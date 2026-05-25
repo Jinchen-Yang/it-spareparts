@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/yangjinchen/Code/**)",
+      "Read(//Users/yangjinchen/**)",
+      "Bash(docker --version)",
+      "Bash(echo \"docker: $\\(docker --version 2>&1\\)\")",
+      "Bash(docker compose *)",
+      "Bash(echo \"docker compose: $\\(docker compose version 2>&1)",
+      "Bash(python3 -m venv .venv)",
+      "Bash(.venv/bin/pip install *)",
+      "Bash(.venv/bin/pip list *)",
+      "Bash(.venv/bin/python -c \"from app.main import app; print\\('import OK'\\)\")",
+      "Bash(.venv/bin/uvicorn app.main:app --port 8011)",
+      "Bash(curl -s http://127.0.0.1:8011/health)",
+      "Bash(curl -s http://127.0.0.1:8011/health/db)",
+      "Bash(kill %1)",
+      "Read(//tmp/**)"
+    ]
+  }
+}
