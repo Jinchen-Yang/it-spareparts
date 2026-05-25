@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from datetime import date as _date
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.orm import Session
 
 from app import config, security
@@ -154,17 +154,22 @@ def aggregate(db: Session, dimension: str, date_from: _date | None,
     }[dimension]
 
     sl = FSalesLine
-    # 计营收口径汇总
-    rev = func.sum(sl.revenue_amount).filter(sl.counts_revenue.is_(True))
-    cost_sum = func.sum(sl.cost_amount).filter(sl.counts_revenue.is_(True))
-    gp = func.sum(sl.gross_profit).filter(sl.counts_revenue.is_(True))
+    counts = sl.counts_revenue.is_(True)
+    # "已配到成本"的行：moving/fifo 同步有无(引擎 source=none 时两者皆空)
+    costed = and_(counts, sl.cost_moving_avg.is_not(None))
+
+    rev_all = func.sum(sl.revenue_amount).filter(counts)
+    rev_costed = func.sum(sl.revenue_amount).filter(costed)
+    cost_ma = func.sum(sl.cost_moving_avg * sl.qty).filter(costed)
+    cost_ff = func.sum(sl.cost_fifo * sl.qty).filter(costed)
     excl = func.sum(sl.revenue_amount).filter(sl.counts_revenue.is_(False))
 
     stmt = (
         select(
             dim_col.label("dim"),
-            rev.label("revenue"), cost_sum.label("cost"), gp.label("gross_profit"),
-            func.count().filter(sl.counts_revenue.is_(True)).label("lines"),
+            rev_all.label("revenue"), rev_costed.label("rev_costed"),
+            cost_ma.label("cost_ma"), cost_ff.label("cost_ff"),
+            func.count().filter(counts).label("lines"),
             func.count().filter(func.array_position(sl.anomaly_flags, "no_cost").is_not(None)).label("no_cost"),
             excl.label("excluded_revenue"),
         )
@@ -182,16 +187,31 @@ def aggregate(db: Session, dimension: str, date_from: _date | None,
         stmt = stmt.where(func.cardinality(sl.anomaly_flags) > 0)
     if user_ctx is not None:
         stmt = security.apply_data_scope(stmt, user_ctx)
-    stmt = stmt.group_by(dim_col).order_by(gp.desc().nullslast())
+    stmt = stmt.group_by(dim_col).order_by(rev_all.desc().nullslast())
+
+    def _margin(rev, cost):
+        if rev and cost is not None and float(rev) != 0:
+            return round((float(rev) - float(cost)) / float(rev), 4)
+        return None
+
+    def _gp(rev, cost):
+        return round(float(rev) - float(cost), 2) if rev is not None and cost is not None else None
 
     rows = []
     for r in db.execute(stmt).all():
-        revenue = r.revenue or 0
-        margin = (float(r.gross_profit) / float(revenue)) if r.gross_profit is not None and revenue else None
+        rc = r.rev_costed
         rows.append({
             "dimension": r.dim or "(未知)",
-            "revenue": _f(r.revenue), "cost": _f(r.cost), "gross_profit": _f(r.gross_profit),
-            "gross_margin": round(margin, 4) if margin is not None else None,
+            "revenue": _f(r.revenue),                 # 计营收总额(全部计营收行)
+            "revenue_costed": _f(rc),                 # 其中已配到成本的营收(毛利分母)
+            # 移动加权
+            "cost_moving_avg": _f(r.cost_ma),
+            "gross_profit_moving": _gp(rc, r.cost_ma),
+            "gross_margin_moving": _margin(rc, r.cost_ma),
+            # 先进先出
+            "cost_fifo": _f(r.cost_ff),
+            "gross_profit_fifo": _gp(rc, r.cost_ff),
+            "gross_margin_fifo": _margin(rc, r.cost_ff),
             "lines": r.lines, "no_cost": r.no_cost, "excluded_revenue": _f(r.excluded_revenue),
         })
-    return {"dimension": dimension, "cost_method": config.COST_METHOD, "rows": rows}
+    return {"dimension": dimension, "rows": rows}

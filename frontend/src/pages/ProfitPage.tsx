@@ -9,9 +9,13 @@ import api from "../api";
 interface ProfitRow {
   dimension: string;
   revenue: number | null;
-  cost: number | null;
-  gross_profit: number | null;
-  gross_margin: number | null;
+  revenue_costed: number | null;
+  cost_moving_avg: number | null;
+  gross_profit_moving: number | null;
+  gross_margin_moving: number | null;
+  cost_fifo: number | null;
+  gross_profit_fifo: number | null;
+  gross_margin_fifo: number | null;
   lines: number;
   no_cost: number;
   excluded_revenue: number | null;
@@ -27,7 +31,6 @@ export default function ProfitPage() {
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [onlyAnomaly, setOnlyAnomaly] = useState(false);
   const [rows, setRows] = useState<ProfitRow[]>([]);
-  const [method, setMethod] = useState("");
   const [loading, setLoading] = useState(false);
   const [recomputing, setRecomputing] = useState(false);
 
@@ -43,7 +46,6 @@ export default function ProfitPage() {
     try {
       const { data } = await api.get("/profit", { params: params() });
       setRows(data.rows);
-      setMethod(data.cost_method);
     } finally {
       setLoading(false);
     }
@@ -77,25 +79,46 @@ export default function ProfitPage() {
     URL.revokeObjectURL(url);
   };
 
+  const numCol = (v: number | null) => (
+    <span style={{ color: v != null && v < 0 ? "#cf1322" : undefined }}>{money(v)}</span>
+  );
+  const pctCol = (v: number | null) => (
+    <span style={{ color: v != null && v < 0 ? "#cf1322" : undefined }}>{pct(v)}</span>
+  );
+
   const cols: ColumnsType<ProfitRow> = [
-    { title: DIM_LABEL[dimension], dataIndex: "dimension", width: 200, fixed: "left", ellipsis: true },
-    { title: "营收(不含税)", dataIndex: "revenue", width: 130, align: "right", render: money,
-      sorter: (a, b) => (a.revenue ?? 0) - (b.revenue ?? 0) },
-    { title: "成本", dataIndex: "cost", width: 130, align: "right", render: money },
-    { title: "毛利", dataIndex: "gross_profit", width: 130, align: "right",
-      sorter: (a, b) => (a.gross_profit ?? 0) - (b.gross_profit ?? 0),
-      render: (v: number | null) => <span style={{ color: v != null && v < 0 ? "#cf1322" : undefined }}>{money(v)}</span> },
-    { title: "毛利率", dataIndex: "gross_margin", width: 100, align: "right",
-      sorter: (a, b) => (a.gross_margin ?? 0) - (b.gross_margin ?? 0),
-      render: (v: number | null) => <span style={{ color: v != null && v < 0 ? "#cf1322" : undefined }}>{pct(v)}</span> },
+    { title: DIM_LABEL[dimension], dataIndex: "dimension", width: 180, fixed: "left", ellipsis: true },
+    { title: "营收(总)", dataIndex: "revenue", width: 130, align: "right", render: money,
+      defaultSortOrder: "descend", sorter: (a, b) => (a.revenue ?? 0) - (b.revenue ?? 0) },
+    { title: "可比营收", dataIndex: "revenue_costed", width: 120, align: "right", render: money },
+    {
+      title: "移动加权",
+      children: [
+        { title: "成本", dataIndex: "cost_moving_avg", width: 120, align: "right", render: money },
+        { title: "毛利", dataIndex: "gross_profit_moving", width: 120, align: "right",
+          sorter: (a, b) => (a.gross_profit_moving ?? 0) - (b.gross_profit_moving ?? 0), render: numCol },
+        { title: "毛利率", dataIndex: "gross_margin_moving", width: 90, align: "right", render: pctCol },
+      ],
+    },
+    {
+      title: "先进先出 FIFO",
+      children: [
+        { title: "成本", dataIndex: "cost_fifo", width: 120, align: "right", render: money },
+        { title: "毛利", dataIndex: "gross_profit_fifo", width: 120, align: "right",
+          sorter: (a, b) => (a.gross_profit_fifo ?? 0) - (b.gross_profit_fifo ?? 0), render: numCol },
+        { title: "毛利率", dataIndex: "gross_margin_fifo", width: 90, align: "right", render: pctCol },
+      ],
+    },
     { title: "行数", dataIndex: "lines", width: 70, align: "right" },
     { title: "无成本", dataIndex: "no_cost", width: 80, align: "right",
       render: (v: number) => (v ? <Tag color="orange">{v}</Tag> : v) },
-    { title: "被排除营收", dataIndex: "excluded_revenue", width: 130, align: "right", render: money },
   ];
 
-  const totalRev = rows.reduce((s, r) => s + (r.revenue ?? 0), 0);
-  const totalGp = rows.reduce((s, r) => s + (r.gross_profit ?? 0), 0);
+  const sum = (k: keyof ProfitRow) => rows.reduce((s, r) => s + ((r[k] as number) ?? 0), 0);
+  const totalRev = sum("revenue");
+  const totalRevCosted = sum("revenue_costed");
+  const totalGpMa = sum("gross_profit_moving");
+  const totalGpFifo = sum("gross_profit_fifo");
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
@@ -115,7 +138,7 @@ export default function ProfitPage() {
             仅看异常
             <Switch checked={onlyAnomaly} onChange={setOnlyAnomaly} />
           </Space>
-          <Tag color="blue">成本法：{method === "moving_avg" ? "移动加权" : method === "fifo" ? "先进先出" : method}</Tag>
+          <Tag color="blue">移动加权 + FIFO 并排</Tag>
           <Button type="primary" loading={recomputing} onClick={recompute}>重算</Button>
           <Button onClick={exportCsv} disabled={!rows.length}>导出 CSV</Button>
         </Space>
@@ -123,8 +146,14 @@ export default function ProfitPage() {
 
       <Row gutter={16}>
         <Col span={8}><Card size="small"><Statistic title="合计营收(不含税)" value={totalRev} precision={2} prefix="¥" /></Card></Col>
-        <Col span={8}><Card size="small"><Statistic title="合计毛利" value={totalGp} precision={2} prefix="¥" valueStyle={{ color: totalGp < 0 ? "#cf1322" : undefined }} /></Card></Col>
-        <Col span={8}><Card size="small"><Statistic title="整体毛利率" value={totalRev ? (totalGp / totalRev) * 100 : 0} precision={2} suffix="%" /></Card></Col>
+        <Col span={8}><Card size="small">
+          <Statistic title="移动加权 · 毛利" value={totalGpMa} precision={2} prefix="¥" valueStyle={{ color: totalGpMa < 0 ? "#cf1322" : undefined }} />
+          <span style={{ color: "#888" }}>毛利率 {totalRevCosted ? ((totalGpMa / totalRevCosted) * 100).toFixed(2) : "-"}%</span>
+        </Card></Col>
+        <Col span={8}><Card size="small">
+          <Statistic title="先进先出 FIFO · 毛利" value={totalGpFifo} precision={2} prefix="¥" valueStyle={{ color: totalGpFifo < 0 ? "#cf1322" : undefined }} />
+          <span style={{ color: "#888" }}>毛利率 {totalRevCosted ? ((totalGpFifo / totalRevCosted) * 100).toFixed(2) : "-"}%</span>
+        </Card></Col>
       </Row>
 
       <Card title={`利润 · ${DIM_LABEL[dimension]}维度`}>
@@ -134,7 +163,7 @@ export default function ProfitPage() {
           loading={loading}
           columns={cols}
           dataSource={rows}
-          scroll={{ x: 1000 }}
+          scroll={{ x: 1320 }}
           pagination={{ pageSize: 20, showSizeChanger: true }}
         />
       </Card>

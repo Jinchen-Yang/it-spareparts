@@ -58,10 +58,15 @@ def export(
     buf = io.StringIO()
     buf.write("﻿")  # BOM，Excel 正确识别 UTF-8
     w = csv.writer(buf)
-    w.writerow(["维度", "营收", "成本", "毛利", "毛利率", "行数", "无成本行", "被排除营收"])
+    w.writerow(["维度", "营收(不含税)", "已配成本营收",
+                "移动加权-成本", "移动加权-毛利", "移动加权-毛利率",
+                "FIFO-成本", "FIFO-毛利", "FIFO-毛利率",
+                "行数", "无成本行", "被排除营收"])
     for r in data["rows"]:
-        w.writerow([r["dimension"], r["revenue"], r["cost"], r["gross_profit"],
-                    r["gross_margin"], r["lines"], r["no_cost"], r["excluded_revenue"]])
+        w.writerow([r["dimension"], r["revenue"], r["revenue_costed"],
+                    r["cost_moving_avg"], r["gross_profit_moving"], r["gross_margin_moving"],
+                    r["cost_fifo"], r["gross_profit_fifo"], r["gross_margin_fifo"],
+                    r["lines"], r["no_cost"], r["excluded_revenue"]])
     buf.seek(0)
     return StreamingResponse(
         iter([buf.getvalue()]), media_type="text/csv",

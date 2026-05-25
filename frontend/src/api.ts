@@ -44,9 +44,12 @@ export interface Overview {
   inventory: InventoryRow[];
   substitutes: { pn_std: string; description: string | null; source: string }[];
   profit_summary: {
-    avg_cost: number | null;
+    avg_purchase_cost: number | null;
     avg_sale_price: number | null;
-    avg_margin: number | null;
+    avg_cost_moving: number | null;
+    avg_cost_fifo: number | null;
+    avg_margin_moving: number | null;
+    avg_margin_fifo: number | null;
     total_qty_sold: number;
   };
   inquiry_ref: {

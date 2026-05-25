@@ -123,19 +123,33 @@ def _profit_summary(db: Session, pn_std: str) -> dict:
     samt, sqty = db.execute(sc).one()
     avg_sale = (samt / sqty) if samt and sqty else None
 
-    # 平均毛利率：取 recompute 落库的 gross_margin（计营收行）的均值
-    mq = select(func.avg(FSalesLine.gross_margin)).join(
-        FSalesOrder, FSalesLine.order_id == FSalesOrder.id
-    ).where(FSalesLine.pn_std == pn_std, FSalesLine.counts_revenue.is_(True),
-            FSalesLine.gross_margin.is_not(None))
+    # 两种成本法的单位成本与毛利率（基于 recompute 落库的逐行成本，数量加权）
+    cc = (
+        select(
+            func.sum(FSalesLine.cost_moving_avg * FSalesLine.qty),
+            func.sum(FSalesLine.cost_fifo * FSalesLine.qty),
+            func.sum(FSalesLine.qty).filter(FSalesLine.cost_moving_avg.is_not(None)),
+            func.sum(FSalesLine.revenue_amount).filter(FSalesLine.cost_moving_avg.is_not(None)),
+        )
+        .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
+        .where(FSalesLine.pn_std == pn_std, FSalesLine.counts_revenue.is_(True))
+    )
     if config.ACTIVE_STATUS_ONLY:
-        mq = mq.where(FSalesOrder.data_status == _ACTIVE)
-    avg_margin = db.scalar(mq)
+        cc = cc.where(FSalesOrder.data_status == _ACTIVE)
+    cma, cff, cqty, crev = db.execute(cc).one()
+    avg_cost_moving = (cma / cqty) if cma and cqty else None
+    avg_cost_fifo = (cff / cqty) if cff and cqty else None
+
+    def _mgn(cost):
+        return round(float((crev - cost) / crev), 4) if cost is not None and crev else None
 
     return {
-        "avg_cost": _d(avg_cost.quantize(Decimal("0.01"))) if avg_cost is not None else None,
+        "avg_purchase_cost": _d(avg_cost.quantize(Decimal("0.01"))) if avg_cost is not None else None,
         "avg_sale_price": _d(avg_sale.quantize(Decimal("0.01"))) if avg_sale is not None else None,
-        "avg_margin": round(float(avg_margin), 4) if avg_margin is not None else None,
+        "avg_cost_moving": _d(avg_cost_moving.quantize(Decimal("0.01"))) if avg_cost_moving is not None else None,
+        "avg_cost_fifo": _d(avg_cost_fifo.quantize(Decimal("0.01"))) if avg_cost_fifo is not None else None,
+        "avg_margin_moving": _mgn(cma),
+        "avg_margin_fifo": _mgn(cff),
         "total_qty_sold": _d(sqty) if sqty is not None else 0,
     }
 

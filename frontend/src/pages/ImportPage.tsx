@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  Card, Upload, Result, Descriptions, Table, Tag, message, Space, Button, Modal,
+  Card, Upload, Result, Descriptions, Table, Tag, message, Space, Button, Modal, Progress,
 } from "antd";
 import { InboxOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -23,6 +23,8 @@ export default function ImportPage() {
   const [report, setReport] = useState<any | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [phase, setPhase] = useState<"idle" | "uploading" | "processing">("idle");
   const [batches, setBatches] = useState<Batch[]>([]);
   const [detail, setDetail] = useState<any | null>(null);
 
@@ -35,10 +37,18 @@ export default function ImportPage() {
     setUploading(true);
     setReport(null);
     setNotice(null);
+    setProgress(0);
+    setPhase("uploading");
     const form = new FormData();
     form.append("file", file);
     try {
-      const { data } = await api.post("/import/upload", form);
+      const { data } = await api.post("/import/upload", form, {
+        onUploadProgress: (e) => {
+          const pct = e.total ? Math.round((e.loaded * 100) / e.total) : 0;
+          setProgress(pct);
+          if (pct >= 100) setPhase("processing"); // 上传完，后端解析/入库/重算中
+        },
+      });
       setReport({ ...data.report, _status: data.status, _batch: data.batch_id, _name: file.name });
       message.success(`导入成功：${FILE_TYPE[data.file_type] || data.file_type}`);
       await loadBatches();
@@ -53,6 +63,7 @@ export default function ImportPage() {
       await loadBatches();
     } finally {
       setUploading(false);
+      setPhase("idle");
     }
   };
 
@@ -99,6 +110,20 @@ export default function ImportPage() {
           <p className="ant-upload-text">点击或拖拽 .xlsx 文件到此处导入</p>
           <p className="ant-upload-hint">支持采购订单 / 销售订单 / 产品库存 / 历史询价，自动识别类型</p>
         </Upload.Dragger>
+
+        {phase !== "idle" && (
+          <div style={{ marginTop: 16 }}>
+            <Progress
+              percent={progress}
+              status={phase === "processing" ? "active" : "normal"}
+            />
+            <div style={{ textAlign: "center", color: "#888", marginTop: 4 }}>
+              {phase === "uploading"
+                ? `上传中 ${progress}%`
+                : "上传完成，正在解析 / 入库 / 重算，请稍候…"}
+            </div>
+          </div>
+        )}
       </Card>
 
       {notice && (
