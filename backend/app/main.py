@@ -1,14 +1,25 @@
 """FastAPI 入口。"""
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app import auth
 from app.api import imports, inventory, parts, profit, substitutes
-from app.config import get_settings
+from app.config import check_security, get_settings
 from app.db import engine
 
+_log = logging.getLogger("startup")
 settings = get_settings()
+
+# 安全自检：prod 下默认弱口令/密钥直接拒绝启动；dev 下仅醒目告警（不打断本地开发）
+_sec_warns = check_security(settings)
+if _sec_warns:
+    if settings.environment == "prod":
+        raise RuntimeError("生产环境禁止使用默认口令/密钥：" + "；".join(_sec_warns))
+    for w in _sec_warns:
+        _log.warning("[安全告警] %s（部署到生产前务必在 .env 覆盖，并设 ENVIRONMENT=prod）", w)
 
 app = FastAPI(title=settings.app_name)
 
@@ -41,5 +52,7 @@ def health_db() -> dict:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         return {"status": "ok", "db": "reachable"}
-    except Exception as exc:  # noqa: BLE001 —— 探针需返回错误信息而非抛 500
-        return {"status": "error", "db": "unreachable", "detail": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        # 不向客户端泄露连接串/主机/驱动等细节，详细错误写服务端日志
+        _log.error("DB health check failed: %s", exc)
+        return {"status": "error", "db": "unreachable"}

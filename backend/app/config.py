@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     app_name: str = "IT 备件智能管理系统"
     api_prefix: str = "/api"
     app_port: int = 8000
+    environment: str = "dev"   # dev | prod；prod 下禁止使用默认口令/密钥
 
     # 数据库：默认指向 docker-compose 中的 db 服务；本地裸跑可用 .env 覆盖
     database_url: str = "postgresql+psycopg://spareparts:spareparts@db:5432/spareparts"
@@ -32,9 +33,25 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
 
+_DEFAULT_ADMIN_PW = "admin"
+_DEFAULT_SECRET = "change-me-in-env"
+
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def check_security(settings: "Settings") -> list[str]:
+    """返回默认弱口令/密钥的告警列表。prod 环境下由 main 启动时拒绝启动。"""
+    warns = []
+    if settings.admin_password == _DEFAULT_ADMIN_PW:
+        warns.append("ADMIN_PASSWORD 仍为默认值 'admin'")
+    if settings.secret_key == _DEFAULT_SECRET:
+        warns.append("SECRET_KEY 仍为默认值（token 可被离线伪造）")
+    if "spareparts:spareparts" in settings.database_url:
+        warns.append("数据库使用默认弱口令 spareparts:spareparts")
+    return warns
 
 
 # ============================================================

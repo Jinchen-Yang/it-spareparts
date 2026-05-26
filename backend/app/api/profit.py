@@ -55,6 +55,12 @@ def export(
     data = profit.aggregate(db, dim, date_from, date_to, only_anomaly, ctx)
     # 导出同样过脱敏层（§8.5：所有对外数据通道统一脱敏）
     data = apply_field_visibility(data, ctx)
+    def _safe(v):
+        # 防 CSV 公式注入：以 = + - @ 制表/回车开头的文本前置单引号
+        if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+            return "'" + v
+        return v
+
     buf = io.StringIO()
     buf.write("﻿")  # BOM，Excel 正确识别 UTF-8
     w = csv.writer(buf)
@@ -63,7 +69,7 @@ def export(
                 "FIFO-成本", "FIFO-毛利", "FIFO-毛利率",
                 "行数", "无成本行", "被排除营收"])
     for r in data["rows"]:
-        w.writerow([r["dimension"], r["revenue"], r["revenue_costed"],
+        w.writerow([_safe(r["dimension"]), r["revenue"], r["revenue_costed"],
                     r["cost_moving_avg"], r["gross_profit_moving"], r["gross_margin_moving"],
                     r["cost_fifo"], r["gross_profit_fifo"], r["gross_margin_fifo"],
                     r["lines"], r["no_cost"], r["excluded_revenue"]])
