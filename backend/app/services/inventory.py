@@ -2,10 +2,10 @@
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
-from app import security
+from app import config, security
 from app.models.inventory import Inventory
 from app.models.system import SysAuditLog
 
@@ -53,6 +53,38 @@ def list_inventory(db: Session, warehouse: str | None, q: str | None,
     ).scalars().all()
     return {"total": total, "page": page, "page_size": page_size,
             "items": [_row(inv) for inv in rows]}
+
+
+def backfill_costs(db: Session) -> dict:
+    """按型号加权平均(不含税,口径同利润COGS)回填 inventory.unit_cost / inventory_value。
+
+    单位成本 = Σ(采购量×不含税单价) / Σ采购量，仅取计入成本的采购类型、已生效、单价>0。
+    库存金额 = 展示数量(人工修正优先) × 单位成本。无采购记录的型号保持 NULL（界面显示"未计算"）。
+    """
+    ex = "/ (1 + COALESCE(po.tax_rate, 0))" if config.TAX_BASIS == "ex_tax" else ""
+    active = "AND po.data_status = '已生效'" if config.ACTIVE_STATUS_ONLY else ""
+    sql = text(f"""
+        WITH cost AS (
+            SELECT pl.pn_std,
+                   SUM(pl.qty * pl.unit_price {ex}) / NULLIF(SUM(pl.qty), 0) AS uc
+            FROM f_purchase_line pl
+            JOIN f_purchase_order po ON pl.order_id = po.id
+            WHERE pl.unit_price > 0 AND pl.qty > 0
+              AND po.source_type = ANY(:types) {active}
+            GROUP BY pl.pn_std
+        )
+        UPDATE inventory i SET
+            unit_cost = round(c.uc, 2),
+            inventory_value = round(c.uc * (CASE WHEN i.is_qty_overridden AND i.manual_qty IS NOT NULL
+                                                 THEN i.manual_qty ELSE i.source_qty END), 2)
+        FROM cost c WHERE c.pn_std = i.pn_std
+    """)
+    res = db.execute(sql, {"types": config.COST_PURCHASE_TYPES})
+    db.commit()
+    filled = db.scalar(select(func.count()).select_from(Inventory).where(Inventory.unit_cost.is_not(None)))
+    total = db.scalar(select(func.count()).select_from(Inventory))
+    return {"updated": res.rowcount, "filled": filled, "total": total,
+            "no_cost": total - filled}
 
 
 def warehouses(db: Session) -> list[str]:

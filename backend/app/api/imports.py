@@ -10,7 +10,7 @@ from app.auth import require_admin
 from app.config import MAX_UPLOAD_MB
 from app.db import get_db
 from app.security import UserContext, get_current_user_context, record_access_log
-from app.services import profit
+from app.services import inventory, profit
 from app.etl import pipeline
 from app.etl.reader import ReaderError
 from app.models.system import SysImportBatch, SysImportError
@@ -60,6 +60,12 @@ def upload(
                 recompute_stats = profit.recompute(db)
             except Exception as exc:  # noqa: BLE001
                 recompute_stats = {"error": f"利润重算失败，请到利润页手动重算：{exc}"}
+        # 采购/库存变化后刷新库存单位成本与库存金额（#9），失败不影响导入
+        if batch.file_type in ("purchase", "inventory"):
+            try:
+                inventory.backfill_costs(db)
+            except Exception:  # noqa: BLE001
+                pass
         return {"batch_id": batch.id, "file_type": batch.file_type,
                 "status": batch.status, "report": batch.report_json,
                 "recompute": recompute_stats}
