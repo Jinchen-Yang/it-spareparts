@@ -5,6 +5,7 @@ import PartSearchPage from "./pages/PartSearchPage";
 import ProfitPage from "./pages/ProfitPage";
 import InventoryPage from "./pages/InventoryPage";
 import ImportPage from "./pages/ImportPage";
+import GovernancePage from "./pages/GovernancePage";
 
 const { Header, Content } = Layout;
 
@@ -35,6 +36,7 @@ export default function App() {
             { key: "parts", label: "型号查询" },
             { key: "profit", label: "利润分析" },
             { key: "inventory", label: "库存查询" },
+            { key: "governance", label: "数据治理" },
           ]}
           style={{ flex: 1, minWidth: 0 }}
         />
@@ -45,6 +47,7 @@ export default function App() {
         {page === "parts" && <PartSearchPage />}
         {page === "profit" && <ProfitPage />}
         {page === "inventory" && <InventoryPage />}
+        {page === "governance" && <GovernancePage />}
       </Content>
     </Layout>
   );
