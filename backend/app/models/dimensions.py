@@ -21,6 +21,9 @@ class DimPart(Base):
     machine_or_part: Mapped[str | None] = mapped_column(String(16))
     unit: Mapped[str | None] = mapped_column(String(16))
     needs_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # 数据治理：标记为非标/不计入利润统计的型号（如"一批备件""配件"），及原因（#25）
+    is_excluded: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    exclude_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         TZDateTime, server_default=func.now(), onupdate=func.now()

@@ -14,7 +14,7 @@ from sqlalchemy import and_, func, select, update
 from sqlalchemy.orm import Session
 
 from app import config, security
-from app.models.dimensions import DimCustomer
+from app.models.dimensions import DimCustomer, DimPart
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.services import cost
@@ -82,10 +82,15 @@ def recompute(db: Session) -> dict:
     for pn, sevents in by_pn.items():
         line_cost.update(cost.replay(pur_events.get(pn, []), sevents, fallback.get(pn)))
 
+    # 数据治理：被人工标记为非标/排除的型号，不计入营收/利润统计（#25）
+    excluded_pns = set(db.execute(
+        select(DimPart.pn_std).where(DimPart.is_excluded.is_(True))
+    ).scalars().all())
+
     active_is_moving = config.COST_METHOD == "moving_avg"
     updates = []
     stats = {"sales_lines": len(sales_rows), "no_cost": 0, "neg_margin": 0,
-             "fallback": 0, "counts_revenue": 0}
+             "fallback": 0, "counts_revenue": 0, "excluded_part": 0}
 
     for sid, m in meta.items():
         lc = line_cost.get(sid)
@@ -97,7 +102,8 @@ def recompute(db: Session) -> dict:
         active = mov if active_is_moving else fifo
 
         revenue = _ex_tax(qty * up, trate).quantize(_CENT)
-        counts = m["business_type"] in config.REVENUE_BUSINESS_TYPES
+        is_excluded_part = m["pn"] in excluded_pns
+        counts = (m["business_type"] in config.REVENUE_BUSINESS_TYPES) and not is_excluded_part
         if counts:
             stats["counts_revenue"] += 1
 
@@ -106,7 +112,10 @@ def recompute(db: Session) -> dict:
             flags.append("zero_price")
         if (m["line_amount"] is not None and abs(m["line_amount"] - qty * up) > Decimal("0.05")):
             flags.append("amount_mismatch")
-        if not counts:
+        if is_excluded_part:
+            flags.append("excluded_part")
+            stats["excluded_part"] += 1
+        if not counts and not is_excluded_part:
             flags.append("excluded_business_type")
 
         if active is None:
