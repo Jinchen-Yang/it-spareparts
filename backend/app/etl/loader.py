@@ -111,24 +111,63 @@ def _upsert_named_dim(session: Session, model, rows: list[dict], extra_cols: lis
     return out
 
 
-def _idempotent_insert(session: Session, model, rows: list[dict], conflict_col) -> int:
-    """ON CONFLICT DO NOTHING，返回实际插入行数。"""
+def _upsert_facts(session: Session, model, rows: list[dict], conflict_col,
+                  update_cols: list[str] | None = None) -> dict:
+    """事实表幂等写入。
+
+    - update_cols=None(默认 skip)：ON CONFLICT DO NOTHING；返回 {inserted, skipped}。
+    - update_cols=列名列表(upsert 修复模式)：ON CONFLICT DO UPDATE 这些字段；
+      预先点一下已存在的键以区分新增/更新；返回 {inserted, updated}。
+    """
     if not rows:
-        return 0
-    inserted = 0
+        return {"inserted": 0, "updated": 0, "skipped": 0}
+    if update_cols is None:
+        inserted = 0
+        for chunk in _chunks(rows):
+            stmt = pg_insert(model).values(chunk).on_conflict_do_nothing(index_elements=[conflict_col])
+            inserted += len(session.execute(stmt.returning(conflict_col)).all())
+        return {"inserted": inserted, "updated": 0, "skipped": len(rows) - inserted}
+    # upsert 模式
+    key_name = conflict_col.name
+    keys = [r[key_name] for r in rows]
+    existing = 0
+    for chunk in _chunks(keys):
+        existing += session.scalar(
+            select(func.count()).select_from(model).where(conflict_col.in_(chunk))
+        ) or 0
     for chunk in _chunks(rows):
-        stmt = pg_insert(model).values(chunk).on_conflict_do_nothing(index_elements=[conflict_col])
-        inserted += len(session.execute(stmt.returning(conflict_col)).all())
-    return inserted
+        stmt = pg_insert(model).values(chunk)
+        set_ = {c: getattr(stmt.excluded, c) for c in update_cols}
+        session.execute(stmt.on_conflict_do_update(index_elements=[conflict_col], set_=set_))
+    return {"inserted": len(rows) - existing, "updated": existing, "skipped": 0}
 
 
-def load(session: Session, result: TransformResult, batch_id: int, snapshot_date: date) -> dict:
+# 可更新字段(upsert 修复模式)：排除主键 raw_*_id 与利润派生字段(recompute 专属)
+_PURCHASE_ORDER_UPD = ["order_no", "order_date", "purchaser", "supplier_id",
+                        "linked_sales_order_no", "source_type", "source_type_raw",
+                        "amount_ex_tax", "tax_rate", "data_status", "import_batch_id"]
+_PURCHASE_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "description",
+                       "brand", "machine_or_part", "unit", "qty", "unit_price", "line_amount",
+                       "recent_purchase_price", "anomaly_flags", "import_batch_id"]
+_SALES_ORDER_UPD = ["order_no", "order_date", "salesperson", "customer_id",
+                     "business_type", "warehouse", "amount_ex_tax", "tax_rate",
+                     "data_status", "import_batch_id"]
+_SALES_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "description",
+                    "brand", "category_major", "category_minor", "machine_or_part", "unit",
+                    "qty", "unit_price", "line_amount", "generic_product", "serial_numbers",
+                    "anomaly_flags", "import_batch_id"]
+
+
+def load(session: Session, result: TransformResult, batch_id: int, snapshot_date: date,
+         mode: str = "skip") -> dict:
     if result.file_type == mapping.INVENTORY:
         return _load_inventory(session, result, batch_id, snapshot_date)
-    return _load_orders(session, result, batch_id)
+    return _load_orders(session, result, batch_id, mode)
 
 
-def _load_orders(session: Session, result: TransformResult, batch_id: int) -> dict:
+def _load_orders(session: Session, result: TransformResult, batch_id: int,
+                 mode: str = "skip") -> dict:
+    upsert = (mode == "upsert")
     is_sales = result.file_type == mapping.SALES
     # 1) 维度 part + alias
     part_attrs = _merge_part_attrs(result.lines, is_sales)
@@ -177,7 +216,8 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int) -> di
                 "linked_sales_order_no": o.get("linked_sales_order_no"),
             })
         order_rows.append(base)
-    orders_inserted = _idempotent_insert(session, order_model, order_rows, order_model.raw_order_id)
+    order_upd_cols = (_SALES_ORDER_UPD if is_sales else _PURCHASE_ORDER_UPD) if upsert else None
+    order_stats = _upsert_facts(session, order_model, order_rows, order_model.raw_order_id, order_upd_cols)
     # raw_order_id -> id（含已存在的）
     raw_ids = [o["raw_order_id"] for o in orders.values()]
     oid_map = dict(session.execute(
@@ -205,15 +245,19 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int) -> di
         else:
             base["recent_purchase_price"] = ln["recent_purchase_price"]
         line_rows.append(base)
-    lines_inserted = _idempotent_insert(session, line_model, line_rows, line_model.raw_line_id)
+    line_upd_cols = (_SALES_LINE_UPD if is_sales else _PURCHASE_LINE_UPD) if upsert else None
+    line_stats = _upsert_facts(session, line_model, line_rows, line_model.raw_line_id, line_upd_cols)
 
     return {
         "source_rows_total": result.rows_total,
-        "fact_rows_inserted": lines_inserted,
-        "fact_rows_skipped": len(line_rows) - lines_inserted,
+        "fact_rows_inserted": line_stats["inserted"],
+        "fact_rows_updated": line_stats["updated"],
+        "fact_rows_skipped": line_stats["skipped"],
         "fact_rows_error": len(result.errors),
         "rows_inactive": result.rows_inactive,
-        "orders_inserted": orders_inserted,
+        "orders_inserted": order_stats["inserted"],
+        "orders_updated": order_stats["updated"],
+        "import_mode": mode,
         "new_parts": len(part_attrs),
     }
 

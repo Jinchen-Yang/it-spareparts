@@ -2,7 +2,7 @@
 import os
 import tempfile
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
@@ -21,12 +21,14 @@ router = APIRouter(prefix="/import", tags=["import"])
 @router.post("/upload")
 def upload(
     file: UploadFile = File(...),
+    mode: str = Query("skip"),    # skip(默认,跳过已存在) | upsert(更新已存在,修复数据)
     db: Session = Depends(get_db),
     _: str = Depends(require_admin),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    mode = mode if mode in ("skip", "upsert") else "skip"
     name = file.filename or "upload.xlsx"
-    record_access_log(ctx, "upload", "import", {"filename": name})
+    record_access_log(ctx, "upload", "import", {"filename": name, "mode": mode})
     if not name.lower().endswith(".xlsx"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             "仅支持 .xlsx；若为 .xls 请另存为 .xlsx 后再上传")
@@ -44,7 +46,7 @@ def upload(
                                         f"文件超过 {MAX_UPLOAD_MB}MB 上限")
                 out.write(chunk)
         try:
-            batch = pipeline.run_import(db, tmp, name)
+            batch = pipeline.run_import(db, tmp, name, mode=mode)
             db.commit()
         except pipeline.DuplicateFileError as exc:
             db.rollback()

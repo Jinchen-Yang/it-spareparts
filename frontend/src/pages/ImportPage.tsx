@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  Card, Upload, Result, Descriptions, Table, Tag, message, Space, Button, Modal, Progress,
+  Card, Upload, Result, Descriptions, Table, Tag, message, Space, Button, Modal, Progress, Switch, Tooltip,
 } from "antd";
 import { InboxOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -25,6 +25,7 @@ export default function ImportPage() {
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [phase, setPhase] = useState<"idle" | "uploading" | "processing">("idle");
+  const [upsertMode, setUpsertMode] = useState(false);  // false=skip(默认), true=upsert(修复模式)
   const [batches, setBatches] = useState<Batch[]>([]);
   const [detail, setDetail] = useState<any | null>(null);
 
@@ -43,6 +44,7 @@ export default function ImportPage() {
     form.append("file", file);
     try {
       const { data } = await api.post("/import/upload", form, {
+        params: { mode: upsertMode ? "upsert" : "skip" },
         onUploadProgress: (e) => {
           const pct = e.total ? Math.round((e.loaded * 100) / e.total) : 0;
           setProgress(pct);
@@ -95,7 +97,15 @@ export default function ImportPage() {
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <Card title="数据导入">
+      <Card title="数据导入"
+        extra={
+          <Tooltip title="开启后：源系统改过字段的旧数据,重导会更新(而不是跳过)。日常导入用「跳过」即可。">
+            <Space>
+              <span style={{ color: upsertMode ? "#cf1322" : "#888" }}>修复模式(更新已存在)</span>
+              <Switch checked={upsertMode} onChange={setUpsertMode} disabled={uploading} />
+            </Space>
+          </Tooltip>
+        }>
         <Upload.Dragger
           accept=".xlsx"
           multiple={false}
@@ -140,8 +150,10 @@ export default function ImportPage() {
           />
           <Descriptions bordered column={3} size="small">
             <Descriptions.Item label="解析总行">{report.source_rows_total}</Descriptions.Item>
-            <Descriptions.Item label="入库">{report.fact_rows_inserted}</Descriptions.Item>
-            <Descriptions.Item label="跳过(已存在)">{report.fact_rows_skipped}</Descriptions.Item>
+            <Descriptions.Item label="新增入库">{report.fact_rows_inserted}</Descriptions.Item>
+            <Descriptions.Item label={report.import_mode === "upsert" ? "更新(已存在)" : "跳过(已存在)"}>
+              {report.import_mode === "upsert" ? (report.fact_rows_updated ?? 0) : (report.fact_rows_skipped ?? 0)}
+            </Descriptions.Item>
             <Descriptions.Item label="错误">{report.fact_rows_error}</Descriptions.Item>
             <Descriptions.Item label="未生效">{report.rows_inactive}</Descriptions.Item>
             <Descriptions.Item label="新增型号">{report.new_parts ?? "-"}</Descriptions.Item>

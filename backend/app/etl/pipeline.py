@@ -42,7 +42,7 @@ def _archive(src_path: str, file_hash: str) -> str:
 
 
 def run_import(session: Session, file_path: str, original_name: str,
-               uploaded_by: str | None = None) -> SysImportBatch:
+               uploaded_by: str | None = None, mode: str = "skip") -> SysImportBatch:
     """对单个 .xlsx 执行完整导入。返回 batch（含 report_json）。
 
     校验在 API 层（扩展名/大小）；此处做 hash 去重 + 锁 + 入库。
@@ -84,7 +84,7 @@ def run_import(session: Session, file_path: str, original_name: str,
                                        raw_row=e.raw_row))
 
         snapshot = datetime.now(timezone.utc).date()
-        counts = loader.load(session, result, batch.id, snapshot)
+        counts = loader.load(session, result, batch.id, snapshot, mode=mode)
 
         report = {"file_type": file_type, **counts,
                   "errors_preview": [
