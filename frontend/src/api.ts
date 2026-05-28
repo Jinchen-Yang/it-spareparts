@@ -66,6 +66,7 @@ export interface PurchaseRow {
   supplier: string | null;
   qty: number | null;
   unit_price: number | null;
+  source_type: string | null;
 }
 export interface SalesRow {
   order_no: string;

@@ -45,9 +45,11 @@ def search_parts(db: Session, q: str | None, page: int, page_size: int,
 
 
 def _purchases_query(pn_std: str, user_ctx: security.UserContext | None = None):
+    # 显示完整采购历史(含维保等),source_type 让用户辨识"哪些计入成本"
     stmt = (
         select(FPurchaseOrder.order_no, FPurchaseOrder.order_date,
-                DimSupplier.name_normalized, FPurchaseLine.qty, FPurchaseLine.unit_price)
+                DimSupplier.name_normalized, FPurchaseLine.qty, FPurchaseLine.unit_price,
+                FPurchaseOrder.source_type)
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
         .join(DimSupplier, FPurchaseOrder.supplier_id == DimSupplier.id, isouter=True)
         .where(FPurchaseLine.pn_std == pn_std)
@@ -83,7 +85,7 @@ def _paginate(db: Session, base_stmt, page: int, page_size: int, mapper) -> dict
 
 def _purchase_row(r):
     return {"order_no": r[0], "order_date": r[1], "supplier": r[2],
-            "qty": _d(r[3]), "unit_price": _d(r[4])}
+            "qty": _d(r[3]), "unit_price": _d(r[4]), "source_type": r[5]}
 
 
 def _sales_row(r):
@@ -102,11 +104,12 @@ def list_sales(db: Session, pn_std: str, page: int, page_size: int,
 
 
 def _profit_summary(db: Session, pn_std: str) -> dict:
-    # 加权平均采购成本（active, unit_price>0）
+    # 加权平均采购成本（active, unit_price>0,按成本口径过滤——维保等不入)
     pc = (
         select(func.sum(FPurchaseLine.qty * FPurchaseLine.unit_price), func.sum(FPurchaseLine.qty))
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
-        .where(FPurchaseLine.pn_std == pn_std, FPurchaseLine.unit_price > 0)
+        .where(FPurchaseLine.pn_std == pn_std, FPurchaseLine.unit_price > 0,
+               FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
     )
     if config.ACTIVE_STATUS_ONLY:
         pc = pc.where(FPurchaseOrder.data_status == _ACTIVE)

@@ -67,6 +67,11 @@ export default function PartSearchPage() {
   const purCols: ColumnsType<PurchaseRow> = [
     { title: "采购单号", dataIndex: "order_no", width: 170, ellipsis: true },
     { title: "日期", dataIndex: "order_date", width: 110 },
+    { title: "类型", dataIndex: "source_type", width: 90,
+      render: (v: string | null) => v === "维保需求"
+        ? <Tag color="orange" title="不计入成本">维保</Tag>
+        : v === "回收" ? <Tag>回收</Tag>
+        : v },
     { title: "供应商", dataIndex: "supplier", width: 160, ellipsis: true },
     { title: "数量", dataIndex: "qty", width: 70 },
     { title: "单价", dataIndex: "unit_price", width: 90, render: money },
