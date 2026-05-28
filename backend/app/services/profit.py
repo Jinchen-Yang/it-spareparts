@@ -33,22 +33,24 @@ def _ex_tax(amount: Decimal, tax_rate: Decimal | None) -> Decimal:
 def _load_purchase_events(db: Session):
     """按 pn 收集采购入库事件(不含税单价)+ 每 pn 兜底价(最近采购价)。"""
     q = (
-        select(FPurchaseLine.pn_std, FPurchaseOrder.order_date,
+        select(FPurchaseLine.id, FPurchaseLine.pn_std, FPurchaseOrder.order_date,
                 FPurchaseLine.qty, FPurchaseLine.unit_price, FPurchaseOrder.tax_rate)
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
         .where(FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
                FPurchaseLine.qty.is_not(None), FPurchaseLine.qty > 0,
                FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
+        # 显式排序：保证重算结果可复现(同日多笔时,数据库返回顺序本身不固定)
+        .order_by(FPurchaseOrder.order_date.asc().nullsfirst(), FPurchaseLine.id.asc())
     )
     if config.ACTIVE_STATUS_ONLY:
         q = q.where(FPurchaseOrder.data_status == _ACTIVE)
 
     events: dict[str, list] = defaultdict(list)
-    recent: dict[str, tuple] = {}   # pn -> (date, ex_price)  最近采购价兜底
-    for pn, odate, qty, price, trate in db.execute(q):
+    recent: dict[str, tuple] = {}   # pn -> ((date, line_id), ex_price)  含 line_id 保证同日不歧义
+    for pl_id, pn, odate, qty, price, trate in db.execute(q):
         ex = _ex_tax(price, trate)
         events[pn].append(cost.PurchaseEvent(odate, qty, ex))
-        key = odate or date.min
+        key = (odate or date.min, pl_id)
         if pn not in recent or key >= recent[pn][0]:
             recent[pn] = (key, ex)
     fallback = {pn: v[1] for pn, v in recent.items()} if config.OPENING_COST_POLICY == "fallback_recent" else {}
@@ -64,6 +66,8 @@ def recompute(db: Session) -> dict:
                 FSalesLine.qty, FSalesLine.unit_price, FSalesLine.line_amount,
                 FSalesOrder.tax_rate, FSalesOrder.business_type)
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
+        # 同上：显式排序保证重算可复现
+        .order_by(FSalesOrder.order_date.asc().nullsfirst(), FSalesLine.id.asc())
     )
     if config.ACTIVE_STATUS_ONLY:
         sq = sq.where(FSalesOrder.data_status == _ACTIVE)
