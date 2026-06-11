@@ -1,0 +1,164 @@
+"""规格结构化抽取（整改 P2，审核说明 §4.3/原则3）。
+
+只做高频且语义规整的三类：机械盘 / SSD / 内存（实测约 6900+1500 个型号可抽）。
+GPU/电源/网卡等没有"容量/接口"统一语义，不强行抽取。
+规则与键定义必须同步演进，故 SPEC_KEYS 作为常量放本模块，不建字典表。
+
+抽取结果 source='auto'，只补缺不覆盖（人工维护的 source='manual' 行优先）。
+"""
+import re
+from decimal import Decimal
+
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session
+
+from app.models.dimensions import DimPart
+from app.models.master_data import ProductSpec
+
+# spec_key → (中文名, 单位)。numeric_value 口径：capacity=GB、rpm=RPM、frequency=MHz
+SPEC_KEYS = {
+    "part_type": ("部件类型", None),       # HDD / SSD / RAM
+    "capacity": ("容量", "GB"),
+    "interface": ("接口", None),           # SAS / SATA / NVME / FC / SCSI
+    "rpm": ("转速", "RPM"),
+    "form_factor": ("尺寸/封装", None),    # 2.5 / 3.5 / RDIMM / LRDIMM ...
+    "generation": ("内存代数", None),      # DDR2~DDR5
+    "frequency": ("内存频率", "MHz"),
+}
+
+# ---- 信号与守卫 ----
+_DISK_SIGNAL = re.compile(r"(SAS|SATA|NVME|SSD|HDD|硬盘|SOLID STATE|FLASH DRIVE)", re.I)
+# 控制器/阵列卡/线缆等也含 SAS 字样，不是盘
+_DISK_GUARD = re.compile(
+    r"(CONTROLLER|控制器|SMART ARRAY|阵列|RAID|HBA|EXPANDER|扩展|背板|BACKPLANE|"
+    r"CABLE|线缆|网卡|ADAPTER|风扇|电源|POWER SUPPLY|TRAY|托架|支架|CADDY)", re.I)
+_MEM_SIGNAL = re.compile(r"(DDR[2-5]|PC[2-5]L?-\d|RDIMM|LRDIMM|UDIMM|SODIMM|内存|MEMORY)", re.I)
+
+_SSD = re.compile(r"(SSD|SOLID STATE|NVME)", re.I)
+_CAP_T = re.compile(r"(\d+(?:\.\d+)?)\s*TB?\b", re.I)
+# G 容量：≥100 才认（3G/6G/12G 是接口速率、2GB 是缓存）
+_CAP_G = re.compile(r"(\d{3,5})\s*GB?\b", re.I)
+_INTERFACE = ["NVME", "SAS", "SATA", "FC", "SCSI"]
+_RPM = re.compile(r"(\d+(?:\.\d+)?)\s*K\b", re.I)
+_FORM_DISK = re.compile(r"(2\.5|3\.5)\s*(寸|英寸|INCH|\")?", re.I)
+
+_MEM_CAP = re.compile(r"(?<![A-Z0-9-])(\d{1,3})\s*GB?\b", re.I)
+_DDR = re.compile(r"DDR([2-5])", re.I)
+_PC_GEN = re.compile(r"PC([2-5])L?-", re.I)
+_DDR_FREQ = re.compile(r"DDR[2-5]-(\d{3,4})\b", re.I)
+_MHZ = re.compile(r"(\d{3,4})\s*MHZ", re.I)
+_PC_CODE = re.compile(r"PC[2-5]L?-(\d{4,5})", re.I)
+_MEM_FORM = re.compile(r"(LRDIMM|RDIMM|UDIMM|SODIMM|CM-DIMM|DIMM)", re.I)
+
+
+def _spec(key: str, value: str, numeric=None) -> dict:
+    label, unit = SPEC_KEYS[key]
+    return {"spec_key": key, "spec_value": value, "spec_unit": unit,
+            "numeric_value": Decimal(str(numeric)) if numeric is not None else None}
+
+
+def _extract_disk(desc: str) -> list[dict]:
+    out = []
+    is_ssd = bool(_SSD.search(desc))
+    out.append(_spec("part_type", "SSD" if is_ssd else "HDD"))
+
+    m = _CAP_T.search(desc)
+    if m:
+        out.append(_spec("capacity", f"{m.group(1)}TB", float(m.group(1)) * 1000))
+    else:
+        m = _CAP_G.search(desc)
+        if m and int(m.group(1)) >= 100:
+            out.append(_spec("capacity", f"{m.group(1)}GB", int(m.group(1))))
+
+    up = desc.upper()
+    for itf in _INTERFACE:
+        if itf in up:
+            out.append(_spec("interface", itf))
+            break
+
+    if not is_ssd:
+        m = _RPM.search(desc)
+        # 转速合理域 4~16K，排除 "256K cache" 之类
+        if m and 4 <= float(m.group(1)) <= 16:
+            out.append(_spec("rpm", f"{m.group(1)}K", float(m.group(1)) * 1000))
+
+    m = _FORM_DISK.search(desc)
+    if m:
+        out.append(_spec("form_factor", m.group(1)))
+    return out
+
+
+def _extract_memory(desc: str) -> list[dict]:
+    out = [_spec("part_type", "RAM")]
+
+    m = _MEM_CAP.search(desc)
+    if m and int(m.group(1)) in (1, 2, 4, 8, 16, 32, 64, 96, 128, 192, 256, 512):
+        out.append(_spec("capacity", f"{m.group(1)}GB", int(m.group(1))))
+
+    gen = None
+    m = _DDR.search(desc)
+    if m:
+        gen = m.group(1)
+    else:
+        m = _PC_GEN.search(desc)
+        if m:
+            gen = m.group(1)
+    if gen:
+        out.append(_spec("generation", f"DDR{gen}"))
+
+    freq = None
+    m = _DDR_FREQ.search(desc)
+    if m:
+        freq = int(m.group(1))
+    if freq is None:
+        m = _MHZ.search(desc)
+        if m:
+            freq = int(m.group(1))
+    if freq is None:
+        m = _PC_CODE.search(desc)
+        if m:
+            code = int(m.group(1))
+            # PC4-25600 是带宽(MB/s)=频率×8；PC4-2666V 是 MT/s 直接当频率
+            freq = code // 8 if code >= 10000 else code
+    if freq and 200 <= freq <= 9000:
+        out.append(_spec("frequency", str(freq), freq))
+
+    m = _MEM_FORM.search(desc)
+    if m:
+        out.append(_spec("form_factor", m.group(1).upper()))
+    return out
+
+
+def extract(description: str | None) -> list[dict]:
+    """从描述抽取结构化规格。无法识别的品类返回 []。"""
+    if not description:
+        return []
+    desc = description.strip()
+    if _MEM_SIGNAL.search(desc):
+        return _extract_memory(desc)
+    if _DISK_SIGNAL.search(desc) and not _DISK_GUARD.search(desc):
+        return _extract_disk(desc)
+    return []
+
+
+def backfill_specs(db: Session) -> dict:
+    """全量幂等回填：对每个 active 型号抽取规格，只补缺不覆盖。"""
+    parts = db.execute(
+        select(DimPart.id, DimPart.description).where(
+            DimPart.status == "active", DimPart.description.is_not(None))
+    ).all()
+    rows = []
+    parts_hit = 0
+    for pid, desc in parts:
+        specs = extract(desc)
+        if specs:
+            parts_hit += 1
+            rows.extend({**s, "part_id": pid, "source": "auto"} for s in specs)
+    inserted = 0
+    for i in range(0, len(rows), 1000):
+        stmt = pg_insert(ProductSpec).values(rows[i:i + 1000]).on_conflict_do_nothing(
+            constraint="uq_spec_part_key")
+        inserted += len(db.execute(stmt.returning(ProductSpec.id)).all())
+    return {"parts_scanned": len(parts), "parts_with_specs": parts_hit,
+            "spec_rows": len(rows), "spec_inserted": inserted}

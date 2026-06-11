@@ -15,6 +15,7 @@ from app import config, security
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
 from app.models.inquiry import FPartInquiry
 from app.models.inventory import Inventory, PartSubstitute
+from app.models.master_data import ProductSpec
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 
@@ -42,23 +43,56 @@ def resolve_part(db: Session, pn_std: str) -> tuple[DimPart | None, str | None]:
     return part, redirected_from
 
 
+def _spec_exists(key: str, value: str | None = None,
+                 numeric_min=None, numeric_max=None):
+    sub = select(ProductSpec.id).where(
+        ProductSpec.part_id == DimPart.id, ProductSpec.spec_key == key)
+    if value is not None:
+        sub = sub.where(func.upper(ProductSpec.spec_value) == value.upper())
+    if numeric_min is not None:
+        sub = sub.where(ProductSpec.numeric_value >= numeric_min)
+    if numeric_max is not None:
+        sub = sub.where(ProductSpec.numeric_value <= numeric_max)
+    return sub.exists()
+
+
 def search_parts(db: Session, q: str | None, page: int, page_size: int,
-                 user_ctx: security.UserContext | None = None) -> dict:
+                 user_ctx: security.UserContext | None = None,
+                 part_type: str | None = None, interface: str | None = None,
+                 capacity_min: float | None = None,
+                 capacity_max: float | None = None) -> dict:
+    """文本检索 + 结构化规格过滤（整改 P2：硬盘容量/接口等条件查询）。"""
     stmt = select(DimPart).where(DimPart.status != "merged")
     if q:
         like = f"%{q.strip()}%"
         stmt = stmt.where(or_(DimPart.pn_std.ilike(like), DimPart.description.ilike(like)))
+    if part_type:
+        stmt = stmt.where(_spec_exists("part_type", value=part_type))
+    if interface:
+        stmt = stmt.where(_spec_exists("interface", value=interface))
+    if capacity_min is not None or capacity_max is not None:
+        stmt = stmt.where(_spec_exists("capacity", numeric_min=capacity_min,
+                                       numeric_max=capacity_max))
     if user_ctx is not None:
         stmt = security.apply_data_scope(stmt, user_ctx)
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = db.execute(
         stmt.order_by(DimPart.pn_std).offset((page - 1) * page_size).limit(page_size)
     ).scalars().all()
+
+    specs_by_part: dict[int, dict] = {}
+    if rows:
+        for pid, key, val in db.execute(
+            select(ProductSpec.part_id, ProductSpec.spec_key, ProductSpec.spec_value)
+            .where(ProductSpec.part_id.in_([p.id for p in rows]))
+        ).all():
+            specs_by_part.setdefault(pid, {})[key] = val
     return {
         "total": total, "page": page, "page_size": page_size,
         "items": [{
             "pn_std": p.pn_std, "description": p.description, "brand": p.brand,
             "category_major": p.category_major, "needs_review": p.needs_review,
+            "specs": specs_by_part.get(p.id, {}),
         } for p in rows],
     }
 
