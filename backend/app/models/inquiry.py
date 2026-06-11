@@ -18,8 +18,13 @@ class FPartInquiry(Base):
     parts_type: Mapped[str | None] = mapped_column(String(64))
     pn_raw: Mapped[str | None] = mapped_column(String(256))
     pn_std: Mapped[str | None] = mapped_column(String(128))
+    # 商品身份（可空：询价只是报价参考，不强制建档；refresh 时按 pn_std 回填）
+    part_id: Mapped[int | None] = mapped_column(ForeignKey("dim_part.id"))
     description: Mapped[str | None] = mapped_column(Text)
     money: Mapped[Decimal | None] = mapped_column(Money)
     import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
 
-    __table_args__ = (Index("ix_inq_pn", "pn_std"),)
+    __table_args__ = (
+        Index("ix_inq_pn", "pn_std"),
+        Index("ix_inq_part", "part_id"),
+    )
