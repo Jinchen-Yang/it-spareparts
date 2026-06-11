@@ -25,6 +25,12 @@ services:
       SECRET_KEY: ${SECRET_KEY:-change-me-in-env}
       APP_PORT: ${APP_PORT:-8000}
       ENVIRONMENT: ${ENVIRONMENT:-dev}   # 生产部署在 .env 设 prod，默认弱口令会拒启
+      # 二期 AI 助手：不配 LLM_API_KEY 时其余功能照常，chat 接口返回降级提示
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v4-flash}
+      # 留空 = 用应用内默认(关思考)；设 {} = 明确不传额外参数
+      LLM_EXTRA_BODY: ${LLM_EXTRA_BODY:-}
     depends_on:
       db:
         condition: service_healthy

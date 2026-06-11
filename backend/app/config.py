@@ -7,7 +7,11 @@
 from decimal import Decimal
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# DeepSeek v4 为混合思考模型；定价助手默认关思考（快/省/够用）
+_DEFAULT_LLM_EXTRA_BODY = '{"thinking": {"type": "disabled"}}'
 
 
 class Settings(BaseSettings):
@@ -31,6 +35,26 @@ class Settings(BaseSettings):
 
     # CORS 允许来源（前端开发服务器）
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    # ---- 二期 AI 定价助手（LLM）----
+    # provider 抽象：openai_compatible 可对接 DeepSeek/Qwen/Kimi/GLM 等一切 OpenAI 兼容端点，
+    # 换厂商只改 base_url+model+key；将来要接 Anthropic 在 provider.py 加分支即可
+    llm_provider: str = "openai_compatible"
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-v4-flash"
+    llm_api_key: str = ""              # 空 = 未配置，chat 接口返回降级提示
+    # 随请求透传的额外参数(JSON)。换 Qwen 等端点时改成对应参数(如 {"enable_thinking": false})；
+    # 设 {} = 明确不传；留空/不设 = 用默认(关思考)
+    llm_extra_body: str = _DEFAULT_LLM_EXTRA_BODY
+    llm_max_tool_iters: int = 8        # 一次问答最多工具往返轮数（文件流程需 4-6 轮）
+    llm_timeout_seconds: int = 60
+    enable_agent: bool = True
+
+    @field_validator("llm_extra_body", mode="before")
+    @classmethod
+    def _extra_body_default(cls, v):
+        # docker-compose 透传空字符串时回退到默认，避免悄悄打开思考模式
+        return _DEFAULT_LLM_EXTRA_BODY if v is None or str(v).strip() == "" else v
 
 
 _DEFAULT_ADMIN_PW = "admin"
@@ -90,6 +114,41 @@ DEFAULT_IMPORT_MODE = "skip"
 
 # 文件上传上限（MB）
 MAX_UPLOAD_MB = 100
+
+# ============================================================
+# §8.6 近似检索（二期）：PN 解析器口径
+# ============================================================
+
+# 品牌同义词组：查询命中组内任一写法时，整组其余写法都加入检索词
+# （解决"super"找"超微/Supermicro"、"希捷"找 Seagate 描述等中英混写）
+BRAND_SYNONYMS: list[list[str]] = [
+    ["supermicro", "super", "超微"],
+    ["seagate", "希捷"],
+    ["western digital", "wd", "西数", "西部数据"],
+    ["hpe", "hp", "惠普"],
+    ["dell", "戴尔"],
+    ["lenovo", "联想"],
+    ["huawei", "华为"],
+    ["h3c", "华三", "新华三"],
+    ["cisco", "思科"],
+    ["intel", "英特尔"],
+    ["samsung", "三星"],
+    ["hynix", "skhynix", "海力士"],
+    ["micron", "镁光", "美光"],
+    ["kingston", "金士顿"],
+    ["toshiba", "东芝"],
+    ["fujitsu", "富士通"],
+    ["inspur", "浪潮"],
+    ["sugon", "曙光"],
+    ["ibm"],
+    ["broadcom", "lsi", "博通"],
+]
+
+# 搜索零命中时落 sys_audit_log（action=search_miss）——数据治理工单来源：缺别名/缺型号
+SEARCH_MISS_LOG = True
+
+# 解析结果置信度阈值：top1 低于该分视为"低置信"，前端/智能体应引导消歧而非直接采用
+RESOLVE_LOW_CONFIDENCE = 0.35
 
 
 # ============================================================

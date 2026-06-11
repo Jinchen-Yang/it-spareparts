@@ -56,8 +56,23 @@ export default function PartSearchPage() {
       render: (v, r) => (
         <a onClick={() => openOverview(v)}>
           {v} {r.needs_review && <Tag color="orange">待复核</Tag>}
+          {r.is_excluded && <Tag color="red">已排除</Tag>}
         </a>
       ),
+    },
+    {
+      title: "匹配度", dataIndex: "score", width: 150,
+      render: (v: number | undefined, r) =>
+        v == null ? "-" : (
+          <span title={r.match_reason}>
+            <Tag color={v >= 0.6 ? "green" : v >= 0.35 ? "blue" : "default"}>
+              {(v * 100).toFixed(0)}%
+            </Tag>
+            <span style={{ color: "#999", fontSize: 12 }}>
+              {(r.match_reason || "").split("；")[0]}
+            </span>
+          </span>
+        ),
     },
     { title: "描述", dataIndex: "description", ellipsis: true },
     { title: "品牌", dataIndex: "brand", width: 140 },

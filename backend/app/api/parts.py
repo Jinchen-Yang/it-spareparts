@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.auth import current_role
 from app.db import get_db
 from app.security import UserContext, apply_field_visibility, get_current_user_context, record_access_log
-from app.services import part_overview
+from app.services import part_overview, part_resolver
 
 router = APIRouter(prefix="/parts", tags=["parts"])
 
@@ -16,11 +16,19 @@ def search(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    _: str = Depends(current_role),
+    role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     record_access_log(ctx, "search", "parts", {"q": q})
-    data = part_overview.search_parts(db, q, page, page_size, ctx)
+    if q and q.strip():
+        # 近似解析（pg_trgm 召回 + 精排），结果单页带 score/match_reason
+        data = part_resolver.resolve(db, q.strip(), limit=page_size, operated_by=role)
+        data = {"total": len(data["items"]), "page": 1, "page_size": page_size,
+                "items": data["items"], "low_confidence": data["low_confidence"],
+                "ambiguous": data["ambiguous"]}
+    else:
+        # 空查询：保留原有按 pn_std 排序的浏览列表（分页）
+        data = part_overview.search_parts(db, None, page, page_size, ctx)
     return apply_field_visibility(data, ctx)
 
 

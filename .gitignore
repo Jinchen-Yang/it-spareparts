@@ -3,7 +3,7 @@ __pycache__/
 .venv/
 venv/
 .env
-backend/data/raw/
+backend/data/
 .pytest_cache/
 node_modules/
 dist/

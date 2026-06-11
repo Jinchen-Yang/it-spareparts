@@ -7,7 +7,21 @@ import "antd/dist/reset.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <ConfigProvider locale={zhCN}>
+    <ConfigProvider
+      locale={zhCN}
+      theme={{
+        token: {
+          colorPrimary: "#4f46e5",
+          borderRadius: 8,
+          fontFamily:
+            '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif',
+        },
+        components: {
+          Layout: { headerBg: "#111827" },
+          Menu: { darkItemBg: "#111827", darkItemSelectedBg: "#4f46e5" },
+        },
+      }}
+    >
       <App />
     </ConfigProvider>
   </React.StrictMode>

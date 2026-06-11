@@ -4,6 +4,7 @@
 利润概览本期给基础聚合（avg_cost/avg_sale_price/total_qty_sold）；
 avg_margin 待 Step 6 成本匹配后才有意义，暂返回 None。
 """
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, or_, select
@@ -187,6 +188,68 @@ def _substitutes(db: Session, part_id: int | None) -> list[dict]:
     return out
 
 
+def _sales_velocity(db: Session, pn_std: str) -> dict:
+    """近 90 天销售速率（二期采购场景："进 50 个合理吗"需要知道卖多快）。"""
+    since = date.today() - timedelta(days=90)
+    stmt = (
+        select(func.sum(FSalesLine.qty).filter(FSalesOrder.order_date >= since),
+               func.max(FSalesOrder.order_date))
+        .select_from(FSalesLine)
+        .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
+        .where(FSalesLine.pn_std == pn_std)
+    )
+    if config.ACTIVE_STATUS_ONLY:
+        stmt = stmt.where(FSalesOrder.data_status == _ACTIVE)
+    qty90, last_date = db.execute(stmt).one()
+    qty90 = qty90 or Decimal(0)
+    return {
+        "qty_sold_90d": _d(qty90),
+        "monthly_avg_90d": _d((qty90 / 3).quantize(Decimal("0.1"))),
+        "last_sale_date": last_date,
+    }
+
+
+def quick_pricing(db: Session, pn_std: str) -> dict:
+    """轻量定价摘要（批量询价单场景）：最近采购价 / 近90天均售价 / 库存合计。
+
+    比 get_overview 轻一个量级，供 lookup_prices_bulk 每行调用。
+    """
+    lp = (
+        select(FPurchaseOrder.order_date, FPurchaseLine.unit_price, FPurchaseOrder.source_type)
+        .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
+        .where(FPurchaseLine.pn_std == pn_std,
+               FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0)
+    )
+    if config.ACTIVE_STATUS_ONLY:
+        lp = lp.where(FPurchaseOrder.data_status == _ACTIVE)
+    last = db.execute(lp.order_by(FPurchaseOrder.order_date.desc().nullslast()).limit(1)).first()
+
+    since = date.today() - timedelta(days=90)
+    sp = (
+        select(func.sum(FSalesLine.qty * FSalesLine.unit_price), func.sum(FSalesLine.qty))
+        .select_from(FSalesLine)
+        .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
+        .where(FSalesLine.pn_std == pn_std, FSalesLine.unit_price > 0,
+               FSalesOrder.order_date >= since)
+    )
+    if config.ACTIVE_STATUS_ONLY:
+        sp = sp.where(FSalesOrder.data_status == _ACTIVE)
+    samt, sqty = db.execute(sp).one()
+
+    inv_rows = db.execute(select(Inventory).where(Inventory.pn_std == pn_std)).scalars().all()
+    stock = sum(
+        (inv.manual_qty if inv.is_qty_overridden and inv.manual_qty is not None else inv.source_qty)
+        or Decimal(0) for inv in inv_rows
+    )
+    return {
+        "last_purchase_price": _d(last[1]) if last else None,
+        "last_purchase_date": last[0] if last else None,
+        "last_purchase_type": last[2] if last else None,
+        "avg_sale_price_90d": _d((samt / sqty).quantize(Decimal("0.01"))) if samt and sqty else None,
+        "stock_total": _d(stock),
+    }
+
+
 def _inquiry_ref(db: Session, pn_std: str) -> dict:
     row = db.execute(
         select(func.min(FPartInquiry.money), func.max(FPartInquiry.money),
@@ -217,4 +280,5 @@ def get_overview(db: Session, pn_std: str,
         "substitutes": _substitutes(db, part.id),
         "profit_summary": _profit_summary(db, pn_std),
         "inquiry_ref": _inquiry_ref(db, pn_std),
+        "sales_velocity": _sales_velocity(db, pn_std),
     }
