@@ -50,6 +50,14 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 60
     enable_agent: bool = True
 
+    # ---- 三期 视觉识别（图片/扫描件 → 文本）----
+    # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级
+    vision_api_key: str = ""
+    vision_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    vision_model: str = "qwen-vl-max"
+    vision_max_pages: int = 8          # 单次最多送几页图（扫描件 PDF / 多图）
+    vision_timeout_seconds: int = 90
+
     @field_validator("llm_extra_body", mode="before")
     @classmethod
     def _extra_body_default(cls, v):
@@ -103,8 +111,11 @@ REVENUE_BUSINESS_TYPES = ["备件销售"]            # 排除 销售换货/整�
 # 含税口径：ex_tax（默认，按不含税算毛利）| as_is（原价粗算）
 TAX_BASIS = "ex_tax"
 
-# 目标毛利率（报价提示/低毛利标记用）
+# 目标毛利率（报价提示/低毛利标记用；整机拆解的"建议售价"=成本×1/(1-此值)）
 TARGET_MARGIN = Decimal("0.20")
+
+# 整机拆解/批量查价取"近 N 天采购价"窗口（客户要"最近15天采购价"）
+RECENT_PURCHASE_DAYS = 15
 
 # 只统计已生效（入库不过滤，业务查询过滤）
 ACTIVE_STATUS_ONLY = True
@@ -152,11 +163,12 @@ RESOLVE_LOW_CONFIDENCE = 0.35
 
 
 # ============================================================
-# §8.5 权限预留（第一期只埋钩子，不实现权限功能）
-# 全部默认关闭：接口输出与不加钩子时完全一致。接入权限时改这里 + 实现 data_scope。
+# §8.5 权限（三期启用：防恶性竞争）
 # ============================================================
-ENABLE_RBAC = False              # 第一期关闭，全员看全量
-ENABLE_ACCESS_LOG = False        # 审计第一期关闭
+# 三期开启：销售只看"匿名行情 + 自己明细"，查不到同事的客户/报价；老板/管理员看全量。
+# 防御在数据层（行级匿名化 + 禁用按客户/销售员排名），不靠提示词。
+ENABLE_RBAC = True
+ENABLE_ACCESS_LOG = True          # 记录谁查了什么型号/客户，便于审计
 
 PHASE1_BYPASS_ROLE = "phase1_full_access"   # 第一期统一上下文，语义=临时全量
 GUEST_ROLE = "guest"                         # 认证失败兜底角色，绝不可是 admin
@@ -179,13 +191,15 @@ FIELD_GROUPS = {
     "profit_rate":   ["gross_margin", "avg_margin", "margin_band"],  # 毛利率：见反推警告
 }
 
-# 角色 → 字段组可见性。ENABLE_RBAC=False 时不生效，仅占位。
-# ⚠️ 反推风险：销售知道售价(营收),若再给精确毛利率/毛利金额则成本被还原。
-#    sales 看 profit_rate 仅在分档(margin_band)时安全 —— 待客户拍板(§清单 C)。
+# 角色 → 字段组可见性（字段级脱敏，apply_field_visibility 用）。
+# 三期口径（客户只要求"防同事报价泄露"）：sales **不做字段脱敏**——
+#   ① 整机拆解要给销售看采购价才能加点直卖/发采购询价；② 防恶性竞争靠"行级匿名化"
+#   （part_overview.anonymize_sales_rows：抹掉同事客户名）+ 禁用按客户/销售员排名，
+#   不是靠遮字段。若日后甲方要"销售不看成本"，把 sales 的 purchase_cost 改 False 即可。
 ROLE_FIELD_VISIBILITY = {
     "admin":     {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
     "boss":      {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
-    "sales":     {"supplier_info": False, "customer_info": True,  "purchase_cost": False, "profit_amount": False, "profit_rate": False},
-    "purchaser": {"supplier_info": True,  "customer_info": False, "purchase_cost": True,  "profit_amount": False, "profit_rate": False},
+    "sales":     {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
+    "purchaser": {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
     "readonly":  {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
 }

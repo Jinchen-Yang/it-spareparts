@@ -23,7 +23,7 @@ const TOOL_LABEL: Record<string, string> = {
 const EXAMPLES = [
   { icon: "💰", title: "销售报价", q: "ST8000NM000A 客户问报 2200 行不行？" },
   { icon: "📦", title: "采购压价", q: "我要进 50 个 ST8000NM000A，目标价多少合理？" },
-  { icon: "🎯", title: "型号消歧", q: "V100 显卡现在卖多少钱？" },
+  { icon: "🧩", title: "整机拆解", q: "点左下角 📎 传整机配置(Word/PDF/图片)，我拆成单件查PN和近15天采购价、生成报价单" },
   { icon: "📄", title: "询价单处理", q: "点左下角 📎 上传客户询价单，我来批量查价回填" },
 ];
 
@@ -187,8 +187,10 @@ export default function ChatPage() {
     let q = text.trim();
     if ((!q && !pendingFile) || busy) return;
     if (pendingFile) {
-      const sheets = pendingFile.sheets.map((s) => `${s.name}(${s.n_rows}行x${s.n_cols}列)`).join("、");
-      q = `[已上传文件「${pendingFile.filename}」 file_id=${pendingFile.file_id}，sheets: ${sheets}]\n\n${q || "请处理这个文件"}`;
+      const meta = pendingFile.sheets
+        ? `sheets: ${pendingFile.sheets.map((s) => `${s.name}(${s.n_rows}行x${s.n_cols}列)`).join("、")}`
+        : `类型: ${pendingFile.file_kind}`;
+      q = `[已上传文件「${pendingFile.filename}」 file_id=${pendingFile.file_id}，${meta}]\n\n${q || "请处理这个文件"}`;
       setPendingFile(null);
     }
     const sid = active.id;
@@ -443,16 +445,19 @@ export default function ChatPage() {
             {pendingFile && (
               <Tag closable color="purple" onClose={() => setPendingFile(null)}
                 style={{ marginBottom: 8, padding: "3px 10px" }}>
-                📎 {pendingFile.filename}（{pendingFile.sheets.map((s) => `${s.name} ${s.n_rows}行`).join("、")}）
+                📎 {pendingFile.filename}（{pendingFile.sheets
+                  ? pendingFile.sheets.map((s) => `${s.name} ${s.n_rows}行`).join("、")
+                  : pendingFile.file_kind}）
               </Tag>
             )}
             <div style={{
               display: "flex", alignItems: "flex-end", gap: 8, border: "1px solid #e5e7eb",
               borderRadius: 14, padding: "8px 10px", boxShadow: "0 2px 10px rgba(0,0,0,0.04)",
             }}>
-              <Upload accept=".xlsx" showUploadList={false} disabled={busy || uploading}
+              <Upload accept=".xlsx,.docx,.pdf,.txt,.csv,.jpg,.jpeg,.png,.webp"
+                showUploadList={false} disabled={busy || uploading}
                 beforeUpload={(f) => doUpload(f as unknown as File)}>
-                <Tooltip title="上传询价单/型号清单 (.xlsx)">
+                <Tooltip title="上传文件：询价单/整机配置（Excel/Word/PDF/txt/图片）">
                   <Button type="text" icon={<PaperClipOutlined />} loading={uploading}
                     style={{ color: "#6b7280" }} />
                 </Tooltip>

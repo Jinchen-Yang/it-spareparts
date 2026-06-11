@@ -8,13 +8,20 @@ DeepSeek 上下文缓存为磁盘级自动命中：把固定的 system + tools �
 即可享缓存折扣，无需显式 cache_control。将来接 Anthropic：在 chat() 加
 provider 分支（anthropic SDK + cache_control），接口保持不变。
 """
+import base64
+import mimetypes
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from app.config import get_settings
 
 
 class LLMNotConfigured(Exception):
     """未配置 LLM_API_KEY。"""
+
+
+class VisionNotConfigured(Exception):
+    """未配置 VISION_API_KEY（图片/扫描件识别需要）。"""
 
 
 @dataclass
@@ -106,3 +113,75 @@ def chat(messages: list[dict], tools: list[dict] | None = None) -> ChatResult:
     calls = [ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
              for tc in (msg.tool_calls or [])]
     return ChatResult(content=msg.content, tool_calls=calls)
+
+
+# ============================================================
+# 视觉识别（图片/扫描件 → 文本）。独立 key/端点，默认 通义 Qwen-VL
+# ============================================================
+
+def vision_configured() -> bool:
+    return bool(get_settings().vision_api_key)
+
+
+def _img_data_url(path: Path) -> str:
+    mime = mimetypes.guess_type(str(path))[0] or "image/png"
+    b64 = base64.b64encode(path.read_bytes()).decode()
+    return f"data:{mime};base64,{b64}"
+
+
+def vision_extract(images: list[Path], hint: str) -> str:
+    """图片/扫描件 PDF → 识别文本。images 为图片路径（PDF 由调用方先渲染成图）。
+
+    用 openai SDK 对接 OpenAI 兼容视觉端点（默认 DashScope qwen-vl-max）。
+    PDF 路径会先用 pypdfium2 逐页渲染成 PNG 再送（最多前若干页）。
+    """
+    s = get_settings()
+    if not s.vision_api_key:
+        raise VisionNotConfigured("未配置 VISION_API_KEY")
+    from openai import OpenAI
+
+    # 展开：PDF → 多页图；图片原样
+    img_paths: list[Path] = []
+    tmp: list[Path] = []
+    for p in images:
+        if p.suffix.lower() == ".pdf":
+            tmp.extend(_render_pdf_pages(p, s.vision_max_pages))
+        else:
+            img_paths.append(p)
+    img_paths.extend(tmp)
+    if not img_paths:
+        return "(无可识别页面)"
+
+    content = [{"type": "text", "text": hint}]
+    for ip in img_paths[: s.vision_max_pages]:
+        content.append({"type": "image_url", "image_url": {"url": _img_data_url(ip)}})
+
+    client = OpenAI(api_key=s.vision_api_key, base_url=s.vision_base_url,
+                    timeout=s.vision_timeout_seconds)
+    try:
+        resp = client.chat.completions.create(
+            model=s.vision_model,
+            messages=[{"role": "user", "content": content}],
+        )
+        return resp.choices[0].message.content or "(视觉模型未返回内容)"
+    finally:
+        for t in tmp:
+            t.unlink(missing_ok=True)
+
+
+def _render_pdf_pages(pdf_path: Path, max_pages: int) -> list[Path]:
+    """PDF 逐页渲染成 PNG（pypdfium2，pdfplumber 依赖自带）。返回临时文件路径。"""
+    import pypdfium2 as pdfium
+
+    out: list[Path] = []
+    doc = pdfium.PdfDocument(str(pdf_path))
+    try:
+        for i in range(min(len(doc), max_pages)):
+            bitmap = doc[i].render(scale=2.0)  # ~144dpi，够清晰
+            img = bitmap.to_pil()
+            dst = pdf_path.with_name(f"{pdf_path.stem}_p{i}.png")
+            img.save(dst)
+            out.append(dst)
+    finally:
+        doc.close()
+    return out

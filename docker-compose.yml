@@ -31,6 +31,10 @@ services:
       LLM_MODEL: ${LLM_MODEL:-deepseek-v4-flash}
       # 留空 = 用应用内默认(关思考)；设 {} = 明确不传额外参数
       LLM_EXTRA_BODY: ${LLM_EXTRA_BODY:-}
+      # 三期 视觉识别(图片/扫描件)：不配则图片走降级，文字类文件照常
+      VISION_API_KEY: ${VISION_API_KEY:-}
+      VISION_BASE_URL: ${VISION_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      VISION_MODEL: ${VISION_MODEL:-qwen-vl-max}
     depends_on:
       db:
         condition: service_healthy

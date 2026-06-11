@@ -146,6 +146,50 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "read_document",
+            "description": (
+                "读取上传文件的全部内容（Word/PDF/txt/Excel/图片均可）。整机配置拆解场景用它："
+                "拿到文本后你自己判断里面有哪些设备/部件，按 品牌+型号+规格+数量 拆成清单。"
+                "图片和扫描件 PDF 会自动走视觉识别（需配置视觉模型，未配置时返回提示）。"
+                "Excel 若要按行列精确定位用 inspect_file/read_file_rows，要整体内容用本工具。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"file_id": {"type": "string"}},
+                "required": ["file_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_report",
+            "description": (
+                "生成**美化** Excel 报表并返回下载链接（表头配色、边框、自适应列宽、金额格式、"
+                "冻结表头、斑马纹；备注含'需确认'/'未找到'的行自动标橙/红）。"
+                "整机拆解报价单、批量查价结果等用它（比 write_excel 好看）。"
+                "headers=列名数组；rows=与列对齐的二维数组（每行一个数组）；money_cols=金额列的"
+                "0基下标数组（会按千分位+两位小数格式化）。完成后把 download_url 告诉用户。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "报表标题，可省略，如 'XX公司整机配置报价单'"},
+                    "headers": {"type": "array", "items": {"type": "string"},
+                                "description": "列名，如 ['序号','部件','品牌','型号','数量','匹配PN','近15天采购均价','库存','建议售价','备注']"},
+                    "rows": {"type": "array", "items": {"type": "array"},
+                             "description": "数据行，每行一个数组，顺序与 headers 对齐"},
+                    "money_cols": {"type": "array", "items": {"type": "integer"},
+                                   "description": "金额列的 0 基下标，如 [6,8]"},
+                    "output_name": {"type": "string", "description": "下载文件名"},
+                },
+                "required": ["headers", "rows"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_profit_ranking",
             "description": (
                 "利润聚合排名（维度三选一：part=按型号 / salesperson=按销售员 / customer=按客户），"
@@ -196,6 +240,10 @@ def _get_part_overview(db: Session, args: dict, ctx: security.UserContext) -> di
 
 
 def _get_profit_ranking(db: Session, args: dict, ctx: security.UserContext) -> dict:
+    # 防恶性竞争：销售角色禁用按销售员/客户的排名（直接暴露同事经营数据）
+    if security.is_scoped_sales(ctx):
+        return {"error": "无权限：销售角色不能查看按客户/销售员的经营排名（防恶性竞争）。"
+                          "可以问某个型号的行情价或你自己的成交。"}
     dim = args.get("dimension", "part")
     if dim not in ("part", "salesperson", "customer"):
         dim = "part"
@@ -253,14 +301,33 @@ def _write_excel(db: Session, args: dict, ctx: security.UserContext) -> dict:
         args.get("cells") or [], args.get("output_name"), ctx.role)
 
 
+def _read_document(db: Session, args: dict, ctx: security.UserContext) -> dict:
+    return agent_files.read_document(str(args.get("file_id", "")))
+
+
+def _write_report(db: Session, args: dict, ctx: security.UserContext) -> dict:
+    headers = args.get("headers")
+    rows = args.get("rows")
+    if not isinstance(headers, list) or not headers:
+        return {"error": "headers 需为非空数组"}
+    if not isinstance(rows, list):
+        return {"error": "rows 需为二维数组"}
+    return agent_files.write_report(
+        args.get("title"), [str(h) for h in headers], rows,
+        args.get("output_name"), ctx.role,
+        money_cols=args.get("money_cols") if isinstance(args.get("money_cols"), list) else None)
+
+
 _REGISTRY = {
     "search_parts": _search_parts,
     "get_part_overview": _get_part_overview,
     "get_profit_ranking": _get_profit_ranking,
     "inspect_file": _inspect_file,
     "read_file_rows": _read_file_rows,
+    "read_document": _read_document,
     "lookup_prices_bulk": _lookup_prices_bulk,
     "write_excel": _write_excel,
+    "write_report": _write_report,
 }
 
 

@@ -105,7 +105,9 @@ export async function agentChatStream(
 export interface AgentUploadResult {
   file_id: string;
   filename: string;
-  sheets: { name: string; n_rows: number; n_cols: number }[];
+  ext: string;
+  file_kind: string; // 表格/Word/PDF/图片/文本
+  sheets?: { name: string; n_rows: number; n_cols: number }[];
 }
 
 export const agentUpload = (file: File) => {

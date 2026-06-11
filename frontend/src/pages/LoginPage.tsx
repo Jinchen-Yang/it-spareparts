@@ -11,6 +11,7 @@ export default function LoginPage({ onLogin }: { onLogin: (token: string) => voi
       const { data } = await api.post("/auth/login", v);
       localStorage.setItem("token", data.token);
       localStorage.setItem("role", data.role);
+      localStorage.setItem("name", data.name || data.role);
       onLogin(data.token);
     } catch {
       message.error("用户名或密码错误");

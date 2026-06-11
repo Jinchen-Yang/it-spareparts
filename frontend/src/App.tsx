@@ -18,8 +18,16 @@ export default function App() {
 
   const logout = () => {
     localStorage.removeItem("token");
+    localStorage.removeItem("role");
+    localStorage.removeItem("name");
     setToken(null);
   };
+
+  const roleMap: Record<string, string> = {
+    admin: "管理员", boss: "老板", sales: "销售", purchaser: "采购", readonly: "只读",
+  };
+  const role = localStorage.getItem("role") || "";
+  const name = localStorage.getItem("name") || "";
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
@@ -42,6 +50,9 @@ export default function App() {
           ]}
           style={{ flex: 1, minWidth: 0 }}
         />
+        <span style={{ color: "#cbd5e1", marginRight: 12, fontSize: 13 }}>
+          {name}{role ? `（${roleMap[role] || role}）` : ""}
+        </span>
         <Button onClick={logout}>退出</Button>
       </Header>
       <Content style={{ padding: 24, background: "#f0f2f5" }}>

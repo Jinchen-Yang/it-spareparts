@@ -24,44 +24,69 @@ _FIELD_TO_GROUP = {f: g for g, fields in config.FIELD_GROUPS.items() for f in fi
 class UserContext:
     user_id: str | None
     role: str
+    salesperson_name: str | None = None   # 对齐 f_sales_order.salesperson，行级过滤用
     ding_user_id: str | None = None
     department_id: str | None = None
     team_id: str | None = None
     is_authenticated: bool = False
 
 
+# 看全量（不受行级/匿名限制）的角色
+FULL_SCOPE_ROLES = {"admin", "boss", "readonly", config.PHASE1_BYPASS_ROLE}
+
+
+def is_scoped_sales(user_ctx: UserContext | None) -> bool:
+    """是否需要按"匿名行情+自己明细"收紧（仅 RBAC 开启且角色=sales）。"""
+    return bool(config.ENABLE_RBAC and user_ctx and user_ctx.role == "sales")
+
+
 def get_current_user_context(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer_optional),
 ) -> UserContext:
-    """身份上下文钩子。第一期：RBAC 关闭时统一返回临时全量上下文。
+    """身份上下文钩子。RBAC 关 → 临时全量；RBAC 开 → 从服务端校验的 token 取真实身份。
 
-    将来：从 session/token/钉钉解析真实身份。鉴权本身仍由 auth.current_role/require_admin
-    在各接口独立把关，本函数只提供"数据范围/脱敏"所需的上下文,不抢鉴权职责。
+    身份**只来自 token**，绝不信对话/请求体里用户自报的角色（注入防御根基）。
+    鉴权本身仍由 auth.current_role/require_admin 各接口独立把关。
     """
     if not config.ENABLE_RBAC:
         return UserContext(user_id=None, role=config.PHASE1_BYPASS_ROLE, is_authenticated=False)
-    # RBAC 开启后：尝试从 token 取角色，失败兜底 GUEST（绝不默认 admin）
-    role = config.GUEST_ROLE
-    authed = False
+    # RBAC 开启：解析 token，失败兜底 GUEST（绝不默认 admin）
     if creds is not None:
         try:
-            from app.auth import _verify_token
-            role = _verify_token(creds.credentials)
-            authed = True
+            from app.auth import verify_token
+            data = verify_token(creds.credentials)
+            return UserContext(user_id=data.get("sub"), role=data.get("role", config.GUEST_ROLE),
+                               salesperson_name=data.get("name"), is_authenticated=True)
         except Exception:  # noqa: BLE001
-            role = config.GUEST_ROLE
-    return UserContext(user_id=None, role=role, is_authenticated=authed)
+            pass
+    return UserContext(user_id=None, role=config.GUEST_ROLE, is_authenticated=False)
 
 
 def apply_data_scope(query, user_ctx: UserContext):
-    """行级数据范围钩子。第一期原样返回。
+    """行级数据范围钩子。保持 pass-through。
 
-    将来：销售只能查自己的客户、采购只能查自己的供应商、主管看本组等
-    —— 在此对 query 追加 where 条件。
+    "匿名行情+自己明细"的防恶性竞争不靠"过滤掉同事的行"（那会连匿名行情也看不到），
+    而靠**行级匿名化**：保留所有成交价（行情价值），但把非本人成交的客户名抹掉
+    （见 part_overview.anonymize_sales_rows）。此处不加 SQL 过滤，避免误伤采购/搜索等
+    跨表查询，且把口径集中在一处便于审计。
     """
-    if not config.ENABLE_RBAC:
-        return query
-    return query  # TODO: 接入身份后按 user_ctx.role/team_id 追加过滤
+    return query
+
+
+def anonymize_sales_rows(rows: list[dict], user_ctx: UserContext | None) -> list[dict]:
+    """sales 角色（RBAC 开）：非本人成交的客户名抹成"（其他客户）"，并去掉 salesperson；
+    本人成交保留客户名。其余角色原样。rows 需含 'salesperson' 与 'customer' 键。"""
+    if not is_scoped_sales(user_ctx):
+        return [{k: v for k, v in r.items() if k != "salesperson"} for r in rows]
+    me = user_ctx.salesperson_name
+    out = []
+    for r in rows:
+        mine = r.get("salesperson") and r["salesperson"] == me
+        r2 = {k: v for k, v in r.items() if k != "salesperson"}
+        if not mine:
+            r2["customer"] = "（其他客户）"
+        out.append(r2)
+    return out
 
 
 def _hidden_fields(role: str) -> set[str]:

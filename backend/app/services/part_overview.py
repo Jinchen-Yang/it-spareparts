@@ -63,9 +63,11 @@ def _purchases_query(pn_std: str, user_ctx: security.UserContext | None = None):
 
 
 def _sales_query(pn_std: str, user_ctx: security.UserContext | None = None):
+    # 带 salesperson 以便 sales 角色行级匿名化（保留行情价、抹掉同事客户名）
     stmt = (
         select(FSalesOrder.order_no, FSalesOrder.order_date,
-                DimCustomer.name_normalized, FSalesLine.qty, FSalesLine.unit_price)
+                DimCustomer.name_normalized, FSalesLine.qty, FSalesLine.unit_price,
+                FSalesOrder.salesperson)
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
         .join(DimCustomer, FSalesOrder.customer_id == DimCustomer.id, isouter=True)
         .where(FSalesLine.pn_std == pn_std)
@@ -91,7 +93,7 @@ def _purchase_row(r):
 
 def _sales_row(r):
     return {"order_no": r[0], "order_date": r[1], "customer": r[2],
-            "qty": _d(r[3]), "unit_price": _d(r[4])}
+            "qty": _d(r[3]), "unit_price": _d(r[4]), "salesperson": r[5]}
 
 
 def list_purchases(db: Session, pn_std: str, page: int, page_size: int,
@@ -101,7 +103,9 @@ def list_purchases(db: Session, pn_std: str, page: int, page_size: int,
 
 def list_sales(db: Session, pn_std: str, page: int, page_size: int,
                user_ctx: security.UserContext | None = None) -> dict:
-    return _paginate(db, _sales_query(pn_std, user_ctx), page, page_size, _sales_row)
+    out = _paginate(db, _sales_query(pn_std, user_ctx), page, page_size, _sales_row)
+    out["items"] = security.anonymize_sales_rows(out["items"], user_ctx)  # 防恶性竞争
+    return out
 
 
 def _profit_summary(db: Session, pn_std: str) -> dict:
@@ -210,19 +214,36 @@ def _sales_velocity(db: Session, pn_std: str) -> dict:
 
 
 def quick_pricing(db: Session, pn_std: str) -> dict:
-    """轻量定价摘要（批量询价单场景）：最近采购价 / 近90天均售价 / 库存合计。
+    """轻量定价摘要（整机拆解/批量询价场景）：近N天采购价窗口 / 近90天均售价 / 库存合计。
 
     比 get_overview 轻一个量级，供 lookup_prices_bulk 每行调用。
+    采购价只取计入成本的采购类型（与成本口径一致，排除维保等）。
     """
     lp = (
         select(FPurchaseOrder.order_date, FPurchaseLine.unit_price, FPurchaseOrder.source_type)
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
         .where(FPurchaseLine.pn_std == pn_std,
-               FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0)
+               FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
+               FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
     )
     if config.ACTIVE_STATUS_ONLY:
         lp = lp.where(FPurchaseOrder.data_status == _ACTIVE)
     last = db.execute(lp.order_by(FPurchaseOrder.order_date.desc().nullslast()).limit(1)).first()
+
+    # 近 N 天采购价窗口（客户要"最近15天采购价"）：均/低/高/笔数
+    win_since = date.today() - timedelta(days=config.RECENT_PURCHASE_DAYS)
+    rp = (
+        select(func.avg(FPurchaseLine.unit_price), func.min(FPurchaseLine.unit_price),
+               func.max(FPurchaseLine.unit_price), func.count())
+        .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
+        .where(FPurchaseLine.pn_std == pn_std,
+               FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
+               FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES),
+               FPurchaseOrder.order_date >= win_since)
+    )
+    if config.ACTIVE_STATUS_ONLY:
+        rp = rp.where(FPurchaseOrder.data_status == _ACTIVE)
+    r_avg, r_min, r_max, r_cnt = db.execute(rp).one()
 
     since = date.today() - timedelta(days=90)
     sp = (
@@ -245,6 +266,12 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
         "last_purchase_price": _d(last[1]) if last else None,
         "last_purchase_date": last[0] if last else None,
         "last_purchase_type": last[2] if last else None,
+        # 近 N 天采购价窗口；窗口内无采购时各值为 None，回退看 last_purchase_*
+        "recent_purchase_days": config.RECENT_PURCHASE_DAYS,
+        "recent_purchase_avg": _d(r_avg.quantize(Decimal("0.01"))) if r_avg else None,
+        "recent_purchase_min": _d(r_min) if r_min else None,
+        "recent_purchase_max": _d(r_max) if r_max else None,
+        "recent_purchase_count": r_cnt or 0,
         "avg_sale_price_90d": _d((samt / sqty).quantize(Decimal("0.01"))) if samt and sqty else None,
         "stock_total": _d(stock),
     }
@@ -275,7 +302,9 @@ def get_overview(db: Session, pn_std: str,
             "unit": part.unit, "needs_review": part.needs_review,
         },
         "purchases_recent": _paginate(db, _purchases_query(pn_std, user_ctx), 1, 20, _purchase_row)["items"],
-        "sales_recent": _paginate(db, _sales_query(pn_std, user_ctx), 1, 20, _sales_row)["items"],
+        # 防恶性竞争：sales 角色保留行情价、抹掉同事的客户名（本人成交保留）
+        "sales_recent": security.anonymize_sales_rows(
+            _paginate(db, _sales_query(pn_std, user_ctx), 1, 20, _sales_row)["items"], user_ctx),
         "inventory": _inventory(db, pn_std),
         "substitutes": _substitutes(db, part.id),
         "profit_summary": _profit_summary(db, pn_std),
