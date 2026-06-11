@@ -1,0 +1,134 @@
+/* ─── 全局重置 & 变量 ─── */
+:root {
+  --indigo: #4f46e5;
+  --indigo-light: #6366f1;
+  --indigo-dim: rgba(79,70,229,0.12);
+  --purple: #9333ea;
+  --surface: #ffffff;
+  --surface-2: #f8f9fc;
+  --border: #e8eaed;
+  --text-1: #111827;
+  --text-2: #4b5563;
+  --text-3: #9ca3af;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.05);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.08), 0 2px 6px rgba(0,0,0,0.05);
+  --shadow-lg: 0 12px 40px rgba(0,0,0,0.12), 0 4px 12px rgba(0,0,0,0.06);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #f4f5f9;
+  color: var(--text-1);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─── 动画 ─── */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes slide-right {
+  from { opacity: 0; transform: translateX(-10px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes pulse-ring {
+  0%   { transform: scale(1);   opacity: 0.6; }
+  50%  { transform: scale(1.4); opacity: 0; }
+  100% { transform: scale(1);   opacity: 0; }
+}
+@keyframes gradient-shift {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+@keyframes spin-slow {
+  to { transform: rotate(360deg); }
+}
+@keyframes blob-move {
+  0%, 100% { transform: translate(0px, 0px) scale(1); }
+  33%       { transform: translate(20px, -15px) scale(1.05); }
+  66%       { transform: translate(-10px, 10px) scale(0.97); }
+}
+
+/* ─── 通用工具 ─── */
+.fade-up    { animation: fade-up 0.28s ease both; }
+.fade-in    { animation: fade-in 0.2s ease both; }
+
+/* ─── 卡片悬浮阴影 ─── */
+.ant-card {
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+/* ─── 滚动条美化 ─── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+
+/* ─── Header glow 线 ─── */
+.app-header::after {
+  content: "";
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(99,102,241,0.5), transparent);
+}
+
+/* ─── Chat markdown ─── */
+.chat-md table { border-collapse: collapse; margin: 10px 0; background: #fff;
+  font-size: 13px; border-radius: 8px; overflow: hidden; width: 100%; }
+.chat-md th, .chat-md td { border: 1px solid #e8eaed; padding: 6px 14px; }
+.chat-md th { background: #f8f9fc; font-weight: 600; color: #374151; }
+.chat-md tr:hover td { background: #f5f7ff; }
+.chat-md p { margin: 6px 0; line-height: 1.75; }
+.chat-md h1, .chat-md h2, .chat-md h3 { margin: 16px 0 6px; }
+.chat-md h2 { font-size: 16px; } .chat-md h3 { font-size: 14.5px; }
+.chat-md hr { border: none; border-top: 1px solid #f0f0f0; margin: 14px 0; }
+.chat-md ul, .chat-md ol { padding-left: 22px; margin: 6px 0; }
+.chat-md li { margin: 4px 0; line-height: 1.7; }
+.chat-md blockquote { margin: 10px 0; padding: 4px 14px; border-left: 3px solid #c7d2fe;
+  background: #f8faff; color: #4b5563; border-radius: 0 6px 6px 0; }
+.chat-md code { background: #f3f4f6; padding: 2px 6px; border-radius: 5px;
+  font-size: 12.5px; font-family: 'Fira Code', 'Cascadia Code', monospace; color: #6d28d9; }
+.chat-md pre { background: #1e1e2e; border-radius: 10px; padding: 14px 16px; overflow-x: auto; margin: 10px 0; }
+.chat-md pre code { background: none; color: #cdd6f4; padding: 0; font-size: 13px; }
+.chat-md strong { color: #1f2937; }
+
+/* ─── 会话列表 ─── */
+.sess-item { transition: background 0.15s ease; }
+.sess-item:hover { background: #eef2ff !important; }
+.sess-item:hover .sess-del { opacity: 1 !important; }
+.sess-item.active-session { background: #eef2ff; }
+
+/* ─── 消息出现动画 ─── */
+.msg-user, .msg-assistant { animation: fade-up 0.22s ease both; }
+
+/* ─── 助手消息复制按钮 ─── */
+.turn-assistant:hover .copy-btn { opacity: 1 !important; }
+
+/* ─── 工具 chip hover ─── */
+.tool-chip { transition: background 0.15s, color 0.15s; }
+.tool-chip:hover { background: #eef2ff !important; color: #4f46e5 !important; }
+
+/* ─── 输入框聚焦光晕 ─── */
+.chat-input-wrap:focus-within {
+  border-color: #6366f1 !important;
+  box-shadow: 0 0 0 3px rgba(99,102,241,0.12), 0 4px 20px rgba(0,0,0,0.06) !important;
+}
+
+/* ─── 统计卡 hover ─── */
+.stat-card { transition: transform 0.18s ease, box-shadow 0.18s ease; }
+.stat-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md) !important; }
+
+/* ─── 页面卡片进入 ─── */
+.page-card { animation: fade-up 0.3s ease both; }

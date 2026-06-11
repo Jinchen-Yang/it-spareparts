@@ -108,7 +108,7 @@ export default function PartSearchPage() {
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <Card>
+      <Card className="page-card" style={{ boxShadow: "0 2px 12px rgba(0,0,0,0.06)" }}>
         <Input.Search
           placeholder="输入型号 (PN) 或描述关键词，如 ST8000NM000A"
           enterButton="搜索"
@@ -135,19 +135,21 @@ export default function PartSearchPage() {
           </Descriptions>
 
           <Row gutter={16} style={{ marginBottom: 16 }}>
-            <Col span={6}><Card size="small">
-              <Statistic title="移动加权 · 单位成本" value={ov.profit_summary.avg_cost_moving ?? "-"} prefix="¥" />
-              <span style={{ color: "#888" }}>毛利率 {pct(ov.profit_summary.avg_margin_moving)}</span>
+            <Col span={6}><Card size="small" className="stat-card" style={{ borderRadius: 12, boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+              <Statistic title="移动加权 · 单位成本" value={ov.profit_summary.avg_cost_moving ?? "-"} prefix="¥" valueStyle={{ color: "#4f46e5", fontWeight: 700 }} />
+              <span style={{ color: "#9ca3af", fontSize: 12 }}>毛利率 {pct(ov.profit_summary.avg_margin_moving)}</span>
             </Card></Col>
-            <Col span={6}><Card size="small">
-              <Statistic title="FIFO · 单位成本" value={ov.profit_summary.avg_cost_fifo ?? "-"} prefix="¥" />
-              <span style={{ color: "#888" }}>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>
+            <Col span={6}><Card size="small" className="stat-card" style={{ borderRadius: 12, boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+              <Statistic title="FIFO · 单位成本" value={ov.profit_summary.avg_cost_fifo ?? "-"} prefix="¥" valueStyle={{ color: "#7c3aed", fontWeight: 700 }} />
+              <span style={{ color: "#9ca3af", fontSize: 12 }}>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>
             </Card></Col>
-            <Col span={6}><Card size="small">
-              <Statistic title="平均销售价(含税)" value={ov.profit_summary.avg_sale_price ?? "-"} prefix="¥" />
-              <span style={{ color: "#888" }}>累计售 {ov.profit_summary.total_qty_sold}</span>
+            <Col span={6}><Card size="small" className="stat-card" style={{ borderRadius: 12, boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+              <Statistic title="平均销售价(含税)" value={ov.profit_summary.avg_sale_price ?? "-"} prefix="¥" valueStyle={{ color: "#0ea5e9", fontWeight: 700 }} />
+              <span style={{ color: "#9ca3af", fontSize: 12 }}>累计售 {ov.profit_summary.total_qty_sold}</span>
             </Card></Col>
-            <Col span={6}><Card size="small"><Statistic title="询价区间" value={ov.inquiry_ref.count ? `${money(ov.inquiry_ref.min_money)}~${money(ov.inquiry_ref.max_money)}` : "无"} /></Card></Col>
+            <Col span={6}><Card size="small" className="stat-card" style={{ borderRadius: 12, boxShadow: "0 2px 8px rgba(0,0,0,0.06)" }}>
+              <Statistic title="询价区间" value={ov.inquiry_ref.count ? `${money(ov.inquiry_ref.min_money)}~${money(ov.inquiry_ref.max_money)}` : "无"} valueStyle={{ color: "#10b981", fontWeight: 700 }} />
+            </Card></Col>
           </Row>
 
           <Card title="库存" size="small" style={{ marginBottom: 16 }}>
