@@ -3,6 +3,10 @@
 对每条已生效销售行：按时间回放成本(cost.replay,移动加权+FIFO)→ 算营收(默认不含税)、
 成本、毛利、毛利率、异常标记、是否计营收 → 批量回填 f_sales_line。
 规则改动(改 config)后调 recompute() 刷新。
+
+整改 P3：成本回放与利润聚合一律按 part_id 分组（pn_std 仅展示）。
+未合并库中 pn_std↔part_id 双射，分组结果与旧口径逐行一致（有等价性测试）；
+合并后源/目标的采购销售事件流自动归并为同一条时间线。
 """
 from collections import defaultdict
 from datetime import date
@@ -31,9 +35,9 @@ def _ex_tax(amount: Decimal, tax_rate: Decimal | None) -> Decimal:
 
 
 def _load_purchase_events(db: Session):
-    """按 pn 收集采购入库事件(不含税单价)+ 每 pn 兜底价(最近采购价)。"""
+    """按 part_id 收集采购入库事件(不含税单价)+ 每 part 兜底价(最近采购价)。"""
     q = (
-        select(FPurchaseLine.id, FPurchaseLine.pn_std, FPurchaseOrder.order_date,
+        select(FPurchaseLine.id, FPurchaseLine.part_id, FPurchaseOrder.order_date,
                 FPurchaseLine.qty, FPurchaseLine.unit_price, FPurchaseOrder.tax_rate)
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
         .where(FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
@@ -45,15 +49,15 @@ def _load_purchase_events(db: Session):
     if config.ACTIVE_STATUS_ONLY:
         q = q.where(FPurchaseOrder.data_status == _ACTIVE)
 
-    events: dict[str, list] = defaultdict(list)
-    recent: dict[str, tuple] = {}   # pn -> ((date, line_id), ex_price)  含 line_id 保证同日不歧义
-    for pl_id, pn, odate, qty, price, trate in db.execute(q):
+    events: dict[int, list] = defaultdict(list)
+    recent: dict[int, tuple] = {}   # part -> ((date, line_id), ex_price)  含 line_id 保证同日不歧义
+    for pl_id, part, odate, qty, price, trate in db.execute(q):
         ex = _ex_tax(price, trate)
-        events[pn].append(cost.PurchaseEvent(odate, qty, ex))
+        events[part].append(cost.PurchaseEvent(odate, qty, ex))
         key = (odate or date.min, pl_id)
-        if pn not in recent or key >= recent[pn][0]:
-            recent[pn] = (key, ex)
-    fallback = {pn: v[1] for pn, v in recent.items()} if config.OPENING_COST_POLICY == "fallback_recent" else {}
+        if part not in recent or key >= recent[part][0]:
+            recent[part] = (key, ex)
+    fallback = {p: v[1] for p, v in recent.items()} if config.OPENING_COST_POLICY == "fallback_recent" else {}
     return events, fallback
 
 
@@ -62,7 +66,7 @@ def recompute(db: Session) -> dict:
     pur_events, fallback = _load_purchase_events(db)
 
     sq = (
-        select(FSalesLine.id, FSalesLine.pn_std, FSalesOrder.order_date,
+        select(FSalesLine.id, FSalesLine.part_id, FSalesOrder.order_date,
                 FSalesLine.qty, FSalesLine.unit_price, FSalesLine.line_amount,
                 FSalesOrder.tax_rate, FSalesOrder.business_type)
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
@@ -73,22 +77,22 @@ def recompute(db: Session) -> dict:
         sq = sq.where(FSalesOrder.data_status == _ACTIVE)
     sales_rows = db.execute(sq).all()
 
-    # 按 pn 分组销售事件
-    by_pn: dict[str, list] = defaultdict(list)
+    # 按 part 分组销售事件
+    by_part: dict[int, list] = defaultdict(list)
     meta: dict[int, dict] = {}
-    for sid, pn, odate, qty, up, lamt, trate, btype in sales_rows:
-        by_pn[pn].append(cost.SaleEvent(odate, sid, qty or Decimal(0)))
-        meta[sid] = {"pn": pn, "qty": qty, "unit_price": up, "line_amount": lamt,
+    for sid, part, odate, qty, up, lamt, trate, btype in sales_rows:
+        by_part[part].append(cost.SaleEvent(odate, sid, qty or Decimal(0)))
+        meta[sid] = {"part": part, "qty": qty, "unit_price": up, "line_amount": lamt,
                      "tax_rate": trate, "business_type": btype}
 
-    # 回放每个 pn
+    # 回放每个 part
     line_cost: dict[int, cost.LineCost] = {}
-    for pn, sevents in by_pn.items():
-        line_cost.update(cost.replay(pur_events.get(pn, []), sevents, fallback.get(pn)))
+    for part, sevents in by_part.items():
+        line_cost.update(cost.replay(pur_events.get(part, []), sevents, fallback.get(part)))
 
     # 数据治理：被人工标记为非标/排除的型号，不计入营收/利润统计（#25）
-    excluded_pns = set(db.execute(
-        select(DimPart.pn_std).where(DimPart.is_excluded.is_(True))
+    excluded_parts = set(db.execute(
+        select(DimPart.id).where(DimPart.is_excluded.is_(True))
     ).scalars().all())
 
     active_is_moving = config.COST_METHOD == "moving_avg"
@@ -106,7 +110,7 @@ def recompute(db: Session) -> dict:
         active = mov if active_is_moving else fifo
 
         revenue = _ex_tax(qty * up, trate).quantize(_CENT)
-        is_excluded_part = m["pn"] in excluded_pns
+        is_excluded_part = m["part"] in excluded_parts
         counts = (m["business_type"] in config.REVENUE_BUSINESS_TYPES) and not is_excluded_part
         if counts:
             stats["counts_revenue"] += 1
@@ -159,9 +163,13 @@ def _f(x):
 def aggregate(db: Session, dimension: str, date_from: _date | None,
               date_to: _date | None, only_anomaly: bool,
               user_ctx: security.UserContext | None = None) -> dict:
-    """利润三维度聚合（§7.3）。仅累计 counts_revenue=true 行；同时返回被排除营收。"""
+    """利润三维度聚合（§7.3）。仅累计 counts_revenue=true 行；同时返回被排除营收。
+
+    part 维度按 part_id 分组、展示 dim_part.pn_std（合并后历史自动归并到目标型号，
+    且 PN 文本变化不破坏历史报表口径）。
+    """
     dim_col = {
-        "part": FSalesLine.pn_std,
+        "part": DimPart.pn_std,
         "salesperson": FSalesOrder.salesperson,
         "customer": DimCustomer.name_normalized,
     }[dimension]
@@ -190,6 +198,8 @@ def aggregate(db: Session, dimension: str, date_from: _date | None,
     )
     if dimension == "customer":
         stmt = stmt.join(DimCustomer, FSalesOrder.customer_id == DimCustomer.id, isouter=True)
+    elif dimension == "part":
+        stmt = stmt.join(DimPart, sl.part_id == DimPart.id)
     if config.ACTIVE_STATUS_ONLY:
         stmt = stmt.where(FSalesOrder.data_status == _ACTIVE)
     if date_from:

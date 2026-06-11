@@ -41,7 +41,10 @@ def exclude(
     db: Session = Depends(get_db),
     role: str = Depends(require_admin),
 ) -> dict:
-    res = governance.set_excluded(db, body.pn_std, body.excluded, body.reason, operated_by=role)
+    try:
+        res = governance.set_excluded(db, body.pn_std, body.excluded, body.reason, operated_by=role)
+    except governance.GovernanceError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     if res is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"型号不存在: {body.pn_std}")
     return res
