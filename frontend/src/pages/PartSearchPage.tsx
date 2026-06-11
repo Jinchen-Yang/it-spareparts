@@ -1,6 +1,7 @@
 import { useState } from "react";
 import {
   Input, Table, Card, Descriptions, Tag, Row, Col, Statistic, Empty, message, Space, Button,
+  Select, InputNumber,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import api from "../api";
@@ -15,12 +16,27 @@ export default function PartSearchPage() {
   const [ov, setOv] = useState<Overview | null>(null);
   const [loadingOv, setLoadingOv] = useState(false);
   const [subPn, setSubPn] = useState("");
+  const [lastQ, setLastQ] = useState("");
+  // 结构化规格过滤（整改 P2：硬盘容量/接口等条件查询）
+  const [partType, setPartType] = useState<string | undefined>(undefined);
+  const [iface, setIface] = useState<string | undefined>(undefined);
+  const [capMin, setCapMin] = useState<number | null>(null);
+  const [capMax, setCapMax] = useState<number | null>(null);
 
-  const doSearch = async (q: string) => {
-    if (!q.trim()) return;
+  const doSearch = async (q: string, override?: Record<string, unknown>) => {
+    const hasSpec = partType || iface || capMin != null || capMax != null || override;
+    if (!q.trim() && !hasSpec) return;
     setSearching(true);
+    setLastQ(q);
     try {
-      const { data } = await api.get("/parts/search", { params: { q, page_size: 20 } });
+      const { data } = await api.get("/parts/search", {
+        params: {
+          q: q.trim() || undefined, page_size: 20,
+          part_type: partType, interface: iface,
+          capacity_min: capMin ?? undefined, capacity_max: capMax ?? undefined,
+          ...(override || {}),
+        },
+      });
       setHits(data.items);
       if (data.items.length === 0) message.info("没有匹配的型号");
     } finally {
@@ -62,6 +78,13 @@ export default function PartSearchPage() {
     { title: "描述", dataIndex: "description", ellipsis: true },
     { title: "品牌", dataIndex: "brand", width: 140 },
     { title: "品类", dataIndex: "category_major", width: 140 },
+    { title: "规格", key: "specs", width: 240,
+      render: (_, r: any) => {
+        const s = r.specs || {};
+        const order = ["part_type", "capacity", "interface", "rpm", "generation", "frequency", "form_factor"];
+        const tags = order.filter((k) => s[k]).map((k) => <Tag key={k}>{s[k]}</Tag>);
+        return tags.length ? tags : <span style={{ color: "#bbb" }}>-</span>;
+      } },
   ];
 
   const purCols: ColumnsType<PurchaseRow> = [
@@ -95,13 +118,22 @@ export default function PartSearchPage() {
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <Card>
         <Input.Search
-          placeholder="输入型号 (PN) 或描述关键词，如 ST8000NM000A"
+          placeholder="输入型号 (PN) 或描述关键词，如 ST8000NM000A；规格条件可单独使用"
           enterButton="搜索"
           size="large"
           loading={searching}
-          onSearch={doSearch}
+          onSearch={(q) => doSearch(q)}
           allowClear
         />
+        <Space style={{ marginTop: 12 }} wrap>
+          <Select allowClear placeholder="部件类型" value={partType} onChange={setPartType} style={{ width: 120 }}
+            options={[{ value: "HDD" }, { value: "SSD" }, { value: "RAM", label: "内存" }]} />
+          <Select allowClear placeholder="接口" value={iface} onChange={setIface} style={{ width: 120 }}
+            options={["SAS", "SATA", "NVME", "FC", "SCSI"].map((v) => ({ value: v }))} />
+          <InputNumber placeholder="容量≥(GB)" value={capMin} onChange={setCapMin} style={{ width: 130 }} min={0} />
+          <InputNumber placeholder="容量≤(GB)" value={capMax} onChange={setCapMax} style={{ width: 130 }} min={0} />
+          <Button onClick={() => doSearch(lastQ, {})} loading={searching}>按规格筛选</Button>
+        </Space>
       </Card>
 
       {hits.length > 0 && (
@@ -111,7 +143,9 @@ export default function PartSearchPage() {
       )}
 
       {ov ? (
-        <Card loading={loadingOv} title={<>型号全景：<b>{ov.part.pn_std}</b>{ov.part.needs_review && <Tag color="orange" style={{ marginLeft: 8 }}>PN 待复核</Tag>}</>}>
+        <Card loading={loadingOv} title={<>型号全景：<b>{ov.part.pn_std}</b>
+          {ov.part.needs_review && <Tag color="orange" style={{ marginLeft: 8 }}>PN 待复核</Tag>}
+          {ov.part.redirected_from && <Tag color="blue" style={{ marginLeft: 8 }}>由 {ov.part.redirected_from} 合并而来</Tag>}</>}>
           <Descriptions bordered size="small" column={3} style={{ marginBottom: 16 }}>
             <Descriptions.Item label="描述" span={3}>{ov.part.description || "-"}</Descriptions.Item>
             <Descriptions.Item label="品牌">{ov.part.brand || "-"}</Descriptions.Item>
@@ -136,7 +170,8 @@ export default function PartSearchPage() {
           </Row>
 
           <Card title="库存" size="small" style={{ marginBottom: 16 }}>
-            <Table rowKey="warehouse" size="small" columns={invCols} dataSource={ov.inventory} pagination={false}
+            {/* 合并后同仓可有多行（不同源 pn），rowKey 不能用 warehouse */}
+            <Table rowKey={(_, i) => String(i)} size="small" columns={invCols} dataSource={ov.inventory} pagination={false}
               locale={{ emptyText: "无库存" }} />
           </Card>
 
@@ -155,6 +190,7 @@ export default function PartSearchPage() {
                 ov.substitutes.map((s) => (
                   <Tag key={s.pn_std} color="geekblue" style={{ marginBottom: 4 }}>
                     {s.pn_std}
+                    {s.relation && s.relation !== "互替" ? `（${s.relation}）` : ""}
                     {s.description ? ` · ${s.description}` : ""}
                   </Tag>
                 ))
