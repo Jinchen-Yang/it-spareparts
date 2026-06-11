@@ -1,8 +1,9 @@
-"""系统表：导入批次 / 导入错误 / 原始文件归档 / 审计日志（§5）。"""
+"""系统表：导入批次 / 导入错误 / 原始文件归档 / 审计日志 / 用户（§5）。"""
 from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     ForeignKey,
     Index,
     Integer,
@@ -16,6 +17,23 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 from app.models._types import TZDateTime
+
+
+class SysUser(Base):
+    """系统用户（三期 RBAC 身份层）。role 决定可见范围；salesperson_name 对齐
+    f_sales_order.salesperson 用于"只看自己客户"的行级过滤；ding_user_id 预留钉钉 SSO。"""
+
+    __tablename__ = "sys_user"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(256))   # pbkdf2$iter$salt$hash
+    role: Mapped[str] = mapped_column(String(16))             # admin/boss/sales/purchaser/readonly
+    display_name: Mapped[str | None] = mapped_column(String(64))
+    salesperson_name: Mapped[str | None] = mapped_column(String(64))  # 对齐销售数据，行级过滤用
+    ding_user_id: Mapped[str | None] = mapped_column(String(64), unique=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
 
 class SysImportBatch(Base):
