@@ -144,6 +144,17 @@ def test_candidates_dup_group_and_review(db, seeded):
     assert again == 0
 
 
+def test_dup_group_cjk_mismatch_warned(db, seeded):
+    """compact 相同但中文不同（单模/多模光纤类）：降分 + 警示，防审核员被 1.0 误导。"""
+    _add_dup_pair(db, seeded, "10米LC-LC单模光纤", "10米LC-LC多模光纤", vol_pn="10米LC-LC多模光纤")
+    match_candidates.generate(db)
+    cand = db.scalar(select(ProductMatchCandidate).where(
+        ProductMatchCandidate.raw_text == "10米LC-LC单模光纤"))
+    assert cand is not None
+    assert float(cand.match_score) == 0.75
+    assert "中文部分不同" in cand.match_reason
+
+
 def test_junk_compact_not_candidate(db, seeded):
     _add_dup_pair(db, seeded, "3-米", "3米")    # compact='3'，垃圾碰撞
     match_candidates.generate(db)

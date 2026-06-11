@@ -15,6 +15,7 @@
 - independent：确认源是独立型号（清 needs_review、记 reviewed_at，并作废其全部待审候选）
 注意：part_resolver.py 与二期分支字节一致，本模块只 import 不修改。
 """
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import func, select, text, update
@@ -30,6 +31,7 @@ from app.models.system import SysAuditLog
 from app.services import master_data, merge, part_resolver
 
 _NOW = lambda: datetime.now(timezone.utc)  # noqa: E731
+_CJK = re.compile(r"[一-鿿]+")
 
 
 class CandidateError(Exception):
@@ -78,14 +80,21 @@ def generate(db: Session) -> dict:
     volume = _volume_map(db, member_ids) if member_ids else {}
     for compact, members in groups.items():
         target_id, target_pn = max(members, key=lambda m: (volume.get(m[0], 0), -m[0]))
+        target_cjk = "".join(_CJK.findall(target_pn))
         for pid, pn in members:
             if pid == target_id or (pid, target_id) in reviewed:
                 continue
+            # compact 会剥掉中文：若中文残差不同（如"万兆单模"vs"万兆多模"），
+            # 很可能是不同商品 —— 降分并明确警示，防止审核员被 1.0 误导
+            src_cjk = "".join(_CJK.findall(pn))
+            score, reason = 1.0, f"pn_compact 完全一致（{compact}），建议并入业务量最大的 {target_pn}"
+            if src_cjk != target_cjk:
+                score = 0.75
+                reason += f"；⚠ 中文部分不同（{src_cjk or '无'} ≠ {target_cjk or '无'}），请人工核对是否同款"
             rows.append({
                 "raw_text": pn, "normalized_text": compact,
                 "source_part_id": pid, "candidate_part_id": target_id,
-                "match_score": 1.0,
-                "match_reason": f"pn_compact 完全一致（{compact}），建议并入业务量最大的 {target_pn}",
+                "match_score": score, "match_reason": reason,
             })
 
     # ---- 2) 待审型号近似解析 ----
