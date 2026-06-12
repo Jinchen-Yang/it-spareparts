@@ -95,3 +95,30 @@ def test_resolver_excludes_tombstone_from_direct_pn_match(db):
     assert old.status == "merged"
     r = part_resolver.resolve(db, "PN-OLD", limit=10)
     assert all(it["pn_std"] != "PN-OLD" for it in r["items"])
+
+
+def test_resolver_excludes_tombstone_via_doc_terms_branch(db):
+    """硬化：墓碑过滤必须跨全部召回路。前几个测试只命中 _PART_SQL 的 clause A
+    （pn_compact 主 token 相似），即便 status 过滤的括号错位只包住 clause A 也会通过。
+    本测试用纯中文词只命中 clause C（search_doc ILIKE / doc_terms）：
+    若括号错位、AND 没有跨到 clause C，墓碑会从这条路泄漏。
+    同时断言一个 active 同词型号*能*被召回，确保 clause C 真的在跑（非空召回的假通过）。"""
+    b = SysImportBatch(filename="t.xlsx", file_type="sales", file_hash="hdocterm")
+    db.add(b)
+    db.flush()
+    loader.load(db, f.sales_result(
+        {"SD": f.sales_head("SD", on=date(2026, 6, 1))},
+        [f.sales_line("SD", "D1", "LIVE-DOC", description="Intel 至强金牌 处理器"),
+         f.sales_line("SD", "D2", "TOMB-DOC", description="AMD 至强金牌 测试件"),
+         f.sales_line("SD", "D3", "MERGE-TGT", description="普通服务器整机")]),
+        b.id, date(2026, 6, 1))
+    db.commit()
+    # TOMB-DOC 并入无关目标 → 成墓碑；LIVE-DOC 仍 active，两者描述都含「至强金牌」
+    merge.merge_parts(db, "TOMB-DOC", "MERGE-TGT", "doc-term 硬化", "tester")
+    db.commit()
+    db.expire_all()
+
+    r = part_resolver.resolve(db, "至强金牌", limit=20)
+    pns = {it["pn_std"] for it in r["items"]}
+    assert "LIVE-DOC" in pns, "doc_terms(clause C)召回路必须在跑（否则本测试是假通过）"
+    assert "TOMB-DOC" not in pns, "墓碑必须从 doc_terms 召回路也被排除——括号须跨全部 OR 分支"
