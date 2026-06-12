@@ -118,11 +118,10 @@ TARGET_MARGIN = Decimal("0.20")
 RECENT_PURCHASE_DAYS = 15
 
 # 成交价参考（销售出价用）：不给"建议售价"（销售自行把握加价），只给一个稳的成交价参考。
-# 取近 REF_PRICE_MAX_N 条且 REF_PRICE_DAYS 天内的成交价，按时间半衰期加权平均：
-# 越近权重越高、越久越低（每过 HALFLIFE 天权重减半），削掉单笔异常价对参考的扰动。
-REF_PRICE_DAYS = 30            # 取样时间窗（天）
-REF_PRICE_MAX_N = 5           # 最多取最近几条
-REF_PRICE_HALFLIFE_DAYS = 15  # 权重半衰期：每过这么多天，该笔成交的权重减半
+# 取近 REF_PRICE_MAX_N 条且 REF_PRICE_DAYS 天内的成交价，按名次线性加权平均：
+# 最近一条权重最高、依次递减到 1（越近权重越高），削掉单笔异常价对参考的扰动。
+REF_PRICE_DAYS = 30   # 取样时间窗（天）
+REF_PRICE_MAX_N = 5   # 最多取最近几条
 
 # 只统计已生效（入库不过滤，业务查询过滤）
 ACTIVE_STATUS_ONLY = True

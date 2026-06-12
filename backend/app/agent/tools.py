@@ -94,7 +94,7 @@ TOOLS: list[dict] = [
             "name": "lookup_prices_bulk",
             "description": (
                 "批量查价（询价单场景核心工具）：对每个型号文本做近似解析并返回 最近采购价/日期、"
-                "近90天均售价、库存合计。每项带 status：ok=唯一命中已附价格；ambiguous=多规格变体"
+                "近期加权成交参考价(ref_sale_price)、近90天均售价、库存合计。每项带 status：ok=唯一命中已附价格；ambiguous=多规格变体"
                 "（带候选列表，需逐项给用户确认或在结果中标注）；not_found=没找到。"
                 "一次最多 60 个，超过请分批。"
             ),
@@ -176,7 +176,7 @@ TOOLS: list[dict] = [
                 "properties": {
                     "title": {"type": "string", "description": "报表标题，可省略，如 'XX公司整机配置报价单'"},
                     "headers": {"type": "array", "items": {"type": "string"},
-                                "description": "列名，如 ['序号','部件','品牌','型号','数量','匹配PN','近15天采购均价','库存','建议售价','备注']"},
+                                "description": "列名，如 ['序号','部件','品牌','型号','数量','匹配PN','近15天采购均价','库存','近期成交参考价','备注']"},
                     "rows": {"type": "array", "items": {"type": "array"},
                              "description": "数据行，每行一个数组，顺序与 headers 对齐"},
                     "money_cols": {"type": "array", "items": {"type": "integer"},

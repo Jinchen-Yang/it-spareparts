@@ -320,7 +320,7 @@ def _sales_velocity(db: Session, part_id: int) -> dict:
 
 def _weighted_recent_sale_price(db: Session, part_id: int) -> dict:
     """成交价参考（销售出价用）：近 REF_PRICE_MAX_N 条且 REF_PRICE_DAYS 天内的成交价，
-    按时间半衰期加权平均——越近权重越高、越久越低（每过 HALFLIFE 天权重减半），
+    按名次线性加权平均——rows 按时间倒序，最近一条权重最高、依次递减到 1（越近越高），
     削掉单笔异常价的方差。只取计入营收的真实成交（counts_revenue，排除换货等）。
     不给"建议售价"——加价由销售自行把握，这里只给一个稳的参考价。"""
     since = date.today() - timedelta(days=config.REF_PRICE_DAYS)
@@ -342,18 +342,17 @@ def _weighted_recent_sale_price(db: Session, part_id: int) -> dict:
     if not rows:
         return {"ref_sale_price": None, "ref_sale_samples": 0,
                 "ref_window_days": config.REF_PRICE_DAYS}
-    today = date.today()
-    num, den = Decimal(0), Decimal(0)
-    for order_date, price in rows:
-        age = (today - order_date).days if order_date else config.REF_PRICE_DAYS
-        age = max(0, min(age, config.REF_PRICE_DAYS))
-        w = Decimal(str(0.5 ** (age / config.REF_PRICE_HALFLIFE_DAYS)))
-        num += w * price
+    # 线性按名次加权：rows 已按时间倒序（最近在前），最近一条权重 = 条数 k，依次递减到 1
+    k = len(rows)
+    num, den = Decimal(0), 0
+    for i, (_order_date, price) in enumerate(rows):
+        w = k - i
+        num += Decimal(w) * price
         den += w
-    ref = (num / den) if den > 0 else None
+    ref = num / Decimal(den)
     return {
-        "ref_sale_price": _d(ref.quantize(Decimal("0.01"))) if ref is not None else None,
-        "ref_sale_samples": len(rows),
+        "ref_sale_price": _d(ref.quantize(Decimal("0.01"))),
+        "ref_sale_samples": k,
         "ref_window_days": config.REF_PRICE_DAYS,
     }
 
