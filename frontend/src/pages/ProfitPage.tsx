@@ -80,10 +80,10 @@ export default function ProfitPage() {
   };
 
   const numCol = (v: number | null) => (
-    <span style={{ color: v != null && v < 0 ? "#cf1322" : undefined }}>{money(v)}</span>
+    <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{money(v)}</span>
   );
   const pctCol = (v: number | null) => (
-    <span style={{ color: v != null && v < 0 ? "#cf1322" : undefined }}>{pct(v)}</span>
+    <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{pct(v)}</span>
   );
 
   const cols: ColumnsType<ProfitRow> = [
@@ -147,12 +147,12 @@ export default function ProfitPage() {
       <Row gutter={16}>
         <Col span={8}><Card size="small"><Statistic title="合计营收(不含税)" value={totalRev} precision={2} prefix="¥" /></Card></Col>
         <Col span={8}><Card size="small">
-          <Statistic title="移动加权 · 毛利" value={totalGpMa} precision={2} prefix="¥" valueStyle={{ color: totalGpMa < 0 ? "#cf1322" : undefined }} />
-          <span style={{ color: "#888" }}>毛利率 {totalRevCosted ? ((totalGpMa / totalRevCosted) * 100).toFixed(2) : "-"}%</span>
+          <Statistic title="移动加权 · 毛利" value={totalGpMa} precision={2} prefix="¥" valueStyle={{ color: totalGpMa < 0 ? "var(--mb-danger)" : undefined }} />
+          <span style={{ color: "var(--mb-text-3)" }}>毛利率 {totalRevCosted ? ((totalGpMa / totalRevCosted) * 100).toFixed(2) : "-"}%</span>
         </Card></Col>
         <Col span={8}><Card size="small">
-          <Statistic title="先进先出 FIFO · 毛利" value={totalGpFifo} precision={2} prefix="¥" valueStyle={{ color: totalGpFifo < 0 ? "#cf1322" : undefined }} />
-          <span style={{ color: "#888" }}>毛利率 {totalRevCosted ? ((totalGpFifo / totalRevCosted) * 100).toFixed(2) : "-"}%</span>
+          <Statistic title="先进先出 FIFO · 毛利" value={totalGpFifo} precision={2} prefix="¥" valueStyle={{ color: totalGpFifo < 0 ? "var(--mb-danger)" : undefined }} />
+          <span style={{ color: "var(--mb-text-3)" }}>毛利率 {totalRevCosted ? ((totalGpFifo / totalRevCosted) * 100).toFixed(2) : "-"}%</span>
         </Card></Col>
       </Row>
 

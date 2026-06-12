@@ -178,11 +178,11 @@ export interface Overview {
     monthly_avg_90d: number;
     last_sale_date: string | null;
   };
-  // 近期加权成交价参考（销售出价用，越近权重越高；建议售价由销售自行把握）
-  sale_price_ref: {
-    ref_sale_price: number | null;
-    ref_sale_samples: number;
-    ref_window_days: number;
+  // 近期加权成交参考价（销售出价用）。PR #1 后端 get_overview 已返回；仍按可空处理（防御旧响应）。
+  sale_price_ref?: {
+    ref_sale_price: number | null;   // 近期加权成交参考价
+    ref_sale_samples: number;        // 取样成交笔数（0 = 窗口内无成交）
+    ref_window_days: number;         // 取样窗口天数（30）
   };
 }
 
