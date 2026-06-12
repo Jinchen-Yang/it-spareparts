@@ -104,6 +104,103 @@ export async function agentChatStream(
   }
 }
 
+// ===== 服务端会话（平台化 P1）=====
+export interface ChatSessionMeta {
+  id: number;
+  title: string;
+  updated_at: string;
+}
+export interface ChatMessageRow {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  tools: AgentToolCall[];
+  stopped: boolean;
+  created_at: string;
+}
+
+export const listChatSessions = () =>
+  api.get<{ items: ChatSessionMeta[] }>("/agent/sessions");
+export const createChatSession = (title?: string) =>
+  api.post<ChatSessionMeta>("/agent/sessions", { title: title ?? null });
+export const renameChatSession = (id: number, title: string) =>
+  api.patch(`/agent/sessions/${id}`, { title });
+export const deleteChatSession = (id: number) =>
+  api.delete(`/agent/sessions/${id}`);
+export const getChatMessages = (id: number) =>
+  api.get<{ id: number; title: string; items: ChatMessageRow[] }>(
+    `/agent/sessions/${id}/messages`,
+  );
+
+export type SessionStreamEvent = AgentStreamEvent | { type: "title"; title: string };
+
+/** 会话内流式问答：只发新消息，历史由服务端持有。 */
+export async function sessionChatStream(
+  sessionId: number,
+  message: string,
+  onEvent: (ev: SessionStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const resp = await fetch(`/api/agent/sessions/${sessionId}/chat/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
+    },
+    body: JSON.stringify({ message }),
+    signal,
+  });
+  if (!resp.ok || !resp.body) {
+    if (resp.status === 401) {
+      localStorage.removeItem("token");
+      location.reload();
+    }
+    throw new Error(`stream http ${resp.status}`);
+  }
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const blocks = buf.split("\n\n");
+    buf = blocks.pop()!;
+    for (const block of blocks) {
+      const line = block.split("\n").find((l) => l.startsWith("data: "));
+      if (!line) continue;
+      try {
+        onEvent(JSON.parse(line.slice(6)) as SessionStreamEvent);
+      } catch {
+        /* 跳过坏帧 */
+      }
+    }
+  }
+}
+
+// ===== 采购记录（合同重点）=====
+export interface RecentPurchaseRow {
+  line_id: number;
+  order_no: string;
+  order_date: string | null;
+  purchaser: string | null;
+  source_type: string | null;
+  supplier: string | null;
+  pn_std: string;
+  needs_review: boolean;
+  description: string | null;
+  brand: string | null;
+  qty: number | null;
+  unit_price: number | null;
+  line_amount: number | null;
+}
+export const listRecentPurchases = (params: {
+  q?: string; days?: number; supplier?: string; page?: number; page_size?: number;
+}) =>
+  api.get<{ total: number; page: number; page_size: number; days: number; items: RecentPurchaseRow[] }>(
+    "/purchases/recent", { params },
+  );
+
 export interface AgentUploadResult {
   file_id: string;
   filename: string;

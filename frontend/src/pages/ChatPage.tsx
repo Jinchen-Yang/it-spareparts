@@ -7,55 +7,42 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Upload } from "antd";
-import { agentChatStream, agentDownload, agentUpload } from "../api";
-import type { AgentToolCall, AgentUploadResult, ChatMessage } from "../api";
+import {
+  agentDownload, agentUpload, createChatSession, deleteChatSession,
+  getChatMessages, listChatSessions, sessionChatStream,
+} from "../api";
+import type { AgentToolCall, AgentUploadResult, ChatSessionMeta } from "../api";
 
 const TOOL_LABEL: Record<string, string> = {
   search_parts: "型号搜索",
   get_part_overview: "型号全景",
   get_profit_ranking: "利润排名",
+  list_recent_purchases: "查采购记录",
   inspect_file: "查看文件结构",
   read_file_rows: "读取文件数据",
+  read_document: "读取文档",
   lookup_prices_bulk: "批量查价",
   write_excel: "生成 Excel",
+  write_report: "生成报表",
 };
 
 const EXAMPLES = [
   { icon: "💰", title: "销售报价", q: "ST8000NM000A 客户问报 2200 行不行？" },
   { icon: "📦", title: "采购压价", q: "我要进 50 个 ST8000NM000A，目标价多少合理？" },
   { icon: "🧩", title: "整机拆解", q: "点左下角 📎 传整机配置(Word/PDF/图片)，我拆成单件查PN和近15天采购价、生成报价单" },
-  { icon: "📄", title: "询价单处理", q: "点左下角 📎 上传客户询价单，我来批量查价回填" },
+  { icon: "🖥️", title: "配整机", q: "帮我配一台 2U 双路服务器：金牌 CPU×2、256G 内存、4×8T 企业盘、双电源，出个配置报价单" },
 ];
 
-interface Turn extends ChatMessage {
+interface Turn {
+  role: "user" | "assistant";
+  content: string;
   tools?: AgentToolCall[];
   stopped?: boolean;
-}
-interface Session {
-  id: string;
-  title: string;
-  turns: Turn[];
-  updatedAt: number;
 }
 interface ToolRun {
   name: string;
   done: boolean;
 }
-
-const LS_KEY = "agent_sessions_v1";
-const loadSessions = (): Session[] => {
-  try {
-    return JSON.parse(localStorage.getItem(LS_KEY) || "[]");
-  } catch {
-    return [];
-  }
-};
-const newSession = (): Session => ({
-  id: Math.random().toString(36).slice(2, 10),
-  title: "新对话",
-  turns: [],
-  updatedAt: Date.now(),
-});
 
 /** 答复里的下载链接渲染成带鉴权下载按钮。
  * 匹配任意形态（相对路径或完整 URL）；裸 <a> 跳转会 401 且可能整页刷新打断对话。 */
@@ -118,11 +105,12 @@ function UserContent({ text }: { text: string }) {
 }
 
 export default function ChatPage() {
-  const [sessions, setSessions] = useState<Session[]>(() => {
-    const s = loadSessions();
-    return s.length ? s : [newSession()];
-  });
-  const [activeId, setActiveId] = useState<string>(() => sessions[0]?.id);
+  // 会话与消息都在服务端（平台化 P1）：刷新/换设备记录不丢。
+  // activeId=null 表示"未落库的新对话"，首次发送时才真正建会话。
+  const [sessions, setSessions] = useState<ChatSessionMeta[]>([]);
+  const [activeId, setActiveId] = useState<number | null>(null);
+  const [turns, setTurns] = useState<Turn[]>([]);
+  const [loadingTurns, setLoadingTurns] = useState(false);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [streamText, setStreamText] = useState("");
@@ -136,28 +124,55 @@ export default function ChatPage() {
   const stickToBottomRef = useRef(true);
   const scrollBoxRef = useRef<HTMLDivElement>(null);
 
-  const active = sessions.find((s) => s.id === activeId) || sessions[0];
+  useEffect(() => {
+    listChatSessions()
+      .then(({ data }) => setSessions(data.items))
+      .catch(() => message.error("加载会话列表失败"));
+  }, []);
 
-  // 函数式更新：流式回调在 await 之后触发，闭包里的 sessions 已过期，必须基于 prev 写
-  const persist = (updater: (prev: Session[]) => Session[]) => {
-    setSessions((prev) => {
-      // 控制体积：每会话最多保留 60 条消息，最多 30 个会话
-      const next = updater(prev)
-        .sort((a, b) => b.updatedAt - a.updatedAt)
-        .slice(0, 30)
-        .map((s) => ({ ...s, turns: s.turns.slice(-60) }));
-      localStorage.setItem(LS_KEY, JSON.stringify(next));
-      return next;
-    });
+  const openSession = async (id: number) => {
+    if (busy) return;
+    setActiveId(id);
+    setLoadingTurns(true);
+    try {
+      const { data } = await getChatMessages(id);
+      setTurns(data.items.map((m) => ({
+        role: m.role, content: m.content,
+        tools: m.tools?.length ? m.tools : undefined, stopped: m.stopped,
+      })));
+    } catch {
+      message.error("会话已不存在");
+      setSessions((prev) => prev.filter((s) => s.id !== id));
+      setActiveId(null);
+      setTurns([]);
+    } finally {
+      setLoadingTurns(false);
+    }
   };
 
-  const patchSession = (sid: string, fn: (s: Session) => Session) =>
-    persist((prev) => prev.map((s) => (s.id === sid ? fn(s) : s)));
+  const newChat = () => {
+    if (busy) return;
+    setActiveId(null);
+    setTurns([]);
+  };
+
+  const removeSession = async (id: number) => {
+    try {
+      await deleteChatSession(id);
+    } catch {
+      /* 已删/网络错都按本地移除处理 */
+    }
+    setSessions((prev) => prev.filter((s) => s.id !== id));
+    if (id === activeId) {
+      setActiveId(null);
+      setTurns([]);
+    }
+  };
 
   const scrollToBottom = () => {
     if (stickToBottomRef.current) bottomRef.current?.scrollIntoView({ block: "end" });
   };
-  useEffect(scrollToBottom, [streamText, toolRuns, sessions]);
+  useEffect(scrollToBottom, [streamText, toolRuns, turns]);
 
   const onScroll = () => {
     const el = scrollBoxRef.current;
@@ -176,7 +191,7 @@ export default function ChatPage() {
       setPendingFile(data);
       message.success(`已附加 ${data.filename}，输入要求后发送`);
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || "上传失败（仅支持 .xlsx）");
+      message.error(e?.response?.data?.detail || "上传失败");
     } finally {
       setUploading(false);
     }
@@ -193,23 +208,29 @@ export default function ChatPage() {
       q = `[已上传文件「${pendingFile.filename}」 file_id=${pendingFile.file_id}，${meta}]\n\n${q || "请处理这个文件"}`;
       setPendingFile(null);
     }
-    const sid = active.id;
-    const userTurn: Turn = { role: "user", content: q };
-    const history: ChatMessage[] = [...active.turns, userTurn]
-      .map(({ role, content }) => ({ role, content }))
-      .slice(-20);
-    patchSession(sid, (s) => ({
-      ...s,
-      title: s.turns.length ? s.title : q.replace(/^\[已上传文件[^\]]*\]\n*/, "").slice(0, 20) || "文件处理",
-      turns: [...s.turns, userTurn],
-      updatedAt: Date.now(),
-    }));
-    setInput("");
+
     setBusy(true);
+    setInput("");
+    // 懒建会话：第一条消息才落库
+    let sid = activeId;
+    if (sid == null) {
+      try {
+        const { data } = await createChatSession();
+        sid = data.id;
+        setActiveId(sid);
+        setSessions((prev) => [data, ...prev]);
+      } catch {
+        message.error("创建会话失败，请稍后重试");
+        setBusy(false);
+        return;
+      }
+    }
+    const sessionId = sid;
+    setTurns((prev) => [...prev, { role: "user", content: q }]);
     stickToBottomRef.current = true;
     streamBufRef.current = "";
     const trace: AgentToolCall[] = [];
-    let settled = false;  // done/error/abort 只落盘一次（busy 闭包过期，不能用它判断）
+    let settled = false;  // done/error/abort 只收尾一次（busy 闭包过期，不能用它判断）
     abortRef.current = new AbortController();
     flushTimerRef.current = window.setInterval(flushStream, 80);
 
@@ -223,18 +244,27 @@ export default function ChatPage() {
       setToolRuns([]);
       setBusy(false);
       if (content || trace.length) {
-        patchSession(sid, (s) => ({
-          ...s,
-          turns: [...s.turns, { role: "assistant", content: content || "(无内容)", tools: [...trace], stopped }],
-          updatedAt: Date.now(),
-        }));
+        setTurns((prev) => [...prev, {
+          role: "assistant", content: content || "(无内容)", tools: [...trace], stopped,
+        }]);
       }
+      // 会话置顶（服务端 updated_at 已更新，这里同步本地排序）
+      setSessions((prev) => {
+        const i = prev.findIndex((s) => s.id === sessionId);
+        if (i < 0) return prev;
+        const next = [...prev];
+        const [s] = next.splice(i, 1);
+        return [{ ...s, updated_at: new Date().toISOString() }, ...next];
+      });
     };
 
     try {
-      await agentChatStream(history, (ev) => {
+      await sessionChatStream(sessionId, q, (ev) => {
         if (ev.type === "delta") {
           streamBufRef.current += ev.text;
+        } else if (ev.type === "title") {
+          setSessions((prev) => prev.map((s) =>
+            s.id === sessionId ? { ...s, title: ev.title } : s));
         } else if (ev.type === "tool") {
           trace.push({ name: ev.name, args: ev.args });
           setToolRuns((t) => [...t, { name: ev.name, done: false }]);
@@ -252,7 +282,7 @@ export default function ChatPage() {
           finishTurn(streamBufRef.current, true);
         }
       }, abortRef.current.signal);
-      // 流结束但没收到 done 事件（服务端异常断流）：兜底落盘
+      // 流结束但没收到 done 事件（服务端异常断流）：兜底收尾
       finishTurn(streamBufRef.current);
     } catch (e: any) {
       if (e?.name === "AbortError") {
@@ -295,34 +325,24 @@ export default function ChatPage() {
       <aside style={{ width: 230, borderRight: "1px solid #f0f0f0", background: "#fafafa",
                       display: "flex", flexDirection: "column", flexShrink: 0 }}>
         <div style={{ padding: 12 }}>
-          <Button block icon={<PlusOutlined />} disabled={busy} onClick={() => {
-            const s = newSession();
-            persist((prev) => [s, ...prev]);
-            setActiveId(s.id);
-          }}>新对话</Button>
+          <Button block icon={<PlusOutlined />} disabled={busy} onClick={newChat}>
+            新对话
+          </Button>
         </div>
         <div style={{ flex: 1, overflowY: "auto", padding: "0 8px 12px" }}>
           {sessions.map((s) => (
-            <div key={s.id} className="sess-item" onClick={() => !busy && setActiveId(s.id)}
+            <div key={s.id} className="sess-item" onClick={() => s.id !== activeId && openSession(s.id)}
               style={{
                 padding: "8px 10px", borderRadius: 8, cursor: "pointer", marginBottom: 2,
                 display: "flex", alignItems: "center", gap: 6,
-                background: s.id === active.id ? "#eef2ff" : "transparent",
-                color: s.id === active.id ? "#4f46e5" : "#374151",
+                background: s.id === activeId ? "#eef2ff" : "transparent",
+                color: s.id === activeId ? "#4f46e5" : "#374151",
               }}>
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis",
                              whiteSpace: "nowrap", fontSize: 13 }}>{s.title}</span>
               <Popconfirm title="删除该对话？" onConfirm={(e) => {
                 e?.stopPropagation();
-                const fallback = newSession();
-                persist((prev) => {
-                  const rest = prev.filter((x) => x.id !== s.id);
-                  return rest.length ? rest : [fallback];
-                });
-                if (s.id === active.id) {
-                  const rest = sessions.filter((x) => x.id !== s.id);
-                  setActiveId(rest.length ? rest[0].id : fallback.id);
-                }
+                removeSession(s.id);
               }}>
                 <DeleteOutlined className="sess-del" onClick={(e) => e.stopPropagation()}
                   style={{ opacity: 0, fontSize: 12, color: "#9ca3af" }} />
@@ -336,7 +356,10 @@ export default function ChatPage() {
       <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
         <div ref={scrollBoxRef} onScroll={onScroll} style={{ flex: 1, overflowY: "auto" }}>
           <div style={{ maxWidth: 860, margin: "0 auto", padding: "24px 24px 8px" }}>
-            {active.turns.length === 0 && !busy && (
+            {loadingTurns && (
+              <div style={{ textAlign: "center", padding: 48 }}><Spin /></div>
+            )}
+            {!loadingTurns && turns.length === 0 && !busy && (
               <div style={{ textAlign: "center", paddingTop: 48 }}>
                 <div style={{
                   width: 56, height: 56, borderRadius: 16, margin: "0 auto 16px",
@@ -347,7 +370,7 @@ export default function ChatPage() {
                 </div>
                 <h2 style={{ marginBottom: 4 }}>AI 定价助手</h2>
                 <div style={{ color: "#9ca3af", marginBottom: 28 }}>
-                  基于公司真实采购 / 销售 / 库存数据回答 · 型号写不准会自动近似匹配并和你确认
+                  基于公司真实采购 / 销售 / 库存数据回答 · 对话记录云端保存，换设备也能接着聊
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12,
                               maxWidth: 640, margin: "0 auto", textAlign: "left" }}>
@@ -367,7 +390,7 @@ export default function ChatPage() {
               </div>
             )}
 
-            {active.turns.map((t, i) =>
+            {turns.map((t, i) =>
               t.role === "user" ? (
                 <div key={i} style={{ display: "flex", justifyContent: "flex-end", margin: "16px 0" }}>
                   <div style={{

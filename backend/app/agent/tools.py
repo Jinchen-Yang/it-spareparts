@@ -11,7 +11,7 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from app import security
-from app.services import agent_files, part_overview, part_resolver, profit
+from app.services import agent_files, part_overview, part_resolver, profit, purchase_query
 
 _RANK_ROWS = 50
 _BULK_MAX = 60
@@ -190,6 +190,27 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "list_recent_purchases",
+            "description": (
+                "查最近的采购记录（跨型号时间线，按采购日期倒序）：日期/供应商/型号/数量/单价。"
+                "回答'最近买了什么''XX 最近进价多少笔'这类问题用它；"
+                "查某一个型号的完整行情仍用 get_part_overview。"
+                "query 可按 型号/描述/品牌 关键词过滤；days 默认 30 天。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "关键词过滤（型号/描述/品牌），可省略"},
+                    "days": {"type": "integer", "description": "最近多少天，默认 30，最大 365"},
+                    "supplier": {"type": "string", "description": "供应商名过滤，可省略"},
+                    "limit": {"type": "integer", "description": "返回条数，默认 20，最大 50"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_profit_ranking",
             "description": (
                 "利润聚合排名（维度三选一：part=按型号 / salesperson=按销售员 / customer=按客户），"
@@ -295,6 +316,17 @@ def _lookup_prices_bulk(db: Session, args: dict, ctx: security.UserContext) -> d
     return {"results": results, "summary": counts}
 
 
+def _list_recent_purchases(db: Session, args: dict, ctx: security.UserContext) -> dict:
+    limit = min(int(args.get("limit") or 20), 50)
+    days = min(int(args.get("days") or 30), 365)
+    data = purchase_query.recent_purchases(
+        db, ctx, q=args.get("query"), days=days,
+        supplier=args.get("supplier"), page=1, page_size=limit)
+    if data["total"] > limit:
+        data["note"] = f"共 {data['total']} 条，仅返回最近 {limit} 条；可加 query/supplier 过滤"
+    return security.apply_field_visibility(data, ctx)
+
+
 def _write_excel(db: Session, args: dict, ctx: security.UserContext) -> dict:
     return agent_files.write_excel(
         args.get("base_file_id"), args.get("sheet"),
@@ -322,6 +354,7 @@ _REGISTRY = {
     "search_parts": _search_parts,
     "get_part_overview": _get_part_overview,
     "get_profit_ranking": _get_profit_ranking,
+    "list_recent_purchases": _list_recent_purchases,
     "inspect_file": _inspect_file,
     "read_file_rows": _read_file_rows,
     "read_document": _read_document,

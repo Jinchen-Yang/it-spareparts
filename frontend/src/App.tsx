@@ -8,6 +8,7 @@ import InventoryPage from "./pages/InventoryPage";
 import ImportPage from "./pages/ImportPage";
 import GovernancePage from "./pages/GovernancePage";
 import ChatPage from "./pages/ChatPage";
+import PurchasesPage from "./pages/PurchasesPage";
 
 const { Header, Content } = Layout;
 
@@ -53,6 +54,7 @@ export default function App() {
           items={[
             { key: "import", label: "数据导入" },
             { key: "parts", label: "型号查询" },
+            { key: "purchases", label: "采购记录" },
             { key: "chat", label: "AI 助手" },
             { key: "profit", label: "利润分析" },
             { key: "inventory", label: "库存查询" },
@@ -68,6 +70,7 @@ export default function App() {
       <Content style={{ padding: 24, background: COLORS.page }}>
         {page === "import" && <ImportPage />}
         {page === "parts" && <PartSearchPage />}
+        {page === "purchases" && <PurchasesPage />}
         {page === "chat" && <ChatPage />}
         {page === "profit" && <ProfitPage />}
         {page === "inventory" && <InventoryPage />}
