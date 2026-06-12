@@ -259,7 +259,8 @@ def _inventory(db: Session, part_id: int) -> list[dict]:
     for inv in rows:
         display = inv.manual_qty if inv.is_qty_overridden and inv.manual_qty is not None else inv.source_qty
         out.append({
-            "warehouse": inv.warehouse, "display_qty": _d(display),
+            # pn_std：合并后同 part 同仓可有多行（不同源 pn），带上源 pn 才能区分这些行
+            "warehouse": inv.warehouse, "pn_std": inv.pn_std, "display_qty": _d(display),
             "source_qty": _d(inv.source_qty), "manual_qty": _d(inv.manual_qty),
             "unit_cost": _d(inv.unit_cost), "inventory_value": _d(inv.inventory_value),
         })

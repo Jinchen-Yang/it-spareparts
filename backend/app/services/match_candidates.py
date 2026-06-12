@@ -13,7 +13,9 @@
 - merge：执行 merge_parts（源并入候选目标）
 - reject：仅否决本条建议
 - independent：确认源是独立型号（清 needs_review、记 reviewed_at，并作废其全部待审候选）
-注意：part_resolver.py 与二期分支字节一致，本模块只 import 不修改。
+注意：本模块只 import part_resolver、不在此修改它。整合后 resolver 已排除
+merged 墓碑（与 search_parts 一致），本模块对其结果另按 status='active' 二次
+过滤（见 generate 内 target_parts），故 resolver 的墓碑排除对候选发现是幂等的。
 """
 import re
 from datetime import datetime, timezone

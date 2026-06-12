@@ -197,6 +197,7 @@ export interface SalesRow {
 }
 export interface InventoryRow {
   warehouse: string;
+  pn_std: string;   // 源 pn：合并后同仓多行用它区分
   display_qty: number | null;
   source_qty: number | null;
   manual_qty: number | null;
