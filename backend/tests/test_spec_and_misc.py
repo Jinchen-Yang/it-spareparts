@@ -86,9 +86,11 @@ def test_substitute_direction(db):
     substitute.add_substitute(db, "PN-OLD", "PN-NEW", "新版兼容旧版", "t",
                               direction="one_way", substitute_type="compatible")
     subs_old = substitute.list_substitutes(db, "PN-OLD")
-    assert subs_old[0]["direction"] == "incoming" and subs_old[0]["pn_std"] == "PN-NEW"
+    assert subs_old["redirected_from"] is None  # 未合并，无重定向
+    assert subs_old["items"][0]["direction"] == "incoming"
+    assert subs_old["items"][0]["pn_std"] == "PN-NEW"
     subs_new = substitute.list_substitutes(db, "PN-NEW")
-    assert subs_new[0]["direction"] == "outgoing"
+    assert subs_new["items"][0]["direction"] == "outgoing"
 
     # 人工创建即生效 → 进入型号全景推荐
     from app.models.dimensions import DimPart

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.models.dimensions import DimPart
 from app.models.inventory import PartSubstitute
 from app.models.system import SysAuditLog
+from app.services.part_overview import resolve_part
 
 _TYPES = {"original", "compatible", "same_spec", "downgrade", "upgrade", "conditional"}
 
@@ -22,16 +23,22 @@ class SubstituteError(Exception):
     """型号不存在 / 自己关联自己等。"""
 
 
-def list_substitutes(db: Session, pn_std: str) -> list[dict]:
-    part = db.scalar(select(DimPart).where(DimPart.pn_std == pn_std))
+def list_substitutes(db: Session, pn_std: str) -> dict:
+    """查替代料：与 part_overview.list_* 同样先走 resolve_part 兜底合并墓碑。
+
+    合并后 OLD 的所有替代关系被 _merge_substitutes 重指向 NEW.id；用 OLD.id 直接
+    查 PartSubstitute 必然为空。返回 {"items", "redirected_from"} 与 list_purchases/
+    list_sales 形状对齐，AI/前端无需特判墓碑。
+    """
+    part, redirected_from = resolve_part(db, pn_std)
     if part is None:
-        return []
+        return {"items": [], "redirected_from": redirected_from}
     rows = db.execute(
         select(PartSubstitute).where(
             or_(PartSubstitute.part_id_a == part.id, PartSubstitute.part_id_b == part.id)
         )
     ).scalars().all()
-    out = []
+    items = []
     for s in rows:
         is_a = s.part_id_a == part.id
         other_id = s.part_id_b if is_a else s.part_id_a
@@ -43,10 +50,10 @@ def list_substitutes(db: Session, pn_std: str) -> list[dict]:
                 direction = "incoming"   # 对方可替代本型号
             else:
                 direction = "outgoing"   # 本型号可替代对方
-            out.append({"pn_std": other.pn_std, "description": other.description,
-                        "source": s.source, "note": s.note, "direction": direction,
-                        "substitute_type": s.substitute_type, "status": s.status})
-    return out
+            items.append({"pn_std": other.pn_std, "description": other.description,
+                          "source": s.source, "note": s.note, "direction": direction,
+                          "substitute_type": s.substitute_type, "status": s.status})
+    return {"items": items, "redirected_from": redirected_from}
 
 
 def add_substitute(db: Session, pn_a: str, pn_b: str, note: str | None,

@@ -122,6 +122,7 @@ export default function PartSearchPage() {
     { title: "单价(含税)", dataIndex: "unit_price", width: 100, render: money },
   ];
   const invCols: ColumnsType<InventoryRow> = [
+    { title: "源PN", dataIndex: "pn_std", width: 140, ellipsis: true },
     { title: "仓库", dataIndex: "warehouse" },
     { title: "可用数量", dataIndex: "display_qty", width: 100 },
     { title: "源系统数量", dataIndex: "source_qty", width: 110 },

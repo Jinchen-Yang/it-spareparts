@@ -23,7 +23,7 @@ def list_(
     pn_std: str = Query(..., min_length=1),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
-) -> list[dict]:
+) -> dict:
     return substitute.list_substitutes(db, pn_std)
 
 

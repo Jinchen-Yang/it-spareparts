@@ -12,7 +12,7 @@ from sqlalchemy import select
 from app.etl import loader
 from app.models.dimensions import DimPart
 from app.models.system import SysImportBatch
-from app.services import merge, part_overview
+from app.services import merge, part_overview, substitute
 from tests import factories as f
 
 
@@ -143,3 +143,48 @@ def test_search_parts_items_have_is_excluded(db, merged):
     r = part_overview.search_parts(db, None, 1, 20)
     assert r["items"], "should have parts"
     assert "is_excluded" in r["items"][0]
+
+
+def test_list_substitutes_surfaces_redirect(db, merged):
+    """list_substitutes 查询墓碑 PN-OLD：旧实现用 OLD.id 直查 PartSubstitute，
+    必为空（_merge_substitutes 已把所有源关系 repoint 到 NEW.id）。修复后先
+    resolve_part 拿到 NEW，再用 NEW.id 命中关系，并暴露 redirected_from='PN-OLD'。
+    """
+    # 在 NEW（合并后存活的目标）上建一个替代关系：等价于"合并前 OLD 有的关系
+    # 被 _merge_substitutes 重指向到 NEW.id"——查询路径是同一条
+    db.add(DimPart(pn_std="PN-OTHER", status="active"))
+    db.commit()
+    substitute.add_substitute(db, "PN-NEW", "PN-OTHER", "regression #2", "tester")
+
+    out = substitute.list_substitutes(db, "PN-OLD")
+    assert out["redirected_from"] == "PN-OLD", "墓碑查询必须暴露 redirected_from"
+    pns = {r["pn_std"] for r in out["items"]}
+    assert pns == {"PN-OTHER"}, f"应命中 NEW.id 上的关系，而非 OLD.id 空查；得到 {pns}"
+
+    # 直接命中目标：同一份数据，无 redirect 标
+    direct = substitute.list_substitutes(db, "PN-NEW")
+    assert direct["redirected_from"] is None
+    assert {r["pn_std"] for r in direct["items"]} == {"PN-OTHER"}
+
+    # 不存在的 PN：形状一致，items 空，redirected_from None
+    miss = substitute.list_substitutes(db, "DOES-NOT-EXIST")
+    assert miss == {"items": [], "redirected_from": None}
+
+
+def test_overview_inventory_rows_carry_pn_std_label(db, merged):
+    """合并后同一 part_id 在同仓有多行（不同源 pn 痕迹），_inventory 必须把 pn_std
+    暴露到每行 dict——否则前端两条相同仓库的行无法区分（review 报的 bug）。"""
+    ov = part_overview.get_overview(db, "PN-NEW")
+    assert ov is not None
+    inv = ov["inventory"]
+    # fixture 在 "总仓" 有 PN-OLD(qty=3) 与 PN-NEW(qty=7) 两行，合并后 part_id 同
+    same_wh = [r for r in inv if r["warehouse"] == "总仓"]
+    assert len(same_wh) == 2, "同仓多源 pn 应保留多行"
+    pns = {r["pn_std"] for r in same_wh}
+    assert pns == {"PN-OLD", "PN-NEW"}, f"每行必须带源 pn_std 标签，得到 {pns}"
+
+    # 入参墓碑同样走 resolve_part，应拿到一致的多行
+    ov2 = part_overview.get_overview(db, "PN-OLD")
+    assert ov2 is not None
+    pns2 = {r["pn_std"] for r in ov2["inventory"] if r["warehouse"] == "总仓"}
+    assert pns2 == {"PN-OLD", "PN-NEW"}

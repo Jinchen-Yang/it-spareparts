@@ -196,6 +196,7 @@ export interface SalesRow {
   unit_price: number | null;
 }
 export interface InventoryRow {
+  pn_std: string;
   warehouse: string;
   display_qty: number | null;
   source_qty: number | null;
