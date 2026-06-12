@@ -1,0 +1,80 @@
+:root {
+  --mb-page: #DCE5EC;
+  --mb-surface: #F7FAFC;
+  --mb-inset: #EAF0F4;
+  --mb-accent: #5E8DA3;
+  --mb-accent-strong: #37708A;
+  --mb-text: #2B3E47;
+  --mb-text-2: #5F727A;
+  --mb-text-3: #92A1A8;
+  --mb-border: #E4ECF1;
+  --mb-danger: #B5635A;
+  --mb-warning: #9A7B43;
+  --mb-success: #5E7A60;
+  --mb-shadow: 0 1px 2px rgba(54, 84, 104, .07), 0 3px 10px rgba(54, 84, 104, .09);
+}
+
+body {
+  margin: 0;
+  background: var(--mb-page);
+  color: var(--mb-text);
+}
+
+/* 卡片：微阴影悬浮 + 发丝边；嵌套卡片改为凹陷内嵌（去阴影、压深底色），形成页底<卡面<内嵌三级 */
+.ant-card {
+  box-shadow: var(--mb-shadow);
+  border-color: var(--mb-border) !important;
+}
+.ant-card .ant-card {
+  box-shadow: none;
+  background: var(--mb-inset);
+}
+.ant-card .ant-card .ant-card-head {
+  border-bottom-color: var(--mb-border);
+}
+
+/* 顶栏：浅色 surface + 发丝底线，去掉默认深色 */
+.ant-layout-header {
+  border-bottom: 1px solid var(--mb-border);
+  padding-inline: 28px;
+}
+
+/* 表格：轻量表头、发丝分隔 */
+.ant-table-wrapper .ant-table {
+  background: transparent;
+}
+.ant-table-thead > tr > th {
+  font-weight: 500;
+}
+
+/* 统计数字：中等字重，关键数字靠 valueStyle 上强调蓝 */
+.ant-statistic-content {
+  font-weight: 500;
+}
+
+/* 上传拖拽区：贴合莫兰迪面色 */
+.ant-upload-wrapper .ant-upload-drag {
+  background: var(--mb-inset);
+  border-color: var(--mb-border);
+  border-radius: 12px;
+}
+
+/* 预设标签去饱和 → 莫兰迪低饱和（全站统一，页面代码无需改） */
+.ant-tag-red, .ant-tag-error {
+  color: #8C4A43; background: #EFE0DD; border-color: #E4CCC7;
+}
+.ant-tag-orange, .ant-tag-gold, .ant-tag-warning {
+  color: #7C6232; background: #EEE6D7; border-color: #E3D7C2;
+}
+.ant-tag-green, .ant-tag-success {
+  color: #4D6650; background: #E0E9E1; border-color: #CFDDD0;
+}
+.ant-tag-blue, .ant-tag-geekblue, .ant-tag-cyan, .ant-tag-processing {
+  color: #3A6175; background: #DCE8ED; border-color: #CADCE4;
+}
+
+/* 滚动条：低存在感 */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #C2CFD6; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: #A9BAC2; background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }

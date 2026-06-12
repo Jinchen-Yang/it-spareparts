@@ -6,6 +6,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import api from "../api";
 import type { Overview, PartHit, PurchaseRow, SalesRow, InventoryRow } from "../api";
+import { COLORS } from "../theme";
 
 const money = (v: number | null) => (v == null ? "-" : `¥${v.toLocaleString()}`);
 const pct = (v: number | null | undefined) => (v == null ? "-" : `${(v * 100).toFixed(1)}%`);
@@ -155,16 +156,17 @@ export default function PartSearchPage() {
 
           <Row gutter={16} style={{ marginBottom: 16 }}>
             <Col span={6}><Card size="small">
-              <Statistic title="移动加权 · 单位成本" value={ov.profit_summary.avg_cost_moving ?? "-"} prefix="¥" />
-              <span style={{ color: "#888" }}>毛利率 {pct(ov.profit_summary.avg_margin_moving)}</span>
+              <Statistic title="移动加权 · 单位成本" value={ov.profit_summary.avg_cost_moving ?? "-"} prefix="¥"
+                valueStyle={{ color: COLORS.accentStrong }} />
+              <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_moving)}</span>
             </Card></Col>
             <Col span={6}><Card size="small">
               <Statistic title="FIFO · 单位成本" value={ov.profit_summary.avg_cost_fifo ?? "-"} prefix="¥" />
-              <span style={{ color: "#888" }}>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>
+              <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>
             </Card></Col>
             <Col span={6}><Card size="small">
               <Statistic title="平均销售价(含税)" value={ov.profit_summary.avg_sale_price ?? "-"} prefix="¥" />
-              <span style={{ color: "#888" }}>累计售 {ov.profit_summary.total_qty_sold}</span>
+              <span style={{ color: COLORS.text3 }}>累计售 {ov.profit_summary.total_qty_sold}</span>
             </Card></Col>
             <Col span={6}><Card size="small"><Statistic title="询价区间" value={ov.inquiry_ref.count ? `${money(ov.inquiry_ref.min_money)}~${money(ov.inquiry_ref.max_money)}` : "无"} /></Card></Col>
           </Row>
@@ -185,7 +187,7 @@ export default function PartSearchPage() {
             </Space>
             <div>
               {ov.substitutes.length === 0 ? (
-                <span style={{ color: "#999" }}>暂无替代料，可在上方添加</span>
+                <span style={{ color: "var(--mb-text-3)" }}>暂无替代料，可在上方添加</span>
               ) : (
                 ov.substitutes.map((s) => (
                   <Tag key={s.pn_std} color="geekblue" style={{ marginBottom: 4 }}>

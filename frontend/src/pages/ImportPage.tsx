@@ -101,7 +101,7 @@ export default function ImportPage() {
         extra={
           <Tooltip title="开启后：源系统改过字段的旧数据,重导会更新(而不是跳过)。日常导入用「跳过」即可。">
             <Space>
-              <span style={{ color: upsertMode ? "#cf1322" : "#888" }}>修复模式(更新已存在)</span>
+              <span style={{ color: upsertMode ? "var(--mb-danger)" : "var(--mb-text-3)" }}>修复模式(更新已存在)</span>
               <Switch checked={upsertMode} onChange={setUpsertMode} disabled={uploading} />
             </Space>
           </Tooltip>
@@ -127,7 +127,7 @@ export default function ImportPage() {
               percent={progress}
               status={phase === "processing" ? "active" : "normal"}
             />
-            <div style={{ textAlign: "center", color: "#888", marginTop: 4 }}>
+            <div style={{ textAlign: "center", color: "var(--mb-text-3)", marginTop: 4 }}>
               {phase === "uploading"
                 ? `上传中 ${progress}%`
                 : "上传完成，正在解析 / 入库 / 重算，请稍候…"}

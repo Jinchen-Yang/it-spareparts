@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Layout, Menu, Button } from "antd";
+import { COLORS } from "./theme";
 import LoginPage from "./pages/LoginPage";
 import PartSearchPage from "./pages/PartSearchPage";
 import ProfitPage from "./pages/ProfitPage";
@@ -22,12 +23,21 @@ export default function App() {
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
-      <Header style={{ display: "flex", alignItems: "center" }}>
-        <div style={{ color: "#fff", fontWeight: 600, marginRight: 32 }}>
-          IT 备件智能管理系统
+      <Header style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span
+          style={{
+            width: 22, height: 22, borderRadius: 7, marginRight: 6,
+            background: COLORS.accent, display: "inline-flex",
+            alignItems: "center", justifyContent: "center",
+            color: "#F3F8FA", fontSize: 13, fontWeight: 500,
+          }}
+        >
+          IT
+        </span>
+        <div style={{ color: COLORS.text, fontWeight: 500, marginRight: 28, fontSize: 15 }}>
+          备件智能管理系统
         </div>
         <Menu
-          theme="dark"
           mode="horizontal"
           selectedKeys={[page]}
           onClick={(e) => setPage(e.key)}
@@ -38,11 +48,11 @@ export default function App() {
             { key: "inventory", label: "库存查询" },
             { key: "governance", label: "数据治理" },
           ]}
-          style={{ flex: 1, minWidth: 0 }}
+          style={{ flex: 1, minWidth: 0, background: "transparent", borderBottom: "none" }}
         />
         <Button onClick={logout}>退出</Button>
       </Header>
-      <Content style={{ padding: 24, background: "#f0f2f5" }}>
+      <Content style={{ padding: 24, background: COLORS.page }}>
         {page === "import" && <ImportPage />}
         {page === "parts" && <PartSearchPage />}
         {page === "profit" && <ProfitPage />}
