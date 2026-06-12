@@ -6,6 +6,10 @@
 
 规模取舍：2~10 万型号在库内近似检索即毫秒级，不引入外部搜索引擎（部署零新增组件）。
 part_alias 在此从"只写不读"变为活数据：人工修订别名即刻影响匹配。
+
+整改 P3：召回排除 status='merged' 墓碑（与 search_parts 一致）。查询已合并型号的
+旧 pn 仍能命中——merge 会留下 pn_raw=旧pn→pn_std=目标 的 active 别名，走别名召回路
+重定向到目标，不靠墓碑本身。
 """
 import re
 
@@ -34,7 +38,8 @@ SELECT p.pn_std, p.pn_compact, p.search_doc, p.description, p.brand,
                           word_similarity(:main, p.pn_compact))
             ELSE 0 END AS sim
 FROM dim_part p
-WHERE (length(:main) >= 2 AND (
+WHERE p.status <> 'merged' AND (
+       (length(:main) >= 2 AND (
           p.pn_compact % :main
           OR :main <% p.pn_compact
           OR (length(:main) >= 3 AND strpos(p.pn_compact, :main) > 0)
@@ -42,7 +47,7 @@ WHERE (length(:main) >= 2 AND (
    OR EXISTS (SELECT 1 FROM unnest(CAST(:others AS text[])) AS t
               WHERE length(t) >= 3 AND strpos(p.pn_compact, t) > 0)
    OR EXISTS (SELECT 1 FROM unnest(CAST(:doc_terms AS text[])) AS t
-              WHERE p.search_doc ILIKE '%' || t || '%')
+              WHERE p.search_doc ILIKE '%' || t || '%'))
 ORDER BY sim DESC, length(p.pn_std) ASC
 LIMIT :cand_limit
 """).bindparams(
@@ -59,6 +64,7 @@ SELECT a.pn_std, a.pn_raw, a.pn_compact,
 FROM part_alias a
 JOIN dim_part p ON p.pn_std = a.pn_std
 WHERE a.pn_compact IS DISTINCT FROM p.pn_compact
+  AND p.status <> 'merged'
   AND length(:main) >= 2 AND (
           a.pn_compact % :main
           OR :main <% a.pn_compact
@@ -157,7 +163,9 @@ def resolve(db: Session, query: str, limit: int = 10,
     """
     ctx, doc_terms = preprocess(query)
     if not ctx["main"] and not doc_terms:
-        return {"query": query, "items": [], "low_confidence": True}
+        # 纯符号/无有效 token（如 "!!!"、"---"）：早返回也要带全部键，
+        # 否则 /parts/search 与 _lookup_prices_bulk 无条件读 ambiguous 会 KeyError(500)
+        return {"query": query, "items": [], "low_confidence": True, "ambiguous": False}
 
     # 放宽 trigram 召回阈值（仅本事务）：长库值×短 token 时默认 0.3 偏紧
     db.execute(text("SET LOCAL pg_trgm.similarity_threshold = 0.25"))
@@ -178,7 +186,8 @@ def resolve(db: Session, query: str, limit: int = 10,
                 alias_hits[a["pn_std"]] = (float(a["sim"] or 0), a["pn_raw"])
         missing = [pn for pn in alias_hits if pn not in cands]
         if missing:
-            for p in db.execute(select(DimPart).where(DimPart.pn_std.in_(missing))).scalars():
+            for p in db.execute(select(DimPart).where(
+                    DimPart.pn_std.in_(missing), DimPart.status != "merged")).scalars():
                 cands[p.pn_std] = {
                     "pn_std": p.pn_std, "pn_compact": p.pn_compact, "search_doc": p.search_doc,
                     "description": p.description, "brand": p.brand,

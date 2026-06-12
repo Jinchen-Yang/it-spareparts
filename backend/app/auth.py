@@ -1,26 +1,53 @@
-"""最小登录（§0/§15）：单管理员 + 只读用户。
+"""登录与身份（§0/§15 → 三期 RBAC）。
 
-不引入额外依赖：用 HMAC-SHA256 对 {role, exp} 签名生成 token。
-- 管理员：username='admin' 且 password == settings.admin_password → role=admin
-- 其他任意 username + 正确口令 → role=readonly
-写操作（导入/库存修正/替代料/利润）要求 admin；只读查询放行任意有效 token。
+token 用 HMAC-SHA256 对 {role, sub, name, exp} 签名（无额外依赖）。
+登录优先查 sys_user（每用户独立口令，pbkdf2 散列）；为兼容既有部署，
+sys_user 里没有的 username 回退老逻辑（admin/admin_password → admin，其余 → readonly）。
+
+**身份只来自服务端校验的 token，绝不信对话内容自报身份**（注入防御的根基）。
 """
 import base64
 import hashlib
 import hmac
 import json
+import os
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.db import get_db
+from app.models.system import SysUser
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 _bearer = HTTPBearer(auto_error=False)
 
+_PBKDF2_ITERS = 200_000
 
+
+# ---------- 口令散列（pbkdf2，stdlib，无额外依赖） ----------
+def hash_password(pw: str) -> str:
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt, _PBKDF2_ITERS)
+    return f"pbkdf2${_PBKDF2_ITERS}${salt.hex()}${dk.hex()}"
+
+
+def verify_password(pw: str, stored: str) -> bool:
+    try:
+        algo, iters, salt_hex, hash_hex = stored.split("$")
+        if algo != "pbkdf2":
+            return False
+        dk = hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt_hex), int(iters))
+        return hmac.compare_digest(dk.hex(), hash_hex)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# ---------- token ----------
 class LoginRequest(BaseModel):
     username: str
     password: str
@@ -29,24 +56,25 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     token: str
     role: str
+    name: str | None = None
     expires_at: int
 
 
 def _sign(payload: bytes) -> str:
-    secret = get_settings().secret_key.encode()
-    sig = hmac.new(secret, payload, hashlib.sha256).digest()
+    sig = hmac.new(get_settings().secret_key.encode(), payload, hashlib.sha256).digest()
     return base64.urlsafe_b64encode(sig).decode().rstrip("=")
 
 
-def _make_token(role: str) -> tuple[str, int]:
+def _make_token(role: str, sub: str, name: str | None) -> tuple[str, int]:
     exp = int(time.time()) + get_settings().token_ttl_hours * 3600
-    body = json.dumps({"role": role, "exp": exp}, separators=(",", ":")).encode()
+    body = json.dumps({"role": role, "sub": sub, "name": name, "exp": exp},
+                      separators=(",", ":"), ensure_ascii=False).encode()
     b64 = base64.urlsafe_b64encode(body).decode().rstrip("=")
     return f"{b64}.{_sign(body)}", exp
 
 
-def _verify_token(token: str) -> str:
-    """返回 role；非法/过期抛 401。"""
+def verify_token(token: str) -> dict:
+    """返回 payload {role, sub, name, exp}；非法/过期抛 401。"""
     try:
         b64, sig = token.split(".", 1)
         body = base64.urlsafe_b64decode(b64 + "=" * (-len(b64) % 4))
@@ -55,27 +83,47 @@ def _verify_token(token: str) -> str:
         data = json.loads(body)
         if data["exp"] < time.time():
             raise ValueError("expired")
-        return data["role"]
+        return data
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效或过期的凭证") from exc
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "无效或过期的凭证") from exc
+
+
+# 兼容旧调用：返回 role 字符串
+def _verify_token(token: str) -> str:
+    return verify_token(token)["role"]
 
 
 @router.post("/login", response_model=LoginResponse)
-def login(req: LoginRequest) -> LoginResponse:
+def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
+    user = db.scalar(select(SysUser).where(SysUser.username == req.username,
+                                           SysUser.is_active.is_(True)))
+    if user is not None:
+        if not verify_password(req.password, user.password_hash):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
+        token, exp = _make_token(user.role, user.username, user.salesperson_name)
+        return LoginResponse(token=token, role=user.role,
+                             name=user.display_name or user.salesperson_name, expires_at=exp)
+
+    # 回退：兼容既有部署的共享口令登录（sys_user 无此账号时）
     if not hmac.compare_digest(req.password, get_settings().admin_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
     role = "admin" if req.username == "admin" else "readonly"
-    token, exp = _make_token(role)
-    return LoginResponse(token=token, role=role, expires_at=exp)
+    token, exp = _make_token(role, req.username, None)
+    return LoginResponse(token=token, role=role, name=req.username, expires_at=exp)
 
 
-def current_role(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> str:
+# ---------- 依赖 ----------
+def current_identity(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> dict:
     if creds is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="缺少凭证")
-    return _verify_token(creds.credentials)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "缺少凭证")
+    return verify_token(creds.credentials)
+
+
+def current_role(ident: dict = Depends(current_identity)) -> str:
+    return ident["role"]
 
 
 def require_admin(role: str = Depends(current_role)) -> str:
     if role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
     return role

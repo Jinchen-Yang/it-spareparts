@@ -7,7 +7,11 @@
 from decimal import Decimal
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# DeepSeek v4 为混合思考模型；定价助手默认关思考（快/省/够用）
+_DEFAULT_LLM_EXTRA_BODY = '{"thinking": {"type": "disabled"}}'
 
 
 class Settings(BaseSettings):
@@ -31,6 +35,34 @@ class Settings(BaseSettings):
 
     # CORS 允许来源（前端开发服务器）
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+    # ---- 二期 AI 定价助手（LLM）----
+    # provider 抽象：openai_compatible 可对接 DeepSeek/Qwen/Kimi/GLM 等一切 OpenAI 兼容端点，
+    # 换厂商只改 base_url+model+key；将来要接 Anthropic 在 provider.py 加分支即可
+    llm_provider: str = "openai_compatible"
+    llm_base_url: str = "https://api.deepseek.com"
+    llm_model: str = "deepseek-v4-flash"
+    llm_api_key: str = ""              # 空 = 未配置，chat 接口返回降级提示
+    # 随请求透传的额外参数(JSON)。换 Qwen 等端点时改成对应参数(如 {"enable_thinking": false})；
+    # 设 {} = 明确不传；留空/不设 = 用默认(关思考)
+    llm_extra_body: str = _DEFAULT_LLM_EXTRA_BODY
+    llm_max_tool_iters: int = 8        # 一次问答最多工具往返轮数（文件流程需 4-6 轮）
+    llm_timeout_seconds: int = 60
+    enable_agent: bool = True
+
+    # ---- 三期 视觉识别（图片/扫描件 → 文本）----
+    # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级
+    vision_api_key: str = ""
+    vision_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    vision_model: str = "qwen-vl-max"
+    vision_max_pages: int = 8          # 单次最多送几页图（扫描件 PDF / 多图）
+    vision_timeout_seconds: int = 90
+
+    @field_validator("llm_extra_body", mode="before")
+    @classmethod
+    def _extra_body_default(cls, v):
+        # docker-compose 透传空字符串时回退到默认，避免悄悄打开思考模式
+        return _DEFAULT_LLM_EXTRA_BODY if v is None or str(v).strip() == "" else v
 
 
 _DEFAULT_ADMIN_PW = "admin"
@@ -79,8 +111,17 @@ REVENUE_BUSINESS_TYPES = ["备件销售"]            # 排除 销售换货/整�
 # 含税口径：ex_tax（默认，按不含税算毛利）| as_is（原价粗算）
 TAX_BASIS = "ex_tax"
 
-# 目标毛利率（报价提示/低毛利标记用）
+# 目标毛利率（报价提示/低毛利标记用；整机拆解的"建议售价"=成本×1/(1-此值)）
 TARGET_MARGIN = Decimal("0.20")
+
+# 整机拆解/批量查价取"近 N 天采购价"窗口（客户要"最近15天采购价"）
+RECENT_PURCHASE_DAYS = 15
+
+# 成交价参考（销售出价用）：不给"建议售价"（销售自行把握加价），只给一个稳的成交价参考。
+# 取近 REF_PRICE_MAX_N 条且 REF_PRICE_DAYS 天内的成交价，按名次线性加权平均：
+# 最近一条权重最高、依次递减到 1（越近权重越高），削掉单笔异常价对参考的扰动。
+REF_PRICE_DAYS = 30   # 取样时间窗（天）
+REF_PRICE_MAX_N = 5   # 最多取最近几条
 
 # 只统计已生效（入库不过滤，业务查询过滤）
 ACTIVE_STATUS_ONLY = True
@@ -92,7 +133,7 @@ DEFAULT_IMPORT_MODE = "skip"
 MAX_UPLOAD_MB = 100
 
 # ============================================================
-# §8.6 近似检索：PN 解析器口径（主数据治理候选发现的基础设施）
+# §8.6 近似检索（二期）：PN 解析器口径（主数据治理候选发现的基础设施）
 # ============================================================
 
 # 品牌同义词组：查询命中组内任一写法时，整组其余写法都加入检索词
@@ -150,11 +191,12 @@ CANDIDATE_STALE_DAYS = 7
 
 
 # ============================================================
-# §8.5 权限预留（第一期只埋钩子，不实现权限功能）
-# 全部默认关闭：接口输出与不加钩子时完全一致。接入权限时改这里 + 实现 data_scope。
+# §8.5 权限（三期启用：防恶性竞争）
 # ============================================================
-ENABLE_RBAC = False              # 第一期关闭，全员看全量
-ENABLE_ACCESS_LOG = False        # 审计第一期关闭
+# 三期开启：销售只看"匿名行情 + 自己明细"，查不到同事的客户/报价；老板/管理员看全量。
+# 防御在数据层（行级匿名化 + 禁用按客户/销售员排名），不靠提示词。
+ENABLE_RBAC = True
+ENABLE_ACCESS_LOG = True          # 记录谁查了什么型号/客户，便于审计
 
 PHASE1_BYPASS_ROLE = "phase1_full_access"   # 第一期统一上下文，语义=临时全量
 GUEST_ROLE = "guest"                         # 认证失败兜底角色，绝不可是 admin
@@ -177,13 +219,15 @@ FIELD_GROUPS = {
     "profit_rate":   ["gross_margin", "avg_margin", "margin_band"],  # 毛利率：见反推警告
 }
 
-# 角色 → 字段组可见性。ENABLE_RBAC=False 时不生效，仅占位。
-# ⚠️ 反推风险：销售知道售价(营收),若再给精确毛利率/毛利金额则成本被还原。
-#    sales 看 profit_rate 仅在分档(margin_band)时安全 —— 待客户拍板(§清单 C)。
+# 角色 → 字段组可见性（字段级脱敏，apply_field_visibility 用）。
+# 三期口径（客户只要求"防同事报价泄露"）：sales **不做字段脱敏**——
+#   ① 整机拆解要给销售看采购价才能加点直卖/发采购询价；② 防恶性竞争靠"行级匿名化"
+#   （part_overview.anonymize_sales_rows：抹掉同事客户名）+ 禁用按客户/销售员排名，
+#   不是靠遮字段。若日后甲方要"销售不看成本"，把 sales 的 purchase_cost 改 False 即可。
 ROLE_FIELD_VISIBILITY = {
     "admin":     {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
     "boss":      {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
-    "sales":     {"supplier_info": False, "customer_info": True,  "purchase_cost": False, "profit_amount": False, "profit_rate": False},
-    "purchaser": {"supplier_info": True,  "customer_info": False, "purchase_cost": True,  "profit_amount": False, "profit_rate": False},
+    "sales":     {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
+    "purchaser": {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
     "readonly":  {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
 }

@@ -1,0 +1,125 @@
+"""AI 助手 Chat API（二期）。任意有效 token 可用（销售/采购是 readonly 角色）。"""
+import json
+import logging
+from typing import Literal
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from app.agent import provider, runtime
+from app.auth import current_role
+from app.config import get_settings
+from app.db import get_db
+from app.security import UserContext, get_current_user_context, record_access_log
+from app.services import agent_files
+
+_log = logging.getLogger("agent")
+router = APIRouter(prefix="/agent", tags=["agent"])
+
+_NOT_CONFIGURED_MSG = (
+    "AI 助手尚未配置：请在服务器 .env 设置 LLM_API_KEY（如 DeepSeek 密钥）后重启服务。"
+    "在此之前可以继续使用「型号查询」页的近似搜索。"
+)
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=8000)
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage] = Field(..., min_length=1, max_length=40)
+
+
+@router.post("/chat")
+def chat(
+    req: ChatRequest,
+    db: Session = Depends(get_db),
+    role: str = Depends(current_role),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    settings = get_settings()
+    if not settings.enable_agent:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "AI 助手未启用")
+    record_access_log(ctx, "chat", "agent", {"q": req.messages[-1].content[:200]})
+    if not provider.is_configured():
+        return {"configured": False, "answer": _NOT_CONFIGURED_MSG, "tool_calls": []}
+    try:
+        out = runtime.run(db, [m.model_dump() for m in req.messages], ctx)
+    except provider.LLMNotConfigured:
+        return {"configured": False, "answer": _NOT_CONFIGURED_MSG, "tool_calls": []}
+    except Exception as exc:  # noqa: BLE001 —— 上游 LLM 网络/配额错误：不泄露细节
+        _log.error("agent chat failed: %r", exc)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                            "AI 服务调用失败，请稍后重试（详情见服务端日志）") from exc
+    return {"configured": True, **out}
+
+
+@router.post("/chat/stream")
+def chat_stream(
+    req: ChatRequest,
+    db: Session = Depends(get_db),
+    role: str = Depends(current_role),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> StreamingResponse:
+    """SSE 流式问答：data: {type: delta|tool|tool_done|done|error, ...}\\n\\n"""
+    settings = get_settings()
+    if not settings.enable_agent:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "AI 助手未启用")
+    record_access_log(ctx, "chat_stream", "agent", {"q": req.messages[-1].content[:200]})
+
+    def _sse(ev: dict) -> str:
+        return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+
+    def gen():
+        if not provider.is_configured():
+            yield _sse({"type": "delta", "text": _NOT_CONFIGURED_MSG})
+            yield _sse({"type": "done", "tool_calls": [], "configured": False})
+            return
+        try:
+            for ev in runtime.run_stream(db, [m.model_dump() for m in req.messages], ctx):
+                yield _sse(ev)
+        except Exception as exc:  # noqa: BLE001 —— 流中途出错：发 error 事件而非半截断流
+            _log.error("agent stream failed: %r", exc)
+            yield _sse({"type": "error", "message": "AI 服务调用失败，请稍后重试"})
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@router.post("/upload")
+async def upload(
+    file: UploadFile = File(...),
+    role: str = Depends(current_role),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """上传 xlsx（询价单/型号清单等），返回 file_id 供对话引用。"""
+    record_access_log(ctx, "upload", "agent_file", {"filename": file.filename})
+    content = await file.read()
+    try:
+        return agent_files.save_upload(content, file.filename or "上传.xlsx", role)
+    except agent_files.FileError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
+@router.get("/files/{file_id}")
+def download(
+    file_id: str,
+    role: str = Depends(current_role),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> FileResponse:
+    """下载智能体生成/上传的文件。"""
+    record_access_log(ctx, "download", "agent_file", {"file_id": file_id})
+    try:
+        path, name = agent_files.get_download(file_id)
+    except agent_files.FileError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    return FileResponse(
+        path, filename=name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        # 含价格数据：禁止浏览器缓存（否则换人/过期 token 仍能命中缓存拿到文件）
+        headers={"Cache-Control": "no-store"},
+    )

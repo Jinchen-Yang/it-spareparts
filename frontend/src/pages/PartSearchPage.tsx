@@ -6,6 +6,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import api from "../api";
 import type { Overview, PartHit, PurchaseRow, SalesRow, InventoryRow } from "../api";
+import { COLORS } from "../theme";
 
 const money = (v: number | null) => (v == null ? "-" : `¥${v.toLocaleString()}`);
 const pct = (v: number | null | undefined) => (v == null ? "-" : `${(v * 100).toFixed(1)}%`);
@@ -72,8 +73,23 @@ export default function PartSearchPage() {
       render: (v, r) => (
         <a onClick={() => openOverview(v)}>
           {v} {r.needs_review && <Tag color="orange">待复核</Tag>}
+          {r.is_excluded && <Tag color="red">已排除</Tag>}
         </a>
       ),
+    },
+    {
+      title: "匹配度", dataIndex: "score", width: 150,
+      render: (v: number | undefined, r) =>
+        v == null ? "-" : (
+          <span title={r.match_reason}>
+            <Tag color={v >= 0.6 ? "green" : v >= 0.35 ? "blue" : "default"}>
+              {(v * 100).toFixed(0)}%
+            </Tag>
+            <span style={{ color: "#999", fontSize: 12 }}>
+              {(r.match_reason || "").split("；")[0]}
+            </span>
+          </span>
+        ),
     },
     { title: "描述", dataIndex: "description", ellipsis: true },
     { title: "品牌", dataIndex: "brand", width: 140 },
@@ -153,18 +169,38 @@ export default function PartSearchPage() {
             <Descriptions.Item label="规格">{ov.part.category_minor || "-"}</Descriptions.Item>
           </Descriptions>
 
+          {ov.sale_price_ref?.ref_sale_price != null && (
+            <div style={{
+              display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap",
+              background: "#DCE8ED", border: "1px solid #CADCE4", borderRadius: 10,
+              padding: "12px 16px", marginBottom: 16,
+            }}>
+              <span style={{ color: COLORS.text2, fontSize: 13 }}>近期成交参考价（销售出价用）</span>
+              <span style={{ fontSize: 22, fontWeight: 500, color: COLORS.accentStrong }}>
+                {money(ov.sale_price_ref.ref_sale_price)}
+              </span>
+              <span style={{ color: COLORS.text3, fontSize: 13 }}>
+                近 {ov.sale_price_ref.ref_sale_samples} 单 / {ov.sale_price_ref.ref_window_days} 天加权
+              </span>
+              {ov.sale_price_ref.ref_sale_samples < 3 && (
+                <Tag color="orange">成交少，仅供参考</Tag>
+              )}
+            </div>
+          )}
+
           <Row gutter={16} style={{ marginBottom: 16 }}>
             <Col span={6}><Card size="small">
-              <Statistic title="移动加权 · 单位成本" value={ov.profit_summary.avg_cost_moving ?? "-"} prefix="¥" />
-              <span style={{ color: "#888" }}>毛利率 {pct(ov.profit_summary.avg_margin_moving)}</span>
+              <Statistic title="移动加权 · 单位成本" value={ov.profit_summary.avg_cost_moving ?? "-"} prefix="¥"
+                valueStyle={{ color: COLORS.accentStrong }} />
+              <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_moving)}</span>
             </Card></Col>
             <Col span={6}><Card size="small">
               <Statistic title="FIFO · 单位成本" value={ov.profit_summary.avg_cost_fifo ?? "-"} prefix="¥" />
-              <span style={{ color: "#888" }}>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>
+              <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>
             </Card></Col>
             <Col span={6}><Card size="small">
               <Statistic title="平均销售价(含税)" value={ov.profit_summary.avg_sale_price ?? "-"} prefix="¥" />
-              <span style={{ color: "#888" }}>累计售 {ov.profit_summary.total_qty_sold}</span>
+              <span style={{ color: COLORS.text3 }}>累计售 {ov.profit_summary.total_qty_sold}</span>
             </Card></Col>
             <Col span={6}><Card size="small"><Statistic title="询价区间" value={ov.inquiry_ref.count ? `${money(ov.inquiry_ref.min_money)}~${money(ov.inquiry_ref.max_money)}` : "无"} /></Card></Col>
           </Row>
@@ -185,7 +221,7 @@ export default function PartSearchPage() {
             </Space>
             <div>
               {ov.substitutes.length === 0 ? (
-                <span style={{ color: "#999" }}>暂无替代料，可在上方添加</span>
+                <span style={{ color: "var(--mb-text-3)" }}>暂无替代料，可在上方添加</span>
               ) : (
                 ov.substitutes.map((s) => (
                   <Tag key={s.pn_std} color="geekblue" style={{ marginBottom: 4 }}>

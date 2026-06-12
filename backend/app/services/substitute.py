@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.models.dimensions import DimPart
 from app.models.inventory import PartSubstitute
 from app.models.system import SysAuditLog
+from app.services import part_overview
 
 _TYPES = {"original", "compatible", "same_spec", "downgrade", "upgrade", "conditional"}
 
@@ -23,7 +24,9 @@ class SubstituteError(Exception):
 
 
 def list_substitutes(db: Session, pn_std: str) -> list[dict]:
-    part = db.scalar(select(DimPart).where(DimPart.pn_std == pn_std))
+    # 整改 P3：入参可能是已合并墓碑——merge 已把替代关系全 repoint 到目标 part_id，
+    # 按墓碑 id 直查会得空。先 resolve_part 沿 merged 链取目标再查（与 list_sales 同源）。
+    part, _ = part_overview.resolve_part(db, pn_std)
     if part is None:
         return []
     rows = db.execute(

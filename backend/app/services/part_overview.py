@@ -6,6 +6,8 @@
 （pn_std 文本是导入痕迹，合并后不重写；商品身份只看 part_id）。
 查询已合并型号自动重定向到目标档案，并在返回中标注 redirected_from。
 """
+import logging
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, or_, select
@@ -21,6 +23,7 @@ from app.models.sales import FSalesLine, FSalesOrder
 
 _ACTIVE = "已生效"
 _MERGE_CHAIN_LIMIT = 10
+_log = logging.getLogger(__name__)
 
 
 def _d(x) -> float | None:
@@ -28,7 +31,12 @@ def _d(x) -> float | None:
 
 
 def resolve_part(db: Session, pn_std: str) -> tuple[DimPart | None, str | None]:
-    """pn_std → (part, redirected_from)。命中已合并墓碑时沿链取目标档案。"""
+    """pn_std → (part, redirected_from)。命中已合并墓碑时沿链取目标档案。
+
+    链深溢出（>_MERGE_CHAIN_LIMIT）返回 (None, None) 而非墓碑：正常路径压缩后
+    链长恒≤1，溢出意味着并发合并或数据异常，此时返墓碑会让下游 part_id 查询
+    全空，AI 误报"无历史"——再次重现 §4 防的失败模式。
+    """
     part = db.scalar(select(DimPart).where(DimPart.pn_std == pn_std))
     if part is None:
         return None, None
@@ -36,9 +44,20 @@ def resolve_part(db: Session, pn_std: str) -> tuple[DimPart | None, str | None]:
     hops = 0
     while part.status == "merged" and part.merged_into_id is not None:
         if hops >= _MERGE_CHAIN_LIMIT:
-            break
+            # %r 转义控制字符，防用户控制的 pn_std 注入伪造日志行
+            _log.warning(
+                "merge chain limit reached resolving pn_std=%r (last=%r, depth=%d)",
+                pn_std, part.pn_std, hops)
+            return None, None
         redirected_from = redirected_from or part.pn_std
-        part = db.get(DimPart, part.merged_into_id)
+        next_part = db.get(DimPart, part.merged_into_id)
+        if next_part is None:
+            # 链中节点缺失（断 FK / 数据异常）：当作 not-found 而非 500
+            _log.warning(
+                "merge chain broken resolving pn_std=%r at hop %d (orphan merged_into_id=%d on %r)",
+                pn_std, hops, part.merged_into_id, part.pn_std)
+            return None, None
+        part = next_part
         hops += 1
     return part, redirected_from
 
@@ -92,6 +111,7 @@ def search_parts(db: Session, q: str | None, page: int, page_size: int,
         "items": [{
             "pn_std": p.pn_std, "description": p.description, "brand": p.brand,
             "category_major": p.category_major, "needs_review": p.needs_review,
+            "is_excluded": p.is_excluded,   # 与 resolver 分支返回形状对齐
             "specs": specs_by_part.get(p.id, {}),
         } for p in rows],
     }
@@ -115,9 +135,11 @@ def _purchases_query(part_id: int, user_ctx: security.UserContext | None = None)
 
 
 def _sales_query(part_id: int, user_ctx: security.UserContext | None = None):
+    # 带 salesperson 以便 sales 角色行级匿名化（保留行情价、抹掉同事客户名）
     stmt = (
         select(FSalesOrder.order_no, FSalesOrder.order_date,
-                DimCustomer.name_normalized, FSalesLine.qty, FSalesLine.unit_price)
+                DimCustomer.name_normalized, FSalesLine.qty, FSalesLine.unit_price,
+                FSalesOrder.salesperson)
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
         .join(DimCustomer, FSalesOrder.customer_id == DimCustomer.id, isouter=True)
         .where(FSalesLine.part_id == part_id)
@@ -143,7 +165,7 @@ def _purchase_row(r):
 
 def _sales_row(r):
     return {"order_no": r[0], "order_date": r[1], "customer": r[2],
-            "qty": _d(r[3]), "unit_price": _d(r[4])}
+            "qty": _d(r[3]), "unit_price": _d(r[4]), "salesperson": r[5]}
 
 
 def _empty_page(page: int, page_size: int) -> dict:
@@ -152,18 +174,25 @@ def _empty_page(page: int, page_size: int) -> dict:
 
 def list_purchases(db: Session, pn_std: str, page: int, page_size: int,
                    user_ctx: security.UserContext | None = None) -> dict:
-    part, _ = resolve_part(db, pn_std)
+    part, redirected_from = resolve_part(db, pn_std)
     if part is None:
-        return _empty_page(page, page_size)
-    return _paginate(db, _purchases_query(part.id, user_ctx), page, page_size, _purchase_row)
+        out = _empty_page(page, page_size)
+    else:
+        out = _paginate(db, _purchases_query(part.id, user_ctx), page, page_size, _purchase_row)
+    out["redirected_from"] = redirected_from   # 与模块 docstring 承诺一致：所有查询都暴露重定向
+    return out
 
 
 def list_sales(db: Session, pn_std: str, page: int, page_size: int,
                user_ctx: security.UserContext | None = None) -> dict:
-    part, _ = resolve_part(db, pn_std)
+    part, redirected_from = resolve_part(db, pn_std)
     if part is None:
-        return _empty_page(page, page_size)
-    return _paginate(db, _sales_query(part.id, user_ctx), page, page_size, _sales_row)
+        out = _empty_page(page, page_size)
+    else:
+        out = _paginate(db, _sales_query(part.id, user_ctx), page, page_size, _sales_row)
+        out["items"] = security.anonymize_sales_rows(out["items"], user_ctx)  # 防恶性竞争
+    out["redirected_from"] = redirected_from
+    return out
 
 
 def _profit_summary(db: Session, part_id: int) -> dict:
@@ -230,7 +259,8 @@ def _inventory(db: Session, part_id: int) -> list[dict]:
     for inv in rows:
         display = inv.manual_qty if inv.is_qty_overridden and inv.manual_qty is not None else inv.source_qty
         out.append({
-            "warehouse": inv.warehouse, "display_qty": _d(display),
+            # pn_std：合并后同 part 同仓可有多行（不同源 pn），带上源 pn 才能区分这些行
+            "warehouse": inv.warehouse, "pn_std": inv.pn_std, "display_qty": _d(display),
             "source_qty": _d(inv.source_qty), "manual_qty": _d(inv.manual_qty),
             "unit_cost": _d(inv.unit_cost), "inventory_value": _d(inv.inventory_value),
         })
@@ -267,6 +297,152 @@ def _substitutes(db: Session, part_id: int | None) -> list[dict]:
     return out
 
 
+def _sales_velocity(db: Session, part_id: int) -> dict:
+    """近 90 天销售速率（二期采购场景："进 50 个合理吗"需要知道卖多快）。"""
+    since = date.today() - timedelta(days=90)
+    stmt = (
+        select(func.sum(FSalesLine.qty).filter(FSalesOrder.order_date >= since),
+               func.max(FSalesOrder.order_date))
+        .select_from(FSalesLine)
+        .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
+        .where(FSalesLine.part_id == part_id)
+    )
+    if config.ACTIVE_STATUS_ONLY:
+        stmt = stmt.where(FSalesOrder.data_status == _ACTIVE)
+    qty90, last_date = db.execute(stmt).one()
+    qty90 = qty90 or Decimal(0)
+    return {
+        "qty_sold_90d": _d(qty90),
+        "monthly_avg_90d": _d((qty90 / 3).quantize(Decimal("0.1"))),
+        "last_sale_date": last_date,
+    }
+
+
+def _weighted_recent_sale_price(db: Session, part_id: int) -> dict:
+    """成交价参考（销售出价用）：近 REF_PRICE_MAX_N 条且 REF_PRICE_DAYS 天内的成交价，
+    按名次线性加权平均——rows 按时间倒序，最近一条权重最高、依次递减到 1（越近越高），
+    削掉单笔异常价的方差。只取计入营收的真实成交（counts_revenue，排除换货等）。
+    不给"建议售价"——加价由销售自行把握，这里只给一个稳的参考价。"""
+    since = date.today() - timedelta(days=config.REF_PRICE_DAYS)
+    stmt = (
+        select(FSalesOrder.order_date, FSalesLine.unit_price)
+        .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
+        .where(FSalesLine.part_id == part_id,
+               FSalesLine.unit_price > 0,
+               FSalesLine.counts_revenue.is_(True),
+               FSalesOrder.order_date >= since)
+    )
+    if config.ACTIVE_STATUS_ONLY:
+        stmt = stmt.where(FSalesOrder.data_status == _ACTIVE)
+    # 最近 N 条；稳定排序（同日按 line id 降序）防取样不确定性
+    rows = db.execute(
+        stmt.order_by(FSalesOrder.order_date.desc().nullslast(), FSalesLine.id.desc())
+        .limit(config.REF_PRICE_MAX_N)
+    ).all()
+    if not rows:
+        return {"ref_sale_price": None, "ref_sale_samples": 0,
+                "ref_window_days": config.REF_PRICE_DAYS}
+    # 线性按名次加权：rows 已按时间倒序（最近在前），最近一条权重 = 条数 k，依次递减到 1
+    k = len(rows)
+    num, den = Decimal(0), 0
+    for i, (_order_date, price) in enumerate(rows):
+        w = k - i
+        num += Decimal(w) * price
+        den += w
+    ref = num / Decimal(den)
+    return {
+        "ref_sale_price": _d(ref.quantize(Decimal("0.01"))),
+        "ref_sale_samples": k,
+        "ref_window_days": config.REF_PRICE_DAYS,
+    }
+
+
+def quick_pricing(db: Session, pn_std: str) -> dict:
+    """轻量定价摘要（整机拆解/批量询价场景）：近N天采购价窗口 / 近90天均售价 / 库存合计。
+
+    比 get_overview 轻一个量级，供 lookup_prices_bulk 每行调用。
+    整改 P3：先 resolve_part 解析 part_id（含 merged 链重定向）再按 part_id 过滤；
+    若直接按 pn_std 文本过滤，已合并型号的历史会从 AI 定价答案中悄悄消失。
+    返回 `pn_std` / `description` / `redirected_from` 让调用方（智能体）能告诉用户
+    "你查的 X 已重定向到 Y，下面价格属于 Y"——否则会用合并目标的价格冒充入参 PN。
+    采购价只取计入成本的采购类型（与成本口径一致，排除维保等）。
+    """
+    part, redirected_from = resolve_part(db, pn_std)
+    if part is None:
+        return {"pn_std": pn_std, "description": None, "redirected_from": None,
+                "last_purchase_price": None, "last_purchase_date": None,
+                "last_purchase_type": None, "recent_purchase_days": config.RECENT_PURCHASE_DAYS,
+                "recent_purchase_avg": None, "recent_purchase_min": None,
+                "recent_purchase_max": None, "recent_purchase_count": 0,
+                "avg_sale_price_90d": None, "stock_total": 0,
+                "ref_sale_price": None, "ref_sale_samples": 0,
+                "ref_window_days": config.REF_PRICE_DAYS}
+    pid = part.id
+    lp = (
+        select(FPurchaseOrder.order_date, FPurchaseLine.unit_price, FPurchaseOrder.source_type)
+        .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
+        .where(FPurchaseLine.part_id == pid,
+               FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
+               FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
+    )
+    if config.ACTIVE_STATUS_ONLY:
+        lp = lp.where(FPurchaseOrder.data_status == _ACTIVE)
+    last = db.execute(lp.order_by(FPurchaseOrder.order_date.desc().nullslast()).limit(1)).first()
+
+    # 近 N 天采购价窗口（客户要"最近15天采购价"）：均/低/高/笔数
+    win_since = date.today() - timedelta(days=config.RECENT_PURCHASE_DAYS)
+    rp = (
+        select(func.avg(FPurchaseLine.unit_price), func.min(FPurchaseLine.unit_price),
+               func.max(FPurchaseLine.unit_price), func.count())
+        .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
+        .where(FPurchaseLine.part_id == pid,
+               FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
+               FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES),
+               FPurchaseOrder.order_date >= win_since)
+    )
+    if config.ACTIVE_STATUS_ONLY:
+        rp = rp.where(FPurchaseOrder.data_status == _ACTIVE)
+    r_avg, r_min, r_max, r_cnt = db.execute(rp).one()
+
+    since = date.today() - timedelta(days=90)
+    sp = (
+        select(func.sum(FSalesLine.qty * FSalesLine.unit_price), func.sum(FSalesLine.qty))
+        .select_from(FSalesLine)
+        .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
+        .where(FSalesLine.part_id == pid, FSalesLine.unit_price > 0,
+               FSalesOrder.order_date >= since)
+    )
+    if config.ACTIVE_STATUS_ONLY:
+        sp = sp.where(FSalesOrder.data_status == _ACTIVE)
+    samt, sqty = db.execute(sp).one()
+
+    inv_rows = db.execute(select(Inventory).where(Inventory.part_id == pid)).scalars().all()
+    stock = sum(
+        (inv.manual_qty if inv.is_qty_overridden and inv.manual_qty is not None else inv.source_qty)
+        or Decimal(0) for inv in inv_rows
+    )
+    return {
+        # 商品身份：用 resolve_part 解析后的 *规范* PN，而非入参 pn_std——
+        # 入参可能是已合并墓碑，此处覆盖让智能体把价格挂在正确的商品上
+        "pn_std": part.pn_std,
+        "description": part.description,
+        "redirected_from": redirected_from,
+        "last_purchase_price": _d(last[1]) if last else None,
+        "last_purchase_date": last[0] if last else None,
+        "last_purchase_type": last[2] if last else None,
+        # 近 N 天采购价窗口；窗口内无采购时各值为 None，回退看 last_purchase_*
+        "recent_purchase_days": config.RECENT_PURCHASE_DAYS,
+        "recent_purchase_avg": _d(r_avg.quantize(Decimal("0.01"))) if r_avg else None,
+        "recent_purchase_min": _d(r_min) if r_min else None,
+        "recent_purchase_max": _d(r_max) if r_max else None,
+        "recent_purchase_count": r_cnt or 0,
+        "avg_sale_price_90d": _d((samt / sqty).quantize(Decimal("0.01"))) if samt and sqty else None,
+        "stock_total": _d(stock),
+        # 近期加权成交价参考（销售出价用，越近权重越高）
+        **_weighted_recent_sale_price(db, pid),
+    }
+
+
 def _inquiry_ref(db: Session, part_id: int, pn_std: str) -> dict:
     # part_id 可空（询价不强制建档）：优先 part_id，未回填的行按 pn_std 兜底
     cond = or_(FPartInquiry.part_id == part_id,
@@ -296,9 +472,13 @@ def get_overview(db: Session, pn_std: str,
             "redirected_from": redirected_from,
         },
         "purchases_recent": _paginate(db, _purchases_query(part.id, user_ctx), 1, 20, _purchase_row)["items"],
-        "sales_recent": _paginate(db, _sales_query(part.id, user_ctx), 1, 20, _sales_row)["items"],
+        # 防恶性竞争：sales 角色保留行情价、抹掉同事的客户名（本人成交保留）
+        "sales_recent": security.anonymize_sales_rows(
+            _paginate(db, _sales_query(part.id, user_ctx), 1, 20, _sales_row)["items"], user_ctx),
         "inventory": _inventory(db, part.id),
         "substitutes": _substitutes(db, part.id),
         "profit_summary": _profit_summary(db, part.id),
         "inquiry_ref": _inquiry_ref(db, part.id, part.pn_std),
+        "sales_velocity": _sales_velocity(db, part.id),
+        "sale_price_ref": _weighted_recent_sale_price(db, part.id),
     }

@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from app.auth import current_role
 from app.db import get_db
 from app.security import UserContext, apply_field_visibility, get_current_user_context, record_access_log
-from app.services import part_overview
+from app.services import part_overview, part_resolver
 
 router = APIRouter(prefix="/parts", tags=["parts"])
 
@@ -20,13 +20,28 @@ def search(
     capacity_min: float | None = Query(None, description="容量下限(GB)"),
     capacity_max: float | None = Query(None, description="容量上限(GB)"),
     db: Session = Depends(get_db),
-    _: str = Depends(current_role),
+    role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    record_access_log(ctx, "search", "parts", {"q": q})
-    data = part_overview.search_parts(db, q, page, page_size, ctx,
-                                      part_type=part_type, interface=interface,
-                                      capacity_min=capacity_min, capacity_max=capacity_max)
+    # whitespace-only q 视同空：避免滑进 structured 分支触发 '%   %' 全表 LIKE
+    q_norm = (q or "").strip() or None
+    has_spec_filter = any(
+        x is not None for x in (part_type, interface, capacity_min, capacity_max))
+    branch = "resolver" if (q_norm and not has_spec_filter) else "structured"
+    # 审计带 branch：纯文本走近似解析(可能含 merged 墓碑标签)，结构化走 part_id 浏览
+    # (排除墓碑)——同一 URL 两种语义，事后溯源必须能区分
+    record_access_log(ctx, "search", "parts", {"q": q_norm, "branch": branch})
+    if branch == "resolver":
+        # 纯文本查询：近似解析（pg_trgm 召回 + 精排），结果单页带 score/match_reason
+        data = part_resolver.resolve(db, q_norm, limit=page_size, operated_by=role)
+        data = {"total": len(data["items"]), "page": 1, "page_size": page_size,
+                "items": data["items"], "low_confidence": data["low_confidence"],
+                "ambiguous": data["ambiguous"]}
+    else:
+        # 空查询浏览，或带结构化规格过滤：走 part_id 主口径的 search_parts（含 merged 墓碑排除）
+        data = part_overview.search_parts(db, q_norm, page, page_size, ctx,
+                                          part_type=part_type, interface=interface,
+                                          capacity_min=capacity_min, capacity_max=capacity_max)
     return apply_field_visibility(data, ctx)
 
 

@@ -107,11 +107,11 @@ function PartsTab() {
     { title: "销售行", dataIndex: "sales_lines", width: 80, align: "right" },
     { title: "营收", dataIndex: "revenue", width: 130, align: "right", render: money },
     { title: "毛利率", dataIndex: "gross_margin", width: 100, align: "right",
-      render: (v: number | null) => <span style={{ color: v != null && v < 0 ? "#cf1322" : undefined }}>{pct(v)}</span> },
+      render: (v: number | null) => <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{pct(v)}</span> },
     { title: "操作", width: 90, fixed: "right",
       render: (_, r) => r.is_excluded
         ? <a onClick={() => unExclude(r.pn_std)}>恢复</a>
-        : <a style={{ color: "#cf1322" }} onClick={() => { setExcluding(r); setReason(""); }}>排除</a> },
+        : <a style={{ color: "var(--mb-danger)" }} onClick={() => { setExcluding(r); setReason(""); }}>排除</a> },
   ];
 
   return (
@@ -136,7 +136,7 @@ function PartsTab() {
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: (p) => load(p) }} />
       <Modal open={!!excluding} title={`排除型号：${excluding?.pn_std}`} okText="确认排除" okButtonProps={{ danger: true }}
         onCancel={() => setExcluding(null)} onOk={doExclude}>
-        <p style={{ color: "#888" }}>排除后，该型号的销售行不再计入营收/利润统计（如笼统打包型号"一批备件"）。</p>
+        <p style={{ color: "var(--mb-text-3)" }}>排除后，该型号的销售行不再计入营收/利润统计（如笼统打包型号"一批备件"）。</p>
         <Input.TextArea rows={2} placeholder="排除原因（写入审计）" value={reason} onChange={(e) => setReason(e.target.value)} />
       </Modal>
     </>
@@ -322,7 +322,7 @@ function AliasesTab() {
         onCancel={() => setReassigning(null)}
         onOk={() => reassigning && review(reassigning.id, "reassign", targetPn.trim())}
         okButtonProps={{ disabled: !targetPn.trim() }}>
-        <p style={{ color: "#888" }}>该写法将映射到下方型号，其既有采购/销售行会同步重指。</p>
+        <p style={{ color: "var(--mb-text-3)" }}>该写法将映射到下方型号，其既有采购/销售行会同步重指。</p>
         <Input placeholder="目标型号 (PN)" value={targetPn} onChange={(e) => setTargetPn(e.target.value)} />
       </Modal>
     </>
@@ -369,7 +369,7 @@ function MergesTab({ onChanged }: { onChanged: () => void }) {
           c.f_purchase_line_ids ? `采${c.f_purchase_line_ids}` : "",
           c.inventory_ids ? `存${c.inventory_ids}` : "",
         ].filter(Boolean);
-        return <span style={{ color: "#888" }}>{parts.join(" / ") || "-"}</span>;
+        return <span style={{ color: "var(--mb-text-3)" }}>{parts.join(" / ") || "-"}</span>;
       } },
     { title: "原因", dataIndex: "reason", ellipsis: true },
     { title: "操作人", dataIndex: "created_by", width: 90 },
@@ -386,7 +386,7 @@ function MergesTab({ onChanged }: { onChanged: () => void }) {
 
   return (
     <>
-      <p style={{ color: "#888", marginBottom: 12 }}>
+      <p style={{ color: "var(--mb-text-3)", marginBottom: 12 }}>
         合并是可逆操作：回滚会按日志把历史采购/销售/库存的归属逐行还原到源型号并重算利润。
         建议仅回滚最近一次误操作。
       </p>
@@ -407,9 +407,9 @@ function MetricsTab({ metrics }: { metrics: any }) {
         <Col span={4}><Statistic title="在用型号" value={m.parts.total_active} /></Col>
         <Col span={4}><Statistic title="已合并" value={m.parts.merged} /></Col>
         <Col span={4}><Statistic title="人工已确认" value={m.parts.reviewed} suffix={`/ ${pct100(m.parts.reviewed_pct)}`} /></Col>
-        <Col span={4}><Statistic title="待复核" value={m.parts.needs_review} valueStyle={{ color: "#fa8c16" }} /></Col>
+        <Col span={4}><Statistic title="待复核" value={m.parts.needs_review} valueStyle={{ color: "var(--mb-warning)" }} /></Col>
         <Col span={4}><Statistic title="待审候选" value={m.review_backlog.pending_candidates} /></Col>
-        <Col span={4}><Statistic title={`超${m.review_backlog.stale_days}天未审`} value={m.review_backlog.stale_candidates} valueStyle={{ color: m.review_backlog.stale_candidates ? "#cf1322" : undefined }} /></Col>
+        <Col span={4}><Statistic title={`超${m.review_backlog.stale_days}天未审`} value={m.review_backlog.stale_candidates} valueStyle={{ color: m.review_backlog.stale_candidates ? "var(--mb-danger)" : undefined }} /></Col>
       </Row>
       <Descriptions bordered size="small" column={3}>
         <Descriptions.Item label="采购行 part_id 覆盖率">{pct100(m.coverage.purchase_lines.part_id_pct)}</Descriptions.Item>
@@ -475,11 +475,11 @@ export default function GovernancePage() {
         </Space>}>
         {sum && (
           <Row gutter={[16, 16]}>
-            <Col span={4}><Statistic title="非标候选型号" value={sum.nonstd_candidates} valueStyle={{ color: "#fa8c16" }} /></Col>
-            <Col span={4}><Statistic title="已排除" value={sum.excluded} valueStyle={{ color: "#cf1322" }} /></Col>
+            <Col span={4}><Statistic title="非标候选型号" value={sum.nonstd_candidates} valueStyle={{ color: "var(--mb-warning)" }} /></Col>
+            <Col span={4}><Statistic title="已排除" value={sum.excluded} valueStyle={{ color: "var(--mb-danger)" }} /></Col>
             <Col span={4}><Statistic title="PN 待复核" value={sum.needs_review} /></Col>
             <Col span={4}><Tooltip title="销售行未匹配到成本"><Statistic title="无成本行" value={sum.sales_no_cost} /></Tooltip></Col>
-            <Col span={4}><Tooltip title="账面亏本行"><Statistic title="负毛利行" value={sum.sales_neg_margin} valueStyle={{ color: "#cf1322" }} /></Tooltip></Col>
+            <Col span={4}><Tooltip title="账面亏本行"><Statistic title="负毛利行" value={sum.sales_neg_margin} valueStyle={{ color: "var(--mb-danger)" }} /></Tooltip></Col>
             <Col span={4}><Tooltip title="成本为估算(兜底),非真实匹配"><Statistic title="估算成本行" value={sum.sales_fallback_cost} /></Tooltip></Col>
           </Row>
         )}
