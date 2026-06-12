@@ -15,12 +15,18 @@ def search(
     q: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    part_type: str | None = Query(None, description="HDD | SSD | RAM"),
+    interface: str | None = Query(None, description="SAS | SATA | NVME | FC | SCSI"),
+    capacity_min: float | None = Query(None, description="容量下限(GB)"),
+    capacity_max: float | None = Query(None, description="容量上限(GB)"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     record_access_log(ctx, "search", "parts", {"q": q})
-    data = part_overview.search_parts(db, q, page, page_size, ctx)
+    data = part_overview.search_parts(db, q, page, page_size, ctx,
+                                      part_type=part_type, interface=interface,
+                                      capacity_min=capacity_min, capacity_max=capacity_max)
     return apply_field_visibility(data, ctx)
 
 

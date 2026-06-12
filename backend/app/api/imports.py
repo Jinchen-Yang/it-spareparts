@@ -10,7 +10,7 @@ from app.auth import require_admin
 from app.config import MAX_UPLOAD_MB
 from app.db import get_db
 from app.security import UserContext, get_current_user_context, record_access_log
-from app.services import inventory, profit
+from app.services import inventory, master_data, profit
 from app.etl import pipeline
 from app.etl.reader import ReaderError
 from app.models.system import SysImportBatch, SysImportError
@@ -68,6 +68,12 @@ def upload(
                 inventory.backfill_costs(db)
             except Exception:  # noqa: BLE001
                 pass
+        # 主数据回填（整改 P2）：新导入会持续产生未归一品牌/品类/别名，导入后自动刷新；
+        # 候选生成较重，留给管理员在治理页手动触发。失败不影响导入
+        try:
+            master_data.refresh(db)
+        except Exception:  # noqa: BLE001
+            pass
         return {"batch_id": batch.id, "file_type": batch.file_type,
                 "status": batch.status, "report": batch.report_json,
                 "recompute": recompute_stats}

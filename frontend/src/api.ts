@@ -27,6 +27,7 @@ export interface PartHit {
   brand: string | null;
   category_major: string | null;
   needs_review: boolean;
+  specs?: Record<string, string>;
 }
 
 export interface Overview {
@@ -38,11 +39,15 @@ export interface Overview {
     category_minor: string | null;
     unit: string | null;
     needs_review: boolean;
+    redirected_from?: string | null;
   };
   purchases_recent: PurchaseRow[];
   sales_recent: SalesRow[];
   inventory: InventoryRow[];
-  substitutes: { pn_std: string; description: string | null; source: string }[];
+  substitutes: {
+    pn_std: string; description: string | null; source: string;
+    relation?: string; substitute_type?: string | null;
+  }[];
   profit_summary: {
     avg_purchase_cost: number | null;
     avg_sale_price: number | null;
