@@ -47,6 +47,17 @@ interface AliasRow {
   source: string;
 }
 
+interface MergeRow {
+  merge_log_id: number;
+  source_pn: string | null;
+  target_pn: string | null;
+  reason: string | null;
+  created_by: string | null;
+  created_at: string;
+  reverted: boolean;
+  affected_counts: Record<string, number>;
+}
+
 const ISSUE_LABELS: Record<string, string> = {
   missing_brand: "缺品牌", missing_category: "缺品类", missing_description: "缺描述",
   nonstd_pn: "非标型号", duplicate_suspected: "疑似重复",
@@ -318,6 +329,74 @@ function AliasesTab() {
   );
 }
 
+/** 合并历史 + 回滚 */
+function MergesTab({ onChanged }: { onChanged: () => void }) {
+  const [rows, setRows] = useState<MergeRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [acting, setActing] = useState<number | null>(null);
+
+  const load = async (p = 1) => {
+    setLoading(true);
+    try {
+      const { data } = await api.get("/governance/merges", { params: { page: p, page_size: 20 } });
+      setRows(data.items); setTotal(data.total); setPage(p);
+    } finally { setLoading(false); }
+  };
+  useEffect(() => { load(1); }, []);
+
+  const unmerge = async (id: number) => {
+    setActing(id);
+    try {
+      await api.post("/governance/parts/unmerge", { merge_log_id: id });
+      message.success("已回滚合并并重算利润");
+      load(page); onChanged();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || "回滚失败");
+    } finally { setActing(null); }
+  };
+
+  const cols: ColumnsType<MergeRow> = [
+    { title: "#", dataIndex: "merge_log_id", width: 60 },
+    { title: "源型号（已并入）", dataIndex: "source_pn", width: 200 },
+    { title: "目标型号", dataIndex: "target_pn", width: 200, render: (v) => <b>{v}</b> },
+    { title: "受影响", key: "aff", width: 160,
+      render: (_, r) => {
+        const c = r.affected_counts || {};
+        const parts = [
+          c.f_sales_line_ids ? `销${c.f_sales_line_ids}` : "",
+          c.f_purchase_line_ids ? `采${c.f_purchase_line_ids}` : "",
+          c.inventory_ids ? `存${c.inventory_ids}` : "",
+        ].filter(Boolean);
+        return <span style={{ color: "#888" }}>{parts.join(" / ") || "-"}</span>;
+      } },
+    { title: "原因", dataIndex: "reason", ellipsis: true },
+    { title: "操作人", dataIndex: "created_by", width: 90 },
+    { title: "时间", dataIndex: "created_at", width: 160,
+      render: (v: string) => v?.replace("T", " ").slice(0, 16) },
+    { title: "操作", width: 110, fixed: "right",
+      render: (_, r) => r.reverted
+        ? <Tag>已回滚</Tag>
+        : <Popconfirm title={`回滚「${r.source_pn} → ${r.target_pn}」？历史归属将还原并重算利润。`}
+            onConfirm={() => unmerge(r.merge_log_id)}>
+            <Button size="small" danger loading={acting === r.merge_log_id}>回滚</Button>
+          </Popconfirm> },
+  ];
+
+  return (
+    <>
+      <p style={{ color: "#888", marginBottom: 12 }}>
+        合并是可逆操作：回滚会按日志把历史采购/销售/库存的归属逐行还原到源型号并重算利润。
+        建议仅回滚最近一次误操作。
+      </p>
+      <Table rowKey="merge_log_id" size="small" loading={loading} columns={cols} dataSource={rows}
+        scroll={{ x: 1000 }}
+        pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: (p) => load(p) }} />
+    </>
+  );
+}
+
 /** 主数据指标（审核说明 §7） */
 function MetricsTab({ metrics }: { metrics: any }) {
   if (!metrics) return null;
@@ -412,6 +491,7 @@ export default function GovernancePage() {
           items={[
             { key: "parts", label: "型号治理", children: <PartsTab /> },
             { key: "candidates", label: "合并候选审核", children: <CandidatesTab onChanged={loadTop} /> },
+            { key: "merges", label: "合并历史", children: <MergesTab onChanged={loadTop} /> },
             { key: "issues", label: "质量问题", children: <IssuesTab /> },
             { key: "aliases", label: "别名审核", children: <AliasesTab /> },
             { key: "metrics", label: "主数据指标", children: <MetricsTab metrics={metrics} /> },

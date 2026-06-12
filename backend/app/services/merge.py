@@ -13,8 +13,9 @@
 """
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -74,7 +75,9 @@ def _merge_substitutes(db: Session, source: DimPart, target: DimPart) -> dict:
     for s in rows:
         other = s.part_id_b if s.part_id_a == source.id else s.part_id_a
         before = {"id": s.id, "a": s.part_id_a, "b": s.part_id_b,
-                  "direction": s.direction, "status": s.status, "note": s.note}
+                  "direction": s.direction, "status": s.status, "note": s.note,
+                  "substitute_type": s.substitute_type, "source": s.source,
+                  "reviewed_at": s.reviewed_at.isoformat() if s.reviewed_at else None}
         if other == target.id:                      # 源↔目标互为替代 → 合并后自配对，删
             db.delete(s)
             dropped.append(before)
@@ -142,17 +145,18 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
         update(PartAlias).where(PartAlias.part_id == source.id)
         .values(part_id=target.id, pn_std=target.pn_std).returning(PartAlias.id)
     ).scalars().all())
-    # 源 pn_std 本身必须有一条 active 别名指向目标（恒等别名 94% 已存在 → UPSERT）
-    db.execute(pg_insert(PartAlias).values(
+    # 源 pn_std 的恒等别名指向目标：94% 已被上面 bulk 改成 target（在 part_alias_ids 内），
+    # 这里只为「源原本没有恒等别名」的 6% 补一条。用 DO NOTHING 而非 DO UPDATE：
+    # 若 pn_raw=源pn_std 已被一条归属第三方 part 的别名占用（人工 reassign 可造成），
+    # 绝不劫持它。仅当真新插入时记 id，供回滚精确删除。
+    inserted_alias = db.execute(pg_insert(PartAlias).values(
         pn_raw=source.pn_std, pn_std=target.pn_std, part_id=target.id,
         source="merge", needs_review=False, status="active",
-    ).on_conflict_do_update(
-        index_elements=[PartAlias.pn_raw],
-        set_={"pn_std": target.pn_std, "part_id": target.id,
-              "status": "active", "source": "merge", "needs_review": False},
-    ))
+    ).on_conflict_do_nothing(index_elements=[PartAlias.pn_raw])
+     .returning(PartAlias.id)).scalar()
+    affected["identity_alias_inserted_id"] = inserted_alias
 
-    # 4) 规格：目标缺的键迁过去，冲突的键保留目标值、删源行
+    # 4) 规格：目标缺的键迁过去，冲突的键保留目标值、删源行（删前存全行供回滚）
     spec_moved = db.execute(update(ProductSpec).where(
         ProductSpec.part_id == source.id,
         ~ProductSpec.spec_key.in_(select(ProductSpec.spec_key).where(
@@ -160,10 +164,14 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
     ).values(part_id=target.id).returning(ProductSpec.id)).scalars().all()
     spec_dropped = db.execute(
         select(ProductSpec).where(ProductSpec.part_id == source.id)).scalars().all()
+    affected["spec_moved_ids"] = list(spec_moved)
+    affected["spec_dropped"] = [{
+        "spec_key": s.spec_key, "spec_value": s.spec_value, "spec_unit": s.spec_unit,
+        "numeric_value": str(s.numeric_value) if s.numeric_value is not None else None,
+        "source": s.source,
+    } for s in spec_dropped]
     for s in spec_dropped:
         db.delete(s)
-    affected["spec_moved_ids"] = list(spec_moved)
-    affected["spec_dropped"] = [{"key": s.spec_key, "value": s.spec_value} for s in spec_dropped]
 
     # 5) 替代关系
     affected["substitutes"] = _merge_substitutes(db, source, target)
@@ -181,9 +189,14 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
              resolved_at=datetime.now(timezone.utc),
              resolution_note=f"已合并入 {target.pn_std}"))
 
-    # 7) 路径压缩 + 源变墓碑
-    db.execute(update(DimPart).where(DimPart.merged_into_id == source.id)
-               .values(merged_into_id=target.id))
+    # 7) 路径压缩 + 源变墓碑。记录被压缩的孙节点 id（回滚时需改回指向源）
+    compressed = list(db.execute(
+        select(DimPart.id).where(DimPart.merged_into_id == source.id)
+    ).scalars().all())
+    affected["path_compressed_part_ids"] = compressed
+    if compressed:
+        db.execute(update(DimPart).where(DimPart.id.in_(compressed))
+                   .values(merged_into_id=target.id))
     source.status = "merged"
     source.merged_into_id = target.id
     target.reviewed_at = datetime.now(timezone.utc)
@@ -204,6 +217,136 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
     _log.info("merged part %s -> %s (%s)", source_pn, target_pn, counts)
     return {"source_pn": source_pn, "target_pn": target_pn,
             "merge_log_id": log_row.id, "affected_counts": counts}
+
+
+def unmerge(db: Session, merge_log_id: int, operated_by: str | None) -> dict:
+    """回滚一次合并（人工 LIFO，审核说明 §4.8 可回滚要求）。
+
+    安全前提（防误回滚链式/已变更状态）：
+    - 源仍是直接并入目标的墓碑（status='merged' 且 merged_into_id=目标）——
+      此条天然防重复回滚（回滚后源变 active，再次回滚会被拦）；
+    - 目标仍 active（未被后续合并卷走）。
+    用 merge_log 的受影响行 id 数组与前镜像逐表还原；事实行只按记录的 id repoint，
+    与后续其它合并的 id 集合不重叠，故无需全局 LIFO，只需上述状态前提。
+    advisory 队列（候选/质量问题）不在此还原——调用方回滚后应重跑 refresh。
+    """
+    from app.services import spec_extract  # 局部导入避免环
+
+    log_row = db.get(ProductMergeLog, merge_log_id)
+    if log_row is None:
+        raise MergeError(f"合并日志不存在: {merge_log_id}")
+
+    # 锁源/目标（升序）
+    ids = sorted({log_row.source_part_id, log_row.target_part_id})
+    locked = {pid: db.execute(
+        select(DimPart).where(DimPart.id == pid).with_for_update()).scalar_one_or_none()
+        for pid in ids}
+    source = locked.get(log_row.source_part_id)
+    target = locked.get(log_row.target_part_id)
+    if source is None or target is None:
+        raise MergeError("源或目标型号已不存在，无法回滚")
+    if source.status != "merged" or source.merged_into_id != target.id:
+        raise MergeError(f"源型号 {source.pn_std} 当前不是并入 {target.pn_std} 的状态，"
+                         "可能已被回滚或状态已变更")
+    if target.status != "active":
+        raise MergeError(f"目标型号 {target.pn_std} 已非 active（可能被后续合并），不可回滚")
+
+    aff = log_row.affected_records or {}
+
+    # 1) 事实表 part_id 改回源（按记录的 id）
+    for key, model in (("f_purchase_line_ids", FPurchaseLine),
+                       ("f_sales_line_ids", FSalesLine),
+                       ("inventory_ids", Inventory),
+                       ("f_part_inquiry_ids", FPartInquiry)):
+        row_ids = aff.get(key) or []
+        for chunk_start in range(0, len(row_ids), 1000):
+            chunk = row_ids[chunk_start:chunk_start + 1000]
+            db.execute(update(model).where(model.id.in_(chunk)).values(part_id=source.id))
+
+    # 2) 别名改回源（复合外键要求 part_id 与 pn_std 同步）。源自有的恒等别名也在
+    #    part_alias_ids 里，一并改回。合并时若新插过一条恒等别名（6% 情形），删掉它。
+    alias_ids = aff.get("part_alias_ids") or []
+    for chunk_start in range(0, len(alias_ids), 1000):
+        chunk = alias_ids[chunk_start:chunk_start + 1000]
+        db.execute(update(PartAlias).where(PartAlias.id.in_(chunk))
+                   .values(part_id=source.id, pn_std=source.pn_std))
+    ins_alias = aff.get("identity_alias_inserted_id")
+    if ins_alias:
+        db.execute(delete(PartAlias).where(PartAlias.id == ins_alias))
+
+    # 3) 规格：迁走的改回源；被删的按日志原样还原（含人工/numeric/unit，无损）
+    spec_moved = aff.get("spec_moved_ids") or []
+    for chunk_start in range(0, len(spec_moved), 1000):
+        chunk = spec_moved[chunk_start:chunk_start + 1000]
+        db.execute(update(ProductSpec).where(ProductSpec.id.in_(chunk))
+                   .values(part_id=source.id))
+    dropped_specs = []
+    for d in (aff.get("spec_dropped") or []):
+        key = d.get("spec_key") or d.get("key")        # 兼容旧日志格式
+        if not key:
+            continue
+        dropped_specs.append({
+            "part_id": source.id, "spec_key": key,
+            "spec_value": d.get("spec_value") or d.get("value") or "",
+            "spec_unit": d.get("spec_unit"),
+            "numeric_value": Decimal(d["numeric_value"]) if d.get("numeric_value") else None,
+            "source": d.get("source", "auto"),
+        })
+    if dropped_specs:
+        db.execute(pg_insert(ProductSpec).values(dropped_specs)
+                   .on_conflict_do_nothing(constraint="uq_spec_part_key"))
+    # 旧日志（仅含 key/value）无法无损还原的规格，按描述补抽兜底
+    if any("spec_unit" not in d for d in (aff.get("spec_dropped") or [])):
+        respecs = [{**s, "part_id": source.id, "source": "auto"}
+                   for s in spec_extract.extract(source.description)]
+        if respecs:
+            db.execute(pg_insert(ProductSpec).values(respecs)
+                       .on_conflict_do_nothing(constraint="uq_spec_part_key"))
+
+    # 4) 替代关系：迁移的改回、删除的按全列还原（type/source/reviewed_at 不丢）
+    subs = aff.get("substitutes") or {}
+    for mv in subs.get("moved", []):
+        db.execute(update(PartSubstitute).where(PartSubstitute.id == mv["id"])
+                   .values(part_id_a=mv["a"], part_id_b=mv["b"], direction=mv["direction"]))
+    for dp in subs.get("dropped", []):
+        rev = dp.get("reviewed_at")
+        db.execute(pg_insert(PartSubstitute).values(
+            part_id_a=dp["a"], part_id_b=dp["b"], direction=dp.get("direction", "both"),
+            substitute_type=dp.get("substitute_type"),
+            status=dp.get("status", "active"), note=dp.get("note"),
+            source=dp.get("source", "manual"),
+            reviewed_at=datetime.fromisoformat(rev) if rev else None,
+        ).on_conflict_do_nothing(index_elements=["part_id_a", "part_id_b"]))
+
+    # 5) 路径压缩的孙节点改回指向源
+    compressed = aff.get("path_compressed_part_ids") or []
+    if compressed:
+        db.execute(update(DimPart).where(DimPart.id.in_(compressed))
+                   .values(merged_into_id=source.id))
+
+    # 6) 目标 fill-if-empty 回补字段还原（仅当当前值仍等于合并时写入的值）
+    restored = {}
+    for f, ba in (log_row.merged_fields or {}).items():
+        if getattr(target, f) == ba["after"]:
+            setattr(target, f, ba["before"])
+            restored[f] = ba["before"]
+
+    # 7) 源复活
+    source.status = "active"
+    source.merged_into_id = None
+
+    db.add(SysAuditLog(
+        entity_type="part", entity_id=source.id, action="unmerge",
+        before_json={"merged_into": target.pn_std, "merge_log_id": merge_log_id},
+        after_json={"restored_fields": restored,
+                    "facts_restored": {k: len(aff.get(k) or []) for k in
+                                       ("f_purchase_line_ids", "f_sales_line_ids",
+                                        "inventory_ids", "f_part_inquiry_ids")}},
+        reason=f"回滚合并 #{merge_log_id}", operated_by=operated_by))
+    db.commit()
+    _log.info("unmerged %s <- %s (log #%s)", source.pn_std, target.pn_std, merge_log_id)
+    return {"source_pn": source.pn_std, "target_pn": target.pn_std,
+            "merge_log_id": merge_log_id, "restored_fields": list(restored)}
 
 
 def cost_source_distribution(db: Session, part_id: int) -> dict:

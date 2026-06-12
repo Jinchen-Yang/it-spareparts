@@ -36,9 +36,11 @@ _DISK_GUARD = re.compile(
 _MEM_SIGNAL = re.compile(r"(DDR[2-5]|PC[2-5]L?-\d|RDIMM|LRDIMM|UDIMM|SODIMM|内存|MEMORY)", re.I)
 
 _SSD = re.compile(r"(SSD|SOLID STATE|NVME)", re.I)
-_CAP_T = re.compile(r"(\d+(?:\.\d+)?)\s*TB?\b", re.I)
+# T 容量：负向先行避免匹配料号内部数字（如 02311T）；上界+前导零守卫在 _disk_capacity 里
+_CAP_T = re.compile(r"(?<![A-Za-z0-9])(\d+(?:\.\d+)?)\s*TB?\b", re.I)
 # G 容量：≥100 才认（3G/6G/12G 是接口速率、2GB 是缓存）
 _CAP_G = re.compile(r"(\d{3,5})\s*GB?\b", re.I)
+_MAX_DISK_TB = 64   # 单盘真实容量上界，过滤被误当容量的料号片段
 _INTERFACE = ["NVME", "SAS", "SATA", "FC", "SCSI"]
 _RPM = re.compile(r"(\d+(?:\.\d+)?)\s*K\b", re.I)
 _FORM_DISK = re.compile(r"(2\.5|3\.5)\s*(寸|英寸|INCH|\")?", re.I)
@@ -58,18 +60,31 @@ def _spec(key: str, value: str, numeric=None) -> dict:
             "numeric_value": Decimal(str(numeric)) if numeric is not None else None}
 
 
+def _t_capacity(desc: str) -> dict | None:
+    """从描述抽 TB 容量；过滤被误当容量的料号片段（前导零多位 / 超上界）。"""
+    for m in _CAP_T.finditer(desc):
+        raw = m.group(1)
+        int_part = raw.split(".")[0]
+        if len(int_part) > 1 and int_part.startswith("0"):
+            continue                       # 02311T 等料号片段
+        val = float(raw)
+        if 0 < val <= _MAX_DISK_TB:
+            return _spec("capacity", f"{raw}TB", val * 1000)
+    return None
+
+
 def _extract_disk(desc: str) -> list[dict]:
     out = []
     is_ssd = bool(_SSD.search(desc))
     out.append(_spec("part_type", "SSD" if is_ssd else "HDD"))
 
-    m = _CAP_T.search(desc)
-    if m:
-        out.append(_spec("capacity", f"{m.group(1)}TB", float(m.group(1)) * 1000))
-    else:
+    cap = _t_capacity(desc)               # T 不合理时不短路 GB
+    if cap is None:
         m = _CAP_G.search(desc)
         if m and int(m.group(1)) >= 100:
-            out.append(_spec("capacity", f"{m.group(1)}GB", int(m.group(1))))
+            cap = _spec("capacity", f"{m.group(1)}GB", int(m.group(1)))
+    if cap is not None:
+        out.append(cap)
 
     up = desc.upper()
     for itf in _INTERFACE:
