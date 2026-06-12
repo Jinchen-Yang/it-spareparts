@@ -163,6 +163,21 @@ def test_junk_compact_not_candidate(db, seeded):
     assert cand is None, "垃圾 compact 组不得进合并候选"
 
 
+def test_review_independent_count_excludes_self(db, seeded):
+    """review(independent) 的 obsoleted 计数不得把本条算进去（autoflush=False 时序）。"""
+    # 同 compact(ABCD1)、长度≥5，构成重复组
+    _add_dup_pair(db, seeded, "ABCD-1", "ABCD1", vol_pn="ABCD1")
+    match_candidates.generate(db)
+    cand = db.scalar(select(ProductMatchCandidate).where(
+        ProductMatchCandidate.status == "pending",
+        ProductMatchCandidate.raw_text == "ABCD-1"))
+    out = match_candidates.review(db, cand.id, "independent", None, "t")
+    # RX-1 源只有这一条候选 → 没有“其它”候选被作废，计数应为 0
+    assert out["confirmed"]["obsoleted_candidates"] == 0
+    db.expire_all()
+    assert db.get(ProductMatchCandidate, cand.id).status == "rejected"
+
+
 def test_confirm_independent_batch(db, seeded):
     ids = match_candidates.parts_without_candidates(db)
     assert ids, "PN AMBIG 待审且无候选"

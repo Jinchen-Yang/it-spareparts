@@ -32,6 +32,16 @@ def test_interface_speed_not_capacity():
     assert float(s["capacity"]["numeric_value"]) == 6000, "6G 是接口速率不是容量"
 
 
+def test_part_number_fragment_not_capacity():
+    """料号片段 02311T 不得被当成 2311TB；真实 GB 容量不被屏蔽。"""
+    s = _specs("HUAWEI 02311T SAS 900GB 10K 2.5")
+    assert float(s["capacity"]["numeric_value"]) == 900, "应抽到真实 900GB，而非料号 02311T"
+    s2 = _specs("HP 005051T SAS HDD 600GB")
+    assert float(s2["capacity"]["numeric_value"]) == 600
+    # 合理 TB 容量仍正常
+    assert float(_specs("Dell 8T 7.2K SAS")["capacity"]["numeric_value"]) == 8000
+
+
 def test_controller_guard():
     assert spec_extract.extract(
         "HP Smart Array P840ar/2GB FBWC 12GB 2-port Internal SAS Controller") == []

@@ -27,6 +27,11 @@ class MergeRequest(BaseModel):
     recompute: bool = True   # 合并后自动重算利润/库存成本
 
 
+class UnmergeRequest(BaseModel):
+    merge_log_id: int
+    recompute: bool = True
+
+
 class CandidateReview(BaseModel):
     action: str              # merge | reject | independent
     reason: str | None = None
@@ -112,6 +117,60 @@ def merge_parts(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     if body.recompute:
         # 合并已提交；重算各自管理事务。失败不回滚合并，提示手动重算。
+        try:
+            result["recompute"] = profit_svc.recompute(db)
+            result["inventory_costs"] = inventory_svc.backfill_costs(db)
+        except Exception as exc:  # noqa: BLE001
+            result["recompute_failed"] = str(exc)
+    return result
+
+
+@router.get("/merges")
+def list_merges(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin),
+) -> dict:
+    """合并历史（最近在前），供回滚选择。"""
+    from sqlalchemy import desc, func, select
+
+    from app.models.dimensions import DimPart
+    from app.models.master_data import ProductMergeLog
+    total = db.scalar(select(func.count()).select_from(ProductMergeLog))
+    rows = db.execute(
+        select(ProductMergeLog).order_by(desc(ProductMergeLog.id))
+        .offset((page - 1) * page_size).limit(page_size)
+    ).scalars().all()
+    names = dict(db.execute(select(DimPart.id, DimPart.pn_std).where(DimPart.id.in_(
+        [r.source_part_id for r in rows] + [r.target_part_id for r in rows]))).all()) if rows else {}
+    items = []
+    for r in rows:
+        src = (r.source_snapshot or {}).get("pn_std") or names.get(r.source_part_id)
+        tgt = names.get(r.target_part_id)
+        src_part = db.get(DimPart, r.source_part_id)
+        items.append({
+            "merge_log_id": r.id, "source_pn": src, "target_pn": tgt,
+            "reason": r.merge_reason, "created_by": r.created_by, "created_at": r.created_at,
+            "reverted": (src_part is None or src_part.status != "merged"
+                         or src_part.merged_into_id != r.target_part_id),
+            "affected_counts": {k: (len(v) if isinstance(v, list) else v)
+                                for k, v in (r.affected_records or {}).items()},
+        })
+    return {"total": total, "page": page, "page_size": page_size, "items": items}
+
+
+@router.post("/parts/unmerge")
+def unmerge_parts(
+    body: UnmergeRequest,
+    db: Session = Depends(get_db),
+    role: str = Depends(require_admin),
+) -> dict:
+    try:
+        result = merge.unmerge(db, body.merge_log_id, role)
+    except merge.MergeError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    if body.recompute:
         try:
             result["recompute"] = profit_svc.recompute(db)
             result["inventory_costs"] = inventory_svc.backfill_costs(db)

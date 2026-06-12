@@ -197,6 +197,9 @@ def review(db: Session, candidate_id: int, action: str, reason: str | None,
         cand.status, cand.review_action = "rejected", "reject"
     else:  # independent：源确认为独立型号
         cand.status, cand.review_action = "rejected", "independent"
+        # 先刷库（autoflush=False）：否则 confirm_independent 的 status='pending'
+        # Core UPDATE 会把本条也算进 obsoleted 计数，多记 1
+        db.flush()
         if cand.source_part_id:
             out["confirmed"] = confirm_independent(
                 db, [cand.source_part_id], operated_by, _commit=False)

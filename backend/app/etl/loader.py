@@ -11,6 +11,7 @@
 明细行 pn_std/pn_raw 一律保留 cleaner 归一原文（不改写为目标 pn）——这是
 追溯与合并回滚归属判定的前提；商品身份只体现在 part_id。
 """
+import logging
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
@@ -26,6 +27,7 @@ from app.models.inventory import Inventory
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 
+_log = logging.getLogger("loader")
 _CHUNK = 1000  # 每批行数，控制单语句参数数 < PostgreSQL 65535 上限
 _MERGE_CHAIN_LIMIT = 10
 
@@ -371,20 +373,31 @@ def _load_inventory(session: Session, result: TransformResult, batch_id: int, sn
     _upsert_aliases(session, result.inventory, resolution)
 
     # 2) 同 (pn_std, warehouse) 求和（实测 15 组重复，§摸底）。
-    #    组内商品身份必须唯一（物理键是 pn_std+warehouse）：优先取「未被重定向」
-    #    成员的身份（canonical == 组 pn_std）；全员重定向（如整组属已合并型号）
-    #    才用重定向身份。混合组极罕见，按此规则确定化处理。
+    #    物理键是 pn_std+warehouse，每组只能落一个 part_id。身份选择规则（确定化，
+    #    与行迭代顺序无关）：优先「未被重定向」成员（canonical==组 pn_std）；
+    #    若全员重定向，取候选 part_id 最小者。若组内重定向到多个不同 part（极罕见：
+    #    两个仅大小写不同的 pn_raw 各自被别名指向不同型号），告警——合并后的数量
+    #    会整体记到选中型号，另一型号的库存可见性丢失。
     agg: dict[tuple, dict] = {}
     for r in result.inventory:
         key = (r["pn_std"], r["warehouse"])
         pid, canonical = resolution[r["pn_raw"]]
+        is_identity = canonical == r["pn_std"]
         if key not in agg:
-            agg[key] = {**r, "source_qty": Decimal("0"), "_part_id": pid,
-                        "_identity": canonical == r["pn_std"]}
+            agg[key] = {**r, "source_qty": Decimal("0"),
+                        "_part_id": pid, "_identity": is_identity, "_targets": set()}
         g = agg[key]
         g["source_qty"] += r["source_qty"]
-        if not g["_identity"] and canonical == r["pn_std"]:
-            g["_part_id"], g["_identity"] = pid, True
+        g["_targets"].add(pid)
+        # 身份优先级：identity 成员 > 非 identity；同级取 part_id 最小（确定化）
+        better = (is_identity and not g["_identity"]) or \
+                 (is_identity == g["_identity"] and pid < g["_part_id"])
+        if better:
+            g["_part_id"], g["_identity"] = pid, is_identity
+    for key, g in agg.items():
+        if len(g["_targets"]) > 1:
+            _log.warning("库存组 %s 重定向到多个型号 %s，数量归到 part_id=%s",
+                         key, sorted(g["_targets"]), g["_part_id"])
 
     rows = [{
         "raw_inventory_id": r["raw_inventory_id"], "part_id": r["_part_id"],
