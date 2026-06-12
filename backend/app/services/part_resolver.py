@@ -163,7 +163,9 @@ def resolve(db: Session, query: str, limit: int = 10,
     """
     ctx, doc_terms = preprocess(query)
     if not ctx["main"] and not doc_terms:
-        return {"query": query, "items": [], "low_confidence": True}
+        # 纯符号/无有效 token（如 "!!!"、"---"）：早返回也要带全部键，
+        # 否则 /parts/search 与 _lookup_prices_bulk 无条件读 ambiguous 会 KeyError(500)
+        return {"query": query, "items": [], "low_confidence": True, "ambiguous": False}
 
     # 放宽 trigram 召回阈值（仅本事务）：长库值×短 token 时默认 0.3 偏紧
     db.execute(text("SET LOCAL pg_trgm.similarity_threshold = 0.25"))

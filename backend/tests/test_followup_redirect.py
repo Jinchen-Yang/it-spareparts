@@ -97,6 +97,21 @@ def test_resolver_excludes_tombstone_from_direct_pn_match(db):
     assert all(it["pn_std"] != "PN-OLD" for it in r["items"])
 
 
+def test_resolve_symbol_only_query_keeps_full_shape(db):
+    """纯符号/无有效 token 查询的早返回必须带 'ambiguous' 键。
+    回归 codex 发现#1：/parts/search 在 resolver 分支无条件读 data['ambiguous']，
+    早返回缺该键时整个端点 500（GET /parts/search?q=!!! 任意登录用户可触发）。"""
+    for q in ("!!!", "---", "###", "  @  "):
+        r = part_resolver.resolve(db, q, limit=5)
+        assert r["items"] == []
+        assert r["low_confidence"] is True
+        assert "ambiguous" in r, f"{q!r} 早返回缺 ambiguous 键 → 端点会 KeyError"
+        assert r["ambiguous"] is False
+    # 形状与正常返回一致（4 键）
+    normal = part_resolver.resolve(db, "ST8000NM000A", limit=5)
+    assert {"query", "items", "low_confidence", "ambiguous"} <= set(normal)
+
+
 def test_resolver_excludes_tombstone_via_doc_terms_branch(db):
     """硬化：墓碑过滤必须跨全部召回路。前几个测试只命中 _PART_SQL 的 clause A
     （pn_compact 主 token 相似），即便 status 过滤的括号错位只包住 clause A 也会通过。
