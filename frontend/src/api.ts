@@ -173,6 +173,11 @@ export interface Overview {
     last_money: number | null;
     count: number;
   };
+  sales_velocity: {
+    qty_sold_90d: number;
+    monthly_avg_90d: number;
+    last_sale_date: string | null;
+  };
 }
 
 export interface PurchaseRow {

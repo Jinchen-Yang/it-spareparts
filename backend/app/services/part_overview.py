@@ -6,6 +6,7 @@
 （pn_std 文本是导入痕迹，合并后不重写；商品身份只看 part_id）。
 查询已合并型号自动重定向到目标档案，并在返回中标注 redirected_from。
 """
+import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -22,6 +23,7 @@ from app.models.sales import FSalesLine, FSalesOrder
 
 _ACTIVE = "已生效"
 _MERGE_CHAIN_LIMIT = 10
+_log = logging.getLogger(__name__)
 
 
 def _d(x) -> float | None:
@@ -29,7 +31,12 @@ def _d(x) -> float | None:
 
 
 def resolve_part(db: Session, pn_std: str) -> tuple[DimPart | None, str | None]:
-    """pn_std → (part, redirected_from)。命中已合并墓碑时沿链取目标档案。"""
+    """pn_std → (part, redirected_from)。命中已合并墓碑时沿链取目标档案。
+
+    链深溢出（>_MERGE_CHAIN_LIMIT）返回 (None, None) 而非墓碑：正常路径压缩后
+    链长恒≤1，溢出意味着并发合并或数据异常，此时返墓碑会让下游 part_id 查询
+    全空，AI 误报"无历史"——再次重现 §4 防的失败模式。
+    """
     part = db.scalar(select(DimPart).where(DimPart.pn_std == pn_std))
     if part is None:
         return None, None
@@ -37,7 +44,10 @@ def resolve_part(db: Session, pn_std: str) -> tuple[DimPart | None, str | None]:
     hops = 0
     while part.status == "merged" and part.merged_into_id is not None:
         if hops >= _MERGE_CHAIN_LIMIT:
-            break
+            _log.warning(
+                "merge chain limit reached resolving pn_std=%s (last=%s, depth=%d)",
+                pn_std, part.pn_std, hops)
+            return None, None
         redirected_from = redirected_from or part.pn_std
         part = db.get(DimPart, part.merged_into_id)
         hops += 1
@@ -93,6 +103,7 @@ def search_parts(db: Session, q: str | None, page: int, page_size: int,
         "items": [{
             "pn_std": p.pn_std, "description": p.description, "brand": p.brand,
             "category_major": p.category_major, "needs_review": p.needs_review,
+            "is_excluded": p.is_excluded,   # 与 resolver 分支返回形状对齐
             "specs": specs_by_part.get(p.id, {}),
         } for p in rows],
     }
@@ -155,19 +166,24 @@ def _empty_page(page: int, page_size: int) -> dict:
 
 def list_purchases(db: Session, pn_std: str, page: int, page_size: int,
                    user_ctx: security.UserContext | None = None) -> dict:
-    part, _ = resolve_part(db, pn_std)
+    part, redirected_from = resolve_part(db, pn_std)
     if part is None:
-        return _empty_page(page, page_size)
-    return _paginate(db, _purchases_query(part.id, user_ctx), page, page_size, _purchase_row)
+        out = _empty_page(page, page_size)
+    else:
+        out = _paginate(db, _purchases_query(part.id, user_ctx), page, page_size, _purchase_row)
+    out["redirected_from"] = redirected_from   # 与模块 docstring 承诺一致：所有查询都暴露重定向
+    return out
 
 
 def list_sales(db: Session, pn_std: str, page: int, page_size: int,
                user_ctx: security.UserContext | None = None) -> dict:
-    part, _ = resolve_part(db, pn_std)
+    part, redirected_from = resolve_part(db, pn_std)
     if part is None:
-        return _empty_page(page, page_size)
-    out = _paginate(db, _sales_query(part.id, user_ctx), page, page_size, _sales_row)
-    out["items"] = security.anonymize_sales_rows(out["items"], user_ctx)  # 防恶性竞争
+        out = _empty_page(page, page_size)
+    else:
+        out = _paginate(db, _sales_query(part.id, user_ctx), page, page_size, _sales_row)
+        out["items"] = security.anonymize_sales_rows(out["items"], user_ctx)  # 防恶性竞争
+    out["redirected_from"] = redirected_from
     return out
 
 
@@ -299,11 +315,14 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
     比 get_overview 轻一个量级，供 lookup_prices_bulk 每行调用。
     整改 P3：先 resolve_part 解析 part_id（含 merged 链重定向）再按 part_id 过滤；
     若直接按 pn_std 文本过滤，已合并型号的历史会从 AI 定价答案中悄悄消失。
+    返回 `pn_std` / `description` / `redirected_from` 让调用方（智能体）能告诉用户
+    "你查的 X 已重定向到 Y，下面价格属于 Y"——否则会用合并目标的价格冒充入参 PN。
     采购价只取计入成本的采购类型（与成本口径一致，排除维保等）。
     """
-    part, _ = resolve_part(db, pn_std)
+    part, redirected_from = resolve_part(db, pn_std)
     if part is None:
-        return {"last_purchase_price": None, "last_purchase_date": None,
+        return {"pn_std": pn_std, "description": None, "redirected_from": None,
+                "last_purchase_price": None, "last_purchase_date": None,
                 "last_purchase_type": None, "recent_purchase_days": config.RECENT_PURCHASE_DAYS,
                 "recent_purchase_avg": None, "recent_purchase_min": None,
                 "recent_purchase_max": None, "recent_purchase_count": 0,
@@ -353,6 +372,11 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
         or Decimal(0) for inv in inv_rows
     )
     return {
+        # 商品身份：用 resolve_part 解析后的 *规范* PN，而非入参 pn_std——
+        # 入参可能是已合并墓碑，此处覆盖让智能体把价格挂在正确的商品上
+        "pn_std": part.pn_std,
+        "description": part.description,
+        "redirected_from": redirected_from,
         "last_purchase_price": _d(last[1]) if last else None,
         "last_purchase_date": last[0] if last else None,
         "last_purchase_type": last[2] if last else None,
