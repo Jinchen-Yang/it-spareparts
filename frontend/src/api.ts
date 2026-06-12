@@ -178,6 +178,12 @@ export interface Overview {
     monthly_avg_90d: number;
     last_sale_date: string | null;
   };
+  // 近期加权成交价参考（销售出价用，越近权重越高；建议售价由销售自行把握）
+  sale_price_ref: {
+    ref_sale_price: number | null;
+    ref_sale_samples: number;
+    ref_window_days: number;
+  };
 }
 
 export interface PurchaseRow {

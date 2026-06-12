@@ -318,6 +318,46 @@ def _sales_velocity(db: Session, part_id: int) -> dict:
     }
 
 
+def _weighted_recent_sale_price(db: Session, part_id: int) -> dict:
+    """成交价参考（销售出价用）：近 REF_PRICE_MAX_N 条且 REF_PRICE_DAYS 天内的成交价，
+    按时间半衰期加权平均——越近权重越高、越久越低（每过 HALFLIFE 天权重减半），
+    削掉单笔异常价的方差。只取计入营收的真实成交（counts_revenue，排除换货等）。
+    不给"建议售价"——加价由销售自行把握，这里只给一个稳的参考价。"""
+    since = date.today() - timedelta(days=config.REF_PRICE_DAYS)
+    stmt = (
+        select(FSalesOrder.order_date, FSalesLine.unit_price)
+        .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
+        .where(FSalesLine.part_id == part_id,
+               FSalesLine.unit_price > 0,
+               FSalesLine.counts_revenue.is_(True),
+               FSalesOrder.order_date >= since)
+    )
+    if config.ACTIVE_STATUS_ONLY:
+        stmt = stmt.where(FSalesOrder.data_status == _ACTIVE)
+    # 最近 N 条；稳定排序（同日按 line id 降序）防取样不确定性
+    rows = db.execute(
+        stmt.order_by(FSalesOrder.order_date.desc().nullslast(), FSalesLine.id.desc())
+        .limit(config.REF_PRICE_MAX_N)
+    ).all()
+    if not rows:
+        return {"ref_sale_price": None, "ref_sale_samples": 0,
+                "ref_window_days": config.REF_PRICE_DAYS}
+    today = date.today()
+    num, den = Decimal(0), Decimal(0)
+    for order_date, price in rows:
+        age = (today - order_date).days if order_date else config.REF_PRICE_DAYS
+        age = max(0, min(age, config.REF_PRICE_DAYS))
+        w = Decimal(str(0.5 ** (age / config.REF_PRICE_HALFLIFE_DAYS)))
+        num += w * price
+        den += w
+    ref = (num / den) if den > 0 else None
+    return {
+        "ref_sale_price": _d(ref.quantize(Decimal("0.01"))) if ref is not None else None,
+        "ref_sale_samples": len(rows),
+        "ref_window_days": config.REF_PRICE_DAYS,
+    }
+
+
 def quick_pricing(db: Session, pn_std: str) -> dict:
     """轻量定价摘要（整机拆解/批量询价场景）：近N天采购价窗口 / 近90天均售价 / 库存合计。
 
@@ -335,7 +375,9 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
                 "last_purchase_type": None, "recent_purchase_days": config.RECENT_PURCHASE_DAYS,
                 "recent_purchase_avg": None, "recent_purchase_min": None,
                 "recent_purchase_max": None, "recent_purchase_count": 0,
-                "avg_sale_price_90d": None, "stock_total": 0}
+                "avg_sale_price_90d": None, "stock_total": 0,
+                "ref_sale_price": None, "ref_sale_samples": 0,
+                "ref_window_days": config.REF_PRICE_DAYS}
     pid = part.id
     lp = (
         select(FPurchaseOrder.order_date, FPurchaseLine.unit_price, FPurchaseOrder.source_type)
@@ -397,6 +439,8 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
         "recent_purchase_count": r_cnt or 0,
         "avg_sale_price_90d": _d((samt / sqty).quantize(Decimal("0.01"))) if samt and sqty else None,
         "stock_total": _d(stock),
+        # 近期加权成交价参考（销售出价用，越近权重越高）
+        **_weighted_recent_sale_price(db, pid),
     }
 
 
@@ -437,4 +481,5 @@ def get_overview(db: Session, pn_std: str,
         "profit_summary": _profit_summary(db, part.id),
         "inquiry_ref": _inquiry_ref(db, part.id, part.pn_std),
         "sales_velocity": _sales_velocity(db, part.id),
+        "sale_price_ref": _weighted_recent_sale_price(db, part.id),
     }
