@@ -81,6 +81,27 @@ def test_resolve_part_chain_limit_returns_none(db, merged):
     assert rf is None
 
 
+def test_resolve_part_chain_broken_returns_none(db, merged):
+    """链中节点缺失（断 FK / 异常数据）：返 (None, None) 而非 AttributeError 500。"""
+    from app.models.dimensions import DimPart as _Part
+
+    # 构造断链：BROKEN-A → merged_into_id=99999（无对应 dim_part 行）
+    # 注：dim_part.merged_into_id 是 ForeignKey 但未显式 RESTRICT；现实路径是
+    # 数据迁移/手工修复留下的孤儿。本测试直接造孤儿来验证防御。
+    orphan_id = 999999
+    a = _Part(pn_std="BROKEN-A", status="merged", merged_into_id=orphan_id)
+    # 绕过 FK 约束：若库有 FK 拒绝，跳过；治理库通常未对 merged_into 加 RESTRICT
+    db.add(a)
+    try:
+        db.flush()
+    except Exception:
+        db.rollback()
+        pytest.skip("FK 约束阻止构造孤儿 merged_into_id；防御路径靠 logger 报警")
+
+    part, rf = part_overview.resolve_part(db, "BROKEN-A")
+    assert part is None and rf is None
+
+
 def test_quick_pricing_labels_canonical_pn_with_redirect(db, merged):
     """整改 P3 核心回归：查询墓碑 PN-OLD 时，quick_pricing 必须用规范 PN-NEW 标注价格，
     并暴露 redirected_from='PN-OLD'。否则下游 lookup_prices_bulk 把 NEW 的价格冒充 OLD。"""

@@ -44,12 +44,20 @@ def resolve_part(db: Session, pn_std: str) -> tuple[DimPart | None, str | None]:
     hops = 0
     while part.status == "merged" and part.merged_into_id is not None:
         if hops >= _MERGE_CHAIN_LIMIT:
+            # %r 转义控制字符，防用户控制的 pn_std 注入伪造日志行
             _log.warning(
-                "merge chain limit reached resolving pn_std=%s (last=%s, depth=%d)",
+                "merge chain limit reached resolving pn_std=%r (last=%r, depth=%d)",
                 pn_std, part.pn_std, hops)
             return None, None
         redirected_from = redirected_from or part.pn_std
-        part = db.get(DimPart, part.merged_into_id)
+        next_part = db.get(DimPart, part.merged_into_id)
+        if next_part is None:
+            # 链中节点缺失（断 FK / 数据异常）：当作 not-found 而非 500
+            _log.warning(
+                "merge chain broken resolving pn_std=%r at hop %d (orphan merged_into_id=%d on %r)",
+                pn_std, hops, part.merged_into_id, part.pn_std)
+            return None, None
+        part = next_part
         hops += 1
     return part, redirected_from
 
