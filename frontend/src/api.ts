@@ -63,6 +63,13 @@ export interface Overview {
     last_money: number | null;
     count: number;
   };
+  // 近期加权成交参考价（销售出价用，北极星）。由 PR #1 后端提供；
+  // 本分支后端暂未返回 → 运行时可能为 undefined，前端按可空处理。
+  sale_price_ref?: {
+    ref_sale_price: number | null;   // 近期加权成交参考价
+    ref_sale_samples: number;        // 取样成交笔数（0 = 窗口内无成交）
+    ref_window_days: number;         // 取样窗口天数（30）
+  };
 }
 
 export interface PurchaseRow {

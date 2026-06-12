@@ -154,6 +154,25 @@ export default function PartSearchPage() {
             <Descriptions.Item label="规格">{ov.part.category_minor || "-"}</Descriptions.Item>
           </Descriptions>
 
+          {ov.sale_price_ref?.ref_sale_price != null && (
+            <div style={{
+              display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap",
+              background: "#DCE8ED", border: "1px solid #CADCE4", borderRadius: 10,
+              padding: "12px 16px", marginBottom: 16,
+            }}>
+              <span style={{ color: COLORS.text2, fontSize: 13 }}>近期成交参考价（销售出价用）</span>
+              <span style={{ fontSize: 22, fontWeight: 500, color: COLORS.accentStrong }}>
+                {money(ov.sale_price_ref.ref_sale_price)}
+              </span>
+              <span style={{ color: COLORS.text3, fontSize: 13 }}>
+                近 {ov.sale_price_ref.ref_sale_samples} 单 / {ov.sale_price_ref.ref_window_days} 天加权
+              </span>
+              {ov.sale_price_ref.ref_sale_samples < 3 && (
+                <Tag color="orange">成交少，仅供参考</Tag>
+              )}
+            </div>
+          )}
+
           <Row gutter={16} style={{ marginBottom: 16 }}>
             <Col span={6}><Card size="small">
               <Statistic title="移动加权 · 单位成本" value={ov.profit_summary.avg_cost_moving ?? "-"} prefix="¥"
