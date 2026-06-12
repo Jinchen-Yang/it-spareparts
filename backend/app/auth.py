@@ -65,10 +65,15 @@ def _sign(payload: bytes) -> str:
     return base64.urlsafe_b64encode(sig).decode().rstrip("=")
 
 
-def _make_token(role: str, sub: str, name: str | None) -> tuple[str, int]:
+def _make_token(role: str, sub: str, name: str | None,
+                fallback: bool = False) -> tuple[str, int]:
     exp = int(time.time()) + get_settings().token_ttl_hours * 3600
-    body = json.dumps({"role": role, "sub": sub, "name": name, "exp": exp},
-                      separators=(",", ":"), ensure_ascii=False).encode()
+    payload: dict = {"role": role, "sub": sub, "name": name, "exp": exp}
+    if fallback:
+        # 共享口令回退登录：sub 是用户自报的任意字符串，不是实名身份。
+        # 依赖 sub 做归属的功能（如对话会话）必须拒绝此类 token。
+        payload["fb"] = True
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
     b64 = base64.urlsafe_b64encode(body).decode().rstrip("=")
     return f"{b64}.{_sign(body)}", exp
 
@@ -104,11 +109,13 @@ def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
         return LoginResponse(token=token, role=user.role,
                              name=user.display_name or user.salesperson_name, expires_at=exp)
 
-    # 回退：兼容既有部署的共享口令登录（sys_user 无此账号时）
+    # 回退：兼容既有部署的共享口令登录（sys_user 无此账号时）。
+    # admin 的 sub 固定为 'admin'（无冒充空间）；其余用户名是自报的，
+    # token 标记 fb=True，按 sub 归属的功能（对话会话）会拒绝。
     if not hmac.compare_digest(req.password, get_settings().admin_password):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
     role = "admin" if req.username == "admin" else "readonly"
-    token, exp = _make_token(role, req.username, None)
+    token, exp = _make_token(role, req.username, None, fallback=(role != "admin"))
     return LoginResponse(token=token, role=role, name=req.username, expires_at=exp)
 
 

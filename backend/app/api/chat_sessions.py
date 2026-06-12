@@ -48,7 +48,17 @@ def _require_agent_enabled() -> None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "AI 助手未启用")
 
 
+def _require_real_identity(ident: dict) -> None:
+    """会话按 token.sub 归属——共享口令回退登录的 sub 是自报的任意字符串，
+    两个人自称同一个名字就会互看对话。这类身份禁用会话功能。"""
+    if ident.get("fb"):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "AI 助手会话需要实名账号（请管理员在系统中为你创建用户）")
+
+
 def _owned_or_404(db: Session, ident: dict, session_id: int):
+    _require_real_identity(ident)
     s = chat_store.get_owned(db, ident["sub"], session_id)
     if s is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "会话不存在")
@@ -60,6 +70,7 @@ def list_sessions(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
 ) -> dict:
+    _require_real_identity(ident)
     return {"items": chat_store.list_sessions(db, ident["sub"])}
 
 
@@ -69,6 +80,7 @@ def create_session(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
 ) -> dict:
+    _require_real_identity(ident)
     s = chat_store.create_session(db, ident["sub"], req.title)
     return {"id": s.id, "title": s.title, "updated_at": s.updated_at}
 
@@ -107,6 +119,53 @@ def list_messages(
             "items": chat_store.list_messages(db, s.id)}
 
 
+# ---------- 会话级生成互斥与取消 ----------
+# 同一会话同时只允许一轮生成（ChatGPT 语义）：并发生成会让消息 id 顺序与
+# 对话顺序永久错乱、半截 checkpoint 被当完整历史回灌 LLM。单进程 uvicorn
+# （Dockerfile 无 --workers）下进程内注册表即可；多进程部署需改 DB 行锁。
+_guard_lock = threading.Lock()
+_active_runs: dict[int, threading.Event] = {}  # session_id -> cancel event
+
+
+def acquire_session(session_id: int) -> threading.Event | None:
+    """开始生成：返回该轮的取消事件；该会话已有生成中则返回 None。"""
+    with _guard_lock:
+        if session_id in _active_runs:
+            return None
+        ev = threading.Event()
+        _active_runs[session_id] = ev
+        return ev
+
+
+def release_session(session_id: int) -> None:
+    with _guard_lock:
+        _active_runs.pop(session_id, None)
+
+
+def request_cancel(session_id: int) -> bool:
+    """请求取消该会话当前生成。返回是否有生成在进行。"""
+    with _guard_lock:
+        ev = _active_runs.get(session_id)
+    if ev is None:
+        return False
+    ev.set()
+    return True
+
+
+@router.post("/{session_id}/chat/cancel")
+def chat_cancel(
+    session_id: int,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """停止当前生成：worker 收到信号后把已生成部分以 stopped=True 落库——
+    前端显示的"已中断"与库内状态一致。"""
+    s = _owned_or_404(db, ident, session_id)
+    record_access_log(ctx, "chat_cancel", "agent", {"session_id": s.id})
+    return {"cancelled": request_cancel(s.id)}
+
+
 @router.post("/{session_id}/chat/stream")
 def chat_stream(
     session_id: int,
@@ -116,26 +175,45 @@ def chat_stream(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     """会话内流式问答。SSE 事件与旧 /agent/chat/stream 一致，外加
-    {type:"title", title} —— 首条消息后服务端定的会话标题。"""
+    {type:"title", title} —— 首条消息后服务端定的会话标题。
+
+    中断语义：①点"停止"（/chat/cancel）→ worker 尽快收束，已生成部分以
+    stopped=True 落库；②客户端断网/关页面（无 cancel）→ worker 跑到底，
+    完整答案落库（重新打开会话可见全文）。"""
     _require_agent_enabled()
     s = _owned_or_404(db, ident, session_id)
     record_access_log(ctx, "chat_stream", "agent",
                       {"session_id": s.id, "q": req.message[:200]})
 
-    # 先落用户消息（即使后面中断，提问也不丢）；首条消息顺带定标题
-    title_before = s.title
-    chat_store.append_message(db, s, "user", req.message)
-    history = chat_store.history_for_llm(db, s.id)
+    cancel_ev = acquire_session(s.id)
+    if cancel_ev is None:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "该会话上一轮回答还在生成中，请稍候或先停止")
+
+    sid = s.id  # 捕获纯标量：流式期间不再触碰请求级 ORM 对象/会话
+    try:
+        # 先落用户消息（即使后面中断，提问也不丢）；首条消息顺带定标题
+        title_before = s.title
+        chat_store.append_message(db, s, "user", req.message)
+        history = chat_store.history_for_llm(db, s.id)
+        new_title = s.title if s.title != title_before else None
+        configured = provider.is_configured()
+        if not configured:
+            chat_store.append_message(db, s, "assistant", _NOT_CONFIGURED_MSG)
+    except BaseException:
+        release_session(sid)
+        raise
+    finally:
+        # 释放请求级连接回池：StreamingResponse 流完前 get_db 不会 teardown，
+        # 不 rollback 的话每路对话白占一个池连接直到生成结束（评审实测确认）
+        db.rollback()
 
     def _sse(ev: dict) -> str:
         return f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
 
-    sid = s.id  # 捕获纯 int：worker 线程不碰请求级 ORM 对象/会话
-
-    # 生成与传输解耦（ChatGPT 语义）：agent 循环在独立线程跑到底——客户端
-    # 关页面/点停止，服务端照样把本轮答案生成完并完整落库；HTTP 流只是
-    # 从队列搬运事件。教训：sync generator 被客户端中断后既不被 close 也
-    # 不再前进，靠 finally/沿途 checkpoint 落库都不可靠。
+    # 生成与传输解耦（ChatGPT 语义）：agent 循环在独立线程跑、沿途 checkpoint
+    # 落库；HTTP 流只是从队列搬运事件。教训：sync generator 被客户端中断后
+    # 既不被 close 也不再前进，靠 finally/沿途 checkpoint 落库都不可靠。
     def _worker(q: "queue.Queue[dict | None]") -> None:
         from app.db import SessionLocal
 
@@ -165,6 +243,10 @@ def chat_stream(
         wdb = SessionLocal()
         try:
             for ev in runtime.run_stream(wdb, history, ctx):
+                if cancel_ev.is_set():  # 用户点了停止：收束并以"已中断"落库
+                    _save(stopped=True, final=True)
+                    q.put({"type": "done", "tool_calls": trace, "stopped": True})
+                    return
                 if ev.get("type") == "delta":
                     buf.append(ev.get("text") or "")
                     since_ckpt += 1
@@ -173,6 +255,8 @@ def chat_stream(
                 elif ev.get("type") == "tool":
                     trace.append({"name": ev.get("name"), "args": ev.get("args")})
                     _save(stopped=True)
+                elif ev.get("type") == "tool_done":
+                    wdb.rollback()  # 工具均只读：立即把连接还回池，别跨整轮 LLM 往返占着
                 elif ev.get("type") == "done":
                     _save(stopped=False, final=True)
                 q.put(ev)
@@ -183,20 +267,29 @@ def chat_stream(
         finally:
             _save(stopped=True, final=True)
             wdb.close()
+            release_session(sid)
             q.put(None)  # 结束哨兵
 
+    # worker 在 handler 里启动而非 gen 里：客户端若在响应体被拉取前断开，
+    # gen 可能永远不被迭代——锁释放/落库必须不依赖 gen 跑起来。
+    q: "queue.Queue[dict | None]" = queue.Queue()  # 无界：断开后无人消费也不堵 worker
+    if configured:
+        try:
+            threading.Thread(target=_worker, args=(q,), daemon=True,
+                             name=f"agent-session-{sid}").start()
+        except BaseException:
+            release_session(sid)
+            raise
+    else:
+        release_session(sid)
+
     def gen():
-        if s.title != title_before:
-            yield _sse({"type": "title", "title": s.title})
-        if not provider.is_configured():
-            chat_store.append_message(db, s, "assistant", _NOT_CONFIGURED_MSG)
+        if new_title:
+            yield _sse({"type": "title", "title": new_title})
+        if not configured:
             yield _sse({"type": "delta", "text": _NOT_CONFIGURED_MSG})
             yield _sse({"type": "done", "tool_calls": [], "configured": False})
             return
-
-        q: "queue.Queue[dict | None]" = queue.Queue()  # 无界：断开后无人消费也不堵 worker
-        threading.Thread(target=_worker, args=(q,), daemon=True,
-                         name=f"agent-session-{sid}").start()
         while True:
             try:
                 ev = q.get(timeout=600)  # 轮数受 llm_max_tool_iters 限制，600s 仅防僵尸

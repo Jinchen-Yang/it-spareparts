@@ -10,7 +10,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app import config, security
-from app.models import DimPart, DimSupplier, FPurchaseLine, FPurchaseOrder
+from app.models import DimPart, DimSupplier, FPurchaseLine, FPurchaseOrder, PartAlias
 
 _ACTIVE = "已生效"
 MAX_PAGE_SIZE = 200
@@ -50,10 +50,18 @@ def recent_purchases(db: Session, user_ctx: security.UserContext | None = None,
         stmt = stmt.where(FPurchaseOrder.data_status == _ACTIVE)
     if q and q.strip():
         like = f"%{q.strip()}%"
+        # 别名召回：用户拿单据上的原文 PN（含已合并的旧 PN、被去 V 码的原始
+        # 写法）来查也要命中——part_alias.part_id 合并时已重指存活商品，
+        # 经它过滤仍是 part_id 主口径（绝不直接 ILIKE 事实表 pn 文本作键）
+        alias_hit = (
+            select(PartAlias.part_id)
+            .where(PartAlias.pn_raw.ilike(like), PartAlias.part_id.is_not(None))
+        )
         stmt = stmt.where(or_(
             DimPart.pn_std.ilike(like),
             FPurchaseLine.description.ilike(like),
             FPurchaseLine.brand.ilike(like),
+            FPurchaseLine.part_id.in_(alias_hit),
         ))
     if supplier and supplier.strip():
         stmt = stmt.where(DimSupplier.name_normalized.ilike(f"%{supplier.strip()}%"))

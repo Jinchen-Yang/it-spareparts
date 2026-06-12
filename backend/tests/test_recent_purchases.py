@@ -95,6 +95,27 @@ def test_merged_part_shows_canonical_pn(db, batch):
     assert out["total"] == 2
 
 
+def test_alias_recall_old_pn_finds_merged_rows(db, batch):
+    """按单据原文/已合并旧 PN 查询：经 part_alias 召回（仍是 part_id 主口径）。"""
+    today = date.today()
+    orders = {
+        "O-A2": f.purchase_head("O-A2", on=today - timedelta(days=2)),
+        "O-B2": f.purchase_head("O-B2", on=today - timedelta(days=1)),
+    }
+    lines = [
+        f.purchase_line("O-A2", "L-A2", "PN-ALIAS-OLD"),
+        f.purchase_line("O-B2", "L-B2", "PN-ALIAS-NEW"),
+    ]
+    _import(db, batch, lines, orders)
+    merge.merge_parts(db, "PN-ALIAS-OLD", "PN-ALIAS-NEW", "同款", "tester")
+    db.commit()
+
+    # 拿旧 PN（现在只存在于 part_alias.pn_raw）查：两行都应命中（同一商品）
+    out = purchase_query.recent_purchases(db, q="PN-ALIAS-OLD", days=30)
+    assert out["total"] == 2
+    assert {r["pn_std"] for r in out["items"]} == {"PN-ALIAS-NEW"}
+
+
 def test_pagination_and_caps(db, batch):
     _seed(db, batch)
     p1 = purchase_query.recent_purchases(db, days=3660, page=1, page_size=2)

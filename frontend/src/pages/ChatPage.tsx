@@ -8,8 +8,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Upload } from "antd";
 import {
-  agentDownload, agentUpload, createChatSession, deleteChatSession,
-  getChatMessages, listChatSessions, sessionChatStream,
+  agentDownload, agentUpload, cancelChatStream, createChatSession,
+  deleteChatSession, getChatMessages, listChatSessions, sessionChatStream,
 } from "../api";
 import type { AgentToolCall, AgentUploadResult, ChatSessionMeta } from "../api";
 
@@ -123,48 +123,73 @@ export default function ChatPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollBoxRef = useRef<HTMLDivElement>(null);
+  // 流式回调/异步 resolve 都发生在 await 之后，闭包里的 state 已过期——
+  // 当前会话与加载序号必须走 ref（教训同旧版 localStorage 时代的闭包陷阱）
+  const activeIdRef = useRef<number | null>(null);
+  const openSeqRef = useRef(0);
+
+  const switchTo = (id: number | null) => {
+    activeIdRef.current = id;
+    setActiveId(id);
+  };
 
   useEffect(() => {
     listChatSessions()
       .then(({ data }) => setSessions(data.items))
       .catch(() => message.error("加载会话列表失败"));
+    // 401 reload 前暂存的草稿：登录回来恢复到输入框
+    const draft = localStorage.getItem("chat_draft");
+    if (draft) {
+      localStorage.removeItem("chat_draft");
+      setInput(draft);
+      message.info("已恢复上次未发送的内容");
+    }
   }, []);
 
   const openSession = async (id: number) => {
     if (busy) return;
-    setActiveId(id);
+    const seq = ++openSeqRef.current;
+    switchTo(id);
     setLoadingTurns(true);
     try {
       const { data } = await getChatMessages(id);
+      if (seq !== openSeqRef.current) return; // 已切到别的会话：丢弃过期响应
       setTurns(data.items.map((m) => ({
         role: m.role, content: m.content,
         tools: m.tools?.length ? m.tools : undefined, stopped: m.stopped,
       })));
-    } catch {
-      message.error("会话已不存在");
-      setSessions((prev) => prev.filter((s) => s.id !== id));
-      setActiveId(null);
-      setTurns([]);
+    } catch (e: any) {
+      if (seq !== openSeqRef.current) return;
+      if (e?.response?.status === 404) {
+        message.error("会话已不存在");
+        setSessions((prev) => prev.filter((s) => s.id !== id));
+        switchTo(null);
+        setTurns([]);
+      } else {
+        message.error("加载会话失败，请重试");
+      }
     } finally {
-      setLoadingTurns(false);
+      if (seq === openSeqRef.current) setLoadingTurns(false);
     }
   };
 
   const newChat = () => {
     if (busy) return;
-    setActiveId(null);
+    openSeqRef.current++;
+    switchTo(null);
     setTurns([]);
   };
 
   const removeSession = async (id: number) => {
+    if (busy) return; // 流式中删除会话：worker 还在写、视图会注入孤儿气泡
     try {
       await deleteChatSession(id);
     } catch {
       /* 已删/网络错都按本地移除处理 */
     }
     setSessions((prev) => prev.filter((s) => s.id !== id));
-    if (id === activeId) {
-      setActiveId(null);
+    if (id === activeIdRef.current) {
+      switchTo(null);
       setTurns([]);
     }
   };
@@ -212,12 +237,12 @@ export default function ChatPage() {
     setBusy(true);
     setInput("");
     // 懒建会话：第一条消息才落库
-    let sid = activeId;
+    let sid = activeIdRef.current;
     if (sid == null) {
       try {
         const { data } = await createChatSession();
         sid = data.id;
-        setActiveId(sid);
+        switchTo(sid);
         setSessions((prev) => [data, ...prev]);
       } catch {
         message.error("创建会话失败，请稍后重试");
@@ -226,7 +251,8 @@ export default function ChatPage() {
       }
     }
     const sessionId = sid;
-    setTurns((prev) => [...prev, { role: "user", content: q }]);
+    const userTurnObj: Turn = { role: "user", content: q };
+    setTurns((prev) => [...prev, userTurnObj]);
     stickToBottomRef.current = true;
     streamBufRef.current = "";
     const trace: AgentToolCall[] = [];
@@ -243,7 +269,8 @@ export default function ChatPage() {
       setStreamText("");
       setToolRuns([]);
       setBusy(false);
-      if (content || trace.length) {
+      // 视图可能已切走（理论上 busy 挡住了切换，此为最后防线）：不往别的会话注入气泡
+      if ((content || trace.length) && activeIdRef.current === sessionId) {
         setTurns((prev) => [...prev, {
           role: "assistant", content: content || "(无内容)", tools: [...trace], stopped,
         }]);
@@ -288,13 +315,41 @@ export default function ChatPage() {
       if (e?.name === "AbortError") {
         finishTurn(streamBufRef.current + "\n\n*(已停止生成)*", true);
       } else {
-        message.error("连接失败，请稍后重试");
-        finishTurn(streamBufRef.current, true);
+        const httpStatus = /stream http (\d+)/.exec(e?.message || "")?.[1];
+        if (httpStatus === "409") {
+          message.warning("上一轮回答还在生成中，请稍候几秒再发");
+        } else if (httpStatus === "401") {
+          // 先把刚输入的内容存草稿再 reload，登录回来不丢稿
+          localStorage.setItem("chat_draft", text);
+          localStorage.removeItem("token");
+          message.error("登录已过期，请重新登录");
+          setTimeout(() => location.reload(), 800);
+        } else {
+          message.error("连接失败，请稍后重试");
+        }
+        // 本轮没有任何内容产生：回滚乐观追加的用户气泡，保持与服务端一致
+        if (!streamBufRef.current && !trace.length) {
+          settled = true;
+          if (flushTimerRef.current) window.clearInterval(flushTimerRef.current);
+          flushTimerRef.current = null;
+          setBusy(false);
+          if (activeIdRef.current === sessionId) {
+            setTurns((prev) => (prev.length && prev[prev.length - 1] === userTurnObj
+              ? prev.slice(0, -1) : prev));
+          }
+        } else {
+          finishTurn(streamBufRef.current, true);
+        }
       }
     }
   };
 
-  const stop = () => abortRef.current?.abort();
+  const stop = () => {
+    // 真取消：通知服务端 worker 收束（已生成部分以"已中断"落库），再断开本地流
+    const sid = activeIdRef.current;
+    if (sid != null) cancelChatStream(sid);
+    abortRef.current?.abort();
+  };
 
   const copyText = (t: string) =>
     navigator.clipboard.writeText(t).then(() => message.success("已复制"));

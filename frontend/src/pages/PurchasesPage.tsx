@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, Input, Segmented, Table, Tag, message } from "antd";
 import { listRecentPurchases } from "../api";
 import type { RecentPurchaseRow } from "../api";
@@ -22,8 +22,10 @@ export default function PurchasesPage() {
   const [total, setTotal] = useState(0);
   const [rows, setRows] = useState<RecentPurchaseRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const loadSeqRef = useRef(0); // 防乱序：快速切天数/搜索时丢弃过期响应
 
   const load = async (p = page, ps = pageSize) => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     try {
       const { data } = await listRecentPurchases({
@@ -31,12 +33,13 @@ export default function PurchasesPage() {
         supplier: supplier.trim() || undefined,
         days, page: p, page_size: ps,
       });
+      if (seq !== loadSeqRef.current) return;
       setRows(data.items);
       setTotal(data.total);
     } catch {
-      message.error("查询失败，请稍后重试");
+      if (seq === loadSeqRef.current) message.error("查询失败，请稍后重试");
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) setLoading(false);
     }
   };
 

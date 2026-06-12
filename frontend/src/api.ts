@@ -131,6 +131,13 @@ export const getChatMessages = (id: number) =>
   api.get<{ id: number; title: string; items: ChatMessageRow[] }>(
     `/agent/sessions/${id}/messages`,
   );
+/** 停止当前生成：服务端 worker 收束并把已生成部分以"已中断"落库。
+ * 用 fetch 而非 axios：避开全局 401 拦截器的整页 reload。 */
+export const cancelChatStream = (id: number) =>
+  fetch(`/api/agent/sessions/${id}/chat/cancel`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
+  }).catch(() => undefined);
 
 export type SessionStreamEvent = AgentStreamEvent | { type: "title"; title: string };
 
@@ -151,10 +158,7 @@ export async function sessionChatStream(
     signal,
   });
   if (!resp.ok || !resp.body) {
-    if (resp.status === 401) {
-      localStorage.removeItem("token");
-      location.reload();
-    }
+    // 不在这里 reload：调用方要先把用户刚输入的内容存草稿，避免 reload 丢稿
     throw new Error(`stream http ${resp.status}`);
   }
   const reader = resp.body.getReader();
