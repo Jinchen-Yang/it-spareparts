@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app import auth
-from app.api import agent, governance, imports, inventory, parts, profit, substitutes
+from app.api import agent, chat_sessions, governance, imports, inventory, parts, profit, purchases, substitutes
 from app.config import check_security, get_settings
 from app.db import engine
 
@@ -39,6 +39,8 @@ app.include_router(inventory.router, prefix=settings.api_prefix)
 app.include_router(substitutes.router, prefix=settings.api_prefix)
 app.include_router(governance.router, prefix=settings.api_prefix)
 app.include_router(agent.router, prefix=settings.api_prefix)
+app.include_router(chat_sessions.router, prefix=settings.api_prefix)
+app.include_router(purchases.router, prefix=settings.api_prefix)
 
 
 @app.get("/health")

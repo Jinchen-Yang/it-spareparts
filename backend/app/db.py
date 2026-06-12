@@ -8,8 +8,11 @@ from app.config import get_settings
 
 _settings = get_settings()
 
-# engine 是惰性连接：创建时不会真正连库，服务可在无 DB 时启动
-engine = create_engine(_settings.database_url, pool_pre_ping=True, future=True)
+# engine 是惰性连接：创建时不会真正连库，服务可在无 DB 时启动。
+# 池显式配置：AI 对话流式期间存在 worker 线程并行连接（见 api/chat_sessions），
+# 默认 5+10 在多路对话下会被打满、拖垮其他端点。
+engine = create_engine(_settings.database_url, pool_pre_ping=True, future=True,
+                       pool_size=10, max_overflow=20)
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
