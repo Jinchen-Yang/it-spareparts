@@ -14,6 +14,8 @@ class SubstituteCreate(BaseModel):
     pn_a: str
     pn_b: str
     note: str | None = None
+    direction: str = "both"            # both=互替 | one_way=pn_b 可替代 pn_a
+    substitute_type: str | None = None  # original/compatible/same_spec/downgrade/upgrade/conditional
 
 
 @router.get("")
@@ -32,6 +34,8 @@ def create(
     role: str = Depends(require_admin),
 ) -> dict:
     try:
-        return substitute.add_substitute(db, body.pn_a, body.pn_b, body.note, operated_by=role)
+        return substitute.add_substitute(db, body.pn_a, body.pn_b, body.note, operated_by=role,
+                                         direction=body.direction,
+                                         substitute_type=body.substitute_type)
     except substitute.SubstituteError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc

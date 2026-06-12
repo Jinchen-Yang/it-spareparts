@@ -2,6 +2,14 @@
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inquiry import FPartInquiry
 from app.models.inventory import Inventory, PartSubstitute
+from app.models.master_data import (
+    Brand,
+    ProductCategory,
+    ProductDataQualityIssue,
+    ProductMatchCandidate,
+    ProductMergeLog,
+    ProductSpec,
+)
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import (
@@ -9,6 +17,7 @@ from app.models.system import (
     SysImportBatch,
     SysImportError,
     SysRawFile,
+    SysUser,
 )
 
 __all__ = [
@@ -16,6 +25,12 @@ __all__ = [
     "PartAlias",
     "DimSupplier",
     "DimCustomer",
+    "Brand",
+    "ProductCategory",
+    "ProductSpec",
+    "ProductMatchCandidate",
+    "ProductMergeLog",
+    "ProductDataQualityIssue",
     "FPurchaseOrder",
     "FPurchaseLine",
     "FSalesOrder",
@@ -27,4 +42,5 @@ __all__ = [
     "SysImportError",
     "SysRawFile",
     "SysAuditLog",
+    "SysUser",
 ]

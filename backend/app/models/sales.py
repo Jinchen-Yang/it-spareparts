@@ -47,7 +47,8 @@ class FSalesLine(Base):
     raw_line_id: Mapped[str] = mapped_column(String(64), unique=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("f_sales_order.id"))
     line_no: Mapped[int | None] = mapped_column(Integer)
-    part_id: Mapped[int | None] = mapped_column(ForeignKey("dim_part.id"))
+    # 商品身份主键（聚合/过滤一律走 part_id）。pn_std/pn_raw 为导入原文痕迹，仅展示/追溯
+    part_id: Mapped[int] = mapped_column(ForeignKey("dim_part.id"))
     pn_std: Mapped[str | None] = mapped_column(String(128))
     pn_raw: Mapped[str | None] = mapped_column(String(256))
     description: Mapped[str | None] = mapped_column(Text)

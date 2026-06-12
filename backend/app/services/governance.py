@@ -18,6 +18,10 @@ _NONSTD_KEYWORDS = ["一批", "配件", "打包", "若干", "其他", "其它", 
 _NO_ALNUM = "pn_std !~ '[A-Za-z0-9]'"
 
 
+class GovernanceError(Exception):
+    """治理操作非法（如对已合并墓碑行操作）。"""
+
+
 def _nonstd_clause():
     kw = or_(*[DimPart.pn_std.like(f"%{k}%") for k in _NONSTD_KEYWORDS])
     return or_(kw, text(_NO_ALNUM))
@@ -64,6 +68,7 @@ def list_parts(db: Session, kind: str, page: int, page_size: int) -> dict:
         cond = DimPart.is_excluded.is_(True)
     else:
         cond = _nonstd_clause()
+    cond = and_(cond, DimPart.status != "merged")   # 墓碑行不进治理清单
 
     total = db.scalar(select(func.count()).select_from(DimPart).where(cond))
     parts = db.execute(
@@ -79,7 +84,7 @@ def list_parts(db: Session, kind: str, page: int, page_size: int) -> dict:
                 func.sum(FSalesLine.revenue_amount).filter(FSalesLine.counts_revenue.is_(True)),
                 func.sum(FSalesLine.gross_profit).filter(FSalesLine.counts_revenue.is_(True)),
             ).join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
-            .where(FSalesLine.pn_std == p.pn_std)
+            .where(FSalesLine.part_id == p.id)
         ).one()
         rev = agg[1]
         gp = agg[2]
@@ -99,6 +104,11 @@ def set_excluded(db: Session, pn_std: str, excluded: bool, reason: str | None,
     p = db.scalar(select(DimPart).where(DimPart.pn_std == pn_std))
     if p is None:
         return None
+    if p.status == "merged":
+        # 墓碑行不承载业务语义；排除应作用在合并目标上，拒绝并提示
+        target = db.get(DimPart, p.merged_into_id) if p.merged_into_id else None
+        raise GovernanceError(
+            f"型号 {pn_std} 已合并入 {target.pn_std if target else '?'}，请对目标型号操作")
     before = {"is_excluded": p.is_excluded, "exclude_reason": p.exclude_reason}
     p.is_excluded = excluded
     p.exclude_reason = reason if excluded else None

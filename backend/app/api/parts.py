@@ -15,20 +15,28 @@ def search(
     q: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    part_type: str | None = Query(None, description="HDD | SSD | RAM"),
+    interface: str | None = Query(None, description="SAS | SATA | NVME | FC | SCSI"),
+    capacity_min: float | None = Query(None, description="容量下限(GB)"),
+    capacity_max: float | None = Query(None, description="容量上限(GB)"),
     db: Session = Depends(get_db),
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     record_access_log(ctx, "search", "parts", {"q": q})
-    if q and q.strip():
-        # 近似解析（pg_trgm 召回 + 精排），结果单页带 score/match_reason
+    has_spec_filter = any(
+        x is not None for x in (part_type, interface, capacity_min, capacity_max))
+    if q and q.strip() and not has_spec_filter:
+        # 纯文本查询：近似解析（pg_trgm 召回 + 精排），结果单页带 score/match_reason
         data = part_resolver.resolve(db, q.strip(), limit=page_size, operated_by=role)
         data = {"total": len(data["items"]), "page": 1, "page_size": page_size,
                 "items": data["items"], "low_confidence": data["low_confidence"],
                 "ambiguous": data["ambiguous"]}
     else:
-        # 空查询：保留原有按 pn_std 排序的浏览列表（分页）
-        data = part_overview.search_parts(db, None, page, page_size, ctx)
+        # 空查询浏览，或带结构化规格过滤：走 part_id 主口径的 search_parts（含 merged 墓碑排除）
+        data = part_overview.search_parts(db, q, page, page_size, ctx,
+                                          part_type=part_type, interface=interface,
+                                          capacity_min=capacity_min, capacity_max=capacity_max)
     return apply_field_visibility(data, ctx)
 
 

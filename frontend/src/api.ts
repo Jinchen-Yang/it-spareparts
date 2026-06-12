@@ -31,6 +31,8 @@ export interface PartHit {
   score?: number;
   match_reason?: string;
   is_excluded?: boolean;
+  // 结构化规格过滤返回（按容量/接口查询时带）
+  specs?: Record<string, string>;
 }
 
 // ===== 二期 AI 助手 =====
@@ -147,11 +149,15 @@ export interface Overview {
     category_minor: string | null;
     unit: string | null;
     needs_review: boolean;
+    redirected_from?: string | null;
   };
   purchases_recent: PurchaseRow[];
   sales_recent: SalesRow[];
   inventory: InventoryRow[];
-  substitutes: { pn_std: string; description: string | null; source: string }[];
+  substitutes: {
+    pn_std: string; description: string | null; source: string;
+    relation?: string; substitute_type?: string | null;
+  }[];
   profit_summary: {
     avg_purchase_cost: number | null;
     avg_sale_price: number | null;

@@ -1,8 +1,10 @@
 """型号全景查询服务（§9）。
 
 业务查询默认按 ACTIVE_STATUS_ONLY 过滤 data_status='已生效'。
-利润概览本期给基础聚合（avg_cost/avg_sale_price/total_qty_sold）；
-avg_margin 待 Step 6 成本匹配后才有意义，暂返回 None。
+
+整改 P3：对外仍接受 pn_std 入参（兼容），但内部一律先解析为 part_id 再查事实表
+（pn_std 文本是导入痕迹，合并后不重写；商品身份只看 part_id）。
+查询已合并型号自动重定向到目标档案，并在返回中标注 redirected_from。
 """
 from datetime import date, timedelta
 from decimal import Decimal
@@ -14,38 +16,89 @@ from app import config, security
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
 from app.models.inquiry import FPartInquiry
 from app.models.inventory import Inventory, PartSubstitute
+from app.models.master_data import ProductSpec
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 
 _ACTIVE = "已生效"
+_MERGE_CHAIN_LIMIT = 10
 
 
 def _d(x) -> float | None:
     return float(x) if isinstance(x, Decimal) else x
 
 
+def resolve_part(db: Session, pn_std: str) -> tuple[DimPart | None, str | None]:
+    """pn_std → (part, redirected_from)。命中已合并墓碑时沿链取目标档案。"""
+    part = db.scalar(select(DimPart).where(DimPart.pn_std == pn_std))
+    if part is None:
+        return None, None
+    redirected_from = None
+    hops = 0
+    while part.status == "merged" and part.merged_into_id is not None:
+        if hops >= _MERGE_CHAIN_LIMIT:
+            break
+        redirected_from = redirected_from or part.pn_std
+        part = db.get(DimPart, part.merged_into_id)
+        hops += 1
+    return part, redirected_from
+
+
+def _spec_exists(key: str, value: str | None = None,
+                 numeric_min=None, numeric_max=None):
+    sub = select(ProductSpec.id).where(
+        ProductSpec.part_id == DimPart.id, ProductSpec.spec_key == key)
+    if value is not None:
+        sub = sub.where(func.upper(ProductSpec.spec_value) == value.upper())
+    if numeric_min is not None:
+        sub = sub.where(ProductSpec.numeric_value >= numeric_min)
+    if numeric_max is not None:
+        sub = sub.where(ProductSpec.numeric_value <= numeric_max)
+    return sub.exists()
+
+
 def search_parts(db: Session, q: str | None, page: int, page_size: int,
-                 user_ctx: security.UserContext | None = None) -> dict:
-    stmt = select(DimPart)
+                 user_ctx: security.UserContext | None = None,
+                 part_type: str | None = None, interface: str | None = None,
+                 capacity_min: float | None = None,
+                 capacity_max: float | None = None) -> dict:
+    """文本检索 + 结构化规格过滤（整改 P2：硬盘容量/接口等条件查询）。"""
+    stmt = select(DimPart).where(DimPart.status != "merged")
     if q:
         like = f"%{q.strip()}%"
         stmt = stmt.where(or_(DimPart.pn_std.ilike(like), DimPart.description.ilike(like)))
+    if part_type:
+        stmt = stmt.where(_spec_exists("part_type", value=part_type))
+    if interface:
+        stmt = stmt.where(_spec_exists("interface", value=interface))
+    if capacity_min is not None or capacity_max is not None:
+        stmt = stmt.where(_spec_exists("capacity", numeric_min=capacity_min,
+                                       numeric_max=capacity_max))
     if user_ctx is not None:
         stmt = security.apply_data_scope(stmt, user_ctx)
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = db.execute(
         stmt.order_by(DimPart.pn_std).offset((page - 1) * page_size).limit(page_size)
     ).scalars().all()
+
+    specs_by_part: dict[int, dict] = {}
+    if rows:
+        for pid, key, val in db.execute(
+            select(ProductSpec.part_id, ProductSpec.spec_key, ProductSpec.spec_value)
+            .where(ProductSpec.part_id.in_([p.id for p in rows]))
+        ).all():
+            specs_by_part.setdefault(pid, {})[key] = val
     return {
         "total": total, "page": page, "page_size": page_size,
         "items": [{
             "pn_std": p.pn_std, "description": p.description, "brand": p.brand,
             "category_major": p.category_major, "needs_review": p.needs_review,
+            "specs": specs_by_part.get(p.id, {}),
         } for p in rows],
     }
 
 
-def _purchases_query(pn_std: str, user_ctx: security.UserContext | None = None):
+def _purchases_query(part_id: int, user_ctx: security.UserContext | None = None):
     # 显示完整采购历史(含维保等),source_type 让用户辨识"哪些计入成本"
     stmt = (
         select(FPurchaseOrder.order_no, FPurchaseOrder.order_date,
@@ -53,7 +106,7 @@ def _purchases_query(pn_std: str, user_ctx: security.UserContext | None = None):
                 FPurchaseOrder.source_type)
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
         .join(DimSupplier, FPurchaseOrder.supplier_id == DimSupplier.id, isouter=True)
-        .where(FPurchaseLine.pn_std == pn_std)
+        .where(FPurchaseLine.part_id == part_id)
     )
     if config.ACTIVE_STATUS_ONLY:
         stmt = stmt.where(FPurchaseOrder.data_status == _ACTIVE)
@@ -62,7 +115,7 @@ def _purchases_query(pn_std: str, user_ctx: security.UserContext | None = None):
     return stmt.order_by(FPurchaseOrder.order_date.desc().nullslast())
 
 
-def _sales_query(pn_std: str, user_ctx: security.UserContext | None = None):
+def _sales_query(part_id: int, user_ctx: security.UserContext | None = None):
     # 带 salesperson 以便 sales 角色行级匿名化（保留行情价、抹掉同事客户名）
     stmt = (
         select(FSalesOrder.order_no, FSalesOrder.order_date,
@@ -70,7 +123,7 @@ def _sales_query(pn_std: str, user_ctx: security.UserContext | None = None):
                 FSalesOrder.salesperson)
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
         .join(DimCustomer, FSalesOrder.customer_id == DimCustomer.id, isouter=True)
-        .where(FSalesLine.pn_std == pn_std)
+        .where(FSalesLine.part_id == part_id)
     )
     if config.ACTIVE_STATUS_ONLY:
         stmt = stmt.where(FSalesOrder.data_status == _ACTIVE)
@@ -96,24 +149,34 @@ def _sales_row(r):
             "qty": _d(r[3]), "unit_price": _d(r[4]), "salesperson": r[5]}
 
 
+def _empty_page(page: int, page_size: int) -> dict:
+    return {"total": 0, "page": page, "page_size": page_size, "items": []}
+
+
 def list_purchases(db: Session, pn_std: str, page: int, page_size: int,
                    user_ctx: security.UserContext | None = None) -> dict:
-    return _paginate(db, _purchases_query(pn_std, user_ctx), page, page_size, _purchase_row)
+    part, _ = resolve_part(db, pn_std)
+    if part is None:
+        return _empty_page(page, page_size)
+    return _paginate(db, _purchases_query(part.id, user_ctx), page, page_size, _purchase_row)
 
 
 def list_sales(db: Session, pn_std: str, page: int, page_size: int,
                user_ctx: security.UserContext | None = None) -> dict:
-    out = _paginate(db, _sales_query(pn_std, user_ctx), page, page_size, _sales_row)
+    part, _ = resolve_part(db, pn_std)
+    if part is None:
+        return _empty_page(page, page_size)
+    out = _paginate(db, _sales_query(part.id, user_ctx), page, page_size, _sales_row)
     out["items"] = security.anonymize_sales_rows(out["items"], user_ctx)  # 防恶性竞争
     return out
 
 
-def _profit_summary(db: Session, pn_std: str) -> dict:
+def _profit_summary(db: Session, part_id: int) -> dict:
     # 加权平均采购成本（active, unit_price>0,按成本口径过滤——维保等不入)
     pc = (
         select(func.sum(FPurchaseLine.qty * FPurchaseLine.unit_price), func.sum(FPurchaseLine.qty))
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
-        .where(FPurchaseLine.pn_std == pn_std, FPurchaseLine.unit_price > 0,
+        .where(FPurchaseLine.part_id == part_id, FPurchaseLine.unit_price > 0,
                FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
     )
     if config.ACTIVE_STATUS_ONLY:
@@ -124,7 +187,7 @@ def _profit_summary(db: Session, pn_std: str) -> dict:
     sc = (
         select(func.sum(FSalesLine.qty * FSalesLine.unit_price), func.sum(FSalesLine.qty))
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
-        .where(FSalesLine.pn_std == pn_std)
+        .where(FSalesLine.part_id == part_id)
     )
     if config.ACTIVE_STATUS_ONLY:
         sc = sc.where(FSalesOrder.data_status == _ACTIVE)
@@ -140,7 +203,7 @@ def _profit_summary(db: Session, pn_std: str) -> dict:
             func.sum(FSalesLine.revenue_amount).filter(FSalesLine.cost_moving_avg.is_not(None)),
         )
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
-        .where(FSalesLine.pn_std == pn_std, FSalesLine.counts_revenue.is_(True))
+        .where(FSalesLine.part_id == part_id, FSalesLine.counts_revenue.is_(True))
     )
     if config.ACTIVE_STATUS_ONLY:
         cc = cc.where(FSalesOrder.data_status == _ACTIVE)
@@ -162,8 +225,12 @@ def _profit_summary(db: Session, pn_std: str) -> dict:
     }
 
 
-def _inventory(db: Session, pn_std: str) -> list[dict]:
-    rows = db.execute(select(Inventory).where(Inventory.pn_std == pn_std)).scalars().all()
+def _inventory(db: Session, part_id: int) -> list[dict]:
+    # 同一 part 同仓可有多行（不同源 pn 合并后），按行展示、part 级合计=SUM
+    rows = db.execute(
+        select(Inventory).where(Inventory.part_id == part_id)
+        .order_by(Inventory.warehouse, Inventory.pn_std)
+    ).scalars().all()
     out = []
     for inv in rows:
         display = inv.manual_qty if inv.is_qty_overridden and inv.manual_qty is not None else inv.source_qty
@@ -176,23 +243,36 @@ def _inventory(db: Session, pn_std: str) -> list[dict]:
 
 
 def _substitutes(db: Session, part_id: int | None) -> list[dict]:
+    """已生效(status=active)替代关系；pending/rejected 不进入推荐（审核说明 §4.6）。"""
     if part_id is None:
         return []
     rows = db.execute(
         select(PartSubstitute).where(
-            or_(PartSubstitute.part_id_a == part_id, PartSubstitute.part_id_b == part_id)
+            or_(PartSubstitute.part_id_a == part_id, PartSubstitute.part_id_b == part_id),
+            PartSubstitute.status == "active",
         )
     ).scalars().all()
     out = []
     for s in rows:
-        other_id = s.part_id_b if s.part_id_a == part_id else s.part_id_a
+        is_a = s.part_id_a == part_id
+        # direction 相对规范序：a_to_b = a 的需求可用 b 满足。站在当前 part 视角，
+        # 「可替代我」的方向是：我是 a 且 a_to_b，或我是 b 且 b_to_a，或 both
+        if s.direction == "both":
+            relation = "互替"
+        elif (is_a and s.direction == "a_to_b") or (not is_a and s.direction == "b_to_a"):
+            relation = "可替代本型号"
+        else:
+            relation = "本型号可替代它"
+        other_id = s.part_id_b if is_a else s.part_id_a
         other = db.get(DimPart, other_id)
         if other:
-            out.append({"pn_std": other.pn_std, "description": other.description, "source": s.source})
+            out.append({"pn_std": other.pn_std, "description": other.description,
+                        "source": s.source, "relation": relation,
+                        "substitute_type": s.substitute_type})
     return out
 
 
-def _sales_velocity(db: Session, pn_std: str) -> dict:
+def _sales_velocity(db: Session, part_id: int) -> dict:
     """近 90 天销售速率（二期采购场景："进 50 个合理吗"需要知道卖多快）。"""
     since = date.today() - timedelta(days=90)
     stmt = (
@@ -200,7 +280,7 @@ def _sales_velocity(db: Session, pn_std: str) -> dict:
                func.max(FSalesOrder.order_date))
         .select_from(FSalesLine)
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
-        .where(FSalesLine.pn_std == pn_std)
+        .where(FSalesLine.part_id == part_id)
     )
     if config.ACTIVE_STATUS_ONLY:
         stmt = stmt.where(FSalesOrder.data_status == _ACTIVE)
@@ -217,12 +297,22 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
     """轻量定价摘要（整机拆解/批量询价场景）：近N天采购价窗口 / 近90天均售价 / 库存合计。
 
     比 get_overview 轻一个量级，供 lookup_prices_bulk 每行调用。
+    整改 P3：先 resolve_part 解析 part_id（含 merged 链重定向）再按 part_id 过滤；
+    若直接按 pn_std 文本过滤，已合并型号的历史会从 AI 定价答案中悄悄消失。
     采购价只取计入成本的采购类型（与成本口径一致，排除维保等）。
     """
+    part, _ = resolve_part(db, pn_std)
+    if part is None:
+        return {"last_purchase_price": None, "last_purchase_date": None,
+                "last_purchase_type": None, "recent_purchase_days": config.RECENT_PURCHASE_DAYS,
+                "recent_purchase_avg": None, "recent_purchase_min": None,
+                "recent_purchase_max": None, "recent_purchase_count": 0,
+                "avg_sale_price_90d": None, "stock_total": 0}
+    pid = part.id
     lp = (
         select(FPurchaseOrder.order_date, FPurchaseLine.unit_price, FPurchaseOrder.source_type)
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
-        .where(FPurchaseLine.pn_std == pn_std,
+        .where(FPurchaseLine.part_id == pid,
                FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
                FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
     )
@@ -236,7 +326,7 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
         select(func.avg(FPurchaseLine.unit_price), func.min(FPurchaseLine.unit_price),
                func.max(FPurchaseLine.unit_price), func.count())
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
-        .where(FPurchaseLine.pn_std == pn_std,
+        .where(FPurchaseLine.part_id == pid,
                FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
                FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES),
                FPurchaseOrder.order_date >= win_since)
@@ -250,14 +340,14 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
         select(func.sum(FSalesLine.qty * FSalesLine.unit_price), func.sum(FSalesLine.qty))
         .select_from(FSalesLine)
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
-        .where(FSalesLine.pn_std == pn_std, FSalesLine.unit_price > 0,
+        .where(FSalesLine.part_id == pid, FSalesLine.unit_price > 0,
                FSalesOrder.order_date >= since)
     )
     if config.ACTIVE_STATUS_ONLY:
         sp = sp.where(FSalesOrder.data_status == _ACTIVE)
     samt, sqty = db.execute(sp).one()
 
-    inv_rows = db.execute(select(Inventory).where(Inventory.pn_std == pn_std)).scalars().all()
+    inv_rows = db.execute(select(Inventory).where(Inventory.part_id == pid)).scalars().all()
     stock = sum(
         (inv.manual_qty if inv.is_qty_overridden and inv.manual_qty is not None else inv.source_qty)
         or Decimal(0) for inv in inv_rows
@@ -277,13 +367,16 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
     }
 
 
-def _inquiry_ref(db: Session, pn_std: str) -> dict:
+def _inquiry_ref(db: Session, part_id: int, pn_std: str) -> dict:
+    # part_id 可空（询价不强制建档）：优先 part_id，未回填的行按 pn_std 兜底
+    cond = or_(FPartInquiry.part_id == part_id,
+               (FPartInquiry.part_id.is_(None)) & (FPartInquiry.pn_std == pn_std))
     row = db.execute(
         select(func.min(FPartInquiry.money), func.max(FPartInquiry.money),
-                func.count()).where(FPartInquiry.pn_std == pn_std)
+                func.count()).where(cond)
     ).one()
     last = db.scalar(
-        select(FPartInquiry.money).where(FPartInquiry.pn_std == pn_std)
+        select(FPartInquiry.money).where(cond)
         .order_by(FPartInquiry.apply_time.desc().nullslast()).limit(1)
     )
     return {"min_money": _d(row[0]), "max_money": _d(row[1]),
@@ -292,7 +385,7 @@ def _inquiry_ref(db: Session, pn_std: str) -> dict:
 
 def get_overview(db: Session, pn_std: str,
                  user_ctx: security.UserContext | None = None) -> dict | None:
-    part = db.scalar(select(DimPart).where(DimPart.pn_std == pn_std))
+    part, redirected_from = resolve_part(db, pn_std)
     if part is None:
         return None
     return {
@@ -300,14 +393,15 @@ def get_overview(db: Session, pn_std: str,
             "pn_std": part.pn_std, "description": part.description, "brand": part.brand,
             "category_major": part.category_major, "category_minor": part.category_minor,
             "unit": part.unit, "needs_review": part.needs_review,
+            "redirected_from": redirected_from,
         },
-        "purchases_recent": _paginate(db, _purchases_query(pn_std, user_ctx), 1, 20, _purchase_row)["items"],
+        "purchases_recent": _paginate(db, _purchases_query(part.id, user_ctx), 1, 20, _purchase_row)["items"],
         # 防恶性竞争：sales 角色保留行情价、抹掉同事的客户名（本人成交保留）
         "sales_recent": security.anonymize_sales_rows(
-            _paginate(db, _sales_query(pn_std, user_ctx), 1, 20, _sales_row)["items"], user_ctx),
-        "inventory": _inventory(db, pn_std),
+            _paginate(db, _sales_query(part.id, user_ctx), 1, 20, _sales_row)["items"], user_ctx),
+        "inventory": _inventory(db, part.id),
         "substitutes": _substitutes(db, part.id),
-        "profit_summary": _profit_summary(db, pn_std),
-        "inquiry_ref": _inquiry_ref(db, pn_std),
-        "sales_velocity": _sales_velocity(db, pn_std),
+        "profit_summary": _profit_summary(db, part.id),
+        "inquiry_ref": _inquiry_ref(db, part.id, part.pn_std),
+        "sales_velocity": _sales_velocity(db, part.id),
     }

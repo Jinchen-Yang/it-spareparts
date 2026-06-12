@@ -69,7 +69,10 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection, target_metadata=target_metadata,
+            # 每个迁移单独提交：避免长链升级（如生产从 876dad34e9c5 直跳 head）
+            # 把 ACCESS EXCLUSIVE 锁持有到整链结束
+            transaction_per_migration=True,
         )
 
         with context.begin_transaction():

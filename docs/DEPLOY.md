@@ -261,11 +261,14 @@ sudo docker compose logs -f frontend
 # 重启
 sudo docker compose restart app
 
-# 升级代码
+# 升级代码（顺序很重要：先备份 → 先建镜像 → 先跑迁移 → 再起新容器。
+# 新代码的 ORM 会 SELECT 新列，若先起容器后迁移，迁移完成前所有查询都会 500）
 cd ~/apps/it-spareparts
+sudo docker compose exec -T db pg_dump -U spareparts -Fc spareparts > backup-$(date +%F).dump
 git pull
+sudo docker compose build app
+sudo docker compose run --rm app alembic upgrade head
 sudo docker compose up -d --build
-sudo docker compose exec app alembic upgrade head
 
 # 停服
 sudo docker compose down
