@@ -18,6 +18,7 @@ from sqlalchemy import text  # noqa: E402
 from app.db import SessionLocal, engine  # noqa: E402
 
 _TABLES = [
+    "chat_message", "chat_session",
     "product_data_quality_issues", "product_merge_logs", "product_match_candidates",
     "product_specs", "product_categories", "brands",
     "f_part_inquiry", "part_substitute", "inventory",
