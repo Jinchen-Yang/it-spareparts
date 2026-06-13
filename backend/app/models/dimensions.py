@@ -109,8 +109,10 @@ class PartAlias(Base):
         Index("ix_alias_std", "pn_std"),
         Index("ix_alias_pn_compact_trgm", "pn_compact",
               postgresql_using="gin", postgresql_ops={"pn_compact": "gin_trgm_ops"}),
+        # DEFERRABLE：改名(part_rename)需在同事务里改 dim_part.pn_std 与名下别名 pn_std，
+        # 非延迟则任一顺序都会在语句末违约；默认 IMMEDIATE，仅改名事务 SET CONSTRAINTS DEFERRED。
         ForeignKeyConstraint(["part_id", "pn_std"], ["dim_part.id", "dim_part.pn_std"],
-                             name="fk_alias_part_pn"),
+                             name="fk_alias_part_pn", deferrable=True, initially="IMMEDIATE"),
         CheckConstraint("status IS NULL OR status IN ('pending','active','rejected')",
                         name="ck_alias_status"),
         Index("ix_alias_part", "part_id"),

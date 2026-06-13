@@ -1,11 +1,13 @@
 """数据治理 API（报告#25/#11 + 整改 P0/P4 主数据工作流）。全部需管理员；写操作留审计。"""
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
 from app.db import get_db
-from app.services import governance, master_data, match_candidates, merge
+from app.models.dimensions import DimPart
+from app.services import governance, master_data, match_candidates, merge, part_rename
 from app.services import inventory as inventory_svc
 from app.services import profit as profit_svc
 
@@ -30,6 +32,12 @@ class MergeRequest(BaseModel):
 class UnmergeRequest(BaseModel):
     merge_log_id: int
     recompute: bool = True
+
+
+class RenameRequest(BaseModel):
+    pn_std: str            # 当前名（被标准化的型号）
+    new_pn_std: str        # 厂商规范写法
+    reason: str | None = None
 
 
 class CandidateReview(BaseModel):
@@ -123,6 +131,26 @@ def merge_parts(
         except Exception as exc:  # noqa: BLE001
             result["recompute_failed"] = str(exc)
     return result
+
+
+@router.post("/parts/rename")
+def rename_part(
+    body: RenameRequest,
+    db: Session = Depends(get_db),
+    role: str = Depends(require_admin),
+) -> dict:
+    """标准化改名（§5）：把型号 pn_std 改成厂商规范写法。
+
+    只改文本不改 part_id/事实，无需重算成本；名下别名 pn_std 同事务跟改（复合外键）。
+    目标名被 active 型号占用时不改名、返回 renamed=False 并转合并候选（同款应走合并）。
+    """
+    part = db.scalar(select(DimPart).where(DimPart.pn_std == body.pn_std))
+    if part is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"型号不存在: {body.pn_std}")
+    try:
+        return part_rename.rename_part(db, part.id, body.new_pn_std, body.reason, role)
+    except part_rename.RenameError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
 
 @router.get("/merges")
