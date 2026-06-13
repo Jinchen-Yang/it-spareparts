@@ -102,11 +102,12 @@ FIFO_SCOPE = "global"                            # global（按型号全局，�
 OPENING_COST_POLICY = "fallback_recent"          # none | fallback_recent
 
 # 计入成本的采购类型（真实导出值：销售订单/维保需求/指定采购）
-# 决定哪些采购构成成本批次层。要把维保算进成本，就把 "维保需求" 加进来
-COST_PURCHASE_TYPES = ["销售订单", "指定采购"]   # 默认排除 维保需求 ← 待确认
+# 决定哪些采购构成成本批次层。
+COST_PURCHASE_TYPES = ["销售订单", "指定采购", "维保需求"]   # 甲方确认：维保采购价计入成本(影响均价)
 
 # 计入营收的销售业务类型（实测：备件销售/销售换货/整机销售）
-REVENUE_BUSINESS_TYPES = ["备件销售"]            # 排除 销售换货/整机销售 ← 待确认
+# 甲方确认(v1)：仅"备件销售"计营收；维保/换货/整机销售不计——维保营收以后单独开模块再算
+REVENUE_BUSINESS_TYPES = ["备件销售"]
 
 # 含税口径：ex_tax（默认，按不含税算毛利）| as_is（原价粗算）
 TAX_BASIS = "ex_tax"
