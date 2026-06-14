@@ -13,7 +13,7 @@
 """
 import logging
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import func, or_, select
@@ -26,10 +26,43 @@ from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inventory import Inventory
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
+from app.models.system import SysAuditLog
 
 _log = logging.getLogger("loader")
 _CHUNK = 1000  # 每批行数，控制单语句参数数 < PostgreSQL 65535 上限
 _MERGE_CHAIN_LIMIT = 10
+# 覆盖留痕（🥉/§3）：upsert/库存覆盖既有行时写 before/after，超量只记汇总防审计爆量。
+_AUDIT_OVERWRITE_MAX = 2000
+_AUDIT_IGNORE = {"import_batch_id"}   # 变化检测忽略（每次导入必变，非业务冲突）
+
+
+def _jsonable(v):
+    """JSONB 安全化：Decimal→str、date/datetime→isoformat，其余原样（list[str]/int/None 均可）。"""
+    if isinstance(v, Decimal):
+        return str(v)
+    if isinstance(v, (date, datetime)):
+        return v.isoformat()
+    return v
+
+
+def _audit_overwrites(session: Session, entity_type: str, table: str,
+                      entries: list[tuple], operated_by: str | None, batch_id: int) -> None:
+    """对被覆盖的行写 SysAuditLog（before/after）。entries: [(entity_id, before_dict, after_dict)]。"""
+    if not entries:
+        return
+    reason = f"导入覆盖（batch {batch_id} · {table}）"
+    if len(entries) > _AUDIT_OVERWRITE_MAX:
+        session.add(SysAuditLog(
+            entity_type=entity_type, entity_id=batch_id, action="overwrite",
+            before_json=None,
+            after_json={"overwritten_rows": len(entries),
+                        "note": f"超过 {_AUDIT_OVERWRITE_MAX} 行，仅记总数"},
+            reason=reason, operated_by=operated_by))
+        return
+    for eid, before, after in entries:
+        session.add(SysAuditLog(
+            entity_type=entity_type, entity_id=eid, action="overwrite",
+            before_json=before, after_json=after, reason=reason, operated_by=operated_by))
 
 
 class MergeChainError(Exception):
@@ -218,12 +251,14 @@ def _upsert_named_dim(session: Session, model, rows: list[dict], extra_cols: lis
 
 
 def _upsert_facts(session: Session, model, rows: list[dict], conflict_col,
-                  update_cols: list[str] | None = None) -> dict:
+                  update_cols: list[str] | None = None, audit: tuple | None = None) -> dict:
     """事实表幂等写入。
 
     - update_cols=None(默认 skip)：ON CONFLICT DO NOTHING；返回 {inserted, skipped}。
     - update_cols=列名列表(upsert 修复模式)：ON CONFLICT DO UPDATE 这些字段；
       预先点一下已存在的键以区分新增/更新；返回 {inserted, updated}。
+    - audit=(operated_by, batch_id)（仅 upsert 有意义）：覆盖既有行时把 before/after 写 SysAuditLog，
+      只记业务字段确有变化的行（忽略 import_batch_id），供「后到覆盖先到」回溯（🥉/§3）。
     """
     if not rows:
         return {"inserted": 0, "updated": 0, "skipped": 0}
@@ -236,15 +271,37 @@ def _upsert_facts(session: Session, model, rows: list[dict], conflict_col,
     # upsert 模式
     key_name = conflict_col.name
     keys = [r[key_name] for r in rows]
-    existing = 0
-    for chunk in _chunks(keys):
-        existing += session.scalar(
-            select(func.count()).select_from(model).where(conflict_col.in_(chunk))
-        ) or 0
+    before_by_key: dict = {}
+    if audit is not None:   # 取既有行 id + 旧值（存原值，比较按数值/对象，避免 Decimal 标度误判）
+        sel_cols = [conflict_col, model.id, *[getattr(model, c) for c in update_cols]]
+        for chunk in _chunks(keys):
+            for row in session.execute(select(*sel_cols).where(conflict_col.in_(chunk))).all():
+                m = row._mapping
+                before_by_key[m[key_name]] = (m["id"], {c: m[c] for c in update_cols})
+        existing = len(before_by_key)
+    else:
+        existing = 0
+        for chunk in _chunks(keys):
+            existing += session.scalar(
+                select(func.count()).select_from(model).where(conflict_col.in_(chunk))
+            ) or 0
     for chunk in _chunks(rows):
         stmt = pg_insert(model).values(chunk)
         set_ = {c: getattr(stmt.excluded, c) for c in update_cols}
         session.execute(stmt.on_conflict_do_update(index_elements=[conflict_col], set_=set_))
+    if audit is not None and before_by_key:
+        op_by, b_id = audit
+        entries = []
+        for r in rows:
+            prev = before_by_key.get(r[key_name])
+            if prev is None:
+                continue
+            eid, before = prev          # before: 原值（Decimal/date/...）
+            after = {c: r.get(c) for c in update_cols}
+            if any(before.get(c) != after.get(c) for c in update_cols if c not in _AUDIT_IGNORE):
+                entries.append((eid, {c: _jsonable(v) for c, v in before.items()},
+                                {c: _jsonable(v) for c, v in after.items()}))
+        _audit_overwrites(session, "import_overwrite", model.__tablename__, entries, op_by, b_id)
     return {"inserted": len(rows) - existing, "updated": existing, "skipped": 0}
 
 
@@ -265,15 +322,20 @@ _SALES_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "descri
 
 
 def load(session: Session, result: TransformResult, batch_id: int, snapshot_date: date,
-         mode: str = "skip") -> dict:
+         mode: str = "skip", operated_by: str | None = None,
+         audit_overwrites: bool = False) -> dict:
     if result.file_type == mapping.INVENTORY:
-        return _load_inventory(session, result, batch_id, snapshot_date)
-    return _load_orders(session, result, batch_id, mode)
+        return _load_inventory(session, result, batch_id, snapshot_date,
+                               operated_by, audit_overwrites)
+    return _load_orders(session, result, batch_id, mode, operated_by, audit_overwrites)
 
 
 def _load_orders(session: Session, result: TransformResult, batch_id: int,
-                 mode: str = "skip") -> dict:
+                 mode: str = "skip", operated_by: str | None = None,
+                 audit_overwrites: bool = False) -> dict:
     upsert = (mode == "upsert")
+    # 仅 upsert(覆盖)模式需留痕；skip 模式 ON CONFLICT DO NOTHING 不覆盖既有行
+    audit = (operated_by, batch_id) if (upsert and audit_overwrites) else None
     is_sales = result.file_type == mapping.SALES
     # 1) 商品身份解析（别名/合并重定向 + 建档）+ alias
     resolution, new_parts = _resolve_line_parts(session, result.lines, is_sales)
@@ -322,7 +384,8 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
             })
         order_rows.append(base)
     order_upd_cols = (_SALES_ORDER_UPD if is_sales else _PURCHASE_ORDER_UPD) if upsert else None
-    order_stats = _upsert_facts(session, order_model, order_rows, order_model.raw_order_id, order_upd_cols)
+    order_stats = _upsert_facts(session, order_model, order_rows, order_model.raw_order_id,
+                                order_upd_cols, audit=audit)
     # raw_order_id -> id（含已存在的）
     raw_ids = [o["raw_order_id"] for o in orders.values()]
     oid_map = dict(session.execute(
@@ -351,7 +414,8 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
             base["recent_purchase_price"] = ln["recent_purchase_price"]
         line_rows.append(base)
     line_upd_cols = (_SALES_LINE_UPD if is_sales else _PURCHASE_LINE_UPD) if upsert else None
-    line_stats = _upsert_facts(session, line_model, line_rows, line_model.raw_line_id, line_upd_cols)
+    line_stats = _upsert_facts(session, line_model, line_rows, line_model.raw_line_id,
+                               line_upd_cols, audit=audit)
 
     return {
         "source_rows_total": result.rows_total,
@@ -367,7 +431,8 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
     }
 
 
-def _load_inventory(session: Session, result: TransformResult, batch_id: int, snapshot_date: date) -> dict:
+def _load_inventory(session: Session, result: TransformResult, batch_id: int, snapshot_date: date,
+                    operated_by: str | None = None, audit_overwrites: bool = False) -> dict:
     # 1) 商品身份解析（与订单路径同口径：别名/合并重定向）+ alias
     resolution, new_parts = _resolve_line_parts(session, result.inventory, is_sales=False)
     _upsert_aliases(session, result.inventory, resolution)
@@ -407,6 +472,20 @@ def _load_inventory(session: Session, result: TransformResult, batch_id: int, sn
         "snapshot_date": snapshot_date, "import_batch_id": batch_id,
     } for r in agg.values()]
 
+    # 覆盖留痕（🥉/§3）：库存快照恒覆盖 source_qty（latest-wins），先取既有量，量变则记 before/after。
+    before_q: dict[tuple, tuple] = {}
+    if audit_overwrites:
+        wh_pairs = {(r["pn_std"], r["warehouse"]) for r in rows}
+        pn_list = list({r["pn_std"] for r in rows})
+        for chunk in _chunks(pn_list):
+            for iid, pn, wh, sq, pid in session.execute(
+                select(Inventory.id, Inventory.pn_std, Inventory.warehouse,
+                       Inventory.source_qty, Inventory.part_id)
+                .where(Inventory.pn_std.in_(chunk))
+            ).all():
+                if (pn, wh) in wh_pairs:
+                    before_q[(pn, wh)] = (iid, sq, pid)
+
     # 3) upsert (pn_std,warehouse)：覆盖 source_qty/snapshot/批次，不动 manual_qty/is_qty_overridden/safety_stock
     for chunk in _chunks(rows):
         stmt = pg_insert(Inventory).values(chunk)
@@ -422,6 +501,21 @@ def _load_inventory(session: Session, result: TransformResult, batch_id: int, sn
             },
         )
         session.execute(stmt)
+
+    if audit_overwrites and before_q:
+        entries = []
+        for r in rows:
+            prev = before_q.get((r["pn_std"], r["warehouse"]))
+            if prev is None:
+                continue
+            iid, old_qty, old_pid = prev
+            # 数量或商品身份(part_id，别名/合并改判后可变)任一变化都留痕（与订单行口径一致）
+            if old_qty != r["source_qty"] or old_pid != r["part_id"]:
+                entries.append((iid,
+                    {"source_qty": _jsonable(old_qty), "part_id": old_pid},
+                    {"source_qty": _jsonable(r["source_qty"]), "part_id": r["part_id"],
+                     "snapshot_date": _jsonable(snapshot_date)}))
+        _audit_overwrites(session, "inventory_overwrite", "inventory", entries, operated_by, batch_id)
 
     return {
         "source_rows_total": result.rows_total,

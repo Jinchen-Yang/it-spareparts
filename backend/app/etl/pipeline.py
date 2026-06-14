@@ -42,10 +42,12 @@ def _archive(src_path: str, file_hash: str) -> str:
 
 
 def run_import(session: Session, file_path: str, original_name: str,
-               uploaded_by: str | None = None, mode: str = "skip") -> SysImportBatch:
+               uploaded_by: str | None = None, mode: str = "skip",
+               import_job_id: int | None = None) -> SysImportBatch:
     """对单个 .xlsx 执行完整导入。返回 batch（含 report_json）。
 
     校验在 API 层（扩展名/大小）；此处做 hash 去重 + 锁 + 入库。
+    import_job_id：批量作业归组（单文件上传为 None）；成功/失败批次都带上，便于作业详情聚合。
     """
     file_hash = sha256_file(file_path)
 
@@ -63,7 +65,8 @@ def run_import(session: Session, file_path: str, original_name: str,
 
     # 3) 建 batch（先占位，类型稍后回填）
     batch = SysImportBatch(filename=original_name, file_type="unknown",
-                           file_hash=file_hash, uploaded_by=uploaded_by, status="processing")
+                           file_hash=file_hash, uploaded_by=uploaded_by,
+                           import_job_id=import_job_id, status="processing")
     session.add(batch)
     session.flush()  # 取 batch.id
 
@@ -84,7 +87,8 @@ def run_import(session: Session, file_path: str, original_name: str,
                                        raw_row=e.raw_row))
 
         snapshot = datetime.now(timezone.utc).date()
-        counts = loader.load(session, result, batch.id, snapshot, mode=mode)
+        counts = loader.load(session, result, batch.id, snapshot, mode=mode,
+                             operated_by=uploaded_by, audit_overwrites=True)
 
         report = {"file_type": file_type, **counts,
                   "errors_preview": [
