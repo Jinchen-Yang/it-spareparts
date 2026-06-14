@@ -2,8 +2,10 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 # 先单独 COPY package.json 利用层缓存
+# npm 源可由构建参数覆盖（国内服务器走镜像，默认上游 npmjs）
+ARG NPM_REGISTRY=https://registry.npmjs.org
 COPY package.json package-lock.json* ./
-RUN npm install --no-audit --no-fund
+RUN npm config set registry ${NPM_REGISTRY} && npm install --no-audit --no-fund
 COPY . .
 RUN npm run build
 
