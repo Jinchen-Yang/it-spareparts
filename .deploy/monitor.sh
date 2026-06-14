@@ -4,7 +4,9 @@
 # 钉钉告警：把钉钉群机器人 webhook URL 写到 ~/apps/it-spareparts/.alert_webhook 即启用；无则只记日志。
 set -uo pipefail   # 不用 -e：要收集所有问题而非首个失败就退出
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-cd "$(dirname "$0")"
+# 本脚本在 .deploy/ 下，但 docker compose 需在含 docker-compose.yml 的应用根目录跑；
+# 故 cd 到脚本上一级（应用根）。monitor.status/monitor.log/.alert_webhook 也落在应用根。
+cd "$(dirname "$0")/.."
 
 PROBLEMS=()
 add() { PROBLEMS+=("$1"); }
