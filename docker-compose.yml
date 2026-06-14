@@ -17,7 +17,10 @@ services:
     restart: unless-stopped
 
   app:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     environment:
       DATABASE_URL: postgresql+psycopg://spareparts:${POSTGRES_PASSWORD:-spareparts}@db:5432/spareparts
       RAW_FILE_DIR: /app/data/raw
@@ -45,7 +48,10 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
     depends_on:
       - app
     ports:
