@@ -11,9 +11,12 @@ api.interceptors.request.use((cfg) => {
 api.interceptors.response.use(
   (r) => r,
   (err) => {
-    if (err.response?.status === 401) {
+    // 登录接口自己的 401(账号/密码错)交给登录页提示，不在这里 reload 把提示冲掉；
+    // 其它接口的 401 = token 失效，清掉并重载回登录页。
+    const isLogin = (err.config?.url || "").includes("/auth/login");
+    if (err.response?.status === 401 && !isLogin) {
       localStorage.removeItem("token");
-      if (location.pathname !== "/login") location.reload();
+      location.reload();
     }
     return Promise.reject(err);
   }
