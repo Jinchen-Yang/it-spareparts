@@ -10,8 +10,10 @@ from typing import Any
 
 from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session
 
 from app import config
+from app.db import get_db
 
 _log = logging.getLogger("access")
 _bearer_optional = HTTPBearer(auto_error=False)
@@ -48,19 +50,21 @@ def is_scoped_sales(user_ctx: UserContext | None) -> bool:
 
 def get_current_user_context(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer_optional),
+    db: Session = Depends(get_db),
 ) -> UserContext:
     """身份上下文钩子。RBAC 关 → 临时全量；RBAC 开 → 从服务端校验的 token 取真实身份。
 
     身份**只来自 token**，绝不信对话/请求体里用户自报的角色（注入防御根基）。
     鉴权本身仍由 auth.current_role/require_admin 各接口独立把关。
+    token 经 verify_token_db 校验吊销（tv/停用）；被吊销/无效 → 兜底 GUEST（数据侧降权，不硬 401）。
     """
     if not config.ENABLE_RBAC:
         return UserContext(user_id=None, role=config.PHASE1_BYPASS_ROLE, is_authenticated=False)
-    # RBAC 开启：解析 token，失败兜底 GUEST（绝不默认 admin）
+    # RBAC 开启：解析 token，失败/被吊销兜底 GUEST（绝不默认 admin）
     if creds is not None:
         try:
-            from app.auth import verify_token
-            data = verify_token(creds.credentials)
+            from app.auth import verify_token_db
+            data = verify_token_db(creds.credentials, db)
             return UserContext(user_id=data.get("sub"), role=data.get("role", config.GUEST_ROLE),
                                salesperson_name=data.get("name"),
                                permissions=data.get("perms"), is_authenticated=True)

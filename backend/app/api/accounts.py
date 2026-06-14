@@ -1,6 +1,7 @@
 """账号与权限管理（管理员专用）：建号 / 改密 / 停用 / 勾权限 / 看活动。
 
-权限改动随该用户**下次登录**写进 token 生效（token 无状态，不即时踢线）。
+改密 / 停用 / 改角色或权限会递增 sys_user.token_version → 该用户**已签发的旧 token 立即失效**
+（下次请求被 verify_token_db 拒，需重新登录）。即时踢线，不再等下次登录。
 admin 不可改角色、不可停用、权限恒全开（不可自锁）。
 """
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -115,6 +116,9 @@ def update_account(username: str, body: UpdateAccount, db: Session = Depends(get
         u.salesperson_name = body.salesperson_name
     if body.permissions is not None:
         u.permissions = permissions.sanitize(body.permissions) or None
+    # 角色/权限变更 → 吊销旧 token，迫使重新登录以即时生效（仅改显示名则不踢）
+    if body.role is not None or body.permissions is not None:
+        u.token_version = (u.token_version or 0) + 1
     db.commit()
     return _view(u)
 
@@ -126,6 +130,7 @@ def reset_password(username: str, body: PasswordReset, db: Session = Depends(get
         raise HTTPException(400, "密码至少 6 位")
     u = _get(db, username)
     u.password_hash = hash_password(body.password)
+    u.token_version = (u.token_version or 0) + 1   # 改密即吊销旧 token
     db.commit()
     return {"username": username, "reset": True}
 
@@ -137,6 +142,8 @@ def set_active(username: str, body: ActiveToggle, db: Session = Depends(get_db),
         raise HTTPException(400, "不能停用 admin")
     u = _get(db, username)
     u.is_active = body.is_active
+    if not body.is_active:
+        u.token_version = (u.token_version or 0) + 1   # 停用即吊销旧 token（立即踢线）
     db.commit()
     return {"username": username, "is_active": u.is_active}
 

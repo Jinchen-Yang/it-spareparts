@@ -39,6 +39,8 @@ class SysUser(Base):
     # 登录暴力破解防护：连续失败计数 + 锁定到期时间（达阈值锁定一段时间）
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     locked_until: Mapped[datetime | None] = mapped_column(TZDateTime)
+    # token 版本：改密/停用/改权限时递增 → 旧 token 的 tv 不匹配即失效（即时吊销）
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
 
