@@ -12,7 +12,12 @@ from app.agent import provider, runtime
 from app.auth import current_role
 from app.config import get_settings
 from app.db import get_db
-from app.security import UserContext, get_current_user_context, record_access_log
+from app.security import (
+    FULL_SCOPE_ROLES,
+    UserContext,
+    get_current_user_context,
+    record_access_log,
+)
 from app.services import agent_files
 
 _log = logging.getLogger("agent")
@@ -100,7 +105,8 @@ async def upload(
     record_access_log(ctx, "upload", "agent_file", {"filename": file.filename})
     content = await file.read()
     try:
-        return agent_files.save_upload(content, file.filename or "上传.xlsx", role)
+        # 归属记真实身份(user_id)而非角色 → 下载/读取按人做越权校验
+        return agent_files.save_upload(content, file.filename or "上传.xlsx", ctx.user_id)
     except agent_files.FileError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
@@ -111,8 +117,15 @@ def download(
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> FileResponse:
-    """下载智能体生成/上传的文件。"""
+    """下载智能体生成/上传的文件（仅本人创建的；admin 例外）。"""
     record_access_log(ctx, "download", "agent_file", {"file_id": file_id})
+    try:
+        owner = agent_files.owner_of(file_id)        # 文件不存在 → FileError → 404
+    except agent_files.FileError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    # 防越权下载他人上传的报价/合同(IDOR)：全量角色放行，否则需本人创建
+    if ctx.role not in FULL_SCOPE_ROLES and owner != ctx.user_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该文件（非本人上传/生成）")
     try:
         path, name = agent_files.get_download(file_id)
     except agent_files.FileError as exc:

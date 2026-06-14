@@ -1,6 +1,14 @@
+# 日志轮转：默认 json-file 无上限会把磁盘撑满；统一限制单文件 10MB×5（每服务最多 50MB）
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   db:
     image: postgres:15
+    logging: *default-logging
     environment:
       POSTGRES_USER: spareparts
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spareparts}
@@ -17,6 +25,7 @@ services:
     restart: unless-stopped
 
   app:
+    logging: *default-logging
     build:
       context: ./backend
       args:
@@ -48,6 +57,7 @@ services:
     restart: unless-stopped
 
   frontend:
+    logging: *default-logging
     build:
       context: ./frontend
       args:

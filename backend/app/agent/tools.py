@@ -277,11 +277,33 @@ def _get_profit_ranking(db: Session, args: dict, ctx: security.UserContext) -> d
     return security.apply_field_visibility(data, ctx)
 
 
+def _owns(ctx: security.UserContext, file_id: str | None) -> bool:
+    """文件归属校验：全量角色(admin/boss/readonly/RBAC关闭的 phase1)放行；
+    否则需创建者==当前用户。防越权读他人上传的报价/合同（主要拦 sales 互看）。"""
+    if not file_id:
+        return True
+    if ctx.role in security.FULL_SCOPE_ROLES:
+        return True
+    try:
+        owner = agent_files.owner_of(file_id)
+    except agent_files.FileError:
+        return True   # 文件不存在交给底层工具报"找不到"，更明确
+    return owner == ctx.user_id
+
+
+_NO_ACCESS = {"error": "无权访问该文件（非本人上传/生成）"}
+
+
 def _inspect_file(db: Session, args: dict, ctx: security.UserContext) -> dict:
-    return agent_files.inspect_file(str(args.get("file_id", "")))
+    fid = str(args.get("file_id", ""))
+    if not _owns(ctx, fid):
+        return _NO_ACCESS
+    return agent_files.inspect_file(fid)
 
 
 def _read_file_rows(db: Session, args: dict, ctx: security.UserContext) -> dict:
+    if not _owns(ctx, str(args.get("file_id", ""))):
+        return _NO_ACCESS
     return agent_files.read_rows(
         str(args.get("file_id", "")), args.get("sheet"),
         int(args.get("start_row") or 1), int(args.get("max_rows") or 50))
@@ -328,13 +350,18 @@ def _list_recent_purchases(db: Session, args: dict, ctx: security.UserContext) -
 
 
 def _write_excel(db: Session, args: dict, ctx: security.UserContext) -> dict:
+    if not _owns(ctx, args.get("base_file_id")):   # 基于他人文件回填 = 变相读他人文件
+        return _NO_ACCESS
     return agent_files.write_excel(
         args.get("base_file_id"), args.get("sheet"),
-        args.get("cells") or [], args.get("output_name"), ctx.role)
+        args.get("cells") or [], args.get("output_name"), ctx.user_id)
 
 
 def _read_document(db: Session, args: dict, ctx: security.UserContext) -> dict:
-    return agent_files.read_document(str(args.get("file_id", "")))
+    fid = str(args.get("file_id", ""))
+    if not _owns(ctx, fid):
+        return _NO_ACCESS
+    return agent_files.read_document(fid)
 
 
 def _write_report(db: Session, args: dict, ctx: security.UserContext) -> dict:
@@ -346,7 +373,7 @@ def _write_report(db: Session, args: dict, ctx: security.UserContext) -> dict:
         return {"error": "rows 需为二维数组"}
     return agent_files.write_report(
         args.get("title"), [str(h) for h in headers], rows,
-        args.get("output_name"), ctx.role,
+        args.get("output_name"), ctx.user_id,
         money_cols=args.get("money_cols") if isinstance(args.get("money_cols"), list) else None)
 
 
