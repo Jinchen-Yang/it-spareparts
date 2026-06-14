@@ -36,6 +36,9 @@ class SysUser(Base):
     # 按用户细粒度权限（账号管理页勾选）；为空 → 回退 role 模板。见 app/permissions.py
     permissions: Mapped[dict | None] = mapped_column(JSONB)
     last_login_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    # 登录暴力破解防护：连续失败计数 + 锁定到期时间（达阈值锁定一段时间）
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    locked_until: Mapped[datetime | None] = mapped_column(TZDateTime)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
 

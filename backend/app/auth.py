@@ -12,7 +12,7 @@ import hmac
 import json
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -29,6 +29,9 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 _bearer = HTTPBearer(auto_error=False)
 
 _PBKDF2_ITERS = 200_000
+# 登录暴力破解防护：连续失败 _LOGIN_MAX_FAILS 次锁定 _LOGIN_LOCK_MINUTES 分钟
+_LOGIN_MAX_FAILS = 5
+_LOGIN_LOCK_MINUTES = 15
 
 
 # ---------- 口令散列（pbkdf2，stdlib，无额外依赖） ----------
@@ -47,6 +50,10 @@ def verify_password(pw: str, stored: str) -> bool:
         return hmac.compare_digest(dk.hex(), hash_hex)
     except Exception:  # noqa: BLE001
         return False
+
+
+# 时序抹平：未知用户也跑一次等量 pbkdf2，避免"命中用户名慢/未命中快"暴露有效账号（用户名枚举旁路）
+_DUMMY_PW_HASH = hash_password("__login_timing_equalizer__")
 
 
 # ---------- token ----------
@@ -105,13 +112,26 @@ def _verify_token(token: str) -> str:
 
 @router.post("/login", response_model=LoginResponse)
 def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
+    now = datetime.now(timezone.utc)
     user = db.scalar(select(SysUser).where(SysUser.username == req.username,
                                            SysUser.is_active.is_(True)))
     if user is not None:
+        # 锁定中：连续失败已达阈值，未到解锁时间则直接拒绝（不消耗 pbkdf2）
+        if user.locked_until is not None and user.locked_until > now:
+            mins = int((user.locked_until - now).total_seconds() // 60) + 1
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                                f"登录失败次数过多，账号已锁定，请 {mins} 分钟后再试")
         if not verify_password(req.password, user.password_hash):
+            user.failed_attempts = (user.failed_attempts or 0) + 1
+            if user.failed_attempts >= _LOGIN_MAX_FAILS:
+                user.locked_until = now + timedelta(minutes=_LOGIN_LOCK_MINUTES)
+            db.commit()
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
+        # 成功：清零失败计数与锁定
         perms = permissions.effective(user.role, user.permissions)
-        user.last_login_at = datetime.now(timezone.utc)
+        user.failed_attempts = 0
+        user.locked_until = None
+        user.last_login_at = now
         db.commit()
         token, exp = _make_token(user.role, user.username, user.salesperson_name, perms=perms)
         return LoginResponse(token=token, role=user.role,
@@ -121,6 +141,8 @@ def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
     # 回退：兼容既有部署的共享口令登录（sys_user 无此账号时）。
     # admin 的 sub 固定为 'admin'（无冒充空间）；其余用户名是自报的，
     # token 标记 fb=True，按 sub 归属的功能（对话会话）会拒绝。
+    # 先跑一次等量 pbkdf2 抹平时序：避免"已存在用户名走慢路径、不存在走快路径"暴露有效账号。
+    verify_password(req.password, _DUMMY_PW_HASH)
     if not hmac.compare_digest(req.password, get_settings().admin_password):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
     role = "admin" if req.username == "admin" else "readonly"
