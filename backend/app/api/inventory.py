@@ -39,6 +39,47 @@ def warehouse_options(db: Session = Depends(get_db), _: str = Depends(current_ro
     return inventory.warehouses(db)
 
 
+@router.get("/movements")
+def list_movements(
+    warehouse: str | None = Query(None),
+    q: str | None = Query(None),
+    doc_type: str | None = Query(None),
+    ledger_kind: str | None = Query(None),   # part | machine
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """全局出入流水分页（§7.6）。"""
+    return apply_field_visibility(
+        inventory.list_movements(db, warehouse, q, doc_type, page, page_size, ledger_kind), ctx)
+
+
+@router.get("/parts/{part_id}/ledger")
+def part_ledger(
+    part_id: int,
+    warehouse: str | None = Query(None),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """单个型号的完整出入流水 + 逐行动态结存——库存页「点开看每条出入」。"""
+    rows = inventory.part_ledger(db, part_id, warehouse)
+    return apply_field_visibility({"part_id": part_id, "items": rows}, ctx)
+
+
+@router.get("/reconciliation")
+def reconciliation(
+    warehouse: str | None = Query(None),
+    only_diff: bool = Query(True),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+) -> dict:
+    """对账：流水回放在库 vs 快照 source_qty 的差异（§7.6）。"""
+    return inventory.reconcile(db, warehouse, only_diff)
+
+
 @router.put("/{inv_id}")
 def update(
     inv_id: int,

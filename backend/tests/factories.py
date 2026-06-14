@@ -69,6 +69,28 @@ def inventory_row(raw_id: str, pn: str, warehouse="总仓", qty="5",
     }
 
 
+def movement_row(raw_id: str, pn: str, warehouse="总仓", direction=1, qty="1",
+                 doc_type="receipt", doc_type_raw=None, on=None, is_absolute=False,
+                 unit_price=None, ledger_kind="part", snapshot_balance=None,
+                 needs_review=False, pn_raw: str | None = None, **kw) -> dict:
+    return {
+        "raw_movement_id": raw_id, "pn_std": pn, "pn_raw": pn_raw or pn,
+        "needs_review": needs_review, "warehouse": warehouse,
+        "movement_date": on or date(2026, 1, 1),
+        "doc_type": doc_type, "doc_type_raw": doc_type_raw or doc_type,
+        "doc_no": kw.get("doc_no"),
+        "direction": direction, "qty": Decimal(qty), "is_absolute": is_absolute,
+        "unit_price": Decimal(unit_price) if unit_price is not None else None,
+        "counterpart_warehouse": kw.get("counterpart_warehouse"),
+        "ledger_kind": ledger_kind,
+        "snapshot_balance": Decimal(snapshot_balance) if snapshot_balance is not None else None,
+    }
+
+
+def movement_result(rows: list) -> TransformResult:
+    return TransformResult(file_type=mapping.STOCK_LEDGER, movements=rows, rows_total=len(rows))
+
+
 def purchase_result(orders: dict, lines: list) -> TransformResult:
     return TransformResult(file_type=mapping.PURCHASE, orders=orders, lines=lines,
                            rows_total=len(lines))

@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.etl import mapping
 from app.etl.transform import TransformResult
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
-from app.models.inventory import Inventory
+from app.models.inventory import Inventory, InventoryMovement
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 
@@ -268,7 +268,54 @@ def load(session: Session, result: TransformResult, batch_id: int, snapshot_date
          mode: str = "skip") -> dict:
     if result.file_type == mapping.INVENTORY:
         return _load_inventory(session, result, batch_id, snapshot_date)
+    if result.file_type == mapping.STOCK_LEDGER:
+        return _load_movement(session, result, batch_id)
     return _load_orders(session, result, batch_id, mode)
+
+
+def _load_movement(session: Session, result: TransformResult, batch_id: int) -> dict:
+    """出入流水入库：append-only，幂等键 raw_movement_id（ON CONFLICT DO NOTHING）。
+
+    流水是不可变事实，只新增不更新；同 raw_movement_id 再次导入被静默跳过（计 skipped）。
+    商品身份解析与订单/库存同口径（别名/合并重定向）。在库数量不在此回算——由
+    services.inventory.compute_onhand 按时间回放得出（永续库存）。
+    """
+    resolution, new_parts = _resolve_line_parts(session, result.movements, is_sales=False)
+    _upsert_aliases(session, result.movements, resolution)
+
+    rows = []
+    for mv in result.movements:
+        raw = mv["pn_raw"]
+        if raw not in resolution:
+            continue
+        pid, _canon = resolution[raw]
+        rows.append({
+            "raw_movement_id": mv["raw_movement_id"], "part_id": pid,
+            "pn_std": mv["pn_std"], "pn_raw": mv["pn_raw"], "warehouse": mv["warehouse"],
+            "movement_date": mv["movement_date"], "doc_type": mv["doc_type"],
+            "doc_type_raw": mv["doc_type_raw"], "doc_no": mv["doc_no"],
+            "direction": mv["direction"], "qty": mv["qty"], "is_absolute": mv["is_absolute"],
+            "unit_price": mv["unit_price"], "counterpart_warehouse": mv["counterpart_warehouse"],
+            "ledger_kind": mv["ledger_kind"], "snapshot_balance": mv["snapshot_balance"],
+            "import_batch_id": batch_id,
+        })
+
+    inserted = 0
+    for chunk in _chunks(rows):
+        stmt = pg_insert(InventoryMovement).values(chunk).on_conflict_do_nothing(
+            index_elements=[InventoryMovement.raw_movement_id]
+        )
+        inserted += len(session.execute(stmt.returning(InventoryMovement.raw_movement_id)).all())
+
+    return {
+        "source_rows_total": result.rows_total,
+        "fact_rows_inserted": inserted,
+        "fact_rows_updated": 0,
+        "fact_rows_skipped": len(rows) - inserted,
+        "fact_rows_error": len(result.errors),
+        "rows_inactive": result.rows_inactive,
+        "new_parts": new_parts,
+    }
 
 
 def _load_orders(session: Session, result: TransformResult, batch_id: int,

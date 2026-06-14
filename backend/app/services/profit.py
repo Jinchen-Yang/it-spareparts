@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app import config, security
 from app.models.dimensions import DimCustomer, DimPart
+from app.models.inventory import InventoryMovement
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.services import cost
@@ -61,9 +62,41 @@ def _load_purchase_events(db: Session):
     return events, fallback
 
 
+def _load_movement_cost_events(db: Session, fallback: dict):
+    """非采购/销售的库存增减（退货返库/组装/盘盈亏）→ 按 part 的额外入/出成本事件（§7.6）。
+
+    采购/销售已覆盖 receipt/issue，调拨 part 级净零，直发不占库——均不在此重复计（见 config）。
+    入库事件优先用流水单价，缺则用该型号兜底价（最近采购价）；无价则跳过（不污染层）。
+    出库事件用负 sale_id 占位消耗层，其 LineCost 不被利润回填读取（meta 只含真实销售行）。
+    """
+    in_types = set(config.COST_MOVEMENT_IN_TYPES)
+    out_types = set(config.COST_MOVEMENT_OUT_TYPES)
+    q = (
+        select(InventoryMovement.part_id, InventoryMovement.movement_date,
+               InventoryMovement.doc_type, InventoryMovement.qty, InventoryMovement.unit_price)
+        .where(InventoryMovement.doc_type.in_(in_types | out_types),
+               InventoryMovement.is_absolute.is_(False),
+               InventoryMovement.qty > 0)
+        .order_by(InventoryMovement.movement_date.asc().nullsfirst(), InventoryMovement.id.asc())
+    )
+    extra_pur: dict[int, list] = defaultdict(list)
+    extra_sale: dict[int, list] = defaultdict(list)
+    phantom_id = 0
+    for part, mdate, dtype, qty, price in db.execute(q):
+        if dtype in in_types:
+            px = price if price is not None else fallback.get(part)
+            if px is not None:
+                extra_pur[part].append(cost.PurchaseEvent(mdate, qty, px))
+        else:
+            phantom_id -= 1   # 负 id 占位，回填阶段不读取
+            extra_sale[part].append(cost.SaleEvent(mdate, phantom_id, qty))
+    return extra_pur, extra_sale
+
+
 def recompute(db: Session) -> dict:
     """重算所有已生效销售行的成本/利润,批量回填。返回统计。"""
     pur_events, fallback = _load_purchase_events(db)
+    extra_pur, extra_sale = _load_movement_cost_events(db, fallback)
 
     sq = (
         select(FSalesLine.id, FSalesLine.part_id, FSalesOrder.order_date,
@@ -85,10 +118,12 @@ def recompute(db: Session) -> dict:
         meta[sid] = {"part": part, "qty": qty, "unit_price": up, "line_amount": lamt,
                      "tax_rate": trate, "business_type": btype}
 
-    # 回放每个 part
+    # 回放每个 part（采购入 + 流水额外入 / 销售出 + 流水额外出，按时间回放；replay 内部排序）
     line_cost: dict[int, cost.LineCost] = {}
     for part, sevents in by_part.items():
-        line_cost.update(cost.replay(pur_events.get(part, []), sevents, fallback.get(part)))
+        purchases = pur_events.get(part, []) + extra_pur.get(part, [])
+        sales = sevents + extra_sale.get(part, [])
+        line_cost.update(cost.replay(purchases, sales, fallback.get(part)))
 
     # 数据治理：被人工标记为非标/排除的型号，不计入营收/利润统计（#25）
     excluded_parts = set(db.execute(

@@ -7,7 +7,8 @@ import type { ColumnsType } from "antd/es/table";
 import api from "../api";
 
 const FILE_TYPE: Record<string, string> = {
-  purchase: "采购订单", sales: "销售订单", inventory: "产品库存", inquiry: "历史询价",
+  purchase: "采购订单", sales: "销售订单", inventory: "产品库存",
+  stock_ledger: "库存流水", inquiry: "历史询价",
 };
 const STATUS_COLOR: Record<string, string> = { success: "green", failed: "red", processing: "blue" };
 
@@ -118,7 +119,7 @@ export default function ImportPage() {
         >
           <p className="ant-upload-drag-icon"><InboxOutlined /></p>
           <p className="ant-upload-text">点击或拖拽 .xlsx 文件到此处导入</p>
-          <p className="ant-upload-hint">支持采购订单 / 销售订单 / 产品库存 / 历史询价，自动识别类型</p>
+          <p className="ant-upload-hint">支持采购订单 / 销售订单 / 产品库存 / 库存流水 / 历史询价，自动识别类型</p>
         </Upload.Dragger>
 
         {phase !== "idle" && (

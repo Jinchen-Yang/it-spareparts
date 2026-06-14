@@ -2,7 +2,7 @@
 from app.models.chat import ChatMessage, ChatSession
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inquiry import FPartInquiry
-from app.models.inventory import Inventory, PartSubstitute
+from app.models.inventory import Inventory, InventoryMovement, PartSubstitute
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -39,6 +39,7 @@ __all__ = [
     "FSalesOrder",
     "FSalesLine",
     "Inventory",
+    "InventoryMovement",
     "PartSubstitute",
     "FPartInquiry",
     "SysImportBatch",

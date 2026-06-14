@@ -105,6 +105,14 @@ OPENING_COST_POLICY = "fallback_recent"          # none | fallback_recent
 # 决定哪些采购构成成本批次层。
 COST_PURCHASE_TYPES = ["销售订单", "指定采购", "维保需求"]   # 甲方确认：维保采购价计入成本(影响均价)
 
+# §7.6 计入成本回放的「额外」库存流水类型（在采购/销售之外补足成本时间线）。
+# 关键：避免双计——采购导入已是入库批次、销售导入已是出库，故流水里的 receipt/issue 不再计；
+# 调拨(transfer_*)在 part 级一进一出净零，也不计；直发不占库不计。
+# 只补采购/销售覆盖不到的真实增减：退货返库、组装领料/入库、盘盈/盘亏。
+# 绝对值盘点(is_absolute)只影响在库数量(compute_onhand)，不在成本层重置（保守，避免误判 COGS）。
+COST_MOVEMENT_IN_TYPES = ["return_in", "assembly_in", "stocktake_gain"]    # 入层（无单价则按兜底价）
+COST_MOVEMENT_OUT_TYPES = ["assembly_out", "stocktake_loss"]              # 出层（消耗，不产生 COGS 行）
+
 # 计入营收的销售业务类型（实测：备件销售/销售换货/整机销售）
 # 甲方确认(v1)：仅"备件销售"计营收；维保/换货/整机销售不计——维保营收以后单独开模块再算
 REVENUE_BUSINESS_TYPES = ["备件销售"]

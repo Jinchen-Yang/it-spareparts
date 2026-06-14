@@ -55,9 +55,10 @@ def upload(
         except ReaderError as exc:
             db.commit()  # failed batch 已记录
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-        # 采购/销售导入后自动重算利润（§6.1 step13），失败不影响导入本身
+        # 采购/销售/库存流水导入后自动重算利润（§6.1 step13 / §7.6），失败不影响导入本身。
+        # 流水里的退货/组装/盘盈亏会改写销售成本时间线（见 profit._load_movement_cost_events）。
         recompute_stats = None
-        if batch.file_type in ("purchase", "sales"):
+        if batch.file_type in ("purchase", "sales", "stock_ledger"):
             try:
                 recompute_stats = profit.recompute(db)
             except Exception as exc:  # noqa: BLE001

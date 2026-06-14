@@ -7,6 +7,7 @@ PURCHASE = "purchase"
 SALES = "sales"
 INVENTORY = "inventory"
 INQUIRY = "inquiry"
+STOCK_LEDGER = "stock_ledger"   # 库存出入流水（备件库存流水 / 整机库存流水）
 
 # ---- 采购订单 ----
 PURCHASE_HEAD = {
@@ -84,18 +85,76 @@ INVENTORY_MAP = {
     "数据状态": "data_status",
 }
 
+# ---- 库存出入流水（备件库存流水 / 整机库存流水，单实体，无 head/line，无 ffill）----
+# ⚠️ 列名按源系统常见「库存流水」导出推断。落地时请用真实「备件库存流水」表头校正
+#    本 dict 与下方 detect_file_type 的特征列即可——transform/loader 的逻辑与列名无关。
+# 数量布局两种都支持：①「入库数量/出库数量」两列；②「数量」单列（带正负）。哪种都行，
+# 缺的列在 transform 里取不到即视为空，不报错。
+STOCK_LEDGER_MAP = {
+    "流水ID": "raw_movement_id",
+    "单据日期": "movement_date",
+    "单据类型": "doc_type_raw",
+    "单据编号": "doc_no",
+    "产品名称(PN)": "pn_raw",
+    "仓库": "warehouse",
+    "对方仓库": "counterpart_warehouse",
+    "入库数量": "qty_in",
+    "出库数量": "qty_out",
+    "数量": "qty_signed",          # 单列带符号布局（+入/-出）
+    "结存数量": "snapshot_balance",  # 源系统结存，用于对账
+    "单价": "unit_price",
+    "整机/备件": "machine_or_part",  # → ledger_kind
+}
+
 MAPPINGS = {
     PURCHASE: {"head": PURCHASE_HEAD, "line": PURCHASE_LINE},
     SALES: {"head": SALES_HEAD, "line": SALES_LINE},
     INVENTORY: {"head": {}, "line": INVENTORY_MAP},
+    STOCK_LEDGER: {"head": {}, "line": STOCK_LEDGER_MAP},
 }
 
-# ffill 的头字段（原始中文列名）—— 库存无
+# ffill 的头字段（原始中文列名）—— 库存/流水无
 FFILL_COLS = {
     PURCHASE: list(PURCHASE_HEAD.keys()),
     SALES: list(SALES_HEAD.keys()),
     INVENTORY: [],
+    STOCK_LEDGER: [],
 }
+
+# 单据类型词表：原始中文（子串匹配，按从具体到笼统排序）→ (标准 doc_type, 默认方向, 是否绝对值)。
+# 方向：+1 入 / -1 出 / 0 不影响在库；is_absolute=True 仅盘点（回放时重置结存而非累加）。
+# 真实方向优先取自「入库/出库数量」列或带符号「数量」列；此处方向仅在无显式数量列时兜底。
+# 若你的「盘点」流水记录的是调整增减而非盘点后绝对数，把 stocktake 的 is_absolute 改 False 即可。
+MOVEMENT_DOC_TYPES: list[tuple[str, str, int, bool]] = [
+    ("调拨入", "transfer_in", 1, False),
+    ("调入", "transfer_in", 1, False),
+    ("调拨出", "transfer_out", -1, False),
+    ("调出", "transfer_out", -1, False),
+    ("退货返库", "return_in", 1, False),
+    ("退返", "return_in", 1, False),
+    ("退库", "return_in", 1, False),
+    ("组装入库", "assembly_in", 1, False),
+    ("组装领料", "assembly_out", -1, False),
+    ("领料", "assembly_out", -1, False),
+    ("盘盈", "stocktake_gain", 1, False),
+    ("盘亏", "stocktake_loss", -1, False),
+    ("盘点", "stocktake", 0, True),
+    ("直发", "direct_ship", 0, False),
+    ("收货", "receipt", 1, False),
+    ("入库", "receipt", 1, False),
+    ("退货", "return_in", 1, False),
+    ("发货", "issue", -1, False),
+    ("出库", "issue", -1, False),
+]
+
+
+def resolve_doc_type(raw: str | None) -> tuple[str, int, bool]:
+    """原始单据类型 → (标准 doc_type, 默认方向, is_absolute)。识别不出归 other/方向待数量列决定。"""
+    if raw:
+        for keyword, doc_type, direction, is_absolute in MOVEMENT_DOC_TYPES:
+            if keyword in raw:
+                return doc_type, direction, is_absolute
+    return "other", 0, False
 
 
 def detect_file_type(cols: list[str]) -> str | None:
@@ -107,4 +166,10 @@ def detect_file_type(cols: list[str]) -> str | None:
         return SALES
     if "产品库存ID" in colset or ("库存数量" in colset and "产品名称(PN)" in colset):
         return INVENTORY
+    # 出入流水：有「流水ID」，或「单据类型 + 仓库 + 任一数量列」
+    if "流水ID" in colset or (
+        "单据类型" in colset and "仓库" in colset
+        and bool({"入库数量", "出库数量", "数量"} & colset)
+    ):
+        return STOCK_LEDGER
     return None

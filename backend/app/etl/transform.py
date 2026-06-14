@@ -27,6 +27,7 @@ class TransformResult:
     orders: dict = field(default_factory=dict)      # raw_order_id -> 头字段 dict
     lines: list = field(default_factory=list)        # 明细行 dict（含 _order_raw_id）
     inventory: list = field(default_factory=list)    # 库存行 dict
+    movements: list = field(default_factory=list)    # 出入流水行 dict
     errors: list = field(default_factory=list)
     rows_total: int = 0
     rows_inactive: int = 0
@@ -221,7 +222,97 @@ def _transform_inventory(df: pd.DataFrame) -> TransformResult:
     return res
 
 
+def _movement_dir_qty(qty_in, qty_out, qty_signed, dir_default):
+    """从数量列推断 (方向, 非负幅度)。优先级：入/出两列 > 带符号单列 > doc_type 默认方向。"""
+    if qty_in is not None and qty_in != 0:
+        return 1, abs(qty_in)
+    if qty_out is not None and qty_out != 0:
+        return -1, abs(qty_out)
+    if qty_signed is not None:
+        if qty_signed > 0:
+            return 1, qty_signed
+        if qty_signed < 0:
+            return -1, -qty_signed
+        return 0, Decimal(0)
+    # 无显式数量列：用 doc_type 默认方向，幅度取任一非空（可能为 None）
+    mag = qty_in if qty_in is not None else qty_out
+    return dir_default, (abs(mag) if mag is not None else None)
+
+
+def _transform_movement(df: pd.DataFrame) -> TransformResult:
+    res = TransformResult(file_type=mapping.STOCK_LEDGER)
+    m = mapping.STOCK_LEDGER_MAP
+    inv = {v: k for k, v in m.items()}   # internal -> chinese（仅含本文件实际存在的列）
+    res.rows_total = len(df)
+
+    def g(internal):
+        col = inv.get(internal)
+        return row.get(col) if col is not None else None
+
+    for idx, row in df.iterrows():
+        row_no = int(idx) + 1
+        raw_mid = cleaner.clean_str(g("raw_movement_id"))
+        if not raw_mid:
+            res.errors.append(ErrorRec(row_no, "missing_raw_id", "缺少流水ID", _row_dict(row, m)))
+            continue
+        pn_std, pn_raw, needs_review = cleaner.standardize_pn(g("pn_raw"))
+        if pn_std is None:
+            res.errors.append(ErrorRec(row_no, "empty_pn", "产品名称为空", _row_dict(row, m)))
+            continue
+        warehouse = cleaner.clean_str(g("warehouse"))
+        if warehouse is None:
+            res.errors.append(ErrorRec(row_no, "missing_required", "仓库为空", _row_dict(row, m)))
+            continue
+        try:
+            movement_date = cleaner.parse_date(g("movement_date"))
+        except ValueError as exc:
+            res.errors.append(ErrorRec(row_no, "bad_date", str(exc), _row_dict(row, m)))
+            continue
+        try:
+            qty_in = cleaner.parse_qty(g("qty_in"))
+            qty_out = cleaner.parse_qty(g("qty_out"))
+            qty_signed = cleaner.parse_qty(g("qty_signed"))
+            unit_price = cleaner.parse_money(g("unit_price"))
+            snapshot_balance = cleaner.parse_qty(g("snapshot_balance"))
+        except ValueError as exc:
+            res.errors.append(ErrorRec(row_no, "bad_number", str(exc), _row_dict(row, m)))
+            continue
+
+        doc_type_raw = cleaner.clean_str(g("doc_type_raw"))
+        doc_type, dir_default, is_absolute = mapping.resolve_doc_type(doc_type_raw)
+        direction, qty = _movement_dir_qty(qty_in, qty_out, qty_signed, dir_default)
+        if is_absolute:                 # 盘点：绝对值重置，方向无意义
+            direction = 0
+            for cand in (qty, qty_in, snapshot_balance):
+                if cand is not None:
+                    qty = abs(cand)
+                    break
+        elif doc_type == "direct_ship":  # 直发：不影响在库，仅留痕
+            direction = 0
+        if qty is None:
+            res.errors.append(ErrorRec(row_no, "missing_required", "数量为空", _row_dict(row, m)))
+            continue
+
+        mop = cleaner.clean_str(g("machine_or_part"))
+        ledger_kind = "machine" if (mop and "整机" in mop) else "part"
+        res.movements.append({
+            "raw_movement_id": raw_mid,
+            "pn_std": pn_std, "pn_raw": pn_raw, "needs_review": needs_review,
+            "warehouse": warehouse, "movement_date": movement_date,
+            "doc_type": doc_type, "doc_type_raw": doc_type_raw,
+            "doc_no": cleaner.clean_str(g("doc_no")),
+            "direction": direction, "qty": qty, "is_absolute": is_absolute,
+            "unit_price": unit_price,
+            "counterpart_warehouse": cleaner.clean_str(g("counterpart_warehouse")),
+            "ledger_kind": ledger_kind,
+            "snapshot_balance": snapshot_balance,
+        })
+    return res
+
+
 def transform(df: pd.DataFrame, file_type: str) -> TransformResult:
     if file_type == mapping.INVENTORY:
         return _transform_inventory(df)
+    if file_type == mapping.STOCK_LEDGER:
+        return _transform_movement(df)
     return _transform_orders(df, file_type)

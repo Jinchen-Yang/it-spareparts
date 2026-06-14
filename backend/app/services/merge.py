@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart, PartAlias
 from app.models.inquiry import FPartInquiry
-from app.models.inventory import Inventory, PartSubstitute
+from app.models.inventory import Inventory, InventoryMovement, PartSubstitute
 from app.models.master_data import (
     ProductDataQualityIssue,
     ProductMatchCandidate,
@@ -137,6 +137,7 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
         "f_purchase_line_ids": _repoint(db, FPurchaseLine, source.id, target.id),
         "f_sales_line_ids": _repoint(db, FSalesLine, source.id, target.id),
         "inventory_ids": _repoint(db, Inventory, source.id, target.id),
+        "inventory_movement_ids": _repoint(db, InventoryMovement, source.id, target.id),
         "f_part_inquiry_ids": _repoint(db, FPartInquiry, source.id, target.id),
     }
 
