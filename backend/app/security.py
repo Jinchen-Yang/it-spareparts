@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from fastapi import Depends
+from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
@@ -71,6 +71,22 @@ def get_current_user_context(
         except Exception:  # noqa: BLE001
             pass
     return UserContext(user_id=None, role=config.GUEST_ROLE, is_authenticated=False)
+
+
+def require_page(page_key: str):
+    """页面级准入依赖：该用户 page_* 权限为 False → 403。
+    admin 恒放行；RBAC 关或旧 token（无 perms）按角色模板回退，避免破坏旧会话。
+    page_* 既驱动前端菜单显示，也在此做后端准入（前端藏菜单 ≠ 后端拦接口）。"""
+    def _dep(ctx: UserContext = Depends(get_current_user_context)) -> None:
+        if not config.ENABLE_RBAC or ctx.role == "admin":
+            return
+        perms = ctx.permissions
+        if perms is None:
+            from app import permissions as _perm
+            perms = _perm.effective(ctx.role, None)
+        if not perms.get(page_key, False):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该页面")
+    return _dep
 
 
 def apply_data_scope(query, user_ctx: UserContext):
