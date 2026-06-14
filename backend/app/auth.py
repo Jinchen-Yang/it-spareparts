@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import permissions
 from app.config import get_settings
 from app.db import get_db
 from app.models.system import SysUser
@@ -58,6 +60,7 @@ class LoginResponse(BaseModel):
     role: str
     name: str | None = None
     expires_at: int
+    permissions: dict | None = None   # 该用户最终权限，前端据此控菜单
 
 
 def _sign(payload: bytes) -> str:
@@ -66,9 +69,11 @@ def _sign(payload: bytes) -> str:
 
 
 def _make_token(role: str, sub: str, name: str | None,
-                fallback: bool = False) -> tuple[str, int]:
+                fallback: bool = False, perms: dict | None = None) -> tuple[str, int]:
     exp = int(time.time()) + get_settings().token_ttl_hours * 3600
     payload: dict = {"role": role, "sub": sub, "name": name, "exp": exp}
+    if perms is not None:
+        payload["perms"] = perms
     if fallback:
         # 共享口令回退登录：sub 是用户自报的任意字符串，不是实名身份。
         # 依赖 sub 做归属的功能（如对话会话）必须拒绝此类 token。
@@ -105,9 +110,13 @@ def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
     if user is not None:
         if not verify_password(req.password, user.password_hash):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
-        token, exp = _make_token(user.role, user.username, user.salesperson_name)
+        perms = permissions.effective(user.role, user.permissions)
+        user.last_login_at = datetime.now(timezone.utc)
+        db.commit()
+        token, exp = _make_token(user.role, user.username, user.salesperson_name, perms=perms)
         return LoginResponse(token=token, role=user.role,
-                             name=user.display_name or user.salesperson_name, expires_at=exp)
+                             name=user.display_name or user.salesperson_name,
+                             expires_at=exp, permissions=perms)
 
     # 回退：兼容既有部署的共享口令登录（sys_user 无此账号时）。
     # admin 的 sub 固定为 'admin'（无冒充空间）；其余用户名是自报的，
@@ -115,8 +124,9 @@ def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
     if not hmac.compare_digest(req.password, get_settings().admin_password):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
     role = "admin" if req.username == "admin" else "readonly"
-    token, exp = _make_token(role, req.username, None, fallback=(role != "admin"))
-    return LoginResponse(token=token, role=role, name=req.username, expires_at=exp)
+    perms = permissions.effective(role, None)
+    token, exp = _make_token(role, req.username, None, fallback=(role != "admin"), perms=perms)
+    return LoginResponse(token=token, role=role, name=req.username, expires_at=exp, permissions=perms)
 
 
 # ---------- 依赖 ----------

@@ -33,6 +33,9 @@ class SysUser(Base):
     salesperson_name: Mapped[str | None] = mapped_column(String(64))  # 对齐销售数据，行级过滤用
     ding_user_id: Mapped[str | None] = mapped_column(String(64), unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    # 按用户细粒度权限（账号管理页勾选）；为空 → 回退 role 模板。见 app/permissions.py
+    permissions: Mapped[dict | None] = mapped_column(JSONB)
+    last_login_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
 
@@ -125,3 +128,19 @@ class SysAuditLog(Base):
     reason: Mapped[str | None] = mapped_column(Text)
     operated_by: Mapped[str | None] = mapped_column(String(64))
     operated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+
+
+class SysAccessLog(Base):
+    """访问活动日志（谁、何时、查了什么）——账号管理页看子账号活动用。"""
+
+    __tablename__ = "sys_access_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str | None] = mapped_column(String(64))
+    role: Mapped[str | None] = mapped_column(String(16))
+    action: Mapped[str] = mapped_column(String(32))        # search/overview/profit/export/chat/import…
+    resource: Mapped[str | None] = mapped_column(Text)     # 查的型号/客户/维度
+    detail: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+
+    __table_args__ = (Index("ix_access_user_time", "username", "created_at"),)

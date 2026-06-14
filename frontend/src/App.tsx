@@ -9,6 +9,7 @@ import ImportPage from "./pages/ImportPage";
 import GovernancePage from "./pages/GovernancePage";
 import ChatPage from "./pages/ChatPage";
 import PurchasesPage from "./pages/PurchasesPage";
+import AccountsPage from "./pages/AccountsPage";
 
 const { Header, Content } = Layout;
 
@@ -22,6 +23,7 @@ export default function App() {
     localStorage.removeItem("token");
     localStorage.removeItem("role");
     localStorage.removeItem("name");
+    localStorage.removeItem("permissions");
     setToken(null);
   };
 
@@ -30,6 +32,20 @@ export default function App() {
   };
   const role = localStorage.getItem("role") || "";
   const name = localStorage.getItem("name") || "";
+  const perms: Record<string, boolean> = JSON.parse(localStorage.getItem("permissions") || "{}");
+  const isAdmin = role === "admin";
+  const can = (p: string) => isAdmin || !!perms[p];
+  const menu = [
+    { key: "import", label: "数据导入", perm: "page_import" },
+    { key: "parts", label: "型号查询", perm: "page_parts" },
+    { key: "purchases", label: "采购记录", perm: "page_purchases" },
+    { key: "chat", label: "AI 助手", perm: "page_chat" },
+    { key: "profit", label: "利润分析", perm: "page_profit" },
+    { key: "inventory", label: "库存查询", perm: "page_inventory" },
+    { key: "governance", label: "数据治理", perm: "page_governance" },
+  ].filter((m) => can(m.perm)).map(({ key, label }) => ({ key, label }));
+  if (isAdmin) menu.push({ key: "accounts", label: "账号管理" });
+  const activePage = menu.some((m) => m.key === page) ? page : (menu[0]?.key || "parts");
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
@@ -49,17 +65,9 @@ export default function App() {
         </div>
         <Menu
           mode="horizontal"
-          selectedKeys={[page]}
+          selectedKeys={[activePage]}
           onClick={(e) => setPage(e.key)}
-          items={[
-            { key: "import", label: "数据导入" },
-            { key: "parts", label: "型号查询" },
-            { key: "purchases", label: "采购记录" },
-            { key: "chat", label: "AI 助手" },
-            { key: "profit", label: "利润分析" },
-            { key: "inventory", label: "库存查询" },
-            { key: "governance", label: "数据治理" },
-          ]}
+          items={menu}
           style={{ flex: 1, minWidth: 0, background: "transparent", borderBottom: "none" }}
         />
         <span style={{ color: "#cbd5e1", marginRight: 12, fontSize: 13 }}>
@@ -68,13 +76,14 @@ export default function App() {
         <Button onClick={logout}>退出</Button>
       </Header>
       <Content style={{ padding: 24, background: COLORS.page }}>
-        {page === "import" && <ImportPage />}
-        {page === "parts" && <PartSearchPage />}
-        {page === "purchases" && <PurchasesPage />}
-        {page === "chat" && <ChatPage />}
-        {page === "profit" && <ProfitPage />}
-        {page === "inventory" && <InventoryPage />}
-        {page === "governance" && <GovernancePage />}
+        {activePage === "import" && <ImportPage />}
+        {activePage === "parts" && <PartSearchPage />}
+        {activePage === "purchases" && <PurchasesPage />}
+        {activePage === "chat" && <ChatPage />}
+        {activePage === "profit" && <ProfitPage />}
+        {activePage === "inventory" && <InventoryPage />}
+        {activePage === "governance" && <GovernancePage />}
+        {activePage === "accounts" && <AccountsPage />}
       </Content>
     </Layout>
   );
