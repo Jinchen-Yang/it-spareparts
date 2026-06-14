@@ -15,6 +15,7 @@ export default function LoginPage({ onLogin }: { onLogin: (token: string) => voi
       localStorage.setItem("token", data.token);
       localStorage.setItem("role", data.role);
       localStorage.setItem("name", data.name || data.role);
+      localStorage.setItem("permissions", JSON.stringify(data.permissions || {}));
       onLogin(data.token);
     } catch (e: any) {
       const status = e?.response?.status;
