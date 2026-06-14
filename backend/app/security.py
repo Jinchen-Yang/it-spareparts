@@ -25,6 +25,7 @@ class UserContext:
     user_id: str | None
     role: str
     salesperson_name: str | None = None   # 对齐 f_sales_order.salesperson，行级过滤用
+    permissions: dict | None = None        # 该用户最终权限（来自 token，见 app/permissions.py）
     ding_user_id: str | None = None
     department_id: str | None = None
     team_id: str | None = None
@@ -36,8 +37,13 @@ FULL_SCOPE_ROLES = {"admin", "boss", "readonly", config.PHASE1_BYPASS_ROLE}
 
 
 def is_scoped_sales(user_ctx: UserContext | None) -> bool:
-    """是否需要按"匿名行情+自己明细"收紧（仅 RBAC 开启且角色=sales）。"""
-    return bool(config.ENABLE_RBAC and user_ctx and user_ctx.role == "sales")
+    """是否按"匿名行情+自己明细"收紧：RBAC 开 + own_customers_only 权限开；
+    旧 token（无 perms）回退按角色=sales。"""
+    if not (config.ENABLE_RBAC and user_ctx):
+        return False
+    if user_ctx.permissions is not None:
+        return bool(user_ctx.permissions.get("own_customers_only"))
+    return user_ctx.role == "sales"
 
 
 def get_current_user_context(
@@ -56,7 +62,8 @@ def get_current_user_context(
             from app.auth import verify_token
             data = verify_token(creds.credentials)
             return UserContext(user_id=data.get("sub"), role=data.get("role", config.GUEST_ROLE),
-                               salesperson_name=data.get("name"), is_authenticated=True)
+                               salesperson_name=data.get("name"),
+                               permissions=data.get("perms"), is_authenticated=True)
         except Exception:  # noqa: BLE001
             pass
     return UserContext(user_id=None, role=config.GUEST_ROLE, is_authenticated=False)
@@ -89,11 +96,19 @@ def anonymize_sales_rows(rows: list[dict], user_ctx: UserContext | None) -> list
     return out
 
 
-def _hidden_fields(role: str) -> set[str]:
-    vis = config.ROLE_FIELD_VISIBILITY.get(role)
+def _hidden_fields(user_ctx: UserContext) -> set[str]:
+    """要隐藏的字段：优先按用户权限(perms)的 data_* 开关算；
+    旧 token（无 perms）回退按 ROLE_FIELD_VISIBILITY 角色配置。"""
+    if user_ctx.permissions is not None:
+        from app import permissions as perm
+        hidden: set[str] = set()
+        for group in perm.hidden_groups(user_ctx.permissions):
+            hidden.update(config.FIELD_GROUPS.get(group, []))
+        return hidden
+    vis = config.ROLE_FIELD_VISIBILITY.get(user_ctx.role)
     if vis is None:
         return set()  # 未知角色/全量角色 → 不隐藏（PHASE1_BYPASS_ROLE 走这里）
-    hidden: set[str] = set()
+    hidden = set()
     for group, visible in vis.items():
         if not visible:
             hidden.update(config.FIELD_GROUPS.get(group, []))
@@ -101,14 +116,14 @@ def _hidden_fields(role: str) -> set[str]:
 
 
 def apply_field_visibility(payload: Any, user_ctx: UserContext) -> Any:
-    """字段级脱敏钩子。第一期(RBAC 关)原样返回。
+    """字段级脱敏钩子。RBAC 关 → 原样返回。
 
-    RBAC 开启时递归处理 dict/list：把不可见字段组内的字段值置为 MASK_VALUE。
+    RBAC 开启时递归处理 dict/list：把该用户不可见的字段值置为 MASK_VALUE。
     part overview/利润聚合返回含嵌套 list，必须递归。
     """
     if not config.ENABLE_RBAC:
         return payload
-    hidden = _hidden_fields(user_ctx.role)
+    hidden = _hidden_fields(user_ctx)
     if not hidden:
         return payload
     return _mask(payload, hidden)
@@ -124,11 +139,24 @@ def _mask(node: Any, hidden: set[str]) -> Any:
 
 def record_access_log(user_ctx: UserContext, action: str, resource: str,
                       filters: dict | None = None) -> None:
-    """访问审计钩子。第一期开关关闭、不写库、不建表。
+    """访问审计：记到 sys_access_log（账号管理页看子账号活动）。
 
-    将来记录：谁查了哪个 PN/客户利润/供应商报价、谁导出了数据。
+    best-effort：用独立短连接写，任何失败都不打断业务请求。
     """
     if not config.ENABLE_ACCESS_LOG:
         return
-    _log.info("access role=%s action=%s resource=%s filters=%s",
-              user_ctx.role, action, resource, filters)
+    _log.info("access user=%s role=%s action=%s resource=%s",
+              user_ctx.user_id, user_ctx.role, action, resource)
+    try:
+        from app.db import SessionLocal
+        from app.models.system import SysAccessLog
+        db = SessionLocal()
+        try:
+            db.add(SysAccessLog(username=user_ctx.user_id, role=user_ctx.role,
+                                action=action, resource=(str(resource)[:500] if resource else None),
+                                detail=filters))
+            db.commit()
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001
+        _log.warning("access log write failed")

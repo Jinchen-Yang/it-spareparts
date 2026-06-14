@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app import auth
-from app.api import agent, chat_sessions, governance, imports, inventory, parts, profit, purchases, substitutes
+from app.api import accounts, agent, chat_sessions, governance, imports, inventory, parts, profit, purchases, substitutes
 from app.config import check_security, get_settings
 from app.db import engine
 
@@ -32,6 +32,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router, prefix=settings.api_prefix)
+app.include_router(accounts.router, prefix=settings.api_prefix)
 app.include_router(imports.router, prefix=settings.api_prefix)
 app.include_router(parts.router, prefix=settings.api_prefix)
 app.include_router(profit.router, prefix=settings.api_prefix)
