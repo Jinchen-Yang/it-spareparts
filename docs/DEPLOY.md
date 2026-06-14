@@ -280,6 +280,30 @@ sudo docker compose up -d --build
 
 ---
 
+## 十二、监控 / 告警 / 日志
+
+**日志轮转**：docker-compose 已统一 `json-file` 单文件 10MB×5（每服务最多 50MB），不会撑满磁盘。
+
+**健康巡检**（`.deploy/monitor.sh`，cron 每 5 分钟）：检查容器/DB/入口/磁盘/备份新鲜度；正常静默（只刷 `monitor.status` 心跳），异常追加 `monitor.log` 并（可选）发钉钉。
+```bash
+# 安装（首次）
+chmod +x ~/apps/it-spareparts/monitor.sh
+( crontab -l 2>/dev/null | grep -v monitor.sh; \
+  echo "*/5 * * * * /home/ubuntu/apps/it-spareparts/monitor.sh" ) | crontab -
+# 启用钉钉告警：把钉钉群机器人 webhook URL 写进下面文件即可（不填则只记 monitor.log）
+echo 'https://oapi.dingtalk.com/robot/send?access_token=xxx' > ~/apps/it-spareparts/.alert_webhook
+cat ~/apps/it-spareparts/monitor.status   # 看最近一次巡检结果
+```
+
+**Postgres 慢查询日志**（免重启、写进数据卷持久化，零风险）：
+```bash
+sudo docker compose exec -T db psql -U spareparts -d spareparts \
+  -c "ALTER SYSTEM SET log_min_duration_statement = 1000;" -c "SELECT pg_reload_conf();"
+# 之后 >1s 的慢查询会进 db 容器日志：sudo docker compose logs db | grep duration
+```
+
+---
+
 ## 故障排查
 
 ### 1. `docker compose build` 因为内存被 OOM Kill

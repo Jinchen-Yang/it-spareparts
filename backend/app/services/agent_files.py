@@ -400,8 +400,13 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
             "download_url": f"/api/agent/files/{file_id}"}
 
 
+def owner_of(file_id: str) -> str | None:
+    """文件创建者（save_upload/_new_file 时记的 operated_by）；文件不存在抛 FileError。归属校验用。"""
+    return _load_meta(_check_id(file_id)).get("operated_by")
+
+
 def get_download(file_id: str) -> tuple[Path, str]:
-    """下载定位：返回 (路径, 文件名)。"""
+    """下载定位：返回 (路径, 文件名)。归属校验在 API 层（见 api/agent.download）。"""
     fid = _check_id(file_id)
     meta = _load_meta(fid)
     return _data_path(fid, meta.get("ext", "xlsx")), meta.get("filename", f"{fid}.xlsx")
