@@ -59,7 +59,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     "sales": {
         "data_supplier": False, "data_customer": True,
         "data_purchase_cost": False, "data_profit": False,
-        "page_parts": True, "page_purchases": False, "page_profit": True,
+        # page_profit=False：利润分析接口本就 require_admin，给 sales 这个菜单只会点了 403
+        "page_parts": True, "page_purchases": False, "page_profit": False,
         "page_inventory": True, "page_chat": True,
         "page_import": False, "page_governance": False,
         "own_customers_only": True,

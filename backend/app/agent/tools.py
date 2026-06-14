@@ -313,7 +313,9 @@ def _lookup_prices_bulk(db: Session, args: dict, ctx: security.UserContext) -> d
             results.append({"query": q, "status": "ok", "pn_std": top["pn_std"],
                             "description": top["description"], "score": top["score"],
                             **part_overview.quick_pricing(db, top["pn_std"])})
-    return {"results": results, "summary": counts}
+    # 按角色脱敏：sales 看不到采购成本（quick_pricing 的 last/recent_purchase_* 进 purchase_cost 组），
+    # 但保留售价聚合（avg_sale_price_90d/ref_sale_price）。与其它工具出口一致。
+    return security.apply_field_visibility({"results": results, "summary": counts}, ctx)
 
 
 def _list_recent_purchases(db: Session, args: dict, ctx: security.UserContext) -> dict:

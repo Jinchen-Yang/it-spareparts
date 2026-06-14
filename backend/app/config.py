@@ -210,14 +210,25 @@ FIELD_GROUPS = {
                       "supplier_type", "supplier_contact", "supplier_phone", "supplier"],
     "customer_info": ["customer_id", "customer_name", "customer_city",
                       "customer_contact", "customer_phone", "customer"],
-    # 注：unit_price 在采购行=成本、销售行=售价(营收)，名字相同。RBAC 开启时此组
-    # 会连销售售价一并遮掉（偏"过度遮蔽"=安全方向）。真启用 RBAC 前需按路径区分或改字段名。
+    # 注：unit_price 在采购行=成本、销售行=售价(营收)同名 → sales 关 data_purchase_cost 时
+    # 逐行 unit_price 一并遮掉（个别成交价对销售也不外露）。销售要的是「聚合成交参考价」，
+    # 由 avg_sale_price / avg_sale_price_90d / ref_sale_price 提供（不在本组，sales 可见）。
+    # ⚠️ 脱敏靠精确 key 匹配：服务层产出的派生键名必须逐字登记，差一字即漏（见下面成组补登）。
     "purchase_cost": ["unit_price", "avg_cost", "latest_cost", "matched_cost",
                       "weighted_avg_cost", "cost_moving_avg", "cost_fifo",
                       "line_amount", "inventory_value", "unit_cost",
-                      "recent_purchase_price", "cost", "cost_amount"],
-    "profit_amount": ["gross_profit"],                  # 毛利金额：能反推成本
-    "profit_rate":   ["gross_margin", "avg_margin", "margin_band"],  # 毛利率：见反推警告
+                      "recent_purchase_price", "cost", "cost_amount",
+                      # part_overview._profit_summary 的聚合成本派生键
+                      "avg_purchase_cost", "avg_cost_moving", "avg_cost_fifo",
+                      # part_overview.quick_pricing 的近期采购价窗口键（AI 批量查价/整机拆解）
+                      "last_purchase_price", "recent_purchase_avg",
+                      "recent_purchase_min", "recent_purchase_max"],
+    # 毛利金额：能反推成本（profit.aggregate 两法派生键一并登记）
+    "profit_amount": ["gross_profit", "gross_profit_moving", "gross_profit_fifo"],
+    # 毛利率：见反推警告（_profit_summary 与 profit.aggregate 的两法派生键一并登记）
+    "profit_rate":   ["gross_margin", "avg_margin", "margin_band",
+                      "avg_margin_moving", "avg_margin_fifo",
+                      "gross_margin_moving", "gross_margin_fifo"],
 }
 
 # 角色 → 字段组可见性（字段级脱敏，apply_field_visibility 用）。
