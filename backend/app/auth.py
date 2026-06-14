@@ -76,9 +76,10 @@ def _sign(payload: bytes) -> str:
 
 
 def _make_token(role: str, sub: str, name: str | None,
-                fallback: bool = False, perms: dict | None = None) -> tuple[str, int]:
+                fallback: bool = False, perms: dict | None = None,
+                token_version: int = 0) -> tuple[str, int]:
     exp = int(time.time()) + get_settings().token_ttl_hours * 3600
-    payload: dict = {"role": role, "sub": sub, "name": name, "exp": exp}
+    payload: dict = {"role": role, "sub": sub, "name": name, "exp": exp, "tv": token_version}
     if perms is not None:
         payload["perms"] = perms
     if fallback:
@@ -110,6 +111,30 @@ def _verify_token(token: str) -> str:
     return verify_token(token)["role"]
 
 
+def verify_token_db(token: str, db: Session) -> dict:
+    """verify_token + 数据库侧吊销校验：实名 token 的 tv 必须等于用户当前 token_version，
+    且账号仍 active。改密/停用/改权限会递增 token_version → 旧 token 立即失效（即时踢线）。
+
+    共享口令回退 token(fb=True，无对应实名用户)只验签名/过期，不做吊销校验。
+    部署前签发的旧 token 无 tv 字段 → 视作 tv=0，与初值 0 匹配，不会被误踢（平滑升级）。
+    """
+    data = verify_token(token)
+    if data.get("fb"):
+        return data
+    sub = data.get("sub")
+    if sub:
+        row = db.execute(
+            select(SysUser.token_version, SysUser.is_active).where(SysUser.username == sub)
+        ).first()
+        if row is not None:
+            tv, is_active = row
+            if not is_active:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号已停用，请重新登录")
+            if int(data.get("tv", 0)) != int(tv or 0):
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "登录状态已失效，请重新登录")
+    return data
+
+
 @router.post("/login", response_model=LoginResponse)
 def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
     now = datetime.now(timezone.utc)
@@ -133,7 +158,8 @@ def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
         user.locked_until = None
         user.last_login_at = now
         db.commit()
-        token, exp = _make_token(user.role, user.username, user.salesperson_name, perms=perms)
+        token, exp = _make_token(user.role, user.username, user.salesperson_name,
+                                 perms=perms, token_version=user.token_version or 0)
         return LoginResponse(token=token, role=user.role,
                              name=user.display_name or user.salesperson_name,
                              expires_at=exp, permissions=perms)
@@ -152,10 +178,11 @@ def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
 
 
 # ---------- 依赖 ----------
-def current_identity(creds: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> dict:
+def current_identity(creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+                     db: Session = Depends(get_db)) -> dict:
     if creds is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "缺少凭证")
-    return verify_token(creds.credentials)
+    return verify_token_db(creds.credentials, db)
 
 
 def current_role(ident: dict = Depends(current_identity)) -> str:
