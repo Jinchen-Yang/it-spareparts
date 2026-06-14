@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
-  Card, Upload, Result, Descriptions, Table, Tag, message, Space, Button, Modal, Progress, Switch, Tooltip,
+  Card, Upload, Descriptions, Table, Tag, message, Space, Button, Modal, Progress,
+  Switch, Tooltip, List, Alert,
 } from "antd";
-import { InboxOutlined } from "@ant-design/icons";
+import { InboxOutlined, DeleteOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import api from "../api";
 
@@ -10,62 +11,87 @@ const FILE_TYPE: Record<string, string> = {
   purchase: "采购订单", sales: "销售订单", inventory: "产品库存", inquiry: "历史询价",
 };
 const STATUS_COLOR: Record<string, string> = { success: "green", failed: "red", processing: "blue" };
+const JOB_STATUS: Record<string, { label: string; color: string }> = {
+  processing: { label: "进行中", color: "blue" },
+  done: { label: "全部完成", color: "green" },
+  partial: { label: "部分成功", color: "orange" },
+  failed: { label: "失败", color: "red" },
+};
 
 interface Batch {
   id: number; filename: string; file_type: string; status: string;
-  uploaded_at: string; rows_total: number; rows_inserted: number;
+  uploaded_at: string; uploaded_by: string | null; rows_total: number; rows_inserted: number;
   rows_skipped: number; rows_error: number; rows_inactive: number;
 }
 
-type Notice = { status: "warning" | "error"; title: string; sub?: string };
+interface JobBatch {
+  id: number; filename: string; file_type: string; status: string;
+  rows_total: number; rows_inserted: number; rows_skipped: number; rows_error: number;
+}
+interface Job {
+  id: number; status: string; mode: string; total_files: number;
+  done_files: number; error_files: number; note: string | null; batches: JobBatch[];
+}
 
 export default function ImportPage() {
-  const [report, setReport] = useState<any | null>(null);
-  const [notice, setNotice] = useState<Notice | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [phase, setPhase] = useState<"idle" | "uploading" | "processing">("idle");
   const [upsertMode, setUpsertMode] = useState(false);  // false=skip(默认), true=upsert(修复模式)
+  const [staged, setStaged] = useState<File[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [job, setJob] = useState<Job | null>(null);
   const [batches, setBatches] = useState<Batch[]>([]);
   const [detail, setDetail] = useState<any | null>(null);
+  const pollRef = useRef<number | null>(null);
+  const pollDeadlineRef = useRef<number>(0);
+  const POLL_MAX_MS = 15 * 60 * 1000;   // 兜底：进程被杀等极端情况下作业卡在「进行中」，不无限轮询
 
   const loadBatches = () => api.get("/import/batches").then((r) => setBatches(r.data));
   useEffect(() => {
     loadBatches();
+    return () => { if (pollRef.current) clearTimeout(pollRef.current); };
   }, []);
 
-  const doUpload = async (file: File) => {
-    setUploading(true);
-    setReport(null);
-    setNotice(null);
-    setProgress(0);
-    setPhase("uploading");
-    const form = new FormData();
-    form.append("file", file);
+  const busy = submitting || job?.status === "processing";
+
+  const poll = async (jobId: number) => {
+    if (Date.now() > pollDeadlineRef.current) {
+      message.warning("导入耗时异常，已停止刷新；请稍后到「导入历史」查看结果");
+      await loadBatches();
+      return;
+    }
     try {
-      const { data } = await api.post("/import/upload", form, {
-        params: { mode: upsertMode ? "upsert" : "skip" },
-        onUploadProgress: (e) => {
-          const pct = e.total ? Math.round((e.loaded * 100) / e.total) : 0;
-          setProgress(pct);
-          if (pct >= 100) setPhase("processing"); // 上传完，后端解析/入库/重算中
-        },
-      });
-      setReport({ ...data.report, _status: data.status, _batch: data.batch_id, _name: file.name });
-      message.success(`导入成功：${FILE_TYPE[data.file_type] || data.file_type}`);
-      await loadBatches();
-    } catch (e: any) {
-      const code = e?.response?.status;
-      const detailMsg = e?.response?.data?.detail || "导入失败";
-      if (code === 409) {
-        setNotice({ status: "warning", title: "该文件已导入过", sub: `${file.name}：${detailMsg}。系统按文件内容去重，重复文件不会再次入库。` });
+      const { data } = await api.get(`/import/jobs/${jobId}`);
+      setJob(data);
+      if (data.status === "processing") {
+        pollRef.current = window.setTimeout(() => poll(jobId), 1500);
       } else {
-        setNotice({ status: "error", title: "导入失败", sub: `${file.name}：${detailMsg}` });
+        await loadBatches();
+        if (data.status === "done") message.success("批量导入完成");
+        else if (data.status === "partial") message.warning("部分文件未导入，见作业明细");
+        else message.error("导入失败，见作业明细");
       }
-      await loadBatches();
+    } catch {
+      if (pollRef.current) clearTimeout(pollRef.current);
+    }
+  };
+
+  const submitBatch = async () => {
+    if (!staged.length) return;
+    setSubmitting(true);
+    const form = new FormData();
+    staged.forEach((f) => form.append("files", f));
+    try {
+      const { data } = await api.post("/import/upload-batch", form, {
+        params: { mode: upsertMode ? "upsert" : "skip" },
+      });
+      setJob({ id: data.job_id, status: "processing", mode: upsertMode ? "upsert" : "skip",
+               total_files: data.total_files, done_files: 0, error_files: 0, note: null, batches: [] });
+      setStaged([]);
+      pollDeadlineRef.current = Date.now() + POLL_MAX_MS;
+      poll(data.job_id);
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || "提交失败");
     } finally {
-      setUploading(false);
-      setPhase("idle");
+      setSubmitting(false);
     }
   };
 
@@ -80,6 +106,17 @@ export default function ImportPage() {
     { title: "明细", dataIndex: "detail" },
   ];
 
+  const jobBatchCols: ColumnsType<JobBatch> = [
+    { title: "文件名", dataIndex: "filename", ellipsis: true },
+    { title: "类型", dataIndex: "file_type", width: 100, render: (t) => FILE_TYPE[t] || t },
+    { title: "状态", dataIndex: "status", width: 90, render: (s) => <Tag color={STATUS_COLOR[s]}>{s}</Tag> },
+    { title: "总行", dataIndex: "rows_total", width: 70, align: "right" },
+    { title: "入库", dataIndex: "rows_inserted", width: 70, align: "right" },
+    { title: "跳过", dataIndex: "rows_skipped", width: 70, align: "right" },
+    { title: "错误", dataIndex: "rows_error", width: 70, align: "right",
+      render: (v) => (v ? <Tag color="red">{v}</Tag> : v) },
+  ];
+
   const batchCols: ColumnsType<Batch> = [
     { title: "文件名", dataIndex: "filename", width: 240, fixed: "left", ellipsis: true },
     { title: "类型", dataIndex: "file_type", width: 100, render: (t) => FILE_TYPE[t] || t },
@@ -90,10 +127,15 @@ export default function ImportPage() {
     { title: "错误", dataIndex: "rows_error", width: 80, align: "right",
       render: (v) => (v ? <Tag color="red">{v}</Tag> : v) },
     { title: "未生效", dataIndex: "rows_inactive", width: 80, align: "right" },
+    { title: "导入人", dataIndex: "uploaded_by", width: 110,
+      render: (v) => v || <span style={{ color: "var(--mb-text-3)" }}>-</span> },
     { title: "时间", dataIndex: "uploaded_at", width: 180,
       render: (t) => new Date(t).toLocaleString("zh-CN") },
     { title: "", width: 70, render: (_, r) => <a onClick={() => openDetail(r.id)}>详情</a> },
   ];
+
+  const jobPct = job && job.total_files
+    ? Math.round(((job.done_files + job.error_files) / job.total_files) * 100) : 0;
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
@@ -102,80 +144,74 @@ export default function ImportPage() {
           <Tooltip title="开启后：源系统改过字段的旧数据,重导会更新(而不是跳过)。日常导入用「跳过」即可。">
             <Space>
               <span style={{ color: upsertMode ? "var(--mb-danger)" : "var(--mb-text-3)" }}>修复模式(更新已存在)</span>
-              <Switch checked={upsertMode} onChange={setUpsertMode} disabled={uploading} />
+              <Switch checked={upsertMode} onChange={setUpsertMode} disabled={busy} />
             </Space>
           </Tooltip>
         }>
         <Upload.Dragger
           accept=".xlsx"
-          multiple={false}
+          multiple
           showUploadList={false}
-          disabled={uploading}
+          disabled={busy}
           beforeUpload={(file) => {
-            doUpload(file);
-            return false; // 阻止 antd 默认上传，自己处理
+            setStaged((prev) =>
+              prev.some((f) => f.name === file.name && f.size === file.size) ? prev : [...prev, file]);
+            return false; // 阻止 antd 默认上传，自己批量提交
           }}
         >
           <p className="ant-upload-drag-icon"><InboxOutlined /></p>
-          <p className="ant-upload-text">点击或拖拽 .xlsx 文件到此处导入</p>
+          <p className="ant-upload-text">点击或拖拽 .xlsx 文件到此处（可多选批量导入）</p>
           <p className="ant-upload-hint">支持采购订单 / 销售订单 / 产品库存 / 历史询价，自动识别类型</p>
         </Upload.Dragger>
 
-        {phase !== "idle" && (
+        {staged.length > 0 && (
           <div style={{ marginTop: 16 }}>
-            <Progress
-              percent={progress}
-              status={phase === "processing" ? "active" : "normal"}
+            <List
+              size="small" bordered dataSource={staged}
+              header={<span>待导入 {staged.length} 个文件</span>}
+              renderItem={(f, i) => (
+                <List.Item actions={[
+                  <Button key="rm" type="text" size="small" danger icon={<DeleteOutlined />}
+                    disabled={busy}
+                    onClick={() => setStaged((prev) => prev.filter((_, idx) => idx !== i))} />,
+                ]}>
+                  {f.name}
+                  <span style={{ color: "var(--mb-text-3)", marginLeft: 8 }}>
+                    {(f.size / 1024 / 1024).toFixed(2)} MB
+                  </span>
+                </List.Item>
+              )}
             />
-            <div style={{ textAlign: "center", color: "var(--mb-text-3)", marginTop: 4 }}>
-              {phase === "uploading"
-                ? `上传中 ${progress}%`
-                : "上传完成，正在解析 / 入库 / 重算，请稍候…"}
-            </div>
+            <Space style={{ marginTop: 12 }}>
+              <Button type="primary" loading={submitting} disabled={busy} onClick={submitBatch}>
+                开始导入（{staged.length} 个）
+              </Button>
+              <Button disabled={busy} onClick={() => setStaged([])}>清空</Button>
+            </Space>
           </div>
         )}
       </Card>
 
-      {notice && (
-        <Card>
-          <Result status={notice.status} title={notice.title} subTitle={notice.sub} />
-        </Card>
-      )}
-
-      {report && (
-        <Card title="导入报告">
-          <Result
-            status={report._status === "success" ? "success" : "error"}
-            title={`批次 #${report._batch} · ${FILE_TYPE[report.file_type] || report.file_type}`}
-          />
-          <Descriptions bordered column={3} size="small">
-            <Descriptions.Item label="解析总行">{report.source_rows_total}</Descriptions.Item>
-            <Descriptions.Item label="新增入库">{report.fact_rows_inserted}</Descriptions.Item>
-            <Descriptions.Item label={report.import_mode === "upsert" ? "更新(已存在)" : "跳过(已存在)"}>
-              {report.import_mode === "upsert" ? (report.fact_rows_updated ?? 0) : (report.fact_rows_skipped ?? 0)}
-            </Descriptions.Item>
-            <Descriptions.Item label="错误">{report.fact_rows_error}</Descriptions.Item>
-            <Descriptions.Item label="未生效">{report.rows_inactive}</Descriptions.Item>
-            <Descriptions.Item label="新增型号">{report.new_parts ?? "-"}</Descriptions.Item>
-            {report.orders_inserted != null && (
-              <Descriptions.Item label="新增订单">{report.orders_inserted}</Descriptions.Item>
-            )}
-            {report.merged_pn_warehouse != null && (
-              <Descriptions.Item label="合并(同PN仓库)">{report.merged_pn_warehouse}</Descriptions.Item>
-            )}
-          </Descriptions>
-          {report.errors_preview?.length > 0 && (
-            <Table
-              style={{ marginTop: 16 }} rowKey="row_no" size="small"
-              title={() => "异常行预览（前 10 条）"}
-              columns={errCols} dataSource={report.errors_preview} pagination={false}
-            />
+      {job && (
+        <Card title={`导入作业 #${job.id}`}
+          extra={<Tag color={JOB_STATUS[job.status]?.color}>{JOB_STATUS[job.status]?.label || job.status}</Tag>}>
+          <Progress percent={jobPct}
+            status={job.status === "processing" ? "active" : job.status === "failed" ? "exception" : "normal"} />
+          <div style={{ color: "var(--mb-text-3)", margin: "4px 0 12px" }}>
+            共 {job.total_files} · 成功 {job.done_files} · 失败/跳过 {job.error_files}
+            {job.status === "processing" && " · 处理中，请稍候…"}
+          </div>
+          {job.note && <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={job.note} />}
+          {job.batches.length > 0 && (
+            <Table rowKey="id" size="small" columns={jobBatchCols} dataSource={job.batches}
+              pagination={false} />
           )}
         </Card>
       )}
 
       <Card title="导入历史">
-        <Table rowKey="id" size="small" columns={batchCols} dataSource={batches} scroll={{ x: 1080 }} pagination={{ pageSize: 10 }} />
+        <Table rowKey="id" size="small" columns={batchCols} dataSource={batches}
+          scroll={{ x: 1080 }} pagination={{ pageSize: 10 }} />
       </Card>
 
       <Modal

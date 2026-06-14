@@ -36,6 +36,28 @@ class SysUser(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
 
+class SysImportJob(Base):
+    """批量导入作业（一次「批量上传」聚合的 N 个 batch，§9）。
+
+    后台 worker 逐文件跑 run_import，每文件一条 batch（job_id 关联）；前端轮询本表看进度。
+    同时承载导入人与时间，是审计/归组单元。
+    """
+
+    __tablename__ = "sys_import_job"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    # processing=进行中 / done=全成 / partial=部分成 / failed=全失败
+    status: Mapped[str] = mapped_column(String(16), default="processing", server_default="processing")
+    mode: Mapped[str] = mapped_column(String(16), default="skip", server_default="skip")
+    total_files: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    done_files: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    error_files: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    note: Mapped[str | None] = mapped_column(Text)
+
+
 class SysImportBatch(Base):
     __tablename__ = "sys_import_batch"
 
@@ -44,6 +66,7 @@ class SysImportBatch(Base):
     file_type: Mapped[str] = mapped_column(String(16))  # purchase/sales/inventory/inquiry
     file_hash: Mapped[str] = mapped_column(String(64))
     uploaded_by: Mapped[str | None] = mapped_column(String(64))
+    import_job_id: Mapped[int | None] = mapped_column(ForeignKey("sys_import_job.id"))  # 批量作业归组
     uploaded_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     rows_total: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     rows_inserted: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

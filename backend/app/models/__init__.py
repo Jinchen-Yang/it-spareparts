@@ -17,6 +17,7 @@ from app.models.system import (
     SysAuditLog,
     SysImportBatch,
     SysImportError,
+    SysImportJob,
     SysRawFile,
     SysUser,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "FPartInquiry",
     "SysImportBatch",
     "SysImportError",
+    "SysImportJob",
     "SysRawFile",
     "SysAuditLog",
     "SysUser",

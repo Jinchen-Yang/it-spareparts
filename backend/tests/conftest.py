@@ -24,7 +24,8 @@ _TABLES = [
     "f_part_inquiry", "part_substitute", "inventory",
     "f_sales_line", "f_sales_order", "f_purchase_line", "f_purchase_order",
     "part_alias", "dim_part", "dim_supplier", "dim_customer",
-    "sys_audit_log", "sys_raw_file", "sys_import_error", "sys_import_batch", "sys_user",
+    "sys_audit_log", "sys_raw_file", "sys_import_error", "sys_import_batch",
+    "sys_import_job", "sys_user",
 ]
 
 
