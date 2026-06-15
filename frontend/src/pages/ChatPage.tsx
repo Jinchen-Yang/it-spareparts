@@ -1,17 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Input, Popconfirm, Spin, Tag, Tooltip, message } from "antd";
+import { Button, Input, Modal, Popconfirm, Spin, Tag, Tooltip, Upload, message } from "antd";
 import {
-  CopyOutlined, DeleteOutlined, PaperClipOutlined, PlusOutlined,
-  RobotOutlined, SendOutlined, StopOutlined,
+  CopyOutlined, DeleteOutlined, DownloadOutlined, EyeOutlined, FileExcelOutlined,
+  PaperClipOutlined, PlusOutlined, RobotOutlined, SendOutlined, StopOutlined,
 } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Upload } from "antd";
 import {
-  agentDownload, agentUpload, cancelChatStream, createChatSession,
-  deleteChatSession, getChatMessages, listChatSessions, sessionChatStream,
+  agentDownload, agentFileBlobUrl, agentPreview, agentUpload, cancelChatStream,
+  createChatSession, deleteChatSession, getChatMessages, listChatSessions, sessionChatStream,
 } from "../api";
-import type { AgentToolCall, AgentUploadResult, ChatSessionMeta } from "../api";
+import type { AgentToolCall, AgentUploadResult, ChatSessionMeta, FilePreview } from "../api";
+import { COLORS } from "../theme";
 
 const TOOL_LABEL: Record<string, string> = {
   search_parts: "型号搜索",
@@ -44,22 +44,129 @@ interface ToolRun {
   done: boolean;
 }
 
-/** 答复里的下载链接渲染成带鉴权下载按钮。
- * 匹配任意形态（相对路径或完整 URL）；裸 <a> 跳转会 401 且可能整页刷新打断对话。 */
+const cellStyle = (head: boolean): React.CSSProperties => ({
+  border: `1px solid ${COLORS.border}`, padding: "5px 10px",
+  background: head ? COLORS.inset : COLORS.surface, fontWeight: head ? 500 : 400,
+  whiteSpace: "nowrap", color: COLORS.text,
+});
+
+function nodeText(n: React.ReactNode): string {
+  if (n == null || typeof n === "boolean") return "";
+  if (typeof n === "string" || typeof n === "number") return String(n);
+  if (Array.isArray(n)) return n.map(nodeText).join("");
+  const props = (n as { props?: { children?: React.ReactNode } }).props;
+  return props ? nodeText(props.children) : "";
+}
+
+/** 生成/上传的文件卡片：在线预览（Excel 表格 / 图片）+ 下载。
+ * 替代裸下载按钮；预览/下载都走带鉴权 fetch，绝不整页刷新打断对话。 */
+function FileCard({ href, label }: { href: string; label?: string }) {
+  const fileId = /\/api\/agent\/files\/([a-z0-9]{6,})/i.exec(href)?.[1] || "";
+  const [open, setOpen] = useState(false);
+  const [pv, setPv] = useState<FilePreview | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [imgUrl, setImgUrl] = useState<string | null>(null);
+  const [tab, setTab] = useState(0);
+  const name = pv?.filename || label || "结果文件.xlsx";
+
+  useEffect(() => () => { if (imgUrl) URL.revokeObjectURL(imgUrl); }, [imgUrl]);
+
+  const download = () =>
+    agentDownload(href).catch((e: Error) =>
+      message.error(e.message === "auth-expired"
+        ? "登录已过期，请重新登录后再下载（聊天记录不会丢失）"
+        : "下载失败，文件可能已清理"));
+
+  const openPreview = async () => {
+    setOpen(true);
+    if (pv || !fileId) return;
+    setLoading(true);
+    try {
+      const data = await agentPreview(fileId);
+      setPv(data);
+      if (data.kind === "image") {
+        try { setImgUrl(await agentFileBlobUrl(fileId)); } catch { /* 退化为仅下载 */ }
+      }
+    } catch (e) {
+      const msg = (e as Error)?.message;
+      message.error(msg === "auth-expired" ? "登录已过期，请重新登录" : "预览失败，文件可能已清理");
+      setOpen(false);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const sheet = pv?.sheets?.[tab];
+  return (
+    <>
+      <span style={{
+        display: "inline-flex", alignItems: "center", gap: 8, margin: "6px 0",
+        padding: "7px 10px", border: `1px solid ${COLORS.border}`, borderRadius: 10,
+        background: COLORS.surface, maxWidth: "100%", verticalAlign: "middle",
+      }}>
+        <span style={{
+          width: 28, height: 28, borderRadius: 8, flexShrink: 0, display: "inline-flex",
+          alignItems: "center", justifyContent: "center", background: "#E9F2EB", color: "#41704F",
+        }}><FileExcelOutlined /></span>
+        <span style={{ fontSize: 13, color: COLORS.text, overflow: "hidden",
+                       textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>{name}</span>
+        <Button size="small" icon={<EyeOutlined />} onClick={openPreview}>预览</Button>
+        <Button size="small" type="primary" icon={<DownloadOutlined />} onClick={download}>下载</Button>
+      </span>
+
+      <Modal open={open} onCancel={() => setOpen(false)} width={820} title={name} destroyOnHidden
+        footer={<Button type="primary" icon={<DownloadOutlined />} onClick={download}>下载文件</Button>}>
+        {loading ? (
+          <div style={{ textAlign: "center", padding: 40 }}><Spin /></div>
+        ) : pv?.kind === "table" ? (
+          <>
+            {pv.sheets && pv.sheets.length > 1 && (
+              <div style={{ marginBottom: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {pv.sheets.map((s, i) => (
+                  <Button key={i} size="small" type={i === tab ? "primary" : "default"}
+                    onClick={() => setTab(i)}>{s.name}</Button>
+                ))}
+              </div>
+            )}
+            <div style={{ maxHeight: 460, overflow: "auto", border: `1px solid ${COLORS.border}`, borderRadius: 8 }}>
+              <table style={{ borderCollapse: "collapse", fontSize: 13, width: "100%" }}>
+                <tbody>
+                  {(sheet?.rows || []).map((r, ri) => (
+                    <tr key={ri}>
+                      {r.map((c, ci) => (ri === 0
+                        ? <th key={ci} style={cellStyle(true)}>{c}</th>
+                        : <td key={ci} style={cellStyle(false)}>{c}</td>))}
+                    </tr>
+                  ))}
+                  {!sheet?.rows?.length && <tr><td style={cellStyle(false)}>（空表）</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            {sheet?.truncated && (
+              <div style={{ color: COLORS.text3, fontSize: 12, marginTop: 8 }}>
+                仅预览前 {Math.max((sheet.rows?.length || 1) - 1, 0)} 行（共 {sheet.total_rows} 行），完整内容请下载
+              </div>
+            )}
+          </>
+        ) : pv?.kind === "image" ? (
+          imgUrl
+            ? <img src={imgUrl} alt={name} style={{ maxWidth: "100%", borderRadius: 8 }} />
+            : <div style={{ color: COLORS.text3, padding: 20, textAlign: "center" }}>图片加载失败，请下载查看</div>
+        ) : (
+          <div style={{ color: COLORS.text2, padding: 20, textAlign: "center" }}>
+            该文件类型暂不支持在线预览，请点「下载文件」查看。
+          </div>
+        )}
+      </Modal>
+    </>
+  );
+}
+
+/** markdown 里的文件链接渲染成文件卡片（预览+下载）；其余链接走普通 <a>。 */
 function MdLink(props: { href?: string; children?: React.ReactNode }) {
   const href = props.href || "";
   if (href.includes("/api/agent/files/")) {
-    return (
-      <Button size="small" type="primary" style={{ margin: "2px 0" }}
-        onClick={() =>
-          agentDownload(href).catch((e: Error) =>
-            message.error(e.message === "auth-expired"
-              ? "登录已过期，请重新登录后再下载（聊天记录不会丢失）"
-              : "下载失败，文件可能已清理"))
-        }>
-        ⬇ 下载 Excel
-      </Button>
-    );
+    return <FileCard href={href} label={nodeText(props.children)} />;
   }
   return <a href={href} target="_blank" rel="noreferrer">{props.children}</a>;
 }
@@ -210,6 +317,7 @@ export default function ChatPage() {
   };
 
   const doUpload = async (file: File) => {
+    if (uploading) return false;   // 防在途重复上传：竞态会让先上传那张的 pendingFile 被覆盖丢弃
     setUploading(true);
     try {
       const { data } = await agentUpload(file);
@@ -535,7 +643,7 @@ export default function ChatPage() {
               <Upload accept=".xlsx,.docx,.pdf,.txt,.csv,.jpg,.jpeg,.png,.webp"
                 showUploadList={false} disabled={busy || uploading}
                 beforeUpload={(f) => doUpload(f as unknown as File)}>
-                <Tooltip title="上传文件：询价单/整机配置（Excel/Word/PDF/txt/图片）">
+                <Tooltip title="上传文件：询价单/整机配置（Excel/Word/PDF/txt/图片）；图片可直接 Ctrl+V 粘贴">
                   <Button type="text" icon={<PaperClipOutlined />} loading={uploading}
                     style={{ color: "#6b7280" }} />
                 </Tooltip>
@@ -548,6 +656,24 @@ export default function ChatPage() {
                 value={input}
                 disabled={busy}
                 onChange={(e) => setInput(e.target.value)}
+                onPaste={(e) => {
+                  // 只拦"纯图片"粘贴（截图）当附件上传；剪贴板含文本（如从 Excel/网页复制带图内容）
+                  // → 放行默认文本粘贴，绝不吞掉用户想粘的文字
+                  const dt = e.clipboardData;
+                  if (!dt) return;
+                  const hasText = !!dt.getData("text/plain")
+                    || Array.from(dt.items).some((it) => it.kind === "string");
+                  if (hasText) return;
+                  const img = Array.from(dt.items).find(
+                    (it) => it.kind === "file" && it.type.startsWith("image/"));
+                  const f = img?.getAsFile();
+                  if (f) {
+                    e.preventDefault();
+                    const named = f.name && f.name !== "image.png"
+                      ? f : new File([f], `粘贴图片-${Date.now()}.png`, { type: f.type || "image/png" });
+                    doUpload(named);
+                  }
+                }}
                 onPressEnter={(e) => {
                   if (!e.shiftKey) {
                     e.preventDefault();

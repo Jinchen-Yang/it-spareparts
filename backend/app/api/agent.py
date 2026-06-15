@@ -136,3 +136,23 @@ def download(
         # 含价格数据：禁止浏览器缓存（否则换人/过期 token 仍能命中缓存拿到文件）
         headers={"Cache-Control": "no-store"},
     )
+
+
+@router.get("/files/{file_id}/preview")
+def preview_file(
+    file_id: str,
+    role: str = Depends(current_role),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """在线预览文件内容（仅本人创建的；admin 例外）——与 download 同一归属校验，防 IDOR。"""
+    record_access_log(ctx, "preview", "agent_file", {"file_id": file_id})
+    try:
+        owner = agent_files.owner_of(file_id)
+    except agent_files.FileError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    if ctx.role not in FULL_SCOPE_ROLES and owner != ctx.user_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该文件（非本人上传/生成）")
+    try:
+        return agent_files.preview(file_id)
+    except agent_files.FileError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc

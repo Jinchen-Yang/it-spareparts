@@ -172,6 +172,37 @@ def read_rows(file_id: str, sheet: str | None, start_row: int, max_rows: int) ->
             "rows": rows, "total_rows": total}
 
 
+def preview(file_id: str, max_rows: int = 200) -> dict:
+    """文件预览（前端在线预览用）：xlsx 返回各 sheet 行数据（截断 max_rows×30列）；
+    图片返回 kind=image（前端走下载端点取图）；其余 kind=other（仅可下载）。
+    归属校验由 API 层做（与 download 同一把关），本函数只读内容。"""
+    fid = _check_id(file_id)
+    meta = _load_meta(fid)
+    ext = meta.get("ext", "")
+    filename = meta.get("filename", f"{fid}.{ext}")
+    if ext != "xlsx":
+        kind = "image" if ext in _IMG_EXT else "other"
+        return {"file_id": fid, "filename": filename, "kind": kind, "ext": ext}
+    # 坏/半损 xlsx 可能通过上传校验(只读维度)却在逐格迭代时抛 ParseError/BadZipFile(非 FileError)，
+    # 不裹会让预览端点裸冒 500 → 统一转 FileError，端点据此返干净 404（与 save_upload 一致）
+    try:
+        wb = load_workbook(_data_path(fid, "xlsx"), read_only=True, data_only=True)
+        sheets = []
+        for ws in wb.worksheets[:10]:
+            total = ws.max_row or 0
+            rows = [[_cell_str(c.value) for c in row]
+                    for row in ws.iter_rows(min_row=1, max_row=min(total, max_rows),
+                                            max_col=min(ws.max_column or 1, 30))]
+            sheets.append({"name": ws.title, "rows": rows,
+                           "total_rows": total, "truncated": total > max_rows})
+        wb.close()
+    except FileError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise FileError(f"无法解析 xlsx（可能损坏，请重新另存）: {type(exc).__name__}") from exc
+    return {"file_id": fid, "filename": filename, "kind": "table", "ext": ext, "sheets": sheets}
+
+
 def _read_docx(path: Path) -> str:
     from docx import Document
     doc = Document(str(path))
