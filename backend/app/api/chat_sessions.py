@@ -71,7 +71,10 @@ def list_sessions(
     ident: dict = Depends(current_identity),
 ) -> dict:
     _require_real_identity(ident)
-    return {"items": chat_store.list_sessions(db, ident["sub"])}
+    items = chat_store.list_sessions(db, ident["sub"])
+    for it in items:   # 标出后台仍在生成的会话，前端给「生成中」角标
+        it["generating"] = is_generating(it["id"])
+    return {"items": items}
 
 
 @router.post("")
@@ -119,37 +122,119 @@ def list_messages(
             "items": chat_store.list_messages(db, s.id)}
 
 
-# ---------- 会话级生成互斥与取消 ----------
+# ---------- 会话级生成中枢（互斥 + 取消 + 可重连扇出）----------
 # 同一会话同时只允许一轮生成（ChatGPT 语义）：并发生成会让消息 id 顺序与
-# 对话顺序永久错乱、半截 checkpoint 被当完整历史回灌 LLM。单进程 uvicorn
-# （Dockerfile 无 --workers）下进程内注册表即可；多进程部署需改 DB 行锁。
+# 对话顺序永久错乱、半截 checkpoint 被当完整历史回灌 LLM。
+# RunHub：worker 把每个事件既存进 buffer 又扇出给所有订阅者 → 原始流断开后，
+# 切回会话可经 /chat/attach 重新订阅：先回放 buffer(已生成部分)、再续实时流
+# （连续逐字直播）。单进程 uvicorn（Dockerfile 无 --workers）下进程内注册表即可；
+# 多进程部署需改 Redis pub/sub + DB 行锁。
 _guard_lock = threading.Lock()
-_active_runs: dict[int, threading.Event] = {}  # session_id -> cancel event
 
 
-def acquire_session(session_id: int) -> threading.Event | None:
-    """开始生成：返回该轮的取消事件；该会话已有生成中则返回 None。"""
+class _RunHub:
+    """一轮生成的事件中枢：缓冲 + 多订阅者扇出 + 取消信号。"""
+
+    def __init__(self) -> None:
+        self.cancel = threading.Event()
+        self._lock = threading.Lock()
+        self._buffer: list[dict] = []          # 本轮全部事件，供晚到订阅者回放
+        self._subs: list["queue.Queue[dict | None]"] = []
+        self._done = False
+
+    def publish(self, ev: dict) -> None:
+        with self._lock:
+            self._buffer.append(ev)
+            for q in self._subs:
+                q.put(ev)
+
+    def finish(self) -> None:
+        with self._lock:
+            self._done = True
+            for q in self._subs:
+                q.put(None)                    # 结束哨兵
+
+    def subscribe(self) -> tuple[list[dict], "queue.Queue[dict | None] | None"]:
+        """返回 (已发生事件回放, 后续事件队列)；已结束则队列为 None。
+        在锁内快照 buffer 再注册，保证回放与实时之间不丢不重。"""
+        with self._lock:
+            replay = list(self._buffer)
+            if self._done:
+                return replay, None
+            q: "queue.Queue[dict | None]" = queue.Queue()
+            self._subs.append(q)
+            return replay, q
+
+    def unsubscribe(self, q: "queue.Queue[dict | None]") -> None:
+        with self._lock:
+            if q in self._subs:
+                self._subs.remove(q)
+
+
+_active_runs: dict[int, _RunHub] = {}  # session_id -> 当前生成中枢
+
+
+def acquire_session(session_id: int) -> _RunHub | None:
+    """开始生成：返回该轮的中枢；该会话已有生成中则返回 None。"""
     with _guard_lock:
         if session_id in _active_runs:
             return None
-        ev = threading.Event()
-        _active_runs[session_id] = ev
-        return ev
+        hub = _RunHub()
+        _active_runs[session_id] = hub
+        return hub
+
+
+def get_run(session_id: int) -> _RunHub | None:
+    with _guard_lock:
+        return _active_runs.get(session_id)
+
+
+def is_generating(session_id: int) -> bool:
+    with _guard_lock:
+        return session_id in _active_runs
 
 
 def release_session(session_id: int) -> None:
+    """结束生成：移出注册表并给所有订阅者发结束哨兵。"""
     with _guard_lock:
-        _active_runs.pop(session_id, None)
+        hub = _active_runs.pop(session_id, None)
+    if hub is not None:
+        hub.finish()
 
 
 def request_cancel(session_id: int) -> bool:
     """请求取消该会话当前生成。返回是否有生成在进行。"""
-    with _guard_lock:
-        ev = _active_runs.get(session_id)
-    if ev is None:
+    hub = get_run(session_id)
+    if hub is None:
         return False
-    ev.set()
+    hub.cancel.set()
     return True
+
+
+def _sse(ev: dict) -> str:
+    return f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+
+
+def _hub_event_stream(hub: _RunHub):
+    """订阅一个生成中枢：先回放已发生事件（切回会话补齐已生成部分），
+    再续实时事件，直到结束哨兵。客户端断开则 finally 注销订阅。"""
+    replay, sub_q = hub.subscribe()
+    try:
+        for ev in replay:
+            yield _sse(ev)
+        if sub_q is None:          # 订阅时已结束：回放完即收
+            return
+        while True:
+            try:
+                ev = sub_q.get(timeout=600)
+            except queue.Empty:
+                return
+            if ev is None:         # 结束哨兵
+                return
+            yield _sse(ev)
+    finally:
+        if sub_q is not None:
+            hub.unsubscribe(sub_q)
 
 
 @router.post("/{session_id}/chat/cancel")
@@ -185,8 +270,8 @@ def chat_stream(
     record_access_log(ctx, "chat_stream", "agent",
                       {"session_id": s.id, "q": req.message[:200]})
 
-    cancel_ev = acquire_session(s.id)
-    if cancel_ev is None:
+    hub = acquire_session(s.id)
+    if hub is None:
         raise HTTPException(status.HTTP_409_CONFLICT,
                             "该会话上一轮回答还在生成中，请稍候或先停止")
 
@@ -208,13 +293,12 @@ def chat_stream(
         # 不 rollback 的话每路对话白占一个池连接直到生成结束（评审实测确认）
         db.rollback()
 
-    def _sse(ev: dict) -> str:
-        return f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
-
     # 生成与传输解耦（ChatGPT 语义）：agent 循环在独立线程跑、沿途 checkpoint
-    # 落库；HTTP 流只是从队列搬运事件。教训：sync generator 被客户端中断后
-    # 既不被 close 也不再前进，靠 finally/沿途 checkpoint 落库都不可靠。
-    def _worker(q: "queue.Queue[dict | None]") -> None:
+    # 落库，并把事件 publish 到 hub（buffer + 扇出给所有订阅者）；HTTP 流只是
+    # hub 的一个订阅者。切回会话经 /chat/attach 再订阅同一 hub → 回放已生成
+    # 部分 + 续实时（连续逐字直播）。教训：sync generator 被客户端中断后既不被
+    # close 也不再前进，落库/锁释放必须由 worker 的 finally 负责，不依赖流被消费。
+    def _worker() -> None:
         from app.db import SessionLocal
 
         CHECKPOINT_DELTAS = 40
@@ -243,9 +327,9 @@ def chat_stream(
         wdb = SessionLocal()
         try:
             for ev in runtime.run_stream(wdb, history, ctx):
-                if cancel_ev.is_set():  # 用户点了停止：收束并以"已中断"落库
+                if hub.cancel.is_set():  # 用户点了停止：收束并以"已中断"落库
                     _save(stopped=True, final=True)
-                    q.put({"type": "done", "tool_calls": trace, "stopped": True})
+                    hub.publish({"type": "done", "tool_calls": trace, "stopped": True})
                     return
                 if ev.get("type") == "delta":
                     buf.append(ev.get("text") or "")
@@ -259,23 +343,21 @@ def chat_stream(
                     wdb.rollback()  # 工具均只读：立即把连接还回池，别跨整轮 LLM 往返占着
                 elif ev.get("type") == "done":
                     _save(stopped=False, final=True)
-                q.put(ev)
+                hub.publish(ev)
         except Exception as exc:  # noqa: BLE001 —— 上游 LLM 错误：保留已生成部分
             _log.error("agent session stream failed: %r", exc)
             _save(stopped=True, final=True)
-            q.put({"type": "error", "message": "AI 服务调用失败，请稍后重试"})
+            hub.publish({"type": "error", "message": "AI 服务调用失败，请稍后重试"})
         finally:
             _save(stopped=True, final=True)
             wdb.close()
-            release_session(sid)
-            q.put(None)  # 结束哨兵
+            release_session(sid)  # → hub.finish() 给所有订阅者发结束哨兵
 
     # worker 在 handler 里启动而非 gen 里：客户端若在响应体被拉取前断开，
     # gen 可能永远不被迭代——锁释放/落库必须不依赖 gen 跑起来。
-    q: "queue.Queue[dict | None]" = queue.Queue()  # 无界：断开后无人消费也不堵 worker
     if configured:
         try:
-            threading.Thread(target=_worker, args=(q,), daemon=True,
+            threading.Thread(target=_worker, daemon=True,
                              name=f"agent-session-{sid}").start()
         except BaseException:
             release_session(sid)
@@ -290,15 +372,33 @@ def chat_stream(
             yield _sse({"type": "delta", "text": _NOT_CONFIGURED_MSG})
             yield _sse({"type": "done", "tool_calls": [], "configured": False})
             return
-        while True:
-            try:
-                ev = q.get(timeout=600)  # 轮数受 llm_max_tool_iters 限制，600s 仅防僵尸
-            except queue.Empty:
-                yield _sse({"type": "error", "message": "生成超时，请重试"})
-                return
-            if ev is None:
-                return
-            yield _sse(ev)
+        yield from _hub_event_stream(hub)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@router.post("/{session_id}/chat/attach")
+def chat_attach(
+    session_id: int,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> StreamingResponse:
+    """重新订阅会话进行中的生成（切回会话续看连续直播）：先回放已生成部分、再续实时。
+    无进行中的生成 → 单个 {type:"no_active"} 事件，前端转为加载历史消息即可。"""
+    _require_agent_enabled()
+    s = _owned_or_404(db, ident, session_id)
+    sid = s.id
+    db.rollback()  # 释放请求连接：订阅期间不再触碰请求级会话
+    hub = get_run(sid)
+
+    def gen():
+        if hub is None:
+            yield _sse({"type": "no_active"})
+            return
+        yield from _hub_event_stream(hub)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache",
