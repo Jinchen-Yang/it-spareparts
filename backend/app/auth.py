@@ -138,9 +138,13 @@ def verify_token_db(token: str, db: Session) -> dict:
 @router.post("/login", response_model=LoginResponse)
 def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
     now = datetime.now(timezone.utc)
-    user = db.scalar(select(SysUser).where(SysUser.username == req.username,
-                                           SysUser.is_active.is_(True)))
+    user = db.scalar(select(SysUser).where(SysUser.username == req.username))
     if user is not None:
+        # 已存在的账号一律在此处理——停用也绝不跌入下面的共享口令回退（否则停用账号可凭
+        # ADMIN_PASSWORD 复活登录，且 fb token 绕过 #15 的吊销/停用校验 → 永久有效）。
+        if not user.is_active:
+            verify_password(req.password, _DUMMY_PW_HASH)  # 时序抹平：与正常校验等量 pbkdf2
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号已停用，请联系管理员")
         # 锁定中：连续失败已达阈值，未到解锁时间则直接拒绝（不消耗 pbkdf2）
         if user.locked_until is not None and user.locked_until > now:
             mins = int((user.locked_until - now).total_seconds() // 60) + 1

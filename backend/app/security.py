@@ -34,8 +34,11 @@ class UserContext:
     is_authenticated: bool = False
 
 
-# 看全量（不受行级/匿名限制）的角色
-FULL_SCOPE_ROLES = {"admin", "boss", "readonly", config.PHASE1_BYPASS_ROLE}
+# 可访问任意上传文件（不受归属限制）的角色——仅 agent 文件 ACL 用（下载/预览）。
+# readonly 故意不在内：共享口令回退把非 admin 一律发成 readonly，若放行会让任何知道
+# ADMIN_PASSWORD 的人凭 12 位 file_id 读他人上传的报价/合同（IDOR，正是 PR#16 要防的）。
+# 数据字段可见性另由 permissions 控制，与本文件白名单无关。
+FULL_SCOPE_ROLES = {"admin", "boss", config.PHASE1_BYPASS_ROLE}
 
 
 def is_scoped_sales(user_ctx: UserContext | None) -> bool:
@@ -116,21 +119,19 @@ def anonymize_sales_rows(rows: list[dict], user_ctx: UserContext | None) -> list
 
 
 def _hidden_fields(user_ctx: UserContext) -> set[str]:
-    """要隐藏的字段：优先按用户权限(perms)的 data_* 开关算；
-    旧 token（无 perms）回退按 ROLE_FIELD_VISIBILITY 角色配置。"""
-    if user_ctx.permissions is not None:
-        from app import permissions as perm
-        hidden: set[str] = set()
-        for group in perm.hidden_groups(user_ctx.permissions):
-            hidden.update(config.FIELD_GROUPS.get(group, []))
-        return hidden
-    vis = config.ROLE_FIELD_VISIBILITY.get(user_ctx.role)
-    if vis is None:
-        return set()  # 未知角色/全量角色 → 不隐藏（PHASE1_BYPASS_ROLE 走这里）
-    hidden = set()
-    for group, visible in vis.items():
-        if not visible:
-            hidden.update(config.FIELD_GROUPS.get(group, []))
+    """要隐藏的字段：按用户权限(perms)的 data_* 开关算。
+
+    单一真值源（2026-06-15 收敛）：perms 与 perms 缺失时的回退都走 permissions 模板，
+    不再用 config.ROLE_FIELD_VISIBILITY（旧表已删）。避免"同一角色因 token 新旧而脱敏结果相反"。
+    无 perms 的旧 token → 按 role 的权限模板回退（与 require_page 的 fallback 口径一致）。
+    """
+    from app import permissions as perm
+    perms = user_ctx.permissions
+    if perms is None:
+        perms = perm.template_for(user_ctx.role)
+    hidden: set[str] = set()
+    for group in perm.hidden_groups(perms):
+        hidden.update(config.FIELD_GROUPS.get(group, []))
     return hidden
 
 

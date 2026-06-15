@@ -491,6 +491,9 @@ def get_overview(db: Session, pn_std: str,
         # AI 助手 get_part_overview 工具走同一函数，自动覆盖。其余角色保留近 20 单（去 salesperson）。
         "sales_recent": [] if security.is_scoped_sales(user_ctx) else security.anonymize_sales_rows(
             _paginate(db, _sales_query(part.id, user_ctx), 1, 20, _sales_row)["items"], user_ctx),
+        # 区分"逐单明细按权限隐藏"与"本就没有成交"：前端据此显示"按权限不可见"提示而非空表。
+        # 与后端唯一门控 is_scoped_sales 对齐（不再让前端用 canCost 等无关键自行猜测）。
+        "sales_recent_restricted": security.is_scoped_sales(user_ctx),
         "inventory": _inventory(db, part.id),
         "substitutes": _substitutes(db, part.id),
         "profit_summary": _profit_summary(db, part.id),

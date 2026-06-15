@@ -232,15 +232,8 @@ FIELD_GROUPS = {
                       "gross_margin_moving", "gross_margin_fifo"],
 }
 
-# 角色 → 字段组可见性（字段级脱敏，apply_field_visibility 用）。
-# 口径（2026-06-13 确认）：sales 不做字段脱敏（仍可看采购价/成本/毛利，用于整机拆解加点
-#   直卖）——但 sales **看不到任何逐单销售成交明细**，只看聚合（平均售价/近期加权成交参考价）。
-#   逐单明细隐藏在 security.anonymize_sales_rows（受限销售整段丢弃）+ part_overview 短路 +
-#   /parts/sales 锁端点 + /profit require_admin，不是靠这里遮字段。
-ROLE_FIELD_VISIBILITY = {
-    "admin":     {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
-    "boss":      {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
-    "sales":     {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
-    "purchaser": {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
-    "readonly":  {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
-}
+# 字段级脱敏的唯一真值源是 app/permissions.py 的 ROLE_TEMPLATES（按 data_* 开关）。
+# 旧的 ROLE_FIELD_VISIBILITY 表已于 2026-06-15 删除——它是 security._hidden_fields 的旧
+# token 回退表，与 permissions 模板口径相反，导致"同一角色因 token 新旧而脱敏结果相反"。
+# 现回退也走 permissions.template_for(role)，单一真值源。要改"某角色看不看成本/毛利"，
+# 改 permissions.ROLE_TEMPLATES 即可；逐单销售成交明细的隐藏另在 security.anonymize_sales_rows。

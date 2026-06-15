@@ -1,8 +1,8 @@
-"""采购记录 API（合同重点：采购直接看最近采购）。
+"""采购记录 API（合同重点：销售和采购都能直接看最近采购）。
 
-页面级准入 require_page("page_purchases")：有「采购记录」页权限的角色（采购/老板/只读/
-管理员）可达；销售 page_purchases=False → 403（销售看不到采购记录页）。
-字段级仍过 apply_field_visibility：即便放行，未授权角色的供应商/进价也会被遮。
+页面级准入 require_page("page_purchases")：销售/采购/老板/只读/管理员均 page_purchases=True
+可达（甲方 2026-06-15 确认销售也要能查采购记录）。字段级仍过 apply_field_visibility：
+未授权角色的供应商等仍被遮（销售 data_supplier=False → 供应商列为空，但进价可见）。
 """
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session

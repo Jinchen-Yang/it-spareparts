@@ -29,6 +29,17 @@ def test_read_tools_block_other_users_file(db):
     assert tools._read_document(db, {"file_id": fid}, _ctx("alice")) != tools._NO_ACCESS
 
 
+def test_readonly_cannot_read_others_file(db):
+    """收紧（2026-06-15）：readonly 不再是文件全量角色——共享口令回退把非 admin 一律发成
+    readonly，若放行会让任何知道 ADMIN_PASSWORD 的人凭 file_id 读他人上传的报价/合同(IDOR)。"""
+    fid = agent_files.save_upload(b"secret quote", "q.txt", "alice")["file_id"]
+    assert tools._owns(_ctx("bob", role="readonly"), fid) is False        # readonly 也需本人
+    assert tools._read_document(db, {"file_id": fid}, _ctx("bob", role="readonly")) == tools._NO_ACCESS
+    # admin / boss 仍可越权读（运维/审计），readonly 不行
+    assert tools._owns(_ctx("bob", role="admin"), fid) is True
+    assert tools._owns(_ctx("bob", role="boss"), fid) is True
+
+
 def test_generated_report_owned_by_creator(db):
     out = tools._write_report(db, {"headers": ["型号"], "rows": [["PN-A"]], "title": "报价"},
                               _ctx("carol"))

@@ -57,10 +57,13 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     "boss": _full(),
     "readonly": {**_full(), "page_import": False, "page_governance": False},
     "sales": {
+        # 甲方 2026-06-15 确认：销售能看采购成本/毛利（整机拆解加点直卖需要采购价算建议售价）。
+        # 供应商仍隐藏（不暴露从谁进货）；逐单销售成交明细另由 own_customers_only 收紧（看不到）。
         "data_supplier": False, "data_customer": True,
-        "data_purchase_cost": False, "data_profit": False,
-        # page_profit=False：利润分析接口本就 require_admin，给 sales 这个菜单只会点了 403
-        "page_parts": True, "page_purchases": False, "page_profit": False,
+        "data_purchase_cost": True, "data_profit": True,
+        # page_purchases=True：合同重点"销售和采购都能查最近采购记录"。
+        # page_profit=False：利润分析接口本就 require_admin，给 sales 这个菜单只会点了 403。
+        "page_parts": True, "page_purchases": True, "page_profit": False,
         "page_inventory": True, "page_chat": True,
         "page_import": False, "page_governance": False,
         "own_customers_only": True,

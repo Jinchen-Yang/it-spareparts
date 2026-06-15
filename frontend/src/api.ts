@@ -344,6 +344,8 @@ export interface Overview {
     ref_sale_samples: number;        // 取样成交笔数（0 = 窗口内无成交）
     ref_window_days: number;         // 取样窗口天数（30）
   };
+  // 逐单销售成交明细是否按权限隐藏（与后端 is_scoped_sales 对齐）：true → sales_recent 必空
+  sales_recent_restricted?: boolean;
 }
 
 export interface PurchaseRow {
