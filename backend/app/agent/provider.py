@@ -10,10 +10,19 @@ provider 分支（anthropic SDK + cache_control），接口保持不变。
 """
 import base64
 import mimetypes
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.config import get_settings
+
+# 推理型视觉模型(如 minimax-m3)会在正文前带 <think>…</think> 思考块，OCR 提取要去掉
+_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_think(text: str) -> str:
+    """去掉推理模型的 <think>…</think> 块；无该块则原样返回。"""
+    return _THINK_RE.sub("", text).strip()
 
 
 class LLMNotConfigured(Exception):
@@ -163,7 +172,8 @@ def vision_extract(images: list[Path], hint: str) -> str:
             model=s.vision_model,
             messages=[{"role": "user", "content": content}],
         )
-        return resp.choices[0].message.content or "(视觉模型未返回内容)"
+        out = _strip_think(resp.choices[0].message.content or "")
+        return out or "(视觉模型未返回内容)"
     finally:
         for t in tmp:
             t.unlink(missing_ok=True)
