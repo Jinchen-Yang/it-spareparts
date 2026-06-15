@@ -30,24 +30,10 @@ def _d(x) -> float | None:
     return float(x) if isinstance(x, Decimal) else x
 
 
-def _median(vals: list):
-    s = sorted(vals)
-    n = len(s)
-    if not n:
-        return None
-    m = n // 2
-    return s[m] if n % 2 else (s[m - 1] + s[m]) / 2
-
-
-def _trim_outliers(rows: list, price_idx: int, pct: float) -> list:
-    """剔除单价≤0、以及偏离中位数 ±pct 以上的行，避免 ¥0/异常价污染均价、参考价。
-    样本 <3 条只去 ¥0（中位数离群裁剪在小样本不稳）；若全被裁光则回退到只去 ¥0。"""
-    pos = [r for r in rows if r[price_idx] and r[price_idx] > 0]
-    if len(pos) < 3:
-        return pos
-    med = _median([r[price_idx] for r in pos])
-    lo, hi = med * (Decimal(1) - Decimal(str(pct))), med * (Decimal(1) + Decimal(str(pct)))
-    return [r for r in pos if lo <= r[price_idx] <= hi] or pos
+def _positive_priced(rows: list, price_idx: int) -> list:
+    """只保留有真实成交价（单价>0）的行——¥0（赠送/换货/录入0价）不计入均价。
+    硬件成交价本就波动大，不做离群裁剪，有售价即计入。"""
+    return [r for r in rows if r[price_idx] and r[price_idx] > 0]
 
 
 def resolve_part(db: Session, pn_std: str) -> tuple[DimPart | None, str | None]:
@@ -228,7 +214,7 @@ def _profit_summary(db: Session, part_id: int) -> dict:
     amt, qty = db.execute(pc).one()
     avg_cost = (amt / qty) if amt and qty else None
 
-    # 平均销售价（含税）：剔除 ¥0 与偏离中位数 ±REF_PRICE_OUTLIER_PCT 的离群价（防赠送/0价/异常价拉偏）；
+    # 平均销售价（含税）：只要有真实成交价（单价>0）就计入——¥0（赠送/换货/录入0价）不算；
     # 累计售出量仍按全部成交计（含 ¥0）——那是"卖了多少个"，不是"卖多少钱"。
     ss = (
         select(FSalesLine.qty, FSalesLine.unit_price)
@@ -239,7 +225,7 @@ def _profit_summary(db: Session, part_id: int) -> dict:
         ss = ss.where(FSalesOrder.data_status == _ACTIVE)
     srows = db.execute(ss).all()
     sqty = sum((r[0] for r in srows if r[0] is not None), Decimal(0))
-    kept = _trim_outliers(srows, 1, config.REF_PRICE_OUTLIER_PCT)
+    kept = _positive_priced(srows, 1)
     kqty = sum((r[0] for r in kept), Decimal(0))
     avg_sale = (sum((r[0] * r[1] for r in kept), Decimal(0)) / kqty) if kqty else None
 
@@ -364,8 +350,7 @@ def _weighted_recent_sale_price(db: Session, part_id: int) -> dict:
         stmt.order_by(FSalesOrder.order_date.desc().nullslast(), FSalesLine.id.desc())
         .limit(config.REF_PRICE_MAX_N)
     ).all()
-    rows = _trim_outliers(rows, 1, config.REF_PRICE_OUTLIER_PCT)   # 去 ¥0 + 偏离中位数 ±30% 的异常价
-    if not rows:
+    if not rows:   # SQL 已过滤 unit_price>0（¥0 不计入），有售价即计入
         return {"ref_sale_price": None, "ref_sale_samples": 0,
                 "ref_window_days": config.REF_PRICE_DAYS}
     # 线性按名次加权：rows 已按时间倒序（最近在前），最近一条权重 = 条数 k，依次递减到 1
