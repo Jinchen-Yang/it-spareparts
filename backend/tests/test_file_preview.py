@@ -1,6 +1,7 @@
 """文件在线预览：agent_files.preview 把 xlsx 解析成行数据；预览端点与 download 同一归属校验（防 IDOR）。"""
 import io
 
+import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
@@ -29,6 +30,14 @@ def test_preview_xlsx_returns_table(db):
 def test_preview_non_xlsx_kind(db):
     fid = agent_files.save_upload(b"hi", "note.txt", "alice")["file_id"]
     assert agent_files.preview(fid)["kind"] == "other"
+
+
+def test_preview_corrupt_xlsx_raises_fileerror(db):
+    # 落盘损坏(绕过上传校验)：preview 须转成 FileError(端点据此返 404)，不能裸冒 500
+    fid = agent_files.save_upload(_xlsx_bytes(), "ok.xlsx", "alice")["file_id"]
+    agent_files._data_path(fid, "xlsx").write_bytes(b"PK\x03\x04 corrupt not a real xlsx")
+    with pytest.raises(agent_files.FileError):
+        agent_files.preview(fid)
 
 
 def _mk_login(db, c, username):

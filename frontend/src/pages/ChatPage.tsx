@@ -317,6 +317,7 @@ export default function ChatPage() {
   };
 
   const doUpload = async (file: File) => {
+    if (uploading) return false;   // 防在途重复上传：竞态会让先上传那张的 pendingFile 被覆盖丢弃
     setUploading(true);
     try {
       const { data } = await agentUpload(file);
@@ -656,9 +657,15 @@ export default function ChatPage() {
                 disabled={busy}
                 onChange={(e) => setInput(e.target.value)}
                 onPaste={(e) => {
-                  // 直接粘贴图片（截图/复制的图片文件）→ 当附件上传
-                  const items = Array.from(e.clipboardData?.items || []);
-                  const img = items.find((it) => it.kind === "file" && it.type.startsWith("image/"));
+                  // 只拦"纯图片"粘贴（截图）当附件上传；剪贴板含文本（如从 Excel/网页复制带图内容）
+                  // → 放行默认文本粘贴，绝不吞掉用户想粘的文字
+                  const dt = e.clipboardData;
+                  if (!dt) return;
+                  const hasText = !!dt.getData("text/plain")
+                    || Array.from(dt.items).some((it) => it.kind === "string");
+                  if (hasText) return;
+                  const img = Array.from(dt.items).find(
+                    (it) => it.kind === "file" && it.type.startsWith("image/"));
                   const f = img?.getAsFile();
                   if (f) {
                     e.preventDefault();
