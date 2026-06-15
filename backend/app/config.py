@@ -123,6 +123,8 @@ RECENT_PURCHASE_DAYS = 15
 # 最近一条权重最高、依次递减到 1（越近权重越高），削掉单笔异常价对参考的扰动。
 REF_PRICE_DAYS = 30   # 取样时间窗（天）
 REF_PRICE_MAX_N = 5   # 最多取最近几条
+# 均价/参考价的离群裁剪：剔除单价≤0（赠送/换货/录入0价），以及偏离中位数 ±此比例 的异常价。
+REF_PRICE_OUTLIER_PCT = 0.30   # ±30%
 
 # 只统计已生效（入库不过滤，业务查询过滤）
 ACTIVE_STATUS_ONLY = True
