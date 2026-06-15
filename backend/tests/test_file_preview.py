@@ -32,6 +32,14 @@ def test_preview_non_xlsx_kind(db):
     assert agent_files.preview(fid)["kind"] == "other"
 
 
+def test_agent_files_dir_persisted_under_raw():
+    # agent_files 必须在 raw_file_dir(持久卷)之下，否则容器重建会清掉生成文件 → 下载 404。
+    from pathlib import Path
+    from app.config import get_settings
+    from app.services.agent_files import _dir
+    assert _dir().resolve().parent == Path(get_settings().raw_file_dir).resolve()
+
+
 def test_preview_corrupt_xlsx_raises_fileerror(db):
     # 落盘损坏(绕过上传校验)：preview 须转成 FileError(端点据此返 404)，不能裸冒 500
     fid = agent_files.save_upload(_xlsx_bytes(), "ok.xlsx", "alice")["file_id"]
