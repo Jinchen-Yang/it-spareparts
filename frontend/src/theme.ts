@@ -1,23 +1,25 @@
 import type { ThemeConfig } from "antd";
 
-// 莫兰迪低饱和·浅蓝主题（UI 改版定稿）。
-// 设计取向：同色系深浅分层（页底 < 卡面 < 内嵌）、卡片微阴影悬浮、单一灰蓝强调、语义色全部压成莫兰迪。
+// 暖白 · 极简蓝点缀主题。
+// 取向：白为主、底色一点点暖（米白）、用白的不同灰度分层（画布<卡面）、蓝只作少量提醒色。
 export const COLORS = {
-  page: "#DCE5EC",        // 页面底（最深的中性蓝灰）
-  surface: "#F7FAFC",     // 卡片/面板（浮起来的雾白蓝）
-  inset: "#EAF0F4",       // 卡内嵌套块（凹陷的中间调）
-  header: "#F2F6F8",      // 顶栏
-  accent: "#5E8DA3",      // 强调灰蓝（主按钮/链接/选中）
-  accentStrong: "#37708A",// 关键数字
-  text: "#2B3E47",        // 主文字（深石板，非纯黑）
-  text2: "#5F727A",       // 次级
-  text3: "#92A1A8",       // 提示/弱
-  border: "#DCE6EC",
-  borderSoft: "#E4ECF1",
-  danger: "#B5635A",      // 莫兰迪赤陶（负毛利/错误）
-  warning: "#9A7B43",     // 莫兰迪赭（待复核/警告）
-  success: "#5E7A60",     // 莫兰迪豆绿
-  shadow: "0 1px 2px rgba(54,84,104,.07), 0 3px 10px rgba(54,84,104,.09)",
+  page: "#F4F1EC",        // 画布底（暖浅灰，把白卡片衬出来）
+  surface: "#FFFFFF",     // 卡片/面板（纯白，浮在画布上）
+  inset: "#F6F3EE",       // 卡内嵌套 / 表头 / 悬浮（暖灰中间调）
+  header: "#FFFFFF",      // 顶栏（白 + 发丝底线）
+  accent: "#3E6FD1",      // 强调蓝（主按钮 / 选中 / 链接）——克制使用
+  accentStrong: "#2C56AE",// 关键数字 / 链接强调
+  accentSoft: "#EEF3FC",  // 蓝色提醒底（成交参考价条等）
+  accentSoftBorder: "#DBE6F8",
+  text: "#2A2722",        // 主文字（暖近黑，非纯黑）
+  text2: "#6B665E",       // 次级（暖灰）
+  text3: "#9C968B",       // 提示 / 弱（暖浅灰）
+  border: "#E9E5DE",      // 发丝边（暖）
+  borderSoft: "#F0EDE7",
+  danger: "#BE564B",      // 暖红（负毛利 / 错误）
+  warning: "#B07C33",     // 暖琥珀（待复核 / 警告）
+  success: "#4F875C",     // 柔绿
+  shadow: "0 1px 2px rgba(40,33,24,.05), 0 4px 14px rgba(40,33,24,.05)",
 };
 
 export const themeConfig: ThemeConfig = {
@@ -33,7 +35,7 @@ export const themeConfig: ThemeConfig = {
     colorText: COLORS.text,
     colorTextSecondary: COLORS.text2,
     colorTextTertiary: COLORS.text3,
-    colorTextQuaternary: "#AEBAC0",
+    colorTextQuaternary: "#B6B0A6",
     colorBorder: COLORS.border,
     colorBorderSecondary: COLORS.borderSoft,
     colorLink: COLORS.accentStrong,
@@ -53,25 +55,26 @@ export const themeConfig: ThemeConfig = {
       bodyBg: COLORS.page,
     },
     Menu: {
-      horizontalItemSelectedColor: COLORS.accentStrong,
+      horizontalItemSelectedColor: COLORS.accent,
       horizontalItemHoverColor: COLORS.accent,
       itemColor: COLORS.text2,
-      itemSelectedColor: COLORS.accentStrong,
+      itemSelectedColor: COLORS.accent,
     },
     Table: {
-      headerBg: "#EBF1F4",
+      headerBg: COLORS.inset,
       headerColor: COLORS.text2,
-      rowHoverBg: "#EBF2F5",
+      rowHoverBg: "#F7F5F1",
       borderColor: COLORS.borderSoft,
       headerSplitColor: COLORS.borderSoft,
     },
     Segmented: {
       itemSelectedBg: COLORS.surface,
-      trackBg: "#E0E8ED",
+      trackBg: COLORS.inset,
       itemSelectedColor: COLORS.accentStrong,
     },
-    Card: { colorBorderSecondary: COLORS.borderSoft },
+    Card: { colorBorderSecondary: COLORS.border },
     Statistic: { titleFontSize: 13 },
     Tabs: { inkBarColor: COLORS.accent, itemSelectedColor: COLORS.accentStrong },
+    Button: { primaryShadow: "none" },
   },
 };
