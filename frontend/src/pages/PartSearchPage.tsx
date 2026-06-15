@@ -252,7 +252,14 @@ export default function PartSearchPage() {
             </Col>
             <Col span={12}>
               <Card title="销售历史(近20)" size="small">
-                <Table rowKey={(r) => r.order_no + r.order_date} size="small" columns={salCols} dataSource={ov.sales_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
+                {!canCost && ov.sales_recent.length === 0 ? (
+                  <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description="按权限，销售逐单成交明细不可见；可参考上方平均售价与近期成交参考价"
+                  />
+                ) : (
+                  <Table rowKey={(r) => r.order_no + r.order_date} size="small" columns={salCols} dataSource={ov.sales_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
+                )}
               </Card>
             </Col>
           </Row>

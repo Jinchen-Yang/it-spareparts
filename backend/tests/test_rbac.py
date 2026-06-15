@@ -28,35 +28,32 @@ def test_password_hash_roundtrip():
     assert verify_password("s3cret", h) and not verify_password("wrong", h)
 
 
-def test_anonymize_masks_peers():
+def test_sales_gets_no_sales_lines():
+    """收紧口径（2026-06-13）：受限销售看不到任何逐单成交明细，连自己的也不给。"""
     rows = [
         {"order_no": "A", "customer": "甲公司", "unit_price": 100, "salesperson": "刘青青"},
         {"order_no": "B", "customer": "乙公司", "unit_price": 110, "salesperson": "崔丽娜"},
     ]
     out = security.anonymize_sales_rows(rows, _sales_ctx("刘青青"))
-    mine = next(r for r in out if r["order_no"] == "A")
-    peer = next(r for r in out if r["order_no"] == "B")
-    assert mine["customer"] == "甲公司"          # 自己的客户保留
-    assert peer["customer"] == "（其他客户）"      # 同事的客户被抹
-    assert "salesperson" not in peer             # 不暴露是谁卖的
-    # 但行情价两行都在（销售能看匿名成交价）
-    assert {r["unit_price"] for r in out} == {100, 110}
+    assert out == []  # 整段不可见——销售只能用聚合（平均售价/加权成交参考价）
 
 
-def test_admin_sees_everything():
+def test_non_sales_keeps_lines_without_salesperson():
     rows = [{"order_no": "B", "customer": "乙公司", "unit_price": 110, "salesperson": "崔丽娜"}]
     out = security.anonymize_sales_rows(rows, _admin_ctx())
-    assert out[0]["customer"] == "乙公司"  # admin 不脱敏
+    assert out[0]["customer"] == "乙公司"      # admin 不脱敏，看得到成交明细
+    assert out[0]["unit_price"] == 110
+    assert "salesperson" not in out[0]         # 但不暴露是谁卖的
 
 
-def test_overview_sales_recent_scoped(db):
-    """真库：销售看某热门型号，同事的客户名应被匿名化（看不到具体是哪家）。"""
+def test_overview_sales_recent_hidden_for_sales(db):
+    """真库：销售看任何型号，sales_recent 必为空（聚合字段仍在）。"""
     ov = po.get_overview(db, "ST8000NM000A", _sales_ctx("刘青青"))
-    if ov and ov["sales_recent"]:
-        for r in ov["sales_recent"]:
-            assert "salesperson" not in r  # 一律不暴露销售员
-        # 至少存在被匿名化的同事行（该型号成交者众多，刘青青不可能独占）
-        assert any(r["customer"] == "（其他客户）" for r in ov["sales_recent"])
+    if ov is not None:
+        assert ov["sales_recent"] == []                       # 逐单成交明细全部隐藏
+        assert "avg_sale_price" in ov["profit_summary"]       # 平均售价仍给
+        assert "sale_price_ref" in ov                         # 近期加权成交参考价仍给
+        assert "purchases_recent" in ov                       # 采购明细仍给
 
 
 def test_profit_ranking_blocked_for_sales(db):
