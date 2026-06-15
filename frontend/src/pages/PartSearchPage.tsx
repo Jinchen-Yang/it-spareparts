@@ -252,7 +252,7 @@ export default function PartSearchPage() {
             </Col>
             <Col span={12}>
               <Card title="销售历史(近20)" size="small">
-                {!canCost && ov.sales_recent.length === 0 ? (
+                {ov.sales_recent_restricted ? (
                   <Empty
                     image={Empty.PRESENTED_IMAGE_SIMPLE}
                     description="按权限，销售逐单成交明细不可见；可参考上方平均售价与近期成交参考价"

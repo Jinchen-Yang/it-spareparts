@@ -11,7 +11,11 @@ from app.models.system import SysUser
 # ---------- 权限模型（纯函数）----------
 def test_role_template_and_admin_full():
     sales = permissions.effective("sales", None)
-    assert sales["data_purchase_cost"] is False
+    # 口径 2026-06-15：销售能看采购成本/毛利（整机拆解加点直卖），但供应商仍隐藏
+    assert sales["data_purchase_cost"] is True
+    assert sales["data_profit"] is True
+    assert sales["data_supplier"] is False
+    assert sales["page_purchases"] is True   # 合同重点：销售也能查采购记录
     assert sales["own_customers_only"] is True
     assert sales["page_governance"] is False
     # admin 恒全开，自定义也锁不住
@@ -28,8 +32,10 @@ def test_custom_overrides_template():
 
 def test_hidden_groups_from_perms():
     g = permissions.hidden_groups(permissions.effective("sales", None))
-    assert "supplier_info" in g and "purchase_cost" in g
-    assert "customer_info" not in g     # sales 看客户
+    assert "supplier_info" in g           # 供应商仍遮
+    assert "purchase_cost" not in g       # 口径 2026-06-15：销售看成本（整机拆解加点直卖）
+    assert "profit_amount" not in g       # 销售看毛利
+    assert "customer_info" not in g       # sales 看客户
 
 
 # ---------- 字段脱敏按 per-user 权限 ----------
@@ -39,7 +45,9 @@ def test_field_visibility_masks_by_user_perms():
     out = security.apply_field_visibility(
         {"pn_std": "X", "avg_cost": 80, "gross_profit": 20, "supplier_name": "甲供"}, ctx)
     assert out["pn_std"] == "X"
-    assert out["avg_cost"] is None and out["gross_profit"] is None and out["supplier_name"] is None
+    # 口径 2026-06-15：销售看成本/毛利（不遮），供应商仍遮
+    assert out["avg_cost"] == 80 and out["gross_profit"] == 20
+    assert out["supplier_name"] is None
 
 
 def test_scoped_sales_by_perm():
