@@ -42,7 +42,10 @@ class FileError(Exception):
 
 
 def _dir() -> Path:
-    d = Path(get_settings().raw_file_dir).parent / "agent_files"
+    # 必须落在持久卷内：生产的持久卷挂在 raw_file_dir(/app/data/raw)，放它的【子目录】才不会
+    # 随容器重建被清空——否则每次部署/重启都会清掉 AI 生成的报价单，下载链接全部 404。
+    # raw 导入文件是 raw_file_dir/{hash}.xlsx 平铺，agent_files 子目录与之不冲突。
+    d = Path(get_settings().raw_file_dir) / "agent_files"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
