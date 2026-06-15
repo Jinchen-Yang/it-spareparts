@@ -11,6 +11,13 @@ import { COLORS } from "../theme";
 const money = (v: number | null) => (v == null ? "-" : `¥${v.toLocaleString()}`);
 const pct = (v: number | null | undefined) => (v == null ? "-" : `${(v * 100).toFixed(1)}%`);
 
+// 按登录用户权限决定是否展示成本/利润卡片（后端已把值脱敏成 null，前端再把空卡片整张藏掉）
+const canSee = (key: string) => {
+  if ((localStorage.getItem("role") || "") === "admin") return true;
+  try { return JSON.parse(localStorage.getItem("permissions") || "{}")[key] === true; }
+  catch { return false; }
+};
+
 export default function PartSearchPage() {
   const [hits, setHits] = useState<PartHit[]>([]);
   const [searching, setSearching] = useState(false);
@@ -23,6 +30,9 @@ export default function PartSearchPage() {
   const [iface, setIface] = useState<string | undefined>(undefined);
   const [capMin, setCapMin] = useState<number | null>(null);
   const [capMax, setCapMax] = useState<number | null>(null);
+
+  const canCost = canSee("data_purchase_cost");   // 销售看不到 → 隐藏成本卡片
+  const canProfit = canSee("data_profit");
 
   const doSearch = async (q: string, override?: Record<string, unknown>) => {
     const hasSpec = partType || iface || capMin != null || capMax != null || override;
@@ -172,7 +182,7 @@ export default function PartSearchPage() {
           {ov.sale_price_ref?.ref_sale_price != null && (
             <div style={{
               display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap",
-              background: "#DCE8ED", border: "1px solid #CADCE4", borderRadius: 10,
+              background: COLORS.accentSoft, border: `1px solid ${COLORS.accentSoftBorder}`, borderRadius: 10,
               padding: "12px 16px", marginBottom: 16,
             }}>
               <span style={{ color: COLORS.text2, fontSize: 13 }}>近期成交参考价（销售出价用）</span>
@@ -189,15 +199,15 @@ export default function PartSearchPage() {
           )}
 
           <Row gutter={16} style={{ marginBottom: 16 }}>
-            <Col span={6}><Card size="small">
+            {canCost && <Col span={6}><Card size="small">
               <Statistic title="移动加权 · 单位成本" value={ov.profit_summary.avg_cost_moving ?? "-"} prefix="¥"
                 valueStyle={{ color: COLORS.accentStrong }} />
-              <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_moving)}</span>
-            </Card></Col>
-            <Col span={6}><Card size="small">
+              {canProfit && <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_moving)}</span>}
+            </Card></Col>}
+            {canCost && <Col span={6}><Card size="small">
               <Statistic title="FIFO · 单位成本" value={ov.profit_summary.avg_cost_fifo ?? "-"} prefix="¥" />
-              <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>
-            </Card></Col>
+              {canProfit && <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>}
+            </Card></Col>}
             <Col span={6}><Card size="small">
               <Statistic title="平均销售价(含税)" value={ov.profit_summary.avg_sale_price ?? "-"} prefix="¥" />
               <span style={{ color: COLORS.text3 }}>累计售 {ov.profit_summary.total_qty_sold}</span>

@@ -1,17 +1,18 @@
 :root {
-  --mb-page: #DCE5EC;
-  --mb-surface: #F7FAFC;
-  --mb-inset: #EAF0F4;
-  --mb-accent: #5E8DA3;
-  --mb-accent-strong: #37708A;
-  --mb-text: #2B3E47;
-  --mb-text-2: #5F727A;
-  --mb-text-3: #92A1A8;
-  --mb-border: #E4ECF1;
-  --mb-danger: #B5635A;
-  --mb-warning: #9A7B43;
-  --mb-success: #5E7A60;
-  --mb-shadow: 0 1px 2px rgba(54, 84, 104, .07), 0 3px 10px rgba(54, 84, 104, .09);
+  --mb-page: #F4F1EC;
+  --mb-surface: #FFFFFF;
+  --mb-inset: #F6F3EE;
+  --mb-accent: #3E6FD1;
+  --mb-accent-strong: #2C56AE;
+  --mb-accent-soft: #EEF3FC;
+  --mb-text: #2A2722;
+  --mb-text-2: #6B665E;
+  --mb-text-3: #9C968B;
+  --mb-border: #E9E5DE;
+  --mb-danger: #BE564B;
+  --mb-warning: #B07C33;
+  --mb-success: #4F875C;
+  --mb-shadow: 0 1px 2px rgba(40, 33, 24, .05), 0 4px 14px rgba(40, 33, 24, .05);
 }
 
 body {
@@ -20,7 +21,7 @@ body {
   color: var(--mb-text);
 }
 
-/* 卡片：微阴影悬浮 + 发丝边；嵌套卡片改为凹陷内嵌（去阴影、压深底色），形成页底<卡面<内嵌三级 */
+/* 卡片：纯白 + 极轻暖阴影 + 发丝边；嵌套卡片改凹陷内嵌（去阴影、压暖灰底），形成画布<卡面<内嵌三级 */
 .ant-card {
   box-shadow: var(--mb-shadow);
   border-color: var(--mb-border) !important;
@@ -33,7 +34,7 @@ body {
   border-bottom-color: var(--mb-border);
 }
 
-/* 顶栏：浅色 surface + 发丝底线，去掉默认深色 */
+/* 顶栏：白 + 发丝底线 */
 .ant-layout-header {
   border-bottom: 1px solid var(--mb-border);
   padding-inline: 28px;
@@ -47,34 +48,39 @@ body {
   font-weight: 500;
 }
 
+/* 描述列表：表头用暖灰内嵌底，分隔发丝边 */
+.ant-descriptions-bordered .ant-descriptions-item-label {
+  background: var(--mb-inset);
+}
+
 /* 统计数字：中等字重，关键数字靠 valueStyle 上强调蓝 */
 .ant-statistic-content {
   font-weight: 500;
 }
 
-/* 上传拖拽区：贴合莫兰迪面色 */
+/* 上传拖拽区：贴合暖灰内嵌面 */
 .ant-upload-wrapper .ant-upload-drag {
   background: var(--mb-inset);
   border-color: var(--mb-border);
   border-radius: 12px;
 }
 
-/* 预设标签去饱和 → 莫兰迪低饱和（全站统一，页面代码无需改） */
+/* 预设标签：白底上的低饱和语义色（蓝=主提醒色） */
 .ant-tag-red, .ant-tag-error {
-  color: #8C4A43; background: #EFE0DD; border-color: #E4CCC7;
+  color: #A24A40; background: #FBEDEB; border-color: #F2D8D3;
 }
 .ant-tag-orange, .ant-tag-gold, .ant-tag-warning {
-  color: #7C6232; background: #EEE6D7; border-color: #E3D7C2;
+  color: #8A6526; background: #FAF1DF; border-color: #EFE0C4;
 }
 .ant-tag-green, .ant-tag-success {
-  color: #4D6650; background: #E0E9E1; border-color: #CFDDD0;
+  color: #41704F; background: #E9F2EB; border-color: #D2E4D6;
 }
 .ant-tag-blue, .ant-tag-geekblue, .ant-tag-cyan, .ant-tag-processing {
-  color: #3A6175; background: #DCE8ED; border-color: #CADCE4;
+  color: #2C56AE; background: #EEF3FC; border-color: #D8E4F7;
 }
 
-/* 滚动条：低存在感 */
+/* 滚动条：低存在感、暖灰 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-thumb { background: #C2CFD6; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
-::-webkit-scrollbar-thumb:hover { background: #A9BAC2; background-clip: content-box; }
+::-webkit-scrollbar-thumb { background: #DAD4CA; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: #C7C0B4; background-clip: content-box; }
 ::-webkit-scrollbar-track { background: transparent; }
