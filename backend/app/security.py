@@ -92,28 +92,27 @@ def require_page(page_key: str):
 def apply_data_scope(query, user_ctx: UserContext):
     """行级数据范围钩子。保持 pass-through。
 
-    "匿名行情+自己明细"的防恶性竞争不靠"过滤掉同事的行"（那会连匿名行情也看不到），
-    而靠**行级匿名化**：保留所有成交价（行情价值），但把非本人成交的客户名抹掉
-    （见 part_overview.anonymize_sales_rows）。此处不加 SQL 过滤，避免误伤采购/搜索等
-    跨表查询，且把口径集中在一处便于审计。
+    受限销售的逐单成交明细整段隐藏（见 anonymize_sales_rows，2026-06-13 收紧：销售只看
+    聚合，不看任何逐单成交）。此处不加 SQL 过滤，避免误伤采购/搜索等跨表查询；逐单明细
+    的可见性集中在 anonymize_sales_rows 一处便于审计。
     """
     return query
 
 
 def anonymize_sales_rows(rows: list[dict], user_ctx: UserContext | None) -> list[dict]:
-    """sales 角色（RBAC 开）：非本人成交的客户名抹成"（其他客户）"，并去掉 salesperson；
-    本人成交保留客户名。其余角色原样。rows 需含 'salesperson' 与 'customer' 键。"""
-    if not is_scoped_sales(user_ctx):
-        return [{k: v for k, v in r.items() if k != "salesperson"} for r in rows]
-    me = user_ctx.salesperson_name
-    out = []
-    for r in rows:
-        mine = r.get("salesperson") and r["salesperson"] == me
-        r2 = {k: v for k, v in r.items() if k != "salesperson"}
-        if not mine:
-            r2["customer"] = "（其他客户）"
-        out.append(r2)
-    return out
+    """逐单销售成交明细的可见性策略（防恶性竞争口径，2026-06-13 甲方收紧）。
+
+    - **受限销售（is_scoped_sales：own_customers_only 权限 / 销售角色）：逐单成交明细
+      完全不可见**——返回空列表。销售只能用聚合（平均售价 avg_sale_price / 近期加权
+      成交参考价 sale_price_ref），看不到"某件某单卖了多少、卖给谁"。这是数据层兜底：
+      即便调用方忘了短路，经此函数后也不泄露任何成交行。
+    - 其余角色（admin/boss/采购/只读）：保留成交行，但去掉 salesperson（不暴露是谁卖的）。
+
+    rows 需含 'salesperson' 与 'customer' 键。（注：函数名沿用历史；行为已从"匿名化"
+    收紧为"对受限销售整段丢弃"。）"""
+    if is_scoped_sales(user_ctx):
+        return []
+    return [{k: v for k, v in r.items() if k != "salesperson"} for r in rows]
 
 
 def _hidden_fields(user_ctx: UserContext) -> set[str]:

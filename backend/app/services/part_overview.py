@@ -192,11 +192,14 @@ def list_purchases(db: Session, pn_std: str, page: int, page_size: int,
 def list_sales(db: Session, pn_std: str, page: int, page_size: int,
                user_ctx: security.UserContext | None = None) -> dict:
     part, redirected_from = resolve_part(db, pn_std)
-    if part is None:
+    # 受限销售（2026-06-13 收紧）：逐单成交明细端点锁死——不查、返回空，销售只能用聚合。
+    if part is None or security.is_scoped_sales(user_ctx):
         out = _empty_page(page, page_size)
+        if security.is_scoped_sales(user_ctx):
+            out["restricted"] = True   # 区分"无数据"与"按权限不可见"
     else:
         out = _paginate(db, _sales_query(part.id, user_ctx), page, page_size, _sales_row)
-        out["items"] = security.anonymize_sales_rows(out["items"], user_ctx)  # 防恶性竞争
+        out["items"] = security.anonymize_sales_rows(out["items"], user_ctx)
     out["redirected_from"] = redirected_from
     return out
 
@@ -483,8 +486,10 @@ def get_overview(db: Session, pn_std: str,
             "redirected_from": redirected_from,
         },
         "purchases_recent": _paginate(db, _purchases_query(part.id, user_ctx), 1, 20, _purchase_row)["items"],
-        # 防恶性竞争：sales 角色保留行情价、抹掉同事的客户名（本人成交保留）
-        "sales_recent": security.anonymize_sales_rows(
+        # 受限销售（2026-06-13 收紧）：逐单成交明细完全不可见，短路为 []（不查、不加载
+        # 同事数据入内存）；销售只看聚合（平均售价 + 近期加权成交参考价 sale_price_ref）。
+        # AI 助手 get_part_overview 工具走同一函数，自动覆盖。其余角色保留近 20 单（去 salesperson）。
+        "sales_recent": [] if security.is_scoped_sales(user_ctx) else security.anonymize_sales_rows(
             _paginate(db, _sales_query(part.id, user_ctx), 1, 20, _sales_row)["items"], user_ctx),
         "inventory": _inventory(db, part.id),
         "substitutes": _substitutes(db, part.id),

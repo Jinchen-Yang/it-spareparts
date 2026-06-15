@@ -233,10 +233,10 @@ FIELD_GROUPS = {
 }
 
 # 角色 → 字段组可见性（字段级脱敏，apply_field_visibility 用）。
-# 三期口径（客户只要求"防同事报价泄露"）：sales **不做字段脱敏**——
-#   ① 整机拆解要给销售看采购价才能加点直卖/发采购询价；② 防恶性竞争靠"行级匿名化"
-#   （part_overview.anonymize_sales_rows：抹掉同事客户名）+ 禁用按客户/销售员排名，
-#   不是靠遮字段。若日后甲方要"销售不看成本"，把 sales 的 purchase_cost 改 False 即可。
+# 口径（2026-06-13 确认）：sales 不做字段脱敏（仍可看采购价/成本/毛利，用于整机拆解加点
+#   直卖）——但 sales **看不到任何逐单销售成交明细**，只看聚合（平均售价/近期加权成交参考价）。
+#   逐单明细隐藏在 security.anonymize_sales_rows（受限销售整段丢弃）+ part_overview 短路 +
+#   /parts/sales 锁端点 + /profit require_admin，不是靠这里遮字段。
 ROLE_FIELD_VISIBILITY = {
     "admin":     {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
     "boss":      {"supplier_info": True,  "customer_info": True,  "purchase_cost": True,  "profit_amount": True,  "profit_rate": True},
