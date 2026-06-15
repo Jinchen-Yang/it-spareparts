@@ -1,41 +1,24 @@
-"""成交价均价 / 参考价的离群裁剪：剔除 ¥0 与偏离中位数 ±30% 的异常价。
+"""平均销售价 / 成交参考价：只剔除 ¥0（无真实成交价），有售价即计入，不做离群裁剪。
 
-用户实证：销售历史里有 ¥0（赠送/换货/录入0价）和个别异常高价被算进了"平均销售价"，
-要求 ¥0 不计入均价、偏离 30% 的也不计入。逻辑在 part_overview._trim_outliers。
+用户口径：硬件成交价波动大，偏离中位数的也照算；唯独 ¥0（赠送/换货/录入0价）不计入均价。
+逻辑在 part_overview._positive_priced。
 """
 from decimal import Decimal as D
 
-from app.services.part_overview import _median, _trim_outliers
+from app.services.part_overview import _positive_priced
 
 
-def test_median():
-    assert _median([D(1), D(3), D(2)]) == D(2)
-    assert _median([D(10), D(20)]) == D(15)
-    assert _median([]) is None
-
-
-def test_trim_excludes_zero_price():
-    rows = [(D(1), D("0")), (D(1), D("20000")), (D(2), D("21000")), (D(1), D("19000"))]
-    prices = [r[1] for r in _trim_outliers(rows, 1, 0.30)]
+def test_drops_zero_keeps_all_priced():
+    rows = [(D(1), D("0")), (D(1), D("20000")), (D(2), D("21000")), (D(1), D("30000"))]
+    prices = sorted(r[1] for r in _positive_priced(rows, 1))
     assert D("0") not in prices
-    assert D("20000") in prices and D("21000") in prices
+    assert prices == [D("20000"), D("21000"), D("30000")]   # 大价差(>30%)也全保留
 
 
-def test_trim_excludes_30pct_outlier():
-    # 中位数 21000，±30% 带 = [14700, 27300]，30000 超出应被裁
-    rows = [(D(1), D("19200")), (D(1), D("21000")), (D(1), D("30000"))]
-    prices = sorted(r[1] for r in _trim_outliers(rows, 1, 0.30))
-    assert prices == [D("19200"), D("21000")]
+def test_drops_none_and_nonpositive():
+    rows = [(D(1), None), (D(1), D("0")), (D(1), D("-5")), (D(1), D("100"))]
+    assert [r[1] for r in _positive_priced(rows, 1)] == [D("100")]
 
 
-def test_trim_small_sample_only_drops_zero():
-    # 去 ¥0 后只剩 2 条（<3）→ 不做中位数裁剪，两条都留
-    rows = [(D(1), D("0")), (D(1), D("30000")), (D(1), D("19200"))]
-    prices = sorted(r[1] for r in _trim_outliers(rows, 1, 0.30))
-    assert prices == [D("19200"), D("30000")]
-
-
-def test_trim_none_and_all_kept():
-    assert _trim_outliers([], 1, 0.30) == []
-    rows = [(D(1), D("100")), (D(1), D("101")), (D(1), D("99"))]   # 都在带内
-    assert len(_trim_outliers(rows, 1, 0.30)) == 3
+def test_empty():
+    assert _positive_priced([], 1) == []
