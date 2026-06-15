@@ -7,10 +7,12 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  agentDownload, agentFileBlobUrl, agentPreview, agentUpload, cancelChatStream,
+  agentDownload, agentFileBlobUrl, agentPreview, agentUpload, attachChatStream, cancelChatStream,
   createChatSession, deleteChatSession, getChatMessages, listChatSessions, sessionChatStream,
 } from "../api";
-import type { AgentToolCall, AgentUploadResult, ChatSessionMeta, FilePreview } from "../api";
+import type {
+  AgentToolCall, AgentUploadResult, ChatSessionMeta, FilePreview, SessionStreamEvent,
+} from "../api";
 import { COLORS } from "../theme";
 
 const TOOL_LABEL: Record<string, string> = {
@@ -43,6 +45,18 @@ interface ToolRun {
   name: string;
   done: boolean;
 }
+// 一路活跃流（send 或 attach）的控制块：切会话/停止/打断都作用于它。
+interface StreamCtl {
+  sessionId: number;
+  abort: AbortController;
+  settled: boolean;
+  conflict: boolean;     // 409：会话锁未释放，交 send 退避重试
+  trace: AgentToolCall[];
+  userTurn?: Turn;
+  done: Promise<void>;
+  resolveDone: () => void;
+}
+const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const cellStyle = (head: boolean): React.CSSProperties => ({
   border: `1px solid ${COLORS.border}`, padding: "5px 10px",
@@ -219,82 +233,246 @@ export default function ChatPage() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [loadingTurns, setLoadingTurns] = useState(false);
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(false);          // 当前会话视图正在流式（send 或 attach）
   const [streamText, setStreamText] = useState("");
   const [toolRuns, setToolRuns] = useState<ToolRun[]>([]);
   const [pendingFile, setPendingFile] = useState<AgentUploadResult | null>(null);
   const [uploading, setUploading] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const [generatingIds, setGeneratingIds] = useState<Set<number>>(new Set());  // 后台仍在生成的会话
+
   const streamBufRef = useRef("");
   const flushTimerRef = useRef<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollBoxRef = useRef<HTMLDivElement>(null);
-  // 流式回调/异步 resolve 都发生在 await 之后，闭包里的 state 已过期——
-  // 当前会话与加载序号必须走 ref（教训同旧版 localStorage 时代的闭包陷阱）
   const activeIdRef = useRef<number | null>(null);
   const openSeqRef = useRef(0);
+  const ctlRef = useRef<StreamCtl | null>(null);     // 当前活跃流的控制块
 
-  const switchTo = (id: number | null) => {
-    activeIdRef.current = id;
-    setActiveId(id);
+  const markGenerating = (id: number, on: boolean) =>
+    setGeneratingIds((prev) => {
+      if (on === prev.has(id)) return prev;
+      const next = new Set(prev);
+      if (on) next.add(id); else next.delete(id);
+      return next;
+    });
+
+  const switchTo = (id: number | null) => { activeIdRef.current = id; setActiveId(id); };
+  const flushStream = () => setStreamText(streamBufRef.current);
+  const clearFlush = () => {
+    if (flushTimerRef.current) { window.clearInterval(flushTimerRef.current); flushTimerRef.current = null; }
   };
+  const bumpTop = (sessionId: number) =>
+    setSessions((prev) => {
+      const i = prev.findIndex((s) => s.id === sessionId);
+      if (i < 0) return prev;
+      const next = [...prev];
+      const [s] = next.splice(i, 1);
+      return [{ ...s, updated_at: new Date().toISOString() }, ...next];
+    });
 
   useEffect(() => {
     listChatSessions()
-      .then(({ data }) => setSessions(data.items))
+      .then(({ data }) => {
+        setSessions(data.items);
+        setGeneratingIds(new Set(data.items.filter((s) => s.generating).map((s) => s.id)));
+      })
       .catch(() => message.error("加载会话列表失败"));
-    // 401 reload 前暂存的草稿：登录回来恢复到输入框
     const draft = localStorage.getItem("chat_draft");
     if (draft) {
       localStorage.removeItem("chat_draft");
       setInput(draft);
       message.info("已恢复上次未发送的内容");
     }
+    return () => clearFlush();
   }, []);
 
+  // 启动一路流：opts.message 有值=发新消息(send)，无值=重新订阅(attach 续直播)。
+  // 闭包/异步 resolve 都在 await 之后，state 已过期 → 全程走 ref + ctl 自带标志。
+  const startStream = (sessionId: number, opts: { message?: string; userTurn?: Turn }): StreamCtl => {
+    const ctl: StreamCtl = {
+      sessionId, abort: new AbortController(), settled: false, conflict: false, trace: [],
+      userTurn: opts.userTurn, done: Promise.resolve(), resolveDone: () => {},
+    };
+    ctl.done = new Promise<void>((res) => { ctl.resolveDone = res; });
+    ctlRef.current = ctl;
+    const isCurrent = () => ctlRef.current === ctl;
+    setBusy(true);
+    markGenerating(sessionId, true);
+    stickToBottomRef.current = true;
+    streamBufRef.current = "";
+    setStreamText("");
+    setToolRuns([]);
+    clearFlush();
+    flushTimerRef.current = window.setInterval(flushStream, 80);
+
+    const finish = (content: string, stopped: boolean) => {
+      if (ctl.settled) return;
+      ctl.settled = true;
+      if (isCurrent()) {
+        clearFlush();
+        streamBufRef.current = "";
+        setStreamText("");
+        setToolRuns([]);
+        setBusy(false);
+      }
+      markGenerating(sessionId, false);
+      if ((content || ctl.trace.length) && activeIdRef.current === sessionId) {
+        setTurns((prev) => [...prev, {
+          role: "assistant", content: content || "(无内容)", tools: [...ctl.trace], stopped,
+        }]);
+      }
+      bumpTop(sessionId);
+      ctl.resolveDone();
+    };
+
+    const reload = async (id: number) => {
+      const seq = ++openSeqRef.current;
+      try {
+        const { data } = await getChatMessages(id);
+        if (seq === openSeqRef.current && activeIdRef.current === id) {
+          setTurns(data.items.map((m) => ({
+            role: m.role, content: m.content,
+            tools: m.tools?.length ? m.tools : undefined, stopped: m.stopped,
+          })));
+        }
+      } catch { /* 忽略 */ }
+    };
+
+    const onEvent = (ev: SessionStreamEvent) => {
+      if (ctl.settled || !isCurrent()) return;     // 已切走/停止：忽略后续事件
+      if (ev.type === "delta") streamBufRef.current += ev.text;
+      else if (ev.type === "title")
+        setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, title: ev.title } : s)));
+      else if (ev.type === "tool") {
+        ctl.trace.push({ name: ev.name, args: ev.args });
+        setToolRuns((t) => [...t, { name: ev.name, done: false }]);
+      } else if (ev.type === "tool_done")
+        setToolRuns((t) => {
+          const i = [...t].reverse().findIndex((x) => x.name === ev.name && !x.done);
+          if (i < 0) return t;
+          const idx = t.length - 1 - i;
+          return t.map((x, j) => (j === idx ? { ...x, done: true } : x));
+        });
+      else if (ev.type === "done") finish(streamBufRef.current, !!ev.stopped);
+      else if (ev.type === "error") { message.error(ev.message); finish(streamBufRef.current, true); }
+      else if (ev.type === "no_active") {
+        // attach 时该会话已生成完：之前为防重复去掉了末尾 in-progress 气泡，这里重载补回最终消息
+        ctl.settled = true;
+        if (isCurrent()) { clearFlush(); setStreamText(""); setToolRuns([]); setBusy(false); }
+        markGenerating(sessionId, false);
+        if (activeIdRef.current === sessionId) reload(sessionId);
+        ctl.resolveDone();
+      }
+    };
+
+    const run = opts.message != null
+      ? sessionChatStream(sessionId, opts.message, onEvent, ctl.abort.signal)
+      : attachChatStream(sessionId, onEvent, ctl.abort.signal);
+
+    run.then(() => finish(streamBufRef.current, false)).catch((e: any) => {
+      if (ctl.settled) { ctl.resolveDone(); return; }   // detach/停止 已处理过
+      if (e?.name === "AbortError") {
+        finish(streamBufRef.current + "\n\n*(已停止生成)*", true);   // 用户主动停止
+        return;
+      }
+      const code = /stream http (\d+)/.exec(e?.message || "")?.[1];
+      if (code === "409") {   // 会话锁未释放：标记冲突交 send 退避重试，保留用户气泡、不打扰
+        ctl.conflict = true;
+        ctl.settled = true;
+        if (isCurrent()) { clearFlush(); setBusy(false); }
+        markGenerating(sessionId, false);
+        ctl.resolveDone();
+        return;
+      }
+      if (code === "401") {
+        localStorage.setItem("chat_draft", opts.message || "");
+        localStorage.removeItem("token");
+        message.error("登录已过期，请重新登录");
+        setTimeout(() => location.reload(), 800);
+      } else if (opts.message != null) message.error("连接失败，请稍后重试");
+      markGenerating(sessionId, false);
+      if (!streamBufRef.current && !ctl.trace.length) {   // 无产出：回滚乐观追加的用户气泡
+        ctl.settled = true;
+        if (isCurrent()) { clearFlush(); setBusy(false); }
+        if (ctl.userTurn && activeIdRef.current === sessionId)
+          setTurns((prev) => (prev.length && prev[prev.length - 1] === ctl.userTurn ? prev.slice(0, -1) : prev));
+        ctl.resolveDone();
+      } else finish(streamBufRef.current, true);
+    });
+    return ctl;
+  };
+
+  // 切走当前会话：停本地显示，但服务端 worker 续跑（会话留在 generatingIds，后台生成）。
+  // keepPartial=true（打断同会话续问时）：把已生成的半截作为「已中断」气泡留在视图，与库内一致。
+  const detachActive = (keepPartial = false) => {
+    const ctl = ctlRef.current;
+    if (!ctl || ctl.settled) return;
+    ctl.settled = true;          // run 的 catch 因 settled 短路，不再落「已停止」气泡
+    clearFlush();
+    const partial = streamBufRef.current;
+    const sid = ctl.sessionId;
+    setStreamText("");
+    setToolRuns([]);
+    setBusy(false);
+    ctlRef.current = null;
+    if (keepPartial && partial.trim() && activeIdRef.current === sid) {
+      setTurns((prev) => [...prev, {
+        role: "assistant", content: partial, tools: [...ctl.trace], stopped: true,
+      }]);
+    }
+    ctl.abort.abort();           // 仅断本地 fetch；未调 cancel → 服务端继续生成
+    ctl.resolveDone();
+  };
+
   const openSession = async (id: number) => {
-    if (busy) return;
+    if (id === activeIdRef.current) return;
+    if (busy) detachActive();    // 切走生成中的会话：后台续跑
     const seq = ++openSeqRef.current;
     switchTo(id);
     setLoadingTurns(true);
     try {
       const { data } = await getChatMessages(id);
-      if (seq !== openSeqRef.current) return; // 已切到别的会话：丢弃过期响应
-      setTurns(data.items.map((m) => ({
+      if (seq !== openSeqRef.current) return;
+      let items: Turn[] = data.items.map((m) => ({
         role: m.role, content: m.content,
         tools: m.tools?.length ? m.tools : undefined, stopped: m.stopped,
-      })));
+      }));
+      const isGen = generatingIds.has(id);
+      // 后台生成中：末尾若是 in-progress 的 assistant checkpoint，先去掉，由 attach 重建直播
+      if (isGen && items.length && items[items.length - 1].role === "assistant") items = items.slice(0, -1);
+      setTurns(items);
+      setLoadingTurns(false);
+      if (isGen) startStream(id, {});   // attach：回放已生成 + 续实时（连续直播）
     } catch (e: any) {
       if (seq !== openSeqRef.current) return;
+      setLoadingTurns(false);
       if (e?.response?.status === 404) {
         message.error("会话已不存在");
         setSessions((prev) => prev.filter((s) => s.id !== id));
+        markGenerating(id, false);
         switchTo(null);
         setTurns([]);
-      } else {
-        message.error("加载会话失败，请重试");
-      }
-    } finally {
-      if (seq === openSeqRef.current) setLoadingTurns(false);
+      } else message.error("加载会话失败，请重试");
     }
   };
 
   const newChat = () => {
-    if (busy) return;
+    if (busy) detachActive();    // 留当前会话后台跑，开新空对话
     openSeqRef.current++;
     switchTo(null);
     setTurns([]);
   };
 
   const removeSession = async (id: number) => {
-    if (busy) return; // 流式中删除会话：worker 还在写、视图会注入孤儿气泡
+    if (id === activeIdRef.current && busy) detachActive();
     try {
       await deleteChatSession(id);
     } catch {
       /* 已删/网络错都按本地移除处理 */
     }
     setSessions((prev) => prev.filter((s) => s.id !== id));
+    markGenerating(id, false);
     if (id === activeIdRef.current) {
       switchTo(null);
       setTurns([]);
@@ -310,10 +488,6 @@ export default function ChatPage() {
     const el = scrollBoxRef.current;
     if (!el) return;
     stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-  };
-
-  const flushStream = () => {
-    setStreamText(streamBufRef.current);
   };
 
   const doUpload = async (file: File) => {
@@ -333,7 +507,18 @@ export default function ChatPage() {
 
   const send = async (text: string) => {
     let q = text.trim();
-    if ((!q && !pendingFile) || busy) return;
+    if (!q && !pendingFile) return;
+
+    // 生成中发新消息 = 打断当前轮 + 用新消息续问：服务端历史已含被打断的半截 → 一起考量
+    if (busy) {
+      const sid0 = activeIdRef.current;
+      if (sid0 != null) cancelChatStream(sid0);  // 服务端收束当前轮，半截以「已中断」落库
+      detachActive(true);                         // 本地把半截留为「已中断」气泡
+      // worker 每个 token 都查取消信号、通常很快释放会话锁；先给个常见时间，
+      // 不够则靠下面的 409 退避重试兜底（不会让用户手动重发）
+      await delay(350);
+    }
+
     if (pendingFile) {
       const meta = pendingFile.sheets
         ? `sheets: ${pendingFile.sheets.map((s) => `${s.name}(${s.n_rows}行x${s.n_cols}列)`).join("、")}`
@@ -342,11 +527,9 @@ export default function ChatPage() {
       setPendingFile(null);
     }
 
-    setBusy(true);
     setInput("");
-    // 懒建会话：第一条消息才落库
     let sid = activeIdRef.current;
-    if (sid == null) {
+    if (sid == null) {   // 懒建会话：第一条消息才落库
       try {
         const { data } = await createChatSession();
         sid = data.id;
@@ -354,101 +537,22 @@ export default function ChatPage() {
         setSessions((prev) => [data, ...prev]);
       } catch {
         message.error("创建会话失败，请稍后重试");
-        setBusy(false);
         return;
       }
     }
-    const sessionId = sid;
-    const userTurnObj: Turn = { role: "user", content: q };
-    setTurns((prev) => [...prev, userTurnObj]);
-    stickToBottomRef.current = true;
-    streamBufRef.current = "";
-    const trace: AgentToolCall[] = [];
-    let settled = false;  // done/error/abort 只收尾一次（busy 闭包过期，不能用它判断）
-    abortRef.current = new AbortController();
-    flushTimerRef.current = window.setInterval(flushStream, 80);
-
-    const finishTurn = (content: string, stopped = false) => {
-      if (settled) return;
-      settled = true;
-      if (flushTimerRef.current) window.clearInterval(flushTimerRef.current);
-      flushTimerRef.current = null;
-      streamBufRef.current = "";
-      setStreamText("");
-      setToolRuns([]);
-      setBusy(false);
-      // 视图可能已切走（理论上 busy 挡住了切换，此为最后防线）：不往别的会话注入气泡
-      if ((content || trace.length) && activeIdRef.current === sessionId) {
-        setTurns((prev) => [...prev, {
-          role: "assistant", content: content || "(无内容)", tools: [...trace], stopped,
-        }]);
-      }
-      // 会话置顶（服务端 updated_at 已更新，这里同步本地排序）
-      setSessions((prev) => {
-        const i = prev.findIndex((s) => s.id === sessionId);
-        if (i < 0) return prev;
-        const next = [...prev];
-        const [s] = next.splice(i, 1);
-        return [{ ...s, updated_at: new Date().toISOString() }, ...next];
-      });
-    };
-
-    try {
-      await sessionChatStream(sessionId, q, (ev) => {
-        if (ev.type === "delta") {
-          streamBufRef.current += ev.text;
-        } else if (ev.type === "title") {
-          setSessions((prev) => prev.map((s) =>
-            s.id === sessionId ? { ...s, title: ev.title } : s));
-        } else if (ev.type === "tool") {
-          trace.push({ name: ev.name, args: ev.args });
-          setToolRuns((t) => [...t, { name: ev.name, done: false }]);
-        } else if (ev.type === "tool_done") {
-          setToolRuns((t) => {
-            const i = [...t].reverse().findIndex((x) => x.name === ev.name && !x.done);
-            if (i < 0) return t;
-            const idx = t.length - 1 - i;
-            return t.map((x, j) => (j === idx ? { ...x, done: true } : x));
-          });
-        } else if (ev.type === "done") {
-          finishTurn(streamBufRef.current);
-        } else if (ev.type === "error") {
-          message.error(ev.message);
-          finishTurn(streamBufRef.current, true);
-        }
-      }, abortRef.current.signal);
-      // 流结束但没收到 done 事件（服务端异常断流）：兜底收尾
-      finishTurn(streamBufRef.current);
-    } catch (e: any) {
-      if (e?.name === "AbortError") {
-        finishTurn(streamBufRef.current + "\n\n*(已停止生成)*", true);
-      } else {
-        const httpStatus = /stream http (\d+)/.exec(e?.message || "")?.[1];
-        if (httpStatus === "409") {
-          message.warning("上一轮回答还在生成中，请稍候几秒再发");
-        } else if (httpStatus === "401") {
-          // 先把刚输入的内容存草稿再 reload，登录回来不丢稿
-          localStorage.setItem("chat_draft", text);
-          localStorage.removeItem("token");
-          message.error("登录已过期，请重新登录");
-          setTimeout(() => location.reload(), 800);
-        } else {
-          message.error("连接失败，请稍后重试");
-        }
-        // 本轮没有任何内容产生：回滚乐观追加的用户气泡，保持与服务端一致
-        if (!streamBufRef.current && !trace.length) {
-          settled = true;
-          if (flushTimerRef.current) window.clearInterval(flushTimerRef.current);
-          flushTimerRef.current = null;
-          setBusy(false);
-          if (activeIdRef.current === sessionId) {
-            setTurns((prev) => (prev.length && prev[prev.length - 1] === userTurnObj
-              ? prev.slice(0, -1) : prev));
-          }
-        } else {
-          finishTurn(streamBufRef.current, true);
-        }
-      }
+    const userTurn: Turn = { role: "user", content: q };
+    setTurns((prev) => [...prev, userTurn]);
+    // 打断后服务端释放会话锁可能稍有延迟：遇 409 退避重试，让「打断续问」尽量无感
+    let ctl = startStream(sid, { message: q, userTurn });
+    await ctl.done;
+    for (let i = 0; ctl.conflict && i < 4; i++) {
+      await delay(500 + i * 400);
+      ctl = startStream(sid, { message: q, userTurn });
+      await ctl.done;
+    }
+    if (ctl.conflict && activeIdRef.current === sid) {   // 几次仍未拿到锁：回滚气泡 + 提示重发
+      message.warning("上一轮还在收尾，请稍后重发");
+      setTurns((prev) => (prev.length && prev[prev.length - 1] === userTurn ? prev.slice(0, -1) : prev));
     }
   };
 
@@ -456,7 +560,7 @@ export default function ChatPage() {
     // 真取消：通知服务端 worker 收束（已生成部分以"已中断"落库），再断开本地流
     const sid = activeIdRef.current;
     if (sid != null) cancelChatStream(sid);
-    abortRef.current?.abort();
+    ctlRef.current?.abort.abort();
   };
 
   const copyText = (t: string) =>
@@ -488,7 +592,7 @@ export default function ChatPage() {
       <aside style={{ width: 230, borderRight: "1px solid #f0f0f0", background: "#fafafa",
                       display: "flex", flexDirection: "column", flexShrink: 0 }}>
         <div style={{ padding: 12 }}>
-          <Button block icon={<PlusOutlined />} disabled={busy} onClick={newChat}>
+          <Button block icon={<PlusOutlined />} onClick={newChat}>
             新对话
           </Button>
         </div>
@@ -503,6 +607,12 @@ export default function ChatPage() {
               }}>
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis",
                              whiteSpace: "nowrap", fontSize: 13 }}>{s.title}</span>
+              {generatingIds.has(s.id) && (
+                <span title="生成中（后台）" style={{
+                  width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: "#10b981",
+                  animation: "blink 1.2s step-start infinite",
+                }} />
+              )}
               <Popconfirm title="删除该对话？" onConfirm={(e) => {
                 e?.stopPropagation();
                 removeSession(s.id);
@@ -641,7 +751,7 @@ export default function ChatPage() {
               borderRadius: 14, padding: "8px 10px", boxShadow: "0 2px 10px rgba(0,0,0,0.04)",
             }}>
               <Upload accept=".xlsx,.docx,.pdf,.txt,.csv,.jpg,.jpeg,.png,.webp"
-                showUploadList={false} disabled={busy || uploading}
+                showUploadList={false} disabled={uploading}
                 beforeUpload={(f) => doUpload(f as unknown as File)}>
                 <Tooltip title="上传文件：询价单/整机配置（Excel/Word/PDF/txt/图片）；图片可直接 Ctrl+V 粘贴">
                   <Button type="text" icon={<PaperClipOutlined />} loading={uploading}
@@ -654,7 +764,6 @@ export default function ChatPage() {
                 placeholder={pendingFile ? "对这个文件想做什么？如：查最近采购价填进去发我"
                                          : "问点什么…（Enter 发送，Shift+Enter 换行）"}
                 value={input}
-                disabled={busy}
                 onChange={(e) => setInput(e.target.value)}
                 onPaste={(e) => {
                   // 只拦"纯图片"粘贴（截图）当附件上传；剪贴板含文本（如从 Excel/网页复制带图内容）
@@ -682,11 +791,15 @@ export default function ChatPage() {
                 }}
                 style={{ flex: 1, fontSize: 14 }}
               />
-              {busy ? (
-                <Button danger type="primary" shape="circle" icon={<StopOutlined />} onClick={stop} />
+              {busy && !input.trim() && !pendingFile ? (
+                <Tooltip title="停止生成">
+                  <Button danger type="primary" shape="circle" icon={<StopOutlined />} onClick={stop} />
+                </Tooltip>
               ) : (
-                <Button type="primary" shape="circle" icon={<SendOutlined />}
-                  disabled={!input.trim() && !pendingFile} onClick={() => send(input)} />
+                <Tooltip title={busy ? "打断当前回答，带上你的新消息继续" : "发送"}>
+                  <Button type="primary" shape="circle" icon={<SendOutlined />}
+                    disabled={!input.trim() && !pendingFile} onClick={() => send(input)} />
+                </Tooltip>
               )}
             </div>
             <div style={{ textAlign: "center", color: "#c4c4c4", fontSize: 11, padding: "6px 0 4px" }}>

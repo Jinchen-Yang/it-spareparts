@@ -28,10 +28,10 @@ def test_release_allows_next_round():
 
 def test_cancel_sets_event_only_when_active():
     assert cs.request_cancel(90004) is False          # 无生成在进行
-    ev = cs.acquire_session(90004)
+    hub = cs.acquire_session(90004)
     try:
         assert cs.request_cancel(90004) is True
-        assert ev.is_set()                            # worker 据此收束
+        assert hub.cancel.is_set()                    # worker 据此收束
     finally:
         _cleanup(90004)
 

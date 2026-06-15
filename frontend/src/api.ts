@@ -61,7 +61,7 @@ export type AgentStreamEvent =
   | { type: "delta"; text: string }
   | { type: "tool"; name: string; args: Record<string, unknown> }
   | { type: "tool_done"; name: string; ok: boolean }
-  | { type: "done"; tool_calls: AgentToolCall[]; answer?: string; configured?: boolean }
+  | { type: "done"; tool_calls: AgentToolCall[]; answer?: string; configured?: boolean; stopped?: boolean }
   | { type: "error"; message: string };
 
 /** 流式问答：axios 不支持浏览器流式，用 fetch + ReadableStream 解析 SSE */
@@ -112,6 +112,7 @@ export interface ChatSessionMeta {
   id: number;
   title: string;
   updated_at: string;
+  generating?: boolean;   // 后台仍在生成（切走的会话也会续跑）
 }
 export interface ChatMessageRow {
   id: number;
@@ -142,24 +143,15 @@ export const cancelChatStream = (id: number) =>
     headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
   }).catch(() => undefined);
 
-export type SessionStreamEvent = AgentStreamEvent | { type: "title"; title: string };
+export type SessionStreamEvent =
+  | AgentStreamEvent
+  | { type: "title"; title: string }
+  | { type: "no_active" };   // attach：该会话当前没有进行中的生成
 
-/** 会话内流式问答：只发新消息，历史由服务端持有。 */
-export async function sessionChatStream(
-  sessionId: number,
-  message: string,
+async function _consumeSSE(
+  resp: Response,
   onEvent: (ev: SessionStreamEvent) => void,
-  signal?: AbortSignal,
 ): Promise<void> {
-  const resp = await fetch(`/api/agent/sessions/${sessionId}/chat/stream`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
-    },
-    body: JSON.stringify({ message }),
-    signal,
-  });
   if (!resp.ok || !resp.body) {
     // 不在这里 reload：调用方要先把用户刚输入的内容存草稿，避免 reload 丢稿
     throw new Error(`stream http ${resp.status}`);
@@ -183,6 +175,40 @@ export async function sessionChatStream(
       }
     }
   }
+}
+
+/** 会话内流式问答：只发新消息，历史由服务端持有。 */
+export async function sessionChatStream(
+  sessionId: number,
+  message: string,
+  onEvent: (ev: SessionStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const resp = await fetch(`/api/agent/sessions/${sessionId}/chat/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
+    },
+    body: JSON.stringify({ message }),
+    signal,
+  });
+  await _consumeSSE(resp, onEvent);
+}
+
+/** 重新订阅会话进行中的生成（切回会话续看连续直播）：先回放已生成部分再续实时。
+ * 无进行中的生成时服务端回 {type:"no_active"}。 */
+export async function attachChatStream(
+  sessionId: number,
+  onEvent: (ev: SessionStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const resp = await fetch(`/api/agent/sessions/${sessionId}/chat/attach`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
+    signal,
+  });
+  await _consumeSSE(resp, onEvent);
 }
 
 // ===== 采购记录（合同重点）=====
