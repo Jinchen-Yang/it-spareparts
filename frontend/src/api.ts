@@ -244,6 +244,36 @@ export const agentDownload = async (url: string, fallbackName = "下载.xlsx") =
   URL.revokeObjectURL(a.href);
 };
 
+export interface FilePreview {
+  file_id: string;
+  filename: string;
+  kind: "table" | "image" | "other";
+  ext?: string;
+  sheets?: { name: string; rows: string[][]; total_rows: number; truncated: boolean }[];
+}
+
+/** 在线预览文件内容（用 fetch 而非 axios：避开全局 401 拦截器的整页刷新，绝不打断对话）。 */
+export const agentPreview = async (fileId: string): Promise<FilePreview> => {
+  const resp = await fetch(`/api/agent/files/${fileId}/preview`, {
+    headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
+    cache: "no-store",
+  });
+  if (resp.status === 401) throw new Error("auth-expired");
+  if (!resp.ok) throw new Error(`http-${resp.status}`);
+  return resp.json();
+};
+
+/** 取文件 blob 的 object URL（图片预览用，带鉴权）；调用方用完需 URL.revokeObjectURL。 */
+export const agentFileBlobUrl = async (fileId: string): Promise<string> => {
+  const resp = await fetch(`/api/agent/files/${fileId}`, {
+    headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
+    cache: "no-store",
+  });
+  if (resp.status === 401) throw new Error("auth-expired");
+  if (!resp.ok) throw new Error(`http-${resp.status}`);
+  return URL.createObjectURL(await resp.blob());
+};
+
 export interface Overview {
   part: {
     pn_std: string;
