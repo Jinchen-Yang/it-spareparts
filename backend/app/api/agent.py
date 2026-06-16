@@ -17,11 +17,15 @@ from app.security import (
     UserContext,
     get_current_user_context,
     record_access_log,
+    require_page,
 )
 from app.services import agent_files
 
 _log = logging.getLogger("agent")
-router = APIRouter(prefix="/agent", tags=["agent"])
+# 后端页面准入：page_chat=False 的角色连接口都进不来（前端藏菜单≠后端拦接口，PR-审计 HUB-1）。
+# admin 恒放行；RBAC 关或旧 token 走角色模板回退（各角色模板默认 page_chat=True）。
+router = APIRouter(prefix="/agent", tags=["agent"],
+                   dependencies=[Depends(require_page("page_chat"))])
 
 _NOT_CONFIGURED_MSG = (
     "AI 助手尚未配置：请在服务器 .env 设置 LLM_API_KEY（如 DeepSeek 密钥）后重启服务。"

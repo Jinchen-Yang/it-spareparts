@@ -6,12 +6,15 @@
 - 输出过 apply_field_visibility（RBAC 关闭时原样；将来收紧销售/采购可见字段零改动）。
 """
 import json
+import logging
 from datetime import date
 
 from sqlalchemy.orm import Session
 
 from app import security
 from app.services import agent_files, part_overview, part_resolver, profit, purchase_query
+
+_log = logging.getLogger("agent")
 
 _RANK_ROWS = 50
 _BULK_MAX = 60
@@ -394,12 +397,19 @@ _REGISTRY = {
 
 
 def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext) -> dict:
-    """执行一次工具调用：审计 → 派发 → 任何异常都转成 error 字段（不让对话崩掉）。"""
+    """执行一次工具调用：审计 → 派发 → 内部异常脱敏后回灌（不让对话崩掉、也不泄实现细节）。
+
+    业务错由各工具显式 return {"error": 文案}（如"型号不存在""query 不能为空"）——这些是给
+    模型自恢复的安全文案，原样回灌。这里的 except 只兜底**未预期的内部异常**（如 SQLAlchemyError
+    会把 SQL 语句 + 表/列名带出）：原始 type+消息只 _log 到服务端，回灌给模型/用户的只有固定脱敏
+    文案。否则裸异常经工具结果 → tool 消息 → SSE delta 直达终端用户（信息泄漏，PR-审计 TOOLS-1）。
+    """
     security.record_access_log(ctx, f"agent_tool:{name}", "agent", args)
     fn = _REGISTRY.get(name)
     if fn is None:
         return {"error": f"未知工具: {name}"}
     try:
         return _jsonable(fn(db, args, ctx))
-    except Exception as exc:  # noqa: BLE001 —— 工具失败要让模型看见并自恢复
-        return {"error": f"{type(exc).__name__}: {exc}"}
+    except Exception:  # noqa: BLE001 —— 内部异常绝不外泄：原始信息只落服务端日志
+        _log.exception("agent tool failed name=%s args=%s", name, args)
+        return {"error": "工具执行失败，请换个方式或稍后重试", "retriable": True, "kind": "internal"}
