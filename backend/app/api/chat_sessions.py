@@ -19,11 +19,13 @@ from app.agent import provider, runtime
 from app.auth import current_identity
 from app.config import get_settings
 from app.db import get_db
-from app.security import UserContext, get_current_user_context, record_access_log
+from app.security import UserContext, get_current_user_context, record_access_log, require_page
 from app.services import chat_store
 
 _log = logging.getLogger("agent")
-router = APIRouter(prefix="/agent/sessions", tags=["agent"])
+# 后端页面准入：page_chat=False 的角色连会话接口都进不来（PR-审计 HUB-1）。
+router = APIRouter(prefix="/agent/sessions", tags=["agent"],
+                   dependencies=[Depends(require_page("page_chat"))])
 
 _NOT_CONFIGURED_MSG = (
     "AI 助手尚未配置：请在服务器 .env 设置 LLM_API_KEY（如 DeepSeek 密钥）后重启服务。"
