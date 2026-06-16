@@ -4,13 +4,10 @@
 订单头从同一行（ffill 后头字段已补齐）解析，按 raw_order_id 首次出现去重。
 """
 from dataclasses import dataclass, field
-from decimal import Decimal
 
 import pandas as pd
 
-from app.etl import cleaner, mapping
-
-AMOUNT_TOL = Decimal("0.05")
+from app.etl import anomaly, cleaner, mapping
 
 
 @dataclass
@@ -35,20 +32,6 @@ class TransformResult:
 def _row_dict(row, field_map) -> dict:
     """原始行按映射取出 {内部字段: 原值}，用于错误留痕。"""
     return {v: (None if pd.isna(row.get(k)) else str(row.get(k))) for k, v in field_map.items()}
-
-
-def _flags_for_line(qty, unit_price, line_amount) -> list[str]:
-    flags = []
-    if unit_price is not None and unit_price == 0:
-        flags.append("zero_price")
-    if (
-        line_amount is not None
-        and qty is not None
-        and unit_price is not None
-        and abs(line_amount - qty * unit_price) > AMOUNT_TOL
-    ):
-        flags.append("amount_mismatch")
-    return flags
 
 
 def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
@@ -102,7 +85,7 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
             "unit_price": unit_price,
             "line_amount": line_amount,
             "recent_purchase_price": recent,
-            "anomaly_flags": _flags_for_line(qty, unit_price, line_amount),
+            "anomaly_flags": anomaly.line_flags(qty, unit_price, line_amount),
         }
         if file_type == mapping.SALES:
             line["category_major"] = cleaner.clean_category(row.get(inv_line["category_major"]))
