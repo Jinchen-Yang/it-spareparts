@@ -143,9 +143,11 @@ class SysAccessLog(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str | None] = mapped_column(String(64))
     role: Mapped[str | None] = mapped_column(String(16))
-    action: Mapped[str] = mapped_column(String(32))        # search/overview/profit/export/chat/import…
+    action: Mapped[str] = mapped_column(String(32))        # search/overview/.../login_success/login_failed…
     resource: Mapped[str | None] = mapped_column(Text)     # 查的型号/客户/维度
     detail: Mapped[dict | None] = mapped_column(JSONB)
+    ip_address: Mapped[str | None] = mapped_column(String(64))     # 登录源(暴力破解排查);X-Forwarded-For 优先
+    user_agent: Mapped[str | None] = mapped_column(String(300))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
     __table_args__ = (Index("ix_access_user_time", "username", "created_at"),)

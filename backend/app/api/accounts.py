@@ -10,9 +10,9 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app import permissions
-from app.auth import hash_password, require_admin
+from app.auth import current_identity, hash_password, require_admin
 from app.db import get_db
-from app.models.system import SysAccessLog, SysUser
+from app.models.system import SysAccessLog, SysAuditLog, SysUser
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
@@ -60,6 +60,23 @@ def _get(db: Session, username: str) -> SysUser:
     return u
 
 
+def _acct_snapshot(u: SysUser) -> dict:
+    """账号审计快照——绝不含口令/hash，只记可见属性变化。"""
+    return {
+        "username": u.username, "role": u.role, "display_name": u.display_name,
+        "salesperson_name": u.salesperson_name, "is_active": u.is_active,
+        "permissions": u.permissions,
+    }
+
+
+def _audit(db: Session, user_id: int, action: str, before: dict | None,
+           after: dict | None, operated_by: str | None, reason: str | None = None) -> None:
+    """账号变更留痕 → sys_audit_log(entity_type='sys_user')。随业务事务一起 commit。"""
+    db.add(SysAuditLog(entity_type="sys_user", entity_id=user_id, action=action,
+                       before_json=before, after_json=after,
+                       operated_by=operated_by, reason=reason))
+
+
 @router.get("/_meta")
 def meta(_: str = Depends(require_admin)) -> dict:
     """权限项 + 标签 + 角色模板，供前端渲染勾选框。"""
@@ -81,6 +98,7 @@ def list_accounts(db: Session = Depends(get_db), _: str = Depends(require_admin)
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_account(body: CreateAccount, db: Session = Depends(get_db),
+                   ident: dict = Depends(current_identity),
                    _: str = Depends(require_admin)) -> dict:
     uname = (body.username or "").strip()
     if not uname:
@@ -96,14 +114,18 @@ def create_account(body: CreateAccount, db: Session = Depends(get_db),
                 password_hash=hash_password(body.password),
                 permissions=permissions.sanitize(body.permissions) or None)
     db.add(u)
+    db.flush()   # 取 u.id 供审计
+    _audit(db, u.id, "account_create", None, _acct_snapshot(u), ident["sub"])
     db.commit()
     return _view(u)
 
 
 @router.put("/{username}")
 def update_account(username: str, body: UpdateAccount, db: Session = Depends(get_db),
+                   ident: dict = Depends(current_identity),
                    _: str = Depends(require_admin)) -> dict:
     u = _get(db, username)
+    before = _acct_snapshot(u)
     if body.role is not None:
         if body.role not in _ROLES:
             raise HTTPException(400, f"角色非法: {body.role}")
@@ -119,31 +141,38 @@ def update_account(username: str, body: UpdateAccount, db: Session = Depends(get
     # 角色/权限变更 → 吊销旧 token，迫使重新登录以即时生效（仅改显示名则不踢）
     if body.role is not None or body.permissions is not None:
         u.token_version = (u.token_version or 0) + 1
+    _audit(db, u.id, "account_update", before, _acct_snapshot(u), ident["sub"])
     db.commit()
     return _view(u)
 
 
 @router.put("/{username}/password")
 def reset_password(username: str, body: PasswordReset, db: Session = Depends(get_db),
+                   ident: dict = Depends(current_identity),
                    _: str = Depends(require_admin)) -> dict:
     if len(body.password or "") < 6:
         raise HTTPException(400, "密码至少 6 位")
     u = _get(db, username)
     u.password_hash = hash_password(body.password)
     u.token_version = (u.token_version or 0) + 1   # 改密即吊销旧 token
+    # 审计只记"发生了改密"事件，绝不记口令/hash
+    _audit(db, u.id, "account_reset_password", None, None, ident["sub"])
     db.commit()
     return {"username": username, "reset": True}
 
 
 @router.put("/{username}/active")
 def set_active(username: str, body: ActiveToggle, db: Session = Depends(get_db),
+               ident: dict = Depends(current_identity),
                _: str = Depends(require_admin)) -> dict:
     if username == "admin" and not body.is_active:
         raise HTTPException(400, "不能停用 admin")
     u = _get(db, username)
+    before = _acct_snapshot(u)
     u.is_active = body.is_active
     if not body.is_active:
         u.token_version = (u.token_version or 0) + 1   # 停用即吊销旧 token（立即踢线）
+    _audit(db, u.id, "account_set_active", before, _acct_snapshot(u), ident["sub"])
     db.commit()
     return {"username": username, "is_active": u.is_active}
 
@@ -158,7 +187,15 @@ def activity(username: str, limit: int = 50, db: Session = Depends(get_db),
         .order_by(desc(SysAccessLog.id)).limit(n)).scalars().all()
     total = db.scalar(select(func.count()).select_from(SysAccessLog)
                       .where(SysAccessLog.username == username))
+    # 该账号被谁改过（建号/改权/改密/停用）——entity_type='sys_user' 按 user_id 取
+    changes = db.execute(
+        select(SysAuditLog).where(SysAuditLog.entity_type == "sys_user",
+                                  SysAuditLog.entity_id == u.id)
+        .order_by(desc(SysAuditLog.id)).limit(50)).scalars().all()
     return {
         "username": username, "last_login_at": u.last_login_at, "total_actions": total or 0,
-        "recent": [{"action": r.action, "resource": r.resource, "at": r.created_at} for r in rows],
+        "recent": [{"action": r.action, "resource": r.resource, "ip": r.ip_address,
+                    "at": r.created_at} for r in rows],
+        "changes": [{"action": c.action, "by": c.operated_by, "at": c.operated_at,
+                     "before": c.before_json, "after": c.after_json} for c in changes],
     }
