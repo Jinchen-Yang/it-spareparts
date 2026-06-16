@@ -18,6 +18,7 @@ from sqlalchemy import and_, func, select, update
 from sqlalchemy.orm import Session
 
 from app import config, security
+from app.etl import anomaly
 from app.models.dimensions import DimCustomer, DimPart
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
@@ -115,11 +116,10 @@ def recompute(db: Session) -> dict:
         if counts:
             stats["counts_revenue"] += 1
 
-        flags = []
-        if up == 0:
-            flags.append("zero_price")
-        if (m["line_amount"] is not None and abs(m["line_amount"] - qty * up) > Decimal("0.05")):
-            flags.append("amount_mismatch")
+        # 行级数值异常取决策树根：与 transform 共用同一套规则与容差（app/etl/anomaly.py），
+        # 不再在此重写一份 zero_price/amount_mismatch + 0.05（旧实现两处易漂移）。
+        flags = anomaly.line_flags(qty, up, m["line_amount"])
+        # 以下成本/业务维度分支只有重算时才算得出，是 profit 专属，挂在根之上：
         if is_excluded_part:
             flags.append("excluded_part")
             stats["excluded_part"] += 1
