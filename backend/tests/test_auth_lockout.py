@@ -2,12 +2,18 @@
 from datetime import datetime, timezone
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from sqlalchemy import select
 
 from app import auth
 from app.auth import LoginRequest, hash_password
 from app.models.system import SysUser
+
+
+def _req(ip: str = "203.0.113.7") -> Request:
+    """构造最小 Request：login 现要从中取源 IP/UA 写登录审计。"""
+    return Request({"type": "http", "headers": [(b"user-agent", b"pytest")],
+                    "client": (ip, 12345)})
 
 
 def _seed(db, username="alice", pw="correct-horse-battery", role="sales"):
@@ -25,12 +31,12 @@ def test_wrong_password_increments_then_locks(db):
     _seed(db)
     for i in range(1, 5):
         with pytest.raises(HTTPException) as e:
-            auth.login(LoginRequest(username="alice", password="nope"), db)
+            auth.login(LoginRequest(username="alice", password="nope"), _req(), db)
         assert e.value.status_code == 401
         assert _get(db).failed_attempts == i
     # 第 5 次失败 → 锁定
     with pytest.raises(HTTPException) as e:
-        auth.login(LoginRequest(username="alice", password="nope"), db)
+        auth.login(LoginRequest(username="alice", password="nope"), _req(), db)
     assert e.value.status_code == 401
     assert _get(db).locked_until is not None
 
@@ -41,7 +47,7 @@ def test_locked_account_rejects_even_correct_password(db):
     u.locked_until = datetime.now(timezone.utc).replace(year=2999)   # 远未来=锁定中
     db.commit()
     with pytest.raises(HTTPException) as e:
-        auth.login(LoginRequest(username="alice", password="correct-horse-battery"), db)
+        auth.login(LoginRequest(username="alice", password="correct-horse-battery"), _req(), db)
     assert e.value.status_code == 429   # 锁定期内即便口令正确也拒绝
 
 
@@ -49,9 +55,9 @@ def test_success_resets_counter(db):
     _seed(db)
     for _ in range(2):
         with pytest.raises(HTTPException):
-            auth.login(LoginRequest(username="alice", password="nope"), db)
+            auth.login(LoginRequest(username="alice", password="nope"), _req(), db)
     assert _get(db).failed_attempts == 2
-    resp = auth.login(LoginRequest(username="alice", password="correct-horse-battery"), db)
+    resp = auth.login(LoginRequest(username="alice", password="correct-horse-battery"), _req(), db)
     assert resp.role == "sales"
     u = _get(db)
     assert u.failed_attempts == 0 and u.locked_until is None and u.last_login_at is not None
@@ -62,7 +68,7 @@ def test_expired_lock_allows_login_and_resets(db):
     u.failed_attempts = 5
     u.locked_until = datetime(2020, 1, 1, tzinfo=timezone.utc)   # 过去=锁已过期
     db.commit()
-    resp = auth.login(LoginRequest(username="alice", password="correct-horse-battery"), db)
+    resp = auth.login(LoginRequest(username="alice", password="correct-horse-battery"), _req(), db)
     assert resp.role == "sales"
     u = _get(db)
     assert u.failed_attempts == 0 and u.locked_until is None
@@ -71,7 +77,7 @@ def test_expired_lock_allows_login_and_resets(db):
 def test_unknown_user_runs_dummy_verify_and_rejects(db):
     # 未知用户：跑 dummy pbkdf2 抹平时序后走共享口令回退；错误口令 → 401，不崩
     with pytest.raises(HTTPException) as e:
-        auth.login(LoginRequest(username="ghost", password="definitely-wrong"), db)
+        auth.login(LoginRequest(username="ghost", password="definitely-wrong"), _req(), db)
     assert e.value.status_code == 401
     # 未知用户不应在 sys_user 留下任何行/锁定
     assert _get(db, "ghost") is None

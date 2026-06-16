@@ -34,7 +34,8 @@ def test_password_reset_revokes_old_token(db):
     _user(db)
     tok = _token_for(db)
     assert verify_token_db(tok, db)["sub"] == "bob"          # 改密前有效
-    accounts.reset_password("bob", accounts.PasswordReset(password="newpw12345"), db, _="admin")
+    accounts.reset_password("bob", accounts.PasswordReset(password="newpw12345"), db,
+                            ident={"sub": "admin"}, _="admin")
     db.expire_all()
     with pytest.raises(HTTPException) as e:
         verify_token_db(tok, db)                              # 改密后旧 token 失效
@@ -44,7 +45,8 @@ def test_password_reset_revokes_old_token(db):
 def test_disable_revokes_old_token(db):
     _user(db)
     tok = _token_for(db)
-    accounts.set_active("bob", accounts.ActiveToggle(is_active=False), db, _="admin")
+    accounts.set_active("bob", accounts.ActiveToggle(is_active=False), db,
+                        ident={"sub": "admin"}, _="admin")
     db.expire_all()
     with pytest.raises(HTTPException) as e:
         verify_token_db(tok, db)                              # 停用后旧 token 失效
@@ -55,7 +57,7 @@ def test_permission_change_revokes_old_token(db):
     _user(db)
     tok = _token_for(db)
     accounts.update_account("bob", accounts.UpdateAccount(permissions={"data_purchase_cost": False}),
-                            db, _="admin")
+                            db, ident={"sub": "admin"}, _="admin")
     db.expire_all()
     with pytest.raises(HTTPException):
         verify_token_db(tok, db)                              # 改权限后旧 token 失效
@@ -64,7 +66,8 @@ def test_permission_change_revokes_old_token(db):
 def test_displayname_change_does_not_revoke(db):
     _user(db)
     tok = _token_for(db)
-    accounts.update_account("bob", accounts.UpdateAccount(display_name="Bob B"), db, _="admin")
+    accounts.update_account("bob", accounts.UpdateAccount(display_name="Bob B"), db,
+                            ident={"sub": "admin"}, _="admin")
     db.expire_all()
     assert verify_token_db(tok, db)["sub"] == "bob"           # 仅改显示名不踢线
 

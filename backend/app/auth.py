@@ -14,13 +14,13 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import permissions
+from app import permissions, security
 from app.config import get_settings
 from app.db import get_db
 from app.models.system import SysUser
@@ -135,26 +135,46 @@ def verify_token_db(token: str, db: Session) -> dict:
     return data
 
 
+def _client_ip(request: Request) -> str | None:
+    """登录源 IP：经 nginx 反代时取 X-Forwarded-For 首个，否则直连 IP。"""
+    xff = request.headers.get("x-forwarded-for", "")
+    return (xff.split(",")[0].strip() if xff else None) or (request.client.host if request.client else None)
+
+
 @router.post("/login", response_model=LoginResponse)
-def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
+def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) -> LoginResponse:
     now = datetime.now(timezone.utc)
+    ip = _client_ip(request)
+    ua = request.headers.get("user-agent")
+
+    def _ev(action: str, role: str | None = None, detail: dict | None = None) -> None:
+        # 登录事件审计（成功/失败/锁定/停用拦截）→ sys_access_log，带源 IP，供暴力破解排查
+        security.record_security_event(req.username, role, action, "auth", detail, ip, ua)
+
     user = db.scalar(select(SysUser).where(SysUser.username == req.username))
     if user is not None:
         # 已存在的账号一律在此处理——停用也绝不跌入下面的共享口令回退（否则停用账号可凭
         # ADMIN_PASSWORD 复活登录，且 fb token 绕过 #15 的吊销/停用校验 → 永久有效）。
         if not user.is_active:
             verify_password(req.password, _DUMMY_PW_HASH)  # 时序抹平：与正常校验等量 pbkdf2
+            _ev("login_blocked", user.role, {"reason": "inactive"})
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号已停用，请联系管理员")
         # 锁定中：连续失败已达阈值，未到解锁时间则直接拒绝（不消耗 pbkdf2）
         if user.locked_until is not None and user.locked_until > now:
             mins = int((user.locked_until - now).total_seconds() // 60) + 1
+            _ev("login_locked", user.role, {"locked_until": user.locked_until.isoformat()})
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
                                 f"登录失败次数过多，账号已锁定，请 {mins} 分钟后再试")
         if not verify_password(req.password, user.password_hash):
             user.failed_attempts = (user.failed_attempts or 0) + 1
-            if user.failed_attempts >= _LOGIN_MAX_FAILS:
+            just_locked = user.failed_attempts >= _LOGIN_MAX_FAILS
+            if just_locked:
                 user.locked_until = now + timedelta(minutes=_LOGIN_LOCK_MINUTES)
             db.commit()
+            _ev("login_failed", user.role, {"failed_attempts": user.failed_attempts})
+            if just_locked:
+                _ev("login_locked", user.role,
+                    {"reason": "too_many_failures", "minutes": _LOGIN_LOCK_MINUTES})
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
         # 成功：清零失败计数与锁定
         perms = permissions.effective(user.role, user.permissions)
@@ -162,6 +182,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
         user.locked_until = None
         user.last_login_at = now
         db.commit()
+        _ev("login_success", user.role)
         token, exp = _make_token(user.role, user.username, user.salesperson_name,
                                  perms=perms, token_version=user.token_version or 0)
         return LoginResponse(token=token, role=user.role,
@@ -174,9 +195,11 @@ def login(req: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
     # 先跑一次等量 pbkdf2 抹平时序：避免"已存在用户名走慢路径、不存在走快路径"暴露有效账号。
     verify_password(req.password, _DUMMY_PW_HASH)
     if not hmac.compare_digest(req.password, get_settings().admin_password):
+        _ev("login_failed", None, {"path": "shared_password"})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
     role = "admin" if req.username == "admin" else "readonly"
     perms = permissions.effective(role, None)
+    _ev("login_success", role, {"path": "shared_password"})
     token, exp = _make_token(role, req.username, None, fallback=(role != "admin"), perms=perms)
     return LoginResponse(token=token, role=role, name=req.username, expires_at=exp, permissions=perms)
 

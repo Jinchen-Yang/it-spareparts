@@ -180,3 +180,31 @@ def record_access_log(user_ctx: UserContext, action: str, resource: str,
             db.close()
     except Exception:  # noqa: BLE001
         _log.warning("access log write failed")
+
+
+def record_security_event(username: str | None, role: str | None, action: str,
+                          resource: str | None = None, detail: dict | None = None,
+                          ip: str | None = None, user_agent: str | None = None) -> None:
+    """安全/账号事件审计（登录成功/失败/锁定/停用拦截等）→ sys_access_log。
+
+    与 record_access_log 不同：不依赖 UserContext（失败登录时无身份），可带 ip/user_agent。
+    best-effort：独立短连接，任何失败都不打断业务。
+    """
+    if not config.ENABLE_ACCESS_LOG:
+        return
+    _log.info("security event user=%s action=%s ip=%s", username, action, ip)
+    try:
+        from app.db import SessionLocal
+        from app.models.system import SysAccessLog
+        db = SessionLocal()
+        try:
+            db.add(SysAccessLog(
+                username=username, role=role, action=action,
+                resource=(str(resource)[:500] if resource else None), detail=detail,
+                ip_address=(ip[:64] if ip else None),
+                user_agent=(user_agent[:300] if user_agent else None)))
+            db.commit()
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001
+        _log.warning("security event log write failed")
