@@ -168,6 +168,13 @@ def aggregate(db: Session, dimension: str, date_from: _date | None,
     part 维度按 part_id 分组、展示 dim_part.pn_std（合并后历史自动归并到目标型号，
     且 PN 文本变化不破坏历史报表口径）。
     """
+    # 数据层兜底（TOOLS-3）：销售员/客户维度会暴露同事的经营数据，受限销售一律不得聚合。
+    # 这道防线不单点依赖 agent 工具记得拦——prompts 也声明"真正的防线在数据层"。
+    # API 侧本就 require_admin（admin 非 scoped，is_scoped_sales=False，不受影响），
+    # 受限销售只可能经 agent 工具到达，此处兜底；正常流里工具已先给出友好提示。
+    if dimension in ("salesperson", "customer") and security.is_scoped_sales(user_ctx):
+        raise PermissionError("受限销售不得按销售员/客户维度聚合经营数据（防恶性竞争）")
+
     dim_col = {
         "part": DimPart.pn_std,
         "salesperson": FSalesOrder.salesperson,
