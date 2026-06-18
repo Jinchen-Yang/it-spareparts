@@ -133,6 +133,10 @@ def list_messages(
 # 多进程部署需改 Redis pub/sub + DB 行锁。
 _guard_lock = threading.Lock()
 
+# 回放缓冲事件数上限（backstop）：正常一轮远不及此（llm_max_tokens 已从源头限长）；
+# 仅防病态超长 run 撑爆内存。超限后停止缓冲——实时订阅不受影响，只是晚到订阅者回放被截断。
+_BUFFER_EVENT_CAP = 5000
+
 
 class _RunHub:
     """一轮生成的事件中枢：缓冲 + 多订阅者扇出 + 取消信号。"""
@@ -141,12 +145,18 @@ class _RunHub:
         self.cancel = threading.Event()
         self._lock = threading.Lock()
         self._buffer: list[dict] = []          # 本轮全部事件，供晚到订阅者回放
+        self._buffer_capped = False
         self._subs: list["queue.Queue[dict | None]"] = []
         self._done = False
 
     def publish(self, ev: dict) -> None:
         with self._lock:
-            self._buffer.append(ev)
+            if len(self._buffer) < _BUFFER_EVENT_CAP:
+                self._buffer.append(ev)
+            elif not self._buffer_capped:
+                self._buffer_capped = True
+                _log.warning("RunHub buffer 超 %d 事件，停止缓冲（实时流不受影响；"
+                             "晚到订阅者回放将截断）", _BUFFER_EVENT_CAP)
             for q in self._subs:
                 q.put(ev)
 
@@ -328,7 +338,9 @@ def chat_stream(
 
         wdb = SessionLocal()
         try:
-            for ev in runtime.run_stream(wdb, history, ctx):
+            # cancel 透传给 runtime：除 worker 在事件间轮询外，runtime 也在 LLM 流内/调用前
+            # 检查，点"停止"后能更快收束（含收尾作答，RUNTIME-4）。
+            for ev in runtime.run_stream(wdb, history, ctx, cancel=hub.cancel):
                 if hub.cancel.is_set():  # 用户点了停止：收束并以"已中断"落库
                     _save(stopped=True, final=True)
                     hub.publish({"type": "done", "tool_calls": trace, "stopped": True})

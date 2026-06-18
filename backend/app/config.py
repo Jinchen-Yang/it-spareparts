@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     llm_extra_body: str = _DEFAULT_LLM_EXTRA_BODY
     llm_max_tool_iters: int = 8        # 一次问答最多工具往返轮数（文件流程需 4-6 轮）
     llm_timeout_seconds: int = 60
+    llm_max_tokens: int | None = None  # 单次生成长度上限；None=不传（用端点默认）。防长答滚雪球/控成本
+    llm_max_retries: int = 2           # 显式化 openai SDK 对 429/5xx 的指数退避重试次数（便于审计调参）
     enable_agent: bool = True
 
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
@@ -63,6 +65,25 @@ class Settings(BaseSettings):
     def _extra_body_default(cls, v):
         # docker-compose 透传空字符串时回退到默认，避免悄悄打开思考模式
         return _DEFAULT_LLM_EXTRA_BODY if v is None or str(v).strip() == "" else v
+
+    @field_validator("llm_extra_body", mode="after")
+    @classmethod
+    def _extra_body_valid_json(cls, v: str) -> str:
+        # 启动期就校验合法性：非法 JSON 直接拒启（loud），不再每请求解析失败静默回退成
+        # None——那会悄悄丢掉关思考标志、变慢变贵，与本配置反复声明的意图相悖（RUNTIME-6）。
+        import json
+        try:
+            parsed = json.loads(v)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"LLM_EXTRA_BODY 不是合法 JSON：{exc}；设为 '{{}}' 表示不传额外参数") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM_EXTRA_BODY 必须是 JSON 对象，如 '{\"thinking\": {\"type\": \"disabled\"}}'")
+        return v
+
+    def llm_extra_body_dict(self) -> dict | None:
+        """解析 LLM_EXTRA_BODY（构造期已校验合法）→ dict；空对象 {} 返回 None（不透传）。"""
+        import json
+        return json.loads(self.llm_extra_body) or None
 
 
 _DEFAULT_ADMIN_PW = "admin"

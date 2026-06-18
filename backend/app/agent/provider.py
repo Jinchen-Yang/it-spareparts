@@ -58,7 +58,37 @@ def _client():
         raise NotImplementedError(f"未知 LLM provider: {s.llm_provider}")
     from openai import OpenAI  # 延迟导入：未配置 LLM 时后端其余功能不依赖该包
     return OpenAI(api_key=s.llm_api_key, base_url=s.llm_base_url,
-                  timeout=s.llm_timeout_seconds), s
+                  timeout=s.llm_timeout_seconds, max_retries=s.llm_max_retries), s
+
+
+def _create_kwargs(s, messages: list[dict], tools: list[dict] | None) -> dict:
+    """组装 chat.completions.create 的公共参数（流式/非流式共用）。"""
+    kw = {"model": s.llm_model, "messages": messages, "tools": tools or None,
+          "extra_body": s.llm_extra_body_dict()}
+    if s.llm_max_tokens:                     # None=不传，用端点默认；设了才透传上限
+        kw["max_tokens"] = s.llm_max_tokens
+    return kw
+
+
+# ---------- 线格式装配（OpenAI 专有，集中在此，runtime 不碰；RUNTIME-2）----------
+def append_assistant_turn(messages: list[dict], result: "ChatResult") -> None:
+    """把模型这一轮回复（含工具调用请求）按当前 provider 的线格式追加进 messages。
+    tool_calls/function.arguments 是 OpenAI 约定；将来接 Anthropic 在此实现各自线格式即可，
+    runtime 只跟中性的 ChatResult/ToolCall 打交道。"""
+    messages.append({
+        "role": "assistant",
+        "content": result.content,
+        "tool_calls": [
+            {"id": c.id, "type": "function",
+             "function": {"name": c.name, "arguments": c.arguments}}
+            for c in result.tool_calls
+        ],
+    })
+
+
+def append_tool_result(messages: list[dict], tool_call_id: str, content: str) -> None:
+    """把一次工具执行结果按 provider 线格式回灌（OpenAI: role=tool + tool_call_id）。"""
+    messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": content})
 
 
 def chat_stream(messages: list[dict], tools: list[dict] | None = None):
@@ -68,10 +98,7 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None):
     在此累积重组，调用方拿到的 ChatResult 与非流式完全一致。
     """
     client, s = _client()
-    stream = client.chat.completions.create(
-        model=s.llm_model, messages=messages, tools=tools or None,
-        extra_body=_extra_body(s.llm_extra_body), stream=True,
-    )
+    stream = client.chat.completions.create(**_create_kwargs(s, messages, tools), stream=True)
     content_parts: list[str] = []
     acc: dict[int, dict] = {}
     for chunk in stream:
@@ -97,27 +124,10 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None):
     yield "result", ChatResult(content="".join(content_parts) or None, tool_calls=calls)
 
 
-def _extra_body(raw: str) -> dict | None:
-    """LLM_EXTRA_BODY(JSON 字符串) → dict；空/非法返回 None（不阻断调用）。"""
-    import json
-    if not raw or not raw.strip():
-        return None
-    try:
-        v = json.loads(raw)
-        return v if isinstance(v, dict) and v else None
-    except json.JSONDecodeError:
-        return None
-
-
 def chat(messages: list[dict], tools: list[dict] | None = None) -> ChatResult:
     """单轮模型调用（非流式）：传入 OpenAI 格式 messages/tools，返回文本或工具调用请求。"""
     client, s = _client()
-    resp = client.chat.completions.create(
-        model=s.llm_model,
-        messages=messages,
-        tools=tools or None,
-        extra_body=_extra_body(s.llm_extra_body),
-    )
+    resp = client.chat.completions.create(**_create_kwargs(s, messages, tools))
     msg = resp.choices[0].message
     calls = [ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
              for tc in (msg.tool_calls or [])]
