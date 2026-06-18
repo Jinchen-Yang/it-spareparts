@@ -4,7 +4,7 @@
 回归 review #1/#5/#7：merge 后 quick_pricing 之前 `part, _ = resolve_part(...)`
 把 redirected_from 丢了，下游 lookup_prices_bulk 输出 {pn_std: 墓碑, 价格: 目标}。
 """
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -18,26 +18,32 @@ from tests import factories as f
 
 @pytest.fixture()
 def merged(db):
-    """PN-OLD 与 PN-NEW 各有采购/销售/库存；将 OLD 合并入 NEW。"""
+    """PN-OLD 与 PN-NEW 各有采购/销售/库存；将 OLD 合并入 NEW。
+
+    日期一律相对 today：采购须落在 RECENT_PURCHASE_DAYS(15) 窗口内，否则 quick_pricing 的
+    recent_purchase_count 会随真实时钟推移而漂移——固定 2026-06-01 即因越窗导致 CI 时间炸弹。
+    保留"采购早于销售"的相对次序以维持成本回放语义。"""
+    def d(n: int) -> date:   # n 天前
+        return date.today() - timedelta(days=n)
     b = SysImportBatch(filename="t.xlsx", file_type="purchase", file_hash="hredir")
     db.add(b)
     db.flush()
     loader.load(db, f.purchase_result(
-        {"PO1": f.purchase_head("PO1", on=date(2026, 6, 1)),
-         "PO2": f.purchase_head("PO2", on=date(2026, 6, 5))},
+        {"PO1": f.purchase_head("PO1", on=d(10)),
+         "PO2": f.purchase_head("PO2", on=d(6))},
         [f.purchase_line("PO1", "L1", "PN-OLD", qty="10", price="80"),
          f.purchase_line("PO2", "L2", "PN-NEW", qty="10", price="100")]),
-        b.id, date(2026, 6, 10))
+        b.id, d(0))
     loader.load(db, f.sales_result(
-        {"SO1": f.sales_head("SO1", on=date(2026, 6, 2)),
-         "SO2": f.sales_head("SO2", on=date(2026, 6, 6))},
+        {"SO1": f.sales_head("SO1", on=d(9)),
+         "SO2": f.sales_head("SO2", on=d(5))},
         [f.sales_line("SO1", "SL1", "PN-OLD", qty="2", price="150"),
          f.sales_line("SO2", "SL2", "PN-NEW", qty="2", price="200")]),
-        b.id, date(2026, 6, 10))
+        b.id, d(0))
     loader.load(db, f.inventory_result(
         [f.inventory_row("INV1", "PN-OLD", qty="3"),
          f.inventory_row("INV2", "PN-NEW", qty="7")]),
-        b.id, date(2026, 6, 10))
+        b.id, d(0))
     db.commit()
     merge.merge_parts(db, "PN-OLD", "PN-NEW", "review #1 regression", "tester")
     db.commit()
