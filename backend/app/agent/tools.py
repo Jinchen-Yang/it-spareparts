@@ -16,8 +16,14 @@ from app.services import agent_files, part_overview, part_resolver, profit, purc
 
 _log = logging.getLogger("agent")
 
-_RANK_ROWS = 50
-_BULK_MAX = 60
+# 各工具入参上限的单一真值源（TOOLS-5）：clamp 与工具描述都引用这些常量，
+# 避免"描述写最大 20、代码 clamp 到别的值"两处漂移。clamp 本身仍保留（不信模型输入）。
+_RANK_ROWS = 50            # get_profit_ranking 返回行上限
+_BULK_MAX = 60             # lookup_prices_bulk 单次型号数上限
+_SEARCH_LIMIT_MAX = 20     # search_parts 返回条数上限
+_RECENT_LIMIT_MAX = 50     # list_recent_purchases 返回条数上限
+_RECENT_DAYS_MAX = 365     # list_recent_purchases 时间窗上限（天）
+_READ_ROWS_MAX = agent_files._MAX_READ_ROWS   # read_file_rows 行数上限（真值源在 agent_files）
 
 TOOLS: list[dict] = [
     {
@@ -35,7 +41,8 @@ TOOLS: list[dict] = [
                 "properties": {
                     "query": {"type": "string",
                               "description": "用户原话中的型号或描述，如 'super 4089RT-x 准系统'"},
-                    "limit": {"type": "integer", "description": "返回条数，默认 10，最大 20"},
+                    "limit": {"type": "integer",
+                              "description": f"返回条数，默认 10，最大 {_SEARCH_LIMIT_MAX}"},
                 },
                 "required": ["query"],
             },
@@ -85,7 +92,8 @@ TOOLS: list[dict] = [
                     "file_id": {"type": "string"},
                     "sheet": {"type": "string", "description": "sheet 名，省略=第一个"},
                     "start_row": {"type": "integer", "description": "起始行(1-based)，默认1"},
-                    "max_rows": {"type": "integer", "description": "读取行数，默认50，最大200"},
+                    "max_rows": {"type": "integer",
+                                 "description": f"读取行数，默认50，最大{_READ_ROWS_MAX}"},
                 },
                 "required": ["file_id"],
             },
@@ -99,7 +107,7 @@ TOOLS: list[dict] = [
                 "批量查价（询价单场景核心工具）：对每个型号文本做近似解析并返回 最近采购价/日期、"
                 "近期加权成交参考价(ref_sale_price)、近90天均售价、库存合计。每项带 status：ok=唯一命中已附价格；ambiguous=多规格变体"
                 "（带候选列表，需逐项给用户确认或在结果中标注）；not_found=没找到。"
-                "一次最多 60 个，超过请分批。"
+                f"一次最多 {_BULK_MAX} 个，超过请分批。"
             ),
             "parameters": {
                 "type": "object",
@@ -198,15 +206,17 @@ TOOLS: list[dict] = [
                 "查最近的采购记录（跨型号时间线，按采购日期倒序）：日期/供应商/型号/数量/单价。"
                 "回答'最近买了什么''XX 最近进价多少笔'这类问题用它；"
                 "查某一个型号的完整行情仍用 get_part_overview。"
-                "query 可按 型号/描述/品牌 关键词过滤；days 默认 30 天。"
+                f"query 可按 型号/描述/品牌 关键词过滤；days 默认 30 天，最大 {_RECENT_DAYS_MAX}。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "关键词过滤（型号/描述/品牌），可省略"},
-                    "days": {"type": "integer", "description": "最近多少天，默认 30，最大 365"},
+                    "days": {"type": "integer",
+                             "description": f"最近多少天，默认 30，最大 {_RECENT_DAYS_MAX}"},
                     "supplier": {"type": "string", "description": "供应商名过滤，可省略"},
-                    "limit": {"type": "integer", "description": "返回条数，默认 20，最大 50"},
+                    "limit": {"type": "integer",
+                              "description": f"返回条数，默认 20，最大 {_RECENT_LIMIT_MAX}"},
                 },
             },
         },
@@ -217,7 +227,7 @@ TOOLS: list[dict] = [
             "name": "get_profit_ranking",
             "description": (
                 "利润聚合排名（维度三选一：part=按型号 / salesperson=按销售员 / customer=按客户），"
-                "含营收、两种成本法的毛利与毛利率。按营收降序，最多返回前50行。可选日期范围过滤。"
+                f"含营收、两种成本法的毛利与毛利率。按营收降序，最多返回前{_RANK_ROWS}行。可选日期范围过滤。"
             ),
             "parameters": {
                 "type": "object",
@@ -251,7 +261,7 @@ def _search_parts(db: Session, args: dict, ctx: security.UserContext) -> dict:
     q = str(args.get("query", "")).strip()
     if not q:
         return {"error": "query 不能为空"}
-    limit = min(int(args.get("limit") or 10), 20)
+    limit = min(int(args.get("limit") or 10), _SEARCH_LIMIT_MAX)
     return part_resolver.resolve(db, q, limit=limit, operated_by=ctx.role)
 
 
@@ -290,7 +300,9 @@ def _owns(ctx: security.UserContext, file_id: str | None) -> bool:
     try:
         owner = agent_files.owner_of(file_id)
     except agent_files.FileError:
-        return True   # 文件不存在交给底层工具报"找不到"，更明确
+        # 文件不存在也按"无权"处理（TOOLS-4）：让"不存在"与"非本人"返回不可区分的拒绝，
+        # 堵住用 12 位 file_id 探测他人文件是否存在的 oracle。全量角色已在上面提前放行。
+        return False
     return owner == ctx.user_id
 
 
@@ -344,8 +356,8 @@ def _lookup_prices_bulk(db: Session, args: dict, ctx: security.UserContext) -> d
 
 
 def _list_recent_purchases(db: Session, args: dict, ctx: security.UserContext) -> dict:
-    limit = min(int(args.get("limit") or 20), 50)
-    days = min(int(args.get("days") or 30), 365)
+    limit = min(int(args.get("limit") or 20), _RECENT_LIMIT_MAX)
+    days = min(int(args.get("days") or 30), _RECENT_DAYS_MAX)
     data = purchase_query.recent_purchases(
         db, ctx, q=args.get("query"), days=days,
         supplier=args.get("supplier"), page=1, page_size=limit)
@@ -370,6 +382,9 @@ def _read_document(db: Session, args: dict, ctx: security.UserContext) -> dict:
 
 
 def _write_report(db: Session, args: dict, ctx: security.UserContext) -> dict:
+    # 归属对称性（TOOLS-6）：本工具只新建报表、不读任何既有文件，故无需 _owns 校验
+    # （对照 _write_excel：它有 base_file_id 回填 = 变相读他人文件，故必须 _owns）。
+    # ⚠️ 若将来给 write_report 加 base_file_id 之类的"读既有文件"能力，必须同步补 _owns。
     headers = args.get("headers")
     rows = args.get("rows")
     if not isinstance(headers, list) or not headers:
