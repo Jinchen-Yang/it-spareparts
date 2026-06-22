@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Card, Input, Segmented, Tag, message } from "antd";
 import ResizableTable from "../components/ResizableTable";
+import PageHeader from "../components/PageHeader";
 import { listRecentPurchases } from "../api";
 import type { RecentPurchaseRow } from "../api";
 
@@ -51,12 +52,12 @@ export default function PurchasesPage() {
   }, [days]);
 
   return (
-    <Card
-      title="采购记录"
-      extra={<span style={{ color: "var(--mb-text-3, #92A1A8)", fontSize: 12 }}>
-        共 {total} 条 · 按采购日期倒序 · 型号为治理后口径
-      </span>}
-    >
+    <>
+      <PageHeader
+        title="采购记录"
+        subtitle={`共 ${total} 条 · 按采购日期倒序 · 型号为治理后口径`}
+      />
+      <Card>
       <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
         <Segmented options={DAY_OPTIONS} value={days} onChange={(v) => setDays(v as number)} />
         <Input.Search
@@ -114,6 +115,7 @@ export default function PurchasesPage() {
             render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span> },
         ]}
       />
-    </Card>
+      </Card>
+    </>
   );
 }

@@ -4,6 +4,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
+import PageHeader from "../components/PageHeader";
 import type { Dayjs } from "dayjs";
 import api from "../api";
 
@@ -123,6 +124,10 @@ export default function ProfitPage() {
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
+      <PageHeader
+        title="利润分析"
+        subtitle="按型号 / 销售员 / 客户维度聚合营收与毛利（移动加权 + FIFO 两种成本法并列）"
+      />
       <Card>
         <Space wrap size="large">
           <Segmented

@@ -5,6 +5,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
+import PageHeader from "../components/PageHeader";
 import api from "../api";
 import type { Overview, PartHit, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { COLORS } from "../theme";
@@ -143,6 +144,10 @@ export default function PartSearchPage() {
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
+      <PageHeader
+        title="型号查询"
+        subtitle="按型号 / 品牌 / 描述近似搜索，点击型号查看完整全景（采购 · 销售 · 库存 · 成本 · 毛利）"
+      />
       <Card>
         <Input.Search
           placeholder="输入型号 (PN) 或描述关键词，如 ST8000NM000A；规格条件可单独使用"

@@ -100,3 +100,42 @@ body {
 ::-webkit-scrollbar-thumb { background: #DAD4CA; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background: #C7C0B4; background-clip: content-box; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 全面美化 v1：在暖白主题上的全局精修 ---------- */
+/* 卡片头：标题更清晰、内边距更舒展、与内容用发丝线分隔 */
+.ant-card > .ant-card-head {
+  min-height: 52px;
+  padding-inline: 20px;
+  border-bottom: 1px solid var(--mb-border-soft, #F0EDE7);
+}
+.ant-card > .ant-card-head .ant-card-head-title {
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: -.2px;
+}
+.ant-card > .ant-card-body { padding: 20px; }
+/* 嵌套卡片更紧凑 */
+.ant-card .ant-card > .ant-card-body { padding: 14px; }
+
+/* 表格：小号表也给单元格一点呼吸感，长表更易读 */
+.ant-table-wrapper .ant-table.ant-table-small .ant-table-tbody > tr > td,
+.ant-table-wrapper .ant-table.ant-table-small .ant-table-thead > tr > th {
+  padding-block: 9px;
+}
+.ant-table-thead > tr > th { letter-spacing: .1px; }
+/* 行悬停整行轻提亮，定位更稳 */
+.ant-table-tbody > tr.ant-table-row:hover > td { background: #F7F5F1; }
+
+/* 统计数字：标题更克制、数值更突出 */
+.ant-statistic-title { color: var(--mb-text-2); margin-bottom: 6px; }
+.ant-statistic-content { font-variant-numeric: tabular-nums; }
+
+/* 分段控件 / 按钮：圆角与主题一致、去重投影 */
+.ant-segmented { padding: 3px; border-radius: 10px; }
+.ant-btn { font-weight: 500; }
+
+/* 空状态：弱化、居中留白更舒展 */
+.ant-empty { padding-block: 14px; color: var(--mb-text-3); }
+
+/* 数字/金额右对齐列用等宽数字，对齐更整齐 */
+.ant-table-cell { font-variant-numeric: tabular-nums; }

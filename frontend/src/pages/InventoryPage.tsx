@@ -4,6 +4,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
+import PageHeader from "../components/PageHeader";
 import api from "../api";
 
 interface InvRow {
@@ -108,7 +109,12 @@ export default function InventoryPage() {
   ];
 
   return (
-    <Card title="库存查询">
+    <>
+      <PageHeader
+        title="库存查询"
+        subtitle="动态结存（源系统数量 + 人工修正）· 含单位成本与库存金额，可改安全库存"
+      />
+      <Card>
       <Space style={{ marginBottom: 16 }} wrap>
         <Select
           allowClear placeholder="全部仓库" style={{ width: 160 }}
@@ -153,6 +159,7 @@ export default function InventoryPage() {
           </Form.Item>
         </Form>
       </Modal>
-    </Card>
+      </Card>
+    </>
   );
 }
