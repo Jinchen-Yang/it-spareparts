@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import {
-  Card, Table, Segmented, DatePicker, Switch, Button, Space, Tag, message, Statistic, Row, Col,
+  Card, Segmented, DatePicker, Switch, Button, Space, Tag, message, Statistic, Row, Col,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import ResizableTable from "../components/ResizableTable";
 import type { Dayjs } from "dayjs";
 import api from "../api";
 
@@ -157,7 +158,8 @@ export default function ProfitPage() {
       </Row>
 
       <Card title={`利润 · ${DIM_LABEL[dimension]}维度`}>
-        <Table
+        <ResizableTable
+          storageKey="profit"
           rowKey="dimension"
           size="small"
           loading={loading}

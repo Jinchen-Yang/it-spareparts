@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import {
-  Card, Row, Col, Statistic, Segmented, Table, Tag, Button, Modal, Input, message, Space,
+  Card, Row, Col, Statistic, Segmented, Tag, Button, Modal, Input, message, Space,
   Tooltip, Tabs, Select, Popconfirm, Descriptions,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import ResizableTable from "../components/ResizableTable";
 import api from "../api";
 
 const money = (v: number | null) => (v == null ? "-" : `¥${v.toLocaleString()}`);
@@ -131,7 +132,7 @@ function PartsTab() {
           </Popconfirm>
         )}
       </Space>
-      <Table rowKey="pn_std" size="small" loading={loading} columns={cols} dataSource={rows}
+      <ResizableTable storageKey="gov-overview" rowKey="pn_std" size="small" loading={loading} columns={cols} dataSource={rows}
         scroll={{ x: 800 }}
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: (p) => load(p) }} />
       <Modal open={!!excluding} title={`排除型号：${excluding?.pn_std}`} okText="确认排除" okButtonProps={{ danger: true }}
@@ -208,7 +209,7 @@ function CandidatesTab({ onChanged }: { onChanged: () => void }) {
             { label: "最早优先", value: "age" },
           ]} />
       </Space>
-      <Table rowKey="id" size="small" loading={loading} columns={cols} dataSource={rows}
+      <ResizableTable storageKey="gov-candidates" rowKey="id" size="small" loading={loading} columns={cols} dataSource={rows}
         scroll={{ x: 1000 }}
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: (p) => load(p) }} />
     </>
@@ -262,7 +263,7 @@ function IssuesTab() {
         <Select allowClear placeholder="问题类型" value={type} onChange={setType} style={{ width: 160 }}
           options={Object.entries(ISSUE_LABELS).map(([value, label]) => ({ value, label }))} />
       </Space>
-      <Table rowKey="id" size="small" loading={loading} columns={cols} dataSource={rows}
+      <ResizableTable storageKey="gov-issues" rowKey="id" size="small" loading={loading} columns={cols} dataSource={rows}
         scroll={{ x: 900 }}
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: (p) => load(p) }} />
     </>
@@ -315,7 +316,7 @@ function AliasesTab() {
 
   return (
     <>
-      <Table rowKey="id" size="small" loading={loading} columns={cols} dataSource={rows}
+      <ResizableTable storageKey="gov-aliases" rowKey="id" size="small" loading={loading} columns={cols} dataSource={rows}
         scroll={{ x: 800 }}
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: (p) => load(p) }} />
       <Modal open={!!reassigning} title={`改指别名：${reassigning?.pn_raw}`} okText="确认改指"
@@ -390,7 +391,7 @@ function MergesTab({ onChanged }: { onChanged: () => void }) {
         合并是可逆操作：回滚会按日志把历史采购/销售/库存的归属逐行还原到源型号并重算利润。
         建议仅回滚最近一次误操作。
       </p>
-      <Table rowKey="merge_log_id" size="small" loading={loading} columns={cols} dataSource={rows}
+      <ResizableTable storageKey="gov-mergelog" rowKey="merge_log_id" size="small" loading={loading} columns={cols} dataSource={rows}
         scroll={{ x: 1000 }}
         pagination={{ current: page, pageSize: 20, total, showSizeChanger: false, onChange: (p) => load(p) }} />
     </>

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import {
-  Card, Table, Input, Select, Space, Button, Modal, InputNumber, Form, message, Tag,
+  Card, Input, Select, Space, Button, Modal, InputNumber, Form, message, Tag,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import ResizableTable from "../components/ResizableTable";
 import api from "../api";
 
 interface InvRow {
@@ -119,7 +120,8 @@ export default function InventoryPage() {
           value={q} onChange={(e) => setQ(e.target.value)} onSearch={() => load(1)} allowClear
         />
       </Space>
-      <Table
+      <ResizableTable
+        storageKey="inventory"
         rowKey="id" size="small" loading={loading} columns={cols} dataSource={rows}
         scroll={{ x: 1100 }}
         pagination={{

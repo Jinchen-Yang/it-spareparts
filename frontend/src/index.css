@@ -79,6 +79,22 @@ body {
   color: #2C56AE; background: #EEF3FC; border-color: #D8E4F7;
 }
 
+/* 可拖拽列宽：表头右侧抓取条（ResizableTable）。
+   Resizable 给被包裹的 <th> 加 .react-resizable 类 → 作为抓取条的定位锚点。
+   fixed 列不参与拖拽（保留其 sticky 定位），故此处不影响固定列。 */
+.react-resizable { position: relative; background-clip: padding-box; }
+.rt-resize-handle {
+  position: absolute; right: -4px; top: 0; bottom: 0; width: 9px;
+  cursor: col-resize; z-index: 2; touch-action: none;
+}
+/* 列边缘发丝线，悬停变蓝提示"可拖" */
+.react-resizable .rt-resize-handle::after {
+  content: ""; position: absolute; right: 4px; top: 28%; bottom: 28%;
+  width: 1px; background: var(--mb-border); transition: background .15s;
+}
+.react-resizable:hover .rt-resize-handle::after,
+.rt-resize-handle:active::after { background: var(--mb-accent); }
+
 /* 滚动条：低存在感、暖灰 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: #DAD4CA; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
