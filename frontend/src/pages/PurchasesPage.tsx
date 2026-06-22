@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, Input, Segmented, Table, Tag, message } from "antd";
+import { Card, Input, Segmented, Tag, message } from "antd";
+import ResizableTable from "../components/ResizableTable";
 import { listRecentPurchases } from "../api";
 import type { RecentPurchaseRow } from "../api";
 
@@ -75,7 +76,8 @@ export default function PurchasesPage() {
           onSearch={() => { setPage(1); load(1, pageSize); }}
         />
       </div>
-      <Table<RecentPurchaseRow>
+      <ResizableTable<RecentPurchaseRow>
+        storageKey="purchases-recent"
         size="small"
         rowKey={(r) => r.line_id}
         loading={loading}

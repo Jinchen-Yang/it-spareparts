@@ -1,9 +1,10 @@
 import { useState } from "react";
 import {
-  Input, Table, Card, Descriptions, Tag, Row, Col, Statistic, Empty, message, Space, Button,
+  Input, Card, Descriptions, Tag, Row, Col, Statistic, Empty, message, Space, Button,
   Select, InputNumber,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import ResizableTable from "../components/ResizableTable";
 import api from "../api";
 import type { Overview, PartHit, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { COLORS } from "../theme";
@@ -164,7 +165,7 @@ export default function PartSearchPage() {
 
       {hits.length > 0 && (
         <Card title="搜索结果" size="small">
-          <Table rowKey="pn_std" size="small" columns={hitCols} dataSource={hits} pagination={{ pageSize: 10 }} />
+          <ResizableTable storageKey="search-hits" rowKey="pn_std" size="small" columns={hitCols} dataSource={hits} pagination={{ pageSize: 10 }} />
         </Card>
       )}
 
@@ -217,7 +218,7 @@ export default function PartSearchPage() {
 
           <Card title="库存" size="small" style={{ marginBottom: 16 }}>
             {/* 合并后同仓可有多行（不同源 pn），rowKey 不能用 warehouse */}
-            <Table rowKey={(_, i) => String(i)} size="small" columns={invCols} dataSource={ov.inventory} pagination={false}
+            <ResizableTable storageKey="search-ov-inv" rowKey={(_, i) => String(i)} size="small" columns={invCols} dataSource={ov.inventory} pagination={false}
               locale={{ emptyText: "无库存" }} />
           </Card>
 
@@ -247,7 +248,7 @@ export default function PartSearchPage() {
           <Row gutter={16}>
             <Col span={12}>
               <Card title="采购历史(近20)" size="small">
-                <Table rowKey={(r) => r.order_no + r.order_date} size="small" columns={purCols} dataSource={ov.purchases_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
+                <ResizableTable storageKey="search-ov-pur" rowKey={(r) => r.order_no + r.order_date} size="small" columns={purCols} dataSource={ov.purchases_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
               </Card>
             </Col>
             <Col span={12}>
@@ -258,7 +259,7 @@ export default function PartSearchPage() {
                     description="按权限，销售逐单成交明细不可见；可参考上方平均售价与近期成交参考价"
                   />
                 ) : (
-                  <Table rowKey={(r) => r.order_no + r.order_date} size="small" columns={salCols} dataSource={ov.sales_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
+                  <ResizableTable storageKey="search-ov-sal" rowKey={(r) => r.order_no + r.order_date} size="small" columns={salCols} dataSource={ov.sales_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
                 )}
               </Card>
             </Col>

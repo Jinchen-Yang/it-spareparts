@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Card, Upload, Descriptions, Table, Tag, message, Space, Button, Modal, Progress,
+  Card, Upload, Descriptions, Tag, message, Space, Button, Modal, Progress,
   Switch, Tooltip, List, Alert,
 } from "antd";
 import { InboxOutlined, DeleteOutlined } from "@ant-design/icons";
+import ResizableTable from "../components/ResizableTable";
 import type { ColumnsType } from "antd/es/table";
 import api from "../api";
 
@@ -203,14 +204,14 @@ export default function ImportPage() {
           </div>
           {job.note && <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={job.note} />}
           {job.batches.length > 0 && (
-            <Table rowKey="id" size="small" columns={jobBatchCols} dataSource={job.batches}
+            <ResizableTable storageKey="import-jobbatches" rowKey="id" size="small" columns={jobBatchCols} dataSource={job.batches}
               pagination={false} />
           )}
         </Card>
       )}
 
       <Card title="导入历史">
-        <Table rowKey="id" size="small" columns={batchCols} dataSource={batches}
+        <ResizableTable storageKey="import-batches" rowKey="id" size="small" columns={batchCols} dataSource={batches}
           scroll={{ x: 1080 }} pagination={{ pageSize: 10 }} />
       </Card>
 
@@ -225,7 +226,7 @@ export default function ImportPage() {
                 <Descriptions.Item key={k} label={k}>{String(v)}</Descriptions.Item>
               ))}
             </Descriptions>
-            <Table rowKey={(_, i) => String(i)} size="small" columns={errCols}
+            <ResizableTable storageKey="import-errors" rowKey={(_, i) => String(i)} size="small" columns={errCols}
               dataSource={detail.errors || []} pagination={{ pageSize: 10 }}
               locale={{ emptyText: "无异常行" }} />
           </>

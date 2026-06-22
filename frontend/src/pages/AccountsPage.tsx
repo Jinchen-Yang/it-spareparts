@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import {
-  Table, Button, Modal, Drawer, Form, Input, Select, Checkbox, Tag,
+  Button, Modal, Drawer, Form, Input, Select, Checkbox, Tag,
   Space, message, Popconfirm, Divider, Descriptions, List, Empty,
 } from "antd";
+import ResizableTable from "../components/ResizableTable";
 import api from "../api";
 
 type Perms = Record<string, boolean>;
@@ -115,7 +116,7 @@ export default function AccountsPage() {
         <h2 style={{ margin: 0 }}>账号管理</h2>
         <Button type="primary" onClick={() => setCreateOpen(true)}>新建账号</Button>
       </div>
-      <Table rowKey="username" dataSource={rows} columns={columns as any} loading={loading} pagination={false} size="middle" />
+      <ResizableTable storageKey="accounts" rowKey="username" dataSource={rows} columns={columns as any} loading={loading} pagination={false} size="middle" />
 
       <Modal title="新建账号" open={createOpen} onOk={() => cForm.submit()} onCancel={() => setCreateOpen(false)} okText="创建">
         <Form form={cForm} layout="vertical" onFinish={doCreate} initialValues={{ role: "sales" }}>
