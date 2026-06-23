@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Layout, Menu, Button } from "antd";
+import { Layout, Menu, Button, Tag } from "antd";
 import { COLORS } from "./theme";
 import LoginPage from "./pages/LoginPage";
 import PartSearchPage from "./pages/PartSearchPage";
@@ -60,7 +60,8 @@ export default function App() {
         >
           IT
         </span>
-        <div style={{ color: COLORS.text, fontWeight: 500, marginRight: 28, fontSize: 15 }}>
+        <div style={{ color: COLORS.text, fontWeight: 600, marginRight: 28, fontSize: 15,
+                      letterSpacing: "-0.2px", whiteSpace: "nowrap" }}>
           备件智能管理系统
         </div>
         <Menu
@@ -70,8 +71,12 @@ export default function App() {
           items={menu}
           style={{ flex: 1, minWidth: 0, background: "transparent", borderBottom: "none" }}
         />
-        <span style={{ color: "#cbd5e1", marginRight: 12, fontSize: 13 }}>
-          {name}{role ? `（${roleMap[role] || role}）` : ""}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginRight: 14,
+                       whiteSpace: "nowrap" }}>
+          <span style={{ color: COLORS.text, fontSize: 13, fontWeight: 500 }}>{name || "未命名"}</span>
+          {role && <Tag style={{ marginInlineEnd: 0 }} color={role === "admin" ? "blue" : "default"}>
+            {roleMap[role] || role}
+          </Tag>}
         </span>
         <Button onClick={logout}>退出</Button>
       </Header>

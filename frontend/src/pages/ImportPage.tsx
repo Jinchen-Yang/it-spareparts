@@ -5,6 +5,7 @@ import {
 } from "antd";
 import { InboxOutlined, DeleteOutlined } from "@ant-design/icons";
 import ResizableTable from "../components/ResizableTable";
+import PageHeader from "../components/PageHeader";
 import type { ColumnsType } from "antd/es/table";
 import api from "../api";
 
@@ -140,7 +141,11 @@ export default function ImportPage() {
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <Card title="数据导入"
+      <PageHeader
+        title="数据导入"
+        subtitle="上传氚云导出的 Excel（采购 / 销售 / 库存 / 询价），自动清洗入库并留痕"
+      />
+      <Card title="上传文件"
         extra={
           <Tooltip title="开启后：源系统改过字段的旧数据,重导会更新(而不是跳过)。日常导入用「跳过」即可。">
             <Space>
