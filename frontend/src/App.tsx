@@ -71,6 +71,10 @@ export default function App() {
           items={menu}
           style={{ flex: 1, minWidth: 0, background: "transparent", borderBottom: "none" }}
         />
+        <a href="/manual.html" target="_blank" rel="noopener"
+           style={{ color: COLORS.text2, fontSize: 13, marginRight: 16, whiteSpace: "nowrap" }}>
+          使用说明
+        </a>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8, marginRight: 14,
                        whiteSpace: "nowrap" }}>
           <span style={{ color: COLORS.text, fontSize: 13, fontWeight: 500 }}>{name || "未命名"}</span>
