@@ -4,8 +4,9 @@
 - run：非流式入口，消费循环只取最终答复（不含中间旁白），返回 {answer, tool_calls}。
 - run_stream：流式入口，把循环事件原样转发供 SSE 推送。
 
-事件：{type:"delta",text} 正文增量 / {type:"tool",name,args} 工具开始 /
-{type:"tool_done",name,ok} 工具完成 / {type:"done",tool_calls,answer,stopped?} 结束。
+事件：{type:"delta",text} 正文增量 / {type:"thinking",text} 思考链增量(开思考时) /
+{type:"tool",name,args} 工具开始 / {type:"tool_done",name,ok} 工具完成 /
+{type:"done",tool_calls,answer,stopped?} 结束。
 
 服务端无状态：对话历史由调用方持有并随请求带上。OpenAI 线格式装配下沉到 provider.append_*
 （RUNTIME-2），此处只跟中性的 ChatResult/ToolCall 打交道。
@@ -55,6 +56,8 @@ def _agent_loop(db: Session, messages: list[dict], ctx: security.UserContext,
         for kind, payload in provider.chat_stream(msgs, tools.TOOLS):
             if kind == "delta":
                 yield {"type": "delta", "text": payload}
+            elif kind == "reasoning":
+                yield {"type": "thinking", "text": payload}
             else:
                 res = payload
             if cancelled():
@@ -84,6 +87,8 @@ def _agent_loop(db: Session, messages: list[dict], ctx: security.UserContext,
     for kind, payload in provider.chat_stream(msgs):
         if kind == "delta":
             yield {"type": "delta", "text": payload}
+        elif kind == "reasoning":
+            yield {"type": "thinking", "text": payload}
         else:
             final = payload
         if cancelled():

@@ -92,7 +92,7 @@ def append_tool_result(messages: list[dict], tool_call_id: str, content: str) ->
 
 
 def chat_stream(messages: list[dict], tools: list[dict] | None = None):
-    """流式模型调用：逐段 yield ("delta", 文本)，结束时 yield ("result", ChatResult)。
+    """流式模型调用：逐段 yield ("delta", 正文) / ("reasoning", 思考)，结束时 yield ("result", ChatResult)。
 
     流式下 tool_calls 按 index 分片增量到达（name 整段、arguments 逐段拼接），
     在此累积重组，调用方拿到的 ChatResult 与非流式完全一致。
@@ -107,6 +107,15 @@ def chat_stream(messages: list[dict], tools: list[dict] | None = None):
         delta = chunk.choices[0].delta
         if delta is None:
             continue
+        # 思考链：DeepSeek 等推理模型把思考过程放在 reasoning_content（非标字段，
+        # openai SDK 收进 model_extra）。流式出去给前端灰色折叠展示，不计入正文答复。
+        rc = getattr(delta, "reasoning_content", None)
+        if rc is None:
+            extra = getattr(delta, "model_extra", None)
+            if extra:
+                rc = extra.get("reasoning_content")
+        if rc:
+            yield "reasoning", rc
         if delta.content:
             content_parts.append(delta.content)
             yield "delta", delta.content

@@ -39,6 +39,7 @@ interface Turn {
   role: "user" | "assistant";
   content: string;
   tools?: AgentToolCall[];
+  reasoning?: string;     // 思考链（仅本轮活会话内保留，刷新不持久——与 Claude 一致）
   stopped?: boolean;
 }
 interface ToolRun {
@@ -193,18 +194,91 @@ function Md({ text }: { text: string }) {
   );
 }
 
-function toolChips(tools?: AgentToolCall[]) {
+// 合并连续同名工具 → [{name, count}]，把"型号搜索×5"压成一条，少占地方
+function mergeConsec(names: string[]): { name: string; count: number }[] {
+  const out: { name: string; count: number }[] = [];
+  for (const n of names) {
+    const last = out[out.length - 1];
+    if (last && last.name === n) last.count += 1;
+    else out.push({ name: n, count: 1 });
+  }
+  return out;
+}
+const label = (n: string) => TOOL_LABEL[n] || n;
+const argOf = (a?: Record<string, unknown>) =>
+  String((a?.query ?? a?.pn_std ?? a?.dimension ?? a?.file_id ?? "") || "");
+
+// 思考链：默认折叠的灰色块，点标题展开，流式时标题显示"思考中…"
+function ThinkBlock({ text, streaming }: { text: string; streaming?: boolean }) {
+  const [open, setOpen] = useState(false);
+  if (!text) return null;
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <div onClick={() => setOpen((o) => !o)}
+        style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                 fontSize: 12.5, color: "#9c968b", userSelect: "none" }}>
+        <span style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s", fontSize: 10 }}>▶</span>
+        <span>💭 {streaming ? "思考中…" : "已思考"}</span>
+      </div>
+      {open && (
+        <div style={{ marginTop: 4, padding: "8px 12px", background: "#F6F3EE", borderRadius: 8,
+                      borderLeft: "2px solid #E9E5DE", fontSize: 12.5, color: "#8a857c",
+                      whiteSpace: "pre-wrap", lineHeight: 1.7, maxHeight: 320, overflow: "auto" }}>
+          {text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 完成态工具轨迹：合并同类，默认折叠成一行标题，点开看每次调用
+function ToolTrace({ tools }: { tools?: AgentToolCall[] }) {
+  const [open, setOpen] = useState(false);
   if (!tools?.length) return null;
+  const groups = mergeConsec(tools.map((t) => t.name));
+  const summary = groups.map((g) => `${label(g.name)}${g.count > 1 ? ` ×${g.count}` : ""}`).join(" · ");
   return (
     <div style={{ marginTop: 8 }}>
-      {tools.map((t, i) => {
-        const arg = (t.args?.query ?? t.args?.pn_std ?? t.args?.dimension ?? "") as string;
-        return (
-          <Tag key={i} style={{ fontSize: 11, color: "#6b7280", background: "#f3f4f6", border: "none" }}>
-            {TOOL_LABEL[t.name] || t.name}{arg ? `（${String(arg).slice(0, 26)}）` : ""}
-          </Tag>
-        );
-      })}
+      <div onClick={() => setOpen((o) => !o)}
+        style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
+                 fontSize: 12, color: "#9c968b", userSelect: "none", maxWidth: "100%" }}>
+        <span style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s", fontSize: 10 }}>▶</span>
+        <span>🔧 用了 {tools.length} 次工具</span>
+        {!open && <span style={{ color: "#bdb7ab", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {summary}</span>}
+      </div>
+      {open && (
+        <div style={{ marginTop: 4, paddingLeft: 14, borderLeft: "2px solid #ECE8E1" }}>
+          {tools.map((t, i) => {
+            const a = argOf(t.args);
+            return (
+              <div key={i} style={{ fontSize: 12, color: "#8a857c", padding: "2px 0" }}>
+                {label(t.name)}{a ? <span style={{ color: "#b6b0a6" }}>（{a.slice(0, 30)}）</span> : null}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// 流式中的工具状态：完成的合并成一行灰字，当前一个转圈
+function LiveTrace({ runs }: { runs: ToolRun[] }) {
+  if (!runs.length) return null;
+  const doneGroups = mergeConsec(runs.filter((r) => r.done).map((r) => r.name));
+  const active = runs.find((r) => !r.done);
+  return (
+    <div style={{ marginBottom: 8, fontSize: 12.5 }}>
+      {doneGroups.length > 0 && (
+        <div style={{ color: "#9c968b" }}>
+          ✓ {doneGroups.map((g) => `${label(g.name)}${g.count > 1 ? ` ×${g.count}` : ""}`).join(" · ")}
+        </div>
+      )}
+      {active && (
+        <div style={{ color: "#3E6FD1", display: "flex", alignItems: "center", gap: 6 }}>
+          <Spin size="small" /> 正在{label(active.name)}…
+        </div>
+      )}
     </div>
   );
 }
@@ -235,12 +309,14 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);          // 当前会话视图正在流式（send 或 attach）
   const [streamText, setStreamText] = useState("");
+  const [thinkText, setThinkText] = useState("");
   const [toolRuns, setToolRuns] = useState<ToolRun[]>([]);
   const [pendingFile, setPendingFile] = useState<AgentUploadResult | null>(null);
   const [uploading, setUploading] = useState(false);
   const [generatingIds, setGeneratingIds] = useState<Set<number>>(new Set());  // 后台仍在生成的会话
 
   const streamBufRef = useRef("");
+  const thinkBufRef = useRef("");
   const flushTimerRef = useRef<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -258,7 +334,7 @@ export default function ChatPage() {
     });
 
   const switchTo = (id: number | null) => { activeIdRef.current = id; setActiveId(id); };
-  const flushStream = () => setStreamText(streamBufRef.current);
+  const flushStream = () => { setStreamText(streamBufRef.current); setThinkText(thinkBufRef.current); };
   const clearFlush = () => {
     if (flushTimerRef.current) { window.clearInterval(flushTimerRef.current); flushTimerRef.current = null; }
   };
@@ -301,7 +377,9 @@ export default function ChatPage() {
     markGenerating(sessionId, true);
     stickToBottomRef.current = true;
     streamBufRef.current = "";
+    thinkBufRef.current = "";
     setStreamText("");
+    setThinkText("");
     setToolRuns([]);
     clearFlush();
     flushTimerRef.current = window.setInterval(flushStream, 80);
@@ -313,13 +391,16 @@ export default function ChatPage() {
         clearFlush();
         streamBufRef.current = "";
         setStreamText("");
+        setThinkText("");
         setToolRuns([]);
         setBusy(false);
       }
       markGenerating(sessionId, false);
+      const reasoning = thinkBufRef.current || undefined;   // 先取值：setTurns 的回调是异步执行的，
+      thinkBufRef.current = "";                              // 不能在回调里读会被同步清空的 ref
       if ((content || ctl.trace.length) && activeIdRef.current === sessionId) {
         setTurns((prev) => [...prev, {
-          role: "assistant", content: content || "(无内容)", tools: [...ctl.trace], stopped,
+          role: "assistant", content: content || "(无内容)", tools: [...ctl.trace], reasoning, stopped,
         }]);
       }
       bumpTop(sessionId);
@@ -342,6 +423,7 @@ export default function ChatPage() {
     const onEvent = (ev: SessionStreamEvent) => {
       if (ctl.settled || !isCurrent()) return;     // 已切走/停止：忽略后续事件
       if (ev.type === "delta") streamBufRef.current += ev.text;
+      else if (ev.type === "thinking") thinkBufRef.current += ev.text;
       else if (ev.type === "title")
         setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, title: ev.title } : s)));
       else if (ev.type === "tool") {
@@ -359,7 +441,7 @@ export default function ChatPage() {
       else if (ev.type === "no_active") {
         // attach 时该会话已生成完：之前为防重复去掉了末尾 in-progress 气泡，这里重载补回最终消息
         ctl.settled = true;
-        if (isCurrent()) { clearFlush(); setStreamText(""); setToolRuns([]); setBusy(false); }
+        if (isCurrent()) { clearFlush(); setStreamText(""); setThinkText(""); setToolRuns([]); setBusy(false); thinkBufRef.current = ""; }
         markGenerating(sessionId, false);
         if (activeIdRef.current === sessionId) reload(sessionId);
         ctl.resolveDone();
@@ -412,7 +494,9 @@ export default function ChatPage() {
     clearFlush();
     const partial = streamBufRef.current;
     const sid = ctl.sessionId;
+    thinkBufRef.current = "";
     setStreamText("");
+    setThinkText("");
     setToolRuns([]);
     setBusy(false);
     ctlRef.current = null;
@@ -482,7 +566,7 @@ export default function ChatPage() {
   const scrollToBottom = () => {
     if (stickToBottomRef.current) bottomRef.current?.scrollIntoView({ block: "end" });
   };
-  useEffect(scrollToBottom, [streamText, toolRuns, turns]);
+  useEffect(scrollToBottom, [streamText, thinkText, toolRuns, turns]);
 
   const onScroll = () => {
     const el = scrollBoxRef.current;
@@ -684,10 +768,11 @@ export default function ChatPage() {
                     <RobotOutlined style={{ color: "#fff", fontSize: 15 }} />
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
+                    {t.reasoning && <ThinkBlock text={t.reasoning} />}
                     <div className="chat-md" style={{ fontSize: 14 }}>
                       <Md text={t.content} />
                     </div>
-                    {toolChips(t.tools)}
+                    <ToolTrace tools={t.tools} />
                     {t.stopped && <Tag style={{ marginTop: 6 }} color="orange">已中断</Tag>}
                     <Tooltip title="复制全文">
                       <Button className="copy-btn" size="small" type="text" icon={<CopyOutlined />}
@@ -710,22 +795,11 @@ export default function ChatPage() {
                   <RobotOutlined style={{ color: "#fff", fontSize: 15 }} />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  {toolRuns.length > 0 && (
-                    <div style={{ marginBottom: 8 }}>
-                      {toolRuns.map((t, i) => (
-                        <div key={i} style={{ fontSize: 12.5, color: t.done ? "#9ca3af" : "#4f46e5",
-                                              marginBottom: 2 }}>
-                          {t.done ? "✓" : <Spin size="small" style={{ marginRight: 4 }} />}{" "}
-                          {t.done ? `${TOOL_LABEL[t.name] || t.name} 完成`
-                                  : `正在${TOOL_LABEL[t.name] || t.name}…`}
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  {thinkText && <ThinkBlock text={thinkText} streaming />}
+                  <LiveTrace runs={toolRuns} />
                   <div className="chat-md" style={{ fontSize: 14 }}>
-                    {streamText ? <Md text={streamText} /> : !runningTool && (
-                      <span style={{ color: "#9ca3af" }}>思考中…</span>
-                    )}
+                    {streamText ? <Md text={streamText} />
+                      : (!runningTool && !thinkText) && <span style={{ color: "#9ca3af" }}>思考中…</span>}
                     <span className="cursor" />
                   </div>
                 </div>
