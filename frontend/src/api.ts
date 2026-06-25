@@ -234,6 +234,58 @@ export const listRecentPurchases = (params: {
     "/purchases/recent", { params },
   );
 
+// ===== 采购分析面板（早会/周会）=====
+export interface PurchaseChannelSplit {
+  channel: string;
+  times: number;
+  qty: number | null;
+  amount: number | null;
+  price_ex_last: number | null;
+  price_inc_last: number | null;
+}
+export interface PurchaseAnalysisRow {
+  part_id: number;
+  pn_std: string;
+  needs_review: boolean;
+  description: string | null;
+  brand: string | null;
+  buy_times: number;
+  total_qty: number | null;
+  daily: number[] | null;
+  price_ex_min: number | null; price_ex_max: number | null;
+  price_ex_last: number | null; price_ex_avg: number | null;
+  price_inc_min: number | null; price_inc_max: number | null;
+  price_inc_last: number | null; price_inc_avg: number | null;
+  price_trend: "up" | "down" | "flat" | "new";
+  source_types: string[];
+  is_frequent: boolean;
+  advice: string;
+  channels: PurchaseChannelSplit[];
+}
+export interface PurchaseAnalysis {
+  window: { days: number; since: string; until: string; freq_threshold: number;
+            exclude_designated: boolean; daily: boolean };
+  kpi: { total_amount: number | null; order_count: number;
+         order_count_by_source: Record<string, number>; part_count: number;
+         frequent_count: number; shown: number; truncated: number };
+  source_composition: { channel: string; amount: number | null; order_count: number; line_count: number }[];
+  rows: PurchaseAnalysisRow[];
+}
+export interface PurchaseDrillItem {
+  order_date: string | null; order_no: string | null; purchaser: string | null;
+  supplier: string | null; source_channel: string; source_type: string | null;
+  qty: number | null; is_tax_inclusive: boolean | null; unit_price: number | null;
+  price_ex: number | null; price_inc: number | null;
+}
+export const fetchPurchaseAnalysis = (params: {
+  days?: number; exclude_designated?: boolean; freq_threshold?: number;
+  q?: string; supplier?: string; purchaser?: string;
+}) => api.get<PurchaseAnalysis>("/purchases/analysis", { params });
+export const fetchPurchaseDrill = (params: { part_id: number; days?: number; exclude_designated?: boolean }) =>
+  api.get<{ part_id: number; days: number; items: PurchaseDrillItem[] }>(
+    "/purchases/analysis/part", { params },
+  );
+
 export interface AgentUploadResult {
   file_id: string;
   filename: string;

@@ -21,6 +21,11 @@ PURCHASE_HEAD = {
     "关联订单": "linked_sales_order_no",
     "不含税金额": "amount_ex_tax",
     "税率(必填)": "tax_rate",
+    # 含税口径（实测真实列；税率列常空 → 由 是否含税+税金+不含税金额 反推，见 transform）
+    # 注意：是否含税 列名带 (必填) 后缀，税金/采购金额 无后缀（实测导出确认）
+    "是否含税(必填)": "is_tax_inclusive",
+    "税金": "tax_amount",
+    "采购金额": "amount_inc_tax",
     "数据状态": "data_status",
 }
 PURCHASE_LINE = {

@@ -131,15 +131,25 @@ def _build_head(row, file_type, inv_head, row_no, res) -> dict:
     }
     if file_type == mapping.PURCHASE:
         name_raw, name_norm = cleaner.normalize_supplier_name(g("supplier_name"))
+        supplier_type = cleaner.clean_str(g("supplier_type"))
+        tax_amount = _safe_money(g("tax_amount"))
+        # 税率列实测常空 → 用 税金/不含税金额 反推（含税单），保证含税未税换算可用
+        if head["tax_rate"] is None:
+            head["tax_rate"] = cleaner.derive_tax_rate(head["amount_ex_tax"], tax_amount)
         head.update({
             "purchaser": cleaner.clean_str(g("purchaser")),
             "supplier_name_raw": name_raw,
             "supplier_name_normalized": name_norm,
             "supplier_code": cleaner.clean_str(g("supplier_code")),
-            "supplier_type": cleaner.clean_str(g("supplier_type")),
+            "supplier_type": supplier_type,
+            "supplier_source_channel": cleaner.classify_source_channel(
+                name_raw, name_norm, supplier_type),
             "source_type_raw": cleaner.clean_str(g("source_type_raw")),
             "source_type": cleaner.normalize_source_type(g("source_type_raw")),
             "linked_sales_order_no": cleaner.clean_str(g("linked_sales_order_no")),
+            "is_tax_inclusive": cleaner.parse_tax_inclusive(g("is_tax_inclusive")),
+            "tax_amount": tax_amount,
+            "amount_inc_tax": _safe_money(g("amount_inc_tax")),
         })
     else:  # sales
         head.update({

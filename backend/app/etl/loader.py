@@ -308,7 +308,8 @@ def _upsert_facts(session: Session, model, rows: list[dict], conflict_col,
 # 可更新字段(upsert 修复模式)：排除主键 raw_*_id 与利润派生字段(recompute 专属)
 _PURCHASE_ORDER_UPD = ["order_no", "order_date", "purchaser", "supplier_id",
                         "linked_sales_order_no", "source_type", "source_type_raw",
-                        "amount_ex_tax", "tax_rate", "data_status", "import_batch_id"]
+                        "amount_ex_tax", "tax_rate", "is_tax_inclusive", "tax_amount",
+                        "amount_inc_tax", "data_status", "import_batch_id"]
 _PURCHASE_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "description",
                        "brand", "machine_or_part", "unit", "qty", "unit_price", "line_amount",
                        "recent_purchase_price", "anomaly_flags", "import_batch_id"]
@@ -355,9 +356,11 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
         sup_rows = [{
             "name_raw": o["supplier_name_raw"], "name_normalized": o["supplier_name_normalized"],
             "supplier_code": o.get("supplier_code"), "supplier_type": o.get("supplier_type"),
+            "source_channel": o.get("supplier_source_channel"),
         } for o in orders.values() if o.get("supplier_name_raw")]
         sup_id = _upsert_named_dim(session, DimSupplier, sup_rows,
-                                   ["name_normalized", "supplier_code", "supplier_type"])
+                                   ["name_normalized", "supplier_code", "supplier_type",
+                                    "source_channel"])
 
     # 3) 订单头
     order_model = FSalesOrder if is_sales else FPurchaseOrder
@@ -381,6 +384,9 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
                 "supplier_id": sup_id.get(o.get("supplier_name_raw")),
                 "source_type": o.get("source_type"), "source_type_raw": o.get("source_type_raw"),
                 "linked_sales_order_no": o.get("linked_sales_order_no"),
+                "is_tax_inclusive": o.get("is_tax_inclusive"),
+                "tax_amount": o.get("tax_amount"),
+                "amount_inc_tax": o.get("amount_inc_tax"),
             })
         order_rows.append(base)
     order_upd_cols = (_SALES_ORDER_UPD if is_sales else _PURCHASE_ORDER_UPD) if upsert else None

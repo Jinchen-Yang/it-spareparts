@@ -214,6 +214,44 @@ CANDIDATE_STALE_DAYS = 7
 
 
 # ============================================================
+# §8.8 采购分析面板（早会/周会：识别频发应急采购→转批量；按来源拆分）
+# ============================================================
+
+# "频发"判定的默认采购次数阈值（窗口内某型号采购次数 ≥ 此值 → 高亮/计入"待计划"）。
+# 阈值只影响标记与计数，不裁剪数据；用户可在面板上自行调整再判断。
+ANALYSIS_FREQ_THRESHOLD = 3
+ANALYSIS_DEFAULT_DAYS = 7        # 面板默认时间窗（天）
+ANALYSIS_DAILY_MAX_DAYS = 31     # 逐日 sparkline 仅在窗口 ≤ 此天数时返回（更长窗只给次数/区间）
+ANALYSIS_TOP_N = 100             # 主排行默认最多返回型号数（早会聚焦头部，超出在 KPI 提示）
+# days 参数上限：聚合需整窗数据进内存，故上限收到约一年（前端最大也只到 30/365）。
+ANALYSIS_MAX_DAYS = 366
+# 取数硬上限：超过则截断并在 KPI 回 over_limit=True（防超大窗口拉爆内存）
+ANALYSIS_MAX_LINES = 50000
+# 默认排除的采购类型（指定采购=大额批量补库，库里一定有，不是要分析的应急采购）
+ANALYSIS_EXCLUDE_SOURCE_TYPES = ["指定采购"]
+# 含税单缺失税率时的兜底增值税率（行业 13%）；仅用于把含税价换算未税
+ANALYSIS_FALLBACK_VAT = Decimal("0.13")
+
+# 采购来源渠道分类（命中靠前者优先）。维修/回收来自「供应商类型」，其余按供应商名关键词。
+SOURCE_CHANNEL_NAME_KEYWORDS = [
+    ("淘宝", ["淘宝"]),
+    ("京东", ["京东"]),
+    ("拼多多", ["拼多多", "拼夕夕"]),
+    ("闲鱼", ["闲鱼", "咸鱼"]),
+    ("个人", ["个人"]),
+]
+# 中文企业词按子串匹配（中文无词边界问题）
+SOURCE_CHANNEL_COMPANY_WORDS = ["公司", "有限", "科技", "实业", "商贸", "网络", "中心", "集团",
+                                "电子", "数码", "技术", "贸易", "信息", "物资", "通信", "系统",
+                                "设备", "厂"]
+# 英文企业词按"整词"匹配（避免 'inc' 误命中 Prince/Vince、'co' 误命中 company 名内子串）
+SOURCE_CHANNEL_COMPANY_WORDS_EN = ["store", "inc", "ltd", "co", "corp", "llc"]
+SOURCE_CHANNEL_PERSONAL = "个人"
+SOURCE_CHANNEL_DEFAULT = "正规供应商"
+SOURCE_CHANNEL_UNKNOWN = "未分类"
+
+
+# ============================================================
 # §8.5 权限（三期启用：防恶性竞争）
 # ============================================================
 # 三期开启：销售只看"匿名行情 + 自己明细"，查不到同事的客户/报价；老板/管理员看全量。
@@ -229,7 +267,9 @@ MASK_TEXT_FOR_EXPORT = "无权限查看"          # 导出场景占位文字
 # 字段组：权限按"组"控制，不按单字段，避免漏字段被反推
 FIELD_GROUPS = {
     "supplier_info": ["supplier_id", "supplier_name", "supplier_code",
-                      "supplier_type", "supplier_contact", "supplier_phone", "supplier"],
+                      "supplier_type", "supplier_contact", "supplier_phone", "supplier",
+                      # §8.8 采购来源渠道也属"从谁/从哪类进货"情报，随 data_supplier 一并遮
+                      "source_channel", "channel"],
     "customer_info": ["customer_id", "customer_name", "customer_city",
                       "customer_contact", "customer_phone", "customer"],
     # 注：unit_price 在采购行=成本、销售行=售价(营收)同名 → sales 关 data_purchase_cost 时
@@ -244,7 +284,13 @@ FIELD_GROUPS = {
                       "avg_purchase_cost", "avg_cost_moving", "avg_cost_fifo",
                       # part_overview.quick_pricing 的近期采购价窗口键（AI 批量查价/整机拆解）
                       "last_purchase_price", "recent_purchase_avg",
-                      "recent_purchase_min", "recent_purchase_max"],
+                      "recent_purchase_min", "recent_purchase_max",
+                      # §8.8 采购分析面板派生价格/金额键（任何新派生键必须登记，否则对无
+                      # data_purchase_cost 角色静默泄漏成本——见 2026-06-15 销售越权教训）
+                      "total_amount", "amount", "price_ex", "price_inc",
+                      "price_ex_min", "price_ex_max", "price_ex_last", "price_ex_avg",
+                      "price_inc_min", "price_inc_max", "price_inc_last", "price_inc_avg",
+                      "price_last"],
     # 毛利金额：能反推成本（profit.aggregate 两法派生键一并登记）
     "profit_amount": ["gross_profit", "gross_profit_moving", "gross_profit_fifo"],
     # 毛利率：见反推警告（_profit_summary 与 profit.aggregate 的两法派生键一并登记）
