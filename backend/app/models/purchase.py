@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     ARRAY,
+    Boolean,
     Date,
     ForeignKey,
     Index,
@@ -33,6 +34,11 @@ class FPurchaseOrder(Base):
     source_type_raw: Mapped[str | None] = mapped_column(String(64))  # 原值留存
     amount_ex_tax: Mapped[Decimal | None] = mapped_column(Money)
     tax_rate: Mapped[Decimal | None] = mapped_column(Rate)
+    # 含税口径（采购分析/含税未税切换）：氚云采购订单原列「是否含税/税金/采购金额(含税总额)」。
+    # 行单价口径跟随 is_tax_inclusive：含税单 unit_price=含税价、不含单=未税价（见 services.purchase_analysis）。
+    is_tax_inclusive: Mapped[bool | None] = mapped_column(Boolean)
+    tax_amount: Mapped[Decimal | None] = mapped_column(Money)
+    amount_inc_tax: Mapped[Decimal | None] = mapped_column(Money)
     data_status: Mapped[str | None] = mapped_column(String(16))
     import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())

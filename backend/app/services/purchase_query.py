@@ -17,6 +17,27 @@ MAX_PAGE_SIZE = 200
 MAX_DAYS = 3660  # 上限十年：days 参数防呆
 
 
+def apply_keyword(stmt, q: str | None):
+    """采购明细关键词召回（part_id 主口径单一真值源；analysis 与 recent 共用，防口径漂移）。
+
+    别名召回：用户拿单据原文 PN（含已合并旧 PN、被去 V 码写法）查也要命中——part_alias.part_id
+    合并时已重指存活商品，经它过滤仍是 part_id 主口径（绝不直接 ILIKE 事实表 pn 文本作聚合键）。
+    """
+    if not (q and q.strip()):
+        return stmt
+    like = f"%{q.strip()}%"
+    alias_hit = (
+        select(PartAlias.part_id)
+        .where(PartAlias.pn_raw.ilike(like), PartAlias.part_id.is_not(None))
+    )
+    return stmt.where(or_(
+        DimPart.pn_std.ilike(like),
+        FPurchaseLine.description.ilike(like),
+        FPurchaseLine.brand.ilike(like),
+        FPurchaseLine.part_id.in_(alias_hit),
+    ))
+
+
 def recent_purchases(db: Session, user_ctx: security.UserContext | None = None,
                      q: str | None = None, days: int = 30,
                      supplier: str | None = None,
@@ -48,21 +69,7 @@ def recent_purchases(db: Session, user_ctx: security.UserContext | None = None,
     )
     if config.ACTIVE_STATUS_ONLY:
         stmt = stmt.where(FPurchaseOrder.data_status == _ACTIVE)
-    if q and q.strip():
-        like = f"%{q.strip()}%"
-        # 别名召回：用户拿单据上的原文 PN（含已合并的旧 PN、被去 V 码的原始
-        # 写法）来查也要命中——part_alias.part_id 合并时已重指存活商品，
-        # 经它过滤仍是 part_id 主口径（绝不直接 ILIKE 事实表 pn 文本作键）
-        alias_hit = (
-            select(PartAlias.part_id)
-            .where(PartAlias.pn_raw.ilike(like), PartAlias.part_id.is_not(None))
-        )
-        stmt = stmt.where(or_(
-            DimPart.pn_std.ilike(like),
-            FPurchaseLine.description.ilike(like),
-            FPurchaseLine.brand.ilike(like),
-            FPurchaseLine.part_id.in_(alias_hit),
-        ))
+    stmt = apply_keyword(stmt, q)
     if supplier and supplier.strip():
         stmt = stmt.where(DimSupplier.name_normalized.ilike(f"%{supplier.strip()}%"))
     if user_ctx is not None:

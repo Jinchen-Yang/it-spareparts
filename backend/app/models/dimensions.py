@@ -127,6 +127,9 @@ class DimSupplier(Base):
     name_normalized: Mapped[str | None] = mapped_column(String(256))  # 去质保后缀；聚合用
     supplier_code: Mapped[str | None] = mapped_column(String(64))
     supplier_type: Mapped[str | None] = mapped_column(String(64))
+    # 采购来源渠道（从供应商名/类型派生，可人工修正）：淘宝/京东/个人/正规供应商/回收/维修。
+    # 用于采购分析面板按来源拆分；分类规则在 cleaner.classify_source_channel（config 可调关键词）。
+    source_channel: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
     __table_args__ = (Index("ix_supplier_norm", "name_normalized"),)

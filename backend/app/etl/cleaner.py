@@ -11,6 +11,8 @@ from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 
+from app import config
+
 # 氚云内部 V 码 token：V + ≥10 位大写字母数字（实测含字母，如 V0230LD000000000）
 _VCODE_TOKEN = re.compile(r"^V[0-9A-Z]{10,}$")
 _THOUSANDS = re.compile(r"[,\s¥￥$]")
@@ -144,3 +146,65 @@ def normalize_source_type(raw) -> str | None:
         if k in s:
             return v
     return s
+
+
+def parse_tax_inclusive(x) -> bool | None:
+    """氚云「是否含税」列：'含税'→True，'不含'/'未税'→False，空→None。
+
+    顺序重要：'不含' 含子串 '含'，必须先判 '不含'/'未税' 再判 '含'。
+    """
+    s = clean_str(x)
+    if s is None:
+        return None
+    if "不含" in s or "未税" in s:
+        return False
+    if "含税" in s or s == "含":
+        return True
+    return None
+
+
+def derive_tax_rate(amount_ex_tax, tax_amount) -> Decimal | None:
+    """税率列常空 → 用 税金/不含税金额 反推（quantize 0.0001）。不含单税金=0 → 返回 0。
+
+    结果限定在 [0, 1)：脏数据（税金/不含税金额 填反、单位错、退货抵扣）会算出 ≥1 或负值，
+    若原样写入 FPurchaseOrder.tax_rate(Rate=Numeric(5,4)，上限 9.9999) 会溢出并 poison 整批
+    导入事务。越界一律返回 None，让分析层回退 ANALYSIS_FALLBACK_VAT 兜底。
+    """
+    if amount_ex_tax is None or tax_amount is None:
+        return None
+    try:
+        ex = Decimal(amount_ex_tax)
+        if ex == 0:
+            return None
+        r = (Decimal(tax_amount) / ex).quantize(Decimal("0.0001"))
+    except (InvalidOperation, ZeroDivisionError, TypeError):
+        return None
+    return r if Decimal(0) <= r < Decimal(1) else None
+
+
+def classify_source_channel(name_raw, name_normalized, supplier_type=None) -> str:
+    """采购来源渠道（从供应商名派生；甲方可在 config 调关键词）。
+
+    口径=采购"从哪类来源进货"：淘宝/京东/拼多多/闲鱼/个人/正规供应商。
+    **不**用 供应商类型 短路——实测它几乎人人都是「底层回收商」(二手件回收商=整个供货基盘)，
+    与"淘宝 vs 正规 vs 个人"是正交维度，若按它分类会把所有供应商都归成「回收」，失去意义。
+    优先级：名称关键词(淘宝/京东/…) → 含企业词→正规供应商 → 短名(纯人名)→个人 → 兜底正规供应商。
+    关键词在 name_raw 上匹配（括号内常含真实公司名），人名长度判断用 name_normalized。结果可人工修正。
+    （supplier_type 入参保留备用，当前不参与分类——回收/维修 信息仍在 dim_supplier.supplier_type 列。）
+    """
+    raw = clean_str(name_raw)
+    if raw is None:
+        return config.SOURCE_CHANNEL_UNKNOWN
+    for label, kws in config.SOURCE_CHANNEL_NAME_KEYWORDS:
+        if any(k in raw for k in kws):
+            return label
+    # 中文企业词按子串；英文企业词按整词（避免 'inc' 误命中 Prince/Vince 这类人名罗马字）
+    low = raw.lower()
+    en = "|".join(re.escape(w) for w in config.SOURCE_CHANNEL_COMPANY_WORDS_EN)
+    if any(w in raw for w in config.SOURCE_CHANNEL_COMPANY_WORDS) or \
+            (en and re.search(rf"\b(?:{en})\b", low)):
+        return config.SOURCE_CHANNEL_DEFAULT
+    base = clean_str(name_normalized) or raw
+    if len(base) <= 5:
+        return config.SOURCE_CHANNEL_PERSONAL
+    return config.SOURCE_CHANNEL_DEFAULT

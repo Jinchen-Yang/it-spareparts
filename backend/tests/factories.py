@@ -20,15 +20,22 @@ def purchase_line(order_raw_id: str, line_raw_id: str, pn: str, qty="1", price="
 
 
 def purchase_head(order_raw_id: str, order_no: str | None = None,
-                  on: date | None = None, source_type="销售订单") -> dict:
+                  on: date | None = None, source_type="销售订单",
+                  supplier="测试供应商", purchaser=None, source_channel="正规供应商",
+                  is_tax_inclusive=None, tax_rate=None, amount_ex_tax=None,
+                  tax_amount=None, amount_inc_tax=None) -> dict:
     return {
         "raw_order_id": order_raw_id, "order_no": order_no or order_raw_id,
-        "order_date": on or date(2026, 1, 1), "tax_rate": None, "amount_ex_tax": None,
-        "data_status": "已生效", "purchaser": None,
-        "supplier_name_raw": "测试供应商", "supplier_name_normalized": "测试供应商",
+        "order_date": on or date(2026, 1, 1), "tax_rate": tax_rate,
+        "amount_ex_tax": amount_ex_tax,
+        "data_status": "已生效", "purchaser": purchaser,
+        "supplier_name_raw": supplier, "supplier_name_normalized": supplier,
         "supplier_code": None, "supplier_type": None,
+        "supplier_source_channel": source_channel,
         "source_type": source_type, "source_type_raw": source_type,
         "linked_sales_order_no": None,
+        "is_tax_inclusive": is_tax_inclusive, "tax_amount": tax_amount,
+        "amount_inc_tax": amount_inc_tax,
     }
 
 
