@@ -59,6 +59,7 @@ export const agentChat = (messages: ChatMessage[]) =>
 /** SSE 事件（/agent/chat/stream） */
 export type AgentStreamEvent =
   | { type: "delta"; text: string }
+  | { type: "thinking"; text: string }
   | { type: "tool"; name: string; args: Record<string, unknown> }
   | { type: "tool_done"; name: string; ok: boolean }
   | { type: "done"; tool_calls: AgentToolCall[]; answer?: string; configured?: boolean; stopped?: boolean }

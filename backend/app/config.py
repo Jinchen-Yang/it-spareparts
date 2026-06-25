@@ -10,8 +10,9 @@ from functools import lru_cache
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# DeepSeek v4 为混合思考模型；定价助手默认关思考（快/省/够用）
-_DEFAULT_LLM_EXTRA_BODY = '{"thinking": {"type": "disabled"}}'
+# DeepSeek v4 为混合思考模型；默认开思考（reasoning_content 流式回前端，灰色可折叠展示）。
+# 要关思考省 token：在 .env 设 LLM_EXTRA_BODY='{"thinking": {"type": "disabled"}}'。
+_DEFAULT_LLM_EXTRA_BODY = '{"thinking": {"type": "enabled"}}'
 
 
 class Settings(BaseSettings):
@@ -44,7 +45,7 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-v4-flash"
     llm_api_key: str = ""              # 空 = 未配置，chat 接口返回降级提示
     # 随请求透传的额外参数(JSON)。换 Qwen 等端点时改成对应参数(如 {"enable_thinking": false})；
-    # 设 {} = 明确不传；留空/不设 = 用默认(关思考)
+    # 设 {} = 明确不传；留空/不设 = 用默认(开思考)
     llm_extra_body: str = _DEFAULT_LLM_EXTRA_BODY
     llm_max_tool_iters: int = 8        # 一次问答最多工具往返轮数（文件流程需 4-6 轮）
     llm_timeout_seconds: int = 60

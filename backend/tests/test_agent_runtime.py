@@ -84,3 +84,33 @@ def test_extra_body_validation_and_dict():
 def test_create_kwargs_max_tokens_optional():
     assert "max_tokens" not in provider._create_kwargs(Settings(llm_max_tokens=None), [], None)
     assert provider._create_kwargs(Settings(llm_max_tokens=1024), [], None)["max_tokens"] == 1024
+
+
+# ---------- 思考链（thinking）----------
+def test_default_extra_body_enables_thinking():
+    # 空 LLM_EXTRA_BODY → 回退默认；默认现在开思考
+    assert Settings(llm_extra_body="").llm_extra_body_dict() == {"thinking": {"type": "enabled"}}
+
+
+def test_run_stream_forwards_reasoning_as_thinking(monkeypatch):
+    def fake(messages, tools_=None):
+        yield "reasoning", "先看一下最近采购价"
+        yield "reasoning", "，再算个加点"
+        yield "delta", "建议报 2200"
+        yield "result", provider.ChatResult(content="建议报 2200", tool_calls=[])
+    monkeypatch.setattr(provider, "chat_stream", fake)
+    evs = list(runtime.run_stream(None, _MSGS, _CTX))
+    thinking = [e["text"] for e in evs if e["type"] == "thinking"]
+    assert thinking == ["先看一下最近采购价", "，再算个加点"]   # 逐段转发，不计入正文
+    done = evs[-1]
+    assert done["type"] == "done" and done["answer"] == "建议报 2200"
+
+
+def test_run_ignores_thinking_in_answer(monkeypatch):
+    def fake(messages, tools_=None):
+        yield "reasoning", "内部思考不该进答复"
+        yield "delta", "最终答复"
+        yield "result", provider.ChatResult(content="最终答复", tool_calls=[])
+    monkeypatch.setattr(provider, "chat_stream", fake)
+    out = runtime.run(None, _MSGS, _CTX)   # 非流式只取 done.answer
+    assert out["answer"] == "最终答复" and "思考" not in out["answer"]
