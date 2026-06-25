@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   Input, Card, Descriptions, Tag, Row, Col, Statistic, Empty, message, Space, Button,
-  Select, InputNumber,
+  Select, InputNumber, Alert,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
@@ -12,6 +12,9 @@ import { COLORS } from "../theme";
 
 const money = (v: number | null) => (v == null ? "-" : `¥${v.toLocaleString()}`);
 const pct = (v: number | null | undefined) => (v == null ? "-" : `${(v * 100).toFixed(1)}%`);
+const errMsg = (e: any) =>
+  !e?.response ? "无法连接服务器，请检查网络后重试"
+  : e?.response?.data?.detail || `加载失败（${e?.response?.status ?? "?"}），请稍后重试`;
 
 // 按登录用户权限决定是否展示成本/利润卡片（后端已把值脱敏成 null，前端再把空卡片整张藏掉）
 const canSee = (key: string) => {
@@ -27,6 +30,8 @@ export default function PartSearchPage() {
   const [loadingOv, setLoadingOv] = useState(false);
   const [subPn, setSubPn] = useState("");
   const [lastQ, setLastQ] = useState("");
+  const [lastPn, setLastPn] = useState("");   // 用于全景加载失败时的"重试"
+  const [error, setError] = useState<string | null>(null);
   // 结构化规格过滤（整改 P2：硬盘容量/接口等条件查询）
   const [partType, setPartType] = useState<string | undefined>(undefined);
   const [iface, setIface] = useState<string | undefined>(undefined);
@@ -41,6 +46,7 @@ export default function PartSearchPage() {
     if (!q.trim() && !hasSpec) return;
     setSearching(true);
     setLastQ(q);
+    setError(null);
     try {
       const { data } = await api.get("/parts/search", {
         params: {
@@ -52,6 +58,11 @@ export default function PartSearchPage() {
       });
       setHits(data.items);
       if (data.items.length === 0) message.info("没有匹配的型号");
+    } catch (e) {
+      setHits([]);
+      const msg = errMsg(e);
+      setError(msg);
+      message.error(msg);
     } finally {
       setSearching(false);
     }
@@ -59,9 +70,16 @@ export default function PartSearchPage() {
 
   const openOverview = async (pn: string) => {
     setLoadingOv(true);
+    setLastPn(pn);
+    setError(null);
     try {
       const { data } = await api.get("/parts/overview", { params: { pn_std: pn } });
       setOv(data);
+    } catch (e) {
+      setOv(null);
+      const msg = errMsg(e);
+      setError(msg);
+      message.error(msg);
     } finally {
       setLoadingOv(false);
     }
@@ -270,8 +288,17 @@ export default function PartSearchPage() {
             </Col>
           </Row>
         </Card>
+      ) : error ? (
+        <Alert
+          type="error" showIcon message="加载失败" description={error}
+          action={
+            <Button size="small" onClick={() => (lastPn ? openOverview(lastPn) : doSearch(lastQ))}>
+              重试
+            </Button>
+          }
+        />
       ) : (
-        <Empty description="搜索并点击型号查看全景" />
+        <Empty description={searching ? "搜索中…" : "搜索并点击型号查看全景"} />
       )}
     </Space>
   );

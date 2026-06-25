@@ -13,7 +13,7 @@ export const COLORS = {
   accentSoftBorder: "#DBE6F8",
   text: "#2A2722",        // 主文字（暖近黑，非纯黑）
   text2: "#6B665E",       // 次级（暖灰）
-  text3: "#9C968B",       // 提示 / 弱（暖浅灰）
+  text3: "#787264",       // 提示 / 弱（暖灰，4.78:1 过 WCAG AA；原 #9C968B 仅 2.94:1）
   border: "#E9E5DE",      // 发丝边（暖）
   borderSoft: "#F0EDE7",
   danger: "#BE564B",      // 暖红（负毛利 / 错误）

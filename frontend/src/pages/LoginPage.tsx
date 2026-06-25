@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Card, Form, Input, Button, message, Alert } from "antd";
+import { Card, Form, Input, Button, Alert } from "antd";
 import { COLORS } from "../theme";
 import api from "../api";
 
@@ -23,8 +23,7 @@ export default function LoginPage({ onLogin }: { onLogin: (token: string) => voi
         status === 401 ? "用户名或密码错误，请核对后重试"
         : !e?.response ? "无法连接服务器，请检查网络后重试"
         : e?.response?.data?.detail || `登录失败（${status}），请稍后重试`;
-      setErr(msg);
-      message.error(msg);
+      setErr(msg);   // 仅行内 Alert，不再叠加全局 toast（去重复提示）
     } finally {
       setLoading(false);
     }
@@ -37,7 +36,7 @@ export default function LoginPage({ onLogin }: { onLogin: (token: string) => voi
         <span style={{ fontSize: 18, fontWeight: 500, color: COLORS.text }}>备件智能管理系统</span>
       </div>
       <Card style={{ width: 360 }}>
-        <Form onFinish={submit} initialValues={{ username: "admin" }} layout="vertical">
+        <Form onFinish={submit} layout="vertical">
           <Form.Item name="username" label="用户名" rules={[{ required: true, message: "请输入用户名" }]}>
             <Input autoFocus onChange={() => setErr(null)} />
           </Form.Item>

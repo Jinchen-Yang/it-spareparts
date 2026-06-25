@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  Card, Input, Select, Space, Button, Modal, InputNumber, Form, message, Tag,
+  Card, Input, Select, Space, Button, Modal, InputNumber, Form, message, Tag, Alert,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
@@ -32,15 +32,17 @@ export default function InventoryPage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<InvRow | null>(null);
   const [form] = Form.useForm();
 
   useEffect(() => {
-    api.get("/inventory/warehouses").then((r) => setWarehouses(r.data));
+    api.get("/inventory/warehouses").then((r) => setWarehouses(r.data)).catch(() => {});
   }, []);
 
   const load = async (p = page) => {
     setLoading(true);
+    setError(null);
     try {
       const { data } = await api.get("/inventory", {
         params: { warehouse, q: q || undefined, page: p, page_size: 20 },
@@ -48,6 +50,12 @@ export default function InventoryPage() {
       setRows(data.items);
       setTotal(data.total);
       setPage(p);
+    } catch (e: any) {
+      const msg = !e?.response ? "无法连接服务器，请检查网络后重试"
+        : e?.response?.data?.detail || "库存加载失败，请稍后重试";
+      setRows([]);
+      setError(msg);
+      message.error(msg);
     } finally {
       setLoading(false);
     }
@@ -126,9 +134,16 @@ export default function InventoryPage() {
           value={q} onChange={(e) => setQ(e.target.value)} onSearch={() => load(1)} allowClear
         />
       </Space>
+      {error && (
+        <Alert
+          type="error" showIcon message="加载失败" description={error} style={{ marginBottom: 12 }}
+          action={<Button size="small" onClick={() => load(page)}>重试</Button>}
+        />
+      )}
       <ResizableTable
         storageKey="inventory"
         rowKey="id" size="small" loading={loading} columns={cols} dataSource={rows}
+        locale={{ emptyText: error ? "加载失败，请点上方重试" : "暂无数据" }}
         scroll={{ x: 1100 }}
         pagination={{
           current: page, pageSize: 20, total, showSizeChanger: false,

@@ -216,13 +216,13 @@ function ThinkBlock({ text, streaming }: { text: string; streaming?: boolean }) 
     <div style={{ marginBottom: 8 }}>
       <div onClick={() => setOpen((o) => !o)}
         style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
-                 fontSize: 12.5, color: "#9c968b", userSelect: "none" }}>
+                 fontSize: 12.5, color: "var(--mb-text-3)", userSelect: "none" }}>
         <span style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s", fontSize: 10 }}>▶</span>
         <span>💭 {streaming ? "思考中…" : "已思考"}</span>
       </div>
       {open && (
         <div style={{ marginTop: 4, padding: "8px 12px", background: "#F6F3EE", borderRadius: 8,
-                      borderLeft: "2px solid #E9E5DE", fontSize: 12.5, color: "#8a857c",
+                      borderLeft: "2px solid #E9E5DE", fontSize: 12.5, color: "var(--mb-text-3)",
                       whiteSpace: "pre-wrap", lineHeight: 1.7, maxHeight: 320, overflow: "auto" }}>
           {text}
         </div>
@@ -241,18 +241,18 @@ function ToolTrace({ tools }: { tools?: AgentToolCall[] }) {
     <div style={{ marginTop: 8 }}>
       <div onClick={() => setOpen((o) => !o)}
         style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
-                 fontSize: 12, color: "#9c968b", userSelect: "none", maxWidth: "100%" }}>
+                 fontSize: 12, color: "var(--mb-text-3)", userSelect: "none", maxWidth: "100%" }}>
         <span style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s", fontSize: 10 }}>▶</span>
         <span>🔧 用了 {tools.length} 次工具</span>
-        {!open && <span style={{ color: "#bdb7ab", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {summary}</span>}
+        {!open && <span style={{ color: "var(--mb-text-3)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>· {summary}</span>}
       </div>
       {open && (
         <div style={{ marginTop: 4, paddingLeft: 14, borderLeft: "2px solid #ECE8E1" }}>
           {tools.map((t, i) => {
             const a = argOf(t.args);
             return (
-              <div key={i} style={{ fontSize: 12, color: "#8a857c", padding: "2px 0" }}>
-                {label(t.name)}{a ? <span style={{ color: "#b6b0a6" }}>（{a.slice(0, 30)}）</span> : null}
+              <div key={i} style={{ fontSize: 12, color: "var(--mb-text-3)", padding: "2px 0" }}>
+                {label(t.name)}{a ? <span style={{ color: "var(--mb-text-3)" }}>（{a.slice(0, 30)}）</span> : null}
               </div>
             );
           })}
@@ -270,7 +270,7 @@ function LiveTrace({ runs }: { runs: ToolRun[] }) {
   return (
     <div style={{ marginBottom: 8, fontSize: 12.5 }}>
       {doneGroups.length > 0 && (
-        <div style={{ color: "#9c968b" }}>
+        <div style={{ color: "var(--mb-text-3)" }}>
           ✓ {doneGroups.map((g) => `${label(g.name)}${g.count > 1 ? ` ×${g.count}` : ""}`).join(" · ")}
         </div>
       )}
@@ -682,7 +682,9 @@ export default function ChatPage() {
         </div>
         <div style={{ flex: 1, overflowY: "auto", padding: "0 8px 12px" }}>
           {sessions.map((s) => (
-            <div key={s.id} className="sess-item" onClick={() => s.id !== activeId && openSession(s.id)}
+            <div key={s.id} className="sess-item" role="button" tabIndex={0}
+              onClick={() => s.id !== activeId && openSession(s.id)}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); s.id !== activeId && openSession(s.id); } }}
               style={{
                 padding: "8px 10px", borderRadius: 8, cursor: "pointer", marginBottom: 2,
                 display: "flex", alignItems: "center", gap: 6,
@@ -702,7 +704,7 @@ export default function ChatPage() {
                 removeSession(s.id);
               }}>
                 <DeleteOutlined className="sess-del" onClick={(e) => e.stopPropagation()}
-                  style={{ opacity: 0, fontSize: 12, color: "#9ca3af" }} />
+                  style={{ opacity: 0, fontSize: 12, color: "var(--mb-text-3)" }} />
               </Popconfirm>
             </div>
           ))}
@@ -726,23 +728,28 @@ export default function ChatPage() {
                   <RobotOutlined style={{ fontSize: 28, color: "#fff" }} />
                 </div>
                 <h2 style={{ marginBottom: 4 }}>AI 定价助手</h2>
-                <div style={{ color: "#9ca3af", marginBottom: 28 }}>
+                <div style={{ color: "var(--mb-text-3)", marginBottom: 28 }}>
                   基于公司真实采购 / 销售 / 库存数据回答 · 对话记录云端保存，换设备也能接着聊
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12,
                               maxWidth: 640, margin: "0 auto", textAlign: "left" }}>
-                  {EXAMPLES.map((ex) => (
-                    <div key={ex.title} onClick={() => !ex.q.startsWith("点左下角") && send(ex.q)}
+                  {EXAMPLES.map((ex) => {
+                    const clickable = !ex.q.startsWith("点左下角");
+                    return (
+                    <div key={ex.title} role={clickable ? "button" : undefined} tabIndex={clickable ? 0 : -1}
+                      onClick={() => clickable && send(ex.q)}
+                      onKeyDown={(e) => { if (clickable && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); send(ex.q); } }}
                       style={{
                         border: "1px solid #e5e7eb", borderRadius: 12, padding: "12px 14px",
-                        cursor: ex.q.startsWith("点左下角") ? "default" : "pointer", background: "#fff",
+                        cursor: clickable ? "pointer" : "default", background: "#fff",
                       }}
                       onMouseEnter={(e) => (e.currentTarget.style.borderColor = "#c7d2fe")}
                       onMouseLeave={(e) => (e.currentTarget.style.borderColor = "#e5e7eb")}>
                       <div style={{ fontWeight: 600, marginBottom: 2 }}>{ex.icon} {ex.title}</div>
                       <div style={{ color: "#6b7280", fontSize: 12.5 }}>{ex.q}</div>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -776,7 +783,7 @@ export default function ChatPage() {
                     {t.stopped && <Tag style={{ marginTop: 6 }} color="orange">已中断</Tag>}
                     <Tooltip title="复制全文">
                       <Button className="copy-btn" size="small" type="text" icon={<CopyOutlined />}
-                        style={{ opacity: 0, color: "#9ca3af", marginTop: 4 }}
+                        style={{ opacity: 0, color: "var(--mb-text-3)", marginTop: 4 }}
                         onClick={() => copyText(t.content)} />
                     </Tooltip>
                   </div>
@@ -799,7 +806,7 @@ export default function ChatPage() {
                   <LiveTrace runs={toolRuns} />
                   <div className="chat-md" style={{ fontSize: 14 }}>
                     {streamText ? <Md text={streamText} />
-                      : (!runningTool && !thinkText) && <span style={{ color: "#9ca3af" }}>思考中…</span>}
+                      : (!runningTool && !thinkText) && <span style={{ color: "var(--mb-text-3)" }}>思考中…</span>}
                     <span className="cursor" />
                   </div>
                 </div>
@@ -876,7 +883,7 @@ export default function ChatPage() {
                 </Tooltip>
               )}
             </div>
-            <div style={{ textAlign: "center", color: "#c4c4c4", fontSize: 11, padding: "6px 0 4px" }}>
+            <div style={{ textAlign: "center", color: "var(--mb-text-2)", fontSize: 11, padding: "6px 0 4px" }}>
               AI 基于库内数据回答，可能出错——重要报价请人工复核
             </div>
           </div>
