@@ -7,7 +7,7 @@
   --mb-accent-soft: #EEF3FC;
   --mb-text: #2A2722;
   --mb-text-2: #6B665E;
-  --mb-text-3: #9C968B;
+  --mb-text-3: #787264;   /* 弱提示灰：从 #9C968B(2.94:1) 加深至 4.78:1，过 WCAG AA 正文 4.5:1 */
   --mb-border: #E9E5DE;
   --mb-danger: #BE564B;
   --mb-warning: #B07C33;

@@ -39,7 +39,7 @@ const fmtMoney = (v: number | null | undefined) =>
   v == null ? "—" : Number(v).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 function Sparkline({ data, accent }: { data: number[] | null; accent: string }) {
-  if (!data || data.length === 0) return <span style={{ color: "#9c968b" }}>—</span>;
+  if (!data || data.length === 0) return <span style={{ color: "var(--mb-text-3)" }}>—</span>;
   const max = Math.max(...data, 1);
   return (
     <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 22 }}>
@@ -59,13 +59,13 @@ function Sparkline({ data, accent }: { data: number[] | null; accent: string }) 
 function TrendArrow({ t }: { t: PurchaseAnalysisRow["price_trend"] }) {
   if (t === "up") return <span style={{ color: "#c0524a" }}>↑</span>;
   if (t === "down") return <span style={{ color: "#3f7a45" }}>↓</span>;
-  return <span style={{ color: "#9c968b" }}>→</span>;
+  return <span style={{ color: "var(--mb-text-3)" }}>→</span>;
 }
 
 function PriceCell({ row, basis }: { row: PurchaseAnalysisRow; basis: string }) {
   const line = (label: string, min: number | null, max: number | null, last: number | null) => (
     <div style={{ whiteSpace: "nowrap" }}>
-      {label && <span style={{ color: "#9c968b" }}>{label} </span>}
+      {label && <span style={{ color: "var(--mb-text-3)" }}>{label} </span>}
       {fmt(min)}–{fmt(max)}
       <span style={{ color: "#6b665e" }}> · 最近 {fmt(last)} </span>
       {last != null && <TrendArrow t={row.price_trend} />}
@@ -92,7 +92,7 @@ function KpiCard({ label, value, sub, highlight }: {
     }}>
       <div style={{ fontSize: 12.5, color: highlight ? "#9a7b43" : "#6b665e" }}>{label}</div>
       <div style={{ fontSize: 22, fontWeight: 500, marginTop: 4, color: highlight ? "#9a7b43" : undefined }}>{value}</div>
-      {sub && <div style={{ fontSize: 11.5, color: highlight ? "#9a7b43" : "#9c968b", marginTop: 2 }}>{sub}</div>}
+      {sub && <div style={{ fontSize: 11.5, color: highlight ? "#9a7b43" : "var(--mb-text-3)", marginTop: 2 }}>{sub}</div>}
     </div>
   );
 }
@@ -119,7 +119,7 @@ function SourceComposition({ comp, accent }: {
           </span>
         ))}
       </div>
-      <div style={{ fontSize: 11.5, color: "#9c968b", marginTop: 4 }}>
+      <div style={{ fontSize: 11.5, color: "var(--mb-text-3)", marginTop: 4 }}>
         金额为实付口径（含税单含税 + 不含税单未税），与上方采购额一致
       </div>
     </div>
@@ -145,7 +145,7 @@ function DrillTable({ partId, days, excludeDesignated }: { partId: number; days:
       columns={[
         { title: "日期", dataIndex: "order_date", width: 100, render: (v) => v || "—" },
         { title: "采购员", dataIndex: "purchaser", width: 90, render: (v) => v || "—" },
-        { title: "供应商", dataIndex: "supplier", ellipsis: true, render: (v) => v || <span style={{ color: "#9c968b" }}>（不可见）</span> },
+        { title: "供应商", dataIndex: "supplier", ellipsis: true, render: (v) => v || <span style={{ color: "var(--mb-text-3)" }}>（不可见）</span> },
         { title: "渠道", dataIndex: "source_channel", width: 100, render: (v) => v ? <Tag>{v}</Tag> : "—" },
         { title: "口径", dataIndex: "is_tax_inclusive", width: 70,
           render: (v) => (v == null ? "—" : <Tag color={v ? "default" : "blue"}>{v ? "含税" : "未税"}</Tag>) },
@@ -190,7 +190,7 @@ function AnalysisPanel() {
         <div>
           <span style={{ fontFamily: "monospace", fontSize: 12.5 }}>{v}</span>
           {r.needs_review && <Tag color="orange" style={{ marginLeft: 6 }}>待复核</Tag>}
-          <div style={{ fontSize: 11.5, color: "#9c968b" }}>{r.description || r.brand || ""}</div>
+          <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>{r.description || r.brand || ""}</div>
         </div>
       ) },
     { title: "次数", dataIndex: "buy_times", width: 64, align: "center",
@@ -209,16 +209,16 @@ function AnalysisPanel() {
         </span>
       ) },
     { title: "库存", key: "stock", width: 72, align: "center",
-      render: () => <span style={{ color: "#9c968b" }}>未启用</span> },
+      render: () => <span style={{ color: "var(--mb-text-3)" }}>未启用</span> },
     { title: "建议", dataIndex: "advice", width: 90,
-      render: (v: string) => (v && v !== "普通" ? <Tag color={ADVICE_COLOR[v]}>{v}</Tag> : <span style={{ color: "#9c968b" }}>—</span>) },
+      render: (v: string) => (v && v !== "普通" ? <Tag color={ADVICE_COLOR[v]}>{v}</Tag> : <span style={{ color: "var(--mb-text-3)" }}>—</span>) },
   ];
 
   return (
     <Card style={{ marginBottom: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: open ? 14 : 0 }}>
         <span onClick={toggle} style={{ fontSize: 16, fontWeight: 500, cursor: "pointer", userSelect: "none", display: "flex", alignItems: "center", gap: 8 }}>
-          <RightOutlined style={{ fontSize: 12, color: "#9c968b", transition: "transform .15s", transform: open ? "rotate(90deg)" : "none" }} />
+          <RightOutlined style={{ fontSize: 12, color: "var(--mb-text-3)", transition: "transform .15s", transform: open ? "rotate(90deg)" : "none" }} />
           采购分析 · 高频采购待计划
           {!open && kpi && (
             <span style={{ fontSize: 12.5, fontWeight: 400, color: "#9a7b43" }}>
@@ -261,7 +261,7 @@ function AnalysisPanel() {
           rowExpandable: () => true,
         }}
       />
-      <div style={{ marginTop: 8, fontSize: 12, color: "#9c968b" }}>
+      <div style={{ marginTop: 8, fontSize: 12, color: "var(--mb-text-3)" }}>
         点开型号看逐笔比价（谁采的 / 哪家 / 含税未税）。建议：
         <Tag color="gold">批量补库</Tag>频发应急→早会谈量 ·
         <Tag color="blue">谈价</Tag>价格在涨→压价 ·
