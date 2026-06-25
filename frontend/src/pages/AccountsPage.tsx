@@ -120,13 +120,13 @@ export default function AccountsPage() {
 
       <Modal title="新建账号" open={createOpen} onOk={() => cForm.submit()} onCancel={() => setCreateOpen(false)} okText="创建">
         <Form form={cForm} layout="vertical" onFinish={doCreate} initialValues={{ role: "sales" }}>
-          <Form.Item name="username" label="用户名（登录用）" rules={[{ required: true, message: "请输入用户名" }]}><Input /></Form.Item>
+          <Form.Item name="username" label="用户名（登录用）" rules={[{ required: true, message: "请输入用户名" }]}><Input autoComplete="off" /></Form.Item>
           <Form.Item name="display_name" label="姓名"><Input /></Form.Item>
           <Form.Item name="role" label="角色（决定默认权限，可建后微调）" rules={[{ required: true }]}>
             <Select options={(meta?.roles || []).filter((r) => r !== "admin").map((r) => ({ value: r, label: ROLE_LABEL[r] || r }))} />
           </Form.Item>
           <Form.Item name="salesperson_name" label="对应销售名（销售防竞争用，选填）"><Input placeholder="与销售数据里的销售员姓名一致" /></Form.Item>
-          <Form.Item name="password" label="初始密码（≥6 位）" rules={[{ required: true, min: 6, message: "至少 6 位" }]}><Input.Password /></Form.Item>
+          <Form.Item name="password" label="初始密码（≥6 位）" rules={[{ required: true, min: 6, message: "至少 6 位" }]}><Input.Password autoComplete="new-password" /></Form.Item>
         </Form>
       </Modal>
 
@@ -147,7 +147,7 @@ export default function AccountsPage() {
 
       <Modal title={pwT ? `重置密码 · ${pwT.username}` : ""} open={!!pwT} onOk={() => pwForm.submit()} onCancel={() => setPwT(null)} okText="重置">
         <Form form={pwForm} layout="vertical" onFinish={doReset}>
-          <Form.Item name="password" label="新密码（≥6 位）" rules={[{ required: true, min: 6, message: "至少 6 位" }]}><Input.Password /></Form.Item>
+          <Form.Item name="password" label="新密码（≥6 位）" rules={[{ required: true, min: 6, message: "至少 6 位" }]}><Input.Password autoComplete="new-password" /></Form.Item>
         </Form>
       </Modal>
 

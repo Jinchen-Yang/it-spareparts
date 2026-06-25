@@ -36,7 +36,7 @@ export default function LoginPage({ onLogin }: { onLogin: (token: string) => voi
         <span style={{ fontSize: 18, fontWeight: 500, color: COLORS.text }}>备件智能管理系统</span>
       </div>
       <Card style={{ width: 360 }}>
-        <Form onFinish={submit} initialValues={{ username: "admin" }} layout="vertical">
+        <Form onFinish={submit} layout="vertical">
           <Form.Item name="username" label="用户名" rules={[{ required: true, message: "请输入用户名" }]}>
             <Input autoFocus onChange={() => setErr(null)} />
           </Form.Item>
