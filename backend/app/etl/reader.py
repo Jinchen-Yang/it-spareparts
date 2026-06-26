@@ -40,6 +40,8 @@ def read_excel(path: str) -> tuple[pd.DataFrame, str]:
 
     h = detect_header(raw)
     cols = _norm_cols(raw.iloc[h].tolist())
+    # 容差归一：把 (必填) 等注解差异的列名规范到 mapping 键，避免非标导出整列读空（empty_pn）
+    cols = mapping.canonicalize_columns(cols)
 
     dup = [c for c, n in Counter(cols).items() if n > 1 and c not in ("", "NAN", "None")]
     if dup:
