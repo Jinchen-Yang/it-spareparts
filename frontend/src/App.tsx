@@ -13,6 +13,15 @@ import AccountsPage from "./pages/AccountsPage";
 
 const { Header, Content } = Layout;
 
+/** 安全读取本地权限快照：localStorage 被写坏时回退为空而非抛错致整页白屏（审计 U-1）。 */
+function readPerms(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem("permissions") || "{}");
+  } catch {
+    return {};
+  }
+}
+
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
   const [page, setPage] = useState("parts");
@@ -32,7 +41,7 @@ export default function App() {
   };
   const role = localStorage.getItem("role") || "";
   const name = localStorage.getItem("name") || "";
-  const perms: Record<string, boolean> = JSON.parse(localStorage.getItem("permissions") || "{}");
+  const perms: Record<string, boolean> = readPerms();
   const isAdmin = role === "admin";
   const can = (p: string) => isAdmin || !!perms[p];
   const menu = [

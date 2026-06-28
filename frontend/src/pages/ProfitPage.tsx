@@ -48,6 +48,9 @@ export default function ProfitPage() {
     try {
       const { data } = await api.get("/profit", { params: params() });
       setRows(data.rows);
+    } catch {
+      // 不再静默吞错：失败时明确提示，避免决策层把陈旧/空数据当真实利润（审计 U-2）
+      message.error("利润数据加载失败，请稍后重试或检查网络/权限");
     } finally {
       setLoading(false);
     }

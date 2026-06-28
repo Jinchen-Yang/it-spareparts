@@ -5,6 +5,7 @@
 - 非空但不合法 → 抛 ValueError，由 validate 层捕获并记 sys_import_error。
 - 金额/数量/税率分别按 0.01 / 0.001 / 0.0001 精度 quantize。
 """
+import numbers
 import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -12,6 +13,9 @@ from decimal import Decimal, InvalidOperation
 import pandas as pd
 
 from app import config
+
+# 共享数值列精度 Numeric(14, scale)：整数位上限 = 14 - scale（见 models/_types.py）。
+_NUMERIC_PRECISION = 14
 
 # 氚云内部 V 码 token：V + ≥10 位大写字母数字（实测含字母，如 V0230LD000000000）
 _VCODE_TOKEN = re.compile(r"^V[0-9A-Z]{10,}$")
@@ -89,9 +93,15 @@ def _parse_decimal(x, places: str, label: str) -> Decimal | None:
         return None
     s = _THOUSANDS.sub("", str(x).strip())
     try:
-        return Decimal(s).quantize(Decimal(places))
+        val = Decimal(s).quantize(Decimal(places))
     except (InvalidOperation, ValueError) as exc:
         raise ValueError(f"{label}非数字: {x!r}") from exc
+    # 越列限保护：超出 Numeric(14, scale) 可表达范围时抛 ValueError 走坏行隔离，
+    # 而非流到 DB 抛未捕获的 DataError 毒化整批导入事务（审计 2026-06-28 I-4）。
+    scale = abs(Decimal(places).as_tuple().exponent)
+    if abs(val) >= Decimal(10) ** (_NUMERIC_PRECISION - scale):
+        raise ValueError(f"{label}超出取值范围({val}): {x!r}")
+    return val
 
 
 def parse_money(x) -> Decimal | None:
@@ -115,6 +125,12 @@ def parse_int(x) -> int | None:
 def parse_date(x) -> date | None:
     if _is_blank(x):
         return None
+    # Excel 日期序列号：日期列丢失日期格式时 openpyxl 返回裸数字，pd.to_datetime 会按纳秒纪元
+    # 塌缩到 1970-01-01（静默数据损坏）。数字一律按 Excel 纪元(1899-12-30)还原（审计 I-3）。
+    if isinstance(x, numbers.Number) and not isinstance(x, bool):
+        if not (1 <= x <= 100000):           # 合理 Excel 序列号区间（约 1900–2173），越界判非法
+            raise ValueError(f"日期非法: {x!r}")
+        return pd.to_datetime(x, unit="D", origin="1899-12-30").date()
     ts = pd.to_datetime(x, errors="coerce")
     if pd.isna(ts):
         raise ValueError(f"日期非法: {x!r}")
