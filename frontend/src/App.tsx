@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Layout, Menu, Button, Tag } from "antd";
+import { Layout, Menu, Button, Tag, Modal, Alert } from "antd";
 import { COLORS } from "./theme";
+import { APP_VERSION, CHANGELOG, LATEST } from "./version";
 import LoginPage from "./pages/LoginPage";
 import PartSearchPage from "./pages/PartSearchPage";
 import ProfitPage from "./pages/ProfitPage";
@@ -25,6 +26,15 @@ function readPerms(): Record<string, boolean> {
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
   const [page, setPage] = useState("parts");
+  const [changelogOpen, setChangelogOpen] = useState(false);
+  // 升版后首次进入显示一次更新提示（按已看版本号去重）
+  const [showWhatsNew, setShowWhatsNew] = useState(
+    () => localStorage.getItem("seen_version") !== APP_VERSION,
+  );
+  const dismissWhatsNew = () => {
+    localStorage.setItem("seen_version", APP_VERSION);
+    setShowWhatsNew(false);
+  };
 
   if (!token) return <LoginPage onLogin={(t) => setToken(t)} />;
 
@@ -80,6 +90,13 @@ export default function App() {
           items={menu}
           style={{ flex: 1, minWidth: 0, background: "transparent", borderBottom: "none" }}
         />
+        <span
+          onClick={() => setChangelogOpen(true)}
+          title="查看更新日志"
+          style={{ color: COLORS.text2, fontSize: 12.5, marginRight: 16, cursor: "pointer", whiteSpace: "nowrap" }}
+        >
+          v{APP_VERSION}
+        </span>
         <a href="/manual.html" target="_blank" rel="noopener"
            style={{ color: COLORS.text2, fontSize: 13, marginRight: 16, whiteSpace: "nowrap" }}>
           使用说明
@@ -94,6 +111,26 @@ export default function App() {
         <Button onClick={logout}>退出</Button>
       </Header>
       <Content style={{ padding: 24, background: COLORS.page }}>
+        {showWhatsNew && (
+          <Alert
+            type="success"
+            showIcon
+            closable
+            onClose={dismissWhatsNew}
+            style={{ marginBottom: 16 }}
+            message={`本次更新 · v${APP_VERSION}（${LATEST.date}）`}
+            description={
+              <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                {LATEST.items.map((it, i) => <li key={i}>{it}</li>)}
+              </ul>
+            }
+            action={
+              <Button size="small" type="link" onClick={() => setChangelogOpen(true)}>
+                完整日志
+              </Button>
+            }
+          />
+        )}
         {activePage === "import" && <ImportPage />}
         {activePage === "parts" && <PartSearchPage />}
         {activePage === "purchases" && <PurchasesPage />}
@@ -103,6 +140,26 @@ export default function App() {
         {activePage === "governance" && <GovernancePage />}
         {activePage === "accounts" && <AccountsPage />}
       </Content>
+      <Modal
+        open={changelogOpen}
+        onCancel={() => setChangelogOpen(false)}
+        footer={null}
+        title="更新日志"
+      >
+        {CHANGELOG.map((e) => (
+          <div key={e.version} style={{ marginBottom: 14 }}>
+            <div style={{ fontWeight: 600 }}>
+              v{e.version}
+              <span style={{ color: COLORS.text2, fontWeight: 400, fontSize: 12.5, marginLeft: 8 }}>
+                {e.date}
+              </span>
+            </div>
+            <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+              {e.items.map((it, i) => <li key={i}>{it}</li>)}
+            </ul>
+          </div>
+        ))}
+      </Modal>
     </Layout>
   );
 }
