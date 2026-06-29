@@ -7,7 +7,11 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from app import config
 from app.etl import anomaly, cleaner, mapping
+
+# 非"硬错误"的软标记类型：不计入 fact_rows_error（见 loader），只在错误列表里以"可忽略"展示。
+SOFT_ERROR_TYPES = frozenset({"empty_pn_inactive"})
 
 
 @dataclass
@@ -34,6 +38,17 @@ def _row_dict(row, field_map) -> dict:
     return {v: (None if pd.isna(row.get(k)) else str(row.get(k))) for k, v in field_map.items()}
 
 
+def _empty_pn_error(row_no, status, label_no, raw_row) -> "ErrorRec":
+    """空产品名分级：生效单缺产品=真错误 empty_pn；草稿/已取消等非生效单缺产品=
+    预期内不完整数据 empty_pn_inactive（不计错误数，只留痕标"可忽略"）。"""
+    if status and status != config.ACTIVE_STATUS:
+        tail = f"·{label_no}" if label_no else ""
+        return ErrorRec(row_no, "empty_pn_inactive",
+                        f"产品名称为空（{status}单{tail}，可忽略）", raw_row)
+    tail = f"（{label_no}）" if label_no else ""
+    return ErrorRec(row_no, "empty_pn", f"产品名称为空{tail}", raw_row)
+
+
 def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
     res = TransformResult(file_type=file_type)
     head_map = mapping.MAPPINGS[file_type]["head"]
@@ -56,7 +71,9 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
 
         pn_std, pn_raw, needs_review = cleaner.standardize_pn(row.get(inv_line["pn_raw"]))
         if pn_std is None:
-            res.errors.append(ErrorRec(row_no, "empty_pn", "产品名称为空", _row_dict(row, full_map)))
+            res.errors.append(_empty_pn_error(
+                row_no, cleaner.clean_str(row.get(inv_head["data_status"])),
+                cleaner.clean_str(row.get(inv_head["order_no"])), _row_dict(row, full_map)))
             continue
 
         # 行级数值
@@ -184,7 +201,8 @@ def _transform_inventory(df: pd.DataFrame) -> TransformResult:
             continue
         pn_std, pn_raw, needs_review = cleaner.standardize_pn(row.get(inv["pn_raw"]))
         if pn_std is None:
-            res.errors.append(ErrorRec(row_no, "empty_pn", "产品名称为空", _row_dict(row, m)))
+            res.errors.append(_empty_pn_error(
+                row_no, cleaner.clean_str(row.get(inv["data_status"])), None, _row_dict(row, m)))
             continue
         warehouse = cleaner.clean_str(row.get(inv["warehouse"]))
         try:

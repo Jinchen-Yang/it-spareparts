@@ -138,9 +138,17 @@ export default function ImportPage() {
     setDetail(data);
   };
 
+  // 软标记（非真错误，可忽略）→ 灰色；其余 → 红色
+  const ERR_LABEL: Record<string, { label: string; color: string }> = {
+    empty_pn_inactive: { label: "草稿/取消单·可忽略", color: "default" },
+  };
   const errCols: ColumnsType<any> = [
     { title: "行号", dataIndex: "row_no", width: 80 },
-    { title: "错误类型", dataIndex: "error_type", width: 160, render: (t) => <Tag color="red">{t}</Tag> },
+    { title: "类型", dataIndex: "error_type", width: 170,
+      render: (t: string) => {
+        const e = ERR_LABEL[t];
+        return <Tag color={e?.color || "red"}>{e?.label || t}</Tag>;
+      } },
     { title: "明细", dataIndex: "detail" },
   ];
 

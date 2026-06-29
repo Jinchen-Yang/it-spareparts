@@ -21,7 +21,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.etl import mapping
-from app.etl.transform import TransformResult
+from app.etl.transform import SOFT_ERROR_TYPES, TransformResult
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inventory import Inventory
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
@@ -428,7 +428,7 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
         "fact_rows_inserted": line_stats["inserted"],
         "fact_rows_updated": line_stats["updated"],
         "fact_rows_skipped": line_stats["skipped"],
-        "fact_rows_error": len(result.errors),
+        "fact_rows_error": sum(1 for e in result.errors if e.error_type not in SOFT_ERROR_TYPES),
         "rows_inactive": result.rows_inactive,
         "orders_inserted": order_stats["inserted"],
         "orders_updated": order_stats["updated"],
@@ -527,7 +527,7 @@ def _load_inventory(session: Session, result: TransformResult, batch_id: int, sn
         "source_rows_total": result.rows_total,
         "fact_rows_inserted": len(rows),
         "fact_rows_skipped": 0,
-        "fact_rows_error": len(result.errors),
+        "fact_rows_error": sum(1 for e in result.errors if e.error_type not in SOFT_ERROR_TYPES),
         "rows_inactive": result.rows_inactive,
         "merged_pn_warehouse": len(result.inventory) - len(rows),
         "new_parts": new_parts,
