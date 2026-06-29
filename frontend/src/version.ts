@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.0.0";
+export const APP_VERSION = "1.1.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.1.0",
+    date: "2026-06-30",
+    items: [
+      "新增「导入前检查」：上传采购/销售文件若缺少价格列（常因导出视图选错），会先提示并请二次确认，避免导入后无金额却无人察觉",
+    ],
+  },
   {
     version: "1.0.0",
     date: "2026-06-29",
