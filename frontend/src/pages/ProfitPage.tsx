@@ -7,6 +7,7 @@ import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import type { Dayjs } from "dayjs";
 import api from "../api";
+import { money, pct } from "../utils/format";
 
 interface ProfitRow {
   dimension: string;
@@ -23,8 +24,6 @@ interface ProfitRow {
   excluded_revenue: number | null;
 }
 
-const money = (v: number | null) => (v == null ? "-" : `¥${v.toLocaleString()}`);
-const pct = (v: number | null) => (v == null ? "-" : `${(v * 100).toFixed(2)}%`);
 
 const DIM_LABEL: Record<string, string> = { part: "型号", salesperson: "销售员", customer: "客户" };
 
@@ -88,7 +87,7 @@ export default function ProfitPage() {
     <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{money(v)}</span>
   );
   const pctCol = (v: number | null) => (
-    <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{pct(v)}</span>
+    <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{pct(v, 2)}</span>
   );
 
   const cols: ColumnsType<ProfitRow> = [

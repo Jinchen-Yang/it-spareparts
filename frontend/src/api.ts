@@ -39,23 +39,10 @@ export interface PartHit {
 }
 
 // ===== 二期 AI 助手 =====
-export interface ChatMessage {
-  role: "user" | "assistant";
-  content: string;
-}
 export interface AgentToolCall {
   name: string;
   args: Record<string, unknown>;
 }
-export interface AgentChatResponse {
-  configured: boolean;
-  answer: string;
-  tool_calls: AgentToolCall[];
-}
-
-export const agentChat = (messages: ChatMessage[]) =>
-  api.post<AgentChatResponse>("/agent/chat", { messages });
-
 /** SSE 事件（/agent/chat/stream） */
 export type AgentStreamEvent =
   | { type: "delta"; text: string }
@@ -64,49 +51,6 @@ export type AgentStreamEvent =
   | { type: "tool_done"; name: string; ok: boolean }
   | { type: "done"; tool_calls: AgentToolCall[]; answer?: string; configured?: boolean; stopped?: boolean }
   | { type: "error"; message: string };
-
-/** 流式问答：axios 不支持浏览器流式，用 fetch + ReadableStream 解析 SSE */
-export async function agentChatStream(
-  messages: ChatMessage[],
-  onEvent: (ev: AgentStreamEvent) => void,
-  signal?: AbortSignal,
-): Promise<void> {
-  const resp = await fetch("/api/agent/chat/stream", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
-    },
-    body: JSON.stringify({ messages }),
-    signal,
-  });
-  if (!resp.ok || !resp.body) {
-    if (resp.status === 401) {
-      localStorage.removeItem("token");
-      location.reload();
-    }
-    throw new Error(`stream http ${resp.status}`);
-  }
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const blocks = buf.split("\n\n");
-    buf = blocks.pop()!;
-    for (const block of blocks) {
-      const line = block.split("\n").find((l) => l.startsWith("data: "));
-      if (!line) continue;
-      try {
-        onEvent(JSON.parse(line.slice(6)) as AgentStreamEvent);
-      } catch {
-        /* 跳过坏帧 */
-      }
-    }
-  }
-}
 
 // ===== 服务端会话（平台化 P1）=====
 export interface ChatSessionMeta {

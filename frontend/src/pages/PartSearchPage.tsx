@@ -9,9 +9,7 @@ import PageHeader from "../components/PageHeader";
 import api from "../api";
 import type { Overview, PartHit, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { COLORS } from "../theme";
-
-const money = (v: number | null) => (v == null ? "-" : `¥${v.toLocaleString()}`);
-const pct = (v: number | null | undefined) => (v == null ? "-" : `${(v * 100).toFixed(1)}%`);
+import { money, pct } from "../utils/format";
 const errMsg = (e: any) =>
   !e?.response ? "无法连接服务器，请检查网络后重试"
   : e?.response?.data?.detail || `加载失败（${e?.response?.status ?? "?"}），请稍后重试`;
