@@ -46,6 +46,8 @@ class FPurchaseOrder(Base):
     __table_args__ = (
         Index("ix_po_order_no", "order_no"),
         Index("ix_po_linked", "linked_sales_order_no"),
+        # 高频过滤+排序：业务查询按 已生效 过滤、按 order_date 排序/窗口（架构体检 2026-06-29）
+        Index("ix_po_status_date", "data_status", "order_date"),
     )
 
 

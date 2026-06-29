@@ -7,6 +7,7 @@ import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import type { Dayjs } from "dayjs";
 import api from "../api";
+import { money, pct } from "../utils/format";
 
 interface ProfitRow {
   dimension: string;
@@ -23,8 +24,6 @@ interface ProfitRow {
   excluded_revenue: number | null;
 }
 
-const money = (v: number | null) => (v == null ? "-" : `¥${v.toLocaleString()}`);
-const pct = (v: number | null) => (v == null ? "-" : `${(v * 100).toFixed(2)}%`);
 
 const DIM_LABEL: Record<string, string> = { part: "型号", salesperson: "销售员", customer: "客户" };
 
@@ -48,6 +47,9 @@ export default function ProfitPage() {
     try {
       const { data } = await api.get("/profit", { params: params() });
       setRows(data.rows);
+    } catch {
+      // 不再静默吞错：失败时明确提示，避免决策层把陈旧/空数据当真实利润（审计 U-2）
+      message.error("利润数据加载失败，请稍后重试或检查网络/权限");
     } finally {
       setLoading(false);
     }
@@ -85,7 +87,7 @@ export default function ProfitPage() {
     <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{money(v)}</span>
   );
   const pctCol = (v: number | null) => (
-    <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{pct(v)}</span>
+    <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{pct(v, 2)}</span>
   );
 
   const cols: ColumnsType<ProfitRow> = [

@@ -6,6 +6,7 @@ import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import api from "../api";
+import { money } from "../utils/format";
 
 interface InvRow {
   id: number;
@@ -22,7 +23,6 @@ interface InvRow {
   inventory_value: number | null;
 }
 
-const money = (v: number | null) => (v == null ? "-" : `¥${v.toLocaleString()}`);
 
 export default function InventoryPage() {
   const [warehouses, setWarehouses] = useState<string[]>([]);

@@ -5,6 +5,7 @@ import threading
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import desc, func, select, update
+from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session
 
 from app.auth import require_admin
@@ -87,6 +88,13 @@ def upload(
         except ReaderError as exc:
             db.commit()  # failed batch 已记录
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        except DataError as exc:
+            # 字段超长/超限等 DB 数据错误：回滚整批，回干净 422 而非裸 500（审计 2026-06-28 I-4）。
+            db.rollback()
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "文件中存在超出字段范围的数据（如金额过大或文本过长），整批未导入，请修正后重试。"
+            ) from exc
         recompute_stats = _post_import_refresh(
             db, batch.file_type in ("purchase", "sales"),
             batch.file_type in ("purchase", "inventory"))

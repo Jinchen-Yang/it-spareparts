@@ -6,9 +6,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import api from "../api";
-
-const money = (v: number | null) => (v == null ? "-" : `¥${v.toLocaleString()}`);
-const pct = (v: number | null) => (v == null ? "-" : `${(v * 100).toFixed(1)}%`);
+import { money, pct } from "../utils/format";
 const pct100 = (v: number | null) => (v == null ? "-" : `${v.toFixed(1)}%`);
 
 interface PartRow {

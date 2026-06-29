@@ -39,23 +39,10 @@ export interface PartHit {
 }
 
 // ===== 二期 AI 助手 =====
-export interface ChatMessage {
-  role: "user" | "assistant";
-  content: string;
-}
 export interface AgentToolCall {
   name: string;
   args: Record<string, unknown>;
 }
-export interface AgentChatResponse {
-  configured: boolean;
-  answer: string;
-  tool_calls: AgentToolCall[];
-}
-
-export const agentChat = (messages: ChatMessage[]) =>
-  api.post<AgentChatResponse>("/agent/chat", { messages });
-
 /** SSE 事件（/agent/chat/stream） */
 export type AgentStreamEvent =
   | { type: "delta"; text: string }
@@ -64,49 +51,6 @@ export type AgentStreamEvent =
   | { type: "tool_done"; name: string; ok: boolean }
   | { type: "done"; tool_calls: AgentToolCall[]; answer?: string; configured?: boolean; stopped?: boolean }
   | { type: "error"; message: string };
-
-/** 流式问答：axios 不支持浏览器流式，用 fetch + ReadableStream 解析 SSE */
-export async function agentChatStream(
-  messages: ChatMessage[],
-  onEvent: (ev: AgentStreamEvent) => void,
-  signal?: AbortSignal,
-): Promise<void> {
-  const resp = await fetch("/api/agent/chat/stream", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
-    },
-    body: JSON.stringify({ messages }),
-    signal,
-  });
-  if (!resp.ok || !resp.body) {
-    if (resp.status === 401) {
-      localStorage.removeItem("token");
-      location.reload();
-    }
-    throw new Error(`stream http ${resp.status}`);
-  }
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const blocks = buf.split("\n\n");
-    buf = blocks.pop()!;
-    for (const block of blocks) {
-      const line = block.split("\n").find((l) => l.startsWith("data: "));
-      if (!line) continue;
-      try {
-        onEvent(JSON.parse(line.slice(6)) as AgentStreamEvent);
-      } catch {
-        /* 跳过坏帧 */
-      }
-    }
-  }
-}
 
 // ===== 服务端会话（平台化 P1）=====
 export interface ChatSessionMeta {
@@ -219,6 +163,7 @@ export interface RecentPurchaseRow {
   order_date: string | null;
   purchaser: string | null;
   source_type: string | null;
+  data_status: string | null;
   supplier: string | null;
   pn_std: string;
   needs_review: boolean;
@@ -230,10 +175,29 @@ export interface RecentPurchaseRow {
 }
 export const listRecentPurchases = (params: {
   q?: string; days?: number; supplier?: string; page?: number; page_size?: number;
+  status?: string;
 }) =>
   api.get<{ total: number; page: number; page_size: number; days: number; items: RecentPurchaseRow[] }>(
     "/purchases/recent", { params },
   );
+
+// ===== 取消单统计（宋总：按月/季/年统计采购取消/作废）=====
+export interface CancellationPeriodRow {
+  period: string;
+  total: number;
+  cancelled: number;
+  cancel_rate: number;
+  cancelled_amount: number;
+  by_status: Record<string, { count: number; amount: number }>;
+}
+export interface CancellationStats {
+  granularity: string;
+  statuses: string[];
+  rows: CancellationPeriodRow[];
+  summary: { total: number; cancelled: number; cancel_rate: number; cancelled_amount: number };
+}
+export const fetchCancellationStats = (params: { granularity?: string; days?: number }) =>
+  api.get<CancellationStats>("/purchases/cancellation-stats", { params });
 
 // ===== 采购分析面板（早会/周会）=====
 export interface PurchaseChannelSplit {

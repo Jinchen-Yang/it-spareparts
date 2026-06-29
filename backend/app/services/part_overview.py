@@ -14,6 +14,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app import config, security
+from app.services.query_filters import active_orders
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
 from app.models.inquiry import FPartInquiry
 from app.models.inventory import Inventory, PartSubstitute
@@ -21,7 +22,6 @@ from app.models.master_data import ProductSpec
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 
-_ACTIVE = "已生效"
 _MERGE_CHAIN_LIMIT = 10
 _log = logging.getLogger(__name__)
 
@@ -133,8 +133,7 @@ def _purchases_query(part_id: int, user_ctx: security.UserContext | None = None)
         .join(DimSupplier, FPurchaseOrder.supplier_id == DimSupplier.id, isouter=True)
         .where(FPurchaseLine.part_id == part_id)
     )
-    if config.ACTIVE_STATUS_ONLY:
-        stmt = stmt.where(FPurchaseOrder.data_status == _ACTIVE)
+    stmt = active_orders(stmt, FPurchaseOrder)
     if user_ctx is not None:
         stmt = security.apply_data_scope(stmt, user_ctx)
     return stmt.order_by(FPurchaseOrder.order_date.desc().nullslast())
@@ -150,8 +149,7 @@ def _sales_query(part_id: int, user_ctx: security.UserContext | None = None):
         .join(DimCustomer, FSalesOrder.customer_id == DimCustomer.id, isouter=True)
         .where(FSalesLine.part_id == part_id)
     )
-    if config.ACTIVE_STATUS_ONLY:
-        stmt = stmt.where(FSalesOrder.data_status == _ACTIVE)
+    stmt = active_orders(stmt, FSalesOrder)
     if user_ctx is not None:
         stmt = security.apply_data_scope(stmt, user_ctx)
     return stmt.order_by(FSalesOrder.order_date.desc().nullslast())
@@ -212,8 +210,7 @@ def _profit_summary(db: Session, part_id: int) -> dict:
         .where(FPurchaseLine.part_id == part_id, FPurchaseLine.unit_price > 0,
                FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
     )
-    if config.ACTIVE_STATUS_ONLY:
-        pc = pc.where(FPurchaseOrder.data_status == _ACTIVE)
+    pc = active_orders(pc, FPurchaseOrder)
     amt, qty = db.execute(pc).one()
     avg_cost = (amt / qty) if amt and qty else None
 
@@ -224,8 +221,7 @@ def _profit_summary(db: Session, part_id: int) -> dict:
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
         .where(FSalesLine.part_id == part_id)
     )
-    if config.ACTIVE_STATUS_ONLY:
-        ss = ss.where(FSalesOrder.data_status == _ACTIVE)
+    ss = active_orders(ss, FSalesOrder)
     srows = db.execute(ss).all()
     sqty = sum((r[0] for r in srows if r[0] is not None), Decimal(0))
     kept = _positive_priced(srows, 1)
@@ -243,8 +239,7 @@ def _profit_summary(db: Session, part_id: int) -> dict:
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
         .where(FSalesLine.part_id == part_id, FSalesLine.counts_revenue.is_(True))
     )
-    if config.ACTIVE_STATUS_ONLY:
-        cc = cc.where(FSalesOrder.data_status == _ACTIVE)
+    cc = active_orders(cc, FSalesOrder)
     cma, cff, cqty, crev = db.execute(cc).one()
     avg_cost_moving = (cma / cqty) if cma and cqty else None
     avg_cost_fifo = (cff / cqty) if cff and cqty else None
@@ -321,8 +316,7 @@ def _sales_velocity(db: Session, part_id: int) -> dict:
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
         .where(FSalesLine.part_id == part_id)
     )
-    if config.ACTIVE_STATUS_ONLY:
-        stmt = stmt.where(FSalesOrder.data_status == _ACTIVE)
+    stmt = active_orders(stmt, FSalesOrder)
     qty90, last_date = db.execute(stmt).one()
     qty90 = qty90 or Decimal(0)
     return {
@@ -346,8 +340,7 @@ def _weighted_recent_sale_price(db: Session, part_id: int) -> dict:
                FSalesLine.counts_revenue.is_(True),
                FSalesOrder.order_date >= since)
     )
-    if config.ACTIVE_STATUS_ONLY:
-        stmt = stmt.where(FSalesOrder.data_status == _ACTIVE)
+    stmt = active_orders(stmt, FSalesOrder)
     # 最近 N 条；稳定排序（同日按 line id 降序）防取样不确定性
     rows = db.execute(
         stmt.order_by(FSalesOrder.order_date.desc().nullslast(), FSalesLine.id.desc())
@@ -399,8 +392,7 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
                FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
                FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
     )
-    if config.ACTIVE_STATUS_ONLY:
-        lp = lp.where(FPurchaseOrder.data_status == _ACTIVE)
+    lp = active_orders(lp, FPurchaseOrder)
     last = db.execute(lp.order_by(FPurchaseOrder.order_date.desc().nullslast()).limit(1)).first()
 
     # 近 N 天采购价窗口（客户要"最近15天采购价"）：均/低/高/笔数
@@ -414,8 +406,7 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
                FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES),
                FPurchaseOrder.order_date >= win_since)
     )
-    if config.ACTIVE_STATUS_ONLY:
-        rp = rp.where(FPurchaseOrder.data_status == _ACTIVE)
+    rp = active_orders(rp, FPurchaseOrder)
     r_avg, r_min, r_max, r_cnt = db.execute(rp).one()
 
     since = date.today() - timedelta(days=90)
@@ -426,8 +417,7 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
         .where(FSalesLine.part_id == pid, FSalesLine.unit_price > 0,
                FSalesOrder.order_date >= since)
     )
-    if config.ACTIVE_STATUS_ONLY:
-        sp = sp.where(FSalesOrder.data_status == _ACTIVE)
+    sp = active_orders(sp, FSalesOrder)
     samt, sqty = db.execute(sp).one()
 
     inv_rows = db.execute(select(Inventory).where(Inventory.part_id == pid)).scalars().all()

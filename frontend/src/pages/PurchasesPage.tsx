@@ -5,11 +5,28 @@ import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import {
-  listRecentPurchases, fetchPurchaseAnalysis, fetchPurchaseDrill,
+  listRecentPurchases, fetchPurchaseAnalysis, fetchPurchaseDrill, fetchCancellationStats,
 } from "../api";
 import type {
   RecentPurchaseRow, PurchaseAnalysis, PurchaseAnalysisRow, PurchaseDrillItem,
+  CancellationStats, CancellationPeriodRow,
 } from "../api";
+
+// 流程状态：颜色 + 过滤选项（宋总：取消单也要能看/能统计）
+const STATUS_COLOR: Record<string, string> = {
+  已生效: "green", 已取消: "red", 作废: "red", 进行中: "blue", 草稿: "default",
+};
+const STATUS_FILTER = [
+  { label: "已生效", value: "已生效" },
+  { label: "已取消", value: "已取消" },
+  { label: "进行中", value: "进行中" },
+  { label: "全部", value: "全部" },
+];
+const GRAN_OPTIONS = [
+  { label: "按月", value: "month" },
+  { label: "按季", value: "quarter" },
+  { label: "按年", value: "year" },
+];
 
 const DAY_OPTIONS = [
   { label: "近 7 天", value: 7 },
@@ -273,10 +290,72 @@ function AnalysisPanel() {
   );
 }
 
+function CancellationPanel() {
+  const [gran, setGran] = useState("month");
+  const [data, setData] = useState<CancellationStats | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [open, setOpen] = useState(() => localStorage.getItem("pap_cancel_open") !== "0");
+  const seqRef = useRef(0);
+  const toggle = () => setOpen((o) => { localStorage.setItem("pap_cancel_open", o ? "0" : "1"); return !o; });
+
+  useEffect(() => {
+    if (!open) return;
+    const seq = ++seqRef.current;
+    setLoading(true);
+    fetchCancellationStats({ granularity: gran })
+      .then(({ data }) => { if (seq === seqRef.current) setData(data); })
+      .catch(() => { if (seq === seqRef.current) message.error("取消单统计加载失败"); })
+      .finally(() => { if (seq === seqRef.current) setLoading(false); });
+  }, [gran, open]);
+
+  const columns: ColumnsType<CancellationPeriodRow> = [
+    { title: "期间", dataIndex: "period", width: 110 },
+    { title: "总单数", dataIndex: "total", width: 88, align: "right" },
+    { title: "已生效", key: "active", width: 84, align: "right",
+      render: (_, r) => r.by_status["已生效"]?.count ?? 0 },
+    { title: "进行中", key: "doing", width: 84, align: "right",
+      render: (_, r) => r.by_status["进行中"]?.count ?? 0 },
+    { title: "取消/作废", dataIndex: "cancelled", width: 98, align: "right",
+      render: (v: number) => <span style={{ color: v > 0 ? "#c0524a" : undefined }}>{v}</span> },
+    { title: "取消率", dataIndex: "cancel_rate", width: 88, align: "right",
+      render: (v: number) => `${v}%` },
+    { title: "取消金额", dataIndex: "cancelled_amount", width: 130, align: "right", render: fmtMoney },
+  ];
+
+  return (
+    <Card style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: open ? 14 : 0 }}>
+        <span onClick={toggle} style={{ fontSize: 16, fontWeight: 500, cursor: "pointer", userSelect: "none", display: "flex", alignItems: "center", gap: 8 }}>
+          <RightOutlined style={{ fontSize: 12, color: "var(--mb-text-3)", transition: "transform .15s", transform: open ? "rotate(90deg)" : "none" }} />
+          取消单统计 · 采购未成功
+          {!open && data && (
+            <span style={{ fontSize: 12.5, fontWeight: 400, color: "#9a7b43" }}>
+              累计取消 {data.summary.cancelled} 单 · 取消率 {data.summary.cancel_rate}%
+            </span>
+          )}
+        </span>
+        {open && <Segmented options={GRAN_OPTIONS} value={gran} onChange={(v) => setGran(v as string)} />}
+      </div>
+      {open && (
+        <>
+          <Table<CancellationPeriodRow>
+            size="small" rowKey={(r) => r.period} loading={loading}
+            dataSource={data?.rows || []} pagination={false} columns={columns}
+          />
+          <div style={{ marginTop: 8, fontSize: 12, color: "var(--mb-text-3)" }}>
+            含全部状态的采购单（含已取消/作废）。取消单仅用于此处统计，<b>不计入</b>成本/库存/利润——那些口径只算「已生效」。
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
 export default function PurchasesPage() {
   const [q, setQ] = useState("");
   const [supplier, setSupplier] = useState("");
   const [days, setDays] = useState(30);
+  const [status, setStatus] = useState("已生效");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [total, setTotal] = useState(0);
@@ -291,7 +370,7 @@ export default function PurchasesPage() {
       const { data } = await listRecentPurchases({
         q: q.trim() || undefined,
         supplier: supplier.trim() || undefined,
-        days, page: p, page_size: ps,
+        days, page: p, page_size: ps, status,
       });
       if (seq !== loadSeqRef.current) return;
       setRows(data.items);
@@ -307,7 +386,7 @@ export default function PurchasesPage() {
     setPage(1);
     load(1, pageSize);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [days]);
+  }, [days, status]);
 
   return (
     <>
@@ -316,8 +395,9 @@ export default function PurchasesPage() {
         subtitle="早会先看上方「采购分析」找频发待计划，下方是逐笔采购明细"
       />
       <AnalysisPanel />
+      <CancellationPanel />
       <Card>
-      <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
         <Segmented options={DAY_OPTIONS} value={days} onChange={(v) => setDays(v as number)} />
         <Input.Search
           placeholder="型号 / 描述 / 品牌关键词"
@@ -335,6 +415,10 @@ export default function PurchasesPage() {
           onChange={(e) => setSupplier(e.target.value)}
           onSearch={() => { setPage(1); load(1, pageSize); }}
         />
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 13, color: "var(--mb-text-3)" }}>状态</span>
+          <Segmented options={STATUS_FILTER} value={status} onChange={(v) => setStatus(v as string)} />
+        </span>
       </div>
       <ResizableTable<RecentPurchaseRow>
         storageKey="purchases-recent"
@@ -369,6 +453,8 @@ export default function PurchasesPage() {
           { title: "供应商", dataIndex: "supplier", width: 160, ellipsis: true },
           { title: "采购类型", dataIndex: "source_type", width: 100,
             render: (v) => v ? <Tag>{v}</Tag> : "—" },
+          { title: "流程状态", dataIndex: "data_status", width: 96,
+            render: (v: string | null) => v ? <Tag color={STATUS_COLOR[v] || "default"}>{v}</Tag> : "—" },
           { title: "采购员", dataIndex: "purchaser", width: 90, render: (v) => v || "—" },
           { title: "单号", dataIndex: "order_no", width: 170,
             render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span> },

@@ -18,6 +18,7 @@ from sqlalchemy import and_, func, select, update
 from sqlalchemy.orm import Session
 
 from app import config, security
+from app.services.query_filters import active_orders
 from app.etl import anomaly
 from app.models.dimensions import DimCustomer, DimPart
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
@@ -26,7 +27,6 @@ from app.services import cost
 
 _CENT = Decimal("0.01")
 _RATE = Decimal("0.0001")
-_ACTIVE = "已生效"
 
 
 def _ex_tax(amount: Decimal, tax_rate: Decimal | None) -> Decimal:
@@ -47,8 +47,7 @@ def _load_purchase_events(db: Session):
         # 显式排序：保证重算结果可复现(同日多笔时,数据库返回顺序本身不固定)
         .order_by(FPurchaseOrder.order_date.asc().nullsfirst(), FPurchaseLine.id.asc())
     )
-    if config.ACTIVE_STATUS_ONLY:
-        q = q.where(FPurchaseOrder.data_status == _ACTIVE)
+    q = active_orders(q, FPurchaseOrder)
 
     events: dict[int, list] = defaultdict(list)
     recent: dict[int, tuple] = {}   # part -> ((date, line_id), ex_price)  含 line_id 保证同日不歧义
@@ -74,8 +73,7 @@ def recompute(db: Session) -> dict:
         # 同上：显式排序保证重算可复现
         .order_by(FSalesOrder.order_date.asc().nullsfirst(), FSalesLine.id.asc())
     )
-    if config.ACTIVE_STATUS_ONLY:
-        sq = sq.where(FSalesOrder.data_status == _ACTIVE)
+    sq = active_orders(sq, FSalesOrder)
     sales_rows = db.execute(sq).all()
 
     # 按 part 分组销售事件
@@ -207,8 +205,7 @@ def aggregate(db: Session, dimension: str, date_from: _date | None,
         stmt = stmt.join(DimCustomer, FSalesOrder.customer_id == DimCustomer.id, isouter=True)
     elif dimension == "part":
         stmt = stmt.join(DimPart, sl.part_id == DimPart.id)
-    if config.ACTIVE_STATUS_ONLY:
-        stmt = stmt.where(FSalesOrder.data_status == _ACTIVE)
+    stmt = active_orders(stmt, FSalesOrder)
     if date_from:
         stmt = stmt.where(FSalesOrder.order_date >= date_from)
     if date_to:
