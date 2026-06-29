@@ -81,6 +81,41 @@ def test_import_job_handles_duplicate(db, tmp_path):
     assert j.note and "重复" in j.note
 
 
+def test_upsert_can_reimport_same_file(db, tmp_path):
+    """同一份文件可二次导入：skip(非修复)后再 upsert(修复)不被 hash 去重挡掉（甲方反馈）。
+
+    旧成功批次标 superseded 让出 ux_batch_success_hash 偏唯一索引，新批次成功——
+    修复模式对同一份文件不再形同虚设。
+    """
+    p = _inv_xlsx(tmp_path, "same.xlsx", _inv_rows("INV1", "PN-A", 5))
+    b1 = pipeline.run_import(db, p, "same.xlsx", mode="skip")
+    db.commit()
+    assert b1.status == "success"
+
+    dup = str(tmp_path / "same_again.xlsx")
+    shutil.copy(p, dup)                            # 同字节 → 同 hash
+    b2 = pipeline.run_import(db, dup, "same.xlsx", mode="upsert")   # 不再抛 DuplicateFileError
+    db.commit()
+    assert b2.status == "success" and b2.id != b1.id
+
+    db.expire_all()
+    assert db.get(SysImportBatch, b1.id).status == "superseded"     # 旧批次让位
+    n_success = db.scalar(select(func.count()).select_from(SysImportBatch).where(
+        SysImportBatch.file_hash == b2.file_hash, SysImportBatch.status == "success"))
+    assert n_success == 1                          # 偏唯一索引未被违反
+
+
+def test_skip_mode_still_blocks_duplicate(db, tmp_path):
+    """skip 模式行为不变：同文件二次导入仍抛 DuplicateFileError（幂等保护不回退）。"""
+    p = _inv_xlsx(tmp_path, "dup.xlsx", _inv_rows("INV9", "PN-Z", 3))
+    pipeline.run_import(db, p, "dup.xlsx", mode="skip")
+    db.commit()
+    dup = str(tmp_path / "dup2.xlsx")
+    shutil.copy(p, dup)
+    with pytest.raises(pipeline.DuplicateFileError):
+        pipeline.run_import(db, dup, "dup.xlsx", mode="skip")
+
+
 def test_import_job_unrecognized_file_failed_batch(db, tmp_path):
     junk = tmp_path / "junk.xlsx"
     pd.DataFrame([{"随便": "x", "列名": "y"}]).to_excel(junk, index=False)

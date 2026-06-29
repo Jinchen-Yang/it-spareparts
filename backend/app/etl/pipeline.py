@@ -4,7 +4,7 @@ import os
 import shutil
 from datetime import date, datetime, timezone
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -51,17 +51,25 @@ def run_import(session: Session, file_path: str, original_name: str,
     """
     file_hash = sha256_file(file_path)
 
-    # 1) success 偏唯一：同 hash 已成功 → 拒绝
+    # 1) 应用级导入锁先行（同一时间仅一个导入；顺带消除"去重检查在加锁前"的并发竞态）
+    session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _ADVISORY_LOCK_KEY})
+
+    # 2) hash 去重：skip 模式拒绝重复成功文件（幂等）；upsert(修复)模式是"显式要求重处理"——
+    #    把旧成功批次标记 superseded 后放行，让 loader 按 raw_id ON CONFLICT DO UPDATE 更新已有行。
+    #    （否则同 hash 第二条 success 会撞 ux_batch_success_hash 偏唯一索引；不放行则"修复模式"
+    #     对同一份文件形同虚设——见甲方反馈：同文件应能先非修复、后修复导入。）
     dup = session.execute(
         select(SysImportBatch.id).where(
             SysImportBatch.file_hash == file_hash, SysImportBatch.status == "success"
         )
     ).first()
     if dup:
-        raise DuplicateFileError(dup[0])
-
-    # 2) 应用级导入锁（同一时间仅一个导入）
-    session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _ADVISORY_LOCK_KEY})
+        if mode != "upsert":
+            raise DuplicateFileError(dup[0])
+        session.execute(
+            update(SysImportBatch).where(SysImportBatch.id == dup[0])
+            .values(status="superseded")
+        )
 
     # 3) 建 batch（先占位，类型稍后回填）
     batch = SysImportBatch(filename=original_name, file_type="unknown",
