@@ -99,3 +99,25 @@ def read_excel(path: str) -> tuple[pd.DataFrame, str]:
         df[ffill_cols] = df[ffill_cols].replace("", pd.NA).ffill()
 
     return df, file_type
+
+
+def peek_columns(path: str) -> tuple[list[str], str | None]:
+    """只读表头几行 → (规范化列名, 识别的文件类型)。供导入前预检（不读全文件）。
+
+    与 read_excel 同样的 探表头 → strip → 容差归一 流程，但只取前几行，开销极小。
+    """
+    _check_workbook_size(path)
+    try:
+        raw = pd.read_excel(path, header=None, dtype=object, engine="openpyxl", nrows=3)
+    except Exception as exc:
+        raise ReaderError(
+            "文件无法按 .xlsx 解析：可能是旧版 .xls 格式、非 Excel 文件或文件已损坏。"
+            "请在 Excel 中「另存为 → Excel 工作簿 (.xlsx)」后再上传。"
+        ) from exc
+    if raw.empty:
+        raise ReaderError("文件为空")
+    h = detect_header(raw)
+    if h >= len(raw):
+        return [], None
+    cols = mapping.canonicalize_columns(_norm_cols(raw.iloc[h].tolist()))
+    return cols, mapping.detect_file_type(cols)

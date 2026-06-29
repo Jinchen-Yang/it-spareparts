@@ -133,3 +133,55 @@ def test_oversized_rowcount_rejected(tmp_path, monkeypatch):
     with pytest.raises(reader.ReaderError) as ei:
         reader.read_excel(str(p))
     assert "行数" in str(ei.value)
+
+
+# ---------- 无价格列检测（导入前预检 + 报告留痕） ----------
+
+def _purchase_xlsx(tmp_path, name, header, row):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(header)
+    ws.append(row)
+    p = tmp_path / name
+    wb.save(p)
+    return str(p)
+
+
+def test_has_price_columns_helper():
+    assert mapping.has_price_columns(["明细.单价(必填)", "明细.采购数量(必填)"], mapping.PURCHASE) is True
+    # 只有数量/最近采购价(参考价，非成交价)→ 无价格列
+    assert mapping.has_price_columns(["明细.采购数量(必填)", "明细.最近采购价"], mapping.PURCHASE) is False
+    assert mapping.has_price_columns(["库存数量"], mapping.INVENTORY) is True   # 库存不涉及
+    assert mapping.has_price_columns(["乱"], None) is True                      # 未识别不拦
+
+
+def test_peek_columns_missing_price(tmp_path):
+    p = _purchase_xlsx(
+        tmp_path, "no_price.xlsx",
+        ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
+         "明细.产品名称(必填)", "明细.采购数量(必填)"],
+        ["CGDD-1", "O1", "L1", "ST8000NM000A", "2"])
+    cols, ft = reader.peek_columns(p)
+    assert ft == mapping.PURCHASE
+    assert mapping.has_price_columns(cols, ft) is False
+
+
+def test_report_flags_missing_price(db, tmp_path):
+    from app.etl import pipeline
+    no_price = _purchase_xlsx(
+        tmp_path, "np.xlsx",
+        ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
+         "明细.产品名称(必填)", "明细.采购数量(必填)"],
+        ["CGDD-1", "O1", "L1", "ST8000NM000A", "2"])
+    b1 = pipeline.run_import(db, no_price, "np.xlsx")
+    db.commit()
+    assert b1.report_json["missing_price_columns"] is True
+
+    with_price = _purchase_xlsx(
+        tmp_path, "wp.xlsx",
+        ["采购单号(必填)", "数据ID(不可修改)", "明细.数据ID(不可修改)",
+         "明细.产品名称(必填)", "明细.采购数量(必填)", "明细.单价(必填)"],
+        ["CGDD-2", "O2", "L2", "ST8000NM000A", "2", "100"])
+    b2 = pipeline.run_import(db, with_price, "wp.xlsx")
+    db.commit()
+    assert b2.report_json["missing_price_columns"] is False
