@@ -63,7 +63,7 @@ def backfill_costs(db: Session) -> dict:
     整改 P3：按 part_id 关联（合并后源/目标采购历史归并，与利润口径一致）。
     """
     ex = "/ (1 + COALESCE(po.tax_rate, 0))" if config.TAX_BASIS == "ex_tax" else ""
-    active = "AND po.data_status = '已生效'" if config.ACTIVE_STATUS_ONLY else ""
+    active = f"AND po.data_status = '{config.ACTIVE_STATUS}'" if config.ACTIVE_STATUS_ONLY else ""
     sql = text(f"""
         WITH cost AS (
             SELECT pl.part_id,

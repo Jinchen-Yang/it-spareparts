@@ -18,10 +18,10 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app import config, security
+from app.services.query_filters import active_orders
 from app.models import DimPart, DimSupplier, FPurchaseLine, FPurchaseOrder
 from app.services.purchase_query import apply_keyword
 
-_ACTIVE = "已生效"
 _CENT = Decimal("0.01")
 
 
@@ -59,8 +59,7 @@ def _window_lines(db: Session, user_ctx, since: date, until: date,
         .join(DimSupplier, FPurchaseOrder.supplier_id == DimSupplier.id, isouter=True)
         .where(FPurchaseOrder.order_date >= since, FPurchaseOrder.order_date <= until)
     )
-    if config.ACTIVE_STATUS_ONLY:
-        stmt = stmt.where(FPurchaseOrder.data_status == _ACTIVE)
+    stmt = active_orders(stmt, FPurchaseOrder)
     if exclude_designated and config.ANALYSIS_EXCLUDE_SOURCE_TYPES:
         stmt = stmt.where(or_(
             FPurchaseOrder.source_type.is_(None),

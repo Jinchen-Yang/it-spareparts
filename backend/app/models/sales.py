@@ -37,7 +37,11 @@ class FSalesOrder(Base):
     import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
-    __table_args__ = (Index("ix_so_order_no", "order_no"),)
+    __table_args__ = (
+        Index("ix_so_order_no", "order_no"),
+        # 高频过滤+排序：业务查询按 已生效 过滤、按 order_date 排序/窗口（架构体检 2026-06-29）
+        Index("ix_so_status_date", "data_status", "order_date"),
+    )
 
 
 class FSalesLine(Base):

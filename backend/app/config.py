@@ -149,6 +149,7 @@ REF_PRICE_MAX_N = 5   # 最多取最近几条
 
 # 只统计已生效（入库不过滤，业务查询过滤）
 ACTIVE_STATUS_ONLY = True
+ACTIVE_STATUS = "已生效"   # "生效"状态字面量单一真值源（曾在 5 个 service 各定义一遍）
 
 # 导入模式：skip（默认，重复行跳过）| upsert（重复行更新可修复字段）
 DEFAULT_IMPORT_MODE = "skip"

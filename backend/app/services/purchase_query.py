@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import config, security
 from app.models import DimPart, DimSupplier, FPurchaseLine, FPurchaseOrder, PartAlias
 
-_ACTIVE = "已生效"
+_ACTIVE = config.ACTIVE_STATUS
 MAX_PAGE_SIZE = 200
 MAX_DAYS = 3660  # 上限十年：days 参数防呆
 
