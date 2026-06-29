@@ -79,9 +79,45 @@ export default function ImportPage() {
   const submitBatch = async () => {
     if (!staged.length) return;
     setSubmitting(true);
-    const form = new FormData();
-    staged.forEach((f) => form.append("files", f));
     try {
+      // 导入前预检：识别文件类型 + 采购/销售是否含价格列。有问题 → 弹二次确认
+      const pcForm = new FormData();
+      staged.forEach((f) => pcForm.append("files", f));
+      const { data: pc } = await api.post("/import/precheck", pcForm);
+      const warned: any[] = (pc.files || []).filter((x: any) => x.warning);
+      if (warned.length) {
+        const proceed = await new Promise<boolean>((resolve) => {
+          Modal.confirm({
+            title: "导入前确认",
+            width: 560,
+            okText: "仍要导入",
+            okButtonProps: { danger: true },
+            cancelText: "取消",
+            content: (
+              <div>
+                <p>以下文件检测到问题：</p>
+                <ul style={{ paddingLeft: 18 }}>
+                  {warned.map((x, i) => (
+                    <li key={i} style={{ marginBottom: 6 }}>
+                      <b>{x.filename}</b>：{x.warning}
+                    </li>
+                  ))}
+                </ul>
+                <p style={{ color: "var(--mb-text-3)", marginBottom: 0 }}>
+                  若是导出视图选错，建议「取消」后用含价格列的视图重新导出再导入。确认无误可继续。
+                </p>
+              </div>
+            ),
+            onOk: () => resolve(true),
+            onCancel: () => resolve(false),
+          });
+        });
+        if (!proceed) { setSubmitting(false); return; }
+      }
+
+      // 实际导入
+      const form = new FormData();
+      staged.forEach((f) => form.append("files", f));
       const { data } = await api.post("/import/upload-batch", form, {
         params: { mode: upsertMode ? "upsert" : "skip" },
       });
@@ -226,10 +262,19 @@ export default function ImportPage() {
       >
         {detail && (
           <>
+            {detail.report?.missing_price_columns && (
+              <Alert
+                type="warning" showIcon style={{ marginBottom: 12 }}
+                message="此文件未识别到价格列，金额为空"
+                description="通常是导出视图选错。请用含 单价 / 金额 / 税 的视图重新导出，再用「修复模式」重导补上金额。"
+              />
+            )}
             <Descriptions bordered column={2} size="small" style={{ marginBottom: 12 }}>
-              {Object.entries(detail.report || {}).filter(([k]) => k !== "errors_preview").map(([k, v]) => (
-                <Descriptions.Item key={k} label={k}>{String(v)}</Descriptions.Item>
-              ))}
+              {Object.entries(detail.report || {})
+                .filter(([k]) => k !== "errors_preview" && k !== "missing_price_columns")
+                .map(([k, v]) => (
+                  <Descriptions.Item key={k} label={k}>{String(v)}</Descriptions.Item>
+                ))}
             </Descriptions>
             <ResizableTable storageKey="import-errors" rowKey={(_, i) => String(i)} size="small" columns={errCols}
               dataSource={detail.errors || []} pagination={{ pageSize: 10 }}

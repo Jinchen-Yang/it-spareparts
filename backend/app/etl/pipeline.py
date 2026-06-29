@@ -8,7 +8,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.etl import loader, reader
+from app.etl import loader, mapping, reader
 from app.etl.reader import ReaderError
 from app.etl.transform import transform
 from app.models.system import SysImportBatch, SysImportError, SysRawFile
@@ -99,6 +99,9 @@ def run_import(session: Session, file_path: str, original_name: str,
                              operated_by=uploaded_by, audit_overwrites=True)
 
         report = {"file_type": file_type, **counts,
+                  # 缺价格列留痕：即便用户确认导入了无金额文件，批次详情也能看到此告警
+                  "missing_price_columns": not mapping.has_price_columns(
+                      list(df.columns), file_type),
                   "errors_preview": [
                       {"row_no": e.row_no, "error_type": e.error_type, "detail": e.error_detail}
                       for e in result.errors[:10]

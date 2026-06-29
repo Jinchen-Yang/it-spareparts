@@ -104,6 +104,19 @@ FFILL_COLS = {
     INVENTORY: [],
 }
 
+# 价格/金额列（成交单价 + 行金额 + 头部含税未税/税金）——导入前预检用：
+# 采购/销售文件若一个价格列都没有（如导出视图选错），导入后这些单将无金额。
+PRICE_INTERNALS = {"unit_price", "line_amount", "amount_ex_tax", "tax_amount", "amount_inc_tax"}
+
+
+def has_price_columns(cols: list[str], file_type: str | None) -> bool:
+    """文件列里是否含任一价格列。库存/询价/未识别一律 True（不涉及价格，不拦）。"""
+    if file_type not in (PURCHASE, SALES):
+        return True
+    m = {**MAPPINGS[file_type]["head"], **MAPPINGS[file_type]["line"]}
+    price_chinese = {ch for ch, internal in m.items() if internal in PRICE_INTERNALS}
+    return any(c in cols for c in price_chinese)
+
 
 # ============================================================
 # 列名容差归一（§4.2）：氚云不同字段视图/模板会让同一列带或不带 (必填)/(选填)/(不可修改)

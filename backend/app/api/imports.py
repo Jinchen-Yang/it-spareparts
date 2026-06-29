@@ -13,7 +13,7 @@ from app.config import MAX_UPLOAD_MB
 from app.db import SessionLocal, get_db
 from app.security import UserContext, get_current_user_context, record_access_log
 from app.services import inventory, master_data, profit
-from app.etl import pipeline
+from app.etl import mapping, pipeline, reader
 from app.etl.reader import ReaderError
 from app.models.system import SysImportBatch, SysImportError, SysImportJob
 
@@ -104,6 +104,48 @@ def upload(
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+
+
+@router.post("/precheck")
+def precheck(
+    files: list[UploadFile] = File(...),
+    _: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """导入前预检（不导入、不建批次）：识别文件类型 + 采购/销售是否含价格列。
+
+    缺价格列（如导出视图选错）→ 前端弹二次确认，让用户确认是否仍要导入无金额数据。
+    """
+    results = []
+    for f in files:
+        name = f.filename or "upload.xlsx"
+        try:
+            tmp = _save_upload_to_temp(f, name)
+        except HTTPException as exc:
+            results.append({"filename": name, "file_type": None, "ok": False,
+                            "missing_price": False, "warning": exc.detail})
+            continue
+        try:
+            cols, file_type = reader.peek_columns(tmp)
+            missing_price = not mapping.has_price_columns(cols, file_type)
+            if file_type is None:
+                warning = "无法识别文件类型（不是采购/销售/库存导出文件？）"
+            elif missing_price:
+                warning = ("未识别到任何价格列（单价 / 金额 / 税）——导入后这些"
+                           "采购/销售单将没有金额，通常是导出视图选错。")
+            else:
+                warning = None
+            results.append({"filename": name, "file_type": file_type, "ok": warning is None,
+                            "missing_price": missing_price, "warning": warning})
+        except ReaderError as exc:
+            results.append({"filename": name, "file_type": None, "ok": False,
+                            "missing_price": False, "warning": str(exc)})
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+    return {"files": results,
+            "any_warning": any(not r["ok"] for r in results),
+            "missing_price_any": any(r["missing_price"] for r in results)}
 
 
 def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
