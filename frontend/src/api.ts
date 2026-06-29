@@ -219,6 +219,7 @@ export interface RecentPurchaseRow {
   order_date: string | null;
   purchaser: string | null;
   source_type: string | null;
+  data_status: string | null;
   supplier: string | null;
   pn_std: string;
   needs_review: boolean;
@@ -230,10 +231,29 @@ export interface RecentPurchaseRow {
 }
 export const listRecentPurchases = (params: {
   q?: string; days?: number; supplier?: string; page?: number; page_size?: number;
+  status?: string;
 }) =>
   api.get<{ total: number; page: number; page_size: number; days: number; items: RecentPurchaseRow[] }>(
     "/purchases/recent", { params },
   );
+
+// ===== 取消单统计（宋总：按月/季/年统计采购取消/作废）=====
+export interface CancellationPeriodRow {
+  period: string;
+  total: number;
+  cancelled: number;
+  cancel_rate: number;
+  cancelled_amount: number;
+  by_status: Record<string, { count: number; amount: number }>;
+}
+export interface CancellationStats {
+  granularity: string;
+  statuses: string[];
+  rows: CancellationPeriodRow[];
+  summary: { total: number; cancelled: number; cancel_rate: number; cancelled_amount: number };
+}
+export const fetchCancellationStats = (params: { granularity?: string; days?: number }) =>
+  api.get<CancellationStats>("/purchases/cancellation-stats", { params });
 
 // ===== 采购分析面板（早会/周会）=====
 export interface PurchaseChannelSplit {

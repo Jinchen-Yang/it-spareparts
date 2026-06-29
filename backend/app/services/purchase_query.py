@@ -41,7 +41,10 @@ def apply_keyword(stmt, q: str | None):
 def recent_purchases(db: Session, user_ctx: security.UserContext | None = None,
                      q: str | None = None, days: int = 30,
                      supplier: str | None = None,
-                     page: int = 1, page_size: int = 50) -> dict:
+                     page: int = 1, page_size: int = 50,
+                     status: str | None = None) -> dict:
+    """status: None→沿用全站 ACTIVE_STATUS_ONLY（仅已生效）；'全部'→不过滤状态；
+    其它具体状态值（已取消/进行中/草稿/已生效）→按该状态过滤。供宋总查看取消单。"""
     days = max(1, min(int(days or 30), MAX_DAYS))
     page = max(1, page)
     page_size = max(1, min(page_size, MAX_PAGE_SIZE))
@@ -53,6 +56,7 @@ def recent_purchases(db: Session, user_ctx: security.UserContext | None = None,
             FPurchaseOrder.order_date,
             FPurchaseOrder.purchaser,
             FPurchaseOrder.source_type,
+            FPurchaseOrder.data_status,
             DimSupplier.name_normalized.label("supplier"),
             DimPart.pn_std,                       # canonical（合并后为存活型号）
             DimPart.needs_review,
@@ -67,7 +71,9 @@ def recent_purchases(db: Session, user_ctx: security.UserContext | None = None,
         .join(DimSupplier, FPurchaseOrder.supplier_id == DimSupplier.id, isouter=True)
         .where(FPurchaseOrder.order_date >= date.today() - timedelta(days=days))
     )
-    if config.ACTIVE_STATUS_ONLY:
+    if status and status != "全部":
+        stmt = stmt.where(FPurchaseOrder.data_status == status)
+    elif status is None and config.ACTIVE_STATUS_ONLY:
         stmt = stmt.where(FPurchaseOrder.data_status == _ACTIVE)
     stmt = apply_keyword(stmt, q)
     if supplier and supplier.strip():

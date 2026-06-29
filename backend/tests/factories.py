@@ -23,12 +23,12 @@ def purchase_head(order_raw_id: str, order_no: str | None = None,
                   on: date | None = None, source_type="销售订单",
                   supplier="测试供应商", purchaser=None, source_channel="正规供应商",
                   is_tax_inclusive=None, tax_rate=None, amount_ex_tax=None,
-                  tax_amount=None, amount_inc_tax=None) -> dict:
+                  tax_amount=None, amount_inc_tax=None, data_status="已生效") -> dict:
     return {
         "raw_order_id": order_raw_id, "order_no": order_no or order_raw_id,
         "order_date": on or date(2026, 1, 1), "tax_rate": tax_rate,
         "amount_ex_tax": amount_ex_tax,
-        "data_status": "已生效", "purchaser": purchaser,
+        "data_status": data_status, "purchaser": purchaser,
         "supplier_name_raw": supplier, "supplier_name_normalized": supplier,
         "supplier_code": None, "supplier_type": None,
         "supplier_source_channel": source_channel,

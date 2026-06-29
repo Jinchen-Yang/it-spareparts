@@ -276,3 +276,79 @@ def part_purchases(db: Session, user_ctx: security.UserContext | None = None, *,
         })
     items.sort(key=lambda x: (x["order_date"] or "", x["order_no"] or ""), reverse=True)
     return {"part_id": part_id, "days": days, "items": items}
+
+
+_CANCEL_GRANULARITY = {"month", "quarter", "year"}
+
+
+def _is_cancelled_status(s: str) -> bool:
+    """取消/作废统一判定（宋总诉求：统计采购未成功的单）。"""
+    return ("取消" in s) or ("作废" in s)
+
+
+def _period_label(dt, gran: str) -> str:
+    if gran == "year":
+        return f"{dt.year}"
+    if gran == "quarter":
+        return f"{dt.year}-Q{(dt.month - 1) // 3 + 1}"
+    return f"{dt.year}-{dt.month:02d}"
+
+
+def cancellation_stats(db: Session, user_ctx: security.UserContext | None = None, *,
+                       granularity: str = "month", days: int | None = None) -> dict:
+    """按期间(月/季/年)×状态 聚合采购单数与金额，统计取消/作废（采购未成功）的单。
+
+    与全站「业务查询过滤已生效」相反——这里**刻意不过滤状态**，取消/作废单本身就是统计对象。
+    取消单只在此类统计里被数，不进入任何成本/库存/利润计算（那些口径仍只认已生效）。
+    """
+    gran = granularity if granularity in _CANCEL_GRANULARITY else "month"
+    period = func.date_trunc(gran, FPurchaseOrder.order_date)
+    amount = func.coalesce(FPurchaseOrder.amount_inc_tax, FPurchaseOrder.amount_ex_tax)
+    stmt = (
+        select(period.label("period"), FPurchaseOrder.data_status.label("status"),
+               func.count().label("cnt"),
+               func.coalesce(func.sum(amount), 0).label("amt"))
+        .where(FPurchaseOrder.order_date.is_not(None))
+    )
+    if days:
+        stmt = stmt.where(
+            FPurchaseOrder.order_date >= date.today() - timedelta(days=int(days)))
+    stmt = stmt.group_by(period, FPurchaseOrder.data_status).order_by(period)
+
+    periods: dict[str, dict] = {}
+    statuses: set[str] = set()
+    for period_dt, status, cnt, amt in db.execute(stmt).all():
+        if period_dt is None:
+            continue
+        lbl = _period_label(period_dt, gran)
+        st = status or "(空)"
+        statuses.add(st)
+        p = periods.setdefault(lbl, {
+            "period": lbl, "total": 0, "cancelled": 0,
+            "cancelled_amount": Decimal(0), "by_status": {}})
+        p["by_status"][st] = {"count": cnt, "amount": _f((amt or Decimal(0)).quantize(_CENT))}
+        p["total"] += cnt
+        if _is_cancelled_status(st):
+            p["cancelled"] += cnt
+            p["cancelled_amount"] += (amt or Decimal(0))
+
+    rows = []
+    for p in periods.values():
+        p["cancel_rate"] = round(100.0 * p["cancelled"] / p["total"], 2) if p["total"] else 0.0
+        p["cancelled_amount"] = _f(p["cancelled_amount"].quantize(_CENT))
+        rows.append(p)
+    rows.sort(key=lambda r: r["period"], reverse=True)   # 最近期间在前
+
+    total = sum(r["total"] for r in rows)
+    cancelled = sum(r["cancelled"] for r in rows)
+    cancelled_amt = sum(r["cancelled_amount"] for r in rows)
+    return {
+        "granularity": gran,
+        "statuses": sorted(statuses),
+        "rows": rows,
+        "summary": {
+            "total": total, "cancelled": cancelled,
+            "cancel_rate": round(100.0 * cancelled / total, 2) if total else 0.0,
+            "cancelled_amount": round(cancelled_amt, 2),
+        },
+    }

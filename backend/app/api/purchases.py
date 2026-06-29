@@ -21,6 +21,7 @@ def recent(
     q: str | None = Query(None, description="型号/描述/品牌关键词"),
     days: int = Query(30, ge=1, le=3660),
     supplier: str | None = Query(None),
+    status: str | None = Query(None, description="流程状态过滤：留空=仅已生效；'全部'=不限；或具体状态(已取消/进行中/草稿/已生效)"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -29,10 +30,26 @@ def recent(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     record_access_log(ctx, "recent", "purchases",
-                      {"q": q, "days": days, "supplier": supplier})
+                      {"q": q, "days": days, "supplier": supplier, "status": status})
     data = purchase_query.recent_purchases(db, ctx, q=q, days=days,
                                            supplier=supplier, page=page,
-                                           page_size=page_size)
+                                           page_size=page_size, status=status)
+    return apply_field_visibility(data, ctx)
+
+
+@router.get("/cancellation-stats")
+def cancellation_stats(
+    granularity: str = Query("month", description="统计粒度：month/quarter/year"),
+    days: int | None = Query(None, ge=1, le=3660, description="仅统计近 N 天；留空=全部历史"),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_purchases")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """采购单按期间×状态统计：多少单被取消/作废（采购未成功）。供宋总按月/季/年看趋势。"""
+    record_access_log(ctx, "cancellation_stats", "purchases",
+                      {"granularity": granularity, "days": days})
+    data = purchase_analysis.cancellation_stats(db, ctx, granularity=granularity, days=days)
     return apply_field_visibility(data, ctx)
 
 
