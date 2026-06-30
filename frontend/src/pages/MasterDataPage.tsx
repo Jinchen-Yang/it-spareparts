@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Input, Modal, Select, Space, Table, Tag, message } from "antd";
+import { Alert, Button, Input, Modal, Select, Space, Table, Tag, Tooltip, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import PageHeader from "../components/PageHeader";
 import BatchNormalizeModal from "../components/BatchNormalizeModal";
 import api, {
-  masterCategories, masterCheck, masterCreate, masterEdit, masterSuggest, searchParts,
+  masterCategories, masterCheck, masterCreate, masterEdit, masterSuggest, searchParts, SPEC_SOURCE_LABEL,
   type CategoryNode, type ClassifySuggestion, type MasterFields, type NearDup, type PartHit,
 } from "../api";
 
@@ -179,7 +179,11 @@ export default function MasterDataPage() {
           <div style={{ marginTop: 8, fontSize: 13, background: "#f6f3ee",
                         padding: "8px 10px", borderRadius: 6 }}>
             {suggest.canonical_description && (
-              <div>标准描述：<span style={{ fontWeight: 500 }}>{suggest.canonical_description}</span></div>
+              <div>标准描述：<span style={{ fontWeight: 500 }}>{suggest.canonical_description}</span>
+                {suggest.review_status === "AUTO_OK"
+                  ? <Tag color="green" style={{ marginLeft: 6 }}>自动通过</Tag>
+                  : <Tag color="orange" style={{ marginLeft: 6 }}>需复核</Tag>}
+              </div>
             )}
             <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
               {suggest.category_l1 && (
@@ -190,6 +194,24 @@ export default function MasterDataPage() {
               )}
               <Button size="small" type="primary" ghost onClick={applyNormalize}>一键规范化</Button>
             </div>
+            {suggest.structured_specs && Object.keys(suggest.structured_specs).length > 0 && (
+              <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+                <span style={{ color: "#9c968b", fontSize: 12 }}>字段依据</span>
+                {Object.entries(suggest.structured_specs).map(([k, f]) => {
+                  const safe = f.source === "DESCRIPTION_EXPLICIT" || f.source === "MODEL_DICTIONARY";
+                  return (
+                    <Tooltip key={k} title={`${SPEC_SOURCE_LABEL[f.source] || f.source} · 证据：${f.evidence}`}>
+                      <Tag color={safe ? "blue" : "gold"} style={{ marginInlineEnd: 0, fontSize: 12 }}>
+                        {k}={f.value}
+                      </Tag>
+                    </Tooltip>
+                  );
+                })}
+              </div>
+            )}
+            {suggest.validation_errors && suggest.validation_errors.length > 0 && (
+              <div style={{ marginTop: 4, fontSize: 12, color: "#c0392b" }}>校验：{suggest.validation_errors.join("；")}</div>
+            )}
           </div>
         )}
         {suggest?.whole_system && (
