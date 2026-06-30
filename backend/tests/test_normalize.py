@@ -73,3 +73,29 @@ def test_unrenderable_defers_to_human():
 def test_brand_norm_keeps_unknown_chinese():
     n, zh = N.normalize_brand("某不知名品牌")
     assert n == "某不知名品牌" and zh == "某不知名品牌"
+
+
+def test_brand_chuanyun_combined_format():
+    """氚云品牌是「中文（English）」合并格式 —— 必须归一到英文（线上 brand 没生效的根因）。"""
+    assert N.normalize_brand("三星（Samsung）")[0] == "Samsung"
+    assert N.normalize_brand("海力士（SK hynix）")[0] == "SK hynix"
+    assert N.normalize_brand("华为（HUAWEI）")[0] == "Huawei"
+    assert N.normalize_brand("DELL/戴尔")[0] == "Dell"
+    assert N.normalize_brand("HDS")[0] == "Hitachi"
+    assert N.normalize_brand("某SHP公司")[0] == "某SHP公司"   # 短键 hp 不得误命中
+
+
+def test_memory_real_world_messy_variants():
+    c = lambda d: N.normalize_part(d)["canonical_description"]
+    assert c("SAMSUNG 内存条 64G DDR5 RECC 2R×4 4800频率") == "64GB DDR5-4800 RDIMM 2Rx4 ECC"
+    assert c("64G 2R*4 PC4-3200AA REG") == "64GB DDR4-3200 RDIMM 2Rx4 ECC"
+    assert c("HPE 1x 32GB DDR4-2133 LRDIMM PC4-17000P-L Quad Rank x4") == \
+        "32GB DDR4-2133 LRDIMM 4Rx4 ECC"
+    assert c("Sun Memory 64GB DDR4-2666 Registered DIMM") == "64GB DDR4-2666 RDIMM ECC"
+
+
+def test_pc_bandwidth_code_to_speed():
+    from app.services import spec_extract as se
+    sp = lambda d: {s["spec_key"]: s["spec_value"] for s in se.extract(d)}
+    assert sp("2GB DDR3 PC3-8500 RDIMM")["frequency"] == "1066"    # 带宽码 → 速率
+    assert sp("32GB DDR4 PC4-21300 RDIMM")["frequency"] == "2666"

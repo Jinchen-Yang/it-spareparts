@@ -129,6 +129,9 @@ BRAND_CANON: dict[str, str] = {
     "思科": "Cisco", "cisco": "Cisco", "超微": "Supermicro", "supermicro": "Supermicro",
     "富士通": "Fujitsu", "fujitsu": "Fujitsu", "铠侠": "KIOXIA", "kioxia": "KIOXIA",
     "新华三": "H3C", "华三": "H3C", "h3c": "H3C",
+    "netapp": "NetApp", "网域存储": "NetApp", "ibm": "IBM",
+    "oracle": "Oracle", "sun": "Oracle", "甲骨文": "Oracle",
+    "hitachi": "Hitachi", "日立": "Hitachi", "hds": "Hitachi", "emc": "EMC",
 }
 # 英文规范名 → 中文显示名（界面另显中文，标准描述用英文）。
 BRAND_ZH: dict[str, str] = {
@@ -136,5 +139,6 @@ BRAND_ZH: dict[str, str] = {
     "Dell": "戴尔", "Samsung": "三星", "Micron": "镁光", "SK hynix": "海力士",
     "Kingston": "金士顿", "Intel": "英特尔", "Lenovo": "联想", "Huawei": "华为",
     "Inspur": "浪潮", "Cisco": "思科", "Supermicro": "超微", "Fujitsu": "富士通",
-    "KIOXIA": "铠侠", "H3C": "新华三",
+    "KIOXIA": "铠侠", "H3C": "新华三", "NetApp": "网域存储", "Oracle": "甲骨文",
+    "Hitachi": "日立",
 }

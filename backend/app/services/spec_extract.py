@@ -62,11 +62,22 @@ _PC_GEN = re.compile(r"PC([2-5])L?-", re.I)
 _DDR_FREQ = re.compile(r"DDR[2-5]-(\d{3,4})\b", re.I)
 _MHZ = re.compile(r"(\d{3,4})\s*MHZ", re.I)
 _PC_CODE = re.compile(r"PC[2-5]L?-(\d{4,5})", re.I)
+# PCx 带宽码(MB/s) → 速率(MT/s)：PC3-8500=DDR3-1066、PC4-21300=DDR4-2666 …
+_PC_BW = {5300: 667, 6400: 800, 8500: 1066, 10600: 1333, 12800: 1600, 14900: 1866,
+          17000: 2133, 19200: 2400, 21300: 2666, 23400: 2933, 25600: 3200, 28800: 3600,
+          38400: 4800, 44800: 5600, 51200: 6400}
 _MEM_FORM = re.compile(r"(LRDIMM|RDIMM|UDIMM|SODIMM|CM-DIMM|DIMM)", re.I)
-_RANK = re.compile(r"(\dR\s*x\s*\d)", re.I)   # 2Rx4 / 1Rx8
+# 2Rx4 / 2R×4 / 2R*4（分隔符可为 x/×/*）
+_RANK = re.compile(r"(\d)\s*R\s*[x×*]\s*(\d)", re.I)
 # 英文写法：Single/Dual/Quad/Octal Rank … x4 → 1R/2R/4R/8R + 位宽
-_RANK_WORDS = re.compile(r"(Single|Dual|Quad|Octal)[\s-]*Rank[\s,]*x\s*(\d{1,2})", re.I)
+_RANK_WORDS = re.compile(r"(Single|Dual|Quad|Octal)[\s-]*Rank[\s,]*[x×*]\s*(\d{1,2})", re.I)
 _RANK_N = {"single": "1", "dual": "2", "quad": "4", "octal": "8"}
+# Registered（REG/RECC/Registered）= RDIMM
+_REG = re.compile(r"\b(REG|RECC|REGISTERED)\b", re.I)
+# 频率：4800频率 / 2666 MT/s
+_FREQ_CN = re.compile(r"(\d{3,4})\s*(?:频率|MT/?s)", re.I)
+# JEDEC 速度等级后缀：2666V / 2933Y / 3200AA → 频率（数字部分）
+_DDR_GRADE = re.compile(r"\b([2-9]\d{3})(?:V|Y|W|U|T|P|R|AA|N|K)\b")
 
 
 def _spec(key: str, value: str, numeric=None) -> dict:
@@ -160,25 +171,32 @@ def _extract_memory(desc: str) -> list[dict]:
     if m:
         freq = int(m.group(1))
     if freq is None:
-        m = _MHZ.search(desc)
+        m = _MHZ.search(desc) or _FREQ_CN.search(desc)   # 2666MHz / 4800频率 / 2666 MT/s
         if m:
             freq = int(m.group(1))
     if freq is None:
         m = _PC_CODE.search(desc)
         if m:
             code = int(m.group(1))
-            # PC4-25600 是带宽(MB/s)=频率×8；PC4-2666V 是 MT/s 直接当频率
-            freq = code // 8 if code >= 10000 else code
+            # 已知带宽码查表；否则 ≥10000 视作带宽÷8，<10000 视作直接频率（PC4-2666V）
+            freq = _PC_BW.get(code) or (code // 8 if code >= 10000 else code)
+    if freq is None:
+        m = _DDR_GRADE.search(desc)          # 2666V / 3200AA → 2666 / 3200
+        if m:
+            freq = int(m.group(1))
     if freq and 200 <= freq <= 9000:
         out.append(_spec("frequency", str(freq), freq))
 
     m = _MEM_FORM.search(desc)
-    if m:
-        out.append(_spec("form_factor", m.group(1).upper()))
+    form = m.group(1).upper() if m else None
+    if form in (None, "DIMM") and _REG.search(desc):   # Registered DIMM / REG / RECC → RDIMM
+        form = "RDIMM"
+    if form:
+        out.append(_spec("form_factor", form))
 
     m = _RANK.search(desc)
     if m:
-        out.append(_spec("rank", m.group(1).replace(" ", "")))
+        out.append(_spec("rank", f"{m.group(1)}Rx{m.group(2)}"))   # 2R×4/2R*4 → 2Rx4
     else:
         rw = _RANK_WORDS.search(desc)        # Dual Rank x4 → 2Rx4
         if rw:

@@ -14,24 +14,53 @@ from app.services import taxonomy as T
 
 _CJK = re.compile(r"[一-鿿]")
 
-
-def normalize_brand(raw: str | None) -> tuple[str | None, str | None]:
-    """raw(中/英/缩写) → (brand_norm 英文规范名, brand_zh 中文显示)。识别不了则原样。"""
-    if not raw:
-        return (None, None)
-    norm = T.BRAND_CANON.get(raw.strip().lower())
-    if norm:
-        return (norm, T.BRAND_ZH.get(norm))
-    return (raw.strip(), raw.strip() if _CJK.search(raw) else None)
+# 品牌识别分两组（氚云品牌是「中文（English）」合并格式，如 三星（Samsung）/海力士（SK hynix））：
+# - 子串安全键：≥4 字符英文 或 中文（中文不会误嵌别词）→ 直接子串匹配，长键优先
+# - 短英文键（hp/wd/h3c…）→ 只整词匹配，避免 'shp' 误命中 'hp'
+_CANON_SAFE = sorted(
+    [(k, v) for k, v in T.BRAND_CANON.items() if len(k) >= 4 or _CJK.search(k)],
+    key=lambda kv: len(kv[0]), reverse=True)
+_CANON_SHORT = {k: v for k, v in T.BRAND_CANON.items() if len(k) < 4 and not _CJK.search(k)}
 
 
-def _brand_from_text(text: str) -> str | None:
-    """描述里夹带的品牌（如 '希捷 8TB…' / '…HDD 东芝'）。"""
+def _recognize_brand(text: str | None) -> str | None:
+    """从一段文本（品牌字段或描述）里识别已知规范品牌；识别不了返回 None。"""
+    if not text:
+        return None
     low = text.lower()
-    for k, v in T.BRAND_CANON.items():
+    for k, v in _CANON_SAFE:
         if k in low:
             return v
+    toks = set(re.split(r"[^a-z0-9]+", low))
+    for k, v in _CANON_SHORT.items():
+        if k in toks:
+            return v
     return None
+
+
+def normalize_brand(raw: str | None) -> tuple[str | None, str | None]:
+    """raw(中/英/缩写/中英合并) → (brand_norm 英文规范名, brand_zh 中文显示)。识别不了则原样。"""
+    if not raw:
+        return (None, None)
+    n = _recognize_brand(raw)
+    if n:
+        return (n, T.BRAND_ZH.get(n))
+    b = raw.strip()
+    return (b, b if _CJK.search(b) else None)
+
+
+def _resolve_brand(brand: str | None, description: str | None) -> tuple[str | None, str | None]:
+    """品牌归一优先级：①字段里认出的已知品牌 ②描述里认出的 ③字段原样透传。"""
+    n = _recognize_brand(brand)
+    if n:
+        return (n, T.BRAND_ZH.get(n))
+    n = _recognize_brand(description)
+    if n:
+        return (n, T.BRAND_ZH.get(n))
+    if brand and brand.strip():
+        b = brand.strip()
+        return (b, b if _CJK.search(b) else None)
+    return (None, None)
 
 
 def normalize_part(description: str | None, pn: str = "", brand: str = "") -> dict:
@@ -50,10 +79,7 @@ def normalize_part(description: str | None, pn: str = "", brand: str = "") -> di
         "frequency": _v(raw, "frequency"),
         "rank": _v(raw, "rank"),
     }
-    bnorm, bzh = normalize_brand(brand) if brand else (None, None)
-    if not bnorm:
-        bnorm = _brand_from_text(description or "")
-        bzh = T.BRAND_ZH.get(bnorm) if bnorm else None
+    bnorm, bzh = _resolve_brand(brand, description)
     # 硬盘/内存走结构化字段模板；其余类目按 l2/l1 分发到 normalize_templates
     canon = _render(f)
     if canon is None and not cls.get("whole_system"):
