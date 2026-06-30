@@ -317,6 +317,36 @@ export const agentFileBlobUrl = async (fileId: string): Promise<string> => {
   return URL.createObjectURL(await resp.blob());
 };
 
+// ===== 备件主数据自治（采购可编辑/新建 PN，WP1 + 轻量 C）=====
+export interface NearDup { pn_std: string; description: string | null; reason: string }
+export interface CategoryNode { code: string; name: string; children: { code: string; name: string }[] }
+export interface ClassifySuggestion {
+  category_l1?: string; l1_code?: string;
+  category_l2?: string | null; l2_code?: string | null;
+  confidence?: string; whole_system?: boolean;
+}
+export interface MasterFields {
+  description?: string | null; brand?: string | null;
+  category_major?: string | null; category_minor?: string | null;
+  machine_or_part?: string | null; unit?: string | null;
+}
+export const searchParts = (q: string, page = 1, page_size = 20) =>
+  api.get<{ items: PartHit[]; total: number }>("/parts/search", { params: { q, page, page_size } });
+export const masterCategories = () =>
+  api.get<{ categories: CategoryNode[]; battery_subtypes: string[]; cooling_types: string[] }>(
+    "/parts/master/categories");
+export const masterSuggest = (description: string, pn = "", brand = "") =>
+  api.get<{ suggestion: ClassifySuggestion | null }>("/parts/master/suggest",
+    { params: { description, pn, brand } });
+export const masterCheck = (pn_std: string) =>
+  api.get<{ near_duplicates: NearDup[] }>("/parts/master/check", { params: { pn_std } });
+export const masterCreate = (body: MasterFields & { pn_std: string; force?: boolean }) =>
+  api.post<{ created: boolean; id?: number; pn_std?: string; near_duplicates?: NearDup[]; message?: string }>(
+    "/parts/master", body);
+export const masterEdit = (body: MasterFields & { pn_std: string }) =>
+  api.patch<{ id: number; pn_std: string; updated: string[]; locked_fields: string[] }>(
+    "/parts/master", body);
+
 export interface Overview {
   part: {
     pn_std: string;
@@ -326,6 +356,8 @@ export interface Overview {
     category_minor: string | null;
     unit: string | null;
     needs_review: boolean;
+    machine_or_part?: string | null;
+    locked_fields?: string[];
     redirected_from?: string | null;
   };
   purchases_recent: PurchaseRow[];

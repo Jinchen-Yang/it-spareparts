@@ -11,7 +11,7 @@ from app.db import get_db
 from app.security import (
     UserContext, apply_field_visibility, get_current_user_context, record_access_log, require_page,
 )
-from app.services import master_edit, part_overview, part_resolver
+from app.services import classify, master_edit, part_overview, part_resolver, taxonomy
 
 router = APIRouter(prefix="/parts", tags=["parts"])
 
@@ -162,3 +162,31 @@ def master_edit_part(
     if res is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"型号不存在: {body.pn_std}")
     return res
+
+
+@router.get("/master/categories")
+def master_categories(
+    _auth: str = Depends(current_role),
+    _: None = Depends(require_page("page_master_data")),
+) -> dict:
+    """品类字典（两级树）供编辑页下拉。轻量 C：字典作为代码常量，采购可维护表是 WP3。"""
+    tree = [
+        {"code": code, "name": name,
+         "children": [{"code": c, "name": n} for c, n in taxonomy.CATEGORY_NAMES.items()
+                      if len(c) == 4 and c.startswith(code)]}
+        for code, name in taxonomy.CATEGORY_NAMES.items() if len(code) == 2
+    ]
+    return {"categories": tree, "battery_subtypes": taxonomy.BATTERY_SUBTYPES,
+            "cooling_types": taxonomy.COOLING_TYPES}
+
+
+@router.get("/master/suggest")
+def master_suggest(
+    description: str = Query(""),
+    pn: str = Query(""),
+    brand: str = Query(""),
+    _auth: str = Depends(current_role),
+    _: None = Depends(require_page("page_master_data")),
+) -> dict:
+    """据描述给高置信品类建议（轻量分类引擎）；含糊返回 null 交人工。"""
+    return {"suggestion": classify.classify_part(description, pn, brand)}
