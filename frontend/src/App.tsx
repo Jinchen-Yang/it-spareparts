@@ -8,6 +8,7 @@ import ProfitPage from "./pages/ProfitPage";
 import InventoryPage from "./pages/InventoryPage";
 import ImportPage from "./pages/ImportPage";
 import GovernancePage from "./pages/GovernancePage";
+import MasterDataPage from "./pages/MasterDataPage";
 import ChatPage from "./pages/ChatPage";
 import PurchasesPage from "./pages/PurchasesPage";
 import AccountsPage from "./pages/AccountsPage";
@@ -61,6 +62,7 @@ export default function App() {
     { key: "chat", label: "AI 助手", perm: "page_chat" },
     { key: "profit", label: "利润分析", perm: "page_profit" },
     { key: "inventory", label: "库存查询", perm: "page_inventory" },
+    { key: "master", label: "备件主数据", perm: "page_master_data" },
     { key: "governance", label: "数据治理", perm: "page_governance" },
   ].filter((m) => can(m.perm)).map(({ key, label }) => ({ key, label }));
   if (isAdmin) menu.push({ key: "accounts", label: "账号管理" });
@@ -137,6 +139,7 @@ export default function App() {
         {activePage === "chat" && <ChatPage />}
         {activePage === "profit" && <ProfitPage />}
         {activePage === "inventory" && <InventoryPage />}
+        {activePage === "master" && <MasterDataPage />}
         {activePage === "governance" && <GovernancePage />}
         {activePage === "accounts" && <AccountsPage />}
       </Content>

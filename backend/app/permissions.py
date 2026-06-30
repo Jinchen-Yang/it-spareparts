@@ -21,6 +21,7 @@ DATA_GROUPS: dict[str, list[str]] = {
 PAGE_KEYS: list[str] = [
     "page_parts", "page_purchases", "page_profit",
     "page_inventory", "page_chat", "page_import", "page_governance",
+    "page_master_data",
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ROW_KEYS]
@@ -39,6 +40,7 @@ LABELS: dict[str, str] = {
     "page_chat": "AI 助手",
     "page_import": "数据导入",
     "page_governance": "数据治理",
+    "page_master_data": "备件主数据（新建/编辑 PN）",
     "own_customers_only": "只看自己成交的客户（防恶性竞争）",
 }
 
@@ -55,7 +57,8 @@ def _full(own: bool = False) -> dict[str, bool]:
 ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     "admin": _full(),
     "boss": _full(),
-    "readonly": {**_full(), "page_import": False, "page_governance": False},
+    "readonly": {**_full(), "page_import": False, "page_governance": False,
+                 "page_master_data": False},
     "sales": {
         # 甲方 2026-06-15 确认：销售能看采购成本/毛利（整机拆解加点直卖需要采购价算建议售价）。
         # 供应商仍隐藏（不暴露从谁进货）；逐单销售成交明细另由 own_customers_only 收紧（看不到）。
@@ -74,6 +77,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_parts": True, "page_purchases": True, "page_profit": False,
         "page_inventory": True, "page_chat": True,
         "page_import": False, "page_governance": False,
+        # 甲方 2026-06-30：备件主数据(新建/编辑 PN)对采购开放
+        "page_master_data": True,
         "own_customers_only": False,
     },
 }

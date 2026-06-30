@@ -186,7 +186,14 @@ BRAND_SYNONYMS: list[list[str]] = [
     ["inspur", "浪潮"],
     ["sugon", "曙光"],
     ["ibm"],
-    ["broadcom", "lsi", "博通"],
+    ["broadcom", "lsi", "avago", "emulex", "博通"],
+    # 服务器备件常见跨标号召回（同一物理件不同 OEM/原厂标号），轻量 C 扩充
+    ["marvell", "qlogic", "aquantia"],
+    ["nvidia", "mellanox", "connectx", "英伟达"],
+    ["microchip", "adaptec", "pmc", "pmc-sierra"],
+    ["kioxia", "铠侠"],
+    ["delta", "台达"],
+    ["seagate", "希捷", "exos"],
 ]
 
 # 搜索零命中时落 sys_audit_log（action=search_miss）——数据治理工单来源：缺别名/缺型号

@@ -16,6 +16,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -62,6 +63,15 @@ class DimPart(Base):
     category_id: Mapped[int | None] = mapped_column(ForeignKey("product_categories.id"))
     data_quality_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
     reviewed_at: Mapped[datetime | None] = mapped_column(TZDateTime)   # 人工确认时间（区分自动建档）
+    # ---- 采购主数据自治（WP1）----
+    # master_source：import=氚云导入建档 / manual=采购手工新建。
+    master_source: Mapped[str] = mapped_column(String(16), default="import", server_default="import")
+    # locked_fields：采购人工维护过的字段名（description/brand/category_major/...）。
+    # loader 重导时对其中字段一律保留人工值、绝不覆盖——"和氚云无 API、服务器 PN 自治"的地基。
+    locked_fields: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, default=list, server_default=text("'{}'::text[]"))
+    # category_source：品类来源 AUTO(轻量分类引擎)/MANUAL(人工)/IMPORT(氚云)；空=未分类。
+    category_source: Mapped[str | None] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         TZDateTime, server_default=func.now(), onupdate=func.now()

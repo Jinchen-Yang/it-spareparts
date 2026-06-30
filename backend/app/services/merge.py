@@ -125,9 +125,13 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
 
     source_snapshot = _part_snapshot(source)
 
-    # 1) 目标 fill-if-empty 补资料
+    # 1) 目标 fill-if-empty 补资料（采购人工锁定过的字段——含人工置空——不被合并回填，
+    #    与 loader._respect_lock 同一口径：locked_fields = 人工权威值，跨写入路径都不覆盖）
+    locked_on_target = set(target.locked_fields or [])
     merged_fields = {}
     for f in _FILL_FIELDS:
+        if f in locked_on_target:
+            continue
         if getattr(target, f) is None and getattr(source, f) is not None:
             merged_fields[f] = {"before": None, "after": getattr(source, f)}
             setattr(target, f, getattr(source, f))

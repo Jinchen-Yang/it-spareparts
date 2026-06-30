@@ -16,7 +16,7 @@ from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -157,21 +157,36 @@ def _upsert_parts(session: Session, part_attrs: dict[str, dict], is_sales: bool)
     """
     if not part_attrs:
         return {}
+
+    def _respect_lock(field: str, normal):
+        """采购人工维护过(locked_fields 含该字段)→ 一律保留人工值；否则走原优先级。
+        "和氚云无 API、把服务器 PN 做成自治主数据"的地基：重导永不覆盖采购改过的字段。"""
+        return case((DimPart.locked_fields.contains([field]), getattr(DimPart, field)),
+                    else_=normal)
+
     for chunk in _chunks(list(part_attrs.values())):
         stmt = pg_insert(DimPart).values(chunk)
-        # fill-if-empty：保留已有值，空则用新值
+        # fill-if-empty：保留已有值，空则用新值（locked 字段则完全保留人工值）
         set_ = {
-            "description": func.coalesce(DimPart.description, stmt.excluded.description),
-            "brand": func.coalesce(DimPart.brand, stmt.excluded.brand),
-            "machine_or_part": func.coalesce(DimPart.machine_or_part, stmt.excluded.machine_or_part),
-            "unit": func.coalesce(DimPart.unit, stmt.excluded.unit),
+            "description": _respect_lock(
+                "description", func.coalesce(DimPart.description, stmt.excluded.description)),
+            "brand": _respect_lock(
+                "brand", func.coalesce(DimPart.brand, stmt.excluded.brand)),
+            "machine_or_part": _respect_lock(
+                "machine_or_part",
+                func.coalesce(DimPart.machine_or_part, stmt.excluded.machine_or_part)),
+            "unit": _respect_lock("unit", func.coalesce(DimPart.unit, stmt.excluded.unit)),
             "pn_raw_sample": func.coalesce(DimPart.pn_raw_sample, stmt.excluded.pn_raw_sample),
             "needs_review": or_(DimPart.needs_review, stmt.excluded.needs_review),
         }
         if is_sales:
-            # 销售可改写品类：新值非空优先
-            set_["category_major"] = func.coalesce(stmt.excluded.category_major, DimPart.category_major)
-            set_["category_minor"] = func.coalesce(stmt.excluded.category_minor, DimPart.category_minor)
+            # 销售可改写品类：新值非空优先（但采购锁定的品类不被覆盖）
+            set_["category_major"] = _respect_lock(
+                "category_major",
+                func.coalesce(stmt.excluded.category_major, DimPart.category_major))
+            set_["category_minor"] = _respect_lock(
+                "category_minor",
+                func.coalesce(stmt.excluded.category_minor, DimPart.category_minor))
         session.execute(stmt.on_conflict_do_update(
             index_elements=[DimPart.pn_std], set_=set_,
             where=(DimPart.status != "merged"),
