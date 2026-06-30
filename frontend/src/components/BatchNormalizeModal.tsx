@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
-import { Button, Checkbox, Modal, Space, Table, Tag, message } from "antd";
+import { Alert, Button, Checkbox, Modal, Space, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { batchApply, batchPreview, type BatchPreviewItem } from "../api";
+
+// 批量「应用」冻结：旧规范化会写错（已发生一次生产回滚），等确定性 standardize 系统接入再开。
+// 预览保留（只读，可看会改什么），仅停写回。新系统上线时改回 false。
+const BATCH_APPLY_FROZEN = true;
 
 const FIELD_OPTS = [
   { label: "描述", value: "description" },
@@ -94,13 +98,19 @@ export default function BatchNormalizeModal({ open, onClose, onApplied }: {
             <Button disabled={page <= 1 || loading} onClick={() => load(page - 1)}>上一批</Button>
             <Button disabled={items.length < 20 || loading} onClick={() => load(page + 1)}>下一批</Button>
             <Button onClick={onClose}>关闭</Button>
-            <Button type="primary" loading={applying} disabled={!selected.length || !fields.length} onClick={apply}>
-              应用选中（{selected.length}）
+            <Button type="primary" loading={!BATCH_APPLY_FROZEN && applying}
+              disabled={BATCH_APPLY_FROZEN || !selected.length || !fields.length} onClick={apply}>
+              {BATCH_APPLY_FROZEN ? "应用已暂停" : `应用选中（${selected.length}）`}
             </Button>
           </Space>
         </div>
       }
     >
+      {BATCH_APPLY_FROZEN && (
+        <Alert type="warning" showIcon style={{ marginBottom: 8 }}
+          message="批量「应用」已暂停"
+          description="描述标准化引擎正在升级为确定性系统（先识别类型→按字段证据渲染→无证据不猜），避免批量写错。此期间预览仍可查看，但暂不写回；需要的话可单条手工编辑。" />
+      )}
       <div style={{ marginBottom: 8, color: "#888", fontSize: 12.5 }}>
         只列出会被规范化的备件，按近期销售额降序（高价值先清）。勾选后应用；已人工锁定的字段不动，应用后字段锁定防氚云重导覆盖。
       </div>
