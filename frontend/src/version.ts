@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.4";
+export const APP_VERSION = "1.2.5";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.5",
+    date: "2026-06-30",
+    items: [
+      "显卡标准化「信息守恒」加固：HGX / Baseboard 整板（8× H100 / A100 等）不再被错误压缩成单卡——识别 NVIDIA HGX 家族（DELTA / DELTA-NEXT / REDSTONE / UMBRIEL）与 935- 板卡料号，新增「产品形态」（单卡 / 模组 / 整板 / 整机）、「GPU 数量」、「每卡显存」字段",
+      "标准描述不再丢失原文信息：显存（含「80G」「80GBSXM5」这类省略 B 或紧凑写法）、PCIe / SXM 形态（含「PCIE显卡」中文紧邻）、GPU 数量等只要原文出现就保留",
+      "新增「信息损失校验」：原文已出现的关键字段若在标准描述里缺失，自动转「需复核」而不再误判「自动通过」；整机服务器（如 8U）按组件转人工；未知系列代号保留并转复核，不静默丢弃",
+    ],
+  },
   {
     version: "1.2.4",
     date: "2026-06-30",

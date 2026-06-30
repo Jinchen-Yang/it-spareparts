@@ -30,7 +30,8 @@ FIELD_SCHEMA = {
     "DRIVE_SSD": ["capacity", "interface_speed", "pcie_gen", "form_factor",
                   "interface_type", "media_type"],
     "MEMORY": ["capacity", "ddr_generation", "speed", "module_type", "rank", "ecc", "media_type"],
-    "GPU": ["brand", "model", "memory_capacity", "memory_type", "form_factor"],
+    "GPU": ["brand", "platform", "product_type", "gpu_model", "gpu_count",
+            "memory_per_gpu", "memory_type", "form_factor", "product_family"],
     "CPU": ["brand", "family", "model", "cores", "base_freq", "l3_cache", "tdp"],
     "MAINBOARD": ["brand", "platform_model"],
     "BACKPLANE": ["bay_count", "interface_type", "form_factor", "subtype"],
@@ -43,6 +44,13 @@ FIELD_SCHEMA = {
     "OPTICS": ["brand", "speed", "form_factor", "pmd", "wavelength", "distance", "connector", "fiber"],
     "CABLE": ["cable_type", "interface_speed", "connector", "length", "media_type"],
     "MISC": ["brand", "item_type"],
+}
+
+# ── 条件关键字段（§信息守恒）：恒关键 + "源说过才关键"。后者的判定在各 validator 里
+# 按独立 source_signals 探测器与抽取字段做归一化语义比对（见 validate_gpu）。──
+CRITICAL_FIELDS = {
+    # gpu_model 恒关键；memory_per_gpu/form_factor/gpu_count/product_type 仅当原文出现才关键
+    "GPU": ["gpu_model"],
 }
 
 
@@ -360,68 +368,265 @@ def validate_memory(l2, specs, desc):
 
 
 # ─────────────────────────── 显卡 GPU ───────────────────────────
+# 设计（甲方规格 v3）：①extractor 高精度产出字段 ②_gpu_signals 高召回独立探测（只预警、
+# 绝不回写；与 extractor 正则不复用）③product_type 确定性建模——HGX 只判 platform 不判形态，
+# 整板/整机绝不渲成单卡 ④信息守恒按"归一化语义字段"比对（80G≡80GB），非字符串包含。
 _GPU_MODEL = re.compile(
     r"(GeForce\s+RTX\s*\d{3,4}\w*|RTX\s*\d{3,4}\w*|Tesla\s+\w+|Quadro\s+\w+|"
-    r"\bA100\b|\bA800\b|\bA30\b|\bA40\b|\bH100\b|\bH200\b|\bH800\b|\bV100\b|\bT4\b|\bL4\b|\bL40S?\b|"
+    r"\bA100\b|\bA800\b|\bA30\b|\bA40\b|\bA2\b|\bH100\b|\bH200\b|\bH800\b|\bV100\b|"
+    r"\bT4\b|\bL4\b|\bL40S?\b|\bL20\b|\bP100\b|\bP40\b|\bM10\b|"
     r"\bMI\d{2,3}\w*|Radeon\s+\w+|Instinct\s+\w+)", re.I)
 _GPU_BRAND_BY_MODEL = [
-    (re.compile(r"rtx|gtx|geforce|tesla|quadro|^a\d{2,3}|h[12]00|h800|v100|t4|l4|l40", re.I), "NVIDIA"),
+    (re.compile(r"rtx|gtx|geforce|tesla|quadro|^a\d{1,3}|h[12]00|h800|v100|t4|l4|l40|l20|p100|p40|m10", re.I), "NVIDIA"),
     (re.compile(r"\bmi\d|radeon|instinct|firepro", re.I), "AMD"),
 ]
-_GPU_FORM = re.compile(r"\b(SXM5|SXM4|SXM2|SXM|OAM|PCIe|Mezzanine)\b", re.I)
+# 形态：不依赖 \b（吃 PCIE显卡 / 80GBSXM5 这类 CJK 紧邻或粘连）
+_GPU_FORM = re.compile(r"(SXM5|SXM4|SXM2|SXM|OAM|PCIe|PCI-?e|Mezzanine)", re.I)
 _GPU_VRAM_TYPE = re.compile(r"(HBM3e|HBM3|HBM2e|HBM2|GDDR6X|GDDR6|GDDR5X|GDDR5)\b", re.I)
+# 显存(extractor 高精度)：2–4 位 + G/GB，容许粘连(80GBSXM5)，区间过滤排除链路速率
+_GPU_MEM_EX = re.compile(r"(?<![A-Za-z0-9.])(\d{2,4})\s*G(?:B)?", re.I)
+# 数量：8× / 8x A100 / 8xA100 / 8-GPU / 8 GPU / 8 H100；negative-lookbehind 防 M10、A100 被读成数量
+_GPU_COUNT = re.compile(
+    r"(?<![A-Za-z0-9])(\d{1,2})\s*[×xX]\s*(?=[A-Za-z])"
+    r"|(?<![A-Za-z])(\d{1,2})\s*[-\s]?GPU\b"
+    r"|(?<![A-Za-z])(\d{1,2})\s+(?:H100|H200|A100|A800|H800|V100|L40S?|A30|A40|MI\d{2,3})", re.I)
+_GPU_BOARD = re.compile(r"base\s*board|gpu\s*board|底板", re.I)
+_GPU_SERVER = re.compile(r"\b\d+U\b|server|整机|superpod", re.I)
+# 系列代号(DELTA-NEXT)：纯字母多段，剔除料号(935-23587)与规格串(V100-16G-PCIE)
+_GPU_CODE = re.compile(r"\b([A-Z][A-Z0-9]{2,}(?:-[A-Z0-9]+)+)\b")
+_GPU_CODE_KNOWN = re.compile(
+    r"^(NVIDIA|AMD|INTEL|GPU|SXM\d?|OAM|PCIE|PCI-E|HBM\d?E?|GDDR\d?X?|HGX|DGX|"
+    r"H100|H200|A100|A800|H800|V100|L40S?|L20|A30|A40|A2|T4|L4|P100|P40|M10|RTX|GTX|MI\d+)$", re.I)
+_GPU_SPECISH = re.compile(r"^\d+G[B]?$|^PCIE$|^PCI-E$|^SXM\d?$|^OAM$|^\d+$", re.I)
+
+# NVIDIA HGX baseboard 家族词典（联网核实 2026-06-30）：代号/PN前缀 → 配置。
+# 已知家族 → 识别为 baseboard + 推导数量，不再当"未映射代号"转人工。
+_NV_BB_FAMILY = {                       # 代号 → {数量, 形态}（型号仍取描述显式）
+    "DELTA-NEXT": {"count": 8, "form": "SXM5"},   # 8× H100/H200 SXM5（935-24287）
+    "REDSTONE":   {"count": 4, "form": "SXM4"},   # 4× A100 SXM4 低成本（935-22687）
+    "UMBRIEL":    {"count": 8, "form": "SXM5"},   # 8× B200 Blackwell（935-26287）
+    "DELTA":      {"count": 8, "form": "SXM4"},   # 8× A100 SXM4（935-23587）
+}
+_NV_BB_PN = {                           # NVIDIA baseboard PN 前缀 → 代号（无歧义）
+    "935-24287": "DELTA-NEXT", "935-22687": "REDSTONE",
+    "935-26287": "UMBRIEL", "935-23587": "DELTA",
+}
+_NV_BB_NAMES = sorted(_NV_BB_FAMILY, key=len, reverse=True)   # 长名先匹配(DELTA-NEXT 先于 DELTA)
 
 
-def extract_gpu(desc, brand_raw=""):
+def _gpu_family(desc, pn=""):
+    """识别已知 HGX baseboard 家族（代号或 PN 前缀）。返回 (代号, 配置) 或 (None, None)。"""
+    text = f"{pn or ''} {desc or ''}"
+    compact = re.sub(r"[^0-9]", "", text)
+    for pref, code in _NV_BB_PN.items():
+        if pref in text or pref.replace("-", "") in compact:
+            return code, _NV_BB_FAMILY[code]
+    if re.search(r"base\s*board|底板|\bhgx\b|sxm", desc, re.I):   # 需 baseboard 语境，防 'DELTA' 误命中
+        up = text.upper()
+        for code in _NV_BB_NAMES:
+            if re.search(rf"\b{re.escape(code)}\b", up):
+                return code, _NV_BB_FAMILY[code]
+    return None, None
+
+
+def _plausible_vram(v):
+    return 8 <= v <= 512            # 排除 6G/12G 链路速率与离谱值
+
+
+def _norm_gpu_form(raw):
+    raw = raw.upper()
+    if raw.startswith("PCI"):
+        return "PCIe"
+    if raw.startswith("MEZ"):
+        return "Mezzanine"
+    return raw                      # SXM5/SXM4/SXM/OAM
+
+
+def _form_family(v):
+    """形态归一到族（比较用）：SXM5→SXM、PCIe→PCIe、OAM→OAM。"""
+    if not v:
+        return None
+    v = v.upper()
+    if v.startswith("PCI"):
+        return "PCIe"
+    if v.startswith("SXM"):
+        return "SXM"
+    if v.startswith("MEZ"):
+        return "Mezzanine"
+    return v
+
+
+def _gpu_count(desc):
+    m = _GPU_COUNT.search(desc)
+    if m:
+        for g in m.groups():
+            if g:
+                return int(g)
+    return None
+
+
+def _gpu_codename(desc):
+    for tok in _GPU_CODE.findall(desc):
+        segs = tok.split("-")
+        if any(_GPU_CODE_KNOWN.match(s) or _GPU_SPECISH.match(s) or s.isdigit() for s in segs):
+            continue
+        if len([s for s in segs if s.isalpha() and len(s) >= 3]) >= 2:
+            return tok
+    return None
+
+
+def _gpu_product_type(desc, count, form):
+    """确定性形态判定。HGX 只产出 platform，绝不单独定 BASEBOARD。"""
+    low = desc.lower()
+    platform = "HGX" if re.search(r"\bhgx\b", low) else None
+    board = bool(_GPU_BOARD.search(desc))
+    dgx = bool(re.search(r"\bdgx\b", low))
+    server = bool(_GPU_SERVER.search(desc))
+    n = count or 0
+    if dgx or (server and n >= 2):              # 整机/服务器(8U/整机/DGX) 优先 → 组件，转人工
+        return "GPU_ASSEMBLY", platform
+    if board or (platform and n >= 2):          # 明确板词，或 HGX+明确多GPU
+        return "GPU_BASEBOARD", platform
+    if n >= 2:                                   # 多GPU但无板词 → 不擅自定，转人工
+        return "UNKNOWN", platform
+    if form and (_form_family(form) in ("SXM", "OAM")):
+        return "GPU_MODULE", platform
+    if _form_family(form) == "PCIe":
+        return "PCIE_GPU_CARD", platform
+    return "UNKNOWN", platform
+
+
+def extract_gpu(desc, brand_raw="", pn=""):
+    """高精度抽取。只产出有可靠证据的字段（不猜测、不回写宽松探测值）。"""
     specs = {}
     m = _GPU_MODEL.search(desc)
     if m:
         model = re.sub(r"\s+", " ", m.group(1).strip())
         model = re.sub(r"RTX\s*(\d)", r"RTX \1", model, flags=re.I)   # RTX4090 → RTX 4090
-        specs["model"] = _F(model, EXPLICIT, m.group(0))
-    # 品牌：描述/字段显式 → EXPLICIT；否则型号字典推导（RTX→NVIDIA）
+        specs["gpu_model"] = _F(model, EXPLICIT, m.group(0))
     bn = T.recognize_brand(brand_raw) or T.recognize_brand(desc)
     if bn:
         specs["brand"] = _F(bn, EXPLICIT, bn)
-    elif specs.get("model"):
+    elif specs.get("gpu_model"):
         for rx, b in _GPU_BRAND_BY_MODEL:
-            if rx.search(specs["model"]["value"]):
-                specs["brand"] = _F(b, DICT, f"{specs['model']['value']}→{b}")
+            if rx.search(specs["gpu_model"]["value"]):
+                specs["brand"] = _F(b, DICT, f"{specs['gpu_model']['value']}→{b}")
                 break
-    m = re.search(r"(\d{2,3})\s*GB\b", desc, re.I)
-    if m:
-        specs["memory_capacity"] = _F(f"{m.group(1)}GB", EXPLICIT, m.group(0))
+    count = _gpu_count(desc)
+    if count and count >= 2:
+        specs["gpu_count"] = _F(str(count), EXPLICIT, str(count))
+    for mm in _GPU_MEM_EX.finditer(desc):       # 显存：首个合理值（per-GPU 语义）
+        v = int(mm.group(1))
+        if _plausible_vram(v):
+            specs["memory_per_gpu"] = _F(f"{v}GB", EXPLICIT, mm.group(0).strip())
+            break
     m = _GPU_VRAM_TYPE.search(desc)
     if m:
         specs["memory_type"] = _F(m.group(1), EXPLICIT, m.group(0))   # 原大小写：HBM3e
-    m = _GPU_FORM.search(desc)
-    if m:
-        specs["form_factor"] = _F(m.group(1).upper().replace("PCIE", "PCIe"), EXPLICIT, m.group(0))
+    fm = _GPU_FORM.search(desc)
+    form = None
+    if fm:
+        form = _norm_gpu_form(fm.group(1))
+        specs["form_factor"] = _F(form, EXPLICIT, fm.group(0))
+    ptype, platform = _gpu_product_type(desc, count, form)
+    fam_code, fam = _gpu_family(desc, pn)        # 已知 HGX baseboard 家族（词典核实）
+    if fam_code:
+        ptype = "GPU_BASEBOARD"                  # 家族即整板，绝不降级
+        platform = "HGX"
+        specs["product_family"] = _F(fam_code, DICT, fam_code)   # DICT=已映射 → 不转人工
+        if "gpu_count" not in specs:
+            specs["gpu_count"] = _F(str(fam["count"]), DICT, f"{fam_code}→{fam['count']}GPU")
+        if "form_factor" not in specs:
+            specs["form_factor"] = _F(fam["form"], DICT, f"{fam_code}→{fam['form']}")
+    else:
+        code = _gpu_codename(desc)               # 未知代号：保留进 product_family + 转人工（不静默丢）
+        if code:
+            specs["product_family"] = _F(code, EXPLICIT, code)
+    specs["product_type"] = _F(ptype, DERIVED, ptype)
+    if platform:
+        specs["platform"] = _F(platform, EXPLICIT, platform)
     return specs
 
 
 def render_gpu(specs):
-    """{品牌} {型号} {显存容量} {显存类型} {形态} GPU —— 形态只从证据来，不默认 PCIe。"""
-    if not _val(specs, "model"):
+    """按 product_type 分叉：整板/整机带 Baseboard/Assembly 名词 + 数量；卡/模块仍为 {…} GPU。"""
+    model = _val(specs, "gpu_model")
+    if not model:
         return None
-    seg = []
-    for k in ("brand", "model", "memory_capacity", "memory_type", "form_factor"):
-        if _val(specs, k):
-            seg.append(_val(specs, k))
+    pt = _val(specs, "product_type")
+    brand, mem = _val(specs, "brand"), _val(specs, "memory_per_gpu")
+    mtype, form = _val(specs, "memory_type"), _val(specs, "form_factor")
+    count, platform = _val(specs, "gpu_count"), _val(specs, "platform")
+    if pt in ("GPU_BASEBOARD", "GPU_ASSEMBLY"):
+        seg = []
+        if brand:
+            seg.append(brand)
+        if platform:
+            seg.append(platform)
+        if count:
+            seg.append(f"{count}×")
+        seg.append(model)
+        for v in (mem, mtype, form):
+            if v:
+                seg.append(v)
+        seg.append("GPU Baseboard" if pt == "GPU_BASEBOARD" else "GPU Assembly")
+        return " ".join(seg)
+    seg = [v for v in (brand, model, mem, mtype, form) if v]
     seg.append("GPU")
     return " ".join(seg)
 
 
+# ── 独立 source_signals 探测器（高召回，仅信息守恒预警，绝不写入结果；正则与 extractor 不复用）──
+_SIG_MEM = re.compile(r"(?<![A-Za-z0-9.])(\d{2,4})\s*G[Bb]?(?![A-Za-z0-9])")
+_SIG_FORM = re.compile(r"(SXM[0-9]?|OAM|Mezzanine|PCI-?e)", re.I)
+
+
+def _gpu_signals(desc):
+    mems = [int(m.group(1)) for m in _SIG_MEM.finditer(desc)]
+    plausible = [v for v in mems if _plausible_vram(v)]
+    fm = _SIG_FORM.search(desc)
+    return {
+        "mem": plausible[0] if plausible else None,
+        "mem_hit": bool(mems),
+        "form": _form_family(fm.group(1)) if fm else None,
+        "count": _gpu_count(desc),
+        "board": bool(_GPU_BOARD.search(desc) or re.search(r"\bhgx\b|\bdgx\b", desc, re.I)),
+    }
+
+
 def validate_gpu(desc, specs):
+    """信息损失校验（归一化语义比对）+ 矛盾校验。errs 非空 → REVIEW_REQUIRED。"""
     errs = []
     low = desc.lower()
     form = _val(specs, "form_factor")
-    if re.search(r"\bsxm", low) and form and form.startswith("PCIe"):
+    if re.search(r"\bsxm", low) and _form_family(form) == "PCIe":
         errs.append("原描述 SXM 不得变成 PCIe")
-    if "pcie" in low and form and form.startswith("SXM"):
+    if "pcie" in low and _form_family(form) == "SXM":
         errs.append("原描述 PCIe 不得变成 SXM")
-    if not _val(specs, "model"):
+    if not _val(specs, "gpu_model"):
         errs.append("GPU 型号丢失")
+        return errs
+    sig = _gpu_signals(desc)
+    ex_mem = None
+    if _val(specs, "memory_per_gpu"):
+        mm = re.search(r"(\d+)", _val(specs, "memory_per_gpu"))
+        ex_mem = int(mm.group(1)) if mm else None
+    if sig["mem"] is not None and ex_mem != sig["mem"]:
+        errs.append(f"显存丢失/不一致（源 {sig['mem']}GB）")
+    elif sig["mem"] is None and sig["mem_hit"] and ex_mem is None:
+        errs.append("疑似显存信号未确认（possible_missing_signal）")   # 不自动补，转人工
+    if sig["form"] and _form_family(form) != sig["form"]:
+        errs.append(f"形态丢失（源 {sig['form']}）")
+    if (sig["count"] or 0) >= 2 and not _val(specs, "gpu_count"):
+        errs.append("GPU 数量丢失")
+    pt = _val(specs, "product_type")
+    if pt == "GPU_ASSEMBLY":
+        errs.append("整机/组件需人工确认（GPU_ASSEMBLY）")
+    elif pt == "UNKNOWN" and (sig["count"] or 0) >= 2:
+        errs.append("多GPU形态未确定（missing_product_type）")
+    pf = specs.get("product_family")
+    if pf and pf["source"] != DICT:              # 仅"未映射"代号转人工；已知家族(DICT)放行
+        errs.append(f"未映射系列词 {pf['value']} 待人工（unmapped_series_codename）")
     return errs
 
 
@@ -1986,7 +2191,7 @@ def standardize(pn: str, description: str | None, brand: str = "") -> dict:
     if l1_code == "05":
         return _run(out, "CPU", extract_cpu(desc, pn, brand), render_cpu, classify_cpu_l2, validate_cpu, desc)
     if l2_code == "0404":
-        specs = extract_gpu(desc, brand)
+        specs = extract_gpu(desc, brand, pn)
         out["object_type"] = "GPU"
         out["structured_specs"] = {k: specs[k] for k in FIELD_SCHEMA["GPU"] if k in specs}
         out["canonical_description"] = render_gpu(specs)
