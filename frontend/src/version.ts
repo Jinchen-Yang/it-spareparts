@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.0";
+export const APP_VERSION = "1.2.1";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.1",
+    date: "2026-06-30",
+    items: [
+      "品牌归一修复：氚云的「中文（英文）」品牌（如 三星（Samsung）、海力士（SK hynix）、华为（HUAWEI））现能正确归一到英文标准名；补充 NetApp / IBM / Oracle / Hitachi 等品牌（此前品牌建议在真实数据上基本没生效）",
+      "内存标准化更完整：识别 Dual Rank x4 / 2R×4 / 2R*4、REG·RECC·Registered（=RDIMM）、4800频率、2666V·3200AA 速度等级、以及 PCx 带宽码（PC3-8500=DDR3-1066）",
+    ],
+  },
   {
     version: "1.2.0",
     date: "2026-06-30",
