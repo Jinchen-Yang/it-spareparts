@@ -58,10 +58,13 @@ def _kw_hit(code: str, text: str) -> bool:
     return any(k in text for k in T.KEYWORDS.get(code, []))
 
 
+_FC_SPEED = re.compile(r"\b\d{1,2}\s*g\s*fc\b", re.I)   # 8G FC / 16G FC / 32GFC = 光纤卡代际，非泛 HBA
+
+
 def _classify_card(text: str) -> str | None:
-    """04 卡 的二级判定：FC 先于泛 HBA（'Fibre Channel HBA' 归 FC 而非 HBA）。"""
+    """04 卡 的二级判定：FC 先于泛 HBA（'Fibre Channel HBA' / 'QLogic 8G FC' 归 FC 而非 HBA）。"""
     if any(k in text for k in ("qle", "lpe", "qme", "fibre channel", "fiber channel",
-                               "光纤卡", "fc hba")):
+                               "光纤卡", "fc hba")) or _FC_SPEED.search(text):
         return "0405"
     if _is_gpu(text):                                       # GPU 型号码整词匹配，防 'a100'⊂'msa1000'
         return "0404"
