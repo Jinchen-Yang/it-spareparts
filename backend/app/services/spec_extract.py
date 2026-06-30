@@ -64,6 +64,9 @@ _MHZ = re.compile(r"(\d{3,4})\s*MHZ", re.I)
 _PC_CODE = re.compile(r"PC[2-5]L?-(\d{4,5})", re.I)
 _MEM_FORM = re.compile(r"(LRDIMM|RDIMM|UDIMM|SODIMM|CM-DIMM|DIMM)", re.I)
 _RANK = re.compile(r"(\dR\s*x\s*\d)", re.I)   # 2Rx4 / 1Rx8
+# 英文写法：Single/Dual/Quad/Octal Rank … x4 → 1R/2R/4R/8R + 位宽
+_RANK_WORDS = re.compile(r"(Single|Dual|Quad|Octal)[\s-]*Rank[\s,]*x\s*(\d{1,2})", re.I)
+_RANK_N = {"single": "1", "dual": "2", "quad": "4", "octal": "8"}
 
 
 def _spec(key: str, value: str, numeric=None) -> dict:
@@ -176,6 +179,10 @@ def _extract_memory(desc: str) -> list[dict]:
     m = _RANK.search(desc)
     if m:
         out.append(_spec("rank", m.group(1).replace(" ", "")))
+    else:
+        rw = _RANK_WORDS.search(desc)        # Dual Rank x4 → 2Rx4
+        if rw:
+            out.append(_spec("rank", f"{_RANK_N[rw.group(1).lower()]}Rx{rw.group(2)}"))
     return out
 
 
