@@ -169,3 +169,10 @@ def test_merge_honors_locked_field(db):
     db.expire_all()
     tgt2 = db.scalar(select(DimPart).where(DimPart.pn_std == "MG-TGT"))
     assert tgt2.category_major is None, "合并回填覆盖了采购锁定的置空字段（跨路径锁失效）"
+
+
+def test_batch_apply_is_frozen():
+    """冻结期：批量「应用」端点返回 503（保护生产，单条编辑不受影响）。"""
+    r = _client.post("/api/parts/master/batch-apply", json={"part_ids": [1]}, headers=_hdr("purchaser"))
+    assert r.status_code == 503
+    assert "暂停" in r.json()["detail"]
