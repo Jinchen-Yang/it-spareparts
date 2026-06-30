@@ -4,6 +4,7 @@
 不建 8 字段品牌 PIM、不建独立规则平台（那是 WP4，触发条件满足再上）。
 分类引擎见 services/classify.py。
 """
+import re
 
 # ── 一级 / 二级分类（code → 中文名）。已应用两处改名：0207 NVMe/PCIe-SSD；07 电池三级属性 ──
 CATEGORY_NAMES: dict[str, str] = {
@@ -28,7 +29,13 @@ COOLING_TYPES = ["FAN", "BLOWER", "HEATSINK", "FAN_HEATSINK", "LIQUID_COOLING",
 CLASSIFY_PRIORITY = ["07", "08", "06", "0901", "0902", "03", "04", "05", "01", "02", "10"]
 
 # 形态决定词：一出现就压过优先级（解决 "Fan Power Cable" 含 Fan 却应归线缆）。
-DECISIVE = {"0902": [" cable", "cable ", "power cord", " dac", " aoc", "mini-sas", "slimsas", "oculink"]}
+DECISIVE = {
+    "0902": [" cable", "cable ", "power cord", " dac", " aoc", "mini-sas", "slimsas", "oculink"],
+    # 主板形态决定词：含主板字样即归主板，压过 CPU/Processor 关键词
+    # （"HP Mother Board…Intel E5 Processor" 是主板不是 CPU；氚云写「Mother Board」带空格）
+    "0301": ["motherboard", "mother board", "mainboard", "main board", "system board",
+             "systemboard", "主板", "主逻辑板"],
+}
 
 # 每个分类的识别关键词（小写匹配；来自 §一~§三 "识别词/识别规则"）。
 KEYWORDS: dict[str, list[str]] = {
@@ -53,8 +60,9 @@ KEYWORDS: dict[str, list[str]] = {
              "sas controller", "sas hba"],
     "0403": ["nic", "network interface", "ethernet adapter", "lan adapter", "network adapter",
              "ocp nic", "flexiblelom", "flexlom", "网卡", "converged network", "infiniband adapter"],
+    # 注：GPU 型号码(a100/h100/rtx…) 不放子串关键词——会误命中 MSA1000 等；改由 classify._is_gpu 整词匹配
     "0404": ["gpu", "graphics card", "video card", "graphics adapter", "tesla", "quadro",
-             "rtx", "a100", "h100", "h200", "radeon instinct", "firepro", "显卡"],
+             "radeon instinct", "firepro", "显卡"],
     "0405": ["fc hba", "fibre channel adapter", "fiber channel adapter", "16g fc", "32g fc",
              "emulex lpe", "qlogic qle", "光纤卡"],
     "0499": ["pcie riser", "riser card", "mezzanine", "sas expander", "nvme switch",
@@ -132,6 +140,7 @@ BRAND_CANON: dict[str, str] = {
     "netapp": "NetApp", "网域存储": "NetApp", "ibm": "IBM",
     "oracle": "Oracle", "sun": "Oracle", "甲骨文": "Oracle",
     "hitachi": "Hitachi", "日立": "Hitachi", "hds": "Hitachi", "emc": "EMC",
+    "nvidia": "NVIDIA", "英伟达": "NVIDIA", "amd": "AMD", "超威": "AMD",
 }
 # 英文规范名 → 中文显示名（界面另显中文，标准描述用英文）。
 BRAND_ZH: dict[str, str] = {
@@ -140,5 +149,39 @@ BRAND_ZH: dict[str, str] = {
     "Kingston": "金士顿", "Intel": "英特尔", "Lenovo": "联想", "Huawei": "华为",
     "Inspur": "浪潮", "Cisco": "思科", "Supermicro": "超微", "Fujitsu": "富士通",
     "KIOXIA": "铠侠", "H3C": "新华三", "NetApp": "网域存储", "Oracle": "甲骨文",
-    "Hitachi": "日立",
+    "Hitachi": "日立", "NVIDIA": "英伟达",
 }
+
+
+# ── 品牌识别（氚云品牌是「中文（English）」合并格式：三星（Samsung）/海力士（SK hynix））──
+_CJK = re.compile(r"[一-鿿]")
+# 子串安全键：≥4 字符英文 或 中文（不会误嵌别词），长键优先；短英文键（hp/wd）只整词匹配
+_CANON_SAFE = sorted([(k, v) for k, v in BRAND_CANON.items() if len(k) >= 4 or _CJK.search(k)],
+                     key=lambda kv: len(kv[0]), reverse=True)
+_CANON_SHORT = {k: v for k, v in BRAND_CANON.items() if len(k) < 4 and not _CJK.search(k)}
+
+
+def recognize_brand(text: str | None) -> str | None:
+    """从文本（品牌字段或描述）识别已知规范品牌；识别不了 → None。"""
+    if not text:
+        return None
+    low = text.lower()
+    for k, v in _CANON_SAFE:
+        if k in low:
+            return v
+    toks = set(re.split(r"[^a-z0-9]+", low))
+    for k, v in _CANON_SHORT.items():
+        if k in toks:
+            return v
+    return None
+
+
+def resolve_brand(brand: str | None, description: str | None) -> tuple[str | None, str | None]:
+    """品牌优先级：①字段认出的 ②描述认出的 ③字段原样。返回 (brand_norm 英文, brand_zh 中文)。"""
+    n = recognize_brand(brand) or recognize_brand(description)
+    if n:
+        return (n, BRAND_ZH.get(n))
+    if brand and brand.strip():
+        b = brand.strip()
+        return (b, b if _CJK.search(b) else None)
+    return (None, None)

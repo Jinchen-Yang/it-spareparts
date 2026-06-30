@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart
 from app.models.sales import FSalesLine, FSalesOrder
-from app.services import master_edit, normalize
+from app.services import master_edit, standardize
 
 _RECENT_DAYS = 540   # 约 18 个月，价值排序窗口
 
@@ -21,7 +21,7 @@ def _cutoff() -> dt.datetime:
 
 def _proposed(part: DimPart) -> dict:
     """据当前字段算建议改动（排除已锁定字段与无变化）。返回 {field: new_value}。"""
-    sug = normalize.normalize_part(part.description, part.pn_std, part.brand)
+    sug = standardize.standardize(part.pn_std, part.description, part.brand)
     locked = set(part.locked_fields or [])
     changes: dict = {}
     canon = sug.get("canonical_description")
@@ -101,8 +101,14 @@ def _row(part: DimPart, amt) -> dict:
             "canonical_description": sug.get("canonical_description"),
             "category_l1": sug.get("category_l1"), "category_l2": sug.get("category_l2"),
             "brand_norm": sug.get("brand_norm"),
+            # 确定性引擎附带：对象类型 + 每字段证据 + 校验 + 审核状态（§16 展开行 / §17 门槛）
+            "object_type": sug.get("object_type"),
+            "structured_specs": sug.get("structured_specs"),
+            "validation_errors": sug.get("validation_errors"),
+            "review_status": sug.get("review_status"),
         },
         "changes": kinds,
+        "review_status": sug.get("review_status"),       # 行级：AUTO_OK 才默认勾选 / 可应用
     }
 
 
@@ -120,7 +126,13 @@ def apply_batch(db: Session, part_ids: list[int], fields: list[str] | None,
         if part is None or part.status != "active":
             skipped += 1
             continue
-        changes = _proposed(part)["changes"]
+        prop = _proposed(part)
+        # §17 服务端门槛：仅 AUTO_OK（类型/分类确定、无校验错、无猜测字段）才批量写回；
+        # REVIEW_REQUIRED 交单条人工，绝不批量写低置信结果。
+        if prop["suggestion"].get("review_status") != standardize.AUTO_OK:
+            skipped += 1
+            continue
+        changes = prop["changes"]
         updates: dict = {}
         if "description" in want and "description" in changes:
             updates["description"] = changes["description"]

@@ -9,10 +9,21 @@
 优先级解决关键词冲突（taxonomy.CLASSIFY_PRIORITY），形态决定词压过优先级
 （"Fan Power Cable" 含 Fan 仍归线缆）。整机 vs FRU：命中任一备件组件即视为 FRU。
 """
+import re
+
 from app.services import taxonomy as T
 
 _DISK_SIGNAL = ["hdd", "ssd", "固态", "硬盘", "机械盘", "机械硬盘", "nvme", " disk "]
 _MEM_SIGNAL = ["ddr", "dimm", "内存", "pc5", "pc4", "pc3", "pc2", "rdram", "sdram"]
+# GPU 显式词（子串安全） + GPU 型号码（必须整词，否则 'a100' 会误命中 'MSA1000'）
+_GPU_WORDS = ["gpu", "graphics card", "video card", "graphics adapter", "tesla", "quadro",
+              "radeon instinct", "firepro", "显卡", "instinct"]
+_GPU_CODE = re.compile(r"\b(A100|A800|A30|A40|A2|H100|H200|H800|V100|T4|L4|L40S?|MI\d{2,3}|"
+                       r"RTX\s*\d{3,4}|GTX\s*\d{3,4})\b", re.I)
+
+
+def _is_gpu(text: str) -> bool:
+    return any(w in text for w in _GPU_WORDS) or bool(_GPU_CODE.search(text))
 
 
 def _norm(*parts: str) -> str:
@@ -47,12 +58,17 @@ def _kw_hit(code: str, text: str) -> bool:
     return any(k in text for k in T.KEYWORDS.get(code, []))
 
 
+_FC_SPEED = re.compile(r"\b\d{1,2}\s*g\s*fc\b", re.I)   # 8G FC / 16G FC / 32GFC = 光纤卡代际，非泛 HBA
+
+
 def _classify_card(text: str) -> str | None:
-    """04 卡 的二级判定：FC 先于泛 HBA（'Fibre Channel HBA' 归 FC 而非 HBA）。"""
+    """04 卡 的二级判定：FC 先于泛 HBA（'Fibre Channel HBA' / 'QLogic 8G FC' 归 FC 而非 HBA）。"""
     if any(k in text for k in ("qle", "lpe", "qme", "fibre channel", "fiber channel",
-                               "光纤卡", "fc hba")):
+                               "光纤卡", "fc hba")) or _FC_SPEED.search(text):
         return "0405"
-    for code in ("0404", "0403", "0401", "0402", "0499"):   # GPU/NIC/RAID/HBA/其他
+    if _is_gpu(text):                                       # GPU 型号码整词匹配，防 'a100'⊂'msa1000'
+        return "0404"
+    for code in ("0403", "0401", "0402", "0499"):           # NIC/RAID/HBA/其他
         if _kw_hit(code, text):
             return code
     return None

@@ -320,6 +320,8 @@ export const agentFileBlobUrl = async (fileId: string): Promise<string> => {
 // ===== 备件主数据自治（采购可编辑/新建 PN，WP1 + 轻量 C）=====
 export interface NearDup { pn_std: string; description: string | null; reason: string }
 export interface CategoryNode { code: string; name: string; children: { code: string; name: string }[] }
+/** 单字段证据：值 + 来源（原文明写/确定性推导/型号字典）+ 证据片段。 */
+export interface SpecField { value: string; source: string; evidence: string }
 export interface ClassifySuggestion {
   category_l1?: string | null;
   category_l2?: string | null;
@@ -329,7 +331,20 @@ export interface ClassifySuggestion {
   brand_norm?: string | null;
   brand_zh?: string | null;
   fields?: Record<string, string>;
+  // 确定性引擎：对象类型 + 每字段证据 + 校验 + 审核状态
+  object_type?: string | null;
+  structured_specs?: Record<string, SpecField>;
+  validation_errors?: string[];
+  review_status?: string;   // AUTO_OK | REVIEW_REQUIRED
 }
+/** 证据来源中文标签。 */
+export const SPEC_SOURCE_LABEL: Record<string, string> = {
+  DESCRIPTION_EXPLICIT: "原文明写",
+  DERIVED_SAFE: "确定性推导",
+  MODEL_DICTIONARY: "型号字典",
+  MANUAL: "人工",
+  UNKNOWN: "未知",
+};
 export interface MasterFields {
   description?: string | null; brand?: string | null;
   category_major?: string | null; category_minor?: string | null;
@@ -363,6 +378,7 @@ export interface BatchPreviewItem {
   recent_sales_amount: number | null;
   suggestion: ClassifySuggestion;
   changes: string[];
+  review_status?: string;   // 行级：AUTO_OK 才默认勾选（§17）
 }
 export const batchPreview = (page = 1, page_size = 20, only_changes = true) =>
   api.get<{ total_beijian: number; page: number; page_size: number; items: BatchPreviewItem[] }>(

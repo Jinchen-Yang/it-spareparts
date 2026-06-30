@@ -11,7 +11,7 @@ from app.db import get_db
 from app.security import (
     UserContext, apply_field_visibility, get_current_user_context, record_access_log, require_page,
 )
-from app.services import batch_normalize, master_edit, normalize, part_overview, part_resolver, taxonomy
+from app.services import batch_normalize, master_edit, part_overview, part_resolver, standardize, taxonomy
 
 router = APIRouter(prefix="/parts", tags=["parts"])
 
@@ -192,9 +192,11 @@ def master_suggest(
     _auth: str = Depends(current_role),
     _: None = Depends(require_page("page_master_data")),
 ) -> dict:
-    """据描述给标准化建议：标准描述 + 一级/二级分类 + 品牌归一 + 结构化字段。
-    缺关键规格时 canonical_description=null、分类为 null，交人工。"""
-    return {"suggestion": normalize.normalize_part(description, pn, brand)}
+    """据描述给确定性标准化建议：先识别类型 → 按字段证据渲染标准描述 + 一级/二级分类 +
+    品牌归一 + 每字段证据(source/evidence) + 校验 + 审核状态。无可靠证据的字段不猜，
+    缺关键字段时 canonical_description=null、分类为 null、review_status=REVIEW_REQUIRED，交人工。"""
+    s = standardize.standardize(pn, description, brand)
+    return {"suggestion": {k: v for k, v in s.items() if not k.startswith("_")}}
 
 
 class BatchApply(BaseModel):

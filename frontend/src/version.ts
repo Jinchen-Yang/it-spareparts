@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.2";
+export const APP_VERSION = "1.2.3";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.3",
+    date: "2026-06-30",
+    items: [
+      "描述标准化升级为确定性引擎：先识别备件类型，再按「字段证据」渲染标准描述——硬盘/SSD/内存/显卡/CPU/主板/背板/RAID·HBA/网卡·光纤卡/电源/电池/风扇/光模块/线缆等 16 类各有固定字段与模板，无可靠证据的字段一律不猜、缺关键字段转人工",
+      "单条「一键规范化」即用新引擎：除标准描述/分类/品牌外，新增「字段依据」——每个字段标注取值来源（原文明写/确定性推导/型号字典）与证据片段，并给出「自动通过 / 需复核」状态",
+      "批量规范化预览升级：可展开逐字段核对证据；仅「自动通过」项（类型与分类确定、无校验错、无猜测字段）默认勾选。批量「应用」仍暂停（待引擎在生产稳定后开放）",
+    ],
+  },
   {
     version: "1.2.2",
     date: "2026-06-30",
