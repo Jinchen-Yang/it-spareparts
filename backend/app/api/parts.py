@@ -15,6 +15,10 @@ from app.services import batch_normalize, master_edit, normalize, part_overview,
 
 router = APIRouter(prefix="/parts", tags=["parts"])
 
+# 批量应用冻结开关：旧 normalize 边看边猜会写错（已发生一次生产回滚），在确定性
+# standardize 系统接入前冻结写回路径，避免采购批量写入低质量结果。新系统上线时改回 False。
+BATCH_APPLY_FROZEN = True
+
 
 @router.get("/search")
 def search(
@@ -220,4 +224,10 @@ def master_batch_apply(
     _: None = Depends(require_page("page_master_data")),
 ) -> dict:
     """批量应用标准化（服务端重算，锁定字段不动，应用后字段锁定防重导覆盖）。"""
+    if BATCH_APPLY_FROZEN:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "批量规范化「应用」已暂停：描述标准化引擎正在升级为确定性系统，避免批量写入低质量结果。"
+            "升级完成后开放。期间可单条手工编辑。",
+        )
     return batch_normalize.apply_batch(db, body.part_ids, body.fields, (ctx.user_id or ctx.role))
