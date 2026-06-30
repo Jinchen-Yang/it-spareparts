@@ -29,7 +29,13 @@ COOLING_TYPES = ["FAN", "BLOWER", "HEATSINK", "FAN_HEATSINK", "LIQUID_COOLING",
 CLASSIFY_PRIORITY = ["07", "08", "06", "0901", "0902", "03", "04", "05", "01", "02", "10"]
 
 # 形态决定词：一出现就压过优先级（解决 "Fan Power Cable" 含 Fan 却应归线缆）。
-DECISIVE = {"0902": [" cable", "cable ", "power cord", " dac", " aoc", "mini-sas", "slimsas", "oculink"]}
+DECISIVE = {
+    "0902": [" cable", "cable ", "power cord", " dac", " aoc", "mini-sas", "slimsas", "oculink"],
+    # 主板形态决定词：含主板字样即归主板，压过 CPU/Processor 关键词
+    # （"HP Mother Board…Intel E5 Processor" 是主板不是 CPU；氚云写「Mother Board」带空格）
+    "0301": ["motherboard", "mother board", "mainboard", "main board", "system board",
+             "systemboard", "主板", "主逻辑板"],
+}
 
 # 每个分类的识别关键词（小写匹配；来自 §一~§三 "识别词/识别规则"）。
 KEYWORDS: dict[str, list[str]] = {

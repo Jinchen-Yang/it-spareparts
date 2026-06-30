@@ -31,6 +31,7 @@ FIELD_SCHEMA = {
                   "interface_type", "media_type"],
     "MEMORY": ["capacity", "ddr_generation", "speed", "module_type", "rank", "ecc", "media_type"],
     "GPU": ["brand", "model", "memory_capacity", "memory_type", "form_factor"],
+    "CPU": ["brand", "family", "model", "cores", "base_freq", "l3_cache", "tdp"],
 }
 
 
@@ -413,6 +414,149 @@ def validate_gpu(desc, specs):
     return errs
 
 
+# ─────────────────────────── 处理器 CPU ───────────────────────────
+# 真实数据：描述多是"规格堆"(核心/频率/缓存/TDP)，型号身份常只在 PN 里(XEON.GOLD.5318Y)。
+# 故型号优先取 PN(可靠身份)，规格取描述；无可靠型号绝不编造。
+_CPU_CORES = re.compile(r"(\d{1,3})\s*(?:核心|核|[\- ]?[Cc]ores?)\b", re.I)
+_CPU_FREQ = re.compile(r"(\d(?:\.\d{1,2})?)\s*GHz", re.I)        # 基频 GHz（FSB 是 MHz，不会误命中）
+_CPU_MB = re.compile(r"(\d{1,3}(?:\.\d)?)\s*MB\b", re.I)         # 缓存 MB（多个取最大，L3 通常最大）
+_CPU_TDP = re.compile(r"(\d{2,3})(?:\s*/\s*\d{2,3})?\s*W\b", re.I)   # 155/170W → 取 155
+_CPU_FAMILY = [
+    (re.compile(r"\bxeon\b|至强", re.I), "Xeon"),
+    (re.compile(r"\bepyc\b", re.I), "EPYC"),
+    (re.compile(r"\bopteron\b", re.I), "Opteron"),
+    (re.compile(r"\bitanium2?\b", re.I), "Itanium"),
+    (re.compile(r"\bpower\d\b", re.I), "POWER"),
+    (re.compile(r"\bsparc\b", re.I), "SPARC"),
+    (re.compile(r"\bcore\s+i[3579]\b", re.I), "Core"),
+]
+_CPU_BRAND_BY_FAMILY = {"Xeon": "Intel", "Itanium": "Intel", "Core": "Intel",
+                        "EPYC": "AMD", "Opteron": "AMD", "POWER": "IBM", "SPARC": "Oracle"}
+# PN 编码的型号（氚云常见格式）：XEON.GOLD.5318Y / XEON.SILVER.4314 / EPYC.7452
+_PN_XEON = re.compile(r"XEON[._\s-]*(GOLD|SILVER|PLATINUM|BRONZE)[._\s-]*(\d{3,4}[A-Z]*)", re.I)
+_PN_XEON_E = re.compile(r"XEON[._\s-]*(E[57])[\s._-]?(\d{4}[A-Z]?\d?)", re.I)
+_PN_EPYC = re.compile(r"EPYC[._\s-]*(\d{3,4}[A-Z]*)", re.I)
+# 描述里的型号：Xeon Gold 5318Y / E5-2680 v4 / E5645 / EPYC 7452 / Itanium2 9340 / POWER6
+_D_TIER = re.compile(r"\b(Gold|Silver|Platinum|Bronze)\s+(\d{3,4}[A-Z]*)\b", re.I)
+_D_XEON_E = re.compile(r"\b(E[357]-\d{4})(?:\s*(v\d))?\b", re.I)     # E5-2680 v4
+_D_XEON_LEGACY = re.compile(r"\b([ELWX][357]\d{3})\b")              # E5645 / X5650 / L5640
+_D_EPYC = re.compile(r"\bEPYC\s+(\d{3,4}[A-Z]*)\b", re.I)
+_D_ITANIUM = re.compile(r"\bItanium2?\s+(\d{3,4})\b", re.I)
+_D_POWER = re.compile(r"\b(POWER\d)\b", re.I)
+
+
+def _cpu_family(text):
+    for rx, fam in _CPU_FAMILY:
+        if rx.search(text):
+            return fam
+    return None
+
+
+def _cpu_model(desc, pn):
+    """型号优先 PN（可靠身份），其次描述；都没有 → None（不猜）。返回 (型号字段, 推出的系列)。"""
+    m = _PN_XEON.search(pn)
+    if m:
+        return _F(f"{m.group(1).title()} {m.group(2).upper()}", DICT, f"PN:{m.group(0)}"), "Xeon"
+    m = _PN_XEON_E.search(pn)
+    if m:
+        return _F(f"{m.group(1).upper()}-{m.group(2).upper()}", DICT, f"PN:{m.group(0)}"), "Xeon"
+    m = _PN_EPYC.search(pn)
+    if m:
+        return _F(m.group(1).upper(), DICT, f"PN:{m.group(0)}"), "EPYC"
+    m = _D_TIER.search(desc)
+    if m:
+        return _F(f"{m.group(1).title()} {m.group(2).upper()}", EXPLICIT, m.group(0)), "Xeon"
+    m = _D_XEON_E.search(desc)
+    if m:
+        model = m.group(1).upper() + (f" {m.group(2).lower()}" if m.group(2) else "")
+        return _F(model, EXPLICIT, m.group(0)), "Xeon"
+    m = _D_XEON_LEGACY.search(desc)
+    if m:
+        return _F(m.group(1).upper(), EXPLICIT, m.group(0)), "Xeon"
+    m = _D_EPYC.search(desc)
+    if m:
+        return _F(m.group(1).upper(), EXPLICIT, m.group(0)), "EPYC"
+    m = _D_ITANIUM.search(desc)
+    if m:
+        return _F(m.group(1), EXPLICIT, m.group(0)), "Itanium"
+    m = _D_POWER.search(desc)
+    if m:
+        return _F(m.group(1).upper(), EXPLICIT, m.group(0)), "POWER"
+    return None, None
+
+
+def extract_cpu(desc, pn="", brand_raw=""):
+    specs = {}
+    model_f, fam_from_model = _cpu_model(desc, pn)
+    family = fam_from_model or _cpu_family(f"{desc} {pn}")
+    if model_f:
+        specs["model"] = model_f
+    if family:
+        specs["family"] = _F(family, model_f["source"] if model_f else EXPLICIT, family)
+    bnorm, _bzh = T.resolve_brand(brand_raw, desc)          # 显式品牌 → 描述
+    if not bnorm and family:
+        bnorm = _CPU_BRAND_BY_FAMILY.get(family)            # 再由系列确定性推导
+    if bnorm:
+        specs["brand"] = _F(bnorm, EXPLICIT if brand_raw else DICT, bnorm)
+    m = _CPU_CORES.search(desc)
+    if m:
+        specs["cores"] = _F(f"{int(m.group(1))}-Core", EXPLICIT, m.group(0).strip())
+    m = _CPU_FREQ.search(desc)
+    if m:
+        specs["base_freq"] = _F(f"{m.group(1)}GHz", EXPLICIT, m.group(0).strip())
+    caches = [float(x) for x in _CPU_MB.findall(desc)]
+    if caches:
+        specs["l3_cache"] = _F(f"{max(caches):g}MB", EXPLICIT, f"{max(caches):g}MB")
+    m = _CPU_TDP.search(desc)
+    if m:
+        specs["tdp"] = _F(f"{int(m.group(1))}W", EXPLICIT, m.group(0).strip())
+    return specs
+
+
+def render_cpu(specs):
+    """{品牌} {系列} {型号} {核数}-Core {基频}GHz {缓存} Cache {TDP}W CPU —— 只拼已抽字段。"""
+    if not (_val(specs, "model") or _val(specs, "cores")):
+        return None        # 既无型号又无核数 = 无可辨识身份 → 转人工
+    seg = [_val(specs, k) for k in ("brand", "family", "model", "cores", "base_freq") if _val(specs, k)]
+    if _val(specs, "l3_cache"):
+        seg.append(f"{_val(specs, 'l3_cache')} Cache")
+    if _val(specs, "tdp"):
+        seg.append(_val(specs, "tdp"))
+    seg.append("CPU")
+    return " ".join(seg)
+
+
+def classify_cpu_l2(specs):
+    """系列优先：Xeon→0501、EPYC/Opteron→0502、其余系列→0599；无系列证据按品牌兜底。"""
+    fam = _val(specs, "family")
+    if fam == "Xeon":
+        return "0501"
+    if fam in ("EPYC", "Opteron"):
+        return "0502"
+    if fam:                                    # Itanium/POWER/SPARC/Core → 其他处理器
+        return "0599"
+    brand = _val(specs, "brand")
+    if brand == "Intel":
+        return "0501"
+    if brand == "AMD":
+        return "0502"
+    return "0599"
+
+
+def validate_cpu(l2, specs, desc):
+    errs = []
+    fam, brand = _val(specs, "family"), _val(specs, "brand")
+    if fam == "Xeon" and brand == "AMD":
+        errs.append("Xeon 系列品牌应为 Intel")
+    if fam == "EPYC" and brand == "Intel":
+        errs.append("EPYC 系列品牌应为 AMD")
+    if l2 == "0501" and brand == "AMD":
+        errs.append("分类 Intel至强 但品牌为 AMD")
+    if l2 == "0502" and brand == "Intel":
+        errs.append("分类 AMD 但品牌为 Intel")
+    return errs
+
+
 # ─────────────────────────── 编排 ───────────────────────────
 def standardize(pn: str, description: str | None, brand: str = "") -> dict:
     """全管线：识别类型 → 抽字段 → 分类 → 渲染 → 校验 → review_status。"""
@@ -438,6 +582,8 @@ def standardize(pn: str, description: str | None, brand: str = "") -> dict:
         return _run(out, "DRIVE_HDD", extract_hdd(desc), render_hdd, classify_hdd_l2, validate_hdd, desc)
     if l1_code == "01":
         return _run(out, "MEMORY", extract_memory(desc), render_memory, classify_mem_l2, validate_memory, desc)
+    if l1_code == "05":
+        return _run(out, "CPU", extract_cpu(desc, pn, brand), render_cpu, classify_cpu_l2, validate_cpu, desc)
     if l2_code == "0404":
         specs = extract_gpu(desc, brand)
         out["object_type"] = "GPU"
