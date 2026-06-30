@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.1.1";
+export const APP_VERSION = "1.2.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.0",
+    date: "2026-06-30",
+    items: [
+      "新增「备件主数据」页（采购）：可新建型号、编辑任意型号的描述/品类/品牌；手工改过的内容氚云重导不会被覆盖",
+      "描述标准化：按类别把杂乱描述自动统一成标准格式（容量/接口/转速等字段顺序、单位一致），并自动判定一级/二级分类、品牌中英归一（如 东芝→Toshiba）",
+      "批量规范化：按销售额优先，成批把现有备件的描述/分类规范化；采购勾选确认后应用，不会覆盖人工改过的字段",
+    ],
+  },
   {
     version: "1.1.1",
     date: "2026-06-30",
