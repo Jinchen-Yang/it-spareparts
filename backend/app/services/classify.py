@@ -47,16 +47,34 @@ def _kw_hit(code: str, text: str) -> bool:
     return any(k in text for k in T.KEYWORDS.get(code, []))
 
 
+def _classify_card(text: str) -> str | None:
+    """04 卡 的二级判定：FC 先于泛 HBA（'Fibre Channel HBA' 归 FC 而非 HBA）。"""
+    if any(k in text for k in ("qle", "lpe", "qme", "fibre channel", "fiber channel",
+                               "光纤卡", "fc hba")):
+        return "0405"
+    for code in ("0404", "0403", "0401", "0402", "0499"):   # GPU/NIC/RAID/HBA/其他
+        if _kw_hit(code, text):
+            return code
+    return None
+
+
 def _classify_component(text: str) -> str | None:
     # 1) 形态决定词：一出现就定（cable 压过 Fan/Power）
     for code, toks in T.DECISIVE.items():
         if any(t in text for t in toks):
             return code
+    # 卡（NIC/HBA/FC/GPU…）即便带 SFP+/光纤连接器，也归卡——不被 0901 光模块/0902 线缆抢走
+    card = _classify_card(text)
     # 2) 按优先级首命中
     for entry in T.CLASSIFY_PRIORITY:
-        if entry == "02":                      # 硬盘：要求介质信号 + 能定接口才归类
+        if entry in ("0901", "0902") and card:
+            continue                            # 卡带连接器 → 归卡
+        if entry == "04":                       # 卡：FC 先于 HBA；无卡词再走泛关键词
+            c = card or next((code for code in T.KEYWORDS
+                              if len(code) == 4 and code.startswith("04") and _kw_hit(code, text)), None)
+        elif entry == "02":                     # 硬盘：要求介质信号 + 能定接口才归类
             c = _classify_disk(text)
-        elif entry == "01":                    # 内存
+        elif entry == "01":                     # 内存
             c = _classify_memory(text)
         elif len(entry) == 2 and entry not in ("06", "07", "08", "10"):
             c = next((code for code in T.KEYWORDS

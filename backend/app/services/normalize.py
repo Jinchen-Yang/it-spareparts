@@ -9,7 +9,7 @@
 """
 import re
 
-from app.services import classify, spec_extract
+from app.services import classify, normalize_templates, spec_extract
 from app.services import taxonomy as T
 
 _CJK = re.compile(r"[一-鿿]")
@@ -54,8 +54,12 @@ def normalize_part(description: str | None, pn: str = "", brand: str = "") -> di
     if not bnorm:
         bnorm = _brand_from_text(description or "")
         bzh = T.BRAND_ZH.get(bnorm) if bnorm else None
+    # 硬盘/内存走结构化字段模板；其余类目按 l2/l1 分发到 normalize_templates
+    canon = _render(f)
+    if canon is None and not cls.get("whole_system"):
+        canon = _template_canonical(cls.get("l2_code"), cls.get("l1_code"), description or "")
     return {
-        "canonical_description": _render(f),
+        "canonical_description": canon,
         "category_l1": cls.get("category_l1"),
         "category_l2": cls.get("category_l2"),
         "whole_system": bool(cls.get("whole_system")),
@@ -64,6 +68,16 @@ def normalize_part(description: str | None, pn: str = "", brand: str = "") -> di
         "brand_zh": bzh,
         "fields": {k: v for k, v in f.items() if v},
     }
+
+
+def _template_canonical(l2_code: str | None, l1_code: str | None, desc: str) -> str | None:
+    fn = normalize_templates.RENDERERS.get(l2_code) or normalize_templates.RENDERERS_L1.get(l1_code)
+    if not fn:
+        return None
+    try:
+        return fn(desc)
+    except Exception:  # noqa: BLE001  模板抽取失败不应炸接口，退回交人工
+        return None
 
 
 def _v(raw: dict, key: str) -> str | None:
