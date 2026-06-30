@@ -55,11 +55,11 @@ def sales_line(order_raw_id: str, line_raw_id: str, pn: str, qty="1", price="200
 
 
 def sales_head(order_raw_id: str, order_no: str | None = None,
-               on: date | None = None, business_type="备件销售") -> dict:
+               on: date | None = None, business_type="备件销售", data_status="已生效") -> dict:
     return {
         "raw_order_id": order_raw_id, "order_no": order_no or order_raw_id,
         "order_date": on or date(2026, 2, 1), "tax_rate": None, "amount_ex_tax": None,
-        "data_status": "已生效", "salesperson": "测试销售",
+        "data_status": data_status, "salesperson": "测试销售",
         "customer_name": "测试客户", "customer_type": None, "customer_source": None,
         "customer_city": None, "business_type": business_type, "warehouse": "总仓",
     }

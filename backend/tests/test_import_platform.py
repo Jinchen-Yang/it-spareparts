@@ -116,6 +116,19 @@ def test_skip_mode_still_blocks_duplicate(db, tmp_path):
         pipeline.run_import(db, dup, "dup.xlsx", mode="skip")
 
 
+def test_inactive_empty_pn_not_counted_as_error(db):
+    """非生效单的空产品(empty_pn_inactive)不计入 fact_rows_error，只硬错误计数。"""
+    from app.etl import transform
+    b = SysImportBatch(filename="t.xlsx", file_type="sales", file_hash="hsoft1")
+    db.add(b); db.flush()
+    res = f.sales_result({"O1": f.sales_head("O1")}, [f.sales_line("O1", "L1", "PN-A")])
+    res.errors.append(transform.ErrorRec(2, "empty_pn_inactive", "草稿可忽略", {}))
+    res.errors.append(transform.ErrorRec(3, "empty_pn", "真空产品", {}))
+    counts = loader.load(db, res, b.id, date(2026, 6, 1), mode="skip")
+    db.commit()
+    assert counts["fact_rows_error"] == 1   # 软错误不计，只数硬错误
+
+
 def test_import_job_unrecognized_file_failed_batch(db, tmp_path):
     junk = tmp_path / "junk.xlsx"
     pd.DataFrame([{"随便": "x", "列名": "y"}]).to_excel(junk, index=False)

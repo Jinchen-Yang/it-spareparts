@@ -185,3 +185,17 @@ def test_report_flags_missing_price(db, tmp_path):
     b2 = pipeline.run_import(db, with_price, "wp.xlsx")
     db.commit()
     assert b2.report_json["missing_price_columns"] is False
+
+
+# ---------- 空产品名分级（生效=真错误；草稿/已取消=可忽略） ----------
+
+def test_empty_pn_classification():
+    # 生效单缺产品 → 真错误 empty_pn
+    assert transform._empty_pn_error(5, "已生效", "XSDD-1", {}).error_type == "empty_pn"
+    # 草稿/已取消缺产品 → 可忽略软标记 empty_pn_inactive
+    e_draft = transform._empty_pn_error(6, "草稿", "XSDD-2", {})
+    assert e_draft.error_type == "empty_pn_inactive" and "可忽略" in e_draft.error_detail
+    assert transform._empty_pn_error(7, "已取消", None, {}).error_type == "empty_pn_inactive"
+    # 状态未知 → 保守按真错误
+    assert transform._empty_pn_error(8, None, None, {}).error_type == "empty_pn"
+    assert "empty_pn_inactive" in transform.SOFT_ERROR_TYPES

@@ -309,5 +309,5 @@ def batch_detail(batch_id: int, db: Session = Depends(get_db),
         "id": b.id, "filename": b.filename, "file_type": b.file_type, "status": b.status,
         "uploaded_at": b.uploaded_at, "uploaded_by": b.uploaded_by, "report": b.report_json,
         "errors": [{"row_no": e.row_no, "error_type": e.error_type,
-                    "error_detail": e.error_detail} for e in errors],
+                    "detail": e.error_detail} for e in errors],
     }

@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.1.0";
+export const APP_VERSION = "1.1.1";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.1.1",
+    date: "2026-06-30",
+    items: [
+      "导入：草稿/已取消订单里产品名为空的明细行不再算「错误」（属正常的未完成单），导入错误数只反映真正需处理的问题；批次详情的「明细」列现可正常显示错误说明",
+    ],
+  },
   {
     version: "1.1.0",
     date: "2026-06-30",
