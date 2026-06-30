@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Alert, Button, Input, Modal, Select, Space, Table, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import PageHeader from "../components/PageHeader";
+import BatchNormalizeModal from "../components/BatchNormalizeModal";
 import api, {
   masterCategories, masterCheck, masterCreate, masterEdit, masterSuggest, searchParts,
   type CategoryNode, type ClassifySuggestion, type MasterFields, type NearDup, type PartHit,
@@ -29,6 +30,7 @@ export default function MasterDataPage() {
   const [near, setNear] = useState<NearDup[]>([]);
   const [suggest, setSuggest] = useState<ClassifySuggestion | null>(null);
   const [saving, setSaving] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
 
   useEffect(() => {
     masterCategories().then((r) => setCats(r.data.categories)).catch(() => undefined);
@@ -232,7 +234,12 @@ export default function MasterDataPage() {
       <PageHeader
         title="备件主数据"
         subtitle="采购可编辑型号的描述/品类/品牌，或新建 PN；改过的内容氚云重导不会覆盖。"
-        extra={<Button type="primary" onClick={openCreate}>新建 PN</Button>}
+        extra={
+          <Space>
+            <Button onClick={() => setBatchOpen(true)}>批量规范化</Button>
+            <Button type="primary" onClick={openCreate}>新建 PN</Button>
+          </Space>
+        }
       />
       <Input.Search
         placeholder="搜 PN / 描述 / 品牌（留空浏览）" allowClear enterButton
@@ -266,6 +273,12 @@ export default function MasterDataPage() {
       >
         {fields}
       </Modal>
+
+      <BatchNormalizeModal
+        open={batchOpen}
+        onClose={() => setBatchOpen(false)}
+        onApplied={() => doSearch(q)}
+      />
     </div>
   );
 }

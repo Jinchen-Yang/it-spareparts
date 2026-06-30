@@ -352,6 +352,24 @@ export const masterEdit = (body: MasterFields & { pn_std: string }) =>
   api.patch<{ id: number; pn_std: string; updated: string[]; locked_fields: string[] }>(
     "/parts/master", body);
 
+// 批量规范化（WP3）
+export interface BatchPreviewItem {
+  part_id: number;
+  pn_std: string;
+  description: string | null;
+  brand: string | null;
+  category_major: string | null;
+  category_minor: string | null;
+  recent_sales_amount: number | null;
+  suggestion: ClassifySuggestion;
+  changes: string[];
+}
+export const batchPreview = (page = 1, page_size = 20, only_changes = true) =>
+  api.get<{ total_beijian: number; page: number; page_size: number; items: BatchPreviewItem[] }>(
+    "/parts/master/batch-preview", { params: { page, page_size, only_changes } });
+export const batchApply = (part_ids: number[], fields?: string[]) =>
+  api.post<{ applied: number; skipped: number }>("/parts/master/batch-apply", { part_ids, fields });
+
 export interface Overview {
   part: {
     pn_std: string;

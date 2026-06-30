@@ -11,7 +11,7 @@ from app.db import get_db
 from app.security import (
     UserContext, apply_field_visibility, get_current_user_context, record_access_log, require_page,
 )
-from app.services import master_edit, normalize, part_overview, part_resolver, taxonomy
+from app.services import batch_normalize, master_edit, normalize, part_overview, part_resolver, taxonomy
 
 router = APIRouter(prefix="/parts", tags=["parts"])
 
@@ -191,3 +191,33 @@ def master_suggest(
     """据描述给标准化建议：标准描述 + 一级/二级分类 + 品牌归一 + 结构化字段。
     缺关键规格时 canonical_description=null、分类为 null，交人工。"""
     return {"suggestion": normalize.normalize_part(description, pn, brand)}
+
+
+class BatchApply(BaseModel):
+    part_ids: list[int]
+    fields: list[str] | None = None   # description / category / brand，缺省全应用
+
+
+@router.get("/master/batch-preview")
+def master_batch_preview(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    only_changes: bool = Query(True),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _: None = Depends(require_page("page_master_data")),
+) -> dict:
+    """批量规范化预览：按近期销售额降序列出备件 + 标准化建议（高价值先清）。"""
+    return batch_normalize.preview(db, page, page_size, only_changes)
+
+
+@router.post("/master/batch-apply")
+def master_batch_apply(
+    body: BatchApply,
+    db: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_current_user_context),
+    _auth: str = Depends(current_role),
+    _: None = Depends(require_page("page_master_data")),
+) -> dict:
+    """批量应用标准化（服务端重算，锁定字段不动，应用后字段锁定防重导覆盖）。"""
+    return batch_normalize.apply_batch(db, body.part_ids, body.fields, (ctx.user_id or ctx.role))
