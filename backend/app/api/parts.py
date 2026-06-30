@@ -15,9 +15,9 @@ from app.services import batch_normalize, master_edit, part_overview, part_resol
 
 router = APIRouter(prefix="/parts", tags=["parts"])
 
-# 批量应用冻结开关：旧 normalize 边看边猜会写错（已发生一次生产回滚），在确定性
-# standardize 系统接入前冻结写回路径，避免采购批量写入低质量结果。新系统上线时改回 False。
-BATCH_APPLY_FROZEN = True
+# 批量应用 kill-switch：确定性 standardize 引擎已接入并上线(v1.2.3)，已解冻(v1.2.4)。
+# 写回门槛在 apply_batch（仅 review_status=AUTO_OK 才写回，§17）。如线上发现问题，改回 True 即刻冻结。
+BATCH_APPLY_FROZEN = False
 
 
 @router.get("/search")

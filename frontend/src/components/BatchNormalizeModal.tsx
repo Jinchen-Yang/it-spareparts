@@ -1,14 +1,10 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Checkbox, Modal, Space, Table, Tag, Tooltip, message } from "antd";
+import { Button, Checkbox, Modal, Space, Table, Tag, Tooltip, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import {
   batchApply, batchPreview, SPEC_SOURCE_LABEL,
   type BatchPreviewItem, type SpecField,
 } from "../api";
-
-// 批量「应用」冻结：等确定性 standardize 系统在生产稳定运行 + 甲方确认后再开。
-// 预览已是新确定性引擎的结果（含字段证据/审核状态），仅停写回。新系统开放时改回 false。
-const BATCH_APPLY_FROZEN = true;
 
 const FIELD_OPTS = [
   { label: "描述", value: "description" },
@@ -166,19 +162,14 @@ export default function BatchNormalizeModal({ open, onClose, onApplied }: {
             <Button disabled={page <= 1 || loading} onClick={() => load(page - 1)}>上一批</Button>
             <Button disabled={items.length < 20 || loading} onClick={() => load(page + 1)}>下一批</Button>
             <Button onClick={onClose}>关闭</Button>
-            <Button type="primary" loading={!BATCH_APPLY_FROZEN && applying}
-              disabled={BATCH_APPLY_FROZEN || !selected.length || !fields.length} onClick={apply}>
-              {BATCH_APPLY_FROZEN ? "应用已暂停" : `应用选中（${selected.length}）`}
+            <Button type="primary" loading={applying}
+              disabled={!selected.length || !fields.length} onClick={apply}>
+              应用选中（{selected.length}）
             </Button>
           </Space>
         </div>
       }
     >
-      {BATCH_APPLY_FROZEN && (
-        <Alert type="warning" showIcon style={{ marginBottom: 8 }}
-          message="批量「应用」暂未开放"
-          description="下方预览已是新确定性引擎的结果（含字段证据与审核状态）。批量写回待引擎在生产稳定 + 确认后开放；此期间可展开核对，或单条手工编辑（已用新引擎）。" />
-      )}
       <div style={{ marginBottom: 8, color: "#888", fontSize: 12.5 }}>
         按近期销售额降序（高价值先清）。点行首 ▸ 展开看每个字段的值/来源/证据。
         <b>仅「自动通过」项默认勾选</b>（类型与分类确定、无校验错、无猜测字段）；「需复核」项不自动写回，交单条人工。
@@ -189,7 +180,7 @@ export default function BatchNormalizeModal({ open, onClose, onApplied }: {
         rowSelection={{
           selectedRowKeys: selected,
           onChange: (k) => setSelected(k as number[]),
-          getCheckboxProps: (r) => ({ disabled: BATCH_APPLY_FROZEN && !isAuto(r) }),
+          getCheckboxProps: (r) => ({ disabled: !isAuto(r) }),   // §17：仅自动通过项可批量勾选，需复核交单条
         }}
         expandable={{ expandedRowRender: (r) => <EvidenceRows r={r} /> }}
         pagination={false} scroll={{ y: 430 }}
