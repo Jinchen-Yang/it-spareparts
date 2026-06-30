@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.3";
+export const APP_VERSION = "1.2.4";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.4",
+    date: "2026-06-30",
+    items: [
+      "批量规范化「应用」已开放：确定性引擎在线上稳定运行后解冻批量写回。仅「自动通过」项可批量勾选应用（类型与分类确定、无校验错、无猜测字段）；「需复核」项不可批量勾选，交单条手工编辑。已人工锁定的字段仍不动。",
+    ],
+  },
   {
     version: "1.2.3",
     date: "2026-06-30",

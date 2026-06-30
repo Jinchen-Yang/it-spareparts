@@ -71,3 +71,14 @@ def test_preview_respects_locked_fields(seeded):
         i["pn_std"] == "ST8000NM001A" for i in res["items"]) else None
     if st is not None:
         assert "description" not in st["changes"]          # 锁定字段不在建议改动里
+
+
+def test_apply_batch_skips_review_required(db):
+    """§17：REVIEW_REQUIRED 项（缺关键字段，如硬盘无接口）即便有品牌建议也不批量写回，交单条人工。"""
+    master_edit.create_part(db, pn_std="REV-HDD-1", description="某硬盘 1TB",
+                            brand="希捷（Seagate）", machine_or_part="备件",
+                            force=True, operated_by="cui")
+    db.commit()
+    pid = db.scalar(select(DimPart.id).where(DimPart.pn_std == "REV-HDD-1"))
+    res = B.apply_batch(db, [pid], fields=None, operated_by="cui")
+    assert res["applied"] == 0 and res["skipped"] == 1   # REVIEW → 不写回

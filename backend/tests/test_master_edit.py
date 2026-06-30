@@ -171,8 +171,9 @@ def test_merge_honors_locked_field(db):
     assert tgt2.category_major is None, "合并回填覆盖了采购锁定的置空字段（跨路径锁失效）"
 
 
-def test_batch_apply_is_frozen():
-    """冻结期：批量「应用」端点返回 503（保护生产，单条编辑不受影响）。"""
-    r = _client.post("/api/parts/master/batch-apply", json={"part_ids": [1]}, headers=_hdr("purchaser"))
-    assert r.status_code == 503
-    assert "暂停" in r.json()["detail"]
+def test_batch_apply_unfrozen():
+    """已解冻（v1.2.4）：批量「应用」端点正常可达（不再 503）；空集 → applied=0。
+    写回门槛在 apply_batch（仅 AUTO_OK 写回，见 test_batch_normalize）。"""
+    r = _client.post("/api/parts/master/batch-apply", json={"part_ids": []}, headers=_hdr("purchaser"))
+    assert r.status_code == 200
+    assert r.json() == {"applied": 0, "skipped": 0}
