@@ -155,11 +155,13 @@ def _log_miss(db: Session, query: str, operated_by: str | None) -> None:
 
 
 def resolve(db: Session, query: str, limit: int = 10,
-            operated_by: str | None = None) -> dict:
+            operated_by: str | None = None, log_miss: bool = True) -> dict:
     """近似解析：返回 {"query", "items": [...], "low_confidence"}。
 
     items 按 score 降序，含 match_reason（如 "PN相似0.67；PN包含匹配；命中'超微'"）。
     零命中时落 sys_audit_log（action=search_miss）供治理回看。
+    log_miss=False：内部复用（如新建去重查重）不写 search_miss、不 commit——
+    避免污染治理工单、也避免在调用方事务中途 commit（见 master_edit.find_near_duplicates）。
     """
     ctx, doc_terms = preprocess(query)
     if not ctx["main"] and not doc_terms:
@@ -208,7 +210,7 @@ def resolve(db: Session, query: str, limit: int = 10,
     items.sort(key=lambda x: (-x["score"], len(x["pn_std"]), x["pn_std"]))
     items = items[:limit]
 
-    if not items:
+    if not items and log_miss:
         _log_miss(db, query, operated_by)
     low_conf = (not items) or items[0]["score"] < config.RESOLVE_LOW_CONFIDENCE
 

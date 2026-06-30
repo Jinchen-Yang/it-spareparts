@@ -1,11 +1,17 @@
-"""型号查询 API（§9）。用 query 传 pn_std，避开 PN 中的 / # 路由问题。需登录。"""
+"""型号查询 API（§9）。用 query 传 pn_std，避开 PN 中的 / # 路由问题。需登录。
+
+/parts/master*（WP1）：采购可新建/编辑备件主数据，require_page('page_master_data') 准入。
+"""
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.auth import current_role
 from app.db import get_db
-from app.security import UserContext, apply_field_visibility, get_current_user_context, record_access_log
-from app.services import part_overview, part_resolver
+from app.security import (
+    UserContext, apply_field_visibility, get_current_user_context, record_access_log, require_page,
+)
+from app.services import master_edit, part_overview, part_resolver
 
 router = APIRouter(prefix="/parts", tags=["parts"])
 
@@ -81,3 +87,78 @@ def sales(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     return apply_field_visibility(part_overview.list_sales(db, pn_std, page, page_size, ctx), ctx)
+
+
+# ---------------- 备件主数据自治（WP1，采购可新建/编辑） ----------------
+
+class PartCreate(BaseModel):
+    pn_std: str
+    description: str | None = None
+    brand: str | None = None
+    category_major: str | None = None
+    category_minor: str | None = None
+    machine_or_part: str | None = "备件"
+    unit: str | None = None
+    force: bool = False   # 确认无重复后强制新建（跳过近似提示）
+
+
+class PartEdit(BaseModel):
+    pn_std: str           # 定位被编辑的型号
+    description: str | None = None
+    brand: str | None = None
+    category_major: str | None = None
+    category_minor: str | None = None
+    machine_or_part: str | None = None
+    unit: str | None = None
+
+
+@router.get("/master/check")
+def master_check_duplicates(
+    pn_std: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401，不依赖全局 RBAC 开关
+    ctx: UserContext = Depends(get_current_user_context),
+    _: None = Depends(require_page("page_master_data")),
+) -> dict:
+    """新建前查近似重复（前端实时提示）。"""
+    return {"near_duplicates": master_edit.find_near_duplicates(db, pn_std)}
+
+
+@router.post("/master")
+def master_create(
+    body: PartCreate,
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401，不依赖全局 RBAC 开关
+    ctx: UserContext = Depends(get_current_user_context),
+    _: None = Depends(require_page("page_master_data")),
+) -> dict:
+    """采购手工新建型号。near_duplicates 非空且未 force → 不建、返回候选待确认。"""
+    try:
+        res = master_edit.create_part(
+            db, pn_std=body.pn_std, description=body.description, brand=body.brand,
+            category_major=body.category_major, category_minor=body.category_minor,
+            machine_or_part=body.machine_or_part, unit=body.unit,
+            force=body.force, operated_by=(ctx.user_id or ctx.role))
+    except master_edit.MasterEditError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return res
+
+
+@router.patch("/master")
+def master_edit_part(
+    body: PartEdit,
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401，不依赖全局 RBAC 开关
+    ctx: UserContext = Depends(get_current_user_context),
+    _: None = Depends(require_page("page_master_data")),
+) -> dict:
+    """编辑任意型号的人工字段（描述/品类/品牌/单位/类型）；改过的字段重导不覆盖。"""
+    updates = body.model_dump(exclude={"pn_std"}, exclude_unset=True)
+    try:
+        res = master_edit.edit_part(db, pn_std=body.pn_std, updates=updates,
+                                    operated_by=(ctx.user_id or ctx.role))
+    except master_edit.MasterEditError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    if res is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"型号不存在: {body.pn_std}")
+    return res
