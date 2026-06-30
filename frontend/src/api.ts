@@ -321,9 +321,14 @@ export const agentFileBlobUrl = async (fileId: string): Promise<string> => {
 export interface NearDup { pn_std: string; description: string | null; reason: string }
 export interface CategoryNode { code: string; name: string; children: { code: string; name: string }[] }
 export interface ClassifySuggestion {
-  category_l1?: string; l1_code?: string;
-  category_l2?: string | null; l2_code?: string | null;
-  confidence?: string; whole_system?: boolean;
+  category_l1?: string | null;
+  category_l2?: string | null;
+  whole_system?: boolean;
+  // 标准化建议（描述标准化工具）
+  canonical_description?: string | null;
+  brand_norm?: string | null;
+  brand_zh?: string | null;
+  fields?: Record<string, string>;
 }
 export interface MasterFields {
   description?: string | null; brand?: string | null;

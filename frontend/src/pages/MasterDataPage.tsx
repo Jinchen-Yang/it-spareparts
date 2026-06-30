@@ -77,10 +77,15 @@ export default function MasterDataPage() {
       setSuggest(data.suggestion);
     } catch { /* 建议失败不打断录入 */ }
   };
-  const applySuggest = () => {
+  const applyNormalize = () => {
     if (!suggest || suggest.whole_system) return;
-    set({ category_major: suggest.category_l1 ?? form.category_major,
-      category_minor: suggest.category_l2 ?? null, machine_or_part: "备件" });
+    set({
+      description: suggest.canonical_description ?? form.description,
+      category_major: suggest.category_l1 ?? form.category_major,
+      category_minor: suggest.category_l2 ?? form.category_minor,
+      brand: suggest.brand_norm ?? form.brand,
+      machine_or_part: "备件",
+    });
   };
 
   const onCheckDup = async () => {
@@ -168,10 +173,21 @@ export default function MasterDataPage() {
         <Input.TextArea value={form.description ?? ""} rows={2} onBlur={onSuggest}
           onChange={(e) => set({ description: e.target.value })}
           placeholder="如 希捷 8TB 7.2K 3.5 SATA 企业级硬盘" />
-        {suggest && !suggest.whole_system && (suggest.category_l1 || suggest.category_l2) && (
-          <div style={{ marginTop: 6, fontSize: 13 }}>
-            建议品类：<Tag color="blue">{suggest.category_l1}{suggest.category_l2 ? ` / ${suggest.category_l2}` : ""}</Tag>
-            <Button size="small" type="link" onClick={applySuggest}>采用</Button>
+        {suggest && !suggest.whole_system && (suggest.canonical_description || suggest.category_l1) && (
+          <div style={{ marginTop: 8, fontSize: 13, background: "#f6f3ee",
+                        padding: "8px 10px", borderRadius: 6 }}>
+            {suggest.canonical_description && (
+              <div>标准描述：<span style={{ fontWeight: 500 }}>{suggest.canonical_description}</span></div>
+            )}
+            <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+              {suggest.category_l1 && (
+                <span>分类 <Tag color="blue">{suggest.category_l1}{suggest.category_l2 ? ` / ${suggest.category_l2}` : ""}</Tag></span>
+              )}
+              {suggest.brand_norm && (
+                <span>品牌 <Tag>{suggest.brand_norm}{suggest.brand_zh ? `（${suggest.brand_zh}）` : ""}</Tag></span>
+              )}
+              <Button size="small" type="primary" ghost onClick={applyNormalize}>一键规范化</Button>
+            </div>
           </div>
         )}
         {suggest?.whole_system && (

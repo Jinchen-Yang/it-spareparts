@@ -11,7 +11,7 @@
 """
 from app.services import taxonomy as T
 
-_DISK_SIGNAL = ["hdd", "ssd", "固态", "硬盘", "nvme", " disk "]
+_DISK_SIGNAL = ["hdd", "ssd", "固态", "硬盘", "机械盘", "机械硬盘", "nvme", " disk "]
 _MEM_SIGNAL = ["ddr", "dimm", "内存", "pc5", "pc4", "pc3", "pc2", "rdram", "sdram"]
 
 

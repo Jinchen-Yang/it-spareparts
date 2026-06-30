@@ -11,7 +11,7 @@ from app.db import get_db
 from app.security import (
     UserContext, apply_field_visibility, get_current_user_context, record_access_log, require_page,
 )
-from app.services import classify, master_edit, part_overview, part_resolver, taxonomy
+from app.services import master_edit, normalize, part_overview, part_resolver, taxonomy
 
 router = APIRouter(prefix="/parts", tags=["parts"])
 
@@ -188,5 +188,6 @@ def master_suggest(
     _auth: str = Depends(current_role),
     _: None = Depends(require_page("page_master_data")),
 ) -> dict:
-    """据描述给高置信品类建议（轻量分类引擎）；含糊返回 null 交人工。"""
-    return {"suggestion": classify.classify_part(description, pn, brand)}
+    """据描述给标准化建议：标准描述 + 一级/二级分类 + 品牌归一 + 结构化字段。
+    缺关键规格时 canonical_description=null、分类为 null，交人工。"""
+    return {"suggestion": normalize.normalize_part(description, pn, brand)}

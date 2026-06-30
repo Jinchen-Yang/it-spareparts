@@ -110,3 +110,31 @@ BRAND_ALIASES: dict[str, str] = {
     "mellanox": "NVIDIA", "qlogic": "Marvell", "aquantia": "Marvell",
     "finisar": "Coherent", "ii-vi": "Coherent", "oclaro": "Lumentum", "fiberstore": "FS",
 }
+
+# ── 品牌规范化（标准描述用英文规范名；一期只要 raw→norm，不分颗粒/芯片/集团）──
+# 原始写法(小写) → 英文规范名。键覆盖中文/缩写/全称变体。
+BRAND_CANON: dict[str, str] = {
+    "东芝": "Toshiba", "toshiba": "Toshiba", "toshiba corp.": "Toshiba",
+    "希捷": "Seagate", "seagate": "Seagate", "seagate technology": "Seagate",
+    "西数": "Western Digital", "西部数据": "Western Digital", "wd": "Western Digital",
+    "wdc": "Western Digital", "western digital": "Western Digital",
+    "惠普": "HPE", "hp": "HPE", "hpe": "HPE", "hewlett packard enterprise": "HPE",
+    "戴尔": "Dell", "dell": "Dell", "dell emc": "Dell", "dellemc": "Dell",
+    "三星": "Samsung", "samsung": "Samsung",
+    "镁光": "Micron", "美光": "Micron", "micron": "Micron",
+    "海力士": "SK hynix", "hynix": "SK hynix", "sk hynix": "SK hynix", "skhynix": "SK hynix",
+    "金士顿": "Kingston", "kingston": "Kingston",
+    "英特尔": "Intel", "intel": "Intel", "联想": "Lenovo", "lenovo": "Lenovo",
+    "华为": "Huawei", "huawei": "Huawei", "浪潮": "Inspur", "inspur": "Inspur",
+    "思科": "Cisco", "cisco": "Cisco", "超微": "Supermicro", "supermicro": "Supermicro",
+    "富士通": "Fujitsu", "fujitsu": "Fujitsu", "铠侠": "KIOXIA", "kioxia": "KIOXIA",
+    "新华三": "H3C", "华三": "H3C", "h3c": "H3C",
+}
+# 英文规范名 → 中文显示名（界面另显中文，标准描述用英文）。
+BRAND_ZH: dict[str, str] = {
+    "Toshiba": "东芝", "Seagate": "希捷", "Western Digital": "西部数据", "HPE": "惠普",
+    "Dell": "戴尔", "Samsung": "三星", "Micron": "镁光", "SK hynix": "海力士",
+    "Kingston": "金士顿", "Intel": "英特尔", "Lenovo": "联想", "Huawei": "华为",
+    "Inspur": "浪潮", "Cisco": "思科", "Supermicro": "超微", "Fujitsu": "富士通",
+    "KIOXIA": "铠侠", "H3C": "新华三",
+}
