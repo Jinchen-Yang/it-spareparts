@@ -116,16 +116,18 @@ def test_aggregation_basics(db, batch):
 
 
 def test_tax_inclusive_exclusive_prices(db, batch):
+    """零计算口径：每单单价只落在自己的税口径列，另一侧留 None（不用税率反推）。"""
     _seed(db, batch)
     res = pa.analysis(db, None, days=7, as_of=_AS_OF)
     st = next(r for r in res["rows"] if r["pn_std"] == "ST8000NM000A")
-    # 未税价总可算；含税单 2260 / 1.13 = 2000；最近一单(O1)是含税单
-    assert st["price_ex_last"] == 2000.0
-    assert st["price_ex_min"] == 1750.0 and st["price_ex_max"] == 2000.0
-    # 含税价只有含税单贡献（不含单留 None）→ inc 系列只反映 O1=2260
+    # 未税价只由不含税单贡献：O2=1900、O3=1750；O1(含税)不再反推未税
+    assert st["price_ex_min"] == 1750.0 and st["price_ex_max"] == 1900.0
+    # 最近一单(O1 06-25)是含税单 → 未税列最近价留空
+    assert st["price_ex_last"] is None
+    # 含税价只有含税单 O1 贡献（不含单留 None）
     assert st["price_inc_last"] == 2260.0
     assert st["price_inc_min"] == 2260.0 and st["price_inc_max"] == 2260.0
-    # 价格趋势：1750→1900→2000 上行
+    # 价格趋势按未税序列(不含税单 1750→1900)：上行
     assert st["price_trend"] == "up"
 
 
@@ -168,12 +170,13 @@ def test_drilldown_and_rbac_supplier_mask(db, batch):
     assert len(drill["items"]) == 3
     newest = drill["items"][0]                       # 06-25 含税单
     assert newest["is_tax_inclusive"] is True
-    assert newest["price_ex"] == 2000.0 and newest["price_inc"] == 2260.0
+    # 零计算：含税单只有含税价，未税价留空（不再 2260/1.13）
+    assert newest["price_ex"] is None and newest["price_inc"] == 2260.0
     # 销售：供应商遮蔽（data_supplier=False），但进价可见（data_purchase_cost=True）
     sales = security.UserContext(user_id="liu", role="sales")
     masked = security.apply_field_visibility(drill, sales)
     assert all(it["supplier"] is None for it in masked["items"])
-    assert masked["items"][0]["price_ex"] == 2000.0     # 成本对销售可见（甲方口径）
+    assert masked["items"][0]["price_inc"] == 2260.0    # 成本对销售可见（甲方口径；此单为含税单）
     # 管理员：供应商可见
     admin = security.UserContext(user_id="admin", role="admin")
     assert security.apply_field_visibility(drill, admin)["items"][0]["supplier"] == "淘宝（采购）"

@@ -25,14 +25,18 @@ from app.services.purchase_query import apply_keyword
 _CENT = Decimal("0.01")
 
 
-def _line_prices(unit_price, is_inc, rate):
-    """单行的 (未税价, 含税价)。未税价总可算；不含税单的含税价留 None（用户口径：另一侧留"-"）。"""
+def _line_prices(unit_price, is_inc):
+    """单行的 (未税价, 含税价)——零计算，只镜像 Excel 原值（甲方口径：系统不算税率）。
+
+    含税单→只有含税价、未税价留空；不含税单→只有未税价、含税价留空；
+    未标注(None，改造前老数据)→按含税列放（沿用旧「单价(含税)」默认）。
+    另一侧一律留 None → 前端显示 "--"，绝不用税率反推另一侧。
+    """
     if unit_price is None:
         return None, None
-    r = rate if rate is not None else config.ANALYSIS_FALLBACK_VAT
-    if is_inc:                                   # 含税单：单价即含税价，未税价 = /(1+税率)
-        return unit_price / (Decimal(1) + r), unit_price
-    return unit_price, None                      # 不含/未知：单价即未税价，含税价留空
+    if is_inc is False:                          # 不含税单：单价即未税价
+        return unit_price, None
+    return None, unit_price                       # 含税单 / 未标注：单价即含税价
 
 
 def _window_lines(db: Session, user_ctx, since: date, until: date,
@@ -136,7 +140,7 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
                                                  "inc_last": None, "last_date": None}),
             }
         qty = r["qty"] or Decimal(0)
-        ex, inc = _line_prices(r["unit_price"], r["is_tax_inclusive"], r["tax_rate"])
+        ex, inc = _line_prices(r["unit_price"], r["is_tax_inclusive"])
         amt = r["line_amount"] or Decimal(0)
         oid = r["order_id"]
         ch = r["source_channel"] or config.SOURCE_CHANNEL_UNKNOWN
@@ -262,7 +266,7 @@ def part_purchases(db: Session, user_ctx: security.UserContext | None = None, *,
                          q=None, supplier=None, purchaser=None, part_id=part_id)
     items = []
     for r in rows:
-        ex, inc = _line_prices(r["unit_price"], r["is_tax_inclusive"], r["tax_rate"])
+        ex, inc = _line_prices(r["unit_price"], r["is_tax_inclusive"])
         items.append({
             "order_date": r["order_date"].isoformat() if r["order_date"] else None,
             "order_no": r["order_no"], "purchaser": r["purchaser"],

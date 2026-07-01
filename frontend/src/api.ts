@@ -170,6 +170,7 @@ export interface RecentPurchaseRow {
   description: string | null;
   brand: string | null;
   qty: number | null;
+  is_tax_inclusive: boolean | null;   // 单价/金额税口径：含税单→含税、不含单→不含税（前端按此分两列，零计算）
   unit_price: number | null;
   line_amount: number | null;
 }
