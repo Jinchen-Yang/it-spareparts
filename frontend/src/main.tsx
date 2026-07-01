@@ -4,6 +4,7 @@ import { ConfigProvider, message } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import App from "./App";
 import ErrorBoundary from "./components/ErrorBoundary";
+import { TaxBasisProvider } from "./context/TaxBasis";
 import { themeConfig } from "./theme";
 import "antd/dist/reset.css";
 import "./index.css";
@@ -15,7 +16,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ConfigProvider locale={zhCN} theme={themeConfig}>
       <ErrorBoundary>
-        <App />
+        <TaxBasisProvider>
+          <App />
+        </TaxBasisProvider>
       </ErrorBoundary>
     </ConfigProvider>
   </React.StrictMode>

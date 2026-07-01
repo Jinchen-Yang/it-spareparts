@@ -11,6 +11,7 @@ import type {
   RecentPurchaseRow, PurchaseAnalysis, PurchaseAnalysisRow, PurchaseDrillItem,
   CancellationStats, CancellationPeriodRow,
 } from "../api";
+import { useTaxBasis } from "../context/TaxBasis";
 
 // 流程状态：颜色 + 过滤选项（宋总：取消单也要能看/能统计）
 const STATUS_COLOR: Record<string, string> = {
@@ -40,11 +41,6 @@ const ANALYSIS_DAYS = [
   { label: "近 30 天", value: 30 },
   { label: "近 90 天", value: 90 },
 ];
-const TAX_OPTIONS = [
-  { label: "含税", value: "inc" },
-  { label: "未税", value: "ex" },
-  { label: "两列", value: "both" },
-];
 const ADVICE_COLOR: Record<string, string> = {
   批量补库: "gold", 谈价: "blue", 偶发: "default",
 };
@@ -54,6 +50,9 @@ const fmt = (v: number | null | undefined) =>
 // 金额场景固定两位小数（含¥0.00 对齐）；数量/比值用 fmt
 const fmtMoney = (v: number | null | undefined) =>
   v == null ? "—" : Number(v).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// 单价/金额按订单税口径归列（零计算，只镜像 Excel 原值；缺的一侧留空 → "—"）
+const byTax = (v: number | null | undefined, isInc: boolean | null) =>
+  isInc === false ? { inc: null, ex: v ?? null } : { inc: v ?? null, ex: null };
 
 function Sparkline({ data, accent }: { data: number[] | null; accent: string }) {
   if (!data || data.length === 0) return <span style={{ color: "var(--mb-text-3)" }}>—</span>;
@@ -92,7 +91,7 @@ function PriceCell({ row, basis }: { row: PurchaseAnalysisRow; basis: string }) 
     return (
       <>
         {line("含", row.price_inc_min, row.price_inc_max, row.price_inc_last)}
-        {line("未", row.price_ex_min, row.price_ex_max, row.price_ex_last)}
+        {line("不含", row.price_ex_min, row.price_ex_max, row.price_ex_last)}
       </>
     );
   if (basis === "ex") return line("", row.price_ex_min, row.price_ex_max, row.price_ex_last);
@@ -178,7 +177,7 @@ function AnalysisPanel() {
   const { token } = theme.useToken();
   const accent = token.colorPrimary;
   const [days, setDays] = useState(7);
-  const [basis, setBasis] = useState("inc");
+  const { basis } = useTaxBasis();
   const [excludeDesignated, setExcludeDesignated] = useState(true);
   const [data, setData] = useState<PurchaseAnalysis | null>(null);
   const [loading, setLoading] = useState(false);
@@ -215,7 +214,7 @@ function AnalysisPanel() {
       render: (v, r) => <span style={{ fontWeight: r.is_frequent ? 500 : 400 }}>{v}</span> },
     { title: "总量", dataIndex: "total_qty", width: 64, align: "center", render: (v) => (v == null ? "—" : Number(v)) },
     { title: `${days} 天分布`, dataIndex: "daily", width: 86, render: (v) => <Sparkline data={v} accent={accent} /> },
-    { title: basis === "ex" ? "采购价(未税)·最近" : basis === "both" ? "采购价 含/未·最近" : "采购价(含税)·最近",
+    { title: basis === "ex" ? "采购价(不含税)·最近" : basis === "both" ? "采购价 含/不含·最近" : "采购价(含税)·最近",
       key: "price", width: 200, render: (_, r) => <PriceCell row={r} basis={basis} /> },
     { title: "来源拆分", key: "channels", width: 200,
       render: (_, r) => (
@@ -246,7 +245,6 @@ function AnalysisPanel() {
         {open && (
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <Segmented options={ANALYSIS_DAYS} value={days} onChange={(v) => setDays(v as number)} />
-            <Segmented options={TAX_OPTIONS} value={basis} onChange={(v) => setBasis(v as string)} />
             <Checkbox checked={excludeDesignated} onChange={(e) => setExcludeDesignated(e.target.checked)}>排除指定采购</Checkbox>
           </div>
         )}
@@ -362,6 +360,7 @@ export default function PurchasesPage() {
   const [rows, setRows] = useState<RecentPurchaseRow[]>([]);
   const [loading, setLoading] = useState(false);
   const loadSeqRef = useRef(0);
+  const { basis } = useTaxBasis();
 
   const load = async (p = page, ps = pageSize) => {
     const seq = ++loadSeqRef.current;
@@ -387,6 +386,22 @@ export default function PurchasesPage() {
     load(1, pageSize);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [days, status]);
+
+  // 单价/金额双列：按订单税口径归列，另一侧 "—"；跟随全局开关（含税/不含税/两列）。零计算。
+  const priceColumns: ColumnsType<RecentPurchaseRow> = [
+    { title: "口径", key: "tax_basis", width: 74, align: "center",
+      render: (_, r) => (r.is_tax_inclusive == null
+        ? <span style={{ color: "var(--mb-text-3)" }}>—</span>
+        : <Tag color={r.is_tax_inclusive ? "default" : "blue"}>{r.is_tax_inclusive ? "含税" : "不含税"}</Tag>) },
+    ...(basis !== "ex" ? [{ title: "单价(含税)", key: "up_inc", width: 110, align: "right",
+      render: (_, r) => fmtMoney(byTax(r.unit_price, r.is_tax_inclusive).inc) }] as ColumnsType<RecentPurchaseRow> : []),
+    ...(basis !== "inc" ? [{ title: "单价(不含税)", key: "up_ex", width: 110, align: "right",
+      render: (_, r) => fmtMoney(byTax(r.unit_price, r.is_tax_inclusive).ex) }] as ColumnsType<RecentPurchaseRow> : []),
+    ...(basis !== "ex" ? [{ title: "金额(含税)", key: "amt_inc", width: 120, align: "right",
+      render: (_, r) => fmtMoney(byTax(r.line_amount, r.is_tax_inclusive).inc) }] as ColumnsType<RecentPurchaseRow> : []),
+    ...(basis !== "inc" ? [{ title: "金额(不含税)", key: "amt_ex", width: 120, align: "right",
+      render: (_, r) => fmtMoney(byTax(r.line_amount, r.is_tax_inclusive).ex) }] as ColumnsType<RecentPurchaseRow> : []),
+  ];
 
   return (
     <>
@@ -446,10 +461,7 @@ export default function PurchasesPage() {
           { title: "品牌", dataIndex: "brand", width: 110, ellipsis: true },
           { title: "数量", dataIndex: "qty", width: 80, align: "right",
             render: (v) => (v == null ? "—" : Number(v)) },
-          { title: "单价(含税)", dataIndex: "unit_price", width: 110, align: "right",
-            render: fmtMoney },
-          { title: "金额", dataIndex: "line_amount", width: 120, align: "right",
-            render: fmtMoney },
+          ...priceColumns,
           { title: "供应商", dataIndex: "supplier", width: 160, ellipsis: true },
           { title: "采购类型", dataIndex: "source_type", width: 100,
             render: (v) => v ? <Tag>{v}</Tag> : "—" },

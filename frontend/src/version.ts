@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.5";
+export const APP_VERSION = "1.2.6";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.6",
+    date: "2026-07-01",
+    items: [
+      "采购价全面区分「含税 / 不含税」：采购记录逐笔明细新增「口径」标签与含税/不含税双列（此前只显示含税一栏），单价与金额都按订单税口径分列——含税单落含税列、不含税单落不含税列，另一侧显示「—」",
+      "顶栏新增全局「价格口径」开关（含税 / 不含税 / 两列都显示），采购记录与采购分析面板一并跟随，选择记忆在本机",
+      "口径一律以导入 Excel 的原值为准，系统不再用税率反推另一侧价格（此前采购分析面板的不含税价是按 13% 估算，现改为只显示 Excel 真实提供的值）",
+    ],
+  },
   {
     version: "1.2.5",
     date: "2026-06-30",

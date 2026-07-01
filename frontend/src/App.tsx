@@ -12,6 +12,7 @@ import MasterDataPage from "./pages/MasterDataPage";
 import ChatPage from "./pages/ChatPage";
 import PurchasesPage from "./pages/PurchasesPage";
 import AccountsPage from "./pages/AccountsPage";
+import { TaxBasisToggle } from "./context/TaxBasis";
 
 const { Header, Content } = Layout;
 
@@ -92,6 +93,10 @@ export default function App() {
           items={menu}
           style={{ flex: 1, minWidth: 0, background: "transparent", borderBottom: "none" }}
         />
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: 16, whiteSpace: "nowrap" }}>
+          <span style={{ color: COLORS.text2, fontSize: 12.5 }}>价格</span>
+          <TaxBasisToggle />
+        </span>
         <span
           onClick={() => setChangelogOpen(true)}
           title="查看更新日志"
