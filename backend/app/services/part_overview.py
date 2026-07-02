@@ -128,7 +128,7 @@ def _purchases_query(part_id: int, user_ctx: security.UserContext | None = None)
     stmt = (
         select(FPurchaseOrder.order_no, FPurchaseOrder.order_date,
                 DimSupplier.name_normalized, FPurchaseLine.qty, FPurchaseLine.unit_price,
-                FPurchaseOrder.source_type)
+                FPurchaseOrder.source_type, FPurchaseOrder.is_tax_inclusive)
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
         .join(DimSupplier, FPurchaseOrder.supplier_id == DimSupplier.id, isouter=True)
         .where(FPurchaseLine.part_id == part_id)
@@ -164,7 +164,8 @@ def _paginate(db: Session, base_stmt, page: int, page_size: int, mapper) -> dict
 
 def _purchase_row(r):
     return {"order_no": r[0], "order_date": r[1], "supplier": r[2],
-            "qty": _d(r[3]), "unit_price": _d(r[4]), "source_type": r[5]}
+            "qty": _d(r[3]), "unit_price": _d(r[4]), "source_type": r[5],
+            "is_tax_inclusive": r[6]}   # 单价口径：含税单→含税、不含单→不含税（前端分列，零计算）
 
 
 def _sales_row(r):

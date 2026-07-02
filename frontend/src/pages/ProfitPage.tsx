@@ -7,7 +7,8 @@ import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import type { Dayjs } from "dayjs";
 import api from "../api";
-import { money, pct } from "../utils/format";
+import { pct, splitFixed, money } from "../utils/format";
+import { useTaxBasis, TaxMoney } from "../context/TaxBasis";
 
 interface ProfitRow {
   dimension: string;
@@ -28,6 +29,7 @@ interface ProfitRow {
 const DIM_LABEL: Record<string, string> = { part: "型号", salesperson: "销售员", customer: "客户" };
 
 export default function ProfitPage() {
+  const { basis } = useTaxBasis();
   const [dimension, setDimension] = useState("salesperson");
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [onlyAnomaly, setOnlyAnomaly] = useState(false);
@@ -83,33 +85,49 @@ export default function ProfitPage() {
     URL.revokeObjectURL(url);
   };
 
-  const numCol = (v: number | null) => (
-    <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{money(v)}</span>
-  );
   const pctCol = (v: number | null) => (
     <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{pct(v, 2)}</span>
   );
 
+  // 金额分列（营收/成本/毛利均为「不含税」固定口径 splitFixed(v,"ex")）：
+  // 含税侧无真实值 → money(null)="-"，绝不税率换算。毛利可负 → 负数标红。
+  const moneyTwoCols = (
+    field: keyof ProfitRow, incTitle: string, exTitle: string, width: number,
+    opts?: { sorter?: boolean },
+  ): ColumnsType<ProfitRow> => {
+    // 列已拆成含税/不含税两列，单元格只渲染本列单值（表格里不套内联双值 TaxMoney）。
+    const cell = (v: number | null, side: "inc" | "ex") => {
+      const val = splitFixed(v, "ex")[side];
+      return <span style={{ color: val != null && val < 0 ? "var(--mb-danger)" : undefined }}>{money(val)}</span>;
+    };
+    const sorter = opts?.sorter
+      ? (a: ProfitRow, b: ProfitRow) => ((a[field] as number) ?? 0) - ((b[field] as number) ?? 0)
+      : undefined;
+    return [
+      ...(basis !== "ex" ? [{ title: incTitle, key: `${String(field)}_inc`, width, align: "right" as const,
+        render: (_: unknown, r: ProfitRow) => cell(r[field] as number | null, "inc"), sorter }] as ColumnsType<ProfitRow> : []),
+      ...(basis !== "inc" ? [{ title: exTitle, key: `${String(field)}_ex`, width, align: "right" as const,
+        render: (_: unknown, r: ProfitRow) => cell(r[field] as number | null, "ex"), sorter }] as ColumnsType<ProfitRow> : []),
+    ];
+  };
+
   const cols: ColumnsType<ProfitRow> = [
     { title: DIM_LABEL[dimension], dataIndex: "dimension", width: 180, fixed: "left", ellipsis: true },
-    { title: "营收(总)", dataIndex: "revenue", width: 130, align: "right", render: money,
-      defaultSortOrder: "descend", sorter: (a, b) => (a.revenue ?? 0) - (b.revenue ?? 0) },
-    { title: "可比营收", dataIndex: "revenue_costed", width: 120, align: "right", render: money },
+    ...moneyTwoCols("revenue", "营收总(含税)", "营收总(不含税)", 130, { sorter: true }),
+    ...moneyTwoCols("revenue_costed", "可比营收(含税)", "可比营收(不含税)", 120),
     {
       title: "移动加权",
       children: [
-        { title: "成本", dataIndex: "cost_moving_avg", width: 120, align: "right", render: money },
-        { title: "毛利", dataIndex: "gross_profit_moving", width: 120, align: "right",
-          sorter: (a, b) => (a.gross_profit_moving ?? 0) - (b.gross_profit_moving ?? 0), render: numCol },
+        ...moneyTwoCols("cost_moving_avg", "成本(含税)", "成本(不含税)", 120),
+        ...moneyTwoCols("gross_profit_moving", "毛利(含税)", "毛利(不含税)", 120, { sorter: true }),
         { title: "毛利率", dataIndex: "gross_margin_moving", width: 90, align: "right", render: pctCol },
       ],
     },
     {
       title: "先进先出 FIFO",
       children: [
-        { title: "成本", dataIndex: "cost_fifo", width: 120, align: "right", render: money },
-        { title: "毛利", dataIndex: "gross_profit_fifo", width: 120, align: "right",
-          sorter: (a, b) => (a.gross_profit_fifo ?? 0) - (b.gross_profit_fifo ?? 0), render: numCol },
+        ...moneyTwoCols("cost_fifo", "成本(含税)", "成本(不含税)", 120),
+        ...moneyTwoCols("gross_profit_fifo", "毛利(含税)", "毛利(不含税)", 120, { sorter: true }),
         { title: "毛利率", dataIndex: "gross_margin_fifo", width: 90, align: "right", render: pctCol },
       ],
     },
@@ -153,13 +171,20 @@ export default function ProfitPage() {
       </Card>
 
       <Row gutter={16}>
-        <Col span={8}><Card size="small"><Statistic title="合计营收(不含税)" value={totalRev} precision={2} prefix="¥" /></Card></Col>
         <Col span={8}><Card size="small">
-          <Statistic title="移动加权 · 毛利" value={totalGpMa} precision={2} prefix="¥" valueStyle={{ color: totalGpMa < 0 ? "var(--mb-danger)" : undefined }} />
+          <Statistic title="合计营收" value={0}
+            formatter={() => <TaxMoney inc={null} ex={totalRev} />} />
+        </Card></Col>
+        <Col span={8}><Card size="small">
+          <Statistic title="移动加权 · 毛利" value={0}
+            valueStyle={{ color: totalGpMa < 0 ? "var(--mb-danger)" : undefined }}
+            formatter={() => <TaxMoney inc={null} ex={totalGpMa} />} />
           <span style={{ color: "var(--mb-text-3)" }}>毛利率 {totalRevCosted ? ((totalGpMa / totalRevCosted) * 100).toFixed(2) : "-"}%</span>
         </Card></Col>
         <Col span={8}><Card size="small">
-          <Statistic title="先进先出 FIFO · 毛利" value={totalGpFifo} precision={2} prefix="¥" valueStyle={{ color: totalGpFifo < 0 ? "var(--mb-danger)" : undefined }} />
+          <Statistic title="先进先出 FIFO · 毛利" value={0}
+            valueStyle={{ color: totalGpFifo < 0 ? "var(--mb-danger)" : undefined }}
+            formatter={() => <TaxMoney inc={null} ex={totalGpFifo} />} />
           <span style={{ color: "var(--mb-text-3)" }}>毛利率 {totalRevCosted ? ((totalGpFifo / totalRevCosted) * 100).toFixed(2) : "-"}%</span>
         </Card></Col>
       </Row>
@@ -172,7 +197,7 @@ export default function ProfitPage() {
           loading={loading}
           columns={cols}
           dataSource={rows}
-          scroll={{ x: 1320 }}
+          scroll={{ x: basis === "both" ? 2100 : 1320 }}
           pagination={{ pageSize: 20, showSizeChanger: true }}
         />
       </Card>

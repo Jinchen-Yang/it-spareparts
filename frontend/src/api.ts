@@ -444,6 +444,7 @@ export interface PurchaseRow {
   qty: number | null;
   unit_price: number | null;
   source_type: string | null;
+  is_tax_inclusive: boolean | null;   // 单价口径：含税单→含税、不含单→不含税（前端分列，零计算）
 }
 export interface SalesRow {
   order_no: string;
