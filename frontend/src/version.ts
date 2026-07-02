@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.9";
+export const APP_VERSION = "1.2.10";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.10",
+    date: "2026-07-02",
+    items: [
+      "修复采购分析「采购额」含税总额在包含历史订单的长时间窗口下偏小的问题：早期导入的订单只有不含税金额、没有采购金额（含税），此前会漏计导致含税总额小于不含税总额；现改为该侧缺失时用另一侧的真实金额兜底（不算税率），保证含税总额 ≥ 不含税总额、不漏计",
+    ],
+  },
   {
     version: "1.2.9",
     date: "2026-07-02",

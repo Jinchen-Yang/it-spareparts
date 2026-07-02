@@ -233,16 +233,20 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
 
     out_rows.sort(key=lambda x: (-x["buy_times"], -(x["total_qty"] or 0)))
     total_amount = sum((co["amount"] for co in comp.values()), Decimal(0))
-    # 订单级真实双总额（零计算）：含税=Σamount_inc_tax、不含税=Σamount_ex_tax；再按渠道拆一份
+    # 订单级真实双总额（零计算）：含税=Σamount_inc_tax、不含税=Σamount_ex_tax；再按渠道拆一份。
+    # 某侧缺失时用另一侧的真实值兜底（老单常只有不含税金额、无采购金额；不含税单两额本就相等）——
+    # 这不是税率换算，只是"没有这侧真实值就用那侧真实值"，保证两侧覆盖同一批订单、含税≥不含税。
     comp_amt: dict[str, dict] = defaultdict(lambda: {"ex": Decimal(0), "inc": Decimal(0)})
     total_inc = total_ex = Decimal(0)
     for a_ex, a_inc, a_ch in order_amt.values():
-        if a_ex is not None:
-            total_ex += a_ex
-            comp_amt[a_ch]["ex"] += a_ex
-        if a_inc is not None:
-            total_inc += a_inc
-            comp_amt[a_ch]["inc"] += a_inc
+        ex = a_ex if a_ex is not None else a_inc
+        inc = a_inc if a_inc is not None else a_ex
+        if ex is not None:
+            total_ex += ex
+            comp_amt[a_ch]["ex"] += ex
+        if inc is not None:
+            total_inc += inc
+            comp_amt[a_ch]["inc"] += inc
     kpi = {
         "total_amount": _f(total_amount.quantize(_CENT)),
         "total_amount_inc": _f(total_inc.quantize(_CENT)),
