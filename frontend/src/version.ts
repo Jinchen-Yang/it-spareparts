@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.6";
+export const APP_VERSION = "1.2.7";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.7",
+    date: "2026-07-01",
+    items: [
+      "型号查询的「规格」标签与容量/接口筛选不再滞后于描述：编辑或批量规范化描述后，结构化规格（容量/接口/转速等）同步重新提取，不再出现描述已更新、筛选还按旧规格命中的情况",
+      "修复存量：对全部型号按当前描述重建了一次结构化规格（此前有约 6800 条描述已标准化但规格仍是旧值）",
+    ],
+  },
   {
     version: "1.2.6",
     date: "2026-07-01",
