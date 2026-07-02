@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart
 from app.models.system import SysAuditLog
-from app.services import part_resolver
+from app.services import part_resolver, spec_extract
 
 # 采购可人工维护的字段（编辑这些 → 写进 locked_fields，重导不覆盖）
 EDITABLE_FIELDS = ("description", "brand", "category_major", "category_minor",
@@ -129,6 +129,9 @@ def edit_part(db: Session, *, pn_std: str, updates: dict,
     part.locked_fields = sorted(locked)
     part.reviewed_at = _now()
     db.flush()
+    # 描述变更 → 同事务重抽派生规格缓存（防 specs 陈旧：删 auto 行重插，manual 优先）
+    if "description" in clean and part.description != before["description"]:
+        spec_extract.refresh_part_specs(db, part.id, part.description)
     db.add(SysAuditLog(entity_type="part", entity_id=part.id, action="edit",
                        before_json=before, after_json=clean,
                        reason="采购编辑主数据", operated_by=operated_by))
