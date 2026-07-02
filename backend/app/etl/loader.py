@@ -544,6 +544,7 @@ def _load_inventory(session: Session, result: TransformResult, batch_id: int, sn
         "fact_rows_skipped": 0,
         "fact_rows_error": sum(1 for e in result.errors if e.error_type not in SOFT_ERROR_TYPES),
         "rows_inactive": result.rows_inactive,
+        "rows_excluded_warehouse": result.rows_excluded_warehouse,
         "merged_pn_warehouse": len(result.inventory) - len(rows),
         "new_parts": new_parts,
     }
