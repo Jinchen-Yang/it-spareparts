@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.12";
+export const APP_VERSION = "1.2.13";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.13",
+    date: "2026-07-03",
+    items: [
+      "坏品仓不再进系统：库存导入时仓库名含「坏品」的行整行跳过（不算错误、不建档），导入报告新增「排除仓行数」计数；存量坏品仓库存（北京/广州/上海共 5704 行）已清除。废品仓照常导入",
+    ],
+  },
   {
     version: "1.2.12",
     date: "2026-07-02",

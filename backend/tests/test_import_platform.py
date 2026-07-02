@@ -254,3 +254,19 @@ def test_inventory_overwrite_audits_part_id_change(db):
     assert changed, "part_id 改判应留痕（即便数量未变）"
     assert changed[-1].before_json["part_id"] == pid_a and changed[-1].after_json["part_id"] == pid_t
     assert changed[-1].operated_by == "崔丽娜"
+
+
+def test_excluded_warehouse_rows_skipped():
+    """排除仓（坏品仓，甲方 2026-07-03）：整行跳过、计数进报告、不算错误——
+    排除判定在空 PN 之前，坏品仓的脏行（如空产品名）也不产生导入错误。"""
+    from app.etl import transform as T
+
+    df = pd.DataFrame([
+        {"产品库存ID": "I1", "产品名称(PN)": "PN-GOOD", "库存数量": 5, "仓库": "北京成品仓"},
+        {"产品库存ID": "I2", "产品名称(PN)": "PN-BAD", "库存数量": 3, "仓库": "北京坏品仓"},
+        {"产品库存ID": "I3", "产品名称(PN)": "", "库存数量": 1, "仓库": "上海坏品仓"},
+    ])
+    res = T.transform(df, "inventory")
+    assert res.rows_excluded_warehouse == 2
+    assert [r["raw_inventory_id"] for r in res.inventory] == ["I1"]
+    assert not res.errors

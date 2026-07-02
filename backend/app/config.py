@@ -154,6 +154,10 @@ ACTIVE_STATUS = "已生效"   # "生效"状态字面量单一真值源（曾在 
 # 导入模式：skip（默认，重复行跳过）| upsert（重复行更新可修复字段）
 DEFAULT_IMPORT_MODE = "skip"
 
+# 库存导入排除仓（甲方 2026-07-03：坏品不进系统）——仓库名含任一关键词的行整行跳过，
+# 计入导入报告 rows_excluded_warehouse，不算错误。注意「废品仓」甲方明确保留，勿加"废品"。
+INVENTORY_EXCLUDED_WAREHOUSES = ("坏品",)
+
 # 文件上传上限（MB）
 MAX_UPLOAD_MB = 100
 # 单文件行数上限：超过则拒绝，避免 pandas 全量物化撑爆内存拖垮单 worker（审计 2026-06-28 I-2）。

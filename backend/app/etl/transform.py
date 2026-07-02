@@ -31,6 +31,7 @@ class TransformResult:
     errors: list = field(default_factory=list)
     rows_total: int = 0
     rows_inactive: int = 0
+    rows_excluded_warehouse: int = 0   # 排除仓（坏品仓等）跳过的库存行，进导入报告
 
 
 def _row_dict(row, field_map) -> dict:
@@ -199,12 +200,17 @@ def _transform_inventory(df: pd.DataFrame) -> TransformResult:
         if not raw_inv_id:
             res.errors.append(ErrorRec(row_no, "missing_raw_id", "缺少产品库存ID", _row_dict(row, m)))
             continue
+        warehouse = cleaner.clean_str(row.get(inv["warehouse"]))
+        # 排除仓（坏品仓等，甲方 2026-07-03：坏品不进系统）：整行跳过、计数进报告，
+        # 不算错误也不建档——放在空 PN 判定之前，排除仓的脏行不该产生导入错误。
+        if warehouse and any(p in warehouse for p in config.INVENTORY_EXCLUDED_WAREHOUSES):
+            res.rows_excluded_warehouse += 1
+            continue
         pn_std, pn_raw, needs_review = cleaner.standardize_pn(row.get(inv["pn_raw"]))
         if pn_std is None:
             res.errors.append(_empty_pn_error(
                 row_no, cleaner.clean_str(row.get(inv["data_status"])), None, _row_dict(row, m)))
             continue
-        warehouse = cleaner.clean_str(row.get(inv["warehouse"]))
         try:
             source_qty = cleaner.parse_qty(row.get(inv["source_qty"]))
         except ValueError as exc:
