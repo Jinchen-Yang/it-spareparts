@@ -6,7 +6,8 @@ import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import api from "../api";
-import { money } from "../utils/format";
+import { money, splitFixed } from "../utils/format";
+import { useTaxBasis } from "../context/TaxBasis";
 
 interface InvRow {
   id: number;
@@ -35,6 +36,7 @@ export default function InventoryPage() {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<InvRow | null>(null);
   const [form] = Form.useForm();
+  const { basis } = useTaxBasis();
 
   useEffect(() => {
     api.get("/inventory/warehouses").then((r) => setWarehouses(r.data)).catch(() => {});
@@ -108,8 +110,15 @@ export default function InventoryPage() {
     },
     { title: "源系统数量", dataIndex: "source_qty", width: 100, align: "right" },
     { title: "安全库存", dataIndex: "safety_stock", width: 90, align: "right" },
-    { title: "单位成本", dataIndex: "unit_cost", width: 100, align: "right", render: money },
-    { title: "库存金额", dataIndex: "inventory_value", width: 120, align: "right", render: money },
+    // 单位成本/库存金额均为「不含税」口径 → splitFixed(v,"ex")；含税列无真实值恒显 "-"（严格模式，不做税率换算）。
+    ...(basis !== "ex" ? [{ title: "单位成本(含税)", key: "unit_cost_inc", width: 100, align: "right" as const,
+      render: (_: unknown, r: InvRow) => money(splitFixed(r.unit_cost, "ex").inc) }] as ColumnsType<InvRow> : []),
+    ...(basis !== "inc" ? [{ title: "单位成本(不含税)", key: "unit_cost_ex", width: 100, align: "right" as const,
+      render: (_: unknown, r: InvRow) => money(splitFixed(r.unit_cost, "ex").ex) }] as ColumnsType<InvRow> : []),
+    ...(basis !== "ex" ? [{ title: "库存金额(含税)", key: "inventory_value_inc", width: 120, align: "right" as const,
+      render: (_: unknown, r: InvRow) => money(splitFixed(r.inventory_value, "ex").inc) }] as ColumnsType<InvRow> : []),
+    ...(basis !== "inc" ? [{ title: "库存金额(不含税)", key: "inventory_value_ex", width: 120, align: "right" as const,
+      render: (_: unknown, r: InvRow) => money(splitFixed(r.inventory_value, "ex").ex) }] as ColumnsType<InvRow> : []),
     {
       title: "操作", width: 80, fixed: "right",
       render: (_, r) => <a onClick={() => openEdit(r)}>修正</a>,

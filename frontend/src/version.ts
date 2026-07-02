@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.7";
+export const APP_VERSION = "1.2.8";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.8",
+    date: "2026-07-02",
+    items: [
+      "含税/不含税双列扩展到全站所有价格：型号查询（采购历史/销售历史、成本卡、成交参考价、询价区间）、利润分析（营收/成本/毛利）、库存查询（单位成本/库存金额）、数据治理（营收）、批量规范化预览（近期销售额）都区分含税与不含税，跟随顶栏「价格口径」开关",
+      "型号查询「采购历史」也按订单口径分列（含税单落含税、不含税单落不含税）；口径规则不变——只显示 Excel/系统的真实值，缺的一侧显示「—」，绝不用税率反推",
+    ],
+  },
   {
     version: "1.2.7",
     date: "2026-07-01",

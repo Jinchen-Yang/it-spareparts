@@ -6,7 +6,8 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import api from "../api";
-import { money, pct } from "../utils/format";
+import { money, pct, splitFixed } from "../utils/format";
+import { useTaxBasis } from "../context/TaxBasis";
 const pct100 = (v: number | null) => (v == null ? "-" : `${v.toFixed(1)}%`);
 
 interface PartRow {
@@ -64,6 +65,7 @@ const ISSUE_LABELS: Record<string, string> = {
 
 /** 型号治理（原有页签：非标/待复核/已排除 + 排除操作） */
 function PartsTab() {
+  const { basis } = useTaxBasis();
   const [kind, setKind] = useState("nonstd");
   const [rows, setRows] = useState<PartRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -104,7 +106,10 @@ function PartsTab() {
       render: (v, r) => <span>{v} {r.needs_review && <Tag color="orange">待复核</Tag>}{r.is_excluded && <Tag color="red">已排除</Tag>}</span> },
     { title: "描述", dataIndex: "description", ellipsis: true },
     { title: "销售行", dataIndex: "sales_lines", width: 80, align: "right" },
-    { title: "营收", dataIndex: "revenue", width: 130, align: "right", render: money },
+    ...(basis !== "ex" ? [{ title: "营收(含税)", key: "revenue_inc", dataIndex: "revenue", width: 130, align: "right" as const,
+      render: (v: number | null) => money(splitFixed(v, "ex").inc) }] as ColumnsType<PartRow> : []),
+    ...(basis !== "inc" ? [{ title: "营收(不含税)", key: "revenue_ex", dataIndex: "revenue", width: 130, align: "right" as const,
+      render: (v: number | null) => money(splitFixed(v, "ex").ex) }] as ColumnsType<PartRow> : []),
     { title: "毛利率", dataIndex: "gross_margin", width: 100, align: "right",
       render: (v: number | null) => <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{pct(v)}</span> },
     { title: "操作", width: 90, fixed: "right",

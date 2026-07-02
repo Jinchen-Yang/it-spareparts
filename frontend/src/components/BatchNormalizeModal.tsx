@@ -5,6 +5,8 @@ import {
   batchApply, batchPreview, SPEC_SOURCE_LABEL,
   type BatchPreviewItem, type SpecField,
 } from "../api";
+import { TaxMoney } from "../context/TaxBasis";
+import { splitFixed } from "../utils/format";
 
 const FIELD_OPTS = [
   { label: "描述", value: "description" },
@@ -145,7 +147,10 @@ export default function BatchNormalizeModal({ open, onClose, onApplied }: {
     },
     {
       title: "近期销售额", dataIndex: "recent_sales_amount", width: 100,
-      render: (v) => v ? `¥${Math.round(v).toLocaleString()}` : "—",
+      render: (v: number | null) => {
+        const s = splitFixed(v == null ? null : Math.round(v), "inc");
+        return <TaxMoney inc={s.inc} ex={s.ex} />;
+      },
     },
   ];
 
