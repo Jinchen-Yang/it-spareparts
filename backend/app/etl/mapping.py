@@ -8,6 +8,7 @@ import re
 PURCHASE = "purchase"
 SALES = "sales"
 INVENTORY = "inventory"
+MAINTENANCE = "maintenance"
 INQUIRY = "inquiry"
 
 # ---- 采购订单 ----
@@ -21,6 +22,9 @@ PURCHASE_HEAD = {
     "供应商类型": "supplier_type",
     "批量采购(必填)": "source_type_raw",
     "关联订单": "linked_sales_order_no",
+    # 维保需求单（WBDD）：维保出库成本"专属采购直配"层的关联键（同名列另有「选择维保需求单」，
+    # 两列内容一致，只认无「选择」前缀者，避免 canonicalize 撞重复列）
+    "维保需求单(必填)": "linked_maintenance_order_no",
     "不含税金额": "amount_ex_tax",
     "税率(必填)": "tax_rate",
     # 含税口径（实测真实列；税率列常空 → 由 是否含税+税金+不含税金额 反推，见 transform）
@@ -77,6 +81,34 @@ SALES_LINE = {
     "订单明细.发货SN": "serial_numbers",
 }
 
+# ---- 维保订单（WBDD 备件出库需求；90 列双表头导出，明细前缀「需求明细.」）----
+# 导出本身无任何成本/金额列（实测零命中）——成本由 maintenance_cost.recompute 回填。
+MAINTENANCE_HEAD = {
+    "数据ID(不可修改)": "raw_order_id",
+    "需求单号": "order_no",
+    "制单日期": "order_date",
+    "销售订单": "linked_sales_order_no",
+    "项目名": "project_raw",
+    "客户名称": "customer_name",
+    "最终客户名": "end_customer",
+    "需求类型": "demand_type",
+    "业务类型": "business_type",
+    "销售人员": "salesperson",
+    "出库仓库(必填)": "warehouse",
+    "维保起始日期": "maint_start",
+    "维保终止日期": "maint_end",
+    "数据状态": "data_status",
+}
+MAINTENANCE_LINE = {
+    "需求明细.数据ID(不可修改)": "raw_line_id",
+    "需求明细.序号": "line_no",
+    "需求明细.需供货产品": "pn_raw",
+    "需求明细.产品描述": "description",
+    "需求明细.需求数量": "qty",
+    "需求明细.退货数量": "return_qty",
+    "需求明细.发货SN": "serial_numbers",
+}
+
 # ---- 产品库存（单实体，无 head/line 之分，无 ffill）----
 INVENTORY_MAP = {
     "产品库存ID": "raw_inventory_id",
@@ -94,6 +126,7 @@ INVENTORY_MAP = {
 MAPPINGS = {
     PURCHASE: {"head": PURCHASE_HEAD, "line": PURCHASE_LINE},
     SALES: {"head": SALES_HEAD, "line": SALES_LINE},
+    MAINTENANCE: {"head": MAINTENANCE_HEAD, "line": MAINTENANCE_LINE},
     INVENTORY: {"head": {}, "line": INVENTORY_MAP},
 }
 
@@ -101,6 +134,7 @@ MAPPINGS = {
 FFILL_COLS = {
     PURCHASE: list(PURCHASE_HEAD.keys()),
     SALES: list(SALES_HEAD.keys()),
+    MAINTENANCE: list(MAINTENANCE_HEAD.keys()),
     INVENTORY: [],
 }
 
@@ -137,7 +171,8 @@ def _sig_norm(name) -> str:
 
 
 _ALL_KEYS = (set(PURCHASE_HEAD) | set(PURCHASE_LINE) | set(SALES_HEAD)
-             | set(SALES_LINE) | set(INVENTORY_MAP))
+             | set(SALES_LINE) | set(MAINTENANCE_HEAD) | set(MAINTENANCE_LINE)
+             | set(INVENTORY_MAP))
 # 去注解名 → 规范键（mapping 原 key）；同名冲突保留先遇到的（sorted 确定化）。
 _CANON_BY_STRIPPED: dict[str, str] = {}
 for _k in sorted(_ALL_KEYS):
@@ -172,6 +207,10 @@ def detect_file_type(cols: list[str]) -> str | None:
     sig = {_sig_norm(c) for c in cols}
     if "采购单号" in sig or any("采购产品" in _sig_norm(c) for c in cols):
         return PURCHASE
+    # 维保出库（WBDD）在销售之前判：维保导出也有「业务类型」但无「订单编号」，
+    # 特征列取 需求单号 +（需求类型 或 维保起始日期），2023-2026 各年份导出实测均含
+    if "需求单号" in sig and ("需求类型" in sig or "维保起始日期" in sig):
+        return MAINTENANCE
     if "订单编号" in sig and "业务类型" in sig:
         return SALES
     if "产品库存ID" in sig or ("库存数量" in sig and "产品名称(PN)" in sig):

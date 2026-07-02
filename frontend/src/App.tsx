@@ -11,6 +11,7 @@ import GovernancePage from "./pages/GovernancePage";
 import MasterDataPage from "./pages/MasterDataPage";
 import ChatPage from "./pages/ChatPage";
 import PurchasesPage from "./pages/PurchasesPage";
+import ProjectCostPage from "./pages/ProjectCostPage";
 import AccountsPage from "./pages/AccountsPage";
 import { TaxBasisToggle } from "./context/TaxBasis";
 
@@ -62,6 +63,7 @@ export default function App() {
     { key: "purchases", label: "采购记录", perm: "page_purchases" },
     { key: "chat", label: "AI 助手", perm: "page_chat" },
     { key: "profit", label: "利润分析", perm: "page_profit" },
+    { key: "maintenance", label: "项目成本", perm: "page_maintenance" },
     { key: "inventory", label: "库存查询", perm: "page_inventory" },
     { key: "master", label: "备件主数据", perm: "page_master_data" },
     { key: "governance", label: "数据治理", perm: "page_governance" },
@@ -143,6 +145,7 @@ export default function App() {
         {activePage === "purchases" && <PurchasesPage />}
         {activePage === "chat" && <ChatPage />}
         {activePage === "profit" && <ProfitPage />}
+        {activePage === "maintenance" && <ProjectCostPage />}
         {activePage === "inventory" && <InventoryPage />}
         {activePage === "master" && <MasterDataPage />}
         {activePage === "governance" && <GovernancePage />}

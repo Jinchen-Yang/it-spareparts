@@ -3,7 +3,9 @@
 原则：坏行隔离、好行照常。每个明细行独立校验，错误进 errors，不阻断其它行。
 订单头从同一行（ffill 后头字段已补齐）解析，按 raw_order_id 首次出现去重。
 """
+import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -164,6 +166,7 @@ def _build_head(row, file_type, inv_head, row_no, res) -> dict:
             "source_type_raw": cleaner.clean_str(g("source_type_raw")),
             "source_type": cleaner.normalize_source_type(g("source_type_raw")),
             "linked_sales_order_no": cleaner.clean_str(g("linked_sales_order_no")),
+            "linked_maintenance_order_no": cleaner.clean_str(g("linked_maintenance_order_no")),
             "is_tax_inclusive": cleaner.parse_tax_inclusive(g("is_tax_inclusive")),
             "tax_amount": tax_amount,
             "amount_inc_tax": _safe_money(g("amount_inc_tax")),
@@ -186,6 +189,102 @@ def _safe_money(x):
         return cleaner.parse_money(x)
     except ValueError:
         return None
+
+
+# 项目名规范化：剥「预交付-」前缀（聚合键；原值另存 project_raw 供追溯）
+_PROJECT_PREFIX = re.compile(r"^预交付[-—－]?")
+# 预建单容忍窗：制单日期晚于导入日超过此天数 → 记 future_date 异常（不拦截，实测存在预建单）
+_FUTURE_TOLERANCE_DAYS = 30
+
+
+def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
+    """维保出库（WBDD）：无任何价格列，成本由 maintenance_cost.recompute 回填。"""
+    res = TransformResult(file_type=mapping.MAINTENANCE)
+    head_map = mapping.MAINTENANCE_HEAD
+    line_map = mapping.MAINTENANCE_LINE
+    inv_head = {v: k for k, v in head_map.items()}
+    inv_line = {v: k for k, v in line_map.items()}
+    res.rows_total = len(df)
+    future_cutoff = date.today() + timedelta(days=_FUTURE_TOLERANCE_DAYS)
+
+    for idx, row in df.iterrows():
+        row_no = int(idx) + 1
+        full_map = {**head_map, **line_map}
+
+        raw_order_id = cleaner.clean_str(row.get(inv_head["raw_order_id"]))
+        raw_line_id = cleaner.clean_str(row.get(inv_line["raw_line_id"]))
+        if not raw_line_id or not raw_order_id:
+            res.errors.append(ErrorRec(row_no, "missing_raw_id",
+                                       "缺少维保单/明细数据ID", _row_dict(row, full_map)))
+            continue
+
+        pn_std, pn_raw, needs_review = cleaner.standardize_pn(row.get(inv_line["pn_raw"]))
+        if pn_std is None:
+            res.errors.append(_empty_pn_error(
+                row_no, cleaner.clean_str(row.get(inv_head["data_status"])),
+                cleaner.clean_str(row.get(inv_head["order_no"])), _row_dict(row, full_map)))
+            continue
+
+        try:
+            qty = cleaner.parse_qty(row.get(inv_line["qty"]))
+            return_qty = cleaner.parse_qty(row.get(inv_line["return_qty"]))
+        except ValueError as exc:
+            res.errors.append(ErrorRec(row_no, "bad_number", str(exc), _row_dict(row, full_map)))
+            continue
+
+        res.lines.append({
+            "_order_raw_id": raw_order_id,
+            "raw_line_id": raw_line_id,
+            "line_no": cleaner.parse_int(row.get(inv_line["line_no"])),
+            "pn_std": pn_std, "pn_raw": pn_raw, "needs_review": needs_review,
+            "description": cleaner.clean_str(row.get(inv_line["description"])),
+            "qty": qty, "return_qty": return_qty,
+            "serial_numbers": cleaner.clean_str(row.get(inv_line["serial_numbers"])),
+            "anomaly_flags": [],
+        })
+
+        if raw_order_id not in res.orders:
+            def g(internal):
+                return row.get(inv_head[internal]) if internal in inv_head else None
+
+            order_date = maint_start = maint_end = None
+            try:
+                order_date = cleaner.parse_date(g("order_date"))
+            except ValueError as exc:
+                res.errors.append(ErrorRec(row_no, "bad_date", str(exc),
+                                           {"order_date": str(g("order_date"))}))
+            try:
+                maint_start = cleaner.parse_date(g("maint_start"))
+                maint_end = cleaner.parse_date(g("maint_end"))
+            except ValueError:
+                pass  # 维保起止仅展示用，坏值不阻断
+            project_raw = cleaner.clean_str(g("project_raw"))
+            res.orders[raw_order_id] = {
+                "raw_order_id": raw_order_id,
+                "order_no": cleaner.clean_str(g("order_no")),
+                "order_date": order_date,
+                "linked_sales_order_no": cleaner.clean_str(g("linked_sales_order_no")),
+                "project_raw": project_raw,
+                "project_std": (_PROJECT_PREFIX.sub("", project_raw).strip() or project_raw)
+                                if project_raw else None,
+                "customer_name": cleaner.clean_str(g("customer_name")),
+                "end_customer": cleaner.clean_str(g("end_customer")),
+                "demand_type": cleaner.clean_str(g("demand_type")),
+                "business_type": cleaner.clean_str(g("business_type")),
+                "salesperson": cleaner.clean_str(g("salesperson")),
+                "warehouse": cleaner.clean_str(g("warehouse")),
+                "maint_start": maint_start, "maint_end": maint_end,
+                "data_status": cleaner.clean_str(g("data_status")),
+                "_future_date": bool(order_date and order_date > future_cutoff),
+            }
+        if res.orders[raw_order_id].get("_future_date"):
+            res.lines[-1]["anomaly_flags"] = ["future_date"]
+
+    res.rows_inactive = sum(
+        1 for ln in res.lines
+        if res.orders.get(ln["_order_raw_id"], {}).get("data_status") not in (None, "已生效")
+    )
+    return res
 
 
 def _transform_inventory(df: pd.DataFrame) -> TransformResult:
@@ -235,4 +334,6 @@ def _transform_inventory(df: pd.DataFrame) -> TransformResult:
 def transform(df: pd.DataFrame, file_type: str) -> TransformResult:
     if file_type == mapping.INVENTORY:
         return _transform_inventory(df)
+    if file_type == mapping.MAINTENANCE:
+        return _transform_maintenance(df)
     return _transform_orders(df, file_type)
