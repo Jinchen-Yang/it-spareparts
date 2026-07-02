@@ -231,10 +231,14 @@ export interface PurchaseAnalysisRow {
 export interface PurchaseAnalysis {
   window: { days: number; since: string; until: string; freq_threshold: number;
             exclude_designated: boolean; daily: boolean };
-  kpi: { total_amount: number | null; order_count: number;
+  kpi: { total_amount: number | null;
+         total_amount_inc: number | null; total_amount_ex: number | null;   // 订单级真实含税/不含税总额（零计算）
+         order_count: number;
          order_count_by_source: Record<string, number>; part_count: number;
          frequent_count: number; shown: number; truncated: number };
-  source_composition: { channel: string; amount: number | null; order_count: number; line_count: number }[];
+  source_composition: { channel: string; amount: number | null;
+                        amount_inc: number | null; amount_ex: number | null;
+                        order_count: number; line_count: number }[];
   rows: PurchaseAnalysisRow[];
 }
 export interface PurchaseDrillItem {

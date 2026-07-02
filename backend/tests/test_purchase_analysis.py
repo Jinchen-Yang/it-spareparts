@@ -145,6 +145,31 @@ def test_channel_split_and_composition(db, batch):
     assert res["source_composition"][0]["channel"] == "淘宝"
 
 
+def test_kpi_dual_totals_from_order_amounts(db, batch):
+    """KPI/渠道双总额取订单级真实金额(零计算)：含税总额=Σamount_inc_tax、不含税=Σamount_ex_tax。"""
+    lines = [
+        f.purchase_line("A1", "AL1", "DUAL-X", qty="1", price="1130"),   # 含税单
+        f.purchase_line("A2", "AL2", "DUAL-X", qty="1", price="1000"),   # 不含单
+    ]
+    heads = {
+        "A1": f.purchase_head("A1", on=date(2026, 6, 25), source_channel="淘宝",
+                              is_tax_inclusive=True, amount_ex_tax=Decimal("1000"),
+                              amount_inc_tax=Decimal("1130")),
+        "A2": f.purchase_head("A2", on=date(2026, 6, 24), source_channel="个人",
+                              is_tax_inclusive=False, amount_ex_tax=Decimal("1000"),
+                              amount_inc_tax=Decimal("1000")),
+    }
+    loader.load(db, f.purchase_result(heads, lines), batch.id, _AS_OF, mode="skip")
+    db.commit()
+    res = pa.analysis(db, None, days=7, as_of=_AS_OF)
+    assert res["kpi"]["total_amount_inc"] == 2130.0   # 1130 + 1000
+    assert res["kpi"]["total_amount_ex"] == 2000.0    # 1000 + 1000
+    # 渠道拆分的双总额汇总回总额（渠道由供应商维度决定，此处两单同供应商归一渠道）
+    comp = res["source_composition"]
+    assert sum(c["amount_inc"] for c in comp) == 2130.0
+    assert sum(c["amount_ex"] for c in comp) == 2000.0
+
+
 def test_exclude_designated_toggle(db, batch):
     _seed(db, batch)
     incl = pa.analysis(db, None, days=7, exclude_designated=False, as_of=_AS_OF)

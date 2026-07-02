@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.8";
+export const APP_VERSION = "1.2.9";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.9",
+    date: "2026-07-02",
+    items: [
+      "采购分析面板的「采购额」与各来源渠道额，现按含税/不含税两个真实总额显示（取订单里的采购金额/不含税金额，零计算），跟随顶栏「价格口径」开关",
+    ],
+  },
   {
     version: "1.2.8",
     date: "2026-07-02",
