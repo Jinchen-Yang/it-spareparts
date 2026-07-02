@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.6";
+export const APP_VERSION = "1.2.7";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.7",
+    date: "2026-07-02",
+    items: [
+      "数据导入页文案修正：暂时移除「历史询价」类型——询价导入尚未上线（属合同 Step 4 规划，待客户确认去重口径后实装），此前按提示上传询价 Excel 会得到「无法识别文件类型」",
+    ],
+  },
   {
     version: "1.2.6",
     date: "2026-07-01",
