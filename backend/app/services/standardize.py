@@ -2096,10 +2096,18 @@ _MISC_TYPE_RX = [(name, re.compile(rx, re.I)) for name, rx in _MISC_TYPES]
 _BRAND_CJK_PREFIX = re.compile(r"\s*([^（(]+)[（(]")
 
 
+# 附件语境：类型词紧跟在 with/w//含/带/配/附 之后 → 是主对象的"附带件"提及，不是本体
+# （实测：'IBM ... Tape Drive with Caddy for TS4500' 曾被压成 'Drive Caddy' 且自动通过）。
+# 只看类型词**前方**语境，'Bracket with Latch'/'Bezel with Lock'（附件在后）不受影响。
+_ACCESSORY_CTX = re.compile(r"(?:\bwith|\bw/|[含带配附])\s*$", re.I)
+
+
 def _misc_item_type(desc):
     for name, rx in _MISC_TYPE_RX:
         m = rx.search(desc)
         if m:
+            if _ACCESSORY_CTX.search(desc[max(0, m.start() - 8):m.start()]):
+                continue                   # 附件提及（with Caddy/带托架）→ 不当本体，试下一类型
             return _F(name, EXPLICIT, m.group(0).strip())
     return None                            # 认不出确定类型 → 不猜，转人工
 
@@ -2148,13 +2156,24 @@ def classify_misc_l2(specs):
     return "10" if _val(specs, "item_type") else None
 
 
-def validate_misc(l2, specs, desc):
+def validate_misc(l2, specs, desc, brand=""):
     errs = []
     # 该桶常混入真正属于其它类目的行（SSD/内存/CPU 等）——标出疑似归类错误，转人工复核
     if re.search(r"\bnvme\b|\bssd\b|\bm\.2\b|\bmlc\b|\btlc\b|固态", desc, re.I):
         errs.append("其他备件桶出现固态盘特征词，疑似归类错误")
     if re.search(r"\bddr[2-5]\b|\brdimm\b|\budimm\b", desc, re.I):
         errs.append("其他备件桶出现内存特征词，疑似归类错误")
+    # 信息守恒（对齐 GPU v1.2.5 哲学）：结构件不该带"主设备"特征——出现即转人工，不静默丢信息。
+    # 实测案例：IBM 3592-55F TS1155 磁带机被压成 'Drive Caddy' 自动通过。
+    if re.search(r"tape\s*(?:drive|library)|磁带|\blto-?\d*\b|\bts\d{3,4}\b", desc, re.I):
+        errs.append("出现磁带机/磁带库特征词，疑似主设备而非结构件")
+    if re.search(r"\b\d+(?:\.\d+)?\s*TB\b", desc, re.I):
+        errs.append("出现 TB 级容量特征词，疑似盘/驱动器等主设备")
+    # 品牌冲突：字段与描述各自认出的品牌不一致（如字段=联想、描述=IBM）→ 不猜谁对，转人工。
+    # 仅 MISC 桶启用——主板类的 联想（IBM）→Lenovo 是沿革内故意行为，不受影响。
+    fb, db = T.recognize_brand(brand), T.recognize_brand(desc)
+    if fb and db and fb != db:
+        errs.append(f"品牌字段({fb})与描述品牌({db})冲突")
     return errs
 
 # 编排接线（修正 3，需加入 standardize()，在「其余类目模板兜底」之前）：
@@ -2220,7 +2239,8 @@ def standardize(pn: str, description: str | None, brand: str = "") -> dict:
     if l1_code == "08":
         return _run(out, "COOLING", extract_cooling(desc, brand), render_cooling, classify_cooling_l2, validate_cooling, desc)
     if l1_code == "10":
-        return _run(out, "MISC", extract_misc(desc, brand), render_misc, classify_misc_l2, validate_misc, desc)
+        return _run(out, "MISC", extract_misc(desc, brand), render_misc, classify_misc_l2,
+                    lambda l2, specs, d: validate_misc(l2, specs, d, brand), desc)
 
     # 其余类目：暂委托现有模板（卡/电源/光模块/线缆/主板/背板/风扇/电池）
     out["object_type"] = "OTHER"
