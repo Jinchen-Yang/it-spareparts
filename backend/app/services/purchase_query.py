@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app import config, security
 from app.models import DimPart, DimSupplier, FPurchaseLine, FPurchaseOrder, PartAlias
+from app.services.query_filters import keyword_terms
 
 _ACTIVE = config.ACTIVE_STATUS
 MAX_PAGE_SIZE = 200
@@ -22,20 +23,27 @@ def apply_keyword(stmt, q: str | None):
 
     别名召回：用户拿单据原文 PN（含已合并旧 PN、被去 V 码写法）查也要命中——part_alias.part_id
     合并时已重指存活商品，经它过滤仍是 part_id 主口径（绝不直接 ILIKE 事实表 pn 文本作聚合键）。
+
+    分词 AND（词序无关，每词命中任一字段即可）；并含 DimPart.description——批量规范化只改主数据
+    描述、单据行保留原文，用户拿标准描述查采购记录必须经主数据召回，否则永远查不到。
     """
-    if not (q and q.strip()):
+    terms = keyword_terms(q)
+    if not terms:
         return stmt
-    like = f"%{q.strip()}%"
-    alias_hit = (
-        select(PartAlias.part_id)
-        .where(PartAlias.pn_raw.ilike(like), PartAlias.part_id.is_not(None))
-    )
-    return stmt.where(or_(
-        DimPart.pn_std.ilike(like),
-        FPurchaseLine.description.ilike(like),
-        FPurchaseLine.brand.ilike(like),
-        FPurchaseLine.part_id.in_(alias_hit),
-    ))
+    for t in terms:
+        like = f"%{t}%"
+        alias_hit = (
+            select(PartAlias.part_id)
+            .where(PartAlias.pn_raw.ilike(like), PartAlias.part_id.is_not(None))
+        )
+        stmt = stmt.where(or_(
+            DimPart.pn_std.ilike(like),
+            DimPart.description.ilike(like),
+            FPurchaseLine.description.ilike(like),
+            FPurchaseLine.brand.ilike(like),
+            FPurchaseLine.part_id.in_(alias_hit),
+        ))
+    return stmt
 
 
 def recent_purchases(db: Session, user_ctx: security.UserContext | None = None,

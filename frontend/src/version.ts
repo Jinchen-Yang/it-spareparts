@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.11";
+export const APP_VERSION = "1.2.12";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.12",
+    date: "2026-07-02",
+    items: [
+      "搜索支持整段描述/多关键词组合：型号查询可直接粘贴标准描述（如「8TB 6Gb/s 7.2K 256MB Cache 3.5-inch SATA HDD」）或输入「8TB 7.2K SATA」这类规格词组合，词序无关、全部命中即召回同描述型号（此前这类查询会被当成型号编号做近似匹配，基本查不到）",
+      "采购记录/采购分析的关键词搜索同步升级：多关键词按「同一行全部命中」匹配，并新增按主数据标准描述召回——批量规范化后的标准描述现在也能搜到对应的历史采购单（单据行仍保留原文）",
+    ],
+  },
   {
     version: "1.2.11",
     date: "2026-07-02",

@@ -22,6 +22,7 @@ from app import config
 from app.etl.cleaner import standardize_pn
 from app.models.dimensions import DimPart
 from app.models.system import SysAuditLog
+from app.services.query_filters import keyword_terms
 
 _CJK = re.compile(r"[一-鿿]{2,}")
 _ALNUM = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-\._/]*")
@@ -54,6 +55,19 @@ LIMIT :cand_limit
     bindparam("others", type_=ARRAY(SAText())),
     bindparam("doc_terms", type_=ARRAY(SAText())),
 )
+
+# 描述全词命中召回：多词查询（粘整段标准描述 / '8TB 7.2K SATA' 组合）→ 所有词都出现在
+# search_doc 的型号。PN 车道对这类查询失效——token 化剥掉 ./-（6Gb/s→6GBS 匹配不上原文），
+# 主 token 还会选中 '35INCH' 这类规格词去和全库编号做 trigram，60 个候选名额全被噪声占掉。
+# 本车道用保形词 + ILIKE ALL，词序无关；单词查询不走（PN 模糊路径已覆盖）。
+_DOC_ALL_SQL = text("""
+SELECT p.pn_std, p.pn_compact, p.search_doc, p.description, p.brand,
+       p.category_major, p.needs_review, p.is_excluded, 0 AS sim
+FROM dim_part p
+WHERE p.status <> 'merged'
+  AND p.search_doc ILIKE ALL (CAST(:pats AS text[]))
+LIMIT :lim
+""").bindparams(bindparam("pats", type_=ARRAY(SAText())))
 
 # 别名召回：对"原值写法"模糊匹配，折叠到 pn_std。
 # 排除恒等别名（compact 与型号自身相同）——那只是导入痕迹，不是额外证据
@@ -115,6 +129,10 @@ def _score(row: dict, ctx: dict, alias_hit: tuple[float, str] | None) -> tuple[f
         sim = max(sim, float(alias_hit[0] or 0))
     reasons: list[str] = []
     score = 0.55 * sim
+    # 查询的全部词（保形）都出现在检索文档 → 强证据（整段描述/多关键词组合检索的主通道）
+    if row.get("pn_std") in ctx.get("full_hits", ()):
+        score += 0.5
+        reasons.append("描述全词命中")
     if sim >= 0.3:
         reasons.append(f"PN相似{sim:.2f}")
     pc, main = row.get("pn_compact") or "", ctx["main"]
@@ -178,6 +196,15 @@ def resolve(db: Session, query: str, limit: int = 10,
         "doc_terms": doc_terms, "cand_limit": _CAND_LIMIT,
     }).mappings().all()
     cands: dict[str, dict] = {r["pn_std"]: dict(r) for r in rows}
+
+    # 描述全词命中车道：不占 PN 车道的 60 候选名额，命中行直接入池并记入 full_hits 加分
+    ctx["full_hits"] = set()
+    raw_terms = keyword_terms(query)
+    if len(raw_terms) >= 2:
+        pats = [f"%{t}%" for t in raw_terms]
+        for r in db.execute(_DOC_ALL_SQL, {"pats": pats, "lim": _CAND_LIMIT}).mappings():
+            ctx["full_hits"].add(r["pn_std"])
+            cands.setdefault(r["pn_std"], dict(r))
 
     # 别名召回 → 折叠到 pn_std；别名独有的型号补取 dim_part 行
     alias_hits: dict[str, tuple[float, str]] = {}

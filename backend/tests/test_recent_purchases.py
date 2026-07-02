@@ -125,3 +125,22 @@ def test_pagination_and_caps(db, batch):
     # days 防呆：超上限被钳制而非报错
     capped = purchase_query.recent_purchases(db, days=999999)
     assert capped["days"] == purchase_query.MAX_DAYS
+
+
+def test_master_description_recall_and_token_and(db, batch):
+    """批量规范化只改主数据描述、单据行保留原文——拿标准描述查采购记录必须经主数据召回；
+    多关键词为 AND 语义（同一行全部命中），词序无关。"""
+    from app.models.dimensions import DimPart
+
+    _seed(db, batch)
+    part = db.query(DimPart).filter_by(pn_std="PN-FRESH").one()
+    part.description = "8TB 6Gb/s 7.2K 256MB Cache 3.5-inch SATA HDD"
+    db.commit()
+
+    # 标准描述的规格词组合 → 经 DimPart.description 召回单据行（行原文是"新进的盘"）
+    r = purchase_query.recent_purchases(db, q="8TB 7.2K SATA HDD", days=365)
+    assert r["total"] == 1 and r["items"][0]["pn_std"] == "PN-FRESH"
+    # 词序无关：品牌 + 行原文描述词
+    assert purchase_query.recent_purchases(db, q="Seagate 新进", days=365)["total"] == 1
+    # AND 语义：两词分属不同行 → 不命中
+    assert purchase_query.recent_purchases(db, q="Seagate 中期", days=365)["total"] == 0
