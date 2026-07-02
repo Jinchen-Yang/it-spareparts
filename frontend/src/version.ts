@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.2.10";
+export const APP_VERSION = "1.2.11";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.2.11",
+    date: "2026-07-02",
+    items: [
+      "描述标准化「其他备件」桶信息守恒加固：磁带机等主设备不再被压缩成托架/挡板类结构件——「with Caddy / 含面板」这类附带件提及不再当成本体；出现磁带机（LTO/TS 型号）或 TB 级容量特征时转人工复核；品牌字段与描述品牌冲突（如字段=联想、描述=IBM）不再静默取字段，转人工判断",
+      "对全部 2.3 万条型号回放验证：仅 34 条受影响且全部为真实问题（如 8TB 硬盘被误标成托架、磁带机被标成挡板），其余类目零波及",
+    ],
+  },
   {
     version: "1.2.10",
     date: "2026-07-02",
