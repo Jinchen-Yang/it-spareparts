@@ -10,7 +10,7 @@ import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app import config, security
@@ -277,33 +277,89 @@ def _inventory(db: Session, part_id: int) -> list[dict]:
     return out
 
 
+_SUB_DEPTH_MAX = 4     # 互替闭包 BFS 深度上限（星型组一跳到齐；链式最多 4 跳，防坏数据）
+_SUB_GROUP_MAX = 60    # 组大小上限，防运行时爆炸
+
+
 def _substitutes(db: Session, part_id: int | None) -> list[dict]:
-    """已生效(status=active)替代关系；pending/rejected 不进入推荐（审核说明 §4.6）。"""
+    """已生效(status=active)替代关系 + 互替闭包 + 库存数（宋总 2026-07-03 两条诉求）：
+
+    - 通用号成组自动互通：互替(both)边做 BFS 闭包——给 02311JRE 加 1~5 五个通用号后，
+      查其中任一个都能看到组内其余号（间接成员标注「互替（间接）·经 X」）。
+      单向替代不传递（方向语义无法安全组合），仅与查询件直连时展示。
+    - 每个通用号带库存数：搜一个 PN 时通用号的库存情况一并可见。
+    pending/rejected 不进入推荐（审核说明 §4.6）。
+    """
     if part_id is None:
         return []
-    rows = db.execute(
-        select(PartSubstitute).where(
-            or_(PartSubstitute.part_id_a == part_id, PartSubstitute.part_id_b == part_id),
-            PartSubstitute.status == "active",
-        )
-    ).scalars().all()
+    info: dict[int, dict] = {}          # other_id -> {relation, source, substitute_type, via_id}
+    visited = {part_id}
+    frontier = [part_id]
+    for _ in range(_SUB_DEPTH_MAX):
+        if not frontier or len(info) >= _SUB_GROUP_MAX:
+            break
+        rows = db.execute(
+            select(PartSubstitute).where(
+                or_(PartSubstitute.part_id_a.in_(frontier),
+                    PartSubstitute.part_id_b.in_(frontier)),
+                PartSubstitute.status == "active",
+            )
+        ).scalars().all()
+        fset = set(frontier)
+        nxt: list[int] = []
+        for s in rows:
+            for me in ({s.part_id_a, s.part_id_b} & fset):
+                other = s.part_id_b if s.part_id_a == me else s.part_id_a
+                direct = me == part_id
+                if s.direction != "both" and not direct:
+                    continue                       # 单向不传递
+                if other in visited:
+                    continue
+                if direct:
+                    is_a = s.part_id_a == part_id
+                    # direction 相对规范序：a_to_b = a 的需求可用 b 满足
+                    if s.direction == "both":
+                        relation = "互替"
+                    elif (is_a and s.direction == "a_to_b") or (not is_a and s.direction == "b_to_a"):
+                        relation = "可替代本型号"
+                    else:
+                        relation = "本型号可替代它"
+                    via_id = None
+                else:
+                    relation = "互替（间接）"
+                    via_id = me
+                info[other] = {"relation": relation, "source": s.source,
+                               "substitute_type": s.substitute_type, "via_id": via_id}
+                visited.add(other)
+                if s.direction == "both":
+                    nxt.append(other)
+                if len(info) >= _SUB_GROUP_MAX:
+                    break
+        frontier = nxt
+
+    if not info:
+        return []
+    ids = list(info)
+    parts = {p.id: p for p in db.execute(
+        select(DimPart).where(DimPart.id.in_(ids + [part_id]))).scalars()}
+    qty = func.sum(case((Inventory.is_qty_overridden, Inventory.manual_qty),
+                        else_=Inventory.source_qty))
+    stock = dict(db.execute(
+        select(Inventory.part_id, qty).where(Inventory.part_id.in_(ids))
+        .group_by(Inventory.part_id)).all())
     out = []
-    for s in rows:
-        is_a = s.part_id_a == part_id
-        # direction 相对规范序：a_to_b = a 的需求可用 b 满足。站在当前 part 视角，
-        # 「可替代我」的方向是：我是 a 且 a_to_b，或我是 b 且 b_to_a，或 both
-        if s.direction == "both":
-            relation = "互替"
-        elif (is_a and s.direction == "a_to_b") or (not is_a and s.direction == "b_to_a"):
-            relation = "可替代本型号"
-        else:
-            relation = "本型号可替代它"
-        other_id = s.part_id_b if is_a else s.part_id_a
-        other = db.get(DimPart, other_id)
-        if other:
-            out.append({"pn_std": other.pn_std, "description": other.description,
-                        "source": s.source, "relation": relation,
-                        "substitute_type": s.substitute_type})
+    for oid, meta in info.items():
+        other = parts.get(oid)
+        if not other:
+            continue
+        via = parts.get(meta["via_id"])
+        out.append({"pn_std": other.pn_std, "description": other.description,
+                    "source": meta["source"], "relation": meta["relation"],
+                    "substitute_type": meta["substitute_type"],
+                    "via": via.pn_std if via else None,
+                    "stock_qty": _d(stock.get(oid)) or 0.0})
+    # 直连在前、间接在后，组内按 PN 稳定排序
+    out.sort(key=lambda x: (x["via"] is not None, x["pn_std"]))
     return out
 
 
