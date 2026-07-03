@@ -91,7 +91,7 @@ def read_excel(path: str) -> tuple[pd.DataFrame, str]:
 
     file_type = mapping.detect_file_type(cols)
     if file_type is None:
-        raise ReaderError("无法识别文件类型，请确认是采购/销售/库存导出文件")
+        raise ReaderError("无法识别文件类型，请确认是采购/销售/库存/维保出库导出文件")
 
     ffill_cols = [c for c in mapping.FFILL_COLS[file_type] if c in df.columns]
     if ffill_cols:

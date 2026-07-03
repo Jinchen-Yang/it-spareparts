@@ -4,6 +4,7 @@
 1. Settings —— 运行环境配置（数据库连接、上传目录、登录密钥等），由环境变量驱动。
 2. 业务规则开关（§8）—— 待客户确认的口径集中在此，确认后改这里即可，不动逻辑。
 """
+from datetime import date
 from decimal import Decimal
 from functools import lru_cache
 
@@ -133,6 +134,14 @@ REVENUE_BUSINESS_TYPES = ["备件销售"]
 
 # 含税口径：ex_tax（默认，按不含税算毛利）| as_is（原价粗算）
 TAX_BASIS = "ex_tax"
+
+# ---- 维保出库成本（客户 2026-07 确认口径，docs/维保出库成本核算-开发方案.md §0）----
+# 注意：与销售毛利的 ex_tax/移动加权是"刻意不同"的两套口径（客户拍板），不是疏漏。
+MAINT_COST_START_DATE = date(2024, 1, 1)          # 项目成本起算日；此前出库行不计价（cost_source=NULL）
+MAINT_TRACE_MAX_MONTHS = 3                        # 均价追溯上限（月）；≥1 个月前端必须标注追溯月数
+MAINT_SALES_REF_BUSINESS_TYPES = ["备件销售"]      # "没有采购有销售"参考池的业务类型（维保类销售单是一口价占位，无真实单价）
+MAINT_POOL_EXCLUDE_PNS = ["一批备件"]              # 打包采购占位 PN（实测 13 行 2,333 万），不进任何价格池
+MAINT_TAX_PREFERENCE = "inc_first"                # 同一取价层含税/不含税并存时优先含税（inc_first | ex_first）
 
 # 目标毛利率（报价提示/低毛利标记用；整机拆解的"建议售价"=成本×1/(1-此值)）
 TARGET_MARGIN = Decimal("0.20")
@@ -306,7 +315,12 @@ FIELD_GROUPS = {
                       "total_amount", "amount", "price_ex", "price_inc",
                       "price_ex_min", "price_ex_max", "price_ex_last", "price_ex_avg",
                       "price_inc_min", "price_inc_max", "price_inc_last", "price_inc_avg",
-                      "price_last"],
+                      "price_last",
+                      # 维保项目成本派生键（maintenance_cost 聚合 cost_total/inc/ex + 明细行
+                      # unit_cost/cost_amount 已在上；成本来源/取价元信息同样可反推成本口径，一并登记）
+                      "cost_total", "cost_inc", "cost_ex",
+                      "cost_source", "cost_tax_basis", "price_month", "trace_months",
+                      "linked_purchase_order_no"],
     # 毛利金额：能反推成本（profit.aggregate 两法派生键一并登记）
     "profit_amount": ["gross_profit", "gross_profit_moving", "gross_profit_fifo"],
     # 毛利率：见反推警告（_profit_summary 与 profit.aggregate 的两法派生键一并登记）

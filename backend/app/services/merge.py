@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.models.dimensions import DimPart, PartAlias
 from app.models.inquiry import FPartInquiry
 from app.models.inventory import Inventory, PartSubstitute
+from app.models.maintenance import FMaintenanceLine
 from app.models.master_data import (
     ProductDataQualityIssue,
     ProductMatchCandidate,
@@ -142,6 +143,8 @@ def merge_parts(db: Session, source_pn: str, target_pn: str, reason: str | None,
         "f_sales_line_ids": _repoint(db, FSalesLine, source.id, target.id),
         "inventory_ids": _repoint(db, Inventory, source.id, target.id),
         "f_part_inquiry_ids": _repoint(db, FPartInquiry, source.id, target.id),
+        # 维保出库行也按 part_id 取价：不 repoint 则合并后维保成本静默降级（成本引擎按目标键找不到源的采购）
+        "f_maintenance_line_ids": _repoint(db, FMaintenanceLine, source.id, target.id),
     }
 
     # 3) 别名：源名下全部别名 repoint 到目标（复合外键要求 part_id 与 pn_std 同改）
@@ -261,7 +264,8 @@ def unmerge(db: Session, merge_log_id: int, operated_by: str | None) -> dict:
     for key, model in (("f_purchase_line_ids", FPurchaseLine),
                        ("f_sales_line_ids", FSalesLine),
                        ("inventory_ids", Inventory),
-                       ("f_part_inquiry_ids", FPartInquiry)):
+                       ("f_part_inquiry_ids", FPartInquiry),
+                       ("f_maintenance_line_ids", FMaintenanceLine)):
         row_ids = aff.get(key) or []
         for chunk_start in range(0, len(row_ids), 1000):
             chunk = row_ids[chunk_start:chunk_start + 1000]
@@ -345,7 +349,8 @@ def unmerge(db: Session, merge_log_id: int, operated_by: str | None) -> dict:
         after_json={"restored_fields": restored,
                     "facts_restored": {k: len(aff.get(k) or []) for k in
                                        ("f_purchase_line_ids", "f_sales_line_ids",
-                                        "inventory_ids", "f_part_inquiry_ids")}},
+                                        "inventory_ids", "f_part_inquiry_ids",
+                                        "f_maintenance_line_ids")}},
         reason=f"回滚合并 #{merge_log_id}", operated_by=operated_by))
     db.commit()
     _log.info("unmerged %s <- %s (log #%s)", source.pn_std, target.pn_std, merge_log_id)

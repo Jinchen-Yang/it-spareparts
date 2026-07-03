@@ -12,7 +12,7 @@ from app.auth import require_admin
 from app.config import MAX_UPLOAD_MB
 from app.db import SessionLocal, get_db
 from app.security import UserContext, get_current_user_context, record_access_log
-from app.services import inventory, master_data, profit
+from app.services import inventory, maintenance_cost, master_data, profit
 from app.etl import mapping, pipeline, reader
 from app.etl.reader import ReaderError
 from app.models.system import SysImportBatch, SysImportError, SysImportJob
@@ -43,8 +43,10 @@ def _save_upload_to_temp(file: UploadFile, name: str) -> str:
     return tmp
 
 
-def _post_import_refresh(db: Session, did_purchase_sales: bool, did_purchase_inventory: bool) -> dict | None:
-    """导入后置刷新（采购/销售→重算利润；采购/库存→回填成本；总是刷新主数据）。失败不影响导入。"""
+def _post_import_refresh(db: Session, did_purchase_sales: bool, did_purchase_inventory: bool,
+                         did_maintenance_cost: bool = False) -> dict | None:
+    """导入后置刷新（采购/销售→重算利润；采购/库存→回填成本；采购/销售/维保→重算维保
+    项目成本；总是刷新主数据）。失败不影响导入。"""
     recompute_stats = None
     if did_purchase_sales:
         try:
@@ -57,6 +59,18 @@ def _post_import_refresh(db: Session, did_purchase_sales: bool, did_purchase_inv
             inventory.backfill_costs(db)
         except Exception:  # noqa: BLE001
             db.rollback()
+    if did_maintenance_cost:
+        try:
+            maintenance_cost.recompute(db)
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            err = f"维保项目成本重算失败，请到项目成本页手动重算：{exc}"
+            if isinstance(recompute_stats, dict) and recompute_stats.get("error"):
+                recompute_stats["error"] += f"；{err}"
+            elif recompute_stats is None:
+                recompute_stats = {"error": err}
+            else:
+                recompute_stats = {**recompute_stats, "error": err}
     try:
         master_data.refresh(db)
     except Exception:  # noqa: BLE001
@@ -97,7 +111,8 @@ def upload(
             ) from exc
         recompute_stats = _post_import_refresh(
             db, batch.file_type in ("purchase", "sales"),
-            batch.file_type in ("purchase", "inventory"))
+            batch.file_type in ("purchase", "inventory"),
+            batch.file_type in ("purchase", "sales", "maintenance"))
         return {"batch_id": batch.id, "file_type": batch.file_type,
                 "status": batch.status, "report": batch.report_json,
                 "recompute": recompute_stats}
@@ -129,7 +144,7 @@ def precheck(
             cols, file_type = reader.peek_columns(tmp)
             missing_price = not mapping.has_price_columns(cols, file_type)
             if file_type is None:
-                warning = "无法识别文件类型（不是采购/销售/库存导出文件？）"
+                warning = "无法识别文件类型（不是采购/销售/库存/维保出库导出文件？）"
             elif missing_price:
                 warning = ("未识别到任何价格列（单价 / 金额 / 税）——导入后这些"
                            "采购/销售单将没有金额，通常是导出视图选错。")
@@ -159,7 +174,7 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
     db = SessionLocal()
     notes: list[str] = []
     done = errored = 0
-    did_ps = did_pi = False
+    did_ps = did_pi = did_mc = False
     try:
         for tmp, name in files:
             try:
@@ -169,6 +184,7 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                 done += 1
                 did_ps = did_ps or batch.file_type in ("purchase", "sales")
                 did_pi = did_pi or batch.file_type in ("purchase", "inventory")
+                did_mc = did_mc or batch.file_type in ("purchase", "sales", "maintenance")
             except pipeline.DuplicateFileError as exc:
                 db.rollback()
                 errored += 1
@@ -188,7 +204,7 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                 db.execute(update(SysImportJob).where(SysImportJob.id == job_id)
                            .values(done_files=done, error_files=errored))
                 db.commit()
-        recompute_stats = _post_import_refresh(db, did_ps, did_pi)
+        recompute_stats = _post_import_refresh(db, did_ps, did_pi, did_mc)
         if isinstance(recompute_stats, dict) and recompute_stats.get("error"):
             notes.append(recompute_stats["error"])
         job_status = "done" if errored == 0 else ("failed" if done == 0 else "partial")

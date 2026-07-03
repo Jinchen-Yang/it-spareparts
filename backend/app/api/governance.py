@@ -9,6 +9,7 @@ from app.db import get_db
 from app.models.dimensions import DimPart
 from app.services import governance, master_data, match_candidates, merge, part_rename
 from app.services import inventory as inventory_svc
+from app.services import maintenance_cost as maintenance_svc
 from app.services import profit as profit_svc
 
 router = APIRouter(prefix="/governance", tags=["governance"])
@@ -128,6 +129,7 @@ def merge_parts(
         try:
             result["recompute"] = profit_svc.recompute(db)
             result["inventory_costs"] = inventory_svc.backfill_costs(db)
+            result["maintenance_costs"] = maintenance_svc.recompute(db)
         except Exception as exc:  # noqa: BLE001
             result["recompute_failed"] = str(exc)
     return result
@@ -202,6 +204,7 @@ def unmerge_parts(
         try:
             result["recompute"] = profit_svc.recompute(db)
             result["inventory_costs"] = inventory_svc.backfill_costs(db)
+            result["maintenance_costs"] = maintenance_svc.recompute(db)
         except Exception as exc:  # noqa: BLE001
             result["recompute_failed"] = str(exc)
     return result

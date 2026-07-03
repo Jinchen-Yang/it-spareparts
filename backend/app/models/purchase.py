@@ -30,6 +30,8 @@ class FPurchaseOrder(Base):
     purchaser: Mapped[str | None] = mapped_column(String(64))
     supplier_id: Mapped[int | None] = mapped_column(ForeignKey("dim_supplier.id"))
     linked_sales_order_no: Mapped[str | None] = mapped_column(String(64))
+    # 维保需求单（WBDD）：维保需求类采购 100% 回填（2026 实测）——维保出库成本"专属采购直配"层的关联键
+    linked_maintenance_order_no: Mapped[str | None] = mapped_column(String(64))
     source_type: Mapped[str | None] = mapped_column(String(32))      # 标准化：销售订单/维保需求/指定采购
     source_type_raw: Mapped[str | None] = mapped_column(String(64))  # 原值留存
     amount_ex_tax: Mapped[Decimal | None] = mapped_column(Money)
@@ -46,6 +48,7 @@ class FPurchaseOrder(Base):
     __table_args__ = (
         Index("ix_po_order_no", "order_no"),
         Index("ix_po_linked", "linked_sales_order_no"),
+        Index("ix_po_linked_maint", "linked_maintenance_order_no"),
         # 高频过滤+排序：业务查询按 已生效 过滤、按 order_date 排序/窗口（架构体检 2026-06-29）
         Index("ix_po_status_date", "data_status", "order_date"),
     )
