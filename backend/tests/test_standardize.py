@@ -11,7 +11,7 @@ def test_golden_AL15SEB18EQ():
     r = _s("AL15SEB18EQ", "1.8TB 12Gbps 10K 128MB Cache 2.5inch SAS HDD", "东芝")
     assert r["brand_norm"] == "Toshiba"
     assert r["category_l2"] == "SAS-HDD-2.5"
-    assert r["canonical_description"] == "1.8TB 12Gb/s 10K 128MB Cache 2.5-inch SAS HDD"
+    assert r["canonical_description"] == "Toshiba 1.8TB 12Gb/s 10K 128MB Cache 2.5-inch SAS HDD"
     assert r["review_status"] == "AUTO_OK"
 
 
@@ -19,14 +19,14 @@ def test_golden_ST10000NM0086():
     r = _s("ST10000NM0086", "10TB 6Gbps 7.2K 256MB Cache 3.5inch SATA HDD", "希捷")
     assert r["brand_norm"] == "Seagate"
     assert r["category_l2"] == "SATA-HDD-3.5"
-    assert r["canonical_description"] == "10TB 6Gb/s 7.2K 256MB Cache 3.5-inch SATA HDD"
+    assert r["canonical_description"] == "Seagate 10TB 6Gb/s 7.2K 256MB Cache 3.5-inch SATA HDD"
 
 
 def test_golden_ST8000NM001A():
     r = _s("ST8000NM001A", "8TB 12Gbps 7.2K 256MB Cache 3.5inch SAS HDD", "希捷")
     assert r["brand_norm"] == "Seagate"
     assert r["category_l2"] == "SAS-HDD-3.5"
-    assert r["canonical_description"] == "8TB 12Gb/s 7.2K 256MB Cache 3.5-inch SAS HDD"
+    assert r["canonical_description"] == "Seagate 8TB 12Gb/s 7.2K 256MB Cache 3.5-inch SAS HDD"
 
 
 # ── 内存：无证据不补 RDIMM/ECC ──
@@ -34,14 +34,14 @@ def test_golden_HMA84GR7CJR4N_no_guess_rdimm_ecc():
     r = _s("HMA84GR7CJR4N", "SK Hynix Memory 32GB 2R*4 PC4-2666V")
     assert r["brand_norm"] == "SK hynix"
     assert r["category_l2"] == "DDR4/PC4"
-    assert r["canonical_description"] == "32GB DDR4-2666 2Rx4"   # 绝不自动加 RDIMM/ECC
+    assert r["canonical_description"] == "SK hynix 32GB DDR4-2666 2Rx4"   # 绝不自动加 RDIMM/ECC
     assert "RDIMM" not in r["canonical_description"]
     assert "ECC" not in r["canonical_description"]
 
 
 def test_memory_keeps_rdimm_ecc_when_evidenced():
     r = _s("X", "Samsung 32GB 2Rx4 PC4-2666V ECC RDIMM")
-    assert r["canonical_description"] == "32GB DDR4-2666 RDIMM 2Rx4 ECC"   # 有证据才补
+    assert r["canonical_description"] == "Samsung 32GB DDR4-2666 RDIMM 2Rx4 ECC"   # 有证据才补
 
 
 # ── GPU：保留品牌/型号/显存，SXM 不得变 PCIe，HBM3e 大小写 ──
@@ -77,7 +77,7 @@ def test_hdd_unknown_size_not_forced():
 def test_ssd_nvme_not_defaulted_sata():
     r = _s("X", "Samsung PM9A3 3.84TB U.2 NVMe PCIe 4.0 SSD")
     assert r["category_l2"] == "NVMe/PCIe-SSD"
-    assert r["canonical_description"] == "3.84TB PCIe 4.0 U.2 NVMe SSD"
+    assert r["canonical_description"] == "Samsung 3.84TB PCIe 4.0 U.2 NVMe SSD"
 
 
 def test_ssd_with_rpm_flagged():
@@ -136,3 +136,16 @@ def test_cpu_xeon_e5_model_from_description():
     r = S.standardize("", "Intel Xeon E5-2680 v4 2.4GHz 14-Core", "")
     assert r["canonical_description"] == "Intel Xeon E5-2680 v4 14-Core 2.4GHz CPU"
     assert r["structured_specs"]["model"]["value"] == "E5-2680 v4"
+
+
+# ── 品牌进标准描述（甲方 2026-07-03：描述里要能看到 Seagate）──
+def test_brand_prefixed_into_canonical():
+    r = _s("ST8000NM000A", "8TB 6Gbps 7.2K 256MB Cache 3.5inch SATA HDD", "希捷（Seagate）")
+    c = r["canonical_description"]
+    assert c is not None and c.startswith("Seagate ")
+    # 模板已含品牌的类不重复前缀（主板渲染自带 Lenovo）
+    r2 = _s("", "IBM System Board For X3550M5", "联想（IBM）")
+    assert r2["canonical_description"].count("Lenovo") == 1
+    # 识别不了的品牌（占位「其他」）不猜、不前缀
+    r3 = _s("PSU-450-001", "450W AC Power Supply Module", "其他")
+    assert r3["canonical_description"] == "450W AC Power Supply"

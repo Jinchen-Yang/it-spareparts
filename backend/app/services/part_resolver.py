@@ -66,6 +66,7 @@ SELECT p.pn_std, p.pn_compact, p.search_doc, p.description, p.brand,
 FROM dim_part p
 WHERE p.status <> 'merged'
   AND p.search_doc ILIKE ALL (CAST(:pats AS text[]))
+ORDER BY p.pn_std
 LIMIT :lim
 """).bindparams(bindparam("pats", type_=ARRAY(SAText())))
 
@@ -129,10 +130,15 @@ def _score(row: dict, ctx: dict, alias_hit: tuple[float, str] | None) -> tuple[f
         sim = max(sim, float(alias_hit[0] or 0))
     reasons: list[str] = []
     score = 0.55 * sim
-    # 查询的全部词（保形）都出现在检索文档 → 强证据（整段描述/多关键词组合检索的主通道）
+    # 查询的全部词（保形）都出现在检索文档 → 强证据（整段描述/多关键词组合检索的主通道）；
+    # 单词命中给较低加成，避免"描述提及"盖过真 PN 匹配（PN 包含≈0.55*sim+0.20 > 0.40）
     if row.get("pn_std") in ctx.get("full_hits", ()):
-        score += 0.5
-        reasons.append("描述全词命中")
+        if ctx.get("multi_terms"):
+            score += 0.5
+            reasons.append("描述全词命中")
+        else:
+            score += 0.25
+            reasons.append("描述命中")
     if sim >= 0.3:
         reasons.append(f"PN相似{sim:.2f}")
     pc, main = row.get("pn_compact") or "", ctx["main"]
@@ -197,10 +203,13 @@ def resolve(db: Session, query: str, limit: int = 10,
     }).mappings().all()
     cands: dict[str, dict] = {r["pn_std"]: dict(r) for r in rows}
 
-    # 描述全词命中车道：不占 PN 车道的 60 候选名额，命中行直接入池并记入 full_hits 加分
+    # 描述命中车道：不占 PN 车道的 60 候选名额，命中行直接入池并记入 full_hits 加分。
+    # 单词也跑（"8TB" 这类规格词此前只会和全库编号做相似度，描述里的 8TB 盘一个不出），
+    # 但加分低于多词全命中（0.25 vs 0.5，见 _score）——敲完整 PN 时 PN 证据仍稳赢。
     ctx["full_hits"] = set()
     raw_terms = keyword_terms(query)
-    if len(raw_terms) >= 2:
+    ctx["multi_terms"] = len(raw_terms) >= 2
+    if raw_terms:
         pats = [f"%{t}%" for t in raw_terms]
         for r in db.execute(_DOC_ALL_SQL, {"pats": pats, "lim": _CAND_LIMIT}).mappings():
             ctx["full_hits"].add(r["pn_std"])

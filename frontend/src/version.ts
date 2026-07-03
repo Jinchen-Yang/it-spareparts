@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.3.0";
+export const APP_VERSION = "1.3.1";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.3.1",
+    date: "2026-07-03",
+    items: [
+      "搜「8TB」这类单个规格词，现在按描述召回（此前会被当成型号编号做近似匹配，描述里的 8TB 盘一个都搜不到）；敲完整型号时精确匹配仍然优先",
+      "品牌进标准描述：描述标准化现在会把已识别的品牌写进标准描述开头（如「Seagate 8TB 6Gb/s 7.2K 256MB Cache 3.5-inch SATA HDD」），模板已含品牌的类别不重复、识别不出的品牌不乱猜。已标准化的存量描述需在「批量规范化」重新应用一次即可补上品牌前缀",
+    ],
+  },
   {
     version: "1.3.0",
     date: "2026-07-03",
