@@ -9,7 +9,7 @@ GPU/电源/网卡等没有"容量/接口"统一语义，不强行抽取。
 import re
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -216,8 +216,29 @@ def extract(description: str | None) -> list[dict]:
     return []
 
 
-def backfill_specs(db: Session) -> dict:
-    """全量幂等回填：对每个 active 型号抽取规格，只补缺不覆盖。"""
+def refresh_part_specs(db: Session, part_id: int, description: str | None) -> None:
+    """description 变更后同步该型号的派生规格：删 auto 行 + 按新描述重抽。
+
+    specs 是 description 的纯派生缓存——描述变了缓存必须跟着变，包括新描述抽不出
+    规格时清空旧行（否则静默陈旧，生产 6797 条已中招）。source='manual' 行不动，
+    重插撞键时 on_conflict_do_nothing 让 manual 优先。不 commit，随调用方事务。
+    """
+    db.execute(delete(ProductSpec).where(ProductSpec.part_id == part_id,
+                                         ProductSpec.source == "auto"))
+    rows = [{**s, "part_id": part_id, "source": "auto"} for s in extract(description)]
+    if rows:
+        db.execute(pg_insert(ProductSpec).values(rows).on_conflict_do_nothing(
+            constraint="uq_spec_part_key"))
+
+
+def backfill_specs(db: Session, rebuild: bool = False) -> dict:
+    """全量幂等回填：对每个 active 型号抽取规格，只补缺不覆盖。
+
+    rebuild=True：先删全部 source='auto' 行再重插（=全量重建派生缓存），
+    治历史陈旧；manual 行保留且撞键优先。
+    """
+    if rebuild:
+        db.execute(delete(ProductSpec).where(ProductSpec.source == "auto"))
     parts = db.execute(
         select(DimPart.id, DimPart.description).where(
             DimPart.status == "active", DimPart.description.is_not(None))

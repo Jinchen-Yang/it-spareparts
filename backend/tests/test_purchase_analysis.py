@@ -145,6 +145,36 @@ def test_channel_split_and_composition(db, batch):
     assert res["source_composition"][0]["channel"] == "淘宝"
 
 
+def test_kpi_dual_totals_from_order_amounts(db, batch):
+    """KPI/渠道双总额取订单级真实金额(零计算)+ coalesce 兜底：某侧缺用另一侧真实值。"""
+    lines = [
+        f.purchase_line("A1", "AL1", "DUAL-X", qty="1", price="1130"),   # 含税单(两额齐)
+        f.purchase_line("A2", "AL2", "DUAL-X", qty="1", price="1000"),   # 不含单(两额相等)
+        f.purchase_line("A3", "AL3", "DUAL-X", qty="1", price="500"),    # 老单(只有不含税额)
+    ]
+    heads = {
+        "A1": f.purchase_head("A1", on=date(2026, 6, 25), source_channel="淘宝",
+                              is_tax_inclusive=True, amount_ex_tax=Decimal("1000"),
+                              amount_inc_tax=Decimal("1130")),
+        "A2": f.purchase_head("A2", on=date(2026, 6, 24), source_channel="个人",
+                              is_tax_inclusive=False, amount_ex_tax=Decimal("1000"),
+                              amount_inc_tax=Decimal("1000")),
+        "A3": f.purchase_head("A3", on=date(2026, 6, 23), source_channel="正规供应商",
+                              is_tax_inclusive=None, amount_ex_tax=Decimal("500"),
+                              amount_inc_tax=None),   # 缺含税额 → coalesce 用不含税额补
+    }
+    loader.load(db, f.purchase_result(heads, lines), batch.id, _AS_OF, mode="skip")
+    db.commit()
+    res = pa.analysis(db, None, days=7, as_of=_AS_OF)
+    # 含税总额 = 1130 + 1000 + 500(兜底) = 2630；不含税 = 1000 + 1000 + 500 = 2500；含税≥不含税
+    assert res["kpi"]["total_amount_inc"] == 2630.0
+    assert res["kpi"]["total_amount_ex"] == 2500.0
+    assert res["kpi"]["total_amount_inc"] >= res["kpi"]["total_amount_ex"]
+    comp = res["source_composition"]
+    assert sum(c["amount_inc"] for c in comp) == 2630.0
+    assert sum(c["amount_ex"] for c in comp) == 2500.0
+
+
 def test_exclude_designated_toggle(db, batch):
     _seed(db, batch)
     incl = pa.analysis(db, None, days=7, exclude_designated=False, as_of=_AS_OF)

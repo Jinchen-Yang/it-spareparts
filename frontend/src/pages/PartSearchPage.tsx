@@ -9,7 +9,8 @@ import PageHeader from "../components/PageHeader";
 import api from "../api";
 import type { Overview, PartHit, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { COLORS } from "../theme";
-import { money, pct } from "../utils/format";
+import { money, pct, splitByFlag, splitFixed } from "../utils/format";
+import { useTaxBasis, TaxMoney } from "../context/TaxBasis";
 const errMsg = (e: any) =>
   !e?.response ? "无法连接服务器，请检查网络后重试"
   : e?.response?.data?.detail || `加载失败（${e?.response?.status ?? "?"}），请稍后重试`;
@@ -38,6 +39,7 @@ export default function PartSearchPage() {
 
   const canCost = canSee("data_purchase_cost");   // 销售看不到 → 隐藏成本卡片
   const canProfit = canSee("data_profit");
+  const { basis } = useTaxBasis();
 
   const doSearch = async (q: string, override?: Record<string, unknown>) => {
     const hasSpec = partType || iface || capMin != null || capMax != null || override;
@@ -141,21 +143,36 @@ export default function PartSearchPage() {
         : v },
     { title: "供应商", dataIndex: "supplier", width: 160, ellipsis: true },
     { title: "数量", dataIndex: "qty", width: 70 },
-    { title: "单价", dataIndex: "unit_price", width: 90, render: money },
+    // 单价按订单税口径归列（含税单→含税列、不含单→不含税列），另一侧 "-"；跟随全局开关。零计算。
+    ...(basis !== "ex" ? [{ title: "单价(含税)", key: "up_inc", width: 90, align: "right" as const,
+      render: (_: unknown, r: PurchaseRow) => money(splitByFlag(r.unit_price, r.is_tax_inclusive).inc) }] as ColumnsType<PurchaseRow> : []),
+    ...(basis !== "inc" ? [{ title: "单价(不含税)", key: "up_ex", width: 90, align: "right" as const,
+      render: (_: unknown, r: PurchaseRow) => money(splitByFlag(r.unit_price, r.is_tax_inclusive).ex) }] as ColumnsType<PurchaseRow> : []),
   ];
   const salCols: ColumnsType<SalesRow> = [
     { title: "销售单号", dataIndex: "order_no", width: 170, ellipsis: true },
     { title: "日期", dataIndex: "order_date", width: 110 },
     { title: "客户", dataIndex: "customer", width: 160, ellipsis: true },
     { title: "数量", dataIndex: "qty", width: 70 },
-    { title: "单价(含税)", dataIndex: "unit_price", width: 100, render: money },
+    // 销售约定含税：真实值只落含税侧，不含税侧 "-"（不做税率换算）。
+    ...(basis !== "ex" ? [{ title: "单价(含税)", key: "sp_inc", width: 100, align: "right" as const,
+      render: (_: unknown, r: SalesRow) => money(splitFixed(r.unit_price, "inc").inc) }] as ColumnsType<SalesRow> : []),
+    ...(basis !== "inc" ? [{ title: "单价(不含税)", key: "sp_ex", width: 100, align: "right" as const,
+      render: (_: unknown, r: SalesRow) => money(splitFixed(r.unit_price, "inc").ex) }] as ColumnsType<SalesRow> : []),
   ];
   const invCols: ColumnsType<InventoryRow> = [
     { title: "仓库", dataIndex: "warehouse" },
     { title: "可用数量", dataIndex: "display_qty", width: 100 },
     { title: "源系统数量", dataIndex: "source_qty", width: 110 },
-    { title: "单位成本", dataIndex: "unit_cost", width: 110, render: money },
-    { title: "库存金额", dataIndex: "inventory_value", width: 120, render: money },
+    // 成本/库存估值固定不含税：真实值只落不含税侧，含税侧 "-"。
+    ...(basis !== "ex" ? [{ title: "单位成本(含税)", key: "uc_inc", width: 110, align: "right" as const,
+      render: (_: unknown, r: InventoryRow) => money(splitFixed(r.unit_cost, "ex").inc) }] as ColumnsType<InventoryRow> : []),
+    ...(basis !== "inc" ? [{ title: "单位成本(不含税)", key: "uc_ex", width: 110, align: "right" as const,
+      render: (_: unknown, r: InventoryRow) => money(splitFixed(r.unit_cost, "ex").ex) }] as ColumnsType<InventoryRow> : []),
+    ...(basis !== "ex" ? [{ title: "库存金额(含税)", key: "iv_inc", width: 120, align: "right" as const,
+      render: (_: unknown, r: InventoryRow) => money(splitFixed(r.inventory_value, "ex").inc) }] as ColumnsType<InventoryRow> : []),
+    ...(basis !== "inc" ? [{ title: "库存金额(不含税)", key: "iv_ex", width: 120, align: "right" as const,
+      render: (_: unknown, r: InventoryRow) => money(splitFixed(r.inventory_value, "ex").ex) }] as ColumnsType<InventoryRow> : []),
   ];
 
   return (
@@ -209,7 +226,7 @@ export default function PartSearchPage() {
             }}>
               <span style={{ color: COLORS.text2, fontSize: 13 }}>近期成交参考价（销售出价用）</span>
               <span style={{ fontSize: 22, fontWeight: 500, color: COLORS.accentStrong }}>
-                {money(ov.sale_price_ref.ref_sale_price)}
+                {(() => { const s = splitFixed(ov.sale_price_ref.ref_sale_price, "inc"); return <TaxMoney inc={s.inc} ex={s.ex} />; })()}
               </span>
               <span style={{ color: COLORS.text3, fontSize: 13 }}>
                 近 {ov.sale_price_ref.ref_sale_samples} 单 / {ov.sale_price_ref.ref_window_days} 天加权
@@ -222,19 +239,34 @@ export default function PartSearchPage() {
 
           <Row gutter={16} style={{ marginBottom: 16 }}>
             {canCost && <Col span={6}><Card size="small">
-              <Statistic title="移动加权 · 单位成本" value={ov.profit_summary.avg_cost_moving ?? "-"} prefix="¥"
-                valueStyle={{ color: COLORS.accentStrong }} />
+              {/* 移动加权单位成本：不含税口径（真实值只落不含税侧） */}
+              <Statistic title="移动加权 · 单位成本" valueStyle={{ color: COLORS.accentStrong }}
+                valueRender={() => { const s = splitFixed(ov.profit_summary.avg_cost_moving, "ex"); return <TaxMoney inc={s.inc} ex={s.ex} />; }} />
               {canProfit && <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_moving)}</span>}
             </Card></Col>}
             {canCost && <Col span={6}><Card size="small">
-              <Statistic title="FIFO · 单位成本" value={ov.profit_summary.avg_cost_fifo ?? "-"} prefix="¥" />
+              {/* FIFO 单位成本：不含税口径 */}
+              <Statistic title="FIFO · 单位成本"
+                valueRender={() => { const s = splitFixed(ov.profit_summary.avg_cost_fifo, "ex"); return <TaxMoney inc={s.inc} ex={s.ex} />; }} />
               {canProfit && <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>}
             </Card></Col>}
             <Col span={6}><Card size="small">
-              <Statistic title="平均销售价(含税)" value={ov.profit_summary.avg_sale_price ?? "-"} prefix="¥" />
+              {/* 平均销售价：含税口径（真实值只落含税侧） */}
+              <Statistic title="平均销售价"
+                valueRender={() => { const s = splitFixed(ov.profit_summary.avg_sale_price, "inc"); return <TaxMoney inc={s.inc} ex={s.ex} />; }} />
               <span style={{ color: COLORS.text3 }}>累计售 {ov.profit_summary.total_qty_sold}</span>
             </Card></Col>
-            <Col span={6}><Card size="small"><Statistic title="询价区间" value={ov.inquiry_ref.count ? `${money(ov.inquiry_ref.min_money)}~${money(ov.inquiry_ref.max_money)}` : "无"} /></Card></Col>
+            <Col span={6}><Card size="small">
+              {/* 询价区间：含税口径，min~max 各自双值 */}
+              <Statistic title="询价区间" valueRender={() => {
+                if (!ov.inquiry_ref.count) return <>无</>;
+                const lo = splitFixed(ov.inquiry_ref.min_money, "inc");
+                const hi = splitFixed(ov.inquiry_ref.max_money, "inc");
+                return (<span style={{ whiteSpace: "nowrap" }}>
+                  <TaxMoney inc={lo.inc} ex={lo.ex} /> ~ <TaxMoney inc={hi.inc} ex={hi.ex} />
+                </span>);
+              }} />
+            </Card></Col>
           </Row>
 
           <Card title="库存" size="small" style={{ marginBottom: 16 }}>

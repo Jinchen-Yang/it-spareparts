@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Card, Input, Segmented, Tag, Checkbox, Table, Tooltip, theme, message } from "antd";
 import { RightOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -11,7 +11,7 @@ import type {
   RecentPurchaseRow, PurchaseAnalysis, PurchaseAnalysisRow, PurchaseDrillItem,
   CancellationStats, CancellationPeriodRow,
 } from "../api";
-import { useTaxBasis } from "../context/TaxBasis";
+import { useTaxBasis, TaxMoney } from "../context/TaxBasis";
 
 // 流程状态：颜色 + 过滤选项（宋总：取消单也要能看/能统计）
 const STATUS_COLOR: Record<string, string> = {
@@ -99,7 +99,7 @@ function PriceCell({ row, basis }: { row: PurchaseAnalysisRow; basis: string }) 
 }
 
 function KpiCard({ label, value, sub, highlight }: {
-  label: string; value: string; sub?: string; highlight?: boolean;
+  label: string; value: ReactNode; sub?: string; highlight?: boolean;
 }) {
   return (
     <div style={{
@@ -131,12 +131,12 @@ function SourceComposition({ comp, accent }: {
         {comp.map((c, i) => (
           <span key={c.channel} style={{ color: "#6b665e" }}>
             <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: palette[i % palette.length], marginRight: 5 }} />
-            {c.channel} ¥{fmt(c.amount)} · {c.order_count}单
+            {c.channel} <TaxMoney inc={c.amount_inc} ex={c.amount_ex} /> · {c.order_count}单
           </span>
         ))}
       </div>
       <div style={{ fontSize: 11.5, color: "var(--mb-text-3)", marginTop: 4 }}>
-        金额为实付口径（含税单含税 + 不含税单未税），与上方采购额一致
+        含税/不含税均为订单级真实总额（Excel 原值，零计算），跟随顶栏「价格口径」开关
       </div>
     </div>
   );
@@ -238,7 +238,7 @@ function AnalysisPanel() {
           采购分析 · 高频采购待计划
           {!open && kpi && (
             <span style={{ fontSize: 12.5, fontWeight: 400, color: "#9a7b43" }}>
-              频发待计划 {kpi.frequent_count} · 近{days}天采购额 ¥{fmt(kpi.total_amount)}
+              频发待计划 {kpi.frequent_count} · 近{days}天采购额 <TaxMoney inc={kpi.total_amount_inc} ex={kpi.total_amount_ex} />
             </span>
           )}
         </span>
@@ -253,7 +253,7 @@ function AnalysisPanel() {
       <>
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
-        <KpiCard label={`近 ${days} 天采购额`} value={`¥${fmt(kpi?.total_amount)}`} sub="实付（含税单含税·不含单未税）" />
+        <KpiCard label={`近 ${days} 天采购额`} value={<TaxMoney inc={kpi?.total_amount_inc ?? null} ex={kpi?.total_amount_ex ?? null} />} sub="订单级真实总额（含税 / 不含税）" />
         <KpiCard label="采购单数" value={kpi ? String(kpi.order_count) : "—"} sub={bySrc} />
         <KpiCard label="涉及型号" value={kpi ? String(kpi.part_count) : "—"} sub={kpi?.truncated ? `仅显示前 ${kpi.shown}` : undefined} />
         <KpiCard label="频发待计划" value={kpi ? String(kpi.frequent_count) : "—"} sub={`≥ ${data?.window.freq_threshold ?? 3} 次 / 窗口`} highlight />

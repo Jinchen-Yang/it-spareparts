@@ -231,10 +231,14 @@ export interface PurchaseAnalysisRow {
 export interface PurchaseAnalysis {
   window: { days: number; since: string; until: string; freq_threshold: number;
             exclude_designated: boolean; daily: boolean };
-  kpi: { total_amount: number | null; order_count: number;
+  kpi: { total_amount: number | null;
+         total_amount_inc: number | null; total_amount_ex: number | null;   // 订单级真实含税/不含税总额（零计算）
+         order_count: number;
          order_count_by_source: Record<string, number>; part_count: number;
          frequent_count: number; shown: number; truncated: number };
-  source_composition: { channel: string; amount: number | null; order_count: number; line_count: number }[];
+  source_composition: { channel: string; amount: number | null;
+                        amount_inc: number | null; amount_ex: number | null;
+                        order_count: number; line_count: number }[];
   rows: PurchaseAnalysisRow[];
 }
 export interface PurchaseDrillItem {
@@ -444,6 +448,7 @@ export interface PurchaseRow {
   qty: number | null;
   unit_price: number | null;
   source_type: string | null;
+  is_tax_inclusive: boolean | null;   // 单价口径：含税单→含税、不含单→不含税（前端分列，零计算）
 }
 export interface SalesRow {
   order_no: string;

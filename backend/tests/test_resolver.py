@@ -102,3 +102,41 @@ def test_exact_not_ambiguous(db):
     r = part_resolver.resolve(db, "ST8000NM000A", limit=5)
     if r["items"] and "PN精确匹配" in r["items"][0]["match_reason"]:
         assert r["ambiguous"] is False
+
+
+# ---------------- 描述全词命中车道（v1.2.12）----------------
+# 真实痛点：粘整段标准描述 '8TB 6Gb/s 7.2K ...' 查不到同描述备件——PN token 化剥掉 ./-
+# （6Gb/s→6GBS 匹配不上原文），主 token 还会选中 '35INCH' 去和全库编号做 trigram。
+
+_HDD_A, _HDD_B = "TST-HDD-8T-A", "TST-HDD-8T-B"
+_HDD_DESC = "8TB 6Gb/s 7.2K 256MB Cache 3.5-inch SATA HDD"
+
+
+@pytest.fixture()
+def desc_parts(db):
+    created = []
+    for pn in (_HDD_A, _HDD_B):
+        if db.query(DimPart).filter_by(pn_std=pn).first() is None:
+            db.add(DimPart(pn_std=pn, description=_HDD_DESC, brand="Seagate"))
+            created.append(pn)
+    db.commit()
+    yield
+    for pn in created:
+        db.query(DimPart).filter_by(pn_std=pn).delete()
+    db.commit()
+
+
+def test_full_description_query_finds_same_description_parts(db, desc_parts):
+    """粘整段标准描述 → 同描述的型号全部召回、强证据、非低置信。"""
+    r = part_resolver.resolve(db, _HDD_DESC, limit=10)
+    pns = [it["pn_std"] for it in r["items"]]
+    assert _HDD_A in pns and _HDD_B in pns
+    assert "描述全词命中" in r["items"][0]["match_reason"]
+    assert not r["low_confidence"]
+
+
+def test_subset_spec_tokens_query(db, desc_parts):
+    """规格词子集组合（词序无关）也要命中：'8TB 7.2K SATA'。"""
+    r = part_resolver.resolve(db, "8TB 7.2K SATA", limit=10)
+    pns = [it["pn_std"] for it in r["items"]]
+    assert _HDD_A in pns and _HDD_B in pns

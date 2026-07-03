@@ -54,6 +54,7 @@ def _window_lines(db: Session, user_ctx, since: date, until: date,
             FPurchaseOrder.order_no, FPurchaseOrder.order_date,
             FPurchaseOrder.purchaser, FPurchaseOrder.source_type,
             FPurchaseOrder.is_tax_inclusive, FPurchaseOrder.tax_rate,
+            FPurchaseOrder.amount_ex_tax, FPurchaseOrder.amount_inc_tax,  # 订单级真实含税/不含税总额（Excel原值，供KPI双总额，零计算）
             DimSupplier.name_normalized.label("supplier"),
             DimSupplier.source_channel,
             FPurchaseLine.qty, FPurchaseLine.unit_price, FPurchaseLine.line_amount,
@@ -122,6 +123,8 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
     all_orders: set = set()
     orders_by_source: dict[str, set] = defaultdict(set)
     comp: dict[str, dict] = defaultdict(lambda: {"amount": Decimal(0), "orders": set(), "lines": 0})
+    # 订单级真实含税/不含税总额（每单只计一次；含税总额=Σamount_inc_tax、不含税=Σamount_ex_tax，零计算）
+    order_amt: dict = {}   # oid -> (ex, inc, channel)
 
     for r in rows:
         pid = r["part_id"]
@@ -176,6 +179,8 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
         co["amount"] += amt
         co["orders"].add(oid)
         co["lines"] += 1
+        if oid not in order_amt:            # 每单只登记一次订单级真实金额
+            order_amt[oid] = (r["amount_ex_tax"], r["amount_inc_tax"], ch)
 
     def _wavg(pairs):
         tot_q = sum((q for _, q in pairs), Decimal(0))
@@ -228,8 +233,24 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
 
     out_rows.sort(key=lambda x: (-x["buy_times"], -(x["total_qty"] or 0)))
     total_amount = sum((co["amount"] for co in comp.values()), Decimal(0))
+    # 订单级真实双总额（零计算）：含税=Σamount_inc_tax、不含税=Σamount_ex_tax；再按渠道拆一份。
+    # 某侧缺失时用另一侧的真实值兜底（老单常只有不含税金额、无采购金额；不含税单两额本就相等）——
+    # 这不是税率换算，只是"没有这侧真实值就用那侧真实值"，保证两侧覆盖同一批订单、含税≥不含税。
+    comp_amt: dict[str, dict] = defaultdict(lambda: {"ex": Decimal(0), "inc": Decimal(0)})
+    total_inc = total_ex = Decimal(0)
+    for a_ex, a_inc, a_ch in order_amt.values():
+        ex = a_ex if a_ex is not None else a_inc
+        inc = a_inc if a_inc is not None else a_ex
+        if ex is not None:
+            total_ex += ex
+            comp_amt[a_ch]["ex"] += ex
+        if inc is not None:
+            total_inc += inc
+            comp_amt[a_ch]["inc"] += inc
     kpi = {
         "total_amount": _f(total_amount.quantize(_CENT)),
+        "total_amount_inc": _f(total_inc.quantize(_CENT)),
+        "total_amount_ex": _f(total_ex.quantize(_CENT)),
         "order_count": len(all_orders),
         "order_count_by_source": {k: len(v) for k, v in orders_by_source.items()},
         "part_count": len(parts),
@@ -240,6 +261,8 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
     }
     source_composition = sorted(
         ({"channel": ch, "amount": _f(co["amount"].quantize(_CENT)),
+          "amount_inc": _f(comp_amt[ch]["inc"].quantize(_CENT)),
+          "amount_ex": _f(comp_amt[ch]["ex"].quantize(_CENT)),
           "order_count": len(co["orders"]), "line_count": co["lines"]}
          for ch, co in comp.items()),
         key=lambda x: -(x["amount"] or 0))

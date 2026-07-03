@@ -95,6 +95,13 @@ CASES = [
     ('misc-7', 'G-MISC-07', 'EMC 118000526 SMART X10 DRV 64GB MLC M.2 6G ISILON UNITY', '易安信（EMC）', None, None, 'REVIEW_REQUIRED'),
     ('misc-8', 'G-MISC-08', 'ThinkSystem SR650 Air Baffle', '联想（Lenovo）', 'Lenovo Air Baffle', '风扇/散热', 'AUTO_OK'),
     ('misc-9', 'G-MISC-09', 'EMC Storage Chassis', '易安信（EMC）', '易安信（EMC） Chassis', '其他备件/耗材', 'AUTO_OK'),
+    # 信息守恒回归（真实事故：IBM 磁带机被压成 '联想（Lenovo） Drive Caddy' 且自动通过）——
+    # ①'with Caddy' 是附件提及不取本体 ②磁带机/TB 容量特征词 ③品牌字段(联想)与描述(IBM)冲突 → 转人工
+    ('misc-10', '3592-55F', 'IBM 3592-55F TS1155 FC 8Gb Tape Drive with Caddy for 3584 TS4500 15TB 45TB',
+     '联想（IBM）', None, None, 'REVIEW_REQUIRED'),
+    ('misc-11', 'G-MISC-11', 'DELL 2.5寸硬盘托架 R730', '戴尔（DELL）', '戴尔（Dell） Drive Caddy', '其他备件/耗材', 'AUTO_OK'),
+    ('misc-12', 'G-MISC-12', 'IBM LTO7 Tape Drive Module', '联想（IBM）', None, None, 'REVIEW_REQUIRED'),
+    ('misc-13', 'G-MISC-13', 'HP DL380 Gen9 Caddy 2.5', '惠普（HPE）', '惠普（HPE） Drive Caddy', '其他备件/耗材', 'AUTO_OK'),
 ]
 
 
