@@ -156,3 +156,21 @@ def test_single_token_pn_exact_still_wins(db, desc_parts):
     r = part_resolver.resolve(db, "4089rt", limit=5)
     assert r["items"][0]["pn_std"] == _PN
     assert "PN精确匹配" in r["items"][0]["match_reason"]
+
+
+def test_spec_variant_normalization(db, desc_parts):
+    """规格词变体归一：6Gbps↔6Gb/s、3.5inch/3.5寸↔3.5-inch、7200rpm↔7.2K（甲方：模糊度太低）。"""
+    for q in ["8TB 6Gbps 7.2K 3.5inch SATA HDD",
+              "8TB 6Gb/s 7200rpm 3.5寸 SATA HDD",
+              "8T 6Gbps 7.2K"]:
+        r = part_resolver.resolve(db, q, limit=10, log_miss=False)
+        pns = [it["pn_std"] for it in r["items"]]
+        assert _HDD_A in pns and _HDD_B in pns, f"{q!r} 未命中"
+
+
+def test_partial_coverage_one_wrong_term(db, desc_parts):
+    """≥4 词允许错 1 个：5/6 词命中按比例给分，不再一刀切全灭。"""
+    r = part_resolver.resolve(db, "8TB 6Gb/s 7.2K 999MB SATA HDD", limit=10, log_miss=False)
+    hit = next((it for it in r["items"] if it["pn_std"] == _HDD_A), None)
+    assert hit is not None
+    assert "描述命中5/6词" in hit["match_reason"]
