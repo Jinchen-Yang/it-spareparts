@@ -24,7 +24,7 @@ from app.etl import mapping
 from app.etl.transform import SOFT_ERROR_TYPES, TransformResult
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inventory import Inventory
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysAuditLog
@@ -355,6 +355,8 @@ def load(session: Session, result: TransformResult, batch_id: int, snapshot_date
                                operated_by, audit_overwrites)
     if result.file_type == mapping.MAINTENANCE:
         return _load_maintenance(session, result, batch_id, mode, operated_by, audit_overwrites)
+    if result.file_type == mapping.EXPENSE:
+        return _load_expense(session, result, batch_id, mode, operated_by, audit_overwrites)
     return _load_orders(session, result, batch_id, mode, operated_by, audit_overwrites)
 
 
@@ -534,6 +536,35 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
         "orders_updated": order_stats["updated"],
         "import_mode": mode,
         "new_parts": new_parts,
+    }
+
+
+# 可更新字段（upsert 修复模式）：排除幂等主键 raw_line_id
+_EXPENSE_UPD = ["bxd_no", "line_no", "data_status", "expense_date", "person",
+                "expense_type", "fee_category", "reason", "linked_sales_order_no",
+                "amount", "import_batch_id"]
+
+
+def _load_expense(session: Session, result: TransformResult, batch_id: int,
+                  mode: str = "skip", operated_by: str | None = None,
+                  audit_overwrites: bool = False) -> dict:
+    """维保报销单（BXD）入库：单表平铺，按 raw_line_id 幂等 upsert（§16.3）。
+
+    不建商品/客户维度（费用行无 PN）；项目归集靠 linked_sales_order_no(XSDD) 查询时 join。
+    """
+    upsert = (mode == "upsert")
+    audit = (operated_by, batch_id) if (upsert and audit_overwrites) else None
+    rows = [{**ln, "import_batch_id": batch_id} for ln in result.lines]
+    stats = _upsert_facts(session, FProjectExpense, rows, FProjectExpense.raw_line_id,
+                          _EXPENSE_UPD if upsert else None, audit=audit)
+    return {
+        "source_rows_total": result.rows_total,
+        "fact_rows_inserted": stats["inserted"],
+        "fact_rows_updated": stats["updated"],
+        "fact_rows_skipped": stats["skipped"],
+        "fact_rows_error": sum(1 for e in result.errors if e.error_type not in SOFT_ERROR_TYPES),
+        "rows_inactive": result.rows_inactive,
+        "import_mode": mode,
     }
 
 

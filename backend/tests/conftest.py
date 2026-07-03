@@ -22,6 +22,7 @@ _TABLES = [
     "product_data_quality_issues", "product_merge_logs", "product_match_candidates",
     "product_specs", "product_categories", "brands",
     "f_part_inquiry", "part_substitute", "inventory",
+    "f_project_expense",
     "f_maintenance_line", "f_maintenance_order",
     "f_sales_line", "f_sales_order", "f_purchase_line", "f_purchase_order",
     "part_alias", "dim_part", "dim_supplier", "dim_customer",

@@ -9,6 +9,7 @@ PURCHASE = "purchase"
 SALES = "sales"
 INVENTORY = "inventory"
 MAINTENANCE = "maintenance"
+EXPENSE = "expense"
 INQUIRY = "inquiry"
 
 # ---- 采购订单 ----
@@ -109,6 +110,26 @@ MAINTENANCE_LINE = {
     "需求明细.发货SN": "serial_numbers",
 }
 
+# ---- 维保报销单（BXD 费用侧，§16.3）：正式源=氚云原生全量导出（勾数据ID）----
+# 金额在行级；「数据标题」= BXD单号+姓名，单号由 transform 正则提取；
+# 工作簿版存在列名漂移（费用分类 vs 报销明细.费用分类、冗余「销售订单」列），transform 做回退互补。
+EXPENSE_HEAD = {
+    "数据ID(不可修改)": "raw_order_id",
+    "数据标题": "bxd_title",
+    "流程状态": "data_status",
+    "报销人员": "person",
+    "报销类别": "expense_type",
+    "支出事由": "reason",
+    "维保销售订单": "linked_sales_order_no",
+    "报销日期": "expense_date",
+}
+EXPENSE_LINE = {
+    "报销明细.数据ID(不可修改)": "raw_line_id",
+    "报销明细.序号": "line_no",
+    "报销明细.费用分类": "fee_category",
+    "报销明细.报销金额": "amount",
+}
+
 # ---- 产品库存（单实体，无 head/line 之分，无 ffill）----
 INVENTORY_MAP = {
     "产品库存ID": "raw_inventory_id",
@@ -127,6 +148,7 @@ MAPPINGS = {
     PURCHASE: {"head": PURCHASE_HEAD, "line": PURCHASE_LINE},
     SALES: {"head": SALES_HEAD, "line": SALES_LINE},
     MAINTENANCE: {"head": MAINTENANCE_HEAD, "line": MAINTENANCE_LINE},
+    EXPENSE: {"head": EXPENSE_HEAD, "line": EXPENSE_LINE},
     INVENTORY: {"head": {}, "line": INVENTORY_MAP},
 }
 
@@ -135,6 +157,7 @@ FFILL_COLS = {
     PURCHASE: list(PURCHASE_HEAD.keys()),
     SALES: list(SALES_HEAD.keys()),
     MAINTENANCE: list(MAINTENANCE_HEAD.keys()),
+    EXPENSE: list(EXPENSE_HEAD.keys()),
     INVENTORY: [],
 }
 
@@ -172,6 +195,7 @@ def _sig_norm(name) -> str:
 
 _ALL_KEYS = (set(PURCHASE_HEAD) | set(PURCHASE_LINE) | set(SALES_HEAD)
              | set(SALES_LINE) | set(MAINTENANCE_HEAD) | set(MAINTENANCE_LINE)
+             | set(EXPENSE_HEAD) | set(EXPENSE_LINE)
              | set(INVENTORY_MAP))
 # 去注解名 → 规范键（mapping 原 key）；同名冲突保留先遇到的（sorted 确定化）。
 _CANON_BY_STRIPPED: dict[str, str] = {}
@@ -211,6 +235,9 @@ def detect_file_type(cols: list[str]) -> str | None:
     # 特征列取 需求单号 +（需求类型 或 维保起始日期），2023-2026 各年份导出实测均含
     if "需求单号" in sig and ("需求类型" in sig or "维保起始日期" in sig):
         return MAINTENANCE
+    # 维保报销单（BXD，费用侧 §16.3）：报销类别 + 维保销售订单 双特征
+    if "报销类别" in sig and "维保销售订单" in sig:
+        return EXPENSE
     if "订单编号" in sig and "业务类型" in sig:
         return SALES
     if "产品库存ID" in sig or ("库存数量" in sig and "产品名称(PN)" in sig):

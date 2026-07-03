@@ -2,25 +2,29 @@
 
 独立旁路：不改 cost.replay / profit.recompute 的任何语义（回归红线）。
 
-取价瀑布（每条有效出库行，五层）：
+取价瀑布（每条有效出库行，六层，v2 §16.1 黄金样本校准后定型）：
   A0 direct    —— 专属采购直配：采购单「维保需求单」== 本行维保单号（WBDD），同 part 加权价
-  A1 month_avg —— 同 part 出库当月采购加权均价（客户口径 Q1：当月加权）
+  A1 window    —— 出库日 ±MAINT_PRICE_WINDOW_DAYS 天内最近采购价（同距取更早、同日加权）
+  A2 month_avg —— 同 part 出库当月采购加权均价（客户口径 Q1：当月加权）
   B  trace_avg —— 向前追溯最近有采购的月份，上限 MAINT_TRACE_MAX_MONTHS（Q1/Q6：≤3 月，≥1 月标注）
   C  sales_ref —— 「没有采购有销售」：备件销售真实成交价，同样 当月→追溯（Q3，客户原话标注）
   D  none      —— 无成本，留人工
 每层取价 含税(inc) 优先、逐条标注 cost_tax_basis（Q4：原值口径，不换算）。
+confidence：direct/window=high（校准中位偏差 0%）、month_avg=medium（6.9%）、
+trace_avg/sales_ref=low（无近期采购的估价中位偏差 25%+，不伪装精确）。
 起算日（MAINT_COST_START_DATE）前的行不计价：cost_source=NULL，区别于"算了但没算出来"的 none。
 """
 import logging
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from app import config
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.services.query_filters import active_orders
@@ -34,7 +38,10 @@ _MONEY_MAX = Decimal(10) ** 12
 _ADVISORY_LOCK_KEY = 0x5350_4152
 # 导入期写入的行级 flag（recompute 重建 flags 时保留；成本派生 flag 每轮重算重挂）
 _IMPORT_FLAGS = frozenset({"future_date"})
-COSTED_SOURCES = ("direct", "month_avg", "trace_avg", "sales_ref")
+COSTED_SOURCES = ("direct", "window", "month_avg", "trace_avg", "sales_ref")
+# v2 §16.1：置信度按来源定档——direct/window 校准中位偏差 0%、month_avg 6.9%、追溯/销售参考 25%+
+_CONFIDENCE = {"direct": "high", "window": "high", "month_avg": "medium",
+               "trace_avg": "low", "sales_ref": "low"}
 
 
 def _ym(d: date) -> str:
@@ -55,14 +62,20 @@ def _basis_order() -> tuple[str, str]:
     return ("inc", "ex") if config.MAINT_TAX_PREFERENCE == "inc_first" else ("ex", "inc")
 
 
-def _purchase_pools(db: Session):
-    """构建 直配池 + 采购月度池。
+def _norm_key(s: str | None) -> str | None:
+    """单号/PN 文本匹配键统一 upper 归一（§16.1：审计发现 1.35% 样本纯因大小写落池）。"""
+    return s.strip().upper() if s else None
 
-    direct:  (wbdd_no, part_id) -> {basis: [Σ金额, Σ数量, 采购单号(最小,可解释)]}
+
+def _purchase_pools(db: Session):
+    """构建 直配池 + ±窗口日度池 + 采购月度池。
+
+    direct:  (WBDD_NO_upper, part_id) -> {basis: [Σ金额, Σ数量, 采购单号(最小,可解释)]}
+    daily:   part_id -> {采购日: {basis: [Σ金额, Σ数量]}}（window 层：同日加权）
     monthly: (part_id, 'YYYY-MM', basis) -> [Σ金额, Σ数量]
     金额一律 qty×unit_price（采购「其他款项」运费等不摊入单价，§0 客户口径）。
     直配池不过滤采购类型（显式关联到该维保单的采购就是它的成本）；
-    月度池按 COST_PURCHASE_TYPES 过滤，两池都排除打包占位 PN。
+    日度/月度池按 COST_PURCHASE_TYPES 过滤，各池都排除打包占位 PN。
     """
     q = (
         select(FPurchaseLine.part_id, FPurchaseLine.pn_std, FPurchaseLine.qty,
@@ -75,16 +88,17 @@ def _purchase_pools(db: Session):
                FPurchaseLine.qty.is_not(None), FPurchaseLine.qty > 0)
     )
     q = active_orders(q, FPurchaseOrder)
-    excl = set(config.MAINT_POOL_EXCLUDE_PNS)
+    excl = {_norm_key(p) for p in config.MAINT_POOL_EXCLUDE_PNS}
     direct: dict[tuple, dict] = defaultdict(dict)
+    daily: dict[int, dict] = defaultdict(dict)
     monthly: dict[tuple, list] = defaultdict(lambda: [_ZERO, _ZERO])
     for part, pn, qty, price, odate, ono, stype, inc, wbdd in db.execute(q):
-        if pn in excl:
+        if _norm_key(pn) in excl:
             continue
         basis = "inc" if inc else "ex"
         amt = qty * price
         if wbdd:
-            slot = direct[(wbdd, part)].setdefault(basis, [_ZERO, _ZERO, ono])
+            slot = direct[(_norm_key(wbdd), part)].setdefault(basis, [_ZERO, _ZERO, ono])
             slot[0] += amt
             slot[1] += qty
             if ono and (slot[2] is None or ono < slot[2]):
@@ -93,7 +107,38 @@ def _purchase_pools(db: Session):
             key = (part, _ym(odate), basis)
             monthly[key][0] += amt
             monthly[key][1] += qty
-    return direct, monthly
+            dslot = daily[part].setdefault(odate, {}).setdefault(basis, [_ZERO, _ZERO])
+            dslot[0] += amt
+            dslot[1] += qty
+    # window 层查找用：每 part 的采购日期升序表（bisect 定位 ±窗口）
+    daily_dates = {part: sorted(days) for part, days in daily.items()}
+    return direct, daily, daily_dates, monthly
+
+
+def _pick_window(daily: dict, daily_dates: dict, part: int, odate: date, max_days: int):
+    """±max_days 内最近采购日（同距取更早），该日按税口径优先取加权均价。
+
+    返回 (unit_cost, basis, distance_days, 取价日) | None。日期近优先于税口径偏好
+    （用户口径"近日价更准"），税口径只在同一取价日内做取舍。
+    """
+    dates = daily_dates.get(part)
+    if not dates:
+        return None
+    lo = bisect_left(dates, odate - timedelta(days=max_days))
+    hi = bisect_right(dates, odate + timedelta(days=max_days))
+    best = None
+    for d in dates[lo:hi]:
+        key = (abs((d - odate).days), d)          # 距离升序；同距日期更早者胜
+        if best is None or key < best:
+            best = key
+    if best is None:
+        return None
+    slots = daily[part][best[1]]
+    for basis in _basis_order():
+        s = slots.get(basis)
+        if s and s[1] > 0:
+            return (s[0] / s[1]).quantize(_CENT), basis, best[0], best[1]
+    return None
 
 
 def _sales_pool(db: Session):
@@ -141,13 +186,14 @@ def recompute(db: Session) -> dict:
     先整体清零（口径改动后不残留旧值/旧 flag），与导入用同一 advisory lock 串行（防并发重算/导入交错）。
     """
     db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _ADVISORY_LOCK_KEY})
-    direct, monthly = _purchase_pools(db)
+    direct, daily, daily_dates, monthly = _purchase_pools(db)
     sales_monthly = _sales_pool(db)
 
     db.execute(
         update(FMaintenanceLine).values(
             unit_cost=None, cost_amount=None, cost_source=None, cost_tax_basis=None,
             price_month=None, trace_months=None, linked_purchase_order_no=None,
+            price_distance_days=None, confidence=None,
             anomaly_flags=text(_KEEP_FLAGS_SQL),
         ).execution_options(synchronize_session=False),
         {"keep_flags": list(_IMPORT_FLAGS)},
@@ -165,9 +211,10 @@ def recompute(db: Session) -> dict:
 
     start = config.MAINT_COST_START_DATE
     max_trace = config.MAINT_TRACE_MAX_MONTHS
+    window_days = config.MAINT_PRICE_WINDOW_DAYS
     stats = {"lines_in_scope": 0, "out_of_scope": 0, "missing_qty": 0,
-             "direct": 0, "month_avg": 0, "trace_avg": 0, "sales_ref": 0, "none": 0,
-             "cost_overflow": 0}
+             "direct": 0, "window": 0, "month_avg": 0, "trace_avg": 0, "sales_ref": 0,
+             "none": 0, "cost_overflow": 0}
     updates = []
     for lid, part, qty, rqty, flags, order_no, odate in rows:
         if odate is None or odate < start:      # 起算日外：不计价，flags 已由上面 SQL 收敛
@@ -177,6 +224,7 @@ def recompute(db: Session) -> dict:
         base_flags = [f for f in (flags or []) if f in _IMPORT_FLAGS]
         ym = _ym(odate)
         unit_cost = basis = source = price_month = trace = linked_po = None
+        distance = None                          # v2：window 层取价日距离（direct=0）
 
         if qty is None:                          # 在期但数量缺失：可见的 none，非静默丢弃
             source = "none"
@@ -185,15 +233,22 @@ def recompute(db: Session) -> dict:
 
         # A0 专属采购直配
         if source is None:
-            slots = direct.get((order_no, part))
+            slots = direct.get((_norm_key(order_no), part))
             if slots:
                 for b in _basis_order():
                     s = slots.get(b)
                     if s and s[1] > 0:
                         unit_cost = (s[0] / s[1]).quantize(_CENT)
                         basis, source, price_month, trace, linked_po = b, "direct", ym, 0, s[2]
+                        distance = 0
                         break
-        # A1 当月均价
+        # A1 ±窗口最近价（v2 §16.1：近日价显著更准，对决 272:122）
+        if source is None:
+            w = _pick_window(daily, daily_dates, part, odate, window_days)
+            if w:
+                unit_cost, basis, distance, pdate = w
+                source, price_month, trace = "window", _ym(pdate), 0
+        # A2 当月均价
         if source is None:
             picked = _pick(monthly, part, ym)
             if picked:
@@ -227,6 +282,7 @@ def recompute(db: Session) -> dict:
             # 溢出守卫：单价/数量异常导致金额超 Numeric(14,2) 容量 → 行级隔离（可见可修，不拖垮全批）
             if cost_amount >= _MONEY_MAX or unit_cost >= _MONEY_MAX:
                 unit_cost = cost_amount = basis = price_month = trace = linked_po = None
+                distance = None
                 source = "none"
                 base_flags.append("cost_overflow")
                 stats["cost_overflow"] += 1
@@ -236,7 +292,10 @@ def recompute(db: Session) -> dict:
             "id": lid, "unit_cost": unit_cost, "cost_amount": cost_amount,
             "cost_source": source, "cost_tax_basis": basis,
             "price_month": price_month, "trace_months": trace,
-            "linked_purchase_order_no": linked_po, "anomaly_flags": base_flags,
+            "linked_purchase_order_no": linked_po,
+            "price_distance_days": distance,
+            "confidence": _CONFIDENCE.get(source),
+            "anomaly_flags": base_flags,
         })
 
     for i in range(0, len(updates), 1000):
@@ -371,5 +430,175 @@ def project_lines(db: Session, project: str, month: str | None = None,
         "cost_source": ln.cost_source, "cost_tax_basis": ln.cost_tax_basis,
         "price_month": ln.price_month, "trace_months": ln.trace_months,
         "linked_purchase_order_no": ln.linked_purchase_order_no,
+        "price_distance_days": ln.price_distance_days, "confidence": ln.confidence,
         "anomaly_flags": ln.anomaly_flags or [],
     } for ln, o in db.execute(paged).all()]}
+
+
+# ============================================================
+# v2 §16.2 盈亏看板（合同 XSDD 级）+ §16.4 工作簿导出数据
+# ============================================================
+
+def _contract_amounts(db: Session, order_nos: list[str]) -> dict[str, Decimal]:
+    """XSDD → 合同额（含税参考 = 不含税×(1+税率)）；重复单号取最大。"""
+    out: dict[str, Decimal] = {}
+    if not order_nos:
+        return out
+    cq = active_orders(
+        select(FSalesOrder.order_no, FSalesOrder.amount_ex_tax, FSalesOrder.tax_rate)
+        .where(FSalesOrder.order_no.in_(order_nos)), FSalesOrder)
+    for ono, ex, trate in db.execute(cq).all():
+        if ex is None:
+            continue
+        inc = (ex * (Decimal(1) + (trate or _ZERO))).quantize(_CENT)
+        out[ono] = max(out.get(ono, _ZERO), inc)
+    return out
+
+
+def _expense_by_contract(db: Session, date_from: date | None = None,
+                         date_to: date | None = None) -> dict[str, Decimal]:
+    """报销费用（仅生效口径 MAINT_EXPENSE_ACTIVE_STATUS）按 XSDD 归集。"""
+    pe = FProjectExpense
+    stmt = (
+        select(pe.linked_sales_order_no, func.coalesce(func.sum(pe.amount), 0))
+        .where(pe.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS,
+               pe.linked_sales_order_no.is_not(None))
+        .group_by(pe.linked_sales_order_no)
+    )
+    if date_from:
+        stmt = stmt.where(pe.expense_date >= date_from)
+    if date_to:
+        stmt = stmt.where(pe.expense_date <= date_to)
+    return {k: Decimal(v) for k, v in db.execute(stmt).all()}
+
+
+def board(db: Session, date_from: date | None = None, date_to: date | None = None,
+          status: str | None = None) -> dict:
+    """盈亏看板（用户口径：绿=赚钱、黄=剩余≤20% 报警、红=超支/亏损；合同级聚合天然解决共用合同）。
+
+    预算 = 合同(XSDD)金额（含税参考口径，前端注明）；已花 = 备件成本(混合口径参考) + 生效报销费用。
+    无合同额（未关联 XSDD / 销售表查无金额）→ status='no_budget' 单列，只看成本。
+    """
+    ml, mo = FMaintenanceLine, FMaintenanceOrder
+    contract_col = func.coalesce(mo.linked_sales_order_no, "")
+    proj = func.coalesce(mo.project_std, "(未填项目)")
+    stmt = (
+        select(
+            contract_col.label("contract"), proj.label("project"),
+            func.count().label("lines"),
+            func.count().filter(ml.cost_source.in_(COSTED_SOURCES)).label("costed"),
+            func.coalesce(func.sum(ml.cost_amount), 0).label("spent_parts"),
+            func.coalesce(func.sum(ml.cost_amount).filter(ml.confidence == "low"), 0).label("low_conf"),
+            func.min(mo.maint_start).label("mstart"), func.max(mo.maint_end).label("mend"),
+            func.min(mo.order_date).label("first_out"), func.max(mo.order_date).label("last_out"),
+        )
+        .join(mo, ml.order_id == mo.id)
+        .group_by(contract_col, proj)
+    )
+    stmt = _scoped_filters(stmt, date_from, date_to)
+    raw = db.execute(stmt).all()
+
+    groups: dict[str, dict] = {}
+    for r in raw:
+        g = groups.setdefault(r.contract, {
+            "projects": [], "lines": 0, "costed": 0,
+            "spent_parts": _ZERO, "low_conf": _ZERO,
+            "mstart": None, "mend": None, "first_out": None, "last_out": None,
+        })
+        g["projects"].append({"project": r.project, "lines": r.lines,
+                              "spent_parts": _f(Decimal(r.spent_parts).quantize(_CENT))})
+        g["lines"] += r.lines
+        g["costed"] += r.costed
+        g["spent_parts"] += Decimal(r.spent_parts)
+        g["low_conf"] += Decimal(r.low_conf)
+        for k, v in (("mstart", r.mstart), ("mend", r.mend)):
+            if v is not None and (g[k] is None or (v < g[k] if k == "mstart" else v > g[k])):
+                g[k] = v
+        for k, v, fn in (("first_out", r.first_out, min), ("last_out", r.last_out, max)):
+            if v is not None:
+                g[k] = v if g[k] is None else fn(g[k], v)
+
+    contracts = _contract_amounts(db, [c for c in groups if c])
+    expenses = _expense_by_contract(db, date_from, date_to)
+    warn = Decimal(str(config.MAINT_BUDGET_WARN_PCT))
+
+    rows = []
+    for cno, g in groups.items():
+        spent_parts = g["spent_parts"].quantize(_CENT)
+        expense = (expenses.get(cno) or _ZERO).quantize(_CENT)
+        spent = (spent_parts + expense).quantize(_CENT)
+        budget = contracts.get(cno) if cno else None
+        if budget:
+            remaining = (budget - spent).quantize(_CENT)
+            if spent >= budget:
+                st = "red"
+            elif remaining <= budget * warn:
+                st = "yellow"
+            else:
+                st = "green"
+            remaining_pct = float((remaining / budget * 100).quantize(_CENT))
+        else:
+            st, remaining, remaining_pct = "no_budget", None, None
+        g["projects"].sort(key=lambda p: -(p["spent_parts"] or 0))
+        rows.append({
+            "contract": cno or None, "status": st,
+            "projects": g["projects"],
+            "lines": g["lines"],
+            "coverage_pct": round(g["costed"] / g["lines"] * 100, 1) if g["lines"] else None,
+            "spent_parts": _f(spent_parts), "spent_expense": _f(expense), "spent": _f(spent),
+            "budget": _f(budget), "remaining": _f(remaining), "remaining_pct": remaining_pct,
+            # 低置信成本占比高 → 卡片提示"估算成分高"
+            "low_conf_pct": round(float(g["low_conf"] / spent_parts * 100), 1) if spent_parts else 0.0,
+            "maint_start": g["mstart"].isoformat() if g["mstart"] else None,
+            "maint_end": g["mend"].isoformat() if g["mend"] else None,
+            "first_out": g["first_out"].isoformat() if g["first_out"] else None,
+            "last_out": g["last_out"].isoformat() if g["last_out"] else None,
+        })
+    order = {"red": 0, "yellow": 1, "green": 2, "no_budget": 3}
+    rows.sort(key=lambda r: (order[r["status"]], -(r["spent"] or 0)))
+    if status:
+        rows = [r for r in rows if r["status"] == status]
+    counts = {s: sum(1 for r in rows if r["status"] == s) for s in order}
+    return {"rows": rows, "status_counts": counts,
+            "warn_pct": float(warn), "start_date": config.MAINT_COST_START_DATE.isoformat()}
+
+
+def contract_workbook_data(db: Session, contract: str) -> dict:
+    """§16.4 工作簿导出数据：合同抬头 + 月度×分类汇总 + 出库明细(单据级回填) + 报销明细。"""
+    ml, mo = FMaintenanceLine, FMaintenanceOrder
+    stmt = (
+        select(ml, mo).join(mo, ml.order_id == mo.id)
+        .where(mo.linked_sales_order_no == contract)
+    )
+    stmt = _scoped_filters(stmt, None, None)
+    stmt = stmt.order_by(mo.order_date.asc().nullslast(), mo.order_no, ml.line_no.asc().nullslast(), ml.id)
+    lines = db.execute(stmt).all()
+
+    # 单据级总成本（财务习惯：产品成本恒填在每张 WBDD 首行 = Σ行成本）
+    doc_total: dict[str, Decimal] = defaultdict(lambda: _ZERO)
+    for ln, o in lines:
+        if ln.cost_amount is not None:
+            doc_total[o.order_no] += ln.cost_amount
+
+    pe = FProjectExpense
+    exp_rows = db.execute(
+        select(pe).where(pe.linked_sales_order_no == contract)
+        .order_by(pe.expense_date.asc().nullslast(), pe.bxd_no, pe.line_no)
+    ).scalars().all()
+
+    # 月度 × 分类汇总：备件成本按出库月，费用按报销月/费用分类（仅生效）
+    monthly: dict[str, dict] = defaultdict(lambda: defaultdict(lambda: _ZERO))
+    for ln, o in lines:
+        if ln.cost_amount is not None and o.order_date:
+            monthly[_ym(o.order_date)]["备件消耗"] += ln.cost_amount
+    for e in exp_rows:
+        if (e.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
+                and e.amount is not None and e.expense_date):
+            monthly[_ym(e.expense_date)][e.fee_category or "(未分类费用)"] += e.amount
+
+    budget = _contract_amounts(db, [contract]).get(contract)
+    so = db.execute(active_orders(
+        select(FSalesOrder).where(FSalesOrder.order_no == contract), FSalesOrder)
+    ).scalars().first()
+    return {"contract": contract, "budget": budget, "sales_order": so,
+            "lines": lines, "doc_total": doc_total, "expenses": exp_rows, "monthly": monthly}

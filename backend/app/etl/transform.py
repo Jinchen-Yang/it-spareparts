@@ -299,6 +299,72 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
     return res
 
 
+_BXD_RX = re.compile(r"BXD-\d{8}-\d+")
+
+
+def _transform_expense(df: pd.DataFrame) -> TransformResult:
+    """维保报销单（BXD 费用侧，§16.3）：单表平铺（无独立头表），行级金额。
+
+    幂等键 = 报销明细数据ID；无（工作簿版）→ BXD单号#序号 复合键退路。
+    列名漂移回退：费用分类↔报销明细.费用分类、维保销售订单↔销售订单（取非空互补）。
+    生效口径 = 流程状态 MAINT_EXPENSE_ACTIVE_STATUS（'已结束'），非生效行照常入库计 inactive。
+    """
+    res = TransformResult(file_type=mapping.EXPENSE)
+    res.rows_total = len(df)
+    full_map = {**mapping.EXPENSE_HEAD, **mapping.EXPENSE_LINE}
+
+    for idx, row in df.iterrows():
+        row_no = int(idx) + 1
+
+        def gv(*names):
+            for n in names:
+                if n in df.columns:
+                    v = row.get(n)
+                    if v is not None and not pd.isna(v):
+                        return v
+            return None
+
+        title = cleaner.clean_str(gv("数据标题"))
+        m = _BXD_RX.search(title or "")
+        bxd_no = m.group(0) if m else None
+        line_no = cleaner.parse_int(gv("报销明细.序号", "序号"))
+        raw_line = cleaner.clean_str(gv("报销明细.数据ID(不可修改)", "报销明细.数据ID"))
+        if not raw_line:
+            if not bxd_no or line_no is None:
+                res.errors.append(ErrorRec(row_no, "missing_raw_id",
+                                           "缺少报销明细数据ID，且 BXD单号/序号 不足以兜底",
+                                           _row_dict(row, full_map)))
+                continue
+            raw_line = f"{bxd_no}#{line_no}"        # 复合键退路（§16.3）
+        try:
+            amount = cleaner.parse_money(gv("报销明细.报销金额", "报销金额"))
+        except ValueError as exc:
+            res.errors.append(ErrorRec(row_no, "bad_number", str(exc), _row_dict(row, full_map)))
+            continue
+        expense_date = None
+        try:
+            expense_date = cleaner.parse_date(gv("报销日期"))
+        except ValueError as exc:
+            res.errors.append(ErrorRec(row_no, "bad_date", str(exc),
+                                       {"expense_date": str(gv("报销日期"))}))
+        res.lines.append({
+            "raw_line_id": raw_line, "bxd_no": bxd_no, "line_no": line_no,
+            "data_status": cleaner.clean_str(gv("流程状态")),
+            "expense_date": expense_date,
+            "person": cleaner.clean_str(gv("报销人员")),
+            "expense_type": cleaner.clean_str(gv("报销类别")),
+            "fee_category": cleaner.clean_str(gv("报销明细.费用分类", "费用分类")),
+            "reason": cleaner.clean_str(gv("支出事由")),
+            "linked_sales_order_no": cleaner.clean_str(gv("维保销售订单", "销售订单")),
+            "amount": amount,
+        })
+    res.rows_inactive = sum(
+        1 for r in res.lines
+        if r["data_status"] not in (None, config.MAINT_EXPENSE_ACTIVE_STATUS)
+    )
+    return res
+
+
 def _transform_inventory(df: pd.DataFrame) -> TransformResult:
     res = TransformResult(file_type=mapping.INVENTORY)
     m = mapping.INVENTORY_MAP
@@ -353,4 +419,6 @@ def transform(df: pd.DataFrame, file_type: str) -> TransformResult:
         return _transform_inventory(df)
     if file_type == mapping.MAINTENANCE:
         return _transform_maintenance(df)
+    if file_type == mapping.EXPENSE:
+        return _transform_expense(df)
     return _transform_orders(df, file_type)
