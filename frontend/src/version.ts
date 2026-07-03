@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.4.0";
+export const APP_VERSION = "1.4.1";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.4.1",
+    date: "2026-07-04",
+    items: [
+      "项目工作簿导出模板升级：正式财务件样式——首页合同抬头+盈亏状态色块（红/黄/绿）+已花构成+月度汇总合计行；备件明细按出库单分组底纹、单据级「产品成本」高亮加粗、低置信度橙色标注；全表深色表头、金额千分位、冻结首行、自动筛选、列宽适配",
+    ],
+  },
   {
     version: "1.4.0",
     date: "2026-07-03",

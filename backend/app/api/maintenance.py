@@ -7,6 +7,7 @@
 import csv
 import io
 from datetime import date
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -18,6 +19,7 @@ from app.security import (
     UserContext, apply_field_visibility, get_current_user_context, record_access_log,
     require_page,
 )
+from app import config
 from app.services import maintenance_cost
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
@@ -169,64 +171,146 @@ def board(
     return apply_field_visibility(data, ctx)
 
 
-@router.get("/export-workbook")
-def export_workbook(
-    contract: str = Query(..., max_length=64),
-    db: Session = Depends(get_db),
-    _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
-    _page: None = Depends(require_page("page_maintenance")),
-    ctx: UserContext = Depends(get_current_user_context),
-) -> StreamingResponse:
-    """§16.4 工作簿形态回填导出：与财务现用「项目预算工作簿」同构（三 sheet）。
+# ─────────── §16.4 工作簿模板样式（财务件规范：深色表头/千分位/斑马纹/冻结/筛选）───────────
+from openpyxl import Workbook                      # noqa: E402  （openpyxl 为既有依赖）
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side  # noqa: E402
+from openpyxl.utils import get_column_letter       # noqa: E402
 
-    xlsx 无法走字段级脱敏 → 显式门禁：本质是成本导出，无 data_purchase_cost 直接 403。
-    「产品成本」按财务习惯填单据级总成本于每张 WBDD 首行；行级取价明细作附加列（增强不破坏）。
-    """
-    from fastapi import HTTPException
-    from openpyxl import Workbook
-    from openpyxl.styles import Font
+_HDR_FILL = PatternFill("solid", fgColor="35506B")
+_HDR_FONT = Font(bold=True, color="FFFFFF", size=11)
+_TITLE_FONT = Font(bold=True, size=15)
+_SUB_FONT = Font(color="8C8C8C", size=10)
+_KV_FILL = PatternFill("solid", fgColor="EFEBE3")
+_ALT_FILL = PatternFill("solid", fgColor="F7F4EE")
+_DOC_FILL = PatternFill("solid", fgColor="FDF3D7")   # 产品成本（单据级回填）高亮：财务第一眼找它
+_TOTAL_FILL = PatternFill("solid", fgColor="E8E2D6")
+_THIN = Side(style="thin", color="D8D2C6")
+_BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+_MONEY = "#,##0.00"
+_CENTER = Alignment(horizontal="center", vertical="center")
+_STATUS_STYLE = {"red": ("超支/亏损", "C0524A"), "yellow": ("预警·剩余≤20%", "B8860B"),
+                 "green": ("健康", "3F7A45"), "no_budget": ("无预算", "8C8C8C")}
 
-    if apply_field_visibility({"unit_cost": 1}, ctx).get("unit_cost") is None:
-        raise HTTPException(status_code=403, detail="无成本查看权限，不能导出项目成本工作簿")
-    record_access_log(ctx, "export_workbook", "maintenance", {"contract": contract})
-    data = maintenance_cost.contract_workbook_data(db, contract)
 
+def _hdr_row(ws, row: int, ncols: int) -> None:
+    for c in range(1, ncols + 1):
+        cell = ws.cell(row=row, column=c)
+        cell.fill, cell.font = _HDR_FILL, _HDR_FONT
+        cell.border, cell.alignment = _BORDER, _CENTER
+
+
+def _col_widths(ws, widths: list[float]) -> None:
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+
+def _money_cell(cell, value):
+    cell.value = value
+    cell.number_format = _MONEY
+
+
+def _build_workbook(contract: str, data: dict) -> Workbook:
+    """三 sheet 财务模板：项目预算（抬头+盈亏+月度汇总）/ 备件明细（按单分组斑马纹）/ 报销明细。"""
     wb = Workbook()
-    bold = Font(bold=True)
-
-    # ---- Sheet1 项目预算 ----
-    ws = wb.active
-    ws.title = "项目预算"
     budget = data["budget"]
     so = data["sales_order"]
-    heads = [("合同（销售订单）", contract),
-             ("合同金额（含税参考）", float(budget) if budget is not None else "（销售表未找到）"),
-             ("税率", float(so.tax_rate) if so is not None and so.tax_rate is not None else ""),
-             ("导出说明", "由系统按取价瀑布自动核算；金额为含税/不含税原值混合参考口径")]
-    for k, v in heads:
-        ws.append([k, v])
-        ws.cell(row=ws.max_row, column=1).font = bold
-    ws.append([])
-    cats = sorted({c for m in data["monthly"].values() for c in m})
-    ws.append(["月份", *cats, "合计"])
-    for c in range(1, len(cats) + 3):
-        ws.cell(row=ws.max_row, column=c).font = bold
-    for ym in sorted(data["monthly"]):
-        m = data["monthly"][ym]
-        vals = [float(m.get(c, 0)) for c in cats]
-        ws.append([ym, *vals, round(sum(vals), 2)])
+    spent_parts = float(sum(data["doc_total"].values(), Decimal(0)))
+    spent_exp = float(sum((e.amount for e in data["expenses"]
+                           if e.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
+                           and e.amount is not None), Decimal(0)))
+    spent = round(spent_parts + spent_exp, 2)
+    if budget:
+        b = float(budget)
+        remaining = round(b - spent, 2)
+        status = ("red" if spent >= b
+                  else "yellow" if remaining <= b * float(config.MAINT_BUDGET_WARN_PCT)
+                  else "green")
+    else:
+        remaining, status = None, "no_budget"
+    st_label, st_color = _STATUS_STYLE[status]
 
-    # ---- Sheet2 备件明细-氚云（原列 + 回填/附加列）----
+    # ── Sheet1 项目预算 ──
+    ws = wb.active
+    ws.title = "项目预算"
+    ws.merge_cells("A1:F1")
+    ws["A1"] = f"维保项目成本工作簿 · {contract}"
+    ws["A1"].font = _TITLE_FONT
+    ws.row_dimensions[1].height = 26
+    ws.merge_cells("A2:F2")
+    ws["A2"] = "系统按取价瀑布自动核算 · 金额为含税/不含税原值混合参考口径 · 导出自 IT 备件智能管理系统"
+    ws["A2"].font = _SUB_FONT
+
+    kv = [
+        ("合同（销售订单）", contract, None),
+        ("合同金额（含税参考）", float(budget) if budget is not None else "（销售表未找到）", _MONEY if budget is not None else None),
+        ("税率", float(so.tax_rate) if so is not None and so.tax_rate is not None else "—", None),
+        ("已花合计（备件+报销）", spent, _MONEY),
+        ("　├ 备件成本", spent_parts, _MONEY),
+        ("　└ 报销费用（已结束）", spent_exp, _MONEY),
+        ("剩余预算", remaining if remaining is not None else "—", _MONEY if remaining is not None else None),
+        ("状态", st_label, None),
+    ]
+    r = 4
+    for label, value, fmt in kv:
+        lc, vc = ws.cell(row=r, column=1, value=label), ws.cell(row=r, column=2, value=value)
+        lc.fill, lc.font, lc.border = _KV_FILL, Font(bold=True), _BORDER
+        vc.border = _BORDER
+        if fmt:
+            vc.number_format = fmt
+        if label == "剩余预算" and remaining is not None:
+            vc.font = Font(bold=True, color=st_color)
+        if label == "状态":
+            vc.fill = PatternFill("solid", fgColor=st_color)
+            vc.font = Font(bold=True, color="FFFFFF")
+            vc.alignment = _CENTER
+        r += 1
+
+    r += 1
+    cats = sorted({c for m in data["monthly"].values() for c in m if c != "备件消耗"})
+    cols = ["月份", "备件消耗", *cats, "当月合计"]
+    for i, h in enumerate(cols, 1):
+        ws.cell(row=r, column=i, value=h)
+    _hdr_row(ws, r, len(cols))
+    band = False
+    totals = [0.0] * (len(cols) - 2)
+    for ym in sorted(data["monthly"]):
+        r += 1
+        band = not band
+        m = data["monthly"][ym]
+        vals = [float(m.get("备件消耗", 0))] + [float(m.get(c, 0)) for c in cats]
+        for i, v in enumerate(vals):
+            totals[i] += v
+        row_vals = [ym, *vals, round(sum(vals), 2)]
+        for i, v in enumerate(row_vals, 1):
+            cell = ws.cell(row=r, column=i, value=v)
+            cell.border = _BORDER
+            if band:
+                cell.fill = _ALT_FILL
+            if i > 1:
+                cell.number_format = _MONEY
+    r += 1
+    total_row = ["合计", *[round(t, 2) for t in totals], round(sum(totals), 2)]
+    for i, v in enumerate(total_row, 1):
+        cell = ws.cell(row=r, column=i, value=v)
+        cell.font, cell.fill, cell.border = Font(bold=True), _TOTAL_FILL, _BORDER
+        if i > 1:
+            cell.number_format = _MONEY
+    _col_widths(ws, [24, 16] + [14] * (len(cats) + 1))
+
+    # ── Sheet2 备件明细-氚云（原列 + 回填/附加列；按 WBDD 单分组斑马纹）──
     ws2 = wb.create_sheet("备件明细-氚云")
-    ws2.append(["数据标题(WBDD单号)", "制单日期", "销售订单", "项目名", "需求类型", "出库仓库",
-                "销售人员", "业务类型", "序号", "需供货产品", "产品描述", "需求数量",
-                "产品成本", "单价", "合计", "发货SN",
-                "行成本单价", "行成本金额", "成本来源", "置信度", "取价月", "距采购天数", "含税口径"])
-    for c in range(1, 24):
-        ws2.cell(row=1, column=c).font = bold
-    prev_order = None
+    hdr2 = ["数据标题(WBDD单号)", "制单日期", "销售订单", "项目名", "需求类型", "出库仓库",
+            "销售人员", "业务类型", "序号", "需供货产品", "产品描述", "需求数量",
+            "产品成本", "单价", "合计", "发货SN",
+            "行成本单价", "行成本金额", "成本来源", "置信度", "取价月", "距采购天数", "含税口径"]
+    ws2.append(hdr2)
+    _hdr_row(ws2, 1, len(hdr2))
+    ws2.freeze_panes = "A2"
+    prev_order, band = None, False
     for ln, o in data["lines"]:
         first = o.order_no != prev_order
+        if first:
+            band = not band
         prev_order = o.order_no
         doc_cost = data["doc_total"].get(o.order_no)
         ws2.append([
@@ -244,18 +328,76 @@ def export_workbook(
             _CONF_LABEL.get(ln.confidence, ln.confidence or ""),
             ln.price_month, ln.price_distance_days, ln.cost_tax_basis,
         ])
+        rr = ws2.max_row
+        for c in range(1, len(hdr2) + 1):
+            cell = ws2.cell(row=rr, column=c)
+            cell.border = _BORDER
+            if band:
+                cell.fill = _ALT_FILL
+        for c in (13, 14, 15, 17, 18):
+            ws2.cell(row=rr, column=c).number_format = _MONEY
+        if ws2.cell(row=rr, column=13).value is not None:      # 产品成本（单据级）高亮
+            dc = ws2.cell(row=rr, column=13)
+            dc.fill, dc.font = _DOC_FILL, Font(bold=True)
+        if ln.confidence == "low":
+            ws2.cell(row=rr, column=20).font = Font(color="B8860B", bold=True)
+    ws2.auto_filter.ref = f"A1:{get_column_letter(len(hdr2))}{ws2.max_row}"
+    _col_widths(ws2, [20, 11, 16, 26, 10, 12, 9, 10, 6, 20, 36, 9,
+                      13, 9, 9, 18, 11, 12, 16, 8, 9, 11, 9])
 
-    # ---- Sheet3 报销明细 ----
+    # ── Sheet3 报销明细 ──
     ws3 = wb.create_sheet("报销明细")
-    ws3.append(["报销日期", "BXD单号", "序号", "流程状态", "报销人员", "报销类别",
-                "费用分类", "支出事由", "报销金额"])
-    for c in range(1, 10):
-        ws3.cell(row=1, column=c).font = bold
-    for e in data["expenses"]:
+    hdr3 = ["报销日期", "BXD单号", "序号", "流程状态", "报销人员", "报销类别",
+            "费用分类", "支出事由", "报销金额"]
+    ws3.append(hdr3)
+    _hdr_row(ws3, 1, len(hdr3))
+    ws3.freeze_panes = "A2"
+    for i, e in enumerate(data["expenses"]):
         ws3.append([e.expense_date.isoformat() if e.expense_date else None,
                     e.bxd_no, e.line_no, e.data_status, e.person, e.expense_type,
                     e.fee_category, e.reason,
                     float(e.amount) if e.amount is not None else None])
+        rr = ws3.max_row
+        inactive = e.data_status != config.MAINT_EXPENSE_ACTIVE_STATUS
+        for c in range(1, len(hdr3) + 1):
+            cell = ws3.cell(row=rr, column=c)
+            cell.border = _BORDER
+            if i % 2:
+                cell.fill = _ALT_FILL
+            if inactive:                                       # 未生效：置灰（不计入已花）
+                cell.font = Font(color="A0A0A0")
+        ws3.cell(row=rr, column=9).number_format = _MONEY
+    if data["expenses"]:
+        ws3.auto_filter.ref = f"A1:I{ws3.max_row}"
+        rr = ws3.max_row + 1
+        ws3.cell(row=rr, column=8, value="合计（仅已结束）").font = Font(bold=True)
+        tc = ws3.cell(row=rr, column=9, value=spent_exp)
+        tc.font, tc.fill = Font(bold=True), _TOTAL_FILL
+        tc.number_format = _MONEY
+    _col_widths(ws3, [12, 18, 6, 10, 10, 12, 14, 42, 13])
+    return wb
+
+
+@router.get("/export-workbook")
+def export_workbook(
+    contract: str = Query(..., max_length=64),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> StreamingResponse:
+    """§16.4 工作簿形态回填导出：与财务现用「项目预算工作簿」同构（三 sheet）。
+
+    xlsx 无法走字段级脱敏 → 显式门禁：本质是成本导出，无 data_purchase_cost 直接 403。
+    「产品成本」按财务习惯填单据级总成本于每张 WBDD 首行；行级取价明细作附加列（增强不破坏）。
+    """
+    from fastapi import HTTPException
+
+    if apply_field_visibility({"unit_cost": 1}, ctx).get("unit_cost") is None:
+        raise HTTPException(status_code=403, detail="无成本查看权限，不能导出项目成本工作簿")
+    record_access_log(ctx, "export_workbook", "maintenance", {"contract": contract})
+    data = maintenance_cost.contract_workbook_data(db, contract)
+    wb = _build_workbook(contract, data)
 
     buf = io.BytesIO()
     wb.save(buf)
