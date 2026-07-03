@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.3.3";
+export const APP_VERSION = "1.3.4";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.3.4",
+    date: "2026-07-03",
+    items: [
+      "规格词搜索按品牌轮播展示：几十个同规格型号命中时，每个品牌的最佳结果都进前排（此前同分排序可能让某个品牌整体沉到 20 名以外看不见）；想只看某品牌，在查询里加品牌词即可（如「Seagate 8TB 7.2K」）",
+    ],
+  },
   {
     version: "1.3.3",
     date: "2026-07-03",

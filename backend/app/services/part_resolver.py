@@ -268,6 +268,29 @@ def resolve(db: Session, query: str, limit: int = 10,
             "score": score, "match_reason": reason,
         })
     items.sort(key=lambda x: (-x["score"], len(x["pn_std"]), x["pn_std"]))
+
+    # 规格词查询的品牌轮播（甲方：搜规格看不到希捷）：几十个同规格行全词命中时，展示位只有
+    # limit 个，同分微差会让某品牌整体沉底。对"全词命中"段按品牌轮流取行（段内原序保留），
+    # 每个品牌的最佳行都进前排；想只看某品牌，查询里加品牌词即可。PN 查询（单词/无全中段）不受影响。
+    n_terms = ctx.get("term_count", 0)
+    if n_terms >= 2 and ctx.get("doc_hits"):
+        full = [it for it in items if ctx["doc_hits"].get(it["pn_std"], 0) >= n_terms]
+        if len(full) > 2:
+            rest = [it for it in items if ctx["doc_hits"].get(it["pn_std"], 0) < n_terms]
+            lanes: dict[str, list] = {}
+            order: list[str] = []
+            for it in full:
+                b = (it.get("brand") or "").strip()
+                if b not in lanes:
+                    lanes[b] = []
+                    order.append(b)
+                lanes[b].append(it)
+            mixed: list = []
+            while len(mixed) < len(full):
+                for b in order:
+                    if lanes[b]:
+                        mixed.append(lanes[b].pop(0))
+            items = mixed + rest
     items = items[:limit]
 
     if not items and log_miss:
