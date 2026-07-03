@@ -174,3 +174,24 @@ def test_partial_coverage_one_wrong_term(db, desc_parts):
     hit = next((it for it in r["items"] if it["pn_std"] == _HDD_A), None)
     assert hit is not None
     assert "描述命中5/6词" in hit["match_reason"]
+
+
+def test_brand_rotation_in_full_hit_band(db):
+    """同规格多品牌全词命中时按品牌轮播：每个品牌的最佳行都进前排（甲方：搜规格看不到希捷）。"""
+    pns = [("TST-ROT-D1", "Dell"), ("TST-ROT-D2", "Dell"), ("TST-ROT-D3", "Dell"),
+           ("TST-ROT-S1", "希捷（Seagate）")]
+    created = []
+    for pn, brand in pns:
+        if db.query(DimPart).filter_by(pn_std=pn).first() is None:
+            db.add(DimPart(pn_std=pn, description=_HDD_DESC, brand=brand))
+            created.append(pn)
+    db.commit()
+    try:
+        r = part_resolver.resolve(db, "8TB 6Gb/s 7.2K SATA", limit=10, log_miss=False)
+        got = [it["pn_std"] for it in r["items"] if it["pn_std"].startswith("TST-ROT-")]
+        # 轮播：希捷的行必须出现在前两个 TST-ROT 结果里，不被 3 个 Dell 行压到后面
+        assert "TST-ROT-S1" in got[:2], got
+    finally:
+        for pn in created:
+            db.query(DimPart).filter_by(pn_std=pn).delete()
+        db.commit()
