@@ -1,8 +1,9 @@
 import { useState } from "react";
 import {
   Input, Card, Descriptions, Tag, Row, Col, Statistic, Empty, message, Space, Button,
-  Select, InputNumber, Alert,
+  Select, InputNumber, Alert, Table,
 } from "antd";
+import { RightOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
@@ -28,6 +29,9 @@ export default function PartSearchPage() {
   const [ov, setOv] = useState<Overview | null>(null);
   const [loadingOv, setLoadingOv] = useState(false);
   const [subPn, setSubPn] = useState("");
+  // 替代料卡片折叠（记忆本机）
+  const [subsOpen, setSubsOpen] = useState(() => localStorage.getItem("ps_subs_open") !== "0");
+  const toggleSubs = () => setSubsOpen((o) => { localStorage.setItem("ps_subs_open", o ? "0" : "1"); return !o; });
   const [lastQ, setLastQ] = useState("");
   const [lastPn, setLastPn] = useState("");   // 用于全景加载失败时的"重试"
   const [error, setError] = useState<string | null>(null);
@@ -275,29 +279,61 @@ export default function PartSearchPage() {
               locale={{ emptyText: "无库存" }} />
           </Card>
 
-          <Card title="替代料" size="small" style={{ marginBottom: 16 }}>
-            <Space wrap style={{ marginBottom: ov.substitutes.length ? 12 : 0 }}>
-              <Input
-                placeholder="输入可替代的型号 (PN)" style={{ width: 260 }}
-                value={subPn} onChange={(e) => setSubPn(e.target.value)} onPressEnter={addSubstitute}
-              />
-              <Button onClick={addSubstitute} disabled={!subPn.trim()}>添加替代料</Button>
-            </Space>
-            <div>
-              {ov.substitutes.length === 0 ? (
-                <span style={{ color: "var(--mb-text-3)" }}>暂无替代料，可在上方添加</span>
-              ) : (
-                ov.substitutes.map((s) => (
-                  <Tag key={s.pn_std} color={s.via ? "cyan" : "geekblue"} style={{ marginBottom: 4 }}>
-                    {s.pn_std}
-                    {s.via ? `（互替·经 ${s.via}）`
-                      : s.relation && s.relation !== "互替" ? `（${s.relation}）` : ""}
-                    {` · 库存 ${s.stock_qty ?? 0}`}
-                    {s.description ? ` · ${s.description}` : ""}
-                  </Tag>
-                ))
+          <Card size="small" style={{ marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
+                          gap: 12, flexWrap: "wrap", marginBottom: subsOpen ? 12 : 0 }}>
+              <span onClick={toggleSubs}
+                    style={{ fontWeight: 500, cursor: "pointer", userSelect: "none",
+                             display: "flex", alignItems: "center", gap: 8 }}>
+                <RightOutlined style={{ fontSize: 12, color: "var(--mb-text-3)", transition: "transform .15s",
+                                        transform: subsOpen ? "rotate(90deg)" : "none" }} />
+                替代料 · 通用号
+                {!subsOpen && (
+                  <span style={{ fontSize: 12.5, fontWeight: 400, color: "var(--mb-text-3)" }}>
+                    {ov.substitutes.length
+                      ? `${ov.substitutes.length} 个通用号 · 库存合计 ${ov.substitutes.reduce((t, s) => t + (s.stock_qty ?? 0), 0)}`
+                      : "暂无"}
+                  </span>
+                )}
+              </span>
+              {subsOpen && (
+                <Space wrap>
+                  <Input
+                    placeholder="输入可替代的型号 (PN)" style={{ width: 240 }} size="small"
+                    value={subPn} onChange={(e) => setSubPn(e.target.value)} onPressEnter={addSubstitute}
+                  />
+                  <Button size="small" onClick={addSubstitute} disabled={!subPn.trim()}>添加替代料</Button>
+                </Space>
               )}
             </div>
+            {subsOpen && (
+              ov.substitutes.length === 0 ? (
+                <span style={{ color: "var(--mb-text-3)" }}>暂无替代料，可在右上方添加</span>
+              ) : (
+                <Table
+                  size="small" rowKey={(s) => s.pn_std}
+                  dataSource={ov.substitutes} pagination={false}
+                  columns={[
+                    { title: "通用号 (PN)", dataIndex: "pn_std", width: 200,
+                      render: (v: string) => (
+                        <a onClick={() => openOverview(v)} style={{ fontFamily: "monospace", fontSize: 12.5 }}>{v}</a>
+                      ) },
+                    { title: "关系", key: "rel", width: 170,
+                      render: (_, s) => s.via
+                        ? <Tag color="cyan">互替 · 经 {s.via}</Tag>
+                        : <Tag color={s.relation === "互替" ? "geekblue" : "orange"}>{s.relation || "互替"}</Tag> },
+                    { title: "库存", dataIndex: "stock_qty", width: 80, align: "right" as const,
+                      render: (v: number | null) => (
+                        <span style={{ fontWeight: 500, color: (v ?? 0) > 0 ? undefined : "var(--mb-text-3)" }}>
+                          {v ?? 0}
+                        </span>
+                      ) },
+                    { title: "描述", dataIndex: "description", ellipsis: true,
+                      render: (v: string | null) => v || <span style={{ color: "var(--mb-text-3)" }}>—</span> },
+                  ]}
+                />
+              )
+            )}
           </Card>
 
           <Row gutter={16}>
