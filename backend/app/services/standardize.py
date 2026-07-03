@@ -2213,7 +2213,7 @@ def standardize(pn: str, description: str | None, brand: str = "") -> dict:
         specs = extract_gpu(desc, brand, pn)
         out["object_type"] = "GPU"
         out["structured_specs"] = {k: specs[k] for k in FIELD_SCHEMA["GPU"] if k in specs}
-        out["canonical_description"] = render_gpu(specs)
+        out["canonical_description"] = _with_brand(render_gpu(specs), brand, desc)
         out["validation_errors"] = validate_gpu(desc, specs)
         out["review_status"] = AUTO_OK if (out["canonical_description"] and not out["validation_errors"]) else REVIEW
         return out
@@ -2247,11 +2247,25 @@ def standardize(pn: str, description: str | None, brand: str = "") -> dict:
     fn = normalize_templates.RENDERERS.get(l2_code) or normalize_templates.RENDERERS_L1.get(l1_code)
     if fn:
         try:
-            out["canonical_description"] = fn(desc)
+            out["canonical_description"] = _with_brand(fn(desc), brand, desc)
         except Exception:  # noqa: BLE001
             out["canonical_description"] = None
     out["review_status"] = AUTO_OK if out["canonical_description"] else REVIEW
     return out
+
+
+def _with_brand(canon, brand_raw, desc):
+    """品牌进标准描述（甲方 2026-07-03：用户在描述里看不到 Seagate 等品牌）。
+
+    已识别的规范品牌且描述文本尚未含该品牌词 → 前缀（'Seagate 8TB ...'）；
+    识别不了（占位「其他」/未知写法）不猜、不前缀；模板本身已含品牌（主板/杂项等）不重复。
+    """
+    if not canon:
+        return canon
+    bn = T.recognize_brand(brand_raw) or T.recognize_brand(desc)
+    if bn and bn.lower() not in canon.lower():
+        return f"{bn} {canon}"
+    return canon
 
 
 def _run(out, obj_type, specs, render, classify_l2, validate, desc):
@@ -2259,7 +2273,7 @@ def _run(out, obj_type, specs, render, classify_l2, validate, desc):
     # 只保留 schema 声明的字段（按声明顺序）——结构强制"字段不乱"，剔除内部/越界字段
     allowed = FIELD_SCHEMA.get(obj_type, [])
     out["structured_specs"] = {k: specs[k] for k in allowed if k in specs}
-    canon = render(specs)
+    canon = _with_brand(render(specs), out.get("brand_raw"), desc)
     out["canonical_description"] = canon
     # 分类由抽到的字段决定（缺关键字段 → None，转人工）
     l2 = classify_l2(specs)

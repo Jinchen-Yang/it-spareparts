@@ -140,3 +140,19 @@ def test_subset_spec_tokens_query(db, desc_parts):
     r = part_resolver.resolve(db, "8TB 7.2K SATA", limit=10)
     pns = [it["pn_std"] for it in r["items"]]
     assert _HDD_A in pns and _HDD_B in pns
+
+
+def test_single_spec_token_hits_description(db, desc_parts):
+    """单个规格词（'8TB'）也要召回描述命中——此前只和全库编号做相似度，描述里的 8TB 盘一个不出。"""
+    r = part_resolver.resolve(db, "8TB", limit=10)
+    pns = [it["pn_std"] for it in r["items"]]
+    assert _HDD_A in pns and _HDD_B in pns
+    hit = next(it for it in r["items"] if it["pn_std"] == _HDD_A)
+    assert "描述命中" in hit["match_reason"]
+
+
+def test_single_token_pn_exact_still_wins(db, desc_parts):
+    """敲完整 PN 时精确匹配仍稳排第一（描述命中 0.25 加成不得反超 PN 证据）。"""
+    r = part_resolver.resolve(db, "4089rt", limit=5)
+    assert r["items"][0]["pn_std"] == _PN
+    assert "PN精确匹配" in r["items"][0]["match_reason"]
