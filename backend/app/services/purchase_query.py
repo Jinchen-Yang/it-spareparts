@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app import config, security
 from app.models import DimPart, DimSupplier, FPurchaseLine, FPurchaseOrder, PartAlias
-from app.services.query_filters import keyword_terms
+from app.services.query_filters import keyword_term_groups
 
 _ACTIVE = config.ACTIVE_STATUS
 MAX_PAGE_SIZE = 200
@@ -26,21 +26,23 @@ def apply_keyword(stmt, q: str | None):
 
     分词 AND（词序无关，每词命中任一字段即可）；并含 DimPart.description——批量规范化只改主数据
     描述、单据行保留原文，用户拿标准描述查采购记录必须经主数据召回，否则永远查不到。
+    每词展开规格变体（6Gbps↔6Gb/s、3.5寸↔3.5-inch、7200rpm↔7.2K），任一变体命中即算该词命中。
     """
-    terms = keyword_terms(q)
-    if not terms:
+    groups = keyword_term_groups(q)
+    if not groups:
         return stmt
-    for t in terms:
-        like = f"%{t}%"
+    for g in groups:
+        likes = [f"%{v}%" for v in g]
         alias_hit = (
             select(PartAlias.part_id)
-            .where(PartAlias.pn_raw.ilike(like), PartAlias.part_id.is_not(None))
+            .where(or_(*[PartAlias.pn_raw.ilike(lk) for lk in likes]),
+                   PartAlias.part_id.is_not(None))
         )
         stmt = stmt.where(or_(
-            DimPart.pn_std.ilike(like),
-            DimPart.description.ilike(like),
-            FPurchaseLine.description.ilike(like),
-            FPurchaseLine.brand.ilike(like),
+            *[DimPart.pn_std.ilike(lk) for lk in likes],
+            *[DimPart.description.ilike(lk) for lk in likes],
+            *[FPurchaseLine.description.ilike(lk) for lk in likes],
+            *[FPurchaseLine.brand.ilike(lk) for lk in likes],
             FPurchaseLine.part_id.in_(alias_hit),
         ))
     return stmt

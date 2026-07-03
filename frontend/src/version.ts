@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.3.1";
+export const APP_VERSION = "1.3.2";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.3.2",
+    date: "2026-07-03",
+    items: [
+      "搜索模糊度提升：规格词自动识别等价写法——「6Gbps」与「6Gb/s」、「3.5寸/3.5inch」与「3.5-inch」、「7200rpm」与「7.2K」、「8T」与「8TB」互通，不再因写法差一个字符搜不到",
+      "多关键词（≥4 个）允许错 1 个词：如搜 6 个词命中 5 个的型号也会列出（标注「描述命中5/6词」、排在全命中之后），不再一刀切搜不出",
+      "以上同时作用于型号查询与采购记录/采购分析的关键词搜索",
+    ],
+  },
   {
     version: "1.3.1",
     date: "2026-07-03",

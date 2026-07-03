@@ -14,7 +14,8 @@ part_alias 在此从"只写不读"变为活数据：人工修订别名即刻影�
 import re
 
 from sqlalchemy import Text as SAText
-from sqlalchemy import bindparam, select, text
+from sqlalchemy import bindparam, or_, select, text
+from sqlalchemy import case as sa_case
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Session
 
@@ -22,7 +23,7 @@ from app import config
 from app.etl.cleaner import standardize_pn
 from app.models.dimensions import DimPart
 from app.models.system import SysAuditLog
-from app.services.query_filters import keyword_terms
+from app.services.query_filters import keyword_term_groups
 
 _CJK = re.compile(r"[一-鿿]{2,}")
 _ALNUM = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-\._/]*")
@@ -56,19 +57,28 @@ LIMIT :cand_limit
     bindparam("doc_terms", type_=ARRAY(SAText())),
 )
 
-# 描述全词命中召回：多词查询（粘整段标准描述 / '8TB 7.2K SATA' 组合）→ 所有词都出现在
-# search_doc 的型号。PN 车道对这类查询失效——token 化剥掉 ./-（6Gb/s→6GBS 匹配不上原文），
-# 主 token 还会选中 '35INCH' 这类规格词去和全库编号做 trigram，60 个候选名额全被噪声占掉。
-# 本车道用保形词 + ILIKE ALL，词序无关；单词查询不走（PN 模糊路径已覆盖）。
-_DOC_ALL_SQL = text("""
-SELECT p.pn_std, p.pn_compact, p.search_doc, p.description, p.brand,
-       p.category_major, p.needs_review, p.is_excluded, 0 AS sim
-FROM dim_part p
-WHERE p.status <> 'merged'
-  AND p.search_doc ILIKE ALL (CAST(:pats AS text[]))
-ORDER BY p.pn_std
-LIMIT :lim
-""").bindparams(bindparam("pats", type_=ARRAY(SAText())))
+# 描述命中召回：查询词（含规格变体归一：6Gbps↔6Gb/s、3.5寸↔3.5-inch、7200rpm↔7.2K）
+# 在 search_doc 上按"命中词数"召回。PN 车道对这类查询失效——token 化剥掉 ./-，主 token 还会
+# 选中 '35INCH' 这类规格词去和全库编号做 trigram。≥4 词允许错 1 个（覆盖率降级，按比例给分），
+# 2~3 词与单词要求全中；命中数降序保证全中行绝不被部分命中行挤出候选池。
+_DOC_CAND_LIMIT = 120
+
+
+def _doc_recall(db, groups):
+    """按变体词组召回：返回 {pn_std: 命中词数}，并给出候选行。"""
+    n = len(groups)
+    conds = [or_(*[DimPart.search_doc.ilike(f"%{v}%") for v in g]) for g in groups]
+    hits = sum(sa_case((c, 1), else_=0) for c in conds)
+    min_hits = n if n <= 3 else n - 1
+    stmt = (
+        select(DimPart.pn_std, DimPart.pn_compact, DimPart.search_doc, DimPart.description,
+               DimPart.brand, DimPart.category_major, DimPart.needs_review, DimPart.is_excluded,
+               hits.label("hits"))
+        .where(DimPart.status != "merged", hits >= min_hits)
+        .order_by(hits.desc(), DimPart.pn_std)
+        .limit(_DOC_CAND_LIMIT)
+    )
+    return db.execute(stmt).mappings().all()
 
 # 别名召回：对"原值写法"模糊匹配，折叠到 pn_std。
 # 排除恒等别名（compact 与型号自身相同）——那只是导入痕迹，不是额外证据
@@ -130,15 +140,21 @@ def _score(row: dict, ctx: dict, alias_hit: tuple[float, str] | None) -> tuple[f
         sim = max(sim, float(alias_hit[0] or 0))
     reasons: list[str] = []
     score = 0.55 * sim
-    # 查询的全部词（保形）都出现在检索文档 → 强证据（整段描述/多关键词组合检索的主通道）；
+    # 描述命中（含规格变体归一）：全中=强证据；≥4 词错 1 个按比例给分排在全中之后；
     # 单词命中给较低加成，避免"描述提及"盖过真 PN 匹配（PN 包含≈0.55*sim+0.20 > 0.40）
-    if row.get("pn_std") in ctx.get("full_hits", ()):
-        if ctx.get("multi_terms"):
-            score += 0.5
-            reasons.append("描述全词命中")
+    k = ctx.get("doc_hits", {}).get(row.get("pn_std"), 0)
+    n = ctx.get("term_count", 0)
+    if k and n:
+        if k >= n:
+            if n >= 2:
+                score += 0.5
+                reasons.append("描述全词命中")
+            else:
+                score += 0.25
+                reasons.append("描述命中")
         else:
-            score += 0.25
-            reasons.append("描述命中")
+            score += 0.5 * k / n
+            reasons.append(f"描述命中{k}/{n}词")
     if sim >= 0.3:
         reasons.append(f"PN相似{sim:.2f}")
     pc, main = row.get("pn_compact") or "", ctx["main"]
@@ -203,17 +219,20 @@ def resolve(db: Session, query: str, limit: int = 10,
     }).mappings().all()
     cands: dict[str, dict] = {r["pn_std"]: dict(r) for r in rows}
 
-    # 描述命中车道：不占 PN 车道的 60 候选名额，命中行直接入池并记入 full_hits 加分。
+    # 描述命中车道：不占 PN 车道的 60 候选名额，命中行直接入池并按命中词数加分。
     # 单词也跑（"8TB" 这类规格词此前只会和全库编号做相似度，描述里的 8TB 盘一个不出），
     # 但加分低于多词全命中（0.25 vs 0.5，见 _score）——敲完整 PN 时 PN 证据仍稳赢。
-    ctx["full_hits"] = set()
-    raw_terms = keyword_terms(query)
-    ctx["multi_terms"] = len(raw_terms) >= 2
-    if raw_terms:
-        pats = [f"%{t}%" for t in raw_terms]
-        for r in db.execute(_DOC_ALL_SQL, {"pats": pats, "lim": _CAND_LIMIT}).mappings():
-            ctx["full_hits"].add(r["pn_std"])
-            cands.setdefault(r["pn_std"], dict(r))
+    groups = keyword_term_groups(query)
+    ctx["doc_hits"] = {}
+    ctx["term_count"] = len(groups)
+    if groups:
+        for r in _doc_recall(db, groups):
+            ctx["doc_hits"][r["pn_std"]] = int(r["hits"])
+            if r["pn_std"] not in cands:
+                d = dict(r)
+                d.pop("hits", None)
+                d["sim"] = 0
+                cands[r["pn_std"]] = d
 
     # 别名召回 → 折叠到 pn_std；别名独有的型号补取 dim_part 行
     alias_hits: dict[str, tuple[float, str]] = {}

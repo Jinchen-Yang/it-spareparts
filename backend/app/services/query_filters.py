@@ -25,7 +25,66 @@ def keyword_terms(q: str | None, max_terms: int = 12) -> list[str]:
     for t in _TERM_SPLIT.split(q.strip()):
         if len(t) < 2:
             continue
-        out.append(t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_"))
+        out.append(_esc(t))
+        if len(out) >= max_terms:
+            break
+    return out
+
+
+def _esc(t: str) -> str:
+    return t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+# ── 规格词变体归一（甲方 2026-07-03：模糊度太低——6Gbps 搜不到 6Gb/s、3.5寸 搜不到 3.5-inch）──
+# 与标准化引擎的写法对齐：容量 8T↔8TB / 速率 6Gbps↔6Gb/s / 转速 7200rpm↔7.2K / 尺寸 寸↔inch。
+# 确定性规则，不上向量：失败案例全是词形差异，规则可 100% 覆盖且结果可解释（match_reason）。
+_CAP_RX = re.compile(r"^(\d+(?:\.\d+)?)(TB?|GB?)$", re.I)
+_SPEED_RX = re.compile(r"^(\d+(?:\.\d+)?)(?:GBPS|GB/S)$", re.I)
+_K_RX = re.compile(r"^(\d+(?:\.\d+)?)K(?:RPM)?$", re.I)
+_RPM_RX = re.compile(r"^(\d{4,5})(?:RPM|转)$", re.I)
+_INCH_RX = re.compile(r"^(\d(?:\.\d)?)(?:-?INCH|-?IN|寸|英寸)$", re.I)
+
+
+def _variants(t: str) -> list[str]:
+    m = _CAP_RX.match(t)
+    if m:
+        n, u = m.group(1), m.group(2).upper()[0]          # 8TB/8T → 两种写法都收
+        return [f"{n}{u}B", f"{n}{u}"]
+    m = _SPEED_RX.match(t)
+    if m:
+        return [f"{m.group(1)}Gb/s", f"{m.group(1)}Gbps"]
+    m = _K_RX.match(t)
+    if m:
+        n = m.group(1)
+        out = [f"{n}K"]
+        try:
+            out.append(str(int(float(n) * 1000)))          # 7.2K → 7200
+        except ValueError:
+            pass
+        return out
+    m = _RPM_RX.match(t)
+    if m:
+        n = m.group(1)
+        out = [n]
+        if n.endswith("00"):
+            out.append(f"{float(n) / 1000:g}K")            # 7200rpm → 7.2K
+        return out
+    m = _INCH_RX.match(t)
+    if m:
+        n = m.group(1)
+        return [f"{n}-inch", f"{n}inch", f"{n}寸", f"{n}英寸"]
+    return [t]
+
+
+def keyword_term_groups(q: str | None, max_terms: int = 12) -> list[list[str]]:
+    """查询串 → 变体词组表：每个词展开为等价写法（已转义），组内任一命中即算该词命中。"""
+    if not (q and q.strip()):
+        return []
+    out: list[list[str]] = []
+    for t in _TERM_SPLIT.split(q.strip()):
+        if len(t) < 2:
+            continue
+        out.append([_esc(v) for v in dict.fromkeys(_variants(t))])
         if len(out) >= max_terms:
             break
     return out
