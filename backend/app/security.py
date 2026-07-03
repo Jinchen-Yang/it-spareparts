@@ -92,6 +92,17 @@ def require_page(page_key: str):
     return _dep
 
 
+def page_allowed(ctx: UserContext, page_key: str) -> bool:
+    """页面权限的纯函数版（agent 工具层等非 FastAPI 依赖处用；与 require_page 同一逻辑）。"""
+    if not config.ENABLE_RBAC or ctx.role == "admin":
+        return True
+    perms = ctx.permissions
+    if perms is None:
+        from app import permissions as _perm
+        perms = _perm.effective(ctx.role, None)
+    return bool(perms.get(page_key, False))
+
+
 def apply_data_scope(query, user_ctx: UserContext):
     """行级数据范围钩子。保持 pass-through。
 
