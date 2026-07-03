@@ -191,8 +191,9 @@ def _safe_money(x):
         return None
 
 
-# 项目名规范化：剥「预交付-」前缀（聚合键；原值另存 project_raw 供追溯）
-_PROJECT_PREFIX = re.compile(r"^预交付[-—－]?")
+# 项目名规范化：剥「预交付-」前缀（聚合键；原值另存 project_raw 供追溯）。
+# 横线必需（半/全角/长横容差）：只剥「预交付-X」，不动恰好以「预交付」开头的正常项目名。
+_PROJECT_PREFIX = re.compile(r"^预交付[-—－]")
 # 预建单容忍窗：制单日期晚于导入日超过此天数 → 记 future_date 异常（不拦截，实测存在预建单）
 _FUTURE_TOLERANCE_DAYS = 30
 
@@ -216,6 +217,12 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
         if not raw_line_id or not raw_order_id:
             res.errors.append(ErrorRec(row_no, "missing_raw_id",
                                        "缺少维保单/明细数据ID", _row_dict(row, full_map)))
+            continue
+        # 需求单号(WBDD)为空：无法关联专属采购，且 ffill 可能把上一单单号串下来错配成本 → 整行跳过
+        order_no = cleaner.clean_str(row.get(inv_head["order_no"]))
+        if not order_no:
+            res.errors.append(ErrorRec(row_no, "missing_order_no",
+                                       "需求单号为空（无法关联成本，整行跳过）", _row_dict(row, full_map)))
             continue
 
         pn_std, pn_raw, needs_review = cleaner.standardize_pn(row.get(inv_line["pn_raw"]))
@@ -253,11 +260,15 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
             except ValueError as exc:
                 res.errors.append(ErrorRec(row_no, "bad_date", str(exc),
                                            {"order_date": str(g("order_date"))}))
+            # 维保起止仅展示用，坏值不阻断；两列各自独立 try，一个坏值不连累另一个
             try:
                 maint_start = cleaner.parse_date(g("maint_start"))
+            except ValueError:
+                pass
+            try:
                 maint_end = cleaner.parse_date(g("maint_end"))
             except ValueError:
-                pass  # 维保起止仅展示用，坏值不阻断
+                pass
             project_raw = cleaner.clean_str(g("project_raw"))
             res.orders[raw_order_id] = {
                 "raw_order_id": raw_order_id,

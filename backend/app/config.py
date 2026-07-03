@@ -312,8 +312,11 @@ FIELD_GROUPS = {
                       "price_ex_min", "price_ex_max", "price_ex_last", "price_ex_avg",
                       "price_inc_min", "price_inc_max", "price_inc_last", "price_inc_avg",
                       "price_last",
-                      # 维保项目成本聚合派生键（services/maintenance_cost.projects_aggregate）
-                      "cost_total", "cost_inc", "cost_ex"],
+                      # 维保项目成本派生键（maintenance_cost 聚合 cost_total/inc/ex + 明细行
+                      # unit_cost/cost_amount 已在上；成本来源/取价元信息同样可反推成本口径，一并登记）
+                      "cost_total", "cost_inc", "cost_ex",
+                      "cost_source", "cost_tax_basis", "price_month", "trace_months",
+                      "linked_purchase_order_no"],
     # 毛利金额：能反推成本（profit.aggregate 两法派生键一并登记）
     "profit_amount": ["gross_profit", "gross_profit_moving", "gross_profit_fifo"],
     # 毛利率：见反推警告（_profit_summary 与 profit.aggregate 的两法派生键一并登记）

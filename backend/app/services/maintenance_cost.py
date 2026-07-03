@@ -16,7 +16,7 @@ from collections import defaultdict
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from app import config
@@ -28,6 +28,10 @@ from app.services.query_filters import active_orders
 _log = logging.getLogger("maintenance_cost")
 _CENT = Decimal("0.01")
 _ZERO = Decimal("0")
+# Money 列为 Numeric(14,2)：绝对值上限 10^12（含）会溢出，回填前守卫
+_MONEY_MAX = Decimal(10) ** 12
+# 与导入互斥用的应用级 advisory lock 键（与 pipeline._ADVISORY_LOCK_KEY 同键，串行化导入与重算）
+_ADVISORY_LOCK_KEY = 0x5350_4152
 # 导入期写入的行级 flag（recompute 重建 flags 时保留；成本派生 flag 每轮重算重挂）
 _IMPORT_FLAGS = frozenset({"future_date"})
 COSTED_SOURCES = ("direct", "month_avg", "trace_avg", "sales_ref")
@@ -124,18 +128,30 @@ def _pick(monthly: dict, part: int, ym: str):
     return None
 
 
+# 清零成本字段并把 anomaly_flags 收敛到仅导入期 flag（no_cost/has_return/cost_overflow 每轮重挂）。
+# 用 SQL 覆盖全表（含 active_orders 过滤掉的已取消行），避免这些行残留上一轮的成本派生 flag。
+_KEEP_FLAGS_SQL = "ARRAY(SELECT f FROM unnest(anomaly_flags) AS f WHERE f = ANY(:keep_flags))"
+
+
 def recompute(db: Session) -> dict:
     """重算所有作用域内维保出库行的成本，批量回填。返回各来源计数。
 
-    作用域 = 已生效 且 order_date ≥ MAINT_COST_START_DATE 且 qty 非空。
-    先整体清零成本字段（口径改动后不残留旧值），作用域外的行保持 NULL。
+    作用域 = 已生效 且 order_date ≥ MAINT_COST_START_DATE；起算日前/无日期 → 不计价（cost_source=NULL）；
+    在期但 qty 缺失 → none + missing_qty 标记（可见可查，不静默丢）。
+    先整体清零（口径改动后不残留旧值/旧 flag），与导入用同一 advisory lock 串行（防并发重算/导入交错）。
     """
+    db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _ADVISORY_LOCK_KEY})
     direct, monthly = _purchase_pools(db)
     sales_monthly = _sales_pool(db)
 
-    db.execute(update(FMaintenanceLine).values(
-        unit_cost=None, cost_amount=None, cost_source=None, cost_tax_basis=None,
-        price_month=None, trace_months=None, linked_purchase_order_no=None))
+    db.execute(
+        update(FMaintenanceLine).values(
+            unit_cost=None, cost_amount=None, cost_source=None, cost_tax_basis=None,
+            price_month=None, trace_months=None, linked_purchase_order_no=None,
+            anomaly_flags=text(_KEEP_FLAGS_SQL),
+        ).execution_options(synchronize_session=False),
+        {"keep_flags": list(_IMPORT_FLAGS)},
+    )
 
     q = (
         select(FMaintenanceLine.id, FMaintenanceLine.part_id,
@@ -149,11 +165,12 @@ def recompute(db: Session) -> dict:
 
     start = config.MAINT_COST_START_DATE
     max_trace = config.MAINT_TRACE_MAX_MONTHS
-    stats = {"lines_in_scope": 0, "out_of_scope": 0,
-             "direct": 0, "month_avg": 0, "trace_avg": 0, "sales_ref": 0, "none": 0}
+    stats = {"lines_in_scope": 0, "out_of_scope": 0, "missing_qty": 0,
+             "direct": 0, "month_avg": 0, "trace_avg": 0, "sales_ref": 0, "none": 0,
+             "cost_overflow": 0}
     updates = []
     for lid, part, qty, rqty, flags, order_no, odate in rows:
-        if odate is None or odate < start or qty is None:
+        if odate is None or odate < start:      # 起算日外：不计价，flags 已由上面 SQL 收敛
             stats["out_of_scope"] += 1
             continue
         stats["lines_in_scope"] += 1
@@ -161,15 +178,21 @@ def recompute(db: Session) -> dict:
         ym = _ym(odate)
         unit_cost = basis = source = price_month = trace = linked_po = None
 
+        if qty is None:                          # 在期但数量缺失：可见的 none，非静默丢弃
+            source = "none"
+            base_flags.append("missing_qty")
+            stats["missing_qty"] += 1
+
         # A0 专属采购直配
-        slots = direct.get((order_no, part))
-        if slots:
-            for b in _basis_order():
-                s = slots.get(b)
-                if s and s[1] > 0:
-                    unit_cost = (s[0] / s[1]).quantize(_CENT)
-                    basis, source, price_month, trace, linked_po = b, "direct", ym, 0, s[2]
-                    break
+        if source is None:
+            slots = direct.get((order_no, part))
+            if slots:
+                for b in _basis_order():
+                    s = slots.get(b)
+                    if s and s[1] > 0:
+                        unit_cost = (s[0] / s[1]).quantize(_CENT)
+                        basis, source, price_month, trace, linked_po = b, "direct", ym, 0, s[2]
+                        break
         # A1 当月均价
         if source is None:
             picked = _pick(monthly, part, ym)
@@ -197,10 +220,16 @@ def recompute(db: Session) -> dict:
 
         if rqty and rqty > 0:
             base_flags.append("has_return")
-        eff_qty = (qty or _ZERO) - (rqty or _ZERO)
         cost_amount = None
         if unit_cost is not None:
-            cost_amount = (max(eff_qty, _ZERO) * unit_cost).quantize(_CENT)
+            eff_qty = max((qty or _ZERO) - (rqty or _ZERO), _ZERO)
+            cost_amount = (eff_qty * unit_cost).quantize(_CENT)
+            # 溢出守卫：单价/数量异常导致金额超 Numeric(14,2) 容量 → 行级隔离（可见可修，不拖垮全批）
+            if cost_amount >= _MONEY_MAX or unit_cost >= _MONEY_MAX:
+                unit_cost = cost_amount = basis = price_month = trace = linked_po = None
+                source = "none"
+                base_flags.append("cost_overflow")
+                stats["cost_overflow"] += 1
 
         stats[source] += 1
         updates.append({
@@ -218,20 +247,22 @@ def recompute(db: Session) -> dict:
 
 
 # ============================================================
-# 项目聚合 / 明细（§5）——只统计作用域内（已生效 + 起算日后）的出库行
+# 项目聚合 / 明细（§5）——只统计作用域内（已生效 + 起算日后）的出库行。
+# 聚合下推到 SQL（GROUP BY project_std）避免全量 ORM 物化（大数据量级内存/耗时可控）。
 # ============================================================
 
 def _f(x):
     return float(x) if x is not None else None
 
 
-def _scoped_lines_stmt():
-    stmt = (
-        select(FMaintenanceLine, FMaintenanceOrder)
-        .join(FMaintenanceOrder, FMaintenanceLine.order_id == FMaintenanceOrder.id)
-        .where(FMaintenanceOrder.order_date >= config.MAINT_COST_START_DATE)
-    )
-    return active_orders(stmt, FMaintenanceOrder)
+def _scoped_filters(stmt, date_from, date_to):
+    stmt = stmt.where(FMaintenanceOrder.order_date >= config.MAINT_COST_START_DATE)
+    stmt = active_orders(stmt, FMaintenanceOrder)
+    if date_from:
+        stmt = stmt.where(FMaintenanceOrder.order_date >= date_from)
+    if date_to:
+        stmt = stmt.where(FMaintenanceOrder.order_date <= date_to)
+    return stmt
 
 
 def projects_aggregate(db: Session, date_from: date | None = None,
@@ -240,90 +271,100 @@ def projects_aggregate(db: Session, date_from: date | None = None,
 
     合同额 = 项目关联 XSDD 在销售表的订单金额（含税≈不含税×(1+税率)，参考值）；
     同一 XSDD 挂多个项目时 contract_shared=true——Q5：本期不出毛利，合同额仅参考。
+    部分/全部关联单号未在销售表时 contract_incomplete=true（避免按 0 静默低估）。
     """
-    stmt = _scoped_lines_stmt()
-    if date_from:
-        stmt = stmt.where(FMaintenanceOrder.order_date >= date_from)
-    if date_to:
-        stmt = stmt.where(FMaintenanceOrder.order_date <= date_to)
+    ml, mo = FMaintenanceLine, FMaintenanceOrder
+    proj = func.coalesce(mo.project_std, "(未填项目)")
+    src_cols = [
+        func.count().filter(ml.cost_source == s).label(f"src_{s}")
+        for s in (*COSTED_SOURCES, "none")
+    ]
+    stmt = (
+        select(
+            proj.label("project"),
+            func.count().label("lines"),
+            func.coalesce(func.sum(ml.qty), 0).label("qty"),
+            func.coalesce(func.sum(ml.cost_amount).filter(ml.cost_tax_basis == "inc"), 0).label("cost_inc"),
+            func.coalesce(func.sum(ml.cost_amount).filter(ml.cost_tax_basis == "ex"), 0).label("cost_ex"),
+            func.count().filter(ml.cost_source.in_(COSTED_SOURCES)).label("costed"),
+            func.count(func.distinct(func.date_trunc("month", mo.order_date))).label("months"),
+            func.array_agg(func.distinct(mo.linked_sales_order_no))
+                .filter(mo.linked_sales_order_no.is_not(None)).label("sales_orders"),
+            *src_cols,
+        )
+        .join(mo, ml.order_id == mo.id)
+        .group_by(proj)
+    )
+    stmt = _scoped_filters(stmt, date_from, date_to)
     if q_text:
-        stmt = stmt.where(FMaintenanceOrder.project_std.ilike(f"%{q_text}%"))
+        stmt = stmt.where(mo.project_std.ilike(f"%{q_text}%"))
 
-    projects: dict[str, dict] = {}
+    raw = db.execute(stmt).all()
+
+    # order_no → 引用它的项目集合（判共用）；合同额一次性查回
     order_no_projects: dict[str, set] = defaultdict(set)
-    for ln, mo in db.execute(stmt).all():
-        key = mo.project_std or "(未填项目)"
-        p = projects.setdefault(key, {
-            "project": key, "lines": 0, "qty": _ZERO,
-            "cost_inc": _ZERO, "cost_ex": _ZERO,
-            "by_source": {s: 0 for s in (*COSTED_SOURCES, "none")},
-            "months": set(), "sales_orders": set(),
-        })
-        p["lines"] += 1
-        p["qty"] += ln.qty or _ZERO
-        if ln.cost_amount is not None and ln.cost_tax_basis in ("inc", "ex"):
-            p["cost_" + ln.cost_tax_basis] += ln.cost_amount
-        if ln.cost_source:
-            p["by_source"][ln.cost_source] = p["by_source"].get(ln.cost_source, 0) + 1
-        if mo.order_date:
-            p["months"].add(_ym(mo.order_date))
-        if mo.linked_sales_order_no:
-            p["sales_orders"].add(mo.linked_sales_order_no)
-            order_no_projects[mo.linked_sales_order_no].add(key)
-
-    # 合同额（参考）：关联 XSDD 的订单金额（含税≈ex×(1+税率)）
+    for r in raw:
+        for ono in (r.sales_orders or []):
+            order_no_projects[ono].add(r.project)
     contract: dict[str, Decimal] = {}
     all_orders = list(order_no_projects.keys())
     if all_orders:
-        cq = (select(FSalesOrder.order_no, FSalesOrder.amount_ex_tax, FSalesOrder.tax_rate)
-              .where(FSalesOrder.order_no.in_(all_orders)))
-        cq = active_orders(cq, FSalesOrder)
+        cq = active_orders(
+            select(FSalesOrder.order_no, FSalesOrder.amount_ex_tax, FSalesOrder.tax_rate)
+            .where(FSalesOrder.order_no.in_(all_orders)), FSalesOrder)
         for ono, ex, trate in db.execute(cq).all():
             if ex is None:
                 continue
             inc = (ex * (Decimal(1) + (trate or _ZERO))).quantize(_CENT)
-            # 同一单号理论唯一；防御性取最大
             contract[ono] = max(contract.get(ono, _ZERO), inc)
 
     rows = []
-    for p in projects.values():
-        costed = sum(v for k, v in p["by_source"].items() if k in COSTED_SOURCES)
-        contract_amt = sum((contract.get(o) or _ZERO) for o in p["sales_orders"])
+    for r in raw:
+        sales_orders = sorted(r.sales_orders or [])
+        by_source = {s: getattr(r, f"src_{s}") for s in (*COSTED_SOURCES, "none")}
+        missing = [o for o in sales_orders if o not in contract]
+        contract_amt = sum((contract.get(o) or _ZERO) for o in sales_orders)
+        cost_inc = Decimal(r.cost_inc).quantize(_CENT)
+        cost_ex = Decimal(r.cost_ex).quantize(_CENT)
         rows.append({
-            "project": p["project"],
-            "lines": p["lines"], "qty": _f(p["qty"]),
-            "cost_inc": _f(p["cost_inc"].quantize(_CENT)),
-            "cost_ex": _f(p["cost_ex"].quantize(_CENT)),
-            "cost_total": _f((p["cost_inc"] + p["cost_ex"]).quantize(_CENT)),
-            "coverage_pct": round(costed / p["lines"] * 100, 1) if p["lines"] else None,
-            "by_source": p["by_source"],
-            "months": len(p["months"]),
-            "sales_orders": sorted(p["sales_orders"]),
-            "contract_amount": _f(contract_amt) if p["sales_orders"] else None,
-            "contract_shared": any(len(order_no_projects[o]) > 1 for o in p["sales_orders"]),
+            "project": r.project,
+            "lines": r.lines, "qty": _f(r.qty),
+            "cost_inc": _f(cost_inc), "cost_ex": _f(cost_ex),
+            "cost_total": _f((cost_inc + cost_ex).quantize(_CENT)),
+            "coverage_pct": round(r.costed / r.lines * 100, 1) if r.lines else None,
+            "by_source": by_source,
+            "months": r.months,
+            "sales_orders": sales_orders,
+            "contract_amount": _f(contract_amt) if sales_orders else None,
+            "contract_shared": any(len(order_no_projects[o]) > 1 for o in sales_orders),
+            # 部分/全部关联单号未在销售表中找到金额 → 合同额被低估，前端标注
+            "contract_incomplete": bool(sales_orders) and len(missing) > 0,
         })
     rows.sort(key=lambda r: r["cost_total"] or 0, reverse=True)
     return {"rows": rows, "start_date": config.MAINT_COST_START_DATE.isoformat()}
 
 
 def project_lines(db: Session, project: str, month: str | None = None,
+                  date_from: date | None = None, date_to: date | None = None,
                   page: int = 1, page_size: int = 50) -> dict:
     """单项目 SKU 级明细（分页）：含成本来源/税口径/追溯月/关联采购单，逐行可解释。"""
-    stmt = _scoped_lines_stmt().where(
-        (FMaintenanceOrder.project_std == project)
-        if project != "(未填项目)" else FMaintenanceOrder.project_std.is_(None))
-    rows = db.execute(stmt.order_by(
-        FMaintenanceOrder.order_date.desc().nullslast(), FMaintenanceLine.id.desc()
-    )).all()
+    ml, mo = FMaintenanceLine, FMaintenanceOrder
+    base = select(ml, mo).join(mo, ml.order_id == mo.id)
+    base = base.where(mo.project_std == project if project != "(未填项目)"
+                      else mo.project_std.is_(None))
+    base = _scoped_filters(base, date_from, date_to)
     if month:
-        rows = [(ln, mo) for ln, mo in rows if mo.order_date and _ym(mo.order_date) == month]
-    total = len(rows)
+        base = base.where(func.to_char(mo.order_date, "YYYY-MM") == month)
+
+    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     page = max(page, 1)
-    chunk = rows[(page - 1) * page_size: page * page_size]
+    paged = base.order_by(
+        mo.order_date.desc().nullslast(), ml.id.desc()
+    ).offset((page - 1) * page_size).limit(page_size)
     return {"total": total, "page": page, "page_size": page_size, "rows": [{
-        "order_no": mo.order_no, "order_date": mo.order_date.isoformat() if mo.order_date else None,
-        "demand_type": mo.demand_type, "business_type": mo.business_type,
-        "warehouse": mo.warehouse,
+        "order_no": o.order_no, "order_date": o.order_date.isoformat() if o.order_date else None,
+        "demand_type": o.demand_type, "business_type": o.business_type,
+        "warehouse": o.warehouse,
         "pn_std": ln.pn_std, "description": ln.description,
         "qty": _f(ln.qty), "return_qty": _f(ln.return_qty),
         "unit_cost": _f(ln.unit_cost), "cost_amount": _f(ln.cost_amount),
@@ -331,4 +372,4 @@ def project_lines(db: Session, project: str, month: str | None = None,
         "price_month": ln.price_month, "trace_months": ln.trace_months,
         "linked_purchase_order_no": ln.linked_purchase_order_no,
         "anomaly_flags": ln.anomaly_flags or [],
-    } for ln, mo in chunk]}
+    } for ln, o in db.execute(paged).all()]}

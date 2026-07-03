@@ -58,8 +58,10 @@ def _full(own: bool = False) -> dict[str, bool]:
 ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     "admin": _full(),
     "boss": _full(),
+    # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance 必须显式关，
+    # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读全量项目成本（方案 §5）
     "readonly": {**_full(), "page_import": False, "page_governance": False,
-                 "page_master_data": False},
+                 "page_master_data": False, "page_maintenance": False},
     "sales": {
         # 甲方 2026-06-15 确认：销售能看采购成本/毛利（整机拆解加点直卖需要采购价算建议售价）。
         # 供应商仍隐藏（不暴露从谁进货）；逐单销售成交明细另由 own_customers_only 收紧（看不到）。
