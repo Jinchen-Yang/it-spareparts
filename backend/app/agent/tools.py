@@ -277,15 +277,15 @@ TOOLS: list[dict] = [
         "function": {
             "name": "get_inventory",
             "description": (
-                "分页查询库存快照：按 型号/描述 关键词与仓库过滤，返回 仓库/型号/描述/可用数量/"
-                "单位成本(不含税,移动加权)/库存金额。「XX 还有多少库存」「北京仓有哪些 8TB 盘」用它；"
+                "分页查询库存（锚定动态口径=最近盘点/快照做期初+之后单据流水实时推算，型号级）："
+                "按 型号/描述/品牌 关键词过滤，返回 动态可用数量/期初(锚点日)/期初后入库/出库(销售+维保)/"
+                "分仓参考(快照行,含单位成本与库存金额)。「XX 还有多少库存」用它；"
                 "单个型号的完整行情（含通用号库存）用 get_part_overview。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "型号/描述关键词，可省略"},
-                    "warehouse": {"type": "string", "description": "仓库名精确过滤，可省略"},
+                    "query": {"type": "string", "description": "型号/描述/品牌关键词，可省略"},
                     "limit": {"type": "integer", "description": "返回条数，默认 20，最大 50"},
                 },
             },
@@ -570,10 +570,9 @@ def _get_purchase_analysis(db: Session, args: dict, ctx: security.UserContext) -
 
 def _get_inventory(db: Session, args: dict, ctx: security.UserContext) -> dict:
     limit = min(int(args.get("limit") or 20), 50)
-    data = inventory.list_inventory(db, args.get("warehouse"), args.get("query"),
-                                    page=1, page_size=limit, user_ctx=ctx)
+    data = inventory.list_dynamic(db, args.get("query"), page=1, page_size=limit, user_ctx=ctx)
     if data.get("total", 0) > limit:
-        data["note"] = f"共 {data['total']} 条，仅返回前 {limit} 条；可加 query/warehouse 过滤"
+        data["note"] = f"共 {data['total']} 个型号，仅返回动态库存最高的前 {limit} 个；可加 query 过滤"
     return security.apply_field_visibility(data, ctx)
 
 

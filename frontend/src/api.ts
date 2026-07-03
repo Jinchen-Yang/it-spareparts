@@ -441,6 +441,11 @@ export interface Overview {
   };
   // 逐单销售成交明细是否按权限隐藏（与后端 is_scoped_sales 对齐）：true → sales_recent 必空
   sales_recent_restricted?: boolean;
+  // 锚定动态库存（型号级主口径）：期初=最近快照/盘点 + 之后单据流水
+  stock_dynamic?: {
+    dynamic_qty: number | null; anchor_qty: number | null; anchor_date: string | null;
+    in_qty: number | null; out_sales: number | null; out_maint: number | null;
+  };
 }
 
 export interface PurchaseRow {

@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.5.1";
+export const APP_VERSION = "1.6.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.6.0",
+    date: "2026-07-04",
+    items: [
+      "库存切换为「动态口径」：可用数量 = 期初（最近盘点/库存快照）+ 之后采购入库 − 销售出库 − 维保出库（退货冲抵），单据导入即时生效，日常不再依赖重导库存；8 月盘点导入后期初自动更新为盘点数",
+      "库存页改版：型号级动态主表（动态可用/期初/期初后入出），点击展开查看分仓分布（快照参考，含单位成本与库存金额，人工修正入口不变）；型号全景、替代料通用号库存、AI 库存工具同步切换动态口径",
+      "口径说明：采购单无仓库字段，动态库存为型号级总量；分仓分布以最近快照为参考并标注快照日期",
+    ],
+  },
   {
     version: "1.5.1",
     date: "2026-07-04",

@@ -14,6 +14,7 @@ from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app import config, security
+from app.services import inventory as inventory_service
 from app.services.query_filters import active_orders
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
 from app.models.inquiry import FPartInquiry
@@ -342,11 +343,9 @@ def _substitutes(db: Session, part_id: int | None) -> list[dict]:
     ids = list(info)
     parts = {p.id: p for p in db.execute(
         select(DimPart).where(DimPart.id.in_(ids + [part_id]))).scalars()}
-    qty = func.sum(case((Inventory.is_qty_overridden, Inventory.manual_qty),
-                        else_=Inventory.source_qty))
-    stock = dict(db.execute(
-        select(Inventory.part_id, qty).where(Inventory.part_id.in_(ids))
-        .group_by(Inventory.part_id)).all())
+    # 库存口径切换（2026-07-04）：通用号库存 = 锚定动态（快照期初+单据流水），与库存页一致
+    dyn = inventory_service.dynamic_stock_map(db, ids)
+    stock = {pid: rec["dynamic_qty"] for pid, rec in dyn.items()}
     out = []
     for oid, meta in info.items():
         other = parts.get(oid)
@@ -361,6 +360,17 @@ def _substitutes(db: Session, part_id: int | None) -> list[dict]:
     # 直连在前、间接在后，组内按 PN 稳定排序
     out.sort(key=lambda x: (x["via"] is not None, x["pn_std"]))
     return out
+
+
+def _stock_dynamic(db: Session, part_id: int) -> dict:
+    rec = inventory_service.dynamic_stock_map(db, [part_id]).get(part_id)
+    if rec is None:
+        return {"dynamic_qty": 0.0, "anchor_qty": 0.0, "anchor_date": None,
+                "in_qty": 0.0, "out_sales": 0.0, "out_maint": 0.0}
+    return {"dynamic_qty": _d(rec["dynamic_qty"]), "anchor_qty": _d(rec["anchor_qty"]),
+            "anchor_date": rec["anchor_date"].isoformat() if rec["anchor_date"] else None,
+            "in_qty": _d(rec["in_qty"]), "out_sales": _d(rec["out_sales"]),
+            "out_maint": _d(rec["out_maint"])}
 
 
 def _sales_velocity(db: Session, part_id: int) -> dict:
@@ -477,11 +487,9 @@ def quick_pricing(db: Session, pn_std: str) -> dict:
     sp = active_orders(sp, FSalesOrder)
     samt, sqty = db.execute(sp).one()
 
-    inv_rows = db.execute(select(Inventory).where(Inventory.part_id == pid)).scalars().all()
-    stock = sum(
-        (inv.manual_qty if inv.is_qty_overridden and inv.manual_qty is not None else inv.source_qty)
-        or Decimal(0) for inv in inv_rows
-    )
+    # 库存口径切换（2026-07-04）：锚定动态（快照期初+单据流水），与库存页/替代料一致
+    _dyn = inventory_service.dynamic_stock_map(db, [pid]).get(pid)
+    stock = _dyn["dynamic_qty"] if _dyn else Decimal(0)
     return {
         # 商品身份：用 resolve_part 解析后的 *规范* PN，而非入参 pn_std——
         # 入参可能是已合并墓碑，此处覆盖让智能体把价格挂在正确的商品上
@@ -544,6 +552,8 @@ def get_overview(db: Session, pn_std: str,
         "sales_recent_restricted": security.is_scoped_sales(user_ctx),
         "inventory": _inventory(db, part.id),
         "substitutes": _substitutes(db, part.id),
+        # 锚定动态库存（型号级主口径）：快照期初 + 快照日后单据流水；分仓行(inventory)作参考
+        "stock_dynamic": _stock_dynamic(db, part.id),
         "profit_summary": _profit_summary(db, part.id),
         "inquiry_ref": _inquiry_ref(db, part.id, part.pn_std),
         "sales_velocity": _sales_velocity(db, part.id),

@@ -34,6 +34,19 @@ def list_(
         inventory.list_inventory(db, warehouse, q, page, page_size, ctx), ctx)
 
 
+@router.get("/dynamic")
+def list_dynamic(
+    q: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """锚定动态库存（型号级）：期初=最近快照，之后跟单据流水；分仓快照行作参考。"""
+    return apply_field_visibility(inventory.list_dynamic(db, q, page, page_size, ctx), ctx)
+
+
 @router.get("/warehouses")
 def warehouse_options(db: Session = Depends(get_db), _: str = Depends(current_role)) -> list[str]:
     return inventory.warehouses(db)

@@ -273,7 +273,18 @@ export default function PartSearchPage() {
             </Card></Col>
           </Row>
 
-          <Card title="库存" size="small" style={{ marginBottom: 16 }}>
+          <Card size="small" style={{ marginBottom: 16 }}
+                title={<Space size={10}>库存
+                  {ov.stock_dynamic && (
+                    <span style={{ fontWeight: 400, fontSize: 13 }}>
+                      动态可用 <b style={{ color: (ov.stock_dynamic.dynamic_qty ?? 0) < 0 ? "var(--mb-danger)" : "var(--mb-accent, #2f5b7c)" }}>
+                        {ov.stock_dynamic.dynamic_qty ?? 0}</b>
+                      <span style={{ color: "var(--mb-text-3)", fontSize: 12 }}>
+                        （期初{ov.stock_dynamic.anchor_qty ?? 0}{ov.stock_dynamic.anchor_date ? `@${ov.stock_dynamic.anchor_date}` : ""} +入{ov.stock_dynamic.in_qty ?? 0} −出{(ov.stock_dynamic.out_sales ?? 0) + (ov.stock_dynamic.out_maint ?? 0)}；下表分仓为快照参考）
+                      </span>
+                    </span>
+                  )}
+                </Space>}>
             {/* 合并后同仓可有多行（不同源 pn），rowKey 不能用 warehouse */}
             <ResizableTable storageKey="search-ov-inv" rowKey={(_, i) => String(i)} size="small" columns={invCols} dataSource={ov.inventory} pagination={false}
               locale={{ emptyText: "无库存" }} />
