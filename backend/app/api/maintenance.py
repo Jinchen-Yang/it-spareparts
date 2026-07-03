@@ -345,18 +345,26 @@ def _build_workbook(contract: str, data: dict) -> Workbook:
     _col_widths(ws2, [20, 11, 16, 26, 10, 12, 9, 10, 6, 20, 36, 9,
                       13, 9, 9, 18, 11, 12, 16, 8, 9, 11, 9])
 
-    # ── Sheet3 报销明细 ──
+    # ── Sheet3 报销明细（§17.3 canonical：人填区，导入=导出同格式）──
+    # 第 1 行=归集锚（销售订单|XSDD），第 2 行=表头；员工在下方续填后整本上传即可导入。
     ws3 = wb.create_sheet("报销明细")
-    hdr3 = ["报销日期", "BXD单号", "序号", "流程状态", "报销人员", "报销类别",
-            "费用分类", "支出事由", "报销金额"]
-    ws3.append(hdr3)
-    _hdr_row(ws3, 1, len(hdr3))
-    ws3.freeze_panes = "A2"
+    ws3.cell(row=1, column=1, value="销售订单").font = Font(bold=True)
+    ws3.cell(row=1, column=1).fill = _KV_FILL
+    ws3.cell(row=1, column=2, value=contract).font = Font(bold=True)
+    for c in (1, 2):
+        ws3.cell(row=1, column=c).border = _BORDER
+    hdr3 = ["报销日期", "报销人员", "报销类别", "费用分类", "支出事由",
+            "报销金额", "流程状态", "单号", "序号"]
+    _AMT_COL = 6
+    for c, h in enumerate(hdr3, 1):
+        ws3.cell(row=2, column=c, value=h)
+    _hdr_row(ws3, 2, len(hdr3))
+    ws3.freeze_panes = "A3"
     for i, e in enumerate(data["expenses"]):
         ws3.append([e.expense_date.isoformat() if e.expense_date else None,
-                    e.bxd_no, e.line_no, e.data_status, e.person, e.expense_type,
-                    e.fee_category, e.reason,
-                    float(e.amount) if e.amount is not None else None])
+                    e.person, e.expense_type, e.fee_category, e.reason,
+                    float(e.amount) if e.amount is not None else None,
+                    e.data_status, e.bxd_no, e.line_no])
         rr = ws3.max_row
         inactive = e.data_status != config.MAINT_EXPENSE_ACTIVE_STATUS
         for c in range(1, len(hdr3) + 1):
@@ -366,15 +374,43 @@ def _build_workbook(contract: str, data: dict) -> Workbook:
                 cell.fill = _ALT_FILL
             if inactive:                                       # 未生效：置灰（不计入已花）
                 cell.font = Font(color="A0A0A0")
-        ws3.cell(row=rr, column=9).number_format = _MONEY
+        ws3.cell(row=rr, column=_AMT_COL).number_format = _MONEY
     if data["expenses"]:
-        ws3.auto_filter.ref = f"A1:I{ws3.max_row}"
+        ws3.auto_filter.ref = f"A2:I{ws3.max_row}"
         rr = ws3.max_row + 1
-        ws3.cell(row=rr, column=8, value="合计（仅已结束）").font = Font(bold=True)
-        tc = ws3.cell(row=rr, column=9, value=spent_exp)
+        # 合计行不填日期 → 再导入时按「缺日期」自然跳过（§17.3）
+        ws3.cell(row=rr, column=_AMT_COL - 1, value="合计（仅已结束）").font = Font(bold=True)
+        tc = ws3.cell(row=rr, column=_AMT_COL, value=spent_exp)
         tc.font, tc.fill = Font(bold=True), _TOTAL_FILL
         tc.number_format = _MONEY
-    _col_widths(ws3, [12, 18, 6, 10, 10, 12, 14, 42, 13])
+    _col_widths(ws3, [12, 10, 12, 14, 42, 13, 10, 18, 6])
+
+    # ── Sheet4 填写说明（系统区，导入时忽略）──
+    ws4 = wb.create_sheet("填写说明")
+    ws4.sheet_view.showGridLines = False
+    notes = [
+        ("这本工作簿怎么用", "这是系统导出的「项目追踪工作簿」：报销明细页由你续填，其余页由系统生成。"
+         "填好后把整本工作簿拖回系统「数据导入」页——系统只吃报销明细页，其它页自动跳过。"),
+        ("报销明细页", "必填仅两列：报销日期、报销金额。行内没有销售订单列时，按第 1 行锚"
+         "（销售订单=本合同）归集；流程状态留空视为「已结束」（计入项目已花）；"
+         "单号/序号选填，有则参与防重。"),
+        ("导入模式", "「跳过」=增量，只进新行；「修复」=以本表为准——本合同在系统里的报销行"
+         "会被本表整体替换（改了金额/删了行都以表为准）。"),
+        ("备件明细页", "系统按取价瀑布自动回填（产品成本=单据级总额填首行，行级取价在附加列），"
+         "此页导入时忽略——备件出库数据请一直用氚云「维保需求单」导出上传，样式不变。"),
+        ("空白表单", "新项目可直接导出本工作簿当作空白表单分发：报销页只有表头和锚行，填完传回即可。"),
+    ]
+    ws4.column_dimensions["A"].width = 16
+    ws4.column_dimensions["B"].width = 96
+    tt = ws4.cell(row=1, column=1, value="项目追踪工作簿 · 填写说明")
+    tt.font = _TITLE_FONT
+    for i, (k, v) in enumerate(notes, 3):
+        kc = ws4.cell(row=i, column=1, value=k)
+        kc.font = Font(bold=True)
+        kc.alignment = Alignment(vertical="top")
+        vc = ws4.cell(row=i, column=2, value=v)
+        vc.alignment = Alignment(wrap_text=True, vertical="top")
+        ws4.row_dimensions[i].height = 42
     return wb
 
 

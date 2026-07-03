@@ -16,7 +16,7 @@ from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -548,12 +548,24 @@ _EXPENSE_UPD = ["bxd_no", "line_no", "data_status", "expense_date", "person",
 def _load_expense(session: Session, result: TransformResult, batch_id: int,
                   mode: str = "skip", operated_by: str | None = None,
                   audit_overwrites: bool = False) -> dict:
-    """维保报销单（BXD）入库：单表平铺，按 raw_line_id 幂等 upsert（§16.3）。
+    """报销明细入库：单表平铺，按 raw_line_id 幂等（§16.3/§17.4）。
 
     不建商品/客户维度（费用行无 PN）；项目归集靠 linked_sales_order_no(XSDD) 查询时 join。
+    模式语义（§17.4）——skip=增量（只进新行）；upsert=**以本表为准**：对本次文件出现的
+    每个 XSDD，先删该合同全部报销行再插入（表单=该合同费用的全量真值；内容派生键下
+    "改了一行金额"才不会留下旧行残影）。删除数进报告 expense_rows_replaced。
     """
     upsert = (mode == "upsert")
     audit = (operated_by, batch_id) if (upsert and audit_overwrites) else None
+    replaced = 0
+    if upsert and result.lines:
+        contracts = {ln["linked_sales_order_no"] for ln in result.lines
+                     if ln.get("linked_sales_order_no")}
+        if contracts:
+            replaced = session.execute(
+                delete(FProjectExpense)
+                .where(FProjectExpense.linked_sales_order_no.in_(contracts))
+            ).rowcount or 0
     rows = [{**ln, "import_batch_id": batch_id} for ln in result.lines]
     stats = _upsert_facts(session, FProjectExpense, rows, FProjectExpense.raw_line_id,
                           _EXPENSE_UPD if upsert else None, audit=audit)
@@ -564,6 +576,7 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
         "fact_rows_skipped": stats["skipped"],
         "fact_rows_error": sum(1 for e in result.errors if e.error_type not in SOFT_ERROR_TYPES),
         "rows_inactive": result.rows_inactive,
+        "expense_rows_replaced": replaced,
         "import_mode": mode,
     }
 

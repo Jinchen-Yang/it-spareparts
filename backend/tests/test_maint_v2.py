@@ -265,7 +265,7 @@ def test_workbook_doc_level_backfill(db, batch):
     # 模板渲染：三页齐全、标题含合同号、表头深色白字、产品成本只填单据首行且高亮、金额千分位
     from app.api.maintenance import _build_workbook
     wb = _build_workbook("XS-W", data)
-    assert wb.sheetnames == ["项目预算", "备件明细-氚云", "报销明细"]
+    assert wb.sheetnames == ["项目预算", "备件明细-氚云", "报销明细", "填写说明"]
     ws = wb["项目预算"]
     assert "XS-W" in ws["A1"].value
     ws2 = wb["备件明细-氚云"]
@@ -277,4 +277,7 @@ def test_workbook_doc_level_backfill(db, batch):
     assert ws2.cell(3, 13).value is None                              # 第二行不重复填
     assert ws2.cell(2, 18).number_format == "#,##0.00"                # 金额千分位
     ws3 = wb["报销明细"]
-    assert ws3.cell(2, 9).number_format == "#,##0.00"
+    # §17.3 canonical：第 1 行归集锚（销售订单|XSDD），第 2 行表头，金额在第 6 列
+    assert ws3.cell(1, 1).value == "销售订单" and ws3.cell(1, 2).value == "XS-W"
+    assert ws3.cell(2, 1).value == "报销日期" and ws3.cell(2, 6).value == "报销金额"
+    assert ws3.cell(3, 6).number_format == "#,##0.00"

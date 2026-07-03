@@ -12,7 +12,7 @@ import api from "../api";
 // 历史询价（inquiry）导入为合同 Step 4 规划，后端尚未实装（B7 去重口径待客户确认），实装后再加回
 const FILE_TYPE: Record<string, string> = {
   purchase: "采购订单", sales: "销售订单", inventory: "产品库存", maintenance: "维保出库",
-  expense: "维保报销单",
+  expense: "报销明细", workbook: "项目工作簿",
 };
 const STATUS_COLOR: Record<string, string> = { success: "green", failed: "red", processing: "blue" };
 const JOB_STATUS: Record<string, { label: string; color: string }> = {
@@ -189,7 +189,7 @@ export default function ImportPage() {
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <PageHeader
         title="数据导入"
-        subtitle="上传氚云导出的 Excel（采购 / 销售 / 库存 / 维保出库 / 维保报销单），自动清洗入库并留痕"
+        subtitle="上传氚云导出的 Excel（采购 / 销售 / 库存 / 维保出库）或项目追踪工作簿（报销明细页），自动清洗入库并留痕"
       />
       <Card title="上传文件"
         extra={
@@ -213,7 +213,7 @@ export default function ImportPage() {
         >
           <p className="ant-upload-drag-icon"><InboxOutlined /></p>
           <p className="ant-upload-text">点击或拖拽 .xlsx 文件到此处（可多选批量导入）</p>
-          <p className="ant-upload-hint">支持采购订单 / 销售订单 / 产品库存 / 维保出库 / 维保报销单，自动识别类型</p>
+          <p className="ant-upload-hint">支持采购订单 / 销售订单 / 产品库存 / 维保出库 / 报销明细，自动识别类型；项目追踪工作簿可整本上传（只吃报销明细页，其余页自动跳过）</p>
         </Upload.Dragger>
 
         {staged.length > 0 && (

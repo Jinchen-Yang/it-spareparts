@@ -130,6 +130,12 @@ EXPENSE_LINE = {
     "报销明细.报销金额": "amount",
 }
 
+# §17.3 宽松变体列（项目追踪工作簿报销页 / 任意含最小列的表格）。
+# 不并入 EXPENSE_HEAD：EXPENSE_HEAD 同时是 ffill 头字段清单——「单号」若 ffill 会把上一行
+# 的单号灌进无单号行，复合幂等键 单号#序号 随即撞键静默丢行。这里只登记进 _ALL_KEYS
+# 供 canonicalize_columns 剥 (必填) 注解，transform 直接按列名读。
+EXPENSE_LOOSE_COLS = {"报销金额", "费用分类", "单号", "序号", "费用单号", "报销单号", "销售订单"}
+
 # ---- 产品库存（单实体，无 head/line 之分，无 ffill）----
 INVENTORY_MAP = {
     "产品库存ID": "raw_inventory_id",
@@ -157,7 +163,9 @@ FFILL_COLS = {
     PURCHASE: list(PURCHASE_HEAD.keys()),
     SALES: list(SALES_HEAD.keys()),
     MAINTENANCE: list(MAINTENANCE_HEAD.keys()),
-    EXPENSE: list(EXPENSE_HEAD.keys()),
+    # 报销日期不 ffill（§17.3）：扁平表单每行是一笔独立报销，日期行行必填；
+    # ffill 会让导出件合计行/半截行继承上一行日期而被误吃（缺日期跳过是防线）。
+    EXPENSE: [c for c in EXPENSE_HEAD if c != "报销日期"],
     INVENTORY: [],
 }
 
@@ -195,7 +203,7 @@ def _sig_norm(name) -> str:
 
 _ALL_KEYS = (set(PURCHASE_HEAD) | set(PURCHASE_LINE) | set(SALES_HEAD)
              | set(SALES_LINE) | set(MAINTENANCE_HEAD) | set(MAINTENANCE_LINE)
-             | set(EXPENSE_HEAD) | set(EXPENSE_LINE)
+             | set(EXPENSE_HEAD) | set(EXPENSE_LINE) | EXPENSE_LOOSE_COLS
              | set(INVENTORY_MAP))
 # 去注解名 → 规范键（mapping 原 key）；同名冲突保留先遇到的（sorted 确定化）。
 _CANON_BY_STRIPPED: dict[str, str] = {}
@@ -237,6 +245,10 @@ def detect_file_type(cols: list[str]) -> str | None:
         return MAINTENANCE
     # 维保报销单（BXD，费用侧 §16.3）：报销类别 + 维保销售订单 双特征
     if "报销类别" in sig and "维保销售订单" in sig:
+        return EXPENSE
+    # 宽松变体（§17.3 项目追踪工作簿报销页/来源无关模板）：报销金额 是强特征——
+    # 采购/销售/维保出库/库存导出均无此列，零误伤；辅以 费用分类 或 报销日期 双保险
+    if "报销金额" in sig and ("费用分类" in sig or "报销日期" in sig):
         return EXPENSE
     if "订单编号" in sig and "业务类型" in sig:
         return SALES

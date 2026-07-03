@@ -3,6 +3,7 @@
 原则：坏行隔离、好行照常。每个明细行独立校验，错误进 errors，不阻断其它行。
 订单头从同一行（ffill 后头字段已补齐）解析，按 raw_order_id 首次出现去重。
 """
+import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -34,6 +35,7 @@ class TransformResult:
     rows_total: int = 0
     rows_inactive: int = 0
     rows_excluded_warehouse: int = 0   # 排除仓（坏品仓等）跳过的库存行，进导入报告
+    rows_skipped_no_data: int = 0      # 报销页缺 日期/金额 跳过的行（合计行/空行，非错误，§17.3）
 
 
 def _row_dict(row, field_map) -> dict:
@@ -302,16 +304,20 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
 _BXD_RX = re.compile(r"BXD-\d{8}-\d+")
 
 
-def _transform_expense(df: pd.DataFrame) -> TransformResult:
-    """维保报销单（BXD 费用侧，§16.3）：单表平铺（无独立头表），行级金额。
+def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> TransformResult:
+    """报销明细（费用侧，§17.3 来源无关宽松口径）：单表平铺，行级金额。
 
-    幂等键 = 报销明细数据ID；无（工作簿版）→ BXD单号#序号 复合键退路。
-    列名漂移回退：费用分类↔报销明细.费用分类、维保销售订单↔销售订单（取非空互补）。
-    生效口径 = 流程状态 MAINT_EXPENSE_ACTIVE_STATUS（'已结束'），非生效行照常入库计 inactive。
+    必需列仅 报销日期 + 报销金额；两者任一为空的行**跳过**（rows_skipped_no_data，
+    非错误——天然免疫导出件合计行）。归集键：行级 维保销售订单/销售订单 → 页级锚(anchor)
+    兜底；皆无 → 错误行。幂等键：单号#序号 优先（与存量生产键兼容），否则内容派生
+    EXP:sha1(xsdd|日期|金额|事由|人员)#重复序 —— 同一本工作簿更新后重传是常态，
+    文件hash+行号会全量重插，内容键天然幂等（§17.4）。
+    流程状态为空 → 默认已结束（表单心智：写上来的就是要计入的账）。
     """
     res = TransformResult(file_type=mapping.EXPENSE)
     res.rows_total = len(df)
     full_map = {**mapping.EXPENSE_HEAD, **mapping.EXPENSE_LINE}
+    key_seen: dict[str, int] = {}
 
     for idx, row in df.iterrows():
         row_no = int(idx) + 1
@@ -324,43 +330,62 @@ def _transform_expense(df: pd.DataFrame) -> TransformResult:
                         return v
             return None
 
-        title = cleaner.clean_str(gv("数据标题"))
-        m = _BXD_RX.search(title or "")
-        bxd_no = m.group(0) if m else None
-        line_no = cleaner.parse_int(gv("报销明细.序号", "序号"))
-        raw_line = cleaner.clean_str(gv("报销明细.数据ID(不可修改)", "报销明细.数据ID"))
-        if not raw_line:
-            if not bxd_no or line_no is None:
-                res.errors.append(ErrorRec(row_no, "missing_raw_id",
-                                           "缺少报销明细数据ID，且 BXD单号/序号 不足以兜底",
-                                           _row_dict(row, full_map)))
-                continue
-            raw_line = f"{bxd_no}#{line_no}"        # 复合键退路（§16.3）
+        raw_date, raw_amount = gv("报销日期"), gv("报销明细.报销金额", "报销金额")
+        if raw_date is None or raw_amount is None:
+            res.rows_skipped_no_data += 1          # 空行/合计行/半截行：跳过不算错
+            continue
         try:
-            amount = cleaner.parse_money(gv("报销明细.报销金额", "报销金额"))
+            expense_date = cleaner.parse_date(raw_date)
+            amount = cleaner.parse_money(raw_amount)
         except ValueError as exc:
             res.errors.append(ErrorRec(row_no, "bad_number", str(exc), _row_dict(row, full_map)))
             continue
-        expense_date = None
-        try:
-            expense_date = cleaner.parse_date(gv("报销日期"))
-        except ValueError as exc:
-            res.errors.append(ErrorRec(row_no, "bad_date", str(exc),
-                                       {"expense_date": str(gv("报销日期"))}))
+        if expense_date is None or amount is None:
+            res.rows_skipped_no_data += 1
+            continue
+
+        xsdd = cleaner.clean_str(gv("维保销售订单", "销售订单")) or anchor
+        if not xsdd:
+            res.errors.append(ErrorRec(row_no, "missing_link",
+                                       "缺少销售订单(XSDD)：行内无该列且工作表无「销售订单」锚",
+                                       _row_dict(row, full_map)))
+            continue
+
+        title = cleaner.clean_str(gv("数据标题"))
+        m = _BXD_RX.search(title or "")
+        bxd_no = (m.group(0) if m
+                  else cleaner.clean_str(gv("单号", "费用单号", "报销单号")))
+        line_no = cleaner.parse_int(gv("报销明细.序号", "序号"))
+        person = cleaner.clean_str(gv("报销人员", "申请人"))
+        reason = cleaner.clean_str(gv("支出事由", "报销主题"))
+
+        raw_line = cleaner.clean_str(gv("报销明细.数据ID(不可修改)", "报销明细.数据ID"))
+        if not raw_line:
+            if bxd_no and line_no is not None:
+                raw_line = f"{bxd_no}#{line_no}"    # 复合键（与既有生产数据兼容，§16.3）
+            else:
+                basis = "|".join([xsdd, expense_date.isoformat(), str(amount),
+                                  reason or "", person or ""])
+                digest = hashlib.sha1(basis.encode("utf-8")).hexdigest()[:36]
+                dup = key_seen.get(digest, 0)
+                key_seen[digest] = dup + 1
+                raw_line = f"EXP:{digest}#{dup}"    # 内容派生键（§17.4）
+
         res.lines.append({
             "raw_line_id": raw_line, "bxd_no": bxd_no, "line_no": line_no,
-            "data_status": cleaner.clean_str(gv("流程状态")),
+            "data_status": cleaner.clean_str(gv("流程状态"))
+                           or config.MAINT_EXPENSE_ACTIVE_STATUS,
             "expense_date": expense_date,
-            "person": cleaner.clean_str(gv("报销人员")),
-            "expense_type": cleaner.clean_str(gv("报销类别")),
+            "person": person,
+            "expense_type": cleaner.clean_str(gv("报销类别", "费用类型")),
             "fee_category": cleaner.clean_str(gv("报销明细.费用分类", "费用分类")),
-            "reason": cleaner.clean_str(gv("支出事由")),
-            "linked_sales_order_no": cleaner.clean_str(gv("维保销售订单", "销售订单")),
+            "reason": reason,
+            "linked_sales_order_no": xsdd,
             "amount": amount,
         })
     res.rows_inactive = sum(
         1 for r in res.lines
-        if r["data_status"] not in (None, config.MAINT_EXPENSE_ACTIVE_STATUS)
+        if r["data_status"] != config.MAINT_EXPENSE_ACTIVE_STATUS
     )
     return res
 
@@ -414,11 +439,12 @@ def _transform_inventory(df: pd.DataFrame) -> TransformResult:
     return res
 
 
-def transform(df: pd.DataFrame, file_type: str) -> TransformResult:
+def transform(df: pd.DataFrame, file_type: str, anchor: str | None = None) -> TransformResult:
+    """anchor：报销页归集锚（§17.3 页级 XSDD），仅 expense 使用。"""
     if file_type == mapping.INVENTORY:
         return _transform_inventory(df)
     if file_type == mapping.MAINTENANCE:
         return _transform_maintenance(df)
     if file_type == mapping.EXPENSE:
-        return _transform_expense(df)
+        return _transform_expense(df, anchor)
     return _transform_orders(df, file_type)

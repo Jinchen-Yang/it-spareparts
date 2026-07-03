@@ -583,7 +583,7 @@ def contract_workbook_data(db: Session, contract: str) -> dict:
     pe = FProjectExpense
     exp_rows = db.execute(
         select(pe).where(pe.linked_sales_order_no == contract)
-        .order_by(pe.expense_date.asc().nullslast(), pe.bxd_no, pe.line_no)
+        .order_by(pe.expense_date.asc().nullslast(), pe.bxd_no, pe.line_no, pe.id)
     ).scalars().all()
 
     # 月度 × 分类汇总：备件成本按出库月，费用按报销月/费用分类（仅生效）
