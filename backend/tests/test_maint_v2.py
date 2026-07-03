@@ -261,3 +261,20 @@ def test_workbook_doc_level_backfill(db, batch):
     m = data["monthly"]["2026-03"]
     assert m["备件消耗"] == Decimal("300.00") and m["驻场工程师"] == Decimal("400")
     assert data["budget"] == Decimal("5000.00")
+
+    # 模板渲染：三页齐全、标题含合同号、表头深色白字、产品成本只填单据首行且高亮、金额千分位
+    from app.api.maintenance import _build_workbook
+    wb = _build_workbook("XS-W", data)
+    assert wb.sheetnames == ["项目预算", "备件明细-氚云", "报销明细"]
+    ws = wb["项目预算"]
+    assert "XS-W" in ws["A1"].value
+    ws2 = wb["备件明细-氚云"]
+    assert ws2.cell(1, 1).font.color.rgb.endswith("FFFFFF")           # 表头白字
+    assert ws2.cell(1, 1).fill.fgColor.rgb.endswith("35506B")         # 深色表头
+    assert ws2.freeze_panes == "A2"
+    assert ws2.cell(2, 13).value == 300.0                             # 单据级总成本填首行
+    assert ws2.cell(2, 13).font.bold                                  # 且高亮加粗
+    assert ws2.cell(3, 13).value is None                              # 第二行不重复填
+    assert ws2.cell(2, 18).number_format == "#,##0.00"                # 金额千分位
+    ws3 = wb["报销明细"]
+    assert ws3.cell(2, 9).number_format == "#,##0.00"
