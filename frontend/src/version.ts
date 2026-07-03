@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.5.0";
+export const APP_VERSION = "1.5.1";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.5.1",
+    date: "2026-07-04",
+    items: [
+      "修复历史采购导入失败与导入页刷屏：氚云历史导出税率列存在「1300.0%」这类被二次放大的录入值（实为 13%），此前一行即导致整批 2 万余行导入失败——现自动纠正并界防（纠不回来的行单行隔离不拖垮整批）；导入作业失败信息改为脱敏短消息（此前把包含整条 SQL 的 48 万字符异常渲染到页面，导致页面被刷屏）",
+    ],
+  },
   {
     version: "1.5.0",
     date: "2026-07-04",

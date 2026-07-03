@@ -199,3 +199,28 @@ def test_empty_pn_classification():
     # 状态未知 → 保守按真错误
     assert transform._empty_pn_error(8, None, None, {}).error_type == "empty_pn"
     assert "empty_pn_inactive" in transform.SOFT_ERROR_TYPES
+
+
+def test_parse_rate_bounds_and_correction():
+    """税率界防+纠偏（1300.0% 实案：一行毒死 22536 行整批导入）。"""
+    from decimal import Decimal
+    from app.etl import cleaner
+    assert cleaner.parse_rate("1300.0%") == Decimal("0.1300")   # 二次放大 → 纠正
+    assert cleaner.parse_rate("600.0%") == Decimal("0.0600")
+    assert cleaner.parse_rate("13") == Decimal("0.1300")        # 裸百分数写法
+    assert cleaner.parse_rate("13.0%") == Decimal("0.1300")     # 原有行为不变
+    assert cleaner.parse_rate("0.13") == Decimal("0.1300")
+    assert cleaner.parse_rate("0.0%") == Decimal("0")
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        cleaner.parse_rate("10001%")                            # 纠正后仍超界 → 行级隔离
+    with _pt.raises(ValueError):
+        cleaner.parse_rate("-5%")
+
+
+def test_job_note_error_sanitized():
+    """作业 note 脱敏：整条 SQL 的异常只留类型+首行 200 字（页面刷屏+泄漏双修）。"""
+    from app.api.imports import _short_err
+    huge = Exception("numeric field overflow\nDETAIL: ...\n[SQL: INSERT INTO f_purchase_order (" + "x" * 500000 + ")]")
+    out = _short_err(huge)
+    assert len(out) < 250 and "INSERT INTO" not in out
