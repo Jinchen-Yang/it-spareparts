@@ -21,7 +21,7 @@ DATA_GROUPS: dict[str, list[str]] = {
 PAGE_KEYS: list[str] = [
     "page_parts", "page_purchases", "page_profit",
     "page_inventory", "page_chat", "page_import", "page_governance",
-    "page_master_data",
+    "page_master_data", "page_maintenance",
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ROW_KEYS]
@@ -41,6 +41,7 @@ LABELS: dict[str, str] = {
     "page_import": "数据导入",
     "page_governance": "数据治理",
     "page_master_data": "备件主数据（新建/编辑 PN）",
+    "page_maintenance": "项目成本（维保出库）",
     "own_customers_only": "只看自己成交的客户（防恶性竞争）",
 }
 
@@ -57,8 +58,10 @@ def _full(own: bool = False) -> dict[str, bool]:
 ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     "admin": _full(),
     "boss": _full(),
+    # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance 必须显式关，
+    # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读全量项目成本（方案 §5）
     "readonly": {**_full(), "page_import": False, "page_governance": False,
-                 "page_master_data": False},
+                 "page_master_data": False, "page_maintenance": False},
     "sales": {
         # 甲方 2026-06-15 确认：销售能看采购成本/毛利（整机拆解加点直卖需要采购价算建议售价）。
         # 供应商仍隐藏（不暴露从谁进货）；逐单销售成交明细另由 own_customers_only 收紧（看不到）。
@@ -69,6 +72,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_parts": True, "page_purchases": True, "page_profit": False,
         "page_inventory": True, "page_chat": True,
         "page_import": False, "page_governance": False,
+        # 项目成本=公司维保项目经营数据，销售不开（同 page_profit 口径）
+        "page_maintenance": False,
         "own_customers_only": True,
     },
     "purchaser": {
@@ -79,6 +84,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_import": False, "page_governance": False,
         # 甲方 2026-06-30：备件主数据(新建/编辑 PN)对采购开放
         "page_master_data": True,
+        # 维保项目成本对采购开放（成本口径本就对采购可见，data_purchase_cost=True）
+        "page_maintenance": True,
         "own_customers_only": False,
     },
 }

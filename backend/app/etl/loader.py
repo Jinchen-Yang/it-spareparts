@@ -24,6 +24,7 @@ from app.etl import mapping
 from app.etl.transform import SOFT_ERROR_TYPES, TransformResult
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inventory import Inventory
+from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysAuditLog
@@ -322,7 +323,8 @@ def _upsert_facts(session: Session, model, rows: list[dict], conflict_col,
 
 # 可更新字段(upsert 修复模式)：排除主键 raw_*_id 与利润派生字段(recompute 专属)
 _PURCHASE_ORDER_UPD = ["order_no", "order_date", "purchaser", "supplier_id",
-                        "linked_sales_order_no", "source_type", "source_type_raw",
+                        "linked_sales_order_no", "linked_maintenance_order_no",
+                        "source_type", "source_type_raw",
                         "amount_ex_tax", "tax_rate", "is_tax_inclusive", "tax_amount",
                         "amount_inc_tax", "data_status", "import_batch_id"]
 _PURCHASE_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "description",
@@ -335,6 +337,14 @@ _SALES_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "descri
                     "brand", "category_major", "category_minor", "machine_or_part", "unit",
                     "qty", "unit_price", "line_amount", "generic_product", "serial_numbers",
                     "anomaly_flags", "import_batch_id"]
+# 维保：成本回填字段(unit_cost/cost_amount/cost_source/cost_tax_basis/price_month/
+# trace_months/linked_purchase_order_no)为 maintenance_cost.recompute 专属，一律排除
+_MAINT_ORDER_UPD = ["order_no", "order_date", "linked_sales_order_no", "project_raw",
+                     "project_std", "customer_id", "end_customer", "demand_type",
+                     "business_type", "salesperson", "warehouse", "maint_start", "maint_end",
+                     "data_status", "import_batch_id"]
+_MAINT_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "description",
+                    "qty", "return_qty", "serial_numbers", "anomaly_flags", "import_batch_id"]
 
 
 def load(session: Session, result: TransformResult, batch_id: int, snapshot_date: date,
@@ -343,6 +353,8 @@ def load(session: Session, result: TransformResult, batch_id: int, snapshot_date
     if result.file_type == mapping.INVENTORY:
         return _load_inventory(session, result, batch_id, snapshot_date,
                                operated_by, audit_overwrites)
+    if result.file_type == mapping.MAINTENANCE:
+        return _load_maintenance(session, result, batch_id, mode, operated_by, audit_overwrites)
     return _load_orders(session, result, batch_id, mode, operated_by, audit_overwrites)
 
 
@@ -399,6 +411,7 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
                 "supplier_id": sup_id.get(o.get("supplier_name_raw")),
                 "source_type": o.get("source_type"), "source_type_raw": o.get("source_type_raw"),
                 "linked_sales_order_no": o.get("linked_sales_order_no"),
+                "linked_maintenance_order_no": o.get("linked_maintenance_order_no"),
                 "is_tax_inclusive": o.get("is_tax_inclusive"),
                 "tax_amount": o.get("tax_amount"),
                 "amount_inc_tax": o.get("amount_inc_tax"),
@@ -437,6 +450,78 @@ def _load_orders(session: Session, result: TransformResult, batch_id: int,
     line_upd_cols = (_SALES_LINE_UPD if is_sales else _PURCHASE_LINE_UPD) if upsert else None
     line_stats = _upsert_facts(session, line_model, line_rows, line_model.raw_line_id,
                                line_upd_cols, audit=audit)
+
+    return {
+        "source_rows_total": result.rows_total,
+        "fact_rows_inserted": line_stats["inserted"],
+        "fact_rows_updated": line_stats["updated"],
+        "fact_rows_skipped": line_stats["skipped"],
+        "fact_rows_error": sum(1 for e in result.errors if e.error_type not in SOFT_ERROR_TYPES),
+        "rows_inactive": result.rows_inactive,
+        "orders_inserted": order_stats["inserted"],
+        "orders_updated": order_stats["updated"],
+        "import_mode": mode,
+        "new_parts": new_parts,
+    }
+
+
+def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
+                      mode: str = "skip", operated_by: str | None = None,
+                      audit_overwrites: bool = False) -> dict:
+    """维保出库（WBDD）入库：与订单路径同套路——商品身份解析 + 客户维度 + 头/行幂等 upsert。
+
+    成本回填字段不在 upsert 白名单内（maintenance_cost.recompute 专属），重导不冲成本。
+    """
+    upsert = (mode == "upsert")
+    audit = (operated_by, batch_id) if (upsert and audit_overwrites) else None
+    # 1) 商品身份解析（别名/合并重定向 + 建档，非销售口径：不写品类）+ alias
+    resolution, new_parts = _resolve_line_parts(session, result.lines, is_sales=False)
+    _upsert_aliases(session, result.lines, resolution)
+
+    # 2) 客户维度（维保客户名实测混入联系人后缀，v1 原样入库，治理留二期）
+    orders = result.orders
+    cust_rows = [{
+        "name_raw": o["customer_name"], "name_normalized": o["customer_name"],
+        "customer_type": None, "customer_source": None, "city": None,
+    } for o in orders.values() if o.get("customer_name")]
+    cust_id = _upsert_named_dim(session, DimCustomer, cust_rows,
+                                ["name_normalized", "customer_type", "customer_source", "city"])
+
+    # 3) 维保单头
+    order_rows = [{
+        "raw_order_id": o["raw_order_id"], "order_no": o["order_no"],
+        "order_date": o["order_date"],
+        "linked_sales_order_no": o.get("linked_sales_order_no"),
+        "project_raw": o.get("project_raw"), "project_std": o.get("project_std"),
+        "customer_id": cust_id.get(o.get("customer_name")),
+        "end_customer": o.get("end_customer"),
+        "demand_type": o.get("demand_type"), "business_type": o.get("business_type"),
+        "salesperson": o.get("salesperson"), "warehouse": o.get("warehouse"),
+        "maint_start": o.get("maint_start"), "maint_end": o.get("maint_end"),
+        "data_status": o["data_status"], "import_batch_id": batch_id,
+    } for o in orders.values()]
+    order_stats = _upsert_facts(session, FMaintenanceOrder, order_rows,
+                                FMaintenanceOrder.raw_order_id,
+                                _MAINT_ORDER_UPD if upsert else None, audit=audit)
+    raw_ids = [o["raw_order_id"] for o in orders.values()]
+    oid_map = dict(session.execute(
+        select(FMaintenanceOrder.raw_order_id, FMaintenanceOrder.id)
+        .where(FMaintenanceOrder.raw_order_id.in_(raw_ids))
+    ).all())
+
+    # 4) 出库明细行
+    line_rows = [{
+        "raw_line_id": ln["raw_line_id"], "order_id": oid_map[ln["_order_raw_id"]],
+        "line_no": ln["line_no"], "part_id": resolution[ln["pn_raw"]][0],
+        "pn_std": ln["pn_std"], "pn_raw": ln["pn_raw"],
+        "description": ln["description"],
+        "qty": ln["qty"], "return_qty": ln["return_qty"],
+        "serial_numbers": ln["serial_numbers"],
+        "anomaly_flags": ln["anomaly_flags"], "import_batch_id": batch_id,
+    } for ln in result.lines]
+    line_stats = _upsert_facts(session, FMaintenanceLine, line_rows,
+                               FMaintenanceLine.raw_line_id,
+                               _MAINT_LINE_UPD if upsert else None, audit=audit)
 
     return {
         "source_rows_total": result.rows_total,
