@@ -147,7 +147,11 @@ def _score(row: dict, ctx: dict, alias_hit: tuple[float, str] | None) -> tuple[f
     if k and n:
         if k >= n:
             if n >= 2:
-                score += 0.5
+                # 吻合密度：查询词总长 / 描述长——用户敲的就是（近）整段描述时，
+                # 描述≈查询本身的行排在"描述更长、含更多别的词"的同规格行之前（同分并列破局）
+                desc_len = len(row.get("description") or "") or 1
+                density = min(1.0, ctx.get("q_len", 0) / desc_len)
+                score += 0.5 + 0.1 * density
                 reasons.append("描述全词命中")
             else:
                 score += 0.25
@@ -225,6 +229,7 @@ def resolve(db: Session, query: str, limit: int = 10,
     groups = keyword_term_groups(query)
     ctx["doc_hits"] = {}
     ctx["term_count"] = len(groups)
+    ctx["q_len"] = sum(len(g[0]) for g in groups)
     if groups:
         for r in _doc_recall(db, groups):
             ctx["doc_hits"][r["pn_std"]] = int(r["hits"])

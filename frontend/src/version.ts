@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.3.2";
+export const APP_VERSION = "1.3.3";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.3.3",
+    date: "2026-07-03",
+    items: [
+      "搜索排序：输入（近）整段标准描述时，描述与查询吻合度最高的型号排最前（此前几十个同规格不同品牌的型号并列，按型号长短排序，目标型号可能被挤出前 20）",
+    ],
+  },
   {
     version: "1.3.2",
     date: "2026-07-03",
