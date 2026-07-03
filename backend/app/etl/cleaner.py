@@ -74,7 +74,12 @@ def standardize_pn(raw) -> tuple[str | None, str | None, bool]:
 
 
 def parse_rate(x) -> Decimal | None:
-    """'13.0%'→0.1300，'0.0%'→0，0.13→0.1300。"""
+    """'13.0%'→0.1300，'0.0%'→0，0.13→0.1300。
+
+    界防+纠偏（2026-07-04 实测：氚云历史导出税率列有 '1300.0%'×1488 行/'600.0%'——
+    百分号字段被二次放大，真实意图 13%/6%）：解析后 ≥1 的值按「多乘了 100」纠正一次；
+    纠正后仍不在 [0,1) → 抛 ValueError（调用方置 None，走 税金/不含税 反推兜底）。
+    绝不把 ≥10 的值放行到 Numeric(5,4)——一行会毒死整批 INSERT（22536 行历史导入实翻过车）。"""
     if _is_blank(x):
         return None
     s = str(x).strip()
@@ -85,6 +90,10 @@ def parse_rate(x) -> Decimal | None:
             val = Decimal(s)
     except (InvalidOperation, ValueError) as exc:
         raise ValueError(f"税率非法: {x!r}") from exc
+    if Decimal(1) <= val <= Decimal(100):
+        val = val / Decimal(100)
+    if not (Decimal(0) <= val < Decimal(1)):
+        raise ValueError(f"税率超界: {x!r}")
     return val.quantize(Decimal("0.0001"))
 
 

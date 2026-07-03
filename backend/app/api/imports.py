@@ -1,4 +1,5 @@
 """导入相关 API（§9）：单文件上传、批量后台作业、批次/作业列表与详情。"""
+import logging
 import os
 import tempfile
 import threading
@@ -163,6 +164,17 @@ def precheck(
             "missing_price_any": any(r["missing_price"] for r in results)}
 
 
+_log = logging.getLogger("imports")
+_NOTE_MAX = 4000          # 作业 note 总长上限：note 会整段渲染到导入页，绝不能无界
+
+
+def _short_err(exc: Exception) -> str:
+    """note 只存脱敏短消息。完整异常（psycopg 错误含整条 SQL+千行参数展开，实测 48.7 万字符）
+    只进服务端日志——否则轮询作业状态时整页被 SQL 刷屏，且泄漏表结构（同 TOOLS-1 教训）。"""
+    first = (str(exc).splitlines() or [exc.__class__.__name__])[0]
+    return f"{exc.__class__.__name__}: {first[:200]}"
+
+
 def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
                         created_by: str | None) -> None:
     """后台 worker：逐文件 run_import（各自事务，复用全局导入锁串行），更新作业进度。
@@ -192,11 +204,12 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
             except ReaderError as exc:
                 db.commit()  # 失败批次已建并带 job_id，提交留痕
                 errored += 1
-                notes.append(f"解析失败：{name}（{exc}）")
+                notes.append(f"解析失败：{name}（{str(exc)[:300]}）")
             except Exception as exc:  # noqa: BLE001
                 db.rollback()
                 errored += 1
-                notes.append(f"导入异常：{name}（{exc}）")
+                _log.exception("import job=%s file=%s failed", job_id, name)
+                notes.append(f"导入异常：{name}（{_short_err(exc)}）")
             finally:
                 if os.path.exists(tmp):
                     os.remove(tmp)
@@ -210,7 +223,7 @@ def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
         job_status = "done" if errored == 0 else ("failed" if done == 0 else "partial")
         db.execute(update(SysImportJob).where(SysImportJob.id == job_id).values(
             status=job_status, finished_at=func.now(), done_files=done, error_files=errored,
-            note="；".join(notes) if notes else None))
+            note=("；".join(notes))[:_NOTE_MAX] if notes else None))
         db.commit()
     except Exception:  # noqa: BLE001 — worker 不能让异常逃逸（无人接），尽力标失败
         db.rollback()
