@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Card, DatePicker, Input, Button, Space, Tag, Tooltip, message, Statistic, Row, Col,
-  Drawer, Progress, Alert, Empty,
+  Drawer, Progress, Alert, Empty, Segmented,
 } from "antd";
 import { InfoCircleOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -37,23 +37,51 @@ interface LineRow {
   cost_source: string | null; cost_tax_basis: string | null;
   price_month: string | null; trace_months: number | null;
   linked_purchase_order_no: string | null; anomaly_flags: string[];
+  price_distance_days: number | null; confidence: string | null;
 }
+
+interface BoardRow {
+  contract: string | null;
+  status: "red" | "yellow" | "green" | "no_budget";
+  projects: { project: string; lines: number; spent_parts: number | null }[];
+  lines: number; coverage_pct: number | null;
+  spent_parts: number | null; spent_expense: number | null; spent: number | null;
+  budget: number | null; remaining: number | null; remaining_pct: number | null;
+  low_conf_pct: number | null;
+  maint_start: string | null; maint_end: string | null;
+  first_out: string | null; last_out: string | null;
+}
+
+const STATUS_META: Record<BoardRow["status"], { label: string; color: string; bg: string }> = {
+  red: { label: "亏损/超支", color: "#c0524a", bg: "rgba(192,82,74,0.08)" },
+  yellow: { label: "预警 · 剩余≤20%", color: "#b8860b", bg: "rgba(212,160,23,0.10)" },
+  green: { label: "健康", color: "#3f7a45", bg: "rgba(63,122,69,0.07)" },
+  no_budget: { label: "无预算(未关联合同额)", color: "#8c8c8c", bg: "rgba(0,0,0,0.03)" },
+};
+const CONF_META: Record<string, { label: string; color: string }> = {
+  high: { label: "高", color: "green" }, medium: { label: "中", color: "blue" },
+  low: { label: "低", color: "orange" },
+};
 
 // 成本来源五态（口径见开发方案 §4.2）；trace_avg 必须带追溯月数标注（客户要求）
 const SOURCE_META: Record<string, { label: string; color: string }> = {
   direct: { label: "实际·专属采购", color: "green" },
+  window: { label: "实际·±7天最近价", color: "cyan" },
   month_avg: { label: "实际·当月均价", color: "blue" },
   trace_avg: { label: "预估·追溯均价", color: "orange" },
   sales_ref: { label: "没有采购有销售", color: "purple" },
   none: { label: "无成本", color: "red" },
 };
-const SOURCE_ORDER = ["direct", "month_avg", "trace_avg", "sales_ref", "none"];
+const SOURCE_ORDER = ["direct", "window", "month_avg", "trace_avg", "sales_ref", "none"];
 const COVERAGE_WARN_PCT = 80;   // 覆盖率预警线（经验值，非验收线；<此值标红提示核对无成本行）
 
-function SourceTag({ source, trace }: { source: string | null; trace?: number | null }) {
+function SourceTag({ source, trace, distance }: {
+  source: string | null; trace?: number | null; distance?: number | null;
+}) {
   if (!source) return <span style={{ color: "var(--mb-text-3)" }}>-</span>;
   const m = SOURCE_META[source] || { label: source, color: "default" };
-  const suffix = trace && trace >= 1 ? `·追溯${trace}月` : "";
+  const suffix = source === "window" && distance != null ? `·距${distance}天`
+    : trace && trace >= 1 ? `·追溯${trace}月` : "";
   return <Tag color={m.color}>{m.label}{suffix}</Tag>;
 }
 
@@ -72,6 +100,8 @@ export default function ProjectCostPage() {
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<ProjectRow[]>([]);
+  const [board, setBoard] = useState<BoardRow[]>([]);
+  const [boardFilter, setBoardFilter] = useState<string>("all");
   const [startDate, setStartDate] = useState("");
   const [loading, setLoading] = useState(false);
   const [recomputing, setRecomputing] = useState(false);
@@ -96,9 +126,14 @@ export default function ProjectCostPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const { data } = await api.get("/maintenance/projects", { params: params() });
+      const [{ data }, bd] = await Promise.all([
+        api.get("/maintenance/projects", { params: params() }),
+        api.get("/maintenance/board", { params: {
+          date_from: params().date_from, date_to: params().date_to } }),
+      ]);
       setRows(data.rows);
       setStartDate(data.start_date);
+      setBoard(bd.data.rows);
     } catch {
       message.error("项目成本加载失败，请稍后重试或检查权限");
     } finally {
@@ -151,8 +186,9 @@ export default function ProjectCostPage() {
     try {
       const { data } = await api.post("/maintenance/recompute");
       message.success(
-        `重算完成：${data.lines_in_scope} 行 · 专属采购 ${data.direct} · 当月均价 ${data.month_avg}` +
-        ` · 追溯 ${data.trace_avg} · 销售参考 ${data.sales_ref} · 无成本 ${data.none}`);
+        `重算完成：${data.lines_in_scope} 行 · 专属采购 ${data.direct} · ±7天 ${data.window}` +
+        ` · 当月均价 ${data.month_avg} · 追溯 ${data.trace_avg} · 销售参考 ${data.sales_ref}` +
+        ` · 无成本 ${data.none}`);
       load();
     } catch {
       message.error("重算失败（需要管理员权限）");
@@ -250,8 +286,13 @@ export default function ProjectCostPage() {
       render: (v: number | null) => (v ? <Tag color="orange">{v}</Tag> : "-") },
     { title: "单价", dataIndex: "unit_cost", width: 100, align: "right", render: money },
     { title: "金额", dataIndex: "cost_amount", width: 110, align: "right", render: money },
-    { title: "成本来源", width: 170,
-      render: (_, r) => <SourceTag source={r.cost_source} trace={r.trace_months} /> },
+    { title: "成本来源", width: 180,
+      render: (_, r) => <SourceTag source={r.cost_source} trace={r.trace_months}
+                                   distance={r.price_distance_days} /> },
+    { title: "置信度", dataIndex: "confidence", width: 76,
+      render: (v: string | null) => v
+        ? <Tag color={CONF_META[v]?.color}>{CONF_META[v]?.label || v}</Tag>
+        : <span style={{ color: "var(--mb-text-3)" }}>-</span> },
     { title: "口径", dataIndex: "cost_tax_basis", width: 70,
       render: (v: string | null) => v ? <Tag>{v === "inc" ? "含税" : "不含税"}</Tag> : "-" },
     { title: "取价月", dataIndex: "price_month", width: 90 },
@@ -290,6 +331,102 @@ export default function ProjectCostPage() {
           <Button type="primary" loading={recomputing} onClick={recompute}>重算成本</Button>
           <Button loading={exporting} onClick={exportCsv} disabled={!rows.length}>导出 CSV</Button>
         </Space>
+      </Card>
+
+      <Card
+        title={<Space>项目盈亏看板
+          <Tooltip title="按合同（销售订单 XSDD）聚合：预算=合同金额（含税参考）；已花=备件成本(混合口径参考)+生效报销费用。共用合同自动合并为一张卡。剩余≤20% 黄灯预警、超支红灯。">
+            <InfoCircleOutlined style={{ color: "var(--mb-text-3)" }} />
+          </Tooltip></Space>}
+        extra={<Segmented
+          value={boardFilter}
+          onChange={(v) => setBoardFilter(v as string)}
+          options={[
+            { label: `全部 ${board.length}`, value: "all" },
+            { label: `🔴 ${board.filter((b) => b.status === "red").length}`, value: "red" },
+            { label: `🟡 ${board.filter((b) => b.status === "yellow").length}`, value: "yellow" },
+            { label: `🟢 ${board.filter((b) => b.status === "green").length}`, value: "green" },
+            { label: `无预算 ${board.filter((b) => b.status === "no_budget").length}`, value: "no_budget" },
+          ]}
+        />}
+      >
+        {board.length === 0 ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据（导入维保出库后自动生成）" />
+        ) : (
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            {(boardFilter === "all" ? board : board.filter((b) => b.status === boardFilter)).map((b) => {
+              const meta = STATUS_META[b.status];
+              const spentPct = b.budget && b.spent != null
+                ? Math.round((b.spent / b.budget) * 100) : null;
+              let timePct: number | null = null;
+              if (b.maint_start && b.maint_end) {
+                const s0 = new Date(b.maint_start).getTime();
+                const e0 = new Date(b.maint_end).getTime();
+                if (e0 > s0) timePct = Math.min(Math.max(
+                  Math.round(((Date.now() - s0) / (e0 - s0)) * 100), 0), 100);
+              }
+              return (
+                <div key={b.contract ?? "(none)"} style={{
+                  width: 370, borderRadius: 8, padding: "12px 14px",
+                  border: "1px solid " + meta.color + "44",
+                  borderLeft: "4px solid " + meta.color, background: meta.bg,
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <b style={{ fontFamily: "monospace", fontSize: 13 }}>{b.contract || "（未关联合同）"}</b>
+                    <Space size={6}>
+                      <Tag color={b.status === "red" ? "red" : b.status === "yellow" ? "gold"
+                        : b.status === "green" ? "green" : "default"}>{meta.label}</Tag>
+                      {b.contract && (
+                        <a style={{ fontSize: 12 }} onClick={() =>
+                          download("/maintenance/export-workbook", `项目工作簿_${b.contract}.xlsx`,
+                                   { contract: b.contract })
+                            .catch(() => message.error("工作簿导出失败，请稍后重试或检查权限"))
+                        }>工作簿</a>
+                      )}
+                    </Space>
+                  </div>
+                  <div style={{ marginTop: 8, fontSize: 12.5 }}>
+                    预算 {money(b.budget)} · 已花 {money(b.spent)} · 剩余{" "}
+                    <span style={{ color: meta.color, fontWeight: 600 }}>
+                      {money(b.remaining)}{b.remaining_pct != null ? `（${b.remaining_pct}%）` : ""}
+                    </span>
+                  </div>
+                  {spentPct != null && (
+                    <div style={{ marginTop: 4 }}>
+                      <Progress percent={Math.min(spentPct, 100)} size="small"
+                                strokeColor={meta.color} showInfo={false} />
+                      <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>
+                        预算消耗 {spentPct}%{spentPct > 100 ? "（超支）" : ""}
+                        {timePct != null ? ` / 时间进度 ${timePct}%` : ""}
+                        {timePct != null && spentPct > timePct + 15 ? " · 花钱快于时间 ⚠" : ""}
+                      </div>
+                    </div>
+                  )}
+                  <div style={{ marginTop: 6, fontSize: 12, color: "#6b665e" }}>
+                    备件 {money(b.spent_parts)} + 费用 {money(b.spent_expense)}
+                    {b.coverage_pct != null ? ` · 覆盖率 ${b.coverage_pct}%` : ""}
+                    {(b.low_conf_pct ?? 0) >= 30 && (
+                      <Tooltip title="低置信（追溯/销售参考）成本占比高，金额估算成分大，建议核对">
+                        <Tag color="orange" style={{ marginLeft: 6 }}>估算成分高 {b.low_conf_pct}%</Tag>
+                      </Tooltip>
+                    )}
+                  </div>
+                  <div style={{ marginTop: 6, fontSize: 12 }}>
+                    {b.projects.slice(0, 3).map((pj) => (
+                      <div key={pj.project} style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        <a onClick={() => openDetail(pj.project)}>{pj.project}</a>
+                        <span style={{ color: "var(--mb-text-3)" }}> · {money(pj.spent_parts)}</span>
+                      </div>
+                    ))}
+                    {b.projects.length > 3 && (
+                      <span style={{ color: "var(--mb-text-3)" }}>…等 {b.projects.length} 个项目</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </Card>
 
       <Row gutter={16}>

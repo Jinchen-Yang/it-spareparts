@@ -66,10 +66,12 @@ def test_direct_hit_weighted(db, batch):
 
 
 def test_month_avg(db, batch):
-    """A1 当月加权：无直配关联时取同 part 当月均价（跨采购单加权）。"""
+    """A2 当月加权：无直配/±7天窗口命中时取同 part 当月均价（跨采购单加权）。
+
+    v2：两笔采购都放在出库日 ±7 天窗口之外（13/15 天），确保不落 window 层。"""
     _load_purchases(db, batch, {
         "P1": f.purchase_head("P1", on=date(2026, 3, 2)),
-        "P2": f.purchase_head("P2", on=date(2026, 3, 20)),
+        "P2": f.purchase_head("P2", on=date(2026, 3, 30)),
     }, [
         f.purchase_line("P1", "PL1", "PN-B", qty="1", price="90"),
         f.purchase_line("P2", "PL2", "PN-B", qty="1", price="110"),
@@ -133,11 +135,13 @@ def test_none_no_cost_flag(db, batch):
 # ---------- 口径细节 ----------
 
 def test_tax_preference_inc_first(db, batch):
-    """Q4：同月含税/不含税并存 → 优先含税并标注；仅不含税 → ex。"""
+    """Q4：同一取价日含税/不含税并存 → 优先含税并标注；仅不含税 → ex。
+
+    v2：日期近优先于税口径（window 层），税偏好只在同一取价日内取舍 → 两单同日验证。"""
     _load_purchases(db, batch, {
         "P1": f.purchase_head("P1", on=date(2026, 3, 2), is_tax_inclusive=True,
                               tax_rate=Decimal("0.13")),
-        "P2": f.purchase_head("P2", on=date(2026, 3, 3)),
+        "P2": f.purchase_head("P2", on=date(2026, 3, 2)),
     }, [
         f.purchase_line("P1", "PL1", "PN-E", qty="1", price="113"),
         f.purchase_line("P2", "PL2", "PN-E", qty="1", price="100"),

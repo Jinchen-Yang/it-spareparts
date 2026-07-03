@@ -80,6 +80,10 @@ class FMaintenanceLine(Base):
     price_month: Mapped[str | None] = mapped_column(String(7))           # 取价月份 YYYY-MM
     trace_months: Mapped[int | None] = mapped_column(SmallInteger)       # 0=当月；≥1 前端须标注
     linked_purchase_order_no: Mapped[str | None] = mapped_column(String(64))  # direct 命中的采购单
+    # v2（§16.1）：window 层取价日距出库日的天数（direct=0，window=0..7，其余 NULL）
+    price_distance_days: Mapped[int | None] = mapped_column(SmallInteger)
+    # v2：置信度 high(direct/window 近乎精确)/medium(当月加权)/low(追溯/销售参考，中位偏差 25%+)
+    confidence: Mapped[str | None] = mapped_column(String(8))
     anomaly_flags: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'")
     )
@@ -88,4 +92,35 @@ class FMaintenanceLine(Base):
     __table_args__ = (
         Index("ix_ml_order", "order_id"),
         Index("ix_ml_part", "part_id"),
+    )
+
+
+class FProjectExpense(Base):
+    """维保报销单（BXD）费用行（§16.3）：经 XSDD 归集到合同/项目，盈亏看板"已花"的费用侧。
+
+    正式数据源=氚云 BXD 原生全量导出（勾数据ID）；无数据ID时以 bxd_no#line_no 复合键幂等。
+    金额在行级；生效口径 流程状态=MAINT_EXPENSE_ACTIVE_STATUS（'已结束'）。
+    """
+
+    __tablename__ = "f_project_expense"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    raw_line_id: Mapped[str] = mapped_column(String(80), unique=True)    # 数据ID 或 bxd_no#line_no
+    bxd_no: Mapped[str | None] = mapped_column(String(64))               # 数据标题正则提取 BXD-\d{8}-\d+
+    line_no: Mapped[int | None] = mapped_column(Integer)
+    data_status: Mapped[str | None] = mapped_column(String(16))          # 流程状态
+    expense_date: Mapped[date | None] = mapped_column(Date)              # 报销日期
+    person: Mapped[str | None] = mapped_column(String(64))               # 报销人员
+    expense_type: Mapped[str | None] = mapped_column(String(64))         # 报销类别（头）
+    fee_category: Mapped[str | None] = mapped_column(String(64))         # 费用分类（行）
+    reason: Mapped[str | None] = mapped_column(Text)                     # 支出事由
+    linked_sales_order_no: Mapped[str | None] = mapped_column(String(64))  # XSDD，项目/合同归集键
+    amount: Mapped[Decimal | None] = mapped_column(Money)                # 报销金额（行级）
+    import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_pe_bxd", "bxd_no"),
+        Index("ix_pe_linked", "linked_sales_order_no"),
+        Index("ix_pe_status_date", "data_status", "expense_date"),
     )

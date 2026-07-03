@@ -142,6 +142,10 @@ MAINT_TRACE_MAX_MONTHS = 3                        # 均价追溯上限（月）�
 MAINT_SALES_REF_BUSINESS_TYPES = ["备件销售"]      # "没有采购有销售"参考池的业务类型（维保类销售单是一口价占位，无真实单价）
 MAINT_POOL_EXCLUDE_PNS = ["一批备件"]              # 打包采购占位 PN（实测 13 行 2,333 万），不进任何价格池
 MAINT_TAX_PREFERENCE = "inc_first"                # 同一取价层含税/不含税并存时优先含税（inc_first | ex_first）
+# ---- v2（§16，1633 行财务手工价黄金样本校准）----
+MAINT_PRICE_WINDOW_DAYS = 7                       # ±窗口天数：出库日 ±7 天内最近采购价优先于当月均价（同距取更早、同日加权）
+MAINT_BUDGET_WARN_PCT = Decimal("0.20")           # 盈亏看板黄灯阈值：剩余预算占比 ≤20% 报警（用户口径"只剩 20% 就报警"）
+MAINT_EXPENSE_ACTIVE_STATUS = "已结束"             # 报销单生效口径（其余枚举待全量数据确认）
 
 # 目标毛利率（报价提示/低毛利标记用；整机拆解的"建议售价"=成本×1/(1-此值)）
 TARGET_MARGIN = Decimal("0.20")
@@ -320,7 +324,11 @@ FIELD_GROUPS = {
                       # unit_cost/cost_amount 已在上；成本来源/取价元信息同样可反推成本口径，一并登记）
                       "cost_total", "cost_inc", "cost_ex",
                       "cost_source", "cost_tax_basis", "price_month", "trace_months",
-                      "linked_purchase_order_no"],
+                      "linked_purchase_order_no",
+                      # 维保 v2（§16）：盈亏看板与取价元信息派生键（budget=合同额亦可反推毛利）
+                      "spent", "spent_parts", "spent_expense", "budget",
+                      "remaining", "remaining_pct", "low_conf_pct",
+                      "price_distance_days", "confidence"],
     # 毛利金额：能反推成本（profit.aggregate 两法派生键一并登记）
     "profit_amount": ["gross_profit", "gross_profit_moving", "gross_profit_fifo"],
     # 毛利率：见反推警告（_profit_summary 与 profit.aggregate 的两法派生键一并登记）
