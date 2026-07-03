@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.3.5";
+export const APP_VERSION = "1.3.6";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.3.6",
+    date: "2026-07-03",
+    items: [
+      "替代料（通用号）改为整齐列表：通用号 / 关系 / 库存 / 描述分列展示，点击通用号可直接跳转到该型号的全景；卡片可折叠（折叠后显示数量与库存合计），状态记忆在本机",
+    ],
+  },
   {
     version: "1.3.5",
     date: "2026-07-03",
