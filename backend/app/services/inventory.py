@@ -123,3 +123,129 @@ def update_inventory(db: Session, inv_id: int, manual_qty: Decimal | None,
                        operated_by=operated_by))
     db.commit()
     return after
+
+
+# ============================================================
+# 锚定动态库存（甲方 2026-07-04）：最近库存快照做期初 + 快照日之后单据流水。
+# 动态可用 = 期初 + 采购入 − 销售出 − 维保出（退货冲抵）。截止今天（未来日期脏单不计）。
+# 期初来源可插拔：8 月盘点结果按普通库存文件导入后，锚点自动前移、期初随之变准。
+# 仓库维度：采购单无仓库字段 → 只算型号级；分仓展示用快照行作参考（甲方选定口径）。
+# ============================================================
+
+def dynamic_stock_map(db: Session, part_ids: list[int] | None = None) -> dict[int, dict]:
+    """按 part 计算锚定动态库存。返回 {part_id: {dynamic_qty, anchor_qty, anchor_date,
+    in_qty, out_sales, out_maint}}；无快照的新型号期初=0、流水全算。"""
+    from sqlalchemy import case
+
+    from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+    from app.models.purchase import FPurchaseLine, FPurchaseOrder
+    from app.models.sales import FSalesLine, FSalesOrder
+    from app.services.query_filters import active_orders
+
+    if part_ids is not None and not part_ids:
+        return {}
+    today = date.today()
+    display = case((Inventory.is_qty_overridden, Inventory.manual_qty),
+                   else_=Inventory.source_qty)
+    anchor_q = (
+        select(Inventory.part_id.label("pid"),
+               func.sum(display).label("aq"),
+               func.max(Inventory.snapshot_date).label("ad"))
+        .group_by(Inventory.part_id)
+    )
+    if part_ids is not None:
+        anchor_q = anchor_q.where(Inventory.part_id.in_(part_ids))
+    anchor_sq = anchor_q.subquery()
+
+    def _blank() -> dict:
+        return {"anchor_qty": Decimal(0), "anchor_date": None, "in_qty": Decimal(0),
+                "out_sales": Decimal(0), "out_maint": Decimal(0)}
+
+    out: dict[int, dict] = {}
+    for pid, aq, ad in db.execute(select(anchor_sq.c.pid, anchor_sq.c.aq, anchor_sq.c.ad)):
+        rec = _blank()
+        rec["anchor_qty"], rec["anchor_date"] = aq or Decimal(0), ad
+        out[pid] = rec
+
+    def _flow(line, order, qty_expr, key):
+        stmt = (
+            select(line.part_id, func.coalesce(func.sum(qty_expr), 0))
+            .join(order, line.order_id == order.id)
+            .outerjoin(anchor_sq, anchor_sq.c.pid == line.part_id)
+            .where(order.order_date.is_not(None), order.order_date <= today,
+                   or_(anchor_sq.c.ad.is_(None), order.order_date > anchor_sq.c.ad))
+            .group_by(line.part_id)
+        )
+        stmt = active_orders(stmt, order)
+        if part_ids is not None:
+            stmt = stmt.where(line.part_id.in_(part_ids))
+        for pid, qv in db.execute(stmt):
+            out.setdefault(pid, _blank())[key] = qv or Decimal(0)
+
+    _flow(FPurchaseLine, FPurchaseOrder, func.coalesce(FPurchaseLine.qty, 0), "in_qty")
+    _flow(FSalesLine, FSalesOrder, func.coalesce(FSalesLine.qty, 0), "out_sales")
+    _flow(FMaintenanceLine, FMaintenanceOrder,
+          func.coalesce(FMaintenanceLine.qty, 0) - func.coalesce(FMaintenanceLine.return_qty, 0),
+          "out_maint")
+
+    for rec in out.values():
+        rec["dynamic_qty"] = (rec["anchor_qty"] + rec["in_qty"]
+                              - rec["out_sales"] - rec["out_maint"])
+    return out
+
+
+def list_dynamic(db: Session, q: str | None, page: int, page_size: int,
+                 user_ctx: security.UserContext | None = None) -> dict:
+    """动态库存列表（型号级为主）：动态可用/期初(锚点日)/之后入出，分仓快照行作参考。"""
+    from app.models.dimensions import DimPart
+    from app.services.query_filters import keyword_term_groups
+
+    smap = dynamic_stock_map(db)
+    ids = list(smap)
+    if q and q.strip() and ids:
+        stmt = select(DimPart.id).where(DimPart.id.in_(ids))
+        for g in keyword_term_groups(q):
+            likes = [f"%{v}%" for v in g]
+            stmt = stmt.where(or_(
+                *[DimPart.pn_std.ilike(lk) for lk in likes],
+                *[DimPart.description.ilike(lk) for lk in likes],
+                *[DimPart.brand.ilike(lk) for lk in likes],
+            ))
+        ids = [i for (i,) in db.execute(stmt)]
+
+    ids.sort(key=lambda i: (-(smap[i]["dynamic_qty"]), i))
+    total = len(ids)
+    page = max(page, 1)
+    page_ids = ids[(page - 1) * page_size: page * page_size]
+
+    parts = {}
+    if page_ids:
+        parts = {p.id: p for p in db.execute(
+            select(DimPart).where(DimPart.id.in_(page_ids))).scalars()}
+    wh: dict[int, list] = {}
+    if page_ids:
+        for inv in db.execute(select(Inventory).where(Inventory.part_id.in_(page_ids))
+                              .order_by(Inventory.warehouse)).scalars():
+            wh.setdefault(inv.part_id, []).append({
+                "id": inv.id, "warehouse": inv.warehouse, "qty": _d(_display_qty(inv)),
+                "source_qty": _d(inv.source_qty), "manual_qty": _d(inv.manual_qty),
+                "is_qty_overridden": inv.is_qty_overridden,
+                "safety_stock": _d(inv.safety_stock),
+                "unit_cost": _d(inv.unit_cost), "inventory_value": _d(inv.inventory_value),
+                "snapshot_date": inv.snapshot_date.isoformat() if inv.snapshot_date else None,
+            })
+
+    items = []
+    for i in page_ids:
+        p, s = parts.get(i), smap[i]
+        if p is None:
+            continue
+        items.append({
+            "part_id": i, "pn_std": p.pn_std, "description": p.description, "brand": p.brand,
+            "dynamic_qty": _d(s["dynamic_qty"]), "anchor_qty": _d(s["anchor_qty"]),
+            "anchor_date": s["anchor_date"].isoformat() if s["anchor_date"] else None,
+            "in_qty": _d(s["in_qty"]), "out_sales": _d(s["out_sales"]),
+            "out_maint": _d(s["out_maint"]),
+            "warehouses": wh.get(i, []),
+        })
+    return {"total": total, "page": page, "page_size": page_size, "items": items}
