@@ -410,6 +410,8 @@ export interface Overview {
   substitutes: {
     pn_std: string; description: string | null; source: string;
     relation?: string; substitute_type?: string | null;
+    via?: string | null;          // 间接互替：经由哪个通用号连到本组
+    stock_qty?: number | null;    // 该通用号当前库存合计
   }[];
   profit_summary: {
     avg_purchase_cost: number | null;

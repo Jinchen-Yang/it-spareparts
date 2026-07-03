@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.3.4";
+export const APP_VERSION = "1.3.5";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.3.5",
+    date: "2026-07-03",
+    items: [
+      "通用号（替代料）成组自动互通：给一个型号添加多个通用号后，查询组内任何一个号，都能看到组里其余所有号（间接关系标注「互替·经 XX」）；单向替代不参与成组，仅在直连型号上显示",
+      "替代料卡片每个通用号显示当前库存合计：搜索一个 PN 时，通用号的库存情况一并可见",
+    ],
+  },
   {
     version: "1.3.4",
     date: "2026-07-03",

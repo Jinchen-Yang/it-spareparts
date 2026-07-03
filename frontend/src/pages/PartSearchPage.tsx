@@ -288,9 +288,11 @@ export default function PartSearchPage() {
                 <span style={{ color: "var(--mb-text-3)" }}>暂无替代料，可在上方添加</span>
               ) : (
                 ov.substitutes.map((s) => (
-                  <Tag key={s.pn_std} color="geekblue" style={{ marginBottom: 4 }}>
+                  <Tag key={s.pn_std} color={s.via ? "cyan" : "geekblue"} style={{ marginBottom: 4 }}>
                     {s.pn_std}
-                    {s.relation && s.relation !== "互替" ? `（${s.relation}）` : ""}
+                    {s.via ? `（互替·经 ${s.via}）`
+                      : s.relation && s.relation !== "互替" ? `（${s.relation}）` : ""}
+                    {` · 库存 ${s.stock_qty ?? 0}`}
                     {s.description ? ` · ${s.description}` : ""}
                   </Tag>
                 ))
