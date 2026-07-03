@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.4.1";
+export const APP_VERSION = "1.5.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.5.0",
+    date: "2026-07-04",
+    items: [
+      "AI 助手升级为业务 Agent：新接入 6 个数据工具——采购分析（频次/趋势/批量建议/双口径总额）、库存查询、维保盈亏看板、维保项目汇总与逐单明细、采购取消统计，AI 现在能multi步调用工具回答「哪些型号该批量采购」「哪些维保项目在亏钱」这类复杂问题",
+      "新增「技能剧本」机制：采购批量计划分析、老板经营速览、配件行情简报（销售）、维保项目健康检查四套打法——给 AI 身份背景与分析框架而非死流程，按登录角色自动过滤可用技能",
+      "AI 工具权限与页面一致：维保成本工具校验项目成本页面权限；所有输出照常按角色脱敏（销售看不到成本）；配件搜索工具说明书更新（整段描述/规格词组合/写法互通）",
+    ],
+  },
   {
     version: "1.4.1",
     date: "2026-07-04",
