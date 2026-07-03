@@ -562,6 +562,18 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
         contracts = {ln["linked_sales_order_no"] for ln in result.lines
                      if ln.get("linked_sales_order_no")}
         if contracts:
+            # 替换前留痕：被删行的 before 快照进审计（金额数据的回溯能力，超量只记总数）
+            if audit:
+                olds = session.scalars(
+                    select(FProjectExpense)
+                    .where(FProjectExpense.linked_sales_order_no.in_(contracts))
+                ).all()
+                _audit_overwrites(session, "f_project_expense", "f_project_expense(替换删除)",
+                                  [(o.id,
+                                    {"raw_line_id": o.raw_line_id,
+                                     **{c: _jsonable(getattr(o, c)) for c in _EXPENSE_UPD}},
+                                    None) for o in olds],
+                                  operated_by, batch_id)
             replaced = session.execute(
                 delete(FProjectExpense)
                 .where(FProjectExpense.linked_sales_order_no.in_(contracts))

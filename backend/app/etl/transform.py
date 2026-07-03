@@ -304,20 +304,31 @@ def _transform_maintenance(df: pd.DataFrame) -> TransformResult:
 _BXD_RX = re.compile(r"BXD-\d{8}-\d+")
 
 
-def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> TransformResult:
-    """报销明细（费用侧，§17.3 来源无关宽松口径）：单表平铺，行级金额。
+def _clip(s: str | None, limit: int = 64) -> str | None:
+    """手填自由文本进定长列前钳制长度：超长截断而非流到 DB 炸整批（坏行隔离原则）。"""
+    return s[:limit] if s else s
 
-    必需列仅 报销日期 + 报销金额；两者任一为空的行**跳过**（rows_skipped_no_data，
-    非错误——天然免疫导出件合计行）。归集键：行级 维保销售订单/销售订单 → 页级锚(anchor)
-    兜底；皆无 → 错误行。幂等键：单号#序号 优先（与存量生产键兼容），否则内容派生
-    EXP:sha1(xsdd|日期|金额|事由|人员)#重复序 —— 同一本工作簿更新后重传是常态，
-    文件hash+行号会全量重插，内容键天然幂等（§17.4）。
+
+def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> TransformResult:
+    """报销明细（费用侧，§17.3 来源无关宽松口径）：单表平铺，行级金额，行行独立（无 ffill）。
+
+    必需列仅 报销日期 + 报销金额。行分拣：
+      - 两者皆空/只有日期 → 跳过（rows_skipped_no_data，空行）
+      - 有金额但缺日期：任一文本格含「合计」→ 跳过（导出件合计行）；否则 **missing_date 错误**
+        ——半截行必须响，不许静默丢（对账口径）
+    归集键：行级 维保销售订单/销售订单 > 页级锚(anchor)；皆无 → 错误行。
+    幂等键（§17.4，生产 f_project_expense 为空表，无历史键兼容包袱）：
+      1. 报销明细.数据ID（氚云原生，实际已无此来源，保留兼容）
+      2. 单号#序号@合同域hash —— 手填单号是自由文本，必须限定在合同域内防跨合同撞键；
+         同文件内重复 单号+序号 → duplicate_key 错误行（否则 upsert 撞 CardinalityViolation 炸整批）
+      3. 内容派生 EXP:sha1(xsdd|日期|金额|事由|人员)#重复序 —— 月更工作簿重传天然幂等
     流程状态为空 → 默认已结束（表单心智：写上来的就是要计入的账）。
     """
     res = TransformResult(file_type=mapping.EXPENSE)
     res.rows_total = len(df)
     full_map = {**mapping.EXPENSE_HEAD, **mapping.EXPENSE_LINE}
-    key_seen: dict[str, int] = {}
+    content_seen: dict[str, int] = {}
+    composite_seen: set[tuple] = set()
 
     for idx, row in df.iterrows():
         row_no = int(idx) + 1
@@ -331,8 +342,18 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
             return None
 
         raw_date, raw_amount = gv("报销日期"), gv("报销明细.报销金额", "报销金额")
-        if raw_date is None or raw_amount is None:
-            res.rows_skipped_no_data += 1          # 空行/合计行/半截行：跳过不算错
+        if raw_amount is None:
+            res.rows_skipped_no_data += 1          # 空行/只有日期的行：跳过不算错
+            continue
+        if raw_date is None:
+            texts = " ".join(str(gv(c) or "") for c in ("支出事由", "报销人员", "报销类别",
+                                                        "费用分类", "报销明细.费用分类"))
+            if "合计" in texts:
+                res.rows_skipped_no_data += 1      # 导出件/手填的合计行
+                continue
+            res.errors.append(ErrorRec(row_no, "missing_date",
+                                       "该行有金额但缺报销日期（日期不允许留空「同上」，请补齐）",
+                                       _row_dict(row, full_map)))
             continue
         try:
             expense_date = cleaner.parse_date(raw_date)
@@ -344,7 +365,7 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
             res.rows_skipped_no_data += 1
             continue
 
-        xsdd = cleaner.clean_str(gv("维保销售订单", "销售订单")) or anchor
+        xsdd = _clip(cleaner.clean_str(gv("维保销售订单", "销售订单")) or anchor)
         if not xsdd:
             res.errors.append(ErrorRec(row_no, "missing_link",
                                        "缺少销售订单(XSDD)：行内无该列且工作表无「销售订单」锚",
@@ -353,32 +374,42 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
 
         title = cleaner.clean_str(gv("数据标题"))
         m = _BXD_RX.search(title or "")
-        bxd_no = (m.group(0) if m
-                  else cleaner.clean_str(gv("单号", "费用单号", "报销单号")))
+        bxd_no = _clip(m.group(0) if m
+                       else cleaner.clean_str(gv("单号", "费用单号", "报销单号")))
         line_no = cleaner.parse_int(gv("报销明细.序号", "序号"))
-        person = cleaner.clean_str(gv("报销人员", "申请人"))
+        person = _clip(cleaner.clean_str(gv("报销人员", "申请人")))
         reason = cleaner.clean_str(gv("支出事由", "报销主题"))
 
         raw_line = cleaner.clean_str(gv("报销明细.数据ID(不可修改)", "报销明细.数据ID"))
         if not raw_line:
             if bxd_no and line_no is not None:
-                raw_line = f"{bxd_no}#{line_no}"    # 复合键（与既有生产数据兼容，§16.3）
+                ck = (xsdd, bxd_no, line_no)
+                if ck in composite_seen:
+                    res.errors.append(ErrorRec(
+                        row_no, "duplicate_key",
+                        f"同一文件内 单号+序号 重复（{bxd_no}#{line_no}），请改序号或删重复行",
+                        _row_dict(row, full_map)))
+                    continue
+                composite_seen.add(ck)
+                # 合同域后缀：手填单号自由文本，跨合同同名不该互撞；≤80 字符列宽内
+                scope = hashlib.sha1(xsdd.encode("utf-8")).hexdigest()[:8]
+                raw_line = f"{bxd_no[:40]}#{line_no}@{scope}"
             else:
                 basis = "|".join([xsdd, expense_date.isoformat(), str(amount),
                                   reason or "", person or ""])
                 digest = hashlib.sha1(basis.encode("utf-8")).hexdigest()[:36]
-                dup = key_seen.get(digest, 0)
-                key_seen[digest] = dup + 1
+                dup = content_seen.get(digest, 0)
+                content_seen[digest] = dup + 1
                 raw_line = f"EXP:{digest}#{dup}"    # 内容派生键（§17.4）
 
         res.lines.append({
             "raw_line_id": raw_line, "bxd_no": bxd_no, "line_no": line_no,
-            "data_status": cleaner.clean_str(gv("流程状态"))
+            "data_status": _clip(cleaner.clean_str(gv("流程状态")), 16)
                            or config.MAINT_EXPENSE_ACTIVE_STATUS,
             "expense_date": expense_date,
             "person": person,
-            "expense_type": cleaner.clean_str(gv("报销类别", "费用类型")),
-            "fee_category": cleaner.clean_str(gv("报销明细.费用分类", "费用分类")),
+            "expense_type": _clip(cleaner.clean_str(gv("报销类别", "费用类型"))),
+            "fee_category": _clip(cleaner.clean_str(gv("报销明细.费用分类", "费用分类"))),
             "reason": reason,
             "linked_sales_order_no": xsdd,
             "amount": amount,

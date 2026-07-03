@@ -64,12 +64,17 @@ def _norm_cols(values) -> list[str]:
 
 
 class SheetData(NamedTuple):
-    """单个可识别 sheet 的解析结果。anchor：报销页归集锚（§17.3，如 XSDD 单号），其余类型 None。"""
+    """单个可识别 sheet 的解析结果。anchor：报销页归集锚（§17.3，如 XSDD 单号），其余类型 None。
+
+    dup_cols：表头重复列名清单。此处不抛错——只有真正要入库的页才值得整批失败，
+    被跳过的页（如粘贴的副本页）带着重复列名不该拖垮整个文件；由调用方按取用情况裁决。
+    """
 
     sheet_name: str
     df: pd.DataFrame
     file_type: str
     anchor: str | None
+    dup_cols: list
 
 
 _ANCHOR_LABELS = {"销售订单", "维保销售订单"}
@@ -91,8 +96,7 @@ def _parse_frame(raw: pd.DataFrame, sheet_name: str) -> SheetData | None:
     """单 sheet：前 _HEADER_SCAN_ROWS 行内找「能识别出类型」的表头行；找不到 → None。
 
     兼容既有双表头（第 0 行 F 码、第 1 行真表头：F 码行识别不出类型，自然落到第 1 行）
-    与报销页锚行（第 1 行锚、第 2 行表头，同理）。识别成功后才做重复列校验——
-    非数据页（说明/汇总）不该让整个文件失败。
+    与报销页锚行（第 1 行锚、第 2 行表头，同理）。重复列校验只记录不抛错（见 SheetData）。
     """
     if raw.empty:
         return None
@@ -102,17 +106,23 @@ def _parse_frame(raw: pd.DataFrame, sheet_name: str) -> SheetData | None:
         if file_type is None:
             continue
         dup = [c for c, n in Counter(cols).items() if n > 1 and c != ""]
-        if dup:
-            raise ReaderError(f"工作表「{sheet_name}」表头存在重复列名：{dup}，请确认导出模版")
         df = raw.iloc[h + 1:].reset_index(drop=True)
         df.columns = cols
-        ffill_cols = [c for c in mapping.FFILL_COLS[file_type] if c in df.columns]
-        if ffill_cols:
-            # 仅填 NA、不覆盖已有值：续行主表空 → 补成所属订单（前提：订单首行头字段非空，已实测）
-            df[ffill_cols] = df[ffill_cols].replace("", pd.NA).ffill()
+        if not dup:
+            ffill_cols = [c for c in mapping.FFILL_COLS[file_type] if c in df.columns]
+            if ffill_cols:
+                # 仅填 NA、不覆盖已有值：续行主表空 → 补成所属订单（订单首行头字段非空，已实测）
+                df[ffill_cols] = df[ffill_cols].replace("", pd.NA).ffill()
         anchor = _scan_anchor(raw, h) if file_type == mapping.EXPENSE else None
-        return SheetData(sheet_name, df, file_type, anchor)
+        return SheetData(sheet_name, df, file_type, anchor, dup)
     return None
+
+
+def require_clean_columns(sheet: SheetData) -> None:
+    """入库前置校验：将被取用的页若有重复列名 → 整批拒绝（数据质量问题必须响）。"""
+    if sheet.dup_cols:
+        raise ReaderError(
+            f"工作表「{sheet.sheet_name}」表头存在重复列名：{sheet.dup_cols}，请确认导出模版")
 
 
 def read_workbook(path: str) -> list[SheetData]:
@@ -137,6 +147,7 @@ def read_excel(path: str) -> tuple[pd.DataFrame, str]:
     parsed = read_workbook(path)
     if not parsed:
         raise ReaderError("无法识别文件类型，请确认是采购/销售/库存/维保出库/报销明细导出文件")
+    require_clean_columns(parsed[0])
     return parsed[0].df, parsed[0].file_type
 
 
@@ -158,14 +169,22 @@ def peek_columns(path: str) -> tuple[list[str], str | None]:
     if not sheets or all(raw.empty for raw in sheets.values()):
         raise ReaderError("文件为空")
     first_cols: list[str] = []
+    found: list[tuple[list[str], str]] = []
     for raw in sheets.values():
         if raw.empty:
             continue
         for h in range(min(_HEADER_SCAN_ROWS, len(raw))):
             cols = mapping.canonicalize_columns(_norm_cols(raw.iloc[h].tolist()))
-            ft = mapping.detect_file_type(cols)
             if h == 0 and not first_cols:
                 first_cols = cols
+            ft = mapping.detect_file_type(cols)
             if ft:
-                return cols, ft
+                found.append((cols, ft))
+                break
+    # 与 pipeline 调度一致（§17.5）：有报销页 → 按报销/工作簿入库；否则第一个可识别页
+    expense = [f for f in found if f[1] == mapping.EXPENSE]
+    if expense:
+        return expense[0][0], ("workbook" if len(found) > 1 else mapping.EXPENSE)
+    if found:
+        return found[0]
     return first_cols, None

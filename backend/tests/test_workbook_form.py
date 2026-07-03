@@ -80,7 +80,7 @@ def test_loose_transform_anchor_defaults_and_content_key():
     df = pd.DataFrame([
         _canon_row(amount=100),                      # 无状态 → 默认已结束
         _canon_row(amount=100),                      # 同内容 → dup_idx 区分
-        _canon_row(d=None, amount=300),              # 缺日期 → 跳过（合计行形态）
+        _canon_row(d=None, amount=300, reason="月度合计"),  # 合计行 → 跳过（非合计缺日期=报错另测）
         _canon_row(amount=None),                     # 缺金额 → 跳过
         _canon_row(amount=200, status="流程中", bxd="BXD-20260501-3", seq=2),
     ])
@@ -91,7 +91,7 @@ def test_loose_transform_anchor_defaults_and_content_key():
     k0, k1, k2 = (r["raw_line_id"] for r in res.lines)
     assert k0.startswith("EXP:") and k0.endswith("#0")
     assert k1.startswith("EXP:") and k1.endswith("#1") and k0[:41] == k1[:41]
-    assert k2 == "BXD-20260501-3#2"                  # 有单号+序号 → 复合键优先
+    assert k2.startswith("BXD-20260501-3#2@")        # 单号+序号 复合键，带合同域后缀
     assert all(r["linked_sales_order_no"] == "XSDD-A" for r in res.lines)
     assert res.lines[0]["data_status"] == "已结束"    # 默认生效
     assert res.lines[2]["data_status"] == "流程中"
@@ -131,8 +131,8 @@ def test_run_import_workbook_only_ingests_expense(db, tmp_path):
     assert batch.file_type == "workbook"
     assert batch.rows_inserted == 2
     rep = batch.report_json
-    assert [s["sheet"] for s in rep["skipped_sheets"]] == ["备件明细-氚云"]
-    assert rep["sheets"][0]["rows_skipped_no_data"] == 1            # 合计行
+    assert len(rep["skipped_sheets"]) == 1 and rep["skipped_sheets"][0].startswith("备件明细-氚云")
+    assert rep["rows_skipped_no_data"] == 1                         # 合计行
     # 备件页确实没入库
     from app.models.maintenance import FMaintenanceOrder
     assert db.scalar(select(func.count()).select_from(FMaintenanceOrder)) == 0
@@ -163,29 +163,31 @@ def test_run_import_upsert_replaces_contract(db, tmp_path):
     p2 = _workbook_xlsx(tmp_path, "wb4b.xlsx", [_canon_row(amount=150)])
     b2 = pipeline.run_import(db, p2, "wb4b.xlsx", mode="upsert")
     db.commit()
-    assert b2.report_json["sheets"][0]["expense_rows_replaced"] == 2
+    assert b2.report_json["expense_rows_replaced"] == 2
     amts = db.scalars(select(FProjectExpense.amount)
                       .where(FProjectExpense.linked_sales_order_no == "XSDD-1")).all()
     assert amts == [Decimal("150")]                                 # 无旧行残影
 
 
-def test_run_import_workbook_without_expense_sheet_fails(db, tmp_path):
-    """≥2 个可识别页但都不是报销页 → 拒绝（白名单：防把回填副本吃回去）。"""
+def test_workbook_without_expense_falls_back_to_first_sheet(db, tmp_path):
+    """无报销页的多页文件 → 老语义：导第一个可识别页，其余页进 ignored_sheets 提示。
+
+    典型场景=隐藏备份页/副本页（审查 D1）：此前会整批失败，现照常导入。"""
     wb = Workbook()
     ws = wb.active
-    ws.title = "备件明细-氚云"
-    ws.append(["需求单号", "制单日期", "需求类型", "需求明细.需供货产品",
-               "需求明细.产品描述", "需求明细.需求数量"])
-    ws.append(["WBDD-20260501-0002", "2026-05-01", "报修供货", "PN-Y", "SSD", 1])
-    ws2 = wb.create_sheet("库存快照")
+    ws.title = "库存"
+    ws.append(["产品库存ID", "产品名称(PN)", "库存数量", "仓库"])
+    ws.append(["INV-8", "PN-Y", 5, "总仓"])
+    ws2 = wb.create_sheet("库存 (2)")                                # 副本页
     ws2.append(["产品库存ID", "产品名称(PN)", "库存数量", "仓库"])
     ws2.append(["INV-9", "PN-Y", 3, "总仓"])
     p = tmp_path / "wb5.xlsx"
     wb.save(str(p))
-    from app.etl.reader import ReaderError
-    with pytest.raises(ReaderError, match="报销明细页"):
-        pipeline.run_import(db, str(p), "wb5.xlsx")
+    batch = pipeline.run_import(db, str(p), "wb5.xlsx")
     db.commit()
+    assert batch.status == "success" and batch.file_type == "inventory"
+    assert batch.rows_inserted == 1                                  # 只导第一页
+    assert batch.report_json["ignored_sheets"][0].startswith("库存 (2)")
 
 
 def test_single_sheet_maintenance_still_imports(db, tmp_path):
@@ -206,39 +208,6 @@ def test_single_sheet_maintenance_still_imports(db, tmp_path):
 
 # ---------- round-trip：导出 → 再导入 = 零新增（§17.6 核心不变量）----------
 
-def test_export_workbook_roundtrip_zero_new_rows(db, batch, tmp_path):
-    from app.api.maintenance import _build_workbook
-    from app.services import maintenance_cost
-
-    db.add(FProjectExpense(raw_line_id="BXD-20260501-1#1", bxd_no="BXD-20260501-1",
-                           line_no=1, data_status="已结束", expense_date=date(2026, 5, 2),
-                           person="张三", expense_type="维保费用", fee_category="外援劳务",
-                           reason="外援", linked_sales_order_no="XSDD-RT",
-                           amount=Decimal("500"), import_batch_id=batch.id))
-    db.add(FProjectExpense(raw_line_id="EXP:abc#0", bxd_no=None, line_no=None,
-                           data_status="流程中", expense_date=date(2026, 5, 3),
-                           person="李四", expense_type="维保费用", fee_category="交通差旅",
-                           reason="打车", linked_sales_order_no="XSDD-RT",
-                           amount=Decimal("66"), import_batch_id=batch.id))
-    db.commit()
-
-    data = maintenance_cost.contract_workbook_data(db, "XSDD-RT")
-    wb = _build_workbook("XSDD-RT", data)
-    p = tmp_path / "roundtrip.xlsx"
-    wb.save(str(p))
-
-    b2 = pipeline.run_import(db, str(p), "roundtrip.xlsx")
-    db.commit()
-    rep = b2.report_json
-    sheet_rep = rep["sheets"][0] if "sheets" in rep else rep
-    assert sheet_rep["fact_rows_error"] == 0
-    # 复合键行幂等命中；内容键行（EXP:abc#0 是手造键）按导出内容重derive → 允许 ≤1 差异？
-    # 不——出厂即约定：内容键由(合同|日期|金额|事由|人员)派生，重导必然一致。手造键除外，
-    # 故此断言用"真实闭环"：先经系统导入产生内容键，再导出回灌。
-    assert db.scalar(select(func.count()).select_from(FProjectExpense)
-                     .where(FProjectExpense.linked_sales_order_no == "XSDD-RT")) >= 2
-
-
 def test_export_workbook_true_roundtrip(db, batch, tmp_path):
     """真实闭环：宽松导入产生内容键 → 导出 → 再导入 → 零新增零错误。"""
     from app.api.maintenance import _build_workbook
@@ -246,14 +215,17 @@ def test_export_workbook_true_roundtrip(db, batch, tmp_path):
 
     p1 = _workbook_xlsx(tmp_path, "rt1.xlsx",
                         [_canon_row(amount=100), _canon_row(amount=100),
-                         _canon_row(amount=200, reason="快递", status="流程中"),
+                         # 非整数金额：库内 Numeric(…,2) → 导出 float → 再解析，
+                         # parse_money 统一量化 0.01 保证内容键稳定
+                         _canon_row(amount=123.45, reason="快递", status="流程中"),
+                         _canon_row(amount=100.5, reason="打车"),
                          _canon_row(amount=300, bxd="BXD-20260502-1", seq=1)],
                         anchor="XSDD-RT2", with_parts=False, with_total_row=False)
     pipeline.run_import(db, p1, "rt1.xlsx")
     db.commit()
     n0 = db.scalar(select(func.count()).select_from(FProjectExpense)
                    .where(FProjectExpense.linked_sales_order_no == "XSDD-RT2"))
-    assert n0 == 4
+    assert n0 == 5
 
     data = maintenance_cost.contract_workbook_data(db, "XSDD-RT2")
     wb = _build_workbook("XSDD-RT2", data)
@@ -265,3 +237,88 @@ def test_export_workbook_true_roundtrip(db, batch, tmp_path):
     assert b2.rows_inserted == 0 and b2.rows_error == 0             # 零新增零错误
     assert db.scalar(select(func.count()).select_from(FProjectExpense)
                      .where(FProjectExpense.linked_sales_order_no == "XSDD-RT2")) == n0
+
+
+# ---------- 审查修复回归（R2-1/2/3/4 + 空白表单）----------
+
+def test_no_ffill_new_row_keeps_defaults(db, tmp_path):
+    """员工在状态=流程中的既有行下面只填 日期+金额 续新行：新行不得继承上一行的
+    流程状态/人员/事由（R2-1——否则新报销静默不计已花）。"""
+    p = _workbook_xlsx(tmp_path, "ff1.xlsx",
+                       [_canon_row(amount=100, status="流程中", reason="旧账"),
+                        {"报销日期": "2026-05-02", "报销金额": 88}],
+                       with_parts=False, with_total_row=False)
+    batch = pipeline.run_import(db, str(p), "ff1.xlsx")
+    db.commit()
+    assert batch.rows_inserted == 2
+    row = db.scalar(select(FProjectExpense).where(FProjectExpense.amount == Decimal("88")))
+    assert row.data_status == "已结束"          # 默认生效，而不是继承「流程中」
+    assert row.person is None and row.reason is None
+
+
+def test_cross_contract_same_docno_no_collision(db, tmp_path):
+    """两个合同的工作簿都手填 单号=1/序号=1：键带合同域，不互撞不互改（R2-2）。"""
+    pa = _workbook_xlsx(tmp_path, "ca.xlsx", [_canon_row(amount=100, bxd="1", seq=1)],
+                        anchor="XSDD-CA", with_parts=False, with_total_row=False)
+    pb = _workbook_xlsx(tmp_path, "cb.xlsx", [_canon_row(amount=200, bxd="1", seq=1)],
+                        anchor="XSDD-CB", with_parts=False, with_total_row=False)
+    pipeline.run_import(db, pa, "ca.xlsx")
+    pipeline.run_import(db, pb, "cb.xlsx", mode="upsert")   # B 合同修复模式也不得波及 A
+    db.commit()
+    rows = {r.linked_sales_order_no: r.amount for r in db.scalars(select(FProjectExpense)).all()}
+    assert rows == {"XSDD-CA": Decimal("100"), "XSDD-CB": Decimal("200")}
+
+
+def test_duplicate_docno_in_file_isolated(db, tmp_path):
+    """同一文件内 单号+序号 重复：后行成 duplicate_key 错误行，不炸整批（R2-4）。"""
+    p = _workbook_xlsx(tmp_path, "dup1.xlsx",
+                       [_canon_row(amount=100, bxd="B1", seq=1),
+                        _canon_row(amount=200, reason="重复", bxd="B1", seq=1)],
+                       with_parts=False, with_total_row=False)
+    batch = pipeline.run_import(db, str(p), "dup1.xlsx")
+    db.commit()
+    assert batch.rows_inserted == 1 and batch.rows_error == 1
+    assert batch.report_json["errors_preview"][0]["error_type"] == "duplicate_key"
+
+
+def test_upsert_requires_clean_sheet(db, tmp_path):
+    """修复模式（以本表为准）遇错误行整批拒绝：半截行不许静默丢账（R2-3）。"""
+    ok = _workbook_xlsx(tmp_path, "cl0.xlsx", [_canon_row(amount=100)],
+                        with_parts=False, with_total_row=False)
+    pipeline.run_import(db, ok, "cl0.xlsx")
+    db.commit()
+    bad = _workbook_xlsx(tmp_path, "cl1.xlsx",
+                         [_canon_row(amount=150),
+                          {"报销金额": 66, "支出事由": "有金额没日期"}],   # missing_date 错误行
+                         with_parts=False, with_total_row=False)
+    from app.etl.reader import ReaderError
+    with pytest.raises(ReaderError, match="修复模式"):
+        pipeline.run_import(db, str(bad), "cl1.xlsx", mode="upsert")
+    db.commit()
+    # 原数据未被动过（删除未发生）
+    amts = db.scalars(select(FProjectExpense.amount)).all()
+    assert amts == [Decimal("100")]
+
+
+def test_amount_without_date_errors_but_total_row_skips():
+    df = pd.DataFrame([
+        {"报销金额": 66, "支出事由": "半截行"},
+        {"报销金额": 999, "支出事由": "合计（仅已结束）"},
+    ])
+    res = transform(df, mapping.EXPENSE, anchor="XSDD-X")
+    assert res.rows_skipped_no_data == 1
+    assert len(res.errors) == 1 and res.errors[0].error_type == "missing_date"
+
+
+def test_blank_form_export_reimports_clean(db, batch, tmp_path):
+    """空白表单（新合同导出，报销页只有锚+表头）再导入：成功、零行、零错误。"""
+    from app.api.maintenance import _build_workbook
+    from app.services import maintenance_cost
+
+    data = maintenance_cost.contract_workbook_data(db, "XSDD-BLANK")
+    wb = _build_workbook("XSDD-BLANK", data)
+    p = tmp_path / "blank.xlsx"
+    wb.save(str(p))
+    b = pipeline.run_import(db, str(p), "blank.xlsx")
+    db.commit()
+    assert b.status == "success" and b.rows_inserted == 0 and b.rows_error == 0

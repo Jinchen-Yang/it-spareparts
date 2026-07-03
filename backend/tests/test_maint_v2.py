@@ -225,12 +225,13 @@ def test_expense_composite_key_and_column_drift(db, batch):
     res = transform(df, mapping.EXPENSE)
     assert not res.errors and len(res.lines) == 1
     r = res.lines[0]
-    assert r["raw_line_id"] == "BXD-20260401-7#1"
+    # v1.7.0（§17.4）：复合键带合同域后缀——单号可为手填自由文本，跨合同同名不得互撞
+    assert r["raw_line_id"].startswith("BXD-20260401-7#1@")
     assert r["fee_category"] == "外援劳务" and r["linked_sales_order_no"] == "XS-2"
     loader.load(db, res, batch.id, date(2026, 6, 1))
     db.commit()
     assert db.scalar(select(FProjectExpense.bxd_no)
-                     .where(FProjectExpense.raw_line_id == "BXD-20260401-7#1")) == "BXD-20260401-7"
+                     .where(FProjectExpense.raw_line_id.like("BXD-20260401-7#1@%"))) == "BXD-20260401-7"
 
 
 # ---------- 工作簿导出（§16.4）----------

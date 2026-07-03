@@ -163,9 +163,11 @@ FFILL_COLS = {
     PURCHASE: list(PURCHASE_HEAD.keys()),
     SALES: list(SALES_HEAD.keys()),
     MAINTENANCE: list(MAINTENANCE_HEAD.keys()),
-    # 报销日期不 ffill（§17.3）：扁平表单每行是一笔独立报销，日期行行必填；
-    # ffill 会让导出件合计行/半截行继承上一行日期而被误吃（缺日期跳过是防线）。
-    EXPENSE: [c for c in EXPENSE_HEAD if c != "报销日期"],
+    # 报销不 ffill（§17.3）：扁平表单每行是一笔独立报销——留空是「无/默认」不是「同上」。
+    # ffill 会让员工只填日期+金额的新行继承上一行的 流程状态/人员/事由（状态=流程中时
+    # 新报销静默不计已花），也会让合计行继承日期被误吃。头明细式多行 BXD 导出已随
+    # 「氚云无报销导出」口径一并废止（§16.3 更正）。
+    EXPENSE: [],
     INVENTORY: [],
 }
 
