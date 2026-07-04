@@ -167,18 +167,19 @@ def extract_hdd(desc):
 
 
 def render_hdd(specs):
-    """{容量} {接口速率} {转速} {缓存} {尺寸} {接口} HDD —— 只渲染已抽到的字段。"""
+    """客户模板（2026-07-04）：{容量} {接口} HDD {速率} {转速} {尺寸}
+    —— 如 '4TB SATA HDD 6Gb 7.2K 3.5'。速率去 /s（6Gb）、尺寸去 -inch（3.5）；不含缓存/品牌。"""
     if not (_val(specs, "capacity") and _val(specs, "interface_type")):
         return None
-    seg = [_val(specs, "capacity")]
-    for k in ("interface_speed", "rpm"):
-        if _val(specs, k):
-            seg.append(_val(specs, k))
-    if _val(specs, "cache"):
-        seg.append(f"{_val(specs, 'cache')} Cache")
-    if _val(specs, "form_factor"):
-        seg.append(_val(specs, "form_factor"))
-    seg += [_val(specs, "interface_type"), "HDD"]
+    seg = [_val(specs, "capacity"), _val(specs, "interface_type"), "HDD"]
+    spd = _val(specs, "interface_speed")
+    if spd:
+        seg.append(spd.replace("Gb/s", "Gb"))            # 6Gb/s → 6Gb
+    if _val(specs, "rpm"):
+        seg.append(_val(specs, "rpm"))
+    ff = _val(specs, "form_factor")
+    if ff:
+        seg.append(ff.replace("-inch", ""))              # 3.5-inch → 3.5
     return " ".join(seg)
 
 
@@ -338,17 +339,26 @@ def extract_memory(desc):
     return specs
 
 
+# DDR4 JEDEC 速率等级字母（客户模板 2026-07-04：3200 用单 A 而非 AA）。仅 DDR4 适用；
+# 其余代际/未列频率不猜等级（只出频率）。
+_DDR4_SPEED_GRADE = {2133: "P", 2400: "T", 2666: "V", 2933: "Y", 3200: "A"}
+
+
 def render_memory(specs):
-    """{容量} {代际}-{速率} {模组} {Rank} {ECC} —— 无证据不补 RDIMM/ECC。"""
-    if not (_val(specs, "capacity") and _val(specs, "ddr_generation")):
+    """客户模板（2026-07-04）：{容量} {频率}{等级} {Rank} {代际}
+    —— 如 '32GB 2666V 2Rx4 DDR4'。频率带 JEDEC 等级字母（DDR4：2133P/2400T/2666V/2933Y/3200A）；
+    不含模组类型(RDIMM)/ECC/品牌。"""
+    cap, gen = _val(specs, "capacity"), _val(specs, "ddr_generation")
+    if not (cap and gen):
         return None
-    gen = _val(specs, "ddr_generation")
-    if _val(specs, "speed"):
-        gen = f"{gen}-{_val(specs, 'speed')}"
-    seg = [_val(specs, "capacity"), gen]
-    for k in ("module_type", "rank", "ecc"):
-        if _val(specs, k):
-            seg.append(_val(specs, k))
+    seg = [cap]
+    spd = _val(specs, "speed")
+    if spd:
+        grade = _DDR4_SPEED_GRADE.get(int(spd), "") if (gen == "DDR4" and spd.isdigit()) else ""
+        seg.append(f"{spd}{grade}")
+    if _val(specs, "rank"):
+        seg.append(_val(specs, "rank"))
+    seg.append(gen)
     return " ".join(seg)
 
 
@@ -2204,9 +2214,11 @@ def standardize(pn: str, description: str | None, brand: str = "") -> dict:
     if l1_code == "02" and _is_ssd(desc):
         return _run(out, "DRIVE_SSD", extract_ssd(desc), render_ssd, classify_ssd_l2, validate_ssd, desc)
     if l1_code == "02" and _is_hdd(desc):
-        return _run(out, "DRIVE_HDD", extract_hdd(desc), render_hdd, classify_hdd_l2, validate_hdd, desc)
+        return _run(out, "DRIVE_HDD", extract_hdd(desc), render_hdd, classify_hdd_l2, validate_hdd, desc,
+                    with_brand=False)   # 客户模板：硬盘不含品牌
     if l1_code == "01":
-        return _run(out, "MEMORY", extract_memory(desc), render_memory, classify_mem_l2, validate_memory, desc)
+        return _run(out, "MEMORY", extract_memory(desc), render_memory, classify_mem_l2, validate_memory, desc,
+                    with_brand=False)   # 客户模板：内存不含品牌
     if l1_code == "05":
         return _run(out, "CPU", extract_cpu(desc, pn, brand), render_cpu, classify_cpu_l2, validate_cpu, desc)
     if l2_code == "0404":
@@ -2268,12 +2280,14 @@ def _with_brand(canon, brand_raw, desc):
     return canon
 
 
-def _run(out, obj_type, specs, render, classify_l2, validate, desc):
+def _run(out, obj_type, specs, render, classify_l2, validate, desc, with_brand=True):
     out["object_type"] = obj_type
     # 只保留 schema 声明的字段（按声明顺序）——结构强制"字段不乱"，剔除内部/越界字段
     allowed = FIELD_SCHEMA.get(obj_type, [])
     out["structured_specs"] = {k: specs[k] for k in allowed if k in specs}
-    canon = _with_brand(render(specs), out.get("brand_raw"), desc)
+    # 硬盘/内存客户模板不含品牌（with_brand=False）；其余类目保留品牌前缀
+    rendered = render(specs)
+    canon = _with_brand(rendered, out.get("brand_raw"), desc) if with_brand else rendered
     out["canonical_description"] = canon
     # 分类由抽到的字段决定（缺关键字段 → None，转人工）
     l2 = classify_l2(specs)
