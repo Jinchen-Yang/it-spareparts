@@ -10,7 +10,7 @@ from app import config, security
 from app.models.dimensions import DimPart
 from app.models.inventory import Inventory
 from app.models.system import SysAuditLog
-from app.services.query_filters import keyword_term_groups
+from app.services.query_filters import keyword_groups_or_substr
 
 
 def _d(x):
@@ -47,7 +47,7 @@ def list_inventory(db: Session, warehouse: str | None, q: str | None,
     if q and q.strip():
         # 分词模糊（大小写不敏感 ILIKE + 规格变体，与动态库存/采购同源）：'8TB SATA' 词序无关、
         # 跨 pn_std/description 命中即可，不再要求整段连续子串（旧整串匹配模糊度过低）。
-        for g in keyword_term_groups(q):
+        for g in keyword_groups_or_substr(q):
             likes = [f"%{v}%" for v in g]
             stmt = stmt.where(or_(
                 *[Inventory.pn_std.ilike(lk) for lk in likes],
@@ -213,7 +213,7 @@ def list_dynamic(db: Session, q: str | None, page: int, page_size: int,
     # 按（命中词数 desc, 动态库存 desc）排序=匹配率优先。前端据 match_hits/match_terms 显示「命中 X/N词」。
     hit_map: dict[int, int] = {}
     n_terms = 0
-    groups = keyword_term_groups(q)
+    groups = keyword_groups_or_substr(q)
     if q and q.strip() and ids and groups:
         n_terms = len(groups)
         hit_exprs = []

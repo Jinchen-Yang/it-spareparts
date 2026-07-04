@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app import config, security
 from app.services import inventory as inventory_service
-from app.services.query_filters import active_orders, keyword_term_groups
+from app.services.query_filters import active_orders, keyword_groups_or_substr
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
 from app.models.inquiry import FPartInquiry
 from app.models.inventory import Inventory, PartSubstitute
@@ -49,7 +49,8 @@ def resolve_part(db: Session, pn_std: str) -> tuple[DimPart | None, str | None]:
         # 大小写/首尾空白容错：canonical pn_std 约定大写，用户传小写/带空格也应能定位。
         # 精确命中优先走索引（上一句），未命中才回退 lower() 匹配（罕见，不拖慢常规路径）。
         part = db.scalar(
-            select(DimPart).where(func.lower(DimPart.pn_std) == pn_std.strip().lower()))
+            select(DimPart).where(func.lower(DimPart.pn_std) == pn_std.strip().lower())
+            .order_by(DimPart.id))          # 大小写变体极罕见，仍确定性取行（不静默取任意行）
     if part is None:
         return None, None
     redirected_from = None
@@ -96,7 +97,7 @@ def search_parts(db: Session, q: str | None, page: int, page_size: int,
     stmt = select(DimPart).where(DimPart.status != "merged")
     if q and q.strip():
         # 分词模糊（大小写不敏感 + 规格变体，与型号查询/库存/采购同源）：词序无关、跨字段命中即可。
-        for g in keyword_term_groups(q):
+        for g in keyword_groups_or_substr(q):
             likes = [f"%{v}%" for v in g]
             stmt = stmt.where(or_(
                 *[DimPart.pn_std.ilike(lk) for lk in likes],

@@ -80,6 +80,35 @@ def test_list_inventory_tokenized_fuzzy(db):
     assert all(r["pn_std"] != "PN-D" for r in rows["items"])
 
 
+# ---------- 单字符/CJK 查询不得退化为全表返回（审计 P1）----------
+def test_dynamic_single_cjk_char_filters(db):
+    cn = _part(db, "PN-CN", "三星企业级固态盘", "三星")
+    en = _part(db, "PN-EN", "Intel Xeon CPU", "Intel")
+    for p in (cn, en):
+        _inv(db, p)
+    db.commit()
+    # 搜单个中文字"三"（三星）：只召回含"三"的型号，绝不全表返回（审计 P1 回归）
+    pns = {it["pn_std"] for it in inv_svc.list_dynamic(db, "三", 1, 20)["items"]}
+    assert pns == {"PN-CN"}
+
+
+def test_dynamic_single_latin_char_still_filters(db):
+    _seed_hdds(db)
+    # 单个字母/数字被分词丢弃 → 回退整串子串，仍过滤（不全表返回）
+    out_all = inv_svc.list_dynamic(db, None, 1, 20)["total"]
+    out_w = inv_svc.list_dynamic(db, "W", 1, 20)                # 只 WD 的 PN-C 描述含 W
+    assert out_w["total"] < out_all and out_w["total"] >= 1
+    assert all("W" in (it["description"] or "").upper() or "W" in it["pn_std"].upper()
+               for it in out_w["items"])
+
+
+def test_list_inventory_single_char_filters(db):
+    _seed_hdds(db)
+    all_n = inv_svc.list_inventory(db, None, None, 1, 50)["total"]
+    one = inv_svc.list_inventory(db, None, "W", 1, 50)
+    assert one["total"] < all_n               # 不再整表返回
+
+
 # ---------- resolve_part 大小写容错 ----------
 def test_resolve_part_case_insensitive(db):
     _part(db, "ABC123XYZ", "some part")
