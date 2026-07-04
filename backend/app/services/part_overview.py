@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app import config, security
 from app.services import inventory as inventory_service
-from app.services.query_filters import active_orders
+from app.services.query_filters import active_orders, keyword_term_groups
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
 from app.models.inquiry import FPartInquiry
 from app.models.inventory import Inventory, PartSubstitute
@@ -45,6 +45,11 @@ def resolve_part(db: Session, pn_std: str) -> tuple[DimPart | None, str | None]:
     全空，AI 误报"无历史"——再次重现 §4 防的失败模式。
     """
     part = db.scalar(select(DimPart).where(DimPart.pn_std == pn_std))
+    if part is None and pn_std and pn_std.strip():
+        # 大小写/首尾空白容错：canonical pn_std 约定大写，用户传小写/带空格也应能定位。
+        # 精确命中优先走索引（上一句），未命中才回退 lower() 匹配（罕见，不拖慢常规路径）。
+        part = db.scalar(
+            select(DimPart).where(func.lower(DimPart.pn_std) == pn_std.strip().lower()))
     if part is None:
         return None, None
     redirected_from = None
@@ -89,9 +94,14 @@ def search_parts(db: Session, q: str | None, page: int, page_size: int,
                  capacity_max: float | None = None) -> dict:
     """文本检索 + 结构化规格过滤（整改 P2：硬盘容量/接口等条件查询）。"""
     stmt = select(DimPart).where(DimPart.status != "merged")
-    if q:
-        like = f"%{q.strip()}%"
-        stmt = stmt.where(or_(DimPart.pn_std.ilike(like), DimPart.description.ilike(like)))
+    if q and q.strip():
+        # 分词模糊（大小写不敏感 + 规格变体，与型号查询/库存/采购同源）：词序无关、跨字段命中即可。
+        for g in keyword_term_groups(q):
+            likes = [f"%{v}%" for v in g]
+            stmt = stmt.where(or_(
+                *[DimPart.pn_std.ilike(lk) for lk in likes],
+                *[DimPart.description.ilike(lk) for lk in likes],
+            ))
     if part_type:
         stmt = stmt.where(_spec_exists("part_type", value=part_type))
     if interface:

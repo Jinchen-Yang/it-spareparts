@@ -1,13 +1,16 @@
 """库存服务（§7.4）：列表 + 人工修正（写审计、不碰 source_qty）。"""
 from datetime import date
 from decimal import Decimal
+from functools import reduce
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app import config, security
+from app.models.dimensions import DimPart
 from app.models.inventory import Inventory
 from app.models.system import SysAuditLog
+from app.services.query_filters import keyword_term_groups
 
 
 def _d(x):
@@ -41,9 +44,15 @@ def list_inventory(db: Session, warehouse: str | None, q: str | None,
     stmt = select(Inventory)
     if warehouse:
         stmt = stmt.where(Inventory.warehouse == warehouse)
-    if q:
-        like = f"%{q.strip()}%"
-        stmt = stmt.where(or_(Inventory.pn_std.ilike(like), Inventory.description.ilike(like)))
+    if q and q.strip():
+        # 分词模糊（大小写不敏感 ILIKE + 规格变体，与动态库存/采购同源）：'8TB SATA' 词序无关、
+        # 跨 pn_std/description 命中即可，不再要求整段连续子串（旧整串匹配模糊度过低）。
+        for g in keyword_term_groups(q):
+            likes = [f"%{v}%" for v in g]
+            stmt = stmt.where(or_(
+                *[Inventory.pn_std.ilike(lk) for lk in likes],
+                *[Inventory.description.ilike(lk) for lk in likes],
+            ))
     if user_ctx is not None:
         stmt = security.apply_data_scope(stmt, user_ctx)
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
@@ -197,23 +206,34 @@ def dynamic_stock_map(db: Session, part_ids: list[int] | None = None) -> dict[in
 def list_dynamic(db: Session, q: str | None, page: int, page_size: int,
                  user_ctx: security.UserContext | None = None) -> dict:
     """动态库存列表（型号级为主）：动态可用/期初(锚点日)/之后入出，分仓快照行作参考。"""
-    from app.models.dimensions import DimPart
-    from app.services.query_filters import keyword_term_groups
-
     smap = dynamic_stock_map(db)
     ids = list(smap)
-    if q and q.strip() and ids:
-        stmt = select(DimPart.id).where(DimPart.id.in_(ids))
-        for g in keyword_term_groups(q):
+    # 关键词搜索：分词（大小写不敏感 ILIKE + 规格变体归一，与型号查询/采购同一 keyword_term_groups
+    # 口径）→ 逐词组统计命中数（pn_std/description/brand 任一命中即算该词命中）→ **部分命中也召回**，
+    # 按（命中词数 desc, 动态库存 desc）排序=匹配率优先。前端据 match_hits/match_terms 显示「命中 X/N词」。
+    hit_map: dict[int, int] = {}
+    n_terms = 0
+    groups = keyword_term_groups(q)
+    if q and q.strip() and ids and groups:
+        n_terms = len(groups)
+        hit_exprs = []
+        for g in groups:
             likes = [f"%{v}%" for v in g]
-            stmt = stmt.where(or_(
+            cond = or_(
                 *[DimPart.pn_std.ilike(lk) for lk in likes],
                 *[DimPart.description.ilike(lk) for lk in likes],
                 *[DimPart.brand.ilike(lk) for lk in likes],
-            ))
-        ids = [i for (i,) in db.execute(stmt)]
+            )
+            hit_exprs.append(case((cond, 1), else_=0))
+        hits = reduce(lambda a, b: a + b, hit_exprs)
+        rows = db.execute(
+            select(DimPart.id, hits.label("h")).where(DimPart.id.in_(ids), hits > 0)
+        ).all()
+        hit_map = {i: int(h) for i, h in rows}
+        ids = list(hit_map)
 
-    ids.sort(key=lambda i: (-(smap[i]["dynamic_qty"]), i))
+    # 有搜索时匹配率优先（命中词数 desc），无搜索时按动态库存 desc
+    ids.sort(key=lambda i: (-hit_map.get(i, 0), -(smap[i]["dynamic_qty"]), i))
     total = len(ids)
     page = max(page, 1)
     page_ids = ids[(page - 1) * page_size: page * page_size]
@@ -247,5 +267,9 @@ def list_dynamic(db: Session, q: str | None, page: int, page_size: int,
             "in_qty": _d(s["in_qty"]), "out_sales": _d(s["out_sales"]),
             "out_maint": _d(s["out_maint"]),
             "warehouses": wh.get(i, []),
+            # 匹配率（仅搜索时）：命中词数 / 总词数，前端显示「命中 X/N词」并可据此排序展示
+            "match_hits": hit_map.get(i) if n_terms else None,
+            "match_terms": n_terms or None,
         })
-    return {"total": total, "page": page, "page_size": page_size, "items": items}
+    return {"total": total, "page": page, "page_size": page_size, "items": items,
+            "match_terms": n_terms or None}

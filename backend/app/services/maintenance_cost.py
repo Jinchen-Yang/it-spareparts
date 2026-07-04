@@ -20,14 +20,14 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from app import config
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
-from app.services.query_filters import active_orders
+from app.services.query_filters import active_orders, keyword_term_groups
 
 _log = logging.getLogger("maintenance_cost")
 _CENT = Decimal("0.01")
@@ -355,8 +355,10 @@ def projects_aggregate(db: Session, date_from: date | None = None,
         .group_by(proj)
     )
     stmt = _scoped_filters(stmt, date_from, date_to)
-    if q_text:
-        stmt = stmt.where(mo.project_std.ilike(f"%{q_text}%"))
+    if q_text and q_text.strip():
+        # 分词模糊（大小写不敏感 + 变体，与全站搜索同源）：'联通 备件' 词序无关即可命中项目名
+        for g in keyword_term_groups(q_text):
+            stmt = stmt.where(or_(*[mo.project_std.ilike(f"%{v}%") for v in g]))
 
     raw = db.execute(stmt).all()
 
