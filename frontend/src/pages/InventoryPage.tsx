@@ -37,6 +37,8 @@ interface DynRow {
   out_sales: number | null;
   out_maint: number | null;
   warehouses: WhRow[];
+  match_hits?: number | null;   // 搜索时：命中词数
+  match_terms?: number | null;  // 搜索时：查询总词数
 }
 
 export default function InventoryPage() {
@@ -44,6 +46,7 @@ export default function InventoryPage() {
   const [rows, setRows] = useState<DynRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  const [matchTerms, setMatchTerms] = useState<number | null>(null);  // >0 时显示匹配度列
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<(WhRow & { pn_std: string }) | null>(null);
@@ -59,6 +62,7 @@ export default function InventoryPage() {
       });
       setRows(data.items);
       setTotal(data.total);
+      setMatchTerms(data.match_terms ?? null);
       setPage(p);
     } catch (e: any) {
       const msg = !e?.response ? "无法连接服务器，请检查网络后重试"
@@ -124,6 +128,14 @@ export default function InventoryPage() {
   ];
 
   const cols: ColumnsType<DynRow> = [
+    // 搜索时展示匹配度（命中词数/总词数）：结果已按匹配率降序，与型号查询/采购同一分词口径
+    ...(matchTerms && matchTerms > 1 ? [{
+      title: "匹配度", key: "match", width: 96, fixed: "left" as const,
+      render: (_: unknown, r: DynRow) => {
+        const h = r.match_hits ?? 0, n = r.match_terms ?? matchTerms;
+        return <Tag color={h >= n ? "green" : h > 0 ? "blue" : "default"}>命中 {h}/{n} 词</Tag>;
+      },
+    }] as ColumnsType<DynRow> : []),
     { title: "型号 (PN)", dataIndex: "pn_std", width: 190, fixed: "left",
       render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12.5 }}>{v}</span> },
     { title: "描述", dataIndex: "description", ellipsis: true },

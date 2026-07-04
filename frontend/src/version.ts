@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.8.1";
+export const APP_VERSION = "1.8.2";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.8.2",
+    date: "2026-07-04",
+    items: [
+      "库存搜索升级为「匹配率排序 + 命中率」：多关键词搜索按命中词数排序，最相关的排最前，并显示「命中 X/N 词」；机制与型号查询/采购一致（大小写不敏感 + 规格变体归一，如 8T↔8TB、6Gbps↔6Gb/s）",
+      "全站搜索统一大小写模糊：库存（含旧列表）、维保项目、型号浏览的关键词搜索都改为分词模糊（词序无关、跨字段命中即可），大小写与写法差异不再漏搜",
+      "型号定位大小写容错：型号全景/替代料/销售里按型号定位时，大小写或首尾空格不同也能命中（先精确后回退）",
+    ],
+  },
   {
     version: "1.8.1",
     date: "2026-07-04",
