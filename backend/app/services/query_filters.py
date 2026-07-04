@@ -6,6 +6,8 @@
 """
 import re
 
+from sqlalchemy import or_
+
 from app import config
 
 # 关键词分词：只按空白/逗号切（保留 6Gb/s、3.5-inch、7.2K 这类含内部分隔符的规格词原形——
@@ -84,15 +86,16 @@ def _variants(t: str) -> list[str]:
 
 
 def keyword_term_groups(q: str | None, max_terms: int = 12) -> list[list[str]]:
-    """查询串 → 变体词组表：每个词展开为等价写法（已转义），组内任一命中即算该词命中。
-    丢弃单个拉丁字母/数字（噪声）但保留单 CJK 字（"三"=三星，有意义）。"""
+    """查询串 → 变体词组表：每个词展开为等价写法（**原词，未转义**），组内任一命中即算该词命中。
+    丢弃单个拉丁字母/数字（噪声）但保留单 CJK 字（"三"=三星，有意义）。
+    匹配一律走 col_matches_any（左词界正则），故此处不做 LIKE 转义。"""
     if not (q and q.strip()):
         return []
     out: list[list[str]] = []
     for t in _TERM_SPLIT.split(q.strip()):
         if not _keep_token(t):
             continue
-        out.append([_esc(v) for v in dict.fromkeys(_variants(t))])
+        out.append(list(dict.fromkeys(_variants(t))))
         if len(out) >= max_terms:
             break
     return out
@@ -100,14 +103,21 @@ def keyword_term_groups(q: str | None, max_terms: int = 12) -> list[list[str]]:
 
 def keyword_groups_or_substr(q: str | None, max_terms: int = 12) -> list[list[str]]:
     """同 keyword_term_groups，但当查询非空却全是被丢弃的短 token（如单个拉丁字母/数字 '8'/'a'）
-    导致无词组时，回退为「整串子串」一个词组——避免调用方 `for g in groups` 空循环＝零过滤＝
+    导致无词组时，回退为「整串」一个词组——避免调用方 `for g in groups` 空循环＝零过滤＝
     全表返回（审计 P1：分词化搜索必须对任意非空查询都过滤）。"""
     groups = keyword_term_groups(q, max_terms)
     if groups:
         return groups
     if q and q.strip():
-        return [[_esc(q.strip())]]
+        return [[q.strip()]]
     return []
+
+
+def col_matches_any(column, variants: list[str]):
+    """列匹配「一个查询词的任一等价变体」：**左词界**大小写不敏感正则（PG ~*）。
+    左词界＝词前为串首或非「数字/小数点」字符——防子串误命中：'6TB' 不再命中 '16TB'/'1.6TB'、
+    '6Gb' 不再命中 '16Gb'。variants 为未转义原词（regex 元字符在此转义）。"""
+    return or_(*[column.op("~*")(f"(^|[^0-9.]){re.escape(v)}") for v in variants])
 
 
 def active_orders(stmt, order_model):

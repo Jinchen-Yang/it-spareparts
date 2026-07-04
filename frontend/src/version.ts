@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.8.3";
+export const APP_VERSION = "1.8.4";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.8.4",
+    date: "2026-07-04",
+    items: [
+      "修复搜索误召回：搜「6TB」不再带出「16TB / 1.6TB」，搜「6Gb」不再带出「16Gb」——容量/规格数字词改为「左词界」匹配（词前不能紧跟数字或小数点），全站搜索（库存/型号/采购/维保）一致生效",
+    ],
+  },
   {
     version: "1.8.3",
     date: "2026-07-04",
