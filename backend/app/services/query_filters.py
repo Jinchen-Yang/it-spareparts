@@ -11,19 +11,26 @@ from app import config
 # 关键词分词：只按空白/逗号切（保留 6Gb/s、3.5-inch、7.2K 这类含内部分隔符的规格词原形——
 # resolver 的 PN token 化会剥掉 ./-/ 导致再也匹配不上描述原文，此处刻意不复用那套）。
 _TERM_SPLIT = re.compile(r"[\s,;，；]+")
+# 单个 CJK 字符是有意义的检索词（"三"=三星、"联"=联想/联通），不能与单个拉丁字母/数字（噪声）
+# 一样丢弃。丢弃单 CJK 字会让"搜三"退化为空词表 → 调用方零过滤全表返回（审计 P1）。
+_CJK = re.compile(r"[㐀-鿿豈-﫿぀-ヿ]")
+
+
+def _keep_token(t: str) -> bool:
+    return len(t) >= 2 or bool(_CJK.search(t))
 
 
 def keyword_terms(q: str | None, max_terms: int = 12) -> list[str]:
     """查询串 → ILIKE 词表：分词 + 转义通配符（PG 的 LIKE 默认反斜杠转义）。
 
     调用方语义＝"全部词都命中"（词序无关）：整段标准描述、或 '8TB 7.2K SATA' 子集组合均可召回。
-    单词查询返回单元素列表，行为与整段子串一致。
+    单词查询返回单元素列表，行为与整段子串一致。丢弃单个拉丁字母/数字（噪声）但保留单 CJK 字。
     """
     if not (q and q.strip()):
         return []
     out: list[str] = []
     for t in _TERM_SPLIT.split(q.strip()):
-        if len(t) < 2:
+        if not _keep_token(t):
             continue
         out.append(_esc(t))
         if len(out) >= max_terms:
@@ -77,17 +84,30 @@ def _variants(t: str) -> list[str]:
 
 
 def keyword_term_groups(q: str | None, max_terms: int = 12) -> list[list[str]]:
-    """查询串 → 变体词组表：每个词展开为等价写法（已转义），组内任一命中即算该词命中。"""
+    """查询串 → 变体词组表：每个词展开为等价写法（已转义），组内任一命中即算该词命中。
+    丢弃单个拉丁字母/数字（噪声）但保留单 CJK 字（"三"=三星，有意义）。"""
     if not (q and q.strip()):
         return []
     out: list[list[str]] = []
     for t in _TERM_SPLIT.split(q.strip()):
-        if len(t) < 2:
+        if not _keep_token(t):
             continue
         out.append([_esc(v) for v in dict.fromkeys(_variants(t))])
         if len(out) >= max_terms:
             break
     return out
+
+
+def keyword_groups_or_substr(q: str | None, max_terms: int = 12) -> list[list[str]]:
+    """同 keyword_term_groups，但当查询非空却全是被丢弃的短 token（如单个拉丁字母/数字 '8'/'a'）
+    导致无词组时，回退为「整串子串」一个词组——避免调用方 `for g in groups` 空循环＝零过滤＝
+    全表返回（审计 P1：分词化搜索必须对任意非空查询都过滤）。"""
+    groups = keyword_term_groups(q, max_terms)
+    if groups:
+        return groups
+    if q and q.strip():
+        return [[_esc(q.strip())]]
+    return []
 
 
 def active_orders(stmt, order_model):
