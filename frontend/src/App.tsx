@@ -13,6 +13,7 @@ import ChatPage from "./pages/ChatPage";
 import PurchasesPage from "./pages/PurchasesPage";
 import ProjectCostPage from "./pages/ProjectCostPage";
 import AccountsPage from "./pages/AccountsPage";
+import ChangePasswordModal from "./components/ChangePasswordModal";
 import { TaxBasisToggle } from "./context/TaxBasis";
 
 const { Header, Content } = Layout;
@@ -30,6 +31,7 @@ export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
   const [page, setPage] = useState("parts");
   const [changelogOpen, setChangelogOpen] = useState(false);
+  const [changePwOpen, setChangePwOpen] = useState(false);
   // 升版后首次进入显示一次更新提示（按已看版本号去重）
   const [showWhatsNew, setShowWhatsNew] = useState(
     () => localStorage.getItem("seen_version") !== APP_VERSION,
@@ -117,8 +119,14 @@ export default function App() {
             {roleMap[role] || role}
           </Tag>}
         </span>
+        <Button onClick={() => setChangePwOpen(true)} style={{ marginRight: 8 }}>修改密码</Button>
         <Button onClick={logout}>退出</Button>
       </Header>
+      <ChangePasswordModal
+        open={changePwOpen}
+        onClose={() => setChangePwOpen(false)}
+        onChanged={(t) => setToken(t)}
+      />
       <Content style={{ padding: 24, background: COLORS.page }}>
         {showWhatsNew && (
           <Alert

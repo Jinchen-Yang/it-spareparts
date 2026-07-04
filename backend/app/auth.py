@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app import permissions, security
 from app.config import get_settings
 from app.db import get_db
-from app.models.system import SysUser
+from app.models.system import SysAuditLog, SysUser
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 _bearer = HTTPBearer(auto_error=False)
@@ -32,6 +32,7 @@ _PBKDF2_ITERS = 200_000
 # 登录暴力破解防护：连续失败 _LOGIN_MAX_FAILS 次锁定 _LOGIN_LOCK_MINUTES 分钟
 _LOGIN_MAX_FAILS = 5
 _LOGIN_LOCK_MINUTES = 15
+_MIN_PASSWORD_LEN = 6   # 与账号管理建号/重置口径一致（accounts.py）
 
 
 # ---------- 口令散列（pbkdf2，stdlib，无额外依赖） ----------
@@ -210,6 +211,69 @@ def current_identity(creds: HTTPAuthorizationCredentials | None = Depends(_beare
     if creds is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "缺少凭证")
     return verify_token_db(creds.credentials, db)
+
+
+# ---------- 自助改密 ----------
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class ChangePasswordResponse(BaseModel):
+    token: str          # 换新密码后即时签发的新 token（当前会话不掉线）
+    expires_at: int
+
+
+@router.post("/change-password", response_model=ChangePasswordResponse)
+def change_password(req: ChangePasswordRequest, request: Request,
+                    ident: dict = Depends(current_identity),
+                    db: Session = Depends(get_db)) -> ChangePasswordResponse:
+    """登录用户自助改密：验当前密码 → 设新密码 → 递增 token_version 踢其他会话 →
+    签发新 token 返回（本次会话不掉线，其余设备下次请求即 401 重登）。
+
+    共享口令回退登录（fb token / 无对应 sys_user 行，如 ADMIN_PASSWORD 登录的 admin）
+    没有可改的账号行 → 明确拒绝，引导改环境变量。审计只记「发生改密」，绝不落明文/hash。
+    """
+    ip = _client_ip(request)
+    ua = request.headers.get("user-agent")
+    sub = ident.get("sub")
+
+    def _ev(action: str, role: str | None, detail: dict | None = None) -> None:
+        security.record_security_event(sub, role, action, "auth", detail, ip, ua)
+
+    if ident.get("fb") or not sub:
+        _ev("change_password_rejected", ident.get("role"), {"reason": "shared_password"})
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "当前为共享口令登录，无法自助改密；请用独立账号登录或联系管理员")
+    user = db.scalar(select(SysUser).where(SysUser.username == sub))
+    if user is None:
+        # 无 fb 标记但也无实名行：ADMIN_PASSWORD 登录的 admin（sub='admin' 但未建号）
+        _ev("change_password_rejected", ident.get("role"), {"reason": "no_account_row"})
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "当前账号通过共享口令登录，无法自助改密；请联系管理员改用独立账号")
+    # current_identity 已校验 is_active/tv，此处仅防御性
+    if not user.is_active:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号已停用，请重新登录")
+    if not verify_password(req.current_password, user.password_hash):
+        _ev("change_password_failed", user.role, {"reason": "wrong_current"})
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "当前密码不正确")
+    if len(req.new_password or "") < _MIN_PASSWORD_LEN:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"新密码至少 {_MIN_PASSWORD_LEN} 位")
+    if verify_password(req.new_password, user.password_hash):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "新密码不能与当前密码相同")
+
+    user.password_hash = hash_password(req.new_password)
+    user.token_version = (user.token_version or 0) + 1   # 踢掉其他会话
+    db.add(SysAuditLog(entity_type="sys_user", entity_id=user.id,
+                       action="account_change_password", before_json=None, after_json=None,
+                       operated_by=sub, reason="用户自助修改密码"))
+    db.commit()
+    _ev("change_password", user.role)
+
+    perms = permissions.effective(user.role, user.permissions)
+    token, exp = _make_token(user.role, user.username, user.salesperson_name,
+                             perms=perms, token_version=user.token_version)
+    return ChangePasswordResponse(token=token, expires_at=exp)
 
 
 def current_role(ident: dict = Depends(current_identity)) -> str:
