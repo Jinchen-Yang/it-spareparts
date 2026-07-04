@@ -254,8 +254,24 @@ def change_password(req: ChangePasswordRequest, request: Request,
     # current_identity 已校验 is_active/tv，此处仅防御性
     if not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号已停用，请重新登录")
+    # 当前密码尝试防爆破：与登录共用同一失败计数/锁定（同一账号认证失败冷却）。
+    # 虽需先持有效会话才能到这里，但零成本复用可挡住会话被盗后的当前密码爆破（安全审查 CP-1）。
+    now = datetime.now(timezone.utc)
+    if user.locked_until is not None and user.locked_until > now:
+        mins = int((user.locked_until - now).total_seconds() // 60) + 1
+        _ev("change_password_locked", user.role, {"locked_until": user.locked_until.isoformat()})
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                            f"密码尝试次数过多，请 {mins} 分钟后再试")
     if not verify_password(req.current_password, user.password_hash):
-        _ev("change_password_failed", user.role, {"reason": "wrong_current"})
+        user.failed_attempts = (user.failed_attempts or 0) + 1
+        just_locked = user.failed_attempts >= _LOGIN_MAX_FAILS
+        if just_locked:
+            user.locked_until = now + timedelta(minutes=_LOGIN_LOCK_MINUTES)
+        db.commit()
+        _ev("change_password_failed", user.role, {"failed_attempts": user.failed_attempts})
+        if just_locked:
+            _ev("change_password_locked", user.role,
+                {"reason": "too_many_failures", "minutes": _LOGIN_LOCK_MINUTES})
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "当前密码不正确")
     if len(req.new_password or "") < _MIN_PASSWORD_LEN:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"新密码至少 {_MIN_PASSWORD_LEN} 位")
@@ -263,6 +279,8 @@ def change_password(req: ChangePasswordRequest, request: Request,
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "新密码不能与当前密码相同")
 
     user.password_hash = hash_password(req.new_password)
+    user.failed_attempts = 0        # 改密成功清零失败计数与锁定（同 login 成功分支）
+    user.locked_until = None
     user.token_version = (user.token_version or 0) + 1   # 踢掉其他会话
     db.add(SysAuditLog(entity_type="sys_user", entity_id=user.id,
                        action="account_change_password", before_json=None, after_json=None,

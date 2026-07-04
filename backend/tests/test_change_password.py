@@ -91,6 +91,32 @@ def test_fallback_nonadmin_cannot_self_change(db):
     assert r.status_code == 400
 
 
+def test_bruteforce_current_password_locks_out(db):
+    """连续猜错当前密码达阈值 → 锁定（429），与登录共用锁定机制（安全审查 CP-1）。"""
+    _mk(db)
+    tok = _login("liu", "pw123456").json()["token"]
+    for _ in range(5):
+        assert _change(tok, "guess_wrong", "newpw789").status_code == 400
+    # 第 6 次即便当前密码正确也被锁定拒绝
+    r = _change(tok, "pw123456", "newpw789")
+    assert r.status_code == 429 and "分钟" in r.json()["detail"]
+    assert _login("liu", "pw123456").status_code == 429   # 锁定对登录同样生效（共用计数）
+
+
+def test_successful_change_resets_failed_counter(db):
+    """成功改密清零失败计数：之前几次猜错不该累积到锁定。"""
+    _mk(db)
+    tok = _login("liu", "pw123456").json()["token"]
+    assert _change(tok, "wrong1", "newpw789").status_code == 400
+    assert _change(tok, "wrong2", "newpw789").status_code == 400
+    assert _change(tok, "pw123456", "newpw789").status_code == 200   # 成功
+    # 计数已清零：新会话再连错 4 次仍不锁（阈值 5）
+    tok2 = _login("liu", "newpw789").json()["token"]
+    for _ in range(4):
+        assert _change(tok2, "nope", "another99").status_code == 400
+    assert _login("liu", "newpw789").status_code == 200   # 未锁定
+
+
 def test_no_token_401(db):
     r = TestClient(app).post("/api/auth/change-password",
                              json={"current_password": "x", "new_password": "yyyyyy"})
