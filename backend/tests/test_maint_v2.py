@@ -225,12 +225,13 @@ def test_expense_composite_key_and_column_drift(db, batch):
     res = transform(df, mapping.EXPENSE)
     assert not res.errors and len(res.lines) == 1
     r = res.lines[0]
-    assert r["raw_line_id"] == "BXD-20260401-7#1"
+    # v1.7.0（§17.4）：复合键带合同域后缀——单号可为手填自由文本，跨合同同名不得互撞
+    assert r["raw_line_id"].startswith("BXD-20260401-7#1@")
     assert r["fee_category"] == "外援劳务" and r["linked_sales_order_no"] == "XS-2"
     loader.load(db, res, batch.id, date(2026, 6, 1))
     db.commit()
     assert db.scalar(select(FProjectExpense.bxd_no)
-                     .where(FProjectExpense.raw_line_id == "BXD-20260401-7#1")) == "BXD-20260401-7"
+                     .where(FProjectExpense.raw_line_id.like("BXD-20260401-7#1@%"))) == "BXD-20260401-7"
 
 
 # ---------- 工作簿导出（§16.4）----------
@@ -265,7 +266,7 @@ def test_workbook_doc_level_backfill(db, batch):
     # 模板渲染：三页齐全、标题含合同号、表头深色白字、产品成本只填单据首行且高亮、金额千分位
     from app.api.maintenance import _build_workbook
     wb = _build_workbook("XS-W", data)
-    assert wb.sheetnames == ["项目预算", "备件明细-氚云", "报销明细"]
+    assert wb.sheetnames == ["项目预算", "备件明细-氚云", "报销明细", "填写说明"]
     ws = wb["项目预算"]
     assert "XS-W" in ws["A1"].value
     ws2 = wb["备件明细-氚云"]
@@ -277,4 +278,7 @@ def test_workbook_doc_level_backfill(db, batch):
     assert ws2.cell(3, 13).value is None                              # 第二行不重复填
     assert ws2.cell(2, 18).number_format == "#,##0.00"                # 金额千分位
     ws3 = wb["报销明细"]
-    assert ws3.cell(2, 9).number_format == "#,##0.00"
+    # §17.3 canonical：第 1 行归集锚（销售订单|XSDD），第 2 行表头，金额在第 6 列
+    assert ws3.cell(1, 1).value == "销售订单" and ws3.cell(1, 2).value == "XS-W"
+    assert ws3.cell(2, 1).value == "报销日期" and ws3.cell(2, 6).value == "报销金额"
+    assert ws3.cell(3, 6).number_format == "#,##0.00"

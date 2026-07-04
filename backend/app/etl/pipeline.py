@@ -79,29 +79,89 @@ def run_import(session: Session, file_path: str, original_name: str,
     session.flush()  # 取 batch.id
 
     try:
-        df, file_type = reader.read_excel(file_path)
-        batch.file_type = file_type
+        sheets = reader.read_workbook(file_path)
+        if not sheets:
+            raise ReaderError("无法识别文件类型，请确认是采购/销售/库存/维保出库/报销明细导出文件")
+
+        # §17.5 调度：**有报销页才是项目追踪工作簿**——只吃报销页，其余可识别页
+        # （系统导出的备件回填副本/手工粘贴件，非权威源）跳过并报告，防回环污染。
+        # 没有报销页 → 老语义：导第一个可识别页（隐藏副本页/杂页不再拖垮整个文件），
+        # 其余页在报告中列为 ignored_sheets 提示。
+        expense_sheets = [s for s in sheets if s.file_type == mapping.EXPENSE]
+        if expense_sheets:
+            primary = None
+            batch.file_type = "workbook" if len(sheets) > 1 else mapping.EXPENSE
+            for s in expense_sheets:
+                reader.require_clean_columns(s)
+        else:
+            primary = sheets[0]
+            reader.require_clean_columns(primary)
+            batch.file_type = primary.file_type
 
         storage_path = _archive(file_path, file_hash)
         session.add(SysRawFile(batch_id=batch.id, filename=original_name,
                                file_hash=file_hash, storage_path=storage_path))
+        snapshot = datetime.now(timezone.utc).date()
 
-        result = transform(df, file_type)
+        if expense_sheets:
+            # 多报销页合并成一次装载：单次合同级替换（修复模式不互删）、计数不虚高
+            result = transform(expense_sheets[0].df, mapping.EXPENSE,
+                               anchor=expense_sheets[0].anchor)
+            if len(expense_sheets) > 1:
+                for e in result.errors:
+                    e.error_detail = f"[{expense_sheets[0].sheet_name}] {e.error_detail}"
+                for s in expense_sheets[1:]:
+                    r = transform(s.df, mapping.EXPENSE, anchor=s.anchor)
+                    for e in r.errors:
+                        e.error_detail = f"[{s.sheet_name}] {e.error_detail}"
+                    result.errors.extend(r.errors)
+                    result.rows_total += r.rows_total
+                    result.rows_inactive += r.rows_inactive
+                    result.rows_skipped_no_data += r.rows_skipped_no_data
+                    result.lines.extend(r.lines)
+                # 跨页同键（完全相同的行/同单号行）＝同一笔费用，保留首次，防 upsert 撞键
+                seen_keys: set[str] = set()
+                result.lines = [ln for ln in result.lines
+                                if not (ln["raw_line_id"] in seen_keys
+                                        or seen_keys.add(ln["raw_line_id"]))]
+            extra_report = {
+                "expense_sheets": [s.sheet_name for s in expense_sheets],
+                "skipped_sheets": [f"{s.sheet_name}（{s.file_type}，此类数据请用氚云原生导出单独上传）"
+                                   for s in sheets if s.file_type != mapping.EXPENSE],
+            }
+            src_cols = list(expense_sheets[0].df.columns)
+        else:
+            result = transform(primary.df, primary.file_type)
+            extra_report = {}
+            if len(sheets) > 1:
+                extra_report["ignored_sheets"] = [
+                    f"{s.sheet_name}（{s.file_type}，多页文件只导第一个可识别页）"
+                    for s in sheets[1:]
+                ]
+            src_cols = list(primary.df.columns)
 
-        # 错误行入 sys_import_error
+        # 错误行入 sys_import_error（失败批次也保留，便于按行修正）
         for e in result.errors:
             session.add(SysImportError(batch_id=batch.id, row_no=e.row_no,
                                        error_type=e.error_type, error_detail=e.error_detail,
                                        raw_row=e.raw_row))
 
-        snapshot = datetime.now(timezone.utc).date()
+        # §17.4 修复模式=以本表为准（合同级删除重建）：要求报销页零错误行——
+        # 半截行/撞键行意味着"本表"不完整，此时整表替换会静默丢账，必须先修再导
+        if expense_sheets and mode == "upsert" and result.errors:
+            raise ReaderError(
+                f"修复模式（以本表为准）要求报销页无错误行：发现 {len(result.errors)} 行错误"
+                "（详见批次错误明细），本次未导入。请修正后重试，或改用「跳过」模式仅补新行。")
+
         counts = loader.load(session, result, batch.id, snapshot, mode=mode,
                              operated_by=uploaded_by, audit_overwrites=True)
 
-        report = {"file_type": file_type, **counts,
+        report = {"file_type": batch.file_type, **counts,
+                  "rows_skipped_no_data": result.rows_skipped_no_data,
                   # 缺价格列留痕：即便用户确认导入了无金额文件，批次详情也能看到此告警
                   "missing_price_columns": not mapping.has_price_columns(
-                      list(df.columns), file_type),
+                      src_cols, result.file_type),
+                  **extra_report,
                   "errors_preview": [
                       {"row_no": e.row_no, "error_type": e.error_type, "detail": e.error_detail}
                       for e in result.errors[:10]
