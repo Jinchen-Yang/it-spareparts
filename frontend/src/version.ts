@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.8.2";
+export const APP_VERSION = "1.8.3";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.8.3",
+    date: "2026-07-04",
+    items: [
+      "硬盘/内存标准描述改为客户主数据治理模板（精简、去多余字段）：硬盘＝「容量 接口 HDD 速率 转速 尺寸」（如 4TB SATA HDD 6Gb 7.2K 3.5），内存＝「容量 频率等级 Rank 代际」（如 32GB 2666V 2Rx4 DDR4）；不再含品牌前缀、缓存、-inch、RDIMM/ECC 等",
+      "「一键规范化 / 批量规范化」同步采用新模板：对硬盘、内存生成上述精简标准描述",
+    ],
+  },
   {
     version: "1.8.2",
     date: "2026-07-04",

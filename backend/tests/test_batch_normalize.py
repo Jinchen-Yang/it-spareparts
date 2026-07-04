@@ -37,8 +37,7 @@ def test_preview_orders_by_value_and_flags_changes(seeded):
     assert items[0]["pn_std"] == "ST8000NM001A"          # 高销售额排前
     assert items[0]["recent_sales_amount"] == 10000.0
     assert "description" in items[0]["changes"]           # 描述会被规范化
-    assert items[0]["suggestion"]["canonical_description"] == \
-        "8TB 12Gb/s 7.2K 256MB Cache 3.5-inch SAS HDD"
+    assert items[0]["suggestion"]["canonical_description"] == "8TB SAS HDD 12Gb 7.2K 3.5"
     assert items[0]["suggestion"]["category_l2"] == "SAS-HDD-3.5"
 
 
@@ -48,7 +47,7 @@ def test_apply_batch_normalizes_and_locks(seeded):
     assert res["applied"] == 2
     seeded.expire_all()
     st = seeded.scalar(select(DimPart).where(DimPart.pn_std == "ST8000NM001A"))
-    assert st.description == "8TB 12Gb/s 7.2K 256MB Cache 3.5-inch SAS HDD"
+    assert st.description == "8TB SAS HDD 12Gb 7.2K 3.5"
     assert st.category_major == "硬盘" and st.category_minor == "SAS-HDD-3.5"
     assert {"description", "category_major"} <= set(st.locked_fields)   # 锁定防重导覆盖
 
