@@ -27,7 +27,7 @@ from app import config
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
-from app.services.query_filters import active_orders, keyword_groups_or_substr
+from app.services.query_filters import active_orders, col_matches_any, keyword_groups_or_substr
 
 _log = logging.getLogger("maintenance_cost")
 _CENT = Decimal("0.01")
@@ -358,7 +358,7 @@ def projects_aggregate(db: Session, date_from: date | None = None,
     if q_text and q_text.strip():
         # 分词模糊（大小写不敏感 + 变体，与全站搜索同源）：'联通 备件' 词序无关即可命中项目名
         for g in keyword_groups_or_substr(q_text):
-            stmt = stmt.where(or_(*[mo.project_std.ilike(f"%{v}%") for v in g]))
+            stmt = stmt.where(col_matches_any(mo.project_std, g))
 
     raw = db.execute(stmt).all()
 

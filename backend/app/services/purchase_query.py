@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app import config, security
 from app.models import DimPart, DimSupplier, FPurchaseLine, FPurchaseOrder, PartAlias
-from app.services.query_filters import keyword_term_groups
+from app.services.query_filters import col_matches_any, keyword_term_groups
 
 _ACTIVE = config.ACTIVE_STATUS
 MAX_PAGE_SIZE = 200
@@ -32,17 +32,15 @@ def apply_keyword(stmt, q: str | None):
     if not groups:
         return stmt
     for g in groups:
-        likes = [f"%{v}%" for v in g]
         alias_hit = (
             select(PartAlias.part_id)
-            .where(or_(*[PartAlias.pn_raw.ilike(lk) for lk in likes]),
-                   PartAlias.part_id.is_not(None))
+            .where(col_matches_any(PartAlias.pn_raw, g), PartAlias.part_id.is_not(None))
         )
         stmt = stmt.where(or_(
-            *[DimPart.pn_std.ilike(lk) for lk in likes],
-            *[DimPart.description.ilike(lk) for lk in likes],
-            *[FPurchaseLine.description.ilike(lk) for lk in likes],
-            *[FPurchaseLine.brand.ilike(lk) for lk in likes],
+            col_matches_any(DimPart.pn_std, g),
+            col_matches_any(DimPart.description, g),
+            col_matches_any(FPurchaseLine.description, g),
+            col_matches_any(FPurchaseLine.brand, g),
             FPurchaseLine.part_id.in_(alias_hit),
         ))
     return stmt

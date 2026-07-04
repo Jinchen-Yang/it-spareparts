@@ -10,7 +10,7 @@ from app import config, security
 from app.models.dimensions import DimPart
 from app.models.inventory import Inventory
 from app.models.system import SysAuditLog
-from app.services.query_filters import keyword_groups_or_substr
+from app.services.query_filters import col_matches_any, keyword_groups_or_substr
 
 
 def _d(x):
@@ -48,10 +48,9 @@ def list_inventory(db: Session, warehouse: str | None, q: str | None,
         # 分词模糊（大小写不敏感 ILIKE + 规格变体，与动态库存/采购同源）：'8TB SATA' 词序无关、
         # 跨 pn_std/description 命中即可，不再要求整段连续子串（旧整串匹配模糊度过低）。
         for g in keyword_groups_or_substr(q):
-            likes = [f"%{v}%" for v in g]
             stmt = stmt.where(or_(
-                *[Inventory.pn_std.ilike(lk) for lk in likes],
-                *[Inventory.description.ilike(lk) for lk in likes],
+                col_matches_any(Inventory.pn_std, g),
+                col_matches_any(Inventory.description, g),
             ))
     if user_ctx is not None:
         stmt = security.apply_data_scope(stmt, user_ctx)
@@ -218,11 +217,10 @@ def list_dynamic(db: Session, q: str | None, page: int, page_size: int,
         n_terms = len(groups)
         hit_exprs = []
         for g in groups:
-            likes = [f"%{v}%" for v in g]
             cond = or_(
-                *[DimPart.pn_std.ilike(lk) for lk in likes],
-                *[DimPart.description.ilike(lk) for lk in likes],
-                *[DimPart.brand.ilike(lk) for lk in likes],
+                col_matches_any(DimPart.pn_std, g),
+                col_matches_any(DimPart.description, g),
+                col_matches_any(DimPart.brand, g),
             )
             hit_exprs.append(case((cond, 1), else_=0))
         hits = reduce(lambda a, b: a + b, hit_exprs)

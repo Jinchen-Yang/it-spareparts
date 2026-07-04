@@ -70,6 +70,34 @@ def test_dynamic_no_query_no_match_fields(db):
     assert all(it["match_hits"] is None for it in out["items"])
 
 
+# ---------- 左词界：容量/规格词不被更大数字子串误命中（6TB ≠ 16TB / 1.6TB）----------
+def test_capacity_left_word_boundary(db):
+    a = _part(db, "PN-6", "Seagate 6TB SATA HDD 6Gb 7.2K 3.5", "Seagate")
+    b = _part(db, "PN-16", "WD 16TB SATA HDD 6Gb 7.2K 3.5", "WD")
+    c = _part(db, "PN-1_6", "Toshiba 1.6TB SAS HDD 12Gb 10K 2.5", "Toshiba")
+    for p in (a, b, c):
+        _inv(db, p)
+    db.commit()
+    # 搜 6TB：只召回 6TB，绝不带出 16TB / 1.6TB
+    pns = {it["pn_std"] for it in inv_svc.list_dynamic(db, "6TB", 1, 20)["items"]}
+    assert pns == {"PN-6"}
+    # 整段客户模板描述：同样只命中 6TB 那条（多词全命中）
+    top = inv_svc.list_dynamic(db, "6TB SATA HDD 6Gb 7.2K 3.5", 1, 20)["items"]
+    assert top and top[0]["pn_std"] == "PN-6"
+    assert "PN-16" not in {it["pn_std"] for it in top if it["match_hits"] == it["match_terms"]}
+    # 16TB 仍能被自己搜到
+    assert {it["pn_std"] for it in inv_svc.list_dynamic(db, "16TB", 1, 20)["items"]} == {"PN-16"}
+
+
+def test_speed_left_word_boundary(db):
+    a = _part(db, "SP-6", "Disk 6Gb SATA", "X")
+    b = _part(db, "SP-16", "Disk 16Gb weird SATA", "X")
+    for p in (a, b):
+        _inv(db, p)
+    db.commit()
+    assert {it["pn_std"] for it in inv_svc.list_dynamic(db, "6Gb", 1, 20)["items"]} == {"SP-6"}
+
+
 # ---------- 库存静态列表：分词模糊（词序无关、大小写不敏感）----------
 def test_list_inventory_tokenized_fuzzy(db):
     a, *_ = _seed_hdds(db)

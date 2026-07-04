@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app import config, security
 from app.services import inventory as inventory_service
-from app.services.query_filters import active_orders, keyword_groups_or_substr
+from app.services.query_filters import active_orders, col_matches_any, keyword_groups_or_substr
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
 from app.models.inquiry import FPartInquiry
 from app.models.inventory import Inventory, PartSubstitute
@@ -98,10 +98,9 @@ def search_parts(db: Session, q: str | None, page: int, page_size: int,
     if q and q.strip():
         # 分词模糊（大小写不敏感 + 规格变体，与型号查询/库存/采购同源）：词序无关、跨字段命中即可。
         for g in keyword_groups_or_substr(q):
-            likes = [f"%{v}%" for v in g]
             stmt = stmt.where(or_(
-                *[DimPart.pn_std.ilike(lk) for lk in likes],
-                *[DimPart.description.ilike(lk) for lk in likes],
+                col_matches_any(DimPart.pn_std, g),
+                col_matches_any(DimPart.description, g),
             ))
     if part_type:
         stmt = stmt.where(_spec_exists("part_type", value=part_type))

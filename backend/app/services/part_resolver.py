@@ -23,7 +23,7 @@ from app import config
 from app.etl.cleaner import standardize_pn
 from app.models.dimensions import DimPart
 from app.models.system import SysAuditLog
-from app.services.query_filters import keyword_term_groups
+from app.services.query_filters import col_matches_any, keyword_term_groups
 
 _CJK = re.compile(r"[一-鿿]{2,}")
 _ALNUM = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-\._/]*")
@@ -67,7 +67,7 @@ _DOC_CAND_LIMIT = 120
 def _doc_recall(db, groups):
     """按变体词组召回：返回 {pn_std: 命中词数}，并给出候选行。"""
     n = len(groups)
-    conds = [or_(*[DimPart.search_doc.ilike(f"%{v}%") for v in g]) for g in groups]
+    conds = [col_matches_any(DimPart.search_doc, g) for g in groups]
     hits = sum(sa_case((c, 1), else_=0) for c in conds)
     min_hits = n if n <= 3 else n - 1
     stmt = (
