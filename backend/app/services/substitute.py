@@ -93,3 +93,35 @@ def add_substitute(db: Session, pn_a: str, pn_b: str, note: str | None,
                            reason=note, operated_by=operated_by))
     db.commit()
     return {"created": created, "pn_a": pn_a, "pn_b": pn_b}
+
+
+def remove_substitute(db: Session, pn_a: str, pn_b: str, operated_by: str | None) -> dict:
+    """解除两个型号间的**直连**替代关系（加错了纠正用）。删的是规范序 (a<b) 那一行整条边，
+    不分方向。写审计（before=被删行快照）。成组互通是读时 BFS 闭包，删掉直连边后经它
+    间接连通的其它号会自动重新计算——只影响这条直连，不误伤组内其它直连关系。
+
+    入参走 resolve_part（跟 list_substitutes 同源，容忍已合并墓碑 PN → 沿链取目标），
+    保证用户在列表里看到的那条直连一定能被定位。找不到该直连边 → deleted=False（幂等）。
+    """
+    pa, _ = part_overview.resolve_part(db, pn_a)
+    pb, _ = part_overview.resolve_part(db, pn_b)
+    missing = [pn for pn, p in [(pn_a, pa), (pn_b, pb)] if p is None]
+    if missing:
+        raise SubstituteError(f"型号不存在: {missing}")
+    if pa.id == pb.id:
+        raise SubstituteError("两个型号已是同一型号（可能已被合并），无直连替代关系可解除")
+
+    a_id, b_id = sorted([pa.id, pb.id])
+    row = db.scalar(select(PartSubstitute).where(
+        PartSubstitute.part_id_a == a_id, PartSubstitute.part_id_b == b_id))
+    if row is None:
+        # 列表里若显示为「互替·经 X」的间接项，两者间并无直连边——如实告知未删除
+        return {"deleted": False, "pn_a": pn_a, "pn_b": pn_b}
+
+    before = {"pn_a": pn_a, "pn_b": pn_b, "direction": row.direction, "source": row.source,
+              "substitute_type": row.substitute_type, "note": row.note, "status": row.status}
+    db.add(SysAuditLog(entity_type="substitute", entity_id=row.id, action="delete",
+                       before_json=before, after_json=None, operated_by=operated_by))
+    db.delete(row)
+    db.commit()
+    return {"deleted": True, "pn_a": pn_a, "pn_b": pn_b}

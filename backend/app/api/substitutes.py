@@ -39,3 +39,17 @@ def create(
                                          substitute_type=body.substitute_type)
     except substitute.SubstituteError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
+@router.delete("")
+def delete_(
+    pn_a: str = Query(..., min_length=1),
+    pn_b: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    role: str = Depends(require_admin),
+) -> dict:
+    """解除两型号间的直连替代关系（管理员，写审计）。加错了纠正用。"""
+    try:
+        return substitute.remove_substitute(db, pn_a, pn_b, operated_by=role)
+    except substitute.SubstituteError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc

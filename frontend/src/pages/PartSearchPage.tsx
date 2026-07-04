@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   Input, Card, Descriptions, Tag, Row, Col, Statistic, Empty, message, Space, Button,
-  Select, InputNumber, Alert, Table,
+  Select, InputNumber, Alert, Table, Popconfirm,
 } from "antd";
 import { RightOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -98,6 +98,17 @@ export default function PartSearchPage() {
       openOverview(ov.part.pn_std);
     } catch (e: any) {
       message.error(e?.response?.data?.detail || "添加失败（需管理员权限）");
+    }
+  };
+
+  const removeSubstitute = async (pnB: string) => {
+    if (!ov) return;
+    try {
+      const { data } = await api.delete("/substitutes", { params: { pn_a: ov.part.pn_std, pn_b: pnB } });
+      message.success(data.deleted ? "已解除替代关系" : "未找到该直连替代关系");
+      openOverview(ov.part.pn_std);
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || "解除失败（需管理员权限）");
     }
   };
 
@@ -341,6 +352,17 @@ export default function PartSearchPage() {
                       ) },
                     { title: "描述", dataIndex: "description", ellipsis: true,
                       render: (v: string | null) => v || <span style={{ color: "var(--mb-text-3)" }}>—</span> },
+                    { title: "", key: "act", width: 64, align: "center" as const,
+                      // 只在直连关系上给「解除」（间接「经 X」无直连边，删不了）
+                      render: (_, s) => s.via ? null : (
+                        <Popconfirm
+                          title="解除替代关系" description={`确定解除与 ${s.pn_std} 的直连替代关系？`}
+                          okText="解除" cancelText="取消" okButtonProps={{ danger: true }}
+                          onConfirm={() => removeSubstitute(s.pn_std)}
+                        >
+                          <a style={{ color: "var(--mb-danger)", fontSize: 12.5 }}>解除</a>
+                        </Popconfirm>
+                      ) },
                   ]}
                 />
               )
