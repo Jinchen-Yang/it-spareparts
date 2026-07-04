@@ -224,6 +224,54 @@ class ChangePasswordResponse(BaseModel):
     expires_at: int
 
 
+class PreauthChangePasswordRequest(BaseModel):
+    """登录页（未登录/登出后）改密：靠 用户名+当前密码 自证身份，无需 token。"""
+    username: str
+    current_password: str
+    new_password: str
+
+
+def _guard_password_attempt(db: Session, user: SysUser, current_pw: str, now: datetime,
+                            ev, fail_status: int, fail_msg: str) -> None:
+    """当前密码校验闸门（认证/登录页两条改密路径共用同一套锁定逻辑，防拷贝漂移）：
+    锁定中 → 429；密码错 → 累加 failed_attempts（达阈值锁定）并抛 fail_status/fail_msg。
+    与登录共用 failed_attempts/locked_until（同账号认证失败统一冷却）。成功则静默返回。"""
+    if user.locked_until is not None and user.locked_until > now:
+        mins = int((user.locked_until - now).total_seconds() // 60) + 1
+        ev("change_password_locked", user.role, {"locked_until": user.locked_until.isoformat()})
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                            f"密码尝试次数过多，请 {mins} 分钟后再试")
+    if not verify_password(current_pw, user.password_hash):
+        user.failed_attempts = (user.failed_attempts or 0) + 1
+        just_locked = user.failed_attempts >= _LOGIN_MAX_FAILS
+        if just_locked:
+            user.locked_until = now + timedelta(minutes=_LOGIN_LOCK_MINUTES)
+        db.commit()
+        ev("change_password_failed", user.role, {"failed_attempts": user.failed_attempts})
+        if just_locked:
+            ev("change_password_locked", user.role,
+               {"reason": "too_many_failures", "minutes": _LOGIN_LOCK_MINUTES})
+        raise HTTPException(fail_status, fail_msg)
+
+
+def _set_new_password(db: Session, user: SysUser, new_pw: str, operated_by: str) -> None:
+    """校验并应用新密码（调用方须先过 _guard_password_attempt 验证当前密码）：
+    长度 → 不同于旧 → 写 hash + 清失败计数/锁定 + 递增 token_version（踢其他会话）+ 审计。
+    审计只记「发生改密」，绝不落明文/hash。"""
+    if len(new_pw or "") < _MIN_PASSWORD_LEN:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"新密码至少 {_MIN_PASSWORD_LEN} 位")
+    if verify_password(new_pw, user.password_hash):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "新密码不能与当前密码相同")
+    user.password_hash = hash_password(new_pw)
+    user.failed_attempts = 0
+    user.locked_until = None
+    user.token_version = (user.token_version or 0) + 1
+    db.add(SysAuditLog(entity_type="sys_user", entity_id=user.id,
+                       action="account_change_password", before_json=None, after_json=None,
+                       operated_by=operated_by, reason="用户自助修改密码"))
+    db.commit()
+
+
 @router.post("/change-password", response_model=ChangePasswordResponse)
 def change_password(req: ChangePasswordRequest, request: Request,
                     ident: dict = Depends(current_identity),
@@ -254,44 +302,52 @@ def change_password(req: ChangePasswordRequest, request: Request,
     # current_identity 已校验 is_active/tv，此处仅防御性
     if not user.is_active:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号已停用，请重新登录")
-    # 当前密码尝试防爆破：与登录共用同一失败计数/锁定（同一账号认证失败冷却）。
-    # 虽需先持有效会话才能到这里，但零成本复用可挡住会话被盗后的当前密码爆破（安全审查 CP-1）。
+    # 当前密码尝试防爆破：与登录共用失败计数/锁定（安全审查 CP-1）。虽需先持有效会话才能
+    # 到这里，但零成本复用可挡住会话被盗后的当前密码爆破。
     now = datetime.now(timezone.utc)
-    if user.locked_until is not None and user.locked_until > now:
-        mins = int((user.locked_until - now).total_seconds() // 60) + 1
-        _ev("change_password_locked", user.role, {"locked_until": user.locked_until.isoformat()})
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
-                            f"密码尝试次数过多，请 {mins} 分钟后再试")
-    if not verify_password(req.current_password, user.password_hash):
-        user.failed_attempts = (user.failed_attempts or 0) + 1
-        just_locked = user.failed_attempts >= _LOGIN_MAX_FAILS
-        if just_locked:
-            user.locked_until = now + timedelta(minutes=_LOGIN_LOCK_MINUTES)
-        db.commit()
-        _ev("change_password_failed", user.role, {"failed_attempts": user.failed_attempts})
-        if just_locked:
-            _ev("change_password_locked", user.role,
-                {"reason": "too_many_failures", "minutes": _LOGIN_LOCK_MINUTES})
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "当前密码不正确")
-    if len(req.new_password or "") < _MIN_PASSWORD_LEN:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"新密码至少 {_MIN_PASSWORD_LEN} 位")
-    if verify_password(req.new_password, user.password_hash):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "新密码不能与当前密码相同")
-
-    user.password_hash = hash_password(req.new_password)
-    user.failed_attempts = 0        # 改密成功清零失败计数与锁定（同 login 成功分支）
-    user.locked_until = None
-    user.token_version = (user.token_version or 0) + 1   # 踢掉其他会话
-    db.add(SysAuditLog(entity_type="sys_user", entity_id=user.id,
-                       action="account_change_password", before_json=None, after_json=None,
-                       operated_by=sub, reason="用户自助修改密码"))
-    db.commit()
+    _guard_password_attempt(db, user, req.current_password, now, _ev,
+                            status.HTTP_400_BAD_REQUEST, "当前密码不正确")
+    _set_new_password(db, user, req.new_password, operated_by=sub)
     _ev("change_password", user.role)
 
     perms = permissions.effective(user.role, user.permissions)
     token, exp = _make_token(user.role, user.username, user.salesperson_name,
                              perms=perms, token_version=user.token_version)
     return ChangePasswordResponse(token=token, expires_at=exp)
+
+
+@router.post("/change-password-unauth")
+def change_password_unauth(req: PreauthChangePasswordRequest, request: Request,
+                           db: Session = Depends(get_db)) -> dict:
+    """登录页改密（未登录）：靠 用户名+当前密码 自证身份，无 token。改后不自动登录——
+    递增 token_version 使所有旧会话失效，用户用新密码重新登录。
+
+    安全同登录门：未知用户/停用/仅共享口令账号(无 sys_user 行) → 跑一次等量 pbkdf2 抹平
+    时序、返回不泄露账号存在性的统一错；当前密码错累加同一失败计数（与登录共用锁定）。
+    """
+    now = datetime.now(timezone.utc)
+    ip = _client_ip(request)
+    ua = request.headers.get("user-agent")
+
+    def _ev(action: str, role: str | None, detail: dict | None = None) -> None:
+        security.record_security_event(req.username, role, action, "auth", detail, ip, ua)
+
+    user = db.scalar(select(SysUser).where(SysUser.username == req.username))
+    if user is None:
+        # 未知用户名 / 仅靠 ADMIN_PASSWORD 登录的账号（无实名行）：时序抹平 + 不泄露存在性
+        verify_password(req.current_password, _DUMMY_PW_HASH)
+        _ev("change_password_failed", None, {"path": "preauth", "reason": "unknown"})
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或当前密码错误")
+    if not user.is_active:
+        verify_password(req.current_password, _DUMMY_PW_HASH)  # 时序抹平
+        _ev("change_password_blocked", user.role, {"path": "preauth", "reason": "inactive"})
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号已停用，请联系管理员")
+    # 未知用户与"用户存在但密码错"返回同一 401 文案，避免用户名枚举
+    _guard_password_attempt(db, user, req.current_password, now, _ev,
+                            status.HTTP_401_UNAUTHORIZED, "用户名或当前密码错误")
+    _set_new_password(db, user, req.new_password, operated_by=user.username)
+    _ev("change_password", user.role, {"path": "preauth"})
+    return {"changed": True}
 
 
 def current_role(ident: dict = Depends(current_identity)) -> str:

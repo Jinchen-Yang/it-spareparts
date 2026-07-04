@@ -123,6 +123,76 @@ def test_no_token_401(db):
     assert r.status_code == 401
 
 
+# ---------- 登录页改密（未登录 /auth/change-password-unauth）----------
+def _change_unauth(username, current, new):
+    return TestClient(app).post("/api/auth/change-password-unauth",
+                                json={"username": username, "current_password": current,
+                                      "new_password": new})
+
+
+def test_unauth_change_happy_path(db):
+    _mk(db)
+    r = _change_unauth("liu", "pw123456", "newpw789")
+    assert r.status_code == 200 and r.json()["changed"] is True
+    assert _login("liu", "newpw789").status_code == 200
+    assert _login("liu", "pw123456").status_code == 401
+
+
+def test_unauth_wrong_current_generic_401(db):
+    _mk(db)
+    r = _change_unauth("liu", "WRONG", "newpw789")
+    assert r.status_code == 401 and "用户名或当前密码" in r.json()["detail"]
+    assert _login("liu", "pw123456").status_code == 200   # 未改动
+
+
+def test_unauth_unknown_user_same_as_wrong_password(db):
+    """未知用户名与密码错返回同一 401 文案（防用户名枚举）。"""
+    _mk(db, username="liu", pw="pw123456")
+    r_unknown = _change_unauth("ghost", "whatever", "newpw789")
+    r_wrongpw = _change_unauth("liu", "WRONG", "newpw789")
+    assert r_unknown.status_code == r_wrongpw.status_code == 401
+    assert r_unknown.json()["detail"] == r_wrongpw.json()["detail"]
+
+
+def test_unauth_short_and_same_password(db):
+    _mk(db)
+    assert _change_unauth("liu", "pw123456", "abc").status_code == 400
+    assert _change_unauth("liu", "pw123456", "pw123456").status_code == 400
+    assert _login("liu", "pw123456").status_code == 200
+
+
+def test_unauth_inactive_account(db):
+    _mk(db, username="gone", active=False)
+    r = _change_unauth("gone", "pw123456", "newpw789")
+    assert r.status_code == 401 and "停用" in r.json()["detail"]
+
+
+def test_unauth_lockout_shared_with_login(db):
+    """登录页改密连错达阈值 → 锁定，且与登录共用计数。"""
+    _mk(db)
+    for _ in range(5):
+        assert _change_unauth("liu", "nope", "newpw789").status_code == 401
+    assert _change_unauth("liu", "pw123456", "newpw789").status_code == 429   # 已锁
+    assert _login("liu", "pw123456").status_code == 429                        # 登录同锁
+
+
+def test_unauth_shared_password_admin_rejected(db):
+    """无 sys_user 行的 admin（ADMIN_PASSWORD 登录）→ 登录页改密也拒绝（不泄露存在性）。"""
+    r = _change_unauth("admin", "admin", "newadmin1")
+    assert r.status_code == 401
+
+
+def test_unauth_change_revokes_existing_sessions(db):
+    """登录页改密递增 token_version：改前签发的会话立即失效。"""
+    _mk(db)
+    old_tok = _login("liu", "pw123456").json()["token"]
+    assert _change_unauth("liu", "pw123456", "newpw789").status_code == 200
+    # 改前的 token 已失效（tv 不匹配）
+    r = TestClient(app).post("/api/auth/change-password", headers=_bearer(old_tok),
+                             json={"current_password": "newpw789", "new_password": "zzz99999"})
+    assert r.status_code == 401
+
+
 def test_audit_records_no_plaintext(db):
     _mk(db)
     tok = _login("liu", "pw123456").json()["token"]
