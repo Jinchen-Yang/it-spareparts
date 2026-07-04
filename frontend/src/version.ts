@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.8.0";
+export const APP_VERSION = "1.8.1";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.8.1",
+    date: "2026-07-04",
+    items: [
+      "替代料/通用号支持「解除」：加错了可在型号全景的替代料列表里点「解除」删除（管理员，二次确认，写审计）；只对直连关系可删，间接「经 XX」的会随直连删除自动重算",
+    ],
+  },
   {
     version: "1.8.0",
     date: "2026-07-04",
