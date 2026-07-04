@@ -11,10 +11,11 @@ api.interceptors.request.use((cfg) => {
 api.interceptors.response.use(
   (r) => r,
   (err) => {
-    // 登录接口自己的 401(账号/密码错)交给登录页提示，不在这里 reload 把提示冲掉；
+    // 登录 / 登录页改密接口自己的 401(账号或密码错)交给页面行内提示，不在这里 reload 把提示冲掉；
     // 其它接口的 401 = token 失效，清掉并重载回登录页。
-    const isLogin = (err.config?.url || "").includes("/auth/login");
-    if (err.response?.status === 401 && !isLogin) {
+    const url = err.config?.url || "";
+    const isPublicAuth = url.includes("/auth/login") || url.includes("/auth/change-password-unauth");
+    if (err.response?.status === 401 && !isPublicAuth) {
       localStorage.removeItem("token");
       location.reload();
     }

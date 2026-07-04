@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.7.0";
+export const APP_VERSION = "1.8.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.8.0",
+    date: "2026-07-04",
+    items: [
+      "支持自助修改密码：登录后顶栏「修改密码」输入当前密码+新密码即可（新密码至少 6 位）；改密后本设备继续可用，其他设备需重新登录",
+      "登录页也可修改密码：未登录时点登录框下方「修改密码」，输入 用户名+当前密码+新密码 即可（改后用新密码登录）；连续输错会与登录一样临时锁定",
+      "共享口令登录（未建独立账号）无法自助改密，请联系管理员开通独立账号",
+    ],
+  },
   {
     version: "1.7.0",
     date: "2026-07-04",
