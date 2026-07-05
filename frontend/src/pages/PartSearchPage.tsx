@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Input, Card, Descriptions, Tag, Row, Col, Statistic, Empty, message, Space, Button,
   Select, InputNumber, Alert, Table, Popconfirm,
@@ -40,13 +40,21 @@ export default function PartSearchPage() {
   const [iface, setIface] = useState<string | undefined>(undefined);
   const [capMin, setCapMin] = useState<number | null>(null);
   const [capMax, setCapMax] = useState<number | null>(null);
+  // 品类筛选（宋总 2026-07-05：全品类按分类查，不只硬盘）—— 一级 → 二级级联
+  const [cats, setCats] = useState<{ major: string; minors: string[] }[]>([]);
+  const [catMajor, setCatMajor] = useState<string | undefined>(undefined);
+  const [catMinor, setCatMinor] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    api.get("/parts/categories").then(({ data }) => setCats(data.categories || [])).catch(() => {});
+  }, []);
+  const minorOpts = cats.find((c) => c.major === catMajor)?.minors || [];
 
   const canCost = canSee("data_purchase_cost");   // 销售看不到 → 隐藏成本卡片
   const canProfit = canSee("data_profit");
   const { basis } = useTaxBasis();
 
   const doSearch = async (q: string, override?: Record<string, unknown>) => {
-    const hasSpec = partType || iface || capMin != null || capMax != null || override;
+    const hasSpec = partType || iface || capMin != null || capMax != null || catMajor || catMinor || override;
     if (!q.trim() && !hasSpec) return;
     setSearching(true);
     setLastQ(q);
@@ -57,6 +65,7 @@ export default function PartSearchPage() {
           q: q.trim() || undefined, page_size: 20,
           part_type: partType, interface: iface,
           capacity_min: capMin ?? undefined, capacity_max: capMax ?? undefined,
+          category_major: catMajor, category_minor: catMinor,
           ...(override || {}),
         },
       });
@@ -206,13 +215,19 @@ export default function PartSearchPage() {
           allowClear
         />
         <Space style={{ marginTop: 12 }} wrap>
-          <Select allowClear placeholder="部件类型" value={partType} onChange={setPartType} style={{ width: 120 }}
+          <Select allowClear showSearch placeholder="一级品类（全品类）" value={catMajor} style={{ width: 160 }}
+            onChange={(v) => { setCatMajor(v); setCatMinor(undefined); }}
+            options={cats.map((c) => ({ value: c.major }))} />
+          <Select allowClear showSearch placeholder="二级品类" value={catMinor} onChange={setCatMinor}
+            style={{ width: 160 }} disabled={!catMajor}
+            options={minorOpts.map((m) => ({ value: m }))} />
+          <Select allowClear placeholder="部件类型" value={partType} onChange={setPartType} style={{ width: 110 }}
             options={[{ value: "HDD" }, { value: "SSD" }, { value: "RAM", label: "内存" }]} />
-          <Select allowClear placeholder="接口" value={iface} onChange={setIface} style={{ width: 120 }}
+          <Select allowClear placeholder="接口" value={iface} onChange={setIface} style={{ width: 100 }}
             options={["SAS", "SATA", "NVME", "FC", "SCSI"].map((v) => ({ value: v }))} />
-          <InputNumber placeholder="容量≥(GB)" value={capMin} onChange={setCapMin} style={{ width: 130 }} min={0} />
-          <InputNumber placeholder="容量≤(GB)" value={capMax} onChange={setCapMax} style={{ width: 130 }} min={0} />
-          <Button onClick={() => doSearch(lastQ, {})} loading={searching}>按规格筛选</Button>
+          <InputNumber placeholder="容量≥(GB)" value={capMin} onChange={setCapMin} style={{ width: 120 }} min={0} />
+          <InputNumber placeholder="容量≤(GB)" value={capMax} onChange={setCapMax} style={{ width: 120 }} min={0} />
+          <Button type="primary" ghost onClick={() => doSearch(lastQ, {})} loading={searching}>按品类/规格筛选</Button>
         </Space>
       </Card>
 
