@@ -92,8 +92,10 @@ def search_parts(db: Session, q: str | None, page: int, page_size: int,
                  user_ctx: security.UserContext | None = None,
                  part_type: str | None = None, interface: str | None = None,
                  capacity_min: float | None = None,
-                 capacity_max: float | None = None) -> dict:
-    """文本检索 + 结构化规格过滤（整改 P2：硬盘容量/接口等条件查询）。"""
+                 capacity_max: float | None = None,
+                 category_major: str | None = None,
+                 category_minor: str | None = None) -> dict:
+    """文本检索 + 结构化规格过滤（整改 P2）+ 品类过滤（宋总 2026-07-05：全品类按分类查，不只硬盘）。"""
     stmt = select(DimPart).where(DimPart.status != "merged")
     if q and q.strip():
         # 分词模糊（大小写不敏感 + 规格变体，与型号查询/库存/采购同源）：词序无关、跨字段命中即可。
@@ -102,6 +104,10 @@ def search_parts(db: Session, q: str | None, page: int, page_size: int,
                 col_matches_any(DimPart.pn_std, g),
                 col_matches_any(DimPart.description, g),
             ))
+    if category_major:
+        stmt = stmt.where(DimPart.category_major == category_major)
+    if category_minor:
+        stmt = stmt.where(DimPart.category_minor == category_minor)
     if part_type:
         stmt = stmt.where(_spec_exists("part_type", value=part_type))
     if interface:

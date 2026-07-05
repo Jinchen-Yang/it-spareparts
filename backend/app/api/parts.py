@@ -4,6 +4,7 @@
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import current_role
@@ -29,6 +30,8 @@ def search(
     interface: str | None = Query(None, description="SAS | SATA | NVME | FC | SCSI"),
     capacity_min: float | None = Query(None, description="容量下限(GB)"),
     capacity_max: float | None = Query(None, description="容量上限(GB)"),
+    category_major: str | None = Query(None, description="一级品类名，如 硬盘/内存/卡/CPU"),
+    category_minor: str | None = Query(None, description="二级品类名，如 显卡GPU/SAS-HDD-3.5"),
     db: Session = Depends(get_db),
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
@@ -36,7 +39,8 @@ def search(
     # whitespace-only q 视同空：避免滑进 structured 分支触发 '%   %' 全表 LIKE
     q_norm = (q or "").strip() or None
     has_spec_filter = any(
-        x is not None for x in (part_type, interface, capacity_min, capacity_max))
+        x is not None for x in (part_type, interface, capacity_min, capacity_max,
+                                category_major, category_minor))
     branch = "resolver" if (q_norm and not has_spec_filter) else "structured"
     # 审计带 branch：纯文本走近似解析(可能含 merged 墓碑标签)，结构化走 part_id 浏览
     # (排除墓碑)——同一 URL 两种语义，事后溯源必须能区分
@@ -51,8 +55,27 @@ def search(
         # 空查询浏览，或带结构化规格过滤：走 part_id 主口径的 search_parts（含 merged 墓碑排除）
         data = part_overview.search_parts(db, q_norm, page, page_size, ctx,
                                           part_type=part_type, interface=interface,
-                                          capacity_min=capacity_min, capacity_max=capacity_max)
+                                          capacity_min=capacity_min, capacity_max=capacity_max,
+                                          category_major=category_major, category_minor=category_minor)
     return apply_field_visibility(data, ctx)
+
+
+@router.get("/categories")
+def part_categories(db: Session = Depends(get_db), _: str = Depends(current_role)) -> dict:
+    """型号查询「按品类筛选」的下拉数据：实际存在于型号上的（一级品类 → 二级品类列表）。
+    任意登录用户可用（搜索页对所有角色开放，与 master/categories 的编辑权门分开）。"""
+    from app.models.dimensions import DimPart as _DP
+    rows = db.execute(
+        select(_DP.category_major, _DP.category_minor)
+        .where(_DP.status == "active", _DP.category_major.is_not(None)).distinct()
+    ).all()
+    tree: dict[str, list[str]] = {}
+    for ma, mi in rows:
+        tree.setdefault(ma, [])
+        if mi and mi not in tree[ma]:
+            tree[ma].append(mi)
+    return {"categories": [{"major": ma, "minors": sorted(mis)}
+                           for ma, mis in sorted(tree.items())]}
 
 
 @router.get("/overview")

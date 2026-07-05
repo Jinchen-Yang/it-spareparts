@@ -85,6 +85,12 @@ def refresh(
     return stats
 
 
+@router.post("/classify-backfill")
+def classify_backfill(db: Session = Depends(get_db), _: str = Depends(require_admin)) -> dict:
+    """按描述自动给型号打干净品类（尊重人工分类/锁定，幂等可重跑）。支撑型号查询按品类筛选。"""
+    return master_data.classify_backfill(db)
+
+
 @router.get("/parts")
 def parts(
     kind: str = Query("nonstd"),

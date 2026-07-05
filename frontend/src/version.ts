@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.8.4";
+export const APP_VERSION = "1.9.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.9.0",
+    date: "2026-07-05",
+    items: [
+      "型号查询新增「按品类筛选」：一级品类（硬盘/内存/主板/卡/CPU/电源/电池/风扇/线缆光模块/其他）→ 二级品类（如 显卡GPU、SAS-HDD-3.5、DDR4）两级下拉，全品类可筛，不再只有硬盘规格；可与关键词联合使用",
+      "全库自动分类：按标准描述给型号自动打上标准品类（人工设过/锁定的分类不动），把此前大量「未分类」的型号归入标准品类；管理员可在数据治理页一键重跑（自动分类）",
+    ],
+  },
   {
     version: "1.8.4",
     date: "2026-07-04",

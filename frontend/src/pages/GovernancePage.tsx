@@ -468,12 +468,27 @@ export default function GovernancePage() {
     } finally { setRefreshing(false); }
   };
 
+  const [classifying, setClassifying] = useState(false);
+  const autoClassify = async () => {
+    setClassifying(true);
+    try {
+      const { data } = await api.post("/governance/classify-backfill");
+      message.success(`自动分类完成：新归类 ${data.parts_reclassified} 个型号（共扫描 ${data.scanned}）`);
+      loadTop();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || "自动分类失败");
+    } finally { setClassifying(false); }
+  };
+
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <Card title="数据治理"
         extra={<Space>
           <Tooltip title="回填品牌/品类字典、别名、规格，扫描质量问题，生成合并候选（幂等，可随时重跑）">
             <Button loading={refreshing} onClick={refresh}>刷新主数据</Button>
+          </Tooltip>
+          <Tooltip title="按标准描述给型号自动打上标准品类（人工设过/锁定的分类不动，幂等可重跑）——型号查询「按品类筛选」的数据来源">
+            <Button loading={classifying} onClick={autoClassify}>自动分类</Button>
           </Tooltip>
           <Button type="primary" loading={recomputing} onClick={recompute}>重算利润</Button>
         </Space>}>

@@ -92,6 +92,50 @@ def backfill_brands(db: Session) -> dict:
 # 品类
 # ============================================================
 
+def classify_backfill(db: Session) -> dict:
+    """轻量分类引擎按（标准化）描述给型号打**干净品类**：category_major=一级名、
+    category_minor=二级名（可空）、category_source='AUTO'。
+
+    只动 status=active 且 category_source≠MANUAL 且 category_major 未锁的型号——尊重人工分类
+    与锁定字段，绝不覆盖手工结果；分类不出（低置信/整机）的保持原值不动。幂等可重跑。
+    产出即支撑「型号查询按品类筛选」：把 2 万多未分类型号打上标准品类。
+    """
+    from collections import defaultdict
+
+    from app.services import classify as classify_svc
+
+    rows = db.execute(
+        select(DimPart.id, DimPart.pn_std, DimPart.description, DimPart.brand,
+               DimPart.category_major, DimPart.category_minor)
+        .where(DimPart.status == "active",
+               or_(DimPart.category_source.is_(None), DimPart.category_source != "MANUAL"),
+               ~DimPart.locked_fields.contains(["category_major"]))
+    ).all()
+
+    # 按 (一级,二级) 分组，每组一条 UPDATE ... WHERE id IN (...)（远快于逐行）
+    groups: dict[tuple, list[int]] = defaultdict(list)
+    for pid, pn, desc, brand, ma0, mi0 in rows:
+        res = classify_svc.classify_part(desc, pn or "", brand or "")
+        if not res or res.get("whole_system"):
+            continue
+        l1, l2 = res.get("category_l1"), res.get("category_l2")
+        if not l1 or (l1 == ma0 and l2 == mi0):
+            continue                                   # 分不出 / 已是该值 → 跳过
+        groups[(l1, l2)].append(pid)
+
+    updated = 0
+    for (l1, l2), ids in groups.items():
+        for i in range(0, len(ids), 1000):             # 分块控参数量
+            updated += db.execute(
+                update(DimPart).where(DimPart.id.in_(ids[i:i + 1000]))
+                .values(category_major=l1, category_minor=l2, category_source="AUTO")
+            ).rowcount
+    db.commit()
+    cat = backfill_categories(db)                       # 干净品类后补 product_categories/category_id
+    return {"scanned": len(rows), "parts_reclassified": updated,
+            "categories": cat["categories"]}
+
+
 def backfill_categories(db: Session) -> dict:
     """distinct (大类,小类) → seed product_categories → 回填 category_id（只填 NULL）。"""
     pairs = db.execute(
