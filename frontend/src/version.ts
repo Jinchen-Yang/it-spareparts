@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.9.1";
+export const APP_VERSION = "1.9.2";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.9.2",
+    date: "2026-07-06",
+    items: [
+      "自动分类准确性再修一轮（对上轮 AI 复核出的错分逐类归因）：带 SFP+/QSFP 光口的以太网/InfiniBand 网卡不再被误判成「光模块」、超微 AOC-xxx 加装卡不再被当有源光缆、真正的 SFP+ 光收发器不再被当光纤卡、网络交换机（含中文描述与 PoE/接入交换机）识别为整机并从错误品类中纠正、System I/O 主板不再被当 CPU、中文「电源线」归为线缆、缓存电池（带线缆）归为电池；管理员在数据治理页点「自动分类」按新规则重跑",
+    ],
+  },
   {
     version: "1.9.1",
     date: "2026-07-06",
