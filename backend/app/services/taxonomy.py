@@ -55,7 +55,7 @@ KEYWORDS: dict[str, list[str]] = {
              "processor board", "cpu board", "logic board", "server board", "主板", "主逻辑板"],
     "0302": ["backplane", "midplane", "centerplane", "背板"],
     "0401": ["raid controller", "array controller", "megaraid", "perc", "smart array",
-             "serveraid", "raid卡", "阵列卡", "raid-on-chip"],
+             "serveraid", "raid卡", "raid card", "阵列卡", "raid-on-chip"],
     "0402": ["hba", "host bus adapter", "it mode", "jbod controller", "sas adapter",
              "sas controller", "sas hba"],
     "0403": ["nic", "network interface", "ethernet adapter", "lan adapter", "network adapter",
@@ -63,7 +63,9 @@ KEYWORDS: dict[str, list[str]] = {
     # 注：GPU 型号码(a100/h100/rtx…) 不放子串关键词——会误命中 MSA1000 等；改由 classify._is_gpu 整词匹配
     "0404": ["gpu", "graphics card", "video card", "graphics adapter", "tesla", "quadro",
              "radeon instinct", "firepro", "显卡"],
-    "0405": ["fc hba", "fibre channel adapter", "fiber channel adapter", "16g fc", "32g fc",
+    # 注：不放 "16g fc"/"32g fc"——它们既是 FC 卡代际也是 FC 硬盘描述里的接口速率，会把
+    # 「EMC HDD 4G FC」这类光纤硬盘误吞进卡。FC 卡由 classify._classify_card 判(带盘介质词即非卡)。
+    "0405": ["fc hba", "fibre channel adapter", "fiber channel adapter",
              "emulex lpe", "qlogic qle", "光纤卡"],
     "0499": ["pcie riser", "riser card", "mezzanine", "sas expander", "nvme switch",
              "nvme retimer", "dpu", "smartnic", "fpga", "crypto accelerator", "tpm module",

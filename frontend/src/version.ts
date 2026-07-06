@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.9.0";
+export const APP_VERSION = "1.9.1";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.9.1",
+    date: "2026-07-06",
+    items: [
+      "自动分类准确性修正：经几百个 AI 审计一遍(错误率 6.79%)，修掉几类关键词误判——光纤(FC)硬盘不再被归到「卡」、M.2 SATA 固态不再被当 NVMe、Intel 网卡不再撞成显卡、RAID 缓存电池不再当阵列卡、带端口的网络交换机识别为整机；管理员在数据治理页点「自动分类」即按新规则重跑",
+    ],
+  },
   {
     version: "1.9.0",
     date: "2026-07-05",
