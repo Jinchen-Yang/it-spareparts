@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.9.2";
+export const APP_VERSION = "1.9.3";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.9.3",
+    date: "2026-07-06",
+    items: [
+      "自动分类第三轮精修（对 2000 个随机抽样 AI 复核出的残留错分）：① 按甲方口径——RAID 卡自带超级电容/BBWC/FBWC/电池只是备电特性，本体归「卡」（不再归电池；纯电池/缓存模块仍归电池）② 自带风扇的电源不再被误判成风扇 ③ 带 SFP+/DAC 口的网卡、交换机线卡/IO 接口模块归「卡」④ 更多光收发器归光模块、更多交换机（含无 switch 字样的型号）识别为整机；随机抽样复核错误率由 6.8% 降至约 3%。管理员在数据治理页点「自动分类」按新规则重跑",
+    ],
+  },
   {
     version: "1.9.2",
     date: "2026-07-06",

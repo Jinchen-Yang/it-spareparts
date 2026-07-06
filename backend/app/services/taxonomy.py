@@ -32,7 +32,9 @@ CLASSIFY_PRIORITY = ["07", "08", "06", "0901", "0902", "03", "04", "05", "01", "
 DECISIVE = {
     # 注：不放 " aoc"——超微加装卡前缀「AOC-」(Add-On Card) 会撞 AOC(Active Optical Cable)。
     # 真 AOC 线缆由 classify._AOC 正则(词界 aoc 不接连字符)判为决定词，AOC-xxx 卡不误伤。
-    "0902": [" cable", "cable ", "power cord", "电源线", " dac", "mini-sas", "slimsas", "oculink"],
+    # 注：不放 " dac"——'Ethernet Server Adapter SFP+ DAC' 是网卡(DAC 只是配套线型)。纯 DAC 线
+    # 缆仍由 0902 关键词 "dac" 在优先级里命中(无卡则归线缆)；网卡先被 _is_nic 识别，卡带 DAC 归卡。
+    "0902": [" cable", "cable ", "power cord", "电源线", "mini-sas", "slimsas", "oculink"],
     # 主板形态决定词：含主板字样即归主板，压过 CPU/Processor 关键词
     # （"HP Mother Board…Intel E5 Processor" 是主板不是 CPU；氚云写「Mother Board」带空格）
     # "i/o board"/"io board"：System I/O board 是主板，别被 E5-xxxx 吞成 CPU

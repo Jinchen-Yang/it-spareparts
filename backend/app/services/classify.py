@@ -68,16 +68,22 @@ _FC_SPEED = re.compile(r"\b\d{1,2}\s*g\s*fc\b", re.I)   # 4G FC / 8G FC / 16G FC
 # （电源/风扇/背板/单板/线卡/主板/引擎）——那些是备件不是整机。
 _SWITCH_EXCLUDE = ("kvm", "nvme switch", "pcie switch", "pci-e switch", "sas switch", "usb switch")
 _SWITCH_FRU = ("power supply", "psu", " fan ", "fan tray", "fan module", "风扇", "背板",
-               "backplane", "line card", "line-card", "线卡", "supervisor engine", "主板",
-               "system board", "单板", "交换机电源", "交换机风扇")
+               "backplane", "line card", "line-card", "线卡", "interface card", "接口板",
+               "supervisor engine", "主板", "system board", "单板", "交换机电源", "交换机风扇")
 _SWITCH_PORTS = ("base-t", "base-sr", "base-lr", "1000base", "10ge", "25ge", "40ge", "100ge",
                  "gbe port", "以太网交换", "数据中心交换", "堆叠", "接入交换", "汇聚交换",
                  "核心交换", "三层交换", "二层交换", "poe", "catalyst", "nexus", "10/100",
-                 "-port", "ports", "端口")
+                 "-port", "ports", "端口", " gig ")
+_SWITCH_WORD = re.compile(r"\bswitch\b", re.I)                # 词界，容忍 'switch,48-port' 这类
+# 常见交换机整机型号（描述里可能没有 switch 字样）：华为 S/CE 系列、Cisco WS-C/Nexus。
+# 尾部不设边界：华为 S5720S/S5735S 等型号带尾字母（S5720 是型号，-52P-SI-AC 是配置后缀）。
+_SWITCH_MODELS = re.compile(
+    r"(?<![a-z0-9])(s57\d{2}|s58\d{2}|s67\d{2}|s6300|s6800|s5300|s5310|s7700|s9700|s12700|"
+    r"ce58\d\d|ce68\d\d|ce88\d\d|ce128\d\d|ws-c\d|n[35679]k-)", re.I)
 
 
 def _is_network_switch(text: str) -> bool:
-    if not (" switch " in text or "交换机" in text):
+    if not (bool(_SWITCH_WORD.search(text)) or "交换机" in text or bool(_SWITCH_MODELS.search(text))):
         return False
     if any(t in text for t in _SWITCH_EXCLUDE) or any(t in text for t in _SWITCH_FRU):
         return False
@@ -90,20 +96,55 @@ _RAID_CACHE = re.compile(r"\bcache\b.{0,15}\bfor\b", re.I)
 
 
 def _is_raid_cache(text: str) -> bool:
-    return ("raid" in text or "array" in text or "阵列" in text) and (
-        bool(_RAID_CACHE.search(text)) or any(t in text for t in
-             ("cachevault", "cachecade", "flash-backed", "flash backed", "阵列卡电池", "阵列卡缓存")))
+    """真·缓存/电池**模块**（不是阵列卡本体）：'Cache … For … RAID' 语义是给某卡的模块 → 电池。
+
+    但 'SR450C RAID卡 … Cache For RH5288'（卡, For 指服务器机型）不算模块——用"缓存词是否在卡本体
+    名词之前"区分：缓存词在前=模块(电池)；卡本体名词在前=卡(甲方定，其缓存只是规格)。
+    """
+    if not ("raid" in text or "array" in text or "阵列" in text):
+        return False
+    if not (bool(_RAID_CACHE.search(text)) or any(t in text for t in
+            ("cachevault", "cachecade", "flash-backed", "flash backed", "阵列卡电池", "阵列卡缓存"))):
+        return False
+    ci = min([text.find(t) for t in ("cache", "缓存", "cachevault", "flash-backed")
+              if t in text] or [10**9])
+    ni = min([text.find(t) for t in ("raid card", "raid 卡", "raid卡", "阵列卡", "controller")
+              if t in text] or [10**9])
+    return ci <= ni                          # 缓存词在卡本体名词之前 → 模块(电池)
 
 
-# 真·光模块（收发器）：SFP/QSFP/XFP 光学件，不是带 SFP 口的网卡/HBA。有 transceiver/收发器/GBIC
-# 即判；或 SFP 形态 + 光学特征(optical/波长/短长波/base-sr) 且无卡本体名词。
+# 阵列卡/控制器**本体**（甲方 2026-07-06 定：RAID 卡自带超级电容/BBWC/FBWC/电池只是备电特性，仍归卡）。
+# 判据：raid/阵列卡 语境 + 卡本体名词(controller/card/卡/adapter/HBA)或 RAID 级别枚举。与 _is_raid_cache
+# 互补：'Cache…For…' 是模块(电池)；'RAID Card…SuperCap/include Cable' 是卡本体。
+_RAID_LEVELS = re.compile(r"raid\s*[0-6](?:\s*[,/]\s*[0-9]+){1,}", re.I)   # RAID0,1,5,6,10,50,60
+
+
+def _is_raid_controller(text: str) -> bool:
+    if not any(t in text for t in ("raid", "megaraid", "perc", "smart array", "serveraid", "阵列卡")):
+        return False
+    return bool(_RAID_LEVELS.search(text)) or any(
+        n in text for n in ("controller", "card", "卡", "adapter", "hba", "阵列卡"))
+
+
+# 电源(自带内置风扇)优先于风扇：'Power Supply 600W … and fan' 是电源；'Fan Module/for PSU' 才是风扇。
+_PSU_WATT = re.compile(r"\d{2,4}\s*w\b", re.I)
+
+
+def _is_power_supply(text: str) -> bool:
+    return ("power supply" in text and bool(_PSU_WATT.search(text))
+            and not any(t in text for t in ("fan module", "fan assembly", "fan tray",
+                                            "风扇模块", "cooling module", "冷却模块")))
+
+
+# 真·光模块（收发器）：SFP/QSFP/XFP 光学件，不是带 SFP 口的网卡/HBA/接口卡。有 transceiver/收发器/GBIC
+# 即判；或 SFP 形态 + 光学特征(optical/波长/短长波/单模/base-sr) 且无卡/接口本体名词。
 _TRX_WORDS = ("transceiver", "收发器", "gbic")
 _TRX_FORM = ("sfp", "qsfp", "xfp", "cfp", "osfp")
 _TRX_OPTICAL = ("optical", "光模块", "光纤收发", "850nm", "1310nm", "1550nm", "短波", "长波",
-                " swl", " lwl", "short wave", "long wave", "base-sr", "base-lr", "base-sx",
-                "base-lx", "base-zr", "base-er")
-_TRX_CARD_NOUN = ("adapter", "controller", "hba", "raid", "阵列", "network card", "riser",
-                  "mezzanine", "网卡")
+                " swl", " lwl", "short wave", "long wave", "shortwave", "longwave", "单模", "多模",
+                "base-sr", "base-lr", "base-sx", "base-lx", "base-zr", "base-er")
+_TRX_CARD_NOUN = ("adapter", "controller", "hba", "raid", "阵列", " card", "网卡", "riser",
+                  "mezzanine", "接口", "interface", " nic", "smartio", "i/o", "gateway")
 
 
 def _is_transceiver(text: str) -> bool:
@@ -144,6 +185,10 @@ def _classify_card(text: str) -> str | None:
         return "0404"
     if _is_nic(text):                                       # 以太网/IB 网卡（含带 SFP 口的）→ 网卡
         return "0403"
+    if any(t in text for t in ("interface card", "接口板", "接口卡", "i/o module", "io module",
+                               "i/o模块", "io模块", "network module", "line card", "smartio",
+                               "gateway module")):           # 交换机线卡/IO 模块/接口板 → 其他适配卡
+        return "0499"
     for code in ("0403", "0401", "0402", "0499"):           # NIC/RAID/HBA/其他
         if _kw_hit(code, text):
             return code
@@ -162,9 +207,16 @@ def _is_cache_battery(text: str) -> bool:
 
 
 def _classify_component(text: str) -> str | None:
-    # 0) 缓存电池带线缆：本体是电池，先于 cable 决定词
+    # 0a) 阵列卡本体（带 supercap/battery/FBWC/include Cable 只是备电/附件）→ 卡；
+    #     但 'Cache … For …' 是缓存/电池**模块** → 归电池(见 0c)，故此处排除 _is_raid_cache。
+    if _is_raid_controller(text) and not _is_raid_cache(text):
+        return _classify_card(text) or "0401"
+    # 0b) 缓存电池带线缆：本体是电池，先于 cable 决定词
     if _is_cache_battery(text):
         return "07"
+    # 0c) 电源自带内置风扇 → 电源（先于风扇优先级；'Fan Module/for PSU' 不在此列）
+    if _is_power_supply(text) and ("fan" in text or "风扇" in text):
+        return "06"
     # 1) 形态决定词：一出现就定（cable 压过 Fan/Power；AOC 有源光缆按词界判，不误伤 AOC- 卡）
     for code, toks in T.DECISIVE.items():
         if any(t in text for t in toks):

@@ -57,9 +57,11 @@ CASES = [
     ('battery-1', 'L3-25034', 'Lsi Battery 13.5V 6.4F', '艾萨华（LSI）', '13.5V Battery', '电池/超级电容', 'AUTO_OK'),
     ('battery-2', 'P0001', 'HP 96W Smart Storage Battery', '惠普（HPE）', 'HPE Smart Storage Battery', '电池/超级电容', 'AUTO_OK'),
     ('battery-3', 'CGA103450A', 'Panasonic Battery 3V Lithium Coin', '松下（Panasonic）', '3V CMOS Battery', '电池/超级电容', 'AUTO_OK'),
-    ('battery-4', '0231Y384', 'Huawei 0231Y384 Raid Card Super Cap', '华为（HUAWEI）', 'Huawei Supercapacitor', '电池/超级电容', 'AUTO_OK'),
-    ('battery-5', 'P840AR', 'HP Smart Array P840ar/2GB FBWC 12GB 2-port Internal SAS Controller Ref', '惠普（HPE）', 'HPE FBWC Module', '电池/超级电容', 'AUTO_OK'),
-    ('battery-6', 'BC1MO0ESMP', '华为 XH628 V3 SR430C-ML 1G-BC1MO0ESMP-LSI 3108 RAID卡电池', '华为（HUAWEI）', 'Huawei RAID Cache Battery', '电池/超级电容', 'AUTO_OK'),
+    # v1.9.3 甲方定：RAID 卡自带超级电容/FBWC/电池只是备电特性，本体仍归「卡」（不再归电池）。
+    # 判据 _is_raid_controller：raid/阵列卡 + 卡本体名词 → 卡；'Cache…For…' 模块才留电池。
+    ('battery-4', '0231Y384', 'Huawei 0231Y384 Raid Card Super Cap', '华为（HUAWEI）', None, '阵列卡RAID', 'REVIEW_REQUIRED'),
+    ('battery-5', 'P840AR', 'HP Smart Array P840ar/2GB FBWC 12GB 2-port Internal SAS Controller Ref', '惠普（HPE）', 'HPE Smart Array P840ar SAS 12Gb/s 2-Port RAID Controller', '阵列卡RAID', 'AUTO_OK'),
+    ('battery-6', 'BC1MO0ESMP', '华为 XH628 V3 SR430C-ML 1G-BC1MO0ESMP-LSI 3108 RAID卡电池', '华为（HUAWEI）', None, None, 'REVIEW_REQUIRED'),
     ('battery-7', '18500V3-BBU', '华为OceanStor 18500V3 BBU', '华为（HUAWEI）', 'Huawei BBU', '电池/超级电容', 'AUTO_OK'),
     ('battery-8', 'MM-NVRAM', 'Curtiss-Wright Micro Memory NVRAM 1gb Mezzanine Battery', '其他', 'NVRAM Battery', '电池/超级电容', 'AUTO_OK'),
     ('fan-1', '', 'Mellanox Fan module w/rear to front airflow fan for SB77X0', '迈络思（Mellanox）', 'Fan Module', '风扇/散热', 'AUTO_OK'),
