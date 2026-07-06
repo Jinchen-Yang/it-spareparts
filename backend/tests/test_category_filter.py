@@ -35,6 +35,23 @@ def test_classify_backfill_fills_clean_categories(db):
     assert cat("PN-JUNK")[0] == "硬盘"
 
 
+def test_classify_backfill_relabels_stale_whole_system(db):
+    # 交换机曾被误挂在「线缆/光模块」下 → 回填应纠为「整机」，清掉错标签
+    _p(db, "PN-SW", "Huawei switch 48-ports 1000BASE-T 4-ports 10GE SFP+",
+       ma="线缆/光模块", mi="光模块", source="IMPORT")
+    # 本来就未分类(NULL)的整机不动，避免一次性冲成整机
+    _p(db, "PN-SRV", "Dell PowerEdge R750 Server")
+    db.commit()
+    master_data.classify_backfill(db)
+
+    def cat(pn):
+        r = db.scalar(select(DimPart).where(DimPart.pn_std == pn))
+        return (r.category_major, r.category_minor, r.category_source)
+
+    assert cat("PN-SW") == ("整机", None, "AUTO")     # 错标签被纠为整机
+    assert cat("PN-SRV")[0] is None                    # 原未分类整机保持不动
+
+
 def test_classify_backfill_respects_manual_and_locks(db):
     _p(db, "PN-M1", "Seagate 6TB SATA HDD 6Gb 7.2K 3.5", ma="我的自定义类", source="MANUAL")
     _p(db, "PN-M2", "32GB 2666V 2Rx4 DDR4", ma="锁定类", locked=["category_major"])

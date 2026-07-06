@@ -77,7 +77,8 @@ CASES = [
     ('optics-5', '', 'XG-SFP-LR-SM1310 10GBASE-LR SFP+ 1310-nm 10-km DOM Duplex LC SMF Optical Transceiver Module', '锐捷网络（Ruijie）', '10G SFP+ LR 1310nm 10km LC SMF Optical Transceiver', '光模块', 'AUTO_OK'),
     ('optics-6', '', 'Avago AFCT-57R5ATPZ 4.25Gbps 1310nm 10km TXRX OPT SFP', '安华高（Avago）', None, None, 'REVIEW_REQUIRED'),
     ('optics-7', '', 'LINKTEL LX6501CDH 25G 850nm 70m SFP28光模块', '其他', '25G SFP28 850nm 70m Optical Transceiver', '光模块', 'AUTO_OK'),
-    ('optics-8', '', 'Intel X520-Da2 Ethernet 10Gbps Dual Port Sfp+ Pci-E Card', '英特尔（INTEL）', None, None, 'REVIEW_REQUIRED'),
+    # v1.9.2 修复：X520-DA2 是双口 10GbE SFP+ 网卡，不再因带 SFP+ 口被误当光模块/转人工
+    ('optics-8', '', 'Intel X520-Da2 Ethernet 10Gbps Dual Port Sfp+ Pci-E Card', '英特尔（INTEL）', 'Intel 2-Port 10GbE SFP+ NIC', '网卡NIC', 'AUTO_OK'),
     ('cable-1', 'MFA2P10-A003', 'Mellanox MFA2P10-A003 Compatible SFP28 Active Optical Cable 25G 3m', '迈络思（Mellanox）', '25Gb/s SFP28 3m AOC Cable', '线缆', 'AUTO_OK'),
     ('cable-2', 'MCP1700-B003E', 'Mellanox MCP1700-B003E Compatible 40G QSFP+ Passive Direct Attach Copper Twinax Cable', '迈络思（Mellanox）', '40Gb/s QSFP+ DAC Cable', '线缆', 'AUTO_OK'),
     ('cable-3', 'MC2207130', 'MELLANOX Passive Copper cable, IB EDR, up to 100Gb/s, QSFP28, 3m', '迈络思（Mellanox）', '100Gb/s QSFP28 3m DAC Cable', '线缆', 'AUTO_OK'),

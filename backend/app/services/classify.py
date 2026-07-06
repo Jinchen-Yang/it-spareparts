@@ -64,13 +64,24 @@ def _kw_hit(code: str, text: str) -> bool:
 _FC_SPEED = re.compile(r"\b\d{1,2}\s*g\s*fc\b", re.I)   # 4G FC / 8G FC / 16G FC = 光纤接口速率
 
 # 网络交换机（带端口）= 整机；排除 KVM/NVMe/PCIe/SAS switch（这些是备件组件）。
+# 端口词放宽（含中文交换机的接入/汇聚/核心/PoE/端口计数）；排除交换机的 FRU 部件
+# （电源/风扇/背板/单板/线卡/主板/引擎）——那些是备件不是整机。
+_SWITCH_EXCLUDE = ("kvm", "nvme switch", "pcie switch", "pci-e switch", "sas switch", "usb switch")
+_SWITCH_FRU = ("power supply", "psu", " fan ", "fan tray", "fan module", "风扇", "背板",
+               "backplane", "line card", "line-card", "线卡", "supervisor engine", "主板",
+               "system board", "单板", "交换机电源", "交换机风扇")
 _SWITCH_PORTS = ("base-t", "base-sr", "base-lr", "1000base", "10ge", "25ge", "40ge", "100ge",
-                 "gbe port", "以太网交换", "数据中心交换", "堆叠")
+                 "gbe port", "以太网交换", "数据中心交换", "堆叠", "接入交换", "汇聚交换",
+                 "核心交换", "三层交换", "二层交换", "poe", "catalyst", "nexus", "10/100",
+                 "-port", "ports", "端口")
 
 
 def _is_network_switch(text: str) -> bool:
-    return " switch " in text and any(t in text for t in _SWITCH_PORTS) \
-        and not any(t in text for t in ("kvm", "nvme switch", "pcie switch", "pci-e switch", "sas switch"))
+    if not (" switch " in text or "交换机" in text):
+        return False
+    if any(t in text for t in _SWITCH_EXCLUDE) or any(t in text for t in _SWITCH_FRU):
+        return False
+    return any(t in text for t in _SWITCH_PORTS)
 
 
 # RAID 缓存/电池模块（如「Cache 4GB For Smart Array」「Avago Cache for … RAID controller」）：
@@ -84,25 +95,85 @@ def _is_raid_cache(text: str) -> bool:
              ("cachevault", "cachecade", "flash-backed", "flash backed", "阵列卡电池", "阵列卡缓存")))
 
 
+# 真·光模块（收发器）：SFP/QSFP/XFP 光学件，不是带 SFP 口的网卡/HBA。有 transceiver/收发器/GBIC
+# 即判；或 SFP 形态 + 光学特征(optical/波长/短长波/base-sr) 且无卡本体名词。
+_TRX_WORDS = ("transceiver", "收发器", "gbic")
+_TRX_FORM = ("sfp", "qsfp", "xfp", "cfp", "osfp")
+_TRX_OPTICAL = ("optical", "光模块", "光纤收发", "850nm", "1310nm", "1550nm", "短波", "长波",
+                " swl", " lwl", "short wave", "long wave", "base-sr", "base-lr", "base-sx",
+                "base-lx", "base-zr", "base-er")
+_TRX_CARD_NOUN = ("adapter", "controller", "hba", "raid", "阵列", "network card", "riser",
+                  "mezzanine", "网卡")
+
+
+def _is_transceiver(text: str) -> bool:
+    if any(w in text for w in _TRX_WORDS):
+        return True
+    return (any(f in text for f in _TRX_FORM) and any(o in text for o in _TRX_OPTICAL)
+            and not any(n in text for n in _TRX_CARD_NOUN))
+
+
+# 网卡(NIC/以太网/InfiniBand 适配卡)：型号码 + 短语 + adapter/card 搭网络信号。识别不足会让带
+# SFP 口的网卡被 0901 光模块吞掉（审计最大错分簇）。跑在 FC/GPU 之后、泛关键词之前。
+_NIC_MODELS = re.compile(
+    r"(?<![a-z0-9])(connectx|x520|x540|x550|x710|x722|xxv710|82598|82599|57810|57840|"
+    r"57414|57416|i350|i340|nc55[0-9]|nc36[0-9]|nc37[0-9])(?![a-z0-9])", re.I)
+_NIC_PHRASES = ("ethernet adapter", "ethernet card", "network adapter", "network card",
+                "network interface", "converged network", "host channel adapter", "infiniband",
+                "flexiblelom", "flexlom", "ocp nic", "10gbe", "25gbe", "40gbe", "100gbe", "网卡")
+_NIC_SIGNAL = ("ethernet", "10gb", "25gb", "40gb", "100gb", "gbe", "sfp", "qsfp", "infiniband", "以太")
+
+
+def _is_nic(text: str) -> bool:
+    if bool(_NIC_MODELS.search(text)) or re.search(r"(?<![a-z])nic(?![a-z])", text):
+        return True
+    if any(p in text for p in _NIC_PHRASES):
+        return True
+    # 「…adapter / …card / 网卡」+ 网络信号（FC/GPU 已在前面剥离，此处 adapter 多为网卡）
+    return ("adapter" in text or "card" in text or "网卡" in text) \
+        and any(s in text for s in _NIC_SIGNAL)
+
+
 def _classify_card(text: str) -> str | None:
-    """04 卡 的二级判定：FC 先于泛 HBA。**带盘介质词(HDD/SSD/固态/drive)的 FC 是硬盘不是卡**。"""
+    """04 卡 的二级判定：FC 先于 NIC 先于泛 HBA。**带盘介质词(HDD/SSD/固态/drive)的 FC 是硬盘不是卡**。"""
     disk = any(s in text for s in _DISK_SIGNAL) or " drive " in text
     if not disk and (any(k in text for k in ("qle", "lpe", "qme", "fibre channel", "fiber channel",
                                              "光纤卡", "fc hba")) or _FC_SPEED.search(text)):
         return "0405"
     if _is_gpu(text):                                       # GPU 型号码整词匹配，防 'a100'⊂'msa1000'
         return "0404"
+    if _is_nic(text):                                       # 以太网/IB 网卡（含带 SFP 口的）→ 网卡
+        return "0403"
     for code in ("0403", "0401", "0402", "0499"):           # NIC/RAID/HBA/其他
         if _kw_hit(code, text):
             return code
     return None
 
 
+_AOC_CABLE = re.compile(r"(?<![a-z])aoc(?![a-z-])", re.I)   # AOC 有源光缆(词界)；排除超微 AOC- 卡前缀
+
+
+def _is_cache_battery(text: str) -> bool:
+    """RAID 缓存电池/超级电容模块（HP FBWC/BBWC「Battery … W/ Cable」）：本体是电池，附带线缆——
+    别被形态决定词 cable 抢成线缆。要求有 battery/电池 头词 + 缓存/FBWC/带线 语境。"""
+    return ("battery" in text or "电池" in text) and any(
+        t in text for t in ("cache", "smart storage", "fbwc", "fwbc", "bbwc",
+                            "w/ cable", "with cable", "缓存"))
+
+
 def _classify_component(text: str) -> str | None:
-    # 1) 形态决定词：一出现就定（cable 压过 Fan/Power）
+    # 0) 缓存电池带线缆：本体是电池，先于 cable 决定词
+    if _is_cache_battery(text):
+        return "07"
+    # 1) 形态决定词：一出现就定（cable 压过 Fan/Power；AOC 有源光缆按词界判，不误伤 AOC- 卡）
     for code, toks in T.DECISIVE.items():
         if any(t in text for t in toks):
             return code
+    if _AOC_CABLE.search(text):
+        return "0902"
+    # 真·光模块(收发器)优先于 FC 卡：'SFP+ Transceiver' 是光模块(0901)，不是光纤卡
+    if _is_transceiver(text):
+        return "0901"
     # RAID 缓存/电池模块优先于阵列卡：'Cache for … RAID' 是电池(07)，不是卡
     if _is_raid_cache(text):
         return "07"

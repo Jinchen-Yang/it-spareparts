@@ -116,7 +116,13 @@ def classify_backfill(db: Session) -> dict:
     groups: dict[tuple, list[int]] = defaultdict(list)
     for pid, pn, desc, brand, ma0, mi0 in rows:
         res = classify_svc.classify_part(desc, pn or "", brand or "")
-        if not res or res.get("whole_system"):
+        if not res:
+            continue
+        if res.get("whole_system"):
+            # 整机(如带端口的交换机)误挂在某部件品类下 → 纠为「整机」，清掉错标签；
+            # 原本未分类(NULL)的不动，避免把两万多待分类型号一次性冲成整机。
+            if ma0 is not None and ma0 != "整机":
+                groups[("整机", None)].append(pid)
             continue
         l1, l2 = res.get("category_l1"), res.get("category_l2")
         if not l1 or (l1 == ma0 and l2 == mi0):

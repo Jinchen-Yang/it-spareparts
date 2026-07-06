@@ -95,3 +95,46 @@ def test_network_switch_is_whole_system():
     assert is_whole_system("Huawei switch with 48-ports 1000BASE-T, 4-ports 10GE SFP+")
     # KVM/PCIe/SAS switch 是备件组件，不是整机
     assert not is_whole_system("NVMe switch PCIe retimer card")
+    # 中文交换机（接入/PoE/端口）也判整机
+    assert is_whole_system("华为 CloudEngine S5735S 24×GE PoE+ + 4×GE SFP 三层接入交换机")
+    assert is_whole_system("Cisco Switch 48 Ethernet 10/100 ports 4 SFP-based Gigabit")
+    # 交换机的 FRU 部件（电源/风扇）不是整机
+    assert not is_whole_system("Cisco Nexus Switch Power Supply 750W AC")
+
+
+# ── 二轮审计(2026-07-06, 1225 复核)暴露的 SFP/卡/电池边界错分——逐条钉死防回归 ──
+AUDIT_FIXES_R2 = [
+    # 带 SFP+/QSFP 口的以太网/IB 网卡不再被吞成光模块（最大错分簇 ~81 个）
+    ("HP Ethernet 10gb 2-port 530sfp+adapter", "0403"),
+    ("IBM INTEL X520 DUAL PORT 10GBE SFP+ EMBEDDED ADAPTER", "0403"),
+    ("Mellanox Ethernet Card 100GbE 1x QSFP28 port PCIe3.0 ConnectX-5", "0403"),
+    ("DELL Broadcom 57810S Dual Port 10gb SFP PCIe Card Adapter", "0403"),
+    ("Mellanox ConnectX-3 QDR QSFP+ InfiniBand 10 LP MCX", "0403"),
+    ("Mellanox InfiniBand HCA", "0403"),
+    # 超微 AOC- 加装卡不再被「AOC(有源光缆)」决定词吞成线缆
+    ("超微 LSI 2108 RAID阵列卡6GB AOC-SAS2LP-H8IR", "0401"),
+    ("SuperMicro Raid Card LSI2308 8 Ports 6Gb/s PCIe AOC-S2308L-L8I", "0401"),
+    # 真 SFP+ 光收发器不再被 FC 速率当成光纤卡
+    ("Finisar SFP 8G FC SWL 850nm SFP+ Transceiver Module", "0901"),
+    ("Emulex 1 Port 8G FC Short Wave Optical – LC SFP+", "0901"),
+    ("DELL 8Gb/s Fiber Channel 850NM SFP Optical Transceiver", "0901"),
+    # 缓存电池带线缆本体是电池，不被 cable 决定词抢
+    ("HP 96W Smart Storage Cache Battery with 145MM Cable", "07"),
+    ("HP Battery 95W W/ Cable 145mm", "07"),
+    # System I/O board 是主板，不被 E5-xxxx 吞成 CPU
+    ("HP System I/O board Support E5-2600 series v3", "0301"),
+    # 中文电源线是线缆不是电源
+    ("华为 电源线 2m", "0902"),
+    # 不回归：真光模块型 SFP / 真 BBU / 真 FC HBA / 纯 CPU
+    ("FC SFP 32G", "0901"),
+    ("LSI MegaRAID RAID Battery BBU", "07"),
+    ("QLogic QLE2560 8Gb Fibre Channel HBA", "0405"),
+    ("Intel Xeon Gold 6248R Processor", "0501"),
+]
+
+
+@pytest.mark.parametrize("desc,expect", AUDIT_FIXES_R2)
+def test_audit_r2_sfp_card_battery_fixes(desc, expect):
+    r = classify_part(desc)
+    got = (r.get("l2_code") or r.get("l1_code")) if r else None
+    assert got == expect, f"{desc!r} → {got}，期望 {expect}"

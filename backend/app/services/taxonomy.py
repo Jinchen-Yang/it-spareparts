@@ -30,11 +30,14 @@ CLASSIFY_PRIORITY = ["07", "08", "06", "0901", "0902", "03", "04", "05", "01", "
 
 # 形态决定词：一出现就压过优先级（解决 "Fan Power Cable" 含 Fan 却应归线缆）。
 DECISIVE = {
-    "0902": [" cable", "cable ", "power cord", " dac", " aoc", "mini-sas", "slimsas", "oculink"],
+    # 注：不放 " aoc"——超微加装卡前缀「AOC-」(Add-On Card) 会撞 AOC(Active Optical Cable)。
+    # 真 AOC 线缆由 classify._AOC 正则(词界 aoc 不接连字符)判为决定词，AOC-xxx 卡不误伤。
+    "0902": [" cable", "cable ", "power cord", "电源线", " dac", "mini-sas", "slimsas", "oculink"],
     # 主板形态决定词：含主板字样即归主板，压过 CPU/Processor 关键词
     # （"HP Mother Board…Intel E5 Processor" 是主板不是 CPU；氚云写「Mother Board」带空格）
+    # "i/o board"/"io board"：System I/O board 是主板，别被 E5-xxxx 吞成 CPU
     "0301": ["motherboard", "mother board", "mainboard", "main board", "system board",
-             "systemboard", "主板", "主逻辑板"],
+             "systemboard", "i/o board", "io board", "主板", "主逻辑板"],
 }
 
 # 每个分类的识别关键词（小写匹配；来自 §一~§三 "识别词/识别规则"）。
@@ -55,7 +58,7 @@ KEYWORDS: dict[str, list[str]] = {
              "processor board", "cpu board", "logic board", "server board", "主板", "主逻辑板"],
     "0302": ["backplane", "midplane", "centerplane", "背板"],
     "0401": ["raid controller", "array controller", "megaraid", "perc", "smart array",
-             "serveraid", "raid卡", "raid card", "阵列卡", "raid-on-chip"],
+             "serveraid", "raid卡", "raid 卡", "raid card", "阵列卡", "raid-on-chip"],
     "0402": ["hba", "host bus adapter", "it mode", "jbod controller", "sas adapter",
              "sas controller", "sas hba"],
     "0403": ["nic", "network interface", "ethernet adapter", "lan adapter", "network adapter",
