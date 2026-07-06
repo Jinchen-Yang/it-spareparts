@@ -60,3 +60,38 @@ def test_is_whole_system_fru_distinction():
     assert is_whole_system("Dell PowerEdge R750 Server") is True
     assert is_whole_system("Dell R750 System Board") is False   # FRU 不算整机
     assert is_whole_system("HPE D3700 Power Supply") is False
+
+
+# ── 大规模审计(2026-07-06, 405 个 Haiku)暴露的关键词碰撞错分——逐条钉死防回归 ──
+AUDIT_FIXES = [
+    # FC 硬盘不再被当光纤卡（最大错分模式 ~210 个）
+    ("EMC HDD 600GB 15K 3.5 4G FC", "0208"),
+    ("IBM HDD 146GB 15K 3.5-inch 4G FC Drive", "0208"),
+    # M.2 SATA SSD 不再被当 NVMe
+    ("480GB SATA 6Gb/s M.2 2280 SSD", "0205"),
+    # GPU 短码不再撞连字符料号：Intel I350-T4 是网卡不是显卡
+    ("Intel I350-T4 4-port 1GbE BASE-T PCIe NIC", "0403"),
+    # 英文 "Raid Card" 归阵列卡（不因也含 HBA 而落到 HBA）
+    ("LSI Raid Card 12Gb SAS PCI-E HBA", "0401"),
+    # RAID 缓存/电池模块归电池，不归阵列卡
+    ("Avago Cache for 9361 and 9380 SAS RAID controller cards", "07"),
+    ("HP Cache 4GB For Smart Array P830i P430 缓存", "07"),
+    # 不回归：真 FC HBA 卡 / 真 GPU / 带缓存的阵列卡本体 / 真 NVMe
+    ("QLogic QLE2560 8Gb Fibre Channel HBA", "0405"),
+    ("NVIDIA Tesla T4 16GB GPU", "0404"),
+    ("MegaRAID 9361-8i 2GB Cache SAS RAID Controller", "0401"),
+    ("Intel P4610 1.6TB NVMe U.2 SSD", "0207"),
+]
+
+
+@pytest.mark.parametrize("desc,expect", AUDIT_FIXES)
+def test_audit_keyword_collision_fixes(desc, expect):
+    r = classify_part(desc)
+    got = r.get("l2_code") or r.get("l1_code") if r else None
+    assert got == expect, f"{desc!r} → {got}，期望 {expect}"
+
+
+def test_network_switch_is_whole_system():
+    assert is_whole_system("Huawei switch with 48-ports 1000BASE-T, 4-ports 10GE SFP+")
+    # KVM/PCIe/SAS switch 是备件组件，不是整机
+    assert not is_whole_system("NVMe switch PCIe retimer card")
