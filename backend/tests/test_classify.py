@@ -138,3 +138,46 @@ def test_audit_r2_sfp_card_battery_fixes(desc, expect):
     r = classify_part(desc)
     got = (r.get("l2_code") or r.get("l1_code")) if r else None
     assert got == expect, f"{desc!r} → {got}，期望 {expect}"
+
+
+# ── 三轮审计(2026-07-06, 2000 抽样)残留 + 甲方口径「RAID 卡自带电容/电池归卡」──
+AUDIT_FIXES_R3 = [
+    # RAID 卡本体（带 supercap/battery/FBWC/include Cable/For 机型）→ 卡（甲方定）
+    ("华为阵列卡 SR430C 2GB LSI 3108 RAID CARD RAID0,1,5,6,10,50,60", "0401"),
+    ("Huawei LSI3108 1GB RAID Card SuperCap(4GB,include Cable)", "0401"),
+    ("Huawei SR450C SAS/SATA RAID 卡 2GB Cache(Avago3508) For RH5288 V5", "0401"),
+    ("Intel RAID RS2PI008 6GB SAS Controller Card w/ Battery", "0402"),  # 卡(HBA)，不落电池
+    ("HP Raid Card SMART ARRAY / 4GB CACHE SAS For P431", "0401"),
+    # 电源自带风扇 → 电源（不落风扇）
+    ("IBM Power Supply 600W AC hot-plug and fan For DS4700", "06"),
+    # 网卡带 DAC/SFP → 卡（DAC 只是配套线型）
+    ("Intel Adapter 2-Port 10GbE Ethernet Server Adapter SFP+ DAC", "0403"),
+    # 交换机线卡/IO 模块/接口板/网关模块 → 卡（其他适配卡）
+    ("Cisco Catalyst 4500-X 8 Port 10GE Network Module", "0499"),
+    ("36端口40GE以太网光接口板 QSFP+", "0499"),
+    ("Huawei 4-Port GE SFP Front Optical Interface Card", "0403"),  # 带 SFP 口→网卡，仍是卡
+    ("华为 4 port SmartIO I/O module(SFP+,16Gb FC)", "0499"),
+    ("Juniper SRX5000 Series 16x 1GB SFP Services Gateway Module", "0499"),
+    # 收发器 → 光模块（shortwave/单模）
+    ("Cisco 4Gbps Fibre Channel Shortwave SFP LC", "0901"),
+    ("Finisar Fibre Channel 4GB 10km 单模 SFP", "0901"),
+    # 交换机（词界 switch, / 型号无 switch 字样）→ 整机
+    ("H3C S6300-52QF L2 Ethernet Switch,48*XG Ports,4 QSFP+ Ports", "whole"),
+    ("HUAWEI S5720S-52P 48 Ethernet 10/100/1000 ports,4 Gig SFP,AC", "whole"),
+    # 不回归：Cache…For 模块 / 纯 BBU / 真光模块 / 纯风扇 / 纯 DAC 线
+    ("Avago Cache for 9361 RAID controller cards", "07"),
+    ("LSI MegaRAID RAID Battery BBU", "07"),
+    ("Cisco 10GBASE-SR SFP+ Module", "0901"),
+    ("Mellanox Fan module w/rear to front airflow fan", "08"),
+    ("Mellanox MCP1700 40G QSFP+ Passive DAC Copper Cable 3m", "0902"),
+]
+
+
+@pytest.mark.parametrize("desc,expect", AUDIT_FIXES_R3)
+def test_audit_r3_raid_card_psu_module_fixes(desc, expect):
+    r = classify_part(desc)
+    if expect == "whole":
+        assert r and r.get("whole_system") is True, f"{desc!r} → {r}"
+    else:
+        got = (r.get("l2_code") or r.get("l1_code")) if r else None
+        assert got == expect, f"{desc!r} → {got}，期望 {expect}"
