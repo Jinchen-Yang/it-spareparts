@@ -358,3 +358,16 @@ def require_admin(role: str = Depends(current_role)) -> str:
     if role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "需要管理员权限")
     return role
+
+
+def require_roles(*roles: str):
+    """端点级角色门：admin 恒通过，另允许 roles 中任一角色，其余 403。
+    用于把某操作开放给特定业务角色（如替代料维护开放给采购）。"""
+    allowed = {"admin", *roles}
+
+    def _dep(role: str = Depends(current_role)) -> str:
+        if role not in allowed:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "无此操作权限")
+        return role
+
+    return _dep
