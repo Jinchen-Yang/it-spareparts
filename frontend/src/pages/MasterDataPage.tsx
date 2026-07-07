@@ -15,12 +15,15 @@ const EMPTY: FormState = {
 };
 const EDITABLE = ["description", "brand", "category_major", "category_minor",
   "machine_or_part", "unit"] as const;
+const PAGE_SIZE = 20;
 
 /** 备件主数据：采购可搜全部型号 → 编辑描述/品类/品牌，或新建 PN。
  * 人工改过的字段后端 locked_fields 标记，重导（氚云）不覆盖。 */
 export default function MasterDataPage() {
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<PartHit[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [cats, setCats] = useState<CategoryNode[]>([]);
 
@@ -37,11 +40,15 @@ export default function MasterDataPage() {
     doSearch("");
   }, []);
 
-  const doSearch = async (query: string) => {
+  // 服务端分页浏览：browse=true 走 search_parts（跨 PN+描述分词模糊 + 真实 total + 可翻到底），
+  // 不再是「只取前 50 条、前端切 3 页」。宋总 2026-07-06 反馈：主数据池子大，模糊搜索每次只有 3 页。
+  const doSearch = async (query: string, p = 1) => {
     setLoading(true);
     try {
-      const { data } = await searchParts(query, 1, 50);
+      const { data } = await searchParts(query, p, PAGE_SIZE, true);
       setRows(data.items || []);
+      setTotal(data.total || 0);
+      setPage(p);
     } catch (e: any) {
       message.error(e?.response?.data?.detail || "搜索失败");
     } finally {
@@ -119,7 +126,7 @@ export default function MasterDataPage() {
         message.success(`已保存（重导不再覆盖：${data.updated.join("、")}）`);
       }
       setMode(null);
-      doSearch(q);
+      doSearch(q, page);
     } catch (e: any) {
       message.error(e?.response?.data?.detail || "保存失败");
     } finally {
@@ -264,13 +271,18 @@ export default function MasterDataPage() {
         }
       />
       <Input.Search
-        placeholder="搜 PN / 描述 / 品牌（留空浏览）" allowClear enterButton
+        placeholder="搜 PN / 描述 / 品牌（留空浏览全部）" allowClear enterButton
         style={{ maxWidth: 460, marginBottom: 16 }}
-        value={q} onChange={(e) => setQ(e.target.value)} onSearch={doSearch}
+        value={q} onChange={(e) => setQ(e.target.value)} onSearch={(v) => doSearch(v, 1)}
       />
       <Table
         rowKey="pn_std" size="small" columns={columns} dataSource={rows} loading={loading}
-        scroll={{ x: 760 }} pagination={{ pageSize: 20, showSizeChanger: false }}
+        scroll={{ x: 760 }}
+        pagination={{
+          current: page, pageSize: PAGE_SIZE, total, showSizeChanger: false,
+          showTotal: (t) => `共 ${t} 个匹配`,
+          onChange: (p) => doSearch(q, p),
+        }}
       />
 
       <Modal
@@ -299,7 +311,7 @@ export default function MasterDataPage() {
       <BatchNormalizeModal
         open={batchOpen}
         onClose={() => setBatchOpen(false)}
-        onApplied={() => doSearch(q)}
+        onApplied={() => doSearch(q, page)}
       />
     </div>
   );

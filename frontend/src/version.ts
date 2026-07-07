@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.9.3";
+export const APP_VERSION = "1.9.4";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,13 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.9.4",
+    date: "2026-07-07",
+    items: [
+      "修复「备件主数据」搜索只能翻 3 页的问题：此前每次搜索只取前 50 条、在前端切成 3 页，池子再大也看不到全部匹配。现改为服务端全量分页——文字搜索跨 PN+描述分词模糊匹配，显示真实匹配总数，可一直翻到底（如搜「DDR4」能浏览全部数百个匹配，不再卡在 3 页）",
+    ],
+  },
   {
     version: "1.9.3",
     date: "2026-07-06",

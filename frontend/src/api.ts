@@ -356,8 +356,9 @@ export interface MasterFields {
   category_major?: string | null; category_minor?: string | null;
   machine_or_part?: string | null; unit?: string | null;
 }
-export const searchParts = (q: string, page = 1, page_size = 20) =>
-  api.get<{ items: PartHit[]; total: number }>("/parts/search", { params: { q, page, page_size } });
+export const searchParts = (q: string, page = 1, page_size = 20, browse = false) =>
+  api.get<{ items: PartHit[]; total: number }>("/parts/search",
+    { params: { q, page, page_size, ...(browse ? { browse: true } : {}) } });
 export const masterCategories = () =>
   api.get<{ categories: CategoryNode[]; battery_subtypes: string[]; cooling_types: string[] }>(
     "/parts/master/categories");
