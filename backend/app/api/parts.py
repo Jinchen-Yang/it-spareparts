@@ -32,6 +32,8 @@ def search(
     capacity_max: float | None = Query(None, description="容量上限(GB)"),
     category_major: str | None = Query(None, description="一级品类名，如 硬盘/内存/卡/CPU"),
     category_minor: str | None = Query(None, description="二级品类名，如 显卡GPU/SAS-HDD-3.5"),
+    browse: bool = Query(False, description="全量浏览分页(主数据管理页)：文字查询也走 search_parts，"
+                         "跨PN+描述分词模糊、真实 total、可翻到底；关=智能解析取Top(型号查询)"),
     db: Session = Depends(get_db),
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
@@ -41,7 +43,9 @@ def search(
     has_spec_filter = any(
         x is not None for x in (part_type, interface, capacity_min, capacity_max,
                                 category_major, category_minor))
-    branch = "resolver" if (q_norm and not has_spec_filter) else "structured"
+    # browse=True：主数据管理需要"浏览所有匹配、可翻页看全"，走 search_parts(全量分页)；
+    # 否则纯文本走 resolver(相似度取 Top 单页，型号查询"这是哪个料号"语义)。见宋总 2026-07-06 反馈。
+    branch = "resolver" if (q_norm and not has_spec_filter and not browse) else "structured"
     # 审计带 branch：纯文本走近似解析(可能含 merged 墓碑标签)，结构化走 part_id 浏览
     # (排除墓碑)——同一 URL 两种语义，事后溯源必须能区分
     record_access_log(ctx, "search", "parts", {"q": q_norm, "branch": branch})

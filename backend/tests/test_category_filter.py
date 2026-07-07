@@ -87,6 +87,21 @@ def test_search_filter_by_category(db):
     assert {it["pn_std"] for it in r3["items"]} == {"PN-B"}
 
 
+def test_search_parts_browses_all_matches_paginated(db):
+    """主数据浏览(browse)：文字查询走 search_parts → 全量分页，total=真实总数（不被 resolver
+    截断到 page_size）。宋总 2026-07-06 反馈：主数据模糊搜索每次只有 3 页，看不到全部匹配。"""
+    for i in range(25):
+        _p(db, f"MEM-{i:02d}", "Samsung 32GB 2133P 2Rx4 DDR4 RDIMM")
+    db.commit()
+    r1 = part_overview.search_parts(db, "32GB 2133", 1, 10)
+    assert r1["total"] == 25 and len(r1["items"]) == 10     # 真实总数，非 ≤page_size 的假 total
+    r2 = part_overview.search_parts(db, "32GB 2133", 2, 10)
+    r3 = part_overview.search_parts(db, "32GB 2133", 3, 10)
+    assert len(r2["items"]) == 10 and len(r3["items"]) == 5
+    pns = {it["pn_std"] for it in r1["items"] + r2["items"] + r3["items"]}
+    assert len(pns) == 25                                    # 三页不重叠且并成全集
+
+
 def test_categories_dict_from_present_data(db):
     _p(db, "PN-A", "d", ma="硬盘", mi="SATA-HDD-3.5")
     _p(db, "PN-B", "d", ma="硬盘", mi="SAS-HDD-2.5")
