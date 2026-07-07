@@ -23,6 +23,9 @@ const canSee = (key: string) => {
   catch { return false; }
 };
 
+// 替代料维护（增/删）开放给 管理员 + 采购；其余角色只读不显示编辑控件
+const canEditSubs = () => ["admin", "purchaser"].includes(localStorage.getItem("role") || "");
+
 export default function PartSearchPage() {
   const [hits, setHits] = useState<PartHit[]>([]);
   const [searching, setSearching] = useState(false);
@@ -106,7 +109,7 @@ export default function PartSearchPage() {
       setSubPn("");
       openOverview(ov.part.pn_std);
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || "添加失败（需管理员权限）");
+      message.error(e?.response?.data?.detail || "添加失败（需管理员或采购权限）");
     }
   };
 
@@ -117,7 +120,7 @@ export default function PartSearchPage() {
       message.success(data.deleted ? "已解除替代关系" : "未找到该直连替代关系");
       openOverview(ov.part.pn_std);
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || "解除失败（需管理员权限）");
+      message.error(e?.response?.data?.detail || "解除失败（需管理员或采购权限）");
     }
   };
 
@@ -333,7 +336,7 @@ export default function PartSearchPage() {
                   </span>
                 )}
               </span>
-              {subsOpen && (
+              {subsOpen && canEditSubs() && (
                 <Space wrap>
                   <Input
                     placeholder="输入可替代的型号 (PN)" style={{ width: 240 }} size="small"
@@ -345,7 +348,9 @@ export default function PartSearchPage() {
             </div>
             {subsOpen && (
               ov.substitutes.length === 0 ? (
-                <span style={{ color: "var(--mb-text-3)" }}>暂无替代料，可在右上方添加</span>
+                <span style={{ color: "var(--mb-text-3)" }}>
+                  {canEditSubs() ? "暂无替代料，可在右上方添加" : "暂无替代料"}
+                </span>
               ) : (
                 <Table
                   size="small" rowKey={(s) => s.pn_std}
@@ -368,8 +373,8 @@ export default function PartSearchPage() {
                     { title: "描述", dataIndex: "description", ellipsis: true,
                       render: (v: string | null) => v || <span style={{ color: "var(--mb-text-3)" }}>—</span> },
                     { title: "", key: "act", width: 64, align: "center" as const,
-                      // 只在直连关系上给「解除」（间接「经 X」无直连边，删不了）
-                      render: (_, s) => s.via ? null : (
+                      // 只在直连关系上给「解除」（间接「经 X」无直连边，删不了）；仅管理员/采购可见
+                      render: (_, s) => (s.via || !canEditSubs()) ? null : (
                         <Popconfirm
                           title="解除替代关系" description={`确定解除与 ${s.pn_std} 的直连替代关系？`}
                           okText="解除" cancelText="取消" okButtonProps={{ danger: true }}

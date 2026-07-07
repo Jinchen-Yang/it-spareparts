@@ -122,3 +122,17 @@ def test_api_non_admin_forbidden(db):
                                headers={"Authorization": f"Bearer {tok}"})
     assert r.status_code == 403
     assert db.query(PartSubstitute).count() == 1      # 未被删
+
+
+def test_api_purchaser_can_add_and_delete(db):
+    """替代料维护开放给采购（甲方 2026-07-07）：purchaser 可增可删，admin 之外的授权角色。"""
+    _parts(db, ["PU1", "PU2"])
+    db.add(SysUser(username="buyer1", role="purchaser", password_hash=hash_password("pw123456")))
+    db.commit()
+    tok = TestClient(app).post("/api/auth/login",
+                               json={"username": "buyer1", "password": "pw123456"}).json()["token"]
+    h = {"Authorization": f"Bearer {tok}"}
+    r = TestClient(app).post("/api/substitutes", json={"pn_a": "PU1", "pn_b": "PU2"}, headers=h)
+    assert r.status_code == 200 and r.json()["created"] is True
+    r = TestClient(app).delete("/api/substitutes", params={"pn_a": "PU1", "pn_b": "PU2"}, headers=h)
+    assert r.status_code == 200 and r.json()["deleted"] is True
