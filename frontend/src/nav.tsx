@@ -1,0 +1,147 @@
+import { lazy } from "react";
+import type { ComponentType, LazyExoticComponent, ReactNode } from "react";
+import {
+  CloudUploadOutlined,
+  ControlOutlined,
+  InboxOutlined,
+  LineChartOutlined,
+  ProfileOutlined,
+  RobotOutlined,
+  SearchOutlined,
+  ShoppingCartOutlined,
+  TeamOutlined,
+  ToolOutlined,
+} from "@ant-design/icons";
+
+/**
+ * 导航单一真值源：路由、侧栏菜单、面包屑、页面标题都从这里生成。
+ * 新增页面只改这一处，避免"菜单有入口但路由/权限没跟上"的漂移。
+ *
+ * P0 壳层约定：只挂现有页面，不放"敬请期待"的空菜单项。
+ */
+
+export interface NavItem {
+  /** 菜单 key，沿用旧版 page 状态字符串，保证权限/习惯连续 */
+  key: string;
+  /** 路由路径（可刷新、可收藏、可分享） */
+  path: string;
+  label: string;
+  icon: ReactNode;
+  /** 后端 page_* 权限键；缺省表示仅管理员可见（如账号管理） */
+  perm?: string;
+  page: LazyExoticComponent<ComponentType>;
+  /** 与 page 共用同一 import() 工厂：空闲时预取，点菜单即秒开 */
+  load: () => Promise<{ default: ComponentType }>;
+}
+
+export interface NavGroup {
+  key: string;
+  /** 业务域分组标题；null = 顶部独立快捷入口（不属于任何业务域） */
+  label: string | null;
+  items: NavItem[];
+}
+
+// 路由级懒加载：每个页面独立 chunk，首包不再背 1.6MB。
+// import() 工厂单独存一份（load 字段）供空闲预取——lazy 与预取命中同一模块缓存
+const loadPartSearch = () => import("./pages/PartSearchPage");
+const loadProfit = () => import("./pages/ProfitPage");
+const loadPurchases = () => import("./pages/PurchasesPage");
+const loadProjectCost = () => import("./pages/ProjectCostPage");
+const loadInventory = () => import("./pages/InventoryPage");
+const loadImport = () => import("./pages/ImportPage");
+const loadMasterData = () => import("./pages/MasterDataPage");
+const loadGovernance = () => import("./pages/GovernancePage");
+const loadChat = () => import("./pages/ChatPage");
+const loadAccounts = () => import("./pages/AccountsPage");
+
+const PartSearchPage = lazy(loadPartSearch);
+const ProfitPage = lazy(loadProfit);
+const PurchasesPage = lazy(loadPurchases);
+const ProjectCostPage = lazy(loadProjectCost);
+const InventoryPage = lazy(loadInventory);
+const ImportPage = lazy(loadImport);
+const MasterDataPage = lazy(loadMasterData);
+const GovernancePage = lazy(loadGovernance);
+const ChatPage = lazy(loadChat);
+const AccountsPage = lazy(loadAccounts);
+
+// 组 key 加 grp- 前缀与 item key 隔离命名空间（防止将来改用 SubMenu 时 keyPath 相撞）
+export const NAV_GROUPS: NavGroup[] = [
+  {
+    key: "grp-quick",
+    label: null,
+    items: [
+      { key: "chat", path: "/chat", label: "AI 助手", icon: <RobotOutlined />, perm: "page_chat", page: ChatPage, load: loadChat },
+    ],
+  },
+  {
+    key: "grp-sales",
+    label: "销售管理",
+    items: [
+      { key: "parts", path: "/parts", label: "型号查询", icon: <SearchOutlined />, perm: "page_parts", page: PartSearchPage, load: loadPartSearch },
+      { key: "profit", path: "/profit", label: "利润分析", icon: <LineChartOutlined />, perm: "page_profit", page: ProfitPage, load: loadProfit },
+    ],
+  },
+  {
+    key: "grp-purchase",
+    label: "采购管理",
+    items: [
+      { key: "purchases", path: "/purchases", label: "采购记录", icon: <ShoppingCartOutlined />, perm: "page_purchases", page: PurchasesPage, load: loadPurchases },
+    ],
+  },
+  {
+    key: "grp-maintenance",
+    label: "维保管理",
+    items: [
+      { key: "maintenance", path: "/maintenance", label: "项目成本", icon: <ToolOutlined />, perm: "page_maintenance", page: ProjectCostPage, load: loadProjectCost },
+    ],
+  },
+  {
+    key: "grp-stock",
+    label: "库存管理",
+    items: [
+      { key: "inventory", path: "/inventory", label: "库存查询", icon: <InboxOutlined />, perm: "page_inventory", page: InventoryPage, load: loadInventory },
+    ],
+  },
+  {
+    key: "grp-data",
+    label: "数据中心",
+    items: [
+      { key: "import", path: "/import", label: "数据导入", icon: <CloudUploadOutlined />, perm: "page_import", page: ImportPage, load: loadImport },
+      { key: "master", path: "/master", label: "备件主数据", icon: <ProfileOutlined />, perm: "page_master_data", page: MasterDataPage, load: loadMasterData },
+      { key: "governance", path: "/governance", label: "数据治理", icon: <ControlOutlined />, perm: "page_governance", page: GovernancePage, load: loadGovernance },
+    ],
+  },
+  {
+    key: "grp-admin",
+    label: "管理中心",
+    items: [
+      { key: "accounts", path: "/accounts", label: "账号管理", icon: <TeamOutlined />, page: AccountsPage, load: loadAccounts },
+    ],
+  },
+];
+
+export const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
+
+/** 找到 path 对应的导航项（精确匹配；路由也按精确注册，加子路由时两处一起改） */
+export function matchNavItem(pathname: string): NavItem | undefined {
+  return NAV_ITEMS.find((it) => pathname === it.path);
+}
+
+// 旧版横向菜单的排列序——默认落地页兜底必须按这个序取第一个可见项，
+// 保证与重构前"零行为变化"（旧逻辑：page_parts 优先，否则 menu[0]）
+const LEGACY_ORDER = [
+  "import", "parts", "purchases", "chat", "profit",
+  "maintenance", "inventory", "master", "governance", "accounts",
+];
+
+/** 登录后默认落地页：优先型号查询；否则按旧菜单序取第一个可见项 */
+export function defaultPath(allowed: NavItem[]): string {
+  const byKey = new Map(allowed.map((it) => [it.key, it]));
+  if (byKey.has("parts")) return byKey.get("parts")!.path;
+  for (const key of LEGACY_ORDER) {
+    const it = byKey.get(key);
+    if (it) return it.path;
+  }
+  return allowed[0]?.path || "/parts";
+}

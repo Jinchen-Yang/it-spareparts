@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.9.5";
+export const APP_VERSION = "1.10.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.10.0",
+    date: "2026-07-10",
+    items: [
+      "全新导航：左侧按业务域分组的菜单（销售/采购/维保/库存/数据中心/管理中心）替代顶部一字排开的横向菜单，可折叠；AI 助手上移为侧栏顶部快捷入口。各页面功能与数据口径不变",
+      "真实网址：每个页面有独立地址（如 /inventory、/parts），刷新不再跳回默认页，浏览器前进/后退可用，可收藏、可直接把链接发给同事",
+      "手机/平板适配：小屏幕改为抽屉式菜单 + 精简顶栏，不再把桌面菜单压成竖排；价格口径切换在抽屉底部",
+      "首屏提速：按页面拆分加载（首包 524KB→约 295KB gzip），表格、AI 助手的重型依赖改为进入对应页面时才下载，并在空闲时后台预取",
+    ],
+  },
   {
     version: "1.9.5",
     date: "2026-07-07",

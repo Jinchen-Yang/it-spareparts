@@ -13,4 +13,26 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // 分包策略：react 系与 markdown 生态拆稳定 vendor chunk；antd 留给
+        // rollup 按使用边界自动切（Table 等重件只随用到它的懒加载页面下载，
+        // 首屏比手动整包 antd 小 ~120KB gzip；代价是 entry 含壳层用到的 antd
+        // 部分、每次发版会重下，内网小团队场景下取首屏体积优先）。
+        // markdown 生态只列语义明确的前缀/包名，不收编通用工具包——
+        // 通用包一旦被首屏依赖共享会把整个 markdown chunk 拖进首屏。
+        manualChunks(id: string) {
+          if (!id.includes("node_modules")) return undefined;
+          if (/node_modules\/(react-markdown|remark-|rehype-|micromark|mdast-|hast-|unist-|unified|vfile|property-information|character-entities|decode-named-character-reference|markdown-table|html-url-attributes)/.test(id)) {
+            return "vendor-markdown";
+          }
+          if (/node_modules\/(react|react-dom|react-router|react-router-dom|scheduler)\//.test(id)) {
+            return "vendor-react";
+          }
+          return undefined;
+        },
+      },
+    },
+  },
 });
