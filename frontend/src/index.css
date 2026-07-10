@@ -139,3 +139,21 @@ body {
 
 /* 数字/金额右对齐列用等宽数字，对齐更整齐 */
 .ant-table-cell { font-variant-numeric: tabular-nums; }
+
+/* ---------- 壳层 v2：左侧栏 ---------- */
+/* 折叠触发条：贴暖白主题（默认深色不协调） */
+.ant-layout-sider-light .ant-layout-sider-trigger {
+  background: var(--mb-surface);
+  color: var(--mb-text-2);
+  border-top: 1px solid var(--mb-border);
+}
+/* 分组标题：更小、留白呼吸（折叠态对齐同样间距，避免展开/收起跳动） */
+.ant-menu-inline .ant-menu-item-group-title {
+  font-size: 12px;
+  padding: 14px 16px 4px;
+}
+.ant-menu-inline-collapsed .ant-menu-item-group-title {
+  font-size: 12px;
+  padding: 14px 8px 4px;
+  text-align: center;
+}

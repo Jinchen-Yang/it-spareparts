@@ -58,7 +58,12 @@ export const themeConfig: ThemeConfig = {
       horizontalItemSelectedColor: COLORS.accent,
       horizontalItemHoverColor: COLORS.accent,
       itemColor: COLORS.text2,
-      itemSelectedColor: COLORS.accent,
+      itemSelectedColor: COLORS.accentStrong,
+      // 侧栏垂直菜单：选中项蓝底胶囊、悬停暖灰，分组标题弱化
+      itemSelectedBg: COLORS.accentSoft,
+      itemHoverBg: COLORS.inset,
+      groupTitleColor: COLORS.text3,
+      itemMarginInline: 8,
     },
     Table: {
       headerBg: COLORS.inset,
