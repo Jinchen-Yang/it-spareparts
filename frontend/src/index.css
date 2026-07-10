@@ -141,11 +141,10 @@ body {
 .ant-table-cell { font-variant-numeric: tabular-nums; }
 
 /* ---------- 壳层 v2：左侧栏 ---------- */
-/* 折叠触发条：贴暖白主题（默认深色不协调） */
-.ant-layout-sider-light .ant-layout-sider-trigger {
-  background: var(--mb-surface);
-  color: var(--mb-text-2);
-  border-top: 1px solid var(--mb-border);
+/* 侧栏收起按钮：键盘聚焦时给清晰焦点环（可访问性） */
+.ant-layout-sider button:focus-visible {
+  outline: 2px solid var(--mb-accent);
+  outline-offset: -2px;
 }
 /* 分组标题：更小、留白呼吸（折叠态对齐同样间距，避免展开/收起跳动） */
 .ant-menu-inline .ant-menu-item-group-title {
