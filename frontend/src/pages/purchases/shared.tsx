@@ -1,6 +1,8 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, type KeyboardEvent, type ReactNode } from "react";
 import { Tag, Tooltip } from "antd";
-import type { PurchaseAnalysisRow } from "../../api";
+import type { SetURLSearchParams } from "react-router-dom";
+import type { PurchaseAnalysisRow, RecentPurchaseRow } from "../../api";
+import type { TaxBasis } from "../../context/TaxBasis";
 
 // 采购三页共用的展示辅助。全部从原 PurchasesPage.tsx 逐字搬运，零逻辑改动。
 
@@ -68,7 +70,7 @@ export function TrendArrow({ t }: { t: PurchaseAnalysisRow["price_trend"] }) {
   return <span style={{ color: "var(--mb-text-3)" }}>→</span>;
 }
 
-export function PriceCell({ row, basis }: { row: PurchaseAnalysisRow; basis: string }) {
+export function PriceCell({ row, basis }: { row: PurchaseAnalysisRow; basis: TaxBasis }) {
   const line = (label: string, min: number | null, max: number | null, last: number | null) => (
     <div style={{ whiteSpace: "nowrap" }}>
       {label && <span style={{ color: "var(--mb-text-3)" }}>{label} </span>}
@@ -93,11 +95,17 @@ export function KpiCard({ label, value, sub, highlight }: {
 }) {
   return (
     <div style={{
-      flex: "1 1 150px", minWidth: 140, padding: "12px 14px", borderRadius: 8,
+      flex: "1 1 190px", minWidth: 160, padding: "12px 14px", borderRadius: 8,
+      overflow: "hidden",
       background: highlight ? "var(--ant-color-warning-bg, #fdf3e3)" : "rgba(0,0,0,0.025)",
     }}>
       <div style={{ fontSize: 12.5, color: highlight ? "#9a7b43" : "#6b665e" }}>{label}</div>
-      <div style={{ fontSize: 22, fontWeight: 500, marginTop: 4, color: highlight ? "#9a7b43" : undefined }}>{value}</div>
+      {/* 值区允许换行、断词，避免「两列」口径下含/不含金额横向溢出撞进相邻卡 */}
+      <div style={{
+        fontSize: 20, fontWeight: 500, marginTop: 4, lineHeight: 1.25,
+        whiteSpace: "normal", overflowWrap: "anywhere",
+        color: highlight ? "#9a7b43" : undefined,
+      }}>{value}</div>
       {sub && <div style={{ fontSize: 11.5, color: highlight ? "#9a7b43" : "var(--mb-text-3)", marginTop: 2 }}>{sub}</div>}
     </div>
   );
@@ -109,4 +117,55 @@ export function readNum(sp: URLSearchParams, key: string, def: number): number {
   if (raw == null) return def;
   const n = Number(raw);
   return Number.isFinite(n) ? n : def;
+}
+
+/**
+ * 三页共用的 URL query 增量更新：合并、空值删除（含 "" / null / undefined），replace 不堆历史。
+ * 传 "" 或 undefined 即从 URL 删除该键——搜索框清除走这条路，条件真正下线。
+ */
+export function useUrlPatch(sp: URLSearchParams, setSp: SetURLSearchParams) {
+  return useCallback(
+    (next: Record<string, string | number | undefined | null>) => {
+      const merged = new URLSearchParams(sp);
+      for (const [k, v] of Object.entries(next)) {
+        if (v === undefined || v === null || v === "") merged.delete(k);
+        else merged.set(k, String(v));
+      }
+      setSp(merged, { replace: true });
+    },
+    [sp, setSp],
+  );
+}
+
+/**
+ * 让非按钮元素（如 List.Item）具备可访问的"按钮"语义：
+ * role=button + tabIndex 可聚焦 + Enter/Space 触发 + 可访问名称。返回可展开到元素上的 props。
+ */
+export function activatableProps(onActivate: () => void, label: string) {
+  return {
+    role: "button" as const,
+    tabIndex: 0,
+    "aria-label": label,
+    onClick: onActivate,
+    onKeyDown: (e: KeyboardEvent) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onActivate(); }
+    },
+  };
+}
+
+/**
+ * 移动端卡片里的单价随全局含税/不含税口径显示，并标明价格属性（含/不含）。
+ * 零计算，仅按订单税口径把 unit_price 归到含/不含一侧（同桌面双列语义）：
+ * - inc：只看含税价，非含税订单显示 "—"
+ * - ex：只看不含税价，含税订单显示 "—"
+ * - both：按本单实际口径标 "含 X" 或 "不含 X"
+ */
+export function mobileUnitPrice(row: RecentPurchaseRow, basis: TaxBasis): ReactNode {
+  const { inc, ex } = byTax(row.unit_price, row.is_tax_inclusive);
+  if (basis === "inc") return <>单价(含税) {fmtMoney(inc)}</>;
+  if (basis === "ex") return <>单价(不含税) {fmtMoney(ex)}</>;
+  // both：本单要么含税要么不含税，只有一侧有值
+  const isInc = row.is_tax_inclusive;
+  if (isInc == null) return <>单价 —</>;
+  return <>单价{isInc ? "(含税)" : "(不含税)"} {fmtMoney(isInc ? inc : ex)}</>;
 }

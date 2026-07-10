@@ -6,7 +6,7 @@ import PageHeader from "../../components/PageHeader";
 import MobileDetailDrawer from "../../components/MobileDetailDrawer";
 import { fetchCancellationStats } from "../../api";
 import type { CancellationStats, CancellationPeriodRow } from "../../api";
-import { GRAN_OPTIONS, fmtMoney } from "./shared";
+import { GRAN_OPTIONS, fmtMoney, activatableProps } from "./shared";
 
 // 采购异常页：集中展示取消/作废/未成功。当前唯一有可靠数据的口径 = 取消单统计。
 // 其它异常（长期未完成等）后端暂无对应字段，不在前端伪造/推算——见页内说明。
@@ -80,7 +80,11 @@ export default function PurchaseExceptionsPage() {
             dataSource={data?.rows || []}
             locale={{ emptyText: "暂无取消/作废记录" }}
             renderItem={(r) => (
-              <List.Item key={r.period} onClick={() => setDetail(r)} style={{ cursor: "pointer" }}>
+              <List.Item
+                key={r.period}
+                {...activatableProps(() => setDetail(r), `查看 ${r.period} 采购异常详情`)}
+                style={{ cursor: "pointer" }}
+              >
                 <div style={{ width: "100%" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
                     <span style={{ fontWeight: 500 }}>{r.period}</span>

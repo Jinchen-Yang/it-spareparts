@@ -11,6 +11,7 @@ import type { RecentPurchaseRow } from "../../api";
 import { useTaxBasis } from "../../context/TaxBasis";
 import {
   DAY_OPTIONS, STATUS_FILTER, STATUS_COLOR, fmtMoney, byTax, readNum,
+  useUrlPatch, activatableProps, mobileUnitPrice,
 } from "./shared";
 
 // 逐笔采购明细页：按时间/型号/供应商/状态筛选、分页浏览。数据源 listRecentPurchases 原样复用。
@@ -21,6 +22,7 @@ export default function PurchaseRecordsPage() {
 
   // 筛选状态存进 URL query，复制链接可恢复
   const [sp, setSp] = useSearchParams();
+  const patch = useUrlPatch(sp, setSp);
   const days = readNum(sp, "days", 30);
   const status = sp.get("status") || "已生效";
   const qParam = sp.get("q") || "";
@@ -39,16 +41,6 @@ export default function PurchaseRecordsPage() {
   const [loading, setLoading] = useState(false);
   const [detail, setDetail] = useState<RecentPurchaseRow | null>(null);
   const loadSeqRef = useRef(0);
-
-  // 统一改 URL query 的小工具：合并、删空、回第一页由调用方决定
-  const patch = (next: Record<string, string | number | undefined>) => {
-    const merged = new URLSearchParams(sp);
-    for (const [k, v] of Object.entries(next)) {
-      if (v === undefined || v === "" || v === null) merged.delete(k);
-      else merged.set(k, String(v));
-    }
-    setSp(merged, { replace: true });
-  };
 
   useEffect(() => {
     const seq = ++loadSeqRef.current;
@@ -102,20 +94,24 @@ export default function PurchaseRecordsPage() {
       render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span> },
   ];
 
-  // 移动端详情抽屉字段（次要字段）
-  const detailFields = (r: RecentPurchaseRow): DetailField[] => [
-    { label: "描述", value: r.description },
-    { label: "品牌", value: r.brand },
-    { label: "口径", value: r.is_tax_inclusive == null ? null : (r.is_tax_inclusive ? "含税" : "不含税") },
-    { label: "单价(含税)", value: fmtMoney(byTax(r.unit_price, r.is_tax_inclusive).inc) },
-    { label: "单价(不含税)", value: fmtMoney(byTax(r.unit_price, r.is_tax_inclusive).ex) },
-    { label: "金额(含税)", value: fmtMoney(byTax(r.line_amount, r.is_tax_inclusive).inc) },
-    { label: "金额(不含税)", value: fmtMoney(byTax(r.line_amount, r.is_tax_inclusive).ex) },
-    { label: "供应商", value: r.supplier },
-    { label: "采购类型", value: r.source_type },
-    { label: "采购员", value: r.purchaser },
-    { label: "单号", value: r.order_no },
-  ];
+  // 移动端详情抽屉字段（次要字段），价格明确标含/不含
+  const detailFields = (r: RecentPurchaseRow): DetailField[] => {
+    const taxLabel = r.is_tax_inclusive == null ? "—" : (r.is_tax_inclusive ? "含税" : "不含税");
+    return [
+      { label: "描述", value: r.description },
+      { label: "品牌", value: r.brand },
+      { label: "数量", value: r.qty == null ? null : Number(r.qty) },
+      { label: "价格口径", value: taxLabel },
+      { label: "单价(含税)", value: fmtMoney(byTax(r.unit_price, r.is_tax_inclusive).inc) },
+      { label: "单价(不含税)", value: fmtMoney(byTax(r.unit_price, r.is_tax_inclusive).ex) },
+      { label: "金额(含税)", value: fmtMoney(byTax(r.line_amount, r.is_tax_inclusive).inc) },
+      { label: "金额(不含税)", value: fmtMoney(byTax(r.line_amount, r.is_tax_inclusive).ex) },
+      { label: "供应商", value: r.supplier },
+      { label: "采购类型", value: r.source_type },
+      { label: "采购员", value: r.purchaser },
+      { label: "单号", value: r.order_no },
+    ];
+  };
 
   const pagination = {
     current: page, pageSize, total, showSizeChanger: true,
@@ -135,7 +131,8 @@ export default function PurchaseRecordsPage() {
             allowClear
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            onSearch={() => patch({ q: q.trim(), page: 1 })}
+            // 用 onSearch 回调提供的新值（清除时为 ""）→ patch 把 q 从 URL 删掉，条件真正下线
+            onSearch={(val) => patch({ q: val.trim() || undefined, page: 1 })}
           />
           <Input.Search
             placeholder="供应商"
@@ -143,7 +140,7 @@ export default function PurchaseRecordsPage() {
             allowClear
             value={supplier}
             onChange={(e) => setSupplier(e.target.value)}
-            onSearch={() => patch({ supplier: supplier.trim(), page: 1 })}
+            onSearch={(val) => patch({ supplier: val.trim() || undefined, page: 1 })}
           />
           <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 13, color: "var(--mb-text-3)" }}>状态</span>
@@ -160,7 +157,7 @@ export default function PurchaseRecordsPage() {
             renderItem={(r) => (
               <List.Item
                 key={r.line_id}
-                onClick={() => setDetail(r)}
+                {...activatableProps(() => setDetail(r), `查看采购记录 ${r.pn_std} 详情`)}
                 style={{ cursor: "pointer" }}
               >
                 <div style={{ width: "100%" }}>
@@ -169,7 +166,7 @@ export default function PurchaseRecordsPage() {
                     <span style={{ color: "var(--mb-text-3)", fontSize: 12.5 }}>{r.order_date || "—"}</span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 4, fontSize: 13 }}>
-                    <span>数量 {r.qty == null ? "—" : Number(r.qty)} · 单价 {fmtMoney(r.unit_price)}</span>
+                    <span>数量 {r.qty == null ? "—" : Number(r.qty)} · {mobileUnitPrice(r, basis)}</span>
                     {r.data_status && <Tag color={STATUS_COLOR[r.data_status] || "default"}>{r.data_status}</Tag>}
                   </div>
                 </div>

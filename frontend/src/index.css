@@ -146,6 +146,12 @@ body {
   outline: 2px solid var(--mb-accent);
   outline-offset: -2px;
 }
+/* 移动端可点击列表项（role=button）：键盘聚焦焦点环 */
+.ant-list-item[role="button"]:focus-visible {
+  outline: 2px solid var(--mb-accent);
+  outline-offset: -2px;
+  border-radius: 6px;
+}
 /* 分组标题：更小、留白呼吸（折叠态对齐同样间距，避免展开/收起跳动） */
 .ant-menu-inline .ant-menu-item-group-title {
   font-size: 12px;

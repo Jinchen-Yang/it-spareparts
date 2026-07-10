@@ -44,10 +44,18 @@ export const useTaxBasis = () => useContext(TaxBasisContext);
 
 // 内联双值（卡片/Statistic 用；表格请改用两列）。跟随全局开关：
 // inc→只含税、ex→只不含税、both→「含 X / 不含 Y」。缺的一侧由 money() 显示 "-"。
-export function TaxMoney({ inc, ex }: { inc: number | null; ex: number | null }) {
+// stack=true：both 口径下把含/不含拆成两行堆叠（大字号 KPI 卡用，避免一行放不下横向溢出）。
+export function TaxMoney({ inc, ex, stack }: { inc: number | null; ex: number | null; stack?: boolean }) {
   const { basis } = useTaxBasis();
   if (basis === "inc") return <>{money(inc)}</>;
   if (basis === "ex") return <>{money(ex)}</>;
+  if (stack)
+    return (
+      <span style={{ display: "inline-flex", flexDirection: "column", lineHeight: 1.25 }}>
+        <span><span style={{ color: "var(--mb-text-3)" }}>含 </span>{money(inc)}</span>
+        <span><span style={{ color: "var(--mb-text-3)" }}>不含 </span>{money(ex)}</span>
+      </span>
+    );
   return (
     <span style={{ whiteSpace: "nowrap" }}>
       <span style={{ color: "var(--mb-text-3)" }}>含 </span>{money(inc)}
