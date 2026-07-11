@@ -266,6 +266,73 @@ def part_ranking(db: Session, date_from: date | None, date_to: date | None,
     }
 
 
+_GRAIN = {"day": "day", "week": "week", "month": "month"}
+
+
+def trend(db: Session, date_from: date | None, date_to: date | None,
+          granularity: str = "day", as_of: date | None = None,
+          user_ctx: security.UserContext | None = None) -> dict:
+    """经营趋势：销售额/采购额/毛利额（未税）按日/周/月。默认排除未来日期。
+
+    毛利只累计已配成本行；销售额累计全部计营收行——同一桶里毛利<销售额属正常
+    （无成本行有营收无毛利），前端可据此看覆盖缺口。
+    """
+    today = as_of or date.today()
+    upper = min(date_to, today) if date_to else today
+    grain = _GRAIN.get(granularity, "day")
+
+    sl = FSalesLine
+    counts = sl.counts_revenue.is_(True)
+    costed = and_(counts, sl.cost_moving_avg.is_not(None))
+    s_bucket = func.date_trunc(grain, FSalesOrder.order_date)
+    s_stmt = (
+        select(s_bucket.label("b"),
+               func.sum(sl.revenue_amount).filter(counts).label("sales"),
+               func.sum(sl.gross_profit).filter(costed).label("gp"))
+        .join(FSalesOrder, sl.order_id == FSalesOrder.id)
+    )
+    s_stmt = active_orders(s_stmt, FSalesOrder)
+    if date_from:
+        s_stmt = s_stmt.where(FSalesOrder.order_date >= date_from)
+    s_stmt = s_stmt.where(FSalesOrder.order_date <= upper)
+    if user_ctx is not None:
+        s_stmt = security.apply_data_scope(s_stmt, user_ctx)
+    s_stmt = s_stmt.group_by(s_bucket)
+
+    p_bucket = func.date_trunc(grain, FPurchaseOrder.order_date)
+    p_stmt = (
+        select(p_bucket.label("b"), func.sum(_purchase_ex_tax_expr()).label("purchase"))
+        .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
+    )
+    p_stmt = active_orders(p_stmt, FPurchaseOrder)
+    if date_from:
+        p_stmt = p_stmt.where(FPurchaseOrder.order_date >= date_from)
+    p_stmt = p_stmt.where(FPurchaseOrder.order_date <= upper).group_by(p_bucket)
+
+    buckets: dict[str, dict] = {}
+
+    def _key(b):
+        return b.date().isoformat() if hasattr(b, "date") else b.isoformat()
+
+    for r in db.execute(s_stmt):
+        if r.b is None:
+            continue
+        buckets.setdefault(_key(r.b), {"sales_ex_tax": 0.0, "purchase_ex_tax": 0.0, "gross_profit": 0.0})
+        buckets[_key(r.b)]["sales_ex_tax"] = _f(r.sales) or 0.0
+        buckets[_key(r.b)]["gross_profit"] = _f(r.gp) or 0.0
+    for r in db.execute(p_stmt):
+        if r.b is None:
+            continue
+        buckets.setdefault(_key(r.b), {"sales_ex_tax": 0.0, "purchase_ex_tax": 0.0, "gross_profit": 0.0})
+        buckets[_key(r.b)]["purchase_ex_tax"] = _f(r.purchase) or 0.0
+
+    series = [{"period": k, **v} for k, v in sorted(buckets.items())]
+    return {"granularity": grain, "as_of": today.isoformat(),
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+            "series": series}
+
+
 def _order_health(db: Session, date_from: date | None, date_to: date | None, today: date) -> dict:
     """销售+采购订单按状态计数 + 未来日期单数（数据异常）。跨两个头表求和。"""
     out = {"orders_active": 0, "orders_in_progress": 0, "orders_cancelled": 0, "orders_future": 0}

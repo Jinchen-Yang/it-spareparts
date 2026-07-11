@@ -31,6 +31,21 @@ def kpi(
     return apply_field_visibility(data, ctx)
 
 
+@router.get("/trend")
+def trend(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    granularity: str = Query("day", pattern="^(day|week|month)$"),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_boss_board")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    record_access_log(ctx, "trend", "dashboard", {"granularity": granularity})
+    data = dashboard.trend(db, date_from, date_to, granularity=granularity, user_ctx=ctx)
+    return apply_field_visibility(data, ctx)
+
+
 @router.get("/part-ranking")
 def part_ranking(
     date_from: date | None = Query(None),
