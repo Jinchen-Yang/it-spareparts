@@ -8,11 +8,13 @@ from datetime import date
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.auth import current_role
+from fastapi import HTTPException
+
+from app.auth import current_role, require_admin
 from app.db import get_db
 from app.security import (UserContext, apply_field_visibility, get_current_user_context,
                           record_access_log, require_page)
-from app.services import dashboard
+from app.services import dashboard, pool
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -85,4 +87,49 @@ def part_ranking(
     record_access_log(ctx, "part_ranking", "dashboard",
                       {"date_from": str(date_from), "date_to": str(date_to), "cost_method": cost_method})
     data = dashboard.part_ranking(db, date_from, date_to, cost_method=cost_method, top=top, user_ctx=ctx)
+    return apply_field_visibility(data, ctx)
+
+
+@router.post("/pool/rebuild")
+def pool_rebuild(
+    dry_run: bool = Query(False, description="只预览合并/拆分，不落库"),
+    db: Session = Depends(get_db),
+    _: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """重算通用号稳定池（管理员）。dry_run 先看会合并/拆分哪些池再决定。"""
+    record_access_log(ctx, "pool_rebuild", "dashboard", {"dry_run": dry_run})
+    return pool.rebuild(db, dry_run=dry_run)
+
+
+@router.get("/pools")
+def pools(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_boss_board")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    record_access_log(ctx, "pools", "dashboard", {})
+    data = pool.list_pools(db, date_from, date_to, page=page, page_size=page_size)
+    return apply_field_visibility(data, ctx)
+
+
+@router.get("/pool/{group_id}")
+def pool_detail(
+    group_id: int,
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_boss_board")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    record_access_log(ctx, "pool_detail", "dashboard", {"group_id": group_id})
+    data = pool.analyze(db, group_id, date_from, date_to, user_ctx=ctx)
+    if data is None:
+        raise HTTPException(status_code=404, detail="池不存在")
     return apply_field_visibility(data, ctx)

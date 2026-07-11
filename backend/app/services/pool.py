@@ -9,12 +9,20 @@
 - 成员超 POOL_OVERSIZE_MEMBERS → oversized（需人工确认）。
 """
 from collections import defaultdict
+from datetime import date
 
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.orm import Session
 
-from app import config
+from app import config, security
+from app.models.dimensions import DimCustomer, DimPart
 from app.models.inventory import PartPool, PartPoolMember, PartSubstitute
+from app.models.purchase import FPurchaseLine, FPurchaseOrder
+from app.models.sales import FSalesLine, FSalesOrder
+from app.services.dashboard import _purchase_ex_tax_expr, _purchase_ex_unit, _sale_ex_unit
+from app.services.query_filters import active_orders
+
+_MIN_RELIABLE_SAMPLES = 2   # 加权均价样本≥2 才作降本标杆（避免一次异常低价，甲方修正②）
 
 
 def _components(edges: list[tuple[int, int]]) -> list[set[int]]:
@@ -154,3 +162,242 @@ def rebuild(db: Session, dry_run: bool = False) -> dict:
             db.add(PartPoolMember(part_id=p, group_id=gid))
     db.commit()
     return result
+
+
+def _r(x, n=2):
+    return round(float(x), n) if x is not None else None
+
+
+def _purchase_member_stats(db, part_ids, date_from, upper):
+    """每成员采购统计（未税）+ 供应稳定性（采购次数/供应商数/最近采购日；库存 8 月前不作条件）。"""
+    ex = _purchase_ex_unit()
+    stmt = (
+        select(
+            FPurchaseLine.part_id,
+            (func.sum(_purchase_ex_tax_expr()) / func.nullif(func.sum(FPurchaseLine.qty), 0)).label("wavg"),
+            func.percentile_cont(0.5).within_group(ex).label("median"),
+            func.min(ex).label("pmin"), func.max(ex).label("pmax"),
+            func.count().label("samples"),
+            func.count(func.distinct(FPurchaseOrder.id)).label("orders"),
+            func.count(func.distinct(FPurchaseOrder.supplier_id)).label("suppliers"),
+            func.max(FPurchaseOrder.order_date).label("last_date"),
+        )
+        .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
+        .where(FPurchaseLine.part_id.in_(part_ids),
+               FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
+               FPurchaseLine.qty.is_not(None), FPurchaseLine.qty > 0,
+               FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
+    )
+    stmt = active_orders(stmt, FPurchaseOrder)
+    if date_from:
+        stmt = stmt.where(FPurchaseOrder.order_date >= date_from)
+    stmt = stmt.where(FPurchaseOrder.order_date <= upper).group_by(FPurchaseLine.part_id)
+    out = {}
+    for r in db.execute(stmt):
+        out[r.part_id] = {
+            "wavg": _r(r.wavg), "median": _r(r.median), "min": _r(r.pmin), "max": _r(r.pmax),
+            "samples": r.samples, "last_date": r.last_date.isoformat() if r.last_date else None,
+            "supply": {"purchase_orders": r.orders, "suppliers": r.suppliers,
+                       "last_purchase_date": r.last_date.isoformat() if r.last_date else None},
+        }
+    return out
+
+
+def _sale_member_stats(db, part_ids, date_from, upper):
+    """每成员销售统计（未税）+ 销量/营收/毛利。"""
+    ex = _sale_ex_unit()
+    sl = FSalesLine
+    counts = sl.counts_revenue.is_(True)
+    costed = and_(counts, sl.cost_moving_avg.is_not(None))
+    stmt = (
+        select(
+            sl.part_id,
+            (func.sum(sl.revenue_amount).filter(counts)
+             / func.nullif(func.sum(sl.qty).filter(counts), 0)).label("wavg"),
+            func.percentile_cont(0.5).within_group(ex).label("median"),
+            func.min(ex).label("smin"), func.max(ex).label("smax"),
+            func.count().filter(counts).label("samples"),
+            func.sum(sl.qty).filter(counts).label("qty_sold"),
+            func.sum(sl.revenue_amount).filter(counts).label("revenue"),
+            func.sum(sl.revenue_amount).filter(costed).label("rev_costed"),
+            func.sum(sl.gross_profit).filter(costed).label("gross_profit"),
+        )
+        .join(FSalesOrder, sl.order_id == FSalesOrder.id)
+        .where(sl.part_id.in_(part_ids))
+    )
+    stmt = active_orders(stmt, FSalesOrder)
+    if date_from:
+        stmt = stmt.where(FSalesOrder.order_date >= date_from)
+    stmt = stmt.where(FSalesOrder.order_date <= upper).group_by(sl.part_id)
+    out = {}
+    for r in db.execute(stmt):
+        rc, gp = r.rev_costed, r.gross_profit
+        out[r.part_id] = {
+            "wavg": _r(r.wavg), "median": _r(r.median), "min": _r(r.smin), "max": _r(r.smax),
+            "samples": r.samples, "qty_sold": _r(r.qty_sold, 3), "revenue": _r(r.revenue),
+            "gross_profit": _r(gp),
+            "gross_margin": round(float(gp) / float(rc), 4) if gp is not None and rc else None,
+        }
+    return out
+
+
+def _benchmark(members, key):
+    """池内降本标杆：样本≥2 的成员里最低加权均价（甲方②：最低价只作参考，标杆要稳）。
+    无可靠样本则取有样本里最低并标 low_confidence。返回 (基准值, part_id, low_confidence)。"""
+    reliable = [m for m in members if m[key] and m[key]["wavg"] is not None and m[key]["samples"] >= _MIN_RELIABLE_SAMPLES]
+    pool_has = [m for m in members if m[key] and m[key]["wavg"] is not None]
+    src = reliable or pool_has
+    if not src:
+        return None, None, False
+    best = min(src, key=lambda m: m[key]["wavg"])
+    return best[key]["wavg"], best["part_id"], not bool(reliable)
+
+
+def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: date | None = None,
+            as_of: date | None = None, user_ctx: security.UserContext | None = None) -> dict | None:
+    """单个通用号池的降本分析（只读）。甲方修正版：双端溢价、供应稳定性非库存、
+    节省分理论上限/可执行机会、客户跨品牌集中度（老板可见）。不输出自动替换指令。"""
+    pool = db.get(PartPool, group_id)
+    if pool is None:
+        return None
+    today = as_of or date.today()
+    upper = min(date_to, today) if date_to else today
+    part_ids = list(db.execute(
+        select(PartPoolMember.part_id).where(PartPoolMember.group_id == group_id)).scalars())
+    parts = {p.id: p for p in db.execute(select(DimPart).where(DimPart.id.in_(part_ids))).scalars()}
+
+    pstats = _purchase_member_stats(db, part_ids, date_from, upper)
+    sstats = _sale_member_stats(db, part_ids, date_from, upper)
+
+    members = []
+    for pid in part_ids:
+        dp = parts.get(pid)
+        members.append({
+            "part_id": pid, "pn_std": dp.pn_std if dp else None,
+            "description": dp.description if dp else None, "brand": dp.brand if dp else None,
+            "purchase": pstats.get(pid), "sale": sstats.get(pid),
+        })
+
+    cost_bench, cost_bench_pid, cost_lowconf = _benchmark(members, "purchase")
+    sale_bench, sale_bench_pid, _ = _benchmark(members, "sale")
+    warn = float(config.POOL_PREMIUM_WARN_PCT)
+
+    # 每成员溢价（双端）+ 供应
+    for m in members:
+        pw = m["purchase"]["wavg"] if m["purchase"] else None
+        sw = m["sale"]["wavg"] if m["sale"] else None
+        m["purchase_premium_pct"] = round((pw - cost_bench) / cost_bench, 4) if pw is not None and cost_bench else None
+        m["sale_premium_pct"] = round((sw - sale_bench) / sale_bench, 4) if sw is not None and sale_bench else None
+        m["brand_premium_purchase"] = bool(m["purchase_premium_pct"] is not None and m["purchase_premium_pct"] >= warn)
+        m["brand_premium_sale"] = bool(m["sale_premium_pct"] is not None and m["sale_premium_pct"] >= warn)
+
+    # 两级节省（甲方⑤）：理论上限=假设全可替换；可执行=标杆供应可得(采购过+供应商)且成员有样本，
+    # 但兼容性/客户指定品牌无证据 → 一律 requires_manual_check=True，不自动判定可替换
+    bench_supply_ok = False
+    if cost_bench_pid is not None and pstats.get(cost_bench_pid):
+        s = pstats[cost_bench_pid]["supply"]
+        bench_supply_ok = bool(s["purchase_orders"] and s["last_purchase_date"])
+    theoretical = executable = 0.0
+    opps = []
+    for m in members:
+        pw = m["purchase"]["wavg"] if m["purchase"] else None
+        qty = m["sale"]["qty_sold"] if m["sale"] else None
+        if pw is None or cost_bench is None or qty is None or pw <= cost_bench or qty <= 0:
+            continue
+        unit_saving = pw - cost_bench
+        t = round(unit_saving * qty, 2)
+        theoretical += t
+        block = None
+        if not bench_supply_ok:
+            block = "标杆型号供应不稳（近窗口无采购或无供应商）"
+        elif (m["purchase"] or {}).get("samples", 0) < 1:
+            block = "样本不足"
+        can_exec = block is None
+        if can_exec:
+            executable += t
+        opps.append({
+            "from_part_id": m["part_id"], "from_pn": m["pn_std"], "from_brand": m["brand"],
+            "to_part_id": cost_bench_pid, "to_pn": parts[cost_bench_pid].pn_std if cost_bench_pid in parts else None,
+            "unit_saving": _r(unit_saving), "qty_sold": qty, "theoretical_saving": t,
+            "executable": can_exec, "block_reason": block,
+            "requires_manual_check": True,   # 兼容性/客户指定品牌/合同：系统无证据，必须人工确认
+        })
+    opps.sort(key=lambda o: o["theoretical_saving"], reverse=True)
+
+    demand_qty = sum((m["sale"]["qty_sold"] or 0) for m in members if m["sale"])
+    demand_rev = sum((m["sale"]["revenue"] or 0) for m in members if m["sale"])
+
+    result = {
+        "group_id": group_id, "member_count": pool.member_count,
+        "needs_calibration": pool.needs_calibration, "oversized": pool.oversized,
+        "window": {"date_from": date_from.isoformat() if date_from else None,
+                   "date_to": date_to.isoformat() if date_to else None, "as_of": today.isoformat()},
+        "demand": {"total_qty": _r(demand_qty, 3), "total_revenue_ex_tax": _r(demand_rev),
+                   "note": "跨品牌总需求只证明公司卖过这些品牌，不等于同一客户愿互换；见 customer_cross_brand"},
+        "benchmark": {"cost_part_id": cost_bench_pid, "cost_ex_tax": _r(cost_bench),
+                      "low_confidence": cost_lowconf, "supply_ok": bench_supply_ok,
+                      "sale_part_id": sale_bench_pid, "sale_ex_tax": _r(sale_bench)},
+        "members": members,
+        "savings": {"theoretical_max": round(theoretical, 2), "executable": round(executable, 2),
+                    "label": "潜在降本机会（只读；替换需人工确认兼容性/客户指定品牌/合同）",
+                    "opportunities": opps},
+        "customer_cross_brand": _customer_cross_brand(db, part_ids, date_from, upper, user_ctx),
+    }
+    return result
+
+
+def _customer_cross_brand(db, part_ids, date_from, upper, user_ctx, top=10):
+    """池内客户的跨品牌购买（甲方④：跨品牌销量≠客户认功能，要看同一客户是否买过≥2品牌+集中度）。
+    仅老板可见（端点 page_boss_board 已保证；受限销售不聚合客户）。"""
+    if security.is_scoped_sales(user_ctx):
+        return {"restricted": True, "customers": []}
+    sl, so = FSalesLine, FSalesOrder
+    # 品牌取自型号(DimPart.brand)：池成员本就是不同品牌的等价型号，客户跨品牌=买了不同成员
+    stmt = (
+        select(DimCustomer.name_normalized.label("cust"), DimPart.brand,
+               func.sum(sl.qty).label("qty"))
+        .join(so, sl.order_id == so.id)
+        .join(DimPart, sl.part_id == DimPart.id)
+        .join(DimCustomer, so.customer_id == DimCustomer.id, isouter=True)
+        .where(sl.part_id.in_(part_ids), sl.counts_revenue.is_(True))
+    )
+    stmt = active_orders(stmt, so)
+    if date_from:
+        stmt = stmt.where(so.order_date >= date_from)
+    stmt = stmt.where(so.order_date <= upper).group_by(DimCustomer.name_normalized, DimPart.brand)
+    by_cust: dict[str, dict] = defaultdict(dict)
+    for r in db.execute(stmt):
+        if r.cust is None:
+            continue
+        by_cust[r.cust][r.brand or "(未标品牌)"] = float(r.qty or 0)
+    rows = []
+    for cust, brands in by_cust.items():
+        total = sum(brands.values()) or 1
+        top_share = max(brands.values()) / total
+        rows.append({"customer": cust, "brand_count": len(brands),
+                     "brands": {b: round(q, 3) for b, q in brands.items()},
+                     "concentration": round(top_share, 4)})
+    # 优先展示买过≥2品牌的客户（可引导替换的信号），再按需求量
+    rows.sort(key=lambda x: (x["brand_count"] >= 2, sum(x["brands"].values())), reverse=True)
+    return {"restricted": False, "multi_brand_customers": sum(1 for x in rows if x["brand_count"] >= 2),
+            "customers": rows[:top]}
+
+
+def list_pools(db: Session, date_from: date | None = None, date_to: date | None = None,
+               as_of: date | None = None, page: int = 1, page_size: int = 20) -> dict:
+    """池清单：按潜在理论节省降序（降本机会大的在前）。轻量——只算节省额不返明细。"""
+    pools = db.execute(select(PartPool).order_by(PartPool.member_count.desc())).scalars().all()
+    total = len(pools)
+    items = []
+    for p in pools:
+        d = analyze(db, p.group_id, date_from, date_to, as_of)
+        items.append({
+            "group_id": p.group_id, "member_count": p.member_count,
+            "needs_calibration": p.needs_calibration, "oversized": p.oversized,
+            "demand_qty": d["demand"]["total_qty"], "demand_revenue_ex_tax": d["demand"]["total_revenue_ex_tax"],
+            "theoretical_saving": d["savings"]["theoretical_max"],
+            "executable_saving": d["savings"]["executable"],
+        })
+    items.sort(key=lambda x: (x["theoretical_saving"] or 0), reverse=True)
+    start = (page - 1) * page_size
+    return {"total": total, "page": page, "page_size": page_size, "items": items[start:start + page_size]}
