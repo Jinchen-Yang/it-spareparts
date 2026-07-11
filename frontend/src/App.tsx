@@ -3,7 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Button, Result } from "antd";
 import LoginPage from "./pages/LoginPage";
 import AppShell from "./AppShell";
-import { NAV_ITEMS, defaultPath } from "./nav";
+import { NAV_ITEMS, NAV_REDIRECTS, defaultPath } from "./nav";
 
 /** 安全读取本地权限快照：localStorage 被写坏时回退为空而非抛错致整页白屏（审计 U-1）。 */
 function readPerms(): Record<string, boolean> {
@@ -53,6 +53,9 @@ export default function App() {
   }
 
   const home = defaultPath(allowed);
+  const allowedKeys = new Set(allowed.map((it) => it.perm).filter(Boolean));
+  // 兼容重定向只在对应权限具备时注册；无权限则不建，交给 * 回 home（不越权暴露目标页存在）
+  const redirects = NAV_REDIRECTS.filter((r) => !r.perm || allowedKeys.has(r.perm));
 
   return (
     <BrowserRouter>
@@ -60,6 +63,9 @@ export default function App() {
         <Route element={<AppShell allowed={allowed} onLogout={logout} onToken={setToken} />}>
           {allowed.map((it) => (
             <Route key={it.key} path={it.path} element={<it.page />} />
+          ))}
+          {redirects.map((r) => (
+            <Route key={r.from} path={r.from} element={<Navigate to={r.to} replace />} />
           ))}
           {/* 根路径与无权限/不存在的地址一律回默认页 */}
           <Route path="*" element={<Navigate to={home} replace />} />

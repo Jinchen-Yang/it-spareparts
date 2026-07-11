@@ -3,6 +3,7 @@ import type { ComponentType, LazyExoticComponent, ReactNode } from "react";
 import {
   CloudUploadOutlined,
   ControlOutlined,
+  FundOutlined,
   InboxOutlined,
   LineChartOutlined,
   ProfileOutlined,
@@ -11,6 +12,7 @@ import {
   ShoppingCartOutlined,
   TeamOutlined,
   ToolOutlined,
+  WarningOutlined,
 } from "@ant-design/icons";
 
 /**
@@ -45,7 +47,9 @@ export interface NavGroup {
 // import() 工厂单独存一份（load 字段）供空闲预取——lazy 与预取命中同一模块缓存
 const loadPartSearch = () => import("./pages/PartSearchPage");
 const loadProfit = () => import("./pages/ProfitPage");
-const loadPurchases = () => import("./pages/PurchasesPage");
+const loadPurchaseAnalysis = () => import("./pages/purchases/PurchaseAnalysisPage");
+const loadPurchaseExceptions = () => import("./pages/purchases/PurchaseExceptionsPage");
+const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage");
 const loadProjectCost = () => import("./pages/ProjectCostPage");
 const loadInventory = () => import("./pages/InventoryPage");
 const loadImport = () => import("./pages/ImportPage");
@@ -56,7 +60,9 @@ const loadAccounts = () => import("./pages/AccountsPage");
 
 const PartSearchPage = lazy(loadPartSearch);
 const ProfitPage = lazy(loadProfit);
-const PurchasesPage = lazy(loadPurchases);
+const PurchaseAnalysisPage = lazy(loadPurchaseAnalysis);
+const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
+const PurchaseRecordsPage = lazy(loadPurchaseRecords);
 const ProjectCostPage = lazy(loadProjectCost);
 const InventoryPage = lazy(loadInventory);
 const ImportPage = lazy(loadImport);
@@ -86,7 +92,9 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-purchase",
     label: "采购管理",
     items: [
-      { key: "purchases", path: "/purchases", label: "采购记录", icon: <ShoppingCartOutlined />, perm: "page_purchases", page: PurchasesPage, load: loadPurchases },
+      { key: "purchases-analysis", path: "/purchases/analysis", label: "采购分析", icon: <FundOutlined />, perm: "page_purchases", page: PurchaseAnalysisPage, load: loadPurchaseAnalysis },
+      { key: "purchases-exceptions", path: "/purchases/exceptions", label: "采购异常", icon: <WarningOutlined />, perm: "page_purchases", page: PurchaseExceptionsPage, load: loadPurchaseExceptions },
+      { key: "purchases-records", path: "/purchases/records", label: "采购明细", icon: <ShoppingCartOutlined />, perm: "page_purchases", page: PurchaseRecordsPage, load: loadPurchaseRecords },
     ],
   },
   {
@@ -123,15 +131,26 @@ export const NAV_GROUPS: NavGroup[] = [
 
 export const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
 
+/**
+ * 旧路径 → 新路径的兼容重定向：老收藏 / 老外链仍能落到正确页面。
+ * from 需与 perm 权限门一致——无权限时 App 层不注册该重定向，交给 * 回 home。
+ */
+export interface NavRedirect { from: string; to: string; perm?: string }
+export const NAV_REDIRECTS: NavRedirect[] = [
+  // 采购拆分：旧 /purchases 收藏跳到默认采购子页（采购分析）
+  { from: "/purchases", to: "/purchases/analysis", perm: "page_purchases" },
+];
+
 /** 找到 path 对应的导航项（精确匹配；路由也按精确注册，加子路由时两处一起改） */
 export function matchNavItem(pathname: string): NavItem | undefined {
   return NAV_ITEMS.find((it) => pathname === it.path);
 }
 
 // 旧版横向菜单的排列序——默认落地页兜底必须按这个序取第一个可见项，
-// 保证与重构前"零行为变化"（旧逻辑：page_parts 优先，否则 menu[0]）
+// 保证与重构前"零行为变化"（旧逻辑：page_parts 优先，否则 menu[0]）。
+// 采购从单页拆成三页后，兜底代表项 = 采购分析（默认采购落地页）。
 const LEGACY_ORDER = [
-  "import", "parts", "purchases", "chat", "profit",
+  "import", "parts", "purchases-analysis", "chat", "profit",
   "maintenance", "inventory", "master", "governance", "accounts",
 ];
 

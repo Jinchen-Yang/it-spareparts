@@ -4,7 +4,7 @@ import {
   Alert, Breadcrumb, Button, Drawer, Dropdown, Grid, Layout, Menu, Modal,
   Spin, Tag,
 } from "antd";
-import { MenuOutlined, UserOutlined } from "@ant-design/icons";
+import { MenuFoldOutlined, MenuOutlined, MenuUnfoldOutlined, UserOutlined } from "@ant-design/icons";
 import type { MenuProps } from "antd";
 import { COLORS } from "./theme";
 import { APP_VERSION, CHANGELOG, LATEST } from "./version";
@@ -187,11 +187,31 @@ export default function AppShell({
           collapsedWidth={SIDER_COLLAPSED}
           collapsible
           collapsed={collapsed}
-          onCollapse={setCollapsed}
+          trigger={null}
           style={{ borderRight: `1px solid ${COLORS.border}`, background: COLORS.surface }}
         >
-          <Brand collapsed={collapsed} />
-          {menu}
+          <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+            <Brand collapsed={collapsed} />
+            <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>{menu}</div>
+            {/* 可访问的收起控件：真实 button（Tab 可聚焦、Enter/Space 生效、aria-* 齐全），
+                取代 antd 默认的 <div> trigger（无语义、键盘不可达） */}
+            <Button
+              type="text"
+              aria-label={collapsed ? "展开侧边栏" : "收起侧边栏"}
+              aria-expanded={!collapsed}
+              onClick={() => setCollapsed((c) => !c)}
+              icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+              style={{
+                height: 44, borderRadius: 0, flex: "none",
+                borderTop: `1px solid ${COLORS.borderSoft}`,
+                display: "flex", alignItems: "center",
+                justifyContent: collapsed ? "center" : "flex-start",
+                paddingInline: collapsed ? 0 : 20, color: COLORS.text2,
+              }}
+            >
+              {!collapsed && "收起"}
+            </Button>
+          </div>
         </Sider>
       )}
 

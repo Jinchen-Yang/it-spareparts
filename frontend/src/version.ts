@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.10.0";
+export const APP_VERSION = "1.11.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.11.0",
+    date: "2026-07-11",
+    items: [
+      "采购管理拆成三个二级菜单，各管一件事：「采购分析」（最近采购/高频待计划/来源拆分）、「采购异常」（取消/作废统计与取消率）、「采购明细」（逐笔记录按时间/型号/供应商/状态筛选）。原采购页一个长页塞三件事的问题解决，功能与数据口径完全不变",
+      "采购三页各有独立网址（/purchases/analysis、/purchases/exceptions、/purchases/records），筛选条件进网址、可收藏可分享、刷新和前进后退保留；旧的 /purchases 收藏自动跳到采购分析",
+      "采购页移动端适配：小屏不再横向滚动挤压表格，改为卡片列表 + 点行看完整详情抽屉（供应商/单号/采购员等次要字段在抽屉里）",
+      "可访问性：侧边栏收起按钮改为真实按钮，支持键盘 Tab 聚焦与 Enter/Space 操作、带屏幕阅读器标签",
+    ],
+  },
   {
     version: "1.10.0",
     date: "2026-07-10",
