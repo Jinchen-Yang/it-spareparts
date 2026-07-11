@@ -29,3 +29,20 @@ def kpi(
     record_access_log(ctx, "kpi", "dashboard", {"date_from": str(date_from), "date_to": str(date_to)})
     data = dashboard.kpi(db, date_from, date_to, user_ctx=ctx)
     return apply_field_visibility(data, ctx)
+
+
+@router.get("/part-ranking")
+def part_ranking(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    cost_method: str = Query("moving_avg", pattern="^(moving_avg|fifo)$"),
+    top: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_boss_board")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    record_access_log(ctx, "part_ranking", "dashboard",
+                      {"date_from": str(date_from), "date_to": str(date_to), "cost_method": cost_method})
+    data = dashboard.part_ranking(db, date_from, date_to, cost_method=cost_method, top=top, user_ctx=ctx)
+    return apply_field_visibility(data, ctx)

@@ -14,28 +14,42 @@ from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import Session
 
 from app import config, security
+from app.models.dimensions import DimPart
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.services.query_filters import active_orders
 
 # 取消/作废口径：非"已生效"里明确终止的两种状态（其余如进行中/草稿单独计）
 _CANCELLED_STATUS = ("已取消", "作废")
+_VAT1 = Decimal(1) + config.PROFIT_VAT_RATE
 
 
 def _f(x) -> float | None:
     return float(x) if x is not None else None
 
 
+def _r(x, n=2) -> float | None:
+    return round(float(x), n) if x is not None else None
+
+
+def _sale_ex_unit():
+    """销售未税单价：销售 unit_price 恒含税 → ÷1.13（TAX_BASIS!=ex_tax 时原值）。"""
+    up = FSalesLine.unit_price
+    return up / _VAT1 if config.TAX_BASIS == "ex_tax" else up
+
+
+def _purchase_ex_unit():
+    """采购未税单价：按头表 is_tax_inclusive 归一（含税/未知÷1.13、明确不含税原值）。"""
+    up = FPurchaseLine.unit_price
+    if config.TAX_BASIS != "ex_tax":
+        return up
+    return case((FPurchaseOrder.is_tax_inclusive.is_(False), up), else_=up / _VAT1)
+
+
 def _purchase_ex_tax_expr():
     """采购行未税额表达式：unit_price*qty，按头表 is_tax_inclusive 归一（含税/未知÷1.13、
     明确不含税取原值）；TAX_BASIS!=ex_tax 时不换算。与 profit._ex_tax_purchase 同口径。"""
-    gross = FPurchaseLine.unit_price * FPurchaseLine.qty
-    if config.TAX_BASIS != "ex_tax":
-        return gross
-    return case(
-        (FPurchaseOrder.is_tax_inclusive.is_(False), gross),
-        else_=gross / (Decimal(1) + config.PROFIT_VAT_RATE),
-    )
+    return _purchase_ex_unit() * FPurchaseLine.qty
 
 
 def kpi(db: Session, date_from: date | None, date_to: date | None,
@@ -108,6 +122,147 @@ def kpi(db: Session, date_from: date | None, date_to: date | None,
         # 订单健康
         **counts_by_status,
         "anomaly_lines": s.anomaly_lines or 0,
+    }
+
+
+def _purchase_price_stats(db: Session, date_from: date | None, upper: date) -> dict[int, dict]:
+    """每 part_id 的采购价统计（未税）：加权均价/中位价/最低/最高/样本数/最近采购日。
+    口径：已生效 + 计入成本的采购类型(COST_PURCHASE_TYPES) + 单价>0。
+    最低/最高仅作参考（可能异常低/小量/脏数据），标杆看加权均价/中位价（甲方评审）。"""
+    ex = _purchase_ex_unit()
+    stmt = (
+        select(
+            FPurchaseLine.part_id,
+            (func.sum(_purchase_ex_tax_expr()) / func.nullif(func.sum(FPurchaseLine.qty), 0)).label("wavg"),
+            func.percentile_cont(0.5).within_group(ex).label("median"),
+            func.min(ex).label("pmin"), func.max(ex).label("pmax"),
+            func.count().label("samples"), func.max(FPurchaseOrder.order_date).label("last_date"),
+        )
+        .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
+        .where(FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
+               FPurchaseLine.qty.is_not(None), FPurchaseLine.qty > 0,
+               FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
+    )
+    stmt = active_orders(stmt, FPurchaseOrder)
+    if date_from:
+        stmt = stmt.where(FPurchaseOrder.order_date >= date_from)
+    stmt = stmt.where(FPurchaseOrder.order_date <= upper).group_by(FPurchaseLine.part_id)
+    out = {}
+    for r in db.execute(stmt):
+        out[r.part_id] = {"wavg": _r(r.wavg), "median": _r(r.median), "min": _r(r.pmin),
+                          "max": _r(r.pmax), "samples": r.samples,
+                          "last_date": r.last_date.isoformat() if r.last_date else None}
+    return out
+
+
+def _sale_price_stats(db: Session, date_from: date | None, upper: date) -> dict[int, dict]:
+    """每 part_id 的销售价统计（未税）：加权均价/中位价/最低/最高/样本数/最近成交日。
+    口径：已生效 + 计营收 + 单价>0（¥0 赠送/换货不计价）。"""
+    ex = _sale_ex_unit()
+    stmt = (
+        select(
+            FSalesLine.part_id,
+            (func.sum(FSalesLine.revenue_amount).filter(FSalesLine.counts_revenue.is_(True))
+             / func.nullif(func.sum(FSalesLine.qty).filter(FSalesLine.counts_revenue.is_(True)), 0)).label("wavg"),
+            func.percentile_cont(0.5).within_group(ex).label("median"),
+            func.min(ex).label("smin"), func.max(ex).label("smax"),
+            func.count().label("samples"), func.max(FSalesOrder.order_date).label("last_date"),
+        )
+        .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
+        .where(FSalesLine.counts_revenue.is_(True),
+               FSalesLine.unit_price.is_not(None), FSalesLine.unit_price > 0,
+               FSalesLine.qty.is_not(None), FSalesLine.qty > 0)
+    )
+    stmt = active_orders(stmt, FSalesOrder)
+    if date_from:
+        stmt = stmt.where(FSalesOrder.order_date >= date_from)
+    stmt = stmt.where(FSalesOrder.order_date <= upper).group_by(FSalesLine.part_id)
+    out = {}
+    for r in db.execute(stmt):
+        out[r.part_id] = {"wavg": _r(r.wavg), "median": _r(r.median), "min": _r(r.smin),
+                          "max": _r(r.smax), "samples": r.samples,
+                          "last_date": r.last_date.isoformat() if r.last_date else None}
+    return out
+
+
+def part_ranking(db: Session, date_from: date | None, date_to: date | None,
+                 cost_method: str = "moving_avg", top: int = 20,
+                 as_of: date | None = None, user_ctx: security.UserContext | None = None) -> dict:
+    """型号盈亏排名（未税双成本法）：赚钱榜 + 亏损榜，各带采购/销售价统计。
+
+    毛利按 cost_method(moving_avg|fifo) 排序；两法毛利都返回。默认排除未来日期。
+    只统计计营收且已配成本的行进毛利；无成本行只计营收（coverage 反映）。
+    """
+    today = as_of or date.today()
+    upper = min(date_to, today) if date_to else today
+    use_fifo = cost_method == "fifo"
+
+    sl = FSalesLine
+    counts = sl.counts_revenue.is_(True)
+    costed = and_(counts, sl.cost_moving_avg.is_not(None))
+    stmt = (
+        select(
+            sl.part_id, DimPart.pn_std, DimPart.description, DimPart.brand,
+            func.sum(sl.revenue_amount).filter(counts).label("revenue"),
+            func.sum(sl.qty).filter(counts).label("qty_sold"),
+            func.sum(sl.revenue_amount).filter(costed).label("rev_costed"),
+            func.sum(sl.cost_moving_avg * sl.qty).filter(costed).label("cost_ma"),
+            func.sum(sl.cost_fifo * sl.qty).filter(costed).label("cost_ff"),
+            func.count().filter(counts).label("lines"),
+            func.count().filter(func.array_position(sl.anomaly_flags, "no_cost").is_not(None)).label("no_cost"),
+        )
+        .join(FSalesOrder, sl.order_id == FSalesOrder.id)
+        .join(DimPart, sl.part_id == DimPart.id)
+    )
+    stmt = active_orders(stmt, FSalesOrder)
+    if date_from:
+        stmt = stmt.where(FSalesOrder.order_date >= date_from)
+    stmt = stmt.where(FSalesOrder.order_date <= upper)
+    if user_ctx is not None:
+        stmt = security.apply_data_scope(stmt, user_ctx)
+    stmt = stmt.group_by(sl.part_id, DimPart.pn_std, DimPart.description, DimPart.brand)
+
+    pstats = _purchase_price_stats(db, date_from, upper)
+    sstats = _sale_price_stats(db, date_from, upper)
+
+    def _gp(rev, cost):
+        return _r(float(rev) - float(cost)) if rev is not None and cost is not None else None
+
+    def _margin(rev, cost):
+        return round((float(rev) - float(cost)) / float(rev), 4) if rev and cost is not None and float(rev) else None
+
+    rows = []
+    for r in db.execute(stmt):
+        rc = r.rev_costed
+        gp_mov, gp_ff = _gp(rc, r.cost_ma), _gp(rc, r.cost_ff)
+        rows.append({
+            "part_id": r.part_id, "pn_std": r.pn_std, "description": r.description, "brand": r.brand,
+            "revenue": _f(r.revenue), "qty_sold": _f(r.qty_sold),
+            "revenue_costed": _f(rc),
+            "cost_coverage": round(float(rc) / float(r.revenue), 4) if rc and r.revenue else None,
+            "no_cost": r.no_cost, "lines": r.lines,
+            "gross_profit_moving": gp_mov, "gross_margin_moving": _margin(rc, r.cost_ma),
+            "gross_profit_fifo": gp_ff, "gross_margin_fifo": _margin(rc, r.cost_ff),
+            "purchase_price": pstats.get(r.part_id), "sale_price": sstats.get(r.part_id),
+            "_sort": (gp_ff if use_fifo else gp_mov),
+        })
+
+    # 有成本才进赚钱/亏损榜（无成本行毛利未知，单独留在 coverage 里，不硬塞进盈亏榜误导）
+    ranked = [x for x in rows if x["_sort"] is not None]
+    n_profit = sum(1 for x in ranked if x["_sort"] > 0)
+    n_loss = sum(1 for x in ranked if x["_sort"] < 0)
+    profitable = sorted([x for x in ranked if x["_sort"] > 0], key=lambda x: x["_sort"], reverse=True)[:top]
+    loss = sorted([x for x in ranked if x["_sort"] < 0], key=lambda x: x["_sort"])[:top]
+    for x in rows:
+        x.pop("_sort", None)
+    return {
+        "window": {"date_from": date_from.isoformat() if date_from else None,
+                   "date_to": date_to.isoformat() if date_to else None,
+                   "as_of": today.isoformat(), "cost_method": cost_method},
+        "profitable": profitable, "loss": loss,
+        "counts": {"total_parts": len(rows), "with_cost": len(ranked),
+                   "profitable": n_profit, "loss": n_loss,
+                   "no_cost_parts": len(rows) - len(ranked)},
     }
 
 
