@@ -13,8 +13,10 @@ from decimal import Decimal
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.orm import Session
 
+from sqlalchemy import exists, or_
+
 from app import config, security
-from app.models.dimensions import DimPart
+from app.models.dimensions import DimCustomer, DimPart
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.services.query_filters import active_orders
@@ -331,6 +333,93 @@ def trend(db: Session, date_from: date | None, date_to: date | None,
             "date_from": date_from.isoformat() if date_from else None,
             "date_to": date_to.isoformat() if date_to else None,
             "series": series}
+
+
+_SALES_SORT = {
+    "order_date": FSalesOrder.order_date,
+    "revenue": FSalesLine.revenue_amount,
+    "gross_profit": FSalesLine.gross_profit,
+    "gross_margin": FSalesLine.gross_margin,
+    "unit_price": FSalesLine.unit_price,
+    "qty": FSalesLine.qty,
+}
+
+
+def sales_lines(db: Session, *, date_from: date | None = None, date_to: date | None = None,
+                status: str | None = None, q: str | None = None, customer: str | None = None,
+                salesperson: str | None = None, business_type: str | None = None,
+                sort: str = "order_date", order: str = "desc",
+                page: int = 1, page_size: int = 50, as_of: date | None = None,
+                user_ctx: security.UserContext | None = None) -> dict:
+    """老板侧销售订单逐行列表（订单拉通的销售半张表；采购半张走 /purchases/recent）。
+
+    金额未税、带逐行毛利（recompute 落库）。status 留空=仅已生效、'全部'=不限、或具体状态。
+    未来日期不排除但打 is_future 标记（列表是排查异常的地方）。带 linked_purchase：
+    该销售单是否有采购单经 linked_sales_order_no 关联（拉通信号）。
+    """
+    today = as_of or date.today()
+    sl, so = FSalesLine, FSalesOrder
+    linked = exists().where(FPurchaseOrder.linked_sales_order_no == so.order_no)
+
+    base = (
+        select(
+            sl.id.label("line_id"), so.order_no, so.order_date, so.salesperson,
+            DimCustomer.name_normalized.label("customer"), so.business_type, so.data_status,
+            sl.part_id, DimPart.pn_std, sl.description, sl.brand, sl.qty, sl.unit_price,
+            sl.revenue_amount, sl.cost_amount, sl.gross_profit, sl.gross_margin,
+            sl.cost_source, linked.label("linked_purchase"),
+        )
+        .join(so, sl.order_id == so.id)
+        .join(DimPart, sl.part_id == DimPart.id)
+        .join(DimCustomer, so.customer_id == DimCustomer.id, isouter=True)
+    )
+    # 状态：留空=仅已生效；'全部'=不限；否则具体状态
+    if status == "全部":
+        pass
+    elif status:
+        base = base.where(so.data_status == status)
+    else:
+        base = active_orders(base, so)
+    if date_from:
+        base = base.where(so.order_date >= date_from)
+    if date_to:
+        base = base.where(so.order_date <= date_to)
+    if q and q.strip():
+        kw = f"%{q.strip()}%"
+        base = base.where(or_(DimPart.pn_std.ilike(kw), sl.description.ilike(kw), sl.brand.ilike(kw)))
+    if customer:
+        base = base.where(DimCustomer.name_normalized.ilike(f"%{customer.strip()}%"))
+    if salesperson:
+        base = base.where(so.salesperson.ilike(f"%{salesperson.strip()}%"))
+    if business_type:
+        base = base.where(so.business_type == business_type)
+    if user_ctx is not None:
+        base = security.apply_data_scope(base, user_ctx)
+
+    total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0
+    col = _SALES_SORT.get(sort, FSalesOrder.order_date)
+    direction = col.desc().nullslast() if order == "desc" else col.asc().nullslast()
+    # 稳定次级排序，保证分页可复现
+    stmt = base.order_by(direction, sl.id.desc()).limit(page_size).offset((page - 1) * page_size)
+
+    items = []
+    for r in db.execute(stmt):
+        up_ex = _r(r.unit_price / _VAT1) if (r.unit_price is not None and config.TAX_BASIS == "ex_tax") else _f(r.unit_price)
+        items.append({
+            "line_id": r.line_id, "order_no": r.order_no,
+            "order_date": r.order_date.isoformat() if r.order_date else None,
+            "is_future": bool(r.order_date and r.order_date > today),
+            "salesperson": r.salesperson, "customer": r.customer,
+            "business_type": r.business_type, "data_status": r.data_status,
+            "part_id": r.part_id, "pn_std": r.pn_std, "description": r.description, "brand": r.brand,
+            "qty": _f(r.qty), "unit_price_ex_tax": up_ex,
+            "revenue_amount": _f(r.revenue_amount), "cost_amount": _f(r.cost_amount),
+            "gross_profit": _f(r.gross_profit),
+            "gross_margin": round(float(r.gross_margin), 4) if r.gross_margin is not None else None,
+            "cost_source": r.cost_source, "linked_purchase": bool(r.linked_purchase),
+        })
+    return {"total": total, "page": page, "page_size": page_size,
+            "as_of": today.isoformat(), "items": items}
 
 
 def _order_health(db: Session, date_from: date | None, date_to: date | None, today: date) -> dict:
