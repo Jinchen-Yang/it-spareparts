@@ -7,6 +7,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     ForeignKey,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -80,3 +81,32 @@ class PartSubstitute(Base):
         CheckConstraint("direction IN ('both','a_to_b','b_to_a')", name="ck_substitute_direction"),
         CheckConstraint("status IN ('pending','active','rejected')", name="ck_substitute_status"),
     )
+
+
+class PartPool(Base):
+    """通用号数据池（稳定分组，供老板看板池化分析）。
+
+    池 = 「已生效双向互替(status=active, direction=both)」关系的连通分量，成员≥2。
+    单向替代不成池。与运行时 BFS（型号页临时展示、有 4 层/60 成员上限、入口不同结果不同）
+    刻意分离：本表是稳定 group_id，由 pool.rebuild() 重算，关系变化时保留稳定 ID + 报告合并/拆分。
+    """
+
+    __tablename__ = "part_pool"
+
+    group_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    member_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 池内任一 active-both 边缺 substitute_type → 关系待校准（甲方：缺类型的池标出）
+    needs_calibration: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 成员超阈值 → 需人工确认（甲方：池成员超合理范围要求人工确认）
+    oversized: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+
+
+class PartPoolMember(Base):
+    """通用号池成员映射（part_id → 稳定 group_id）。一个型号最多属一个池。"""
+
+    __tablename__ = "part_pool_member"
+
+    part_id: Mapped[int] = mapped_column(ForeignKey("dim_part.id"), primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("part_pool.group_id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())

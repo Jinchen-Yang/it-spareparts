@@ -159,6 +159,12 @@ MAINT_EXPENSE_ACTIVE_STATUS = "已结束"             # 报销单生效口径（
 # 目标毛利率（报价提示/低毛利标记用；整机拆解的"建议售价"=成本×1/(1-此值)）
 TARGET_MARGIN = Decimal("0.20")
 
+# ---- 通用号数据池（老板看板池化分析，甲方 2026-07-11 修正版）----
+# 池 = 已生效双向互替(status=active,direction=both)关系的连通分量，成员≥2；单向替代不成池。
+# 稳定 group_id 由 pool.rebuild() 重算并保留，关系变化时报告合并/拆分。
+POOL_OVERSIZE_MEMBERS = 30        # 成员超此数 → oversized 标记，需人工确认（生产最大池 59）
+POOL_PREMIUM_WARN_PCT = Decimal("0.20")   # 采购/销售溢价率 ≥20% 视为"品牌溢价"候选（相对池基准）
+
 # 整机拆解/批量查价取"近 N 天采购价"窗口（客户要"最近15天采购价"）
 RECENT_PURCHASE_DAYS = 15
 
