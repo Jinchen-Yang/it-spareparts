@@ -10,7 +10,7 @@ from app.etl import loader
 from app.models.dimensions import DimPart
 from app.models.inventory import PartSubstitute
 from app.models.system import SysImportBatch
-from app.services import dashboard, pool, profit
+from app.services import dashboard, pool, pool_catalog, profit
 from tests import factories as f
 
 AS_OF = date(2026, 6, 1)
@@ -30,7 +30,8 @@ def seeded(db):
     db.add(PartSubstitute(part_id_a=min(x.id, y.id), part_id_b=max(x.id, y.id),
                           status="active", direction="both", substitute_type="same_spec"))
     db.flush()
-    pool.rebuild(db)
+    # 人工池是唯一真值（Slice 1）：经 pool_catalog 建池，不再自动重算
+    pool_catalog.create_pool(db, name="池-XY", member_part_ids=[x.id, y.id], operated_by="t")
     b = SysImportBatch(filename="t.xlsx", file_type="purchase", file_hash="hmask")
     db.add(b); db.flush()
     po = {"P1": f.purchase_head("P1", on=date(2026, 1, 5), is_tax_inclusive=True),

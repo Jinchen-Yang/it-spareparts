@@ -159,9 +159,12 @@ MAINT_EXPENSE_ACTIVE_STATUS = "已结束"             # 报销单生效口径（
 # 目标毛利率（报价提示/低毛利标记用；整机拆解的"建议售价"=成本×1/(1-此值)）
 TARGET_MARGIN = Decimal("0.20")
 
-# ---- 通用号数据池（老板看板池化分析，甲方 2026-07-11 修正版）----
-# 池 = 已生效双向互替(status=active,direction=both)关系的连通分量，成员≥2；单向替代不成池。
-# 稳定 group_id 由 pool.rebuild() 重算并保留，关系变化时报告合并/拆分。
+# ---- 互通 PN 池（人工池，2026-07-13 起唯一真值；互通PN池价格分析 §15/§21）----
+# 池由人工在「互通PN池管理」页创建维护，替代关系变化不再自动改池（自动重算已停用）。
+# 稳定 group_id 序列语义保留：单调递增、退役 ID 永不复用。
+# 约束价（采购上限/销售下限）统一未税入库；含税录入按统一 13% 口径换算（含税÷1.13），
+# 原始录入值与口径保留可追溯。只用于池约束价换算，不触碰利润引擎的 PROFIT_VAT_RATE 调用方。
+POOL_POLICY_VAT_RATE = Decimal("0.13")
 POOL_OVERSIZE_MEMBERS = 30        # 成员超此数 → oversized 标记，需人工确认（生产最大池 59）
 POOL_PREMIUM_WARN_PCT = Decimal("0.20")   # 采购/销售溢价率 ≥20% 视为"品牌溢价"候选（相对池基准）
 # 标杆型号"供应可得"门槛（复审二轮 P1-5：原来只查"有采购单+有日期"太松，单样本/远古采购也算）：
@@ -370,6 +373,11 @@ FIELD_GROUPS = {
     "profit_rate":   ["gross_margin", "avg_margin", "margin_band",
                       "avg_margin_moving", "avg_margin_fifo",
                       "gross_margin_moving", "gross_margin_fifo"],
+    # 互通池价格治理（data_pool_price_governance，§12）：人工约束价及其原始录入值。
+    # 关掉后管理页/池详情的约束价全为 null；Slice 2 起的越线差额/越线标记派生键
+    # （delta_amount/delta_pct/relation_to_constraint/violation_count 等）产出时必须补登记到本组。
+    "pool_price_governance": ["purchase_ceiling_ex_tax", "sales_floor_ex_tax",
+                              "purchase_input_value", "sales_input_value"],
 }
 
 # 字段级脱敏的唯一真值源是 app/permissions.py 的 ROLE_TEMPLATES（按 data_* 开关）。

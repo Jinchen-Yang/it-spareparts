@@ -1,8 +1,9 @@
 """按用户的细粒度权限（管理员在"账号管理"页逐项勾选）。
 
-三类开关：
+四类开关：
 - data_*  数据字段可见：驱动 security.apply_field_visibility——关掉则该类字段在所有接口被抹成 null。
 - page_*  页面可用：驱动前端菜单显示 + 后端接口准入（require_page）。
+- action_* 动作可用：驱动写操作准入（require_action）+ 前端动作入口显隐。
 - own_customers_only  行级：销售只看自己成交的客户（同事客户名匿名）。
 
 每个账号把自定义存在 sys_user.permissions(JSONB)；为空 → 回退该 role 的模板(ROLE_TEMPLATES)。
@@ -16,15 +17,24 @@ DATA_GROUPS: dict[str, list[str]] = {
     "data_customer": ["customer_info"],
     "data_purchase_cost": ["purchase_cost"],
     "data_profit": ["profit_amount", "profit_rate"],
+    # 互通池价格治理：约束价（采购上限/销售下限及原始录入值）可见性（§12）。
+    # 关掉后后端同时隐藏价格、约束差额与越线标记，防止靠颜色/排序反推金额。
+    "data_pool_price_governance": ["pool_price_governance"],
 }
 # 页面开关（与前端菜单 key 对齐）
 PAGE_KEYS: list[str] = [
     "page_parts", "page_purchases", "page_profit",
     "page_inventory", "page_chat", "page_import", "page_governance",
     "page_master_data", "page_maintenance", "page_boss_board",
+    "page_pool_analysis",
+]
+# 动作开关：写操作准入（require_action）。默认仅老板/管理员，可在账号管理页单独授权。
+ACTION_KEYS: list[str] = [
+    "action_pool_manage",      # 建池/改名称说明/增删成员/归档恢复
+    "action_pool_set_policy",  # 设置采购最高价 / 销售最低价
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
-ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ROW_KEYS]
+ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ACTION_KEYS, *ROW_KEYS]
 _VALID = set(ALL_KEYS)
 
 # 给前端勾选框用的中文标签
@@ -43,14 +53,19 @@ LABELS: dict[str, str] = {
     "page_master_data": "备件主数据（新建/编辑 PN）",
     "page_maintenance": "项目成本（维保出库）",
     "page_boss_board": "老板经营看板",
+    "page_pool_analysis": "互通池价格分析",
+    "data_pool_price_governance": "池价格治理（约束价/越线差额）",
+    "action_pool_manage": "互通PN池维护（建池/成员/归档）",
+    "action_pool_set_policy": "池约束价设置（采购上限/销售下限）",
     "own_customers_only": "只看自己成交的客户（防恶性竞争）",
 }
 
 
 def _full(own: bool = False) -> dict[str, bool]:
-    """全部数据 + 全部页面打开；own_customers_only 单独给。"""
+    """全部数据 + 全部页面 + 全部动作打开；own_customers_only 单独给。"""
     d = {k: True for k in DATA_GROUPS}
     d.update({k: True for k in PAGE_KEYS})
+    d.update({k: True for k in ACTION_KEYS})
     d["own_customers_only"] = own
     return d
 
@@ -60,10 +75,13 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     "admin": _full(),
     "boss": _full(),
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
-    # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）
+    # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
+    # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
+    # page_pool_analysis / data_pool_price_governance 按规格 §12 全员开（普通员工可看池与约束价）。
     "readonly": {**_full(), "page_import": False, "page_governance": False,
                  "page_master_data": False, "page_maintenance": False,
-                 "page_boss_board": False},
+                 "page_boss_board": False,
+                 "action_pool_manage": False, "action_pool_set_policy": False},
     "sales": {
         # 甲方 2026-06-15 确认：销售能看采购成本/毛利（整机拆解加点直卖需要采购价算建议售价）。
         # 供应商仍隐藏（不暴露从谁进货）；逐单销售成交明细另由 own_customers_only 收紧（看不到）。
@@ -78,6 +96,10 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_maintenance": False,
         # 老板经营看板=全公司经营/个人排名，销售不开
         "page_boss_board": False,
+        # 互通池价格分析全员可见（§12），约束价对全员公开；池维护/约束设置默认不开
+        "page_pool_analysis": True,
+        "data_pool_price_governance": True,
+        "action_pool_manage": False, "action_pool_set_policy": False,
         "own_customers_only": True,
     },
     "purchaser": {
@@ -92,6 +114,10 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_maintenance": True,
         # 老板经营看板=全公司经营/个人排名，采购不开
         "page_boss_board": False,
+        # 互通池价格分析全员可见（§12），约束价对全员公开；池维护/约束设置默认不开
+        "page_pool_analysis": True,
+        "data_pool_price_governance": True,
+        "action_pool_manage": False, "action_pool_set_policy": False,
         "own_customers_only": False,
     },
 }

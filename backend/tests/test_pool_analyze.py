@@ -14,7 +14,7 @@ from app.etl import loader
 from app.models.dimensions import DimPart
 from app.models.inventory import PartSubstitute
 from app.models.system import SysImportBatch
-from app.services import pool, profit
+from app.services import pool, pool_catalog, profit
 from app import config
 from tests import factories as f
 
@@ -46,7 +46,9 @@ def seeded(db):
     z = _part(db, "PN-Z", "BrandZ")   # ex 120（+20%，恰达阈值）
     _edge(db, x, y); _edge(db, y, z)
     db.flush()
-    pool.rebuild(db)
+    # 人工池是唯一真值（Slice 1）：经 pool_catalog 建池，不再自动重算
+    created = pool_catalog.create_pool(db, name="池-XYZ", member_part_ids=[x, y, z],
+                                       operated_by="t")
 
     b = SysImportBatch(filename="t.xlsx", file_type="purchase", file_hash="hpool")
     db.add(b); db.flush()
@@ -71,9 +73,7 @@ def seeded(db):
     loader.load(db, f.sales_result(sorders, slines), b.id, date(2026, 6, 1))
     db.commit()
     profit.recompute(db)
-    gid = db.execute(select(pool.PartPoolMember.group_id)
-                     .where(pool.PartPoolMember.part_id == x)).scalar()
-    return {"gid": gid, "x": x, "y": y, "z": z}
+    return {"gid": created["group_id"], "x": x, "y": y, "z": z}
 
 
 def test_benchmark_reliable_needs_distinct_orders(db, seeded):
@@ -122,7 +122,8 @@ def test_supply_gate_rejects_single_order_benchmark(db):
     """复审二轮 P1-5：标杆只有 1 张采购单（单样本）→ 供应不可得，不计入 supply_available_upper。
     理论节省仍在（口径不变），但供应层面上限=0，机会条目标 supply_available=False。"""
     x = _part(db, "PN-SX", "BX"); y = _part(db, "PN-SY", "BY")
-    _edge(db, x, y); db.flush(); pool.rebuild(db)
+    _edge(db, x, y); db.flush()
+    pool_catalog.create_pool(db, name="池-SXY", member_part_ids=[x, y], operated_by="t")
     b = SysImportBatch(filename="s.xlsx", file_type="purchase", file_hash="hsupply1")
     db.add(b); db.flush()
     # 标杆 PN-SX 只 1 张采购单 → orders=1 < POOL_SUPPLY_MIN_ORDERS(2) → 供应不稳
@@ -148,7 +149,8 @@ def test_supply_window_not_truncated_by_page_range(db):
     """复审三轮 P1：页面选近30天时，60/90天前的有效采购仍应满足365天供应证据。
     采购统计（标杆价+供应）用近一年窗口，不被页面窗口截断；销量仍按页面窗口。"""
     x = _part(db, "PN-WX", "BX"); y = _part(db, "PN-WY", "BY")
-    _edge(db, x, y); db.flush(); pool.rebuild(db)
+    _edge(db, x, y); db.flush()
+    pool_catalog.create_pool(db, name="池-WXY", member_part_ids=[x, y], operated_by="t")
     b = SysImportBatch(filename="w.xlsx", file_type="purchase", file_hash="hwin1")
     db.add(b); db.flush()
     porders = {   # 标杆 X 两张单在 60/90 天前（页面近30天窗口之外，但在一年内）
@@ -192,7 +194,9 @@ def test_list_pools_savings_global_ranking(db):
     # 池B：2 成员、大溢价 + 有销量 → 高节省
     b1 = _part(db, "PN-B1", "B4"); b2 = _part(db, "PN-B2", "B5")
     _edge(db, b1, b2)
-    db.flush(); pool.rebuild(db)
+    db.flush()
+    pool_catalog.create_pool(db, name="池-A", member_part_ids=[a1, a2, a3], operated_by="t")
+    pool_catalog.create_pool(db, name="池-B", member_part_ids=[b1, b2], operated_by="t")
     bat = SysImportBatch(filename="r.xlsx", file_type="purchase", file_hash="hrank1")
     db.add(bat); db.flush()
     po = {"PA": f.purchase_head("PA", on=date(2026, 1, 5), is_tax_inclusive=True)}
@@ -224,7 +228,8 @@ def test_list_pools_pagination_and_cap(db, monkeypatch):
     for i in range(5):   # 5 个池，各 2 成员 1 边
         a = _part(db, f"PN-P{i}A", f"B{i}A"); b2 = _part(db, f"PN-P{i}B", f"B{i}B")
         _edge(db, a, b2)
-    db.flush(); pool.rebuild(db)
+        db.flush()
+        pool_catalog.create_pool(db, name=f"池-P{i}", member_part_ids=[a, b2], operated_by="t")
     r1 = pool.list_pools(db, as_of=AS_OF, sort="savings", page=1, page_size=2)
     r2 = pool.list_pools(db, as_of=AS_OF, sort="savings", page=2, page_size=2)
     r3 = pool.list_pools(db, as_of=AS_OF, sort="savings", page=3, page_size=2)
@@ -245,7 +250,9 @@ def test_pools_endpoint_restricts_savings_ranking_and_masks_values(db):
     _edge(db, a1, a2); _edge(db, a2, a3)
     b1 = _part(db, "PN-EB1", "BE4"); b2 = _part(db, "PN-EB2", "BE5")
     _edge(db, b1, b2)
-    db.flush(); pool.rebuild(db)
+    db.flush()
+    pool_catalog.create_pool(db, name="池-EA", member_part_ids=[a1, a2, a3], operated_by="t")
+    pool_catalog.create_pool(db, name="池-EB", member_part_ids=[b1, b2], operated_by="t")
     batch = SysImportBatch(filename="endpoint-rank.xlsx", file_type="purchase", file_hash="hrank-endpoint")
     db.add(batch); db.flush()
     purchase = {"PE": f.purchase_head("PE", on=date(2026, 1, 5), is_tax_inclusive=True)}

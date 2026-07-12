@@ -84,6 +84,7 @@ def meta(_: str = Depends(require_admin)) -> dict:
         "roles": _ROLES,
         "data_keys": list(permissions.DATA_GROUPS),
         "page_keys": permissions.PAGE_KEYS,
+        "action_keys": permissions.ACTION_KEYS,
         "row_keys": permissions.ROW_KEYS,
         "labels": permissions.LABELS,
         "role_templates": {r: permissions.effective(r, None) for r in _ROLES},

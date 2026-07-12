@@ -92,6 +92,32 @@ def require_page(page_key: str):
     return _dep
 
 
+def require_action(action_key: str):
+    """动作级准入依赖：该用户 action_* 权限为 False → 403；RBAC 开且未登录 → 401。
+    admin 恒放行；旧 token（无 perms）按角色模板回退（与 require_page 同一口径）。
+    与 require_page 的区别：page 管"能不能进页面看"，action 管"能不能执行写操作"
+    （建池/改约束价等），二者独立授权（互通PN池价格分析 §12）。"""
+    def _dep(ctx: UserContext = Depends(get_current_user_context)) -> None:
+        if not config.ENABLE_RBAC or ctx.role == "admin":
+            return
+        if not ctx.is_authenticated:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "请先登录")
+        perms = ctx.permissions
+        if perms is None:
+            from app import permissions as _perm
+            perms = _perm.effective(ctx.role, None)
+        if not perms.get(action_key, False):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "无此操作权限")
+    return _dep
+
+
+def require_login(ctx: UserContext = Depends(get_current_user_context)) -> UserContext:
+    """登录即可的准入依赖（"全员读"接口用）：RBAC 开且匿名 → 401，其余放行并返回 ctx。"""
+    if config.ENABLE_RBAC and not ctx.is_authenticated and ctx.role != "admin":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "请先登录")
+    return ctx
+
+
 def page_allowed(ctx: UserContext, page_key: str) -> bool:
     """页面权限的纯函数版（agent 工具层等非 FastAPI 依赖处用；与 require_page 同一逻辑）。"""
     if not config.ENABLE_RBAC or ctx.role == "admin":
