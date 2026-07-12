@@ -21,6 +21,20 @@ def _cfg():
     return cfg
 
 
+@pytest.fixture()
+def preserve_pool_seq(migrated):
+    """保存并恢复 part_pool_group_id_seq 状态（复审五轮 Standards：Postgres 序列不随
+    事务回滚，凡是直接操纵序列（ALTER/setval）或依赖其初始值的测试都必须挂本 fixture，
+    否则测试结束把序列留在任意水位 → 跨用例顺序依赖）。"""
+    with engine.begin() as conn:
+        prev = conn.execute(text(
+            "SELECT last_value, is_called FROM part_pool_group_id_seq")).one()
+    yield
+    with engine.begin() as conn:
+        conn.execute(text("SELECT setval('part_pool_group_id_seq', :lv, :ic)"),
+                     {"lv": prev.last_value, "ic": prev.is_called})
+
+
 @pytest.mark.parametrize(
     ("group_id", "sequence_sql", "expected_next"),
     [
@@ -31,15 +45,10 @@ def _cfg():
     ids=["empty-un-called", "sequence-lagging", "sequence-high-watermark"],
 )
 def test_followup_migration_preserves_sequence_high_watermark(
-    migrated, group_id, sequence_sql, expected_next
+    preserve_pool_seq, group_id, sequence_sql, expected_next
 ):
     """已在 d3 的环境升级 b9 后，序列不得因存活池删除而回退。"""
     cfg = _cfg()
-    # 保存测试前序列状态（复审四轮 Standards：本测试消费 nextval，若不恢复会把序列
-    # 留在参数化的高水位（如 101），对后续用例形成顺序依赖）。
-    with engine.begin() as conn:
-        prev = conn.execute(text(
-            "SELECT last_value, is_called FROM part_pool_group_id_seq")).one()
     alembic_command.downgrade(cfg, "d3e8f1a6b2c4")   # 回到"后续对齐迁移未应用"的状态
     try:
         with engine.begin() as conn:
@@ -58,10 +67,7 @@ def test_followup_migration_preserves_sequence_high_watermark(
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM part_pool_member"))
             conn.execute(text("DELETE FROM part_pool"))
-        alembic_command.upgrade(cfg, "head")          # 确保回到 head，不污染后续用例
-        with engine.begin() as conn:                   # 恢复测试前的序列状态（消除顺序依赖）
-            conn.execute(text("SELECT setval('part_pool_group_id_seq', :lv, :ic)"),
-                         {"lv": prev.last_value, "ic": prev.is_called})
+        alembic_command.upgrade(cfg, "head")          # 回到 head；序列状态由 preserve_pool_seq 恢复
 
 
 def test_single_alembic_head(migrated):
