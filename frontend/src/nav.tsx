@@ -4,6 +4,7 @@ import {
   CloudUploadOutlined,
   ControlOutlined,
   DashboardOutlined,
+  DeploymentUnitOutlined,
   FundOutlined,
   InboxOutlined,
   LineChartOutlined,
@@ -57,6 +58,7 @@ const loadInventory = () => import("./pages/InventoryPage");
 const loadImport = () => import("./pages/ImportPage");
 const loadMasterData = () => import("./pages/MasterDataPage");
 const loadGovernance = () => import("./pages/GovernancePage");
+const loadPoolManagement = () => import("./pages/PoolManagementPage");
 const loadChat = () => import("./pages/ChatPage");
 const loadAccounts = () => import("./pages/AccountsPage");
 
@@ -71,6 +73,7 @@ const InventoryPage = lazy(loadInventory);
 const ImportPage = lazy(loadImport);
 const MasterDataPage = lazy(loadMasterData);
 const GovernancePage = lazy(loadGovernance);
+const PoolManagementPage = lazy(loadPoolManagement);
 const ChatPage = lazy(loadChat);
 const AccountsPage = lazy(loadAccounts);
 
@@ -128,6 +131,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { key: "import", path: "/import", label: "数据导入", icon: <CloudUploadOutlined />, perm: "page_import", page: ImportPage, load: loadImport },
       { key: "master", path: "/master", label: "备件主数据", icon: <ProfileOutlined />, perm: "page_master_data", page: MasterDataPage, load: loadMasterData },
       { key: "governance", path: "/governance", label: "数据治理", icon: <ControlOutlined />, perm: "page_governance", page: GovernancePage, load: loadGovernance },
+      { key: "pool-mgmt", path: "/pool-management", label: "互通PN池管理", icon: <DeploymentUnitOutlined />, perm: "action_pool_manage", page: PoolManagementPage, load: loadPoolManagement },
     ],
   },
   {

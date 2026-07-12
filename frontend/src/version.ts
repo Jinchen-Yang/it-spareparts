@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.12.4";
+export const APP_VERSION = "1.13.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.13.0",
+    date: "2026-07-13",
+    items: [
+      "新增「互通PN池管理」页（数据中心）：人工维护的互通池是唯一真值，可建池、改名称说明、增删 PN 成员、归档/恢复，保存即生效",
+      "池约束价：每个池可设「采购最高价（上限）」与「销售最低价（下限）」，支持含税/未税口径录入，含税自动 ÷1.13 换算为未税入库并保留原始录入值",
+      "自动重算池停用：经营看板移除「重算池」按钮，池成员不再被自动重算覆盖，统一在管理页人工维护",
+      "账号管理权限设置新增「操作权限」分组：池维护、池约束价设置可按账号单独授权（默认仅老板/管理员）",
+    ],
+  },
   {
     version: "1.12.4",
     date: "2026-07-12",
