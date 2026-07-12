@@ -1,363 +1,225 @@
-# 部署到云服务器(Debian + 腾讯云 + 宝塔面板)
+# 生产发布 Runbook（PR #90 后续修复）
 
-> 适配环境：Debian 11/12、有 sudo、有宝塔面板、2C2G(或更高)。
-> 部署完成后，浏览器访问 `http://<服务器公网IP>:8080`，admin 登录。
+本文只描述发布步骤；本次修复不执行生产部署。生产发布前必须先在 staging 使用生产快照完整演练。
 
----
+约定：服务名为 `db`、`app`、`frontend`，数据库名为 `spareparts`。所有命令在服务器上的项目目录执行，并把 `BACKUP` 指向本次唯一备份文件；不要使用 `backup-*.dump` 这类模糊 glob。
 
-## 一、前置检查
-
-```bash
-# 确认系统
-cat /etc/os-release
-
-# 确认架构(x86_64 还是 aarch64)
-uname -m
-
-# 确认能 sudo
-sudo whoami    # 输出 root 即可
-
-# 检查 Docker 是否已装(宝塔有时会装过)
-docker --version 2>&1
-docker compose version 2>&1
-```
-
-如果两行 `docker` 命令都报"command not found"，跳到二；否则跳到三。
-
----
-
-## 二、安装 Docker(Debian 官方源)
+## 1. 拉取目标 commit，记录回滚基线
 
 ```bash
-# 1. 准备依赖
-sudo apt update
-sudo apt install -y ca-certificates curl gnupg lsb-release
-
-# 2. 加 Docker 官方 GPG key + 源
-sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/debian/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-# 3. 装 Docker
-sudo apt update
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-# 4. 起服务 + 开机自启
-sudo systemctl enable --now docker
-
-# 5. 验证
-sudo docker run --rm hello-world
-```
-
-> 国内服务器拉镜像慢的话, 可以配 Docker 国内镜像源(腾讯云内网通常直接走腾讯云镜像加速):
-> ```
-> sudo mkdir -p /etc/docker
-> sudo tee /etc/docker/daemon.json <<EOF
-> {"registry-mirrors": ["https://mirror.ccs.tencentyun.com"]}
-> EOF
-> sudo systemctl restart docker
-> ```
-
----
-
-## 三、加 Swap(2G 内存机器**必做**, 否则重算大表会 OOM)
-
-```bash
-# 检查现有 swap
-free -h | grep -i swap
-
-# 没有的话, 加 3GB swap
-sudo fallocate -l 3G /swapfile
-sudo chmod 600 /swapfile
-sudo mkswap /swapfile
-sudo swapon /swapfile
-echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-
-# 验证
-free -h
-```
-
----
-
-## 四、拉代码
-
-仓库 `Jinchen-Yang/it-spareparts` 是私有的。两种拉法,二选一:
-
-### 方式 A：用 Personal Access Token(最简单)
-
-1. 浏览器登录 GitHub → 右上角头像 → **Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token (classic)**
-2. 权限只勾 `repo`, 有效期选 30/90 天
-3. 复制生成的 token(只显示一次)
-
-```bash
-mkdir -p ~/apps && cd ~/apps
-git clone https://<贴你的 token>@github.com/Jinchen-Yang/it-spareparts.git
-cd it-spareparts
-```
-
-### 方式 B：用 Deploy Key(更长期)
-
-```bash
-# 在服务器上生成专用 SSH key
-ssh-keygen -t ed25519 -C "deploy@server" -f ~/.ssh/github_deploy -N ""
-
-# 把公钥贴到 GitHub 仓库 Settings → Deploy keys → Add deploy key (只勾 Read)
-cat ~/.ssh/github_deploy.pub
-
-# 配 SSH 别名
-cat >> ~/.ssh/config <<'EOF'
-Host github-deploy
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/github_deploy
-EOF
-chmod 600 ~/.ssh/config
-
-# 拉代码(用别名)
-cd ~/apps
-git clone git@github-deploy:Jinchen-Yang/it-spareparts.git
-cd it-spareparts
-```
-
----
-
-## 五、配置 .env
-
-```bash
-cp .env.example .env
-
-# 生成随机密钥/密码
-openssl rand -hex 16    # 复制输出, 当 POSTGRES_PASSWORD
-openssl rand -hex 16    # 复制输出, 当 ADMIN_PASSWORD
-openssl rand -hex 32    # 复制输出, 当 SECRET_KEY
-
-# 编辑 .env, 把上面三个值填进去, ENVIRONMENT 保持 prod
-vi .env
-```
-
-最终 `.env` 大致是这样(用你自己生成的随机值):
-```
-POSTGRES_PASSWORD=ab12cd34ef56...
-ADMIN_PASSWORD=xy78pq90mn12...
-SECRET_KEY=long-random-32-byte-hex...
-ENVIRONMENT=prod
-FRONTEND_PORT=8080
-APP_PORT=8000
-```
-
-> ⚠️ **千万记住 ADMIN_PASSWORD**，这是你以后登录用的密码(用户名 `admin`)。
-
----
-
-## 六、起服务(首次)
-
-```bash
-# 在 it-spareparts 目录下
-sudo docker compose up -d --build
-
-# 这一步会:
-# 1) 拉 postgres:15 / node:20 / nginx 镜像 (~300MB)
-# 2) 装前端依赖 + tsc + vite build (1-3 分钟)
-# 3) 装后端依赖 + 构建 backend 镜像 (1-2 分钟)
-# 4) 起三个容器: db, app, frontend
-# 总耗时 5-10 分钟, 2G 内存 + swap 应该够
-
-# 看启动状态
-sudo docker compose ps
-
-# 应该看到 3 个 Up:
-#   it-spareparts-db-1        Up (healthy)
-#   it-spareparts-app-1       Up
-#   it-spareparts-frontend-1  Up
-```
-
-> ⚠️ 如果 build 中途因为内存被 kill, 见底部"故障排查"。
-
----
-
-## 七、初始化数据库
-
-```bash
-sudo docker compose exec app alembic upgrade head
-
-# 应该看到一连串 "INFO [alembic.runtime.migration] Running upgrade ..."
-# 最后没有 ERROR 就 OK
-```
-
----
-
-## 八、防火墙 + 腾讯云安全组放行
-
-```bash
-# 系统防火墙(若开了 ufw 或 iptables)
-# Debian 默认通常没开, 可以跳过
-sudo ufw allow 8080/tcp 2>/dev/null || true
-```
-
-**腾讯云控制台**:
-1. 登录腾讯云 → CVM → 你的实例 → 安全组
-2. 添加入站规则: 协议 TCP, 端口 `8080`, 来源 `0.0.0.0/0`(或限定你公司出口 IP)
-3. 22(SSH) 和 8888(宝塔) 应已开
-
----
-
-## 九、访问
-
-浏览器打开:**`http://<服务器公网IP>:8080`**
-
-- 用户名: `admin`
-- 密码: 你在 `.env` 里设的 `ADMIN_PASSWORD`
-
-第一次没有数据, 顶部点"数据导入"上传你的 .xlsx 即可。
-
----
-
-## 十、备份(强烈建议在客户用之前配上)
-
-```bash
-# 创建备份目录
-sudo mkdir -p /var/backups/spareparts && sudo chown $USER:$USER /var/backups/spareparts
-
-# 写每日备份脚本
-cat > ~/apps/it-spareparts/backup.sh <<'EOF'
-#!/usr/bin/env bash
-set -e
-cd "$(dirname "$0")"
-DATE=$(date +%Y%m%d-%H%M)
-sudo docker compose exec -T db pg_dump -U spareparts -Fc spareparts \
-  > /var/backups/spareparts/db-$DATE.dump
-# 只留最近 14 天
-find /var/backups/spareparts -name 'db-*.dump' -mtime +14 -delete
-EOF
-chmod +x ~/apps/it-spareparts/backup.sh
-
-# 加 cron(每天凌晨 3 点)
-(crontab -l 2>/dev/null; echo "0 3 * * * $HOME/apps/it-spareparts/backup.sh >> $HOME/apps/it-spareparts/backup.log 2>&1") | crontab -
-
-# 测试一次
-~/apps/it-spareparts/backup.sh
-ls -la /var/backups/spareparts/
-```
-
-恢复命令(灾难时):
-```bash
-sudo docker compose exec -T db pg_restore -U spareparts -d spareparts --clean --if-exists \
-  < /var/backups/spareparts/db-<日期>.dump
-```
-
----
-
-## 十一、日常运维命令
-
-```bash
-# 看日志
-sudo docker compose logs -f --tail 100 app
-sudo docker compose logs -f frontend
-
-# 重启
-sudo docker compose restart app
-
-# 升级代码（顺序很重要：先备份 → 先建镜像 → 先跑迁移 → 再起新容器。
-# 新代码的 ORM 会 SELECT 新列，若先起容器后迁移，迁移完成前所有查询都会 500）
 cd ~/apps/it-spareparts
-sudo docker compose exec -T db pg_dump -U spareparts -Fc spareparts > backup-$(date +%F).dump
-git pull
-sudo docker compose build app
-sudo docker compose run --rm app alembic upgrade head
-sudo docker compose up -d --build
+OLD_COMMIT=$(git rev-parse HEAD)
+git fetch origin fix/boss-dashboard-p0-followup
+git checkout fix/boss-dashboard-p0-followup
+git pull --ff-only origin fix/boss-dashboard-p0-followup
+TARGET_COMMIT=$(git rev-parse HEAD)
+echo "TARGET_COMMIT=$TARGET_COMMIT"
 
-# 停服
-sudo docker compose down
-
-# 完全干净重建(慎用, 不会删 volume)
-sudo docker compose down
-sudo docker compose up -d --build
+# 先记下当前运行版本，回滚时恢复这两个镜像和这个 commit。
+OLD_APP_IMAGE_ID=$(sudo docker compose images -q app)
+OLD_FRONTEND_IMAGE_ID=$(sudo docker compose images -q frontend)
+echo "OLD_COMMIT=$OLD_COMMIT"
+echo "OLD_APP_IMAGE_ID=$OLD_APP_IMAGE_ID"
+echo "OLD_FRONTEND_IMAGE_ID=$OLD_FRONTEND_IMAGE_ID"
 ```
 
----
+如果 `git pull` 得到的 commit 不是已批准的目标 commit，立即停止，不要继续构建。
 
-## 十二、监控 / 告警 / 日志
+## 2. 备份并由 db 容器校验
 
-**日志轮转**：docker-compose 已统一 `json-file` 单文件 10MB×5（每服务最多 50MB），不会撑满磁盘。
-
-**健康巡检**（`.deploy/monitor.sh`，cron 每 5 分钟）：检查容器/DB/入口/磁盘/备份新鲜度；正常静默（只刷 `monitor.status` 心跳），异常追加 `monitor.log` 并（可选）发钉钉。
 ```bash
-# 安装（首次）
-chmod +x ~/apps/it-spareparts/monitor.sh
-( crontab -l 2>/dev/null | grep -v monitor.sh; \
-  echo "*/5 * * * * /home/ubuntu/apps/it-spareparts/monitor.sh" ) | crontab -
-# 启用钉钉告警：把钉钉群机器人 webhook URL 写进下面文件即可（不填则只记 monitor.log）
-echo 'https://oapi.dingtalk.com/robot/send?access_token=xxx' > ~/apps/it-spareparts/.alert_webhook
-cat ~/apps/it-spareparts/monitor.status   # 看最近一次巡检结果
+mkdir -p backups
+BACKUP="$PWD/backups/it-spareparts-$(date +%Y%m%d-%H%M%S).dump"
+export BACKUP
+
+sudo docker compose exec -T db pg_dump -U spareparts -Fc spareparts > "$BACKUP"
+test -s "$BACKUP"
+ls -lh "$BACKUP"
+
+# pg_restore 从 db 容器执行，宿主机不需要安装 PostgreSQL 客户端。
+sudo docker compose exec -T db pg_restore --list < "$BACKUP" | head -40
 ```
 
-**Postgres 慢查询日志**（免重启、写进数据卷持久化，零风险）：
+备份文件为空或 `pg_restore --list` 失败，立即中止。不得进入迁移或重算。
+
+## 3. 重算前导出 KPI 与 40 单基线
+
+下面的命令从当前 app 容器导出 KPI、按营收最高的 20 单和随机 20 单；文件保存在宿主机，供重算后逐项对账。
+
 ```bash
-sudo docker compose exec -T db psql -U spareparts -d spareparts \
-  -c "ALTER SYSTEM SET log_min_duration_statement = 1000;" -c "SELECT pg_reload_conf();"
-# 之后 >1s 的慢查询会进 db 容器日志：sudo docker compose logs db | grep duration
+BASELINE="$PWD/backups/baseline-before-${TARGET_COMMIT}.json"
+sudo docker compose exec -T app python -c '
+import json
+from sqlalchemy import func, select
+from app.db import SessionLocal
+from app.models.sales import FSalesLine, FSalesOrder
+from app.services import dashboard
+
+db = SessionLocal()
+try:
+    def row(o):
+        revenue, gross = db.execute(
+            select(func.coalesce(func.sum(FSalesLine.revenue_amount), 0),
+                   func.coalesce(func.sum(FSalesLine.gross_profit), 0))
+            .where(FSalesLine.order_id == o.id)
+        ).one()
+        return {"order_no": o.order_no, "order_date": str(o.order_date),
+                "revenue": float(revenue), "gross_profit": float(gross)}
+
+    high = db.scalars(
+        select(FSalesOrder).join(FSalesLine)
+        .group_by(FSalesOrder.id)
+        .order_by(func.sum(FSalesLine.revenue_amount).desc(), FSalesOrder.id.desc())
+        .limit(20)
+    ).all()
+    # 用稳定的伪随机顺序，保证重算前后是同一批 20 单。
+    random = db.scalars(select(FSalesOrder).order_by(func.md5(FSalesOrder.order_no), FSalesOrder.id).limit(20)).all()
+    print(json.dumps({"commit": "'"$TARGET_COMMIT"'", "kpi": dashboard.kpi(db, None, None),
+                      "high_20": [row(o) for o in high],
+                      "random_20": [row(o) for o in random]}, ensure_ascii=False, default=str))
+finally:
+    db.close()
+' > "$BASELINE"
+test -s "$BASELINE"
 ```
 
----
+## 4. 先构建新镜像，再停止 app 写入
 
-## 故障排查
-
-### 1. `docker compose build` 因为内存被 OOM Kill
-
-2G 机器 + 宝塔，build 前端时 Node + vite 内存峰值可能撑爆。两种解法:
-
-**A. 临时停掉宝塔再 build**:
 ```bash
-sudo systemctl stop bt
-sudo docker compose build
-sudo docker compose up -d
-sudo systemctl start bt
+sudo docker compose build app frontend
+NEW_APP_IMAGE_ID=$(sudo docker compose images -q app)
+NEW_FRONTEND_IMAGE_ID=$(sudo docker compose images -q frontend)
+echo "NEW_APP_IMAGE_ID=$NEW_APP_IMAGE_ID"
+echo "NEW_FRONTEND_IMAGE_ID=$NEW_FRONTEND_IMAGE_ID"
+
+# 到这里才停止 app；frontend 仍可继续提供旧页面，直到新镜像验证完成。
+sudo docker compose stop app
 ```
 
-**B. 本地 build 好镜像再传上去**(更稳, 见仓库 `docs/DEPLOY_PREBUILT.md` —— 暂未写, 需要时告诉我补)。
+## 5. 用新 app 镜像执行迁移、利润重算和池重建
 
-### 2. 容器启动后访问 8080 没反应
+不能 `exec` 旧 app 容器跑新迁移。以下全部是基于刚构建的新 app 镜像的 one-off 容器，并且不启动旧依赖：
 
 ```bash
-# 先看容器是否 Up
+sudo docker compose run --rm --no-deps app alembic upgrade head
+sudo docker compose run --rm --no-deps app python -c \
+  'from app.db import SessionLocal; from app.services import profit; db=SessionLocal(); print(profit.recompute(db)); db.close()'
+sudo docker compose run --rm --no-deps app python -c \
+  'from app.db import SessionLocal; from app.services import pool; db=SessionLocal(); print(pool.rebuild(db)); db.close()'
+```
+
+每一步出现异常栈都中止，按第 8 节恢复，不要启动新 app。
+
+迁移后核对稳定池序列；SQL 同时打印存活最大 ID、序列高水位和 `is_called`，并输出明确结论：
+
+```bash
+sudo docker compose exec -T db psql -U spareparts -d spareparts -v ON_ERROR_STOP=1 -c '
+WITH live AS (SELECT max(group_id) AS max_group_id FROM part_pool),
+seq AS (SELECT last_value, is_called FROM part_pool_group_id_seq)
+SELECT live.max_group_id, seq.last_value, seq.is_called,
+       CASE WHEN seq.is_called THEN seq.last_value + 1 ELSE seq.last_value END AS next_value,
+       CASE WHEN (CASE WHEN seq.is_called THEN seq.last_value + 1 ELSE seq.last_value END)
+                  > coalesce(live.max_group_id, 0)
+            THEN ''PASS: next_value > max(group_id)''
+            ELSE ''FAIL: sequence may collide'' END AS conclusion
+FROM live CROSS JOIN seq;
+'
+```
+
+## 6. 重算后 40 单与 KPI 对账，再启动新版本
+
+```bash
+AFTER="$PWD/backups/baseline-after-${TARGET_COMMIT}.json"
+sudo docker compose run --rm --no-deps app python -c '
+import json
+from sqlalchemy import func, select
+from app.db import SessionLocal
+from app.models.sales import FSalesLine, FSalesOrder
+from app.services import dashboard
+
+db = SessionLocal()
+try:
+    def row(o):
+        revenue, gross = db.execute(
+            select(func.coalesce(func.sum(FSalesLine.revenue_amount), 0),
+                   func.coalesce(func.sum(FSalesLine.gross_profit), 0))
+            .where(FSalesLine.order_id == o.id)
+        ).one()
+        return {"order_no": o.order_no, "order_date": str(o.order_date),
+                "revenue": float(revenue), "gross_profit": float(gross)}
+    high = db.scalars(select(FSalesOrder).join(FSalesLine).group_by(FSalesOrder.id)
+                      .order_by(func.sum(FSalesLine.revenue_amount).desc(), FSalesOrder.id.desc()).limit(20)).all()
+    random = db.scalars(select(FSalesOrder).order_by(func.md5(FSalesOrder.order_no), FSalesOrder.id).limit(20)).all()
+    print(json.dumps({"commit": "'"$TARGET_COMMIT"'", "kpi": dashboard.kpi(db, None, None),
+                      "high_20": [row(o) for o in high],
+                      "random_20": [row(o) for o in random]}, ensure_ascii=False, default=str))
+finally:
+    db.close()
+' > "$AFTER"
+
+# 可执行阈值：40 单逐单 revenue/gross_profit 变化均不得超过 ¥0.01；订单集合必须各 20 条。
+python3 - "$BASELINE" "$AFTER" <<'PY'
+import json, sys
+
+before, after = (json.load(open(p)) for p in sys.argv[1:])
+assert len(before["high_20"]) == len(after["high_20"]) == 20
+assert len(before["random_20"]) == len(after["random_20"]) == 20
+for group in ("high_20", "random_20"):
+    b = {x["order_no"]: x for x in before[group]}
+    a = {x["order_no"]: x for x in after[group]}
+    assert set(b) == set(a), f"{group}: order set changed"
+    for order_no in b:
+        for field in ("revenue", "gross_profit"):
+            delta = abs(b[order_no][field] - a[order_no][field])
+            assert delta <= 0.01, f"{group} {order_no} {field} delta={delta} > 0.01"
+print("PASS: 40 orders reconcile within ¥0.01")
+PY
+
+sudo docker compose up -d app frontend
 sudo docker compose ps
-
-# 看 frontend 日志
-sudo docker compose logs --tail 50 frontend
-
-# 看 app 日志(看启动安全告警等)
-sudo docker compose logs --tail 50 app
-
-# 检查端口监听
-sudo ss -tlnp | grep 8080
 ```
 
-如果显示 `Listen 0.0.0.0:8080` 但浏览器仍打不开，**90% 是腾讯云安全组没开 8080**。
+若对账失败，不得继续放量；差异必须能逐笔解释为本次税价口径变更，否则按回滚处理。
 
-### 3. 数据库连接失败
+## 7. 生产放行门槛
+
+以下条件全部满足后才允许生产放量：
+
+1. staging 使用生产快照完整演练本 runbook。
+2. `BACKUP` 非空，且 db 容器内 `pg_restore --list` 通过。
+3. `alembic current` 为目标 head；序列 SQL 输出 `PASS`。
+4. KPI 无异常；20 高额 + 20 随机订单逐单差异 ≤ ¥0.01，且无不明差额。
+5. RBAC 验收：无采购成本权限不能从池顺序推断节省排名；无利润权限显示“无利润权限”。
+6. UI 验收：订单分页/搜索/受限排序语义、池列表/详情快速切换、供应窗口提示。
+7. 新版本观察至少 30 分钟：无新增 500、迁移错误或权限异常。
+
+因此，合并 PR 不等于可以生产；本 PR 的预期结论是“可合并但不可生产”，直到上述 staging、备份、40 单对账、RBAC/UI 验收和观察门槛完成。
+
+## 8. 回滚：恢复干净 DB/schema 与旧镜像
+
+利润重算和迁移已经改库时，不能只回滚镜像，也不能只对现存数据库执行 `pg_restore --clean`；后者不会删除备份中不存在的新对象。必须停止写入、重建干净数据库，再恢复旧镜像/commit：
 
 ```bash
-sudo docker compose exec db psql -U spareparts -d spareparts -c "select 1"
+sudo docker compose stop app frontend
+
+# 以 postgres 数据库连接执行，先终止业务连接，再删除并重建目标库。
+sudo docker compose exec -T db psql -U spareparts -d postgres -v ON_ERROR_STOP=1 -c \
+  "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+   WHERE datname='spareparts' AND pid <> pg_backend_pid();"
+sudo docker compose exec -T db psql -U spareparts -d postgres -v ON_ERROR_STOP=1 -c \
+  'DROP DATABASE spareparts;'
+sudo docker compose exec -T db psql -U spareparts -d postgres -v ON_ERROR_STOP=1 -c \
+  'CREATE DATABASE spareparts OWNER spareparts;'
+sudo docker compose exec -T db pg_restore -U spareparts -d spareparts --no-owner < "$BACKUP"
+
+# 恢复旧代码记录，并把旧镜像 ID 重新标回 compose 使用的镜像名。
+git checkout "$OLD_COMMIT"
+APP_IMAGE_REF=$(sudo docker compose config --images | awk '/app/ {print; exit}')
+FRONTEND_IMAGE_REF=$(sudo docker compose config --images | awk '/frontend/ {print; exit}')
+sudo docker tag "$OLD_APP_IMAGE_ID" "$APP_IMAGE_REF"
+sudo docker tag "$OLD_FRONTEND_IMAGE_ID" "$FRONTEND_IMAGE_REF"
+sudo docker compose up -d app frontend
+sudo docker compose ps
 ```
-如果报 "password authentication failed", 说明 `.env` 改了 `POSTGRES_PASSWORD` 但 db 容器是旧密码起的。解决:
-```bash
-sudo docker compose down
-sudo docker volume rm it-spareparts_postgres_data   # ⚠️ 会清空数据库, 仅在还没导入真实数据时用
-sudo docker compose up -d --build
-```
 
-### 4. app 容器报"安全护栏拒启"
-
-说明 `ENVIRONMENT=prod` 但密码/密钥还是默认值。检查 `.env` 是不是把 `POSTGRES_PASSWORD` / `ADMIN_PASSWORD` / `SECRET_KEY` 都改了。
-
----
-
-## 接下来
-
-- 跑通后, 让客户的 2-3 个用户先试用一周, 观察内存峰值: `free -h`、`sudo docker stats`
-- 如果稳定, 加上 **HTTPS** (用宝塔自带 SSL 模块, 把 `http://IP:8080` 反代成 `https://你的域名`)
-- 数据增多到 10w+ 后, 严肃考虑升 4G 内存(腾讯云控制台可以热升级, 重启一次即可)
+恢复完成后重新执行健康检查、`alembic current` 和关键页面验收；恢复失败时保持 app/frontend 停止，升级值班人员处理。
