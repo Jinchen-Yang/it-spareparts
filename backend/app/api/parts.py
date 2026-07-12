@@ -50,11 +50,12 @@ def search(
     # (排除墓碑)——同一 URL 两种语义，事后溯源必须能区分
     record_access_log(ctx, "search", "parts", {"q": q_norm, "branch": branch})
     if branch == "resolver":
-        # 纯文本查询：近似解析（pg_trgm 召回 + 精排），结果单页带 score/match_reason
+        # 纯文本查询：近似解析（pg_trgm 召回 + 精排），结果单页带 part_id/score/match_reason。
+        # exact=True（第②块：查询与 PN/别名完全一致）→ items 只有唯一标准型号，前端据此直开全景
         data = part_resolver.resolve(db, q_norm, limit=page_size, operated_by=role)
         data = {"total": len(data["items"]), "page": 1, "page_size": page_size,
-                "items": data["items"], "low_confidence": data["low_confidence"],
-                "ambiguous": data["ambiguous"]}
+                "exact": data["exact"], "items": data["items"],
+                "low_confidence": data["low_confidence"], "ambiguous": data["ambiguous"]}
     else:
         # 空查询浏览，或带结构化规格过滤：走 part_id 主口径的 search_parts（含 merged 墓碑排除）
         data = part_overview.search_parts(db, q_norm, page, page_size, ctx,

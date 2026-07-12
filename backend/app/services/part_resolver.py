@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app import config
 from app.etl.cleaner import standardize_pn
-from app.models.dimensions import DimPart
+from app.models.dimensions import DimPart, PartAlias
 from app.models.system import SysAuditLog
 from app.services.query_filters import col_matches_any, keyword_term_groups
 
@@ -33,7 +33,7 @@ _CAND_LIMIT = 60
 
 # 召回 SQL：四路 OR —— 主 token 相似(%)/词相似(<%)/双向包含 + 其余 token 包含 + 检索文档命中
 _PART_SQL = text("""
-SELECT p.pn_std, p.pn_compact, p.search_doc, p.description, p.brand,
+SELECT p.id AS part_id, p.pn_std, p.pn_compact, p.search_doc, p.description, p.brand,
        p.category_major, p.needs_review, p.is_excluded,
        CASE WHEN length(:main) >= 2
             THEN greatest(similarity(p.pn_compact, :main),
@@ -71,7 +71,8 @@ def _doc_recall(db, groups):
     hits = sum(sa_case((c, 1), else_=0) for c in conds)
     min_hits = n if n <= 3 else n - 1
     stmt = (
-        select(DimPart.pn_std, DimPart.pn_compact, DimPart.search_doc, DimPart.description,
+        select(DimPart.id.label("part_id"), DimPart.pn_std, DimPart.pn_compact,
+               DimPart.search_doc, DimPart.description,
                DimPart.brand, DimPart.category_major, DimPart.needs_review, DimPart.is_excluded,
                hits.label("hits"))
         .where(DimPart.status != "merged", hits >= min_hits)
@@ -198,11 +199,46 @@ def _log_miss(db: Session, query: str, operated_by: str | None) -> None:
         db.rollback()
 
 
+def _exact_lookup(db: Session, main: str) -> list[dict]:
+    """PN/别名与查询 compact **完全一致**的非合并型号（第②块：精确即唯一）。
+    别名命中沿 pn_std 折叠到目标型号（merged 重定向天然生效）；同型号双路命中只留一条，
+    别名证据保留在 alias_raw。"""
+    found: dict[int, dict] = {}
+    for p in db.execute(select(DimPart).where(
+            DimPart.pn_compact == main, DimPart.status != "merged")).scalars():
+        found[p.id] = {"part": p, "alias_raw": None}
+    rows = db.execute(
+        select(PartAlias.pn_raw, DimPart)
+        .join(DimPart, DimPart.pn_std == PartAlias.pn_std)
+        .where(PartAlias.pn_compact == main, DimPart.status != "merged"))
+    for pn_raw, p in rows:
+        if p.id not in found:
+            found[p.id] = {"part": p, "alias_raw": pn_raw}
+    return list(found.values())
+
+
+def _exact_item(hit: dict) -> dict:
+    p, alias_raw = hit["part"], hit["alias_raw"]
+    reasons = ["PN精确匹配"] if alias_raw is None else [f"别名命中({alias_raw[:40]})", "PN精确匹配"]
+    if p.needs_review:
+        reasons.append("PN待复核")
+    if p.is_excluded:
+        reasons.append("已治理排除")
+    return {"part_id": p.id, "pn_std": p.pn_std, "description": p.description,
+            "brand": p.brand, "category_major": p.category_major,
+            "needs_review": bool(p.needs_review), "is_excluded": bool(p.is_excluded),
+            "score": 1.0, "match_reason": "；".join(reasons)}
+
+
 def resolve(db: Session, query: str, limit: int = 10,
             operated_by: str | None = None, log_miss: bool = True) -> dict:
-    """近似解析：返回 {"query", "items": [...], "low_confidence"}。
+    """近似解析：返回 {"query", "exact", "items": [...], "low_confidence", "ambiguous"}。
 
-    items 按 score 降序，含 match_reason（如 "PN相似0.67；PN包含匹配；命中'超微'"）。
+    items 按 score 降序，含 part_id（统一商品身份，第②块）与 match_reason
+    （如 "PN相似0.67；PN包含匹配；命中'超微'"）。
+    **精确即唯一**（第②块，02311DYQ 案）：查询本身就是一个 PN（无中文/无其余 token）
+    且与某型号或别名的 compact 完全一致时，只返回那唯一的标准型号（exact=True），
+    不再拖出 trigram 相似候选；多个型号同 compact（脏数据）→ 不短路，走排序并标 ambiguous。
     零命中时落 sys_audit_log（action=search_miss）供治理回看。
     log_miss=False：内部复用（如新建去重查重）不写 search_miss、不 commit——
     避免污染治理工单、也避免在调用方事务中途 commit（见 master_edit.find_near_duplicates）。
@@ -211,7 +247,15 @@ def resolve(db: Session, query: str, limit: int = 10,
     if not ctx["main"] and not doc_terms:
         # 纯符号/无有效 token（如 "!!!"、"---"）：早返回也要带全部键，
         # 否则 /parts/search 与 _lookup_prices_bulk 无条件读 ambiguous 会 KeyError(500)
-        return {"query": query, "items": [], "low_confidence": True, "ambiguous": False}
+        return {"query": query, "exact": False, "items": [],
+                "low_confidence": True, "ambiguous": False}
+
+    # 精确即唯一短路：查询=单个 PN token（无中文、无其余 token）
+    if ctx["main"] and not ctx["others"] and not ctx["cjk"]:
+        exact_hits = _exact_lookup(db, ctx["main"])
+        if len(exact_hits) == 1:
+            return {"query": query, "exact": True, "items": [_exact_item(exact_hits[0])],
+                    "low_confidence": False, "ambiguous": False}
 
     # 放宽 trigram 召回阈值（仅本事务）：长库值×短 token 时默认 0.3 偏紧
     db.execute(text("SET LOCAL pg_trgm.similarity_threshold = 0.25"))
@@ -251,7 +295,8 @@ def resolve(db: Session, query: str, limit: int = 10,
             for p in db.execute(select(DimPart).where(
                     DimPart.pn_std.in_(missing), DimPart.status != "merged")).scalars():
                 cands[p.pn_std] = {
-                    "pn_std": p.pn_std, "pn_compact": p.pn_compact, "search_doc": p.search_doc,
+                    "part_id": p.id, "pn_std": p.pn_std, "pn_compact": p.pn_compact,
+                    "search_doc": p.search_doc,
                     "description": p.description, "brand": p.brand,
                     "category_major": p.category_major, "needs_review": p.needs_review,
                     "is_excluded": p.is_excluded, "sim": 0,
@@ -261,7 +306,7 @@ def resolve(db: Session, query: str, limit: int = 10,
     for pn_std, row in cands.items():
         score, reason = _score(row, ctx, alias_hits.get(pn_std))
         items.append({
-            "pn_std": pn_std, "description": row.get("description"),
+            "part_id": row.get("part_id"), "pn_std": pn_std, "description": row.get("description"),
             "brand": row.get("brand"), "category_major": row.get("category_major"),
             "needs_review": bool(row.get("needs_review")),
             "is_excluded": bool(row.get("is_excluded")),
@@ -298,11 +343,15 @@ def resolve(db: Session, query: str, limit: int = 10,
     low_conf = (not items) or items[0]["score"] < config.RESOLVE_LOW_CONFIDENCE
 
     # 歧义检测：多候选并列高分 = 口头型号对应多个规格变体（如 V100 → 16G/32G/PCIE/NVLINK）。
-    # 例外：top1 精确匹配（用户敲了完整 PN）不算歧义。
+    # 例外：top1 精确匹配（用户敲了完整 PN）不算歧义——但**多个型号同 compact 精确命中**
+    # （脏数据未合并）是真歧义，必须反问（第②块：此时不走"精确即唯一"短路）。
     ambiguous = False
-    if len(items) >= 2 and not low_conf and "PN精确匹配" not in items[0]["match_reason"]:
+    exact_count = sum(1 for it in items if "PN精确匹配" in it["match_reason"])
+    if exact_count >= 2:
+        ambiguous = True
+    elif len(items) >= 2 and not low_conf and "PN精确匹配" not in items[0]["match_reason"]:
         near = [it for it in items if it["score"] >= max(items[0]["score"] * 0.85, 0.3)]
         ambiguous = len(near) >= 2
 
-    return {"query": query, "items": items, "low_confidence": low_conf,
+    return {"query": query, "exact": False, "items": items, "low_confidence": low_conf,
             "ambiguous": ambiguous}
