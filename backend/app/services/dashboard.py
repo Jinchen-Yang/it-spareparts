@@ -389,6 +389,10 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
                          DimCustomer.name_normalized, so.business_type, so.data_status)
 
     total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0
+    # 结构性泄漏防护（复审三轮同类扩展）：利润被脱敏的角色不得按 gross_profit 排序——
+    # 即便金额置空，行序本身泄漏盈亏排名。退回按日期排序。
+    if sort == "gross_profit" and security.is_field_hidden(user_ctx, "gross_profit"):
+        sort = "order_date"
     sort_expr = {"order_date": so.order_date, "revenue": rev, "gross_profit": gp,
                  "part_count": func.count(func.distinct(sl.part_id))}.get(sort, so.order_date)
     direction = sort_expr.desc().nullslast() if order == "desc" else sort_expr.asc().nullslast()
@@ -448,6 +452,9 @@ def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date
     base = base.group_by(po.id, po.order_no, po.order_date, po.purchaser, po.source_type,
                          po.data_status, po.linked_sales_order_no, po.supplier_id)
     total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0
+    # 结构性泄漏防护：采购成本被脱敏的角色不得按 amount(未税采购额) 排序——行序泄漏采购额排名。
+    if sort == "amount" and security.is_field_hidden(user_ctx, "total_ex_tax"):
+        sort = "order_date"
     sort_expr = {"order_date": po.order_date, "amount": amt, "part_count": func.count(func.distinct(pl.part_id))}.get(sort, po.order_date)
     direction = sort_expr.desc().nullslast() if order == "desc" else sort_expr.asc().nullslast()
     stmt = base.order_by(direction, po.id.desc()).limit(page_size).offset((page - 1) * page_size)

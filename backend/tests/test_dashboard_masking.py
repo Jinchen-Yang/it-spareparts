@@ -124,6 +124,35 @@ def test_sales_orders_masks_total_gross_profit(db, seeded):
         assert row["total_revenue"] is not None    # 营收非成本，可见
 
 
+def test_order_sort_by_hidden_field_falls_back_to_date(db):
+    """复审三轮同类扩展：利润被脱敏的角色按 gross_profit 排序时，行序本身泄漏盈亏排名 →
+    后端退回按日期排序。构造"日期序≠毛利序"的两单来区分。"""
+    b = SysImportBatch(filename="s.xlsx", file_type="purchase", file_hash="hsortleak")
+    db.add(b); db.flush()
+    db.add_all([DimPart(pn_std="PN-SX", brand="BX"), DimPart(pn_std="PN-SY", brand="BY")])
+    db.flush()
+    po = {"P1": f.purchase_head("P1", on=date(2026, 1, 1), is_tax_inclusive=True)}
+    pl = [f.purchase_line("P1", "LX", "PN-SX", qty="10", price="113"),   # ex100
+          f.purchase_line("P1", "LY", "PN-SY", qty="10", price="226")]   # ex200
+    loader.load(db, f.purchase_result(po, pl), b.id, date(2026, 6, 1))
+    so = {"OA": f.sales_head("OA", order_no="OA", on=date(2026, 1, 10)),   # 早日期、高毛利
+          "OB": f.sales_head("OB", order_no="OB", on=date(2026, 2, 10))}   # 晚日期、低毛利
+    sl = [f.sales_line("OA", "SA", "PN-SX", qty="1", price="400"),   # 毛利高
+          f.sales_line("OB", "SB", "PN-SY", qty="1", price="226")]   # 毛利≈0
+    loader.load(db, f.sales_result(so, sl), b.id, date(2026, 6, 1))
+    db.commit(); profit.recompute(db)
+
+    def order(ctx, sort):
+        return [i["order_no"] for i in dashboard.sales_orders(
+            db, status="全部", sort=sort, order="desc", as_of=AS_OF, user_ctx=ctx)["items"]][:2]
+
+    full = _ctx()
+    assert order(full, "gross_profit") == ["OA", "OB"]   # 毛利降序：高毛利在前
+    assert order(full, "order_date") == ["OB", "OA"]      # 日期降序：晚单在前
+    # 无利润权限请求按毛利排序 → 退回日期序（≠毛利序），不泄漏盈亏排名
+    assert order(_ctx(data_profit=False), "gross_profit") == ["OB", "OA"]
+
+
 def test_pool_masks_brand_premium_purchase(db, seeded):
     """池成员 brand_premium_purchase（采购溢价判定）反推采购成本比较，必须遮。"""
     ctx = _ctx(data_purchase_cost=False)
