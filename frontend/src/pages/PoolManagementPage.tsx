@@ -444,7 +444,7 @@ export default function PoolManagementPage() {
 
       <Table<PnPoolRow>
         rowKey="group_id" size="small" columns={columns} dataSource={rows} loading={loading}
-        scroll={{ x: 1080 }}
+        scroll={{ x: 1180 }}   // ≥列宽总和，防止固定操作列悬浮盖住更新时间列
         pagination={{
           current: page, pageSize: PAGE_SIZE, total, showSizeChanger: false,
           showTotal: (t) => `共 ${t} 个池`,
