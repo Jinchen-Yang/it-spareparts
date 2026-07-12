@@ -6,6 +6,8 @@
 """
 import os
 
+import pytest
+
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import text
@@ -19,23 +21,34 @@ def _cfg():
     return cfg
 
 
-def test_followup_migration_aligns_seq_on_env_already_at_d3(migrated):
-    """已在 d3、池表已有 group_id=40、序列坏在 1 → alembic upgrade head 后首个 nextval=41。"""
+@pytest.mark.parametrize(
+    ("group_id", "sequence_sql", "expected_next"),
+    [
+        (None, "ALTER SEQUENCE part_pool_group_id_seq RESTART WITH 1", 1),
+        (40, "ALTER SEQUENCE part_pool_group_id_seq RESTART WITH 1", 41),
+        (40, "SELECT setval('part_pool_group_id_seq', 100, true)", 101),
+    ],
+    ids=["empty-un-called", "sequence-lagging", "sequence-high-watermark"],
+)
+def test_followup_migration_preserves_sequence_high_watermark(
+    migrated, group_id, sequence_sql, expected_next
+):
+    """已在 d3 的环境升级 b9 后，序列不得因存活池删除而回退。"""
     cfg = _cfg()
     alembic_command.downgrade(cfg, "d3e8f1a6b2c4")   # 回到"后续对齐迁移未应用"的状态
     try:
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM part_pool_member"))
             conn.execute(text("DELETE FROM part_pool"))
-            # 模拟旧代码写入的已有池（高 group_id）+ d3 的坏序列（停在 1）
-            conn.execute(text(
-                "INSERT INTO part_pool (group_id, member_count, needs_calibration, oversized) "
-                "VALUES (40, 2, false, false)"))
-            conn.execute(text("ALTER SEQUENCE part_pool_group_id_seq RESTART WITH 1"))
+            if group_id is not None:
+                conn.execute(text(
+                    "INSERT INTO part_pool (group_id, member_count, needs_calibration, oversized) "
+                    "VALUES (:group_id, 2, false, false)"), {"group_id": group_id})
+            conn.execute(text(sequence_sql))
         alembic_command.upgrade(cfg, "head")          # Alembic 执行后续迁移 b9e1f4a7c2d8
         with engine.begin() as conn:
             nxt = conn.execute(text("SELECT nextval('part_pool_group_id_seq')")).scalar()
-        assert nxt == 41, f"已执行 d3 的环境升级后首个 nextval 应 = max(40)+1=41，实得 {nxt}"
+        assert nxt == expected_next
     finally:
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM part_pool_member"))
