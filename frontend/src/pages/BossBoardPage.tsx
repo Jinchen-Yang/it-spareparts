@@ -98,6 +98,12 @@ function KpiStrip({ k }: { k: DashboardKpi }) {
   );
 }
 
+/** 登录时落到 localStorage 的 data_* 权限（App.tsx 同源）。仅用于首渲染 UI 门控；
+ * 数据面真值源永远是后端（响应旗标 + 字段脱敏 + 排序退回），本地值过期也不泄漏。 */
+function readLocalPerms(): Record<string, boolean> {
+  try { return JSON.parse(localStorage.getItem("permissions") || "{}"); } catch { return {}; }
+}
+
 export default function BossBoardPage() {
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
@@ -105,6 +111,11 @@ export default function BossBoardPage() {
   const { key, setKey, setCustom, range } = useRange();
   const [granularity, setGranularity] = useState("day");
   const [costMethod, setCostMethod] = useState<"moving_avg" | "fifo">("moving_avg");
+  // 权限门控（复审四轮）：从**第一次渲染**起就按权限禁用隐藏字段排序，不等首个响应；
+  // 响应旗标到达后以后端为准（且只会更严，不会因切换排序而重新放开）。
+  const localPerms = useMemo(readLocalPerms, []);
+  const localProfitRestricted = !isAdmin && localPerms.data_profit === false;
+  const localCostRestricted = !isAdmin && localPerms.data_purchase_cost === false;
 
   const [kpi, setKpi] = useState<DashboardKpi | null>(null);
   const [trend, setTrend] = useState<TrendPoint[]>([]);
@@ -115,8 +126,12 @@ export default function BossBoardPage() {
   const [poolDetail, setPoolDetail] = useState<PoolDetailT | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // 订单拉通两张表各自的服务端查询态（分页/搜索/状态/排序），独立于顶部时间范围
-  const [salesQ, setSalesQ] = useState<OrdersQuery>({ page: 1, page_size: 20, sort: "gross_profit", order: "asc" });
+  // 订单拉通两张表各自的服务端查询态（分页/搜索/状态/排序），独立于顶部时间范围。
+  // 无利润权限的账号默认排序直接用日期（毛利排序本会被后端退回，不发注定被拦的请求）。
+  const [salesQ, setSalesQ] = useState<OrdersQuery>(() => (
+    localProfitRestricted
+      ? { page: 1, page_size: 20, sort: "order_date", order: "desc" }
+      : { page: 1, page_size: 20, sort: "gross_profit", order: "asc" }));
   const [purchaseQ, setPurchaseQ] = useState<OrdersQuery>({ page: 1, page_size: 20, sort: "order_date", order: "desc" });
   const [salesLoading, setSalesLoading] = useState(false);
   const [purchaseLoading, setPurchaseLoading] = useState(false);
@@ -221,10 +236,16 @@ export default function BossBoardPage() {
       order: s?.order === "ascend" ? "asc" : s?.order === "descend" ? "desc" : q.order,
     }));
   };
+  // 权限化排序禁用（复审四轮）：用**权限旗标**而非 ranking_restricted（后者只表示
+  // "本次请求的排序被拦"，切走再切回会重新放开、首渲染也拦不住）。本地权限先行，
+  // 响应旗标到达后取并集——只收紧不放开。
+  const profitRestricted = localProfitRestricted
+    || (sales?.profit_restricted ?? false) || (ranking?.profit_restricted ?? false);
+  const costRestricted = localCostRestricted || (purchases?.cost_restricted ?? false);
   const orderSortProps = (
-    q: OrdersQuery, key: string, effectiveSort: string | undefined, restricted: boolean,
+    q: OrdersQuery, key: string, effectiveSort: string | undefined, disabled = false,
   ) => ({
-    sorter: !(restricted && (key === "gross_profit" || key === "amount")),
+    sorter: !disabled,
     sortOrder: effectiveSort === key ? (q.order === "asc" ? "ascend" as const : "descend" as const) : null,
   });
   const ordersToolbar = (q: OrdersQuery, setQ: React.Dispatch<React.SetStateAction<OrdersQuery>>) => (
@@ -274,18 +295,20 @@ export default function BossBoardPage() {
 
   // 订单粒度：一张销售订单一行（多型号聚合）。列 key = 后端 sort 字段名（用于服务端排序）。
   const salesCols: ColumnsType<SalesOrderRow> = [
-    { title: "日期", dataIndex: "order_date", key: "order_date", width: 116, ...orderSortProps(salesQ, "order_date", sales?.effective_sort, sales?.ranking_restricted ?? false),
+    { title: "日期", dataIndex: "order_date", key: "order_date", width: 116, ...orderSortProps(salesQ, "order_date", sales?.effective_sort),
       render: (v, r) => (<span>{v || "—"}{r.is_future && <Tag color="red" style={{ marginLeft: 4 }}>未来</Tag>}</span>) },
     { title: "销售单号", dataIndex: "order_no", width: 130, render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span> },
     { title: "客户", dataIndex: "customer", width: 130, ellipsis: true, render: (v) => v ?? "—" },
     { title: "销售员", dataIndex: "salesperson", width: 80, render: (v) => v ?? "—" },
-    { title: "型号数", dataIndex: "part_count", key: "part_count", width: 88, align: "right", ...orderSortProps(salesQ, "part_count", sales?.effective_sort, sales?.ranking_restricted ?? false) },
+    { title: "型号数", dataIndex: "part_count", key: "part_count", width: 88, align: "right", ...orderSortProps(salesQ, "part_count", sales?.effective_sort) },
     { title: "总量", dataIndex: "total_qty", width: 70, align: "right", render: num },
     { title: "营收(未税)", dataIndex: "total_revenue", key: "revenue", width: 124, align: "right",
-      ...orderSortProps(salesQ, "revenue", sales?.effective_sort, sales?.ranking_restricted ?? false), render: money },
+      ...orderSortProps(salesQ, "revenue", sales?.effective_sort), render: money },
     { title: "毛利", dataIndex: "total_gross_profit", key: "gross_profit", width: 116, align: "right",
-      ...orderSortProps(salesQ, "gross_profit", sales?.effective_sort, sales?.ranking_restricted ?? false),
-      render: (v) => v == null ? <Tag>{sales?.profit_restricted ? "无利润权限" : "无成本"}</Tag> : <span style={{ color: v < 0 ? "#c0524a" : undefined }}>{money(v)}</span> },
+      ...orderSortProps(salesQ, "gross_profit", sales?.effective_sort, profitRestricted),
+      render: (v) => profitRestricted ? <Tag>无利润权限</Tag>
+        : v == null ? <Tag>无成本</Tag>
+        : <span style={{ color: v < 0 ? "#c0524a" : undefined }}>{money(v)}</span> },
     { title: "状态", dataIndex: "data_status", width: 84, render: (v) => v ? <Tag>{v}</Tag> : "—" },
     { title: "采购拉通", dataIndex: "linked_purchase", width: 84, align: "center",
       render: (v) => v ? <Tag color="blue">已生效</Tag> : <span style={{ color: "var(--mb-text-3)" }}>—</span> },
@@ -293,15 +316,16 @@ export default function BossBoardPage() {
 
   // 订单粒度：一张采购订单一行
   const purchaseCols: ColumnsType<PurchaseOrderRow> = [
-    { title: "日期", dataIndex: "order_date", key: "order_date", width: 116, ...orderSortProps(purchaseQ, "order_date", purchases?.effective_sort, purchases?.ranking_restricted ?? false),
+    { title: "日期", dataIndex: "order_date", key: "order_date", width: 116, ...orderSortProps(purchaseQ, "order_date", purchases?.effective_sort),
       render: (v, r) => (<span>{v || "—"}{r.is_future && <Tag color="red" style={{ marginLeft: 4 }}>未来</Tag>}</span>) },
     { title: "采购单号", dataIndex: "order_no", width: 140, render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span> },
     { title: "采购员", dataIndex: "purchaser", width: 80, render: (v) => v ?? "—" },
     { title: "类型", dataIndex: "source_type", width: 90, render: (v) => v ? <Tag>{v}</Tag> : "—" },
-    { title: "型号数", dataIndex: "part_count", key: "part_count", width: 88, align: "right", ...orderSortProps(purchaseQ, "part_count", purchases?.effective_sort, purchases?.ranking_restricted ?? false) },
+    { title: "型号数", dataIndex: "part_count", key: "part_count", width: 88, align: "right", ...orderSortProps(purchaseQ, "part_count", purchases?.effective_sort) },
     { title: "总量", dataIndex: "total_qty", width: 70, align: "right", render: num },
     { title: "金额(未税)", dataIndex: "total_ex_tax", key: "amount", width: 124, align: "right",
-      ...orderSortProps(purchaseQ, "amount", purchases?.effective_sort, purchases?.ranking_restricted ?? false), render: money },
+      ...orderSortProps(purchaseQ, "amount", purchases?.effective_sort, costRestricted),
+      render: (v) => costRestricted ? <Tag>无成本权限</Tag> : money(v) },
     { title: "关联销售单", dataIndex: "linked_sales_order", width: 130, render: (v) => v || <span style={{ color: "var(--mb-text-3)" }}>—</span> },
     { title: "状态", dataIndex: "data_status", width: 84, render: (v) => v ? <Tag>{v}</Tag> : "—" },
   ];

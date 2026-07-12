@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.12.3";
+export const APP_VERSION = "1.12.4";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.12.4",
+    date: "2026-07-12",
+    items: [
+      "权限化排序禁用：无利润/无成本权限的账号，从进入看板第一屏起「毛利」「采购金额」表头排序就不可点击（此前要等一次被拦截的请求才禁用，且切换排序后可能重新放开）",
+      "被隐藏的采购金额显示「无成本权限」、毛利显示「无利润权限」，与「该单没有数据」明确区分",
+      "部署文档拆分：docs/DEPLOY.md 恢复为通用部署手册，本次版本的发布/对账/回滚流程独立成 docs/releases/ 下的发布 runbook（部署目标改为合并后 main 的精确 SHA，重算对账改为按新 13% 公式独立验证 + 二次重算幂等）",
+    ],
+  },
   {
     version: "1.12.3",
     date: "2026-07-12",
