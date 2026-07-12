@@ -36,8 +36,11 @@ sudo docker compose exec -T db pg_dump -U spareparts -Fc spareparts > "$BACKUP"
 test -s "$BACKUP"
 ls -lh "$BACKUP"
 
-# pg_restore 从 db 容器执行，宿主机不需要安装 PostgreSQL 客户端。
-sudo docker compose exec -T db pg_restore --list < "$BACKUP" | head -40
+# pg_restore 从 db 容器执行，宿主机不需要安装 PostgreSQL 客户端；不要用
+# `| head` 吞掉 pg_restore 的失败状态。
+sudo docker compose exec -T db pg_restore --list < "$BACKUP" > "${BACKUP}.list"
+test -s "${BACKUP}.list"
+sed -n '1,40p' "${BACKUP}.list"
 ```
 
 备份文件为空或 `pg_restore --list` 失败，立即中止。不得进入迁移或重算。
@@ -120,8 +123,8 @@ SELECT live.max_group_id, seq.last_value, seq.is_called,
        CASE WHEN seq.is_called THEN seq.last_value + 1 ELSE seq.last_value END AS next_value,
        CASE WHEN (CASE WHEN seq.is_called THEN seq.last_value + 1 ELSE seq.last_value END)
                   > coalesce(live.max_group_id, 0)
-            THEN ''PASS: next_value > max(group_id)''
-            ELSE ''FAIL: sequence may collide'' END AS conclusion
+            THEN $q$PASS: next_value > max(group_id)$q$
+            ELSE $q$FAIL: sequence may collide$q$ END AS conclusion
 FROM live CROSS JOIN seq;
 '
 ```
