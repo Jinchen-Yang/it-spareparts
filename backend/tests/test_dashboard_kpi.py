@@ -70,6 +70,9 @@ def test_kpi_order_health(db, seeded):
     assert k["orders_future"] == 1          # S3
     assert k["orders_in_progress"] == 1     # P2
     assert k["orders_cancelled"] == 1       # S5
+    # 复审 P1-5：S3 虽是已生效但日期在未来 → 只进 orders_future，不重复计入 orders_active
+    # 已生效非未来 = S1/S2/S4(销售) + P1(采购) = 4（S3 被排除）
+    assert k["orders_active"] == 4
     assert k["window"]["future_excluded"] is True
 
 

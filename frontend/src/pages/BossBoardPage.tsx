@@ -7,10 +7,11 @@ import type { ColumnsType } from "antd/es/table";
 import dayjs, { type Dayjs } from "dayjs";
 import PageHeader from "../components/PageHeader";
 import {
-  dashboardKpi, dashboardTrend, dashboardPartRanking, dashboardSales,
+  dashboardKpi, dashboardTrend, dashboardPartRanking, dashboardSales, dashboardPurchaseOrders,
   dashboardPools, dashboardPool, dashboardPoolRebuild,
   type DashboardKpi, type TrendPoint,
 } from "../api";
+import { Modal } from "antd";
 
 const { RangePicker } = DatePicker;
 
@@ -106,6 +107,7 @@ export default function BossBoardPage() {
   const [trend, setTrend] = useState<TrendPoint[]>([]);
   const [ranking, setRanking] = useState<any>(null);
   const [sales, setSales] = useState<any>(null);
+  const [purchases, setPurchases] = useState<any>(null);
   const [pools, setPools] = useState<any>(null);
   const [poolDetail, setPoolDetail] = useState<any>(null);
   const [loading, setLoading] = useState(false);
@@ -119,7 +121,9 @@ export default function BossBoardPage() {
         dashboardSales({ ...range, page_size: 20, sort: "gross_profit", order: "asc" }),
         dashboardPools(range),
       ]);
+      const po = await dashboardPurchaseOrders({ ...range, page_size: 20 });
       setKpi(k.data); setTrend(t.data.series); setRanking(r.data); setSales(s.data); setPools(p.data);
+      setPurchases(po.data);
     } catch {
       message.error("看板加载失败");
     } finally { setLoading(false); }
@@ -132,10 +136,20 @@ export default function BossBoardPage() {
     catch { message.error("池详情加载失败"); }
   };
 
+  // 重算：先 dry-run 预览合并/拆分，再确认后执行（复审 P1-6：闭环，不只有预览）
   const rebuildPools = async () => {
     try {
       const { data } = await dashboardPoolRebuild(true);
-      message.info(`预览：${data.pools} 个池，合并 ${data.merged.length}、拆分 ${data.split.length}、新建 ${data.new.length}`);
+      Modal.confirm({
+        title: "通用号池重算预览",
+        content: `将得到 ${data.pools} 个池：合并 ${data.merged.length}、拆分 ${data.split.length}、新建 ${data.new.length}、不变 ${data.unchanged}。确认后落库（退役池 ID 不复用）。`,
+        okText: "确认执行", cancelText: "取消",
+        onOk: async () => {
+          await dashboardPoolRebuild(false);
+          message.success("池已重算");
+          load();
+        },
+      });
     } catch { message.error("重算预览失败"); }
   };
 
@@ -156,21 +170,35 @@ export default function BossBoardPage() {
     { title: "覆盖率", dataIndex: "cost_coverage", width: 72, align: "right", render: pct },
   ];
 
+  // 订单粒度：一张销售订单一行（多型号聚合）
   const salesCols: ColumnsType<any> = [
     { title: "日期", dataIndex: "order_date", width: 100, render: (v, r) => (
       <span>{v || "—"}{r.is_future && <Tag color="red" style={{ marginLeft: 4 }}>未来</Tag>}</span>) },
-    { title: "单号", dataIndex: "order_no", width: 130, render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span> },
-    { title: "型号", dataIndex: "pn_std", width: 140 },
-    { title: "客户", dataIndex: "customer", width: 120, ellipsis: true },
+    { title: "销售单号", dataIndex: "order_no", width: 130, render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span> },
+    { title: "客户", dataIndex: "customer", width: 130, ellipsis: true },
     { title: "销售员", dataIndex: "salesperson", width: 80 },
-    { title: "数量", dataIndex: "qty", width: 64, align: "right", render: num },
-    { title: "单价(未税)", dataIndex: "unit_price_ex_tax", width: 100, align: "right", render: money },
-    { title: "营收", dataIndex: "revenue_amount", width: 100, align: "right", render: money },
-    { title: "毛利", dataIndex: "gross_profit", width: 100, align: "right",
+    { title: "型号数", dataIndex: "part_count", width: 70, align: "right" },
+    { title: "总量", dataIndex: "total_qty", width: 70, align: "right", render: num },
+    { title: "营收(未税)", dataIndex: "total_revenue", width: 110, align: "right", render: money },
+    { title: "毛利", dataIndex: "total_gross_profit", width: 100, align: "right",
       render: (v) => v == null ? <Tag>无成本</Tag> : <span style={{ color: v < 0 ? "#c0524a" : undefined }}>{money(v)}</span> },
     { title: "状态", dataIndex: "data_status", width: 84, render: (v) => v ? <Tag>{v}</Tag> : "—" },
     { title: "采购拉通", dataIndex: "linked_purchase", width: 84, align: "center",
-      render: (v) => v ? <Tag color="blue">有</Tag> : <span style={{ color: "var(--mb-text-3)" }}>—</span> },
+      render: (v) => v ? <Tag color="blue">已生效</Tag> : <span style={{ color: "var(--mb-text-3)" }}>—</span> },
+  ];
+
+  // 订单粒度：一张采购订单一行
+  const purchaseCols: ColumnsType<any> = [
+    { title: "日期", dataIndex: "order_date", width: 100, render: (v, r) => (
+      <span>{v || "—"}{r.is_future && <Tag color="red" style={{ marginLeft: 4 }}>未来</Tag>}</span>) },
+    { title: "采购单号", dataIndex: "order_no", width: 140, render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span> },
+    { title: "采购员", dataIndex: "purchaser", width: 80 },
+    { title: "类型", dataIndex: "source_type", width: 90, render: (v) => v ? <Tag>{v}</Tag> : "—" },
+    { title: "型号数", dataIndex: "part_count", width: 70, align: "right" },
+    { title: "总量", dataIndex: "total_qty", width: 70, align: "right", render: num },
+    { title: "金额(未税)", dataIndex: "total_ex_tax", width: 110, align: "right", render: money },
+    { title: "关联销售单", dataIndex: "linked_sales_order", width: 130, render: (v) => v || <span style={{ color: "var(--mb-text-3)" }}>—</span> },
+    { title: "状态", dataIndex: "data_status", width: 84, render: (v) => v ? <Tag>{v}</Tag> : "—" },
   ];
 
   const poolCols: ColumnsType<any> = [
@@ -178,9 +206,10 @@ export default function BossBoardPage() {
     { title: "成员", dataIndex: "member_count", width: 70, align: "right" },
     { title: "池需求量", dataIndex: "demand_qty", width: 90, align: "right", render: num },
     { title: "池营收(未税)", dataIndex: "demand_revenue_ex_tax", width: 120, align: "right", render: money },
-    { title: "理论节省", dataIndex: "theoretical_saving", width: 110, align: "right",
+    { title: "理论节省上限", dataIndex: "theoretical_saving", width: 120, align: "right",
       render: (v) => <span style={{ color: "#9a7b43" }}>{money(v)}</span> },
-    { title: "可执行", dataIndex: "executable_saving", width: 100, align: "right", render: money },
+    { title: "供应层面上限", dataIndex: "supply_available_upper", width: 120, align: "right",
+      render: (v) => <Tooltip title="仍待人工核实兼容性/客户指定品牌，非可执行金额">{money(v)}</Tooltip> },
     { title: "标记", key: "flags", width: 140, render: (_, r) => (
       <span>{r.needs_calibration && <Tag color="orange">关系待校准</Tag>}{r.oversized && <Tag color="red">超限</Tag>}</span>) },
     { title: "", key: "act", width: 70, render: (_, r) => <a onClick={() => openPool(r.group_id)}>详情</a> },
@@ -241,17 +270,22 @@ export default function BossBoardPage() {
         )}
       </Card>
 
-      <Card title="订单拉通 · 销售（按毛利升序，亏损在前）" style={{ marginBottom: 16 }} size="small"
-        extra={<span style={{ fontSize: 12, color: "var(--mb-text-3)" }}>采购侧见「采购明细」页</span>}>
-        <Table size="small" rowKey="line_id" loading={loading}
-          dataSource={sales?.items || []} columns={salesCols} scroll={{ x: 1100 }}
-          pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 行` }} />
+      <Card title="订单拉通 · 销售订单（一单一行，按毛利升序）" style={{ marginBottom: 16 }} size="small">
+        <Table size="small" rowKey="order_id" loading={loading}
+          dataSource={sales?.items || []} columns={salesCols} scroll={{ x: 1000 }}
+          pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 单` }} />
+      </Card>
+
+      <Card title="订单拉通 · 采购订单（一单一行）" style={{ marginBottom: 16 }} size="small">
+        <Table size="small" rowKey="order_id" loading={loading}
+          dataSource={purchases?.items || []} columns={purchaseCols} scroll={{ x: 1000 }}
+          pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 单` }} />
       </Card>
 
       <Card title="通用号数据池 · 潜在降本机会" size="small"
-        extra={isAdmin && <Button size="small" onClick={rebuildPools}>重算预览</Button>}>
+        extra={isAdmin && <Button size="small" onClick={rebuildPools}>重算池</Button>}>
         <Alert type="info" showIcon style={{ marginBottom: 10 }}
-          message="只读分析：替换需人工确认兼容性 / 客户指定品牌 / 合同限制。库存 8 月盘点前不作推荐条件，供应稳定性看采购频次/供应商数/最近采购日。" />
+          message="只读分析·潜在降本机会：所有替换均「待核实」兼容性/客户指定品牌/合同，当前无可执行金额。库存 8 月盘点前不作推荐条件，供应稳定性看采购频次/供应商数/最近采购日。" />
         <Table size="small" rowKey="group_id" loading={loading}
           dataSource={pools?.items || []} columns={poolCols} scroll={{ x: 800 }}
           pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 个池` }} />
@@ -279,8 +313,8 @@ function PoolDetail({ d, accent }: { d: any; accent: string }) {
         <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>{d.demand.note}</div>
       </div>
       <div style={{ marginBottom: 12 }}>
-        <b>降本机会</b>：理论上限 <span style={{ color: "#9a7b43" }}>{money(d.savings.theoretical_max)}</span> ·
-        可执行 {money(d.savings.executable)}
+        <b>降本机会（只读）</b>：理论上限 <span style={{ color: "#9a7b43" }}>{money(d.savings.theoretical_max)}</span> ·
+        供应层面上限 {money(d.savings.supply_available_upper)} · <Tag color="orange">无可执行金额</Tag>
         <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>{d.savings.label}</div>
       </div>
       <Table size="small" rowKey="part_id" pagination={false} dataSource={d.members}
@@ -288,14 +322,14 @@ function PoolDetail({ d, accent }: { d: any; accent: string }) {
           { title: "型号", dataIndex: "pn_std", render: (v, r: any) => (
             <span>{v} {r.brand && <Tag>{r.brand}</Tag>}
               {r.part_id === d.benchmark.cost_part_id && <Tag color="green">性价比标杆</Tag>}</span>) },
-          { title: "采购均价", key: "pw", align: "right", render: (_, r: any) => money(r.purchase?.wavg) },
+          { title: "采购均价", key: "pw", align: "right", render: (_, r: any) => money(r.purchase_price?.wavg) },
           { title: "采购溢价", dataIndex: "purchase_premium_pct", align: "right",
             render: (v: number, r: any) => v == null ? "—" :
               <span style={{ color: r.brand_premium_purchase ? "#c0524a" : undefined }}>{pct(v)}</span> },
-          { title: "销售均价", key: "sw", align: "right", render: (_, r: any) => money(r.sale?.wavg) },
-          { title: "销量", key: "q", align: "right", render: (_, r: any) => num(r.sale?.qty_sold) },
-          { title: "供应", key: "sup", render: (_, r: any) => r.purchase?.supply ?
-            `${r.purchase.supply.purchase_orders}次/${r.purchase.supply.suppliers}商` : "—" },
+          { title: "销售均价", key: "sw", align: "right", render: (_, r: any) => money(r.sale_price?.wavg) },
+          { title: "销量", key: "q", align: "right", render: (_, r: any) => num(r.sale_price?.qty_sold) },
+          { title: "供应", key: "sup", render: (_, r: any) => r.purchase_price?.supply ?
+            `${r.purchase_price.supply.purchase_orders}次/${r.purchase_price.supply.suppliers}商` : "—" },
         ]} />
       {d.savings.opportunities?.length > 0 && (
         <>
@@ -308,9 +342,11 @@ function PoolDetail({ d, accent }: { d: any; accent: string }) {
               { title: "单件省", dataIndex: "unit_saving", align: "right", render: money },
               { title: "销量", dataIndex: "qty_sold", align: "right", render: num },
               { title: "理论节省", dataIndex: "theoretical_saving", align: "right", render: money },
-              { title: "可执行", dataIndex: "executable", align: "center",
-                render: (v: boolean, r: any) => v ? <Tag color="green">是</Tag> :
-                  <Tooltip title={r.block_reason}><Tag>否</Tag></Tooltip> },
+              { title: "供应", dataIndex: "supply_available", align: "center",
+                render: (v: boolean, r: any) => v ? <Tag color="blue">可得</Tag> :
+                  <Tooltip title={r.block_reason}><Tag>不稳</Tag></Tooltip> },
+              { title: "核实状态", dataIndex: "verification_status", align: "center",
+                render: (v: string) => <Tag color="orange">{v}</Tag> },
             ]} />
         </>
       )}

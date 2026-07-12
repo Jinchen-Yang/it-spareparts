@@ -340,6 +340,12 @@ FIELD_GROUPS = {
                       "cost_total", "cost_inc", "cost_ex",
                       "cost_source", "cost_tax_basis", "price_month", "trace_months",
                       "linked_purchase_order_no",
+                      # 老板看板（dashboard/pool）派生成本键：采购额、采购价统计容器、
+                      # 未税单价、池标杆成本、双端溢价、两级节省——全部反推采购成本，随 data_purchase_cost 遮。
+                      # 容器级登记（purchase_price/benchmark/savings）避免与销售侧同名内层键(wavg/median)冲突。
+                      "purchase_ex_tax", "purchase_price", "unit_price_ex_tax",
+                      "benchmark", "savings", "theoretical_saving", "supply_available_upper",
+                      "theoretical_max", "unit_saving", "cost_ex_tax", "purchase_premium_pct",
                       # 维保 v2（§16）：盈亏看板与取价元信息派生键（budget=合同额亦可反推毛利）
                       "spent", "spent_parts", "spent_expense", "budget",
                       "remaining", "remaining_pct", "low_conf_pct",

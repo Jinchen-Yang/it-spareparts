@@ -107,3 +107,24 @@ def test_dry_run_no_write(db, parts):
     r = pool.rebuild(db, dry_run=True)
     assert r["dry_run"] is True and r["pools"] == 1
     assert db.execute(select(PartPoolMember)).first() is None   # 未落库
+
+
+def test_retired_id_never_reused(db, parts):
+    """复审 P0-2：池退役后其 group_id 永不被无关新池复用（持久序列，非 max+1）。"""
+    p = parts
+    _edge(db, p["A"], p["B"])       # 池①
+    _edge(db, p["D"], p["E"])       # 池②
+    db.commit()
+    pool.rebuild(db)
+    m1 = dict(db.execute(select(PartPoolMember.part_id, PartPoolMember.group_id)).all())
+    gid_de = m1[p["D"]]             # 池② 的 ID
+
+    # 删掉 D-E 边 → 池② 退役；另加一个完全无关的新池 F-G
+    db.query(PartSubstitute).filter_by(
+        part_id_a=min(p["D"], p["E"]), part_id_b=max(p["D"], p["E"])).delete()
+    _edge(db, p["F"], p["G"]); db.commit()
+    pool.rebuild(db)
+    m2 = dict(db.execute(select(PartPoolMember.part_id, PartPoolMember.group_id)).all())
+    gid_fg = m2[p["F"]]
+    assert p["D"] not in m2                 # 池② 已退役
+    assert gid_fg != gid_de, "退役 ID 绝不能被无关新池复用"

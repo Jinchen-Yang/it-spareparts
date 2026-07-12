@@ -42,7 +42,7 @@ def sales(
     customer: str | None = Query(None),
     salesperson: str | None = Query(None),
     business_type: str | None = Query(None),
-    sort: str = Query("order_date", pattern="^(order_date|revenue|gross_profit|gross_margin|unit_price|qty)$"),
+    sort: str = Query("order_date", pattern="^(order_date|revenue|gross_profit|part_count)$"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -52,9 +52,32 @@ def sales(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     record_access_log(ctx, "sales", "dashboard", {"q": q, "status": status, "sort": sort})
-    data = dashboard.sales_lines(db, date_from=date_from, date_to=date_to, status=status, q=q,
-                                 customer=customer, salesperson=salesperson, business_type=business_type,
-                                 sort=sort, order=order, page=page, page_size=page_size, user_ctx=ctx)
+    data = dashboard.sales_orders(db, date_from=date_from, date_to=date_to, status=status, q=q,
+                                  customer=customer, salesperson=salesperson, business_type=business_type,
+                                  sort=sort, order=order, page=page, page_size=page_size, user_ctx=ctx)
+    return apply_field_visibility(data, ctx)
+
+
+@router.get("/purchase-orders")
+def purchase_orders(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    status: str | None = Query(None, description="留空=仅已生效；'全部'=不限；或具体状态"),
+    q: str | None = Query(None),
+    source_type: str | None = Query(None),
+    sort: str = Query("order_date", pattern="^(order_date|amount|part_count)$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_boss_board")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    record_access_log(ctx, "purchase_orders", "dashboard", {"q": q, "status": status, "sort": sort})
+    data = dashboard.purchase_orders(db, date_from=date_from, date_to=date_to, status=status, q=q,
+                                     source_type=source_type, sort=sort, order=order,
+                                     page=page, page_size=page_size, user_ctx=ctx)
     return apply_field_visibility(data, ctx)
 
 

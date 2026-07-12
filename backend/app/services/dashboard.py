@@ -335,45 +335,36 @@ def trend(db: Session, date_from: date | None, date_to: date | None,
             "series": series}
 
 
-_SALES_SORT = {
-    "order_date": FSalesOrder.order_date,
-    "revenue": FSalesLine.revenue_amount,
-    "gross_profit": FSalesLine.gross_profit,
-    "gross_margin": FSalesLine.gross_margin,
-    "unit_price": FSalesLine.unit_price,
-    "qty": FSalesLine.qty,
-}
-
-
-def sales_lines(db: Session, *, date_from: date | None = None, date_to: date | None = None,
-                status: str | None = None, q: str | None = None, customer: str | None = None,
-                salesperson: str | None = None, business_type: str | None = None,
-                sort: str = "order_date", order: str = "desc",
-                page: int = 1, page_size: int = 50, as_of: date | None = None,
-                user_ctx: security.UserContext | None = None) -> dict:
-    """老板侧销售订单逐行列表（订单拉通的销售半张表；采购半张走 /purchases/recent）。
-
-    金额未税、带逐行毛利（recompute 落库）。status 留空=仅已生效、'全部'=不限、或具体状态。
-    未来日期不排除但打 is_future 标记（列表是排查异常的地方）。带 linked_purchase：
-    该销售单是否有采购单经 linked_sales_order_no 关联（拉通信号）。
-    """
+def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | None = None,
+                 status: str | None = None, q: str | None = None, customer: str | None = None,
+                 salesperson: str | None = None, business_type: str | None = None,
+                 sort: str = "order_date", order: str = "desc",
+                 page: int = 1, page_size: int = 50, as_of: date | None = None,
+                 user_ctx: security.UserContext | None = None) -> dict:
+    """订单拉通-销售侧：**一张销售订单一行**（复审 P1-4，此前是明细行粒度）。
+    多型号聚合为 型号数/总量/总营收/总毛利。金额未税。status 留空=仅已生效、'全部'=不限。
+    linked_purchase：是否有**已生效**采购单经 linked_sales_order_no 关联（复审：不再算取消单）。
+    未来单不排除但打 is_future。"""
     today = as_of or date.today()
     sl, so = FSalesLine, FSalesOrder
-    linked = exists().where(FPurchaseOrder.linked_sales_order_no == so.order_no)
-
+    counts, costed = sl.counts_revenue.is_(True), and_(sl.counts_revenue.is_(True), sl.cost_moving_avg.is_not(None))
+    # 已生效采购单关联才算"拉通"（取消/进行中不算）
+    linked = exists().where(and_(FPurchaseOrder.linked_sales_order_no == so.order_no,
+                                 FPurchaseOrder.data_status == config.ACTIVE_STATUS))
+    rev = func.sum(sl.revenue_amount).filter(counts)
+    gp = func.sum(sl.gross_profit).filter(costed)
     base = (
         select(
-            sl.id.label("line_id"), so.order_no, so.order_date, so.salesperson,
+            so.id, so.order_no, so.order_date, so.salesperson,
             DimCustomer.name_normalized.label("customer"), so.business_type, so.data_status,
-            sl.part_id, DimPart.pn_std, sl.description, sl.brand, sl.qty, sl.unit_price,
-            sl.revenue_amount, sl.cost_amount, sl.gross_profit, sl.gross_margin,
-            sl.cost_source, linked.label("linked_purchase"),
+            func.count(func.distinct(sl.part_id)).label("part_count"),
+            func.sum(sl.qty).filter(counts).label("total_qty"),
+            rev.label("total_revenue"), gp.label("total_gross_profit"),
+            linked.label("linked_purchase"),
         )
-        .join(so, sl.order_id == so.id)
-        .join(DimPart, sl.part_id == DimPart.id)
+        .join(sl, sl.order_id == so.id)
         .join(DimCustomer, so.customer_id == DimCustomer.id, isouter=True)
     )
-    # 状态：留空=仅已生效；'全部'=不限；否则具体状态
     if status == "全部":
         pass
     elif status:
@@ -385,8 +376,10 @@ def sales_lines(db: Session, *, date_from: date | None = None, date_to: date | N
     if date_to:
         base = base.where(so.order_date <= date_to)
     if q and q.strip():
-        kw = f"%{q.strip()}%"
-        base = base.where(or_(DimPart.pn_std.ilike(kw), sl.description.ilike(kw), sl.brand.ilike(kw)))
+        kw = f"%{q.strip()}%"   # 订单粒度：含匹配型号的订单（TODO 第②块接统一型号搜索）
+        sub = (select(FSalesLine.order_id).join(DimPart, FSalesLine.part_id == DimPart.id)
+               .where(or_(DimPart.pn_std.ilike(kw), FSalesLine.description.ilike(kw), FSalesLine.brand.ilike(kw))))
+        base = base.where(so.id.in_(sub))
     if customer:
         base = base.where(DimCustomer.name_normalized.ilike(f"%{customer.strip()}%"))
     if salesperson:
@@ -395,41 +388,96 @@ def sales_lines(db: Session, *, date_from: date | None = None, date_to: date | N
         base = base.where(so.business_type == business_type)
     if user_ctx is not None:
         base = security.apply_data_scope(base, user_ctx)
+    base = base.group_by(so.id, so.order_no, so.order_date, so.salesperson,
+                         DimCustomer.name_normalized, so.business_type, so.data_status)
 
     total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0
-    col = _SALES_SORT.get(sort, FSalesOrder.order_date)
-    direction = col.desc().nullslast() if order == "desc" else col.asc().nullslast()
-    # 稳定次级排序，保证分页可复现
-    stmt = base.order_by(direction, sl.id.desc()).limit(page_size).offset((page - 1) * page_size)
+    sort_expr = {"order_date": so.order_date, "revenue": rev, "gross_profit": gp,
+                 "part_count": func.count(func.distinct(sl.part_id))}.get(sort, so.order_date)
+    direction = sort_expr.desc().nullslast() if order == "desc" else sort_expr.asc().nullslast()
+    stmt = base.order_by(direction, so.id.desc()).limit(page_size).offset((page - 1) * page_size)
 
     items = []
     for r in db.execute(stmt):
-        up_ex = _r(r.unit_price / _VAT1) if (r.unit_price is not None and config.TAX_BASIS == "ex_tax") else _f(r.unit_price)
         items.append({
-            "line_id": r.line_id, "order_no": r.order_no,
+            "order_id": r.id, "order_no": r.order_no,
             "order_date": r.order_date.isoformat() if r.order_date else None,
             "is_future": bool(r.order_date and r.order_date > today),
             "salesperson": r.salesperson, "customer": r.customer,
             "business_type": r.business_type, "data_status": r.data_status,
-            "part_id": r.part_id, "pn_std": r.pn_std, "description": r.description, "brand": r.brand,
-            "qty": _f(r.qty), "unit_price_ex_tax": up_ex,
-            "revenue_amount": _f(r.revenue_amount), "cost_amount": _f(r.cost_amount),
-            "gross_profit": _f(r.gross_profit),
-            "gross_margin": round(float(r.gross_margin), 4) if r.gross_margin is not None else None,
-            "cost_source": r.cost_source, "linked_purchase": bool(r.linked_purchase),
+            "part_count": r.part_count, "total_qty": _f(r.total_qty),
+            "total_revenue": _f(r.total_revenue), "total_gross_profit": _f(r.total_gross_profit),
+            "linked_purchase": bool(r.linked_purchase),
         })
-    return {"total": total, "page": page, "page_size": page_size,
-            "as_of": today.isoformat(), "items": items}
+    return {"total": total, "page": page, "page_size": page_size, "as_of": today.isoformat(), "items": items}
+
+
+def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date | None = None,
+                    status: str | None = None, q: str | None = None,
+                    source_type: str | None = None, sort: str = "order_date", order: str = "desc",
+                    page: int = 1, page_size: int = 50, as_of: date | None = None,
+                    user_ctx: security.UserContext | None = None) -> dict:
+    """订单拉通-采购侧：**一张采购订单一行**（看板内直接给采购订单列表，不再只让跳采购明细页）。
+    金额未税。linked_sales_order：该采购单关联的销售单号（拉通）。"""
+    today = as_of or date.today()
+    po, pl = FPurchaseOrder, FPurchaseLine
+    amt = func.sum(_purchase_ex_tax_expr())
+    base = (
+        select(
+            po.id, po.order_no, po.order_date, po.purchaser, po.source_type, po.data_status,
+            po.linked_sales_order_no, po.supplier_id,
+            func.count(func.distinct(pl.part_id)).label("part_count"),
+            func.sum(pl.qty).label("total_qty"), amt.label("total_ex_tax"),
+        )
+        .join(pl, pl.order_id == po.id)
+    )
+    if status == "全部":
+        pass
+    elif status:
+        base = base.where(po.data_status == status)
+    else:
+        base = active_orders(base, po)
+    if date_from:
+        base = base.where(po.order_date >= date_from)
+    if date_to:
+        base = base.where(po.order_date <= date_to)
+    if q and q.strip():
+        kw = f"%{q.strip()}%"
+        sub = (select(pl.order_id).join(DimPart, pl.part_id == DimPart.id)
+               .where(or_(DimPart.pn_std.ilike(kw), pl.description.ilike(kw), pl.brand.ilike(kw))))
+        base = base.where(po.id.in_(sub))
+    if source_type:
+        base = base.where(po.source_type == source_type)
+    base = base.group_by(po.id, po.order_no, po.order_date, po.purchaser, po.source_type,
+                         po.data_status, po.linked_sales_order_no, po.supplier_id)
+    total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0
+    sort_expr = {"order_date": po.order_date, "amount": amt, "part_count": func.count(func.distinct(pl.part_id))}.get(sort, po.order_date)
+    direction = sort_expr.desc().nullslast() if order == "desc" else sort_expr.asc().nullslast()
+    stmt = base.order_by(direction, po.id.desc()).limit(page_size).offset((page - 1) * page_size)
+    items = []
+    for r in db.execute(stmt):
+        items.append({
+            "order_id": r.id, "order_no": r.order_no,
+            "order_date": r.order_date.isoformat() if r.order_date else None,
+            "is_future": bool(r.order_date and r.order_date > today),
+            "purchaser": r.purchaser, "source_type": r.source_type, "data_status": r.data_status,
+            "linked_sales_order": r.linked_sales_order_no,
+            "part_count": r.part_count, "total_qty": _f(r.total_qty), "total_ex_tax": _f(r.total_ex_tax),
+        })
+    return {"total": total, "page": page, "page_size": page_size, "as_of": today.isoformat(), "items": items}
 
 
 def _order_health(db: Session, date_from: date | None, date_to: date | None, today: date) -> dict:
-    """销售+采购订单按状态计数 + 未来日期单数（数据异常）。跨两个头表求和。"""
+    """销售+采购订单按状态计数 + 未来日期单数（数据异常）。跨两个头表求和。
+    复审 P1-5：未来单**只**计入 orders_future（数据异常），不再同时计入正常状态计数——
+    否则老板会看到同一张单既属正常经营又属异常。状态计数一律加 order_date<=today 门槛。"""
     out = {"orders_active": 0, "orders_in_progress": 0, "orders_cancelled": 0, "orders_future": 0}
     for OM in (FSalesOrder, FPurchaseOrder):
+        not_future = OM.order_date <= today
         stmt = select(
-            func.count().filter(OM.data_status == config.ACTIVE_STATUS).label("active"),
-            func.count().filter(OM.data_status == "进行中").label("in_progress"),
-            func.count().filter(OM.data_status.in_(_CANCELLED_STATUS)).label("cancelled"),
+            func.count().filter(and_(OM.data_status == config.ACTIVE_STATUS, not_future)).label("active"),
+            func.count().filter(and_(OM.data_status == "进行中", not_future)).label("in_progress"),
+            func.count().filter(and_(OM.data_status.in_(_CANCELLED_STATUS), not_future)).label("cancelled"),
             func.count().filter(OM.order_date > today).label("future"),
         )
         if date_from:

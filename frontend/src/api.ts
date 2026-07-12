@@ -499,6 +499,9 @@ export const dashboardPartRanking = (params: { date_from?: string; date_to?: str
 export const dashboardSales = (params: Record<string, any> = {}) =>
   api.get<any>("/dashboard/sales", { params });
 
+export const dashboardPurchaseOrders = (params: Record<string, any> = {}) =>
+  api.get<any>("/dashboard/purchase-orders", { params });
+
 export const dashboardPools = (params: { date_from?: string; date_to?: string; page?: number; page_size?: number } = {}) =>
   api.get<any>("/dashboard/pools", { params });
 
