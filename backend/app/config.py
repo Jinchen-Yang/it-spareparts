@@ -164,6 +164,12 @@ TARGET_MARGIN = Decimal("0.20")
 # 稳定 group_id 由 pool.rebuild() 重算并保留，关系变化时报告合并/拆分。
 POOL_OVERSIZE_MEMBERS = 30        # 成员超此数 → oversized 标记，需人工确认（生产最大池 59）
 POOL_PREMIUM_WARN_PCT = Decimal("0.20")   # 采购/销售溢价率 ≥20% 视为"品牌溢价"候选（相对池基准）
+# 标杆型号"供应可得"门槛（复审二轮 P1-5：原来只查"有采购单+有日期"太松，单样本/远古采购也算）：
+# 必须 ≥N 张去重采购单（非单样本）、≥1 家供应商、且最近采购在 recent_days 窗口内。仍不代表可替换。
+POOL_SUPPLY_MIN_ORDERS = 2        # 标杆型号至少 2 张去重采购单（排除单样本偶发）
+POOL_SUPPLY_MIN_SUPPLIERS = 1     # 至少 1 家可识别供应商
+POOL_SUPPLY_RECENT_DAYS = 365     # 最近采购须在此天数内（远古采购不算"供应可得"）
+POOL_RANK_ANALYZE_CAP = 500       # 全局按节省额排名时最多分析多少个池（生产 ~40）；超限退回成员数排序
 
 # 整机拆解/批量查价取"近 N 天采购价"窗口（客户要"最近15天采购价"）
 RECENT_PURCHASE_DAYS = 15
@@ -346,12 +352,20 @@ FIELD_GROUPS = {
                       "purchase_ex_tax", "purchase_price", "unit_price_ex_tax",
                       "benchmark", "savings", "theoretical_saving", "supply_available_upper",
                       "theoretical_max", "unit_saving", "cost_ex_tax", "purchase_premium_pct",
+                      # 订单拉通-采购侧一单一行的未税采购额（键名带 total_ 前缀，与上面容器键
+                      # purchase_ex_tax 不同名，复审 P0：漏登记会绕过 data_purchase_cost 泄漏采购额）
+                      "total_ex_tax",
+                      # 池成员"采购溢价判定"布尔：反推该型号采购价高于标杆（采购成本比较信号）
+                      "brand_premium_purchase",
                       # 维保 v2（§16）：盈亏看板与取价元信息派生键（budget=合同额亦可反推毛利）
                       "spent", "spent_parts", "spent_expense", "budget",
                       "remaining", "remaining_pct", "low_conf_pct",
                       "price_distance_days", "confidence"],
     # 毛利金额：能反推成本（profit.aggregate 两法派生键一并登记）
-    "profit_amount": ["gross_profit", "gross_profit_moving", "gross_profit_fifo"],
+    # total_gross_profit = 订单拉通-销售侧一单一行毛利（键名带 total_ 前缀，与 gross_profit
+    # 不同名，复审 P0：漏登记会绕过 data_profit 泄漏毛利）
+    "profit_amount": ["gross_profit", "gross_profit_moving", "gross_profit_fifo",
+                      "total_gross_profit"],
     # 毛利率：见反推警告（_profit_summary 与 profit.aggregate 的两法派生键一并登记）
     "profit_rate":   ["gross_margin", "avg_margin", "margin_band",
                       "avg_margin_moving", "avg_margin_fifo",

@@ -68,3 +68,16 @@ def test_purchase_orders_list(db, seeded):
     assert by["P1"]["total_ex_tax"] == 1000.0        # 10 * 113/1.13
     assert by["P1"]["linked_sales_order"] == "SO-1"
     assert by["P1"]["part_count"] == 1
+
+
+def test_search_by_order_no(db, seeded):
+    """复审二轮补漏：搜索框宣称支持"单号"，q 必须能直接命中订单号（此前只搜型号/描述/品牌）。"""
+    # 销售侧：搜销售单号
+    ds = dashboard.sales_orders(db, status="全部", q="SO-1", as_of=AS_OF)
+    assert [i["order_no"] for i in ds["items"]] == ["SO-1"]
+    # 采购侧：搜采购单号
+    dp = dashboard.purchase_orders(db, status="全部", q="P2", as_of=AS_OF)
+    assert [i["order_no"] for i in dp["items"]] == ["P2"]
+    # 型号搜索仍然可用（未回归）
+    dpn = dashboard.sales_orders(db, status="全部", q="PN-B", as_of=AS_OF)
+    assert "SO-1" in [i["order_no"] for i in dpn["items"]]

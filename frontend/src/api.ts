@@ -493,20 +493,94 @@ export interface TrendPoint { period: string; sales_ex_tax: number; purchase_ex_
 export const dashboardTrend = (params: { date_from?: string; date_to?: string; granularity?: string } = {}) =>
   api.get<{ granularity: string; series: TrendPoint[] }>("/dashboard/trend", { params });
 
+// 成本/毛利类字段按角色可能被脱敏成 null，故一律 `number | null`。
+export interface PartRankingRow {
+  part_id: number; pn_std: string; brand: string | null;
+  qty_sold: number | null; revenue: number | null;
+  gross_profit_moving: number | null; gross_profit_fifo: number | null;
+  gross_margin_moving: number | null; gross_margin_fifo: number | null;
+  purchase_price: { wavg: number | null } | null; cost_coverage: number | null;
+}
+export interface PartRankingResp {
+  profitable: PartRankingRow[]; loss: PartRankingRow[];
+  profit_restricted: boolean;
+  counts: { total_parts: number; with_cost: number;
+    profitable: number | null; loss: number | null; no_cost_parts: number };
+}
 export const dashboardPartRanking = (params: { date_from?: string; date_to?: string; cost_method?: string; top?: number } = {}) =>
-  api.get<any>("/dashboard/part-ranking", { params });
+  api.get<PartRankingResp>("/dashboard/part-ranking", { params });
 
-export const dashboardSales = (params: Record<string, any> = {}) =>
-  api.get<any>("/dashboard/sales", { params });
+export interface OrdersQuery {
+  date_from?: string; date_to?: string; q?: string; status?: string;
+  source_type?: string; sort?: string; order?: "asc" | "desc";
+  page?: number; page_size?: number;
+}
+export interface SalesOrderRow {
+  order_id: number; order_no: string; order_date: string | null; is_future: boolean;
+  salesperson: string | null; customer: string | null; business_type: string | null;
+  data_status: string | null; part_count: number; total_qty: number | null;
+  total_revenue: number | null; total_gross_profit: number | null; linked_purchase: boolean;
+}
+export interface PurchaseOrderRow {
+  order_id: number; order_no: string; order_date: string | null; is_future: boolean;
+  purchaser: string | null; source_type: string | null; data_status: string | null;
+  linked_sales_order: string | null; part_count: number; total_qty: number | null;
+  total_ex_tax: number | null;
+}
+export interface OrdersResp<T> {
+  total: number; page: number; page_size: number; as_of: string; items: T[];
+  effective_sort: string; ranking_restricted: boolean;
+  profit_restricted?: boolean; cost_restricted?: boolean;
+}
 
-export const dashboardPurchaseOrders = (params: Record<string, any> = {}) =>
-  api.get<any>("/dashboard/purchase-orders", { params });
+export const dashboardSales = (params: OrdersQuery = {}) =>
+  api.get<OrdersResp<SalesOrderRow>>("/dashboard/sales", { params });
 
-export const dashboardPools = (params: { date_from?: string; date_to?: string; page?: number; page_size?: number } = {}) =>
-  api.get<any>("/dashboard/pools", { params });
+export const dashboardPurchaseOrders = (params: OrdersQuery = {}) =>
+  api.get<OrdersResp<PurchaseOrderRow>>("/dashboard/purchase-orders", { params });
 
+export interface PoolListItem {
+  group_id: number; member_count: number; needs_calibration: boolean; oversized: boolean;
+  demand_qty: number | null; demand_revenue_ex_tax: number | null;
+  theoretical_saving: number | null; supply_available_upper: number | null;
+}
+export interface PoolsResp {
+  total: number; page: number; page_size: number;
+  sort: "savings" | "member_count"; effective_sort: "savings" | "member_count";
+  ranking_restricted: boolean; ranking_capped: boolean; items: PoolListItem[];
+}
+export const dashboardPools = (params: { date_from?: string; date_to?: string; page?: number; page_size?: number; sort?: string } = {}) =>
+  api.get<PoolsResp>("/dashboard/pools", { params });
+
+// 池详情：benchmark/savings 属成本组，对无成本查看权限的角色会被整块脱敏为 null → 定型为可空。
+export interface PoolMemberRow {
+  part_id: number; pn_std: string | null; brand: string | null;
+  purchase_price: { wavg: number | null;
+    supply?: { purchase_orders: number; suppliers: number } | null } | null;
+  sale_price: { wavg: number | null; qty_sold: number | null } | null;
+  purchase_premium_pct: number | null; brand_premium_purchase: boolean | null;
+}
+export interface PoolOpportunity {
+  from_part_id: number; from_pn: string | null; to_pn: string | null;
+  unit_saving: number | null; qty_sold: number | null; theoretical_saving: number | null;
+  supply_available: boolean; block_reason: string | null; verification_status: string;
+}
+export interface PoolDetail {
+  group_id: number; member_count: number; needs_calibration?: boolean; oversized?: boolean;
+  demand: { total_qty: number | null; total_revenue_ex_tax: number | null; note?: string };
+  supply_window: { date_from: string; date_to: string; as_of: string };
+  benchmark: { cost_part_id: number | null } | null;    // 成本组 → 可能整块脱敏
+  savings: { theoretical_max: number | null; supply_available_upper: number | null;
+    label?: string; opportunities: PoolOpportunity[] } | null;
+  members: PoolMemberRow[];
+  customer_cross_brand?: { restricted: boolean; multi_brand_customers?: number;
+    customers?: Array<{ customer: string; brand_count: number; concentration: number }> } | null;
+}
 export const dashboardPool = (groupId: number, params: { date_from?: string; date_to?: string } = {}) =>
-  api.get<any>(`/dashboard/pool/${groupId}`, { params });
+  api.get<PoolDetail>(`/dashboard/pool/${groupId}`, { params });
 
+export interface PoolRebuildPreview {
+  dry_run: boolean; pools: number; merged: unknown[]; split: unknown[]; new: unknown[]; unchanged: number;
+}
 export const dashboardPoolRebuild = (dry_run = true) =>
-  api.post<any>("/dashboard/pool/rebuild", null, { params: { dry_run } });
+  api.post<PoolRebuildPreview>("/dashboard/pool/rebuild", null, { params: { dry_run } });

@@ -10,7 +10,7 @@
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from sqlalchemy import exists, or_
@@ -20,10 +20,16 @@ from app.models.dimensions import DimCustomer, DimPart
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.services.query_filters import active_orders
+# 税价换算收敛到 pricing 单一真值源（复审二轮 Standards：财务规则防多处漂移）。
+# 保留 `_`-前缀别名，本模块内既有调用点不动。
+from app.services.pricing import (
+    purchase_ex_tax_expr as _purchase_ex_tax_expr,
+    purchase_ex_unit as _purchase_ex_unit,
+    sale_ex_unit as _sale_ex_unit,
+)
 
 # 取消/作废口径：非"已生效"里明确终止的两种状态（其余如进行中/草稿单独计）
 _CANCELLED_STATUS = ("已取消", "作废")
-_VAT1 = Decimal(1) + config.PROFIT_VAT_RATE
 
 
 def _f(x) -> float | None:
@@ -32,26 +38,6 @@ def _f(x) -> float | None:
 
 def _r(x, n=2) -> float | None:
     return round(float(x), n) if x is not None else None
-
-
-def _sale_ex_unit():
-    """销售未税单价：销售 unit_price 恒含税 → ÷1.13（TAX_BASIS!=ex_tax 时原值）。"""
-    up = FSalesLine.unit_price
-    return up / _VAT1 if config.TAX_BASIS == "ex_tax" else up
-
-
-def _purchase_ex_unit():
-    """采购未税单价：按头表 is_tax_inclusive 归一（含税/未知÷1.13、明确不含税原值）。"""
-    up = FPurchaseLine.unit_price
-    if config.TAX_BASIS != "ex_tax":
-        return up
-    return case((FPurchaseOrder.is_tax_inclusive.is_(False), up), else_=up / _VAT1)
-
-
-def _purchase_ex_tax_expr():
-    """采购行未税额表达式：unit_price*qty，按头表 is_tax_inclusive 归一（含税/未知÷1.13、
-    明确不含税取原值）；TAX_BASIS!=ex_tax 时不换算。与 profit._ex_tax_purchase 同口径。"""
-    return _purchase_ex_unit() * FPurchaseLine.qty
 
 
 def kpi(db: Session, date_from: date | None, date_to: date | None,
@@ -257,10 +243,21 @@ def part_ranking(db: Session, date_from: date | None, date_to: date | None,
     loss = sorted([x for x in ranked if x["_sort"] < 0], key=lambda x: x["_sort"])[:top]
     for x in rows:
         x.pop("_sort", None)
+    window = {"date_from": date_from.isoformat() if date_from else None,
+              "date_to": date_to.isoformat() if date_to else None,
+              "as_of": today.isoformat(), "cost_method": cost_method}
+    # 结构性收敛（复审三轮 P0-1）：data_profit=false 时，连"哪些型号赚/亏、各几个"都不能给——
+    # 字段 mask 只置空金额，型号落在哪个榜 + 榜内计数本身泄漏利润结论。整块归属一律撤下。
+    if security.is_field_hidden(user_ctx, "gross_profit"):
+        return {
+            "window": window, "profit_restricted": True,
+            "profitable": [], "loss": [],
+            "counts": {"total_parts": len(rows), "with_cost": len(ranked),
+                       "profitable": None, "loss": None,
+                       "no_cost_parts": len(rows) - len(ranked)},
+        }
     return {
-        "window": {"date_from": date_from.isoformat() if date_from else None,
-                   "date_to": date_to.isoformat() if date_to else None,
-                   "as_of": today.isoformat(), "cost_method": cost_method},
+        "window": window, "profit_restricted": False,
         "profitable": profitable, "loss": loss,
         "counts": {"total_parts": len(rows), "with_cost": len(ranked),
                    "profitable": n_profit, "loss": n_loss,
@@ -376,10 +373,10 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
     if date_to:
         base = base.where(so.order_date <= date_to)
     if q and q.strip():
-        kw = f"%{q.strip()}%"   # 订单粒度：含匹配型号的订单（TODO 第②块接统一型号搜索）
+        kw = f"%{q.strip()}%"   # 订单粒度：单号直匹 或 含匹配型号（TODO 第②块接统一型号搜索）
         sub = (select(FSalesLine.order_id).join(DimPart, FSalesLine.part_id == DimPart.id)
                .where(or_(DimPart.pn_std.ilike(kw), FSalesLine.description.ilike(kw), FSalesLine.brand.ilike(kw))))
-        base = base.where(so.id.in_(sub))
+        base = base.where(or_(so.order_no.ilike(kw), so.id.in_(sub)))
     if customer:
         base = base.where(DimCustomer.name_normalized.ilike(f"%{customer.strip()}%"))
     if salesperson:
@@ -392,6 +389,13 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
                          DimCustomer.name_normalized, so.business_type, so.data_status)
 
     total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0
+    # 结构性泄漏防护（复审三轮同类扩展）：利润被脱敏的角色不得按 gross_profit 排序——
+    # 即便金额置空，行序本身泄漏盈亏排名。退回按日期排序。
+    profit_restricted = security.is_field_hidden(user_ctx, "gross_profit")
+    ranking_restricted = sort == "gross_profit" and profit_restricted
+    effective_sort = "order_date" if ranking_restricted else sort
+    if ranking_restricted:
+        sort = "order_date"
     sort_expr = {"order_date": so.order_date, "revenue": rev, "gross_profit": gp,
                  "part_count": func.count(func.distinct(sl.part_id))}.get(sort, so.order_date)
     direction = sort_expr.desc().nullslast() if order == "desc" else sort_expr.asc().nullslast()
@@ -409,7 +413,9 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
             "total_revenue": _f(r.total_revenue), "total_gross_profit": _f(r.total_gross_profit),
             "linked_purchase": bool(r.linked_purchase),
         })
-    return {"total": total, "page": page, "page_size": page_size, "as_of": today.isoformat(), "items": items}
+    return {"total": total, "page": page, "page_size": page_size, "as_of": today.isoformat(),
+            "effective_sort": effective_sort, "ranking_restricted": ranking_restricted,
+            "profit_restricted": profit_restricted, "items": items}
 
 
 def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date | None = None,
@@ -442,15 +448,21 @@ def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date
     if date_to:
         base = base.where(po.order_date <= date_to)
     if q and q.strip():
-        kw = f"%{q.strip()}%"
+        kw = f"%{q.strip()}%"   # 单号直匹 或 含匹配型号
         sub = (select(pl.order_id).join(DimPart, pl.part_id == DimPart.id)
                .where(or_(DimPart.pn_std.ilike(kw), pl.description.ilike(kw), pl.brand.ilike(kw))))
-        base = base.where(po.id.in_(sub))
+        base = base.where(or_(po.order_no.ilike(kw), po.id.in_(sub)))
     if source_type:
         base = base.where(po.source_type == source_type)
     base = base.group_by(po.id, po.order_no, po.order_date, po.purchaser, po.source_type,
                          po.data_status, po.linked_sales_order_no, po.supplier_id)
     total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0
+    # 结构性泄漏防护：采购成本被脱敏的角色不得按 amount(未税采购额) 排序——行序泄漏采购额排名。
+    cost_restricted = security.is_field_hidden(user_ctx, "total_ex_tax")
+    ranking_restricted = sort == "amount" and cost_restricted
+    effective_sort = "order_date" if ranking_restricted else sort
+    if ranking_restricted:
+        sort = "order_date"
     sort_expr = {"order_date": po.order_date, "amount": amt, "part_count": func.count(func.distinct(pl.part_id))}.get(sort, po.order_date)
     direction = sort_expr.desc().nullslast() if order == "desc" else sort_expr.asc().nullslast()
     stmt = base.order_by(direction, po.id.desc()).limit(page_size).offset((page - 1) * page_size)
@@ -464,7 +476,9 @@ def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date
             "linked_sales_order": r.linked_sales_order_no,
             "part_count": r.part_count, "total_qty": _f(r.total_qty), "total_ex_tax": _f(r.total_ex_tax),
         })
-    return {"total": total, "page": page, "page_size": page_size, "as_of": today.isoformat(), "items": items}
+    return {"total": total, "page": page, "page_size": page_size, "as_of": today.isoformat(),
+            "effective_sort": effective_sort, "ranking_restricted": ranking_restricted,
+            "cost_restricted": cost_restricted, "items": items}
 
 
 def _order_health(db: Session, date_from: date | None, date_to: date | None, today: date) -> dict:

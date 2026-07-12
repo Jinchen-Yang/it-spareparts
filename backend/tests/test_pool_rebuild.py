@@ -128,3 +128,8 @@ def test_retired_id_never_reused(db, parts):
     gid_fg = m2[p["F"]]
     assert p["D"] not in m2                 # 池② 已退役
     assert gid_fg != gid_de, "退役 ID 绝不能被无关新池复用"
+
+
+# 迁移对齐场景（空表→1 / max=40→41 / 高水位保持）的测试在 tests/test_migration_pool_seq.py：
+# 走真实 Alembic downgrade/upgrade 并保存/恢复序列状态。此前这里有两个复制迁移 SQL 的
+# 手动版（复审五轮：直接 ALTER SEQUENCE/setval 且不恢复 → 污染序列状态），已删除。
