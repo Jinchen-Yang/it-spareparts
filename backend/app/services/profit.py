@@ -29,8 +29,11 @@ _CENT = Decimal("0.01")
 _RATE = Decimal("0.0001")
 
 
+# 税口径同一规则的两种表示：本文件是 replay 期 Python 标量版（作用于 Decimal），
+# services/pricing.py 是 SQL 列表达式版（看板/池聚合用）。二者共享 config.PROFIT_VAT_RATE +
+# 同样的 is_tax_inclusive 分支，改口径须同步改两处（标量与 SQL 无法直接复用同一实现）。
 def _ex_tax_sale(amount: Decimal) -> Decimal:
-    """销售含税额 → 未税额（统一 13%）。销售 unit_price 恒为含税单价。"""
+    """销售含税额 → 未税额（统一 13%）。销售 unit_price 恒为含税单价。见 pricing.sale_ex_unit（SQL 版）。"""
     if config.TAX_BASIS == "ex_tax":
         return amount / (Decimal(1) + config.PROFIT_VAT_RATE)
     return amount

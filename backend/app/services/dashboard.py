@@ -243,10 +243,21 @@ def part_ranking(db: Session, date_from: date | None, date_to: date | None,
     loss = sorted([x for x in ranked if x["_sort"] < 0], key=lambda x: x["_sort"])[:top]
     for x in rows:
         x.pop("_sort", None)
+    window = {"date_from": date_from.isoformat() if date_from else None,
+              "date_to": date_to.isoformat() if date_to else None,
+              "as_of": today.isoformat(), "cost_method": cost_method}
+    # 结构性收敛（复审三轮 P0-1）：data_profit=false 时，连"哪些型号赚/亏、各几个"都不能给——
+    # 字段 mask 只置空金额，型号落在哪个榜 + 榜内计数本身泄漏利润结论。整块归属一律撤下。
+    if security.is_field_hidden(user_ctx, "gross_profit"):
+        return {
+            "window": window, "profit_restricted": True,
+            "profitable": [], "loss": [],
+            "counts": {"total_parts": len(rows), "with_cost": len(ranked),
+                       "profitable": None, "loss": None,
+                       "no_cost_parts": len(rows) - len(ranked)},
+        }
     return {
-        "window": {"date_from": date_from.isoformat() if date_from else None,
-                   "date_to": date_to.isoformat() if date_to else None,
-                   "as_of": today.isoformat(), "cost_method": cost_method},
+        "window": window, "profit_restricted": False,
         "profitable": profitable, "loss": loss,
         "counts": {"total_parts": len(rows), "with_cost": len(ranked),
                    "profitable": n_profit, "loss": n_loss,

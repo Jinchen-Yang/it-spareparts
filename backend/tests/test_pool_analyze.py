@@ -10,6 +10,7 @@ from app.models.dimensions import DimPart
 from app.models.inventory import PartSubstitute
 from app.models.system import SysImportBatch
 from app.services import pool, profit
+from app import config
 from tests import factories as f
 
 AS_OF = date(2026, 6, 1)
@@ -132,6 +133,34 @@ def test_supply_gate_rejects_single_order_benchmark(db):
     assert opp["supply_available"] is False and opp["block_reason"]
 
 
+def test_supply_window_not_truncated_by_page_range(db):
+    """复审三轮 P1：页面选近30天时，60/90天前的有效采购仍应满足365天供应证据。
+    采购统计（标杆价+供应）用近一年窗口，不被页面窗口截断；销量仍按页面窗口。"""
+    x = _part(db, "PN-WX", "BX"); y = _part(db, "PN-WY", "BY")
+    _edge(db, x, y); db.flush(); pool.rebuild(db)
+    b = SysImportBatch(filename="w.xlsx", file_type="purchase", file_hash="hwin1")
+    db.add(b); db.flush()
+    porders = {   # 标杆 X 两张单在 60/90 天前（页面近30天窗口之外，但在一年内）
+        "P1": f.purchase_head("P1", on=date(2026, 4, 2), is_tax_inclusive=True),
+        "P2": f.purchase_head("P2", on=date(2026, 3, 3), is_tax_inclusive=True),
+    }
+    plines = [f.purchase_line("P1", "LX1", "PN-WX", qty="5", price="113"),   # ex100
+              f.purchase_line("P2", "LX2", "PN-WX", qty="5", price="113"),
+              f.purchase_line("P1", "LY", "PN-WY", qty="5", price="169.5")]  # ex150 溢价
+    loader.load(db, f.purchase_result(porders, plines), b.id, date(2026, 6, 1))
+    sorders = {"S1": f.sales_head("S1", on=date(2026, 5, 15))}   # 销量落在页面窗口内
+    slines = [f.sales_line("S1", "SLY", "PN-WY", qty="10", price="300")]
+    loader.load(db, f.sales_result(sorders, slines), b.id, date(2026, 6, 1))
+    db.commit(); profit.recompute(db)
+    gid = db.execute(select(pool.PartPoolMember.group_id)
+                     .where(pool.PartPoolMember.part_id == x)).scalar()
+    # 页面近30天：date_from=2026-05-02 —— 两张采购单都在窗口外
+    d = pool.analyze(db, gid, date_from=date(2026, 5, 2), date_to=date(2026, 6, 1), as_of=AS_OF)
+    assert d["benchmark"]["cost_ex_tax"] == 100.0        # 标杆价来自窗口外采购，仍算得出
+    assert d["benchmark"]["supply_ok"] is True            # 60/90天前×2单 → 一年内供应稳定
+    assert d["savings"]["supply_available_upper"] > 0     # 供应可得 → 有上限
+
+
 def test_list_pools_savings_global_ranking(db):
     """复审二轮 P1-4：小成员但高节省的池，sort=savings 必须排在大成员低节省池之前
     （旧实现先按成员数分页、只在页内排节省 → 高节省小池藏后页）。"""
@@ -165,3 +194,24 @@ def test_list_pools_savings_global_ranking(db):
     assert by_savings["items"][0]["group_id"] == gid_b   # 高节省小池排全局第一
     by_members = pool.list_pools(db, as_of=AS_OF, sort="member_count", page=1, page_size=1)
     assert by_members["items"][0]["group_id"] == gid_a   # 成员多的池排第一（对照）
+
+
+def test_list_pools_pagination_and_cap(db, monkeypatch):
+    """复审三轮 P1/Standards：savings 排序下服务端分页可翻到任意页（>100 池同理）；
+    超 POOL_RANK_ANALYZE_CAP 时退回成员数排序并置 ranking_capped=True。"""
+    for i in range(5):   # 5 个池，各 2 成员 1 边
+        a = _part(db, f"PN-P{i}A", f"B{i}A"); b2 = _part(db, f"PN-P{i}B", f"B{i}B")
+        _edge(db, a, b2)
+    db.flush(); pool.rebuild(db)
+    r1 = pool.list_pools(db, as_of=AS_OF, sort="savings", page=1, page_size=2)
+    r2 = pool.list_pools(db, as_of=AS_OF, sort="savings", page=2, page_size=2)
+    r3 = pool.list_pools(db, as_of=AS_OF, sort="savings", page=3, page_size=2)
+    assert r1["total"] == 5 and len(r1["items"]) == 2
+    assert len(r3["items"]) == 1                          # 第 3 页可访问（末池）
+    seen = {it["group_id"] for r in (r1, r2, r3) for it in r["items"]}
+    assert len(seen) == 5                                 # 5 个池全部可达、不重不漏
+    assert r1["ranking_capped"] is False
+    # 超 cap → 退回成员数排序并标注
+    monkeypatch.setattr(config, "POOL_RANK_ANALYZE_CAP", 2)
+    rc = pool.list_pools(db, as_of=AS_OF, sort="savings", page=1, page_size=2)
+    assert rc["ranking_capped"] is True and rc["sort"] == "member_count"

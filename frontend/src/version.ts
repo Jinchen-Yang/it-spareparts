@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.12.1";
+export const APP_VERSION = "1.12.2";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.12.2",
+    date: "2026-07-12",
+    items: [
+      "安全修复：关闭利润查看权限的账号，经营看板不再显示「哪些型号赚钱/亏损」及其数量（此前虽隐藏金额，仍能看出盈亏归属）",
+      "数据池「供应稳定性」不再被页面时间范围截断：默认近30天视图下，60/90天前的有效采购仍计入「近一年供应证据」，标杆价与供应判定更准",
+      "数据池列表改为服务端翻页：池数量很多时可翻到任意一页；当池数超过分析上限退回按成员数排序时，页面明确告警",
+      "看板顶部板块加请求代次守卫：快速切换时间范围时，旧请求不会再覆盖新范围的数据",
+    ],
+  },
   {
     version: "1.12.1",
     date: "2026-07-12",

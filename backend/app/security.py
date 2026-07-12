@@ -146,6 +146,15 @@ def _hidden_fields(user_ctx: UserContext) -> set[str]:
     return hidden
 
 
+def is_field_hidden(user_ctx: UserContext | None, field: str) -> bool:
+    """该字段对此用户是否被脱敏。供服务层做**结构性**收敛用——字段级 mask 只会把
+    叶子值置空，但"型号落在赚钱榜还是亏损榜"这类归属本身就泄漏利润结论，需服务层据此
+    决定不返回分类结构（复审三轮 P0：data_profit=false 仍能看出哪个型号赚/亏）。"""
+    if user_ctx is None or not config.ENABLE_RBAC:
+        return False
+    return field in _hidden_fields(user_ctx)
+
+
 def apply_field_visibility(payload: Any, user_ctx: UserContext) -> Any:
     """字段级脱敏钩子。RBAC 关 → 原样返回。
 

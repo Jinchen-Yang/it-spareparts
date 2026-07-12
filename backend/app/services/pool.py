@@ -9,7 +9,7 @@
 - 成员超 POOL_OVERSIZE_MEMBERS → oversized（需人工确认）。
 """
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import and_, delete, func, select, text
 from sqlalchemy.orm import Session
@@ -295,7 +295,12 @@ def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: 
         select(PartPoolMember.part_id).where(PartPoolMember.group_id == group_id)).scalars())
     parts = {p.id: p for p in db.execute(select(DimPart).where(DimPart.id.in_(part_ids))).scalars()}
 
-    pstats = _purchase_member_stats(db, part_ids, date_from, upper)
+    # 采购统计（标杆价 + 供应稳定性）独立用"至少近一年"窗口，不被页面时间范围（默认 30 天）
+    # 截断——否则 60/90 天前的有效采购看不到，供应稳定性/365 天门槛与标杆价都会失真
+    # （复审三轮 P1）。用户若显式选了更宽窗口则取更宽者。销量(demand)仍用页面窗口。
+    supply_floor = today - timedelta(days=config.POOL_SUPPLY_RECENT_DAYS)
+    purchase_from = min(date_from, supply_floor) if date_from else supply_floor
+    pstats = _purchase_member_stats(db, part_ids, purchase_from, upper)
     sstats = _sale_member_stats(db, part_ids, date_from, upper)
 
     members = []

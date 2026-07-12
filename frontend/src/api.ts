@@ -503,7 +503,9 @@ export interface PartRankingRow {
 }
 export interface PartRankingResp {
   profitable: PartRankingRow[]; loss: PartRankingRow[];
-  counts: { total_parts: number; with_cost: number; profitable: number; loss: number; no_cost_parts: number };
+  profit_restricted: boolean;
+  counts: { total_parts: number; with_cost: number;
+    profitable: number | null; loss: number | null; no_cost_parts: number };
 }
 export const dashboardPartRanking = (params: { date_from?: string; date_to?: string; cost_method?: string; top?: number } = {}) =>
   api.get<PartRankingResp>("/dashboard/part-ranking", { params });
@@ -545,10 +547,28 @@ export interface PoolsResp {
 export const dashboardPools = (params: { date_from?: string; date_to?: string; page?: number; page_size?: number; sort?: string } = {}) =>
   api.get<PoolsResp>("/dashboard/pools", { params });
 
-// 池详情结构较深且含条件遮蔽，抽屉内按需读取；顶层已知字段定型，其余走索引签名。
+// 池详情：benchmark/savings 属成本组，对无成本查看权限的角色会被整块脱敏为 null → 定型为可空。
+export interface PoolMemberRow {
+  part_id: number; pn_std: string | null; brand: string | null;
+  purchase_price: { wavg: number | null;
+    supply?: { purchase_orders: number; suppliers: number } | null } | null;
+  sale_price: { wavg: number | null; qty_sold: number | null } | null;
+  purchase_premium_pct: number | null; brand_premium_purchase: boolean | null;
+}
+export interface PoolOpportunity {
+  from_part_id: number; from_pn: string | null; to_pn: string | null;
+  unit_saving: number | null; qty_sold: number | null; theoretical_saving: number | null;
+  supply_available: boolean; block_reason: string | null; verification_status: string;
+}
 export interface PoolDetail {
   group_id: number; member_count: number; needs_calibration?: boolean; oversized?: boolean;
-  [k: string]: unknown;
+  demand: { total_qty: number | null; total_revenue_ex_tax: number | null; note?: string };
+  benchmark: { cost_part_id: number | null } | null;    // 成本组 → 可能整块脱敏
+  savings: { theoretical_max: number | null; supply_available_upper: number | null;
+    label?: string; opportunities: PoolOpportunity[] } | null;
+  members: PoolMemberRow[];
+  customer_cross_brand?: { restricted: boolean; multi_brand_customers?: number;
+    customers?: Array<{ customer: string; brand_count: number; concentration: number }> } | null;
 }
 export const dashboardPool = (groupId: number, params: { date_from?: string; date_to?: string } = {}) =>
   api.get<PoolDetail>(`/dashboard/pool/${groupId}`, { params });

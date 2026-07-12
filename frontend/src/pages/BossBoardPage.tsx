@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Alert, Button, Card, DatePicker, Drawer, Grid, Input, Segmented, Select, Table, Tag, Tooltip,
-  message, theme,
+  message,
 } from "antd";
 import type { ColumnsType, TablePaginationConfig } from "antd/es/table";
 import type { SorterResult } from "antd/es/table/interface";
@@ -13,6 +13,7 @@ import {
   type DashboardKpi, type TrendPoint, type PartRankingResp, type PartRankingRow,
   type SalesOrderRow, type PurchaseOrderRow, type OrdersResp, type OrdersQuery,
   type PoolsResp, type PoolListItem, type PoolDetail as PoolDetailT,
+  type PoolMemberRow, type PoolOpportunity,
 } from "../api";
 import { Modal } from "antd";
 
@@ -100,7 +101,6 @@ function KpiStrip({ k }: { k: DashboardKpi }) {
 export default function BossBoardPage() {
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
-  const { token } = theme.useToken();
   const isAdmin = (localStorage.getItem("role") || "") === "admin";
   const { key, setKey, setCustom, range } = useRange();
   const [granularity, setGranularity] = useState("day");
@@ -120,21 +120,29 @@ export default function BossBoardPage() {
   const [purchaseQ, setPurchaseQ] = useState<OrdersQuery>({ page: 1, page_size: 20, sort: "order_date", order: "desc" });
   const [salesLoading, setSalesLoading] = useState(false);
   const [purchaseLoading, setPurchaseLoading] = useState(false);
+  // 数据池表：服务端分页（复审三轮：>100 池也要能翻到）；nonce 用于重算后强制刷新
+  const [poolPage, setPoolPage] = useState({ page: 1, page_size: 10 });
+  const [poolLoading, setPoolLoading] = useState(false);
+  const [poolNonce, setPoolNonce] = useState(0);
 
-  // 上部板块（KPI/趋势/盈亏榜/池）：每块独立落库，一块失败不拖垮其余（复审 Standards：不再全有或全无）
+  // 上部板块（KPI/趋势/盈亏榜/池）：每块独立落库，一块失败不拖垮其余（复审 Standards：不再全有或全无）。
+  // 代次守卫（复审三轮 Standards）：快速切时间范围时，旧请求即便最后返回也不得覆盖新范围数据。
+  const loadGen = useRef(0);
   const load = useCallback(async () => {
+    const gen = ++loadGen.current;
+    const alive = () => gen === loadGen.current;
     setLoading(true);
     const errs: string[] = [];
     const into = async <T,>(p: Promise<{ data: T }>, set: (v: T | null) => void, label: string) => {
-      try { set((await p).data); } catch { set(null); errs.push(label); }
+      try { const { data } = await p; if (alive()) set(data); }
+      catch { if (alive()) { set(null); errs.push(label); } }
     };
     await Promise.all([
       into(dashboardKpi(range), setKpi, "经营KPI"),
       into(dashboardTrend({ ...range, granularity }), (d) => setTrend(d?.series ?? []), "趋势"),
       into(dashboardPartRanking({ ...range, cost_method: costMethod, top: 10 }), setRanking, "盈亏榜"),
-      // 池数量有限（生产 ~40）：一次取满（≤100，全局按节省额排名），本地翻页的"共 N 个池"才准
-      into(dashboardPools({ ...range, sort: "savings", page_size: 100 }), setPools, "数据池"),
     ]);
+    if (!alive()) return;   // 已被更新的 load 取代 → 丢弃本次收尾（含 loading/错误提示）
     if (errs.length) message.error(`部分板块加载失败：${errs.join("、")}`);
     setLoading(false);
   }, [range, granularity, costMethod]);
@@ -162,10 +170,22 @@ export default function BossBoardPage() {
     return () => { alive = false; };
   }, [range, purchaseQ]);
 
-  // 换时间范围时两张订单表回到第 1 页（避免停在越界页看到空表）
+  // 数据池：服务端分页（sort=savings 时后端先分析全部池再全局排序分页）。nonce 变化=重算后刷新
+  useEffect(() => {
+    let alive = true;
+    setPoolLoading(true);
+    dashboardPools({ ...range, sort: "savings", page: poolPage.page, page_size: poolPage.page_size })
+      .then(({ data }) => { if (alive) setPools(data); })
+      .catch(() => { if (alive) { setPools(null); message.error("数据池加载失败"); } })
+      .finally(() => { if (alive) setPoolLoading(false); });
+    return () => { alive = false; };
+  }, [range, poolPage, poolNonce]);
+
+  // 换时间范围时订单表与池表回到第 1 页（避免停在越界页看到空表）
   useEffect(() => {
     setSalesQ((q) => (q.page === 1 ? q : { ...q, page: 1 }));
     setPurchaseQ((q) => (q.page === 1 ? q : { ...q, page: 1 }));
+    setPoolPage((q) => (q.page === 1 ? q : { ...q, page: 1 }));
   }, [range]);
 
   const openPool = async (gid: number) => {
@@ -213,6 +233,7 @@ export default function BossBoardPage() {
           await dashboardPoolRebuild(false);
           message.success("池已重算");
           load();
+          setPoolNonce((n) => n + 1);   // 池表独立于 load，单独刷新
         },
       });
     } catch { message.error("重算预览失败"); }
@@ -318,24 +339,28 @@ export default function BossBoardPage() {
       <Card title="型号盈亏排名" style={{ marginBottom: 16 }} size="small"
         extra={<Segmented size="small" value={costMethod} onChange={(v) => setCostMethod(v as any)}
           options={[{ label: "移动加权", value: "moving_avg" }, { label: "FIFO", value: "fifo" }]} />}>
-        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-          <div style={{ flex: "1 1 480px", minWidth: 300 }}>
-            <div style={{ fontWeight: 500, marginBottom: 6, color: "#3f7a45" }}>💰 赚钱榜</div>
-            <Table size="small" rowKey="part_id" pagination={false} loading={loading}
-              dataSource={ranking?.profitable || []} columns={rankCols(false)} scroll={{ x: 700 }} />
+        {ranking?.profit_restricted ? (
+          <Alert type="info" showIcon message="无利润查看权限：盈亏排名（含型号赚/亏归属与计数）对当前账号不可见。" />
+        ) : (<>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 480px", minWidth: 300 }}>
+              <div style={{ fontWeight: 500, marginBottom: 6, color: "#3f7a45" }}>💰 赚钱榜</div>
+              <Table size="small" rowKey="part_id" pagination={false} loading={loading}
+                dataSource={ranking?.profitable || []} columns={rankCols(false)} scroll={{ x: 700 }} />
+            </div>
+            <div style={{ flex: "1 1 480px", minWidth: 300 }}>
+              <div style={{ fontWeight: 500, marginBottom: 6, color: "#c0524a" }}>📉 亏损榜</div>
+              <Table size="small" rowKey="part_id" pagination={false} loading={loading}
+                dataSource={ranking?.loss || []} columns={rankCols(true)} scroll={{ x: 700 }} />
+            </div>
           </div>
-          <div style={{ flex: "1 1 480px", minWidth: 300 }}>
-            <div style={{ fontWeight: 500, marginBottom: 6, color: "#c0524a" }}>📉 亏损榜</div>
-            <Table size="small" rowKey="part_id" pagination={false} loading={loading}
-              dataSource={ranking?.loss || []} columns={rankCols(true)} scroll={{ x: 700 }} />
-          </div>
-        </div>
-        {ranking?.counts && (
-          <div style={{ marginTop: 8, fontSize: 12, color: "var(--mb-text-3)" }}>
-            共 {ranking.counts.total_parts} 型号，有成本 {ranking.counts.with_cost}（赚 {ranking.counts.profitable} / 亏 {ranking.counts.loss}），
-            无成本 {ranking.counts.no_cost_parts}（毛利未知，不入榜）
-          </div>
-        )}
+          {ranking?.counts && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "var(--mb-text-3)" }}>
+              共 {ranking.counts.total_parts} 型号，有成本 {ranking.counts.with_cost}（赚 {ranking.counts.profitable} / 亏 {ranking.counts.loss}），
+              无成本 {ranking.counts.no_cost_parts}（毛利未知，不入榜）
+            </div>
+          )}
+        </>)}
       </Card>
 
       <Card title="订单拉通 · 销售订单（一单一行，点表头排序）" style={{ marginBottom: 16 }} size="small">
@@ -360,20 +385,26 @@ export default function BossBoardPage() {
         extra={isAdmin && <Button size="small" onClick={rebuildPools}>重算池</Button>}>
         <Alert type="info" showIcon style={{ marginBottom: 10 }}
           message="只读分析·潜在降本机会：所有替换均「待核实」兼容性/客户指定品牌/合同，当前无可执行金额。库存 8 月盘点前不作推荐条件，供应稳定性看采购频次/供应商数/最近采购日。" />
-        <Table size="small" rowKey="group_id" loading={loading}
+        {pools?.ranking_capped && (
+          <Alert type="warning" showIcon style={{ marginBottom: 10 }}
+            message={`池数量超过分析上限，已退回「按成员数排序」——当前非按节省金额全局排名。`} />
+        )}
+        <Table<PoolListItem> size="small" rowKey="group_id" loading={poolLoading}
           dataSource={pools?.items || []} columns={poolCols} scroll={{ x: 800 }}
-          pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 个池` }} />
+          onChange={(pag) => setPoolPage((q) => ({ page: pag.current || 1, page_size: pag.pageSize || q.page_size }))}
+          pagination={{ current: pools?.page ?? 1, pageSize: poolPage.page_size, total: pools?.total ?? 0,
+            showSizeChanger: true, pageSizeOptions: [10, 20, 50], showTotal: (t) => `共 ${t} 个池` }} />
       </Card>
 
       <Drawer width={isMobile ? "100%" : 640} open={poolDetail != null} onClose={() => setPoolDetail(null)}
         title={poolDetail ? `通用号池 #${poolDetail.group_id}（${poolDetail.member_count} 个型号）` : ""}>
-        {poolDetail && <PoolDetail d={poolDetail} accent={token.colorPrimary} />}
+        {poolDetail && <PoolDetail d={poolDetail} />}
       </Drawer>
     </>
   );
 }
 
-function PoolDetail({ d, accent }: { d: any; accent: string }) {
+function PoolDetail({ d }: { d: PoolDetailT }) {
   return (
     <>
       {(d.needs_calibration || d.oversized) && (
@@ -386,29 +417,34 @@ function PoolDetail({ d, accent }: { d: any; accent: string }) {
         <b>池总需求（跨品牌）</b>：{num(d.demand.total_qty)} 件 · {money(d.demand.total_revenue_ex_tax)}
         <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>{d.demand.note}</div>
       </div>
-      <div style={{ marginBottom: 12 }}>
-        <b>降本机会（只读）</b>：理论上限 <span style={{ color: "#9a7b43" }}>{money(d.savings.theoretical_max)}</span> ·
-        供应层面上限 {money(d.savings.supply_available_upper)} · <Tag color="orange">无可执行金额</Tag>
-        <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>{d.savings.label}</div>
-      </div>
-      <Table size="small" rowKey="part_id" pagination={false} dataSource={d.members}
+      {/* benchmark/savings 属成本组，无权限时被脱敏为 null → 显示占位而非崩溃 */}
+      {d.savings ? (
+        <div style={{ marginBottom: 12 }}>
+          <b>降本机会（只读）</b>：理论上限 <span style={{ color: "#9a7b43" }}>{money(d.savings.theoretical_max)}</span> ·
+          供应层面上限 {money(d.savings.supply_available_upper)} · <Tag color="orange">无可执行金额</Tag>
+          <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>{d.savings.label}</div>
+        </div>
+      ) : (
+        <div style={{ marginBottom: 12, color: "var(--mb-text-3)", fontSize: 12.5 }}>降本金额按权限不可见</div>
+      )}
+      <Table<PoolMemberRow> size="small" rowKey="part_id" pagination={false} dataSource={d.members}
         columns={[
-          { title: "型号", dataIndex: "pn_std", render: (v, r: any) => (
+          { title: "型号", dataIndex: "pn_std", render: (v, r) => (
             <span>{v} {r.brand && <Tag>{r.brand}</Tag>}
-              {r.part_id === d.benchmark.cost_part_id && <Tag color="green">性价比标杆</Tag>}</span>) },
-          { title: "采购均价", key: "pw", align: "right", render: (_, r: any) => money(r.purchase_price?.wavg) },
+              {d.benchmark && r.part_id === d.benchmark.cost_part_id && <Tag color="green">性价比标杆</Tag>}</span>) },
+          { title: "采购均价", key: "pw", align: "right", render: (_, r) => money(r.purchase_price?.wavg) },
           { title: "采购溢价", dataIndex: "purchase_premium_pct", align: "right",
-            render: (v: number, r: any) => v == null ? "—" :
+            render: (v: number | null, r) => v == null ? "—" :
               <span style={{ color: r.brand_premium_purchase ? "#c0524a" : undefined }}>{pct(v)}</span> },
-          { title: "销售均价", key: "sw", align: "right", render: (_, r: any) => money(r.sale_price?.wavg) },
-          { title: "销量", key: "q", align: "right", render: (_, r: any) => num(r.sale_price?.qty_sold) },
-          { title: "供应", key: "sup", render: (_, r: any) => r.purchase_price?.supply ?
+          { title: "销售均价", key: "sw", align: "right", render: (_, r) => money(r.sale_price?.wavg) },
+          { title: "销量", key: "q", align: "right", render: (_, r) => num(r.sale_price?.qty_sold) },
+          { title: "供应", key: "sup", render: (_, r) => r.purchase_price?.supply ?
             `${r.purchase_price.supply.purchase_orders}次/${r.purchase_price.supply.suppliers}商` : "—" },
         ]} />
-      {d.savings.opportunities?.length > 0 && (
+      {d.savings && d.savings.opportunities.length > 0 && (
         <>
           <div style={{ fontWeight: 500, margin: "14px 0 6px" }}>降本机会明细</div>
-          <Table size="small" rowKey={(r: any) => r.from_part_id} pagination={false}
+          <Table<PoolOpportunity> size="small" rowKey={(r) => r.from_part_id} pagination={false}
             dataSource={d.savings.opportunities}
             columns={[
               { title: "高价型号", dataIndex: "from_pn" },
@@ -417,8 +453,8 @@ function PoolDetail({ d, accent }: { d: any; accent: string }) {
               { title: "销量", dataIndex: "qty_sold", align: "right", render: num },
               { title: "理论节省", dataIndex: "theoretical_saving", align: "right", render: money },
               { title: "供应", dataIndex: "supply_available", align: "center",
-                render: (v: boolean, r: any) => v ? <Tag color="blue">可得</Tag> :
-                  <Tooltip title={r.block_reason}><Tag>不稳</Tag></Tooltip> },
+                render: (v: boolean, r) => v ? <Tag color="blue">可得</Tag> :
+                  <Tooltip title={r.block_reason || undefined}><Tag>不稳</Tag></Tooltip> },
               { title: "核实状态", dataIndex: "verification_status", align: "center",
                 render: (v: string) => <Tag color="orange">{v}</Tag> },
             ]} />
