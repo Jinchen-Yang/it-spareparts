@@ -1,12 +1,20 @@
 """通用号池重算：已生效双向互替连通分量成池、单向/pending不成池、
 稳定 group_id 复用、合并/拆分报告、关系待校准、超限、dry_run 预览。"""
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.models.dimensions import DimPart
 from app.models.inventory import PartPool, PartPoolMember, PartSubstitute
 from app.services import pool
 from app import config
+
+# 镜像迁移 d3e8f1a6b2c4 的序列对齐语句（复审二轮 P0-2）：建序列后必须对齐到现存
+# max(group_id)，否则已有池数据时 nextval 从 1 起会与现存 group_id 碰撞。
+_SEQ_ALIGN_SQL = (
+    "SELECT setval('part_pool_group_id_seq', "
+    "GREATEST(COALESCE((SELECT MAX(group_id) FROM part_pool), 0), 1), "
+    "COALESCE((SELECT MAX(group_id) FROM part_pool), 0) > 0)"
+)
 
 
 def _part(db, pn):
@@ -128,3 +136,40 @@ def test_retired_id_never_reused(db, parts):
     gid_fg = m2[p["F"]]
     assert p["D"] not in m2                 # 池② 已退役
     assert gid_fg != gid_de, "退役 ID 绝不能被无关新池复用"
+
+
+def test_seq_migration_aligns_to_existing_pool_max(db, parts):
+    """复审二轮 P0-2：升级时 part_pool 已有数据，序列必须对齐到 max(group_id) 之后。
+    reviewer 复现的 bug：固定 START 1 → max=1 时 nextval=1 → 下次建池撞现存 group_id。"""
+    p = parts
+    # 清空池表以控制 MAX（序列/池行在库内跨用例累积，非行级隔离）
+    db.execute(text("DELETE FROM part_pool_member"))
+    db.execute(text("DELETE FROM part_pool"))
+    # 模拟"已存在池数据"（中间版本/重跑/已存在环境遗留）：一个高 group_id 的存活池
+    db.add(PartPool(group_id=7, member_count=2, needs_calibration=False, oversized=False))
+    db.add_all([PartPoolMember(part_id=p["A"], group_id=7),
+                PartPoolMember(part_id=p["B"], group_id=7)])
+    db.commit()
+    # 模拟迁移前的"坏序列"（reviewer 的碰撞前置）：RESTART WITH 1
+    db.execute(text("ALTER SEQUENCE part_pool_group_id_seq RESTART WITH 1"))
+    db.execute(text(_SEQ_ALIGN_SQL))        # 跑迁移的对齐语句
+    nxt = db.execute(text("SELECT nextval('part_pool_group_id_seq')")).scalar()
+    assert nxt == 8, f"对齐后应从 max(7)+1=8 起，实得 {nxt}（会与现存 group_id=7 碰撞）"
+
+    # 端到端：对齐后 rebuild 建的新池必须避开现存 group_id 7（A-B 存活保 7、新池 D-E 取新 ID）
+    _edge(db, p["A"], p["B"]); _edge(db, p["D"], p["E"]); db.commit()
+    pool.rebuild(db)
+    m = dict(db.execute(select(PartPoolMember.part_id, PartPoolMember.group_id)).all())
+    assert m[p["A"]] == m[p["B"]]
+    assert m[p["D"]] == m[p["E"]]
+    assert m[p["D"]] != m[p["A"]], "新池 ID 不得与其它池碰撞"
+
+
+def test_seq_migration_empty_table_starts_at_one(db):
+    """空池表升级：对齐语句应让首个 nextval=1（COALESCE 0 → is_called=false，不被推到 2）。"""
+    db.execute(text("DELETE FROM part_pool_member"))
+    db.execute(text("DELETE FROM part_pool"))
+    db.execute(text("ALTER SEQUENCE part_pool_group_id_seq RESTART WITH 50"))  # 故意打乱
+    db.execute(text(_SEQ_ALIGN_SQL))
+    nxt = db.execute(text("SELECT nextval('part_pool_group_id_seq')")).scalar()
+    assert nxt == 1

@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
-  Alert, Button, Card, DatePicker, Drawer, Grid, Segmented, Table, Tag, Tooltip,
+  Alert, Button, Card, DatePicker, Drawer, Grid, Input, Segmented, Select, Table, Tag, Tooltip,
   message, theme,
 } from "antd";
-import type { ColumnsType } from "antd/es/table";
+import type { ColumnsType, TablePaginationConfig } from "antd/es/table";
+import type { SorterResult } from "antd/es/table/interface";
 import dayjs, { type Dayjs } from "dayjs";
 import PageHeader from "../components/PageHeader";
 import {
   dashboardKpi, dashboardTrend, dashboardPartRanking, dashboardSales, dashboardPurchaseOrders,
   dashboardPools, dashboardPool, dashboardPoolRebuild,
-  type DashboardKpi, type TrendPoint,
+  type DashboardKpi, type TrendPoint, type PartRankingResp, type PartRankingRow,
+  type SalesOrderRow, type PurchaseOrderRow, type OrdersResp, type OrdersQuery,
+  type PoolsResp, type PoolListItem, type PoolDetail as PoolDetailT,
 } from "../api";
 import { Modal } from "antd";
 
@@ -105,36 +108,98 @@ export default function BossBoardPage() {
 
   const [kpi, setKpi] = useState<DashboardKpi | null>(null);
   const [trend, setTrend] = useState<TrendPoint[]>([]);
-  const [ranking, setRanking] = useState<any>(null);
-  const [sales, setSales] = useState<any>(null);
-  const [purchases, setPurchases] = useState<any>(null);
-  const [pools, setPools] = useState<any>(null);
-  const [poolDetail, setPoolDetail] = useState<any>(null);
+  const [ranking, setRanking] = useState<PartRankingResp | null>(null);
+  const [sales, setSales] = useState<OrdersResp<SalesOrderRow> | null>(null);
+  const [purchases, setPurchases] = useState<OrdersResp<PurchaseOrderRow> | null>(null);
+  const [pools, setPools] = useState<PoolsResp | null>(null);
+  const [poolDetail, setPoolDetail] = useState<PoolDetailT | null>(null);
   const [loading, setLoading] = useState(false);
 
+  // 订单拉通两张表各自的服务端查询态（分页/搜索/状态/排序），独立于顶部时间范围
+  const [salesQ, setSalesQ] = useState<OrdersQuery>({ page: 1, page_size: 20, sort: "gross_profit", order: "asc" });
+  const [purchaseQ, setPurchaseQ] = useState<OrdersQuery>({ page: 1, page_size: 20, sort: "order_date", order: "desc" });
+  const [salesLoading, setSalesLoading] = useState(false);
+  const [purchaseLoading, setPurchaseLoading] = useState(false);
+
+  // 上部板块（KPI/趋势/盈亏榜/池）：每块独立落库，一块失败不拖垮其余（复审 Standards：不再全有或全无）
   const load = useCallback(async () => {
     setLoading(true);
-    try {
-      const [k, t, r, s, p] = await Promise.all([
-        dashboardKpi(range), dashboardTrend({ ...range, granularity }),
-        dashboardPartRanking({ ...range, cost_method: costMethod, top: 10 }),
-        dashboardSales({ ...range, page_size: 20, sort: "gross_profit", order: "asc" }),
-        dashboardPools(range),
-      ]);
-      const po = await dashboardPurchaseOrders({ ...range, page_size: 20 });
-      setKpi(k.data); setTrend(t.data.series); setRanking(r.data); setSales(s.data); setPools(p.data);
-      setPurchases(po.data);
-    } catch {
-      message.error("看板加载失败");
-    } finally { setLoading(false); }
+    const errs: string[] = [];
+    const into = async <T,>(p: Promise<{ data: T }>, set: (v: T | null) => void, label: string) => {
+      try { set((await p).data); } catch { set(null); errs.push(label); }
+    };
+    await Promise.all([
+      into(dashboardKpi(range), setKpi, "经营KPI"),
+      into(dashboardTrend({ ...range, granularity }), (d) => setTrend(d?.series ?? []), "趋势"),
+      into(dashboardPartRanking({ ...range, cost_method: costMethod, top: 10 }), setRanking, "盈亏榜"),
+      // 池数量有限（生产 ~40）：一次取满（≤100，全局按节省额排名），本地翻页的"共 N 个池"才准
+      into(dashboardPools({ ...range, sort: "savings", page_size: 100 }), setPools, "数据池"),
+    ]);
+    if (errs.length) message.error(`部分板块加载失败：${errs.join("、")}`);
+    setLoading(false);
   }, [range, granularity, costMethod]);
 
   useEffect(() => { load(); }, [load]);
+
+  // 订单表独立拉取（服务端分页/搜索/筛选/排序）：range 或本表查询态变化即重取
+  useEffect(() => {
+    let alive = true;
+    setSalesLoading(true);
+    dashboardSales({ ...range, ...salesQ })
+      .then(({ data }) => { if (alive) setSales(data); })
+      .catch(() => { if (alive) { setSales(null); message.error("销售订单加载失败"); } })
+      .finally(() => { if (alive) setSalesLoading(false); });
+    return () => { alive = false; };
+  }, [range, salesQ]);
+
+  useEffect(() => {
+    let alive = true;
+    setPurchaseLoading(true);
+    dashboardPurchaseOrders({ ...range, ...purchaseQ })
+      .then(({ data }) => { if (alive) setPurchases(data); })
+      .catch(() => { if (alive) { setPurchases(null); message.error("采购订单加载失败"); } })
+      .finally(() => { if (alive) setPurchaseLoading(false); });
+    return () => { alive = false; };
+  }, [range, purchaseQ]);
+
+  // 换时间范围时两张订单表回到第 1 页（避免停在越界页看到空表）
+  useEffect(() => {
+    setSalesQ((q) => (q.page === 1 ? q : { ...q, page: 1 }));
+    setPurchaseQ((q) => (q.page === 1 ? q : { ...q, page: 1 }));
+  }, [range]);
 
   const openPool = async (gid: number) => {
     try { const { data } = await dashboardPool(gid, range); setPoolDetail(data); }
     catch { message.error("池详情加载失败"); }
   };
+
+  // AntD Table onChange → 服务端分页/排序。columnKey 即后端 sort 字段名。
+  const onOrdersChange = (
+    setQ: React.Dispatch<React.SetStateAction<OrdersQuery>>,
+    fallbackSort: string,
+  ) => (pag: TablePaginationConfig, _f: unknown, sorter: SorterResult<any> | SorterResult<any>[]) => {
+    const s = Array.isArray(sorter) ? sorter[0] : sorter;
+    setQ((q) => ({
+      ...q,
+      page: pag.current || 1,
+      page_size: pag.pageSize || q.page_size,
+      sort: s?.order ? String(s.columnKey || fallbackSort) : q.sort,
+      order: s?.order === "ascend" ? "asc" : s?.order === "descend" ? "desc" : q.order,
+    }));
+  };
+  const orderSortProps = (q: OrdersQuery, key: string) => ({
+    sorter: true as const,
+    sortOrder: q.sort === key ? (q.order === "asc" ? "ascend" as const : "descend" as const) : null,
+  });
+  const ordersToolbar = (q: OrdersQuery, setQ: React.Dispatch<React.SetStateAction<OrdersQuery>>) => (
+    <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+      <Input.Search allowClear placeholder="搜索 型号 / 单号 / 描述 / 品牌" style={{ width: 260 }}
+        defaultValue={q.q} onSearch={(v) => setQ((s) => ({ ...s, q: v || undefined, page: 1 }))} />
+      <Select style={{ width: 130 }} value={q.status ?? ""}
+        onChange={(v) => setQ((s) => ({ ...s, status: v || undefined, page: 1 }))}
+        options={[{ label: "仅已生效", value: "" }, { label: "全部状态", value: "全部" }]} />
+    </div>
+  );
 
   // 重算：先 dry-run 预览合并/拆分，再确认后执行（复审 P1-6：闭环，不只有预览）
   const rebuildPools = async () => {
@@ -153,7 +218,7 @@ export default function BossBoardPage() {
     } catch { message.error("重算预览失败"); }
   };
 
-  const rankCols = (loss: boolean): ColumnsType<any> => [
+  const rankCols = (loss: boolean): ColumnsType<PartRankingRow> => [
     { title: "型号", dataIndex: "pn_std", width: 160, render: (v, r) => (
       <span><span style={{ fontFamily: "monospace", fontSize: 12.5 }}>{v}</span>
         {r.brand && <Tag style={{ marginLeft: 6 }}>{r.brand}</Tag>}</span>) },
@@ -170,17 +235,19 @@ export default function BossBoardPage() {
     { title: "覆盖率", dataIndex: "cost_coverage", width: 72, align: "right", render: pct },
   ];
 
-  // 订单粒度：一张销售订单一行（多型号聚合）
-  const salesCols: ColumnsType<any> = [
-    { title: "日期", dataIndex: "order_date", width: 100, render: (v, r) => (
-      <span>{v || "—"}{r.is_future && <Tag color="red" style={{ marginLeft: 4 }}>未来</Tag>}</span>) },
+  // 订单粒度：一张销售订单一行（多型号聚合）。列 key = 后端 sort 字段名（用于服务端排序）。
+  const salesCols: ColumnsType<SalesOrderRow> = [
+    { title: "日期", dataIndex: "order_date", key: "order_date", width: 116, ...orderSortProps(salesQ, "order_date"),
+      render: (v, r) => (<span>{v || "—"}{r.is_future && <Tag color="red" style={{ marginLeft: 4 }}>未来</Tag>}</span>) },
     { title: "销售单号", dataIndex: "order_no", width: 130, render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span> },
-    { title: "客户", dataIndex: "customer", width: 130, ellipsis: true },
-    { title: "销售员", dataIndex: "salesperson", width: 80 },
-    { title: "型号数", dataIndex: "part_count", width: 70, align: "right" },
+    { title: "客户", dataIndex: "customer", width: 130, ellipsis: true, render: (v) => v ?? "—" },
+    { title: "销售员", dataIndex: "salesperson", width: 80, render: (v) => v ?? "—" },
+    { title: "型号数", dataIndex: "part_count", key: "part_count", width: 88, align: "right", ...orderSortProps(salesQ, "part_count") },
     { title: "总量", dataIndex: "total_qty", width: 70, align: "right", render: num },
-    { title: "营收(未税)", dataIndex: "total_revenue", width: 110, align: "right", render: money },
-    { title: "毛利", dataIndex: "total_gross_profit", width: 100, align: "right",
+    { title: "营收(未税)", dataIndex: "total_revenue", key: "revenue", width: 124, align: "right",
+      ...orderSortProps(salesQ, "revenue"), render: money },
+    { title: "毛利", dataIndex: "total_gross_profit", key: "gross_profit", width: 116, align: "right",
+      ...orderSortProps(salesQ, "gross_profit"),
       render: (v) => v == null ? <Tag>无成本</Tag> : <span style={{ color: v < 0 ? "#c0524a" : undefined }}>{money(v)}</span> },
     { title: "状态", dataIndex: "data_status", width: 84, render: (v) => v ? <Tag>{v}</Tag> : "—" },
     { title: "采购拉通", dataIndex: "linked_purchase", width: 84, align: "center",
@@ -188,20 +255,21 @@ export default function BossBoardPage() {
   ];
 
   // 订单粒度：一张采购订单一行
-  const purchaseCols: ColumnsType<any> = [
-    { title: "日期", dataIndex: "order_date", width: 100, render: (v, r) => (
-      <span>{v || "—"}{r.is_future && <Tag color="red" style={{ marginLeft: 4 }}>未来</Tag>}</span>) },
+  const purchaseCols: ColumnsType<PurchaseOrderRow> = [
+    { title: "日期", dataIndex: "order_date", key: "order_date", width: 116, ...orderSortProps(purchaseQ, "order_date"),
+      render: (v, r) => (<span>{v || "—"}{r.is_future && <Tag color="red" style={{ marginLeft: 4 }}>未来</Tag>}</span>) },
     { title: "采购单号", dataIndex: "order_no", width: 140, render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span> },
-    { title: "采购员", dataIndex: "purchaser", width: 80 },
+    { title: "采购员", dataIndex: "purchaser", width: 80, render: (v) => v ?? "—" },
     { title: "类型", dataIndex: "source_type", width: 90, render: (v) => v ? <Tag>{v}</Tag> : "—" },
-    { title: "型号数", dataIndex: "part_count", width: 70, align: "right" },
+    { title: "型号数", dataIndex: "part_count", key: "part_count", width: 88, align: "right", ...orderSortProps(purchaseQ, "part_count") },
     { title: "总量", dataIndex: "total_qty", width: 70, align: "right", render: num },
-    { title: "金额(未税)", dataIndex: "total_ex_tax", width: 110, align: "right", render: money },
+    { title: "金额(未税)", dataIndex: "total_ex_tax", key: "amount", width: 124, align: "right",
+      ...orderSortProps(purchaseQ, "amount"), render: money },
     { title: "关联销售单", dataIndex: "linked_sales_order", width: 130, render: (v) => v || <span style={{ color: "var(--mb-text-3)" }}>—</span> },
     { title: "状态", dataIndex: "data_status", width: 84, render: (v) => v ? <Tag>{v}</Tag> : "—" },
   ];
 
-  const poolCols: ColumnsType<any> = [
+  const poolCols: ColumnsType<PoolListItem> = [
     { title: "池号", dataIndex: "group_id", width: 70 },
     { title: "成员", dataIndex: "member_count", width: 70, align: "right" },
     { title: "池需求量", dataIndex: "demand_qty", width: 90, align: "right", render: num },
@@ -270,16 +338,22 @@ export default function BossBoardPage() {
         )}
       </Card>
 
-      <Card title="订单拉通 · 销售订单（一单一行，按毛利升序）" style={{ marginBottom: 16 }} size="small">
-        <Table size="small" rowKey="order_id" loading={loading}
-          dataSource={sales?.items || []} columns={salesCols} scroll={{ x: 1000 }}
-          pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 单` }} />
+      <Card title="订单拉通 · 销售订单（一单一行，点表头排序）" style={{ marginBottom: 16 }} size="small">
+        {ordersToolbar(salesQ, setSalesQ)}
+        <Table<SalesOrderRow> size="small" rowKey="order_id" loading={salesLoading}
+          dataSource={sales?.items || []} columns={salesCols} scroll={{ x: 1080 }}
+          onChange={onOrdersChange(setSalesQ, "gross_profit")}
+          pagination={{ current: sales?.page ?? 1, pageSize: salesQ.page_size, total: sales?.total ?? 0,
+            showSizeChanger: true, pageSizeOptions: [20, 50, 100], showTotal: (t) => `共 ${t} 单` }} />
       </Card>
 
-      <Card title="订单拉通 · 采购订单（一单一行）" style={{ marginBottom: 16 }} size="small">
-        <Table size="small" rowKey="order_id" loading={loading}
-          dataSource={purchases?.items || []} columns={purchaseCols} scroll={{ x: 1000 }}
-          pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 单` }} />
+      <Card title="订单拉通 · 采购订单（一单一行，点表头排序）" style={{ marginBottom: 16 }} size="small">
+        {ordersToolbar(purchaseQ, setPurchaseQ)}
+        <Table<PurchaseOrderRow> size="small" rowKey="order_id" loading={purchaseLoading}
+          dataSource={purchases?.items || []} columns={purchaseCols} scroll={{ x: 1080 }}
+          onChange={onOrdersChange(setPurchaseQ, "order_date")}
+          pagination={{ current: purchases?.page ?? 1, pageSize: purchaseQ.page_size, total: purchases?.total ?? 0,
+            showSizeChanger: true, pageSizeOptions: [20, 50, 100], showTotal: (t) => `共 ${t} 单` }} />
       </Card>
 
       <Card title="通用号数据池 · 潜在降本机会" size="small"

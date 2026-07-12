@@ -19,7 +19,11 @@ from app.models.dimensions import DimCustomer, DimPart
 from app.models.inventory import PartPool, PartPoolMember, PartSubstitute
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
-from app.services.dashboard import _purchase_ex_tax_expr, _purchase_ex_unit, _sale_ex_unit
+from app.services.pricing import (
+    purchase_ex_tax_expr as _purchase_ex_tax_expr,
+    purchase_ex_unit as _purchase_ex_unit,
+    sale_ex_unit as _sale_ex_unit,
+)
 from app.services.query_filters import active_orders
 
 _MIN_RELIABLE_SAMPLES = 2   # 加权均价样本≥2 才作降本标杆（避免一次异常低价，甲方修正②）
@@ -321,10 +325,17 @@ def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: 
     # - 供应层面潜在上限 supply_available_upper：标杆供应可得的子集——**仍非"可执行"**。
     # 系统对兼容性/客户指定品牌/合同**无任何证据**，因此每条替换的核实状态一律"待核实"，
     # 绝不把未核实的金额算成"可执行"、绝不显示绿色"是"（复审：约1074万虚假可执行，误导极大）。
+    # 供应可得（收紧，复审二轮 P1-5）：标杆型号须 ≥N 张去重采购单 + ≥1 家供应商 +
+    # 最近采购在窗口内。仍只代表"标杆供应稳定"，不代表兼容/可替换（一律待核实）。
     bench_supply_ok = False
     if cost_bench_pid is not None and pstats.get(cost_bench_pid):
         s = pstats[cost_bench_pid]["supply"]
-        bench_supply_ok = bool(s["purchase_orders"] and s["last_purchase_date"])
+        last = s.get("last_purchase_date")
+        recent = bool(last and (today - date.fromisoformat(last)).days <= config.POOL_SUPPLY_RECENT_DAYS)
+        bench_supply_ok = bool(
+            (s.get("purchase_orders") or 0) >= config.POOL_SUPPLY_MIN_ORDERS
+            and (s.get("suppliers") or 0) >= config.POOL_SUPPLY_MIN_SUPPLIERS
+            and recent)
     theoretical = supply_upper = 0.0
     opps = []
     for m in members:
@@ -337,7 +348,7 @@ def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: 
         theoretical += t
         block = None
         if not bench_supply_ok:
-            block = "标杆型号供应不稳（近窗口无采购或无供应商）"
+            block = "标杆型号供应不稳（去重采购单<2、无供应商或近一年无采购）"
         elif (m["purchase_price"] or {}).get("samples", 0) < 1:
             block = "样本不足"
         supply_available = block is None      # 仅代表"标杆供应可得"，不代表可替换
@@ -417,24 +428,47 @@ def _customer_cross_brand(db, part_ids, date_from, upper, user_ctx, top=10):
             "customers": rows[:top]}
 
 
+def _pool_list_item(p: PartPool, d: dict) -> dict:
+    return {
+        "group_id": p.group_id, "member_count": p.member_count,
+        "needs_calibration": p.needs_calibration, "oversized": p.oversized,
+        "demand_qty": d["demand"]["total_qty"], "demand_revenue_ex_tax": d["demand"]["total_revenue_ex_tax"],
+        "theoretical_saving": d["savings"]["theoretical_max"],
+        "supply_available_upper": d["savings"]["supply_available_upper"],
+    }
+
+
 def list_pools(db: Session, date_from: date | None = None, date_to: date | None = None,
-               as_of: date | None = None, page: int = 1, page_size: int = 20) -> dict:
-    """池清单：按成员数降序稳定排序，**先分页再逐池分析**（复审 P1-6：避免先分析全部池的 N+1）。
-    降本额只对当前页的池计算，故清单口径=页内排序；跨全部池的节省排名不在此（分析代价高）。"""
+               as_of: date | None = None, page: int = 1, page_size: int = 20,
+               sort: str = "member_count") -> dict:
+    """池清单。两种排序口径：
+    - sort="member_count"（默认）：按成员数降序，**先分页再逐池分析**（避免 N+1）。
+    - sort="savings"（复审二轮 P1-4）：**全局**按理论节省额排名——先分析全部池再排序分页，
+      否则"成员少但节省高"的池会永远藏在后页。池数量有限（生产 ~40），超 POOL_RANK_ANALYZE_CAP
+      时退回成员数排序并置 ranking_capped=True（当前不触发）。"""
     total = db.execute(select(func.count()).select_from(PartPool)).scalar() or 0
+    ranking_capped = False
+
+    if sort == "savings":
+        if total <= config.POOL_RANK_ANALYZE_CAP:
+            all_pools = db.execute(
+                select(PartPool).order_by(PartPool.group_id.asc())).scalars().all()
+            scored = [(p, analyze(db, p.group_id, date_from, date_to, as_of)) for p in all_pools]
+            # 全局按节省额降序，再按 group_id 稳定破并列
+            scored.sort(key=lambda pd: (-(pd[1]["savings"]["theoretical_max"] or 0), pd[0].group_id))
+            page_slice = scored[(page - 1) * page_size: page * page_size]
+            items = [_pool_list_item(p, d) for p, d in page_slice]
+            return {"total": total, "page": page, "page_size": page_size,
+                    "sort": "savings", "ranking_capped": False, "items": items}
+        ranking_capped = True   # 池数超上限，退回成员数排序（数据规模保护）
+
     page_pools = db.execute(
         select(PartPool).order_by(PartPool.member_count.desc(), PartPool.group_id.asc())
         .limit(page_size).offset((page - 1) * page_size)
     ).scalars().all()
-    items = []
-    for p in page_pools:   # 只分析当前页
-        d = analyze(db, p.group_id, date_from, date_to, as_of)
-        items.append({
-            "group_id": p.group_id, "member_count": p.member_count,
-            "needs_calibration": p.needs_calibration, "oversized": p.oversized,
-            "demand_qty": d["demand"]["total_qty"], "demand_revenue_ex_tax": d["demand"]["total_revenue_ex_tax"],
-            "theoretical_saving": d["savings"]["theoretical_max"],
-            "supply_available_upper": d["savings"]["supply_available_upper"],
-        })
+    # 页内再按节省额降序（仅当前页口径，非全局）
+    items = [_pool_list_item(p, analyze(db, p.group_id, date_from, date_to, as_of))
+             for p in page_pools]
     items.sort(key=lambda x: (x["theoretical_saving"] or 0), reverse=True)
-    return {"total": total, "page": page, "page_size": page_size, "items": items}
+    return {"total": total, "page": page, "page_size": page_size,
+            "sort": "member_count", "ranking_capped": ranking_capped, "items": items}

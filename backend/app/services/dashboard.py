@@ -10,7 +10,7 @@
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from sqlalchemy import exists, or_
@@ -20,10 +20,16 @@ from app.models.dimensions import DimCustomer, DimPart
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.services.query_filters import active_orders
+# 税价换算收敛到 pricing 单一真值源（复审二轮 Standards：财务规则防多处漂移）。
+# 保留 `_`-前缀别名，本模块内既有调用点不动。
+from app.services.pricing import (
+    purchase_ex_tax_expr as _purchase_ex_tax_expr,
+    purchase_ex_unit as _purchase_ex_unit,
+    sale_ex_unit as _sale_ex_unit,
+)
 
 # 取消/作废口径：非"已生效"里明确终止的两种状态（其余如进行中/草稿单独计）
 _CANCELLED_STATUS = ("已取消", "作废")
-_VAT1 = Decimal(1) + config.PROFIT_VAT_RATE
 
 
 def _f(x) -> float | None:
@@ -32,26 +38,6 @@ def _f(x) -> float | None:
 
 def _r(x, n=2) -> float | None:
     return round(float(x), n) if x is not None else None
-
-
-def _sale_ex_unit():
-    """销售未税单价：销售 unit_price 恒含税 → ÷1.13（TAX_BASIS!=ex_tax 时原值）。"""
-    up = FSalesLine.unit_price
-    return up / _VAT1 if config.TAX_BASIS == "ex_tax" else up
-
-
-def _purchase_ex_unit():
-    """采购未税单价：按头表 is_tax_inclusive 归一（含税/未知÷1.13、明确不含税原值）。"""
-    up = FPurchaseLine.unit_price
-    if config.TAX_BASIS != "ex_tax":
-        return up
-    return case((FPurchaseOrder.is_tax_inclusive.is_(False), up), else_=up / _VAT1)
-
-
-def _purchase_ex_tax_expr():
-    """采购行未税额表达式：unit_price*qty，按头表 is_tax_inclusive 归一（含税/未知÷1.13、
-    明确不含税取原值）；TAX_BASIS!=ex_tax 时不换算。与 profit._ex_tax_purchase 同口径。"""
-    return _purchase_ex_unit() * FPurchaseLine.qty
 
 
 def kpi(db: Session, date_from: date | None, date_to: date | None,

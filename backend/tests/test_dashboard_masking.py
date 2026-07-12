@@ -82,3 +82,77 @@ def test_boss_sees_everything(db, seeded):
     ctx = _ctx()
     d = security.apply_field_visibility(pool.analyze(db, seeded, as_of=AS_OF, user_ctx=ctx), ctx)
     assert d["benchmark"] is not None and d["savings"] is not None
+
+
+# ── 复审二轮 P0：订单拉通端点的 total_ 前缀派生键此前漏登记 → 端点级脱敏回归 ──
+
+def test_purchase_orders_masks_total_ex_tax(db, seeded):
+    """采购订单一单一行的 total_ex_tax 是采购额，data_purchase_cost=False 必须遮。"""
+    ctx = _ctx(data_purchase_cost=False)
+    d = security.apply_field_visibility(
+        dashboard.purchase_orders(db, as_of=AS_OF, status="全部", user_ctx=ctx), ctx)
+    assert d["items"], "seeded 应有采购订单"
+    for row in d["items"]:
+        assert row["total_ex_tax"] is None       # 采购额遮
+        assert row["total_qty"] is not None       # 数量非成本，可见
+        assert row["order_no"] is not None
+
+
+def test_sales_orders_masks_total_gross_profit(db, seeded):
+    """销售订单一单一行的 total_gross_profit 是毛利，data_profit=False 必须遮；营收仍可见。"""
+    ctx = _ctx(data_profit=False)
+    d = security.apply_field_visibility(
+        dashboard.sales_orders(db, as_of=AS_OF, status="全部", user_ctx=ctx), ctx)
+    assert d["items"], "seeded 应有销售订单"
+    for row in d["items"]:
+        assert row["total_gross_profit"] is None  # 毛利遮
+        assert row["total_revenue"] is not None    # 营收非成本，可见
+
+
+def test_pool_masks_brand_premium_purchase(db, seeded):
+    """池成员 brand_premium_purchase（采购溢价判定）反推采购成本比较，必须遮。"""
+    ctx = _ctx(data_purchase_cost=False)
+    d = security.apply_field_visibility(pool.analyze(db, seeded, as_of=AS_OF, user_ctx=ctx), ctx)
+    for m in d["members"]:
+        assert m["brand_premium_purchase"] is None
+
+
+# ── 系统性护栏：穷举所有面板端点，凡键名暗示"成本/毛利金额/采购溢价"者，cost-blind 角色一律 null ──
+# 复审两次都在"新加端点又漏登记同类键"上翻车，本测试按语义扫全部端点键，杜绝下次再漏。
+# 命中词刻意收窄到"金额/判定"语义，绕开营收(revenue_costed)、覆盖率(cost_coverage)、
+# 计数(no_cost/with_cost/profitable)、方法名(cost_method)这些含 cost/profit 子串但非成本值的键。
+_COST_HINT = ("gross_profit", "premium_purchase", "purchase_price", "benchmark", "saving",
+              "purchase_ex_tax", "total_ex_tax", "cost_ex_tax", "unit_price_ex_tax")
+
+
+def _leaky_keys(obj, path=""):
+    """递归找出"键名暗示成本金额/毛利/采购溢价"且值非 None 的标量路径。"""
+    bad = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            kl = k.lower()
+            if (any(h in kl for h in _COST_HINT)
+                    and v is not None and not isinstance(v, (dict, list))):
+                bad.append(f"{path}.{k}={v!r}")
+            bad += _leaky_keys(v, f"{path}.{k}")
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            bad += _leaky_keys(v, f"{path}[{i}]")
+    return bad
+
+
+def test_no_cost_key_leaks_across_all_panels(db, seeded):
+    """cost-blind（采购成本+毛利全关）角色跑遍所有看板/池端点，任何成本语义键都不得漏。"""
+    ctx = _ctx(data_purchase_cost=False, data_profit=False)
+    av = lambda d: security.apply_field_visibility(d, ctx)  # noqa: E731
+    panels = {
+        "kpi": av(dashboard.kpi(db, None, None, as_of=AS_OF, user_ctx=ctx)),
+        "ranking": av(dashboard.part_ranking(db, None, None, as_of=AS_OF, user_ctx=ctx)),
+        "sales_orders": av(dashboard.sales_orders(db, as_of=AS_OF, status="全部", user_ctx=ctx)),
+        "purchase_orders": av(dashboard.purchase_orders(db, as_of=AS_OF, status="全部", user_ctx=ctx)),
+        "pool": av(pool.analyze(db, seeded, as_of=AS_OF, user_ctx=ctx)),
+        "pools": av(pool.list_pools(db, as_of=AS_OF)),
+    }
+    leaks = {name: _leaky_keys(d) for name, d in panels.items()}
+    leaks = {n: v for n, v in leaks.items() if v}
+    assert not leaks, f"成本语义键泄漏：{leaks}"
