@@ -150,7 +150,26 @@ def test_order_sort_by_hidden_field_falls_back_to_date(db):
     assert order(full, "gross_profit") == ["OA", "OB"]   # 毛利降序：高毛利在前
     assert order(full, "order_date") == ["OB", "OA"]      # 日期降序：晚单在前
     # 无利润权限请求按毛利排序 → 退回日期序（≠毛利序），不泄漏盈亏排名
-    assert order(_ctx(data_profit=False), "gross_profit") == ["OB", "OA"]
+    limited = dashboard.sales_orders(
+        db, status="全部", sort="gross_profit", order="desc", as_of=AS_OF,
+        user_ctx=_ctx(data_profit=False),
+    )
+    assert [i["order_no"] for i in limited["items"]] == ["OB", "OA"]
+    assert limited["effective_sort"] == "order_date"
+    assert limited["ranking_restricted"] is True
+    assert limited["profit_restricted"] is True
+    masked = security.apply_field_visibility(limited, _ctx(data_profit=False))
+    assert all(i["total_gross_profit"] is None for i in masked["items"])
+
+
+def test_purchase_order_sort_response_explains_cost_restriction(db, seeded):
+    limited = dashboard.purchase_orders(
+        db, status="全部", sort="amount", order="desc", as_of=AS_OF,
+        user_ctx=_ctx(data_purchase_cost=False),
+    )
+    assert limited["effective_sort"] == "order_date"
+    assert limited["ranking_restricted"] is True
+    assert limited["cost_restricted"] is True
 
 
 def test_pool_masks_brand_premium_purchase(db, seeded):

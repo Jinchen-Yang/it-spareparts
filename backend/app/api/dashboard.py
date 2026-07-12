@@ -138,7 +138,8 @@ def pools(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     record_access_log(ctx, "pools", "dashboard", {"sort": sort})
-    data = pool.list_pools(db, date_from, date_to, page=page, page_size=page_size, sort=sort)
+    data = pool.list_pools(db, date_from, date_to, page=page, page_size=page_size,
+                           sort=sort, user_ctx=ctx)
     return apply_field_visibility(data, ctx)
 
 

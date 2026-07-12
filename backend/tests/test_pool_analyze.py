@@ -3,8 +3,13 @@
 from datetime import date
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app import permissions, security
+from app.api import dashboard as dashboard_api
+from app.db import get_db
+from app.main import app
 from app.etl import loader
 from app.models.dimensions import DimPart
 from app.models.inventory import PartSubstitute
@@ -14,6 +19,12 @@ from app import config
 from tests import factories as f
 
 AS_OF = date(2026, 6, 1)
+
+
+def _ctx(**over):
+    perms = permissions._full()
+    perms.update(over)
+    return security.UserContext(user_id="u", role="custom", permissions=perms, is_authenticated=True)
 
 
 def _part(db, pn, brand):
@@ -159,6 +170,17 @@ def test_supply_window_not_truncated_by_page_range(db):
     assert d["benchmark"]["cost_ex_tax"] == 100.0        # 标杆价来自窗口外采购，仍算得出
     assert d["benchmark"]["supply_ok"] is True            # 60/90天前×2单 → 一年内供应稳定
     assert d["savings"]["supply_available_upper"] > 0     # 供应可得 → 有上限
+    assert d["supply_window"] == {
+        "date_from": "2025-06-01", "date_to": "2026-06-01", "as_of": "2026-06-01"
+    }
+
+    historical = pool.analyze(
+        db, gid, date_from=date(2025, 12, 1), date_to=date(2025, 12, 31), as_of=AS_OF
+    )
+    assert historical["benchmark"]["cost_ex_tax"] == 100.0
+    assert historical["benchmark"]["supply_ok"] is True
+    assert historical["demand"]["total_qty"] == 0.0
+    assert historical["supply_window"] == d["supply_window"]
 
 
 def test_list_pools_savings_global_ranking(db):
@@ -215,3 +237,53 @@ def test_list_pools_pagination_and_cap(db, monkeypatch):
     monkeypatch.setattr(config, "POOL_RANK_ANALYZE_CAP", 2)
     rc = pool.list_pools(db, as_of=AS_OF, sort="savings", page=1, page_size=2)
     assert rc["ranking_capped"] is True and rc["sort"] == "member_count"
+
+
+def test_pools_endpoint_restricts_savings_ranking_and_masks_values(db):
+    """端点级：节省序与成员序不同，成本受限账号必须拿到成员序。"""
+    a1 = _part(db, "PN-EA1", "BE1"); a2 = _part(db, "PN-EA2", "BE2"); a3 = _part(db, "PN-EA3", "BE3")
+    _edge(db, a1, a2); _edge(db, a2, a3)
+    b1 = _part(db, "PN-EB1", "BE4"); b2 = _part(db, "PN-EB2", "BE5")
+    _edge(db, b1, b2)
+    db.flush(); pool.rebuild(db)
+    batch = SysImportBatch(filename="endpoint-rank.xlsx", file_type="purchase", file_hash="hrank-endpoint")
+    db.add(batch); db.flush()
+    purchase = {"PE": f.purchase_head("PE", on=date(2026, 1, 5), is_tax_inclusive=True)}
+    purchase_lines = [
+        f.purchase_line("PE", "LE1", "PN-EB1", qty="5", price="113"),
+        f.purchase_line("PE", "LE2", "PN-EB2", qty="5", price="226"),
+    ]
+    loader.load(db, f.purchase_result(purchase, purchase_lines), batch.id, date(2026, 6, 1))
+    sales = {"SE": f.sales_head("SE", on=date(2026, 2, 1))}
+    loader.load(db, f.sales_result(
+        sales, [f.sales_line("SE", "SLE2", "PN-EB2", qty="20", price="300")]
+    ), batch.id, date(2026, 6, 1))
+    db.commit(); profit.recompute(db)
+    gid_a = db.execute(select(pool.PartPoolMember.group_id).where(pool.PartPoolMember.part_id == a1)).scalar()
+    gid_b = db.execute(select(pool.PartPoolMember.group_id).where(pool.PartPoolMember.part_id == b1)).scalar()
+
+    unrestricted = _ctx()
+    restricted = _ctx(data_purchase_cost=False)
+    original = dict(app.dependency_overrides)
+    try:
+        app.dependency_overrides[get_db] = lambda: db
+        app.dependency_overrides[dashboard_api.get_current_user_context] = lambda: unrestricted
+        app.dependency_overrides[dashboard_api.current_role] = lambda: "boss"
+        client = TestClient(app)
+        full = client.get("/api/dashboard/pools", params={"sort": "savings", "page_size": 10})
+        assert full.status_code == 200
+        assert full.json()["effective_sort"] == "savings"
+        assert full.json()["items"][0]["group_id"] == gid_b
+
+        app.dependency_overrides[dashboard_api.get_current_user_context] = lambda: restricted
+        limited = client.get("/api/dashboard/pools", params={"sort": "savings", "page_size": 10})
+        assert limited.status_code == 200
+        body = limited.json()
+        assert body["ranking_restricted"] is True
+        assert body["effective_sort"] == "member_count"
+        assert body["items"][0]["group_id"] == gid_a
+        assert body["items"][0]["group_id"] != gid_b
+        assert all(item["theoretical_saving"] is None for item in body["items"])
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(original)
