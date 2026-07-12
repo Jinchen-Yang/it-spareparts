@@ -527,7 +527,11 @@ export interface PurchaseOrderRow {
   linked_sales_order: string | null; part_count: number; total_qty: number | null;
   total_ex_tax: number | null;
 }
-export interface OrdersResp<T> { total: number; page: number; page_size: number; as_of: string; items: T[] }
+export interface OrdersResp<T> {
+  total: number; page: number; page_size: number; as_of: string; items: T[];
+  effective_sort: string; ranking_restricted: boolean;
+  profit_restricted?: boolean; cost_restricted?: boolean;
+}
 
 export const dashboardSales = (params: OrdersQuery = {}) =>
   api.get<OrdersResp<SalesOrderRow>>("/dashboard/sales", { params });
@@ -542,7 +546,8 @@ export interface PoolListItem {
 }
 export interface PoolsResp {
   total: number; page: number; page_size: number;
-  sort: "savings" | "member_count"; ranking_capped: boolean; items: PoolListItem[];
+  sort: "savings" | "member_count"; effective_sort: "savings" | "member_count";
+  ranking_restricted: boolean; ranking_capped: boolean; items: PoolListItem[];
 }
 export const dashboardPools = (params: { date_from?: string; date_to?: string; page?: number; page_size?: number; sort?: string } = {}) =>
   api.get<PoolsResp>("/dashboard/pools", { params });
@@ -563,6 +568,7 @@ export interface PoolOpportunity {
 export interface PoolDetail {
   group_id: number; member_count: number; needs_calibration?: boolean; oversized?: boolean;
   demand: { total_qty: number | null; total_revenue_ex_tax: number | null; note?: string };
+  supply_window: { date_from: string; date_to: string; as_of: string };
   benchmark: { cost_part_id: number | null } | null;    // 成本组 → 可能整块脱敏
   savings: { theoretical_max: number | null; supply_available_upper: number | null;
     label?: string; opportunities: PoolOpportunity[] } | null;

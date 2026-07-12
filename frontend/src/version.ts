@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.12.2";
+export const APP_VERSION = "1.12.3";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.12.3",
+    date: "2026-07-12",
+    items: [
+      "稳定池 ID 迁移保留历史序列高水位，退役池不会因存活最大 ID 变小而复用；补齐空表、未调用、序列落后和高水位生命周期测试",
+      "成本不可见账号的池列表强制按成员数/稳定池号排序，并明确提示当前非按节省金额排序；订单受限排序返回实际排序口径，前端显示无利润权限与无成本的区别",
+      "池详情增加请求代次守卫，快速切换池或时间范围不会出现旧响应覆盖新范围；供应能力固定按当前日期往前 365 天取证据，并回传 supply window",
+      "更新生产 runbook：单一 BACKUP、db 容器备份校验、40 单对账、新镜像 one-off 迁移/重算、序列结论和干净数据库回滚",
+    ],
+  },
   {
     version: "1.12.2",
     date: "2026-07-12",

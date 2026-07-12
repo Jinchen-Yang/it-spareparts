@@ -124,6 +124,7 @@ export default function BossBoardPage() {
   const [poolPage, setPoolPage] = useState({ page: 1, page_size: 10 });
   const [poolLoading, setPoolLoading] = useState(false);
   const [poolNonce, setPoolNonce] = useState(0);
+  const poolDetailGen = useRef(0);
 
   // 上部板块（KPI/趋势/盈亏榜/池）：每块独立落库，一块失败不拖垮其余（复审 Standards：不再全有或全无）。
   // 代次守卫（复审三轮 Standards）：快速切时间范围时，旧请求即便最后返回也不得覆盖新范围数据。
@@ -189,9 +190,22 @@ export default function BossBoardPage() {
   }, [range]);
 
   const openPool = async (gid: number) => {
-    try { const { data } = await dashboardPool(gid, range); setPoolDetail(data); }
-    catch { message.error("池详情加载失败"); }
+    const gen = ++poolDetailGen.current;
+    setPoolDetail(null);
+    try {
+      const { data } = await dashboardPool(gid, range);
+      if (gen === poolDetailGen.current) setPoolDetail(data);
+    } catch {
+      if (gen === poolDetailGen.current) message.error("池详情加载失败");
+    }
   };
+
+  // 时间范围变化后，已打开详情不能继续显示旧窗口；同时使旧请求失效。
+  useEffect(() => {
+    poolDetailGen.current += 1;
+    setPoolDetail(null);
+    return () => { poolDetailGen.current += 1; };
+  }, [range]);
 
   // AntD Table onChange → 服务端分页/排序。columnKey 即后端 sort 字段名。
   const onOrdersChange = (
@@ -207,9 +221,11 @@ export default function BossBoardPage() {
       order: s?.order === "ascend" ? "asc" : s?.order === "descend" ? "desc" : q.order,
     }));
   };
-  const orderSortProps = (q: OrdersQuery, key: string) => ({
-    sorter: true as const,
-    sortOrder: q.sort === key ? (q.order === "asc" ? "ascend" as const : "descend" as const) : null,
+  const orderSortProps = (
+    q: OrdersQuery, key: string, effectiveSort: string | undefined, restricted: boolean,
+  ) => ({
+    sorter: !(restricted && (key === "gross_profit" || key === "amount")),
+    sortOrder: effectiveSort === key ? (q.order === "asc" ? "ascend" as const : "descend" as const) : null,
   });
   const ordersToolbar = (q: OrdersQuery, setQ: React.Dispatch<React.SetStateAction<OrdersQuery>>) => (
     <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
@@ -258,18 +274,18 @@ export default function BossBoardPage() {
 
   // 订单粒度：一张销售订单一行（多型号聚合）。列 key = 后端 sort 字段名（用于服务端排序）。
   const salesCols: ColumnsType<SalesOrderRow> = [
-    { title: "日期", dataIndex: "order_date", key: "order_date", width: 116, ...orderSortProps(salesQ, "order_date"),
+    { title: "日期", dataIndex: "order_date", key: "order_date", width: 116, ...orderSortProps(salesQ, "order_date", sales?.effective_sort, sales?.ranking_restricted ?? false),
       render: (v, r) => (<span>{v || "—"}{r.is_future && <Tag color="red" style={{ marginLeft: 4 }}>未来</Tag>}</span>) },
     { title: "销售单号", dataIndex: "order_no", width: 130, render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span> },
     { title: "客户", dataIndex: "customer", width: 130, ellipsis: true, render: (v) => v ?? "—" },
     { title: "销售员", dataIndex: "salesperson", width: 80, render: (v) => v ?? "—" },
-    { title: "型号数", dataIndex: "part_count", key: "part_count", width: 88, align: "right", ...orderSortProps(salesQ, "part_count") },
+    { title: "型号数", dataIndex: "part_count", key: "part_count", width: 88, align: "right", ...orderSortProps(salesQ, "part_count", sales?.effective_sort, sales?.ranking_restricted ?? false) },
     { title: "总量", dataIndex: "total_qty", width: 70, align: "right", render: num },
     { title: "营收(未税)", dataIndex: "total_revenue", key: "revenue", width: 124, align: "right",
-      ...orderSortProps(salesQ, "revenue"), render: money },
+      ...orderSortProps(salesQ, "revenue", sales?.effective_sort, sales?.ranking_restricted ?? false), render: money },
     { title: "毛利", dataIndex: "total_gross_profit", key: "gross_profit", width: 116, align: "right",
-      ...orderSortProps(salesQ, "gross_profit"),
-      render: (v) => v == null ? <Tag>无成本</Tag> : <span style={{ color: v < 0 ? "#c0524a" : undefined }}>{money(v)}</span> },
+      ...orderSortProps(salesQ, "gross_profit", sales?.effective_sort, sales?.ranking_restricted ?? false),
+      render: (v) => v == null ? <Tag>{sales?.profit_restricted ? "无利润权限" : "无成本"}</Tag> : <span style={{ color: v < 0 ? "#c0524a" : undefined }}>{money(v)}</span> },
     { title: "状态", dataIndex: "data_status", width: 84, render: (v) => v ? <Tag>{v}</Tag> : "—" },
     { title: "采购拉通", dataIndex: "linked_purchase", width: 84, align: "center",
       render: (v) => v ? <Tag color="blue">已生效</Tag> : <span style={{ color: "var(--mb-text-3)" }}>—</span> },
@@ -277,15 +293,15 @@ export default function BossBoardPage() {
 
   // 订单粒度：一张采购订单一行
   const purchaseCols: ColumnsType<PurchaseOrderRow> = [
-    { title: "日期", dataIndex: "order_date", key: "order_date", width: 116, ...orderSortProps(purchaseQ, "order_date"),
+    { title: "日期", dataIndex: "order_date", key: "order_date", width: 116, ...orderSortProps(purchaseQ, "order_date", purchases?.effective_sort, purchases?.ranking_restricted ?? false),
       render: (v, r) => (<span>{v || "—"}{r.is_future && <Tag color="red" style={{ marginLeft: 4 }}>未来</Tag>}</span>) },
     { title: "采购单号", dataIndex: "order_no", width: 140, render: (v) => <span style={{ fontFamily: "monospace", fontSize: 12 }}>{v}</span> },
     { title: "采购员", dataIndex: "purchaser", width: 80, render: (v) => v ?? "—" },
     { title: "类型", dataIndex: "source_type", width: 90, render: (v) => v ? <Tag>{v}</Tag> : "—" },
-    { title: "型号数", dataIndex: "part_count", key: "part_count", width: 88, align: "right", ...orderSortProps(purchaseQ, "part_count") },
+    { title: "型号数", dataIndex: "part_count", key: "part_count", width: 88, align: "right", ...orderSortProps(purchaseQ, "part_count", purchases?.effective_sort, purchases?.ranking_restricted ?? false) },
     { title: "总量", dataIndex: "total_qty", width: 70, align: "right", render: num },
     { title: "金额(未税)", dataIndex: "total_ex_tax", key: "amount", width: 124, align: "right",
-      ...orderSortProps(purchaseQ, "amount"), render: money },
+      ...orderSortProps(purchaseQ, "amount", purchases?.effective_sort, purchases?.ranking_restricted ?? false), render: money },
     { title: "关联销售单", dataIndex: "linked_sales_order", width: 130, render: (v) => v || <span style={{ color: "var(--mb-text-3)" }}>—</span> },
     { title: "状态", dataIndex: "data_status", width: 84, render: (v) => v ? <Tag>{v}</Tag> : "—" },
   ];
@@ -389,6 +405,10 @@ export default function BossBoardPage() {
           <Alert type="warning" showIcon style={{ marginBottom: 10 }}
             message={`池数量超过分析上限，已退回「按成员数排序」——当前非按节省金额全局排名。`} />
         )}
+        {pools?.ranking_restricted && (
+          <Alert type="info" showIcon style={{ marginBottom: 10 }}
+            message="无成本权限，当前非按节省金额排序。" />
+        )}
         <Table<PoolListItem> size="small" rowKey="group_id" loading={poolLoading}
           dataSource={pools?.items || []} columns={poolCols} scroll={{ x: 800 }}
           onChange={(pag) => setPoolPage((q) => ({ page: pag.current || 1, page_size: pag.pageSize || q.page_size }))}
@@ -416,6 +436,9 @@ function PoolDetail({ d }: { d: PoolDetailT }) {
       <div style={{ marginBottom: 12, fontSize: 13 }}>
         <b>池总需求（跨品牌）</b>：{num(d.demand.total_qty)} 件 · {money(d.demand.total_revenue_ex_tax)}
         <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>{d.demand.note}</div>
+      </div>
+      <div style={{ marginBottom: 12, fontSize: 11.5, color: "var(--mb-text-3)" }}>
+        供应证据窗口：{d.supply_window.date_from} 至 {d.supply_window.date_to}（as of {d.supply_window.as_of}）；销售需求按看板时间范围统计
       </div>
       {/* benchmark/savings 属成本组，无权限时被脱敏为 null → 显示占位而非崩溃 */}
       {d.savings ? (
