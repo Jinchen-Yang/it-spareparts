@@ -362,10 +362,10 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
     if date_to:
         base = base.where(so.order_date <= date_to)
     if q and q.strip():
-        kw = f"%{q.strip()}%"   # 订单粒度：含匹配型号的订单（TODO 第②块接统一型号搜索）
+        kw = f"%{q.strip()}%"   # 订单粒度：单号直匹 或 含匹配型号（TODO 第②块接统一型号搜索）
         sub = (select(FSalesLine.order_id).join(DimPart, FSalesLine.part_id == DimPart.id)
                .where(or_(DimPart.pn_std.ilike(kw), FSalesLine.description.ilike(kw), FSalesLine.brand.ilike(kw))))
-        base = base.where(so.id.in_(sub))
+        base = base.where(or_(so.order_no.ilike(kw), so.id.in_(sub)))
     if customer:
         base = base.where(DimCustomer.name_normalized.ilike(f"%{customer.strip()}%"))
     if salesperson:
@@ -428,10 +428,10 @@ def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date
     if date_to:
         base = base.where(po.order_date <= date_to)
     if q and q.strip():
-        kw = f"%{q.strip()}%"
+        kw = f"%{q.strip()}%"   # 单号直匹 或 含匹配型号
         sub = (select(pl.order_id).join(DimPart, pl.part_id == DimPart.id)
                .where(or_(DimPart.pn_std.ilike(kw), pl.description.ilike(kw), pl.brand.ilike(kw))))
-        base = base.where(po.id.in_(sub))
+        base = base.where(or_(po.order_no.ilike(kw), po.id.in_(sub)))
     if source_type:
         base = base.where(po.source_type == source_type)
     base = base.group_by(po.id, po.order_no, po.order_date, po.purchaser, po.source_type,
