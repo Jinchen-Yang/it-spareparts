@@ -3,6 +3,7 @@ import type { ComponentType, LazyExoticComponent, ReactNode } from "react";
 import {
   CloudUploadOutlined,
   ControlOutlined,
+  DashboardOutlined,
   FundOutlined,
   InboxOutlined,
   LineChartOutlined,
@@ -45,6 +46,7 @@ export interface NavGroup {
 
 // 路由级懒加载：每个页面独立 chunk，首包不再背 1.6MB。
 // import() 工厂单独存一份（load 字段）供空闲预取——lazy 与预取命中同一模块缓存
+const loadBossBoard = () => import("./pages/BossBoardPage");
 const loadPartSearch = () => import("./pages/PartSearchPage");
 const loadProfit = () => import("./pages/ProfitPage");
 const loadPurchaseAnalysis = () => import("./pages/purchases/PurchaseAnalysisPage");
@@ -58,6 +60,7 @@ const loadGovernance = () => import("./pages/GovernancePage");
 const loadChat = () => import("./pages/ChatPage");
 const loadAccounts = () => import("./pages/AccountsPage");
 
+const BossBoardPage = lazy(loadBossBoard);
 const PartSearchPage = lazy(loadPartSearch);
 const ProfitPage = lazy(loadProfit);
 const PurchaseAnalysisPage = lazy(loadPurchaseAnalysis);
@@ -73,6 +76,13 @@ const AccountsPage = lazy(loadAccounts);
 
 // 组 key 加 grp- 前缀与 item key 隔离命名空间（防止将来改用 SubMenu 时 keyPath 相撞）
 export const NAV_GROUPS: NavGroup[] = [
+  {
+    key: "grp-board",
+    label: null,
+    items: [
+      { key: "boss", path: "/boss", label: "经营看板", icon: <DashboardOutlined />, perm: "page_boss_board", page: BossBoardPage, load: loadBossBoard },
+    ],
+  },
   {
     key: "grp-quick",
     label: null,

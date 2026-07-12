@@ -135,6 +135,15 @@ REVENUE_BUSINESS_TYPES = ["备件销售"]
 # 含税口径：ex_tax（默认，按不含税算毛利）| as_is（原价粗算）
 TAX_BASIS = "ex_tax"
 
+# 正式利润统一税率（甲方 2026-07-11：采购与销售统一按 13% 做业务计算口径，
+# 与 2026 年施行的《增值税法》一般货物 13% 一致）。
+# 含税÷1.13 → 未税；未税×1.13 → 含税。
+# 原则：**不覆盖原始单据的 tax_rate / 0% / 空税率**（保留可追溯），仅用于生成"未税计算字段"。
+# 销售 unit_price 恒含税 → 一律 ÷1.13；采购 unit_price 口径跟随头表 is_tax_inclusive：
+# 含税单(或口径未知，含税为常态) ÷1.13、明确不含税单取原值。旧的"逐单 tax_rate 换算"
+# 因大量 0%/空税率会静默虚高未税额，已弃用，统一到此常量。
+PROFIT_VAT_RATE = Decimal("0.13")
+
 # ---- 维保出库成本（客户 2026-07 确认口径，docs/维保出库成本核算-开发方案.md §0）----
 # 注意：与销售毛利的 ex_tax/移动加权是"刻意不同"的两套口径（客户拍板），不是疏漏。
 MAINT_COST_START_DATE = date(2024, 1, 1)          # 项目成本起算日；此前出库行不计价（cost_source=NULL）
@@ -149,6 +158,12 @@ MAINT_EXPENSE_ACTIVE_STATUS = "已结束"             # 报销单生效口径（
 
 # 目标毛利率（报价提示/低毛利标记用；整机拆解的"建议售价"=成本×1/(1-此值)）
 TARGET_MARGIN = Decimal("0.20")
+
+# ---- 通用号数据池（老板看板池化分析，甲方 2026-07-11 修正版）----
+# 池 = 已生效双向互替(status=active,direction=both)关系的连通分量，成员≥2；单向替代不成池。
+# 稳定 group_id 由 pool.rebuild() 重算并保留，关系变化时报告合并/拆分。
+POOL_OVERSIZE_MEMBERS = 30        # 成员超此数 → oversized 标记，需人工确认（生产最大池 59）
+POOL_PREMIUM_WARN_PCT = Decimal("0.20")   # 采购/销售溢价率 ≥20% 视为"品牌溢价"候选（相对池基准）
 
 # 整机拆解/批量查价取"近 N 天采购价"窗口（客户要"最近15天采购价"）
 RECENT_PURCHASE_DAYS = 15
@@ -325,6 +340,12 @@ FIELD_GROUPS = {
                       "cost_total", "cost_inc", "cost_ex",
                       "cost_source", "cost_tax_basis", "price_month", "trace_months",
                       "linked_purchase_order_no",
+                      # 老板看板（dashboard/pool）派生成本键：采购额、采购价统计容器、
+                      # 未税单价、池标杆成本、双端溢价、两级节省——全部反推采购成本，随 data_purchase_cost 遮。
+                      # 容器级登记（purchase_price/benchmark/savings）避免与销售侧同名内层键(wavg/median)冲突。
+                      "purchase_ex_tax", "purchase_price", "unit_price_ex_tax",
+                      "benchmark", "savings", "theoretical_saving", "supply_available_upper",
+                      "theoretical_max", "unit_saving", "cost_ex_tax", "purchase_premium_pct",
                       # 维保 v2（§16）：盈亏看板与取价元信息派生键（budget=合同额亦可反推毛利）
                       "spent", "spent_parts", "spent_expense", "budget",
                       "remaining", "remaining_pct", "low_conf_pct",

@@ -48,11 +48,14 @@ def _expected_by_pn_grouping(db):
     """旧口径（按 pn_std 文本分组）手工回放，作为等价性基准。"""
     rows = db.execute(select(FSalesLine.id, FSalesLine.pn_std)).all()
     pn_of = dict(rows)
+    # 采购价统一按 13% 换未税（fixture 的 is_tax_inclusive=None → 视作含税 ÷1.13），
+    # 与 profit._load_purchase_events 同口径，保证等价性基准仍成立
+    ex = lambda p: profit._ex_tax_purchase(Decimal(p), None)
     pur = defaultdict(list)
-    pur["PN-X"] = [cost.PurchaseEvent(date(2026, 1, 5), Decimal(10), Decimal(80)),
-                   cost.PurchaseEvent(date(2026, 1, 20), Decimal(10), Decimal(100))]
-    pur["PN-Y"] = [cost.PurchaseEvent(date(2026, 1, 5), Decimal(5), Decimal(200))]
-    fallback = {"PN-X": Decimal(100), "PN-Y": Decimal(200)}
+    pur["PN-X"] = [cost.PurchaseEvent(date(2026, 1, 5), Decimal(10), ex(80)),
+                   cost.PurchaseEvent(date(2026, 1, 20), Decimal(10), ex(100))]
+    pur["PN-Y"] = [cost.PurchaseEvent(date(2026, 1, 5), Decimal(5), ex(200))]
+    fallback = {"PN-X": ex(100), "PN-Y": ex(200)}
     sales = defaultdict(list)
     dates = {"SL1": date(2026, 1, 10), "SL2": date(2026, 2, 1),
              "SL3": date(2026, 2, 1), "SL4": date(2026, 2, 1)}

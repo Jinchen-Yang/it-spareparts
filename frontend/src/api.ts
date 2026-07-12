@@ -475,3 +475,38 @@ export interface InventoryRow {
   unit_cost: number | null;
   inventory_value: number | null;
 }
+
+// ===== 老板经营看板（page_boss_board）=====
+export interface DashboardKpi {
+  window: { date_from: string | null; date_to: string | null; as_of: string; future_excluded: boolean };
+  sales_ex_tax: number | null; purchase_ex_tax: number | null;
+  sales_costed_ex_tax: number | null; gross_profit: number | null;
+  gross_margin: number | null; cost_coverage: number | null;
+  sales_uncosted_ex_tax: number | null; excluded_revenue: number | null;
+  orders_active: number; orders_in_progress: number; orders_cancelled: number;
+  orders_future: number; anomaly_lines: number;
+}
+export const dashboardKpi = (params: { date_from?: string; date_to?: string } = {}) =>
+  api.get<DashboardKpi>("/dashboard/kpi", { params });
+
+export interface TrendPoint { period: string; sales_ex_tax: number; purchase_ex_tax: number; gross_profit: number }
+export const dashboardTrend = (params: { date_from?: string; date_to?: string; granularity?: string } = {}) =>
+  api.get<{ granularity: string; series: TrendPoint[] }>("/dashboard/trend", { params });
+
+export const dashboardPartRanking = (params: { date_from?: string; date_to?: string; cost_method?: string; top?: number } = {}) =>
+  api.get<any>("/dashboard/part-ranking", { params });
+
+export const dashboardSales = (params: Record<string, any> = {}) =>
+  api.get<any>("/dashboard/sales", { params });
+
+export const dashboardPurchaseOrders = (params: Record<string, any> = {}) =>
+  api.get<any>("/dashboard/purchase-orders", { params });
+
+export const dashboardPools = (params: { date_from?: string; date_to?: string; page?: number; page_size?: number } = {}) =>
+  api.get<any>("/dashboard/pools", { params });
+
+export const dashboardPool = (groupId: number, params: { date_from?: string; date_to?: string } = {}) =>
+  api.get<any>(`/dashboard/pool/${groupId}`, { params });
+
+export const dashboardPoolRebuild = (dry_run = true) =>
+  api.post<any>("/dashboard/pool/rebuild", null, { params: { dry_run } });

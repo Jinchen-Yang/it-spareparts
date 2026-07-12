@@ -29,17 +29,26 @@ _CENT = Decimal("0.01")
 _RATE = Decimal("0.0001")
 
 
-def _ex_tax(amount: Decimal, tax_rate: Decimal | None) -> Decimal:
-    if config.TAX_BASIS == "ex_tax" and tax_rate:
-        return amount / (Decimal(1) + tax_rate)
+def _ex_tax_sale(amount: Decimal) -> Decimal:
+    """销售含税额 → 未税额（统一 13%）。销售 unit_price 恒为含税单价。"""
+    if config.TAX_BASIS == "ex_tax":
+        return amount / (Decimal(1) + config.PROFIT_VAT_RATE)
     return amount
+
+
+def _ex_tax_purchase(price: Decimal, is_tax_inclusive: bool | None) -> Decimal:
+    """采购单价 → 未税单价（统一 13%）。含税单(或口径未知，含税为常态) ÷1.13；
+    明确不含税单(is_tax_inclusive is False)取原值——采购 unit_price 口径跟随头表标记。"""
+    if config.TAX_BASIS == "ex_tax" and is_tax_inclusive is not False:
+        return price / (Decimal(1) + config.PROFIT_VAT_RATE)
+    return price
 
 
 def _load_purchase_events(db: Session):
     """按 part_id 收集采购入库事件(不含税单价)+ 每 part 兜底价(最近采购价)。"""
     q = (
         select(FPurchaseLine.id, FPurchaseLine.part_id, FPurchaseOrder.order_date,
-                FPurchaseLine.qty, FPurchaseLine.unit_price, FPurchaseOrder.tax_rate)
+                FPurchaseLine.qty, FPurchaseLine.unit_price, FPurchaseOrder.is_tax_inclusive)
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
         .where(FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
                FPurchaseLine.qty.is_not(None), FPurchaseLine.qty > 0,
@@ -51,8 +60,8 @@ def _load_purchase_events(db: Session):
 
     events: dict[int, list] = defaultdict(list)
     recent: dict[int, tuple] = {}   # part -> ((date, line_id), ex_price)  含 line_id 保证同日不歧义
-    for pl_id, part, odate, qty, price, trate in db.execute(q):
-        ex = _ex_tax(price, trate)
+    for pl_id, part, odate, qty, price, inc in db.execute(q):
+        ex = _ex_tax_purchase(price, inc)
         events[part].append(cost.PurchaseEvent(odate, qty, ex))
         key = (odate or date.min, pl_id)
         if part not in recent or key >= recent[part][0]:
@@ -68,7 +77,7 @@ def recompute(db: Session) -> dict:
     sq = (
         select(FSalesLine.id, FSalesLine.part_id, FSalesOrder.order_date,
                 FSalesLine.qty, FSalesLine.unit_price, FSalesLine.line_amount,
-                FSalesOrder.tax_rate, FSalesOrder.business_type)
+                FSalesOrder.business_type)
         .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
         # 同上：显式排序保证重算可复现
         .order_by(FSalesOrder.order_date.asc().nullsfirst(), FSalesLine.id.asc())
@@ -79,10 +88,10 @@ def recompute(db: Session) -> dict:
     # 按 part 分组销售事件
     by_part: dict[int, list] = defaultdict(list)
     meta: dict[int, dict] = {}
-    for sid, part, odate, qty, up, lamt, trate, btype in sales_rows:
+    for sid, part, odate, qty, up, lamt, btype in sales_rows:
         by_part[part].append(cost.SaleEvent(odate, sid, qty or Decimal(0)))
         meta[sid] = {"part": part, "qty": qty, "unit_price": up, "line_amount": lamt,
-                     "tax_rate": trate, "business_type": btype}
+                     "business_type": btype}
 
     # 回放每个 part
     line_cost: dict[int, cost.LineCost] = {}
@@ -103,12 +112,11 @@ def recompute(db: Session) -> dict:
         lc = line_cost.get(sid)
         qty = m["qty"] or Decimal(0)
         up = m["unit_price"] or Decimal(0)
-        trate = m["tax_rate"]
         mov = lc.moving_avg if lc else None
         fifo = lc.fifo if lc else None
         active = mov if active_is_moving else fifo
 
-        revenue = _ex_tax(qty * up, trate).quantize(_CENT)
+        revenue = _ex_tax_sale(qty * up).quantize(_CENT)
         is_excluded_part = m["part"] in excluded_parts
         counts = (m["business_type"] in config.REVENUE_BUSINESS_TYPES) and not is_excluded_part
         if counts:
