@@ -149,6 +149,26 @@ def sanitize(custom: dict | None) -> dict[str, bool]:
     return {k: bool(v) for k, v in custom.items() if k in _VALID}
 
 
+# "能改必须能看"的动作→数据依赖（复审阻塞 4）：动作权限开而对应数据可见权限关，
+# 用户会在看不见现值的情况下改写它（约束价单侧被静默清空的根源）。
+# 账号保存时拒绝（combo_errors），接口层 require_action(require_data=...) 兜底。
+ACTION_DATA_DEPENDENCIES: dict[str, str] = {
+    "action_pool_set_policy": "data_pool_price_governance",
+}
+
+
+def combo_errors(perms: dict[str, bool]) -> list[str]:
+    """校验**最终生效**权限（模板+自定义叠加后）的非法组合，返回人话错误清单。"""
+    errors: list[str] = []
+    for action_key, data_key in ACTION_DATA_DEPENDENCIES.items():
+        if perms.get(action_key, False) and not perms.get(data_key, False):
+            errors.append(
+                f"「{LABELS.get(action_key, action_key)}」需要同时开启"
+                f"「{LABELS.get(data_key, data_key)}」——能设置就必须能查看，"
+                f"否则会在看不见现值的情况下改写它")
+    return errors
+
+
 def hidden_groups(perms: dict | None) -> set[str]:
     """据 data_* 开关算出要隐藏的 FIELD_GROUPS 组名集合。"""
     if not perms:

@@ -79,11 +79,13 @@ def test_substitute_changes_never_touch_pools(db):
 
 def test_new_pool_ids_monotonic_never_reused(db):
     """group_id 单调递增；归档（退役）池的 ID 不会被新池复用。"""
-    a, b = _part(db, "SEQ-A"), _part(db, "SEQ-B")
+    a, a2 = _part(db, "SEQ-A"), _part(db, "SEQ-A2")
+    b, b2 = _part(db, "SEQ-B"), _part(db, "SEQ-B2")
+    c, c2 = _part(db, "SEQ-C"), _part(db, "SEQ-C2")
     db.commit()
-    p1 = pool_catalog.create_pool(db, name="池一", member_part_ids=[a], operated_by="t")
-    p2 = pool_catalog.create_pool(db, name="池二", member_part_ids=[b], operated_by="t")
+    p1 = pool_catalog.create_pool(db, name="池一", member_part_ids=[a, a2], operated_by="t")
+    p2 = pool_catalog.create_pool(db, name="池二", member_part_ids=[b, b2], operated_by="t")
     assert p2["group_id"] > p1["group_id"]
     pool_catalog.archive_pool(db, group_id=p2["group_id"], version=p2["version"], operated_by="t")
-    p3 = pool_catalog.create_pool(db, name="池三", operated_by="t")
+    p3 = pool_catalog.create_pool(db, name="池三", member_part_ids=[c, c2], operated_by="t")
     assert p3["group_id"] > p2["group_id"]

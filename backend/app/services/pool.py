@@ -132,7 +132,9 @@ def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: 
     """单个通用号池的降本分析（只读）。甲方修正版：双端溢价、供应稳定性非库存、
     节省分理论上限/可执行机会、客户跨品牌集中度（老板可见）。不输出自动替换指令。"""
     pool = db.get(PartPool, group_id)
-    if pool is None:
+    if pool is None or pool.status != "active":
+        # 归档池不是当前经营池（复审阻塞 2）：其成员可能已进新有效池，再分析会把同一
+        # PN 双份计入节省/需求。归档档案的查看走管理接口 /api/pools?status=archived。
         return None
     today = as_of or date.today()
     upper = min(date_to, today) if date_to else today
@@ -296,8 +298,11 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
     - sort="member_count"（默认）：按成员数降序，**先分页再逐池分析**（避免 N+1）。
     - sort="savings"（复审二轮 P1-4）：**全局**按理论节省额排名——先分析全部池再排序分页，
       否则"成员少但节省高"的池会永远藏在后页。池数量有限（生产 ~40），超 POOL_RANK_ANALYZE_CAP
-      时退回成员数排序并置 ranking_capped=True（当前不触发）。"""
-    total = db.execute(select(func.count()).select_from(PartPool)).scalar() or 0
+      时退回成员数排序并置 ranking_capped=True（当前不触发）。
+    只统计 status='active'（复审阻塞 2）：归档池成员可再入新有效池，混入清单/总数/
+    排名会把同一 PN 双份计入；归档档案查询走管理接口。"""
+    total = db.execute(select(func.count()).select_from(PartPool)
+                       .where(PartPool.status == "active")).scalar() or 0
     ranking_restricted = sort == "savings" and security.is_field_hidden(user_ctx, "theoretical_saving")
     if ranking_restricted:
         # 不仅不返回金额，连“按节省额”的执行路径也不能运行；否则行序仍是
@@ -308,7 +313,8 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
     if sort == "savings":
         if total <= config.POOL_RANK_ANALYZE_CAP:
             all_pools = db.execute(
-                select(PartPool).order_by(PartPool.group_id.asc())).scalars().all()
+                select(PartPool).where(PartPool.status == "active")
+                .order_by(PartPool.group_id.asc())).scalars().all()
             scored = [(p, analyze(db, p.group_id, date_from, date_to, as_of)) for p in all_pools]
             # 全局按节省额降序，再按 group_id 稳定破并列
             scored.sort(key=lambda pd: (-(pd[1]["savings"]["theoretical_max"] or 0), pd[0].group_id))
@@ -320,7 +326,8 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
         ranking_capped = True   # 池数超上限，退回成员数排序（数据规模保护）
 
     page_pools = db.execute(
-        select(PartPool).order_by(PartPool.member_count.desc(), PartPool.group_id.asc())
+        select(PartPool).where(PartPool.status == "active")
+        .order_by(PartPool.member_count.desc(), PartPool.group_id.asc())
         .limit(page_size).offset((page - 1) * page_size)
     ).scalars().all()
     # 成员数口径保持数据库排序；绝不能在当前页再按隐藏 theoretical_saving 排序。

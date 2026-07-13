@@ -33,6 +33,9 @@ _PART_LOCK_NS = 918273646
 
 _BASES = ("ex_tax", "inc_tax")
 _POLICY_HISTORY_LIMIT = 20
+# 《互通PN池》核心规则第 5 条：每个有效池至少包含两个 PN。只约束运行时写路径
+# （建池/调成员），迁移回填的历史池不经此校验（§21 要求存量池零变化）。
+MIN_ACTIVE_POOL_MEMBERS = 2
 
 
 class PoolCatalogError(Exception):
@@ -266,6 +269,9 @@ def create_pool(db: Session, *, name: str, description: str | None = None,
     if len(clean_name) > 128:
         raise PoolCatalogError("池名称过长（≤128 字符）")
     part_ids = sorted(set(member_part_ids or []))
+    if len(part_ids) < MIN_ACTIVE_POOL_MEMBERS:
+        raise PoolCatalogError(
+            f"有效池至少包含 {MIN_ACTIVE_POOL_MEMBERS} 个 PN（当前 {len(part_ids)} 个）")
 
     _lock_parts(db, part_ids)
     id_to_pn = _validate_parts(db, part_ids)
@@ -354,6 +360,14 @@ def update_members(db: Session, *, group_id: int, version: int,
     if missing_remove:
         raise PoolCatalogError(f"不是本池成员，无法移除: part_id={sorted(missing_remove)}")
 
+    # 有效池 ≥2 成员：先按增删差算出终态数量，任何删除发生前整体拒绝——
+    # 绝不出现"删了一半才发现不足"的部分结果
+    final_count = len(current_ids) - len(removes) + len(adds)
+    if final_count < MIN_ACTIVE_POOL_MEMBERS:
+        raise PoolCatalogError(
+            f"有效池至少包含 {MIN_ACTIVE_POOL_MEMBERS} 个 PN：本次调整后仅剩 "
+            f"{final_count} 个，未做任何改动")
+
     removed_pns = []
     if removes:
         removed_pns = sorted(db.scalars(
@@ -378,23 +392,50 @@ def update_members(db: Session, *, group_id: int, version: int,
     return _pool_dict(pool, _current_policy(db, group_id))
 
 
+_POLICY_OPS = ("set", "unset", "keep")
+
+
+def _resolve_policy_side(op: str | None, value: Decimal | None, basis: str, side: str,
+                         old: PartPoolPricePolicy | None,
+                         ex_attr: str, in_attr: str, basis_attr: str) -> tuple:
+    """单侧更新语义（复审阻塞 4）：返回 (op, ex_tax, input_value, input_basis)。
+
+    - op 缺省按参数推导：给了值 = set，没给值 = keep（**绝不**把 None 当"清空"）；
+    - 只有显式 op="unset" 才清空该侧；
+    - keep 原样复制当前策略该侧三个字段（无当前策略则保持未设置）。
+    """
+    op = op or ("set" if value is not None else "keep")
+    if op not in _POLICY_OPS:
+        raise PoolCatalogError(f"{side}操作必须是 set / unset / keep")
+    if op == "set":
+        if value is None:
+            raise PoolCatalogError(f"{side}为 set 时必须给出新值；清空请用显式 unset")
+        if value <= 0:
+            raise PoolCatalogError(f"{side}必须大于 0")
+        if basis not in _BASES:
+            raise PoolCatalogError(f"{side}录入口径必须是 ex_tax（未税）或 inc_tax（含税）")
+        return op, _to_ex_tax(value, basis), value, basis
+    if value is not None:
+        raise PoolCatalogError(f"{side}同时给出了新值与 {op} 指令，请二选一")
+    if op == "unset" or old is None:
+        return op, None, None, None
+    return op, getattr(old, ex_attr), getattr(old, in_attr), getattr(old, basis_attr)
+
+
 def set_price_policy(db: Session, *, group_id: int, version: int,
+                     purchase_op: str | None = None,
                      purchase_value: Decimal | None = None, purchase_basis: str = "ex_tax",
+                     sales_op: str | None = None,
                      sales_value: Decimal | None = None, sales_basis: str = "ex_tax",
                      note: str | None = None, operated_by: str | None = None) -> dict | None:
     """设置采购最高价/销售最低价：关闭旧行 + 插入新行，不覆盖历史（§15.3）。
 
-    值为 None = 该侧不设约束（unset，管理页明确显示"未设置"）；两侧都 None = 清空。
+    单侧更新语义（复审阻塞 4）：每侧独立三态——set（给新值）/ unset（显式清空）/
+    keep（缺省，保持当前值）。普通 None **不是**清空：脱敏成 null 的另一侧提交上来
+    会按 keep 保留，杜绝"可写不可读"组合把看不见的一侧静默清空。
     含税录入 ÷1.13 统一成未税入库，原始录入值与口径保留。等于约束价不算越线（§13，
     越线判定属 Slice 2 分析侧，此处只管配置）。
     """
-    for basis, side in ((purchase_basis, "采购"), (sales_basis, "销售")):
-        if basis not in _BASES:
-            raise PoolCatalogError(f"{side}录入口径必须是 ex_tax（未税）或 inc_tax（含税）")
-    for value, side in ((purchase_value, "采购最高价"), (sales_value, "销售最低价")):
-        if value is not None and value <= 0:
-            raise PoolCatalogError(f"{side}必须大于 0")
-
     pool = _pool_for_update(db, group_id)
     if pool is None:
         return None
@@ -402,6 +443,15 @@ def set_price_policy(db: Session, *, group_id: int, version: int,
     _check_version(pool, version)
 
     old = _current_policy(db, group_id)
+    p_op, p_ex, p_in, p_basis = _resolve_policy_side(
+        purchase_op, purchase_value, purchase_basis, "采购最高价", old,
+        "purchase_ceiling_ex_tax", "purchase_input_value", "purchase_input_basis")
+    s_op, s_ex, s_in, s_basis = _resolve_policy_side(
+        sales_op, sales_value, sales_basis, "销售最低价", old,
+        "sales_floor_ex_tax", "sales_input_value", "sales_input_basis")
+    if p_op == "keep" and s_op == "keep":
+        raise PoolCatalogError("两侧都是 keep：没有要修改的约束价")
+
     db.execute(
         update(PartPoolPricePolicy)
         .where(PartPoolPricePolicy.group_id == group_id,
@@ -410,12 +460,12 @@ def set_price_policy(db: Session, *, group_id: int, version: int,
     )
     new_policy = PartPoolPricePolicy(
         group_id=group_id,
-        purchase_ceiling_ex_tax=_to_ex_tax(purchase_value, purchase_basis),
-        sales_floor_ex_tax=_to_ex_tax(sales_value, sales_basis),
-        purchase_input_value=purchase_value,
-        purchase_input_basis=(purchase_basis if purchase_value is not None else None),
-        sales_input_value=sales_value,
-        sales_input_basis=(sales_basis if sales_value is not None else None),
+        purchase_ceiling_ex_tax=p_ex,
+        sales_floor_ex_tax=s_ex,
+        purchase_input_value=p_in,
+        purchase_input_basis=p_basis,
+        sales_input_value=s_in,
+        sales_input_basis=s_basis,
         changed_by=operated_by, note=note,
     )
     db.add(new_policy)
@@ -428,11 +478,12 @@ def set_price_policy(db: Session, *, group_id: int, version: int,
 
     pool.version += 1
     pool.updated_by = operated_by
+    # 审计明确记录每侧发生了什么（set/unset/keep）——复核"谁清了哪一侧"不用比对猜
     _audit(db, group_id, "set_policy", _policy_dict(old) if old else None,
-           {"purchase_ceiling_ex_tax": new_policy.purchase_ceiling_ex_tax,
-            "sales_floor_ex_tax": new_policy.sales_floor_ex_tax,
-            "purchase_input_value": purchase_value, "purchase_input_basis": purchase_basis,
-            "sales_input_value": sales_value, "sales_input_basis": sales_basis},
+           {"purchase_op": p_op, "sales_op": s_op,
+            "purchase_ceiling_ex_tax": p_ex, "sales_floor_ex_tax": s_ex,
+            "purchase_input_value": p_in, "purchase_input_basis": p_basis,
+            "sales_input_value": s_in, "sales_input_basis": s_basis},
            note, operated_by)
     db.commit()
     out = _pool_dict(pool, new_policy)

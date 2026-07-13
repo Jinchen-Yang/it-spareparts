@@ -61,6 +61,16 @@ def test_detail_404(db):
 
 # ---------------------------------------------------------------- 写权限矩阵
 
+def _mk_parts(db, *pns):
+    ids = []
+    for pn in pns:
+        p = DimPart(pn_std=pn)
+        db.add(p); db.flush()
+        ids.append(p.id)
+    db.commit()
+    return ids
+
+
 def test_write_permission_matrix(db):
     created, _ = _seed_pool(db)
     gid, ver = created["group_id"], created["version"]
@@ -77,18 +87,38 @@ def test_write_permission_matrix(db):
     # 匿名：401
     anon = TestClient(app)
     assert anon.post("/api/pools", json={"name": "匿名池"}).status_code == 401
-    # boss / admin：可建池
+    # boss / admin：可建池（≥2 成员）
     for role in ("boss", "admin"):
         c = _mk_client(db, f"ok_{role}", role)
-        r = c.post("/api/pools", json={"name": f"{role}的池"})
+        ids = _mk_parts(db, f"MTX-{role}-1", f"MTX-{role}-2")
+        r = c.post("/api/pools", json={"name": f"{role}的池", "member_part_ids": ids})
         assert r.status_code == 200 and r.json()["source"] == "manual"
+
+
+def test_create_pool_min_members_via_api(db):
+    """复审阻塞 1：有效池至少 2 个 PN——0/1 成员建池 400（原先 0 成员会 200）。"""
+    c = _mk_client(db, "boss_min", "boss")
+    r0 = c.post("/api/pools", json={"name": "空池", "member_part_ids": []})
+    assert r0.status_code == 400 and "至少包含 2 个" in r0.json()["detail"]
+    (pid,) = _mk_parts(db, "MIN-API-1")
+    r1 = c.post("/api/pools", json={"name": "单成员池", "member_part_ids": [pid]})
+    assert r1.status_code == 400 and "至少包含 2 个" in r1.json()["detail"]
+    # 成员删到 <2 同样 400，且集合不变
+    created, ids = _seed_pool(db, name="下限API池", pns=("MIN-API-A", "MIN-API-B"))
+    gid = created["group_id"]
+    r2 = c.patch(f"/api/pools/{gid}/members",
+                 json={"version": 1, "remove_part_ids": [ids[0]]})
+    assert r2.status_code == 400 and "至少包含 2 个" in r2.json()["detail"]
+    detail = c.get(f"/api/pools/{gid}").json()
+    assert detail["member_count"] == 2 and detail["version"] == 1
 
 
 def test_grant_pool_manage_to_readonly_user(db):
     """§12：成员维护可单独授权数据维护人员——readonly + action_pool_manage 可维护池，
     但 action_pool_set_policy 未授 → 约束价仍 403（两权限独立）。"""
     c = _mk_client(db, "dm1", "readonly", permissions={"action_pool_manage": True})
-    r = c.post("/api/pools", json={"name": "数据维护建的池"})
+    ids = _mk_parts(db, "DM-1", "DM-2")
+    r = c.post("/api/pools", json={"name": "数据维护建的池", "member_part_ids": ids})
     assert r.status_code == 200
     gid, ver = r.json()["group_id"], r.json()["version"]
     assert c.patch(f"/api/pools/{gid}", json={"version": ver, "name": "改名"}).status_code == 200
@@ -122,7 +152,8 @@ def test_stale_version_409_via_api(db):
 def test_member_conflict_409_via_api(db):
     created, ids = _seed_pool(db)
     c = _mk_client(db, "boss3", "boss")
-    r = c.post("/api/pools", json={"name": "抢人池", "member_part_ids": [ids[0]]})
+    (fresh,) = _mk_parts(db, "API-FRESH")
+    r = c.post("/api/pools", json={"name": "抢人池", "member_part_ids": [ids[0], fresh]})
     assert r.status_code == 409 and "矩阵池" in r.json()["detail"]
 
 
@@ -160,7 +191,8 @@ def test_price_governance_masking(db):
 
     blind = _mk_client(db, "blind1", "readonly",
                        permissions={"data_pool_price_governance": False})
-    item = blind.get("/api/pools").json()["items"][0]
+    resp = blind.get("/api/pools").json()
+    item = resp["items"][0]
     assert item["purchase_ceiling_ex_tax"] is None
     assert item["sales_floor_ex_tax"] is None
     detail = blind.get(f"/api/pools/{gid}").json()
@@ -168,9 +200,94 @@ def test_price_governance_masking(db):
     assert detail["price_policy"]["purchase_input_value"] is None
     for h in detail["price_policy_history"]:
         assert h["purchase_ceiling_ex_tax"] is None and h["sales_floor_ex_tax"] is None
+    # 复审非阻塞 1："无权限"必须有明确旗标，前端不允许与"未设置"都显示成 "--"
+    assert resp["price_restricted"] is True and item["price_restricted"] is True
+    assert detail["price_restricted"] is True
 
     seen = boss.get(f"/api/pools/{gid}").json()
     assert Decimal(str(seen["purchase_ceiling_ex_tax"])) == Decimal("725.66")
+    assert seen["price_restricted"] is False
+    boss_list = boss.get("/api/pools").json()
+    assert boss_list["price_restricted"] is False
+    assert boss_list["items"][0]["price_restricted"] is False
+
+
+# ---------------------------------------------------------------- 可写必可读（复审阻塞 4）
+
+def test_set_policy_requires_governance_read(db):
+    """action_pool_set_policy=True 但 data_pool_price_governance=False 的历史脏组合：
+    接口层兜底 403——绝不允许在看不见现值的情况下改约束价。"""
+    created, _ = _seed_pool(db, name="兜底池", pns=("GOV-A", "GOV-B"))
+    gid = created["group_id"]
+    boss = _mk_client(db, "gov_boss", "boss")
+    boss.put(f"/api/pools/{gid}/price-policy",
+             json={"version": 1, "purchase_value": "100", "sales_value": "90"})
+    # 直接落库构造脏组合（账号管理接口已拒绝保存这种组合，见下一个测试）
+    dirty = _mk_client(db, "gov_dirty", "readonly",
+                       permissions={"action_pool_set_policy": True,
+                                    "data_pool_price_governance": False})
+    r = dirty.put(f"/api/pools/{gid}/price-policy",
+                  json={"version": 2, "purchase_value": "1"})
+    assert r.status_code == 403 and "查看权限" in r.json()["detail"]
+    # 约束价原样未动
+    seen = boss.get(f"/api/pools/{gid}").json()
+    assert Decimal(str(seen["purchase_ceiling_ex_tax"])) == Decimal("100.00")
+    assert Decimal(str(seen["sales_floor_ex_tax"])) == Decimal("90.00")
+
+
+def test_accounts_reject_writable_but_unreadable_combo(db):
+    """账号管理保存时拒绝"能设约束价但看不见约束价"的组合（建号与改权限都拦）。"""
+    admin = _mk_client(db, "combo_admin", "admin")
+    bad = {"action_pool_set_policy": True, "data_pool_price_governance": False}
+    r = admin.post("/api/accounts", json={
+        "username": "combo_u1", "password": "pw123456", "role": "readonly",
+        "permissions": bad})
+    assert r.status_code == 400 and "必须能查看" in r.json()["detail"]
+    # 合法组合可以建号
+    ok = admin.post("/api/accounts", json={
+        "username": "combo_u2", "password": "pw123456", "role": "readonly",
+        "permissions": {"action_pool_set_policy": True}})
+    assert ok.status_code == 201
+    # 改权限改出非法组合同样 400，且原权限不变
+    r2 = admin.put("/api/accounts/combo_u2", json={"permissions": bad})
+    assert r2.status_code == 400
+    eff = next(u for u in admin.get("/api/accounts").json()
+               if u["username"] == "combo_u2")["permissions"]
+    assert eff["action_pool_set_policy"] is True
+    assert eff["data_pool_price_governance"] is True
+
+
+def test_policy_single_side_and_unset_via_api(db):
+    """PUT /price-policy 单侧语义：缺省=keep、显式 unset 才清空；旧式
+    {purchase_value: X, sales_value: null} 请求不再清掉销售侧。"""
+    created, _ = _seed_pool(db, name="单侧API池", pns=("SIDE-A", "SIDE-B"))
+    gid = created["group_id"]
+    c = _mk_client(db, "side_boss", "boss")
+    r = c.put(f"/api/pools/{gid}/price-policy",
+              json={"version": 1, "purchase_value": "100", "sales_value": "90"})
+    assert r.status_code == 200
+
+    # 危险请求形状（阻塞 4 的原始事故）：只想改采购，sales_value 传了 null
+    r2 = c.put(f"/api/pools/{gid}/price-policy",
+               json={"version": 2, "purchase_value": "80", "sales_value": None})
+    assert r2.status_code == 200
+    pol = r2.json()["price_policy"]
+    assert Decimal(str(pol["purchase_ceiling_ex_tax"])) == Decimal("80.00")
+    assert Decimal(str(pol["sales_floor_ex_tax"])) == Decimal("90.00")   # 保住了
+
+    # 显式清空销售侧
+    r3 = c.put(f"/api/pools/{gid}/price-policy",
+               json={"version": 3, "sales_unset": True})
+    assert r3.status_code == 200
+    pol3 = r3.json()["price_policy"]
+    assert pol3["sales_floor_ex_tax"] is None
+    assert Decimal(str(pol3["purchase_ceiling_ex_tax"])) == Decimal("80.00")
+
+    # 两侧都没改 → 400；带旧 version → 409
+    assert c.put(f"/api/pools/{gid}/price-policy",
+                 json={"version": 4}).status_code == 400
+    assert c.put(f"/api/pools/{gid}/price-policy",
+                 json={"version": 1, "purchase_value": "70"}).status_code == 409
 
 
 # ---------------------------------------------------------------- 权限注册表接线
@@ -207,11 +324,10 @@ def test_permission_registry_wiring(db):
 
 def test_full_management_flow(db):
     """管理页闭环：建池→改名→调成员→设约束→归档→恢复，每步用上一步返回的 version。"""
-    p1 = DimPart(pn_std="FLOW-1"); p2 = DimPart(pn_std="FLOW-2")
-    db.add_all([p1, p2]); db.commit()
+    p1, p2, p3 = _mk_parts(db, "FLOW-1", "FLOW-2", "FLOW-3")
     c = _mk_client(db, "admin_flow", "admin")
 
-    r = c.post("/api/pools", json={"name": "闭环池", "member_part_ids": [p1.id],
+    r = c.post("/api/pools", json={"name": "闭环池", "member_part_ids": [p1, p2],
                                    "note": "建池"})
     assert r.status_code == 200
     gid, ver = r.json()["group_id"], r.json()["version"]
@@ -220,8 +336,8 @@ def test_full_management_flow(db):
     assert r.status_code == 200; ver = r.json()["version"]
 
     r = c.patch(f"/api/pools/{gid}/members",
-                json={"version": ver, "add_part_ids": [p2.id]})
-    assert r.status_code == 200 and r.json()["member_count"] == 2
+                json={"version": ver, "add_part_ids": [p3]})
+    assert r.status_code == 200 and r.json()["member_count"] == 3
     ver = r.json()["version"]
 
     r = c.put(f"/api/pools/{gid}/price-policy",
@@ -234,6 +350,6 @@ def test_full_management_flow(db):
     assert r.status_code == 200
 
     detail = c.get(f"/api/pools/{gid}").json()
-    assert detail["member_count"] == 2 and detail["status"] == "active"
-    assert {m["pn_std"] for m in detail["members"]} == {"FLOW-1", "FLOW-2"}
+    assert detail["member_count"] == 3 and detail["status"] == "active"
+    assert {m["pn_std"] for m in detail["members"]} == {"FLOW-1", "FLOW-2", "FLOW-3"}
     assert Decimal(str(detail["price_policy"]["purchase_ceiling_ex_tax"])) == Decimal("100.00")

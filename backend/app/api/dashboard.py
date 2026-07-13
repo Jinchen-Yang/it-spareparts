@@ -158,5 +158,12 @@ def pool_detail(
     record_access_log(ctx, "pool_detail", "dashboard", {"group_id": group_id})
     data = pool.analyze(db, group_id, date_from, date_to, user_ctx=ctx)
     if data is None:
+        # 归档池不参与当前经营分析（复审阻塞 2）：明确告知去向，而不是含糊的"不存在"
+        from app.models.inventory import PartPool
+        row = db.get(PartPool, group_id)
+        if row is not None and row.status != "active":
+            raise HTTPException(
+                status_code=404,
+                detail="池已归档，不参与当前经营分析；档案见「互通PN池管理」（状态筛选：已归档），如需分析请先恢复")
         raise HTTPException(status_code=404, detail="池不存在")
     return apply_field_visibility(data, ctx)

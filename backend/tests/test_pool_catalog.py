@@ -20,6 +20,13 @@ def _part(db, pn, brand=None, description=None):
     return p.id
 
 
+def _pool(db, name, pns=None, **kw):
+    """满足"有效池≥2成员"规则的测试池（《互通PN池》核心规则 5）。"""
+    ids = [_part(db, pn) for pn in (pns or (f"{name}-A", f"{name}-B"))]
+    kw.setdefault("operated_by", "t")
+    return svc.create_pool(db, name=name, member_part_ids=ids, **kw)
+
+
 def _audits(db, gid, action=None):
     stmt = select(SysAuditLog).where(SysAuditLog.entity_type == "part_pool",
                                      SysAuditLog.entity_id == gid)
@@ -43,9 +50,19 @@ def test_create_pool_basic(db):
     assert sorted(logs[0].after_json["members"]) == ["CAT-A", "CAT-B"]
 
 
-def test_create_pool_empty_pool_allowed(db):
-    r = svc.create_pool(db, name="先建后加", operated_by="t")
-    assert r["member_count"] == 0
+def test_create_pool_rejects_zero_and_one_member(db):
+    """《互通PN池》核心规则 5：每个有效池至少包含两个 PN——0/1 成员建池一律 400，
+    不存在"先建空壳后加成员"的路径（那需要引入非有效状态并另行评审）。"""
+    with pytest.raises(svc.PoolCatalogError, match="至少包含 2 个"):
+        svc.create_pool(db, name="空池", operated_by="t")
+    with pytest.raises(svc.PoolCatalogError, match="至少包含 2 个"):
+        svc.create_pool(db, name="空池2", member_part_ids=[], operated_by="t")
+    a = _part(db, "CAT-ONLY")
+    with pytest.raises(svc.PoolCatalogError, match="至少包含 2 个"):
+        svc.create_pool(db, name="单成员池", member_part_ids=[a], operated_by="t")
+    # 同一 part_id 重复给两次 = 去重后 1 个，同样拒绝
+    with pytest.raises(svc.PoolCatalogError, match="至少包含 2 个"):
+        svc.create_pool(db, name="重复成员池", member_part_ids=[a, a], operated_by="t")
 
 
 def test_create_pool_validations(db):
@@ -63,22 +80,24 @@ def test_create_pool_rejects_merged_part(db):
                {"i": a, "t": target})
     db.commit()
     with pytest.raises(svc.PoolCatalogError, match="已合并"):
-        svc.create_pool(db, name="墓碑成员", member_part_ids=[a], operated_by="t")
+        svc.create_pool(db, name="墓碑成员", member_part_ids=[a, target], operated_by="t")
 
 
 def test_pn_in_active_pool_conflicts_with_pool_name(db):
     """PN 已属其他有效池 → 明确提示现有池（§11），冲突而非静默加入。"""
     a = _part(db, "CAT-DUP")
-    svc.create_pool(db, name="老池", member_part_ids=[a], operated_by="t")
+    b = _part(db, "CAT-DUP-B")
+    c = _part(db, "CAT-DUP-C")
+    svc.create_pool(db, name="老池", member_part_ids=[a, b], operated_by="t")
     with pytest.raises(svc.PoolConflictError) as ei:
-        svc.create_pool(db, name="新池", member_part_ids=[a], operated_by="t")
+        svc.create_pool(db, name="新池", member_part_ids=[a, c], operated_by="t")
     assert "老池" in str(ei.value) and "CAT-DUP" in str(ei.value)
 
 
 # ---------------------------------------------------------------- 编辑 + 乐观锁
 
 def test_update_pool_rename_and_version_bump(db):
-    r = svc.create_pool(db, name="旧名", operated_by="t")
+    r = _pool(db, "旧名")
     r2 = svc.update_pool(db, group_id=r["group_id"], version=1,
                          updates={"name": "新名", "description": "说明"}, operated_by="u2")
     assert r2["name"] == "新名" and r2["version"] == 2 and r2["updated_by"] == "u2"
@@ -86,7 +105,7 @@ def test_update_pool_rename_and_version_bump(db):
 
 
 def test_update_pool_stale_version_conflicts(db):
-    r = svc.create_pool(db, name="并发池", operated_by="t")
+    r = _pool(db, "并发池")
     svc.update_pool(db, group_id=r["group_id"], version=1, updates={"name": "先手"},
                     operated_by="a")
     with pytest.raises(svc.PoolConflictError, match="已被他人修改"):
@@ -100,7 +119,7 @@ def test_update_pool_not_found_returns_none(db):
 
 def test_optimistic_lock_across_two_sessions(db):
     """双会话乐观锁：A、B 同时读 v1，A 保存后 B 携旧版本必须 409，不静默覆盖（§11）。"""
-    r = svc.create_pool(db, name="双会话池", operated_by="t")
+    r = _pool(db, "双会话池")
     db.commit()
     s1, s2 = SessionLocal(), SessionLocal()
     try:
@@ -148,8 +167,8 @@ def test_update_members_add_remove_syncs_count(db):
 
 
 def test_update_members_validations(db):
-    a, b = _part(db, "CAT-M4"), _part(db, "CAT-M5")
-    r = svc.create_pool(db, name="校验池", member_part_ids=[a], operated_by="t")
+    a, extra, b = _part(db, "CAT-M4"), _part(db, "CAT-M4X"), _part(db, "CAT-M5")
+    r = svc.create_pool(db, name="校验池", member_part_ids=[a, extra], operated_by="t")
     with pytest.raises(svc.PoolCatalogError, match="没有要增删"):
         svc.update_members(db, group_id=r["group_id"], version=1)
     with pytest.raises(svc.PoolCatalogError, match="同时增删"):
@@ -161,10 +180,43 @@ def test_update_members_validations(db):
         svc.update_members(db, group_id=r["group_id"], version=1, remove_part_ids=[b])
 
 
+def test_update_members_rejects_below_two_and_keeps_set_intact(db):
+    """成员调整后终态 <2 → 整体拒绝：任何删除都不落库，成员集合/计数/版本原样。"""
+    a, b, c = _part(db, "CAT-MIN1"), _part(db, "CAT-MIN2"), _part(db, "CAT-MIN3")
+    r = svc.create_pool(db, name="下限池", member_part_ids=[a, b, c], operated_by="t")
+    gid = r["group_id"]
+
+    def _members():
+        return set(db.scalars(select(PartPoolMember.part_id)
+                              .where(PartPoolMember.group_id == gid)).all())
+
+    # 剩 1 个：拒绝且未删除任何成员
+    with pytest.raises(svc.PoolCatalogError, match="至少包含 2 个"):
+        svc.update_members(db, group_id=gid, version=1, remove_part_ids=[a, b],
+                           operated_by="t")
+    db.rollback()
+    assert _members() == {a, b, c}
+    # 剩 0 个：同样拒绝
+    with pytest.raises(svc.PoolCatalogError, match="至少包含 2 个"):
+        svc.update_members(db, group_id=gid, version=1, remove_part_ids=[a, b, c],
+                           operated_by="t")
+    db.rollback()
+    assert _members() == {a, b, c}
+    detail = svc.get_pool(db, gid)
+    assert detail["member_count"] == 3 and detail["version"] == 1
+    assert not _audits(db, gid, "members")   # 失败的调整不留成员审计
+    # 有增有删、终态仍 ≥2 → 正常放行（回归保护）
+    d = _part(db, "CAT-MIN4")
+    ok = svc.update_members(db, group_id=gid, version=1,
+                            add_part_ids=[d], remove_part_ids=[a, b], operated_by="t")
+    assert ok["member_count"] == 2 and _members() == {c, d}
+
+
 def test_update_members_cross_pool_conflict(db):
-    a, b = _part(db, "CAT-X1"), _part(db, "CAT-X2")
-    svc.create_pool(db, name="甲池", member_part_ids=[a], operated_by="t")
-    r = svc.create_pool(db, name="乙池", member_part_ids=[b], operated_by="t")
+    a, a2 = _part(db, "CAT-X1"), _part(db, "CAT-X1B")
+    b, b2 = _part(db, "CAT-X2"), _part(db, "CAT-X2B")
+    svc.create_pool(db, name="甲池", member_part_ids=[a, a2], operated_by="t")
+    r = svc.create_pool(db, name="乙池", member_part_ids=[b, b2], operated_by="t")
     with pytest.raises(svc.PoolConflictError, match="甲池"):
         svc.update_members(db, group_id=r["group_id"], version=1, add_part_ids=[a],
                            operated_by="t")
@@ -174,7 +226,7 @@ def test_update_members_cross_pool_conflict(db):
 
 def test_policy_ex_tax_passthrough_and_inc_tax_conversion(db):
     """统一未税入库：未税原值、含税 ÷1.13（§13/§26-3），原始录入值与口径保留。"""
-    r = svc.create_pool(db, name="价池", operated_by="t")
+    r = _pool(db, "价池")
     out = svc.set_price_policy(db, group_id=r["group_id"], version=1,
                                purchase_value=Decimal("113"), purchase_basis="inc_tax",
                                sales_value=Decimal("973.45"), sales_basis="ex_tax",
@@ -191,7 +243,7 @@ def test_policy_ex_tax_passthrough_and_inc_tax_conversion(db):
 
 def test_policy_history_close_and_insert(db):
     """修改=关闭旧行+插入新行，不覆盖历史（§15.3）；每池仅一条当前策略。"""
-    r = svc.create_pool(db, name="历史池", operated_by="t")
+    r = _pool(db, "历史池")
     gid = r["group_id"]
     svc.set_price_policy(db, group_id=gid, version=1,
                          purchase_value=Decimal("100"), operated_by="a")
@@ -208,21 +260,71 @@ def test_policy_history_close_and_insert(db):
     assert len(detail["price_policy_history"]) == 2
 
 
-def test_policy_unset_side_and_clear(db):
-    """单侧不设=unset（None 明示"未设置"）；两侧清空同样留历史行（可追溯谁清的）。"""
-    r = svc.create_pool(db, name="清空池", operated_by="t")
+def test_policy_single_side_set_keeps_other_side(db):
+    """单侧更新（复审阻塞 4）：只改一侧时另一侧三字段（未税值/原始录入值/口径）原样保留，
+    普通 None **不是**清空。"""
+    r = _pool(db, "单侧池")
     gid = r["group_id"]
-    out = svc.set_price_policy(db, group_id=gid, version=1,
-                               purchase_value=Decimal("50"), operated_by="t")
-    assert out["price_policy"]["sales_floor_ex_tax"] is None
-    assert out["price_policy"]["sales_input_basis"] is None
-    out2 = svc.set_price_policy(db, group_id=gid, version=2, note="清空", operated_by="t")
+    svc.set_price_policy(db, group_id=gid, version=1,
+                         purchase_value=Decimal("113"), purchase_basis="inc_tax",
+                         sales_value=Decimal("973.45"), sales_basis="ex_tax", operated_by="t")
+    # 只改采购：sales 三字段保持
+    out = svc.set_price_policy(db, group_id=gid, version=2,
+                               purchase_value=Decimal("90"), operated_by="t")
+    pol = out["price_policy"]
+    assert pol["purchase_ceiling_ex_tax"] == Decimal("90.00")
+    assert pol["purchase_input_basis"] == "ex_tax"
+    assert pol["sales_floor_ex_tax"] == Decimal("973.45")
+    assert pol["sales_input_value"] == Decimal("973.45")
+    assert pol["sales_input_basis"] == "ex_tax"
+    # 只改销售：purchase 三字段保持
+    out2 = svc.set_price_policy(db, group_id=gid, version=3,
+                                sales_value=Decimal("1130"), sales_basis="inc_tax",
+                                operated_by="t")
+    pol2 = out2["price_policy"]
+    assert pol2["sales_floor_ex_tax"] == Decimal("1000.00")
+    assert pol2["purchase_ceiling_ex_tax"] == Decimal("90.00")
+    assert pol2["purchase_input_value"] == Decimal("90")
+    assert pol2["purchase_input_basis"] == "ex_tax"
+    # 每次都是关旧行插新行
+    assert len(svc.get_pool(db, gid)["price_policy_history"]) == 3
+
+
+def test_policy_explicit_unset_only_clears_target_side(db):
+    """显式 unset 才清空、且只清目标侧；两侧都 keep = 无操作 → 400；
+    unset 留历史行（可追溯谁清的），审计准确记录每侧 set/unset/keep。"""
+    r = _pool(db, "清空池")
+    gid = r["group_id"]
+    svc.set_price_policy(db, group_id=gid, version=1,
+                         purchase_value=Decimal("50"), sales_value=Decimal("40"),
+                         operated_by="t")
+    # 显式清采购，销售 keep
+    out = svc.set_price_policy(db, group_id=gid, version=2, purchase_op="unset",
+                               note="清采购", operated_by="t")
+    pol = out["price_policy"]
+    assert pol["purchase_ceiling_ex_tax"] is None and pol["purchase_input_basis"] is None
+    assert pol["sales_floor_ex_tax"] == Decimal("40.00")
+    # 显式清销售（采购已是未设置，keep 继续保持未设置）
+    out2 = svc.set_price_policy(db, group_id=gid, version=3, sales_op="unset",
+                                operated_by="t")
+    assert out2["price_policy"]["sales_floor_ex_tax"] is None
     assert out2["price_policy"]["purchase_ceiling_ex_tax"] is None
-    assert len(svc.get_pool(db, gid)["price_policy_history"]) == 2
+    assert len(svc.get_pool(db, gid)["price_policy_history"]) == 3
+    # 审计逐侧记录 set/unset/keep
+    ops = [(log.after_json["purchase_op"], log.after_json["sales_op"])
+           for log in _audits(db, gid, "set_policy")]
+    assert ops == [("set", "set"), ("unset", "keep"), ("keep", "unset")]
+    # 两侧都 keep → 明确报错，不产生无意义历史行
+    with pytest.raises(svc.PoolCatalogError, match="keep"):
+        svc.set_price_policy(db, group_id=gid, version=4, operated_by="t")
+    # unset 同时又给值 → 400
+    with pytest.raises(svc.PoolCatalogError, match="二选一"):
+        svc.set_price_policy(db, group_id=gid, version=4, purchase_op="unset",
+                             purchase_value=Decimal("1"), operated_by="t")
 
 
 def test_policy_validations(db):
-    r = svc.create_pool(db, name="校验价池", operated_by="t")
+    r = _pool(db, "校验价池")
     with pytest.raises(svc.PoolCatalogError, match="大于 0"):
         svc.set_price_policy(db, group_id=r["group_id"], version=1,
                              purchase_value=Decimal("0"))
@@ -238,25 +340,28 @@ def test_policy_validations(db):
 
 def test_archive_keeps_members_and_frees_pns(db):
     """归档保留成员集合；归档池成员可加入新有效池（复合主键语义）。"""
-    a = _part(db, "CAT-AR")
-    r = svc.create_pool(db, name="退役池", member_part_ids=[a], operated_by="t")
+    a, b = _part(db, "CAT-AR"), _part(db, "CAT-AR-B")
+    c = _part(db, "CAT-AR-C")
+    r = svc.create_pool(db, name="退役池", member_part_ids=[a, b], operated_by="t")
     r2 = svc.archive_pool(db, group_id=r["group_id"], version=1, operated_by="t")
     assert r2["status"] == "archived" and r2["version"] == 2
-    assert db.scalar(select(PartPoolMember.part_id)
-                     .where(PartPoolMember.group_id == r["group_id"])) == a   # 成员还在
-    r3 = svc.create_pool(db, name="接盘池", member_part_ids=[a], operated_by="t")
-    assert r3["member_count"] == 1    # 同一 PN 可入新有效池
+    left = set(db.scalars(select(PartPoolMember.part_id)
+                          .where(PartPoolMember.group_id == r["group_id"])).all())
+    assert left == {a, b}   # 成员还在
+    r3 = svc.create_pool(db, name="接盘池", member_part_ids=[a, c], operated_by="t")
+    assert r3["member_count"] == 2    # 同一 PN 可入新有效池
 
 
 def test_restore_conflict_when_member_taken(db):
     """恢复时成员已被其他有效池占用 → 409 列出占用池，不静默抢占。"""
-    a = _part(db, "CAT-RS")
-    r1 = svc.create_pool(db, name="一号池", member_part_ids=[a], operated_by="t")
+    a, x1 = _part(db, "CAT-RS"), _part(db, "CAT-RS-X1")
+    x2, x3 = _part(db, "CAT-RS-X2"), _part(db, "CAT-RS-X3")
+    r1 = svc.create_pool(db, name="一号池", member_part_ids=[a, x1], operated_by="t")
     svc.archive_pool(db, group_id=r1["group_id"], version=1, operated_by="t")
-    r2 = svc.create_pool(db, name="二号池", member_part_ids=[a], operated_by="t")
+    r2 = svc.create_pool(db, name="二号池", member_part_ids=[a, x2, x3], operated_by="t")
     with pytest.raises(svc.PoolConflictError, match="二号池"):
         svc.restore_pool(db, group_id=r1["group_id"], version=2, operated_by="t")
-    # 二号池让出该 PN 后恢复成功
+    # 二号池让出该 PN（余 2 个成员，仍满足下限）后恢复成功
     svc.update_members(db, group_id=r2["group_id"], version=1, remove_part_ids=[a],
                        operated_by="t")
     r1b = svc.restore_pool(db, group_id=r1["group_id"], version=2, operated_by="t")
@@ -264,8 +369,8 @@ def test_restore_conflict_when_member_taken(db):
 
 
 def test_archived_pool_rejects_edits(db):
-    a = _part(db, "CAT-FZ")
-    r = svc.create_pool(db, name="冻结池", member_part_ids=[a], operated_by="t")
+    a, b = _part(db, "CAT-FZ"), _part(db, "CAT-FZ-B")
+    r = svc.create_pool(db, name="冻结池", member_part_ids=[a, b], operated_by="t")
     svc.archive_pool(db, group_id=r["group_id"], version=1, operated_by="t")
     with pytest.raises(svc.PoolCatalogError, match="已归档"):
         svc.update_pool(db, group_id=r["group_id"], version=2, updates={"name": "x"})
@@ -282,10 +387,12 @@ def test_archived_pool_rejects_edits(db):
 
 def test_list_pools_search_and_status_filter(db):
     a = _part(db, "ST4000NM0035", brand="Seagate", description="4T SAS 3.5 硬盘")
+    a2 = _part(db, "ST4000NM0055", brand="Seagate")
     b = _part(db, "HUS726T4TALS", brand="HGST")
-    r1 = svc.create_pool(db, name="4T SAS 硬盘池", member_part_ids=[a], operated_by="t")
+    b2 = _part(db, "HUS726T6TALS", brand="HGST")
+    r1 = svc.create_pool(db, name="4T SAS 硬盘池", member_part_ids=[a, a2], operated_by="t")
     r2 = svc.create_pool(db, name="内存池", description="服务器内存",
-                         member_part_ids=[b], operated_by="t")
+                         member_part_ids=[b, b2], operated_by="t")
     svc.archive_pool(db, group_id=r2["group_id"], version=1, operated_by="t")
 
     assert [i["group_id"] for i in svc.list_pools(db)["items"]] == [r1["group_id"]]
@@ -299,7 +406,7 @@ def test_list_pools_search_and_status_filter(db):
 
 
 def test_list_pools_carries_current_policy(db):
-    r = svc.create_pool(db, name="带价清单池", operated_by="t")
+    r = _pool(db, "带价清单池")
     svc.set_price_policy(db, group_id=r["group_id"], version=1,
                          purchase_value=Decimal("725.66"), operated_by="t")
     item = svc.list_pools(db)["items"][0]

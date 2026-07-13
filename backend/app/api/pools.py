@@ -19,6 +19,7 @@ from app.security import (
     UserContext,
     apply_field_visibility,
     get_current_user_context,
+    is_field_hidden,
     record_access_log,
     require_action,
     require_login,
@@ -52,11 +53,20 @@ class PoolMembersPatch(BaseModel):
 
 
 class PoolPolicyPut(BaseModel):
+    """约束价单侧更新语义（复审阻塞 4）：每侧独立三态。
+
+    - 给了 *_value → set 该侧；
+    - *_unset=True → 显式清空该侧（此时不得同时给值）；
+    - 都没有 → keep，该侧保持原值。
+    普通 null 永远不是"清空"——被脱敏成 null 的一侧原样保留。
+    """
     version: int
     purchase_value: Decimal | None = None
     purchase_basis: str = Field("ex_tax", pattern=_BASIS_PATTERN)
+    purchase_unset: bool = False
     sales_value: Decimal | None = None
     sales_basis: str = Field("ex_tax", pattern=_BASIS_PATTERN)
+    sales_unset: bool = False
     note: str | None = None
 
 
@@ -68,6 +78,16 @@ class PoolLifecycle(BaseModel):
 def _operated_by(ctx: UserContext) -> str | None:
     # 真实用户名优先（审计勿记角色串——S-2 教训，见 services/master_edit.py）
     return ctx.user_id or ctx.role
+
+
+def _price_restricted(ctx: UserContext) -> bool:
+    """约束价对该用户是否被权限隐藏（data_pool_price_governance=False）。
+
+    作为明确旗标随清单/详情返回（复审非阻塞 1）："未设置"（null + 不受限）与
+    "无权限"（受限）是两种状态，前端不允许都渲染成 "--" 让人猜。
+    旗标只表达"看不看得见"，不携带任何金额信息，不属于脱敏字段组。
+    """
+    return is_field_hidden(ctx, "purchase_ceiling_ex_tax")
 
 
 def _run(fn, **kwargs):
@@ -94,6 +114,10 @@ def list_pools(
 ) -> dict:
     record_access_log(ctx, "pool_catalog_list", "pools", {"q": q, "status": status_})
     data = svc.list_pools(db, q=q, status=status_, page=page, page_size=page_size)
+    restricted = _price_restricted(ctx)
+    data["price_restricted"] = restricted
+    for item in data["items"]:
+        item["price_restricted"] = restricted
     return apply_field_visibility(data, ctx)
 
 
@@ -107,6 +131,7 @@ def get_pool(
     data = svc.get_pool(db, group_id)
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "池不存在")
+    data["price_restricted"] = _price_restricted(ctx)
     return apply_field_visibility(data, ctx)
 
 
@@ -156,11 +181,16 @@ def put_price_policy(
     group_id: int,
     body: PoolPolicyPut,
     db: Session = Depends(get_db),
-    _act: None = Depends(require_action("action_pool_set_policy")),
+    # "能改必须能看"（复审阻塞 4）：设置约束价还必须持有约束价查看权限，
+    # 否则会在看不见现值的情况下改写/清空另一侧
+    _act: None = Depends(require_action("action_pool_set_policy",
+                                        require_data="data_pool_price_governance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     data = _run(svc.set_price_policy, db=db, group_id=group_id, version=body.version,
+                purchase_op=("unset" if body.purchase_unset else None),
                 purchase_value=body.purchase_value, purchase_basis=body.purchase_basis,
+                sales_op=("unset" if body.sales_unset else None),
                 sales_value=body.sales_value, sales_basis=body.sales_basis,
                 note=body.note, operated_by=_operated_by(ctx))
     return apply_field_visibility(data, ctx)

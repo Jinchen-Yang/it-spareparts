@@ -92,11 +92,16 @@ def require_page(page_key: str):
     return _dep
 
 
-def require_action(action_key: str):
+def require_action(action_key: str, *, require_data: str | None = None):
     """动作级准入依赖：该用户 action_* 权限为 False → 403；RBAC 开且未登录 → 401。
     admin 恒放行；旧 token（无 perms）按角色模板回退（与 require_page 同一口径）。
     与 require_page 的区别：page 管"能不能进页面看"，action 管"能不能执行写操作"
-    （建池/改约束价等），二者独立授权（互通PN池价格分析 §12）。"""
+    （建池/改约束价等），二者独立授权（互通PN池价格分析 §12）。
+
+    require_data：该动作还必须持有的 data_* 可见权限（复审阻塞 4）——"能改必须能看"。
+    典型：设置约束价（action_pool_set_policy）必须同时能看约束价
+    （data_pool_price_governance），否则用户会在看不见现值的情况下改写/清空它。
+    账号管理保存时也拒绝该非法组合（permissions.combo_errors），这里是后端兜底防线。"""
     def _dep(ctx: UserContext = Depends(get_current_user_context)) -> None:
         if not config.ENABLE_RBAC or ctx.role == "admin":
             return
@@ -108,6 +113,11 @@ def require_action(action_key: str):
             perms = _perm.effective(ctx.role, None)
         if not perms.get(action_key, False):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "无此操作权限")
+        if require_data and not perms.get(require_data, False):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "该操作需要同时具备对应数据的查看权限（看不见的数据不能修改），"
+                "请联系管理员调整账号权限")
     return _dep
 
 
