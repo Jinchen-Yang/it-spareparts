@@ -5,6 +5,8 @@ Revises: b9e1f4a7c2d8
 Create Date: 2026-07-13
 
 池从「自动重算的连通分量」转为「人工创建维护的唯一真值」：
+0. 第一条 DDL 前校验所有历史池的真实成员集合；成员不足两个则失败即停，避免把
+   不合规历史池回填为 active，需先补足成员或制定显式归档治理迁移。
 1. part_pool 增加人可读池名/说明/状态/来源/乐观锁版本/维护人字段；
    存量池回填 name='互通池-{ID}'、source='legacy_generated'，ID 与成员集合零变化。
 2. part_pool_member 主键 part_id → (group_id, part_id)：池只归档不硬删除，
@@ -20,8 +22,9 @@ Create Date: 2026-07-13
 - part_pool_member 复合主键前导列即 group_id → 删除旧单列索引 ix_pool_member_group；
 - part_pool_price_policy 不建 group_id 单列索引（ix_pool_policy_group_from 前导列覆盖）。
 
-downgrade **不是无条件可逆**（复审阻塞 6）：只有未产生"一 PN 多池"数据且无约束价
-历史时才无损；否则守卫失败即停、不删任何数据——生产回滚一律恢复迁移前数据库备份。
+downgrade **不是无条件可逆**（复审阻塞 6）：只有未产生任何人工建池、池元数据/成员
+维护、一 PN 多池或约束价历史时才无损；否则守卫在第一条 DDL 前失败即停、不删任何数据
+——生产回滚一律恢复迁移前数据库备份。
 应用过本迁移旧版本（2026-07-13 未合并版）的开发库：直接重建，或 downgrade 到
 b9e1f4a7c2d8 再 upgrade（索引操作带 IF [NOT] EXISTS，可安全重放）。
 """
@@ -40,6 +43,28 @@ _MONEY = sa.Numeric(14, 2)
 
 
 def upgrade() -> None:
+    # 旧 schema 没有归档状态，所有存量池在本迁移中都会回填为 active。必须在第一条
+    # DDL 前按成员明细验证核心不变量；不能信任可能失真的冗余 member_count。
+    bind = op.get_bind()
+    undersized_pools = bind.execute(sa.text(
+        "SELECT p.group_id, COUNT(m.part_id) AS actual_member_count "
+        "FROM part_pool p "
+        "LEFT JOIN part_pool_member m ON m.group_id = p.group_id "
+        "GROUP BY p.group_id "
+        "HAVING COUNT(m.part_id) < 2 "
+        "ORDER BY p.group_id"
+    )).all()
+    if undersized_pools:
+        sample = "、".join(
+            f"池 {row.group_id}={row.actual_member_count} 个 PN"
+            for row in undersized_pools[:10]
+        )
+        more = f" 等 {len(undersized_pools)} 个池" if len(undersized_pools) > 10 else ""
+        raise RuntimeError(
+            "upgrade f2a7d9c3e6b1 中止（未做任何改动）：存量数据违反“有效池至少包含 "
+            f"2 个 PN”——{sample}{more}。请先在旧 schema 补足成员；若业务必须保留"
+            "单成员历史池，请先制定将其显式归档的数据治理迁移，再重试。")
+
     # ---- 1. part_pool 人工池字段（先加可空 → 回填 → 收紧非空） ----
     op.add_column("part_pool", sa.Column("name", sa.String(128), nullable=True))
     op.add_column("part_pool", sa.Column("description", sa.Text(), nullable=True))
@@ -145,21 +170,40 @@ def downgrade() -> None:
     # 1) 同一 part_id 已属多个池（归档 A → A 的成员加入新有效池 B 的正常使用轨迹）：
     #    恢复单列主键 (part_id) 必然 UniqueViolation；
     # 2) part_pool_price_policy 已有约束价历史：drop_table 会把它整个删掉。
-    # 两种情况都**失败即停**（事务回滚，什么都不删），生产回滚一律恢复数据库备份，
-    # 绝不静默丢历史。确认可丢弃时先手工清理这两类数据再 downgrade。
+    # 3) 人工建池或对历史池做过改名、说明、归档/恢复、成员维护：这些写入存放在本迁移
+    #    新增的列中，继续 drop_column 会静默丢失，且旧 schema 无法表达人工池语义。
+    # 三种情况都**失败即停**（事务回滚，什么都不删），生产回滚一律恢复数据库备份，
+    # 绝不静默丢业务数据。确认可丢弃时先手工清理这些数据再 downgrade。
     bind = op.get_bind()
     multi_pool_parts = bind.execute(sa.text(
         "SELECT COUNT(*) FROM (SELECT part_id FROM part_pool_member "
         "GROUP BY part_id HAVING COUNT(*) > 1) t")).scalar()
     policy_rows = bind.execute(sa.text(
         "SELECT COUNT(*) FROM part_pool_price_policy")).scalar()
-    if multi_pool_parts or policy_rows:
+    changed_pool_rows = bind.execute(sa.text(
+        "SELECT COUNT(*) FROM part_pool WHERE "
+        "source IS DISTINCT FROM 'legacy_generated' "
+        "OR name IS DISTINCT FROM ('互通池-' || group_id) "
+        "OR description IS NOT NULL "
+        "OR status IS DISTINCT FROM 'active' "
+        "OR version IS DISTINCT FROM 1 "
+        "OR created_by IS NOT NULL "
+        "OR updated_by IS NOT NULL "
+        "OR created_at IS DISTINCT FROM updated_at"
+    )).scalar()
+    changed_member_rows = bind.execute(sa.text(
+        "SELECT COUNT(*) FROM part_pool_member WHERE "
+        "added_by IS NOT NULL OR note IS NOT NULL "
+        "OR updated_at IS DISTINCT FROM created_at"
+    )).scalar()
+    if multi_pool_parts or policy_rows or changed_pool_rows or changed_member_rows:
         raise RuntimeError(
             "downgrade f2a7d9c3e6b1 中止（未做任何改动）：检测到本迁移之后产生的业务数据——"
             f"{multi_pool_parts} 个 PN 属于多个池（无法恢复 part_id 单列主键）、"
-            f"{policy_rows} 条约束价历史（drop 表会永久丢失）。"
+            f"{policy_rows} 条约束价历史、{changed_pool_rows} 个新建或维护过的池、"
+            f"{changed_member_rows} 条带迁移后维护信息的成员记录（降级会永久丢失）。"
             "此状态下 schema 降级不是无损回滚：生产环境请恢复迁移前的数据库备份；"
-            "开发环境确认可丢弃后，先清空 part_pool_price_policy 并解除一 PN 多池，再重试。")
+            "开发环境确认可丢弃后，先清理所有迁移后业务写入，再重试。")
 
     op.drop_index("ix_pool_policy_group_from", table_name="part_pool_price_policy")
     op.drop_index("uq_pool_policy_current", table_name="part_pool_price_policy")

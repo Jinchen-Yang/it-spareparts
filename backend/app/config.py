@@ -374,10 +374,13 @@ FIELD_GROUPS = {
                       "avg_margin_moving", "avg_margin_fifo",
                       "gross_margin_moving", "gross_margin_fifo"],
     # 互通池价格治理（data_pool_price_governance，§12）：人工约束价及其原始录入值。
-    # 关掉后管理页/池详情的约束价全为 null；Slice 2 起的越线差额/越线标记派生键
+    # 关掉后管理页/池详情的约束价全为 null；当前策略容器整体隐藏，
+    # 防止 note/changed_by/input_basis 等元数据反推价格，且不全局遮蔽普通 note。
+    # Slice 2 起的越线差额/越线标记派生键
     # （delta_amount/delta_pct/relation_to_constraint/violation_count 等）产出时必须补登记到本组。
     "pool_price_governance": ["purchase_ceiling_ex_tax", "sales_floor_ex_tax",
-                              "purchase_input_value", "sales_input_value"],
+                              "purchase_input_value", "sales_input_value",
+                              "price_policy"],
 }
 
 # 字段级脱敏的唯一真值源是 app/permissions.py 的 ROLE_TEMPLATES（按 data_* 开关）。

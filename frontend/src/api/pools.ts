@@ -65,8 +65,12 @@ export interface PnPoolListResp {
   price_restricted: boolean;
 }
 
+export type PnPoolListSort = "updated_at" | "name" | "member_count" | "group_id";
+export type SortOrder = "asc" | "desc";
+
 export const listPnPools = (params: {
   q?: string; status?: "active" | "archived" | "all"; page?: number; page_size?: number;
+  sort?: PnPoolListSort; order?: SortOrder;
 } = {}) => api.get<PnPoolListResp>("/pools", { params });
 
 export const getPnPool = (groupId: number) => api.get<PnPoolDetail>(`/pools/${groupId}`);

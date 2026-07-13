@@ -33,8 +33,14 @@ _PART_LOCK_NS = 918273646
 
 _BASES = ("ex_tax", "inc_tax")
 _POLICY_HISTORY_LIMIT = 20
-# 《互通PN池》核心规则第 5 条：每个有效池至少包含两个 PN。只约束运行时写路径
-# （建池/调成员），迁移回填的历史池不经此校验（§21 要求存量池零变化）。
+_LIST_SORT_COLUMNS = {
+    "updated_at": PartPool.updated_at,
+    "name": PartPool.name,
+    "member_count": PartPool.member_count,
+    "group_id": PartPool.group_id,
+}
+# 《互通PN池》核心规则第 5 条：每个有效池至少包含两个 PN。运行时由建池、成员维护、
+# 恢复三条可产生有效池的写路径共同守住；迁移在任何 DDL 前拒绝不合规存量。
 MIN_ACTIVE_POOL_MEMBERS = 2
 
 
@@ -47,6 +53,21 @@ class PoolConflictError(Exception):
 
 
 # ---------------------------------------------------------------- 内部工具
+
+def _unique_part_ids(part_ids: list[int] | None, *, label: str) -> list[int]:
+    """把请求中的 PN ID 规范为有序集合，但不替调用方静默丢弃重复成员。"""
+    ids = list(part_ids or [])
+    seen: set[int] = set()
+    duplicates: set[int] = set()
+    for part_id in ids:
+        if part_id in seen:
+            duplicates.add(part_id)
+        seen.add(part_id)
+    if duplicates:
+        raise PoolCatalogError(
+            f"{label}不能包含重复 PN: part_id={sorted(duplicates)}")
+    return sorted(seen)
+
 
 def _lock_parts(db: Session, part_ids) -> None:
     """按 part_id 升序取事务级 advisory 锁，串行化同一 PN 的并发池写入（全局同序防死锁）。"""
@@ -186,8 +207,13 @@ def _audit(db: Session, group_id: int, action: str, before: dict | None,
 # ---------------------------------------------------------------- 读
 
 def list_pools(db: Session, *, q: str | None = None, status: str = "active",
-               page: int = 1, page_size: int = 20) -> dict:
+               page: int = 1, page_size: int = 20,
+               sort: str = "updated_at", order: str = "desc") -> dict:
     """池清单（管理页）：搜索池名/描述/成员 PN/品牌，带当前约束价。"""
+    if sort not in _LIST_SORT_COLUMNS:
+        raise PoolCatalogError(f"不支持的排序字段: {sort}")
+    if order not in ("asc", "desc"):
+        raise PoolCatalogError(f"不支持的排序方向: {order}")
     stmt = select(PartPool)
     if status in ("active", "archived"):
         stmt = stmt.where(PartPool.status == status)
@@ -203,8 +229,12 @@ def list_pools(db: Session, *, q: str | None = None, status: str = "active",
         stmt = stmt.where(or_(PartPool.name.ilike(like),
                               PartPool.description.ilike(like), member_hit))
     total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    direction = getattr(_LIST_SORT_COLUMNS[sort], order)
+    order_by = [direction()]
+    if sort != "group_id":
+        order_by.append(getattr(PartPool.group_id, order)())
     pools = db.execute(
-        stmt.order_by(PartPool.updated_at.desc(), PartPool.group_id.desc())
+        stmt.order_by(*order_by)
         .offset((page - 1) * page_size).limit(page_size)
     ).scalars().all()
 
@@ -268,7 +298,7 @@ def create_pool(db: Session, *, name: str, description: str | None = None,
         raise PoolCatalogError("池名称不能为空")
     if len(clean_name) > 128:
         raise PoolCatalogError("池名称过长（≤128 字符）")
-    part_ids = sorted(set(member_part_ids or []))
+    part_ids = _unique_part_ids(member_part_ids, label="成员列表")
     if len(part_ids) < MIN_ACTIVE_POOL_MEMBERS:
         raise PoolCatalogError(
             f"有效池至少包含 {MIN_ACTIVE_POOL_MEMBERS} 个 PN（当前 {len(part_ids)} 个）")
@@ -330,8 +360,8 @@ def update_members(db: Session, *, group_id: int, version: int,
                    remove_part_ids: list[int] | None = None,
                    note: str | None = None, operated_by: str | None = None) -> dict | None:
     """一次事务增删成员（乐观锁 + 有效池唯一性）。"""
-    adds = sorted(set(add_part_ids or []))
-    removes = sorted(set(remove_part_ids or []))
+    adds = _unique_part_ids(add_part_ids, label="新增成员列表")
+    removes = _unique_part_ids(remove_part_ids, label="移除成员列表")
     if not adds and not removes:
         raise PoolCatalogError("没有要增删的成员")
     both = set(adds) & set(removes)
@@ -511,8 +541,8 @@ def archive_pool(db: Session, *, group_id: int, version: int, note: str | None =
 
 def restore_pool(db: Session, *, group_id: int, version: int, note: str | None = None,
                  operated_by: str | None = None) -> dict | None:
-    """恢复归档池。成员若已在归档期间加入其他有效池 → 409 冲突并列出占用池，
-    先在成员维护里解决归属再恢复（不静默抢占）。"""
+    """恢复归档池。实时成员数不足 2 → 400；成员若已在归档期间加入其他有效池 →
+    409 冲突并列出占用池，先治理成员/归属再恢复（不静默抢占）。"""
     pool = _pool_for_update(db, group_id)
     if pool is None:
         return None
@@ -522,6 +552,10 @@ def restore_pool(db: Session, *, group_id: int, version: int, note: str | None =
 
     member_ids = sorted(db.scalars(
         select(PartPoolMember.part_id).where(PartPoolMember.group_id == group_id)).all())
+    if len(member_ids) < MIN_ACTIVE_POOL_MEMBERS:
+        raise PoolCatalogError(
+            f"有效池至少包含 {MIN_ACTIVE_POOL_MEMBERS} 个 PN（当前 {len(member_ids)} 个），"
+            "请先治理成员后再恢复")
     _lock_parts(db, member_ids)
     conflicts = _active_pool_conflicts(db, member_ids, exclude_group_id=group_id)
     if conflicts:

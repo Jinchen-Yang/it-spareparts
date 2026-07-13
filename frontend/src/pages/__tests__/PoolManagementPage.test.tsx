@@ -1,4 +1,4 @@
-/** 互通PN池管理页的权限行为测试（复审阻塞 3 / 非阻塞 1、2、3）。
+/** 互通PN池管理页的权限与请求身份行为测试。
  *
  * 真实断言口径：
  * - manage-only：能建池/改成员，但约束价区域明确显示"无约束价设置权限"、无可编辑输入框、
@@ -8,9 +8,10 @@
  *   与"未设置"文案区分；
  * - 键盘可达：编辑/归档/恢复是真实 <button>（可 Tab 聚焦、Enter/Space 触发）；
  * - 归档池：只读档案 + "先恢复"提示，不渲染任何保存按钮。
+ * - 请求身份：详情、保存后刷新、列表只接受当前代次与目标，旧 finally 不结束新 loading。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { message } from "antd";
 
 const listPnPools = vi.fn();
@@ -68,10 +69,20 @@ function login(role: string, perms: Record<string, boolean>) {
   localStorage.setItem("permissions", JSON.stringify(perms));
 }
 
-function mockList(items: unknown[], priceRestricted = false) {
-  listPnPools.mockResolvedValue({
+function listResult(items: ReturnType<typeof row>[], priceRestricted = false) {
+  return {
     data: { total: items.length, page: 1, page_size: 20, items, price_restricted: priceRestricted },
-  });
+  };
+}
+
+function mockList(items: ReturnType<typeof row>[], priceRestricted = false) {
+  listPnPools.mockResolvedValue(listResult(items, priceRestricted));
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
 }
 
 beforeEach(() => {
@@ -230,6 +241,155 @@ describe("保存后基线刷新守卫（乐观锁不被分裂态击穿）", () =
     fireEvent.click(screen.getByRole("button", { name: "保存约束价" }));
     await vi.waitFor(() => expect(getPnPool).toHaveBeenCalledTimes(2));
     expect(screen.queryByText(/已重新加载最新数据/)).toBeNull();
+  });
+
+  it("保存 A 的延迟刷新在打开 B 后返回时被丢弃，后续保存只会更新 B", async () => {
+    login("admin", {});
+    const poolA = row({ group_id: 1, name: "池 A" });
+    const poolB = row({ group_id: 2, name: "池 B" });
+    mockList([poolA, poolB]);
+
+    const refreshA = deferred<{ data: ReturnType<typeof detail> }>();
+    let poolAReads = 0;
+    getPnPool.mockImplementation((groupId: number) => {
+      if (groupId === 1 && poolAReads++ === 0) {
+        return Promise.resolve({ data: detail({ group_id: 1, name: "池 A" }) });
+      }
+      if (groupId === 1) return refreshA.promise;
+      return Promise.resolve({ data: detail({ group_id: 2, name: "池 B" }) });
+    });
+    updatePnPool.mockImplementation((groupId: number) => Promise.resolve({
+      data: row({ group_id: groupId, version: 2 }),
+    }));
+
+    render(<PoolManagementPage />);
+    const poolARow = (await screen.findByText("池 A")).closest("tr")!;
+    fireEvent.click(within(poolARow).getByRole("button", { name: "编辑" }));
+    const nameInput = await screen.findByPlaceholderText("如 8TB 7.2K SATA 企业盘互通池");
+    fireEvent.change(nameInput, { target: { value: "池 A 已保存" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存基本信息" }));
+    await vi.waitFor(() => expect(updatePnPool).toHaveBeenCalledWith(1, expect.objectContaining({
+      version: 1, name: "池 A 已保存",
+    })));
+    await vi.waitFor(() => expect(getPnPool).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    const poolBRow = screen.getByText("池 B").closest("tr")!;
+    fireEvent.click(within(poolBRow).getByRole("button", { name: "编辑" }));
+    const poolBInput = await screen.findByDisplayValue("池 B");
+    fireEvent.change(poolBInput, { target: { value: "池 B 新名称" } });
+
+    await act(async () => {
+      refreshA.resolve({ data: detail({ group_id: 1, name: "池 A 已保存", version: 2 }) });
+    });
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "保存基本信息" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "保存基本信息" }));
+
+    await vi.waitFor(() => expect(updatePnPool).toHaveBeenCalledTimes(2));
+    expect(updatePnPool).toHaveBeenLastCalledWith(2, expect.objectContaining({
+      version: 1, name: "池 B 新名称",
+    }));
+  });
+});
+
+describe("列表请求身份守卫", () => {
+  it("较早的列表响应晚到时不会覆盖用户最后一次搜索结果", async () => {
+    login("admin", {});
+    const initialList = deferred<ReturnType<typeof listResult>>();
+    listPnPools
+      .mockImplementationOnce(() => initialList.promise)
+      .mockResolvedValueOnce(listResult([row({ group_id: 2, name: "最新搜索结果" })]));
+
+    render(<PoolManagementPage />);
+    const searchInput = screen.getByPlaceholderText("搜索池名/成员PN/描述/品牌");
+    fireEvent.change(searchInput, { target: { value: "最新" } });
+    fireEvent.click(screen.getByRole("button", { name: "search" }));
+    expect(await screen.findByText("最新搜索结果")).toBeInTheDocument();
+
+    await act(async () => {
+      initialList.resolve(listResult([row({ group_id: 1, name: "过期初始结果" })]));
+    });
+
+    expect(screen.getByText("最新搜索结果")).toBeInTheDocument();
+    expect(screen.queryByText("过期初始结果")).toBeNull();
+  });
+
+  it("旧列表请求的 finally 不会提前结束最新请求的 loading", async () => {
+    login("admin", {});
+    const initialList = deferred<ReturnType<typeof listResult>>();
+    const latestList = deferred<ReturnType<typeof listResult>>();
+    listPnPools
+      .mockImplementationOnce(() => initialList.promise)
+      .mockImplementationOnce(() => latestList.promise);
+
+    render(<PoolManagementPage />);
+    await vi.waitFor(() => expect(listPnPools).toHaveBeenCalledTimes(1));
+    const searchInput = screen.getByPlaceholderText("搜索池名/成员PN/描述/品牌");
+    fireEvent.change(searchInput, { target: { value: "最新" } });
+    fireEvent.click(screen.getByRole("button", { name: "search" }));
+    await vi.waitFor(() => expect(listPnPools).toHaveBeenCalledTimes(2));
+    const listRegion = screen.getByRole("region", { name: "互通PN池列表" });
+    await vi.waitFor(() => expect(listRegion).toHaveAttribute("aria-busy", "true"));
+
+    await act(async () => {
+      initialList.resolve(listResult([]));
+    });
+    expect(listRegion).toHaveAttribute("aria-busy", "true");
+
+    await act(async () => {
+      latestList.resolve(listResult([row({ group_id: 2, name: "最新搜索结果" })]));
+    });
+    expect(await screen.findByText("最新搜索结果")).toBeInTheDocument();
+    await vi.waitFor(() => expect(listRegion).toHaveAttribute("aria-busy", "false"));
+  });
+});
+
+describe("详情请求身份守卫", () => {
+  it("详情 A 延迟时关闭并打开 B，A 晚到不会覆盖 B", async () => {
+    login("admin", {});
+    mockList([
+      row({ group_id: 1, name: "池 A" }),
+      row({ group_id: 2, name: "池 B" }),
+    ]);
+    const poolADetail = deferred<{ data: ReturnType<typeof detail> }>();
+    getPnPool.mockImplementation((groupId: number) => groupId === 1
+      ? poolADetail.promise
+      : Promise.resolve({ data: detail({ group_id: 2, name: "池 B" }) }));
+
+    render(<PoolManagementPage />);
+    const poolARow = (await screen.findByText("池 A")).closest("tr")!;
+    fireEvent.click(within(poolARow).getByRole("button", { name: "编辑" }));
+    await vi.waitFor(() => expect(getPnPool).toHaveBeenCalledWith(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    const poolBRow = screen.getByText("池 B").closest("tr")!;
+    fireEvent.click(within(poolBRow).getByRole("button", { name: "编辑" }));
+    expect(await screen.findByDisplayValue("池 B")).toBeInTheDocument();
+
+    await act(async () => {
+      poolADetail.resolve({ data: detail({ group_id: 1, name: "池 A" }) });
+    });
+
+    expect(screen.getByDisplayValue("池 B")).toBeInTheDocument();
+    expect(screen.queryByDisplayValue("池 A")).toBeNull();
+  });
+
+  it("当前详情请求返回不同 group_id 时不会把错误池填入抽屉", async () => {
+    login("admin", {});
+    mockList([row({ group_id: 2, name: "池 B" })]);
+    const poolBDetail = deferred<{ data: ReturnType<typeof detail> }>();
+    getPnPool.mockReturnValue(poolBDetail.promise);
+
+    render(<PoolManagementPage />);
+    const poolBRow = (await screen.findByText("池 B")).closest("tr")!;
+    fireEvent.click(within(poolBRow).getByRole("button", { name: "编辑" }));
+    await vi.waitFor(() => expect(getPnPool).toHaveBeenCalledWith(2));
+
+    await act(async () => {
+      poolBDetail.resolve({ data: detail({ group_id: 1, name: "错误的池 A" }) });
+    });
+
+    expect(screen.queryByDisplayValue("错误的池 A")).toBeNull();
   });
 });
 

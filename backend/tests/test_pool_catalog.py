@@ -9,7 +9,7 @@ from sqlalchemy import select, text
 
 from app.db import SessionLocal
 from app.models.dimensions import DimPart
-from app.models.inventory import PartPoolMember, PartPoolPricePolicy
+from app.models.inventory import PartPool, PartPoolMember, PartPoolPricePolicy
 from app.models.system import SysAuditLog
 from app.services import pool_catalog as svc
 
@@ -60,9 +60,19 @@ def test_create_pool_rejects_zero_and_one_member(db):
     a = _part(db, "CAT-ONLY")
     with pytest.raises(svc.PoolCatalogError, match="至少包含 2 个"):
         svc.create_pool(db, name="单成员池", member_part_ids=[a], operated_by="t")
-    # 同一 part_id 重复给两次 = 去重后 1 个，同样拒绝
-    with pytest.raises(svc.PoolCatalogError, match="至少包含 2 个"):
-        svc.create_pool(db, name="重复成员池", member_part_ids=[a, a], operated_by="t")
+
+
+def test_create_pool_rejects_duplicate_members(db):
+    """重复成员是非法请求：[A, B, A] 不得被静默去重成合法的 [A, B]。"""
+    a, b = _part(db, "CAT-DUP-REQ-A"), _part(db, "CAT-DUP-REQ-B")
+
+    with pytest.raises(svc.PoolCatalogError, match="不能包含重复 PN"):
+        svc.create_pool(
+            db,
+            name="重复请求池",
+            member_part_ids=[a, b, a],
+            operated_by="t",
+        )
 
 
 def test_create_pool_validations(db):
@@ -164,6 +174,54 @@ def test_update_members_add_remove_syncs_count(db):
     assert left == {b, c}
     log = _audits(db, r["group_id"], "members")[0]
     assert log.after_json["added"] == ["CAT-M3"] and log.after_json["removed"] == ["CAT-M1"]
+
+
+def test_update_members_rejects_duplicate_add_request(db):
+    """新增列表中的重复 PN 必须拒绝，不得静默收缩为一次新增。"""
+    a, b, extra = (
+        _part(db, "CAT-DUP-ADD-A"),
+        _part(db, "CAT-DUP-ADD-B"),
+        _part(db, "CAT-DUP-ADD-X"),
+    )
+    created = svc.create_pool(
+        db,
+        name="重复新增池",
+        member_part_ids=[a, b],
+        operated_by="t",
+    )
+
+    with pytest.raises(svc.PoolCatalogError, match="新增成员列表不能包含重复 PN"):
+        svc.update_members(
+            db,
+            group_id=created["group_id"],
+            version=1,
+            add_part_ids=[extra, extra],
+            operated_by="t",
+        )
+
+
+def test_update_members_rejects_duplicate_remove_request(db):
+    """移除列表中的重复 PN 必须拒绝，不得静默收缩为一次移除。"""
+    a, b, c = (
+        _part(db, "CAT-DUP-RM-A"),
+        _part(db, "CAT-DUP-RM-B"),
+        _part(db, "CAT-DUP-RM-C"),
+    )
+    created = svc.create_pool(
+        db,
+        name="重复移除池",
+        member_part_ids=[a, b, c],
+        operated_by="t",
+    )
+
+    with pytest.raises(svc.PoolCatalogError, match="移除成员列表不能包含重复 PN"):
+        svc.update_members(
+            db,
+            group_id=created["group_id"],
+            version=1,
+            remove_part_ids=[a, a],
+            operated_by="t",
+        )
 
 
 def test_update_members_validations(db):
@@ -350,6 +408,29 @@ def test_archive_keeps_members_and_frees_pns(db):
     assert left == {a, b}   # 成员还在
     r3 = svc.create_pool(db, name="接盘池", member_part_ids=[a, c], operated_by="t")
     assert r3["member_count"] == 2    # 同一 PN 可入新有效池
+
+
+def test_restore_rejects_legacy_single_member_pool_and_keeps_it_archived(db):
+    """历史单成员有效池归档后不得恢复；失败后状态、版本和成员集合原样。"""
+    only = _part(db, "CAT-RS-ONLY")
+    legacy = PartPool(group_id=9_910_001, name="历史单成员池", status="active",
+                      source="legacy_generated", version=1, member_count=1)
+    db.add(legacy)
+    db.add(PartPoolMember(group_id=legacy.group_id, part_id=only, added_by="legacy"))
+    db.commit()
+
+    archived = svc.archive_pool(db, group_id=legacy.group_id, version=1,
+                                operated_by="t")
+    assert archived["status"] == "archived" and archived["version"] == 2
+
+    with pytest.raises(svc.PoolCatalogError, match="至少包含 2 个"):
+        svc.restore_pool(db, group_id=legacy.group_id, version=2, operated_by="t")
+    db.rollback()
+
+    unchanged = svc.get_pool(db, legacy.group_id)
+    assert unchanged["status"] == "archived" and unchanged["version"] == 2
+    assert unchanged["member_count"] == 1
+    assert [member["part_id"] for member in unchanged["members"]] == [only]
 
 
 def test_restore_conflict_when_member_taken(db):

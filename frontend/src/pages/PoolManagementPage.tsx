@@ -15,6 +15,12 @@ import {
 const PAGE_SIZE = 20;
 const MIN_MEMBERS = 2;   // 《互通PN池》核心规则5：有效池至少两个 PN（后端同规则兜底）
 type StatusFilter = "active" | "archived" | "all";
+interface ListRequestIdentity {
+  generation: number;
+  query: string;
+  status: StatusFilter;
+  page: number;
+}
 
 const SOURCE_LABEL: Record<string, string> = { manual: "人工", legacy_generated: "历史自动池" };
 const BASIS_OPTIONS = [{ label: "未税", value: "ex_tax" }, { label: "含税", value: "inc_tax" }];
@@ -39,6 +45,8 @@ function readLocalPerms(): Record<string, boolean> {
 }
 
 interface MemberOption { value: number; label: string }
+interface DrawerIdentity { generation: number; groupId: number }
+interface DetailRequestIdentity extends DrawerIdentity { requestGeneration: number }
 
 const memberLabel = (pn: string | null, desc: string | null) =>
   `${pn ?? "?"}${desc ? `｜${desc}` : ""}`;
@@ -72,20 +80,38 @@ export default function PoolManagementPage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
+  const listRequestGeneration = useRef(0);
+  const currentListRequest = useRef<ListRequestIdentity | null>(null);
+
+  const isCurrentListRequest = (identity: ListRequestIdentity) => {
+    const current = currentListRequest.current;
+    return current != null
+      && current.generation === identity.generation
+      && current.query === identity.query
+      && current.status === identity.status
+      && current.page === identity.page;
+  };
 
   const load = async (query = q, status = statusFilter, p = page) => {
+    const requestIdentity: ListRequestIdentity = {
+      generation: ++listRequestGeneration.current,
+      query: query.trim(), status, page: p,
+    };
+    currentListRequest.current = requestIdentity;
     setLoading(true);
     try {
       const { data } = await listPnPools({
-        q: query.trim() || undefined, status, page: p, page_size: PAGE_SIZE,
+        q: requestIdentity.query || undefined, status, page: p, page_size: PAGE_SIZE,
       });
+      if (!isCurrentListRequest(requestIdentity)) return;
       setRows(data.items || []);
       setTotal(data.total || 0);
       setPage(data.page || p);
     } catch (e: any) {
+      if (!isCurrentListRequest(requestIdentity)) return;
       message.error(e?.response?.data?.detail || "池列表加载失败");
     } finally {
-      setLoading(false);
+      if (isCurrentListRequest(requestIdentity)) setLoading(false);
     }
   };
   useEffect(() => { load("", "active", 1); }, []);
@@ -94,6 +120,27 @@ export default function PoolManagementPage() {
   const [mode, setMode] = useState<null | "create" | "edit">(null);
   const [detail, setDetail] = useState<PnPoolDetail | null>(null);   // edit 基线（diff 与 version 来源）
   const [detailLoading, setDetailLoading] = useState(false);
+  // 抽屉身份与详情请求各自有独立代次：前者区分关闭/重开（即使 group_id 相同），
+  // 后者保证同一抽屉内只有最后发出的详情请求可以落地。
+  const activeGroupId = useRef<number | null>(null);
+  const drawerGeneration = useRef(0);
+  const detailRequestGeneration = useRef(0);
+
+  const activateDrawer = (groupId: number | null) => {
+    activeGroupId.current = groupId;
+    const generation = ++drawerGeneration.current;
+    return groupId == null ? null : { generation, groupId };
+  };
+  const isCurrentDrawer = (identity: DrawerIdentity) =>
+    identity.generation === drawerGeneration.current
+    && identity.groupId === activeGroupId.current;
+  const beginDetailRequest = (identity: DrawerIdentity): DetailRequestIdentity | null => {
+    if (!isCurrentDrawer(identity)) return null;
+    return { ...identity, requestGeneration: ++detailRequestGeneration.current };
+  };
+  const isCurrentDetailRequest = (identity: DetailRequestIdentity) =>
+    isCurrentDrawer(identity)
+    && identity.requestGeneration === detailRequestGeneration.current;
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -132,6 +179,7 @@ export default function PoolManagementPage() {
   };
 
   const openCreate = () => {
+    activateDrawer(null);   // 关闭/切换目标时，立即使所有旧详情响应失效
     setDetail(null);
     setName(""); setDescription(""); setMemberIds([]); setMemberOptions([]); setSearchOptions([]);
     setPurchaseValue(null); setPurchaseBasis("ex_tax");
@@ -141,21 +189,32 @@ export default function PoolManagementPage() {
   };
 
   const openEdit = async (groupId: number) => {
+    const drawerIdentity = activateDrawer(groupId)!;
+    const requestIdentity = beginDetailRequest(drawerIdentity)!;
     setMode("edit");
     setDetail(null);
     setDetailLoading(true);
+    setSavingInfo(false); setSavingMembers(false); setSavingPolicy(false);
     try {
       const { data } = await getPnPool(groupId);
+      if (!isCurrentDetailRequest(requestIdentity) || data.group_id !== groupId) return;
       hydrate(data);
     } catch (e: any) {
+      if (!isCurrentDetailRequest(requestIdentity)) return;
       message.error(e?.response?.data?.detail || "池详情加载失败");
+      setDetailLoading(false);
+      activateDrawer(null);
       setMode(null);
     } finally {
-      setDetailLoading(false);
+      if (isCurrentDetailRequest(requestIdentity)) setDetailLoading(false);
     }
   };
 
-  const closeDrawer = () => { setMode(null); setDetail(null); };
+  const closeDrawer = () => {
+    activateDrawer(null);
+    setMode(null); setDetail(null); setDetailLoading(false);
+    setSavingInfo(false); setSavingMembers(false); setSavingPolicy(false);
+  };
 
   // ---- 成员远程搜索（防抖 + 代次守卫；browse=true 分支返回 part id）----
   const [fetching, setFetching] = useState(false);
@@ -243,9 +302,14 @@ export default function PoolManagementPage() {
   // 或失败时的原版本）才允许"只换基线、保留用户输入"；出现非预期的版本推进 = 他人
   // 并发修改——必须整表单回填并明确提示。否则"旧表单 × 新版本号"的分裂态会让下一次
   // 保存无冲突地滚回他人写入，击穿乐观锁"绝不静默覆盖"的承诺。
-  const refreshBaseline = async (groupId: number, expectedVersion: number) => {
+  const refreshBaseline = async (
+    groupId: number, expectedVersion: number, drawerIdentity: DrawerIdentity,
+  ) => {
+    const requestIdentity = beginDetailRequest(drawerIdentity);
+    if (!requestIdentity || requestIdentity.groupId !== groupId) return;
     try {
       const { data } = await getPnPool(groupId);
+      if (!isCurrentDetailRequest(requestIdentity) || data.group_id !== groupId) return;
       if (data.version !== expectedVersion || data.status !== "active") {
         hydrate(data);
         message.warning("该池刚被他人同时修改，已重新加载最新数据，请确认后再继续编辑");
@@ -255,28 +319,37 @@ export default function PoolManagementPage() {
     } catch { /* 拉不到就保持现状，用户可关闭抽屉重开 */ }
   };
 
-  const handleSaveError = async (e: any, fallback: string) => {
+  const handleSaveError = async (
+    e: any, fallback: string, savedDetail: PnPoolDetail, drawerIdentity: DrawerIdentity,
+  ) => {
+    if (!isCurrentDrawer(drawerIdentity)) return;
     const isConflict = e?.response?.status === 409;
     message.error(e?.response?.data?.detail
       || (isConflict ? "保存冲突：该池刚被他人修改，已重新加载最新数据" : fallback));
-    if (detail) {
-      if (isConflict) {
-        // 409：他人已改，整表单回填最新值
+    if (isConflict) {
+      // 409：他人已改，整表单回填最新值
+      const requestIdentity = beginDetailRequest(drawerIdentity);
+      if (requestIdentity) {
         try {
-          const { data } = await getPnPool(detail.group_id);
-          hydrate(data);
+          const { data } = await getPnPool(savedDetail.group_id);
+          if (isCurrentDetailRequest(requestIdentity) && data.group_id === savedDetail.group_id) {
+            hydrate(data);
+          }
         } catch { /* 拉不到就保持现状 */ }
-      } else {
-        // 其它错误：本次保存未生效，预期版本不变；若版本仍被推进说明有并发修改
-        await refreshBaseline(detail.group_id, detail.version);
       }
+    } else {
+      // 其它错误：本次保存未生效，预期版本不变；若版本仍被推进说明有并发修改
+      await refreshBaseline(savedDetail.group_id, savedDetail.version, drawerIdentity);
     }
-    load(q, statusFilter, page);
+    if (isCurrentDrawer(drawerIdentity)) load(q, statusFilter, page);
   };
 
   // ---- 三个独立保存动作：每个按钮恰好一个请求，成功/失败独立呈现 ----
   const saveInfo = async () => {
     if (!detail) return;
+    const savedDetail = detail;
+    const drawerIdentity = { generation: drawerGeneration.current, groupId: detail.group_id };
+    if (!isCurrentDrawer(drawerIdentity)) return;
     if (!name.trim()) { message.warning("请输入池名称"); return; }
     setSavingInfo(true);
     try {
@@ -288,18 +361,22 @@ export default function PoolManagementPage() {
         ...(descChanged ? { description: description.trim() || null } : {}),
         note: note.trim() || null,
       });
+      if (!isCurrentDrawer(drawerIdentity)) return;
       message.success("基本信息已保存");
-      await refreshBaseline(detail.group_id, data.version);
-      load(q, statusFilter, page);
+      await refreshBaseline(savedDetail.group_id, data.version, drawerIdentity);
+      if (isCurrentDrawer(drawerIdentity)) load(q, statusFilter, page);
     } catch (e: any) {
-      await handleSaveError(e, "基本信息保存失败");
+      await handleSaveError(e, "基本信息保存失败", savedDetail, drawerIdentity);
     } finally {
-      setSavingInfo(false);
+      if (isCurrentDrawer(drawerIdentity)) setSavingInfo(false);
     }
   };
 
   const saveMembers = async () => {
     if (!detail) return;
+    const savedDetail = detail;
+    const drawerIdentity = { generation: drawerGeneration.current, groupId: detail.group_id };
+    if (!isCurrentDrawer(drawerIdentity)) return;
     if (memberIds.length < MIN_MEMBERS) {
       message.warning(`有效池至少包含 ${MIN_MEMBERS} 个 PN`);
       return;
@@ -311,28 +388,33 @@ export default function PoolManagementPage() {
         add_part_ids: memberDiff.add, remove_part_ids: memberDiff.remove,
         note: note.trim() || null,
       });
+      if (!isCurrentDrawer(drawerIdentity)) return;
       message.success("成员变更已保存");
-      await refreshBaseline(detail.group_id, data.version);
-      load(q, statusFilter, page);
+      await refreshBaseline(savedDetail.group_id, data.version, drawerIdentity);
+      if (isCurrentDrawer(drawerIdentity)) load(q, statusFilter, page);
     } catch (e: any) {
-      await handleSaveError(e, "成员保存失败");
+      await handleSaveError(e, "成员保存失败", savedDetail, drawerIdentity);
     } finally {
-      setSavingMembers(false);
+      if (isCurrentDrawer(drawerIdentity)) setSavingMembers(false);
     }
   };
 
   const savePolicy = async () => {
     if (!detail) return;
+    const savedDetail = detail;
+    const drawerIdentity = { generation: drawerGeneration.current, groupId: detail.group_id };
+    if (!isCurrentDrawer(drawerIdentity)) return;
     setSavingPolicy(true);
     try {
       const { data } = await setPnPoolPolicy(detail.group_id, policyBody());
+      if (!isCurrentDrawer(drawerIdentity)) return;
       message.success("约束价已保存");
-      await refreshBaseline(detail.group_id, data.version);
-      load(q, statusFilter, page);
+      await refreshBaseline(savedDetail.group_id, data.version, drawerIdentity);
+      if (isCurrentDrawer(drawerIdentity)) load(q, statusFilter, page);
     } catch (e: any) {
-      await handleSaveError(e, "约束价保存失败");
+      await handleSaveError(e, "约束价保存失败", savedDetail, drawerIdentity);
     } finally {
-      setSavingPolicy(false);
+      if (isCurrentDrawer(drawerIdentity)) setSavingPolicy(false);
     }
   };
 
@@ -672,15 +754,17 @@ export default function PoolManagementPage() {
         />
       </div>
 
-      <Table<PnPoolRow>
-        rowKey="group_id" size="small" columns={columns} dataSource={rows} loading={loading}
-        scroll={{ x: 1190 }}   // ≥列宽总和，防止固定操作列悬浮盖住更新时间列
-        pagination={{
-          current: page, pageSize: PAGE_SIZE, total, showSizeChanger: false,
-          showTotal: (t) => `共 ${t} 个池`,
-          onChange: (p) => load(q, statusFilter, p),
-        }}
-      />
+      <div role="region" aria-label="互通PN池列表" aria-busy={loading}>
+        <Table<PnPoolRow>
+          rowKey="group_id" size="small" columns={columns} dataSource={rows} loading={loading}
+          scroll={{ x: 1190 }}   // ≥列宽总和，防止固定操作列悬浮盖住更新时间列
+          pagination={{
+            current: page, pageSize: PAGE_SIZE, total, showSizeChanger: false,
+            showTotal: (t) => `共 ${t} 个池`,
+            onChange: (p) => load(q, statusFilter, p),
+          }}
+        />
+      </div>
 
       <Drawer
         width={isMobile ? "100%" : 720}

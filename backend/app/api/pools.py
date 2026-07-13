@@ -1,8 +1,8 @@
 """互通 PN 池独立接口（/api/pools*，互通PN池价格分析 §17）——脱离老板看板权限。
 
 权限口径（§12）：
-- 读（清单/档案）：全员可读，但必须登录（require_login）；约束价字段随
-  data_pool_price_governance 过 apply_field_visibility 脱敏。
+- 读（清单/档案）：全员可读，但必须登录（require_login）；清单约束价字段随
+  data_pool_price_governance 过 apply_field_visibility 脱敏，详情策略容器再做结构性收敛。
 - 池维护（建池/改名/成员/归档/恢复）：action_pool_manage（默认老板/管理员，可单独授权）。
 - 约束价设置：action_pool_set_policy（默认老板/管理员）。
 所有写操作携带 version（乐观锁）：他人先保存 → 409，前端提示重新加载，不静默覆盖。
@@ -90,6 +90,16 @@ def _price_restricted(ctx: UserContext) -> bool:
     return is_field_hidden(ctx, "purchase_ceiling_ex_tax")
 
 
+def _hide_policy_actor_side_channel(pool_data: dict) -> None:
+    """隐藏池顶层最后维护人对约束价设置人的镜像。
+
+    set_price_policy 会和其它池写操作一样更新 PartPool.updated_by；若只遮蔽策略容器，
+    最近一次操作恰好是设价时仍可从该通用字段精确反推 changed_by。此处只处理池响应，
+    不把全局同名 updated_by 加进 FIELD_GROUPS，以免误伤其它业务的普通维护人字段。
+    """
+    pool_data["updated_by"] = None
+
+
 def _run(fn, **kwargs):
     """service 领域异常 → HTTP 语义：业务非法 400、并发/唯一性冲突 409、不存在 404。"""
     try:
@@ -109,15 +119,24 @@ def list_pools(
     status_: str = Query("active", alias="status", pattern="^(active|archived|all)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
+    sort: str = Query("updated_at", pattern="^(updated_at|name|member_count|group_id)$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(require_login),
 ) -> dict:
-    record_access_log(ctx, "pool_catalog_list", "pools", {"q": q, "status": status_})
-    data = svc.list_pools(db, q=q, status=status_, page=page, page_size=page_size)
+    record_access_log(ctx, "pool_catalog_list", "pools", {
+        "q": q, "status": status_, "sort": sort, "order": order,
+    })
+    data = svc.list_pools(
+        db, q=q, status=status_, page=page, page_size=page_size,
+        sort=sort, order=order,
+    )
     restricted = _price_restricted(ctx)
     data["price_restricted"] = restricted
     for item in data["items"]:
         item["price_restricted"] = restricted
+        if restricted:
+            _hide_policy_actor_side_channel(item)
     return apply_field_visibility(data, ctx)
 
 
@@ -131,7 +150,13 @@ def get_pool(
     data = svc.get_pool(db, group_id)
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "池不存在")
-    data["price_restricted"] = _price_restricted(ctx)
+    restricted = _price_restricted(ctx)
+    data["price_restricted"] = restricted
+    if restricted:
+        # 历史项的 note / changed_by / input_basis 均可能直接或间接泄漏约束价。
+        # 整体收敛为空数组，既不给未来新增的策略元数据留下漏网字段，也保持数组契约。
+        data["price_policy_history"] = []
+        _hide_policy_actor_side_channel(data)
     return apply_field_visibility(data, ctx)
 
 

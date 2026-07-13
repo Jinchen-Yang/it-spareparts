@@ -36,7 +36,8 @@ def preserve_pool_seq(migrated):
 
 
 def _cleanup(conn):
-    conn.execute(text("DELETE FROM part_pool_price_policy"))
+    # 仅使用新旧两版共有表，保证 RED 停在 _PREV 时也能清理；head 下 policy 由
+    # part_pool 外键 ON DELETE CASCADE 一并删除。
     conn.execute(text("DELETE FROM part_pool_member"))
     conn.execute(text("DELETE FROM part_pool"))
     conn.execute(text("DELETE FROM dim_part WHERE pn_std LIKE 'MIGPOOL-%'"))
@@ -45,8 +46,8 @@ def _cleanup(conn):
 def test_legacy_pools_survive_migration_identically(preserve_pool_seq):
     """downgrade 到旧 schema → 造存量自动池（约 40 池 586 型号的縮影）→ upgrade head。
 
-    含一个 1 成员的历史池（gid 30）：运行时"有效池≥2成员"只约束 create/update_members
-    写路径，迁移回填的历史池不经该校验、必须零变化通过（复审阻塞 1-7）。"""
+    所有历史池均满足"有效池≥2成员"；迁移逐池保持 ID 与成员集合不变。非法单成员
+    存量由独立 fail-fast 用例覆盖，不得升级为 active。"""
     cfg = _cfg()
     with engine.begin() as conn:
         _cleanup(conn)   # 复合主键降级回单列主键前必须清池数据
@@ -55,10 +56,10 @@ def test_legacy_pools_survive_migration_identically(preserve_pool_seq):
         with engine.begin() as conn:
             part_ids = [conn.execute(text(
                 "INSERT INTO dim_part (pn_std) VALUES (:pn) RETURNING id"),
-                {"pn": f"MIGPOOL-{i}"}).scalar() for i in range(6)]
-            # 三个存量池：11={p0,p1}、25={p2,p3,p4}、30={p5}（ID 故意不连续，模拟退役空洞；
-            # 30 是 1 成员池，验证迁移不受运行时最小成员数校验影响）
-            legacy = {11: part_ids[:2], 25: part_ids[2:5], 30: part_ids[5:]}
+                {"pn": f"MIGPOOL-{i}"}).scalar() for i in range(7)]
+            # 三个存量池：11={p0,p1}、25={p2,p3,p4}、30={p5,p6}；ID 故意不连续，
+            # 模拟退役空洞。
+            legacy = {11: part_ids[:2], 25: part_ids[2:5], 30: part_ids[5:7]}
             for gid, members in legacy.items():
                 conn.execute(text(
                     "INSERT INTO part_pool (group_id, member_count, needs_calibration, oversized) "
@@ -88,11 +89,17 @@ def test_legacy_pools_survive_migration_identically(preserve_pool_seq):
                 cnt = conn.execute(text(
                     "SELECT member_count FROM part_pool WHERE group_id=:g"), {"g": gid}).scalar()
                 assert cnt == len(members)
+            undersized = conn.execute(text(
+                "SELECT p.group_id FROM part_pool p "
+                "LEFT JOIN part_pool_member m ON m.group_id = p.group_id "
+                "WHERE p.status = 'active' "
+                "GROUP BY p.group_id HAVING COUNT(m.part_id) < 2"
+            )).all()
+            assert undersized == [], "升级后数据库不得存在实际成员数 <2 的有效池"
             # §21-6：序列下一值严格大于所有历史 ID
             nxt = conn.execute(text("SELECT nextval('part_pool_group_id_seq')")).scalar()
             assert nxt > 30
-        # 1 成员历史池日常维护不被最小成员数校验卡死：改名可用；
-        # 补足成员到 ≥2 也可用（唯一被拒的是把有效池改到 <2）
+        # 合法历史池升级后可正常改名。
         from app.db import SessionLocal
         from app.services import pool_catalog
         s = SessionLocal()
@@ -106,6 +113,57 @@ def test_legacy_pools_survive_migration_identically(preserve_pool_seq):
     finally:
         with engine.begin() as conn:
             _cleanup(conn)
+        alembic_command.upgrade(cfg, "head")
+
+
+def test_upgrade_rejects_legacy_single_member_pool_without_schema_or_data_changes(
+        preserve_pool_seq):
+    """旧 schema 存在单成员池时 upgrade 必须在任何 DDL 前失败，数据与 revision 原样。"""
+    cfg = _cfg()
+    gid = 31
+    with engine.begin() as conn:
+        _cleanup(conn)
+    alembic_command.downgrade(cfg, _PREV)
+    try:
+        with engine.begin() as conn:
+            part_id = conn.execute(text(
+                "INSERT INTO dim_part (pn_std) VALUES ('MIGPOOL-SINGLE') RETURNING id"
+            )).scalar()
+            conn.execute(text(
+                "INSERT INTO part_pool (group_id, member_count, needs_calibration, oversized) "
+                "VALUES (:g, 1, false, false)"), {"g": gid})
+            conn.execute(text(
+                "INSERT INTO part_pool_member (part_id, group_id) VALUES (:p, :g)"),
+                {"p": part_id, "g": gid})
+
+        with pytest.raises(RuntimeError, match="有效池至少包含 2 个 PN"):
+            alembic_command.upgrade(cfg, "head")
+
+        with engine.begin() as conn:
+            assert conn.execute(text(
+                "SELECT version_num FROM alembic_version")).scalar() == _PREV
+            added_columns = set(conn.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'part_pool' "
+                "AND column_name IN ('name', 'status', 'source', 'version')"
+            )).scalars())
+            assert added_columns == set(), "fail-fast 前不得执行任何新增列 DDL"
+            assert conn.execute(text(
+                "SELECT member_count FROM part_pool WHERE group_id=:g"),
+                {"g": gid}).scalar() == 1
+            assert conn.execute(text(
+                "SELECT part_id FROM part_pool_member WHERE group_id=:g"),
+                {"g": gid}).scalar() == part_id
+            assert conn.execute(text(
+                "SELECT pn_std FROM dim_part WHERE id=:p"), {"p": part_id}).scalar() == \
+                "MIGPOOL-SINGLE"
+    finally:
+        # RED（旧实现意外升级成功）和 GREEN（仍停在旧 schema）都能用这些共有列清理，
+        # 随后恢复 head，避免污染共享测试库。
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM part_pool_member WHERE group_id=:g"), {"g": gid})
+            conn.execute(text("DELETE FROM part_pool WHERE group_id=:g"), {"g": gid})
+            conn.execute(text("DELETE FROM dim_part WHERE pn_std='MIGPOOL-SINGLE'"))
         alembic_command.upgrade(cfg, "head")
 
 
