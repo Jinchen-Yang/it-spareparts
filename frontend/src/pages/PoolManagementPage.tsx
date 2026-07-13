@@ -15,11 +15,13 @@ import {
 const PAGE_SIZE = 20;
 const MIN_MEMBERS = 2;   // 《互通PN池》核心规则5：有效池至少两个 PN（后端同规则兜底）
 type StatusFilter = "active" | "archived" | "all";
-interface ListRequestIdentity {
-  generation: number;
+interface ListTarget {
   query: string;
   status: StatusFilter;
   page: number;
+}
+interface ListRequestIdentity extends ListTarget {
+  generation: number;
 }
 
 const SOURCE_LABEL: Record<string, string> = { manual: "人工", legacy_generated: "历史自动池" };
@@ -81,6 +83,9 @@ export default function PoolManagementPage() {
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const listRequestGeneration = useRef(0);
+  // “最后应用的列表目标”与 React render 闭包解耦。保存/归档等旧异步工作流结束后
+  // 只能刷新这个目标，不能拿启动工作流时捕获的旧筛选再创建一个更高代次请求。
+  const currentListTarget = useRef<ListTarget>({ query: "", status: "active", page: 1 });
   const currentListRequest = useRef<ListRequestIdentity | null>(null);
 
   const isCurrentListRequest = (identity: ListRequestIdentity) => {
@@ -93,9 +98,11 @@ export default function PoolManagementPage() {
   };
 
   const load = async (query = q, status = statusFilter, p = page) => {
+    const target: ListTarget = { query: query.trim(), status, page: p };
+    currentListTarget.current = target;
     const requestIdentity: ListRequestIdentity = {
       generation: ++listRequestGeneration.current,
-      query: query.trim(), status, page: p,
+      ...target,
     };
     currentListRequest.current = requestIdentity;
     setLoading(true);
@@ -113,6 +120,10 @@ export default function PoolManagementPage() {
     } finally {
       if (isCurrentListRequest(requestIdentity)) setLoading(false);
     }
+  };
+  const refreshCurrentList = (pageOverride?: number) => {
+    const target = currentListTarget.current;
+    return load(target.query, target.status, pageOverride ?? target.page);
   };
   useEffect(() => { load("", "active", 1); }, []);
 
@@ -341,7 +352,7 @@ export default function PoolManagementPage() {
       // 其它错误：本次保存未生效，预期版本不变；若版本仍被推进说明有并发修改
       await refreshBaseline(savedDetail.group_id, savedDetail.version, drawerIdentity);
     }
-    if (isCurrentDrawer(drawerIdentity)) load(q, statusFilter, page);
+    if (isCurrentDrawer(drawerIdentity)) refreshCurrentList();
   };
 
   // ---- 三个独立保存动作：每个按钮恰好一个请求，成功/失败独立呈现 ----
@@ -364,7 +375,7 @@ export default function PoolManagementPage() {
       if (!isCurrentDrawer(drawerIdentity)) return;
       message.success("基本信息已保存");
       await refreshBaseline(savedDetail.group_id, data.version, drawerIdentity);
-      if (isCurrentDrawer(drawerIdentity)) load(q, statusFilter, page);
+      if (isCurrentDrawer(drawerIdentity)) refreshCurrentList();
     } catch (e: any) {
       await handleSaveError(e, "基本信息保存失败", savedDetail, drawerIdentity);
     } finally {
@@ -391,7 +402,7 @@ export default function PoolManagementPage() {
       if (!isCurrentDrawer(drawerIdentity)) return;
       message.success("成员变更已保存");
       await refreshBaseline(savedDetail.group_id, data.version, drawerIdentity);
-      if (isCurrentDrawer(drawerIdentity)) load(q, statusFilter, page);
+      if (isCurrentDrawer(drawerIdentity)) refreshCurrentList();
     } catch (e: any) {
       await handleSaveError(e, "成员保存失败", savedDetail, drawerIdentity);
     } finally {
@@ -410,7 +421,7 @@ export default function PoolManagementPage() {
       if (!isCurrentDrawer(drawerIdentity)) return;
       message.success("约束价已保存");
       await refreshBaseline(savedDetail.group_id, data.version, drawerIdentity);
-      if (isCurrentDrawer(drawerIdentity)) load(q, statusFilter, page);
+      if (isCurrentDrawer(drawerIdentity)) refreshCurrentList();
     } catch (e: any) {
       await handleSaveError(e, "约束价保存失败", savedDetail, drawerIdentity);
     } finally {
@@ -432,7 +443,7 @@ export default function PoolManagementPage() {
         member_part_ids: memberIds, note: note.trim() || null,
       });
       message.success(canSetPolicy ? "池已创建；可继续设置约束价" : "池已创建");
-      load(q, statusFilter, 1);
+      refreshCurrentList(1);
       if (canSetPolicy) {
         await openEdit(created.group_id);   // 顺手设约束价：进入编辑抽屉（独立的保存动作）
       } else {
@@ -440,7 +451,7 @@ export default function PoolManagementPage() {
       }
     } catch (e: any) {
       message.error(e?.response?.data?.detail || "建池失败");
-      load(q, statusFilter, page);
+      refreshCurrentList();
     } finally {
       setCreating(false);
     }
@@ -455,7 +466,9 @@ export default function PoolManagementPage() {
     } catch (e: any) {
       message.error(e?.response?.data?.detail || (action === "archive" ? "归档失败" : "恢复失败"));
     }
-    load(q, statusFilter, page);   // 失败（含 409 版本冲突）也刷新，拿到最新 version
+    // 失败（含 409）也刷新，但只能刷新用户当前已应用的筛选；异步动作启动时的旧闭包
+    // 不得再发起更高代次请求，反向覆盖用户后来选择的列表目标。
+    refreshCurrentList();
   };
 
   // ---- 列表列 ----

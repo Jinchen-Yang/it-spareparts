@@ -342,6 +342,36 @@ describe("列表请求身份守卫", () => {
     expect(await screen.findByText("最新搜索结果")).toBeInTheDocument();
     await vi.waitFor(() => expect(listRegion).toHaveAttribute("aria-busy", "false"));
   });
+
+  it("旧生命周期回调晚结束时只刷新用户当前筛选，不会用旧闭包反向覆盖", async () => {
+    login("admin", {});
+    const archiveRequest = deferred<{ data: ReturnType<typeof row> }>();
+    archivePnPool.mockReturnValue(archiveRequest.promise);
+    listPnPools.mockImplementation(({ status }: { status: "active" | "archived" }) =>
+      Promise.resolve(listResult(status === "archived"
+        ? [row({ group_id: 2, name: "当前已归档结果", status: "archived" })]
+        : [row({ group_id: 1, name: "错误有效池结果", status: "active" })])));
+
+    render(<PoolManagementPage />);
+    expect(await screen.findByText("错误有效池结果")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "归档" }));
+    await screen.findByText("归档该池？");
+    fireEvent.click(screen.getByRole("button", { name: "OK" }));
+    await vi.waitFor(() => expect(archivePnPool).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByText("已归档"));
+    expect(await screen.findByText("当前已归档结果")).toBeInTheDocument();
+    expect(listPnPools).toHaveBeenLastCalledWith(expect.objectContaining({ status: "archived" }));
+
+    await act(async () => {
+      archiveRequest.resolve({ data: row({ status: "archived", version: 2 }) });
+    });
+    await vi.waitFor(() => expect(listPnPools).toHaveBeenCalledTimes(3));
+
+    expect(listPnPools).toHaveBeenLastCalledWith(expect.objectContaining({ status: "archived" }));
+    expect(screen.getByText("当前已归档结果")).toBeInTheDocument();
+    expect(screen.queryByText("错误有效池结果")).toBeNull();
+  });
 });
 
 describe("详情请求身份守卫", () => {
