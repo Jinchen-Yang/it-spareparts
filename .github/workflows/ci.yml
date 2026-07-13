@@ -54,3 +54,6 @@ jobs:
         run: |
           npm ci
           npm run build
+      - name: 行为测试（vitest：池管理页权限矩阵/键盘可达/归档只读）
+        working-directory: frontend
+        run: npm run test

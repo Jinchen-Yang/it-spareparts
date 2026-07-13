@@ -24,8 +24,12 @@ export default function App() {
     const role = localStorage.getItem("role") || "";
     const isAdmin = role === "admin";
     const perms = readPerms();
-    // 权限规则与旧版一致：admin 全通；有 perm 键的查权限快照；无 perm 键的仅 admin（账号管理）
-    return NAV_ITEMS.filter((it) => isAdmin || (it.perm ? !!perms[it.perm] : false));
+    // 权限规则与旧版一致：admin 全通；有 perm 键的查权限快照；anyPerm 任一命中即可见
+    // （互通PN池管理：manage / set_policy 两个动作权限共享入口）；两者都没有的仅 admin（账号管理）
+    return NAV_ITEMS.filter((it) => isAdmin
+      || (it.perm ? !!perms[it.perm]
+        : it.anyPerm ? it.anyPerm.some((p) => !!perms[p])
+          : false));
   }, [token]);
 
   // 未登录时任何路径都先登录；登录后停留在原地址（支持深链接直达）

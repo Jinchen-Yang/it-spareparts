@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
-  Button, Drawer, Grid, Input, InputNumber, Popconfirm, Segmented, Select, Space, Spin, Table,
-  Tag, message,
+  Alert, Button, Drawer, Grid, Input, InputNumber, Popconfirm, Segmented, Select, Space, Spin,
+  Table, Tag, message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import PageHeader from "../components/PageHeader";
@@ -13,29 +13,57 @@ import {
 } from "../api/pools";
 
 const PAGE_SIZE = 20;
+const MIN_MEMBERS = 2;   // 《互通PN池》核心规则5：有效池至少两个 PN（后端同规则兜底）
 type StatusFilter = "active" | "archived" | "all";
 
 const SOURCE_LABEL: Record<string, string> = { manual: "人工", legacy_generated: "历史自动池" };
 const BASIS_OPTIONS = [{ label: "未税", value: "ex_tax" }, { label: "含税", value: "inc_tax" }];
 const basisLabel = (b?: string | null) => (b === "inc_tax" ? "含税" : "未税");
 
-// 约束价（未税）：null = 未设置或按权限脱敏，列表统一显示 "--"
-const fmtMoney = (v: number | null | undefined) =>
-  v == null ? <span style={{ color: "var(--mb-text-3, #bbb)" }}>--</span>
-    : Number(v).toFixed(2);
+const MUTED = { color: "var(--mb-text-3, #999)" };
+// 约束价（未税）三态展示：无权限（price_restricted）≠ 未设置（null）≠ 数值——
+// 绝不把"看不见"和"没设"都画成 "--" 让人猜（复审非阻塞 1）
+const fmtMoney = (v: number | null | undefined, restricted: boolean) =>
+  restricted ? <span style={MUTED}>无价格权限</span>
+    : v == null ? <span style={MUTED}>未设置</span>
+      : Number(v).toFixed(2);
 const fmtTime = (s: string | null | undefined) => (s ? new Date(s).toLocaleString("zh-CN") : "—");
+
+/** 本地权限快照（登录时整份写入 localStorage；写坏时回退空对象，与 App.tsx 同口径）。 */
+function readLocalPerms(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem("permissions") || "{}");
+  } catch {
+    return {};
+  }
+}
 
 interface MemberOption { value: number; label: string }
 
 const memberLabel = (pn: string | null, desc: string | null) =>
   `${pn ?? "?"}${desc ? `｜${desc}` : ""}`;
 
-/** 互通PN池管理（Slice 1 最小管理页）：人工池是唯一真值，保存即生效。
- * 列表（搜索/状态筛选/分页）+ 右侧抽屉编辑（名称/说明/成员/约束价/备注）+ 新建/归档/恢复。
- * 写操作全部携带 version（乐观锁）；连续保存串行，用上一步返回的新 version。 */
+/** 互通PN池管理（Slice 1）：人工池是唯一真值，保存即生效。
+ *
+ * 权限分区（复审阻塞 3）——manage 与 set_policy 是两种独立授权，任一权限都可进页面：
+ * - action_pool_manage：建池、改名称/说明、增删成员、归档/恢复；
+ * - action_pool_set_policy：设置约束价（无权限时该区域明确显示文案，不给可编辑输入框）。
+ * 编辑抽屉拆成三个独立保存动作（基本信息 / 成员 / 约束价），每个按钮 = 恰好一个
+ * HTTP 请求 = 后端一个事务——不存在"一个保存按钮伪装原子操作、前半成功后半 403"。
+ * 归档池只读（显示档案与"先恢复"提示，不渲染必然 400 的可保存表单）。 */
 export default function PoolManagementPage() {
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
+
+  // 权限快照随登录周期固定（改权限会踢重登），组件生命周期内读一次即可
+  const [{ canManage, canSetPolicy }] = useState(() => {
+    const isAdmin = localStorage.getItem("role") === "admin";
+    const perms = readLocalPerms();
+    return {
+      canManage: isAdmin || !!perms.action_pool_manage,
+      canSetPolicy: isAdmin || !!perms.action_pool_set_policy,
+    };
+  });
 
   // ---- 列表 ----
   const [q, setQ] = useState("");
@@ -66,7 +94,6 @@ export default function PoolManagementPage() {
   const [mode, setMode] = useState<null | "create" | "edit">(null);
   const [detail, setDetail] = useState<PnPoolDetail | null>(null);   // edit 基线（diff 与 version 来源）
   const [detailLoading, setDetailLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -78,6 +105,12 @@ export default function PoolManagementPage() {
   const [salesValue, setSalesValue] = useState<number | null>(null);
   const [salesBasis, setSalesBasis] = useState<PriceBasis>("ex_tax");
   const [note, setNote] = useState("");
+
+  // 三个独立保存动作各自的 loading（互不阻塞、互不伪装）
+  const [savingInfo, setSavingInfo] = useState(false);
+  const [savingMembers, setSavingMembers] = useState(false);
+  const [savingPolicy, setSavingPolicy] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   // 表单填充：edit 打开 / 409 后重拉详情时同步 version 与字段
   const hydrate = (d: PnPoolDetail) => {
@@ -160,21 +193,54 @@ export default function PoolManagementPage() {
     setMemberIds(ids);
   };
 
-  // ---- 保存（保存即生效）----
-  // 约束价是否被用户改动（与详情里的原始录入值/口径比对；没动就不调 PUT）
-  const policyDirty = (d: PnPoolDetail | null) => {
-    const p = d?.price_policy;
+  // ---- diff 判定（各保存按钮只在真有改动时可用）----
+  const infoDirty = detail != null
+    && (name.trim() !== detail.name
+      || (description.trim() || null) !== (detail.description ?? null));
+
+  const memberDiff = useMemo(() => {
+    if (!detail) return { add: [] as number[], remove: [] as number[] };
+    const initIds = new Set(detail.members.map((m) => m.part_id));
+    const nowIds = new Set(memberIds);
+    return {
+      add: memberIds.filter((id) => !initIds.has(id)),
+      remove: detail.members.map((m) => m.part_id).filter((id) => !nowIds.has(id)),
+    };
+  }, [detail, memberIds]);
+  const membersDirty = memberDiff.add.length > 0 || memberDiff.remove.length > 0;
+
+  // 约束价单侧 diff：每侧独立判定 set / unset / keep（null 永远不是"清空"）
+  const policyBody = () => {
+    const p = detail?.price_policy;
     const initPV = p?.purchase_input_value != null ? Number(p.purchase_input_value) : null;
     const initSV = p?.sales_input_value != null ? Number(p.sales_input_value) : null;
     const initPB = p?.purchase_input_basis ?? "ex_tax";
     const initSB = p?.sales_input_basis ?? "ex_tax";
-    return purchaseValue !== initPV || salesValue !== initSV
-      || (purchaseValue != null && purchaseBasis !== initPB)
-      || (salesValue != null && salesBasis !== initSB);
+    const body: Parameters<typeof setPnPoolPolicy>[1] = {
+      version: detail?.version ?? 0, note: note.trim() || null,
+    };
+    if (purchaseValue == null) {
+      if (initPV != null) body.purchase_unset = true;                    // 用户显式清空了已设值
+    } else if (purchaseValue !== initPV || purchaseBasis !== initPB) {
+      body.purchase_value = purchaseValue; body.purchase_basis = purchaseBasis;
+    }
+    if (salesValue == null) {
+      if (initSV != null) body.sales_unset = true;
+    } else if (salesValue !== initSV || salesBasis !== initSB) {
+      body.sales_value = salesValue; body.sales_basis = salesBasis;
+    }
+    return body;
   };
+  const policyDirty = useMemo(() => {
+    if (!detail) return false;
+    const b = policyBody();
+    return b.purchase_unset || b.sales_unset
+      || b.purchase_value !== undefined || b.sales_value !== undefined;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail, purchaseValue, purchaseBasis, salesValue, salesBasis]);
 
-  // 保存失败后的详情重拉：409（他人已改）→ 整表单回填最新值；其它错误（如 400 成员冲突、
-  // 前序步骤已生效）→ 只刷新基线 version/成员，保留用户正在编辑的内容供改正后重存
+  // 保存出错后的基线刷新：409（他人已改）→ 整表单回填最新值；
+  // 其它错误 → 只刷新基线（version/members），保留用户正在编辑的内容供改正后重存
   const refreshAfterError = async (groupId: number, rehydrateForm: boolean) => {
     try {
       const { data } = await getPnPool(groupId);
@@ -182,89 +248,101 @@ export default function PoolManagementPage() {
     } catch { /* 拉不到就保持现状，用户可关闭抽屉重开 */ }
   };
 
-  const policyBody = (version: number) => ({
-    version,
-    purchase_value: purchaseValue, purchase_basis: purchaseBasis,
-    sales_value: salesValue, sales_basis: salesBasis,
-    note: note.trim() || null,
-  });
+  const handleSaveError = async (e: any, fallback: string) => {
+    const isConflict = e?.response?.status === 409;
+    message.error(e?.response?.data?.detail
+      || (isConflict ? "保存冲突：该池刚被他人修改，已重新加载最新数据" : fallback));
+    if (detail) await refreshAfterError(detail.group_id, isConflict);
+    load(q, statusFilter, page);
+  };
 
-  const save = async () => {
+  // ---- 三个独立保存动作：每个按钮恰好一个请求，成功/失败独立呈现 ----
+  const saveInfo = async () => {
+    if (!detail) return;
     if (!name.trim()) { message.warning("请输入池名称"); return; }
-    setSaving(true);
+    setSavingInfo(true);
     try {
-      if (mode === "create") {
-        const { data: created } = await createPnPool({
-          name: name.trim(), description: description.trim() || null,
-          member_part_ids: memberIds, note: note.trim() || null,
-        });
-        // 填了约束价才追加 PUT；失败时池已建成 → 转入编辑模式重试，避免重复建池
-        if (purchaseValue != null || salesValue != null) {
-          try {
-            await setPnPoolPolicy(created.group_id, policyBody(created.version));
-          } catch (e: any) {
-            message.error(e?.response?.data?.detail || "池已创建，但约束价保存失败，请重试");
-            setMode("edit");
-            await refreshAfterError(created.group_id, false);
-            load();
-            return;
-          }
-        }
-        message.success("已保存并生效");
-        closeDrawer();
-        load(q, statusFilter, 1);
-        return;
-      }
-
-      // edit：按 diff 串行 PATCH 基本信息 → PATCH 成员 → PUT 约束价，每步用上一步返回的新 version
-      const d = detail;
-      if (!d) return;
-      let version = d.version;
-      let touched = false;
-      const cleanNote = note.trim() || null;
-
-      const nameChanged = name.trim() !== d.name;
-      const descChanged = (description.trim() || null) !== (d.description ?? null);
-      if (nameChanged || descChanged) {
-        const { data } = await updatePnPool(d.group_id, {
-          version,
-          ...(nameChanged ? { name: name.trim() } : {}),
-          ...(descChanged ? { description: description.trim() || null } : {}),
-          note: cleanNote,
-        });
-        version = data.version;
-        touched = true;
-      }
-
-      const initIds = new Set(d.members.map((m) => m.part_id));
-      const nowIds = new Set(memberIds);
-      const add = memberIds.filter((id) => !initIds.has(id));
-      const remove = d.members.map((m) => m.part_id).filter((id) => !nowIds.has(id));
-      if (add.length || remove.length) {
-        const { data } = await updatePnPoolMembers(d.group_id, {
-          version, add_part_ids: add, remove_part_ids: remove, note: cleanNote,
-        });
-        version = data.version;
-        touched = true;
-      }
-
-      if (policyDirty(d)) {
-        await setPnPoolPolicy(d.group_id, policyBody(version));
-        touched = true;
-      }
-
-      if (!touched) { message.info("没有改动"); return; }
-      message.success("已保存并生效");
-      closeDrawer();
+      const nameChanged = name.trim() !== detail.name;
+      const descChanged = (description.trim() || null) !== (detail.description ?? null);
+      await updatePnPool(detail.group_id, {
+        version: detail.version,
+        ...(nameChanged ? { name: name.trim() } : {}),
+        ...(descChanged ? { description: description.trim() || null } : {}),
+        note: note.trim() || null,
+      });
+      message.success("基本信息已保存");
+      await refreshAfterError(detail.group_id, false);
       load(q, statusFilter, page);
     } catch (e: any) {
-      const isConflict = e?.response?.status === 409;
-      message.error(e?.response?.data?.detail
-        || (isConflict ? "保存冲突：该池刚被他人修改，已重新加载最新数据" : "保存失败"));
-      if (mode === "edit" && detail) await refreshAfterError(detail.group_id, isConflict);
-      load(q, statusFilter, page);   // 前序步骤可能已生效，列表同步刷新
+      await handleSaveError(e, "基本信息保存失败");
     } finally {
-      setSaving(false);
+      setSavingInfo(false);
+    }
+  };
+
+  const saveMembers = async () => {
+    if (!detail) return;
+    if (memberIds.length < MIN_MEMBERS) {
+      message.warning(`有效池至少包含 ${MIN_MEMBERS} 个 PN`);
+      return;
+    }
+    setSavingMembers(true);
+    try {
+      await updatePnPoolMembers(detail.group_id, {
+        version: detail.version,
+        add_part_ids: memberDiff.add, remove_part_ids: memberDiff.remove,
+        note: note.trim() || null,
+      });
+      message.success("成员变更已保存");
+      await refreshAfterError(detail.group_id, false);
+      load(q, statusFilter, page);
+    } catch (e: any) {
+      await handleSaveError(e, "成员保存失败");
+    } finally {
+      setSavingMembers(false);
+    }
+  };
+
+  const savePolicy = async () => {
+    if (!detail) return;
+    setSavingPolicy(true);
+    try {
+      await setPnPoolPolicy(detail.group_id, policyBody());
+      message.success("约束价已保存");
+      await refreshAfterError(detail.group_id, false);
+      load(q, statusFilter, page);
+    } catch (e: any) {
+      await handleSaveError(e, "约束价保存失败");
+    } finally {
+      setSavingPolicy(false);
+    }
+  };
+
+  // 新建 = 单个 POST（名称/说明/成员一个事务）；约束价创建后在编辑抽屉里单独设置
+  const create = async () => {
+    if (!name.trim()) { message.warning("请输入池名称"); return; }
+    if (memberIds.length < MIN_MEMBERS) {
+      message.warning(`有效池至少包含 ${MIN_MEMBERS} 个 PN`);
+      return;
+    }
+    setCreating(true);
+    try {
+      const { data: created } = await createPnPool({
+        name: name.trim(), description: description.trim() || null,
+        member_part_ids: memberIds, note: note.trim() || null,
+      });
+      message.success(canSetPolicy ? "池已创建；可继续设置约束价" : "池已创建");
+      load(q, statusFilter, 1);
+      if (canSetPolicy) {
+        await openEdit(created.group_id);   // 顺手设约束价：进入编辑抽屉（独立的保存动作）
+      } else {
+        closeDrawer();
+      }
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || "建池失败");
+      load(q, statusFilter, page);
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -288,14 +366,20 @@ export default function PoolManagementPage() {
         <span>
           <span style={{ fontWeight: 500 }}>{v}</span>
           {r.description && (
-            <div style={{ fontSize: 12, color: "var(--mb-text-3, #999)" }}>{r.description}</div>
+            <div style={{ fontSize: 12, ...MUTED }}>{r.description}</div>
           )}
         </span>
       ),
     },
     { title: "成员数", dataIndex: "member_count", width: 80, align: "right" },
-    { title: "采购上限(未税)", dataIndex: "purchase_ceiling_ex_tax", width: 130, align: "right", render: fmtMoney },
-    { title: "销售下限(未税)", dataIndex: "sales_floor_ex_tax", width: 130, align: "right", render: fmtMoney },
+    {
+      title: "采购上限(未税)", dataIndex: "purchase_ceiling_ex_tax", width: 130, align: "right",
+      render: (v, r) => fmtMoney(v, r.price_restricted),
+    },
+    {
+      title: "销售下限(未税)", dataIndex: "sales_floor_ex_tax", width: 130, align: "right",
+      render: (v, r) => fmtMoney(v, r.price_restricted),
+    },
     { title: "来源", dataIndex: "source", width: 110, render: (v) => SOURCE_LABEL[v] || v },
     {
       title: "状态", dataIndex: "status", width: 90,
@@ -304,63 +388,146 @@ export default function PoolManagementPage() {
     { title: "更新人", dataIndex: "updated_by", width: 100, render: (v) => v || "—" },
     { title: "更新时间", dataIndex: "updated_at", width: 160, render: fmtTime },
     {
-      title: "操作", key: "op", width: 110, fixed: isMobile ? undefined : "right",
+      // 操作全部用真实 Button（可 Tab 聚焦、Enter/Space 触发、有焦点环）——
+      // 无 href 的 <a onClick> 键盘不可达（复审非阻塞 2）
+      title: "操作", key: "op", width: 120, fixed: isMobile ? undefined : "right",
       render: (_, r) => (
-        <Space size="small">
-          <a onClick={() => openEdit(r.group_id)}>编辑</a>
-          {r.status === "active" ? (
-            <Popconfirm title="归档该池？" description="归档后可随时恢复。"
+        <Space size={0}>
+          <Button type="link" size="small" style={{ paddingInline: 4 }}
+            onClick={() => openEdit(r.group_id)}>
+            {r.status === "active" && (canManage || canSetPolicy) ? "编辑" : "查看"}
+          </Button>
+          {canManage && (r.status === "active" ? (
+            <Popconfirm title="归档该池？" description="归档后退出经营分析，可随时恢复。"
               onConfirm={() => doLifecycle(r, "archive")}>
-              <a style={{ color: "#cf1322" }}>归档</a>
+              <Button type="link" size="small" danger style={{ paddingInline: 4 }}>归档</Button>
             </Popconfirm>
           ) : (
             <Popconfirm title="恢复该池为有效？" onConfirm={() => doLifecycle(r, "restore")}>
-              <a style={{ color: "#389e0d" }}>恢复</a>
+              <Button type="link" size="small" style={{ paddingInline: 4, color: "#389e0d" }}>
+                恢复
+              </Button>
             </Popconfirm>
-          )}
+          ))}
         </Space>
       ),
     },
   ];
 
-  // ---- 抽屉表单 ----
+  // ---- 抽屉内容 ----
   const policy = detail?.price_policy;
-  const drawerForm = (
+  const isArchived = mode === "edit" && detail?.status === "archived";
+  const priceRestricted = detail?.price_restricted ?? false;
+  const sectionTitle = (t: string) => (
+    <div style={{ fontWeight: 600, marginBottom: 8 }}>{t}</div>
+  );
+  const sectionBox: CSSProperties = {
+    padding: 12, border: "1px solid var(--mb-border, #eee)", borderRadius: 8,
+  };
+
+  // 归档池：只读档案 + 明确"先恢复"提示，绝不渲染必然 400 的可保存表单
+  const archivedView = detail && (
     <Space direction="vertical" size={14} style={{ width: "100%" }}>
+      <Alert type="warning" showIcon message="该池已归档，处于只读状态"
+        description={canManage
+          ? "归档池不参与经营分析，也不能编辑。如需修改，请先在列表中「恢复」该池。"
+          : "归档池不参与经营分析，也不能编辑。恢复操作需要池维护权限。"} />
       <div>
-        <label style={{ display: "block", marginBottom: 4 }}>
-          池名称<span style={{ color: "#cf1322" }}> *</span>
-        </label>
-        <Input value={name} maxLength={128} placeholder="如 8TB 7.2K SATA 企业盘互通池"
-          onChange={(e) => setName(e.target.value)} />
+        <div style={{ fontWeight: 600 }}>{detail.name}</div>
+        {detail.description && <div style={{ marginTop: 4, ...MUTED }}>{detail.description}</div>}
       </div>
-
       <div>
-        <label style={{ display: "block", marginBottom: 4 }}>用途 / 说明</label>
-        <Input.TextArea value={description} rows={2} placeholder="这个池覆盖哪些场景、为什么互通（选填）"
-          onChange={(e) => setDescription(e.target.value)} />
+        {sectionTitle(`PN 成员（${detail.members.length}）`)}
+        <Space size={[6, 6]} wrap>
+          {detail.members.map((m) => (
+            <Tag key={m.part_id}>{memberLabel(m.pn_std, m.description)}</Tag>
+          ))}
+        </Space>
       </div>
-
       <div>
-        <label style={{ display: "block", marginBottom: 4 }}>PN 成员</label>
-        <Select
-          mode="multiple"
-          showSearch
-          filterOption={false}
-          style={{ width: "100%" }}
-          placeholder="输入 PN / 描述搜索后选择；点已选项的 × 可移出"
-          value={memberIds}
-          options={mergedOptions}
-          onSearch={onMemberSearch}
-          onChange={onMembersChange}
-          notFoundContent={fetching ? <Spin size="small" /> : "输入关键词搜索型号"}
-          maxTagCount={isMobile ? 6 : undefined}
-        />
-        <div style={{ marginTop: 4, fontSize: 12, color: "var(--mb-text-3, #999)" }}>
-          一个有效 PN 只能属于一个有效池；保存时按增删差异生效。
+        {sectionTitle("约束价（归档时快照）")}
+        {priceRestricted ? (
+          <span style={MUTED}>无价格权限</span>
+        ) : (
+          <div style={{ lineHeight: 1.9 }}>
+            <div>采购上限（未税）：{policy?.purchase_ceiling_ex_tax != null
+              ? Number(policy.purchase_ceiling_ex_tax).toFixed(2) : "未设置"}</div>
+            <div>销售下限（未税）：{policy?.sales_floor_ex_tax != null
+              ? Number(policy.sales_floor_ex_tax).toFixed(2) : "未设置"}</div>
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 12.5, ...MUTED }}>
+        最近变更：{detail.updated_by || "—"} · {fmtTime(detail.updated_at)}
+      </div>
+    </Space>
+  );
+
+  const infoSection = (
+    <div style={sectionBox}>
+      {sectionTitle("基本信息")}
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <div>
+          <label style={{ display: "block", marginBottom: 4 }}>
+            池名称<span style={{ color: "#cf1322" }}> *</span>
+          </label>
+          <Input value={name} maxLength={128} placeholder="如 8TB 7.2K SATA 企业盘互通池"
+            disabled={!canManage}
+            onChange={(e) => setName(e.target.value)} />
         </div>
-      </div>
+        <div>
+          <label style={{ display: "block", marginBottom: 4 }}>用途 / 说明</label>
+          <Input.TextArea value={description} rows={2}
+            placeholder="这个池覆盖哪些场景、为什么互通（选填）"
+            disabled={!canManage}
+            onChange={(e) => setDescription(e.target.value)} />
+        </div>
+        {mode === "edit" && canManage && (
+          <Button type="primary" loading={savingInfo} disabled={!infoDirty} onClick={saveInfo}>
+            保存基本信息
+          </Button>
+        )}
+        {mode === "edit" && !canManage && (
+          <span style={{ fontSize: 12, ...MUTED }}>无池维护权限，名称与说明只读。</span>
+        )}
+      </Space>
+    </div>
+  );
 
+  const membersSection = (
+    <div style={sectionBox}>
+      {sectionTitle("PN 成员")}
+      <Select
+        mode="multiple"
+        showSearch
+        filterOption={false}
+        style={{ width: "100%" }}
+        placeholder="输入 PN / 描述搜索后选择；点已选项的 × 可移出"
+        value={memberIds}
+        options={mergedOptions}
+        onSearch={onMemberSearch}
+        onChange={onMembersChange}
+        disabled={!canManage}
+        notFoundContent={fetching ? <Spin size="small" /> : "输入关键词搜索型号"}
+        maxTagCount={isMobile ? 6 : undefined}
+      />
+      <div style={{ marginTop: 4, fontSize: 12, ...MUTED }}>
+        有效池至少 {MIN_MEMBERS} 个 PN；一个有效 PN 只能属于一个有效池；保存时按增删差异生效。
+      </div>
+      {mode === "edit" && canManage && (
+        <Button type="primary" style={{ marginTop: 8 }} loading={savingMembers}
+          disabled={!membersDirty} onClick={saveMembers}>
+          保存成员变更
+        </Button>
+      )}
+      {mode === "edit" && !canManage && (
+        <div style={{ marginTop: 4, fontSize: 12, ...MUTED }}>无池维护权限，成员只读。</div>
+      )}
+    </div>
+  );
+
+  const policyInputs = (
+    <>
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 220px", minWidth: 200 }}>
           <label style={{ display: "block", marginBottom: 4 }}>采购最高价（上限）</label>
@@ -383,34 +550,77 @@ export default function PoolManagementPage() {
           </div>
         </div>
       </div>
-      <div style={{ marginTop: -8, fontSize: 12, color: "var(--mb-text-3, #999)" }}>
-        约束价统一按未税入库：选「含税」将 ÷1.13 自动换算为未税，原始录入值与口径保留可查。
+      <div style={{ marginTop: 6, fontSize: 12, ...MUTED }}>
+        统一按未税入库：选「含税」将 ÷1.13 自动换算为未税，原始录入值与口径保留可查。
+        把已设的一侧清空并保存 = 显式取消该侧约束；没动的一侧保持原值。
       </div>
+      <Button type="primary" style={{ marginTop: 8 }} loading={savingPolicy}
+        disabled={!policyDirty} onClick={savePolicy}>
+        保存约束价
+      </Button>
+    </>
+  );
 
+  const policyReadonly = (
+    <div style={{ lineHeight: 1.9 }}>
+      {priceRestricted ? (
+        <span style={MUTED}>无价格权限</span>
+      ) : (
+        <>
+          <div>采购上限（未税）：{policy?.purchase_ceiling_ex_tax != null
+            ? Number(policy.purchase_ceiling_ex_tax).toFixed(2) : "未设置"}</div>
+          <div>销售下限（未税）：{policy?.sales_floor_ex_tax != null
+            ? Number(policy.sales_floor_ex_tax).toFixed(2) : "未设置"}</div>
+        </>
+      )}
+    </div>
+  );
+
+  const policySection = mode === "edit" && (
+    <div style={sectionBox}>
+      {sectionTitle("约束价")}
+      {!canSetPolicy ? (
+        <>
+          <Alert type="info" showIcon style={{ marginBottom: 8 }}
+            message="无约束价设置权限"
+            description="约束价（采购上限/销售下限）需要「池约束价设置」权限，请联系管理员开通。" />
+          {policyReadonly}
+        </>
+      ) : priceRestricted ? (
+        // 理论上不可达（后端已禁止"可写不可读"组合），防御性兜底
+        <Alert type="warning" showIcon message="无价格权限"
+          description="当前账号看不到约束价现值，为避免误改已禁用编辑。" />
+      ) : policyInputs}
+      {policy && !priceRestricted && (
+        <div style={{ marginTop: 8, fontSize: 12.5, ...MUTED }}>
+          当前约束（原始录入）：采购上限 {policy.purchase_input_value != null
+            ? `${Number(policy.purchase_input_value).toFixed(2)}（${basisLabel(policy.purchase_input_basis)}）`
+            : "未设置"} · 销售下限 {policy.sales_input_value != null
+            ? `${Number(policy.sales_input_value).toFixed(2)}（${basisLabel(policy.sales_input_basis)}）`
+            : "未设置"}
+          <div>约束设置人：{policy.changed_by || "—"} · {fmtTime(policy.valid_from)}</div>
+        </div>
+      )}
+    </div>
+  );
+
+  const editableView = (
+    <Space direction="vertical" size={14} style={{ width: "100%" }}>
+      {infoSection}
+      {membersSection}
+      {policySection}
       <div>
         <label style={{ display: "block", marginBottom: 4 }}>变更备注</label>
-        <Input value={note} maxLength={200} placeholder="本次改动的原因（选填，随本次变更留痕）"
+        <Input value={note} maxLength={200}
+          placeholder="本次改动的原因（选填，随各保存动作留痕）"
           onChange={(e) => setNote(e.target.value)} />
       </div>
-
+      {mode === "create" && (
+        <Button type="primary" loading={creating} onClick={create}>创建池</Button>
+      )}
       {mode === "edit" && detail && (
-        <div style={{
-          paddingTop: 12, borderTop: "1px solid var(--mb-border, #eee)",
-          fontSize: 12.5, color: "var(--mb-text-3, #999)", lineHeight: 1.8,
-        }}>
-          <div>最近变更：{detail.updated_by || "—"} · {fmtTime(detail.updated_at)}</div>
-          {policy ? (
-            <div>
-              当前约束（原始录入）：采购上限 {policy.purchase_input_value != null
-                ? `${Number(policy.purchase_input_value).toFixed(2)}（${basisLabel(policy.purchase_input_basis)}）`
-                : "未设置"} · 销售下限 {policy.sales_input_value != null
-                ? `${Number(policy.sales_input_value).toFixed(2)}（${basisLabel(policy.sales_input_basis)}）`
-                : "未设置"}
-              <div>约束设置人：{policy.changed_by || "—"} · {fmtTime(policy.valid_from)}</div>
-            </div>
-          ) : (
-            <div>当前未设置约束价</div>
-          )}
+        <div style={{ fontSize: 12.5, ...MUTED }}>
+          最近变更：{detail.updated_by || "—"} · {fmtTime(detail.updated_at)}
         </div>
       )}
     </Space>
@@ -421,7 +631,9 @@ export default function PoolManagementPage() {
       <PageHeader
         title="互通PN池管理"
         subtitle="人工维护的互通池是唯一真值：建池、调成员、设约束价（采购上限/销售下限，统一未税口径），保存即生效。"
-        extra={<Button type="primary" onClick={openCreate}>新建池</Button>}
+        extra={canManage
+          ? <Button type="primary" onClick={openCreate}>新建池</Button>
+          : undefined}
       />
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
@@ -444,7 +656,7 @@ export default function PoolManagementPage() {
 
       <Table<PnPoolRow>
         rowKey="group_id" size="small" columns={columns} dataSource={rows} loading={loading}
-        scroll={{ x: 1180 }}   // ≥列宽总和，防止固定操作列悬浮盖住更新时间列
+        scroll={{ x: 1190 }}   // ≥列宽总和，防止固定操作列悬浮盖住更新时间列
         pagination={{
           current: page, pageSize: PAGE_SIZE, total, showSizeChanger: false,
           showTotal: (t) => `共 ${t} 个池`,
@@ -456,18 +668,12 @@ export default function PoolManagementPage() {
         width={isMobile ? "100%" : 720}
         open={mode !== null}
         onClose={closeDrawer}
-        title={mode === "create" ? "新建互通PN池" : detail ? `编辑池 · ${detail.name}` : "编辑池"}
-        extra={
-          <Button type="primary" loading={saving}
-            disabled={mode === "edit" && !detail}
-            onClick={save}>
-            保存
-          </Button>
-        }
+        title={mode === "create" ? "新建互通PN池"
+          : detail ? `${isArchived ? "查看归档池" : "编辑池"} · ${detail.name}` : "编辑池"}
       >
         {detailLoading ? (
           <div style={{ textAlign: "center", padding: 48 }}><Spin /></div>
-        ) : drawerForm}
+        ) : isArchived ? archivedView : editableView}
       </Drawer>
     </div>
   );

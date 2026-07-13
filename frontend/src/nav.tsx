@@ -31,8 +31,11 @@ export interface NavItem {
   path: string;
   label: string;
   icon: ReactNode;
-  /** 后端 page_* 权限键；缺省表示仅管理员可见（如账号管理） */
+  /** 后端 page_* 权限键；缺省且无 anyPerm 表示仅管理员可见（如账号管理） */
   perm?: string;
+  /** 任一权限即可见（与 perm 互斥；perm 优先）：给"多个动作权限共享一个入口"的页面用。
+   * 互通PN池管理页 manage / set_policy 两权限各管一半操作，任何一个开都必须能进页面。 */
+  anyPerm?: string[];
   page: LazyExoticComponent<ComponentType>;
   /** 与 page 共用同一 import() 工厂：空闲时预取，点菜单即秒开 */
   load: () => Promise<{ default: ComponentType }>;
@@ -131,7 +134,9 @@ export const NAV_GROUPS: NavGroup[] = [
       { key: "import", path: "/import", label: "数据导入", icon: <CloudUploadOutlined />, perm: "page_import", page: ImportPage, load: loadImport },
       { key: "master", path: "/master", label: "备件主数据", icon: <ProfileOutlined />, perm: "page_master_data", page: MasterDataPage, load: loadMasterData },
       { key: "governance", path: "/governance", label: "数据治理", icon: <ControlOutlined />, perm: "page_governance", page: GovernancePage, load: loadGovernance },
-      { key: "pool-mgmt", path: "/pool-management", label: "互通PN池管理", icon: <DeploymentUnitOutlined />, perm: "action_pool_manage", page: PoolManagementPage, load: loadPoolManagement },
+      // 池维护（action_pool_manage）与约束价设置（action_pool_set_policy）是两种独立授权：
+      // 任一权限都必须能进页面（页面内再按各自权限开放对应操作区）
+      { key: "pool-mgmt", path: "/pool-management", label: "互通PN池管理", icon: <DeploymentUnitOutlined />, anyPerm: ["action_pool_manage", "action_pool_set_policy"], page: PoolManagementPage, load: loadPoolManagement },
     ],
   },
   {

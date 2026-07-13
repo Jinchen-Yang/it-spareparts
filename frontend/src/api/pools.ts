@@ -19,9 +19,12 @@ export interface PnPoolRow {
   updated_by: string | null;
   created_at: string | null;
   updated_at: string | null;
-  // 约束价（统一未税）：null = 未设置，或被权限脱敏
+  // 约束价（统一未税）：null 的含义看 price_restricted——
+  // false = 未设置（页面显示"未设置"）；true = 被权限脱敏（显示"无价格权限"）
   purchase_ceiling_ex_tax: number | null;
   sales_floor_ex_tax: number | null;
+  /** 该账号的约束价是否被权限隐藏（data_pool_price_governance=False） */
+  price_restricted: boolean;
 }
 
 export interface PoolMemberItem {
@@ -59,6 +62,7 @@ export interface PnPoolListResp {
   page: number;
   page_size: number;
   items: PnPoolRow[];
+  price_restricted: boolean;
 }
 
 export const listPnPools = (params: {
@@ -79,10 +83,12 @@ export const updatePnPoolMembers = (groupId: number, body: {
   version: number; add_part_ids: number[]; remove_part_ids: number[]; note?: string | null;
 }) => api.patch<PnPoolRow>(`/pools/${groupId}/members`, body);
 
+/** 约束价单侧更新语义：给 *_value = set 该侧；*_unset=true = 显式清空；
+ * 两者都不给 = keep（该侧保持原值）。null 永远不是"清空"。 */
 export const setPnPoolPolicy = (groupId: number, body: {
   version: number;
-  purchase_value?: number | null; purchase_basis: PriceBasis;
-  sales_value?: number | null; sales_basis: PriceBasis;
+  purchase_value?: number | null; purchase_basis?: PriceBasis; purchase_unset?: boolean;
+  sales_value?: number | null; sales_basis?: PriceBasis; sales_unset?: boolean;
   note?: string | null;
 }) => api.put<PnPoolRow & { price_policy: PricePolicy | null }>(`/pools/${groupId}/price-policy`, body);
 
