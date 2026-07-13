@@ -11,6 +11,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { message } from "antd";
 
 const listPnPools = vi.fn();
 const getPnPool = vi.fn();
@@ -76,8 +77,12 @@ function mockList(items: unknown[], priceRestricted = false) {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  message.destroy();   // antd message 渲染在 body 挂载点，cleanup 不会清，需显式销毁
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  message.destroy();
+});
 
 describe("manage-only（只有 action_pool_manage）", () => {
   const perms = {
@@ -159,6 +164,72 @@ describe("set-policy-only（只有 action_pool_set_policy）", () => {
     expect(body.purchase_unset).toBe(true);
     expect(body.purchase_value).toBeUndefined();
     expect(body.sales_unset).toBeUndefined();      // 本就未设置的销售侧保持 keep
+  });
+});
+
+describe("保存后基线刷新守卫（乐观锁不被分裂态击穿）", () => {
+  const perms = {
+    action_pool_manage: false, action_pool_set_policy: true, data_pool_price_governance: true,
+  };
+
+  it("保存成功后若版本被他人推进（非本次保存产生的版本），整表单回填最新值", async () => {
+    login("readonly", perms);
+    mockList([row()]);
+    getPnPool.mockResolvedValueOnce({ data: detail() });          // 打开抽屉:v1
+    setPnPoolPolicy.mockResolvedValue({ data: row({ version: 2 }) });  // 我们的保存 → v2
+    // 刷新基线时发现已是 v5（他人并发改过），且约束价被他人改成 777
+    getPnPool.mockResolvedValueOnce({
+      data: detail({
+        version: 5,
+        price_policy: {
+          purchase_ceiling_ex_tax: 777, sales_floor_ex_tax: null,
+          purchase_input_value: 777, purchase_input_basis: "ex_tax",
+          sales_input_value: null, sales_input_basis: null,
+          valid_from: "2026-07-13T01:00:00Z", valid_to: null, changed_by: "other", note: null,
+        },
+      }),
+    });
+
+    render(<PoolManagementPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    await screen.findByText("约束价");
+    const [purchaseInput] = screen.getAllByRole("spinbutton");
+    fireEvent.change(purchaseInput, { target: { value: "88" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存约束价" }));
+    await vi.waitFor(() => expect(getPnPool).toHaveBeenCalledTimes(2));
+    // 整表单回填:输入框变成他人写入的 777.00（precision=2），而不是保留旧表单快照
+    await vi.waitFor(() => {
+      const [input] = screen.getAllByRole("spinbutton");
+      expect((input as HTMLInputElement).value).toBe("777.00");
+    });
+    expect(screen.getAllByText(/已重新加载最新数据/).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("保存成功且版本正是本次保存产生的 → 保留基线刷新，不打扰用户", async () => {
+    login("readonly", perms);
+    mockList([row()]);
+    getPnPool.mockResolvedValueOnce({ data: detail() });
+    setPnPoolPolicy.mockResolvedValue({ data: row({ version: 2 }) });
+    getPnPool.mockResolvedValueOnce({
+      data: detail({
+        version: 2,
+        price_policy: {
+          purchase_ceiling_ex_tax: 88, sales_floor_ex_tax: null,
+          purchase_input_value: 88, purchase_input_basis: "ex_tax",
+          sales_input_value: null, sales_input_basis: null,
+          valid_from: "2026-07-13T01:00:00Z", valid_to: null, changed_by: "me", note: null,
+        },
+      }),
+    });
+
+    render(<PoolManagementPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    await screen.findByText("约束价");
+    const [purchaseInput] = screen.getAllByRole("spinbutton");
+    fireEvent.change(purchaseInput, { target: { value: "88" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存约束价" }));
+    await vi.waitFor(() => expect(getPnPool).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(/已重新加载最新数据/)).toBeNull();
   });
 });
 

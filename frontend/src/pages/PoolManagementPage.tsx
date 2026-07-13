@@ -239,12 +239,19 @@ export default function PoolManagementPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detail, purchaseValue, purchaseBasis, salesValue, salesBasis]);
 
-  // 保存出错后的基线刷新：409（他人已改）→ 整表单回填最新值；
-  // 其它错误 → 只刷新基线（version/members），保留用户正在编辑的内容供改正后重存
-  const refreshAfterError = async (groupId: number, rehydrateForm: boolean) => {
+  // 基线刷新守卫：只有当拉回的 version 恰好是我们预期的值（自己刚保存产生的新版本，
+  // 或失败时的原版本）才允许"只换基线、保留用户输入"；出现非预期的版本推进 = 他人
+  // 并发修改——必须整表单回填并明确提示。否则"旧表单 × 新版本号"的分裂态会让下一次
+  // 保存无冲突地滚回他人写入，击穿乐观锁"绝不静默覆盖"的承诺。
+  const refreshBaseline = async (groupId: number, expectedVersion: number) => {
     try {
       const { data } = await getPnPool(groupId);
-      if (rehydrateForm) hydrate(data); else setDetail(data);
+      if (data.version !== expectedVersion || data.status !== "active") {
+        hydrate(data);
+        message.warning("该池刚被他人同时修改，已重新加载最新数据，请确认后再继续编辑");
+      } else {
+        setDetail(data);
+      }
     } catch { /* 拉不到就保持现状，用户可关闭抽屉重开 */ }
   };
 
@@ -252,7 +259,18 @@ export default function PoolManagementPage() {
     const isConflict = e?.response?.status === 409;
     message.error(e?.response?.data?.detail
       || (isConflict ? "保存冲突：该池刚被他人修改，已重新加载最新数据" : fallback));
-    if (detail) await refreshAfterError(detail.group_id, isConflict);
+    if (detail) {
+      if (isConflict) {
+        // 409：他人已改，整表单回填最新值
+        try {
+          const { data } = await getPnPool(detail.group_id);
+          hydrate(data);
+        } catch { /* 拉不到就保持现状 */ }
+      } else {
+        // 其它错误：本次保存未生效，预期版本不变；若版本仍被推进说明有并发修改
+        await refreshBaseline(detail.group_id, detail.version);
+      }
+    }
     load(q, statusFilter, page);
   };
 
@@ -264,14 +282,14 @@ export default function PoolManagementPage() {
     try {
       const nameChanged = name.trim() !== detail.name;
       const descChanged = (description.trim() || null) !== (detail.description ?? null);
-      await updatePnPool(detail.group_id, {
+      const { data } = await updatePnPool(detail.group_id, {
         version: detail.version,
         ...(nameChanged ? { name: name.trim() } : {}),
         ...(descChanged ? { description: description.trim() || null } : {}),
         note: note.trim() || null,
       });
       message.success("基本信息已保存");
-      await refreshAfterError(detail.group_id, false);
+      await refreshBaseline(detail.group_id, data.version);
       load(q, statusFilter, page);
     } catch (e: any) {
       await handleSaveError(e, "基本信息保存失败");
@@ -288,13 +306,13 @@ export default function PoolManagementPage() {
     }
     setSavingMembers(true);
     try {
-      await updatePnPoolMembers(detail.group_id, {
+      const { data } = await updatePnPoolMembers(detail.group_id, {
         version: detail.version,
         add_part_ids: memberDiff.add, remove_part_ids: memberDiff.remove,
         note: note.trim() || null,
       });
       message.success("成员变更已保存");
-      await refreshAfterError(detail.group_id, false);
+      await refreshBaseline(detail.group_id, data.version);
       load(q, statusFilter, page);
     } catch (e: any) {
       await handleSaveError(e, "成员保存失败");
@@ -307,9 +325,9 @@ export default function PoolManagementPage() {
     if (!detail) return;
     setSavingPolicy(true);
     try {
-      await setPnPoolPolicy(detail.group_id, policyBody());
+      const { data } = await setPnPoolPolicy(detail.group_id, policyBody());
       message.success("约束价已保存");
-      await refreshAfterError(detail.group_id, false);
+      await refreshBaseline(detail.group_id, data.version);
       load(q, statusFilter, page);
     } catch (e: any) {
       await handleSaveError(e, "约束价保存失败");
