@@ -130,8 +130,10 @@ class PartPoolMember(Base):
 
     __tablename__ = "part_pool_member"
 
+    # group_id 不再单独建索引：复合主键 (group_id, part_id) 的前导列已覆盖按池查询；
+    # 旧单列索引 ix_pool_member_group 在 f2a7d9c3e6b1 里随主键改造一并删除（复审阻塞 5）
     group_id: Mapped[int] = mapped_column(
-        ForeignKey("part_pool.group_id", ondelete="CASCADE"), primary_key=True, index=True
+        ForeignKey("part_pool.group_id", ondelete="CASCADE"), primary_key=True
     )
     part_id: Mapped[int] = mapped_column(ForeignKey("dim_part.id"), primary_key=True)
     added_by: Mapped[str | None] = mapped_column(String(64))
@@ -155,8 +157,10 @@ class PartPoolPricePolicy(Base):
     __tablename__ = "part_pool_price_policy"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # group_id 不单独建索引：ix_pool_policy_group_from (group_id, valid_from DESC) 的
+    # 前导列已覆盖按池查询，单列索引是纯冗余（复审阻塞 5，ORM 与迁移索引对齐）
     group_id: Mapped[int] = mapped_column(
-        ForeignKey("part_pool.group_id", ondelete="CASCADE"), index=True
+        ForeignKey("part_pool.group_id", ondelete="CASCADE")
     )
     purchase_ceiling_ex_tax: Mapped[Decimal | None] = mapped_column(Money)
     sales_floor_ex_tax: Mapped[Decimal | None] = mapped_column(Money)

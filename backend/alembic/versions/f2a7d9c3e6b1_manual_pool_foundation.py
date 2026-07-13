@@ -15,6 +15,15 @@ Create Date: 2026-07-13
 4. 复核 part_pool_group_id_seq 高水位（同 b9e1f4a7c2d8，幂等）：
    下一 nextval 严格大于所有历史 group_id。
 只增加池与约束配置，不改任何采购/销售事实数据。
+
+索引口径（复审阻塞 5，与 ORM 元数据严格对齐，alembic check 必须零漂移）：
+- part_pool_member 复合主键前导列即 group_id → 删除旧单列索引 ix_pool_member_group；
+- part_pool_price_policy 不建 group_id 单列索引（ix_pool_policy_group_from 前导列覆盖）。
+
+downgrade **不是无条件可逆**（复审阻塞 6）：只有未产生"一 PN 多池"数据且无约束价
+历史时才无损；否则守卫失败即停、不删任何数据——生产回滚一律恢复迁移前数据库备份。
+应用过本迁移旧版本（2026-07-13 未合并版）的开发库：直接重建，或 downgrade 到
+b9e1f4a7c2d8 再 upgrade（索引操作带 IF [NOT] EXISTS，可安全重放）。
 """
 from typing import Sequence, Union
 
@@ -65,6 +74,9 @@ def upgrade() -> None:
     op.drop_constraint("part_pool_member_pkey", "part_pool_member", type_="primary")
     op.create_primary_key("part_pool_member_pkey", "part_pool_member", ["group_id", "part_id"])
     op.create_index("ix_pool_member_part", "part_pool_member", ["part_id"])
+    # 旧单列索引（c1a7f0d5e2b9 创建）随主键改造变纯冗余：新复合主键前导列即 group_id。
+    # IF EXISTS：容忍应用过本迁移旧版本（未删此索引）的开发库重放（复审阻塞 5）
+    op.execute("DROP INDEX IF EXISTS ix_pool_member_group")
 
     # ---- 3. 约束价历史表 ----
     op.create_table(
@@ -90,7 +102,8 @@ def upgrade() -> None:
             "sales_input_basis IS NULL OR sales_input_basis IN ('ex_tax','inc_tax')",
             name="ck_pool_policy_sales_basis"),
     )
-    op.create_index("ix_pool_policy_group", "part_pool_price_policy", ["group_id"])
+    # 不建 group_id 单列索引：ix_pool_policy_group_from 前导列已覆盖（复审阻塞 5，
+    # 与 ORM 元数据对齐，alembic check 必须零漂移）
     op.create_index(
         "uq_pool_policy_current", "part_pool_price_policy", ["group_id"],
         unique=True, postgresql_where=sa.text("valid_to IS NULL"))
@@ -128,16 +141,36 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # ---- 数据丢失守卫：本 downgrade 只在"未产生本迁移之后的新数据"时才是无损的 ----
+    # 1) 同一 part_id 已属多个池（归档 A → A 的成员加入新有效池 B 的正常使用轨迹）：
+    #    恢复单列主键 (part_id) 必然 UniqueViolation；
+    # 2) part_pool_price_policy 已有约束价历史：drop_table 会把它整个删掉。
+    # 两种情况都**失败即停**（事务回滚，什么都不删），生产回滚一律恢复数据库备份，
+    # 绝不静默丢历史。确认可丢弃时先手工清理这两类数据再 downgrade。
+    bind = op.get_bind()
+    multi_pool_parts = bind.execute(sa.text(
+        "SELECT COUNT(*) FROM (SELECT part_id FROM part_pool_member "
+        "GROUP BY part_id HAVING COUNT(*) > 1) t")).scalar()
+    policy_rows = bind.execute(sa.text(
+        "SELECT COUNT(*) FROM part_pool_price_policy")).scalar()
+    if multi_pool_parts or policy_rows:
+        raise RuntimeError(
+            "downgrade f2a7d9c3e6b1 中止（未做任何改动）：检测到本迁移之后产生的业务数据——"
+            f"{multi_pool_parts} 个 PN 属于多个池（无法恢复 part_id 单列主键）、"
+            f"{policy_rows} 条约束价历史（drop 表会永久丢失）。"
+            "此状态下 schema 降级不是无损回滚：生产环境请恢复迁移前的数据库备份；"
+            "开发环境确认可丢弃后，先清空 part_pool_price_policy 并解除一 PN 多池，再重试。")
+
     op.drop_index("ix_pool_policy_group_from", table_name="part_pool_price_policy")
     op.drop_index("uq_pool_policy_current", table_name="part_pool_price_policy")
-    op.drop_index("ix_pool_policy_group", table_name="part_pool_price_policy")
     op.drop_table("part_pool_price_policy")
 
     op.drop_index("ix_pool_member_part", table_name="part_pool_member")
     op.drop_constraint("part_pool_member_pkey", "part_pool_member", type_="primary")
-    # 若归档池数据已让同一 part 属于多个池，恢复单列主键会失败——属预期，
-    # 带数据的生产回滚以数据库备份恢复为准（部署 runbook 铁律）。
     op.create_primary_key("part_pool_member_pkey", "part_pool_member", ["part_id"])
+    # 恢复 c1a7f0d5e2b9 时代的单列索引（IF NOT EXISTS 容忍旧版本迁移遗留）
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_pool_member_group ON part_pool_member (group_id)")
     op.drop_column("part_pool_member", "updated_at")
     op.drop_column("part_pool_member", "note")
     op.drop_column("part_pool_member", "added_by")

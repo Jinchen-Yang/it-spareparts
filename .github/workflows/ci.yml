@@ -26,6 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - name: 迁移与 ORM 零漂移（alembic upgrade head → alembic check）
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:5433/spareparts_test
+        run: |
+          uv run --extra dev alembic upgrade head
+          uv run --extra dev alembic check
       - name: 跑测试（conftest 会先 alembic upgrade head，迁移链一并验证）
         working-directory: backend
         env:
