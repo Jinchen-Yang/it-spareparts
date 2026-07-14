@@ -1,10 +1,14 @@
 """RBAC 防恶性竞争单测：销售只看匿名行情+自己明细，查不到同事报价。"""
 import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import delete
 
-from app import security
+from app import permissions, security
 from app.agent import tools
 from app.auth import hash_password, verify_password
 from app.db import SessionLocal
+from app.main import app
+from app.models.system import SysUser
 from app.services import part_overview as po
 
 
@@ -72,3 +76,56 @@ def test_purchase_visible_to_sales(db):
     item = r["results"][0]
     if item["status"] == "ok":
         assert "recent_purchase_avg" in item  # 采购价字段未被遮
+
+
+# ---------------------------------------------------------------- 毛利反推成本（2026-07-14 审计）
+
+def test_profit_without_cost_combo_flagged():
+    """data_profit=True + data_purchase_cost=False：营收 − 毛利可精确重构被遮的
+    移动加权成本（part_ranking / sales_orders 同理），combo_errors 必须拦下。"""
+    bad = permissions.effective("sales", {"data_purchase_cost": False})
+    errs = permissions.combo_errors(bad)
+    assert len(errs) == 1 and "反推" in errs[0] and "采购进价" in errs[0]
+    # 反向"看成本不看毛利"（purchaser 模板方向）合法
+    assert permissions.combo_errors(
+        permissions.effective("purchaser", {"data_purchase_cost": True})) == []
+    # 成本毛利一起关也合法
+    both_off = permissions.effective(
+        "sales", {"data_purchase_cost": False, "data_profit": False})
+    assert permissions.combo_errors(both_off) == []
+
+
+def test_role_templates_free_of_illegal_combos():
+    """内置角色模板（含 guest/未知角色兜底）必须全部通过 combo 校验——模板改动的回归护栏。"""
+    for role in [*permissions.ROLE_TEMPLATES, "guest", "no_such_role"]:
+        assert permissions.combo_errors(permissions.effective(role, None)) == [], role
+
+
+def test_accounts_api_rejects_profit_without_cost(db):
+    """账号管理保存路径：建号与改权限都拒绝"开毛利关成本"的自定义组合（唯一可达通道）。"""
+    # 本模块 db 夹具不 TRUNCATE，先清同名账号保证可重复跑
+    db.execute(delete(SysUser).where(
+        SysUser.username.in_(["rbac_combo_admin", "rbac_combo_u"])))
+    db.add(SysUser(username="rbac_combo_admin", role="admin",
+                   password_hash=hash_password("pw123456")))
+    db.commit()
+    c = TestClient(app)
+    tok = c.post("/api/auth/login", json={"username": "rbac_combo_admin",
+                                          "password": "pw123456"}).json()["token"]
+    c.headers.update({"Authorization": f"Bearer {tok}"})
+
+    r = c.post("/api/accounts", json={
+        "username": "rbac_combo_u", "password": "pw123456", "role": "readonly",
+        "permissions": {"data_profit": True, "data_purchase_cost": False}})
+    assert r.status_code == 400 and "反推" in r.json()["detail"]
+
+    # 合法建号后，把权限改出该组合同样 400，且原权限不变
+    ok = c.post("/api/accounts", json={
+        "username": "rbac_combo_u", "password": "pw123456", "role": "sales"})
+    assert ok.status_code == 201
+    r2 = c.put("/api/accounts/rbac_combo_u",
+               json={"permissions": {"data_purchase_cost": False}})
+    assert r2.status_code == 400 and "反推" in r2.json()["detail"]
+    eff = next(u for u in c.get("/api/accounts").json()
+               if u["username"] == "rbac_combo_u")["permissions"]
+    assert eff["data_purchase_cost"] is True and eff["data_profit"] is True

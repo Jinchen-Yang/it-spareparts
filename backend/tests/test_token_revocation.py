@@ -56,7 +56,8 @@ def test_disable_revokes_old_token(db):
 def test_permission_change_revokes_old_token(db):
     _user(db)
     tok = _token_for(db)
-    accounts.update_account("bob", accounts.UpdateAccount(permissions={"data_purchase_cost": False}),
+    # sales 单关 data_purchase_cost 会被 combo_errors 拒绝（毛利反推成本），改用合法变更
+    accounts.update_account("bob", accounts.UpdateAccount(permissions={"data_profit": False}),
                             db, ident={"sub": "admin"}, _="admin")
     db.expire_all()
     with pytest.raises(HTTPException):

@@ -156,6 +156,17 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     "action_pool_set_policy": "data_pool_price_governance",
 }
 
+# "开毛利必须开成本"的数据→数据依赖（2026-07-14 看板对抗审计）：营收对全员可见，
+# data_profit=True 而 data_purchase_cost=False 时，revenue_costed − gross_profit_moving
+# 可精确重构被遮的移动加权成本（part_ranking 榜单/items、sales_orders 的
+# total_revenue − total_gross_profit 同理）——遮成本形同虚设。内置角色模板无此组合
+# （sales 双开、purchaser 反向"看成本不看毛利"），仅账号管理页自定义可达，保存时拒绝。
+# 注意：不要把利润组再登记进 FIELD_GROUPS.purchase_cost 来"双遮"——那会破坏
+# part_ranking 的 profit_restricted 结构语义（只关成本时盈亏分类仍应可见）。
+DATA_DATA_DEPENDENCIES: dict[str, str] = {
+    "data_profit": "data_purchase_cost",
+}
+
 
 def combo_errors(perms: dict[str, bool]) -> list[str]:
     """校验**最终生效**权限（模板+自定义叠加后）的非法组合，返回人话错误清单。"""
@@ -166,6 +177,12 @@ def combo_errors(perms: dict[str, bool]) -> list[str]:
                 f"「{LABELS.get(action_key, action_key)}」需要同时开启"
                 f"「{LABELS.get(data_key, data_key)}」——能设置就必须能查看，"
                 f"否则会在看不见现值的情况下改写它")
+    for src_key, dep_key in DATA_DATA_DEPENDENCIES.items():
+        if perms.get(src_key, False) and not perms.get(dep_key, False):
+            errors.append(
+                f"「{LABELS.get(src_key, src_key)}」需要同时开启"
+                f"「{LABELS.get(dep_key, dep_key)}」——营收全员可见，"
+                f"营收减毛利即可精确反推被隐藏的采购成本，单开毛利等于没遮成本")
     return errors
 
 
