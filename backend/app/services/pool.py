@@ -128,6 +128,129 @@ def _benchmark(members, key):
     return best[key]["wavg"], best["part_id"], not bool(reliable)
 
 
+# ---------------------------------------------------------------- 池清单旧 savings 字段的批量版
+
+
+def _savings_purchase_rows(db, gids, supply_floor, today):
+    """按 (池, 成员) 的**供应窗口**采购统计——一条 GROUP BY，与池数/页大小无关。
+    只取标杆与机会计算需要的列（加权均价/样本数/去重单数/供应商数/最近采购日），
+    行过滤与 _purchase_member_stats 完全同口径。"""
+    stmt = (
+        select(
+            PartPoolMember.group_id,
+            FPurchaseLine.part_id,
+            (func.sum(_purchase_ex_tax_expr()) / func.nullif(func.sum(FPurchaseLine.qty), 0)).label("wavg"),
+            func.count().label("samples"),
+            func.count(func.distinct(FPurchaseOrder.id)).label("orders"),
+            func.count(func.distinct(FPurchaseOrder.supplier_id)).label("suppliers"),
+            func.max(FPurchaseOrder.order_date).label("last_date"),
+        )
+        .join(FPurchaseLine, FPurchaseLine.part_id == PartPoolMember.part_id)
+        .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
+        .where(PartPoolMember.group_id.in_(gids),
+               FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
+               FPurchaseLine.qty.is_not(None), FPurchaseLine.qty > 0,
+               FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
+    )
+    stmt = active_orders(stmt, FPurchaseOrder)
+    stmt = (stmt.where(FPurchaseOrder.order_date >= supply_floor,
+                       FPurchaseOrder.order_date <= today)
+            .group_by(PartPoolMember.group_id, FPurchaseLine.part_id))
+    return db.execute(stmt)
+
+
+def _savings_sales_rows(db, gids, date_from, upper):
+    """按 (池, 成员) 的**页面窗口**销量/营收（计营收行全量，含 ¥0 成交量）——
+    与 _sale_member_stats 的 qty_sold/revenue 同口径，一条 GROUP BY。"""
+    counts = FSalesLine.counts_revenue.is_(True)
+    stmt = (
+        select(
+            PartPoolMember.group_id,
+            FSalesLine.part_id,
+            func.sum(FSalesLine.qty).filter(counts).label("qty_sold"),
+            func.sum(FSalesLine.revenue_amount).filter(counts).label("revenue"),
+        )
+        .join(FSalesLine, FSalesLine.part_id == PartPoolMember.part_id)
+        .join(FSalesOrder, FSalesLine.order_id == FSalesOrder.id)
+        .where(PartPoolMember.group_id.in_(gids))
+    )
+    stmt = active_orders(stmt, FSalesOrder)
+    if date_from:
+        stmt = stmt.where(FSalesOrder.order_date >= date_from)
+    stmt = (stmt.where(FSalesOrder.order_date <= upper)
+            .group_by(PartPoolMember.group_id, FSalesLine.part_id))
+    return db.execute(stmt)
+
+
+def _pool_savings_batch(db: Session, gids, date_from: date | None, upper: date,
+                        today: date) -> dict[int, dict]:
+    """池清单旧 savings 字段（demand_qty / demand_revenue_ex_tax / theoretical_saving /
+    supply_available_upper）的按池批量版：固定 2 条 SQL，替代逐池 analyze 的 N+1
+    （生产 ~40 池 ≈35 条 → 恒 2 条）。
+
+    与 analyze() 单池计算逐步对齐（语义锚定 test_pool_analyze / test_pool_list_batch）：
+    - 采购标杆价与供应证据固定看 [today-POOL_SUPPLY_RECENT_DAYS, today]，销量/营收按
+      页面窗口 [date_from, upper]（upper=min(date_to, today) 由调用方算好传入）；
+    - 成员级先舍入（wavg 2 位 / qty_sold 3 位 / revenue 2 位）再进标杆比较与乘法，
+      与 analyze 的成员统计输出一致，金额逐分相等；
+    - 标杆可靠性（去重采购单≥2）、供应可得门槛、"样本不足"阻断与 _benchmark/机会循环同规则。
+    传入的 gids 必须已按 status='active' 过滤（归档池绝不进清单口径）。"""
+    if not gids:
+        return {}
+    supply_floor = today - timedelta(days=config.POOL_SUPPLY_RECENT_DAYS)
+    purchase: dict[int, dict[int, dict]] = defaultdict(dict)
+    for r in _savings_purchase_rows(db, gids, supply_floor, today):
+        purchase[r.group_id][r.part_id] = {
+            "wavg": _r(r.wavg), "samples": r.samples, "orders": r.orders,
+            "suppliers": r.suppliers, "last_date": r.last_date,
+        }
+    sales: dict[int, dict[int, dict]] = defaultdict(dict)
+    for r in _savings_sales_rows(db, gids, date_from, upper):
+        sales[r.group_id][r.part_id] = {"qty_sold": _r(r.qty_sold, 3), "revenue": _r(r.revenue)}
+
+    out = {}
+    for gid in gids:
+        pstats, sstats = purchase.get(gid) or {}, sales.get(gid) or {}
+        # 标杆：去重订单≥2 的成员里最低加权均价；无可靠成员取有均价里最低（同 _benchmark）
+        reliable = [pid for pid, st in pstats.items()
+                    if st["wavg"] is not None and (st["orders"] or 0) >= _MIN_RELIABLE_SAMPLES]
+        pool_has = [pid for pid, st in pstats.items() if st["wavg"] is not None]
+        src = reliable or pool_has
+        cost_bench_pid = min(src, key=lambda pid: pstats[pid]["wavg"]) if src else None
+        cost_bench = pstats[cost_bench_pid]["wavg"] if cost_bench_pid is not None else None
+
+        bench_supply_ok = False
+        if cost_bench_pid is not None:
+            bs = pstats[cost_bench_pid]
+            recent = bool(bs["last_date"]
+                          and (today - bs["last_date"]).days <= config.POOL_SUPPLY_RECENT_DAYS)
+            bench_supply_ok = bool(
+                (bs["orders"] or 0) >= config.POOL_SUPPLY_MIN_ORDERS
+                and (bs["suppliers"] or 0) >= config.POOL_SUPPLY_MIN_SUPPLIERS
+                and recent)
+
+        theoretical = supply_upper = 0.0
+        for pid, st in pstats.items():
+            pw = st["wavg"]
+            qty = (sstats.get(pid) or {}).get("qty_sold")
+            if pw is None or cost_bench is None or qty is None or pw <= cost_bench or qty <= 0:
+                continue
+            t = round((pw - cost_bench) * qty, 2)
+            theoretical += t
+            # 与 analyze 的机会阻断同规则：标杆供应不稳、或该成员采购样本不足
+            if bench_supply_ok and (st["samples"] or 0) >= 1:
+                supply_upper += t
+
+        demand_qty = sum((st["qty_sold"] or 0) for st in sstats.values())
+        demand_rev = sum((st["revenue"] or 0) for st in sstats.values())
+        out[gid] = {
+            "demand_qty": _r(demand_qty, 3), "demand_revenue_ex_tax": _r(demand_rev),
+            "theoretical_saving": round(theoretical, 2),
+            "supply_available_upper": round(supply_upper, 2),
+        }
+    return out
+
+
 # ---------------------------------------------------------------- v2：窗口指标 / 约束价 / 订单板块
 
 _EMPTY_METRICS = {"total_amount": None, "total_quantity": None,
@@ -433,16 +556,16 @@ def _customer_cross_brand(db, part_ids, date_from, upper, user_ctx, top=10):
 
 
 def _pool_list_item(p: PartPool, d: dict | None) -> dict:
-    """清单条目。d=analyze 结果（旧排序路径才有）；新排序路径不逐池 analyze，
-    旧 savings 字段置 null（旧前端不会带新 sort 值，不受影响；不给假数据）。"""
+    """清单条目。d=_pool_savings_batch 的单池结果（旧排序路径才有）；新排序路径
+    不算旧 savings 字段，一律置 null（旧前端不会带新 sort 值，不受影响；不给假数据）。"""
     return {
         "group_id": p.group_id, "name": p.name, "description": p.description,
         "member_count": p.member_count,
         "needs_calibration": p.needs_calibration, "oversized": p.oversized,
-        "demand_qty": d["demand"]["total_qty"] if d else None,
-        "demand_revenue_ex_tax": d["demand"]["total_revenue_ex_tax"] if d else None,
-        "theoretical_saving": d["savings"]["theoretical_max"] if d else None,
-        "supply_available_upper": d["savings"]["supply_available_upper"] if d else None,
+        "demand_qty": d["demand_qty"] if d else None,
+        "demand_revenue_ex_tax": d["demand_revenue_ex_tax"] if d else None,
+        "theoretical_saving": d["theoretical_saving"] if d else None,
+        "supply_available_upper": d["supply_available_upper"] if d else None,
     }
 
 
@@ -462,14 +585,16 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
                as_of: date | None = None, page: int = 1, page_size: int = 20,
                sort: str = "member_count", user_ctx: security.UserContext | None = None) -> dict:
     """池清单。排序口径：
-    - sort="member_count"（默认）：按成员数降序，**先分页再逐池分析**（避免 N+1）。
-    - sort="savings"（复审二轮 P1-4）：**全局**按理论节省额排名——先分析全部池再排序分页，
-      否则"成员少但节省高"的池会永远藏在后页。池数量有限（生产 ~40），超 POOL_RANK_ANALYZE_CAP
-      时退回成员数排序并置 ranking_capped=True（当前不触发）。
+    - sort="member_count"（默认）：按成员数降序，先分页，再对**当页**池批量算旧
+      savings 字段（_pool_savings_batch，固定 2 条 SQL，与页大小无关）。
+    - sort="savings"（复审二轮 P1-4）：**全局**按理论节省额排名——先批量算**全部**
+      有效池的节省再排序分页，否则"成员少但节省高"的池会永远藏在后页。
+      POOL_RANK_ANALYZE_CAP 的响应语义保留：超上限仍退回成员数排序并置
+      ranking_capped=True（批量化后该上限已非性能必需，但契约不变、当前不触发）。
     - v2 指标排序（purchase_total/purchase_average/sales_total/sales_average/
       purchase_violation_count/sale_violation_count）：全部有效池批量统计（固定 3 条 SQL）
-      后全局排序分页；不逐池 analyze，旧 savings 字段置 null。
-    所有路径的条目都带 v2 统计块（当页批量合并，与订单数无关）。
+      后全局排序分页；不算旧 savings 字段，一律置 null。
+    任何路径都**不逐池调用 analyze**（旧 N+1 已批量化）；所有路径的条目都带 v2 统计块。
     只统计 status='active'（复审阻塞 2）：归档池成员可再入新有效池，混入清单/总数/
     排名会把同一 PN 双份计入；归档档案查询走管理接口。"""
     today = as_of or date.today()
@@ -517,13 +642,17 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
             all_pools = db.execute(
                 select(PartPool).where(PartPool.status == "active")
                 .order_by(PartPool.group_id.asc())).scalars().all()
-            scored = [(p, analyze(db, p.group_id, date_from, date_to, as_of)) for p in all_pools]
+            savings = _pool_savings_batch(db, [p.group_id for p in all_pools],
+                                          date_from, upper, today)
             # 全局按节省额降序，再按 group_id 稳定破并列
-            scored.sort(key=lambda pd: (-(pd[1]["savings"]["theoretical_max"] or 0), pd[0].group_id))
-            page_slice = scored[(page - 1) * page_size: page * page_size]
-            stats = _pool_stats(db, [p.group_id for p, _ in page_slice], date_from, upper,
+            ranked = sorted(all_pools,
+                            key=lambda p: (-(savings[p.group_id]["theoretical_saving"] or 0),
+                                           p.group_id))
+            page_slice = ranked[(page - 1) * page_size: page * page_size]
+            stats = _pool_stats(db, [p.group_id for p in page_slice], date_from, upper,
                                 manual_restricted)
-            items = [{**_pool_list_item(p, d), **stats.get(p.group_id, {})} for p, d in page_slice]
+            items = [{**_pool_list_item(p, savings[p.group_id]), **stats.get(p.group_id, {})}
+                     for p in page_slice]
             return {"total": total, "page": page, "page_size": page_size, "window": window,
                     "sort": "savings", "effective_sort": "savings",
                     "ranking_restricted": False, "ranking_capped": False, "items": items}
@@ -535,9 +664,11 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
         .limit(page_size).offset((page - 1) * page_size)
     ).scalars().all()
     # 成员数口径保持数据库排序；绝不能在当前页再按隐藏 theoretical_saving 排序。
-    stats = _pool_stats(db, [p.group_id for p in page_pools], date_from, upper, manual_restricted)
-    items = [{**_pool_list_item(p, analyze(db, p.group_id, date_from, date_to, as_of)),
-              **stats.get(p.group_id, {})} for p in page_pools]
+    page_gids = [p.group_id for p in page_pools]
+    savings = _pool_savings_batch(db, page_gids, date_from, upper, today)
+    stats = _pool_stats(db, page_gids, date_from, upper, manual_restricted)
+    items = [{**_pool_list_item(p, savings.get(p.group_id)), **stats.get(p.group_id, {})}
+             for p in page_pools]
     return {"total": total, "page": page, "page_size": page_size, "window": window,
             "sort": "member_count", "effective_sort": "member_count",
             "ranking_restricted": ranking_restricted, "ranking_capped": ranking_capped, "items": items}
