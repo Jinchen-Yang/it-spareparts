@@ -88,10 +88,11 @@ def _leaky(obj, hints, exempt=(), path=""):
 
 # 成本语义键（金额/判定）。max_purchase_price/min_sale_price 是治理口径（§12 全员公开、
 # 由 governance 开关另测），在 cost 扫描中豁免；reference_status 是任务明确要求可见的状态。
+# "amount"/"supply_available" 为审计 P3 补盲：行级金额与供应上限撤登记时扫描必须报警。
 _COST_HINTS = ("gross_profit", "premium_purchase", "purchase_price", "benchmark", "saving",
                "purchase_ex_tax", "total_ex_tax", "cost_ex_tax", "unit_price_ex_tax",
                "purchase_metrics", "pool_avg_purchase", "pool_avg_delta",
-               "manual_limit_delta", "total_amount")
+               "manual_limit_delta", "total_amount", "amount", "supply_available")
 _COST_EXEMPT = ("max_purchase_price", "min_sale_price")
 
 # 治理语义键（约束价/越线/与约束差额）
@@ -128,6 +129,24 @@ def test_governance_blind_no_constraint_leaks_across_v2_panels(db, seeded):
             for p in i["parts"]:
                 assert "manual" not in (p["reference_status"] or ""), (
                     f"{name} 状态泄漏约束关系: {p['reference_status']}")
+
+
+def test_customer_blind_no_leak_across_v2_panels(db, seeded):
+    """data_customer=False：客户名在全部 v2 面板（含池详情销售板块）不得出现（审计 P3 补盲）。"""
+    ctx = _ctx(data_customer=False)
+    leaks = {n: _leaky(d, ("customer",)) for n, d in _panels(db, seeded, ctx).items()}
+    leaks = {n: v for n, v in leaks.items() if v}
+    assert not leaks, f"客户键泄漏：{leaks}"
+
+
+def test_supplier_blind_no_leak_across_v2_panels(db, seeded):
+    """data_supplier=False：供应商名在全部 v2 面板（含池详情采购板块）不得出现（审计 P3 补盲）。
+    豁免 "suppliers"：遗留供应稳定性指标里的供应商**数量**（基点即有），非身份信息。"""
+    ctx = _ctx(data_supplier=False)
+    leaks = {n: _leaky(d, ("supplier",), exempt=("suppliers",))
+             for n, d in _panels(db, seeded, ctx).items()}
+    leaks = {n: v for n, v in leaks.items() if v}
+    assert not leaks, f"供应商键泄漏：{leaks}"
 
 
 def test_sales_aggregates_stay_visible_for_cost_blind(db, seeded):

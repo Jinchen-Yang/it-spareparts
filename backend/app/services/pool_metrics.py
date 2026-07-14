@@ -229,27 +229,31 @@ def price_reference(side: str, unit_ex: float | None, in_pool: bool,
       no_pool → no_price → above_manual_max/below_manual_min → above/below_pool_average
       → within_limit（有约束且未越线未劣于池均价）→ no_manual_limit（无约束且不劣于池均价）。
 
+    unit_ex 必须传**未税原值**（不得预先四舍五入）：round 2 位是输出规则不是比较输入，
+    否则 (limit, limit+0.005) 带内的行在池级 SQL 计数越线、行级却显示 within_limit，
+    看板与明细互相矛盾（审计 P2）。输出差额才做舍入。
+
     manual_restricted（data_pool_price_governance 关闭）：涉约束价的状态**降级为仅池均价
     口径**（above/below_pool_average / within_pool_average / no_pool_average），且约束价
     与差额一律 None——多行"可见价格×越线布尔"可二分逼出约束价原值，状态本身必须去约束化。
     异常状态对无采购成本/利润权限的用户仍可见（任务要求：状态非金额）；金额靠
     FIELD_GROUPS 键名递归脱敏，本函数不重复处理。
     """
-    worse_than_pool = (unit_ex is not None and pool_avg is not None
-                       and (unit_ex > pool_avg if side == "purchase" else unit_ex < pool_avg))
-    out = {
-        "pool_avg_delta": _r(unit_ex - pool_avg) if unit_ex is not None and pool_avg is not None else None,
-        "pool_avg_delta_pct": (round((unit_ex - pool_avg) / pool_avg, 4)
-                               if unit_ex is not None and pool_avg else None),
-        "manual_limit_delta": None,
-        "manual_limit_delta_pct": None,
-    }
+    out = {"pool_avg_delta": None, "pool_avg_delta_pct": None,
+           "manual_limit_delta": None, "manual_limit_delta_pct": None}
     if not in_pool:
         out["reference_status"] = "no_pool"
         return out
     if unit_ex is None or unit_ex <= 0:
+        # ¥0 赠送/无价行不是价格信号：状态 no_price 且**不输出任何差额**——
+        # 否则 0 元行会被当作"低于池均价 100%"的深红异常渲染（审计 P2）。
         out["reference_status"] = "no_price"
         return out
+    worse_than_pool = (pool_avg is not None
+                       and (unit_ex > pool_avg if side == "purchase" else unit_ex < pool_avg))
+    if pool_avg is not None:
+        out["pool_avg_delta"] = _r(unit_ex - pool_avg)
+        out["pool_avg_delta_pct"] = round((unit_ex - pool_avg) / pool_avg, 4) if pool_avg else None
 
     if manual_restricted:
         if pool_avg is None:

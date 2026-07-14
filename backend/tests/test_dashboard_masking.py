@@ -187,6 +187,10 @@ def test_pool_masks_brand_premium_purchase(db, seeded):
 # 计数(no_cost/with_cost/profitable)、方法名(cost_method)这些含 cost/profit 子串但非成本值的键。
 _COST_HINT = ("gross_profit", "premium_purchase", "purchase_price", "benchmark", "saving",
               "purchase_ex_tax", "total_ex_tax", "cost_ex_tax", "unit_price_ex_tax")
+# 治理口径键（§12 约束价对全员公开，属 data_pool_price_governance 而非 data_purchase_cost）：
+# "max_purchase_price" 撞 "purchase_price" 子串纯属键名巧合，本扫描只管成本维度——
+# 治理维度的穷举扫描在 test_boss_v2_masking.py。
+_GOVERNANCE_EXEMPT = ("max_purchase_price", "min_sale_price")
 
 
 def _leaky_keys(obj, path=""):
@@ -195,7 +199,8 @@ def _leaky_keys(obj, path=""):
     if isinstance(obj, dict):
         for k, v in obj.items():
             kl = k.lower()
-            if (any(h in kl for h in _COST_HINT)
+            if (k not in _GOVERNANCE_EXEMPT
+                    and any(h in kl for h in _COST_HINT)
                     and v is not None and not isinstance(v, (dict, list))):
                 bad.append(f"{path}.{k}={v!r}")
             bad += _leaky_keys(v, f"{path}.{k}")

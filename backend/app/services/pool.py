@@ -368,8 +368,9 @@ def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: 
     # ---- v2 增量（仅池详情端点开启；列表逐池 analyze 不带，避免每池多跑板块查询）----
     manual_restricted = security.is_field_hidden(user_ctx, "purchase_ceiling_ex_tax")
     stats = _pool_stats(db, [group_id], date_from, upper, manual_restricted).get(group_id, {})
-    pol = pool_metrics.current_policies(db, [group_id]).get(group_id) or {}
-    ceiling, floor = pol.get("purchase_ceiling_ex_tax"), pol.get("sales_floor_ex_tax")
+    # 约束价直接复用 _pool_stats 结果（省一次重复查询）：manual_restricted 时为 None，
+    # 恰与成员差额"治理关闭一律 None"的目标一致
+    ceiling, floor = stats.get("max_purchase_price"), stats.get("min_sale_price")
     # 成员窗口指标（**页面窗口**，与遗留 supply-window 的 purchase_price 并存不互改）
     mp = pool_metrics.purchase_part_stats(db, part_ids, date_from, upper)
     ms = pool_metrics.sales_part_stats(db, part_ids, date_from, upper)

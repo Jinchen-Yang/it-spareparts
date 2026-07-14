@@ -145,9 +145,11 @@ def test_purchase_query_count_constant(db, seeded):
 
 
 def test_scoped_sales_gets_no_parts(db, seeded):
-    """受限销售（own_customers_only）：逐单成交明细整段不可见 → parts 空 + 旗标。"""
+    """受限销售（own_customers_only）：逐单成交明细整段不可见 → parts 空 + 旗标；
+    订单头的 客户/销售员（"某单卖给谁、谁卖的"逐单归属）同样置空（审计 P1）。"""
     ctx = _ctx(own_customers_only=True)
     d = dashboard.sales_orders(db, status="全部", as_of=AS_OF, user_ctx=ctx)
     assert d["parts_restricted"] is True
     for it in d["items"]:
         assert it["parts"] == [] and it["pn_preview"] == []
+        assert it["customer"] is None and it["salesperson"] is None
