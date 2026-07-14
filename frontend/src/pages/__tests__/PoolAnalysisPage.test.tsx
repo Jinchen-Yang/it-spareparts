@@ -22,8 +22,10 @@ vi.mock("../../api", () => ({
   dashboardSales: (...a: unknown[]) => dashboardSales(...a),
 }));
 vi.mock("../../components/charts/HorizontalMetricBar", () => ({
-  default: (p: { mode: string; metric: string; items: Array<{ pn: string; value: number | null }> }) => (
+  default: (p: { mode: string; metric: string; items: Array<{ pn: string; value: number | null }>;
+    onPartClick?: (partId: number) => void }) => (
     <div data-testid={`metric-bar-${p.mode}`} data-metric={p.metric}
+      data-clickable={String(!!p.onPartClick)}
       data-values={p.items.map((i) => `${i.pn}:${i.value}`).join("|")} />),
 }));
 
@@ -94,6 +96,7 @@ beforeEach(() => {
   localStorage.setItem("role", "admin");
   dashboardPool.mockResolvedValue({ data: DETAIL });
   dashboardPurchaseOrders.mockResolvedValue({ data: {
+    contract_version: 2,
     total: 1, page: 1, page_size: 20, as_of: "2026-07-15", effective_sort: "order_date",
     ranking_restricted: false, cost_restricted: false, manual_reference_restricted: false,
     items: [{ order_id: 77, order_no: "CG-77", order_date: "2026-06-10", occurred_date: "2026-06-10",
@@ -125,6 +128,18 @@ describe("深链与取数", () => {
     await screen.findByText("无效的池编号");
     expect(dashboardPool).not.toHaveBeenCalled();
   });
+
+  it("不可能日期显示明确错误且不查询，避免 422 或扩大到全历史", async () => {
+    renderAt("/pool-analysis/12?from=2026-02-31&to=2026-03-31");
+    await screen.findByText("无效的统计时间范围");
+    expect(dashboardPool).not.toHaveBeenCalled();
+  });
+
+  it("from>to 的反向窗口显示明确错误且不查询", async () => {
+    renderAt("/pool-analysis/12?from=2026-06-30&to=2026-06-01");
+    await screen.findByText("无效的统计时间范围");
+    expect(dashboardPool).not.toHaveBeenCalled();
+  });
 });
 
 describe("横向柱状排名：平均/合计切换", () => {
@@ -141,6 +156,16 @@ describe("横向柱状排名：平均/合计切换", () => {
       expect(b.dataset.values).toContain("PN-B:1100");    // 合计
     });
   });
+
+  it("无型号查询页权限时柱状图不提供失效的 PN 跳转", async () => {
+    localStorage.setItem("role", "boss");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_boss_board: true, page_parts: false,
+    }));
+    renderAt("/pool-analysis/12");
+    expect(await screen.findByTestId("metric-bar-purchase")).toHaveAttribute("data-clickable", "false");
+    expect(screen.getByTestId("metric-bar-sales")).toHaveAttribute("data-clickable", "false");
+  });
 });
 
 // Segmented 内部按文本找可点击项
@@ -153,15 +178,31 @@ function within2(root: HTMLElement, text: string): HTMLElement {
 
 describe("订单板块", () => {
   it("点采购单号 → 弹窗按单号精确召回并展示订单内容", async () => {
-    renderAt("/pool-analysis/12");
+    renderAt("/pool-analysis/12?from=2026-06-01&to=2026-06-30");
     const link = await screen.findByRole("button", { name: "查看订单 CG-77 内容" });
+    expect(link.tagName).toBe("BUTTON");
     fireEvent.click(link);
     await waitFor(() => expect(dashboardPurchaseOrders).toHaveBeenCalledWith(
-      expect.objectContaining({ q: "CG-77", status: "全部" })));
+      expect.objectContaining({ order_no: "CG-77", status: "全部" })));
     const dialog = await screen.findByRole("dialog");
     await within(dialog).findByText("采购订单 CG-77");
     // 弹窗内是完整行明细表（约束价列在场；页面 Descriptions 里同名标签是合法复现）
     expect((await within(dialog).findAllByText("人工最高采购价")).length).toBeGreaterThan(0);
+    expect(within(dialog).getByLabelText("进入池「内存互通池」分析详情"))
+      .toHaveAttribute("href", "/pool-analysis/12?from=2026-06-01&to=2026-06-30");
+  });
+
+  it("旧后端未声明 v2 契约时精确订单弹窗失败关闭", async () => {
+    dashboardPurchaseOrders.mockResolvedValueOnce({ data: {
+      total: 1, page: 1, page_size: 20, as_of: "2026-07-15",
+      effective_sort: "order_date", ranking_restricted: false, items: [{
+        order_id: 1, order_no: "别的单", part_count: 1,
+      }],
+    } });
+    renderAt("/pool-analysis/12");
+    fireEvent.click(await screen.findByRole("button", { name: "查看订单 CG-77 内容" }));
+    expect(await screen.findByText(/服务升级中，精确订单详情暂不可用/)).toBeInTheDocument();
+    expect(screen.queryByText("别的单")).toBeNull();
   });
 });
 

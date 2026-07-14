@@ -44,7 +44,7 @@ export default function RankingBlock({
         {r.brand && <Tag style={{ marginLeft: 6 }}>{r.brand}</Tag>}
       </span>) },
     { title: "所属池", key: "pool", width: 120, ellipsis: true,
-      render: (_, r) => <PoolLink groupId={r.pool_group_id} name={r.pool_name} /> },
+      render: (_, r) => <PoolLink groupId={r.pool_group_id} name={r.pool_name} dateRange={dateRange} /> },
     { title: "销量", dataIndex: "qty_sold", width: 70, align: "right", render: qty },
     { title: "营收(未税)", dataIndex: "revenue", width: 108, align: "right",
       render: (v) => v == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(v) },

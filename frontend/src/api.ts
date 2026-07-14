@@ -548,7 +548,7 @@ export const dashboardPartRanking = (params: PartRankingQuery = {}) =>
   api.get<PartRankingResp>("/dashboard/part-ranking", { params });
 
 export interface OrdersQuery {
-  date_from?: string; date_to?: string; q?: string; status?: string;
+  date_from?: string; date_to?: string; q?: string; order_no?: string; status?: string;
   source_type?: string; customer?: string; salesperson?: string; purchaser?: string;
   part_id?: number; pool_group_id?: number;
   sort?: string; order?: "asc" | "desc";
@@ -578,25 +578,30 @@ export interface SalesOrderRow {
   order_id: number; order_no: string; order_date: string | null;
   occurred_date: string | null; is_future: boolean;
   salesperson: string | null; customer: string | null; business_type: string | null;
-  data_status: string | null; part_count: number; pn_count: number;
+  data_status: string | null; part_count: number; pn_count?: number;
   total_qty: number | null; total_quantity: number | null;
   total_revenue: number | null; total_amount: number | null;
   total_gross_profit: number | null; linked_purchase: boolean;
-  parts: SalesOrderPart[]; pn_preview: string[];
+  /** v2 fields are optional during rolling deployment against a pre-v2 backend. */
+  parts?: SalesOrderPart[]; pn_preview?: string[];
 }
 export interface PurchaseOrderRow {
   order_id: number; order_no: string; order_date: string | null;
   occurred_date: string | null; is_future: boolean;
   purchaser: string | null; source_type: string | null; data_status: string | null;
-  linked_sales_order: string | null; part_count: number; pn_count: number;
+  linked_sales_order: string | null; part_count: number; pn_count?: number;
   total_qty: number | null; total_quantity: number | null;
   total_ex_tax: number | null; total_amount: number | null;
-  parts: PurchaseOrderPart[]; pn_preview: string[];
+  /** v2 fields are optional during rolling deployment against a pre-v2 backend. */
+  parts?: PurchaseOrderPart[]; pn_preview?: string[];
 }
 export interface OrdersResp<T> {
-  total: number; page: number; page_size: number; as_of: string; items: T[];
-  effective_sort: string; ranking_restricted: boolean;
+  /** orders_restricted=true 时 total=null，避免用 0 伪装成无业务数据。 */
+  total: number | null; page: number; page_size: number; as_of: string; items: T[];
+  effective_sort: string | null; ranking_restricted: boolean;
+  contract_version?: number | string;
   profit_restricted?: boolean; cost_restricted?: boolean;
+  orders_restricted?: boolean;
   /** 受限销售：逐单明细整段不可见（parts 恒空、订单头客户/销售员置空） */
   parts_restricted?: boolean;
   /** 治理权限关闭：约束价与差额一律 null，reference_status 降级为池均价口径 */

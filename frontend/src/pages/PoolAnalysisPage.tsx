@@ -18,12 +18,13 @@ import {
 } from "../api";
 import HorizontalMetricBar, { type MetricBarItem } from "../components/charts/HorizontalMetricBar";
 import { EMPTY, moneyExact, pct, pctSigned, qty } from "../utils/format";
+import { ISO_DATE_FORMAT, strictIsoDateRange } from "../utils/date";
 import OrderDetailModal from "./boss/OrderDetailModal";
-import { PartLink } from "./boss/PartsTable";
+import { canOpenPartDetail, PartLink } from "./boss/PartsTable";
 import { MUTED, useGuardedFetch, useLocalRestrictions } from "./boss/shared";
 
 const { RangePicker } = DatePicker;
-const D = "YYYY-MM-DD";
+const D = ISO_DATE_FORMAT;
 
 type MetricMode = "average" | "total";
 
@@ -46,8 +47,11 @@ export default function PoolAnalysisPage() {
   const [sp, setSp] = useSearchParams();
   const local = useLocalRestrictions();
 
-  const from = /^\d{4}-\d{2}-\d{2}$/.test(sp.get("from") || "") ? sp.get("from")! : null;
-  const to = /^\d{4}-\d{2}-\d{2}$/.test(sp.get("to") || "") ? sp.get("to")! : null;
+  const parsedWindow = strictIsoDateRange(sp.get("from"), sp.get("to"));
+  const invalidWindow = (sp.has("from") || sp.has("to")) && !parsedWindow;
+  // 池统计只接受完整闭区间；坏日期或半开窗口都不下发，避免后端 422。
+  const from = parsedWindow?.from ?? null;
+  const to = parsedWindow?.to ?? null;
   const purchasePage = readPage(sp, "pp");
   const salesPage = readPage(sp, "spg");
   const [pMode, setPMode] = useState<MetricMode>("average");
@@ -70,9 +74,9 @@ export default function PoolAnalysisPage() {
 
   const validId = Number.isInteger(groupId) && groupId > 0;
   const { data: d, loading, error, reload } = useGuardedFetch<PoolDetail>(
-    () => (validId ? dashboardPool(groupId, params)
+    () => (validId && !invalidWindow ? dashboardPool(groupId, params)
       : Promise.resolve({ data: null as unknown as PoolDetail })),   // 非法编号：走 404 空态，不发请求
-    [groupId, params, validId]);
+    [groupId, params, validId, invalidWindow]);
 
   const govRestricted = local.governance || (d?.manual_reference_restricted ?? false);
 
@@ -95,7 +99,9 @@ export default function PoolAnalysisPage() {
       };
     });
 
-  const openPart = (partId: number) => navigate(`/parts?part_id=${partId}`);
+  const openPart = canOpenPartDetail()
+    ? (partId: number) => navigate(`/parts?part_id=${partId}`)
+    : undefined;
 
   // ---- 成员表 ----
   const memberCols: ColumnsType<PoolMemberRow> = [
@@ -148,9 +154,9 @@ export default function PoolAnalysisPage() {
   const orderCols = (side: "purchase" | "sales"): ColumnsType<PoolOrderLine> => [
     { title: "日期", dataIndex: "order_date", width: 104, render: (v) => v || EMPTY },
     { title: "单号", dataIndex: "order_no", width: 140, render: (v) => (
-      <a onClick={() => setOrderModal({ side, orderNo: v })} role="button"
-        style={{ fontFamily: "monospace", fontSize: 12 }}
-        aria-label={`查看订单 ${v} 内容`}>{v}</a>) },
+      <Button type="link" size="small" onClick={() => setOrderModal({ side, orderNo: v })}
+        style={{ padding: 0, height: "auto", fontFamily: "monospace", fontSize: 12 }}
+        aria-label={`查看订单 ${v} 内容`}>{v}</Button>) },
     ...(side === "purchase" ? [
       { title: "采购员", dataIndex: "purchaser", width: 84,
         render: (v: string | null) => v || <span style={MUTED}>{EMPTY}</span> },
@@ -181,6 +187,11 @@ export default function PoolAnalysisPage() {
 
   if (!validId) {
     return <Result status="404" title="无效的池编号" subTitle="请从看板互通池列表进入。"
+      extra={<Button onClick={() => navigate("/boss")}>返回经营看板</Button>} />;
+  }
+  if (invalidWindow) {
+    return <Result status="warning" title="无效的统计时间范围"
+      subTitle="起止日期必须是真实日期，且开始日期不能晚于结束日期。为避免扩大成全历史，本页未发起查询。"
       extra={<Button onClick={() => navigate("/boss")}>返回经营看板</Button>} />;
   }
 
@@ -298,9 +309,9 @@ export default function PoolAnalysisPage() {
                 供应层面上限 {moneyExact(d.savings.supply_available_upper)} · <Tag color="orange">无可执行金额</Tag>
                 <div style={MUTED}>{d.savings.label}</div>
               </div>
-              {d.savings.opportunities.length > 0 && (
+              {(d.savings.opportunities ?? []).length > 0 && (
                 <Table<PoolOpportunity> size="small" rowKey={(r) => r.from_part_id} pagination={false}
-                  dataSource={d.savings.opportunities}
+                  dataSource={d.savings.opportunities ?? []}
                   scroll={{ x: 720 }}
                   columns={[
                     { title: "高价型号", dataIndex: "from_pn" },
@@ -373,7 +384,8 @@ export default function PoolAnalysisPage() {
         side={orderModal?.side ?? "purchase"}
         orderNo={orderModal?.orderNo ?? null}
         onClose={() => setOrderModal(null)}
-        localCostRestricted={local.cost} />
+        localCostRestricted={local.cost}
+        dateRange={{ date_from: from ?? undefined, date_to: to ?? undefined }} />
     </>
   );
 }

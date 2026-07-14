@@ -81,6 +81,7 @@ const purchaseRow = (over: Record<string, unknown> = {}) => ({
 
 const ordersResp = (items: unknown[], over: Record<string, unknown> = {}) => ({
   total: items.length, page: 1, page_size: 10, as_of: "2026-07-15",
+  contract_version: 2,
   effective_sort: "order_date", ranking_restricted: false,
   profit_restricted: false, cost_restricted: false,
   parts_restricted: false, manual_reference_restricted: false, items, ...over,
@@ -180,6 +181,49 @@ describe("URL 深链与筛选下发", () => {
     await waitFor(() => expect(dashboardPurchaseOrders).toHaveBeenLastCalledWith(
       expect.objectContaining({ date_from: from30 })));
   });
+
+  it("仅选择时间范围也显示清除按钮，并可恢复默认近30天", async () => {
+    renderAt("/boss");
+    fireEvent.click(await screen.findByText("今天"));
+    const clear = await screen.findByRole("button", { name: "清除全部筛选" });
+    fireEvent.click(clear);
+    await waitFor(() => expect(curLoc.search).not.toContain("range=today"));
+    const from30 = dayjs().subtract(29, "day").format(D);
+    await waitFor(() => expect(dashboardPurchaseOrders).toHaveBeenLastCalledWith(
+      expect.objectContaining({ date_from: from30, date_to: dayjs().format(D) })));
+  });
+
+  it("URL 自定义时间 from>to 不下发反向窗口，退回默认30天且仍可清除", async () => {
+    renderAt("/boss?range=custom&from=2026-07-20&to=2026-07-01");
+    const from30 = dayjs().subtract(29, "day").format(D);
+    await waitFor(() => expect(dashboardKpi).toHaveBeenCalledWith({
+      date_from: from30, date_to: dayjs().format(D),
+    }));
+    expect(screen.getByRole("button", { name: "清除全部筛选" })).toBeInTheDocument();
+  });
+
+  it("URL 不可能日期不下发，避免后端 422", async () => {
+    renderAt("/boss?range=custom&from=2026-02-31&to=2026-03-31");
+    const from30 = dayjs().subtract(29, "day").format(D);
+    await waitFor(() => expect(dashboardKpi).toHaveBeenCalledWith({
+      date_from: from30, date_to: dayjs().format(D),
+    }));
+  });
+
+  it.each([
+    "/boss?od_from=2026-07-20&od_to=2026-07-01",
+    "/boss?od_from=2026-07-01",
+  ])("非法或半开的趋势下钻窗口整体失效，不下发给订单接口：%s", async (url) => {
+    renderAt(url);
+    const from30 = dayjs().subtract(29, "day").format(D);
+    const today = dayjs().format(D);
+    await waitFor(() => expect(dashboardPurchaseOrders).toHaveBeenCalledWith(
+      expect.objectContaining({ date_from: from30, date_to: today })));
+    expect(dashboardPurchaseOrders).not.toHaveBeenCalledWith(
+      expect.objectContaining({ date_from: "2026-07-20", date_to: "2026-07-01" }));
+    expect(screen.queryByText(/订单块已按选中期筛选/)).toBeNull();
+    expect(screen.getByRole("button", { name: "清除全部筛选" })).toBeInTheDocument();
+  });
 });
 
 describe("最近订单：PN 首屏直出 + 展开明细", () => {
@@ -188,7 +232,29 @@ describe("最近订单：PN 首屏直出 + 展开明细", () => {
     // PN-A 同时出现在盈亏榜（合法复现），断言至少一个带稳定深链
     const pnLinks = await screen.findAllByRole("link", { name: "查看型号 PN-A 全景" });
     expect(pnLinks.some((l) => l.getAttribute("href") === "/parts?part_id=101")).toBe(true);
-    expect(screen.getByText("+1 更多")).toBeInTheDocument();
+    expect(screen.getByText("+1 更多").closest("button")).not.toBeNull();
+  });
+
+  it("短暂连接旧版后端缺少 parts/pn_preview/pn_count 时受控降级，不崩溃", async () => {
+    dashboardPurchaseOrders.mockResolvedValue({ data: ordersResp([
+      purchaseRow({ parts: undefined, pn_preview: undefined, pn_count: undefined }),
+    ], { contract_version: undefined }) });
+    renderAt("/boss");
+    expect(await screen.findByText("旧版接口：暂无PN明细")).toBeInTheDocument();
+    const orderButton = screen.getByRole("button", { name: /订单 CG-001，展开明细/ });
+    expect(orderButton.tagName).toBe("BUTTON");
+    fireEvent.click(orderButton);
+    expect(await screen.findByText(/当前服务版本尚未返回 PN 明细/)).toBeInTheDocument();
+  });
+
+  it("旧契约忽略 v2 筛选时失败关闭，不展示可能错误的订单", async () => {
+    dashboardPurchaseOrders.mockResolvedValue({ data: ordersResp([
+      purchaseRow({ parts: undefined, pn_preview: undefined, pn_count: undefined }),
+    ], { contract_version: undefined }) });
+    renderAt("/boss?part_id=5&pn=PN-X");
+    expect(await screen.findByText(/服务升级中，当前 PN、互通池或采购员筛选暂不可用/))
+      .toBeInTheDocument();
+    expect(screen.queryByText("CG-001")).toBeNull();
   });
 
   it("点单号展开完整明细：池归属/池均价/约束价/差额/分析状态齐全", async () => {
@@ -205,6 +271,30 @@ describe("最近订单：PN 首屏直出 + 展开明细", () => {
 });
 
 describe("权限三态（无权限 ≠ 暂无数据）", () => {
+  it("orders_restricted=true：明确显示无逐单销售权限，不伪装成共0单", async () => {
+    dashboardSales.mockResolvedValue({ data: ordersResp([], { orders_restricted: true, total: null }) });
+    renderAt("/boss");
+    expect(await screen.findByText("当前账号无逐单销售订单权限（仅聚合数据可见）。"))
+      .toBeInTheDocument();
+    expect(screen.queryByText("共 0 单")).toBeNull();
+  });
+
+  it("page_boss_board=true 但 page_parts=false：PN 只读展示，不生成不可访问深链", async () => {
+    localStorage.setItem("role", "boss");
+    localStorage.setItem("permissions", JSON.stringify({ page_boss_board: true, page_parts: false }));
+    renderAt("/boss");
+    await screen.findAllByText("PN-A");
+    expect(screen.queryByRole("link", { name: "查看型号 PN-A 全景" })).toBeNull();
+  });
+
+  it("非管理员权限快照缺少 page_parts 时也不生成死链", async () => {
+    localStorage.setItem("role", "boss");
+    localStorage.setItem("permissions", JSON.stringify({ page_boss_board: true }));
+    renderAt("/boss");
+    await screen.findAllByText("PN-A");
+    expect(screen.queryByRole("link", { name: "查看型号 PN-A 全景" })).toBeNull();
+  });
+
   it("data_purchase_cost=false：采购金额列显示「无成本权限」而非空", async () => {
     localStorage.setItem("role", "boss");
     localStorage.setItem("permissions", JSON.stringify({ data_purchase_cost: false, data_profit: true }));
@@ -256,10 +346,24 @@ describe("互通池列表：表头 合计↔均价 循环切换", () => {
   });
 
   it("点击池名进入 /pool-analysis/:groupId 深链", async () => {
-    renderAt("/boss");
+    renderAt("/boss?range=custom&from=2026-06-01&to=2026-06-30");
     const table = (await screen.findAllByRole("table")).find((t) => within(t).queryByText("内存池"))!;
-    fireEvent.click(within(table).getByLabelText("进入池「内存池」分析详情"));
+    const link = within(table).getByLabelText("进入池「内存池」分析详情");
+    expect(link.tagName).toBe("A");
+    expect(link).toHaveAttribute("href", "/pool-analysis/7?from=2026-06-01&to=2026-06-30");
+    fireEvent.click(link);
     await screen.findByText("池分析详情页桩");
+  });
+
+  it("订单明细和盈亏榜的池链接都保留当前 from/to", async () => {
+    renderAt("/boss?range=custom&from=2026-06-01&to=2026-06-30");
+    fireEvent.click(await screen.findByRole("button", { name: /订单 CG-001，展开明细/ }));
+    const links = await screen.findAllByLabelText("进入池「内存池」分析详情");
+    expect(links.length).toBeGreaterThanOrEqual(3); // 池列表、盈亏榜、订单明细
+    for (const link of links) {
+      expect(link.tagName).toBe("A");
+      expect(link).toHaveAttribute("href", "/pool-analysis/7?from=2026-06-01&to=2026-06-30");
+    }
   });
 });
 

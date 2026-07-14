@@ -65,7 +65,9 @@ export default function TrendBlock({ filters, dateRange, patch }: TrendBlockProp
           granularity={granularity}
           loading={loading}
           onPointClick={(period) => {
-            const r = drillRangeOf(period, granularity);
+            const r = drillRangeOf(period, granularity, {
+              dateFrom: dateRange.date_from, dateTo: dateRange.date_to,
+            });
             patch({ od_from: r.from, od_to: r.to });
           }} />
       )}

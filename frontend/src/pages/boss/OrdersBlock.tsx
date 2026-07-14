@@ -20,6 +20,7 @@ import {
 } from "./shared";
 
 type AnyOrder = SalesOrderRow | PurchaseOrderRow;
+type AnyPart = NonNullable<AnyOrder["parts"]>[number];
 
 interface OrdersBlockProps {
   side: OrderSide;
@@ -35,6 +36,23 @@ interface OrdersBlockProps {
 }
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50];
+
+/** null = pre-v2 response did not include the field; [] = v2 explicitly has no lines. */
+function orderParts(row: AnyOrder): AnyPart[] | null {
+  return Array.isArray(row.parts) ? row.parts : null;
+}
+
+function orderPnCount(row: AnyOrder): number {
+  return typeof row.pn_count === "number" ? row.pn_count : row.part_count;
+}
+
+function isV2OrderContract(data: OrdersResp<AnyOrder> | null): boolean {
+  if (!data) return true;
+  const n = Number(String(data.contract_version ?? "").replace(/^v/i, ""));
+  // 新筛选参数会被旧 FastAPI 静默忽略，不能凭返回字段“猜版本”；只有
+  // 后端显式声明 v2 才能展示带 PN/池/采购员筛选的结果（空结果也一样）。
+  return Number.isFinite(n) && n >= 2;
+}
 
 export default function OrdersBlock({
   side, range, partId, poolId, person, scopeNote,
@@ -73,6 +91,9 @@ export default function OrdersBlock({
   const costRestricted = localCostRestricted || (data?.cost_restricted ?? false);
   const partsRestricted = data?.parts_restricted ?? false;
   const manualRestricted = data?.manual_reference_restricted ?? false;
+  const ordersRestricted = data?.orders_restricted ?? false;
+  const needsV2Filter = partId != null || poolId != null || (isPurchase && !!person);
+  const unsupportedLegacyFilter = needsV2Filter && !isV2OrderContract(data);
 
   const toggleExpand = (id: number) =>
     setExpanded((keys) => (keys.includes(id) ? keys.filter((k) => k !== id) : [...keys, id]));
@@ -85,18 +106,27 @@ export default function OrdersBlock({
 
   const pnPreviewCell = (r: AnyOrder) => {
     if (partsRestricted) return <Tag>无明细权限</Tag>;
-    if (!r.parts.length) return <span style={MUTED}>{EMPTY}</span>;
-    const byPn = new Map(r.parts.map((p) => [p.pn_std, p.part_id]));
-    const more = r.pn_count - r.pn_preview.length;
+    const parts = orderParts(r);
+    const preview = Array.isArray(r.pn_preview)
+      ? r.pn_preview
+      : parts?.map((p) => p.pn_std).filter((pn): pn is string => !!pn).slice(0, 3);
+    if (!parts && !preview) {
+      return <Tag title="当前后端尚未提供 v2 PN 明细字段">旧版接口：暂无PN明细</Tag>;
+    }
+    if (!preview?.length) return <span style={MUTED}>{EMPTY}</span>;
+    const byPn = new Map((parts ?? []).map((p) => [p.pn_std, p.part_id]));
+    const pnCount = orderPnCount(r);
+    const more = Math.max(0, pnCount - preview.length);
     return (
       <span style={{ display: "inline-flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-        {r.pn_preview.map((pn) => (
+        {preview.map((pn) => (
           <PartLink key={pn} partId={byPn.get(pn) ?? null} pn={pn} />
         ))}
         {more > 0 && (
-          <a onClick={() => toggleExpand(r.order_id)} aria-label={`展开全部 ${r.pn_count} 个型号明细`}>
+          <Button type="link" size="small" onClick={() => toggleExpand(r.order_id)}
+            style={{ padding: 0, height: "auto" }} aria-label={`展开全部 ${pnCount} 个型号明细`}>
             +{more} 更多
-          </a>
+          </Button>
         )}
       </span>
     );
@@ -108,12 +138,13 @@ export default function OrdersBlock({
       render: (v, r) => <span>{v || EMPTY}{r.is_future && <Tag color="red" style={{ marginLeft: 4 }}>未来</Tag>}</span> },
     { title: isPurchase ? "采购单号" : "销售单号", dataIndex: "order_no", width: 140,
       render: (v, r) => (
-        <a onClick={() => toggleExpand(r.order_id)} style={{ fontFamily: "monospace", fontSize: 12 }}
-          role="button" aria-expanded={expanded.includes(r.order_id)}
-          aria-label={`订单 ${v}，${expanded.includes(r.order_id) ? "收起" : "展开"}明细`}>{v}</a>) },
+        <Button type="link" size="small" onClick={() => toggleExpand(r.order_id)}
+          style={{ padding: 0, height: "auto", fontFamily: "monospace", fontSize: 12 }}
+          aria-expanded={expanded.includes(r.order_id)}
+          aria-label={`订单 ${v}，${expanded.includes(r.order_id) ? "收起" : "展开"}明细`}>{v}</Button>) },
     { title: "PN", key: "pns", width: 210, render: (_, r) => pnPreviewCell(r) },
-    { title: "型号数", dataIndex: "pn_count", key: "part_count", width: 78, align: "right",
-      ...sortProps("part_count") },
+    { title: "型号数", key: "part_count", width: 78, align: "right",
+      ...sortProps("part_count"), render: (_, r) => orderPnCount(r) },
     { title: "数量", dataIndex: "total_quantity", width: 72, align: "right", render: qty },
     ...(isPurchase ? [
       { title: "采购员", dataIndex: "purchaser", width: 84,
@@ -144,7 +175,7 @@ export default function OrdersBlock({
     { title: "状态", dataIndex: "data_status", width: 82,
       render: (v) => (v ? <Tag>{v}</Tag> : EMPTY) },
     { title: "分析状态", key: "ref_summary", width: 130,
-      render: (_, r) => orderReferenceSummary(r.parts, partsRestricted) },
+      render: (_, r) => orderReferenceSummary(orderParts(r) ?? undefined, partsRestricted) },
   ];
 
   const onChange = (pag: TablePaginationConfig, _f: unknown,
@@ -172,6 +203,11 @@ export default function OrdersBlock({
       {error ? (
         <Alert type="error" showIcon message={`${isPurchase ? "采购" : "销售"}订单加载失败：${error}`}
           action={<Button size="small" onClick={reload}>重试</Button>} />
+      ) : ordersRestricted ? (
+        <Alert type="info" showIcon message="当前账号无逐单销售订单权限（仅聚合数据可见）。" />
+      ) : unsupportedLegacyFilter ? (
+        <Alert type="warning" showIcon
+          message="服务升级中，当前 PN、互通池或采购员筛选暂不可用；为避免展示错误结果，本列表已暂停显示。" />
       ) : (
         <Table<AnyOrder>
           size="small" rowKey="order_id" loading={loading}
@@ -181,10 +217,17 @@ export default function OrdersBlock({
           expandable={{
             expandedRowKeys: expanded,
             onExpandedRowsChange: (keys) => setExpanded(keys),
-            expandedRowRender: (r) => partsRestricted
-              ? <Alert type="info" showIcon message="当前账号无逐单明细查看权限（仅聚合可见）。" />
-              : <PartsTable side={side} parts={r.parts}
-                  costRestricted={costRestricted} manualRestricted={manualRestricted} />,
+            expandedRowRender: (r) => {
+              if (partsRestricted) {
+                return <Alert type="info" showIcon message="当前账号无逐单明细查看权限（仅聚合可见）。" />;
+              }
+              const parts = orderParts(r);
+              return parts == null
+                ? <Alert type="warning" showIcon
+                    message="当前服务版本尚未返回 PN 明细；订单概要仍可查看，请待后端升级完成后重试。" />
+                : <PartsTable side={side} parts={parts} dateRange={range}
+                    costRestricted={costRestricted} manualRestricted={manualRestricted} />;
+            },
           }}
           pagination={{
             current: data?.page ?? 1, pageSize, total: data?.total ?? 0,

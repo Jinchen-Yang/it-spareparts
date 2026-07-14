@@ -4,39 +4,48 @@
  */
 import { Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import type { PurchaseOrderPart, SalesOrderPart } from "../../api";
 import { EMPTY, moneyExact, pctSigned, qty } from "../../utils/format";
-import { MUTED, ReferenceStatusTag, fmtMoneyR } from "./shared";
+import {
+  MUTED, ReferenceStatusTag, fmtMoneyR, poolAnalysisPath, readLocalPerms, type DateRange,
+} from "./shared";
 
 export type OrderSide = "purchase" | "sales";
 type AnyPart = SalesOrderPart | PurchaseOrderPart;
 
+export function canOpenPartDetail(): boolean {
+  return localStorage.getItem("role") === "admin" || readLocalPerms().page_parts === true;
+}
+
 export function PartLink({ partId, pn }: { partId: number | null; pn: string | null }) {
   if (!pn) return <span style={MUTED}>{EMPTY}</span>;
-  if (!partId) return <span style={{ fontFamily: "monospace", fontSize: 12.5 }}>{pn}</span>;
+  const canOpenPartPage = canOpenPartDetail();
+  if (!partId || !canOpenPartPage) {
+    return <span style={{ fontFamily: "monospace", fontSize: 12.5 }}
+      title={!canOpenPartPage ? "当前账号无型号查询页面权限" : undefined}>{pn}</span>;
+  }
   return (
     <Link to={`/parts?part_id=${partId}`} style={{ fontFamily: "monospace", fontSize: 12.5 }}
       aria-label={`查看型号 ${pn} 全景`}>{pn}</Link>
   );
 }
 
-export function PoolLink({ groupId, name }: { groupId: number | null; name: string | null }) {
-  const navigate = useNavigate();
+export function PoolLink({ groupId, name, dateRange }: {
+  groupId: number | null; name: string | null; dateRange?: DateRange;
+}) {
   if (!groupId) return <span style={MUTED}>未入池</span>;
   return (
-    <a onClick={() => navigate(`/pool-analysis/${groupId}`)} aria-label={`进入池「${name || groupId}」分析详情`}>
+    <Link to={poolAnalysisPath(groupId, dateRange)} aria-label={`进入池「${name || groupId}」分析详情`}>
       {name || `池 #${groupId}`}
-    </a>
+    </Link>
   );
 }
 
 /** 差额：优先 vs 人工约束价，无约束时 vs 池均价（明确标注口径，不混单位） */
-function DeltaCell({ p, restricted }: { p: AnyPart; restricted: boolean }) {
+function DeltaCell({ p, side, restricted }: { p: AnyPart; side: OrderSide; restricted: boolean }) {
   if (p.manual_limit_delta != null) {
-    const worse = p.manual_limit_delta > 0
-      ? ("max_purchase_price" in p)      // 采购：高于上限为差
-      : !("max_purchase_price" in p);    // 销售：低于下限为差
+    const worse = side === "purchase" ? p.manual_limit_delta > 0 : p.manual_limit_delta < 0;
     return (
       <Tooltip title={`vs 人工约束价（${pctSigned(p.manual_limit_delta_pct)}）`}>
         <span style={{ color: worse && p.manual_limit_delta !== 0 ? "#c0524a" : undefined }}>
@@ -62,14 +71,15 @@ function DeltaCell({ p, restricted }: { p: AnyPart; restricted: boolean }) {
 
 export interface PartsTableProps {
   side: OrderSide;
-  parts: AnyPart[];
+  parts?: AnyPart[];
+  dateRange?: DateRange;
   /** 采购金额权限（data_purchase_cost=False）——采购单价/金额显示「无成本权限」 */
   costRestricted: boolean;
   /** 治理权限（data_pool_price_governance=False）——约束价/差额显示「无权限」 */
   manualRestricted: boolean;
 }
 
-export default function PartsTable({ side, parts, costRestricted, manualRestricted }: PartsTableProps) {
+export default function PartsTable({ side, parts = [], dateRange, costRestricted, manualRestricted }: PartsTableProps) {
   const isPurchase = side === "purchase";
   // 销售侧 unit_price_ex_tax/amount 与采购成本键同名，对 cost-blind 账号会被后端有意过遮
   // （契约既定取舍）：null 且账号受限 → 显示无权限而非「-」
@@ -89,7 +99,7 @@ export default function PartsTable({ side, parts, costRestricted, manualRestrict
     { title: "金额(未税)", dataIndex: "amount", width: 110, align: "right",
       render: (v) => fmtMoneyR(v, priceRestricted && v == null, "无成本权限") },
     { title: "所属池", key: "pool", width: 130, ellipsis: true,
-      render: (_, p) => <PoolLink groupId={p.pool_group_id} name={p.pool_name} /> },
+      render: (_, p) => <PoolLink groupId={p.pool_group_id} name={p.pool_name} dateRange={dateRange} /> },
     { title: "池均价", key: "pool_avg", width: 100, align: "right",
       render: (_, p) => {
         const v = isPurchase
@@ -111,7 +121,7 @@ export default function PartsTable({ side, parts, costRestricted, manualRestrict
     { title: "差额", key: "delta", width: 140, align: "right",
       render: (_, p) => p.pool_group_id == null
         ? <span style={MUTED}>{EMPTY}</span>
-        : <DeltaCell p={p} restricted={manualRestricted} /> },
+        : <DeltaCell p={p} side={side} restricted={manualRestricted} /> },
     { title: "分析状态", key: "ref", width: 116, render: (_, p) => (
       <span>
         <ReferenceStatusTag status={p.reference_status} />

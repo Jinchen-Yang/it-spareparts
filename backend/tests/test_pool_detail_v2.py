@@ -144,9 +144,19 @@ def test_governance_blind_detail(db, seeded):
         assert m["sales_metrics"]["manual_limit_delta"] is None
 
 
-def test_list_pools_does_not_run_order_sections(db, seeded):
-    """池列表逐池 analyze 不带 v2 板块（旧路径不为每池多跑板块查询）。"""
+def test_list_pools_does_not_run_per_pool_analyze(db, seeded, monkeypatch):
+    """池列表批量聚合摘要，不得回退为每池一次 analyze（N-per-pool）。"""
+    detail = pool.analyze(db, seeded["gid"], as_of=AS_OF)
+
+    def fail(*_args, **_kwargs):
+        raise AssertionError("池列表不应调用单池 analyze")
+
+    monkeypatch.setattr(pool, "analyze", fail)
     out = pool.list_pools(db, as_of=AS_OF, sort="savings")
     assert out["items"], "应有池条目"
     assert "purchase_orders" not in out["items"][0]
     assert out["items"][0]["purchase_metrics"] is not None   # 批量统计块照常合并
+    assert out["items"][0]["demand_qty"] == detail["demand"]["total_qty"]
+    assert out["items"][0]["demand_revenue_ex_tax"] == detail["demand"]["total_revenue_ex_tax"]
+    assert out["items"][0]["theoretical_saving"] == detail["savings"]["theoretical_max"]
+    assert out["items"][0]["supply_available_upper"] == detail["savings"]["supply_available_upper"]

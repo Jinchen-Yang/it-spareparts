@@ -18,6 +18,17 @@ const { Header, Content, Sider } = Layout;
 const SIDER_WIDTH = 224;
 const SIDER_COLLAPSED = 72;
 
+export type ShellHeaderMode = "mobile" | "tablet" | "desktop";
+
+/** Ant Design md starts at exactly 768px; lg starts at 992px.  The old desktop
+ * action row overflowed the 544px content area at 768px (after the sider).
+ * Tablet mode keeps the desktop sider but uses the compact user-menu header. */
+export function shellHeaderMode(screens: { md?: boolean; lg?: boolean }): ShellHeaderMode {
+  if (screens.md === false) return "mobile";
+  if (screens.lg === false) return "tablet";
+  return "desktop";
+}
+
 function Brand({ collapsed }: { collapsed?: boolean }) {
   return (
     <div
@@ -61,7 +72,9 @@ export default function AppShell({
   const navigate = useNavigate();
   const screens = Grid.useBreakpoint();
   // md 未计算完成(首帧 undefined)按桌面处理，避免闪抽屉
-  const isMobile = screens.md === false;
+  const headerMode = shellHeaderMode(screens);
+  const isMobile = headerMode === "mobile";
+  const compactHeader = headerMode !== "desktop";
 
   const [collapsed, setCollapsed] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -222,19 +235,23 @@ export default function AppShell({
 
       <Layout style={{ minWidth: 0 }}>
         <Header
+          data-shell-header-mode={headerMode}
           style={{
             display: "flex", alignItems: "center", gap: 8,
             paddingInline: isMobile ? 12 : 24,
+            minWidth: 0,
           }}
         >
-          {isMobile ? (
+          {compactHeader ? (
             <>
-              <Button
-                type="text"
-                icon={<MenuOutlined />}
-                aria-label="打开菜单"
-                onClick={() => setDrawerOpen(true)}
-              />
+              {isMobile && (
+                <Button
+                  type="text"
+                  icon={<MenuOutlined />}
+                  aria-label="打开菜单"
+                  onClick={() => setDrawerOpen(true)}
+                />
+              )}
               <span
                 style={{
                   flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",

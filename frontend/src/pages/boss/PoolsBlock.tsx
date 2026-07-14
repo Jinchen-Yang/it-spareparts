@@ -11,10 +11,10 @@ import { Alert, Button, Card, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType, TablePaginationConfig } from "antd/es/table";
 import type { SorterResult } from "antd/es/table/interface";
 import { SwapOutlined } from "@ant-design/icons";
-import { useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { dashboardPools, type PoolListItem, type PoolSort, type PoolsResp } from "../../api";
 import { EMPTY, moneyExact } from "../../utils/format";
-import { MUTED, useGuardedFetch, type DateRange } from "./shared";
+import { MUTED, poolAnalysisPath, useGuardedFetch, type DateRange } from "./shared";
 
 type MetricMode = "total" | "average";
 const MODE_LABEL: Record<MetricMode, string> = { total: "金额合计(未税)", average: "平均单价(未税)" };
@@ -59,7 +59,6 @@ interface PoolsBlockProps {
 }
 
 export default function PoolsBlock({ dateRange, scopeNote, localCostRestricted, localGovernanceRestricted }: PoolsBlockProps) {
-  const navigate = useNavigate();
   const [pMode, setPMode] = useState<MetricMode>("total");
   const [sMode, setSMode] = useState<MetricMode>("total");
   const [sort, setSort] = useState<PoolSort>("savings");
@@ -112,10 +111,10 @@ export default function PoolsBlock({ dateRange, scopeNote, localCostRestricted, 
   const cols: ColumnsType<PoolListItem> = [
     { title: "池名", key: "name", width: 170, ellipsis: true,
       render: (_, r) => (
-        <a onClick={() => navigate(`/pool-analysis/${r.group_id}?from=${dateRange.date_from ?? ""}&to=${dateRange.date_to ?? ""}`)}
+        <Link to={poolAnalysisPath(r.group_id, dateRange)}
           aria-label={`进入池「${r.name || r.group_id}」分析详情`}>
           {r.name || `池 #${r.group_id}`}
-        </a>) },
+        </Link>) },
     { title: "成员", dataIndex: "member_count", key: "member_count", width: 68, align: "right",
       ...sortProps("member_count") },
     { title: <MetricHeaderToggle side="purchase" mode={pMode} onToggle={togglePMode} />,

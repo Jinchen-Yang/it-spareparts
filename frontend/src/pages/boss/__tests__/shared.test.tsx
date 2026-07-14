@@ -2,7 +2,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import dayjs from "dayjs";
-import { drillRangeOf, rangeToDates, useGuardedFetch } from "../shared";
+import { drillRangeOf, poolAnalysisPath, rangeToDates, useGuardedFetch } from "../shared";
+import { isStrictIsoDate, strictIsoDateOrNull, strictIsoDateRange } from "../../../utils/date";
 
 afterEach(cleanup);
 
@@ -64,6 +65,8 @@ describe("rangeToDates", () => {
       .toEqual({ date_from: "2026-06-01", date_to: "2026-06-30" });
     expect(rangeToDates("custom", "2026-06-01", null)).toEqual({
       date_from: dayjs().subtract(29, "day").format(D), date_to: dayjs().format(D) });
+    expect(rangeToDates("custom", "2026-06-30", "2026-06-01")).toEqual({
+      date_from: dayjs().subtract(29, "day").format(D), date_to: dayjs().format(D) });
   });
 });
 
@@ -72,5 +75,35 @@ describe("drillRangeOf（趋势点击 → 订单窗口）", () => {
     expect(drillRangeOf("2026-07-01", "day")).toEqual({ from: "2026-07-01", to: "2026-07-01" });
     expect(drillRangeOf("2026-06-29", "week")).toEqual({ from: "2026-06-29", to: "2026-07-05" });
     expect(drillRangeOf("2026-06-01", "month")).toEqual({ from: "2026-06-01", to: "2026-06-30" });
+  });
+  it("桶末截断到全局 date_to 与今天两者中更早的一天", () => {
+    expect(drillRangeOf("2026-07-13", "week", { dateTo: "2026-07-15", today: "2026-07-20" }))
+      .toEqual({ from: "2026-07-13", to: "2026-07-15" });
+    expect(drillRangeOf("2026-07-01", "month", { dateTo: "2026-07-31", today: "2026-07-18" }))
+      .toEqual({ from: "2026-07-01", to: "2026-07-18" });
+  });
+  it("周/月桶起点不得早于全局 date_from", () => {
+    expect(drillRangeOf("2026-07-13", "week", {
+      dateFrom: "2026-07-15", dateTo: "2026-07-15", today: "2026-07-20",
+    })).toEqual({ from: "2026-07-15", to: "2026-07-15" });
+    expect(drillRangeOf("2026-07-01", "month", {
+      dateFrom: "2026-07-10", dateTo: "2026-07-20", today: "2026-07-31",
+    })).toEqual({ from: "2026-07-10", to: "2026-07-20" });
+  });
+});
+
+describe("严格日期与池深链", () => {
+  it("拒绝 dayjs 会自动滚入下月的不可能日期", () => {
+    expect(isStrictIsoDate("2026-02-31")).toBe(false);
+    expect(strictIsoDateOrNull("2026-02-31")).toBeNull();
+    expect(isStrictIsoDate("2026-02-28")).toBe(true);
+    expect(strictIsoDateRange("2026-06-30", "2026-06-01")).toBeNull();
+  });
+
+  it("池详情路径只携带严格合法的当前窗口", () => {
+    expect(poolAnalysisPath(7, { date_from: "2026-06-01", date_to: "2026-06-30" }))
+      .toBe("/pool-analysis/7?from=2026-06-01&to=2026-06-30");
+    expect(poolAnalysisPath(7, { date_from: "2026-02-31", date_to: "2026-06-30" }))
+      .toBe("/pool-analysis/7");
   });
 });

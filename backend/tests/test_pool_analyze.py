@@ -4,11 +4,11 @@ from datetime import date
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app import permissions, security
 from app.api import dashboard as dashboard_api
-from app.db import get_db
+from app.db import engine, get_db
 from app.main import app
 from app.etl import loader
 from app.models.dimensions import DimPart
@@ -242,6 +242,36 @@ def test_list_pools_pagination_and_cap(db, monkeypatch):
     monkeypatch.setattr(config, "POOL_RANK_ANALYZE_CAP", 2)
     rc = pool.list_pools(db, as_of=AS_OF, sort="savings", page=1, page_size=2)
     assert rc["ranking_capped"] is True and rc["sort"] == "member_count"
+
+
+def test_savings_list_query_count_is_constant_as_pool_count_grows(db):
+    """性能契约：savings 是看板首屏默认排序，SQL 数不得随池数线性增长。"""
+    def add_pools(start, count):
+        for i in range(start, start + count):
+            a = _part(db, f"PN-Q{i}A", f"QB{i}A")
+            b = _part(db, f"PN-Q{i}B", f"QB{i}B")
+            pool_catalog.create_pool(db, name=f"池-Q{i}", member_part_ids=[a, b], operated_by="t")
+        db.commit()
+
+    def queries():
+        counter = {"n": 0}
+
+        def before(*_args):
+            counter["n"] += 1
+
+        event.listen(engine, "before_cursor_execute", before)
+        try:
+            result = pool.list_pools(db, as_of=AS_OF, sort="savings", page_size=100)
+        finally:
+            event.remove(engine, "before_cursor_execute", before)
+        return counter["n"], result
+
+    add_pools(0, 2)
+    small_n, small = queries()
+    add_pools(2, 10)
+    large_n, large = queries()
+    assert small["total"] == 2 and large["total"] == 12
+    assert large_n == small_n, f"池数 2→12 时 SQL 数 {small_n}→{large_n}，疑似 N-per-pool"
 
 
 def test_pools_endpoint_restricts_savings_ranking_and_masks_values(db):

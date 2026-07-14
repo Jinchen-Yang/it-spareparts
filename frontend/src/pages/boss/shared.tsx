@@ -10,6 +10,9 @@ import { useSearchParams } from "react-router-dom";
 import { Tag, Tooltip } from "antd";
 import dayjs from "dayjs";
 import type { ReferenceStatus } from "../../api";
+import {
+  ISO_DATE_FORMAT, isStrictIsoDate, strictIsoDateOrNull, strictIsoDateRange,
+} from "../../utils/date";
 import { EMPTY, moneyExact } from "../../utils/format";
 
 // ---------------------------------------------------------------- 全局筛选
@@ -36,7 +39,7 @@ export interface BoardFilters {
 
 export interface DateRange { date_from?: string; date_to?: string }
 
-const D = "YYYY-MM-DD";
+const D = ISO_DATE_FORMAT;
 
 /** rangeKey → 实际统计窗口（custom 缺参时退回 30d，绝不产出半开窗口） */
 export function rangeToDates(key: RangeKey, from: string | null, to: string | null): DateRange {
@@ -44,7 +47,10 @@ export function rangeToDates(key: RangeKey, from: string | null, to: string | nu
   if (key === "today") return { date_from: today.format(D), date_to: today.format(D) };
   if (key === "7d") return { date_from: today.subtract(6, "day").format(D), date_to: today.format(D) };
   if (key === "month") return { date_from: today.startOf("month").format(D), date_to: today.format(D) };
-  if (key === "custom" && from && to) return { date_from: from, date_to: to };
+  const custom = strictIsoDateRange(from, to);
+  if (key === "custom" && custom) {
+    return { date_from: custom.from, date_to: custom.to };
+  }
   return { date_from: today.subtract(29, "day").format(D), date_to: today.format(D) };
 }
 
@@ -58,9 +64,7 @@ function readIntParam(sp: URLSearchParams, key: string): number | null {
 }
 
 function readDateParam(sp: URLSearchParams, key: string): string | null {
-  const raw = sp.get(key);
-  // 未装 customParseFormat 插件，严格校验用正则 + isValid 双关
-  return raw && /^\d{4}-\d{2}-\d{2}$/.test(raw) && dayjs(raw).isValid() ? raw : null;
+  return strictIsoDateOrNull(sp.get(key));
 }
 
 export function useBoardFilters() {
@@ -68,6 +72,9 @@ export function useBoardFilters() {
 
   const filters: BoardFilters = useMemo(() => {
     const rawRange = sp.get("range") as RangeKey | null;
+    const drillWindow = strictIsoDateRange(
+      readDateParam(sp, "od_from"), readDateParam(sp, "od_to"),
+    );
     return {
       rangeKey: rawRange && RANGE_KEYS.includes(rawRange) ? rawRange : "30d",
       from: readDateParam(sp, "from"),
@@ -77,8 +84,9 @@ export function useBoardFilters() {
       poolId: readIntParam(sp, "pool"),
       salesperson: sp.get("sp") || null,
       purchaser: sp.get("buyer") || null,
-      drillFrom: readDateParam(sp, "od_from"),
-      drillTo: readDateParam(sp, "od_to"),
+      // 下钻必须是完整正向闭区间；半开/逆序/坏日期整体失效，绝不下发。
+      drillFrom: drillWindow?.from ?? null,
+      drillTo: drillWindow?.to ?? null,
       granularity: (["day", "week", "month"].includes(sp.get("gran") || "") ? sp.get("gran") : "day") as BoardFilters["granularity"],
       costMethod: sp.get("cost") === "fifo" ? "fifo" : "moving_avg",
     };
@@ -116,8 +124,11 @@ export function useBoardFilters() {
     setSp(merged, { replace: false });
   }, [sp, setSp]);
 
-  const hasFilter = !!(filters.partId || filters.poolId || filters.salesperson
-    || filters.purchaser || filters.drillFrom);
+  // granularity/costMethod 是展示偏好，clearAll 会保留；其余范围/业务条件都应可清除。
+  const hasFilter = filters.rangeKey !== "30d" || !!(filters.from || filters.to
+    || filters.partId || filters.poolId || filters.salesperson
+    || filters.purchaser || filters.drillFrom || filters.drillTo
+    || sp.has("od_from") || sp.has("od_to"));
 
   return { filters, dateRange, ordersRange, patch, clearAll, hasFilter };
 }
@@ -238,12 +249,37 @@ export function orderReferenceSummary(
 
 // ---------------------------------------------------------------- 杂项
 
-/** 趋势点击下钻：period（桶起点）+ 粒度 → 订单日期覆盖窗口 */
-export function drillRangeOf(period: string, granularity: "day" | "week" | "month"): { from: string; to: string } {
-  const start = dayjs(period);
-  if (granularity === "week") return { from: start.format(D), to: start.add(6, "day").format(D) };
-  if (granularity === "month") return { from: start.format(D), to: start.endOf("month").format(D) };
-  return { from: start.format(D), to: start.format(D) };
+/** 趋势点击下钻：桶末不得越过全局 date_to 或今天。 */
+export function drillRangeOf(
+  period: string,
+  granularity: "day" | "week" | "month",
+  bounds: { dateFrom?: string; dateTo?: string; today?: string } = {},
+): { from: string; to: string } {
+  const bucketStart = dayjs(period);
+  let start = bucketStart;
+  let end = granularity === "week" ? bucketStart.add(6, "day")
+    : granularity === "month" ? bucketStart.endOf("month") : bucketStart;
+  if (isStrictIsoDate(bounds.dateFrom)) {
+    const lower = dayjs(bounds.dateFrom);
+    if (start.isBefore(lower, "day")) start = lower;
+  }
+  const today = isStrictIsoDate(bounds.today) ? dayjs(bounds.today) : dayjs().startOf("day");
+  const caps = [today, ...(isStrictIsoDate(bounds.dateTo) ? [dayjs(bounds.dateTo)] : [])];
+  for (const cap of caps) if (end.isAfter(cap, "day")) end = cap;
+  if (end.isBefore(start, "day")) end = start;
+  return { from: start.format(D), to: end.format(D) };
+}
+
+/** 互通池详情唯一深链构造器：所有入口一致保留当前统计窗口。 */
+export function poolAnalysisPath(groupId: number, range?: DateRange): string {
+  const query = new URLSearchParams();
+  const window = strictIsoDateRange(range?.date_from, range?.date_to);
+  if (window) {
+    query.set("from", window.from);
+    query.set("to", window.to);
+  }
+  const suffix = query.toString();
+  return `/pool-analysis/${groupId}${suffix ? `?${suffix}` : ""}`;
 }
 
 export const RANGE_OPTIONS = [
