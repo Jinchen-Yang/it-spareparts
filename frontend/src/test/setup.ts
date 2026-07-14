@@ -2,26 +2,24 @@
 // getComputedStyle 等浏览器 API，jsdom 缺省没有或不完整。
 import "@testing-library/jest-dom/vitest";
 
-// Node 22+ 在 globalThis 上自带 localStorage/sessionStorage getter（未配
-// --localstorage-file 时恒返回 undefined），vitest populateGlobal 见"已存在"便跳过
-// 注入 jsdom 实现，测试里 typeof localStorage === "undefined"（jsdom 原始 window
-// 也被 Node getter 遮蔽，拿不回来）→ 用内存版 Storage 顶上。
-// 旧版 Node（CI）没有该 getter，此分支不生效。
+// Node ≥22 自带实验性 localStorage/sessionStorage 全局（未配 --localstorage-file 时
+// 值为 undefined），且该自有属性会遮蔽 jsdom 注入的实现 → 测试里裸引用 localStorage
+// 变 undefined（Node 26 实测命中）。jsdom 下 window === globalThis，不能转发回 window
+// （会自引用），直接装一个符合 Storage 语义的内存实现。旧版 Node（CI）无该属性，不生效。
 function memStorage(): Storage {
-  let store = new Map<string, string>();
+  const store = new Map<string, string>();
   return {
     get length() { return store.size; },
-    clear: () => { store = new Map(); },
+    clear: () => store.clear(),
     getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
-    key: (i: number) => [...store.keys()][i] ?? null,
+    key: (i: number) => Array.from(store.keys())[i] ?? null,
     removeItem: (k: string) => { store.delete(k); },
     setItem: (k: string, v: string) => { store.set(k, String(v)); },
   };
 }
 for (const key of ["localStorage", "sessionStorage"] as const) {
-  if (typeof globalThis[key] === "undefined") {
-    Object.defineProperty(globalThis, key,
-      { value: memStorage(), writable: true, configurable: true });
+  if (globalThis[key] == null) {
+    Object.defineProperty(globalThis, key, { configurable: true, value: memStorage() });
   }
 }
 

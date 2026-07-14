@@ -20,6 +20,7 @@ from app.models.system import (
     SysImportError,
     SysImportJob,
     SysRawFile,
+    SysRoleTemplate,
     SysUser,
 )
 
@@ -51,4 +52,5 @@ __all__ = [
     "SysRawFile",
     "SysAuditLog",
     "SysUser",
+    "SysRoleTemplate",
 ]
