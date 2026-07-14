@@ -50,11 +50,15 @@ def search(
     # (排除墓碑)——同一 URL 两种语义，事后溯源必须能区分
     record_access_log(ctx, "search", "parts", {"q": q_norm, "branch": branch})
     if branch == "resolver":
-        # 纯文本查询：近似解析（pg_trgm 召回 + 精排），结果单页带 score/match_reason
-        data = part_resolver.resolve(db, q_norm, limit=page_size, operated_by=role)
+        # 纯文本查询：近似解析（pg_trgm 召回 + 精排），结果单页带 part_id/score/match_reason。
+        # exact=True（统一搜索：查询与 PN/别名完全一致）→ items 只有唯一标准型号，前端据此
+        # 直开型号全景；相似候选降级到 similar_items 独立区域，不与精确结果混排。
+        data = part_resolver.resolve(db, q_norm, limit=page_size, operated_by=role,
+                                     include_similar=True)
         data = {"total": len(data["items"]), "page": 1, "page_size": page_size,
-                "items": data["items"], "low_confidence": data["low_confidence"],
-                "ambiguous": data["ambiguous"]}
+                "exact": data["exact"], "items": data["items"],
+                "similar_items": data["similar_items"],
+                "low_confidence": data["low_confidence"], "ambiguous": data["ambiguous"]}
     else:
         # 空查询浏览，或带结构化规格过滤：走 part_id 主口径的 search_parts（含 merged 墓碑排除）
         data = part_overview.search_parts(db, q_norm, page, page_size, ctx,
@@ -84,15 +88,19 @@ def part_categories(db: Session = Depends(get_db), _: str = Depends(current_role
 
 @router.get("/overview")
 def overview(
-    pn_std: str = Query(..., min_length=1),
+    pn_std: str | None = Query(None, min_length=1),
+    part_id: int | None = Query(None, ge=1, description="稳定深链主键（/parts?part_id=）；与 pn_std 二选一，同传时以 part_id 为准"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    record_access_log(ctx, "overview", "part", {"pn_std": pn_std})
-    data = part_overview.get_overview(db, pn_std, ctx)
+    if pn_std is None and part_id is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "pn_std 与 part_id 至少传一个")
+    record_access_log(ctx, "overview", "part", {"pn_std": pn_std, "part_id": part_id})
+    data = part_overview.get_overview(db, pn_std, ctx, part_id=part_id)
     if data is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"型号不存在: {pn_std}")
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            f"型号不存在: {pn_std if part_id is None else f'part_id={part_id}'}")
     return apply_field_visibility(data, ctx)
 
 

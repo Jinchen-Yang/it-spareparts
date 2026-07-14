@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app import config, security
 from app.services import inventory as inventory_service
+from app.services import part_resolver
 from app.services.query_filters import active_orders, col_matches_any, keyword_groups_or_substr
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
 from app.models.inquiry import FPartInquiry
@@ -51,24 +52,36 @@ def resolve_part(db: Session, pn_std: str) -> tuple[DimPart | None, str | None]:
         part = db.scalar(
             select(DimPart).where(func.lower(DimPart.pn_std) == pn_std.strip().lower())
             .order_by(DimPart.id))          # 大小写变体极罕见，仍确定性取行（不静默取任意行）
+    return _follow_merge_chain(db, part, origin=repr(pn_std))
+
+
+def resolve_part_by_id(db: Session, part_id: int) -> tuple[DimPart | None, str | None]:
+    """part_id → (part, redirected_from)。统一深链入口（/parts?part_id=）：
+    命中已合并墓碑时与 pn_std 路径同规则沿链取目标档案——旧链接（收藏/聊天记录里的
+    URL）在型号被合并后仍应打开存活档案，而不是 404。"""
+    return _follow_merge_chain(db, db.get(DimPart, part_id), origin=f"part_id={part_id}")
+
+
+def _follow_merge_chain(db: Session, part: DimPart | None,
+                        origin: str = "?") -> tuple[DimPart | None, str | None]:
     if part is None:
         return None, None
     redirected_from = None
     hops = 0
     while part.status == "merged" and part.merged_into_id is not None:
         if hops >= _MERGE_CHAIN_LIMIT:
-            # %r 转义控制字符，防用户控制的 pn_std 注入伪造日志行
+            # origin 已转义（repr/受控格式），防用户控制的 pn_std 注入伪造日志行
             _log.warning(
-                "merge chain limit reached resolving pn_std=%r (last=%r, depth=%d)",
-                pn_std, part.pn_std, hops)
+                "merge chain limit reached resolving %s (last=%r, depth=%d)",
+                origin, part.pn_std, hops)
             return None, None
         redirected_from = redirected_from or part.pn_std
         next_part = db.get(DimPart, part.merged_into_id)
         if next_part is None:
             # 链中节点缺失（断 FK / 数据异常）：当作 not-found 而非 500
             _log.warning(
-                "merge chain broken resolving pn_std=%r at hop %d (orphan merged_into_id=%d on %r)",
-                pn_std, hops, part.merged_into_id, part.pn_std)
+                "merge chain broken resolving %s at hop %d (orphan merged_into_id=%d on %r)",
+                origin, hops, part.merged_into_id, part.pn_std)
             return None, None
         part = next_part
         hops += 1
@@ -129,14 +142,20 @@ def search_parts(db: Session, q: str | None, page: int, page_size: int,
             .where(ProductSpec.part_id.in_([p.id for p in rows]))
         ).all():
             specs_by_part.setdefault(pid, {})[key] = val
+    # 池身份与 resolver 分支同源（统一搜索结构）：只带身份(group_id+name)，不带约束价
+    pools = part_resolver.pool_identity_map(db, [p.id for p in rows])
     return {
         "total": total, "page": page, "page_size": page_size,
         "items": [{
-            "id": p.id,   # part_id：池成员选择等写接口需要（resolver 分支无 id，取 id 请传 browse=true）
+            "id": p.id,   # 兼容旧消费方（池成员选择等）；统一键名是 part_id
+            "part_id": p.id,
             "pn_std": p.pn_std, "description": p.description, "brand": p.brand,
-            "category_major": p.category_major, "needs_review": p.needs_review,
+            "category": p.category_major, "category_major": p.category_major,
+            "needs_review": p.needs_review,
             "is_excluded": p.is_excluded,   # 与 resolver 分支返回形状对齐
             "specs": specs_by_part.get(p.id, {}),
+            "pool_group_id": pools.get(p.id, (None, None))[0],
+            "pool_name": pools.get(p.id, (None, None))[1],
         } for p in rows],
     }
 
@@ -545,13 +564,20 @@ def _inquiry_ref(db: Session, part_id: int, pn_std: str) -> dict:
             "last_money": _d(last), "count": row[2]}
 
 
-def get_overview(db: Session, pn_std: str,
-                 user_ctx: security.UserContext | None = None) -> dict | None:
-    part, redirected_from = resolve_part(db, pn_std)
+def get_overview(db: Session, pn_std: str | None,
+                 user_ctx: security.UserContext | None = None, *,
+                 part_id: int | None = None) -> dict | None:
+    """pn_std 与 part_id 二选一（同传以 part_id 为准——数字主键是统一深链身份，
+    pn_std 只是兼容入口）。返回的 part.id 供前端把 pn 深链改写成稳定 part_id 深链。"""
+    if part_id is not None:
+        part, redirected_from = resolve_part_by_id(db, part_id)
+    else:
+        part, redirected_from = resolve_part(db, pn_std)
     if part is None:
         return None
     return {
         "part": {
+            "id": part.id,
             "pn_std": part.pn_std, "description": part.description, "brand": part.brand,
             "category_major": part.category_major, "category_minor": part.category_minor,
             "unit": part.unit, "needs_review": part.needs_review,

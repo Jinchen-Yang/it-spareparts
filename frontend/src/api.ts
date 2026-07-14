@@ -397,6 +397,7 @@ export const batchApply = (part_ids: number[], fields?: string[]) =>
 
 export interface Overview {
   part: {
+    id: number;            // part_id：稳定深链主键（/parts?part_id=），前端据此回写 URL
     pn_std: string;
     description: string | null;
     brand: string | null;

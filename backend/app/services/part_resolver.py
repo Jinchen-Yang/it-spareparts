@@ -10,6 +10,11 @@ part_alias 在此从"只写不读"变为活数据：人工修订别名即刻影�
 整改 P3：召回排除 status='merged' 墓碑（与 search_parts 一致）。查询已合并型号的
 旧 pn 仍能命中——merge 会留下 pn_raw=旧pn→pn_std=目标 的 active 别名，走别名召回路
 重定向到目标，不靠墓碑本身。
+
+统一搜索（第②块，02311DYQ 案）：resolve() 是采购/销售/看板/型号全景共用的
+"文本→part_id"唯一出口。规则：PN/别名精确命中 → 只返回唯一标准型号（exact=True），
+相似候选降级到 similar_items 单独区域；无精确命中才走 前缀/包含/描述/模糊 排序。
+每条结果带统一结构：part_id / match_type / matched_text / score / 池身份(pool_group_id+pool_name)。
 """
 import re
 
@@ -21,7 +26,8 @@ from sqlalchemy.orm import Session
 
 from app import config
 from app.etl.cleaner import standardize_pn
-from app.models.dimensions import DimPart
+from app.models.dimensions import DimPart, PartAlias
+from app.models.inventory import PartPool, PartPoolMember
 from app.models.system import SysAuditLog
 from app.services.query_filters import col_matches_any, keyword_term_groups
 
@@ -33,7 +39,7 @@ _CAND_LIMIT = 60
 
 # 召回 SQL：四路 OR —— 主 token 相似(%)/词相似(<%)/双向包含 + 其余 token 包含 + 检索文档命中
 _PART_SQL = text("""
-SELECT p.pn_std, p.pn_compact, p.search_doc, p.description, p.brand,
+SELECT p.id AS part_id, p.pn_std, p.pn_compact, p.search_doc, p.description, p.brand,
        p.category_major, p.needs_review, p.is_excluded,
        CASE WHEN length(:main) >= 2
             THEN greatest(similarity(p.pn_compact, :main),
@@ -71,7 +77,8 @@ def _doc_recall(db, groups):
     hits = sum(sa_case((c, 1), else_=0) for c in conds)
     min_hits = n if n <= 3 else n - 1
     stmt = (
-        select(DimPart.pn_std, DimPart.pn_compact, DimPart.search_doc, DimPart.description,
+        select(DimPart.id.label("part_id"), DimPart.pn_std, DimPart.pn_compact,
+               DimPart.search_doc, DimPart.description,
                DimPart.brand, DimPart.category_major, DimPart.needs_review, DimPart.is_excluded,
                hits.label("hits"))
         .where(DimPart.status != "merged", hits >= min_hits)
@@ -125,7 +132,10 @@ def preprocess(query: str) -> tuple[dict, list[str]]:
     # 检索文档命中词：中文词 + 同义词扩展 + 其余字母数字 token；去 ILIKE 通配符防注入
     doc_terms = [t.replace("%", "").replace("_", "") for t in (cjk + syn + others)]
     doc_terms = [t for t in doc_terms if len(t) >= 2]
-    return {"main": main, "others": others, "cjk": cjk, "syn": syn,
+    # joined：整个查询压成一个 compact（"02311 DYQ"→"02311DYQ"）。空格/连字符把一个 PN
+    # 拆成多 token 时，靠它走"精确即唯一"车道；含中文的查询是描述语义，不参与。
+    joined = _STRIP.sub("", q.upper()) if not cjk else ""
+    return {"main": main, "others": others, "cjk": cjk, "syn": syn, "joined": joined,
             "coverage_terms": list(dict.fromkeys(cjk + syn + others))}, doc_terms
 
 
@@ -198,21 +208,93 @@ def _log_miss(db: Session, query: str, operated_by: str | None) -> None:
         db.rollback()
 
 
-def resolve(db: Session, query: str, limit: int = 10,
-            operated_by: str | None = None, log_miss: bool = True) -> dict:
-    """近似解析：返回 {"query", "items": [...], "low_confidence"}。
+def _exact_lookup(db: Session, main: str) -> list[dict]:
+    """PN/别名与查询 compact **完全一致**的非合并型号（统一搜索：精确即唯一）。
+    别名命中沿 pn_std 折叠到目标型号（merged 墓碑重定向天然生效）；同型号双路命中只留一条，
+    别名证据保留在 alias_raw。"""
+    found: dict[int, dict] = {}
+    for p in db.execute(select(DimPart).where(
+            DimPart.pn_compact == main, DimPart.status != "merged")).scalars():
+        found[p.id] = {"part": p, "alias_raw": None}
+    rows = db.execute(
+        select(PartAlias.pn_raw, DimPart)
+        .join(DimPart, DimPart.pn_std == PartAlias.pn_std)
+        .where(PartAlias.pn_compact == main, DimPart.status != "merged"))
+    for pn_raw, p in rows:
+        if p.id not in found:
+            found[p.id] = {"part": p, "alias_raw": pn_raw}
+    # 确定性排序：PN 直中优先于别名命中，同层按 pn_std——多精确歧义时展示顺序稳定
+    return sorted(found.values(),
+                  key=lambda h: (h["alias_raw"] is not None, h["part"].pn_std))
 
-    items 按 score 降序，含 match_reason（如 "PN相似0.67；PN包含匹配；命中'超微'"）。
-    零命中时落 sys_audit_log（action=search_miss）供治理回看。
-    log_miss=False：内部复用（如新建去重查重）不写 search_miss、不 commit——
-    避免污染治理工单、也避免在调用方事务中途 commit（见 master_edit.find_near_duplicates）。
-    """
-    ctx, doc_terms = preprocess(query)
-    if not ctx["main"] and not doc_terms:
-        # 纯符号/无有效 token（如 "!!!"、"---"）：早返回也要带全部键，
-        # 否则 /parts/search 与 _lookup_prices_bulk 无条件读 ambiguous 会 KeyError(500)
-        return {"query": query, "items": [], "low_confidence": True, "ambiguous": False}
 
+def _exact_item(hit: dict) -> dict:
+    p, alias_raw = hit["part"], hit["alias_raw"]
+    reasons = ["PN精确匹配"] if alias_raw is None else [f"别名命中({alias_raw[:40]})", "PN精确匹配"]
+    if p.needs_review:
+        reasons.append("PN待复核")
+    if p.is_excluded:
+        reasons.append("已治理排除")
+    return {"part_id": p.id, "pn_std": p.pn_std, "description": p.description,
+            "brand": p.brand, "category": p.category_major, "category_major": p.category_major,
+            "needs_review": bool(p.needs_review), "is_excluded": bool(p.is_excluded),
+            "match_type": "exact_pn" if alias_raw is None else "exact_alias",
+            "matched_text": p.pn_std if alias_raw is None else alias_raw,
+            "score": 1.0, "match_reason": "；".join(reasons)}
+
+
+def pool_identity_map(db: Session, part_ids: list[int]) -> dict[int, tuple[int, str]]:
+    """part_id → (pool_group_id, pool_name)，只看有效池。
+    "一个有效 PN 只属一个有效池"由 pool_catalog 写路保证；若脏数据多池并存，
+    取 group_id 最小者，保持确定性。池身份对登录用户全员可读（与 GET /pools 门一致），
+    不带任何约束价字段——价格治理数据仍走 data_pool_price_governance 权限桶。"""
+    ids = [i for i in part_ids if i]
+    if not ids:
+        return {}
+    rows = db.execute(
+        select(PartPoolMember.part_id, PartPool.group_id, PartPool.name)
+        .join(PartPool, PartPool.group_id == PartPoolMember.group_id)
+        .where(PartPoolMember.part_id.in_(ids), PartPool.status == "active")
+        .order_by(PartPoolMember.part_id, PartPool.group_id)).all()
+    out: dict[int, tuple[int, str]] = {}
+    for pid, gid, name in rows:
+        out.setdefault(pid, (gid, name))
+    return out
+
+
+def _attach_pool_identity(db: Session, items: list[dict]) -> None:
+    pools = pool_identity_map(db, [it.get("part_id") for it in items])
+    for it in items:
+        hit = pools.get(it.get("part_id"))
+        it["pool_group_id"] = hit[0] if hit else None
+        it["pool_name"] = hit[1] if hit else None
+
+
+def _match_meta(row: dict, ctx: dict, alias_hit: tuple[float, str] | None) -> tuple[str, str]:
+    """按最强证据分类 match_type + 给出命中文本 matched_text（库侧被命中的字符串）。
+    优先级：exact_pn > exact_alias > fuzzy_pn > alias > description > weak。"""
+    pc, main = row.get("pn_compact") or "", ctx["main"]
+    q_compact = ctx.get("joined") or main   # 整查询 compact（空格/连字符拆分后仍算精确）
+    pn_std = row.get("pn_std") or ""
+    if q_compact and pc == q_compact:
+        return "exact_pn", pn_std
+    if alias_hit and q_compact and _STRIP.sub("", alias_hit[1].upper()) == q_compact:
+        return "exact_alias", alias_hit[1]
+    sim = float(row.get("sim") or 0)
+    if alias_hit:
+        sim = max(sim, float(alias_hit[0] or 0))
+    if main and pc and ((len(main) >= 3 and main in pc) or (len(pc) >= 4 and pc in main)
+                        or sim >= 0.3):
+        return "fuzzy_pn", pn_std
+    if alias_hit:
+        return "alias", alias_hit[1]
+    if ctx.get("doc_hits", {}).get(pn_std):
+        return "description", row.get("description") or pn_std
+    return "weak", pn_std
+
+
+def _fuzzy_rank(db: Session, query: str, ctx: dict, doc_terms: list[str], limit: int) -> list[dict]:
+    """模糊召回 + 精排（原 resolve 主体）：返回排序、截断后的 items（不含池身份）。"""
     # 放宽 trigram 召回阈值（仅本事务）：长库值×短 token 时默认 0.3 偏紧
     db.execute(text("SET LOCAL pg_trgm.similarity_threshold = 0.25"))
     db.execute(text("SET LOCAL pg_trgm.word_similarity_threshold = 0.35"))
@@ -251,7 +333,8 @@ def resolve(db: Session, query: str, limit: int = 10,
             for p in db.execute(select(DimPart).where(
                     DimPart.pn_std.in_(missing), DimPart.status != "merged")).scalars():
                 cands[p.pn_std] = {
-                    "pn_std": p.pn_std, "pn_compact": p.pn_compact, "search_doc": p.search_doc,
+                    "part_id": p.id, "pn_std": p.pn_std, "pn_compact": p.pn_compact,
+                    "search_doc": p.search_doc,
                     "description": p.description, "brand": p.brand,
                     "category_major": p.category_major, "needs_review": p.needs_review,
                     "is_excluded": p.is_excluded, "sim": 0,
@@ -260,11 +343,14 @@ def resolve(db: Session, query: str, limit: int = 10,
     items = []
     for pn_std, row in cands.items():
         score, reason = _score(row, ctx, alias_hits.get(pn_std))
+        match_type, matched_text = _match_meta(row, ctx, alias_hits.get(pn_std))
         items.append({
-            "pn_std": pn_std, "description": row.get("description"),
-            "brand": row.get("brand"), "category_major": row.get("category_major"),
+            "part_id": row.get("part_id"), "pn_std": pn_std, "description": row.get("description"),
+            "brand": row.get("brand"), "category": row.get("category_major"),
+            "category_major": row.get("category_major"),
             "needs_review": bool(row.get("needs_review")),
             "is_excluded": bool(row.get("is_excluded")),
+            "match_type": match_type, "matched_text": matched_text,
             "score": score, "match_reason": reason,
         })
     items.sort(key=lambda x: (-x["score"], len(x["pn_std"]), x["pn_std"]))
@@ -291,18 +377,77 @@ def resolve(db: Session, query: str, limit: int = 10,
                     if lanes[b]:
                         mixed.append(lanes[b].pop(0))
             items = mixed + rest
-    items = items[:limit]
+    return items[:limit]
+
+
+_SIMILAR_LIMIT = 8   # exact 命中时"相似型号"区最多带几条（响应体量可控）
+
+
+def resolve(db: Session, query: str, limit: int = 10,
+            operated_by: str | None = None, log_miss: bool = True,
+            include_similar: bool = False) -> dict:
+    """统一解析：返回 {"query", "exact", "items", "similar_items", "low_confidence", "ambiguous"}。
+
+    items 按 score 降序，每条含 part_id（统一商品身份）/ match_type / matched_text /
+    pool_group_id / pool_name / match_reason（如 "PN相似0.67；PN包含匹配；命中'超微'"）。
+    **精确即唯一**（02311DYQ 案）：查询本身就是一个 PN（无中文/无其余 token）且与某型号
+    或别名的 compact 完全一致时，items 只有那唯一的标准型号（exact=True），trigram 相似
+    候选不再混入同等级结果；include_similar=True 时相似候选降级到 similar_items（供前端
+    "相似型号"独立区域，内部消费方默认不取、零额外开销）。
+    多个未合并型号同 compact（脏数据）或多个别名同写法指向不同型号 → 不短路，
+    走排序并标 ambiguous=True 要求消歧。
+    零命中时落 sys_audit_log（action=search_miss）供治理回看。
+    log_miss=False：内部复用（如新建去重查重）不写 search_miss、不 commit——
+    避免污染治理工单、也避免在调用方事务中途 commit（见 master_edit.find_near_duplicates）。
+    """
+    ctx, doc_terms = preprocess(query)
+    if not ctx["main"] and not doc_terms:
+        # 纯符号/无有效 token（如 "!!!"、"---"）：早返回也要带全部键，
+        # 否则 /parts/search 与 _lookup_prices_bulk 无条件读 ambiguous 会 KeyError(500)
+        return {"query": query, "exact": False, "items": [], "similar_items": [],
+                "low_confidence": True, "ambiguous": False}
+
+    # 精确即唯一短路：整查询压成一个 compact 后与 PN/别名完全一致（无中文——中文是
+    # 描述语义）。joined 车道让"02311 DYQ"/"02311-DYQ"这类空格/连字符拆分照样精确。
+    exact_hits: list[dict] = []
+    if ctx["joined"]:
+        exact_hits = _exact_lookup(db, ctx["joined"])
+    if len(exact_hits) == 1:
+        item = _exact_item(exact_hits[0])
+        similar: list[dict] = []
+        if include_similar:
+            fuzzy = _fuzzy_rank(db, query, ctx, doc_terms, limit)
+            similar = [it for it in fuzzy if it["part_id"] != item["part_id"]][:_SIMILAR_LIMIT]
+        _attach_pool_identity(db, [item] + similar)
+        return {"query": query, "exact": True, "items": [item], "similar_items": similar,
+                "low_confidence": False, "ambiguous": False}
+
+    items = _fuzzy_rank(db, query, ctx, doc_terms, limit)
+
+    # 多精确命中（脏数据同 compact / 多别名同写法）：全部精确目标统一置顶后标歧义。
+    # 常规召回按 compact 包含几乎必中，但为防"歧义但目标缺席"的不可判局面，统一用
+    # _exact_item 重建这几条（同时保证 match_type=exact_* 口径一致）。
+    if len(exact_hits) >= 2:
+        exact_ids = {h["part"].id for h in exact_hits}
+        tail = [it for it in items if it["part_id"] not in exact_ids]
+        items = ([_exact_item(h) for h in exact_hits] + tail)[:limit]
 
     if not items and log_miss:
         _log_miss(db, query, operated_by)
     low_conf = (not items) or items[0]["score"] < config.RESOLVE_LOW_CONFIDENCE
 
     # 歧义检测：多候选并列高分 = 口头型号对应多个规格变体（如 V100 → 16G/32G/PCIE/NVLINK）。
-    # 例外：top1 精确匹配（用户敲了完整 PN）不算歧义。
+    # 例外：top1 精确匹配（用户敲了完整 PN）不算歧义——但**多个型号/别名同 compact 精确命中**
+    # 是真歧义，必须反问（此时不走"精确即唯一"短路）。
     ambiguous = False
-    if len(items) >= 2 and not low_conf and "PN精确匹配" not in items[0]["match_reason"]:
+    if len(exact_hits) >= 2:
+        ambiguous = True
+        low_conf = False   # 精确命中不算低置信，只是需要人工消歧
+    elif (len(items) >= 2 and not low_conf
+          and items[0]["match_type"] not in ("exact_pn", "exact_alias")):
         near = [it for it in items if it["score"] >= max(items[0]["score"] * 0.85, 0.3)]
         ambiguous = len(near) >= 2
 
-    return {"query": query, "items": items, "low_confidence": low_conf,
-            "ambiguous": ambiguous}
+    _attach_pool_identity(db, items)
+    return {"query": query, "exact": False, "items": items, "similar_items": [],
+            "low_confidence": low_conf, "ambiguous": ambiguous}

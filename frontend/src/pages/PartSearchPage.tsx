@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Input, Card, Descriptions, Tag, Row, Col, Statistic, Empty, message, Space, Button,
   Select, InputNumber, Alert, Table, Popconfirm,
@@ -8,7 +9,9 @@ import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import api from "../api";
-import type { Overview, PartHit, PurchaseRow, SalesRow, InventoryRow } from "../api";
+import type { Overview, PurchaseRow, SalesRow, InventoryRow } from "../api";
+import { unifiedSearch, fetchOverview } from "../api/search";
+import type { UnifiedSearchItem, UnifiedSearchResp } from "../api/search";
 import { COLORS } from "../theme";
 import { money, pct, splitByFlag, splitFixed } from "../utils/format";
 import { useTaxBasis, TaxMoney } from "../context/TaxBasis";
@@ -26,8 +29,21 @@ const canSee = (key: string) => {
 // 替代料维护（增/删）开放给 管理员 + 采购；其余角色只读不显示编辑控件
 const canEditSubs = () => ["admin", "purchaser"].includes(localStorage.getItem("role") || "");
 
+/**
+ * 型号查询：URL 驱动（与采购三页同范式）——
+ *   /parts?q=<查询>            搜索
+ *   /parts?part_id=<ID>        稳定深链：直开该型号全景（刷新/前进/后退/分享均保持）
+ *   /parts?pn=<PN>             兼容入口：按 PN 解析后自动改写成 part_id 深链
+ * 精确命中（exact）唯一主结果自动打开全景，相似候选降级到"相似型号"独立区域。
+ */
 export default function PartSearchPage() {
-  const [hits, setHits] = useState<PartHit[]>([]);
+  const [sp, setSp] = useSearchParams();
+  const urlQ = sp.get("q") || "";
+  const urlPartId = sp.get("part_id");
+  const urlPn = sp.get("pn");
+
+  const [qInput, setQInput] = useState(urlQ);
+  const [resp, setResp] = useState<UnifiedSearchResp | null>(null);
   const [searching, setSearching] = useState(false);
   const [ov, setOv] = useState<Overview | null>(null);
   const [loadingOv, setLoadingOv] = useState(false);
@@ -35,10 +51,11 @@ export default function PartSearchPage() {
   // 替代料卡片折叠（记忆本机）
   const [subsOpen, setSubsOpen] = useState(() => localStorage.getItem("ps_subs_open") !== "0");
   const toggleSubs = () => setSubsOpen((o) => { localStorage.setItem("ps_subs_open", o ? "0" : "1"); return !o; });
-  const [lastQ, setLastQ] = useState("");
-  const [lastPn, setLastPn] = useState("");   // 用于全景加载失败时的"重试"
   const [error, setError] = useState<string | null>(null);
-  // 结构化规格过滤（整改 P2：硬盘容量/接口等条件查询）
+  // 代次守卫：慢响应不得覆盖新请求的结果（与采购页 loadSeqRef 同范式）
+  const searchSeq = useRef(0);
+  const ovSeq = useRef(0);
+  // 结构化规格过滤（整改 P2：硬盘容量/接口等条件查询）——本地态，属"筛选浏览"不属深链
   const [partType, setPartType] = useState<string | undefined>(undefined);
   const [iface, setIface] = useState<string | undefined>(undefined);
   const [capMin, setCapMin] = useState<number | null>(null);
@@ -56,50 +73,110 @@ export default function PartSearchPage() {
   const canProfit = canSee("data_profit");
   const { basis } = useTaxBasis();
 
-  const doSearch = async (q: string, override?: Record<string, unknown>) => {
-    const hasSpec = partType || iface || capMin != null || capMax != null || catMajor || catMinor || override;
-    if (!q.trim() && !hasSpec) return;
+  /** URL 增量更新：push 进历史（深链/后退语义），replace 用于精确命中自动选中等改写 */
+  const patchUrl = (next: Record<string, string | undefined>, replace = false) => {
+    setSp((prev) => {
+      const merged = new URLSearchParams(prev);
+      for (const [k, v] of Object.entries(next)) {
+        if (v === undefined || v === "") merged.delete(k);
+        else merged.set(k, v);
+      }
+      return merged;
+    }, { replace });
+  };
+
+  const runSearch = async (q: string, filters?: Record<string, unknown>) => {
+    const seq = ++searchSeq.current;
     setSearching(true);
-    setLastQ(q);
     setError(null);
     try {
-      const { data } = await api.get("/parts/search", {
-        params: {
-          q: q.trim() || undefined, page_size: 20,
-          part_type: partType, interface: iface,
-          capacity_min: capMin ?? undefined, capacity_max: capMax ?? undefined,
-          category_major: catMajor, category_minor: catMinor,
-          ...(override || {}),
-        },
-      });
-      setHits(data.items);
+      const data = await unifiedSearch(q, { pageSize: 20, filters: filters as any });
+      if (seq !== searchSeq.current) return;   // 已有更新的搜索在跑
+      setResp(data);
       if (data.items.length === 0) message.info("没有匹配的型号");
+      // 精确即唯一：自动打开唯一主结果的全景（replace 不额外堆历史，后退直接回搜索前）
+      if (data.exact && data.items[0]?.part_id && !sp.get("part_id")) {
+        patchUrl({ part_id: String(data.items[0].part_id), pn: undefined }, true);
+      }
     } catch (e) {
-      setHits([]);
+      if (seq !== searchSeq.current) return;
+      setResp(null);
       const msg = errMsg(e);
       setError(msg);
       message.error(msg);
     } finally {
-      setSearching(false);
+      if (seq === searchSeq.current) setSearching(false);
     }
   };
 
-  const openOverview = async (pn: string) => {
+  // URL q → 搜索（刷新/前进/后退都从这里重放）
+  useEffect(() => {
+    setQInput(urlQ);
+    if (urlQ.trim()) runSearch(urlQ);
+    else setResp(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlQ]);
+
+  const loadOverview = async (key: { part_id: number } | { pn_std: string }) => {
+    const seq = ++ovSeq.current;
     setLoadingOv(true);
-    setLastPn(pn);
     setError(null);
     try {
-      const { data } = await api.get("/parts/overview", { params: { pn_std: pn } });
+      const data = await fetchOverview(key);
+      if (seq !== ovSeq.current) return;
       setOv(data);
+      // pn 兼容入口 / 旧深链：统一改写成稳定 part_id 深链（replace 不堆历史）
+      if (data.part?.id && String(data.part.id) !== sp.get("part_id")) {
+        patchUrl({ part_id: String(data.part.id), pn: undefined }, true);
+      }
     } catch (e) {
+      if (seq !== ovSeq.current) return;
       setOv(null);
       const msg = errMsg(e);
       setError(msg);
       message.error(msg);
     } finally {
-      setLoadingOv(false);
+      if (seq === ovSeq.current) setLoadingOv(false);
     }
   };
+
+  // URL part_id / pn → 型号全景（稳定深链；后退/前进保持选中型号）
+  useEffect(() => {
+    if (urlPartId) {
+      const idNum = Number(urlPartId);
+      if (!Number.isFinite(idNum) || idNum <= 0) { setOv(null); return; }
+      if (ov?.part?.id === idNum) return;        // 已加载（pn 改写/后退复用），不重复拉
+      loadOverview({ part_id: idNum });
+    } else if (urlPn) {
+      loadOverview({ pn_std: urlPn });
+    } else {
+      setOv(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlPartId, urlPn]);
+
+  const onSearch = (q: string) => {
+    if (!q.trim()) return;
+    // 新搜索：q 入 URL（push，一次搜索一条历史），清掉旧选中
+    patchUrl({ q: q.trim(), part_id: undefined, pn: undefined });
+  };
+
+  // 按品类/规格筛选：结构化浏览（后端 structured 分支），结果进同一张结果表
+  const doFilterSearch = () => {
+    runSearch(qInput, {
+      part_type: partType, interface: iface,
+      capacity_min: capMin ?? undefined, capacity_max: capMax ?? undefined,
+      category_major: catMajor, category_minor: catMinor,
+    });
+  };
+
+  /** 点击结果行：part_id 深链（push 进历史，后退回到列表） */
+  const openPart = (it: UnifiedSearchItem) => {
+    if (it.part_id) patchUrl({ part_id: String(it.part_id), pn: undefined });
+    else patchUrl({ pn: it.pn_std, part_id: undefined });   // 极端兜底：无 id 走 pn 兼容
+  };
+  /** 替代料等只有 PN 的入口：pn 兼容深链（加载后自动改写成 part_id） */
+  const openByPn = (pn: string) => patchUrl({ pn, part_id: undefined });
 
   const addSubstitute = async () => {
     if (!ov || !subPn.trim()) return;
@@ -107,7 +184,7 @@ export default function PartSearchPage() {
       const { data } = await api.post("/substitutes", { pn_a: ov.part.pn_std, pn_b: subPn.trim() });
       message.success(data.created ? "已添加替代料" : "该替代关系已存在");
       setSubPn("");
-      openOverview(ov.part.pn_std);
+      loadOverview({ part_id: ov.part.id });
     } catch (e: any) {
       message.error(e?.response?.data?.detail || "添加失败（需管理员或采购权限）");
     }
@@ -118,17 +195,17 @@ export default function PartSearchPage() {
     try {
       const { data } = await api.delete("/substitutes", { params: { pn_a: ov.part.pn_std, pn_b: pnB } });
       message.success(data.deleted ? "已解除替代关系" : "未找到该直连替代关系");
-      openOverview(ov.part.pn_std);
+      loadOverview({ part_id: ov.part.id });
     } catch (e: any) {
       message.error(e?.response?.data?.detail || "解除失败（需管理员或采购权限）");
     }
   };
 
-  const hitCols: ColumnsType<PartHit> = [
+  const hitCols: ColumnsType<UnifiedSearchItem> = [
     {
-      title: "型号 (PN)", dataIndex: "pn_std",
+      title: "型号 (PN)", dataIndex: "pn_std", width: 220,
       render: (v, r) => (
-        <a onClick={() => openOverview(v)}>
+        <a onClick={() => openPart(r)}>
           {v} {r.needs_review && <Tag color="orange">待复核</Tag>}
           {r.is_excluded && <Tag color="red">已排除</Tag>}
         </a>
@@ -138,9 +215,12 @@ export default function PartSearchPage() {
       title: "匹配度", dataIndex: "score", width: 150,
       render: (v: number | undefined, r) =>
         v == null ? "-" : (
-          <span title={r.match_reason}>
-            <Tag color={v >= 0.6 ? "green" : v >= 0.35 ? "blue" : "default"}>
-              {(v * 100).toFixed(0)}%
+          <span title={`${r.match_reason || ""}${r.matched_text ? `｜命中：${r.matched_text}` : ""}`}>
+            <Tag color={r.match_type === "exact_pn" || r.match_type === "exact_alias"
+              ? "green" : v >= 0.6 ? "cyan" : v >= 0.35 ? "blue" : "default"}>
+              {r.match_type === "exact_pn" ? "精确"
+                : r.match_type === "exact_alias" ? "别名精确"
+                : `${(v * 100).toFixed(0)}%`}
             </Tag>
             <span style={{ color: "#999", fontSize: 12 }}>
               {(r.match_reason || "").split("；")[0]}
@@ -151,6 +231,10 @@ export default function PartSearchPage() {
     { title: "描述", dataIndex: "description", ellipsis: true },
     { title: "品牌", dataIndex: "brand", width: 140 },
     { title: "品类", dataIndex: "category_major", width: 140 },
+    { title: "互通池", dataIndex: "pool_name", width: 150, ellipsis: true,
+      render: (v: string | null, r) => v
+        ? <Tag color="geekblue" title={`池 ID ${r.pool_group_id}`}>{v}</Tag>
+        : <span style={{ color: "#bbb" }}>-</span> },
     { title: "规格", key: "specs", width: 240,
       render: (_, r: any) => {
         const s = r.specs || {};
@@ -202,6 +286,9 @@ export default function PartSearchPage() {
       render: (_: unknown, r: InventoryRow) => money(splitFixed(r.inventory_value, "ex").ex) }] as ColumnsType<InventoryRow> : []),
   ];
 
+  const exactItem = resp?.exact ? resp.items[0] : undefined;
+  const similar = resp?.similar_items || [];
+
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <PageHeader
@@ -214,7 +301,9 @@ export default function PartSearchPage() {
           enterButton="搜索"
           size="large"
           loading={searching}
-          onSearch={(q) => doSearch(q)}
+          value={qInput}
+          onChange={(e) => setQInput(e.target.value)}
+          onSearch={onSearch}
           allowClear
         />
         <Space style={{ marginTop: 12 }} wrap>
@@ -230,15 +319,35 @@ export default function PartSearchPage() {
             options={["SAS", "SATA", "NVME", "FC", "SCSI"].map((v) => ({ value: v }))} />
           <InputNumber placeholder="容量≥(GB)" value={capMin} onChange={setCapMin} style={{ width: 120 }} min={0} />
           <InputNumber placeholder="容量≤(GB)" value={capMax} onChange={setCapMax} style={{ width: 120 }} min={0} />
-          <Button type="primary" ghost onClick={() => doSearch(lastQ, {})} loading={searching}>按品类/规格筛选</Button>
+          <Button type="primary" ghost onClick={doFilterSearch} loading={searching}>按品类/规格筛选</Button>
         </Space>
       </Card>
 
-      {hits.length > 0 && (
-        <Card title="搜索结果" size="small">
-          <ResizableTable storageKey="search-hits" rowKey="pn_std" size="small" columns={hitCols} dataSource={hits} pagination={{ pageSize: 10 }} />
-        </Card>
+      {resp?.ambiguous && (
+        <Alert
+          type="warning" showIcon message="该写法命中多个型号（歧义）"
+          description="同一写法对应多个未合并型号或多个别名指向不同目标，请人工从下表选择正确型号；如属重复数据，请在主数据管理中合并治理。"
+        />
       )}
+
+      {exactItem ? (
+        <Card title="精确匹配" size="small">
+          <Space wrap size={12} style={{ fontSize: 14 }}>
+            <a onClick={() => openPart(exactItem)} style={{ fontFamily: "monospace", fontWeight: 600 }}>
+              {exactItem.pn_std}
+            </a>
+            <Tag color="green">{exactItem.match_type === "exact_alias"
+              ? `别名精确：${exactItem.matched_text}` : "PN 精确匹配"}</Tag>
+            {exactItem.pool_name && <Tag color="geekblue">互通池：{exactItem.pool_name}</Tag>}
+            <span style={{ color: "var(--mb-text-3)" }}>{exactItem.description || ""}</span>
+          </Space>
+        </Card>
+      ) : (resp && resp.items.length > 0 && (
+        <Card title="搜索结果" size="small">
+          <ResizableTable storageKey="search-hits" rowKey="pn_std" size="small" columns={hitCols}
+            dataSource={resp.items} pagination={{ pageSize: 10 }} scroll={{ x: 900 }} />
+        </Card>
+      ))}
 
       {ov ? (
         <Card loading={loadingOv} title={<>型号全景：<b>{ov.part.pn_std}</b>
@@ -358,7 +467,7 @@ export default function PartSearchPage() {
                   columns={[
                     { title: "通用号 (PN)", dataIndex: "pn_std", width: 200,
                       render: (v: string) => (
-                        <a onClick={() => openOverview(v)} style={{ fontFamily: "monospace", fontSize: 12.5 }}>{v}</a>
+                        <a onClick={() => openByPn(v)} style={{ fontFamily: "monospace", fontSize: 12.5 }}>{v}</a>
                       ) },
                     { title: "关系", key: "rel", width: 170,
                       render: (_, s) => s.via
@@ -413,13 +522,25 @@ export default function PartSearchPage() {
         <Alert
           type="error" showIcon message="加载失败" description={error}
           action={
-            <Button size="small" onClick={() => (lastPn ? openOverview(lastPn) : doSearch(lastQ))}>
+            <Button size="small" onClick={() => {
+              if (urlPartId) loadOverview({ part_id: Number(urlPartId) });
+              else if (urlPn) loadOverview({ pn_std: urlPn });
+              else if (urlQ) runSearch(urlQ);
+            }}>
               重试
             </Button>
           }
         />
       ) : (
-        <Empty description={searching ? "搜索中…" : "搜索并点击型号查看全景"} />
+        <Empty description={searching || loadingOv ? "加载中…" : "搜索并点击型号查看全景"} />
+      )}
+
+      {exactItem && similar.length > 0 && (
+        <Card size="small" title={<span>相似型号 <span style={{ fontWeight: 400, fontSize: 12.5, color: "var(--mb-text-3)" }}>
+          非精确命中，仅供参考（如要找的不是 {exactItem.pn_std}）</span></span>}>
+          <ResizableTable storageKey="search-similar" rowKey="pn_std" size="small" columns={hitCols}
+            dataSource={similar} pagination={false} scroll={{ x: 900 }} />
+        </Card>
       )}
     </Space>
   );
