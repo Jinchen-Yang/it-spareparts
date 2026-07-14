@@ -30,6 +30,12 @@ export default defineConfig({
           if (/node_modules\/(react|react-dom|react-router|react-router-dom|scheduler)\//.test(id)) {
             return "vendor-react";
           }
+          // echarts/zrender 独立成 chunk：体积大（gzip ~200KB 量级）且只有看板类
+          // 页面用到，跟随首个引用它的懒加载页面按需下载，绝不进首屏 entry。
+          // 当前无生产引用（图表组件仅 chart-demo/测试引用），此规则为集成期预置。
+          if (/node_modules\/(echarts|zrender)\//.test(id)) {
+            return "vendor-echarts";
+          }
           return undefined;
         },
       },
