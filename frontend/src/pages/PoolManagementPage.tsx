@@ -15,6 +15,12 @@ import {
 const PAGE_SIZE = 20;
 const MIN_MEMBERS = 2;   // 《互通PN池》核心规则5：有效池至少两个 PN（后端同规则兜底）
 type StatusFilter = "active" | "archived" | "all";
+type DrawerMode = null | "create" | "edit";
+interface DrawerRequestContext {
+  generation: number;
+  mode: DrawerMode;
+  groupId: number | null;
+}
 
 const SOURCE_LABEL: Record<string, string> = { manual: "人工", legacy_generated: "历史自动池" };
 const BASIS_OPTIONS = [{ label: "未税", value: "ex_tax" }, { label: "含税", value: "inc_tax" }];
@@ -72,28 +78,44 @@ export default function PoolManagementPage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
+  const listGeneration = useRef(0);
+  const listView = useRef<{ query: string; status: StatusFilter; page: number }>({
+    query: "", status: "active", page: 1,
+  });
 
   const load = async (query = q, status = statusFilter, p = page) => {
+    const generation = ++listGeneration.current;
+    listView.current = { query, status, page: p };
     setLoading(true);
     try {
       const { data } = await listPnPools({
         q: query.trim() || undefined, status, page: p, page_size: PAGE_SIZE,
       });
+      if (generation !== listGeneration.current) return;
       setRows(data.items || []);
       setTotal(data.total || 0);
       setPage(data.page || p);
     } catch (e: any) {
+      if (generation !== listGeneration.current) return;
       message.error(e?.response?.data?.detail || "池列表加载失败");
     } finally {
-      setLoading(false);
+      if (generation === listGeneration.current) setLoading(false);
     }
   };
-  useEffect(() => { load("", "active", 1); }, []);
+  const reloadCurrentList = () => {
+    const current = listView.current;
+    return load(current.query, current.status, current.page);
+  };
+  useEffect(() => {
+    load("", "active", 1);
+    return () => { listGeneration.current += 1; };
+  }, []);
 
   // ---- 抽屉（create / edit 共用同一套表单态）----
-  const [mode, setMode] = useState<null | "create" | "edit">(null);
+  const [mode, setMode] = useState<DrawerMode>(null);
   const [detail, setDetail] = useState<PnPoolDetail | null>(null);   // edit 基线（diff 与 version 来源）
   const [detailLoading, setDetailLoading] = useState(false);
+  const drawerContext = useRef<DrawerRequestContext>({ generation: 0, mode: null, groupId: null });
 
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -111,6 +133,45 @@ export default function PoolManagementPage() {
   const [savingMembers, setSavingMembers] = useState(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
   const [creating, setCreating] = useState(false);
+
+  // 成员搜索也属于抽屉会话；切池、关闭或转新建时，旧搜索结果不得落入新表单。
+  const [fetching, setFetching] = useState(false);
+  const searchTimer = useRef<number>();
+  const searchGen = useRef(0);
+
+  const beginDrawerContext = (nextMode: DrawerMode, groupId: number | null) => {
+    const next: DrawerRequestContext = {
+      generation: drawerContext.current.generation + 1,
+      mode: nextMode,
+      groupId,
+    };
+    drawerContext.current = next;
+    window.clearTimeout(searchTimer.current);
+    searchGen.current += 1;
+    setFetching(false);
+    setDetailLoading(false);
+    // 旧会话的写请求即使稍后完成，也不能控制新抽屉的 loading 状态。
+    setSavingInfo(false);
+    setSavingMembers(false);
+    setSavingPolicy(false);
+    setCreating(false);
+    return next;
+  };
+
+  const isDrawerContextCurrent = (ctx: DrawerRequestContext) => {
+    const current = drawerContext.current;
+    return current.generation === ctx.generation
+      && current.mode === ctx.mode
+      && current.groupId === ctx.groupId;
+  };
+
+  const isPoolResponseCurrent = (ctx: DrawerRequestContext, responseGroupId: number) =>
+    ctx.groupId === responseGroupId && isDrawerContextCurrent(ctx);
+
+  const currentEditContext = (groupId: number) => {
+    const current = drawerContext.current;
+    return current.mode === "edit" && current.groupId === groupId ? { ...current } : null;
+  };
 
   // 表单填充：edit 打开 / 409 后重拉详情时同步 version 与字段
   const hydrate = (d: PnPoolDetail) => {
@@ -132,6 +193,7 @@ export default function PoolManagementPage() {
   };
 
   const openCreate = () => {
+    beginDrawerContext("create", null);
     setDetail(null);
     setName(""); setDescription(""); setMemberIds([]); setMemberOptions([]); setSearchOptions([]);
     setPurchaseValue(null); setPurchaseBasis("ex_tax");
@@ -141,32 +203,38 @@ export default function PoolManagementPage() {
   };
 
   const openEdit = async (groupId: number) => {
+    const ctx = beginDrawerContext("edit", groupId);
     setMode("edit");
     setDetail(null);
     setDetailLoading(true);
     try {
       const { data } = await getPnPool(groupId);
+      if (!isPoolResponseCurrent(ctx, data.group_id)) return;
       hydrate(data);
     } catch (e: any) {
+      if (!isDrawerContextCurrent(ctx)) return;
       message.error(e?.response?.data?.detail || "池详情加载失败");
+      beginDrawerContext(null, null);
       setMode(null);
+      setDetail(null);
     } finally {
-      setDetailLoading(false);
+      if (isDrawerContextCurrent(ctx)) setDetailLoading(false);
     }
   };
 
-  const closeDrawer = () => { setMode(null); setDetail(null); };
+  const closeDrawer = () => {
+    beginDrawerContext(null, null);
+    setMode(null);
+    setDetail(null);
+  };
 
   // ---- 成员远程搜索（防抖 + 代次守卫；browse=true 分支返回 part id）----
-  const [fetching, setFetching] = useState(false);
-  const searchTimer = useRef<number>();
-  const searchGen = useRef(0);
   const onMemberSearch = (kw: string) => {
     window.clearTimeout(searchTimer.current);
+    const gen = ++searchGen.current;
     const key = kw.trim();
-    if (!key) { setSearchOptions([]); return; }
+    if (!key) { setSearchOptions([]); setFetching(false); return; }
     searchTimer.current = window.setTimeout(async () => {
-      const gen = ++searchGen.current;
       setFetching(true);
       try {
         const { data } = await searchParts(key, 1, 20, true);
@@ -179,7 +247,13 @@ export default function PoolManagementPage() {
       }
     }, 300);
   };
-  useEffect(() => () => window.clearTimeout(searchTimer.current), []);
+  useEffect(() => () => {
+    window.clearTimeout(searchTimer.current);
+    searchGen.current += 1;
+    drawerContext.current = {
+      generation: drawerContext.current.generation + 1, mode: null, groupId: null,
+    };
+  }, []);
 
   // 下拉选项 = 已选成员标签 + 搜索结果（去重，保证已选项标签不因搜索词变化而丢失）
   const mergedOptions = useMemo(() => {
@@ -243,9 +317,11 @@ export default function PoolManagementPage() {
   // 或失败时的原版本）才允许"只换基线、保留用户输入"；出现非预期的版本推进 = 他人
   // 并发修改——必须整表单回填并明确提示。否则"旧表单 × 新版本号"的分裂态会让下一次
   // 保存无冲突地滚回他人写入，击穿乐观锁"绝不静默覆盖"的承诺。
-  const refreshBaseline = async (groupId: number, expectedVersion: number) => {
+  const refreshBaseline = async (ctx: DrawerRequestContext, expectedVersion: number) => {
+    if (ctx.groupId == null || !isDrawerContextCurrent(ctx)) return;
     try {
-      const { data } = await getPnPool(groupId);
+      const { data } = await getPnPool(ctx.groupId);
+      if (!isPoolResponseCurrent(ctx, data.group_id)) return;
       if (data.version !== expectedVersion || data.status !== "active") {
         hydrate(data);
         message.warning("该池刚被他人同时修改，已重新加载最新数据，请确认后再继续编辑");
@@ -255,28 +331,35 @@ export default function PoolManagementPage() {
     } catch { /* 拉不到就保持现状，用户可关闭抽屉重开 */ }
   };
 
-  const handleSaveError = async (e: any, fallback: string) => {
+  const handleSaveError = async (
+    ctx: DrawerRequestContext, expectedVersion: number, e: any, fallback: string,
+  ) => {
+    if (ctx.groupId == null || !isDrawerContextCurrent(ctx)) {
+      await reloadCurrentList();
+      return;
+    }
     const isConflict = e?.response?.status === 409;
     message.error(e?.response?.data?.detail
       || (isConflict ? "保存冲突：该池刚被他人修改，已重新加载最新数据" : fallback));
-    if (detail) {
-      if (isConflict) {
-        // 409：他人已改，整表单回填最新值
-        try {
-          const { data } = await getPnPool(detail.group_id);
-          hydrate(data);
-        } catch { /* 拉不到就保持现状 */ }
-      } else {
-        // 其它错误：本次保存未生效，预期版本不变；若版本仍被推进说明有并发修改
-        await refreshBaseline(detail.group_id, detail.version);
-      }
+    if (isConflict) {
+      // 409：他人已改，整表单回填最新值；跨池/已关闭时旧响应直接丢弃。
+      try {
+        const { data } = await getPnPool(ctx.groupId);
+        if (isPoolResponseCurrent(ctx, data.group_id)) hydrate(data);
+      } catch { /* 拉不到就保持现状 */ }
+    } else {
+      // 其它错误：本次保存未生效，预期版本不变；若版本仍被推进说明有并发修改
+      await refreshBaseline(ctx, expectedVersion);
     }
-    load(q, statusFilter, page);
+    await reloadCurrentList();
   };
 
   // ---- 三个独立保存动作：每个按钮恰好一个请求，成功/失败独立呈现 ----
   const saveInfo = async () => {
     if (!detail) return;
+    const ctx = currentEditContext(detail.group_id);
+    if (!ctx) return;
+    const expectedVersion = detail.version;
     if (!name.trim()) { message.warning("请输入池名称"); return; }
     setSavingInfo(true);
     try {
@@ -288,18 +371,25 @@ export default function PoolManagementPage() {
         ...(descChanged ? { description: description.trim() || null } : {}),
         note: note.trim() || null,
       });
+      if (!isPoolResponseCurrent(ctx, data.group_id)) {
+        await reloadCurrentList();
+        return;
+      }
       message.success("基本信息已保存");
-      await refreshBaseline(detail.group_id, data.version);
-      load(q, statusFilter, page);
+      await refreshBaseline(ctx, data.version);
+      await reloadCurrentList();
     } catch (e: any) {
-      await handleSaveError(e, "基本信息保存失败");
+      await handleSaveError(ctx, expectedVersion, e, "基本信息保存失败");
     } finally {
-      setSavingInfo(false);
+      if (isDrawerContextCurrent(ctx)) setSavingInfo(false);
     }
   };
 
   const saveMembers = async () => {
     if (!detail) return;
+    const ctx = currentEditContext(detail.group_id);
+    if (!ctx) return;
+    const expectedVersion = detail.version;
     if (memberIds.length < MIN_MEMBERS) {
       message.warning(`有效池至少包含 ${MIN_MEMBERS} 个 PN`);
       return;
@@ -311,33 +401,46 @@ export default function PoolManagementPage() {
         add_part_ids: memberDiff.add, remove_part_ids: memberDiff.remove,
         note: note.trim() || null,
       });
+      if (!isPoolResponseCurrent(ctx, data.group_id)) {
+        await reloadCurrentList();
+        return;
+      }
       message.success("成员变更已保存");
-      await refreshBaseline(detail.group_id, data.version);
-      load(q, statusFilter, page);
+      await refreshBaseline(ctx, data.version);
+      await reloadCurrentList();
     } catch (e: any) {
-      await handleSaveError(e, "成员保存失败");
+      await handleSaveError(ctx, expectedVersion, e, "成员保存失败");
     } finally {
-      setSavingMembers(false);
+      if (isDrawerContextCurrent(ctx)) setSavingMembers(false);
     }
   };
 
   const savePolicy = async () => {
     if (!detail) return;
+    const ctx = currentEditContext(detail.group_id);
+    if (!ctx) return;
+    const expectedVersion = detail.version;
     setSavingPolicy(true);
     try {
       const { data } = await setPnPoolPolicy(detail.group_id, policyBody());
+      if (!isPoolResponseCurrent(ctx, data.group_id)) {
+        await reloadCurrentList();
+        return;
+      }
       message.success("约束价已保存");
-      await refreshBaseline(detail.group_id, data.version);
-      load(q, statusFilter, page);
+      await refreshBaseline(ctx, data.version);
+      await reloadCurrentList();
     } catch (e: any) {
-      await handleSaveError(e, "约束价保存失败");
+      await handleSaveError(ctx, expectedVersion, e, "约束价保存失败");
     } finally {
-      setSavingPolicy(false);
+      if (isDrawerContextCurrent(ctx)) setSavingPolicy(false);
     }
   };
 
   // 新建 = 单个 POST（名称/说明/成员一个事务）；约束价创建后在编辑抽屉里单独设置
   const create = async () => {
+    const ctx = { ...drawerContext.current };
+    if (ctx.mode !== "create") return;
     if (!name.trim()) { message.warning("请输入池名称"); return; }
     if (memberIds.length < MIN_MEMBERS) {
       message.warning(`有效池至少包含 ${MIN_MEMBERS} 个 PN`);
@@ -349,18 +452,23 @@ export default function PoolManagementPage() {
         name: name.trim(), description: description.trim() || null,
         member_part_ids: memberIds, note: note.trim() || null,
       });
+      await reloadCurrentList();
+      if (!isDrawerContextCurrent(ctx)) return;
       message.success(canSetPolicy ? "池已创建；可继续设置约束价" : "池已创建");
-      load(q, statusFilter, 1);
       if (canSetPolicy) {
         await openEdit(created.group_id);   // 顺手设约束价：进入编辑抽屉（独立的保存动作）
       } else {
         closeDrawer();
       }
     } catch (e: any) {
+      if (!isDrawerContextCurrent(ctx)) {
+        await reloadCurrentList();
+        return;
+      }
       message.error(e?.response?.data?.detail || "建池失败");
-      load(q, statusFilter, page);
+      await reloadCurrentList();
     } finally {
-      setCreating(false);
+      if (isDrawerContextCurrent(ctx)) setCreating(false);
     }
   };
 
@@ -373,7 +481,7 @@ export default function PoolManagementPage() {
     } catch (e: any) {
       message.error(e?.response?.data?.detail || (action === "archive" ? "归档失败" : "恢复失败"));
     }
-    load(q, statusFilter, page);   // 失败（含 409 版本冲突）也刷新，拿到最新 version
+    reloadCurrentList();   // 失败（含 409 版本冲突）也刷新，拿到最新 version
   };
 
   // ---- 列表列 ----

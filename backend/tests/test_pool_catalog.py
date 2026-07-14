@@ -60,9 +60,10 @@ def test_create_pool_rejects_zero_and_one_member(db):
     a = _part(db, "CAT-ONLY")
     with pytest.raises(svc.PoolCatalogError, match="至少包含 2 个"):
         svc.create_pool(db, name="单成员池", member_part_ids=[a], operated_by="t")
-    # 同一 part_id 重复给两次 = 去重后 1 个，同样拒绝
-    with pytest.raises(svc.PoolCatalogError, match="至少包含 2 个"):
-        svc.create_pool(db, name="重复成员池", member_part_ids=[a, a], operated_by="t")
+    b = _part(db, "CAT-ONLY-B")
+    # 重复 ID 是非法请求，不能静默去重后继续建池
+    with pytest.raises(svc.PoolCatalogError, match="成员列表包含重复 part_id"):
+        svc.create_pool(db, name="重复成员池", member_part_ids=[a, b, a], operated_by="t")
 
 
 def test_create_pool_validations(db):
@@ -178,6 +179,12 @@ def test_update_members_validations(db):
         svc.update_members(db, group_id=r["group_id"], version=1, add_part_ids=[a])
     with pytest.raises(svc.PoolCatalogError, match="不是本池成员"):
         svc.update_members(db, group_id=r["group_id"], version=1, remove_part_ids=[b])
+    with pytest.raises(svc.PoolCatalogError, match="新增成员包含重复 part_id"):
+        svc.update_members(db, group_id=r["group_id"], version=1,
+                           add_part_ids=[b, b])
+    with pytest.raises(svc.PoolCatalogError, match="移除成员包含重复 part_id"):
+        svc.update_members(db, group_id=r["group_id"], version=1,
+                           remove_part_ids=[a, a])
 
 
 def test_update_members_rejects_below_two_and_keeps_set_intact(db):
@@ -366,6 +373,29 @@ def test_restore_conflict_when_member_taken(db):
                        operated_by="t")
     r1b = svc.restore_pool(db, group_id=r1["group_id"], version=2, operated_by="t")
     assert r1b["status"] == "active"
+
+
+def test_restore_rejects_singleton_archived_pool(db):
+    """恢复也是进入有效态的写路径：历史异常单成员池不得恢复为 active。"""
+    only = _part(db, "CAT-RS-SINGLE")
+    gid = int(db.execute(text("SELECT nextval('part_pool_group_id_seq')")).scalar())
+    db.execute(text(
+        "INSERT INTO part_pool "
+        "(group_id, name, status, source, version, member_count, needs_calibration, oversized) "
+        "VALUES (:g, '历史单成员池', 'archived', 'legacy_generated', 2, 1, false, false)"),
+        {"g": gid})
+    db.execute(text(
+        "INSERT INTO part_pool_member (group_id, part_id) VALUES (:g, :p)"),
+        {"g": gid, "p": only})
+    db.commit()
+
+    with pytest.raises(svc.PoolCatalogError, match="至少包含 2 个"):
+        svc.restore_pool(db, group_id=gid, version=2, operated_by="t")
+    db.rollback()
+    row = db.execute(text(
+        "SELECT status, version, member_count FROM part_pool WHERE group_id=:g"),
+        {"g": gid}).one()
+    assert row == ("archived", 2, 1)
 
 
 def test_archived_pool_rejects_edits(db):

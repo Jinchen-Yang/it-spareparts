@@ -38,6 +38,13 @@ vi.mock("../../api", () => ({
 
 import PoolManagementPage from "../PoolManagementPage";
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 const row = (over: Record<string, unknown> = {}) => ({
   group_id: 1, name: "测试池", description: null, status: "active", source: "manual",
   version: 1, member_count: 2, created_by: "t", updated_by: "t",
@@ -230,6 +237,154 @@ describe("保存后基线刷新守卫（乐观锁不被分裂态击穿）", () =
     fireEvent.click(screen.getByRole("button", { name: "保存约束价" }));
     await vi.waitFor(() => expect(getPnPool).toHaveBeenCalledTimes(2));
     expect(screen.queryByText(/已重新加载最新数据/)).toBeNull();
+  });
+
+  it("池 A 保存后的延迟刷新不能覆盖后来打开的池 B，下一次保存仍只写 B", async () => {
+    login("readonly", perms);
+    const rowA = row({ group_id: 1, name: "池 A" });
+    const rowB = row({ group_id: 2, name: "池 B", version: 7 });
+    mockList([rowA, rowB]);
+
+    const delayedRefreshA = deferred<{ data: ReturnType<typeof detail> }>();
+    let aReads = 0;
+    getPnPool.mockImplementation((groupId: number) => {
+      if (groupId === 1 && ++aReads === 1) {
+        return Promise.resolve({ data: detail({ group_id: 1, name: "池 A" }) });
+      }
+      if (groupId === 1) return delayedRefreshA.promise;
+      return Promise.resolve({
+        data: detail({
+          group_id: 2, name: "池 B", version: 7,
+          price_policy: {
+            purchase_ceiling_ex_tax: 200, sales_floor_ex_tax: null,
+            purchase_input_value: 200, purchase_input_basis: "ex_tax",
+            sales_input_value: null, sales_input_basis: null,
+            valid_from: "2026-07-13T00:00:00Z", valid_to: null,
+            changed_by: "boss", note: null,
+          },
+        }),
+      });
+    });
+    setPnPoolPolicy
+      .mockResolvedValueOnce({ data: row({ group_id: 1, name: "池 A", version: 2 }) })
+      .mockResolvedValueOnce({ data: row({ group_id: 2, name: "池 B", version: 8 }) });
+
+    render(<PoolManagementPage />);
+    await screen.findByText("池 A");
+    fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[0]);
+    await screen.findByText("编辑池 · 池 A");
+    let purchaseInput = screen.getAllByRole("spinbutton")[0];
+    fireEvent.change(purchaseInput, { target: { value: "88" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存约束价" }));
+    await vi.waitFor(() => expect(aReads).toBe(2));
+
+    fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[1]);
+    await screen.findByText("编辑池 · 池 B");
+    expect((screen.getAllByRole("spinbutton")[0] as HTMLInputElement).value).toBe("200.00");
+
+    delayedRefreshA.resolve({
+      data: detail({ group_id: 1, name: "池 A", version: 2 }),
+    });
+    await delayedRefreshA.promise;
+    await Promise.resolve();
+    expect(screen.getByText("编辑池 · 池 B")).toBeInTheDocument();
+    expect((screen.getAllByRole("spinbutton")[0] as HTMLInputElement).value).toBe("200.00");
+
+    purchaseInput = screen.getAllByRole("spinbutton")[0];
+    fireEvent.change(purchaseInput, { target: { value: "188" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存约束价" }));
+    await vi.waitFor(() => expect(setPnPoolPolicy).toHaveBeenCalledTimes(2));
+    expect(setPnPoolPolicy.mock.calls[1][0]).toBe(2);
+    expect(setPnPoolPolicy.mock.calls[1][1]).toMatchObject({ version: 7, purchase_value: 188 });
+  });
+
+  it("池 A 冲突后的延迟重载不能覆盖后来打开的新建表单", async () => {
+    login("admin", {});
+    mockList([row({ group_id: 1, name: "池 A" })]);
+    const delayedConflictReload = deferred<{ data: ReturnType<typeof detail> }>();
+    let aReads = 0;
+    getPnPool.mockImplementation(() => ++aReads === 1
+      ? Promise.resolve({ data: detail({ group_id: 1, name: "池 A" }) })
+      : delayedConflictReload.promise);
+    setPnPoolPolicy.mockRejectedValue({ response: { status: 409, data: { detail: "版本冲突" } } });
+
+    render(<PoolManagementPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
+    await screen.findByText("编辑池 · 池 A");
+    fireEvent.change(screen.getAllByRole("spinbutton")[0], { target: { value: "88" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存约束价" }));
+    await vi.waitFor(() => expect(aReads).toBe(2));
+
+    fireEvent.click(screen.getByRole("button", { name: "新建池" }));
+    await screen.findByText("新建互通PN池");
+    expect(screen.getByPlaceholderText("如 8TB 7.2K SATA 企业盘互通池")).toHaveValue("");
+
+    delayedConflictReload.resolve({ data: detail({ group_id: 1, name: "池 A", version: 3 }) });
+    await delayedConflictReload.promise;
+    await Promise.resolve();
+    expect(screen.getByText("新建互通PN池")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("如 8TB 7.2K SATA 企业盘互通池")).toHaveValue("");
+  });
+});
+
+describe("详情与列表请求代次守卫", () => {
+  const perms = {
+    action_pool_manage: true, action_pool_set_policy: true, data_pool_price_governance: true,
+  };
+
+  it("快速打开 A 再打开 B，最后返回的 A 详情不能覆盖 B", async () => {
+    login("readonly", perms);
+    mockList([row({ group_id: 1, name: "池 A" }), row({ group_id: 2, name: "池 B" })]);
+    const delayedA = deferred<{ data: ReturnType<typeof detail> }>();
+    getPnPool.mockImplementation((groupId: number) => groupId === 1
+      ? delayedA.promise
+      : Promise.resolve({ data: detail({ group_id: 2, name: "池 B", version: 4 }) }));
+
+    render(<PoolManagementPage />);
+    await screen.findByText("池 A");
+    fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[1]);
+    await screen.findByText("编辑池 · 池 B");
+
+    delayedA.resolve({ data: detail({ group_id: 1, name: "池 A" }) });
+    await delayedA.promise;
+    await Promise.resolve();
+    expect(screen.getByText("编辑池 · 池 B")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("如 8TB 7.2K SATA 企业盘互通池")).toHaveValue("池 B");
+  });
+
+  it("旧筛选列表最后返回时不能覆盖较新的筛选结果", async () => {
+    login("readonly", perms);
+    const delayedArchived = deferred<{
+      data: { total: number; page: number; page_size: number; items: unknown[]; price_restricted: boolean };
+    }>();
+    listPnPools.mockImplementation(({ status }: { status: string }) => {
+      if (status === "archived") return delayedArchived.promise;
+      const item = status === "all"
+        ? row({ group_id: 2, name: "全部筛选的新结果" })
+        : row({ group_id: 1, name: "初始有效池" });
+      return Promise.resolve({
+        data: { total: 1, page: 1, page_size: 20, items: [item], price_restricted: false },
+      });
+    });
+
+    render(<PoolManagementPage />);
+    await screen.findByText("初始有效池");
+    fireEvent.click(screen.getByText("已归档"));
+    fireEvent.click(screen.getByText("全部"));
+    await screen.findByText("全部筛选的新结果");
+
+    delayedArchived.resolve({
+      data: {
+        total: 1, page: 1, page_size: 20,
+        items: [row({ group_id: 3, name: "已过期的归档结果", status: "archived" })],
+        price_restricted: false,
+      },
+    });
+    await delayedArchived.promise;
+    await Promise.resolve();
+    expect(screen.getByText("全部筛选的新结果")).toBeInTheDocument();
+    expect(screen.queryByText("已过期的归档结果")).toBeNull();
   });
 });
 

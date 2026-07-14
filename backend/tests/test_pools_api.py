@@ -4,8 +4,9 @@
 - 读：登录即可（全员）；匿名 401。
 - 池维护写：action_pool_manage（模板默认 boss；admin 恒通过；可对任意账号单独授权）。
 - 约束价写：action_pool_set_policy（默认 boss/admin）。
-- data_pool_price_governance=False 的账号：约束价字段（含原始录入值）全为 null。
+- data_pool_price_governance=False 的账号：清单金额为 null，详情策略及历史整体隐藏。
 """
+import json
 from decimal import Decimal
 
 import pytest
@@ -103,6 +104,13 @@ def test_create_pool_min_members_via_api(db):
     (pid,) = _mk_parts(db, "MIN-API-1")
     r1 = c.post("/api/pools", json={"name": "单成员池", "member_part_ids": [pid]})
     assert r1.status_code == 400 and "至少包含 2 个" in r1.json()["detail"]
+    p2, p3 = _mk_parts(db, "MIN-API-2", "MIN-API-3")
+    duplicate_create = c.post(
+        "/api/pools",
+        json={"name": "重复成员池", "member_part_ids": [p2, p3, p2]},
+    )
+    assert duplicate_create.status_code == 400
+    assert "成员列表包含重复 part_id" in duplicate_create.json()["detail"]
     # 成员删到 <2 同样 400，且集合不变
     created, ids = _seed_pool(db, name="下限API池", pns=("MIN-API-A", "MIN-API-B"))
     gid = created["group_id"]
@@ -111,6 +119,13 @@ def test_create_pool_min_members_via_api(db):
     assert r2.status_code == 400 and "至少包含 2 个" in r2.json()["detail"]
     detail = c.get(f"/api/pools/{gid}").json()
     assert detail["member_count"] == 2 and detail["version"] == 1
+    (fresh,) = _mk_parts(db, "MIN-API-FRESH")
+    duplicate_update = c.patch(
+        f"/api/pools/{gid}/members",
+        json={"version": 1, "add_part_ids": [fresh, fresh]},
+    )
+    assert duplicate_update.status_code == 400
+    assert "新增成员包含重复 part_id" in duplicate_update.json()["detail"]
 
 
 def test_grant_pool_manage_to_readonly_user(db):
@@ -181,13 +196,19 @@ def test_archive_restore_roundtrip_via_api(db):
 # ---------------------------------------------------------------- 价格治理脱敏
 
 def test_price_governance_masking(db):
-    """data_pool_price_governance=False：清单/详情的约束价与原始录入值全为 null，
-    有权限账号看到真实值（防止靠管理页反推约束金额，§12）。"""
+    """data_pool_price_governance=False：详情不返回任何策略对象或历史元数据。
+
+    不能只遮金额叶子：备注、设置人、录入口径和生效时间也会暴露隐藏约束。
+    """
     created, _ = _seed_pool(db)
     gid = created["group_id"]
     boss = _mk_client(db, "boss6", "boss")
     boss.put(f"/api/pools/{gid}/price-policy",
-             json={"version": 1, "purchase_value": "725.66", "sales_value": "973.45"})
+             json={"version": 1,
+                   "purchase_value": "725.66",
+                   "purchase_basis": "inc_tax",
+                   "sales_value": "973.45",
+                   "note": "采购上限改为725.66，禁止向外泄漏"})
 
     blind = _mk_client(db, "blind1", "readonly",
                        permissions={"data_pool_price_governance": False})
@@ -197,15 +218,21 @@ def test_price_governance_masking(db):
     assert item["sales_floor_ex_tax"] is None
     detail = blind.get(f"/api/pools/{gid}").json()
     assert detail["purchase_ceiling_ex_tax"] is None
-    assert detail["price_policy"]["purchase_input_value"] is None
-    for h in detail["price_policy_history"]:
-        assert h["purchase_ceiling_ex_tax"] is None and h["sales_floor_ex_tax"] is None
+    assert detail["sales_floor_ex_tax"] is None
+    assert detail["price_policy"] is None
+    assert detail["price_policy_history"] == []
+    serialized = json.dumps(detail, ensure_ascii=False)
+    for secret in ("725.66", "973.45", "采购上限改为", "inc_tax",
+                   "changed_by", "valid_from", "valid_to"):
+        assert secret not in serialized
     # 复审非阻塞 1："无权限"必须有明确旗标，前端不允许与"未设置"都显示成 "--"
     assert resp["price_restricted"] is True and item["price_restricted"] is True
     assert detail["price_restricted"] is True
 
     seen = boss.get(f"/api/pools/{gid}").json()
-    assert Decimal(str(seen["purchase_ceiling_ex_tax"])) == Decimal("725.66")
+    assert Decimal(str(seen["price_policy"]["purchase_input_value"])) == Decimal("725.66")
+    assert seen["price_policy"]["purchase_input_basis"] == "inc_tax"
+    assert seen["price_policy"]["note"] == "采购上限改为725.66，禁止向外泄漏"
     assert seen["price_restricted"] is False
     boss_list = boss.get("/api/pools").json()
     assert boss_list["price_restricted"] is False

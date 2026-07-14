@@ -90,6 +90,18 @@ def _price_restricted(ctx: UserContext) -> bool:
     return is_field_hidden(ctx, "purchase_ceiling_ex_tax")
 
 
+def _hide_price_policy_structure(data: dict, *, restricted: bool) -> None:
+    """价格治理受限时收敛详情结构，避免元数据侧漏。
+
+    通用字段脱敏只能把金额叶子置空；策略备注可能直接写出价格，changed_by、
+    录入口径和生效区间也属于价格策略信息。这里在 /api/pools 详情边界整体移除
+    当前策略与历史，同时保留稳定、前端可判定的响应形状。
+    """
+    if restricted:
+        data["price_policy"] = None
+        data["price_policy_history"] = []
+
+
 def _run(fn, **kwargs):
     """service 领域异常 → HTTP 语义：业务非法 400、并发/唯一性冲突 409、不存在 404。"""
     try:
@@ -131,7 +143,9 @@ def get_pool(
     data = svc.get_pool(db, group_id)
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "池不存在")
-    data["price_restricted"] = _price_restricted(ctx)
+    restricted = _price_restricted(ctx)
+    data["price_restricted"] = restricted
+    _hide_price_policy_structure(data, restricted=restricted)
     return apply_field_visibility(data, ctx)
 
 

@@ -33,8 +33,8 @@ _PART_LOCK_NS = 918273646
 
 _BASES = ("ex_tax", "inc_tax")
 _POLICY_HISTORY_LIMIT = 20
-# 《互通PN池》核心规则第 5 条：每个有效池至少包含两个 PN。只约束运行时写路径
-# （建池/调成员），迁移回填的历史池不经此校验（§21 要求存量池零变化）。
+# 《互通PN池》核心规则第 5 条：每个有效池至少包含两个 PN。建池、调整成员、
+# 恢复归档池和历史数据升级都必须守住这一全局不变量。
 MIN_ACTIVE_POOL_MEMBERS = 2
 
 
@@ -109,6 +109,23 @@ def _validate_parts(db: Session, part_ids: list[int]) -> dict[int, str]:
     if merged:
         raise PoolCatalogError(f"型号已合并入他档，不能入池: {', '.join(sorted(merged))}")
     return {rid: pn for rid, (pn, st) in found.items()}
+
+
+def _distinct_part_ids(values: list[int] | None, *, label: str) -> list[int]:
+    """校验成员请求不含重复 ID，并返回稳定排序结果。
+
+    重复成员属于请求错误；静默 set 去重会让调用方误以为所有输入都被执行。
+    """
+    raw = list(values or [])
+    seen: set[int] = set()
+    duplicates: set[int] = set()
+    for part_id in raw:
+        if part_id in seen:
+            duplicates.add(part_id)
+        seen.add(part_id)
+    if duplicates:
+        raise PoolCatalogError(f"{label}包含重复 part_id: {sorted(duplicates)}")
+    return sorted(raw)
 
 
 def _member_count(db: Session, group_id: int) -> int:
@@ -268,7 +285,7 @@ def create_pool(db: Session, *, name: str, description: str | None = None,
         raise PoolCatalogError("池名称不能为空")
     if len(clean_name) > 128:
         raise PoolCatalogError("池名称过长（≤128 字符）")
-    part_ids = sorted(set(member_part_ids or []))
+    part_ids = _distinct_part_ids(member_part_ids, label="成员列表")
     if len(part_ids) < MIN_ACTIVE_POOL_MEMBERS:
         raise PoolCatalogError(
             f"有效池至少包含 {MIN_ACTIVE_POOL_MEMBERS} 个 PN（当前 {len(part_ids)} 个）")
@@ -330,8 +347,8 @@ def update_members(db: Session, *, group_id: int, version: int,
                    remove_part_ids: list[int] | None = None,
                    note: str | None = None, operated_by: str | None = None) -> dict | None:
     """一次事务增删成员（乐观锁 + 有效池唯一性）。"""
-    adds = sorted(set(add_part_ids or []))
-    removes = sorted(set(remove_part_ids or []))
+    adds = _distinct_part_ids(add_part_ids, label="新增成员")
+    removes = _distinct_part_ids(remove_part_ids, label="移除成员")
     if not adds and not removes:
         raise PoolCatalogError("没有要增删的成员")
     both = set(adds) & set(removes)
@@ -522,6 +539,11 @@ def restore_pool(db: Session, *, group_id: int, version: int, note: str | None =
 
     member_ids = sorted(db.scalars(
         select(PartPoolMember.part_id).where(PartPoolMember.group_id == group_id)).all())
+    if len(member_ids) < MIN_ACTIVE_POOL_MEMBERS:
+        raise PoolCatalogError(
+            f"池「{pool.name}」仅有 {len(member_ids)} 个 PN，有效池至少包含 "
+            f"{MIN_ACTIVE_POOL_MEMBERS} 个 PN；请先补齐成员再恢复"
+        )
     _lock_parts(db, member_ids)
     conflicts = _active_pool_conflicts(db, member_ids, exclude_group_id=group_id)
     if conflicts:

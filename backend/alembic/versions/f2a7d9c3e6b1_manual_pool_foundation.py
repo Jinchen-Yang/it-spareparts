@@ -20,8 +20,9 @@ Create Date: 2026-07-13
 - part_pool_member 复合主键前导列即 group_id → 删除旧单列索引 ix_pool_member_group；
 - part_pool_price_policy 不建 group_id 单列索引（ix_pool_policy_group_from 前导列覆盖）。
 
-downgrade **不是无条件可逆**（复审阻塞 6）：只有未产生"一 PN 多池"数据且无约束价
-历史时才无损；否则守卫失败即停、不删任何数据——生产回滚一律恢复迁移前数据库备份。
+downgrade **不是无条件可逆**：只有 upgrade 后从未产生人工建池、池/成员维护、
+一 PN 多池或约束价历史时才无损；否则守卫失败即停、不删任何数据。生产回滚
+一律恢复迁移前数据库备份。
 应用过本迁移旧版本（2026-07-13 未合并版）的开发库：直接重建，或 downgrade 到
 b9e1f4a7c2d8 再 upgrade（索引操作带 IF [NOT] EXISTS，可安全重放）。
 """
@@ -40,6 +41,26 @@ _MONEY = sa.Numeric(14, 2)
 
 
 def upgrade() -> None:
+    # ---- 0. 全局不变量：有效池至少 2 个实际成员 ----
+    # 在任何 DDL 之前检查旧 schema，不信任可能漂移的 member_count 冗余值。
+    # 若存在单成员/空池，必须先治理再升级；PostgreSQL 事务性 DDL 保证失败后
+    # schema 和数据都仍停在上一版。
+    bind = op.get_bind()
+    undersized = bind.execute(sa.text(
+        "SELECT p.group_id, COUNT(m.part_id) AS actual_member_count "
+        "FROM part_pool p LEFT JOIN part_pool_member m ON m.group_id=p.group_id "
+        "GROUP BY p.group_id HAVING COUNT(m.part_id) < 2 ORDER BY p.group_id"
+    )).all()
+    if undersized:
+        detail = ", ".join(
+            f"group_id={row.group_id}(实际成员={row.actual_member_count})"
+            for row in undersized
+        )
+        raise RuntimeError(
+            "upgrade f2a7d9c3e6b1 中止（未执行任何 DDL）：有效池必须至少"
+            f"包含 2 个 PN，请先治理以下历史池：{detail}"
+        )
+
     # ---- 1. part_pool 人工池字段（先加可空 → 回填 → 收紧非空） ----
     op.add_column("part_pool", sa.Column("name", sa.String(128), nullable=True))
     op.add_column("part_pool", sa.Column("description", sa.Text(), nullable=True))
@@ -144,22 +165,39 @@ def downgrade() -> None:
     # ---- 数据丢失守卫：本 downgrade 只在"未产生本迁移之后的新数据"时才是无损的 ----
     # 1) 同一 part_id 已属多个池（归档 A → A 的成员加入新有效池 B 的正常使用轨迹）：
     #    恢复单列主键 (part_id) 必然 UniqueViolation；
-    # 2) part_pool_price_policy 已有约束价历史：drop_table 会把它整个删掉。
-    # 两种情况都**失败即停**（事务回滚，什么都不删），生产回滚一律恢复数据库备份，
-    # 绝不静默丢历史。确认可丢弃时先手工清理这两类数据再 downgrade。
+    # 2) part_pool_price_policy 已有约束价历史：drop_table 会把它整个删掉；
+    # 3) 人工建池/改名/说明/归档/版本或维护人变更：旧 schema 没有这些字段；
+    # 4) 成员的 added_by/note/updated_at 已变：旧 schema 同样无法表达。
+    # 任一情况都**失败即停**（事务回滚，什么都不删），生产回滚一律恢复
+    # 迁移前数据库备份，绝不静默丢历史。
     bind = op.get_bind()
     multi_pool_parts = bind.execute(sa.text(
         "SELECT COUNT(*) FROM (SELECT part_id FROM part_pool_member "
         "GROUP BY part_id HAVING COUNT(*) > 1) t")).scalar()
     policy_rows = bind.execute(sa.text(
         "SELECT COUNT(*) FROM part_pool_price_policy")).scalar()
-    if multi_pool_parts or policy_rows:
+    changed_pools = bind.execute(sa.text(
+        "SELECT group_id FROM part_pool WHERE "
+        "source IS DISTINCT FROM 'legacy_generated' "
+        "OR name IS DISTINCT FROM ('互通池-' || group_id::text) "
+        "OR description IS NOT NULL OR status IS DISTINCT FROM 'active' "
+        "OR version IS DISTINCT FROM 1 OR created_by IS NOT NULL OR updated_by IS NOT NULL "
+        "OR created_at IS DISTINCT FROM updated_at ORDER BY group_id"
+    )).scalars().all()
+    changed_member_pools = bind.execute(sa.text(
+        "SELECT DISTINCT group_id FROM part_pool_member WHERE "
+        "added_by IS NOT NULL OR note IS NOT NULL OR updated_at IS DISTINCT FROM created_at "
+        "ORDER BY group_id"
+    )).scalars().all()
+    if multi_pool_parts or policy_rows or changed_pools or changed_member_pools:
         raise RuntimeError(
             "downgrade f2a7d9c3e6b1 中止（未做任何改动）：检测到本迁移之后产生的业务数据——"
             f"{multi_pool_parts} 个 PN 属于多个池（无法恢复 part_id 单列主键）、"
-            f"{policy_rows} 条约束价历史（drop 表会永久丢失）。"
+            f"{policy_rows} 条约束价历史（drop 表会永久丢失）、"
+            f"人工池/池元数据已变更 group_id={list(changed_pools)}、"
+            f"成员维护元数据已变更 group_id={list(changed_member_pools)}。"
             "此状态下 schema 降级不是无损回滚：生产环境请恢复迁移前的数据库备份；"
-            "开发环境确认可丢弃后，先清空 part_pool_price_policy 并解除一 PN 多池，再重试。")
+            "开发环境确认可丢弃后，先恢复或清理所有迁移后业务数据再重试。")
 
     op.drop_index("ix_pool_policy_group_from", table_name="part_pool_price_policy")
     op.drop_index("uq_pool_policy_current", table_name="part_pool_price_policy")
