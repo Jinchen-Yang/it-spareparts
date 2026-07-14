@@ -1,6 +1,6 @@
 import axios from "axios";
 
-const api = axios.create({ baseURL: "/api" });
+export const api = axios.create({ baseURL: "/api" });
 
 api.interceptors.request.use((cfg) => {
   const token = localStorage.getItem("token");
@@ -26,6 +26,8 @@ api.interceptors.response.use(
 export default api;
 
 export interface PartHit {
+  // part_id：browse/结构化分支返回（池成员选择等需要 id 的场景请传 browse=true）；resolver 分支无
+  id?: number;
   pn_std: string;
   description: string | null;
   brand: string | null;
@@ -578,9 +580,3 @@ export interface PoolDetail {
 }
 export const dashboardPool = (groupId: number, params: { date_from?: string; date_to?: string } = {}) =>
   api.get<PoolDetail>(`/dashboard/pool/${groupId}`, { params });
-
-export interface PoolRebuildPreview {
-  dry_run: boolean; pools: number; merged: unknown[]; split: unknown[]; new: unknown[]; unchanged: number;
-}
-export const dashboardPoolRebuild = (dry_run = true) =>
-  api.post<PoolRebuildPreview>("/dashboard/pool/rebuild", null, { params: { dry_run } });

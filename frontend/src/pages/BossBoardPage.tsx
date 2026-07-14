@@ -9,13 +9,12 @@ import dayjs, { type Dayjs } from "dayjs";
 import PageHeader from "../components/PageHeader";
 import {
   dashboardKpi, dashboardTrend, dashboardPartRanking, dashboardSales, dashboardPurchaseOrders,
-  dashboardPools, dashboardPool, dashboardPoolRebuild,
+  dashboardPools, dashboardPool,
   type DashboardKpi, type TrendPoint, type PartRankingResp, type PartRankingRow,
   type SalesOrderRow, type PurchaseOrderRow, type OrdersResp, type OrdersQuery,
   type PoolsResp, type PoolListItem, type PoolDetail as PoolDetailT,
   type PoolMemberRow, type PoolOpportunity,
 } from "../api";
-import { Modal } from "antd";
 
 const { RangePicker } = DatePicker;
 
@@ -135,10 +134,9 @@ export default function BossBoardPage() {
   const [purchaseQ, setPurchaseQ] = useState<OrdersQuery>({ page: 1, page_size: 20, sort: "order_date", order: "desc" });
   const [salesLoading, setSalesLoading] = useState(false);
   const [purchaseLoading, setPurchaseLoading] = useState(false);
-  // 数据池表：服务端分页（复审三轮：>100 池也要能翻到）；nonce 用于重算后强制刷新
+  // 数据池表：服务端分页（复审三轮：>100 池也要能翻到）
   const [poolPage, setPoolPage] = useState({ page: 1, page_size: 10 });
   const [poolLoading, setPoolLoading] = useState(false);
-  const [poolNonce, setPoolNonce] = useState(0);
   const poolDetailGen = useRef(0);
 
   // 上部板块（KPI/趋势/盈亏榜/池）：每块独立落库，一块失败不拖垮其余（复审 Standards：不再全有或全无）。
@@ -186,7 +184,7 @@ export default function BossBoardPage() {
     return () => { alive = false; };
   }, [range, purchaseQ]);
 
-  // 数据池：服务端分页（sort=savings 时后端先分析全部池再全局排序分页）。nonce 变化=重算后刷新
+  // 数据池：服务端分页（sort=savings 时后端先分析全部池再全局排序分页）
   useEffect(() => {
     let alive = true;
     setPoolLoading(true);
@@ -195,7 +193,7 @@ export default function BossBoardPage() {
       .catch(() => { if (alive) { setPools(null); message.error("数据池加载失败"); } })
       .finally(() => { if (alive) setPoolLoading(false); });
     return () => { alive = false; };
-  }, [range, poolPage, poolNonce]);
+  }, [range, poolPage]);
 
   // 换时间范围时订单表与池表回到第 1 页（避免停在越界页看到空表）
   useEffect(() => {
@@ -257,24 +255,6 @@ export default function BossBoardPage() {
         options={[{ label: "仅已生效", value: "" }, { label: "全部状态", value: "全部" }]} />
     </div>
   );
-
-  // 重算：先 dry-run 预览合并/拆分，再确认后执行（复审 P1-6：闭环，不只有预览）
-  const rebuildPools = async () => {
-    try {
-      const { data } = await dashboardPoolRebuild(true);
-      Modal.confirm({
-        title: "通用号池重算预览",
-        content: `将得到 ${data.pools} 个池：合并 ${data.merged.length}、拆分 ${data.split.length}、新建 ${data.new.length}、不变 ${data.unchanged}。确认后落库（退役池 ID 不复用）。`,
-        okText: "确认执行", cancelText: "取消",
-        onOk: async () => {
-          await dashboardPoolRebuild(false);
-          message.success("池已重算");
-          load();
-          setPoolNonce((n) => n + 1);   // 池表独立于 load，单独刷新
-        },
-      });
-    } catch { message.error("重算预览失败"); }
-  };
 
   const rankCols = (loss: boolean): ColumnsType<PartRankingRow> => [
     { title: "型号", dataIndex: "pn_std", width: 160, render: (v, r) => (
@@ -421,8 +401,7 @@ export default function BossBoardPage() {
             showSizeChanger: true, pageSizeOptions: [20, 50, 100], showTotal: (t) => `共 ${t} 单` }} />
       </Card>
 
-      <Card title="通用号数据池 · 潜在降本机会" size="small"
-        extra={isAdmin && <Button size="small" onClick={rebuildPools}>重算池</Button>}>
+      <Card title="通用号数据池 · 潜在降本机会" size="small">
         <Alert type="info" showIcon style={{ marginBottom: 10 }}
           message="只读分析·潜在降本机会：所有替换均「待核实」兼容性/客户指定品牌/合同，当前无可执行金额。库存 8 月盘点前不作推荐条件，供应稳定性看采购频次/供应商数/最近采购日。" />
         {pools?.ranking_capped && (

@@ -21,6 +21,9 @@ _TABLES = [
     "chat_message", "chat_session",
     "product_data_quality_issues", "product_merge_logs", "product_match_candidates",
     "product_specs", "product_categories", "brands",
+    # 池三表：TRUNCATE 不会重置独立序列 part_pool_group_id_seq（非 owned），
+    # 「退役 ID 永不复用」语义跨用例保持
+    "part_pool_price_policy", "part_pool_member", "part_pool",
     "f_part_inquiry", "part_substitute", "inventory",
     "f_project_expense",
     "f_maintenance_line", "f_maintenance_order",

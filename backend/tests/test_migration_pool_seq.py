@@ -47,7 +47,10 @@ def preserve_pool_seq(migrated):
 def test_followup_migration_preserves_sequence_high_watermark(
     preserve_pool_seq, group_id, sequence_sql, expected_next
 ):
-    """已在 d3 的环境升级 b9 后，序列不得因存活池删除而回退。"""
+    """已在 d3 的环境升级 b9 后，序列不得因存活池删除而回退。
+
+    有池场景造两个真实成员，不用只改 member_count 的不可能状态绕过人工池
+    迁移的全局不变量。"""
     cfg = _cfg()
     alembic_command.downgrade(cfg, "d3e8f1a6b2c4")   # 回到"后续对齐迁移未应用"的状态
     try:
@@ -58,6 +61,14 @@ def test_followup_migration_preserves_sequence_high_watermark(
                 conn.execute(text(
                     "INSERT INTO part_pool (group_id, member_count, needs_calibration, oversized) "
                     "VALUES (:group_id, 2, false, false)"), {"group_id": group_id})
+                for i in range(2):
+                    part_id = conn.execute(text(
+                        "INSERT INTO dim_part (pn_std) VALUES (:pn) RETURNING id"),
+                        {"pn": f"MIGSEQ-{group_id}-{i}"}).scalar()
+                    conn.execute(text(
+                        "INSERT INTO part_pool_member (part_id, group_id) "
+                        "VALUES (:part_id, :group_id)"),
+                        {"part_id": part_id, "group_id": group_id})
             conn.execute(text(sequence_sql))
         alembic_command.upgrade(cfg, "head")          # Alembic 执行后续迁移 b9e1f4a7c2d8
         with engine.begin() as conn:
@@ -67,6 +78,7 @@ def test_followup_migration_preserves_sequence_high_watermark(
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM part_pool_member"))
             conn.execute(text("DELETE FROM part_pool"))
+            conn.execute(text("DELETE FROM dim_part WHERE pn_std LIKE 'MIGSEQ-%'"))
         alembic_command.upgrade(cfg, "head")          # 回到 head；序列状态由 preserve_pool_seq 恢复
 
 
@@ -74,4 +86,4 @@ def test_single_alembic_head(migrated):
     """新增后续迁移后仍是单一 head（没修改旧 revision 造成分叉）。"""
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(_cfg()).get_heads()
-    assert heads == ["b9e1f4a7c2d8"], f"应只有一个 head=b9e1f4a7c2d8，实得 {heads}"
+    assert heads == ["f2a7d9c3e6b1"], f"应只有一个 head=f2a7d9c3e6b1，实得 {heads}"

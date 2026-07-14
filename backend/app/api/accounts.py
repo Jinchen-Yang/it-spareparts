@@ -84,6 +84,7 @@ def meta(_: str = Depends(require_admin)) -> dict:
         "roles": _ROLES,
         "data_keys": list(permissions.DATA_GROUPS),
         "page_keys": permissions.PAGE_KEYS,
+        "action_keys": permissions.ACTION_KEYS,
         "row_keys": permissions.ROW_KEYS,
         "labels": permissions.LABELS,
         "role_templates": {r: permissions.effective(r, None) for r in _ROLES},
@@ -109,10 +110,15 @@ def create_account(body: CreateAccount, db: Session = Depends(get_db),
         raise HTTPException(400, "密码至少 6 位")
     if db.scalar(select(SysUser).where(SysUser.username == uname)):
         raise HTTPException(409, f"用户名已存在: {uname}")
+    custom = permissions.sanitize(body.permissions) or None
+    # 拒绝非法权限组合（复审阻塞 4）：按最终生效权限（模板+自定义叠加）校验
+    combo = permissions.combo_errors(permissions.effective(body.role, custom))
+    if combo:
+        raise HTTPException(400, "；".join(combo))
     u = SysUser(username=uname, role=body.role, display_name=body.display_name,
                 salesperson_name=body.salesperson_name,
                 password_hash=hash_password(body.password),
-                permissions=permissions.sanitize(body.permissions) or None)
+                permissions=custom)
     db.add(u)
     db.flush()   # 取 u.id 供审计
     _audit(db, u.id, "account_create", None, _acct_snapshot(u), ident["sub"])
@@ -138,6 +144,12 @@ def update_account(username: str, body: UpdateAccount, db: Session = Depends(get
         u.salesperson_name = body.salesperson_name
     if body.permissions is not None:
         u.permissions = permissions.sanitize(body.permissions) or None
+    # 拒绝非法权限组合（复审阻塞 4）：角色与自定义都可能变，按变更后的最终生效权限校验。
+    # 400 时依赖 get_db 关闭会话丢弃未提交改动，账号保持原样。
+    if body.role is not None or body.permissions is not None:
+        combo = permissions.combo_errors(permissions.effective(u.role, u.permissions))
+        if combo:
+            raise HTTPException(400, "；".join(combo))
     # 角色/权限变更 → 吊销旧 token，迫使重新登录以即时生效（仅改显示名则不踢）
     if body.role is not None or body.permissions is not None:
         u.token_version = (u.token_version or 0) + 1

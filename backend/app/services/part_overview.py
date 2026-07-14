@@ -132,6 +132,7 @@ def search_parts(db: Session, q: str | None, page: int, page_size: int,
     return {
         "total": total, "page": page, "page_size": page_size,
         "items": [{
+            "id": p.id,   # part_id：池成员选择等写接口需要（resolver 分支无 id，取 id 请传 browse=true）
             "pn_std": p.pn_std, "description": p.description, "brand": p.brand,
             "category_major": p.category_major, "needs_review": p.needs_review,
             "is_excluded": p.is_excluded,   # 与 resolver 分支返回形状对齐

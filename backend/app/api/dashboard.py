@@ -115,14 +115,16 @@ def part_ranking(
 
 @router.post("/pool/rebuild")
 def pool_rebuild(
-    dry_run: bool = Query(False, description="只预览合并/拆分，不落库"),
-    db: Session = Depends(get_db),
     _: str = Depends(require_admin),
-    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """重算通用号稳定池（管理员）。dry_run 先看会合并/拆分哪些池再决定。"""
-    record_access_log(ctx, "pool_rebuild", "dashboard", {"dry_run": dry_run})
-    return pool.rebuild(db, dry_run=dry_run)
+    """已停用（互通PN池价格分析 §17.1）：自动重算不再是池的写入路径，恒返回 410 Gone。
+
+    人工池是唯一真值——建池/改成员/归档一律走「数据中心 → 互通PN池管理」（/api/pools*）。
+    保留 admin 门是维持旧权限面（非管理员仍 403），不扩大可探测面。"""
+    raise HTTPException(
+        status_code=410,
+        detail="自动重算池已停用：互通 PN 池由人工维护（数据中心 → 互通PN池管理），替代关系变化不再自动改池",
+    )
 
 
 @router.get("/pools")
@@ -156,5 +158,12 @@ def pool_detail(
     record_access_log(ctx, "pool_detail", "dashboard", {"group_id": group_id})
     data = pool.analyze(db, group_id, date_from, date_to, user_ctx=ctx)
     if data is None:
+        # 归档池不参与当前经营分析（复审阻塞 2）：明确告知去向，而不是含糊的"不存在"
+        from app.models.inventory import PartPool
+        row = db.get(PartPool, group_id)
+        if row is not None and row.status != "active":
+            raise HTTPException(
+                status_code=404,
+                detail="池已归档，不参与当前经营分析；档案见「互通PN池管理」（状态筛选：已归档），如需分析请先恢复")
         raise HTTPException(status_code=404, detail="池不存在")
     return apply_field_visibility(data, ctx)

@@ -1,17 +1,15 @@
-"""通用号数据池：稳定 group_id 重算（老板看板池化分析地基）。
+"""互通 PN 池的**只读**池化分析（老板看板池清单/池详情）。
 
-甲方 2026-07-11 修正版第①条：不复用运行时 BFS（型号页临时展示、4 层/60 成员上限、
-入口不同结果不同、加一个型号可能触顶）——建稳定池：
-- 池边 = 已生效双向互替（status='active' AND direction='both'）；单向替代不成池。
-- 连通分量为池，成员≥2（单点不成池）。
-- 关系变化时 rebuild：**保留稳定 group_id**（按成员重叠复用），并报告本次合并/拆分。
-- 池内任一边缺 substitute_type → needs_calibration（关系待校准）。
-- 成员超 POOL_OVERSIZE_MEMBERS → oversized（需人工确认）。
+2026-07-13（互通PN池价格分析 Slice 1）起池是人工维护的唯一真值：
+- 自动重算 rebuild() 已删除——替代关系（part_substitute）变化**不会**再改池；
+  池、成员、约束价的唯一写入路径是 services/pool_catalog。
+- 本模块只保留 list_pools / analyze 两个只读入口（旧"潜在节省"语义，
+  Slice 4 经营看板改版时迁移到价格纪律摘要）。
 """
 from collections import defaultdict
 from datetime import date, timedelta
 
-from sqlalchemy import and_, delete, func, select, text
+from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app import config, security
@@ -27,159 +25,6 @@ from app.services.pricing import (
 from app.services.query_filters import active_orders
 
 _MIN_RELIABLE_SAMPLES = 2   # 加权均价样本≥2 才作降本标杆（避免一次异常低价，甲方修正②）
-_POOL_LOCK_KEY = 918273645  # pg_advisory 锁键：串行化 rebuild，避免并发主键冲突/过期结果
-
-
-def _components(edges: list[tuple[int, int]]) -> list[set[int]]:
-    """并查集求连通分量（只含出现在边里的点，故天然成员≥2）。"""
-    parent: dict[int, int] = {}
-
-    def find(x):
-        parent.setdefault(x, x)
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[rb] = ra
-
-    for a, b in edges:
-        union(a, b)
-    groups: dict[int, set[int]] = defaultdict(set)
-    for x in parent:
-        groups[find(x)].add(x)
-    return list(groups.values())
-
-
-def rebuild(db: Session, dry_run: bool = False) -> dict:
-    """从已生效双向互替关系重算稳定池。dry_run=True 只返回预览不落库。
-
-    返回：pools/parts_pooled 计数、new/merged/split/unchanged 报告、
-    needs_calibration/oversized 池清单。合并=一个新分量吃了多个旧池；拆分=一个旧池散到多个新分量。
-    """
-    # 并发锁：串行化 rebuild（两次并发重建可能主键冲突或产生过期结果）。事务级，提交/回滚自动释放。
-    if not dry_run:
-        db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _POOL_LOCK_KEY})
-    # 池边：已生效 + 双向互替
-    edge_rows = db.execute(
-        select(PartSubstitute.part_id_a, PartSubstitute.part_id_b, PartSubstitute.substitute_type)
-        .where(PartSubstitute.status == "active", PartSubstitute.direction == "both")
-    ).all()
-    edges = [(a, b) for a, b, _ in edge_rows]
-    comps = _components(edges)
-
-    # 每个分量内是否有缺类型的边（关系待校准）
-    comp_of: dict[int, int] = {}   # part_id -> comp index
-    for i, m in enumerate(comps):
-        for p in m:
-            comp_of[p] = i
-    comp_missing_type = [False] * len(comps)
-    for a, b, stype in edge_rows:
-        if stype is None and a in comp_of:
-            comp_missing_type[comp_of[a]] = True
-
-    # 现有映射（用于稳定 ID 复用）
-    existing = dict(db.execute(select(PartPoolMember.part_id, PartPoolMember.group_id)).all())
-    existing_groups: dict[int, set[int]] = defaultdict(set)
-    for p, g in existing.items():
-        existing_groups[g].add(p)
-
-    # 新池 ID 从**持久序列** part_pool_group_id_seq 取（单调递增，退役 ID 永不复用——
-    # 复审 P0-2：旧的 max(存活ID)+1 会在池退役后把 ID 让给无关新池）。
-    # dry_run 不消耗真实序列值，仅用本地计数预览。
-    if dry_run:
-        cur = db.execute(text("SELECT last_value, is_called FROM part_pool_group_id_seq")).one()
-        _ctr = [cur.last_value + (1 if cur.is_called else 0)]
-
-        def _alloc():
-            v = _ctr[0]; _ctr[0] += 1; return v
-    else:
-        def _alloc():
-            return int(db.execute(text("SELECT nextval('part_pool_group_id_seq')")).scalar())
-
-    # 大分量先认领主导 ID（成员重叠最多的旧 group_id）；稳定排序保证可复现
-    order = sorted(range(len(comps)), key=lambda i: (-len(comps[i]), min(comps[i])))
-    claimed: set[int] = set()
-    assigned: dict[int, int] = {}          # comp index -> group_id
-    existing_ids_in_comp: dict[int, set[int]] = {}
-    report = {"new": [], "merged": [], "split": [], "unchanged": 0}
-
-    for i in order:
-        members = comps[i]
-        tally: dict[int, int] = defaultdict(int)
-        for p in members:
-            if p in existing:
-                tally[existing[p]] += 1
-        existing_ids_in_comp[i] = set(tally)
-        # 候选=重叠最多的旧 ID（并列取小），未被本轮认领才可复用
-        cand = None
-        for gid in sorted(tally, key=lambda g: (-tally[g], g)):
-            if gid not in claimed:
-                cand = gid
-                break
-        if cand is not None:
-            assigned[i] = cand
-            claimed.add(cand)
-            if set(tally) == {cand} and existing_groups.get(cand) == members:
-                report["unchanged"] += 1
-        else:
-            assigned[i] = _alloc()
-
-    # 合并/拆分报告
-    for i in order:
-        others = existing_ids_in_comp[i] - {assigned[i]}
-        if others:
-            report["merged"].append({"into": assigned[i], "from": sorted(others), "size": len(comps[i])})
-    # 拆分：某旧 group_id 的成员散到 ≥2 个新分量
-    old_to_comps: dict[int, set[int]] = defaultdict(set)
-    for i in range(len(comps)):
-        for gid in existing_ids_in_comp[i]:
-            old_to_comps[gid].add(i)
-    for gid, cs in old_to_comps.items():
-        if len(cs) > 1:
-            report["split"].append({"from": gid, "into": sorted(assigned[i] for i in cs)})
-    for i in order:
-        if not existing_ids_in_comp[i]:
-            report["new"].append({"group_id": assigned[i], "size": len(comps[i])})
-
-    calib, over = [], []
-    pools_out = []
-    for i in range(len(comps)):
-        gid = assigned[i]
-        size = len(comps[i])
-        nc = comp_missing_type[i]
-        ov = size > config.POOL_OVERSIZE_MEMBERS
-        if nc:
-            calib.append(gid)
-        if ov:
-            over.append(gid)
-        pools_out.append((gid, sorted(comps[i]), size, nc, ov))
-
-    result = {
-        "dry_run": dry_run,
-        "pools": len(comps),
-        "parts_pooled": sum(len(m) for m in comps),
-        "needs_calibration": sorted(calib),
-        "oversized": sorted(over),
-        **report,
-    }
-    if dry_run:
-        return result
-
-    db.execute(delete(PartPoolMember))
-    db.execute(delete(PartPool))
-    db.flush()
-    for gid, members, size, nc, ov in pools_out:
-        db.add(PartPool(group_id=gid, member_count=size, needs_calibration=nc, oversized=ov))
-    db.flush()
-    for gid, members, size, nc, ov in pools_out:
-        for p in members:
-            db.add(PartPoolMember(part_id=p, group_id=gid))
-    db.commit()
-    return result
 
 
 def _r(x, n=2):
@@ -287,7 +132,9 @@ def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: 
     """单个通用号池的降本分析（只读）。甲方修正版：双端溢价、供应稳定性非库存、
     节省分理论上限/可执行机会、客户跨品牌集中度（老板可见）。不输出自动替换指令。"""
     pool = db.get(PartPool, group_id)
-    if pool is None:
+    if pool is None or pool.status != "active":
+        # 归档池不是当前经营池（复审阻塞 2）：其成员可能已进新有效池，再分析会把同一
+        # PN 双份计入节省/需求。归档档案的查看走管理接口 /api/pools?status=archived。
         return None
     today = as_of or date.today()
     upper = min(date_to, today) if date_to else today
@@ -451,8 +298,11 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
     - sort="member_count"（默认）：按成员数降序，**先分页再逐池分析**（避免 N+1）。
     - sort="savings"（复审二轮 P1-4）：**全局**按理论节省额排名——先分析全部池再排序分页，
       否则"成员少但节省高"的池会永远藏在后页。池数量有限（生产 ~40），超 POOL_RANK_ANALYZE_CAP
-      时退回成员数排序并置 ranking_capped=True（当前不触发）。"""
-    total = db.execute(select(func.count()).select_from(PartPool)).scalar() or 0
+      时退回成员数排序并置 ranking_capped=True（当前不触发）。
+    只统计 status='active'（复审阻塞 2）：归档池成员可再入新有效池，混入清单/总数/
+    排名会把同一 PN 双份计入；归档档案查询走管理接口。"""
+    total = db.execute(select(func.count()).select_from(PartPool)
+                       .where(PartPool.status == "active")).scalar() or 0
     ranking_restricted = sort == "savings" and security.is_field_hidden(user_ctx, "theoretical_saving")
     if ranking_restricted:
         # 不仅不返回金额，连“按节省额”的执行路径也不能运行；否则行序仍是
@@ -463,7 +313,8 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
     if sort == "savings":
         if total <= config.POOL_RANK_ANALYZE_CAP:
             all_pools = db.execute(
-                select(PartPool).order_by(PartPool.group_id.asc())).scalars().all()
+                select(PartPool).where(PartPool.status == "active")
+                .order_by(PartPool.group_id.asc())).scalars().all()
             scored = [(p, analyze(db, p.group_id, date_from, date_to, as_of)) for p in all_pools]
             # 全局按节省额降序，再按 group_id 稳定破并列
             scored.sort(key=lambda pd: (-(pd[1]["savings"]["theoretical_max"] or 0), pd[0].group_id))
@@ -475,7 +326,8 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
         ranking_capped = True   # 池数超上限，退回成员数排序（数据规模保护）
 
     page_pools = db.execute(
-        select(PartPool).order_by(PartPool.member_count.desc(), PartPool.group_id.asc())
+        select(PartPool).where(PartPool.status == "active")
+        .order_by(PartPool.member_count.desc(), PartPool.group_id.asc())
         .limit(page_size).offset((page - 1) * page_size)
     ).scalars().all()
     # 成员数口径保持数据库排序；绝不能在当前页再按隐藏 theoretical_saving 排序。

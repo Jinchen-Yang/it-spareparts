@@ -14,6 +14,7 @@ type Account = {
 };
 type Meta = {
   roles: string[]; data_keys: string[]; page_keys: string[]; row_keys: string[];
+  action_keys: string[];   // 操作权限（如池维护/池约束价）；旧缓存的 meta 可能没有 → 渲染处兜底
   labels: Record<string, string>; role_templates: Record<string, Perms>;
 };
 
@@ -140,6 +141,7 @@ export default function AccountsPage() {
               options={meta.roles.filter((r) => r !== "admin").map((r) => ({ value: r, label: ROLE_LABEL[r] || r }))} />
             {permGroup("能看哪些数据", meta.data_keys)}
             {permGroup("能用哪些页面", meta.page_keys)}
+            {permGroup("操作权限", meta.action_keys ?? [])}
             {permGroup("防恶性竞争", meta.row_keys)}
           </>
         )}
