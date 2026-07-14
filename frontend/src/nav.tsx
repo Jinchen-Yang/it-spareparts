@@ -51,6 +51,7 @@ export interface NavGroup {
 // 路由级懒加载：每个页面独立 chunk，首包不再背 1.6MB。
 // import() 工厂单独存一份（load 字段）供空闲预取——lazy 与预取命中同一模块缓存
 const loadBossBoard = () => import("./pages/BossBoardPage");
+const loadPoolAnalysis = () => import("./pages/PoolAnalysisPage");
 const loadPartSearch = () => import("./pages/PartSearchPage");
 const loadProfit = () => import("./pages/ProfitPage");
 const loadPurchaseAnalysis = () => import("./pages/purchases/PurchaseAnalysisPage");
@@ -66,6 +67,7 @@ const loadChat = () => import("./pages/ChatPage");
 const loadAccounts = () => import("./pages/AccountsPage");
 
 const BossBoardPage = lazy(loadBossBoard);
+const PoolAnalysisPage = lazy(loadPoolAnalysis);
 const PartSearchPage = lazy(loadPartSearch);
 const ProfitPage = lazy(loadProfit);
 const PurchaseAnalysisPage = lazy(loadPurchaseAnalysis);
@@ -151,6 +153,42 @@ export const NAV_GROUPS: NavGroup[] = [
 ];
 
 export const NAV_ITEMS: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
+
+/**
+ * 带参详情路由（不进侧栏菜单，可深链/刷新/前进后退）。
+ * menuKey 指向所属菜单项：详情页打开时侧栏仍高亮母页、面包屑挂在母页之下。
+ * perm 与母页一致——注册与菜单可见性共用同一权限门，不越权暴露详情路由。
+ */
+export interface DetailRoute {
+  key: string;
+  /** react-router 带参路径，如 /pool-analysis/:groupId */
+  path: string;
+  /** 匹配当前地址用（menu 高亮/标题/面包屑），与 path 的参数段对应 */
+  pattern: RegExp;
+  label: string;
+  perm: string;
+  menuKey: string;
+  page: LazyExoticComponent<ComponentType>;
+  load: () => Promise<{ default: ComponentType }>;
+}
+
+export const DETAIL_ROUTES: DetailRoute[] = [
+  {
+    key: "pool-analysis",
+    path: "/pool-analysis/:groupId",
+    pattern: /^\/pool-analysis\/\d+$/,
+    label: "池分析详情",
+    perm: "page_boss_board",
+    menuKey: "boss",
+    page: PoolAnalysisPage,
+    load: loadPoolAnalysis,
+  },
+];
+
+/** 找到 path 对应的详情路由（正则匹配参数段） */
+export function matchDetailRoute(pathname: string): DetailRoute | undefined {
+  return DETAIL_ROUTES.find((r) => r.pattern.test(pathname));
+}
 
 /**
  * 旧路径 → 新路径的兼容重定向：老收藏 / 老外链仍能落到正确页面。

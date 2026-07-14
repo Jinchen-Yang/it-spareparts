@@ -446,6 +446,72 @@ def _pool_list_item(p: PartPool, d: dict | None) -> dict:
     }
 
 
+def _batch_list_summaries(db: Session, pools: list[PartPool], date_from: date | None,
+                          upper: date, today: date) -> dict[int, dict]:
+    """批量生成清单所需的遗留 demand/savings 摘要。
+
+    历史实现在 sort=savings 时对每个池调一次 analyze()；每次都重查成员、
+    采购、销售和客户，形成 N×多条 SQL。清单实际只需四个数，因此在所有
+    候选池之间共用一次成员查询 + 一次采购聚合 + 一次销售聚合。
+
+    公式与 analyze 保持一致：可靠标杆=去重采购单数>=2 的最低加权均价；
+    theoretical=Σ(成员采购均价-标杆均价)×该成员销量。这是等价的
+    查询计划优化，不改遗留字段/排序语义。"""
+    if not pools:
+        return {}
+    gids = [p.group_id for p in pools]
+    group_parts: dict[int, list[int]] = defaultdict(list)
+    for gid, pid in db.execute(
+        select(PartPoolMember.group_id, PartPoolMember.part_id)
+        .where(PartPoolMember.group_id.in_(gids))
+    ):
+        group_parts[gid].append(pid)
+    part_ids = [pid for ids in group_parts.values() for pid in ids]
+    supply_floor = today - timedelta(days=config.POOL_SUPPLY_RECENT_DAYS)
+    pstats = _purchase_member_stats(db, part_ids, supply_floor, today)
+    sstats = _sale_member_stats(db, part_ids, date_from, upper)
+
+    out: dict[int, dict] = {}
+    for p in pools:
+        members = [{"part_id": pid, "purchase_price": pstats.get(pid),
+                    "sale_price": sstats.get(pid)}
+                   for pid in group_parts.get(p.group_id, [])]
+        cost_bench, cost_bench_pid, _ = _benchmark(members, "purchase_price")
+        bench_supply_ok = False
+        if cost_bench_pid is not None and pstats.get(cost_bench_pid):
+            supply = pstats[cost_bench_pid]["supply"]
+            last = supply.get("last_purchase_date")
+            recent = bool(last and
+                          (today - date.fromisoformat(last)).days
+                          <= config.POOL_SUPPLY_RECENT_DAYS)
+            bench_supply_ok = bool(
+                (supply.get("purchase_orders") or 0) >= config.POOL_SUPPLY_MIN_ORDERS
+                and (supply.get("suppliers") or 0) >= config.POOL_SUPPLY_MIN_SUPPLIERS
+                and recent)
+
+        theoretical = supply_upper = 0.0
+        for m in members:
+            purchase = m["purchase_price"] or {}
+            sale = m["sale_price"] or {}
+            pw, qty = purchase.get("wavg"), sale.get("qty_sold")
+            if pw is None or cost_bench is None or qty is None or pw <= cost_bench or qty <= 0:
+                continue
+            saving = round((pw - cost_bench) * qty, 2)
+            theoretical += saving
+            if bench_supply_ok and (purchase.get("samples") or 0) >= 1:
+                supply_upper += saving
+
+        demand_qty = sum((m["sale_price"] or {}).get("qty_sold") or 0 for m in members)
+        demand_rev = sum((m["sale_price"] or {}).get("revenue") or 0 for m in members)
+        out[p.group_id] = {
+            "demand": {"total_qty": _r(demand_qty, 3),
+                       "total_revenue_ex_tax": _r(demand_rev)},
+            "savings": {"theoretical_max": round(theoretical, 2),
+                        "supply_available_upper": round(supply_upper, 2)},
+        }
+    return out
+
+
 # v2 服务端排序键 → 从 _pool_stats 结果取排序值
 _METRIC_SORTS = {
     "purchase_total": lambda s: s["purchase_metrics"]["total_amount"],
@@ -462,8 +528,8 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
                as_of: date | None = None, page: int = 1, page_size: int = 20,
                sort: str = "member_count", user_ctx: security.UserContext | None = None) -> dict:
     """池清单。排序口径：
-    - sort="member_count"（默认）：按成员数降序，**先分页再逐池分析**（避免 N+1）。
-    - sort="savings"（复审二轮 P1-4）：**全局**按理论节省额排名——先分析全部池再排序分页，
+    - sort="member_count"（默认）：按成员数降序，分页后批量算当页摘要。
+    - sort="savings"（复审二轮 P1-4）：**全局**按理论节省额排名——先批量聚合全部池再排序分页，
       否则"成员少但节省高"的池会永远藏在后页。池数量有限（生产 ~40），超 POOL_RANK_ANALYZE_CAP
       时退回成员数排序并置 ranking_capped=True（当前不触发）。
     - v2 指标排序（purchase_total/purchase_average/sales_total/sales_average/
@@ -517,7 +583,8 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
             all_pools = db.execute(
                 select(PartPool).where(PartPool.status == "active")
                 .order_by(PartPool.group_id.asc())).scalars().all()
-            scored = [(p, analyze(db, p.group_id, date_from, date_to, as_of)) for p in all_pools]
+            summaries = _batch_list_summaries(db, all_pools, date_from, upper, today)
+            scored = [(p, summaries[p.group_id]) for p in all_pools]
             # 全局按节省额降序，再按 group_id 稳定破并列
             scored.sort(key=lambda pd: (-(pd[1]["savings"]["theoretical_max"] or 0), pd[0].group_id))
             page_slice = scored[(page - 1) * page_size: page * page_size]
@@ -536,7 +603,8 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
     ).scalars().all()
     # 成员数口径保持数据库排序；绝不能在当前页再按隐藏 theoretical_saving 排序。
     stats = _pool_stats(db, [p.group_id for p in page_pools], date_from, upper, manual_restricted)
-    items = [{**_pool_list_item(p, analyze(db, p.group_id, date_from, date_to, as_of)),
+    summaries = _batch_list_summaries(db, page_pools, date_from, upper, today)
+    items = [{**_pool_list_item(p, summaries[p.group_id]),
               **stats.get(p.group_id, {})} for p in page_pools]
     return {"total": total, "page": page, "page_size": page_size, "window": window,
             "sort": "member_count", "effective_sort": "member_count",

@@ -503,17 +503,50 @@ def _purchase_parts(db: Session, order_ids: list[int], date_from: date | None, u
     return out
 
 
+def _orders_containing_part(line_model, part_id: int | None, pool_group_id: int | None):
+    """全局筛选（UI v2）：按"订单内含该型号 / 含该有效池成员"生成整单召回子查询。
+    过滤在订单集合层做而非行 WHERE——聚合口径必须仍是整单（型号数/总量/金额不因筛选缩水）。"""
+    conds = []
+    if part_id is not None:
+        conds.append(select(line_model.order_id).where(line_model.part_id == part_id))
+    if pool_group_id is not None:
+        member_sub = (select(PartPoolMember.part_id)
+                      .join(PartPool, PartPool.group_id == PartPoolMember.group_id)
+                      .where(PartPoolMember.group_id == pool_group_id,
+                             PartPool.status == "active"))
+        conds.append(select(line_model.order_id).where(line_model.part_id.in_(member_sub)))
+    return conds
+
+
 def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | None = None,
-                 status: str | None = None, q: str | None = None, customer: str | None = None,
+                 status: str | None = None, q: str | None = None, order_no: str | None = None,
+                 customer: str | None = None,
                  salesperson: str | None = None, business_type: str | None = None,
+                 part_id: int | None = None, pool_group_id: int | None = None,
                  sort: str = "order_date", order: str = "desc",
                  page: int = 1, page_size: int = 50, as_of: date | None = None,
                  user_ctx: security.UserContext | None = None) -> dict:
     """订单拉通-销售侧：**一张销售订单一行**（复审 P1-4，此前是明细行粒度）。
     多型号聚合为 型号数/总量/总营收/总毛利。金额未税。status 留空=仅已生效、'全部'=不限。
     linked_purchase：是否有**已生效**采购单经 linked_sales_order_no 关联（复审：不再算取消单）。
-    未来单不排除但打 is_future。"""
+    默认/具体状态视图排除未来单；status='全部' 保留管理诊断能力。
+
+    受限销售（is_scoped_sales）按 security.py 的统一策略不可见任何逐单
+    成交信息。必须在任何过滤/计数 SQL 前短路，避免用 customer/salesperson/
+    order_no 等条件猜测某单是否存在。"""
     today = as_of or date.today()
+    if security.is_scoped_sales(user_ctx):
+        # 稳定的受限响应：total=None 明确表示“不可见”，不用 0 伪装成
+        # “查无数据”；且不随任何查询条件/排序改变，消除存在性侧信道。
+        return {
+            "contract_version": 2, "total": None, "page": page, "page_size": page_size,
+            "as_of": today.isoformat(), "effective_sort": None,
+            "ranking_restricted": True, "profit_restricted": True,
+            "parts_restricted": True, "orders_restricted": True,
+            "manual_reference_restricted": security.is_field_hidden(
+                user_ctx, "purchase_ceiling_ex_tax"),
+            "items": [],
+        }
     sl, so = FSalesLine, FSalesOrder
     counts, costed = sl.counts_revenue.is_(True), and_(sl.counts_revenue.is_(True), sl.cost_moving_avg.is_not(None))
     # 已生效采购单关联才算"拉通"（取消/进行中不算）
@@ -541,8 +574,13 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
         base = active_orders(base, so)
     if date_from:
         base = base.where(so.order_date >= date_from)
-    if date_to:
-        base = base.where(so.order_date <= date_to)
+    # 老板默认“最近有效单”不能被未来日期污染；只有显式
+    # status='全部' 的管理诊断视图可看未来单。date_to 即使传到未来也被裁到 today。
+    upper = date_to if status == "全部" else min(date_to, today) if date_to else today
+    if upper:
+        base = base.where(so.order_date <= upper)
+    if order_no and order_no.strip():
+        base = base.where(so.order_no == order_no.strip())
     if q and q.strip():
         kw = f"%{q.strip()}%"   # 订单粒度：单号直匹 或 含匹配型号（TODO 第②块接统一型号搜索）
         sub = (select(FSalesLine.order_id).join(DimPart, FSalesLine.part_id == DimPart.id)
@@ -554,6 +592,8 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
         base = base.where(so.salesperson.ilike(f"%{salesperson.strip()}%"))
     if business_type:
         base = base.where(so.business_type == business_type)
+    for sub in _orders_containing_part(FSalesLine, part_id, pool_group_id):
+        base = base.where(so.id.in_(sub))
     if user_ctx is not None:
         base = security.apply_data_scope(base, user_ctx)
     base = base.group_by(so.id, so.order_no, so.order_date, so.salesperson,
@@ -587,31 +627,29 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
             "total_gross_profit": _f(r.total_gross_profit),
             "linked_purchase": bool(r.linked_purchase),
         })
-    # v2：嵌套 parts（价格参考随行）。受限销售 = 逐单成交明细整段不可见
-    # （anonymize_sales_rows 同一口径），只留聚合概要，置 parts_restricted 旗标。
-    scoped = security.is_scoped_sales(user_ctx)
+    # v2：嵌套 parts（价格参考随行）。受限销售已在入口整段短路。
     manual_restricted = security.is_field_hidden(user_ctx, "purchase_ceiling_ex_tax")
     stats_upper = min(date_to, today) if date_to else today
-    parts_map = {} if scoped else _sales_parts(
+    parts_map = _sales_parts(
         db, [i["order_id"] for i in items], date_from, stats_upper, manual_restricted)
     for it in items:
         parts = parts_map.get(it["order_id"], [])
         it["parts"] = parts
         it["pn_preview"] = list(dict.fromkeys(p["pn_std"] for p in parts if p["pn_std"]))[:3]
-        if scoped:
-            # 订单头的 客户/销售员 同属"某单卖给谁、谁卖的"逐单归属（安全审计 P1）：
-            # 受限销售即便被自定义权限开了看板页，也只看聚合，不看归属
-            it["customer"] = None
-            it["salesperson"] = None
-    return {"total": total, "page": page, "page_size": page_size, "as_of": today.isoformat(),
+    return {"contract_version": 2, "total": total, "page": page, "page_size": page_size,
+            "as_of": today.isoformat(),
             "effective_sort": effective_sort, "ranking_restricted": ranking_restricted,
-            "profit_restricted": profit_restricted, "parts_restricted": scoped,
+            "profit_restricted": profit_restricted, "parts_restricted": False,
+            "orders_restricted": False,
             "manual_reference_restricted": manual_restricted, "items": items}
 
 
 def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date | None = None,
                     status: str | None = None, q: str | None = None,
-                    source_type: str | None = None, sort: str = "order_date", order: str = "desc",
+                    order_no: str | None = None,
+                    source_type: str | None = None, purchaser: str | None = None,
+                    part_id: int | None = None, pool_group_id: int | None = None,
+                    sort: str = "order_date", order: str = "desc",
                     page: int = 1, page_size: int = 50, as_of: date | None = None,
                     user_ctx: security.UserContext | None = None) -> dict:
     """订单拉通-采购侧：**一张采购订单一行**（看板内直接给采购订单列表，不再只让跳采购明细页）。
@@ -636,8 +674,11 @@ def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date
         base = active_orders(base, po)
     if date_from:
         base = base.where(po.order_date >= date_from)
-    if date_to:
-        base = base.where(po.order_date <= date_to)
+    upper = date_to if status == "全部" else min(date_to, today) if date_to else today
+    if upper:
+        base = base.where(po.order_date <= upper)
+    if order_no and order_no.strip():
+        base = base.where(po.order_no == order_no.strip())
     if q and q.strip():
         kw = f"%{q.strip()}%"   # 单号直匹 或 含匹配型号
         sub = (select(pl.order_id).join(DimPart, pl.part_id == DimPart.id)
@@ -645,6 +686,10 @@ def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date
         base = base.where(or_(po.order_no.ilike(kw), po.id.in_(sub)))
     if source_type:
         base = base.where(po.source_type == source_type)
+    if purchaser:
+        base = base.where(po.purchaser.ilike(f"%{purchaser.strip()}%"))
+    for sub in _orders_containing_part(FPurchaseLine, part_id, pool_group_id):
+        base = base.where(po.id.in_(sub))
     base = base.group_by(po.id, po.order_no, po.order_date, po.purchaser, po.source_type,
                          po.data_status, po.linked_sales_order_no, po.supplier_id)
     total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0
@@ -678,7 +723,8 @@ def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date
         parts = parts_map.get(it["order_id"], [])
         it["parts"] = parts
         it["pn_preview"] = list(dict.fromkeys(p["pn_std"] for p in parts if p["pn_std"]))[:3]
-    return {"total": total, "page": page, "page_size": page_size, "as_of": today.isoformat(),
+    return {"contract_version": 2, "total": total, "page": page, "page_size": page_size,
+            "as_of": today.isoformat(),
             "effective_sort": effective_sort, "ranking_restricted": ranking_restricted,
             "cost_restricted": cost_restricted,
             "manual_reference_restricted": manual_restricted, "items": items}

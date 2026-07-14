@@ -8,7 +8,7 @@ import { MenuFoldOutlined, MenuOutlined, MenuUnfoldOutlined, UserOutlined } from
 import type { MenuProps } from "antd";
 import { COLORS } from "./theme";
 import { APP_VERSION, CHANGELOG, LATEST } from "./version";
-import { NAV_GROUPS, matchNavItem } from "./nav";
+import { NAV_GROUPS, matchDetailRoute, matchNavItem } from "./nav";
 import type { NavItem } from "./nav";
 import ChangePasswordModal from "./components/ChangePasswordModal";
 import { TaxBasisToggle } from "./context/TaxBasis";
@@ -17,6 +17,17 @@ const { Header, Content, Sider } = Layout;
 
 const SIDER_WIDTH = 224;
 const SIDER_COLLAPSED = 72;
+
+export type ShellHeaderMode = "mobile" | "tablet" | "desktop";
+
+/** Ant Design md starts at exactly 768px; lg starts at 992px.  The old desktop
+ * action row overflowed the 544px content area at 768px (after the sider).
+ * Tablet mode keeps the desktop sider but uses the compact user-menu header. */
+export function shellHeaderMode(screens: { md?: boolean; lg?: boolean }): ShellHeaderMode {
+  if (screens.md === false) return "mobile";
+  if (screens.lg === false) return "tablet";
+  return "desktop";
+}
 
 function Brand({ collapsed }: { collapsed?: boolean }) {
   return (
@@ -61,7 +72,9 @@ export default function AppShell({
   const navigate = useNavigate();
   const screens = Grid.useBreakpoint();
   // md 未计算完成(首帧 undefined)按桌面处理，避免闪抽屉
-  const isMobile = screens.md === false;
+  const headerMode = shellHeaderMode(screens);
+  const isMobile = headerMode === "mobile";
+  const compactHeader = headerMode !== "desktop";
 
   const [collapsed, setCollapsed] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -81,12 +94,16 @@ export default function AppShell({
     admin: "管理员", boss: "老板", sales: "销售", purchaser: "采购", readonly: "只读",
   };
 
-  const active = matchNavItem(location.pathname);
+  // 详情路由（如 /pool-analysis/:id）挂在母页之下：菜单仍高亮母页、面包屑/标题追加详情段
+  const detail = matchDetailRoute(location.pathname);
+  const active = matchNavItem(location.pathname)
+    ?? (detail ? allowed.find((it) => it.key === detail.menuKey) : undefined);
 
   // 页面标题跟随路由：浏览器标签/收藏夹可辨识
   useEffect(() => {
-    document.title = active ? `${active.label} · 备件智能管理系统` : "备件智能管理系统";
-  }, [active]);
+    const label = detail?.label ?? active?.label;
+    document.title = label ? `${label} · 备件智能管理系统` : "备件智能管理系统";
+  }, [active, detail]);
 
   // 视口跨过断点回桌面时收起抽屉，避免转回竖屏时抽屉无操作自动弹开
   useEffect(() => {
@@ -145,8 +162,9 @@ export default function AppShell({
     ? [
         ...(group?.label ? [{ title: group.label }] : []),
         { title: active.label },
+        ...(detail ? [{ title: detail.label }] : []),
       ]
-    : [];
+    : detail ? [{ title: detail.label }] : [];
 
   // 移动端把次级入口收进用户菜单，顶栏只留 菜单/标题/用户 三件事
   const userMenuItems: MenuProps["items"] = [
@@ -217,19 +235,23 @@ export default function AppShell({
 
       <Layout style={{ minWidth: 0 }}>
         <Header
+          data-shell-header-mode={headerMode}
           style={{
             display: "flex", alignItems: "center", gap: 8,
             paddingInline: isMobile ? 12 : 24,
+            minWidth: 0,
           }}
         >
-          {isMobile ? (
+          {compactHeader ? (
             <>
-              <Button
-                type="text"
-                icon={<MenuOutlined />}
-                aria-label="打开菜单"
-                onClick={() => setDrawerOpen(true)}
-              />
+              {isMobile && (
+                <Button
+                  type="text"
+                  icon={<MenuOutlined />}
+                  aria-label="打开菜单"
+                  onClick={() => setDrawerOpen(true)}
+                />
+              )}
               <span
                 style={{
                   flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",

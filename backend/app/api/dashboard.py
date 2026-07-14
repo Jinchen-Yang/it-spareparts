@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from app.auth import current_role, require_admin
 from app.db import get_db
 from app.security import (UserContext, apply_field_visibility, get_current_user_context,
-                          record_access_log, require_page)
+                          is_field_hidden, is_scoped_sales, record_access_log, require_page)
 from app.services import dashboard, pool
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
@@ -39,9 +39,12 @@ def sales(
     date_to: date | None = Query(None),
     status: str | None = Query(None, description="留空=仅已生效；'全部'=不限；或具体状态"),
     q: str | None = Query(None),
+    order_no: str | None = Query(None, description="销售单号全等精确查找（q 仍为模糊搜索）"),
     customer: str | None = Query(None),
     salesperson: str | None = Query(None),
     business_type: str | None = Query(None),
+    part_id: int | None = Query(None, description="含该型号的订单（整单召回）"),
+    pool_group_id: int | None = Query(None, description="含该有效池成员的订单（整单召回）"),
     sort: str = Query("order_date", pattern="^(order_date|revenue|gross_profit|part_count)$"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
@@ -51,9 +54,18 @@ def sales(
     _page: None = Depends(require_page("page_boss_board")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    record_access_log(ctx, "sales", "dashboard", {"q": q, "status": status, "sort": sort})
+    # 受限销售由服务层在任何 SQL 前返回稳定的“订单不可见”响应；除此之外，
+    # 客户字段不可见的账号也不能用筛选结果数量探测客户名是否存在。
+    if customer and not is_scoped_sales(ctx) and is_field_hidden(ctx, "customer"):
+        raise HTTPException(status_code=403, detail="当前账号无客户信息权限，不能按客户筛选")
+    record_access_log(ctx, "sales", "dashboard", {
+        "q": q, "order_no": order_no, "status": status, "sort": sort,
+        "part_id": part_id, "pool_group_id": pool_group_id,
+    })
     data = dashboard.sales_orders(db, date_from=date_from, date_to=date_to, status=status, q=q,
+                                  order_no=order_no,
                                   customer=customer, salesperson=salesperson, business_type=business_type,
+                                  part_id=part_id, pool_group_id=pool_group_id,
                                   sort=sort, order=order, page=page, page_size=page_size, user_ctx=ctx)
     return apply_field_visibility(data, ctx)
 
@@ -64,7 +76,11 @@ def purchase_orders(
     date_to: date | None = Query(None),
     status: str | None = Query(None, description="留空=仅已生效；'全部'=不限；或具体状态"),
     q: str | None = Query(None),
+    order_no: str | None = Query(None, description="采购单号全等精确查找（q 仍为模糊搜索）"),
     source_type: str | None = Query(None),
+    purchaser: str | None = Query(None, description="采购员（ILIKE 含匹配）"),
+    part_id: int | None = Query(None, description="含该型号的订单（整单召回）"),
+    pool_group_id: int | None = Query(None, description="含该有效池成员的订单（整单召回）"),
     sort: str = Query("order_date", pattern="^(order_date|amount|part_count)$"),
     order: str = Query("desc", pattern="^(asc|desc)$"),
     page: int = Query(1, ge=1),
@@ -74,9 +90,15 @@ def purchase_orders(
     _page: None = Depends(require_page("page_boss_board")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    record_access_log(ctx, "purchase_orders", "dashboard", {"q": q, "status": status, "sort": sort})
+    record_access_log(ctx, "purchase_orders", "dashboard", {
+        "q": q, "order_no": order_no, "status": status, "sort": sort,
+        "part_id": part_id, "pool_group_id": pool_group_id,
+    })
     data = dashboard.purchase_orders(db, date_from=date_from, date_to=date_to, status=status, q=q,
-                                     source_type=source_type, sort=sort, order=order,
+                                     order_no=order_no,
+                                     source_type=source_type, purchaser=purchaser,
+                                     part_id=part_id, pool_group_id=pool_group_id,
+                                     sort=sort, order=order,
                                      page=page, page_size=page_size, user_ctx=ctx)
     return apply_field_visibility(data, ctx)
 
