@@ -26,7 +26,8 @@ if (!(window as any).ResizeObserver) {
   };
 }
 
-// rc-table 在 jsdom 里读取 offsetParent 之类的布局属性，缺省即可
-if (!("getComputedStyle" in window)) {
-  (window as any).getComputedStyle = () => ({ getPropertyValue: () => "" });
-}
+// rc-table 会把伪元素参数传给 getComputedStyle；jsdom 虽然实现了这个方法，
+// 但伪元素分支只会向 stderr 打 "Not implemented"。测试不依赖伪元素样式，
+// 因此保留真实元素的计算结果并忽略第二个参数，避免噪音淹没真正的 warning。
+const nativeGetComputedStyle = window.getComputedStyle.bind(window);
+window.getComputedStyle = (element: Element) => nativeGetComputedStyle(element);
