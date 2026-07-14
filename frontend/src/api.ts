@@ -479,7 +479,7 @@ export interface InventoryRow {
   inventory_value: number | null;
 }
 
-// ===== 老板经营看板（page_boss_board）=====
+// ===== 老板经营看板（page_boss_board）· v2 契约（PR#93）=====
 export interface DashboardKpi {
   window: { date_from: string | null; date_to: string | null; as_of: string; future_excluded: boolean };
   sales_ex_tax: number | null; purchase_ex_tax: number | null;
@@ -496,44 +496,111 @@ export interface TrendPoint { period: string; sales_ex_tax: number; purchase_ex_
 export const dashboardTrend = (params: { date_from?: string; date_to?: string; granularity?: string } = {}) =>
   api.get<{ granularity: string; series: TrendPoint[] }>("/dashboard/trend", { params });
 
+/** 单行价格参考状态（pool_metrics.price_reference）。
+ * within_pool_average / no_pool_average 仅出现在治理权限受限的降级口径。 */
+export type ReferenceStatus =
+  | "no_pool" | "no_price"
+  | "above_manual_max" | "below_manual_min"
+  | "above_pool_average" | "below_pool_average"
+  | "within_limit" | "no_manual_limit"
+  | "within_pool_average" | "no_pool_average";
+
+export interface PriceReference {
+  reference_status: ReferenceStatus;
+  pool_avg_delta: number | null; pool_avg_delta_pct: number | null;
+  manual_limit_delta: number | null; manual_limit_delta_pct: number | null;
+}
+
+/** 每 part 的价格统计容器（最低/最高仅参考，标杆看加权均价/中位价）。 */
+export interface PriceStats {
+  wavg: number | null; median: number | null; min: number | null; max: number | null;
+  samples: number; last_date: string | null;
+}
+
 // 成本/毛利类字段按角色可能被脱敏成 null，故一律 `number | null`。
 export interface PartRankingRow {
-  part_id: number; pn_std: string; brand: string | null;
-  qty_sold: number | null; revenue: number | null;
+  part_id: number; pn_std: string; description: string | null; brand: string | null;
+  qty_sold: number | null; revenue: number | null; order_count: number;
+  revenue_costed: number | null; no_cost: number; lines: number;
   gross_profit_moving: number | null; gross_profit_fifo: number | null;
   gross_margin_moving: number | null; gross_margin_fifo: number | null;
-  purchase_price: { wavg: number | null } | null; cost_coverage: number | null;
+  purchase_price: PriceStats | null; sale_price: PriceStats | null;
+  cost_coverage: number | null;
+  pool_group_id: number | null; pool_name: string | null;
 }
 export interface PartRankingResp {
+  window: { date_from: string | null; date_to: string | null; as_of: string; cost_method: string };
+  filters: { part_id: number | null; pn: string | null; pool_group_id: number | null };
   profitable: PartRankingRow[]; loss: PartRankingRow[];
   profit_restricted: boolean;
   counts: { total_parts: number; with_cost: number;
     profitable: number | null; loss: number | null; no_cost_parts: number };
+  ranking: { total: number; page: number; page_size: number; sort: string;
+    effective_sort: string; order: string; ranking_restricted: boolean;
+    items: PartRankingRow[] };
 }
-export const dashboardPartRanking = (params: { date_from?: string; date_to?: string; cost_method?: string; top?: number } = {}) =>
+export interface PartRankingQuery {
+  date_from?: string; date_to?: string; cost_method?: string; top?: number;
+  part_id?: number; pn?: string; pool_group_id?: number;
+  sort?: string; order?: "asc" | "desc"; page?: number; page_size?: number;
+}
+export const dashboardPartRanking = (params: PartRankingQuery = {}) =>
   api.get<PartRankingResp>("/dashboard/part-ranking", { params });
 
 export interface OrdersQuery {
   date_from?: string; date_to?: string; q?: string; status?: string;
-  source_type?: string; sort?: string; order?: "asc" | "desc";
+  source_type?: string; customer?: string; salesperson?: string; purchaser?: string;
+  part_id?: number; pool_group_id?: number;
+  sort?: string; order?: "asc" | "desc";
   page?: number; page_size?: number;
 }
+
+/** 销售订单行明细（v2 嵌套 parts）。约束价键名 = min_sale_price（销售下限）。 */
+export interface SalesOrderPart extends PriceReference {
+  line_id: number; part_id: number; pn_std: string | null;
+  description: string | null; brand: string | null;
+  quantity: number | null; unit_price_ex_tax: number | null; amount: number | null;
+  counts_revenue: boolean; in_stats_scope: boolean;
+  pool_group_id: number | null; pool_name: string | null;
+  pool_avg_sale_price: number | null; min_sale_price: number | null;
+}
+/** 采购订单行明细。约束价键名 = max_purchase_price（采购上限）。 */
+export interface PurchaseOrderPart extends PriceReference {
+  line_id: number; part_id: number; pn_std: string | null;
+  description: string | null; brand: string | null;
+  quantity: number | null; unit_price_ex_tax: number | null; amount: number | null;
+  in_stats_scope: boolean;
+  pool_group_id: number | null; pool_name: string | null;
+  pool_avg_purchase_price: number | null; max_purchase_price: number | null;
+}
+
 export interface SalesOrderRow {
-  order_id: number; order_no: string; order_date: string | null; is_future: boolean;
+  order_id: number; order_no: string; order_date: string | null;
+  occurred_date: string | null; is_future: boolean;
   salesperson: string | null; customer: string | null; business_type: string | null;
-  data_status: string | null; part_count: number; total_qty: number | null;
-  total_revenue: number | null; total_gross_profit: number | null; linked_purchase: boolean;
+  data_status: string | null; part_count: number; pn_count: number;
+  total_qty: number | null; total_quantity: number | null;
+  total_revenue: number | null; total_amount: number | null;
+  total_gross_profit: number | null; linked_purchase: boolean;
+  parts: SalesOrderPart[]; pn_preview: string[];
 }
 export interface PurchaseOrderRow {
-  order_id: number; order_no: string; order_date: string | null; is_future: boolean;
+  order_id: number; order_no: string; order_date: string | null;
+  occurred_date: string | null; is_future: boolean;
   purchaser: string | null; source_type: string | null; data_status: string | null;
-  linked_sales_order: string | null; part_count: number; total_qty: number | null;
-  total_ex_tax: number | null;
+  linked_sales_order: string | null; part_count: number; pn_count: number;
+  total_qty: number | null; total_quantity: number | null;
+  total_ex_tax: number | null; total_amount: number | null;
+  parts: PurchaseOrderPart[]; pn_preview: string[];
 }
 export interface OrdersResp<T> {
   total: number; page: number; page_size: number; as_of: string; items: T[];
   effective_sort: string; ranking_restricted: boolean;
   profit_restricted?: boolean; cost_restricted?: boolean;
+  /** 受限销售：逐单明细整段不可见（parts 恒空、订单头客户/销售员置空） */
+  parts_restricted?: boolean;
+  /** 治理权限关闭：约束价与差额一律 null，reference_status 降级为池均价口径 */
+  manual_reference_restricted?: boolean;
 }
 
 export const dashboardSales = (params: OrdersQuery = {}) =>
@@ -542,42 +609,91 @@ export const dashboardSales = (params: OrdersQuery = {}) =>
 export const dashboardPurchaseOrders = (params: OrdersQuery = {}) =>
   api.get<OrdersResp<PurchaseOrderRow>>("/dashboard/purchase-orders", { params });
 
+/** 池窗口指标（pool_metrics 单一口径源）：数量为 0 时加权均价= null，绝不用 0 冒充。 */
+export interface PoolMetrics {
+  total_amount: number | null; total_quantity: number | null;
+  weighted_avg_unit_price: number | null; order_count: number; latest_date: string | null;
+}
+
 export interface PoolListItem {
-  group_id: number; member_count: number; needs_calibration: boolean; oversized: boolean;
+  group_id: number; name: string | null; description: string | null;
+  member_count: number; needs_calibration: boolean; oversized: boolean;
   demand_qty: number | null; demand_revenue_ex_tax: number | null;
   theoretical_saving: number | null; supply_available_upper: number | null;
+  purchase_metrics: PoolMetrics | null; sales_metrics: PoolMetrics | null;
+  max_purchase_price: number | null; min_sale_price: number | null;
+  /** null 语义二分：该侧无约束价（无约束≠零越线）或治理权限受限 */
+  purchase_violation_count: number | null; sale_violation_count: number | null;
 }
+export type PoolSort =
+  | "savings" | "member_count"
+  | "purchase_total" | "purchase_average" | "sales_total" | "sales_average"
+  | "purchase_violation_count" | "sale_violation_count";
 export interface PoolsResp {
   total: number; page: number; page_size: number;
-  sort: "savings" | "member_count"; effective_sort: "savings" | "member_count";
+  window: { date_from: string | null; date_to: string | null; as_of: string };
+  sort: PoolSort; effective_sort: PoolSort;
   ranking_restricted: boolean; ranking_capped: boolean; items: PoolListItem[];
 }
-export const dashboardPools = (params: { date_from?: string; date_to?: string; page?: number; page_size?: number; sort?: string } = {}) =>
+export const dashboardPools = (params: { date_from?: string; date_to?: string; page?: number; page_size?: number; sort?: PoolSort } = {}) =>
   api.get<PoolsResp>("/dashboard/pools", { params });
+
+/** 成员窗口指标 = 池窗口指标 + 与池均值/人工约束价的差额（成员加权均价为比较基准）。 */
+export interface PoolMemberMetrics extends PoolMetrics {
+  pool_avg_delta: number | null; pool_avg_delta_pct: number | null;
+  manual_limit_delta: number | null; manual_limit_delta_pct: number | null;
+}
 
 // 池详情：benchmark/savings 属成本组，对无成本查看权限的角色会被整块脱敏为 null → 定型为可空。
 export interface PoolMemberRow {
-  part_id: number; pn_std: string | null; brand: string | null;
+  part_id: number; pn_std: string | null; description: string | null; brand: string | null;
   purchase_price: { wavg: number | null;
     supply?: { purchase_orders: number; suppliers: number } | null } | null;
   sale_price: { wavg: number | null; qty_sold: number | null } | null;
-  purchase_premium_pct: number | null; brand_premium_purchase: boolean | null;
+  purchase_premium_pct: number | null; sale_premium_pct: number | null;
+  brand_premium_purchase: boolean | null; brand_premium_sale: boolean | null;
+  purchase_metrics: PoolMemberMetrics | null; sales_metrics: PoolMemberMetrics | null;
 }
 export interface PoolOpportunity {
   from_part_id: number; from_pn: string | null; to_pn: string | null;
   unit_saving: number | null; qty_sold: number | null; theoretical_saving: number | null;
   supply_available: boolean; block_reason: string | null; verification_status: string;
 }
+/** 池详情订单板块行（行粒度；销售侧受限时 restricted=true 且 items 恒空）。 */
+export interface PoolOrderLine {
+  order_no: string; order_date: string | null;
+  purchaser?: string | null; supplier?: string | null; source_type?: string | null;
+  salesperson?: string | null; customer?: string | null; business_type?: string | null;
+  line_id: number; part_id: number; pn_std: string | null;
+  quantity: number | null; unit_price_ex_tax: number | null; amount: number | null;
+  counts_revenue?: boolean;
+}
+export interface PoolOrdersBlock {
+  restricted: boolean; total: number | null; page: number; page_size: number;
+  items: PoolOrderLine[];
+}
 export interface PoolDetail {
   group_id: number; member_count: number; needs_calibration?: boolean; oversized?: boolean;
+  name: string | null; description: string | null;
+  window: { date_from: string | null; date_to: string | null; as_of: string };
   demand: { total_qty: number | null; total_revenue_ex_tax: number | null; note?: string };
   supply_window: { date_from: string; date_to: string; as_of: string };
-  benchmark: { cost_part_id: number | null } | null;    // 成本组 → 可能整块脱敏
+  benchmark: { cost_part_id: number | null; cost_ex_tax: number | null;
+    low_confidence?: boolean; supply_ok?: boolean;
+    sale_part_id: number | null; sale_ex_tax: number | null } | null;   // 成本组 → 可能整块脱敏
   savings: { theoretical_max: number | null; supply_available_upper: number | null;
-    label?: string; opportunities: PoolOpportunity[] } | null;
+    executable: null; label?: string; opportunities: PoolOpportunity[] } | null;
   members: PoolMemberRow[];
   customer_cross_brand?: { restricted: boolean; multi_brand_customers?: number;
     customers?: Array<{ customer: string; brand_count: number; concentration: number }> } | null;
+  purchase_metrics: PoolMetrics | null; sales_metrics: PoolMetrics | null;
+  max_purchase_price: number | null; min_sale_price: number | null;
+  purchase_violation_count: number | null; sale_violation_count: number | null;
+  manual_reference_restricted: boolean;
+  purchase_orders: PoolOrdersBlock; sales_orders: PoolOrdersBlock;
 }
-export const dashboardPool = (groupId: number, params: { date_from?: string; date_to?: string } = {}) =>
+export const dashboardPool = (groupId: number, params: {
+  date_from?: string; date_to?: string;
+  purchase_page?: number; sales_page?: number; orders_page_size?: number;
+} = {}) =>
   api.get<PoolDetail>(`/dashboard/pool/${groupId}`, { params });

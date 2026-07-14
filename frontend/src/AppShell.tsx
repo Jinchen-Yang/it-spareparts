@@ -8,7 +8,7 @@ import { MenuFoldOutlined, MenuOutlined, MenuUnfoldOutlined, UserOutlined } from
 import type { MenuProps } from "antd";
 import { COLORS } from "./theme";
 import { APP_VERSION, CHANGELOG, LATEST } from "./version";
-import { NAV_GROUPS, matchNavItem } from "./nav";
+import { NAV_GROUPS, matchDetailRoute, matchNavItem } from "./nav";
 import type { NavItem } from "./nav";
 import ChangePasswordModal from "./components/ChangePasswordModal";
 import { TaxBasisToggle } from "./context/TaxBasis";
@@ -81,12 +81,16 @@ export default function AppShell({
     admin: "管理员", boss: "老板", sales: "销售", purchaser: "采购", readonly: "只读",
   };
 
-  const active = matchNavItem(location.pathname);
+  // 详情路由（如 /pool-analysis/:id）挂在母页之下：菜单仍高亮母页、面包屑/标题追加详情段
+  const detail = matchDetailRoute(location.pathname);
+  const active = matchNavItem(location.pathname)
+    ?? (detail ? allowed.find((it) => it.key === detail.menuKey) : undefined);
 
   // 页面标题跟随路由：浏览器标签/收藏夹可辨识
   useEffect(() => {
-    document.title = active ? `${active.label} · 备件智能管理系统` : "备件智能管理系统";
-  }, [active]);
+    const label = detail?.label ?? active?.label;
+    document.title = label ? `${label} · 备件智能管理系统` : "备件智能管理系统";
+  }, [active, detail]);
 
   // 视口跨过断点回桌面时收起抽屉，避免转回竖屏时抽屉无操作自动弹开
   useEffect(() => {
@@ -145,8 +149,9 @@ export default function AppShell({
     ? [
         ...(group?.label ? [{ title: group.label }] : []),
         { title: active.label },
+        ...(detail ? [{ title: detail.label }] : []),
       ]
-    : [];
+    : detail ? [{ title: detail.label }] : [];
 
   // 移动端把次级入口收进用户菜单，顶栏只留 菜单/标题/用户 三件事
   const userMenuItems: MenuProps["items"] = [

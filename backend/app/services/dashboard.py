@@ -503,9 +503,25 @@ def _purchase_parts(db: Session, order_ids: list[int], date_from: date | None, u
     return out
 
 
+def _orders_containing_part(line_model, part_id: int | None, pool_group_id: int | None):
+    """全局筛选（UI v2）：按"订单内含该型号 / 含该有效池成员"生成整单召回子查询。
+    过滤在订单集合层做而非行 WHERE——聚合口径必须仍是整单（型号数/总量/金额不因筛选缩水）。"""
+    conds = []
+    if part_id is not None:
+        conds.append(select(line_model.order_id).where(line_model.part_id == part_id))
+    if pool_group_id is not None:
+        member_sub = (select(PartPoolMember.part_id)
+                      .join(PartPool, PartPool.group_id == PartPoolMember.group_id)
+                      .where(PartPoolMember.group_id == pool_group_id,
+                             PartPool.status == "active"))
+        conds.append(select(line_model.order_id).where(line_model.part_id.in_(member_sub)))
+    return conds
+
+
 def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | None = None,
                  status: str | None = None, q: str | None = None, customer: str | None = None,
                  salesperson: str | None = None, business_type: str | None = None,
+                 part_id: int | None = None, pool_group_id: int | None = None,
                  sort: str = "order_date", order: str = "desc",
                  page: int = 1, page_size: int = 50, as_of: date | None = None,
                  user_ctx: security.UserContext | None = None) -> dict:
@@ -554,6 +570,8 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
         base = base.where(so.salesperson.ilike(f"%{salesperson.strip()}%"))
     if business_type:
         base = base.where(so.business_type == business_type)
+    for sub in _orders_containing_part(FSalesLine, part_id, pool_group_id):
+        base = base.where(so.id.in_(sub))
     if user_ctx is not None:
         base = security.apply_data_scope(base, user_ctx)
     base = base.group_by(so.id, so.order_no, so.order_date, so.salesperson,
@@ -611,7 +629,9 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
 
 def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date | None = None,
                     status: str | None = None, q: str | None = None,
-                    source_type: str | None = None, sort: str = "order_date", order: str = "desc",
+                    source_type: str | None = None, purchaser: str | None = None,
+                    part_id: int | None = None, pool_group_id: int | None = None,
+                    sort: str = "order_date", order: str = "desc",
                     page: int = 1, page_size: int = 50, as_of: date | None = None,
                     user_ctx: security.UserContext | None = None) -> dict:
     """订单拉通-采购侧：**一张采购订单一行**（看板内直接给采购订单列表，不再只让跳采购明细页）。
@@ -645,6 +665,10 @@ def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date
         base = base.where(or_(po.order_no.ilike(kw), po.id.in_(sub)))
     if source_type:
         base = base.where(po.source_type == source_type)
+    if purchaser:
+        base = base.where(po.purchaser.ilike(f"%{purchaser.strip()}%"))
+    for sub in _orders_containing_part(FPurchaseLine, part_id, pool_group_id):
+        base = base.where(po.id.in_(sub))
     base = base.group_by(po.id, po.order_no, po.order_date, po.purchaser, po.source_type,
                          po.data_status, po.linked_sales_order_no, po.supplier_id)
     total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0

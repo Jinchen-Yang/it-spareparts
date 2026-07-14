@@ -3,7 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Button, Result } from "antd";
 import LoginPage from "./pages/LoginPage";
 import AppShell from "./AppShell";
-import { NAV_ITEMS, NAV_REDIRECTS, defaultPath } from "./nav";
+import { DETAIL_ROUTES, NAV_ITEMS, NAV_REDIRECTS, defaultPath } from "./nav";
 
 /** 安全读取本地权限快照：localStorage 被写坏时回退为空而非抛错致整页白屏（审计 U-1）。 */
 function readPerms(): Record<string, boolean> {
@@ -30,6 +30,14 @@ export default function App() {
       || (it.perm ? !!perms[it.perm]
         : it.anyPerm ? it.anyPerm.some((p) => !!perms[p])
           : false));
+  }, [token]);
+
+  // 带参详情路由（如 /pool-analysis/:groupId）：与母页共用同一权限门，无权限则不注册
+  const allowedDetails = useMemo(() => {
+    if (!token) return [];
+    const isAdmin = (localStorage.getItem("role") || "") === "admin";
+    const perms = readPerms();
+    return DETAIL_ROUTES.filter((r) => isAdmin || !!perms[r.perm]);
   }, [token]);
 
   // 未登录时任何路径都先登录；登录后停留在原地址（支持深链接直达）
@@ -67,6 +75,9 @@ export default function App() {
         <Route element={<AppShell allowed={allowed} onLogout={logout} onToken={setToken} />}>
           {allowed.map((it) => (
             <Route key={it.key} path={it.path} element={<it.page />} />
+          ))}
+          {allowedDetails.map((r) => (
+            <Route key={r.key} path={r.path} element={<r.page />} />
           ))}
           {redirects.map((r) => (
             <Route key={r.from} path={r.from} element={<Navigate to={r.to} replace />} />
