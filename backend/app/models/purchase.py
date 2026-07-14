@@ -81,4 +81,6 @@ class FPurchaseLine(Base):
     __table_args__ = (
         Index("ix_pl_part", "part_id"),
         Index("ix_pl_pn", "pn_std"),
+        # 看板 v2：订单列表按 order_id IN (当页) 批量装配 parts 的热路径（FK 不自动建索引）
+        Index("ix_pl_order", "order_id", "id"),
     )

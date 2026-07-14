@@ -13,10 +13,11 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
 from app import config, security
-from app.models.dimensions import DimCustomer, DimPart
+from app.models.dimensions import DimCustomer, DimPart, DimSupplier
 from app.models.inventory import PartPool, PartPoolMember, PartSubstitute
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
+from app.services import pool_metrics
 from app.services.pricing import (
     purchase_ex_tax_expr as _purchase_ex_tax_expr,
     purchase_ex_unit as _purchase_ex_unit,
@@ -127,8 +128,130 @@ def _benchmark(members, key):
     return best[key]["wavg"], best["part_id"], not bool(reliable)
 
 
+# ---------------------------------------------------------------- v2：窗口指标 / 约束价 / 订单板块
+
+_EMPTY_METRICS = {"total_amount": None, "total_quantity": None,
+                  "weighted_avg_unit_price": None, "order_count": 0, "latest_date": None}
+
+
+def _pool_stats(db: Session, gids: list[int], date_from: date | None, upper: date,
+                manual_restricted: bool) -> dict[int, dict]:
+    """批量池窗口统计（固定 3 条 SQL，与池数无关）：双侧 metrics + 约束价 + 越线计数。
+
+    约束价该侧为空 → violation_count=null（"无约束"≠"零越线"，验收 10）；
+    data_pool_price_governance 关闭 → 约束价与越线计数一律 null（config §12：越线标记
+    随治理权限遮，防靠排序/颜色反推金额）。金额键另由 FIELD_GROUPS 递归脱敏兜底。
+    """
+    if not gids:
+        return {}
+    policies = pool_metrics.current_policies(db, gids)
+    gp = pool_metrics.purchase_group_stats(db, date_from, upper, group_ids=gids)
+    gs = pool_metrics.sales_group_stats(db, date_from, upper, group_ids=gids)
+    out = {}
+    for gid in gids:
+        pol = policies.get(gid) or {}
+        ceiling, floor = pol.get("purchase_ceiling_ex_tax"), pol.get("sales_floor_ex_tax")
+        p = dict(gp.get(gid) or _EMPTY_METRICS)
+        pv = p.pop("violations", 0)
+        s = dict(gs.get(gid) or _EMPTY_METRICS)
+        sv = s.pop("violations", 0)
+        out[gid] = {
+            "purchase_metrics": p, "sales_metrics": s,
+            "max_purchase_price": None if manual_restricted else ceiling,
+            "min_sale_price": None if manual_restricted else floor,
+            "purchase_violation_count": None if (manual_restricted or ceiling is None) else pv,
+            "sale_violation_count": None if (manual_restricted or floor is None) else sv,
+        }
+    return out
+
+
+def _member_metrics(stats: dict | None, pool_avg: float | None, limit: float | None,
+                    manual_restricted: bool) -> dict:
+    """成员窗口指标块 + 与池均值/人工约束价的差额与比例（成员加权均价为比较基准）。"""
+    base = dict(stats) if stats else dict(_EMPTY_METRICS)
+    wavg = base.get("weighted_avg_unit_price")
+    base["pool_avg_delta"] = _r(wavg - pool_avg) if wavg is not None and pool_avg is not None else None
+    base["pool_avg_delta_pct"] = (round((wavg - pool_avg) / pool_avg, 4)
+                                  if wavg is not None and pool_avg else None)
+    if manual_restricted or limit is None or wavg is None:
+        base["manual_limit_delta"] = base["manual_limit_delta_pct"] = None
+    else:
+        base["manual_limit_delta"] = _r(wavg - limit)
+        base["manual_limit_delta_pct"] = round((wavg - limit) / limit, 4) if limit else None
+    return base
+
+
+def _pool_sales_orders(db: Session, part_ids, date_from: date | None, upper: date,
+                       page: int, page_size: int,
+                       user_ctx: security.UserContext | None) -> dict:
+    """池详情-销售订单板块（行粒度，分页返回 total，不静默截断）。
+    受限销售 = 逐单成交明细整段不可见（anonymize_sales_rows 同一口径）→ restricted。"""
+    if user_ctx is not None and security.is_scoped_sales(user_ctx):
+        return {"restricted": True, "total": None, "page": page, "page_size": page_size, "items": []}
+    sl, so = FSalesLine, FSalesOrder
+    base = (
+        select(so.order_no, so.order_date, so.salesperson,
+               DimCustomer.name_normalized.label("customer"), so.business_type,
+               sl.id.label("line_id"), sl.part_id, DimPart.pn_std,
+               sl.qty, _sale_ex_unit().label("unit_ex"), sl.revenue_amount, sl.counts_revenue)
+        .join(so, sl.order_id == so.id)
+        .join(DimPart, sl.part_id == DimPart.id)
+        .join(DimCustomer, so.customer_id == DimCustomer.id, isouter=True)
+        .where(sl.part_id.in_(list(part_ids)))
+    )
+    base = active_orders(base, so)
+    if date_from:
+        base = base.where(so.order_date >= date_from)
+    base = base.where(so.order_date <= upper)
+    total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0
+    rows = db.execute(base.order_by(so.order_date.desc().nullslast(), sl.id.desc())
+                      .limit(page_size).offset((page - 1) * page_size))
+    items = [{
+        "order_no": r.order_no, "order_date": r.order_date.isoformat() if r.order_date else None,
+        "salesperson": r.salesperson, "customer": r.customer, "business_type": r.business_type,
+        "line_id": r.line_id, "part_id": r.part_id, "pn_std": r.pn_std,
+        "quantity": _r(r.qty, 3), "unit_price_ex_tax": _r(r.unit_ex),
+        "amount": _r(r.revenue_amount), "counts_revenue": bool(r.counts_revenue),
+    } for r in rows]
+    return {"restricted": False, "total": total, "page": page, "page_size": page_size, "items": items}
+
+
+def _pool_purchase_orders(db: Session, part_ids, date_from: date | None, upper: date,
+                          page: int, page_size: int) -> dict:
+    """池详情-采购订单板块（行粒度，分页返回 total）。展示层含全部已生效采购
+    （不限 COST_PURCHASE_TYPES——那是价格统计口径，单据板块如实列单）。"""
+    pl, po = FPurchaseLine, FPurchaseOrder
+    base = (
+        select(po.order_no, po.order_date, po.purchaser, po.source_type,
+               DimSupplier.name_normalized.label("supplier"),
+               pl.id.label("line_id"), pl.part_id, DimPart.pn_std,
+               pl.qty, _purchase_ex_unit().label("unit_ex"),
+               _purchase_ex_tax_expr().label("amount"))
+        .join(po, pl.order_id == po.id)
+        .join(DimPart, pl.part_id == DimPart.id)
+        .join(DimSupplier, po.supplier_id == DimSupplier.id, isouter=True)
+        .where(pl.part_id.in_(list(part_ids)))
+    )
+    base = active_orders(base, po)
+    if date_from:
+        base = base.where(po.order_date >= date_from)
+    base = base.where(po.order_date <= upper)
+    total = db.execute(select(func.count()).select_from(base.subquery())).scalar() or 0
+    rows = db.execute(base.order_by(po.order_date.desc().nullslast(), pl.id.desc())
+                      .limit(page_size).offset((page - 1) * page_size))
+    items = [{
+        "order_no": r.order_no, "order_date": r.order_date.isoformat() if r.order_date else None,
+        "purchaser": r.purchaser, "supplier": r.supplier, "source_type": r.source_type,
+        "line_id": r.line_id, "part_id": r.part_id, "pn_std": r.pn_std,
+        "quantity": _r(r.qty, 3), "unit_price_ex_tax": _r(r.unit_ex), "amount": _r(r.amount),
+    } for r in rows]
+    return {"restricted": False, "total": total, "page": page, "page_size": page_size, "items": items}
+
+
 def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: date | None = None,
-            as_of: date | None = None, user_ctx: security.UserContext | None = None) -> dict | None:
+            as_of: date | None = None, user_ctx: security.UserContext | None = None, *,
+            with_v2: bool = False, purchase_page: int = 1, sales_page: int = 1,
+            orders_page_size: int = 20) -> dict | None:
     """单个通用号池的降本分析（只读）。甲方修正版：双端溢价、供应稳定性非库存、
     节省分理论上限/可执行机会、客户跨品牌集中度（老板可见）。不输出自动替换指令。"""
     pool = db.get(PartPool, group_id)
@@ -239,6 +362,34 @@ def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: 
                     "opportunities": opps},
         "customer_cross_brand": _customer_cross_brand(db, part_ids, date_from, upper, user_ctx),
     }
+    if not with_v2:
+        return result
+
+    # ---- v2 增量（仅池详情端点开启；列表逐池 analyze 不带，避免每池多跑板块查询）----
+    manual_restricted = security.is_field_hidden(user_ctx, "purchase_ceiling_ex_tax")
+    stats = _pool_stats(db, [group_id], date_from, upper, manual_restricted).get(group_id, {})
+    # 约束价直接复用 _pool_stats 结果（省一次重复查询）：manual_restricted 时为 None，
+    # 恰与成员差额"治理关闭一律 None"的目标一致
+    ceiling, floor = stats.get("max_purchase_price"), stats.get("min_sale_price")
+    # 成员窗口指标（**页面窗口**，与遗留 supply-window 的 purchase_price 并存不互改）
+    mp = pool_metrics.purchase_part_stats(db, part_ids, date_from, upper)
+    ms = pool_metrics.sales_part_stats(db, part_ids, date_from, upper)
+    pool_pavg = (stats.get("purchase_metrics") or {}).get("weighted_avg_unit_price")
+    pool_savg = (stats.get("sales_metrics") or {}).get("weighted_avg_unit_price")
+    for m in members:
+        m["purchase_metrics"] = _member_metrics(mp.get(m["part_id"]), pool_pavg,
+                                                ceiling, manual_restricted)
+        m["sales_metrics"] = _member_metrics(ms.get(m["part_id"]), pool_savg,
+                                             floor, manual_restricted)
+    result.update({
+        "name": pool.name, "description": pool.description,
+        **stats,
+        "manual_reference_restricted": manual_restricted,
+        "purchase_orders": _pool_purchase_orders(db, part_ids, date_from, upper,
+                                                 purchase_page, orders_page_size),
+        "sales_orders": _pool_sales_orders(db, part_ids, date_from, upper,
+                                           sales_page, orders_page_size, user_ctx),
+    })
     return result
 
 
@@ -281,34 +432,85 @@ def _customer_cross_brand(db, part_ids, date_from, upper, user_ctx, top=10):
             "customers": rows[:top]}
 
 
-def _pool_list_item(p: PartPool, d: dict) -> dict:
+def _pool_list_item(p: PartPool, d: dict | None) -> dict:
+    """清单条目。d=analyze 结果（旧排序路径才有）；新排序路径不逐池 analyze，
+    旧 savings 字段置 null（旧前端不会带新 sort 值，不受影响；不给假数据）。"""
     return {
-        "group_id": p.group_id, "member_count": p.member_count,
+        "group_id": p.group_id, "name": p.name, "description": p.description,
+        "member_count": p.member_count,
         "needs_calibration": p.needs_calibration, "oversized": p.oversized,
-        "demand_qty": d["demand"]["total_qty"], "demand_revenue_ex_tax": d["demand"]["total_revenue_ex_tax"],
-        "theoretical_saving": d["savings"]["theoretical_max"],
-        "supply_available_upper": d["savings"]["supply_available_upper"],
+        "demand_qty": d["demand"]["total_qty"] if d else None,
+        "demand_revenue_ex_tax": d["demand"]["total_revenue_ex_tax"] if d else None,
+        "theoretical_saving": d["savings"]["theoretical_max"] if d else None,
+        "supply_available_upper": d["savings"]["supply_available_upper"] if d else None,
     }
+
+
+# v2 服务端排序键 → 从 _pool_stats 结果取排序值
+_METRIC_SORTS = {
+    "purchase_total": lambda s: s["purchase_metrics"]["total_amount"],
+    "purchase_average": lambda s: s["purchase_metrics"]["weighted_avg_unit_price"],
+    "sales_total": lambda s: s["sales_metrics"]["total_amount"],
+    "sales_average": lambda s: s["sales_metrics"]["weighted_avg_unit_price"],
+    "purchase_violation_count": lambda s: s["purchase_violation_count"],
+    "sale_violation_count": lambda s: s["sale_violation_count"],
+}
+POOL_SORTS = ("savings", "member_count", *_METRIC_SORTS)
 
 
 def list_pools(db: Session, date_from: date | None = None, date_to: date | None = None,
                as_of: date | None = None, page: int = 1, page_size: int = 20,
                sort: str = "member_count", user_ctx: security.UserContext | None = None) -> dict:
-    """池清单。两种排序口径：
+    """池清单。排序口径：
     - sort="member_count"（默认）：按成员数降序，**先分页再逐池分析**（避免 N+1）。
     - sort="savings"（复审二轮 P1-4）：**全局**按理论节省额排名——先分析全部池再排序分页，
       否则"成员少但节省高"的池会永远藏在后页。池数量有限（生产 ~40），超 POOL_RANK_ANALYZE_CAP
       时退回成员数排序并置 ranking_capped=True（当前不触发）。
+    - v2 指标排序（purchase_total/purchase_average/sales_total/sales_average/
+      purchase_violation_count/sale_violation_count）：全部有效池批量统计（固定 3 条 SQL）
+      后全局排序分页；不逐池 analyze，旧 savings 字段置 null。
+    所有路径的条目都带 v2 统计块（当页批量合并，与订单数无关）。
     只统计 status='active'（复审阻塞 2）：归档池成员可再入新有效池，混入清单/总数/
     排名会把同一 PN 双份计入；归档档案查询走管理接口。"""
+    today = as_of or date.today()
+    upper = min(date_to, today) if date_to else today
+    manual_restricted = security.is_field_hidden(user_ctx, "purchase_ceiling_ex_tax")
     total = db.execute(select(func.count()).select_from(PartPool)
                        .where(PartPool.status == "active")).scalar() or 0
-    ranking_restricted = sort == "savings" and security.is_field_hidden(user_ctx, "theoretical_saving")
+
+    # 结构性排序保护：被脱敏的金额/越线指标不能当排序键运行——行序本身是隐藏值的
+    # 侧信道（复审三轮先例）。销售聚合（sales_total/sales_average）为公开口径，不受限。
+    ranking_restricted = (
+        (sort == "savings" and security.is_field_hidden(user_ctx, "theoretical_saving"))
+        or (sort in ("purchase_total", "purchase_average")
+            and security.is_field_hidden(user_ctx, "total_ex_tax"))
+        or (sort in ("purchase_violation_count", "sale_violation_count")
+            and security.is_field_hidden(user_ctx, "purchase_violation_count"))
+    )
     if ranking_restricted:
-        # 不仅不返回金额，连“按节省额”的执行路径也不能运行；否则行序仍是
-        # 隐藏金额的侧信道。下面只按成员数/稳定 group_id 取页。
         sort = "member_count"
     ranking_capped = False
+    window = {"date_from": date_from.isoformat() if date_from else None,
+              "date_to": date_to.isoformat() if date_to else None, "as_of": today.isoformat()}
+
+    if sort in _METRIC_SORTS:
+        all_pools = db.execute(
+            select(PartPool).where(PartPool.status == "active")
+            .order_by(PartPool.group_id.asc())).scalars().all()
+        stats = _pool_stats(db, [p.group_id for p in all_pools], date_from, upper,
+                            manual_restricted)
+        key = _METRIC_SORTS[sort]
+
+        def _rank(p: PartPool):
+            v = key(stats[p.group_id])
+            # 降序、无值垫底、group_id 稳定破并列
+            return (v is None, -(v if v is not None else 0), p.group_id)
+
+        page_slice = sorted(all_pools, key=_rank)[(page - 1) * page_size: page * page_size]
+        items = [{**_pool_list_item(p, None), **stats[p.group_id]} for p in page_slice]
+        return {"total": total, "page": page, "page_size": page_size, "window": window,
+                "sort": sort, "effective_sort": sort,
+                "ranking_restricted": False, "ranking_capped": False, "items": items}
 
     if sort == "savings":
         if total <= config.POOL_RANK_ANALYZE_CAP:
@@ -319,8 +521,10 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
             # 全局按节省额降序，再按 group_id 稳定破并列
             scored.sort(key=lambda pd: (-(pd[1]["savings"]["theoretical_max"] or 0), pd[0].group_id))
             page_slice = scored[(page - 1) * page_size: page * page_size]
-            items = [_pool_list_item(p, d) for p, d in page_slice]
-            return {"total": total, "page": page, "page_size": page_size,
+            stats = _pool_stats(db, [p.group_id for p, _ in page_slice], date_from, upper,
+                                manual_restricted)
+            items = [{**_pool_list_item(p, d), **stats.get(p.group_id, {})} for p, d in page_slice]
+            return {"total": total, "page": page, "page_size": page_size, "window": window,
                     "sort": "savings", "effective_sort": "savings",
                     "ranking_restricted": False, "ranking_capped": False, "items": items}
         ranking_capped = True   # 池数超上限，退回成员数排序（数据规模保护）
@@ -331,8 +535,9 @@ def list_pools(db: Session, date_from: date | None = None, date_to: date | None 
         .limit(page_size).offset((page - 1) * page_size)
     ).scalars().all()
     # 成员数口径保持数据库排序；绝不能在当前页再按隐藏 theoretical_saving 排序。
-    items = [_pool_list_item(p, analyze(db, p.group_id, date_from, date_to, as_of))
-             for p in page_pools]
-    return {"total": total, "page": page, "page_size": page_size,
+    stats = _pool_stats(db, [p.group_id for p in page_pools], date_from, upper, manual_restricted)
+    items = [{**_pool_list_item(p, analyze(db, p.group_id, date_from, date_to, as_of)),
+              **stats.get(p.group_id, {})} for p in page_pools]
+    return {"total": total, "page": page, "page_size": page_size, "window": window,
             "sort": "member_count", "effective_sort": "member_count",
             "ranking_restricted": ranking_restricted, "ranking_capped": ranking_capped, "items": items}
