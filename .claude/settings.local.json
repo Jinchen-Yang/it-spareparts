@@ -15,7 +15,8 @@
       "Bash(curl -s http://127.0.0.1:8011/health)",
       "Bash(curl -s http://127.0.0.1:8011/health/db)",
       "Bash(kill %1)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "mcp__Claude_Code_Remote__send_later"
     ]
   }
 }
