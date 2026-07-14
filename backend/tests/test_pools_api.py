@@ -344,7 +344,8 @@ def test_permission_registry_wiring(db):
     # 账号管理元数据带 action 桶（前端权限抽屉渲染依据）
     admin = _mk_client(db, "meta_admin", "admin")
     meta = admin.get("/api/accounts/_meta").json()
-    assert meta["action_keys"] == ["action_pool_manage", "action_pool_set_policy"]
+    assert meta["action_keys"] == ["action_pool_manage", "action_pool_set_policy",
+                                   "action_account_manage"]
 
 
 # ---------------------------------------------------------------- 端到端闭环

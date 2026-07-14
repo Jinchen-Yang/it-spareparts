@@ -177,8 +177,8 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
                 _ev("login_locked", user.role,
                     {"reason": "too_many_failures", "minutes": _LOGIN_LOCK_MINUTES})
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
-        # 成功：清零失败计数与锁定
-        perms = permissions.effective(user.role, user.permissions)
+        # 成功：清零失败计数与锁定。权限中心 v2：有效权限=模板快照⊕个别调整
+        perms = permissions.effective_for_user(user)
         user.failed_attempts = 0
         user.locked_until = None
         user.last_login_at = now
@@ -310,7 +310,7 @@ def change_password(req: ChangePasswordRequest, request: Request,
     _set_new_password(db, user, req.new_password, operated_by=sub)
     _ev("change_password", user.role)
 
-    perms = permissions.effective(user.role, user.permissions)
+    perms = permissions.effective_for_user(user)
     token, exp = _make_token(user.role, user.username, user.salesperson_name,
                              perms=perms, token_version=user.token_version)
     return ChangePasswordResponse(token=token, expires_at=exp)
