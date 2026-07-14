@@ -34,7 +34,8 @@ def _audits(db):
 def test_account_changes_audited(db):
     c = _admin(db)
     c.post("/api/accounts", json={"username": "sales_x", "password": "pw123456", "role": "sales"})
-    c.put("/api/accounts/sales_x", json={"permissions": {"data_purchase_cost": True}})
+    # data_supplier 是 sales 模板默认关的键 → 会真正产生 overrides 变化
+    c.put("/api/accounts/sales_x", json={"permissions": {"data_supplier": True}})
     c.put("/api/accounts/sales_x/password", json={"password": "newpw123"})
     c.put("/api/accounts/sales_x/active", json={"is_active": False})
 
@@ -49,7 +50,8 @@ def test_account_changes_audited(db):
     assert "password" not in create.after_json and "password_hash" not in create.after_json
 
     upd = rows[1]
-    assert upd.before_json["permissions"] != upd.after_json["permissions"]
+    # v2 快照记 模板+个别调整（不再是整图 permissions）；本次 PUT 应产生 overrides 变化
+    assert upd.before_json["overrides"] != upd.after_json["overrides"]
 
     pw = rows[2]
     assert pw.before_json is None and pw.after_json is None   # 改密只记事件，不记口令

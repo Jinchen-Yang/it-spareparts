@@ -31,7 +31,29 @@ _TABLES = [
     "part_alias", "dim_part", "dim_supplier", "dim_customer",
     "sys_audit_log", "sys_access_log", "sys_raw_file", "sys_import_error", "sys_import_batch",
     "sys_import_job", "sys_user",
+    # 职位模板（权限中心 v2）：清掉用例改过/新建的模板后重播内置 5 条（下方 _reseed_templates），
+    # 否则前一个用例编辑 sales 模板会污染后一个用例新建的账号快照
+    "sys_role_template",
 ]
+
+_BUILTIN_TEMPLATE_ROLES = ["admin", "boss", "sales", "purchaser", "readonly"]
+_BUILTIN_TEMPLATE_NAMES = {"admin": "管理员", "boss": "老板", "sales": "销售",
+                           "purchaser": "采购", "readonly": "只读"}
+
+
+def _reseed_templates(conn) -> None:
+    """重播内置模板（等价迁移 seed；值=当前代码 effective(role, None)，
+    与迁移冻结值的一致性由 test_frozen_templates_match_current_code 看守）。"""
+    import json
+
+    from app import permissions as _perms
+    for role in _BUILTIN_TEMPLATE_ROLES:
+        conn.execute(text(
+            "INSERT INTO sys_role_template"
+            " (code, name, base_role, permissions, is_system, is_active, version, created_by)"
+            " VALUES (:c, :n, :c, CAST(:p AS jsonb), true, true, 1, 'conftest')"),
+            {"c": role, "n": _BUILTIN_TEMPLATE_NAMES[role],
+             "p": json.dumps(_perms.effective(role, None))})
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -47,6 +69,7 @@ def migrated():
 def db(migrated):
     with engine.connect() as conn:
         conn.execute(text(f"TRUNCATE {', '.join(_TABLES)} RESTART IDENTITY CASCADE"))
+        _reseed_templates(conn)
         conn.commit()
     session = SessionLocal()
     try:

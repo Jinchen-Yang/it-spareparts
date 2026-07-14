@@ -33,8 +33,18 @@ class SysUser(Base):
     salesperson_name: Mapped[str | None] = mapped_column(String(64))  # 对齐销售数据，行级过滤用
     ding_user_id: Mapped[str | None] = mapped_column(String(64), unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
-    # 按用户细粒度权限（账号管理页勾选）；为空 → 回退 role 模板。见 app/permissions.py
+    # 【旧列，权限中心 v2 起只做回滚保险】v1 语义：自定义权限图，为空回退 role 模板。
+    # v2 写路径每次保存都把**完整有效权限图**双写进来——旧代码 effective(role, 完整图)
+    # 逐键等于该图，因此 downgrade 掉 v2 后有效权限零漂移。见 docs/权限中心v2 设计 §1.6
     permissions: Mapped[dict | None] = mapped_column(JSONB)
+    # 权限中心 v2：模板快照三件套。有效权限 = template_perms（套用模板时的快照）⊕
+    # perm_overrides（与快照不同的键，稀疏 diff）。模板后续被编辑**不**影响这里的快照，
+    # 直到管理员显式「保存并同步账号」。template_version 记录套用时模板版本，用于
+    # 显示「模板已更新到 vN，此账号仍在 vM」。见 app/permissions.py:effective_for_user
+    template_code: Mapped[str | None] = mapped_column(String(64))
+    template_version: Mapped[int | None] = mapped_column(Integer)
+    template_perms: Mapped[dict | None] = mapped_column(JSONB)
+    perm_overrides: Mapped[dict | None] = mapped_column(JSONB)
     last_login_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     # 登录暴力破解防护：连续失败计数 + 锁定到期时间（达阈值锁定一段时间）
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
@@ -42,6 +52,33 @@ class SysUser(Base):
     # token 版本：改密/停用/改权限时递增 → 旧 token 的 tv 不匹配即失效（即时吊销）
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+
+
+class SysRoleTemplate(Base):
+    """职位模板（权限中心 v2）：可编辑的权限预设，持久化替代 permissions.ROLE_TEMPLATES 硬编码。
+
+    语义=复制快照：套用模板把 permissions 快照进 sys_user.template_perms；之后编辑模板
+    不影响已套用账号，除非显式「保存并同步账号」。内置 5 条（code=角色名）is_system=True
+    不可删；其中 admin 模板锁定（不可编辑/停用/套用——升管理员走单账号改 role）。
+    version 是乐观锁：PUT 必须带当前 version，不匹配 409（防两管理员互相覆盖）。"""
+
+    __tablename__ = "sys_role_template"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), unique=True)
+    name: Mapped[str] = mapped_column(String(64))
+    description: Mapped[str | None] = mapped_column(Text)
+    # 套用该模板的账号获得的基础角色 ∈ boss/sales/purchaser/readonly（内置 admin 模板=admin）。
+    # role 挂着行级语义/文件 ACL/replace require_roles 等硬编码点，跟模板走避免"勾了权限仍 403"
+    base_role: Mapped[str] = mapped_column(String(16))
+    permissions: Mapped[dict] = mapped_column(JSONB)   # 完整键→bool 图（保存时 normalize 补全）
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
 
 class SysImportJob(Base):

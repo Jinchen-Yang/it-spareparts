@@ -143,7 +143,9 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-admin",
     label: "管理中心",
     items: [
-      { key: "accounts", path: "/accounts", label: "账号管理", icon: <TeamOutlined />, page: AccountsPage, load: loadAccounts },
+      // 权限中心 v2：入口由 page_accounts 键驱动（admin 在 App 层恒短路通过，行为不变）；
+      // 管理员可把「查看」受控委派给骨干员工，写操作另需 action_account_manage（后端把关）
+      { key: "accounts", path: "/accounts", label: "账号与权限", icon: <TeamOutlined />, perm: "page_accounts", page: AccountsPage, load: loadAccounts },
     ],
   },
 ];
