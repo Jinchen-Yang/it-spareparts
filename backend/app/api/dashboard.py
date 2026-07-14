@@ -102,14 +102,26 @@ def part_ranking(
     date_to: date | None = Query(None),
     cost_method: str = Query("moving_avg", pattern="^(moving_avg|fifo)$"),
     top: int = Query(20, ge=1, le=100),
+    part_id: int | None = Query(None, description="精确 part_id（优先于 pn）"),
+    pn: str | None = Query(None, description="pn_std 全等精确匹配（不模糊，相似 PN 不混入）"),
+    pool_group_id: int | None = Query(None, description="限该有效池成员"),
+    sort: str = Query("gross_profit", pattern="^(gross_profit|revenue|qty_sold|order_count)$"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
     _page: None = Depends(require_page("page_boss_board")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     record_access_log(ctx, "part_ranking", "dashboard",
-                      {"date_from": str(date_from), "date_to": str(date_to), "cost_method": cost_method})
-    data = dashboard.part_ranking(db, date_from, date_to, cost_method=cost_method, top=top, user_ctx=ctx)
+                      {"date_from": str(date_from), "date_to": str(date_to),
+                       "cost_method": cost_method, "part_id": part_id, "pn": pn,
+                       "pool_group_id": pool_group_id, "sort": sort})
+    data = dashboard.part_ranking(db, date_from, date_to, cost_method=cost_method, top=top,
+                                  part_id=part_id, pn=pn, pool_group_id=pool_group_id,
+                                  sort=sort, order=order, page=page, page_size=page_size,
+                                  user_ctx=ctx)
     return apply_field_visibility(data, ctx)
 
 
@@ -133,7 +145,10 @@ def pools(
     date_to: date | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    sort: str = Query("savings", pattern="^(savings|member_count)$"),
+    sort: str = Query("savings",
+                      pattern="^(savings|member_count|purchase_total|purchase_average"
+                              "|sales_total|sales_average|purchase_violation_count"
+                              "|sale_violation_count)$"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
     _page: None = Depends(require_page("page_boss_board")),
@@ -150,13 +165,18 @@ def pool_detail(
     group_id: int,
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
+    purchase_page: int = Query(1, ge=1, description="采购订单板块页码"),
+    sales_page: int = Query(1, ge=1, description="销售订单板块页码"),
+    orders_page_size: int = Query(20, ge=1, le=100, description="订单板块每页条数"),
     db: Session = Depends(get_db),
     _: str = Depends(current_role),
     _page: None = Depends(require_page("page_boss_board")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     record_access_log(ctx, "pool_detail", "dashboard", {"group_id": group_id})
-    data = pool.analyze(db, group_id, date_from, date_to, user_ctx=ctx)
+    data = pool.analyze(db, group_id, date_from, date_to, user_ctx=ctx, with_v2=True,
+                        purchase_page=purchase_page, sales_page=sales_page,
+                        orders_page_size=orders_page_size)
     if data is None:
         # 归档池不参与当前经营分析（复审阻塞 2）：明确告知去向，而不是含糊的"不存在"
         from app.models.inventory import PartPool

@@ -363,7 +363,17 @@ FIELD_GROUPS = {
                       # 维保 v2（§16）：盈亏看板与取价元信息派生键（budget=合同额亦可反推毛利）
                       "spent", "spent_parts", "spent_expense", "budget",
                       "remaining", "remaining_pct", "low_conf_pct",
-                      "price_distance_days", "confidence"],
+                      "price_distance_days", "confidence",
+                      # 看板 v2（订单嵌套 parts / 池窗口指标）：池采购均价、采购指标容器
+                      # （内含与销售侧同名的 total_amount/weighted_avg_unit_price 等，容器级遮，
+                      # 沿用 purchase_price 容器先例）。pool_avg_delta* 两侧同名——销售侧行价
+                      # 被本组遮（unit_price 同名先例）而池销售均价公开，差额不遮即可
+                      # "均价+差额"反推行价，故差额随本组一起遮。
+                      "pool_avg_purchase_price", "purchase_metrics",
+                      "pool_avg_delta", "pool_avg_delta_pct",
+                      # 与人工约束价的差额：价-差=约束价、价-差=行价，两头都能反推 →
+                      # 双登记（本组 + pool_price_governance），任一组关闭即遮
+                      "manual_limit_delta", "manual_limit_delta_pct"],
     # 毛利金额：能反推成本（profit.aggregate 两法派生键一并登记）
     # total_gross_profit = 订单拉通-销售侧一单一行毛利（键名带 total_ 前缀，与 gross_profit
     # 不同名，复审 P0：漏登记会绕过 data_profit 泄漏毛利）
@@ -377,7 +387,15 @@ FIELD_GROUPS = {
     # 关掉后管理页/池详情的约束价全为 null；Slice 2 起的越线差额/越线标记派生键
     # （delta_amount/delta_pct/relation_to_constraint/violation_count 等）产出时必须补登记到本组。
     "pool_price_governance": ["purchase_ceiling_ex_tax", "sales_floor_ex_tax",
-                              "purchase_input_value", "sales_input_value"],
+                              "purchase_input_value", "sales_input_value",
+                              # 看板 v2：约束价的契约名（池列表/详情/订单行参考）与越线计数。
+                              # 越线计数随治理权限遮（防靠排序/颜色反推金额）；服务层另有
+                              # 结构性降级——reference_status 对治理关闭者只给池均价口径
+                              # （多行"可见价格×越线布尔"可二分逼出约束价原值）。
+                              "max_purchase_price", "min_sale_price",
+                              "purchase_violation_count", "sale_violation_count",
+                              # 与约束价的差额（双登记，另见 purchase_cost 组注）
+                              "manual_limit_delta", "manual_limit_delta_pct"],
 }
 
 # 字段级脱敏的唯一真值源是 app/permissions.py 的 ROLE_TEMPLATES（按 data_* 开关）。

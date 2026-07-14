@@ -17,8 +17,10 @@ from sqlalchemy import exists, or_
 
 from app import config, security
 from app.models.dimensions import DimCustomer, DimPart
+from app.models.inventory import PartPool, PartPoolMember
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
+from app.services import pool_metrics
 from app.services.query_filters import active_orders
 # 税价换算收敛到 pricing 单一真值源（复审二轮 Standards：财务规则防多处漂移）。
 # 保留 `_`-前缀别名，本模块内既有调用点不动。
@@ -173,13 +175,24 @@ def _sale_price_stats(db: Session, date_from: date | None, upper: date) -> dict[
     return out
 
 
+RANKING_SORTS = ("gross_profit", "revenue", "qty_sold", "order_count")
+
+
 def part_ranking(db: Session, date_from: date | None, date_to: date | None,
                  cost_method: str = "moving_avg", top: int = 20,
+                 part_id: int | None = None, pn: str | None = None,
+                 pool_group_id: int | None = None,
+                 sort: str = "gross_profit", order: str = "desc",
+                 page: int = 1, page_size: int = 50,
                  as_of: date | None = None, user_ctx: security.UserContext | None = None) -> dict:
     """型号盈亏排名（未税双成本法）：赚钱榜 + 亏损榜，各带采购/销售价统计。
 
     毛利按 cost_method(moving_avg|fifo) 排序；两法毛利都返回。默认排除未来日期。
     只统计计营收且已配成本的行进毛利；无成本行只计营收（coverage 反映）。
+
+    v2 增量：part_id（精确，优先于 pn）/ pn（pn_std 全等，不做模糊——相似 PN 不得混入）/
+    pool_group_id（限有效池成员）筛选；items 分页块（全量榜单按 sort/order 服务端排序）；
+    行内补池归属 pool_group_id/pool_name 与去重 order_count。旧 profitable/loss/counts 原样。
     """
     today = as_of or date.today()
     upper = min(date_to, today) if date_to else today
@@ -197,6 +210,7 @@ def part_ranking(db: Session, date_from: date | None, date_to: date | None,
             func.sum(sl.cost_moving_avg * sl.qty).filter(costed).label("cost_ma"),
             func.sum(sl.cost_fifo * sl.qty).filter(costed).label("cost_ff"),
             func.count().filter(counts).label("lines"),
+            func.count(func.distinct(sl.order_id)).filter(counts).label("order_count"),
             func.count().filter(func.array_position(sl.anomaly_flags, "no_cost").is_not(None)).label("no_cost"),
         )
         .join(FSalesOrder, sl.order_id == FSalesOrder.id)
@@ -206,6 +220,18 @@ def part_ranking(db: Session, date_from: date | None, date_to: date | None,
     if date_from:
         stmt = stmt.where(FSalesOrder.order_date >= date_from)
     stmt = stmt.where(FSalesOrder.order_date <= upper)
+    # 精确筛选：part_id 优先；pn 走 pn_std 全等（绝不 ILIKE——"PN-A"不得召回"PN-A1"）
+    pn_clean = (pn or "").strip() or None
+    if part_id is not None:
+        stmt = stmt.where(sl.part_id == part_id)
+    elif pn_clean:
+        stmt = stmt.where(DimPart.pn_std == pn_clean)
+    if pool_group_id is not None:
+        member_sub = (select(PartPoolMember.part_id)
+                      .join(PartPool, PartPool.group_id == PartPoolMember.group_id)
+                      .where(PartPoolMember.group_id == pool_group_id,
+                             PartPool.status == "active"))
+        stmt = stmt.where(sl.part_id.in_(member_sub))
     if user_ctx is not None:
         stmt = security.apply_data_scope(stmt, user_ctx)
     stmt = stmt.group_by(sl.part_id, DimPart.pn_std, DimPart.description, DimPart.brand)
@@ -226,6 +252,7 @@ def part_ranking(db: Session, date_from: date | None, date_to: date | None,
         rows.append({
             "part_id": r.part_id, "pn_std": r.pn_std, "description": r.description, "brand": r.brand,
             "revenue": _f(r.revenue), "qty_sold": _f(r.qty_sold),
+            "order_count": r.order_count,
             "revenue_costed": _f(rc),
             "cost_coverage": round(float(rc) / float(r.revenue), 4) if rc and r.revenue else None,
             "no_cost": r.no_cost, "lines": r.lines,
@@ -235,33 +262,68 @@ def part_ranking(db: Session, date_from: date | None, date_to: date | None,
             "_sort": (gp_ff if use_fifo else gp_mov),
         })
 
+    # 池归属（批量一条，防 N+1）
+    pool_map = pool_metrics.active_pool_map(db, [x["part_id"] for x in rows])
+    for x in rows:
+        pm = pool_map.get(x["part_id"])
+        x["pool_group_id"] = pm["group_id"] if pm else None
+        x["pool_name"] = pm["pool_name"] if pm else None
+
     # 有成本才进赚钱/亏损榜（无成本行毛利未知，单独留在 coverage 里，不硬塞进盈亏榜误导）
     ranked = [x for x in rows if x["_sort"] is not None]
     n_profit = sum(1 for x in ranked if x["_sort"] > 0)
     n_loss = sum(1 for x in ranked if x["_sort"] < 0)
     profitable = sorted([x for x in ranked if x["_sort"] > 0], key=lambda x: x["_sort"], reverse=True)[:top]
     loss = sorted([x for x in ranked if x["_sort"] < 0], key=lambda x: x["_sort"])[:top]
-    for x in rows:
-        x.pop("_sort", None)
+
     window = {"date_from": date_from.isoformat() if date_from else None,
               "date_to": date_to.isoformat() if date_to else None,
               "as_of": today.isoformat(), "cost_method": cost_method}
+    filters = {"part_id": part_id, "pn": pn_clean, "pool_group_id": pool_group_id}
+    profit_restricted = security.is_field_hidden(user_ctx, "gross_profit")
+
+    # items 分页块：全量榜单服务端排序。毛利排序对无利润权限角色是行序侧信道 →
+    # 退回按营收排序（与订单端点 ranking_restricted 同一先例）。
+    if sort not in RANKING_SORTS:
+        sort = "gross_profit"
+    ranking_restricted = profit_restricted and sort == "gross_profit"
+    effective_sort = "revenue" if ranking_restricted else sort
+    desc = order != "asc"
+
+    def _key(x):
+        v = x["_sort"] if effective_sort == "gross_profit" else x.get(effective_sort)
+        if v is None:
+            return float("-inf") if desc else float("inf")
+        return v
+
+    items_all = sorted(rows, key=_key, reverse=desc)
+    items_page = items_all[(page - 1) * page_size: page * page_size]
+    items = {"total": len(rows), "page": page, "page_size": page_size,
+             "sort": sort, "effective_sort": effective_sort, "order": order,
+             "ranking_restricted": ranking_restricted, "items": items_page}
+
+    for x in rows:
+        x.pop("_sort", None)
+
     # 结构性收敛（复审三轮 P0-1）：data_profit=false 时，连"哪些型号赚/亏、各几个"都不能给——
     # 字段 mask 只置空金额，型号落在哪个榜 + 榜内计数本身泄漏利润结论。整块归属一律撤下。
-    if security.is_field_hidden(user_ctx, "gross_profit"):
+    # items 块无盈亏归属（非毛利排序 + 金额键随组脱敏），可保留。
+    if profit_restricted:
         return {
-            "window": window, "profit_restricted": True,
+            "window": window, "filters": filters, "profit_restricted": True,
             "profitable": [], "loss": [],
             "counts": {"total_parts": len(rows), "with_cost": len(ranked),
                        "profitable": None, "loss": None,
                        "no_cost_parts": len(rows) - len(ranked)},
+            "ranking": items,
         }
     return {
-        "window": window, "profit_restricted": False,
+        "window": window, "filters": filters, "profit_restricted": False,
         "profitable": profitable, "loss": loss,
         "counts": {"total_parts": len(rows), "with_cost": len(ranked),
                    "profitable": n_profit, "loss": n_loss,
                    "no_cost_parts": len(rows) - len(ranked)},
+        "ranking": items,
     }
 
 
@@ -330,6 +392,89 @@ def trend(db: Session, date_from: date | None, date_to: date | None,
             "date_from": date_from.isoformat() if date_from else None,
             "date_to": date_to.isoformat() if date_to else None,
             "series": series}
+
+
+def _sales_parts(db: Session, order_ids: list[int], date_from: date | None, upper: date,
+                 manual_restricted: bool) -> dict[int, list[dict]]:
+    """当页销售订单的行明细批量装配（固定 ≤5 条 SQL，与订单数/页大小无关，防 N+1）：
+    ① 当页全部行+主数据 ② 行内 PN→有效池映射 ③ 涉及池当前约束价
+    ④ 涉及池窗口销售加权均价（③④ 在 pool_metrics 内各一条）。"""
+    if not order_ids:
+        return {}
+    rows = db.execute(
+        select(FSalesLine.order_id, FSalesLine.id, FSalesLine.part_id,
+               DimPart.pn_std, DimPart.description, DimPart.brand,
+               FSalesLine.qty, _sale_ex_unit().label("unit_ex"),
+               FSalesLine.revenue_amount, FSalesLine.counts_revenue)
+        .join(DimPart, FSalesLine.part_id == DimPart.id)
+        .where(FSalesLine.order_id.in_(order_ids))
+        .order_by(FSalesLine.order_id, FSalesLine.id)
+    ).all()
+    pool_map = pool_metrics.active_pool_map(db, [r.part_id for r in rows])
+    gids = {v["group_id"] for v in pool_map.values()}
+    policies = pool_metrics.current_policies(db, gids)
+    gstats = pool_metrics.sales_group_stats(db, date_from, upper, group_ids=gids) if gids else {}
+    out: dict[int, list[dict]] = {}
+    for r in rows:
+        pm = pool_map.get(r.part_id)
+        gid = pm["group_id"] if pm else None
+        pool_avg = (gstats.get(gid) or {}).get("weighted_avg_unit_price") if gid else None
+        floor = (policies.get(gid) or {}).get("sales_floor_ex_tax") if gid else None
+        unit = _r(r.unit_ex)
+        ref = pool_metrics.price_reference("sales", unit, gid is not None,
+                                           pool_avg, floor, manual_restricted)
+        out.setdefault(r.order_id, []).append({
+            "line_id": r.id, "part_id": r.part_id, "pn_std": r.pn_std,
+            "description": r.description, "brand": r.brand,
+            "quantity": _f(r.qty), "unit_price_ex_tax": unit,
+            "amount": _f(r.revenue_amount), "counts_revenue": bool(r.counts_revenue),
+            "pool_group_id": gid, "pool_name": pm["pool_name"] if pm else None,
+            "pool_avg_sale_price": pool_avg,
+            "min_sale_price": None if manual_restricted else floor,
+            **ref,
+        })
+    return out
+
+
+def _purchase_parts(db: Session, order_ids: list[int], date_from: date | None, upper: date,
+                    manual_restricted: bool) -> dict[int, list[dict]]:
+    """当页采购订单的行明细批量装配（同 _sales_parts，固定 ≤5 条 SQL 防 N+1）。"""
+    if not order_ids:
+        return {}
+    rows = db.execute(
+        select(FPurchaseLine.order_id, FPurchaseLine.id, FPurchaseLine.part_id,
+               DimPart.pn_std, DimPart.description, DimPart.brand,
+               FPurchaseLine.qty, _purchase_ex_unit().label("unit_ex"),
+               _purchase_ex_tax_expr().label("amount"))
+        .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
+        .join(DimPart, FPurchaseLine.part_id == DimPart.id)
+        .where(FPurchaseLine.order_id.in_(order_ids))
+        .order_by(FPurchaseLine.order_id, FPurchaseLine.id)
+    ).all()
+    pool_map = pool_metrics.active_pool_map(db, [r.part_id for r in rows])
+    gids = {v["group_id"] for v in pool_map.values()}
+    policies = pool_metrics.current_policies(db, gids)
+    gstats = pool_metrics.purchase_group_stats(db, date_from, upper, group_ids=gids) if gids else {}
+    out: dict[int, list[dict]] = {}
+    for r in rows:
+        pm = pool_map.get(r.part_id)
+        gid = pm["group_id"] if pm else None
+        pool_avg = (gstats.get(gid) or {}).get("weighted_avg_unit_price") if gid else None
+        ceiling = (policies.get(gid) or {}).get("purchase_ceiling_ex_tax") if gid else None
+        unit = _r(r.unit_ex)
+        ref = pool_metrics.price_reference("purchase", unit, gid is not None,
+                                           pool_avg, ceiling, manual_restricted)
+        out.setdefault(r.order_id, []).append({
+            "line_id": r.id, "part_id": r.part_id, "pn_std": r.pn_std,
+            "description": r.description, "brand": r.brand,
+            "quantity": _f(r.qty), "unit_price_ex_tax": unit,
+            "amount": _r(r.amount),
+            "pool_group_id": gid, "pool_name": pm["pool_name"] if pm else None,
+            "pool_avg_purchase_price": pool_avg,
+            "max_purchase_price": None if manual_restricted else ceiling,
+            **ref,
+        })
+    return out
 
 
 def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | None = None,
@@ -406,16 +551,31 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
         items.append({
             "order_id": r.id, "order_no": r.order_no,
             "order_date": r.order_date.isoformat() if r.order_date else None,
+            "occurred_date": r.order_date.isoformat() if r.order_date else None,
             "is_future": bool(r.order_date and r.order_date > today),
             "salesperson": r.salesperson, "customer": r.customer,
             "business_type": r.business_type, "data_status": r.data_status,
-            "part_count": r.part_count, "total_qty": _f(r.total_qty),
-            "total_revenue": _f(r.total_revenue), "total_gross_profit": _f(r.total_gross_profit),
+            "part_count": r.part_count, "pn_count": r.part_count,
+            "total_qty": _f(r.total_qty), "total_quantity": _f(r.total_qty),
+            "total_revenue": _f(r.total_revenue), "total_amount": _f(r.total_revenue),
+            "total_gross_profit": _f(r.total_gross_profit),
             "linked_purchase": bool(r.linked_purchase),
         })
+    # v2：嵌套 parts（价格参考随行）。受限销售 = 逐单成交明细整段不可见
+    # （anonymize_sales_rows 同一口径），只留聚合概要，置 parts_restricted 旗标。
+    scoped = security.is_scoped_sales(user_ctx)
+    manual_restricted = security.is_field_hidden(user_ctx, "purchase_ceiling_ex_tax")
+    stats_upper = min(date_to, today) if date_to else today
+    parts_map = {} if scoped else _sales_parts(
+        db, [i["order_id"] for i in items], date_from, stats_upper, manual_restricted)
+    for it in items:
+        parts = parts_map.get(it["order_id"], [])
+        it["parts"] = parts
+        it["pn_preview"] = list(dict.fromkeys(p["pn_std"] for p in parts if p["pn_std"]))[:3]
     return {"total": total, "page": page, "page_size": page_size, "as_of": today.isoformat(),
             "effective_sort": effective_sort, "ranking_restricted": ranking_restricted,
-            "profit_restricted": profit_restricted, "items": items}
+            "profit_restricted": profit_restricted, "parts_restricted": scoped,
+            "manual_reference_restricted": manual_restricted, "items": items}
 
 
 def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date | None = None,
@@ -471,14 +631,26 @@ def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date
         items.append({
             "order_id": r.id, "order_no": r.order_no,
             "order_date": r.order_date.isoformat() if r.order_date else None,
+            "occurred_date": r.order_date.isoformat() if r.order_date else None,
             "is_future": bool(r.order_date and r.order_date > today),
             "purchaser": r.purchaser, "source_type": r.source_type, "data_status": r.data_status,
             "linked_sales_order": r.linked_sales_order_no,
-            "part_count": r.part_count, "total_qty": _f(r.total_qty), "total_ex_tax": _f(r.total_ex_tax),
+            "part_count": r.part_count, "pn_count": r.part_count,
+            "total_qty": _f(r.total_qty), "total_quantity": _f(r.total_qty),
+            "total_ex_tax": _f(r.total_ex_tax), "total_amount": _f(r.total_ex_tax),
         })
+    manual_restricted = security.is_field_hidden(user_ctx, "purchase_ceiling_ex_tax")
+    stats_upper = min(date_to, today) if date_to else today
+    parts_map = _purchase_parts(db, [i["order_id"] for i in items],
+                                date_from, stats_upper, manual_restricted)
+    for it in items:
+        parts = parts_map.get(it["order_id"], [])
+        it["parts"] = parts
+        it["pn_preview"] = list(dict.fromkeys(p["pn_std"] for p in parts if p["pn_std"]))[:3]
     return {"total": total, "page": page, "page_size": page_size, "as_of": today.isoformat(),
             "effective_sort": effective_sort, "ranking_restricted": ranking_restricted,
-            "cost_restricted": cost_restricted, "items": items}
+            "cost_restricted": cost_restricted,
+            "manual_reference_restricted": manual_restricted, "items": items}
 
 
 def _order_health(db: Session, date_from: date | None, date_to: date | None, today: date) -> dict:
