@@ -30,7 +30,17 @@ const DIM_LABEL: Record<string, string> = { part: "型号", salesperson: "销售
 
 export default function ProfitPage() {
   const { basis } = useTaxBasis();
-  const [dimension, setDimension] = useState("salesperson");
+  const role = localStorage.getItem("role") || "";
+  const isAdmin = role === "admin";
+  let localPerms: Record<string, boolean> = {};
+  try { localPerms = JSON.parse(localStorage.getItem("permissions") || "{}"); }
+  catch { localPerms = {}; }
+  // own_customers_only 用户按销售员/客户聚合会泄露同事经营信息；后端硬拦，前端同步
+  // 收起这些必然 403 的选项。旧权限快照缺键时按 sales 角色模板回退为受限。
+  const scopedSales = !isAdmin && (localPerms.own_customers_only === true
+    || (localPerms.own_customers_only == null && role === "sales"));
+  const canCustomerDimension = !scopedSales && (isAdmin || localPerms.data_customer !== false);
+  const [dimension, setDimension] = useState(() => scopedSales ? "part" : "salesperson");
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [onlyAnomaly, setOnlyAnomaly] = useState(false);
   const [rows, setRows] = useState<ProfitRow[]>([]);
@@ -155,8 +165,8 @@ export default function ProfitPage() {
             onChange={(v) => setDimension(v as string)}
             options={[
               { label: "按型号", value: "part" },
-              { label: "按销售员", value: "salesperson" },
-              { label: "按客户", value: "customer" },
+              ...(!scopedSales ? [{ label: "按销售员", value: "salesperson" }] : []),
+              ...(canCustomerDimension ? [{ label: "按客户", value: "customer" }] : []),
             ]}
           />
           <DatePicker.RangePicker onChange={(v) => setRange(v as [Dayjs, Dayjs] | null)} />
@@ -165,7 +175,9 @@ export default function ProfitPage() {
             <Switch checked={onlyAnomaly} onChange={setOnlyAnomaly} />
           </Space>
           <Tag color="blue">移动加权 + FIFO 并排</Tag>
-          <Button type="primary" loading={recomputing} onClick={recompute}>重算</Button>
+          {isAdmin && (
+            <Button type="primary" loading={recomputing} onClick={recompute}>重算</Button>
+          )}
           <Button onClick={exportCsv} disabled={!rows.length}>导出 CSV</Button>
         </Space>
       </Card>

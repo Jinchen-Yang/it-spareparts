@@ -9,16 +9,25 @@ from sqlalchemy import desc, func, select, update
 from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session
 
-from app.auth import require_admin
+from app.auth import current_role
 from app.config import MAX_UPLOAD_MB
 from app.db import SessionLocal, get_db
-from app.security import UserContext, get_current_user_context, record_access_log
+from app.security import (
+    UserContext,
+    get_current_user_context,
+    record_access_log,
+    require_page,
+)
 from app.services import inventory, maintenance_cost, master_data, profit
 from app.etl import mapping, pipeline, reader
 from app.etl.reader import ReaderError
 from app.models.system import SysImportBatch, SysImportError, SysImportJob
 
-router = APIRouter(prefix="/import", tags=["import"])
+router = APIRouter(
+    prefix="/import",
+    tags=["import"],
+    dependencies=[Depends(current_role), Depends(require_page("page_import"))],
+)
 
 
 def _save_upload_to_temp(file: UploadFile, name: str) -> str:
@@ -84,7 +93,6 @@ def upload(
     file: UploadFile = File(...),
     mode: str = Query("skip"),    # skip(默认,跳过已存在) | upsert(更新已存在,修复数据)
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     mode = mode if mode in ("skip", "upsert") else "skip"
@@ -125,7 +133,6 @@ def upload(
 @router.post("/precheck")
 def precheck(
     files: list[UploadFile] = File(...),
-    _: str = Depends(require_admin),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """导入前预检（不导入、不建批次）：识别文件类型 + 采购/销售是否含价格列。
@@ -248,7 +255,6 @@ def upload_batch(
     files: list[UploadFile] = File(...),
     mode: str = Query("skip"),
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """批量上传：N 个 .xlsx 归一个作业，后台逐文件导入。立即返回 job_id，前端轮询进度。"""
@@ -287,7 +293,7 @@ def _job_dict(j: SysImportJob) -> dict:
 
 
 @router.get("/jobs")
-def list_jobs(db: Session = Depends(get_db), _: str = Depends(require_admin)) -> list[dict]:
+def list_jobs(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.execute(
         select(SysImportJob).order_by(desc(SysImportJob.created_at)).limit(50)
     ).scalars().all()
@@ -295,8 +301,7 @@ def list_jobs(db: Session = Depends(get_db), _: str = Depends(require_admin)) ->
 
 
 @router.get("/jobs/{job_id}")
-def job_detail(job_id: int, db: Session = Depends(get_db),
-               _: str = Depends(require_admin)) -> dict:
+def job_detail(job_id: int, db: Session = Depends(get_db)) -> dict:
     j = db.get(SysImportJob, job_id)
     if j is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "作业不存在")
@@ -313,7 +318,7 @@ def job_detail(job_id: int, db: Session = Depends(get_db),
 
 
 @router.get("/batches")
-def list_batches(db: Session = Depends(get_db), _: str = Depends(require_admin)) -> list[dict]:
+def list_batches(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.execute(
         select(SysImportBatch).order_by(desc(SysImportBatch.uploaded_at)).limit(100)
     ).scalars().all()
@@ -326,8 +331,7 @@ def list_batches(db: Session = Depends(get_db), _: str = Depends(require_admin))
 
 
 @router.get("/batches/{batch_id}")
-def batch_detail(batch_id: int, db: Session = Depends(get_db),
-                 _: str = Depends(require_admin)) -> dict:
+def batch_detail(batch_id: int, db: Session = Depends(get_db)) -> dict:
     b = db.get(SysImportBatch, batch_id)
     if b is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "批次不存在")

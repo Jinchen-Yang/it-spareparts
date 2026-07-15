@@ -1,20 +1,54 @@
-"""利润 API（§9）。需管理员。"""
+"""利润 API（§9）：page_profit 可读/导出，重算仅管理员。"""
 import csv
 import io
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.auth import require_admin
+from app.auth import current_role, require_admin
 from app.db import get_db
-from app.security import UserContext, apply_field_visibility, get_current_user_context, record_access_log
+from app.security import (
+    UserContext,
+    apply_field_visibility,
+    get_current_user_context,
+    is_field_hidden,
+    record_access_log,
+    require_page,
+)
 from app.services import profit
 
-router = APIRouter(prefix="/profit", tags=["profit"])
+router = APIRouter(
+    prefix="/profit",
+    tags=["profit"],
+    dependencies=[Depends(current_role), Depends(require_page("page_profit"))],
+)
 
 _DIMS = ("part", "salesperson", "customer")
+
+
+def _aggregate_for_user(
+    db: Session,
+    dimension: str,
+    date_from: date | None,
+    date_to: date | None,
+    only_anomaly: bool,
+    ctx: UserContext,
+) -> dict:
+    """统一利润读边界：维度侧信道先拦截，再执行服务并做字段脱敏。
+
+    customer 的名称落在通用 ``dimension`` 键，递归字段脱敏无法从键名识别它，必须在
+    聚合前显式拒绝；受限销售的销售员/客户维度由服务层兜底抛 PermissionError，API
+    收敛为 403，不能把权限拒绝暴露成 500。
+    """
+    if dimension == "customer" and is_field_hidden(ctx, "customer_name"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无客户信息查看权限")
+    try:
+        data = profit.aggregate(db, dimension, date_from, date_to, only_anomaly, ctx)
+    except PermissionError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    return apply_field_visibility(data, ctx)
 
 
 @router.post("/recompute")
@@ -31,13 +65,11 @@ def aggregate(
     date_to: date | None = Query(None),
     only_anomaly: bool = Query(False),
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     dim = dimension if dimension in _DIMS else "part"
     record_access_log(ctx, "aggregate", "profit", {"dimension": dim})
-    data = profit.aggregate(db, dim, date_from, date_to, only_anomaly, ctx)
-    return apply_field_visibility(data, ctx)
+    return _aggregate_for_user(db, dim, date_from, date_to, only_anomaly, ctx)
 
 
 @router.get("/export")
@@ -47,14 +79,12 @@ def export(
     date_to: date | None = Query(None),
     only_anomaly: bool = Query(False),
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     dim = dimension if dimension in _DIMS else "part"
     record_access_log(ctx, "export", "profit", {"dimension": dim})
-    data = profit.aggregate(db, dim, date_from, date_to, only_anomaly, ctx)
-    # 导出同样过脱敏层（§8.5：所有对外数据通道统一脱敏）
-    data = apply_field_visibility(data, ctx)
+    # 导出与页面共用同一准入/脱敏边界，避免 CSV 成为绕过通道。
+    data = _aggregate_for_user(db, dim, date_from, date_to, only_anomaly, ctx)
     def _safe(v):
         # 防 CSV 公式注入：以 = + - @ 制表/回车开头的文本前置单引号
         if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):

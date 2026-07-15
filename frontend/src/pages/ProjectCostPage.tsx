@@ -97,6 +97,7 @@ const SourceLegend = (
 );
 
 export default function ProjectCostPage() {
+  const isAdmin = localStorage.getItem("role") === "admin";
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<ProjectRow[]>([]);
@@ -328,7 +329,9 @@ export default function ProjectCostPage() {
             style={{ width: 260 }}
             onSearch={(v) => setQ(v.trim())}
           />
-          <Button type="primary" loading={recomputing} onClick={recompute}>重算成本</Button>
+          {isAdmin && (
+            <Button type="primary" loading={recomputing} onClick={recompute}>重算成本</Button>
+          )}
           <Button loading={exporting} onClick={exportCsv} disabled={!rows.length}>导出 CSV</Button>
         </Space>
       </Card>

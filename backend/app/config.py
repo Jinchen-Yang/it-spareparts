@@ -371,6 +371,9 @@ FIELD_GROUPS = {
                       # "均价+差额"反推行价，故差额随本组一起遮。
                       "pool_avg_purchase_price", "purchase_metrics",
                       "pool_avg_delta", "pool_avg_delta_pct",
+                      # 数据治理汇总里的成本可追溯派生信号；数值虽非金额，仍会暴露
+                      # 成本是否匹配/估算，随采购成本权限一起隐藏。
+                      "sales_no_cost", "sales_fallback_cost", "traceable_pct",
                       # 与人工约束价的差额：价-差=约束价、价-差=行价，两头都能反推 →
                       # 双登记（本组 + pool_price_governance），任一组关闭即遮
                       "manual_limit_delta", "manual_limit_delta_pct"],
@@ -382,7 +385,9 @@ FIELD_GROUPS = {
     # 毛利率：见反推警告（_profit_summary 与 profit.aggregate 的两法派生键一并登记）
     "profit_rate":   ["gross_margin", "avg_margin", "margin_band",
                       "avg_margin_moving", "avg_margin_fifo",
-                      "gross_margin_moving", "gross_margin_fifo"],
+                      "gross_margin_moving", "gross_margin_fifo",
+                      # 数据治理汇总/指标里的盈亏派生结论同样属于利润信息。
+                      "sales_neg_margin", "margin_computable_pct"],
     # 互通池价格治理（data_pool_price_governance，§12）：人工约束价及其原始录入值。
     # 关掉后管理页/池详情的约束价全为 null；Slice 2 起的越线差额/越线标记派生键
     # （delta_amount/delta_pct/relation_to_constraint/violation_count 等）产出时必须补登记到本组。
