@@ -14,6 +14,7 @@ from app.config import MAX_UPLOAD_MB
 from app.db import SessionLocal, get_db
 from app.security import (
     UserContext,
+    apply_profit_recompute_visibility,
     get_current_user_context,
     record_access_log,
     require_page,
@@ -28,6 +29,11 @@ router = APIRouter(
     tags=["import"],
     dependencies=[Depends(current_role), Depends(require_page("page_import"))],
 )
+_log = logging.getLogger("imports")
+
+_PROFIT_REFRESH_ERROR = "利润重算失败，请到利润页手动重算"
+_MAINTENANCE_REFRESH_ERROR = "维保项目成本重算失败，请到项目成本页手动重算"
+_INTERNAL_IMPORT_ERROR = "系统处理异常，请联系管理员查看服务端日志"
 
 
 def _save_upload_to_temp(file: UploadFile, name: str) -> str:
@@ -61,20 +67,23 @@ def _post_import_refresh(db: Session, did_purchase_sales: bool, did_purchase_inv
     if did_purchase_sales:
         try:
             recompute_stats = profit.recompute(db)
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            _log.exception("post-import profit recompute failed")
             db.rollback()
-            recompute_stats = {"error": f"利润重算失败，请到利润页手动重算：{exc}"}
+            recompute_stats = {"error": _PROFIT_REFRESH_ERROR}
     if did_purchase_inventory:
         try:
             inventory.backfill_costs(db)
         except Exception:  # noqa: BLE001
+            _log.exception("post-import inventory cost backfill failed")
             db.rollback()
     if did_maintenance_cost:
         try:
             maintenance_cost.recompute(db)
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            _log.exception("post-import maintenance cost recompute failed")
             db.rollback()
-            err = f"维保项目成本重算失败，请到项目成本页手动重算：{exc}"
+            err = _MAINTENANCE_REFRESH_ERROR
             if isinstance(recompute_stats, dict) and recompute_stats.get("error"):
                 recompute_stats["error"] += f"；{err}"
             elif recompute_stats is None:
@@ -84,6 +93,7 @@ def _post_import_refresh(db: Session, did_purchase_sales: bool, did_purchase_inv
     try:
         master_data.refresh(db)
     except Exception:  # noqa: BLE001
+        _log.exception("post-import master data refresh failed")
         db.rollback()
     return recompute_stats
 
@@ -124,7 +134,7 @@ def upload(
             batch.file_type in ("purchase", "sales", "maintenance"))
         return {"batch_id": batch.id, "file_type": batch.file_type,
                 "status": batch.status, "report": batch.report_json,
-                "recompute": recompute_stats}
+                "recompute": apply_profit_recompute_visibility(recompute_stats, ctx)}
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -171,15 +181,16 @@ def precheck(
             "missing_price_any": any(r["missing_price"] for r in results)}
 
 
-_log = logging.getLogger("imports")
 _NOTE_MAX = 4000          # 作业 note 总长上限：note 会整段渲染到导入页，绝不能无界
 
 
 def _short_err(exc: Exception) -> str:
-    """note 只存脱敏短消息。完整异常（psycopg 错误含整条 SQL+千行参数展开，实测 48.7 万字符）
-    只进服务端日志——否则轮询作业状态时整页被 SQL 刷屏，且泄漏表结构（同 TOOLS-1 教训）。"""
-    first = (str(exc).splitlines() or [exc.__class__.__name__])[0]
-    return f"{exc.__class__.__name__}: {first[:200]}"
+    """作业 note 只存固定业务文案；完整异常仅进服务端日志。
+
+    psycopg/SQLAlchemy 的首行也可能包含表名、SQL 或参数，因此不能截断后返回客户端。
+    """
+    _ = exc
+    return _INTERNAL_IMPORT_ERROR
 
 
 def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,

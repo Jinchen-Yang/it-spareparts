@@ -26,6 +26,39 @@ router = APIRouter(
 )
 
 _DIMS = ("part", "salesperson", "customer")
+_COUPLED_FINANCIAL_FIELDS = (
+    "revenue_costed",
+    "no_cost",
+    "cost_moving_avg",
+    "gross_profit_moving",
+    "gross_margin_moving",
+    "cost_fifo",
+    "gross_profit_fifo",
+    "gross_margin_fifo",
+)
+
+
+def _financial_visibility_restricted(ctx: UserContext) -> bool:
+    """成本和利润在该报表中可互推，任一数据组隐藏都必须按受限口径输出。"""
+    return (
+        is_field_hidden(ctx, "cost_moving_avg")
+        or is_field_hidden(ctx, "gross_profit_moving")
+    )
+
+
+def _visible_profit_data(data: dict, ctx: UserContext) -> dict:
+    """利润页的成本与毛利必须成组可见，防止通过公开营收做代数反推。
+
+    在这个报表里 ``毛利 = 已配成本营收 - 成本``；只隐藏等式一侧没有意义。只要
+    data_purchase_cost / data_profit 任一关闭，就把两组派生财务值一起置空。营收与
+    行数仍可见，页面权限不会变成菜单可见但接口 403。
+    """
+    visible = apply_field_visibility(data, ctx)
+    if _financial_visibility_restricted(ctx):
+        for row in visible.get("rows", []):
+            for field in _COUPLED_FINANCIAL_FIELDS:
+                row[field] = None
+    return visible
 
 
 def _aggregate_for_user(
@@ -44,11 +77,16 @@ def _aggregate_for_user(
     """
     if dimension == "customer" and is_field_hidden(ctx, "customer_name"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无客户信息查看权限")
+    if only_anomaly and _financial_visibility_restricted(ctx):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "异常筛选需要同时具备采购成本和利润查看权限",
+        )
     try:
         data = profit.aggregate(db, dimension, date_from, date_to, only_anomaly, ctx)
     except PermissionError as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
-    return apply_field_visibility(data, ctx)
+    return _visible_profit_data(data, ctx)
 
 
 @router.post("/recompute")

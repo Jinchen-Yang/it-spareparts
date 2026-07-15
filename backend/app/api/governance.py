@@ -3,6 +3,8 @@
 持有 page_governance 的实名用户可查看并处理治理队列；所有输出继续服从 data_* 字段
 权限，写操作按 token 中的具体用户名留审计。该页面权限本身标记为高风险，由管理员显式授予。
 """
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -11,10 +13,13 @@ from sqlalchemy.orm import Session
 from app.auth import current_role
 from app.db import get_db
 from app.models.dimensions import DimPart
+from app.models.system import SysAuditLog
 from app.security import (
     UserContext,
     apply_field_visibility,
+    apply_profit_recompute_visibility,
     get_current_user_context,
+    is_field_hidden,
     require_page,
 )
 from app.services import governance, master_data, match_candidates, merge, part_rename
@@ -27,6 +32,8 @@ router = APIRouter(
     tags=["governance"],
     dependencies=[Depends(current_role), Depends(require_page("page_governance"))],
 )
+_log = logging.getLogger("governance")
+_RECOMPUTE_FAILED = "治理操作已完成，但后置重算失败，请联系管理员处理"
 
 _KINDS = ("nonstd", "needs_review", "excluded")
 
@@ -38,7 +45,36 @@ def _operated_by(ctx: UserContext) -> str:
 
 def _visible(data: dict, ctx: UserContext) -> dict:
     """治理页也是对外数据通道，统一执行字段级脱敏。"""
-    return apply_field_visibility(data, ctx)
+    visible = apply_field_visibility(data, ctx)
+    if isinstance(visible.get("recompute"), dict):
+        visible["recompute"] = apply_profit_recompute_visibility(
+            visible["recompute"], ctx,
+        )
+    return visible
+
+
+def _audit_bulk(db: Session, action: str, result: dict, ctx: UserContext) -> None:
+    """批量治理动作单独留痕；底层服务已提交业务事务，因此这里显式提交审计。"""
+    db.add(SysAuditLog(
+        entity_type="governance",
+        entity_id=0,
+        action=action,
+        after_json=result,
+        operated_by=_operated_by(ctx),
+    ))
+    db.commit()
+
+
+def _visible_parts(data: dict, ctx: UserContext) -> dict:
+    """治理清单的营收与毛利率可反推成本，混合权限下收敛派生毛利率。"""
+    visible = _visible(data, ctx)
+    if (
+        is_field_hidden(ctx, "cost_moving_avg")
+        or is_field_hidden(ctx, "gross_margin")
+    ):
+        for item in visible.get("items", []):
+            item["gross_margin"] = None
+    return visible
 
 
 class ExcludeRequest(BaseModel):
@@ -111,7 +147,19 @@ def refresh(
     """一键回填+扫描（幂等）：字典/别名/规格/质量问题，可选生成合并候选。"""
     stats = master_data.refresh(db)
     if with_candidates:
-        stats["candidates"] = match_candidates.generate(db)
+        try:
+            stats["candidates"] = match_candidates.generate(db)
+        except Exception as exc:
+            # refresh 已在服务层提交；即使候选生成失败，也必须记录已发生的批量写入。
+            # SQL 异常会把当前事务标成 failed，先回滚候选阶段才能可靠写入独立审计。
+            db.rollback()
+            stats["candidates"] = {
+                "status": "failed",
+                "error_type": type(exc).__name__,
+            }
+            _audit_bulk(db, "refresh", stats, ctx)
+            raise
+    _audit_bulk(db, "refresh", stats, ctx)
     return _visible(stats, ctx)
 
 
@@ -121,7 +169,9 @@ def classify_backfill(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """按描述自动给型号打干净品类（尊重人工分类/锁定，幂等可重跑）。支撑型号查询按品类筛选。"""
-    return _visible(master_data.classify_backfill(db), ctx)
+    result = master_data.classify_backfill(db)
+    _audit_bulk(db, "classify_backfill", result, ctx)
+    return _visible(result, ctx)
 
 
 @router.get("/parts")
@@ -133,7 +183,7 @@ def parts(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     k = kind if kind in _KINDS else "nonstd"
-    return _visible(governance.list_parts(db, k, page, page_size), ctx)
+    return _visible_parts(governance.list_parts(db, k, page, page_size), ctx)
 
 
 @router.put("/exclude")
@@ -171,8 +221,10 @@ def merge_parts(
             result["recompute"] = profit_svc.recompute(db)
             result["inventory_costs"] = inventory_svc.backfill_costs(db)
             result["maintenance_costs"] = maintenance_svc.recompute(db)
-        except Exception as exc:  # noqa: BLE001
-            result["recompute_failed"] = str(exc)
+        except Exception:  # noqa: BLE001
+            _log.exception("post-merge recompute failed")
+            db.rollback()
+            result["recompute_failed"] = _RECOMPUTE_FAILED
     return _visible(result, ctx)
 
 
@@ -248,8 +300,10 @@ def unmerge_parts(
             result["recompute"] = profit_svc.recompute(db)
             result["inventory_costs"] = inventory_svc.backfill_costs(db)
             result["maintenance_costs"] = maintenance_svc.recompute(db)
-        except Exception as exc:  # noqa: BLE001
-            result["recompute_failed"] = str(exc)
+        except Exception:  # noqa: BLE001
+            _log.exception("post-unmerge recompute failed")
+            db.rollback()
+            result["recompute_failed"] = _RECOMPUTE_FAILED
     return _visible(result, ctx)
 
 

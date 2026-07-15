@@ -81,6 +81,66 @@ describe("利润维度与数据范围一致", () => {
     expect(screen.queryByText("按销售员")).toBeNull();
     expect(screen.queryByText("按客户")).toBeNull();
   });
+
+  it.each([
+    ["缺成本权限", { data_purchase_cost: false, data_profit: true }],
+    ["缺利润权限", { data_purchase_cost: true, data_profit: false }],
+  ])("%s 时隐藏会泄露成本/盈亏归类的异常筛选", (_label, permissions) => {
+    localStorage.setItem("permissions", JSON.stringify({
+      page_profit: true,
+      own_customers_only: false,
+      data_customer: true,
+      ...permissions,
+    }));
+    render(<ProfitPage />);
+    expect(screen.queryByText("仅看异常")).toBeNull();
+  });
+
+  it("成本与利润权限齐全时保留异常筛选", () => {
+    localStorage.setItem("permissions", JSON.stringify({
+      page_profit: true,
+      own_customers_only: false,
+      data_customer: true,
+      data_purchase_cost: true,
+      data_profit: true,
+    }));
+    render(<ProfitPage />);
+    expect(screen.getByText("仅看异常")).toBeInTheDocument();
+  });
+
+  it("脱敏后的利润 KPI 保持为空，不能误显示为真实零元", async () => {
+    localStorage.setItem("permissions", JSON.stringify({
+      page_profit: true,
+      own_customers_only: false,
+      data_customer: true,
+      data_purchase_cost: false,
+      data_profit: true,
+    }));
+    get.mockResolvedValue({ data: { rows: [{
+      dimension: "SECURE-PN",
+      revenue: 100,
+      revenue_costed: null,
+      cost_moving_avg: null,
+      gross_profit_moving: null,
+      gross_margin_moving: null,
+      cost_fifo: null,
+      gross_profit_fifo: null,
+      gross_margin_fifo: null,
+      lines: 1,
+      no_cost: null,
+      excluded_revenue: 0,
+    }] } });
+    render(<ProfitPage />);
+    await screen.findByText("SECURE-PN");
+
+    for (const title of ["移动加权 · 毛利", "先进先出 FIFO · 毛利"]) {
+      const card = screen.getByText(title).closest(".ant-card");
+      expect(card).not.toBeNull();
+      expect(card).toHaveTextContent("不含 -");
+      expect(card).toHaveTextContent("毛利率 -");
+      expect(card).not.toHaveTextContent("¥0");
+    }
+  });
 });
 
 const inventoryResponse = {
