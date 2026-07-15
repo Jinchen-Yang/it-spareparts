@@ -1,20 +1,80 @@
-"""数据治理 API（报告#25/#11 + 整改 P0/P4 主数据工作流）。全部需管理员；写操作留审计。"""
+"""数据治理 API（报告#25/#11 + 整改 P0/P4 主数据工作流）。
+
+持有 page_governance 的实名用户可查看并处理治理队列；所有输出继续服从 data_* 字段
+权限，写操作按 token 中的具体用户名留审计。该页面权限本身标记为高风险，由管理员显式授予。
+"""
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.auth import require_admin
+from app.auth import current_role
 from app.db import get_db
 from app.models.dimensions import DimPart
+from app.models.system import SysAuditLog
+from app.security import (
+    UserContext,
+    apply_field_visibility,
+    apply_profit_recompute_visibility,
+    get_current_user_context,
+    is_field_hidden,
+    require_page,
+)
 from app.services import governance, master_data, match_candidates, merge, part_rename
 from app.services import inventory as inventory_svc
 from app.services import maintenance_cost as maintenance_svc
 from app.services import profit as profit_svc
 
-router = APIRouter(prefix="/governance", tags=["governance"])
+router = APIRouter(
+    prefix="/governance",
+    tags=["governance"],
+    dependencies=[Depends(current_role), Depends(require_page("page_governance"))],
+)
+_log = logging.getLogger("governance")
+_RECOMPUTE_FAILED = "治理操作已完成，但后置重算失败，请联系管理员处理"
 
 _KINDS = ("nonstd", "needs_review", "excluded")
+
+
+def _operated_by(ctx: UserContext) -> str:
+    """治理写审计必须能区分同角色的不同员工，真实用户名优先。"""
+    return ctx.user_id or ctx.role
+
+
+def _visible(data: dict, ctx: UserContext) -> dict:
+    """治理页也是对外数据通道，统一执行字段级脱敏。"""
+    visible = apply_field_visibility(data, ctx)
+    if isinstance(visible.get("recompute"), dict):
+        visible["recompute"] = apply_profit_recompute_visibility(
+            visible["recompute"], ctx,
+        )
+    return visible
+
+
+def _audit_bulk(db: Session, action: str, result: dict, ctx: UserContext) -> None:
+    """批量治理动作单独留痕；底层服务已提交业务事务，因此这里显式提交审计。"""
+    db.add(SysAuditLog(
+        entity_type="governance",
+        entity_id=0,
+        action=action,
+        after_json=result,
+        operated_by=_operated_by(ctx),
+    ))
+    db.commit()
+
+
+def _visible_parts(data: dict, ctx: UserContext) -> dict:
+    """治理清单的营收与毛利率可反推成本，混合权限下收敛派生毛利率。"""
+    visible = _visible(data, ctx)
+    if (
+        is_field_hidden(ctx, "cost_moving_avg")
+        or is_field_hidden(ctx, "gross_margin")
+    ):
+        for item in visible.get("items", []):
+            item["gross_margin"] = None
+    return visible
 
 
 class ExcludeRequest(BaseModel):
@@ -62,33 +122,56 @@ class AliasReview(BaseModel):
 
 
 @router.get("/summary")
-def summary(db: Session = Depends(get_db), _: str = Depends(require_admin)) -> dict:
-    return governance.summary(db)
+def summary(
+    db: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    return _visible(governance.summary(db), ctx)
 
 
 @router.get("/metrics")
-def metrics(db: Session = Depends(get_db), _: str = Depends(require_admin)) -> dict:
+def metrics(
+    db: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
     """主数据建设量化指标（审核说明 §7）：覆盖率/归一率/完整率/积压/可追溯率。"""
-    return master_data.metrics(db)
+    return _visible(master_data.metrics(db), ctx)
 
 
 @router.post("/refresh")
 def refresh(
     with_candidates: bool = Query(True),
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """一键回填+扫描（幂等）：字典/别名/规格/质量问题，可选生成合并候选。"""
     stats = master_data.refresh(db)
     if with_candidates:
-        stats["candidates"] = match_candidates.generate(db)
-    return stats
+        try:
+            stats["candidates"] = match_candidates.generate(db)
+        except Exception as exc:
+            # refresh 已在服务层提交；即使候选生成失败，也必须记录已发生的批量写入。
+            # SQL 异常会把当前事务标成 failed，先回滚候选阶段才能可靠写入独立审计。
+            db.rollback()
+            stats["candidates"] = {
+                "status": "failed",
+                "error_type": type(exc).__name__,
+            }
+            _audit_bulk(db, "refresh", stats, ctx)
+            raise
+    _audit_bulk(db, "refresh", stats, ctx)
+    return _visible(stats, ctx)
 
 
 @router.post("/classify-backfill")
-def classify_backfill(db: Session = Depends(get_db), _: str = Depends(require_admin)) -> dict:
+def classify_backfill(
+    db: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
     """按描述自动给型号打干净品类（尊重人工分类/锁定，幂等可重跑）。支撑型号查询按品类筛选。"""
-    return master_data.classify_backfill(db)
+    result = master_data.classify_backfill(db)
+    _audit_bulk(db, "classify_backfill", result, ctx)
+    return _visible(result, ctx)
 
 
 @router.get("/parts")
@@ -97,25 +180,26 @@ def parts(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     k = kind if kind in _KINDS else "nonstd"
-    return governance.list_parts(db, k, page, page_size)
+    return _visible_parts(governance.list_parts(db, k, page, page_size), ctx)
 
 
 @router.put("/exclude")
 def exclude(
     body: ExcludeRequest,
     db: Session = Depends(get_db),
-    role: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     try:
-        res = governance.set_excluded(db, body.pn_std, body.excluded, body.reason, operated_by=role)
+        res = governance.set_excluded(
+            db, body.pn_std, body.excluded, body.reason, operated_by=_operated_by(ctx))
     except governance.GovernanceError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     if res is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"型号不存在: {body.pn_std}")
-    return res
+    return _visible(res, ctx)
 
 
 # ---------------- 合并 ----------------
@@ -124,10 +208,11 @@ def exclude(
 def merge_parts(
     body: MergeRequest,
     db: Session = Depends(get_db),
-    role: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     try:
-        result = merge.merge_parts(db, body.source_pn, body.target_pn, body.reason, role)
+        result = merge.merge_parts(
+            db, body.source_pn, body.target_pn, body.reason, _operated_by(ctx))
     except merge.MergeError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     if body.recompute:
@@ -136,16 +221,18 @@ def merge_parts(
             result["recompute"] = profit_svc.recompute(db)
             result["inventory_costs"] = inventory_svc.backfill_costs(db)
             result["maintenance_costs"] = maintenance_svc.recompute(db)
-        except Exception as exc:  # noqa: BLE001
-            result["recompute_failed"] = str(exc)
-    return result
+        except Exception:  # noqa: BLE001
+            _log.exception("post-merge recompute failed")
+            db.rollback()
+            result["recompute_failed"] = _RECOMPUTE_FAILED
+    return _visible(result, ctx)
 
 
 @router.post("/parts/rename")
 def rename_part(
     body: RenameRequest,
     db: Session = Depends(get_db),
-    role: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """标准化改名（§5）：把型号 pn_std 改成厂商规范写法。
 
@@ -156,7 +243,9 @@ def rename_part(
     if part is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"型号不存在: {body.pn_std}")
     try:
-        return part_rename.rename_part(db, part.id, body.new_pn_std, body.reason, role)
+        result = part_rename.rename_part(
+            db, part.id, body.new_pn_std, body.reason, _operated_by(ctx))
+        return _visible(result, ctx)
     except part_rename.RenameError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
@@ -166,7 +255,7 @@ def list_merges(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """合并历史（最近在前），供回滚选择。"""
     from sqlalchemy import desc, func, select
@@ -193,17 +282,17 @@ def list_merges(
             "affected_counts": {k: (len(v) if isinstance(v, list) else v)
                                 for k, v in (r.affected_records or {}).items()},
         })
-    return {"total": total, "page": page, "page_size": page_size, "items": items}
+    return _visible({"total": total, "page": page, "page_size": page_size, "items": items}, ctx)
 
 
 @router.post("/parts/unmerge")
 def unmerge_parts(
     body: UnmergeRequest,
     db: Session = Depends(get_db),
-    role: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     try:
-        result = merge.unmerge(db, body.merge_log_id, role)
+        result = merge.unmerge(db, body.merge_log_id, _operated_by(ctx))
     except merge.MergeError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     if body.recompute:
@@ -211,16 +300,18 @@ def unmerge_parts(
             result["recompute"] = profit_svc.recompute(db)
             result["inventory_costs"] = inventory_svc.backfill_costs(db)
             result["maintenance_costs"] = maintenance_svc.recompute(db)
-        except Exception as exc:  # noqa: BLE001
-            result["recompute_failed"] = str(exc)
-    return result
+        except Exception:  # noqa: BLE001
+            _log.exception("post-unmerge recompute failed")
+            db.rollback()
+            result["recompute_failed"] = _RECOMPUTE_FAILED
+    return _visible(result, ctx)
 
 
 @router.post("/parts/confirm-batch")
 def confirm_batch(
     body: ConfirmBatchRequest,
     db: Session = Depends(get_db),
-    role: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """批量确认独立型号（清待审标记）。pn_stds 与 scope=no_candidates 二选一。"""
     if body.pn_stds:
@@ -235,7 +326,7 @@ def confirm_batch(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "需提供 pn_stds 或 scope=no_candidates")
     if not ids:
         return {"confirmed": 0, "obsoleted_candidates": 0}
-    return match_candidates.confirm_independent(db, ids, role)
+    return _visible(match_candidates.confirm_independent(db, ids, _operated_by(ctx)), ctx)
 
 
 # ---------------- 候选审核 ----------------
@@ -247,9 +338,9 @@ def candidates(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    return match_candidates.list_candidates(db, status_, page, page_size, order)
+    return _visible(match_candidates.list_candidates(db, status_, page, page_size, order), ctx)
 
 
 @router.post("/candidates/{candidate_id}/review")
@@ -257,10 +348,12 @@ def review_candidate(
     candidate_id: int,
     body: CandidateReview,
     db: Session = Depends(get_db),
-    role: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     try:
-        return match_candidates.review(db, candidate_id, body.action, body.reason, role)
+        result = match_candidates.review(
+            db, candidate_id, body.action, body.reason, _operated_by(ctx))
+        return _visible(result, ctx)
     except (match_candidates.CandidateError, merge.MergeError) as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
@@ -274,9 +367,9 @@ def issues(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    return master_data.list_issues(db, issue_type, status_, page, page_size)
+    return _visible(master_data.list_issues(db, issue_type, status_, page, page_size), ctx)
 
 
 @router.post("/issues/{issue_id}/resolve")
@@ -284,15 +377,16 @@ def resolve_issue(
     issue_id: int,
     body: IssueResolve,
     db: Session = Depends(get_db),
-    role: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     try:
-        res = master_data.resolve_issue(db, issue_id, body.action, body.note, role)
+        res = master_data.resolve_issue(
+            db, issue_id, body.action, body.note, _operated_by(ctx))
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     if res is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"问题不存在: {issue_id}")
-    return res
+    return _visible(res, ctx)
 
 
 # ---------------- 别名审核 ----------------
@@ -303,9 +397,9 @@ def aliases(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    return master_data.list_aliases(db, status_, page, page_size)
+    return _visible(master_data.list_aliases(db, status_, page, page_size), ctx)
 
 
 @router.post("/aliases/{alias_id}/review")
@@ -313,9 +407,11 @@ def review_alias(
     alias_id: int,
     body: AliasReview,
     db: Session = Depends(get_db),
-    role: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     try:
-        return master_data.review_alias(db, alias_id, body.action, body.target_pn, role)
+        result = master_data.review_alias(
+            db, alias_id, body.action, body.target_pn, _operated_by(ctx))
+        return _visible(result, ctx)
     except master_data.AliasError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc

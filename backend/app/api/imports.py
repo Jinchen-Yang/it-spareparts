@@ -9,16 +9,31 @@ from sqlalchemy import desc, func, select, update
 from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session
 
-from app.auth import require_admin
+from app.auth import current_role
 from app.config import MAX_UPLOAD_MB
 from app.db import SessionLocal, get_db
-from app.security import UserContext, get_current_user_context, record_access_log
+from app.security import (
+    UserContext,
+    apply_profit_recompute_visibility,
+    get_current_user_context,
+    record_access_log,
+    require_page,
+)
 from app.services import inventory, maintenance_cost, master_data, profit
 from app.etl import mapping, pipeline, reader
 from app.etl.reader import ReaderError
 from app.models.system import SysImportBatch, SysImportError, SysImportJob
 
-router = APIRouter(prefix="/import", tags=["import"])
+router = APIRouter(
+    prefix="/import",
+    tags=["import"],
+    dependencies=[Depends(current_role), Depends(require_page("page_import"))],
+)
+_log = logging.getLogger("imports")
+
+_PROFIT_REFRESH_ERROR = "利润重算失败，请到利润页手动重算"
+_MAINTENANCE_REFRESH_ERROR = "维保项目成本重算失败，请到项目成本页手动重算"
+_INTERNAL_IMPORT_ERROR = "系统处理异常，请联系管理员查看服务端日志"
 
 
 def _save_upload_to_temp(file: UploadFile, name: str) -> str:
@@ -52,20 +67,23 @@ def _post_import_refresh(db: Session, did_purchase_sales: bool, did_purchase_inv
     if did_purchase_sales:
         try:
             recompute_stats = profit.recompute(db)
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            _log.exception("post-import profit recompute failed")
             db.rollback()
-            recompute_stats = {"error": f"利润重算失败，请到利润页手动重算：{exc}"}
+            recompute_stats = {"error": _PROFIT_REFRESH_ERROR}
     if did_purchase_inventory:
         try:
             inventory.backfill_costs(db)
         except Exception:  # noqa: BLE001
+            _log.exception("post-import inventory cost backfill failed")
             db.rollback()
     if did_maintenance_cost:
         try:
             maintenance_cost.recompute(db)
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
+            _log.exception("post-import maintenance cost recompute failed")
             db.rollback()
-            err = f"维保项目成本重算失败，请到项目成本页手动重算：{exc}"
+            err = _MAINTENANCE_REFRESH_ERROR
             if isinstance(recompute_stats, dict) and recompute_stats.get("error"):
                 recompute_stats["error"] += f"；{err}"
             elif recompute_stats is None:
@@ -75,6 +93,7 @@ def _post_import_refresh(db: Session, did_purchase_sales: bool, did_purchase_inv
     try:
         master_data.refresh(db)
     except Exception:  # noqa: BLE001
+        _log.exception("post-import master data refresh failed")
         db.rollback()
     return recompute_stats
 
@@ -84,7 +103,6 @@ def upload(
     file: UploadFile = File(...),
     mode: str = Query("skip"),    # skip(默认,跳过已存在) | upsert(更新已存在,修复数据)
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     mode = mode if mode in ("skip", "upsert") else "skip"
@@ -116,7 +134,7 @@ def upload(
             batch.file_type in ("purchase", "sales", "maintenance"))
         return {"batch_id": batch.id, "file_type": batch.file_type,
                 "status": batch.status, "report": batch.report_json,
-                "recompute": recompute_stats}
+                "recompute": apply_profit_recompute_visibility(recompute_stats, ctx)}
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -125,7 +143,6 @@ def upload(
 @router.post("/precheck")
 def precheck(
     files: list[UploadFile] = File(...),
-    _: str = Depends(require_admin),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """导入前预检（不导入、不建批次）：识别文件类型 + 采购/销售是否含价格列。
@@ -164,15 +181,16 @@ def precheck(
             "missing_price_any": any(r["missing_price"] for r in results)}
 
 
-_log = logging.getLogger("imports")
 _NOTE_MAX = 4000          # 作业 note 总长上限：note 会整段渲染到导入页，绝不能无界
 
 
 def _short_err(exc: Exception) -> str:
-    """note 只存脱敏短消息。完整异常（psycopg 错误含整条 SQL+千行参数展开，实测 48.7 万字符）
-    只进服务端日志——否则轮询作业状态时整页被 SQL 刷屏，且泄漏表结构（同 TOOLS-1 教训）。"""
-    first = (str(exc).splitlines() or [exc.__class__.__name__])[0]
-    return f"{exc.__class__.__name__}: {first[:200]}"
+    """作业 note 只存固定业务文案；完整异常仅进服务端日志。
+
+    psycopg/SQLAlchemy 的首行也可能包含表名、SQL 或参数，因此不能截断后返回客户端。
+    """
+    _ = exc
+    return _INTERNAL_IMPORT_ERROR
 
 
 def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
@@ -248,7 +266,6 @@ def upload_batch(
     files: list[UploadFile] = File(...),
     mode: str = Query("skip"),
     db: Session = Depends(get_db),
-    _: str = Depends(require_admin),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """批量上传：N 个 .xlsx 归一个作业，后台逐文件导入。立即返回 job_id，前端轮询进度。"""
@@ -287,7 +304,7 @@ def _job_dict(j: SysImportJob) -> dict:
 
 
 @router.get("/jobs")
-def list_jobs(db: Session = Depends(get_db), _: str = Depends(require_admin)) -> list[dict]:
+def list_jobs(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.execute(
         select(SysImportJob).order_by(desc(SysImportJob.created_at)).limit(50)
     ).scalars().all()
@@ -295,8 +312,7 @@ def list_jobs(db: Session = Depends(get_db), _: str = Depends(require_admin)) ->
 
 
 @router.get("/jobs/{job_id}")
-def job_detail(job_id: int, db: Session = Depends(get_db),
-               _: str = Depends(require_admin)) -> dict:
+def job_detail(job_id: int, db: Session = Depends(get_db)) -> dict:
     j = db.get(SysImportJob, job_id)
     if j is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "作业不存在")
@@ -313,7 +329,7 @@ def job_detail(job_id: int, db: Session = Depends(get_db),
 
 
 @router.get("/batches")
-def list_batches(db: Session = Depends(get_db), _: str = Depends(require_admin)) -> list[dict]:
+def list_batches(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.execute(
         select(SysImportBatch).order_by(desc(SysImportBatch.uploaded_at)).limit(100)
     ).scalars().all()
@@ -326,8 +342,7 @@ def list_batches(db: Session = Depends(get_db), _: str = Depends(require_admin))
 
 
 @router.get("/batches/{batch_id}")
-def batch_detail(batch_id: int, db: Session = Depends(get_db),
-                 _: str = Depends(require_admin)) -> dict:
+def batch_detail(batch_id: int, db: Session = Depends(get_db)) -> dict:
     b = db.get(SysImportBatch, batch_id)
     if b is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "批次不存在")

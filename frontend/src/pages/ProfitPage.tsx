@@ -21,7 +21,7 @@ interface ProfitRow {
   gross_profit_fifo: number | null;
   gross_margin_fifo: number | null;
   lines: number;
-  no_cost: number;
+  no_cost: number | null;
   excluded_revenue: number | null;
 }
 
@@ -30,7 +30,19 @@ const DIM_LABEL: Record<string, string> = { part: "型号", salesperson: "销售
 
 export default function ProfitPage() {
   const { basis } = useTaxBasis();
-  const [dimension, setDimension] = useState("salesperson");
+  const role = localStorage.getItem("role") || "";
+  const isAdmin = role === "admin";
+  let localPerms: Record<string, boolean> = {};
+  try { localPerms = JSON.parse(localStorage.getItem("permissions") || "{}"); }
+  catch { localPerms = {}; }
+  // own_customers_only 用户按销售员/客户聚合会泄露同事经营信息；后端硬拦，前端同步
+  // 收起这些必然 403 的选项。旧权限快照缺键时按 sales 角色模板回退为受限。
+  const scopedSales = !isAdmin && (localPerms.own_customers_only === true
+    || (localPerms.own_customers_only == null && role === "sales"));
+  const canCustomerDimension = !scopedSales && (isAdmin || localPerms.data_customer !== false);
+  const canUseFinancialAnomalies = isAdmin
+    || (localPerms.data_purchase_cost !== false && localPerms.data_profit !== false);
+  const [dimension, setDimension] = useState(() => scopedSales ? "part" : "salesperson");
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [onlyAnomaly, setOnlyAnomaly] = useState(false);
   const [rows, setRows] = useState<ProfitRow[]>([]);
@@ -133,14 +145,24 @@ export default function ProfitPage() {
     },
     { title: "行数", dataIndex: "lines", width: 70, align: "right" },
     { title: "无成本", dataIndex: "no_cost", width: 80, align: "right",
-      render: (v: number) => (v ? <Tag color="orange">{v}</Tag> : v) },
+      render: (v: number | null) => (v ? <Tag color="orange">{v}</Tag> : v) },
   ];
 
-  const sum = (k: keyof ProfitRow) => rows.reduce((s, r) => s + ((r[k] as number) ?? 0), 0);
+  const sum = (k: keyof ProfitRow): number | null => {
+    const values = rows
+      .map((row) => row[k])
+      .filter((value): value is number => typeof value === "number");
+    return values.length ? values.reduce((total, value) => total + value, 0) : null;
+  };
   const totalRev = sum("revenue");
   const totalRevCosted = sum("revenue_costed");
   const totalGpMa = sum("gross_profit_moving");
   const totalGpFifo = sum("gross_profit_fifo");
+  const marginText = (profit: number | null, revenue: number | null) => (
+    profit != null && revenue != null && revenue !== 0
+      ? `${((profit / revenue) * 100).toFixed(2)}%`
+      : "-"
+  );
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
@@ -155,17 +177,21 @@ export default function ProfitPage() {
             onChange={(v) => setDimension(v as string)}
             options={[
               { label: "按型号", value: "part" },
-              { label: "按销售员", value: "salesperson" },
-              { label: "按客户", value: "customer" },
+              ...(!scopedSales ? [{ label: "按销售员", value: "salesperson" }] : []),
+              ...(canCustomerDimension ? [{ label: "按客户", value: "customer" }] : []),
             ]}
           />
           <DatePicker.RangePicker onChange={(v) => setRange(v as [Dayjs, Dayjs] | null)} />
-          <Space>
-            仅看异常
-            <Switch checked={onlyAnomaly} onChange={setOnlyAnomaly} />
-          </Space>
+          {canUseFinancialAnomalies && (
+            <Space>
+              仅看异常
+              <Switch checked={onlyAnomaly} onChange={setOnlyAnomaly} />
+            </Space>
+          )}
           <Tag color="blue">移动加权 + FIFO 并排</Tag>
-          <Button type="primary" loading={recomputing} onClick={recompute}>重算</Button>
+          {isAdmin && (
+            <Button type="primary" loading={recomputing} onClick={recompute}>重算</Button>
+          )}
           <Button onClick={exportCsv} disabled={!rows.length}>导出 CSV</Button>
         </Space>
       </Card>
@@ -177,15 +203,15 @@ export default function ProfitPage() {
         </Card></Col>
         <Col span={8}><Card size="small">
           <Statistic title="移动加权 · 毛利" value={0}
-            valueStyle={{ color: totalGpMa < 0 ? "var(--mb-danger)" : undefined }}
+            valueStyle={{ color: totalGpMa != null && totalGpMa < 0 ? "var(--mb-danger)" : undefined }}
             formatter={() => <TaxMoney inc={null} ex={totalGpMa} />} />
-          <span style={{ color: "var(--mb-text-3)" }}>毛利率 {totalRevCosted ? ((totalGpMa / totalRevCosted) * 100).toFixed(2) : "-"}%</span>
+          <span style={{ color: "var(--mb-text-3)" }}>毛利率 {marginText(totalGpMa, totalRevCosted)}</span>
         </Card></Col>
         <Col span={8}><Card size="small">
           <Statistic title="先进先出 FIFO · 毛利" value={0}
-            valueStyle={{ color: totalGpFifo < 0 ? "var(--mb-danger)" : undefined }}
+            valueStyle={{ color: totalGpFifo != null && totalGpFifo < 0 ? "var(--mb-danger)" : undefined }}
             formatter={() => <TaxMoney inc={null} ex={totalGpFifo} />} />
-          <span style={{ color: "var(--mb-text-3)" }}>毛利率 {totalRevCosted ? ((totalGpFifo / totalRevCosted) * 100).toFixed(2) : "-"}%</span>
+          <span style={{ color: "var(--mb-text-3)" }}>毛利率 {marginText(totalGpFifo, totalRevCosted)}</span>
         </Card></Col>
       </Row>
 

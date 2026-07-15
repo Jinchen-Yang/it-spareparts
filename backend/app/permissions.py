@@ -102,7 +102,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "data_supplier": False, "data_customer": True,
         "data_purchase_cost": True, "data_profit": True,
         # page_purchases=True：合同重点"销售和采购都能查最近采购记录"。
-        # page_profit=False：利润分析接口本就 require_admin，给 sales 这个菜单只会点了 403。
+        # page_profit=False：销售默认不开放利润分析；管理员可按账号显式授予页面权限。
         "page_parts": True, "page_purchases": True, "page_profit": False,
         "page_inventory": True, "page_chat": True,
         "page_import": False, "page_governance": False,

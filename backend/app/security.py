@@ -213,6 +213,28 @@ def _mask(node: Any, hidden: set[str]) -> Any:
     return node
 
 
+def apply_profit_recompute_visibility(
+    stats: dict | None,
+    user_ctx: UserContext,
+) -> dict | None:
+    """净化导入/治理动作附带的利润重算统计。
+
+    ``profit.recompute`` 的短键不是常规数据模型字段，不能依赖 FIELD_GROUPS 的精确键
+    映射：无成本权限隐藏匹配失败/兜底计数，无利润权限隐藏负毛利计数。调用方仍可返回
+    非敏感的处理行数，管理员保持完整结果。
+    """
+    if stats is None:
+        return None
+    visible = apply_field_visibility(stats, user_ctx)
+    if is_field_hidden(user_ctx, "cost_moving_avg"):
+        for field in ("no_cost", "fallback"):
+            if field in visible:
+                visible[field] = None
+    if is_field_hidden(user_ctx, "gross_profit_moving") and "neg_margin" in visible:
+        visible["neg_margin"] = None
+    return visible
+
+
 def record_access_log(user_ctx: UserContext, action: str, resource: str,
                       filters: dict | None = None) -> None:
     """访问审计：记到 sys_access_log（账号管理页看子账号活动）。

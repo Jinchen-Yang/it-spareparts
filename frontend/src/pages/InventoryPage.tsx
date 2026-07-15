@@ -42,6 +42,7 @@ interface DynRow {
 }
 
 export default function InventoryPage() {
+  const isAdmin = localStorage.getItem("role") === "admin";
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<DynRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -124,7 +125,10 @@ export default function InventoryPage() {
       render: (_: unknown, r: WhRow) => money(splitFixed(r.inventory_value, "ex").ex) }] as ColumnsType<WhRow> : []),
     { title: "快照日期", dataIndex: "snapshot_date", width: 100,
       render: (v) => v || "-" },
-    { title: "操作", width: 70, render: (_, r) => <a onClick={() => openEdit(r, pn)}>修正</a> },
+    ...(isAdmin ? [{
+      title: "操作", width: 70,
+      render: (_: unknown, r: WhRow) => <a onClick={() => openEdit(r, pn)}>修正</a>,
+    }] as ColumnsType<WhRow> : []),
   ];
 
   const cols: ColumnsType<DynRow> = [
@@ -208,7 +212,7 @@ export default function InventoryPage() {
         }}
       />
 
-      <Modal
+      {isAdmin && <Modal
         open={!!editing} title={`修正库存 · ${editing?.pn_std} @ ${editing?.warehouse}`}
         onCancel={() => setEditing(null)} onOk={submitEdit} okText="保存修正"
         footer={[
@@ -232,7 +236,7 @@ export default function InventoryPage() {
             <Input.TextArea rows={2} placeholder="如：盘点差异修正" />
           </Form.Item>
         </Form>
-      </Modal>
+      </Modal>}
       </Card>
     </>
   );

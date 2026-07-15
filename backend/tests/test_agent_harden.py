@@ -82,8 +82,8 @@ _PURCHASE_PRICE = ("purchase_price", "purchase_avg", "purchase_min", "purchase_m
 _ALLOW = {
     "cost_source",      # 成本来源枚举(computed/fallback/none)，非金额
     "cost_method",      # 计价法名(moving_avg/fifo)，非金额
-    "no_cost",          # 统计计数(无成本行数)，非金额
-    "revenue_costed",   # 营收口径(已配到成本的营收，毛利分母)，单独不可反推成本
+    "no_cost",          # 成本覆盖计数，跨看板既定为非金额质量信号；利润页另做结构收敛
+    "revenue_costed",   # 成本覆盖营收口径；利润页与毛利/成本同现时另做结构收敛
     "profit_summary",   # 全景的利润板块容器键，其子键(avg_purchase_cost/gross_margin…)已各自登记
 }
 

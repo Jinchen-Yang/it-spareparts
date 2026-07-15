@@ -436,6 +436,7 @@ function MetricsTab({ metrics }: { metrics: any }) {
 }
 
 export default function GovernancePage() {
+  const isAdmin = localStorage.getItem("role") === "admin";
   const [sum, setSum] = useState<any>(null);
   const [metrics, setMetrics] = useState<any>(null);
   const [recomputing, setRecomputing] = useState(false);
@@ -490,7 +491,9 @@ export default function GovernancePage() {
           <Tooltip title="按标准描述给型号自动打上标准品类（人工设过/锁定的分类不动，幂等可重跑）——型号查询「按品类筛选」的数据来源">
             <Button loading={classifying} onClick={autoClassify}>自动分类</Button>
           </Tooltip>
-          <Button type="primary" loading={recomputing} onClick={recompute}>重算利润</Button>
+          {isAdmin && (
+            <Button type="primary" loading={recomputing} onClick={recompute}>重算利润</Button>
+          )}
         </Space>}>
         {sum && (
           <Row gutter={[16, 16]}>
