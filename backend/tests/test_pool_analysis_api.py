@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, select
 
 from app.auth import hash_password
+from app.business_time import business_today
 from app.etl import loader
 from app.main import app
 from app.models.dimensions import DimPart
@@ -326,13 +327,14 @@ def test_window_contract_rejects_half_open_or_reversed_and_caps_future(db, price
     capped = client.get(f"/api/parts/{part_id}/pool-reference", params={
         "date_from": "2026-01-01", "date_to": "2099-12-31"})
     assert capped.status_code == 200
-    assert capped.json()["window"]["date_to"] == date.today().isoformat()
+    assert capped.json()["window"]["date_to"] == business_today().isoformat()
 
 
 def test_reference_returns_real_excluded_counts_instead_of_silent_zeroes(db, priced_pool):
     batch = SysImportBatch(filename="excluded.xlsx", file_type="purchase", file_hash="excluded")
     db.add(batch); db.flush()
-    future = date.today().replace(year=date.today().year + 1)
+    today = business_today()
+    future = today.replace(year=today.year + 1)
     heads = {
         "PX-C": f.purchase_head("PX-C", on=date(2026, 4, 1), data_status="已取消"),
         "PX-ZP": f.purchase_head("PX-ZP", on=date(2026, 4, 2)),
@@ -349,7 +351,7 @@ def test_reference_returns_real_excluded_counts_instead_of_silent_zeroes(db, pri
     db.commit()
     client = _client(db, "excluded_reader", "readonly")
     body = client.get(f"/api/parts/{priced_pool['a']}/pool-reference", params={
-        "date_from": "2026-01-01", "date_to": date.today().isoformat()}).json()
+        "date_from": "2026-01-01", "date_to": business_today().isoformat()}).json()
     assert body["excluded"]["inactive_orders"] == 1
     assert body["excluded"]["nonpositive_price"] == 1
     assert body["excluded"]["nonpositive_qty"] == 1
