@@ -13,14 +13,20 @@ import PoolIdentityLink from "./PoolIdentityLink";
 type Item = PoolAnalysisOrderDetail["items"][number];
 const muted = { color: "var(--mb-text-3)" };
 
+export type PoolOrderDetailLoader = (
+  side: PoolAnalysisSide,
+  orderId: number,
+) => Promise<PoolAnalysisOrderDetail>;
+
 export default function PoolOrderDetailModal({ side, orderId, range = "90d", dateFrom, dateTo,
-  forcePriceRestricted = false, onClose }: {
+  forcePriceRestricted = false, loadDetail = fetchPoolAnalysisOrderDetail, onClose }: {
   side: PoolAnalysisSide;
   orderId: number | null;
   range?: PoolAnalysisRange;
   dateFrom?: string;
   dateTo?: string;
   forcePriceRestricted?: boolean;
+  loadDetail?: PoolOrderDetailLoader;
   onClose: () => void;
 }) {
   const [detail, setDetail] = useState<PoolAnalysisOrderDetail | null>(null);
@@ -34,12 +40,12 @@ export default function PoolOrderDetailModal({ side, orderId, range = "90d", dat
     setDetail(null);
     setFailed(false);
     setLoading(true);
-    fetchPoolAnalysisOrderDetail(side, orderId)
+    loadDetail(side, orderId)
       .then((data) => { if (request === seq.current) setDetail(data); })
       .catch(() => { if (request === seq.current) setFailed(true); })
       .finally(() => { if (request === seq.current) setLoading(false); });
     return () => { seq.current += 1; };
-  }, [side, orderId]);
+  }, [side, orderId, loadDetail]);
 
   const price = (value: number | null | undefined) => forcePriceRestricted || detail?.price_restricted
     ? <span style={muted}>无池价格权限</span>

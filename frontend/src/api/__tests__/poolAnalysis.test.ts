@@ -4,6 +4,7 @@ const { get, post } = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
 vi.mock("../../api", () => ({ api: { get, post } }));
 
 import {
+  fetchDashboardOrderDetail,
   fetchPoolAnalysis,
   fetchPoolAnalysisOrderDetail,
   fetchPoolAnalysisList,
@@ -32,6 +33,12 @@ describe("互通池分析专用 API 契约", () => {
       params: { range: "90d", purchase_type: "销售订单" },
     });
     expect(get).toHaveBeenNthCalledWith(2, "/pool-analysis/orders/purchase/77");
+  });
+
+  it("老板摘要订单下钻使用 page_boss_board 的稳定 order_id 端点", async () => {
+    get.mockResolvedValue({ data: { side: "sales", order: { order_id: 88 }, items: [] } });
+    await fetchDashboardOrderDetail("sales", 88);
+    expect(get).toHaveBeenCalledWith("/dashboard/orders/sales/88");
   });
 
   it("分析清单和详情只调用 /pool-analysis 读端点", async () => {
