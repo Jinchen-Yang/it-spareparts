@@ -270,6 +270,11 @@ def test_account_validation_masking_and_write_gate(db):
     assert all(entry["reason"] is None for entry in restricted_payload["audit"])
     serialized = restricted_after_review.text
     assert "采购价999元" not in serialized and "比基准100元高" not in serialized
+    restricted_list = reader.get("/api/data-quality/issues")
+    assert restricted_list.status_code == 200
+    assert "采购价999元" not in restricted_list.text
+    assert "比基准100元高" not in restricted_list.text
+    assert "source_fingerprint" not in restricted_list.text
 
 
 def test_issue_workflow_does_not_mutate_source_facts_or_financial_fields(db):

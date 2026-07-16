@@ -346,7 +346,10 @@ def list_issues(db: Session, *, status: str | None = None, side: str | None = No
     items = []
     for issue in issues:
         item = _issue_dict(issue)
-        item.pop("evidence", None)
+        # 队列只用于定位与筛选：自由文本核实原因、原始证据与内部指纹只在
+        # 详情接口按权限返回，避免清单响应成为脱敏旁路。
+        for private_field in ("evidence", "source_fingerprint", "review_note"):
+            item.pop(private_field, None)
         item["fact"] = facts.get(issue.id)
         items.append(item)
     return {"items": items, "total": total, "page": page, "page_size": page_size}
