@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
@@ -90,6 +91,65 @@ def _by_key(report: dict) -> dict[str, dict]:
     return {row["code"]: row for row in report["buckets"]}
 
 
+EXPECTED_BUCKET_ORDER = [
+    "empty_request_no",
+    "normalizable_format",
+    "duplicate_candidates",
+    "other",
+    "request_exists_pn_diff",
+    "purchase_missing_request_no",
+]
+
+
+def _assert_all_buckets_are_zero(report: dict) -> None:
+    assert [row["code"] for row in report["buckets"]] == EXPECTED_BUCKET_ORDER
+    assert [row["line_count"] for row in report["buckets"]] == [0] * 6
+    assert [row["share_of_unmatched"] for row in report["buckets"]] == [0.0] * 6
+    assert all(row["samples"] == [] for row in report["buckets"])
+    # 标准 JSON 不允许 NaN/Infinity；空分母必须产出显式 0，而不是非标准浮点值。
+    assert "NaN" not in json.dumps(report, ensure_ascii=False, allow_nan=False)
+
+
+def test_empty_and_all_exact_mother_sets_have_stable_zero_denominators(db, batch):
+    empty = maintenance_match_audit.build_report(db, sample_limit=5)
+    assert empty["scope"] == {
+        "definition": "active_maintenance_since_cost_start",
+        "maintenance_start_date": "2024-01-01",
+        "total_line_count": 0,
+        "exact_matched_line_count": 0,
+        "unmatched_line_count": 0,
+        "exact_match_rate": 0.0,
+    }
+    assert empty["repairable"]["line_count"] == 0
+    assert empty["repairable"]["rate_of_unmatched"] == 0.0
+    assert empty["invariant"] == {"bucket_sum": 0, "equals_unmatched": True}
+    _assert_all_buckets_are_zero(empty)
+
+    loader.load(db, f.maintenance_result(
+        {"M-ALL-EXACT": f.maintenance_head(
+            "M-ALL-EXACT", order_no="WBDD-ALL-EXACT", on=date(2026, 1, 2),
+        )},
+        [f.maintenance_line("M-ALL-EXACT", "ML-ALL-EXACT", "PN-ALL-EXACT")],
+    ), batch.id, date(2026, 7, 16))
+    loader.load(db, f.purchase_result(
+        {"P-ALL-EXACT": f.purchase_head(
+            "P-ALL-EXACT", linked_maintenance_order_no=" wbdd-all-exact ",
+        )},
+        [f.purchase_line("P-ALL-EXACT", "PL-ALL-EXACT", "PN-ALL-EXACT")],
+    ), batch.id, date(2026, 7, 16))
+    db.commit()
+
+    all_exact = maintenance_match_audit.build_report(db, sample_limit=5)
+    assert all_exact["scope"]["total_line_count"] == 1
+    assert all_exact["scope"]["exact_matched_line_count"] == 1
+    assert all_exact["scope"]["unmatched_line_count"] == 0
+    assert all_exact["scope"]["exact_match_rate"] == 1.0
+    assert all_exact["repairable"]["line_count"] == 0
+    assert all_exact["repairable"]["rate_of_unmatched"] == 0.0
+    assert all_exact["invariant"] == {"bucket_sum": 0, "equals_unmatched": True}
+    _assert_all_buckets_are_zero(all_exact)
+
+
 def test_six_buckets_are_exhaustive_mutually_exclusive_and_exact_hit_is_excluded(db, batch):
     _load_fixture(db, batch)
 
@@ -121,9 +181,26 @@ def test_six_buckets_are_exhaustive_mutually_exclusive_and_exact_hit_is_excluded
 
 def test_report_is_deterministic_masked_fixed_query_count_and_has_no_side_effects(db, batch):
     _load_fixture(db, batch)
+    seeded = db.scalar(select(FMaintenanceLine).where(
+        FMaintenanceLine.raw_line_id == "ML-FORMAT",
+    ))
+    seeded.unit_cost = Decimal("12.34")
+    seeded.cost_amount = Decimal("24.68")
+    seeded.cost_source = "direct"
+    seeded.linked_purchase_order_no = "P-COST-SNAPSHOT"
+    seeded.cost_tax_basis = "ex"
+    seeded.price_month = "2026-01"
+    seeded.trace_months = 2
+    seeded.price_distance_days = 3
+    seeded.confidence = "high"
+    seeded.anomaly_flags = ["snapshot-marker"]
+    db.commit()
     cost_before = list(db.execute(select(
         FMaintenanceLine.id, FMaintenanceLine.unit_cost, FMaintenanceLine.cost_amount,
         FMaintenanceLine.cost_source, FMaintenanceLine.linked_purchase_order_no,
+        FMaintenanceLine.cost_tax_basis, FMaintenanceLine.price_month,
+        FMaintenanceLine.trace_months, FMaintenanceLine.price_distance_days,
+        FMaintenanceLine.confidence, FMaintenanceLine.anomaly_flags,
     ).order_by(FMaintenanceLine.id)))
     counts_before = (
         db.scalar(select(func.count()).select_from(FMaintenanceOrder)),
@@ -166,6 +243,9 @@ def test_report_is_deterministic_masked_fixed_query_count_and_has_no_side_effect
     cost_after = list(db.execute(select(
         FMaintenanceLine.id, FMaintenanceLine.unit_cost, FMaintenanceLine.cost_amount,
         FMaintenanceLine.cost_source, FMaintenanceLine.linked_purchase_order_no,
+        FMaintenanceLine.cost_tax_basis, FMaintenanceLine.price_month,
+        FMaintenanceLine.trace_months, FMaintenanceLine.price_distance_days,
+        FMaintenanceLine.confidence, FMaintenanceLine.anomaly_flags,
     ).order_by(FMaintenanceLine.id)))
     counts_after = (
         db.scalar(select(func.count()).select_from(FMaintenanceOrder)),

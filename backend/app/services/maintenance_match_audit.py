@@ -30,10 +30,10 @@ _ZERO = Decimal("0")
 _BUCKETS = (
     ("empty_request_no", "单号为空", False),
     ("normalizable_format", "格式可规整", True),
-    ("request_exists_pn_diff", "单号存在但 PN 不同", False),
-    ("purchase_missing_request_no", "采购侧无该需求号", False),
     ("duplicate_candidates", "重复候选", False),
     ("other", "其他", False),
+    ("request_exists_pn_diff", "单号存在但 PN 不同", False),
+    ("purchase_missing_request_no", "采购侧无该需求号", False),
 )
 
 

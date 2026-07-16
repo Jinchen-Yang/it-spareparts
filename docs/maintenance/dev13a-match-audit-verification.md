@@ -15,10 +15,10 @@
 | 全部未匹配 | 19,508 |
 | 单号为空 | 0 |
 | 格式可规整 | 0 |
-| 单号存在但 PN 不同 | 7,327 |
-| 采购侧无该需求号 | 12,167 |
 | 重复候选 | 0 |
 | 其他（同号同 PN 但候选无效） | 14 |
+| 单号存在但 PN 不同 | 7,327 |
+| 采购侧无该需求号 | 12,167 |
 
 六桶合计 `19,508`，与全部未匹配完全一致。当前快照的技术上可规整候选率为
 `0%`，因此本次报告没有把任何记录包装成可自动修复。
@@ -121,4 +121,6 @@ sales_ref 3,094、none 2,838。结论：报告重复运行确定，共享 helper
 - `tracemalloc` 新鲜进程实测峰值：`sample_limit=0` 为 **56.9 MB**，`sample_limit=10` 为 **57.0 MB**；均显著低于审查记录的旧版 185.7 MB，也低于第一轮返修的 235.5 MB。
 - 精确键同源：`maintenance_cost` 与归因服务共同调用 `maintenance_match_keys.exact_match_key`；测试锁定 `None`、空字符串、纯空白、大小写和首尾空格的历史行为。交叉样本同时放入“空白维保号 + 空白采购号 + 同 PN”和“空白维保号 + 无采购命中”：前者沿用现行 A0 命中、排除于母集，后者进入 `empty_request_no`。空白直配语义异常另开问题，本诊断不改成本结果。
 - 脱敏收紧：短值全遮，5~8 位最多首尾各 1 位，9 位及以上才首尾各 2 位；测试从夹具数据库枚举全部维保/采购需求号与 PN，确认无任一原值出现在 JSON，并对白名单逐层校验响应字段。
-- 最终验证：归因 + 成本定向测试 20 passed；后端全量 978 passed / 2 skipped；`alembic check` 返回 `No new upgrade operations detected.`；独立 SQL 仍为 29,046 / 9,538 / 19,508，六桶数字零漂移。
+- 空分母边界：空母集固定返回六桶全 0、精确命中率 0、技术可规整候选率 0；全精确母集固定返回六桶全 0、精确命中率 1、技术可规整候选率 0。两者均可用严格标准 JSON（禁 NaN/Infinity）序列化，六桶响应顺序与规格 §4 完全一致。
+- 零写入快照覆盖 `unit_cost`、`cost_amount`、`cost_source`、`linked_purchase_order_no`、`cost_tax_basis`、`price_month`、`trace_months`、`price_distance_days`、`confidence`、`anomaly_flags` 全部成本与标记字段。
+- 最终验证：归因 + 成本定向测试 21 passed；后端全量 979 passed / 2 skipped；`alembic check` 返回 `No new upgrade operations detected.`；独立 SQL 仍为 29,046 / 9,538 / 19,508，六桶数字零漂移。
