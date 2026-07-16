@@ -462,8 +462,7 @@ def _purchase_parts(db: Session, order_ids: list[int], date_from: date | None, u
                DimPart.pn_std, DimPart.description, DimPart.brand,
                FPurchaseLine.qty, _purchase_ex_unit().label("unit_ex"),
                _purchase_ex_tax_expr().label("amount"),
-               FPurchaseOrder.data_status, FPurchaseOrder.order_date,
-               FPurchaseOrder.source_type)
+               FPurchaseOrder.data_status, FPurchaseOrder.order_date)
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
         .join(DimPart, FPurchaseLine.part_id == DimPart.id)
         .where(FPurchaseLine.order_id.in_(order_ids))
@@ -483,10 +482,10 @@ def _purchase_parts(db: Session, order_ids: list[int], date_from: date | None, u
         unit_raw = float(r.unit_ex) if r.unit_ex is not None else None
         ref = pool_metrics.price_reference("purchase", unit_raw, gid is not None,
                                            pool_avg, ceiling, manual_restricted)
-        # 该行是否在池统计口径内（已生效+非未来+计成本采购类型+计价）——对账钩子
+        # 该行是否在价格纪律统计口径内（已生效+非未来+正价正量）——对账钩子。
+        # 不限 COST_PURCHASE_TYPES：真实采购行为分析与利润成本池是两种业务语义。
         in_scope = (r.data_status == config.ACTIVE_STATUS
                     and bool(r.order_date and r.order_date <= upper)
-                    and r.source_type in config.COST_PURCHASE_TYPES
                     and unit_raw is not None and unit_raw > 0
                     and r.qty is not None and r.qty > 0)
         out.setdefault(r.order_id, []).append({
