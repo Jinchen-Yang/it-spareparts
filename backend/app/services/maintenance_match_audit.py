@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -21,6 +21,7 @@ from app.business_time import business_today
 from app.config import get_settings
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
+from app.services.maintenance_match_keys import exact_match_key
 from app.services.query_filters import active_orders
 
 _LOOSE_NON_ALNUM = re.compile(r"[^A-Z0-9]+")
@@ -37,23 +38,38 @@ _BUCKETS = (
 
 
 @dataclass(frozen=True)
-class _PurchaseCandidate:
-    line_id: int
+class _CandidatePreview:
     order_id: int
     request_no: str
-    part_id: int
     pn_std: str | None
-    eligible: bool
 
 
-def _exact_key(value: str | None) -> str | None:
-    """与 maintenance_cost._norm_key 等价；不直接复用私有函数，避免反向耦合。"""
-    return value.strip().upper() if value and value.strip() else None
+@dataclass
+class _LooseCandidates:
+    """按宽松需求号预聚合的最小分类索引；不保留采购明细行或价格。"""
+    order_ids: set[int] = field(default_factory=set)
+    part_ids: set[int] = field(default_factory=set)
+    eligible_orders_by_part: dict[int, set[int]] = field(
+        default_factory=lambda: defaultdict(set)
+    )
+    previews: list[_CandidatePreview] = field(default_factory=list)
+    preview_keys: set[tuple[int, int]] = field(default_factory=set)
+
+    def add(self, order_id: int, request_no: str, part_id: int,
+            pn_std: str | None, eligible: bool) -> None:
+        self.order_ids.add(order_id)
+        self.part_ids.add(part_id)
+        if eligible:
+            self.eligible_orders_by_part[part_id].add(order_id)
+        preview_key = (order_id, part_id)
+        if len(self.previews) < 3 and preview_key not in self.preview_keys:
+            self.preview_keys.add(preview_key)
+            self.previews.append(_CandidatePreview(order_id, request_no, pn_std))
 
 
 def _loose_key(value: str | None) -> str | None:
-    exact = _exact_key(value)
-    if exact is None:
+    exact = exact_match_key(value)
+    if not exact:
         return None
     loose = _LOOSE_NON_ALNUM.sub("", exact)
     return loose or None
@@ -68,8 +84,9 @@ def _masked(value: str | None) -> str | None:
         return None
     if len(text) <= 4:
         return "*" * len(text)
-    hidden = "*" * min(max(len(text) - 4, 3), 12)
-    return f"{text[:2]}{hidden}{text[-2:]}"
+    keep = 1 if len(text) <= 8 else 2
+    hidden = "*" * min(max(len(text) - keep * 2, 3), 12)
+    return f"{text[:keep]}{hidden}{text[-keep:]}"
 
 
 def _sample_ref(line_id: int) -> str:
@@ -82,10 +99,11 @@ def _ratio(numerator: int, denominator: int) -> float:
     return round(numerator / denominator, 6) if denominator else 0.0
 
 
-def _purchase_rows(db: Session) -> list[_PurchaseCandidate]:
+def _purchase_indexes(
+    db: Session,
+) -> tuple[set[tuple[str, int]], dict[str, _LooseCandidates]]:
     stmt = (
         select(
-            FPurchaseLine.id,
             FPurchaseOrder.id,
             FPurchaseOrder.linked_maintenance_order_no,
             FPurchaseLine.part_id,
@@ -101,42 +119,37 @@ def _purchase_rows(db: Session) -> list[_PurchaseCandidate]:
         .order_by(FPurchaseLine.id)
     )
     stmt = active_orders(stmt, FPurchaseOrder)
-    excluded = {_exact_key(pn) for pn in config.MAINT_POOL_EXCLUDE_PNS}
-    rows: list[_PurchaseCandidate] = []
-    for line_id, order_id, request_no, part_id, pn_std, qty, unit_price in db.execute(stmt):
+    excluded = {exact_match_key(pn) for pn in config.MAINT_POOL_EXCLUDE_PNS}
+    exact_eligible: set[tuple[str, int]] = set()
+    by_loose: dict[str, _LooseCandidates] = defaultdict(_LooseCandidates)
+    for order_id, request_no, part_id, pn_std, qty, unit_price in db.execute(stmt):
         eligible = bool(
             qty is not None and qty > _ZERO
             and unit_price is not None and unit_price > _ZERO
-            and _exact_key(pn_std) not in excluded
+            and exact_match_key(pn_std) not in excluded
         )
-        rows.append(_PurchaseCandidate(
-            line_id=line_id,
-            order_id=order_id,
-            request_no=request_no,
-            part_id=part_id,
-            pn_std=pn_std,
-            eligible=eligible,
-        ))
-    return rows
+        exact = exact_match_key(request_no)
+        if eligible and exact is not None:
+            exact_eligible.add((exact, part_id))
+        loose = _loose_key(request_no)
+        if loose is not None:
+            by_loose[loose].add(order_id, request_no, part_id, pn_std, eligible)
+    return exact_eligible, dict(by_loose)
 
 
 def _sample(line_id: int, request_no: str | None, pn_std: str | None,
-            candidates: list[_PurchaseCandidate], reason: str) -> dict:
-    unique: dict[tuple[int, int], _PurchaseCandidate] = {}
-    for candidate in candidates:
-        unique[(candidate.order_id, candidate.part_id)] = candidate
-    ordered = sorted(unique.values(), key=lambda row: (row.order_id, row.line_id))
+            candidates: _LooseCandidates | None, reason: str) -> dict:
     return {
         "sample_ref": _sample_ref(line_id),
         "maintenance_request_no": _masked(request_no),
         "maintenance_pn": _masked(pn_std),
-        "candidate_order_count": len({row.order_id for row in candidates}),
+        "candidate_order_count": len(candidates.order_ids) if candidates else 0,
         "candidates": [
             {
                 "request_no": _masked(row.request_no),
                 "pn": _masked(row.pn_std),
             }
-            for row in ordered[:3]
+            for row in (candidates.previews if candidates else [])
         ],
         "reason": reason,
     }
@@ -160,36 +173,29 @@ def build_report(db: Session, *, sample_limit: int = 5) -> dict:
     )
     maintenance_stmt = active_orders(maintenance_stmt, FMaintenanceOrder)
     maintenance_rows = list(db.execute(maintenance_stmt))
-    purchase_rows = _purchase_rows(db)
+    exact_eligible, by_loose = _purchase_indexes(db)
 
-    exact_eligible: set[tuple[str, int]] = set()
-    by_loose: dict[str, list[_PurchaseCandidate]] = defaultdict(list)
-    for candidate in purchase_rows:
-        exact = _exact_key(candidate.request_no)
-        loose = _loose_key(candidate.request_no)
-        if candidate.eligible and exact is not None:
-            exact_eligible.add((exact, candidate.part_id))
-        if loose is not None:
-            by_loose[loose].append(candidate)
-
-    bucket_rows: dict[str, list[dict]] = {code: [] for code, _label, _repairable in _BUCKETS}
+    bucket_counts = {code: 0 for code, _label, _repairable in _BUCKETS}
+    bucket_samples: dict[str, list[dict]] = {
+        code: [] for code, _label, _repairable in _BUCKETS
+    }
     exact_matched = 0
     for line_id, request_no, part_id, pn_std in maintenance_rows:
-        exact = _exact_key(request_no)
+        exact = exact_match_key(request_no)
+        # 母集必须与现行 A0 完全一致：历史语义会把双方纯空白键视为 '' 精确命中。
+        # 该语义异常另开问题处理；诊断报告不能在本 slice 偷改正式成本边界。
         if exact is not None and (exact, part_id) in exact_eligible:
             exact_matched += 1
             continue
 
         loose = _loose_key(request_no)
-        candidates = by_loose.get(loose, []) if loose else []
-        eligible_same_part_orders = {
-            candidate.order_id
-            for candidate in candidates
-            if candidate.eligible and candidate.part_id == part_id
-        }
-        any_same_part = any(candidate.part_id == part_id for candidate in candidates)
+        candidates = by_loose.get(loose) if loose else None
+        eligible_same_part_orders = (
+            candidates.eligible_orders_by_part.get(part_id, set()) if candidates else set()
+        )
+        any_same_part = bool(candidates and part_id in candidates.part_ids)
 
-        if exact is None:
+        if not exact:
             code = "empty_request_no"
             reason = "维保侧需求号为空，无法建立需求号关联"
         elif len(eligible_same_part_orders) == 1:
@@ -201,7 +207,7 @@ def build_report(db: Session, *, sample_limit: int = 5) -> dict:
         elif any_same_part:
             code = "other"
             reason = "存在同需求号、同 PN 记录，但不满足现行直配候选条件"
-        elif candidates:
+        elif candidates is not None:
             code = "request_exists_pn_diff"
             reason = "采购侧存在该需求号，但候选 PN 与维保明细不同"
         elif loose is not None:
@@ -211,25 +217,27 @@ def build_report(db: Session, *, sample_limit: int = 5) -> dict:
             code = "other"
             reason = "未落入已知归因类型，需人工复核"
 
-        bucket_rows[code].append(_sample(line_id, request_no, pn_std, candidates, reason))
+        bucket_counts[code] += 1
+        if len(bucket_samples[code]) < sample_limit:
+            bucket_samples[code].append(_sample(line_id, request_no, pn_std, candidates, reason))
 
     total = len(maintenance_rows)
     unmatched = total - exact_matched
-    bucket_sum = sum(len(rows) for rows in bucket_rows.values())
+    bucket_sum = sum(bucket_counts.values())
     if bucket_sum != unmatched:
         raise AssertionError(f"bucket sum {bucket_sum} != unmatched {unmatched}")
 
-    format_count = len(bucket_rows["normalizable_format"])
+    format_count = bucket_counts["normalizable_format"]
     buckets = []
     for code, label, repairable in _BUCKETS:
-        rows = bucket_rows[code]
+        count = bucket_counts[code]
         buckets.append({
             "code": code,
             "label": label,
-            "line_count": len(rows),
-            "share_of_unmatched": _ratio(len(rows), unmatched),
+            "line_count": count,
+            "share_of_unmatched": _ratio(count, unmatched),
             "repairable": repairable,
-            "samples": rows[:sample_limit],
+            "samples": bucket_samples[code],
         })
 
     return {

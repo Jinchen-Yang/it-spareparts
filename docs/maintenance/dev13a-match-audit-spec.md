@@ -19,7 +19,7 @@
 1. 维保母集：已生效维保单，且 `order_date >= MAINT_COST_START_DATE` 的全部明细行；
 2. 采购候选：已生效采购单，`linked_maintenance_order_no` 非空，明细数量和单价均为正；
 3. 打包占位 PN（`MAINT_POOL_EXCLUDE_PNS`）不构成候选；
-4. 精确键为 `需求号.strip().upper() + part_id`；
+4. 精确键为公共 helper `exact_match_key(需求号) + part_id`，成本引擎与报告共同调用；为保证母集完全一致，历史纯空白键会规整成 `''`，双方纯空白且同 part 时仍算现行 A0 命中；
 5. 精确键存在至少一条合格采购候选即算已匹配，不进入归因母集。现有引擎允许同键多张采购单加权，因此这类不属于“重复候选未匹配”。
 
 报告只分析上述母集中未精确匹配的行。它不是 `cost_source=none` 报告：未直配行仍可能被 ±7 天价、月均价、追溯价或销售参考价估算出成本。
@@ -40,7 +40,7 @@ loose_key = upper(trim(value)) 后删除所有非 A-Z / 0-9 字符
 
 | 顺序 | code | 人话标签 | 判定 |
 |---:|---|---|---|
-| 1 | `empty_request_no` | 单号为空 | 维保需求号为空或只有空白 |
+| 1 | `empty_request_no` | 单号为空 | 在现行 A0 未命中的母集中，维保需求号为空或只有空白（双方空白且同 part 的现行命中不在母集） |
 | 2 | `normalizable_format` | 格式可规整 | loose_key + part_id 恰好对应 1 张合格采购单 |
 | 3 | `duplicate_candidates` | 重复候选 | loose_key + part_id 对应 2 张及以上合格采购单；不能自动选 |
 | 4 | `other` | 其他 | 采购侧存在 loose_key + 同 part_id，但候选因非正价、非正数量或占位 PN 等不满足现行直配条件 |
@@ -109,17 +109,19 @@ GET /api/maintenance/match-audit?sample_limit=5
 - 掩码后的采购侧候选需求号、候选 PN（最多 3 个）；
 - 候选张数与不含金额、不含人员的原因说明。
 
-掩码保留前后少量字符，其余以 `*` 替代。任何响应都不得包含采购订单号、供应商、客户、采购员、销售员、价格、金额、成本来源或原始未掩码需求号。
+掩码规则固定为：长度不超过 4 的短值全遮；5~8 位最多保留首尾各 1 位；9 位及以上才保留首尾各 2 位；其余以 `*` 替代。任何响应都不得包含采购订单号、供应商、客户、采购员、销售员、价格、金额、成本来源或原始未掩码需求号。
 
 该报告只陈述数据关联现状，不使用“错误员工”“违规”“自动修复”等措辞。
 
 ## 7. 实现边界与文件域
 
+- 新建 `services/maintenance_match_keys.py` 作为正式精确键的单一真值源，成本引擎与审计共同调用并锁定历史边界语义。
 - 新建 `services/maintenance_match_audit.py`，只执行固定次数的只读查询和内存归因；不得调用 `maintenance_cost.recompute()`。
 - 新建独立 `api/maintenance_audit.py`，避免与后续维保主流程改造共享 `api/maintenance.py`。
 - `main.py` 仅增加路由注册。
 - 不修改 `models`、迁移、ETL、`maintenance_cost.py`、前端、库存、利润或权限模板。
-- 查询次数不得随维保行数、桶数或样例数增长。
+- 查询次数不得随维保行数、桶数或样例数增长；采购明细须先压成分类所需的最小索引。
+- 每桶只保存整数计数和前 `sample_limit` 个样例；`sample_limit=0` 时不得构造任何样例响应字典。
 
 ## 8. TDD 验收 seam
 

@@ -28,6 +28,7 @@ from app.business_time import business_today
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
+from app.services.maintenance_match_keys import exact_match_key
 from app.services.query_filters import active_orders, col_matches_any, keyword_groups_or_substr
 
 _log = logging.getLogger("maintenance_cost")
@@ -63,11 +64,6 @@ def _basis_order() -> tuple[str, str]:
     return ("inc", "ex") if config.MAINT_TAX_PREFERENCE == "inc_first" else ("ex", "inc")
 
 
-def _norm_key(s: str | None) -> str | None:
-    """单号/PN 文本匹配键统一 upper 归一（§16.1：审计发现 1.35% 样本纯因大小写落池）。"""
-    return s.strip().upper() if s else None
-
-
 def _purchase_pools(db: Session):
     """构建 直配池 + ±窗口日度池 + 采购月度池。
 
@@ -89,17 +85,17 @@ def _purchase_pools(db: Session):
                FPurchaseLine.qty.is_not(None), FPurchaseLine.qty > 0)
     )
     q = active_orders(q, FPurchaseOrder)
-    excl = {_norm_key(p) for p in config.MAINT_POOL_EXCLUDE_PNS}
+    excl = {exact_match_key(p) for p in config.MAINT_POOL_EXCLUDE_PNS}
     direct: dict[tuple, dict] = defaultdict(dict)
     daily: dict[int, dict] = defaultdict(dict)
     monthly: dict[tuple, list] = defaultdict(lambda: [_ZERO, _ZERO])
     for part, pn, qty, price, odate, ono, stype, inc, wbdd in db.execute(q):
-        if _norm_key(pn) in excl:
+        if exact_match_key(pn) in excl:
             continue
         basis = "inc" if inc else "ex"
         amt = qty * price
         if wbdd:
-            slot = direct[(_norm_key(wbdd), part)].setdefault(basis, [_ZERO, _ZERO, ono])
+            slot = direct[(exact_match_key(wbdd), part)].setdefault(basis, [_ZERO, _ZERO, ono])
             slot[0] += amt
             slot[1] += qty
             if ono and (slot[2] is None or ono < slot[2]):
@@ -234,7 +230,7 @@ def recompute(db: Session) -> dict:
 
         # A0 专属采购直配
         if source is None:
-            slots = direct.get((_norm_key(order_no), part))
+            slots = direct.get((exact_match_key(order_no), part))
             if slots:
                 for b in _basis_order():
                     s = slots.get(b)

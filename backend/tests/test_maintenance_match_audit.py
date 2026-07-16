@@ -15,6 +15,7 @@ from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.system import SysImportBatch, SysUser
 from app.services import maintenance_match_audit
+from app.services.maintenance_match_keys import exact_match_key
 from tests import factories as f
 
 
@@ -31,6 +32,9 @@ def _load_fixture(db, batch) -> None:
     maintenance_orders = {
         "M-EXACT": f.maintenance_head("M-EXACT", order_no="WBDD-EXACT", on=date(2026, 1, 2)),
         "M-EMPTY": f.maintenance_head("M-EMPTY", order_no="WBDD-EMPTY", on=date(2026, 1, 2)),
+        "M-BLANK-EXACT": f.maintenance_head(
+            "M-BLANK-EXACT", order_no="WBDD-BLANK-EXACT", on=date(2026, 1, 2)
+        ),
         "M-FORMAT": f.maintenance_head("M-FORMAT", order_no="WBDD-20260101-0001", on=date(2026, 1, 2)),
         "M-DUP": f.maintenance_head("M-DUP", order_no="WBDD-20260101-0002", on=date(2026, 1, 2)),
         "M-PN": f.maintenance_head("M-PN", order_no="WBDD-20260101-0003", on=date(2026, 1, 2)),
@@ -40,6 +44,7 @@ def _load_fixture(db, batch) -> None:
     maintenance_lines = [
         f.maintenance_line("M-EXACT", "ML-EXACT", "PN-EXACT"),
         f.maintenance_line("M-EMPTY", "ML-EMPTY", "PN-EMPTY"),
+        f.maintenance_line("M-BLANK-EXACT", "ML-BLANK-EXACT", "PN-BLANK-EXACT"),
         f.maintenance_line("M-FORMAT", "ML-FORMAT", "PN-FORMAT"),
         f.maintenance_line("M-DUP", "ML-DUP", "PN-DUP"),
         f.maintenance_line("M-PN", "ML-PN", "PN-WANTED"),
@@ -51,6 +56,8 @@ def _load_fixture(db, batch) -> None:
 
     purchase_orders = {
         "P-EXACT": f.purchase_head("P-EXACT", linked_maintenance_order_no=" wbdd-exact "),
+        # 现行 A0 把双方纯空白键视为精确命中；本诊断只复刻母集，不在此修正式成本语义。
+        "P-BLANK": f.purchase_head("P-BLANK", linked_maintenance_order_no="   "),
         "P-FORMAT": f.purchase_head("P-FORMAT", linked_maintenance_order_no="WBDD 20260101 0001"),
         "P-DUP-A": f.purchase_head("P-DUP-A", linked_maintenance_order_no="WBDD 20260101 0002"),
         "P-DUP-B": f.purchase_head("P-DUP-B", linked_maintenance_order_no="WBDD/20260101/0002"),
@@ -60,6 +67,7 @@ def _load_fixture(db, batch) -> None:
     }
     purchase_lines = [
         f.purchase_line("P-EXACT", "PL-EXACT", "PN-EXACT"),
+        f.purchase_line("P-BLANK", "PL-BLANK", "PN-BLANK-EXACT"),
         f.purchase_line("P-FORMAT", "PL-FORMAT", "PN-FORMAT"),
         f.purchase_line("P-DUP-A", "PL-DUP-A", "PN-DUP"),
         f.purchase_line("P-DUP-B", "PL-DUP-B", "PN-DUP"),
@@ -71,6 +79,10 @@ def _load_fixture(db, batch) -> None:
     # 导入层会拦空单号；归因服务仍须对数据库历史脏值给出明确桶。
     empty = db.scalar(select(FMaintenanceOrder).where(FMaintenanceOrder.raw_order_id == "M-EMPTY"))
     empty.order_no = " "
+    blank_exact = db.scalar(
+        select(FMaintenanceOrder).where(FMaintenanceOrder.raw_order_id == "M-BLANK-EXACT")
+    )
+    blank_exact.order_no = "   "
     db.commit()
 
 
@@ -83,8 +95,8 @@ def test_six_buckets_are_exhaustive_mutually_exclusive_and_exact_hit_is_excluded
 
     report = maintenance_match_audit.build_report(db, sample_limit=5)
 
-    assert report["scope"]["total_line_count"] == 7
-    assert report["scope"]["exact_matched_line_count"] == 1
+    assert report["scope"]["total_line_count"] == 8
+    assert report["scope"]["exact_matched_line_count"] == 2
     assert report["scope"]["unmatched_line_count"] == 6
     buckets = _by_key(report)
     assert set(buckets) == {
@@ -138,11 +150,15 @@ def test_report_is_deterministic_masked_fixed_query_count_and_has_no_side_effect
     assert first_query_count == 2
     assert selects == 4
     payload = json.dumps(first, ensure_ascii=False)
-    for raw in (
-        "WBDD-EXACT", "WBDD-20260101-0001", "WBDD 20260101 0001",
-        "PN-EXACT", "PN-FORMAT", "PN-ACTUAL",
-        "测试供应商", "测试客户",
-    ):
+    all_raw_values = {
+        value.strip()
+        for value in db.scalars(select(FMaintenanceOrder.order_no)).all()
+        + db.scalars(select(FMaintenanceLine.pn_std)).all()
+        + db.scalars(select(FPurchaseOrder.linked_maintenance_order_no)).all()
+        + db.scalars(select(FPurchaseLine.pn_std)).all()
+        if value and value.strip()
+    }
+    for raw in all_raw_values | {"测试供应商", "测试客户"}:
         assert raw not in payload
     assert all(sample["sample_ref"].startswith("MA-")
                for bucket in first["buckets"] for sample in bucket["samples"])
@@ -160,6 +176,76 @@ def test_report_is_deterministic_masked_fixed_query_count_and_has_no_side_effect
     assert cost_after == cost_before
     assert counts_after == counts_before
     assert not db.dirty and not db.new and not db.deleted
+
+
+def test_sample_limit_zero_never_constructs_sample_dicts(db, batch, monkeypatch):
+    _load_fixture(db, batch)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("sample_limit=0 不得为未匹配行构造样例字典")
+
+    monkeypatch.setattr(maintenance_match_audit, "_sample", forbidden)
+    report = maintenance_match_audit.build_report(db, sample_limit=0)
+
+    assert report["scope"]["unmatched_line_count"] == 6
+    assert report["invariant"]["equals_unmatched"] is True
+    assert all(bucket["samples"] == [] for bucket in report["buckets"])
+
+
+def test_shared_exact_key_preserves_cost_engine_edge_semantics():
+    assert exact_match_key(None) is None
+    assert exact_match_key("") is None
+    assert exact_match_key("   ") == ""
+    assert exact_match_key(" wbdd-AbC-1 ") == "WBDD-ABC-1"
+
+
+def test_blank_cross_case_follows_existing_a0_mother_set(db, batch):
+    _load_fixture(db, batch)
+    report = maintenance_match_audit.build_report(db, sample_limit=10)
+    blank_exact_id = db.scalar(
+        select(FMaintenanceLine.id).where(FMaintenanceLine.raw_line_id == "ML-BLANK-EXACT")
+    )
+    blank_unmatched_id = db.scalar(
+        select(FMaintenanceLine.id).where(FMaintenanceLine.raw_line_id == "ML-EMPTY")
+    )
+    returned_refs = {
+        sample["sample_ref"]
+        for bucket in report["buckets"]
+        for sample in bucket["samples"]
+    }
+
+    # 双方空白+同 part 沿用现行 A0 命中，不进入未匹配；无采购命中的空白号才进 empty。
+    assert maintenance_match_audit._sample_ref(blank_exact_id) not in returned_refs
+    assert maintenance_match_audit._sample_ref(blank_unmatched_id) in returned_refs
+    assert _by_key(report)["empty_request_no"]["line_count"] == 1
+
+
+def test_mask_policy_and_response_field_whitelist(db, batch):
+    assert maintenance_match_audit._masked("ABCD") == "****"
+    assert maintenance_match_audit._masked("ABCDE") == "A***E"
+    assert maintenance_match_audit._masked("ABCDEFGH") == "A******H"
+    assert maintenance_match_audit._masked("ABCDEFGHI") == "AB*****HI"
+
+    _load_fixture(db, batch)
+    report = maintenance_match_audit.build_report(db, sample_limit=10)
+    assert set(report) == {"restricted", "as_of", "scope", "repairable", "buckets", "invariant"}
+    assert set(report["scope"]) == {
+        "definition", "maintenance_start_date", "total_line_count",
+        "exact_matched_line_count", "unmatched_line_count", "exact_match_rate",
+    }
+    assert set(report["repairable"]) == {"line_count", "rate_of_unmatched", "meaning"}
+    assert set(report["invariant"]) == {"bucket_sum", "equals_unmatched"}
+    for bucket in report["buckets"]:
+        assert set(bucket) == {
+            "code", "label", "line_count", "share_of_unmatched", "repairable", "samples",
+        }
+        for sample in bucket["samples"]:
+            assert set(sample) == {
+                "sample_ref", "maintenance_request_no", "maintenance_pn",
+                "candidate_order_count", "candidates", "reason",
+            }
+            assert all(set(candidate) == {"request_no", "pn"}
+                       for candidate in sample["candidates"])
 
 
 def _login(client: TestClient, db, username: str, role: str, permissions: dict | None = None) -> str:
