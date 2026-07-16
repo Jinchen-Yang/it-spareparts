@@ -7,7 +7,7 @@
 from copy import deepcopy
 from datetime import date, timedelta
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import Session
 
@@ -228,12 +228,15 @@ def _current_policies(db: Session, group_ids: list[int]) -> dict[int, PartPoolPr
 def _excluded_counts(db: Session, group_ids: list[int], lower: date | None,
                      upper: date, today: date,
                      purchase_type: str | None = None) -> dict[int, dict]:
-    """按池返回真实排除计数；采购/销售两侧相同类别相加，固定两条 SQL。"""
+    """按池返回四个可直接验证的真实排除计数，固定两条 SQL。
+
+    anomaly_flags 同时承载经营异常，不能冒充“数据疑点”；人工确认无效的闭环也尚未
+    建立。因此本接口在 DEV-05 口径落地前不声明这两个计数，更不能用假 0 代替。
+    """
     if not group_ids:
         return {}
     empty = {"inactive_orders": 0, "nonpositive_price": 0,
-             "nonpositive_qty": 0, "future_orders": 0,
-             "suspected_records": 0, "confirmed_invalid_excluded": 0}
+             "nonpositive_qty": 0, "future_orders": 0}
     out = {gid: dict(empty) for gid in group_ids}
 
     def add_rows(line_model, order_model, source_type: str | None = None):
@@ -257,9 +260,6 @@ def _excluded_counts(db: Session, group_ids: list[int], lower: date | None,
                 func.count(func.distinct(order_model.id)).filter(and_(
                     active, order_model.order_date > today
                 )).label("future"),
-                func.count(line_model.id).filter(and_(
-                    date_window, active, func.cardinality(line_model.anomaly_flags) > 0
-                )).label("suspected"),
             )
             .select_from(PartPoolMember)
             .join(line_model, line_model.part_id == PartPoolMember.part_id)
@@ -275,7 +275,6 @@ def _excluded_counts(db: Session, group_ids: list[int], lower: date | None,
             target["nonpositive_price"] += int(row.bad_price or 0)
             target["nonpositive_qty"] += int(row.bad_qty or 0)
             target["future_orders"] += int(row.future or 0)
-            target["suspected_records"] += int(row.suspected or 0)
 
     add_rows(FPurchaseLine, FPurchaseOrder, purchase_type)
     add_rows(FSalesLine, FSalesOrder)
@@ -321,6 +320,18 @@ def _reference_side(side: str, pool_stats: dict | None, part_stats: dict | None,
         "restricted": False, "pool_stats": pool_stats, "part_stats": part_stats,
         "constraint": constraint, "delta_to_pool_avg": delta_pool,
         "delta_to_constraint": delta_limit, "relation_to_constraint": relation,
+    }
+
+
+def _not_in_pool_side() -> dict:
+    """未入有效池不是“无权限”或“无样本”，必须返回无价格的中性状态。"""
+    return {
+        "status": "not_in_pool", "restricted": False,
+        "pool_stats": None, "part_stats": None,
+        "constraint": {"status": "unset", "value": None, "changed_by": None,
+                       "changed_at": None, "input_basis": None},
+        "delta_to_pool_avg": None, "delta_to_constraint": None,
+        "relation_to_constraint": None,
     }
 
 
@@ -380,10 +391,11 @@ def references(db: Session, part_ids: list[int], *, range_: str | None = None,
     ).all()
     by_part = {r.id: r for r in rows}
     group_ids = list({r.group_id for r in rows if r.group_id is not None})
+    pooled_part_ids = [r.id for r in rows if r.group_id is not None]
     p_group = _purchase_group_stats(db, group_ids, lower, upper, purchase_type)
     s_group = _sales_group_stats(db, group_ids, lower, upper)
-    p_part = _purchase_part_stats(db, unique, lower, upper, purchase_type)
-    s_part = _sales_part_stats(db, unique, lower, upper)
+    p_part = _purchase_part_stats(db, pooled_part_ids, lower, upper, purchase_type)
+    s_part = _sales_part_stats(db, pooled_part_ids, lower, upper)
     policies = _current_policies(db, group_ids)
     excluded = _excluded_counts(db, group_ids, lower, upper, today, purchase_type)
     out = []
@@ -394,9 +406,23 @@ def references(db: Session, part_ids: list[int], *, range_: str | None = None,
         gid = row.group_id
         pool_info = ({"group_id": gid, "name": row.pool_name,
                       "member_count": row.member_count} if gid is not None else None)
+        if gid is None:
+            out.append({
+                "status": "not_in_pool", "part_id": part_id, "pn_std": row.pn_std,
+                "pool": None,
+                "window": {"range": token,
+                           "date_from": lower.isoformat() if lower else None,
+                           "date_to": upper.isoformat(), "as_of": today.isoformat()},
+                "basis": "ex_tax", "purchase_type": purchase_type,
+                "purchase_reference": _not_in_pool_side(),
+                "sales_reference": _not_in_pool_side(),
+                "excluded": None,
+            })
+            continue
         policy = policies.get(gid)
         out.append({
-            "part_id": part_id, "pn_std": row.pn_std, "pool": pool_info,
+            "status": "active_pool", "part_id": part_id, "pn_std": row.pn_std,
+            "pool": pool_info,
             "window": {"range": token,
                        "date_from": lower.isoformat() if lower else None,
                        "date_to": upper.isoformat(), "as_of": today.isoformat()},
@@ -407,8 +433,7 @@ def references(db: Session, part_ids: list[int], *, range_: str | None = None,
                 "sales", s_group.get(gid), s_part.get(part_id), policy),
             "excluded": excluded.get(gid, {
                 "inactive_orders": 0, "nonpositive_price": 0,
-                "nonpositive_qty": 0, "future_orders": 0,
-                "suspected_records": 0, "confirmed_invalid_excluded": 0}),
+                "nonpositive_qty": 0, "future_orders": 0}),
         })
     return out
 
@@ -493,6 +518,16 @@ def list_pools(db: Session, *, range_: str | None = None,
     }
 
 
+def _order_has_active_pool_member(line_model, order_id: int):
+    return exists(
+        select(1)
+        .select_from(line_model)
+        .join(PartPoolMember, PartPoolMember.part_id == line_model.part_id)
+        .join(PartPool, PartPool.group_id == PartPoolMember.group_id)
+        .where(line_model.order_id == order_id, PartPool.status == "active")
+    )
+
+
 def order_detail(db: Session, side: str, order_id: int) -> dict | None:
     """按稳定订单主键返回完整订单；不使用可能重复或被改写的显示单号定位。"""
     if side == "purchase":
@@ -512,7 +547,8 @@ def order_detail(db: Session, side: str, order_id: int) -> dict | None:
             )
             .outerjoin(DimSupplier, DimSupplier.id == FPurchaseOrder.supplier_id)
             .where(FPurchaseOrder.id == order_id,
-                   FPurchaseOrder.data_status == config.ACTIVE_STATUS)
+                   FPurchaseOrder.data_status == config.ACTIVE_STATUS,
+                   _order_has_active_pool_member(FPurchaseLine, order_id))
         ).mappings().one_or_none()
         if order is None:
             return None
@@ -545,7 +581,8 @@ def order_detail(db: Session, side: str, order_id: int) -> dict | None:
             )
             .outerjoin(DimCustomer, DimCustomer.id == FSalesOrder.customer_id)
             .where(FSalesOrder.id == order_id,
-                   FSalesOrder.data_status == config.ACTIVE_STATUS)
+                   FSalesOrder.data_status == config.ACTIVE_STATUS,
+                   _order_has_active_pool_member(FSalesLine, order_id))
         ).mappings().one_or_none()
         if order is None:
             return None
@@ -657,7 +694,7 @@ def apply_visibility(data, ctx: security.UserContext):
                 header["supplier"] = None
             if customer_restricted and "customer" in header:
                 header["customer"] = None
-        if price_restricted:
+        if price_restricted and node.get("status") != "not_in_pool":
             scrub_price_side(node.get("purchase_reference"))
             scrub_price_side(node.get("sales_reference"))
         for member in node.get("members") or []:
@@ -667,7 +704,7 @@ def apply_visibility(data, ctx: security.UserContext):
                 for key in ("purchase_metrics", "sales_metrics"):
                     if key in member:
                         member[key] = None
-        if price_restricted:
+        if price_restricted and node.get("status") != "not_in_pool":
             for key in ("purchase_metrics", "sales_metrics"):
                 if key in node:
                     node[key] = None
@@ -778,8 +815,7 @@ def pool_detail(db: Session, group_id: int, date_from: date | None = None,
         "sales_reference": pool_sales, "members": members,
         "excluded": deepcopy((first or {}).get("excluded")) or {
             "inactive_orders": 0, "nonpositive_price": 0, "nonpositive_qty": 0,
-            "future_orders": 0, "suspected_records": 0,
-            "confirmed_invalid_excluded": 0,
+            "future_orders": 0,
         },
         # 兼容既有详情图表，但数值来自本模块的全采购类型统一口径。
         "purchase_metrics": _compat_pool_metrics(purchase_pool_stats),

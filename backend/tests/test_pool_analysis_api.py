@@ -8,12 +8,14 @@ from time import perf_counter
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import event
+from sqlalchemy import event, select
 
 from app.auth import hash_password
 from app.etl import loader
 from app.main import app
 from app.models.dimensions import DimPart
+from app.models.purchase import FPurchaseOrder
+from app.models.sales import FSalesOrder
 from app.models.system import SysUser
 from app.models.system import SysImportBatch
 from app.db import engine
@@ -89,6 +91,29 @@ def priced_pool(db):
     return {"gid": gid, "a": a.id, "b": b.id, "outside": c.id}
 
 
+@pytest.fixture()
+def non_pool_only_orders(db, priced_pool):
+    """两张已生效订单都只有池外 PN，用于验证订单详情授权边界。"""
+    batch = SysImportBatch(
+        filename="non-pool-orders.xlsx", file_type="purchase", file_hash="non-pool-orders")
+    db.add(batch); db.flush()
+    loader.load(db, f.purchase_result(
+        {"P-NO-POOL": f.purchase_head("P-NO-POOL", on=date(2026, 4, 10))},
+        [f.purchase_line("P-NO-POOL", "PL-NO-POOL", "PA-OUTSIDE", qty="1", price="339")],
+    ), batch.id, AS_OF)
+    loader.load(db, f.sales_result(
+        {"S-NO-POOL": f.sales_head("S-NO-POOL", on=date(2026, 4, 11))},
+        [f.sales_line("S-NO-POOL", "SL-NO-POOL", "PA-OUTSIDE", qty="1", price="452")],
+    ), batch.id, AS_OF)
+    db.commit()
+    return {
+        "purchase_id": db.execute(select(FPurchaseOrder.id).where(
+            FPurchaseOrder.order_no == "P-NO-POOL")).scalar_one(),
+        "sales_id": db.execute(select(FSalesOrder.id).where(
+            FSalesOrder.order_no == "S-NO-POOL")).scalar_one(),
+    }
+
+
 def test_pool_detail_exposes_employees_but_masks_supplier_and_customer_independently(db, priced_pool):
     """池分析是经办人公开的显式上下文；不复用全局销售逐单隐藏策略。"""
     gid = priced_pool["gid"]
@@ -147,6 +172,53 @@ def test_single_pool_reference_uses_weighted_average_median_and_manual_limits(db
     assert sales["part_stats"]["weighted_avg"] == 200.0
     assert sales["constraint"]["value"] == 180.0
     assert sales["relation_to_constraint"] == "above"
+
+
+def test_non_pool_single_reference_is_neutral_without_prices_or_policy(db, priced_pool):
+    """池分析页权限不能变成任意 PN 历史价格查询器。"""
+    client = _client(db, "non_pool_single_reader", "readonly")
+    response = client.get(
+        f"/api/parts/{priced_pool['outside']}/pool-reference",
+        params={"date_from": "2026-01-01", "date_to": AS_OF.isoformat()},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "not_in_pool"
+    assert body["pool"] is None
+    for key in ("purchase_reference", "sales_reference"):
+        assert body[key] == {
+            "status": "not_in_pool",
+            "restricted": False,
+            "pool_stats": None,
+            "part_stats": None,
+            "constraint": {
+                "status": "unset", "value": None, "changed_by": None,
+                "changed_at": None, "input_basis": None,
+            },
+            "delta_to_pool_avg": None,
+            "delta_to_constraint": None,
+            "relation_to_constraint": None,
+        }
+
+
+def test_non_pool_batch_reference_is_neutral_while_pool_member_keeps_prices(db, priced_pool):
+    client = _client(db, "non_pool_batch_reader", "readonly")
+    response = client.post("/api/parts/pool-references", json={
+        "part_ids": [priced_pool["a"], priced_pool["outside"]],
+        "date_from": "2026-01-01",
+        "date_to": AS_OF.isoformat(),
+    })
+    assert response.status_code == 200
+    by_part = {item["part_id"]: item for item in response.json()["items"]}
+    assert by_part[priced_pool["a"]]["status"] == "active_pool"
+    assert by_part[priced_pool["a"]]["purchase_reference"]["part_stats"]["weighted_avg"] == 100.0
+    outside = by_part[priced_pool["outside"]]
+    assert outside["status"] == "not_in_pool"
+    assert outside["pool"] is None
+    assert outside["purchase_reference"]["part_stats"] is None
+    assert outside["sales_reference"]["part_stats"] is None
+    assert outside["purchase_reference"]["constraint"]["value"] is None
+    assert outside["sales_reference"]["constraint"]["value"] is None
 
 
 def test_pool_analysis_list_uses_same_stats_contract_and_member_search(db, priced_pool):
@@ -282,6 +354,9 @@ def test_reference_returns_real_excluded_counts_instead_of_silent_zeroes(db, pri
     assert body["excluded"]["nonpositive_price"] == 1
     assert body["excluded"]["nonpositive_qty"] == 1
     assert body["excluded"]["future_orders"] == 1
+    assert set(body["excluded"]) == {
+        "inactive_orders", "nonpositive_price", "nonpositive_qty", "future_orders",
+    }
 
 
 def test_batch_reference_is_capped_at_50_and_query_count_is_constant(db, priced_pool):
@@ -449,6 +524,43 @@ def test_detail_masks_customer_and_supplier_but_keeps_employee_names_when_both_h
         "采购张", "采购李"}
     assert {row["salesperson"] for row in body["sales_transactions"]["items"]} == {
         "销售王", "销售赵"}
+
+
+def test_pool_order_detail_rejects_purchase_order_without_active_pool_member(
+        db, priced_pool, non_pool_only_orders):
+    client = _client(db, "non_pool_purchase_order_reader", "readonly")
+    response = client.get(
+        f"/api/pool-analysis/orders/purchase/{non_pool_only_orders['purchase_id']}")
+    assert response.status_code == 404
+
+
+def test_pool_order_detail_rejects_sales_order_without_active_pool_member(
+        db, priced_pool, non_pool_only_orders):
+    client = _client(db, "non_pool_sales_order_reader", "readonly")
+    response = client.get(
+        f"/api/pool-analysis/orders/sales/{non_pool_only_orders['sales_id']}")
+    assert response.status_code == 404
+
+
+def test_pool_order_detail_keeps_every_line_when_order_contains_pool_and_non_pool_parts(
+        db, priced_pool):
+    client = _client(db, "mixed_pool_order_reader", "readonly")
+    window = {"date_from": "2026-01-01", "date_to": AS_OF.isoformat()}
+    detail = client.get(
+        f"/api/pool-analysis/pools/{priced_pool['gid']}", params=window).json()
+    order_id = next(row["order_id"] for row in detail["purchase_transactions"]["items"]
+                    if row["order_no"] == "P1")
+
+    response = client.get(f"/api/pool-analysis/orders/purchase/{order_id}")
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert {item["part_id"] for item in items} == {
+        priced_pool["a"], priced_pool["outside"],
+    }
+    assert next(item for item in items if item["part_id"] == priced_pool["a"])[
+        "pool_group_id"] == priced_pool["gid"]
+    assert next(item for item in items if item["part_id"] == priced_pool["outside"])[
+        "pool_group_id"] is None
 
 
 def test_pool_order_detail_uses_unique_id_returns_complete_order_and_own_permissions(
