@@ -115,6 +115,7 @@ export default function PoolReferenceCard({
     qs.set("to", reference.window.date_to);
   }
   if (reference.pn_std) qs.set("pn", reference.pn_std);
+  if (side !== "both") qs.set("side", side);
   const sides: PoolAnalysisSide[] = side === "both" ? ["purchase", "sales"] : [side];
   const purchaseSamples = forceRestricted || reference.purchase_reference.restricted
     || reference.purchase_reference.constraint.status === "restricted"

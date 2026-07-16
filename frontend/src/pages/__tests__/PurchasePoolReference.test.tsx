@@ -71,7 +71,7 @@ describe("采购页池身份与同源参考卡", () => {
     const { container } = routes("analysis");
     await screen.findByText("PN-4T");
     expect(screen.getByRole("link", { name: "查看互通池 4T 硬盘池" }))
-      .toHaveAttribute("href", "/pool-analysis/7?range=custom&from=2026-07-01&to=2026-07-07&pn=PN-4T");
+      .toHaveAttribute("href", "/pool-analysis/7?range=custom&from=2026-07-01&to=2026-07-07&pn=PN-4T&side=purchase");
 
     const expand = container.querySelector<HTMLButtonElement>(".ant-table-row-expand-icon");
     if (expand) fireEvent.click(expand);
@@ -87,7 +87,8 @@ describe("采购页池身份与同源参考卡", () => {
   it("采购明细型号行显示池标签，展开后显示采购侧参考卡", async () => {
     const { container } = routes("records");
     await screen.findByText("PN-4T");
-    expect(screen.getByRole("link", { name: "查看互通池 4T 硬盘池" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看互通池 4T 硬盘池" }))
+      .toHaveAttribute("href", "/pool-analysis/7?range=30d&pn=PN-4T&side=purchase");
 
     const expand = container.querySelector<HTMLButtonElement>(".ant-table-row-expand-icon");
     if (expand) fireEvent.click(expand);

@@ -172,7 +172,7 @@ export default function PurchaseAnalysisPage() {
           <span style={{ fontFamily: "monospace", fontSize: 12.5 }}>{v}</span>
           {r.needs_review && <Tag color="orange" style={{ marginLeft: 6 }}>待复核</Tag>}
           <PoolIdentityLink groupId={r.pool_group_id} name={r.pool_name} pn={r.pn_std}
-            range="custom" dateFrom={data?.window.since} dateTo={data?.window.until} />
+            range="custom" dateFrom={data?.window.since} dateTo={data?.window.until} side="purchase" />
           <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>{r.description || r.brand || ""}</div>
         </div>
       ) },
@@ -244,7 +244,7 @@ export default function PurchaseAnalysisPage() {
                   </div>
                   <div style={{ marginTop: 4 }}>
                     <PoolIdentityLink groupId={r.pool_group_id} name={r.pool_name} pn={r.pn_std}
-                      range="custom" dateFrom={data?.window.since} dateTo={data?.window.until} />
+                      range="custom" dateFrom={data?.window.since} dateTo={data?.window.until} side="purchase" />
                   </div>
                   <div style={{ marginTop: 4, fontSize: 13, color: "var(--mb-text-2)" }}>
                     采购 {r.buy_times} 次 · 总量 {r.total_qty == null ? "—" : Number(r.total_qty)} · 库存 <span style={{ color: "var(--mb-text-3)" }}>未启用</span>

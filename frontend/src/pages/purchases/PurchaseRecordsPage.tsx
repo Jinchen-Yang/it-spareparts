@@ -91,7 +91,7 @@ export default function PurchaseRecordsPage() {
       render: (v, r) => (
         <span>{v}{r.needs_review && <Tag style={{ marginLeft: 6 }} color="orange">待复核</Tag>}
           <PoolIdentityLink groupId={r.pool_group_id} name={r.pool_name} pn={r.pn_std}
-            range={referenceRange} dateFrom={referenceDateFrom} dateTo={referenceDateTo} />
+            range={referenceRange} dateFrom={referenceDateFrom} dateTo={referenceDateTo} side="purchase" />
         </span>
       ) },
     { title: "描述", dataIndex: "description", ellipsis: true },
@@ -180,7 +180,7 @@ export default function PurchaseRecordsPage() {
                   </div>
                   <div style={{ marginTop: 4 }}>
                     <PoolIdentityLink groupId={r.pool_group_id} name={r.pool_name} pn={r.pn_std}
-                      range={referenceRange} dateFrom={referenceDateFrom} dateTo={referenceDateTo} />
+                      range={referenceRange} dateFrom={referenceDateFrom} dateTo={referenceDateTo} side="purchase" />
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 4, fontSize: 13 }}>
                     <span>数量 {r.qty == null ? "—" : Number(r.qty)} · {mobileUnitPrice(r, basis)}</span>

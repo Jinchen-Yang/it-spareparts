@@ -109,11 +109,22 @@ describe("PoolReferenceCard", () => {
   it("自定义窗口深链保留起止日期与当前 PN", () => {
     renderCard(reference({ window: {
       range: "custom", date_from: "2026-05-01", date_to: "2026-05-20",
-    } }));
+    } }), { side: "sales" });
     expect(screen.getByRole("link", { name: "查看互通池详情" })).toHaveAttribute(
       "href",
-      "/pool-analysis/12?range=custom&from=2026-05-01&to=2026-05-20&pn=ST4000NM0035",
+      "/pool-analysis/12?range=custom&from=2026-05-01&to=2026-05-20&pn=ST4000NM0035&side=sales",
     );
+  });
+
+  it("单侧参考卡把当前采购/销售方向带入详情；双侧卡不强加方向", () => {
+    const { unmount } = render(<MemoryRouter><PoolReferenceCard reference={reference()} side="purchase" /></MemoryRouter>);
+    expect(screen.getByRole("link", { name: "查看互通池详情" })).toHaveAttribute(
+      "href", "/pool-analysis/12?range=90d&pn=ST4000NM0035&side=purchase",
+    );
+    unmount();
+    renderCard(reference());
+    expect(screen.getByRole("link", { name: "查看互通池详情" }).getAttribute("href"))
+      .not.toContain("side=");
   });
 
   it("本地权限首屏先收紧：即使响应误带金额也不渲染", () => {

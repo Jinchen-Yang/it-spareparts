@@ -77,7 +77,7 @@ export default function PoolOrderDetailModal({ side, orderId, range = "90d", dat
       open={orderId != null}
       onCancel={onClose}
       footer={null}
-      width={920}
+      width="min(920px, calc(100vw - 16px))"
       title={`${side === "purchase" ? "采购" : "销售"}订单 ${order?.order_no || ""}`}
       destroyOnHidden
     >

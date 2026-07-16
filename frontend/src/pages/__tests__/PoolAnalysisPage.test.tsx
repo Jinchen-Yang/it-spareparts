@@ -9,6 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { Grid } from "antd";
 
 const fetchPoolAnalysis = vi.fn();
 const fetchPoolAnalysisOrderDetail = vi.fn();
@@ -34,6 +35,8 @@ vi.mock("../../components/charts/HorizontalMetricBar", () => ({
 }));
 
 import PoolAnalysisPage from "../PoolAnalysisPage";
+
+const breakpoint = vi.spyOn(Grid, "useBreakpoint");
 
 const metrics = (amount: number, avg: number) => ({
   total_amount: amount, total_quantity: 10, weighted_avg_unit_price: avg,
@@ -113,6 +116,7 @@ function renderAt(url: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  breakpoint.mockReturnValue({ xs: false, sm: true, md: true, lg: true, xl: true, xxl: true });
   localStorage.clear();
   localStorage.setItem("role", "admin");
   fetchPoolAnalysis.mockResolvedValue(DETAIL);
@@ -270,6 +274,8 @@ describe("订单板块", () => {
     fireEvent.click(link);
     await waitFor(() => expect(fetchPoolAnalysisOrderDetail).toHaveBeenCalledWith("purchase", 77));
     const dialog = await screen.findByRole("dialog");
+    expect((dialog.closest(".ant-modal") ?? dialog).getAttribute("style"))
+      .toContain("calc(100vw - 16px)");
     await within(dialog).findByText("采购订单 CG-77");
     expect(within(dialog).getByText("供应商A")).toBeInTheDocument();
     expect(within(dialog).getByRole("link", { name: "查看互通池 内存互通池" }))
@@ -307,6 +313,29 @@ describe("订单板块", () => {
 });
 
 describe("治理权限", () => {
+  it("哨兵不一致时 constraint=restricted 仍关闭该侧全部价格、成员与排序", async () => {
+    const sentinelRestricted = {
+      ...reference(2000, 100),
+      restricted: false,
+      constraint: { status: "restricted" as const, value: null },
+    };
+    fetchPoolAnalysis.mockResolvedValue({
+      ...DETAIL,
+      purchase_reference: sentinelRestricted,
+      members: DETAIL.members.map((member) => ({
+        ...member, purchase_reference: sentinelRestricted,
+      })),
+    });
+
+    renderAt("/pool-analysis/12?side=purchase");
+    await screen.findByText("内存互通池");
+    expect(screen.getByLabelText("采购排名指标：平均单价或金额合计"))
+      .toHaveClass("ant-segmented-disabled");
+    expect(screen.queryByTestId("metric-bar-purchase")).toBeNull();
+    expect(screen.getAllByText("无池价格权限").length).toBeGreaterThanOrEqual(4);
+    expect(screen.queryByText(/¥90|¥100|¥105/)).toBeNull();
+  });
+
   it("data_pool_price_governance=false：价格、约束、差额与排序统一隐藏", async () => {
     localStorage.setItem("role", "boss");
     localStorage.setItem("permissions", JSON.stringify({ data_pool_price_governance: false }));
@@ -365,5 +394,34 @@ describe("治理权限", () => {
     expect(screen.getAllByText(/¥210/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/¥420/).length).toBeGreaterThan(0);
     expect(screen.queryByText("当前账号无逐单销售明细查看权限（仅聚合可见）。")).toBeNull();
+  });
+});
+
+describe("390px 移动详情", () => {
+  it("不用桌面宽表；成员卡片可 Tab，并可用 Enter 打开全屏指标详情，订单按钮可达", async () => {
+    breakpoint.mockReturnValue({ xs: true, sm: false, md: false, lg: false, xl: false, xxl: false });
+    renderAt("/pool-analysis/12?side=purchase&pn=PN-B");
+
+    const page = await screen.findByTestId("pool-analysis-page");
+    expect(page).toHaveStyle({ maxWidth: "100%", overflowX: "hidden" });
+    expect(page.querySelector(".ant-table")).toBeNull();
+
+    const member = screen.getByRole("button", { name: "查看成员 PN-B 价格详情" });
+    member.focus();
+    expect(document.activeElement).toBe(member);
+    fireEvent.keyDown(member, { key: "Enter" });
+
+    const drawer = await screen.findByText("成员 PN-B 详情");
+    const dialog = drawer.closest(".ant-drawer") as HTMLElement;
+    expect(dialog).toBeTruthy();
+    expect(dialog.querySelector(".ant-drawer-content-wrapper")).toHaveStyle({ height: "100%" });
+    expect(within(dialog).getByText("采购均价").parentElement).toHaveTextContent("¥110");
+    expect(within(dialog).getByText("采购量").parentElement).toHaveTextContent("10");
+    expect(within(dialog).getByText("采购 vs 池均").parentElement).toHaveTextContent("+¥10");
+    expect(within(dialog).getByText("采购池约束").parentElement).toHaveTextContent("¥105");
+
+    const order = screen.getByRole("button", { name: "查看采购订单 CG-77 内容" });
+    order.focus();
+    expect(document.activeElement).toBe(order);
   });
 });

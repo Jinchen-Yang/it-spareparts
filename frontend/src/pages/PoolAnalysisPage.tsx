@@ -4,10 +4,10 @@
  * → 采购订单板块 + 销售订单板块（点单号看订单内容）。
  * 时间窗口 from/to 写入 URL；订单板块分页也入 URL（刷新不丢位置）。
  */
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
-  Alert, Button, Card, DatePicker, Descriptions, Result, Segmented, Table, Tag,
+  Alert, Button, Card, DatePicker, Descriptions, Grid, List, Result, Segmented, Table, Tag,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import dayjs, { type Dayjs } from "dayjs";
@@ -15,14 +15,16 @@ import PageHeader from "../components/PageHeader";
 import { fetchPoolAnalysis } from "../api/poolAnalysis";
 import type {
   PoolAnalysisDetail, PoolAnalysisMember, PoolAnalysisOrderLine, PoolAnalysisPurchaseOrderLine,
-  PoolAnalysisRange, PoolAnalysisSaleOrderLine,
+  PoolAnalysisRange, PoolAnalysisSaleOrderLine, PoolReferenceSide,
 } from "../api/poolAnalysis";
 import HorizontalMetricBar, { type MetricBarItem } from "../components/charts/HorizontalMetricBar";
+import MobileDetailDrawer, { type DetailField } from "../components/MobileDetailDrawer";
 import PoolOrderDetailModal from "../components/pools/PoolOrderDetailModal";
 import { EMPTY, moneyExact, qty } from "../utils/format";
 import { ISO_DATE_FORMAT, strictIsoDateRange } from "../utils/date";
 import { canOpenPartDetail, PartLink } from "./boss/PartsTable";
 import { MUTED, useGuardedFetch, useLocalRestrictions } from "./boss/shared";
+import { activatableProps } from "./purchases/shared";
 
 const { RangePicker } = DatePicker;
 const D = ISO_DATE_FORMAT;
@@ -42,12 +44,20 @@ function readPage(sp: URLSearchParams, key: string): number {
   return Number.isInteger(n) && n > 0 ? n : 1;
 }
 
+/** 任一治理哨兵收紧即整侧收紧；防御后端短暂不一致，绝不选择性信任金额。 */
+function isReferenceRestricted(reference: PoolReferenceSide | null | undefined, localRestricted: boolean) {
+  return localRestricted || !!reference
+    && (reference.restricted || reference.constraint.status === "restricted");
+}
+
 export default function PoolAnalysisPage() {
   const { groupId: rawId } = useParams<{ groupId: string }>();
   const groupId = Number(rawId);
   const navigate = useNavigate();
   const [sp, setSp] = useSearchParams();
   const local = useLocalRestrictions();
+  const screens = Grid.useBreakpoint();
+  const isMobile = screens.md === false;
 
   const parsedWindow = strictIsoDateRange(sp.get("from"), sp.get("to"));
   const rawRange = sp.get("range");
@@ -70,6 +80,7 @@ export default function PoolAnalysisPage() {
   const [pMode, setPMode] = useState<MetricMode>("average");
   const [sMode, setSMode] = useState<MetricMode>("average");
   const [orderModal, setOrderModal] = useState<{ side: "purchase" | "sales"; orderId: number } | null>(null);
+  const [memberDetail, setMemberDetail] = useState<PoolAnalysisMember | null>(null);
 
   const patch = (next: Record<string, string | number | null>, replace = true) => {
     const merged = new URLSearchParams(sp);
@@ -110,7 +121,10 @@ export default function PoolAnalysisPage() {
   const sideReference = (side: "purchase" | "sales") => side === "purchase"
     ? d?.purchase_reference : d?.sales_reference;
   const sideRestricted = (side: "purchase" | "sales") =>
-    local.governance || (sideReference(side)?.restricted ?? false);
+    isReferenceRestricted(sideReference(side), local.governance);
+  const memberRestricted = (member: PoolAnalysisMember, side: "purchase" | "sales") =>
+    isReferenceRestricted(side === "purchase" ? member.purchase_reference : member.sales_reference,
+      local.governance);
 
   // ---- 横向柱状排名数据（组件内自动降序 + 剔除无值项并计数）----
   const barItems = (side: "purchase" | "sales", mode: MetricMode): MetricBarItem[] =>
@@ -118,16 +132,17 @@ export default function PoolAnalysisPage() {
       const reference = side === "purchase" ? m.purchase_reference : m.sales_reference;
       const metrics = reference.part_stats;
       const poolMetrics = reference.pool_stats;
+      const restricted = isReferenceRestricted(reference, local.governance);
       return {
         part_id: m.part_id,
         pn: m.pn_std ?? `#${m.part_id}`,
         description: m.description,
-        qty: metrics?.total_qty ?? null,
-        order_count: metrics?.order_count ?? null,
-        last_date: metrics?.latest_date ?? null,
-        value: (mode === "total" ? metrics?.total_amount : metrics?.weighted_avg) ?? null,
-        pool_avg: mode === "average" ? (poolMetrics?.weighted_avg ?? null) : null,
-        constraint_price: mode === "average" && !sideRestricted(side)
+        qty: restricted ? null : metrics?.total_qty ?? null,
+        order_count: restricted ? null : metrics?.order_count ?? null,
+        last_date: restricted ? null : metrics?.latest_date ?? null,
+        value: restricted ? null : (mode === "total" ? metrics?.total_amount : metrics?.weighted_avg) ?? null,
+        pool_avg: !restricted && mode === "average" ? (poolMetrics?.weighted_avg ?? null) : null,
+        constraint_price: !restricted && mode === "average"
           ? (reference.constraint.value ?? null) : null,
       };
     });
@@ -161,38 +176,70 @@ export default function PoolAnalysisPage() {
     { title: "采购均价(窗口)", key: "pavg", width: 118, align: "right",
       render: (_, m) => {
         const v = m.purchase_reference.part_stats?.weighted_avg;
-        if (m.purchase_reference.restricted || local.governance) return <span style={MUTED}>无池价格权限</span>;
+        if (memberRestricted(m, "purchase")) return <span style={MUTED}>无池价格权限</span>;
         return v == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(v);
       } },
     { title: "采购量", key: "pq", width: 82, align: "right",
-      render: (_, m) => m.purchase_reference.restricted || local.governance
+      render: (_, m) => memberRestricted(m, "purchase")
         ? <span style={MUTED}>无池价格权限</span>
         : qty(m.purchase_reference.part_stats?.total_qty) },
     { title: "采购 vs 池均", key: "pd", width: 106, align: "right",
       render: (_, m) => {
         const v = m.purchase_reference.delta_to_pool_avg;
-        if (m.purchase_reference.restricted || local.governance) return <span style={MUTED}>无池价格权限</span>;
+        if (memberRestricted(m, "purchase")) return <span style={MUTED}>无池价格权限</span>;
         return v == null ? <span style={MUTED}>{EMPTY}</span>
           : <span style={{ color: v > 0 ? "#c0524a" : undefined }}>{signedMoney(v)}</span>;
       } },
     { title: "销售均价(窗口)", key: "savg", width: 118, align: "right",
       render: (_, m) => {
         const v = m.sales_reference.part_stats?.weighted_avg;
-        if (m.sales_reference.restricted || local.governance) return <span style={MUTED}>无池价格权限</span>;
+        if (memberRestricted(m, "sales")) return <span style={MUTED}>无池价格权限</span>;
         return v == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(v);
       } },
     { title: "销量", key: "sq", width: 78, align: "right",
-      render: (_, m) => m.sales_reference.restricted || local.governance
+      render: (_, m) => memberRestricted(m, "sales")
         ? <span style={MUTED}>无池价格权限</span>
         : qty(m.sales_reference.part_stats?.total_qty) },
     { title: "销售 vs 池均", key: "sd", width: 106, align: "right",
       render: (_, m) => {
         const v = m.sales_reference.delta_to_pool_avg;
-        if (m.sales_reference.restricted || local.governance) return <span style={MUTED}>无池价格权限</span>;
+        if (memberRestricted(m, "sales")) return <span style={MUTED}>无池价格权限</span>;
         return v == null ? <span style={MUTED}>{EMPTY}</span>
           : <span style={{ color: v < 0 ? "#c0524a" : undefined }}>{signedMoney(v)}</span>;
       } },
   ];
+
+  const memberFields = (member: PoolAnalysisMember): DetailField[] => {
+    const purchase = member.purchase_reference;
+    const sales = member.sales_reference;
+    const unavailable = <span style={MUTED}>无池价格权限</span>;
+    const value = (side: "purchase" | "sales", content: ReactNode) =>
+      memberRestricted(member, side) ? unavailable : content;
+    const constraint = (side: "purchase" | "sales", reference: PoolReferenceSide) => value(side,
+      reference.constraint.status === "unset"
+        ? <span style={MUTED}>未设置</span>
+        : moneyExact(reference.constraint.value));
+    return [
+      { label: "型号", value: <PartLink partId={member.part_id} pn={member.pn_std} /> },
+      { label: "品牌", value: member.brand || EMPTY },
+      { label: "描述", value: member.description || EMPTY },
+      { label: "采购均价", value: value("purchase", moneyExact(purchase.part_stats?.weighted_avg)) },
+      { label: "采购量", value: value("purchase", qty(purchase.part_stats?.total_qty)) },
+      { label: "采购 vs 池均", value: value("purchase", signedMoney(purchase.delta_to_pool_avg) || EMPTY) },
+      { label: "采购池约束", value: constraint("purchase", purchase) },
+      { label: "销售均价", value: value("sales", moneyExact(sales.part_stats?.weighted_avg)) },
+      { label: "销售量", value: value("sales", qty(sales.part_stats?.total_qty)) },
+      { label: "销售 vs 池均", value: value("sales", signedMoney(sales.delta_to_pool_avg) || EMPTY) },
+      { label: "销售池约束", value: constraint("sales", sales) },
+    ];
+  };
+
+  const mobileMemberSummary = (member: PoolAnalysisMember, side: "purchase" | "sales") => {
+    const reference = side === "purchase" ? member.purchase_reference : member.sales_reference;
+    if (memberRestricted(member, side)) return <span style={MUTED}>无池价格权限</span>;
+    return <>{side === "purchase" ? "采购" : "销售"}均价 {moneyExact(reference.part_stats?.weighted_avg)} ·
+      数量 {qty(reference.part_stats?.total_qty)}</>;
+  };
 
   // ---- 订单板块（行粒度，点单号看订单全貌）----
   const orderCols = (side: "purchase" | "sales"): ColumnsType<PoolAnalysisOrderLine> => [
@@ -238,8 +285,66 @@ export default function PoolAnalysisPage() {
         return sideRestricted(side)
           ? <span style={MUTED}>无池价格权限</span>
           : value == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(value);
-      } },
+    } },
   ];
+
+  const orderPagination = (side: "purchase" | "sales") => {
+    const block = side === "purchase" ? d?.purchase_orders : d?.sales_orders;
+    const current = side === "purchase" ? purchasePage : salesPage;
+    return {
+      current: block?.page ?? current,
+      pageSize: 20,
+      total: block?.total ?? 0,
+      showSizeChanger: false,
+      showTotal: (total: number) => `共 ${total} 行`,
+      onChange: (page: number) => patch(side === "purchase"
+        ? { pp: page === 1 ? null : page }
+        : { spg: page === 1 ? null : page }),
+    };
+  };
+
+  const mobileOrders = (side: "purchase" | "sales") => {
+    const block = side === "purchase" ? d?.purchase_orders : d?.sales_orders;
+    return (
+      <List<PoolAnalysisOrderLine>
+        loading={loading}
+        dataSource={block?.items ?? []}
+        pagination={orderPagination(side)}
+        locale={{ emptyText: `窗口内暂无${side === "purchase" ? "采购" : "销售"}记录` }}
+        renderItem={(row) => {
+          const price = side === "purchase"
+            ? (row as PoolAnalysisPurchaseOrderLine).purchase_unit_price_ex_tax
+            : (row as PoolAnalysisSaleOrderLine).sale_unit_price_ex_tax;
+          const employee = side === "purchase" ? row.purchaser : row.salesperson;
+          return (
+            <List.Item key={row.line_id}
+              {...activatableProps(
+                () => setOrderModal({ side, orderId: row.order_id }),
+                `查看${side === "purchase" ? "采购" : "销售"}订单 ${row.order_no} 内容`,
+              )}
+              style={{ cursor: "pointer", paddingInline: 2 }}>
+              <div style={{ width: "100%", minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                  <span style={{ fontFamily: "monospace", fontWeight: 600 }}>{row.order_no}</span>
+                  <span style={MUTED}>{row.order_date || EMPTY}</span>
+                </div>
+                <div style={{ marginTop: 5, overflowWrap: "anywhere" }}>
+                  <span style={{ fontFamily: "monospace" }}>{row.pn_std || `#${row.part_id}`}</span>
+                  {employee && <Tag style={{ marginInlineStart: 6 }}>{employee}</Tag>}
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 5, fontSize: 13 }}>
+                  <span>数量 {qty(row.quantity)}</span>
+                  {sideRestricted(side)
+                    ? <span style={MUTED}>无池价格权限</span>
+                    : <span>未税单价 {moneyExact(price)}</span>}
+                </div>
+              </div>
+            </List.Item>
+          );
+        }}
+      />
+    );
+  };
 
   if (!validId) {
     return <Result status="404" title="无效的池编号" subTitle="请从看板互通池列表进入。"
@@ -256,12 +361,14 @@ export default function PoolAnalysisPage() {
     : "";
 
   return (
-    <>
+    <div data-testid="pool-analysis-page"
+      style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowX: "hidden" }}>
       <PageHeader
         title={d ? `${d.name || `通用号池 #${groupId}`}` : `通用号池 #${groupId}`}
         subtitle="池分析详情（只读）：成员排名 · 约束价参考 · 订单明细（金额均未税）"
         extra={
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap",
+            width: isMobile ? "100%" : undefined, minWidth: 0 }}>
             <Segmented
               size="small"
               aria-label="当前关注方向"
@@ -270,6 +377,7 @@ export default function PoolAnalysisPage() {
               onChange={(value) => patch({ side: String(value) }, false)}
             />
             <RangePicker size="small" allowClear presets={RANGE_PRESETS}
+              style={{ width: isMobile ? "100%" : undefined, maxWidth: "100%" }}
               value={from && to ? [dayjs(from), dayjs(to)] : null}
               disabledDate={(day) => day.isAfter(dayjs(), "day")}
               onChange={(v) => {
@@ -377,43 +485,77 @@ export default function PoolAnalysisPage() {
 
           {/* 成员 PN 表 */}
           <Card size="small" style={{ marginBottom: 16 }} title="成员型号（窗口指标）">
-            <Table<PoolAnalysisMember> size="small" rowKey="part_id" pagination={false}
-              loading={loading} dataSource={focusedMembers} columns={memberCols} scroll={{ x: 980 }}
-              locale={{ emptyText: "池内暂无成员" }} />
+            {isMobile ? (
+              <List<PoolAnalysisMember>
+                loading={loading}
+                dataSource={focusedMembers}
+                locale={{ emptyText: "池内暂无成员" }}
+                renderItem={(member) => (
+                  <List.Item key={member.part_id}
+                    {...activatableProps(
+                      () => setMemberDetail(member),
+                      `查看成员 ${member.pn_std || `#${member.part_id}`} 价格详情`,
+                    )}
+                    style={{ cursor: "pointer", paddingInline: 2 }}>
+                    <div style={{ width: "100%", minWidth: 0 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                        <span style={{ fontFamily: "monospace", fontWeight: 600, overflowWrap: "anywhere" }}>
+                          {member.pn_std || `#${member.part_id}`}
+                        </span>
+                        <span>
+                          {member.brand && <Tag>{member.brand}</Tag>}
+                          {focusPn && member.pn_std?.toLocaleUpperCase() === focusPn.toLocaleUpperCase()
+                            && <Tag color="processing">当前型号</Tag>}
+                        </span>
+                      </div>
+                      {member.description && <div style={{ ...MUTED, marginTop: 4 }}>{member.description}</div>}
+                      <div style={{ marginTop: 6, fontSize: 13 }}>{mobileMemberSummary(member, "purchase")}</div>
+                      <div style={{ marginTop: 3, fontSize: 13 }}>{mobileMemberSummary(member, "sales")}</div>
+                    </div>
+                  </List.Item>
+                )}
+              />
+            ) : (
+              <Table<PoolAnalysisMember> size="small" rowKey="part_id" pagination={false}
+                loading={loading} dataSource={focusedMembers} columns={memberCols} scroll={{ x: 980 }}
+                locale={{ emptyText: "池内暂无成员" }} />
+            )}
           </Card>
 
           {/* 采购订单板块 */}
           <Card size="small" style={{ marginBottom: 16 }} title="采购订单（池内成员，窗口内已生效）">
-            <Table<PoolAnalysisOrderLine> size="small" rowKey="line_id" loading={loading}
-              dataSource={d?.purchase_orders?.items ?? []} columns={orderCols("purchase")}
-              scroll={{ x: 1000 }} locale={{ emptyText: "窗口内暂无采购记录" }}
-              pagination={{
-                current: d?.purchase_orders?.page ?? purchasePage, pageSize: 20,
-                total: d?.purchase_orders?.total ?? 0, showSizeChanger: false,
-                showTotal: (t) => `共 ${t} 行`,
-                onChange: (p) => patch({ pp: p === 1 ? null : p }),
-              }} />
+            {isMobile ? mobileOrders("purchase") : (
+              <Table<PoolAnalysisOrderLine> size="small" rowKey="line_id" loading={loading}
+                dataSource={d?.purchase_orders?.items ?? []} columns={orderCols("purchase")}
+                scroll={{ x: 1000 }} locale={{ emptyText: "窗口内暂无采购记录" }}
+                pagination={orderPagination("purchase")} />
+            )}
           </Card>
 
           {/* 销售订单板块 */}
           <Card size="small" style={{ marginBottom: 16 }} title="销售订单（池内成员，窗口内已生效）">
             {d?.sales_orders?.restricted ? (
               <Alert type="info" showIcon message="当前账号无逐单销售明细查看权限（仅聚合可见）。" />
+            ) : isMobile ? (
+              mobileOrders("sales")
             ) : (
               <Table<PoolAnalysisOrderLine> size="small" rowKey="line_id" loading={loading}
                 dataSource={d?.sales_orders?.items ?? []} columns={orderCols("sales")}
                 scroll={{ x: 1000 }} locale={{ emptyText: "窗口内暂无销售记录" }}
-                pagination={{
-                  current: d?.sales_orders?.page ?? salesPage, pageSize: 20,
-                  total: d?.sales_orders?.total ?? 0, showSizeChanger: false,
-                  showTotal: (t) => `共 ${t} 行`,
-                  onChange: (p) => patch({ spg: p === 1 ? null : p }),
-                }} />
+                pagination={orderPagination("sales")} />
             )}
           </Card>
 
         </>
       )}
+
+      <MobileDetailDrawer
+        open={memberDetail != null}
+        title={memberDetail ? `成员 ${memberDetail.pn_std || `#${memberDetail.part_id}`} 详情` : "成员详情"}
+        fields={memberDetail ? memberFields(memberDetail) : []}
+        height="100%"
+        onClose={() => setMemberDetail(null)}
+      />
 
       <PoolOrderDetailModal
         side={orderModal?.side ?? "purchase"}
@@ -421,9 +563,9 @@ export default function PoolAnalysisPage() {
         range={from && to ? "custom" : range ?? "90d"}
         dateFrom={from ?? undefined}
         dateTo={to ?? undefined}
-        forcePriceRestricted={local.governance}
+        forcePriceRestricted={sideRestricted(orderModal?.side ?? "purchase")}
         onClose={() => setOrderModal(null)}
       />
-    </>
+    </div>
   );
 }
