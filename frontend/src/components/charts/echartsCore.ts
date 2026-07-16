@@ -7,7 +7,7 @@
  * vendor-echarts chunk 控制在整包的一半以下。新图表类型（饼图等）在此追加注册。
  */
 import * as echarts from "echarts/core";
-import { BarChart, LineChart } from "echarts/charts";
+import { BarChart, CustomChart, LineChart } from "echarts/charts";
 import {
   AriaComponent,
   DataZoomComponent,
@@ -20,6 +20,7 @@ import {
 import { CanvasRenderer } from "echarts/renderers";
 import type {
   BarSeriesOption,
+  CustomSeriesOption,
   LineSeriesOption,
 } from "echarts/charts";
 import type {
@@ -36,6 +37,7 @@ import { buildChartTheme, CHART_THEME_NAME } from "./chartTheme";
 
 echarts.use([
   BarChart,
+  CustomChart,
   LineChart,
   AriaComponent,
   DataZoomComponent,
@@ -52,6 +54,7 @@ echarts.registerTheme(CHART_THEME_NAME, buildChartTheme());
 /** 本项目图表 option 的合成类型：只含已注册模块，用了未注册的组件会在编译期暴露。 */
 export type ECOption = ComposeOption<
   | BarSeriesOption
+  | CustomSeriesOption
   | LineSeriesOption
   | AriaComponentOption
   | DataZoomComponentOption

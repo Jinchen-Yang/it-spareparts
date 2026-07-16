@@ -21,6 +21,16 @@ export interface PoolExcludedCounts {
   confirmed_invalid_excluded?: number;
 }
 
+export interface PoolPriceMapExcludedCounts {
+  inactive_orders: number;
+  nonpositive_price: number;
+  nonpositive_qty: number;
+  future_orders: number;
+  non_revenue_sales: number;
+  suspected_records: number;
+  confirmed_source_error_excluded: number;
+}
+
 /** 统一未税统计；null 是无样本或无金额权限，绝不用 0 代替。 */
 export interface PoolPriceStats {
   weighted_avg: number | null;
@@ -158,6 +168,62 @@ export interface PoolAnalysisQuery {
   purchase_page?: number;
   sales_page?: number;
   orders_page_size?: number;
+  employee?: string;
+  sort?: "pn" | "weighted_avg" | "constraint_delta" | "latest_date";
+  order?: "asc" | "desc";
+}
+
+export interface PoolPriceMapStats {
+  weighted_avg: number | null;
+  median: number | null;
+  min: number | null;
+  max: number | null;
+  latest: number | null;
+  total_qty: number | null;
+  order_count: number;
+  line_count: number;
+  latest_date: string | null;
+}
+
+export interface PoolPriceMapMember {
+  part_id: number;
+  pn_std: string | null;
+  description: string | null;
+  brand: string | null;
+  stats: PoolPriceMapStats | null;
+  current_reference: {
+    relation: "above" | "below" | "equal";
+    delta_amount: number | null;
+    delta_pct: number | null;
+  } | null;
+  latest_raw_record: {
+    order_id: number;
+    line_id: number;
+    order_no: string;
+    order_date: string | null;
+    employee: string | null;
+    price_ex_tax: number | null;
+    quality_status: "none" | "open_or_source_changed" | "confirmed_source_error";
+  } | null;
+  quality_counts: { suspected: number; confirmed_source_error: number } | null;
+}
+
+export interface PoolPriceMapResponse {
+  contract_version: 1;
+  side: PoolAnalysisSide;
+  basis: "ex_tax";
+  price_restricted: boolean;
+  pool: { group_id: number; name: string | null; member_count: number };
+  window: PoolWindow;
+  filters: { purchase_type: string | null; employee: string | null };
+  sort: "pn" | "weighted_avg" | "constraint_delta" | "latest_date";
+  order: "asc" | "desc";
+  effective_sort: "pn" | "weighted_avg" | "constraint_delta" | "latest_date";
+  effective_order: "asc" | "desc";
+  current_constraint: PoolConstraint;
+  pool_stats: PoolPriceMapStats | null;
+  excluded: PoolPriceMapExcludedCounts | null;
+  members: PoolPriceMapMember[];
 }
 
 export async function fetchPoolAnalysisList(
@@ -172,6 +238,17 @@ export async function fetchPoolAnalysis(
   params: PoolAnalysisQuery = {},
 ): Promise<PoolAnalysisDetail> {
   const { data } = await api.get<PoolAnalysisDetail>(`/pool-analysis/pools/${groupId}`, { params });
+  return data;
+}
+
+export async function fetchPoolPriceMap(
+  groupId: number,
+  params: Pick<PoolAnalysisQuery,
+    "side" | "range" | "date_from" | "date_to" | "purchase_type" | "employee" | "sort" | "order"> = {},
+): Promise<PoolPriceMapResponse> {
+  const { data } = await api.get<PoolPriceMapResponse>(
+    `/pool-analysis/pools/${groupId}/price-map`, { params },
+  );
   return data;
 }
 
