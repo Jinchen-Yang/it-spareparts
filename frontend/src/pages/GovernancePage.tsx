@@ -8,6 +8,7 @@ import ResizableTable from "../components/ResizableTable";
 import api from "../api";
 import { money, pct, splitFixed } from "../utils/format";
 import { useTaxBasis } from "../context/TaxBasis";
+import DataQualityIssuesPanel from "./governance/DataQualityIssuesPanel";
 const pct100 = (v: number | null) => (v == null ? "-" : `${v.toFixed(1)}%`);
 
 interface PartRow {
@@ -515,6 +516,7 @@ export default function GovernancePage() {
             { key: "candidates", label: "合并候选审核", children: <CandidatesTab onChanged={loadTop} /> },
             { key: "merges", label: "合并历史", children: <MergesTab onChanged={loadTop} /> },
             { key: "issues", label: "质量问题", children: <IssuesTab /> },
+            { key: "fact-data-quality", label: "价格与数量疑点", children: <DataQualityIssuesPanel /> },
             { key: "aliases", label: "别名审核", children: <AliasesTab /> },
             { key: "metrics", label: "主数据指标", children: <MetricsTab metrics={metrics} /> },
           ]}
