@@ -4,6 +4,7 @@ import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
 import { Link, useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
+import PurchaseTypeSelect from "../components/pools/PurchaseTypeSelect";
 import {
   fetchPoolAnalysisList,
   type PoolAnalysisListItem,
@@ -68,6 +69,7 @@ export default function PoolsPage() {
   const invalidRange = rawRange !== "custom" && !VALID_RANGES.has(rawRange);
   const range = (invalidRange ? "90d" : rawRange) as PoolAnalysisRange;
   const q = sp.get("q") || "";
+  const purchaseType = sp.get("purchase_type")?.trim() || "";
   const page = readPage(sp.get("page"));
   const [searchText, setSearchText] = useState(q);
   const [data, setData] = useState<PoolAnalysisListResponse | null>(null);
@@ -86,6 +88,7 @@ export default function PoolsPage() {
     fetchPoolAnalysisList({
       range,
       ...(parsedCustom ? { date_from: parsedCustom.from, date_to: parsedCustom.to } : {}),
+      ...(purchaseType ? { purchase_type: purchaseType } : {}),
       q: q || undefined,
       page,
       page_size: 20,
@@ -94,7 +97,8 @@ export default function PoolsPage() {
       .catch(() => { if (seq === requestSeq.current) setError(true); })
       .finally(() => { if (seq === requestSeq.current) setLoading(false); });
     return () => { requestSeq.current += 1; };
-  }, [range, parsedCustom?.from, parsedCustom?.to, invalidWindow, invalidRange, q, page, reload]);
+  }, [range, parsedCustom?.from, parsedCustom?.to, invalidWindow, invalidRange,
+    purchaseType, q, page, reload]);
 
   const patchUrl = (next: Record<string, string | number | undefined>) => {
     const merged = new URLSearchParams(sp);
@@ -110,6 +114,7 @@ export default function PoolsPage() {
     detailQuery.set("from", parsedCustom.from);
     detailQuery.set("to", parsedCustom.to);
   }
+  if (purchaseType) detailQuery.set("purchase_type", purchaseType);
 
   const columns = useMemo<ColumnsType<PoolAnalysisListItem>>(() => [
     {
@@ -187,6 +192,10 @@ export default function PoolsPage() {
               }}
             />
           </span>
+          <PurchaseTypeSelect
+            value={purchaseType}
+            onChange={(value) => patchUrl({ purchase_type: value, page: undefined })}
+          />
           <Input.Search
             aria-label="搜索互通池"
             placeholder="池名 / 成员 PN / 描述"

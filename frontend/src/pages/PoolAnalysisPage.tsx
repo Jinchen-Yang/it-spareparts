@@ -20,6 +20,7 @@ import type {
 import HorizontalMetricBar, { type MetricBarItem } from "../components/charts/HorizontalMetricBar";
 import MobileDetailDrawer, { type DetailField } from "../components/MobileDetailDrawer";
 import PoolOrderDetailModal from "../components/pools/PoolOrderDetailModal";
+import PurchaseTypeSelect from "../components/pools/PurchaseTypeSelect";
 import { EMPTY, moneyExact, qty } from "../utils/format";
 import { ISO_DATE_FORMAT, strictIsoDateRange } from "../utils/date";
 import { canOpenPartDetail, PartLink } from "./boss/PartsTable";
@@ -66,6 +67,7 @@ export default function PoolAnalysisPage() {
   const sideParam: "purchase" | "sales" | null = rawSide === "purchase" || rawSide === "sales"
     ? rawSide : null;
   const focusPn = sp.get("pn")?.trim() || null;
+  const purchaseType = sp.get("purchase_type")?.trim() || null;
   const hasCustomWindow = sp.has("from") || sp.has("to");
   const range = !parsedWindow
     ? (rawRange == null ? "90d" : STANDARD_RANGES.has(rawRange as PoolAnalysisRange)
@@ -97,8 +99,9 @@ export default function PoolAnalysisPage() {
       : { range: range ?? undefined }),
     ...(sideParam ? { side: sideParam } : {}),
     ...(focusPn ? { pn: focusPn } : {}),
+    ...(purchaseType ? { purchase_type: purchaseType } : {}),
     purchase_page: purchasePage, sales_page: salesPage, orders_page_size: 20,
-  }), [from, to, range, sideParam, focusPn, purchasePage, salesPage]);
+  }), [from, to, range, sideParam, focusPn, purchaseType, purchasePage, salesPage]);
 
   const backQuery = new URLSearchParams();
   if (from && to) {
@@ -110,6 +113,7 @@ export default function PoolAnalysisPage() {
   }
   if (sideParam) backQuery.set("side", sideParam);
   if (focusPn) backQuery.set("pn", focusPn);
+  if (purchaseType) backQuery.set("purchase_type", purchaseType);
   const backPath = `/pools${backQuery.size ? `?${backQuery.toString()}` : ""}`;
 
   const validId = Number.isInteger(groupId) && groupId > 0;
@@ -384,6 +388,11 @@ export default function PoolAnalysisPage() {
                 if (v && v[0] && v[1]) patch({ range: "custom", from: v[0].format(D), to: v[1].format(D), pp: null, spg: null }, false);
                 else patch({ range: null, from: null, to: null, pp: null, spg: null }, false);
               }} />
+            <PurchaseTypeSelect
+              value={purchaseType}
+              mobile={isMobile}
+              onChange={(value) => patch({ purchase_type: value ?? null, pp: null, spg: null }, false)}
+            />
             <Button size="small" onClick={() => navigate(backPath)}>返回互通池</Button>
           </div>
         } />

@@ -8,7 +8,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { Grid } from "antd";
 
 const fetchPoolAnalysis = vi.fn();
@@ -108,10 +108,18 @@ function renderAt(url: string) {
       <Routes>
         <Route path="/pool-analysis/:groupId" element={<PoolAnalysisPage />} />
         <Route path="/boss" element={<div>看板桩</div>} />
+        <Route path="/pools" element={<><div>池列表桩</div><LocationProbe /></>} />
         <Route path="/parts" element={<div>型号查询页桩</div>} />
       </Routes>
     </MemoryRouter>,
   );
+}
+
+let currentPath = "";
+function LocationProbe() {
+  const location = useLocation();
+  currentPath = `${location.pathname}${location.search}`;
+  return null;
 }
 
 beforeEach(() => {
@@ -177,6 +185,33 @@ describe("深链与取数", () => {
     expect(memberRows[0]).toHaveTextContent("PN-B");
     expect(memberRows[0]).toHaveTextContent("当前型号");
     expect(screen.getByText("成员销售排名（高→低）").parentElement).toHaveTextContent("当前关注");
+  });
+
+  it("采购类型深链下发接口，未知值可显示，并由返回链接原样保留", async () => {
+    renderAt("/pool-analysis/12?range=365d&side=sales&pn=PN-B&purchase_type=临时联合采购");
+    await waitFor(() => expect(fetchPoolAnalysis).toHaveBeenCalledWith(12, {
+      range: "365d", side: "sales", pn: "PN-B", purchase_type: "临时联合采购",
+      purchase_page: 1, sales_page: 1, orders_page_size: 20,
+    }));
+    expect(screen.getByText("临时联合采购")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "返回互通池" }));
+    await screen.findByText("池列表桩");
+    const query = new URLSearchParams(currentPath.split("?")[1]);
+    expect(query.get("range")).toBe("365d");
+    expect(query.get("side")).toBe("sales");
+    expect(query.get("pn")).toBe("PN-B");
+    expect(query.get("purchase_type")).toBe("临时联合采购");
+  });
+
+  it("详情采购类型 Select 可输入未知值，并重置订单分页后重查", async () => {
+    renderAt("/pool-analysis/12?pp=3&spg=2");
+    await screen.findByText("内存互通池");
+    const input = screen.getByRole("combobox", { name: "采购类型" });
+    fireEvent.change(input, { target: { value: "全新采购流程" } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13, which: 13 });
+    await waitFor(() => expect(fetchPoolAnalysis).toHaveBeenLastCalledWith(12, expect.objectContaining({
+      purchase_type: "全新采购流程", purchase_page: 1, sales_page: 1,
+    })));
   });
 
   it("全员详情不再渲染旧推荐与节省语义", async () => {
@@ -405,6 +440,7 @@ describe("390px 移动详情", () => {
     const page = await screen.findByTestId("pool-analysis-page");
     expect(page).toHaveStyle({ maxWidth: "100%", overflowX: "hidden" });
     expect(page.querySelector(".ant-table")).toBeNull();
+    expect(screen.getByLabelText("采购类型筛选")).toHaveStyle({ width: "100%", maxWidth: "100%" });
 
     const member = screen.getByRole("button", { name: "查看成员 PN-B 价格详情" });
     member.focus();

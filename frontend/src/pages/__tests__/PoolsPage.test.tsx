@@ -33,7 +33,7 @@ const RESPONSE = {
 let path = "";
 function Probe() { path = `${useLocation().pathname}${useLocation().search}`; return null; }
 function renderAt(url = "/pools") {
-  render(<MemoryRouter initialEntries={[url]}><Routes>
+  return render(<MemoryRouter initialEntries={[url]}><Routes>
     <Route path="/pools" element={<><PoolsPage /><Probe /></>} />
     <Route path="/pool-analysis/:groupId" element={<div>详情页桩</div>} />
   </Routes></MemoryRouter>);
@@ -75,6 +75,38 @@ describe("全员互通池价格分析页", () => {
     fireEvent.click(screen.getByText("近 365 天"));
     await waitFor(() => expect(path).toContain("range=365d"));
     await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenLastCalledWith(expect.objectContaining({ range: "365d" })));
+  });
+
+  it("采购类型从 URL 重放、下发接口并由池链接原样带入详情", async () => {
+    renderAt("/pools?range=365d&purchase_type=委外维修");
+    await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenCalledWith({
+      range: "365d", purchase_type: "委外维修", q: undefined, page: 1, page_size: 20,
+    }));
+    expect(screen.getByText("委外维修")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看硬盘互通池价格详情" })).toHaveAttribute(
+      "href", "/pool-analysis/7?range=365d&purchase_type=%E5%A7%94%E5%A4%96%E7%BB%B4%E4%BF%AE",
+    );
+  });
+
+  it("采购类型 Select 可键入未知新值并可清除，不被建议列表锁死", async () => {
+    const { container } = renderAt();
+    await screen.findByText("硬盘互通池");
+    const input = screen.getByRole("combobox", { name: "采购类型" });
+    fireEvent.change(input, { target: { value: "临时联合采购" } });
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13, which: 13 });
+    await waitFor(() => expect(path).toContain("purchase_type=%E4%B8%B4%E6%97%B6%E8%81%94%E5%90%88%E9%87%87%E8%B4%AD"));
+    await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenLastCalledWith(expect.objectContaining({
+      purchase_type: "临时联合采购",
+    })));
+
+    const clear = container.querySelector<HTMLElement>(".ant-select-clear");
+    expect(clear).toBeTruthy();
+    fireEvent.mouseDown(clear!);
+    fireEvent.click(clear!);
+    await waitFor(() => expect(path).not.toContain("purchase_type="));
+    await waitFor(() => expect(fetchPoolAnalysisList).toHaveBeenLastCalledWith(expect.not.objectContaining({
+      purchase_type: expect.anything(),
+    })));
   });
 
   it("价格治理受限时明确显示无价格权限，不显示 0 或未设置", async () => {
@@ -168,5 +200,7 @@ describe("全员互通池价格分析页", () => {
     link.focus();
     expect(document.activeElement).toBe(link);
     expect(link.tabIndex).toBe(0);
+    const purchaseType = screen.getByLabelText("采购类型筛选");
+    expect(purchaseType).toHaveStyle({ maxWidth: "100%" });
   });
 });
