@@ -90,6 +90,37 @@ def test_page_import_grant_unlocks_every_import_endpoint(
         assert response.status_code == expected, f"{method.upper()} {path}: {response.text}"
 
 
+def test_import_history_sanitizes_legacy_internal_error_notes(db, admin_client):
+    """旧版本已经落库的 SQL/驱动异常也不能因放宽导入页权限而暴露给员工。"""
+    client = _account(admin_client, "import-history-reader", "purchaser", {"page_import": True})
+    leaked = (
+        "导入异常：采购订单.xlsx（(psycopg.errors.NumericValueOutOfRange) numeric overflow "
+        "[SQL: INSERT INTO f_purchase_order (order_no) VALUES (%(order_no)s)] "
+        "[parameters: {'order_no': 'CG-1'}]）"
+    )
+    unsafe = SysImportJob(created_by="legacy-admin", mode="skip", total_files=1,
+                          status="failed", error_files=1, note=leaked)
+    safe_note = "重复跳过：采购订单.xlsx（已导入 batch 42）"
+    safe = SysImportJob(created_by="legacy-admin", mode="skip", total_files=1,
+                        status="failed", error_files=1, note=safe_note)
+    db.add_all([unsafe, safe])
+    db.commit()
+
+    listed = client.get("/api/import/jobs")
+    assert listed.status_code == 200, listed.text
+    by_id = {row["id"]: row for row in listed.json()}
+    assert by_id[unsafe.id]["note"] == "系统处理异常，请联系管理员查看服务端日志"
+    assert by_id[safe.id]["note"] == safe_note
+
+    detail = client.get(f"/api/import/jobs/{unsafe.id}")
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["note"] == "系统处理异常，请联系管理员查看服务端日志"
+
+    # 只清理对外响应，原始记录仍保留给管理员在数据库/服务端审计，不做静默改库。
+    db.expire_all()
+    assert db.get(SysImportJob, unsafe.id).note == leaked
+
+
 def test_page_import_runs_the_real_precheck_batch_and_history_flow(
     db, admin_client, monkeypatch, tmp_path,
 ):

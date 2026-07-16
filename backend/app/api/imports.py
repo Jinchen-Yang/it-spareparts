@@ -182,6 +182,13 @@ def precheck(
 
 
 _NOTE_MAX = 4000          # 作业 note 总长上限：note 会整段渲染到导入页，绝不能无界
+_UNSAFE_LEGACY_NOTE_MARKERS = (
+    "traceback (most recent call last)",
+    "sqlalchemy.",
+    "psycopg.",
+    "[sql:",
+    "[parameters:",
+)
 
 
 def _short_err(exc: Exception) -> str:
@@ -191,6 +198,21 @@ def _short_err(exc: Exception) -> str:
     """
     _ = exc
     return _INTERNAL_IMPORT_ERROR
+
+
+def _public_job_note(note: str | None) -> str | None:
+    """清理导入作业对外 note，兼容旧版本已落库的完整数据库异常。
+
+    v1.14.1 已保证新作业只写固定业务文案，但放宽导入页权限后，历史记录也会被
+    非管理员读取。旧 note 一旦包含驱动名、SQL 或参数，整条降级为固定文案；数据库
+    原值不改，仍供服务端审计使用。安全的重复/解析提示保持原样。
+    """
+    if not note:
+        return note
+    lowered = note.casefold()
+    if any(marker in lowered for marker in _UNSAFE_LEGACY_NOTE_MARKERS):
+        return _INTERNAL_IMPORT_ERROR
+    return note
 
 
 def _process_import_job(job_id: int, files: list[tuple[str, str]], mode: str,
@@ -299,7 +321,7 @@ def _job_dict(j: SysImportJob) -> dict:
         "id": j.id, "created_by": j.created_by, "created_at": j.created_at,
         "finished_at": j.finished_at, "status": j.status, "mode": j.mode,
         "total_files": j.total_files, "done_files": j.done_files,
-        "error_files": j.error_files, "note": j.note,
+        "error_files": j.error_files, "note": _public_job_note(j.note),
     }
 
 
