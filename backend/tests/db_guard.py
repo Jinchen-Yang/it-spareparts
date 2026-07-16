@@ -36,8 +36,10 @@ def _assert_recreate_privileges(conn, test_db: str, *, exists: bool) -> None:
     """DROP 前一次性证明当前角色既能删除目标库，也能重新 CREATE DATABASE。"""
     row = conn.execute(text(
         "SELECT r.rolsuper, r.rolcreatedb,"
+        # 精确 owner 才能直接 DROP；仅是 owner 角色的成员不等于当前会话已 SET ROLE，
+        # 不能把 pg_has_role(..., 'USAGE') 当成对象 ownership。
         "       CASE WHEN d.datdba IS NULL THEN false"
-        "            ELSE pg_has_role(current_user, d.datdba, 'USAGE') END AS owns_db"
+        "            ELSE d.datdba = r.oid END AS owns_db"
         " FROM pg_roles r LEFT JOIN pg_database d ON d.datname = :db"
         " WHERE r.rolname = current_user"
     ), {"db": test_db}).one()
