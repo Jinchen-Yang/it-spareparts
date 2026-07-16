@@ -13,19 +13,16 @@ from app.models.inventory import PartPool, PartPoolMember, PartPoolPricePolicy
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.services import pool_price_analysis
+from app.services.pool_price_rules import (
+    apply_price_window,
+    purchase_priced_condition,
+    sales_priced_condition,
+)
 from app.services.pricing import purchase_ex_unit, sale_ex_unit
-from app.services.query_filters import active_orders
 
 
 def _r(value, digits: int = 2):
     return round(float(value), digits) if value is not None else None
-
-
-def _window(stmt, order_model, lower: date | None, upper: date):
-    stmt = active_orders(stmt, order_model)
-    if lower is not None:
-        stmt = stmt.where(order_model.order_date >= lower)
-    return stmt.where(order_model.order_date <= upper)
 
 
 def _violation_rows(lower: date | None, upper: date):
@@ -54,11 +51,11 @@ def _violation_rows(lower: date | None, upper: date):
         .where(
             PartPool.status == "active", PartPoolPricePolicy.valid_to.is_(None),
             PartPoolPricePolicy.purchase_ceiling_ex_tax.is_not(None),
-            pool_price_analysis._purchase_priced_condition(),
+            purchase_priced_condition(),
             purchase_unit > PartPoolPricePolicy.purchase_ceiling_ex_tax,
         )
     )
-    purchases = _window(purchases, FPurchaseOrder, lower, upper)
+    purchases = apply_price_window(purchases, FPurchaseOrder, lower, upper)
 
     sales_unit = sale_ex_unit()
     sales_gap = PartPoolPricePolicy.sales_floor_ex_tax - sales_unit
@@ -84,11 +81,11 @@ def _violation_rows(lower: date | None, upper: date):
         .where(
             PartPool.status == "active", PartPoolPricePolicy.valid_to.is_(None),
             PartPoolPricePolicy.sales_floor_ex_tax.is_not(None),
-            pool_price_analysis._sales_priced_condition(),
+            sales_priced_condition(),
             sales_unit < PartPoolPricePolicy.sales_floor_ex_tax,
         )
     )
-    sales = _window(sales, FSalesOrder, lower, upper)
+    sales = apply_price_window(sales, FSalesOrder, lower, upper)
     return union_all(purchases, sales).subquery("price_discipline_violation")
 
 

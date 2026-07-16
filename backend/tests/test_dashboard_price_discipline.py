@@ -11,7 +11,6 @@ from sqlalchemy import select
 
 from app import permissions, security
 from app.api import dashboard as dashboard_api
-from app.business_time import business_today
 from app.db import get_db
 from app.etl import loader
 from app.main import app
@@ -255,8 +254,10 @@ def _restore_overrides(original):
     app.dependency_overrides.update(original)
 
 
-def test_governance_blind_summary_is_structurally_empty(db, discipline_seed):
+def test_governance_blind_summary_is_structurally_empty(db, discipline_seed, monkeypatch):
     """关治理权限时整体失败关闭，不能靠次数、人员、排名或记录反推约束。"""
+    fixed_today = date(2026, 7, 16)
+    monkeypatch.setattr(pool_price_analysis, "business_today", lambda: fixed_today)
     client, original = _api_client(db, _ctx(data_pool_price_governance=False))
     try:
         response = client.get("/api/dashboard/price-discipline-summary", params={
@@ -268,7 +269,7 @@ def test_governance_blind_summary_is_structurally_empty(db, discipline_seed):
         "restricted": True,
         "basis": "ex_tax",
         "window": {"range": "custom", "date_from": "2026-01-01",
-                   "date_to": "2026-06-01", "as_of": business_today().isoformat()},
+                   "date_to": "2026-06-01", "as_of": fixed_today.isoformat()},
         "purchase": None, "sales": None, "most_severe_pool": None,
         "handler_summary": {"purchase": [], "sales": []},
         "recent_violations": [], "missing_constraints": None,

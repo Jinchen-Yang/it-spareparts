@@ -20,11 +20,11 @@ from app.models.sales import FSalesLine, FSalesOrder
 from app import security
 from app.services import pool, pool_metrics
 from app.services.pool_price_rules import (
-    purchase_priced_condition,
-    sales_priced_condition,
+    apply_price_window as _window,
+    purchase_priced_condition as _purchase_priced_condition,
+    sales_priced_condition as _sales_priced_condition,
 )
 from app.services.pricing import purchase_ex_tax_expr, purchase_ex_unit, sale_ex_unit
-from app.services.query_filters import active_orders
 
 _EMPTY_STATS = {
     "weighted_avg": None, "median": None, "min": None, "max": None, "latest": None,
@@ -63,27 +63,6 @@ def resolve_window(range_: str | None, date_from: date | None, date_to: date | N
     days = {"30d": 30, "90d": 90, "365d": 365}.get(token)
     lower = upper - timedelta(days=days - 1) if days else None
     return lower, upper, today, token
-
-
-def _window(stmt, order_model, lower: date | None, upper: date):
-    stmt = active_orders(stmt, order_model)
-    if lower is not None:
-        stmt = stmt.where(order_model.order_date >= lower)
-    return stmt.where(order_model.order_date <= upper)
-
-
-def _purchase_priced_condition():
-    """价格纪律的真实采购行口径。
-
-    这里故意不复用利润引擎的 ``COST_PURCHASE_TYPES``：是否进入利润成本池，和老板
-    是否需要看见一次真实采购是两件事。采购价格分析覆盖全部已生效采购类型，仅排除
-    无价格、非正数量、未来单；已生效和日期窗口由 ``_window`` 统一处理。
-    """
-    return purchase_priced_condition()
-
-
-def _sales_priced_condition():
-    return sales_priced_condition()
 
 
 def _purchase_type_filter(stmt, purchase_type: str | None):
