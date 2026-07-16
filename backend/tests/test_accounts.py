@@ -38,6 +38,21 @@ def test_hidden_groups_from_perms():
     assert "customer_info" not in g       # sales 看客户
 
 
+def test_profit_requires_purchase_cost_and_runtime_closes_historical_combo():
+    invalid = permissions.effective(
+        "sales", {"data_purchase_cost": False, "data_profit": True})
+    errors = permissions.combo_errors(invalid)
+    assert len(errors) == 1 and "反推出采购成本" in errors[0]
+    assert permissions.combo_errors(
+        permissions.effective("purchaser", None)) == []  # 看成本、不看利润合法
+    assert all(permissions.combo_errors(permissions.effective(role, None)) == []
+               for role in permissions.ROLE_TEMPLATES)
+    safe = permissions.runtime_safe(invalid)
+    assert safe["data_purchase_cost"] is False and safe["data_profit"] is False
+    groups = permissions.hidden_groups(invalid)
+    assert {"purchase_cost", "profit_amount", "profit_rate"} <= groups
+
+
 # ---------- 字段脱敏按 per-user 权限 ----------
 def test_field_visibility_masks_by_user_perms():
     ctx = security.UserContext(user_id="liu", role="sales",

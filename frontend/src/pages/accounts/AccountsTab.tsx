@@ -110,6 +110,7 @@ export default function AccountsTab({ meta, accounts, loading, onChanged }: {
         <Tag color="geekblue">{u.template_name || u.template_code || "—"}</Tag>
         {u.template_stale && <Tag color="orange">模板已更新</Tag>}
         {u.is_custom && <Tag color="blue">{Object.keys(u.overrides).length} 处调整</Tag>}
+        {u.permission_combo_errors.length > 0 && <Tag color="red">权限组合需修复</Tag>}
       </Space>
     ) },
     { title: "角色", dataIndex: "role", render: (v: string) => <Tag>{ROLE_LABEL[v] || v}</Tag> },

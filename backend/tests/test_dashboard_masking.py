@@ -58,14 +58,15 @@ def test_kpi_masks_purchase_and_profit(db, seeded):
     assert k["sales_ex_tax"] is not None
 
 
-def test_ranking_masks_purchase_price(db, seeded):
+def test_ranking_historical_profit_without_cost_fails_closed(db, seeded):
+    """历史脏权限图会在字段层再收紧：成本隐藏时不能保留盈亏分类。"""
     ctx = _ctx(data_purchase_cost=False)
     r = security.apply_field_visibility(
         dashboard.part_ranking(db, None, None, as_of=AS_OF, user_ctx=ctx), ctx)
-    assert r["profit_restricted"] is False     # 只关采购成本、未关利润 → 分类仍给
-    for row in r["profitable"] + r["loss"]:
-        assert row["purchase_price"] is None   # 采购价统计容器遮
-        assert row["revenue"] is not None      # 营收仍可见
+    assert r["profit_restricted"] is True
+    assert r["profitable"] == [] and r["loss"] == []
+    assert r["counts"]["profitable"] is None
+    assert r["counts"]["loss"] is None
 
 
 def test_ranking_profit_restricted_hides_classification(db, seeded):

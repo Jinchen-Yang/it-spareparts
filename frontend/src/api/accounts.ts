@@ -39,6 +39,7 @@ export interface TemplateInfo {
   created_by?: string | null;
   updated_by?: string | null;
   updated_at?: string | null;
+  permission_combo_errors: string[];
 }
 
 export interface AccountsMeta {
@@ -46,7 +47,11 @@ export interface AccountsMeta {
   labels: Record<string, string>;
   groups: PermGroup[];
   meta: Record<string, PermKeyMeta>;
-  dependencies: { action_data: Record<string, string>; action_page: Record<string, string> };
+  dependencies: {
+    action_data: Record<string, string>;
+    action_page: Record<string, string>;
+    data_data: Record<string, string>;
+  };
   high_risk_keys: string[];
   all_keys: string[];
   templates: TemplateInfo[];
@@ -60,6 +65,8 @@ export interface Account {
   is_active: boolean;
   last_login_at: string | null;
   permissions: Perms;        // 最终生效
+  runtime_permissions: Perms; // 存量非法组合失败关闭后的实际运行图
+  permission_combo_errors: string[];
   template_code: string | null;
   template_version: number | null;
   template_name: string | null;
@@ -170,6 +177,11 @@ export function comboErrors(perms: Perms, meta: AccountsMeta): string[] {
       errs.push(`「${name(action)}」需要同时开启「${name(page)}」——操作发生在该页面里`);
     }
   }
+  for (const [data, required] of Object.entries(meta.dependencies.data_data)) {
+    if (perms[data] && !perms[required]) {
+      errs.push(`「${name(data)}」需要同时开启「${name(required)}」——营收减毛利可反推出采购成本`);
+    }
+  }
   return errs;
 }
 
@@ -178,8 +190,10 @@ export function missingDeps(key: string, perms: Perms, meta: AccountsMeta): stri
   const need: string[] = [];
   const d1 = meta.dependencies.action_data[key];
   const d2 = meta.dependencies.action_page[key];
+  const d3 = meta.dependencies.data_data[key];
   if (d1 && !perms[d1]) need.push(d1);
   if (d2 && !perms[d2]) need.push(d2);
+  if (d3 && !perms[d3]) need.push(d3);
   return need;
 }
 
@@ -191,6 +205,9 @@ export function dependentActions(key: string, perms: Perms, meta: AccountsMeta):
   }
   for (const [action, dep] of Object.entries(meta.dependencies.action_page)) {
     if (dep === key && perms[action]) out.push(action);
+  }
+  for (const [data, dep] of Object.entries(meta.dependencies.data_data)) {
+    if (dep === key && perms[data]) out.push(data);
   }
   return out;
 }

@@ -6,7 +6,8 @@ import type { AccountsMeta, Perms } from "../../api/accounts";
 
 afterEach(cleanup);
 
-const KEYS = ["page_parts", "page_accounts", "data_pool_price_governance",
+const KEYS = ["page_parts", "page_accounts", "data_purchase_cost", "data_profit",
+  "data_pool_price_governance",
   "action_pool_set_policy", "action_account_manage", "own_customers_only"];
 
 const META: AccountsMeta = {
@@ -17,10 +18,12 @@ const META: AccountsMeta = {
   dependencies: {
     action_data: { action_pool_set_policy: "data_pool_price_governance" },
     action_page: { action_account_manage: "page_accounts" },
+    data_data: { data_profit: "data_purchase_cost" },
   },
   groups: [
     { key: "page", label: "页面入口", hint: "能打开哪些页面", keys: ["page_parts", "page_accounts"] },
-    { key: "data", label: "数据可见范围", hint: "能看到哪些字段", keys: ["data_pool_price_governance"] },
+    { key: "data", label: "数据可见范围", hint: "能看到哪些字段",
+      keys: ["data_purchase_cost", "data_profit", "data_pool_price_governance"] },
     { key: "action", label: "操作能力", hint: "能执行哪些写操作", keys: ["action_pool_set_policy"] },
     { key: "row", label: "行级范围", hint: "看的范围", keys: ["own_customers_only"] },
     { key: "admin", label: "高风险管理能力", hint: "接近管理员", keys: ["action_account_manage"] },
@@ -69,6 +72,23 @@ describe("PermissionMatrix", () => {
     rerender(<PermissionMatrix meta={META} value={next} base={base} onChange={onChange} />);
     expect(within(screen.getByTestId("perm-data_pool_price_governance"))
       .getByText("随依赖开启")).toBeInTheDocument();
+  });
+
+  it("开启利润自动补齐采购成本依赖，关闭成本会显示反推风险", () => {
+    const onChange = vi.fn();
+    const { rerender } = render(
+      <PermissionMatrix meta={META} value={zero} base={zero} onChange={onChange} />);
+    fireEvent.click(box("data_profit"));
+    const next = onChange.mock.calls[0][0] as Perms;
+    expect(next.data_profit).toBe(true);
+    expect(next.data_purchase_cost).toBe(true);
+    rerender(<PermissionMatrix meta={META} value={next} base={zero} onChange={onChange} />);
+    expect(within(screen.getByTestId("perm-data_purchase_cost"))
+      .getByText("随依赖开启")).toBeInTheDocument();
+
+    const bad = { ...next, data_purchase_cost: false };
+    rerender(<PermissionMatrix meta={META} value={bad} base={zero} onChange={onChange} />);
+    expect(screen.getByText(/营收减毛利可反推出采购成本/)).toBeInTheDocument();
   });
 
   it("组合不完整时显示保存会被拒绝的告警", () => {

@@ -56,7 +56,7 @@ def test_disable_revokes_old_token(db):
 def test_permission_change_revokes_old_token(db):
     _user(db)
     tok = _token_for(db)
-    accounts.update_account("bob", accounts.UpdateAccount(permissions={"data_purchase_cost": False}),
+    accounts.update_account("bob", accounts.UpdateAccount(permissions={"data_profit": False}),
                             db, ident={"sub": "admin"}, _="admin")
     db.expire_all()
     with pytest.raises(HTTPException):
@@ -85,3 +85,15 @@ def test_legacy_token_without_tv_not_kicked(db):
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
     tok = f"{base64.urlsafe_b64encode(body).decode().rstrip('=')}.{_sign(body)}"
     assert verify_token_db(tok, db)["sub"] == "bob"
+
+
+def test_existing_token_with_inferable_financial_combo_is_clamped(db):
+    """部署前已签发的 token 也不能等到重新登录才收紧。"""
+    _user(db)
+    tok, _ = _make_token(
+        "sales", "bob", None, token_version=0,
+        perms={"data_purchase_cost": False, "data_profit": True},
+    )
+    verified = verify_token_db(tok, db)
+    assert verified["perms"]["data_purchase_cost"] is False
+    assert verified["perms"]["data_profit"] is False
