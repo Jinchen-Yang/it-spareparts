@@ -16,6 +16,7 @@ import {
 const { Text, Title } = Typography;
 const FIXED_THRESHOLDS = [2, 3, 5, 10] as const;
 const DEFAULT_SAMPLE_LIMIT = 6;
+const SAMPLE_PAGE_SIZE = 10;
 
 function readPermissions(): Record<string, boolean> {
   try { return JSON.parse(localStorage.getItem("permissions") || "{}"); } catch { return {}; }
@@ -312,6 +313,9 @@ function CalibrationSamples({ samples, isMobile }: {
       <List
         data-testid="calibration-mobile-samples"
         dataSource={samples}
+        pagination={samples.length > SAMPLE_PAGE_SIZE ? {
+          pageSize: SAMPLE_PAGE_SIZE, showSizeChanger: false, size: "small",
+        } : false}
         renderItem={(sample) => (
           <List.Item style={{ paddingInline: 0 }}>
             <Card size="small" style={{ width: "100%" }}>
@@ -346,7 +350,9 @@ function CalibrationSamples({ samples, isMobile }: {
     <Table
       rowKey={(row) => `${row.threshold}-${row.direction}-${row.current.line_id}-${row.previous.line_id}`}
       size="small"
-      pagination={false}
+      pagination={samples.length > SAMPLE_PAGE_SIZE ? {
+        pageSize: SAMPLE_PAGE_SIZE, showSizeChanger: false, size: "small",
+      } : false}
       columns={columns}
       dataSource={samples}
       scroll={{ x: 1100 }}
