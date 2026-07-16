@@ -14,10 +14,24 @@ DROPPED_COLS_REBUILD_THRESHOLD = 800
 _TEST_DATABASE_NAME = re.compile(r"^spareparts_test(?:_[A-Za-z0-9_]+)?$")
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _REMOTE_OPT_IN = "ALLOW_REMOTE_TEST_DB_REBUILD"
+# psycopg/libpq 会让 query 参数覆盖 URL authority。只校验 ``url.host`` /
+# ``url.database`` 会被 ``?host=...``、``?hostaddr=...``、``?dbname=...`` 绕过。
+# 目标必须只在 authority/path 中声明；TLS 等非目标参数仍可正常放 query。
+_TARGET_QUERY_OVERRIDES = {
+    "host", "hostaddr", "port", "dbname", "database",
+    "user", "username", "password", "service", "servicefile",
+}
 
 
 def _allow_target(url, test_db: str) -> None:
     """所有连接和破坏动作之前完成目标白名单校验。"""
+    target_overrides = sorted(set(url.query) & _TARGET_QUERY_OVERRIDES)
+    if target_overrides:
+        raise RuntimeError(
+            "拒绝使用会覆盖连接目标的 libpq query 参数："
+            f"{', '.join(target_overrides)}；请把主机、端口、数据库和账号写在 URL "
+            "authority/path 中，让测试库白名单能验证最终目标"
+        )
     if not _TEST_DATABASE_NAME.fullmatch(test_db):
         raise RuntimeError(
             f"拒绝管理非测试数据库 {test_db!r}；名称必须是 spareparts_test[_后缀]"

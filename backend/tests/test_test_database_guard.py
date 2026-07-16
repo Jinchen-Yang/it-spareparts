@@ -130,6 +130,27 @@ def test_guard_refuses_remote_host_before_connect(monkeypatch):
         ensure_test_database(_render(remote))
 
 
+@pytest.mark.parametrize(("key", "value"), [
+    ("host", "db.example.invalid"),
+    ("hostaddr", "203.0.113.10"),
+    ("dbname", "production"),
+])
+def test_guard_refuses_libpq_target_query_override_before_connect(
+    monkeypatch, key, value,
+):
+    """URL authority 看似 localhost 也不够；libpq query 可改写真正连接目标。"""
+    base = make_url(os.environ["DATABASE_URL"]).set(
+        database="spareparts_test_query_override",
+    ).update_query_dict({key: value})
+    monkeypatch.delenv("ALLOW_REMOTE_TEST_DB_REBUILD", raising=False)
+    monkeypatch.setattr(
+        "tests.db_guard.create_engine",
+        lambda *_args, **_kwargs: pytest.fail("目标校验必须发生在任何连接之前"),
+    )
+    with pytest.raises(RuntimeError, match="覆盖连接目标的 libpq query 参数"):
+        ensure_test_database(_render(base))
+
+
 def test_guard_refuses_non_test_database_name_before_connect():
     url = make_url(os.environ["DATABASE_URL"]).set(database="spareparts_dev")
     with pytest.raises(RuntimeError, match="拒绝管理非测试数据库"):
@@ -167,6 +188,25 @@ def test_guard_refuses_rebuild_while_another_client_is_connected():
         maint.dispose()
 
 
+def test_guard_refuses_when_another_maintenance_session_holds_guard_lock():
+    base, name, url = _unique_url("lock")
+    maint = _maintenance_engine(base)
+    lock_key = f"spareparts-test-db-guard:{name}"
+    try:
+        with maint.connect() as blocker:
+            blocker.execute(
+                text("SELECT pg_advisory_lock(hashtext(:key))"), {"key": lock_key},
+            )
+            with pytest.raises(RuntimeError, match="正被另一个寿命守卫处理"):
+                ensure_test_database(_render(url))
+            blocker.execute(
+                text("SELECT pg_advisory_unlock(hashtext(:key))"), {"key": lock_key},
+            )
+    finally:
+        _drop_database(maint, name)
+        maint.dispose()
+
+
 def test_guard_checks_recreate_privilege_before_drop():
     base, name, owner_url = _unique_url("priv")
     maint = _maintenance_engine(base)
@@ -188,4 +228,63 @@ def test_guard_checks_recreate_privilege_before_drop():
         _drop_database(maint, name)
         with maint.connect() as conn:
             conn.execute(text(f'DROP ROLE IF EXISTS "{role}"'))
+        maint.dispose()
+
+
+def test_guard_allows_exact_owner_with_createdb_to_recreate():
+    base, name, owner_url = _unique_url("exact_owner")
+    maint = _maintenance_engine(base)
+    owner = f"guard_exact_owner_{uuid.uuid4().hex[:10]}"
+    password = "guardpw123456"
+    role_url = owner_url.set(username=owner, password=password)
+    try:
+        with maint.connect() as conn:
+            conn.execute(text(
+                f'CREATE ROLE "{owner}" LOGIN PASSWORD \'{password}\' CREATEDB'
+            ))
+            conn.execute(text(f'CREATE DATABASE "{name}" OWNER "{owner}"'))
+        _burn_columns(role_url, 801)
+        assert ensure_test_database(_render(role_url)) == "recreated"
+        with maint.connect() as conn:
+            actual_owner = conn.execute(text(
+                "SELECT r.rolname FROM pg_database d"
+                " JOIN pg_roles r ON r.oid=d.datdba WHERE d.datname=:db"
+            ), {"db": name}).scalar_one()
+        assert actual_owner == owner
+    finally:
+        _drop_database(maint, name)
+        with maint.connect() as conn:
+            conn.execute(text(f'DROP ROLE IF EXISTS "{owner}"'))
+        maint.dispose()
+
+
+def test_guard_requires_exact_owner_not_membership_in_owner_role():
+    base, name, url = _unique_url("owner_membership")
+    maint = _maintenance_engine(base)
+    owner = f"guard_owner_{uuid.uuid4().hex[:10]}"
+    member = f"guard_member_{uuid.uuid4().hex[:10]}"
+    password = "guardpw123456"
+    member_url = url.set(username=member, password=password)
+    try:
+        with maint.connect() as conn:
+            conn.execute(text(f'CREATE ROLE "{owner}" NOLOGIN'))
+            conn.execute(text(
+                f'CREATE ROLE "{member}" LOGIN PASSWORD \'{password}\' CREATEDB'
+            ))
+            conn.execute(text(f'GRANT "{owner}" TO "{member}"'))
+            conn.execute(text(f'CREATE DATABASE "{name}" OWNER "{owner}"'))
+        # 用维护角色制造寿命耗尽；被测 member 具备 CREATEDB 且属于 owner role，
+        # 但当前会话没有 SET ROLE，不能被预检误判成精确 owner。
+        _burn_columns(url, 801)
+        with pytest.raises(RuntimeError, match="DROP_DATABASE=False"):
+            ensure_test_database(_render(member_url))
+        with maint.connect() as conn:
+            assert conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname=:db"), {"db": name}
+            ).scalar_one() == 1
+    finally:
+        _drop_database(maint, name)
+        with maint.connect() as conn:
+            conn.execute(text(f'DROP ROLE IF EXISTS "{member}"'))
+            conn.execute(text(f'DROP ROLE IF EXISTS "{owner}"'))
         maint.dispose()
