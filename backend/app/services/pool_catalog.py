@@ -18,9 +18,9 @@
 """
 from decimal import Decimal, ROUND_HALF_UP
 
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app import config
 from app.models.dimensions import DimPart
@@ -33,6 +33,7 @@ _PART_LOCK_NS = 918273646
 
 _BASES = ("ex_tax", "inc_tax")
 _POLICY_HISTORY_LIMIT = 20
+_POLICY_MISSING = {"purchase", "sales", "either", "both"}
 # 《互通PN池》核心规则第 5 条：每个有效池至少包含两个 PN。建池、调整成员、
 # 恢复归档池和历史数据升级都必须守住这一全局不变量。
 MIN_ACTIVE_POOL_MEMBERS = 2
@@ -176,6 +177,47 @@ def _pool_dict(pool: PartPool, policy: PartPoolPricePolicy | None) -> dict:
     }
 
 
+def _policy_coverage(db: Session) -> dict[str, int]:
+    """全局有效池约束价覆盖率（DEV-07）。
+
+    只连接 ``valid_to IS NULL`` 的当前策略；历史策略与归档池均不进入分母。
+    单条聚合 SQL 返回全部指标，查询次数不随池数增长。
+    """
+    policy = aliased(PartPoolPricePolicy)
+    row = db.execute(
+        select(
+            func.count(PartPool.group_id).label("active_pool_count"),
+            func.count(PartPool.group_id).filter(
+                policy.purchase_ceiling_ex_tax.is_not(None)
+            ).label("purchase_set_count"),
+            func.count(PartPool.group_id).filter(
+                policy.sales_floor_ex_tax.is_not(None)
+            ).label("sales_set_count"),
+            func.count(PartPool.group_id).filter(
+                policy.purchase_ceiling_ex_tax.is_not(None),
+                policy.sales_floor_ex_tax.is_not(None),
+            ).label("both_set_count"),
+        )
+        .select_from(PartPool)
+        .outerjoin(
+            policy,
+            and_(policy.group_id == PartPool.group_id, policy.valid_to.is_(None)),
+        )
+        .where(PartPool.status == "active")
+    ).one()
+    active = int(row.active_pool_count or 0)
+    purchase_set = int(row.purchase_set_count or 0)
+    sales_set = int(row.sales_set_count or 0)
+    return {
+        "active_pool_count": active,
+        "purchase_set_count": purchase_set,
+        "purchase_missing_count": active - purchase_set,
+        "sales_set_count": sales_set,
+        "sales_missing_count": active - sales_set,
+        "both_set_count": int(row.both_set_count or 0),
+    }
+
+
 def _to_ex_tax(value: Decimal | None, basis: str) -> Decimal | None:
     """录入值 → 统一未税：含税÷(1+13%)（甲方统一税口径），未税原值入库。"""
     if value is None:
@@ -203,11 +245,36 @@ def _audit(db: Session, group_id: int, action: str, before: dict | None,
 # ---------------------------------------------------------------- 读
 
 def list_pools(db: Session, *, q: str | None = None, status: str = "active",
+               policy_missing: str | None = None,
                page: int = 1, page_size: int = 20) -> dict:
-    """池清单（管理页）：搜索池名/描述/成员 PN/品牌，带当前约束价。"""
+    """池清单（管理页）：搜索池名/描述/成员 PN/品牌，带当前约束价和全局覆盖率。"""
+    if policy_missing is not None and policy_missing not in _POLICY_MISSING:
+        raise PoolCatalogError("约束价缺失筛选必须是 purchase / sales / either / both")
+
     stmt = select(PartPool)
     if status in ("active", "archived"):
         stmt = stmt.where(PartPool.status == status)
+    if policy_missing is not None:
+        # 缺失筛选是“有效池约束补录”入口，归档池始终排除；当前策略只认 valid_to IS NULL。
+        current = select(PartPoolPricePolicy.id).where(
+            PartPoolPricePolicy.group_id == PartPool.group_id,
+            PartPoolPricePolicy.valid_to.is_(None),
+        )
+        purchase_set = current.where(
+            PartPoolPricePolicy.purchase_ceiling_ex_tax.is_not(None)
+        ).exists()
+        sales_set = current.where(
+            PartPoolPricePolicy.sales_floor_ex_tax.is_not(None)
+        ).exists()
+        stmt = stmt.where(PartPool.status == "active")
+        if policy_missing == "purchase":
+            stmt = stmt.where(~purchase_set)
+        elif policy_missing == "sales":
+            stmt = stmt.where(~sales_set)
+        elif policy_missing == "either":
+            stmt = stmt.where(or_(~purchase_set, ~sales_set))
+        else:  # both
+            stmt = stmt.where(and_(~purchase_set, ~sales_set))
     kw = (q or "").strip()
     if kw:
         like = f"%{kw}%"
@@ -235,6 +302,7 @@ def list_pools(db: Session, *, q: str | None = None, status: str = "active",
         ).scalars():
             policies[pol.group_id] = pol
     return {"total": total, "page": page, "page_size": page_size,
+            "coverage": _policy_coverage(db),
             "items": [_pool_dict(p, policies.get(p.group_id)) for p in pools]}
 
 

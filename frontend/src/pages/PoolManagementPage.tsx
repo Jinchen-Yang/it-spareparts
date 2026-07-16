@@ -4,12 +4,15 @@ import {
   Table, Tag, message,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import { useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
+import PoolPolicyCoverage from "../components/pools/PoolPolicyCoverage";
 import { searchParts } from "../api";
 import {
   archivePnPool, createPnPool, getPnPool, listPnPools, restorePnPool, setPnPoolPolicy,
   updatePnPool, updatePnPoolMembers,
-  type PnPoolDetail, type PnPoolRow, type PriceBasis,
+  type PnPoolDetail, type PnPoolRow, type PoolPolicyCoverage as Coverage,
+  type PoolPolicyMissing, type PriceBasis,
 } from "../api/pools";
 
 const PAGE_SIZE = 20;
@@ -27,6 +30,7 @@ const BASIS_OPTIONS = [{ label: "未税", value: "ex_tax" }, { label: "含税", 
 const basisLabel = (b?: string | null) => (b === "inc_tax" ? "含税" : "未税");
 
 const MUTED = { color: "var(--mb-text-3, #999)" };
+const POLICY_MISSING_VALUES: PoolPolicyMissing[] = ["purchase", "sales", "either", "both"];
 // 约束价（未税）三态展示：无权限（price_restricted）≠ 未设置（null）≠ 数值——
 // 绝不把"看不见"和"没设"都画成 "--" 让人猜（复审非阻塞 1）
 const fmtMoney = (v: number | null | undefined, restricted: boolean) =>
@@ -60,14 +64,19 @@ const memberLabel = (pn: string | null, desc: string | null) =>
 export default function PoolManagementPage() {
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rawPolicyMissing = searchParams.get("policy_missing") as PoolPolicyMissing | null;
+  const policyMissing = rawPolicyMissing && POLICY_MISSING_VALUES.includes(rawPolicyMissing)
+    ? rawPolicyMissing : null;
 
   // 权限快照随登录周期固定（改权限会踢重登），组件生命周期内读一次即可
-  const [{ canManage, canSetPolicy }] = useState(() => {
+  const [{ canManage, canSetPolicy, localCoverageRestricted }] = useState(() => {
     const isAdmin = localStorage.getItem("role") === "admin";
     const perms = readLocalPerms();
     return {
       canManage: isAdmin || !!perms.action_pool_manage,
       canSetPolicy: isAdmin || !!perms.action_pool_set_policy,
+      localCoverageRestricted: !isAdmin && perms.data_pool_price_governance === false,
     };
   });
 
@@ -78,38 +87,78 @@ export default function PoolManagementPage() {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
+  const [coverage, setCoverage] = useState<Coverage | null>(null);
+  const [coverageRestricted, setCoverageRestricted] = useState(localCoverageRestricted);
   const listGeneration = useRef(0);
-  const listView = useRef<{ query: string; status: StatusFilter; page: number }>({
-    query: "", status: "active", page: 1,
+  const listView = useRef<{
+    query: string; status: StatusFilter; page: number; policyMissing: PoolPolicyMissing | null;
+  }>({
+    query: "", status: "active", page: 1, policyMissing: null,
   });
 
-  const load = async (query = q, status = statusFilter, p = page) => {
+  const load = async (
+    query = q, status = statusFilter, p = page,
+    missing: PoolPolicyMissing | null = localCoverageRestricted ? null : policyMissing,
+  ) => {
     const generation = ++listGeneration.current;
-    listView.current = { query, status, page: p };
+    listView.current = { query, status, page: p, policyMissing: missing };
     setLoading(true);
+    setListError(null);
     try {
       const { data } = await listPnPools({
         q: query.trim() || undefined, status, page: p, page_size: PAGE_SIZE,
+        ...(missing ? { policy_missing: missing } : {}),
       });
       if (generation !== listGeneration.current) return;
       setRows(data.items || []);
       setTotal(data.total || 0);
       setPage(data.page || p);
+      setCoverageRestricted(!!data.coverage_restricted);
+      setCoverage(data.coverage_restricted ? null : (data.coverage ?? null));
     } catch (e: any) {
       if (generation !== listGeneration.current) return;
-      message.error(e?.response?.data?.detail || "池列表加载失败");
+      // 失败时绝不保留上一筛选的行；否则 URL/高亮已切换却仍展示旧数据。
+      setRows([]);
+      setTotal(0);
+      setPage(1);
+      setListError(e?.response?.data?.detail || "池列表加载失败");
     } finally {
       if (generation === listGeneration.current) setLoading(false);
     }
   };
   const reloadCurrentList = () => {
     const current = listView.current;
-    return load(current.query, current.status, current.page);
+    return load(current.query, current.status, current.page, current.policyMissing);
   };
   useEffect(() => {
-    load("", "active", 1);
+    const current = listView.current;
+    const missing = localCoverageRestricted ? null : policyMissing;
+    // 缺失筛选只定义于有效池；深链/前进后退恢复筛选时，状态标签也必须同步回有效。
+    const nextStatus: StatusFilter = missing ? "active" : current.status;
+    if (current.status !== nextStatus) {
+      current.status = nextStatus;
+      setStatusFilter(nextStatus);
+    }
+    load(current.query, nextStatus, 1, missing);
     return () => { listGeneration.current += 1; };
-  }, []);
+    // URL 是缺失筛选的唯一真值；搜索词和状态由用户显式提交，不放进依赖避免逐键请求。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [policyMissing, localCoverageRestricted]);
+
+  const setPolicyMissing = (next: "purchase" | "sales") => {
+    // 覆盖率分母是有效池，点击覆盖卡必须回到有效池列表，避免用归档列表解释全局数字。
+    listView.current.status = "active";
+    setStatusFilter("active");
+    const merged = new URLSearchParams(searchParams);
+    merged.set("policy_missing", next);
+    setSearchParams(merged, { replace: false });
+  };
+  const clearPolicyMissing = () => {
+    const merged = new URLSearchParams(searchParams);
+    merged.delete("policy_missing");
+    setSearchParams(merged, { replace: false });
+  };
 
   // ---- 抽屉（create / edit 共用同一套表单态）----
   const [mode, setMode] = useState<DrawerMode>(null);
@@ -762,16 +811,35 @@ export default function PoolManagementPage() {
           : undefined}
       />
 
+      <PoolPolicyCoverage
+        coverage={coverage}
+        restricted={coverageRestricted || localCoverageRestricted}
+        selected={localCoverageRestricted ? null : policyMissing}
+        onSelect={setPolicyMissing}
+        onClear={policyMissing ? clearPolicyMissing : undefined}
+      />
+
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
         <Input.Search
           placeholder="搜索池名/成员PN/描述/品牌" allowClear enterButton
           style={{ maxWidth: 380, flex: "1 1 260px" }}
           value={q} onChange={(e) => setQ(e.target.value)}
-          onSearch={(v) => load(v, statusFilter, 1)}
+          onSearch={(v) => load(v, statusFilter, 1,
+            localCoverageRestricted ? null : policyMissing)}
         />
         <Segmented
           value={statusFilter}
-          onChange={(v) => { setStatusFilter(v as StatusFilter); load(q, v as StatusFilter, 1); }}
+          onChange={(v) => {
+            const nextStatus = v as StatusFilter;
+            setStatusFilter(nextStatus);
+            listView.current.status = nextStatus;
+            if (nextStatus !== "active" && policyMissing && !localCoverageRestricted) {
+              // 归档/全部与“有效池缺失约束”不能同时成立；先清 URL，随后由 effect 按新状态取数。
+              clearPolicyMissing();
+              return;
+            }
+            load(q, nextStatus, 1, localCoverageRestricted ? null : policyMissing);
+          }}
           options={[
             { label: "有效", value: "active" },
             { label: "已归档", value: "archived" },
@@ -780,13 +848,21 @@ export default function PoolManagementPage() {
         />
       </div>
 
+      {listError && (
+        <Alert type="error" showIcon style={{ marginBottom: 12 }} message={listError}
+          description="当前列表未展示任何旧筛选结果，请重试加载。"
+          action={<Button size="small" onClick={reloadCurrentList}
+            aria-label="重试加载池列表">重试</Button>} />
+      )}
+
       <Table<PnPoolRow>
         rowKey="group_id" size="small" columns={columns} dataSource={rows} loading={loading}
         scroll={{ x: 1190 }}   // ≥列宽总和，防止固定操作列悬浮盖住更新时间列
         pagination={{
           current: page, pageSize: PAGE_SIZE, total, showSizeChanger: false,
           showTotal: (t) => `共 ${t} 个池`,
-          onChange: (p) => load(q, statusFilter, p),
+          onChange: (p) => load(q, statusFilter, p,
+            localCoverageRestricted ? null : policyMissing),
         }}
       />
 

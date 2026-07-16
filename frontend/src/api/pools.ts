@@ -6,6 +6,17 @@ import { api } from "../api";
 
 /** 约束价录入口径：ex_tax=未税 | inc_tax=含税（含税 ÷1.13 换算入库，原始录入值保留） */
 export type PriceBasis = "ex_tax" | "inc_tax";
+export type PoolPolicyMissing = "purchase" | "sales" | "either" | "both";
+
+/** 有效池约束价覆盖率：全局口径，不随列表搜索、分页或缺失筛选变化。 */
+export interface PoolPolicyCoverage {
+  active_pool_count: number;
+  purchase_set_count: number;
+  purchase_missing_count: number;
+  sales_set_count: number;
+  sales_missing_count: number;
+  both_set_count: number;
+}
 
 export interface PnPoolRow {
   group_id: number;
@@ -63,10 +74,14 @@ export interface PnPoolListResp {
   page_size: number;
   items: PnPoolRow[];
   price_restricted: boolean;
+  /** 无治理可见权限时 coverage 必须为 null，前端不渲染数字或筛选入口。 */
+  coverage_restricted: boolean;
+  coverage: PoolPolicyCoverage | null;
 }
 
 export const listPnPools = (params: {
   q?: string; status?: "active" | "archived" | "all"; page?: number; page_size?: number;
+  policy_missing?: PoolPolicyMissing;
 } = {}) => api.get<PnPoolListResp>("/pools", { params });
 
 export const getPnPool = (groupId: number) => api.get<PnPoolDetail>(`/pools/${groupId}`);
