@@ -13,9 +13,13 @@ import type { ColumnsType } from "antd/es/table";
 import dayjs, { type Dayjs } from "dayjs";
 import PageHeader from "../components/PageHeader";
 import {
-  dashboardPool,
-  type PoolDetail, type PoolMemberRow, type PoolOpportunity, type PoolOrderLine,
+  type PoolMemberRow, type PoolOpportunity,
 } from "../api";
+import { fetchPoolAnalysis } from "../api/poolAnalysis";
+import type {
+  PoolAnalysisDetail, PoolAnalysisOrderLine, PoolAnalysisPurchaseOrderLine,
+  PoolAnalysisRange, PoolAnalysisSaleOrderLine,
+} from "../api/poolAnalysis";
 import HorizontalMetricBar, { type MetricBarItem } from "../components/charts/HorizontalMetricBar";
 import { EMPTY, moneyExact, pct, pctSigned, qty } from "../utils/format";
 import { ISO_DATE_FORMAT, strictIsoDateRange } from "../utils/date";
@@ -25,6 +29,7 @@ import { MUTED, useGuardedFetch, useLocalRestrictions } from "./boss/shared";
 
 const { RangePicker } = DatePicker;
 const D = ISO_DATE_FORMAT;
+const STANDARD_RANGES = new Set<PoolAnalysisRange>(["30d", "90d", "365d", "all"]);
 
 type MetricMode = "average" | "total";
 
@@ -48,7 +53,13 @@ export default function PoolAnalysisPage() {
   const local = useLocalRestrictions();
 
   const parsedWindow = strictIsoDateRange(sp.get("from"), sp.get("to"));
-  const invalidWindow = (sp.has("from") || sp.has("to")) && !parsedWindow;
+  const rawRange = sp.get("range");
+  const hasCustomWindow = sp.has("from") || sp.has("to");
+  const range = !parsedWindow
+    ? (rawRange == null ? "90d" : STANDARD_RANGES.has(rawRange as PoolAnalysisRange)
+      ? rawRange as PoolAnalysisRange : null)
+    : null;
+  const invalidWindow = (hasCustomWindow && !parsedWindow) || (!parsedWindow && range == null);
   // 池统计只接受完整闭区间；坏日期或半开窗口都不下发，避免后端 422。
   const from = parsedWindow?.from ?? null;
   const to = parsedWindow?.to ?? null;
@@ -68,14 +79,25 @@ export default function PoolAnalysisPage() {
   };
 
   const params = useMemo(() => ({
-    date_from: from ?? undefined, date_to: to ?? undefined,
+    ...(from && to
+      ? { date_from: from, date_to: to }
+      : { range: range ?? undefined }),
     purchase_page: purchasePage, sales_page: salesPage, orders_page_size: 20,
-  }), [from, to, purchasePage, salesPage]);
+  }), [from, to, range, purchasePage, salesPage]);
+
+  const backQuery = new URLSearchParams();
+  if (from && to) {
+    backQuery.set("from", from);
+    backQuery.set("to", to);
+  } else if (range && range !== "90d") {
+    backQuery.set("range", range);
+  }
+  const backPath = `/pools${backQuery.size ? `?${backQuery.toString()}` : ""}`;
 
   const validId = Number.isInteger(groupId) && groupId > 0;
-  const { data: d, loading, error, reload } = useGuardedFetch<PoolDetail>(
-    () => (validId && !invalidWindow ? dashboardPool(groupId, params)
-      : Promise.resolve({ data: null as unknown as PoolDetail })),   // 非法编号：走 404 空态，不发请求
+  const { data: d, loading, error, reload } = useGuardedFetch<PoolAnalysisDetail>(
+    () => (validId && !invalidWindow ? fetchPoolAnalysis(groupId, params).then((data) => ({ data }))
+      : Promise.resolve({ data: null as unknown as PoolAnalysisDetail })),   // 非法编号：走 404 空态，不发请求
     [groupId, params, validId, invalidWindow]);
 
   const govRestricted = local.governance || (d?.manual_reference_restricted ?? false);
@@ -116,7 +138,7 @@ export default function PoolAnalysisPage() {
     { title: "采购均价(窗口)", key: "pavg", width: 118, align: "right",
       render: (_, m) => {
         const v = m.purchase_metrics?.weighted_avg_unit_price;
-        if (v == null && local.cost) return <span style={MUTED}>无成本权限</span>;
+        if (v == null && local.cost) return <span style={MUTED}>无价格权限</span>;
         return v == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(v);
       } },
     { title: "采购量", key: "pq", width: 82, align: "right",
@@ -124,6 +146,7 @@ export default function PoolAnalysisPage() {
     { title: "采购 vs 池均", key: "pd", width: 106, align: "right",
       render: (_, m) => {
         const v = m.purchase_metrics?.pool_avg_delta_pct;
+        if (v == null && local.cost) return <span style={MUTED}>无价格权限</span>;
         return v == null ? <span style={MUTED}>{EMPTY}</span>
           : <span style={{ color: v > 0 ? "#c0524a" : undefined }}>{pctSigned(v)}</span>;
       } },
@@ -151,7 +174,7 @@ export default function PoolAnalysisPage() {
   ];
 
   // ---- 订单板块（行粒度，点单号看订单全貌）----
-  const orderCols = (side: "purchase" | "sales"): ColumnsType<PoolOrderLine> => [
+  const orderCols = (side: "purchase" | "sales"): ColumnsType<PoolAnalysisOrderLine> => [
     { title: "日期", dataIndex: "order_date", width: 104, render: (v) => v || EMPTY },
     { title: "单号", dataIndex: "order_no", width: 140, render: (v) => (
       <Button type="link" size="small" onClick={() => setOrderModal({ side, orderNo: v })}
@@ -161,38 +184,50 @@ export default function PoolAnalysisPage() {
       { title: "采购员", dataIndex: "purchaser", width: 84,
         render: (v: string | null) => v || <span style={MUTED}>{EMPTY}</span> },
       { title: "供应商", dataIndex: "supplier", width: 140, ellipsis: true,
-        render: (v: string | null) => v || <span style={MUTED}>{EMPTY}</span> },
+        render: (v: string | null) => local.supplier
+          ? <span style={MUTED}>无供应商权限</span>
+          : v || <span style={MUTED}>{EMPTY}</span> },
       { title: "类型", dataIndex: "source_type", width: 92,
         render: (v: string | null) => (v ? <Tag>{v}</Tag> : EMPTY) },
     ] : [
       { title: "销售员", dataIndex: "salesperson", width: 84,
         render: (v: string | null) => v || <span style={MUTED}>{EMPTY}</span> },
       { title: "客户", dataIndex: "customer", width: 140, ellipsis: true,
-        render: (v: string | null) => (local.customer ? <span style={MUTED}>无权限</span>
+        render: (v: string | null) => (local.customer ? <span style={MUTED}>无客户权限</span>
           : v || <span style={MUTED}>{EMPTY}</span>) },
       { title: "业务类型", dataIndex: "business_type", width: 92,
         render: (v: string | null) => (v ? <Tag>{v}</Tag> : EMPTY) },
     ]),
     { title: "PN", key: "pn", width: 160, render: (_, r) => <PartLink partId={r.part_id} pn={r.pn_std} /> },
     { title: "数量", dataIndex: "quantity", width: 72, align: "right", render: qty },
-    { title: "未税单价", dataIndex: "unit_price_ex_tax", width: 96, align: "right",
-      render: (v) => (v == null && side === "purchase" && local.cost)
-        ? <span style={MUTED}>无成本权限</span>
-        : v == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(v) },
-    { title: "金额(未税)", dataIndex: "amount", width: 104, align: "right",
-      render: (v) => (v == null && side === "purchase" && local.cost)
-        ? <span style={MUTED}>无成本权限</span>
-        : v == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(v) },
+    { title: "未税单价", key: "unit_price", width: 96, align: "right",
+      render: (_, row) => {
+        const value = side === "purchase"
+          ? (row as PoolAnalysisPurchaseOrderLine).purchase_unit_price_ex_tax
+          : (row as PoolAnalysisSaleOrderLine).sale_unit_price_ex_tax;
+        return value == null && side === "purchase" && local.cost
+          ? <span style={MUTED}>无价格权限</span>
+          : value == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(value);
+      } },
+    { title: "金额(未税)", key: "line_value", width: 104, align: "right",
+      render: (_, row) => {
+        const value = side === "purchase"
+          ? (row as PoolAnalysisPurchaseOrderLine).purchase_line_value_ex_tax
+          : (row as PoolAnalysisSaleOrderLine).sale_line_value_ex_tax;
+        return value == null && side === "purchase" && local.cost
+          ? <span style={MUTED}>无价格权限</span>
+          : value == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(value);
+      } },
   ];
 
   if (!validId) {
     return <Result status="404" title="无效的池编号" subTitle="请从看板互通池列表进入。"
-      extra={<Button onClick={() => navigate("/boss")}>返回经营看板</Button>} />;
+      extra={<Button onClick={() => navigate(backPath)}>返回互通池</Button>} />;
   }
   if (invalidWindow) {
     return <Result status="warning" title="无效的统计时间范围"
       subTitle="起止日期必须是真实日期，且开始日期不能晚于结束日期。为避免扩大成全历史，本页未发起查询。"
-      extra={<Button onClick={() => navigate("/boss")}>返回经营看板</Button>} />;
+      extra={<Button onClick={() => navigate(backPath)}>返回互通池</Button>} />;
   }
 
   const windowNote = d?.window
@@ -210,10 +245,10 @@ export default function PoolAnalysisPage() {
               value={from && to ? [dayjs(from), dayjs(to)] : null}
               disabledDate={(day) => day.isAfter(dayjs(), "day")}
               onChange={(v) => {
-                if (v && v[0] && v[1]) patch({ from: v[0].format(D), to: v[1].format(D), pp: null, spg: null }, false);
-                else patch({ from: null, to: null, pp: null, spg: null }, false);
+                if (v && v[0] && v[1]) patch({ range: null, from: v[0].format(D), to: v[1].format(D), pp: null, spg: null }, false);
+                else patch({ range: null, from: null, to: null, pp: null, spg: null }, false);
               }} />
-            <Button size="small" onClick={() => navigate("/boss")}>返回看板</Button>
+            <Button size="small" onClick={() => navigate(backPath)}>返回互通池</Button>
           </div>
         } />
 
@@ -234,18 +269,20 @@ export default function PoolAnalysisPage() {
                   <Descriptions.Item label="池编号">#{d.group_id}</Descriptions.Item>
                   <Descriptions.Item label="成员数">{d.member_count}</Descriptions.Item>
                   <Descriptions.Item label="人工最高采购价">
-                    {govRestricted ? <span style={MUTED}>无权限</span>
+                    {govRestricted ? <span style={MUTED}>无约束价权限</span>
                       : d.max_purchase_price == null ? <span style={MUTED}>未设置</span>
                         : moneyExact(d.max_purchase_price)}
                   </Descriptions.Item>
                   <Descriptions.Item label="人工最低销售价">
-                    {govRestricted ? <span style={MUTED}>无权限</span>
+                    {govRestricted ? <span style={MUTED}>无约束价权限</span>
                       : d.min_sale_price == null ? <span style={MUTED}>未设置</span>
                         : moneyExact(d.min_sale_price)}
                   </Descriptions.Item>
                   <Descriptions.Item label="窗口采购">
-                    {moneyExact(d.purchase_metrics?.total_amount)} · {qty(d.purchase_metrics?.total_quantity)} 件 ·
-                    {d.purchase_metrics?.order_count ?? 0} 单
+                    {local.cost
+                      ? <span style={MUTED}>无价格权限</span>
+                      : <>{moneyExact(d.purchase_metrics?.total_amount)} · {qty(d.purchase_metrics?.total_quantity)} 件 ·
+                          {d.purchase_metrics?.order_count ?? 0} 单</>}
                   </Descriptions.Item>
                   <Descriptions.Item label="窗口销售">
                     {moneyExact(d.sales_metrics?.total_amount)} · {qty(d.sales_metrics?.total_quantity)} 件 ·
@@ -253,13 +290,13 @@ export default function PoolAnalysisPage() {
                   </Descriptions.Item>
                   <Descriptions.Item label="采购超限行">
                     {d.purchase_violation_count == null
-                      ? <span style={MUTED}>{govRestricted ? "无权限" : "未设约束"}</span>
+                      ? <span style={MUTED}>{govRestricted ? "无约束价权限" : "未设约束"}</span>
                       : d.purchase_violation_count > 0
                         ? <Tag color="red">{d.purchase_violation_count}</Tag> : "0"}
                   </Descriptions.Item>
                   <Descriptions.Item label="销售低限行">
                     {d.sale_violation_count == null
-                      ? <span style={MUTED}>{govRestricted ? "无权限" : "未设约束"}</span>
+                      ? <span style={MUTED}>{govRestricted ? "无约束价权限" : "未设约束"}</span>
                       : d.sale_violation_count > 0
                         ? <Tag color="red">{d.sale_violation_count}</Tag> : "0"}
                   </Descriptions.Item>
@@ -278,7 +315,7 @@ export default function PoolAnalysisPage() {
                 onChange={(v) => setPMode(v as MetricMode)}
                 options={[{ label: "平均单价", value: "average" }, { label: "金额合计", value: "total" }]} />}>
               {local.cost ? (
-                <Alert type="info" showIcon message="无采购成本权限：采购金额排名对当前账号不可见。" />
+                <Alert type="info" showIcon message="无价格权限：采购价格排名对当前账号不可见。" />
               ) : (
                 <HorizontalMetricBar items={barItems("purchase", pMode)} mode="purchase" metric={pMode}
                   loading={loading} onPartClick={openPart} />
@@ -335,7 +372,7 @@ export default function PoolAnalysisPage() {
 
           {/* 采购订单板块 */}
           <Card size="small" style={{ marginBottom: 16 }} title="采购订单（池内成员，窗口内已生效）">
-            <Table<PoolOrderLine> size="small" rowKey="line_id" loading={loading}
+            <Table<PoolAnalysisOrderLine> size="small" rowKey="line_id" loading={loading}
               dataSource={d?.purchase_orders?.items ?? []} columns={orderCols("purchase")}
               scroll={{ x: 1000 }} locale={{ emptyText: "窗口内暂无采购记录" }}
               pagination={{
@@ -351,7 +388,7 @@ export default function PoolAnalysisPage() {
             {d?.sales_orders?.restricted ? (
               <Alert type="info" showIcon message="当前账号无逐单销售明细查看权限（仅聚合可见）。" />
             ) : (
-              <Table<PoolOrderLine> size="small" rowKey="line_id" loading={loading}
+              <Table<PoolAnalysisOrderLine> size="small" rowKey="line_id" loading={loading}
                 dataSource={d?.sales_orders?.items ?? []} columns={orderCols("sales")}
                 scroll={{ x: 1000 }} locale={{ emptyText: "窗口内暂无销售记录" }}
                 pagination={{

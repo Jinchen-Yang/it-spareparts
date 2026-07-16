@@ -199,6 +199,7 @@ export function useLocalRestrictions() {
     cost: !isAdmin && perms.data_purchase_cost === false,
     governance: !isAdmin && perms.data_pool_price_governance === false,
     customer: !isAdmin && perms.data_customer === false,
+    supplier: !isAdmin && perms.data_supplier === false,
   };
 }
 

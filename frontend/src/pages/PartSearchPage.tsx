@@ -8,6 +8,7 @@ import { RightOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
+import PoolReferencePanel from "../components/pools/PoolReferencePanel";
 import api from "../api";
 import type { Overview, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { unifiedSearch, fetchOverview } from "../api/search";
@@ -359,6 +360,10 @@ export default function PartSearchPage() {
             <Descriptions.Item label="品类">{ov.part.category_major || "-"}</Descriptions.Item>
             <Descriptions.Item label="规格">{ov.part.category_minor || "-"}</Descriptions.Item>
           </Descriptions>
+
+          <div style={{ marginBottom: 16 }}>
+            <PoolReferencePanel partId={ov.part.id} />
+          </div>
 
           {ov.sale_price_ref?.ref_sale_price != null && (
             <div style={{

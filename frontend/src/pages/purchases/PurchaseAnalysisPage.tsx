@@ -4,6 +4,8 @@ import { Card, Checkbox, Grid, List, Segmented, Spin, Table, Tag, Tooltip, theme
 import type { ColumnsType } from "antd/es/table";
 import PageHeader from "../../components/PageHeader";
 import MobileDetailDrawer from "../../components/MobileDetailDrawer";
+import PoolIdentityLink from "../../components/pools/PoolIdentityLink";
+import PoolReferencePanel from "../../components/pools/PoolReferencePanel";
 import {
   fetchPurchaseAnalysis, fetchPurchaseDrill,
 } from "../../api";
@@ -55,6 +57,17 @@ function DrillTable({ partId, days, excludeDesignated }: { partId: number; days:
       pagination={false}
       columns={DRILL_COLUMNS}
     />
+  );
+}
+
+function ExpandedAnalysis({ partId, days, excludeDesignated }: {
+  partId: number; days: number; excludeDesignated: boolean;
+}) {
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <PoolReferencePanel partId={partId} side="purchase" compact />
+      <DrillTable partId={partId} days={days} excludeDesignated={excludeDesignated} />
+    </div>
   );
 }
 
@@ -157,6 +170,7 @@ export default function PurchaseAnalysisPage() {
         <div>
           <span style={{ fontFamily: "monospace", fontSize: 12.5 }}>{v}</span>
           {r.needs_review && <Tag color="orange" style={{ marginLeft: 6 }}>待复核</Tag>}
+          <PoolIdentityLink groupId={r.pool_group_id} name={r.pool_name} pn={r.pn_std} />
           <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>{r.description || r.brand || ""}</div>
         </div>
       ) },
@@ -226,6 +240,9 @@ export default function PurchaseAnalysisPage() {
                     <span style={{ fontFamily: "monospace", fontWeight: r.is_frequent ? 500 : 400 }}>{r.pn_std}</span>
                     {r.advice && r.advice !== "普通" && <Tag color={ADVICE_COLOR[r.advice]}>{r.advice}</Tag>}
                   </div>
+                  <div style={{ marginTop: 4 }}>
+                    <PoolIdentityLink groupId={r.pool_group_id} name={r.pool_name} pn={r.pn_std} />
+                  </div>
                   <div style={{ marginTop: 4, fontSize: 13, color: "var(--mb-text-2)" }}>
                     采购 {r.buy_times} 次 · 总量 {r.total_qty == null ? "—" : Number(r.total_qty)} · 库存 <span style={{ color: "var(--mb-text-3)" }}>未启用</span>
                   </div>
@@ -245,7 +262,7 @@ export default function PurchaseAnalysisPage() {
             expandable={{
               expandedRowKeys: expandedKeys,
               onExpandedRowsChange: (keys) => setExpandedKeys(keys as number[]),
-              expandedRowRender: (r) => <DrillTable partId={r.part_id} days={days} excludeDesignated={excludeDesignated} />,
+              expandedRowRender: (r) => <ExpandedAnalysis partId={r.part_id} days={days} excludeDesignated={excludeDesignated} />,
               rowExpandable: () => true,
             }}
           />
@@ -273,7 +290,12 @@ export default function PurchaseAnalysisPage() {
         ] : []}
         onClose={() => setDetail(null)}
       >
-        {detail && <MobileDrill partId={detail.part_id} days={days} excludeDesignated={excludeDesignated} />}
+        {detail && (
+          <div style={{ display: "grid", gap: 12 }}>
+            <PoolReferencePanel partId={detail.part_id} side="purchase" compact />
+            <MobileDrill partId={detail.part_id} days={days} excludeDesignated={excludeDesignated} />
+          </div>
+        )}
       </MobileDetailDrawer>
     </>
   );

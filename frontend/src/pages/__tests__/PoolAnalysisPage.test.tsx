@@ -10,16 +10,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
-const dashboardPool = vi.fn();
+const fetchPoolAnalysis = vi.fn();
 const dashboardPurchaseOrders = vi.fn();
 const dashboardSales = vi.fn();
 
 vi.mock("../../api", () => ({
   default: { get: vi.fn(), post: vi.fn() },
   api: { get: vi.fn(), post: vi.fn() },
-  dashboardPool: (...a: unknown[]) => dashboardPool(...a),
   dashboardPurchaseOrders: (...a: unknown[]) => dashboardPurchaseOrders(...a),
   dashboardSales: (...a: unknown[]) => dashboardSales(...a),
+}));
+vi.mock("../../api/poolAnalysis", () => ({
+  fetchPoolAnalysis: (...a: unknown[]) => fetchPoolAnalysis(...a),
 }));
 vi.mock("../../components/charts/HorizontalMetricBar", () => ({
   default: (p: { mode: string; metric: string; items: Array<{ pn: string; value: number | null }>;
@@ -71,11 +73,11 @@ const DETAIL = {
   purchase_orders: { restricted: false, total: 1, page: 1, page_size: 20, items: [
     { order_no: "CG-77", order_date: "2026-06-10", purchaser: "张三", supplier: "供应商A",
       source_type: "销售订单", line_id: 1, part_id: 101, pn_std: "PN-A",
-      quantity: 5, unit_price_ex_tax: 95, amount: 475 }] },
+      quantity: 5, purchase_unit_price_ex_tax: 95, purchase_line_value_ex_tax: 475 }] },
   sales_orders: { restricted: false, total: 1, page: 1, page_size: 20, items: [
     { order_no: "XS-88", order_date: "2026-06-12", salesperson: "李四", customer: "客户甲",
       business_type: "备件销售", line_id: 9, part_id: 102, pn_std: "PN-B",
-      quantity: 2, unit_price_ex_tax: 210, amount: 420, counts_revenue: true }] },
+      quantity: 2, sale_unit_price_ex_tax: 210, sale_line_value_ex_tax: 420, counts_revenue: true }] },
 };
 
 function renderAt(url: string) {
@@ -94,7 +96,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   localStorage.setItem("role", "admin");
-  dashboardPool.mockResolvedValue({ data: DETAIL });
+  fetchPoolAnalysis.mockResolvedValue(DETAIL);
   dashboardPurchaseOrders.mockResolvedValue({ data: {
     contract_version: 2,
     total: 1, page: 1, page_size: 20, as_of: "2026-07-15", effective_sort: "order_date",
@@ -113,9 +115,25 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("深链与取数", () => {
+  it("没有自定义日期时按 range 深链重放统计窗口", async () => {
+    renderAt("/pool-analysis/12?range=365d");
+    await waitFor(() => expect(fetchPoolAnalysis).toHaveBeenCalledWith(12, {
+      range: "365d",
+      purchase_page: 1, sales_page: 1, orders_page_size: 20,
+    }));
+  });
+
+  it("完整 from/to 优先于 range，不把两套窗口同时发给后端", async () => {
+    renderAt("/pool-analysis/12?range=365d&from=2026-06-01&to=2026-06-30");
+    await waitFor(() => expect(fetchPoolAnalysis).toHaveBeenCalledWith(12, {
+      date_from: "2026-06-01", date_to: "2026-06-30",
+      purchase_page: 1, sales_page: 1, orders_page_size: 20,
+    }));
+  });
+
   it("/pool-analysis/12?from=&to= 打开即按窗口取数并渲染池信息", async () => {
     renderAt("/pool-analysis/12?from=2026-06-01&to=2026-06-30");
-    await waitFor(() => expect(dashboardPool).toHaveBeenCalledWith(12, {
+    await waitFor(() => expect(fetchPoolAnalysis).toHaveBeenCalledWith(12, {
       date_from: "2026-06-01", date_to: "2026-06-30",
       purchase_page: 1, sales_page: 1, orders_page_size: 20 }));
     await screen.findByText("内存互通池");
@@ -126,19 +144,25 @@ describe("深链与取数", () => {
   it("非法 groupId：404 空态，不发请求", async () => {
     renderAt("/pool-analysis/abc");
     await screen.findByText("无效的池编号");
-    expect(dashboardPool).not.toHaveBeenCalled();
+    expect(fetchPoolAnalysis).not.toHaveBeenCalled();
   });
 
   it("不可能日期显示明确错误且不查询，避免 422 或扩大到全历史", async () => {
     renderAt("/pool-analysis/12?from=2026-02-31&to=2026-03-31");
     await screen.findByText("无效的统计时间范围");
-    expect(dashboardPool).not.toHaveBeenCalled();
+    expect(fetchPoolAnalysis).not.toHaveBeenCalled();
   });
 
   it("from>to 的反向窗口显示明确错误且不查询", async () => {
     renderAt("/pool-analysis/12?from=2026-06-30&to=2026-06-01");
     await screen.findByText("无效的统计时间范围");
-    expect(dashboardPool).not.toHaveBeenCalled();
+    expect(fetchPoolAnalysis).not.toHaveBeenCalled();
+  });
+
+  it("未知 range 显示明确错误且不查询，避免静默扩大范围", async () => {
+    renderAt("/pool-analysis/12?range=forever");
+    await screen.findByText("无效的统计时间范围");
+    expect(fetchPoolAnalysis).not.toHaveBeenCalled();
   });
 });
 
@@ -207,16 +231,51 @@ describe("订单板块", () => {
 });
 
 describe("治理权限", () => {
-  it("data_pool_price_governance=false：约束价显示「无权限」而非「未设置」", async () => {
+  it("data_pool_price_governance=false：只隐藏人工约束，历史均价仍可见", async () => {
     localStorage.setItem("role", "boss");
     localStorage.setItem("permissions", JSON.stringify({ data_pool_price_governance: false }));
-    dashboardPool.mockResolvedValue({ data: { ...DETAIL,
+    fetchPoolAnalysis.mockResolvedValue({ ...DETAIL,
       max_purchase_price: null, min_sale_price: null,
       purchase_violation_count: null, sale_violation_count: null,
-      manual_reference_restricted: true } });
+      manual_reference_restricted: true });
     renderAt("/pool-analysis/12");
     await screen.findByText("内存互通池");
-    expect(screen.getAllByText("无权限").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("无约束价权限").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("窗口销售").closest("td")).toHaveTextContent("¥3,760");
     expect(screen.queryByText("未设置")).toBeNull();
+  });
+
+  it("字段受限不隐藏整行或经办人，并把无权限与无数据区分", async () => {
+    localStorage.setItem("role", "purchaser");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_pool_analysis: true,
+      data_purchase_cost: false,
+      data_pool_price_governance: true,
+      data_supplier: false,
+      data_customer: false,
+    }));
+    fetchPoolAnalysis.mockResolvedValue({
+      ...DETAIL,
+      purchase_metrics: null,
+      members: DETAIL.members.map((member) => ({ ...member, purchase_metrics: null })),
+      purchase_orders: { ...DETAIL.purchase_orders, items: [{
+        ...DETAIL.purchase_orders.items[0], supplier: null,
+        purchase_unit_price_ex_tax: null, purchase_line_value_ex_tax: null,
+      }] },
+      sales_orders: { ...DETAIL.sales_orders, restricted: false, items: [{
+        ...DETAIL.sales_orders.items[0], customer: null,
+      }] },
+    });
+
+    renderAt("/pool-analysis/12");
+    await screen.findByText("内存互通池");
+    expect(screen.getByText("张三")).toBeInTheDocument();
+    expect(screen.getByText("李四")).toBeInTheDocument();
+    expect(screen.getAllByText("无价格权限").length).toBeGreaterThan(0);
+    expect(screen.getByText("无供应商权限")).toBeInTheDocument();
+    expect(screen.getByText("无客户权限")).toBeInTheDocument();
+    expect(screen.getAllByText(/¥210/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/¥420/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("当前账号无逐单销售明细查看权限（仅聚合可见）。")).toBeNull();
   });
 });
