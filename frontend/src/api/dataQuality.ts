@@ -80,6 +80,7 @@ export interface DataQualityIssueDetail extends DataQualityIssueListItem {
   reviewed_by: string | null;
   reviewed_at: string | null;
   review_note: string | null;
+  review_note_restricted: boolean;
   fact: DataQualityIssueFact;
   evidence: Record<string, DataQualityEvidenceValue>;
   evidence_restricted: boolean;
@@ -105,10 +106,10 @@ interface DataQualityWireFact {
   part_id: number | null;
   pn_std: string | null;
   description: string | null;
-  qty: number | null;
+  qty: string | number | null;
   unit: string | null;
-  unit_price: number | null;
-  line_amount: number | null;
+  unit_price: string | number | null;
+  line_amount: string | number | null;
   batch: DataQualityWireBatch | null;
 }
 
@@ -141,6 +142,7 @@ interface DataQualityWireIssue {
   audit?: DataQualityWireAudit[];
   price_restricted?: boolean;
   evidence_restricted?: boolean;
+  review_note_restricted?: boolean;
 }
 
 interface DataQualityWirePage {
@@ -174,6 +176,12 @@ export interface ReopenDataQualityIssueBody {
 /**
  * 数据疑点接口的唯一适配层。页面不直接拼路径，也不依赖 AxiosResponse，后端契约若微调只改这里。
  */
+function nullableNumber(value: string | number | null | undefined): number | null {
+  if (value == null || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function normalizeBase(wire: DataQualityWireIssue, pageRestricted = false): DataQualityIssueListItem {
   const fact = wire.fact;
   const priceRestricted = pageRestricted || wire.price_restricted === true;
@@ -185,9 +193,9 @@ function normalizeBase(wire: DataQualityWireIssue, pageRestricted = false): Data
     order_no: fact?.order_no ?? null,
     pn_std: fact?.pn_std ?? null,
     handler: fact?.purchaser ?? fact?.salesperson ?? null,
-    quantity: fact?.qty ?? null,
+    quantity: nullableNumber(fact?.qty),
     unit: fact?.unit ?? null,
-    unit_price: priceRestricted ? null : fact?.unit_price ?? null,
+    unit_price: priceRestricted ? null : nullableNumber(fact?.unit_price),
     rule_code: wire.rule_code,
     rule_label: null,
     import_batch_id: wire.import_batch_id,
@@ -209,13 +217,14 @@ function normalizeDetail(wire: DataQualityWireIssue): DataQualityIssueDetail {
     reviewed_by: wire.reviewed_by,
     reviewed_at: wire.reviewed_at,
     review_note: wire.review_note,
+    review_note_restricted: wire.review_note_restricted === true,
     fact: {
       description: fact?.description ?? null,
       brand: null,
-      quantity: fact?.qty ?? null,
+      quantity: nullableNumber(fact?.qty),
       unit: fact?.unit ?? null,
-      unit_price: base.price_restricted ? null : fact?.unit_price ?? null,
-      line_amount: base.price_restricted ? null : fact?.line_amount ?? null,
+      unit_price: base.price_restricted ? null : nullableNumber(fact?.unit_price),
+      line_amount: base.price_restricted ? null : nullableNumber(fact?.line_amount),
     },
     evidence: wire.evidence ?? {},
     evidence_restricted: wire.evidence_restricted === true,
@@ -257,11 +266,11 @@ export async function getDataQualityIssue(id: number) {
 }
 
 export async function decideDataQualityIssue(id: number, body: DecideDataQualityIssueBody) {
-  await api.post(`/data-quality/issues/${id}/decision`, body);
-  return getDataQualityIssue(id);
+  const { data } = await api.post<DataQualityWireIssue>(`/data-quality/issues/${id}/decision`, body);
+  return normalizeDetail(data);
 }
 
 export async function reopenDataQualityIssue(id: number, body: ReopenDataQualityIssueBody) {
-  await api.post(`/data-quality/issues/${id}/reopen`, body);
-  return getDataQualityIssue(id);
+  const { data } = await api.post<DataQualityWireIssue>(`/data-quality/issues/${id}/reopen`, body);
+  return normalizeDetail(data);
 }

@@ -20,7 +20,7 @@ const wire = {
   fact: {
     order_id: 3, order_no: "CG-1", order_date: "2026-07-15", purchaser: "采购甲",
     salesperson: null, part_id: 5, pn_std: "PN-1", description: "硬盘",
-    qty: 1, unit: "块", unit_price: 100, line_amount: 100,
+    qty: "1.00", unit: "块", unit_price: "100.00", line_amount: "100.00",
     batch: { id: 9, filename: "采购.xlsx", file_type: "purchase", uploaded_by: "数据员",
       uploaded_at: "2026-07-15T18:00:00Z" },
   },
@@ -52,7 +52,9 @@ describe("data quality API contract", () => {
       evidence_restricted: false,
     };
     get.mockResolvedValue({ data: detail });
-    post.mockResolvedValue({ data: { id: 1, status: "confirmed_valid", version: 2 } });
+    post
+      .mockResolvedValueOnce({ data: { ...detail, status: "confirmed_valid", version: 2 } })
+      .mockResolvedValueOnce({ data: { ...detail, status: "open", version: 3 } });
 
     await expect(getDataQualityIssue(1)).resolves.toMatchObject({
       order_no: "CG-1", handler: "采购甲", evidence: { unit_price: "100.00" },
@@ -62,14 +64,17 @@ describe("data quality API contract", () => {
     expect(get).toHaveBeenCalledWith("/data-quality/issues/1");
 
     const decision = { decision: "confirmed_valid" as const, version: 1, note: "原单核实无误" };
-    await decideDataQualityIssue(1, decision);
+    await expect(decideDataQualityIssue(1, decision)).resolves.toMatchObject({
+      status: "confirmed_valid", version: 2, order_no: "CG-1",
+    });
     expect(post).toHaveBeenNthCalledWith(1, "/data-quality/issues/1/decision", decision);
-    expect(get).toHaveBeenNthCalledWith(2, "/data-quality/issues/1");
 
     const reopen = { version: 2, note: "收到新凭证" };
-    await reopenDataQualityIssue(1, reopen);
+    await expect(reopenDataQualityIssue(1, reopen)).resolves.toMatchObject({
+      status: "open", version: 3, order_no: "CG-1",
+    });
     expect(post).toHaveBeenNthCalledWith(2, "/data-quality/issues/1/reopen", reopen);
-    expect(get).toHaveBeenNthCalledWith(3, "/data-quality/issues/1");
+    expect(get).toHaveBeenCalledTimes(1);
   });
 
   it("evidence=null 与 audit 单数键正确收口，受限价格不能经清单或详情回流", async () => {
@@ -84,10 +89,11 @@ describe("data quality API contract", () => {
       ...wire,
       fact: { ...wire.fact, unit_price: undefined, line_amount: undefined },
       evidence: null,
-      audit: [{ action: "decision", before: null, after: null, reason: "已核实",
+      audit: [{ action: "decision", before: null, after: null, reason: null,
         operated_by: "复核员", operated_at: "2026-07-16T01:00:00Z" }],
       price_restricted: true,
       evidence_restricted: true,
+      review_note_restricted: true,
     } });
     const detail = await getDataQualityIssue(1);
     expect(detail.price_restricted).toBe(true);
@@ -95,6 +101,7 @@ describe("data quality API contract", () => {
     expect(detail.evidence).toEqual({});
     expect(detail.fact.unit_price).toBeNull();
     expect(detail.fact.line_amount).toBeNull();
-    expect(detail.audits[0]).toMatchObject({ username: "复核员", note: "已核实" });
+    expect(detail.review_note_restricted).toBe(true);
+    expect(detail.audits[0]).toMatchObject({ username: "复核员", note: null });
   });
 });

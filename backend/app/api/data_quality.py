@@ -12,6 +12,7 @@ from app.security import (
     apply_field_visibility,
     get_current_user_context,
     is_field_hidden,
+    is_scoped_sales,
     require_action,
     require_page,
 )
@@ -50,15 +51,22 @@ def _visible(data: dict, ctx: UserContext, *, detail: bool = False) -> dict:
     # evidence 是规则定义的自由 JSON，字段名不稳定；成本受限时整体收起，避免换键名绕过。
     restricted = is_field_hidden(ctx, "unit_price")
     data["price_restricted"] = restricted
+    # 源指纹是内部幂等/失效判定实现细节，页面不需要，也不应被用于枚举源数据变化。
+    data.pop("source_fingerprint", None)
     if detail and restricted:
         data["evidence"] = None
         data["evidence_restricted"] = True
+        # 核实原因是自由文本，可能写入精确金额；不能依赖递归键名脱敏。
+        data["review_note"] = None
+        data["review_note_restricted"] = True
         for entry in data.get("audit", []):
             # before/after 含 evidence 快照，受限时不能把历史证据作为旁路。
             entry["before"] = None
             entry["after"] = None
+            entry["reason"] = None
     elif detail:
         data["evidence_restricted"] = False
+        data["review_note_restricted"] = False
     return apply_field_visibility(data, ctx)
 
 
@@ -75,7 +83,8 @@ def list_issues(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     data = _run(svc.list_issues, db=db, status=status_, side=side,
-                rule_code=rule_code, q=q, page=page, page_size=page_size)
+                rule_code=rule_code, q=q, page=page, page_size=page_size,
+                allow_sales=not is_scoped_sales(ctx))
     return _visible(data, ctx)
 
 
@@ -85,7 +94,7 @@ def get_issue(
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    data = svc.get_issue(db, issue_id)
+    data = svc.get_issue(db, issue_id, allow_sales=not is_scoped_sales(ctx))
     if data is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "疑点不存在")
     return _visible(data, ctx, detail=True)
@@ -100,10 +109,14 @@ def decide_issue(
         "action_data_quality_review", require_data="data_purchase_cost")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    data = _run(
+    _run(
         svc.decide_issue, db=db, issue_id=issue_id, decision=body.decision,
         version=body.version, note=body.note, operated_by=ctx.user_id or ctx.role,
+        allow_sales=not is_scoped_sales(ctx),
     )
+    data = svc.get_issue(db, issue_id, allow_sales=not is_scoped_sales(ctx))
+    if data is None:  # 纵深防御：写后详情仍须通过同一行级范围门。
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "疑点不存在")
     return _visible(data, ctx, detail=True)
 
 
@@ -116,8 +129,12 @@ def reopen_issue(
         "action_data_quality_review", require_data="data_purchase_cost")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    data = _run(
+    _run(
         svc.reopen_issue, db=db, issue_id=issue_id, version=body.version,
         note=body.note, operated_by=ctx.user_id or ctx.role,
+        allow_sales=not is_scoped_sales(ctx),
     )
+    data = svc.get_issue(db, issue_id, allow_sales=not is_scoped_sales(ctx))
+    if data is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "疑点不存在")
     return _visible(data, ctx, detail=True)

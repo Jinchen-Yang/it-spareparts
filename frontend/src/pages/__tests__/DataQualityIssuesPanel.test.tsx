@@ -46,6 +46,7 @@ const DETAIL: DataQualityIssueDetail = {
   reviewed_by: null,
   reviewed_at: null,
   review_note: null,
+  review_note_restricted: false,
   evidence_restricted: false,
   fact: {
     description: "4TB 企业级硬盘",
@@ -91,6 +92,13 @@ function mockList(items = [ISSUE]) {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((ok, fail) => { resolve = ok; reject = fail; });
+  return { promise, resolve, reject };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
@@ -113,6 +121,7 @@ describe("价格与数量疑点队列", () => {
     login(false);
     render(<DataQualityIssuesPanel />);
     await screen.findByText("ST4000NM000A");
+    expect(screen.getByText("2026-07-15 17:30")).toBeInTheDocument();
 
     fireEvent.mouseDown(screen.getByLabelText("疑点状态").querySelector(".ant-select-selector")!);
     fireEvent.click(await screen.findByText("确认数据正确"));
@@ -127,6 +136,39 @@ describe("价格与数量疑点队列", () => {
       status: "confirmed_valid", side: "sales", rule_code: "quantity_unit_review",
       q: "XS-88", page: 1, page_size: 20,
     })));
+  });
+
+  it("新筛选响应先返回时，旧响应晚到不得覆盖新结果", async () => {
+    login(false, true);
+    const oldRequest = deferred<{ total: number; page: number; page_size: number; items: DataQualityIssueListItem[] }>();
+    const newRequest = deferred<{ total: number; page: number; page_size: number; items: DataQualityIssueListItem[] }>();
+    const newRow = { ...ISSUE, id: 18, pn_std: "NEW-PN", status: "confirmed_valid" as const };
+    listDataQualityIssues.mockReset();
+    listDataQualityIssues
+      .mockImplementationOnce(() => oldRequest.promise)
+      .mockImplementationOnce(() => newRequest.promise);
+    render(<DataQualityIssuesPanel />);
+
+    fireEvent.mouseDown(screen.getByLabelText("疑点状态").querySelector(".ant-select-selector")!);
+    fireEvent.click(await screen.findByText("确认数据正确"));
+    await waitFor(() => expect(listDataQualityIssues).toHaveBeenCalledTimes(2));
+    newRequest.resolve({ total: 1, page: 1, page_size: 20, items: [newRow] });
+    expect(await screen.findByText("NEW-PN")).toBeInTheDocument();
+    oldRequest.resolve({ total: 1, page: 1, page_size: 20, items: [ISSUE] });
+    await waitFor(() => expect(screen.queryByText("ST4000NM000A")).toBeNull());
+    expect(screen.getByText("NEW-PN")).toBeInTheDocument();
+  });
+
+  it("当前筛选加载失败时清空旧结果并给出可重试错态", async () => {
+    login(false, true);
+    render(<DataQualityIssuesPanel />);
+    expect(await screen.findByText("ST4000NM000A")).toBeInTheDocument();
+    listDataQualityIssues.mockRejectedValueOnce(new Error("network"));
+    fireEvent.mouseDown(screen.getByLabelText("业务方向").querySelector(".ant-select-selector")!);
+    fireEvent.click(await screen.findByText("销售"));
+    expect(await screen.findByText("数据疑点加载失败，当前筛选结果未显示。")).toBeInTheDocument();
+    expect(screen.queryByText("ST4000NM000A")).toBeNull();
+    expect(screen.getByRole("button", { name: /重\s*试/ })).toBeInTheDocument();
   });
 
   it("只读账号可看事实与证据，但不渲染任何写按钮；原值缺失不冒充无权限", async () => {
@@ -193,6 +235,40 @@ describe("价格与数量疑点队列", () => {
     expect(screen.getByText("无价格权限，规则证据已隐藏")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认数据正确" })).toBeNull();
     expect(screen.queryByRole("button", { name: "确认源数据错误" })).toBeNull();
+  });
+
+  it("连续点两条记录时，较旧详情晚到不得覆盖最新选中", async () => {
+    login(true);
+    const second = { ...ISSUE, id: 18, order_no: "CG-NEW-002", pn_std: "NEW-PN" };
+    mockList([ISSUE, second]);
+    const oldRequest = deferred<DataQualityIssueDetail>();
+    const newRequest = deferred<DataQualityIssueDetail>();
+    getDataQualityIssue.mockReset();
+    getDataQualityIssue.mockImplementation((id: number) => id === ISSUE.id ? oldRequest.promise : newRequest.promise);
+    render(<DataQualityIssuesPanel />);
+    const buttons = await screen.findAllByRole("button", { name: /^查看疑点/ });
+    fireEvent.click(buttons[0]);
+    fireEvent.click(buttons[1]);
+    newRequest.resolve({ ...DETAIL, ...second, order: { ...DETAIL.order, order_no: second.order_no } });
+    expect(await screen.findByText(`疑点详情 · ${second.order_no}`)).toBeInTheDocument();
+    oldRequest.resolve(DETAIL);
+    await waitFor(() => expect(screen.queryByText("疑点详情 · CG-20260710-001")).toBeNull());
+    expect(screen.getByText(`疑点详情 · ${second.order_no}`)).toBeInTheDocument();
+  });
+
+  it("详情加载中关闭抽屉后，晚响应不会重开抽屉", async () => {
+    login(true);
+    const request = deferred<DataQualityIssueDetail>();
+    getDataQualityIssue.mockReset();
+    getDataQualityIssue.mockReturnValue(request.promise);
+    render(<DataQualityIssuesPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看疑点 CG-20260710-001 ST4000NM000A 详情" }));
+    const close = document.querySelector(".ant-drawer-close") as HTMLButtonElement;
+    expect(close).toBeTruthy();
+    fireEvent.click(close);
+    request.resolve(DETAIL);
+    await waitFor(() => expect(document.querySelector(".ant-drawer-open")).toBeNull());
+    expect(screen.queryByText("疑点详情 · CG-20260710-001")).toBeNull();
   });
 
   it("409 并发冲突提示数据已刷新，并重新拉取清单与详情", async () => {

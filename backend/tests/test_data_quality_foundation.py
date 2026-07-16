@@ -256,10 +256,20 @@ def test_account_validation_masking_and_write_gate(db):
     assert reviewer_created.status_code == 201, reviewer_created.text
     reviewer = _login("dq_reviewer")
     allowed = reviewer.post(f"/api/data-quality/issues/{issue['id']}/decision", json={
-        "decision": "confirmed_valid", "version": 1, "note": "已核对原始凭证",
+        "decision": "confirmed_valid", "version": 1,
+        "note": "采购价999元，比基准100元高，已核对原始凭证",
     })
     assert allowed.status_code == 200, allowed.text
     assert allowed.json()["reviewed_by"] == "dq_reviewer"
+    restricted_after_review = reader.get(f"/api/data-quality/issues/{issue['id']}")
+    assert restricted_after_review.status_code == 200
+    restricted_payload = restricted_after_review.json()
+    assert restricted_payload["review_note"] is None
+    assert restricted_payload["review_note_restricted"] is True
+    assert "source_fingerprint" not in restricted_payload
+    assert all(entry["reason"] is None for entry in restricted_payload["audit"])
+    serialized = restricted_after_review.text
+    assert "采购价999元" not in serialized and "比基准100元高" not in serialized
 
 
 def test_issue_workflow_does_not_mutate_source_facts_or_financial_fields(db):
@@ -328,3 +338,63 @@ def test_sales_side_summary_and_filters(db):
     assert item["id"] == issue["id"]
     assert item["fact"]["salesperson"] == "销售甲"
     assert item["fact"]["pn_std"] == "DQ-SALE-PN"
+
+
+def test_scoped_sales_cannot_enumerate_or_write_sales_side_issues(db):
+    _, _, _, purchase_line = _seed_purchase(db)
+    purchase_issue = _create_issue(db, purchase_line)
+    batch = SysImportBatch(
+        filename="销售红线疑点.xlsx", file_type="sales", file_hash="dq-sales-scope",
+        uploaded_by="销售导入员", status="success",
+    )
+    part = DimPart(pn_std="DQ-SECRET-PN", description="销售行级红线测试")
+    db.add_all([batch, part])
+    db.flush()
+    order = FSalesOrder(
+        raw_order_id="dq-secret-order", order_no="XS-SECRET", salesperson="同事乙",
+        data_status="已生效", import_batch_id=batch.id,
+    )
+    db.add(order)
+    db.flush()
+    line = FSalesLine(
+        raw_line_id="dq-secret-line", order_id=order.id, line_no=1,
+        part_id=part.id, pn_std=part.pn_std, description=part.description,
+        qty=Decimal("1"), unit="块", unit_price=Decimal("888.00"),
+        line_amount=Decimal("888.00"), import_batch_id=batch.id,
+    )
+    db.add(line)
+    db.commit()
+    sales_issue = data_quality.create_or_refresh_issue(
+        db, side="sales", line_id=line.id, rule_code="sale_price_outlier",
+        rule_version="1", evidence={"unit_price": "888.00"},
+        source_fingerprint="secret-sales-fp", detected_by="test-detector",
+    )
+
+    admin = _admin_client(db)
+    created = admin.post("/api/accounts", json={
+        "username": "dq_scoped_sales", "password": "pw123456", "template_code": "sales",
+        "overrides": {
+            "page_governance": True,
+            "action_data_quality_review": True,
+        },
+    })
+    assert created.status_code == 201, created.text
+    scoped = _login("dq_scoped_sales")
+
+    listed = scoped.get("/api/data-quality/issues")
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 1
+    assert listed.json()["items"][0]["id"] == purchase_issue["id"]
+    sales_only = scoped.get("/api/data-quality/issues", params={"side": "sales"})
+    assert sales_only.status_code == 200 and sales_only.json()["total"] == 0
+    searched = scoped.get("/api/data-quality/issues", params={"q": "XS-SECRET"})
+    assert searched.status_code == 200 and searched.json()["total"] == 0
+    assert scoped.get(f"/api/data-quality/issues/{sales_issue['id']}").status_code == 404
+    decision = scoped.post(f"/api/data-quality/issues/{sales_issue['id']}/decision", json={
+        "decision": "confirmed_valid", "version": 1, "note": "不应命中",
+    })
+    assert decision.status_code == 404
+    reopen = scoped.post(f"/api/data-quality/issues/{sales_issue['id']}/reopen", json={
+        "version": 1, "note": "不应命中",
+    })
+    assert reopen.status_code == 404

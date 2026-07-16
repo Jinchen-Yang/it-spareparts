@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert, Button, Descriptions, Drawer, Empty, Grid, Input, List, Modal, Pagination,
   Select, Space, Spin, Table, Tag, Typography, message,
@@ -50,7 +50,15 @@ function issueLabel(row: Pick<DataQualityIssueListItem, "order_no" | "pn_std">) 
 
 function formatDateTime(value: string | null | undefined) {
   if (!value) return "—";
-  return value.replace("T", " ").replace("Z", "").slice(0, 16);
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value || "";
+  return `${part("year")}-${part("month")}-${part("day")} ${part("hour")}:${part("minute")}`;
 }
 
 function formatQuantity(quantity: number | null, unit: string | null) {
@@ -98,12 +106,15 @@ export default function DataQualityIssuesPanel() {
   const [rows, setRows] = useState<DataQualityIssueListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const [detail, setDetail] = useState<DataQualityIssueDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [note, setNote] = useState("");
   const [noteError, setNoteError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const listRequestSeq = useRef(0);
+  const detailRequestSeq = useRef(0);
 
   const ruleOptions = useMemo(() => {
     const byCode = new Map(RULE_OPTIONS.map((item) => [item.value, item]));
@@ -116,7 +127,9 @@ export default function DataQualityIssuesPanel() {
   }, [rows]);
 
   const load = useCallback(async (targetPage = page) => {
+    const requestSeq = ++listRequestSeq.current;
     setLoading(true);
+    setLoadError("");
     try {
       const data = await listDataQualityIssues({
         ...(status ? { status } : {}),
@@ -126,32 +139,46 @@ export default function DataQualityIssuesPanel() {
         page: targetPage,
         page_size: PAGE_SIZE,
       });
+      if (requestSeq !== listRequestSeq.current) return;
       setRows(data.items);
       setTotal(data.total);
       setPage(data.page || targetPage);
     } catch {
-      message.error("数据疑点加载失败，请稍后重试");
+      if (requestSeq === listRequestSeq.current) {
+        setRows([]);
+        setTotal(0);
+        setLoadError("数据疑点加载失败，当前筛选结果未显示。");
+        message.error("数据疑点加载失败，请稍后重试");
+      }
     } finally {
-      setLoading(false);
+      if (requestSeq === listRequestSeq.current) setLoading(false);
     }
   }, [page, query, ruleCode, side, status]);
 
   useEffect(() => { void load(1); }, [status, side, ruleCode, query]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const openDetail = async (row: DataQualityIssueListItem) => {
+    const requestSeq = ++detailRequestSeq.current;
+    setDetail(null);
     setDetailLoading(true);
     try {
-      setDetail(await getDataQualityIssue(row.id));
+      const loaded = await getDataQualityIssue(row.id);
+      if (requestSeq !== detailRequestSeq.current) return;
+      setDetail(loaded);
     } catch {
-      message.error("疑点详情加载失败，请稍后重试");
+      if (requestSeq === detailRequestSeq.current) {
+        setDetail(null);
+        message.error("疑点详情加载失败，请稍后重试");
+      }
     } finally {
-      setDetailLoading(false);
+      if (requestSeq === detailRequestSeq.current) setDetailLoading(false);
     }
   };
 
   const refreshDetail = async (id: number) => {
+    const requestSeq = ++detailRequestSeq.current;
     const fresh = await getDataQualityIssue(id);
-    setDetail(fresh);
+    if (requestSeq === detailRequestSeq.current) setDetail(fresh);
   };
 
   const beginAction = (action: PendingAction) => {
@@ -255,6 +282,16 @@ export default function DataQualityIssuesPanel() {
         />
       </Space>
 
+      {loadError && (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={loadError}
+          action={<Button size="small" onClick={() => void load(page)}>重试</Button>}
+        />
+      )}
+
       {isMobile ? (
         <Spin spinning={loading}>
           {rows.length ? (
@@ -290,7 +327,11 @@ export default function DataQualityIssuesPanel() {
       <Drawer
         open={!!detail || detailLoading}
         title={detail ? `疑点详情 · ${detail.order_no || `#${detail.id}`}` : "疑点详情"}
-        onClose={() => setDetail(null)}
+        onClose={() => {
+          detailRequestSeq.current += 1;
+          setDetail(null);
+          setDetailLoading(false);
+        }}
         placement={isMobile ? "bottom" : "right"}
         height={isMobile ? "100%" : undefined}
         width={isMobile ? undefined : 720}
@@ -415,7 +456,9 @@ function IssueDetail({ detail, priceRestricted }: { detail: DataQualityIssueDeta
           <Descriptions.Item label="发现时间">{formatDateTime(detail.detected_at)}</Descriptions.Item>
           <Descriptions.Item label="最近核实人">{detail.reviewed_by || "—"}</Descriptions.Item>
           <Descriptions.Item label="核实时间">{formatDateTime(detail.reviewed_at)}</Descriptions.Item>
-          <Descriptions.Item label="核实原因" span={2}>{detail.review_note || "尚无人工结论"}</Descriptions.Item>
+          <Descriptions.Item label="核实原因" span={2}>
+            {detail.review_note_restricted ? "无价格权限" : (detail.review_note || "尚无人工结论")}
+          </Descriptions.Item>
         </Descriptions>
         {!!detail.audits?.length && (
           <List
