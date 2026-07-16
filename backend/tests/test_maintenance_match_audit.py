@@ -75,7 +75,7 @@ def _load_fixture(db, batch) -> None:
 
 
 def _by_key(report: dict) -> dict[str, dict]:
-    return {row["key"]: row for row in report["buckets"]}
+    return {row["code"]: row for row in report["buckets"]}
 
 
 def test_six_buckets_are_exhaustive_mutually_exclusive_and_exact_hit_is_excluded(db, batch):
@@ -83,15 +83,15 @@ def test_six_buckets_are_exhaustive_mutually_exclusive_and_exact_hit_is_excluded
 
     report = maintenance_match_audit.build_report(db, sample_limit=5)
 
-    assert report["scope"]["lines_total"] == 7
-    assert report["exact_matched"]["count"] == 1
-    assert report["unmatched"]["count"] == 6
+    assert report["scope"]["total_line_count"] == 7
+    assert report["scope"]["exact_matched_line_count"] == 1
+    assert report["scope"]["unmatched_line_count"] == 6
     buckets = _by_key(report)
     assert set(buckets) == {
         "empty_request_no", "normalizable_format", "request_exists_pn_diff",
         "purchase_missing_request_no", "duplicate_candidates", "other",
     }
-    assert {key: row["count"] for key, row in buckets.items()} == {
+    assert {key: row["line_count"] for key, row in buckets.items()} == {
         "empty_request_no": 1,
         "normalizable_format": 1,
         "request_exists_pn_diff": 1,
@@ -99,11 +99,11 @@ def test_six_buckets_are_exhaustive_mutually_exclusive_and_exact_hit_is_excluded
         "duplicate_candidates": 1,
         "other": 1,
     }
-    assert report["invariant"] == {"bucket_sum": 6, "unmatched_count": 6, "ok": True}
+    assert report["invariant"] == {"bucket_sum": 6, "equals_unmatched": True}
     assert report["repairable"] == {
-        "count": 1,
-        "rate": pytest.approx(1 / 6),
-        "definition": "仅单号格式可规整且唯一命中同 PN 的技术候选；不会自动修复",
+        "line_count": 1,
+        "rate_of_unmatched": 0.166667,
+        "meaning": "技术上可规整候选；只读，不自动修改",
     }
 
 
@@ -194,7 +194,6 @@ def test_api_requires_auth_and_page_permission_and_returns_only_masked_samples(d
         headers={"Authorization": f"Bearer {allowed_token}"},
     )
     assert allowed.status_code == 200, allowed.text
-    assert allowed.json()["invariant"]["ok"] is True
+    assert allowed.json()["invariant"]["equals_unmatched"] is True
     assert "WBDD-20260101-0001" not in allowed.text
     assert "PN-FORMAT" not in allowed.text
-
