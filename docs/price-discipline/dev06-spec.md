@@ -71,25 +71,26 @@
     "violation_line_count": 3,
     "order_count": 2,
     "pool_count": 2,
-    "gap_amount": 1250.00
+    "total_gap": 1250.00
   },
   "sales": {
     "violation_line_count": 2,
     "order_count": 2,
     "pool_count": 1,
-    "gap_amount": 460.00
+    "total_gap": 460.00
   },
   "most_severe_pool": {
-    "group_id": 7,
+    "pool_group_id": 7,
     "pool_name": "4T 企业盘",
-    "purchase_gap_amount": 1250.00,
-    "sales_gap_amount": 460.00,
-    "total_gap_amount": 1710.00,
-    "violation_line_count": 5
+    "purchase_total_gap": 1250.00,
+    "sales_total_gap": 460.00,
+    "total_gap": 1710.00,
+    "violation_line_count": 5,
+    "dominant_side": "purchase"
   },
   "handler_summary": {
-    "purchase": [{"person": "张三", "violation_line_count": 2, "order_count": 1, "gap_amount": 900.00}],
-    "sales": [{"person": "李四", "violation_line_count": 2, "order_count": 2, "gap_amount": 460.00}]
+    "purchase": [{"person": "张三", "violation_line_count": 2, "order_count": 1, "total_gap": 900.00}],
+    "sales": [{"person": "李四", "violation_line_count": 2, "order_count": 2, "total_gap": 460.00}]
   },
   "recent_violations": [
     {
@@ -98,11 +99,11 @@
       "order_no": "CG-001",
       "order_date": "2026-07-16",
       "part_id": 42,
-      "pn": "PN-4T-A",
-      "group_id": 7,
+      "pn_std": "PN-4T-A",
+      "pool_group_id": 7,
       "pool_name": "4T 企业盘",
       "person": "张三",
-      "qty": 2,
+      "quantity": 2,
       "actual_unit_ex_tax": 900.00,
       "manual_limit_ex_tax": 800.00,
       "unit_gap": 100.00,
@@ -110,14 +111,17 @@
     }
   ],
   "missing_constraints": {
-    "purchase_pool_count": 4,
-    "sales_pool_count": 6,
-    "both_pool_count": 3
+    "active_pool_count": 20,
+    "purchase_ceiling_unset_count": 4,
+    "sales_floor_unset_count": 6,
+    "both_unset_count": 3
   }
 }
 ```
 
-所有新派生价格、差额、计数与排名字段必须进入池价格治理脱敏组；不能只遮金额而留下人员或排序侧信道。
+所有新派生价格和差额键必须进入池价格治理脱敏组。计数、人员、排名与记录条数
+不能使用 `order_count` 等全局通用键做递归遮罩（会误伤其它模块），而应在端点进入任何
+业务查询之前整体返回 `restricted=true` 的稳定空响应；不能只遮金额而留下人员或排序侧信道。
 
 订单下钻使用 `GET /api/dashboard/orders/{side}/{order_id}`。该只读端点沿用
 `page_boss_board`，内部复用已有订单详情和结构化脱敏；不得按不唯一的 `order_no`

@@ -517,6 +517,7 @@ export interface PriceDisciplinePoolSummary {
   sales_total_gap: number;
   total_gap: number;
   violation_line_count: number;
+  dominant_side: "purchase" | "sales" | "both";
 }
 
 export interface PriceDisciplineHandlerSummary {

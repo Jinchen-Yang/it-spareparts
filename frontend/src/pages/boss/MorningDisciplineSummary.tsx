@@ -65,16 +65,23 @@ function HandlerLines({ data }: { data: PriceDisciplineSummary["handler_summary"
   if (data.purchase.length === 0 && data.sales.length === 0) {
     return <span style={MUTED}>当前范围内无涉及经办人</span>;
   }
+  const renderPerson = (row: PriceDisciplineHandlerSummary, i: number) => (
+    <span key={`${row.person ?? "未记录"}-${i}`} style={{ marginRight: 8, fontSize: 12.5 }}>
+      {row.person || "未记录"} {row.violation_line_count}行/{row.order_count}单 ·
+      {moneyExact(row.total_gap)}
+    </span>
+  );
   const renderSide = (side: PriceDisciplineSide, rows: PriceDisciplineHandlerSummary[]) => (
     rows.length > 0 && (
       <div style={{ marginTop: 4 }}>
         <Tag color={side === "purchase" ? "orange" : "blue"}>{sideName(side)}</Tag>
-        {rows.slice(0, 3).map((row, i) => (
-          <span key={`${row.person ?? "未记录"}-${i}`} style={{ marginRight: 8, fontSize: 12.5 }}>
-            {row.person || "未记录"} {row.violation_line_count}行/{row.order_count}单 ·
-            {moneyExact(row.total_gap)}
-          </span>
-        ))}
+        {rows.slice(0, 3).map(renderPerson)}
+        {rows.length > 3 && (
+          <details style={{ marginTop: 4, fontSize: 12.5 }}>
+            <summary style={{ cursor: "pointer" }}>查看其余 {rows.length - 3} 人</summary>
+            <div style={{ marginTop: 4 }}>{rows.slice(3).map(renderPerson)}</div>
+          </details>
+        )}
       </div>
     )
   );
@@ -230,6 +237,13 @@ export default function MorningDisciplineSummary({ dateRange, localGovernanceRes
                   <div style={{ ...MUTED, marginTop: 2 }}>
                     采购 {moneyExact(data.most_severe_pool.purchase_total_gap)} ·
                     销售 {moneyExact(data.most_severe_pool.sales_total_gap)}
+                  </div>
+                  <div style={{ marginTop: 4 }}>
+                    <Tag color="orange">
+                      {data.most_severe_pool.dominant_side === "purchase" ? "价差主要来自采购"
+                        : data.most_severe_pool.dominant_side === "sales" ? "价差主要来自销售"
+                          : "采购与销售价差相同"}
+                    </Tag>
                   </div>
                 </>
               ) : <span style={MUTED}>当前范围内无越线池</span>}

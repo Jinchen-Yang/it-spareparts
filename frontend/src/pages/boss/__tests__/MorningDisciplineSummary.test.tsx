@@ -26,7 +26,7 @@ const SUMMARY = {
   sales: { violation_line_count: 2, order_count: 2, pool_count: 1, total_gap: 360 },
   most_severe_pool: {
     pool_group_id: 7, pool_name: "硬盘池", purchase_total_gap: 600,
-    sales_total_gap: 300, total_gap: 900, violation_line_count: 4,
+    sales_total_gap: 300, total_gap: 900, violation_line_count: 4, dominant_side: "purchase",
   },
   handler_summary: {
     purchase: [{ person: "张三", violation_line_count: 2, order_count: 1, total_gap: 600 }],
@@ -93,10 +93,28 @@ describe("早会价格纪律摘要", () => {
     expect(screen.getByText(/历史分析，只记录展示，不拦截订单/)).toBeInTheDocument();
     expect(screen.getByText(/次数和差额不等于员工评价/)).toBeInTheDocument();
     expect(screen.getByText("3 行 · 2 单 · 2 个池")).toBeInTheDocument();
+    expect(screen.getByText("价差主要来自采购")).toBeInTheDocument();
     expect(screen.getByText("最近 10 条越线记录")).toBeInTheDocument();
     expect(dashboardPriceDisciplineSummary).toHaveBeenCalledWith({
       date_from: "2026-07-01", date_to: "2026-07-15",
     });
+  });
+
+  it("经办人超过三人时可展开查看全部，不静默截断", async () => {
+    dashboardPriceDisciplineSummary.mockResolvedValue({ data: {
+      ...SUMMARY,
+      handler_summary: { ...SUMMARY.handler_summary, purchase: [
+        ...SUMMARY.handler_summary.purchase,
+        { person: "采购乙", violation_line_count: 1, order_count: 1, total_gap: 80 },
+        { person: "采购丙", violation_line_count: 1, order_count: 1, total_gap: 70 },
+        { person: "采购丁", violation_line_count: 1, order_count: 1, total_gap: 60 },
+      ] },
+    } });
+    renderSummary();
+    const summary = await screen.findByText("查看其余 1 人");
+    expect(screen.getByText(/采购丁 1行\/1单/)).not.toBeVisible();
+    fireEvent.click(summary);
+    expect(screen.getByText(/采购丁 1行\/1单/)).toBeVisible();
   });
 
   it("restricted=true 时不渲染任何次数、金额、人员或排行侧信道", async () => {
