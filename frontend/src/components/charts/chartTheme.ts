@@ -14,6 +14,8 @@ import { COLORS } from "../../theme";
 export const CHART_COLORS = {
   /** 销售额系列（=theme 强调蓝） */
   sales: COLORS.accent,
+  /** 强调点/选中标记（=theme 深强调蓝） */
+  emphasis: COLORS.accentStrong,
   /** 采购额系列（=theme 暖琥珀） */
   purchase: COLORS.warning,
   /** 毛利系列（图表专用绿，见文件头说明） */
@@ -30,6 +32,8 @@ export const CHART_COLORS = {
   crosshair: COLORS.text3,
   dataZoomFill: COLORS.accentSoft,
   dataZoomBorder: COLORS.accentSoftBorder,
+  /** 图表附属选中卡片背景 */
+  selectionBg: COLORS.accentSoft,
 } as const;
 
 export const CHART_THEME_NAME = "spareparts";

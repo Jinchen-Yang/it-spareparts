@@ -4,8 +4,8 @@ import type { ColumnsType } from "antd/es/table";
 import type { CustomSeriesOption } from "echarts/charts";
 import type { ECOption } from "./echartsCore";
 import EChartContainer from "./EChartContainer";
+import { CHART_COLORS } from "./chartTheme";
 import type { PoolPriceMapMember, PoolPriceMapResponse } from "../../api/poolAnalysis";
-import { COLORS } from "../../theme";
 import { EMPTY, escapeHtml, moneyExact, qty } from "../../utils/format";
 import { activatableProps } from "../../pages/purchases/shared";
 
@@ -24,12 +24,13 @@ type PriceMapGraphic =
   | { type: "text"; x: number; y: number;
     style: { text: string; fill: string; fontSize: number; verticalAlign: "middle" } };
 
-const muted: React.CSSProperties = { color: COLORS.text3 };
+const muted: React.CSSProperties = { color: CHART_COLORS.axisLabel };
 type QualityStatus = NonNullable<PoolPriceMapMember["latest_raw_record"]>["quality_status"];
 
 function qualityLabel(status: QualityStatus) {
   if (status === "confirmed_source_error") return "确认源数据错误";
   if (status === "open_or_source_changed") return "数据疑点";
+  if (status === "confirmed_valid") return "已确认有效";
   return "无疑点";
 }
 
@@ -58,7 +59,7 @@ export function buildPoolPnPriceMapOption(data: PoolPriceMapResponse): ECOption 
     const latest = api.value(5) as number | null;
     const member = data.members[category];
     const danger = isViolation(data.side, member?.current_reference?.relation);
-    const color = danger ? COLORS.danger : COLORS.accent;
+    const color = danger ? CHART_COLORS.profitNegative : CHART_COLORS.sales;
     const low = api.coord([minimum, category]);
     const high = api.coord([maximum, category]);
     const children: PriceMapGraphic[] = [
@@ -72,25 +73,25 @@ export function buildPoolPnPriceMapOption(data: PoolPriceMapResponse): ECOption 
     if (median != null) {
       const point = api.coord([median, category]);
       children.push({ type: "line", shape: { x1: point[0], y1: point[1] - 8,
-        x2: point[0], y2: point[1] + 8 }, style: { stroke: COLORS.text, lineWidth: 2 } });
+        x2: point[0], y2: point[1] + 8 }, style: { stroke: CHART_COLORS.text, lineWidth: 2 } });
     }
     if (average != null) {
       const point = api.coord([average, category]);
       children.push({ type: "polygon", shape: { points: [
         [point[0], point[1] - 7], [point[0] + 7, point[1]],
         [point[0], point[1] + 7], [point[0] - 7, point[1]],
-      ] }, style: { fill: danger ? COLORS.danger : COLORS.accentStrong,
-        stroke: COLORS.surface, lineWidth: 1 } });
+      ] }, style: { fill: danger ? CHART_COLORS.profitNegative : CHART_COLORS.emphasis,
+        stroke: CHART_COLORS.tooltipBg, lineWidth: 1 } });
     }
     if (latest != null) {
       const point = api.coord([latest, category]);
       children.push({ type: "circle", shape: { cx: point[0], cy: point[1], r: 4.5 },
-        style: { fill: COLORS.surface, stroke: COLORS.warning, lineWidth: 2 } });
+        style: { fill: CHART_COLORS.tooltipBg, stroke: CHART_COLORS.purchase, lineWidth: 2 } });
     }
     if (danger && member?.current_reference?.delta_amount != null) {
       children.push({ type: "text", x: high[0] + 8, y: high[1],
         style: { text: data.side === "purchase" ? "高于上限" : "低于下限",
-          fill: COLORS.danger, fontSize: 11, verticalAlign: "middle" } });
+          fill: CHART_COLORS.profitNegative, fontSize: 11, verticalAlign: "middle" } });
     }
     return { type: "group", children };
   };
@@ -98,14 +99,14 @@ export function buildPoolPnPriceMapOption(data: PoolPriceMapResponse): ECOption 
   const markData: Array<Record<string, unknown>> = [];
   if (data.pool_stats?.weighted_avg != null) {
     markData.push({ name: "池加权均价", xAxis: data.pool_stats.weighted_avg,
-      lineStyle: { color: COLORS.accent, type: "dashed", width: 1.5 },
-      label: { color: COLORS.accentStrong } });
+      lineStyle: { color: CHART_COLORS.sales, type: "dashed", width: 1.5 },
+      label: { color: CHART_COLORS.emphasis } });
   }
   if (data.current_constraint.value != null) {
     markData.push({ name: `当前${sideName}${data.side === "purchase" ? "上限" : "下限"}`,
       xAxis: data.current_constraint.value,
-      lineStyle: { color: COLORS.warning, type: "solid", width: 2 },
-      label: { color: COLORS.warning } });
+      lineStyle: { color: CHART_COLORS.purchase, type: "solid", width: 2 },
+      label: { color: CHART_COLORS.purchase } });
   }
   const seriesData = data.members.map((member, index) => [
     index, member.stats?.min ?? null, member.stats?.max ?? null,
@@ -139,7 +140,7 @@ export function buildPoolPnPriceMapOption(data: PoolPriceMapResponse): ECOption 
     },
     xAxis: { type: "value", name: `${sideName}未税单价`, nameLocation: "middle", nameGap: 30,
       axisLabel: { formatter: (value: number) => `¥${value.toLocaleString("zh-CN")}` },
-      splitLine: { lineStyle: { color: COLORS.borderSoft } } },
+      splitLine: { lineStyle: { color: CHART_COLORS.splitLine } } },
     yAxis: { type: "category", inverse: true,
       data: data.members.map((member) => member.pn_std ?? `#${member.part_id}`),
       axisLabel: { width: 102, overflow: "truncate", fontFamily: "monospace" } },
@@ -206,7 +207,7 @@ export default function PoolPnPriceMap({ data, loading, onPartOpen,
         const ref = member.current_reference;
         if (!ref) return <span style={muted}>{data.current_constraint.status === "unset" ? "未设置" : EMPTY}</span>;
         const danger = isViolation(data.side, ref.relation);
-        return <span style={{ color: danger ? COLORS.danger : COLORS.text2 }}>
+        return <span style={{ color: danger ? CHART_COLORS.profitNegative : CHART_COLORS.text2 }}>
           {danger ? (data.side === "purchase" ? "高于上限 " : "低于下限 ") : "范围内 "}
           {ref.delta_amount == null ? EMPTY : `${ref.delta_amount > 0 ? "+" : ""}${moneyExact(ref.delta_amount)}`}
         </span>;
@@ -234,10 +235,10 @@ export default function PoolPnPriceMap({ data, loading, onPartOpen,
   }
   return <div style={{ minWidth: 0 }}>
     <div style={{ display: "flex", gap: 12, flexWrap: "wrap", fontSize: 12,
-      color: COLORS.text2, marginBottom: 4 }} aria-label="价格图图例">
+      color: CHART_COLORS.text2, marginBottom: 4 }} aria-label="价格图图例">
       <span>粗线 最低—最高</span><span>│ 中位</span><span>◆ 数量加权均价</span>
-      <span style={{ color: COLORS.warning }}>○ 最近正式价</span>
-      <span style={{ color: COLORS.danger }}>红色 + 文字 = 当前约束越线</span>
+      <span style={{ color: CHART_COLORS.purchase }}>○ 最近正式价</span>
+      <span style={{ color: CHART_COLORS.profitNegative }}>红色 + 文字 = 当前约束越线</span>
     </div>
     <EChartContainer option={option} loading={loading} empty={!data.members.some((m) => m.stats)}
       emptyText="窗口内暂无正式参考价格"
@@ -250,7 +251,8 @@ export default function PoolPnPriceMap({ data, loading, onPartOpen,
       } }} />
 
     {selected && <div data-testid="price-map-selected" style={{ marginBlock: 10, padding: 12,
-      border: `1px solid ${COLORS.accentSoftBorder}`, borderRadius: 8, background: COLORS.accentSoft }}>
+      border: `1px solid ${CHART_COLORS.dataZoomBorder}`, borderRadius: 8,
+      background: CHART_COLORS.selectionBg }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
         <strong style={{ fontFamily: "monospace" }}>{selected.pn_std ?? `#${selected.part_id}`}</strong>
         {onPartOpen && <Button size="small" onClick={() => onPartOpen(selected.part_id)}>

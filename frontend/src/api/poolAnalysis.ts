@@ -203,7 +203,7 @@ export interface PoolPriceMapMember {
     order_date: string | null;
     employee: string | null;
     price_ex_tax: number | null;
-    quality_status: "none" | "open_or_source_changed" | "confirmed_source_error";
+    quality_status: "none" | "confirmed_valid" | "open_or_source_changed" | "confirmed_source_error";
   } | null;
   quality_counts: { suspected: number; confirmed_source_error: number } | null;
 }

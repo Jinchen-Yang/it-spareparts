@@ -121,6 +121,20 @@ describe("池内 PN 股票式价格图", () => {
     expect(open).toHaveBeenCalledWith(2);
   });
 
+  it("固定详情卡区分已确认有效与无疑点", () => {
+    const reviewed: PoolPriceMapResponse = {
+      ...DATA,
+      members: DATA.members.map((member) => member.part_id === 1 && member.latest_raw_record
+        ? { ...member, latest_raw_record: {
+          ...member.latest_raw_record, quality_status: "confirmed_valid" as const,
+        } } : member),
+    };
+    render(<PoolPnPriceMap data={reviewed} isMobile />);
+    act(() => lastChart().emit("click", { seriesName: "价格区间", dataIndex: 0 }));
+    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("已确认有效");
+    expect(screen.getByTestId("price-map-selected")).not.toHaveTextContent("无疑点");
+  });
+
   it("固定详情只保存 part_id：响应更新时取当前正式口径，成员消失时自动清空", () => {
     const { rerender } = render(<PoolPnPriceMap data={DATA} isMobile />);
     act(() => lastChart().emit("click", { seriesName: "价格区间", dataIndex: 1 }));

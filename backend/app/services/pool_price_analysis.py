@@ -187,6 +187,7 @@ def _price_map_latest_raw(db: Session, *, side: str, part_ids: list[int],
     line, order_model = context["line"], context["order"]
     is_error = _dq_exists(side, line.id, ("confirmed_source_error",))
     is_suspected = _dq_exists(side, line.id, ("open", "source_changed"))
+    is_valid = _dq_exists(side, line.id, ("confirmed_valid",))
     ranked = (
         select(
             line.part_id.label("part_id"), order_model.id.label("order_id"),
@@ -194,6 +195,7 @@ def _price_map_latest_raw(db: Session, *, side: str, part_ids: list[int],
             order_model.order_date.label("order_date"),
             context["employee"].label("employee"), context["price"].label("price_ex_tax"),
             is_error.label("is_error"), is_suspected.label("is_suspected"),
+            is_valid.label("is_valid"),
             func.row_number().over(
                 partition_by=line.part_id,
                 order_by=(order_model.order_date.desc(), order_model.id.desc(), line.id.desc()),
@@ -212,6 +214,8 @@ def _price_map_latest_raw(db: Session, *, side: str, part_ids: list[int],
             quality = "confirmed_source_error"
         elif row["is_suspected"]:
             quality = "open_or_source_changed"
+        elif row["is_valid"]:
+            quality = "confirmed_valid"
         else:
             quality = "none"
         out[row["part_id"]] = {

@@ -193,6 +193,40 @@ def test_price_map_purchase_keeps_all_members_and_separates_formal_from_raw_dq(
     assert employee["members"][1]["stats"] is None
 
 
+def test_price_map_latest_raw_quality_uses_full_review_priority(db, priced_pool):
+    """Latest raw status must retain the human-reviewed-valid state, while stronger
+    current warning/error states still win deterministically on the same fact row."""
+    batch = SysImportBatch(filename="price-map-valid.xlsx", file_type="purchase",
+                           file_hash="price-map-valid")
+    db.add(batch); db.flush()
+    loader.load(db, f.purchase_result({
+        "PV": f.purchase_head("PV", on=date(2026, 4, 5), purchaser="采购审核",
+                              is_tax_inclusive=True),
+    }, [f.purchase_line("PV", "PVL", "PA-B", qty="1", price="339")]), batch.id, AS_OF)
+    line = db.scalar(select(FPurchaseLine).where(FPurchaseLine.raw_line_id == "PVL"))
+    _dq_issue(db, side="purchase", line=line, status="confirmed_valid",
+              rule_code="reviewed_valid")
+    db.commit()
+
+    client = _client(db, "price_map_quality_priority", "readonly")
+    url = f"/api/pool-analysis/pools/{priced_pool['gid']}/price-map"
+    params = {"side": "purchase", "date_from": "2026-01-01", "date_to": AS_OF.isoformat()}
+
+    def latest_status() -> str:
+        body = client.get(url, params=params).json()
+        member = next(item for item in body["members"] if item["part_id"] == priced_pool["b"])
+        return member["latest_raw_record"]["quality_status"]
+
+    assert latest_status() == "confirmed_valid"
+    _dq_issue(db, side="purchase", line=line, status="open", rule_code="new_warning")
+    db.commit()
+    assert latest_status() == "open_or_source_changed"
+    _dq_issue(db, side="purchase", line=line, status="confirmed_source_error",
+              rule_code="source_error_after_review")
+    db.commit()
+    assert latest_status() == "confirmed_source_error"
+
+
 def test_price_map_sales_and_governance_restriction_are_structural(db, priced_pool):
     params = {"side": "sales", "date_from": "2026-01-01",
               "date_to": AS_OF.isoformat(), "sort": "weighted_avg", "order": "desc"}
