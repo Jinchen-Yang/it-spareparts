@@ -1,13 +1,16 @@
-"""互通池价格纪律的共享行口径。
+"""互通池价格纪律的共享行口径与窗口过滤。
 
 这里只定义“哪些历史行是有效价格事实”，不定义利润成本池。采购价格纪律覆盖全部
 已生效真实采购类型；利润引擎继续独立使用 ``COST_PURCHASE_TYPES``，两者不得混用。
 订单状态与日期窗口由调用方统一通过 ``active_orders`` / resolve_window 处理。
 """
+from datetime import date
+
 from sqlalchemy import and_
 
 from app.models.purchase import FPurchaseLine
 from app.models.sales import FSalesLine
+from app.services.query_filters import active_orders
 
 
 def purchase_priced_condition():
@@ -25,3 +28,11 @@ def sales_priced_condition():
         FSalesLine.unit_price.is_not(None), FSalesLine.unit_price > 0,
         FSalesLine.qty.is_not(None), FSalesLine.qty > 0,
     )
+
+
+def apply_price_window(stmt, order_model, lower: date | None, upper: date):
+    """统一应用已生效与闭区间日期上限；空 lower 表示不限制历史起点。"""
+    stmt = active_orders(stmt, order_model)
+    if lower is not None:
+        stmt = stmt.where(order_model.order_date >= lower)
+    return stmt.where(order_model.order_date <= upper)

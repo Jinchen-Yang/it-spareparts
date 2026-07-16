@@ -29,8 +29,11 @@ from app.services.pricing import (
     purchase_ex_unit as _purchase_ex_unit,
     sale_ex_unit as _sale_ex_unit,
 )
-from app.services.pool_price_rules import purchase_priced_condition, sales_priced_condition
-from app.services.query_filters import active_orders
+from app.services.pool_price_rules import (
+    apply_price_window as _window,
+    purchase_priced_condition,
+    sales_priced_condition,
+)
 
 
 def _r(x, n=2):
@@ -95,13 +98,6 @@ def _purchase_priced():
 def _sales_priced():
     """销售计价行过滤条件（计营收 + 单价>0，复审 P1-6 口径）。"""
     return sales_priced_condition()
-
-
-def _window(stmt, order_model, date_from: date | None, upper: date):
-    stmt = active_orders(stmt, order_model)
-    if date_from:
-        stmt = stmt.where(order_model.order_date >= date_from)
-    return stmt.where(order_model.order_date <= upper)
 
 
 def purchase_group_stats(db: Session, date_from: date | None, upper: date,
