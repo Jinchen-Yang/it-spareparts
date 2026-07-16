@@ -119,7 +119,7 @@ GET /api/maintenance/match-audit?sample_limit=5
 - 新建 `services/maintenance_match_audit.py`，只执行固定次数的只读查询和内存归因；不得调用 `maintenance_cost.recompute()`。
 - 新建独立 `api/maintenance_audit.py`，避免与后续维保主流程改造共享 `api/maintenance.py`。
 - `main.py` 仅增加路由注册。
-- 不修改 `models`、迁移、ETL、`maintenance_cost.py`、前端、库存、利润或权限模板。
+- 除把正式精确键抽到共享 `exact_match_key`（语义保持不变）外，不修改 `models`、迁移、ETL、成本引擎逻辑、前端、库存、利润或权限模板。
 - 分类主路径固定 2 次查询；有样例时增加 1 次有界预览查询（最多 60 个 loose key、最多返回 180 行），总查询不超过 3 次且不随业务行数增长。采购明细先在 SQL 按采购单+part 聚合，Python 索引只保留分类所需订单集合和按 part 的合格订单计数。
 - 每桶只保存整数计数和前 `sample_limit` 个待补样例；主索引不得构造候选预览。`sample_limit=0` 时不得构造任何样例/候选预览字典，也不得执行第三次预览查询。
 
