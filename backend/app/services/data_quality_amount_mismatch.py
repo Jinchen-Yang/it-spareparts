@@ -5,7 +5,8 @@ import hashlib
 import json
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import Integer, String, any_, bindparam, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Session
 
 from app.etl import anomaly, mapping
@@ -71,9 +72,9 @@ def _evidence(line, *, current_match: bool = True) -> dict:
 
 def detect_imported_lines(
     db: Session, *, file_type: str, raw_line_ids: list[str],
-    detected_by: str | None, commit: bool = False,
+    detected_by: str | None,
 ) -> dict:
-    """检测一次导入实际触及的当前事实行；默认加入调用方事务。"""
+    """检测一次导入实际触及的当前事实行；始终加入调用方事务。"""
     empty = {
         "scanned": 0, "matched": 0, "created": 0,
         "refreshed": 0, "unchanged": 0, "source_changed": 0,
@@ -83,31 +84,54 @@ def detect_imported_lines(
 
     side = "purchase" if file_type == mapping.PURCHASE else "sales"
     model = FPurchaseLine if side == "purchase" else FSalesLine
+    unique_raw_ids = sorted(set(raw_line_ids))
     rows = db.scalars(
-        select(model).where(model.raw_line_id.in_(set(raw_line_ids))).order_by(model.id)
+        select(model).where(
+            model.raw_line_id == any_(bindparam(
+                "detector_raw_line_ids", type_=ARRAY(String()),
+            ))
+        ).order_by(model.id),
+        {"detector_raw_line_ids": unique_raw_ids},
     ).all()
     stats = {**empty, "scanned": len(rows)}
     actor = (detected_by or "").strip() or SYSTEM_DETECTOR
+    if not rows:
+        return stats
+    issues = db.scalars(
+        select(FactDataQualityIssue).where(
+            FactDataQualityIssue.side == side,
+            FactDataQualityIssue.rule_code == RULE_CODE,
+            FactDataQualityIssue.line_id == any_(bindparam(
+                "detector_line_ids", type_=ARRAY(Integer()),
+            )),
+        ).with_for_update(),
+        {"detector_line_ids": [line.id for line in rows]},
+    ).all()
+    issue_by_line_id = {issue.line_id: issue for issue in issues}
 
     for line in rows:
         matched = RULE_CODE in anomaly.line_flags(
             line.qty, line.unit_price, line.line_amount,
         )
-        existing = db.scalar(select(FactDataQualityIssue).where(
-            FactDataQualityIssue.side == side,
-            FactDataQualityIssue.line_id == line.id,
-            FactDataQualityIssue.rule_code == RULE_CODE,
-        ))
+        existing = issue_by_line_id.get(line.id)
         if not matched:
             if existing is None:
+                continue
+            evidence = _evidence(line, current_match=False)
+            fingerprint = _fingerprint(side, line)
+            if data_quality.detection_issue_is_current(
+                existing, line, rule_version=RULE_VERSION,
+                evidence=evidence, source_fingerprint=fingerprint,
+                expected_status="source_changed",
+            ):
+                stats["unchanged"] += 1
                 continue
             prior_version = existing.version
             result = data_quality.mark_issue_source_changed(
                 db, side=side, line_id=line.id, rule_code=RULE_CODE,
                 rule_version=RULE_VERSION,
-                evidence=_evidence(line, current_match=False),
-                source_fingerprint=_fingerprint(side, line), detected_by=actor,
-                commit=commit,
+                evidence=evidence,
+                source_fingerprint=fingerprint, detected_by=actor,
             )
             if result is not None and result["version"] != prior_version:
                 stats["source_changed"] += 1
@@ -116,11 +140,18 @@ def detect_imported_lines(
             continue
         stats["matched"] += 1
         prior_version = existing.version if existing is not None else None
+        evidence = _evidence(line)
+        fingerprint = _fingerprint(side, line)
+        if existing is not None and data_quality.detection_issue_is_current(
+            existing, line, rule_version=RULE_VERSION,
+            evidence=evidence, source_fingerprint=fingerprint,
+        ):
+            stats["unchanged"] += 1
+            continue
         result = data_quality.create_or_refresh_issue(
             db, side=side, line_id=line.id, rule_code=RULE_CODE,
-            rule_version=RULE_VERSION, evidence=_evidence(line),
-            source_fingerprint=_fingerprint(side, line), detected_by=actor,
-            commit=commit,
+            rule_version=RULE_VERSION, evidence=evidence,
+            source_fingerprint=fingerprint, detected_by=actor,
         )
         if existing is None:
             stats["created"] += 1

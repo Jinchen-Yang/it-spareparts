@@ -6,10 +6,12 @@ from datetime import date
 from decimal import Decimal
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from app.auth import hash_password
+from app.db import engine
 from app.main import app
 from app.etl import loader, mapping, pipeline
 from app.models.data_quality import FactDataQualityIssue
@@ -180,6 +182,11 @@ def test_changed_source_that_still_matches_invalidates_old_conclusion(db, tmp_pa
     assert current.detected_by == "王小环"
     assert batch.report_json["data_quality_detection"]["refreshed"] == 1
     assert batch.report_json["data_quality_detection"]["source_changed"] == 1
+    logs = db.scalars(select(SysAuditLog).where(
+        SysAuditLog.entity_type == "data_quality_issue",
+        SysAuditLog.entity_id == issue.id,
+    ).order_by(SysAuditLog.id)).all()
+    assert [log.action for log in logs] == ["create", "decision", "source_changed"]
 
 
 def test_detector_joins_the_import_transaction_instead_of_committing_early(db, tmp_path):
@@ -191,6 +198,168 @@ def test_detector_joins_the_import_transaction_instead_of_committing_early(db, t
     assert db.scalar(select(func.count()).select_from(FactDataQualityIssue)) == 1
 
     db.rollback()
+
+    assert db.scalar(select(func.count()).select_from(FactDataQualityIssue)) == 0
+    assert db.scalar(select(func.count()).select_from(FPurchaseLine)) == 0
+    assert db.scalar(select(func.count()).select_from(SysImportBatch)) == 0
+    assert db.scalar(select(func.count()).select_from(SysAuditLog)) == 0
+
+
+def test_detector_accepts_seventy_thousand_raw_ids_without_parameter_expansion(db):
+    batch = SysImportBatch(
+        filename="70k.xlsx", file_type="purchase", file_hash="detector-70k",
+        uploaded_by="大批导入员", status="success",
+    )
+    db.add(batch)
+    db.flush()
+    loader.load(
+        db,
+        f.purchase_result(
+            {"O-70K": f.purchase_head("O-70K", on=date(2026, 7, 16))},
+            [f.purchase_line("O-70K", "L-REAL", "PN-REAL", qty="2", price="10")],
+        ),
+        batch.id,
+        date(2026, 7, 16),
+    )
+    db.commit()
+
+    ids = ["L-REAL", *(f"L-MISSING-{index}" for index in range(69_999))]
+    result = detector.detect_imported_lines(
+        db, file_type=mapping.PURCHASE, raw_line_ids=ids,
+        detected_by="大批导入员",
+    )
+
+    assert result["scanned"] == 1
+    assert result["matched"] == 0
+
+
+def test_one_thousand_normal_lines_use_two_read_queries(db):
+    batch = SysImportBatch(
+        filename="1000.xlsx", file_type="purchase", file_hash="detector-1000",
+        uploaded_by="批量导入员", status="success",
+    )
+    db.add(batch)
+    db.flush()
+    lines = [
+        f.purchase_line("O-1000", f"L-{index}", f"PN-{index}", qty="2", price="10")
+        for index in range(1000)
+    ]
+    loader.load(
+        db,
+        f.purchase_result(
+            {"O-1000": f.purchase_head("O-1000", on=date(2026, 7, 16))}, lines,
+        ),
+        batch.id,
+        date(2026, 7, 16),
+    )
+    db.commit()
+    statements: list[str] = []
+
+    def count_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", count_statement)
+    try:
+        result = detector.detect_imported_lines(
+            db, file_type=mapping.PURCHASE,
+            raw_line_ids=[f"L-{index}" for index in range(1000)],
+            detected_by="批量导入员",
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", count_statement)
+
+    assert result["scanned"] == 1000
+    assert result["matched"] == 0
+    assert len(statements) == 2, statements
+
+
+def test_one_thousand_lines_with_ten_new_issues_use_declared_query_budget(db):
+    batch = SysImportBatch(
+        filename="1000-mixed.xlsx", file_type="purchase", file_hash="detector-1000-mixed",
+        uploaded_by="批量导入员", status="success",
+    )
+    db.add(batch)
+    db.flush()
+    lines = []
+    for index in range(1000):
+        line = f.purchase_line("O-MIXED", f"LM-{index}", f"PNM-{index}",
+                               qty="2", price="10")
+        if index < 10:
+            line["line_amount"] = Decimal("25")
+        lines.append(line)
+    loader.load(
+        db,
+        f.purchase_result(
+            {"O-MIXED": f.purchase_head("O-MIXED", on=date(2026, 7, 16))}, lines,
+        ),
+        batch.id,
+        date(2026, 7, 16),
+    )
+    db.commit()
+    statements: list[str] = []
+
+    def count_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", count_statement)
+    try:
+        result = detector.detect_imported_lines(
+            db, file_type=mapping.PURCHASE,
+            raw_line_ids=[f"LM-{index}" for index in range(1000)],
+            detected_by="批量导入员",
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", count_statement)
+
+    assert result["scanned"] == 1000
+    assert result["matched"] == 10
+    assert result["created"] == 10
+    # 固定读预算 2 条（事实 + 已有疑点）；每条新写入最多 4 条
+    # （advisory lock、并发复核、疑点 INSERT、审计 INSERT）。
+    assert len(statements) == 2 + 4 * 10, statements
+
+
+def test_second_issue_write_failure_rolls_back_the_whole_import_transaction(db):
+    batch = SysImportBatch(
+        filename="atomic-nth.xlsx", file_type="purchase", file_hash="atomic-nth",
+        uploaded_by="原子导入员", status="processing",
+    )
+    db.add(batch)
+    db.flush()
+    lines = []
+    for index in range(2):
+        line = f.purchase_line("O-NTH", f"L-NTH-{index}", f"PN-NTH-{index}",
+                               qty="2", price="10")
+        line["line_amount"] = Decimal("25")
+        lines.append(line)
+    loader.load(
+        db,
+        f.purchase_result(
+            {"O-NTH": f.purchase_head("O-NTH", on=date(2026, 7, 16))}, lines,
+        ),
+        batch.id,
+        date(2026, 7, 16),
+    )
+    inserts = 0
+
+    def fail_second_issue(_conn, _cursor, statement, _parameters, _context, _executemany):
+        nonlocal inserts
+        if statement.startswith("INSERT INTO fact_data_quality_issue"):
+            inserts += 1
+            if inserts == 2:
+                raise RuntimeError("simulated second issue write failure")
+
+    event.listen(engine, "before_cursor_execute", fail_second_issue)
+    try:
+        with pytest.raises(RuntimeError, match="second issue"):
+            detector.detect_imported_lines(
+                db, file_type=mapping.PURCHASE,
+                raw_line_ids=["L-NTH-0", "L-NTH-1"],
+                detected_by="原子导入员",
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_second_issue)
+        db.rollback()
 
     assert db.scalar(select(func.count()).select_from(FactDataQualityIssue)) == 0
     assert db.scalar(select(func.count()).select_from(FPurchaseLine)) == 0
@@ -256,7 +425,7 @@ def _seed_history_for_preview(db):
     ))
     detector.detect_imported_lines(
         db, file_type=mapping.PURCHASE, raw_line_ids=["PL-BAD"],
-        detected_by="历史导入员", commit=False,
+        detected_by="历史导入员",
     )
     db.commit()
     return purchase_line

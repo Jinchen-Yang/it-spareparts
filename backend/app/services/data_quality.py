@@ -110,12 +110,51 @@ def _issue_dict(issue: FactDataQualityIssue) -> dict[str, Any]:
     }
 
 
+def detection_issue_is_current(
+    issue: FactDataQualityIssue, source, *, rule_version: str, evidence: dict,
+    source_fingerprint: str, expected_status: str | None = None,
+) -> bool:
+    """批量检测器预取并锁定疑点后，用同一条件安全跳过无变化行。"""
+    return not any((
+        issue.part_id != source.part_id,
+        issue.rule_version != rule_version,
+        issue.evidence != evidence,
+        issue.source_fingerprint != source_fingerprint,
+        expected_status is not None and issue.status != expected_status,
+    ))
+
+
+def _transition_detected_issue(
+    db: Session, issue: FactDataQualityIssue, source, *, rule_version: str,
+    evidence: dict, source_fingerprint: str, detected_by: str,
+    status: str | None, action: str, reason: str | None = None,
+) -> dict:
+    """检测刷新/源变化的共用状态转换；事务边界始终属于调用方。"""
+    before = _audit_snapshot(issue)
+    issue.part_id = source.part_id
+    issue.import_batch_id = source.import_batch_id
+    issue.rule_version = rule_version
+    issue.evidence = evidence
+    issue.source_fingerprint = source_fingerprint
+    issue.detected_by = detected_by
+    issue.detected_at = _now()
+    if status is not None:
+        issue.status = status
+    issue.version += 1
+    issue.updated_at = _now()
+    _add_audit(
+        db, issue, action=action, before=before,
+        operated_by=detected_by, reason=reason,
+    )
+    db.flush()
+    return _issue_dict(issue)
+
+
 def create_or_refresh_issue(
     db: Session, *, side: str, line_id: int, rule_code: str, rule_version: str,
     evidence: dict, source_fingerprint: str, detected_by: str,
-    commit: bool = True,
 ) -> dict:
-    """内部检测器写入口；重复信号幂等，源变化会使既有结论失效。"""
+    """内部检测器写入口；只 flush，事务提交/回滚统一属于调用方。"""
     rule_code = _required(rule_code, "rule_code")
     rule_version = _required(rule_version, "rule_version")
     source_fingerprint = _required(source_fingerprint, "source_fingerprint")
@@ -143,48 +182,29 @@ def create_or_refresh_issue(
         db.add(issue)
         db.flush()
         _add_audit(db, issue, action="create", before=None, operated_by=detected_by)
-        if commit:
-            db.commit()
-        else:
-            db.flush()
-        db.refresh(issue)
-        return _issue_dict(issue)
-
-    changed = any((
-        issue.part_id != source.part_id,
-        issue.rule_version != rule_version,
-        issue.evidence != evidence,
-        issue.source_fingerprint != source_fingerprint,
-    ))
-    if not changed:
-        return _issue_dict(issue)
-
-    before = _audit_snapshot(issue)
-    fingerprint_changed = issue.source_fingerprint != source_fingerprint
-    issue.part_id = source.part_id
-    issue.import_batch_id = source.import_batch_id
-    issue.rule_version = rule_version
-    issue.evidence = evidence
-    issue.source_fingerprint = source_fingerprint
-    issue.detected_by = detected_by
-    issue.detected_at = _now()
-    if fingerprint_changed and issue.status in _DECISIONS:
-        issue.status = "source_changed"
-    issue.version += 1
-    issue.updated_at = _now()
-    _add_audit(db, issue, action="refresh", before=before, operated_by=detected_by)
-    if commit:
-        db.commit()
-    else:
         db.flush()
-    db.refresh(issue)
-    return _issue_dict(issue)
+        return _issue_dict(issue)
+
+    if detection_issue_is_current(
+        issue, source, rule_version=rule_version, evidence=evidence,
+        source_fingerprint=source_fingerprint,
+    ):
+        return _issue_dict(issue)
+
+    fingerprint_changed = issue.source_fingerprint != source_fingerprint
+    source_changed = fingerprint_changed and issue.status in _DECISIONS
+    return _transition_detected_issue(
+        db, issue, source, rule_version=rule_version, evidence=evidence,
+        source_fingerprint=source_fingerprint, detected_by=detected_by,
+        status="source_changed" if source_changed else None,
+        action="source_changed" if source_changed else "refresh",
+        reason=("源数据变化后旧核实结论失效" if source_changed else None),
+    )
 
 
 def mark_issue_source_changed(
     db: Session, *, side: str, line_id: int, rule_code: str, rule_version: str,
     evidence: dict, source_fingerprint: str, detected_by: str,
-    commit: bool = True,
 ) -> dict | None:
     """让不再命中规则的既有疑点失效；没有既有疑点时不新建。"""
     rule_code = _required(rule_code, "rule_code")
@@ -203,36 +223,17 @@ def mark_issue_source_changed(
     ).with_for_update())
     if issue is None:
         return None
-    changed = any((
-        issue.part_id != source.part_id,
-        issue.rule_version != rule_version,
-        issue.evidence != evidence,
-        issue.source_fingerprint != source_fingerprint,
-        issue.status != "source_changed",
-    ))
-    if not changed:
+    if detection_issue_is_current(
+        issue, source, rule_version=rule_version, evidence=evidence,
+        source_fingerprint=source_fingerprint, expected_status="source_changed",
+    ):
         return _issue_dict(issue)
-    before = _audit_snapshot(issue)
-    issue.part_id = source.part_id
-    issue.import_batch_id = source.import_batch_id
-    issue.rule_version = rule_version
-    issue.evidence = evidence
-    issue.source_fingerprint = source_fingerprint
-    issue.status = "source_changed"
-    issue.detected_by = detected_by
-    issue.detected_at = _now()
-    issue.version += 1
-    issue.updated_at = _now()
-    _add_audit(
-        db, issue, action="source_changed", before=before, operated_by=detected_by,
+    return _transition_detected_issue(
+        db, issue, source, rule_version=rule_version, evidence=evidence,
+        source_fingerprint=source_fingerprint, detected_by=detected_by,
+        status="source_changed", action="source_changed",
         reason="源数据变化后当前已不再命中金额疑点规则",
     )
-    if commit:
-        db.commit()
-    else:
-        db.flush()
-    db.refresh(issue)
-    return _issue_dict(issue)
 
 
 def _locked_issue(
