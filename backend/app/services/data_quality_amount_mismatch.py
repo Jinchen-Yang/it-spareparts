@@ -49,7 +49,9 @@ def _fingerprint(side: str, line) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _evidence(line, *, current_match: bool = True) -> dict:
+def _evidence(
+    line, *, current_match: bool = True, detection_source: str = "etl_import",
+) -> dict:
     expected = (
         line.qty * line.unit_price
         if line.qty is not None and line.unit_price is not None else None
@@ -66,7 +68,7 @@ def _evidence(line, *, current_match: bool = True) -> dict:
         "absolute_difference": _decimal_text(difference),
         "tolerance": _decimal_text(anomaly.AMOUNT_TOL),
         "current_match": current_match,
-        "detection_source": "etl_import",
+        "detection_source": detection_source,
     }
 
 
@@ -170,6 +172,7 @@ def _preview_sample(side: str, line, *, action: str) -> dict:
         current_match=(
             RULE_CODE in anomaly.line_flags(line.qty, line.unit_price, line.line_amount)
         ),
+        detection_source="historical_scan",
     )
     return {
         "side": side,

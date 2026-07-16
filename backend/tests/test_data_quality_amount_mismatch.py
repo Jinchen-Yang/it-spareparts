@@ -462,6 +462,9 @@ def test_history_preview_is_deterministic_and_read_only_for_business_numbers(db)
         ("purchase", "PL-BAD", "unchanged"),
         ("sales", "SL-BAD", "would_create"),
     ]
+    assert {sample["detection_source"] for sample in first["samples"]} == {
+        "historical_scan",
+    }
     assert db.scalar(select(func.count()).select_from(FactDataQualityIssue)) == before_issue_count
     assert db.scalar(select(func.count()).select_from(SysAuditLog)) == before_audit_count
     assert dashboard.kpi(
