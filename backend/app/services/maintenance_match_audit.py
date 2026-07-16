@@ -254,4 +254,3 @@ def build_report(db: Session, *, sample_limit: int = 5) -> dict:
             "equals_unmatched": bucket_sum == unmatched,
         },
     }
-

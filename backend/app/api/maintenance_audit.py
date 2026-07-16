@@ -25,4 +25,3 @@ def match_audit(
 ) -> dict:
     record_access_log(ctx, "match_audit", "maintenance", {"sample_limit": sample_limit})
     return maintenance_match_audit.build_report(db, sample_limit=sample_limit)
-
