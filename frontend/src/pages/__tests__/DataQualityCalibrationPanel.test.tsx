@@ -112,11 +112,11 @@ describe("规则校准预览", () => {
     const samples = screen.getByLabelText("确定性抽样样本");
     expect(within(samples).getByText("PN-4T")).toBeInTheDocument();
     expect(within(samples).getByText("本次变贵")).toBeInTheDocument();
-    expect(within(samples).getByText("CG-1")).toBeInTheDocument();
-    expect(within(samples).getByText("CG-2")).toBeInTheDocument();
     expect(within(samples).getByText("2.50 倍")).toBeInTheDocument();
-    expect(within(samples).getByText("¥400.00")).toBeInTheDocument();
-    expect(within(samples).getByText("¥1,000.00")).toBeInTheDocument();
+    expect(within(samples).getByText("CG-1 · 2026-07-01")).toBeInTheDocument();
+    expect(within(samples).getByText("CG-2 · 2026-07-15")).toBeInTheDocument();
+    expect(within(samples).getByText(/¥400.00 · 1 块 · 原值不含税/)).toBeInTheDocument();
+    expect(within(samples).getByText(/¥1,000.00 · 2 块 · 含税或未知，已÷1.13换算/)).toBeInTheDocument();
   });
 
   it("无采购成本权限时给出明确无权限状态，且绝不发送预览请求", async () => {

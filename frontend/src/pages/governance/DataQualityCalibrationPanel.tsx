@@ -333,10 +333,14 @@ function CalibrationSamples({ samples, isMobile }: {
     { title: "档位", dataIndex: "threshold", width: 76, render: (value) => `${value} 倍` },
     { title: "方向", dataIndex: "direction", width: 110, render: directionTag },
     { title: "倍率", dataIndex: "ratio", width: 90, align: "right", render: (value) => `${value.toFixed(2)} 倍` },
-    { title: "前一笔单号", key: "previous_order", width: 150, render: (_, row) => row.previous.order_no },
-    { title: "前一笔未税价", key: "previous_price", width: 130, align: "right", render: (_, row) => formatMoney(row.previous.unit_price_ex_tax) },
-    { title: "本次单号", key: "current_order", width: 150, render: (_, row) => row.current.order_no },
-    { title: "本次未税价", key: "current_price", width: 130, align: "right", render: (_, row) => formatMoney(row.current.unit_price_ex_tax) },
+    {
+      title: "前一笔采购", key: "previous", width: 280,
+      render: (_, row) => <SampleLine title="前一笔" line={row.previous} hideTitle />,
+    },
+    {
+      title: "本次采购", key: "current", width: 280,
+      render: (_, row) => <SampleLine title="本次" line={row.current} hideTitle />,
+    },
   ];
   return (
     <Table
@@ -350,13 +354,14 @@ function CalibrationSamples({ samples, isMobile }: {
   );
 }
 
-function SampleLine({ title, line }: {
+function SampleLine({ title, line, hideTitle = false }: {
   title: string;
   line: PurchasePriceCalibrationSample["current"];
+  hideTitle?: boolean;
 }) {
   return (
     <div>
-      <Text type="secondary">{title}</Text>
+      {!hideTitle && <Text type="secondary">{title}</Text>}
       <div>{line.order_no || "无单号"} · {line.order_date}</div>
       <div>{formatMoney(line.unit_price_ex_tax)} · {line.quantity.toLocaleString()}{line.unit ? ` ${line.unit}` : ""} · {taxBasisLabel(line.tax_basis)}</div>
     </div>

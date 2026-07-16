@@ -46,10 +46,18 @@ def purchase_price_preview(
             "开始日期不能晚于截止日期，且校准预览不包含未来记录",
         )
     normalized_type = purchase_type.strip() if purchase_type else None
-    return svc.purchase_price_preview(
-        db,
-        date_from=date_from,
-        date_to=effective_to,
-        purchase_type=normalized_type or None,
-        sample_limit=sample_limit,
-    )
+    try:
+        return svc.purchase_price_preview(
+            db,
+            date_from=date_from,
+            date_to=effective_to,
+            purchase_type=normalized_type or None,
+            sample_limit=sample_limit,
+        )
+    except svc.CalibrationPreviewTimeout as exc:
+        # statement_timeout 会使当前事务进入失败态；先回滚再交还连接池。
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "规则校准预览查询超时，请缩小日期范围后重试",
+        ) from exc

@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
 
 from app import permissions
 from app.auth import hash_password
@@ -14,6 +15,7 @@ from app.models.data_quality import FactDataQualityIssue
 from app.models.dimensions import DimPart
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.system import SysAuditLog, SysImportBatch, SysUser
+from app.services import data_quality_calibration as calibration_svc
 
 
 PASSWORD = "pw123456"
@@ -48,7 +50,8 @@ def _seed_calibration_facts(db) -> dict[str, object]:
     )
     part_a = DimPart(pn_std="CAL-A", description="校准盘 A")
     part_b = DimPart(pn_std="CAL-B", description="校准盘 B")
-    db.add_all([batch, part_a, part_b])
+    part_c = DimPart(pn_std="CAL-C", description="校准盘 C")
+    db.add_all([batch, part_a, part_b, part_c])
     db.flush()
 
     sequence = 0
@@ -114,6 +117,17 @@ def _seed_calibration_facts(db) -> dict[str, object]:
     add_line(
         part=part_b, day=date(2026, 7, 2), purchase_type="销售订单",
         price="100", tax_inclusive=False,
+    )
+
+    # 两笔都含税，未税价数学上仍精确为 2 倍。若除税值被错误压回 Money
+    # 两位小数，200→100 会变成约 1.9999 并漏掉 2 倍档。
+    add_line(
+        part=part_c, day=date(2026, 6, 30), purchase_type="销售订单",
+        price="200", tax_inclusive=True,
+    )
+    add_line(
+        part=part_c, day=date(2026, 7, 1), purchase_type="销售订单",
+        price="100", tax_inclusive=True,
     )
 
     # 指定采购单独分区：10 -> 100，倍率 10↑。
@@ -183,8 +197,8 @@ def test_purchase_price_preview_stats_tax_direction_and_deterministic_samples(db
 
     assert payload["rule_code"] == "purchase_adjacent_price_ratio"
     assert payload["rule_version"] == "preview-v1"
-    assert payload["eligible_pairs"] == 5
-    assert payload["distinct_parts"] == 2
+    assert payload["eligible_pairs"] == 6
+    assert payload["distinct_parts"] == 3
     assert payload["data_through"] == "2026-07-02"
     assert payload["parameters"] == {
         "date_from": "2026-07-01",
@@ -194,22 +208,22 @@ def test_purchase_price_preview_stats_tax_direction_and_deterministic_samples(db
     }
 
     expected = {
-        2: (4, 3, 1),
+        2: (5, 3, 2),
         3: (4, 3, 1),
         5: (3, 2, 1),
         10: (2, 2, 0),
     }
     for multiplier, (candidates, increased, decreased) in expected.items():
         row = _threshold(payload, multiplier)
-        assert row["eligible_pairs"] == 5
+        assert row["eligible_pairs"] == 6
         assert row["candidate_pairs"] == candidates
-        assert row["candidate_rate"] == candidates / 5
+        assert row["candidate_rate"] == candidates / 6
         assert row["increased_pairs"] == increased
         assert row["decreased_pairs"] == decreased
 
     sales = _purchase_type(payload, "销售订单")
     designated = _purchase_type(payload, "指定采购")
-    assert sales["eligible_pairs"] == 4
+    assert sales["eligible_pairs"] == 5
     assert designated["eligible_pairs"] == 1
     assert _threshold(sales, 10)["candidate_pairs"] == 1
     assert _threshold(designated, 10)["candidate_pairs"] == 1
@@ -221,9 +235,9 @@ def test_purchase_price_preview_stats_tax_direction_and_deterministic_samples(db
                     if row["purchase_type"] == "销售订单"
                     and row["direction"] == "decrease")
     assert increase["comparable_pairs"] == 2
-    assert decrease["comparable_pairs"] == 1
+    assert decrease["comparable_pairs"] == 2
     assert _threshold(increase, 5)["candidate_rate"] == 0.5
-    assert _threshold(decrease, 5)["candidate_rate"] == 1.0
+    assert _threshold(decrease, 5)["candidate_rate"] == 0.5
 
     # 时间窗只限制“本次”：6/30 的未税 100 仍是 7/1 的前值。
     pair = next(item for item in payload["samples"]
@@ -364,7 +378,7 @@ def test_preview_validates_date_range_and_sample_limit(db, monkeypatch):
     )
     assert default_window.status_code == 200, default_window.text
     # 默认截止今日，7/20 的未来行不能变成可比对。
-    assert default_window.json()["eligible_pairs"] == 5
+    assert default_window.json()["eligible_pairs"] == 6
     backwards = client.get("/api/data-quality/calibration/purchase-price", params={
         "date_from": "2026-07-10", "date_to": "2026-07-01",
     })
@@ -375,3 +389,67 @@ def test_preview_validates_date_range_and_sample_limit(db, monkeypatch):
     assert client.get(
         "/api/data-quality/calibration/purchase-price", params={"sample_limit": 21},
     ).status_code == 422
+
+
+def test_data_through_reports_latest_valid_row_even_without_a_pair(db):
+    batch = SysImportBatch(
+        filename="单笔采购.xlsx", file_type="purchase",
+        file_hash="calibration-single", uploaded_by="测试导入员", status="success",
+    )
+    part = DimPart(pn_std="CAL-SINGLE", description="只有一笔的型号")
+    db.add_all([batch, part])
+    db.flush()
+    order = FPurchaseOrder(
+        raw_order_id="cal-single-order", order_no="CG-SINGLE-001",
+        order_date=date(2026, 7, 8), source_type="单笔采购",
+        is_tax_inclusive=False, data_status="已生效", import_batch_id=batch.id,
+    )
+    db.add(order)
+    db.flush()
+    db.add(FPurchaseLine(
+        raw_line_id="cal-single-line", order_id=order.id, line_no=1,
+        part_id=part.id, pn_std=part.pn_std, qty=Decimal("1"), unit="块",
+        unit_price=Decimal("100"), line_amount=Decimal("100"),
+        import_batch_id=batch.id,
+    ))
+    db.commit()
+
+    client = _client(db, "calibration_single", page=True, cost=True)
+    response = client.get("/api/data-quality/calibration/purchase-price", params={
+        "date_from": "2026-07-01", "date_to": "2026-07-10",
+        "purchase_type": "单笔采购",
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["eligible_pairs"] == 0
+    assert response.json()["data_through"] == "2026-07-08"
+
+
+def test_service_sets_transaction_local_timeout(db):
+    _seed_calibration_facts(db)
+    calibration_svc.purchase_price_preview(
+        db, date_from=date(2026, 7, 1), date_to=date(2026, 7, 10),
+        purchase_type=None, sample_limit=1,
+    )
+    assert db.execute(text("SHOW statement_timeout")).scalar_one() == "3s"
+    db.rollback()
+    assert db.execute(text("SHOW statement_timeout")).scalar_one() == "0"
+
+
+def test_timeout_returns_retryable_error_and_rolls_back(db, monkeypatch):
+    client = _client(db, "calibration_timeout", page=True, cost=True)
+    rolled_back: list[bool] = []
+    original_rollback = Session.rollback
+
+    def timeout(*_args, **_kwargs):
+        raise calibration_svc.CalibrationPreviewTimeout("模拟超时")
+
+    def record_rollback(session):
+        rolled_back.append(True)
+        return original_rollback(session)
+
+    monkeypatch.setattr(calibration_svc, "purchase_price_preview", timeout)
+    monkeypatch.setattr(Session, "rollback", record_rollback)
+    response = client.get("/api/data-quality/calibration/purchase-price")
+    assert response.status_code == 503
+    assert response.json()["detail"] == "规则校准预览查询超时，请缩小日期范围后重试"
+    assert rolled_back

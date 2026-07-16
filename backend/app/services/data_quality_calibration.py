@@ -8,9 +8,25 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
-from sqlalchemy import Integer, String, case, cast, column, func, literal, select, true, union_all, values
+from sqlalchemy import (
+    Integer,
+    Numeric,
+    String,
+    case,
+    cast,
+    column,
+    func,
+    literal,
+    select,
+    text,
+    true,
+    union_all,
+    values,
+)
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
+from app import config
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.services.pricing import purchase_ex_unit
 
@@ -19,6 +35,11 @@ RULE_CODE = "purchase_adjacent_price_ratio"
 RULE_VERSION = "preview-v1"
 THRESHOLDS = (2, 3, 5, 10)
 EMPTY_PURCHASE_TYPE = "(空)"
+STATEMENT_TIMEOUT_MS = 3_000
+
+
+class CalibrationPreviewTimeout(RuntimeError):
+    """校准预览超过只读查询保护时限。"""
 
 
 def _rate(candidate: int, eligible: int) -> float:
@@ -67,7 +88,11 @@ def purchase_price_preview(
     四个固定倍率不会重复扫描四次事实表。
     """
     normalized_type = func.coalesce(FPurchaseOrder.source_type, EMPTY_PURCHASE_TYPE)
-    normalized_price = purchase_ex_unit()
+    # Money 是 NUMERIC(14,2)。直接拿除税表达式继续做比值时，SQLAlchemy 会在
+    # “前值 / 本次值”分支把本次值重新 CAST 回两位小数，导致精确 2 倍变成
+    # 1.9999 而漏判。先把正式未税表达式提升到无固定 scale 的 NUMERIC
+    # （不截断除税循环小数），再做 lag/ratio。
+    normalized_price = cast(purchase_ex_unit(), Numeric())
     tax_basis = case(
         (FPurchaseOrder.is_tax_inclusive.is_(False), "ex_tax"),
         (FPurchaseOrder.is_tax_inclusive.is_(True), "inc_tax"),
@@ -89,7 +114,7 @@ def purchase_price_preview(
         normalized_price.label("current_unit_price_ex_tax"),
         tax_basis.label("current_tax_basis"),
     ).join(FPurchaseOrder, FPurchaseOrder.id == FPurchaseLine.order_id).where(
-        FPurchaseOrder.data_status == "已生效",
+        FPurchaseOrder.data_status == config.ACTIVE_STATUS,
         FPurchaseOrder.order_date.is_not(None),
         FPurchaseOrder.order_date <= date_to,
         FPurchaseLine.part_id.is_not(None),
@@ -151,12 +176,18 @@ def purchase_price_preview(
         column("multiplier", Integer), name="calibration_threshold_values",
     ).data([(value,) for value in THRESHOLDS]).cte("calibration_thresholds")
 
+    data_through_stmt = select(func.max(priced.c.current_order_date))
+    if date_from is not None:
+        data_through_stmt = data_through_stmt.where(
+            priced.c.current_order_date >= date_from,
+        )
     meta = select(
         literal("meta").label("kind"),
         func.jsonb_build_object(
             "eligible_pairs", func.count(),
             "distinct_parts", func.count(func.distinct(pairs.c.part_id)),
-            "data_through", func.max(pairs.c.current_order_date),
+            # 有筛选范围内的有效采购、但尚未形成相邻对时也要给出真实截止日。
+            "data_through", data_through_stmt.scalar_subquery(),
         ).label("payload"),
     ).select_from(pairs)
 
@@ -228,7 +259,14 @@ def purchase_price_preview(
     ).where(ranked_samples.c.sample_rank <= sample_limit)
 
     combined = union_all(meta, stats, samples).subquery("calibration_result")
-    result_rows = db.execute(select(combined.c.kind, combined.c.payload)).all()
+    # 该窗口查询当前快照约 300ms；失败上限防慢计划或锁等待占满 worker/连接池。
+    db.execute(text(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT_MS}ms'"))
+    try:
+        result_rows = db.execute(select(combined.c.kind, combined.c.payload)).all()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) == "57014":
+            raise CalibrationPreviewTimeout("规则校准预览查询超时") from exc
+        raise
 
     meta_payload = next((row.payload for row in result_rows if row.kind == "meta"), {})
     raw_stats = [row.payload for row in result_rows if row.kind == "stat"]
