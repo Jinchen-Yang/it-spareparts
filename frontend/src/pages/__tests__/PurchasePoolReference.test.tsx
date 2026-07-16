@@ -13,8 +13,11 @@ vi.mock("../../api", () => ({
   listRecentPurchases: (...args: unknown[]) => listRecentPurchases(...args),
 }));
 vi.mock("../../components/pools/PoolReferencePanel", () => ({
-  default: ({ partId, side }: { partId: number; side: string }) => (
-    <div data-testid={`pool-reference-${partId}`}>池价格参考 {partId} {side}</div>
+  default: ({ partId, side, range, dateFrom, dateTo }: {
+    partId: number; side: string; range?: string; dateFrom?: string; dateTo?: string;
+  }) => (
+    <div data-testid={`pool-reference-${partId}`} data-range={range}
+      data-from={dateFrom} data-to={dateTo}>池价格参考 {partId} {side}</div>
   ),
 }));
 
@@ -68,12 +71,16 @@ describe("采购页池身份与同源参考卡", () => {
     const { container } = routes("analysis");
     await screen.findByText("PN-4T");
     expect(screen.getByRole("link", { name: "查看互通池 4T 硬盘池" }))
-      .toHaveAttribute("href", "/pool-analysis/7?range=90d&pn=PN-4T");
+      .toHaveAttribute("href", "/pool-analysis/7?range=custom&from=2026-07-01&to=2026-07-07&pn=PN-4T");
 
     const expand = container.querySelector<HTMLButtonElement>(".ant-table-row-expand-icon");
     if (expand) fireEvent.click(expand);
     else fireEvent.click(screen.getByRole("button", { name: "查看型号 PN-4T 的采购分析与逐笔比价" }));
-    expect(await screen.findByTestId("pool-reference-42")).toHaveTextContent("purchase");
+    const reference = await screen.findByTestId("pool-reference-42");
+    expect(reference).toHaveTextContent("purchase");
+    expect(reference).toHaveAttribute("data-range", "custom");
+    expect(reference).toHaveAttribute("data-from", "2026-07-01");
+    expect(reference).toHaveAttribute("data-to", "2026-07-07");
     await waitFor(() => expect(fetchPurchaseDrill).toHaveBeenCalled());
   });
 
@@ -85,6 +92,8 @@ describe("采购页池身份与同源参考卡", () => {
     const expand = container.querySelector<HTMLButtonElement>(".ant-table-row-expand-icon");
     if (expand) fireEvent.click(expand);
     else fireEvent.click(screen.getByRole("button", { name: "查看采购记录 PN-4T 详情" }));
-    expect(await screen.findByTestId("pool-reference-42")).toHaveTextContent("purchase");
+    const reference = await screen.findByTestId("pool-reference-42");
+    expect(reference).toHaveTextContent("purchase");
+    expect(reference).toHaveAttribute("data-range", "30d");
   });
 });

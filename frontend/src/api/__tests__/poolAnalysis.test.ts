@@ -5,6 +5,7 @@ vi.mock("../../api", () => ({ api: { get, post } }));
 
 import {
   fetchPoolAnalysis,
+  fetchPoolAnalysisOrderDetail,
   fetchPoolAnalysisList,
   fetchPoolReference,
   fetchPoolReferences,
@@ -21,6 +22,16 @@ describe("互通池分析专用 API 契约", () => {
     expect(get).toHaveBeenCalledWith("/pool-analysis/pools/7", { params: {
       range: "custom", date_from: "2026-07-01", date_to: "2026-07-15",
     } });
+  });
+
+  it("采购类型筛选和专用订单详情使用池分析读端点", async () => {
+    get.mockResolvedValue({ data: { items: [] } });
+    await fetchPoolAnalysisList({ range: "90d", purchase_type: "销售订单" });
+    await fetchPoolAnalysisOrderDetail("purchase", 77);
+    expect(get).toHaveBeenNthCalledWith(1, "/pool-analysis/pools", {
+      params: { range: "90d", purchase_type: "销售订单" },
+    });
+    expect(get).toHaveBeenNthCalledWith(2, "/pool-analysis/orders/purchase/77");
   });
 
   it("分析清单和详情只调用 /pool-analysis 读端点", async () => {

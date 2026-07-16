@@ -41,7 +41,9 @@ const reference = (over: Partial<PoolReference> = {}): PoolReference => ({
 
 afterEach(cleanup);
 
-function renderCard(value: PoolReference, props: { side?: "both" | "purchase" | "sales" } = {}) {
+function renderCard(value: PoolReference, props: {
+  side?: "both" | "purchase" | "sales"; forceRestricted?: boolean;
+} = {}) {
   render(<MemoryRouter><PoolReferenceCard reference={value} {...props} /></MemoryRouter>);
 }
 
@@ -78,31 +80,46 @@ describe("PoolReferenceCard", () => {
       relation_to_constraint: null,
     }) }), { side: "purchase" });
 
-    expect(screen.getByText("无价格权限")).toBeInTheDocument();
-    expect(screen.getByText(/采购价格无权限/)).toBeInTheDocument();
+    expect(screen.getByText("无池价格权限")).toBeInTheDocument();
+    expect(screen.getByText(/采购无池价格权限/)).toBeInTheDocument();
     expect(screen.queryByText(/采购 0 单/)).toBeNull();
     expect(screen.queryByText("¥0.00")).not.toBeInTheDocument();
     expect(screen.queryByText("未设置")).not.toBeInTheDocument();
   });
 
-  it("仅约束价受限时仍展示池价格统计，但隐藏人工约束", () => {
+  it("治理权限受限时不能通过池统计或约束差额反推价格", () => {
     renderCard(reference({ purchase_reference: side({
       constraint: { status: "restricted", value: null },
       delta_to_constraint: null,
       relation_to_constraint: null,
     }) }), { side: "purchase" });
 
-    const purchase = screen.getByLabelText("采购参考");
-    expect(purchase).toHaveTextContent("池均价 ¥698.20");
-    expect(purchase).toHaveTextContent("中位 ¥682.30");
-    expect(purchase).toHaveTextContent("无约束价权限");
+    const purchase = screen.getByLabelText("采购参考（无池价格权限）");
+    expect(purchase).toHaveTextContent("无池价格权限");
+    expect(purchase).not.toHaveTextContent("¥698.20");
     expect(screen.queryByText(/人工约束.*34\.34/)).toBeNull();
-    expect(screen.queryByText("无价格权限")).toBeNull();
   });
 
   it("没有加入互通池时给出事实提示，不渲染价格", () => {
     renderCard(reference({ pool: null }));
     expect(screen.getByText("该型号尚未加入互通池")).toBeInTheDocument();
     expect(screen.queryByText(/池均价/)).not.toBeInTheDocument();
+  });
+
+  it("自定义窗口深链保留起止日期与当前 PN", () => {
+    renderCard(reference({ window: {
+      range: "custom", date_from: "2026-05-01", date_to: "2026-05-20",
+    } }));
+    expect(screen.getByRole("link", { name: "查看互通池详情" })).toHaveAttribute(
+      "href",
+      "/pool-analysis/12?range=custom&from=2026-05-01&to=2026-05-20&pn=ST4000NM0035",
+    );
+  });
+
+  it("本地权限首屏先收紧：即使响应误带金额也不渲染", () => {
+    renderCard(reference(), { forceRestricted: true });
+    expect(screen.getAllByText("无池价格权限")).toHaveLength(2);
+    expect(screen.queryByText("¥698.20")).toBeNull();
+    expect(screen.queryByText("¥1,198.50")).toBeNull();
   });
 });

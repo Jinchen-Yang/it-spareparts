@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Input, Segmented, Table, Tag } from "antd";
+import { Alert, Button, Card, DatePicker, Input, Segmented, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import dayjs from "dayjs";
 import { Link, useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import {
@@ -10,6 +11,10 @@ import {
   type PoolAnalysisRange,
   type PoolReferenceSide,
 } from "../api/poolAnalysis";
+import { strictIsoDateRange } from "../utils/date";
+import { useLocalRestrictions } from "./boss/shared";
+
+const { RangePicker } = DatePicker;
 
 const RANGE_OPTIONS = [
   { label: "近 30 天", value: "30d" },
@@ -24,14 +29,14 @@ const money = (value: number | null | undefined) => value == null ? null : `¥${
   maximumFractionDigits: 2,
 })}`;
 
-function PriceSummary({ side, kind }: { side: PoolReferenceSide; kind: "purchase" | "sales" }) {
-  if (side.restricted) {
-    return <Tag aria-label={`${kind === "purchase" ? "采购" : "销售"}价格无权限`}>无价格权限</Tag>;
+function PriceSummary({ side, kind, forceRestricted = false }: {
+  side: PoolReferenceSide; kind: "purchase" | "sales"; forceRestricted?: boolean;
+}) {
+  if (forceRestricted || side.restricted || side.constraint.status === "restricted") {
+    return <Tag aria-label={`${kind === "purchase" ? "采购" : "销售"}池价格无权限`}>无池价格权限</Tag>;
   }
   const limitName = kind === "purchase" ? "人工上限" : "人工下限";
-  const limit = side.constraint.status === "restricted"
-    ? "无约束价权限"
-    : side.constraint.status === "unset" ? "未设置" : money(side.constraint.value) || "未设置";
+  const limit = side.constraint.status === "unset" ? "未设置" : money(side.constraint.value) || "未设置";
   return (
     <div style={{ display: "grid", gap: 3, fontSize: 12.5, lineHeight: 1.45 }}>
       <span>均价 <b>{money(side.pool_stats?.weighted_avg) || "暂无样本"}</b></span>
@@ -54,9 +59,14 @@ function readPage(value: string | null): number {
  * 筛选以 URL 为唯一真值源，复制链接、刷新、前进后退都会重放同一范围。
  */
 export default function PoolsPage() {
+  const local = useLocalRestrictions();
   const [sp, setSp] = useSearchParams();
-  const rawRange = sp.get("range") || "90d";
-  const range = (VALID_RANGES.has(rawRange) ? rawRange : "90d") as PoolAnalysisRange;
+  const parsedCustom = strictIsoDateRange(sp.get("from"), sp.get("to"));
+  const hasCustomInput = sp.has("from") || sp.has("to") || sp.get("range") === "custom";
+  const invalidWindow = hasCustomInput && !parsedCustom;
+  const rawRange = parsedCustom ? "custom" : sp.get("range") || "90d";
+  const invalidRange = rawRange !== "custom" && !VALID_RANGES.has(rawRange);
+  const range = (invalidRange ? "90d" : rawRange) as PoolAnalysisRange;
   const q = sp.get("q") || "";
   const page = readPage(sp.get("page"));
   const [searchText, setSearchText] = useState(q);
@@ -69,15 +79,22 @@ export default function PoolsPage() {
   useEffect(() => setSearchText(q), [q]);
 
   useEffect(() => {
+    if (invalidWindow || invalidRange) return;
     const seq = ++requestSeq.current;
     setLoading(true);
     setError(false);
-    fetchPoolAnalysisList({ range, q: q || undefined, page, page_size: 20 })
+    fetchPoolAnalysisList({
+      range,
+      ...(parsedCustom ? { date_from: parsedCustom.from, date_to: parsedCustom.to } : {}),
+      q: q || undefined,
+      page,
+      page_size: 20,
+    })
       .then((result) => { if (seq === requestSeq.current) setData(result); })
       .catch(() => { if (seq === requestSeq.current) setError(true); })
       .finally(() => { if (seq === requestSeq.current) setLoading(false); });
     return () => { requestSeq.current += 1; };
-  }, [range, q, page, reload]);
+  }, [range, parsedCustom?.from, parsedCustom?.to, invalidWindow, invalidRange, q, page, reload]);
 
   const patchUrl = (next: Record<string, string | number | undefined>) => {
     const merged = new URLSearchParams(sp);
@@ -88,6 +105,12 @@ export default function PoolsPage() {
     setSp(merged, { replace: false });
   };
 
+  const detailQuery = new URLSearchParams({ range });
+  if (parsedCustom) {
+    detailQuery.set("from", parsedCustom.from);
+    detailQuery.set("to", parsedCustom.to);
+  }
+
   const columns = useMemo<ColumnsType<PoolAnalysisListItem>>(() => [
     {
       title: "互通池",
@@ -97,7 +120,7 @@ export default function PoolsPage() {
       render: (_, row) => (
         <div style={{ display: "grid", gap: 4 }}>
           <Link
-            to={`/pool-analysis/${row.group_id}?range=${range}`}
+            to={`/pool-analysis/${row.group_id}?${detailQuery.toString()}`}
             aria-label={`查看${row.name}价格详情`}
             style={{ fontWeight: 600 }}
           >
@@ -112,18 +135,21 @@ export default function PoolsPage() {
       title: "采购参考（统一未税）",
       key: "purchase",
       width: 220,
-      render: (_, row) => <PriceSummary side={row.purchase_reference} kind="purchase" />,
+      render: (_, row) => <PriceSummary side={row.purchase_reference} kind="purchase"
+        forceRestricted={local.governance} />,
     },
     {
       title: "销售参考（统一未税）",
       key: "sales",
       width: 220,
-      render: (_, row) => <PriceSummary side={row.sales_reference} kind="sales" />,
+      render: (_, row) => <PriceSummary side={row.sales_reference} kind="sales"
+        forceRestricted={local.governance} />,
     },
-  ], [range]);
+  ], [detailQuery.toString(), local.governance]);
 
   return (
-    <>
+    <div data-testid="pool-analysis-list-page"
+      style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowX: "hidden" }}>
       <PageHeader
         title="互通池价格分析"
         subtitle="复盘已经发生的采购与销售价格；所有记录都保留，越过人工约束只做警示。"
@@ -134,8 +160,33 @@ export default function PoolsPage() {
             aria-label="统计时间范围"
             options={RANGE_OPTIONS}
             value={range}
-            onChange={(value) => patchUrl({ range: value === "90d" ? undefined : String(value), page: undefined })}
+            onChange={(value) => patchUrl({
+              range: value === "90d" ? undefined : String(value),
+              from: undefined,
+              to: undefined,
+              page: undefined,
+            })}
           />
+          <span aria-label="自定义统计日期">
+            <RangePicker
+              size="small"
+              allowClear
+              value={parsedCustom ? [dayjs(parsedCustom.from), dayjs(parsedCustom.to)] : null}
+              disabledDate={(day) => day.isAfter(dayjs(), "day")}
+              onChange={(value) => {
+                if (value?.[0] && value[1]) {
+                  patchUrl({
+                    range: "custom",
+                    from: value[0].format("YYYY-MM-DD"),
+                    to: value[1].format("YYYY-MM-DD"),
+                    page: undefined,
+                  });
+                } else {
+                  patchUrl({ range: undefined, from: undefined, to: undefined, page: undefined });
+                }
+              }}
+            />
+          </span>
           <Input.Search
             aria-label="搜索互通池"
             placeholder="池名 / 成员 PN / 描述"
@@ -150,7 +201,14 @@ export default function PoolsPage() {
           </span>
         </div>
 
-        {error ? (
+        {invalidWindow || invalidRange ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="无效的统计时间范围"
+            description="自定义日期必须同时提供真实的开始和结束日期，且开始日期不能晚于结束日期。"
+          />
+        ) : error ? (
           <Alert
             type="error"
             showIcon
@@ -177,6 +235,6 @@ export default function PoolsPage() {
           />
         )}
       </Card>
-    </>
+    </div>
   );
 }

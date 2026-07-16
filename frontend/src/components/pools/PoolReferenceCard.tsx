@@ -10,6 +10,7 @@ export interface PoolReferenceCardProps {
   reference: PoolReference;
   side?: "both" | PoolAnalysisSide;
   compact?: boolean;
+  forceRestricted?: boolean;
 }
 
 const money = (value: number | null) => value == null
@@ -26,15 +27,17 @@ function deltaLabel(value: number | null, target: "池均价" | "人工约束") 
   return `${direction}${target}${value === 0 ? "" : ` ${amount}`}`;
 }
 
-function PriceSide({ kind, value }: { kind: PoolAnalysisSide; value: PoolReferenceSide }) {
+function PriceSide({ kind, value, forceRestricted = false }: {
+  kind: PoolAnalysisSide; value: PoolReferenceSide; forceRestricted?: boolean;
+}) {
   const title = kind === "purchase" ? "采购参考" : "销售参考";
   const limitLabel = kind === "purchase" ? "人工上限" : "人工下限";
 
-  if (value.restricted) {
+  if (forceRestricted || value.restricted || value.constraint.status === "restricted") {
     return (
-      <div style={sidePanelStyle} aria-label={`${title}（无价格权限）`}>
+      <div style={sidePanelStyle} aria-label={`${title}（无池价格权限）`}>
         <strong>{title}</strong>
-        <Tag color="default" style={{ marginInlineStart: 8 }}>无价格权限</Tag>
+        <Tag color="default" style={{ marginInlineStart: 8 }}>无池价格权限</Tag>
         <div style={mutedStyle}>价格、约束差额与越线状态已按权限隐藏</div>
       </div>
     );
@@ -48,9 +51,8 @@ function PriceSide({ kind, value }: { kind: PoolAnalysisSide; value: PoolReferen
       <div style={metricsStyle}>
         <span>池均价 <b>{money(pool?.weighted_avg ?? null) || "暂无样本"}</b></span>
         <span>中位 <b>{money(pool?.median ?? null) || "暂无样本"}</b></span>
-        <span>{limitLabel} <b>{value.constraint.status === "restricted"
-          ? "无约束价权限"
-          : value.constraint.status === "unset" ? "未设置" : money(value.constraint.value) || "未设置"}</b></span>
+        <span>{limitLabel} <b>{value.constraint.status === "unset"
+          ? "未设置" : money(value.constraint.value) || "未设置"}</b></span>
       </div>
       <div style={{ ...metricsStyle, marginTop: 6 }}>
         <span>本型号均价 <b>{money(part?.weighted_avg ?? null) || "暂无样本"}</b></span>
@@ -59,7 +61,7 @@ function PriceSide({ kind, value }: { kind: PoolAnalysisSide; value: PoolReferen
             {deltaLabel(value.delta_to_pool_avg, "池均价")}
           </Tag>
         )}
-        {value.constraint.status !== "restricted" && deltaLabel(value.delta_to_constraint, "人工约束") && (
+        {deltaLabel(value.delta_to_constraint, "人工约束") && (
           <Tag color={kind === "purchase"
             ? (value.relation_to_constraint === "above" ? "volcano" : "green")
             : (value.relation_to_constraint === "below" ? "volcano" : "green")}>
@@ -95,6 +97,7 @@ export default function PoolReferenceCard({
   reference,
   side = "both",
   compact = false,
+  forceRestricted = false,
 }: PoolReferenceCardProps) {
   const label = `${reference.pn_std || "当前型号"} 的池价格参考`;
   if (!reference.pool) {
@@ -107,13 +110,19 @@ export default function PoolReferenceCard({
 
   const qs = new URLSearchParams();
   if (reference.window.range) qs.set("range", reference.window.range);
+  if (reference.window.range === "custom" && reference.window.date_from && reference.window.date_to) {
+    qs.set("from", reference.window.date_from);
+    qs.set("to", reference.window.date_to);
+  }
   if (reference.pn_std) qs.set("pn", reference.pn_std);
   const sides: PoolAnalysisSide[] = side === "both" ? ["purchase", "sales"] : [side];
-  const purchaseSamples = reference.purchase_reference.restricted
-    ? "采购价格无权限"
+  const purchaseSamples = forceRestricted || reference.purchase_reference.restricted
+    || reference.purchase_reference.constraint.status === "restricted"
+    ? "采购无池价格权限"
     : `采购 ${reference.purchase_reference.pool_stats?.order_count ?? 0} 单`;
-  const salesSamples = reference.sales_reference.restricted
-    ? "销售价格无权限"
+  const salesSamples = forceRestricted || reference.sales_reference.restricted
+    || reference.sales_reference.constraint.status === "restricted"
+    ? "销售无池价格权限"
     : `销售 ${reference.sales_reference.pool_stats?.order_count ?? 0} 单`;
   const sampleText = [
     purchaseSamples,
@@ -146,6 +155,7 @@ export default function PoolReferenceCard({
               key={kind}
               kind={kind}
               value={kind === "purchase" ? reference.purchase_reference : reference.sales_reference}
+              forceRestricted={forceRestricted}
             />
           ))}
         </div>
