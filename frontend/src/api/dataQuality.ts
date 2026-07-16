@@ -8,6 +8,10 @@ export type DataQualityIssueStatus =
 
 export type DataQualityIssueSide = "purchase" | "sales";
 export type DataQualityDecision = "confirmed_valid" | "confirmed_source_error";
+export type DataQualityEvidenceValue =
+  | string | number | boolean | null
+  | DataQualityEvidenceValue[]
+  | { [key: string]: DataQualityEvidenceValue };
 
 export interface DataQualityIssueListItem {
   id: number;
@@ -27,6 +31,7 @@ export interface DataQualityIssueListItem {
   import_batch_name: string | null;
   updated_at: string;
   version: number;
+  price_restricted: boolean;
 }
 
 export interface DataQualityIssuePage {
@@ -76,10 +81,74 @@ export interface DataQualityIssueDetail extends DataQualityIssueListItem {
   reviewed_at: string | null;
   review_note: string | null;
   fact: DataQualityIssueFact;
-  evidence: Record<string, string | number | boolean | null>;
+  evidence: Record<string, DataQualityEvidenceValue>;
+  evidence_restricted: boolean;
   order: DataQualityIssueOrder;
   batch: DataQualityIssueBatch | null;
   audits: DataQualityIssueAudit[];
+}
+
+interface DataQualityWireBatch {
+  id: number;
+  filename: string | null;
+  file_type: string | null;
+  uploaded_by: string | null;
+  uploaded_at: string | null;
+}
+
+interface DataQualityWireFact {
+  order_id: number | null;
+  order_no: string | null;
+  order_date: string | null;
+  purchaser: string | null;
+  salesperson: string | null;
+  part_id: number | null;
+  pn_std: string | null;
+  description: string | null;
+  qty: number | null;
+  unit: string | null;
+  unit_price: number | null;
+  line_amount: number | null;
+  batch: DataQualityWireBatch | null;
+}
+
+interface DataQualityWireAudit {
+  action: string;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  reason: string | null;
+  operated_by: string | null;
+  operated_at: string;
+}
+
+interface DataQualityWireIssue {
+  id: number;
+  status: DataQualityIssueStatus;
+  side: DataQualityIssueSide;
+  rule_code: string;
+  rule_version: string;
+  version: number;
+  import_batch_id: number | null;
+  detected_by: string | null;
+  detected_at: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  review_note: string | null;
+  created_at: string;
+  updated_at: string;
+  fact: DataQualityWireFact | null;
+  evidence?: Record<string, DataQualityEvidenceValue> | null;
+  audit?: DataQualityWireAudit[];
+  price_restricted?: boolean;
+  evidence_restricted?: boolean;
+}
+
+interface DataQualityWirePage {
+  total: number;
+  page: number;
+  page_size: number;
+  items: DataQualityWireIssue[];
+  price_restricted?: boolean;
 }
 
 export interface ListDataQualityIssuesParams {
@@ -105,22 +174,94 @@ export interface ReopenDataQualityIssueBody {
 /**
  * 数据疑点接口的唯一适配层。页面不直接拼路径，也不依赖 AxiosResponse，后端契约若微调只改这里。
  */
+function normalizeBase(wire: DataQualityWireIssue, pageRestricted = false): DataQualityIssueListItem {
+  const fact = wire.fact;
+  const priceRestricted = pageRestricted || wire.price_restricted === true;
+  return {
+    id: wire.id,
+    status: wire.status,
+    side: wire.side,
+    order_date: fact?.order_date ?? null,
+    order_no: fact?.order_no ?? null,
+    pn_std: fact?.pn_std ?? null,
+    handler: fact?.purchaser ?? fact?.salesperson ?? null,
+    quantity: fact?.qty ?? null,
+    unit: fact?.unit ?? null,
+    unit_price: priceRestricted ? null : fact?.unit_price ?? null,
+    rule_code: wire.rule_code,
+    rule_label: null,
+    import_batch_id: wire.import_batch_id,
+    import_batch_name: fact?.batch?.filename ?? null,
+    updated_at: wire.updated_at,
+    version: wire.version,
+    price_restricted: priceRestricted,
+  };
+}
+
+function normalizeDetail(wire: DataQualityWireIssue): DataQualityIssueDetail {
+  const base = normalizeBase(wire);
+  const fact = wire.fact;
+  const batch = fact?.batch;
+  return {
+    ...base,
+    detected_by: wire.detected_by,
+    detected_at: wire.detected_at,
+    reviewed_by: wire.reviewed_by,
+    reviewed_at: wire.reviewed_at,
+    review_note: wire.review_note,
+    fact: {
+      description: fact?.description ?? null,
+      brand: null,
+      quantity: fact?.qty ?? null,
+      unit: fact?.unit ?? null,
+      unit_price: base.price_restricted ? null : fact?.unit_price ?? null,
+      line_amount: base.price_restricted ? null : fact?.line_amount ?? null,
+    },
+    evidence: wire.evidence ?? {},
+    evidence_restricted: wire.evidence_restricted === true,
+    order: {
+      order_no: fact?.order_no ?? null,
+      order_date: fact?.order_date ?? null,
+      handler: fact?.purchaser ?? fact?.salesperson ?? null,
+      counterparty: null,
+      data_status: null,
+    },
+    batch: batch ? {
+      id: batch.id,
+      filename: batch.filename,
+      imported_by: batch.uploaded_by,
+      imported_at: batch.uploaded_at,
+    } : null,
+    audits: (wire.audit ?? []).map((entry) => ({
+      action: entry.action,
+      username: entry.operated_by,
+      note: entry.reason,
+      created_at: entry.operated_at,
+    })),
+  };
+}
+
 export async function listDataQualityIssues(params: ListDataQualityIssuesParams) {
-  const { data } = await api.get<DataQualityIssuePage>("/data-quality/issues", { params });
-  return data;
+  const { data } = await api.get<DataQualityWirePage>("/data-quality/issues", { params });
+  return {
+    total: data.total,
+    page: data.page,
+    page_size: data.page_size,
+    items: data.items.map((item) => normalizeBase(item, data.price_restricted === true)),
+  } satisfies DataQualityIssuePage;
 }
 
 export async function getDataQualityIssue(id: number) {
-  const { data } = await api.get<DataQualityIssueDetail>(`/data-quality/issues/${id}`);
-  return data;
+  const { data } = await api.get<DataQualityWireIssue>(`/data-quality/issues/${id}`);
+  return normalizeDetail(data);
 }
 
 export async function decideDataQualityIssue(id: number, body: DecideDataQualityIssueBody) {
-  const { data } = await api.post<DataQualityIssueDetail>(`/data-quality/issues/${id}/decision`, body);
-  return data;
+  await api.post(`/data-quality/issues/${id}/decision`, body);
+  return getDataQualityIssue(id);
 }
 
 export async function reopenDataQualityIssue(id: number, body: ReopenDataQualityIssueBody) {
-  const { data } = await api.post<DataQualityIssueDetail>(`/data-quality/issues/${id}/reopen`, body);
-  return data;
+  await api.post(`/data-quality/issues/${id}/reopen`, body);
+  return getDataQualityIssue(id);
 }

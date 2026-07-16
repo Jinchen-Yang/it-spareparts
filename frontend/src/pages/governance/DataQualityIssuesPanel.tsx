@@ -7,7 +7,7 @@ import type { ColumnsType } from "antd/es/table";
 import {
   decideDataQualityIssue, getDataQualityIssue, listDataQualityIssues, reopenDataQualityIssue,
   type DataQualityDecision, type DataQualityIssueDetail, type DataQualityIssueListItem,
-  type DataQualityIssueSide, type DataQualityIssueStatus,
+  type DataQualityIssueSide, type DataQualityIssueStatus, type DataQualityEvidenceValue,
 } from "../../api/dataQuality";
 import { activatableProps } from "../purchases/shared";
 
@@ -22,6 +22,7 @@ const STATUS_META: Record<DataQualityIssueStatus, { label: string; color: string
 };
 
 const RULE_OPTIONS = [
+  { value: "unit_price_outlier", label: "单价待核实" },
   { value: "purchase_price_neighbour_ratio", label: "采购价格待核实" },
   { value: "sales_price_neighbour_ratio", label: "销售价格待核实" },
   { value: "quantity_unit_review", label: "数量单位待核实" },
@@ -33,10 +34,14 @@ function readPermissions(): Record<string, boolean> {
   try { return JSON.parse(localStorage.getItem("permissions") || "{}"); } catch { return {}; }
 }
 
-function canReviewIssues() {
-  if (localStorage.getItem("role") === "admin") return true;
+function reviewPermissionState() {
+  if (localStorage.getItem("role") === "admin") {
+    return { hasAction: true, hasPurchaseCost: true, canReview: true };
+  }
   const p = readPermissions();
-  return p.page_governance === true && p.action_data_quality_review === true;
+  const hasAction = p.page_governance === true && p.action_data_quality_review === true;
+  const hasPurchaseCost = p.data_purchase_cost === true;
+  return { hasAction, hasPurchaseCost, canReview: hasAction && hasPurchaseCost };
 }
 
 function issueLabel(row: Pick<DataQualityIssueListItem, "order_no" | "pn_std">) {
@@ -70,17 +75,19 @@ function ruleName(row: Pick<DataQualityIssueListItem, "rule_code" | "rule_label"
   return row.rule_label || RULE_OPTIONS.find((item) => item.value === row.rule_code)?.label || row.rule_code;
 }
 
-function evidenceValue(key: string, value: string | number | boolean | null, priceRestricted: boolean) {
+function evidenceValue(key: string, value: DataQualityEvidenceValue, priceRestricted: boolean) {
   if (priceRestricted && /price|amount|cost|金额|价格|单价/i.test(key)) return "无价格权限";
   if (value == null || value === "") return "—";
   if (typeof value === "boolean") return value ? "是" : "否";
+  if (typeof value === "object") return JSON.stringify(value);
   return String(value);
 }
 
 export default function DataQualityIssuesPanel() {
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
-  const canReview = canReviewIssues();
+  const reviewPermission = reviewPermissionState();
+  const canReview = reviewPermission.canReview;
   const [status, setStatus] = useState<DataQualityIssueStatus | undefined>("open");
   const [side, setSide] = useState<DataQualityIssueSide | undefined>();
   const [ruleCode, setRuleCode] = useState<string | undefined>();
@@ -206,7 +213,7 @@ export default function DataQualityIssuesPanel() {
 
   const actionTitle = pendingAction === "confirmed_valid" ? "确认数据正确"
     : pendingAction === "confirmed_source_error" ? "确认源数据错误" : "重新打开";
-  const priceRestricted = detail?.unit_price == null;
+  const priceRestricted = detail?.price_restricted === true || detail?.unit_price == null;
 
   return (
     <div data-testid="data-quality-issues-panel" style={{ maxWidth: "100%", overflowX: "hidden" }}>
@@ -299,7 +306,18 @@ export default function DataQualityIssuesPanel() {
         ) : null}
       >
         <Spin spinning={detailLoading}>
-          {detail && <IssueDetail detail={detail} priceRestricted={priceRestricted} />}
+          {detail && <>
+            {reviewPermission.hasAction && !reviewPermission.hasPurchaseCost && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginBottom: 16 }}
+                message="无采购成本数据权限，不能确认"
+                description="你仍可查看已授权的信息；如需提交核实结论，请联系管理员补充采购成本数据权限。"
+              />
+            )}
+            <IssueDetail detail={detail} priceRestricted={priceRestricted} />
+          </>}
         </Spin>
       </Drawer>
 

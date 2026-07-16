@@ -36,6 +36,7 @@ const ISSUE: DataQualityIssueListItem = {
   import_batch_name: "采购订单_20260710.xlsx",
   updated_at: "2026-07-15T09:30:00Z",
   version: 3,
+  price_restricted: false,
 };
 
 const DETAIL: DataQualityIssueDetail = {
@@ -45,6 +46,7 @@ const DETAIL: DataQualityIssueDetail = {
   reviewed_by: null,
   reviewed_at: null,
   review_note: null,
+  evidence_restricted: false,
   fact: {
     description: "4TB 企业级硬盘",
     brand: "Seagate",
@@ -79,6 +81,7 @@ function login(canReview: boolean) {
   localStorage.setItem("permissions", JSON.stringify({
     page_governance: true,
     action_data_quality_review: canReview,
+    data_purchase_cost: canReview,
   }));
 }
 
@@ -165,6 +168,29 @@ describe("价格与数量疑点队列", () => {
       decision: "confirmed_valid", version: 3,
       note: "已与原始采购单逐项核对，数据正确",
     }));
+  });
+
+  it("有审核动作但无采购成本权限时降为只读，并明确说明不能盲确认", async () => {
+    localStorage.setItem("role", "readonly");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_governance: true,
+      action_data_quality_review: true,
+      data_purchase_cost: false,
+    }));
+    mockList([{ ...ISSUE, unit_price: null, price_restricted: true }]);
+    getDataQualityIssue.mockResolvedValue({
+      ...DETAIL,
+      unit_price: null,
+      price_restricted: true,
+      evidence: {},
+      evidence_restricted: true,
+      fact: { ...DETAIL.fact, unit_price: null, line_amount: null },
+    });
+    render(<DataQualityIssuesPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看疑点 CG-20260710-001 ST4000NM000A 详情" }));
+    expect(await screen.findByText("无采购成本数据权限，不能确认")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认数据正确" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "确认源数据错误" })).toBeNull();
   });
 
   it("409 并发冲突提示数据已刷新，并重新拉取清单与详情", async () => {
