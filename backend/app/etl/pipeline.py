@@ -12,6 +12,7 @@ from app.etl import loader, mapping, reader
 from app.etl.reader import ReaderError
 from app.etl.transform import transform
 from app.models.system import SysImportBatch, SysImportError, SysRawFile
+from app.services import data_quality_amount_mismatch
 
 _ADVISORY_LOCK_KEY = 0x5350_4152  # 'SPAR' 应用级导入锁
 
@@ -155,8 +156,15 @@ def run_import(session: Session, file_path: str, original_name: str,
 
         counts = loader.load(session, result, batch.id, snapshot, mode=mode,
                              operated_by=uploaded_by, audit_overwrites=True)
+        detection = data_quality_amount_mismatch.detect_imported_lines(
+            session,
+            file_type=result.file_type,
+            raw_line_ids=[line["raw_line_id"] for line in result.lines],
+            detected_by=uploaded_by,
+        )
 
         report = {"file_type": batch.file_type, **counts,
+                  "data_quality_detection": detection,
                   "rows_skipped_no_data": result.rows_skipped_no_data,
                   # 缺价格列留痕：即便用户确认导入了无金额文件，批次详情也能看到此告警
                   "missing_price_columns": not mapping.has_price_columns(
