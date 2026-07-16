@@ -1,6 +1,8 @@
 """测试夹具：独立 Postgres（127.0.0.1:5433/spareparts_test），绝不连 dev 库。
 
-会话级跑一次 alembic upgrade head（顺带验证迁移链）；每个用例前 TRUNCATE 全部业务表。
+会话级先确保测试库健康（不存在则创建；迁移循环测试烧掉的 dropped 列逼近
+PostgreSQL 1600 attnum 上限时整库重建，见 ``ensure_test_database``），再跑一次
+alembic upgrade head（顺带验证迁移链）；每个用例前 TRUNCATE 全部业务表。
 """
 import os
 
@@ -16,6 +18,7 @@ from alembic.config import Config as AlembicConfig  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 from app.db import SessionLocal, engine  # noqa: E402
+from tests.db_guard import ensure_test_database  # noqa: E402
 
 _TABLES = [
     "chat_message", "chat_session",
@@ -58,6 +61,10 @@ def _reseed_templates(conn) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def migrated():
+    # app.db.engine 在模块导入时已创建；重建前清空它可能缓存的旧连接，避免 DROP 后
+    # 复用指向旧数据库实例的连接。
+    engine.dispose()
+    ensure_test_database()
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     cfg.set_main_option("script_location",
                         os.path.join(os.path.dirname(__file__), "..", "alembic"))
