@@ -58,8 +58,9 @@ function formatQuantity(quantity: number | null, unit: string | null) {
   return `${quantity.toLocaleString()}${unit ? ` ${unit}` : ""}`;
 }
 
-function formatPrice(value: number | null) {
-  return value == null ? "无价格权限" : `¥${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+function formatPrice(value: number | null, restricted = false) {
+  if (restricted) return "无价格权限";
+  return value == null ? "—" : `¥${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 }
 
 function statusTag(status: DataQualityIssueStatus) {
@@ -202,7 +203,7 @@ export default function DataQualityIssuesPanel() {
     { title: "PN", dataIndex: "pn_std", width: 170, render: (v) => v || "—" },
     { title: "经办人", dataIndex: "handler", width: 100, render: (v) => v || "—" },
     { title: "数量/单位", key: "quantity", width: 110, align: "right", render: (_, row) => formatQuantity(row.quantity, row.unit) },
-    { title: "单价", dataIndex: "unit_price", width: 120, align: "right", render: formatPrice },
+    { title: "单价", dataIndex: "unit_price", width: 120, align: "right", render: (value, row) => formatPrice(value, row.price_restricted) },
     { title: "规则", key: "rule", width: 190, render: (_, row) => ruleName(row) },
     { title: "导入批次", key: "batch", width: 180, render: (_, row) => row.import_batch_name || (row.import_batch_id ? `#${row.import_batch_id}` : "—") },
     { title: "更新时间", dataIndex: "updated_at", width: 150, render: formatDateTime },
@@ -213,7 +214,7 @@ export default function DataQualityIssuesPanel() {
 
   const actionTitle = pendingAction === "confirmed_valid" ? "确认数据正确"
     : pendingAction === "confirmed_source_error" ? "确认源数据错误" : "重新打开";
-  const priceRestricted = detail?.price_restricted === true || detail?.unit_price == null;
+  const priceRestricted = detail?.price_restricted === true;
 
   return (
     <div data-testid="data-quality-issues-panel" style={{ maxWidth: "100%", overflowX: "hidden" }}>
@@ -267,7 +268,7 @@ export default function DataQualityIssuesPanel() {
                   <Space direction="vertical" size={7} style={{ width: "100%" }}>
                     <Space wrap>{statusTag(row.status)}{sideTag(row.side)}<Text strong>{row.pn_std || "无型号"}</Text></Space>
                     <Text>{row.order_no || "无单号"} · {row.order_date || "无日期"}</Text>
-                    <Space wrap><Text type="secondary">{row.handler || "无经办人"}</Text><Text>{formatQuantity(row.quantity, row.unit)}</Text><Text>{formatPrice(row.unit_price)}</Text></Space>
+                    <Space wrap><Text type="secondary">{row.handler || "无经办人"}</Text><Text>{formatQuantity(row.quantity, row.unit)}</Text><Text>{formatPrice(row.unit_price, row.price_restricted)}</Text></Space>
                     <Text type="secondary">{ruleName(row)}</Text>
                   </Space>
                 </List.Item>
@@ -366,19 +367,23 @@ function IssueDetail({ detail, priceRestricted }: { detail: DataQualityIssueDeta
           <Descriptions.Item label="品牌">{detail.fact.brand || "—"}</Descriptions.Item>
           <Descriptions.Item label="经办人">{detail.handler || "—"}</Descriptions.Item>
           <Descriptions.Item label="数量/单位">{formatQuantity(detail.fact.quantity, detail.fact.unit)}</Descriptions.Item>
-          <Descriptions.Item label="单价">{formatPrice(detail.fact.unit_price)}</Descriptions.Item>
-          <Descriptions.Item label="行金额">{priceRestricted || detail.fact.line_amount == null ? "无价格权限" : formatPrice(detail.fact.line_amount)}</Descriptions.Item>
+          <Descriptions.Item label="单价">{formatPrice(detail.fact.unit_price, priceRestricted)}</Descriptions.Item>
+          <Descriptions.Item label="行金额">{formatPrice(detail.fact.line_amount, priceRestricted)}</Descriptions.Item>
         </Descriptions>
       </section>
 
       <section>
         <Typography.Title level={5}>规则证据</Typography.Title>
-        <Descriptions bordered size="small" column={1}>
-          <Descriptions.Item label="规则">{ruleName(detail)}</Descriptions.Item>
-          {Object.entries(detail.evidence || {}).map(([key, value]) => (
-            <Descriptions.Item key={key} label={key}>{evidenceValue(key, value, priceRestricted)}</Descriptions.Item>
-          ))}
-        </Descriptions>
+        {detail.evidence_restricted ? (
+          <Alert type="warning" showIcon message="无价格权限，规则证据已隐藏" />
+        ) : (
+          <Descriptions bordered size="small" column={1}>
+            <Descriptions.Item label="规则">{ruleName(detail)}</Descriptions.Item>
+            {Object.entries(detail.evidence || {}).map(([key, value]) => (
+              <Descriptions.Item key={key} label={key}>{evidenceValue(key, value, priceRestricted)}</Descriptions.Item>
+            ))}
+          </Descriptions>
+        )}
       </section>
 
       <section>

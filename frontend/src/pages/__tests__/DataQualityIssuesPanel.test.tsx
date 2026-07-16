@@ -76,12 +76,12 @@ const DETAIL: DataQualityIssueDetail = {
   audits: [],
 };
 
-function login(canReview: boolean) {
+function login(canReview: boolean, hasPurchaseCost = canReview) {
   localStorage.setItem("role", "readonly");
   localStorage.setItem("permissions", JSON.stringify({
     page_governance: true,
     action_data_quality_review: canReview,
-    data_purchase_cost: canReview,
+    data_purchase_cost: hasPurchaseCost,
   }));
 }
 
@@ -129,22 +129,23 @@ describe("价格与数量疑点队列", () => {
     })));
   });
 
-  it("只读账号可看事实与证据，但不渲染任何写按钮；空价格明确说明无权限", async () => {
-    login(false);
+  it("只读账号可看事实与证据，但不渲染任何写按钮；原值缺失不冒充无权限", async () => {
+    login(false, true);
     mockList([{ ...ISSUE, unit_price: null }]);
     getDataQualityIssue.mockResolvedValue({
       ...DETAIL, unit_price: null, fact: { ...DETAIL.fact, unit_price: null, line_amount: null },
     });
     render(<DataQualityIssuesPanel />);
 
-    expect(await screen.findByText("无价格权限")).toBeInTheDocument();
+    await screen.findByText("ST4000NM000A");
+    expect(screen.queryByText("无价格权限")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "查看疑点 CG-20260710-001 ST4000NM000A 详情" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("规则证据")).toBeInTheDocument();
     expect(within(dialog).getByText("采购订单_20260710.xlsx")).toBeInTheDocument();
     expect(within(dialog).queryByRole("button", { name: "确认数据正确" })).toBeNull();
     expect(within(dialog).queryByRole("button", { name: "确认源数据错误" })).toBeNull();
-    expect(dialog).not.toHaveTextContent("¥880");
+    expect(dialog).not.toHaveTextContent("无价格权限");
   });
 
   it("可写账号逐条二次确认；空原因在前端阻断，不发送请求", async () => {
@@ -189,6 +190,7 @@ describe("价格与数量疑点队列", () => {
     render(<DataQualityIssuesPanel />);
     fireEvent.click(await screen.findByRole("button", { name: "查看疑点 CG-20260710-001 ST4000NM000A 详情" }));
     expect(await screen.findByText("无采购成本数据权限，不能确认")).toBeInTheDocument();
+    expect(screen.getByText("无价格权限，规则证据已隐藏")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认数据正确" })).toBeNull();
     expect(screen.queryByRole("button", { name: "确认源数据错误" })).toBeNull();
   });
