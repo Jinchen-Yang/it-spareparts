@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.16.0";
+export const APP_VERSION = "1.16.1";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.16.1",
+    date: "2026-07-16",
+    items: [
+      "数据治理新增「规则校准预览」：只读对比相邻采购价 2/3/5/10 倍四档，查看采购类型、涨跌方向和确定性抽样",
+      "页面中的候选仅用于估算未来人工核实工作量，不代表采购记录有错；本版不会生成疑点、保存阈值或改变利润、库存和员工排名",
+      "预览统一使用未税采购价口径，并明确展示前后两笔采购；缺少采购成本权限时整体关闭，避免通过倍率和排序反推价格",
+      "自动检测仍未开启：需先由甲方提供应核实与正常业务的正反样本，再确定正式规则适用范围",
+    ],
+  },
   {
     version: "1.16.0",
     date: "2026-07-16",

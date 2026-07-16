@@ -9,6 +9,7 @@ import api from "../api";
 import { money, pct, splitFixed } from "../utils/format";
 import { useTaxBasis } from "../context/TaxBasis";
 import DataQualityIssuesPanel from "./governance/DataQualityIssuesPanel";
+import DataQualityCalibrationPanel from "./governance/DataQualityCalibrationPanel";
 const pct100 = (v: number | null) => (v == null ? "-" : `${v.toFixed(1)}%`);
 
 interface PartRow {
@@ -514,6 +515,7 @@ export default function GovernancePage() {
           items={[
             { key: "parts", label: "型号治理", children: <PartsTab /> },
             { key: "fact-data-quality", label: "价格与数量疑点", children: <DataQualityIssuesPanel /> },
+            { key: "data-quality-calibration", label: "规则校准预览", children: <DataQualityCalibrationPanel /> },
             { key: "candidates", label: "合并候选审核", children: <CandidatesTab onChanged={loadTop} /> },
             { key: "merges", label: "合并历史", children: <MergesTab onChanged={loadTop} /> },
             { key: "issues", label: "质量问题", children: <IssuesTab /> },

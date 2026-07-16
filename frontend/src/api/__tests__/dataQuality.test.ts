@@ -8,7 +8,8 @@ vi.mock("../../api", () => ({
 }));
 
 import {
-  decideDataQualityIssue, getDataQualityIssue, listDataQualityIssues, reopenDataQualityIssue,
+  decideDataQualityIssue, getDataQualityIssue, getPurchasePriceCalibration,
+  listDataQualityIssues, reopenDataQualityIssue,
 } from "../dataQuality";
 
 const wire = {
@@ -29,6 +30,54 @@ const wire = {
 beforeEach(() => vi.clearAllMocks());
 
 describe("data quality API contract", () => {
+  it("采购价校准预览使用只读 GET，并把数据库小数统一转换为 number", async () => {
+    get.mockResolvedValue({ data: {
+      rule_code: "purchase_adjacent_price_ratio",
+      rule_version: "preview-v1",
+      generated_at: "2026-07-16T10:00:00Z",
+      data_through: "2026-07-15",
+      eligible_pairs: 120,
+      distinct_parts: 36,
+      thresholds: [{
+        multiplier: 2, eligible_pairs: 120, candidate_pairs: 12,
+        candidate_rate: "0.1000", increased_pairs: 8, decreased_pairs: 4,
+      }],
+      purchase_types: [{
+        purchase_type: "销售订单", eligible_pairs: 80,
+        thresholds: [{ multiplier: 2, eligible_pairs: 80, candidate_pairs: 9,
+          candidate_rate: "0.1125", increased_pairs: 6, decreased_pairs: 3 }],
+      }],
+      samples: [{
+        multiplier: 2, sample_rank: 1, direction: "increase", ratio: "2.50", pn_std: "PN-4T",
+        purchase_type: "销售订单",
+        current_line_id: 12, current_order_no: "CG-2", current_order_date: "2026-07-15",
+        current_qty: "2.00", current_unit: "块", current_tax_basis: "inc_tax_or_unknown_div_1_13",
+        current_unit_price_ex_tax: "1000.00",
+        previous_line_id: 8, previous_order_no: "CG-1", previous_order_date: "2026-07-01",
+        previous_qty: "1.00", previous_unit: "块", previous_tax_basis: "inc_tax_or_unknown_div_1_13",
+        previous_unit_price_ex_tax: "400.00",
+      }],
+      parameters: { date_from: "2026-07-01", date_to: "2026-07-15",
+        purchase_type: "销售订单", sample_limit: 6 },
+      direction_groups: [],
+      sample_boundary: { limit_per_threshold_direction: 6,
+        ordering: "md5(preview-v1:previous_line_id:current_line_id), line ids",
+        contains_people_or_parties: false },
+    } });
+
+    const params = { date_from: "2026-07-01", date_to: "2026-07-15",
+      purchase_type: "销售订单", sample_limit: 6 };
+    await expect(getPurchasePriceCalibration(params)).resolves.toMatchObject({
+      eligible_pairs: 120,
+      thresholds: [{ threshold: 2, candidate_rate: 0.1 }],
+      purchase_types: [{ thresholds: [{ candidate_rate: 0.1125 }] }],
+      samples: [{ ratio: 2.5, current: { quantity: 2, unit_price_ex_tax: 1000 },
+        previous: { quantity: 1, unit_price_ex_tax: 400 } }],
+    });
+    expect(get).toHaveBeenCalledWith("/data-quality/calibration/purchase-price", { params });
+    expect(post).not.toHaveBeenCalled();
+  });
+
   it("清单筛选只通过唯一客户端下发，并解包分页响应", async () => {
     const page = { total: 1, page: 2, page_size: 20, items: [wire], price_restricted: false };
     get.mockResolvedValue({ data: page });
