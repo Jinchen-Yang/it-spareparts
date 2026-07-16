@@ -60,6 +60,7 @@ describe("管理员专属重算动作", () => {
     expect(screen.getByRole("button", { name: "刷新主数据" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "自动分类" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "价格与数量疑点" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "规则校准预览" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "重算利润" })).toBeNull();
   });
 });
