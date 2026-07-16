@@ -122,7 +122,8 @@ export default function BossBoardPage() {
 
       {/* ④ 互通池列表（详情 → /pool-analysis/:groupId 独立深链页） */}
       <PoolsBlock dateRange={dateRange} scopeNote={poolsScope}
-        localCostRestricted={local.cost} localGovernanceRestricted={local.governance} />
+        localCostRestricted={local.cost} localGovernanceRestricted={local.governance}
+        canOpenPoolManagement={local.poolManagement} />
 
       {/* ⑥ 赚钱榜 / 亏钱榜（下沉） */}
       <RankingBlock filters={filters} dateRange={dateRange} patch={patch}

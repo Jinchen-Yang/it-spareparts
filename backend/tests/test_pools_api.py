@@ -239,6 +239,41 @@ def test_price_governance_masking(db):
     assert boss_list["items"][0]["price_restricted"] is False
 
 
+def test_policy_coverage_permission_and_filter_anti_inference(db):
+    """DEV-07：无治理可见权限拿不到覆盖数字，也不能用缺失筛选反推。"""
+    created, _ = _seed_pool(db, name="覆盖率权限池", pns=("COV-A", "COV-B"))
+    boss = _mk_client(db, "coverage_boss", "boss")
+    set_result = boss.put(
+        f"/api/pools/{created['group_id']}/price-policy",
+        json={"version": 1, "purchase_value": "100"},
+    )
+    assert set_result.status_code == 200
+
+    visible = boss.get("/api/pools").json()
+    assert visible["coverage_restricted"] is False
+    assert visible["coverage"] == {
+        "active_pool_count": 1,
+        "purchase_set_count": 1,
+        "purchase_missing_count": 0,
+        "sales_set_count": 0,
+        "sales_missing_count": 1,
+        "both_set_count": 0,
+    }
+    assert boss.get("/api/pools?policy_missing=sales").json()["total"] == 1
+
+    blind = _mk_client(
+        db, "coverage_blind", "readonly",
+        permissions={"data_pool_price_governance": False},
+    )
+    hidden = blind.get("/api/pools")
+    assert hidden.status_code == 200
+    assert hidden.json()["coverage_restricted"] is True
+    assert hidden.json()["coverage"] is None
+    denied = blind.get("/api/pools?policy_missing=sales")
+    assert denied.status_code == 403
+    assert "约束价" in denied.json()["detail"]
+
+
 # ---------------------------------------------------------------- 可写必可读（复审阻塞 4）
 
 def test_set_policy_requires_governance_read(db):

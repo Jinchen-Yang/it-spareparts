@@ -10,8 +10,10 @@
  * - 归档池：只读档案 + "先恢复"提示，不渲染任何保存按钮。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { message } from "antd";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import type { Location, NavigateFunction } from "react-router-dom";
 
 const listPnPools = vi.fn();
 const getPnPool = vi.fn();
@@ -75,10 +77,37 @@ function login(role: string, perms: Record<string, boolean>) {
   localStorage.setItem("permissions", JSON.stringify(perms));
 }
 
-function mockList(items: unknown[], priceRestricted = false) {
+const COVERAGE = {
+  active_pool_count: 12,
+  purchase_set_count: 8,
+  purchase_missing_count: 4,
+  sales_set_count: 7,
+  sales_missing_count: 5,
+  both_set_count: 6,
+};
+
+function mockList(items: unknown[], priceRestricted = false, coverageRestricted = false) {
   listPnPools.mockResolvedValue({
-    data: { total: items.length, page: 1, page_size: 20, items, price_restricted: priceRestricted },
+    data: {
+      total: items.length, page: 1, page_size: 20, items,
+      price_restricted: priceRestricted,
+      coverage_restricted: coverageRestricted,
+      coverage: coverageRestricted ? null : COVERAGE,
+    },
   });
+}
+
+let curLoc!: Location;
+let nav!: NavigateFunction;
+function Probe() { curLoc = useLocation(); nav = useNavigate(); return null; }
+function renderPage(url = "/pool-management") {
+  return render(
+    <MemoryRouter initialEntries={[url]}>
+      <Routes>
+        <Route path="/pool-management" element={<><PoolManagementPage /><Probe /></>} />
+      </Routes>
+    </MemoryRouter>,
+  );
 }
 
 beforeEach(() => {
@@ -91,6 +120,113 @@ afterEach(() => {
   message.destroy();
 });
 
+describe("约束价覆盖率与 URL 缺失筛选", () => {
+  const perms = {
+    action_pool_manage: true, action_pool_set_policy: true, data_pool_price_governance: true,
+  };
+
+  it("深链打开即筛选；切换、清除与浏览器后退均由 URL 恢复", async () => {
+    login("readonly", perms);
+    mockList([row()]);
+
+    renderPage("/pool-management?policy_missing=purchase");
+    await vi.waitFor(() => expect(listPnPools).toHaveBeenCalledWith(
+      expect.objectContaining({ policy_missing: "purchase", status: "active", page: 1 })));
+
+    const purchase = await screen.findByRole("button", { name: "筛选未设采购上限的互通池" });
+    expect(purchase).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("12")).toBeInTheDocument();
+    expect(screen.getByText("4")).toBeInTheDocument();
+    expect(screen.getByText("5")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "筛选未设销售下限的互通池" }));
+    await vi.waitFor(() => expect(curLoc.search).toBe("?policy_missing=sales"));
+    await vi.waitFor(() => expect(listPnPools).toHaveBeenLastCalledWith(
+      expect.objectContaining({ policy_missing: "sales", status: "active", page: 1 })));
+
+    fireEvent.click(screen.getByRole("button", { name: "清除缺失筛选" }));
+    await vi.waitFor(() => expect(curLoc.search).toBe(""));
+    await vi.waitFor(() => expect(listPnPools).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ policy_missing: expect.anything() })));
+
+    act(() => nav(-1));
+    await vi.waitFor(() => expect(curLoc.search).toBe("?policy_missing=sales"));
+    expect(await screen.findByRole("button", { name: "筛选未设销售下限的互通池" }))
+      .toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("覆盖卡片采用可换行布局，不给窄屏制造固定宽度", async () => {
+    login("readonly", perms);
+    mockList([row()]);
+    renderPage();
+    const grid = await screen.findByTestId("pool-policy-coverage-grid");
+    expect(grid).toHaveStyle({ display: "flex", flexWrap: "wrap" });
+    expect(grid.getAttribute("style")).not.toContain("min-width");
+  });
+
+  it("缺失筛选下切到归档会同步清除 URL；后退恢复筛选时同时回到有效池", async () => {
+    login("readonly", perms);
+    mockList([row()]);
+    renderPage("/pool-management?policy_missing=purchase");
+    await vi.waitFor(() => expect(listPnPools).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "active", policy_missing: "purchase" })));
+
+    fireEvent.click(screen.getByText("已归档"));
+    await vi.waitFor(() => expect(curLoc.search).toBe(""));
+    await vi.waitFor(() => expect(listPnPools).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: "archived" })));
+    expect(listPnPools).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ policy_missing: expect.anything() }));
+
+    act(() => nav(-1));
+    await vi.waitFor(() => expect(curLoc.search).toBe("?policy_missing=purchase"));
+    await vi.waitFor(() => expect(listPnPools).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: "active", policy_missing: "purchase" })));
+    expect(screen.getByTitle("有效").closest("label")).toHaveClass("ant-segmented-item-selected");
+  });
+
+  it("无治理可见权限时不展示数字，也不把 URL 缺失筛选下发给后端", async () => {
+    login("readonly", {
+      action_pool_manage: true, action_pool_set_policy: false, data_pool_price_governance: false,
+    });
+    mockList([row({ price_restricted: true })], true, true);
+
+    renderPage("/pool-management?policy_missing=purchase");
+    await screen.findByText("测试池");
+    expect(screen.queryByTestId("pool-policy-coverage-grid")).toBeNull();
+    expect(screen.queryByRole("button", { name: /筛选未设/ })).toBeNull();
+    expect(listPnPools).toHaveBeenCalledWith(expect.not.objectContaining({ policy_missing: "purchase" }));
+  });
+
+  it("切换缺失筛选失败时清掉旧列表并保留可重试错误，不让新标签配旧数据", async () => {
+    login("readonly", perms);
+    listPnPools
+      .mockResolvedValueOnce({ data: {
+        total: 1, page: 1, page_size: 20, items: [row({ name: "旧筛选池" })],
+        price_restricted: false, coverage_restricted: false, coverage: COVERAGE,
+      } })
+      .mockRejectedValueOnce({ response: { data: { detail: "筛选服务暂不可用" } } })
+      .mockResolvedValueOnce({ data: {
+        total: 1, page: 1, page_size: 20, items: [row({ name: "重试后的销售缺失池" })],
+        price_restricted: false, coverage_restricted: false, coverage: COVERAGE,
+      } });
+
+    renderPage("/pool-management?policy_missing=purchase");
+    await screen.findByText("旧筛选池");
+    fireEvent.click(screen.getByRole("button", { name: "筛选未设销售下限的互通池" }));
+
+    expect(await screen.findByText("筛选服务暂不可用")).toBeInTheDocument();
+    expect(screen.queryByText("旧筛选池")).toBeNull();
+    expect(screen.getByRole("button", { name: "重试加载池列表" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "筛选未设销售下限的互通池" }))
+      .toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "重试加载池列表" }));
+    expect(await screen.findByText("重试后的销售缺失池")).toBeInTheDocument();
+    expect(screen.queryByText("筛选服务暂不可用")).toBeNull();
+  });
+});
+
 describe("manage-only（只有 action_pool_manage）", () => {
   const perms = {
     action_pool_manage: true, action_pool_set_policy: false, data_pool_price_governance: true,
@@ -101,7 +237,7 @@ describe("manage-only（只有 action_pool_manage）", () => {
     mockList([row()]);
     getPnPool.mockResolvedValue({ data: detail() });
 
-    render(<PoolManagementPage />);
+    renderPage();
     expect(await screen.findByRole("button", { name: "新建池" })).toBeInTheDocument();
 
     fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
@@ -129,7 +265,7 @@ describe("set-policy-only（只有 action_pool_set_policy）", () => {
     getPnPool.mockResolvedValue({ data: detail() });
     setPnPoolPolicy.mockResolvedValue({ data: row({ version: 2 }) });
 
-    render(<PoolManagementPage />);
+    renderPage();
     await screen.findByText("测试池");
     expect(screen.queryByRole("button", { name: "新建池" })).toBeNull();
     expect(screen.queryByRole("button", { name: "归档" })).toBeNull();
@@ -160,7 +296,7 @@ describe("set-policy-only（只有 action_pool_set_policy）", () => {
     getPnPool.mockResolvedValue({ data: detail() });
     setPnPoolPolicy.mockResolvedValue({ data: row({ version: 2 }) });
 
-    render(<PoolManagementPage />);
+    renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
     await screen.findByText("约束价");
     const [purchaseInput] = screen.getAllByRole("spinbutton");
@@ -197,7 +333,7 @@ describe("保存后基线刷新守卫（乐观锁不被分裂态击穿）", () =
       }),
     });
 
-    render(<PoolManagementPage />);
+    renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
     await screen.findByText("约束价");
     const [purchaseInput] = screen.getAllByRole("spinbutton");
@@ -229,7 +365,7 @@ describe("保存后基线刷新守卫（乐观锁不被分裂态击穿）", () =
       }),
     });
 
-    render(<PoolManagementPage />);
+    renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
     await screen.findByText("约束价");
     const [purchaseInput] = screen.getAllByRole("spinbutton");
@@ -269,7 +405,7 @@ describe("保存后基线刷新守卫（乐观锁不被分裂态击穿）", () =
       .mockResolvedValueOnce({ data: row({ group_id: 1, name: "池 A", version: 2 }) })
       .mockResolvedValueOnce({ data: row({ group_id: 2, name: "池 B", version: 8 }) });
 
-    render(<PoolManagementPage />);
+    renderPage();
     await screen.findByText("池 A");
     fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[0]);
     await screen.findByText("编辑池 · 池 A");
@@ -308,7 +444,7 @@ describe("保存后基线刷新守卫（乐观锁不被分裂态击穿）", () =
       : delayedConflictReload.promise);
     setPnPoolPolicy.mockRejectedValue({ response: { status: 409, data: { detail: "版本冲突" } } });
 
-    render(<PoolManagementPage />);
+    renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "编辑" }));
     await screen.findByText("编辑池 · 池 A");
     fireEvent.change(screen.getAllByRole("spinbutton")[0], { target: { value: "88" } });
@@ -340,7 +476,7 @@ describe("详情与列表请求代次守卫", () => {
       ? delayedA.promise
       : Promise.resolve({ data: detail({ group_id: 2, name: "池 B", version: 4 }) }));
 
-    render(<PoolManagementPage />);
+    renderPage();
     await screen.findByText("池 A");
     fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[0]);
     fireEvent.click(screen.getAllByRole("button", { name: "编辑" })[1]);
@@ -368,7 +504,7 @@ describe("详情与列表请求代次守卫", () => {
       });
     });
 
-    render(<PoolManagementPage />);
+    renderPage();
     await screen.findByText("初始有效池");
     fireEvent.click(screen.getByText("已归档"));
     fireEvent.click(screen.getByText("全部"));
@@ -395,7 +531,7 @@ describe("data_pool_price_governance=False（price_restricted）", () => {
     });
     mockList([row({ purchase_ceiling_ex_tax: null, sales_floor_ex_tax: null, price_restricted: true })], true);
 
-    render(<PoolManagementPage />);
+    renderPage();
     await screen.findByText("测试池");
     expect(screen.getAllByText("无价格权限").length).toBeGreaterThanOrEqual(2);
     expect(screen.queryByText("未设置")).toBeNull();
@@ -409,7 +545,7 @@ describe("data_pool_price_governance=False（price_restricted）", () => {
     });
     mockList([row()]);   // purchase=100, sales=null, restricted=false
 
-    render(<PoolManagementPage />);
+    renderPage();
     await screen.findByText("测试池");
     expect(screen.getByText("100.00")).toBeInTheDocument();
     expect(screen.getByText("未设置")).toBeInTheDocument();
@@ -422,7 +558,7 @@ describe("键盘可达（复审非阻塞 2）", () => {
     login("admin", {});
     mockList([row(), row({ group_id: 2, name: "归档池行", status: "archived" })]);
 
-    render(<PoolManagementPage />);
+    renderPage();
     await screen.findByText("测试池");
     const edit = screen.getAllByRole("button", { name: /编辑|查看/ })[0];
     const archive = screen.getByRole("button", { name: "归档" });
@@ -444,7 +580,7 @@ describe("归档池只读（复审非阻塞 3）", () => {
     mockList([row({ status: "archived", name: "老池" })]);
     getPnPool.mockResolvedValue({ data: detail({ status: "archived", name: "老池" }) });
 
-    render(<PoolManagementPage />);
+    renderPage();
     await screen.findByText("老池");
     fireEvent.click(screen.getByRole("button", { name: "查看" }));
     expect(await screen.findByText("该池已归档，处于只读状态")).toBeInTheDocument();

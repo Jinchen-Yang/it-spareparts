@@ -119,14 +119,39 @@ def _run(fn, **kwargs):
 def list_pools(
     q: str | None = Query(None, description="搜索：池名/描述/成员PN/品牌"),
     status_: str = Query("active", alias="status", pattern="^(active|archived|all)$"),
+    policy_missing: str | None = Query(
+        None,
+        pattern="^(purchase|sales|either|both)$",
+        description="筛选有效池中未设置采购上限/销售下限/任一侧/两侧约束的池",
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
     ctx: UserContext = Depends(require_login),
 ) -> dict:
-    record_access_log(ctx, "pool_catalog_list", "pools", {"q": q, "status": status_})
-    data = svc.list_pools(db, q=q, status=status_, page=page, page_size=page_size)
     restricted = _price_restricted(ctx)
+    if restricted and policy_missing is not None:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "无池约束价查看权限，不能按约束价缺失状态筛选",
+        )
+    record_access_log(
+        ctx,
+        "pool_catalog_list",
+        "pools",
+        {"q": q, "status": status_, "policy_missing": policy_missing},
+    )
+    data = svc.list_pools(
+        db,
+        q=q,
+        status=status_,
+        policy_missing=policy_missing,
+        page=page,
+        page_size=page_size,
+    )
+    data["coverage_restricted"] = restricted
+    if restricted:
+        data["coverage"] = None
     data["price_restricted"] = restricted
     for item in data["items"]:
         item["price_restricted"] = restricted

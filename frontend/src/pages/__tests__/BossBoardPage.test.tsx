@@ -20,6 +20,7 @@ const dashboardSales = vi.fn();
 const dashboardPurchaseOrders = vi.fn();
 const dashboardPools = vi.fn();
 const dashboardPool = vi.fn();
+const listPnPools = vi.fn();
 
 vi.mock("../../api", () => ({
   default: { get: vi.fn(), post: vi.fn() },
@@ -31,6 +32,9 @@ vi.mock("../../api", () => ({
   dashboardPurchaseOrders: (...a: unknown[]) => dashboardPurchaseOrders(...a),
   dashboardPools: (...a: unknown[]) => dashboardPools(...a),
   dashboardPool: (...a: unknown[]) => dashboardPool(...a),
+}));
+vi.mock("../../api/pools", () => ({
+  listPnPools: (...a: unknown[]) => listPnPools(...a),
 }));
 // 图表在 jsdom 无 canvas：打桩捕获 props
 vi.mock("../../components/charts/BusinessTrendChart", () => ({
@@ -131,6 +135,7 @@ function renderAt(url: string) {
       <Routes>
         <Route path="/boss" element={<><BossBoardPage /><Probe /></>} />
         <Route path="/pool-analysis/:groupId" element={<div>池分析详情页桩</div>} />
+        <Route path="/pool-management" element={<><div>池管理页桩</div><Probe /></>} />
         <Route path="/parts" element={<div>型号查询页桩</div>} />
       </Routes>
     </MemoryRouter>,
@@ -148,6 +153,14 @@ beforeEach(() => {
   dashboardSales.mockResolvedValue({ data: ordersResp([]) });
   dashboardPurchaseOrders.mockResolvedValue({ data: ordersResp([purchaseRow()]) });
   dashboardPools.mockResolvedValue({ data: poolsResp([poolItem()]) });
+  listPnPools.mockResolvedValue({ data: {
+    total: 1, page: 1, page_size: 1, items: [], price_restricted: false,
+    coverage_restricted: false,
+    coverage: {
+      active_pool_count: 12, purchase_set_count: 8, purchase_missing_count: 4,
+      sales_set_count: 7, sales_missing_count: 5, both_set_count: 6,
+    },
+  } });
 });
 afterEach(cleanup);
 
@@ -321,6 +334,44 @@ describe("权限三态（无权限 ≠ 暂无数据）", () => {
 });
 
 describe("互通池列表：表头 合计↔均价 循环切换", () => {
+  it("展示同源覆盖数字，点击缺失项进入池管理页对应筛选", async () => {
+    renderAt("/boss");
+    expect(await screen.findByText("约束价覆盖")).toBeInTheDocument();
+    expect(listPnPools).toHaveBeenCalledWith({ status: "active", page: 1, page_size: 1 });
+
+    fireEvent.click(screen.getByRole("button", { name: "筛选未设采购上限的互通池" }));
+    expect(await screen.findByText("池管理页桩")).toBeInTheDocument();
+    expect(curLoc.pathname).toBe("/pool-management");
+    expect(curLoc.search).toBe("?policy_missing=purchase");
+  });
+
+  it("治理权限受限时不请求或显示覆盖数字，避免反推约束设置情况", async () => {
+    localStorage.setItem("role", "boss");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_boss_board: true, data_pool_price_governance: false,
+    }));
+    renderAt("/boss");
+    await screen.findByText("互通池列表");
+    expect(listPnPools).not.toHaveBeenCalled();
+    expect(screen.queryByText("约束价覆盖")).toBeNull();
+    expect(screen.queryByRole("button", { name: /筛选未设/ })).toBeNull();
+  });
+
+  it("能看覆盖数字但无池管理动作权限时只读展示，不生成无效导航", async () => {
+    localStorage.setItem("role", "boss");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_boss_board: true,
+      data_pool_price_governance: true,
+      action_pool_manage: false,
+      action_pool_set_policy: false,
+    }));
+    renderAt("/boss");
+    expect(await screen.findByText("约束价覆盖")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /筛选未设/ })).toBeNull();
+    expect(screen.getByText(/联系管理员补录/)).toBeInTheDocument();
+    expect(screen.getByText(/全局有效池，不受当前时间范围影响/)).toBeInTheDocument();
+  });
+
   it("切换按钮 aria-label 完整；点击后文案与排序字段同步", async () => {
     renderAt("/boss");
     // 先按采购指标列排序（当前=金额合计）

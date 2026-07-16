@@ -11,8 +11,10 @@ import { Alert, Button, Card, Table, Tag, Tooltip } from "antd";
 import type { ColumnsType, TablePaginationConfig } from "antd/es/table";
 import type { SorterResult } from "antd/es/table/interface";
 import { SwapOutlined } from "@ant-design/icons";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { dashboardPools, type PoolListItem, type PoolSort, type PoolsResp } from "../../api";
+import { listPnPools, type PnPoolListResp } from "../../api/pools";
+import PoolPolicyCoverage from "../../components/pools/PoolPolicyCoverage";
 import { EMPTY, moneyExact } from "../../utils/format";
 import { MUTED, poolAnalysisPath, useGuardedFetch, type DateRange } from "./shared";
 
@@ -56,9 +58,13 @@ interface PoolsBlockProps {
   scopeNote: string;
   localCostRestricted: boolean;
   localGovernanceRestricted: boolean;
+  canOpenPoolManagement: boolean;
 }
 
-export default function PoolsBlock({ dateRange, scopeNote, localCostRestricted, localGovernanceRestricted }: PoolsBlockProps) {
+export default function PoolsBlock({
+  dateRange, scopeNote, localCostRestricted, localGovernanceRestricted, canOpenPoolManagement,
+}: PoolsBlockProps) {
+  const navigate = useNavigate();
   const [pMode, setPMode] = useState<MetricMode>("total");
   const [sMode, setSMode] = useState<MetricMode>("total");
   const [sort, setSort] = useState<PoolSort>("savings");
@@ -70,6 +76,14 @@ export default function PoolsBlock({ dateRange, scopeNote, localCostRestricted, 
   const { data, loading, error, reload } = useGuardedFetch<PoolsResp>(
     () => dashboardPools({ ...dateRange, sort, page, page_size: pageSize }),
     [dateRange, sort, page, pageSize]);
+  const coverage = useGuardedFetch<PnPoolListResp>(
+    () => localGovernanceRestricted
+      ? Promise.resolve({ data: {
+        total: 0, page: 1, page_size: 1, items: [], price_restricted: true,
+        coverage_restricted: true, coverage: null,
+      } })
+      : listPnPools({ status: "active", page: 1, page_size: 1 }),
+    [localGovernanceRestricted]);
 
   // 表头切换（合计↔均价）时，若该列正是当前排序列 → 排序字段同步切换
   const togglePMode = () => {
@@ -169,6 +183,19 @@ export default function PoolsBlock({ dateRange, scopeNote, localCostRestricted, 
   return (
     <Card size="small" style={{ marginBottom: 16 }} title="互通池列表"
       extra={<span style={MUTED}>{scopeNote}</span>}>
+      {!localGovernanceRestricted && coverage.error && (
+        <Alert type="warning" showIcon style={{ marginBottom: 10 }}
+          message="约束价覆盖率暂时加载失败，不影响下方经营指标。"
+          action={<Button size="small" onClick={coverage.reload}>重试</Button>} />
+      )}
+      <PoolPolicyCoverage
+        coverage={coverage.data?.coverage}
+        restricted={localGovernanceRestricted || !!coverage.data?.coverage_restricted}
+        scopeNote="全局有效池，不受当前时间范围影响"
+        onSelect={canOpenPoolManagement
+          ? (missing) => navigate(`/pool-management?policy_missing=${missing}`) : undefined}
+        readOnlyHint={canOpenPoolManagement ? undefined : "当前账号无池管理入口，请联系管理员补录约束价。"}
+      />
       <Alert type="info" showIcon style={{ marginBottom: 10 }}
         message="只读分析：池指标按当前时间窗口统计；越线计数=窗口内严格越过人工约束价的行数（等于不算）。" />
       {data?.ranking_capped && (

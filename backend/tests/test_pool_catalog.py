@@ -2,12 +2,13 @@
 
 覆盖规格 §11（并发与安全）/§13（约束价口径）/§15（模型语义）/§21-9（不经审核直接生效）。
 """
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 
-from app.db import SessionLocal
+from app.db import SessionLocal, engine
 from app.models.dimensions import DimPart
 from app.models.inventory import PartPoolMember, PartPoolPricePolicy
 from app.models.system import SysAuditLog
@@ -442,3 +443,128 @@ def test_list_pools_carries_current_policy(db):
     item = svc.list_pools(db)["items"][0]
     assert item["purchase_ceiling_ex_tax"] == Decimal("725.66")
     assert item["sales_floor_ex_tax"] is None
+
+
+def test_list_pools_policy_coverage_and_missing_filters(db):
+    """DEV-07：覆盖率只认有效池的当前策略，四种缺失筛选语义互不混淆。"""
+    both = _pool(db, "双侧已设池")
+    purchase_only = _pool(db, "仅采购已设池")
+    sales_only = _pool(db, "仅销售已设池")
+    neither = _pool(db, "两侧未设池")
+    archived = _pool(db, "归档池")
+
+    svc.set_price_policy(
+        db, group_id=both["group_id"], version=1,
+        purchase_value=Decimal("100"), sales_value=Decimal("80"), operated_by="t",
+    )
+    svc.set_price_policy(
+        db, group_id=purchase_only["group_id"], version=1,
+        purchase_value=Decimal("90"), operated_by="t",
+    )
+    svc.set_price_policy(
+        db, group_id=sales_only["group_id"], version=1,
+        sales_value=Decimal("70"), operated_by="t",
+    )
+    # 历史策略不能伪装成当前覆盖：neither 只有一条 valid_to 非空的旧策略。
+    db.add(PartPoolPricePolicy(
+        group_id=neither["group_id"],
+        purchase_ceiling_ex_tax=Decimal("1"),
+        sales_floor_ex_tax=Decimal("1"),
+        valid_to=datetime.now(timezone.utc),
+        changed_by="old",
+    ))
+    db.commit()
+    svc.set_price_policy(
+        db, group_id=archived["group_id"], version=1,
+        purchase_value=Decimal("60"), sales_value=Decimal("50"), operated_by="t",
+    )
+    svc.archive_pool(db, group_id=archived["group_id"], version=2, operated_by="t")
+
+    result = svc.list_pools(db, status="all", page_size=200)
+    assert result["coverage"] == {
+        "active_pool_count": 4,
+        "purchase_set_count": 2,
+        "purchase_missing_count": 2,
+        "sales_set_count": 2,
+        "sales_missing_count": 2,
+        "both_set_count": 1,
+    }
+
+    expected = {
+        "purchase": {sales_only["group_id"], neither["group_id"]},
+        "sales": {purchase_only["group_id"], neither["group_id"]},
+        "either": {
+            purchase_only["group_id"], sales_only["group_id"], neither["group_id"],
+        },
+        "both": {neither["group_id"]},
+    }
+    for missing, group_ids in expected.items():
+        filtered = svc.list_pools(
+            db, status="all", policy_missing=missing, page_size=200,
+        )
+        assert {item["group_id"] for item in filtered["items"]} == group_ids
+        assert filtered["total"] == len(group_ids)
+        assert filtered["coverage"] == result["coverage"]
+        assert all(item["status"] == "active" for item in filtered["items"])
+
+
+def test_policy_coverage_is_global_across_search_status_and_pagination(db):
+    """覆盖卡是全局有效池口径，不随列表视窗变化；归档页也返回同一统计。"""
+    first = _pool(db, "可检索的硬盘池")
+    _pool(db, "内存池")
+    archived = _pool(db, "旧池")
+    svc.set_price_policy(
+        db, group_id=first["group_id"], version=1,
+        purchase_value=Decimal("100"), operated_by="t",
+    )
+    svc.set_price_policy(
+        db, group_id=archived["group_id"], version=1,
+        purchase_value=Decimal("1"), sales_value=Decimal("1"), operated_by="t",
+    )
+    svc.archive_pool(db, group_id=archived["group_id"], version=2, operated_by="t")
+
+    expected = {
+        "active_pool_count": 2,
+        "purchase_set_count": 1,
+        "purchase_missing_count": 1,
+        "sales_set_count": 0,
+        "sales_missing_count": 2,
+        "both_set_count": 0,
+    }
+    views = [
+        svc.list_pools(db, page=1, page_size=1),
+        svc.list_pools(db, page=2, page_size=1),
+        svc.list_pools(db, q="硬盘"),
+        svc.list_pools(db, status="archived"),
+        svc.list_pools(db, policy_missing="sales", page_size=1),
+    ]
+    assert all(view["coverage"] == expected for view in views)
+    assert views[2]["total"] == 1
+    assert views[3]["total"] == 1
+
+
+def test_list_pools_policy_coverage_query_count_is_constant(db):
+    """池数增长不能产生逐池查策略；清单含覆盖统计仍保持常数次 SQL。"""
+    _pool(db, "查询池-1")
+    _pool(db, "查询池-2")
+
+    def count_queries() -> int:
+        count = 0
+
+        def before_cursor(*_args):
+            nonlocal count
+            count += 1
+
+        event.listen(engine, "before_cursor_execute", before_cursor)
+        try:
+            svc.list_pools(db, page_size=200)
+        finally:
+            event.remove(engine, "before_cursor_execute", before_cursor)
+        return count
+
+    small = count_queries()
+    for i in range(10):
+        _pool(db, f"查询池-{i + 3}")
+    large = count_queries()
+    assert small == large
+    assert large <= 4

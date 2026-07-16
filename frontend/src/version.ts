@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.16.1";
+export const APP_VERSION = "1.16.2";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.16.2",
+    date: "2026-07-16",
+    items: [
+      "互通池管理与老板经营看板新增「约束价覆盖」：同时显示有效池总数、未设采购上限池数和未设销售下限池数",
+      "点击缺失数量可直接筛出待补录的有效池，筛选写入网址，刷新、分享链接和浏览器前进/后退都能恢复",
+      "覆盖统计只认有效池和当前约束记录，归档池与历史约束不混入；未设约束与未越线继续明确区分",
+      "无池价格治理查看权限的账号不显示覆盖数字，也不能通过缺失筛选反推哪些池已设置约束价",
+    ],
+  },
   {
     version: "1.16.1",
     date: "2026-07-16",

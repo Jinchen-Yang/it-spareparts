@@ -195,6 +195,7 @@ export function useLocalRestrictions() {
   const perms = useMemo(readLocalPerms, []);
   return {
     isAdmin,
+    poolManagement: isAdmin || !!perms.action_pool_manage || !!perms.action_pool_set_policy,
     profit: !isAdmin && perms.data_profit === false,
     cost: !isAdmin && perms.data_purchase_cost === false,
     governance: !isAdmin && perms.data_pool_price_governance === false,
