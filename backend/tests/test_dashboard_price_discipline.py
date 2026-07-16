@@ -20,7 +20,7 @@ from app.models.inventory import PartPoolMember, PartPoolPricePolicy
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysImportBatch
-from app.services import pool, pool_catalog, pool_price_analysis, price_discipline
+from app.services import dashboard, pool, pool_catalog, pool_price_analysis, price_discipline
 from tests import factories as f
 
 AS_OF = date(2026, 6, 1)
@@ -87,7 +87,8 @@ def discipline_seed(db):
     loader.load(db, f.purchase_result(purchases, purchase_lines), batch.id, AS_OF)
 
     sales = {
-        "S1": f.sales_head("S1", order_no="SALE-LOW", on=date(2026, 2, 1)),
+        # 与首张采购故意同 date/order_id/line_id，锁住跨表 union 的最终 side tie-break。
+        "S1": f.sales_head("S1", order_no="SALE-LOW", on=date(2026, 1, 1)),
         "SE": f.sales_head("SE", on=date(2026, 2, 2)),
         "SX": f.sales_head("SX", on=date(2026, 2, 3), data_status="已取消"),
         "SF": f.sales_head("SF", on=date(2026, 12, 2)),
@@ -140,7 +141,7 @@ def test_summary_matches_independent_line_math_and_boundaries(db, discipline_see
     assert severe == {
         "pool_group_id": discipline_seed["governed"], "pool_name": "已设约束池",
         "purchase_total_gap": 550.0, "sales_total_gap": 160.0,
-        "total_gap": 710.0, "violation_line_count": 3,
+        "total_gap": 710.0, "violation_line_count": 3, "dominant_side": "purchase",
     }
     assert out["handler_summary"]["purchase"] == [
         {"person": "采购李", "violation_line_count": 1, "order_count": 1,
@@ -153,7 +154,11 @@ def test_summary_matches_independent_line_math_and_boundaries(db, discipline_see
          "total_gap": 160.0},
     ]
     assert [row["order_no"] for row in out["recent_violations"]] == [
-        "SALE-LOW", "DUP-NO", "DUP-NO"]
+        "DUP-NO", "DUP-NO", "SALE-LOW"]
+    tied = out["recent_violations"][-2:]
+    assert {(row["order_date"], row["order_id"], row["line_id"]) for row in tied} == {
+        ("2026-01-01", 1, 1)}
+    assert [row["side"] for row in tied] == ["purchase", "sales"]
     assert all(set((
         "side", "order_id", "order_no", "order_date", "line_id", "part_id", "pn_std",
         "pool_group_id", "pool_name", "person", "quantity", "actual_unit_ex_tax",
@@ -185,6 +190,14 @@ def test_non_cost_purchase_type_matches_boss_pool_list_same_window(db, disciplin
     assert item["purchase_metrics"]["total_amount"] == 1450.0
     assert item["purchase_violation_count"] == 2
     assert item["purchase_violation_count"] == summary["purchase"]["violation_line_count"]
+
+    orders = dashboard.purchase_orders(
+        db, as_of=AS_OF, status="全部", page_size=50, user_ctx=_ctx())
+    non_cost = next(x for x in orders["items"]
+                    if x["order_id"] == discipline_seed["purchase_ids"]["PN"])
+    assert non_cost["source_type"] == "补库"
+    assert non_cost["parts"][0]["in_stats_scope"] is True
+    assert non_cost["parts"][0]["reference_status"] == "above_manual_max"
 
 
 def test_each_recent_gap_matches_independent_source_row_calculation(db, discipline_seed):

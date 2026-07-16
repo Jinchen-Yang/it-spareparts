@@ -187,13 +187,19 @@ def summary(db: Session, *, date_from: date | None = None, date_to: date | None 
         .order_by(func.sum(violations.c.total_gap).desc(), violations.c.pool_group_id.asc())
         .limit(1)
     ).one_or_none()
-    most_severe = None if pool_row is None else {
-        "pool_group_id": pool_row.pool_group_id, "pool_name": pool_row.pool_name,
-        "purchase_total_gap": _r(pool_row.purchase_gap) or 0.0,
-        "sales_total_gap": _r(pool_row.sales_gap) or 0.0,
-        "total_gap": _r(pool_row.total_gap) or 0.0,
-        "violation_line_count": int(pool_row.lines or 0),
-    }
+    most_severe = None
+    if pool_row is not None:
+        pool_purchase_gap = _r(pool_row.purchase_gap) or 0.0
+        pool_sales_gap = _r(pool_row.sales_gap) or 0.0
+        dominant_side = ("purchase" if pool_purchase_gap > pool_sales_gap else
+                         "sales" if pool_sales_gap > pool_purchase_gap else "both")
+        most_severe = {
+            "pool_group_id": pool_row.pool_group_id, "pool_name": pool_row.pool_name,
+            "purchase_total_gap": pool_purchase_gap, "sales_total_gap": pool_sales_gap,
+            "total_gap": _r(pool_row.total_gap) or 0.0,
+            "violation_line_count": int(pool_row.lines or 0),
+            "dominant_side": dominant_side,
+        }
 
     handlers = {"purchase": [], "sales": []}
     for row in db.execute(
@@ -217,7 +223,8 @@ def summary(db: Session, *, date_from: date | None = None, date_to: date | None 
     for row in db.execute(
         select(violations)
         .order_by(violations.c.order_date.desc().nullslast(),
-                  violations.c.order_id.desc(), violations.c.line_id.desc())
+                  violations.c.order_id.desc(), violations.c.line_id.desc(),
+                  violations.c.side.asc())
         .limit(10)
     ).mappings():
         item = dict(row)
