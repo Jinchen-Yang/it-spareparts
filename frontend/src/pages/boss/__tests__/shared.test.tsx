@@ -9,8 +9,11 @@ afterEach(cleanup);
 
 // ---------------------------------------------------------------- useGuardedFetch 竞态
 
-function Harness({ dep, fetcher }: { dep: string; fetcher: (dep: string) => Promise<{ data: string }> }) {
-  const { data, loading, error } = useGuardedFetch<string>(() => fetcher(dep), [dep]);
+function Harness({ dep, fetcher, scoped = false }: { dep: string;
+  fetcher: (dep: string) => Promise<{ data: string }>; scoped?: boolean }) {
+  const { data, loading, error } = useGuardedFetch<string>(
+    () => fetcher(dep), [dep], scoped ? dep : undefined,
+  );
   return (
     <div>
       <span data-testid="data">{data ?? "(null)"}</span>
@@ -45,6 +48,22 @@ describe("useGuardedFetch 代次守卫", () => {
     render(<Harness dep="X" fetcher={fetcher} />);
     await waitFor(() => expect(screen.getByTestId("error").textContent).toBe("接口错误（500）"));
     expect(screen.getByTestId("data").textContent).toBe("(null)");
+  });
+
+  it("scope 改变首帧立即隐藏旧数据，不等 effect 或新响应", async () => {
+    let resolveB!: (v: { data: string }) => void;
+    const fetcher = (dep: string) => dep === "A"
+      ? Promise.resolve({ data: "A 的旧数据" })
+      : new Promise<{ data: string }>((resolve) => { resolveB = resolve; });
+    const { rerender } = render(<Harness dep="A" fetcher={fetcher} scoped />);
+    await waitFor(() => expect(screen.getByTestId("data")).toHaveTextContent("A 的旧数据"));
+
+    rerender(<Harness dep="B" fetcher={fetcher} scoped />);
+    expect(screen.getByTestId("data")).toHaveTextContent("(null)");
+    expect(screen.getByTestId("loading")).toHaveTextContent("true");
+
+    resolveB({ data: "B 的数据" });
+    await waitFor(() => expect(screen.getByTestId("data")).toHaveTextContent("B 的数据"));
   });
 });
 

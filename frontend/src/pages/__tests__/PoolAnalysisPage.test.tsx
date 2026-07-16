@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { Grid } from "antd";
+import type { PoolPriceMapResponse } from "../../api/poolAnalysis";
 
 const fetchPoolAnalysis = vi.fn();
 const fetchPoolPriceMap = vi.fn();
@@ -28,14 +29,28 @@ vi.mock("../../api/poolAnalysis", () => ({
   fetchPoolPriceMap: (...a: unknown[]) => fetchPoolPriceMap(...a),
   fetchPoolAnalysisOrderDetail: (...a: unknown[]) => fetchPoolAnalysisOrderDetail(...a),
 }));
-vi.mock("../../components/charts/PoolPnPriceMap", () => ({
-  default: (p: { data: { side: string; price_restricted: boolean; members: Array<{ part_id: number }> };
-    onPartOpen?: (partId: number) => void }) => (
-    <div data-testid="price-map-stub" data-side={p.data.side}
-      data-restricted={String(p.data.price_restricted)} data-clickable={String(!!p.onPartOpen)}>
-      <button onClick={() => p.onPartOpen?.(p.data.members[0].part_id)}>查看图中型号全景</button>
-    </div>),
-}));
+vi.mock("../../components/charts/PoolPnPriceMap", async () => {
+  const React = await import("react");
+  return {
+    default: (p: { data: { side: string; price_restricted: boolean;
+      members: Array<{ part_id: number; pn_std?: string | null }> };
+      onPartOpen?: (partId: number) => void }) => {
+      const [selectedPartId, setSelectedPartId] = React.useState<number | null>(null);
+      const selected = p.data.members.find((member) => member.part_id === selectedPartId);
+      return <div data-testid="price-map-stub" data-side={p.data.side}
+        data-restricted={String(p.data.price_restricted)} data-clickable={String(!!p.onPartOpen)}>
+        <button onClick={() => p.onPartOpen?.(p.data.members[0].part_id)}>查看图中型号全景</button>
+        <div data-testid="price-map-equivalent-table">
+          {p.data.members.map((member) => <button key={member.part_id}
+            onClick={() => setSelectedPartId(member.part_id)}>
+            选择 {member.pn_std ?? `#${member.part_id}`}
+          </button>)}
+        </div>
+        {selected && <div data-testid="price-map-selected">已选择 {selected.pn_std}</div>}
+      </div>;
+    },
+  };
+});
 
 import PoolAnalysisPage from "../PoolAnalysisPage";
 
@@ -109,7 +124,7 @@ const PRICE_MAP = {
   contract_version: 1 as const, side: "purchase" as const, basis: "ex_tax" as const,
   price_restricted: false,
   pool: { group_id: 12, name: "内存互通池", member_count: 2 },
-  window: DETAIL.window,
+  window: { ...DETAIL.window, range: "90d" },
   filters: { purchase_type: null, employee: null },
   sort: "pn" as const, order: "asc" as const, effective_sort: "pn" as const,
   effective_order: "asc" as const,
@@ -153,8 +168,21 @@ beforeEach(() => {
   localStorage.clear();
   localStorage.setItem("role", "admin");
   fetchPoolAnalysis.mockResolvedValue(DETAIL);
-  fetchPoolPriceMap.mockImplementation((_groupId: number, params: { side?: "purchase" | "sales" }) =>
-    Promise.resolve({ ...PRICE_MAP, side: params.side ?? "purchase" }));
+  fetchPoolPriceMap.mockImplementation((_groupId: number, params: {
+    side?: "purchase" | "sales"; range?: string; date_from?: string; date_to?: string;
+    purchase_type?: string; employee?: string; sort?: string; order?: string;
+  }) => Promise.resolve({
+    ...PRICE_MAP,
+    side: params.side ?? "purchase",
+    window: {
+      ...PRICE_MAP.window,
+      range: params.date_from && params.date_to ? "custom" : (params.range ?? "90d"),
+      date_from: params.date_from ?? PRICE_MAP.window.date_from,
+      date_to: params.date_to ?? PRICE_MAP.window.date_to,
+    },
+    filters: { purchase_type: params.purchase_type ?? null, employee: params.employee ?? null },
+    sort: params.sort ?? "pn", order: params.order ?? "asc",
+  }));
   fetchPoolAnalysisOrderDetail.mockResolvedValue({
     side: "purchase", price_restricted: false,
     supplier_restricted: false, customer_restricted: false,
@@ -295,10 +323,11 @@ describe("深链与取数", () => {
 });
 
 describe("股票式价格区间图", () => {
-  it("按 URL 窗口、方向与采购类型请求同一 price-map 契约", async () => {
-    renderAt("/pool-analysis/12?side=sales&range=365d&purchase_type=补库");
+  it("按 URL 窗口、方向、采购类型与经办人请求同一 price-map 契约", async () => {
+    renderAt("/pool-analysis/12?side=sales&range=365d&purchase_type=补库&employee=张三");
     await waitFor(() => expect(fetchPoolPriceMap).toHaveBeenCalledWith(12, {
-      side: "sales", range: "365d", purchase_type: "补库", sort: "pn", order: "asc",
+      side: "sales", range: "365d", purchase_type: "补库", employee: "张三",
+      sort: "pn", order: "asc",
     }));
     expect(await screen.findByTestId("price-map-stub")).toHaveAttribute("data-side", "sales");
   });
@@ -324,6 +353,31 @@ describe("股票式价格区间图", () => {
     await waitFor(() => expect(screen.getByTestId("price-map-stub")).toHaveAttribute("data-side", "sales"));
     await act(async () => releasePurchase?.(PRICE_MAP));
     expect(screen.getByTestId("price-map-stub")).toHaveAttribute("data-side", "sales");
+  });
+
+  it("scope 切换立即隐藏旧表和固定详情，新响应不得继承旧 PN 选择", async () => {
+    let releaseSales: ((value: PoolPriceMapResponse) => void) | undefined;
+    fetchPoolPriceMap.mockImplementation((_groupId: number, params: { side?: "purchase" | "sales" }) => {
+      if (params.side === "sales") {
+        return new Promise<PoolPriceMapResponse>((resolve) => { releaseSales = resolve; });
+      }
+      return Promise.resolve(PRICE_MAP);
+    });
+    renderAt("/pool-analysis/12?side=purchase");
+    const purchaseMap = await screen.findByTestId("price-map-stub");
+    fireEvent.click(within(purchaseMap).getByRole("button", { name: "选择 PN-A" }));
+    expect(within(purchaseMap).getByTestId("price-map-selected")).toHaveTextContent("PN-A");
+
+    fireEvent.click(within(screen.getByLabelText("当前关注方向")).getByText("销售"));
+    expect(screen.queryByTestId("price-map-stub")).toBeNull();
+    expect(screen.queryByTestId("price-map-equivalent-table")).toBeNull();
+    expect(screen.queryByTestId("price-map-selected")).toBeNull();
+    expect(screen.getByText("正在加载价格区间…")).toBeInTheDocument();
+
+    await act(async () => releaseSales?.({ ...PRICE_MAP, side: "sales" }));
+    const salesMap = await screen.findByTestId("price-map-stub");
+    expect(salesMap).toHaveAttribute("data-side", "sales");
+    expect(within(salesMap).queryByTestId("price-map-selected")).toBeNull();
   });
 
   it("价格图排序和方向进入 URL 驱动请求", async () => {

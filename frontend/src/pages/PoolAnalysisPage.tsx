@@ -37,6 +37,38 @@ const PRICE_MAP_SORTS: ReadonlySet<PriceMapSort> = new Set([
   "pn", "weighted_avg", "constraint_delta", "latest_date",
 ]);
 
+interface PriceMapScope {
+  groupId: number;
+  side: PoolAnalysisSide;
+  range: PoolAnalysisRange;
+  dateFrom: string | null;
+  dateTo: string | null;
+  purchaseType: string | null;
+  employee: string | null;
+  sort: PriceMapSort;
+  order: "asc" | "desc";
+}
+
+function priceMapScopeKey(scope: PriceMapScope): string {
+  return JSON.stringify([
+    scope.groupId, scope.side, scope.range, scope.dateFrom, scope.dateTo,
+    scope.purchaseType, scope.employee, scope.sort, scope.order,
+  ]);
+}
+
+/** 后端响应也须自证范围；即使请求链路异常返回错侧/错窗口，也不渲染成当前数据。 */
+function responseMatchesPriceMapScope(data: PoolPriceMapResponse, scope: PriceMapScope): boolean {
+  return data.pool.group_id === scope.groupId
+    && data.side === scope.side
+    && data.window.range === scope.range
+    && (scope.range !== "custom"
+      || (data.window.date_from === scope.dateFrom && data.window.date_to === scope.dateTo))
+    && (data.filters.purchase_type ?? null) === scope.purchaseType
+    && (data.filters.employee ?? null) === scope.employee
+    && data.sort === scope.sort
+    && data.order === scope.order;
+}
+
 const RANGE_PRESETS = [
   { label: "近30天", value: [dayjs().subtract(29, "day"), dayjs()] as [Dayjs, Dayjs] },
   { label: "近90天", value: [dayjs().subtract(89, "day"), dayjs()] as [Dayjs, Dayjs] },
@@ -72,6 +104,7 @@ export default function PoolAnalysisPage() {
     ? rawSide : null;
   const focusPn = sp.get("pn")?.trim() || null;
   const purchaseType = sp.get("purchase_type")?.trim() || null;
+  const employee = sp.get("employee")?.trim() || null;
   const hasCustomWindow = sp.has("from") || sp.has("to");
   const range = !parsedWindow
     ? (rawRange == null ? "90d" : STANDARD_RANGES.has(rawRange as PoolAnalysisRange)
@@ -128,30 +161,50 @@ export default function PoolAnalysisPage() {
   const rawPriceSort = sp.get("price_sort") as PriceMapSort | null;
   const priceSort: PriceMapSort = rawPriceSort && priceSortTokens.has(rawPriceSort) ? rawPriceSort : "pn";
   const priceOrder: "asc" | "desc" = sp.get("price_order") === "desc" ? "desc" : "asc";
+  const priceMapScope = useMemo<PriceMapScope>(() => ({
+    groupId,
+    side: focusSide,
+    range: from && to ? "custom" : (range ?? "90d"),
+    dateFrom: from,
+    dateTo: to,
+    purchaseType,
+    employee,
+    sort: priceSort,
+    order: priceOrder,
+  }), [groupId, focusSide, from, to, range, purchaseType, employee, priceSort, priceOrder]);
+  const currentPriceMapScopeKey = useMemo(
+    () => priceMapScopeKey(priceMapScope), [priceMapScope],
+  );
   const priceMapParams = useMemo(() => ({
     side: focusSide,
     ...(from && to ? { date_from: from, date_to: to } : { range: range ?? undefined }),
     ...(purchaseType ? { purchase_type: purchaseType } : {}),
+    ...(employee ? { employee } : {}),
     sort: priceSort, order: priceOrder,
-  }), [focusSide, from, to, range, purchaseType, priceSort, priceOrder]);
+  }), [focusSide, from, to, range, purchaseType, employee, priceSort, priceOrder]);
   const { data: rawPriceMap, loading: priceMapLoading, error: priceMapError,
     reload: reloadPriceMap } = useGuardedFetch<PoolPriceMapResponse>(
     () => (validId && !invalidWindow
       ? fetchPoolPriceMap(groupId, priceMapParams).then((data) => ({ data }))
       : Promise.resolve({ data: null as unknown as PoolPriceMapResponse })),
-    [groupId, priceMapParams, validId, invalidWindow]);
+    [currentPriceMapScopeKey, validId, invalidWindow], currentPriceMapScopeKey);
+  const scopedRawPriceMap = rawPriceMap
+    && responseMatchesPriceMapScope(rawPriceMap, priceMapScope) ? rawPriceMap : null;
+  const priceMapScopeMismatch = rawPriceMap != null && scopedRawPriceMap == null;
   // 登录态权限先于接口响应收紧；任何旧响应都不能在首帧短暂露出价格。
   const priceMap = useMemo(() => {
-    if (!rawPriceMap || !local.governance || rawPriceMap.price_restricted) return rawPriceMap;
+    if (!scopedRawPriceMap || !local.governance || scopedRawPriceMap.price_restricted) {
+      return scopedRawPriceMap;
+    }
     return {
-      ...rawPriceMap, price_restricted: true, effective_sort: "pn" as const,
+      ...scopedRawPriceMap, price_restricted: true, effective_sort: "pn" as const,
       effective_order: "asc" as const, pool_stats: null, excluded: null,
       current_constraint: { status: "restricted" as const, value: null,
         changed_at: null, input_basis: null },
-      members: rawPriceMap.members.map((member) => ({ ...member, stats: null,
+      members: scopedRawPriceMap.members.map((member) => ({ ...member, stats: null,
         current_reference: null, latest_raw_record: null, quality_counts: null })),
     };
-  }, [rawPriceMap, local.governance]);
+  }, [scopedRawPriceMap, local.governance]);
 
   const sideReference = (side: "purchase" | "sales") => side === "purchase"
     ? d?.purchase_reference : d?.sales_reference;
@@ -488,10 +541,13 @@ export default function PoolAnalysisPage() {
                 {priceOrder === "asc" ? "升序 ↑" : "降序 ↓"}
               </Button>
             </div>}>
-            {priceMapError ? <Alert type="error" showIcon
-              message={`价格区间加载失败：${priceMapError}`}
+            {priceMapError || priceMapScopeMismatch ? <Alert type="error" showIcon
+              message={priceMapScopeMismatch
+                ? "价格区间响应范围与当前筛选不一致，请重试"
+                : `价格区间加载失败：${priceMapError}`}
               action={<Button size="small" onClick={reloadPriceMap}>重试</Button>} />
-              : priceMap ? <PoolPnPriceMap data={priceMap} loading={priceMapLoading}
+              : priceMap ? <PoolPnPriceMap key={currentPriceMapScopeKey}
+                data={priceMap} loading={priceMapLoading}
                 onPartOpen={(partId) => navigate(`/parts?part_id=${partId}`)} />
                 : <div style={{ ...MUTED, padding: 32, textAlign: "center" }}>
                     {priceMapLoading ? "正在加载价格区间…" : "窗口内暂无价格数据"}
