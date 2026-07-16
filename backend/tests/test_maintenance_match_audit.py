@@ -147,8 +147,8 @@ def test_report_is_deterministic_masked_fixed_query_count_and_has_no_side_effect
         event.remove(db.bind, "before_cursor_execute", count_select)
 
     assert first == second
-    assert first_query_count == 2
-    assert selects == 4
+    assert first_query_count == 3
+    assert selects == 6
     payload = json.dumps(first, ensure_ascii=False)
     all_raw_values = {
         value.strip()
@@ -180,16 +180,28 @@ def test_report_is_deterministic_masked_fixed_query_count_and_has_no_side_effect
 
 def test_sample_limit_zero_never_constructs_sample_dicts(db, batch, monkeypatch):
     _load_fixture(db, batch)
+    selects = 0
 
     def forbidden(*_args, **_kwargs):
-        raise AssertionError("sample_limit=0 不得为未匹配行构造样例字典")
+        raise AssertionError("sample_limit=0 不得构造样例字典、候选预览或执行预览查询")
+
+    def count_select(_conn, _cursor, statement, _params, _ctx, _many):
+        nonlocal selects
+        if statement.lstrip().upper().startswith("SELECT"):
+            selects += 1
 
     monkeypatch.setattr(maintenance_match_audit, "_sample", forbidden)
-    report = maintenance_match_audit.build_report(db, sample_limit=0)
+    monkeypatch.setattr(maintenance_match_audit, "_CandidatePreview", forbidden)
+    event.listen(db.bind, "before_cursor_execute", count_select)
+    try:
+        report = maintenance_match_audit.build_report(db, sample_limit=0)
+    finally:
+        event.remove(db.bind, "before_cursor_execute", count_select)
 
     assert report["scope"]["unmatched_line_count"] == 6
     assert report["invariant"]["equals_unmatched"] is True
     assert all(bucket["samples"] == [] for bucket in report["buckets"])
+    assert selects == 2
 
 
 def test_shared_exact_key_preserves_cost_engine_edge_semantics():

@@ -114,9 +114,11 @@ sales_ref 3,094、none 2,838。结论：报告重复运行确定，共享 helper
 
 ## 5. Standards 返修验证
 
-- 内存有界：六桶只累加整数计数，每桶最多保留 `sample_limit` 个样例；测试将 `_sample` 替换为失败函数，`sample_limit=0` 时完整报告仍成功且调用次数为 0。
-- 快照实测：`sample_limit=0` 返回 0 个样例；`sample_limit=10` 仅三个非空桶各保存 10 个样例，而不是为 19,508 条未匹配行创建字典。
-- 采购候选在读取时即按宽松需求号预聚合，只保留订单集合、PN 集合、每 PN 的合格订单集合和最多 3 个掩码预览所需值，不再保留全部采购明细对象。
+- 内存有界：六桶只累加整数计数，每桶最多保留 `sample_limit` 个待补样例；测试同时将 `_sample` 与 `_CandidatePreview` 替换为失败函数，`sample_limit=0` 时完整报告仍成功、两者调用次数均为 0。
+- 主索引不含预览：采购查询先在 SQL 按采购单+part 聚合，Python 每个 loose key 只保留订单集合及每个 part 的合格订单计数，不保存 PN、需求号、采购行对象或 `CandidatePreview`。
+- 预览后补：完成六桶计数并选出最多 60 个待补样例后，第三个查询用这些 loose key 取每键最多 3 条预览，总返回上限 180 行；`sample_limit=0` 完全跳过该查询。
+- 快照实测：`sample_limit=0` 为 2 次 SELECT、0 个样例、0 个 `CandidatePreview`；`sample_limit=10` 为 3 次 SELECT、30 个样例、仅构造 38 个 `CandidatePreview`。
+- `tracemalloc` 新鲜进程实测峰值：`sample_limit=0` 为 **56.9 MB**，`sample_limit=10` 为 **57.0 MB**；均显著低于审查记录的旧版 185.7 MB，也低于第一轮返修的 235.5 MB。
 - 精确键同源：`maintenance_cost` 与归因服务共同调用 `maintenance_match_keys.exact_match_key`；测试锁定 `None`、空字符串、纯空白、大小写和首尾空格的历史行为。交叉样本同时放入“空白维保号 + 空白采购号 + 同 PN”和“空白维保号 + 无采购命中”：前者沿用现行 A0 命中、排除于母集，后者进入 `empty_request_no`。空白直配语义异常另开问题，本诊断不改成本结果。
 - 脱敏收紧：短值全遮，5~8 位最多首尾各 1 位，9 位及以上才首尾各 2 位；测试从夹具数据库枚举全部维保/采购需求号与 PN，确认无任一原值出现在 JSON，并对白名单逐层校验响应字段。
 - 最终验证：归因 + 成本定向测试 20 passed；后端全量 978 passed / 2 skipped；`alembic check` 返回 `No new upgrade operations detected.`；独立 SQL 仍为 29,046 / 9,538 / 19,508，六桶数字零漂移。

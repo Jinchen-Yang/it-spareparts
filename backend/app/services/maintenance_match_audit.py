@@ -13,7 +13,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app import config
@@ -39,7 +39,6 @@ _BUCKETS = (
 
 @dataclass(frozen=True)
 class _CandidatePreview:
-    order_id: int
     request_no: str
     pn_std: str | None
 
@@ -48,23 +47,24 @@ class _CandidatePreview:
 class _LooseCandidates:
     """按宽松需求号预聚合的最小分类索引；不保留采购明细行或价格。"""
     order_ids: set[int] = field(default_factory=set)
-    part_ids: set[int] = field(default_factory=set)
-    eligible_orders_by_part: dict[int, set[int]] = field(
-        default_factory=lambda: defaultdict(set)
-    )
-    previews: list[_CandidatePreview] = field(default_factory=list)
-    preview_keys: set[tuple[int, int]] = field(default_factory=set)
+    # 采购查询已按 (order_id, part_id) 聚合，所以这里可直接计数，无需保存订单集合。
+    eligible_order_count_by_part: dict[int, int] = field(default_factory=dict)
 
-    def add(self, order_id: int, request_no: str, part_id: int,
-            pn_std: str | None, eligible: bool) -> None:
+    def add(self, order_id: int, part_id: int, eligible: bool) -> None:
         self.order_ids.add(order_id)
-        self.part_ids.add(part_id)
+        self.eligible_order_count_by_part.setdefault(part_id, 0)
         if eligible:
-            self.eligible_orders_by_part[part_id].add(order_id)
-        preview_key = (order_id, part_id)
-        if len(self.previews) < 3 and preview_key not in self.preview_keys:
-            self.preview_keys.add(preview_key)
-            self.previews.append(_CandidatePreview(order_id, request_no, pn_std))
+            self.eligible_order_count_by_part[part_id] += 1
+
+
+@dataclass(frozen=True)
+class _PendingSample:
+    line_id: int
+    request_no: str | None
+    pn_std: str | None
+    loose_key: str | None
+    candidate_order_count: int
+    reason: str
 
 
 def _loose_key(value: str | None) -> str | None:
@@ -102,61 +102,120 @@ def _ratio(numerator: int, denominator: int) -> float:
 def _purchase_indexes(
     db: Session,
 ) -> tuple[set[tuple[str, int]], dict[str, _LooseCandidates]]:
+    normalized_pn = func.upper(func.btrim(FPurchaseLine.pn_std))
+    excluded = tuple(exact_match_key(pn) for pn in config.MAINT_POOL_EXCLUDE_PNS)
+    eligible_line = and_(
+        FPurchaseLine.qty.is_not(None),
+        FPurchaseLine.qty > _ZERO,
+        FPurchaseLine.unit_price.is_not(None),
+        FPurchaseLine.unit_price > _ZERO,
+        or_(FPurchaseLine.pn_std.is_(None), normalized_pn.not_in(excluded)),
+    )
     stmt = (
         select(
             FPurchaseOrder.id,
             FPurchaseOrder.linked_maintenance_order_no,
             FPurchaseLine.part_id,
-            FPurchaseLine.pn_std,
-            FPurchaseLine.qty,
-            FPurchaseLine.unit_price,
+            func.bool_or(eligible_line).label("eligible"),
         )
         .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
         .where(
             FPurchaseOrder.linked_maintenance_order_no.is_not(None),
             FPurchaseOrder.linked_maintenance_order_no != "",
         )
-        .order_by(FPurchaseLine.id)
+        .group_by(
+            FPurchaseOrder.id,
+            FPurchaseOrder.linked_maintenance_order_no,
+            FPurchaseLine.part_id,
+        )
+        .order_by(FPurchaseOrder.id, FPurchaseLine.part_id)
     )
     stmt = active_orders(stmt, FPurchaseOrder)
-    excluded = {exact_match_key(pn) for pn in config.MAINT_POOL_EXCLUDE_PNS}
     exact_eligible: set[tuple[str, int]] = set()
     by_loose: dict[str, _LooseCandidates] = defaultdict(_LooseCandidates)
-    for order_id, request_no, part_id, pn_std, qty, unit_price in db.execute(stmt):
-        eligible = bool(
-            qty is not None and qty > _ZERO
-            and unit_price is not None and unit_price > _ZERO
-            and exact_match_key(pn_std) not in excluded
-        )
+    for order_id, request_no, part_id, eligible in db.execute(stmt):
         exact = exact_match_key(request_no)
-        if eligible and exact is not None:
+        if bool(eligible) and exact is not None:
             exact_eligible.add((exact, part_id))
         loose = _loose_key(request_no)
         if loose is not None:
-            by_loose[loose].add(order_id, request_no, part_id, pn_std, eligible)
+            by_loose[loose].add(order_id, part_id, bool(eligible))
     return exact_eligible, dict(by_loose)
 
 
-def _sample(line_id: int, request_no: str | None, pn_std: str | None,
-            candidates: _LooseCandidates | None, reason: str) -> dict:
+def _candidate_previews(db: Session, loose_keys: set[str]) -> dict[str, list[_CandidatePreview]]:
+    """对已选样例补最多 3 条候选；loose key 最多 6 桶×10=60，返回最多 180 行。"""
+    if not loose_keys:
+        return {}
+    if len(loose_keys) > 60:
+        raise AssertionError(f"preview loose key budget exceeded: {len(loose_keys)}")
+
+    request_no = FPurchaseOrder.linked_maintenance_order_no
+    loose_expr = func.nullif(
+        func.regexp_replace(func.upper(func.btrim(request_no)), "[^A-Z0-9]+", "", "g"),
+        "",
+    )
+    grouped_stmt = (
+        select(
+            loose_expr.label("loose_key"),
+            FPurchaseOrder.id.label("order_id"),
+            FPurchaseLine.part_id.label("part_id"),
+            func.min(FPurchaseLine.id).label("line_id"),
+        )
+        .join(FPurchaseOrder, FPurchaseLine.order_id == FPurchaseOrder.id)
+        .where(
+            request_no.is_not(None),
+            request_no != "",
+            loose_expr.in_(sorted(loose_keys)),
+        )
+        .group_by(loose_expr, FPurchaseOrder.id, FPurchaseLine.part_id)
+    )
+    grouped_stmt = active_orders(grouped_stmt, FPurchaseOrder)
+    grouped = grouped_stmt.subquery()
+    ranked = (
+        select(
+            grouped.c.loose_key,
+            FPurchaseOrder.linked_maintenance_order_no.label("request_no"),
+            FPurchaseLine.pn_std,
+            func.row_number().over(
+                partition_by=grouped.c.loose_key,
+                order_by=grouped.c.line_id,
+            ).label("preview_rank"),
+        )
+        .join(FPurchaseLine, FPurchaseLine.id == grouped.c.line_id)
+        .join(FPurchaseOrder, FPurchaseOrder.id == grouped.c.order_id)
+        .subquery()
+    )
+    stmt = (
+        select(ranked.c.loose_key, ranked.c.request_no, ranked.c.pn_std)
+        .where(ranked.c.preview_rank <= 3)
+        .order_by(ranked.c.loose_key, ranked.c.preview_rank)
+    )
+    previews: dict[str, list[_CandidatePreview]] = defaultdict(list)
+    for loose_key, candidate_request_no, candidate_pn in db.execute(stmt):
+        previews[loose_key].append(_CandidatePreview(candidate_request_no, candidate_pn))
+    return dict(previews)
+
+
+def _sample(pending: _PendingSample, previews: list[_CandidatePreview]) -> dict:
     return {
-        "sample_ref": _sample_ref(line_id),
-        "maintenance_request_no": _masked(request_no),
-        "maintenance_pn": _masked(pn_std),
-        "candidate_order_count": len(candidates.order_ids) if candidates else 0,
+        "sample_ref": _sample_ref(pending.line_id),
+        "maintenance_request_no": _masked(pending.request_no),
+        "maintenance_pn": _masked(pending.pn_std),
+        "candidate_order_count": pending.candidate_order_count,
         "candidates": [
             {
                 "request_no": _masked(row.request_no),
                 "pn": _masked(row.pn_std),
             }
-            for row in (candidates.previews if candidates else [])
+            for row in previews
         ],
-        "reason": reason,
+        "reason": pending.reason,
     }
 
 
 def build_report(db: Session, *, sample_limit: int = 5) -> dict:
-    """生成确定性的只读归因报告；固定两次 SELECT，查询数不随数据量增长。"""
+    """确定性只读归因；无样例 2 次 SELECT，有样例固定 3 次，均不随行数增长。"""
     if not 0 <= sample_limit <= 10:
         raise ValueError("sample_limit must be between 0 and 10")
 
@@ -172,15 +231,16 @@ def build_report(db: Session, *, sample_limit: int = 5) -> dict:
         .order_by(FMaintenanceLine.id)
     )
     maintenance_stmt = active_orders(maintenance_stmt, FMaintenanceOrder)
-    maintenance_rows = list(db.execute(maintenance_stmt))
     exact_eligible, by_loose = _purchase_indexes(db)
 
     bucket_counts = {code: 0 for code, _label, _repairable in _BUCKETS}
-    bucket_samples: dict[str, list[dict]] = {
+    pending_samples: dict[str, list[_PendingSample]] = {
         code: [] for code, _label, _repairable in _BUCKETS
     }
     exact_matched = 0
-    for line_id, request_no, part_id, pn_std in maintenance_rows:
+    total = 0
+    for line_id, request_no, part_id, pn_std in db.execute(maintenance_stmt):
+        total += 1
         exact = exact_match_key(request_no)
         # 母集必须与现行 A0 完全一致：历史语义会把双方纯空白键视为 '' 精确命中。
         # 该语义异常另开问题处理；诊断报告不能在本 slice 偷改正式成本边界。
@@ -190,18 +250,20 @@ def build_report(db: Session, *, sample_limit: int = 5) -> dict:
 
         loose = _loose_key(request_no)
         candidates = by_loose.get(loose) if loose else None
-        eligible_same_part_orders = (
-            candidates.eligible_orders_by_part.get(part_id, set()) if candidates else set()
+        eligible_same_part_count = (
+            candidates.eligible_order_count_by_part.get(part_id, 0) if candidates else 0
         )
-        any_same_part = bool(candidates and part_id in candidates.part_ids)
+        any_same_part = bool(
+            candidates and part_id in candidates.eligible_order_count_by_part
+        )
 
         if not exact:
             code = "empty_request_no"
             reason = "维保侧需求号为空，无法建立需求号关联"
-        elif len(eligible_same_part_orders) == 1:
+        elif eligible_same_part_count == 1:
             code = "normalizable_format"
             reason = "仅格式符号不同，规整后唯一命中同 PN 采购候选"
-        elif len(eligible_same_part_orders) > 1:
+        elif eligible_same_part_count > 1:
             code = "duplicate_candidates"
             reason = "规整后命中多张同 PN 采购候选，不能唯一判断"
         elif any_same_part:
@@ -218,16 +280,29 @@ def build_report(db: Session, *, sample_limit: int = 5) -> dict:
             reason = "未落入已知归因类型，需人工复核"
 
         bucket_counts[code] += 1
-        if len(bucket_samples[code]) < sample_limit:
-            bucket_samples[code].append(_sample(line_id, request_no, pn_std, candidates, reason))
+        if len(pending_samples[code]) < sample_limit:
+            pending_samples[code].append(_PendingSample(
+                line_id=line_id,
+                request_no=request_no,
+                pn_std=pn_std,
+                loose_key=loose,
+                candidate_order_count=len(candidates.order_ids) if candidates else 0,
+                reason=reason,
+            ))
 
-    total = len(maintenance_rows)
     unmatched = total - exact_matched
     bucket_sum = sum(bucket_counts.values())
     if bucket_sum != unmatched:
         raise AssertionError(f"bucket sum {bucket_sum} != unmatched {unmatched}")
 
     format_count = bucket_counts["normalizable_format"]
+    preview_keys = {
+        pending.loose_key
+        for rows in pending_samples.values()
+        for pending in rows
+        if pending.loose_key is not None
+    }
+    previews_by_loose = _candidate_previews(db, preview_keys)
     buckets = []
     for code, label, repairable in _BUCKETS:
         count = bucket_counts[code]
@@ -237,7 +312,10 @@ def build_report(db: Session, *, sample_limit: int = 5) -> dict:
             "line_count": count,
             "share_of_unmatched": _ratio(count, unmatched),
             "repairable": repairable,
-            "samples": bucket_samples[code],
+            "samples": [
+                _sample(pending, previews_by_loose.get(pending.loose_key, []))
+                for pending in pending_samples[code]
+            ],
         })
 
     return {
