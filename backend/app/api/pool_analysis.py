@@ -120,12 +120,15 @@ def get_pool_price_map(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     price_restricted = is_field_hidden(ctx, "purchase_ceiling_ex_tax")
-    ranking_restricted = price_restricted and sort != "pn"
-    effective_sort = "pn" if ranking_restricted else sort
-    effective_order = "asc" if ranking_restricted else order
+    # 无价格权限时，必须在调用服务前把真实数组顺序也锁定为 PN 升序；
+    # 不能仅在 apply_visibility 阶段改响应元数据，否则 pn/desc 仍会泄露旧排序语义。
+    ranking_restricted = price_restricted and (sort != "pn" or order != "asc")
+    effective_sort = "pn" if price_restricted else sort
+    effective_order = "asc" if price_restricted else order
     record_access_log(ctx, "pool_analysis_price_map", "pools", {
         "group_id": group_id, "side": side, "purchase_type": purchase_type,
         "employee": employee, "sort": sort, "effective_sort": effective_sort,
+        "order": order, "effective_order": effective_order,
     })
     try:
         data = pool_price_analysis.price_map(

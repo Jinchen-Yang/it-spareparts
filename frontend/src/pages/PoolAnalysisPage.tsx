@@ -24,6 +24,7 @@ import PoolOrderDetailModal from "../components/pools/PoolOrderDetailModal";
 import PurchaseTypeSelect from "../components/pools/PurchaseTypeSelect";
 import { EMPTY, moneyExact, qty } from "../utils/format";
 import { ISO_DATE_FORMAT, strictIsoDateRange } from "../utils/date";
+import { poolAnalysisPartPath } from "../utils/poolAnalysisNavigation";
 import { PartLink } from "./boss/PartsTable";
 import { MUTED, useGuardedFetch, useLocalRestrictions } from "./boss/shared";
 import { activatableProps } from "./purchases/shared";
@@ -175,6 +176,18 @@ export default function PoolAnalysisPage() {
   const currentPriceMapScopeKey = useMemo(
     () => priceMapScopeKey(priceMapScope), [priceMapScope],
   );
+  const partNavigationContext = useMemo(() => ({
+    groupId,
+    range: priceMapScope.range,
+    dateFrom: from,
+    dateTo: to,
+    side: focusSide,
+    purchaseType,
+    employee,
+    priceSort: sp.has("price_sort") ? priceSort : null,
+    priceOrder: sp.has("price_order") ? priceOrder : null,
+  }), [groupId, priceMapScope.range, from, to, focusSide, purchaseType, employee,
+    priceSort, priceOrder, sp]);
   const priceMapParams = useMemo(() => ({
     side: focusSide,
     ...(from && to ? { date_from: from, date_to: to } : { range: range ?? undefined }),
@@ -548,7 +561,10 @@ export default function PoolAnalysisPage() {
               action={<Button size="small" onClick={reloadPriceMap}>重试</Button>} />
               : priceMap ? <PoolPnPriceMap key={currentPriceMapScopeKey}
                 data={priceMap} loading={priceMapLoading}
-                onPartOpen={(partId) => navigate(`/parts?part_id=${partId}`)} />
+                isMobile={isMobile}
+                onPartOpen={(partId) => navigate(poolAnalysisPartPath(
+                  partId, partNavigationContext,
+                ))} />
                 : <div style={{ ...MUTED, padding: 32, textAlign: "center" }}>
                     {priceMapLoading ? "正在加载价格区间…" : "窗口内暂无价格数据"}
                   </div>}

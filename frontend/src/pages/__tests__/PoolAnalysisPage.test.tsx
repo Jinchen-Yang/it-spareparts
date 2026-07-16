@@ -34,19 +34,24 @@ vi.mock("../../components/charts/PoolPnPriceMap", async () => {
   return {
     default: (p: { data: { side: string; price_restricted: boolean;
       members: Array<{ part_id: number; pn_std?: string | null }> };
-      onPartOpen?: (partId: number) => void }) => {
+      onPartOpen?: (partId: number) => void; isMobile?: boolean }) => {
       const [selectedPartId, setSelectedPartId] = React.useState<number | null>(null);
       const selected = p.data.members.find((member) => member.part_id === selectedPartId);
+      const activate = (partId: number) => p.isMobile
+        ? setSelectedPartId(partId) : p.onPartOpen?.(partId);
       return <div data-testid="price-map-stub" data-side={p.data.side}
-        data-restricted={String(p.data.price_restricted)} data-clickable={String(!!p.onPartOpen)}>
-        <button onClick={() => p.onPartOpen?.(p.data.members[0].part_id)}>查看图中型号全景</button>
+        data-restricted={String(p.data.price_restricted)} data-clickable={String(!!p.onPartOpen)}
+        data-mobile={String(!!p.isMobile)}>
+        <button onClick={() => activate(p.data.members[0].part_id)}>查看图中型号全景</button>
         <div data-testid="price-map-equivalent-table">
           {p.data.members.map((member) => <button key={member.part_id}
-            onClick={() => setSelectedPartId(member.part_id)}>
+            onClick={() => activate(member.part_id)}>
             选择 {member.pn_std ?? `#${member.part_id}`}
           </button>)}
         </div>
-        {selected && <div data-testid="price-map-selected">已选择 {selected.pn_std}</div>}
+        {selected && <div data-testid="price-map-selected">已选择 {selected.pn_std}
+          <button onClick={() => p.onPartOpen?.(selected.part_id)}>查看型号全景</button>
+        </div>}
       </div>;
     },
   };
@@ -332,13 +337,35 @@ describe("股票式价格区间图", () => {
     expect(await screen.findByTestId("price-map-stub")).toHaveAttribute("data-side", "sales");
   });
 
-  it("图中型号不再打开旧统计抽屉，直接跳稳定 part_id 全景深链", async () => {
-    renderAt("/pool-analysis/12?side=purchase&range=365d&purchase_type=补库");
+  it("桌面图中型号一次点击进入全景，并携带完整池分析上下文", async () => {
+    renderAt("/pool-analysis/12?from=2026-06-01&to=2026-06-30&side=purchase&purchase_type=补库&employee=张三&price_sort=weighted_avg&price_order=desc");
     await screen.findByText("内存互通池");
     fireEvent.click(await screen.findByRole("button", { name: "查看图中型号全景" }));
     expect(await screen.findByText("型号查询页桩")).toBeInTheDocument();
-    expect(currentPath).toBe("/parts?part_id=101");
+    const query = new URLSearchParams(currentPath.split("?")[1]);
+    expect(currentPath.split("?")[0]).toBe("/parts");
+    expect(Object.fromEntries(query)).toEqual({
+      part_id: "101", group_id: "12", range: "custom",
+      date_from: "2026-06-01", date_to: "2026-06-30", side: "purchase",
+      purchase_type: "补库", employee: "张三",
+      price_sort: "weighted_avg", price_order: "desc",
+    });
     expect(screen.queryByText("成员 PN-A 详情")).toBeNull();
+  });
+
+  it("移动端图形先开固定卡，卡片按钮再携上下文进入型号全景", async () => {
+    breakpoint.mockReturnValue({ xs: true, sm: false, md: false, lg: false, xl: false, xxl: false });
+    renderAt("/pool-analysis/12?range=365d&side=sales&employee=李四");
+    const map = await screen.findByTestId("price-map-stub");
+    expect(map).toHaveAttribute("data-mobile", "true");
+    fireEvent.click(within(map).getByRole("button", { name: "查看图中型号全景" }));
+    expect(within(map).getByTestId("price-map-selected")).toHaveTextContent("PN-A");
+    fireEvent.click(within(map).getByRole("button", { name: "查看型号全景" }));
+    await screen.findByText("型号查询页桩");
+    const query = new URLSearchParams(currentPath.split("?")[1]);
+    expect(Object.fromEntries(query)).toEqual({
+      part_id: "101", group_id: "12", range: "365d", side: "sales", employee: "李四",
+    });
   });
 
   it("确定性延迟下旧采购响应最后到达也不能覆盖新销售图", async () => {
@@ -356,6 +383,7 @@ describe("股票式价格区间图", () => {
   });
 
   it("scope 切换立即隐藏旧表和固定详情，新响应不得继承旧 PN 选择", async () => {
+    breakpoint.mockReturnValue({ xs: true, sm: false, md: false, lg: false, xl: false, xxl: false });
     let releaseSales: ((value: PoolPriceMapResponse) => void) | undefined;
     fetchPoolPriceMap.mockImplementation((_groupId: number, params: { side?: "purchase" | "sales" }) => {
       if (params.side === "sales") {

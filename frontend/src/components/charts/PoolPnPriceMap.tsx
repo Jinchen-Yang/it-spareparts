@@ -159,9 +159,12 @@ export interface PoolPnPriceMapProps {
   data: PoolPriceMapResponse;
   loading?: boolean;
   onPartOpen?: (partId: number) => void;
+  /** 小屏没有 hover，点图/表后先展示同页固定详情；桌面则一次点击直接下钻。 */
+  isMobile?: boolean;
 }
 
-export default function PoolPnPriceMap({ data, loading, onPartOpen }: PoolPnPriceMapProps) {
+export default function PoolPnPriceMap({ data, loading, onPartOpen,
+  isMobile = false }: PoolPnPriceMapProps) {
   // 只保存稳定身份；统计、原始追溯与疑点标记始终从当前响应派生，不能把旧窗口
   // 的整条 member 带进新筛选结果。
   const [selectedPartId, setSelectedPartId] = useState<number | null>(null);
@@ -176,8 +179,9 @@ export default function PoolPnPriceMap({ data, loading, onPartOpen }: PoolPnPric
     }
   }, [data.members, selectedPartId]);
 
-  const open = (member: PoolPriceMapMember) => {
-    setSelectedPartId(member.part_id);
+  const activate = (member: PoolPriceMapMember) => {
+    if (!isMobile && onPartOpen) onPartOpen(member.part_id);
+    else setSelectedPartId(member.part_id);
   };
   const columns: ColumnsType<PoolPriceMapMember> = data.price_restricted ? [
     { title: "PN", dataIndex: "pn_std", render: (value, member) => value ?? `#${member.part_id}` },
@@ -221,7 +225,11 @@ export default function PoolPnPriceMap({ data, loading, onPartOpen }: PoolPnPric
       <Alert type="info" showIcon message="无池价格权限"
         description="型号仍可查看；价格、约束、差额、数据标记与价格排序均已隐藏。" />
       <Table rowKey="part_id" size="small" pagination={false} columns={columns}
-        dataSource={data.members} scroll={{ x: 420 }} style={{ marginTop: 12 }} />
+        dataSource={data.members} scroll={{ x: 420 }} style={{ marginTop: 12 }}
+        onRow={(member) => onPartOpen ? ({ ...activatableProps(
+          () => onPartOpen(member.part_id),
+          `查看 ${member.pn_std ?? `#${member.part_id}`} 型号全景`,
+        ) }) : ({})} />
     </div>;
   }
   return <div style={{ minWidth: 0 }}>
@@ -238,7 +246,7 @@ export default function PoolPnPriceMap({ data, loading, onPartOpen }: PoolPnPric
       testId="pool-pn-price-map"
       onEvents={{ click: (raw) => {
         const member = resolvePriceMapClick(raw as ChartClickParams, data.members);
-        if (member) open(member);
+        if (member) activate(member);
       } }} />
 
     {selected && <div data-testid="price-map-selected" style={{ marginBlock: 10, padding: 12,
@@ -264,7 +272,8 @@ export default function PoolPnPriceMap({ data, loading, onPartOpen }: PoolPnPric
     <Table<PoolPriceMapMember> rowKey="part_id" size="small" pagination={false}
       columns={columns} dataSource={data.members} scroll={{ x: 1040 }}
       locale={{ emptyText: "池内暂无成员" }}
-      onRow={(member) => ({ ...activatableProps(() => open(member),
-        `查看 ${member.pn_std ?? `#${member.part_id}`} 型号价格详情`) })} />
+      onRow={(member) => ({ ...activatableProps(() => activate(member),
+        isMobile ? `查看 ${member.pn_std ?? `#${member.part_id}`} 型号价格详情`
+          : `查看 ${member.pn_std ?? `#${member.part_id}`} 型号全景`) })} />
   </div>;
 }

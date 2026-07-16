@@ -92,28 +92,37 @@ describe("池内 PN 股票式价格图", () => {
     expect(resolvePriceMapClick({ seriesName: "价格区间", dataIndex: 99 }, DATA.members)).toBeNull();
   });
 
-  it("图、移动固定详情卡与等价表共用完整成员集合，键盘可进入型号详情", () => {
+  it("桌面图形与等价表一次点击直接进入型号全景", () => {
     const open = vi.fn();
     render(<PoolPnPriceMap data={DATA} onPartOpen={open} />);
     expect(screen.getByRole("img", { name: /池内采购价区间/ })).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "查看 PN-NO-SAMPLE 型号价格详情" })[0])
+    expect(screen.getAllByRole("button", { name: "查看 PN-NO-SAMPLE 型号全景" })[0])
       .toHaveTextContent("暂无正式参考样本");
 
     act(() => lastChart().emit("click", { seriesName: "价格区间", dataIndex: 1 }));
-    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("PN-B");
-    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("最近原始价");
-    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("确认源数据错误");
+    expect(open).toHaveBeenCalledWith(2);
+    expect(screen.queryByTestId("price-map-selected")).toBeNull();
 
-    const row = screen.getByRole("button", { name: "查看 PN-A 型号价格详情" });
+    const row = screen.getByRole("button", { name: "查看 PN-A 型号全景" });
     row.focus();
     fireEvent.keyDown(row, { key: "Enter" });
-    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("PN-A");
-    fireEvent.click(screen.getByRole("button", { name: "查看型号全景" }));
     expect(open).toHaveBeenCalledWith(1);
   });
 
+  it("移动端图形保留固定详情卡，并从卡片进入型号全景", () => {
+    const open = vi.fn();
+    render(<PoolPnPriceMap data={DATA} onPartOpen={open} isMobile />);
+    act(() => lastChart().emit("click", { seriesName: "价格区间", dataIndex: 1 }));
+    expect(open).not.toHaveBeenCalled();
+    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("PN-B");
+    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("最近原始价");
+    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("确认源数据错误");
+    fireEvent.click(screen.getByRole("button", { name: "查看型号全景" }));
+    expect(open).toHaveBeenCalledWith(2);
+  });
+
   it("固定详情只保存 part_id：响应更新时取当前正式口径，成员消失时自动清空", () => {
-    const { rerender } = render(<PoolPnPriceMap data={DATA} />);
+    const { rerender } = render(<PoolPnPriceMap data={DATA} isMobile />);
     act(() => lastChart().emit("click", { seriesName: "价格区间", dataIndex: 1 }));
     expect(screen.getByTestId("price-map-selected")).toHaveTextContent("加权均价 ¥120");
     expect(screen.getByTestId("price-map-selected")).toHaveTextContent("最近原始价 ¥230");
@@ -123,12 +132,12 @@ describe("池内 PN 股票式价格图", () => {
       members: DATA.members.map((member) => member.part_id === 2
         ? { ...member, stats: { ...member.stats!, weighted_avg: 777 } } : member),
     };
-    rerender(<PoolPnPriceMap data={updated} />);
+    rerender(<PoolPnPriceMap data={updated} isMobile />);
     expect(screen.getByTestId("price-map-selected")).toHaveTextContent("加权均价 ¥777");
     expect(screen.getByTestId("price-map-selected")).not.toHaveTextContent("加权均价 ¥120");
 
     rerender(<PoolPnPriceMap data={{ ...updated,
-      members: updated.members.filter((member) => member.part_id !== 2) }} />);
+      members: updated.members.filter((member) => member.part_id !== 2) }} isMobile />);
     expect(screen.queryByTestId("price-map-selected")).toBeNull();
   });
 
@@ -144,10 +153,14 @@ describe("池内 PN 股票式价格图", () => {
       members: DATA.members.map((member) => ({ ...member, stats: null, current_reference: null,
         latest_raw_record: null, quality_counts: null })),
     };
-    render(<PoolPnPriceMap data={restricted} />);
+    const open = vi.fn();
+    render(<PoolPnPriceMap data={restricted} onPartOpen={open} />);
     expect(screen.queryByTestId("pool-pn-price-map")).toBeNull();
     expect(screen.getAllByText("无池价格权限").length).toBeGreaterThan(1);
-    expect(screen.getByRole("row", { name: /PN-A/ })).toHaveTextContent("无池价格权限");
+    const pnRow = screen.getByRole("button", { name: "查看 PN-A 型号全景" });
+    expect(pnRow).toHaveTextContent("无池价格权限");
+    fireEvent.click(pnRow);
+    expect(open).toHaveBeenCalledWith(1);
     expect(document.body).not.toHaveTextContent("¥");
     expect(document.body).not.toHaveTextContent("疑点 1");
   });

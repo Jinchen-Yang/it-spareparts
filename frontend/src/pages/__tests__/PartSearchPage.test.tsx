@@ -74,6 +74,7 @@ function renderAt(url: string) {
     <MemoryRouter initialEntries={[url]}>
       <Routes>
         <Route path="/parts" element={<><PartSearchPage /><Probe /></>} />
+        <Route path="/pool-analysis/:groupId" element={<><div>池分析页桩</div><Probe /></>} />
       </Routes>
     </MemoryRouter>,
   );
@@ -119,6 +120,20 @@ describe("稳定深链", () => {
     renderAt("/parts?part_id=abc");
     await Promise.resolve();
     expect(fetchOverview).not.toHaveBeenCalled();
+  });
+
+  it("池分析上下文保留在型号深链，显式返回可完整重放", async () => {
+    renderAt("/parts?part_id=42&group_id=12&range=custom&date_from=2026-06-01&date_to=2026-06-30&side=sales&purchase_type=补库&employee=李四&price_sort=weighted_avg&price_order=desc");
+    await screen.findByText("型号全景：");
+    fireEvent.click(screen.getByRole("link", { name: "返回互通池分析" }));
+    await screen.findByText("池分析页桩");
+    const query = new URLSearchParams(curLoc.search);
+    expect(curLoc.pathname).toBe("/pool-analysis/12");
+    expect(Object.fromEntries(query)).toEqual({
+      range: "custom", from: "2026-06-01", to: "2026-06-30", side: "sales",
+      purchase_type: "补库", employee: "李四",
+      price_sort: "weighted_avg", price_order: "desc",
+    });
   });
 });
 
