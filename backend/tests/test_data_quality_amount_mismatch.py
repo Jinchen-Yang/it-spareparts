@@ -6,13 +6,16 @@ from datetime import date
 from decimal import Decimal
 
 import pandas as pd
+from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from app.auth import hash_password
+from app.main import app
 from app.etl import loader, mapping, pipeline
 from app.models.data_quality import FactDataQualityIssue
 from app.models.purchase import FPurchaseLine
 from app.models.sales import FSalesLine
-from app.models.system import SysImportBatch
+from app.models.system import SysImportBatch, SysUser
 from app.models.system import SysAuditLog
 from app.services import data_quality
 from app.services import dashboard
@@ -301,3 +304,51 @@ def test_history_preview_is_deterministic_and_read_only_for_business_numbers(db)
     assert db.execute(select(
         func.count(FSalesLine.id), func.sum(FSalesLine.line_amount),
     )).one() == before_sales
+
+
+def _login(username: str) -> TestClient:
+    client = TestClient(app)
+    response = client.post(
+        "/api/auth/login", json={"username": username, "password": "pw123456"},
+    )
+    assert response.status_code == 200, response.text
+    client.headers["Authorization"] = f"Bearer {response.json()['token']}"
+    return client
+
+
+def test_automatic_issue_keeps_existing_page_and_price_visibility_gates(db, tmp_path):
+    path = _xlsx(
+        tmp_path, side=mapping.PURCHASE, filename="masked.xlsx",
+        qty="2", unit_price="999", line_amount="2500",
+    )
+    pipeline.run_import(db, path, "masked.xlsx", uploaded_by="刘朝红")
+    db.add_all([
+        SysUser(
+            username="dq_masked", role="readonly", display_name="金额受限",
+            password_hash=hash_password("pw123456"),
+            permissions={"page_governance": True, "data_purchase_cost": False},
+        ),
+        SysUser(
+            username="dq_no_page", role="readonly", display_name="无治理页",
+            password_hash=hash_password("pw123456"),
+        ),
+    ])
+    db.commit()
+    issue = db.scalar(select(FactDataQualityIssue))
+
+    masked = _login("dq_masked")
+    listed = masked.get("/api/data-quality/issues")
+    assert listed.status_code == 200
+    assert "999" not in listed.text and "2500" not in listed.text
+    detail = masked.get(f"/api/data-quality/issues/{issue.id}")
+    assert detail.status_code == 200
+    payload = detail.json()
+    assert payload["evidence"] is None
+    assert payload["evidence_restricted"] is True
+    assert payload["fact"]["unit_price"] is None
+    assert payload["fact"]["line_amount"] is None
+    assert "source_fingerprint" not in payload
+    assert "999" not in detail.text and "2500" not in detail.text
+
+    no_page = _login("dq_no_page")
+    assert no_page.get("/api/data-quality/issues").status_code == 403
