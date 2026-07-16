@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.14.1";
+export const APP_VERSION = "1.14.2";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,14 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.14.2",
+    date: "2026-07-16",
+    items: [
+      "导入历史安全修复：旧版本已记录的数据库驱动、SQL 与参数异常不再向已授权员工显示，统一提示联系管理员；重复文件、解析失败等正常业务说明保持可见",
+      "v1.14.1 的数据导入、治理、利润和库存页面权限修复随本版本一并上线",
+    ],
+  },
   {
     version: "1.14.1",
     date: "2026-07-15",
