@@ -190,7 +190,7 @@ def _pool_sales_orders(db: Session, part_ids, date_from: date | None, upper: dat
         return {"restricted": True, "total": None, "page": page, "page_size": page_size, "items": []}
     sl, so = FSalesLine, FSalesOrder
     base = (
-        select(so.order_no, so.order_date, so.salesperson,
+        select(so.id.label("order_id"), so.order_no, so.order_date, so.salesperson,
                DimCustomer.name_normalized.label("customer"), so.business_type,
                sl.id.label("line_id"), sl.part_id, DimPart.pn_std,
                sl.qty, _sale_ex_unit().label("unit_ex"), sl.revenue_amount, sl.counts_revenue)
@@ -207,7 +207,8 @@ def _pool_sales_orders(db: Session, part_ids, date_from: date | None, upper: dat
     rows = db.execute(base.order_by(so.order_date.desc().nullslast(), sl.id.desc())
                       .limit(page_size).offset((page - 1) * page_size))
     items = [{
-        "order_no": r.order_no, "order_date": r.order_date.isoformat() if r.order_date else None,
+        "order_id": r.order_id, "order_no": r.order_no,
+        "order_date": r.order_date.isoformat() if r.order_date else None,
         "salesperson": r.salesperson, "customer": r.customer, "business_type": r.business_type,
         "line_id": r.line_id, "part_id": r.part_id, "pn_std": r.pn_std,
         "quantity": _r(r.qty, 3), "unit_price_ex_tax": _r(r.unit_ex),
@@ -217,12 +218,13 @@ def _pool_sales_orders(db: Session, part_ids, date_from: date | None, upper: dat
 
 
 def _pool_purchase_orders(db: Session, part_ids, date_from: date | None, upper: date,
-                          page: int, page_size: int) -> dict:
+                          page: int, page_size: int,
+                          source_type: str | None = None) -> dict:
     """池详情-采购订单板块（行粒度，分页返回 total）。展示层含全部已生效采购
     （不限 COST_PURCHASE_TYPES——那是价格统计口径，单据板块如实列单）。"""
     pl, po = FPurchaseLine, FPurchaseOrder
     base = (
-        select(po.order_no, po.order_date, po.purchaser, po.source_type,
+        select(po.id.label("order_id"), po.order_no, po.order_date, po.purchaser, po.source_type,
                DimSupplier.name_normalized.label("supplier"),
                pl.id.label("line_id"), pl.part_id, DimPart.pn_std,
                pl.qty, _purchase_ex_unit().label("unit_ex"),
@@ -233,6 +235,8 @@ def _pool_purchase_orders(db: Session, part_ids, date_from: date | None, upper: 
         .where(pl.part_id.in_(list(part_ids)))
     )
     base = active_orders(base, po)
+    if source_type and source_type.strip():
+        base = base.where(po.source_type == source_type)
     if date_from:
         base = base.where(po.order_date >= date_from)
     base = base.where(po.order_date <= upper)
@@ -240,7 +244,8 @@ def _pool_purchase_orders(db: Session, part_ids, date_from: date | None, upper: 
     rows = db.execute(base.order_by(po.order_date.desc().nullslast(), pl.id.desc())
                       .limit(page_size).offset((page - 1) * page_size))
     items = [{
-        "order_no": r.order_no, "order_date": r.order_date.isoformat() if r.order_date else None,
+        "order_id": r.order_id, "order_no": r.order_no,
+        "order_date": r.order_date.isoformat() if r.order_date else None,
         "purchaser": r.purchaser, "supplier": r.supplier, "source_type": r.source_type,
         "line_id": r.line_id, "part_id": r.part_id, "pn_std": r.pn_std,
         "quantity": _r(r.qty, 3), "unit_price_ex_tax": _r(r.unit_ex), "amount": _r(r.amount),
@@ -251,7 +256,8 @@ def _pool_purchase_orders(db: Session, part_ids, date_from: date | None, upper: 
 def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: date | None = None,
             as_of: date | None = None, user_ctx: security.UserContext | None = None, *,
             with_v2: bool = False, purchase_page: int = 1, sales_page: int = 1,
-            orders_page_size: int = 20) -> dict | None:
+            orders_page_size: int = 20,
+            purchase_source_type: str | None = None) -> dict | None:
     """单个通用号池的降本分析（只读）。甲方修正版：双端溢价、供应稳定性非库存、
     节省分理论上限/可执行机会、客户跨品牌集中度（老板可见）。不输出自动替换指令。"""
     pool = db.get(PartPool, group_id)
@@ -386,7 +392,8 @@ def analyze(db: Session, group_id: int, date_from: date | None = None, date_to: 
         **stats,
         "manual_reference_restricted": manual_restricted,
         "purchase_orders": _pool_purchase_orders(db, part_ids, date_from, upper,
-                                                 purchase_page, orders_page_size),
+                                                 purchase_page, orders_page_size,
+                                                 purchase_source_type),
         "sales_orders": _pool_sales_orders(db, part_ids, date_from, upper,
                                            sales_page, orders_page_size, user_ctx),
     })

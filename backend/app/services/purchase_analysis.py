@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app import config, security
 from app.services.query_filters import active_orders
 from app.models import DimPart, DimSupplier, FPurchaseLine, FPurchaseOrder
+from app.services import pool_metrics
 from app.services.purchase_query import apply_keyword
 
 _CENT = Decimal("0.01")
@@ -231,6 +232,11 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
             "is_frequent": is_freq, "advice": advice, "channels": channels,
         })
 
+    pool_map = pool_metrics.active_pool_map(db, [row["part_id"] for row in out_rows])
+    for row in out_rows:
+        identity = pool_map.get(row["part_id"])
+        row["pool_group_id"] = identity["group_id"] if identity else None
+        row["pool_name"] = identity["pool_name"] if identity else None
     out_rows.sort(key=lambda x: (-x["buy_times"], -(x["total_qty"] or 0)))
     total_amount = sum((co["amount"] for co in comp.values()), Decimal(0))
     # 订单级真实双总额（零计算）：含税=Σamount_inc_tax、不含税=Σamount_ex_tax；再按渠道拆一份。
