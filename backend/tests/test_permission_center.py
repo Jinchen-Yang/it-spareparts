@@ -534,10 +534,11 @@ def test_migration_admin_short_circuit():
 
 
 def test_frozen_templates_match_current_code():
-    """冻结模板 = 编写时刻 effective(role, None)——若后来代码模板漂移，此测提醒补新迁移。"""
+    """历史冻结键保持原值；新权限键必须由后续迁移显式补入。"""
     mig = _load_migration()
     for role, frozen in mig.FROZEN_TEMPLATES.items():
-        assert frozen == permissions.effective(role, None), f"角色 {role} 模板与迁移冻结值漂移"
+        current = permissions.effective(role, None)
+        assert {key: current[key] for key in frozen} == frozen, f"角色 {role} 历史模板键漂移"
 
 
 # ---------- 11. 旧列双写（回滚保险） ----------

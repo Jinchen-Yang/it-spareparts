@@ -31,13 +31,14 @@ PAGE_KEYS: list[str] = [
     # 内置模板对所有非 admin 角色显式 False，保持"仅管理员可见账号管理"的既有行为。
     "page_accounts",
 ]
-# 动作开关：写操作准入（require_action）。默认仅老板/管理员，可在账号管理页单独授权。
+# 动作开关：写操作准入（require_action）。各动作按模板失败关闭，可在账号管理页单独授权。
 ACTION_KEYS: list[str] = [
     "action_pool_manage",      # 建池/改名称说明/增删成员/归档恢复
     "action_pool_set_policy",  # 设置采购最高价 / 销售最低价
     # 权限中心 v2：账号与权限的写能力（建号/改权/改密/停用/批量/模板管理）。
     # 授予/撤销本键与 page_accounts 仅限 admin 角色操作者（api/accounts._guard_account_write）。
     "action_account_manage",
+    "action_data_quality_review",  # 逐条核实采购/销售事实疑点
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ACTION_KEYS, *ROW_KEYS]
@@ -66,6 +67,7 @@ LABELS: dict[str, str] = {
     "own_customers_only": "只看自己成交的客户（防恶性竞争）",
     "page_accounts": "账号与权限中心（查看）",
     "action_account_manage": "账号与权限管理（建号/改权/批量/模板）",
+    "action_data_quality_review": "数据疑点核实（逐条确认/重新打开）",
 }
 
 
@@ -83,9 +85,9 @@ def _full(own: bool = False) -> dict[str, bool]:
 # 共享口令回退登录。正常账号的权限底座来自 sys_role_template 套用时的快照（sys_user.template_perms）。
 ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     "admin": _full(),
-    # boss 由 _full() 生成会连账号管理两键一起 True——必须显式关：账号与权限管理
-    # 历来仅 admin 可见，v2 引入 page_accounts/action_account_manage 不改变这一现状。
-    "boss": {**_full(), "page_accounts": False, "action_account_manage": False},
+    # boss 由 _full() 生成会把全部动作打开；账号管理与数据疑点核实必须显式关闭。
+    "boss": {**_full(), "page_accounts": False, "action_account_manage": False,
+             "action_data_quality_review": False},
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
     # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
     # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
@@ -94,6 +96,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "page_master_data": False, "page_maintenance": False,
                  "page_boss_board": False,
                  "action_pool_manage": False, "action_pool_set_policy": False,
+                 "action_data_quality_review": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
@@ -114,6 +117,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_pool_analysis": True,
         "data_pool_price_governance": True,
         "action_pool_manage": False, "action_pool_set_policy": False,
+        "action_data_quality_review": False,
         "own_customers_only": True,
     },
     "purchaser": {
@@ -132,6 +136,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_pool_analysis": True,
         "data_pool_price_governance": True,
         "action_pool_manage": False, "action_pool_set_policy": False,
+        "action_data_quality_review": False,
         "own_customers_only": False,
     },
 }
@@ -168,6 +173,8 @@ def sanitize(custom: dict | None) -> dict[str, bool]:
 # 账号保存时拒绝（combo_errors），接口层 require_action(require_data=...) 兜底。
 ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     "action_pool_set_policy": "data_pool_price_governance",
+    # 逐条确认必须看得到原始价格和规则证据，不能在证据被脱敏时盲判。
+    "action_data_quality_review": "data_purchase_cost",
 }
 
 # "页面内操作必须能进页面"的动作→页面依赖（权限中心 v2）：改账号权限先要能打开
@@ -175,6 +182,7 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
 # （nav anyPerm），没有独立的 page_* 键。
 ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_account_manage": "page_accounts",
+    "action_data_quality_review": "page_governance",
 }
 
 # 数据之间的可推导依赖：营收在经营报表中是公开口径，毛利一旦可见，
@@ -257,7 +265,7 @@ UI_GROUPS: list[dict] = [
      "keys": list(DATA_GROUPS)},
     {"key": "action", "label": "操作能力",
      "hint": "决定能不能执行写操作（新建/修改/设置）。看见≠能改，改的能力在这里单独授权。",
-     "keys": ["action_pool_manage", "action_pool_set_policy"]},
+     "keys": ["action_pool_manage", "action_pool_set_policy", "action_data_quality_review"]},
     {"key": "row", "label": "行级范围",
      "hint": "在能看的数据里进一步收紧范围（限制型开关：勾上=看得更少）。",
      "keys": list(ROW_KEYS)},
@@ -453,6 +461,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员"],
         "sensitivity": "critical",
         "risk": "接近管理员的能力：持有者可以改动其他普通账号看到什么。必须同时开启「账号与权限中心（查看）」。",
+    },
+    "action_data_quality_review": {
+        "label": "数据疑点核实",
+        "summary": "允许逐条确认采购/销售事实疑点，并在有新依据时重新打开。",
+        "can": "填写原因后确认数据正确、确认源数据错误，或撤销旧结论重新核实。",
+        "cannot": "必须同时持有「查看采购成本」；不能批量确认、不能修改原始订单，也不会因此自动排除利润、库存或池分析统计。",
+        "typical": ["管理员", "数据维护人员（需单独授权）"],
+        "sensitivity": "high",
+        "risk": "结论会实名留痕，并为后续正式参考口径提供依据；必须看着原始证据逐条判断。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {

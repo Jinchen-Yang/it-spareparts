@@ -22,6 +22,7 @@ from tests.db_guard import ensure_test_database  # noqa: E402
 
 _TABLES = [
     "chat_message", "chat_session",
+    "fact_data_quality_issue",
     "product_data_quality_issues", "product_merge_logs", "product_match_candidates",
     "product_specs", "product_categories", "brands",
     # 池三表：TRUNCATE 不会重置独立序列 part_pool_group_id_seq（非 owned），

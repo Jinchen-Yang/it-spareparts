@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.15.0";
+export const APP_VERSION = "1.16.0";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.16.0",
+    date: "2026-07-16",
+    items: [
+      "数据治理新增「价格与数量疑点」工作台：可按状态、采购/销售、规则、PN 或单号筛选，并追溯原始事实行与导入批次",
+      "疑点只表示「需要人工核实」，不等于数据错误；核实员可逐条记录「数据正确 / 源数据错误」并实名留痕，本版不自动修改或排除任何经营数据",
+      "新增独立「数据疑点核实」操作权限；必须同时具备数据治理页面和采购成本查看权限，不允许在看不到证据时盲确认",
+      "本版只建立安全的人工核实地基：自动阈值规则和历史回扫仍未开启，需先用甲方确认的正反样本校准",
+    ],
+  },
   {
     version: "1.15.0",
     date: "2026-07-16",

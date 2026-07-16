@@ -8,6 +8,7 @@ import ResizableTable from "../components/ResizableTable";
 import api from "../api";
 import { money, pct, splitFixed } from "../utils/format";
 import { useTaxBasis } from "../context/TaxBasis";
+import DataQualityIssuesPanel from "./governance/DataQualityIssuesPanel";
 const pct100 = (v: number | null) => (v == null ? "-" : `${v.toFixed(1)}%`);
 
 interface PartRow {
@@ -497,12 +498,12 @@ export default function GovernancePage() {
         </Space>}>
         {sum && (
           <Row gutter={[16, 16]}>
-            <Col span={4}><Statistic title="非标候选型号" value={sum.nonstd_candidates} valueStyle={{ color: "var(--mb-warning)" }} /></Col>
-            <Col span={4}><Statistic title="已排除" value={sum.excluded} valueStyle={{ color: "var(--mb-danger)" }} /></Col>
-            <Col span={4}><Statistic title="PN 待复核" value={sum.needs_review} /></Col>
-            <Col span={4}><Tooltip title="销售行未匹配到成本"><Statistic title="无成本行" value={sum.sales_no_cost} /></Tooltip></Col>
-            <Col span={4}><Tooltip title="账面亏本行"><Statistic title="负毛利行" value={sum.sales_neg_margin} valueStyle={{ color: "var(--mb-danger)" }} /></Tooltip></Col>
-            <Col span={4}><Tooltip title="成本为估算(兜底),非真实匹配"><Statistic title="估算成本行" value={sum.sales_fallback_cost} /></Tooltip></Col>
+            <Col xs={12} sm={8} md={4}><Statistic title="非标候选型号" value={sum.nonstd_candidates} valueStyle={{ color: "var(--mb-warning)" }} /></Col>
+            <Col xs={12} sm={8} md={4}><Statistic title="已排除" value={sum.excluded} valueStyle={{ color: "var(--mb-danger)" }} /></Col>
+            <Col xs={12} sm={8} md={4}><Statistic title="PN 待复核" value={sum.needs_review} /></Col>
+            <Col xs={12} sm={8} md={4}><Tooltip title="销售行未匹配到成本"><Statistic title="无成本行" value={sum.sales_no_cost} /></Tooltip></Col>
+            <Col xs={12} sm={8} md={4}><Tooltip title="账面亏本行"><Statistic title="负毛利行" value={sum.sales_neg_margin} valueStyle={{ color: "var(--mb-danger)" }} /></Tooltip></Col>
+            <Col xs={12} sm={8} md={4}><Tooltip title="成本为估算(兜底),非真实匹配"><Statistic title="估算成本行" value={sum.sales_fallback_cost} /></Tooltip></Col>
           </Row>
         )}
       </Card>
@@ -512,6 +513,7 @@ export default function GovernancePage() {
           defaultActiveKey="parts"
           items={[
             { key: "parts", label: "型号治理", children: <PartsTab /> },
+            { key: "fact-data-quality", label: "价格与数量疑点", children: <DataQualityIssuesPanel /> },
             { key: "candidates", label: "合并候选审核", children: <CandidatesTab onChanged={loadTop} /> },
             { key: "merges", label: "合并历史", children: <MergesTab onChanged={loadTop} /> },
             { key: "issues", label: "质量问题", children: <IssuesTab /> },
