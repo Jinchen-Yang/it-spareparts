@@ -154,7 +154,7 @@ def test_board_status_lights_and_order(db, batch):
                       [f.maintenance_line("M-N", "ML-N", "PN-G", qty="1")])
     db.commit()
     maintenance_cost.recompute(db)
-    b = maintenance_cost.board(db)
+    b = maintenance_cost.board(db, lifecycle="all")
     st = {r["contract"]: r["status"] for r in b["rows"]}
     assert st["XS-G"] == "green" and st["XS-B"] == "yellow" and st["XS-R"] == "red"
     assert st[None] == "no_budget"
@@ -163,7 +163,10 @@ def test_board_status_lights_and_order(db, batch):
     red = next(r for r in b["rows"] if r["status"] == "red")
     assert red["remaining"] == -200.0 and red["budget"] == 1000.0
     # 状态过滤
-    assert all(r["status"] == "yellow" for r in maintenance_cost.board(db, status="yellow")["rows"])
+    assert all(
+        r["status"] == "yellow"
+        for r in maintenance_cost.board(db, status="yellow", lifecycle="all")["rows"]
+    )
 
 
 def test_board_includes_active_expenses_only(db, batch):
@@ -179,7 +182,10 @@ def test_board_includes_active_expenses_only(db, batch):
                            amount=Decimal("9999"), import_batch_id=batch.id))
     db.commit()
     maintenance_cost.recompute(db)
-    row = next(r for r in maintenance_cost.board(db)["rows"] if r["contract"] == "XS-E")
+    row = next(
+        r for r in maintenance_cost.board(db, lifecycle="all")["rows"]
+        if r["contract"] == "XS-E"
+    )
     assert row["spent_expense"] == 950.0
     assert row["spent"] == 1050.0 and row["status"] == "red"
 

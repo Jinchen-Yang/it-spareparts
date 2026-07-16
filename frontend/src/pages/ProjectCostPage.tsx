@@ -25,6 +25,8 @@ interface ProjectRow {
   contract_amount: number | null;
   contract_shared: boolean;
   contract_incomplete: boolean;
+  maint_end: string | null;
+  lifecycle_status: LifecycleStatus;
 }
 
 interface LineRow {
@@ -41,6 +43,9 @@ interface LineRow {
 }
 
 type BoardStatus = "red" | "yellow" | "green" | "no_budget";
+type LifecycleStatus = "ongoing" | "ended" | "missing";
+type LifecycleFilter = LifecycleStatus | "all";
+type LifecycleCounts = Record<LifecycleStatus, number>;
 
 interface BoardRow {
   contract: string | null;
@@ -51,6 +56,7 @@ interface BoardRow {
   budget: number | null; remaining: number | null; remaining_pct: number | null;
   low_conf_pct: number | null;
   maint_start: string | null; maint_end: string | null;
+  lifecycle_status: LifecycleStatus;
   first_out: string | null; last_out: string | null;
 }
 
@@ -61,6 +67,12 @@ const STATUS_META: Record<BoardStatus, { label: string; color: string; bg: strin
   no_budget: { label: "无预算(未关联合同额)", color: "#8c8c8c", bg: "rgba(0,0,0,0.03)" },
 };
 const NEUTRAL_META = { label: "", color: "#8c8c8c", bg: "rgba(0,0,0,0.03)" };
+const LIFECYCLE_META: Record<LifecycleStatus, { label: string; color: string }> = {
+  ongoing: { label: "进行中", color: "blue" },
+  ended: { label: "已结束", color: "default" },
+  missing: { label: "期限缺失", color: "orange" },
+};
+const EMPTY_LIFECYCLE_COUNTS: LifecycleCounts = { ongoing: 0, ended: 0, missing: 0 };
 const CONF_META: Record<string, { label: string; color: string }> = {
   high: { label: "高", color: "green" }, medium: { label: "中", color: "blue" },
   low: { label: "低", color: "orange" },
@@ -88,6 +100,11 @@ function SourceTag({ source, trace, distance }: {
   return <Tag color={m.color}>{m.label}{suffix}</Tag>;
 }
 
+function LifecycleTag({ status }: { status: LifecycleStatus }) {
+  const meta = LIFECYCLE_META[status];
+  return <Tag color={meta.color}>{meta.label}</Tag>;
+}
+
 // 成本来源图例（列头 Tooltip 用，避免用户逐个 hover 才懂颜色）
 const SourceLegend = (
   <div>
@@ -103,12 +120,16 @@ export default function ProjectCostPage() {
   const isAdmin = localStorage.getItem("role") === "admin";
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [q, setQ] = useState("");
+  const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
+  const [lifecycleCounts, setLifecycleCounts] = useState<LifecycleCounts>(EMPTY_LIFECYCLE_COUNTS);
+  const [asOf, setAsOf] = useState("");
   const [rows, setRows] = useState<ProjectRow[]>([]);
   const [board, setBoard] = useState<BoardRow[]>([]);
   const [boardProfitRestricted, setBoardProfitRestricted] = useState(false);
   const [boardFilter, setBoardFilter] = useState<string>("all");
   const [startDate, setStartDate] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [recomputing, setRecomputing] = useState(false);
   const [exporting, setExporting] = useState(false);
   // 明细抽屉
@@ -121,44 +142,66 @@ export default function ProjectCostPage() {
   // 请求序号守卫：抽屉快速翻页/切项目时，迟到响应不得覆盖新结果
   const linesSeq = useRef(0);
   const detailRef = useRef<string | null>(null);
+  // 页面两组聚合请求共享代次：快速切换期限/日期/搜索时，迟到响应不能覆盖最新筛选。
+  const pageSeq = useRef(0);
 
-  const params = () => ({
+  const baseParams = () => ({
     q: q || undefined,
     date_from: range?.[0]?.format("YYYY-MM-DD"),
     date_to: range?.[1]?.format("YYYY-MM-DD"),
   });
 
+  const lifecycleParams = () => ({ ...baseParams(), lifecycle });
+  const boardParams = () => ({
+    q: q || undefined,
+    date_from: range?.[0]?.format("YYYY-MM-DD"),
+    date_to: range?.[1]?.format("YYYY-MM-DD"),
+    lifecycle,
+  });
+
   const load = async () => {
+    const seq = ++pageSeq.current;
     setLoading(true);
+    setLoadError(false);
+    // 筛选已经变化时不继续展示上一筛选的结果，避免用户把旧数据误认成新口径。
+    setRows([]);
+    setBoard([]);
+    setLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
+    setAsOf("");
     try {
       const [{ data }, bd] = await Promise.all([
-        api.get("/maintenance/projects", { params: params() }),
-        api.get("/maintenance/board", { params: {
-          date_from: params().date_from, date_to: params().date_to } }),
+        api.get("/maintenance/projects", { params: lifecycleParams() }),
+        api.get("/maintenance/board", { params: boardParams() }),
       ]);
+      if (seq !== pageSeq.current) return;
       setRows(data.rows);
       setStartDate(data.start_date);
       setBoard(bd.data.rows);
+      setAsOf(data.as_of || bd.data.as_of || "");
+      setLifecycleCounts(data.lifecycle_counts || bd.data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
       setBoardProfitRestricted(!!bd.data.profit_restricted);
       if (bd.data.profit_restricted) setBoardFilter("all");
     } catch {
-      message.error("项目成本加载失败，请稍后重试或检查权限");
+      if (seq !== pageSeq.current) return;
+      setRows([]);
+      setBoard([]);
+      setLoadError(true);
     } finally {
-      setLoading(false);
+      if (seq === pageSeq.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, range]);
+  }, [q, range, lifecycle]);
 
   const loadLines = async (project: string, page: number, month?: string) => {
     const seq = ++linesSeq.current;
     setLinesLoading(true);
     try {
       const { data } = await api.get("/maintenance/lines", {
-        params: { project, page, page_size: 50, month, ...params() },
+        params: { project, page, page_size: 50, month, ...baseParams() },
       });
       // 仅当仍是最新请求且抽屉未切项目时才落地（防竞态覆盖）
       if (seq !== linesSeq.current || detailRef.current !== project) return;
@@ -206,7 +249,7 @@ export default function ProjectCostPage() {
   };
 
   const download = (path: string, filename: string, extra?: Record<string, unknown>) =>
-    api.get(path, { params: { ...params(), ...extra }, responseType: "blob" })
+    api.get(path, { params: { ...baseParams(), ...extra }, responseType: "blob" })
       .then((res) => {
         const url = URL.createObjectURL(res.data);
         const a = document.createElement("a");
@@ -219,7 +262,7 @@ export default function ProjectCostPage() {
   const exportCsv = async () => {
     setExporting(true);
     try {
-      await download("/maintenance/export", "maintenance_projects.csv");
+      await download("/maintenance/export", "maintenance_projects.csv", { lifecycle });
     } catch {
       message.error("导出失败，请稍后重试或检查权限");
     } finally {
@@ -236,6 +279,10 @@ export default function ProjectCostPage() {
 
   const projectCols: ColumnsType<ProjectRow> = [
     { title: "项目", dataIndex: "project", width: 300, fixed: "left", ellipsis: true },
+    { title: "期限状态", dataIndex: "lifecycle_status", width: 100,
+      render: (v: LifecycleStatus) => <LifecycleTag status={v} /> },
+    { title: "维保终止日期", dataIndex: "maint_end", width: 120,
+      render: (v: string | null) => v || <span style={{ color: "var(--mb-warning)" }}>未填写</span> },
     { title: "出库行", dataIndex: "lines", width: 80, align: "right" },
     { title: "数量", dataIndex: "qty", width: 80, align: "right" },
     { title: "备件成本(含税)", dataIndex: "cost_inc", width: 130, align: "right", render: money,
@@ -327,18 +374,57 @@ export default function ProjectCostPage() {
         subtitle={`维保项目备件成本自动核算：已采购按真实采购价（专属采购/当月均价），未采购按追溯均价（≤3月，标注）或销售参考价，逐条标注来源与含税口径${startDate ? ` · 起算日 ${startDate}` : ""}`}
       />
       <Card>
-        <Space wrap size="large">
-          <DatePicker.RangePicker onChange={(v) => setRange(v as [Dayjs, Dayjs] | null)} />
-          <Input.Search
-            placeholder="搜索项目名"
-            allowClear
-            style={{ width: 260 }}
-            onSearch={(v) => setQ(v.trim())}
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>维保期限</div>
+            <div style={{ maxWidth: "100%", overflowX: "auto", paddingBottom: 2 }}>
+              <Segmented
+                aria-label="维保期限筛选"
+                value={lifecycle}
+                onChange={(value) => setLifecycle(value as LifecycleFilter)}
+                options={[
+                  { label: `进行中 ${lifecycleCounts.ongoing}`, value: "ongoing" },
+                  { label: `已结束 ${lifecycleCounts.ended}`, value: "ended" },
+                  { label: <span style={{ color: lifecycleCounts.missing ? "#d46b08" : undefined }}>
+                    期限缺失 {lifecycleCounts.missing}
+                  </span>, value: "missing" },
+                  { label: `全部 ${lifecycleCounts.ongoing + lifecycleCounts.ended + lifecycleCounts.missing}`,
+                    value: "all" },
+                ]}
+              />
+            </div>
+          </div>
+          <Space wrap size="large">
+            <DatePicker.RangePicker onChange={(v) => setRange(v as [Dayjs, Dayjs] | null)} />
+            <Input.Search
+              placeholder="搜索项目名"
+              allowClear
+              style={{ width: "min(260px, 100%)" }}
+              onChange={(event) => {
+                if (!event.target.value) setQ("");
+              }}
+              onSearch={(v) => setQ(v.trim())}
+            />
+            {isAdmin && (
+              <Button type="primary" loading={recomputing} onClick={recompute}>重算成本</Button>
+            )}
+            <Button loading={exporting} onClick={exportCsv} disabled={!rows.length}>导出 CSV</Button>
+          </Space>
+          <Alert
+            type={lifecycleCounts.missing ? "warning" : "info"}
+            showIcon
+            message={`日期范围筛选出库日期；维保期限状态按 ${asOf || "后端请求当天"} 判断。`}
+            description={`终止日当天仍算进行中；未填写终止日期的项目归入“期限缺失”。当前有 ${lifecycleCounts.missing} 个期限缺失项目。`}
           />
-          {isAdmin && (
-            <Button type="primary" loading={recomputing} onClick={recompute}>重算成本</Button>
+          {loadError && (
+            <Alert
+              type="error"
+              showIcon
+              message="项目成本加载失败，旧结果已清空。"
+              description="请检查网络或账号权限后重试；错误期间不会继续展示上一筛选的数据。"
+              action={<Button size="small" danger onClick={load}>重试</Button>}
+            />
           )}
-          <Button loading={exporting} onClick={exportCsv} disabled={!rows.length}>导出 CSV</Button>
         </Space>
       </Card>
 
@@ -347,18 +433,23 @@ export default function ProjectCostPage() {
           <Tooltip title="按合同（销售订单 XSDD）聚合：预算=合同金额（含税参考）；已花=备件成本(混合口径参考)+生效报销费用。共用合同自动合并为一张卡。剩余≤20% 黄灯预警、超支红灯。">
             <InfoCircleOutlined style={{ color: "var(--mb-text-3)" }} />
           </Tooltip></Space>}
-        extra={!boardProfitRestricted && <Segmented
-          value={boardFilter}
-          onChange={(v) => setBoardFilter(v as string)}
-          options={[
-            { label: `全部 ${board.length}`, value: "all" },
-            { label: `🔴 ${board.filter((b) => b.status === "red").length}`, value: "red" },
-            { label: `🟡 ${board.filter((b) => b.status === "yellow").length}`, value: "yellow" },
-            { label: `🟢 ${board.filter((b) => b.status === "green").length}`, value: "green" },
-            { label: `无预算 ${board.filter((b) => b.status === "no_budget").length}`, value: "no_budget" },
-          ]}
-        />}
       >
+        {!boardProfitRestricted && (
+          <div style={{ maxWidth: "100%", overflowX: "auto", marginBottom: 12, paddingBottom: 2 }}>
+            <Segmented
+              aria-label="盈亏状态筛选"
+              value={boardFilter}
+              onChange={(v) => setBoardFilter(v as string)}
+              options={[
+                { label: `全部 ${board.length}`, value: "all" },
+                { label: `🔴 ${board.filter((b) => b.status === "red").length}`, value: "red" },
+                { label: `🟡 ${board.filter((b) => b.status === "yellow").length}`, value: "yellow" },
+                { label: `🟢 ${board.filter((b) => b.status === "green").length}`, value: "green" },
+                { label: `无预算 ${board.filter((b) => b.status === "no_budget").length}`, value: "no_budget" },
+              ]}
+            />
+          </div>
+        )}
         {boardProfitRestricted && (
           <Alert
             type="info"
@@ -369,7 +460,11 @@ export default function ProjectCostPage() {
           />
         )}
         {board.length === 0 ? (
-          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据（导入维保出库后自动生成）" />
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={
+            q || range || lifecycle !== "ongoing"
+              ? "当前筛选暂无合同，请调整项目、日期或期限状态"
+              : "暂无数据（导入维保出库后自动生成）"
+          } />
         ) : (
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             {(boardProfitRestricted || boardFilter === "all"
@@ -386,7 +481,8 @@ export default function ProjectCostPage() {
               }
               return (
                 <div key={b.contract ?? "(none)"} style={{
-                  width: 370, borderRadius: 8, padding: "12px 14px",
+                  width: 370, maxWidth: "100%", boxSizing: "border-box",
+                  borderRadius: 8, padding: "12px 14px",
                   border: "1px solid " + meta.color + "44",
                   borderLeft: "4px solid " + meta.color, background: meta.bg,
                 }}>
@@ -397,6 +493,7 @@ export default function ProjectCostPage() {
                         <Tag color={b.status === "red" ? "red" : b.status === "yellow" ? "gold"
                           : b.status === "green" ? "green" : "default"}>{meta.label}</Tag>
                       )}
+                      <LifecycleTag status={b.lifecycle_status} />
                       {b.contract && (
                         <a style={{ fontSize: 12 }} onClick={() =>
                           download("/maintenance/export-workbook", `项目工作簿_${b.contract}.xlsx`,
@@ -450,17 +547,17 @@ export default function ProjectCostPage() {
         )}
       </Card>
 
-      <Row gutter={16}>
-        <Col span={6}><Card size="small"><Statistic title="项目数" value={rows.length} /></Card></Col>
-        <Col span={6}><Card size="small"><Statistic
+      <Row gutter={[16, 16]}>
+        <Col xs={24} sm={12} lg={6}><Card size="small"><Statistic title="项目数" value={rows.length} /></Card></Col>
+        <Col xs={24} sm={12} lg={6}><Card size="small"><Statistic
           title={<Space size={4}>备件成本 · 含税小计
             <Tooltip title="含税/不含税为分列口径，请勿直接相加对账"><InfoCircleOutlined /></Tooltip></Space>}
           {...costStat(totalInc)} /></Card></Col>
-        <Col span={6}><Card size="small"><Statistic
+        <Col xs={24} sm={12} lg={6}><Card size="small"><Statistic
           title={<Space size={4}>备件成本 · 不含税小计
             <Tooltip title="含税/不含税为分列口径，请勿直接相加对账"><InfoCircleOutlined /></Tooltip></Space>}
           {...costStat(totalEx)} /></Card></Col>
-        <Col span={6}><Card size="small"><Statistic title="无成本行(待处理)" value={totalNone}
+        <Col xs={24} sm={12} lg={6}><Card size="small"><Statistic title="无成本行(待处理)" value={totalNone}
           valueStyle={{ color: totalNone ? "var(--mb-danger)" : undefined }} /></Card></Col>
       </Row>
 
@@ -478,15 +575,15 @@ export default function ProjectCostPage() {
           dataSource={rows}
           scroll={{ x: 1520 }}
           pagination={{ pageSize: 20, showSizeChanger: true }}
-          locale={{ emptyText: (q || range)
-            ? "当前筛选无结果，请调整搜索或日期范围"
+          locale={{ emptyText: (q || range || lifecycle !== "ongoing")
+            ? "当前筛选无结果，请调整搜索、日期或期限状态"
             : <Empty description="尚未导入维保出库数据，请到【数据导入】上传氚云维保订单 Excel" /> }}
         />
       </Card>
 
       <Drawer
         open={!!detailProject}
-        width={1100}
+        width="min(1100px, 100vw)"
         onClose={closeDetail}
         title={detailProject ? `${detailProject} · 出库明细` : ""}
         extra={

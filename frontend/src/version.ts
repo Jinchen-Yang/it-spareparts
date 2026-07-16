@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.16.2";
+export const APP_VERSION = "1.16.3";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.16.3",
+    date: "2026-07-16",
+    items: [
+      "项目成本页新增维保期限筛选：默认只显示进行中项目，可切换查看已结束、期限缺失或全部；终止日当天仍算进行中",
+      "项目列表、合同盈亏卡与 CSV 导出统一显示期限状态和维保终止日期；期限缺失单独提醒，不再与红黄绿预算状态混为一谈",
+      "日期范围仍筛选出库日期，期限状态按北京时间业务日判断，页面同时展示判断日期和进行中/已结束/缺失数量",
+      "快速切换期限、日期或项目搜索时，迟到的旧请求不会覆盖新结果；请求失败会清空旧数据并保留可重试提示",
+    ],
+  },
   {
     version: "1.16.2",
     date: "2026-07-16",
