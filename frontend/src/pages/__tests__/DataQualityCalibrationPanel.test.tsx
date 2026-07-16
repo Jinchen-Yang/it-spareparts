@@ -91,7 +91,8 @@ describe("规则校准预览", () => {
 
     expect(await screen.findByText("仅为模拟预览，不会生成数据疑点")).toBeInTheDocument();
     expect(screen.getByText(/不会修改采购、利润、库存、池均价或员工排名/)).toBeInTheDocument();
-    expect(screen.getByText("可比相邻对")).toBeInTheDocument();
+    // 提示文案同步出现，指标要等异步预览请求完成；全量并发测试下不能假设同一 tick 返回。
+    expect(await screen.findByText("可比相邻对")).toBeInTheDocument();
     expect(screen.getByText("涉及 PN")).toBeInTheDocument();
     for (const threshold of [2, 3, 5, 10]) {
       expect(screen.getByText(`${threshold} 倍档`)).toBeInTheDocument();
