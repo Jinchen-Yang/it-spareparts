@@ -93,6 +93,7 @@ def _template_map(db: Session) -> dict[str, SysRoleTemplate]:
 
 def _view(u: SysUser, tpl: SysRoleTemplate | None = None) -> dict:
     eff = permissions.effective_for_user(u)
+    combo = permissions.combo_errors(eff)
     base = permissions.normalize(u.template_perms) if u.template_perms is not None \
         else permissions.effective(u.role, None)
     return {
@@ -100,6 +101,10 @@ def _view(u: SysUser, tpl: SysRoleTemplate | None = None) -> dict:
         "salesperson_name": u.salesperson_name, "is_active": u.is_active,
         "last_login_at": u.last_login_at,
         "permissions": eff,                       # 最终生效（键名沿用旧版，前端兼容）
+        # 存量非法组合不自动改库：列表显式标红供管理员修复；登录/字段层按
+        # runtime_permissions 失败关闭，旧数据和旧 token 也不能继续泄漏。
+        "runtime_permissions": permissions.runtime_safe(eff),
+        "permission_combo_errors": combo,
         "template_code": u.template_code,
         "template_version": u.template_version,
         "template_name": tpl.name if tpl else u.template_code,
@@ -246,12 +251,15 @@ def meta(db: Session = Depends(get_db), _: None = Depends(_read_gate)) -> dict:
         "groups": permissions.UI_GROUPS,
         "meta": permissions.PERMISSION_META,
         "dependencies": {"action_data": permissions.ACTION_DATA_DEPENDENCIES,
-                         "action_page": permissions.ACTION_PAGE_DEPENDENCIES},
+                         "action_page": permissions.ACTION_PAGE_DEPENDENCIES,
+                         "data_data": permissions.DATA_DATA_DEPENDENCIES},
         "high_risk_keys": sorted(permissions.HIGH_RISK_KEYS),
         "all_keys": permissions.ALL_KEYS,
         "templates": [{
             "code": t.code, "name": t.name, "description": t.description,
             "base_role": t.base_role, "permissions": permissions.normalize(t.permissions),
+            "permission_combo_errors": permissions.combo_errors(
+                permissions.normalize(t.permissions)),
             "is_system": t.is_system, "is_active": t.is_active, "version": t.version,
             "usage_count": usage.get(t.code, 0),
             "locked": t.code == "admin",

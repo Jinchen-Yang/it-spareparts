@@ -90,7 +90,11 @@ export default function PermissionMatrix({
   const detail = (k: string) => {
     const m = meta.meta[k];
     if (!m) return null;
-    const deps = [meta.dependencies.action_data[k], meta.dependencies.action_page[k]].filter(Boolean) as string[];
+    const deps = [
+      meta.dependencies.action_data[k],
+      meta.dependencies.action_page[k],
+      meta.dependencies.data_data[k],
+    ].filter(Boolean) as string[];
     const dependents = dependentActions(k, value, meta);
     return (
       <div style={{ maxWidth: 340 }}>

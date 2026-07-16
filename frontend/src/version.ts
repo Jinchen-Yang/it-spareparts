@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.14.2";
+export const APP_VERSION = "1.14.3";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.14.3",
+    date: "2026-07-16",
+    items: [
+      "权限安全规则补齐：开启「查看利润 / 毛利」时必须同时开启「查看采购成本」，避免用营收减毛利反推出本应隐藏的采购成本；权限矩阵会自动补齐依赖并在关闭成本时明确提示",
+      "账号、职位模板、批量设置和模板同步统一校验这一规则，非法组合整次拒绝且不会留下部分修改",
+      "历史异常权限不会被静默改库：权限中心标出「权限组合需修复」，修复前运行时自动关闭利润数据；已签发的旧登录也会立即按安全口径收紧",
+    ],
+  },
   {
     version: "1.14.2",
     date: "2026-07-16",

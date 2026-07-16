@@ -102,6 +102,15 @@ export default function AccountDrawer({ meta, account, onClose, onSaved }: {
               description="编辑模板不会自动改动账号。要跟上新版本，请到「职位模板」页用「保存并同步账号」，或在这里重选模板。"
             />
           )}
+          {cur.permission_combo_errors.length > 0 && !dirty && (
+            <Alert
+              type="error"
+              showIcon
+              style={{ marginBottom: 8 }}
+              message="该账号存在历史非法权限组合，运行时已自动收紧"
+              description={`${cur.permission_combo_errors.join("；")}。请在下方修正后保存，用户重新登录后生效。`}
+            />
+          )}
           {Object.keys(cur.overrides).length > 0 && !dirty && (
             <div style={{ marginBottom: 8, fontSize: 13 }}>
               <Tag color="blue">此账号有 {Object.keys(cur.overrides).length} 处个别调整</Tag>

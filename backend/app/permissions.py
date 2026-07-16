@@ -177,6 +177,13 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_account_manage": "page_accounts",
 }
 
+# 数据之间的可推导依赖：营收在经营报表中是公开口径，毛利一旦可见，
+# ``营收 - 毛利`` 就能精确反推出采购成本。因此 data_profit 只能在同时持有
+# data_purchase_cost 时开启。反向（看成本、不看利润）合法，采购模板正是此口径。
+DATA_DATA_DEPENDENCIES: dict[str, str] = {
+    "data_profit": "data_purchase_cost",
+}
+
 
 def combo_errors(perms: dict[str, bool]) -> list[str]:
     """校验**最终生效**权限（模板/快照+覆盖叠加后）的非法组合，返回人话错误清单。
@@ -194,13 +201,40 @@ def combo_errors(perms: dict[str, bool]) -> list[str]:
                 f"「{LABELS.get(action_key, action_key)}」需要同时开启"
                 f"「{LABELS.get(page_key, page_key)}」——操作发生在该页面里，"
                 f"进不了页面就无法看着现状做修改")
+    for data_key, required_key in DATA_DATA_DEPENDENCIES.items():
+        if perms.get(data_key, False) and not perms.get(required_key, False):
+            errors.append(
+                f"「{LABELS.get(data_key, data_key)}」需要同时开启"
+                f"「{LABELS.get(required_key, required_key)}」——营收减毛利可精确"
+                f"反推出采购成本，不能只开放利润而隐藏成本")
     return errors
 
 
+def runtime_safe(perms: dict | None) -> dict[str, bool]:
+    """把可能来自历史脏数据/旧 token 的非法数据权限组合收紧为安全图。
+
+    保存路径必须用 ``combo_errors`` 明确拒绝，不能静默改用户选择；本函数只用于
+    运行时纵深防御：依赖缺失时关闭被依赖的数据权限。例如历史账号若仍是
+    ``data_profit=True, data_purchase_cost=False``，运行时只会得到利润关闭。
+    """
+    safe = normalize(perms)
+    for data_key, required_key in DATA_DATA_DEPENDENCIES.items():
+        if safe.get(data_key, False) and not safe.get(required_key, False):
+            safe[data_key] = False
+    return safe
+
+
 def hidden_groups(perms: dict | None) -> set[str]:
-    """据 data_* 开关算出要隐藏的 FIELD_GROUPS 组名集合。"""
-    if not perms:
+    """据 data_* 开关算出要隐藏的 FIELD_GROUPS 组名集合。
+
+    ``None`` 表示调用方尚未解析权限，应由 security._hidden_fields 按角色模板回退；
+    ``{}`` 则是明确的“零权限图”，normalize 后所有 data_* 都为 false，必须全隐藏。
+    """
+    if perms is None:
         return set()
+    # 构造 UserContext 的测试、旧 token 或存量脏账号可能绕过新保存校验；字段层仍按
+    # 安全图隐藏，保证所有 apply_field_visibility/is_field_hidden 调用方都失败关闭。
+    perms = runtime_safe(perms)
     hidden: set[str] = set()
     for key, groups in DATA_GROUPS.items():
         if not perms.get(key, False):
@@ -268,7 +302,7 @@ PERMISSION_META: dict[str, dict] = {
         "label": "查看利润 / 毛利",
         "summary": "允许查看毛利额、毛利率与盈亏排行。",
         "can": "单据与汇总的毛利额、毛利率、赚钱/亏钱排行榜。",
-        "cannot": "关闭后连「哪个型号在赚钱榜还是亏损榜」的归类都不返回，不只是数字打码。",
+        "cannot": "必须同时开启「查看采购成本」；否则营收减毛利会反推出采购成本。关闭后连「哪个型号在赚钱榜还是亏损榜」的归类都不返回。",
         "typical": ["老板", "销售"],
         "sensitivity": "high",
         "risk": "暴露公司真实盈利水平。",

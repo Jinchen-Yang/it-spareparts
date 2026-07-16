@@ -120,19 +120,28 @@ def verify_token_db(token: str, db: Session) -> dict:
     部署前签发的旧 token 无 tv 字段 → 视作 tv=0，与初值 0 匹配，不会被误踢（平滑升级）。
     """
     data = verify_token(token)
+    # 已签发 token 也可能携带历史非法数据权限组合。签名验证后立即失败关闭，
+    # 防止它在下次登录前继续通过直接读取 ctx.permissions 的调用方。
+    token_has_perms = isinstance(data.get("perms"), dict)
+    if token_has_perms:
+        data["perms"] = permissions.runtime_safe(data["perms"])
     if data.get("fb"):
         return data
     sub = data.get("sub")
     if sub:
-        row = db.execute(
-            select(SysUser.token_version, SysUser.is_active).where(SysUser.username == sub)
-        ).first()
-        if row is not None:
-            tv, is_active = row
-            if not is_active:
+        user = db.scalar(select(SysUser).where(SysUser.username == sub))
+        if user is not None:
+            if not user.is_active:
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "账号已停用，请重新登录")
-            if int(data.get("tv", 0)) != int(tv or 0):
+            if int(data.get("tv", 0)) != int(user.token_version or 0):
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "登录状态已失效，请重新登录")
+            if not token_has_perms:
+                # 部署前旧 JWT 没有 perms。不能按 token 里的 role 模板回退：账号可能
+                # 已套自定义职位模板/个别调整。每次验签从 DB 的当前有效图生成，并再做
+                # 运行时收紧，既保持旧 token 平滑可用，也不绕过账号真实权限。
+                data["perms"] = permissions.runtime_safe(
+                    permissions.effective_for_user(user)
+                )
     return data
 
 
@@ -178,7 +187,7 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
                     {"reason": "too_many_failures", "minutes": _LOGIN_LOCK_MINUTES})
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
         # 成功：清零失败计数与锁定。权限中心 v2：有效权限=模板快照⊕个别调整
-        perms = permissions.effective_for_user(user)
+        perms = permissions.runtime_safe(permissions.effective_for_user(user))
         user.failed_attempts = 0
         user.locked_until = None
         user.last_login_at = now
@@ -199,7 +208,7 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
         _ev("login_failed", None, {"path": "shared_password"})
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
     role = "admin" if req.username == "admin" else "readonly"
-    perms = permissions.effective(role, None)
+    perms = permissions.runtime_safe(permissions.effective(role, None))
     _ev("login_success", role, {"path": "shared_password"})
     token, exp = _make_token(role, req.username, None, fallback=(role != "admin"), perms=perms)
     return LoginResponse(token=token, role=role, name=req.username, expires_at=exp, permissions=perms)
@@ -310,7 +319,7 @@ def change_password(req: ChangePasswordRequest, request: Request,
     _set_new_password(db, user, req.new_password, operated_by=sub)
     _ev("change_password", user.role)
 
-    perms = permissions.effective_for_user(user)
+    perms = permissions.runtime_safe(permissions.effective_for_user(user))
     token, exp = _make_token(user.role, user.username, user.salesperson_name,
                              perms=perms, token_version=user.token_version)
     return ChangePasswordResponse(token=token, expires_at=exp)

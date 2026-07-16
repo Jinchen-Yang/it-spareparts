@@ -53,6 +53,34 @@ def _account(admin_client: TestClient, username: str, template: str,
     return client
 
 
+def _historical_invalid_account(
+    db, username: str, overrides: dict[str, bool], template: str = "readonly",
+) -> TestClient:
+    """直接落一条升级前脏账号，验证运行时收紧；新 API 已禁止创建该组合。"""
+    base = permissions.effective(template, None)
+    effective = permissions.effective_from_snapshot(base, overrides)
+    assert permissions.combo_errors(effective), "仅用于构造历史非法权限组合"
+    db.add(SysUser(
+        username=username, role=template, display_name=username,
+        password_hash=hash_password("pw123456"), is_active=True,
+        template_code=template, template_version=1, template_perms=base,
+        perm_overrides=overrides, permissions=effective,
+    ))
+    db.commit()
+
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login", json={"username": username, "password": "pw123456"},
+    )
+    assert login.status_code == 200, login.text
+    # 登录返回的实际权限必须已经失败关闭，不能等管理员手工修数据。
+    assert login.json()["permissions"]["data_purchase_cost"] is False
+    assert login.json()["permissions"]["data_profit"] is False
+    client.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+    client.login_payload = login.json()  # type: ignore[attr-defined]
+    return client
+
+
 def _inventory_xlsx() -> bytes:
     workbook = Workbook()
     sheet = workbook.active
@@ -195,13 +223,16 @@ def test_page_import_denial_still_blocks_read_and_write(db, admin_client):
         "page_governance": True,
         "data_purchase_cost": False,
         "data_profit": True,
-    }, {"sales_lines": 10, "no_cost": None, "neg_margin": 3, "fallback": None}),
+    }, {"sales_lines": 10, "no_cost": None, "neg_margin": None, "fallback": None}),
 ])
 def test_import_and_governance_recompute_stats_follow_data_permissions(
     db, admin_client, monkeypatch, username, overrides, expected_stats,
 ):
     """触发重算的响应也必须脱敏，不能用短键绕过成本/利润数据权限。"""
-    client = _account(admin_client, username, "readonly", overrides)
+    client = (_historical_invalid_account(db, username, overrides)
+              if permissions.combo_errors(permissions.effective_from_snapshot(
+                  permissions.effective("readonly", None), overrides))
+              else _account(admin_client, username, "readonly", overrides))
     raw_stats = {"sales_lines": 10, "no_cost": 2, "neg_margin": 3, "fallback": 4}
 
     monkeypatch.setattr("app.api.imports.pipeline.run_import", lambda *_args, **_kwargs:
@@ -431,7 +462,10 @@ def test_page_governance_refresh_is_audited_if_candidate_generation_fails(
 def test_governance_parts_do_not_allow_cost_or_profit_inference(
     db, admin_client, monkeypatch, username, overrides,
 ):
-    client = _account(admin_client, username, "readonly", overrides)
+    client = (_historical_invalid_account(db, username, overrides)
+              if permissions.combo_errors(permissions.effective_from_snapshot(
+                  permissions.effective("readonly", None), overrides))
+              else _account(admin_client, username, "readonly", overrides))
     monkeypatch.setattr("app.api.governance.governance.list_parts", lambda *_args: {
         "kind": "nonstd", "total": 1, "page": 1, "page_size": 20,
         "items": [{
@@ -502,7 +536,10 @@ def test_profit_report_and_export_do_not_allow_cross_permission_inference(
     db, admin_client, monkeypatch, username, overrides,
 ):
     """成本和毛利互为可推导值；只授权一边时，利润页必须把两边一起收敛。"""
-    client = _account(admin_client, username, "readonly", overrides)
+    client = (_historical_invalid_account(db, username, overrides)
+              if permissions.combo_errors(permissions.effective_from_snapshot(
+                  permissions.effective("readonly", None), overrides))
+              else _account(admin_client, username, "readonly", overrides))
     monkeypatch.setattr("app.api.profit.profit.aggregate", lambda *_args: {
         "dimension": "part",
         "rows": [{

@@ -23,7 +23,7 @@ from decimal import Decimal
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.orm import Session
 
-from app import config
+from app import config, security
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
@@ -325,7 +325,8 @@ def _scoped_filters(stmt, date_from, date_to):
 
 
 def projects_aggregate(db: Session, date_from: date | None = None,
-                       date_to: date | None = None, q_text: str | None = None) -> dict:
+                       date_to: date | None = None, q_text: str | None = None,
+                       user_ctx: security.UserContext | None = None) -> dict:
     """项目维度聚合：成本按税口径分列小计（Q4：不混加），来源分布、覆盖率、合同额参考。
 
     合同额 = 项目关联 XSDD 在销售表的订单金额（含税≈不含税×(1+税率)，参考值）；
@@ -401,8 +402,18 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             # 部分/全部关联单号未在销售表中找到金额 → 合同额被低估，前端标注
             "contract_incomplete": bool(sales_orders) and len(missing) > 0,
         })
-    rows.sort(key=lambda r: r["cost_total"] or 0, reverse=True)
-    return {"rows": rows, "start_date": config.MAINT_COST_START_DATE.isoformat()}
+    cost_restricted = security.is_field_hidden(user_ctx, "cost_total")
+    if cost_restricted:
+        # 叶子金额置 null 还不够：按隐藏 cost_total 排序本身会泄漏相对成本，Agent
+        # 再截前 N 条时泄漏更严重。无成本权限统一退回项目名稳定序。
+        rows.sort(key=lambda r: (r["project"] or "").casefold())
+    else:
+        rows.sort(key=lambda r: r["cost_total"] or 0, reverse=True)
+    return {
+        "rows": rows, "start_date": config.MAINT_COST_START_DATE.isoformat(),
+        "effective_sort": "project" if cost_restricted else "cost_total",
+        "ranking_restricted": cost_restricted,
+    }
 
 
 def project_lines(db: Session, project: str, month: str | None = None,
@@ -475,7 +486,8 @@ def _expense_by_contract(db: Session, date_from: date | None = None,
 
 
 def board(db: Session, date_from: date | None = None, date_to: date | None = None,
-          status: str | None = None) -> dict:
+          status: str | None = None,
+          user_ctx: security.UserContext | None = None) -> dict:
     """盈亏看板（用户口径：绿=赚钱、黄=剩余≤20% 报警、红=超支/亏损；合同级聚合天然解决共用合同）。
 
     预算 = 合同(XSDD)金额（含税参考口径，前端注明）；已花 = 备件成本(混合口径参考) + 生效报销费用。
@@ -541,7 +553,11 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             remaining_pct = float((remaining / budget * 100).quantize(_CENT))
         else:
             st, remaining, remaining_pct = "no_budget", None, None
-        g["projects"].sort(key=lambda p: -(p["spent_parts"] or 0))
+        cost_restricted = security.is_field_hidden(user_ctx, "cost_total")
+        if cost_restricted:
+            g["projects"].sort(key=lambda p: (p["project"] or "").casefold())
+        else:
+            g["projects"].sort(key=lambda p: -(p["spent_parts"] or 0))
         rows.append({
             "contract": cno or None, "status": st,
             "projects": g["projects"],
@@ -557,11 +573,33 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             "last_out": g["last_out"].isoformat() if g["last_out"] else None,
         })
     order = {"red": 0, "yellow": 1, "green": 2, "no_budget": 3}
+    profit_restricted = security.is_field_hidden(user_ctx, "gross_profit")
+    if profit_restricted:
+        # status 与 status_counts 本身就是盈亏结论；即使金额随后被 mask，红黄绿归属、
+        # 状态筛选及排序仍会泄漏。受限用户忽略 status 请求，移除分类结构并按最近出库
+        # 日期稳定排序。Agent 与 API 共用本函数，不得各自遗漏。
+        rows.sort(
+            key=lambda r: (r["last_out"] is not None, r["last_out"] or "", r["contract"] or ""),
+            reverse=True,
+        )
+        for row in rows:
+            row.pop("status", None)
+        return {
+            "rows": rows,
+            "profit_restricted": True,
+            "ranking_restricted": True,
+            "effective_sort": "last_out",
+            "status_filter_applied": False,
+            "warn_pct": float(warn),
+            "start_date": config.MAINT_COST_START_DATE.isoformat(),
+        }
     rows.sort(key=lambda r: (order[r["status"]], -(r["spent"] or 0)))
     if status:
         rows = [r for r in rows if r["status"] == status]
     counts = {s: sum(1 for r in rows if r["status"] == s) for s in order}
     return {"rows": rows, "status_counts": counts,
+            "profit_restricted": False, "ranking_restricted": False,
+            "effective_sort": "status_then_spent", "status_filter_applied": bool(status),
             "warn_pct": float(warn), "start_date": config.MAINT_COST_START_DATE.isoformat()}
 
 

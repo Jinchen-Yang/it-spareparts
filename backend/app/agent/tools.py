@@ -299,6 +299,7 @@ TOOLS: list[dict] = [
                 "维保项目盈亏看板（合同级）：预算=合同额(含税参考)、已花=备件成本+生效报销费用、"
                 "剩余与状态灯——red=超支/亏损、yellow=剩余≤20%预警、green=健康、no_budget=未关联合同额。"
                 "含备件/费用构成、成本覆盖率、低置信成本占比、维保起止。黄红置顶。"
+                "无利润权限时不返回状态、状态计数或状态筛选结果，改按最近出库日期排列。"
                 "「哪些维保项目亏钱/要预警」用它。需要项目成本页面权限。"
             ),
             "parameters": {
@@ -318,6 +319,7 @@ TOOLS: list[dict] = [
                 "维保项目成本汇总（项目维度）：出库行数/数量/备件成本(含税、不含税分列)/覆盖率/"
                 "成本来源分布(direct=专属采购直配、window=±7天最近价、month_avg=当月均价、"
                 "trace_avg=追溯均价、sales_ref=销售参考、none=无成本)/关联销售订单与合同额参考。"
+                "无成本权限时按项目名排序后再截取 top，不按隐藏成本排名。"
                 "需要项目成本页面权限。"
             ),
             "parameters": {
@@ -580,8 +582,11 @@ def _get_maintenance_board(db: Session, args: dict, ctx: security.UserContext) -
     if not security.page_allowed(ctx, "page_maintenance"):
         return _MAINT_PAGE_ERR
     st = args.get("status")
-    data = maintenance_cost.board(db, None, None,
-                                  st if st in ("red", "yellow", "green", "no_budget") else None)
+    data = maintenance_cost.board(
+        db, None, None,
+        st if st in ("red", "yellow", "green", "no_budget") else None,
+        user_ctx=ctx,
+    )
     return security.apply_field_visibility(data, ctx)
 
 
@@ -589,11 +594,12 @@ def _get_maintenance_projects(db: Session, args: dict, ctx: security.UserContext
     if not security.page_allowed(ctx, "page_maintenance"):
         return _MAINT_PAGE_ERR
     top = min(int(args.get("top") or 20), 50)
-    data = maintenance_cost.projects_aggregate(db, None, None, args.get("q"))
+    data = maintenance_cost.projects_aggregate(db, None, None, args.get("q"), user_ctx=ctx)
     rows = data.get("rows", [])
     if len(rows) > top:
+        sort_label = "按项目名" if data.get("ranking_restricted") else "成本最高"
         data = {**data, "rows": rows[:top],
-                "note": f"共 {len(rows)} 个项目，仅返回成本前 {top}；可用 q 过滤"}
+                "note": f"共 {len(rows)} 个项目，仅返回{sort_label}的前 {top} 个；可用 q 过滤"}
     return security.apply_field_visibility(data, ctx)
 
 

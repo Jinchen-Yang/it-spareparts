@@ -53,6 +53,7 @@ export default function TemplatesTab({ meta, onChanged }: {
             {t.is_system && <Tag>内置</Tag>}
             {t.locked && <Tag color="red">锁定</Tag>}
             {!t.is_active && <Tag color="default">已停用</Tag>}
+            {t.permission_combo_errors.length > 0 && <Tag color="red">权限组合需修复</Tag>}
           </Space>
           <span style={{ fontSize: 12, color: "#888" }}>{t.description || t.code}</span>
         </Space>

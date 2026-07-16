@@ -8,7 +8,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
-from app import permissions
+from app import permissions, security
 from app.auth import hash_password
 from app.db import SessionLocal
 from app.main import app
@@ -96,6 +96,109 @@ def test_admin_template_locked(db, admin_client):
         "name": "坏模板", "base_role": "sales",
         "permissions": {"action_pool_set_policy": True, "data_pool_price_governance": False}})
     assert r.status_code == 400
+
+
+def test_financial_dependency_blocks_account_template_bulk_and_sync_paths(db, admin_client):
+    """data_profit → data_purchase_cost 必须覆盖权限中心 v2 的所有保存路径。"""
+    c = admin_client
+
+    # 建号：sales 模板原本成本/利润双开，只关成本会留下可反推组合。
+    r = c.post("/api/accounts", json={
+        "username": "dep-create", "password": "pw123456", "template_code": "sales",
+        "overrides": {"data_purchase_cost": False},
+    })
+    assert r.status_code == 400 and "反推出采购成本" in r.json()["detail"]
+
+    # 单账号更新：拒绝后原权限保持双开。
+    _mk_account(c, "dep-update", template="sales")
+    r = c.put("/api/accounts/dep-update", json={
+        "overrides": {"data_purchase_cost": False},
+    })
+    assert r.status_code == 400
+    row = next(x for x in c.get("/api/accounts").json() if x["username"] == "dep-update")
+    assert row["permissions"]["data_purchase_cost"] is True
+    assert row["permissions"]["data_profit"] is True
+
+    # 模板新建与编辑：非法图都不能入库，编辑拒绝后版本和权限不变。
+    r = c.post("/api/role-templates", json={
+        "name": "成本反推坏模板", "base_role": "sales",
+        "permissions": {"data_purchase_cost": False, "data_profit": True},
+    })
+    assert r.status_code == 400
+    created = c.post("/api/role-templates", json={
+        "name": "依赖测试模板", "base_role": "sales", "copy_from": "sales",
+    }).json()
+    bad = {**created["permissions"], "data_purchase_cost": False, "data_profit": True}
+    r = c.put(f"/api/role-templates/{created['code']}", json={
+        "version": created["version"], "permissions": bad,
+    })
+    assert r.status_code == 400
+    unchanged = next(t for t in c.get("/api/role-templates").json()
+                     if t["code"] == created["code"])
+    assert unchanged["version"] == created["version"]
+    assert unchanged["permissions"]["data_purchase_cost"] is True
+
+    # 批量：从合法 sales 双开图批量关成本，整批在预览阶段拒绝且账号不变。
+    r = c.post("/api/accounts/bulk", json={
+        "usernames": ["dep-update"], "operation": "revoke",
+        "keys": ["data_purchase_cost"], "dry_run": True,
+    })
+    assert r.status_code == 400
+    row = next(x for x in c.get("/api/accounts").json() if x["username"] == "dep-update")
+    assert row["permissions"]["data_purchase_cost"] is True
+
+    # 同步：模拟上线前已落库的脏覆盖；保留覆盖同步时必须整体拒绝。
+    dirty = db.query(SysUser).filter_by(username="dep-update").one()
+    dirty.perm_overrides = {"data_purchase_cost": False}
+    db.commit()
+    r = c.post("/api/role-templates/sales/sync", json={"dry_run": True})
+    assert r.status_code == 400
+    assert "同步后组合非法" in str(r.json()["detail"])
+
+
+def test_historical_invalid_combo_is_audited_and_runtime_fail_closed(db, admin_client):
+    """存量脏账号不自动改库，但列表标红，登录/token/字段层都关闭利润。"""
+    base = permissions.effective("sales", None)
+    dirty = SysUser(
+        username="legacy-infer", role="sales", display_name="历史脏账号",
+        password_hash=hash_password("pw123456"), template_code="sales", template_version=1,
+        template_perms=base, perm_overrides={"data_purchase_cost": False},
+        permissions={**base, "data_purchase_cost": False},
+    )
+    db.add(dirty)
+    db.add(SysRoleTemplate(
+        code="legacy-bad-template", name="历史脏模板", base_role="sales",
+        permissions={**base, "data_purchase_cost": False}, is_system=False,
+        is_active=True, version=1, created_by="legacy",
+    ))
+    db.commit()
+
+    account = next(x for x in admin_client.get("/api/accounts").json()
+                   if x["username"] == "legacy-infer")
+    assert account["permissions"]["data_profit"] is True       # 原始存量图可审计/可修
+    assert account["permissions"]["data_purchase_cost"] is False
+    assert account["runtime_permissions"]["data_profit"] is False
+    assert account["permission_combo_errors"]
+    template = next(x for x in admin_client.get("/api/role-templates").json()
+                    if x["code"] == "legacy-bad-template")
+    assert template["permission_combo_errors"]
+
+    login = _login("legacy-infer", "pw123456")
+    assert login.status_code == 200
+    assert login.json()["permissions"]["data_purchase_cost"] is False
+    assert login.json()["permissions"]["data_profit"] is False
+
+    ctx = security.UserContext(
+        user_id="legacy-infer", role="sales", is_authenticated=True,
+        permissions={**base, "data_purchase_cost": False},
+    )
+    masked = security.apply_field_visibility(
+        {"total_revenue": 100.0, "total_ex_tax": 60.0, "total_gross_profit": 40.0},
+        ctx,
+    )
+    assert masked == {
+        "total_revenue": 100.0, "total_ex_tax": None, "total_gross_profit": None,
+    }
 
 
 # ---------- 3. 仅保存模板：不静默改账号 ----------
@@ -464,4 +567,5 @@ def test_meta_has_business_language(db, admin_client):
             assert meta.get(field), f"{k} 缺业务语言字段 {field}"
     assert m["dependencies"]["action_data"]["action_pool_set_policy"] == "data_pool_price_governance"
     assert m["dependencies"]["action_page"]["action_account_manage"] == "page_accounts"
+    assert m["dependencies"]["data_data"]["data_profit"] == "data_purchase_cost"
     assert {t["code"] for t in m["templates"]} >= {"admin", "boss", "sales", "purchaser", "readonly"}

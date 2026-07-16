@@ -1,7 +1,7 @@
 """智能体工具层单测：不依赖 LLM key，直接验证派发与返回结构（对本地真库）。"""
 import pytest
 
-from app import security
+from app import permissions, security
 from app.agent import tools
 from app.db import SessionLocal
 
@@ -94,7 +94,8 @@ def test_maintenance_tools_page_gate(db):
             r = tools.dispatch(db, name, args, sales)
             assert "无权限" in r.get("error", ""), name
         purchaser = _role_ctx("purchaser", perms={"page_maintenance": True,
-                                                  "data_purchase_cost": True})
+                                                  "data_purchase_cost": True,
+                                                  "data_profit": True})
         r = tools.dispatch(db, "get_maintenance_board", {}, purchaser)
         assert "rows" in r and "status_counts" in r
     finally:
@@ -114,7 +115,7 @@ def test_skills_role_filtered(db):
         r = tools.dispatch(db, "get_skill", {"skill": "boss_briefing"}, sales)
         assert "error" in r
 
-        boss = _role_ctx("boss", perms={"page_maintenance": True})
+        boss = _role_ctx("boss", perms=permissions.effective("boss", None))
         got = {s["skill"] for s in tools.dispatch(db, "list_skills", {}, boss)["skills"]}
         assert {"boss_briefing", "purchase_batch_planning",
                 "maintenance_health_check"} <= got

@@ -110,9 +110,11 @@ def _usage(db: Session, code: str) -> dict:
 
 
 def _tpl_view(db: Session, t: SysRoleTemplate) -> dict:
+    normalized = permissions.normalize(t.permissions)
     return {
         "code": t.code, "name": t.name, "description": t.description,
-        "base_role": t.base_role, "permissions": permissions.normalize(t.permissions),
+        "base_role": t.base_role, "permissions": normalized,
+        "permission_combo_errors": permissions.combo_errors(normalized),
         "is_system": t.is_system, "is_active": t.is_active, "version": t.version,
         "locked": t.code == "admin",
         "created_by": t.created_by, "created_at": t.created_at,
