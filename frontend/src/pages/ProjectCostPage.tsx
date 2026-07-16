@@ -40,9 +40,11 @@ interface LineRow {
   price_distance_days: number | null; confidence: string | null;
 }
 
+type BoardStatus = "red" | "yellow" | "green" | "no_budget";
+
 interface BoardRow {
   contract: string | null;
-  status: "red" | "yellow" | "green" | "no_budget";
+  status?: BoardStatus;
   projects: { project: string; lines: number; spent_parts: number | null }[];
   lines: number; coverage_pct: number | null;
   spent_parts: number | null; spent_expense: number | null; spent: number | null;
@@ -52,12 +54,13 @@ interface BoardRow {
   first_out: string | null; last_out: string | null;
 }
 
-const STATUS_META: Record<BoardRow["status"], { label: string; color: string; bg: string }> = {
+const STATUS_META: Record<BoardStatus, { label: string; color: string; bg: string }> = {
   red: { label: "亏损/超支", color: "#c0524a", bg: "rgba(192,82,74,0.08)" },
   yellow: { label: "预警 · 剩余≤20%", color: "#b8860b", bg: "rgba(212,160,23,0.10)" },
   green: { label: "健康", color: "#3f7a45", bg: "rgba(63,122,69,0.07)" },
   no_budget: { label: "无预算(未关联合同额)", color: "#8c8c8c", bg: "rgba(0,0,0,0.03)" },
 };
+const NEUTRAL_META = { label: "", color: "#8c8c8c", bg: "rgba(0,0,0,0.03)" };
 const CONF_META: Record<string, { label: string; color: string }> = {
   high: { label: "高", color: "green" }, medium: { label: "中", color: "blue" },
   low: { label: "低", color: "orange" },
@@ -102,6 +105,7 @@ export default function ProjectCostPage() {
   const [q, setQ] = useState("");
   const [rows, setRows] = useState<ProjectRow[]>([]);
   const [board, setBoard] = useState<BoardRow[]>([]);
+  const [boardProfitRestricted, setBoardProfitRestricted] = useState(false);
   const [boardFilter, setBoardFilter] = useState<string>("all");
   const [startDate, setStartDate] = useState("");
   const [loading, setLoading] = useState(false);
@@ -135,6 +139,8 @@ export default function ProjectCostPage() {
       setRows(data.rows);
       setStartDate(data.start_date);
       setBoard(bd.data.rows);
+      setBoardProfitRestricted(!!bd.data.profit_restricted);
+      if (bd.data.profit_restricted) setBoardFilter("all");
     } catch {
       message.error("项目成本加载失败，请稍后重试或检查权限");
     } finally {
@@ -341,7 +347,7 @@ export default function ProjectCostPage() {
           <Tooltip title="按合同（销售订单 XSDD）聚合：预算=合同金额（含税参考）；已花=备件成本(混合口径参考)+生效报销费用。共用合同自动合并为一张卡。剩余≤20% 黄灯预警、超支红灯。">
             <InfoCircleOutlined style={{ color: "var(--mb-text-3)" }} />
           </Tooltip></Space>}
-        extra={<Segmented
+        extra={!boardProfitRestricted && <Segmented
           value={boardFilter}
           onChange={(v) => setBoardFilter(v as string)}
           options={[
@@ -353,13 +359,23 @@ export default function ProjectCostPage() {
           ]}
         />}
       >
+        {boardProfitRestricted && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="当前账号无利润查看权限，不展示红黄绿盈亏分类与状态筛选"
+            description="合同按最近出库日期排列；成本字段仍按账号的数据权限单独显示或隐藏。"
+          />
+        )}
         {board.length === 0 ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据（导入维保出库后自动生成）" />
         ) : (
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            {(boardFilter === "all" ? board : board.filter((b) => b.status === boardFilter)).map((b) => {
-              const meta = STATUS_META[b.status];
-              const spentPct = b.budget && b.spent != null
+            {(boardProfitRestricted || boardFilter === "all"
+              ? board : board.filter((b) => b.status === boardFilter)).map((b) => {
+              const meta = b.status ? STATUS_META[b.status] : NEUTRAL_META;
+              const spentPct = !boardProfitRestricted && b.budget && b.spent != null
                 ? Math.round((b.spent / b.budget) * 100) : null;
               let timePct: number | null = null;
               if (b.maint_start && b.maint_end) {
@@ -377,8 +393,10 @@ export default function ProjectCostPage() {
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <b style={{ fontFamily: "monospace", fontSize: 13 }}>{b.contract || "（未关联合同）"}</b>
                     <Space size={6}>
-                      <Tag color={b.status === "red" ? "red" : b.status === "yellow" ? "gold"
-                        : b.status === "green" ? "green" : "default"}>{meta.label}</Tag>
+                      {b.status && (
+                        <Tag color={b.status === "red" ? "red" : b.status === "yellow" ? "gold"
+                          : b.status === "green" ? "green" : "default"}>{meta.label}</Tag>
+                      )}
                       {b.contract && (
                         <a style={{ fontSize: 12 }} onClick={() =>
                           download("/maintenance/export-workbook", `项目工作簿_${b.contract}.xlsx`,

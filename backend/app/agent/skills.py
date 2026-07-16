@@ -2,13 +2,13 @@
 
 设计原则（甲方 2026-07-04 明确）：
 - 剧本给**身份背景 + 数据路径 + 分析框架 + 输出建议**，让模型自己判断裁剪——绝不写死步骤。
-- 按登录角色过滤（list_skills 只列可用的；get_skill 再校验一次）；涉及维保成本的剧本
-  同时要求 page_maintenance 页面权限（与 API 层同一开关）。
+- 按登录角色过滤（list_skills 只列可用的；get_skill 再校验一次）；涉及维保盈亏的剧本
+  同时要求 page_maintenance 页面权限与利润字段权限（与 API/工具层同一口径）。
 - 新增业务场景 = 在 SKILLS 里加一条剧本，不改 runtime/工具代码。
 """
 from app import security
 
-# roles: 允许的角色集合；"*" = 全部登录角色。page: 额外要求的页面权限（可选）。
+# roles: 允许的角色集合；"*" = 全部登录角色。page/field: 额外要求的页面/字段权限。
 SKILLS: dict[str, dict] = {
     "purchase_batch_planning": {
         "title": "采购批量计划分析",
@@ -99,6 +99,7 @@ SKILLS: dict[str, dict] = {
         "title": "维保项目健康检查",
         "roles": {"admin", "boss", "purchaser"},
         "page": "page_maintenance",
+        "field": "gross_profit",
         "brief": "从盈亏看板追到单据：找出亏损/预警合同的原因和可优化点",
         "playbook": """# 维保项目健康检查
 
@@ -138,6 +139,8 @@ def available(ctx: security.UserContext) -> list[dict]:
         if ctx.role not in s["roles"] and "*" not in s["roles"]:
             continue
         if s.get("page") and not security.page_allowed(ctx, s["page"]):
+            continue
+        if s.get("field") and security.is_field_hidden(ctx, s["field"]):
             continue
         out.append({"skill": sid, "title": s["title"], "brief": s["brief"]})
     return out

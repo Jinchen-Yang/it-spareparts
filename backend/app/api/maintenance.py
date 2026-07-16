@@ -44,7 +44,7 @@ def projects(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     record_access_log(ctx, "projects", "maintenance")
-    data = maintenance_cost.projects_aggregate(db, date_from, date_to, q)
+    data = maintenance_cost.projects_aggregate(db, date_from, date_to, q, user_ctx=ctx)
     return apply_field_visibility(data, ctx)
 
 
@@ -104,7 +104,7 @@ def export(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     record_access_log(ctx, "export", "maintenance")
-    data = maintenance_cost.projects_aggregate(db, date_from, date_to, q)
+    data = maintenance_cost.projects_aggregate(db, date_from, date_to, q, user_ctx=ctx)
     data = apply_field_visibility(data, ctx)   # 导出同样过脱敏层（§8.5）
     header = ["项目", "出库行数", "出库数量", "备件成本-含税小计", "备件成本-不含税小计",
               "成本合计(混合口径参考)", "覆盖率%",
@@ -167,7 +167,7 @@ def board(
 ) -> dict:
     """盈亏看板（§16.2）：合同(XSDD)级 红/黄/绿 状态灯，黄红置顶。"""
     record_access_log(ctx, "board", "maintenance")
-    data = maintenance_cost.board(db, date_from, date_to, status)
+    data = maintenance_cost.board(db, date_from, date_to, status, user_ctx=ctx)
     return apply_field_visibility(data, ctx)
 
 

@@ -38,6 +38,24 @@ def test_hidden_groups_from_perms():
     assert "customer_info" not in g       # sales 看客户
 
 
+def test_explicit_empty_permission_map_hides_all_sensitive_fields():
+    """{} 是明确零权限，不等同于旧 token 的 None（角色模板回退）。"""
+    assert permissions.hidden_groups(None) == set()
+    groups = permissions.hidden_groups({})
+    assert set().union(*permissions.DATA_GROUPS.values()) <= groups
+    ctx = security.UserContext(
+        user_id="empty-map", role="sales", permissions={}, is_authenticated=True,
+    )
+    out = security.apply_field_visibility({
+        "pn_std": "PN-1", "supplier_name": "甲供", "customer_name": "乙客",
+        "avg_cost": 80, "gross_profit": 20, "gross_margin": 0.2,
+    }, ctx)
+    assert out == {
+        "pn_std": "PN-1", "supplier_name": None, "customer_name": None,
+        "avg_cost": None, "gross_profit": None, "gross_margin": None,
+    }
+
+
 def test_profit_requires_purchase_cost_and_runtime_closes_historical_combo():
     invalid = permissions.effective(
         "sales", {"data_purchase_cost": False, "data_profit": True})

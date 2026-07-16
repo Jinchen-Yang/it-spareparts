@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from app import permissions
 from app.api import accounts
 from app.auth import _make_token, _sign, hash_password, verify_token_db
 from app.models.system import SysUser
@@ -84,7 +85,29 @@ def test_legacy_token_without_tv_not_kicked(db):
     payload = {"role": "sales", "sub": "bob", "name": None, "exp": 9999999999}
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
     tok = f"{base64.urlsafe_b64encode(body).decode().rstrip('=')}.{_sign(body)}"
-    assert verify_token_db(tok, db)["sub"] == "bob"
+    verified = verify_token_db(tok, db)
+    assert verified["sub"] == "bob"
+    assert verified["perms"] == permissions.runtime_safe(
+        permissions.effective("sales", None)
+    )
+
+
+def test_legacy_signed_token_without_perms_uses_current_db_snapshot(db):
+    """旧 JWT 的 role 不能覆盖账号当前模板快照/个别调整。"""
+    u = _user(db)
+    # token 仍写 sales，但 DB 当前快照已改成 purchaser（成本可见、利润不可见）。
+    # 若错误按 token role 回退，sales 会把利润重新放开。
+    u.template_perms = permissions.effective("purchaser", None)
+    u.perm_overrides = {"page_governance": True}
+    db.commit()
+    tok, _ = _make_token("sales", "bob", None, token_version=0)  # 真实签名、无 perms
+    verified = verify_token_db(tok, db)
+    assert verified["perms"] == permissions.runtime_safe(
+        permissions.effective_for_user(u)
+    )
+    assert verified["perms"]["data_purchase_cost"] is True
+    assert verified["perms"]["data_profit"] is False
+    assert verified["perms"]["page_governance"] is True
 
 
 def test_existing_token_with_inferable_financial_combo_is_clamped(db):

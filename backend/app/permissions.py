@@ -225,8 +225,12 @@ def runtime_safe(perms: dict | None) -> dict[str, bool]:
 
 
 def hidden_groups(perms: dict | None) -> set[str]:
-    """据 data_* 开关算出要隐藏的 FIELD_GROUPS 组名集合。"""
-    if not perms:
+    """据 data_* 开关算出要隐藏的 FIELD_GROUPS 组名集合。
+
+    ``None`` 表示调用方尚未解析权限，应由 security._hidden_fields 按角色模板回退；
+    ``{}`` 则是明确的“零权限图”，normalize 后所有 data_* 都为 false，必须全隐藏。
+    """
+    if perms is None:
         return set()
     # 构造 UserContext 的测试、旧 token 或存量脏账号可能绕过新保存校验；字段层仍按
     # 安全图隐藏，保证所有 apply_field_visibility/is_field_hidden 调用方都失败关闭。
