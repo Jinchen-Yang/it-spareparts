@@ -345,7 +345,7 @@ def test_permission_registry_wiring(db):
     admin = _mk_client(db, "meta_admin", "admin")
     meta = admin.get("/api/accounts/_meta").json()
     assert meta["action_keys"] == ["action_pool_manage", "action_pool_set_policy",
-                                   "action_account_manage"]
+                                   "action_account_manage", "action_data_quality_review"]
 
 
 # ---------------------------------------------------------------- 端到端闭环

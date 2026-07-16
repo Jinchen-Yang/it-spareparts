@@ -86,5 +86,5 @@ def test_single_alembic_head(migrated):
     """新增后续迁移后仍是单一 head（没修改旧 revision 造成分叉）。"""
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(_cfg()).get_heads()
-    # 钉住当前 head：看板 v2 行表 order_id 索引迁移（a9c5e2f7d4b1 ← a3f8c1d9e5b2 权限中心 v2）
-    assert heads == ["a9c5e2f7d4b1"], f"应只有一个 head=a9c5e2f7d4b1，实得 {heads}"
+    # 钉住当前 head：DEV-05A 行级数据疑点地基。
+    assert heads == ["d5a7c9e1f3b6"], f"应只有一个 head=d5a7c9e1f3b6，实得 {heads}"
