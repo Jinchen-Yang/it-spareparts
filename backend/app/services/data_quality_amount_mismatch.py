@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from sqlalchemy import Integer, String, any_, bindparam, select
 from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.etl import anomaly, mapping
 from app.models.data_quality import FactDataQualityIssue
@@ -18,6 +18,7 @@ from app.services import data_quality
 RULE_CODE = "amount_mismatch"
 RULE_VERSION = "etl-v1"
 SYSTEM_DETECTOR = "system:etl-import"
+_DETECTION_BATCH_SIZE = 1_000
 
 
 def _decimal_text(value: Decimal | None) -> str | None:
@@ -86,83 +87,97 @@ def detect_imported_lines(
 
     side = "purchase" if file_type == mapping.PURCHASE else "sales"
     model = FPurchaseLine if side == "purchase" else FSalesLine
-    unique_raw_ids = sorted(set(raw_line_ids))
-    rows = db.scalars(
-        select(model).where(
+    # 单个 PostgreSQL 数组参数承接全部 raw id，数据库唯一键天然去重；只加载规则与
+    # 追溯真正需要的列，并以固定分区流式消费，避免 7 万行完整 ORM 同时驻留。
+    line_stmt = (
+        select(model)
+        .options(load_only(
+            model.id,
+            model.raw_line_id,
+            model.part_id,
+            model.pn_std,
+            model.unit,
+            model.qty,
+            model.unit_price,
+            model.line_amount,
+            model.import_batch_id,
+        ))
+        .where(
             model.raw_line_id == any_(bindparam(
                 "detector_raw_line_ids", type_=ARRAY(String()),
             ))
-        ).order_by(model.id),
-        {"detector_raw_line_ids": unique_raw_ids},
-    ).all()
-    stats = {**empty, "scanned": len(rows)}
-    actor = (detected_by or "").strip() or SYSTEM_DETECTOR
-    if not rows:
-        return stats
-    issues = db.scalars(
-        select(FactDataQualityIssue).where(
-            FactDataQualityIssue.side == side,
-            FactDataQualityIssue.rule_code == RULE_CODE,
-            FactDataQualityIssue.line_id == any_(bindparam(
-                "detector_line_ids", type_=ARRAY(Integer()),
-            )),
-        ).with_for_update(),
-        {"detector_line_ids": [line.id for line in rows]},
-    ).all()
-    issue_by_line_id = {issue.line_id: issue for issue in issues}
-
-    for line in rows:
-        matched = RULE_CODE in anomaly.line_flags(
-            line.qty, line.unit_price, line.line_amount,
         )
-        existing = issue_by_line_id.get(line.id)
-        if not matched:
-            if existing is None:
+        .order_by(model.id)
+        .execution_options(yield_per=_DETECTION_BATCH_SIZE)
+    )
+    rows = db.scalars(line_stmt, {"detector_raw_line_ids": raw_line_ids})
+    stats = dict(empty)
+    actor = (detected_by or "").strip() or SYSTEM_DETECTOR
+    for chunk in rows.partitions(_DETECTION_BATCH_SIZE):
+        stats["scanned"] += len(chunk)
+        issues = db.scalars(
+            select(FactDataQualityIssue).where(
+                FactDataQualityIssue.side == side,
+                FactDataQualityIssue.rule_code == RULE_CODE,
+                FactDataQualityIssue.line_id == any_(bindparam(
+                    "detector_line_ids", type_=ARRAY(Integer()),
+                )),
+            ),
+            {"detector_line_ids": [line.id for line in chunk]},
+        ).all()
+        issue_by_line_id = {issue.line_id: issue for issue in issues}
+
+        for line in chunk:
+            matched = RULE_CODE in anomaly.line_flags(
+                line.qty, line.unit_price, line.line_amount,
+            )
+            existing = issue_by_line_id.get(line.id)
+            if not matched:
+                if existing is None:
+                    continue
+                evidence = _evidence(line, current_match=False)
+                fingerprint = _fingerprint(side, line)
+                if data_quality.detection_issue_is_current(
+                    existing, line, rule_version=RULE_VERSION,
+                    evidence=evidence, source_fingerprint=fingerprint,
+                    expected_status="source_changed",
+                ):
+                    stats["unchanged"] += 1
+                    continue
+                result = data_quality.mark_issue_source_changed(
+                    db, side=side, line_id=line.id, rule_code=RULE_CODE,
+                    rule_version=RULE_VERSION,
+                    evidence=evidence,
+                    source_fingerprint=fingerprint, detected_by=actor,
+                )
+                mutation = result["mutation"] if result is not None else "unchanged"
+                stats[mutation] += 1
                 continue
-            evidence = _evidence(line, current_match=False)
+            stats["matched"] += 1
+            evidence = _evidence(line)
             fingerprint = _fingerprint(side, line)
-            if data_quality.detection_issue_is_current(
+            if existing is not None and data_quality.detection_issue_is_current(
                 existing, line, rule_version=RULE_VERSION,
                 evidence=evidence, source_fingerprint=fingerprint,
-                expected_status="source_changed",
             ):
                 stats["unchanged"] += 1
                 continue
-            prior_version = existing.version
-            result = data_quality.mark_issue_source_changed(
+            result = data_quality.create_or_refresh_issue(
                 db, side=side, line_id=line.id, rule_code=RULE_CODE,
-                rule_version=RULE_VERSION,
-                evidence=evidence,
+                rule_version=RULE_VERSION, evidence=evidence,
                 source_fingerprint=fingerprint, detected_by=actor,
             )
-            if result is not None and result["version"] != prior_version:
+            mutation = result["mutation"]
+            if mutation == "source_changed":
+                stats["refreshed"] += 1
                 stats["source_changed"] += 1
             else:
-                stats["unchanged"] += 1
-            continue
-        stats["matched"] += 1
-        prior_version = existing.version if existing is not None else None
-        evidence = _evidence(line)
-        fingerprint = _fingerprint(side, line)
-        if existing is not None and data_quality.detection_issue_is_current(
-            existing, line, rule_version=RULE_VERSION,
-            evidence=evidence, source_fingerprint=fingerprint,
-        ):
-            stats["unchanged"] += 1
-            continue
-        result = data_quality.create_or_refresh_issue(
-            db, side=side, line_id=line.id, rule_code=RULE_CODE,
-            rule_version=RULE_VERSION, evidence=evidence,
-            source_fingerprint=fingerprint, detected_by=actor,
-        )
-        if existing is None:
-            stats["created"] += 1
-        elif result["version"] == prior_version:
-            stats["unchanged"] += 1
-        else:
-            stats["refreshed"] += 1
-            if result["status"] == "source_changed":
-                stats["source_changed"] += 1
+                stats[mutation] += 1
+        # 立即释放本分区的强引用；Session identity map 对干净对象使用弱引用，下一分区
+        # 开始前即可回收上一批完整 ORM，峰值不随整份文件行数增长。
+        issue_by_line_id.clear()
+        issues.clear()
+        chunk.clear()
     return stats
 
 

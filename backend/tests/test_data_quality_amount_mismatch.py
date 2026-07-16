@@ -2,20 +2,24 @@
 from __future__ import annotations
 
 import shutil
+import threading
+import tracemalloc
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from decimal import Decimal
 
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import event, func, select
+from sqlalchemy import event, func, insert, select
 
 from app.auth import hash_password
-from app.db import engine
+from app.db import SessionLocal, engine
 from app.main import app
 from app.etl import loader, mapping, pipeline
 from app.models.data_quality import FactDataQualityIssue
-from app.models.purchase import FPurchaseLine
+from app.models.dimensions import DimPart
+from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine
 from app.models.system import SysImportBatch, SysUser
 from app.models.system import SysAuditLog
@@ -99,6 +103,208 @@ def test_purchase_import_creates_one_named_amount_mismatch_issue_and_reimport_is
         SysAuditLog.entity_type == "data_quality_issue",
         SysAuditLog.entity_id == issue.id,
     )) == 1
+
+
+def test_unique_write_entry_reports_the_committed_mutation(db):
+    """调用方只信锁后写入口结果，不用锁前快照猜 created/refreshed。"""
+    batch = SysImportBatch(
+        filename="mutation.xlsx", file_type="purchase", file_hash="mutation-contract",
+        uploaded_by="并发导入员", status="success",
+    )
+    part = DimPart(pn_std="PN-MUTATION")
+    db.add_all([batch, part])
+    db.flush()
+    order = FPurchaseOrder(
+        raw_order_id="O-MUTATION", order_no="CG-MUTATION",
+        data_status="已生效", import_batch_id=batch.id,
+    )
+    db.add(order)
+    db.flush()
+    line = FPurchaseLine(
+        raw_line_id="L-MUTATION", order_id=order.id, line_no=1,
+        part_id=part.id, pn_std=part.pn_std, qty=Decimal("2"),
+        unit_price=Decimal("10"), line_amount=Decimal("25"),
+        import_batch_id=batch.id,
+    )
+    db.add(line)
+    db.commit()
+
+    args = {
+        "side": "purchase", "line_id": line.id, "rule_code": detector.RULE_CODE,
+        "rule_version": detector.RULE_VERSION, "evidence": {"value": "first"},
+        "source_fingerprint": "fp-first", "detected_by": "并发导入员",
+    }
+    created = data_quality.create_or_refresh_issue(db, **args)
+    unchanged = data_quality.create_or_refresh_issue(db, **args)
+    refreshed = data_quality.create_or_refresh_issue(
+        db, **{**args, "evidence": {"value": "second"}, "source_fingerprint": "fp-second"},
+    )
+    data_quality.decide_issue(
+        db, issue_id=refreshed["id"], decision="confirmed_valid",
+        version=refreshed["version"], note="按当前源文件核实", operated_by="复核员甲",
+    )
+    source_changed = data_quality.create_or_refresh_issue(
+        db, **{**args, "evidence": {"value": "third"}, "source_fingerprint": "fp-third"},
+    )
+
+    assert created["mutation"] == "created"
+    assert unchanged["mutation"] == "unchanged"
+    assert refreshed["mutation"] == "refreshed"
+    assert source_changed["mutation"] == "source_changed"
+
+
+def test_two_concurrent_detectors_report_one_created_and_one_unchanged(db):
+    """两会话都在锁前读到不存在时，统计仍以 advisory 锁后的真实 mutation 为准。"""
+    batch = SysImportBatch(
+        filename="concurrent-create.xlsx", file_type="purchase",
+        file_hash="concurrent-create", uploaded_by="并发导入员", status="success",
+    )
+    part = DimPart(pn_std="PN-CONCURRENT-CREATE")
+    db.add_all([batch, part])
+    db.flush()
+    order = FPurchaseOrder(
+        raw_order_id="O-CONCURRENT-CREATE", order_no="CG-CONCURRENT-CREATE",
+        data_status="已生效", import_batch_id=batch.id,
+    )
+    db.add(order)
+    db.flush()
+    db.add(FPurchaseLine(
+        raw_line_id="L-CONCURRENT-CREATE", order_id=order.id, line_no=1,
+        part_id=part.id, pn_std=part.pn_std, qty=Decimal("2"),
+        unit_price=Decimal("10"), line_amount=Decimal("25"),
+        import_batch_id=batch.id,
+    ))
+    db.commit()
+
+    both_at_advisory = threading.Barrier(2, timeout=10)
+
+    def run_detector() -> dict:
+        with SessionLocal() as session:
+            connection = session.connection()
+            waited = False
+
+            def synchronize_before_lock(
+                _conn, _cursor, statement, _parameters, _context, _executemany,
+            ):
+                nonlocal waited
+                if not waited and "pg_advisory_xact_lock" in statement:
+                    waited = True
+                    both_at_advisory.wait()
+
+            event.listen(connection, "before_cursor_execute", synchronize_before_lock)
+            try:
+                result = detector.detect_imported_lines(
+                    session, file_type=mapping.PURCHASE,
+                    raw_line_ids=["L-CONCURRENT-CREATE"], detected_by="并发导入员",
+                )
+                session.commit()
+                return result
+            finally:
+                event.remove(connection, "before_cursor_execute", synchronize_before_lock)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result(timeout=20) for future in [
+            pool.submit(run_detector), pool.submit(run_detector),
+        ]]
+
+    assert sorted((row["created"], row["unchanged"]) for row in results) == [(0, 1), (1, 0)]
+    assert db.scalar(select(func.count()).select_from(FactDataQualityIssue)) == 1
+
+
+def test_detector_and_unique_writer_use_advisory_then_row_lock_without_deadlock(db):
+    """确定性交错：写入口持 advisory，批量检测同时读取旧疑点，两会话仍能完成。"""
+    batch = SysImportBatch(
+        filename="lock-order.xlsx", file_type="purchase", file_hash="lock-order",
+        uploaded_by="并发导入员", status="success",
+    )
+    part = DimPart(pn_std="PN-LOCK-ORDER")
+    db.add_all([batch, part])
+    db.flush()
+    order = FPurchaseOrder(
+        raw_order_id="O-LOCK-ORDER", order_no="CG-LOCK-ORDER",
+        data_status="已生效", import_batch_id=batch.id,
+    )
+    db.add(order)
+    db.flush()
+    line = FPurchaseLine(
+        raw_line_id="L-LOCK-ORDER", order_id=order.id, line_no=1,
+        part_id=part.id, pn_std=part.pn_std, qty=Decimal("2"),
+        unit_price=Decimal("10"), line_amount=Decimal("25"),
+        import_batch_id=batch.id,
+    )
+    db.add(line)
+    db.commit()
+    data_quality.create_or_refresh_issue(
+        db, side="purchase", line_id=line.id, rule_code=detector.RULE_CODE,
+        rule_version=detector.RULE_VERSION, evidence={"stale": True},
+        source_fingerprint="stale-fingerprint", detected_by="初始检测器",
+    )
+    db.commit()
+
+    writer_before_row = threading.Event()
+    release_writer = threading.Event()
+    detector_waiting_for_advisory = threading.Event()
+
+    def run_writer() -> str:
+        with SessionLocal() as session:
+            connection = session.connection()
+            advisory_seen = False
+
+            def pause_after_advisory(
+                _conn, _cursor, statement, _parameters, _context, _executemany,
+            ):
+                nonlocal advisory_seen
+                if "pg_advisory_xact_lock" in statement:
+                    advisory_seen = True
+                elif advisory_seen and "fact_data_quality_issue" in statement and "FOR UPDATE" in statement:
+                    writer_before_row.set()
+                    assert release_writer.wait(timeout=10)
+
+            event.listen(connection, "before_cursor_execute", pause_after_advisory)
+            try:
+                result = data_quality.create_or_refresh_issue(
+                    session, side="purchase", line_id=line.id,
+                    rule_code=detector.RULE_CODE, rule_version=detector.RULE_VERSION,
+                    evidence={"writer": True}, source_fingerprint="writer-fingerprint",
+                    detected_by="并发写入口",
+                )
+                session.commit()
+                return result["mutation"]
+            finally:
+                event.remove(connection, "before_cursor_execute", pause_after_advisory)
+
+    def run_detector() -> dict:
+        with SessionLocal() as session:
+            connection = session.connection()
+
+            def observe_advisory(
+                _conn, _cursor, statement, _parameters, _context, _executemany,
+            ):
+                if "pg_advisory_xact_lock" in statement:
+                    detector_waiting_for_advisory.set()
+
+            event.listen(connection, "before_cursor_execute", observe_advisory)
+            try:
+                result = detector.detect_imported_lines(
+                    session, file_type=mapping.PURCHASE,
+                    raw_line_ids=["L-LOCK-ORDER"], detected_by="并发导入员",
+                )
+                session.commit()
+                return result
+            finally:
+                event.remove(connection, "before_cursor_execute", observe_advisory)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writer = pool.submit(run_writer)
+        assert writer_before_row.wait(timeout=10)
+        detection = pool.submit(run_detector)
+        assert detector_waiting_for_advisory.wait(timeout=10)
+        release_writer.set()
+        assert writer.result(timeout=20) in {"refreshed", "source_changed"}
+        detected = detection.result(timeout=20)
+
+    assert detected["refreshed"] == 1
+    assert db.scalar(select(func.count()).select_from(FactDataQualityIssue)) == 1
 
 
 def test_corrected_source_invalidates_old_conclusion_and_keeps_new_evidence(db, tmp_path):
@@ -231,6 +437,73 @@ def test_detector_accepts_seventy_thousand_raw_ids_without_parameter_expansion(d
 
     assert result["scanned"] == 1
     assert result["matched"] == 0
+
+
+def test_many_real_facts_are_projected_and_processed_in_bounded_batches(db):
+    """真实事实行按轻量投影流式处理；重复 raw id 也只扫描一次。"""
+    row_count = 5_000
+    batch = SysImportBatch(
+        filename="real-facts.xlsx", file_type="purchase", file_hash="real-facts-bounded",
+        uploaded_by="大批导入员", status="success",
+    )
+    part = DimPart(pn_std="PN-REAL-FACT")
+    db.add_all([batch, part])
+    db.flush()
+    order = FPurchaseOrder(
+        raw_order_id="O-REAL-FACT", order_no="CG-REAL-FACT",
+        data_status="已生效", import_batch_id=batch.id,
+    )
+    db.add(order)
+    db.flush()
+    raw_ids = [f"L-REAL-FACT-{index}" for index in range(row_count)]
+    db.execute(insert(FPurchaseLine), [
+        {
+            "raw_line_id": raw_id, "order_id": order.id, "line_no": index + 1,
+            "part_id": part.id, "pn_std": part.pn_std, "unit": "块",
+            "qty": Decimal("2"), "unit_price": Decimal("10"),
+            "line_amount": Decimal("20"), "anomaly_flags": [],
+            "import_batch_id": batch.id,
+        }
+        for index, raw_id in enumerate(raw_ids)
+    ])
+    db.commit()
+    db.expunge_all()
+
+    select_statements: list[str] = []
+    max_identity_size = 0
+
+    def record_select(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            select_statements.append(statement)
+
+    def record_identity_size(session, _instance):
+        nonlocal max_identity_size
+        max_identity_size = max(max_identity_size, len(session.identity_map))
+
+    event.listen(engine, "before_cursor_execute", record_select)
+    event.listen(db, "loaded_as_persistent", record_identity_size)
+    tracemalloc.start()
+    try:
+        result = detector.detect_imported_lines(
+            db, file_type=mapping.PURCHASE,
+            raw_line_ids=[*raw_ids, *raw_ids[:100]], detected_by="大批导入员",
+        )
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+        event.remove(db, "loaded_as_persistent", record_identity_size)
+        event.remove(engine, "before_cursor_execute", record_select)
+
+    assert result["scanned"] == row_count
+    assert result["matched"] == 0
+    # 1 条流式事实查询 + 每 1,000 行 1 条只读疑点快照；不随列宽加载完整 ORM。
+    assert len(select_statements) == 1 + row_count // 1_000
+    fact_sql = select_statements[0]
+    assert "f_purchase_line.description" not in fact_sql
+    assert "f_purchase_line.pn_raw" not in fact_sql
+    assert "f_purchase_line.anomaly_flags" not in fact_sql
+    assert max_identity_size <= 1_100
+    assert peak < 16 * 1024 * 1024
 
 
 def test_one_thousand_normal_lines_use_two_read_queries(db):

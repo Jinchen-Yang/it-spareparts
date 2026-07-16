@@ -110,11 +110,16 @@ def _issue_dict(issue: FactDataQualityIssue) -> dict[str, Any]:
     }
 
 
+def _mutation_result(issue: FactDataQualityIssue, mutation: str) -> dict[str, Any]:
+    """返回锁后真实写入结果，批量调用方不得用锁前快照猜测统计。"""
+    return {**_issue_dict(issue), "mutation": mutation}
+
+
 def detection_issue_is_current(
     issue: FactDataQualityIssue, source, *, rule_version: str, evidence: dict,
     source_fingerprint: str, expected_status: str | None = None,
 ) -> bool:
-    """批量检测器预取并锁定疑点后，用同一条件安全跳过无变化行。"""
+    """批量检测器用只读快照识别明显无变化行；变更仍由唯一写入口锁后复核。"""
     return not any((
         issue.part_id != source.part_id,
         issue.rule_version != rule_version,
@@ -147,7 +152,7 @@ def _transition_detected_issue(
         operated_by=detected_by, reason=reason,
     )
     db.flush()
-    return _issue_dict(issue)
+    return _mutation_result(issue, "refreshed" if action == "refresh" else action)
 
 
 def create_or_refresh_issue(
@@ -183,13 +188,13 @@ def create_or_refresh_issue(
         db.flush()
         _add_audit(db, issue, action="create", before=None, operated_by=detected_by)
         db.flush()
-        return _issue_dict(issue)
+        return _mutation_result(issue, "created")
 
     if detection_issue_is_current(
         issue, source, rule_version=rule_version, evidence=evidence,
         source_fingerprint=source_fingerprint,
     ):
-        return _issue_dict(issue)
+        return _mutation_result(issue, "unchanged")
 
     fingerprint_changed = issue.source_fingerprint != source_fingerprint
     source_changed = fingerprint_changed and issue.status in _DECISIONS
@@ -227,7 +232,7 @@ def mark_issue_source_changed(
         issue, source, rule_version=rule_version, evidence=evidence,
         source_fingerprint=source_fingerprint, expected_status="source_changed",
     ):
-        return _issue_dict(issue)
+        return _mutation_result(issue, "unchanged")
     return _transition_detected_issue(
         db, issue, source, rule_version=rule_version, evidence=evidence,
         source_fingerprint=source_fingerprint, detected_by=detected_by,
