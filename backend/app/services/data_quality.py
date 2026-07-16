@@ -113,6 +113,7 @@ def _issue_dict(issue: FactDataQualityIssue) -> dict[str, Any]:
 def create_or_refresh_issue(
     db: Session, *, side: str, line_id: int, rule_code: str, rule_version: str,
     evidence: dict, source_fingerprint: str, detected_by: str,
+    commit: bool = True,
 ) -> dict:
     """内部检测器写入口；重复信号幂等，源变化会使既有结论失效。"""
     rule_code = _required(rule_code, "rule_code")
@@ -142,13 +143,15 @@ def create_or_refresh_issue(
         db.add(issue)
         db.flush()
         _add_audit(db, issue, action="create", before=None, operated_by=detected_by)
-        db.commit()
+        if commit:
+            db.commit()
+        else:
+            db.flush()
         db.refresh(issue)
         return _issue_dict(issue)
 
     changed = any((
         issue.part_id != source.part_id,
-        issue.import_batch_id != source.import_batch_id,
         issue.rule_version != rule_version,
         issue.evidence != evidence,
         issue.source_fingerprint != source_fingerprint,
@@ -170,7 +173,64 @@ def create_or_refresh_issue(
     issue.version += 1
     issue.updated_at = _now()
     _add_audit(db, issue, action="refresh", before=before, operated_by=detected_by)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
+    db.refresh(issue)
+    return _issue_dict(issue)
+
+
+def mark_issue_source_changed(
+    db: Session, *, side: str, line_id: int, rule_code: str, rule_version: str,
+    evidence: dict, source_fingerprint: str, detected_by: str,
+    commit: bool = True,
+) -> dict | None:
+    """让不再命中规则的既有疑点失效；没有既有疑点时不新建。"""
+    rule_code = _required(rule_code, "rule_code")
+    rule_version = _required(rule_version, "rule_version")
+    source_fingerprint = _required(source_fingerprint, "source_fingerprint")
+    detected_by = _required(detected_by, "detected_by")
+    if not isinstance(evidence, dict):
+        raise DataQualityValidationError("evidence 必须是对象")
+    source = _source_line(db, side, line_id)
+    lock_key = f"data-quality:{side}:{line_id}:{rule_code}"
+    db.execute(select(func.pg_advisory_xact_lock(func.hashtext(lock_key))))
+    issue = db.scalar(select(FactDataQualityIssue).where(
+        FactDataQualityIssue.side == side,
+        FactDataQualityIssue.line_id == line_id,
+        FactDataQualityIssue.rule_code == rule_code,
+    ).with_for_update())
+    if issue is None:
+        return None
+    changed = any((
+        issue.part_id != source.part_id,
+        issue.rule_version != rule_version,
+        issue.evidence != evidence,
+        issue.source_fingerprint != source_fingerprint,
+        issue.status != "source_changed",
+    ))
+    if not changed:
+        return _issue_dict(issue)
+    before = _audit_snapshot(issue)
+    issue.part_id = source.part_id
+    issue.import_batch_id = source.import_batch_id
+    issue.rule_version = rule_version
+    issue.evidence = evidence
+    issue.source_fingerprint = source_fingerprint
+    issue.status = "source_changed"
+    issue.detected_by = detected_by
+    issue.detected_at = _now()
+    issue.version += 1
+    issue.updated_at = _now()
+    _add_audit(
+        db, issue, action="source_changed", before=before, operated_by=detected_by,
+        reason="源数据变化后当前已不再命中金额疑点规则",
+    )
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     db.refresh(issue)
     return _issue_dict(issue)
 

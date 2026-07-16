@@ -1,0 +1,303 @@
+"""DEV-05C1 确定性金额疑点检测器。"""
+from __future__ import annotations
+
+import shutil
+from datetime import date
+from decimal import Decimal
+
+import pandas as pd
+from sqlalchemy import func, select
+
+from app.etl import loader, mapping, pipeline
+from app.models.data_quality import FactDataQualityIssue
+from app.models.purchase import FPurchaseLine
+from app.models.sales import FSalesLine
+from app.models.system import SysImportBatch
+from app.models.system import SysAuditLog
+from app.services import data_quality
+from app.services import dashboard
+from app.services import data_quality_amount_mismatch as detector
+from tests import factories as f
+
+
+def _xlsx(tmp_path, *, side: str, filename: str, qty="2", unit_price="10",
+          line_amount="25") -> str:
+    config = mapping.MAPPINGS[side]
+    cn = {
+        **{internal: source for source, internal in config["head"].items()},
+        **{internal: source for source, internal in config["line"].items()},
+    }
+    prefix = "CG" if side == mapping.PURCHASE else "XS"
+    row = {
+        "raw_order_id": f"{prefix}-RAW-1",
+        "order_no": f"{prefix}-DQ-1",
+        "order_date": "2026-07-16",
+        "data_status": "已生效",
+        "raw_line_id": f"{prefix}-LINE-1",
+        "line_no": 1,
+        "pn_raw": f"{prefix}-PN-1",
+        "qty": Decimal(qty),
+        "unit_price": Decimal(unit_price),
+        "line_amount": Decimal(line_amount),
+    }
+    if side == mapping.SALES:
+        row["business_type"] = "配件销售"
+    path = tmp_path / filename
+    pd.DataFrame([{cn[key]: value for key, value in row.items()}]).to_excel(path, index=False)
+    return str(path)
+
+
+def test_purchase_import_creates_one_named_amount_mismatch_issue_and_reimport_is_idempotent(
+    db, tmp_path,
+):
+    path = _xlsx(tmp_path, side=mapping.PURCHASE, filename="mismatch.xlsx")
+    first_batch = pipeline.run_import(
+        db, path, "mismatch.xlsx", uploaded_by="刘朝红", mode="skip",
+    )
+    db.commit()
+
+    issue = db.scalar(select(FactDataQualityIssue))
+    assert issue is not None
+    assert issue.rule_code == "amount_mismatch"
+    assert issue.rule_version == "etl-v1"
+    assert issue.status == "open"
+    assert issue.detected_by == "刘朝红"
+    assert issue.evidence == {
+        "qty": "2",
+        "unit_price": "10",
+        "line_amount": "25",
+        "expected_amount": "20",
+        "absolute_difference": "5",
+        "tolerance": "0.05",
+        "current_match": True,
+        "detection_source": "etl_import",
+    }
+    assert first_batch.report_json["data_quality_detection"] == {
+        "scanned": 1, "matched": 1, "created": 1,
+        "refreshed": 0, "unchanged": 0, "source_changed": 0,
+    }
+
+    same = tmp_path / "mismatch-again.xlsx"
+    shutil.copy(path, same)
+    second_batch = pipeline.run_import(
+        db, str(same), "mismatch.xlsx", uploaded_by="刘朝红", mode="upsert",
+    )
+    db.commit()
+    db.expire_all()
+
+    issues = db.scalars(select(FactDataQualityIssue)).all()
+    assert len(issues) == 1
+    assert issues[0].id == issue.id
+    assert issues[0].version == 1
+    assert second_batch.report_json["data_quality_detection"]["unchanged"] == 1
+    assert db.scalar(select(func.count()).select_from(SysAuditLog).where(
+        SysAuditLog.entity_type == "data_quality_issue",
+        SysAuditLog.entity_id == issue.id,
+    )) == 1
+
+
+def test_corrected_source_invalidates_old_conclusion_and_keeps_new_evidence(db, tmp_path):
+    original = _xlsx(
+        tmp_path, side=mapping.PURCHASE, filename="source-before.xlsx",
+        qty="2", unit_price="10", line_amount="25",
+    )
+    pipeline.run_import(db, original, "source-before.xlsx", uploaded_by="刘朝红")
+    db.commit()
+    issue = db.scalar(select(FactDataQualityIssue))
+    decided = data_quality.decide_issue(
+        db, issue_id=issue.id, decision="confirmed_source_error", version=issue.version,
+        note="已按原始凭证确认", operated_by="数据维护员甲",
+    )
+    assert decided["status"] == "confirmed_source_error"
+
+    corrected = _xlsx(
+        tmp_path, side=mapping.PURCHASE, filename="source-corrected.xlsx",
+        qty="2", unit_price="10", line_amount="20",
+    )
+    batch = pipeline.run_import(
+        db, corrected, "source-corrected.xlsx", uploaded_by="王小环", mode="upsert",
+    )
+    db.commit()
+    db.expire_all()
+
+    current = db.get(FactDataQualityIssue, issue.id)
+    assert current.status == "source_changed"
+    assert current.version == 3
+    assert current.detected_by == "王小环"
+    assert current.evidence == {
+        "qty": "2",
+        "unit_price": "10",
+        "line_amount": "20",
+        "expected_amount": "20",
+        "absolute_difference": "0",
+        "tolerance": "0.05",
+        "current_match": False,
+        "detection_source": "etl_import",
+    }
+    assert batch.report_json["data_quality_detection"] == {
+        "scanned": 1, "matched": 0, "created": 0,
+        "refreshed": 0, "unchanged": 0, "source_changed": 1,
+    }
+    logs = db.scalars(select(SysAuditLog).where(
+        SysAuditLog.entity_type == "data_quality_issue",
+        SysAuditLog.entity_id == issue.id,
+    ).order_by(SysAuditLog.id)).all()
+    assert [log.action for log in logs] == ["create", "decision", "source_changed"]
+    assert logs[-1].operated_by == "王小环"
+
+
+def test_changed_source_that_still_matches_invalidates_old_conclusion(db, tmp_path):
+    original = _xlsx(
+        tmp_path, side=mapping.PURCHASE, filename="still-before.xlsx",
+        qty="2", unit_price="10", line_amount="25",
+    )
+    pipeline.run_import(db, original, "still-before.xlsx", uploaded_by="刘朝红")
+    db.commit()
+    issue = db.scalar(select(FactDataQualityIssue))
+    data_quality.decide_issue(
+        db, issue_id=issue.id, decision="confirmed_valid", version=issue.version,
+        note="按旧文件核实正确", operated_by="数据维护员甲",
+    )
+
+    changed = _xlsx(
+        tmp_path, side=mapping.PURCHASE, filename="still-after.xlsx",
+        qty="2", unit_price="10", line_amount="26",
+    )
+    batch = pipeline.run_import(
+        db, changed, "still-after.xlsx", uploaded_by="王小环", mode="upsert",
+    )
+    db.commit()
+    db.expire_all()
+
+    current = db.get(FactDataQualityIssue, issue.id)
+    assert current.status == "source_changed"
+    assert current.version == 3
+    assert current.evidence["current_match"] is True
+    assert current.evidence["absolute_difference"] == "6"
+    assert current.detected_by == "王小环"
+    assert batch.report_json["data_quality_detection"]["refreshed"] == 1
+    assert batch.report_json["data_quality_detection"]["source_changed"] == 1
+
+
+def test_detector_joins_the_import_transaction_instead_of_committing_early(db, tmp_path):
+    path = _xlsx(
+        tmp_path, side=mapping.PURCHASE, filename="atomic.xlsx",
+        qty="2", unit_price="10", line_amount="25",
+    )
+    pipeline.run_import(db, path, "atomic.xlsx", uploaded_by="刘朝红")
+    assert db.scalar(select(func.count()).select_from(FactDataQualityIssue)) == 1
+
+    db.rollback()
+
+    assert db.scalar(select(func.count()).select_from(FactDataQualityIssue)) == 0
+    assert db.scalar(select(func.count()).select_from(FPurchaseLine)) == 0
+    assert db.scalar(select(func.count()).select_from(SysImportBatch)) == 0
+    assert db.scalar(select(func.count()).select_from(SysAuditLog)) == 0
+
+
+def test_sales_import_uses_shared_tolerance_and_explicit_system_identity(db, tmp_path):
+    boundary = _xlsx(
+        tmp_path, side=mapping.SALES, filename="sales-boundary.xlsx",
+        qty="2", unit_price="10", line_amount="20.05",
+    )
+    first = pipeline.run_import(db, boundary, "sales-boundary.xlsx")
+    db.commit()
+    assert first.report_json["data_quality_detection"]["matched"] == 0
+    assert db.scalar(select(func.count()).select_from(FactDataQualityIssue)) == 0
+
+    over = _xlsx(
+        tmp_path, side=mapping.SALES, filename="sales-over.xlsx",
+        qty="2", unit_price="10", line_amount="20.06",
+    )
+    second = pipeline.run_import(db, over, "sales-over.xlsx", mode="upsert")
+    db.commit()
+    issue = db.scalar(select(FactDataQualityIssue))
+    assert second.report_json["data_quality_detection"]["matched"] == 1
+    assert issue.side == "sales"
+    assert issue.detected_by == detector.SYSTEM_DETECTOR
+    assert issue.evidence["absolute_difference"] == "0.06"
+
+
+def _seed_history_for_preview(db):
+    batch = SysImportBatch(
+        filename="历史回扫.xlsx", file_type="purchase", file_hash="history-preview",
+        uploaded_by="历史导入员", status="success",
+    )
+    db.add(batch)
+    db.flush()
+    purchase_bad = f.purchase_line("P1", "PL-BAD", "PN-P-BAD", qty="2", price="10")
+    purchase_bad["line_amount"] = Decimal("25")
+    loader.load(
+        db,
+        f.purchase_result(
+            {"P1": f.purchase_head("P1", on=date(2026, 1, 1))},
+            [purchase_bad, f.purchase_line("P1", "PL-OK", "PN-P-OK", qty="2", price="10")],
+        ),
+        batch.id,
+        date(2026, 7, 16),
+    )
+    sales_bad = f.sales_line("S1", "SL-BAD", "PN-S-BAD", qty="3", price="10")
+    sales_bad["line_amount"] = Decimal("35")
+    loader.load(
+        db,
+        f.sales_result(
+            {"S1": f.sales_head("S1", on=date(2026, 2, 1))},
+            [sales_bad, f.sales_line("S1", "SL-OK", "PN-S-OK", qty="3", price="10")],
+        ),
+        batch.id,
+        date(2026, 7, 16),
+    )
+    db.commit()
+    purchase_line = db.scalar(select(FPurchaseLine).where(
+        FPurchaseLine.raw_line_id == "PL-BAD",
+    ))
+    detector.detect_imported_lines(
+        db, file_type=mapping.PURCHASE, raw_line_ids=["PL-BAD"],
+        detected_by="历史导入员", commit=False,
+    )
+    db.commit()
+    return purchase_line
+
+
+def test_history_preview_is_deterministic_and_read_only_for_business_numbers(db):
+    _seed_history_for_preview(db)
+    before_issue_count = db.scalar(select(func.count()).select_from(FactDataQualityIssue))
+    before_audit_count = db.scalar(select(func.count()).select_from(SysAuditLog))
+    before_kpi = dashboard.kpi(
+        db, date(2026, 1, 1), date(2026, 12, 31), as_of=date(2026, 12, 31),
+    )
+    before_purchase = db.execute(select(
+        func.count(FPurchaseLine.id), func.sum(FPurchaseLine.line_amount),
+    )).one()
+    before_sales = db.execute(select(
+        func.count(FSalesLine.id), func.sum(FSalesLine.line_amount),
+    )).one()
+
+    first = detector.preview_history(db, side=None, sample_limit=10)
+    second = detector.preview_history(db, side=None, sample_limit=10)
+
+    assert first == second
+    assert first["summary"] == {
+        "scanned": 4,
+        "matched": 2,
+        "existing": 1,
+        "would_create": 1,
+        "would_refresh": 0,
+        "existing_no_longer_matches": 0,
+    }
+    assert [(sample["side"], sample["raw_line_id"], sample["action"])
+            for sample in first["samples"]] == [
+        ("purchase", "PL-BAD", "unchanged"),
+        ("sales", "SL-BAD", "would_create"),
+    ]
+    assert db.scalar(select(func.count()).select_from(FactDataQualityIssue)) == before_issue_count
+    assert db.scalar(select(func.count()).select_from(SysAuditLog)) == before_audit_count
+    assert dashboard.kpi(
+        db, date(2026, 1, 1), date(2026, 12, 31), as_of=date(2026, 12, 31),
+    ) == before_kpi
+    assert db.execute(select(
+        func.count(FPurchaseLine.id), func.sum(FPurchaseLine.line_amount),
+    )).one() == before_purchase
+    assert db.execute(select(
+        func.count(FSalesLine.id), func.sum(FSalesLine.line_amount),
+    )).one() == before_sales
