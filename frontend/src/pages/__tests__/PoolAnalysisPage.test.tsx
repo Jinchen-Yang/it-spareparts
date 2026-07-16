@@ -2,16 +2,18 @@
  *
  * 断言口径：
  * - 深链打开即按 URL 窗口取数（刷新语义等价）；非法 groupId 走 404 空态不请求；
- * - 采购/销售横向柱状排名：平均/合计切换改变喂给图表的指标；
+ * - 采购/销售股票式价格区间图：筛选、排序、点击和竞态；
  * - 订单板块点单号 → 弹窗按单号精确召回订单内容；
  * - 治理受限：约束价显示「无权限」，与「未设置」分离。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { Grid } from "antd";
+import type { PoolPriceMapResponse } from "../../api/poolAnalysis";
 
 const fetchPoolAnalysis = vi.fn();
+const fetchPoolPriceMap = vi.fn();
 const fetchPoolAnalysisOrderDetail = vi.fn();
 const dashboardPurchaseOrders = vi.fn();
 const dashboardSales = vi.fn();
@@ -24,15 +26,36 @@ vi.mock("../../api", () => ({
 }));
 vi.mock("../../api/poolAnalysis", () => ({
   fetchPoolAnalysis: (...a: unknown[]) => fetchPoolAnalysis(...a),
+  fetchPoolPriceMap: (...a: unknown[]) => fetchPoolPriceMap(...a),
   fetchPoolAnalysisOrderDetail: (...a: unknown[]) => fetchPoolAnalysisOrderDetail(...a),
 }));
-vi.mock("../../components/charts/HorizontalMetricBar", () => ({
-  default: (p: { mode: string; metric: string; items: Array<{ pn: string; value: number | null }>;
-    onPartClick?: (partId: number) => void }) => (
-    <div data-testid={`metric-bar-${p.mode}`} data-metric={p.metric}
-      data-clickable={String(!!p.onPartClick)}
-      data-values={p.items.map((i) => `${i.pn}:${i.value}`).join("|")} />),
-}));
+vi.mock("../../components/charts/PoolPnPriceMap", async () => {
+  const React = await import("react");
+  return {
+    default: (p: { data: { side: string; price_restricted: boolean;
+      members: Array<{ part_id: number; pn_std?: string | null }> };
+      onPartOpen?: (partId: number) => void; isMobile?: boolean }) => {
+      const [selectedPartId, setSelectedPartId] = React.useState<number | null>(null);
+      const selected = p.data.members.find((member) => member.part_id === selectedPartId);
+      const activate = (partId: number) => p.isMobile
+        ? setSelectedPartId(partId) : p.onPartOpen?.(partId);
+      return <div data-testid="price-map-stub" data-side={p.data.side}
+        data-restricted={String(p.data.price_restricted)} data-clickable={String(!!p.onPartOpen)}
+        data-mobile={String(!!p.isMobile)}>
+        <button onClick={() => activate(p.data.members[0].part_id)}>查看图中型号全景</button>
+        <div data-testid="price-map-equivalent-table">
+          {p.data.members.map((member) => <button key={member.part_id}
+            onClick={() => activate(member.part_id)}>
+            选择 {member.pn_std ?? `#${member.part_id}`}
+          </button>)}
+        </div>
+        {selected && <div data-testid="price-map-selected">已选择 {selected.pn_std}
+          <button onClick={() => p.onPartOpen?.(selected.part_id)}>查看型号全景</button>
+        </div>}
+      </div>;
+    },
+  };
+});
 
 import PoolAnalysisPage from "../PoolAnalysisPage";
 
@@ -102,6 +125,28 @@ const DETAIL = {
       quantity: 2, sale_unit_price_ex_tax: 210, sale_line_value_ex_tax: 420, counts_revenue: true }] },
 };
 
+const PRICE_MAP = {
+  contract_version: 1 as const, side: "purchase" as const, basis: "ex_tax" as const,
+  price_restricted: false,
+  pool: { group_id: 12, name: "内存互通池", member_count: 2 },
+  window: { ...DETAIL.window, range: "90d" },
+  filters: { purchase_type: null, employee: null },
+  sort: "pn" as const, order: "asc" as const, effective_sort: "pn" as const,
+  effective_order: "asc" as const,
+  current_constraint: { status: "set" as const, value: 105, changed_at: null, input_basis: "ex_tax" as const },
+  pool_stats: { weighted_avg: 100, median: 98, min: 80, max: 120, latest: 110,
+    total_qty: 20, order_count: 4, line_count: 5, latest_date: "2026-06-30" },
+  excluded: { inactive_orders: 0, nonpositive_price: 0, nonpositive_qty: 0, future_orders: 0,
+    non_revenue_sales: 0, suspected_records: 0, confirmed_source_error_excluded: 0 },
+  members: DETAIL.members.map((member) => ({ part_id: member.part_id, pn_std: member.pn_std,
+    description: member.description, brand: member.brand,
+    stats: { weighted_avg: member.purchase_metrics.weighted_avg_unit_price,
+      median: member.purchase_metrics.weighted_avg_unit_price, min: 80, max: 120, latest: 110,
+      total_qty: 10, order_count: 3, line_count: 4, latest_date: "2026-06-30" },
+    current_reference: { relation: "below" as const, delta_amount: -5, delta_pct: -0.0476 },
+    latest_raw_record: null, quality_counts: { suspected: 0, confirmed_source_error: 0 } })),
+};
+
 function renderAt(url: string) {
   return render(
     <MemoryRouter initialEntries={[url]}>
@@ -109,7 +154,7 @@ function renderAt(url: string) {
         <Route path="/pool-analysis/:groupId" element={<PoolAnalysisPage />} />
         <Route path="/boss" element={<div>看板桩</div>} />
         <Route path="/pools" element={<><div>池列表桩</div><LocationProbe /></>} />
-        <Route path="/parts" element={<div>型号查询页桩</div>} />
+        <Route path="/parts" element={<><div>型号查询页桩</div><LocationProbe /></>} />
       </Routes>
     </MemoryRouter>,
   );
@@ -128,6 +173,21 @@ beforeEach(() => {
   localStorage.clear();
   localStorage.setItem("role", "admin");
   fetchPoolAnalysis.mockResolvedValue(DETAIL);
+  fetchPoolPriceMap.mockImplementation((_groupId: number, params: {
+    side?: "purchase" | "sales"; range?: string; date_from?: string; date_to?: string;
+    purchase_type?: string; employee?: string; sort?: string; order?: string;
+  }) => Promise.resolve({
+    ...PRICE_MAP,
+    side: params.side ?? "purchase",
+    window: {
+      ...PRICE_MAP.window,
+      range: params.date_from && params.date_to ? "custom" : (params.range ?? "90d"),
+      date_from: params.date_from ?? PRICE_MAP.window.date_from,
+      date_to: params.date_to ?? PRICE_MAP.window.date_to,
+    },
+    filters: { purchase_type: params.purchase_type ?? null, employee: params.employee ?? null },
+    sort: params.sort ?? "pn", order: params.order ?? "asc",
+  }));
   fetchPoolAnalysisOrderDetail.mockResolvedValue({
     side: "purchase", price_restricted: false,
     supplier_restricted: false, customer_restricted: false,
@@ -184,7 +244,7 @@ describe("深链与取数", () => {
     const memberRows = rows.filter((row) => row.textContent?.includes("PN-A") || row.textContent?.includes("PN-B"));
     expect(memberRows[0]).toHaveTextContent("PN-B");
     expect(memberRows[0]).toHaveTextContent("当前型号");
-    expect(screen.getByText("成员销售排名（高→低）").parentElement).toHaveTextContent("当前关注");
+    expect(screen.getByText("成员销售价格区间").parentElement).toHaveTextContent("当前关注");
   });
 
   it("采购类型深链下发接口，未知值可显示，并由返回链接原样保留", async () => {
@@ -267,39 +327,98 @@ describe("深链与取数", () => {
   });
 });
 
-describe("横向柱状排名：平均/合计切换", () => {
-  it("默认平均单价；切合计后喂给图表的指标与数值同步变化", async () => {
-    renderAt("/pool-analysis/12");
-    const bar = await screen.findByTestId("metric-bar-purchase");
-    expect(bar.dataset.metric).toBe("average");
-    expect(bar.dataset.values).toContain("PN-B:110");     // 均价
-    const seg = screen.getByLabelText("采购排名指标：平均单价或金额合计");
-    fireEvent.click(within2(seg, "金额合计"));
-    await waitFor(() => {
-      const b = screen.getByTestId("metric-bar-purchase");
-      expect(b.dataset.metric).toBe("total");
-      expect(b.dataset.values).toContain("PN-B:1100");    // 合计
+describe("股票式价格区间图", () => {
+  it("按 URL 窗口、方向、采购类型与经办人请求同一 price-map 契约", async () => {
+    renderAt("/pool-analysis/12?side=sales&range=365d&purchase_type=补库&employee=张三");
+    await waitFor(() => expect(fetchPoolPriceMap).toHaveBeenCalledWith(12, {
+      side: "sales", range: "365d", purchase_type: "补库", employee: "张三",
+      sort: "pn", order: "asc",
+    }));
+    expect(await screen.findByTestId("price-map-stub")).toHaveAttribute("data-side", "sales");
+  });
+
+  it("桌面图中型号一次点击进入全景，并携带完整池分析上下文", async () => {
+    renderAt("/pool-analysis/12?from=2026-06-01&to=2026-06-30&side=purchase&purchase_type=补库&employee=张三&price_sort=weighted_avg&price_order=desc");
+    await screen.findByText("内存互通池");
+    fireEvent.click(await screen.findByRole("button", { name: "查看图中型号全景" }));
+    expect(await screen.findByText("型号查询页桩")).toBeInTheDocument();
+    const query = new URLSearchParams(currentPath.split("?")[1]);
+    expect(currentPath.split("?")[0]).toBe("/parts");
+    expect(Object.fromEntries(query)).toEqual({
+      part_id: "101", group_id: "12", range: "custom",
+      date_from: "2026-06-01", date_to: "2026-06-30", side: "purchase",
+      purchase_type: "补库", employee: "张三",
+      price_sort: "weighted_avg", price_order: "desc",
+    });
+    expect(screen.queryByText("成员 PN-A 详情")).toBeNull();
+  });
+
+  it("移动端图形先开固定卡，卡片按钮再携上下文进入型号全景", async () => {
+    breakpoint.mockReturnValue({ xs: true, sm: false, md: false, lg: false, xl: false, xxl: false });
+    renderAt("/pool-analysis/12?range=365d&side=sales&employee=李四");
+    const map = await screen.findByTestId("price-map-stub");
+    expect(map).toHaveAttribute("data-mobile", "true");
+    fireEvent.click(within(map).getByRole("button", { name: "查看图中型号全景" }));
+    expect(within(map).getByTestId("price-map-selected")).toHaveTextContent("PN-A");
+    fireEvent.click(within(map).getByRole("button", { name: "查看型号全景" }));
+    await screen.findByText("型号查询页桩");
+    const query = new URLSearchParams(currentPath.split("?")[1]);
+    expect(Object.fromEntries(query)).toEqual({
+      part_id: "101", group_id: "12", range: "365d", side: "sales", employee: "李四",
     });
   });
 
-  it("无型号查询页权限时柱状图不提供失效的 PN 跳转", async () => {
-    localStorage.setItem("role", "boss");
-    localStorage.setItem("permissions", JSON.stringify({
-      page_boss_board: true, page_parts: false,
-    }));
+  it("确定性延迟下旧采购响应最后到达也不能覆盖新销售图", async () => {
+    let releasePurchase: ((value: typeof PRICE_MAP) => void) | undefined;
+    fetchPoolPriceMap.mockImplementation((_groupId: number, params: { side?: "purchase" | "sales" }) => {
+      if (params.side === "sales") return Promise.resolve({ ...PRICE_MAP, side: "sales" as const });
+      return new Promise<typeof PRICE_MAP>((resolve) => { releasePurchase = resolve; });
+    });
+    renderAt("/pool-analysis/12?side=purchase");
+    await screen.findByText("内存互通池");
+    fireEvent.click(within(screen.getByLabelText("当前关注方向")).getByText("销售"));
+    await waitFor(() => expect(screen.getByTestId("price-map-stub")).toHaveAttribute("data-side", "sales"));
+    await act(async () => releasePurchase?.(PRICE_MAP));
+    expect(screen.getByTestId("price-map-stub")).toHaveAttribute("data-side", "sales");
+  });
+
+  it("scope 切换立即隐藏旧表和固定详情，新响应不得继承旧 PN 选择", async () => {
+    breakpoint.mockReturnValue({ xs: true, sm: false, md: false, lg: false, xl: false, xxl: false });
+    let releaseSales: ((value: PoolPriceMapResponse) => void) | undefined;
+    fetchPoolPriceMap.mockImplementation((_groupId: number, params: { side?: "purchase" | "sales" }) => {
+      if (params.side === "sales") {
+        return new Promise<PoolPriceMapResponse>((resolve) => { releaseSales = resolve; });
+      }
+      return Promise.resolve(PRICE_MAP);
+    });
+    renderAt("/pool-analysis/12?side=purchase");
+    const purchaseMap = await screen.findByTestId("price-map-stub");
+    fireEvent.click(within(purchaseMap).getByRole("button", { name: "选择 PN-A" }));
+    expect(within(purchaseMap).getByTestId("price-map-selected")).toHaveTextContent("PN-A");
+
+    fireEvent.click(within(screen.getByLabelText("当前关注方向")).getByText("销售"));
+    expect(screen.queryByTestId("price-map-stub")).toBeNull();
+    expect(screen.queryByTestId("price-map-equivalent-table")).toBeNull();
+    expect(screen.queryByTestId("price-map-selected")).toBeNull();
+    expect(screen.getByText("正在加载价格区间…")).toBeInTheDocument();
+
+    await act(async () => releaseSales?.({ ...PRICE_MAP, side: "sales" }));
+    const salesMap = await screen.findByTestId("price-map-stub");
+    expect(salesMap).toHaveAttribute("data-side", "sales");
+    expect(within(salesMap).queryByTestId("price-map-selected")).toBeNull();
+  });
+
+  it("价格图排序和方向进入 URL 驱动请求", async () => {
     renderAt("/pool-analysis/12");
-    expect(await screen.findByTestId("metric-bar-purchase")).toHaveAttribute("data-clickable", "false");
-    expect(screen.getByTestId("metric-bar-sales")).toHaveAttribute("data-clickable", "false");
+    await screen.findByTestId("price-map-stub");
+    fireEvent.click(within(screen.getByLabelText("价格图区间排序")).getByText("加权均价"));
+    await waitFor(() => expect(fetchPoolPriceMap).toHaveBeenLastCalledWith(12,
+      expect.objectContaining({ sort: "weighted_avg", order: "desc" })));
+    fireEvent.click(screen.getByRole("button", { name: "切换价格图排序方向" }));
+    await waitFor(() => expect(fetchPoolPriceMap).toHaveBeenLastCalledWith(12,
+      expect.objectContaining({ sort: "weighted_avg", order: "asc" })));
   });
 });
-
-// Segmented 内部按文本找可点击项
-function within2(root: HTMLElement, text: string): HTMLElement {
-  const el = Array.from(root.querySelectorAll<HTMLElement>("*"))
-    .find((n) => n.textContent === text && n.children.length === 0);
-  if (!el) throw new Error(`Segmented 选项未找到: ${text}`);
-  return el;
-}
 
 describe("订单板块", () => {
   it("点采购单号 → 专用池分析端点按唯一 order_id 召回完整订单", async () => {
@@ -364,9 +483,7 @@ describe("治理权限", () => {
 
     renderAt("/pool-analysis/12?side=purchase");
     await screen.findByText("内存互通池");
-    expect(screen.getByLabelText("采购排名指标：平均单价或金额合计"))
-      .toHaveClass("ant-segmented-disabled");
-    expect(screen.queryByTestId("metric-bar-purchase")).toBeNull();
+    expect(screen.getByTestId("price-map-stub")).toHaveAttribute("data-restricted", "false");
     expect(screen.getAllByText("无池价格权限").length).toBeGreaterThanOrEqual(4);
     expect(screen.queryByText(/¥90|¥100|¥105/)).toBeNull();
   });
@@ -393,8 +510,7 @@ describe("治理权限", () => {
     renderAt("/pool-analysis/12");
     await screen.findByText("内存互通池");
     expect(screen.getAllByText("无池价格权限").length).toBeGreaterThanOrEqual(4);
-    expect(screen.getByLabelText("采购排名指标：平均单价或金额合计")).toHaveClass("ant-segmented-disabled");
-    expect(screen.getByLabelText("销售排名指标：平均单价或金额合计")).toHaveClass("ant-segmented-disabled");
+    expect(screen.getByTestId("price-map-stub")).toHaveAttribute("data-restricted", "true");
     expect(screen.queryByText(/¥3,760/)).toBeNull();
     expect(screen.queryByText("未设置")).toBeNull();
   });

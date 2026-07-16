@@ -101,3 +101,43 @@ def get_pool_detail(
     if data is None:
         raise HTTPException(status_code=404, detail="池不存在或已归档")
     return pool_price_analysis.apply_visibility(data, ctx)
+
+
+@router.get("/pools/{group_id}/price-map")
+def get_pool_price_map(
+    group_id: int,
+    side: Literal["purchase", "sales"] = Query("purchase"),
+    range_: str | None = Query("90d", alias="range", pattern="^(30d|90d|365d|all|custom)$"),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    purchase_type: str | None = Query(None),
+    employee: str | None = Query(None),
+    sort: Literal["pn", "weighted_avg", "constraint_delta", "latest_date"] = Query("pn"),
+    order: Literal["asc", "desc"] = Query("asc"),
+    db: Session = Depends(get_db),
+    _role: str = Depends(current_role),
+    _page: None = Depends(require_page("page_pool_analysis")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    price_restricted = is_field_hidden(ctx, "purchase_ceiling_ex_tax")
+    # 无价格权限时，必须在调用服务前把真实数组顺序也锁定为 PN 升序；
+    # 不能仅在 apply_visibility 阶段改响应元数据，否则 pn/desc 仍会泄露旧排序语义。
+    ranking_restricted = price_restricted and (sort != "pn" or order != "asc")
+    effective_sort = "pn" if price_restricted else sort
+    effective_order = "asc" if price_restricted else order
+    record_access_log(ctx, "pool_analysis_price_map", "pools", {
+        "group_id": group_id, "side": side, "purchase_type": purchase_type,
+        "employee": employee, "sort": sort, "effective_sort": effective_sort,
+        "order": order, "effective_order": effective_order,
+    })
+    try:
+        data = pool_price_analysis.price_map(
+            db, group_id, side=side, range_=range_, date_from=date_from, date_to=date_to,
+            purchase_type=purchase_type, employee=employee,
+            requested_sort=sort, requested_order=order,
+            effective_sort=effective_sort, effective_order=effective_order)
+    except pool_price_analysis.WindowValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if data is None:
+        raise HTTPException(status_code=404, detail="池不存在或已归档")
+    return pool_price_analysis.apply_visibility(data, ctx)

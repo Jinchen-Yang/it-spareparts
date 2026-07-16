@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Input, Card, Descriptions, Tag, Row, Col, Statistic, Empty, message, Space, Button,
   Select, InputNumber, Alert, Table, Popconfirm,
@@ -16,6 +16,7 @@ import type { UnifiedSearchItem, UnifiedSearchResp } from "../api/search";
 import { COLORS } from "../theme";
 import { money, pct, splitByFlag, splitFixed } from "../utils/format";
 import { useTaxBasis, TaxMoney } from "../context/TaxBasis";
+import { poolAnalysisReturnPath } from "../utils/poolAnalysisNavigation";
 const errMsg = (e: any) =>
   !e?.response ? "无法连接服务器，请检查网络后重试"
   : e?.response?.data?.detail || `加载失败（${e?.response?.status ?? "?"}），请稍后重试`;
@@ -42,6 +43,7 @@ export default function PartSearchPage() {
   const urlQ = sp.get("q") || "";
   const urlPartId = sp.get("part_id");
   const urlPn = sp.get("pn");
+  const returnToPool = poolAnalysisReturnPath(sp);
 
   const [qInput, setQInput] = useState(urlQ);
   const [resp, setResp] = useState<UnifiedSearchResp | null>(null);
@@ -295,6 +297,7 @@ export default function PartSearchPage() {
       <PageHeader
         title="型号查询"
         subtitle="按型号 / 品牌 / 描述近似搜索，点击型号查看完整全景（采购 · 销售 · 库存 · 成本 · 毛利）"
+        extra={returnToPool ? <Link to={returnToPool}>返回互通池分析</Link> : undefined}
       />
       <Card>
         <Input.Search

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app import config
 from app.business_time import business_today
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
+from app.models.data_quality import FactDataQualityIssue
 from app.models.inventory import PartPool, PartPoolMember, PartPoolPricePolicy
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
@@ -30,6 +31,12 @@ _EMPTY_STATS = {
     "weighted_avg": None, "median": None, "min": None, "max": None, "latest": None,
     "total_amount": None, "total_qty": None, "order_count": 0, "line_count": 0,
     "latest_date": None, "violation_count": 0,
+}
+
+_MAP_EMPTY_EXCLUDED = {
+    "inactive_orders": 0, "nonpositive_price": 0, "nonpositive_qty": 0,
+    "future_orders": 0, "non_revenue_sales": 0, "suspected_records": 0,
+    "confirmed_source_error_excluded": 0,
 }
 
 
@@ -83,6 +90,312 @@ def _stats(row) -> dict:
         "latest_date": (row.latest_date.isoformat()
                         if getattr(row, "latest_date", None) else None),
         "violation_count": int(getattr(row, "violations", 0) or 0),
+    }
+
+
+def _price_map_stats(row) -> dict | None:
+    """DEV-09A 的精简统计形状；无正式样本必须返回 null 而不是伪造 0。"""
+    if row is None or int(row.lines or 0) == 0:
+        return None
+    qty = float(row.qty or 0)
+    return {
+        "weighted_avg": _r(float(row.amount) / qty) if row.amount is not None and qty else None,
+        "median": _r(row.median), "min": _r(row.minimum), "max": _r(row.maximum),
+        "latest": _r(row.latest), "total_qty": _r(row.qty, 3),
+        "order_count": int(row.orders or 0), "line_count": int(row.lines or 0),
+        "latest_date": row.latest_date.isoformat() if row.latest_date else None,
+    }
+
+
+def _dq_exists(side: str, line_id, statuses: tuple[str, ...]):
+    return exists(
+        select(1).select_from(FactDataQualityIssue).where(
+            FactDataQualityIssue.side == side,
+            FactDataQualityIssue.line_id == line_id,
+            FactDataQualityIssue.status.in_(statuses),
+        )
+    )
+
+
+def _price_map_context(side: str):
+    if side == "purchase":
+        return {
+            "line": FPurchaseLine, "order": FPurchaseOrder,
+            "price": purchase_ex_unit(), "amount": purchase_ex_tax_expr(),
+            "priced": _purchase_priced_condition(), "employee": FPurchaseOrder.purchaser,
+        }
+    if side == "sales":
+        return {
+            "line": FSalesLine, "order": FSalesOrder,
+            "price": sale_ex_unit(), "amount": FSalesLine.revenue_amount,
+            "priced": _sales_priced_condition(), "employee": FSalesOrder.salesperson,
+        }
+    raise ValueError(f"unsupported price-map side: {side}")
+
+
+def _price_map_filter(stmt, *, context: dict, lower: date | None, upper: date,
+                      purchase_type: str | None, employee: str | None):
+    order_model = context["order"]
+    stmt = _window(stmt, order_model, lower, upper)
+    if context["line"] is FPurchaseLine:
+        stmt = _purchase_type_filter(stmt, purchase_type)
+    if employee and employee.strip():
+        stmt = stmt.where(context["employee"] == employee.strip())
+    return stmt
+
+
+def _price_map_aggregate(db: Session, *, side: str, part_ids: list[int],
+                         lower: date | None, upper: date,
+                         purchase_type: str | None, employee: str | None,
+                         by_part: bool) -> dict[int, dict] | dict | None:
+    """正式参考统计；confirmed_source_error 仅在此处剔除。"""
+    context = _price_map_context(side)
+    line, order_model = context["line"], context["order"]
+    price, amount = context["price"], context["amount"]
+    is_error = _dq_exists(side, line.id, ("confirmed_source_error",))
+    columns = [
+        func.sum(amount).label("amount"), func.sum(line.qty).label("qty"),
+        func.percentile_cont(0.5).within_group(price).label("median"),
+        func.min(price).label("minimum"), func.max(price).label("maximum"),
+        func.array_agg(aggregate_order_by(
+            price, order_model.order_date.desc(), order_model.id.desc(), line.id.desc()
+        ))[1].label("latest"),
+        func.max(order_model.order_date).label("latest_date"),
+        func.count(func.distinct(order_model.id)).label("orders"),
+        func.count(line.id).label("lines"),
+    ]
+    if by_part:
+        columns.insert(0, line.part_id.label("key"))
+    stmt = (
+        select(*columns).select_from(line).join(order_model, order_model.id == line.order_id)
+        .where(line.part_id.in_(part_ids), context["priced"], ~is_error)
+    )
+    stmt = _price_map_filter(
+        stmt, context=context, lower=lower, upper=upper,
+        purchase_type=purchase_type, employee=employee)
+    if by_part:
+        stmt = stmt.group_by(line.part_id)
+        return {row.key: _price_map_stats(row) for row in db.execute(stmt)}
+    return _price_map_stats(db.execute(stmt).one())
+
+
+def _price_map_latest_raw(db: Session, *, side: str, part_ids: list[int],
+                          lower: date | None, upper: date,
+                          purchase_type: str | None, employee: str | None) -> dict[int, dict]:
+    """每 PN 最近原始有效价格点；源错误不删除，只附明确状态。"""
+    context = _price_map_context(side)
+    line, order_model = context["line"], context["order"]
+    is_error = _dq_exists(side, line.id, ("confirmed_source_error",))
+    is_suspected = _dq_exists(side, line.id, ("open", "source_changed"))
+    is_valid = _dq_exists(side, line.id, ("confirmed_valid",))
+    ranked = (
+        select(
+            line.part_id.label("part_id"), order_model.id.label("order_id"),
+            line.id.label("line_id"), order_model.order_no.label("order_no"),
+            order_model.order_date.label("order_date"),
+            context["employee"].label("employee"), context["price"].label("price_ex_tax"),
+            is_error.label("is_error"), is_suspected.label("is_suspected"),
+            is_valid.label("is_valid"),
+            func.row_number().over(
+                partition_by=line.part_id,
+                order_by=(order_model.order_date.desc(), order_model.id.desc(), line.id.desc()),
+            ).label("rn"),
+        )
+        .select_from(line).join(order_model, order_model.id == line.order_id)
+        .where(line.part_id.in_(part_ids), context["priced"])
+    )
+    ranked = _price_map_filter(
+        ranked, context=context, lower=lower, upper=upper,
+        purchase_type=purchase_type, employee=employee).subquery()
+    rows = db.execute(select(ranked).where(ranked.c.rn == 1)).mappings()
+    out: dict[int, dict] = {}
+    for row in rows:
+        if row["is_error"]:
+            quality = "confirmed_source_error"
+        elif row["is_suspected"]:
+            quality = "open_or_source_changed"
+        elif row["is_valid"]:
+            quality = "confirmed_valid"
+        else:
+            quality = "none"
+        out[row["part_id"]] = {
+            "order_id": row["order_id"], "line_id": row["line_id"],
+            "order_no": row["order_no"],
+            "order_date": row["order_date"].isoformat() if row["order_date"] else None,
+            "employee": row["employee"], "price_ex_tax": _r(row["price_ex_tax"]),
+            "quality_status": quality,
+        }
+    return out
+
+
+def _price_map_quality_counts(db: Session, *, side: str, part_ids: list[int],
+                              lower: date | None, upper: date,
+                              purchase_type: str | None,
+                              employee: str | None) -> dict[int, dict]:
+    context = _price_map_context(side)
+    line, order_model = context["line"], context["order"]
+    is_error = _dq_exists(side, line.id, ("confirmed_source_error",))
+    is_suspected = _dq_exists(side, line.id, ("open", "source_changed"))
+    stmt = (
+        select(
+            line.part_id.label("key"),
+            func.count(func.distinct(line.id)).filter(and_(is_suspected, ~is_error)).label("suspected"),
+            func.count(func.distinct(line.id)).filter(is_error).label("errors"),
+        )
+        .select_from(line).join(order_model, order_model.id == line.order_id)
+        .where(line.part_id.in_(part_ids), context["priced"])
+    )
+    stmt = _price_map_filter(
+        stmt, context=context, lower=lower, upper=upper,
+        purchase_type=purchase_type, employee=employee).group_by(line.part_id)
+    return {row.key: {"suspected": int(row.suspected or 0),
+                      "confirmed_source_error": int(row.errors or 0)}
+            for row in db.execute(stmt)}
+
+
+def _price_map_excluded(db: Session, *, side: str, part_ids: list[int],
+                        lower: date | None, upper: date, today: date,
+                        purchase_type: str | None, employee: str | None,
+                        quality_counts: dict[int, dict]) -> dict:
+    context = _price_map_context(side)
+    line, order_model = context["line"], context["order"]
+    date_window = order_model.order_date <= upper
+    if lower is not None:
+        date_window = and_(date_window, order_model.order_date >= lower)
+    active = order_model.data_status == config.ACTIVE_STATUS
+    columns = [
+        func.count(func.distinct(order_model.id)).filter(and_(
+            date_window, order_model.data_status.is_distinct_from(config.ACTIVE_STATUS)
+        )).label("inactive"),
+        func.count(line.id).filter(and_(
+            date_window, active, or_(line.unit_price.is_(None), line.unit_price <= 0)
+        )).label("bad_price"),
+        func.count(line.id).filter(and_(
+            date_window, active, or_(line.qty.is_(None), line.qty <= 0)
+        )).label("bad_qty"),
+        func.count(func.distinct(order_model.id)).filter(and_(
+            active, order_model.order_date > today)).label("future"),
+    ]
+    if side == "sales":
+        columns.append(func.count(line.id).filter(and_(
+            date_window, active, line.counts_revenue.is_not(True)
+        )).label("non_revenue"))
+    stmt = (
+        select(*columns).select_from(line).join(order_model, order_model.id == line.order_id)
+        .where(line.part_id.in_(part_ids))
+    )
+    if side == "purchase":
+        stmt = _purchase_type_filter(stmt, purchase_type)
+    if employee and employee.strip():
+        stmt = stmt.where(context["employee"] == employee.strip())
+    row = db.execute(stmt).one()
+    out = dict(_MAP_EMPTY_EXCLUDED)
+    out.update({
+        "inactive_orders": int(row.inactive or 0),
+        "nonpositive_price": int(row.bad_price or 0),
+        "nonpositive_qty": int(row.bad_qty or 0),
+        "future_orders": int(row.future or 0),
+        "non_revenue_sales": int(getattr(row, "non_revenue", 0) or 0),
+        "suspected_records": sum(x["suspected"] for x in quality_counts.values()),
+        "confirmed_source_error_excluded": sum(
+            x["confirmed_source_error"] for x in quality_counts.values()),
+    })
+    return out
+
+
+def _map_current_reference(side: str, stats: dict | None, constraint: dict) -> dict | None:
+    if stats is None or constraint["value"] is None:
+        return None
+    average, limit = stats["weighted_avg"], constraint["value"]
+    delta = _r(average - limit)
+    if side == "purchase":
+        relation = "above" if average > limit else "below" if average < limit else "equal"
+    else:
+        relation = "below" if average < limit else "above" if average > limit else "equal"
+    return {
+        "relation": relation, "delta_amount": delta,
+        "delta_pct": round(delta / limit, 4) if limit else None,
+    }
+
+
+def price_map(db: Session, group_id: int, *, side: str = "purchase",
+              range_: str | None = None, date_from: date | None = None,
+              date_to: date | None = None, purchase_type: str | None = None,
+              employee: str | None = None, requested_sort: str = "pn",
+              requested_order: str = "asc", effective_sort: str = "pn",
+              effective_order: str = "asc") -> dict | None:
+    """池内全部 PN 的股票式区间图读模型；固定查询数，不按成员 N+1。"""
+    pool_row = db.execute(select(PartPool).where(
+        PartPool.group_id == group_id, PartPool.status == "active")).scalar_one_or_none()
+    if pool_row is None:
+        return None
+    lower, upper, today, token = resolve_window(range_, date_from, date_to)
+    member_rows = db.execute(
+        select(DimPart.id, DimPart.pn_std, DimPart.description, DimPart.brand)
+        .join(PartPoolMember, PartPoolMember.part_id == DimPart.id)
+        .where(PartPoolMember.group_id == group_id)
+        .order_by(DimPart.pn_std.asc(), DimPart.id.asc())
+    ).all()
+    part_ids = [row.id for row in member_rows]
+    stats = _price_map_aggregate(
+        db, side=side, part_ids=part_ids, lower=lower, upper=upper,
+        purchase_type=purchase_type, employee=employee, by_part=True)
+    pool_stats = _price_map_aggregate(
+        db, side=side, part_ids=part_ids, lower=lower, upper=upper,
+        purchase_type=purchase_type, employee=employee, by_part=False)
+    latest = _price_map_latest_raw(
+        db, side=side, part_ids=part_ids, lower=lower, upper=upper,
+        purchase_type=purchase_type, employee=employee)
+    quality = _price_map_quality_counts(
+        db, side=side, part_ids=part_ids, lower=lower, upper=upper,
+        purchase_type=purchase_type, employee=employee)
+    policy = _current_policies(db, [group_id]).get(group_id)
+    constraint_full = _constraint(policy, side)
+    constraint = {key: constraint_full[key] for key in (
+        "status", "value", "changed_at", "input_basis")}
+    members = []
+    for row in member_rows:
+        member_stats = stats.get(row.id)
+        members.append({
+            "part_id": row.id, "pn_std": row.pn_std,
+            "description": row.description, "brand": row.brand,
+            "stats": member_stats,
+            "current_reference": _map_current_reference(side, member_stats, constraint),
+            "latest_raw_record": latest.get(row.id),
+            "quality_counts": quality.get(row.id, {
+                "suspected": 0, "confirmed_source_error": 0}),
+        })
+
+    def sort_value(item):
+        if effective_sort == "weighted_avg":
+            return (item["stats"] or {}).get("weighted_avg")
+        if effective_sort == "constraint_delta":
+            return (item["current_reference"] or {}).get("delta_amount")
+        if effective_sort == "latest_date":
+            return (item["stats"] or {}).get("latest_date")
+        return (item["pn_std"] or "").casefold()
+
+    with_value = [item for item in members if sort_value(item) is not None]
+    without_value = [item for item in members if sort_value(item) is None]
+    with_value.sort(key=lambda item: (sort_value(item), (item["pn_std"] or "").casefold()),
+                    reverse=effective_order == "desc")
+    without_value.sort(key=lambda item: ((item["pn_std"] or "").casefold(), item["part_id"]))
+    members = with_value + without_value
+    return {
+        "contract_version": 1, "side": side, "basis": "ex_tax",
+        "price_restricted": False,
+        "pool": {"group_id": group_id, "name": pool_row.name,
+                 "member_count": pool_row.member_count},
+        "window": {"range": token, "date_from": lower.isoformat() if lower else None,
+                   "date_to": upper.isoformat(), "as_of": today.isoformat()},
+        "filters": {"purchase_type": purchase_type, "employee": employee},
+        "sort": requested_sort, "order": requested_order,
+        "effective_sort": effective_sort, "effective_order": effective_order,
+        "current_constraint": constraint, "pool_stats": pool_stats,
+        "excluded": _price_map_excluded(
+            db, side=side, part_ids=part_ids, lower=lower, upper=upper, today=today,
+            purchase_type=purchase_type, employee=employee, quality_counts=quality),
+        "members": members,
     }
 
 
@@ -647,6 +960,24 @@ def apply_visibility(data, ctx: security.UserContext):
     for node in nodes:
         if not isinstance(node, dict):
             continue
+        if node.get("contract_version") == 1 and isinstance(node.get("members"), list):
+            node["price_restricted"] = price_restricted
+            if price_restricted:
+                node["effective_sort"] = "pn"
+                node["effective_order"] = "asc"
+                node["current_constraint"] = {
+                    "status": "restricted", "value": None, "changed_at": None,
+                    "input_basis": None,
+                }
+                node["pool_stats"] = None
+                node["excluded"] = None
+                for member in node["members"]:
+                    member["stats"] = None
+                    member["current_reference"] = None
+                    member["latest_raw_record"] = None
+                    member["quality_counts"] = None
+            # price-map 不含交易对手方，后续逐笔时间线另行按字段权限处理。
+            continue
         order_side = node.get("side") if isinstance(node.get("order"), dict) else None
         if order_side in {"purchase", "sales"}:
             header = node["order"]
@@ -718,6 +1049,11 @@ def apply_visibility(data, ctx: security.UserContext):
                         row["customer"] = None
         if customer_restricted and "customer_cross_brand" in node:
             node["customer_cross_brand"] = {"restricted": True, "customers": []}
+    # price-map 是独立读模型，只含身份字段和池价格治理字段；在结构化净化后再过
+    # FIELD_GROUPS 通用递归脱敏作为第二防线。其它详情契约不能走这里，否则会把
+    # data_purchase_cost 误当成池历史价格权限（本模块明确以 governance 为唯一开关）。
+    if isinstance(data, dict) and data.get("contract_version") == 1:
+        return security.apply_field_visibility(data, ctx)
     return data
 
 

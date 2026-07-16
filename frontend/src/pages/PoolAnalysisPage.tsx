@@ -12,18 +12,20 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import dayjs, { type Dayjs } from "dayjs";
 import PageHeader from "../components/PageHeader";
-import { fetchPoolAnalysis } from "../api/poolAnalysis";
+import { fetchPoolAnalysis, fetchPoolPriceMap } from "../api/poolAnalysis";
 import type {
   PoolAnalysisDetail, PoolAnalysisMember, PoolAnalysisOrderLine, PoolAnalysisPurchaseOrderLine,
-  PoolAnalysisRange, PoolAnalysisSaleOrderLine, PoolReferenceSide,
+  PoolAnalysisRange, PoolAnalysisSaleOrderLine, PoolAnalysisSide, PoolPriceMapResponse,
+  PoolReferenceSide,
 } from "../api/poolAnalysis";
-import HorizontalMetricBar, { type MetricBarItem } from "../components/charts/HorizontalMetricBar";
+import PoolPnPriceMap from "../components/charts/PoolPnPriceMap";
 import MobileDetailDrawer, { type DetailField } from "../components/MobileDetailDrawer";
 import PoolOrderDetailModal from "../components/pools/PoolOrderDetailModal";
 import PurchaseTypeSelect from "../components/pools/PurchaseTypeSelect";
 import { EMPTY, moneyExact, qty } from "../utils/format";
 import { ISO_DATE_FORMAT, strictIsoDateRange } from "../utils/date";
-import { canOpenPartDetail, PartLink } from "./boss/PartsTable";
+import { poolAnalysisPartPath } from "../utils/poolAnalysisNavigation";
+import { PartLink } from "./boss/PartsTable";
 import { MUTED, useGuardedFetch, useLocalRestrictions } from "./boss/shared";
 import { activatableProps } from "./purchases/shared";
 
@@ -31,7 +33,42 @@ const { RangePicker } = DatePicker;
 const D = ISO_DATE_FORMAT;
 const STANDARD_RANGES = new Set<PoolAnalysisRange>(["30d", "90d", "365d", "all"]);
 
-type MetricMode = "average" | "total";
+type PriceMapSort = "pn" | "weighted_avg" | "constraint_delta" | "latest_date";
+const PRICE_MAP_SORTS: ReadonlySet<PriceMapSort> = new Set([
+  "pn", "weighted_avg", "constraint_delta", "latest_date",
+]);
+
+interface PriceMapScope {
+  groupId: number;
+  side: PoolAnalysisSide;
+  range: PoolAnalysisRange;
+  dateFrom: string | null;
+  dateTo: string | null;
+  purchaseType: string | null;
+  employee: string | null;
+  sort: PriceMapSort;
+  order: "asc" | "desc";
+}
+
+function priceMapScopeKey(scope: PriceMapScope): string {
+  return JSON.stringify([
+    scope.groupId, scope.side, scope.range, scope.dateFrom, scope.dateTo,
+    scope.purchaseType, scope.employee, scope.sort, scope.order,
+  ]);
+}
+
+/** 后端响应也须自证范围；即使请求链路异常返回错侧/错窗口，也不渲染成当前数据。 */
+function responseMatchesPriceMapScope(data: PoolPriceMapResponse, scope: PriceMapScope): boolean {
+  return data.pool.group_id === scope.groupId
+    && data.side === scope.side
+    && data.window.range === scope.range
+    && (scope.range !== "custom"
+      || (data.window.date_from === scope.dateFrom && data.window.date_to === scope.dateTo))
+    && (data.filters.purchase_type ?? null) === scope.purchaseType
+    && (data.filters.employee ?? null) === scope.employee
+    && data.sort === scope.sort
+    && data.order === scope.order;
+}
 
 const RANGE_PRESETS = [
   { label: "近30天", value: [dayjs().subtract(29, "day"), dayjs()] as [Dayjs, Dayjs] },
@@ -63,11 +100,12 @@ export default function PoolAnalysisPage() {
   const parsedWindow = strictIsoDateRange(sp.get("from"), sp.get("to"));
   const rawRange = sp.get("range");
   const rawSide = sp.get("side");
-  const focusSide = rawSide === "sales" ? "sales" : "purchase";
+  const focusSide: PoolAnalysisSide = rawSide === "sales" ? "sales" : "purchase";
   const sideParam: "purchase" | "sales" | null = rawSide === "purchase" || rawSide === "sales"
     ? rawSide : null;
   const focusPn = sp.get("pn")?.trim() || null;
   const purchaseType = sp.get("purchase_type")?.trim() || null;
+  const employee = sp.get("employee")?.trim() || null;
   const hasCustomWindow = sp.has("from") || sp.has("to");
   const range = !parsedWindow
     ? (rawRange == null ? "90d" : STANDARD_RANGES.has(rawRange as PoolAnalysisRange)
@@ -79,8 +117,6 @@ export default function PoolAnalysisPage() {
   const to = parsedWindow?.to ?? null;
   const purchasePage = readPage(sp, "pp");
   const salesPage = readPage(sp, "spg");
-  const [pMode, setPMode] = useState<MetricMode>("average");
-  const [sMode, setSMode] = useState<MetricMode>("average");
   const [orderModal, setOrderModal] = useState<{ side: "purchase" | "sales"; orderId: number } | null>(null);
   const [memberDetail, setMemberDetail] = useState<PoolAnalysisMember | null>(null);
 
@@ -122,6 +158,67 @@ export default function PoolAnalysisPage() {
       : Promise.resolve({ data: null as unknown as PoolAnalysisDetail })),   // 非法编号：走 404 空态，不发请求
     [groupId, params, validId, invalidWindow]);
 
+  const priceSortTokens: ReadonlySet<PriceMapSort> = PRICE_MAP_SORTS;
+  const rawPriceSort = sp.get("price_sort") as PriceMapSort | null;
+  const priceSort: PriceMapSort = rawPriceSort && priceSortTokens.has(rawPriceSort) ? rawPriceSort : "pn";
+  const priceOrder: "asc" | "desc" = sp.get("price_order") === "desc" ? "desc" : "asc";
+  const priceMapScope = useMemo<PriceMapScope>(() => ({
+    groupId,
+    side: focusSide,
+    range: from && to ? "custom" : (range ?? "90d"),
+    dateFrom: from,
+    dateTo: to,
+    purchaseType,
+    employee,
+    sort: priceSort,
+    order: priceOrder,
+  }), [groupId, focusSide, from, to, range, purchaseType, employee, priceSort, priceOrder]);
+  const currentPriceMapScopeKey = useMemo(
+    () => priceMapScopeKey(priceMapScope), [priceMapScope],
+  );
+  const partNavigationContext = useMemo(() => ({
+    groupId,
+    range: priceMapScope.range,
+    dateFrom: from,
+    dateTo: to,
+    side: focusSide,
+    purchaseType,
+    employee,
+    priceSort: sp.has("price_sort") ? priceSort : null,
+    priceOrder: sp.has("price_order") ? priceOrder : null,
+  }), [groupId, priceMapScope.range, from, to, focusSide, purchaseType, employee,
+    priceSort, priceOrder, sp]);
+  const priceMapParams = useMemo(() => ({
+    side: focusSide,
+    ...(from && to ? { date_from: from, date_to: to } : { range: range ?? undefined }),
+    ...(purchaseType ? { purchase_type: purchaseType } : {}),
+    ...(employee ? { employee } : {}),
+    sort: priceSort, order: priceOrder,
+  }), [focusSide, from, to, range, purchaseType, employee, priceSort, priceOrder]);
+  const { data: rawPriceMap, loading: priceMapLoading, error: priceMapError,
+    reload: reloadPriceMap } = useGuardedFetch<PoolPriceMapResponse>(
+    () => (validId && !invalidWindow
+      ? fetchPoolPriceMap(groupId, priceMapParams).then((data) => ({ data }))
+      : Promise.resolve({ data: null as unknown as PoolPriceMapResponse })),
+    [currentPriceMapScopeKey, validId, invalidWindow], currentPriceMapScopeKey);
+  const scopedRawPriceMap = rawPriceMap
+    && responseMatchesPriceMapScope(rawPriceMap, priceMapScope) ? rawPriceMap : null;
+  const priceMapScopeMismatch = rawPriceMap != null && scopedRawPriceMap == null;
+  // 登录态权限先于接口响应收紧；任何旧响应都不能在首帧短暂露出价格。
+  const priceMap = useMemo(() => {
+    if (!scopedRawPriceMap || !local.governance || scopedRawPriceMap.price_restricted) {
+      return scopedRawPriceMap;
+    }
+    return {
+      ...scopedRawPriceMap, price_restricted: true, effective_sort: "pn" as const,
+      effective_order: "asc" as const, pool_stats: null, excluded: null,
+      current_constraint: { status: "restricted" as const, value: null,
+        changed_at: null, input_basis: null },
+      members: scopedRawPriceMap.members.map((member) => ({ ...member, stats: null,
+        current_reference: null, latest_raw_record: null, quality_counts: null })),
+    };
+  }, [scopedRawPriceMap, local.governance]);
+
   const sideReference = (side: "purchase" | "sales") => side === "purchase"
     ? d?.purchase_reference : d?.sales_reference;
   const sideRestricted = (side: "purchase" | "sales") =>
@@ -129,31 +226,6 @@ export default function PoolAnalysisPage() {
   const memberRestricted = (member: PoolAnalysisMember, side: "purchase" | "sales") =>
     isReferenceRestricted(side === "purchase" ? member.purchase_reference : member.sales_reference,
       local.governance);
-
-  // ---- 横向柱状排名数据（组件内自动降序 + 剔除无值项并计数）----
-  const barItems = (side: "purchase" | "sales", mode: MetricMode): MetricBarItem[] =>
-    (d?.members ?? []).map((m) => {
-      const reference = side === "purchase" ? m.purchase_reference : m.sales_reference;
-      const metrics = reference.part_stats;
-      const poolMetrics = reference.pool_stats;
-      const restricted = isReferenceRestricted(reference, local.governance);
-      return {
-        part_id: m.part_id,
-        pn: m.pn_std ?? `#${m.part_id}`,
-        description: m.description,
-        qty: restricted ? null : metrics?.total_qty ?? null,
-        order_count: restricted ? null : metrics?.order_count ?? null,
-        last_date: restricted ? null : metrics?.latest_date ?? null,
-        value: restricted ? null : (mode === "total" ? metrics?.total_amount : metrics?.weighted_avg) ?? null,
-        pool_avg: !restricted && mode === "average" ? (poolMetrics?.weighted_avg ?? null) : null,
-        constraint_price: !restricted && mode === "average"
-          ? (reference.constraint.value ?? null) : null,
-      };
-    });
-
-  const openPart = canOpenPartDetail()
-    ? (partId: number) => navigate(`/parts?part_id=${partId}`)
-    : undefined;
 
   // ---- 成员表 ----
   const focusedMembers = useMemo(() => {
@@ -462,35 +534,41 @@ export default function PoolAnalysisPage() {
             )}
           </Card>
 
-          {/* 采购 / 销售 横向柱状排名 */}
-          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
-            <Card size="small" style={{ flex: "1 1 480px", minWidth: 320 }}
-              title={<span>成员采购排名（高→低）{focusSide === "purchase" && <Tag color="processing">当前关注</Tag>}</span>}
-              extra={<Segmented size="small" value={pMode} aria-label="采购排名指标：平均单价或金额合计"
-                disabled={sideRestricted("purchase")}
-                onChange={(v) => setPMode(v as MetricMode)}
-                options={[{ label: "平均单价", value: "average" }, { label: "金额合计", value: "total" }]} />}>
-              {sideRestricted("purchase") ? (
-                <Alert type="info" showIcon message="无池价格权限：采购价格、差额与排序不可见。" />
-              ) : (
-                <HorizontalMetricBar items={barItems("purchase", pMode)} mode="purchase" metric={pMode}
-                  loading={loading} onPartClick={openPart} />
-              )}
-            </Card>
-            <Card size="small" style={{ flex: "1 1 480px", minWidth: 320 }}
-              title={<span>成员销售排名（高→低）{focusSide === "sales" && <Tag color="processing">当前关注</Tag>}</span>}
-              extra={<Segmented size="small" value={sMode} aria-label="销售排名指标：平均单价或金额合计"
-                disabled={sideRestricted("sales")}
-                onChange={(v) => setSMode(v as MetricMode)}
-                options={[{ label: "平均单价", value: "average" }, { label: "金额合计", value: "total" }]} />}>
-              {sideRestricted("sales") ? (
-                <Alert type="info" showIcon message="无池价格权限：销售价格、差额与排序不可见。" />
-              ) : (
-                <HorizontalMetricBar items={barItems("sales", sMode)} mode="sales" metric={sMode}
-                  loading={loading} onPartClick={openPart} />
-              )}
-            </Card>
-          </div>
+          {/* DEV-09A：股票式最低—最高价格区间 + 等价数据表；采购/销售由页头方向切换。 */}
+          <Card size="small" style={{ marginBottom: 16, minWidth: 0 }}
+            title={<span>成员{focusSide === "purchase" ? "采购" : "销售"}价格区间
+              <Tag color="processing" style={{ marginInlineStart: 8 }}>当前关注</Tag></span>}
+            extra={<div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <Segmented size="small" aria-label="价格图区间排序"
+                value={priceSort} disabled={priceMap?.price_restricted || local.governance}
+                options={[
+                  { label: "PN", value: "pn" }, { label: "加权均价", value: "weighted_avg" },
+                  { label: "约束差额", value: "constraint_delta" },
+                  { label: "最近日期", value: "latest_date" },
+                ]}
+                onChange={(value) => patch({ price_sort: String(value),
+                  price_order: value === "pn" ? "asc" : "desc" }, false)} />
+              <Button size="small" aria-label="切换价格图排序方向"
+                disabled={priceMap?.price_restricted || local.governance}
+                onClick={() => patch({ price_order: priceOrder === "asc" ? "desc" : "asc" }, false)}>
+                {priceOrder === "asc" ? "升序 ↑" : "降序 ↓"}
+              </Button>
+            </div>}>
+            {priceMapError || priceMapScopeMismatch ? <Alert type="error" showIcon
+              message={priceMapScopeMismatch
+                ? "价格区间响应范围与当前筛选不一致，请重试"
+                : `价格区间加载失败：${priceMapError}`}
+              action={<Button size="small" onClick={reloadPriceMap}>重试</Button>} />
+              : priceMap ? <PoolPnPriceMap key={currentPriceMapScopeKey}
+                data={priceMap} loading={priceMapLoading}
+                isMobile={isMobile}
+                onPartOpen={(partId) => navigate(poolAnalysisPartPath(
+                  partId, partNavigationContext,
+                ))} />
+                : <div style={{ ...MUTED, padding: 32, textAlign: "center" }}>
+                    {priceMapLoading ? "正在加载价格区间…" : "窗口内暂无价格数据"}
+                  </div>}
+          </Card>
 
           {/* 成员 PN 表 */}
           <Card size="small" style={{ marginBottom: 16 }} title="成员型号（窗口指标）">

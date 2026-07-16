@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.16.4";
+export const APP_VERSION = "1.16.5";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,16 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.16.5",
+    date: "2026-07-16",
+    items: [
+      "互通池详情新增股票式 PN 价格区间图：同屏展示最低—最高、中位、数量加权均价和最近正式价，并标出池均价与当前人工约束价",
+      "采购与销售可分别按 PN、加权均价、约束差额或最近日期排序；图形悬停显示完整样本，点击后在页面固定展示，手机上也不依赖悬停",
+      "图下保留完整等价表；无样本型号不消失，数据疑点继续计入并标记，已确认源数据错误不进正式统计但保留最近原始事实供追溯",
+      "价格越过当前人工上限或下限时同时用红色、图形和文字提示；本功能只复盘已有订单，不提交价格、不审批、不拦截业务",
+    ],
+  },
   {
     version: "1.16.4",
     date: "2026-07-16",

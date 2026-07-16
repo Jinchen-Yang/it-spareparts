@@ -142,12 +142,22 @@ export interface BlockState<T> {
   error: string | null;
 }
 
+interface ScopedBlockState<T> extends BlockState<T> {
+  /** 数据/错误所属的请求范围；用于筛选切换首帧立即隔离旧响应。 */
+  scopeKey?: string;
+}
+
 /**
  * 带代次守卫的板块取数：deps 变化 → 旧请求即便最后返回也不得覆盖新数据；
- * 卸载后不再 setState。四态由调用方渲染：loading / error / 空 / 数据。
+ * 卸载后不再 setState。传 scopeKey 时，scope 改变的首帧立即返回 data=null，
+ * 不让旧范围数据在新标题/筛选下继续可见或可操作。四态由调用方渲染。
  */
-export function useGuardedFetch<T>(fetcher: () => Promise<{ data: T }>, deps: unknown[]) {
-  const [state, setState] = useState<BlockState<T>>({ data: null, loading: true, error: null });
+export function useGuardedFetch<T>(
+  fetcher: () => Promise<{ data: T }>, deps: unknown[], scopeKey?: string,
+) {
+  const [state, setState] = useState<ScopedBlockState<T>>({
+    data: null, loading: true, error: null, scopeKey,
+  });
   const gen = useRef(0);
   const fetchRef = useRef(fetcher);
   fetchRef.current = fetcher;
@@ -155,21 +165,35 @@ export function useGuardedFetch<T>(fetcher: () => Promise<{ data: T }>, deps: un
 
   useEffect(() => {
     const g = ++gen.current;
-    setState((s) => ({ ...s, loading: true, error: null }));
+    const requestScope = scopeKey;
+    setState((s) => ({
+      data: s.scopeKey === requestScope ? s.data : null,
+      loading: true,
+      error: null,
+      scopeKey: requestScope,
+    }));
     fetchRef.current()
-      .then(({ data }) => { if (g === gen.current) setState({ data, loading: false, error: null }); })
+      .then(({ data }) => {
+        if (g === gen.current) {
+          setState({ data, loading: false, error: null, scopeKey: requestScope });
+        }
+      })
       .catch((e) => {
         if (g === gen.current) {
           const msg = e?.response?.status ? `接口错误（${e.response.status}）` : "网络错误";
-          setState({ data: null, loading: false, error: msg });
+          setState({ data: null, loading: false, error: msg, scopeKey: requestScope });
         }
       });
     return () => { gen.current += 1; };   // deps 变化/卸载即作废在途请求
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, tick]);
+  }, [...deps, tick, scopeKey]);
 
   const reload = useCallback(() => setTick((t) => t + 1), []);
-  return { ...state, reload };
+  // effect 在 render 后执行；scope 变化的这一帧也必须立即隐藏旧数据/旧错误，不能等 loading。
+  if (state.scopeKey !== scopeKey) {
+    return { data: null, loading: true, error: null, reload };
+  }
+  return { data: state.data, loading: state.loading, error: state.error, reload };
 }
 
 // ---------------------------------------------------------------- 权限三态渲染
