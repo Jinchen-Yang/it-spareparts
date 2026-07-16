@@ -16,6 +16,7 @@ import PageHeader from "../components/PageHeader";
 import { dashboardKpi, type DashboardKpi } from "../api";
 import { moneyExact, pct } from "../utils/format";
 import FilterBar from "./boss/FilterBar";
+import MorningDisciplineSummary from "./boss/MorningDisciplineSummary";
 import OrdersBlock from "./boss/OrdersBlock";
 import PoolsBlock from "./boss/PoolsBlock";
 import RankingBlock from "./boss/RankingBlock";
@@ -106,6 +107,10 @@ export default function BossBoardPage() {
           )}
         </>
       )}
+
+      {/* 早会价格纪律：历史事实摘要，不审批、不拦截、不评价员工 */}
+      <MorningDisciplineSummary dateRange={dateRange}
+        localGovernanceRestricted={local.governance} />
 
       {/* ② 最近采购 / 最近销售（PN 明细前置） */}
       <OrdersBlock side="purchase" range={ordersRange}
