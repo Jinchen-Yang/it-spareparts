@@ -399,6 +399,12 @@ FIELD_GROUPS = {
                               # （多行"可见价格×越线布尔"可二分逼出约束价原值）。
                               "max_purchase_price", "min_sale_price",
                               "purchase_violation_count", "sale_violation_count",
+                              # DEV-06 早会纪律摘要：实际价、约束价、逐件/合计差额与
+                              # 聚合次数/金额。API 另做结构性失败关闭，避免靠空值位置、
+                              # 人员排序或记录条数反推约束；字段组是第二道纵深防线。
+                              "actual_unit_ex_tax", "manual_limit_ex_tax",
+                              "unit_gap", "total_gap", "purchase_total_gap",
+                              "sales_total_gap", "violation_line_count",
                               # 与约束价的差额（双登记，另见 purchase_cost 组注）
                               "manual_limit_delta", "manual_limit_delta_pct"],
 }

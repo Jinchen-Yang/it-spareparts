@@ -12,14 +12,19 @@ from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.orm import Session
 
 from app import config
+from app.business_time import business_today
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
 from app.models.inventory import PartPool, PartPoolMember, PartPoolPricePolicy
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app import security
 from app.services import pool, pool_metrics
+from app.services.pool_price_rules import (
+    apply_price_window as _window,
+    purchase_priced_condition as _purchase_priced_condition,
+    sales_priced_condition as _sales_priced_condition,
+)
 from app.services.pricing import purchase_ex_tax_expr, purchase_ex_unit, sale_ex_unit
-from app.services.query_filters import active_orders
 
 _EMPTY_STATS = {
     "weighted_avg": None, "median": None, "min": None, "max": None, "latest": None,
@@ -38,7 +43,8 @@ def _r(value, digits: int = 2):
 
 def resolve_window(range_: str | None, date_from: date | None, date_to: date | None,
                    as_of: date | None = None) -> tuple[date | None, date, date, str]:
-    today = as_of or date.today()
+    # 生产容器可能是 UTC；早会窗口必须按北京时间跨日，不能在 00:00-08:00 少一天。
+    today = as_of or business_today()
     if (date_from is None) != (date_to is None):
         raise WindowValidationError("自定义时间必须同时提供 date_from 和 date_to")
     if date_from is not None and date_to is not None:
@@ -57,30 +63,6 @@ def resolve_window(range_: str | None, date_from: date | None, date_to: date | N
     days = {"30d": 30, "90d": 90, "365d": 365}.get(token)
     lower = upper - timedelta(days=days - 1) if days else None
     return lower, upper, today, token
-
-
-def _window(stmt, order_model, lower: date | None, upper: date):
-    stmt = active_orders(stmt, order_model)
-    if lower is not None:
-        stmt = stmt.where(order_model.order_date >= lower)
-    return stmt.where(order_model.order_date <= upper)
-
-
-def _purchase_priced_condition():
-    """价格纪律的真实采购行口径。
-
-    这里故意不复用利润引擎的 ``COST_PURCHASE_TYPES``：是否进入利润成本池，和老板
-    是否需要看见一次真实采购是两件事。采购价格分析覆盖全部已生效采购类型，仅排除
-    无价格、非正数量、未来单；已生效和日期窗口由 ``_window`` 统一处理。
-    """
-    return and_(FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
-                FPurchaseLine.qty.is_not(None), FPurchaseLine.qty > 0)
-
-
-def _sales_priced_condition():
-    return and_(FSalesLine.counts_revenue.is_(True),
-                FSalesLine.unit_price.is_not(None), FSalesLine.unit_price > 0,
-                FSalesLine.qty.is_not(None), FSalesLine.qty > 0)
 
 
 def _purchase_type_filter(stmt, purchase_type: str | None):

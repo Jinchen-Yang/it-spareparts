@@ -20,7 +20,9 @@ const dashboardSales = vi.fn();
 const dashboardPurchaseOrders = vi.fn();
 const dashboardPools = vi.fn();
 const dashboardPool = vi.fn();
+const dashboardPriceDisciplineSummary = vi.fn();
 const listPnPools = vi.fn();
+const fetchDashboardOrderDetail = vi.fn();
 
 vi.mock("../../api", () => ({
   default: { get: vi.fn(), post: vi.fn() },
@@ -32,6 +34,11 @@ vi.mock("../../api", () => ({
   dashboardPurchaseOrders: (...a: unknown[]) => dashboardPurchaseOrders(...a),
   dashboardPools: (...a: unknown[]) => dashboardPools(...a),
   dashboardPool: (...a: unknown[]) => dashboardPool(...a),
+  dashboardPriceDisciplineSummary: (...a: unknown[]) => dashboardPriceDisciplineSummary(...a),
+}));
+vi.mock("../../api/poolAnalysis", () => ({
+  fetchDashboardOrderDetail: (...a: unknown[]) => fetchDashboardOrderDetail(...a),
+  fetchPoolAnalysisOrderDetail: vi.fn(),
 }));
 vi.mock("../../api/pools", () => ({
   listPnPools: (...a: unknown[]) => listPnPools(...a),
@@ -153,6 +160,16 @@ beforeEach(() => {
   dashboardSales.mockResolvedValue({ data: ordersResp([]) });
   dashboardPurchaseOrders.mockResolvedValue({ data: ordersResp([purchaseRow()]) });
   dashboardPools.mockResolvedValue({ data: poolsResp([poolItem()]) });
+  dashboardPriceDisciplineSummary.mockResolvedValue({ data: {
+    window: { range: "custom", date_from: "2026-06-16", date_to: "2026-07-15", as_of: "2026-07-15" },
+    basis: "ex_tax", restricted: false,
+    purchase: { violation_line_count: 0, order_count: 0, pool_count: 0, total_gap: 0 },
+    sales: { violation_line_count: 0, order_count: 0, pool_count: 0, total_gap: 0 },
+    most_severe_pool: null, handler_summary: { purchase: [], sales: [] },
+    recent_violations: [],
+    missing_constraints: { active_pool_count: 1, purchase_ceiling_unset_count: 0,
+      sales_floor_unset_count: 0, both_unset_count: 0 },
+  } });
   listPnPools.mockResolvedValue({ data: {
     total: 1, page: 1, page_size: 1, items: [], price_restricted: false,
     coverage_restricted: false,

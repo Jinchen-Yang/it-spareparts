@@ -3,10 +3,11 @@
 dashboard（订单 parts / 型号排名）与 pool（池清单 / 池详情）共用本模块取数，
 池均价/约束价/越线/参考状态的算法只此一份，防多处漂移。
 
-统计口径（全部沿用现行，勿在调用方重写）：
+统计口径（价格纪律单一真值，勿在调用方重写）：
 - 金额未税（services/pricing 单一真值源）；只统计已生效（query_filters.active_orders）；
   未来日期由调用方以 upper=min(date_to, today) 裁掉。
-- 采购计价行 = COST_PURCHASE_TYPES + 单价>0 + 数量>0（与 dashboard._purchase_price_stats 同）。
+- 采购计价行 = 全部真实采购类型 + 单价>0 + 数量>0（利润成本池仍独立使用
+  COST_PURCHASE_TYPES；老板查看采购行为不能被利润口径截断）。
 - 销售计价行 = counts_revenue + 单价>0 + 数量>0（¥0 赠送/换货不进价格口径，复审 P1-6）。
 - metrics 三元组自洽：weighted_avg_unit_price = total_amount / total_quantity；
   数量为 0/无计价行 → 均价 **null**，绝不用 0 冒充真实均价。
@@ -20,7 +21,6 @@ from datetime import date
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
-from app import config
 from app.models.inventory import PartPool, PartPoolMember, PartPoolPricePolicy
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
@@ -29,7 +29,11 @@ from app.services.pricing import (
     purchase_ex_unit as _purchase_ex_unit,
     sale_ex_unit as _sale_ex_unit,
 )
-from app.services.query_filters import active_orders
+from app.services.pool_price_rules import (
+    apply_price_window as _window,
+    purchase_priced_condition,
+    sales_priced_condition,
+)
 
 
 def _r(x, n=2):
@@ -87,24 +91,13 @@ def _metrics_row(amount, qty, orders, latest) -> dict:
 
 
 def _purchase_priced():
-    """采购计价行过滤条件（与 dashboard._purchase_price_stats 同口径）。"""
-    return and_(FPurchaseLine.unit_price.is_not(None), FPurchaseLine.unit_price > 0,
-                FPurchaseLine.qty.is_not(None), FPurchaseLine.qty > 0,
-                FPurchaseOrder.source_type.in_(config.COST_PURCHASE_TYPES))
+    """老板池分析采购纪律：全部已生效真实采购类型，不等同利润成本池。"""
+    return purchase_priced_condition()
 
 
 def _sales_priced():
     """销售计价行过滤条件（计营收 + 单价>0，复审 P1-6 口径）。"""
-    return and_(FSalesLine.counts_revenue.is_(True),
-                FSalesLine.unit_price.is_not(None), FSalesLine.unit_price > 0,
-                FSalesLine.qty.is_not(None), FSalesLine.qty > 0)
-
-
-def _window(stmt, order_model, date_from: date | None, upper: date):
-    stmt = active_orders(stmt, order_model)
-    if date_from:
-        stmt = stmt.where(order_model.order_date >= date_from)
-    return stmt.where(order_model.order_date <= upper)
+    return sales_priced_condition()
 
 
 def purchase_group_stats(db: Session, date_from: date | None, upper: date,

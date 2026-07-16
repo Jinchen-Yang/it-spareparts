@@ -232,6 +232,18 @@ export async function fetchPoolAnalysisOrderDetail(
   return data;
 }
 
+/**
+ * 老板看板的稳定订单主键详情。与池分析详情共用只读响应契约，但权限只要求
+ * page_boss_board，避免早会摘要下钻错误依赖 page_pool_analysis。
+ */
+export async function fetchDashboardOrderDetail(
+  side: PoolAnalysisSide,
+  orderId: number,
+): Promise<PoolAnalysisOrderDetail> {
+  const { data } = await api.get<PoolAnalysisOrderDetail>(`/dashboard/orders/${side}/${orderId}`);
+  return data;
+}
+
 export async function fetchPoolReference(
   partId: number,
   params: Pick<PoolAnalysisQuery, "range" | "date_from" | "date_to" | "purchase_type"> = {},

@@ -4,6 +4,7 @@
 （boss/admin 全可见；将来若给其它角色开需靠脱敏兜底）。
 """
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -14,9 +15,51 @@ from app.auth import current_role, require_admin
 from app.db import get_db
 from app.security import (UserContext, apply_field_visibility, get_current_user_context,
                           is_field_hidden, is_scoped_sales, record_access_log, require_page)
-from app.services import dashboard, pool
+from app.services import dashboard, pool, pool_price_analysis, price_discipline
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+
+
+@router.get("/price-discipline-summary")
+def price_discipline_summary(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_boss_board")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """早会价格纪律摘要：仅复盘历史事实，不报价、不审批、不拦截业务。"""
+    record_access_log(ctx, "price_discipline_summary", "dashboard", {
+        "date_from": str(date_from), "date_to": str(date_to)})
+    try:
+        # 治理关闭时必须在任何业务 SQL 前整体短路：次数、人员、排行、记录条数
+        # 同样会泄漏约束价存在性，不能只靠字段级置空。
+        if is_field_hidden(ctx, "purchase_ceiling_ex_tax"):
+            return price_discipline.restricted_summary(
+                date_from=date_from, date_to=date_to)
+        data = price_discipline.summary(db, date_from=date_from, date_to=date_to)
+    except pool_price_analysis.WindowValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return apply_field_visibility(data, ctx)
+
+
+@router.get("/orders/{side}/{order_id}")
+def order_detail(
+    side: Literal["purchase", "sales"],
+    order_id: int,
+    db: Session = Depends(get_db),
+    _: str = Depends(current_role),
+    _page: None = Depends(require_page("page_boss_board")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """老板页按稳定主键下钻订单；不使用可能重复的显示单号定位。"""
+    record_access_log(ctx, "dashboard_order_detail", "order", {
+        "side": side, "order_id": order_id})
+    data = pool_price_analysis.order_detail(db, side, order_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="订单不存在或不是已生效的有效池订单")
+    return pool_price_analysis.apply_visibility(data, ctx)
 
 
 @router.get("/kpi")

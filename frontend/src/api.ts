@@ -501,6 +501,74 @@ export interface TrendPoint { period: string; sales_ex_tax: number; purchase_ex_
 export const dashboardTrend = (params: { date_from?: string; date_to?: string; granularity?: string } = {}) =>
   api.get<{ granularity: string; series: TrendPoint[] }>("/dashboard/trend", { params });
 
+export type PriceDisciplineSide = "purchase" | "sales";
+
+export interface PriceDisciplineSideSummary {
+  violation_line_count: number;
+  order_count: number;
+  pool_count: number;
+  total_gap: number;
+}
+
+export interface PriceDisciplinePoolSummary {
+  pool_group_id: number;
+  pool_name: string | null;
+  purchase_total_gap: number;
+  sales_total_gap: number;
+  total_gap: number;
+  violation_line_count: number;
+  dominant_side: "purchase" | "sales" | "both";
+}
+
+export interface PriceDisciplineHandlerSummary {
+  person: string | null;
+  violation_line_count: number;
+  order_count: number;
+  total_gap: number;
+}
+
+export interface PriceDisciplineViolation {
+  side: PriceDisciplineSide;
+  line_id: number;
+  order_id: number;
+  order_no: string;
+  order_date: string | null;
+  part_id: number;
+  pn_std: string | null;
+  pool_group_id: number;
+  pool_name: string | null;
+  person: string | null;
+  quantity: number;
+  actual_unit_ex_tax: number;
+  manual_limit_ex_tax: number;
+  unit_gap: number;
+  total_gap: number;
+}
+
+export interface PriceDisciplineSummary {
+  window: { range: string; date_from: string | null; date_to: string | null; as_of: string };
+  basis: "ex_tax";
+  restricted: boolean;
+  purchase: PriceDisciplineSideSummary | null;
+  sales: PriceDisciplineSideSummary | null;
+  most_severe_pool: PriceDisciplinePoolSummary | null;
+  handler_summary: {
+    purchase: PriceDisciplineHandlerSummary[];
+    sales: PriceDisciplineHandlerSummary[];
+  };
+  recent_violations: PriceDisciplineViolation[];
+  missing_constraints: {
+    active_pool_count: number;
+    purchase_ceiling_unset_count: number;
+    sales_floor_unset_count: number;
+    both_unset_count: number;
+  } | null;
+}
+
+export const dashboardPriceDisciplineSummary = (
+  params: { date_from?: string; date_to?: string } = {},
+) => api.get<PriceDisciplineSummary>("/dashboard/price-discipline-summary", { params });
+
 /** 单行价格参考状态（pool_metrics.price_reference）。
  * within_pool_average / no_pool_average 仅出现在治理权限受限的降级口径。 */
 export type ReferenceStatus =
