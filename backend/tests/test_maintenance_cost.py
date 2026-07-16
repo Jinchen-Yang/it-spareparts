@@ -249,7 +249,7 @@ def test_projects_aggregate_shared_contract(db, batch):
     ])
     db.commit()
     maintenance_cost.recompute(db)
-    data = maintenance_cost.projects_aggregate(db)
+    data = maintenance_cost.projects_aggregate(db, lifecycle="all")
     rows = {r["project"]: r for r in data["rows"]}
     assert rows["项目甲"]["cost_ex"] == 200.0 and rows["项目甲"]["cost_inc"] == 0.0
     assert rows["项目甲"]["coverage_pct"] == 100.0

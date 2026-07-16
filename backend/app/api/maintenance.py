@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.auth import current_role, require_admin
+from app.business_time import business_today
 from app.db import get_db
 from app.security import (
     UserContext, apply_field_visibility, get_current_user_context, record_access_log,
@@ -38,13 +39,17 @@ def projects(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     q: str | None = Query(None, max_length=128),
+    lifecycle: str = Query("ongoing", pattern=r"^(ongoing|ended|missing|all)$"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401，不依赖全局 RBAC 开关
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     record_access_log(ctx, "projects", "maintenance")
-    data = maintenance_cost.projects_aggregate(db, date_from, date_to, q, user_ctx=ctx)
+    data = maintenance_cost.projects_aggregate(
+        db, date_from, date_to, q, user_ctx=ctx,
+        lifecycle=lifecycle, as_of=business_today(),
+    )
     return apply_field_visibility(data, ctx)
 
 
@@ -98,15 +103,20 @@ def export(
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     q: str | None = Query(None, max_length=128),
+    lifecycle: str = Query("ongoing", pattern=r"^(ongoing|ended|missing|all)$"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     record_access_log(ctx, "export", "maintenance")
-    data = maintenance_cost.projects_aggregate(db, date_from, date_to, q, user_ctx=ctx)
+    data = maintenance_cost.projects_aggregate(
+        db, date_from, date_to, q, user_ctx=ctx,
+        lifecycle=lifecycle, as_of=business_today(),
+    )
     data = apply_field_visibility(data, ctx)   # 导出同样过脱敏层（§8.5）
-    header = ["项目", "出库行数", "出库数量", "备件成本-含税小计", "备件成本-不含税小计",
+    header = ["项目", "期限状态", "维保终止日期",
+              "出库行数", "出库数量", "备件成本-含税小计", "备件成本-不含税小计",
               "成本合计(混合口径参考)", "覆盖率%",
               *(_SOURCE_LABEL[s] + "(行)" for s in ("direct", "window", "month_avg",
                                                     "trace_avg", "sales_ref", "none")),
@@ -114,7 +124,9 @@ def export(
     rows = []
     for r in data["rows"]:
         bs = r["by_source"]
-        rows.append([_safe(r["project"]), r["lines"], r["qty"],
+        lifecycle_label = {"ongoing": "进行中", "ended": "已结束", "missing": "期限缺失"}
+        rows.append([_safe(r["project"]), lifecycle_label[r["lifecycle_status"]], r["maint_end"],
+                     r["lines"], r["qty"],
                      r["cost_inc"], r["cost_ex"], r["cost_total"], r["coverage_pct"],
                      bs.get("direct", 0), bs.get("window", 0), bs.get("month_avg", 0),
                      bs.get("trace_avg", 0), bs.get("sales_ref", 0), bs.get("none", 0),
@@ -160,6 +172,8 @@ def board(
     status: str | None = Query(None, pattern=r"^(red|yellow|green|no_budget)$"),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
+    q: str | None = Query(None, max_length=128),
+    lifecycle: str = Query("ongoing", pattern=r"^(ongoing|ended|missing|all)$"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
     _page: None = Depends(require_page("page_maintenance")),
@@ -167,7 +181,10 @@ def board(
 ) -> dict:
     """盈亏看板（§16.2）：合同(XSDD)级 红/黄/绿 状态灯，黄红置顶。"""
     record_access_log(ctx, "board", "maintenance")
-    data = maintenance_cost.board(db, date_from, date_to, status, user_ctx=ctx)
+    data = maintenance_cost.board(
+        db, date_from, date_to, status, user_ctx=ctx, q_text=q,
+        lifecycle=lifecycle, as_of=business_today(),
+    )
     return apply_field_visibility(data, ctx)
 
 

@@ -20,10 +20,11 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select, text, update
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy.orm import Session, aliased
 
 from app import config, security
+from app.business_time import business_today
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
@@ -324,15 +325,63 @@ def _scoped_filters(stmt, date_from, date_to):
     return stmt
 
 
+def _matched_maintenance_contracts(date_from, date_to, q_text: str):
+    """找出命中项目搜索的合同号，但不裁掉同合同下的其他项目成本。
+
+    看板是合同粒度。搜索只负责召回合同；后续主查询仍聚合该合同在当前日期
+    作用域内的完整项目、备件成本和期限，避免把共享合同重算得虚假健康。
+    """
+    match_line = aliased(FMaintenanceLine)
+    match_order = aliased(FMaintenanceOrder)
+    contract = func.coalesce(match_order.linked_sales_order_no, "")
+    stmt = (
+        select(contract)
+        .select_from(match_line)
+        .join(match_order, match_line.order_id == match_order.id)
+        .where(
+            match_order.order_date >= config.MAINT_COST_START_DATE,
+            match_order.linked_sales_order_no.is_not(None),
+        )
+    )
+    stmt = active_orders(stmt, match_order)
+    if date_from:
+        stmt = stmt.where(match_order.order_date >= date_from)
+    if date_to:
+        stmt = stmt.where(match_order.order_date <= date_to)
+    for keyword_group in keyword_groups_or_substr(q_text):
+        stmt = stmt.where(col_matches_any(match_order.project_std, keyword_group))
+    return stmt.distinct()
+
+
+_LIFECYCLE_FILTERS = frozenset({"ongoing", "ended", "missing", "all"})
+
+
+def _normalize_lifecycle(lifecycle: str) -> str:
+    if lifecycle not in _LIFECYCLE_FILTERS:
+        raise ValueError(f"unsupported maintenance lifecycle: {lifecycle}")
+    return lifecycle
+
+
+def _lifecycle_status(missing_count: int, latest_end: date | None, as_of: date) -> str:
+    """聚合期限：任一底层单缺日期优先判 missing，否则以最晚终止日判断。"""
+    if missing_count or latest_end is None:
+        return "missing"
+    return "ended" if latest_end < as_of else "ongoing"
+
+
 def projects_aggregate(db: Session, date_from: date | None = None,
                        date_to: date | None = None, q_text: str | None = None,
-                       user_ctx: security.UserContext | None = None) -> dict:
+                       user_ctx: security.UserContext | None = None,
+                       lifecycle: str = "all",
+                       as_of: date | None = None) -> dict:
     """项目维度聚合：成本按税口径分列小计（Q4：不混加），来源分布、覆盖率、合同额参考。
 
     合同额 = 项目关联 XSDD 在销售表的订单金额（含税≈不含税×(1+税率)，参考值）；
     同一 XSDD 挂多个项目时 contract_shared=true——Q5：本期不出毛利，合同额仅参考。
     部分/全部关联单号未在销售表时 contract_incomplete=true（避免按 0 静默低估）。
     """
+    lifecycle = _normalize_lifecycle(lifecycle)
+    as_of = as_of or business_today()
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     proj = func.coalesce(mo.project_std, "(未填项目)")
     src_cols = [
@@ -348,6 +397,8 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             func.coalesce(func.sum(ml.cost_amount).filter(ml.cost_tax_basis == "ex"), 0).label("cost_ex"),
             func.count().filter(ml.cost_source.in_(COSTED_SOURCES)).label("costed"),
             func.count(func.distinct(func.date_trunc("month", mo.order_date))).label("months"),
+            func.count().filter(mo.maint_end.is_(None)).label("maint_end_missing"),
+            func.max(mo.maint_end).label("latest_maint_end"),
             func.array_agg(func.distinct(mo.linked_sales_order_no))
                 .filter(mo.linked_sales_order_no.is_not(None)).label("sales_orders"),
             *src_cols,
@@ -361,11 +412,26 @@ def projects_aggregate(db: Session, date_from: date | None = None,
         for g in keyword_groups_or_substr(q_text):
             stmt = stmt.where(col_matches_any(mo.project_std, g))
 
-    raw = db.execute(stmt).all()
+    raw_all = db.execute(stmt).all()
+    lifecycle_counts = {"ongoing": 0, "ended": 0, "missing": 0}
+    classified = []
+    for row in raw_all:
+        lifecycle_status = _lifecycle_status(
+            row.maint_end_missing, row.latest_maint_end, as_of,
+        )
+        lifecycle_counts[lifecycle_status] += 1
+        classified.append((row, lifecycle_status))
+    raw = [
+        (row, lifecycle_status)
+        for row, lifecycle_status in classified
+        if lifecycle == "all" or lifecycle_status == lifecycle
+    ]
 
     # order_no → 引用它的项目集合（判共用）；合同额一次性查回
     order_no_projects: dict[str, set] = defaultdict(set)
-    for r in raw:
+    # 共享合同判定仍看 lifecycle 过滤前的同一业务作用域，避免切换期限后
+    # 把本来由多个项目共用的合同误标成独占。
+    for r, _lifecycle in classified:
         for ono in (r.sales_orders or []):
             order_no_projects[ono].add(r.project)
     contract: dict[str, Decimal] = {}
@@ -381,7 +447,7 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             contract[ono] = max(contract.get(ono, _ZERO), inc)
 
     rows = []
-    for r in raw:
+    for r, lifecycle_status in raw:
         sales_orders = sorted(r.sales_orders or [])
         by_source = {s: getattr(r, f"src_{s}") for s in (*COSTED_SOURCES, "none")}
         missing = [o for o in sales_orders if o not in contract]
@@ -401,6 +467,11 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             "contract_shared": any(len(order_no_projects[o]) > 1 for o in sales_orders),
             # 部分/全部关联单号未在销售表中找到金额 → 合同额被低估，前端标注
             "contract_incomplete": bool(sales_orders) and len(missing) > 0,
+            "maint_end": (
+                r.latest_maint_end.isoformat()
+                if lifecycle_status != "missing" and r.latest_maint_end else None
+            ),
+            "lifecycle_status": lifecycle_status,
         })
     cost_restricted = security.is_field_hidden(user_ctx, "cost_total")
     if cost_restricted:
@@ -413,6 +484,9 @@ def projects_aggregate(db: Session, date_from: date | None = None,
         "rows": rows, "start_date": config.MAINT_COST_START_DATE.isoformat(),
         "effective_sort": "project" if cost_restricted else "cost_total",
         "ranking_restricted": cost_restricted,
+        "as_of": as_of.isoformat(),
+        "lifecycle_filter": lifecycle,
+        "lifecycle_counts": lifecycle_counts,
     }
 
 
@@ -487,12 +561,17 @@ def _expense_by_contract(db: Session, date_from: date | None = None,
 
 def board(db: Session, date_from: date | None = None, date_to: date | None = None,
           status: str | None = None,
-          user_ctx: security.UserContext | None = None) -> dict:
+          user_ctx: security.UserContext | None = None,
+          lifecycle: str = "all",
+          as_of: date | None = None,
+          q_text: str | None = None) -> dict:
     """盈亏看板（用户口径：绿=赚钱、黄=剩余≤20% 报警、红=超支/亏损；合同级聚合天然解决共用合同）。
 
     预算 = 合同(XSDD)金额（含税参考口径，前端注明）；已花 = 备件成本(混合口径参考) + 生效报销费用。
     无合同额（未关联 XSDD / 销售表查无金额）→ status='no_budget' 单列，只看成本。
     """
+    lifecycle = _normalize_lifecycle(lifecycle)
+    as_of = as_of or business_today()
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     contract_col = func.coalesce(mo.linked_sales_order_no, "")
     proj = func.coalesce(mo.project_std, "(未填项目)")
@@ -504,12 +583,26 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             func.coalesce(func.sum(ml.cost_amount), 0).label("spent_parts"),
             func.coalesce(func.sum(ml.cost_amount).filter(ml.confidence == "low"), 0).label("low_conf"),
             func.min(mo.maint_start).label("mstart"), func.max(mo.maint_end).label("mend"),
+            func.count().filter(mo.maint_end.is_(None)).label("mend_missing"),
             func.min(mo.order_date).label("first_out"), func.max(mo.order_date).label("last_out"),
         )
         .join(mo, ml.order_id == mo.id)
         .group_by(contract_col, proj)
     )
     stmt = _scoped_filters(stmt, date_from, date_to)
+    if q_text and q_text.strip():
+        keyword_groups = keyword_groups_or_substr(q_text)
+        unlinked_match = and_(
+            mo.linked_sales_order_no.is_(None),
+            *(col_matches_any(mo.project_std, group) for group in keyword_groups),
+        )
+        stmt = stmt.where(or_(
+            and_(
+                mo.linked_sales_order_no.is_not(None),
+                contract_col.in_(_matched_maintenance_contracts(date_from, date_to, q_text)),
+            ),
+            unlinked_match,
+        ))
     raw = db.execute(stmt).all()
 
     groups: dict[str, dict] = {}
@@ -517,7 +610,8 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
         g = groups.setdefault(r.contract, {
             "projects": [], "lines": 0, "costed": 0,
             "spent_parts": _ZERO, "low_conf": _ZERO,
-            "mstart": None, "mend": None, "first_out": None, "last_out": None,
+            "mstart": None, "mend": None, "mend_missing": 0,
+            "first_out": None, "last_out": None,
         })
         g["projects"].append({"project": r.project, "lines": r.lines,
                               "spent_parts": _f(Decimal(r.spent_parts).quantize(_CENT))})
@@ -525,6 +619,7 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
         g["costed"] += r.costed
         g["spent_parts"] += Decimal(r.spent_parts)
         g["low_conf"] += Decimal(r.low_conf)
+        g["mend_missing"] += r.mend_missing
         for k, v in (("mstart", r.mstart), ("mend", r.mend)):
             if v is not None and (g[k] is None or (v < g[k] if k == "mstart" else v > g[k])):
                 g[k] = v
@@ -558,6 +653,7 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             g["projects"].sort(key=lambda p: (p["project"] or "").casefold())
         else:
             g["projects"].sort(key=lambda p: -(p["spent_parts"] or 0))
+        lifecycle_status = _lifecycle_status(g["mend_missing"], g["mend"], as_of)
         rows.append({
             "contract": cno or None, "status": st,
             "projects": g["projects"],
@@ -568,7 +664,11 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             # 低置信成本占比高 → 卡片提示"估算成分高"
             "low_conf_pct": round(float(g["low_conf"] / spent_parts * 100), 1) if spent_parts else 0.0,
             "maint_start": g["mstart"].isoformat() if g["mstart"] else None,
-            "maint_end": g["mend"].isoformat() if g["mend"] else None,
+            "maint_end": (
+                g["mend"].isoformat()
+                if lifecycle_status != "missing" and g["mend"] else None
+            ),
+            "lifecycle_status": lifecycle_status,
             "first_out": g["first_out"].isoformat() if g["first_out"] else None,
             "last_out": g["last_out"].isoformat() if g["last_out"] else None,
         })
@@ -578,6 +678,14 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
         # status 与 status_counts 本身就是盈亏结论；即使金额随后被 mask，红黄绿归属、
         # 状态筛选及排序仍会泄漏。受限用户忽略 status 请求，移除分类结构并按最近出库
         # 日期稳定排序。Agent 与 API 共用本函数，不得各自遗漏。
+        lifecycle_counts = {
+            lifecycle_status: sum(
+                1 for row in rows if row["lifecycle_status"] == lifecycle_status
+            )
+            for lifecycle_status in ("ongoing", "ended", "missing")
+        }
+        if lifecycle != "all":
+            rows = [row for row in rows if row["lifecycle_status"] == lifecycle]
         rows.sort(
             key=lambda r: (r["last_out"] is not None, r["last_out"] or "", r["contract"] or ""),
             reverse=True,
@@ -592,15 +700,28 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             "status_filter_applied": False,
             "warn_pct": float(warn),
             "start_date": config.MAINT_COST_START_DATE.isoformat(),
+            "as_of": as_of.isoformat(),
+            "lifecycle_filter": lifecycle,
+            "lifecycle_counts": lifecycle_counts,
         }
     rows.sort(key=lambda r: (order[r["status"]], -(r["spent"] or 0)))
     if status:
         rows = [r for r in rows if r["status"] == status]
+    lifecycle_counts = {
+        lifecycle_status: sum(
+            1 for row in rows if row["lifecycle_status"] == lifecycle_status
+        )
+        for lifecycle_status in ("ongoing", "ended", "missing")
+    }
+    if lifecycle != "all":
+        rows = [row for row in rows if row["lifecycle_status"] == lifecycle]
     counts = {s: sum(1 for r in rows if r["status"] == s) for s in order}
     return {"rows": rows, "status_counts": counts,
             "profit_restricted": False, "ranking_restricted": False,
             "effective_sort": "status_then_spent", "status_filter_applied": bool(status),
-            "warn_pct": float(warn), "start_date": config.MAINT_COST_START_DATE.isoformat()}
+            "warn_pct": float(warn), "start_date": config.MAINT_COST_START_DATE.isoformat(),
+            "as_of": as_of.isoformat(), "lifecycle_filter": lifecycle,
+            "lifecycle_counts": lifecycle_counts}
 
 
 def contract_workbook_data(db: Session, contract: str) -> dict:

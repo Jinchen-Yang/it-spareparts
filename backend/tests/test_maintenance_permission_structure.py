@@ -51,6 +51,7 @@ def maintenance_permission_data(db):
             {f"M-{tag}": f.maintenance_head(
                 f"M-{tag}", order_no=f"WBDD-{tag}", on=out_date,
                 sales_order=f"XS-{tag}", project=project,
+                maint_end=date(2027, 12, 31),
             )},
             [f.maintenance_line(
                 f"M-{tag}", f"ML-{tag}", f"PN-{tag}", qty="1",

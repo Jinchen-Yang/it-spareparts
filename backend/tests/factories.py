@@ -95,7 +95,9 @@ def maintenance_line(order_raw_id: str, line_raw_id: str, pn: str, qty="1",
 def maintenance_head(order_raw_id: str, order_no: str | None = None,
                      on: date | None = None, project="测试维保项目",
                      sales_order=None, demand_type="报修供货",
-                     business_type="备件维保", data_status="已生效") -> dict:
+                     business_type="备件维保", data_status="已生效",
+                     maint_start: date | None = None,
+                     maint_end: date | None = None) -> dict:
     return {
         "raw_order_id": order_raw_id, "order_no": order_no or order_raw_id,
         "order_date": on or date(2026, 3, 1),
@@ -104,7 +106,7 @@ def maintenance_head(order_raw_id: str, order_no: str | None = None,
         "customer_name": "测试客户", "end_customer": None,
         "demand_type": demand_type, "business_type": business_type,
         "salesperson": "测试销售", "warehouse": "北京成品仓",
-        "maint_start": None, "maint_end": None, "data_status": data_status,
+        "maint_start": maint_start, "maint_end": maint_end, "data_status": data_status,
     }
 
 

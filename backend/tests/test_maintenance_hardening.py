@@ -221,6 +221,6 @@ def test_contract_incomplete_flag(db, batch):
         batch.id, date(2026, 6, 1))
     db.commit()
     maintenance_cost.recompute(db)
-    row = maintenance_cost.projects_aggregate(db)["rows"][0]
+    row = maintenance_cost.projects_aggregate(db, lifecycle="all")["rows"][0]
     assert row["contract_incomplete"] is True
     assert row["contract_amount"] == 0.0   # 无金额可加，但标记提示不全
