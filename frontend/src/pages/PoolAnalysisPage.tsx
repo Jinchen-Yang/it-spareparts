@@ -492,10 +492,7 @@ export default function PoolAnalysisPage() {
               message={`价格区间加载失败：${priceMapError}`}
               action={<Button size="small" onClick={reloadPriceMap}>重试</Button>} />
               : priceMap ? <PoolPnPriceMap data={priceMap} loading={priceMapLoading}
-                onPartClick={(partId) => {
-                  const member = d?.members.find((item) => item.part_id === partId);
-                  if (member) setMemberDetail(member);
-                }} />
+                onPartOpen={(partId) => navigate(`/parts?part_id=${partId}`)} />
                 : <div style={{ ...MUTED, padding: 32, textAlign: "center" }}>
                     {priceMapLoading ? "正在加载价格区间…" : "窗口内暂无价格数据"}
                   </div>}

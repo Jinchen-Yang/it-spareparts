@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select
 
+from app import security
 from app.auth import hash_password
 from app.etl import loader
 from app.main import app
@@ -229,6 +230,65 @@ def test_price_map_sales_and_governance_restriction_are_structural(db, priced_po
     assert denied.get(
         f"/api/pool-analysis/pools/{priced_pool['gid']}/price-map").status_code == 403
     assert reader.get("/api/pool-analysis/pools/999999/price-map").status_code == 404
+
+
+def test_price_map_derived_fields_are_registered_for_recursive_masking():
+    """结构化净化之外的第二防线：新增派生容器/键必须由通用递归脱敏覆盖。"""
+    ctx = security.UserContext(
+        user_id="blind", role="readonly", is_authenticated=True,
+        permissions={"data_pool_price_governance": False},
+    )
+    payload = {
+        "part_id": 7, "pn_std": "SAFE-PN",
+        "current_reference": {"relation": "above", "delta_amount": 12.3,
+                              "delta_pct": 0.12},
+        "latest_raw_record": {"price_ex_tax": 99.0, "order_no": "P-1"},
+        "quality_counts": {"suspected": 2, "confirmed_source_error": 1},
+    }
+    masked = security.apply_field_visibility(payload, ctx)
+    assert masked == {
+        "part_id": 7, "pn_std": "SAFE-PN",
+        "current_reference": None,
+        "latest_raw_record": None,
+        "quality_counts": None,
+    }
+
+
+def test_price_map_query_budget_is_constant_as_member_count_grows(db, priced_pool):
+    """price-map 是固定批量查询；池成员增加不能退化成逐 PN 查询。"""
+    client = _client(db, "price_map_query_budget", "readonly")
+    path = f"/api/pool-analysis/pools/{priced_pool['gid']}/price-map"
+    params = {"side": "purchase", "date_from": "2026-01-01",
+              "date_to": AS_OF.isoformat()}
+
+    def request_query_count() -> int:
+        seen = 0
+
+        def before_cursor(*_args):
+            nonlocal seen
+            seen += 1
+
+        event.listen(engine, "before_cursor_execute", before_cursor)
+        try:
+            response = client.get(path, params=params)
+        finally:
+            event.remove(engine, "before_cursor_execute", before_cursor)
+        assert response.status_code == 200
+        return seen
+
+    small = request_query_count()
+    extra = []
+    for index in range(18):
+        part = DimPart(pn_std=f"PA-BUDGET-{index:02d}")
+        db.add(part); db.flush(); extra.append(part.id)
+    pool_catalog.update_members(
+        db, group_id=priced_pool["gid"], version=2, add_part_ids=extra,
+        remove_part_ids=[], operated_by="query-budget")
+    db.commit()
+    large = request_query_count()
+
+    assert large == small
+    assert large <= 12
 
 
 def test_pool_detail_exposes_employees_but_masks_supplier_and_customer_independently(db, priced_pool):

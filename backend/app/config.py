@@ -405,6 +405,11 @@ FIELD_GROUPS = {
                               "actual_unit_ex_tax", "manual_limit_ex_tax",
                               "unit_gap", "total_gap", "purchase_total_gap",
                               "sales_total_gap", "violation_line_count",
+                              # DEV-09A price-map：用独有容器名做第二道递归脱敏，避免把
+                              # stats/value/relation 等全局通用键登记后误伤其它接口。
+                              # delta/price_ex_tax 同时登记，防未来调用方拆平容器时漏遮。
+                              "current_reference", "latest_raw_record", "quality_counts",
+                              "delta_amount", "delta_pct", "price_ex_tax",
                               # 与约束价的差额（双登记，另见 purchase_cost 组注）
                               "manual_limit_delta", "manual_limit_delta_pct"],
 }

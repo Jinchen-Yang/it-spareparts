@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Alert, Button, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import type { CustomSeriesOption } from "echarts/charts";
@@ -6,7 +6,7 @@ import type { ECOption } from "./echartsCore";
 import EChartContainer from "./EChartContainer";
 import type { PoolPriceMapMember, PoolPriceMapResponse } from "../../api/poolAnalysis";
 import { COLORS } from "../../theme";
-import { EMPTY, moneyExact, qty } from "../../utils/format";
+import { EMPTY, escapeHtml, moneyExact, qty } from "../../utils/format";
 import { activatableProps } from "../../pages/purchases/shared";
 
 interface ChartClickParams {
@@ -122,13 +122,15 @@ export function buildPoolPnPriceMapOption(data: PoolPriceMapResponse): ECOption 
         const params = raw as { dataIndex?: number };
         const member = data.members[params.dataIndex ?? -1];
         if (!member) return "";
-        if (!member.stats) return `<b>${member.pn_std ?? `#${member.part_id}`}</b><br/>暂无正式参考样本`;
+        if (!member.stats) {
+          return `<b>${escapeHtml(member.pn_std ?? `#${member.part_id}`)}</b><br/>暂无正式参考样本`;
+        }
         const q = member.quality_counts;
         return [
-          `<b>${member.pn_std ?? `#${member.part_id}`}</b>`,
+          `<b>${escapeHtml(member.pn_std ?? `#${member.part_id}`)}</b>`,
           `区间 ${moneyExact(member.stats.min)} — ${moneyExact(member.stats.max)}`,
           `中位 ${moneyExact(member.stats.median)} · 加权均价 ${moneyExact(member.stats.weighted_avg)}`,
-          `最近正式价 ${moneyExact(member.stats.latest)} · ${member.stats.latest_date ?? EMPTY}`,
+          `最近正式价 ${moneyExact(member.stats.latest)} · ${escapeHtml(member.stats.latest_date ?? EMPTY)}`,
           `数量 ${qty(member.stats.total_qty)} · ${member.stats.order_count} 单 · ${member.stats.line_count} 行`,
           q && (q.suspected || q.confirmed_source_error)
             ? `数据标记：疑点 ${q.suspected} · 确认源错误 ${q.confirmed_source_error}` : "",
@@ -156,17 +158,26 @@ export function buildPoolPnPriceMapOption(data: PoolPriceMapResponse): ECOption 
 export interface PoolPnPriceMapProps {
   data: PoolPriceMapResponse;
   loading?: boolean;
-  onPartClick?: (partId: number) => void;
+  onPartOpen?: (partId: number) => void;
 }
 
-export default function PoolPnPriceMap({ data, loading, onPartClick }: PoolPnPriceMapProps) {
-  const [selected, setSelected] = useState<PoolPriceMapMember | null>(null);
+export default function PoolPnPriceMap({ data, loading, onPartOpen }: PoolPnPriceMapProps) {
+  // 只保存稳定身份；统计、原始追溯与疑点标记始终从当前响应派生，不能把旧窗口
+  // 的整条 member 带进新筛选结果。
+  const [selectedPartId, setSelectedPartId] = useState<number | null>(null);
+  const selected = useMemo(() => data.members.find((member) => member.part_id === selectedPartId)
+    ?? null, [data.members, selectedPartId]);
   const option = useMemo(() => buildPoolPnPriceMapOption(data), [data]);
   const sideName = data.side === "purchase" ? "采购" : "销售";
 
+  useEffect(() => {
+    if (selectedPartId != null && !data.members.some((member) => member.part_id === selectedPartId)) {
+      setSelectedPartId(null);
+    }
+  }, [data.members, selectedPartId]);
+
   const open = (member: PoolPriceMapMember) => {
-    setSelected(member);
-    onPartClick?.(member.part_id);
+    setSelectedPartId(member.part_id);
   };
   const columns: ColumnsType<PoolPriceMapMember> = data.price_restricted ? [
     { title: "PN", dataIndex: "pn_std", render: (value, member) => value ?? `#${member.part_id}` },
@@ -234,7 +245,8 @@ export default function PoolPnPriceMap({ data, loading, onPartClick }: PoolPnPri
       border: `1px solid ${COLORS.accentSoftBorder}`, borderRadius: 8, background: COLORS.accentSoft }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
         <strong style={{ fontFamily: "monospace" }}>{selected.pn_std ?? `#${selected.part_id}`}</strong>
-        {onPartClick && <Button size="small" onClick={() => onPartClick(selected.part_id)}>查看型号详情</Button>}
+        {onPartOpen && <Button size="small" onClick={() => onPartOpen(selected.part_id)}>
+          查看型号全景</Button>}
       </div>
       {selected.stats ? <div style={{ marginTop: 6 }}>
         区间 {moneyExact(selected.stats.min)} — {moneyExact(selected.stats.max)} ·

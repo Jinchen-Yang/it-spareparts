@@ -30,10 +30,10 @@ vi.mock("../../api/poolAnalysis", () => ({
 }));
 vi.mock("../../components/charts/PoolPnPriceMap", () => ({
   default: (p: { data: { side: string; price_restricted: boolean; members: Array<{ part_id: number }> };
-    onPartClick?: (partId: number) => void }) => (
+    onPartOpen?: (partId: number) => void }) => (
     <div data-testid="price-map-stub" data-side={p.data.side}
-      data-restricted={String(p.data.price_restricted)} data-clickable={String(!!p.onPartClick)}>
-      <button onClick={() => p.onPartClick?.(p.data.members[0].part_id)}>图中第一个 PN</button>
+      data-restricted={String(p.data.price_restricted)} data-clickable={String(!!p.onPartOpen)}>
+      <button onClick={() => p.onPartOpen?.(p.data.members[0].part_id)}>查看图中型号全景</button>
     </div>),
 }));
 
@@ -134,7 +134,7 @@ function renderAt(url: string) {
         <Route path="/pool-analysis/:groupId" element={<PoolAnalysisPage />} />
         <Route path="/boss" element={<div>看板桩</div>} />
         <Route path="/pools" element={<><div>池列表桩</div><LocationProbe /></>} />
-        <Route path="/parts" element={<div>型号查询页桩</div>} />
+        <Route path="/parts" element={<><div>型号查询页桩</div><LocationProbe /></>} />
       </Routes>
     </MemoryRouter>,
   );
@@ -303,14 +303,13 @@ describe("股票式价格区间图", () => {
     expect(await screen.findByTestId("price-map-stub")).toHaveAttribute("data-side", "sales");
   });
 
-  it("点图中 PN 打开本页既有成员详情，不跳页也不丢 URL 筛选", async () => {
+  it("图中型号不再打开旧统计抽屉，直接跳稳定 part_id 全景深链", async () => {
     renderAt("/pool-analysis/12?side=purchase&range=365d&purchase_type=补库");
     await screen.findByText("内存互通池");
-    fireEvent.click(await screen.findByRole("button", { name: "图中第一个 PN" }));
-    expect(await screen.findByText("成员 PN-A 详情")).toBeInTheDocument();
-    expect(fetchPoolAnalysis).toHaveBeenLastCalledWith(12, expect.objectContaining({
-      range: "365d", purchase_type: "补库",
-    }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看图中型号全景" }));
+    expect(await screen.findByText("型号查询页桩")).toBeInTheDocument();
+    expect(currentPath).toBe("/parts?part_id=101");
+    expect(screen.queryByText("成员 PN-A 详情")).toBeNull();
   });
 
   it("确定性延迟下旧采购响应最后到达也不能覆盖新销售图", async () => {

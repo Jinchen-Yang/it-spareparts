@@ -1045,6 +1045,11 @@ def apply_visibility(data, ctx: security.UserContext):
                         row["customer"] = None
         if customer_restricted and "customer_cross_brand" in node:
             node["customer_cross_brand"] = {"restricted": True, "customers": []}
+    # price-map 是独立读模型，只含身份字段和池价格治理字段；在结构化净化后再过
+    # FIELD_GROUPS 通用递归脱敏作为第二防线。其它详情契约不能走这里，否则会把
+    # data_purchase_cost 误当成池历史价格权限（本模块明确以 governance 为唯一开关）。
+    if isinstance(data, dict) and data.get("contract_version") == 1:
+        return security.apply_field_visibility(data, ctx)
     return data
 
 

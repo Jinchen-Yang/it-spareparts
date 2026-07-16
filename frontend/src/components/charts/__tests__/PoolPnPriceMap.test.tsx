@@ -74,6 +74,18 @@ describe("池内 PN 股票式价格图", () => {
     ] }));
   });
 
+  it("自定义 HTML tooltip 转义恶意 PN，不能形成存储型 XSS", () => {
+    const malicious = {
+      ...DATA,
+      members: [{ ...DATA.members[0], pn_std: `<img src=x onerror="alert(1)">` }],
+    };
+    const option = buildPoolPnPriceMapOption(malicious);
+    const formatter = (option.tooltip as { formatter: (raw: unknown) => string }).formatter;
+    const html = formatter({ dataIndex: 0 });
+    expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+    expect(html).not.toContain("<img");
+  });
+
   it("图形 click 只按 dataIndex 解析到同一成员，不使用显示 PN 猜测", () => {
     expect(resolvePriceMapClick({ seriesName: "价格区间", dataIndex: 1 }, DATA.members)?.part_id).toBe(2);
     expect(resolvePriceMapClick({ seriesName: "其它", dataIndex: 1 }, DATA.members)).toBeNull();
@@ -82,7 +94,7 @@ describe("池内 PN 股票式价格图", () => {
 
   it("图、移动固定详情卡与等价表共用完整成员集合，键盘可进入型号详情", () => {
     const open = vi.fn();
-    render(<PoolPnPriceMap data={DATA} onPartClick={open} />);
+    render(<PoolPnPriceMap data={DATA} onPartOpen={open} />);
     expect(screen.getByRole("img", { name: /池内采购价区间/ })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "查看 PN-NO-SAMPLE 型号价格详情" })[0])
       .toHaveTextContent("暂无正式参考样本");
@@ -95,7 +107,29 @@ describe("池内 PN 股票式价格图", () => {
     const row = screen.getByRole("button", { name: "查看 PN-A 型号价格详情" });
     row.focus();
     fireEvent.keyDown(row, { key: "Enter" });
+    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("PN-A");
+    fireEvent.click(screen.getByRole("button", { name: "查看型号全景" }));
     expect(open).toHaveBeenCalledWith(1);
+  });
+
+  it("固定详情只保存 part_id：响应更新时取当前正式口径，成员消失时自动清空", () => {
+    const { rerender } = render(<PoolPnPriceMap data={DATA} />);
+    act(() => lastChart().emit("click", { seriesName: "价格区间", dataIndex: 1 }));
+    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("加权均价 ¥120");
+    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("最近原始价 ¥230");
+
+    const updated = {
+      ...DATA,
+      members: DATA.members.map((member) => member.part_id === 2
+        ? { ...member, stats: { ...member.stats!, weighted_avg: 777 } } : member),
+    };
+    rerender(<PoolPnPriceMap data={updated} />);
+    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("加权均价 ¥777");
+    expect(screen.getByTestId("price-map-selected")).not.toHaveTextContent("加权均价 ¥120");
+
+    rerender(<PoolPnPriceMap data={{ ...updated,
+      members: updated.members.filter((member) => member.part_id !== 2) }} />);
+    expect(screen.queryByTestId("price-map-selected")).toBeNull();
   });
 
   it("无治理权限时不建图，表内不出现任何价格、差额或疑点数量", () => {
