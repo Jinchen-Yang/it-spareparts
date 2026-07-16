@@ -11,19 +11,21 @@ export interface DetailField {
  * 通用组件——各页把"次要字段"组装成 fields 传进来即可。可关闭、可滚动。
  */
 export default function MobileDetailDrawer({
-  open, title, fields, onClose, children,
+  open, title, fields, onClose, children, height = "70%",
 }: {
   open: boolean;
   title: ReactNode;
   fields: DetailField[];
   onClose: () => void;
+  /** 默认保留上下文；复杂详情可传 100% 使用移动端全屏抽屉。 */
+  height?: string | number;
   /** 字段列表下方的附加内容（如逐笔下钻列表） */
   children?: ReactNode;
 }) {
   return (
     <Drawer
       placement="bottom"
-      height="70%"
+      height={height}
       open={open}
       onClose={onClose}
       title={title}

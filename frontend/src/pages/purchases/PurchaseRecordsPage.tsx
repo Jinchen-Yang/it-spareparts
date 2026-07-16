@@ -2,12 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Card, Grid, Input, List, Segmented, Tag, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import dayjs from "dayjs";
 import ResizableTable from "../../components/ResizableTable";
 import PageHeader from "../../components/PageHeader";
 import MobileDetailDrawer from "../../components/MobileDetailDrawer";
+import PoolIdentityLink from "../../components/pools/PoolIdentityLink";
+import PoolReferencePanel from "../../components/pools/PoolReferencePanel";
 import type { DetailField } from "../../components/MobileDetailDrawer";
 import { listRecentPurchases } from "../../api";
 import type { RecentPurchaseRow } from "../../api";
+import type { PoolAnalysisRange } from "../../api/poolAnalysis";
 import { useTaxBasis } from "../../context/TaxBasis";
 import {
   DAY_OPTIONS, STATUS_FILTER, STATUS_COLOR, fmtMoney, byTax, readNum,
@@ -24,6 +28,12 @@ export default function PurchaseRecordsPage() {
   const [sp, setSp] = useSearchParams();
   const patch = useUrlPatch(sp, setSp);
   const days = readNum(sp, "days", 30);
+  const referenceRange: PoolAnalysisRange = days === 30 || days === 90 || days === 365
+    ? `${days}d` as PoolAnalysisRange
+    : "custom";
+  const referenceDateFrom = referenceRange === "custom"
+    ? dayjs().subtract(days - 1, "day").format("YYYY-MM-DD") : undefined;
+  const referenceDateTo = referenceRange === "custom" ? dayjs().format("YYYY-MM-DD") : undefined;
   const status = sp.get("status") || "已生效";
   const qParam = sp.get("q") || "";
   const supplierParam = sp.get("supplier") || "";
@@ -79,7 +89,10 @@ export default function PurchaseRecordsPage() {
     { title: "采购日期", dataIndex: "order_date", width: 110, fixed: "left", render: (v) => v || "—" },
     { title: "型号", dataIndex: "pn_std", width: 190,
       render: (v, r) => (
-        <span>{v}{r.needs_review && <Tag style={{ marginLeft: 6 }} color="orange">待复核</Tag>}</span>
+        <span>{v}{r.needs_review && <Tag style={{ marginLeft: 6 }} color="orange">待复核</Tag>}
+          <PoolIdentityLink groupId={r.pool_group_id} name={r.pool_name} pn={r.pn_std}
+            range={referenceRange} dateFrom={referenceDateFrom} dateTo={referenceDateTo} side="purchase" />
+        </span>
       ) },
     { title: "描述", dataIndex: "description", ellipsis: true },
     { title: "品牌", dataIndex: "brand", width: 110, ellipsis: true },
@@ -165,6 +178,10 @@ export default function PurchaseRecordsPage() {
                     <span style={{ fontWeight: 500 }}>{r.pn_std}</span>
                     <span style={{ color: "var(--mb-text-3)", fontSize: 12.5 }}>{r.order_date || "—"}</span>
                   </div>
+                  <div style={{ marginTop: 4 }}>
+                    <PoolIdentityLink groupId={r.pool_group_id} name={r.pool_name} pn={r.pn_std}
+                      range={referenceRange} dateFrom={referenceDateFrom} dateTo={referenceDateTo} side="purchase" />
+                  </div>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 4, fontSize: 13 }}>
                     <span>数量 {r.qty == null ? "—" : Number(r.qty)} · {mobileUnitPrice(r, basis)}</span>
                     {r.data_status && <Tag color={STATUS_COLOR[r.data_status] || "default"}>{r.data_status}</Tag>}
@@ -183,6 +200,12 @@ export default function PurchaseRecordsPage() {
             scroll={{ x: 1100 }}
             pagination={pagination}
             columns={desktopColumns}
+            expandable={{
+              expandedRowRender: (row) => <PoolReferencePanel partId={row.part_id}
+                side="purchase" range={referenceRange}
+                dateFrom={referenceDateFrom} dateTo={referenceDateTo} compact />,
+              rowExpandable: (row) => Number.isInteger(row.part_id) && row.part_id > 0,
+            }}
           />
         )}
       </Card>
@@ -192,7 +215,11 @@ export default function PurchaseRecordsPage() {
         title={detail ? detail.pn_std : ""}
         fields={detail ? detailFields(detail) : []}
         onClose={() => setDetail(null)}
-      />
+      >
+        {detail && <PoolReferencePanel partId={detail.part_id}
+          side="purchase" range={referenceRange}
+          dateFrom={referenceDateFrom} dateTo={referenceDateTo} compact />}
+      </MobileDetailDrawer>
     </>
   );
 }

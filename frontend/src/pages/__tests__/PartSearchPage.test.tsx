@@ -15,6 +15,7 @@ import type { Location, NavigateFunction } from "react-router-dom";
 
 const unifiedSearch = vi.fn();
 const fetchOverview = vi.fn();
+const fetchPoolReference = vi.fn();
 
 vi.mock("../../api/search", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../../api/search")>();
@@ -22,6 +23,9 @@ vi.mock("../../api/search", async (importOriginal) => {
     unifiedSearch: (...a: unknown[]) => unifiedSearch(...a),
     fetchOverview: (...a: unknown[]) => fetchOverview(...a) };
 });
+vi.mock("../../api/poolAnalysis", () => ({
+  fetchPoolReference: (...a: unknown[]) => fetchPoolReference(...a),
+}));
 vi.mock("../../api", () => {
   const api = {
     get: vi.fn(async () => ({ data: { categories: [] } })),
@@ -81,6 +85,16 @@ beforeEach(() => {
   localStorage.setItem("role", "admin");
   unifiedSearch.mockResolvedValue(emptyResp);
   fetchOverview.mockResolvedValue(ovFix());
+  fetchPoolReference.mockResolvedValue({
+    part_id: 42, pn_std: "02311DYQ", pool: null,
+    window: { range: "90d", date_from: null, date_to: null }, basis: "ex_tax",
+    purchase_reference: { restricted: false, pool_stats: null, part_stats: null,
+      constraint: { status: "unset", value: null }, delta_to_pool_avg: null,
+      delta_to_constraint: null, relation_to_constraint: "unset" },
+    sales_reference: { restricted: false, pool_stats: null, part_stats: null,
+      constraint: { status: "unset", value: null }, delta_to_pool_avg: null,
+      delta_to_constraint: null, relation_to_constraint: "unset" },
+  });
 });
 afterEach(cleanup);
 
@@ -109,6 +123,35 @@ describe("稳定深链", () => {
 });
 
 describe("精确即唯一", () => {
+  it("精确型号全景在历史卡片前显示近90天同源池价格参考卡", async () => {
+    fetchPoolReference.mockResolvedValue({
+      part_id: 42, pn_std: "02311DYQ",
+      pool: { group_id: 7, name: "华为互通池", member_count: 8 },
+      window: { range: "90d", date_from: "2026-04-01", date_to: "2026-06-29" },
+      basis: "ex_tax",
+      purchase_reference: { restricted: false,
+        pool_stats: { weighted_avg: 500, median: 490, min: 400, max: 600, latest: 520,
+          total_amount: 5000, total_qty: 10, order_count: 3, line_count: 4 },
+        part_stats: { weighted_avg: 540, median: 530, min: 500, max: 600, latest: 520,
+          total_amount: 1080, total_qty: 2, order_count: 2, line_count: 2 },
+        constraint: { status: "set", value: 550 }, delta_to_pool_avg: 40,
+        delta_to_constraint: -10, relation_to_constraint: "below" },
+      sales_reference: { restricted: false,
+        pool_stats: { weighted_avg: 800, median: 790, min: 700, max: 900, latest: 820,
+          total_amount: 8000, total_qty: 10, order_count: 4, line_count: 4 },
+        part_stats: { weighted_avg: 820, median: 810, min: 780, max: 850, latest: 820,
+          total_amount: 1640, total_qty: 2, order_count: 2, line_count: 2 },
+        constraint: { status: "unset", value: null }, delta_to_pool_avg: 20,
+        delta_to_constraint: null, relation_to_constraint: "unset" },
+    });
+    renderAt("/parts?part_id=42");
+
+    await waitFor(() => expect(fetchPoolReference).toHaveBeenCalledWith(42, { range: "90d" }));
+    expect(await screen.findByRole("region", { name: "02311DYQ 的池价格参考" })).toBeInTheDocument();
+    expect(screen.getByLabelText("采购参考")).toHaveTextContent("池均价 ¥500.00");
+    expect(screen.getByLabelText("销售参考")).toHaveTextContent("池均价 ¥800.00");
+  });
+
   it("精确命中：唯一主结果自动开全景；相似候选只在'相似型号'区，不混排", async () => {
     unifiedSearch.mockResolvedValue({
       total: 1, page: 1, page_size: 20, exact: true, ambiguous: false, low_confidence: false,

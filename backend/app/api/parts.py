@@ -2,17 +2,20 @@
 
 /parts/master*（WP1）：采购可新建/编辑备件主数据，require_page('page_master_data') 准入。
 """
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import current_role
 from app.db import get_db
 from app.security import (
-    UserContext, apply_field_visibility, get_current_user_context, record_access_log, require_page,
+    UserContext, apply_field_visibility, get_current_user_context,
+    record_access_log, require_page,
 )
-from app.services import batch_normalize, master_edit, part_overview, part_resolver, standardize, taxonomy
+from app.services import batch_normalize, master_edit, part_overview, part_resolver, pool_price_analysis, standardize, taxonomy
 
 router = APIRouter(prefix="/parts", tags=["parts"])
 
@@ -126,6 +129,61 @@ def sales(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     return apply_field_visibility(part_overview.list_sales(db, pn_std, page, page_size, ctx), ctx)
+
+
+class PoolReferencesRequest(BaseModel):
+    part_ids: list[int] = Field(min_length=1, max_length=50)
+    range: str | None = Field("90d", pattern="^(30d|90d|365d|all|custom)$")
+    date_from: date | None = None
+    date_to: date | None = None
+    purchase_type: str | None = None
+
+
+@router.get("/{part_id}/pool-reference")
+def pool_reference(
+    part_id: int,
+    range_: str | None = Query("90d", alias="range", pattern="^(30d|90d|365d|all|custom)$"),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    purchase_type: str | None = Query(None, description="仅查看指定采购类型"),
+    db: Session = Depends(get_db),
+    _role: str = Depends(current_role),
+    _page: None = Depends(require_page("page_pool_analysis")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    try:
+        data = pool_price_analysis.reference(
+            db, part_id, range_=range_, date_from=date_from, date_to=date_to,
+            purchase_type=purchase_type)
+    except pool_price_analysis.WindowValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    if data is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "型号不存在")
+    record_access_log(ctx, "pool_reference", "part", {
+        "part_id": part_id, "purchase_type": purchase_type})
+    # 池内历史价属于价格纪律事实，不是利润成本；专用净化器只按池治理、供应商、
+    # 客户权限处理，不能再套全局 data_purchase_cost 脱敏。
+    return pool_price_analysis.apply_visibility(data, ctx)
+
+
+@router.post("/pool-references")
+def pool_references(
+    body: PoolReferencesRequest,
+    db: Session = Depends(get_db),
+    _role: str = Depends(current_role),
+    _page: None = Depends(require_page("page_pool_analysis")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    try:
+        items = pool_price_analysis.references(
+            db, body.part_ids, range_=body.range,
+            date_from=body.date_from, date_to=body.date_to,
+            purchase_type=body.purchase_type)
+    except pool_price_analysis.WindowValidationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    record_access_log(ctx, "pool_references", "part", {
+        "count": len(body.part_ids), "purchase_type": body.purchase_type})
+    return {"items": pool_price_analysis.apply_visibility(items, ctx)}
 
 
 # ---------------- 备件主数据自治（WP1，采购可新建/编辑） ----------------

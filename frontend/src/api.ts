@@ -162,6 +162,7 @@ export async function attachChatStream(
 // ===== 采购记录（合同重点）=====
 export interface RecentPurchaseRow {
   line_id: number;
+  part_id: number;
   order_no: string;
   order_date: string | null;
   purchaser: string | null;
@@ -169,6 +170,8 @@ export interface RecentPurchaseRow {
   data_status: string | null;
   supplier: string | null;
   pn_std: string;
+  pool_group_id: number | null;
+  pool_name: string | null;
   needs_review: boolean;
   description: string | null;
   brand: string | null;
@@ -215,6 +218,8 @@ export interface PurchaseChannelSplit {
 export interface PurchaseAnalysisRow {
   part_id: number;
   pn_std: string;
+  pool_group_id: number | null;
+  pool_name: string | null;
   needs_review: boolean;
   description: string | null;
   brand: string | null;

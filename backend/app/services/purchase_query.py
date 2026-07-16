@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app import config, security
 from app.models import DimPart, DimSupplier, FPurchaseLine, FPurchaseOrder, PartAlias
+from app.services import pool_metrics
 from app.services.query_filters import col_matches_any, keyword_term_groups
 
 _ACTIVE = config.ACTIVE_STATUS
@@ -60,6 +61,7 @@ def recent_purchases(db: Session, user_ctx: security.UserContext | None = None,
     stmt = (
         select(
             FPurchaseLine.id.label("line_id"),
+            FPurchaseLine.part_id,
             FPurchaseOrder.order_no,
             FPurchaseOrder.order_date,
             FPurchaseOrder.purchaser,
@@ -97,8 +99,16 @@ def recent_purchases(db: Session, user_ctx: security.UserContext | None = None,
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).mappings().all()
+    pool_map = pool_metrics.active_pool_map(db, [r["part_id"] for r in rows])
+    items = []
+    for row in rows:
+        item = dict(row)
+        identity = pool_map.get(row["part_id"])
+        item["pool_group_id"] = identity["group_id"] if identity else None
+        item["pool_name"] = identity["pool_name"] if identity else None
+        items.append(item)
 
     return {
         "total": total, "page": page, "page_size": page_size, "days": days,
-        "items": [dict(r) for r in rows],
+        "items": items,
     }

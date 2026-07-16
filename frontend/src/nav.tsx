@@ -5,6 +5,7 @@ import {
   ControlOutlined,
   DashboardOutlined,
   DeploymentUnitOutlined,
+  DollarOutlined,
   FundOutlined,
   InboxOutlined,
   LineChartOutlined,
@@ -51,6 +52,7 @@ export interface NavGroup {
 // 路由级懒加载：每个页面独立 chunk，首包不再背 1.6MB。
 // import() 工厂单独存一份（load 字段）供空闲预取——lazy 与预取命中同一模块缓存
 const loadBossBoard = () => import("./pages/BossBoardPage");
+const loadPools = () => import("./pages/PoolsPage");
 const loadPoolAnalysis = () => import("./pages/PoolAnalysisPage");
 const loadPartSearch = () => import("./pages/PartSearchPage");
 const loadProfit = () => import("./pages/ProfitPage");
@@ -67,6 +69,7 @@ const loadChat = () => import("./pages/ChatPage");
 const loadAccounts = () => import("./pages/AccountsPage");
 
 const BossBoardPage = lazy(loadBossBoard);
+const PoolsPage = lazy(loadPools);
 const PoolAnalysisPage = lazy(loadPoolAnalysis);
 const PartSearchPage = lazy(loadPartSearch);
 const ProfitPage = lazy(loadProfit);
@@ -96,6 +99,13 @@ export const NAV_GROUPS: NavGroup[] = [
     label: null,
     items: [
       { key: "chat", path: "/chat", label: "AI 助手", icon: <RobotOutlined />, perm: "page_chat", page: ChatPage, load: loadChat },
+    ],
+  },
+  {
+    key: "grp-price-analysis",
+    label: "价格分析",
+    items: [
+      { key: "pools", path: "/pools", label: "互通池", icon: <DollarOutlined />, perm: "page_pool_analysis", page: PoolsPage, load: loadPools },
     ],
   },
   {
@@ -178,8 +188,8 @@ export const DETAIL_ROUTES: DetailRoute[] = [
     path: "/pool-analysis/:groupId",
     pattern: /^\/pool-analysis\/\d+$/,
     label: "池分析详情",
-    perm: "page_boss_board",
-    menuKey: "boss",
+    perm: "page_pool_analysis",
+    menuKey: "pools",
     page: PoolAnalysisPage,
     load: loadPoolAnalysis,
   },
