@@ -16,6 +16,8 @@ import type { Location, NavigateFunction } from "react-router-dom";
 const unifiedSearch = vi.fn();
 const fetchOverview = vi.fn();
 const fetchPoolReference = vi.fn();
+const masterCategories = vi.fn();
+const masterEdit = vi.fn();
 
 vi.mock("../../api/search", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../../api/search")>();
@@ -29,9 +31,14 @@ vi.mock("../../api/poolAnalysis", () => ({
 vi.mock("../../api", () => {
   const api = {
     get: vi.fn(async () => ({ data: { categories: [] } })),
-    post: vi.fn(), delete: vi.fn(),
+    post: vi.fn(), delete: vi.fn(), patch: vi.fn(),
   };
-  return { default: api, api };
+  return {
+    default: api,
+    api,
+    masterCategories: (...a: unknown[]) => masterCategories(...a),
+    masterEdit: (...a: unknown[]) => masterEdit(...a),
+  };
 });
 
 import PartSearchPage from "../PartSearchPage";
@@ -86,6 +93,10 @@ beforeEach(() => {
   localStorage.setItem("role", "admin");
   unifiedSearch.mockResolvedValue(emptyResp);
   fetchOverview.mockResolvedValue(ovFix());
+  masterCategories.mockResolvedValue({ data: { categories: [] } });
+  masterEdit.mockResolvedValue({
+    data: { id: 99, pn_std: "SUB-001", updated: ["description"], locked_fields: ["description"] },
+  });
   fetchPoolReference.mockResolvedValue({
     part_id: 42, pn_std: "02311DYQ", pool: null,
     window: { range: "90d", date_from: null, date_to: null }, basis: "ex_tax",
@@ -245,5 +256,85 @@ describe("浏览器历史", () => {
     });
     await waitFor(() => expect(unifiedSearch).toHaveBeenCalledWith(
       "ST8000", expect.objectContaining({ pageSize: 20 })));
+  });
+});
+
+describe("通用号 PN 就地编辑", () => {
+  const parentWithSubstitute = {
+    ...ovFix(),
+    substitutes: [{
+      pn_std: "SUB-001", description: "旧描述", source: "manual", relation: "互替",
+      via: null, stock_qty: 3,
+    }],
+  };
+  const targetOverview = {
+    ...ovFix(99, "SUB-001"),
+    part: {
+      ...ovFix(99, "SUB-001").part,
+      description: "旧描述",
+      category_major: "服务器配件",
+      category_minor: "磁盘",
+    },
+  };
+
+  it("管理员点击通用号 PN 就地修改描述和两级品类，保存后刷新当前型号而不跳页", async () => {
+    fetchOverview.mockImplementation(async (key: any) =>
+      key.pn_std === "SUB-001" ? targetOverview : parentWithSubstitute);
+    masterCategories.mockResolvedValue({
+      data: {
+        categories: [{ code: "01", name: "存储设备", children: [{ code: "0101", name: "硬盘" }] }],
+      },
+    });
+    masterEdit.mockResolvedValue({
+      data: {
+        id: 99, pn_std: "SUB-001",
+        updated: ["description", "category_major", "category_minor"],
+        locked_fields: ["description", "category_major", "category_minor"],
+      },
+    });
+
+    renderAt("/parts?part_id=42");
+    fireEvent.click(await screen.findByRole("button", { name: "编辑备件 SUB-001" }));
+
+    await screen.findByText("就地编辑备件 SUB-001");
+    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
+    fireEvent.change(screen.getByLabelText("描述"), { target: { value: "新描述：2TB SAS 企业盘" } });
+
+    fireEvent.mouseDown(screen.getByLabelText("一级品类"));
+    await screen.findByRole("option", { name: "存储设备" });
+    const majorOption = screen.getAllByText("存储设备")
+      .find((node) => node.closest(".ant-select-item-option"));
+    fireEvent.click(majorOption!.closest(".ant-select-item-option")!);
+    fireEvent.mouseDown(screen.getByLabelText("二级品类"));
+    await screen.findByRole("option", { name: "硬盘" });
+    const minorOption = screen.getAllByText("硬盘")
+      .find((node) => node.closest(".ant-select-item-option"));
+    fireEvent.click(minorOption!.closest(".ant-select-item-option")!);
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+
+    await waitFor(() => expect(masterEdit).toHaveBeenCalledWith({
+      pn_std: "SUB-001",
+      description: "新描述：2TB SAS 企业盘",
+      category_major: "存储设备",
+      category_minor: "硬盘",
+    }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "就地编辑备件 SUB-001" })).toBeNull());
+    expect(curLoc.search).toContain("part_id=42");
+    expect(curLoc.search).not.toContain("pn=SUB-001");
+    expect(fetchOverview.mock.calls.filter(([key]) => key.part_id === 42)).toHaveLength(2);
+  });
+
+  it("采购等非管理员仍按原逻辑打开型号详情，不显示就地编辑器", async () => {
+    localStorage.setItem("role", "purchaser");
+    fetchOverview.mockImplementation(async (key: any) =>
+      key.pn_std === "SUB-001" ? targetOverview : parentWithSubstitute);
+
+    renderAt("/parts?part_id=42");
+    fireEvent.click(await screen.findByRole("button", { name: "查看型号 SUB-001" }));
+
+    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
+    await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
+    expect(screen.queryByText("就地编辑备件 SUB-001")).toBeNull();
+    expect(masterEdit).not.toHaveBeenCalled();
   });
 });
