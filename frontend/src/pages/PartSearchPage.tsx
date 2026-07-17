@@ -9,6 +9,7 @@ import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import PoolReferencePanel from "../components/pools/PoolReferencePanel";
+import InlinePartEditModal from "../components/parts/InlinePartEditModal";
 import api from "../api";
 import type { Overview, PurchaseRow, SalesRow, InventoryRow } from "../api";
 import { unifiedSearch, fetchOverview } from "../api/search";
@@ -30,6 +31,8 @@ const canSee = (key: string) => {
 
 // 替代料维护（增/删）开放给 管理员 + 采购；其余角色只读不显示编辑控件
 const canEditSubs = () => ["admin", "purchaser"].includes(localStorage.getItem("role") || "");
+// 甲方本次明确只要求管理员在通用号 PN 处就地修改主数据；不随替代料维护权限扩大。
+const canInlineEditPart = () => (localStorage.getItem("role") || "") === "admin";
 
 /**
  * 型号查询：URL 驱动（与采购三页同范式）——
@@ -51,6 +54,7 @@ export default function PartSearchPage() {
   const [ov, setOv] = useState<Overview | null>(null);
   const [loadingOv, setLoadingOv] = useState(false);
   const [subPn, setSubPn] = useState("");
+  const [inlineEditPn, setInlineEditPn] = useState<string | null>(null);
   // 替代料卡片折叠（记忆本机）
   const [subsOpen, setSubsOpen] = useState(() => localStorage.getItem("ps_subs_open") !== "0");
   const toggleSubs = () => setSubsOpen((o) => { localStorage.setItem("ps_subs_open", o ? "0" : "1"); return !o; });
@@ -475,7 +479,14 @@ export default function PartSearchPage() {
                   columns={[
                     { title: "通用号 (PN)", dataIndex: "pn_std", width: 200,
                       render: (v: string) => (
-                        <a onClick={() => openByPn(v)} style={{ fontFamily: "monospace", fontSize: 12.5 }}>{v}</a>
+                        <Button
+                          type="link" size="small"
+                          aria-label={`${canInlineEditPart() ? "编辑备件" : "查看型号"} ${v}`}
+                          onClick={() => canInlineEditPart() ? setInlineEditPn(v) : openByPn(v)}
+                          style={{ fontFamily: "monospace", fontSize: 12.5, padding: 0, height: "auto" }}
+                        >
+                          {v}
+                        </Button>
                       ) },
                     { title: "关系", key: "rel", width: 170,
                       render: (_, s) => s.via
@@ -550,6 +561,13 @@ export default function PartSearchPage() {
             dataSource={similar} pagination={false} scroll={{ x: 900 }} />
         </Card>
       )}
+
+      <InlinePartEditModal
+        open={inlineEditPn !== null}
+        pn={inlineEditPn}
+        onClose={() => setInlineEditPn(null)}
+        onSaved={() => ov ? loadOverview({ part_id: ov.part.id }) : undefined}
+      />
     </Space>
   );
 }
