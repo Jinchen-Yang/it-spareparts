@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.16.6";
+export const APP_VERSION = "1.16.7";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.16.7",
+    date: "2026-07-20",
+    items: [
+      "恢复‘替代料 · 通用号’列表的 PN 查看入口，管理员点击 PN 与普通用户一样进入型号详情",
+      "管理员可通过 PN 旁的独立编辑按钮修改描述和两级品类，查看与编辑不再混用",
+      "编辑权限、审计记录和重导锁定规则保持不变",
+    ],
+  },
   {
     version: "1.16.6",
     date: "2026-07-17",
