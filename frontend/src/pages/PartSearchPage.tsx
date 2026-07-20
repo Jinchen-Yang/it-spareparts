@@ -31,8 +31,9 @@ const canSee = (key: string) => {
 
 // 替代料维护（增/删）开放给 管理员 + 采购；其余角色只读不显示编辑控件
 const canEditSubs = () => ["admin", "purchaser"].includes(localStorage.getItem("role") || "");
-// 甲方本次明确只要求管理员在通用号 PN 处就地修改主数据；不随替代料维护权限扩大。
-const canInlineEditPart = () => (localStorage.getItem("role") || "") === "admin";
+// 详情页的轻量编辑入口与「备件主数据」使用同一权限。
+// 后端 /parts/master 同样用 page_master_data 兜底，避免前端显隐与实际写权限分叉。
+const canEditPartDetails = () => canSee("page_master_data");
 
 /**
  * 型号查询：URL 驱动（与采购三页同范式）——
@@ -362,7 +363,25 @@ export default function PartSearchPage() {
           {ov.part.needs_review && <Tag color="orange" style={{ marginLeft: 8 }}>PN 待复核</Tag>}
           {ov.part.redirected_from && <Tag color="blue" style={{ marginLeft: 8 }}>由 {ov.part.redirected_from} 合并而来</Tag>}</>}>
           <Descriptions bordered size="small" column={3} style={{ marginBottom: 16 }}>
-            <Descriptions.Item label="描述" span={3}>{ov.part.description || "-"}</Descriptions.Item>
+            <Descriptions.Item label="描述" span={3}>
+              <Space size={8} wrap>
+                <span>{ov.part.description || "-"}</span>
+                {canEditPartDetails() && (
+                  <Tooltip title="修改描述和品类">
+                    <Button
+                      type="link"
+                      size="small"
+                      icon={<EditOutlined />}
+                      aria-label={`修改型号 ${ov.part.pn_std} 的描述和品类`}
+                      onClick={() => setInlineEditPn(ov.part.pn_std)}
+                      style={{ paddingInline: 0 }}
+                    >
+                      修改
+                    </Button>
+                  </Tooltip>
+                )}
+              </Space>
+            </Descriptions.Item>
             <Descriptions.Item label="品牌">{ov.part.brand || "-"}</Descriptions.Item>
             <Descriptions.Item label="品类">{ov.part.category_major || "-"}</Descriptions.Item>
             <Descriptions.Item label="规格">{ov.part.category_minor || "-"}</Descriptions.Item>
@@ -479,28 +498,14 @@ export default function PartSearchPage() {
                   columns={[
                     { title: "通用号 (PN)", dataIndex: "pn_std", width: 200,
                       render: (v: string) => (
-                        <Space size={4}>
-                          <Button
-                            type="link" size="small"
-                            aria-label={`查看型号 ${v}`}
-                            onClick={() => openByPn(v)}
-                            style={{ fontFamily: "monospace", fontSize: 12.5, padding: 0, height: "auto" }}
-                          >
-                            {v}
-                          </Button>
-                          {canInlineEditPart() && (
-                            <Tooltip title="编辑描述和品类">
-                              <Button
-                                type="text" size="small" icon={<EditOutlined />}
-                                aria-label={`编辑备件 ${v}`}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  setInlineEditPn(v);
-                                }}
-                              />
-                            </Tooltip>
-                          )}
-                        </Space>
+                        <Button
+                          type="link" size="small"
+                          aria-label={`查看型号 ${v}`}
+                          onClick={() => openByPn(v)}
+                          style={{ fontFamily: "monospace", fontSize: 12.5, padding: 0, height: "auto" }}
+                        >
+                          {v}
+                        </Button>
                       ) },
                     { title: "关系", key: "rel", width: 170,
                       render: (_, s) => s.via
