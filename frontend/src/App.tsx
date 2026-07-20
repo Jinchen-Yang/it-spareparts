@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Button, Result } from "antd";
 import LoginPage from "./pages/LoginPage";
@@ -16,6 +16,16 @@ function readPerms(): Record<string, boolean> {
 
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
+
+  useEffect(() => {
+    const syncCrossTabSession = (event: StorageEvent) => {
+      if (event.storageArea === localStorage && event.key === "token") {
+        setToken(event.newValue);
+      }
+    };
+    window.addEventListener("storage", syncCrossTabSession);
+    return () => window.removeEventListener("storage", syncCrossTabSession);
+  }, []);
 
   // 权限快照随登录周期固定：只在 token 变化（登录/登出/改密）时重算，
   // 让 AppShell 收到的 allowed 引用稳定、下游 useMemo 可依赖
@@ -70,7 +80,7 @@ export default function App() {
   const redirects = NAV_REDIRECTS.filter((r) => !r.perm || allowedKeys.has(r.perm));
 
   return (
-    <BrowserRouter>
+    <BrowserRouter key={token}>
       <Routes>
         <Route element={<AppShell allowed={allowed} onLogout={logout} onToken={setToken} />}>
           {allowed.map((it) => (

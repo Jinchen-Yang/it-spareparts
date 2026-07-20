@@ -29,12 +29,6 @@ const canSee = (key: string) => {
   catch { return false; }
 };
 
-// 替代料维护（增/删）开放给 管理员 + 采购；其余角色只读不显示编辑控件
-const canEditSubs = () => ["admin", "purchaser"].includes(localStorage.getItem("role") || "");
-// 详情页的轻量编辑入口与「备件主数据」使用同一权限。
-// 后端 /parts/master 同样用 page_master_data 兜底，避免前端显隐与实际写权限分叉。
-const canEditPartDetails = () => canSee("page_master_data");
-
 /**
  * 型号查询：URL 驱动（与采购三页同范式）——
  *   /parts?q=<查询>            搜索
@@ -48,6 +42,16 @@ export default function PartSearchPage() {
   const urlPartId = sp.get("part_id");
   const urlPn = sp.get("pn");
   const returnToPool = poolAnalysisReturnPath(sp);
+  // 权限快照绑定当前登录周期；App 在 token 变化时重挂 Router/页面。
+  // 组件存活期间不重读可变 localStorage，避免 DevTools 改值后借无关重渲染点亮入口。
+  const [{ canEditSubstitutes, canEditPartDetails }] = useState(() => {
+    const role = localStorage.getItem("role") || "";
+    return {
+      canEditSubstitutes: ["admin", "purchaser"].includes(role),
+      // 详情页轻量编辑与「备件主数据」共用权限；后端 /parts/master 仍做最终准入。
+      canEditPartDetails: canSee("page_master_data"),
+    };
+  });
 
   const [qInput, setQInput] = useState(urlQ);
   const [resp, setResp] = useState<UnifiedSearchResp | null>(null);
@@ -56,6 +60,7 @@ export default function PartSearchPage() {
   const [loadingOv, setLoadingOv] = useState(false);
   const [subPn, setSubPn] = useState("");
   const [inlineEditPn, setInlineEditPn] = useState<string | null>(null);
+  useEffect(() => { setInlineEditPn(null); }, [urlPartId, urlPn]);
   // 替代料卡片折叠（记忆本机）
   const [subsOpen, setSubsOpen] = useState(() => localStorage.getItem("ps_subs_open") !== "0");
   const toggleSubs = () => setSubsOpen((o) => { localStorage.setItem("ps_subs_open", o ? "0" : "1"); return !o; });
@@ -152,12 +157,24 @@ export default function PartSearchPage() {
   useEffect(() => {
     if (urlPartId) {
       const idNum = Number(urlPartId);
-      if (!Number.isFinite(idNum) || idNum <= 0) { setOv(null); return; }
-      if (ov?.part?.id === idNum) return;        // 已加载（pn 改写/后退复用），不重复拉
+      if (!Number.isFinite(idNum) || idNum <= 0) {
+        ovSeq.current += 1;
+        setLoadingOv(false);
+        setOv(null);
+        return;
+      }
+      if (ov?.part?.id === idNum) {
+        // 返回已缓存型号时仍要废弃离开期间启动的请求，避免 A→慢B→A 后 B 覆盖 A。
+        ovSeq.current += 1;
+        setLoadingOv(false);
+        return;
+      }
       loadOverview({ part_id: idNum });
     } else if (urlPn) {
       loadOverview({ pn_std: urlPn });
     } else {
+      ovSeq.current += 1;
+      setLoadingOv(false);
       setOv(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -366,7 +383,7 @@ export default function PartSearchPage() {
             <Descriptions.Item label="描述" span={3}>
               <Space size={8} wrap>
                 <span>{ov.part.description || "-"}</span>
-                {canEditPartDetails() && (
+                {canEditPartDetails && (
                   <Tooltip title="修改描述和品类">
                     <Button
                       type="link"
@@ -476,7 +493,7 @@ export default function PartSearchPage() {
                   </span>
                 )}
               </span>
-              {subsOpen && canEditSubs() && (
+              {subsOpen && canEditSubstitutes && (
                 <Space wrap>
                   <Input
                     placeholder="输入可替代的型号 (PN)" style={{ width: 240 }} size="small"
@@ -489,7 +506,7 @@ export default function PartSearchPage() {
             {subsOpen && (
               ov.substitutes.length === 0 ? (
                 <span style={{ color: "var(--mb-text-3)" }}>
-                  {canEditSubs() ? "暂无替代料，可在右上方添加" : "暂无替代料"}
+                  {canEditSubstitutes ? "暂无替代料，可在右上方添加" : "暂无替代料"}
                 </span>
               ) : (
                 <Table
@@ -521,7 +538,7 @@ export default function PartSearchPage() {
                       render: (v: string | null) => v || <span style={{ color: "var(--mb-text-3)" }}>—</span> },
                     { title: "", key: "act", width: 64, align: "center" as const,
                       // 只在直连关系上给「解除」（间接「经 X」无直连边，删不了）；仅管理员/采购可见
-                      render: (_, s) => (s.via || !canEditSubs()) ? null : (
+                      render: (_, s) => (s.via || !canEditSubstitutes) ? null : (
                         <Popconfirm
                           title="解除替代关系" description={`确定解除与 ${s.pn_std} 的直连替代关系？`}
                           okText="解除" cancelText="取消" okButtonProps={{ danger: true }}
@@ -583,6 +600,8 @@ export default function PartSearchPage() {
 
       <InlinePartEditModal
         open={inlineEditPn !== null}
+        canEdit={canEditPartDetails}
+        contextKey={`${urlPartId ?? ""}:${urlPn ?? ""}`}
         pn={inlineEditPn}
         onClose={() => setInlineEditPn(null)}
         onSaved={() => ov ? loadOverview({ part_id: ov.part.id }) : undefined}

@@ -90,6 +90,7 @@ export default function PoolManagementPage() {
   const [listError, setListError] = useState<string | null>(null);
   const [coverage, setCoverage] = useState<Coverage | null>(null);
   const [coverageRestricted, setCoverageRestricted] = useState(localCoverageRestricted);
+  const [listPriceRestricted, setListPriceRestricted] = useState(localCoverageRestricted);
   const listGeneration = useRef(0);
   const listView = useRef<{
     query: string; status: StatusFilter; page: number; policyMissing: PoolPolicyMissing | null;
@@ -114,6 +115,7 @@ export default function PoolManagementPage() {
       setRows(data.items || []);
       setTotal(data.total || 0);
       setPage(data.page || p);
+      setListPriceRestricted(localCoverageRestricted || !!data.price_restricted);
       setCoverageRestricted(!!data.coverage_restricted);
       setCoverage(data.coverage_restricted ? null : (data.coverage ?? null));
     } catch (e: any) {
@@ -549,11 +551,11 @@ export default function PoolManagementPage() {
     { title: "成员数", dataIndex: "member_count", width: 80, align: "right" },
     {
       title: "采购上限(未税)", dataIndex: "purchase_ceiling_ex_tax", width: 130, align: "right",
-      render: (v, r) => fmtMoney(v, r.price_restricted),
+      render: (v, r) => fmtMoney(v, listPriceRestricted || r.price_restricted),
     },
     {
       title: "销售下限(未税)", dataIndex: "sales_floor_ex_tax", width: 130, align: "right",
-      render: (v, r) => fmtMoney(v, r.price_restricted),
+      render: (v, r) => fmtMoney(v, listPriceRestricted || r.price_restricted),
     },
     { title: "来源", dataIndex: "source", width: 110, render: (v) => SOURCE_LABEL[v] || v },
     {
