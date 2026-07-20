@@ -259,7 +259,7 @@ describe("浏览器历史", () => {
   });
 });
 
-describe("通用号 PN 就地编辑", () => {
+describe("通用号 PN 查看与详情编辑", () => {
   const parentWithSubstitute = {
     ...ovFix(),
     substitutes: [{
@@ -271,13 +271,30 @@ describe("通用号 PN 就地编辑", () => {
     ...ovFix(99, "SUB-001"),
     part: {
       ...ovFix(99, "SUB-001").part,
-      description: "旧描述",
+      description: "目标型号描述",
       category_major: "服务器配件",
       category_minor: "磁盘",
     },
   };
 
-  it("管理员点击通用号 PN 就地修改描述和两级品类，保存后刷新当前型号而不跳页", async () => {
+  it("管理员点击通用号 PN 只进入目标型号，修改入口位于目标详情的描述旁", async () => {
+    fetchOverview.mockImplementation(async (key: any) =>
+      key.pn_std === "SUB-001" ? targetOverview : parentWithSubstitute);
+
+    renderAt("/parts?part_id=42");
+    const viewButton = await screen.findByRole("button", { name: "查看型号 SUB-001" });
+    expect(screen.queryByRole("button", { name: "编辑备件 SUB-001" })).toBeNull();
+    fireEvent.click(viewButton);
+
+    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
+    await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
+    expect(await screen.findByText("目标型号描述")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "修改型号 SUB-001 的描述和品类" })).toBeInTheDocument();
+    expect(screen.queryByText("就地编辑备件 SUB-001")).toBeNull();
+    expect(masterEdit).not.toHaveBeenCalled();
+  });
+
+  it("有主数据权限的人从详情描述旁修改，保存后刷新当前型号而不跳回父型号", async () => {
     fetchOverview.mockImplementation(async (key: any) =>
       key.pn_std === "SUB-001" ? targetOverview : parentWithSubstitute);
     masterCategories.mockResolvedValue({
@@ -294,7 +311,21 @@ describe("通用号 PN 就地编辑", () => {
     });
 
     renderAt("/parts?part_id=42");
-    fireEvent.click(await screen.findByRole("button", { name: "编辑备件 SUB-001" }));
+    const viewButton = await screen.findByRole("button", { name: "查看型号 SUB-001" });
+    expect(viewButton.closest(".ant-table")).toHaveClass("ant-table-scroll-horizontal");
+    expect(screen.getByText("平均销售价").closest(".ant-col"))
+      .toHaveClass("ant-col-xs-24", "ant-col-sm-12", "ant-col-lg-6");
+    expect(viewButton).toHaveAttribute("type", "button");
+    viewButton.focus();
+    expect(viewButton).toHaveFocus();
+    fireEvent.click(viewButton);
+
+    await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
+    const editButton = await screen.findByRole("button", { name: "修改型号 SUB-001 的描述和品类" });
+    expect(editButton).toHaveAttribute("type", "button");
+    editButton.focus();
+    expect(editButton).toHaveFocus();
+    fireEvent.click(editButton);
 
     await screen.findByText("就地编辑备件 SUB-001");
     await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
@@ -319,22 +350,40 @@ describe("通用号 PN 就地编辑", () => {
       category_minor: "硬盘",
     }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "就地编辑备件 SUB-001" })).toBeNull());
-    expect(curLoc.search).toContain("part_id=42");
+    expect(curLoc.search).toContain("part_id=99");
     expect(curLoc.search).not.toContain("pn=SUB-001");
-    expect(fetchOverview.mock.calls.filter(([key]) => key.part_id === 42)).toHaveLength(2);
+    expect(fetchOverview.mock.calls.filter(([key]) => key.part_id === 99)).toHaveLength(1);
   });
 
-  it("采购等非管理员仍按原逻辑打开型号详情，不显示就地编辑器", async () => {
+  it("采购账号有主数据编辑权限时，在详情描述旁看到同一修改入口", async () => {
     localStorage.setItem("role", "purchaser");
+    localStorage.setItem("permissions", JSON.stringify({ page_master_data: true }));
+    fetchOverview.mockImplementation(async (key: any) =>
+      key.pn_std === "SUB-001" ? targetOverview : parentWithSubstitute);
+
+    renderAt("/parts?part_id=42");
+    const viewButton = await screen.findByRole("button", { name: "查看型号 SUB-001" });
+    expect(screen.queryByRole("button", { name: "编辑备件 SUB-001" })).toBeNull();
+    fireEvent.click(viewButton);
+
+    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
+    await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
+    expect(screen.getByRole("button", { name: "修改型号 SUB-001 的描述和品类" })).toBeInTheDocument();
+    expect(screen.queryByText("就地编辑备件 SUB-001")).toBeNull();
+    expect(masterEdit).not.toHaveBeenCalled();
+  });
+
+  it("没有主数据编辑权限的人可查看型号，但详情描述旁没有修改入口", async () => {
+    localStorage.setItem("role", "sales");
+    localStorage.setItem("permissions", JSON.stringify({ page_master_data: false }));
     fetchOverview.mockImplementation(async (key: any) =>
       key.pn_std === "SUB-001" ? targetOverview : parentWithSubstitute);
 
     renderAt("/parts?part_id=42");
     fireEvent.click(await screen.findByRole("button", { name: "查看型号 SUB-001" }));
 
-    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
     await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
-    expect(screen.queryByText("就地编辑备件 SUB-001")).toBeNull();
-    expect(masterEdit).not.toHaveBeenCalled();
+    expect(await screen.findByText("目标型号描述")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "修改型号 SUB-001 的描述和品类" })).toBeNull();
   });
 });

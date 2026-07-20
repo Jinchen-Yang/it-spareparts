@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   Input, Card, Descriptions, Tag, Row, Col, Statistic, Empty, message, Space, Button,
-  Select, InputNumber, Alert, Table, Popconfirm,
+  Select, InputNumber, Alert, Table, Popconfirm, Tooltip,
 } from "antd";
-import { RightOutlined } from "@ant-design/icons";
+import { EditOutlined, RightOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
@@ -31,8 +31,9 @@ const canSee = (key: string) => {
 
 // 替代料维护（增/删）开放给 管理员 + 采购；其余角色只读不显示编辑控件
 const canEditSubs = () => ["admin", "purchaser"].includes(localStorage.getItem("role") || "");
-// 甲方本次明确只要求管理员在通用号 PN 处就地修改主数据；不随替代料维护权限扩大。
-const canInlineEditPart = () => (localStorage.getItem("role") || "") === "admin";
+// 详情页的轻量编辑入口与「备件主数据」使用同一权限。
+// 后端 /parts/master 同样用 page_master_data 兜底，避免前端显隐与实际写权限分叉。
+const canEditPartDetails = () => canSee("page_master_data");
 
 /**
  * 型号查询：URL 驱动（与采购三页同范式）——
@@ -362,7 +363,25 @@ export default function PartSearchPage() {
           {ov.part.needs_review && <Tag color="orange" style={{ marginLeft: 8 }}>PN 待复核</Tag>}
           {ov.part.redirected_from && <Tag color="blue" style={{ marginLeft: 8 }}>由 {ov.part.redirected_from} 合并而来</Tag>}</>}>
           <Descriptions bordered size="small" column={3} style={{ marginBottom: 16 }}>
-            <Descriptions.Item label="描述" span={3}>{ov.part.description || "-"}</Descriptions.Item>
+            <Descriptions.Item label="描述" span={3}>
+              <Space size={8} wrap>
+                <span>{ov.part.description || "-"}</span>
+                {canEditPartDetails() && (
+                  <Tooltip title="修改描述和品类">
+                    <Button
+                      type="link"
+                      size="small"
+                      icon={<EditOutlined />}
+                      aria-label={`修改型号 ${ov.part.pn_std} 的描述和品类`}
+                      onClick={() => setInlineEditPn(ov.part.pn_std)}
+                      style={{ paddingInline: 0 }}
+                    >
+                      修改
+                    </Button>
+                  </Tooltip>
+                )}
+              </Space>
+            </Descriptions.Item>
             <Descriptions.Item label="品牌">{ov.part.brand || "-"}</Descriptions.Item>
             <Descriptions.Item label="品类">{ov.part.category_major || "-"}</Descriptions.Item>
             <Descriptions.Item label="规格">{ov.part.category_minor || "-"}</Descriptions.Item>
@@ -392,25 +411,25 @@ export default function PartSearchPage() {
           )}
 
           <Row gutter={16} style={{ marginBottom: 16 }}>
-            {canCost && <Col span={6}><Card size="small">
+            {canCost && <Col xs={24} sm={12} lg={6}><Card size="small">
               {/* 移动加权单位成本：不含税口径（真实值只落不含税侧） */}
               <Statistic title="移动加权 · 单位成本" valueStyle={{ color: COLORS.accentStrong }}
                 valueRender={() => { const s = splitFixed(ov.profit_summary.avg_cost_moving, "ex"); return <TaxMoney inc={s.inc} ex={s.ex} />; }} />
               {canProfit && <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_moving)}</span>}
             </Card></Col>}
-            {canCost && <Col span={6}><Card size="small">
+            {canCost && <Col xs={24} sm={12} lg={6}><Card size="small">
               {/* FIFO 单位成本：不含税口径 */}
               <Statistic title="FIFO · 单位成本"
                 valueRender={() => { const s = splitFixed(ov.profit_summary.avg_cost_fifo, "ex"); return <TaxMoney inc={s.inc} ex={s.ex} />; }} />
               {canProfit && <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>}
             </Card></Col>}
-            <Col span={6}><Card size="small">
+            <Col xs={24} sm={12} lg={6}><Card size="small">
               {/* 平均销售价：含税口径（真实值只落含税侧） */}
               <Statistic title="平均销售价"
                 valueRender={() => { const s = splitFixed(ov.profit_summary.avg_sale_price, "inc"); return <TaxMoney inc={s.inc} ex={s.ex} />; }} />
               <span style={{ color: COLORS.text3 }}>累计售 {ov.profit_summary.total_qty_sold}</span>
             </Card></Col>
-            <Col span={6}><Card size="small">
+            <Col xs={24} sm={12} lg={6}><Card size="small">
               {/* 询价区间：含税口径，min~max 各自双值 */}
               <Statistic title="询价区间" valueRender={() => {
                 if (!ov.inquiry_ref.count) return <>无</>;
@@ -475,14 +494,14 @@ export default function PartSearchPage() {
               ) : (
                 <Table
                   size="small" rowKey={(s) => s.pn_std}
-                  dataSource={ov.substitutes} pagination={false}
+                  dataSource={ov.substitutes} pagination={false} scroll={{ x: 700 }}
                   columns={[
                     { title: "通用号 (PN)", dataIndex: "pn_std", width: 200,
                       render: (v: string) => (
                         <Button
                           type="link" size="small"
-                          aria-label={`${canInlineEditPart() ? "编辑备件" : "查看型号"} ${v}`}
-                          onClick={() => canInlineEditPart() ? setInlineEditPn(v) : openByPn(v)}
+                          aria-label={`查看型号 ${v}`}
+                          onClick={() => openByPn(v)}
                           style={{ fontFamily: "monospace", fontSize: 12.5, padding: 0, height: "auto" }}
                         >
                           {v}
@@ -518,12 +537,12 @@ export default function PartSearchPage() {
           </Card>
 
           <Row gutter={16}>
-            <Col span={12}>
+            <Col xs={24} lg={12}>
               <Card title="采购历史(近20)" size="small">
                 <ResizableTable storageKey="search-ov-pur" rowKey={(r) => r.order_no + r.order_date} size="small" columns={purCols} dataSource={ov.purchases_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
               </Card>
             </Col>
-            <Col span={12}>
+            <Col xs={24} lg={12}>
               <Card title="销售历史(近20)" size="small">
                 {ov.sales_recent_restricted ? (
                   <Empty
