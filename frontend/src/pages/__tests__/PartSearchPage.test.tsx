@@ -310,6 +310,9 @@ describe("通用号 PN 就地编辑", () => {
     renderAt("/parts?part_id=42");
     const viewButton = await screen.findByRole("button", { name: "查看型号 SUB-001" });
     const editButton = screen.getByRole("button", { name: "编辑备件 SUB-001" });
+    expect(viewButton.closest(".ant-table")).toHaveClass("ant-table-scroll-horizontal");
+    expect(screen.getByText("平均销售价").closest(".ant-col"))
+      .toHaveClass("ant-col-xs-24", "ant-col-sm-12", "ant-col-lg-6");
     expect(viewButton).toHaveAttribute("type", "button");
     expect(editButton).toHaveAttribute("type", "button");
     viewButton.focus();

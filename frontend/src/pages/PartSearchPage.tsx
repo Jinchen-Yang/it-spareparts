@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   Input, Card, Descriptions, Tag, Row, Col, Statistic, Empty, message, Space, Button,
-  Select, InputNumber, Alert, Table, Popconfirm,
+  Select, InputNumber, Alert, Table, Popconfirm, Tooltip,
 } from "antd";
-import { RightOutlined } from "@ant-design/icons";
+import { EditOutlined, RightOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
@@ -392,25 +392,25 @@ export default function PartSearchPage() {
           )}
 
           <Row gutter={16} style={{ marginBottom: 16 }}>
-            {canCost && <Col span={6}><Card size="small">
+            {canCost && <Col xs={24} sm={12} lg={6}><Card size="small">
               {/* 移动加权单位成本：不含税口径（真实值只落不含税侧） */}
               <Statistic title="移动加权 · 单位成本" valueStyle={{ color: COLORS.accentStrong }}
                 valueRender={() => { const s = splitFixed(ov.profit_summary.avg_cost_moving, "ex"); return <TaxMoney inc={s.inc} ex={s.ex} />; }} />
               {canProfit && <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_moving)}</span>}
             </Card></Col>}
-            {canCost && <Col span={6}><Card size="small">
+            {canCost && <Col xs={24} sm={12} lg={6}><Card size="small">
               {/* FIFO 单位成本：不含税口径 */}
               <Statistic title="FIFO · 单位成本"
                 valueRender={() => { const s = splitFixed(ov.profit_summary.avg_cost_fifo, "ex"); return <TaxMoney inc={s.inc} ex={s.ex} />; }} />
               {canProfit && <span style={{ color: COLORS.text3 }}>毛利率 {pct(ov.profit_summary.avg_margin_fifo)}</span>}
             </Card></Col>}
-            <Col span={6}><Card size="small">
+            <Col xs={24} sm={12} lg={6}><Card size="small">
               {/* 平均销售价：含税口径（真实值只落含税侧） */}
               <Statistic title="平均销售价"
                 valueRender={() => { const s = splitFixed(ov.profit_summary.avg_sale_price, "inc"); return <TaxMoney inc={s.inc} ex={s.ex} />; }} />
               <span style={{ color: COLORS.text3 }}>累计售 {ov.profit_summary.total_qty_sold}</span>
             </Card></Col>
-            <Col span={6}><Card size="small">
+            <Col xs={24} sm={12} lg={6}><Card size="small">
               {/* 询价区间：含税口径，min~max 各自双值 */}
               <Statistic title="询价区间" valueRender={() => {
                 if (!ov.inquiry_ref.count) return <>无</>;
@@ -475,18 +475,32 @@ export default function PartSearchPage() {
               ) : (
                 <Table
                   size="small" rowKey={(s) => s.pn_std}
-                  dataSource={ov.substitutes} pagination={false}
+                  dataSource={ov.substitutes} pagination={false} scroll={{ x: 700 }}
                   columns={[
                     { title: "通用号 (PN)", dataIndex: "pn_std", width: 200,
                       render: (v: string) => (
-                        <Button
-                          type="link" size="small"
-                          aria-label={`${canInlineEditPart() ? "编辑备件" : "查看型号"} ${v}`}
-                          onClick={() => canInlineEditPart() ? setInlineEditPn(v) : openByPn(v)}
-                          style={{ fontFamily: "monospace", fontSize: 12.5, padding: 0, height: "auto" }}
-                        >
-                          {v}
-                        </Button>
+                        <Space size={4}>
+                          <Button
+                            type="link" size="small"
+                            aria-label={`查看型号 ${v}`}
+                            onClick={() => openByPn(v)}
+                            style={{ fontFamily: "monospace", fontSize: 12.5, padding: 0, height: "auto" }}
+                          >
+                            {v}
+                          </Button>
+                          {canInlineEditPart() && (
+                            <Tooltip title="编辑描述和品类">
+                              <Button
+                                type="text" size="small" icon={<EditOutlined />}
+                                aria-label={`编辑备件 ${v}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setInlineEditPn(v);
+                                }}
+                              />
+                            </Tooltip>
+                          )}
+                        </Space>
                       ) },
                     { title: "关系", key: "rel", width: 170,
                       render: (_, s) => s.via
@@ -518,12 +532,12 @@ export default function PartSearchPage() {
           </Card>
 
           <Row gutter={16}>
-            <Col span={12}>
+            <Col xs={24} lg={12}>
               <Card title="采购历史(近20)" size="small">
                 <ResizableTable storageKey="search-ov-pur" rowKey={(r) => r.order_no + r.order_date} size="small" columns={purCols} dataSource={ov.purchases_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
               </Card>
             </Col>
-            <Col span={12}>
+            <Col xs={24} lg={12}>
               <Card title="销售历史(近20)" size="small">
                 {ov.sales_recent_restricted ? (
                   <Empty
