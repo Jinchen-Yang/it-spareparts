@@ -2,7 +2,7 @@
 // 发版规范：每次更新 → ① 升 APP_VERSION ② 在 CHANGELOG 顶部新增一条（最新在最前）。
 // 升版后用户首次打开会在主页看到一次「更新提示」，并可点版本号查看完整日志。
 
-export const APP_VERSION = "1.16.7";
+export const APP_VERSION = "1.16.8";
 
 export interface ChangelogEntry {
   version: string;
@@ -11,6 +11,15 @@ export interface ChangelogEntry {
 }
 
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "1.16.8",
+    date: "2026-07-20",
+    items: [
+      "权限防御加固：通用号主数据就地编辑器绑定管理员会话与 bearer token；跨标签页切换账号会重挂页面，不沿用旧账号权限或数据",
+      "切换到另一个 PN、父型号或关闭编辑器后，前一个 PN 的迟到保存响应不会再关闭或刷新新的页面上下文",
+      "池管理列表同时遵守响应顶层与单行价格权限标记，任一层受限都不会显示约束价",
+    ],
+  },
   {
     version: "1.16.7",
     date: "2026-07-20",

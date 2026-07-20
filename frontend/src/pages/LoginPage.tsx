@@ -4,6 +4,21 @@ import { COLORS } from "../theme";
 import api from "../api";
 import LoginChangePasswordModal from "../components/LoginChangePasswordModal";
 
+interface LoginSessionData {
+  token: string;
+  role: string;
+  name?: string | null;
+  permissions?: Record<string, boolean> | null;
+}
+
+export function persistLoginSession(data: LoginSessionData) {
+  localStorage.setItem("role", data.role);
+  localStorage.setItem("name", data.name || data.role);
+  localStorage.setItem("permissions", JSON.stringify(data.permissions || {}));
+  // token 是跨标签页的会话提交标志；最后写，确保接收方读取到完整元数据。
+  localStorage.setItem("token", data.token);
+}
+
 export default function LoginPage({ onLogin }: { onLogin: (token: string) => void }) {
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
@@ -15,10 +30,7 @@ export default function LoginPage({ onLogin }: { onLogin: (token: string) => voi
     setErr(null);
     try {
       const { data } = await api.post("/auth/login", v);
-      localStorage.setItem("token", data.token);
-      localStorage.setItem("role", data.role);
-      localStorage.setItem("name", data.name || data.role);
-      localStorage.setItem("permissions", JSON.stringify(data.permissions || {}));
+      persistLoginSession(data);
       onLogin(data.token);
     } catch (e: any) {
       const status = e?.response?.status;

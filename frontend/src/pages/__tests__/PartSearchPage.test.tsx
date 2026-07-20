@@ -19,6 +19,12 @@ const fetchPoolReference = vi.fn();
 const masterCategories = vi.fn();
 const masterEdit = vi.fn();
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
 vi.mock("../../api/search", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../../api/search")>();
   return { ...mod,
@@ -42,6 +48,7 @@ vi.mock("../../api", () => {
 });
 
 import PartSearchPage from "../PartSearchPage";
+import InlinePartEditModal from "../../components/parts/InlinePartEditModal";
 
 const item = (over: Record<string, unknown> = {}) => ({
   part_id: 42, pn_std: "02311DYQ", description: "华为部件 DYQ", brand: "华为",
@@ -90,6 +97,7 @@ function renderAt(url: string) {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  localStorage.setItem("token", "admin-token");
   localStorage.setItem("role", "admin");
   unifiedSearch.mockResolvedValue(emptyResp);
   fetchOverview.mockResolvedValue(ovFix());
@@ -257,6 +265,34 @@ describe("浏览器历史", () => {
     await waitFor(() => expect(unifiedSearch).toHaveBeenCalledWith(
       "ST8000", expect.objectContaining({ pageSize: 20 })));
   });
+
+  it("A → 慢 B → A 时，B 的迟到响应不会覆盖已恢复的 A", async () => {
+    const delayedB = deferred<ReturnType<typeof ovFix>>();
+    const partA = {
+      ...ovFix(42, "PART-A"),
+      part: { ...ovFix(42, "PART-A").part, description: "父型号 A" },
+    };
+    const partB = {
+      ...ovFix(77, "PART-B"),
+      part: { ...ovFix(77, "PART-B").part, description: "父型号 B" },
+    };
+    fetchOverview.mockImplementation(async (key: any) =>
+      key.part_id === 77 ? delayedB.promise : partA);
+
+    renderAt("/parts?part_id=42");
+    expect(await screen.findByText("父型号 A")).toBeInTheDocument();
+    act(() => nav("/parts?part_id=77"));
+    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ part_id: 77 }));
+    act(() => nav("/parts?part_id=42"));
+    expect(screen.getByText("父型号 A")).toBeInTheDocument();
+
+    delayedB.resolve(partB);
+    await act(async () => { await delayedB.promise; });
+
+    expect(curLoc.search).toContain("part_id=42");
+    expect(screen.getByText("父型号 A")).toBeInTheDocument();
+    expect(screen.queryByText("父型号 B")).toBeNull();
+  });
 });
 
 describe("通用号 PN 就地编辑", () => {
@@ -342,7 +378,7 @@ describe("通用号 PN 就地编辑", () => {
       description: "新描述：2TB SAS 企业盘",
       category_major: "存储设备",
       category_minor: "硬盘",
-    }));
+    }, "admin-token"));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "就地编辑备件 SUB-001" })).toBeNull());
     expect(curLoc.search).toContain("part_id=42");
     expect(curLoc.search).not.toContain("pn=SUB-001");
@@ -364,5 +400,178 @@ describe("通用号 PN 就地编辑", () => {
     await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
     expect(screen.queryByText("就地编辑备件 SUB-001")).toBeNull();
     expect(masterEdit).not.toHaveBeenCalled();
+  });
+
+  it("非管理员即使被错误地要求打开就地编辑器，也不会加载或提交主数据", () => {
+    localStorage.setItem("role", "purchaser");
+
+    render(
+      <InlinePartEditModal
+        open
+        canEdit={false}
+        contextKey="parent-42"
+        pn="SUB-001"
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("dialog", { name: "就地编辑备件 SUB-001" })).toBeNull();
+    expect(fetchOverview).not.toHaveBeenCalled();
+    expect(masterCategories).not.toHaveBeenCalled();
+    expect(masterEdit).not.toHaveBeenCalled();
+  });
+
+  it("编辑器打开后 token 先切换，role 尚未更新时保存仍会失败关闭", async () => {
+    fetchOverview.mockResolvedValue(targetOverview);
+
+    render(
+      <InlinePartEditModal
+        open
+        canEdit
+        contextKey="parent-42"
+        pn="SUB-001"
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    await screen.findByDisplayValue("目标型号描述");
+    fireEvent.change(screen.getByLabelText("描述"), { target: { value: "不应提交" } });
+    localStorage.setItem("token", "purchaser-token");
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+
+    expect(masterEdit).not.toHaveBeenCalled();
+  });
+
+  it("旧型号保存迟到时，不会关闭或刷新后来打开的编辑会话", async () => {
+    const delayedSave = deferred<{ data: {
+      id: number; pn_std: string; updated: string[]; locked_fields: string[];
+    } }>();
+    const secondOverview = {
+      ...ovFix(100, "SUB-002"),
+      part: {
+        ...ovFix(100, "SUB-002").part,
+        description: "第二型号描述",
+        category_major: "服务器配件",
+        category_minor: "磁盘",
+      },
+    };
+    fetchOverview.mockImplementation(async (key: any) =>
+      key.pn_std === "SUB-002" ? secondOverview : targetOverview);
+    masterEdit.mockReturnValueOnce(delayedSave.promise);
+    const onClose = vi.fn();
+    const onSaved = vi.fn();
+
+    const view = render(
+      <InlinePartEditModal
+        open
+        canEdit
+        contextKey="parent-42"
+        pn="SUB-001"
+        onClose={onClose}
+        onSaved={onSaved}
+      />,
+    );
+    await screen.findByDisplayValue("目标型号描述");
+    fireEvent.change(screen.getByLabelText("描述"), { target: { value: "型号一新描述" } });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => expect(masterEdit).toHaveBeenCalled());
+
+    view.rerender(
+      <InlinePartEditModal
+        open
+        canEdit
+        contextKey="parent-42"
+        pn="SUB-002"
+        onClose={onClose}
+        onSaved={onSaved}
+      />,
+    );
+    expect(await screen.findByRole("dialog", { name: "就地编辑备件 SUB-002" })).toBeInTheDocument();
+    await screen.findByDisplayValue("第二型号描述");
+
+    delayedSave.resolve({
+      data: {
+        id: 99,
+        pn_std: "SUB-001",
+        updated: ["description"],
+        locked_fields: ["description"],
+      },
+    });
+    await act(async () => { await delayedSave.promise; });
+
+    expect(screen.getByRole("dialog", { name: "就地编辑备件 SUB-002" })).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it("保存期间切换父型号，旧响应不会把页面带回原父型号", async () => {
+    const delayedSave = deferred<{ data: {
+      id: number; pn_std: string; updated: string[]; locked_fields: string[];
+    } }>();
+    const secondParent = {
+      ...ovFix(77, "PARENT-2"),
+      part: { ...ovFix(77, "PARENT-2").part, description: "第二父型号" },
+    };
+    fetchOverview.mockImplementation(async (key: any) => {
+      if (key.pn_std === "SUB-001") return targetOverview;
+      if (key.part_id === 77) return secondParent;
+      return parentWithSubstitute;
+    });
+    masterEdit.mockReturnValueOnce(delayedSave.promise);
+
+    renderAt("/parts?part_id=42");
+    fireEvent.click(await screen.findByRole("button", { name: "编辑备件 SUB-001" }));
+    await screen.findByDisplayValue("目标型号描述");
+    fireEvent.change(screen.getByLabelText("描述"), { target: { value: "迟到保存" } });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => expect(masterEdit).toHaveBeenCalled());
+
+    act(() => nav("/parts?part_id=77"));
+    expect(await screen.findByText("第二父型号")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "就地编辑备件 SUB-001" })).toBeNull();
+
+    delayedSave.resolve({
+      data: {
+        id: 99,
+        pn_std: "SUB-001",
+        updated: ["description"],
+        locked_fields: ["description"],
+      },
+    });
+    await act(async () => { await delayedSave.promise; });
+
+    expect(curLoc.search).toContain("part_id=77");
+    expect(screen.getByText("第二父型号")).toBeInTheDocument();
+    expect(fetchOverview.mock.calls.filter(([key]) => key.part_id === 42)).toHaveLength(1);
+  });
+
+  it("保存成功后的父型号刷新迟到时，离开详情页不会复活旧型号", async () => {
+    const delayedRefresh = deferred<typeof parentWithSubstitute>();
+    let parentLoads = 0;
+    fetchOverview.mockImplementation(async (key: any) => {
+      if (key.pn_std === "SUB-001") return targetOverview;
+      if (key.part_id === 42) {
+        parentLoads += 1;
+        return parentLoads === 1 ? parentWithSubstitute : delayedRefresh.promise;
+      }
+      return ovFix();
+    });
+
+    renderAt("/parts?part_id=42");
+    fireEvent.click(await screen.findByRole("button", { name: "编辑备件 SUB-001" }));
+    await screen.findByDisplayValue("目标型号描述");
+    fireEvent.change(screen.getByLabelText("描述"), { target: { value: "已保存但刷新未回" } });
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() => expect(parentLoads).toBe(2));
+
+    act(() => nav("/parts"));
+    await screen.findByText("搜索并点击型号查看全景");
+    delayedRefresh.resolve(parentWithSubstitute);
+    await act(async () => { await delayedRefresh.promise; });
+
+    expect(curLoc.search).toBe("");
+    expect(screen.queryByText("型号全景：")).toBeNull();
   });
 });
