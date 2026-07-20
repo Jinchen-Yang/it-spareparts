@@ -271,11 +271,25 @@ describe("通用号 PN 就地编辑", () => {
     ...ovFix(99, "SUB-001"),
     part: {
       ...ovFix(99, "SUB-001").part,
-      description: "旧描述",
+      description: "目标型号描述",
       category_major: "服务器配件",
       category_minor: "磁盘",
     },
   };
+
+  it("管理员点击通用号 PN 查看目标型号，不会误入就地编辑", async () => {
+    fetchOverview.mockImplementation(async (key: any) =>
+      key.pn_std === "SUB-001" ? targetOverview : parentWithSubstitute);
+
+    renderAt("/parts?part_id=42");
+    fireEvent.click(await screen.findByRole("button", { name: "查看型号 SUB-001" }));
+
+    await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
+    await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
+    expect(await screen.findByText("目标型号描述")).toBeInTheDocument();
+    expect(screen.queryByText("就地编辑备件 SUB-001")).toBeNull();
+    expect(masterEdit).not.toHaveBeenCalled();
+  });
 
   it("管理员点击通用号 PN 就地修改描述和两级品类，保存后刷新当前型号而不跳页", async () => {
     fetchOverview.mockImplementation(async (key: any) =>
@@ -294,7 +308,15 @@ describe("通用号 PN 就地编辑", () => {
     });
 
     renderAt("/parts?part_id=42");
-    fireEvent.click(await screen.findByRole("button", { name: "编辑备件 SUB-001" }));
+    const viewButton = await screen.findByRole("button", { name: "查看型号 SUB-001" });
+    const editButton = screen.getByRole("button", { name: "编辑备件 SUB-001" });
+    expect(viewButton).toHaveAttribute("type", "button");
+    expect(editButton).toHaveAttribute("type", "button");
+    viewButton.focus();
+    expect(viewButton).toHaveFocus();
+    editButton.focus();
+    expect(editButton).toHaveFocus();
+    fireEvent.click(editButton);
 
     await screen.findByText("就地编辑备件 SUB-001");
     await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
@@ -330,7 +352,10 @@ describe("通用号 PN 就地编辑", () => {
       key.pn_std === "SUB-001" ? targetOverview : parentWithSubstitute);
 
     renderAt("/parts?part_id=42");
-    fireEvent.click(await screen.findByRole("button", { name: "查看型号 SUB-001" }));
+    const viewButton = await screen.findByRole("button", { name: "查看型号 SUB-001" });
+    expect(screen.queryByRole("button", { name: "编辑备件 SUB-001" })).toBeNull();
+    expect(screen.queryByText("就地编辑备件 SUB-001")).toBeNull();
+    fireEvent.click(viewButton);
 
     await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "SUB-001" }));
     await waitFor(() => expect(curLoc.search).toContain("part_id=99"));
