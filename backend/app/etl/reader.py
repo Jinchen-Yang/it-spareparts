@@ -107,6 +107,25 @@ def _coalesce_value_aliases(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
     return df
 
 
+def _ffill_head_columns(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
+    ffill_cols = [c for c in mapping.FFILL_COLS[file_type] if c in df.columns]
+    if not ffill_cols:
+        return df
+    boundary_cols = [
+        source for source, internal in mapping.MAPPINGS[file_type]["head"].items()
+        if internal in ("raw_order_id", "order_no") and source in df.columns
+    ]
+    if not boundary_cols:
+        return df
+    order_groups = (
+        df[boundary_cols].replace("", pd.NA).notna().any(axis=1).cumsum()
+    )
+    df[ffill_cols] = (
+        df[ffill_cols].replace("", pd.NA).groupby(order_groups, sort=False).ffill()
+    )
+    return df
+
+
 def _parse_frame(raw: pd.DataFrame, sheet_name: str) -> SheetData | None:
     """单 sheet：前 _HEADER_SCAN_ROWS 行内找「能识别出类型」的表头行；找不到 → None。
 
@@ -125,10 +144,7 @@ def _parse_frame(raw: pd.DataFrame, sheet_name: str) -> SheetData | None:
         df.columns = cols
         if not dup:
             df = _coalesce_value_aliases(df, file_type)
-            ffill_cols = [c for c in mapping.FFILL_COLS[file_type] if c in df.columns]
-            if ffill_cols:
-                # 仅填 NA、不覆盖已有值：续行主表空 → 补成所属订单（订单首行头字段非空，已实测）
-                df[ffill_cols] = df[ffill_cols].replace("", pd.NA).ffill()
+            df = _ffill_head_columns(df, file_type)
         anchor = _scan_anchor(raw, h) if file_type == mapping.EXPENSE else None
         return SheetData(sheet_name, df, file_type, anchor, dup)
     return None
