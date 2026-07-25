@@ -128,17 +128,34 @@ def _order_group_ids(
         raw_id = _identity_value(raw_value)
         order_no = _identity_value(order_value)
         has_identity = raw_id is not None or order_no is not None
-        conflicts = (
+        raw_matches = (
+            raw_id is not None
+            and current_raw is not None
+            and raw_id == current_raw
+        )
+        order_matches = (
+            order_no is not None
+            and current_order is not None
+            and order_no == current_order
+        )
+        raw_conflicts = (
             raw_id is not None
             and current_raw is not None
             and raw_id != current_raw
-        ) or (
+        )
+        order_conflicts = (
             order_no is not None
             and current_order is not None
             and order_no != current_order
         )
+        starts_new_group = has_identity and (
+            group_id == 0
+            or raw_conflicts
+            or order_conflicts
+            or not (raw_matches or order_matches)
+        )
 
-        if has_identity and (group_id == 0 or conflicts):
+        if starts_new_group:
             group_id += 1
             current_raw = raw_id
             current_order = order_no

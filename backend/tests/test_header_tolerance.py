@@ -84,7 +84,7 @@ def test_header_ffill_supports_a_single_identity_column(identity_column, identit
     ("raw_ids", "order_nos"),
     [
         ([None, "RAW-A", None], ["XSDD-A", "XSDD-A", None]),
-        (["RAW-A", None, None], [None, "XSDD-A", None]),
+        (["RAW-A", "RAW-A", None], [None, "XSDD-A", None]),
     ],
 )
 def test_header_ffill_supplements_identity_within_current_group(raw_ids, order_nos):
@@ -97,6 +97,29 @@ def test_header_ffill_supplements_identity_within_current_group(raw_ids, order_n
     filled = reader._ffill_head_columns(df, mapping.SALES)
 
     assert filled["业务类型#"].tolist() == ["备件销售", "备件销售", "备件销售"]
+
+
+@pytest.mark.parametrize(
+    ("raw_ids", "order_nos", "must_stay_empty"),
+    [
+        ([None, "RAW-B", None], ["XSDD-A", None, None], "订单编号(必填)"),
+        (["RAW-A", None, None], [None, "XSDD-B", None], "数据ID(不可修改)"),
+    ],
+)
+def test_header_ffill_does_not_join_complementary_unproven_identities(
+    raw_ids, order_nos, must_stay_empty,
+):
+    df = pd.DataFrame({
+        "数据ID(不可修改)": raw_ids,
+        "订单编号(必填)": order_nos,
+        "业务类型#": ["备件销售", None, None],
+    })
+
+    filled = reader._ffill_head_columns(df, mapping.SALES)
+
+    assert filled["业务类型#"].iloc[0] == "备件销售"
+    assert filled["业务类型#"].iloc[1:].isna().all()
+    assert filled[must_stay_empty].iloc[1:].isna().all()
 
 
 def _sales_xlsx(tmp_path, business_type_header, double_header, raw_order_id, business_type):
