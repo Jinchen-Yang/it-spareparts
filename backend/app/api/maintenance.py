@@ -6,8 +6,10 @@
 """
 import csv
 import io
+import re
 from datetime import date
 from decimal import Decimal
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
@@ -84,7 +86,31 @@ def _safe(v):
     return v
 
 
-def _csv_stream(header: list, rows: list, filename: str) -> StreamingResponse:
+_INVALID_DOWNLOAD_NAME = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
+_INVALID_ASCII_FALLBACK = re.compile(r"[^A-Za-z0-9._-]+")
+_RFC5987_SAFE = "!#$&+-.^_`|~"
+
+
+def _content_disposition(filename: str, ascii_fallback: str | None = None) -> str:
+    """生成纯 ASCII 下载响应头，同时保留 RFC 5987 UTF-8 文件名。"""
+    clean_name = _INVALID_DOWNLOAD_NAME.sub("_", filename).strip(" .") or "download"
+    fallback_source = ascii_fallback or clean_name
+    fallback = _INVALID_DOWNLOAD_NAME.sub("_", fallback_source)
+    fallback = fallback.encode("ascii", "ignore").decode()
+    fallback = _INVALID_ASCII_FALLBACK.sub("_", fallback).strip(" ._") or "download"
+    encoded_name = quote(clean_name, safe=_RFC5987_SAFE)
+    return (
+        f'attachment; filename="{fallback}"; '
+        f"filename*=UTF-8''{encoded_name}"
+    )
+
+
+def _csv_stream(
+    header: list,
+    rows: list,
+    filename: str,
+    ascii_fallback: str | None = None,
+) -> StreamingResponse:
     buf = io.StringIO()
     buf.write("﻿")  # BOM，Excel 正确识别 UTF-8
     w = csv.writer(buf)
@@ -94,7 +120,7 @@ def _csv_stream(header: list, rows: list, filename: str) -> StreamingResponse:
     buf.seek(0)
     return StreamingResponse(
         iter([buf.getvalue()]), media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers={"Content-Disposition": _content_disposition(filename, ascii_fallback)},
     )
 
 
@@ -164,7 +190,12 @@ def lines_export(
                      r["cost_tax_basis"], r["price_month"], r["trace_months"],
                      r["price_distance_days"],
                      _safe(r["linked_purchase_order_no"]), "、".join(r["anomaly_flags"] or [])])
-    return _csv_stream(header, rows, f"maintenance_lines_{project[:40]}.csv")
+    return _csv_stream(
+        header,
+        rows,
+        f"maintenance_lines_{project[:40]}.csv",
+        ascii_fallback="maintenance_lines.csv",
+    )
 
 
 @router.get("/board")
@@ -459,5 +490,8 @@ def export_workbook(
     buf.seek(0)
     return StreamingResponse(
         buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename=project_workbook_{contract[:40]}.xlsx"},
+        headers={"Content-Disposition": _content_disposition(
+            f"project_workbook_{contract[:40]}.xlsx",
+            ascii_fallback="project_workbook.xlsx",
+        )},
     )
