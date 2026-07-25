@@ -8,7 +8,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.etl import loader, mapping, reader
+from app.etl import loader, mapping, reader, sheet_selection
 from app.etl.reader import ReaderError
 from app.etl.transform import transform
 from app.models.system import SysImportBatch, SysImportError, SysRawFile
@@ -80,24 +80,33 @@ def run_import(session: Session, file_path: str, original_name: str,
     session.flush()  # 取 batch.id
 
     try:
-        sheets = reader.read_workbook(file_path)
-        if not sheets:
-            raise ReaderError("无法识别文件类型，请确认是采购/销售/库存/维保出库/报销明细导出文件")
+        inspected_sheets = reader.inspect_workbook(file_path)
+        selection = sheet_selection.select_workbook_sheets(inspected_sheets)
+        if not selection.selected:
+            raise ReaderError(
+                "无法识别文件类型，请确认是采购/销售/库存/维保出库/报销明细导出文件",
+                code="no_recognized_sheet",
+            )
+        selected_sheets = [
+            sheet.parsed for sheet in selection.selected if sheet.parsed is not None
+        ]
 
         # §17.5 调度：**有报销页才是项目追踪工作簿**——只吃报销页，其余可识别页
         # （系统导出的备件回填副本/手工粘贴件，非权威源）跳过并报告，防回环污染。
         # 没有报销页 → 老语义：导第一个可识别页（隐藏副本页/杂页不再拖垮整个文件），
         # 其余页在报告中列为 ignored_sheets 提示。
-        expense_sheets = [s for s in sheets if s.file_type == mapping.EXPENSE]
+        expense_sheets = [
+            sheet for sheet in selected_sheets if sheet.file_type == mapping.EXPENSE
+        ]
         if expense_sheets:
             primary = None
-            batch.file_type = "workbook" if len(sheets) > 1 else mapping.EXPENSE
+            batch.file_type = selection.file_type
             for s in expense_sheets:
                 reader.require_clean_columns(s)
         else:
-            primary = sheets[0]
+            primary = selected_sheets[0]
             reader.require_clean_columns(primary)
-            batch.file_type = primary.file_type
+            batch.file_type = selection.file_type
 
         storage_path = _archive(file_path, file_hash)
         session.add(SysRawFile(batch_id=batch.id, filename=original_name,
@@ -128,16 +137,16 @@ def run_import(session: Session, file_path: str, original_name: str,
             extra_report = {
                 "expense_sheets": [s.sheet_name for s in expense_sheets],
                 "skipped_sheets": [f"{s.sheet_name}（{s.file_type}，此类数据请用氚云原生导出单独上传）"
-                                   for s in sheets if s.file_type != mapping.EXPENSE],
+                                   for s in selection.ignored_recognized],
             }
             src_cols = list(expense_sheets[0].df.columns)
         else:
             result = transform(primary.df, primary.file_type)
             extra_report = {}
-            if len(sheets) > 1:
+            if selection.ignored_recognized:
                 extra_report["ignored_sheets"] = [
                     f"{s.sheet_name}（{s.file_type}，多页文件只导第一个可识别页）"
-                    for s in sheets[1:]
+                    for s in selection.ignored_recognized
                 ]
             src_cols = list(primary.df.columns)
 

@@ -20,7 +20,7 @@ from app.security import (
     require_page,
 )
 from app.services import inventory, maintenance_cost, master_data, profit
-from app.etl import mapping, pipeline, reader
+from app.etl import pipeline, precheck as import_precheck
 from app.etl.reader import ReaderError
 from app.models.system import SysImportBatch, SysImportError, SysImportJob
 
@@ -49,7 +49,7 @@ def _save_upload_to_temp(file: UploadFile, name: str) -> str:
             while chunk := file.file.read(1 << 20):
                 size += len(chunk)
                 if size > limit:
-                    raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE,
                                         f"{name} 超过 {MAX_UPLOAD_MB}MB 上限")
                 out.write(chunk)
     except Exception:
@@ -145,40 +145,28 @@ def precheck(
     files: list[UploadFile] = File(...),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """导入前预检（不导入、不建批次）：识别文件类型 + 采购/销售是否含价格列。
-
-    缺价格列（如导出视图选错）→ 前端弹二次确认，让用户确认是否仍要导入无金额数据。
-    """
+    """导入前预检（不导入、不建批次）：返回选表结果、风险等级与 v1 兼容字段。"""
     results = []
     for f in files:
         name = f.filename or "upload.xlsx"
         try:
             tmp = _save_upload_to_temp(f, name)
         except HTTPException as exc:
-            results.append({"filename": name, "file_type": None, "ok": False,
-                            "missing_price": False, "warning": exc.detail})
+            code = (
+                "file_too_large"
+                if exc.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+                else "invalid_file"
+            )
+            results.append(import_precheck.failed_file_result(name, code, str(exc.detail)))
             continue
         try:
-            cols, file_type = reader.peek_columns(tmp)
-            missing_price = not mapping.has_price_columns(cols, file_type)
-            if file_type is None:
-                warning = "无法识别文件类型（不是采购/销售/库存/维保出库导出文件？）"
-            elif missing_price:
-                warning = ("未识别到任何价格列（单价 / 金额 / 税）——导入后这些"
-                           "采购/销售单将没有金额，通常是导出视图选错。")
-            else:
-                warning = None
-            results.append({"filename": name, "file_type": file_type, "ok": warning is None,
-                            "missing_price": missing_price, "warning": warning})
+            results.append(import_precheck.inspect_file(tmp, name))
         except ReaderError as exc:
-            results.append({"filename": name, "file_type": None, "ok": False,
-                            "missing_price": False, "warning": str(exc)})
+            results.append(import_precheck.failed_file_result(name, exc.code, str(exc)))
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
-    return {"files": results,
-            "any_warning": any(not r["ok"] for r in results),
-            "missing_price_any": any(r["missing_price"] for r in results)}
+    return import_precheck.response(results)
 
 
 _NOTE_MAX = 4000          # 作业 note 总长上限：note 会整段渲染到导入页，绝不能无界
