@@ -157,7 +157,7 @@ describe("稳定深链", () => {
 });
 
 describe("精确即唯一", () => {
-  it("精确型号全景在历史卡片前显示近90天同源池价格参考卡", async () => {
+  it("精确型号全景保留近90天同源池价格参考卡", async () => {
     fetchPoolReference.mockResolvedValue({
       part_id: 42, pn_std: "02311DYQ",
       pool: { group_id: 7, name: "华为互通池", member_count: 8 },
@@ -184,6 +184,34 @@ describe("精确即唯一", () => {
     expect(await screen.findByRole("region", { name: "02311DYQ 的池价格参考" })).toBeInTheDocument();
     expect(screen.getByLabelText("采购参考")).toHaveTextContent("池均价 ¥500.00");
     expect(screen.getByLabelText("销售参考")).toHaveTextContent("池均价 ¥800.00");
+  });
+
+  it("订单历史按采购、销售顺序置顶，分别占满一整行，其他全景信息后置", async () => {
+    renderAt("/parts?part_id=42");
+
+    const purchaseHistory = await screen.findByRole("region", { name: "采购订单历史" });
+    const salesHistory = screen.getByRole("region", { name: "销售订单历史" });
+    const orderHistory = screen.getByRole("group", { name: "型号订单历史" });
+    const basicInfo = screen.getByRole("region", { name: "型号基本信息" });
+    const inventory = screen.getByRole("region", { name: "型号库存" });
+    const poolReference = await screen.findByRole("region", { name: "02311DYQ 的池价格参考" });
+
+    expect(purchaseHistory.compareDocumentPosition(salesHistory) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+    expect(salesHistory.compareDocumentPosition(basicInfo) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+    expect(salesHistory.compareDocumentPosition(poolReference) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+    expect(salesHistory.compareDocumentPosition(inventory) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+
+    expect(orderHistory).toHaveStyle({
+      display: "flex",
+      flexDirection: "column",
+      width: "100%",
+    });
+    expect(purchaseHistory).toHaveStyle({ width: "100%" });
+    expect(salesHistory).toHaveStyle({ width: "100%" });
   });
 
   it("精确命中：唯一主结果自动开全景；相似候选只在'相似型号'区，不混排", async () => {

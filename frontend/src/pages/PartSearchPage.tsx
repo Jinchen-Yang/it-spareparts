@@ -379,30 +379,56 @@ export default function PartSearchPage() {
         <Card loading={loadingOv} title={<>型号全景：<b>{ov.part.pn_std}</b>
           {ov.part.needs_review && <Tag color="orange" style={{ marginLeft: 8 }}>PN 待复核</Tag>}
           {ov.part.redirected_from && <Tag color="blue" style={{ marginLeft: 8 }}>由 {ov.part.redirected_from} 合并而来</Tag>}</>}>
-          <Descriptions bordered size="small" column={3} style={{ marginBottom: 16 }}>
-            <Descriptions.Item label="描述" span={3}>
-              <Space size={8} wrap>
-                <span>{ov.part.description || "-"}</span>
-                {canEditPartDetails && (
-                  <Tooltip title="修改描述和品类">
-                    <Button
-                      type="link"
-                      size="small"
-                      icon={<EditOutlined />}
-                      aria-label={`修改型号 ${ov.part.pn_std} 的描述和品类`}
-                      onClick={() => setInlineEditPn(ov.part.pn_std)}
-                      style={{ paddingInline: 0 }}
-                    >
-                      修改
-                    </Button>
-                  </Tooltip>
+          <div
+            role="group"
+            aria-label="型号订单历史"
+            style={{ display: "flex", flexDirection: "column", gap: 16, width: "100%", marginBottom: 16 }}
+          >
+            <section aria-label="采购订单历史" style={{ width: "100%" }}>
+              <Card title="采购历史(近20)" size="small">
+                <ResizableTable storageKey="search-ov-pur" rowKey={(r) => r.order_no + r.order_date} size="small" columns={purCols} dataSource={ov.purchases_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
+              </Card>
+            </section>
+            <section aria-label="销售订单历史" style={{ width: "100%" }}>
+              <Card title="销售历史(近20)" size="small">
+                {ov.sales_recent_restricted ? (
+                  <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description="按权限，销售逐单成交明细不可见；可参考下方平均售价与近期成交参考价"
+                  />
+                ) : (
+                  <ResizableTable storageKey="search-ov-sal" rowKey={(r) => r.order_no + r.order_date} size="small" columns={salCols} dataSource={ov.sales_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
                 )}
-              </Space>
-            </Descriptions.Item>
-            <Descriptions.Item label="品牌">{ov.part.brand || "-"}</Descriptions.Item>
-            <Descriptions.Item label="品类">{ov.part.category_major || "-"}</Descriptions.Item>
-            <Descriptions.Item label="规格">{ov.part.category_minor || "-"}</Descriptions.Item>
-          </Descriptions>
+              </Card>
+            </section>
+          </div>
+
+          <section aria-label="型号基本信息">
+            <Descriptions bordered size="small" column={3} style={{ marginBottom: 16 }}>
+              <Descriptions.Item label="描述" span={3}>
+                <Space size={8} wrap>
+                  <span>{ov.part.description || "-"}</span>
+                  {canEditPartDetails && (
+                    <Tooltip title="修改描述和品类">
+                      <Button
+                        type="link"
+                        size="small"
+                        icon={<EditOutlined />}
+                        aria-label={`修改型号 ${ov.part.pn_std} 的描述和品类`}
+                        onClick={() => setInlineEditPn(ov.part.pn_std)}
+                        style={{ paddingInline: 0 }}
+                      >
+                        修改
+                      </Button>
+                    </Tooltip>
+                  )}
+                </Space>
+              </Descriptions.Item>
+              <Descriptions.Item label="品牌">{ov.part.brand || "-"}</Descriptions.Item>
+              <Descriptions.Item label="品类">{ov.part.category_major || "-"}</Descriptions.Item>
+              <Descriptions.Item label="规格">{ov.part.category_minor || "-"}</Descriptions.Item>
+            </Descriptions>
+          </section>
 
           <div style={{ marginBottom: 16 }}>
             <PoolReferencePanel partId={ov.part.id} />
@@ -459,22 +485,24 @@ export default function PartSearchPage() {
             </Card></Col>
           </Row>
 
-          <Card size="small" style={{ marginBottom: 16 }}
-                title={<Space size={10}>库存
-                  {ov.stock_dynamic && (
-                    <span style={{ fontWeight: 400, fontSize: 13 }}>
-                      动态可用 <b style={{ color: (ov.stock_dynamic.dynamic_qty ?? 0) < 0 ? "var(--mb-danger)" : "var(--mb-accent, #2f5b7c)" }}>
-                        {ov.stock_dynamic.dynamic_qty ?? 0}</b>
-                      <span style={{ color: "var(--mb-text-3)", fontSize: 12 }}>
-                        （期初{ov.stock_dynamic.anchor_qty ?? 0}{ov.stock_dynamic.anchor_date ? `@${ov.stock_dynamic.anchor_date}` : ""} +入{ov.stock_dynamic.in_qty ?? 0} −出{(ov.stock_dynamic.out_sales ?? 0) + (ov.stock_dynamic.out_maint ?? 0)}；下表分仓为快照参考）
+          <section aria-label="型号库存">
+            <Card size="small" style={{ marginBottom: 16 }}
+                  title={<Space size={10}>库存
+                    {ov.stock_dynamic && (
+                      <span style={{ fontWeight: 400, fontSize: 13 }}>
+                        动态可用 <b style={{ color: (ov.stock_dynamic.dynamic_qty ?? 0) < 0 ? "var(--mb-danger)" : "var(--mb-accent, #2f5b7c)" }}>
+                          {ov.stock_dynamic.dynamic_qty ?? 0}</b>
+                        <span style={{ color: "var(--mb-text-3)", fontSize: 12 }}>
+                          （期初{ov.stock_dynamic.anchor_qty ?? 0}{ov.stock_dynamic.anchor_date ? `@${ov.stock_dynamic.anchor_date}` : ""} +入{ov.stock_dynamic.in_qty ?? 0} −出{(ov.stock_dynamic.out_sales ?? 0) + (ov.stock_dynamic.out_maint ?? 0)}；下表分仓为快照参考）
+                        </span>
                       </span>
-                    </span>
-                  )}
-                </Space>}>
-            {/* 合并后同仓可有多行（不同源 pn），rowKey 不能用 warehouse */}
-            <ResizableTable storageKey="search-ov-inv" rowKey={(_, i) => String(i)} size="small" columns={invCols} dataSource={ov.inventory} pagination={false}
-              locale={{ emptyText: "无库存" }} />
-          </Card>
+                    )}
+                  </Space>}>
+              {/* 合并后同仓可有多行（不同源 pn），rowKey 不能用 warehouse */}
+              <ResizableTable storageKey="search-ov-inv" rowKey={(_, i) => String(i)} size="small" columns={invCols} dataSource={ov.inventory} pagination={false}
+                locale={{ emptyText: "无库存" }} />
+            </Card>
+          </section>
 
           <Card size="small" style={{ marginBottom: 16 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center",
@@ -553,25 +581,6 @@ export default function PartSearchPage() {
             )}
           </Card>
 
-          <Row gutter={16}>
-            <Col xs={24} lg={12}>
-              <Card title="采购历史(近20)" size="small">
-                <ResizableTable storageKey="search-ov-pur" rowKey={(r) => r.order_no + r.order_date} size="small" columns={purCols} dataSource={ov.purchases_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
-              </Card>
-            </Col>
-            <Col xs={24} lg={12}>
-              <Card title="销售历史(近20)" size="small">
-                {ov.sales_recent_restricted ? (
-                  <Empty
-                    image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description="按权限，销售逐单成交明细不可见；可参考上方平均售价与近期成交参考价"
-                  />
-                ) : (
-                  <ResizableTable storageKey="search-ov-sal" rowKey={(r) => r.order_no + r.order_date} size="small" columns={salCols} dataSource={ov.sales_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
-                )}
-              </Card>
-            </Col>
-          </Row>
         </Card>
       ) : error ? (
         <Alert
