@@ -1,7 +1,7 @@
 /**
  * 池分析详情页（独立深链 /pool-analysis/:groupId，可刷新/前进后退）：
- * 池信息 + 人工约束价 → 成员 PN 表 → 采购/销售横向柱状排名（平均/合计切换，高到低）
- * → 采购订单板块 + 销售订单板块（点单号看订单内容）。
+ * 池信息 + 人工约束价 → 成员 PN 表 → 采购订单板块 + 销售订单板块（点单号看订单内容）
+ * → 默认折叠的成员采购/销售价格区间。
  * 时间窗口 from/to 写入 URL；订单板块分页也入 URL（刷新不丢位置）。
  */
 import { useMemo, useState, type ReactNode } from "react";
@@ -119,6 +119,7 @@ export default function PoolAnalysisPage() {
   const salesPage = readPage(sp, "spg");
   const [orderModal, setOrderModal] = useState<{ side: "purchase" | "sales"; orderId: number } | null>(null);
   const [memberDetail, setMemberDetail] = useState<PoolAnalysisMember | null>(null);
+  const [priceRangeExpanded, setPriceRangeExpanded] = useState(false);
 
   const patch = (next: Record<string, string | number | null>, replace = true) => {
     const merged = new URLSearchParams(sp);
@@ -435,6 +436,7 @@ export default function PoolAnalysisPage() {
   const windowNote = d?.window
     ? `统计窗口：${d.window.date_from ?? "全部历史"} ~ ${d.window.date_to ?? d.window.as_of}（as of ${d.window.as_of}）`
     : "";
+  const priceRangeTitle = `成员${focusSide === "purchase" ? "采购" : "销售"}价格区间`;
 
   return (
     <div data-testid="pool-analysis-page"
@@ -534,104 +536,126 @@ export default function PoolAnalysisPage() {
             )}
           </Card>
 
-          {/* DEV-09A：股票式最低—最高价格区间 + 等价数据表；采购/销售由页头方向切换。 */}
-          <Card size="small" style={{ marginBottom: 16, minWidth: 0 }}
-            title={<span>成员{focusSide === "purchase" ? "采购" : "销售"}价格区间
-              <Tag color="processing" style={{ marginInlineStart: 8 }}>当前关注</Tag></span>}
-            extra={<div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-              <Segmented size="small" aria-label="价格图区间排序"
-                value={priceSort} disabled={priceMap?.price_restricted || local.governance}
-                options={[
-                  { label: "PN", value: "pn" }, { label: "加权均价", value: "weighted_avg" },
-                  { label: "约束差额", value: "constraint_delta" },
-                  { label: "最近日期", value: "latest_date" },
-                ]}
-                onChange={(value) => patch({ price_sort: String(value),
-                  price_order: value === "pn" ? "asc" : "desc" }, false)} />
-              <Button size="small" aria-label="切换价格图排序方向"
-                disabled={priceMap?.price_restricted || local.governance}
-                onClick={() => patch({ price_order: priceOrder === "asc" ? "desc" : "asc" }, false)}>
-                {priceOrder === "asc" ? "升序 ↑" : "降序 ↓"}
-              </Button>
-            </div>}>
-            {priceMapError || priceMapScopeMismatch ? <Alert type="error" showIcon
-              message={priceMapScopeMismatch
-                ? "价格区间响应范围与当前筛选不一致，请重试"
-                : `价格区间加载失败：${priceMapError}`}
-              action={<Button size="small" onClick={reloadPriceMap}>重试</Button>} />
-              : priceMap ? <PoolPnPriceMap key={currentPriceMapScopeKey}
-                data={priceMap} loading={priceMapLoading}
-                isMobile={isMobile}
-                onPartOpen={(partId) => navigate(poolAnalysisPartPath(
-                  partId, partNavigationContext,
-                ))} />
-                : <div style={{ ...MUTED, padding: 32, textAlign: "center" }}>
-                    {priceMapLoading ? "正在加载价格区间…" : "窗口内暂无价格数据"}
-                  </div>}
-          </Card>
-
           {/* 成员 PN 表 */}
-          <Card size="small" style={{ marginBottom: 16 }} title="成员型号（窗口指标）">
-            {isMobile ? (
-              <List<PoolAnalysisMember>
-                loading={loading}
-                dataSource={focusedMembers}
-                locale={{ emptyText: "池内暂无成员" }}
-                renderItem={(member) => (
-                  <List.Item key={member.part_id}
-                    {...activatableProps(
-                      () => setMemberDetail(member),
-                      `查看成员 ${member.pn_std || `#${member.part_id}`} 价格详情`,
-                    )}
-                    style={{ cursor: "pointer", paddingInline: 2 }}>
-                    <div style={{ width: "100%", minWidth: 0 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
-                        <span style={{ fontFamily: "monospace", fontWeight: 600, overflowWrap: "anywhere" }}>
-                          {member.pn_std || `#${member.part_id}`}
-                        </span>
-                        <span>
-                          {member.brand && <Tag>{member.brand}</Tag>}
-                          {focusPn && member.pn_std?.toLocaleUpperCase() === focusPn.toLocaleUpperCase()
-                            && <Tag color="processing">当前型号</Tag>}
-                        </span>
+          <section aria-label="成员型号">
+            <Card size="small" style={{ marginBottom: 16 }} title="成员型号（窗口指标）">
+              {isMobile ? (
+                <List<PoolAnalysisMember>
+                  loading={loading}
+                  dataSource={focusedMembers}
+                  locale={{ emptyText: "池内暂无成员" }}
+                  renderItem={(member) => (
+                    <List.Item key={member.part_id}
+                      {...activatableProps(
+                        () => setMemberDetail(member),
+                        `查看成员 ${member.pn_std || `#${member.part_id}`} 价格详情`,
+                      )}
+                      style={{ cursor: "pointer", paddingInline: 2 }}>
+                      <div style={{ width: "100%", minWidth: 0 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                          <span style={{ fontFamily: "monospace", fontWeight: 600, overflowWrap: "anywhere" }}>
+                            {member.pn_std || `#${member.part_id}`}
+                          </span>
+                          <span>
+                            {member.brand && <Tag>{member.brand}</Tag>}
+                            {focusPn && member.pn_std?.toLocaleUpperCase() === focusPn.toLocaleUpperCase()
+                              && <Tag color="processing">当前型号</Tag>}
+                          </span>
+                        </div>
+                        {member.description && <div style={{ ...MUTED, marginTop: 4 }}>{member.description}</div>}
+                        <div style={{ marginTop: 6, fontSize: 13 }}>{mobileMemberSummary(member, "purchase")}</div>
+                        <div style={{ marginTop: 3, fontSize: 13 }}>{mobileMemberSummary(member, "sales")}</div>
                       </div>
-                      {member.description && <div style={{ ...MUTED, marginTop: 4 }}>{member.description}</div>}
-                      <div style={{ marginTop: 6, fontSize: 13 }}>{mobileMemberSummary(member, "purchase")}</div>
-                      <div style={{ marginTop: 3, fontSize: 13 }}>{mobileMemberSummary(member, "sales")}</div>
-                    </div>
-                  </List.Item>
-                )}
-              />
-            ) : (
-              <Table<PoolAnalysisMember> size="small" rowKey="part_id" pagination={false}
-                loading={loading} dataSource={focusedMembers} columns={memberCols} scroll={{ x: 980 }}
-                locale={{ emptyText: "池内暂无成员" }} />
-            )}
-          </Card>
+                    </List.Item>
+                  )}
+                />
+              ) : (
+                <Table<PoolAnalysisMember> size="small" rowKey="part_id" pagination={false}
+                  loading={loading} dataSource={focusedMembers} columns={memberCols} scroll={{ x: 980 }}
+                  locale={{ emptyText: "池内暂无成员" }} />
+              )}
+            </Card>
+          </section>
 
           {/* 采购订单板块 */}
-          <Card size="small" style={{ marginBottom: 16 }} title="采购订单（池内成员，窗口内已生效）">
-            {isMobile ? mobileOrders("purchase") : (
-              <Table<PoolAnalysisOrderLine> size="small" rowKey="line_id" loading={loading}
-                dataSource={d?.purchase_orders?.items ?? []} columns={orderCols("purchase")}
-                scroll={{ x: 1000 }} locale={{ emptyText: "窗口内暂无采购记录" }}
-                pagination={orderPagination("purchase")} />
-            )}
-          </Card>
+          <section aria-label="采购订单">
+            <Card size="small" style={{ marginBottom: 16 }} title="采购订单（池内成员，窗口内已生效）">
+              {isMobile ? mobileOrders("purchase") : (
+                <Table<PoolAnalysisOrderLine> size="small" rowKey="line_id" loading={loading}
+                  dataSource={d?.purchase_orders?.items ?? []} columns={orderCols("purchase")}
+                  scroll={{ x: 1000 }} locale={{ emptyText: "窗口内暂无采购记录" }}
+                  pagination={orderPagination("purchase")} />
+              )}
+            </Card>
+          </section>
 
           {/* 销售订单板块 */}
-          <Card size="small" style={{ marginBottom: 16 }} title="销售订单（池内成员，窗口内已生效）">
-            {d?.sales_orders?.restricted ? (
-              <Alert type="info" showIcon message="当前账号无逐单销售明细查看权限（仅聚合可见）。" />
-            ) : isMobile ? (
-              mobileOrders("sales")
-            ) : (
-              <Table<PoolAnalysisOrderLine> size="small" rowKey="line_id" loading={loading}
-                dataSource={d?.sales_orders?.items ?? []} columns={orderCols("sales")}
-                scroll={{ x: 1000 }} locale={{ emptyText: "窗口内暂无销售记录" }}
-                pagination={orderPagination("sales")} />
-            )}
-          </Card>
+          <section aria-label="销售订单">
+            <Card size="small" style={{ marginBottom: 16 }} title="销售订单（池内成员，窗口内已生效）">
+              {d?.sales_orders?.restricted ? (
+                <Alert type="info" showIcon message="当前账号无逐单销售明细查看权限（仅聚合可见）。" />
+              ) : isMobile ? (
+                mobileOrders("sales")
+              ) : (
+                <Table<PoolAnalysisOrderLine> size="small" rowKey="line_id" loading={loading}
+                  dataSource={d?.sales_orders?.items ?? []} columns={orderCols("sales")}
+                  scroll={{ x: 1000 }} locale={{ emptyText: "窗口内暂无销售记录" }}
+                  pagination={orderPagination("sales")} />
+              )}
+            </Card>
+          </section>
+
+          {/* DEV-09A：低优先级价格区间置底并默认折叠；采购/销售仍由页头方向切换。 */}
+          <section aria-label={priceRangeTitle}>
+            <Card size="small" style={{ marginBottom: 16, minWidth: 0 }}
+              title={<span>{priceRangeTitle}
+                <Tag color="processing" style={{ marginInlineStart: 8 }}>当前关注</Tag></span>}
+              extra={<Button size="small" type="text"
+                aria-label={`${priceRangeExpanded ? "收起" : "展开"}${priceRangeTitle}`}
+                aria-expanded={priceRangeExpanded}
+                aria-controls="pool-price-range-content"
+                onClick={() => setPriceRangeExpanded((expanded) => !expanded)}>
+                {priceRangeExpanded ? "收起" : "展开"}
+              </Button>}>
+              {priceRangeExpanded && (
+                <div id="pool-price-range-content">
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap",
+                    justifyContent: "flex-end", marginBottom: 12 }}>
+                    <Segmented size="small" aria-label="价格图区间排序"
+                      value={priceSort} disabled={priceMap?.price_restricted || local.governance}
+                      options={[
+                        { label: "PN", value: "pn" }, { label: "加权均价", value: "weighted_avg" },
+                        { label: "约束差额", value: "constraint_delta" },
+                        { label: "最近日期", value: "latest_date" },
+                      ]}
+                      onChange={(value) => patch({ price_sort: String(value),
+                        price_order: value === "pn" ? "asc" : "desc" }, false)} />
+                    <Button size="small" aria-label="切换价格图排序方向"
+                      disabled={priceMap?.price_restricted || local.governance}
+                      onClick={() => patch({
+                        price_order: priceOrder === "asc" ? "desc" : "asc",
+                      }, false)}>
+                      {priceOrder === "asc" ? "升序 ↑" : "降序 ↓"}
+                    </Button>
+                  </div>
+                  {priceMapError || priceMapScopeMismatch ? <Alert type="error" showIcon
+                    message={priceMapScopeMismatch
+                      ? "价格区间响应范围与当前筛选不一致，请重试"
+                      : `价格区间加载失败：${priceMapError}`}
+                    action={<Button size="small" onClick={reloadPriceMap}>重试</Button>} />
+                    : priceMap ? <PoolPnPriceMap key={currentPriceMapScopeKey}
+                      data={priceMap} loading={priceMapLoading}
+                      isMobile={isMobile}
+                      onPartOpen={(partId) => navigate(poolAnalysisPartPath(
+                        partId, partNavigationContext,
+                      ))} />
+                      : <div style={{ ...MUTED, padding: 32, textAlign: "center" }}>
+                          {priceMapLoading ? "正在加载价格区间…" : "窗口内暂无价格数据"}
+                        </div>}
+                </div>
+              )}
+            </Card>
+          </section>
 
         </>
       )}

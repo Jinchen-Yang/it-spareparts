@@ -160,6 +160,14 @@ function renderAt(url: string) {
   );
 }
 
+async function expandPriceRange() {
+  const button = await screen.findByRole("button", {
+    name: /展开成员(?:采购|销售)价格区间/,
+  });
+  fireEvent.click(button);
+  expect(button).toHaveAttribute("aria-expanded", "true");
+}
+
 let currentPath = "";
 function LocationProbe() {
   const location = useLocation();
@@ -215,6 +223,37 @@ beforeEach(() => {
         manual_limit_delta: -10, manual_limit_delta_pct: -0.1 }] }] } });
 });
 afterEach(cleanup);
+
+describe("页面信息层级", () => {
+  it("成员、采购订单、销售订单先于底部价格区间，且价格区间默认折叠", async () => {
+    renderAt("/pool-analysis/12");
+    const memberSection = await screen.findByRole("region", { name: "成员型号" });
+    const purchaseSection = screen.getByRole("region", { name: "采购订单" });
+    const salesSection = screen.getByRole("region", { name: "销售订单" });
+    const priceRangeSection = screen.getByRole("region", { name: "成员采购价格区间" });
+
+    expect(memberSection.compareDocumentPosition(purchaseSection)
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(purchaseSection.compareDocumentPosition(salesSection)
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(salesSection.compareDocumentPosition(priceRangeSection)
+      & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole("button", { name: "展开成员采购价格区间" }))
+      .toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("price-map-stub")).toBeNull();
+    expect(screen.queryByLabelText("价格图区间排序")).toBeNull();
+    expect(screen.queryByRole("button", { name: "切换价格图排序方向" })).toBeNull();
+    await waitFor(() => expect(fetchPoolPriceMap).toHaveBeenCalled());
+  });
+
+  it("主动展开后恢复价格图与原排序能力", async () => {
+    renderAt("/pool-analysis/12");
+    await expandPriceRange();
+    expect(await screen.findByTestId("price-map-stub")).toHaveAttribute("data-side", "purchase");
+    expect(screen.getByLabelText("价格图区间排序")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "切换价格图排序方向" })).toBeEnabled();
+  });
+});
 
 describe("深链与取数", () => {
   it("没有自定义日期时按 range 深链重放统计窗口", async () => {
@@ -334,12 +373,14 @@ describe("股票式价格区间图", () => {
       side: "sales", range: "365d", purchase_type: "补库", employee: "张三",
       sort: "pn", order: "asc",
     }));
+    await expandPriceRange();
     expect(await screen.findByTestId("price-map-stub")).toHaveAttribute("data-side", "sales");
   });
 
   it("桌面图中型号一次点击进入全景，并携带完整池分析上下文", async () => {
     renderAt("/pool-analysis/12?from=2026-06-01&to=2026-06-30&side=purchase&purchase_type=补库&employee=张三&price_sort=weighted_avg&price_order=desc");
     await screen.findByText("内存互通池");
+    await expandPriceRange();
     fireEvent.click(await screen.findByRole("button", { name: "查看图中型号全景" }));
     expect(await screen.findByText("型号查询页桩")).toBeInTheDocument();
     const query = new URLSearchParams(currentPath.split("?")[1]);
@@ -356,6 +397,7 @@ describe("股票式价格区间图", () => {
   it("移动端图形先开固定卡，卡片按钮再携上下文进入型号全景", async () => {
     breakpoint.mockReturnValue({ xs: true, sm: false, md: false, lg: false, xl: false, xxl: false });
     renderAt("/pool-analysis/12?range=365d&side=sales&employee=李四");
+    await expandPriceRange();
     const map = await screen.findByTestId("price-map-stub");
     expect(map).toHaveAttribute("data-mobile", "true");
     fireEvent.click(within(map).getByRole("button", { name: "查看图中型号全景" }));
@@ -376,6 +418,7 @@ describe("股票式价格区间图", () => {
     });
     renderAt("/pool-analysis/12?side=purchase");
     await screen.findByText("内存互通池");
+    await expandPriceRange();
     fireEvent.click(within(screen.getByLabelText("当前关注方向")).getByText("销售"));
     await waitFor(() => expect(screen.getByTestId("price-map-stub")).toHaveAttribute("data-side", "sales"));
     await act(async () => releasePurchase?.(PRICE_MAP));
@@ -392,6 +435,7 @@ describe("股票式价格区间图", () => {
       return Promise.resolve(PRICE_MAP);
     });
     renderAt("/pool-analysis/12?side=purchase");
+    await expandPriceRange();
     const purchaseMap = await screen.findByTestId("price-map-stub");
     fireEvent.click(within(purchaseMap).getByRole("button", { name: "选择 PN-A" }));
     expect(within(purchaseMap).getByTestId("price-map-selected")).toHaveTextContent("PN-A");
@@ -410,6 +454,7 @@ describe("股票式价格区间图", () => {
 
   it("价格图排序和方向进入 URL 驱动请求", async () => {
     renderAt("/pool-analysis/12");
+    await expandPriceRange();
     await screen.findByTestId("price-map-stub");
     fireEvent.click(within(screen.getByLabelText("价格图区间排序")).getByText("加权均价"));
     await waitFor(() => expect(fetchPoolPriceMap).toHaveBeenLastCalledWith(12,
@@ -483,6 +528,7 @@ describe("治理权限", () => {
 
     renderAt("/pool-analysis/12?side=purchase");
     await screen.findByText("内存互通池");
+    await expandPriceRange();
     expect(screen.getByTestId("price-map-stub")).toHaveAttribute("data-restricted", "false");
     expect(screen.getAllByText("无池价格权限").length).toBeGreaterThanOrEqual(4);
     expect(screen.queryByText(/¥90|¥100|¥105/)).toBeNull();
@@ -510,7 +556,12 @@ describe("治理权限", () => {
     renderAt("/pool-analysis/12");
     await screen.findByText("内存互通池");
     expect(screen.getAllByText("无池价格权限").length).toBeGreaterThanOrEqual(4);
+    await expandPriceRange();
     expect(screen.getByTestId("price-map-stub")).toHaveAttribute("data-restricted", "true");
+    for (const option of within(screen.getByLabelText("价格图区间排序")).getAllByRole("radio")) {
+      expect(option).toBeDisabled();
+    }
+    expect(screen.getByRole("button", { name: "切换价格图排序方向" })).toBeDisabled();
     expect(screen.queryByText(/¥3,760/)).toBeNull();
     expect(screen.queryByText("未设置")).toBeNull();
   });
