@@ -379,29 +379,29 @@ export default function PartSearchPage() {
         <Card loading={loadingOv} title={<>型号全景：<b>{ov.part.pn_std}</b>
           {ov.part.needs_review && <Tag color="orange" style={{ marginLeft: 8 }}>PN 待复核</Tag>}
           {ov.part.redirected_from && <Tag color="blue" style={{ marginLeft: 8 }}>由 {ov.part.redirected_from} 合并而来</Tag>}</>}>
-          <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-            <Col span={24}>
-              <section aria-label="采购订单历史">
-                <Card title="采购历史(近20)" size="small">
-                  <ResizableTable storageKey="search-ov-pur" rowKey={(r) => r.order_no + r.order_date} size="small" columns={purCols} dataSource={ov.purchases_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
-                </Card>
-              </section>
-            </Col>
-            <Col span={24}>
-              <section aria-label="销售订单历史">
-                <Card title="销售历史(近20)" size="small">
-                  {ov.sales_recent_restricted ? (
-                    <Empty
-                      image={Empty.PRESENTED_IMAGE_SIMPLE}
-                      description="按权限，销售逐单成交明细不可见；可参考下方平均售价与近期成交参考价"
-                    />
-                  ) : (
-                    <ResizableTable storageKey="search-ov-sal" rowKey={(r) => r.order_no + r.order_date} size="small" columns={salCols} dataSource={ov.sales_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
-                  )}
-                </Card>
-              </section>
-            </Col>
-          </Row>
+          <div
+            role="group"
+            aria-label="型号订单历史"
+            style={{ display: "flex", flexDirection: "column", gap: 16, width: "100%", marginBottom: 16 }}
+          >
+            <section aria-label="采购订单历史" style={{ width: "100%" }}>
+              <Card title="采购历史(近20)" size="small">
+                <ResizableTable storageKey="search-ov-pur" rowKey={(r) => r.order_no + r.order_date} size="small" columns={purCols} dataSource={ov.purchases_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
+              </Card>
+            </section>
+            <section aria-label="销售订单历史" style={{ width: "100%" }}>
+              <Card title="销售历史(近20)" size="small">
+                {ov.sales_recent_restricted ? (
+                  <Empty
+                    image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    description="按权限，销售逐单成交明细不可见；可参考下方平均售价与近期成交参考价"
+                  />
+                ) : (
+                  <ResizableTable storageKey="search-ov-sal" rowKey={(r) => r.order_no + r.order_date} size="small" columns={salCols} dataSource={ov.sales_recent} pagination={false} scroll={{ x: 600, y: 280 }} />
+                )}
+              </Card>
+            </section>
+          </div>
 
           <section aria-label="型号基本信息">
             <Descriptions bordered size="small" column={3} style={{ marginBottom: 16 }}>

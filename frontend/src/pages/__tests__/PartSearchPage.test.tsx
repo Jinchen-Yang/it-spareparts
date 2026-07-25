@@ -191,6 +191,7 @@ describe("精确即唯一", () => {
 
     const purchaseHistory = await screen.findByRole("region", { name: "采购订单历史" });
     const salesHistory = screen.getByRole("region", { name: "销售订单历史" });
+    const orderHistory = screen.getByRole("group", { name: "型号订单历史" });
     const basicInfo = screen.getByRole("region", { name: "型号基本信息" });
     const inventory = screen.getByRole("region", { name: "型号库存" });
     const poolReference = await screen.findByRole("region", { name: "02311DYQ 的池价格参考" });
@@ -204,13 +205,13 @@ describe("精确即唯一", () => {
     expect(salesHistory.compareDocumentPosition(inventory) & Node.DOCUMENT_POSITION_FOLLOWING)
       .toBeTruthy();
 
-    const purchaseColumn = purchaseHistory.closest(".ant-col");
-    const salesColumn = salesHistory.closest(".ant-col");
-    expect(purchaseColumn).toHaveClass("ant-col-24");
-    expect(salesColumn).toHaveClass("ant-col-24");
-    expect(purchaseColumn).not.toHaveClass("ant-col-lg-12");
-    expect(salesColumn).not.toHaveClass("ant-col-lg-12");
-    expect(purchaseColumn?.parentElement).toBe(salesColumn?.parentElement);
+    expect(orderHistory).toHaveStyle({
+      display: "flex",
+      flexDirection: "column",
+      width: "100%",
+    });
+    expect(purchaseHistory).toHaveStyle({ width: "100%" });
+    expect(salesHistory).toHaveStyle({ width: "100%" });
   });
 
   it("精确命中：唯一主结果自动开全景；相似候选只在'相似型号'区，不混排", async () => {
