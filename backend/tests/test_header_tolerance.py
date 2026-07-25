@@ -1,7 +1,10 @@
 """列名容差归一：氚云非标导出视图让列丢 (必填) 注解（实测 #25 采购订单整文件 empty_pn）。"""
 import openpyxl
+import pytest
+from sqlalchemy import select
 
-from app.etl import mapping, reader
+from app.etl import mapping, pipeline, reader, transform
+from app.models.sales import FSalesOrder
 
 
 def test_canonicalize_columns():
@@ -53,3 +56,50 @@ def test_reader_canonicalizes_bare_headers(tmp_path):
     assert "明细.产品名称(必填)" in df.columns
     assert "采购单号(必填)" in df.columns
     assert df["明细.产品名称(必填)"].iloc[0] == "ST8000NM000A"
+
+
+def _sales_xlsx(tmp_path, business_type_header, double_header, raw_order_id, business_type):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    headers = [
+        "订单编号", "数据ID(不可修改)", business_type_header,
+        "订单明细.数据ID(不可修改)", "订单明细.产品名称",
+        "订单明细.订单数量", "订单明细.单价", "订单明细.金额",
+    ]
+    if double_header:
+        ws.append([f"F000000{i}" for i in range(1, len(headers) + 1)])
+    ws.append(headers)
+    ws.append([
+        f"XSDD-{raw_order_id}", raw_order_id, business_type,
+        f"{raw_order_id}-LINE", "ST8000NM000A", "1", "100", "100",
+    ])
+    path = tmp_path / f"{raw_order_id}.xlsx"
+    wb.save(path)
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    ("business_type_header", "double_header", "raw_order_id", "business_type"),
+    [
+        ("业务类型", False, "SALES-BARE", "备件销售"),
+        ("业务类型#", True, "SALES-TRITIUM", "整机销售"),
+    ],
+)
+def test_sales_business_type_survives_transform_and_load(
+    db, tmp_path, business_type_header, double_header, raw_order_id, business_type,
+):
+    path = _sales_xlsx(
+        tmp_path, business_type_header, double_header, raw_order_id, business_type,
+    )
+    df, file_type = reader.read_excel(path)
+    result = transform.transform(df, file_type)
+
+    assert file_type == mapping.SALES
+    assert result.orders[raw_order_id]["business_type"] == business_type
+
+    pipeline.run_import(db, path, f"{raw_order_id}.xlsx")
+    loaded = db.scalar(
+        select(FSalesOrder).where(FSalesOrder.raw_order_id == raw_order_id)
+    )
+    assert loaded is not None
+    assert loaded.business_type == business_type
