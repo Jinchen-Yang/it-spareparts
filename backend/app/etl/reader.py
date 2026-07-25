@@ -2,6 +2,8 @@
 多 sheet 工作簿逐页探测（§17.5）。"""
 import re
 from collections import Counter
+from collections.abc import Iterable
+from itertools import repeat
 from typing import NamedTuple
 
 import pandas as pd
@@ -107,6 +109,50 @@ def _coalesce_value_aliases(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
     return df
 
 
+def _identity_value(value: object) -> object | None:
+    if value is None or pd.isna(value) or value == "":
+        return None
+    return value
+
+
+def _order_group_ids(
+    raw_ids: Iterable[object],
+    order_nos: Iterable[object],
+) -> list[int]:
+    current_raw = None
+    current_order = None
+    group_id = 0
+    groups: list[int] = []
+
+    for raw_value, order_value in zip(raw_ids, order_nos, strict=True):
+        raw_id = _identity_value(raw_value)
+        order_no = _identity_value(order_value)
+        has_identity = raw_id is not None or order_no is not None
+        conflicts = (
+            raw_id is not None
+            and current_raw is not None
+            and raw_id != current_raw
+        ) or (
+            order_no is not None
+            and current_order is not None
+            and order_no != current_order
+        )
+
+        if has_identity and (group_id == 0 or conflicts):
+            group_id += 1
+            current_raw = raw_id
+            current_order = order_no
+        else:
+            if raw_id is not None and current_raw is None:
+                current_raw = raw_id
+            if order_no is not None and current_order is None:
+                current_order = order_no
+
+        groups.append(group_id)
+
+    return groups
+
+
 def _ffill_head_columns(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
     ffill_cols = [c for c in mapping.FFILL_COLS[file_type] if c in df.columns]
     if not ffill_cols:
@@ -117,24 +163,18 @@ def _ffill_head_columns(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
     }
     if not identity_cols:
         return df
-    empty_ids = pd.Series(pd.NA, index=df.index, dtype=object)
-    raw_ids = (
-        df[identity_cols["raw_order_id"]].replace("", pd.NA)
-        if "raw_order_id" in identity_cols else empty_ids
+    raw_ids: Iterable[object] = (
+        df[identity_cols["raw_order_id"]].array
+        if "raw_order_id" in identity_cols else repeat(None, len(df))
     )
-    order_nos = (
-        df[identity_cols["order_no"]].replace("", pd.NA)
-        if "order_no" in identity_cols else empty_ids
+    order_nos: Iterable[object] = (
+        df[identity_cols["order_no"]].array
+        if "order_no" in identity_cols else repeat(None, len(df))
     )
-    raw_id_changed = (
-        raw_ids.notna() & raw_ids.ne(raw_ids.ffill().shift()).fillna(True)
+    order_groups = pd.Series(
+        _order_group_ids(raw_ids, order_nos),
+        index=df.index,
     )
-    order_no_changed = (
-        raw_ids.isna()
-        & order_nos.notna()
-        & order_nos.ne(order_nos.ffill().shift()).fillna(True)
-    )
-    order_groups = (raw_id_changed | order_no_changed).cumsum()
     df[ffill_cols] = (
         df[ffill_cols].replace("", pd.NA).groupby(order_groups, sort=False).ffill()
     )
