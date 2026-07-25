@@ -132,11 +132,7 @@ def _transform_orders(df: pd.DataFrame, file_type: str) -> TransformResult:
 
 def _build_head(row, file_type, inv_head, row_no, res) -> dict:
     def g(internal):
-        value = row.get(inv_head[internal]) if internal in inv_head else None
-        if (internal == "business_type" and file_type == mapping.SALES
-                and cleaner.clean_str(value) is None):
-            return row.get("业务类型")
-        return value
+        return row.get(inv_head[internal]) if internal in inv_head else None
 
     try:
         order_date = cleaner.parse_date(g("order_date"))

@@ -92,6 +92,21 @@ def _scan_anchor(raw: pd.DataFrame, upto: int) -> str | None:
     return None
 
 
+def _coalesce_value_aliases(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
+    for target, aliases in mapping.VALUE_ALIASES.get(file_type, {}).items():
+        present_aliases = [alias for alias in aliases if alias in df.columns]
+        if target not in df.columns and not present_aliases:
+            continue
+        values = (df[target].replace("", pd.NA) if target in df.columns
+                  else pd.Series(pd.NA, index=df.index, dtype=object))
+        for alias in present_aliases:
+            values = values.combine_first(df[alias].replace("", pd.NA))
+        df[target] = values
+        if present_aliases:
+            df = df.drop(columns=present_aliases)
+    return df
+
+
 def _parse_frame(raw: pd.DataFrame, sheet_name: str) -> SheetData | None:
     """单 sheet：前 _HEADER_SCAN_ROWS 行内找「能识别出类型」的表头行；找不到 → None。
 
@@ -109,6 +124,7 @@ def _parse_frame(raw: pd.DataFrame, sheet_name: str) -> SheetData | None:
         df = raw.iloc[h + 1:].reset_index(drop=True)
         df.columns = cols
         if not dup:
+            df = _coalesce_value_aliases(df, file_type)
             ffill_cols = [c for c in mapping.FFILL_COLS[file_type] if c in df.columns]
             if ffill_cols:
                 # 仅填 NA、不覆盖已有值：续行主表空 → 补成所属订单（订单首行头字段非空，已实测）

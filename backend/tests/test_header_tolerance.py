@@ -78,6 +78,33 @@ def _sales_xlsx(tmp_path, business_type_header, double_header, raw_order_id, bus
     return str(path)
 
 
+def _sales_xlsx_with_business_type_aliases(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    headers = [
+        "订单编号", "数据ID(不可修改)", "业务类型#", "业务类型",
+        "订单明细.数据ID(不可修改)", "订单明细.产品名称",
+        "订单明细.订单数量", "订单明细.单价", "订单明细.金额",
+    ]
+    ws.append([f"F000000{i}" for i in range(1, len(headers) + 1)])
+    ws.append(headers)
+    ws.append([
+        "XSDD-SALES-A", "SALES-A", "标准A", "裸A",
+        "SALES-A-LINE", "ST8000NM000A", "1", "100", "100",
+    ])
+    ws.append([
+        "XSDD-SALES-B", "SALES-B", None, "裸B",
+        "SALES-B-LINE-1", "ST8000NM000B", "1", "200", "200",
+    ])
+    ws.append([
+        None, None, None, None,
+        "SALES-B-LINE-2", "ST8000NM000C", "1", "300", "300",
+    ])
+    path = tmp_path / "sales-business-type-aliases.xlsx"
+    wb.save(path)
+    return str(path)
+
+
 @pytest.mark.parametrize(
     ("business_type_header", "double_header", "raw_order_id", "business_type"),
     [
@@ -95,6 +122,9 @@ def test_sales_business_type_survives_transform_and_load(
     result = transform.transform(df, file_type)
 
     assert file_type == mapping.SALES
+    assert "业务类型#" in df.columns
+    assert "业务类型" not in df.columns
+    assert df["业务类型#"].tolist() == [business_type]
     assert result.orders[raw_order_id]["business_type"] == business_type
 
     pipeline.run_import(db, path, f"{raw_order_id}.xlsx")
@@ -103,3 +133,23 @@ def test_sales_business_type_survives_transform_and_load(
     )
     assert loaded is not None
     assert loaded.business_type == business_type
+
+
+def test_sales_business_type_aliases_coalesce_before_ffill(db, tmp_path):
+    path = _sales_xlsx_with_business_type_aliases(tmp_path)
+    df, file_type = reader.read_excel(path)
+    result = transform.transform(df, file_type)
+
+    assert file_type == mapping.SALES
+    assert "业务类型" not in df.columns
+    assert df["业务类型#"].tolist() == ["标准A", "裸B", "裸B"]
+    assert result.orders["SALES-A"]["business_type"] == "标准A"
+    assert result.orders["SALES-B"]["business_type"] == "裸B"
+
+    pipeline.run_import(db, path, "sales-business-type-aliases.xlsx")
+    loaded = dict(db.execute(
+        select(FSalesOrder.raw_order_id, FSalesOrder.business_type).where(
+            FSalesOrder.raw_order_id.in_(["SALES-A", "SALES-B"])
+        )
+    ).all())
+    assert loaded == {"SALES-A": "标准A", "SALES-B": "裸B"}
