@@ -126,7 +126,7 @@ export function buildMetricBarOption(
     grid: { left: 8, right: scrollable ? 96 : 80, top: 8, bottom: 28, containLabel: true },
     tooltip: {
       trigger: "item",
-      confine: true, // 同 BusinessTrendChart：配合容器 overflow:hidden
+      confine: true, // 配合容器 overflow:hidden，避免 tooltip 撑宽页面
       formatter: (params: unknown) => {
         const item = resolveMetricBarClick(params, sorted);
         return item ? formatMetricBarTooltip(item, mode, metric) : "";

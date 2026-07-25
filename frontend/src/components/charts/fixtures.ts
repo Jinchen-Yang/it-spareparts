@@ -1,10 +1,9 @@
-import type { BusinessTrendPoint } from "./BusinessTrendChart";
 import type { MetricBarItem } from "./HorizontalMetricBar";
 
 /**
  * 图表组件固定演示数据：种子伪随机（mulberry32），任何机器任何时刻生成的
  * 数值逐位一致——demo 截图可复现、测试可精确断言。
- * 后续 BossBoardPage 接真数据时，本文件只供 chart-demo 与测试引用，不进生产包。
+ * 本文件只供 chart-demo 与测试引用，不进生产包。
  */
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -18,89 +17,6 @@ function mulberry32(seed: number): () => number {
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
-
-/** 120 天日粒度趋势：周内节律 + 三段缺数据（null 断点）+ 若干负毛利日 + 同环比。 */
-export function trendDailyFixture(): BusinessTrendPoint[] {
-  const rand = mulberry32(20260714);
-  const points: BusinessTrendPoint[] = [];
-  const start = new Date(2026, 2, 1); // 2026-03-01
-  for (let i = 0; i < 120; i++) {
-    const d = new Date(start.getTime() + i * 86400000);
-    const period = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-    // 三段人为断档：验证 null 画成断点而非 0
-    if ((i >= 22 && i <= 24) || i === 67 || i === 100) {
-      points.push({ period, sales_ex_tax: null, purchase_ex_tax: null, gross_profit: null });
-      continue;
-    }
-    const weekday = d.getDay();
-    const weekFactor = weekday === 0 || weekday === 6 ? 0.35 : 1;
-    const sales = Math.round((42000 + 30000 * rand() + i * 120) * weekFactor);
-    const purchase = Math.round((30000 + 26000 * rand() + i * 90) * weekFactor);
-    // 约 1/8 的天亏损（大单亏价出货）：验证负毛利变色 + 0 轴参考线
-    const lossDay = rand() < 0.125;
-    const profit = lossDay
-      ? -Math.round(2000 + 9000 * rand())
-      : Math.round(sales * (0.08 + 0.1 * rand()));
-    points.push({
-      period,
-      sales_ex_tax: sales,
-      purchase_ex_tax: purchase,
-      gross_profit: profit,
-      compare: {
-        sales_ex_tax: { yoy: 0.4 * rand() - 0.1, mom: 0.2 * rand() - 0.1 },
-        gross_profit: { yoy: 0.6 * rand() - 0.25, mom: 0.3 * rand() - 0.15 },
-      },
-    });
-  }
-  return points;
-}
-
-/** 周粒度：由日数据聚合（ISO 周标签沿用"YYYY-Www"形态）。 */
-export function trendWeeklyFixture(): BusinessTrendPoint[] {
-  const daily = trendDailyFixture();
-  const weeks = new Map<string, BusinessTrendPoint[]>();
-  daily.forEach((p, i) => {
-    const key = `2026-W${pad(Math.floor(i / 7) + 9)}`;
-    if (!weeks.has(key)) weeks.set(key, []);
-    weeks.get(key)!.push(p);
-  });
-  return [...weeks.entries()].map(([period, pts]) => {
-    const sum = (k: "sales_ex_tax" | "purchase_ex_tax" | "gross_profit") => {
-      const vals = pts.map((p) => p[k]).filter((v): v is number => v != null);
-      return vals.length ? vals.reduce((a, b) => a + b, 0) : null;
-    };
-    return {
-      period,
-      sales_ex_tax: sum("sales_ex_tax"),
-      purchase_ex_tax: sum("purchase_ex_tax"),
-      gross_profit: sum("gross_profit"),
-    };
-  });
-}
-
-/** 月粒度。 */
-export function trendMonthlyFixture(): BusinessTrendPoint[] {
-  const daily = trendDailyFixture();
-  const months = new Map<string, BusinessTrendPoint[]>();
-  daily.forEach((p) => {
-    const key = p.period.slice(0, 7);
-    if (!months.has(key)) months.set(key, []);
-    months.get(key)!.push(p);
-  });
-  return [...months.entries()].map(([period, pts]) => {
-    const sum = (k: "sales_ex_tax" | "purchase_ex_tax" | "gross_profit") => {
-      const vals = pts.map((p) => p[k]).filter((v): v is number => v != null);
-      return vals.length ? vals.reduce((a, b) => a + b, 0) : null;
-    };
-    return {
-      period,
-      sales_ex_tax: sum("sales_ex_tax"),
-      purchase_ex_tax: sum("purchase_ex_tax"),
-      gross_profit: sum("gross_profit"),
-      compare: { sales_ex_tax: { yoy: 0.18, mom: 0.05 }, gross_profit: { yoy: -0.07, mom: 0.02 } },
-    };
-  });
-}
 
 const PN_POOL = [
   ["00Y2684", "IBM 600GB 10K 6Gbps SAS 2.5英寸 G2HS 硬盘"],

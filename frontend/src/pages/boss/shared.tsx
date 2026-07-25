@@ -3,7 +3,7 @@
  * 权限三态渲染（无权限 ≠ 暂无数据 ≠ 未设置）、价格参考状态标签。
  *
  * URL 是筛选的唯一真值源：刷新/复制链接/前进后退都从 URL 重放。
- * 筛选变化 push 进历史（后退可恢复），展示偏好（粒度/成本法）replace 不堆历史。
+ * 筛选变化 push 进历史（后退可恢复），展示偏好（成本法）replace 不堆历史。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -11,7 +11,7 @@ import { Tag, Tooltip } from "antd";
 import dayjs from "dayjs";
 import type { ReferenceStatus } from "../../api";
 import {
-  ISO_DATE_FORMAT, isStrictIsoDate, strictIsoDateOrNull, strictIsoDateRange,
+  ISO_DATE_FORMAT, strictIsoDateOrNull, strictIsoDateRange,
 } from "../../utils/date";
 import { EMPTY, moneyExact } from "../../utils/format";
 
@@ -30,10 +30,6 @@ export interface BoardFilters {
   poolId: number | null;
   salesperson: string | null;
   purchaser: string | null;
-  /** 趋势图点击下钻：订单块的日期覆盖窗口 */
-  drillFrom: string | null;
-  drillTo: string | null;
-  granularity: "day" | "week" | "month";
   costMethod: "moving_avg" | "fifo";
 }
 
@@ -70,11 +66,20 @@ function readDateParam(sp: URLSearchParams, key: string): string | null {
 export function useBoardFilters() {
   const [sp, setSp] = useSearchParams();
 
+  useEffect(() => {
+    const merged = new URLSearchParams(sp);
+    let removed = false;
+    for (const key of ["od_from", "od_to", "gran"]) {
+      if (merged.has(key)) {
+        merged.delete(key);
+        removed = true;
+      }
+    }
+    if (removed) setSp(merged, { replace: true });
+  }, [sp, setSp]);
+
   const filters: BoardFilters = useMemo(() => {
     const rawRange = sp.get("range") as RangeKey | null;
-    const drillWindow = strictIsoDateRange(
-      readDateParam(sp, "od_from"), readDateParam(sp, "od_to"),
-    );
     return {
       rangeKey: rawRange && RANGE_KEYS.includes(rawRange) ? rawRange : "30d",
       from: readDateParam(sp, "from"),
@@ -84,25 +89,14 @@ export function useBoardFilters() {
       poolId: readIntParam(sp, "pool"),
       salesperson: sp.get("sp") || null,
       purchaser: sp.get("buyer") || null,
-      // 下钻必须是完整正向闭区间；半开/逆序/坏日期整体失效，绝不下发。
-      drillFrom: drillWindow?.from ?? null,
-      drillTo: drillWindow?.to ?? null,
-      granularity: (["day", "week", "month"].includes(sp.get("gran") || "") ? sp.get("gran") : "day") as BoardFilters["granularity"],
       costMethod: sp.get("cost") === "fifo" ? "fifo" : "moving_avg",
     };
   }, [sp]);
 
-  /** 全局统计窗口（KPI/趋势/榜/池），订单块另叠 drill 覆盖 */
+  /** 全局统计窗口（KPI/订单/榜/池）。 */
   const dateRange = useMemo(
     () => rangeToDates(filters.rangeKey, filters.from, filters.to),
     [filters.rangeKey, filters.from, filters.to]);
-
-  /** 订单块窗口：趋势点击下钻优先于全局时间 */
-  const ordersRange: DateRange = useMemo(
-    () => (filters.drillFrom && filters.drillTo
-      ? { date_from: filters.drillFrom, date_to: filters.drillTo }
-      : dateRange),
-    [filters.drillFrom, filters.drillTo, dateRange]);
 
   /** 增量改 URL。筛选变化 push 进历史（前进/后退可恢复）；replace=true 用于展示偏好。 */
   const patch = useCallback((next: Record<string, string | number | null | undefined>,
@@ -116,21 +110,19 @@ export function useBoardFilters() {
   }, [sp, setSp]);
 
   const clearAll = useCallback(() => {
-    // 清除筛选：回到默认 30 天全量视角（保留展示偏好 gran/cost）
+    // 清除筛选：回到默认 30 天全量视角（保留成本法展示偏好）
     const merged = new URLSearchParams();
-    const gran = sp.get("gran"); const cost = sp.get("cost");
-    if (gran) merged.set("gran", gran);
+    const cost = sp.get("cost");
     if (cost) merged.set("cost", cost);
     setSp(merged, { replace: false });
   }, [sp, setSp]);
 
-  // granularity/costMethod 是展示偏好，clearAll 会保留；其余范围/业务条件都应可清除。
+  // costMethod 是展示偏好，clearAll 会保留；其余范围/业务条件都应可清除。
   const hasFilter = filters.rangeKey !== "30d" || !!(filters.from || filters.to
     || filters.partId || filters.poolId || filters.salesperson
-    || filters.purchaser || filters.drillFrom || filters.drillTo
-    || sp.has("od_from") || sp.has("od_to"));
+    || filters.purchaser);
 
-  return { filters, dateRange, ordersRange, patch, clearAll, hasFilter };
+  return { filters, dateRange, patch, clearAll, hasFilter };
 }
 
 // ---------------------------------------------------------------- 竞态守卫取数
@@ -274,27 +266,6 @@ export function orderReferenceSummary(
 }
 
 // ---------------------------------------------------------------- 杂项
-
-/** 趋势点击下钻：桶末不得越过全局 date_to 或今天。 */
-export function drillRangeOf(
-  period: string,
-  granularity: "day" | "week" | "month",
-  bounds: { dateFrom?: string; dateTo?: string; today?: string } = {},
-): { from: string; to: string } {
-  const bucketStart = dayjs(period);
-  let start = bucketStart;
-  let end = granularity === "week" ? bucketStart.add(6, "day")
-    : granularity === "month" ? bucketStart.endOf("month") : bucketStart;
-  if (isStrictIsoDate(bounds.dateFrom)) {
-    const lower = dayjs(bounds.dateFrom);
-    if (start.isBefore(lower, "day")) start = lower;
-  }
-  const today = isStrictIsoDate(bounds.today) ? dayjs(bounds.today) : dayjs().startOf("day");
-  const caps = [today, ...(isStrictIsoDate(bounds.dateTo) ? [dayjs(bounds.dateTo)] : [])];
-  for (const cap of caps) if (end.isAfter(cap, "day")) end = cap;
-  if (end.isBefore(start, "day")) end = start;
-  return { from: start.format(D), to: end.format(D) };
-}
 
 /** 互通池详情唯一深链构造器：所有入口一致保留当前统计窗口。 */
 export function poolAnalysisPath(groupId: number, range?: DateRange): string {

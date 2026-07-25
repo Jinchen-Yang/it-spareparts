@@ -2,10 +2,9 @@
  * 老板经营看板 v2（UI 重排）：
  * ① 全局筛选栏（时间/PN/池/人员，URL 同步可深链可前进后退）
  * ② 最近采购 + 最近销售（订单级 PN 明细前置，优先于榜单）
- * ③ 专业经营趋势（BusinessTrendChart，点击联动订单）
- * ④ 互通池列表（表头合计↔均价循环切换）
- * ⑤ 池分析详情 → 独立深链页 /pool-analysis/:groupId
- * ⑥ 赚钱榜/亏钱榜（下沉到页面后部）
+ * ③ 互通池列表（表头合计↔均价循环切换）
+ * ④ 池分析详情 → 独立深链页 /pool-analysis/:groupId
+ * ⑤ 赚钱榜/亏钱榜（下沉到页面后部）
  *
  * 竞态守卫：所有板块经 useGuardedFetch 代次守卫，快速切筛选时旧响应不覆盖新数据。
  * 权限：本地权限首渲染先行 + 响应旗标并集（只收紧）；无权限与暂无数据严格分离。
@@ -20,7 +19,6 @@ import MorningDisciplineSummary from "./boss/MorningDisciplineSummary";
 import OrdersBlock from "./boss/OrdersBlock";
 import PoolsBlock from "./boss/PoolsBlock";
 import RankingBlock from "./boss/RankingBlock";
-import TrendBlock from "./boss/TrendBlock";
 import { MUTED, useBoardFilters, useGuardedFetch, useLocalRestrictions } from "./boss/shared";
 
 function KpiStrip({ k }: { k: DashboardKpi }) {
@@ -47,7 +45,7 @@ function KpiStrip({ k }: { k: DashboardKpi }) {
 }
 
 export default function BossBoardPage() {
-  const { filters, dateRange, ordersRange, patch, clearAll, hasFilter } = useBoardFilters();
+  const { filters, dateRange, patch, clearAll, hasFilter } = useBoardFilters();
   const local = useLocalRestrictions();
 
   const kpi = useGuardedFetch<DashboardKpi>(() => dashboardKpi(dateRange), [dateRange]);
@@ -61,12 +59,11 @@ export default function BossBoardPage() {
   }, [filters.partId, filters.partPn, filters.poolId]);
 
   const ordersScope = useMemo(() => {
-    const bits = [`${ordersRange.date_from} ~ ${ordersRange.date_to}`, ...filterBits];
+    const bits = [`${dateRange.date_from} ~ ${dateRange.date_to}`, ...filterBits];
     if (filters.purchaser) bits.push(`采购员 ${filters.purchaser}`);
     if (filters.salesperson) bits.push(`销售员 ${filters.salesperson}`);
-    if (filters.drillFrom) bits.push("（趋势选中期）");
     return bits.join(" · ");
-  }, [ordersRange, filterBits, filters.purchaser, filters.salesperson, filters.drillFrom]);
+  }, [dateRange, filterBits, filters.purchaser, filters.salesperson]);
 
   const rankingScope = useMemo(
     () => [`${dateRange.date_from} ~ ${dateRange.date_to}`, ...filterBits].join(" · "),
@@ -113,24 +110,21 @@ export default function BossBoardPage() {
         localGovernanceRestricted={local.governance} />
 
       {/* ② 最近采购 / 最近销售（PN 明细前置） */}
-      <OrdersBlock side="purchase" range={ordersRange}
+      <OrdersBlock side="purchase" range={dateRange}
         partId={filters.partId} poolId={filters.poolId} person={filters.purchaser}
         scopeNote={ordersScope}
         localProfitRestricted={local.profit} localCostRestricted={local.cost} />
-      <OrdersBlock side="sales" range={ordersRange}
+      <OrdersBlock side="sales" range={dateRange}
         partId={filters.partId} poolId={filters.poolId} person={filters.salesperson}
         scopeNote={ordersScope}
         localProfitRestricted={local.profit} localCostRestricted={local.cost} />
 
-      {/* ③ 专业经营趋势 */}
-      <TrendBlock filters={filters} dateRange={dateRange} patch={patch} />
-
-      {/* ④ 互通池列表（详情 → /pool-analysis/:groupId 独立深链页） */}
+      {/* ③ 互通池列表（详情 → /pool-analysis/:groupId 独立深链页） */}
       <PoolsBlock dateRange={dateRange} scopeNote={poolsScope}
         localCostRestricted={local.cost} localGovernanceRestricted={local.governance}
         canOpenPoolManagement={local.poolManagement} />
 
-      {/* ⑥ 赚钱榜 / 亏钱榜（下沉） */}
+      {/* ⑤ 赚钱榜 / 亏钱榜（下沉） */}
       <RankingBlock filters={filters} dateRange={dateRange} patch={patch}
         kpi={kpi.data} scopeNote={rankingScope}
         localProfitRestricted={local.profit} localCostRestricted={local.cost} />
