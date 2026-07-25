@@ -132,6 +132,29 @@ def _sales_xlsx_with_empty_new_order_business_type(tmp_path):
     return str(path)
 
 
+def _sales_xlsx_with_repeated_order_identity(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    headers = [
+        "订单编号", "数据ID(不可修改)", "业务类型#", "业务类型",
+        "订单明细.数据ID(不可修改)", "订单明细.产品名称",
+        "订单明细.订单数量", "订单明细.单价", "订单明细.金额",
+    ]
+    ws.append([f"F000000{i}" for i in range(1, len(headers) + 1)])
+    ws.append(headers)
+    ws.append([
+        "XSDD-SALES-REPEATED", "SALES-REPEATED", "备件销售", None,
+        "SALES-REPEATED-LINE-1", "ST8000NM000A", "1", "100", "100",
+    ])
+    ws.append([
+        "XSDD-SALES-REPEATED", "SALES-REPEATED", None, None,
+        "SALES-REPEATED-LINE-2", "ST8000NM000B", "1", "200", "200",
+    ])
+    path = tmp_path / "sales-repeated-order-identity.xlsx"
+    wb.save(path)
+    return str(path)
+
+
 @pytest.mark.parametrize(
     ("business_type_header", "double_header", "raw_order_id", "business_type"),
     [
@@ -200,3 +223,20 @@ def test_sales_business_type_does_not_ffill_across_orders(db, tmp_path):
         )
     ).all())
     assert loaded == {"SALES-A": "标准A", "SALES-B": None}
+
+
+def test_sales_business_type_ffills_when_order_identity_repeats(db, tmp_path):
+    path = _sales_xlsx_with_repeated_order_identity(tmp_path)
+    df, file_type = reader.read_excel(path)
+    result = transform.transform(df, file_type)
+
+    assert file_type == mapping.SALES
+    assert df["业务类型#"].tolist() == ["备件销售", "备件销售"]
+    assert result.orders["SALES-REPEATED"]["business_type"] == "备件销售"
+
+    pipeline.run_import(db, path, "sales-repeated-order-identity.xlsx")
+    loaded = db.scalar(
+        select(FSalesOrder).where(FSalesOrder.raw_order_id == "SALES-REPEATED")
+    )
+    assert loaded is not None
+    assert loaded.business_type == "备件销售"

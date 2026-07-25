@@ -111,15 +111,30 @@ def _ffill_head_columns(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
     ffill_cols = [c for c in mapping.FFILL_COLS[file_type] if c in df.columns]
     if not ffill_cols:
         return df
-    boundary_cols = [
-        source for source, internal in mapping.MAPPINGS[file_type]["head"].items()
+    identity_cols = {
+        internal: source for source, internal in mapping.MAPPINGS[file_type]["head"].items()
         if internal in ("raw_order_id", "order_no") and source in df.columns
-    ]
-    if not boundary_cols:
+    }
+    if not identity_cols:
         return df
-    order_groups = (
-        df[boundary_cols].replace("", pd.NA).notna().any(axis=1).cumsum()
+    empty_ids = pd.Series(pd.NA, index=df.index, dtype=object)
+    raw_ids = (
+        df[identity_cols["raw_order_id"]].replace("", pd.NA)
+        if "raw_order_id" in identity_cols else empty_ids
     )
+    order_nos = (
+        df[identity_cols["order_no"]].replace("", pd.NA)
+        if "order_no" in identity_cols else empty_ids
+    )
+    raw_id_changed = (
+        raw_ids.notna() & raw_ids.ne(raw_ids.ffill().shift()).fillna(True)
+    )
+    order_no_changed = (
+        raw_ids.isna()
+        & order_nos.notna()
+        & order_nos.ne(order_nos.ffill().shift()).fillna(True)
+    )
+    order_groups = (raw_id_changed | order_no_changed).cumsum()
     df[ffill_cols] = (
         df[ffill_cols].replace("", pd.NA).groupby(order_groups, sort=False).ffill()
     )
