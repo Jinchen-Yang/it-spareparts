@@ -158,6 +158,12 @@ MAPPINGS = {
     INVENTORY: {"head": {}, "line": INVENTORY_MAP},
 }
 
+VALUE_ALIASES = {
+    SALES: {
+        "业务类型#": ("业务类型",),
+    },
+}
+
 # ffill 的头字段（原始中文列名）—— 库存无
 FFILL_COLS = {
     PURCHASE: list(PURCHASE_HEAD.keys()),

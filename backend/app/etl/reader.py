@@ -2,6 +2,8 @@
 多 sheet 工作簿逐页探测（§17.5）。"""
 import re
 from collections import Counter
+from collections.abc import Iterable
+from itertools import repeat
 from typing import NamedTuple
 
 import pandas as pd
@@ -92,6 +94,110 @@ def _scan_anchor(raw: pd.DataFrame, upto: int) -> str | None:
     return None
 
 
+def _coalesce_value_aliases(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
+    for target, aliases in mapping.VALUE_ALIASES.get(file_type, {}).items():
+        present_aliases = [alias for alias in aliases if alias in df.columns]
+        if target not in df.columns and not present_aliases:
+            continue
+        values = (df[target].replace("", pd.NA) if target in df.columns
+                  else pd.Series(pd.NA, index=df.index, dtype=object))
+        for alias in present_aliases:
+            values = values.combine_first(df[alias].replace("", pd.NA))
+        df[target] = values
+        if present_aliases:
+            df = df.drop(columns=present_aliases)
+    return df
+
+
+def _identity_value(value: object) -> object | None:
+    if value is None or pd.isna(value) or value == "":
+        return None
+    return value
+
+
+def _order_group_ids(
+    raw_ids: Iterable[object],
+    order_nos: Iterable[object],
+) -> list[int]:
+    current_raw = None
+    current_order = None
+    group_id = 0
+    groups: list[int] = []
+
+    for raw_value, order_value in zip(raw_ids, order_nos, strict=True):
+        raw_id = _identity_value(raw_value)
+        order_no = _identity_value(order_value)
+        has_identity = raw_id is not None or order_no is not None
+        raw_matches = (
+            raw_id is not None
+            and current_raw is not None
+            and raw_id == current_raw
+        )
+        order_matches = (
+            order_no is not None
+            and current_order is not None
+            and order_no == current_order
+        )
+        raw_conflicts = (
+            raw_id is not None
+            and current_raw is not None
+            and raw_id != current_raw
+        )
+        order_conflicts = (
+            order_no is not None
+            and current_order is not None
+            and order_no != current_order
+        )
+        starts_new_group = has_identity and (
+            group_id == 0
+            or raw_conflicts
+            or order_conflicts
+            or not (raw_matches or order_matches)
+        )
+
+        if starts_new_group:
+            group_id += 1
+            current_raw = raw_id
+            current_order = order_no
+        else:
+            if raw_id is not None and current_raw is None:
+                current_raw = raw_id
+            if order_no is not None and current_order is None:
+                current_order = order_no
+
+        groups.append(group_id)
+
+    return groups
+
+
+def _ffill_head_columns(df: pd.DataFrame, file_type: str) -> pd.DataFrame:
+    ffill_cols = [c for c in mapping.FFILL_COLS[file_type] if c in df.columns]
+    if not ffill_cols:
+        return df
+    identity_cols = {
+        internal: source for source, internal in mapping.MAPPINGS[file_type]["head"].items()
+        if internal in ("raw_order_id", "order_no") and source in df.columns
+    }
+    if not identity_cols:
+        return df
+    raw_ids: Iterable[object] = (
+        df[identity_cols["raw_order_id"]].array
+        if "raw_order_id" in identity_cols else repeat(None, len(df))
+    )
+    order_nos: Iterable[object] = (
+        df[identity_cols["order_no"]].array
+        if "order_no" in identity_cols else repeat(None, len(df))
+    )
+    order_groups = pd.Series(
+        _order_group_ids(raw_ids, order_nos),
+        index=df.index,
+    )
+    df[ffill_cols] = (
+        df[ffill_cols].replace("", pd.NA).groupby(order_groups, sort=False).ffill()
+    )
+    return df
+
+
 def _parse_frame(raw: pd.DataFrame, sheet_name: str) -> SheetData | None:
     """单 sheet：前 _HEADER_SCAN_ROWS 行内找「能识别出类型」的表头行；找不到 → None。
 
@@ -109,10 +215,8 @@ def _parse_frame(raw: pd.DataFrame, sheet_name: str) -> SheetData | None:
         df = raw.iloc[h + 1:].reset_index(drop=True)
         df.columns = cols
         if not dup:
-            ffill_cols = [c for c in mapping.FFILL_COLS[file_type] if c in df.columns]
-            if ffill_cols:
-                # 仅填 NA、不覆盖已有值：续行主表空 → 补成所属订单（订单首行头字段非空，已实测）
-                df[ffill_cols] = df[ffill_cols].replace("", pd.NA).ffill()
+            df = _coalesce_value_aliases(df, file_type)
+            df = _ffill_head_columns(df, file_type)
         anchor = _scan_anchor(raw, h) if file_type == mapping.EXPENSE else None
         return SheetData(sheet_name, df, file_type, anchor, dup)
     return None
