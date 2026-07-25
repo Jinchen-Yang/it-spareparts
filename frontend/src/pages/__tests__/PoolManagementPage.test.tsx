@@ -551,6 +551,40 @@ describe("data_pool_price_governance=False（price_restricted）", () => {
     expect(screen.getByText("未设置")).toBeInTheDocument();
     expect(screen.queryByText("无价格权限")).toBeNull();
   });
+
+  it("列表顶层受限时，即使单行标志错误也不会显示约束价", async () => {
+    login("readonly", {
+      action_pool_manage: true, action_pool_set_policy: false, data_pool_price_governance: true,
+    });
+    mockList([row({
+      purchase_ceiling_ex_tax: 123,
+      sales_floor_ex_tax: 456,
+      price_restricted: false,
+    })], true);
+
+    renderPage();
+    await screen.findByText("测试池");
+    expect(screen.getAllByText("无价格权限")).toHaveLength(2);
+    expect(screen.queryByText("123.00")).toBeNull();
+    expect(screen.queryByText("456.00")).toBeNull();
+  });
+
+  it("单行受限时，即使列表顶层标志错误也不会显示该行约束价", async () => {
+    login("readonly", {
+      action_pool_manage: true, action_pool_set_policy: false, data_pool_price_governance: true,
+    });
+    mockList([row({
+      purchase_ceiling_ex_tax: 123,
+      sales_floor_ex_tax: 456,
+      price_restricted: true,
+    })], false);
+
+    renderPage();
+    await screen.findByText("测试池");
+    expect(screen.getAllByText("无价格权限")).toHaveLength(2);
+    expect(screen.queryByText("123.00")).toBeNull();
+    expect(screen.queryByText("456.00")).toBeNull();
+  });
 });
 
 describe("键盘可达（复审非阻塞 2）", () => {

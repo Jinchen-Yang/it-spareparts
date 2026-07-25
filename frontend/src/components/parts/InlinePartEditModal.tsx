@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Alert, Input, Modal, Select, Space, message } from "antd";
 import { masterCategories, masterEdit, type CategoryNode, type MasterFields } from "../../api";
 import { fetchOverview } from "../../api/search";
@@ -9,6 +9,8 @@ type EditablePart = Required<Pick<MasterFields, "description" | "category_major"
 
 interface Props {
   open: boolean;
+  canEdit: boolean;
+  contextKey: string;
   pn: string | null;
   onClose: () => void;
   onSaved: () => void | Promise<void>;
@@ -23,7 +25,9 @@ const normalized = (value: string | null | undefined) => {
  * 型号全景里的轻量主数据编辑器。
  * 只开放甲方本次明确提出的描述与两级品类，不复制完整主数据页的其它能力。
  */
-export default function InlinePartEditModal({ open, pn, onClose, onSaved }: Props) {
+export default function InlinePartEditModal({
+  open, canEdit, contextKey, pn, onClose, onSaved,
+}: Props) {
   const [form, setForm] = useState<EditablePart | null>(null);
   const [initial, setInitial] = useState<EditablePart | null>(null);
   const [categories, setCategories] = useState<CategoryNode[]>([]);
@@ -31,9 +35,31 @@ export default function InlinePartEditModal({ open, pn, onClose, onSaved }: Prop
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const loadSeq = useRef(0);
+  const sessionSeq = useRef(0);
+  const sessionToken = useRef<string | null>(null);
+  // 独立于父组件再取一次挂载时权限快照：既防父级误传 true，也不让后续
+  // localStorage 篡改改变守卫结果。token 变化会由 App 重挂整棵页面树。
+  const [hasSessionPermission] = useState(() => {
+    if (localStorage.getItem("role") === "admin") return true;
+    try {
+      return JSON.parse(localStorage.getItem("permissions") || "{}").page_master_data === true;
+    } catch {
+      return false;
+    }
+  });
+  const canEditNow = () => canEdit && hasSessionPermission;
+  const permittedOpen = open && canEditNow();
+
+  useLayoutEffect(() => {
+    sessionSeq.current += 1;
+    sessionToken.current = permittedOpen ? localStorage.getItem("token") : null;
+    setSaving(false);
+    return () => { sessionSeq.current += 1; };
+  }, [permittedOpen, pn, contextKey]);
 
   const load = async () => {
-    if (!pn) return;
+    if (!canEditNow() || !sessionToken.current
+      || localStorage.getItem("token") !== sessionToken.current || !pn) return;
     const seq = ++loadSeq.current;
     setLoading(true);
     setLoadError(null);
@@ -62,7 +88,7 @@ export default function InlinePartEditModal({ open, pn, onClose, onSaved }: Prop
   };
 
   useEffect(() => {
-    if (open && pn) load();
+    if (permittedOpen && pn) load();
     else {
       ++loadSeq.current;
       setForm(null);
@@ -71,13 +97,18 @@ export default function InlinePartEditModal({ open, pn, onClose, onSaved }: Prop
     }
     // pn 变化必须重新加载；load 只使用当前 pn。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, pn]);
+  }, [permittedOpen, pn]);
 
   const minorOptions = (categories.find((c) => c.name === form?.category_major)?.children || [])
     .map((child) => ({ label: child.name, value: child.name }));
 
   const save = async () => {
-    if (!form || !initial) return;
+    const authToken = sessionToken.current;
+    if (!canEditNow() || !authToken || localStorage.getItem("token") !== authToken
+      || !form || !initial) return;
+    const session = sessionSeq.current;
+    const isCurrentSession = () => session === sessionSeq.current && canEditNow()
+      && localStorage.getItem("token") === authToken;
     const payload: MasterFields & { pn_std: string } = { pn_std: form.pn_std };
     (["description", "category_major", "category_minor"] as const).forEach((key) => {
       const before = normalized(initial[key]);
@@ -91,32 +122,37 @@ export default function InlinePartEditModal({ open, pn, onClose, onSaved }: Prop
 
     setSaving(true);
     try {
-      const { data } = await masterEdit(payload);
+      const { data } = await masterEdit(payload, authToken);
+      if (!isCurrentSession()) return;
       message.success(`已保存（${data.updated.join("、")} 将不会被重导覆盖）`);
       onClose();
       // 写入已经成功后，刷新失败不能再误报为“保存失败”，避免管理员重复提交。
       try {
         await onSaved();
       } catch {
-        message.warning("修改已保存，但当前页面刷新失败，请稍后手动刷新");
+        if (isCurrentSession()) {
+          message.warning("修改已保存，但当前页面刷新失败，请稍后手动刷新");
+        }
       }
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || "保存失败，请重试");
+      if (isCurrentSession()) {
+        message.error(error?.response?.data?.detail || "保存失败，请重试");
+      }
     } finally {
-      setSaving(false);
+      if (isCurrentSession()) setSaving(false);
     }
   };
 
   return (
     <Modal
-      open={open}
+      open={permittedOpen}
       title={pn ? `就地编辑备件 ${pn}` : "就地编辑备件"}
       onCancel={onClose}
       onOk={save}
       okText="保存"
       cancelText="取消"
       confirmLoading={saving}
-      okButtonProps={{ disabled: loading || !form || Boolean(loadError) }}
+      okButtonProps={{ disabled: !canEdit || loading || !form || Boolean(loadError) }}
       width={560}
     >
       <Space direction="vertical" size={14} style={{ width: "100%" }}>

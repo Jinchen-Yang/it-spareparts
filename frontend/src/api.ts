@@ -4,7 +4,7 @@ export const api = axios.create({ baseURL: "/api" });
 
 api.interceptors.request.use((cfg) => {
   const token = localStorage.getItem("token");
-  if (token) cfg.headers.Authorization = `Bearer ${token}`;
+  if (token && !cfg.headers.Authorization) cfg.headers.Authorization = `Bearer ${token}`;
   return cfg;
 });
 
@@ -16,8 +16,13 @@ api.interceptors.response.use(
     const url = err.config?.url || "";
     const isPublicAuth = url.includes("/auth/login") || url.includes("/auth/change-password-unauth");
     if (err.response?.status === 401 && !isPublicAuth) {
-      localStorage.removeItem("token");
-      location.reload();
+      const requestAuth = err.config?.headers?.Authorization;
+      const currentToken = localStorage.getItem("token");
+      // 旧账号的迟到 401 不能清掉另一个标签页刚写入的新会话。
+      if (!requestAuth || requestAuth === `Bearer ${currentToken}`) {
+        localStorage.removeItem("token");
+        location.reload();
+      }
     }
     return Promise.reject(err);
   }
@@ -377,9 +382,10 @@ export const masterCheck = (pn_std: string) =>
 export const masterCreate = (body: MasterFields & { pn_std: string; force?: boolean }) =>
   api.post<{ created: boolean; id?: number; pn_std?: string; near_duplicates?: NearDup[]; message?: string }>(
     "/parts/master", body);
-export const masterEdit = (body: MasterFields & { pn_std: string }) =>
+export const masterEdit = (body: MasterFields & { pn_std: string }, token?: string) =>
   api.patch<{ id: number; pn_std: string; updated: string[]; locked_fields: string[] }>(
-    "/parts/master", body);
+    "/parts/master", body,
+    token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
 
 // 批量规范化（WP3）
 export interface BatchPreviewItem {
