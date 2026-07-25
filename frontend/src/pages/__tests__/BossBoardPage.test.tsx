@@ -14,7 +14,6 @@ import type { Location, NavigateFunction } from "react-router-dom";
 import dayjs from "dayjs";
 
 const dashboardKpi = vi.fn();
-const dashboardTrend = vi.fn();
 const dashboardPartRanking = vi.fn();
 const dashboardSales = vi.fn();
 const dashboardPurchaseOrders = vi.fn();
@@ -28,7 +27,6 @@ vi.mock("../../api", () => ({
   default: { get: vi.fn(), post: vi.fn() },
   api: { get: vi.fn(), post: vi.fn() },
   dashboardKpi: (...a: unknown[]) => dashboardKpi(...a),
-  dashboardTrend: (...a: unknown[]) => dashboardTrend(...a),
   dashboardPartRanking: (...a: unknown[]) => dashboardPartRanking(...a),
   dashboardSales: (...a: unknown[]) => dashboardSales(...a),
   dashboardPurchaseOrders: (...a: unknown[]) => dashboardPurchaseOrders(...a),
@@ -42,11 +40,6 @@ vi.mock("../../api/poolAnalysis", () => ({
 }));
 vi.mock("../../api/pools", () => ({
   listPnPools: (...a: unknown[]) => listPnPools(...a),
-}));
-// 图表在 jsdom 无 canvas：打桩捕获 props
-vi.mock("../../components/charts/BusinessTrendChart", () => ({
-  default: (p: { granularity: string; data: unknown[] }) => (
-    <div data-testid="trend-chart" data-granularity={p.granularity} data-points={p.data.length} />),
 }));
 vi.mock("../../components/PartPicker", () => ({
   default: (p: { value?: number | null }) => (
@@ -154,8 +147,6 @@ beforeEach(() => {
   localStorage.clear();
   localStorage.setItem("role", "admin");
   dashboardKpi.mockResolvedValue({ data: KPI });
-  dashboardTrend.mockResolvedValue({ data: { granularity: "day", series: [
-    { period: "2026-07-10", sales_ex_tax: 100, purchase_ex_tax: 80, gross_profit: 20 }] } });
   dashboardPartRanking.mockResolvedValue({ data: rankingResp });
   dashboardSales.mockResolvedValue({ data: ordersResp([]) });
   dashboardPurchaseOrders.mockResolvedValue({ data: ordersResp([purchaseRow()]) });
@@ -192,7 +183,7 @@ describe("URL 深链与筛选下发", () => {
       expect.objectContaining({ part_id: 5, pool_group_id: 3, salesperson: "李" })));
     await waitFor(() => expect(dashboardPartRanking).toHaveBeenCalledWith(
       expect.objectContaining({ part_id: 5, pool_group_id: 3 })));
-    // KPI/趋势仅时间口径，不带 PN/池
+    // KPI 仅时间口径，不带 PN/池
     await waitFor(() => expect(dashboardKpi).toHaveBeenCalledWith({ date_from: from, date_to: to }));
   });
 
@@ -240,19 +231,16 @@ describe("URL 深链与筛选下发", () => {
     }));
   });
 
-  it.each([
-    "/boss?od_from=2026-07-20&od_to=2026-07-01",
-    "/boss?od_from=2026-07-01",
-  ])("非法或半开的趋势下钻窗口整体失效，不下发给订单接口：%s", async (url) => {
-    renderAt(url);
+  it("旧趋势参数不再改变订单时间窗口，也不算当前筛选", async () => {
+    renderAt("/boss?od_from=2026-07-01&od_to=2026-07-20&gran=month");
     const from30 = dayjs().subtract(29, "day").format(D);
     const today = dayjs().format(D);
     await waitFor(() => expect(dashboardPurchaseOrders).toHaveBeenCalledWith(
       expect.objectContaining({ date_from: from30, date_to: today })));
     expect(dashboardPurchaseOrders).not.toHaveBeenCalledWith(
-      expect.objectContaining({ date_from: "2026-07-20", date_to: "2026-07-01" }));
-    expect(screen.queryByText(/订单块已按选中期筛选/)).toBeNull();
-    expect(screen.getByRole("button", { name: "清除全部筛选" })).toBeInTheDocument();
+      expect.objectContaining({ date_from: "2026-07-01", date_to: "2026-07-20" }));
+    expect(screen.queryByRole("button", { name: "清除全部筛选" })).toBeNull();
+    await waitFor(() => expect(curLoc.search).toBe(""));
   });
 });
 
@@ -435,17 +423,7 @@ describe("互通池列表：表头 合计↔均价 循环切换", () => {
   });
 });
 
-describe("趋势与盈亏榜", () => {
-  it("趋势图接收粒度与数据点；切粒度 replace 不堆历史", async () => {
-    renderAt("/boss");
-    const chart = await screen.findByTestId("trend-chart");
-    expect(chart.dataset.granularity).toBe("day");
-    fireEvent.click(screen.getByText("月"));
-    await waitFor(() => expect(curLoc.search).toContain("gran=month"));
-    await waitFor(() => expect(dashboardTrend).toHaveBeenCalledWith(
-      expect.objectContaining({ granularity: "month" })));
-  });
-
+describe("盈亏榜", () => {
   it("盈亏榜显示成本覆盖率与未配成本营收提示；无成本型号不入榜说明在场", async () => {
     renderAt("/boss");
     await screen.findByText(/无成本 1（毛利未知，不入正式排名）/);

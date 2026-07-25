@@ -10,40 +10,22 @@ ECharts（`echarts@6.1.0` 锁定精确版本）按需注册 + 自写 React 壳�
   part_id → 一票否决。
 - echarts-for-react：默认整包引入（gzip 多 ~140KB）、低频维护、size-sensor 全局
   监听难测试。壳层本身 ~120 行，`EChartContainer.test.tsx` 对生命周期全覆盖。
-- 按需注册后 vendor-echarts chunk：630KB min / 212KB gzip，且只随首个引用它的
-  懒加载页面下载（vite.config manualChunks 已预置）；当前无生产页面引用，生产包 0 增量。
+- 按需注册后 vendor-echarts chunk 只随池分析等实际引用它的懒加载页面下载
+  （vite.config manualChunks 已预置），不进入应用首屏。
 
 ## 文件职责
 
 | 文件 | 职责 |
 |---|---|
-| `echartsCore.ts` | echarts/core 按需注册（line/bar + grid/tooltip/legend/dataZoom/markLine/visualMap/aria）、注册主题、导出 `ECOption` 合成类型 |
+| `echartsCore.ts` | echarts/core 按需注册、注册主题、导出 `ECOption` 合成类型 |
 | `chartTheme.ts` | 颜色 token 单一真值源 + ECharts 主题（系列色经 CVD/对比度验证，见文件头） |
 | `EChartContainer.tsx` | init/dispose、ResizeObserver 自适应（无残留监听）、option 引用门控、事件桥、loading/空/错误三态 |
-| `BusinessTrendChart.tsx` | 销售/采购/毛利三线趋势（组件 + 纯函数 option builder） |
 | `HorizontalMetricBar.tsx` | PN 横向指标排名（组件 + 纯函数 option builder） |
+| `PoolPnPriceMap.tsx` | 池成员价格区间与正式价格参考图 |
 | `fixtures.ts` | 种子随机固定数据：demo 与测试共用，跨机器逐位一致 |
 | `../../utils/format.ts` | 金额/数量/百分比/HTML 转义/空值语义（全站共用，图表不得另写） |
 
 ## 组件 API
-
-### BusinessTrendChart
-
-```tsx
-<BusinessTrendChart
-  data={points}            // BusinessTrendPoint[]：period + 三金额（null=断点，不折 0）
-                           //   可选 compare.{系列key}.{yoy,mom}（小数比率），tooltip 自动带出
-  granularity="day"        // day | week | month（只影响轴标签压缩；聚合由调用方做）
-  loading={loading}
-  error={errMsg}           // 非空即错误态
-  onPointClick={(period, point) => {/* 用 period 下钻筛订单 */}}
-  height={340}
-/>
-```
-
-内置：十字指针 + 轴触发精确 tooltip、图例开关、inside（滚轮缩放/拖动平移）+
-slider 双 dataZoom、0 轴虚线参考线、负毛利红色分段（visualMap）、>60 点自动
-LTTB 抽稀（抽稀≠平滑，不捏造中间值）、`smooth:false` 硬约定。
 
 ### HorizontalMetricBar
 
@@ -73,5 +55,5 @@ LTTB 抽稀（抽稀≠平滑，不捏造中间值）、`smooth:false` 硬约定
 ## Demo 与视觉验收
 
 `npm run dev` 后访问 `/chart-demo.html`（不进生产构建、无导航入口）。
-四态切换、粒度切换、点击回调实况都在页内。截图基线见
+采购/销售两种指标口径与点击回调实况都在页内。截图基线见
 `docs/dashboard-chart-foundation/`。

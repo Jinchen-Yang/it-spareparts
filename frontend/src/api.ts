@@ -503,10 +503,6 @@ export interface DashboardKpi {
 export const dashboardKpi = (params: { date_from?: string; date_to?: string } = {}) =>
   api.get<DashboardKpi>("/dashboard/kpi", { params });
 
-export interface TrendPoint { period: string; sales_ex_tax: number; purchase_ex_tax: number; gross_profit: number }
-export const dashboardTrend = (params: { date_from?: string; date_to?: string; granularity?: string } = {}) =>
-  api.get<{ granularity: string; series: TrendPoint[] }>("/dashboard/trend", { params });
-
 export type PriceDisciplineSide = "purchase" | "sales";
 
 export interface PriceDisciplineSideSummary {
