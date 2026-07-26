@@ -33,6 +33,17 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+def successful_batch_ids_by_hash(session: Session, file_hashes: set[str]) -> dict[str, int]:
+    if not file_hashes:
+        return {}
+    rows = session.execute(
+        select(SysImportBatch.file_hash, SysImportBatch.id).where(
+            SysImportBatch.file_hash.in_(file_hashes), SysImportBatch.status == "success"
+        )
+    ).all()
+    return {file_hash: batch_id for file_hash, batch_id in rows}
+
+
 def _archive(src_path: str, file_hash: str) -> str:
     settings = get_settings()
     os.makedirs(settings.raw_file_dir, exist_ok=True)
@@ -58,16 +69,10 @@ def run_import(session: Session, file_path: str, original_name: str,
     # 2) hash 去重：skip 模式拒绝重复成功文件（幂等）；upsert(修复)模式是"显式要求重处理"。
     #    旧成功批次必须等新批次完整通过后再 supersede；否则新文件预检/装载失败会破坏
     #    既有成功审计链。两次状态切换在同一事务 flush，仍满足 success hash 偏唯一索引。
-    dup = session.execute(
-        select(SysImportBatch.id).where(
-            SysImportBatch.file_hash == file_hash, SysImportBatch.status == "success"
-        )
-    ).first()
-    duplicate_batch_id = None
-    if dup:
+    duplicate_batch_id = successful_batch_ids_by_hash(session, {file_hash}).get(file_hash)
+    if duplicate_batch_id is not None:
         if mode != "upsert":
-            raise DuplicateFileError(dup[0])
-        duplicate_batch_id = dup[0]
+            raise DuplicateFileError(duplicate_batch_id)
 
     # 3) 建 batch（先占位，类型稍后回填）
     batch = SysImportBatch(filename=original_name, file_type="unknown",

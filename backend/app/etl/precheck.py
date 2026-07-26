@@ -50,6 +50,8 @@ def failed_file_result(filename: str, code: str, message: str) -> dict:
         "selected_sheets": [],
         "sheets": [],
         "issues": issues,
+        "exact_success_match": None,
+        "blocked_reason": None,
     }
 
 
@@ -135,11 +137,26 @@ def inspect_file(path: str, filename: str) -> dict:
         "selected_sheets": [sheet.sheet_name for sheet in selection.selected],
         "sheets": sheet_results,
         "issues": file_issues,
+        "exact_success_match": None,
+        "blocked_reason": None,
     }
 
 
-def response(results: list[dict]) -> dict:
+def apply_exact_success_matches(results_with_hashes: list[tuple[dict, str | None]],
+                                matches: dict[str, int], mode: str) -> None:
+    for result, file_hash in results_with_hashes:
+        batch_id = matches.get(file_hash) if file_hash is not None else None
+        if batch_id is None:
+            continue
+        result["exact_success_match"] = {"batch_id": batch_id}
+        if mode == "skip":
+            result["blocked_reason"] = "exact_success_duplicate"
+            result["can_import"] = False
+
+
+def response(results: list[dict], mode: str = "skip") -> dict:
     return {
+        "mode": mode,
         "files": results,
         "any_warning": any(not result["ok"] for result in results),
         "missing_price_any": any(result["missing_price"] for result in results),
