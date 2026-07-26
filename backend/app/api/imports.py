@@ -169,10 +169,13 @@ def upload(
 @router.post("/precheck")
 def precheck(
     files: list[UploadFile] = File(...),
+    mode: str = Query("skip"),
+    db: Session = Depends(get_db),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """导入前预检（不导入、不建批次）：返回选表结果、风险等级与 v1 兼容字段。"""
-    results = []
+    mode = mode if mode in ("skip", "upsert") else "skip"
+    results_with_hashes: list[tuple[dict, str | None]] = []
     for f in files:
         name = f.filename or "upload.xlsx"
         try:
@@ -183,16 +186,24 @@ def precheck(
                 if exc.status_code == _HTTP_REQUEST_ENTITY_TOO_LARGE
                 else "invalid_file"
             )
-            results.append(import_precheck.failed_file_result(name, code, str(exc.detail)))
+            result = import_precheck.failed_file_result(name, code, str(exc.detail))
+            results_with_hashes.append((result, None))
             continue
         try:
-            results.append(import_precheck.inspect_file(tmp, name))
-        except ReaderError as exc:
-            results.append(import_precheck.failed_file_result(name, exc.code, str(exc)))
+            file_hash = pipeline.sha256_file(tmp)
+            try:
+                result = import_precheck.inspect_file(tmp, name)
+            except ReaderError as exc:
+                result = import_precheck.failed_file_result(name, exc.code, str(exc))
         finally:
             if os.path.exists(tmp):
                 os.remove(tmp)
-    return import_precheck.response(results)
+        results_with_hashes.append((result, file_hash))
+
+    matches = pipeline.successful_batch_ids_by_hash(
+        db, {file_hash for _, file_hash in results_with_hashes if file_hash is not None})
+    import_precheck.apply_exact_success_matches(results_with_hashes, matches, mode)
+    return import_precheck.response([result for result, _ in results_with_hashes], mode)
 
 
 _NOTE_MAX = 4000          # 作业 note 总长上限：note 会整段渲染到导入页，绝不能无界

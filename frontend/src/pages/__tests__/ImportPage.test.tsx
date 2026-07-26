@@ -25,12 +25,15 @@ const cleanResult: ImportPrecheckResult = {
   contract: "v2",
   decision: "clean",
   blocked: false,
+  mode: "skip",
   files: [{
     filename: "采购.xlsx",
     file_type: "purchase",
     warning: null,
     severity: "info",
     can_import: true,
+    exact_success_match: null,
+    blocked_reason: null,
     issues: [],
     sheets: [{
       sheet_name: "采购明细",
@@ -66,6 +69,18 @@ const warningResult: ImportPrecheckResult = {
     warning: "未识别到价格列",
     severity: "warning",
     issues: [{ severity: "warning", code: "missing_price_columns", message: "导入后将没有金额" }],
+  }],
+};
+
+const skipDuplicateResult: ImportPrecheckResult = {
+  ...cleanResult,
+  decision: "blocked",
+  blocked: true,
+  files: [{
+    ...cleanResult.files[0],
+    can_import: false,
+    exact_success_match: { batch_id: 42 },
+    blocked_reason: "exact_success_duplicate",
   }],
 };
 
@@ -206,6 +221,210 @@ describe("完整导入问题明细下载", () => {
 });
 
 describe("导入预检状态机", () => {
+  it("skip 精确重复显示成功事实、移除文案并回链原批次", async () => {
+    precheckImportFiles.mockResolvedValueOnce(skipDuplicateResult);
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: [] });
+      if (url === "/import/batches/42") return Promise.resolve({ data: {
+        id: 42, filename: "原采购.xlsx", report: {}, errors: [], issue_count: 0,
+      } });
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    render(<ImportPage />);
+    stage();
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+
+    expect(await screen.findByText("已成功导入")).toBeInTheDocument();
+    expect(screen.getByText("文件字节完全相同，系统不会再次导入")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "请移除已导入文件后重新预检" })).toBeDisabled();
+    expect(screen.queryByText("请修正后重新预检")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看原批次 #42" }));
+    expect(await screen.findByText("批次 #42 · 原采购.xlsx")).toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith(
+      "/import/batches/42", { timeout: 30_000, signal: expect.any(AbortSignal) },
+    );
+  });
+
+  it("skip 精确重复与内容错误并存时提示同时处理两类问题", async () => {
+    precheckImportFiles.mockResolvedValueOnce({
+      ...skipDuplicateResult,
+      files: [
+        skipDuplicateResult.files[0],
+        {
+          ...cleanResult.files[0],
+          filename: "错误.xlsx",
+          severity: "error",
+          can_import: false,
+          issues: [{ severity: "error", code: "invalid_workbook", message: "工作簿已损坏" }],
+        },
+      ],
+    });
+    render(<ImportPage />);
+    stage();
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+
+    expect(await screen.findByText("工作簿已损坏")).toBeInTheDocument();
+    expect(screen.getByRole("button", {
+      name: "请移除已导入文件并处理其他预检问题后重新预检",
+    })).toBeDisabled();
+  });
+
+  it("upsert 精确重复只显示修复事实，不增加确认或 warning", async () => {
+    precheckImportFiles.mockResolvedValueOnce({
+      ...cleanResult,
+      mode: "upsert",
+      files: [{ ...cleanResult.files[0], exact_success_match: { batch_id: 42 } }],
+    });
+    render(<ImportPage />);
+    fireEvent.click(screen.getByRole("switch"));
+    stage();
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+
+    expect(await screen.findByText(
+      "当前为修复模式，继续后会重新处理；仅新批次完整成功后原批次才标记为已替代",
+    )).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "我已阅读并确认以上警告" })).toBeNull();
+    expect(screen.getByRole("button", { name: "开始导入" })).toBeEnabled();
+    expect(precheckImportFiles).toHaveBeenCalledWith(
+      expect.any(Array), "upsert", expect.any(AbortSignal),
+    );
+  });
+
+  it("原批次回链同步双击只复用一次详情请求", async () => {
+    const detailRequest = deferred<{ data: unknown }>();
+    precheckImportFiles.mockResolvedValueOnce(skipDuplicateResult);
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: [] });
+      if (url === "/import/batches/42") return detailRequest.promise;
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    render(<ImportPage />);
+    stage();
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+    const link = await screen.findByRole("button", { name: "查看原批次 #42" });
+
+    fireEvent.click(link);
+    fireEvent.click(link);
+
+    expect(get.mock.calls.filter(([url]) => url === "/import/batches/42")).toHaveLength(1);
+    detailRequest.resolve({ data: {
+      id: 42, filename: "原采购.xlsx", report: {}, errors: [], issue_count: 0,
+    } });
+    expect(await screen.findByText("批次 #42 · 原采购.xlsx")).toBeInTheDocument();
+  });
+
+  it("原批次详情超时后提示重试并允许再次请求同一批次", async () => {
+    const firstDetailRequest = deferred<{ data: unknown }>();
+    precheckImportFiles.mockResolvedValueOnce(skipDuplicateResult);
+    let detailCallCount = 0;
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: [] });
+      if (url === "/import/batches/42") {
+        detailCallCount += 1;
+        return detailCallCount === 1 ? firstDetailRequest.promise : new Promise(() => {});
+      }
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    render(<ImportPage />);
+    stage();
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+    const link = await screen.findByRole("button", { name: "查看原批次 #42" });
+
+    fireEvent.click(link);
+    expect(get).toHaveBeenCalledWith("/import/batches/42", {
+      timeout: 30_000,
+      signal: expect.any(AbortSignal),
+    });
+
+    firstDetailRequest.reject({ code: "ECONNABORTED", message: "timeout of 30000ms exceeded" });
+    expect(await screen.findByText("原批次详情加载超时，请重试")).toBeInTheDocument();
+    fireEvent.click(link);
+
+    expect(get.mock.calls.filter(([url]) => url === "/import/batches/42")).toHaveLength(2);
+  });
+
+  it("模式变化后新预检的原批次回链取代悬挂请求", async () => {
+    const oldDetailRequest = deferred<{ data: unknown }>();
+    precheckImportFiles
+      .mockResolvedValueOnce(skipDuplicateResult)
+      .mockResolvedValueOnce({
+        ...cleanResult,
+        mode: "upsert",
+        files: [{ ...cleanResult.files[0], exact_success_match: { batch_id: 42 } }],
+      });
+    let detailCallCount = 0;
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: [] });
+      if (url === "/import/batches/42") {
+        detailCallCount += 1;
+        if (detailCallCount === 1) return oldDetailRequest.promise;
+        return Promise.resolve({ data: {
+          id: 42, filename: "新请求.xlsx", report: {}, errors: [], issue_count: 0,
+        } });
+      }
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    render(<ImportPage />);
+    stage();
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看原批次 #42" }));
+
+    fireEvent.click(screen.getByRole("switch"));
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看原批次 #42" }));
+
+    const detailCalls = get.mock.calls.filter(([url]) => url === "/import/batches/42");
+    expect(detailCalls).toHaveLength(2);
+    expect((detailCalls[0][1] as { signal: AbortSignal }).signal.aborted).toBe(true);
+    expect(await screen.findByText("批次 #42 · 新请求.xlsx")).toBeInTheDocument();
+  });
+
+  it("模式变化后丢弃迟到的原批次详情响应", async () => {
+    const detailRequest = deferred<{ data: unknown }>();
+    precheckImportFiles.mockResolvedValueOnce(skipDuplicateResult);
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: [] });
+      if (url === "/import/batches/42") return detailRequest.promise;
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    render(<ImportPage />);
+    stage();
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看原批次 #42" }));
+
+    fireEvent.click(screen.getByRole("switch"));
+    detailRequest.resolve({ data: {
+      id: 42, filename: "原采购.xlsx", report: {}, errors: [], issue_count: 0,
+    } });
+    await act(async () => {});
+
+    expect(screen.queryByText("批次 #42 · 原采购.xlsx")).toBeNull();
+    expect(screen.queryByText("已成功导入")).toBeNull();
+  });
+
+  it.each([
+    ["403", { response: { status: 403 } }, "无权查看原批次详情，请联系管理员开通数据导入权限"],
+    ["404", { response: { status: 404 } }, "原批次不存在或已无法访问"],
+    ["网络", { message: "Network Error" }, "网络连接失败，请检查网络后重试查看原批次"],
+    ["其他", { response: { status: 500 } }, "原批次详情加载失败，请稍后重试"],
+  ])("原批次回链遇到%s错误时明确提示且保留预检", async (_label, error, expected) => {
+    precheckImportFiles.mockResolvedValueOnce(skipDuplicateResult);
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: [] });
+      if (url === "/import/batches/42") return Promise.reject(error);
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    render(<ImportPage />);
+    stage();
+    fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看原批次 #42" }));
+
+    expect(await screen.findByText(expected)).toBeInTheDocument();
+    expect(screen.getByText("已成功导入")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "请移除已导入文件后重新预检" })).toBeDisabled();
+  });
+
   it("正常文件也必须先展示预检结果，不能在预检 handler 中自动上传", async () => {
     render(<ImportPage />);
     const file = stage();
@@ -217,7 +436,7 @@ describe("导入预检状态机", () => {
     expect(screen.getByText("将导入")).toBeInTheDocument();
     expect(screen.getByText("表头行：2")).toBeInTheDocument();
     expect(screen.getByText("数据行：8")).toBeInTheDocument();
-    expect(precheckImportFiles).toHaveBeenCalledWith([file], expect.any(AbortSignal));
+    expect(precheckImportFiles).toHaveBeenCalledWith([file], "skip", expect.any(AbortSignal));
     expect(uploadImportBatch).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "开始导入" })).toBeEnabled();
   });
@@ -380,9 +599,11 @@ describe("导入预检状态机", () => {
       contract,
       decision: "unknown",
       blocked: true,
+      mode: null,
       files: [{
         filename: "旧版.xlsx", file_type: "purchase", warning: "旧版缺价格提示",
-        severity: "unknown", can_import: null, issues: [], sheets: [],
+        severity: "unknown", can_import: null, exact_success_match: null,
+        blocked_reason: null, issues: [], sheets: [],
       }],
     } satisfies ImportPrecheckResult);
     render(<ImportPage />);
@@ -462,7 +683,7 @@ describe("导入预检状态机", () => {
     render(<ImportPage />);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
-    const signal = precheckImportFiles.mock.calls[0][1] as AbortSignal;
+    const signal = precheckImportFiles.mock.calls[0][2] as AbortSignal;
     expect(signal.aborted).toBe(false);
 
     stage(new File(["new"], "新文件.xlsx"));
@@ -479,7 +700,7 @@ describe("导入预检状态机", () => {
     const view = render(<ImportPage />);
     stage();
     fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
-    const signal = precheckImportFiles.mock.calls[0][1] as AbortSignal;
+    const signal = precheckImportFiles.mock.calls[0][2] as AbortSignal;
 
     view.unmount();
 

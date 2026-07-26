@@ -15,6 +15,7 @@ import {
 } from "../imports";
 
 const cleanV2 = {
+  mode: "skip",
   files: [{
     filename: "采购.xlsx",
     file_type: "purchase",
@@ -23,6 +24,8 @@ const cleanV2 = {
     warning: null,
     can_import: true,
     severity: "info",
+    exact_success_match: null,
+    blocked_reason: null,
     selected_sheets: ["采购"],
     issues: [],
     sheets: [{
@@ -83,6 +86,128 @@ describe("import error download", () => {
 });
 
 describe("import precheck adapter", () => {
+  it("sends the requested mode with the precheck snapshot", async () => {
+    const file = new File(["xlsx"], "采购.xlsx");
+    const controller = new AbortController();
+    post.mockResolvedValueOnce({ data: { ...cleanV2, mode: "upsert" } });
+
+    await precheckImportFiles([file], "upsert", controller.signal);
+
+    expect(post).toHaveBeenCalledWith("/import/precheck", expect.any(FormData), {
+      params: { mode: "upsert" },
+      signal: controller.signal,
+      timeout: 30_000,
+    });
+  });
+
+  it.each([
+    ["missing mode", { mode: undefined }],
+    ["unknown mode", { mode: "replace" }],
+    ["missing exact match", { file: { exact_success_match: undefined } }],
+    ["missing blocked reason", { file: { blocked_reason: undefined } }],
+    ["non-positive batch", { file: { exact_success_match: { batch_id: 0 } } }],
+    ["fractional batch", { file: { exact_success_match: { batch_id: 1.5 } } }],
+    ["extra match field", { file: { exact_success_match: { batch_id: 7, filename: "secret.xlsx" } } }],
+    ["unknown blocked reason", { file: { blocked_reason: "duplicate" } }],
+    ["skip match without reason", { file: { exact_success_match: { batch_id: 7 } } }],
+    ["skip reason without match", { file: { blocked_reason: "exact_success_duplicate" } }],
+    ["upsert match is blocked", {
+      mode: "upsert",
+      file: { exact_success_match: { batch_id: 7 }, blocked_reason: "exact_success_duplicate" },
+    }],
+  ])("fails closed for malformed exact-duplicate contract: %s", (_label, patch) => {
+    const filePatch = "file" in patch ? patch.file : {};
+    const wire = {
+      ...cleanV2,
+      ...patch,
+      files: [{ ...cleanV2.files[0], ...filePatch }],
+    };
+    delete (wire as Record<string, unknown>).file;
+
+    expect(normalizeImportPrecheck(wire)).toMatchObject({
+      contract: "invalid", decision: "unknown", blocked: true,
+    });
+  });
+
+  it("accepts a skip duplicate as blocked without treating it as a data error", () => {
+    expect(normalizeImportPrecheck({
+      ...cleanV2,
+      can_import_all: false,
+      files: [{
+        ...cleanV2.files[0],
+        can_import: false,
+        exact_success_match: { batch_id: 42 },
+        blocked_reason: "exact_success_duplicate",
+      }],
+    })).toMatchObject({
+      contract: "v2",
+      mode: "skip",
+      decision: "blocked",
+      blocked: true,
+      files: [{
+        severity: "info",
+        can_import: false,
+        exact_success_match: { batch_id: 42 },
+        blocked_reason: "exact_success_duplicate",
+      }],
+    });
+  });
+
+  it("accepts an upsert duplicate as an informational match without blocking", () => {
+    expect(normalizeImportPrecheck({
+      ...cleanV2,
+      mode: "upsert",
+      files: [{ ...cleanV2.files[0], exact_success_match: { batch_id: 42 } }],
+    })).toMatchObject({
+      contract: "v2", mode: "upsert", decision: "clean", blocked: false,
+      files: [{
+        can_import: true,
+        exact_success_match: { batch_id: 42 },
+        blocked_reason: null,
+      }],
+    });
+  });
+
+  it.each([
+    ["skip match remains importable", {
+      files: [{
+        ...cleanV2.files[0], exact_success_match: { batch_id: 42 },
+        blocked_reason: "exact_success_duplicate",
+      }],
+    }],
+    ["skip match is reported as a data error", {
+      has_errors: true, can_import_all: false,
+      files: [{
+        ...cleanV2.files[0], can_import: false, exact_success_match: { batch_id: 42 },
+        blocked_reason: "exact_success_duplicate",
+      }],
+    }],
+    ["skip match claims all files are importable", {
+      files: [{
+        ...cleanV2.files[0], can_import: false, exact_success_match: { batch_id: 42 },
+        blocked_reason: "exact_success_duplicate",
+      }],
+    }],
+    ["upsert match becomes non-importable", {
+      mode: "upsert", can_import_all: false,
+      files: [{
+        ...cleanV2.files[0], can_import: false, exact_success_match: { batch_id: 42 },
+      }],
+    }],
+  ])("fails closed when mode/match aggregates contradict: %s", (_label, patch) => {
+    expect(normalizeImportPrecheck({ ...cleanV2, ...patch })).toMatchObject({
+      contract: "invalid", decision: "unknown", blocked: true,
+    });
+  });
+
+  it("fails closed when the response mode differs from the requested mode", async () => {
+    post.mockResolvedValueOnce({ data: cleanV2 });
+
+    await expect(precheckImportFiles(
+      [new File(["xlsx"], "采购.xlsx")], "upsert",
+    )).resolves.toMatchObject({ contract: "invalid", decision: "unknown", blocked: true });
+  });
+
   it("accepts a complete v2 response and centralizes both multipart requests", async () => {
     expect(normalizeImportPrecheck(cleanV2)).toMatchObject({
       contract: "v2",
@@ -100,12 +225,13 @@ describe("import precheck adapter", () => {
     post.mockResolvedValueOnce({ data: cleanV2 });
     const file = new File(["xlsx"], "采购.xlsx");
     const controller = new AbortController();
-    await expect(precheckImportFiles([file], controller.signal)).resolves.toMatchObject({
+    await expect(precheckImportFiles([file], "skip", controller.signal)).resolves.toMatchObject({
       contract: "v2",
       decision: "clean",
     });
     const precheckForm = post.mock.calls[0][1] as FormData;
     expect(post).toHaveBeenNthCalledWith(1, "/import/precheck", precheckForm, {
+      params: { mode: "skip" },
       signal: controller.signal,
       timeout: 30_000,
     });
@@ -413,14 +539,17 @@ describe("import precheck adapter", () => {
 
   it.each([
     ["failed_file_result", {
+      mode: "skip",
       files: [{
         filename: "损坏.xlsx", file_type: null, ok: false, missing_price: false,
         warning: "文件损坏", can_import: false, severity: "error", selected_sheets: [], sheets: [],
         issues: [{ severity: "error", code: "invalid_workbook", message: "文件损坏" }],
+        exact_success_match: null, blocked_reason: null,
       }],
       any_warning: true, missing_price_any: false, has_errors: true, can_import_all: false,
     }],
     ["all sheets unrecognized", {
+      mode: "skip",
       files: [{
         filename: "未知.xlsx", file_type: null, ok: false, missing_price: false,
         warning: "无法识别任何可导入工作表", can_import: false, severity: "error",
@@ -428,6 +557,7 @@ describe("import precheck adapter", () => {
         issues: [{
           severity: "error", code: "no_recognized_sheet", message: "无法识别任何可导入工作表",
         }],
+        exact_success_match: null, blocked_reason: null,
         sheets: [{
           sheet_name: "说明", detected_type: null, action: "ignored_unrecognized",
           header_row: null, data_rows: 5, duplicate_headers: [], issues: [{
@@ -505,7 +635,7 @@ describe("import precheck adapter", () => {
     const first = new File(["a"], "采购.xlsx");
     const second = new File(["b"], "销售.xlsx");
     post.mockResolvedValueOnce({ data: cleanV2 });
-    await expect(precheckImportFiles([first, second])).resolves.toMatchObject({
+    await expect(precheckImportFiles([first, second], "skip")).resolves.toMatchObject({
       contract: "invalid", decision: "unknown", blocked: true,
     });
 
@@ -513,7 +643,7 @@ describe("import precheck adapter", () => {
       ...cleanV2,
       files: [{ ...cleanV2.files[0], filename: "别的文件.xlsx" }],
     } });
-    await expect(precheckImportFiles([first])).resolves.toMatchObject({
+    await expect(precheckImportFiles([first], "skip")).resolves.toMatchObject({
       contract: "invalid", decision: "unknown", blocked: true,
     });
   });

@@ -26,6 +26,8 @@ export interface ImportPrecheckFile {
   warning: string | null;
   severity: ImportSeverity | "unknown";
   can_import: boolean | null;
+  exact_success_match: { batch_id: number } | null;
+  blocked_reason: "exact_success_duplicate" | null;
   issues: ImportPrecheckIssue[];
   sheets: ImportPrecheckSheet[];
 }
@@ -34,6 +36,7 @@ export interface ImportPrecheckResult {
   contract: "v2" | "legacy" | "invalid";
   decision: "clean" | "warning" | "blocked" | "unknown";
   blocked: boolean;
+  mode: ImportMode | null;
   files: ImportPrecheckFile[];
 }
 
@@ -65,6 +68,10 @@ function isNonNegativeInteger(value: unknown): value is number {
 
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+function isImportMode(value: unknown): value is ImportMode {
+  return value === "skip" || value === "upsert";
 }
 
 function normalizeIssue(value: unknown): ImportPrecheckIssue | null {
@@ -104,7 +111,7 @@ function normalizeSheet(value: unknown): ImportPrecheckSheet | null {
   };
 }
 
-function normalizeV2File(value: unknown): ImportPrecheckFile | null {
+function normalizeV2File(value: unknown, mode: ImportMode): ImportPrecheckFile | null {
   if (!isRecord(value) || typeof value.filename !== "string"
     || !isNullableString(value.file_type) || typeof value.ok !== "boolean"
     || typeof value.missing_price !== "boolean" || !isNullableString(value.warning)
@@ -112,6 +119,16 @@ function normalizeV2File(value: unknown): ImportPrecheckFile | null {
     || !Array.isArray(value.selected_sheets)
     || !value.selected_sheets.every((sheet) => typeof sheet === "string")
     || !Array.isArray(value.sheets)) return null;
+  const exactMatch = value.exact_success_match;
+  if (exactMatch !== null && (!isRecord(exactMatch)
+    || Object.keys(exactMatch).length !== 1
+    || !isPositiveInteger(exactMatch.batch_id))) return null;
+  const normalizedExactMatch = exactMatch === null
+    ? null : { batch_id: exactMatch.batch_id as number };
+  if (value.blocked_reason !== null && value.blocked_reason !== "exact_success_duplicate") return null;
+  const expectedBlockedReason = mode === "skip" && exactMatch !== null
+    ? "exact_success_duplicate" : null;
+  if (value.blocked_reason !== expectedBlockedReason) return null;
   const issues = normalizeIssues(value.issues);
   const sheets = value.sheets.map(normalizeSheet);
   if (!issues || !sheets.every((sheet): sheet is ImportPrecheckSheet => sheet !== null)) return null;
@@ -155,8 +172,10 @@ function normalizeV2File(value: unknown): ImportPrecheckFile | null {
     ? null
     : allIssues.find((issue) => issue.severity === severity)?.message ?? null;
   const missingPrice = allIssues.some((issue) => issue.code === "missing_price_columns");
+  const contentCanImport = selectedSheets.length > 0 && severity !== "error";
+  const canImport = contentCanImport && expectedBlockedReason === null;
   if (value.severity !== severity
-    || value.can_import !== (selectedSheets.length > 0 && severity !== "error")
+    || value.can_import !== canImport
     || value.warning !== warning
     || value.ok !== (warning === null)
     || value.missing_price !== missingPrice) return null;
@@ -166,6 +185,8 @@ function normalizeV2File(value: unknown): ImportPrecheckFile | null {
     warning: value.warning,
     severity: value.severity,
     can_import: value.can_import,
+    exact_success_match: normalizedExactMatch,
+    blocked_reason: value.blocked_reason,
     issues,
     sheets,
   };
@@ -181,6 +202,8 @@ function fallbackFiles(value: unknown): ImportPrecheckFile[] {
       warning: isNullableString(record.warning) ? record.warning : null,
       severity: "unknown" as const,
       can_import: null,
+      exact_success_match: null,
+      blocked_reason: null,
       issues: [],
       sheets: [],
     };
@@ -189,27 +212,29 @@ function fallbackFiles(value: unknown): ImportPrecheckFile[] {
 
 export function normalizeImportPrecheck(value: unknown): ImportPrecheckResult {
   const record = isRecord(value) ? value : null;
-  const hasV2Markers = !!record && ["has_errors", "can_import_all"].some((key) => key in record);
+  const hasV2Markers = !!record && ["mode", "has_errors", "can_import_all"].some((key) => key in record);
   const wireFiles = record && Array.isArray(record.files) ? record.files : null;
   const topLevelValid = !!record && wireFiles !== null
+    && isImportMode(record.mode)
     && typeof record.any_warning === "boolean"
     && typeof record.missing_price_any === "boolean"
     && typeof record.has_errors === "boolean"
     && typeof record.can_import_all === "boolean";
-  const normalizedFiles = topLevelValid ? wireFiles.map(normalizeV2File) : [];
+  const mode = topLevelValid ? record.mode as ImportMode : null;
+  const normalizedFiles = topLevelValid ? wireFiles.map((file) => normalizeV2File(file, mode!)) : [];
   if (!topLevelValid || normalizedFiles.length === 0
     || !normalizedFiles.every((file): file is ImportPrecheckFile => file !== null)) {
     return {
       contract: hasV2Markers ? "invalid" : "legacy",
       decision: "unknown",
       blocked: true,
+      mode,
       files: fallbackFiles(value),
     };
   }
   const files = normalizedFiles.filter((file): file is ImportPrecheckFile => file !== null);
 
   const hasNestedError = files.some((file) => file.severity === "error"
-    || file.can_import === false
     || file.issues.some((issue) => issue.severity === "error")
     || file.sheets.some((sheet) => sheet.issues.some((issue) => issue.severity === "error")));
   const anyWarning = wireFiles.some((file) => isRecord(file) && file.ok === false);
@@ -222,6 +247,7 @@ export function normalizeImportPrecheck(value: unknown): ImportPrecheckResult {
       contract: "invalid",
       decision: "unknown",
       blocked: true,
+      mode,
       files: fallbackFiles(value),
     };
   }
@@ -238,6 +264,7 @@ export function normalizeImportPrecheck(value: unknown): ImportPrecheckResult {
     contract: "v2",
     decision: blocked ? "blocked" : warning ? "warning" : "clean",
     blocked,
+    mode,
     files,
   };
 }
@@ -248,14 +275,18 @@ function filesFormData(files: readonly File[]) {
   return form;
 }
 
-export async function precheckImportFiles(files: readonly File[], signal?: AbortSignal) {
+export async function precheckImportFiles(
+  files: readonly File[], mode: ImportMode, signal?: AbortSignal,
+) {
   const { data } = await api.post("/import/precheck", filesFormData(files), {
+    params: { mode },
     signal,
     timeout: 30_000,
   });
   const result = normalizeImportPrecheck(data);
   if (result.contract === "v2"
-    && (result.files.length !== files.length
+    && (result.mode !== mode
+      || result.files.length !== files.length
       || result.files.some((file, index) => file.filename !== files[index].name))) {
     return { ...result, contract: "invalid", decision: "unknown", blocked: true } as const;
   }

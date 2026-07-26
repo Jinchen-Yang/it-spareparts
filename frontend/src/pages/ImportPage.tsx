@@ -76,6 +76,9 @@ export default function ImportPage() {
   const uploadActionLockRef = useRef(false);
   const resumePollingLockRef = useRef(false);
   const downloadErrorsLockRef = useRef(false);
+  const detailRequestRef = useRef<{
+    key: string; fromPrecheck: boolean; controller: AbortController;
+  } | null>(null);
   const POLL_MAX_MS = 15 * 60 * 1000;   // 兜底：进程被杀等极端情况下作业卡在「进行中」，不无限轮询
 
   const loadBatches = () => api.get("/import/batches").then((r) => {
@@ -90,6 +93,7 @@ export default function ImportPage() {
       if (pollRef.current) clearTimeout(pollRef.current);
       if (pollDeadlineTimerRef.current) clearTimeout(pollDeadlineTimerRef.current);
       precheckControllerRef.current?.abort();
+      detailRequestRef.current?.controller.abort();
     };
   }, []);
 
@@ -100,6 +104,10 @@ export default function ImportPage() {
   const invalidatePrecheck = () => {
     inputRevisionRef.current += 1;
     precheckControllerRef.current?.abort();
+    if (detailRequestRef.current?.fromPrecheck) {
+      detailRequestRef.current.controller.abort();
+      detailRequestRef.current = null;
+    }
     setSnapshot(null);
     setWarningConfirmed(false);
     setImportError(null);
@@ -188,7 +196,7 @@ export default function ImportPage() {
     setWarningConfirmed(false);
     setPhase("prechecking");
     try {
-      const result = await precheckImportFiles(files, controller.signal);
+      const result = await precheckImportFiles(files, mode, controller.signal);
       if (!mountedRef.current || revision !== inputRevisionRef.current) return;
       setSnapshot({ files, mode, revision, result });
       setPhase(result.decision === "clean" ? "clean_ready"
@@ -250,9 +258,44 @@ export default function ImportPage() {
     }
   };
 
-  const openDetail = async (id: number) => {
-    const { data } = await api.get(`/import/batches/${id}`);
-    if (mountedRef.current) setDetail(data);
+  const openDetail = async (id: number, fromPrecheck = false) => {
+    const revision = inputRevisionRef.current;
+    const key = `${fromPrecheck ? `precheck:${revision}` : "history"}:${id}`;
+    if (detailRequestRef.current?.key === key) return;
+    detailRequestRef.current?.controller.abort();
+    const request = { key, fromPrecheck, controller: new AbortController() };
+    detailRequestRef.current = request;
+    try {
+      const { data } = await api.get(`/import/batches/${id}`, {
+        timeout: 30_000,
+        signal: request.controller.signal,
+      });
+      if (detailRequestRef.current !== request) return;
+      if (fromPrecheck && revision !== inputRevisionRef.current) return;
+      if (mountedRef.current) setDetail(data);
+    } catch (error: any) {
+      if (!mountedRef.current || detailRequestRef.current !== request
+        || request.controller.signal.aborted
+        || (fromPrecheck && revision !== inputRevisionRef.current)) return;
+      const timedOut = error?.code === "ECONNABORTED" || /timeout/i.test(error?.message || "");
+      if (fromPrecheck && timedOut) {
+        message.error("原批次详情加载超时，请重试");
+      } else if (timedOut) {
+        message.error("批次详情加载超时，请重试");
+      } else if (fromPrecheck && error?.response?.status === 403) {
+        message.error("无权查看原批次详情，请联系管理员开通数据导入权限");
+      } else if (fromPrecheck && error?.response?.status === 404) {
+        message.error("原批次不存在或已无法访问");
+      } else if (fromPrecheck && !error?.response) {
+        message.error("网络连接失败，请检查网络后重试查看原批次");
+      } else if (fromPrecheck) {
+        message.error("原批次详情加载失败，请稍后重试");
+      } else {
+        message.error("批次详情加载失败，请稍后重试");
+      }
+    } finally {
+      if (detailRequestRef.current === request) detailRequestRef.current = null;
+    }
   };
 
   const downloadErrors = async () => {
@@ -392,7 +435,14 @@ export default function ImportPage() {
                 </Button>
               )}
               {phase === "blocked" && (
-                <Button type="primary" danger disabled>请修正后重新预检</Button>
+                <Button type="primary" danger disabled>
+                  {snapshot?.result.files.some((file) => file.blocked_reason === "exact_success_duplicate")
+                    ? snapshot.result.files.some((file) => file.blocked_reason !== "exact_success_duplicate"
+                      && file.severity === "error")
+                      ? "请移除已导入文件并处理其他预检问题后重新预检"
+                      : "请移除已导入文件后重新预检"
+                    : "请修正后重新预检"}
+                </Button>
               )}
               {phase === "clean_ready" && (
                 <Button type="primary" loading={submitting} disabled={busy || activeJob} onClick={submitBatch}>开始导入</Button>
@@ -416,7 +466,10 @@ export default function ImportPage() {
               }}>清空</Button>
             </Space>
             {importError && <Alert type="error" showIcon message={importError} style={{ marginTop: 12 }} />}
-            {snapshot && <ImportPrecheckPanel result={snapshot.result} />}
+            {snapshot && <ImportPrecheckPanel
+              result={snapshot.result}
+              onOpenBatch={(batchId) => { void openDetail(batchId, true); }}
+            />}
           </div>
         )}
       </Card>

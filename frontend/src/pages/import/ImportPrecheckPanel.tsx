@@ -1,4 +1,4 @@
-import { Alert, Card, Descriptions, List, Space, Tag, Typography } from "antd";
+import { Alert, Button, Card, Descriptions, List, Space, Tag, Typography } from "antd";
 import type {
   ImportPrecheckIssue, ImportPrecheckResult, ImportSeverity, ImportSheetAction,
 } from "../../api/imports";
@@ -53,7 +53,12 @@ function Issues({ issues }: { issues: ImportPrecheckIssue[] }) {
   );
 }
 
-export default function ImportPrecheckPanel({ result }: { result: ImportPrecheckResult }) {
+export default function ImportPrecheckPanel({
+  result, onOpenBatch,
+}: {
+  result: ImportPrecheckResult;
+  onOpenBatch: (batchId: number) => void;
+}) {
   return (
     <Card title="预检结果" size="small" style={{ marginTop: 16 }}>
       {result.contract !== "v2" && (
@@ -77,6 +82,27 @@ export default function ImportPrecheckPanel({ result }: { result: ImportPrecheck
                 {file.can_import === null ? "未知" : file.can_import ? "是" : "否"}
               </Descriptions.Item>
             </Descriptions>
+            {file.exact_success_match && (
+              <Alert
+                type={file.blocked_reason === "exact_success_duplicate" ? "success" : "info"}
+                showIcon
+                style={{ marginTop: 8 }}
+                message={file.blocked_reason === "exact_success_duplicate"
+                  ? "已成功导入"
+                  : "文件与成功批次字节完全相同"}
+                description={(
+                  <Space direction="vertical" size={2}>
+                    <span>{file.blocked_reason === "exact_success_duplicate"
+                      ? "文件字节完全相同，系统不会再次导入"
+                      : "当前为修复模式，继续后会重新处理；仅新批次完整成功后原批次才标记为已替代"}</span>
+                    <Button type="link" size="small" style={{ padding: 0 }}
+                      onClick={() => onOpenBatch(file.exact_success_match!.batch_id)}>
+                      查看原批次 #{file.exact_success_match.batch_id}
+                    </Button>
+                  </Space>
+                )}
+              />
+            )}
             {file.warning && <Alert type="warning" showIcon message={file.warning} style={{ marginTop: 8 }} />}
             <Issues issues={file.issues} />
             <Space direction="vertical" size="small" style={{ width: "100%", marginTop: 8 }}>
