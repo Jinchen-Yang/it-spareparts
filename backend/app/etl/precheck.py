@@ -23,11 +23,15 @@ def _severity(issues: Iterable[dict]) -> str:
 
 
 def _legacy_warning(issues: Iterable[dict]) -> str | None:
+    issues = list(issues)
+    severity = _severity(issues)
+    if severity == "info":
+        return None
     return next(
         (
             issue["message"]
             for issue in issues
-            if issue["severity"] in {"error", "warning"}
+            if issue["severity"] == severity
         ),
         None,
     )

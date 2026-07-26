@@ -55,22 +55,19 @@ def run_import(session: Session, file_path: str, original_name: str,
     # 1) 应用级导入锁先行（同一时间仅一个导入；顺带消除"去重检查在加锁前"的并发竞态）
     session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _ADVISORY_LOCK_KEY})
 
-    # 2) hash 去重：skip 模式拒绝重复成功文件（幂等）；upsert(修复)模式是"显式要求重处理"——
-    #    把旧成功批次标记 superseded 后放行，让 loader 按 raw_id ON CONFLICT DO UPDATE 更新已有行。
-    #    （否则同 hash 第二条 success 会撞 ux_batch_success_hash 偏唯一索引；不放行则"修复模式"
-    #     对同一份文件形同虚设——见甲方反馈：同文件应能先非修复、后修复导入。）
+    # 2) hash 去重：skip 模式拒绝重复成功文件（幂等）；upsert(修复)模式是"显式要求重处理"。
+    #    旧成功批次必须等新批次完整通过后再 supersede；否则新文件预检/装载失败会破坏
+    #    既有成功审计链。两次状态切换在同一事务 flush，仍满足 success hash 偏唯一索引。
     dup = session.execute(
         select(SysImportBatch.id).where(
             SysImportBatch.file_hash == file_hash, SysImportBatch.status == "success"
         )
     ).first()
+    duplicate_batch_id = None
     if dup:
         if mode != "upsert":
             raise DuplicateFileError(dup[0])
-        session.execute(
-            update(SysImportBatch).where(SysImportBatch.id == dup[0])
-            .values(status="superseded")
-        )
+        duplicate_batch_id = dup[0]
 
     # 3) 建 batch（先占位，类型稍后回填）
     batch = SysImportBatch(filename=original_name, file_type="unknown",
@@ -189,6 +186,11 @@ def run_import(session: Session, file_path: str, original_name: str,
         batch.rows_error = counts["fact_rows_error"]
         batch.rows_inactive = counts["rows_inactive"]
         batch.report_json = report
+        if duplicate_batch_id is not None:
+            session.execute(
+                update(SysImportBatch).where(SysImportBatch.id == duplicate_batch_id)
+                .values(status="superseded")
+            )
         batch.status = "success"
         session.flush()
         return batch

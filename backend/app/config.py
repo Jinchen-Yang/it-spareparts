@@ -199,9 +199,12 @@ INVENTORY_EXCLUDED_WAREHOUSES = ("坏品",)
 MAX_UPLOAD_MB = 100
 # XLSX 本质是 ZIP。以下阈值在 openpyxl/pandas 之前只读中央目录校验，
 # 防止超多成员、超大解压体积或异常压缩比消耗 worker 内存/CPU。
+IMPORT_XLSX_MAX_WORKSHEETS = 100
 IMPORT_XLSX_MAX_MEMBERS = 10_000
 IMPORT_XLSX_MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 IMPORT_XLSX_MAX_COMPRESSION_RATIO = 200.0
+IMPORT_XLSX_MAX_COLUMNS = 512
+IMPORT_XLSX_MAX_DECLARED_CELLS = 5_000_000
 # 单文件行数上限：超过则拒绝，避免 pandas 全量物化撑爆内存拖垮单 worker（审计 2026-06-28 I-2）。
 # 取值兼顾 2G 容器内存与真实导出体量（中石化逐月导出单文件远低于此）。
 IMPORT_MAX_ROWS = 300_000

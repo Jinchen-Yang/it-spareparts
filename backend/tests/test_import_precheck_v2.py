@@ -1,9 +1,14 @@
 import io
 import time
+import xml.etree.ElementTree as ET
+import zipfile
+from collections.abc import Callable
 
+import openpyxl
 import pytest
 from fastapi.testclient import TestClient
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook as openpyxl_load_workbook
+from openpyxl.utils import get_column_letter
 from sqlalchemy import func, select
 
 from app import config
@@ -61,6 +66,449 @@ def _workbook_bytes(sheets: list[tuple[str, list[list[object]]]]) -> bytes:
     output = io.BytesIO()
     workbook.save(output)
     return output.getvalue()
+
+
+def _sparse_workbook_bytes(cell_ref: str, value: object = "x") -> bytes:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "稀疏表"
+    sheet[cell_ref] = value
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def _rewrite_xlsx_members(
+    payload: bytes,
+    transforms: dict[str, Callable[[bytes], bytes]],
+    renames: dict[str, str] | None = None,
+    omit: set[str] | None = None,
+) -> bytes:
+    output = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as source,
+        zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as target,
+    ):
+        for member in source.infolist():
+            if omit and member.filename in omit:
+                continue
+            data = source.read(member)
+            transform = transforms.get(member.filename)
+            if transform is not None:
+                data = transform(data)
+            target.writestr(
+                renames.get(member.filename, member.filename)
+                if renames
+                else member.filename,
+                data,
+            )
+    return output.getvalue()
+
+
+def _rename_worksheet_parts(payload: bytes) -> bytes:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        worksheet_members = [
+            name
+            for name in archive.namelist()
+            if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")
+        ]
+    renames = {
+        name: name.replace("xl/worksheets/sheet", "xl/worksheets/ws", 1)
+        for name in worksheet_members
+    }
+
+    def rewrite_workbook_rels(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        for relationship in root:
+            target = relationship.attrib.get("Target", "")
+            relationship.set(
+                "Target",
+                target.replace("/xl/worksheets/sheet", "/xl/worksheets/ws", 1)
+                .replace("worksheets/sheet", "worksheets/ws", 1),
+            )
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/_rels/workbook.xml.rels": rewrite_workbook_rels},
+        renames=renames,
+    )
+
+
+def _relocate_worksheets_to_custom_dir(payload: bytes) -> bytes:
+    prefix = "xl/worksheets/sheet"
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        worksheet_members = [
+            name
+            for name in archive.namelist()
+            if name.startswith(prefix) and name.endswith(".xml")
+        ]
+    renames = {
+        name: f"xl/custom/ws{name.removeprefix(prefix)}"
+        for name in worksheet_members
+    }
+
+    def rewrite_workbook_rels(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        for relationship in root:
+            target = relationship.attrib.get("Target", "")
+            relationship.set(
+                "Target",
+                target.replace("/xl/worksheets/sheet", "/xl/custom/ws", 1)
+                .replace("worksheets/sheet", "custom/ws", 1),
+            )
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def rewrite_content_types(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        for override in root:
+            part_name = override.attrib.get("PartName", "")
+            if part_name.startswith("/xl/worksheets/sheet"):
+                override.set(
+                    "PartName",
+                    part_name.replace("/xl/worksheets/sheet", "/xl/custom/ws", 1),
+                )
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={
+            "xl/_rels/workbook.xml.rels": rewrite_workbook_rels,
+            "[Content_Types].xml": rewrite_content_types,
+        },
+        renames=renames,
+    )
+
+
+def _share_all_worksheets_with_single_custom_part(payload: bytes) -> bytes:
+    prefix = "xl/worksheets/sheet"
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        worksheet_members = [
+            name
+            for name in archive.namelist()
+            if name.startswith(prefix) and name.endswith(".xml")
+        ]
+
+    def rewrite_workbook_rels(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        for relationship in root:
+            if relationship.attrib.get("Type", "").endswith("/worksheet"):
+                relationship.set("Target", "/xl/custom/ws1.xml")
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def rewrite_content_types(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        for override in list(root):
+            part_name = override.attrib.get("PartName", "")
+            if part_name == "/xl/worksheets/sheet1.xml":
+                override.set("PartName", "/xl/custom/ws1.xml")
+            elif part_name.startswith("/xl/worksheets/sheet"):
+                root.remove(override)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={
+            "xl/_rels/workbook.xml.rels": rewrite_workbook_rels,
+            "[Content_Types].xml": rewrite_content_types,
+        },
+        renames={"xl/worksheets/sheet1.xml": "xl/custom/ws1.xml"},
+        omit=set(worksheet_members[1:]),
+    )
+
+
+def _append_malformed_workbook_tail_after_sheets(payload: bytes) -> bytes:
+    def rewrite_workbook(data: bytes) -> bytes:
+        return data.replace(b"</sheets>", b"<broken</sheets>", 1)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/workbook.xml": rewrite_workbook},
+    )
+
+
+def _rewrite_worksheet_relationship_types(payload: bytes, rel_type: str) -> bytes:
+    def rewrite_workbook_rels(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        for relationship in root:
+            if relationship.attrib.get("Type", "").endswith("/worksheet"):
+                relationship.set("Type", rel_type)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/_rels/workbook.xml.rels": rewrite_workbook_rels},
+    )
+
+
+def _append_duplicate_required_relationship(payload: bytes) -> bytes:
+    def rewrite_workbook_rels(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        relationship = next(
+            (
+                element
+                for element in root
+                if element.attrib.get("Type", "").endswith("/worksheet")
+            ),
+            None,
+        )
+        assert relationship is not None
+        ET.SubElement(root, relationship.tag, relationship.attrib.copy())
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/_rels/workbook.xml.rels": rewrite_workbook_rels},
+    )
+
+
+def _nest_junk_under_first_workbook_sheet(payload: bytes) -> bytes:
+    def rewrite_workbook(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        sheets = next(
+            (element for element in root if element.tag.rsplit("}", 1)[-1] == "sheets"),
+            None,
+        )
+        assert sheets is not None
+        assert len(sheets) > 0
+        ET.SubElement(sheets[0], "junk")
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/workbook.xml": rewrite_workbook},
+    )
+
+
+def _append_unknown_child_under_workbook_sheets(payload: bytes) -> bytes:
+    def rewrite_workbook(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        sheets = next(
+            (element for element in root if element.tag.rsplit("}", 1)[-1] == "sheets"),
+            None,
+        )
+        assert sheets is not None
+        ET.SubElement(sheets, "junk")
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/workbook.xml": rewrite_workbook},
+    )
+
+
+def _remove_worksheet_dimension(payload: bytes) -> bytes:
+    def rewrite_dimension(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        dimension = next(
+            (
+                element
+                for element in root
+                if element.tag.rsplit("}", 1)[-1] == "dimension"
+            ),
+            None,
+        )
+        if dimension is not None:
+            root.remove(dimension)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/worksheets/sheet1.xml": rewrite_dimension},
+    )
+
+
+def _rewrite_worksheet_dimension_ref(payload: bytes, ref: str) -> bytes:
+    def rewrite_dimension(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        dimension = next(
+            (
+                element
+                for element in root
+                if element.tag.rsplit("}", 1)[-1] == "dimension"
+            ),
+            None,
+        )
+        assert dimension is not None
+        dimension.set("ref", ref)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/worksheets/sheet1.xml": rewrite_dimension},
+    )
+
+
+def _remove_worksheet_dimension_and_refs(payload: bytes) -> bytes:
+    def rewrite_dimension_and_refs(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        for element in list(root):
+            if element.tag.rsplit("}", 1)[-1] == "dimension":
+                root.remove(element)
+        for element in root.iter():
+            if element.tag.rsplit("}", 1)[-1] in {"row", "c"}:
+                element.attrib.pop("r", None)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={
+            "xl/worksheets/sheet1.xml": rewrite_dimension_and_refs,
+        },
+    )
+
+
+def _rewrite_worksheet_row_ref(payload: bytes, row_ref: str) -> bytes:
+    def rewrite_row_ref(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        for element in list(root):
+            if element.tag.rsplit("}", 1)[-1] == "dimension":
+                root.remove(element)
+        row = next(
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "row"
+        )
+        row.set("r", row_ref)
+        for element in row:
+            element.attrib.pop("r", None)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/worksheets/sheet1.xml": rewrite_row_ref},
+    )
+
+
+def _rewrite_first_row_child_ref(payload: bytes, cell_ref: str) -> bytes:
+    def rewrite_cell_ref(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        for element in list(root):
+            if element.tag.rsplit("}", 1)[-1] == "dimension":
+                root.remove(element)
+        row = next(
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "row"
+        )
+        row[0].set("r", cell_ref)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/worksheets/sheet1.xml": rewrite_cell_ref},
+    )
+
+
+def _add_cross_chunk_worksheet_doctype(payload: bytes) -> bytes:
+    def add_doctype(data: bytes) -> bytes:
+        declaration_at = data.find(b"?>")
+        declaration_end = declaration_at + 2 if declaration_at >= 0 else 0
+        doctype_offset = 64 * 1024 - 4
+        comment_overhead = len(b"<!--") + len(b"-->")
+        padding_length = doctype_offset - declaration_end - comment_overhead
+        padding = b"<!--" + b"x" * padding_length + b"-->"
+        doctype = b"<!DOCTYPE worksheet [<!-- ]/> -->]>"
+        rewritten = data[:declaration_end] + padding + doctype + data[declaration_end:]
+        assert rewritten[doctype_offset : doctype_offset + 9] == b"<!DOCTYPE"
+        return rewritten
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/worksheets/sheet1.xml": add_doctype},
+    )
+
+
+def _add_unique_attribute_names(payload: bytes, member_name: str) -> bytes:
+    def add_attributes(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        for index in range(reader._XML_NAME_LIMIT + 1):
+            root.set(f"unique_name_{index}", "")
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(payload, transforms={member_name: add_attributes})
+
+
+def _add_unique_namespace_declarations(payload: bytes, member_name: str) -> bytes:
+    def add_namespaces(data: bytes) -> bytes:
+        declaration_end = data.find(b"?>") + 2
+        root_start = data.find(b"<", declaration_end)
+        root_end = data.find(b">", root_start)
+        namespaces = b"".join(
+            f' xmlns:unique{index}="urn:unique:{index}"'.encode()
+            for index in range(reader._XML_NAME_LIMIT + 1)
+        )
+        return data[:root_end] + namespaces + data[root_end:]
+
+    return _rewrite_xlsx_members(payload, transforms={member_name: add_namespaces})
+
+
+def _replace_first_cell_with_inline_cdata(payload: bytes, value: str) -> bytes:
+    def replace_cell(data: bytes) -> bytes:
+        cell_start = data.find(b"<c ")
+        cell_end = data.find(b"</c>", cell_start) + len(b"</c>")
+        assert cell_start >= 0 and cell_end >= len(b"</c>")
+        replacement = (
+            b'<c r="A1" t="inlineStr"><is><t><![CDATA['
+            + value.encode()
+            + b"]]></t></is></c>"
+        )
+        return data[:cell_start] + replacement + data[cell_end:]
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/worksheets/sheet1.xml": replace_cell},
+    )
+
+
+def _add_root_attribute(
+    payload: bytes,
+    member_name: str,
+    name: str,
+    value: str,
+) -> bytes:
+    def add_attribute(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        root.set(name, value)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(payload, transforms={member_name: add_attribute})
+
+
+def _add_nested_xml(payload: bytes, member_name: str, depth: int) -> bytes:
+    def add_nesting(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        parent = root
+        for _ in range(depth - 1):
+            parent = ET.SubElement(parent, "level")
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(payload, transforms={member_name: add_nesting})
+
+
+def _replace_first_cell_with_namespaced_sibling(
+    payload: bytes,
+    local_name: str,
+) -> bytes:
+    def replace_cell(data: bytes) -> bytes:
+        root = ET.fromstring(data)
+        row = next(
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "row"
+        )
+        cell = row[0]
+        namespace = cell.tag.rsplit("}", 1)[0].lstrip("{")
+        cell.tag = f"{{{namespace}}}{local_name}"
+        for element in list(root):
+            if element.tag.rsplit("}", 1)[-1] == "dimension":
+                root.remove(element)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    return _rewrite_xlsx_members(
+        payload,
+        transforms={"xl/worksheets/sheet1.xml": replace_cell},
+    )
 
 
 def _precheck(client: TestClient, payload: bytes, filename: str = "input.xlsx"):
@@ -341,6 +789,23 @@ def test_precheck_ignored_duplicate_headers_do_not_block(import_client):
     assert result["can_import_all"] is True
 
 
+def test_precheck_legacy_warning_prefers_error_over_earlier_warning(import_client):
+    payload = _workbook_bytes([
+        ("采购", [_PURCHASE_HEADER, _PURCHASE_ROW]),
+        (
+            "报销明细",
+            [["报销日期", "报销金额", "报销金额"], ["2026-07-01", 20, 30]],
+        ),
+    ])
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert "重复非空表头" in file_result["warning"]
+    assert "不会导入" not in file_result["warning"]
+
+
 def test_precheck_corrupt_workbook_is_error(import_client):
     result = _precheck(import_client, b"not-an-xlsx", "broken.xlsx")
     file_result = result["files"][0]
@@ -447,7 +912,7 @@ def test_precheck_xlsx_zip_limits_run_before_openpyxl_and_pandas(
     monkeypatch.setattr(config, "IMPORT_XLSX_MAX_COMPRESSION_RATIO", 200.0)
     monkeypatch.setattr(config, limit_name, limit_value)
     monkeypatch.setattr(
-        reader,
+        openpyxl,
         "load_workbook",
         lambda *_args, **_kwargs: pytest.fail("ZIP 超限文件不应进入 openpyxl"),
     )
@@ -462,6 +927,1143 @@ def test_precheck_xlsx_zip_limits_run_before_openpyxl_and_pandas(
     assert file_result["severity"] == "error"
     assert file_result["can_import"] is False
     assert file_result["issues"][0]["code"] == expected_code
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        "xl/_rels/workbook.xml.rels",
+        "xl/workbook.xml",
+        "xl/worksheets/sheet1.xml",
+    ],
+)
+def test_inspect_workbook_rejects_too_many_xml_names_before_pandas(
+    monkeypatch,
+    tmp_path,
+    member_name,
+):
+    payload = _add_unique_attribute_names(
+        _workbook_bytes([("Sheet 1", [["row-1"]])]),
+        member_name,
+    )
+    path = tmp_path / "too-many-xml-names.xlsx"
+    path.write_bytes(payload)
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("XML 名称超限文件不应进入 pandas"),
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.inspect_workbook(str(path), load_data=False)
+
+    assert exc_info.value.code == "invalid_workbook"
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        "xl/_rels/workbook.xml.rels",
+        "xl/workbook.xml",
+        "xl/worksheets/sheet1.xml",
+    ],
+)
+def test_inspect_workbook_rejects_too_many_xml_namespaces_before_excel_readers(
+    monkeypatch,
+    tmp_path,
+    member_name,
+):
+    payload = _add_unique_namespace_declarations(
+        _workbook_bytes([("Sheet 1", [["row-1"]])]),
+        member_name,
+    )
+    path = tmp_path / "too-many-xml-namespaces.xlsx"
+    path.write_bytes(payload)
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail(
+            "XML namespace 超限文件不应进入 openpyxl"
+        ),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("XML namespace 超限文件不应进入 pandas"),
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.inspect_workbook(str(path), load_data=False)
+
+    assert exc_info.value.code == "invalid_workbook"
+
+
+@pytest.mark.parametrize(
+    "namespace_declaration",
+    [
+        f'xmlns:{"p" * (reader._XML_NAME_LENGTH_LIMIT + 1)}="urn:test"',
+        f'xmlns:p="{"u" * (reader._XML_NAME_LENGTH_LIMIT + 1)}"',
+    ],
+)
+def test_xml_namespace_prefix_and_uri_have_length_limits(namespace_declaration):
+    xml = f"<root {namespace_declaration} />".encode()
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        list(reader._safe_xml_iterparse(io.BytesIO(xml)))
+
+    assert exc_info.value.code == "invalid_workbook"
+
+
+@pytest.mark.parametrize(
+    "xml_text",
+    [
+        '<?xml version="1.0" encoding="UTF-16"?><root><child /></root>',
+        '<?xml version="1.0" encoding="UTF-16"?><root><![CDATA['
+        + "x" * 70_000
+        + "]]></root>",
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        '<!DOCTYPE root [<!ENTITY expanded "value">]><root>&expanded;</root>',
+    ],
+)
+def test_xml_scanner_rejects_utf16_before_elementtree_emits_events(
+    monkeypatch,
+    xml_text,
+):
+    def fail_if_elementtree_can_emit_events(source, events):
+        source.read()
+        pytest.fail("UTF-16 XML must be rejected before ElementTree emits events")
+        yield from ()
+
+    monkeypatch.setattr(reader.ET, "iterparse", fail_if_elementtree_can_emit_events)
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        list(reader._safe_xml_iterparse(io.BytesIO(xml_text.encode("utf-16"))))
+
+    assert exc_info.value.code == "invalid_workbook"
+
+
+def test_xml_scanner_accepts_utf8_bom():
+    xml = b'\xef\xbb\xbf<?xml version="1.0" encoding="UTF-8"?><root><child /></root>'
+
+    events = list(reader._safe_xml_iterparse(io.BytesIO(xml)))
+
+    assert [element.tag for event, element in events if event == "start"] == [
+        "root",
+        "child",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("attribute_name", "attribute_value"),
+    [
+        ("n" * (reader._XML_NAME_LENGTH_LIMIT + 1), ""),
+        (
+            "oversized_markup",
+            "x" * (reader._XML_MARKUP_LENGTH_LIMIT + 1),
+        ),
+    ],
+)
+def test_inspect_workbook_rejects_oversized_xml_names_and_markup(
+    monkeypatch,
+    tmp_path,
+    attribute_name,
+    attribute_value,
+):
+    payload = _add_root_attribute(
+        _workbook_bytes([("Sheet 1", [["row-1"]])]),
+        "xl/workbook.xml",
+        attribute_name,
+        attribute_value,
+    )
+    path = tmp_path / "oversized-xml-token.xlsx"
+    path.write_bytes(payload)
+    monkeypatch.setattr(config, "IMPORT_XLSX_MAX_COMPRESSION_RATIO", 10_000.0)
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("XML token 超限文件不应进入 pandas"),
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.inspect_workbook(str(path), load_data=False)
+
+    assert exc_info.value.code == "invalid_workbook"
+
+
+def test_xml_markup_limit_does_not_treat_comment_quotes_as_start_tag_quotes():
+    xml = b"<root><!-- don't --><padding>" + b"x" * 70_000 + b"</padding></root>"
+
+    events = list(reader._safe_xml_iterparse(io.BytesIO(xml)))
+
+    assert [event for event, _element in events].count("start") == 2
+
+
+def test_xml_markup_scanner_preserves_states_across_small_chunks():
+    class SmallChunkReader(io.BytesIO):
+        def read(self, size=-1):
+            return super().read(min(size, 2))
+
+    xml = (
+        b'<?xml version="1.0"?>'
+        b'<root quoted="a>b"><!-- ]/> --><![CDATA[<not-a-tag>]]>'
+        b"<child /></root>"
+    )
+
+    events = list(reader._safe_xml_iterparse(SmallChunkReader(xml)))
+
+    assert [element.tag for event, element in events if event == "start"] == [
+        "root",
+        "child",
+    ]
+
+
+def test_xml_markup_scanner_handles_many_short_tags_before_chunk_tail_comment():
+    tag_count = 10_000
+    chunk_prefix = b"<root>" + b"<n/>" * tag_count
+    padding = b"x" * (
+        reader._XML_MARKUP_LENGTH_LIMIT - len(chunk_prefix) - len(b"<!--")
+    )
+    xml = chunk_prefix + padding + b"<!--tail comment--><child /></root>"
+
+    events = list(reader._safe_xml_iterparse(io.BytesIO(xml)))
+    start_tags = [element.tag for event, element in events if event == "start"]
+
+    assert len(start_tags) == tag_count + 2
+    assert start_tags[0] == "root"
+    assert start_tags[-1] == "child"
+
+
+@pytest.mark.parametrize(
+    ("markup", "chunk_size"),
+    [
+        (b"<!-- text containing <!DOCTYPE worksheet -->", 64 * 1024),
+        (b"<!-- text containing <!DOCTYPE worksheet -->", 2),
+        (b"<![CDATA[text containing <!DOCTYPE worksheet]]>", 64 * 1024),
+        (b"<![CDATA[text containing <!DOCTYPE worksheet]]>", 2),
+        (b"<?target text containing <!DOCTYPE worksheet?>", 64 * 1024),
+        (b"<?target text containing <!DOCTYPE worksheet?>", 2),
+    ],
+)
+def test_xml_markup_scanner_accepts_doctype_text_inside_special_markup(
+    markup, chunk_size
+):
+    class SmallChunkReader(io.BytesIO):
+        def read(self, size=-1):
+            return super().read(min(size, chunk_size))
+
+    xml = b"<root>" + markup + b"<child /></root>"
+
+    events = list(reader._safe_xml_iterparse(SmallChunkReader(xml)))
+
+    assert [element.tag for event, element in events if event == "start"] == [
+        "root",
+        "child",
+    ]
+
+
+def test_long_inline_cdata_is_readable_and_not_counted_as_start_tag_markup(tmp_path):
+    value = "中" * 30_000
+    payload = _replace_first_cell_with_inline_cdata(
+        _workbook_bytes([("Sheet 1", [["row-1"]])]),
+        value,
+    )
+    path = tmp_path / "long-cdata.xlsx"
+    path.write_bytes(payload)
+
+    workbook = openpyxl_load_workbook(path, read_only=True, data_only=True)
+    try:
+        assert workbook.active["A1"].value == value
+    finally:
+        workbook.close()
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        assert reader._scan_worksheet_bounds(
+            archive,
+            "xl/worksheets/sheet1.xml",
+            sheet_name="Sheet 1",
+            row_limit=config.IMPORT_MAX_ROWS,
+            row_total_so_far=0,
+            column_limit=config.IMPORT_XLSX_MAX_COLUMNS,
+            declared_cell_limit=config.IMPORT_XLSX_MAX_DECLARED_CELLS,
+            declared_cells_so_far=0,
+        ) == (1, 1)
+
+    assert (
+        reader.inspect_workbook(str(path), load_data=False)[0].sheet_name == "Sheet 1"
+    )
+
+
+def test_inspect_workbook_rejects_cross_chunk_doctype_before_excel_readers(
+    monkeypatch,
+    tmp_path,
+):
+    payload = _add_cross_chunk_worksheet_doctype(
+        _workbook_bytes([("Sheet 1", [["row-1"]])])
+    )
+    path = tmp_path / "doctype.xlsx"
+    path.write_bytes(payload)
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail("DOCTYPE 文件不应进入 openpyxl"),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("DOCTYPE 文件不应进入 pandas"),
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.inspect_workbook(str(path), load_data=False)
+
+    assert exc_info.value.code == "invalid_workbook"
+
+
+@pytest.mark.parametrize("cell_ref", ["", "A1_1", "A300_001", "A1 "])
+def test_inspect_workbook_rejects_invalid_explicit_cell_ref_before_excel_readers(
+    monkeypatch,
+    tmp_path,
+    cell_ref,
+):
+    payload = _rewrite_first_row_child_ref(
+        _workbook_bytes([("Sheet 1", [["row-1"]])]),
+        cell_ref,
+    )
+    path = tmp_path / "invalid-cell-ref.xlsx"
+    path.write_bytes(payload)
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail("非法单元格坐标不应进入 openpyxl"),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("非法单元格坐标不应进入 pandas"),
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.inspect_workbook(str(path), load_data=False)
+
+    assert exc_info.value.code == "invalid_workbook"
+
+
+def test_workbook_sheet_parts_allows_exactly_100_sheets():
+    payload = _workbook_bytes([
+        (f"Sheet {index}", [[f"row-{index}"]]) for index in range(1, 101)
+    ])
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        assert len(reader._workbook_sheet_parts(archive)) == 100
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    ["xl/workbook.xml", "xl/worksheets/sheet1.xml"],
+)
+def test_real_workbook_and_worksheet_xml_allow_depth_64(member_name):
+    payload = _add_nested_xml(
+        _workbook_bytes([("Sheet 1", [["row-1"]])]),
+        member_name,
+        reader._XML_DEPTH_LIMIT,
+    )
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        if member_name == "xl/workbook.xml":
+            assert reader._workbook_sheet_refs(archive) == [
+                reader._WorkbookSheetRef("Sheet 1", "rId1")
+            ]
+        else:
+            assert reader._scan_worksheet_bounds(
+                archive,
+                member_name,
+                sheet_name="Sheet 1",
+                row_limit=config.IMPORT_MAX_ROWS,
+                row_total_so_far=0,
+                column_limit=config.IMPORT_XLSX_MAX_COLUMNS,
+                declared_cell_limit=config.IMPORT_XLSX_MAX_DECLARED_CELLS,
+                declared_cells_so_far=0,
+            ) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    ["xl/workbook.xml", "xl/worksheets/sheet1.xml"],
+)
+def test_real_workbook_and_worksheet_xml_reject_depth_65(member_name):
+    payload = _add_nested_xml(
+        _workbook_bytes([("Sheet 1", [["row-1"]])]),
+        member_name,
+        reader._XML_DEPTH_LIMIT + 1,
+    )
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        with pytest.raises(reader.ReaderError) as exc_info:
+            if member_name == "xl/workbook.xml":
+                reader._workbook_sheet_refs(archive)
+            else:
+                reader._scan_worksheet_bounds(
+                    archive,
+                    member_name,
+                    sheet_name="Sheet 1",
+                    row_limit=config.IMPORT_MAX_ROWS,
+                    row_total_so_far=0,
+                    column_limit=config.IMPORT_XLSX_MAX_COLUMNS,
+                    declared_cell_limit=config.IMPORT_XLSX_MAX_DECLARED_CELLS,
+                    declared_cells_so_far=0,
+                )
+
+    assert exc_info.value.code == "invalid_workbook"
+
+
+def test_precheck_rejects_too_many_worksheets_before_openpyxl_and_pandas(
+    import_client, monkeypatch
+):
+    payload = _workbook_bytes([
+        (f"Sheet {index}", [[f"row-{index}"]]) for index in range(1, 102)
+    ])
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail("超工作表文件不应进入 openpyxl"),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("超工作表文件不应进入 pandas"),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "worksheet_limit_exceeded"
+
+
+def test_precheck_counts_renamed_worksheet_parts_before_openpyxl_and_pandas(
+    import_client, monkeypatch
+):
+    payload = _rename_worksheet_parts(_workbook_bytes([
+        (f"Sheet {index}", [[f"row-{index}"]]) for index in range(1, 102)
+    ]))
+    workbook = openpyxl_load_workbook(
+        io.BytesIO(payload), read_only=True, data_only=True
+    )
+    try:
+        assert len(workbook.worksheets) == 101
+    finally:
+        workbook.close()
+
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail(
+            "重命名 worksheet parts 的超页工作簿不应进入 openpyxl"
+        ),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "重命名 worksheet parts 的超页工作簿不应进入 pandas"
+        ),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "worksheet_limit_exceeded"
+
+
+def test_precheck_counts_custom_directory_worksheet_relationships_before_openpyxl_and_pandas(
+    import_client, monkeypatch
+):
+    payload = _relocate_worksheets_to_custom_dir(_workbook_bytes([
+        (f"Sheet {index}", [[f"row-{index}"]]) for index in range(1, 102)
+    ]))
+    workbook = openpyxl_load_workbook(
+        io.BytesIO(payload), read_only=True, data_only=True
+    )
+    try:
+        assert len(workbook.worksheets) == 101
+    finally:
+        workbook.close()
+
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail(
+            "自定义目录 worksheet parts 的超页工作簿不应进入 openpyxl"
+        ),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "自定义目录 worksheet parts 的超页工作簿不应进入 pandas"
+        ),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "worksheet_limit_exceeded"
+
+
+def test_precheck_counts_logical_sheets_when_worksheets_share_one_physical_part(
+    import_client, monkeypatch
+):
+    payload = _share_all_worksheets_with_single_custom_part(_workbook_bytes([
+        (f"Sheet {index}", [[f"row-{index}"]]) for index in range(1, 102)
+    ]))
+    workbook = openpyxl_load_workbook(
+        io.BytesIO(payload), read_only=True, data_only=True
+    )
+    try:
+        assert len(workbook.worksheets) == 101
+        assert workbook.worksheets[0]["A1"].value == "row-1"
+        assert workbook.worksheets[-1]["A1"].value == "row-1"
+    finally:
+        workbook.close()
+
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail(
+            "共享 worksheet part 的超页工作簿不应进入 openpyxl"
+        ),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "共享 worksheet part 的超页工作簿不应进入 pandas"
+        ),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "worksheet_limit_exceeded"
+
+
+def test_precheck_stops_at_logical_sheet_limit_before_malformed_workbook_tail(
+    import_client, monkeypatch
+):
+    payload = _append_malformed_workbook_tail_after_sheets(
+        _workbook_bytes([
+            (f"Sheet {index}", [[f"row-{index}"]]) for index in range(1, 102)
+        ])
+    )
+    monkeypatch.setattr(
+        reader,
+        "_worksheet_relationship_targets",
+        lambda *_args, **_kwargs: pytest.fail(
+            "第 101 个逻辑 sheet 超限时不应解析 workbook relationships"
+        ),
+    )
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail("超工作表文件不应进入 openpyxl"),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("超工作表文件不应进入 pandas"),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "worksheet_limit_exceeded"
+
+
+def test_precheck_rejects_unknown_internal_sheet_relationships_before_openpyxl_and_pandas(
+    import_client, monkeypatch
+):
+    payload = _rewrite_worksheet_relationship_types(
+        _workbook_bytes([("Sheet 1", [["row-1"]])]),
+        "urn:custom:not-a-worksheet",
+    )
+    workbook = openpyxl_load_workbook(
+        io.BytesIO(payload), read_only=True, data_only=True
+    )
+    try:
+        assert len(workbook.worksheets) == 1
+        assert workbook.worksheets[0]["A1"].value == "row-1"
+    finally:
+        workbook.close()
+
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail("非法关系工作簿不应进入 openpyxl"),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("非法关系工作簿不应进入 pandas"),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "invalid_workbook"
+
+
+def test_precheck_rejects_duplicate_required_sheet_relationship_ids_before_openpyxl_and_pandas(
+    import_client, monkeypatch
+):
+    payload = _append_duplicate_required_relationship(
+        _workbook_bytes([("Sheet 1", [["row-1"]])])
+    )
+    workbook = openpyxl_load_workbook(
+        io.BytesIO(payload), read_only=True, data_only=True
+    )
+    try:
+        assert len(workbook.worksheets) == 1
+        assert workbook.worksheets[0]["A1"].value == "row-1"
+    finally:
+        workbook.close()
+
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail(
+            "重复 required relationship Id 的工作簿不应进入 openpyxl"
+        ),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "重复 required relationship Id 的工作簿不应进入 pandas"
+        ),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "invalid_workbook"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["unknown depth-2 sibling", "nested relationship child"],
+)
+def test_worksheet_relationship_targets_rejects_invalid_relationship_structure_early(
+    monkeypatch,
+    scenario,
+):
+    payload = _workbook_bytes([("Sheet 1", [["row-1"]])])
+
+    def fake_iterparse(_source, events=("end",)):
+        root = ET.Element("Relationships")
+        yield "start", root
+        if scenario == "unknown depth-2 sibling":
+            yield "start", ET.SubElement(root, "junk")
+            pytest.fail("非法 relationships depth=2 sibling 后不应继续解析")
+
+        relationship = ET.SubElement(
+            root,
+            "Relationship",
+            {
+                "Id": "rId-target",
+                "Type": (
+                    "http://schemas.openxmlformats.org/officeDocument/2006/"
+                    "relationships/worksheet"
+                ),
+                "Target": "worksheets/sheet1.xml",
+            },
+        )
+        yield "start", relationship
+        yield "start", ET.SubElement(relationship, "nested-child")
+        pytest.fail("Relationship 嵌套 child 后不应继续解析")
+
+    monkeypatch.setattr(reader.ET, "iterparse", fake_iterparse)
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        with pytest.raises(reader.ReaderError, match="无法按 .xlsx 解析"):
+            reader._worksheet_relationship_targets(
+                archive,
+                set(archive.namelist()),
+                [reader._WorkbookSheetRef("Sheet 1", "rId-target")],
+            )
+
+
+def test_worksheet_relationship_targets_clears_processed_relationship_children(
+    monkeypatch,
+):
+    payload = _workbook_bytes([("Sheet 1", [["row-1"]])])
+    captured_root = None
+
+    def fake_iterparse(_source, events=("end",)):
+        nonlocal captured_root
+        captured_root = ET.Element("Relationships")
+
+        if "start" in events:
+            yield "start", captured_root
+
+        for index in range(1000):
+            relationship = ET.SubElement(
+                captured_root,
+                "Relationship",
+                {
+                    "Id": f"unused-{index}",
+                    "Type": (
+                        "http://schemas.openxmlformats.org/officeDocument/2006/"
+                        "relationships/worksheet"
+                    ),
+                    "Target": "worksheets/sheet1.xml",
+                },
+            )
+            if "start" in events:
+                yield "start", relationship
+            if "end" in events:
+                yield "end", relationship
+
+        relationship = ET.SubElement(
+            captured_root,
+            "Relationship",
+            {
+                "Id": "rId-target",
+                "Type": (
+                    "http://schemas.openxmlformats.org/officeDocument/2006/"
+                    "relationships/worksheet"
+                ),
+                "Target": "worksheets/sheet1.xml",
+            },
+        )
+        if "start" in events:
+            yield "start", relationship
+        if "end" in events:
+            yield "end", relationship
+            yield "end", captured_root
+
+    monkeypatch.setattr(reader.ET, "iterparse", fake_iterparse)
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        rel_targets = reader._worksheet_relationship_targets(
+            archive,
+            set(archive.namelist()),
+            [reader._WorkbookSheetRef("Sheet 1", "rId-target")],
+        )
+
+    assert rel_targets == {"rId-target": "xl/worksheets/sheet1.xml"}
+    assert captured_root is not None
+    assert len(captured_root) == 0
+
+
+def test_workbook_sheet_refs_clears_processed_workbook_children(monkeypatch):
+    payload = _workbook_bytes([("Sheet 1", [["row-1"]])])
+    captured_root = None
+
+    def fake_iterparse(_source, events=("end",)):
+        nonlocal captured_root
+        captured_root = ET.Element("workbook")
+        yield "start", captured_root
+
+        for _ in range(1000):
+            metadata = ET.SubElement(captured_root, "metadata")
+            yield "start", metadata
+            yield "end", metadata
+
+        sheets = ET.SubElement(captured_root, "sheets")
+        yield "start", sheets
+        sheet = ET.SubElement(
+            sheets,
+            "sheet",
+            {
+                "name": "Sheet 1",
+                "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id": "rId1",
+            },
+        )
+        yield "start", sheet
+        yield "end", sheet
+        yield "end", sheets
+        yield "end", captured_root
+
+    monkeypatch.setattr(reader.ET, "iterparse", fake_iterparse)
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        sheet_refs = reader._workbook_sheet_refs(archive)
+
+    assert sheet_refs == [reader._WorkbookSheetRef("Sheet 1", "rId1")]
+    assert captured_root is not None
+    assert len(captured_root) == 0
+
+
+def test_precheck_rejects_nested_workbook_sheet_nodes_before_openpyxl_and_pandas(
+    import_client, monkeypatch
+):
+    payload = _nest_junk_under_first_workbook_sheet(
+        _workbook_bytes([("Sheet 1", [["row-1"]])])
+    )
+
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail(
+            "sheet 下嵌套 junk 的工作簿不应进入 openpyxl"
+        ),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "sheet 下嵌套 junk 的工作簿不应进入 pandas"
+        ),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "invalid_workbook"
+
+
+def test_precheck_rejects_unknown_workbook_sheets_children_before_openpyxl_and_pandas(
+    import_client, monkeypatch
+):
+    payload = _append_unknown_child_under_workbook_sheets(
+        _workbook_bytes([("Sheet 1", [["row-1"]])])
+    )
+
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail(
+            "sheets 下出现未知 child 的工作簿不应进入 openpyxl"
+        ),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "sheets 下出现未知 child 的工作簿不应进入 pandas"
+        ),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "invalid_workbook"
+
+
+def test_scan_worksheet_bounds_rejects_excessive_xml_depth_before_scanning_cells(
+    monkeypatch,
+):
+    payload = _workbook_bytes([("Sheet 1", [["row-1"]])])
+
+    def fake_iterparse(_source, events=("end",)):
+        for depth in range(reader._XML_DEPTH_LIMIT):
+            yield "start", ET.Element(f"level-{depth}")
+        yield "start", ET.Element("too-deep")
+        pytest.fail("超深 worksheet XML 不应继续扫描单元格")
+
+    monkeypatch.setattr(reader.ET, "iterparse", fake_iterparse)
+
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        with pytest.raises(reader.ReaderError, match="无法按 .xlsx 解析"):
+            reader._scan_worksheet_bounds(
+                archive,
+                "xl/worksheets/sheet1.xml",
+                sheet_name="Sheet 1",
+                row_limit=config.IMPORT_MAX_ROWS,
+                row_total_so_far=0,
+                column_limit=config.IMPORT_XLSX_MAX_COLUMNS,
+                declared_cell_limit=config.IMPORT_XLSX_MAX_DECLARED_CELLS,
+                declared_cells_so_far=0,
+            )
+
+
+def test_precheck_does_not_truncate_data_rows_for_custom_directory_sheet(
+    import_client,
+):
+    payload = _relocate_worksheets_to_custom_dir(_workbook_bytes([(
+        "采购",
+        [
+            _PURCHASE_HEADER,
+            _PURCHASE_ROW,
+            ["CGDD-2", "PO-2", "PL-2", "PN-2", 100],
+            ["CGDD-3", "PO-3", "PL-3", "PN-3", 100],
+            ["CGDD-4", "PO-4", "PL-4", "PN-4", 100],
+            ["CGDD-5", "PO-5", "PL-5", "PN-5", 100],
+        ],
+    )]))
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["file_type"] == "purchase"
+    assert _sheet(file_result, "采购")["data_rows"] == 5
+
+
+def test_precheck_rejects_declared_column_limit_before_pandas(
+    import_client, monkeypatch
+):
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("超列工作簿不应进入 pandas"),
+    )
+
+    file_result = _precheck(
+        import_client, _sparse_workbook_bytes("XFD300000")
+    )["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "column_limit_exceeded"
+
+
+def test_precheck_rejects_declared_grid_limit_before_pandas(
+    import_client, monkeypatch
+):
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("超网格工作簿不应进入 pandas"),
+    )
+    cell_ref = f"{get_column_letter(512)}10000"
+
+    file_result = _precheck(
+        import_client, _sparse_workbook_bytes(cell_ref)
+    )["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "declared_cell_limit_exceeded"
+
+
+def test_precheck_does_not_trust_spoofed_dimension_before_openpyxl_and_pandas(
+    import_client, monkeypatch
+):
+    payload = _rewrite_worksheet_dimension_ref(
+        _workbook_bytes([("伪造维度列", [list(range(1, 514))])]),
+        "A1",
+    )
+    workbook = openpyxl_load_workbook(io.BytesIO(payload), data_only=True)
+    try:
+        assert workbook.worksheets[0].max_column == 513
+    finally:
+        workbook.close()
+
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail(
+            "伪造 dimension 的超列工作簿不应进入 openpyxl"
+        ),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "伪造 dimension 的超列工作簿不应进入 pandas"
+        ),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "column_limit_exceeded"
+
+
+@pytest.mark.parametrize("local_name", ["x", "dimension"])
+def test_inspect_workbook_counts_any_direct_row_child_as_a_cell_before_pandas(
+    monkeypatch,
+    tmp_path,
+    local_name,
+):
+    payload = _replace_first_cell_with_namespaced_sibling(
+        _sparse_workbook_bytes("XFD1"),
+        local_name,
+    )
+    workbook = openpyxl_load_workbook(io.BytesIO(payload), data_only=True)
+    try:
+        assert workbook.worksheets[0].max_column == 16_384
+    finally:
+        workbook.close()
+
+    path = tmp_path / "non-c-cell.xlsx"
+    path.write_bytes(payload)
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "row 直属非 c 单元格超列文件不应进入 pandas"
+        ),
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.inspect_workbook(str(path), load_data=False)
+
+    assert exc_info.value.code == "column_limit_exceeded"
+
+
+def test_inspect_workbook_rejects_nested_row_elements_before_pandas(
+    monkeypatch,
+    tmp_path,
+):
+    payload = _replace_first_cell_with_namespaced_sibling(
+        _workbook_bytes([("Sheet 1", [["row-1"]])]),
+        "row",
+    )
+    path = tmp_path / "nested-row.xlsx"
+    path.write_bytes(payload)
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("嵌套 row 的工作簿不应进入 pandas"),
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.inspect_workbook(str(path), load_data=False)
+
+    assert exc_info.value.code == "invalid_workbook"
+
+
+def test_precheck_infers_missing_column_refs_before_openpyxl_and_pandas(
+    import_client, monkeypatch
+):
+    payload = _remove_worksheet_dimension_and_refs(_workbook_bytes([
+        ("无坐标列", [list(range(1, 514))]),
+    ]))
+    workbook = openpyxl_load_workbook(
+        io.BytesIO(payload), read_only=True, data_only=True
+    )
+    try:
+        assert len(next(workbook.worksheets[0].iter_rows())) == 513
+    finally:
+        workbook.close()
+
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail(
+            "缺失 dimension 和列坐标的超列工作簿不应进入 openpyxl"
+        ),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "缺失 dimension 和列坐标的超列工作簿不应进入 pandas"
+        ),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "column_limit_exceeded"
+
+
+def test_precheck_infers_missing_row_refs_before_openpyxl_and_pandas(
+    import_client, monkeypatch
+):
+    payload = _remove_worksheet_dimension_and_refs(_workbook_bytes([
+        ("无坐标行", [["r1"], ["r2"], ["r3"], ["r4"]]),
+    ]))
+    workbook = openpyxl_load_workbook(
+        io.BytesIO(payload), read_only=True, data_only=True
+    )
+    try:
+        assert len(list(workbook.worksheets[0].iter_rows())) == 4
+    finally:
+        workbook.close()
+
+    monkeypatch.setattr(config, "IMPORT_MAX_ROWS", 3)
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail(
+            "缺失 dimension 和行坐标的超行工作簿不应进入 openpyxl"
+        ),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "缺失 dimension 和行坐标的超行工作簿不应进入 pandas"
+        ),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "row_limit_exceeded"
+
+
+def test_inspect_workbook_rejects_non_decimal_row_ref_before_openpyxl_and_pandas(
+    monkeypatch,
+    tmp_path,
+):
+    payload = _rewrite_worksheet_row_ref(
+        _workbook_bytes([("非法行号", [["row-1"]])]),
+        "10000000.0",
+    )
+    path = tmp_path / "non-decimal-row-ref.xlsx"
+    path.write_bytes(payload)
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail("非法行号工作簿不应进入 openpyxl"),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("非法行号工作簿不应进入 pandas"),
+    )
+
+    with pytest.raises(reader.ReaderError) as exc_info:
+        reader.inspect_workbook(str(path), load_data=False)
+
+    assert exc_info.value.code == "invalid_workbook"
+
+
+def test_precheck_scans_sparse_sheet_without_dimension_before_openpyxl_and_pandas(
+    import_client, monkeypatch
+):
+    payload = _remove_worksheet_dimension(_sparse_workbook_bytes("XFD10"))
+    workbook = openpyxl_load_workbook(
+        io.BytesIO(payload), read_only=True, data_only=True
+    )
+    try:
+        assert workbook.worksheets[0]["XFD10"].value == "x"
+    finally:
+        workbook.close()
+
+    monkeypatch.setattr(
+        openpyxl,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail(
+            "缺失 dimension 的稀疏工作簿不应进入 openpyxl"
+        ),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail(
+            "缺失 dimension 的稀疏工作簿不应进入 pandas"
+        ),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == "column_limit_exceeded"
 
 
 def test_batch_upload_cannot_bypass_any_fatal_precheck_error(
