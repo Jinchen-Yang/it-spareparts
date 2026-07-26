@@ -1,6 +1,7 @@
 """文件解析：双表头探测 + 列名规整 + 重复列校验 + 文件识别 + ffill（§6.2）；
 多 sheet 工作簿逐页探测（§17.5）。"""
 import re
+import zipfile
 from collections import Counter
 from collections.abc import Iterable
 from itertools import repeat
@@ -24,6 +25,56 @@ class ReaderError(Exception):
     def __init__(self, message: str, *, code: str = "reader_error"):
         self.code = code
         super().__init__(message)
+
+
+def _check_xlsx_archive_safety(path: str) -> None:
+    """只读 XLSX ZIP 中央目录并在任何解压/工作簿解析前执行资源上限。"""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            members = archive.infolist()
+    except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        raise ReaderError(
+            "文件无法按 .xlsx 解析：可能是旧版 .xls 格式、非 Excel 文件或文件已损坏。"
+            "请在 Excel 中打开后「另存为 → Excel 工作簿 (.xlsx)」再上传。",
+            code="invalid_workbook",
+        ) from exc
+
+    member_limit = config.IMPORT_XLSX_MAX_MEMBERS
+    if len(members) > member_limit:
+        raise ReaderError(
+            f"XLSX 压缩包成员数超过 {member_limit} 个安全上限，请精简工作簿后重试。",
+            code="xlsx_too_many_members",
+        )
+
+    total_uncompressed = 0
+    total_compressed = 0
+    uncompressed_limit = config.IMPORT_XLSX_MAX_UNCOMPRESSED_BYTES
+    ratio_limit = config.IMPORT_XLSX_MAX_COMPRESSION_RATIO
+    for member in members:
+        total_uncompressed += member.file_size
+        total_compressed += member.compress_size
+        if total_uncompressed > uncompressed_limit:
+            raise ReaderError(
+                "XLSX 解压后总大小超过安全上限，请删除无关工作表、图片或附件后重试。",
+                code="xlsx_uncompressed_size_exceeded",
+            )
+        if (
+            member.file_size > 0
+            and member.file_size / max(member.compress_size, 1) > ratio_limit
+        ):
+            raise ReaderError(
+                "XLSX 压缩比超过安全上限，请使用 Excel 重新保存工作簿后重试。",
+                code="xlsx_compression_ratio_exceeded",
+            )
+
+    if (
+        total_uncompressed > 0
+        and total_uncompressed / max(total_compressed, 1) > ratio_limit
+    ):
+        raise ReaderError(
+            "XLSX 压缩比超过安全上限，请使用 Excel 重新保存工作簿后重试。",
+            code="xlsx_compression_ratio_exceeded",
+        )
 
 
 def _check_workbook_size(path: str) -> dict[str, int] | None:
@@ -286,6 +337,7 @@ def require_clean_columns(sheet: SheetData) -> None:
 
 def inspect_workbook(path: str, *, load_data: bool = True) -> list[SheetInspection]:
     """统一探测全部工作表；预检仅读表头，正式导入同时构造完整 DataFrame。"""
+    _check_xlsx_archive_safety(path)
     row_counts = _check_workbook_size(path)
     try:
         sheets = pd.read_excel(path, sheet_name=None, header=None, dtype=object,

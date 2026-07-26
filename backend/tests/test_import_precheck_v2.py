@@ -1,4 +1,5 @@
 import io
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,7 +13,10 @@ from app.config import get_settings
 from app.etl import pipeline, reader, sheet_selection
 from app.main import app
 from app.models.inventory import Inventory
-from app.models.system import SysImportBatch, SysRawFile, SysUser
+from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
+from app.models.purchase import FPurchaseLine, FPurchaseOrder
+from app.models.sales import FSalesLine, FSalesOrder
+from app.models.system import SysImportBatch, SysImportJob, SysRawFile, SysUser
 
 
 _XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -72,8 +76,37 @@ def _sheet(result: dict, name: str) -> dict:
     return next(sheet for sheet in result["sheets"] if sheet["sheet_name"] == name)
 
 
+def _wait_for_job(client: TestClient, job_id: int) -> dict:
+    for _ in range(200):
+        response = client.get(f"/api/import/jobs/{job_id}")
+        assert response.status_code == 200, response.text
+        job = response.json()
+        if job["status"] != "processing":
+            return job
+        time.sleep(0.025)
+    pytest.fail("批量导入作业未在 5 秒内结束")
+
+
+def _fact_counts(db) -> dict[str, int]:
+    models = (
+        Inventory,
+        FPurchaseOrder,
+        FPurchaseLine,
+        FSalesOrder,
+        FSalesLine,
+        FMaintenanceOrder,
+        FMaintenanceLine,
+        FProjectExpense,
+    )
+    return {
+        model.__tablename__: db.scalar(select(func.count()).select_from(model))
+        for model in models
+    }
+
+
 def test_precheck_single_purchase_keeps_v1_fields_and_adds_v2_contract(db, import_client):
     payload = _workbook_bytes([("采购", [_PURCHASE_HEADER, _PURCHASE_ROW])])
+    facts_before = _fact_counts(db)
 
     result = _precheck(import_client, payload)
     file_result = result["files"][0]
@@ -104,8 +137,10 @@ def test_precheck_single_purchase_keeps_v1_fields_and_adds_v2_contract(db, impor
     assert result["missing_price_any"] is False
     assert result["has_errors"] is False
     assert result["can_import_all"] is True
+    assert db.scalar(select(func.count()).select_from(SysImportJob)) == 0
     assert db.scalar(select(func.count()).select_from(SysImportBatch)) == 0
     assert db.scalar(select(func.count()).select_from(SysRawFile)) == 0
+    assert _fact_counts(db) == facts_before
 
 
 def test_precheck_recognizes_sales_with_bare_business_type(import_client):
@@ -354,6 +389,143 @@ def test_precheck_upload_size_limit_is_structured_error(import_client, monkeypat
     assert file_result["severity"] == "error"
     assert file_result["can_import"] is False
     assert file_result["issues"][0]["code"] == "file_too_large"
+
+
+def test_single_upload_size_limit_returns_http_413(import_client, monkeypatch):
+    monkeypatch.setattr(imports_api, "MAX_UPLOAD_MB", 0)
+    payload = _workbook_bytes([("采购", [_PURCHASE_HEADER, _PURCHASE_ROW])])
+
+    response = import_client.post(
+        "/api/import/upload",
+        files={"file": ("too-large.xlsx", payload, _XLSX_CONTENT_TYPE)},
+    )
+
+    assert response.status_code == 413
+
+
+def test_batch_upload_size_limit_returns_http_413(db, import_client, monkeypatch):
+    monkeypatch.setattr(imports_api, "MAX_UPLOAD_MB", 0)
+    payload = _workbook_bytes([("采购", [_PURCHASE_HEADER, _PURCHASE_ROW])])
+
+    response = import_client.post(
+        "/api/import/upload-batch",
+        files=[("files", ("too-large.xlsx", payload, _XLSX_CONTENT_TYPE))],
+    )
+
+    assert response.status_code == 413
+    assert db.scalar(select(func.count()).select_from(SysImportJob)) == 0
+    assert db.scalar(select(func.count()).select_from(SysImportBatch)) == 0
+    assert db.scalar(select(func.count()).select_from(SysRawFile)) == 0
+
+
+@pytest.mark.parametrize(
+    ("limit_name", "limit_value", "expected_code"),
+    [
+        ("IMPORT_XLSX_MAX_MEMBERS", 0, "xlsx_too_many_members"),
+        (
+            "IMPORT_XLSX_MAX_UNCOMPRESSED_BYTES",
+            0,
+            "xlsx_uncompressed_size_exceeded",
+        ),
+        (
+            "IMPORT_XLSX_MAX_COMPRESSION_RATIO",
+            0.0,
+            "xlsx_compression_ratio_exceeded",
+        ),
+    ],
+)
+def test_precheck_xlsx_zip_limits_run_before_openpyxl_and_pandas(
+    import_client,
+    monkeypatch,
+    limit_name,
+    limit_value,
+    expected_code,
+):
+    payload = _workbook_bytes([("采购", [_PURCHASE_HEADER, _PURCHASE_ROW])])
+    monkeypatch.setattr(config, "IMPORT_XLSX_MAX_MEMBERS", 10_000)
+    monkeypatch.setattr(config, "IMPORT_XLSX_MAX_UNCOMPRESSED_BYTES", 512 * 1024 * 1024)
+    monkeypatch.setattr(config, "IMPORT_XLSX_MAX_COMPRESSION_RATIO", 200.0)
+    monkeypatch.setattr(config, limit_name, limit_value)
+    monkeypatch.setattr(
+        reader,
+        "load_workbook",
+        lambda *_args, **_kwargs: pytest.fail("ZIP 超限文件不应进入 openpyxl"),
+    )
+    monkeypatch.setattr(
+        reader.pd,
+        "read_excel",
+        lambda *_args, **_kwargs: pytest.fail("ZIP 超限文件不应进入 pandas"),
+    )
+
+    file_result = _precheck(import_client, payload)["files"][0]
+
+    assert file_result["severity"] == "error"
+    assert file_result["can_import"] is False
+    assert file_result["issues"][0]["code"] == expected_code
+
+
+def test_batch_upload_cannot_bypass_any_fatal_precheck_error(
+    db,
+    import_client,
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setattr(config, "IMPORT_MAX_ROWS", 3)
+    raw_dir = tmp_path / "raw"
+    monkeypatch.setattr(get_settings(), "raw_file_dir", str(raw_dir))
+    duplicate = _workbook_bytes([(
+        "重复采购",
+        [
+            [
+                "采购单号(必填)",
+                "明细.产品名称(必填)",
+                "明细.产品名称(必填)",
+                "明细.单价(必填)",
+            ],
+            ["CGDD-1", "PN-A", "PN-B", 100],
+        ],
+    )])
+    unrecognized = _workbook_bytes([
+        ("说明", [["说明", "备注"], ["只用于阅读", "不导入"]]),
+    ])
+    over_rows = _workbook_bytes([(
+        "采购",
+        [
+            _PURCHASE_HEADER,
+            _PURCHASE_ROW,
+            ["CGDD-2", "PO-2", "PL-2", "PN-2", 100],
+            ["CGDD-3", "PO-3", "PL-3", "PN-3", 100],
+        ],
+    )])
+
+    response = import_client.post(
+        "/api/import/upload-batch?mode=upsert",
+        files=[
+            ("files", ("duplicate.xlsx", duplicate, _XLSX_CONTENT_TYPE)),
+            ("files", ("unrecognized.xlsx", unrecognized, _XLSX_CONTENT_TYPE)),
+            ("files", ("corrupt.xlsx", b"not-an-xlsx", _XLSX_CONTENT_TYPE)),
+            ("files", ("over-rows.xlsx", over_rows, _XLSX_CONTENT_TYPE)),
+        ],
+    )
+
+    assert response.status_code == 200, response.text
+    job = _wait_for_job(import_client, response.json()["job_id"])
+    assert job["status"] == "failed"
+    assert job["done_files"] == 0
+    assert job["error_files"] == 4
+    assert len(job["batches"]) == 4
+    assert all(batch["status"] == "failed" for batch in job["batches"])
+
+    db.expire_all()
+    assert db.scalar(
+        select(func.count()).select_from(SysImportBatch).where(
+            SysImportBatch.import_job_id == job["id"],
+            SysImportBatch.status == "success",
+        )
+    ) == 0
+    assert db.scalar(select(func.count()).select_from(SysRawFile)) == 0
+    assert all(count == 0 for count in _fact_counts(db).values())
+    assert not raw_dir.exists()
 
 
 def test_pipeline_and_precheck_share_sheet_selection(

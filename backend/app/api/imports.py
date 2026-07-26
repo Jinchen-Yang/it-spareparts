@@ -34,6 +34,8 @@ _log = logging.getLogger("imports")
 _PROFIT_REFRESH_ERROR = "利润重算失败，请到利润页手动重算"
 _MAINTENANCE_REFRESH_ERROR = "维保项目成本重算失败，请到项目成本页手动重算"
 _INTERNAL_IMPORT_ERROR = "系统处理异常，请联系管理员查看服务端日志"
+# Starlette 0.37.2 只有旧名称、新版又会对旧名称发弃用警告；数值 413 是稳定 HTTP 契约。
+_HTTP_REQUEST_ENTITY_TOO_LARGE = 413
 
 
 def _save_upload_to_temp(file: UploadFile, name: str) -> str:
@@ -49,7 +51,7 @@ def _save_upload_to_temp(file: UploadFile, name: str) -> str:
             while chunk := file.file.read(1 << 20):
                 size += len(chunk)
                 if size > limit:
-                    raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE,
+                    raise HTTPException(_HTTP_REQUEST_ENTITY_TOO_LARGE,
                                         f"{name} 超过 {MAX_UPLOAD_MB}MB 上限")
                 out.write(chunk)
     except Exception:
@@ -154,7 +156,7 @@ def precheck(
         except HTTPException as exc:
             code = (
                 "file_too_large"
-                if exc.status_code == status.HTTP_413_CONTENT_TOO_LARGE
+                if exc.status_code == _HTTP_REQUEST_ENTITY_TOO_LARGE
                 else "invalid_file"
             )
             results.append(import_precheck.failed_file_result(name, code, str(exc.detail)))
