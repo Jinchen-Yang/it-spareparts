@@ -14,6 +14,8 @@ import {
 } from "../api/imports";
 import ImportPrecheckPanel from "./import/ImportPrecheckPanel";
 
+const MAX_IMPORT_FILES = 20;
+
 // 历史询价（inquiry）导入为合同 Step 4 规划，后端尚未实装（B7 去重口径待客户确认），实装后再加回
 const FILE_TYPE: Record<string, string> = {
   purchase: "采购订单", sales: "销售订单", inventory: "产品库存", maintenance: "维保出库",
@@ -392,25 +394,19 @@ export default function ImportPage() {
           disabled={busy}
           beforeUpload={(file) => {
             invalidatePrecheck();
-            setStaged((prev) => {
-              const existing = prev.findIndex((f) => f.name === file.name && f.size === file.size);
-              if (existing < 0) return [...prev, file];
-              const next = [...prev];
-              next[existing] = file;
-              return next;
-            });
+            setStaged((prev) => [...prev, file]);
             return false; // 阻止 antd 默认上传，自己批量提交
           }}
         >
           <p className="ant-upload-drag-icon"><InboxOutlined /></p>
           <p className="ant-upload-text">点击或拖拽 .xlsx 文件到此处（可多选批量导入）</p>
-          <p className="ant-upload-hint">支持采购订单 / 销售订单 / 产品库存 / 维保出库 / 报销明细，自动识别类型；项目追踪工作簿可整本上传（只吃报销明细页，其余页自动跳过）</p>
+          <p className="ant-upload-hint">每批最多 {MAX_IMPORT_FILES} 个文件；支持采购订单 / 销售订单 / 产品库存 / 维保出库 / 报销明细，自动识别类型；项目追踪工作簿可整本上传（只吃报销明细页，其余页自动跳过）</p>
         </Upload.Dragger>
 
         {staged.length > 0 && (
           <div style={{ marginTop: 16 }}>
             <List
-              size="small" bordered dataSource={staged}
+              size="small" bordered dataSource={staged.slice(0, MAX_IMPORT_FILES)}
               header={<span>待导入 {staged.length} 个文件</span>}
               renderItem={(f, i) => (
                 <List.Item actions={[
@@ -428,6 +424,11 @@ export default function ImportPage() {
                 </List.Item>
               )}
             />
+            {staged.length > MAX_IMPORT_FILES && (
+              <div style={{ marginTop: 8 }}>
+                另有 {staged.length - MAX_IMPORT_FILES} 个文件未展示，请删除或清空后分批处理
+              </div>
+            )}
             <Space style={{ marginTop: 12 }} wrap>
               {phase === "dirty" && (
                 <Button type="primary" disabled={busy} onClick={runPrecheck}>

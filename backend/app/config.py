@@ -197,6 +197,8 @@ INVENTORY_EXCLUDED_WAREHOUSES = ("坏品",)
 
 # 文件上传上限（MB）
 MAX_UPLOAD_MB = 100
+# 单次批量导入文件数上限
+MAX_IMPORT_FILES = 20
 # XLSX 本质是 ZIP。以下阈值在 openpyxl/pandas 之前只读中央目录校验，
 # 防止超多成员、超大解压体积或异常压缩比消耗 worker 内存/CPU。
 IMPORT_XLSX_MAX_WORKSHEETS = 100
