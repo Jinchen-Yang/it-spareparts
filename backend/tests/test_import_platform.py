@@ -8,8 +8,8 @@ import pytest
 from sqlalchemy import func, select
 
 from app.api.imports import _process_import_job
-from app.etl import loader, pipeline
-from app.models.system import SysAuditLog, SysImportBatch, SysImportJob
+from app.etl import loader, pipeline, reader
+from app.models.system import SysAuditLog, SysImportBatch, SysImportJob, SysRawFile
 from tests import factories as f
 
 
@@ -103,6 +103,38 @@ def test_upsert_can_reimport_same_file(db, tmp_path):
     n_success = db.scalar(select(func.count()).select_from(SysImportBatch).where(
         SysImportBatch.file_hash == b2.file_hash, SysImportBatch.status == "success"))
     assert n_success == 1                          # 偏唯一索引未被违反
+
+
+def test_upsert_failed_reimport_preserves_old_success_and_archive(
+    db, tmp_path, monkeypatch
+):
+    path = _inv_xlsx(tmp_path, "same.xlsx", _inv_rows("INV1", "PN-A", 5))
+    first = pipeline.run_import(db, path, "same.xlsx", mode="skip")
+    db.commit()
+
+    duplicate = str(tmp_path / "same_again.xlsx")
+    shutil.copy(path, duplicate)
+    monkeypatch.setattr(
+        reader,
+        "inspect_workbook",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            reader.ReaderError("模拟预检失败", code="invalid_workbook")
+        ),
+    )
+
+    with pytest.raises(reader.ReaderError, match="模拟预检失败"):
+        pipeline.run_import(db, duplicate, "same.xlsx", mode="upsert")
+    db.commit()
+
+    db.expire_all()
+    same_hash = db.scalars(
+        select(SysImportBatch)
+        .where(SysImportBatch.file_hash == first.file_hash)
+        .order_by(SysImportBatch.id)
+    ).all()
+    assert [batch.status for batch in same_hash] == ["success", "failed"]
+    raw_files = db.scalars(select(SysRawFile).order_by(SysRawFile.id)).all()
+    assert len(raw_files) == 1 and raw_files[0].batch_id == first.id
 
 
 def test_skip_mode_still_blocks_duplicate(db, tmp_path):
