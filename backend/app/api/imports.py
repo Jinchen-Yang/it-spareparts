@@ -150,6 +150,12 @@ def upload(
             db.rollback()
             raise HTTPException(status.HTTP_409_CONFLICT,
                                 f"该文件已成功导入（batch {exc.batch_id}）") from exc
+        except pipeline.ArchiveError as exc:
+            db.rollback()
+            _log.exception("raw archive failed")
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR, _INTERNAL_IMPORT_ERROR
+            ) from exc
         except ReaderError as exc:
             db.commit()  # failed batch 已记录
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc

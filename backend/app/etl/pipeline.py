@@ -1,7 +1,10 @@
 """导入编排：校验→hash→锁→batch→read→transform→load→report（§6.1/§6.6）。"""
 import hashlib
+import logging
 import os
-import shutil
+import re
+import stat
+import tempfile
 from datetime import date, datetime, timezone
 
 from sqlalchemy import func, select, text, update
@@ -15,6 +18,9 @@ from app.models.system import SysImportBatch, SysImportError, SysRawFile
 from app.services import data_quality_amount_mismatch
 
 _ADVISORY_LOCK_KEY = 0x5350_4152  # 'SPAR' 应用级导入锁
+_ARCHIVE_HASH_RE = re.compile(r"[0-9a-f]{64}")
+_ARCHIVE_ERROR_MESSAGE = "原始文件归档失败"
+_log = logging.getLogger(__name__)
 
 
 class DuplicateFileError(Exception):
@@ -23,6 +29,17 @@ class DuplicateFileError(Exception):
     def __init__(self, batch_id: int):
         self.batch_id = batch_id
         super().__init__("该文件已成功导入")
+
+
+class ArchiveError(RuntimeError):
+    """原始文件无法安全归档。"""
+
+    def __init__(self):
+        super().__init__(_ARCHIVE_ERROR_MESSAGE)
+
+
+class _ArchiveDestinationChanged(Exception):
+    pass
 
 
 def sha256_file(path: str) -> str:
@@ -44,13 +61,156 @@ def successful_batch_ids_by_hash(session: Session, file_hashes: set[str]) -> dic
     return {file_hash: batch_id for file_hash, batch_id in rows}
 
 
+def _archive_digest(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        while chunk := source.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _open_archive_temp(fd: int):
+    return os.fdopen(fd, "wb")
+
+
+def _close_archive_fd(fd: int) -> None:
+    os.close(fd)
+
+
+def _archive_lstat(path: str) -> os.stat_result:
+    return os.lstat(path)
+
+
+def _archive_digest_regular(path: str, expected_stat: os.stat_result) -> str:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        opened_stat = os.fstat(fd)
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise ArchiveError()
+        if (opened_stat.st_dev, opened_stat.st_ino) != (
+            expected_stat.st_dev,
+            expected_stat.st_ino,
+        ):
+            raise _ArchiveDestinationChanged()
+        digest = hashlib.sha256()
+        while chunk := os.read(fd, 1 << 20):
+            digest.update(chunk)
+        try:
+            current_stat = _archive_lstat(path)
+        except FileNotFoundError:
+            raise _ArchiveDestinationChanged()
+        if not stat.S_ISREG(current_stat.st_mode):
+            raise ArchiveError()
+        if (current_stat.st_dev, current_stat.st_ino) != (
+            opened_stat.st_dev,
+            opened_stat.st_ino,
+        ):
+            raise _ArchiveDestinationChanged()
+    except Exception:
+        try:
+            _close_archive_fd(fd)
+        except Exception:
+            _log.warning("archive destination fd close failed", exc_info=True)
+        raise
+    _close_archive_fd(fd)
+    return digest.hexdigest()
+
+
+def _copy_archive_chunks(source_path: str, temp_file) -> str:
+    digest = hashlib.sha256()
+    with open(source_path, "rb") as source:
+        while chunk := source.read(1 << 20):
+            temp_file.write(chunk)
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _flush_archive_temp(temp_file) -> None:
+    temp_file.flush()
+
+
+def _fsync_archive_temp(temp_file) -> None:
+    os.fsync(temp_file.fileno())
+
+
+def _replace_archive_temp(temp_path: str, dest_path: str) -> None:
+    os.replace(temp_path, dest_path)
+
+
+def _remove_archive_temp(temp_path: str) -> None:
+    os.remove(temp_path)
+
+
 def _archive(src_path: str, file_hash: str) -> str:
+    if _ARCHIVE_HASH_RE.fullmatch(file_hash) is None:
+        raise ArchiveError()
+
     settings = get_settings()
-    os.makedirs(settings.raw_file_dir, exist_ok=True)
     dest = os.path.join(settings.raw_file_dir, f"{file_hash}.xlsx")
-    if not os.path.exists(dest):
-        shutil.copy2(src_path, dest)
-    return dest
+    try:
+        if _archive_digest(src_path) != file_hash:
+            raise ArchiveError()
+        os.makedirs(settings.raw_file_dir, exist_ok=True)
+        for _ in range(4):
+            try:
+                destination_stat = _archive_lstat(dest)
+            except FileNotFoundError:
+                break
+            if not stat.S_ISREG(destination_stat.st_mode):
+                raise ArchiveError()
+            try:
+                destination_hash = _archive_digest_regular(dest, destination_stat)
+            except _ArchiveDestinationChanged:
+                continue
+            if destination_hash == file_hash:
+                return dest
+            _log.warning("corrupt raw archive will be repaired")
+            break
+        else:
+            raise ArchiveError()
+    except ArchiveError:
+        raise
+    except Exception as exc:
+        raise ArchiveError() from exc
+
+    temp_path: str | None = None
+    temp_file = None
+    try:
+        fd, temp_path = tempfile.mkstemp(dir=settings.raw_file_dir)
+        try:
+            temp_file = _open_archive_temp(fd)
+        except Exception:
+            try:
+                _close_archive_fd(fd)
+            except Exception:
+                _log.warning("archive temporary fd close failed", exc_info=True)
+            raise
+        copied_hash = _copy_archive_chunks(src_path, temp_file)
+        if copied_hash != file_hash:
+            raise ArchiveError()
+        _flush_archive_temp(temp_file)
+        _fsync_archive_temp(temp_file)
+        temp_file.close()
+        temp_file = None
+        _replace_archive_temp(temp_path, dest)
+        temp_path = None
+        return dest
+    except Exception as exc:
+        if temp_file is not None:
+            try:
+                temp_file.close()
+            except Exception:
+                _log.warning("archive temporary file close failed", exc_info=True)
+        if temp_path is not None:
+            try:
+                _remove_archive_temp(temp_path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                _log.warning("archive temporary file cleanup failed", exc_info=True)
+        if isinstance(exc, ArchiveError):
+            raise
+        raise ArchiveError() from exc
 
 
 def run_import(session: Session, file_path: str, original_name: str,
