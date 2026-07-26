@@ -110,6 +110,67 @@ afterEach(() => {
   message.destroy();
 });
 
+describe("批量文件数量提示", () => {
+  it("明确提示每批最多 20 个文件", () => {
+    render(<ImportPage />);
+
+    expect(screen.getByText(/每批最多 20 个文件/)).toBeInTheDocument();
+  });
+
+  it("保留同名同大小但内容不同的文件并按选择顺序预检", async () => {
+    render(<ImportPage />);
+    const first = stage(new File([Uint8Array.of(1)], "同名.xlsx"));
+    const second = stage(new File([Uint8Array.of(2)], "同名.xlsx"));
+
+    expect(await screen.findByText("待导入 2 个文件")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /预检文件/ }));
+
+    await waitFor(() => expect(precheckImportFiles).toHaveBeenCalledTimes(1));
+    expect(precheckImportFiles.mock.calls[0][0][0]).toBe(first);
+    expect(precheckImportFiles.mock.calls[0][0][1]).toBe(second);
+    expect(precheckImportFiles).toHaveBeenCalledWith(
+      expect.any(Array), "skip", expect.any(AbortSignal),
+    );
+  });
+
+  it("超出数量限制后保留全部文件并允许精确删除一个后重试", async () => {
+    const files = Array.from({ length: 21 }, (_, index) => (
+      new File([Uint8Array.of(index)], "同名.xlsx")
+    ));
+    precheckImportFiles
+      .mockRejectedValueOnce({
+        response: { status: 400, data: { detail: "一次最多导入 20 个文件，请分批处理" } },
+      })
+      .mockResolvedValueOnce(cleanResult);
+    render(<ImportPage />);
+
+    files.forEach((file) => stage(file));
+    expect(await screen.findByText("待导入 21 个文件")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "delete" })).toHaveLength(20);
+    expect(screen.getByText("另有 1 个文件未展示，请删除或清空后分批处理")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /预检文件/ }));
+    expect(await screen.findByText("一次最多导入 20 个文件，请分批处理")).toBeInTheDocument();
+    expect(screen.getByText("待导入 21 个文件")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "delete" })[0]);
+    expect(screen.getByText("待导入 20 个文件")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "delete" })).toHaveLength(20);
+    expect(screen.queryByText(/个文件未展示，请删除或清空后分批处理/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /预检文件/ }));
+
+    await waitFor(() => expect(precheckImportFiles).toHaveBeenCalledTimes(2));
+    expect(precheckImportFiles.mock.calls[0][0]).toHaveLength(21);
+    precheckImportFiles.mock.calls[0][0].forEach((file: File, index: number) => {
+      expect(file).toBe(files[index]);
+    });
+    expect(precheckImportFiles.mock.calls[1][0]).toHaveLength(20);
+    precheckImportFiles.mock.calls[1][0].forEach((file: File, index: number) => {
+      expect(file).toBe(files[index + 1]);
+    });
+  });
+});
+
 describe("完整导入问题明细下载", () => {
   it("批次有问题时显示完整数量和可忽略提示说明", async () => {
     get.mockImplementation((url: string) => {
@@ -617,18 +678,19 @@ describe("导入预检状态机", () => {
     expect(uploadImportBatch).not.toHaveBeenCalled();
   });
 
-  it.each(["replace", "delete", "clear", "mode"] as const)(
+  it.each(["add", "delete", "clear", "mode"] as const)(
     "%s 会立即使旧预检结果失效",
     async (action) => {
       render(<ImportPage />);
       const oldFile = stage();
+      let addedFile: File | undefined;
       fireEvent.click(await screen.findByRole("button", { name: /预检文件/ }));
       await screen.findByText("采购明细");
 
-      if (action === "replace") {
-        const replacement = new File(["xlsx"], oldFile.name);
-        expect(replacement.size).toBe(oldFile.size);
-        stage(replacement);
+      if (action === "add") {
+        addedFile = new File(["xlsx"], oldFile.name);
+        expect(addedFile.size).toBe(oldFile.size);
+        stage(addedFile);
       } else if (action === "delete") {
         fireEvent.click(screen.getByRole("button", { name: "delete" }));
       } else if (action === "clear") {
@@ -641,10 +703,10 @@ describe("导入预检状态机", () => {
       expect(screen.queryByRole("button", { name: "开始导入" })).toBeNull();
       expect(uploadImportBatch).not.toHaveBeenCalled();
 
-      if (action === "replace") {
+      if (action === "add") {
         fireEvent.click(screen.getByRole("button", { name: /预检文件/ }));
         await waitFor(() => expect(precheckImportFiles).toHaveBeenCalledTimes(2));
-        expect(precheckImportFiles.mock.calls[1][0][0]).not.toBe(oldFile);
+        expect(precheckImportFiles.mock.calls[1][0]).toEqual([oldFile, addedFile]);
       }
     },
   );

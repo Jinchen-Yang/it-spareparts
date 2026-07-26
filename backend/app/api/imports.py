@@ -12,7 +12,7 @@ from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session
 
 from app.auth import current_role
-from app.config import MAX_UPLOAD_MB
+from app.config import MAX_IMPORT_FILES, MAX_UPLOAD_MB
 from app.db import SessionLocal, get_db
 from app.security import (
     UserContext,
@@ -39,6 +39,12 @@ _MAINTENANCE_REFRESH_ERROR = "维保项目成本重算失败，请到项目成�
 _INTERNAL_IMPORT_ERROR = "系统处理异常，请联系管理员查看服务端日志"
 # Starlette 0.37.2 只有旧名称、新版又会对旧名称发弃用警告；数值 413 是稳定 HTTP 契约。
 _HTTP_REQUEST_ENTITY_TOO_LARGE = 413
+
+
+def _enforce_import_file_limit(files: list[UploadFile]) -> None:
+    if len(files) > MAX_IMPORT_FILES:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"一次最多导入 {MAX_IMPORT_FILES} 个文件，请分批处理")
 
 
 def _safe_csv_cell(value: object) -> object:
@@ -174,6 +180,7 @@ def precheck(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """导入前预检（不导入、不建批次）：返回选表结果、风险等级与 v1 兼容字段。"""
+    _enforce_import_file_limit(files)
     mode = mode if mode in ("skip", "upsert") else "skip"
     results_with_hashes: list[tuple[dict, str | None]] = []
     for f in files:
@@ -316,6 +323,7 @@ def upload_batch(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """批量上传：N 个 .xlsx 归一个作业，后台逐文件导入。立即返回 job_id，前端轮询进度。"""
+    _enforce_import_file_limit(files)
     mode = mode if mode in ("skip", "upsert") else "skip"
     if not files:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "未选择文件")
