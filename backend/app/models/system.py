@@ -144,6 +144,8 @@ class SysImportError(Base):
     error_detail: Mapped[str | None] = mapped_column(Text)
     raw_row: Mapped[dict | None] = mapped_column(JSONB)
 
+    __table_args__ = (Index("ix_import_error_batch_id_id", "batch_id", "id"),)
+
 
 class SysRawFile(Base):
     __tablename__ = "sys_raw_file"

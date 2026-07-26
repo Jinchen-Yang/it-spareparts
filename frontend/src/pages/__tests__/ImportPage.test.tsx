@@ -5,6 +5,7 @@ import { StrictMode } from "react";
 import type { ImportPrecheckResult } from "../../api/imports";
 
 const get = vi.fn();
+const downloadImportErrors = vi.fn();
 const precheckImportFiles = vi.fn();
 const uploadImportBatch = vi.fn();
 
@@ -13,6 +14,7 @@ vi.mock("../../api", () => ({
 }));
 
 vi.mock("../../api/imports", () => ({
+  downloadImportErrors: (...args: unknown[]) => downloadImportErrors(...args),
   precheckImportFiles: (...args: unknown[]) => precheckImportFiles(...args),
   uploadImportBatch: (...args: unknown[]) => uploadImportBatch(...args),
 }));
@@ -91,6 +93,116 @@ afterEach(() => {
   vi.restoreAllMocks();
   cleanup();
   message.destroy();
+});
+
+describe("完整导入问题明细下载", () => {
+  it("批次有问题时显示完整数量和可忽略提示说明", async () => {
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: [{
+        id: 7, filename: "错误.xlsx", file_type: "purchase", status: "failed",
+        uploaded_at: "2026-07-27T00:00:00Z", uploaded_by: "admin",
+        rows_total: 501, rows_inserted: 0, rows_skipped: 0, rows_error: 501,
+        rows_inactive: 0,
+      }] });
+      if (url === "/import/batches/7") return Promise.resolve({ data: {
+        id: 7, filename: "错误.xlsx", report: {}, errors: [], issue_count: 501,
+      } });
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    render(<ImportPage />);
+
+    fireEvent.click(await screen.findByText("详情"));
+
+    expect(await screen.findByRole("button", {
+      name: "下载完整导入问题明细（501 条）",
+    })).toBeInTheDocument();
+    expect(screen.getByText(
+      "可能包含草稿/取消单等可忽略提示，不代表源数据错误",
+    )).toBeInTheDocument();
+  });
+
+  it("无错误批次不显示下载按钮", async () => {
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: [{
+        id: 8, filename: "正常.xlsx", file_type: "purchase", status: "success",
+        uploaded_at: "2026-07-27T00:00:00Z", uploaded_by: "admin",
+        rows_total: 1, rows_inserted: 1, rows_skipped: 0, rows_error: 0,
+        rows_inactive: 0,
+      }] });
+      if (url === "/import/batches/8") return Promise.resolve({ data: {
+        id: 8, filename: "正常.xlsx", report: {}, errors: [], issue_count: 0,
+      } });
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    render(<ImportPage />);
+
+    fireEvent.click(await screen.findByText("详情"));
+    await screen.findByText("批次 #8 · 正常.xlsx");
+
+    expect(screen.queryByRole("button", { name: /下载完整导入问题明细/ })).toBeNull();
+    expect(screen.getByText("无问题行")).toBeInTheDocument();
+  });
+
+  it("下载中同步双击只请求一次，完成后按钮恢复且详情保持打开", async () => {
+    const download = deferred<void>();
+    downloadImportErrors.mockReturnValueOnce(download.promise);
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: [{
+        id: 9, filename: "错误.xlsx", file_type: "purchase", status: "failed",
+        uploaded_at: "2026-07-27T00:00:00Z", uploaded_by: "admin",
+        rows_total: 3, rows_inserted: 0, rows_skipped: 0, rows_error: 3,
+        rows_inactive: 0,
+      }] });
+      if (url === "/import/batches/9") return Promise.resolve({ data: {
+        id: 9, filename: "错误.xlsx", report: {}, errors: [], issue_count: 3,
+      } });
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    render(<ImportPage />);
+    fireEvent.click(await screen.findByText("详情"));
+    const button = await screen.findByRole("button", {
+      name: "下载完整导入问题明细（3 条）",
+    });
+
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    expect(downloadImportErrors).toHaveBeenCalledTimes(1);
+    expect(downloadImportErrors).toHaveBeenCalledWith(9);
+    expect(button).toBeDisabled();
+    download.resolve();
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(screen.getByText("批次 #9 · 错误.xlsx")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["403", { response: { status: 403 } }, "无权下载问题明细，请联系管理员开通数据导入权限"],
+    ["404", { response: { status: 404 } }, "未找到批次，无法下载问题明细"],
+    ["网络", { message: "Network Error" }, "网络连接失败，请检查网络后重试下载"],
+  ])("下载遇到%s错误时明确提示且不关闭详情", async (_label, error, expected) => {
+    downloadImportErrors.mockRejectedValueOnce(error);
+    get.mockImplementation((url: string) => {
+      if (url === "/import/batches") return Promise.resolve({ data: [{
+        id: 10, filename: "错误.xlsx", file_type: "purchase", status: "failed",
+        uploaded_at: "2026-07-27T00:00:00Z", uploaded_by: "admin",
+        rows_total: 1, rows_inserted: 0, rows_skipped: 0, rows_error: 1,
+        rows_inactive: 0,
+      }] });
+      if (url === "/import/batches/10") return Promise.resolve({ data: {
+        id: 10, filename: "错误.xlsx", report: {}, errors: [], issue_count: 1,
+      } });
+      return Promise.reject(new Error(`unexpected GET ${url}`));
+    });
+    render(<ImportPage />);
+    fireEvent.click(await screen.findByText("详情"));
+
+    fireEvent.click(await screen.findByRole("button", {
+      name: "下载完整导入问题明细（1 条）",
+    }));
+
+    expect(await screen.findByText(expected)).toBeInTheDocument();
+    expect(screen.getByText("批次 #10 · 错误.xlsx")).toBeInTheDocument();
+  });
 });
 
 describe("导入预检状态机", () => {

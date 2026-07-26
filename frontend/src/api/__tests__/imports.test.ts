@@ -1,12 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const post = vi.fn();
+const get = vi.fn();
 
 vi.mock("../../api", () => ({
-  default: { post: (...args: unknown[]) => post(...args) },
+  default: {
+    get: (...args: unknown[]) => get(...args),
+    post: (...args: unknown[]) => post(...args),
+  },
 }));
 
-import { normalizeImportPrecheck, precheckImportFiles, uploadImportBatch } from "../imports";
+import {
+  downloadImportErrors, normalizeImportPrecheck, precheckImportFiles, uploadImportBatch,
+} from "../imports";
 
 const cleanV2 = {
   files: [{
@@ -36,6 +42,45 @@ const cleanV2 = {
 };
 
 beforeEach(() => vi.clearAllMocks());
+
+describe("import error download", () => {
+  it("downloads the authenticated Blob with the response filename and releases its URL", async () => {
+    vi.useFakeTimers();
+    const blob = new Blob(["csv"], { type: "text/csv" });
+    get.mockResolvedValueOnce({
+      data: blob,
+      headers: { "content-disposition": "attachment; filename=import-batch-7-issues.csv" },
+    });
+    const createObjectURL = vi.fn(() => "blob:errors");
+    const revokeObjectURL = vi.fn();
+    Object.defineProperties(URL, {
+      createObjectURL: { configurable: true, value: createObjectURL },
+      revokeObjectURL: { configurable: true, value: revokeObjectURL },
+    });
+    let clickedAnchor: HTMLAnchorElement | null = null;
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      clickedAnchor = this;
+      expect(document.body.contains(this)).toBe(true);
+    });
+
+    await downloadImportErrors(7);
+
+    expect(get).toHaveBeenCalledWith("/import/batches/7/errors.csv", { responseType: "blob" });
+    expect(createObjectURL).toHaveBeenCalledWith(blob);
+    expect(click).toHaveBeenCalledOnce();
+    expect(clickedAnchor).toMatchObject({
+      href: "blob:errors",
+      download: "import-batch-7-issues.csv",
+    });
+    expect(document.body.contains(clickedAnchor)).toBe(false);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    await vi.runAllTimersAsync();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:errors");
+    vi.useRealTimers();
+  });
+});
 
 describe("import precheck adapter", () => {
   it("accepts a complete v2 response and centralizes both multipart requests", async () => {

@@ -87,4 +87,4 @@ def test_single_alembic_head(migrated):
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(_cfg()).get_heads()
     # 钉住当前 head：DEV-05A 行级数据疑点地基。
-    assert heads == ["d5a7c9e1f3b6"], f"应只有一个 head=d5a7c9e1f3b6，实得 {heads}"
+    assert heads == ["f8c3d1a6b2e4"], f"应只有一个 head=f8c3d1a6b2e4，实得 {heads}"
