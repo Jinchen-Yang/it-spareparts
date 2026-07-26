@@ -279,3 +279,26 @@ export async function uploadImportBatch(files: readonly File[], mode: ImportMode
   }
   return data;
 }
+
+export async function downloadImportErrors(batchId: number) {
+  const response = await api.get<Blob>(`/import/batches/${batchId}/errors.csv`, {
+    responseType: "blob",
+  });
+  const disposition = response.headers["content-disposition"] || "";
+  const match = /filename="?([^";]+)"?/.exec(disposition);
+  const filename = match?.[1] || `import-batch-${batchId}-issues.csv`;
+  const url = URL.createObjectURL(response.data);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    try {
+      anchor.click();
+    } finally {
+      anchor.remove();
+    }
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+}

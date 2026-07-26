@@ -9,7 +9,7 @@ import PageHeader from "../components/PageHeader";
 import type { ColumnsType } from "antd/es/table";
 import api from "../api";
 import {
-  precheckImportFiles, uploadImportBatch,
+  downloadImportErrors, precheckImportFiles, uploadImportBatch,
   type ImportMode, type ImportPrecheckResult,
 } from "../api/imports";
 import ImportPrecheckPanel from "./import/ImportPrecheckPanel";
@@ -64,6 +64,7 @@ export default function ImportPage() {
   const [job, setJob] = useState<Job | null>(null);
   const [batches, setBatches] = useState<Batch[]>([]);
   const [detail, setDetail] = useState<any | null>(null);
+  const [downloadingErrors, setDownloadingErrors] = useState(false);
   const pollRef = useRef<number | null>(null);
   const pollDeadlineTimerRef = useRef<number | null>(null);
   const pollDeadlineRef = useRef<number>(0);
@@ -74,6 +75,7 @@ export default function ImportPage() {
   const precheckControllerRef = useRef<AbortController | null>(null);
   const uploadActionLockRef = useRef(false);
   const resumePollingLockRef = useRef(false);
+  const downloadErrorsLockRef = useRef(false);
   const POLL_MAX_MS = 15 * 60 * 1000;   // 兜底：进程被杀等极端情况下作业卡在「进行中」，不无限轮询
 
   const loadBatches = () => api.get("/import/batches").then((r) => {
@@ -253,18 +255,42 @@ export default function ImportPage() {
     if (mountedRef.current) setDetail(data);
   };
 
+  const downloadErrors = async () => {
+    if (downloadErrorsLockRef.current || !detail) return;
+    downloadErrorsLockRef.current = true;
+    setDownloadingErrors(true);
+    try {
+      await downloadImportErrors(detail.id);
+    } catch (error: any) {
+      if (!mountedRef.current) return;
+      if (error?.response?.status === 403) {
+        message.error("无权下载问题明细，请联系管理员开通数据导入权限");
+      } else if (error?.response?.status === 404) {
+        message.error("未找到批次，无法下载问题明细");
+      } else if (!error?.response) {
+        message.error("网络连接失败，请检查网络后重试下载");
+      } else {
+        message.error("问题明细下载失败，请稍后重试");
+      }
+    } finally {
+      downloadErrorsLockRef.current = false;
+      if (mountedRef.current) setDownloadingErrors(false);
+    }
+  };
+
   // 软标记（非真错误，可忽略）→ 灰色；其余 → 红色
   const ERR_LABEL: Record<string, { label: string; color: string }> = {
     empty_pn_inactive: { label: "草稿/取消单·可忽略", color: "default" },
   };
   const errCols: ColumnsType<any> = [
     { title: "行号", dataIndex: "row_no", width: 80 },
-    { title: "类型", dataIndex: "error_type", width: 170,
+    { title: "性质", dataIndex: "nature", width: 80 },
+    { title: "问题类型", dataIndex: "error_type", width: 170,
       render: (t: string) => {
         const e = ERR_LABEL[t];
         return <Tag color={e?.color || "red"}>{e?.label || t}</Tag>;
       } },
-    { title: "明细", dataIndex: "detail" },
+    { title: "问题明细", dataIndex: "detail" },
   ];
 
   const jobBatchCols: ColumnsType<JobBatch> = [
@@ -446,9 +472,19 @@ export default function ImportPage() {
                   <Descriptions.Item key={k} label={k}>{String(v)}</Descriptions.Item>
                 ))}
             </Descriptions>
+            {detail.issue_count > 0 && (
+              <>
+                <Alert type="info" showIcon style={{ marginBottom: 12 }}
+                  message="可能包含草稿/取消单等可忽略提示，不代表源数据错误" />
+                <Button loading={downloadingErrors} disabled={downloadingErrors}
+                  onClick={downloadErrors} style={{ marginBottom: 12 }}>
+                  下载完整导入问题明细（{detail.issue_count} 条）
+                </Button>
+              </>
+            )}
             <ResizableTable storageKey="import-errors" rowKey={(_, i) => String(i)} size="small" columns={errCols}
               dataSource={detail.errors || []} pagination={{ pageSize: 10 }}
-              locale={{ emptyText: "无异常行" }} />
+              locale={{ emptyText: "无问题行" }} />
           </>
         )}
       </Modal>

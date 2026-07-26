@@ -9,7 +9,7 @@ from sqlalchemy import text
 from app.db import engine
 
 _PREV = "a9c5e2f7d4b1"
-_HEAD = "d5a7c9e1f3b6"
+_HEAD = "f8c3d1a6b2e4"
 
 
 def _cfg():
@@ -77,8 +77,11 @@ def test_nonempty_issue_table_blocks_downgrade(db):
             "VALUES ('purchase',999,:part,:batch,'r','1','{}'::jsonb,'fp','open','test',1)"
         ), {"part": part_id, "batch": batch_id})
 
-    with pytest.raises(Exception, match="not empty"):
-        alembic_command.downgrade(_cfg(), _PREV)
+    try:
+        with pytest.raises(Exception, match="not empty"):
+            alembic_command.downgrade(_cfg(), _PREV)
+    finally:
+        alembic_command.upgrade(_cfg(), "head")
     with engine.begin() as conn:
         assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar() == _HEAD
         assert conn.execute(text("SELECT COUNT(*) FROM fact_data_quality_issue")).scalar() == 1

@@ -1,10 +1,12 @@
 """导入相关 API（§9）：单文件上传、批量后台作业、批次/作业列表与详情。"""
+import csv
 import logging
 import os
 import tempfile
 import threading
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import desc, func, select, update
 from sqlalchemy.exc import DataError
 from sqlalchemy.orm import Session
@@ -22,6 +24,7 @@ from app.security import (
 from app.services import inventory, maintenance_cost, master_data, profit
 from app.etl import pipeline, precheck as import_precheck
 from app.etl.reader import ReaderError
+from app.etl.transform import SOFT_ERROR_TYPES
 from app.models.system import SysImportBatch, SysImportError, SysImportJob
 
 router = APIRouter(
@@ -36,6 +39,27 @@ _MAINTENANCE_REFRESH_ERROR = "维保项目成本重算失败，请到项目成�
 _INTERNAL_IMPORT_ERROR = "系统处理异常，请联系管理员查看服务端日志"
 # Starlette 0.37.2 只有旧名称、新版又会对旧名称发弃用警告；数值 413 是稳定 HTTP 契约。
 _HTTP_REQUEST_ENTITY_TOO_LARGE = 413
+
+
+def _safe_csv_cell(value: object) -> object:
+    if isinstance(value, str):
+        content = value.lstrip()
+        if content and content[0] in "=+-@":
+            return "'" + value
+    return value
+
+
+class _DeletingFileResponse(FileResponse):
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                os.remove(self.path)
+            except FileNotFoundError:
+                pass
+            except Exception:
+                _log.warning("Failed to remove response temporary file", exc_info=True)
 
 
 def _save_upload_to_temp(file: UploadFile, name: str) -> str:
@@ -358,12 +382,82 @@ def batch_detail(batch_id: int, db: Session = Depends(get_db)) -> dict:
     b = db.get(SysImportBatch, batch_id)
     if b is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "批次不存在")
+    issue_count = db.scalar(
+        select(func.count()).select_from(SysImportError)
+        .where(SysImportError.batch_id == batch_id)
+    )
     errors = db.execute(
-        select(SysImportError).where(SysImportError.batch_id == batch_id).limit(500)
+        select(SysImportError).where(SysImportError.batch_id == batch_id)
+        .order_by(SysImportError.id).limit(500)
     ).scalars().all()
     return {
         "id": b.id, "filename": b.filename, "file_type": b.file_type, "status": b.status,
         "uploaded_at": b.uploaded_at, "uploaded_by": b.uploaded_by, "report": b.report_json,
-        "errors": [{"row_no": e.row_no, "error_type": e.error_type,
+        "issue_count": issue_count,
+        "errors": [{"row_no": e.row_no,
+                    "nature": "提示" if e.error_type in SOFT_ERROR_TYPES else "错误",
+                    "error_type": e.error_type,
                     "detail": e.error_detail} for e in errors],
     }
+
+
+@router.get("/batches/{batch_id}/errors.csv")
+def batch_errors_csv(
+    batch_id: int,
+    db: Session = Depends(get_db),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> FileResponse:
+    if db.get(SysImportBatch, batch_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "批次不存在")
+    record_access_log(ctx, "download_errors", f"import_batch:{batch_id}")
+    fd, tmp = tempfile.mkstemp(prefix="it-data-import-issues-", suffix=".csv")
+    try:
+        try:
+            output = os.fdopen(fd, "w", encoding="utf-8-sig", newline="")
+        except Exception:
+            try:
+                os.close(fd)
+            except Exception:
+                _log.warning("Failed to close error CSV temporary file", exc_info=True)
+            raise
+        try:
+            writer = csv.writer(output)
+            writer.writerow(("行号", "性质", "问题类型", "问题明细"))
+            rows = db.execute(
+                select(SysImportError.row_no, SysImportError.error_type,
+                       SysImportError.error_detail)
+                .where(SysImportError.batch_id == batch_id)
+                .order_by(SysImportError.id)
+                .execution_options(yield_per=1000)
+            )
+            for row_no, error_type, error_detail in rows:
+                nature = "提示" if error_type in SOFT_ERROR_TYPES else "错误"
+                writer.writerow(
+                    _safe_csv_cell(value)
+                    for value in (row_no, nature, error_type, error_detail))
+        except Exception:
+            try:
+                output.close()
+            except Exception:
+                _log.warning("Failed to close error CSV output", exc_info=True)
+            raise
+        else:
+            output.close()
+        db.rollback()
+        return _DeletingFileResponse(
+            tmp, media_type="text/csv; charset=utf-8",
+            filename=f"import-batch-{batch_id}-issues.csv",
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            _log.warning("Failed to rollback error CSV query", exc_info=True)
+        try:
+            os.remove(tmp)
+        except FileNotFoundError:
+            pass
+        except Exception:
+            _log.warning("Failed to remove error CSV temporary file", exc_info=True)
+        raise
