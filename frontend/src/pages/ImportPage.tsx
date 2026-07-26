@@ -1,13 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Card, Upload, Descriptions, Tag, message, Space, Button, Modal, Progress,
-  Switch, Tooltip, List, Alert,
+  Switch, Tooltip, List, Alert, Checkbox,
 } from "antd";
 import { InboxOutlined, DeleteOutlined } from "@ant-design/icons";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import type { ColumnsType } from "antd/es/table";
 import api from "../api";
+import {
+  precheckImportFiles, uploadImportBatch,
+  type ImportMode, type ImportPrecheckResult,
+} from "../api/imports";
+import ImportPrecheckPanel from "./import/ImportPrecheckPanel";
 
 // 历史询价（inquiry）导入为合同 Step 4 规划，后端尚未实装（B7 去重口径待客户确认），实装后再加回
 const FILE_TYPE: Record<string, string> = {
@@ -37,107 +42,215 @@ interface Job {
   done_files: number; error_files: number; note: string | null; batches: JobBatch[];
 }
 
+type ImportPhase = "dirty" | "prechecking" | "blocked" | "warning_ready"
+  | "clean_ready" | "uploading" | "processing";
+
+interface PrecheckSnapshot {
+  files: File[];
+  mode: ImportMode;
+  revision: number;
+  result: ImportPrecheckResult;
+}
+
 export default function ImportPage() {
   const [upsertMode, setUpsertMode] = useState(false);  // false=skip(默认), true=upsert(修复模式)
   const [staged, setStaged] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [phase, setPhase] = useState<ImportPhase>("dirty");
+  const [snapshot, setSnapshot] = useState<PrecheckSnapshot | null>(null);
+  const [warningConfirmed, setWarningConfirmed] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [pollingInterrupted, setPollingInterrupted] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
   const [batches, setBatches] = useState<Batch[]>([]);
   const [detail, setDetail] = useState<any | null>(null);
   const pollRef = useRef<number | null>(null);
+  const pollDeadlineTimerRef = useRef<number | null>(null);
   const pollDeadlineRef = useRef<number>(0);
+  const pollGenerationRef = useRef(0);
+  const mountedRef = useRef(false);
+  const inputRevisionRef = useRef(0);
+  const precheckActionLockRef = useRef(false);
+  const precheckControllerRef = useRef<AbortController | null>(null);
+  const uploadActionLockRef = useRef(false);
+  const resumePollingLockRef = useRef(false);
   const POLL_MAX_MS = 15 * 60 * 1000;   // 兜底：进程被杀等极端情况下作业卡在「进行中」，不无限轮询
 
-  const loadBatches = () => api.get("/import/batches").then((r) => setBatches(r.data));
+  const loadBatches = () => api.get("/import/batches").then((r) => {
+    if (mountedRef.current) setBatches(r.data);
+  });
   useEffect(() => {
+    mountedRef.current = true;
     loadBatches();
-    return () => { if (pollRef.current) clearTimeout(pollRef.current); };
+    return () => {
+      mountedRef.current = false;
+      pollGenerationRef.current += 1;
+      if (pollRef.current) clearTimeout(pollRef.current);
+      if (pollDeadlineTimerRef.current) clearTimeout(pollDeadlineTimerRef.current);
+      precheckControllerRef.current?.abort();
+    };
   }, []);
 
-  const busy = submitting || job?.status === "processing";
+  const activeJob = job?.status === "processing";
+  const busy = phase === "prechecking" || phase === "uploading"
+    || (activeJob && !pollingInterrupted);
 
-  const poll = async (jobId: number) => {
+  const invalidatePrecheck = () => {
+    inputRevisionRef.current += 1;
+    precheckControllerRef.current?.abort();
+    setSnapshot(null);
+    setWarningConfirmed(false);
+    setImportError(null);
+    setPhase("dirty");
+  };
+
+  const interruptPolling = (generation: number) => {
+    if (generation !== pollGenerationRef.current) return;
+    pollGenerationRef.current += 1;
+    if (pollRef.current) clearTimeout(pollRef.current);
+    if (pollDeadlineTimerRef.current) clearTimeout(pollDeadlineTimerRef.current);
+    pollRef.current = null;
+    pollDeadlineTimerRef.current = null;
+    resumePollingLockRef.current = false;
+    setPollingInterrupted(true);
+    setPhase((current) => current === "processing" ? "dirty" : current);
+    void loadBatches().catch(() => {});
+  };
+
+  const armPollingDeadline = (generation: number) => {
+    if (pollDeadlineTimerRef.current) clearTimeout(pollDeadlineTimerRef.current);
+    pollDeadlineTimerRef.current = window.setTimeout(
+      () => interruptPolling(generation),
+      Math.max(0, pollDeadlineRef.current - Date.now()),
+    );
+  };
+
+  const poll = async (jobId: number, generation: number) => {
+    if (!mountedRef.current || generation !== pollGenerationRef.current) return;
     if (Date.now() > pollDeadlineRef.current) {
-      message.warning("导入耗时异常，已停止刷新；请稍后到「导入历史」查看结果");
-      await loadBatches();
+      interruptPolling(generation);
       return;
     }
     try {
       const { data } = await api.get(`/import/jobs/${jobId}`);
+      if (!mountedRef.current || generation !== pollGenerationRef.current) return;
       setJob(data);
+      setPollingInterrupted(false);
       if (data.status === "processing") {
-        pollRef.current = window.setTimeout(() => poll(jobId), 1500);
+        pollRef.current = window.setTimeout(() => poll(jobId, generation), 1500);
       } else {
+        resumePollingLockRef.current = false;
+        if (pollDeadlineTimerRef.current) clearTimeout(pollDeadlineTimerRef.current);
+        pollDeadlineTimerRef.current = null;
+        setPhase((current) => current === "processing" ? "dirty" : current);
         await loadBatches();
+        if (!mountedRef.current || generation !== pollGenerationRef.current) return;
         if (data.status === "done") message.success("批量导入完成");
         else if (data.status === "partial") message.warning("部分文件未导入，见作业明细");
         else message.error("导入失败，见作业明细");
       }
     } catch {
-      if (pollRef.current) clearTimeout(pollRef.current);
+      if (!mountedRef.current || generation !== pollGenerationRef.current) return;
+      if (Date.now() > pollDeadlineRef.current) {
+        interruptPolling(generation);
+      } else {
+        pollRef.current = window.setTimeout(() => poll(jobId, generation), 1500);
+      }
+    }
+  };
+
+  const resumePolling = () => {
+    if (resumePollingLockRef.current || !job || job.status !== "processing") return;
+    resumePollingLockRef.current = true;
+    setPollingInterrupted(false);
+    if (!staged.length) setPhase("processing");
+    pollDeadlineRef.current = Date.now() + POLL_MAX_MS;
+    const generation = ++pollGenerationRef.current;
+    armPollingDeadline(generation);
+    poll(job.id, generation);
+  };
+
+  const runPrecheck = async () => {
+    if (precheckActionLockRef.current) return;
+    precheckActionLockRef.current = true;
+    if (!staged.length) {
+      precheckActionLockRef.current = false;
+      return;
+    }
+    const files = [...staged];
+    const mode: ImportMode = upsertMode ? "upsert" : "skip";
+    const revision = inputRevisionRef.current;
+    const controller = new AbortController();
+    precheckControllerRef.current = controller;
+    setImportError(null);
+    setWarningConfirmed(false);
+    setPhase("prechecking");
+    try {
+      const result = await precheckImportFiles(files, controller.signal);
+      if (!mountedRef.current || revision !== inputRevisionRef.current) return;
+      setSnapshot({ files, mode, revision, result });
+      setPhase(result.decision === "clean" ? "clean_ready"
+        : result.decision === "warning" ? "warning_ready" : "blocked");
+    } catch (e: any) {
+      if (!mountedRef.current || revision !== inputRevisionRef.current) return;
+      const detail = e?.response?.data?.detail;
+      if (e?.response?.status === 403) setImportError(`无权限${detail ? `：${detail}` : ""}`);
+      else if (e?.code === "ECONNABORTED" || /timeout/i.test(e?.message || "")) {
+        setImportError("预检超时：请检查文件大小后重新预检");
+      } else if (!e?.response) setImportError("网络连接失败：请检查网络后重新预检");
+      else setImportError(detail || "预检失败，请修正后重试");
+      setPhase("dirty");
+    } finally {
+      if (precheckControllerRef.current === controller) {
+        precheckControllerRef.current = null;
+        precheckActionLockRef.current = false;
+      }
     }
   };
 
   const submitBatch = async () => {
-    if (!staged.length) return;
+    if (uploadActionLockRef.current || activeJob) return;
+    uploadActionLockRef.current = true;
+    const current = snapshot;
+    if (!current || current.revision !== inputRevisionRef.current
+      || current.result.blocked || current.result.decision === "unknown"
+      || (current.result.decision === "warning" && !warningConfirmed)) {
+      uploadActionLockRef.current = false;
+      return;
+    }
     setSubmitting(true);
+    setImportError(null);
+    setPhase("uploading");
     try {
-      // 导入前预检：识别文件类型 + 采购/销售是否含价格列。有问题 → 弹二次确认
-      const pcForm = new FormData();
-      staged.forEach((f) => pcForm.append("files", f));
-      const { data: pc } = await api.post("/import/precheck", pcForm);
-      const warned: any[] = (pc.files || []).filter((x: any) => x.warning);
-      if (warned.length) {
-        const proceed = await new Promise<boolean>((resolve) => {
-          Modal.confirm({
-            title: "导入前确认",
-            width: 560,
-            okText: "仍要导入",
-            okButtonProps: { danger: true },
-            cancelText: "取消",
-            content: (
-              <div>
-                <p>以下文件检测到问题：</p>
-                <ul style={{ paddingLeft: 18 }}>
-                  {warned.map((x, i) => (
-                    <li key={i} style={{ marginBottom: 6 }}>
-                      <b>{x.filename}</b>：{x.warning}
-                    </li>
-                  ))}
-                </ul>
-                <p style={{ color: "var(--mb-text-3)", marginBottom: 0 }}>
-                  若是导出视图选错，建议「取消」后用含价格列的视图重新导出再导入。确认无误可继续。
-                </p>
-              </div>
-            ),
-            onOk: () => resolve(true),
-            onCancel: () => resolve(false),
-          });
-        });
-        if (!proceed) { setSubmitting(false); return; }
-      }
-
-      // 实际导入
-      const form = new FormData();
-      staged.forEach((f) => form.append("files", f));
-      const { data } = await api.post("/import/upload-batch", form, {
-        params: { mode: upsertMode ? "upsert" : "skip" },
-      });
-      setJob({ id: data.job_id, status: "processing", mode: upsertMode ? "upsert" : "skip",
+      const data = await uploadImportBatch(current.files, current.mode);
+      if (!mountedRef.current) return;
+      setJob({ id: data.job_id, status: "processing", mode: current.mode,
                total_files: data.total_files, done_files: 0, error_files: 0, note: null, batches: [] });
-      setStaged([]);
       pollDeadlineRef.current = Date.now() + POLL_MAX_MS;
-      poll(data.job_id);
+      const generation = ++pollGenerationRef.current;
+      armPollingDeadline(generation);
+      poll(data.job_id, generation);
+      if (current.revision === inputRevisionRef.current) {
+        setStaged([]);
+        inputRevisionRef.current += 1;
+        setSnapshot(null);
+        setWarningConfirmed(false);
+        setPhase("processing");
+      }
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || "提交失败");
+      if (!mountedRef.current || current.revision !== inputRevisionRef.current) return;
+      const detail = e?.response?.data?.detail || e?.message || "正式提交失败";
+      setImportError(`${detail}。请先查看导入历史，确认未创建作业后再重试。`);
+      setPhase(current.result.decision === "warning" ? "warning_ready" : "clean_ready");
     } finally {
-      setSubmitting(false);
+      if (mountedRef.current) setSubmitting(false);
+      uploadActionLockRef.current = false;
     }
   };
 
   const openDetail = async (id: number) => {
     const { data } = await api.get(`/import/batches/${id}`);
-    setDetail(data);
+    if (mountedRef.current) setDetail(data);
   };
 
   // 软标记（非真错误，可忽略）→ 灰色；其余 → 红色
@@ -196,7 +309,10 @@ export default function ImportPage() {
           <Tooltip title="开启后：源系统改过字段的旧数据,重导会更新(而不是跳过)。日常导入用「跳过」即可。">
             <Space>
               <span style={{ color: upsertMode ? "var(--mb-danger)" : "var(--mb-text-3)" }}>修复模式(更新已存在)</span>
-              <Switch checked={upsertMode} onChange={setUpsertMode} disabled={busy} />
+              <Switch checked={upsertMode} onChange={(checked) => {
+                invalidatePrecheck();
+                setUpsertMode(checked);
+              }} disabled={busy} />
             </Space>
           </Tooltip>
         }>
@@ -206,8 +322,14 @@ export default function ImportPage() {
           showUploadList={false}
           disabled={busy}
           beforeUpload={(file) => {
-            setStaged((prev) =>
-              prev.some((f) => f.name === file.name && f.size === file.size) ? prev : [...prev, file]);
+            invalidatePrecheck();
+            setStaged((prev) => {
+              const existing = prev.findIndex((f) => f.name === file.name && f.size === file.size);
+              if (existing < 0) return [...prev, file];
+              const next = [...prev];
+              next[existing] = file;
+              return next;
+            });
             return false; // 阻止 antd 默认上传，自己批量提交
           }}
         >
@@ -225,7 +347,10 @@ export default function ImportPage() {
                 <List.Item actions={[
                   <Button key="rm" type="text" size="small" danger icon={<DeleteOutlined />}
                     disabled={busy}
-                    onClick={() => setStaged((prev) => prev.filter((_, idx) => idx !== i))} />,
+                    onClick={() => {
+                      invalidatePrecheck();
+                      setStaged((prev) => prev.filter((_, idx) => idx !== i));
+                    }} />,
                 ]}>
                   {f.name}
                   <span style={{ color: "var(--mb-text-3)", marginLeft: 8 }}>
@@ -234,12 +359,38 @@ export default function ImportPage() {
                 </List.Item>
               )}
             />
-            <Space style={{ marginTop: 12 }}>
-              <Button type="primary" loading={submitting} disabled={busy} onClick={submitBatch}>
-                开始导入（{staged.length} 个）
-              </Button>
-              <Button disabled={busy} onClick={() => setStaged([])}>清空</Button>
+            <Space style={{ marginTop: 12 }} wrap>
+              {phase === "dirty" && (
+                <Button type="primary" disabled={busy} onClick={runPrecheck}>
+                  预检文件（{staged.length} 个）
+                </Button>
+              )}
+              {phase === "blocked" && (
+                <Button type="primary" danger disabled>请修正后重新预检</Button>
+              )}
+              {phase === "clean_ready" && (
+                <Button type="primary" loading={submitting} disabled={busy || activeJob} onClick={submitBatch}>开始导入</Button>
+              )}
+              {phase === "warning_ready" && (
+                <>
+                  <Checkbox checked={warningConfirmed} onChange={(event) => setWarningConfirmed(event.target.checked)}>
+                    我已阅读并确认以上警告
+                  </Checkbox>
+                  <Button type="primary" loading={submitting} disabled={busy || activeJob || !warningConfirmed} onClick={submitBatch}>
+                    确认警告并导入
+                  </Button>
+                </>
+              )}
+              {(phase === "blocked" || phase === "warning_ready" || phase === "clean_ready") && (
+                <Button disabled={busy} onClick={invalidatePrecheck}>返回修改</Button>
+              )}
+              <Button disabled={busy} onClick={() => {
+                invalidatePrecheck();
+                setStaged([]);
+              }}>清空</Button>
             </Space>
+            {importError && <Alert type="error" showIcon message={importError} style={{ marginTop: 12 }} />}
+            {snapshot && <ImportPrecheckPanel result={snapshot.result} />}
           </div>
         )}
       </Card>
@@ -247,6 +398,15 @@ export default function ImportPage() {
       {job && (
         <Card title={`导入作业 #${job.id}`}
           extra={<Tag color={JOB_STATUS[job.status]?.color}>{JOB_STATUS[job.status]?.label || job.status}</Tag>}>
+          {pollingInterrupted && (
+            <Alert
+              type="warning"
+              showIcon
+              message="作业查询已中断，可继续查询当前作业"
+              action={<Button size="small" onClick={resumePolling}>继续查询</Button>}
+              style={{ marginBottom: 12 }}
+            />
+          )}
           <Progress percent={jobPct}
             status={job.status === "processing" ? "active" : job.status === "failed" ? "exception" : "normal"} />
           <div style={{ color: "var(--mb-text-3)", margin: "4px 0 12px" }}>
