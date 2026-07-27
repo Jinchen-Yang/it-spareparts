@@ -90,6 +90,9 @@ class Settings(BaseSettings):
 
 _DEFAULT_ADMIN_PW = "admin"
 _DEFAULT_SECRET = "change-me-in-env"
+# PostgreSQL 事务级 advisory lock：导入/成本重算取独占锁，导出取共享锁，
+# 保证资源预检与后续 ORM 物化看到同一批业务数据。
+DATA_CHANGE_ADVISORY_LOCK_KEY = 0x5350_4152  # "SPAR"
 
 
 @lru_cache

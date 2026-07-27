@@ -53,6 +53,15 @@ def _iter_download_chunks(resource):
         yield chunk
 
 
+def _release_db_before_stream(db: Session, resource) -> None:
+    """流式响应结束前依赖不会 teardown；先归还连接，失败时同时关闭文件。"""
+    try:
+        db.rollback()
+    except BaseException:
+        resource.close()
+        raise
+
+
 @router.post("/recompute")
 def recompute(db: Session = Depends(get_db),
               _auth: str = Depends(require_admin),   # 全表重算(~1min 写库)：限管理员，与导入触发方口径一致
@@ -98,10 +107,8 @@ def lines(
     return apply_field_visibility(data, ctx)
 
 
-_SOURCE_LABEL = {"direct": "实际·专属采购", "window": "实际·±7天最近价",
-                 "month_avg": "实际·当月均价",
-                 "trace_avg": "预估·追溯均价", "sales_ref": "没有采购有销售", "none": "无成本"}
-_CONF_LABEL = {"high": "高", "medium": "中", "low": "低"}
+_SOURCE_LABEL = maintenance_workbook_renderer.SOURCE_LABELS
+_CONF_LABEL = maintenance_workbook_renderer.CONFIDENCE_LABELS
 
 
 def _safe(v):
@@ -228,6 +235,7 @@ def orders_export(
         output = maintenance_export.build_workbook(db, ctx, date_from, date_to)
     except (maintenance_export.ExcelCellTooLong, maintenance_export.ExcelRowLimitExceeded) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _release_db_before_stream(db, output)
     scope = f"{date_from.isoformat()}_{date_to.isoformat()}" if date_from and date_to else "all"
     return _ClosingStreamingResponse(
         _iter_download_chunks(output),
@@ -287,6 +295,7 @@ def export_workbooks(
         ) from exc
     except maintenance_workbook_export.WorkbookExportRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _release_db_before_stream(db, output)
     scope = f"{date_from.isoformat()}_{date_to.isoformat()}" if date_from and date_to else "all"
     return _ClosingStreamingResponse(
         _iter_download_chunks(output),
@@ -388,6 +397,7 @@ def export_workbook(
         output = maintenance_workbook_export.build_contract_workbook_file(db, contract)
     except maintenance_workbook_export.WorkbookExportRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _release_db_before_stream(db, output)
     return _ClosingStreamingResponse(
         _iter_download_chunks(output),
         resource=output,

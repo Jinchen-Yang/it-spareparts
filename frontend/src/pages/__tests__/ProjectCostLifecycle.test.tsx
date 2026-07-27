@@ -99,6 +99,13 @@ function deferred<T>() {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  localStorage.setItem("role", "readonly");
+  localStorage.setItem("permissions", JSON.stringify({
+    page_maintenance: true,
+    data_purchase_cost: true,
+    data_profit: true,
+    own_customers_only: false,
+  }));
   message.destroy();
   Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn(() => "blob:test") });
   Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
@@ -165,6 +172,24 @@ describe("维保项目生命周期筛选", () => {
     expect(screen.getByText(/时间范围只决定纳入哪些合同/))
       .toHaveTextContent("每本仍包含该合同完整数据");
     expect(screen.getByText(/批量导出不受项目搜索或维保期限筛选影响/)).toBeInTheDocument();
+  });
+
+  it.each([
+    ["缺成本权限", { data_purchase_cost: false, data_profit: true, own_customers_only: false }],
+    ["缺利润权限", { data_purchase_cost: true, data_profit: false, own_customers_only: false }],
+    ["受限销售", { data_purchase_cost: true, data_profit: true, own_customers_only: true }],
+  ])("%s 时隐藏批量和单本工作簿入口", async (_label, permissions) => {
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      ...permissions,
+    }));
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+
+    expect(screen.queryByRole("button", { name: "批量导出项目工作簿 ZIP" })).toBeNull();
+    expect(screen.queryByText("单本工作簿")).toBeNull();
+    expect(screen.getByRole("button", { name: "导出订单汇总 Excel" })).toBeInTheDocument();
   });
 
   it.each(["今天", "近7天", "近14天", "近21天", "近30天", "本月"])(

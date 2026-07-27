@@ -187,7 +187,23 @@ const SourceLegend = (
 );
 
 export default function ProjectCostPage() {
-  const isAdmin = localStorage.getItem("role") === "admin";
+  const role = localStorage.getItem("role") || "";
+  const isAdmin = role === "admin";
+  let localPermissions: Record<string, boolean> = {};
+  try {
+    localPermissions = JSON.parse(localStorage.getItem("permissions") || "{}");
+  } catch {
+    localPermissions = {};
+  }
+  const scopedSales = !isAdmin && (
+    localPermissions.own_customers_only === true
+    || (localPermissions.own_customers_only == null && role === "sales")
+  );
+  const canExportProjectWorkbooks = isAdmin || (
+    !scopedSales
+    && localPermissions.data_purchase_cost === true
+    && localPermissions.data_profit === true
+  );
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [exportDatePreset, setExportDatePreset] = useState<ExportDatePreset>("all");
   const exportDatePresetRef = useRef<ExportDatePreset>("all");
@@ -606,14 +622,16 @@ export default function ProjectCostPage() {
             {isAdmin && (
               <Button type="primary" loading={recomputing} onClick={recompute}>重算成本</Button>
             )}
-            <Button
-              type="primary"
-              loading={exportingWorkbooks}
-              disabled={exportingWorkbooks}
-              onClick={exportWorkbooks}
-            >
-              批量导出项目工作簿 ZIP
-            </Button>
+            {canExportProjectWorkbooks && (
+              <Button
+                type="primary"
+                loading={exportingWorkbooks}
+                disabled={exportingWorkbooks}
+                onClick={exportWorkbooks}
+              >
+                批量导出项目工作簿 ZIP
+              </Button>
+            )}
             <Button loading={exporting} disabled={exporting} onClick={exportOrders}>
               导出订单汇总 Excel
             </Button>
@@ -714,7 +732,7 @@ export default function ProjectCostPage() {
                           : b.status === "green" ? "green" : "default"}>{meta.label}</Tag>
                       )}
                       <LifecycleTag status={b.lifecycle_status} />
-                      {b.contract && (
+                      {b.contract && canExportProjectWorkbooks && (
                         <a style={{ fontSize: 12 }} onClick={() =>
                           download("/maintenance/export-workbook", `项目工作簿_${b.contract}.xlsx`,
                                    { contract: b.contract })

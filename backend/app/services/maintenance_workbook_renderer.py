@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 from app import config
 
 
-_SOURCE_LABEL = {
+SOURCE_LABELS = {
     "direct": "实际·专属采购",
     "window": "实际·±7天最近价",
     "month_avg": "实际·当月均价",
@@ -20,7 +20,7 @@ _SOURCE_LABEL = {
     "sales_ref": "没有采购有销售",
     "none": "无成本",
 }
-_CONF_LABEL = {"high": "高", "medium": "中", "low": "低"}
+CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}
 _HDR_FILL = PatternFill("solid", fgColor="35506B")
 _HDR_FONT = Font(bold=True, color="FFFFFF", size=11)
 _TITLE_FONT = Font(bold=True, size=15)
@@ -240,8 +240,8 @@ def _populate_contract_workbook(
             safe_text(line.serial_numbers),
             float(line.unit_cost) if line.unit_cost is not None else None,
             float(line.cost_amount) if line.cost_amount is not None else None,
-            safe_text(_SOURCE_LABEL.get(line.cost_source, line.cost_source)),
-            safe_text(_CONF_LABEL.get(line.confidence, line.confidence or "")),
+            safe_text(SOURCE_LABELS.get(line.cost_source, line.cost_source)),
+            safe_text(CONFIDENCE_LABELS.get(line.confidence, line.confidence or "")),
             safe_text(line.price_month),
             line.price_distance_days,
             safe_text(line.cost_tax_basis),

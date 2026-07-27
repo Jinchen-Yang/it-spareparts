@@ -12,7 +12,7 @@ from tempfile import SpooledTemporaryFile
 from zipfile import ZIP_STORED, ZipFile
 
 from openpyxl import Workbook
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app import config
@@ -23,11 +23,19 @@ from app.services import maintenance_cost, maintenance_workbook_renderer
 _INVALID_MEMBER_CHARS = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
 _INVALID_TEXT_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
 MAX_WORKBOOKS = 500
+MAX_SELECTED_ORDERS = 250_000
 MAX_PART_LINES = 250_000
 MAX_EXPENSE_LINES = 250_000
+MAX_PART_LINES_PER_WORKBOOK = 25_000
+MAX_EXPENSE_LINES_PER_WORKBOOK = 25_000
+MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK = 64 * 1024 * 1024
+MAX_WORKBOOK_BYTES = 256 * 1024 * 1024
+PART_RENDERED_TEXT_OVERHEAD_BYTES = 64
+EXPENSE_RENDERED_TEXT_OVERHEAD_BYTES = 32
 MAX_EXCEL_ROWS = 1_048_576
 MAX_EXCEL_COLUMNS = 16_384
 MAX_ZIP_BYTES = 512 * 1024 * 1024
+MAX_MEMBER_LEAF_BYTES = 240
 _MANIFEST_HEADERS = (
     "记录类型", "合同号", "文件名", "命中订单数", "命中最早日期", "命中最晚日期",
     "跳过维保单号", "跳过原始订单ID", "跳过制单日期", "说明",
@@ -46,15 +54,21 @@ class WorkbookExportBusy(RuntimeError):
 class _SizeLimitedFile:
     """给 ZipFile 提供可 seek 的硬字节上限，禁止临时文件先超限再事后拒绝。"""
 
-    def __init__(self, raw, max_size: int):
+    def __init__(
+        self,
+        raw,
+        max_size: int,
+        rejection_detail: str = "批量工作簿 ZIP 超过 512 MiB 上限",
+    ):
         self._raw = raw
         self._max_size = max_size
+        self._rejection_detail = rejection_detail
         self._extent = raw.tell()
 
     def write(self, data):
         end = self._raw.tell() + len(data)
         if max(self._extent, end) > self._max_size:
-            raise WorkbookExportRejected("批量工作簿 ZIP 超过 512 MiB 上限")
+            raise WorkbookExportRejected(self._rejection_detail)
         written = self._raw.write(data)
         self._extent = max(self._extent, self._raw.tell())
         return written
@@ -165,74 +179,208 @@ def _unlinked_orders(
     )
 
 
+def _octet_length(value):
+    """PostgreSQL 端统计将进入 XLSX 的 UTF-8 字节，避免先物化巨型文本。"""
+    return func.octet_length(func.coalesce(value, ""))
+
+
+def _acquire_shared_source_lock(db: Session) -> None:
+    """阻止导入/重算在预检与工作簿物化之间提交新事实行。"""
+    db.execute(
+        text("SELECT pg_advisory_xact_lock_shared(:k)"),
+        {"k": config.DATA_CHANGE_ADVISORY_LOCK_KEY},
+    )
+
+
 def _preflight_resource_limits(
     db: Session,
     matches: list[_ContractMatch],
 ) -> None:
     contracts = [match.contract for match in matches]
+    text_bytes_by_contract = {
+        contract: len(contract.encode("utf-8")) * 3 + 2
+        for contract in contracts
+    }
     part_filters = [
         FMaintenanceOrder.linked_sales_order_no.in_(contracts),
         FMaintenanceOrder.order_date >= config.MAINT_COST_START_DATE,
     ]
     if config.ACTIVE_STATUS_ONLY:
         part_filters.append(FMaintenanceOrder.data_status == config.ACTIVE_STATUS)
-    part_count = db.scalar(
-        select(func.count(FMaintenanceLine.id))
+
+    rendered_project = func.coalesce(
+        func.nullif(FMaintenanceOrder.project_raw, ""),
+        FMaintenanceOrder.project_std,
+        "",
+    )
+    part_text_bytes = (
+        _octet_length(FMaintenanceOrder.order_no)
+        + _octet_length(FMaintenanceOrder.linked_sales_order_no)
+        + _octet_length(rendered_project)
+        + _octet_length(FMaintenanceOrder.demand_type)
+        + _octet_length(FMaintenanceOrder.warehouse)
+        + _octet_length(FMaintenanceOrder.salesperson)
+        + _octet_length(FMaintenanceOrder.business_type)
+        + _octet_length(FMaintenanceLine.pn_std)
+        + _octet_length(FMaintenanceLine.description)
+        + _octet_length(FMaintenanceLine.serial_numbers)
+        + _octet_length(FMaintenanceLine.cost_source)
+        + _octet_length(FMaintenanceLine.confidence)
+        + _octet_length(FMaintenanceLine.price_month)
+        + _octet_length(FMaintenanceLine.cost_tax_basis)
+        + PART_RENDERED_TEXT_OVERHEAD_BYTES
+    )
+    part_rows = db.execute(
+        select(
+            FMaintenanceOrder.linked_sales_order_no,
+            func.count(FMaintenanceLine.id),
+            func.coalesce(func.sum(part_text_bytes), 0),
+        )
         .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
         .where(*part_filters)
-    ) or 0
+        .group_by(FMaintenanceOrder.linked_sales_order_no)
+    ).all()
+    part_count = sum(int(count) for _contract, count, _text_bytes in part_rows)
     if part_count > MAX_PART_LINES:
         raise WorkbookExportRejected(
             f"项目工作簿备件明细超过批量上限 {MAX_PART_LINES} 行",
         )
-    if part_count + 1 > MAX_EXCEL_ROWS:
-        raise WorkbookExportRejected("备件明细 Sheet 超过 Excel 行数上限")
+    for contract, count, text_bytes in part_rows:
+        count = int(count)
+        if count > MAX_PART_LINES_PER_WORKBOOK:
+            raise WorkbookExportRejected(
+                "单个项目工作簿备件明细超过上限 "
+                f"{MAX_PART_LINES_PER_WORKBOOK} 行（合同：{contract}）",
+            )
+        if count + 1 > MAX_EXCEL_ROWS:
+            raise WorkbookExportRejected("备件明细 Sheet 超过 Excel 行数上限")
+        text_bytes_by_contract[contract] += int(text_bytes)
 
-    expense_count = db.scalar(
-        select(func.count(FProjectExpense.id)).where(
+    expense_text_bytes = (
+        _octet_length(FProjectExpense.person)
+        + _octet_length(FProjectExpense.expense_type)
+        + _octet_length(FProjectExpense.fee_category)
+        + _octet_length(FProjectExpense.reason)
+        + _octet_length(FProjectExpense.data_status)
+        + _octet_length(FProjectExpense.bxd_no)
+        + EXPENSE_RENDERED_TEXT_OVERHEAD_BYTES
+    )
+    expense_rows = db.execute(
+        select(
+            FProjectExpense.linked_sales_order_no,
+            func.count(FProjectExpense.id),
+            func.coalesce(func.sum(expense_text_bytes), 0),
+        ).where(
             FProjectExpense.linked_sales_order_no.in_(contracts),
         )
-    ) or 0
+        .group_by(FProjectExpense.linked_sales_order_no)
+    ).all()
+    expense_count = sum(int(count) for _contract, count, _text_bytes in expense_rows)
     if expense_count > MAX_EXPENSE_LINES:
         raise WorkbookExportRejected(
             f"项目工作簿报销明细超过批量上限 {MAX_EXPENSE_LINES} 行",
         )
-    if expense_count + 3 > MAX_EXCEL_ROWS:
-        raise WorkbookExportRejected("报销明细 Sheet 超过 Excel 行数上限")
+    for contract, count, text_bytes in expense_rows:
+        count = int(count)
+        if count > MAX_EXPENSE_LINES_PER_WORKBOOK:
+            raise WorkbookExportRejected(
+                "单个项目工作簿报销明细超过上限 "
+                f"{MAX_EXPENSE_LINES_PER_WORKBOOK} 行（合同：{contract}）",
+            )
+        if count + 3 > MAX_EXCEL_ROWS:
+            raise WorkbookExportRejected("报销明细 Sheet 超过 Excel 行数上限")
+        text_bytes_by_contract[contract] += int(text_bytes)
 
-    fee_category = func.coalesce(FProjectExpense.fee_category, "(未分类费用)")
-    category_count = db.scalar(
-        select(func.count(func.distinct(fee_category))).where(
+    fee_category = func.coalesce(
+        func.nullif(FProjectExpense.fee_category, ""),
+        "(未分类费用)",
+    )
+    distinct_categories = (
+        select(
+            FProjectExpense.linked_sales_order_no.label("contract"),
+            fee_category.label("category"),
+        )
+        .where(
             FProjectExpense.linked_sales_order_no.in_(contracts),
             FProjectExpense.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS,
             FProjectExpense.amount.is_not(None),
             FProjectExpense.expense_date.is_not(None),
+            fee_category != "备件消耗",
         )
-    ) or 0
+        .distinct()
+        .subquery()
+    )
+    category_rows = db.execute(
+        select(
+            distinct_categories.c.contract,
+            func.count(),
+            func.coalesce(
+                func.sum(_octet_length(distinct_categories.c.category) + 1),
+                0,
+            ),
+        )
+        .group_by(distinct_categories.c.contract)
+    ).all()
+    category_count = max(
+        (int(count) for _contract, count, _text_bytes in category_rows),
+        default=0,
+    )
     if category_count + 3 > MAX_EXCEL_COLUMNS:
         raise WorkbookExportRejected("项目预算 Sheet 超过 Excel 列数上限")
+    for contract, _count, text_bytes in category_rows:
+        text_bytes_by_contract[contract] += int(text_bytes)
+
+    for contract, text_bytes in text_bytes_by_contract.items():
+        if text_bytes > MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK:
+            raise WorkbookExportRejected(
+                "单个项目工作簿动态文本超过安全上限 "
+                f"64 MiB（合同：{contract}）",
+            )
 
 
 def _member_collision_key(name: str) -> str:
     return unicodedata.normalize("NFKC", name).casefold().rstrip(" .")
 
 
+def _utf8_prefix(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _member_leaf(clean: str, suffix: str = "") -> str:
+    prefix = "project_workbook_"
+    extension = ".xlsx"
+    fixed_bytes = len((prefix + suffix + extension).encode("utf-8"))
+    stem = _utf8_prefix(
+        clean,
+        max(MAX_MEMBER_LEAF_BYTES - fixed_bytes, 0),
+    ).rstrip(" ._")
+    if not stem:
+        stem = "contract"
+    return f"{prefix}{stem}{suffix}{extension}"
+
+
 def _member_name(contract: str, used_names: set[str]) -> str:
     clean = unicodedata.normalize("NFKC", contract)
+    clean = "".join(
+        "_" if unicodedata.category(character) in {"Cc", "Cf"} else character
+        for character in clean
+    )
     clean = _INVALID_MEMBER_CHARS.sub("_", clean)
     while ".." in clean:
         clean = clean.replace("..", "_")
-    clean = clean.strip(" .") or "contract"
-    clean = clean[:80].rstrip(" ._") or "contract"
-    leaf = f"project_workbook_{clean}.xlsx"
+    clean = clean.strip(" ._") or "contract"
+    leaf = _member_leaf(clean)
     collision_key = _member_collision_key(leaf)
     if collision_key in used_names:
         digest = hashlib.sha256(contract.encode("utf-8")).hexdigest()[:10]
-        leaf = f"project_workbook_{clean[:68]}_{digest}.xlsx"
+        leaf = _member_leaf(clean, f"_{digest}")
         collision_key = _member_collision_key(leaf)
         suffix = 2
         while collision_key in used_names:
-            leaf = f"project_workbook_{clean[:64]}_{digest}_{suffix}.xlsx"
+            leaf = _member_leaf(clean, f"_{digest}_{suffix}")
             collision_key = _member_collision_key(leaf)
             suffix += 1
     used_names.add(collision_key)
@@ -255,8 +403,19 @@ def _write_manifest_row(writer, values: tuple) -> None:
 def build_contract_workbook_file(
     db: Session,
     contract: str,
+    resource_limits_preflighted: bool = False,
 ) -> SpooledTemporaryFile:
-    """构建一本项目工作簿；返回的流归调用方所有。"""
+    """构建一本项目工作簿；返回的流归调用方所有。
+
+    单本入口必须在 ORM 物化前独立预检。批量入口已对整批一次性预检，可显式复用
+    该结论，避免每本重复执行聚合查询。
+    """
+    if not resource_limits_preflighted:
+        _acquire_shared_source_lock(db)
+        _preflight_resource_limits(
+            db,
+            [_ContractMatch(contract, 0, None, None)],
+        )
     output = SpooledTemporaryFile(max_size=5 * 1024 * 1024, mode="w+b")
     workbook = None
     try:
@@ -268,7 +427,11 @@ def build_contract_workbook_file(
             safe_xlsx_text,
             workbook=workbook,
         )
-        workbook.save(output)
+        workbook.save(_SizeLimitedFile(
+            output,
+            MAX_WORKBOOK_BYTES,
+            "单本项目工作簿超过 256 MiB 上限",
+        ))
         output.seek(0)
         return output
     except BaseException:
@@ -290,6 +453,7 @@ def _build_contract_workbooks_zip(
         raise WorkbookExportRejected("date_from 与 date_to 必须同时提供")
     if date_from is not None and date_to is not None and date_from > date_to:
         raise WorkbookExportRejected("date_from 不能晚于 date_to")
+    _acquire_shared_source_lock(db)
     selected_orders = db.scalar(
         select(func.count(FMaintenanceOrder.id)).where(
             *_selection_filters(date_from, date_to),
@@ -297,6 +461,10 @@ def _build_contract_workbooks_zip(
     ) or 0
     if selected_orders == 0:
         raise WorkbookExportRejected("所选范围内没有已生效维保订单")
+    if selected_orders > MAX_SELECTED_ORDERS:
+        raise WorkbookExportRejected(
+            f"命中维保订单超过批量上限 {MAX_SELECTED_ORDERS} 条",
+        )
     matches = _contract_matches(db, date_from, date_to)
     if not matches:
         raise WorkbookExportRejected("所选范围内的已生效维保订单均未关联合同")
@@ -350,7 +518,11 @@ def _build_contract_workbooks_zip(
                     finally:
                         unlinked_orders.close()
             for match, member_name in exports:
-                workbook = build_contract_workbook_file(db, match.contract)
+                workbook = build_contract_workbook_file(
+                    db,
+                    match.contract,
+                    True,
+                )
                 try:
                     with archive.open(member_name, mode="w", force_zip64=True) as member:
                         shutil.copyfileobj(workbook, member, length=1024 * 1024)
