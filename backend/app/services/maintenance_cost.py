@@ -36,8 +36,6 @@ _CENT = Decimal("0.01")
 _ZERO = Decimal("0")
 # Money 列为 Numeric(14,2)：绝对值上限 10^12（含）会溢出，回填前守卫
 _MONEY_MAX = Decimal(10) ** 12
-# 与导入互斥用的应用级 advisory lock 键（与 pipeline._ADVISORY_LOCK_KEY 同键，串行化导入与重算）
-_ADVISORY_LOCK_KEY = 0x5350_4152
 # 导入期写入的行级 flag（recompute 重建 flags 时保留；成本派生 flag 每轮重算重挂）
 _IMPORT_FLAGS = frozenset({"future_date"})
 COSTED_SOURCES = ("direct", "window", "month_avg", "trace_avg", "sales_ref")
@@ -182,7 +180,10 @@ def recompute(db: Session) -> dict:
     在期但 qty 缺失 → none + missing_qty 标记（可见可查，不静默丢）。
     先整体清零（口径改动后不残留旧值/旧 flag），与导入用同一 advisory lock 串行（防并发重算/导入交错）。
     """
-    db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _ADVISORY_LOCK_KEY})
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:k)"),
+        {"k": config.DATA_CHANGE_ADVISORY_LOCK_KEY},
+    )
     direct, daily, daily_dates, monthly = _purchase_pools(db)
     sales_monthly = _sales_pool(db)
 

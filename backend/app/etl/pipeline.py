@@ -10,14 +10,13 @@ from datetime import date, datetime, timezone
 from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
+from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, get_settings
 from app.etl import loader, mapping, reader, sheet_selection
 from app.etl.reader import ReaderError
 from app.etl.transform import transform
 from app.models.system import SysImportBatch, SysImportError, SysRawFile
 from app.services import data_quality_amount_mismatch
 
-_ADVISORY_LOCK_KEY = 0x5350_4152  # 'SPAR' 应用级导入锁
 _ARCHIVE_HASH_RE = re.compile(r"[0-9a-f]{64}")
 _ARCHIVE_ERROR_MESSAGE = "原始文件归档失败"
 _log = logging.getLogger(__name__)
@@ -224,7 +223,10 @@ def run_import(session: Session, file_path: str, original_name: str,
     file_hash = sha256_file(file_path)
 
     # 1) 应用级导入锁先行（同一时间仅一个导入；顺带消除"去重检查在加锁前"的并发竞态）
-    session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _ADVISORY_LOCK_KEY})
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:k)"),
+        {"k": DATA_CHANGE_ADVISORY_LOCK_KEY},
+    )
 
     # 2) hash 去重：skip 模式拒绝重复成功文件（幂等）；upsert(修复)模式是"显式要求重处理"。
     #    旧成功批次必须等新批次完整通过后再 supersede；否则新文件预检/装载失败会破坏

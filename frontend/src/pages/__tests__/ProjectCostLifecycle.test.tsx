@@ -84,6 +84,7 @@ function installSuccessResponses() {
     if (path === "/maintenance/board") return Promise.resolve(board(undefined, lifecycle));
     if (path === "/maintenance/as-of") return Promise.resolve({ data: { as_of: "2026-07-16" } });
     if (path === "/maintenance/orders/export") return Promise.resolve({ data: new Blob(["ok"]) });
+    if (path === "/maintenance/export-workbooks") return Promise.resolve({ data: new Blob(["zip"]) });
     return Promise.resolve({ data: { rows: [], total: 0 } });
   });
 }
@@ -98,6 +99,13 @@ function deferred<T>() {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  localStorage.setItem("role", "readonly");
+  localStorage.setItem("permissions", JSON.stringify({
+    page_maintenance: true,
+    data_purchase_cost: true,
+    data_profit: true,
+    own_customers_only: false,
+  }));
   message.destroy();
   Object.defineProperty(URL, "createObjectURL", { configurable: true, value: vi.fn(() => "blob:test") });
   Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: vi.fn() });
@@ -145,7 +153,43 @@ describe("维保项目生命周期筛选", () => {
       display: "flex", flexWrap: "wrap", width: "100%", minWidth: "0",
     });
     expect(controls).not.toHaveClass("ant-space-item");
-    expect(screen.getByRole("button", { name: "导出维保订单 Excel" }).parentElement).toBe(controls);
+    expect(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }).parentElement).toBe(controls);
+    expect(screen.getByRole("button", { name: "导出订单汇总 Excel" }).parentElement).toBe(controls);
+    expect(screen.getByLabelText("批量导出说明").parentElement).toBe(controls);
+  });
+
+  it("清楚区分批量完整工作簿、订单汇总、当前项目统计和单本工作簿", async () => {
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+
+    const zipButton = screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" });
+    const summaryButton = screen.getByRole("button", { name: "导出订单汇总 Excel" });
+    expect(zipButton).toHaveClass("ant-btn-primary");
+    expect(summaryButton).not.toHaveClass("ant-btn-primary");
+    expect(screen.getByRole("button", { name: "导出当前项目统计 CSV" })).toBeInTheDocument();
+    expect(screen.getByText("单本工作簿")).toBeInTheDocument();
+    expect(screen.getByText(/时间范围只决定纳入哪些合同/))
+      .toHaveTextContent("每本仍包含该合同完整数据");
+    expect(screen.getByText(/批量导出不受项目搜索或维保期限筛选影响/)).toBeInTheDocument();
+  });
+
+  it.each([
+    ["缺成本权限", { data_purchase_cost: false, data_profit: true, own_customers_only: false }],
+    ["缺利润权限", { data_purchase_cost: true, data_profit: false, own_customers_only: false }],
+    ["受限销售", { data_purchase_cost: true, data_profit: true, own_customers_only: true }],
+  ])("%s 时隐藏批量和单本工作簿入口", async (_label, permissions) => {
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      ...permissions,
+    }));
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+
+    expect(screen.queryByRole("button", { name: "批量导出项目工作簿 ZIP" })).toBeNull();
+    expect(screen.queryByText("单本工作簿")).toBeNull();
+    expect(screen.getByRole("button", { name: "导出订单汇总 Excel" })).toBeInTheDocument();
   });
 
   it.each(["今天", "近7天", "近14天", "近21天", "近30天", "本月"])(
@@ -231,12 +275,68 @@ describe("维保项目生命周期筛选", () => {
     installSuccessResponses();
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
       params: {},
       responseType: "blob",
     }));
+  });
+
+  it("全部档一键下载所有项目工作簿 ZIP 且不携带页面筛选参数", async () => {
+    installSuccessResponses();
+    let downloadedName = "";
+    vi.mocked(HTMLAnchorElement.prototype.click).mockImplementation(function (this: HTMLAnchorElement) {
+      downloadedName = this.download;
+    });
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+
+    fireEvent.click(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }));
+
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/export-workbooks", {
+      params: {},
+      responseType: "blob",
+    }));
+    await waitFor(() => expect(downloadedName).toBe("maintenance_project_workbooks_all.zip"));
+  });
+
+  it("批量工作簿 ZIP 慢请求防重复且不与其他导出互锁", async () => {
+    const zipPending = deferred<{ data: Blob }>();
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      const lifecycle = config?.params?.lifecycle ?? "ongoing";
+      if (path === "/maintenance/projects") return Promise.resolve(projects("当前项目", lifecycle));
+      if (path === "/maintenance/board") return Promise.resolve(board(undefined, lifecycle));
+      if (path === "/maintenance/export-workbooks") return zipPending.promise;
+      if (path === "/maintenance/orders/export") return Promise.resolve({ data: new Blob(["xlsx"]) });
+      if (path === "/maintenance/export") return Promise.resolve({ data: new Blob(["csv"]) });
+      if (path === "/maintenance/export-workbook") return Promise.resolve({ data: new Blob(["single"]) });
+      return Promise.reject(new Error("unexpected"));
+    });
+    render(<ProjectCostPage />);
+    await screen.findByText("当前项目");
+    const zipButton = screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" });
+    const orderButton = screen.getByRole("button", { name: "导出订单汇总 Excel" });
+    const csvButton = screen.getByRole("button", { name: "导出当前项目统计 CSV" });
+
+    fireEvent.click(zipButton);
+    fireEvent.click(zipButton);
+
+    await waitFor(() => expect(zipButton).toBeDisabled());
+    expect(orderButton).toBeEnabled();
+    expect(csvButton).toBeEnabled();
+    fireEvent.click(orderButton);
+    fireEvent.click(csvButton);
+    fireEvent.click(screen.getByText("单本工作簿"));
+    await waitFor(() => {
+      expect(get.mock.calls.filter(([path]) => path === "/maintenance/export-workbooks")).toHaveLength(1);
+      expect(get).toHaveBeenCalledWith("/maintenance/orders/export", expect.anything());
+      expect(get).toHaveBeenCalledWith("/maintenance/export", expect.anything());
+      expect(get).toHaveBeenCalledWith("/maintenance/export-workbook", expect.anything());
+    });
+
+    zipPending.resolve({ data: new Blob(["zip"]) });
+    await waitFor(() => expect(zipButton).toBeEnabled());
   });
 
   it("项目 rows 为空时主 XLSX 导出仍可用", async () => {
@@ -253,10 +353,32 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("暂无数据（导入维保出库后自动生成）");
 
-    const button = screen.getByRole("button", { name: "导出维保订单 Excel" });
+    const button = screen.getByRole("button", { name: "导出订单汇总 Excel" });
     expect(button).toBeEnabled();
     fireEvent.click(button);
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", expect.anything()));
+  });
+
+  it("项目 rows 为空时批量工作簿 ZIP 仍可用", async () => {
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/projects") {
+        return Promise.resolve({ data: { ...projects().data, rows: [] } });
+      }
+      if (path === "/maintenance/board") {
+        return Promise.resolve({ data: { ...board().data, rows: [] } });
+      }
+      if (path === "/maintenance/export-workbooks") {
+        return Promise.resolve({ data: new Blob(["zip"]) });
+      }
+      return Promise.reject(new Error("unexpected"));
+    });
+    render(<ProjectCostPage />);
+    await screen.findByText("暂无数据（导入维保出库后自动生成）");
+
+    const button = screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/export-workbooks", expect.anything()));
   });
 
   it("主 XLSX 请求进行中禁用按钮以避免重复导出", async () => {
@@ -271,7 +393,7 @@ describe("维保项目生命周期筛选", () => {
     });
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
-    const button = screen.getByRole("button", { name: "导出维保订单 Excel" });
+    const button = screen.getByRole("button", { name: "导出订单汇总 Excel" });
 
     fireEvent.click(button);
 
@@ -299,7 +421,7 @@ describe("维保项目生命周期筛选", () => {
         params: expect.objectContaining(expected),
       }));
     });
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
       params: expected,
       responseType: "blob",
@@ -311,7 +433,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
     fireEvent.click(screen.getByText("今天"));
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
       params: { date_from: "2026-07-16", date_to: "2026-07-16" },
@@ -324,7 +446,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
     fireEvent.click(screen.getByText("近14天"));
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
       params: {
@@ -340,7 +462,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
     fireEvent.click(screen.getByText("近21天"));
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
       params: {
@@ -356,7 +478,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
     fireEvent.click(screen.getByText("近30天"));
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
       params: {
@@ -372,7 +494,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
     fireEvent.click(screen.getByText("本月"));
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
       params: {
@@ -402,7 +524,7 @@ describe("维保项目生命周期筛选", () => {
     await screen.findByText("跨月项目");
 
     fireEvent.click(screen.getByText("本月"));
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
       params: { date_from: "2026-06-01", date_to: "2026-06-30" },
@@ -418,7 +540,7 @@ describe("维保项目生命周期筛选", () => {
 
     fireEvent.click(screen.getByText("自定义"));
     const callsBeforeExport = get.mock.calls.length;
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await Promise.resolve();
     expect(get.mock.calls.slice(callsBeforeExport).filter(([path]) => (
@@ -443,7 +565,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
 
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(HTMLAnchorElement.prototype.click).toHaveBeenCalled());
     expect(attachedWhenClicked).toBe(true);
@@ -462,7 +584,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
 
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(remove).toHaveBeenCalled());
     expect(document.querySelector('a[download="maintenance_orders_all.xlsx"]')).toBeNull();
@@ -482,7 +604,7 @@ describe("维保项目生命周期筛选", () => {
       return originalAppend(node);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(remove).toHaveBeenCalled());
     expect(window.setTimeout).toHaveBeenCalledWith(expect.any(Function), 100);
@@ -499,7 +621,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
 
-    fireEvent.click(screen.getByText("工作簿"));
+    fireEvent.click(screen.getByText("单本工作簿"));
 
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/export-workbook", expect.objectContaining({
       params: expect.objectContaining({ contract: "XSDD-1" }),
@@ -531,7 +653,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
 
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(errorMessage).toHaveBeenCalledWith("无维保页面权限"));
   });
@@ -555,10 +677,108 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
 
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(errorMessage).toHaveBeenCalledWith(
       "订单明细超过 Excel 单 Sheet 数据行上限 1048575",
+    ));
+  });
+
+  it("批量工作簿 422 JSON Blob 错误优先展示后端 detail", async () => {
+    installSuccessResponses();
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      const lifecycle = config?.params?.lifecycle ?? "ongoing";
+      if (path === "/maintenance/projects") return Promise.resolve(projects("进行中项目", lifecycle));
+      if (path === "/maintenance/board") return Promise.resolve(board(undefined, lifecycle));
+      if (path === "/maintenance/export-workbooks") return Promise.reject({
+        response: {
+          status: 422,
+          data: new Blob([JSON.stringify({ detail: "范围内全部订单均未关联合同" })],
+            { type: "application/json" }),
+        },
+      });
+      return Promise.reject(new Error("unexpected"));
+    });
+    const errorMessage = vi.spyOn(message, "error");
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+
+    fireEvent.click(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }));
+
+    await waitFor(() => expect(errorMessage).toHaveBeenCalledWith("范围内全部订单均未关联合同"));
+  });
+
+  it("批量工作簿 403 JSON Blob 错误优先展示后端 detail", async () => {
+    installSuccessResponses();
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      const lifecycle = config?.params?.lifecycle ?? "ongoing";
+      if (path === "/maintenance/projects") return Promise.resolve(projects("进行中项目", lifecycle));
+      if (path === "/maintenance/board") return Promise.resolve(board(undefined, lifecycle));
+      if (path === "/maintenance/export-workbooks") return Promise.reject({
+        response: {
+          status: 403,
+          data: new Blob([JSON.stringify({ detail: "无成本查看权限，不能批量导出项目工作簿" })],
+            { type: "application/json" }),
+        },
+      });
+      return Promise.reject(new Error("unexpected"));
+    });
+    const errorMessage = vi.spyOn(message, "error");
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+
+    fireEvent.click(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }));
+
+    await waitFor(() => expect(errorMessage).toHaveBeenCalledWith(
+      "无成本查看权限，不能批量导出项目工作簿",
+    ));
+  });
+
+  it("批量工作簿 429 JSON Blob 展示并发占用提示", async () => {
+    installSuccessResponses();
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      const lifecycle = config?.params?.lifecycle ?? "ongoing";
+      if (path === "/maintenance/projects") return Promise.resolve(projects("进行中项目", lifecycle));
+      if (path === "/maintenance/board") return Promise.resolve(board(undefined, lifecycle));
+      if (path === "/maintenance/export-workbooks") return Promise.reject({
+        response: {
+          status: 429,
+          data: new Blob([JSON.stringify({ detail: "已有批量工作簿导出正在执行，请稍后重试" })],
+            { type: "application/json" }),
+        },
+      });
+      return Promise.reject(new Error("unexpected"));
+    });
+    const errorMessage = vi.spyOn(message, "error");
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+
+    fireEvent.click(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }));
+
+    await waitFor(() => expect(errorMessage).toHaveBeenCalledWith(
+      "已有批量工作簿导出正在执行，请稍后重试",
+    ));
+  });
+
+  it("批量工作簿普通 500 错误只展示安全通用提示", async () => {
+    installSuccessResponses();
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      const lifecycle = config?.params?.lifecycle ?? "ongoing";
+      if (path === "/maintenance/projects") return Promise.resolve(projects("进行中项目", lifecycle));
+      if (path === "/maintenance/board") return Promise.resolve(board(undefined, lifecycle));
+      if (path === "/maintenance/export-workbooks") {
+        return Promise.reject({ response: { status: 500, data: new Blob(["internal secret"]) } });
+      }
+      return Promise.reject(new Error("unexpected"));
+    });
+    const errorMessage = vi.spyOn(message, "error");
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+
+    fireEvent.click(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }));
+
+    await waitFor(() => expect(errorMessage).toHaveBeenCalledWith(
+      "批量项目工作簿导出失败，请稍后重试",
     ));
   });
 
@@ -575,7 +795,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
 
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(errorMessage).toHaveBeenCalledWith("导出失败，请稍后重试"));
   });
@@ -589,7 +809,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
     fireEvent.click(screen.getByText("近7天"));
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     await waitFor(() => expect(downloadedName).toBe(
       "maintenance_orders_2026-07-10_2026-07-16.xlsx",
@@ -615,7 +835,7 @@ describe("维保项目生命周期筛选", () => {
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/projects", expect.objectContaining({
       params: expect.objectContaining(expected),
     })));
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
       params: expected,
       responseType: "blob",
@@ -636,7 +856,7 @@ describe("维保项目生命周期筛选", () => {
     fireEvent.click(screen.getByText("期限缺失 1"));
     await screen.findByText("当前项目");
 
-    fireEvent.click(screen.getByRole("button", { name: "导出项目 CSV" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出当前项目统计 CSV" }));
 
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/export", expect.objectContaining({
       params: expect.objectContaining({ lifecycle: "missing" }),
@@ -689,8 +909,8 @@ describe("维保项目生命周期筛选", () => {
     });
     render(<ProjectCostPage />);
     await screen.findByText("当前项目");
-    const csvButton = screen.getByRole("button", { name: "导出项目 CSV" });
-    const xlsxButton = screen.getByRole("button", { name: "导出维保订单 Excel" });
+    const csvButton = screen.getByRole("button", { name: "导出当前项目统计 CSV" });
+    const xlsxButton = screen.getByRole("button", { name: "导出订单汇总 Excel" });
 
     fireEvent.click(csvButton);
     await waitFor(() => expect(csvButton).toBeDisabled());
@@ -718,7 +938,7 @@ describe("维保项目生命周期筛选", () => {
     await screen.findByText("跨夜项目");
     fireEvent.click(screen.getByText("近7天"));
 
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     const refreshed = { date_from: "2026-07-11", date_to: "2026-07-17" };
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/as-of"));
@@ -731,12 +951,111 @@ describe("维保项目生命周期筛选", () => {
     })));
   });
 
+  it("批量工作簿相对日期档跨业务日时刷新 as_of 后再导出", async () => {
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      const lifecycle = config?.params?.lifecycle ?? "ongoing";
+      if (path === "/maintenance/projects") return Promise.resolve(projects("跨夜项目", lifecycle));
+      if (path === "/maintenance/board") return Promise.resolve(board(undefined, lifecycle));
+      if (path === "/maintenance/as-of") return Promise.resolve({ data: { as_of: "2026-07-17" } });
+      if (path === "/maintenance/export-workbooks") return Promise.resolve({ data: new Blob(["zip"]) });
+      return Promise.reject(new Error("unexpected"));
+    });
+    let downloadedName = "";
+    vi.mocked(HTMLAnchorElement.prototype.click).mockImplementation(function (this: HTMLAnchorElement) {
+      downloadedName = this.download;
+    });
+    render(<ProjectCostPage />);
+    await screen.findByText("跨夜项目");
+    fireEvent.click(screen.getByText("近7天"));
+
+    fireEvent.click(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }));
+
+    const refreshed = { date_from: "2026-07-11", date_to: "2026-07-17" };
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/as-of"));
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/export-workbooks", {
+      params: refreshed,
+      responseType: "blob",
+    }));
+    await waitFor(() => expect(downloadedName).toBe(
+      "maintenance_project_workbooks_2026-07-11_2026-07-17.zip",
+    ));
+  });
+
+  it.each([
+    ["今天", "2026-07-16", "2026-07-16"],
+    ["近7天", "2026-07-10", "2026-07-16"],
+    ["近14天", "2026-07-03", "2026-07-16"],
+    ["近21天", "2026-06-26", "2026-07-16"],
+    ["近30天", "2026-06-17", "2026-07-16"],
+    ["本月", "2026-07-01", "2026-07-16"],
+  ])("批量工作簿%s档使用后端业务日闭区间 %s 至 %s", async (label, dateFrom, dateTo) => {
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+    fireEvent.click(screen.getByText(label));
+
+    fireEvent.click(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }));
+
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/export-workbooks", {
+      params: { date_from: dateFrom, date_to: dateTo },
+      responseType: "blob",
+    }));
+  });
+
+  it("批量工作簿自定义范围精确导出且不额外请求 as_of", async () => {
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+    fireEvent.click(screen.getByText("自定义"));
+    const start = screen.getByPlaceholderText("Start date");
+    const end = screen.getByPlaceholderText("End date");
+    fireEvent.focus(start);
+    fireEvent.change(start, { target: { value: "2026-07-03" } });
+    fireEvent.keyDown(start, { key: "Enter", code: "Enter" });
+    fireEvent.focus(end);
+    fireEvent.change(end, { target: { value: "2026-07-19" } });
+    fireEvent.keyDown(end, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(start).toHaveValue("2026-07-03"));
+
+    fireEvent.click(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }));
+
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/export-workbooks", {
+      params: { date_from: "2026-07-03", date_to: "2026-07-19" },
+      responseType: "blob",
+    }));
+    expect(get.mock.calls.filter(([path]) => path === "/maintenance/as-of")).toHaveLength(0);
+  });
+
+  it("批量工作簿等待 as_of 时切换日期档会取消旧范围导出", async () => {
+    const asOfPending = deferred<{ data: { as_of: string } }>();
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      const lifecycle = config?.params?.lifecycle ?? "ongoing";
+      if (path === "/maintenance/projects") return Promise.resolve(projects("当前项目", lifecycle));
+      if (path === "/maintenance/board") return Promise.resolve(board(undefined, lifecycle));
+      if (path === "/maintenance/as-of") return asOfPending.promise;
+      if (path === "/maintenance/export-workbooks") return Promise.resolve({ data: new Blob(["zip"]) });
+      return Promise.reject(new Error("unexpected"));
+    });
+    render(<ProjectCostPage />);
+    await screen.findByText("当前项目");
+    fireEvent.click(screen.getByText("近7天"));
+    const zipButton = screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" });
+    fireEvent.click(zipButton);
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/as-of"));
+
+    fireEvent.click(screen.getByRole("radio", { name: "全部" }));
+    asOfPending.resolve({ data: { as_of: "2026-07-17" } });
+
+    await waitFor(() => expect(zipButton).toBeEnabled());
+    expect(get.mock.calls.filter(([path]) => path === "/maintenance/export-workbooks")).toHaveLength(0);
+  });
+
   it("全部档和自定义档导出不额外请求 as_of", async () => {
     installSuccessResponses();
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
 
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", expect.anything()));
     expect(get.mock.calls.filter(([path]) => path === "/maintenance/as-of")).toHaveLength(0);
 
@@ -748,7 +1067,7 @@ describe("维保项目生命周期筛选", () => {
     fireEvent.change(screen.getByPlaceholderText("End date"), { target: { value: "2026-07-19" } });
     fireEvent.keyDown(screen.getByPlaceholderText("End date"), { key: "Enter", code: "Enter" });
     await waitFor(() => expect(screen.getByPlaceholderText("Start date")).toHaveValue("2026-07-03"));
-    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
       params: { date_from: "2026-07-03", date_to: "2026-07-19" },
       responseType: "blob",

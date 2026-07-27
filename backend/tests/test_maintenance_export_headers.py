@@ -166,4 +166,4 @@ def test_cost_blind_user_can_export_masked_csv_but_workbook_stays_403(db):
 
     assert csv_response.status_code == 200, csv_response.text
     assert workbook_response.status_code == 403
-    assert workbook_response.json()["detail"] == "无成本查看权限，不能导出项目成本工作簿"
+    assert workbook_response.json()["detail"] == "无成本及利润查看权限，不能导出项目成本工作簿"
