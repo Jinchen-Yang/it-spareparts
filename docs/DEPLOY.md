@@ -286,14 +286,34 @@ sudo docker compose up -d --build
 
 **健康巡检**（`.deploy/monitor.sh`，cron 每 5 分钟）：检查容器/DB/入口/磁盘/备份新鲜度；正常静默（只刷 `monitor.status` 心跳），异常追加 `monitor.log` 并（可选）发钉钉。
 ```bash
-# 安装（首次）
-chmod +x ~/apps/it-spareparts/monitor.sh
-( crontab -l 2>/dev/null | grep -v monitor.sh; \
-  echo "*/5 * * * * /home/ubuntu/apps/it-spareparts/monitor.sh" ) | crontab -
+# 首次安装或升级巡检脚本（幂等；会清理本项目旧路径，不影响其他项目 cron）
+cd ~/apps/it-spareparts || exit 1
+APP_DIR=$(pwd -P)
+LEGACY_MONITOR="$APP_DIR/monitor.sh"
+MONITOR_SCRIPT="$APP_DIR/.deploy/monitor.sh"
+test -f "$MONITOR_SCRIPT" || { echo "缺少 $MONITOR_SCRIPT"; exit 1; }
+chmod +x "$MONITOR_SCRIPT"
+( crontab -l 2>/dev/null | grep -Fv -e "$LEGACY_MONITOR" -e "$MONITOR_SCRIPT"; \
+  printf '*/5 * * * * %s\n' "$MONITOR_SCRIPT" ) | crontab -
 # 启用钉钉告警：把钉钉群机器人 webhook URL 写进下面文件即可（不填则只记 monitor.log）
-echo 'https://oapi.dingtalk.com/robot/send?access_token=xxx' > ~/apps/it-spareparts/.alert_webhook
-cat ~/apps/it-spareparts/monitor.status   # 看最近一次巡检结果
+umask 077
+printf '%s\n' 'https://oapi.dingtalk.com/robot/send?access_token=xxx' > "$APP_DIR/.alert_webhook"
+chmod 600 "$APP_DIR/.alert_webhook"
+cat "$APP_DIR/monitor.status"   # 看最近一次巡检结果
 ```
+
+**本次生产修复 / 以后升级的验收**：
+
+1. 先执行上面的幂等安装块，再确认 `test -x "$MONITOR_SCRIPT"` 成功，且
+   `crontab -l | grep -F "$MONITOR_SCRIPT"` 只返回一条、绝对路径以
+   `"$APP_DIR/.deploy/monitor.sh"` 结尾。
+2. 手工执行一次 `"$MONITOR_SCRIPT"`；如返回非零，先检查 `monitor.status` /
+   `monitor.log`，不得把异常结果当作通过。记录当前状态时间戳与
+   `monitor.log` 行数。
+3. 连续两个 cron 周期观察（至少 11 分钟）：两次 `monitor.status` 时间戳都应向前推进，
+   且状态均为 `ok=Y`；`monitor.log` 不得新增异常。
+4. 用 `sudo -n journalctl -u cron --since '15 minutes ago' --no-pager` 核对这两个周期，
+   不得出现脚本不存在、权限拒绝、sudo 交互或超时堆积。
 
 **Postgres 慢查询日志**（免重启、写进数据卷持久化，零风险）：
 ```bash

@@ -11,3 +11,7 @@ dist/
 .DS_Store
 *.xlsx
 *.egg-info/
+.alert_webhook
+.monitor.lock
+monitor.log
+monitor.status
