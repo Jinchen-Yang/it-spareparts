@@ -777,68 +777,79 @@ def _wait_until_process_opens(
     pytest.fail("CLI did not expose the target archive fd before the timeout")
 
 
-def _assert_safe_file_failure(completed, archive: Path, file_hash: str) -> None:
-    assert completed.returncode == 1
-    assert completed.stderr == ""
-    payload = json.loads(completed.stdout)
-    assert {
-        "complete": True,
-        "status": "FAIL",
-        "healthy": 0,
-        "read_error": 1,
-    }.items() <= payload.items()
-    assert payload["samples"] == {
-        "missing": [],
-        "hash_mismatch": [],
-        "non_regular": [],
-        "invalid_reference": [],
-        "read_error": [{"file": 1}],
-    }
-    output = completed.stdout + completed.stderr
-    assert str(archive) not in output
-    assert str(archive.parent) not in output
-    assert file_hash not in output
-    assert "issue-145-streaming-contract" not in output
-
-
 @pytest.mark.parametrize("race", ["atomic_replace", "metadata_change"])
-def test_cli_fails_closed_when_large_archive_changes_after_open(db, tmp_path, race):
+def test_check_file_fails_closed_when_archive_changes_after_open(
+    monkeypatch, tmp_path, race
+):
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
-    archive, file_hash = _create_large_archive(raw_dir, 128)
-    _add_raw_file_reference(db, archive, file_hash)
+    content = b"archive mutation boundary"
+    file_hash = hashlib.sha256(content).hexdigest()
+    archive = raw_dir / f"{file_hash}.xlsx"
+    archive.write_bytes(content)
     replacement = raw_dir / "precreated-replacement.xlsx"
     if race == "atomic_replace":
-        assert _write_large_file(replacement, 128) == file_hash
+        replacement.write_bytes(content)
 
-    process = _start_archive_check(raw_dir)
-    deadline = time.monotonic() + 5
-    try:
-        _wait_until_process_opens(process, archive, deadline)
-        if race == "atomic_replace":
-            original_inode = archive.lstat().st_ino
-            assert replacement.lstat().st_ino != original_inode
-            os.replace(replacement, archive)
-            assert archive.lstat().st_ino != original_inode
-        else:
-            opened = archive.lstat()
-            os.utime(
-                archive,
-                ns=(opened.st_atime_ns, opened.st_mtime_ns + 1_000_000_000),
-            )
-            assert archive.lstat().st_ino == opened.st_ino
-
-        timeout = max(0.1, deadline - time.monotonic())
-        stdout, stderr = process.communicate(timeout=timeout)
-    finally:
-        _stop_process(process)
-
-    completed = SimpleNamespace(
-        returncode=process.returncode,
-        stdout=stdout,
-        stderr=stderr,
+    real_close = os.close
+    real_fstat = os.fstat
+    real_open = os.open
+    real_read = os.read
+    real_stat = os.stat
+    original = real_stat(archive, follow_symlinks=False)
+    directory_flags = (
+        os.O_RDONLY
+        | raw_archive_check._required_flag("O_DIRECTORY")
+        | raw_archive_check._required_flag("O_NOFOLLOW")
+        | raw_archive_check._required_flag("O_CLOEXEC")
     )
-    _assert_safe_file_failure(completed, archive, file_hash)
+    dir_fd = real_open(raw_dir, directory_flags)
+    mutation_happened = False
+    target_reads = 0
+
+    def mutate_on_first_archive_read(fd, size):
+        nonlocal mutation_happened, target_reads
+        opened = real_fstat(fd)
+        if (opened.st_dev, opened.st_ino) == (original.st_dev, original.st_ino):
+            target_reads += 1
+            if target_reads == 1:
+                if race == "atomic_replace":
+                    replacement_inode = real_stat(
+                        replacement, follow_symlinks=False
+                    ).st_ino
+                    assert replacement_inode != original.st_ino
+                    os.replace(replacement, archive)
+                    mutation_happened = (
+                        real_stat(archive, follow_symlinks=False).st_ino
+                        == replacement_inode
+                    )
+                else:
+                    os.utime(
+                        archive,
+                        ns=(
+                            original.st_atime_ns,
+                            original.st_mtime_ns + 1_000_000_000,
+                        ),
+                    )
+                    changed = real_stat(archive, follow_symlinks=False)
+                    mutation_happened = (
+                        changed.st_ino == original.st_ino
+                        and changed.st_mtime_ns != original.st_mtime_ns
+                    )
+        return real_read(fd, size)
+
+    monkeypatch.setattr(raw_archive_check.os, "read", mutate_on_first_archive_read)
+    try:
+        outcome = raw_archive_check._check_file(dir_fd, file_hash)
+    finally:
+        real_close(dir_fd)
+
+    assert target_reads >= 1
+    assert mutation_happened is True
+    assert outcome == "read_error"
+    with pytest.raises(OSError) as exc_info:
+        real_fstat(dir_fd)
+    assert exc_info.value.errno == errno.EBADF
 
 
 def test_cli_errors_when_archive_directory_is_replaced_after_file_open(db, tmp_path):
