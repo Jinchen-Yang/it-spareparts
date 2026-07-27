@@ -1,24 +1,121 @@
-"""测试夹具：独立 Postgres（127.0.0.1:5433/spareparts_test），绝不连 dev 库。
+"""测试夹具：每个 pytest 进程独占新建的数据库和原始文件目录。"""
 
-会话级先确保测试库健康（不存在则创建；迁移循环测试烧掉的 dropped 列逼近
-PostgreSQL 1600 attnum 上限时整库重建，见 ``ensure_test_database``），再跑一次
-alembic upgrade head（顺带验证迁移链）；每个用例前 TRUNCATE 全部业务表。
-"""
+import atexit
 import os
+import signal
+import sys
+from pathlib import Path
 
-os.environ.setdefault(
-    "DATABASE_URL",
-    "postgresql+psycopg://spareparts:spareparts@127.0.0.1:5433/spareparts_test",
+from tests.run_isolation import (
+    CONTROLLED_RAW_BASE,
+    RunLifecycle,
+    cleanup_database_run,
+    cleanup_raw_run,
+    create_database_run,
+    create_raw_run,
+    validate_platform_capabilities,
+    validate_database_base,
+    validate_pytest_invocation,
+    validate_raw_base,
 )
-assert "spareparts_test" in os.environ["DATABASE_URL"], "测试必须使用独立测试库"
 
-import pytest  # noqa: E402
-from alembic import command as alembic_command  # noqa: E402
-from alembic.config import Config as AlembicConfig  # noqa: E402
-from sqlalchemy import text  # noqa: E402
+validate_platform_capabilities()
 
-from app.db import SessionLocal, engine  # noqa: E402
-from tests.db_guard import ensure_test_database  # noqa: E402
+_DEFAULT_DATABASE_BASE_URL = (
+    "postgresql+psycopg://spareparts:spareparts@127.0.0.1:5433/spareparts_test"
+)
+_database_run = None
+_raw_run = None
+_app_engine = None
+
+
+def _dispose_engine() -> None:
+    if _app_engine is not None:
+        _app_engine.dispose()
+
+
+def _cleanup_database() -> None:
+    if _database_run is not None:
+        cleanup_database_run(_database_run)
+
+
+def _cleanup_raw() -> None:
+    if _raw_run is not None:
+        cleanup_raw_run(_raw_run)
+
+
+_lifecycle = RunLifecycle(
+    engine_dispose=_dispose_engine,
+    database_cleanup=_cleanup_database,
+    raw_cleanup=_cleanup_raw,
+)
+
+
+def _cleanup_run() -> None:
+    _lifecycle.cleanup()
+
+
+def _atexit_cleanup() -> None:
+    try:
+        _cleanup_run()
+    except BaseException:
+        print("[conftest] pytest run cleanup failed safely", file=sys.stderr)
+
+
+def _handle_sigterm(_signum, _frame) -> None:
+    raise KeyboardInterrupt("pytest received SIGTERM")
+
+
+atexit.register(_atexit_cleanup)
+if hasattr(signal, "SIGTERM"):
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+validate_pytest_invocation(sys.argv[1:], os.environ)
+_checkout_root = Path(__file__).resolve().parents[2]
+_raw_base = os.environ.get("PYTEST_RAW_FILE_BASE_DIR", str(CONTROLLED_RAW_BASE))
+_raw_plan = validate_raw_base(_raw_base, checkout_root=_checkout_root)
+_database_base_url = os.environ.get(
+    "PYTEST_DATABASE_BASE_URL",
+    os.environ.get("DATABASE_URL", _DEFAULT_DATABASE_BASE_URL),
+)
+validate_database_base(_database_base_url)
+
+try:
+
+    def _record_raw_run(handle) -> None:
+        global _raw_run
+        _raw_run = handle
+
+    _raw_run = create_raw_run(_raw_plan, on_owned=_record_raw_run)
+
+    def _record_database_run(handle) -> None:
+        global _database_run
+        _database_run = handle
+
+    _database_run = create_database_run(
+        _database_base_url,
+        on_owned=_record_database_run,
+    )
+except BaseException:
+    _cleanup_run()
+    raise
+
+os.environ["PYTEST_DATABASE_BASE_URL"] = _database_run.base_url
+os.environ["DATABASE_URL"] = _database_run.database_url
+os.environ["PYTEST_RAW_FILE_BASE_DIR"] = str(_raw_run.root)
+os.environ["RAW_FILE_DIR"] = str(_raw_run.run_dir)
+
+try:
+    import pytest  # noqa: E402
+    from alembic import command as alembic_command  # noqa: E402
+    from alembic.config import Config as AlembicConfig  # noqa: E402
+    from sqlalchemy import text  # noqa: E402
+
+    from app.db import SessionLocal, engine  # noqa: E402
+except BaseException:
+    _cleanup_run()
+    raise
+_app_engine = engine
 
 _TABLES = [
     "chat_message", "chat_session",
@@ -62,15 +159,22 @@ def _reseed_templates(conn) -> None:
 
 @pytest.fixture(scope="session", autouse=True)
 def migrated():
-    # app.db.engine 在模块导入时已创建；重建前清空它可能缓存的旧连接，避免 DROP 后
-    # 复用指向旧数据库实例的连接。
-    engine.dispose()
-    ensure_test_database()
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     cfg.set_main_option("script_location",
                         os.path.join(os.path.dirname(__file__), "..", "alembic"))
-    alembic_command.upgrade(cfg, "head")
-    yield
+    try:
+        alembic_command.upgrade(cfg, "head")
+        yield
+    finally:
+        _cleanup_run()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    try:
+        _cleanup_run()
+    except BaseException:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        print("[conftest] pytest run cleanup failed safely", file=sys.stderr)
 
 
 @pytest.fixture()
