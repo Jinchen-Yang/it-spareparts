@@ -568,6 +568,7 @@ def test_as_of_returns_authenticated_business_date(db, monkeypatch):
     response = _admin_client(db).get("/api/maintenance/as-of")
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     assert response.json() == {"as_of": "2026-07-17"}
 
 

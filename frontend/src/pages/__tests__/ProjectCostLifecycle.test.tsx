@@ -130,16 +130,22 @@ describe("维保项目生命周期筛选", () => {
     expect(screen.getByText(/终止日当天仍算进行中/)).toBeInTheDocument();
   });
 
-  it("八档导出日期控件外包横向滚动容器避免窄屏溢出", async () => {
+  it("375px 窄屏用可收缩换行父容器且只让八档日期控件横向滚动", async () => {
     installSuccessResponses();
-    render(<ProjectCostPage />);
+    render(<div style={{ width: 375 }}><ProjectCostPage /></div>);
     await screen.findByText("进行中项目");
 
     const segmented = screen.getByRole("radiogroup", { name: "维保订单导出日期" });
-    expect(segmented.parentElement).toHaveStyle({
+    const dateScroller = segmented.parentElement;
+    const controls = dateScroller?.parentElement;
+    expect(dateScroller).toHaveStyle({
       width: "100%", minWidth: "0", maxWidth: "100%", overflowX: "auto",
     });
-    expect(segmented.closest(".ant-space")).toHaveStyle({ width: "100%", minWidth: "0" });
+    expect(controls).toHaveStyle({
+      display: "flex", flexWrap: "wrap", width: "100%", minWidth: "0",
+    });
+    expect(controls).not.toHaveClass("ant-space-item");
+    expect(screen.getByRole("button", { name: "导出维保订单 Excel" }).parentElement).toBe(controls);
   });
 
   it.each(["今天", "近7天", "近14天", "近21天", "近30天", "本月"])(

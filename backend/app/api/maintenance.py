@@ -12,7 +12,7 @@ from datetime import date
 from decimal import Decimal
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -217,11 +217,13 @@ def orders_export(
 
 @router.get("/as-of")
 def maintenance_as_of(
+    response: Response,
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict[str, str]:
     record_access_log(ctx, "as_of", "maintenance")
+    response.headers["Cache-Control"] = "no-store"
     return {"as_of": business_today().isoformat()}
 
 

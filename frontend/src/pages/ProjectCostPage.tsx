@@ -494,7 +494,7 @@ export default function ProjectCostPage() {
               />
             </div>
           </div>
-          <Space wrap size="large" style={{ width: "100%", minWidth: 0 }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 24, width: "100%", minWidth: 0 }}>
             <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowX: "auto", paddingBottom: 2 }}>
               <Segmented
                 aria-label="维保订单导出日期"
@@ -550,7 +550,7 @@ export default function ProjectCostPage() {
               onClick={exportProjectsCsv}
               disabled={!rows.length || exportingProjects}
             >导出项目 CSV</Button>
-          </Space>
+          </div>
           <Alert
             type={lifecycleCounts.missing ? "warning" : "info"}
             showIcon
