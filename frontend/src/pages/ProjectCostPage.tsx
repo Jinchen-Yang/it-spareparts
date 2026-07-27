@@ -103,16 +103,30 @@ export function buildOrderExportParams(
   } : {};
 }
 
+function presetRange(preset: ExportDatePreset, anchor: Dayjs): [Dayjs, Dayjs] {
+  if (preset === "today") return [anchor, anchor];
+  if (preset === "last7") return [anchor.subtract(6, "day"), anchor];
+  if (preset === "last14") return [anchor.subtract(13, "day"), anchor];
+  if (preset === "last21") return [anchor.subtract(20, "day"), anchor];
+  if (preset === "last30") return [anchor.subtract(29, "day"), anchor];
+  return [anchor.startOf("month"), anchor];
+}
+
 function saveBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  const revokeObjectURL = URL.revokeObjectURL.bind(URL);
-  setTimeout(() => revokeObjectURL(url), 100);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    try {
+      document.body.appendChild(anchor);
+      anchor.click();
+    } finally {
+      anchor.remove();
+    }
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 100);
+  }
 }
 
 function SourceTag({ source, trace, distance }: {
@@ -145,6 +159,7 @@ export default function ProjectCostPage() {
   const isAdmin = localStorage.getItem("role") === "admin";
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [exportDatePreset, setExportDatePreset] = useState<ExportDatePreset>("all");
+  const exportDatePresetRef = useRef<ExportDatePreset>("all");
   const [q, setQ] = useState("");
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
   const [lifecycleCounts, setLifecycleCounts] = useState<LifecycleCounts>(EMPTY_LIFECYCLE_COUNTS);
@@ -158,6 +173,7 @@ export default function ProjectCostPage() {
   const [loadError, setLoadError] = useState(false);
   const [recomputing, setRecomputing] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportingProjects, setExportingProjects] = useState(false);
   // 明细抽屉
   const [detailProject, setDetailProject] = useState<string | null>(null);
   const [lines, setLines] = useState<LineRow[]>([]);
@@ -279,8 +295,10 @@ export default function ProjectCostPage() {
       .then((res) => saveBlob(res.data, filename));
 
   const exportOrders = async () => {
-    const params = buildOrderExportParams(exportDatePreset, range);
-    if (!params) {
+    const requestedPreset = exportDatePreset;
+    let exportRange = range;
+    const initialParams = buildOrderExportParams(requestedPreset, exportRange);
+    if (!initialParams) {
       message.warning(exportDatePreset === "custom"
         ? "请选择自定义起止日期"
         : "日期基准尚未加载，请稍后重试");
@@ -288,9 +306,26 @@ export default function ProjectCostPage() {
     }
     setExporting(true);
     try {
+      if (requestedPreset !== "all" && requestedPreset !== "custom") {
+        const { data } = await api.get("/maintenance/as-of");
+        if (exportDatePresetRef.current !== requestedPreset) return;
+        const latestAsOf = typeof data?.as_of === "string" ? data.as_of : "";
+        const anchor = latestAsOf ? dayjs(latestAsOf) : null;
+        if (!anchor?.isValid()) throw new Error("invalid as_of");
+        exportRange = presetRange(requestedPreset, anchor);
+        setAsOf(latestAsOf);
+        setRange(exportRange);
+      }
+      const params = buildOrderExportParams(requestedPreset, exportRange);
+      if (!params) {
+        message.warning(exportDatePreset === "custom"
+          ? "请选择自定义起止日期"
+          : "日期基准尚未加载，请稍后重试");
+        return;
+      }
       const res = await api.get("/maintenance/orders/export", { params, responseType: "blob" });
-      saveBlob(res.data, range
-        ? `maintenance_orders_${range[0].format("YYYY-MM-DD")}_${range[1].format("YYYY-MM-DD")}.xlsx`
+      saveBlob(res.data, exportRange
+        ? `maintenance_orders_${exportRange[0].format("YYYY-MM-DD")}_${exportRange[1].format("YYYY-MM-DD")}.xlsx`
         : "maintenance_orders_all.xlsx");
     } catch (error) {
       const response = (error as {
@@ -323,9 +358,16 @@ export default function ProjectCostPage() {
     }
   };
 
-  const exportProjectsCsv = () => {
-    download("/maintenance/export", "maintenance_projects.csv", { lifecycle })
-      .catch(() => message.error("项目 CSV 导出失败，请稍后重试或检查权限"));
+  const exportProjectsCsv = async () => {
+    if (exportingProjects) return;
+    setExportingProjects(true);
+    try {
+      await download("/maintenance/export", "maintenance_projects.csv", { lifecycle });
+    } catch {
+      message.error("项目 CSV 导出失败，请稍后重试或检查权限");
+    } finally {
+      setExportingProjects(false);
+    }
   };
 
   const exportLines = () => {
@@ -452,35 +494,21 @@ export default function ProjectCostPage() {
               />
             </div>
           </div>
-          <Space wrap size="large">
-            <div style={{ maxWidth: "100%", overflowX: "auto", paddingBottom: 2 }}>
+          <Space wrap size="large" style={{ width: "100%", minWidth: 0 }}>
+            <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowX: "auto", paddingBottom: 2 }}>
               <Segmented
                 aria-label="维保订单导出日期"
                 value={exportDatePreset}
                 onChange={(value) => {
                   const preset = value as ExportDatePreset;
+                  exportDatePresetRef.current = preset;
                   setExportDatePreset(preset);
                   if (preset === "all") setRange(null);
                   if (preset === "custom") setRange(null);
-                  const anchor = asOf ? dayjs(asOf) : null;
-                  if (preset === "today") {
-                    if (anchor) setRange([anchor, anchor]);
-                  }
-                  if (preset === "last7") {
-                    if (anchor) setRange([anchor.subtract(6, "day"), anchor]);
-                  }
-                  if (preset === "last14") {
-                    if (anchor) setRange([anchor.subtract(13, "day"), anchor]);
-                  }
-                  if (preset === "last21") {
-                    if (anchor) setRange([anchor.subtract(20, "day"), anchor]);
-                  }
-                  if (preset === "last30") {
-                    if (anchor) setRange([anchor.subtract(29, "day"), anchor]);
-                  }
-                  if (preset === "month") {
-                    if (anchor) setRange([anchor.startOf("month"), anchor]);
-                  }
+                   const anchor = asOf ? dayjs(asOf) : null;
+                   if (anchor && preset !== "all" && preset !== "custom") {
+                     setRange(presetRange(preset, anchor));
+                   }
                 }}
                 options={[
                   { label: "全部", value: "all" },
@@ -497,6 +525,7 @@ export default function ProjectCostPage() {
             <DatePicker.RangePicker
               value={range}
               onChange={(v) => {
+                exportDatePresetRef.current = "custom";
                 setExportDatePreset("custom");
                 setRange(v as [Dayjs, Dayjs] | null);
               }}
@@ -516,7 +545,11 @@ export default function ProjectCostPage() {
             <Button type="primary" loading={exporting} disabled={exporting} onClick={exportOrders}>
               导出维保订单 Excel
             </Button>
-            <Button onClick={exportProjectsCsv} disabled={!rows.length}>导出项目 CSV</Button>
+            <Button
+              loading={exportingProjects}
+              onClick={exportProjectsCsv}
+              disabled={!rows.length || exportingProjects}
+            >导出项目 CSV</Button>
           </Space>
           <Alert
             type={lifecycleCounts.missing ? "warning" : "info"}

@@ -1,4 +1,5 @@
 """维保订单 XLSX 导出的公共接口契约。"""
+import asyncio
 import io
 from datetime import date
 from decimal import Decimal
@@ -10,6 +11,7 @@ from openpyxl import load_workbook
 from openpyxl.worksheet._write_only import WriteOnlyWorksheet
 from openpyxl.worksheet._writer import ALL_TEMP_FILES
 from sqlalchemy import select, text
+from starlette.requests import ClientDisconnect
 
 from app import permissions
 from app.api import maintenance as maintenance_api
@@ -109,6 +111,31 @@ def _readonly_client(db) -> TestClient:
     return client
 
 
+def _scoped_sales_with_maintenance_page_client(db) -> TestClient:
+    base = permissions.effective("sales", None)
+    overrides = {"page_maintenance": True, "own_customers_only": True}
+    db.add(SysUser(
+        username="maintenance_order_export_scoped_sales",
+        role="sales",
+        password_hash=hash_password("pw123456"),
+        is_active=True,
+        template_code="sales",
+        template_version=1,
+        template_perms=base,
+        perm_overrides=overrides,
+        permissions=permissions.effective_from_snapshot(base, overrides),
+    ))
+    db.commit()
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "maintenance_order_export_scoped_sales", "password": "pw123456"},
+    )
+    assert login.status_code == 200, login.text
+    client.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+    return client
+
+
 def _workbook(response):
     return load_workbook(io.BytesIO(response.content), read_only=True, data_only=True)
 
@@ -150,6 +177,8 @@ def test_empty_export_is_valid_two_sheet_xlsx_with_headers(db):
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
     assert response.content[:2] == b"PK"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
     workbook = _workbook(response)
     assert workbook.sheetnames == ["维保订单", "订单明细"]
     assert list(workbook["维保订单"].values) == [
@@ -164,6 +193,17 @@ def test_empty_export_is_valid_two_sheet_xlsx_with_headers(db):
     ]
 
 
+def test_legacy_project_workbook_uses_sensitive_download_headers(db):
+    response = _admin_client(db).get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "XSDD-NOT-FOUND"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
 def test_export_closes_workbook_stream_after_response_is_consumed(db, monkeypatch):
     output = io.BytesIO(b"workbook bytes")
     monkeypatch.setattr(maintenance_export, "build_workbook", lambda *args: output)
@@ -172,6 +212,33 @@ def test_export_closes_workbook_stream_after_response_is_consumed(db, monkeypatc
 
     assert response.status_code == 200, response.text
     assert response.content == b"workbook bytes"
+    assert output.closed
+
+
+def test_export_closes_workbook_stream_when_asgi_send_disconnects(db, monkeypatch):
+    output = io.BytesIO(b"workbook bytes")
+    monkeypatch.setattr(maintenance_export, "build_workbook", lambda *args: output)
+    response = maintenance_api.orders_export(
+        date_from=None, date_to=None, db=db, _auth="admin", _page=None,
+        ctx=UserContext(user_id="admin", role="admin"),
+    )
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(_message):
+        raise OSError("client disconnected")
+
+    with pytest.raises(ClientDisconnect):
+        asyncio.run(response(
+            {
+                "type": "http", "method": "GET", "path": "/", "headers": [],
+                "asgi": {"version": "3.0", "spec_version": "2.4"},
+            },
+            receive,
+            send,
+        ))
+
     assert output.closed
 
 
@@ -256,6 +323,35 @@ def test_export_rejects_detail_rows_over_excel_sheet_limit_and_cleans_temp_files
     assert response.status_code == 422
     assert "1048575" in response.json()["detail"]
     assert set(ALL_TEMP_FILES) == before
+
+
+def test_export_preflight_rejects_order_rows_over_limit_before_writing(db, monkeypatch):
+    _seed_orders(db, [
+        ("ORDER-LIMIT-1", date(2026, 7, 15), "已生效", None, 0),
+        ("ORDER-LIMIT-2", date(2026, 7, 16), "已生效", None, 0),
+    ])
+    monkeypatch.setattr(maintenance_export, "MAX_DATA_ROWS_PER_SHEET", 1)
+    append = Mock()
+    monkeypatch.setattr(WriteOnlyWorksheet, "append", append)
+
+    response = _admin_client(db).get("/api/maintenance/orders/export")
+
+    assert response.status_code == 422
+    assert "维保订单" in response.json()["detail"]
+    append.assert_not_called()
+
+
+def test_export_preflight_rejects_detail_rows_over_limit_before_writing(db, monkeypatch):
+    _seed_orders(db, [("DETAIL-LIMIT", date(2026, 7, 15), "已生效", None, 2)])
+    monkeypatch.setattr(maintenance_export, "MAX_DATA_ROWS_PER_SHEET", 1)
+    append = Mock()
+    monkeypatch.setattr(WriteOnlyWorksheet, "append", append)
+
+    response = _admin_client(db).get("/api/maintenance/orders/export")
+
+    assert response.status_code == 422
+    assert "订单明细" in response.json()["detail"]
+    append.assert_not_called()
 
 
 def test_all_export_contains_every_active_order_and_all_its_lines(db):
@@ -452,6 +548,27 @@ def test_export_audit_log_records_all_and_date_range_scopes(db, monkeypatch):
 def test_export_keeps_anonymous_401_and_no_page_403(db):
     assert TestClient(app).get("/api/maintenance/orders/export").status_code == 401
     assert _readonly_client(db).get("/api/maintenance/orders/export").status_code == 403
+
+
+def test_scoped_sales_remains_forbidden_after_page_permission_is_granted(db, monkeypatch):
+    build_workbook = Mock()
+    monkeypatch.setattr(maintenance_export, "build_workbook", build_workbook)
+
+    response = _scoped_sales_with_maintenance_page_client(db).get(
+        "/api/maintenance/orders/export",
+    )
+
+    assert response.status_code == 403
+    build_workbook.assert_not_called()
+
+
+def test_as_of_returns_authenticated_business_date(db, monkeypatch):
+    monkeypatch.setattr(maintenance_api, "business_today", lambda: date(2026, 7, 17))
+
+    response = _admin_client(db).get("/api/maintenance/as-of")
+
+    assert response.status_code == 200
+    assert response.json() == {"as_of": "2026-07-17"}
 
 
 def test_export_rejects_text_that_excel_would_silently_truncate(db):
