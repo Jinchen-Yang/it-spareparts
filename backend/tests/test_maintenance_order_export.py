@@ -2,17 +2,23 @@
 import io
 from datetime import date
 from decimal import Decimal
+from unittest.mock import Mock
 
+import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
+from openpyxl.worksheet._write_only import WriteOnlyWorksheet
+from openpyxl.worksheet._writer import ALL_TEMP_FILES
 from sqlalchemy import select, text
 
 from app import permissions
+from app.api import maintenance as maintenance_api
 from app.auth import hash_password
 from app.etl import loader
 from app.main import app
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.system import SysImportBatch, SysUser
+from app.security import UserContext
 from app.services import maintenance_export
 from tests import factories as f
 
@@ -54,6 +60,31 @@ def _cost_blind_client(db) -> TestClient:
     login = client.post(
         "/api/auth/login",
         json={"username": "maintenance_order_export_cost_blind", "password": "pw123456"},
+    )
+    assert login.status_code == 200, login.text
+    client.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+    return client
+
+
+def _customer_blind_purchaser_client(db) -> TestClient:
+    base = permissions.effective("purchaser", None)
+    overrides = {"page_maintenance": True, "data_customer": False}
+    db.add(SysUser(
+        username="maintenance_order_export_customer_blind",
+        role="purchaser",
+        password_hash=hash_password("pw123456"),
+        is_active=True,
+        template_code="purchaser",
+        template_version=1,
+        template_perms=base,
+        perm_overrides=overrides,
+        permissions=permissions.effective_from_snapshot(base, overrides),
+    ))
+    db.commit()
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "maintenance_order_export_customer_blind", "password": "pw123456"},
     )
     assert login.status_code == 200, login.text
     client.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
@@ -144,6 +175,50 @@ def test_export_closes_workbook_stream_after_response_is_consumed(db, monkeypatc
     assert output.closed
 
 
+def test_build_workbook_cleans_writer_temp_files_when_database_stream_fails(db, monkeypatch):
+    before = set(ALL_TEMP_FILES)
+    monkeypatch.setattr(db, "execute", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("db failed")))
+
+    with pytest.raises(RuntimeError, match="db failed"):
+        maintenance_export.build_workbook(db, UserContext(user_id="admin", role="admin"))
+
+    assert set(ALL_TEMP_FILES) == before
+
+
+def test_build_workbook_closes_output_and_cleans_temp_files_when_save_fails(db, monkeypatch):
+    before = set(ALL_TEMP_FILES)
+    output = io.BytesIO()
+    monkeypatch.setattr(maintenance_export, "SpooledTemporaryFile", lambda **kwargs: output)
+    monkeypatch.setattr(maintenance_export.Workbook, "save", lambda *args: (_ for _ in ()).throw(RuntimeError("save failed")))
+
+    with pytest.raises(RuntimeError, match="save failed"):
+        maintenance_export.build_workbook(db, UserContext(user_id="admin", role="admin"))
+
+    assert output.closed
+    assert set(ALL_TEMP_FILES) == before
+
+
+def test_build_workbook_cleans_temp_files_when_row_append_fails(db, monkeypatch):
+    _seed_orders(db, [("APPEND", date(2026, 7, 15), "已生效", None, 1)])
+    before = set(ALL_TEMP_FILES)
+    original_append = WriteOnlyWorksheet.append
+    calls = 0
+
+    def fail_data_append(worksheet, row):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise RuntimeError("append failed")
+        return original_append(worksheet, row)
+
+    monkeypatch.setattr(WriteOnlyWorksheet, "append", fail_data_append)
+
+    with pytest.raises(RuntimeError, match="append failed"):
+        maintenance_export.build_workbook(db, UserContext(user_id="admin", role="admin"))
+
+    assert set(ALL_TEMP_FILES) == before
+
+
 def test_export_rejects_date_from_without_date_to(db):
     response = _admin_client(db).get(
         "/api/maintenance/orders/export",
@@ -169,6 +244,18 @@ def test_export_rejects_reversed_date_range(db):
     )
 
     assert response.status_code == 422
+
+
+def test_export_rejects_detail_rows_over_excel_sheet_limit_and_cleans_temp_files(db, monkeypatch):
+    _seed_orders(db, [("ROW-LIMIT", date(2026, 7, 15), "已生效", None, 2)])
+    before = set(ALL_TEMP_FILES)
+    monkeypatch.setattr(maintenance_export, "MAX_DATA_ROWS_PER_SHEET", 1, raising=False)
+
+    response = _admin_client(db).get("/api/maintenance/orders/export")
+
+    assert response.status_code == 422
+    assert "1048575" in response.json()["detail"]
+    assert set(ALL_TEMP_FILES) == before
 
 
 def test_all_export_contains_every_active_order_and_all_its_lines(db):
@@ -239,6 +326,37 @@ def test_cost_blind_user_exports_facts_with_all_cost_metadata_blank(db):
         "单价", "金额", "成本来源", "含税口径", "取价月", "追溯月数", "关联采购单",
         "距采购天数", "置信度",
     )] == [None] * 9
+
+
+def test_cost_blind_user_exports_data_quality_flags_without_cost_conclusions(db):
+    _seed_orders(db, [("FLAGS", date(2026, 7, 15), "已生效", None, 1)])
+    line = db.execute(select(FMaintenanceLine)).scalar_one()
+    line.anomaly_flags = ["future_date", "no_cost", "has_return", "cost_overflow", "missing_qty"]
+    db.commit()
+
+    response = _cost_blind_client(db).get("/api/maintenance/orders/export")
+
+    assert response.status_code == 200, response.text
+    values = list(_workbook(response)["订单明细"].values)
+    row = dict(zip(values[0], values[1]))
+    assert row["异常标记"] == "future_date、has_return、missing_qty"
+    assert row["维保单号"] == "WBDD-FLAGS"
+
+
+def test_customer_blind_purchaser_exports_order_facts_without_end_customer(db):
+    _seed_orders(db, [("CUSTOMER", date(2026, 7, 15), "已生效", None, 1)])
+    order = db.execute(select(FMaintenanceOrder)).scalar_one()
+    order.end_customer = "敏感终端客户"
+    db.commit()
+
+    response = _customer_blind_purchaser_client(db).get("/api/maintenance/orders/export")
+
+    assert response.status_code == 200, response.text
+    values = list(_workbook(response)["维保订单"].values)
+    row = dict(zip(values[0], values[1]))
+    assert row["终端客户"] is None
+    assert row["维保单号"] == "WBDD-CUSTOMER"
+    assert row["项目名"] == "项目-CUSTOMER"
 
 
 def test_export_escapes_every_excel_formula_prefix_in_text_cells(db):
@@ -315,6 +433,22 @@ def test_range_export_filename_contains_actual_boundaries(db):
     )
 
 
+def test_export_audit_log_records_all_and_date_range_scopes(db, monkeypatch):
+    audit = Mock()
+    monkeypatch.setattr(maintenance_api, "record_access_log", audit)
+    client = _admin_client(db)
+
+    assert client.get("/api/maintenance/orders/export").status_code == 200
+    assert client.get("/api/maintenance/orders/export", params={
+        "date_from": "2026-07-01", "date_to": "2026-07-31",
+    }).status_code == 200
+
+    assert audit.call_args_list[0].args[3] == {"scope": "all"}
+    assert audit.call_args_list[1].args[3] == {
+        "date_from": "2026-07-01", "date_to": "2026-07-31",
+    }
+
+
 def test_export_keeps_anonymous_401_and_no_page_403(db):
     assert TestClient(app).get("/api/maintenance/orders/export").status_code == 401
     assert _readonly_client(db).get("/api/maintenance/orders/export").status_code == 403
@@ -324,6 +458,38 @@ def test_export_rejects_text_that_excel_would_silently_truncate(db):
     _seed_orders(db, [("TOO-LONG", date(2026, 7, 15), "已生效", None, 1)])
     line = db.execute(select(FMaintenanceLine)).scalar_one()
     line.description = "X" * 32768
+    db.commit()
+    before = set(ALL_TEMP_FILES)
+
+    response = _admin_client(db).get("/api/maintenance/orders/export")
+
+    assert response.status_code == 422
+    assert "32767" in response.json()["detail"]
+    assert set(ALL_TEMP_FILES) == before
+
+
+def test_export_keeps_formula_escaped_text_at_excel_cell_limit(db):
+    _seed_orders(db, [("ESCAPED-LIMIT", date(2026, 7, 15), "已生效", None, 1)])
+    line = db.execute(select(FMaintenanceLine)).scalar_one()
+    description = "=" + "X" * 32765
+    line.description = description
+    db.commit()
+
+    response = _admin_client(db).get("/api/maintenance/orders/export")
+
+    assert response.status_code == 200, response.text
+    values = list(_workbook(response)["订单明细"].values)
+    row = dict(zip(values[0], values[1]))
+    exported_description = row["产品描述"]
+    assert isinstance(exported_description, str)
+    assert exported_description == "'" + description
+    assert len(exported_description) == 32767
+
+
+def test_export_rejects_formula_escaped_text_over_excel_cell_limit(db):
+    _seed_orders(db, [("ESCAPED-TOO-LONG", date(2026, 7, 15), "已生效", None, 1)])
+    line = db.execute(select(FMaintenanceLine)).scalar_one()
+    line.description = "=" + "X" * 32766
     db.commit()
 
     response = _admin_client(db).get("/api/maintenance/orders/export")

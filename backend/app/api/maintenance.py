@@ -175,10 +175,15 @@ def orders_export(
         raise HTTPException(status_code=422, detail="date_from 与 date_to 必须同时提供")
     if date_from is not None and date_to is not None and date_from > date_to:
         raise HTTPException(status_code=422, detail="date_from 不能晚于 date_to")
-    record_access_log(ctx, "orders_export", "maintenance")
+    audit_scope = (
+        {"date_from": date_from.isoformat(), "date_to": date_to.isoformat()}
+        if date_from is not None and date_to is not None
+        else {"scope": "all"}
+    )
+    record_access_log(ctx, "orders_export", "maintenance", audit_scope)
     try:
         output = maintenance_export.build_workbook(db, ctx, date_from, date_to)
-    except maintenance_export.ExcelCellTooLong as exc:
+    except (maintenance_export.ExcelCellTooLong, maintenance_export.ExcelRowLimitExceeded) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     scope = f"{date_from.isoformat()}_{date_to.isoformat()}" if date_from and date_to else "all"
     return StreamingResponse(
