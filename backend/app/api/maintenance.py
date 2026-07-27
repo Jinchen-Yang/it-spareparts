@@ -7,11 +7,12 @@
 import csv
 import io
 import re
+from contextlib import suppress
 from datetime import date
 from decimal import Decimal
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -20,12 +21,25 @@ from app.business_time import business_today
 from app.db import get_db
 from app.security import (
     UserContext, apply_field_visibility, get_current_user_context, record_access_log,
-    require_page,
+    is_scoped_sales, require_page,
 )
 from app import config
-from app.services import maintenance_cost
+from app.services import maintenance_cost, maintenance_export
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    def __init__(self, content, resource, **kwargs):
+        super().__init__(content, **kwargs)
+        self._resource = resource
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with suppress(Exception):
+                self._resource.close()
 
 
 @router.post("/recompute")
@@ -159,6 +173,58 @@ def export(
                      r["months"], _safe("、".join(r["sales_orders"])),
                      r["contract_amount"], "是" if r["contract_shared"] else ""])
     return _csv_stream(header, rows, "maintenance_projects.csv")
+
+
+@router.get("/orders/export")
+def orders_export(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> StreamingResponse:
+    if is_scoped_sales(ctx):
+        raise HTTPException(status_code=403, detail="受限销售账号不能导出逐单维保数据")
+    if (date_from is None) != (date_to is None):
+        raise HTTPException(status_code=422, detail="date_from 与 date_to 必须同时提供")
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(status_code=422, detail="date_from 不能晚于 date_to")
+    audit_scope = (
+        {"date_from": date_from.isoformat(), "date_to": date_to.isoformat()}
+        if date_from is not None and date_to is not None
+        else {"scope": "all"}
+    )
+    record_access_log(ctx, "orders_export", "maintenance", audit_scope)
+    try:
+        output = maintenance_export.build_workbook(db, ctx, date_from, date_to)
+    except (maintenance_export.ExcelCellTooLong, maintenance_export.ExcelRowLimitExceeded) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    scope = f"{date_from.isoformat()}_{date_to.isoformat()}" if date_from and date_to else "all"
+    return _ClosingStreamingResponse(
+        output,
+        resource=output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": _content_disposition(
+                f"maintenance_orders_{scope}.xlsx",
+            ),
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/as-of")
+def maintenance_as_of(
+    response: Response,
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict[str, str]:
+    record_access_log(ctx, "as_of", "maintenance")
+    response.headers["Cache-Control"] = "no-store"
+    return {"as_of": business_today().isoformat()}
 
 
 @router.get("/lines/export")
@@ -490,8 +556,12 @@ def export_workbook(
     buf.seek(0)
     return StreamingResponse(
         buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": _content_disposition(
-            f"project_workbook_{contract[:40]}.xlsx",
-            ascii_fallback="project_workbook.xlsx",
-        )},
+        headers={
+            "Content-Disposition": _content_disposition(
+                f"project_workbook_{contract[:40]}.xlsx",
+                ascii_fallback="project_workbook.xlsx",
+            ),
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
     )

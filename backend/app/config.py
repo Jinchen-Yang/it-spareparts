@@ -334,7 +334,7 @@ FIELD_GROUPS = {
                       # §8.8 采购来源渠道也属"从谁/从哪类进货"情报，随 data_supplier 一并遮
                       "source_channel", "channel"],
     "customer_info": ["customer_id", "customer_name", "customer_city",
-                      "customer_contact", "customer_phone", "customer"],
+                      "customer_contact", "customer_phone", "customer", "end_customer"],
     # 注：unit_price 在采购行=成本、销售行=售价(营收)同名 → sales 关 data_purchase_cost 时
     # 逐行 unit_price 一并遮掉（个别成交价对销售也不外露）。销售要的是「聚合成交参考价」，
     # 由 avg_sale_price / avg_sale_price_90d / ref_sale_price 提供（不在本组，sales 可见）。

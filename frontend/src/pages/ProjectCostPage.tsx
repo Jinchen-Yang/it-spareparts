@@ -7,6 +7,7 @@ import { InfoCircleOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
+import dayjs from "dayjs";
 import type { Dayjs } from "dayjs";
 import api from "../api";
 import { money } from "../utils/format";
@@ -46,6 +47,7 @@ type BoardStatus = "red" | "yellow" | "green" | "no_budget";
 type LifecycleStatus = "ongoing" | "ended" | "missing";
 type LifecycleFilter = LifecycleStatus | "all";
 type LifecycleCounts = Record<LifecycleStatus, number>;
+type ExportDatePreset = "all" | "today" | "last7" | "last14" | "last21" | "last30" | "month" | "custom";
 
 interface BoardRow {
   contract: string | null;
@@ -90,6 +92,43 @@ const SOURCE_META: Record<string, { label: string; color: string }> = {
 const SOURCE_ORDER = ["direct", "window", "month_avg", "trace_avg", "sales_ref", "none"];
 const COVERAGE_WARN_PCT = 80;   // 覆盖率预警线（经验值，非验收线；<此值标红提示核对无成本行）
 
+export function buildOrderExportParams(
+  preset: ExportDatePreset,
+  range: [Dayjs, Dayjs] | null,
+) {
+  if (preset !== "all" && !range) return null;
+  return range ? {
+    date_from: range[0].format("YYYY-MM-DD"),
+    date_to: range[1].format("YYYY-MM-DD"),
+  } : {};
+}
+
+function presetRange(preset: ExportDatePreset, anchor: Dayjs): [Dayjs, Dayjs] {
+  if (preset === "today") return [anchor, anchor];
+  if (preset === "last7") return [anchor.subtract(6, "day"), anchor];
+  if (preset === "last14") return [anchor.subtract(13, "day"), anchor];
+  if (preset === "last21") return [anchor.subtract(20, "day"), anchor];
+  if (preset === "last30") return [anchor.subtract(29, "day"), anchor];
+  return [anchor.startOf("month"), anchor];
+}
+
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    try {
+      document.body.appendChild(anchor);
+      anchor.click();
+    } finally {
+      anchor.remove();
+    }
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 100);
+  }
+}
+
 function SourceTag({ source, trace, distance }: {
   source: string | null; trace?: number | null; distance?: number | null;
 }) {
@@ -119,6 +158,8 @@ const SourceLegend = (
 export default function ProjectCostPage() {
   const isAdmin = localStorage.getItem("role") === "admin";
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
+  const [exportDatePreset, setExportDatePreset] = useState<ExportDatePreset>("all");
+  const exportDatePresetRef = useRef<ExportDatePreset>("all");
   const [q, setQ] = useState("");
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
   const [lifecycleCounts, setLifecycleCounts] = useState<LifecycleCounts>(EMPTY_LIFECYCLE_COUNTS);
@@ -132,6 +173,7 @@ export default function ProjectCostPage() {
   const [loadError, setLoadError] = useState(false);
   const [recomputing, setRecomputing] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportingProjects, setExportingProjects] = useState(false);
   // 明细抽屉
   const [detailProject, setDetailProject] = useState<string | null>(null);
   const [lines, setLines] = useState<LineRow[]>([]);
@@ -250,23 +292,81 @@ export default function ProjectCostPage() {
 
   const download = (path: string, filename: string, extra?: Record<string, unknown>) =>
     api.get(path, { params: { ...baseParams(), ...extra }, responseType: "blob" })
-      .then((res) => {
-        const url = URL.createObjectURL(res.data);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
-      });
+      .then((res) => saveBlob(res.data, filename));
 
-  const exportCsv = async () => {
+  const exportOrders = async () => {
+    const requestedPreset = exportDatePreset;
+    let exportRange = range;
+    const initialParams = buildOrderExportParams(requestedPreset, exportRange);
+    if (!initialParams) {
+      message.warning(exportDatePreset === "custom"
+        ? "请选择自定义起止日期"
+        : "日期基准尚未加载，请稍后重试");
+      return;
+    }
     setExporting(true);
+    try {
+      if (requestedPreset !== "all" && requestedPreset !== "custom") {
+        const { data } = await api.get("/maintenance/as-of");
+        if (exportDatePresetRef.current !== requestedPreset) return;
+        const latestAsOf = typeof data?.as_of === "string" ? data.as_of : "";
+        const anchor = latestAsOf ? dayjs(latestAsOf) : null;
+        if (!anchor?.isValid()) throw new Error("invalid as_of");
+        exportRange = presetRange(requestedPreset, anchor);
+        setAsOf(latestAsOf);
+        setRange(exportRange);
+      }
+      const params = buildOrderExportParams(requestedPreset, exportRange);
+      if (!params) {
+        message.warning(exportDatePreset === "custom"
+          ? "请选择自定义起止日期"
+          : "日期基准尚未加载，请稍后重试");
+        return;
+      }
+      const res = await api.get("/maintenance/orders/export", { params, responseType: "blob" });
+      saveBlob(res.data, exportRange
+        ? `maintenance_orders_${exportRange[0].format("YYYY-MM-DD")}_${exportRange[1].format("YYYY-MM-DD")}.xlsx`
+        : "maintenance_orders_all.xlsx");
+    } catch (error) {
+      const response = (error as {
+        response?: { status?: number; data?: unknown };
+      })?.response;
+      let detail: string | undefined;
+      if ((response?.status === 403 || response?.status === 422) && response.data instanceof Blob) {
+        try {
+          const text = typeof response.data.text === "function"
+            ? await response.data.text()
+            : await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result || ""));
+              reader.onerror = () => reject(reader.error);
+              reader.readAsText(response.data as Blob);
+            });
+          const body = JSON.parse(text) as { detail?: unknown };
+          if (typeof body.detail === "string") detail = body.detail;
+        } catch {
+          // Non-JSON error bodies fall through to a safe status-specific message.
+        }
+      }
+      message.error(detail || (response?.status === 403
+        ? "无权限导出维保订单"
+        : response?.status === 422
+          ? "导出日期参数无效"
+          : "导出失败，请稍后重试"));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const exportProjectsCsv = async () => {
+    if (exportingProjects) return;
+    setExportingProjects(true);
     try {
       await download("/maintenance/export", "maintenance_projects.csv", { lifecycle });
     } catch {
-      message.error("导出失败，请稍后重试或检查权限");
+      message.error("项目 CSV 导出失败，请稍后重试或检查权限");
     } finally {
-      setExporting(false);
+      setExportingProjects(false);
     }
   };
 
@@ -394,8 +494,42 @@ export default function ProjectCostPage() {
               />
             </div>
           </div>
-          <Space wrap size="large">
-            <DatePicker.RangePicker onChange={(v) => setRange(v as [Dayjs, Dayjs] | null)} />
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 24, width: "100%", minWidth: 0 }}>
+            <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowX: "auto", paddingBottom: 2 }}>
+              <Segmented
+                aria-label="维保订单导出日期"
+                value={exportDatePreset}
+                onChange={(value) => {
+                  const preset = value as ExportDatePreset;
+                  exportDatePresetRef.current = preset;
+                  setExportDatePreset(preset);
+                  if (preset === "all") setRange(null);
+                  if (preset === "custom") setRange(null);
+                   const anchor = asOf ? dayjs(asOf) : null;
+                   if (anchor && preset !== "all" && preset !== "custom") {
+                     setRange(presetRange(preset, anchor));
+                   }
+                }}
+                options={[
+                  { label: "全部", value: "all" },
+                  { label: "今天", value: "today", disabled: !asOf },
+                  { label: "近7天", value: "last7", disabled: !asOf },
+                  { label: "近14天", value: "last14", disabled: !asOf },
+                  { label: "近21天", value: "last21", disabled: !asOf },
+                  { label: "近30天", value: "last30", disabled: !asOf },
+                  { label: "本月", value: "month", disabled: !asOf },
+                  { label: "自定义", value: "custom" },
+                ]}
+              />
+            </div>
+            <DatePicker.RangePicker
+              value={range}
+              onChange={(v) => {
+                exportDatePresetRef.current = "custom";
+                setExportDatePreset("custom");
+                setRange(v as [Dayjs, Dayjs] | null);
+              }}
+            />
             <Input.Search
               placeholder="搜索项目名"
               allowClear
@@ -408,8 +542,15 @@ export default function ProjectCostPage() {
             {isAdmin && (
               <Button type="primary" loading={recomputing} onClick={recompute}>重算成本</Button>
             )}
-            <Button loading={exporting} onClick={exportCsv} disabled={!rows.length}>导出 CSV</Button>
-          </Space>
+            <Button type="primary" loading={exporting} disabled={exporting} onClick={exportOrders}>
+              导出维保订单 Excel
+            </Button>
+            <Button
+              loading={exportingProjects}
+              onClick={exportProjectsCsv}
+              disabled={!rows.length || exportingProjects}
+            >导出项目 CSV</Button>
+          </div>
           <Alert
             type={lifecycleCounts.missing ? "warning" : "info"}
             showIcon
