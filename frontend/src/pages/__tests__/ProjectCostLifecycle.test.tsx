@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { message } from "antd";
+import dayjs from "dayjs";
 
 const get = vi.fn();
 const post = vi.fn();
@@ -82,7 +83,7 @@ function installSuccessResponses() {
     const label = lifecycle === "ended" ? "已结束" : lifecycle === "missing" ? "期限缺失" : "进行中";
     if (path === "/maintenance/projects") return Promise.resolve(projects(`${label}项目`, lifecycle));
     if (path === "/maintenance/board") return Promise.resolve(board(undefined, lifecycle));
-    if (path === "/maintenance/export") return Promise.resolve({ data: new Blob(["ok"]) });
+    if (path === "/maintenance/orders/export") return Promise.resolve({ data: new Blob(["ok"]) });
     return Promise.resolve({ data: { rows: [], total: 0 } });
   });
 }
@@ -195,13 +196,248 @@ describe("维保项目生命周期筛选", () => {
     await waitFor(() => expect(get.mock.calls.length).toBeGreaterThan(callsBeforeRetry));
   });
 
-  it("导出使用当前生命周期筛选", async () => {
+  it("全部档通过新端点导出且不携带页面期限或搜索参数", async () => {
     installSuccessResponses();
     render(<ProjectCostPage />);
     await screen.findByText("进行中项目");
+    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
+      params: {},
+      responseType: "blob",
+    }));
+  });
+
+  it("近7天同步页面日期筛选并按含首尾的七天范围导出", async () => {
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+    const today = dayjs();
+    const expected = {
+      date_from: today.subtract(6, "day").format("YYYY-MM-DD"),
+      date_to: today.format("YYYY-MM-DD"),
+    };
+
+    fireEvent.click(screen.getByText("近7天"));
+
+    await waitFor(() => {
+      expect(get).toHaveBeenCalledWith("/maintenance/projects", expect.objectContaining({
+        params: expect.objectContaining(expected),
+      }));
+      expect(get).toHaveBeenCalledWith("/maintenance/board", expect.objectContaining({
+        params: expect.objectContaining(expected),
+      }));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
+      params: expected,
+      responseType: "blob",
+    }));
+  });
+
+  it("今天档使用今天作为同一个闭区间首尾", async () => {
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+    const today = dayjs().format("YYYY-MM-DD");
+
+    fireEvent.click(screen.getByText("今天"));
+    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
+      params: { date_from: today, date_to: today },
+      responseType: "blob",
+    }));
+  });
+
+  it("近14天档从今天向前包含十四个自然日", async () => {
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+    const today = dayjs();
+
+    fireEvent.click(screen.getByText("近14天"));
+    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
+      params: {
+        date_from: today.subtract(13, "day").format("YYYY-MM-DD"),
+        date_to: today.format("YYYY-MM-DD"),
+      },
+      responseType: "blob",
+    }));
+  });
+
+  it("近21天档从今天向前包含二十一个自然日", async () => {
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+    const today = dayjs();
+
+    fireEvent.click(screen.getByText("近21天"));
+    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
+      params: {
+        date_from: today.subtract(20, "day").format("YYYY-MM-DD"),
+        date_to: today.format("YYYY-MM-DD"),
+      },
+      responseType: "blob",
+    }));
+  });
+
+  it("近30天档从今天向前包含三十个自然日", async () => {
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+    const today = dayjs();
+
+    fireEvent.click(screen.getByText("近30天"));
+    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
+      params: {
+        date_from: today.subtract(29, "day").format("YYYY-MM-DD"),
+        date_to: today.format("YYYY-MM-DD"),
+      },
+      responseType: "blob",
+    }));
+  });
+
+  it("本月档从当月一日到今天", async () => {
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+    const today = dayjs();
+
+    fireEvent.click(screen.getByText("本月"));
+    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
+      params: {
+        date_from: today.startOf("month").format("YYYY-MM-DD"),
+        date_to: today.format("YYYY-MM-DD"),
+      },
+      responseType: "blob",
+    }));
+  });
+
+  it("自定义缺少日期范围时不发送导出请求", async () => {
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+
+    fireEvent.click(screen.getByText("自定义"));
+    const callsBeforeExport = get.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+
+    await Promise.resolve();
+    expect(get.mock.calls.slice(callsBeforeExport).filter(([path]) => (
+      path === "/maintenance/orders/export"
+    ))).toHaveLength(0);
+  });
+
+  it("下载锚点加入 DOM 后点击移除并延迟释放 Object URL", async () => {
+    installSuccessResponses();
+    let attachedWhenClicked = false;
+    vi.mocked(HTMLAnchorElement.prototype.click).mockImplementation(function (this: HTMLAnchorElement) {
+      attachedWhenClicked = document.body.contains(this);
+    });
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+
+    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+
+    await waitFor(() => expect(HTMLAnchorElement.prototype.click).toHaveBeenCalled());
+    expect(attachedWhenClicked).toBe(true);
+    expect(document.querySelector('a[download="maintenance_orders_all.xlsx"]')).toBeNull();
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 110));
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:test");
+  });
+
+  it("403 JSON Blob 错误优先展示后端 detail", async () => {
+    installSuccessResponses();
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      const lifecycle = config?.params?.lifecycle ?? "ongoing";
+      if (path === "/maintenance/projects") return Promise.resolve(projects("进行中项目", lifecycle));
+      if (path === "/maintenance/board") return Promise.resolve(board(undefined, lifecycle));
+      if (path === "/maintenance/orders/export") return Promise.reject({
+        response: {
+          status: 403,
+          data: new Blob([JSON.stringify({ detail: "无维保页面权限" })], { type: "application/json" }),
+        },
+      });
+      return Promise.reject(new Error("unexpected"));
+    });
+    const errorMessage = vi.spyOn(message, "error");
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+
+    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+
+    await waitFor(() => expect(errorMessage).toHaveBeenCalledWith("无维保页面权限"));
+  });
+
+  it("范围导出的下载文件名使用实际起止日期", async () => {
+    installSuccessResponses();
+    let downloadedName = "";
+    vi.mocked(HTMLAnchorElement.prototype.click).mockImplementation(function (this: HTMLAnchorElement) {
+      downloadedName = this.download;
+    });
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+    const today = dayjs();
+
+    fireEvent.click(screen.getByText("近7天"));
+    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+
+    await waitFor(() => expect(downloadedName).toBe(
+      `maintenance_orders_${today.subtract(6, "day").format("YYYY-MM-DD")}_${today.format("YYYY-MM-DD")}.xlsx`,
+    ));
+  });
+
+  it("自定义 RangePicker 的完整范围同步页面并精确导出", async () => {
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+    await screen.findByText("进行中项目");
+    fireEvent.click(screen.getByText("自定义"));
+    const start = screen.getByPlaceholderText("Start date");
+    const end = screen.getByPlaceholderText("End date");
+
+    fireEvent.focus(start);
+    fireEvent.change(start, { target: { value: "2026-07-03" } });
+    fireEvent.keyDown(start, { key: "Enter", code: "Enter" });
+    fireEvent.focus(end);
+    fireEvent.change(end, { target: { value: "2026-07-19" } });
+    fireEvent.keyDown(end, { key: "Enter", code: "Enter" });
+
+    const expected = { date_from: "2026-07-03", date_to: "2026-07-19" };
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/projects", expect.objectContaining({
+      params: expect.objectContaining(expected),
+    })));
+    fireEvent.click(screen.getByRole("button", { name: "导出维保订单 Excel" }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", {
+      params: expected,
+      responseType: "blob",
+    }));
+  });
+
+  it("保留项目聚合 CSV 并继续使用当前生命周期筛选", async () => {
+    installSuccessResponses();
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      const lifecycle = config?.params?.lifecycle ?? "ongoing";
+      if (path === "/maintenance/projects") return Promise.resolve(projects("当前项目", lifecycle));
+      if (path === "/maintenance/board") return Promise.resolve(board(undefined, lifecycle));
+      if (path === "/maintenance/export") return Promise.resolve({ data: new Blob(["csv"]) });
+      return Promise.resolve({ data: new Blob(["xlsx"]) });
+    });
+    render(<ProjectCostPage />);
+    await screen.findByText("当前项目");
     fireEvent.click(screen.getByText("期限缺失 1"));
-    await screen.findByText("期限缺失项目");
-    fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+    await screen.findByText("当前项目");
+
+    fireEvent.click(screen.getByRole("button", { name: "导出项目 CSV" }));
 
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/export", expect.objectContaining({
       params: expect.objectContaining({ lifecycle: "missing" }),

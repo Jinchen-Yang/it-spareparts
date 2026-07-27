@@ -7,6 +7,7 @@ import { InfoCircleOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
+import dayjs from "dayjs";
 import type { Dayjs } from "dayjs";
 import api from "../api";
 import { money } from "../utils/format";
@@ -46,6 +47,7 @@ type BoardStatus = "red" | "yellow" | "green" | "no_budget";
 type LifecycleStatus = "ongoing" | "ended" | "missing";
 type LifecycleFilter = LifecycleStatus | "all";
 type LifecycleCounts = Record<LifecycleStatus, number>;
+type ExportDatePreset = "all" | "today" | "last7" | "last14" | "last21" | "last30" | "month" | "custom";
 
 interface BoardRow {
   contract: string | null;
@@ -119,6 +121,7 @@ const SourceLegend = (
 export default function ProjectCostPage() {
   const isAdmin = localStorage.getItem("role") === "admin";
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
+  const [exportDatePreset, setExportDatePreset] = useState<ExportDatePreset>("all");
   const [q, setQ] = useState("");
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
   const [lifecycleCounts, setLifecycleCounts] = useState<LifecycleCounts>(EMPTY_LIFECYCLE_COUNTS);
@@ -259,15 +262,63 @@ export default function ProjectCostPage() {
         URL.revokeObjectURL(url);
       });
 
-  const exportCsv = async () => {
+  const exportOrders = async () => {
+    if (exportDatePreset === "custom" && !range) {
+      message.warning("请选择自定义起止日期");
+      return;
+    }
     setExporting(true);
     try {
-      await download("/maintenance/export", "maintenance_projects.csv", { lifecycle });
-    } catch {
-      message.error("导出失败，请稍后重试或检查权限");
+      const params = range ? {
+        date_from: range[0].format("YYYY-MM-DD"),
+        date_to: range[1].format("YYYY-MM-DD"),
+      } : {};
+      const res = await api.get("/maintenance/orders/export", { params, responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = range
+        ? `maintenance_orders_${range[0].format("YYYY-MM-DD")}_${range[1].format("YYYY-MM-DD")}.xlsx`
+        : "maintenance_orders_all.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      const revokeObjectURL = URL.revokeObjectURL.bind(URL);
+      setTimeout(() => revokeObjectURL(url), 100);
+    } catch (error) {
+      const response = (error as {
+        response?: { status?: number; data?: unknown };
+      })?.response;
+      let detail: string | undefined;
+      if ((response?.status === 403 || response?.status === 422) && response.data instanceof Blob) {
+        try {
+          const text = typeof response.data.text === "function"
+            ? await response.data.text()
+            : await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result || ""));
+              reader.onerror = () => reject(reader.error);
+              reader.readAsText(response.data as Blob);
+            });
+          const body = JSON.parse(text) as { detail?: unknown };
+          if (typeof body.detail === "string") detail = body.detail;
+        } catch {
+          // Non-JSON error bodies fall through to a safe status-specific message.
+        }
+      }
+      message.error(detail || (response?.status === 403
+        ? "无权限导出维保订单"
+        : response?.status === 422
+          ? "导出日期参数无效"
+          : "导出失败，请稍后重试"));
     } finally {
       setExporting(false);
     }
+  };
+
+  const exportProjectsCsv = () => {
+    download("/maintenance/export", "maintenance_projects.csv", { lifecycle })
+      .catch(() => message.error("项目 CSV 导出失败，请稍后重试或检查权限"));
   };
 
   const exportLines = () => {
@@ -395,7 +446,57 @@ export default function ProjectCostPage() {
             </div>
           </div>
           <Space wrap size="large">
-            <DatePicker.RangePicker onChange={(v) => setRange(v as [Dayjs, Dayjs] | null)} />
+            <Segmented
+              aria-label="维保订单导出日期"
+              value={exportDatePreset}
+              onChange={(value) => {
+                const preset = value as ExportDatePreset;
+                setExportDatePreset(preset);
+                if (preset === "all") setRange(null);
+                if (preset === "custom") setRange(null);
+                if (preset === "today") {
+                  const today = dayjs();
+                  setRange([today, today]);
+                }
+                if (preset === "last7") {
+                  const today = dayjs();
+                  setRange([today.subtract(6, "day"), today]);
+                }
+                if (preset === "last14") {
+                  const today = dayjs();
+                  setRange([today.subtract(13, "day"), today]);
+                }
+                if (preset === "last21") {
+                  const today = dayjs();
+                  setRange([today.subtract(20, "day"), today]);
+                }
+                if (preset === "last30") {
+                  const today = dayjs();
+                  setRange([today.subtract(29, "day"), today]);
+                }
+                if (preset === "month") {
+                  const today = dayjs();
+                  setRange([today.startOf("month"), today]);
+                }
+              }}
+              options={[
+                { label: "全部", value: "all" },
+                { label: "今天", value: "today" },
+                { label: "近7天", value: "last7" },
+                { label: "近14天", value: "last14" },
+                { label: "近21天", value: "last21" },
+                { label: "近30天", value: "last30" },
+                { label: "本月", value: "month" },
+                { label: "自定义", value: "custom" },
+              ]}
+            />
+            <DatePicker.RangePicker
+              value={range}
+              onChange={(v) => {
+                setExportDatePreset("custom");
+                setRange(v as [Dayjs, Dayjs] | null);
+              }}
+            />
             <Input.Search
               placeholder="搜索项目名"
               allowClear
@@ -408,7 +509,8 @@ export default function ProjectCostPage() {
             {isAdmin && (
               <Button type="primary" loading={recomputing} onClick={recompute}>重算成本</Button>
             )}
-            <Button loading={exporting} onClick={exportCsv} disabled={!rows.length}>导出 CSV</Button>
+            <Button type="primary" loading={exporting} onClick={exportOrders}>导出维保订单 Excel</Button>
+            <Button onClick={exportProjectsCsv} disabled={!rows.length}>导出项目 CSV</Button>
           </Space>
           <Alert
             type={lifecycleCounts.missing ? "warning" : "info"}
