@@ -129,6 +129,37 @@ function saveBlob(blob: Blob, filename: string) {
   }
 }
 
+async function readExportError(error: unknown): Promise<{
+  status?: number;
+  detail?: string;
+}> {
+  const response = (error as {
+    response?: { status?: number; data?: unknown };
+  })?.response;
+  let detail: string | undefined;
+  if (
+    response?.status != null
+    && [403, 422, 429].includes(response.status)
+    && response.data instanceof Blob
+  ) {
+    try {
+      const text = typeof response.data.text === "function"
+        ? await response.data.text()
+        : await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(reader.error);
+          reader.readAsText(response.data as Blob);
+        });
+      const body = JSON.parse(text) as { detail?: unknown };
+      if (typeof body.detail === "string") detail = body.detail;
+    } catch {
+      // 非 JSON 错误体只使用安全的状态提示。
+    }
+  }
+  return { status: response?.status, detail };
+}
+
 function SourceTag({ source, trace, distance }: {
   source: string | null; trace?: number | null; distance?: number | null;
 }) {
@@ -173,6 +204,8 @@ export default function ProjectCostPage() {
   const [loadError, setLoadError] = useState(false);
   const [recomputing, setRecomputing] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [exportingWorkbooks, setExportingWorkbooks] = useState(false);
+  const exportingWorkbooksRef = useRef(false);
   const [exportingProjects, setExportingProjects] = useState(false);
   // 明细抽屉
   const [detailProject, setDetailProject] = useState<string | null>(null);
@@ -328,33 +361,64 @@ export default function ProjectCostPage() {
         ? `maintenance_orders_${exportRange[0].format("YYYY-MM-DD")}_${exportRange[1].format("YYYY-MM-DD")}.xlsx`
         : "maintenance_orders_all.xlsx");
     } catch (error) {
-      const response = (error as {
-        response?: { status?: number; data?: unknown };
-      })?.response;
-      let detail: string | undefined;
-      if ((response?.status === 403 || response?.status === 422) && response.data instanceof Blob) {
-        try {
-          const text = typeof response.data.text === "function"
-            ? await response.data.text()
-            : await new Promise<string>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve(String(reader.result || ""));
-              reader.onerror = () => reject(reader.error);
-              reader.readAsText(response.data as Blob);
-            });
-          const body = JSON.parse(text) as { detail?: unknown };
-          if (typeof body.detail === "string") detail = body.detail;
-        } catch {
-          // Non-JSON error bodies fall through to a safe status-specific message.
-        }
-      }
-      message.error(detail || (response?.status === 403
+      const { status, detail } = await readExportError(error);
+      message.error(detail || (status === 403
         ? "无权限导出维保订单"
-        : response?.status === 422
+        : status === 422
           ? "导出日期参数无效"
           : "导出失败，请稍后重试"));
     } finally {
       setExporting(false);
+    }
+  };
+
+  const exportWorkbooks = async () => {
+    if (exportingWorkbooksRef.current) return;
+    const requestedPreset = exportDatePreset;
+    let exportRange = range;
+    const initialParams = buildOrderExportParams(requestedPreset, exportRange);
+    if (!initialParams) {
+      message.warning(requestedPreset === "custom"
+        ? "请选择自定义起止日期"
+        : "日期基准尚未加载，请稍后重试");
+      return;
+    }
+    exportingWorkbooksRef.current = true;
+    setExportingWorkbooks(true);
+    try {
+      if (requestedPreset !== "all" && requestedPreset !== "custom") {
+        const { data } = await api.get("/maintenance/as-of");
+        if (exportDatePresetRef.current !== requestedPreset) return;
+        const latestAsOf = typeof data?.as_of === "string" ? data.as_of : "";
+        const anchor = latestAsOf ? dayjs(latestAsOf) : null;
+        if (!anchor?.isValid()) throw new Error("invalid as_of");
+        exportRange = presetRange(requestedPreset, anchor);
+        setAsOf(latestAsOf);
+        setRange(exportRange);
+      }
+      const params = buildOrderExportParams(requestedPreset, exportRange);
+      if (!params) {
+        message.warning(requestedPreset === "custom"
+          ? "请选择自定义起止日期"
+          : "日期基准尚未加载，请稍后重试");
+        return;
+      }
+      const res = await api.get("/maintenance/export-workbooks", { params, responseType: "blob" });
+      saveBlob(res.data, exportRange
+        ? `maintenance_project_workbooks_${exportRange[0].format("YYYY-MM-DD")}_${exportRange[1].format("YYYY-MM-DD")}.zip`
+        : "maintenance_project_workbooks_all.zip");
+    } catch (error) {
+      const { status, detail } = await readExportError(error);
+      message.error(detail || (status === 403
+        ? "无权限导出项目工作簿"
+        : status === 422
+          ? "批量项目工作簿导出范围无效"
+          : status === 429
+            ? "已有批量工作簿导出正在执行，请稍后重试"
+            : "批量项目工作簿导出失败，请稍后重试"));
+    } finally {
+      exportingWorkbooksRef.current = false;
+      setExportingWorkbooks(false);
     }
   };
 
@@ -542,20 +606,35 @@ export default function ProjectCostPage() {
             {isAdmin && (
               <Button type="primary" loading={recomputing} onClick={recompute}>重算成本</Button>
             )}
-            <Button type="primary" loading={exporting} disabled={exporting} onClick={exportOrders}>
-              导出维保订单 Excel
+            <Button
+              type="primary"
+              loading={exportingWorkbooks}
+              disabled={exportingWorkbooks}
+              onClick={exportWorkbooks}
+            >
+              批量导出项目工作簿 ZIP
+            </Button>
+            <Button loading={exporting} disabled={exporting} onClick={exportOrders}>
+              导出订单汇总 Excel
             </Button>
             <Button
               loading={exportingProjects}
               onClick={exportProjectsCsv}
               disabled={!rows.length || exportingProjects}
-            >导出项目 CSV</Button>
+            >导出当前项目统计 CSV</Button>
+            <div
+              aria-label="批量导出说明"
+              style={{ width: "100%", color: "var(--mb-text-2)", fontSize: 12.5, lineHeight: 1.6 }}
+            >
+              <div>批量项目工作簿 ZIP：时间范围只决定纳入哪些合同，每本仍包含该合同完整数据。</div>
+              <div>订单汇总 Excel：汇总范围内的订单及明细；两种批量导出不受项目搜索或维保期限筛选影响。</div>
+            </div>
           </div>
           <Alert
             type={lifecycleCounts.missing ? "warning" : "info"}
             showIcon
-            message={`日期范围筛选出库日期；维保期限状态按 ${asOf || "后端请求当天"} 判断。`}
-            description={`终止日当天仍算进行中；未填写终止日期的项目归入“期限缺失”。当前有 ${lifecycleCounts.missing} 个期限缺失项目。`}
+            message={`日期范围筛选出库日期；批量导出按维保单制单日期；维保期限状态按 ${asOf || "后端请求当天"} 判断。`}
+            description={`批量工作簿只按范围决定合同是否入包，每本保持完整；终止日当天仍算进行中；未填写终止日期的项目归入“期限缺失”。当前有 ${lifecycleCounts.missing} 个期限缺失项目。`}
           />
           {loadError && (
             <Alert
@@ -640,7 +719,7 @@ export default function ProjectCostPage() {
                           download("/maintenance/export-workbook", `项目工作簿_${b.contract}.xlsx`,
                                    { contract: b.contract })
                             .catch(() => message.error("工作簿导出失败，请稍后重试或检查权限"))
-                        }>工作簿</a>
+                        }>单本工作簿</a>
                       )}
                     </Space>
                   </div>
