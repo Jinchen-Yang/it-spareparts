@@ -296,17 +296,23 @@ TOOLS: list[dict] = [
         "function": {
             "name": "get_maintenance_board",
             "description": (
-                "维保项目盈亏看板（合同级）：预算=合同额(含税参考)、已花=备件成本+生效报销费用、"
-                "剩余与状态灯——red=超支/亏损、yellow=剩余≤20%预警、green=健康、no_budget=未关联合同额。"
-                "含备件/费用构成、成本覆盖率、低置信成本占比、维保起止。黄红置顶。"
-                "无利润权限时不返回状态、状态计数或状态筛选结果，改按最近出库日期排列。"
-                "「哪些维保项目亏钱/要预警」用它。需要项目成本页面权限。"
+                "维保合同预算消耗参考：备件先分实际采购参考/估算参考/成本缺失，再与生效报销费用组成"
+                "已知支出参考。incomplete_cost=成本不完整，必须先补数据，remaining/remaining_pct 为空，"
+                "严禁自行推断红黄绿或盈亏；仅成本完整时才给 red=预算已用完或超预算、"
+                "yellow=预算余量≤20%、green=预算余量>20%、no_budget=无正预算。"
+                "含成本质量、三类行数、备件/费用构成和维保起止，不定义正式项目毛利。"
+                "合同额、预算与余量仅按利润权限返回；无利润权限时不返回这些金额、决策状态、"
+                "状态计数或筛选结果，改按最近出库日期排列。"
+                "需要项目成本页面权限。"
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "status": {"type": "string", "enum": ["red", "yellow", "green", "no_budget"],
-                               "description": "按状态灯过滤，可省略=全部"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["incomplete_cost", "red", "yellow", "green", "no_budget"],
+                        "description": "按预算消耗参考状态过滤，可省略=全部",
+                    },
                 },
             },
         },
@@ -316,9 +322,11 @@ TOOLS: list[dict] = [
         "function": {
             "name": "get_maintenance_projects",
             "description": (
-                "维保项目成本汇总（项目维度）：出库行数/数量/备件成本(含税、不含税分列)/覆盖率/"
+                "维保项目成本汇总（项目维度）：实际采购参考/估算参考按含税与不含税分列、"
+                "缺失成本行、成本完整性、已知成本混合原值参考、出库行数/数量/覆盖率/"
                 "成本来源分布(direct=专属采购直配、window=±7天最近价、month_avg=当月均价、"
-                "trace_avg=追溯均价、sales_ref=销售参考、none=无成本)/关联销售订单与合同额参考。"
+                "trace_avg=估算追溯均价、sales_ref=估算销售参考、none=成本缺失)/关联销售订单与合同额参考。"
+                "合同额参考仅按利润权限返回，空值不等于源数据缺失。"
                 "无成本权限时按项目名排序后再截取 top，不按隐藏成本排名。"
                 "需要项目成本页面权限。"
             ),
@@ -337,7 +345,10 @@ TOOLS: list[dict] = [
             "name": "get_maintenance_lines",
             "description": (
                 "单个维保项目的出库明细（追单据用）：维保单号/日期/需求类型/仓库/PN/数量/退货/"
-                "单价/金额/成本来源/置信度(high|medium|low)/取价月/距采购天数/关联采购单/异常标记。"
+                "单价/金额/cost_tier(actual|estimated|missing)/原始成本来源与税口径/"
+                "置信度(high|medium|low)/取价月/距采购天数/关联采购单/异常标记。"
+                "cost_tier 是权威事实层级；missing 时单价和金额为空，原始来源/税口径仅供诊断，"
+                "不得据此自行恢复金额或重判 actual/estimated。"
                 "project 必须是 get_maintenance_projects 返回的准确项目名。需要项目成本页面权限。"
             ),
             "parameters": {
@@ -375,7 +386,7 @@ TOOLS: list[dict] = [
             "name": "list_skills",
             "description": (
                 "列出你（按当前登录角色）可用的业务技能剧本：采购批量计划分析、老板经营速览、"
-                "配件行情简报、维保项目健康检查等。接到复杂/多步的业务任务时先看这里有没有现成打法。"
+                "配件行情简报、维保成本与预算检查等。接到复杂/多步的业务任务时先看这里有没有现成打法。"
             ),
             "parameters": {"type": "object", "properties": {}},
         },
@@ -584,7 +595,7 @@ def _get_maintenance_board(db: Session, args: dict, ctx: security.UserContext) -
     st = args.get("status")
     data = maintenance_cost.board(
         db, None, None,
-        st if st in ("red", "yellow", "green", "no_budget") else None,
+        st if st in ("incomplete_cost", "red", "yellow", "green", "no_budget") else None,
         user_ctx=ctx,
     )
     return security.apply_field_visibility(data, ctx)
@@ -611,7 +622,8 @@ def _get_maintenance_lines(db: Session, args: dict, ctx: security.UserContext) -
         return {"error": "project 不能为空（用 get_maintenance_projects 拿准确项目名）"}
     month = args.get("month")
     data = maintenance_cost.project_lines(db, project, month if month else None,
-                                          None, None, max(int(args.get("page") or 1), 1), 50)
+                                          None, None, max(int(args.get("page") or 1), 1), 50,
+                                          user_ctx=ctx)
     return security.apply_field_visibility(data, ctx)
 
 

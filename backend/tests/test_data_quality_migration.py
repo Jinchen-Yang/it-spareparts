@@ -9,7 +9,7 @@ from sqlalchemy import text
 from app.db import engine
 
 _PREV = "a9c5e2f7d4b1"
-_HEAD = "f8c3d1a6b2e4"
+_HEAD = "c9d4e7f2a6b1"
 
 
 def _cfg():

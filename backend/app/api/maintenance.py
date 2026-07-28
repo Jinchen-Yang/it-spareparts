@@ -9,6 +9,7 @@ import io
 import re
 from contextlib import suppress
 from datetime import date
+from tempfile import SpooledTemporaryFile
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -32,6 +33,12 @@ from app.services import (
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 _DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+_CSV_SPOOL_MEMORY_BYTES = 5 * 1024 * 1024
+_MAX_CSV_DATA_ROWS = 1_000_000
+_MAX_CSV_CELL_CHARS = 32_767
+_MAX_CSV_DYNAMIC_TEXT_BYTES = 64 * 1024 * 1024
+_MAX_CSV_OUTPUT_BYTES = 512 * 1024 * 1024
+_INVALID_CSV_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff]")
 
 
 class _ClosingStreamingResponse(StreamingResponse):
@@ -103,7 +110,9 @@ def lines(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     record_access_log(ctx, "lines", "maintenance", {"project": project})
-    data = maintenance_cost.project_lines(db, project, month, date_from, date_to, page, page_size)
+    data = maintenance_cost.project_lines(
+        db, project, month, date_from, date_to, page, page_size, user_ctx=ctx,
+    )
     return apply_field_visibility(data, ctx)
 
 
@@ -112,10 +121,19 @@ _CONF_LABEL = maintenance_workbook_renderer.CONFIDENCE_LABELS
 
 
 def _safe(v):
-    # 防 CSV 公式注入：以 = + - @ 制表/回车开头的文本前置单引号
-    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
-        return "'" + v
-    return v
+    """统一净化 CSV 动态文本：非法控制、公式注入、Excel 单元格长度。"""
+    if not isinstance(v, str):
+        return v
+    value = _INVALID_CSV_CONTROLS.sub("", v)
+    probe = value.lstrip()
+    if probe[:1] in ("=", "+", "-", "@"):
+        value = "'" + value
+    if len(value) > _MAX_CSV_CELL_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"CSV 单元格超过 {_MAX_CSV_CELL_CHARS} 字符安全上限",
+        )
+    return value
 
 
 _INVALID_DOWNLOAD_NAME = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
@@ -156,20 +174,74 @@ def _require_workbook_export_permissions(ctx: UserContext) -> None:
 
 def _csv_stream(
     header: list,
-    rows: list,
+    rows,
     filename: str,
     ascii_fallback: str | None = None,
+    db: Session | None = None,
 ) -> StreamingResponse:
-    buf = io.StringIO()
-    buf.write("﻿")  # BOM，Excel 正确识别 UTF-8
-    w = csv.writer(buf)
-    w.writerow(header)
-    for r in rows:
-        w.writerow(r)
-    buf.seek(0)
-    return StreamingResponse(
-        iter([buf.getvalue()]), media_type="text/csv",
-        headers={"Content-Disposition": _content_disposition(filename, ascii_fallback)},
+    """增量写入有界内存 spool；完整校验成功后才开始响应。"""
+    output = SpooledTemporaryFile(max_size=_CSV_SPOOL_MEMORY_BYTES, mode="w+b")
+    row_buffer = io.StringIO(newline="")
+    writer = csv.writer(row_buffer)
+    dynamic_text_bytes = 0
+
+    def write_row(values) -> None:
+        nonlocal dynamic_text_bytes
+        safe_values = []
+        for value in values:
+            safe_value = _safe(value)
+            safe_values.append(safe_value)
+            if isinstance(safe_value, str):
+                dynamic_text_bytes += len(safe_value.encode("utf-8"))
+                if dynamic_text_bytes > _MAX_CSV_DYNAMIC_TEXT_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="CSV 动态文本超过 64 MiB 安全上限",
+                    )
+        writer.writerow(safe_values)
+        row_bytes = row_buffer.getvalue().encode("utf-8")
+        if output.tell() + len(row_bytes) > _MAX_CSV_OUTPUT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="CSV 文件超过 512 MiB 安全上限",
+            )
+        output.write(row_bytes)
+        row_buffer.seek(0)
+        row_buffer.truncate(0)
+
+    row_iterator = None
+    try:
+        output.write(b"\xef\xbb\xbf")  # BOM，Excel 正确识别 UTF-8
+        write_row(header)
+        row_iterator = iter(rows)
+        for row_count, row in enumerate(row_iterator, 1):
+            if row_count > _MAX_CSV_DATA_ROWS:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"CSV 数据行超过 {_MAX_CSV_DATA_ROWS} 行上限",
+                )
+            write_row(row)
+        output.seek(0)
+        if db is not None:
+            _release_db_before_stream(db, output)
+    except BaseException:
+        output.close()
+        raise
+    finally:
+        close_rows = getattr(row_iterator, "close", None)
+        if close_rows is not None:
+            with suppress(Exception):
+                close_rows()
+        row_buffer.close()
+    return _ClosingStreamingResponse(
+        _iter_download_chunks(output),
+        resource=output,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": _content_disposition(filename, ascii_fallback),
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -191,23 +263,48 @@ def export(
     )
     data = apply_field_visibility(data, ctx)   # 导出同样过脱敏层（§8.5）
     header = ["项目", "期限状态", "维保终止日期",
-              "出库行数", "出库数量", "备件成本-含税小计", "备件成本-不含税小计",
-              "成本合计(混合口径参考)", "覆盖率%",
+              "出库行数", "出库数量",
+              "实际采购参考-含税", "实际采购参考-不含税",
+              "估算参考-含税", "估算参考-不含税",
+              "实际参考行数", "估算参考行数", "缺失成本行数",
+              "已知成本参考(混合原值)", "成本完整性",
+              "已知成本参考-含税小计(兼容)", "已知成本参考-不含税小计(兼容)",
+              "已知成本参考合计(兼容)", "覆盖率%",
               *(_SOURCE_LABEL[s] + "(行)" for s in ("direct", "window", "month_avg",
                                                     "trace_avg", "sales_ref", "none")),
               "月份数", "关联销售订单", "合同额(含税参考)", "合同被多项目共用"]
     rows = []
     for r in data["rows"]:
         bs = r["by_source"]
+        source_counts = (
+            [None] * 6
+            if bs is None
+            else [
+                bs.get("direct", 0),
+                bs.get("window", 0),
+                bs.get("month_avg", 0),
+                bs.get("trace_avg", 0),
+                bs.get("sales_ref", 0),
+                bs.get("none", 0),
+            ]
+        )
         lifecycle_label = {"ongoing": "进行中", "ended": "已结束", "missing": "期限缺失"}
+        quality_label = {
+            "actual_only": "仅实际采购参考",
+            "contains_estimate": "含估算参考",
+            "incomplete": "成本不完整，需补数据",
+        }
         rows.append([_safe(r["project"]), lifecycle_label[r["lifecycle_status"]], r["maint_end"],
                      r["lines"], r["qty"],
+                     r["actual_cost_inc"], r["actual_cost_ex"],
+                     r["estimated_cost_inc"], r["estimated_cost_ex"],
+                     r["actual_lines"], r["estimated_lines"], r["missing_cost_lines"],
+                     r["known_cost_total"], quality_label.get(r["cost_quality"], r["cost_quality"]),
                      r["cost_inc"], r["cost_ex"], r["cost_total"], r["coverage_pct"],
-                     bs.get("direct", 0), bs.get("window", 0), bs.get("month_avg", 0),
-                     bs.get("trace_avg", 0), bs.get("sales_ref", 0), bs.get("none", 0),
+                     *source_counts,
                      r["months"], _safe("、".join(r["sales_orders"])),
                      r["contract_amount"], "是" if r["contract_shared"] else ""])
-    return _csv_stream(header, rows, "maintenance_projects.csv")
+    return _csv_stream(header, rows, "maintenance_projects.csv", db=db)
 
 
 @router.get("/orders/export")
@@ -324,33 +421,62 @@ def lines_export(
 ) -> StreamingResponse:
     """单项目 SKU 明细导出（财务逐行复核入账用）——全量、含成本来源/税口径。"""
     record_access_log(ctx, "lines_export", "maintenance", {"project": project})
-    data = maintenance_cost.project_lines(db, project, month, date_from, date_to,
-                                          page=1, page_size=1_000_000)
-    data = apply_field_visibility(data, ctx)
+    line_count = maintenance_cost.project_line_count(
+        db, project, month, date_from, date_to,
+    )
+    if line_count > _MAX_CSV_DATA_ROWS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"CSV 数据行超过 {_MAX_CSV_DATA_ROWS} 行上限",
+        )
     header = ["日期", "维保单号", "需求类型", "业务类型", "出库仓库", "PN", "描述",
-              "数量", "退货", "单价", "金额", "成本来源", "置信度", "含税口径", "取价月",
+              "数量", "退货", "单价", "金额", "成本事实层级", "成本来源", "置信度", "含税口径", "取价月",
               "追溯月数", "距采购天数", "关联采购单", "异常标记"]
-    rows = []
-    for r in data["rows"]:
-        rows.append([r["order_date"], _safe(r["order_no"]), r["demand_type"], r["business_type"],
-                     r["warehouse"], _safe(r["pn_std"]), _safe(r["description"]),
-                     r["qty"], r["return_qty"], r["unit_cost"], r["cost_amount"],
-                     _SOURCE_LABEL.get(r["cost_source"], r["cost_source"]),
-                     _CONF_LABEL.get(r["confidence"], r["confidence"] or ""),
-                     r["cost_tax_basis"], r["price_month"], r["trace_months"],
-                     r["price_distance_days"],
-                     _safe(r["linked_purchase_order_no"]), "、".join(r["anomaly_flags"] or [])])
+
+    def rows():
+        source_rows = maintenance_cost.iter_project_lines(
+            db,
+            project,
+            month,
+            date_from,
+            date_to,
+            user_ctx=ctx,
+        )
+        try:
+            for raw_row in source_rows:
+                r = apply_field_visibility(raw_row, ctx)
+                yield [
+                    r["order_date"], r["order_no"], r["demand_type"], r["business_type"],
+                    r["warehouse"], r["pn_std"], r["description"],
+                    r["qty"], r["return_qty"], r["unit_cost"], r["cost_amount"],
+                    {"actual": "实际采购参考", "estimated": "估算参考",
+                     "missing": "成本缺失"}.get(r["cost_tier"], r["cost_tier"]),
+                    _SOURCE_LABEL.get(r["cost_source"], r["cost_source"]),
+                    _CONF_LABEL.get(r["confidence"], r["confidence"] or ""),
+                    r["cost_tax_basis"], r["price_month"], r["trace_months"],
+                    r["price_distance_days"], r["linked_purchase_order_no"],
+                    "、".join(r["anomaly_flags"] or []),
+                ]
+        finally:
+            close_source = getattr(source_rows, "close", None)
+            if close_source is not None:
+                with suppress(Exception):
+                    close_source()
     return _csv_stream(
         header,
-        rows,
+        rows(),
         f"maintenance_lines_{project[:40]}.csv",
         ascii_fallback="maintenance_lines.csv",
+        db=db,
     )
 
 
 @router.get("/board")
 def board(
-    status: str | None = Query(None, pattern=r"^(red|yellow|green|no_budget)$"),
+    status: str | None = Query(
+        None,
+        pattern=r"^(incomplete_cost|red|yellow|green|no_budget)$",
+    ),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     q: str | None = Query(None, max_length=128),
@@ -360,7 +486,7 @@ def board(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """盈亏看板（§16.2）：合同(XSDD)级 红/黄/绿 状态灯，黄红置顶。"""
+    """合同预算消耗参考：成本缺失优先，其后才允许红/黄/绿参考状态。"""
     record_access_log(ctx, "board", "maintenance")
     data = maintenance_cost.board(
         db, date_from, date_to, status, user_ctx=ctx, q_text=q,

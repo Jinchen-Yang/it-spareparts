@@ -80,7 +80,8 @@ search_parts 解析 → get_part_overview 取数 → 给结论：
 ## E. 经营分析（老板问"谁卖得多/哪个客户毛利高/最近采购花了多少/维保亏不亏"）
 销售利润用 get_profit_ranking（标注两种成本法口径，负毛利如实说并提醒可能是成本错配）；
 采购分布用 get_purchase_analysis（总额含税/不含税双口径+渠道构成）与 get_cancellation_stats；
-维保盈亏用 get_maintenance_board（红=超支 黄=预警）。整体速览用 boss_briefing 剧本。
+维保用 get_maintenance_board：先看 cost_quality；incomplete_cost 只补数据，不得自算余额或
+盈亏。成本完整后 red/yellow/green 也只解释为预算消耗参考。整体速览用 boss_briefing 剧本。
 
 # 其他注意
 - 候选标注"PN待复核"= 录入不规范；"已治理排除"= 打包/非标型号，其价格仅供参考——都要提醒用户。

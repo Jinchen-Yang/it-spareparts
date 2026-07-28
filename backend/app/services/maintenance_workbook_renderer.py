@@ -17,10 +17,11 @@ SOURCE_LABELS = {
     "window": "实际·±7天最近价",
     "month_avg": "实际·当月均价",
     "trace_avg": "预估·追溯均价",
-    "sales_ref": "没有采购有销售",
-    "none": "无成本",
+    "sales_ref": "预估·销售参考",
+    "none": "成本缺失",
 }
 CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}
+FEE_CATEGORY_HEADER_PREFIX = "费用分类："
 _HDR_FILL = PatternFill("solid", fgColor="35506B")
 _HDR_FONT = Font(bold=True, color="FFFFFF", size=11)
 _TITLE_FONT = Font(bold=True, size=15)
@@ -34,10 +35,21 @@ _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 _MONEY = "#,##0.00"
 _CENTER = Alignment(horizontal="center", vertical="center")
 _STATUS_STYLE = {
-    "red": ("超支/亏损", "C0524A"),
-    "yellow": ("预警·剩余≤20%", "B8860B"),
-    "green": ("健康", "3F7A45"),
+    "incomplete_cost": ("成本不完整，需补数据", "8C8C8C"),
+    "red": ("预算已用完或超预算", "C0524A"),
+    "yellow": ("预算余量≤20%", "B8860B"),
+    "green": ("预算余量>20%", "3F7A45"),
     "no_budget": ("无预算", "8C8C8C"),
+}
+_QUALITY_LABELS = {
+    "actual_only": "完整：仅实际采购参考",
+    "contains_estimate": "完整：含估算参考",
+    "incomplete": "成本不完整，需补数据",
+}
+_TIER_LABELS = {
+    "actual": "实际采购参考",
+    "estimated": "估算参考",
+    "missing": "成本缺失",
 }
 
 
@@ -80,29 +92,18 @@ def _populate_contract_workbook(
     safe_contract = safe_text(contract)
     budget = data["budget"]
     sales_order = data["sales_order"]
-    spent_parts = float(sum(data["doc_total"].values(), Decimal(0)))
-    spent_expenses = float(sum(
-        (
-            expense.amount
-            for expense in data["expenses"]
-            if expense.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
-            and expense.amount is not None
-        ),
-        Decimal(0),
-    ))
-    spent = round(spent_parts + spent_expenses, 2)
-    if budget:
-        budget_number = float(budget)
-        remaining = round(budget_number - spent, 2)
-        status = (
-            "red" if spent >= budget_number
-            else "yellow"
-            if remaining <= budget_number * float(config.MAINT_BUDGET_WARN_PCT)
-            else "green"
-        )
-    else:
-        remaining, status = None, "no_budget"
+    cost_summary = data["cost_summary"]
+    decision = data["decision"]
+    spent_parts = float(cost_summary["known_cost_total"])
+    spent_expenses = float(data["expense_total"])
+    spent = float(decision["known_spend_total"])
+    remaining = (
+        float(decision["remaining"])
+        if decision["remaining"] is not None else None
+    )
+    status = decision["decision_status"]
     status_label, status_color = _STATUS_STYLE[status]
+    quality_label = _QUALITY_LABELS[cost_summary["cost_quality"]]
 
     budget_sheet = workbook.active
     budget_sheet.title = "项目预算"
@@ -112,76 +113,95 @@ def _populate_contract_workbook(
     budget_sheet.row_dimensions[1].height = 26
     budget_sheet.merge_cells("A2:F2")
     budget_sheet["A2"] = (
-        "系统按取价瀑布自动核算 · 金额为含税/不含税原值混合参考口径 · "
+        "实际、估算、缺失分层同源 · 已知金额为含税/不含税混合原值参考 · "
+        "成本缺失时不计算预算余量或红黄绿 · "
         "导出自 IT 备件智能管理系统"
     )
     budget_sheet["A2"].font = _SUB_FONT
 
     key_values = [
-        ("合同（销售订单）", safe_contract, None),
-        (
-            "合同金额（含税参考）",
-            float(budget) if budget is not None else "（销售表未找到）",
-            _MONEY if budget is not None else None,
-        ),
-        (
-            "税率",
-            (
-                float(sales_order.tax_rate)
-                if sales_order is not None and sales_order.tax_rate is not None
-                else "—"
-            ),
-            None,
-        ),
-        ("已花合计（备件+报销）", spent, _MONEY),
-        ("　├ 备件成本", spent_parts, _MONEY),
-        ("　└ 报销费用（已结束）", spent_expenses, _MONEY),
-        (
-            "剩余预算",
-            remaining if remaining is not None else "—",
-            _MONEY if remaining is not None else None,
-        ),
-        ("状态", status_label, None),
+        ("合同（销售订单）", safe_contract, None,
+         "成本完整性", quality_label, None),
+        ("合同金额（含税参考）",
+         float(budget) if budget is not None else "（销售表未找到）",
+         _MONEY if budget is not None else None,
+         "预算消耗参考状态", status_label, None),
+        ("实际采购参考（含税）", float(cost_summary["actual_cost_inc"]), _MONEY,
+         "实际参考行", cost_summary["actual_lines"], None),
+        ("实际采购参考（不含税）", float(cost_summary["actual_cost_ex"]), _MONEY,
+         "税率",
+         (
+             float(sales_order.tax_rate)
+             if sales_order is not None and sales_order.tax_rate is not None
+             else "—"
+         ), None),
+        ("估算参考（含税）", float(cost_summary["estimated_cost_inc"]), _MONEY,
+         "估算参考行", cost_summary["estimated_lines"], None),
+        ("估算参考（不含税）", float(cost_summary["estimated_cost_ex"]), _MONEY,
+         "缺失成本行", cost_summary["missing_cost_lines"], None),
+        ("已知备件成本参考（混合原值）", spent_parts, _MONEY,
+         "生效报销费用", spent_expenses, _MONEY),
+        ("已知支出参考（备件+报销）", spent, _MONEY,
+         "剩余预算", remaining if remaining is not None else "—",
+         _MONEY if remaining is not None else None),
     ]
     row = 4
-    for label, value, number_format in key_values:
-        label_cell = budget_sheet.cell(row=row, column=1, value=label)
-        value_cell = budget_sheet.cell(row=row, column=2, value=value)
-        label_cell.fill, label_cell.font, label_cell.border = (
-            _KV_FILL,
-            Font(bold=True),
-            _BORDER,
-        )
-        value_cell.border = _BORDER
-        if number_format:
-            value_cell.number_format = number_format
-        if label == "剩余预算" and remaining is not None:
-            value_cell.font = Font(bold=True, color=status_color)
-        if label == "状态":
-            value_cell.fill = PatternFill("solid", fgColor=status_color)
-            value_cell.font = Font(bold=True, color="FFFFFF")
-            value_cell.alignment = _CENTER
+    for left_label, left_value, left_format, right_label, right_value, right_format in key_values:
+        for label, value, number_format, label_column in (
+            (left_label, left_value, left_format, 1),
+            (right_label, right_value, right_format, 3),
+        ):
+            label_cell = budget_sheet.cell(row=row, column=label_column, value=label)
+            value_cell = budget_sheet.cell(row=row, column=label_column + 1, value=value)
+            label_cell.fill, label_cell.font, label_cell.border = (
+                _KV_FILL,
+                Font(bold=True),
+                _BORDER,
+            )
+            value_cell.border = _BORDER
+            if number_format:
+                value_cell.number_format = number_format
+            if label == "剩余预算" and remaining is not None:
+                value_cell.font = Font(bold=True, color=status_color)
+            if label == "预算消耗参考状态":
+                value_cell.fill = PatternFill("solid", fgColor=status_color)
+                value_cell.font = Font(bold=True, color="FFFFFF")
+                value_cell.alignment = _CENTER
         row += 1
 
     row += 1
     categories = sorted({
         category
-        for month in data["monthly"].values()
+        for month in data["monthly_expenses"].values()
         for category in month
-        if category != "备件消耗"
     })
-    columns = ["月份", "备件消耗", *categories, "当月合计"]
+    expense_columns = [
+        f"{FEE_CATEGORY_HEADER_PREFIX}{category}"
+        for category in categories
+    ]
+    columns = [
+        "月份",
+        "已知备件成本参考（混合原值·兼容）",
+        *expense_columns,
+        "当月合计",
+    ]
     for index, heading in enumerate(columns, 1):
         budget_sheet.cell(row=row, column=index, value=safe_text(heading))
     _hdr_row(budget_sheet, row, len(columns))
     band = False
     totals = [0.0] * (len(columns) - 2)
-    for year_month in sorted(data["monthly"]):
+    year_months = sorted(
+        set(data["monthly_parts"]) | set(data["monthly_expenses"]),
+    )
+    for year_month in year_months:
         row += 1
         band = not band
-        month = data["monthly"][year_month]
-        values = [float(month.get("备件消耗", 0))]
-        values.extend(float(month.get(category, 0)) for category in categories)
+        month_expenses = data["monthly_expenses"].get(year_month, {})
+        values = [float(data["monthly_parts"].get(year_month, 0))]
+        values.extend(
+            float(month_expenses.get(category, 0))
+            for category in categories
+        )
         for index, value in enumerate(values):
             totals[index] += value
         row_values = [safe_text(year_month), *values, round(sum(values), 2)]
@@ -208,8 +228,9 @@ def _populate_contract_workbook(
     part_headers = [
         "数据标题(WBDD单号)", "制单日期", "销售订单", "项目名", "需求类型",
         "出库仓库", "销售人员", "业务类型", "序号", "需供货产品", "产品描述",
-        "需求数量", "产品成本", "单价", "合计", "发货SN", "行成本单价",
+        "需求数量", "已知成本参考", "单价", "合计", "发货SN", "行成本单价",
         "行成本金额", "成本来源", "置信度", "取价月", "距采购天数", "含税口径",
+        "成本事实层级",
     ]
     parts_sheet.append(part_headers)
     _hdr_row(parts_sheet, 1, len(part_headers))
@@ -221,6 +242,8 @@ def _populate_contract_workbook(
             band = not band
         previous_order = order.order_no
         document_cost = data["doc_total"].get(order.order_no)
+        tier = data["line_cost_tiers"][line.id]
+        known_line = tier != "missing"
         parts_sheet.append([
             safe_text(order.order_no),
             order.order_date.isoformat() if order.order_date else None,
@@ -238,13 +261,14 @@ def _populate_contract_workbook(
             None,
             None,
             safe_text(line.serial_numbers),
-            float(line.unit_cost) if line.unit_cost is not None else None,
-            float(line.cost_amount) if line.cost_amount is not None else None,
+            float(line.unit_cost) if known_line and line.unit_cost is not None else None,
+            float(line.cost_amount) if known_line and line.cost_amount is not None else None,
             safe_text(SOURCE_LABELS.get(line.cost_source, line.cost_source)),
             safe_text(CONFIDENCE_LABELS.get(line.confidence, line.confidence or "")),
             safe_text(line.price_month),
             line.price_distance_days,
             safe_text(line.cost_tax_basis),
+            safe_text(_TIER_LABELS[tier]),
         ])
         rendered_row = parts_sheet.max_row
         for column in range(1, len(part_headers) + 1):
@@ -270,7 +294,7 @@ def _populate_contract_workbook(
         parts_sheet,
         [
             20, 11, 16, 26, 10, 12, 9, 10, 6, 20, 36, 9, 13, 9, 9, 18, 11,
-            12, 16, 8, 9, 11, 9,
+            12, 16, 8, 9, 11, 9, 12,
         ],
     )
 

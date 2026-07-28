@@ -14,7 +14,7 @@ from app.etl import loader, mapping
 from app.etl.transform import transform
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.system import SysImportBatch
-from app.services import maintenance_cost
+from app.services import maintenance_cost, maintenance_cost_quality
 from tests import factories as f
 
 
@@ -63,6 +63,7 @@ def test_direct_hit_weighted(db, batch):
     assert ln.trace_months == 0
     assert ln.linked_purchase_order_no == "CGDD-1"
     assert ln.cost_tax_basis == "ex"                   # is_tax_inclusive=None → ex
+    assert ln.cost_bucket == maintenance_cost_quality.COST_BUCKET_ACTUAL_EX
 
 
 def test_month_avg(db, batch):
@@ -113,6 +114,7 @@ def test_trace_avg_and_cap(db, batch):
     c = _line(db, "ML1")
     assert (c.cost_source, c.trace_months, c.price_month) == ("trace_avg", 2, "2026-01")
     assert c.unit_cost == Decimal("50.00")
+    assert c.cost_bucket == maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_LOW
     d = _line(db, "ML2")
     assert d.cost_source == "sales_ref"               # 采购超追溯上限 → 没有采购有销售
     assert d.unit_cost == Decimal("88.00")

@@ -360,6 +360,11 @@ FIELD_GROUPS = {
                       # 维保项目成本派生键（maintenance_cost 聚合 cost_total/inc/ex + 明细行
                       # unit_cost/cost_amount 已在上；成本来源/取价元信息同样可反推成本口径，一并登记）
                       "cost_total", "cost_inc", "cost_ex",
+                      "actual_cost_inc", "actual_cost_ex",
+                      "estimated_cost_inc", "estimated_cost_ex",
+                      "known_cost_total",
+                      "actual_lines", "estimated_lines", "missing_cost_lines",
+                      "cost_quality", "cost_tier", "by_source", "coverage_pct",
                       "cost_source", "cost_tax_basis", "price_month", "trace_months",
                       "linked_purchase_order_no",
                       # 老板看板（dashboard/pool）派生成本键：采购额、采购价统计容器、
@@ -394,7 +399,10 @@ FIELD_GROUPS = {
     # total_gross_profit = 订单拉通-销售侧一单一行毛利（键名带 total_ 前缀，与 gross_profit
     # 不同名，复审 P0：漏登记会绕过 data_profit 泄漏毛利）
     "profit_amount": ["gross_profit", "gross_profit_moving", "gross_profit_fifo",
-                      "total_gross_profit"],
+                      "total_gross_profit",
+                      # 维保预算消耗参考决策；禁止登记通用 status（会误伤流程状态）
+                      "decision_status", "contract_amount",
+                      "budget", "remaining", "remaining_pct"],
     # 毛利率：见反推警告（_profit_summary 与 profit.aggregate 的两法派生键一并登记）
     "profit_rate":   ["gross_margin", "avg_margin", "margin_band",
                       "avg_margin_moving", "avg_margin_fifo",

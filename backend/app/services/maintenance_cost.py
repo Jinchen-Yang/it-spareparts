@@ -28,6 +28,7 @@ from app.business_time import business_today
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
+from app.services import maintenance_cost_quality
 from app.services.maintenance_match_keys import exact_match_key
 from app.services.query_filters import active_orders, col_matches_any, keyword_groups_or_substr
 
@@ -381,18 +382,40 @@ def projects_aggregate(db: Session, date_from: date | None = None,
     as_of = as_of or business_today()
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     proj = func.coalesce(mo.project_std, "(未填项目)")
+    bucket = ml.cost_bucket
+    missing_bucket = maintenance_cost_quality.COST_BUCKET_MISSING
+    estimated_inc = bucket.between(
+        maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_LOW,
+        maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_OTHER,
+    )
+    estimated_ex = bucket.between(
+        maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_LOW,
+        maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_OTHER,
+    )
     src_cols = [
-        func.count().filter(ml.cost_source == s).label(f"src_{s}")
-        for s in (*COSTED_SOURCES, "none")
+        func.count().filter(
+            bucket != missing_bucket,
+            ml.cost_source == source,
+        ).label(f"src_{source}")
+        for source in COSTED_SOURCES
     ]
     stmt = (
         select(
             proj.label("project"),
             func.count().label("lines"),
             func.coalesce(func.sum(ml.qty), 0).label("qty"),
-            func.coalesce(func.sum(ml.cost_amount).filter(ml.cost_tax_basis == "inc"), 0).label("cost_inc"),
-            func.coalesce(func.sum(ml.cost_amount).filter(ml.cost_tax_basis == "ex"), 0).label("cost_ex"),
-            func.count().filter(ml.cost_source.in_(COSTED_SOURCES)).label("costed"),
+            func.coalesce(func.sum(ml.cost_amount).filter(
+                bucket == maintenance_cost_quality.COST_BUCKET_ACTUAL_INC,
+            ), 0).label("actual_cost_inc"),
+            func.coalesce(func.sum(ml.cost_amount).filter(
+                bucket == maintenance_cost_quality.COST_BUCKET_ACTUAL_EX,
+            ), 0).label("actual_cost_ex"),
+            func.coalesce(func.sum(ml.cost_amount).filter(
+                estimated_inc,
+            ), 0).label("estimated_cost_inc"),
+            func.coalesce(func.sum(ml.cost_amount).filter(
+                estimated_ex,
+            ), 0).label("estimated_cost_ex"),
             func.count(func.distinct(func.date_trunc("month", mo.order_date))).label("months"),
             func.count().filter(mo.maint_end.is_(None)).label("maint_end_missing"),
             func.max(mo.maint_end).label("latest_maint_end"),
@@ -446,17 +469,45 @@ def projects_aggregate(db: Session, date_from: date | None = None,
     rows = []
     for r, lifecycle_status in raw:
         sales_orders = sorted(r.sales_orders or [])
-        by_source = {s: getattr(r, f"src_{s}") for s in (*COSTED_SOURCES, "none")}
+        by_source = {s: getattr(r, f"src_{s}") for s in COSTED_SOURCES}
+        actual_lines = sum(
+            by_source[source]
+            for source in maintenance_cost_quality.ACTUAL_SOURCES
+        )
+        estimated_lines = sum(
+            by_source[source]
+            for source in maintenance_cost_quality.ESTIMATED_SOURCES
+        )
+        missing_cost_lines = r.lines - actual_lines - estimated_lines
+        by_source["none"] = missing_cost_lines
         missing = [o for o in sales_orders if o not in contract]
         contract_amt = sum((contract.get(o) or _ZERO) for o in sales_orders)
-        cost_inc = Decimal(r.cost_inc).quantize(_CENT)
-        cost_ex = Decimal(r.cost_ex).quantize(_CENT)
+        cost_summary = maintenance_cost_quality.summarize_aggregate(
+            lines=r.lines,
+            actual_cost_inc=r.actual_cost_inc,
+            actual_cost_ex=r.actual_cost_ex,
+            estimated_cost_inc=r.estimated_cost_inc,
+            estimated_cost_ex=r.estimated_cost_ex,
+            actual_lines=actual_lines,
+            estimated_lines=estimated_lines,
+            missing_cost_lines=missing_cost_lines,
+        )
+        cost_inc = (
+            cost_summary["actual_cost_inc"] + cost_summary["estimated_cost_inc"]
+        ).quantize(_CENT)
+        cost_ex = (
+            cost_summary["actual_cost_ex"] + cost_summary["estimated_cost_ex"]
+        ).quantize(_CENT)
         rows.append({
             "project": r.project,
             "lines": r.lines, "qty": _f(r.qty),
             "cost_inc": _f(cost_inc), "cost_ex": _f(cost_ex),
-            "cost_total": _f((cost_inc + cost_ex).quantize(_CENT)),
-            "coverage_pct": round(r.costed / r.lines * 100, 1) if r.lines else None,
+            "cost_total": _f(cost_summary["known_cost_total"]),
+            **{key: _f(value) if isinstance(value, Decimal) else value
+               for key, value in cost_summary.items()},
+            "coverage_pct": round(
+                (actual_lines + estimated_lines) / r.lines * 100, 1,
+            ) if r.lines else None,
             "by_source": by_source,
             "months": r.months,
             "sales_orders": sales_orders,
@@ -471,6 +522,10 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             "lifecycle_status": lifecycle_status,
         })
     cost_restricted = security.is_field_hidden(user_ctx, "cost_total")
+    budget_restricted = security.is_field_hidden(user_ctx, "contract_amount")
+    if budget_restricted:
+        for row in rows:
+            row["contract_amount"] = None
     if cost_restricted:
         # 叶子金额置 null 还不够：按隐藏 cost_total 排序本身会泄漏相对成本，Agent
         # 再截前 N 条时泄漏更严重。无成本权限统一退回项目名稳定序。
@@ -487,10 +542,12 @@ def projects_aggregate(db: Session, date_from: date | None = None,
     }
 
 
-def project_lines(db: Session, project: str, month: str | None = None,
-                  date_from: date | None = None, date_to: date | None = None,
-                  page: int = 1, page_size: int = 50) -> dict:
-    """单项目 SKU 级明细（分页）：含成本来源/税口径/追溯月/关联采购单，逐行可解释。"""
+def _project_lines_query(
+    project: str,
+    month: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+):
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     base = select(ml, mo).join(mo, ml.order_id == mo.id)
     base = base.where(mo.project_std == project if project != "(未填项目)"
@@ -498,25 +555,105 @@ def project_lines(db: Session, project: str, month: str | None = None,
     base = _scoped_filters(base, date_from, date_to)
     if month:
         base = base.where(func.to_char(mo.order_date, "YYYY-MM") == month)
+    return base
 
+
+def project_line_count(
+    db: Session,
+    project: str,
+    month: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> int:
+    """返回与项目明细/CSV 完全同作用域的行数，供资源预检。"""
+    base = _project_lines_query(project, month, date_from, date_to)
+    return db.scalar(select(func.count()).select_from(base.subquery())) or 0
+
+
+def _serialize_project_line(
+    ln: FMaintenanceLine,
+    order: FMaintenanceOrder,
+    *,
+    hide_cost_signals: bool,
+) -> dict:
+    cost_tier = maintenance_cost_quality.source_tier(
+        ln.cost_source,
+        ln.cost_tax_basis,
+        ln.cost_amount,
+    )
+    has_known_cost = cost_tier != "missing"
+    flags = ln.anomaly_flags or []
+    if hide_cost_signals:
+        flags = [flag for flag in flags if flag not in {"no_cost", "cost_overflow"}]
+    return {
+        "order_no": order.order_no,
+        "order_date": order.order_date.isoformat() if order.order_date else None,
+        "demand_type": order.demand_type,
+        "business_type": order.business_type,
+        "warehouse": order.warehouse,
+        "pn_std": ln.pn_std,
+        "description": ln.description,
+        "qty": _f(ln.qty),
+        "return_qty": _f(ln.return_qty),
+        "unit_cost": _f(ln.unit_cost) if has_known_cost else None,
+        "cost_amount": _f(ln.cost_amount) if has_known_cost else None,
+        "cost_tier": cost_tier,
+        "cost_source": ln.cost_source,
+        "cost_tax_basis": ln.cost_tax_basis,
+        "price_month": ln.price_month,
+        "trace_months": ln.trace_months,
+        "linked_purchase_order_no": ln.linked_purchase_order_no,
+        "price_distance_days": ln.price_distance_days,
+        "confidence": ln.confidence,
+        "anomaly_flags": flags,
+    }
+
+
+def iter_project_lines(
+    db: Session,
+    project: str,
+    month: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    user_ctx: security.UserContext | None = None,
+    yield_per: int = 1000,
+):
+    """流式遍历项目明细；与分页 API 共用查询和序列化真相源。"""
+    ml, mo = FMaintenanceLine, FMaintenanceOrder
+    statement = _project_lines_query(project, month, date_from, date_to).order_by(
+        mo.order_date.desc().nullslast(), ml.id.desc(),
+    ).execution_options(stream_results=True, yield_per=yield_per)
+    hide_cost_signals = security.is_field_hidden(user_ctx, "cost_total")
+    result = db.execute(statement)
+    try:
+        for ln, order in result:
+            yield _serialize_project_line(
+                ln,
+                order,
+                hide_cost_signals=hide_cost_signals,
+            )
+    finally:
+        result.close()
+
+
+def project_lines(db: Session, project: str, month: str | None = None,
+                  date_from: date | None = None, date_to: date | None = None,
+                  page: int = 1, page_size: int = 50,
+                  user_ctx: security.UserContext | None = None) -> dict:
+    """单项目 SKU 级明细（分页）：含成本来源/税口径/追溯月/关联采购单，逐行可解释。"""
+    ml, mo = FMaintenanceLine, FMaintenanceOrder
+    base = _project_lines_query(project, month, date_from, date_to)
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     page = max(page, 1)
     paged = base.order_by(
-        mo.order_date.desc().nullslast(), ml.id.desc()
+        mo.order_date.desc().nullslast(), ml.id.desc(),
     ).offset((page - 1) * page_size).limit(page_size)
-    return {"total": total, "page": page, "page_size": page_size, "rows": [{
-        "order_no": o.order_no, "order_date": o.order_date.isoformat() if o.order_date else None,
-        "demand_type": o.demand_type, "business_type": o.business_type,
-        "warehouse": o.warehouse,
-        "pn_std": ln.pn_std, "description": ln.description,
-        "qty": _f(ln.qty), "return_qty": _f(ln.return_qty),
-        "unit_cost": _f(ln.unit_cost), "cost_amount": _f(ln.cost_amount),
-        "cost_source": ln.cost_source, "cost_tax_basis": ln.cost_tax_basis,
-        "price_month": ln.price_month, "trace_months": ln.trace_months,
-        "linked_purchase_order_no": ln.linked_purchase_order_no,
-        "price_distance_days": ln.price_distance_days, "confidence": ln.confidence,
-        "anomaly_flags": ln.anomaly_flags or [],
-    } for ln, o in db.execute(paged).all()]}
+    hide_cost_signals = security.is_field_hidden(user_ctx, "cost_total")
+    rows = [
+        _serialize_project_line(ln, order, hide_cost_signals=hide_cost_signals)
+        for ln, order in db.execute(paged)
+    ]
+    return {"total": total, "page": page, "page_size": page_size, "rows": rows}
 
 
 # ============================================================
@@ -562,23 +699,59 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
           lifecycle: str = "all",
           as_of: date | None = None,
           q_text: str | None = None) -> dict:
-    """盈亏看板（用户口径：绿=赚钱、黄=剩余≤20% 报警、红=超支/亏损；合同级聚合天然解决共用合同）。
+    """合同级预算消耗参考看板。
 
-    预算 = 合同(XSDD)金额（含税参考口径，前端注明）；已花 = 备件成本(混合口径参考) + 生效报销费用。
-    无合同额（未关联 XSDD / 销售表查无金额）→ status='no_budget' 单列，只看成本。
+    预算 = 合同(XSDD)金额（含税参考）；已知支出 = 已知备件成本(混合原值参考)
+    + 生效报销费用。任一成本行缺失时优先返回 ``incomplete_cost``，不计算余额或
+    红黄绿；完整且无正预算才返回 ``no_budget``。
     """
     lifecycle = _normalize_lifecycle(lifecycle)
     as_of = as_of or business_today()
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     contract_col = func.coalesce(mo.linked_sales_order_no, "")
     proj = func.coalesce(mo.project_std, "(未填项目)")
+    bucket = ml.cost_bucket
+    actual_bucket = bucket.between(
+        maintenance_cost_quality.COST_BUCKET_ACTUAL_INC,
+        maintenance_cost_quality.COST_BUCKET_ACTUAL_EX,
+    )
+    estimated_bucket = bucket.between(
+        maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_LOW,
+        maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_OTHER,
+    )
+    estimated_inc = bucket.between(
+        maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_LOW,
+        maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_OTHER,
+    )
+    estimated_ex = bucket.between(
+        maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_LOW,
+        maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_OTHER,
+    )
+    estimated_low = or_(
+        bucket == maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_LOW,
+        bucket == maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_LOW,
+    )
     stmt = (
         select(
             contract_col.label("contract"), proj.label("project"),
             func.count().label("lines"),
-            func.count().filter(ml.cost_source.in_(COSTED_SOURCES)).label("costed"),
-            func.coalesce(func.sum(ml.cost_amount), 0).label("spent_parts"),
-            func.coalesce(func.sum(ml.cost_amount).filter(ml.confidence == "low"), 0).label("low_conf"),
+            func.coalesce(func.sum(ml.cost_amount).filter(
+                bucket == maintenance_cost_quality.COST_BUCKET_ACTUAL_INC,
+            ), 0).label("actual_cost_inc"),
+            func.coalesce(func.sum(ml.cost_amount).filter(
+                bucket == maintenance_cost_quality.COST_BUCKET_ACTUAL_EX,
+            ), 0).label("actual_cost_ex"),
+            func.coalesce(func.sum(ml.cost_amount).filter(
+                estimated_inc,
+            ), 0).label("estimated_cost_inc"),
+            func.coalesce(func.sum(ml.cost_amount).filter(
+                estimated_ex,
+            ), 0).label("estimated_cost_ex"),
+            func.count().filter(actual_bucket).label("actual_lines"),
+            func.count().filter(estimated_bucket).label("estimated_lines"),
+            func.coalesce(func.sum(ml.cost_amount).filter(
+                estimated_low,
+            ), 0).label("low_conf"),
             func.min(mo.maint_start).label("mstart"), func.max(mo.maint_end).label("mend"),
             func.count().filter(mo.maint_end.is_(None)).label("mend_missing"),
             func.min(mo.order_date).label("first_out"), func.max(mo.order_date).label("last_out"),
@@ -603,18 +776,53 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
     raw = db.execute(stmt).all()
 
     groups: dict[str, dict] = {}
+    cost_restricted = security.is_field_hidden(user_ctx, "cost_total")
+    profit_restricted = security.is_field_hidden(user_ctx, "gross_profit")
     for r in raw:
-        g = groups.setdefault(r.contract, {
-            "projects": [], "lines": 0, "costed": 0,
-            "spent_parts": _ZERO, "low_conf": _ZERO,
-            "mstart": None, "mend": None, "mend_missing": 0,
-            "first_out": None, "last_out": None,
+        missing_cost_lines = r.lines - r.actual_lines - r.estimated_lines
+        project_summary = maintenance_cost_quality.summarize_aggregate(
+            lines=r.lines,
+            actual_cost_inc=r.actual_cost_inc,
+            actual_cost_ex=r.actual_cost_ex,
+            estimated_cost_inc=r.estimated_cost_inc,
+            estimated_cost_ex=r.estimated_cost_ex,
+            actual_lines=r.actual_lines,
+            estimated_lines=r.estimated_lines,
+            missing_cost_lines=missing_cost_lines,
+        )
+        g = groups.get(r.contract)
+        if g is None:
+            g = {
+                "projects": [], "lines": 0,
+                "actual_cost_inc": _ZERO, "actual_cost_ex": _ZERO,
+                "estimated_cost_inc": _ZERO, "estimated_cost_ex": _ZERO,
+                "actual_lines": 0, "estimated_lines": 0, "missing_cost_lines": 0,
+                "low_conf": _ZERO,
+                "mstart": None, "mend": None, "mend_missing": 0,
+                "first_out": None, "last_out": None,
+                # 单项目合同直接复用项目摘要；出现第二个项目时再走合同级合并。
+                "single_project_summary": project_summary,
+            }
+            groups[r.contract] = g
+        else:
+            g["single_project_summary"] = None
+        g["projects"].append({
+            "project": r.project,
+            "lines": r.lines,
+            "spent_parts": _f(project_summary["known_cost_total"]),
+            **{
+                key: _f(value) if isinstance(value, Decimal) else value
+                for key, value in project_summary.items()
+            },
         })
-        g["projects"].append({"project": r.project, "lines": r.lines,
-                              "spent_parts": _f(Decimal(r.spent_parts).quantize(_CENT))})
         g["lines"] += r.lines
-        g["costed"] += r.costed
-        g["spent_parts"] += Decimal(r.spent_parts)
+        for key in (
+            "actual_cost_inc", "actual_cost_ex",
+            "estimated_cost_inc", "estimated_cost_ex",
+        ):
+            g[key] += project_summary[key]
+        for key in ("actual_lines", "estimated_lines", "missing_cost_lines"):
+            g[key] += project_summary[key]
         g["low_conf"] += Decimal(r.low_conf)
         g["mend_missing"] += r.mend_missing
         for k, v in (("mstart", r.mstart), ("mend", r.mend)):
@@ -630,34 +838,53 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
 
     rows = []
     for cno, g in groups.items():
-        spent_parts = g["spent_parts"].quantize(_CENT)
+        cost_summary = g["single_project_summary"]
+        if cost_summary is None:
+            cost_summary = maintenance_cost_quality.summarize_aggregate(
+                lines=g["lines"],
+                actual_cost_inc=g["actual_cost_inc"],
+                actual_cost_ex=g["actual_cost_ex"],
+                estimated_cost_inc=g["estimated_cost_inc"],
+                estimated_cost_ex=g["estimated_cost_ex"],
+                actual_lines=g["actual_lines"],
+                estimated_lines=g["estimated_lines"],
+                missing_cost_lines=g["missing_cost_lines"],
+            )
+        spent_parts = cost_summary["known_cost_total"]
         expense = (expenses.get(cno) or _ZERO).quantize(_CENT)
-        spent = (spent_parts + expense).quantize(_CENT)
         budget = contracts.get(cno) if cno else None
-        if budget:
-            remaining = (budget - spent).quantize(_CENT)
-            if spent >= budget:
-                st = "red"
-            elif remaining <= budget * warn:
-                st = "yellow"
+        decision = maintenance_cost_quality.budget_decision(
+            cost_summary,
+            budget=budget,
+            expense_total=expense,
+            warn_pct=warn,
+        )
+        st = decision["decision_status"]
+        remaining = decision["remaining"]
+        remaining_pct = decision["remaining_pct"]
+        spent = decision["known_spend_total"]
+        if len(g["projects"]) > 1:
+            if cost_restricted:
+                g["projects"].sort(key=lambda p: (p["project"] or "").casefold())
             else:
-                st = "green"
-            remaining_pct = float((remaining / budget * 100).quantize(_CENT))
-        else:
-            st, remaining, remaining_pct = "no_budget", None, None
-        cost_restricted = security.is_field_hidden(user_ctx, "cost_total")
-        if cost_restricted:
-            g["projects"].sort(key=lambda p: (p["project"] or "").casefold())
-        else:
-            g["projects"].sort(key=lambda p: -(p["spent_parts"] or 0))
+                g["projects"].sort(key=lambda p: -(p["spent_parts"] or 0))
         lifecycle_status = _lifecycle_status(g["mend_missing"], g["mend"], as_of)
         rows.append({
-            "contract": cno or None, "status": st,
+            "contract": cno or None,
+            "decision_status": st,
+            "status": st,  # 兼容一版：与 decision_status 同一计算结果
             "projects": g["projects"],
             "lines": g["lines"],
-            "coverage_pct": round(g["costed"] / g["lines"] * 100, 1) if g["lines"] else None,
+            **{
+                key: _f(value) if isinstance(value, Decimal) else value
+                for key, value in cost_summary.items()
+            },
+            "coverage_pct": round(
+                (g["actual_lines"] + g["estimated_lines"]) / g["lines"] * 100, 1,
+            ) if g["lines"] else None,
             "spent_parts": _f(spent_parts), "spent_expense": _f(expense), "spent": _f(spent),
-            "budget": _f(budget), "remaining": _f(remaining), "remaining_pct": remaining_pct,
+            "budget": _f(budget), "remaining": _f(remaining),
+            "remaining_pct": _f(remaining_pct),
             # 低置信成本占比高 → 卡片提示"估算成分高"
             "low_conf_pct": round(float(g["low_conf"] / spent_parts * 100), 1) if spent_parts else 0.0,
             "maint_start": g["mstart"].isoformat() if g["mstart"] else None,
@@ -669,9 +896,9 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             "first_out": g["first_out"].isoformat() if g["first_out"] else None,
             "last_out": g["last_out"].isoformat() if g["last_out"] else None,
         })
-    order = {"red": 0, "yellow": 1, "green": 2, "no_budget": 3}
-    profit_restricted = security.is_field_hidden(user_ctx, "gross_profit")
-    if profit_restricted:
+    order = {"incomplete_cost": 0, "red": 1, "yellow": 2, "green": 3, "no_budget": 4}
+    decision_restricted = profit_restricted or cost_restricted
+    if decision_restricted:
         # status 与 status_counts 本身就是盈亏结论；即使金额随后被 mask，红黄绿归属、
         # 状态筛选及排序仍会泄漏。受限用户忽略 status 请求，移除分类结构并按最近出库
         # 日期稳定排序。Agent 与 API 共用本函数，不得各自遗漏。
@@ -684,16 +911,27 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
         if lifecycle != "all":
             rows = [row for row in rows if row["lifecycle_status"] == lifecycle]
         rows.sort(
-            key=lambda r: (r["last_out"] is not None, r["last_out"] or "", r["contract"] or ""),
+            key=lambda r: (
+                r["last_out"] is not None,
+                r["last_out"] or "",
+                r["contract"] or "",
+            ),
             reverse=True,
         )
+        effective_sort = "last_out"
         for row in rows:
             row.pop("status", None)
+            row.pop("decision_status", None)
+            if profit_restricted:
+                row["budget"] = None
+                row["remaining"] = None
+                row["remaining_pct"] = None
         return {
             "rows": rows,
-            "profit_restricted": True,
+            "profit_restricted": profit_restricted,
+            "decision_restricted": True,
             "ranking_restricted": True,
-            "effective_sort": "last_out",
+            "effective_sort": effective_sort,
             "status_filter_applied": False,
             "warn_pct": float(warn),
             "start_date": config.MAINT_COST_START_DATE.isoformat(),
@@ -703,7 +941,7 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
         }
     rows.sort(key=lambda r: (order[r["status"]], -(r["spent"] or 0)))
     if status:
-        rows = [r for r in rows if r["status"] == status]
+        rows = [r for r in rows if r["decision_status"] == status]
     lifecycle_counts = {
         lifecycle_status: sum(
             1 for row in rows if row["lifecycle_status"] == lifecycle_status
@@ -712,9 +950,15 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
     }
     if lifecycle != "all":
         rows = [row for row in rows if row["lifecycle_status"] == lifecycle]
-    counts = {s: sum(1 for r in rows if r["status"] == s) for s in order}
-    return {"rows": rows, "status_counts": counts,
-            "profit_restricted": False, "ranking_restricted": False,
+    counts = {s: sum(1 for r in rows if r["decision_status"] == s) for s in order}
+    legacy_counts = {
+        status_name: counts[status_name]
+        for status_name in ("red", "yellow", "green", "no_budget")
+    }
+    return {"rows": rows, "status_counts": legacy_counts,
+            "decision_status_counts": counts,
+            "profit_restricted": False, "decision_restricted": False,
+            "ranking_restricted": False,
             "effective_sort": "status_then_spent", "status_filter_applied": bool(status),
             "warn_pct": float(warn), "start_date": config.MAINT_COST_START_DATE.isoformat(),
             "as_of": as_of.isoformat(), "lifecycle_filter": lifecycle,
@@ -732,11 +976,30 @@ def contract_workbook_data(db: Session, contract: str) -> dict:
     stmt = stmt.order_by(mo.order_date.asc().nullslast(), mo.order_no, ml.line_no.asc().nullslast(), ml.id)
     lines = db.execute(stmt).all()
 
-    # 单据级总成本（财务习惯：产品成本恒填在每张 WBDD 首行 = Σ行成本）
+    # 单据级已知成本参考；脏历史行同样走统一 fail-closed 分类，未知来源金额不纳入。
     doc_total: dict[str, Decimal] = defaultdict(lambda: _ZERO)
+    doc_records: dict[str, list] = defaultdict(list)
     for ln, o in lines:
-        if ln.cost_amount is not None:
+        record = (ln.cost_source, ln.cost_tax_basis, ln.cost_amount)
+        doc_records[o.order_no].append(record)
+        if maintenance_cost_quality.source_tier(*record) != "missing":
             doc_total[o.order_no] += ln.cost_amount
+    doc_cost_summary = {
+        order_no: maintenance_cost_quality.summarize_records(records)
+        for order_no, records in doc_records.items()
+    }
+    line_cost_tiers = {
+        ln.id: maintenance_cost_quality.source_tier(
+            ln.cost_source,
+            ln.cost_tax_basis,
+            ln.cost_amount,
+        )
+        for ln, _order in lines
+    }
+    cost_summary = maintenance_cost_quality.summarize_records(
+        (ln.cost_source, ln.cost_tax_basis, ln.cost_amount)
+        for ln, _order in lines
+    )
 
     pe = FProjectExpense
     exp_rows = db.execute(
@@ -744,19 +1007,59 @@ def contract_workbook_data(db: Session, contract: str) -> dict:
         .order_by(pe.expense_date.asc().nullslast(), pe.bxd_no, pe.line_no, pe.id)
     ).scalars().all()
 
-    # 月度 × 分类汇总：备件成本按出库月，费用按报销月/费用分类（仅生效）
-    monthly: dict[str, dict] = defaultdict(lambda: defaultdict(lambda: _ZERO))
+    # 月度汇总分命名空间保存，避免费用分类与内置的备件成本列同名时互相覆盖。
+    monthly_parts: dict[str, Decimal] = defaultdict(lambda: _ZERO)
+    monthly_expenses: dict[str, dict[str, Decimal]] = defaultdict(
+        lambda: defaultdict(lambda: _ZERO),
+    )
+    monthly_missing: dict[str, int] = defaultdict(int)
     for ln, o in lines:
-        if ln.cost_amount is not None and o.order_date:
-            monthly[_ym(o.order_date)]["备件消耗"] += ln.cost_amount
+        if not o.order_date:
+            continue
+        tier = maintenance_cost_quality.source_tier(
+            ln.cost_source,
+            ln.cost_tax_basis,
+            ln.cost_amount,
+        )
+        if tier == "missing":
+            monthly_missing[_ym(o.order_date)] += 1
+        else:
+            monthly_parts[_ym(o.order_date)] += ln.cost_amount
     for e in exp_rows:
         if (e.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
                 and e.amount is not None and e.expense_date):
-            monthly[_ym(e.expense_date)][e.fee_category or "(未分类费用)"] += e.amount
+            monthly_expenses[_ym(e.expense_date)][
+                e.fee_category or "(未分类费用)"
+            ] += e.amount
 
     budget = _contract_amounts(db, [contract]).get(contract)
+    expense_total = sum(
+        (
+            expense.amount
+            for expense in exp_rows
+            if expense.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
+            and expense.amount is not None
+        ),
+        _ZERO,
+    )
+    decision = maintenance_cost_quality.budget_decision(
+        cost_summary,
+        budget=budget,
+        expense_total=expense_total,
+        warn_pct=Decimal(str(config.MAINT_BUDGET_WARN_PCT)),
+    )
     so = db.execute(active_orders(
         select(FSalesOrder).where(FSalesOrder.order_no == contract), FSalesOrder)
     ).scalars().first()
     return {"contract": contract, "budget": budget, "sales_order": so,
-            "lines": lines, "doc_total": doc_total, "expenses": exp_rows, "monthly": monthly}
+            "lines": lines, "doc_total": doc_total,
+            "doc_cost_summary": doc_cost_summary,
+            "line_cost_tiers": line_cost_tiers,
+            "cost_summary": cost_summary, "decision": decision,
+            "expenses": exp_rows, "expense_total": expense_total,
+            "monthly_parts": dict(monthly_parts),
+            "monthly_expenses": {
+                year_month: dict(categories)
+                for year_month, categories in monthly_expenses.items()
+            },
+            "monthly_missing": dict(monthly_missing)}

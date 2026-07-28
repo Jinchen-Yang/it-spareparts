@@ -1,39 +1,34 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.17.0 release notes", () => {
-  it("publishes the complete import-safety and maintenance-export release summary", () => {
-    expect(APP_VERSION).toBe("1.17.0");
+describe("v1.18.0 release notes", () => {
+  it("publishes the maintenance cost quality decision-gate summary", () => {
+    expect(APP_VERSION).toBe("1.18.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-07-27");
+    expect(LATEST.date).toBe("2026-07-28");
 
     const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/导入预检/);
-    expect(notes).toMatch(/完整.*问题明细/);
-    expect(notes).toMatch(/重复文件.*归档安全/);
-    expect(notes).toMatch(/维保订单.*时间.*XLSX/);
-    expect(notes).toMatch(/批量.*项目工作簿.*ZIP/);
+    expect(notes).toMatch(/实际采购参考.*估算参考.*成本缺失/);
+    expect(notes).toMatch(/含税\/不含税.*不跨税口径相加/);
+    expect(notes).toMatch(/任一.*缺失.*停止计算预算余额.*红黄绿/);
+    expect(notes).toMatch(/不定义正式项目毛利/);
   });
 
-  it("states the hard per-batch file limit without silent truncation or splitting", () => {
+  it("states that every maintenance consumer uses the same cost truth", () => {
     const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/单批最多 20 个文件/);
-    expect(notes).toMatch(/21 个及以上.*整批拒绝/);
-    expect(notes).toMatch(/不截断.*不拆批/);
+    expect(notes).toMatch(/逐行 API/);
+    expect(notes).toMatch(/项目与明细 CSV/);
+    expect(notes).toMatch(/订单汇总 Excel/);
+    expect(notes).toMatch(/单本及批量四 Sheet 项目工作簿/);
+    expect(notes).toMatch(/Agent.*前端页面.*同一成本事实层级/);
   });
 
-  it("distinguishes exact duplicate handling between skip and upsert modes", () => {
+  it("documents both cost-blind and profit-blind permission boundaries", () => {
     const notes = LATEST.items.join("\n");
+    expect(notes).toMatch(/无成本权限.*金额.*层级.*来源统计.*异常标记.*脱敏/);
     expect(notes).toMatch(
-      /skip 模式.*成功批次.*SHA-256.*完全相同.*建作业前拦截/,
+      /无利润权限.*合同额.*预算.*余量.*决策状态.*状态计数.*筛选.*排序.*隐藏/,
     );
-    expect(notes).toMatch(/upsert 模式.*只提示.*允许重处理/);
-  });
-
-  it("explains that ZIP dates select contracts without truncating their workbooks", () => {
-    const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/ZIP.*时间范围只用于选中合同/);
-    expect(notes).toMatch(/每本.*完整四个 Sheet 工作簿/);
   });
 });

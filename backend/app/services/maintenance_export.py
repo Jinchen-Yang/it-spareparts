@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app import config
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.security import UserContext, apply_field_visibility, is_field_hidden
+from app.services import maintenance_cost_quality
 
 
 ORDER_HEADERS = (
@@ -21,7 +22,7 @@ ORDER_HEADERS = (
 LINE_HEADERS = (
     "数据库ID", "原始明细ID", "订单数据库ID", "原始订单ID", "维保单号", "制单日期", "行号",
     "PN", "原始PN", "产品描述", "需求数量", "退货数量", "发货SN", "单价", "金额",
-    "成本来源", "含税口径", "取价月", "追溯月数", "关联采购单", "距采购天数", "置信度",
+    "成本事实层级", "成本来源", "含税口径", "取价月", "追溯月数", "关联采购单", "距采购天数", "置信度",
     "异常标记",
 )
 _INVALID_XML_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
@@ -147,9 +148,16 @@ def build_workbook(
                 line_count += 1
                 if line_count > MAX_DATA_ROWS_PER_SHEET:
                     raise ExcelRowLimitExceeded("订单明细超过 Excel 单 Sheet 数据行上限 1048575")
+                cost_tier = maintenance_cost_quality.source_tier(
+                    line.cost_source,
+                    line.cost_tax_basis,
+                    line.cost_amount,
+                )
+                has_known_cost = cost_tier != "missing"
                 cost = apply_field_visibility({
-                    "unit_cost": line.unit_cost,
-                    "cost_amount": line.cost_amount,
+                    "unit_cost": line.unit_cost if has_known_cost else None,
+                    "cost_amount": line.cost_amount if has_known_cost else None,
+                    "cost_tier": cost_tier,
                     "cost_source": line.cost_source,
                     "cost_tax_basis": line.cost_tax_basis,
                     "price_month": line.price_month,
@@ -165,6 +173,8 @@ def build_workbook(
                     line.id, line.raw_line_id, order.id, order.raw_order_id, order.order_no,
                     order.order_date, line.line_no, line.pn_std, line.pn_raw, line.description,
                     line.qty, line.return_qty, line.serial_numbers, cost["unit_cost"], cost["cost_amount"],
+                    {"actual": "实际采购参考", "estimated": "估算参考", "missing": "成本缺失"}
+                    .get(cost["cost_tier"], cost["cost_tier"]),
                     cost["cost_source"], cost["cost_tax_basis"], cost["price_month"], cost["trace_months"],
                     cost["linked_purchase_order_no"], cost["price_distance_days"], cost["confidence"],
                     "、".join(anomaly_flags),

@@ -188,7 +188,7 @@ def test_empty_export_is_valid_two_sheet_xlsx_with_headers(db):
     assert list(workbook["订单明细"].values) == [
         ("数据库ID", "原始明细ID", "订单数据库ID", "原始订单ID", "维保单号", "制单日期", "行号",
          "PN", "原始PN", "产品描述", "需求数量", "退货数量", "发货SN", "单价", "金额",
-         "成本来源", "含税口径", "取价月", "追溯月数", "关联采购单", "距采购天数", "置信度",
+         "成本事实层级", "成本来源", "含税口径", "取价月", "追溯月数", "关联采购单", "距采购天数", "置信度",
          "异常标记"),
     ]
 
@@ -419,9 +419,29 @@ def test_cost_blind_user_exports_facts_with_all_cost_metadata_blank(db):
     row = dict(zip(values[0], values[1]))
     assert row["维保单号"] == "WBDD-COSTED"
     assert [row[key] for key in (
-        "单价", "金额", "成本来源", "含税口径", "取价月", "追溯月数", "关联采购单",
+        "单价", "金额", "成本事实层级", "成本来源", "含税口径", "取价月", "追溯月数", "关联采购单",
         "距采购天数", "置信度",
-    )] == [None] * 9
+    )] == [None] * 10
+
+
+def test_order_workbook_fail_closes_invalid_cost_amount_and_marks_missing_tier(db):
+    _seed_orders(db, [("INVALID-COST", date(2026, 7, 15), "已生效", None, 1)])
+    line = db.execute(select(FMaintenanceLine)).scalar_one()
+    line.unit_cost = Decimal("999.00")
+    line.cost_amount = Decimal("999.00")
+    line.cost_source = "future_source"
+    line.cost_tax_basis = "inc"
+    db.commit()
+
+    response = _admin_client(db).get("/api/maintenance/orders/export")
+
+    assert response.status_code == 200, response.text
+    values = list(_workbook(response)["订单明细"].values)
+    row = dict(zip(values[0], values[1]))
+    assert row["单价"] is None
+    assert row["金额"] is None
+    assert row["成本事实层级"] == "成本缺失"
+    assert row["成本来源"] == "future_source"
 
 
 def test_cost_blind_user_exports_data_quality_flags_without_cost_conclusions(db):
