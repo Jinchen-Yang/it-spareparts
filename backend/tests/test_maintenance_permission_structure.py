@@ -1,9 +1,11 @@
 """维保页结构性权限：隐藏金额之外，分类、排序、筛选与 Agent 截断也不能泄漏。"""
+import io
 from datetime import date
 from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 from sqlalchemy import select
 
 from app import permissions, security
@@ -262,6 +264,116 @@ def test_default_purchaser_template_keeps_cost_facts_but_hides_budget_decisions(
     assert all(row["known_cost_total"] is not None for row in agent_board["rows"])
     assert all(row["budget"] is None for row in agent_board["rows"])
     assert all("decision_status" not in row for row in agent_board["rows"])
+
+
+def test_boss_sees_same_incomplete_cost_gate_across_api_agent_and_workbook(
+    db,
+    maintenance_permission_data,
+):
+    boss_permissions = permissions.effective("boss", None)
+    assert boss_permissions["page_maintenance"] is True
+    assert boss_permissions["data_purchase_cost"] is True
+    assert boss_permissions["data_profit"] is True
+
+    missing_line = db.execute(
+        select(FMaintenanceLine).where(FMaintenanceLine.raw_line_id == "ML-A"),
+    ).scalar_one()
+    missing_line.cost_source = "none"
+    missing_line.cost_tax_basis = None
+    missing_line.unit_cost = None
+    missing_line.cost_amount = None
+    db.add(SysUser(
+        username="maintenance-boss",
+        role="boss",
+        display_name="维保老板",
+        password_hash=hash_password("pw123456"),
+        is_active=True,
+        template_code="boss",
+        template_version=1,
+        template_perms=boss_permissions,
+        perm_overrides={},
+        permissions=boss_permissions,
+    ))
+    db.commit()
+
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "maintenance-boss", "password": "pw123456"},
+    )
+    assert login.status_code == 200, login.text
+    client.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+
+    projects_response = client.get(
+        "/api/maintenance/projects",
+        params={"lifecycle": "all"},
+    )
+    assert projects_response.status_code == 200, projects_response.text
+    project = next(
+        row
+        for row in projects_response.json()["rows"]
+        if row["project"] == "A-low"
+    )
+    assert project["actual_lines"] == 0
+    assert project["estimated_lines"] == 0
+    assert project["missing_cost_lines"] == 1
+    assert project["known_cost_total"] == 0.0
+    assert project["cost_quality"] == "incomplete"
+    assert project["contract_amount"] is not None
+
+    board_response = client.get(
+        "/api/maintenance/board",
+        params={"status": "incomplete_cost", "lifecycle": "all"},
+    )
+    assert board_response.status_code == 200, board_response.text
+    board = board_response.json()
+    assert board["status_filter_applied"] is True
+    assert board["decision_status_counts"]["incomplete_cost"] == 1
+    assert [row["contract"] for row in board["rows"]] == ["XS-A"]
+    boss_row = board["rows"][0]
+    assert boss_row["decision_status"] == boss_row["status"] == "incomplete_cost"
+    assert boss_row["cost_quality"] == "incomplete"
+    assert boss_row["missing_cost_lines"] == 1
+    assert boss_row["remaining"] is None
+    assert boss_row["remaining_pct"] is None
+
+    boss_ctx = security.UserContext(
+        user_id="maintenance-boss",
+        role="boss",
+        permissions=boss_permissions,
+        is_authenticated=True,
+    )
+    agent_board = tools.dispatch(
+        db,
+        "get_maintenance_board",
+        {"status": "incomplete_cost"},
+        boss_ctx,
+    )
+    assert agent_board["decision_status_counts"]["incomplete_cost"] == 1
+    assert [row["contract"] for row in agent_board["rows"]] == ["XS-A"]
+    assert agent_board["rows"][0]["decision_status"] == "incomplete_cost"
+    assert agent_board["rows"][0]["remaining"] is None
+    assert agent_board["rows"][0]["remaining_pct"] is None
+
+    workbook_response = client.get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "XS-A"},
+    )
+    assert workbook_response.status_code == 200, workbook_response.text
+    workbook = load_workbook(
+        io.BytesIO(workbook_response.content),
+        read_only=True,
+        data_only=True,
+    )
+    try:
+        assert workbook.sheetnames == [
+            "项目预算",
+            "备件明细-氚云",
+            "报销明细",
+            "填写说明",
+        ]
+    finally:
+        workbook.close()
 
 
 def test_agent_board_reuses_service_decision_without_recomputing(monkeypatch):

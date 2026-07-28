@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     ARRAY,
+    Computed,
     Date,
     ForeignKey,
     Index,
@@ -23,6 +24,41 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
 from app.models._types import Money, Qty, TZDateTime
+
+
+_VALID_MAINTENANCE_COST_SQL = (
+    "cost_amount IS NOT NULL"
+    " AND cost_amount >= 0"
+    " AND cost_amount < 1000000000000"
+)
+_ACTUAL_MAINTENANCE_SOURCE_SQL = (
+    "cost_source IN ('direct', 'month_avg', 'window')"
+)
+_ESTIMATED_MAINTENANCE_SOURCE_SQL = (
+    "cost_source IN ('sales_ref', 'trace_avg')"
+)
+MAINTENANCE_COST_BUCKET_SQL = (
+    "CASE"
+    f" WHEN {_VALID_MAINTENANCE_COST_SQL}"
+    f" AND {_ACTUAL_MAINTENANCE_SOURCE_SQL}"
+    " AND cost_tax_basis = 'inc' THEN 1"
+    f" WHEN {_VALID_MAINTENANCE_COST_SQL}"
+    f" AND {_ACTUAL_MAINTENANCE_SOURCE_SQL}"
+    " AND cost_tax_basis = 'ex' THEN 2"
+    f" WHEN {_VALID_MAINTENANCE_COST_SQL}"
+    f" AND {_ESTIMATED_MAINTENANCE_SOURCE_SQL}"
+    " AND cost_tax_basis = 'inc' AND confidence = 'low' THEN 3"
+    f" WHEN {_VALID_MAINTENANCE_COST_SQL}"
+    f" AND {_ESTIMATED_MAINTENANCE_SOURCE_SQL}"
+    " AND cost_tax_basis = 'inc' THEN 4"
+    f" WHEN {_VALID_MAINTENANCE_COST_SQL}"
+    f" AND {_ESTIMATED_MAINTENANCE_SOURCE_SQL}"
+    " AND cost_tax_basis = 'ex' AND confidence = 'low' THEN 5"
+    f" WHEN {_VALID_MAINTENANCE_COST_SQL}"
+    f" AND {_ESTIMATED_MAINTENANCE_SOURCE_SQL}"
+    " AND cost_tax_basis = 'ex' THEN 6"
+    " ELSE 0 END"
+)
 
 
 class FMaintenanceOrder(Base):
@@ -84,6 +120,12 @@ class FMaintenanceLine(Base):
     price_distance_days: Mapped[int | None] = mapped_column(SmallInteger)
     # v2：置信度 high(direct/window 近乎精确)/medium(当月加权)/low(追溯/销售参考，中位偏差 25%+)
     confidence: Mapped[str | None] = mapped_column(String(8))
+    # 查询加速用 schema snapshot：0=missing；其余桶的唯一业务解释在
+    # services.maintenance_cost_quality。生成列只缓存严格分类，不接受导入/接口写入。
+    cost_bucket: Mapped[int] = mapped_column(
+        SmallInteger,
+        Computed(MAINTENANCE_COST_BUCKET_SQL, persisted=True),
+    )
     anomaly_flags: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'")
     )

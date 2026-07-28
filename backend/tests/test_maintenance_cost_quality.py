@@ -1,9 +1,10 @@
 """维保成本事实分层与预算决策门禁的单一真值测试。"""
+import json
 from datetime import date
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import and_, event, func, select
+from sqlalchemy import and_, event, func, select, text
 
 from app import permissions, security
 from app.agent import tools
@@ -14,6 +15,175 @@ from app.services import maintenance_cost, maintenance_workbook_renderer
 from app.services import maintenance_cost_quality
 from app.services.maintenance_cost import COSTED_SOURCES
 from tests import factories as f
+
+
+@pytest.mark.parametrize(
+    ("source", "tax_basis", "amount", "confidence", "expected"),
+    [
+        ("direct", "inc", "1.00", "high", maintenance_cost_quality.COST_BUCKET_ACTUAL_INC),
+        ("window", "ex", "1.00", "low", maintenance_cost_quality.COST_BUCKET_ACTUAL_EX),
+        (
+            "trace_avg",
+            "inc",
+            "1.00",
+            "low",
+            maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_LOW,
+        ),
+        (
+            "sales_ref",
+            "inc",
+            "1.00",
+            None,
+            maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_OTHER,
+        ),
+        (
+            "trace_avg",
+            "ex",
+            "1.00",
+            "low",
+            maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_LOW,
+        ),
+        (
+            "sales_ref",
+            "ex",
+            "1.00",
+            "medium",
+            maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_OTHER,
+        ),
+        ("future", "inc", "1.00", "low", maintenance_cost_quality.COST_BUCKET_MISSING),
+        ("direct", "gross", "1.00", "high", maintenance_cost_quality.COST_BUCKET_MISSING),
+        ("direct", "inc", None, "high", maintenance_cost_quality.COST_BUCKET_MISSING),
+        ("direct", "inc", "-1.00", "high", maintenance_cost_quality.COST_BUCKET_MISSING),
+        ("direct", "inc", "NaN", "high", maintenance_cost_quality.COST_BUCKET_MISSING),
+        ("direct", "inc", "Infinity", "high", maintenance_cost_quality.COST_BUCKET_MISSING),
+    ],
+)
+def test_cost_bucket_constants_and_fail_closed_reverse_mapping(
+    source,
+    tax_basis,
+    amount,
+    confidence,
+    expected,
+):
+    bucket = maintenance_cost_quality.cost_bucket(
+        source,
+        tax_basis,
+        Decimal(amount) if amount is not None else None,
+        confidence,
+    )
+
+    assert bucket == expected
+    assert maintenance_cost_quality.bucket_tier(bucket) == (
+        maintenance_cost_quality.source_tier(
+            source,
+            tax_basis,
+            Decimal(amount) if amount is not None else None,
+        )
+    )
+    assert maintenance_cost_quality.bucket_tier(999) == "missing"
+    assert maintenance_cost_quality.bucket_tier(None) == "missing"
+
+
+def test_generated_cost_bucket_sql_matches_python_for_full_input_matrix(db):
+    """数据库真实生成表达式与 Python 真值全笛卡尔积等价，含特殊值。"""
+    sources = [
+        *sorted(maintenance_cost_quality.KNOWN_SOURCES),
+        "none",
+        "future_source",
+        None,
+    ]
+    tax_bases = ["inc", "ex", "gross", None]
+    amount_texts = [
+        None,
+        "-1",
+        "0",
+        "999999999999.99",
+        "1000000000000",
+        "NaN",
+        "Infinity",
+        "-Infinity",
+    ]
+    confidences = ["low", "other", None]
+    samples = []
+    expected = []
+    for source in sources:
+        for tax_basis in tax_bases:
+            for amount_text in amount_texts:
+                for confidence in confidences:
+                    ordinal = len(samples)
+                    samples.append({
+                        "ordinal": ordinal,
+                        "cost_source": source,
+                        "cost_tax_basis": tax_basis,
+                        "amount_text": amount_text,
+                        "confidence": confidence,
+                    })
+                    expected.append(maintenance_cost_quality.cost_bucket(
+                        source,
+                        tax_basis,
+                        Decimal(amount_text) if amount_text is not None else None,
+                        confidence,
+                    ))
+
+    generation_expression = db.scalar(text(
+        """
+        SELECT generation_expression
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'f_maintenance_line'
+          AND column_name = 'cost_bucket'
+        """,
+    ))
+    assert generation_expression
+
+    observed = db.execute(
+        text(
+            f"""
+            WITH samples AS (
+                SELECT
+                    ordinal,
+                    cost_source,
+                    cost_tax_basis,
+                    CAST(amount_text AS NUMERIC) AS cost_amount,
+                    confidence
+                FROM jsonb_to_recordset(CAST(:payload AS JSONB)) AS item(
+                    ordinal INTEGER,
+                    cost_source TEXT,
+                    cost_tax_basis TEXT,
+                    amount_text TEXT,
+                    confidence TEXT
+                )
+            )
+            SELECT ordinal, ({generation_expression}) AS cost_bucket
+            FROM samples
+            ORDER BY ordinal
+            """,
+        ),
+        {"payload": json.dumps(samples)},
+    ).all()
+
+    assert [row.ordinal for row in observed] == list(range(len(samples)))
+    assert [row.cost_bucket for row in observed] == expected
+
+
+def test_cost_bucket_is_a_stored_generated_orm_column(db):
+    column = FMaintenanceLine.__table__.c.cost_bucket
+    assert column.computed is not None
+    assert column.computed.persisted is True
+
+    schema = db.execute(text(
+        """
+        SELECT is_generated, generation_expression, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'f_maintenance_line'
+          AND column_name = 'cost_bucket'
+        """,
+    )).one()
+    assert schema.is_generated == "ALWAYS"
+    assert schema.is_nullable == "NO"
+    assert "cost_amount" in schema.generation_expression
+    assert "confidence" in schema.generation_expression
 
 
 def test_cost_sources_are_classified_into_actual_estimated_or_missing():
@@ -68,6 +238,25 @@ def test_cost_sources_are_classified_into_actual_estimated_or_missing():
 )
 def test_cost_quality_states(records, expected):
     assert maintenance_cost_quality.summarize_records(records)["cost_quality"] == expected
+
+
+def test_aggregate_summary_keeps_cent_quantization_after_fast_return():
+    summary = maintenance_cost_quality.summarize_aggregate(
+        lines=2,
+        actual_cost_inc=Decimal("1.006"),
+        actual_cost_ex=Decimal("2"),
+        estimated_cost_inc=Decimal("0"),
+        estimated_cost_ex=Decimal("3.004"),
+        actual_lines=1,
+        estimated_lines=1,
+        missing_cost_lines=0,
+    )
+
+    assert summary["actual_cost_inc"] == Decimal("1.01")
+    assert summary["actual_cost_ex"] == Decimal("2.00")
+    assert summary["estimated_cost_inc"] == Decimal("0.00")
+    assert summary["estimated_cost_ex"] == Decimal("3.00")
+    assert summary["known_cost_total"] == Decimal("6.01")
 
 
 def test_incomplete_cost_blocks_budget_decision_and_remaining_values():
@@ -197,11 +386,21 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
     lines["ML-ZERO"].cost_amount = Decimal("0.00")
     db.commit()
 
+    for line in lines.values():
+        db.refresh(line)
+        assert line.cost_bucket == maintenance_cost_quality.cost_bucket(
+            line.cost_source,
+            line.cost_tax_basis,
+            line.cost_amount,
+            line.confidence,
+        )
+
     row = maintenance_cost.projects_aggregate(
         db,
         lifecycle="all",
     )["rows"][0]
 
+    assert "cost_bucket" not in row
     assert row["actual_cost_inc"] == 100.0
     assert row["actual_cost_ex"] == 0.0
     assert row["estimated_cost_inc"] == 0.0
@@ -257,6 +456,7 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
     }
     assert detail_rows["PN-A"]["cost_tier"] == "actual"
     assert detail_rows["PN-E"]["cost_tier"] == "estimated"
+    assert all("cost_bucket" not in item for item in detail_rows.values())
     for pn in (
         "PN-M",
         "PN-NULL",
@@ -380,6 +580,12 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
         "incomplete_cost",
         "green",
     ]
+    assert all("cost_bucket" not in item for item in all_rows)
+    assert all(
+        "cost_bucket" not in project
+        for item in all_rows
+        for project in item["projects"]
+    )
     row = next(item for item in all_rows if item["contract"] == "XS-QUALITY")
 
     assert row["contract"] == "XS-QUALITY"
@@ -387,6 +593,19 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
     assert row["actual_lines"] == 1
     assert row["estimated_lines"] == 0
     assert row["missing_cost_lines"] == 1
+    assert (
+        row["actual_lines"]
+        + row["estimated_lines"]
+        + row["missing_cost_lines"]
+        == row["lines"]
+    )
+    assert all(
+        project["actual_lines"]
+        + project["estimated_lines"]
+        + project["missing_cost_lines"]
+        == project["lines"]
+        for project in row["projects"]
+    )
     assert row["known_cost_total"] == row["spent_parts"] == 100.0
     assert row["low_conf_pct"] == 0.0
     assert row["decision_status"] == row["status"] == "incomplete_cost"

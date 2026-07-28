@@ -15,6 +15,40 @@ ESTIMATED_SOURCES = frozenset({"trace_avg", "sales_ref"})
 KNOWN_SOURCES = ACTUAL_SOURCES | ESTIMATED_SOURCES
 TAX_BASES = frozenset({"inc", "ex"})
 
+COST_BUCKET_MISSING = 0
+COST_BUCKET_ACTUAL_INC = 1
+COST_BUCKET_ACTUAL_EX = 2
+COST_BUCKET_ESTIMATED_INC_LOW = 3
+COST_BUCKET_ESTIMATED_INC_OTHER = 4
+COST_BUCKET_ESTIMATED_EX_LOW = 5
+COST_BUCKET_ESTIMATED_EX_OTHER = 6
+
+ACTUAL_BUCKETS = frozenset({
+    COST_BUCKET_ACTUAL_INC,
+    COST_BUCKET_ACTUAL_EX,
+})
+ESTIMATED_BUCKETS = frozenset({
+    COST_BUCKET_ESTIMATED_INC_LOW,
+    COST_BUCKET_ESTIMATED_INC_OTHER,
+    COST_BUCKET_ESTIMATED_EX_LOW,
+    COST_BUCKET_ESTIMATED_EX_OTHER,
+})
+KNOWN_BUCKETS = ACTUAL_BUCKETS | ESTIMATED_BUCKETS
+INC_BUCKETS = frozenset({
+    COST_BUCKET_ACTUAL_INC,
+    COST_BUCKET_ESTIMATED_INC_LOW,
+    COST_BUCKET_ESTIMATED_INC_OTHER,
+})
+EX_BUCKETS = frozenset({
+    COST_BUCKET_ACTUAL_EX,
+    COST_BUCKET_ESTIMATED_EX_LOW,
+    COST_BUCKET_ESTIMATED_EX_OTHER,
+})
+ESTIMATED_LOW_BUCKETS = frozenset({
+    COST_BUCKET_ESTIMATED_INC_LOW,
+    COST_BUCKET_ESTIMATED_EX_LOW,
+})
+
 _ZERO = Decimal("0")
 _CENT = Decimal("0.01")
 _MAX_AMOUNT_EXCLUSIVE = Decimal("1000000000000")
@@ -110,13 +144,64 @@ def summarize_aggregate(
     )
     known_cost_total = sum(amounts.values(), _ZERO).quantize(_CENT)
     return {
-        **{key: value.quantize(_CENT) for key, value in amounts.items()},
+        **amounts,
         "actual_lines": actual_lines,
         "estimated_lines": estimated_lines,
         "missing_cost_lines": missing_cost_lines,
         "known_cost_total": known_cost_total,
         "cost_quality": quality,
     }
+
+
+def sql_amount_is_valid(amount_column):
+    """返回与 :func:`source_tier` 一致的金额合法性 SQL 条件。
+
+    聚合查询可先按这个低基数布尔值分组，再在 Python 端复用 ``source_tier`` 完成
+    来源/税口径分类，避免 PostgreSQL 为每个 ``FILTER`` 重复求值完整分级表达式。
+    """
+    return and_(
+        amount_column.is_not(None),
+        amount_column >= _ZERO,
+        amount_column < _MAX_AMOUNT_EXCLUSIVE,
+    )
+
+
+def cost_bucket(
+    source: str | None,
+    tax_basis: str | None,
+    amount: Decimal | None,
+    confidence: str | None,
+) -> int:
+    """把严格成本分类压成聚合列的 smallint；0 永远 fail-closed 为 missing。"""
+    tier = source_tier(source, tax_basis, amount)
+    if tier == "missing":
+        return COST_BUCKET_MISSING
+    if tier == "actual":
+        return (
+            COST_BUCKET_ACTUAL_INC
+            if tax_basis == "inc"
+            else COST_BUCKET_ACTUAL_EX
+        )
+    if tax_basis == "inc":
+        return (
+            COST_BUCKET_ESTIMATED_INC_LOW
+            if confidence == "low"
+            else COST_BUCKET_ESTIMATED_INC_OTHER
+        )
+    return (
+        COST_BUCKET_ESTIMATED_EX_LOW
+        if confidence == "low"
+        else COST_BUCKET_ESTIMATED_EX_OTHER
+    )
+
+
+def bucket_tier(bucket: int | None) -> str:
+    """反解持久化桶；未知桶同样 fail-closed，避免未来 schema 漂移变成已知成本。"""
+    if bucket in ACTUAL_BUCKETS:
+        return "actual"
+    if bucket in ESTIMATED_BUCKETS:
+        return "estimated"
+    return "missing"
 
 
 def sql_tier_predicates(source_column, tax_basis_column, amount_column):
@@ -126,9 +211,7 @@ def sql_tier_predicates(source_column, tax_basis_column, amount_column):
     这条约束防止未重算/脏历史行从 ``count(...).filter`` 中静默消失。
     """
     valid_amount_and_basis = and_(
-        amount_column.is_not(None),
-        amount_column >= _ZERO,
-        amount_column < _MAX_AMOUNT_EXCLUSIVE,
+        sql_amount_is_valid(amount_column),
         tax_basis_column.in_(tuple(sorted(TAX_BASES))),
     )
     actual = and_(
