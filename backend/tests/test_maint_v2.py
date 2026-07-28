@@ -261,12 +261,27 @@ def test_workbook_doc_level_backfill(db, batch):
                            data_status="已结束", expense_date=date(2026, 3, 20),
                            fee_category="驻场工程师", linked_sales_order_no="XS-W",
                            amount=Decimal("400"), import_batch_id=batch.id))
+    db.add(FProjectExpense(raw_line_id="EXP-W-PART-NAMED",
+                           bxd_no="BXD-20260301-10", line_no=1,
+                           data_status="已结束", expense_date=date(2026, 3, 21),
+                           fee_category="备件消耗", linked_sales_order_no="XS-W",
+                           amount=Decimal("50"), import_batch_id=batch.id))
+    db.add(FProjectExpense(raw_line_id="EXP-W-STATIC-NAMED",
+                           bxd_no="BXD-20260301-11", line_no=1,
+                           data_status="已结束", expense_date=date(2026, 3, 22),
+                           fee_category="月份", linked_sales_order_no="XS-W",
+                           amount=Decimal("10"), import_batch_id=batch.id))
     db.commit()
     maintenance_cost.recompute(db)
     data = maintenance_cost.contract_workbook_data(db, "XS-W")
     assert data["doc_total"]["WBDD-WB"] == Decimal("300.00")
-    m = data["monthly"]["2026-03"]
-    assert m["备件消耗"] == Decimal("300.00") and m["驻场工程师"] == Decimal("400")
+    assert "monthly" not in data
+    assert data["monthly_parts"]["2026-03"] == Decimal("300.00")
+    assert data["monthly_expenses"]["2026-03"] == {
+        "备件消耗": Decimal("50"),
+        "月份": Decimal("10"),
+        "驻场工程师": Decimal("400"),
+    }
     assert data["budget"] == Decimal("5000.00")
 
     # 模板渲染：三页齐全、标题含合同号、表头深色白字、产品成本只填单据首行且高亮、金额千分位
@@ -275,6 +290,20 @@ def test_workbook_doc_level_backfill(db, batch):
     assert wb.sheetnames == ["项目预算", "备件明细-氚云", "报销明细", "填写说明"]
     ws = wb["项目预算"]
     assert "XS-W" in ws["A1"].value
+    monthly_headings = [
+        cell.value
+        for cell in ws[13]
+        if cell.value is not None
+    ]
+    monthly_values = [cell.value for cell in ws[14]][:len(monthly_headings)]
+    assert dict(zip(monthly_headings, monthly_values, strict=True)) == {
+        "月份": "2026-03",
+        "已知备件成本参考（混合原值·兼容）": 300,
+        "费用分类：备件消耗": 50,
+        "费用分类：月份": 10,
+        "费用分类：驻场工程师": 400,
+        "当月合计": 760,
+    }
     ws2 = wb["备件明细-氚云"]
     assert ws2.cell(1, 1).font.color.rgb.endswith("FFFFFF")           # 表头白字
     assert ws2.cell(1, 1).fill.fgColor.rgb.endswith("35506B")         # 深色表头

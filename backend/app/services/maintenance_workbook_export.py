@@ -36,6 +36,9 @@ MAX_EXCEL_ROWS = 1_048_576
 MAX_EXCEL_COLUMNS = 16_384
 MAX_ZIP_BYTES = 512 * 1024 * 1024
 MAX_MEMBER_LEAF_BYTES = 240
+_FEE_CATEGORY_HEADER_PREFIX_BYTES = len(
+    maintenance_workbook_renderer.FEE_CATEGORY_HEADER_PREFIX.encode("utf-8"),
+)
 _MANIFEST_HEADERS = (
     "记录类型", "合同号", "文件名", "命中订单数", "命中最早日期", "命中最晚日期",
     "跳过维保单号", "跳过原始订单ID", "跳过制单日期", "说明",
@@ -305,7 +308,6 @@ def _preflight_resource_limits(
             FProjectExpense.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS,
             FProjectExpense.amount.is_not(None),
             FProjectExpense.expense_date.is_not(None),
-            fee_category != "备件消耗",
         )
         .distinct()
         .subquery()
@@ -315,7 +317,11 @@ def _preflight_resource_limits(
             distinct_categories.c.contract,
             func.count(),
             func.coalesce(
-                func.sum(_octet_length(distinct_categories.c.category) + 1),
+                func.sum(
+                    _octet_length(distinct_categories.c.category)
+                    + _FEE_CATEGORY_HEADER_PREFIX_BYTES
+                    + 1
+                ),
                 0,
             ),
         )

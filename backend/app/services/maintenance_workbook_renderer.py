@@ -21,6 +21,7 @@ SOURCE_LABELS = {
     "none": "成本缺失",
 }
 CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}
+FEE_CATEGORY_HEADER_PREFIX = "费用分类："
 _HDR_FILL = PatternFill("solid", fgColor="35506B")
 _HDR_FONT = Font(bold=True, color="FFFFFF", size=11)
 _TITLE_FONT = Font(bold=True, size=15)
@@ -171,22 +172,36 @@ def _populate_contract_workbook(
     row += 1
     categories = sorted({
         category
-        for month in data["monthly"].values()
+        for month in data["monthly_expenses"].values()
         for category in month
-        if category != "备件消耗"
     })
-    columns = ["月份", "已知备件成本参考（混合原值·兼容）", *categories, "当月合计"]
+    expense_columns = [
+        f"{FEE_CATEGORY_HEADER_PREFIX}{category}"
+        for category in categories
+    ]
+    columns = [
+        "月份",
+        "已知备件成本参考（混合原值·兼容）",
+        *expense_columns,
+        "当月合计",
+    ]
     for index, heading in enumerate(columns, 1):
         budget_sheet.cell(row=row, column=index, value=safe_text(heading))
     _hdr_row(budget_sheet, row, len(columns))
     band = False
     totals = [0.0] * (len(columns) - 2)
-    for year_month in sorted(data["monthly"]):
+    year_months = sorted(
+        set(data["monthly_parts"]) | set(data["monthly_expenses"]),
+    )
+    for year_month in year_months:
         row += 1
         band = not band
-        month = data["monthly"][year_month]
-        values = [float(month.get("备件消耗", 0))]
-        values.extend(float(month.get(category, 0)) for category in categories)
+        month_expenses = data["monthly_expenses"].get(year_month, {})
+        values = [float(data["monthly_parts"].get(year_month, 0))]
+        values.extend(
+            float(month_expenses.get(category, 0))
+            for category in categories
+        )
         for index, value in enumerate(values):
             totals[index] += value
         row_values = [safe_text(year_month), *values, round(sum(values), 2)]

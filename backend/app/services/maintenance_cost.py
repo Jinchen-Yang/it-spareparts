@@ -536,11 +536,12 @@ def projects_aggregate(db: Session, date_from: date | None = None,
     }
 
 
-def project_lines(db: Session, project: str, month: str | None = None,
-                  date_from: date | None = None, date_to: date | None = None,
-                  page: int = 1, page_size: int = 50,
-                  user_ctx: security.UserContext | None = None) -> dict:
-    """单项目 SKU 级明细（分页）：含成本来源/税口径/追溯月/关联采购单，逐行可解释。"""
+def _project_lines_query(
+    project: str,
+    month: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+):
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     base = select(ml, mo).join(mo, ml.order_id == mo.id)
     base = base.where(mo.project_std == project if project != "(未填项目)"
@@ -548,46 +549,104 @@ def project_lines(db: Session, project: str, month: str | None = None,
     base = _scoped_filters(base, date_from, date_to)
     if month:
         base = base.where(func.to_char(mo.order_date, "YYYY-MM") == month)
+    return base
 
+
+def project_line_count(
+    db: Session,
+    project: str,
+    month: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> int:
+    """返回与项目明细/CSV 完全同作用域的行数，供资源预检。"""
+    base = _project_lines_query(project, month, date_from, date_to)
+    return db.scalar(select(func.count()).select_from(base.subquery())) or 0
+
+
+def _serialize_project_line(
+    ln: FMaintenanceLine,
+    order: FMaintenanceOrder,
+    *,
+    hide_cost_signals: bool,
+) -> dict:
+    cost_tier = maintenance_cost_quality.source_tier(
+        ln.cost_source,
+        ln.cost_tax_basis,
+        ln.cost_amount,
+    )
+    has_known_cost = cost_tier != "missing"
+    flags = ln.anomaly_flags or []
+    if hide_cost_signals:
+        flags = [flag for flag in flags if flag not in {"no_cost", "cost_overflow"}]
+    return {
+        "order_no": order.order_no,
+        "order_date": order.order_date.isoformat() if order.order_date else None,
+        "demand_type": order.demand_type,
+        "business_type": order.business_type,
+        "warehouse": order.warehouse,
+        "pn_std": ln.pn_std,
+        "description": ln.description,
+        "qty": _f(ln.qty),
+        "return_qty": _f(ln.return_qty),
+        "unit_cost": _f(ln.unit_cost) if has_known_cost else None,
+        "cost_amount": _f(ln.cost_amount) if has_known_cost else None,
+        "cost_tier": cost_tier,
+        "cost_source": ln.cost_source,
+        "cost_tax_basis": ln.cost_tax_basis,
+        "price_month": ln.price_month,
+        "trace_months": ln.trace_months,
+        "linked_purchase_order_no": ln.linked_purchase_order_no,
+        "price_distance_days": ln.price_distance_days,
+        "confidence": ln.confidence,
+        "anomaly_flags": flags,
+    }
+
+
+def iter_project_lines(
+    db: Session,
+    project: str,
+    month: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    user_ctx: security.UserContext | None = None,
+    yield_per: int = 1000,
+):
+    """流式遍历项目明细；与分页 API 共用查询和序列化真相源。"""
+    ml, mo = FMaintenanceLine, FMaintenanceOrder
+    statement = _project_lines_query(project, month, date_from, date_to).order_by(
+        mo.order_date.desc().nullslast(), ml.id.desc(),
+    ).execution_options(stream_results=True, yield_per=yield_per)
+    hide_cost_signals = security.is_field_hidden(user_ctx, "cost_total")
+    result = db.execute(statement)
+    try:
+        for ln, order in result:
+            yield _serialize_project_line(
+                ln,
+                order,
+                hide_cost_signals=hide_cost_signals,
+            )
+    finally:
+        result.close()
+
+
+def project_lines(db: Session, project: str, month: str | None = None,
+                  date_from: date | None = None, date_to: date | None = None,
+                  page: int = 1, page_size: int = 50,
+                  user_ctx: security.UserContext | None = None) -> dict:
+    """单项目 SKU 级明细（分页）：含成本来源/税口径/追溯月/关联采购单，逐行可解释。"""
+    ml, mo = FMaintenanceLine, FMaintenanceOrder
+    base = _project_lines_query(project, month, date_from, date_to)
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     page = max(page, 1)
     paged = base.order_by(
-        mo.order_date.desc().nullslast(), ml.id.desc()
+        mo.order_date.desc().nullslast(), ml.id.desc(),
     ).offset((page - 1) * page_size).limit(page_size)
     hide_cost_signals = security.is_field_hidden(user_ctx, "cost_total")
-    rows = []
-    for ln, o in db.execute(paged).all():
-        cost_tier = maintenance_cost_quality.source_tier(
-            ln.cost_source,
-            ln.cost_tax_basis,
-            ln.cost_amount,
-        )
-        has_known_cost = cost_tier != "missing"
-        flags = ln.anomaly_flags or []
-        if hide_cost_signals:
-            flags = [flag for flag in flags if flag not in {"no_cost", "cost_overflow"}]
-        rows.append({
-            "order_no": o.order_no,
-            "order_date": o.order_date.isoformat() if o.order_date else None,
-            "demand_type": o.demand_type,
-            "business_type": o.business_type,
-            "warehouse": o.warehouse,
-            "pn_std": ln.pn_std,
-            "description": ln.description,
-            "qty": _f(ln.qty),
-            "return_qty": _f(ln.return_qty),
-            "unit_cost": _f(ln.unit_cost) if has_known_cost else None,
-            "cost_amount": _f(ln.cost_amount) if has_known_cost else None,
-            "cost_tier": cost_tier,
-            "cost_source": ln.cost_source,
-            "cost_tax_basis": ln.cost_tax_basis,
-            "price_month": ln.price_month,
-            "trace_months": ln.trace_months,
-            "linked_purchase_order_no": ln.linked_purchase_order_no,
-            "price_distance_days": ln.price_distance_days,
-            "confidence": ln.confidence,
-            "anomaly_flags": flags,
-        })
+    rows = [
+        _serialize_project_line(ln, order, hide_cost_signals=hide_cost_signals)
+        for ln, order in db.execute(paged)
+    ]
     return {"total": total, "page": page, "page_size": page_size, "rows": rows}
 
 
@@ -920,8 +979,11 @@ def contract_workbook_data(db: Session, contract: str) -> dict:
         .order_by(pe.expense_date.asc().nullslast(), pe.bxd_no, pe.line_no, pe.id)
     ).scalars().all()
 
-    # 月度 × 分类汇总：备件成本按出库月，费用按报销月/费用分类（仅生效）
-    monthly: dict[str, dict] = defaultdict(lambda: defaultdict(lambda: _ZERO))
+    # 月度汇总分命名空间保存，避免费用分类与内置的备件成本列同名时互相覆盖。
+    monthly_parts: dict[str, Decimal] = defaultdict(lambda: _ZERO)
+    monthly_expenses: dict[str, dict[str, Decimal]] = defaultdict(
+        lambda: defaultdict(lambda: _ZERO),
+    )
     monthly_missing: dict[str, int] = defaultdict(int)
     for ln, o in lines:
         if not o.order_date:
@@ -934,12 +996,13 @@ def contract_workbook_data(db: Session, contract: str) -> dict:
         if tier == "missing":
             monthly_missing[_ym(o.order_date)] += 1
         else:
-            # 兼容一版：旧键等于实际+估算的已知参考。
-            monthly[_ym(o.order_date)]["备件消耗"] += ln.cost_amount
+            monthly_parts[_ym(o.order_date)] += ln.cost_amount
     for e in exp_rows:
         if (e.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
                 and e.amount is not None and e.expense_date):
-            monthly[_ym(e.expense_date)][e.fee_category or "(未分类费用)"] += e.amount
+            monthly_expenses[_ym(e.expense_date)][
+                e.fee_category or "(未分类费用)"
+            ] += e.amount
 
     budget = _contract_amounts(db, [contract]).get(contract)
     expense_total = sum(
@@ -966,5 +1029,9 @@ def contract_workbook_data(db: Session, contract: str) -> dict:
             "line_cost_tiers": line_cost_tiers,
             "cost_summary": cost_summary, "decision": decision,
             "expenses": exp_rows, "expense_total": expense_total,
-            "monthly": monthly,
+            "monthly_parts": dict(monthly_parts),
+            "monthly_expenses": {
+                year_month: dict(categories)
+                for year_month, categories in monthly_expenses.items()
+            },
             "monthly_missing": dict(monthly_missing)}

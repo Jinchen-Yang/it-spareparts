@@ -10,10 +10,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app import permissions
+from app.api import maintenance as maintenance_api
 from app.auth import hash_password
 from app.etl import loader
 from app.main import app
-from app.models.maintenance import FMaintenanceLine
+from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.system import SysImportBatch, SysUser
 from app.services import maintenance_cost
 from tests import factories as f
@@ -181,6 +182,249 @@ def test_project_lines_csv_fail_closes_invalid_cost_and_exports_explicit_tier(db
     )
     assert cost_blind_row["成本事实层级"] == ""
     assert cost_blind_row["成本来源"] == ""
+
+
+def test_project_lines_csv_sanitizes_every_dynamic_text_cell(db):
+    batch = SysImportBatch(
+        filename="formula-cells.xlsx",
+        file_type="maintenance",
+        file_hash="formula-cells",
+    )
+    db.add(batch)
+    db.flush()
+    loader.load(
+        db,
+        f.maintenance_result(
+            {
+                "M-FORMULA": f.maintenance_head(
+                    "M-FORMULA",
+                    order_no="=ORDER()",
+                    project="CSV统一净化",
+                    on=date(2026, 7, 1),
+                    demand_type="  +DEMAND()",
+                    business_type="@BUSINESS()",
+                ),
+            },
+            [
+                f.maintenance_line(
+                    "M-FORMULA",
+                    "ML-FORMULA",
+                    "=PN()",
+                    description="\x01=DESCRIPTION()",
+                ),
+            ],
+        ),
+        batch.id,
+        date(2026, 7, 2),
+    )
+    order = db.execute(select(FMaintenanceOrder)).scalar_one()
+    order.warehouse = "\t=WAREHOUSE()"
+    line = db.execute(select(FMaintenanceLine)).scalar_one()
+    line.linked_purchase_order_no = "\r@PURCHASE()"
+    line.anomaly_flags = ["=FLAG()"]
+    db.commit()
+
+    response = _admin_client(db).get(
+        "/api/maintenance/lines/export",
+        params={"project": "CSV统一净化"},
+    )
+
+    assert response.status_code == 200, response.text
+    parsed = list(csv.reader(io.StringIO(response.content.decode("utf-8-sig"))))
+    row = dict(zip(parsed[0], parsed[1], strict=True))
+    for header in ("维保单号", "需求类型", "业务类型", "出库仓库", "PN", "描述",
+                   "关联采购单", "异常标记"):
+        assert row[header].startswith("'"), (header, row[header])
+    assert "\x01" not in row["描述"]
+
+
+def test_project_summary_csv_sanitizes_formula_after_controls_and_whitespace(db, monkeypatch):
+    def fake_projects(*_args, **_kwargs):
+        return {
+            "rows": [{
+                "project": "\x01  =PROJECT()",
+                "lifecycle_status": "ongoing",
+                "maint_end": "2027-01-01",
+                "lines": 1,
+                "qty": 1,
+                "actual_cost_inc": 1,
+                "actual_cost_ex": 0,
+                "estimated_cost_inc": 0,
+                "estimated_cost_ex": 0,
+                "actual_lines": 1,
+                "estimated_lines": 0,
+                "missing_cost_lines": 0,
+                "known_cost_total": 1,
+                "cost_quality": "actual_only",
+                "cost_inc": 1,
+                "cost_ex": 0,
+                "cost_total": 1,
+                "coverage_pct": 100,
+                "by_source": {
+                    "direct": 1, "window": 0, "month_avg": 0,
+                    "trace_avg": 0, "sales_ref": 0, "none": 0,
+                },
+                "months": 1,
+                "sales_orders": ["\t@CONTRACT()"],
+                "contract_amount": 10,
+                "contract_shared": False,
+            }],
+        }
+
+    monkeypatch.setattr(maintenance_cost, "projects_aggregate", fake_projects)
+    response = _admin_client(db).get("/api/maintenance/export", params={"lifecycle": "all"})
+
+    assert response.status_code == 200, response.text
+    parsed = list(csv.reader(io.StringIO(response.content.decode("utf-8-sig"))))
+    row = dict(zip(parsed[0], parsed[1], strict=True))
+    assert row["项目"].startswith("'")
+    assert "\x01" not in row["项目"]
+    assert row["关联销售订单"].startswith("'")
+
+
+def test_project_lines_csv_rejects_over_one_million_before_row_materialization(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        maintenance_cost,
+        "project_line_count",
+        lambda *_args, **_kwargs: 1_000_001,
+    )
+
+    def must_not_iterate(*_args, **_kwargs):
+        raise AssertionError("row iterator must not start after count preflight rejection")
+
+    monkeypatch.setattr(maintenance_cost, "iter_project_lines", must_not_iterate)
+    response = _admin_client(db).get(
+        "/api/maintenance/lines/export",
+        params={"project": "超量项目"},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "CSV 数据行超过 1000000 行上限"
+
+
+def test_project_lines_csv_rejects_escaped_cell_over_excel_limit(db, monkeypatch):
+    monkeypatch.setattr(
+        maintenance_cost,
+        "project_line_count",
+        lambda *_args, **_kwargs: 1,
+    )
+    row = {
+        "order_date": "2026-07-01",
+        "order_no": "WBDD-1",
+        "demand_type": "报修供货",
+        "business_type": "备件维保",
+        "warehouse": "仓库",
+        "pn_std": "PN-1",
+        "description": "=" + "x" * 32_766,
+        "qty": 1,
+        "return_qty": 0,
+        "unit_cost": 1,
+        "cost_amount": 1,
+        "cost_tier": "actual",
+        "cost_source": "direct",
+        "confidence": "high",
+        "cost_tax_basis": "inc",
+        "price_month": "2026-07",
+        "trace_months": 0,
+        "price_distance_days": 0,
+        "linked_purchase_order_no": None,
+        "anomaly_flags": [],
+    }
+    class ClosingRows:
+        def __init__(self):
+            self._rows = iter([row])
+            self.closed = False
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self._rows)
+
+        def close(self):
+            self.closed = True
+
+    rows = ClosingRows()
+    monkeypatch.setattr(
+        maintenance_cost,
+        "iter_project_lines",
+        lambda *_args, **_kwargs: rows,
+    )
+
+    response = _admin_client(db).get(
+        "/api/maintenance/lines/export",
+        params={"project": "超长单元格"},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "CSV 单元格超过 32767 字符安全上限"
+    assert rows.closed is True
+
+
+def test_project_lines_csv_rejects_total_dynamic_text_budget_before_response(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(maintenance_api, "_MAX_CSV_DYNAMIC_TEXT_BYTES", 10)
+    monkeypatch.setattr(
+        maintenance_cost,
+        "project_line_count",
+        lambda *_args, **_kwargs: 0,
+    )
+    response = _admin_client(db).get(
+        "/api/maintenance/lines/export",
+        params={"project": "文本预算"},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "CSV 动态文本超过 64 MiB 安全上限"
+
+
+def test_project_lines_csv_rejects_total_encoded_output_budget(db, monkeypatch):
+    monkeypatch.setattr(maintenance_api, "_MAX_CSV_OUTPUT_BYTES", 10)
+    monkeypatch.setattr(
+        maintenance_cost,
+        "project_line_count",
+        lambda *_args, **_kwargs: 0,
+    )
+    response = _admin_client(db).get(
+        "/api/maintenance/lines/export",
+        params={"project": "文件预算"},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "CSV 文件超过 512 MiB 安全上限"
+
+
+def test_project_line_iterator_closes_server_result_when_consumer_stops(monkeypatch):
+    class Result:
+        def __init__(self):
+            self.closed = False
+
+        def __iter__(self):
+            return iter([(object(), object())])
+
+        def close(self):
+            self.closed = True
+
+    result = Result()
+
+    class DB:
+        def execute(self, _statement):
+            return result
+
+    monkeypatch.setattr(
+        maintenance_cost,
+        "_serialize_project_line",
+        lambda *_args, **_kwargs: {"row": 1},
+    )
+    rows = maintenance_cost.iter_project_lines(DB(), "项目")
+    assert next(rows) == {"row": 1}
+    rows.close()
+    assert result.closed is True
 
 
 def test_chinese_contract_workbook_uses_ascii_header_and_utf8_filename(db):

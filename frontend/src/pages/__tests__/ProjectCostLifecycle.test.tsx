@@ -38,7 +38,7 @@ function projects(project = "进行中项目", lifecycle: Lifecycle = "ongoing",
         estimated_lines: nullable(0),
         missing_cost_lines: nullable(0),
         known_cost_total: nullable(188.5),
-        cost_quality: nullable<string>("actual_only"),
+        cost_quality: nullable<string | undefined>("actual_only"),
         coverage_pct: nullable(100),
         by_source: nullable<Record<string, number>>({ direct: 1 }),
         months: 1,
@@ -53,6 +53,7 @@ function projects(project = "进行中项目", lifecycle: Lifecycle = "ongoing",
       as_of: asOf,
       lifecycle_filter: lifecycle,
       lifecycle_counts: counts,
+      ranking_restricted: false,
     },
   };
 }
@@ -62,8 +63,8 @@ function board(contract = "XSDD-1", lifecycle: Lifecycle = "ongoing", asOf = "20
     data: {
       rows: [{
         contract,
-        decision_status: optional<string>("green"),
-        status: optional<string>("green"),
+        decision_status: optional<string | null>("green"),
+        status: optional<string | null>("green"),
         projects: [{
           project: `${contract}项目`, lines: 1, spent_parts: 100,
           actual_cost_inc: 100, actual_cost_ex: 0,
@@ -80,7 +81,7 @@ function board(contract = "XSDD-1", lifecycle: Lifecycle = "ongoing", asOf = "20
         estimated_lines: nullable(0),
         missing_cost_lines: nullable(0),
         known_cost_total: nullable(100),
-        cost_quality: nullable<string>("actual_only"),
+        cost_quality: nullable<string | undefined>("actual_only"),
         coverage_pct: nullable(100),
         spent_parts: nullable(100),
         spent_expense: nullable(0),
@@ -321,6 +322,63 @@ describe("维保项目生命周期筛选", () => {
     expect(card).not.toHaveTextContent("预算余量 > 20%");
     expect(within(card).queryByText(/剩余预算/)).toBeNull();
     expect(within(card).queryByRole("progressbar")).toBeNull();
+    expect(screen.getByText("待补成本 1")).toBeInTheDocument();
+    expect(screen.getByText("🟢 0")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["decision_status 为 null", { decision_status: null, status: "green", cost_quality: "actual_only" }],
+    ["decision_status 缺失", { decision_status: undefined, status: "green", cost_quality: "actual_only" }],
+    ["cost_quality 为 null", { decision_status: "green", status: "green", cost_quality: null }],
+    ["cost_quality 缺失", { decision_status: "green", status: "green", cost_quality: undefined }],
+  ])("不受限响应%s时 fail-closed，不能展示旧状态的预算结论", async (_label, overrides) => {
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/projects") return Promise.resolve(projects());
+      if (path === "/maintenance/board") {
+        const response = board("XS-NULL-GATE");
+        response.data.rows[0] = {
+          ...response.data.rows[0],
+          ...overrides,
+        };
+        return Promise.resolve(response);
+      }
+      return Promise.reject(new Error("unexpected"));
+    });
+
+    render(<ProjectCostPage />);
+
+    const card = await screen.findByTestId("maintenance-board-card-XS-NULL-GATE");
+    expect(within(card).getAllByText("成本不完整，需补数据")).toHaveLength(2);
+    expect(card).not.toHaveTextContent("预算余量 > 20%");
+    expect(within(card).queryByText(/剩余预算/)).toBeNull();
+    expect(within(card).queryByRole("progressbar")).toBeNull();
+  });
+
+  it("no_budget 即使收到脏负预算也不在前端自行重算进度", async () => {
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/projects") return Promise.resolve(projects());
+      if (path === "/maintenance/board") {
+        const response = board("XS-NO-BUDGET");
+        response.data.rows[0] = {
+          ...response.data.rows[0],
+          decision_status: "no_budget",
+          status: "no_budget",
+          budget: -1,
+          spent: 100,
+          remaining: null,
+          remaining_pct: null,
+        };
+        return Promise.resolve(response);
+      }
+      return Promise.reject(new Error("unexpected"));
+    });
+
+    render(<ProjectCostPage />);
+
+    const card = await screen.findByTestId("maintenance-board-card-XS-NO-BUDGET");
+    expect(card).toHaveTextContent("无预算(未关联合同额)");
+    expect(within(card).queryByRole("progressbar")).toBeNull();
+    expect(card).not.toHaveTextContent("预算消耗参考 -10000%");
   });
 
   it("成本权限脱敏时统计保持横杠，不把空值伪装成 0 或成本缺失", async () => {
@@ -350,6 +408,7 @@ describe("维保项目生命周期筛选", () => {
           coverage_pct: null,
           by_source: null,
         };
+        response.data.ranking_restricted = true;
         return Promise.resolve(response);
       }
       if (path === "/maintenance/board") {
@@ -439,6 +498,91 @@ describe("维保项目生命周期筛选", () => {
     expect(screen.getByText("当前账号不展示预算消耗决策分类与状态筛选"))
       .toBeInTheDocument();
     expect(screen.queryByText("¥1,000")).toBeNull();
+  });
+
+  it.each([
+    ["显式 incomplete", "incomplete"],
+    ["质量字段异常为空但其他成本事实可见", null],
+  ])("利润权限受限且%s时仍 fail-closed 展示补数事实，决策外观保持中性",
+    async (_label, costQuality) => {
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: true,
+      data_profit: false,
+      own_customers_only: false,
+    }));
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/projects") return Promise.resolve(projects());
+      if (path === "/maintenance/board") {
+        const response = board("XS-PROFIT-MISSING");
+        response.data.rows[0] = {
+          ...response.data.rows[0],
+          decision_status: undefined,
+          status: undefined,
+          cost_quality: costQuality,
+          missing_cost_lines: 1,
+          budget: null,
+          remaining: null,
+          remaining_pct: null,
+        };
+        return Promise.resolve({
+          data: { ...response.data, decision_restricted: true },
+        });
+      }
+      return Promise.reject(new Error("unexpected"));
+    });
+
+    render(<ProjectCostPage />);
+
+    const card = await screen.findByTestId("maintenance-board-card-XS-PROFIT-MISSING");
+    expect(within(card).getByText("成本不完整，需补数据")).toBeInTheDocument();
+    expect(card).toHaveTextContent("缺失 1 行");
+    expect(within(card).queryByText(/剩余预算|预算余量|预算已用完/)).toBeNull();
+    expect(within(card).queryByRole("progressbar")).toBeNull();
+    expect(card).toHaveStyle({ borderLeft: "4px solid #8c8c8c" });
+  });
+
+  it("权限限制标志不一致时按任一 true 收口，不能泄漏决策状态", async () => {
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/projects") return Promise.resolve(projects());
+      if (path === "/maintenance/board") {
+        const response = board("XS-DRIFTED-MASK");
+        return Promise.resolve({
+          data: {
+            ...response.data,
+            decision_restricted: false,
+            profit_restricted: true,
+          },
+        });
+      }
+      return Promise.reject(new Error("unexpected"));
+    });
+
+    render(<ProjectCostPage />);
+
+    const card = await screen.findByTestId("maintenance-board-card-XS-DRIFTED-MASK");
+    expect(screen.queryByRole("radiogroup", { name: "预算消耗参考状态筛选" })).toBeNull();
+    expect(card).not.toHaveTextContent(/预算余量 > 20%|剩余预算/);
+    expect(card).toHaveStyle({ borderLeft: "4px solid #8c8c8c" });
+  });
+
+  it("项目成本字段不受限时 cost_quality null 按需补数据 fail-closed", async () => {
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/projects") {
+        const response = projects("项目质量空值");
+        response.data.rows[0].cost_quality = null;
+        response.data.rows[0].missing_cost_lines = null;
+        response.data.ranking_restricted = false;
+        return Promise.resolve(response);
+      }
+      if (path === "/maintenance/board") return Promise.resolve(board());
+      return Promise.reject(new Error("unexpected"));
+    });
+
+    render(<ProjectCostPage />);
+
+    await screen.findByText("项目质量空值");
+    expect(screen.getByText("需补数据 · — 行")).toBeInTheDocument();
   });
 
   it("明细以 cost_tier 为权威，未知来源和税口径不显示成已知成本", async () => {

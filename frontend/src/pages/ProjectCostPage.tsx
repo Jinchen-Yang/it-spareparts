@@ -27,7 +27,7 @@ interface ProjectRow {
   estimated_lines: number | null;
   missing_cost_lines: number | null;
   known_cost_total: number | null;
-  cost_quality: string | null;
+  cost_quality?: string | null;
   coverage_pct: number | null;
   by_source: Record<string, number> | null;
   months: number;
@@ -62,15 +62,15 @@ type ExportDatePreset = "all" | "today" | "last7" | "last14" | "last21" | "last3
 
 interface BoardRow {
   contract: string | null;
-  decision_status?: string;
-  status?: string;
+  decision_status?: string | null;
+  status?: string | null;
   projects: { project: string; lines: number; spent_parts: number | null }[];
   lines: number; coverage_pct: number | null;
   actual_cost_inc: number | null; actual_cost_ex: number | null;
   estimated_cost_inc: number | null; estimated_cost_ex: number | null;
   actual_lines: number | null; estimated_lines: number | null;
   missing_cost_lines: number | null; known_cost_total: number | null;
-  cost_quality: string | null;
+  cost_quality?: string | null;
   spent_parts: number | null; spent_expense: number | null; spent: number | null;
   budget: number | null; remaining: number | null; remaining_pct: number | null;
   low_conf_pct: number | null;
@@ -121,19 +121,23 @@ const BOARD_STATUSES = new Set<BoardStatus>([
 
 function normalizeDecisionStatus(
   decisionStatus: string | null | undefined,
-  legacyStatus: string | null | undefined,
-): BoardStatus | undefined {
-  const candidate = decisionStatus ?? legacyStatus;
-  if (candidate == null) return undefined;
-  return BOARD_STATUSES.has(candidate as BoardStatus)
-    ? candidate as BoardStatus
+): BoardStatus {
+  return BOARD_STATUSES.has(decisionStatus as BoardStatus)
+    ? decisionStatus as BoardStatus
     : "incomplete_cost";
 }
 
-function normalizeCostQuality(value: string | null | undefined): CostQuality | null {
-  if (value == null) return null;
+function normalizeCostQuality(value: string | null | undefined): CostQuality {
   if (value === "actual_only" || value === "contains_estimate") return value;
   return "incomplete";
+}
+
+function effectiveBoardStatus(row: BoardRow): BoardStatus {
+  const status = normalizeDecisionStatus(row.decision_status);
+  return normalizeCostQuality(row.cost_quality) === "incomplete"
+    || status === "incomplete_cost"
+    ? "incomplete_cost"
+    : status;
 }
 
 export function buildOrderExportParams(
@@ -256,6 +260,7 @@ export default function ProjectCostPage() {
   const [lifecycleCounts, setLifecycleCounts] = useState<LifecycleCounts>(EMPTY_LIFECYCLE_COUNTS);
   const [asOf, setAsOf] = useState("");
   const [rows, setRows] = useState<ProjectRow[]>([]);
+  const [projectCostRestricted, setProjectCostRestricted] = useState(false);
   const [board, setBoard] = useState<BoardRow[]>([]);
   const [boardDecisionRestricted, setBoardDecisionRestricted] = useState(false);
   const [boardFilter, setBoardFilter] = useState<string>("all");
@@ -310,18 +315,21 @@ export default function ProjectCostPage() {
       ]);
       if (seq !== pageSeq.current) return;
       setRows(data.rows);
+      setProjectCostRestricted(!!data.ranking_restricted);
       setStartDate(data.start_date);
       setBoard(bd.data.rows);
       setAsOf(data.as_of || bd.data.as_of || "");
       setLifecycleCounts(data.lifecycle_counts || bd.data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
-      const decisionRestricted = !!(
-        bd.data.decision_restricted ?? bd.data.profit_restricted
-      );
+      const decisionRestricted = bd.data.decision_restricted === true
+        || bd.data.profit_restricted === true
+        || bd.data.ranking_restricted === true
+        || data.ranking_restricted === true;
       setBoardDecisionRestricted(decisionRestricted);
       if (decisionRestricted) setBoardFilter("all");
     } catch {
       if (seq !== pageSeq.current) return;
       setRows([]);
+      setProjectCostRestricted(false);
       setBoard([]);
       setLoadError(true);
     } finally {
@@ -518,8 +526,9 @@ export default function ProjectCostPage() {
     { title: "估算参考(不含税)", dataIndex: "estimated_cost_ex", width: 140, align: "right", render: money },
     { title: "成本完整性", dataIndex: "cost_quality", width: 160,
       render: (rawQuality: string | null, row) => {
+        // 成本字段确由 RBAC 隐藏时保持中性；不受限响应的 null/未知值仍 fail-closed。
+        if (rawQuality == null && projectCostRestricted) return "—";
         const quality = normalizeCostQuality(rawQuality);
-        if (quality == null) return "—";
         if (quality === "incomplete") {
           return <Tag color="orange">需补数据 · {row.missing_cost_lines ?? "—"} 行</Tag>;
         }
@@ -758,16 +767,16 @@ export default function ProjectCostPage() {
               options={[
                 { label: `全部 ${board.length}`, value: "all" },
                 { label: `待补成本 ${board.filter((b) =>
-                  normalizeDecisionStatus(b.decision_status, b.status) === "incomplete_cost").length}`,
+                  effectiveBoardStatus(b) === "incomplete_cost").length}`,
                   value: "incomplete_cost" },
                 { label: `🔴 ${board.filter((b) =>
-                  normalizeDecisionStatus(b.decision_status, b.status) === "red").length}`, value: "red" },
+                  effectiveBoardStatus(b) === "red").length}`, value: "red" },
                 { label: `🟡 ${board.filter((b) =>
-                  normalizeDecisionStatus(b.decision_status, b.status) === "yellow").length}`, value: "yellow" },
+                  effectiveBoardStatus(b) === "yellow").length}`, value: "yellow" },
                 { label: `🟢 ${board.filter((b) =>
-                  normalizeDecisionStatus(b.decision_status, b.status) === "green").length}`, value: "green" },
+                  effectiveBoardStatus(b) === "green").length}`, value: "green" },
                 { label: `无预算 ${board.filter((b) =>
-                  normalizeDecisionStatus(b.decision_status, b.status) === "no_budget").length}`,
+                  effectiveBoardStatus(b) === "no_budget").length}`,
                   value: "no_budget" },
               ]}
             />
@@ -792,12 +801,33 @@ export default function ProjectCostPage() {
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             {(boardDecisionRestricted || boardFilter === "all"
               ? board : board.filter((b) =>
-                normalizeDecisionStatus(b.decision_status, b.status) === boardFilter)).map((b) => {
-              const decisionStatus = normalizeDecisionStatus(b.decision_status, b.status);
-              const incomplete = normalizeCostQuality(b.cost_quality) === "incomplete"
-                || decisionStatus === "incomplete_cost";
+                effectiveBoardStatus(b) === boardFilter)).map((b) => {
+              // 决策字段被 RBAC 隐藏时保持中性；不受限响应则对缺失/null/未知值
+              // 一律 fail-closed，禁止回退旧 status 伪造绿灯。
+              const normalizedQuality = normalizeCostQuality(b.cost_quality);
+              const normalizedDecision = effectiveBoardStatus(b);
+              const costFactsMasked = boardDecisionRestricted && [
+                b.cost_quality,
+                b.actual_cost_inc, b.actual_cost_ex,
+                b.estimated_cost_inc, b.estimated_cost_ex,
+                b.actual_lines, b.estimated_lines,
+                b.missing_cost_lines, b.known_cost_total,
+              ].every((value) => value == null);
+              const costIncomplete = !costFactsMasked
+                && normalizedQuality === "incomplete";
+              const decisionIncomplete = !boardDecisionRestricted && (
+                b.cost_quality == null || normalizedDecision === "incomplete_cost"
+              );
+              const incomplete = costIncomplete || decisionIncomplete;
+              const decisionStatus = boardDecisionRestricted
+                ? undefined : incomplete ? "incomplete_cost" : normalizedDecision;
               const meta = decisionStatus ? STATUS_META[decisionStatus] : NEUTRAL_META;
-              const spentPct = !boardDecisionRestricted && !incomplete && b.budget && b.spent != null
+              const hasBudgetDecision = decisionStatus === "red"
+                || decisionStatus === "yellow"
+                || decisionStatus === "green";
+              const spentPct = !boardDecisionRestricted && !incomplete && hasBudgetDecision
+                && b.budget != null && b.budget > 0 && b.spent != null
+                && b.remaining != null && b.remaining_pct != null
                 ? Math.round((b.spent / b.budget) * 100) : null;
               let timePct: number | null = null;
               if (!incomplete && b.maint_start && b.maint_end) {

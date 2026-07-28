@@ -911,6 +911,56 @@ def test_dynamic_text_budget_counts_generated_date_and_label_text_before_materia
     assert materialize_calls == []
 
 
+def test_dynamic_text_budget_counts_rendered_fee_category_prefix_before_materializing(
+    db,
+    monkeypatch,
+):
+    # 该最小数据在旧口径下为 50 bytes；55 落在加入 15-byte“费用分类：”前缀前后之间。
+    monkeypatch.setattr(
+        maintenance_workbook_export,
+        "MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK",
+        55,
+        raising=False,
+    )
+    materialize_calls = []
+    real_materialize = (
+        maintenance_workbook_export.maintenance_cost.contract_workbook_data
+    )
+
+    def capture_materialize(*args):
+        materialize_calls.append("materialized")
+        return real_materialize(*args)
+
+    monkeypatch.setattr(
+        maintenance_workbook_export.maintenance_cost,
+        "contract_workbook_data",
+        capture_materialize,
+    )
+    batch = _batch(db)
+    _order(db, batch, raw_id="FEE-PREFIX", contract="C")
+    db.add(FProjectExpense(
+        raw_line_id="EXP-FEE-PREFIX",
+        bxd_no="B",
+        line_no=1,
+        data_status="已结束",
+        expense_date=date(2026, 7, 16),
+        fee_category="X",
+        linked_sales_order_no="C",
+        amount=Decimal("10"),
+        import_batch_id=batch.id,
+    ))
+    db.commit()
+
+    response = _admin_client(db).get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "C"},
+    )
+
+    assert response.status_code == 422
+    assert "单个项目工作簿动态文本超过安全上限" in response.json()["detail"]
+    assert materialize_calls == []
+
+
 def test_excel_column_limit_uses_max_categories_per_contract_not_global_distinct(
     db,
     monkeypatch,
@@ -947,7 +997,7 @@ def test_excel_column_limit_uses_max_categories_per_contract_not_global_distinct
         ]) == 2
 
 
-def test_excel_column_preflight_matches_empty_and_reserved_fee_category_semantics(
+def test_excel_column_preflight_counts_normalized_and_part_named_fee_categories(
     db,
     monkeypatch,
 ):
@@ -976,23 +1026,8 @@ def test_excel_column_preflight_matches_empty_and_reserved_fee_category_semantic
 
     response = _admin_client(db).get("/api/maintenance/export-workbooks")
 
-    assert response.status_code == 200, response.text
-    with ZipFile(io.BytesIO(response.content)) as archive:
-        workbook = _only_workbook(archive)
-        try:
-            headings = [
-                cell.value
-                for cell in workbook["项目预算"][13]
-                if cell.value is not None
-            ]
-            assert headings == [
-                "月份",
-                "已知备件成本参考（混合原值·兼容）",
-                "(未分类费用)",
-                "当月合计",
-            ]
-        finally:
-            workbook.close()
+    assert response.status_code == 422
+    assert response.json()["detail"] == "项目预算 Sheet 超过 Excel 列数上限"
 
 
 def test_fee_categories_named_like_cost_tiers_remain_visible_in_monthly_table(db):
@@ -1028,8 +1063,8 @@ def test_fee_categories_named_like_cost_tiers_remain_visible_in_monthly_table(db
         headings = [cell.value for cell in sheet[13] if cell.value is not None]
         values = [cell.value for cell in sheet[14]][:len(headings)]
         row = dict(zip(headings, values, strict=True))
-        assert row["备件实际参考"] == 11
-        assert row["备件估算参考"] == 22
+        assert row["费用分类：备件实际参考"] == 11
+        assert row["费用分类：备件估算参考"] == 22
     finally:
         workbook.close()
 
