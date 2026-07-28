@@ -212,6 +212,58 @@ def test_agent_uses_same_board_collapse_and_neutral_project_truncation(
     assert "maintenance_health_check" not in {item["skill"] for item in skills}
 
 
+def test_default_purchaser_template_keeps_cost_facts_but_hides_budget_decisions(
+    db,
+    maintenance_permission_data,
+):
+    purchaser_permissions = permissions.effective("purchaser", None)
+    assert purchaser_permissions["page_maintenance"] is True
+    assert purchaser_permissions["data_purchase_cost"] is True
+    assert purchaser_permissions["data_profit"] is False
+    ctx = security.UserContext(
+        user_id="default-purchaser",
+        role="purchaser",
+        permissions=purchaser_permissions,
+        is_authenticated=True,
+    )
+
+    projects = maintenance_cost.projects_aggregate(db, user_ctx=ctx)
+    assert all(row["known_cost_total"] is not None for row in projects["rows"])
+    assert all(row["cost_quality"] == "actual_only" for row in projects["rows"])
+    assert all(row["contract_amount"] is None for row in projects["rows"])
+
+    board = maintenance_cost.board(db, status="red", user_ctx=ctx)
+    assert board["profit_restricted"] is True
+    assert board["decision_restricted"] is True
+    assert board["status_filter_applied"] is False
+    assert board["effective_sort"] == "last_out"
+    assert "status_counts" not in board
+    assert "decision_status_counts" not in board
+    assert len(board["rows"]) == 3
+    for row in board["rows"]:
+        assert row["known_cost_total"] is not None
+        assert row["cost_quality"] == "actual_only"
+        assert row["budget"] is None
+        assert row["remaining"] is None
+        assert row["remaining_pct"] is None
+        assert "status" not in row
+        assert "decision_status" not in row
+
+    agent_board = tools.dispatch(
+        db,
+        "get_maintenance_board",
+        {"status": "red"},
+        ctx,
+    )
+    assert agent_board["status_filter_applied"] is False
+    assert agent_board["effective_sort"] == "last_out"
+    assert "status_counts" not in agent_board
+    assert "decision_status_counts" not in agent_board
+    assert all(row["known_cost_total"] is not None for row in agent_board["rows"])
+    assert all(row["budget"] is None for row in agent_board["rows"])
+    assert all("decision_status" not in row for row in agent_board["rows"])
+
+
 def test_agent_board_reuses_service_decision_without_recomputing(monkeypatch):
     captured = {}
     service_result = {

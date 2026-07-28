@@ -3,7 +3,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, event, func, select
 
 from app import permissions, security
 from app.agent import tools
@@ -12,10 +12,13 @@ from app.models.maintenance import FMaintenanceLine
 from app.models.system import SysImportBatch
 from app.services import maintenance_cost, maintenance_workbook_renderer
 from app.services import maintenance_cost_quality
+from app.services.maintenance_cost import COSTED_SOURCES
 from tests import factories as f
 
 
 def test_cost_sources_are_classified_into_actual_estimated_or_missing():
+    assert set(COSTED_SOURCES) == maintenance_cost_quality.KNOWN_SOURCES
+
     records = [
         ("direct", "inc", Decimal("100.00")),
         ("window", "ex", Decimal("20.00")),
@@ -95,6 +98,8 @@ def test_incomplete_cost_blocks_budget_decision_and_remaining_values():
         ("800.00", "1000.00", "yellow", "200.00"),
         ("799.99", "1000.00", "green", "200.01"),
         ("100.00", None, "no_budget", None),
+        ("100.00", "0.00", "no_budget", None),
+        ("100.00", "-1.00", "no_budget", None),
     ],
 )
 def test_complete_cost_preserves_twenty_percent_budget_boundaries(
@@ -388,11 +393,24 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
     assert row["remaining"] is None
     assert row["remaining_pct"] is None
 
-    searched_rows = maintenance_cost.board(
-        db,
-        q_text="项目甲",
-        lifecycle="all",
-    )["rows"]
+    engine = db.get_bind()
+    select_count = 0
+
+    def before_execute(_conn, _cursor, statement, _params, _context, _many):
+        nonlocal select_count
+        if statement.lstrip().upper().startswith("SELECT"):
+            select_count += 1
+
+    event.listen(engine, "before_cursor_execute", before_execute)
+    try:
+        searched_rows = maintenance_cost.board(
+            db,
+            q_text="项目甲",
+            lifecycle="all",
+        )["rows"]
+    finally:
+        event.remove(engine, "before_cursor_execute", before_execute)
+    assert select_count <= 3
     assert [item["contract"] for item in searched_rows] == ["XS-QUALITY"]
     assert {project["project"] for project in searched_rows[0]["projects"]} == {
         "共享合同项目甲",
