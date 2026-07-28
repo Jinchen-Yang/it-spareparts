@@ -220,17 +220,21 @@ def test_board_uses_same_contract_lifecycle_and_default(db, lifecycle_data):
     assert default["as_of"] == as_of.isoformat()
 
 
-def test_board_combines_outbound_date_status_and_lifecycle_filters(db, lifecycle_data):
+def test_board_combines_outbound_date_expense_gate_and_lifecycle_filters(
+    db,
+    lifecycle_data,
+):
     data = maintenance_cost.board(
         db,
         date_to=date(2026, 3, 31),
-        status="no_budget",
+        status="expense_data_unavailable",
         lifecycle="missing",
         as_of=lifecycle_data,
     )
     assert {row["contract"] for row in data["rows"]} == {"XS-MISS", "XS-MIX"}
     assert data["lifecycle_counts"] == {"ongoing": 1, "ended": 1, "missing": 2}
-    assert data["status_counts"] == {"red": 0, "yellow": 0, "green": 0, "no_budget": 2}
+    assert data["status_counts"] == {"red": 0, "yellow": 0, "green": 0, "no_budget": 0}
+    assert data["decision_status_counts"]["expense_data_unavailable"] == 2
 
 
 def test_board_project_search_matches_projects_scope(db, lifecycle_data):

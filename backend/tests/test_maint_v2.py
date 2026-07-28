@@ -143,8 +143,8 @@ def _one_contract(db, batch, tag: str, budget: str, cost: str):
     }, [f.maintenance_line(f"M-{tag}", f"ML-{tag}", f"PN-{tag}", qty="1")])
 
 
-def test_board_status_lights_and_order(db, batch):
-    """绿(>20%剩余)/黄(0<剩余≤20%，含恰好 20% 边界)/红(超支)/无预算，黄红置顶排序。"""
+def test_board_fails_closed_without_complete_expense_watermark(db, batch):
+    """费用全量水位未建立时，预算灯和无预算结论都不得绕过费用门禁。"""
     _one_contract(db, batch, "G", budget="1000", cost="100")     # 剩余 90% → green
     _one_contract(db, batch, "B", budget="1000", cost="800")     # 剩余恰 20% → yellow（≤ 含边界）
     _one_contract(db, batch, "R", budget="1000", cost="1200")    # 超支 → red
@@ -156,21 +156,32 @@ def test_board_status_lights_and_order(db, batch):
     maintenance_cost.recompute(db)
     b = maintenance_cost.board(db, lifecycle="all")
     st = {r["contract"]: r["status"] for r in b["rows"]}
-    assert st["XS-G"] == "green" and st["XS-B"] == "yellow" and st["XS-R"] == "red"
-    assert st[None] == "no_budget"
-    order = [r["status"] for r in b["rows"]]
-    assert order.index("red") < order.index("yellow") < order.index("green")
-    red = next(r for r in b["rows"] if r["status"] == "red")
-    assert red["remaining"] == -200.0 and red["budget"] == 1000.0
-    # 状态过滤
+    assert set(st.values()) == {"expense_data_unavailable"}
     assert all(
-        r["status"] == "yellow"
-        for r in maintenance_cost.board(db, status="yellow", lifecycle="all")["rows"]
+        row["expense_data_available"] is False
+        and row["spent_expense"] is None
+        and row["spent"] is None
+        and row["remaining"] is None
+        for row in b["rows"]
     )
+    assert b["status_counts"] == {
+        "red": 0, "yellow": 0, "green": 0, "no_budget": 0,
+    }
+    unavailable = maintenance_cost.board(
+        db,
+        status="expense_data_unavailable",
+        lifecycle="all",
+    )["rows"]
+    assert len(unavailable) == 4
+    assert maintenance_cost.board(
+        db,
+        status="yellow",
+        lifecycle="all",
+    )["rows"] == []
 
 
-def test_board_includes_active_expenses_only(db, batch):
-    """已花 = 备件 + 生效(已结束)报销；流程中的报销不计。绿卡被费用推成红卡。"""
+def test_board_does_not_publish_partial_expenses_as_complete_spend(db, batch):
+    """已有零散生效费用仍不等于建立全量水位，完整支出必须保持空值。"""
     _one_contract(db, batch, "E", budget="1000", cost="100")
     db.add(FProjectExpense(raw_line_id="EXP-1", bxd_no="BXD-20260301-1", line_no=1,
                            data_status="已结束", expense_date=date(2026, 3, 8),
@@ -186,8 +197,11 @@ def test_board_includes_active_expenses_only(db, batch):
         r for r in maintenance_cost.board(db, lifecycle="all")["rows"]
         if r["contract"] == "XS-E"
     )
-    assert row["spent_expense"] == 950.0
-    assert row["spent"] == 1050.0 and row["status"] == "red"
+    assert row["expense_data_available"] is False
+    assert row["spent_expense"] is None
+    assert row["spent"] is None
+    assert row["remaining"] is None
+    assert row["status"] == "expense_data_unavailable"
 
 
 # ---------- BXD 报销导入（§16.3）----------
@@ -290,19 +304,27 @@ def test_workbook_doc_level_backfill(db, batch):
     assert wb.sheetnames == ["项目预算", "备件明细-氚云", "报销明细", "填写说明"]
     ws = wb["项目预算"]
     assert "XS-W" in ws["A1"].value
+    monthly_header_row = next(
+        row
+        for row in range(1, ws.max_row + 1)
+        if ws.cell(row, 1).value == "月份"
+    )
     monthly_headings = [
         cell.value
-        for cell in ws[13]
+        for cell in ws[monthly_header_row]
         if cell.value is not None
     ]
-    monthly_values = [cell.value for cell in ws[14]][:len(monthly_headings)]
+    monthly_values = [
+        cell.value
+        for cell in ws[monthly_header_row + 1]
+    ][:len(monthly_headings)]
     assert dict(zip(monthly_headings, monthly_values, strict=True)) == {
         "月份": "2026-03",
         "已知备件成本参考（混合原值·兼容）": 300,
-        "费用分类：备件消耗": 50,
-        "费用分类：月份": 10,
-        "费用分类：驻场工程师": 400,
-        "当月合计": 760,
+        "当前已导入报销（非全量）·备件消耗": 50,
+        "当前已导入报销（非全量）·月份": 10,
+        "当前已导入报销（非全量）·驻场工程师": 400,
+        "当月已知合计（费用非全量）": 760,
     }
     ws2 = wb["备件明细-氚云"]
     assert ws2.cell(1, 1).font.color.rgb.endswith("FFFFFF")           # 表头白字

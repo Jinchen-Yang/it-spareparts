@@ -4,9 +4,11 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     func,
@@ -77,6 +79,39 @@ class SysRoleTemplate(Base):
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     created_by: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+
+class SysBusinessSetting(Base):
+    """类型化业务设置单例。
+
+    不使用自由 key/value：每个设置都必须在模型和迁移中声明类型、合法值、默认值与
+    回滚行为。id 固定为 1；version 供管理员界面的乐观锁使用。
+    """
+
+    __tablename__ = "sys_business_setting"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_sys_business_setting_singleton"),
+        CheckConstraint(
+            "maintenance_project_profit_default_basis IN ('inc', 'ex', 'both')",
+            name="ck_sys_business_setting_maintenance_profit_basis",
+        ),
+        CheckConstraint("version >= 1", name="ck_sys_business_setting_version"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        SmallInteger,
+        primary_key=True,
+        default=1,
+        server_default="1",
+    )
+    maintenance_project_profit_default_basis: Mapped[str] = mapped_column(
+        String(8),
+        default="both",
+        server_default="both",
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     updated_by: Mapped[str | None] = mapped_column(String(64))
     updated_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 

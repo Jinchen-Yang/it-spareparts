@@ -1,34 +1,34 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.18.0 release notes", () => {
-  it("publishes the maintenance cost quality decision-gate summary", () => {
-    expect(APP_VERSION).toBe("1.18.0");
+describe("v1.19.0 pending release notes", () => {
+  it("publishes the contract-level dual-tax margin scope", () => {
+    expect(APP_VERSION).toBe("1.19.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
     expect(LATEST.date).toBe("2026-07-28");
 
     const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/实际采购参考.*估算参考.*成本缺失/);
-    expect(notes).toMatch(/含税\/不含税.*不跨税口径相加/);
-    expect(notes).toMatch(/任一.*缺失.*停止计算预算余额.*红黄绿/);
-    expect(notes).toMatch(/不定义正式项目毛利/);
+    expect(notes).toMatch(/合同级备件毛利.*合同级贡献毛利/);
+    expect(notes).toMatch(/含税、未税两套.*毛利.*毛利率/);
+    expect(notes).toMatch(/管理员.*默认显示含税、未税或两者同时显示/);
+    expect(notes).toMatch(/不会.*丢弃另一套数据/);
   });
 
-  it("states that every maintenance consumer uses the same cost truth", () => {
+  it("documents the missing-cost waterfall and audit evidence", () => {
     const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/逐行 API/);
-    expect(notes).toMatch(/项目与明细 CSV/);
-    expect(notes).toMatch(/订单汇总 Excel/);
-    expect(notes).toMatch(/单本及批量四 Sheet 项目工作簿/);
-    expect(notes).toMatch(/Agent.*前端页面.*同一成本事实层级/);
-  });
-
-  it("documents both cost-blind and profit-blind permission boundaries", () => {
-    const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/无成本权限.*金额.*层级.*来源统计.*异常标记.*脱敏/);
     expect(notes).toMatch(
-      /无利润权限.*合同额.*预算.*余量.*决策状态.*状态计数.*筛选.*排序.*隐藏/,
+      /池采购数量加权均价.*池销售均价.*本 PN 历史采购.*本 PN 历史销售/,
     );
+    expect(notes).toMatch(/出库日当日或以前/);
+    expect(notes).toMatch(/池版本.*样本窗口.*样本数.*追溯月份/);
+  });
+
+  it("states fail-closed and production approval gates", () => {
+    const notes = LATEST.items.join("\n");
+    expect(notes).toMatch(/证据不完整.*毛利保持空值.*不用 0/);
+    expect(notes).toMatch(/项目追踪工作簿报销明细尚未建立费用全量数据水位.*贡献毛利.*空值/);
+    expect(notes).toMatch(/代码完成不等于生产批准/);
+    expect(notes).toMatch(/须经甲方确认.*发布门禁后才可上线/);
   });
 });

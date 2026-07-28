@@ -1,4 +1,5 @@
 import axios from "axios";
+import { clearSessionScopedPreferences } from "./sessionPreferences";
 
 export const api = axios.create({ baseURL: "/api" });
 
@@ -20,6 +21,7 @@ api.interceptors.response.use(
       const currentToken = localStorage.getItem("token");
       // 旧账号的迟到 401 不能清掉另一个标签页刚写入的新会话。
       if (!requestAuth || requestAuth === `Bearer ${currentToken}`) {
+        clearSessionScopedPreferences();
         localStorage.removeItem("token");
         location.reload();
       }

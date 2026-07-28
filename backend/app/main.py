@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app import auth
-from app.api import accounts, agent, chat_sessions, dashboard, data_quality, data_quality_calibration, governance, imports, inventory, maintenance, maintenance_audit, parts, pool_analysis, pools, profit, purchases, role_templates, substitutes
+from app.api import accounts, agent, chat_sessions, dashboard, data_quality, data_quality_calibration, governance, imports, inventory, maintenance, maintenance_audit, parts, pool_analysis, pools, profit, purchases, role_templates, substitutes, system_settings
 from app.config import check_security, get_settings
 from app.db import engine
 
@@ -50,6 +50,7 @@ app.include_router(maintenance_audit.router, prefix=settings.api_prefix)
 app.include_router(dashboard.router, prefix=settings.api_prefix)
 app.include_router(pools.router, prefix=settings.api_prefix)
 app.include_router(pool_analysis.router, prefix=settings.api_prefix)
+app.include_router(system_settings.router, prefix=settings.api_prefix)
 
 
 @app.get("/health")

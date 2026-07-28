@@ -1060,11 +1060,19 @@ def test_fee_categories_named_like_cost_tiers_remain_visible_in_monthly_table(db
     workbook = load_workbook(io.BytesIO(response.content), read_only=True)
     try:
         sheet = workbook["项目预算"]
-        headings = [cell.value for cell in sheet[13] if cell.value is not None]
-        values = [cell.value for cell in sheet[14]][:len(headings)]
+        heading_index = next(
+            index
+            for index, cells in enumerate(sheet.iter_rows(), 1)
+            if cells[0].value == "月份"
+        )
+        headings = [
+            cell.value for cell in sheet[heading_index]
+            if cell.value is not None
+        ]
+        values = [cell.value for cell in sheet[heading_index + 1]][:len(headings)]
         row = dict(zip(headings, values, strict=True))
-        assert row["费用分类：备件实际参考"] == 11
-        assert row["费用分类：备件估算参考"] == 22
+        assert row["当前已导入报销（非全量）·备件实际参考"] == 11
+        assert row["当前已导入报销（非全量）·备件估算参考"] == 22
     finally:
         workbook.close()
 

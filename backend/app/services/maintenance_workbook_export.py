@@ -231,6 +231,7 @@ def _preflight_resource_limits(
         + _octet_length(FMaintenanceLine.confidence)
         + _octet_length(FMaintenanceLine.price_month)
         + _octet_length(FMaintenanceLine.cost_tax_basis)
+        + _octet_length(FMaintenanceLine.reference_side)
         + PART_RENDERED_TEXT_OVERHEAD_BYTES
     )
     part_rows = db.execute(

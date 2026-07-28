@@ -12,6 +12,7 @@ import {
   ProfileOutlined,
   RobotOutlined,
   SearchOutlined,
+  SettingOutlined,
   ShoppingCartOutlined,
   TeamOutlined,
   ToolOutlined,
@@ -67,6 +68,7 @@ const loadGovernance = () => import("./pages/GovernancePage");
 const loadPoolManagement = () => import("./pages/PoolManagementPage");
 const loadChat = () => import("./pages/ChatPage");
 const loadAccounts = () => import("./pages/AccountsPage");
+const loadSystemSettings = () => import("./pages/SystemSettingsPage");
 
 const BossBoardPage = lazy(loadBossBoard);
 const PoolsPage = lazy(loadPools);
@@ -84,6 +86,7 @@ const GovernancePage = lazy(loadGovernance);
 const PoolManagementPage = lazy(loadPoolManagement);
 const ChatPage = lazy(loadChat);
 const AccountsPage = lazy(loadAccounts);
+const SystemSettingsPage = lazy(loadSystemSettings);
 
 // 组 key 加 grp- 前缀与 item key 隔离命名空间（防止将来改用 SubMenu 时 keyPath 相撞）
 export const NAV_GROUPS: NavGroup[] = [
@@ -158,6 +161,9 @@ export const NAV_GROUPS: NavGroup[] = [
       // 权限中心 v2：入口由 page_accounts 键驱动（admin 在 App 层恒短路通过，行为不变）；
       // 管理员可把「查看」受控委派给骨干员工，写操作另需 action_account_manage（后端把关）
       { key: "accounts", path: "/accounts", label: "账号与权限", icon: <TeamOutlined />, perm: "page_accounts", page: AccountsPage, load: loadAccounts },
+      // 不绑定可委派的 page_* 键：系统级业务默认值只能由 admin 看到入口和注册路由。
+      // 项目成本页读取默认值仍由后端 page_maintenance 把关。
+      { key: "system-settings", path: "/system-settings", label: "系统设置", icon: <SettingOutlined />, page: SystemSettingsPage, load: loadSystemSettings },
     ],
   },
 ];

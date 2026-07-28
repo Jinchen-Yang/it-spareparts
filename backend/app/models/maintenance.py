@@ -35,7 +35,10 @@ _ACTUAL_MAINTENANCE_SOURCE_SQL = (
     "cost_source IN ('direct', 'month_avg', 'window')"
 )
 _ESTIMATED_MAINTENANCE_SOURCE_SQL = (
-    "cost_source IN ('sales_ref', 'trace_avg')"
+    "cost_source IN ("
+    "'pool_purchase', 'pool_sales', 'purchase_history', 'sales_history',"
+    " 'sales_ref', 'trace_avg'"
+    ")"
 )
 MAINTENANCE_COST_BUCKET_SQL = (
     "CASE"
@@ -109,7 +112,13 @@ class FMaintenanceLine(Base):
     # 成本结果（maintenance_cost.recompute 回填；loader upsert 白名单排除，同 matched_cost 约定）
     unit_cost: Mapped[Decimal | None] = mapped_column(Money)
     cost_amount: Mapped[Decimal | None] = mapped_column(Money)           # (qty-return_qty)×unit_cost
-    # direct(专属采购直配)/month_avg(当月均价)/trace_avg(追溯均价)/sales_ref(没有采购有销售)/none；
+    # 双税计算底座：所有成功取价来源均同时落两套结果；legacy 字段继续保留旧口径与兼容展示。
+    unit_cost_inc_tax: Mapped[Decimal | None] = mapped_column(Money)
+    unit_cost_ex_tax: Mapped[Decimal | None] = mapped_column(Money)
+    cost_amount_inc_tax: Mapped[Decimal | None] = mapped_column(Money)
+    cost_amount_ex_tax: Mapped[Decimal | None] = mapped_column(Money)
+    # 旧五层：direct/window/month_avg/trace_avg/sales_ref；
+    # 缺失补价：pool_purchase/pool_sales/purchase_history/sales_history；最终 none。
     # 起算日(MAINT_COST_START_DATE)之前的行恒为 NULL（不计价，区别于"算了但没算出来"的 none）
     cost_source: Mapped[str | None] = mapped_column(String(16))
     cost_tax_basis: Mapped[str | None] = mapped_column(String(4))        # inc/ex（原值口径，Q4）
@@ -120,6 +129,15 @@ class FMaintenanceLine(Base):
     price_distance_days: Mapped[int | None] = mapped_column(SmallInteger)
     # v2：置信度 high(direct/window 近乎精确)/medium(当月加权)/low(追溯/销售参考，中位偏差 25%+)
     confidence: Mapped[str | None] = mapped_column(String(8))
+    # 可审计取价证据。旧五层按可得信息回填；来源单日期缺失等无法证明的证据保持 NULL，
+    # 对应双税成本 fail-closed，不伪造采购日期。
+    reference_side: Mapped[str | None] = mapped_column(String(16))
+    reference_pool_group_id: Mapped[int | None] = mapped_column(Integer)
+    reference_pool_version: Mapped[int | None] = mapped_column(Integer)
+    reference_sample_count: Mapped[int | None] = mapped_column(Integer)
+    reference_from_date: Mapped[date | None] = mapped_column(Date)
+    reference_to_date: Mapped[date | None] = mapped_column(Date)
+    reference_latest_date: Mapped[date | None] = mapped_column(Date)
     # 查询加速用 schema snapshot：0=missing；其余桶的唯一业务解释在
     # services.maintenance_cost_quality。生成列只缓存严格分类，不接受导入/接口写入。
     cost_bucket: Mapped[int] = mapped_column(
@@ -140,7 +158,8 @@ class FMaintenanceLine(Base):
 class FProjectExpense(Base):
     """维保报销单（BXD）费用行（§16.3）：经 XSDD 归集到合同/项目，盈亏看板"已花"的费用侧。
 
-    正式数据源=氚云 BXD 原生全量导出（勾数据ID）；无数据ID时以 bxd_no#line_no 复合键幂等。
+    正式数据源=项目追踪工作簿的报销明细页；数据ID仅作历史兼容，无数据ID时以
+    bxd_no#line_no 复合键幂等。
     金额在行级；生效口径 流程状态=MAINT_EXPENSE_ACTIVE_STATUS（'已结束'）。
     """
 

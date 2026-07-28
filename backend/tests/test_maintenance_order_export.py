@@ -13,15 +13,16 @@ from openpyxl.worksheet._writer import ALL_TEMP_FILES
 from sqlalchemy import select, text
 from starlette.requests import ClientDisconnect
 
-from app import permissions
+from app import config, permissions
 from app.api import maintenance as maintenance_api
 from app.auth import hash_password
+from app.db import SessionLocal
 from app.etl import loader
 from app.main import app
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.system import SysImportBatch, SysUser
 from app.security import UserContext
-from app.services import maintenance_export
+from app.services import maintenance_cost_quality, maintenance_export
 from tests import factories as f
 
 
@@ -185,12 +186,7 @@ def test_empty_export_is_valid_two_sheet_xlsx_with_headers(db):
         ("数据库ID", "原始订单ID", "维保单号", "制单日期", "销售订单", "项目名", "终端客户",
          "需求类型", "业务类型", "销售人员", "出库仓库", "维保开始日期", "维保终止日期", "流程状态"),
     ]
-    assert list(workbook["订单明细"].values) == [
-        ("数据库ID", "原始明细ID", "订单数据库ID", "原始订单ID", "维保单号", "制单日期", "行号",
-         "PN", "原始PN", "产品描述", "需求数量", "退货数量", "发货SN", "单价", "金额",
-         "成本事实层级", "成本来源", "含税口径", "取价月", "追溯月数", "关联采购单", "距采购天数", "置信度",
-         "异常标记"),
-    ]
+    assert list(workbook["订单明细"].values) == [maintenance_export.LINE_HEADERS]
 
 
 def test_legacy_project_workbook_uses_sensitive_download_headers(db):
@@ -256,13 +252,47 @@ def test_build_workbook_closes_output_and_cleans_temp_files_when_save_fails(db, 
     before = set(ALL_TEMP_FILES)
     output = io.BytesIO()
     monkeypatch.setattr(maintenance_export, "SpooledTemporaryFile", lambda **kwargs: output)
-    monkeypatch.setattr(maintenance_export.Workbook, "save", lambda *args: (_ for _ in ()).throw(RuntimeError("save failed")))
+    monkeypatch.setattr(
+        maintenance_export,
+        "_save_workbook",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("save failed")),
+    )
 
     with pytest.raises(RuntimeError, match="save failed"):
         maintenance_export.build_workbook(db, UserContext(user_id="admin", role="admin"))
 
     assert output.closed
     assert set(ALL_TEMP_FILES) == before
+
+
+def test_export_rejects_final_xlsx_size_and_cleans_all_resources(db, monkeypatch):
+    before = set(ALL_TEMP_FILES)
+    output = io.BytesIO()
+    monkeypatch.setattr(maintenance_export, "SpooledTemporaryFile", lambda **kwargs: output)
+    monkeypatch.setattr(maintenance_export, "MAX_WORKBOOK_BYTES", 1, raising=False)
+
+    response = _admin_client(db).get("/api/maintenance/orders/export")
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "维保订单 XLSX 超过 256 MiB 上限"
+    assert output.closed
+    assert set(ALL_TEMP_FILES) == before
+    assert maintenance_export._ORDER_EXPORT_LOCK.acquire(blocking=False)
+    maintenance_export._ORDER_EXPORT_LOCK.release()
+
+
+def test_xlsx_size_guard_never_writes_beyond_hard_limit():
+    output = io.BytesIO()
+    limited = maintenance_export._SizeLimitedFile(output, max_size=3)
+    assert limited.write(b"12") == 2
+
+    with pytest.raises(
+        maintenance_export.ExcelExportTooLarge,
+        match="256 MiB",
+    ):
+        limited.write(b"34")
+
+    assert output.getvalue() == b"12"
 
 
 def test_build_workbook_cleans_temp_files_when_row_append_fails(db, monkeypatch):
@@ -354,6 +384,110 @@ def test_export_preflight_rejects_detail_rows_over_limit_before_writing(db, monk
     append.assert_not_called()
 
 
+def test_export_preflight_rejects_dynamic_text_budget_before_writing(db, monkeypatch):
+    _seed_orders(db, [("TEXT-LIMIT", date(2026, 7, 15), "已生效", None, 1)])
+    line = db.execute(select(FMaintenanceLine)).scalar_one()
+    line.description = "超限动态文本"
+    db.commit()
+    monkeypatch.setattr(maintenance_export, "MAX_DYNAMIC_TEXT_BYTES", 1, raising=False)
+    append = Mock()
+    monkeypatch.setattr(WriteOnlyWorksheet, "append", append)
+
+    response = _admin_client(db).get("/api/maintenance/orders/export")
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "维保订单 XLSX 动态文本超过 64 MiB 上限"
+    append.assert_not_called()
+
+
+def test_second_order_export_is_rejected_before_preflight_with_retry_after(db, monkeypatch):
+    class BusyLock:
+        def acquire(self, blocking=True):
+            assert blocking is False
+            return False
+
+        def release(self):
+            raise AssertionError("未取得锁时不得 release")
+
+    monkeypatch.setattr(
+        maintenance_export,
+        "_ORDER_EXPORT_LOCK",
+        BusyLock(),
+        raising=False,
+    )
+
+    response = _admin_client(db).get("/api/maintenance/orders/export")
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "5"
+    assert response.json()["detail"] == "已有逐单维保导出正在执行，请稍后重试"
+
+
+def test_database_lock_rejects_concurrent_export_across_sessions(db):
+    client = _admin_client(db)
+    ctx = UserContext(user_id="holder", role="admin")
+    with SessionLocal() as holder:
+        held_output = maintenance_export.build_workbook(holder, ctx)
+        try:
+            response = client.get("/api/maintenance/orders/export")
+            assert response.status_code == 429
+            assert response.headers["retry-after"] == "5"
+            assert response.json()["detail"] == "已有逐单维保导出正在执行，请稍后重试"
+        finally:
+            held_output.close()
+            holder.rollback()
+
+    retry = client.get("/api/maintenance/orders/export")
+    assert retry.status_code == 200, retry.text
+
+
+def test_export_holds_shared_source_lock_from_preflight_through_materialization(
+    db,
+    monkeypatch,
+):
+    _seed_orders(db, [("SOURCE-SNAPSHOT", date(2026, 7, 15), "已生效", None, 1)])
+    original_preflight = maintenance_export._preflight_row_limits
+    original_save = maintenance_export._save_workbook
+    protected_stages = []
+
+    def assert_import_lock_blocked(stage):
+        with SessionLocal() as importer:
+            acquired = importer.scalar(
+                text("SELECT pg_try_advisory_xact_lock(:k)"),
+                {"k": config.DATA_CHANGE_ADVISORY_LOCK_KEY},
+            )
+            protected_stages.append((stage, acquired))
+            importer.rollback()
+
+    def checked_preflight(*args, **kwargs):
+        assert_import_lock_blocked("preflight")
+        return original_preflight(*args, **kwargs)
+
+    def checked_save(*args, **kwargs):
+        assert_import_lock_blocked("materialization")
+        return original_save(*args, **kwargs)
+
+    monkeypatch.setattr(maintenance_export, "_preflight_row_limits", checked_preflight)
+    monkeypatch.setattr(maintenance_export, "_save_workbook", checked_save)
+
+    output = maintenance_export.build_workbook(
+        db,
+        UserContext(user_id="admin", role="admin"),
+    )
+    output.close()
+    assert protected_stages == [
+        ("preflight", False),
+        ("materialization", False),
+    ]
+
+    db.rollback()
+    with SessionLocal() as importer:
+        assert importer.scalar(
+            text("SELECT pg_try_advisory_xact_lock(:k)"),
+            {"k": config.DATA_CHANGE_ADVISORY_LOCK_KEY},
+        ) is True
+
+
 def test_all_export_contains_every_active_order_and_all_its_lines(db):
     _seed_orders(db, [
         ("OLD", date(2023, 12, 31), "已生效", date(2024, 1, 1), 2),
@@ -410,6 +544,17 @@ def test_cost_blind_user_exports_facts_with_all_cost_metadata_blank(db):
     line.linked_purchase_order_no = "CGDD-SECRET"
     line.price_distance_days = 0
     line.confidence = "high"
+    line.unit_cost_inc_tax = Decimal("12.34")
+    line.unit_cost_ex_tax = Decimal("10.92")
+    line.cost_amount_inc_tax = Decimal("24.68")
+    line.cost_amount_ex_tax = Decimal("21.84")
+    line.reference_side = "purchase"
+    line.reference_pool_group_id = 77
+    line.reference_pool_version = 3
+    line.reference_sample_count = 4
+    line.reference_from_date = date(2026, 6, 1)
+    line.reference_to_date = date(2026, 6, 30)
+    line.reference_latest_date = date(2026, 6, 30)
     db.commit()
 
     response = _cost_blind_client(db).get("/api/maintenance/orders/export")
@@ -421,7 +566,10 @@ def test_cost_blind_user_exports_facts_with_all_cost_metadata_blank(db):
     assert [row[key] for key in (
         "单价", "金额", "成本事实层级", "成本来源", "含税口径", "取价月", "追溯月数", "关联采购单",
         "距采购天数", "置信度",
-    )] == [None] * 10
+        "含税单位成本", "未税单位成本", "含税成本金额", "未税成本金额",
+        "参考侧", "参考池ID", "参考池版本", "参考样本数",
+        "参考起始日", "参考截止日", "最近样本日",
+    )] == [None] * 21
 
 
 def test_order_workbook_fail_closes_invalid_cost_amount_and_marks_missing_tier(db):
@@ -447,7 +595,12 @@ def test_order_workbook_fail_closes_invalid_cost_amount_and_marks_missing_tier(d
 def test_cost_blind_user_exports_data_quality_flags_without_cost_conclusions(db):
     _seed_orders(db, [("FLAGS", date(2026, 7, 15), "已生效", None, 1)])
     line = db.execute(select(FMaintenanceLine)).scalar_one()
-    line.anomaly_flags = ["future_date", "no_cost", "has_return", "cost_overflow", "missing_qty"]
+    line.anomaly_flags = [
+        "future_date",
+        *maintenance_cost_quality.COST_DERIVED_ANOMALY_FLAGS,
+        "has_return",
+        "missing_qty",
+    ]
     db.commit()
 
     response = _cost_blind_client(db).get("/api/maintenance/orders/export")

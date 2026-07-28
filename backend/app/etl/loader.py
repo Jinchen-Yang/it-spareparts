@@ -337,8 +337,8 @@ _SALES_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "descri
                     "brand", "category_major", "category_minor", "machine_or_part", "unit",
                     "qty", "unit_price", "line_amount", "generic_product", "serial_numbers",
                     "anomaly_flags", "import_batch_id"]
-# 维保：成本回填字段(unit_cost/cost_amount/cost_source/cost_tax_basis/price_month/
-# trace_months/linked_purchase_order_no)为 maintenance_cost.recompute 专属，一律排除
+# 维保：legacy 成本、双税成本及 reference_* provenance 均由
+# maintenance_cost.recompute 独占回填；导入修复不得覆盖。
 _MAINT_ORDER_UPD = ["order_no", "order_date", "linked_sales_order_no", "project_raw",
                      "project_std", "customer_id", "end_customer", "demand_type",
                      "business_type", "salesperson", "warehouse", "maint_start", "maint_end",

@@ -4,6 +4,7 @@ import { Button, Result } from "antd";
 import LoginPage from "./pages/LoginPage";
 import AppShell from "./AppShell";
 import { DETAIL_ROUTES, NAV_ITEMS, NAV_REDIRECTS, defaultPath } from "./nav";
+import { clearSessionScopedPreferences } from "./sessionPreferences";
 
 /** 安全读取本地权限快照：localStorage 被写坏时回退为空而非抛错致整页白屏（审计 U-1）。 */
 function readPerms(): Record<string, boolean> {
@@ -54,6 +55,7 @@ export default function App() {
   if (!token) return <LoginPage onLogin={setToken} />;
 
   const logout = () => {
+    clearSessionScopedPreferences();
     localStorage.removeItem("token");
     localStorage.removeItem("role");
     localStorage.removeItem("name");

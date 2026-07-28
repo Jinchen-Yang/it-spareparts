@@ -74,7 +74,15 @@ def recompute(db: Session = Depends(get_db),
               _auth: str = Depends(require_admin),   # 全表重算(~1min 写库)：限管理员，与导入触发方口径一致
               ctx: UserContext = Depends(get_current_user_context)) -> dict:
     record_access_log(ctx, "recompute", "maintenance")
-    return maintenance_cost.recompute(db)
+    try:
+        return maintenance_cost.recompute(db)
+    except maintenance_cost.MaintenanceCostRecomputeBusy as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+            headers={"Retry-After": "5"},
+        ) from exc
 
 
 @router.get("/projects")
@@ -270,14 +278,19 @@ def export(
               "已知成本参考(混合原值)", "成本完整性",
               "已知成本参考-含税小计(兼容)", "已知成本参考-不含税小计(兼容)",
               "已知成本参考合计(兼容)", "覆盖率%",
-              *(_SOURCE_LABEL[s] + "(行)" for s in ("direct", "window", "month_avg",
-                                                    "trace_avg", "sales_ref", "none")),
+              "备件成本-含税归一", "含税口径完整", "含税口径质量", "含税口径缺失行",
+              "备件成本-未税归一", "未税口径完整", "未税口径质量", "未税口径缺失行",
+              *(_SOURCE_LABEL[s] + "(行)" for s in (
+                  "direct", "window", "month_avg", "trace_avg", "sales_ref",
+                  "pool_purchase", "pool_sales", "purchase_history",
+                  "sales_history", "none",
+              )),
               "月份数", "关联销售订单", "合同额(含税参考)", "合同被多项目共用"]
     rows = []
     for r in data["rows"]:
         bs = r["by_source"]
         source_counts = (
-            [None] * 6
+            [None] * 10
             if bs is None
             else [
                 bs.get("direct", 0),
@@ -285,6 +298,10 @@ def export(
                 bs.get("month_avg", 0),
                 bs.get("trace_avg", 0),
                 bs.get("sales_ref", 0),
+                bs.get("pool_purchase", 0),
+                bs.get("pool_sales", 0),
+                bs.get("purchase_history", 0),
+                bs.get("sales_history", 0),
                 bs.get("none", 0),
             ]
         )
@@ -301,6 +318,18 @@ def export(
                      r["actual_lines"], r["estimated_lines"], r["missing_cost_lines"],
                      r["known_cost_total"], quality_label.get(r["cost_quality"], r["cost_quality"]),
                      r["cost_inc"], r["cost_ex"], r["cost_total"], r["coverage_pct"],
+                     r.get("parts_cost_inc_tax"), r.get("parts_cost_inc_tax_complete"),
+                     quality_label.get(
+                         r.get("parts_cost_inc_tax_quality"),
+                         r.get("parts_cost_inc_tax_quality"),
+                     ),
+                     r.get("parts_cost_inc_tax_missing_lines"),
+                     r.get("parts_cost_ex_tax"), r.get("parts_cost_ex_tax_complete"),
+                     quality_label.get(
+                         r.get("parts_cost_ex_tax_quality"),
+                         r.get("parts_cost_ex_tax_quality"),
+                     ),
+                     r.get("parts_cost_ex_tax_missing_lines"),
                      *source_counts,
                      r["months"], _safe("、".join(r["sales_orders"])),
                      r["contract_amount"], "是" if r["contract_shared"] else ""])
@@ -330,6 +359,14 @@ def orders_export(
     record_access_log(ctx, "orders_export", "maintenance", audit_scope)
     try:
         output = maintenance_export.build_workbook(db, ctx, date_from, date_to)
+    except maintenance_export.ExcelExportBusy as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": "5"},
+        ) from exc
+    except maintenance_export.ExcelExportTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     except (maintenance_export.ExcelCellTooLong, maintenance_export.ExcelRowLimitExceeded) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     _release_db_before_stream(db, output)
@@ -430,8 +467,12 @@ def lines_export(
             detail=f"CSV 数据行超过 {_MAX_CSV_DATA_ROWS} 行上限",
         )
     header = ["日期", "维保单号", "需求类型", "业务类型", "出库仓库", "PN", "描述",
-              "数量", "退货", "单价", "金额", "成本事实层级", "成本来源", "置信度", "含税口径", "取价月",
-              "追溯月数", "距采购天数", "关联采购单", "异常标记"]
+              "数量", "退货", "单价", "金额",
+              "含税单位成本", "未税单位成本", "含税成本金额", "未税成本金额",
+              "成本事实层级", "成本来源", "置信度", "含税口径", "取价月",
+              "追溯月数", "距采购天数", "关联采购单",
+              "参考侧", "参考池ID", "参考池版本", "参考样本数",
+              "参考起始日", "参考截止日", "最近样本日", "异常标记"]
 
     def rows():
         source_rows = maintenance_cost.iter_project_lines(
@@ -449,12 +490,18 @@ def lines_export(
                     r["order_date"], r["order_no"], r["demand_type"], r["business_type"],
                     r["warehouse"], r["pn_std"], r["description"],
                     r["qty"], r["return_qty"], r["unit_cost"], r["cost_amount"],
+                    r.get("unit_cost_inc_tax"), r.get("unit_cost_ex_tax"),
+                    r.get("cost_amount_inc_tax"), r.get("cost_amount_ex_tax"),
                     {"actual": "实际采购参考", "estimated": "估算参考",
                      "missing": "成本缺失"}.get(r["cost_tier"], r["cost_tier"]),
                     _SOURCE_LABEL.get(r["cost_source"], r["cost_source"]),
                     _CONF_LABEL.get(r["confidence"], r["confidence"] or ""),
                     r["cost_tax_basis"], r["price_month"], r["trace_months"],
                     r["price_distance_days"], r["linked_purchase_order_no"],
+                    r.get("reference_side"), r.get("reference_pool_group_id"),
+                    r.get("reference_pool_version"), r.get("reference_sample_count"),
+                    r.get("reference_from_date"), r.get("reference_to_date"),
+                    r.get("reference_latest_date"),
                     "、".join(r["anomaly_flags"] or []),
                 ]
         finally:
@@ -475,7 +522,10 @@ def lines_export(
 def board(
     status: str | None = Query(
         None,
-        pattern=r"^(incomplete_cost|red|yellow|green|no_budget)$",
+        pattern=(
+            r"^(incomplete_cost|expense_data_unavailable|"
+            r"red|yellow|green|no_budget)$"
+        ),
     ),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
@@ -486,7 +536,7 @@ def board(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """合同预算消耗参考：成本缺失优先，其后才允许红/黄/绿参考状态。"""
+    """合同预算消耗参考：成本或费用数据不完整时不计算红黄绿。"""
     record_access_log(ctx, "board", "maintenance")
     data = maintenance_cost.board(
         db, date_from, date_to, status, user_ctx=ctx, q_text=q,

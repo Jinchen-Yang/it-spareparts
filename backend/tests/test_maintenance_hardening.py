@@ -10,10 +10,12 @@ from decimal import Decimal
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
+from app import config
 from app.auth import hash_password
 from app.config import get_settings
+from app.db import SessionLocal
 from app.etl import loader, mapping
 from app.etl.transform import transform
 from app.main import app
@@ -77,6 +79,33 @@ def test_readonly_forbidden_admin_ok(db):
     ad_token, _ = _token("mc_admin", "pw_admin_123456")
     r3 = c.get("/api/maintenance/projects", headers={"Authorization": f"Bearer {ad_token}"})
     assert r3.status_code == 200
+
+
+def test_recompute_fails_fast_while_import_lock_is_held(db):
+    db.add(SysUser(
+        username="mc_recompute_busy_admin",
+        role="admin",
+        is_active=True,
+        password_hash=hash_password("pw_admin_123456"),
+    ))
+    db.commit()
+    token, _ = _token("mc_recompute_busy_admin", "pw_admin_123456")
+
+    with SessionLocal() as importer:
+        importer.execute(
+            text("SELECT pg_advisory_xact_lock(:k)"),
+            {"k": config.DATA_CHANGE_ADVISORY_LOCK_KEY},
+        )
+        response = TestClient(app).post(
+            "/api/maintenance/recompute",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 409
+    assert response.headers["retry-after"] == "5"
+    assert response.json()["detail"] == (
+        "维保数据导入或另一轮成本重算正在进行，请稍后重试"
+    )
 
 
 def test_readonly_template_closes_page_maintenance():

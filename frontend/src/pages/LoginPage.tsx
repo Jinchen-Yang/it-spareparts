@@ -3,6 +3,7 @@ import { Card, Form, Input, Button, Alert } from "antd";
 import { COLORS } from "../theme";
 import api from "../api";
 import LoginChangePasswordModal from "../components/LoginChangePasswordModal";
+import { clearSessionScopedPreferences } from "../sessionPreferences";
 
 interface LoginSessionData {
   token: string;
@@ -12,6 +13,8 @@ interface LoginSessionData {
 }
 
 export function persistLoginSession(data: LoginSessionData) {
+  // 个人口径是会话级临时偏好，绝不能由上一个账号继承。
+  clearSessionScopedPreferences();
   localStorage.setItem("role", data.role);
   localStorage.setItem("name", data.name || data.role);
   localStorage.setItem("permissions", JSON.stringify(data.permissions || {}));

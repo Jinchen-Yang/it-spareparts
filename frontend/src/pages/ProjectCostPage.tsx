@@ -10,7 +10,47 @@ import PageHeader from "../components/PageHeader";
 import dayjs from "dayjs";
 import type { Dayjs } from "dayjs";
 import api from "../api";
-import { money } from "../utils/format";
+import { getSystemSettings } from "../api/systemSettings";
+import type { MaintenanceProfitDefaultBasis } from "../api/systemSettings";
+import { MAINTENANCE_PROFIT_BASIS_KEY } from "../sessionPreferences";
+import { money, pct } from "../utils/format";
+
+export { MAINTENANCE_PROFIT_BASIS_KEY } from "../sessionPreferences";
+
+type PartsProfitStatus =
+  | "complete_actual"
+  | "complete_estimated"
+  | "missing_revenue"
+  | "missing_tax_rate"
+  | "invalid_tax_rate"
+  | "ambiguous_revenue"
+  | "incomplete_cost"
+  | "filtered_scope";
+
+type ContributionStatus =
+  | "complete"
+  | "expense_data_unavailable"
+  | "expense_tax_unknown"
+  | PartsProfitStatus;
+
+interface DualMarginFields {
+  revenue_inc?: number | null;
+  revenue_ex?: number | null;
+  parts_cost_inc_tax?: number | null;
+  parts_cost_ex_tax?: number | null;
+  parts_gross_profit_inc?: number | null;
+  parts_gross_profit_ex?: number | null;
+  parts_gross_margin_inc?: number | null;
+  parts_gross_margin_ex?: number | null;
+  parts_profit_status_inc?: PartsProfitStatus | string | null;
+  parts_profit_status_ex?: PartsProfitStatus | string | null;
+  contribution_profit_inc?: number | null;
+  contribution_profit_ex?: number | null;
+  contribution_margin_inc?: number | null;
+  contribution_margin_ex?: number | null;
+  contribution_status_inc?: ContributionStatus | string | null;
+  contribution_status_ex?: ContributionStatus | string | null;
+}
 
 interface ProjectRow {
   project: string;
@@ -54,13 +94,19 @@ interface LineRow {
 }
 
 type CostQuality = "actual_only" | "contains_estimate" | "incomplete";
-type BoardStatus = "incomplete_cost" | "red" | "yellow" | "green" | "no_budget";
+type BoardStatus =
+  | "incomplete_cost"
+  | "expense_data_unavailable"
+  | "red"
+  | "yellow"
+  | "green"
+  | "no_budget";
 type LifecycleStatus = "ongoing" | "ended" | "missing";
 type LifecycleFilter = LifecycleStatus | "all";
 type LifecycleCounts = Record<LifecycleStatus, number>;
 type ExportDatePreset = "all" | "today" | "last7" | "last14" | "last21" | "last30" | "month" | "custom";
 
-interface BoardRow {
+interface BoardRow extends DualMarginFields {
   contract: string | null;
   decision_status?: string | null;
   status?: string | null;
@@ -72,6 +118,7 @@ interface BoardRow {
   missing_cost_lines: number | null; known_cost_total: number | null;
   cost_quality?: string | null;
   spent_parts: number | null; spent_expense: number | null; spent: number | null;
+  expense_data_available?: boolean | null;
   budget: number | null; remaining: number | null; remaining_pct: number | null;
   low_conf_pct: number | null;
   maint_start: string | null; maint_end: string | null;
@@ -81,6 +128,7 @@ interface BoardRow {
 
 const STATUS_META: Record<BoardStatus, { label: string; color: string; bg: string }> = {
   incomplete_cost: { label: "成本不完整，需补数据", color: "#8c6d31", bg: "rgba(140,109,49,0.08)" },
+  expense_data_unavailable: { label: "费用数据未就绪", color: "#8c6d31", bg: "rgba(140,109,49,0.08)" },
   red: { label: "预算已用完或超预算", color: "#c0524a", bg: "rgba(192,82,74,0.08)" },
   yellow: { label: "预算余量 ≤ 20%", color: "#b8860b", bg: "rgba(212,160,23,0.10)" },
   green: { label: "预算余量 > 20%", color: "#3f7a45", bg: "rgba(63,122,69,0.07)" },
@@ -103,20 +151,278 @@ const COST_TIER_META: Record<string, { label: string; color: string }> = {
   missing: { label: "成本缺失", color: "orange" },
 };
 
-// 成本来源五态（口径见开发方案 §4.2）；trace_avg 必须带追溯月数标注（客户要求）
+// 既有来源 + 缺失成本历史参考；trace_avg 及历史层必须带真实追溯月数。
 const SOURCE_META: Record<string, { label: string; color: string }> = {
   direct: { label: "实际·专属采购", color: "green" },
   window: { label: "实际·±7天最近价", color: "cyan" },
   month_avg: { label: "实际·当月均价", color: "blue" },
   trace_avg: { label: "预估·追溯均价", color: "orange" },
   sales_ref: { label: "预估·销售参考", color: "purple" },
+  pool_purchase: { label: "预估·互通池采购均价", color: "gold" },
+  pool_sales: { label: "预估·互通池销售均价", color: "magenta" },
+  purchase_history: { label: "预估·本PN历史采购", color: "volcano" },
+  sales_history: { label: "预估·本PN历史销售", color: "purple" },
   none: { label: "成本缺失", color: "red" },
 };
-const SOURCE_ORDER = ["direct", "window", "month_avg", "trace_avg", "sales_ref", "none"];
+const SOURCE_ORDER = [
+  "direct", "window", "month_avg", "trace_avg", "sales_ref",
+  "pool_purchase", "pool_sales", "purchase_history", "sales_history", "none",
+];
 const COVERAGE_WARN_PCT = 80;   // 覆盖率预警线（经验值，非验收线；<此值标红提示核对无成本行）
 
+const PROFIT_BASIS_LABEL: Record<MaintenanceProfitDefaultBasis, string> = {
+  inc: "含税",
+  ex: "未税",
+  both: "含税与未税",
+};
+
+type ProfitStatusMeta = {
+  label: string;
+  color: string;
+  detail: string;
+};
+
+const PARTS_PROFIT_STATUS_META: Record<string, ProfitStatusMeta> = {
+  complete_actual: {
+    label: "完整 · 实际",
+    color: "green",
+    detail: "收入和成本证据完整，成本仅含实际参考。",
+  },
+  complete_estimated: {
+    label: "含估算",
+    color: "gold",
+    detail: "收入和成本证据完整，但成本中含低置信估算。",
+  },
+  missing_revenue: {
+    label: "收入缺失",
+    color: "orange",
+    detail: "合同收入缺失，毛利保持为空。",
+  },
+  missing_tax_rate: {
+    label: "税率缺失",
+    color: "orange",
+    detail: "合同税率缺失，对应含税毛利保持为空。",
+  },
+  invalid_tax_rate: {
+    label: "税率异常",
+    color: "red",
+    detail: "合同税率异常，对应含税毛利保持为空。",
+  },
+  ambiguous_revenue: {
+    label: "合同收入冲突",
+    color: "red",
+    detail: "同一 XSDD 存在多个冲突金额，收入取值未确认，毛利保持为空。",
+  },
+  incomplete_cost: {
+    label: "成本不完整",
+    color: "orange",
+    detail: "仍有成本缺失，毛利保持为空。",
+  },
+  filtered_scope: {
+    label: "日期筛选下暂不计算",
+    color: "default",
+    detail: "当前是期间成本，不能与完整合同收入直接比较。",
+  },
+};
+
+const CONTRIBUTION_STATUS_META: Record<string, ProfitStatusMeta> = {
+  complete: {
+    label: "完整",
+    color: "green",
+    detail: "备件毛利与费用证据均完整，可展示合同级贡献毛利。",
+  },
+  expense_tax_unknown: {
+    label: "费用税务口径待确认",
+    color: "orange",
+    detail: "报销费用缺少税务口径，合同级贡献毛利保持为空。",
+  },
+  expense_data_unavailable: {
+    label: "费用数据未就绪",
+    color: "orange",
+    detail: "尚无可证明完整的报销数据集，合同级贡献毛利保持为空。",
+  },
+  parts_profit_unavailable: {
+    label: "备件毛利未就绪",
+    color: "orange",
+    detail: "备件毛利证据尚未完整，合同级贡献毛利保持为空。",
+  },
+};
+
+function validProfitBasis(value: unknown): value is MaintenanceProfitDefaultBasis {
+  return value === "inc" || value === "ex" || value === "both";
+}
+
+export function readMaintenanceProfitBasisOverride(): MaintenanceProfitDefaultBasis | null {
+  try {
+    const value = localStorage.getItem(MAINTENANCE_PROFIT_BASIS_KEY);
+    return validProfitBasis(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeMaintenanceProfitBasisOverride(
+  basis: MaintenanceProfitDefaultBasis | null,
+) {
+  try {
+    if (basis == null) localStorage.removeItem(MAINTENANCE_PROFIT_BASIS_KEY);
+    else localStorage.setItem(MAINTENANCE_PROFIT_BASIS_KEY, basis);
+  } catch {
+    // 隐私模式等场景仍更新当前页面状态；只是不跨刷新保存。
+  }
+}
+
+function selectedProfitBases(
+  basis: MaintenanceProfitDefaultBasis,
+): Array<"inc" | "ex"> {
+  return basis === "both" ? ["inc", "ex"] : [basis];
+}
+
+function marginValue(
+  row: DualMarginFields,
+  basis: "inc" | "ex",
+  field: "revenue" | "parts_cost" | "parts_profit" | "parts_margin"
+    | "parts_status" | "contribution_profit" | "contribution_margin"
+    | "contribution_status",
+) {
+  const suffix = basis === "inc" ? "inc" : "ex";
+  if (field === "parts_cost") {
+    return row[`parts_cost_${suffix}_tax` as keyof DualMarginFields];
+  }
+  if (field === "parts_profit") {
+    return row[`parts_gross_profit_${suffix}` as keyof DualMarginFields];
+  }
+  if (field === "parts_margin") {
+    return row[`parts_gross_margin_${suffix}` as keyof DualMarginFields];
+  }
+  if (field === "parts_status") {
+    return row[`parts_profit_status_${suffix}` as keyof DualMarginFields];
+  }
+  return row[`${field}_${suffix}` as keyof DualMarginFields];
+}
+
+function ProfitStatusTag({
+  status,
+  kind,
+}: {
+  status: string | null | undefined;
+  kind: "parts" | "contribution";
+}) {
+  const meta = status
+    ? (
+      kind === "parts"
+        ? PARTS_PROFIT_STATUS_META[status]
+        : CONTRIBUTION_STATUS_META[status]
+    )
+    : undefined;
+  if (!meta) {
+    return (
+      <Tooltip title="后端尚未提供可核实的毛利状态。">
+        <span
+          tabIndex={0}
+          aria-label="结果未提供：后端尚未提供可核实的毛利状态。"
+        >
+          <Tag>结果未提供</Tag>
+        </span>
+      </Tooltip>
+    );
+  }
+  return (
+    <Tooltip title={meta.detail}>
+      <span tabIndex={0} aria-label={`${meta.label}：${meta.detail}`}>
+        <Tag color={meta.color}>{meta.label}</Tag>
+      </span>
+    </Tooltip>
+  );
+}
+
+function MarginFacts({ row, basis }: {
+  row: DualMarginFields;
+  basis: "inc" | "ex";
+}) {
+  const partsStatus = marginValue(
+    row,
+    basis,
+    "parts_status",
+  ) as string | null | undefined;
+  const rawContributionStatus = marginValue(
+    row,
+    basis,
+    "contribution_status",
+  ) as string | null | undefined;
+  const partsComplete = (
+    partsStatus === "complete_actual" || partsStatus === "complete_estimated"
+  );
+  const contributionStatus = partsComplete
+    ? rawContributionStatus
+    : "parts_profit_unavailable";
+  const partsProfitAllowed = partsComplete;
+  const contributionAllowed = partsComplete && contributionStatus === "complete";
+  const revenueAllowed = partsComplete || partsStatus === "incomplete_cost";
+  const partsCostAllowed = partsComplete || (
+    partsStatus === "missing_revenue"
+    || partsStatus === "missing_tax_rate"
+    || partsStatus === "invalid_tax_rate"
+    || partsStatus === "ambiguous_revenue"
+    || partsStatus === "filtered_scope"
+  );
+  // UI 同样 fail-closed：阻断/未知状态即便夹带脏数字，也不能显示为财务结论。
+  const revenue = revenueAllowed
+    ? marginValue(row, basis, "revenue") as number | null | undefined
+    : null;
+  const partsCost = partsCostAllowed
+    ? marginValue(row, basis, "parts_cost") as number | null | undefined
+    : null;
+  const partsProfit = partsProfitAllowed
+    ? marginValue(row, basis, "parts_profit") as number | null | undefined
+    : null;
+  const partsMargin = partsProfitAllowed
+    ? marginValue(row, basis, "parts_margin") as number | null | undefined
+    : null;
+  const contributionProfit = contributionAllowed
+    ? marginValue(row, basis, "contribution_profit") as number | null | undefined
+    : null;
+  const contributionMargin = contributionAllowed
+    ? marginValue(row, basis, "contribution_margin") as number | null | undefined
+    : null;
+  const hasEvidence = [
+    revenue,
+    partsCost,
+    partsProfit,
+    partsMargin,
+    contributionProfit,
+    contributionMargin,
+    partsStatus,
+    rawContributionStatus,
+  ].some((value) => value != null);
+  if (!hasEvidence) return <span style={{ color: "var(--mb-text-3)" }}>—</span>;
+
+  return (
+    <div
+      data-testid={`maintenance-margin-card-${basis}`}
+      style={{ fontSize: 12.5, lineHeight: 1.7 }}
+    >
+      <div>
+        <strong>合同级备件毛利</strong>{" "}
+        <ProfitStatusTag status={partsStatus} kind="parts" />
+      </div>
+      <div>合同收入 {money(revenue)}</div>
+      <div>备件成本 {money(partsCost)}</div>
+      <div>毛利 {money(partsProfit)} · {pct(partsMargin, 2)}</div>
+      <div style={{ marginTop: 4 }}>
+        <strong>合同级贡献毛利（费用口径待确认）</strong>{" "}
+        <ProfitStatusTag status={contributionStatus} kind="contribution" />
+      </div>
+      <div>
+        贡献毛利 {money(contributionProfit)} · {pct(contributionMargin, 2)}
+      </div>
+    </div>
+  );
+}
+
 const BOARD_STATUSES = new Set<BoardStatus>([
-  "incomplete_cost", "red", "yellow", "green", "no_budget",
+  "incomplete_cost", "expense_data_unavailable",
+  "red", "yellow", "green", "no_budget",
 ]);
 
 function normalizeDecisionStatus(
@@ -253,6 +559,13 @@ export default function ProjectCostPage() {
     && localPermissions.data_profit === true
   );
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
+  const [profitBasisOverride, setProfitBasisOverride] = useState<
+    MaintenanceProfitDefaultBasis | null
+  >(readMaintenanceProfitBasisOverride);
+  const [adminProfitBasis, setAdminProfitBasis] = useState<
+    MaintenanceProfitDefaultBasis | null
+  >(null);
+  const [profitBasisFallback, setProfitBasisFallback] = useState(false);
   const [exportDatePreset, setExportDatePreset] = useState<ExportDatePreset>("all");
   const exportDatePresetRef = useRef<ExportDatePreset>("all");
   const [q, setQ] = useState("");
@@ -284,6 +597,40 @@ export default function ProjectCostPage() {
   const detailRef = useRef<string | null>(null);
   // 页面两组聚合请求共享代次：快速切换期限/日期/搜索时，迟到响应不能覆盖最新筛选。
   const pageSeq = useRef(0);
+  const effectiveProfitBasis = profitBasisOverride ?? adminProfitBasis ?? "both";
+
+  useEffect(() => {
+    let active = true;
+    getSystemSettings()
+      .then(({ data }) => {
+        if (!active) return;
+        if (validProfitBasis(data.maintenance_project_profit_default_basis)) {
+          setAdminProfitBasis(data.maintenance_project_profit_default_basis);
+          setProfitBasisFallback(false);
+        } else {
+          setAdminProfitBasis("both");
+          setProfitBasisFallback(true);
+        }
+      })
+      .catch(() => {
+        if (!active) return;
+        setAdminProfitBasis("both");
+        setProfitBasisFallback(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const chooseProfitBasis = (basis: MaintenanceProfitDefaultBasis) => {
+    writeMaintenanceProfitBasisOverride(basis);
+    setProfitBasisOverride(basis);
+  };
+
+  const restoreAdminProfitBasis = () => {
+    writeMaintenanceProfitBasisOverride(null);
+    setProfitBasisOverride(null);
+  };
 
   const baseParams = () => ({
     q: q || undefined,
@@ -384,6 +731,8 @@ export default function ProjectCostPage() {
       message.success(
         `重算完成：${data.lines_in_scope} 行 · 专属采购 ${data.direct} · ±7天 ${data.window}` +
         ` · 当月均价 ${data.month_avg} · 追溯 ${data.trace_avg} · 销售参考 ${data.sales_ref}` +
+        ` · 池采购 ${data.pool_purchase} · 池销售 ${data.pool_sales}` +
+        ` · 本PN历史采购 ${data.purchase_history} · 本PN历史销售 ${data.sales_history}` +
         ` · 无成本 ${data.none}`);
       load();
     } catch {
@@ -563,7 +912,7 @@ export default function ProjectCostPage() {
         <span>
           {money(v)}
           {r.contract_shared && (
-            <Tooltip title="该合同被多个项目共同引用，金额跨项目重复，仅作参考（本期不计项目毛利）">
+            <Tooltip title="该合同被多个项目共同引用，金额跨项目重复，仅作参考（本期不计算单项目毛利）">
               <Tag color="warning" style={{ marginLeft: 4 }}>共用</Tag>
             </Tooltip>
           )}
@@ -637,7 +986,7 @@ export default function ProjectCostPage() {
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <PageHeader
         title="项目成本"
-        subtitle={`维保备件成本按实际采购参考、估算参考、成本缺失分层；缺失时停止预算余额和红黄绿判断，含税/不含税原值分列、不可跨口径相加${startDate ? ` · 起算日 ${startDate}` : ""}`}
+        subtitle={`维保备件成本按实际采购参考、估算参考、成本缺失分层；合同毛利同时保留含税与未税事实，证据不完整时保持空值${startDate ? ` · 起算日 ${startDate}` : ""}`}
       />
       <Card>
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
@@ -659,6 +1008,48 @@ export default function ProjectCostPage() {
                 ]}
               />
             </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>
+              合同级毛利展示口径
+            </div>
+            <Space wrap>
+              <Segmented
+                aria-label="合同级毛利展示口径"
+                value={effectiveProfitBasis}
+                onChange={(value) => {
+                  chooseProfitBasis(value as MaintenanceProfitDefaultBasis);
+                }}
+                options={[
+                  { label: "含税毛利", value: "inc" },
+                  { label: "未税毛利", value: "ex" },
+                  { label: "同时显示", value: "both" },
+                ]}
+              />
+              <Button
+                size="small"
+                disabled={profitBasisOverride == null}
+                onClick={restoreAdminProfitBasis}
+              >
+                恢复管理员默认
+              </Button>
+              <span style={{ color: "var(--mb-text-3)", fontSize: 12.5 }}>
+                {adminProfitBasis == null
+                  ? "正在读取管理员默认…"
+                  : `管理员默认：${PROFIT_BASIS_LABEL[adminProfitBasis]}`}
+                {profitBasisOverride != null ? " · 当前为个人临时选择" : " · 当前跟随默认"}
+              </span>
+            </Space>
+            {profitBasisFallback && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginTop: 8 }}
+                message={profitBasisOverride == null
+                  ? "管理员默认读取失败，本次安全回退为含税与未税同时显示。"
+                  : "管理员默认读取失败，当前继续使用已保存的个人临时选择。"}
+              />
+            )}
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 24, width: "100%", minWidth: 0 }}>
             <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowX: "auto", paddingBottom: 2 }}>
@@ -753,8 +1144,8 @@ export default function ProjectCostPage() {
       </Card>
 
       <Card
-        title={<Space>项目预算消耗参考
-          <Tooltip title="按合同聚合实际采购参考、估算参考与成本缺失。任一成本缺失时只提示补数据，不计算余额或红黄绿；成本完整后才对照合同金额显示预算消耗参考，不定义正式项目毛利。">
+        title={<Space>合同预算与双口径毛利
+          <Tooltip title="按合同聚合收入、备件成本与费用。含税、未税独立计算；任一口径证据不完整时，该口径毛利保持为空并显示原因。">
             <InfoCircleOutlined style={{ color: "var(--mb-text-3)" }} />
           </Tooltip></Space>}
       >
@@ -769,6 +1160,9 @@ export default function ProjectCostPage() {
                 { label: `待补成本 ${board.filter((b) =>
                   effectiveBoardStatus(b) === "incomplete_cost").length}`,
                   value: "incomplete_cost" },
+                { label: `待补费用数据 ${board.filter((b) =>
+                  effectiveBoardStatus(b) === "expense_data_unavailable").length}`,
+                  value: "expense_data_unavailable" },
                 { label: `🔴 ${board.filter((b) =>
                   effectiveBoardStatus(b) === "red").length}`, value: "red" },
                 { label: `🟡 ${board.filter((b) =>
@@ -821,6 +1215,8 @@ export default function ProjectCostPage() {
               const incomplete = costIncomplete || decisionIncomplete;
               const decisionStatus = boardDecisionRestricted
                 ? undefined : incomplete ? "incomplete_cost" : normalizedDecision;
+              const expenseUnavailable = !boardDecisionRestricted
+                && decisionStatus === "expense_data_unavailable";
               const meta = decisionStatus ? STATUS_META[decisionStatus] : NEUTRAL_META;
               const hasBudgetDecision = decisionStatus === "red"
                 || decisionStatus === "yellow"
@@ -830,7 +1226,7 @@ export default function ProjectCostPage() {
                 && b.remaining != null && b.remaining_pct != null
                 ? Math.round((b.spent / b.budget) * 100) : null;
               let timePct: number | null = null;
-              if (!incomplete && b.maint_start && b.maint_end) {
+              if (!incomplete && !expenseUnavailable && b.maint_start && b.maint_end) {
                 const s0 = new Date(b.maint_start).getTime();
                 const e0 = new Date(b.maint_end).getTime();
                 if (e0 > s0) timePct = Math.min(Math.max(
@@ -867,6 +1263,34 @@ export default function ProjectCostPage() {
                       )}
                     </Space>
                   </div>
+                  {!boardDecisionRestricted && (
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: effectiveProfitBasis === "both"
+                          ? "repeat(2, minmax(0, 1fr))" : "1fr",
+                        gap: 10,
+                        marginTop: 10,
+                      }}
+                    >
+                      {selectedProfitBases(effectiveProfitBasis).map((basis) => (
+                        <div
+                          key={basis}
+                          style={{
+                            minWidth: 0,
+                            padding: "8px 9px",
+                            borderRadius: 6,
+                            background: "rgba(255,255,255,0.6)",
+                          }}
+                        >
+                          <div style={{ fontWeight: 600, marginBottom: 3 }}>
+                            {PROFIT_BASIS_LABEL[basis]}口径
+                          </div>
+                          <MarginFacts row={b} basis={basis} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {incomplete ? (
                     <Alert
                       type="warning"
@@ -874,6 +1298,14 @@ export default function ProjectCostPage() {
                       style={{ marginTop: 8 }}
                       message="成本不完整，需补数据"
                       description="当前仅展示已知成本事实，不计算预算余额或红黄绿参考。"
+                    />
+                  ) : expenseUnavailable ? (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      style={{ marginTop: 8 }}
+                      message="费用数据未就绪"
+                      description="当前只展示已知备件成本；无报销记录不等于费用为 0，不计算完整支出、预算余额或红黄绿参考。"
                     />
                   ) : !boardDecisionRestricted && (
                     <div style={{ marginTop: 8, fontSize: 12.5 }}>
@@ -901,7 +1333,10 @@ export default function ProjectCostPage() {
                     估算参考：含税 {money(b.estimated_cost_inc)} / 不含税 {money(b.estimated_cost_ex)}
                     {" · "}
                     {b.missing_cost_lines == null ? "缺失 —" : `缺失 ${b.missing_cost_lines} 行`}
-                    {" · "}报销费用 {money(b.spent_expense)}
+                    {" · "}报销费用{" "}
+                    {b.expense_data_available === true
+                      ? money(b.spent_expense)
+                      : "数据未就绪（无记录不等于0）"}
                     {(b.low_conf_pct ?? 0) >= 30 && (
                       <Tooltip title="低置信（追溯/销售参考）成本占比高，金额估算成分大，建议核对">
                         <Tag color="orange" style={{ marginLeft: 6 }}>估算成分高 {b.low_conf_pct}%</Tag>
@@ -952,7 +1387,7 @@ export default function ProjectCostPage() {
       <Card title="项目成本事实分层">
         <Alert
           type="info" showIcon style={{ marginBottom: 12 }}
-          message="实际采购参考与估算参考均按含税/不含税原值分列，请勿直接相加；成本缺失时只提示补数据，不给预算余额或经营结论。合同额仅作预算参考，本期不定义正式项目毛利。"
+          message="含税与未税收入、成本、毛利独立展示；含估算会明确标识，成本、收入、税率或费用证据不完整时对应毛利保持为空，不以 0 补齐。"
         />
         <ResizableTable
           storageKey="maint-projects"

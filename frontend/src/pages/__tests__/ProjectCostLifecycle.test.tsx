@@ -4,6 +4,7 @@ import { message } from "antd";
 
 const get = vi.fn();
 const post = vi.fn();
+const getSystemSettings = vi.fn();
 
 vi.mock("../../api", () => ({
   default: {
@@ -12,7 +13,14 @@ vi.mock("../../api", () => ({
   },
 }));
 
-import ProjectCostPage, { buildOrderExportParams } from "../ProjectCostPage";
+vi.mock("../../api/systemSettings", () => ({
+  getSystemSettings: (...args: unknown[]) => getSystemSettings(...args),
+}));
+
+import ProjectCostPage, {
+  buildOrderExportParams,
+  MAINTENANCE_PROFIT_BASIS_KEY,
+} from "../ProjectCostPage";
 
 type Lifecycle = "ongoing" | "ended" | "missing" | "all";
 
@@ -86,10 +94,27 @@ function board(contract = "XSDD-1", lifecycle: Lifecycle = "ongoing", asOf = "20
         spent_parts: nullable(100),
         spent_expense: nullable(0),
         spent: nullable(100),
+        expense_data_available: optional(true),
         budget: nullable(1000),
         remaining: nullable(900),
         remaining_pct: nullable(90),
         low_conf_pct: nullable(0),
+        revenue_inc: nullable(1060),
+        revenue_ex: nullable(1000),
+        parts_cost_inc_tax: nullable(226),
+        parts_cost_ex_tax: nullable(200),
+        parts_gross_profit_inc: nullable(834),
+        parts_gross_profit_ex: nullable(800),
+        parts_gross_margin_inc: nullable(0.7868),
+        parts_gross_margin_ex: nullable(0.8),
+        parts_profit_status_inc: nullable("complete_estimated"),
+        parts_profit_status_ex: nullable("complete_actual"),
+        contribution_profit_inc: nullable(null),
+        contribution_profit_ex: nullable(null),
+        contribution_margin_inc: nullable(null),
+        contribution_margin_ex: nullable(null),
+        contribution_status_inc: nullable("expense_tax_unknown"),
+        contribution_status_ex: nullable("expense_tax_unknown"),
         maint_start: "2026-01-01",
         maint_end: lifecycle === "missing" ? null : lifecycle === "ended" ? "2026-07-15" : "2026-07-16",
         lifecycle_status: lifecycle === "all" ? "ongoing" : lifecycle,
@@ -126,6 +151,14 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  getSystemSettings.mockResolvedValue({
+    data: {
+      maintenance_project_profit_default_basis: "both",
+      version: 1,
+      updated_by: null,
+      updated_at: null,
+    },
+  });
   localStorage.clear();
   localStorage.setItem("role", "readonly");
   localStorage.setItem("permissions", JSON.stringify({
@@ -295,6 +328,41 @@ describe("维保项目生命周期筛选", () => {
     expect(within(card).queryByText(/健康|亏损|超支/)).toBeNull();
     expect(screen.getByRole("radiogroup", { name: "预算消耗参考状态筛选" }))
       .toBeInTheDocument();
+  });
+
+  it("费用全量水位未建立时不把无记录显示为0，也不展示预算余额或红黄绿", async () => {
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/projects") return Promise.resolve(projects());
+      if (path === "/maintenance/board") {
+        const response = board("XS-NO-EXPENSE-WATERMARK");
+        response.data.rows[0] = {
+          ...response.data.rows[0],
+          decision_status: "expense_data_unavailable",
+          status: "expense_data_unavailable",
+          expense_data_available: false,
+          spent_expense: null,
+          spent: null,
+          remaining: null,
+          remaining_pct: null,
+        };
+        return Promise.resolve(response);
+      }
+      return Promise.reject(new Error("unexpected"));
+    });
+
+    render(<ProjectCostPage />);
+
+    const card = await screen.findByTestId(
+      "maintenance-board-card-XS-NO-EXPENSE-WATERMARK",
+    );
+    expect(within(card).getAllByText("费用数据未就绪")).toHaveLength(2);
+    expect(card).toHaveTextContent("无报销记录不等于费用为 0");
+    expect(card).toHaveTextContent("报销费用 数据未就绪（无记录不等于0）");
+    expect(card).not.toHaveTextContent("报销费用 ¥0");
+    expect(card).not.toHaveTextContent("剩余预算");
+    expect(within(card).queryByRole("progressbar")).toBeNull();
+    expect(screen.getByText("待补费用数据 1")).toBeInTheDocument();
+    expect(screen.getByText("🟢 0")).toBeInTheDocument();
   });
 
   it("后端出现未知决策枚举时 fail-closed 为成本不完整，不能回退成旧 green", async () => {
@@ -1506,5 +1574,192 @@ describe("维保项目生命周期筛选", () => {
       .toBeInTheDocument();
     expect(screen.getByText("当前筛选无结果，请调整搜索、日期或期限状态"))
       .toBeInTheDocument();
+  });
+});
+
+describe("项目毛利管理员默认与个人临时口径", () => {
+  it("无个人覆盖时采用管理员默认，并可临时选择后恢复默认", async () => {
+    getSystemSettings.mockResolvedValue({
+      data: {
+        maintenance_project_profit_default_basis: "inc",
+        version: 2,
+        updated_by: "admin",
+        updated_at: "2026-07-28T20:00:00+08:00",
+      },
+    });
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+
+    await screen.findByText(/管理员默认：含税/);
+    expect(screen.getByTestId("maintenance-margin-card-inc")).toBeInTheDocument();
+    expect(screen.queryByTestId("maintenance-margin-card-ex")).toBeNull();
+
+    fireEvent.click(screen.getByRole("radio", { name: "未税毛利" }));
+    expect(localStorage.getItem(MAINTENANCE_PROFIT_BASIS_KEY)).toBe("ex");
+    expect(screen.getByTestId("maintenance-margin-card-ex")).toBeInTheDocument();
+    expect(screen.queryByTestId("maintenance-margin-card-inc")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复管理员默认" }));
+    expect(localStorage.getItem(MAINTENANCE_PROFIT_BASIS_KEY)).toBeNull();
+    expect(screen.getByTestId("maintenance-margin-card-inc")).toBeInTheDocument();
+    expect(screen.queryByTestId("maintenance-margin-card-ex")).toBeNull();
+  });
+
+  it("已有个人覆盖时不被管理员默认覆盖", async () => {
+    localStorage.setItem(MAINTENANCE_PROFIT_BASIS_KEY, "ex");
+    getSystemSettings.mockResolvedValue({
+      data: {
+        maintenance_project_profit_default_basis: "inc",
+        version: 2,
+        updated_by: "admin",
+        updated_at: null,
+      },
+    });
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+
+    await screen.findByText(/管理员默认：含税/);
+    expect(screen.getByText(/当前为个人临时选择/)).toBeInTheDocument();
+    expect(screen.getByTestId("maintenance-margin-card-ex")).toBeInTheDocument();
+    expect(screen.queryByTestId("maintenance-margin-card-inc")).toBeNull();
+  });
+
+  it("管理员默认接口失败时安全回退为两套同时显示", async () => {
+    getSystemSettings.mockRejectedValue(new Error("network down"));
+    installSuccessResponses();
+    render(<ProjectCostPage />);
+
+    expect(await screen.findByText(/安全回退为含税与未税同时显示/))
+      .toBeInTheDocument();
+    expect(screen.getByTestId("maintenance-margin-card-inc")).toBeInTheDocument();
+    expect(screen.getByTestId("maintenance-margin-card-ex")).toBeInTheDocument();
+    expect(localStorage.getItem(MAINTENANCE_PROFIT_BASIS_KEY)).toBeNull();
+  });
+
+  it("合同卡展示完整 flat 字段，估算及阻断状态清楚且空值不伪造为零", async () => {
+    installSuccessResponses();
+    const originalImplementation = get.getMockImplementation();
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      if (path === "/maintenance/board") {
+        const response = board();
+        Object.assign(response.data.rows[0], {
+          parts_profit_status_inc: "complete_estimated",
+          parts_profit_status_ex: "complete_actual",
+          contribution_status_inc: "expense_data_unavailable",
+          contribution_status_ex: "expense_tax_unknown",
+          contribution_profit_ex: null,
+          contribution_margin_ex: null,
+        });
+        return Promise.resolve(response);
+      }
+      return originalImplementation?.(path, config);
+    });
+    render(<ProjectCostPage />);
+
+    const inc = await screen.findByTestId("maintenance-margin-card-inc");
+    const ex = screen.getByTestId("maintenance-margin-card-ex");
+    expect(within(inc).getByText("含估算")).toBeInTheDocument();
+    expect(within(inc).getByText("费用数据未就绪")).toBeInTheDocument();
+    expect(inc).toHaveTextContent("合同收入 ¥1,060");
+    expect(inc).toHaveTextContent("备件成本 ¥226");
+    expect(inc).toHaveTextContent("合同级备件毛利");
+    expect(inc).toHaveTextContent("¥834 · 78.68%");
+    expect(within(ex).getByText("费用税务口径待确认")).toBeInTheDocument();
+    expect(ex).toHaveTextContent("合同级贡献毛利（费用口径待确认）");
+    expect(ex).toHaveTextContent("贡献毛利 - · -");
+    expect(ex).not.toHaveTextContent("贡献毛利 ¥0");
+    expect(screen.queryByRole("columnheader", { name: /项目毛利/ })).toBeNull();
+  });
+
+  it("费用证据完整时只从 contribution 字段展示项目贡献毛利", async () => {
+    installSuccessResponses();
+    const originalImplementation = get.getMockImplementation();
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      if (path === "/maintenance/board") {
+        const response = board();
+        Object.assign(response.data.rows[0], {
+          parts_profit_status_inc: "complete_actual",
+          contribution_profit_inc: 784,
+          contribution_margin_inc: 0.7396,
+          contribution_status_inc: "complete",
+        });
+        return Promise.resolve(response);
+      }
+      return originalImplementation?.(path, config);
+    });
+    render(<ProjectCostPage />);
+
+    const inc = await screen.findByTestId("maintenance-margin-card-inc");
+    expect(within(inc).getByText("完整")).toBeInTheDocument();
+    expect(inc).toHaveTextContent("贡献毛利 ¥784 · 73.96%");
+  });
+
+  it("阻断或未知状态即使夹带脏数字也不展示毛利结论", async () => {
+    installSuccessResponses();
+    const originalImplementation = get.getMockImplementation();
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      if (path === "/maintenance/board") {
+        const response = board();
+        Object.assign(response.data.rows[0], {
+          parts_profit_status_inc: "ambiguous_revenue",
+          contribution_status_inc: "complete",
+          revenue_inc: 999,
+          parts_gross_profit_inc: 998,
+          parts_gross_margin_inc: 0.998,
+          contribution_profit_inc: 997,
+          contribution_margin_inc: 0.997,
+          parts_profit_status_ex: "complete_actual",
+          contribution_status_ex: "future_unknown_status",
+          revenue_ex: 899,
+          parts_cost_ex_tax: 898,
+          parts_gross_profit_ex: 897,
+          parts_gross_margin_ex: 0.897,
+          contribution_profit_ex: 896,
+          contribution_margin_ex: 0.896,
+        });
+        return Promise.resolve(response);
+      }
+      return originalImplementation?.(path, config);
+    });
+    render(<ProjectCostPage />);
+
+    const inc = await screen.findByTestId("maintenance-margin-card-inc");
+    const ex = screen.getByTestId("maintenance-margin-card-ex");
+    expect(within(inc).getByText("合同收入冲突")).toBeInTheDocument();
+    expect(inc).not.toHaveTextContent("¥999");
+    expect(inc).not.toHaveTextContent("¥998");
+    expect(inc).not.toHaveTextContent("¥997");
+    expect(within(ex).getByText("结果未提供")).toBeInTheDocument();
+    expect(ex).toHaveTextContent("合同收入 ¥899");
+    expect(ex).toHaveTextContent("备件成本 ¥898");
+    expect(ex).toHaveTextContent("¥897 · 89.70%");
+    expect(ex).not.toHaveTextContent("¥896");
+  });
+
+  it("重复 XSDD 收入冲突时明确阻断毛利，不把任一历史金额当收入", async () => {
+    installSuccessResponses();
+    const originalImplementation = get.getMockImplementation();
+    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
+      if (path === "/maintenance/board") {
+        const response = board();
+        Object.assign(response.data.rows[0], {
+          revenue_inc: null,
+          parts_gross_profit_inc: null,
+          parts_gross_margin_inc: null,
+          parts_profit_status_inc: "ambiguous_revenue",
+          contribution_profit_inc: null,
+          contribution_margin_inc: null,
+          contribution_status_inc: "ambiguous_revenue",
+        });
+        return Promise.resolve(response);
+      }
+      return originalImplementation?.(path, config);
+    });
+    render(<ProjectCostPage />);
+
+    const inc = await screen.findByTestId("maintenance-margin-card-inc");
+    expect(within(inc).getByText("合同收入冲突")).toBeInTheDocument();
+    expect(inc).toHaveTextContent("合同收入 -");
+    expect(inc).not.toHaveTextContent("合同收入 ¥0");
   });
 });

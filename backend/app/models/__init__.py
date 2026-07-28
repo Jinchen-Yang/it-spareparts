@@ -17,6 +17,7 @@ from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import (
     SysAuditLog,
+    SysBusinessSetting,
     SysImportBatch,
     SysImportError,
     SysImportJob,
@@ -53,6 +54,7 @@ __all__ = [
     "SysImportJob",
     "SysRawFile",
     "SysAuditLog",
+    "SysBusinessSetting",
     "SysUser",
     "SysRoleTemplate",
 ]

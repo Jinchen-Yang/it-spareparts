@@ -15,7 +15,7 @@ from app.etl import loader
 from app.main import app
 from app.models.maintenance import FMaintenanceLine
 from app.models.system import SysImportBatch, SysUser
-from app.services import maintenance_cost
+from app.services import maintenance_cost, maintenance_cost_quality
 from tests import factories as f
 
 
@@ -123,10 +123,22 @@ def test_api_profit_blind_board_removes_status_filter_counts_and_ranking(
     assert all(row["cost_quality"] == "actual_only" for row in data["rows"])
     assert all(row["actual_lines"] == 1 for row in data["rows"])
     assert all(row["known_cost_total"] is not None for row in data["rows"])
-    assert all(row["spent_expense"] == 0 for row in data["rows"])
+    assert all(row["spent_expense"] is None for row in data["rows"])
+    assert all(row["expense_data_available"] is False for row in data["rows"])
     assert all(row["budget"] is None for row in data["rows"])
     assert all(row["remaining"] is None for row in data["rows"])
     assert all(row["remaining_pct"] is None for row in data["rows"])
+    for row in data["rows"]:
+        for field in (
+            "revenue_inc", "revenue_ex",
+            "parts_gross_profit_inc", "parts_gross_profit_ex",
+            "parts_gross_margin_inc", "parts_gross_margin_ex",
+            "parts_profit_status_inc", "parts_profit_status_ex",
+            "contribution_profit_inc", "contribution_profit_ex",
+            "contribution_margin_inc", "contribution_margin_ex",
+            "contribution_status_inc", "contribution_status_ex",
+        ):
+            assert row[field] is None
     assert [row["contract"] for row in data["rows"]] == ["XS-A", "XS-M", "XS-Z"]
 
     projects_response = client.get("/api/maintenance/projects")
@@ -154,6 +166,12 @@ def test_api_cost_blind_projects_use_neutral_sort_before_any_consumer_truncation
     assert all(row["cost_quality"] is None for row in data["rows"])
     assert all(row["by_source"] is None for row in data["rows"])
     assert all(row["coverage_pct"] is None for row in data["rows"])
+    assert all(row["parts_cost_inc_tax"] is None for row in data["rows"])
+    assert all(row["parts_cost_ex_tax"] is None for row in data["rows"])
+    assert all(row["parts_cost_inc_tax_complete"] is None for row in data["rows"])
+    assert all(row["parts_cost_ex_tax_complete"] is None for row in data["rows"])
+    assert all(row["parts_cost_inc_tax_quality"] is None for row in data["rows"])
+    assert all(row["parts_cost_ex_tax_quality"] is None for row in data["rows"])
 
 
 def test_agent_uses_same_board_collapse_and_neutral_project_truncation(
@@ -176,6 +194,17 @@ def test_agent_uses_same_board_collapse_and_neutral_project_truncation(
     assert all(row["budget"] is None for row in profit_blind["rows"])
     assert all(row["remaining"] is None for row in profit_blind["rows"])
     assert all(row["remaining_pct"] is None for row in profit_blind["rows"])
+    for row in profit_blind["rows"]:
+        for field in (
+            "revenue_inc", "revenue_ex",
+            "parts_gross_profit_inc", "parts_gross_profit_ex",
+            "parts_gross_margin_inc", "parts_gross_margin_ex",
+            "parts_profit_status_inc", "parts_profit_status_ex",
+            "contribution_profit_inc", "contribution_profit_ex",
+            "contribution_margin_inc", "contribution_margin_ex",
+            "contribution_status_inc", "contribution_status_ex",
+        ):
+            assert row[field] is None
 
     cost_blind = tools.dispatch(
         db, "get_maintenance_projects", {"top": 2},
@@ -202,6 +231,10 @@ def test_agent_uses_same_board_collapse_and_neutral_project_truncation(
             "estimated_cost_inc", "estimated_cost_ex",
             "actual_lines", "estimated_lines", "missing_cost_lines",
             "known_cost_total", "cost_quality", "coverage_pct",
+            "parts_cost_inc_tax", "parts_cost_ex_tax",
+            "parts_cost_inc_tax_complete", "parts_cost_ex_tax_complete",
+            "parts_cost_inc_tax_quality", "parts_cost_ex_tax_quality",
+            "parts_cost_inc_tax_missing_lines", "parts_cost_ex_tax_missing_lines",
         ):
             assert row[field] is None
         for project in row["projects"]:
@@ -209,6 +242,10 @@ def test_agent_uses_same_board_collapse_and_neutral_project_truncation(
             assert project["estimated_lines"] is None
             assert project["missing_cost_lines"] is None
             assert project["cost_quality"] is None
+            assert project["parts_cost_inc_tax"] is None
+            assert project["parts_cost_ex_tax"] is None
+            assert project["parts_cost_inc_tax_complete"] is None
+            assert project["parts_cost_ex_tax_complete"] is None
 
     skills = tools.dispatch(db, "list_skills", {}, profit_blind_ctx)["skills"]
     assert "maintenance_health_check" not in {item["skill"] for item in skills}
@@ -433,6 +470,7 @@ def test_agent_board_reuses_service_decision_without_recomputing(monkeypatch):
     )
     assert schema["parameters"]["properties"]["status"]["enum"] == [
         "incomplete_cost",
+        "expense_data_unavailable",
         "red",
         "yellow",
         "green",
@@ -446,7 +484,10 @@ def test_cost_blind_lines_remove_cost_derived_anomaly_flags(
     line = db.execute(
         select(FMaintenanceLine).where(FMaintenanceLine.raw_line_id == "ML-A"),
     ).scalar_one()
-    line.anomaly_flags = ["no_cost", "cost_overflow", "future_date"]
+    line.anomaly_flags = [
+        *maintenance_cost_quality.COST_DERIVED_ANOMALY_FLAGS,
+        "future_date",
+    ]
     db.commit()
 
     client = _limited_client(db, "maint-line-cost-blind", cost=False, profit=False)
@@ -464,11 +505,39 @@ def test_new_maintenance_fields_are_registered_without_masking_generic_status():
         "estimated_cost_inc", "estimated_cost_ex", "known_cost_total",
         "actual_lines", "estimated_lines", "missing_cost_lines",
         "cost_quality", "cost_tier", "by_source", "coverage_pct",
+        "unit_cost_inc_tax", "unit_cost_ex_tax",
+        "cost_amount_inc_tax", "cost_amount_ex_tax",
+        "parts_cost_inc_tax", "parts_cost_ex_tax",
+        "parts_cost_inc_tax_complete", "parts_cost_ex_tax_complete",
+        "parts_cost_inc_tax_quality", "parts_cost_ex_tax_quality",
+        "parts_cost_inc_tax_missing_lines", "parts_cost_ex_tax_missing_lines",
+        "reference_side", "reference_pool_group_id", "reference_pool_version",
+        "reference_sample_count", "reference_from_date", "reference_to_date",
+        "reference_latest_date",
     } <= purchase_fields
-    assert "decision_status" in permissions.config.FIELD_GROUPS["profit_amount"]
+    profit_amount_fields = set(permissions.config.FIELD_GROUPS["profit_amount"])
+    profit_rate_fields = set(permissions.config.FIELD_GROUPS["profit_rate"])
+    assert {
+        "parts_gross_profit_inc", "parts_gross_profit_ex",
+        "parts_profit_status_inc", "parts_profit_status_ex",
+        "contribution_profit_inc", "contribution_profit_ex",
+        "contribution_status_inc", "contribution_status_ex",
+    } <= profit_amount_fields
+    assert {
+        "parts_gross_margin_inc", "parts_gross_margin_ex",
+        "contribution_margin_inc", "contribution_margin_ex",
+    } <= profit_rate_fields
+    assert {
+        "gross_profit_inc", "gross_profit_ex",
+        "profit_status_inc", "profit_status_ex",
+    }.isdisjoint(profit_amount_fields)
+    assert {
+        "gross_margin_inc", "gross_margin_ex",
+    }.isdisjoint(profit_rate_fields)
+    assert "decision_status" in profit_amount_fields
     assert {
         "contract_amount", "budget", "remaining", "remaining_pct",
-    } <= set(permissions.config.FIELD_GROUPS["profit_amount"])
+    } <= profit_amount_fields
     assert "status" not in {
         field
         for fields in permissions.config.FIELD_GROUPS.values()

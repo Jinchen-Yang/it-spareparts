@@ -59,14 +59,15 @@ SKILLS: dict[str, dict] = {
 - 销售/利润面：get_profit_ranking(dimension=part / salesperson / customer)——营收与
   两法毛利，负毛利行是重点。
 - 维保面：get_maintenance_board()——合同级成本质量与预算消耗参考；先处理
-  incomplete_cost（成本不完整），成本完整后才解释 red/yellow/green 预算边界。
+  incomplete_cost（成本不完整）和 expense_data_unavailable（费用全量数据水位未建立），
+  成本与费用数据都完整后才解释 red/yellow/green 预算边界。
 
 ## 怎么分析
 先总量（本期采购额、营收、毛利），再异常点名（每条给金额和一句原因）：
 成本不完整的维保合同先列为补数任务；完整合同再列预算已用完/余量不足的参考信号，
 并列出负毛利型号或客户、采购取消率突增的月份、频发应急件（=可省的钱）。
 异常里区分「经营问题」和「数据问题」。不得对 incomplete 合同自行用已知金额重算状态，
-也不得把 red/yellow/green 说成正式项目毛利结论。
+也不得把 red/yellow/green 说成正式合同级毛利结论。
 
 ## 输出建议
 一页速览：三~五行总量 → 「需要拍板」清单（按金额降序，每条=事实+建议动作一句）。
@@ -104,36 +105,50 @@ SKILLS: dict[str, dict] = {
         "roles": {"admin", "boss", "purchaser"},
         "page": "page_maintenance",
         "field": "gross_profit",
-        "brief": "从成本质量与预算参考追到单据：先补缺失，再分析预算消耗",
+        "brief": "从双口径成本与毛利证据追到单据：先补缺失，再分析合同结果",
         "playbook": """# 维保成本与预算检查
 
 ## 你的身份与背景
-你是维保项目的成本管家。系统只提供成本事实分层和预算消耗参考，不定义正式项目毛利。
-你的任务：先确认成本是否完整，再追到单据，分清「数据问题」和「预算消耗信号」。
+你是维保项目的成本管家。系统同时提供合同级含税/未税备件毛利，但费用税务口径
+确认前，“合同级贡献毛利”仍不是正式财务结论。你的任务：先确认每一税口径的收入、
+成本与费用证据，再追到单据，分清「数据问题」「备件毛利」和「预算消耗信号」。
 
 ## 数据从哪来（由粗到细的追查路径）
 1. get_maintenance_board(status=incomplete_cost)：先找成本不完整合同；这类合同没有剩余预算
-   或红黄绿结论，必须先补数据。之后才可查询 red/yellow/green 的完整合同预算参考。
-2. get_maintenance_projects(q=项目名)：项目级汇总——实际/估算/缺失、含税/不含税分列、
-   已知成本混合原值参考与成本来源分布
+   或红黄绿结论，必须先补数据。看板还返回含税/未税合同收入、归一成本、备件毛利/
+   毛利率及 parts_profit_status，以及独立的合同级贡献毛利与 contribution_status。之后才可
+   查询 red/yellow/green 的完整合同预算参考。
+2. get_maintenance_projects(q=项目名)：项目级汇总——实际/估算/缺失、含税/不含税原值兼容分列、
+   含税/未税归一备件成本及各自完整性、已知成本混合原值兼容参考与成本来源分布
    （direct=专属采购直配、window=±7天最近价、month_avg=当月均价、trace_avg=追溯、
-   sales_ref=销售参考、none=无成本）。
+   sales_ref=销售参考、pool_purchase/pool_sales=互通池同伴历史均价、
+   purchase_history/sales_history=本PN历史参考、none=无成本）。
 3. get_maintenance_lines(project=..., month=...)：逐单据明细——大额出库行、成本来源/
    置信度/关联采购单，一行行可核。
 
 ## 怎么分析
 - incomplete_cost：只报告实际/估算/缺失事实和补数动作；禁止用已知部分自行计算余额、
   红黄绿、赚钱或亏损。
+- expense_data_unavailable：只报告已知备件成本和“费用全量数据未就绪”；不得把
+  无报销记录说成费用为 0，也不得自行计算余额或红黄绿。
 - 成本完整的 red/yellow/green 仅表示合同额对照已知支出的预算消耗参考，不是正式毛利。
-- 估算占比高说明数字依赖追溯/销售参考，需注明估算边界。
+- parts_profit_status 的 complete_actual 才是仅实际成本；complete_estimated 说明数字
+  依赖追溯、池价或销售参考，必须注明“含估算”。两个税口径可一边完整、一边缺失，
+  禁止互相补值。
+- missing_revenue/missing_tax_rate/invalid_tax_rate/ambiguous_revenue/incomplete_cost/
+  filtered_scope 对应备件毛利口径保持 null；禁止当作 0 或自行补算。
+- contribution_status 与备件状态分开判断：expense_data_unavailable 表示费用全量数据未就绪，
+  expense_tax_unknown 表示费用税务口径未知；两者都可以报告备件毛利，但合同级贡献毛利必须
+  留空并说明边界。只有 contribution_status=complete 才能报告贡献毛利。
 - 覆盖率低 / none 行多 = 数据问题（对应期间采购没导、或 PN 对不上），别误读成省钱。
 - direct（专属采购直配）占比异常低 = 采购下单时没填「维保需求单」关联——流程问题，
   提醒规范填写（直配价最准）。
 - 完整成本的 yellow：可将预算余量与维保剩余时长并列提醒，但不得改写为正式盈利判断。
-- 报销费用侧数据要客户提供 BXD 导出后才有；费用为 0 不代表没花，注明数据边界。
+- 报销费用正式源为项目追踪工作簿的报销明细页；只有经确认覆盖合同范围、截止日和
+  完整性的快照才能建立费用全量水位。费用为 0 不代表没花，必须注明数据边界。
 
 ## 输出建议
-每张问题合同一段：成本完整性与关键数字 → 原因判断（数据/预算参考分开说）→ 建议动作。
+每张问题合同一段：两套口径状态与关键数字 → 原因判断（数据/备件毛利/预算参考分开说）→ 建议动作。
 数据质量问题单独列一节（缺数、待导、待规范），别混进经营结论。""",
     },
 }

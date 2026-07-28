@@ -367,6 +367,17 @@ FIELD_GROUPS = {
                       "cost_quality", "cost_tier", "by_source", "coverage_pct",
                       "cost_source", "cost_tax_basis", "price_month", "trace_months",
                       "linked_purchase_order_no",
+                      # 维保双税成本底座与历史补价 provenance（均可反推采购/销售成本事实）
+                      "unit_cost_inc_tax", "unit_cost_ex_tax",
+                      "cost_amount_inc_tax", "cost_amount_ex_tax",
+                      "parts_cost_inc_tax", "parts_cost_ex_tax",
+                      "parts_cost_inc_tax_complete", "parts_cost_ex_tax_complete",
+                      "parts_cost_inc_tax_quality", "parts_cost_ex_tax_quality",
+                      "parts_cost_inc_tax_missing_lines", "parts_cost_ex_tax_missing_lines",
+                      "reference_side", "reference_pool_group_id",
+                      "reference_pool_version", "reference_sample_count",
+                      "reference_from_date", "reference_to_date",
+                      "reference_latest_date",
                       # 老板看板（dashboard/pool）派生成本键：采购额、采购价统计容器、
                       # 未税单价、池标杆成本、双端溢价、两级节省——全部反推采购成本，随 data_purchase_cost 遮。
                       # 容器级登记（purchase_price/benchmark/savings）避免与销售侧同名内层键(wavg/median)冲突。
@@ -400,6 +411,14 @@ FIELD_GROUPS = {
     # 不同名，复审 P0：漏登记会绕过 data_profit 泄漏毛利）
     "profit_amount": ["gross_profit", "gross_profit_moving", "gross_profit_fifo",
                       "total_gross_profit",
+                      # 维保合同双口径收入、毛利、费用门禁和状态；状态本身也会泄漏
+                      # 盈亏/证据结论，必须随 data_profit 一起递归遮蔽。
+                      "revenue_inc", "revenue_ex",
+                      "parts_gross_profit_inc", "parts_gross_profit_ex",
+                      "parts_profit_status_inc", "parts_profit_status_ex",
+                      "expense_inc", "expense_ex",
+                      "contribution_profit_inc", "contribution_profit_ex",
+                      "contribution_status_inc", "contribution_status_ex",
                       # 维保预算消耗参考决策；禁止登记通用 status（会误伤流程状态）
                       "decision_status", "contract_amount",
                       "budget", "remaining", "remaining_pct"],
@@ -407,6 +426,8 @@ FIELD_GROUPS = {
     "profit_rate":   ["gross_margin", "avg_margin", "margin_band",
                       "avg_margin_moving", "avg_margin_fifo",
                       "gross_margin_moving", "gross_margin_fifo",
+                      "parts_gross_margin_inc", "parts_gross_margin_ex",
+                      "contribution_margin_inc", "contribution_margin_ex",
                       # 数据治理汇总/指标里的盈亏派生结论同样属于利润信息。
                       "sales_neg_margin", "margin_computable_pct"],
     # 互通池价格治理（data_pool_price_governance，§12）：人工约束价及其原始录入值。
