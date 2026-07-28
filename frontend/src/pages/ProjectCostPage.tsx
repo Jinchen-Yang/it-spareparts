@@ -19,8 +19,17 @@ interface ProjectRow {
   cost_inc: number | null;
   cost_ex: number | null;
   cost_total: number | null;
+  actual_cost_inc: number | null;
+  actual_cost_ex: number | null;
+  estimated_cost_inc: number | null;
+  estimated_cost_ex: number | null;
+  actual_lines: number | null;
+  estimated_lines: number | null;
+  missing_cost_lines: number | null;
+  known_cost_total: number | null;
+  cost_quality: string | null;
   coverage_pct: number | null;
-  by_source: Record<string, number>;
+  by_source: Record<string, number> | null;
   months: number;
   sales_orders: string[];
   contract_amount: number | null;
@@ -37,13 +46,15 @@ interface LineRow {
   pn_std: string | null; description: string | null;
   qty: number | null; return_qty: number | null;
   unit_cost: number | null; cost_amount: number | null;
+  cost_tier: "actual" | "estimated" | "missing" | null;
   cost_source: string | null; cost_tax_basis: string | null;
   price_month: string | null; trace_months: number | null;
   linked_purchase_order_no: string | null; anomaly_flags: string[];
   price_distance_days: number | null; confidence: string | null;
 }
 
-type BoardStatus = "red" | "yellow" | "green" | "no_budget";
+type CostQuality = "actual_only" | "contains_estimate" | "incomplete";
+type BoardStatus = "incomplete_cost" | "red" | "yellow" | "green" | "no_budget";
 type LifecycleStatus = "ongoing" | "ended" | "missing";
 type LifecycleFilter = LifecycleStatus | "all";
 type LifecycleCounts = Record<LifecycleStatus, number>;
@@ -51,9 +62,15 @@ type ExportDatePreset = "all" | "today" | "last7" | "last14" | "last21" | "last3
 
 interface BoardRow {
   contract: string | null;
-  status?: BoardStatus;
+  decision_status?: string;
+  status?: string;
   projects: { project: string; lines: number; spent_parts: number | null }[];
   lines: number; coverage_pct: number | null;
+  actual_cost_inc: number | null; actual_cost_ex: number | null;
+  estimated_cost_inc: number | null; estimated_cost_ex: number | null;
+  actual_lines: number | null; estimated_lines: number | null;
+  missing_cost_lines: number | null; known_cost_total: number | null;
+  cost_quality: string | null;
   spent_parts: number | null; spent_expense: number | null; spent: number | null;
   budget: number | null; remaining: number | null; remaining_pct: number | null;
   low_conf_pct: number | null;
@@ -63,9 +80,10 @@ interface BoardRow {
 }
 
 const STATUS_META: Record<BoardStatus, { label: string; color: string; bg: string }> = {
-  red: { label: "亏损/超支", color: "#c0524a", bg: "rgba(192,82,74,0.08)" },
-  yellow: { label: "预警 · 剩余≤20%", color: "#b8860b", bg: "rgba(212,160,23,0.10)" },
-  green: { label: "健康", color: "#3f7a45", bg: "rgba(63,122,69,0.07)" },
+  incomplete_cost: { label: "成本不完整，需补数据", color: "#8c6d31", bg: "rgba(140,109,49,0.08)" },
+  red: { label: "预算已用完或超预算", color: "#c0524a", bg: "rgba(192,82,74,0.08)" },
+  yellow: { label: "预算余量 ≤ 20%", color: "#b8860b", bg: "rgba(212,160,23,0.10)" },
+  green: { label: "预算余量 > 20%", color: "#3f7a45", bg: "rgba(63,122,69,0.07)" },
   no_budget: { label: "无预算(未关联合同额)", color: "#8c8c8c", bg: "rgba(0,0,0,0.03)" },
 };
 const NEUTRAL_META = { label: "", color: "#8c8c8c", bg: "rgba(0,0,0,0.03)" };
@@ -79,6 +97,11 @@ const CONF_META: Record<string, { label: string; color: string }> = {
   high: { label: "高", color: "green" }, medium: { label: "中", color: "blue" },
   low: { label: "低", color: "orange" },
 };
+const COST_TIER_META: Record<string, { label: string; color: string }> = {
+  actual: { label: "实际采购参考", color: "green" },
+  estimated: { label: "估算参考", color: "gold" },
+  missing: { label: "成本缺失", color: "orange" },
+};
 
 // 成本来源五态（口径见开发方案 §4.2）；trace_avg 必须带追溯月数标注（客户要求）
 const SOURCE_META: Record<string, { label: string; color: string }> = {
@@ -86,11 +109,32 @@ const SOURCE_META: Record<string, { label: string; color: string }> = {
   window: { label: "实际·±7天最近价", color: "cyan" },
   month_avg: { label: "实际·当月均价", color: "blue" },
   trace_avg: { label: "预估·追溯均价", color: "orange" },
-  sales_ref: { label: "没有采购有销售", color: "purple" },
-  none: { label: "无成本", color: "red" },
+  sales_ref: { label: "预估·销售参考", color: "purple" },
+  none: { label: "成本缺失", color: "red" },
 };
 const SOURCE_ORDER = ["direct", "window", "month_avg", "trace_avg", "sales_ref", "none"];
 const COVERAGE_WARN_PCT = 80;   // 覆盖率预警线（经验值，非验收线；<此值标红提示核对无成本行）
+
+const BOARD_STATUSES = new Set<BoardStatus>([
+  "incomplete_cost", "red", "yellow", "green", "no_budget",
+]);
+
+function normalizeDecisionStatus(
+  decisionStatus: string | null | undefined,
+  legacyStatus: string | null | undefined,
+): BoardStatus | undefined {
+  const candidate = decisionStatus ?? legacyStatus;
+  if (candidate == null) return undefined;
+  return BOARD_STATUSES.has(candidate as BoardStatus)
+    ? candidate as BoardStatus
+    : "incomplete_cost";
+}
+
+function normalizeCostQuality(value: string | null | undefined): CostQuality | null {
+  if (value == null) return null;
+  if (value === "actual_only" || value === "contains_estimate") return value;
+  return "incomplete";
+}
 
 export function buildOrderExportParams(
   preset: ExportDatePreset,
@@ -213,7 +257,7 @@ export default function ProjectCostPage() {
   const [asOf, setAsOf] = useState("");
   const [rows, setRows] = useState<ProjectRow[]>([]);
   const [board, setBoard] = useState<BoardRow[]>([]);
-  const [boardProfitRestricted, setBoardProfitRestricted] = useState(false);
+  const [boardDecisionRestricted, setBoardDecisionRestricted] = useState(false);
   const [boardFilter, setBoardFilter] = useState<string>("all");
   const [startDate, setStartDate] = useState("");
   const [loading, setLoading] = useState(false);
@@ -270,8 +314,11 @@ export default function ProjectCostPage() {
       setBoard(bd.data.rows);
       setAsOf(data.as_of || bd.data.as_of || "");
       setLifecycleCounts(data.lifecycle_counts || bd.data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
-      setBoardProfitRestricted(!!bd.data.profit_restricted);
-      if (bd.data.profit_restricted) setBoardFilter("all");
+      const decisionRestricted = !!(
+        bd.data.decision_restricted ?? bd.data.profit_restricted
+      );
+      setBoardDecisionRestricted(decisionRestricted);
+      if (decisionRestricted) setBoardFilter("all");
     } catch {
       if (seq !== pageSeq.current) return;
       setRows([]);
@@ -465,11 +512,24 @@ export default function ProjectCostPage() {
       render: (v: string | null) => v || <span style={{ color: "var(--mb-warning)" }}>未填写</span> },
     { title: "出库行", dataIndex: "lines", width: 80, align: "right" },
     { title: "数量", dataIndex: "qty", width: 80, align: "right" },
-    { title: "备件成本(含税)", dataIndex: "cost_inc", width: 130, align: "right", render: money,
-      sorter: (a, b) => (a.cost_inc ?? 0) - (b.cost_inc ?? 0) },
-    { title: "备件成本(不含税)", dataIndex: "cost_ex", width: 130, align: "right", render: money,
-      defaultSortOrder: "descend",
-      sorter: (a, b) => (a.cost_ex ?? 0) - (b.cost_ex ?? 0) },
+    { title: "实际参考(含税)", dataIndex: "actual_cost_inc", width: 130, align: "right", render: money },
+    { title: "实际参考(不含税)", dataIndex: "actual_cost_ex", width: 140, align: "right", render: money },
+    { title: "估算参考(含税)", dataIndex: "estimated_cost_inc", width: 130, align: "right", render: money },
+    { title: "估算参考(不含税)", dataIndex: "estimated_cost_ex", width: 140, align: "right", render: money },
+    { title: "成本完整性", dataIndex: "cost_quality", width: 160,
+      render: (rawQuality: string | null, row) => {
+        const quality = normalizeCostQuality(rawQuality);
+        if (quality == null) return "—";
+        if (quality === "incomplete") {
+          return <Tag color="orange">需补数据 · {row.missing_cost_lines ?? "—"} 行</Tag>;
+        }
+        if (quality === "contains_estimate") {
+          return <Tag color="gold">完整 · 含估算 {row.estimated_lines ?? "—"} 行</Tag>;
+        }
+        return <Tag color="green">完整 · 仅实际参考</Tag>;
+      } },
+    { title: "已知成本兼容参考(混合原值)", dataIndex: "known_cost_total",
+      width: 190, align: "right", render: money },
     { title: (
         <Tooltip title="有成本来源的出库行占比（按行数；销售参考价也计入已覆盖）。低于阈值提示核对无成本行。">
           覆盖率 <InfoCircleOutlined style={{ color: "var(--mb-text-3)" }} />
@@ -482,13 +542,13 @@ export default function ProjectCostPage() {
           成本来源分布 <InfoCircleOutlined style={{ color: "var(--mb-text-3)" }} />
         </Tooltip>
       ), dataIndex: "by_source", width: 240,
-      render: (bs: Record<string, number>) => (
-        <Space size={2} wrap>
-          {SOURCE_ORDER.map((k) =>
-            bs?.[k] ? <Tooltip key={k} title={SOURCE_META[k].label}>
-              <Tag color={SOURCE_META[k].color}>{bs[k]}</Tag></Tooltip> : null)}
-        </Space>
-      ) },
+      render: (bs: Record<string, number> | null) => bs == null ? "—" : (
+          <Space size={2} wrap>
+            {SOURCE_ORDER.map((k) =>
+              bs[k] ? <Tooltip key={k} title={SOURCE_META[k].label}>
+                <Tag color={SOURCE_META[k].color}>{bs[k]}</Tag></Tooltip> : null)}
+          </Space>
+        ) },
     { title: "合同额(参考)", dataIndex: "contract_amount", width: 150, align: "right",
       render: (v: number | null, r) => (
         <span>
@@ -520,28 +580,45 @@ export default function ProjectCostPage() {
       render: (v: number | null) => (v ? <Tag color="orange">{v}</Tag> : "-") },
     { title: "单价", dataIndex: "unit_cost", width: 100, align: "right", render: money },
     { title: "金额", dataIndex: "cost_amount", width: 110, align: "right", render: money },
+    { title: "成本事实层级", dataIndex: "cost_tier", width: 120,
+      render: (value: string | null) => value && COST_TIER_META[value]
+        ? <Tag color={COST_TIER_META[value].color}>{COST_TIER_META[value].label}</Tag>
+        : "—" },
     { title: "成本来源", width: 180,
-      render: (_, r) => <SourceTag source={r.cost_source} trace={r.trace_months}
+      render: (_, r) => <SourceTag source={r.cost_tier === "missing" ? "none" : r.cost_source}
+                                   trace={r.trace_months}
                                    distance={r.price_distance_days} /> },
     { title: "置信度", dataIndex: "confidence", width: 76,
       render: (v: string | null) => v
         ? <Tag color={CONF_META[v]?.color}>{CONF_META[v]?.label || v}</Tag>
         : <span style={{ color: "var(--mb-text-3)" }}>-</span> },
     { title: "口径", dataIndex: "cost_tax_basis", width: 70,
-      render: (v: string | null) => v ? <Tag>{v === "inc" ? "含税" : "不含税"}</Tag> : "-" },
+      render: (v: string | null) => v === "inc"
+        ? <Tag>含税</Tag>
+        : v === "ex"
+          ? <Tag>不含税</Tag>
+          : v
+            ? <Tag color="orange">未知</Tag>
+            : "-" },
     { title: "取价月", dataIndex: "price_month", width: 90 },
     { title: "关联采购单", dataIndex: "linked_purchase_order_no", width: 160, ellipsis: true,
       render: (v: string | null) => v || <span style={{ color: "var(--mb-text-3)" }}>-</span> },
   ];
 
-  // 成本被权限脱敏时（page_maintenance 开但无采购成本权限），合计显示为隐藏而非误导的 ¥0
-  const costsMasked = rows.length > 0 && rows.every((r) => r.cost_inc == null && r.cost_ex == null);
-  const totalInc = rows.reduce((s, r) => s + (r.cost_inc ?? 0), 0);
-  const totalEx = rows.reduce((s, r) => s + (r.cost_ex ?? 0), 0);
-  const totalNone = rows.reduce((s, r) => s + (r.by_source?.none ?? 0), 0);
-  const costStat = (v: number) => costsMasked
+  // 全部为 null 表示权限脱敏，不能把它折算成 0；空结果则按 0 展示。
+  const sumRows = (values: (number | null)[]) => {
+    if (rows.length === 0) return 0;
+    if (values.every((value) => value == null)) return null;
+    return values.reduce<number>((total, value) => total + (value ?? 0), 0);
+  };
+  const totalActualInc = sumRows(rows.map((row) => row.actual_cost_inc));
+  const totalActualEx = sumRows(rows.map((row) => row.actual_cost_ex));
+  const totalEstimatedInc = sumRows(rows.map((row) => row.estimated_cost_inc));
+  const totalEstimatedEx = sumRows(rows.map((row) => row.estimated_cost_ex));
+  const totalMissing = sumRows(rows.map((row) => row.missing_cost_lines));
+  const costStat = (value: number | null) => value == null
     ? { value: "—" as const }
-    : { value: v, precision: 2, prefix: "¥" };
+    : { value, precision: 2, prefix: "¥" };
   // 抽屉月份下拉：由当前项目行的 months 数不便直接取月份列表，简单用近 24 个月占位由后端过滤
   const monthOptions = detailProject
     ? (rows.find((r) => r.project === detailProject)?.months || 0)
@@ -551,7 +628,7 @@ export default function ProjectCostPage() {
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <PageHeader
         title="项目成本"
-        subtitle={`维保项目备件成本自动核算：已采购按真实采购价（专属采购/当月均价），未采购按追溯均价（≤3月，标注）或销售参考价，逐条标注来源与含税口径${startDate ? ` · 起算日 ${startDate}` : ""}`}
+        subtitle={`维保备件成本按实际采购参考、估算参考、成本缺失分层；缺失时停止预算余额和红黄绿判断，含税/不含税原值分列、不可跨口径相加${startDate ? ` · 起算日 ${startDate}` : ""}`}
       />
       <Card>
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
@@ -667,34 +744,42 @@ export default function ProjectCostPage() {
       </Card>
 
       <Card
-        title={<Space>项目盈亏看板
-          <Tooltip title="按合同（销售订单 XSDD）聚合：预算=合同金额（含税参考）；已花=备件成本(混合口径参考)+生效报销费用。共用合同自动合并为一张卡。剩余≤20% 黄灯预警、超支红灯。">
+        title={<Space>项目预算消耗参考
+          <Tooltip title="按合同聚合实际采购参考、估算参考与成本缺失。任一成本缺失时只提示补数据，不计算余额或红黄绿；成本完整后才对照合同金额显示预算消耗参考，不定义正式项目毛利。">
             <InfoCircleOutlined style={{ color: "var(--mb-text-3)" }} />
           </Tooltip></Space>}
       >
-        {!boardProfitRestricted && (
+        {!boardDecisionRestricted && (
           <div style={{ maxWidth: "100%", overflowX: "auto", marginBottom: 12, paddingBottom: 2 }}>
             <Segmented
-              aria-label="盈亏状态筛选"
+              aria-label="预算消耗参考状态筛选"
               value={boardFilter}
               onChange={(v) => setBoardFilter(v as string)}
               options={[
                 { label: `全部 ${board.length}`, value: "all" },
-                { label: `🔴 ${board.filter((b) => b.status === "red").length}`, value: "red" },
-                { label: `🟡 ${board.filter((b) => b.status === "yellow").length}`, value: "yellow" },
-                { label: `🟢 ${board.filter((b) => b.status === "green").length}`, value: "green" },
-                { label: `无预算 ${board.filter((b) => b.status === "no_budget").length}`, value: "no_budget" },
+                { label: `待补成本 ${board.filter((b) =>
+                  normalizeDecisionStatus(b.decision_status, b.status) === "incomplete_cost").length}`,
+                  value: "incomplete_cost" },
+                { label: `🔴 ${board.filter((b) =>
+                  normalizeDecisionStatus(b.decision_status, b.status) === "red").length}`, value: "red" },
+                { label: `🟡 ${board.filter((b) =>
+                  normalizeDecisionStatus(b.decision_status, b.status) === "yellow").length}`, value: "yellow" },
+                { label: `🟢 ${board.filter((b) =>
+                  normalizeDecisionStatus(b.decision_status, b.status) === "green").length}`, value: "green" },
+                { label: `无预算 ${board.filter((b) =>
+                  normalizeDecisionStatus(b.decision_status, b.status) === "no_budget").length}`,
+                  value: "no_budget" },
               ]}
             />
           </div>
         )}
-        {boardProfitRestricted && (
+        {boardDecisionRestricted && (
           <Alert
             type="info"
             showIcon
             style={{ marginBottom: 12 }}
-            message="当前账号无利润查看权限，不展示红黄绿盈亏分类与状态筛选"
-            description="合同按最近出库日期排列；成本字段仍按账号的数据权限单独显示或隐藏。"
+            message="当前账号不展示预算消耗决策分类与状态筛选"
+            description="合同按最近出库日期排列；实际、估算、缺失等成本事实仍按账号的数据权限显示。"
           />
         )}
         {board.length === 0 ? (
@@ -705,31 +790,42 @@ export default function ProjectCostPage() {
           } />
         ) : (
           <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            {(boardProfitRestricted || boardFilter === "all"
-              ? board : board.filter((b) => b.status === boardFilter)).map((b) => {
-              const meta = b.status ? STATUS_META[b.status] : NEUTRAL_META;
-              const spentPct = !boardProfitRestricted && b.budget && b.spent != null
+            {(boardDecisionRestricted || boardFilter === "all"
+              ? board : board.filter((b) =>
+                normalizeDecisionStatus(b.decision_status, b.status) === boardFilter)).map((b) => {
+              const decisionStatus = normalizeDecisionStatus(b.decision_status, b.status);
+              const incomplete = normalizeCostQuality(b.cost_quality) === "incomplete"
+                || decisionStatus === "incomplete_cost";
+              const meta = decisionStatus ? STATUS_META[decisionStatus] : NEUTRAL_META;
+              const spentPct = !boardDecisionRestricted && !incomplete && b.budget && b.spent != null
                 ? Math.round((b.spent / b.budget) * 100) : null;
               let timePct: number | null = null;
-              if (b.maint_start && b.maint_end) {
+              if (!incomplete && b.maint_start && b.maint_end) {
                 const s0 = new Date(b.maint_start).getTime();
                 const e0 = new Date(b.maint_end).getTime();
                 if (e0 > s0) timePct = Math.min(Math.max(
                   Math.round(((Date.now() - s0) / (e0 - s0)) * 100), 0), 100);
               }
               return (
-                <div key={b.contract ?? "(none)"} style={{
+                <div
+                  key={b.contract ?? "(none)"}
+                  data-testid={`maintenance-board-card-${b.contract || "unlinked"}`}
+                  style={{
                   width: 370, maxWidth: "100%", boxSizing: "border-box",
                   borderRadius: 8, padding: "12px 14px",
                   border: "1px solid " + meta.color + "44",
                   borderLeft: "4px solid " + meta.color, background: meta.bg,
-                }}>
+                  }}
+                >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <b style={{ fontFamily: "monospace", fontSize: 13 }}>{b.contract || "（未关联合同）"}</b>
                     <Space size={6}>
-                      {b.status && (
-                        <Tag color={b.status === "red" ? "red" : b.status === "yellow" ? "gold"
-                          : b.status === "green" ? "green" : "default"}>{meta.label}</Tag>
+                      {decisionStatus && (
+                        <Tag color={decisionStatus === "red" ? "red" : decisionStatus === "yellow" ? "gold"
+                          : decisionStatus === "green" ? "green"
+                            : decisionStatus === "incomplete_cost" ? "orange" : "default"}>
+                          {meta.label}
+                        </Tag>
                       )}
                       <LifecycleTag status={b.lifecycle_status} />
                       {b.contract && canExportProjectWorkbooks && (
@@ -741,26 +837,41 @@ export default function ProjectCostPage() {
                       )}
                     </Space>
                   </div>
-                  <div style={{ marginTop: 8, fontSize: 12.5 }}>
-                    预算 {money(b.budget)} · 已花 {money(b.spent)} · 剩余{" "}
-                    <span style={{ color: meta.color, fontWeight: 600 }}>
-                      {money(b.remaining)}{b.remaining_pct != null ? `（${b.remaining_pct}%）` : ""}
-                    </span>
-                  </div>
+                  {incomplete ? (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      style={{ marginTop: 8 }}
+                      message="成本不完整，需补数据"
+                      description="当前仅展示已知成本事实，不计算预算余额或红黄绿参考。"
+                    />
+                  ) : !boardDecisionRestricted && (
+                    <div style={{ marginTop: 8, fontSize: 12.5 }}>
+                      合同额参考 {money(b.budget)} · 已知支出兼容参考（混合原值） {money(b.spent)}
+                      {" · "}剩余预算{" "}
+                      <span style={{ color: meta.color, fontWeight: 600 }}>
+                        {money(b.remaining)}{b.remaining_pct != null ? `（${b.remaining_pct}%）` : ""}
+                      </span>
+                    </div>
+                  )}
                   {spentPct != null && (
                     <div style={{ marginTop: 4 }}>
                       <Progress percent={Math.min(spentPct, 100)} size="small"
                                 strokeColor={meta.color} showInfo={false} />
                       <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>
-                        预算消耗 {spentPct}%{spentPct > 100 ? "（超支）" : ""}
+                        预算消耗参考 {spentPct}%{spentPct > 100 ? "（超过合同额参考）" : ""}
                         {timePct != null ? ` / 时间进度 ${timePct}%` : ""}
-                        {timePct != null && spentPct > timePct + 15 ? " · 花钱快于时间 ⚠" : ""}
+                        {timePct != null && spentPct > timePct + 15 ? " · 支出进度快于时间 ⚠" : ""}
                       </div>
                     </div>
                   )}
                   <div style={{ marginTop: 6, fontSize: 12, color: "#6b665e" }}>
-                    备件 {money(b.spent_parts)} + 费用 {money(b.spent_expense)}
-                    {b.coverage_pct != null ? ` · 覆盖率 ${b.coverage_pct}%` : ""}
+                    实际参考：含税 {money(b.actual_cost_inc)} / 不含税 {money(b.actual_cost_ex)}
+                    <br />
+                    估算参考：含税 {money(b.estimated_cost_inc)} / 不含税 {money(b.estimated_cost_ex)}
+                    {" · "}
+                    {b.missing_cost_lines == null ? "缺失 —" : `缺失 ${b.missing_cost_lines} 行`}
+                    {" · "}报销费用 {money(b.spent_expense)}
                     {(b.low_conf_pct ?? 0) >= 30 && (
                       <Tooltip title="低置信（追溯/销售参考）成本占比高，金额估算成分大，建议核对">
                         <Tag color="orange" style={{ marginLeft: 6 }}>估算成分高 {b.low_conf_pct}%</Tag>
@@ -771,7 +882,9 @@ export default function ProjectCostPage() {
                     {b.projects.slice(0, 3).map((pj) => (
                       <div key={pj.project} style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         <a onClick={() => openDetail(pj.project)}>{pj.project}</a>
-                        <span style={{ color: "var(--mb-text-3)" }}> · {money(pj.spent_parts)}</span>
+                        <span style={{ color: "var(--mb-text-3)" }}>
+                          {" · "}已知成本兼容参考（混合原值） {money(pj.spent_parts)}
+                        </span>
                       </div>
                     ))}
                     {b.projects.length > 3 && (
@@ -786,23 +899,30 @@ export default function ProjectCostPage() {
       </Card>
 
       <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} lg={6}><Card size="small"><Statistic title="项目数" value={rows.length} /></Card></Col>
-        <Col xs={24} sm={12} lg={6}><Card size="small"><Statistic
-          title={<Space size={4}>备件成本 · 含税小计
-            <Tooltip title="含税/不含税为分列口径，请勿直接相加对账"><InfoCircleOutlined /></Tooltip></Space>}
-          {...costStat(totalInc)} /></Card></Col>
-        <Col xs={24} sm={12} lg={6}><Card size="small"><Statistic
-          title={<Space size={4}>备件成本 · 不含税小计
-            <Tooltip title="含税/不含税为分列口径，请勿直接相加对账"><InfoCircleOutlined /></Tooltip></Space>}
-          {...costStat(totalEx)} /></Card></Col>
-        <Col xs={24} sm={12} lg={6}><Card size="small"><Statistic title="无成本行(待处理)" value={totalNone}
-          valueStyle={{ color: totalNone ? "var(--mb-danger)" : undefined }} /></Card></Col>
+        <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic title="项目数" value={rows.length} /></Card></Col>
+        <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
+          title="实际采购参考（含税）"
+          {...costStat(totalActualInc)} /></Card></Col>
+        <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
+          title="实际采购参考（不含税）"
+          {...costStat(totalActualEx)} /></Card></Col>
+        <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
+          title="估算参考（含税）"
+          {...costStat(totalEstimatedInc)} /></Card></Col>
+        <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
+          title="估算参考（不含税）"
+          {...costStat(totalEstimatedEx)} /></Card></Col>
+        <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
+          title="缺失成本行"
+          value={totalMissing == null ? "—" : totalMissing}
+          valueStyle={{ color: totalMissing ? "var(--mb-danger)" : undefined }}
+        /></Card></Col>
       </Row>
 
-      <Card title="项目备件成本">
+      <Card title="项目成本事实分层">
         <Alert
           type="info" showIcon style={{ marginBottom: 12 }}
-          message="含税/不含税小计按采购原值口径分列（客户确认口径），请勿直接相加对账；「合同额」为关联销售订单金额，仅作参考，本期不计项目毛利。"
+          message="实际采购参考与估算参考均按含税/不含税原值分列，请勿直接相加；成本缺失时只提示补数据，不给预算余额或经营结论。合同额仅作预算参考，本期不定义正式项目毛利。"
         />
         <ResizableTable
           storageKey="maint-projects"
@@ -811,7 +931,7 @@ export default function ProjectCostPage() {
           loading={loading}
           columns={projectCols}
           dataSource={rows}
-          scroll={{ x: 1520 }}
+          scroll={{ x: 1960 }}
           pagination={{ pageSize: 20, showSizeChanger: true }}
           locale={{ emptyText: (q || range || lifecycle !== "ongoing")
             ? "当前筛选无结果，请调整搜索、日期或期限状态"

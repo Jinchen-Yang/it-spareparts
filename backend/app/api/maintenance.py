@@ -103,7 +103,9 @@ def lines(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     record_access_log(ctx, "lines", "maintenance", {"project": project})
-    data = maintenance_cost.project_lines(db, project, month, date_from, date_to, page, page_size)
+    data = maintenance_cost.project_lines(
+        db, project, month, date_from, date_to, page, page_size, user_ctx=ctx,
+    )
     return apply_field_visibility(data, ctx)
 
 
@@ -191,20 +193,45 @@ def export(
     )
     data = apply_field_visibility(data, ctx)   # 导出同样过脱敏层（§8.5）
     header = ["项目", "期限状态", "维保终止日期",
-              "出库行数", "出库数量", "备件成本-含税小计", "备件成本-不含税小计",
-              "成本合计(混合口径参考)", "覆盖率%",
+              "出库行数", "出库数量",
+              "实际采购参考-含税", "实际采购参考-不含税",
+              "估算参考-含税", "估算参考-不含税",
+              "实际参考行数", "估算参考行数", "缺失成本行数",
+              "已知成本参考(混合原值)", "成本完整性",
+              "已知成本参考-含税小计(兼容)", "已知成本参考-不含税小计(兼容)",
+              "已知成本参考合计(兼容)", "覆盖率%",
               *(_SOURCE_LABEL[s] + "(行)" for s in ("direct", "window", "month_avg",
                                                     "trace_avg", "sales_ref", "none")),
               "月份数", "关联销售订单", "合同额(含税参考)", "合同被多项目共用"]
     rows = []
     for r in data["rows"]:
         bs = r["by_source"]
+        source_counts = (
+            [None] * 6
+            if bs is None
+            else [
+                bs.get("direct", 0),
+                bs.get("window", 0),
+                bs.get("month_avg", 0),
+                bs.get("trace_avg", 0),
+                bs.get("sales_ref", 0),
+                bs.get("none", 0),
+            ]
+        )
         lifecycle_label = {"ongoing": "进行中", "ended": "已结束", "missing": "期限缺失"}
+        quality_label = {
+            "actual_only": "仅实际采购参考",
+            "contains_estimate": "含估算参考",
+            "incomplete": "成本不完整，需补数据",
+        }
         rows.append([_safe(r["project"]), lifecycle_label[r["lifecycle_status"]], r["maint_end"],
                      r["lines"], r["qty"],
+                     r["actual_cost_inc"], r["actual_cost_ex"],
+                     r["estimated_cost_inc"], r["estimated_cost_ex"],
+                     r["actual_lines"], r["estimated_lines"], r["missing_cost_lines"],
+                     r["known_cost_total"], quality_label.get(r["cost_quality"], r["cost_quality"]),
                      r["cost_inc"], r["cost_ex"], r["cost_total"], r["coverage_pct"],
-                     bs.get("direct", 0), bs.get("window", 0), bs.get("month_avg", 0),
-                     bs.get("trace_avg", 0), bs.get("sales_ref", 0), bs.get("none", 0),
+                     *source_counts,
                      r["months"], _safe("、".join(r["sales_orders"])),
                      r["contract_amount"], "是" if r["contract_shared"] else ""])
     return _csv_stream(header, rows, "maintenance_projects.csv")
@@ -324,17 +351,21 @@ def lines_export(
 ) -> StreamingResponse:
     """单项目 SKU 明细导出（财务逐行复核入账用）——全量、含成本来源/税口径。"""
     record_access_log(ctx, "lines_export", "maintenance", {"project": project})
-    data = maintenance_cost.project_lines(db, project, month, date_from, date_to,
-                                          page=1, page_size=1_000_000)
+    data = maintenance_cost.project_lines(
+        db, project, month, date_from, date_to,
+        page=1, page_size=1_000_000, user_ctx=ctx,
+    )
     data = apply_field_visibility(data, ctx)
     header = ["日期", "维保单号", "需求类型", "业务类型", "出库仓库", "PN", "描述",
-              "数量", "退货", "单价", "金额", "成本来源", "置信度", "含税口径", "取价月",
+              "数量", "退货", "单价", "金额", "成本事实层级", "成本来源", "置信度", "含税口径", "取价月",
               "追溯月数", "距采购天数", "关联采购单", "异常标记"]
     rows = []
     for r in data["rows"]:
         rows.append([r["order_date"], _safe(r["order_no"]), r["demand_type"], r["business_type"],
                      r["warehouse"], _safe(r["pn_std"]), _safe(r["description"]),
                      r["qty"], r["return_qty"], r["unit_cost"], r["cost_amount"],
+                     {"actual": "实际采购参考", "estimated": "估算参考",
+                      "missing": "成本缺失"}.get(r["cost_tier"], r["cost_tier"]),
                      _SOURCE_LABEL.get(r["cost_source"], r["cost_source"]),
                      _CONF_LABEL.get(r["confidence"], r["confidence"] or ""),
                      r["cost_tax_basis"], r["price_month"], r["trace_months"],
@@ -350,7 +381,10 @@ def lines_export(
 
 @router.get("/board")
 def board(
-    status: str | None = Query(None, pattern=r"^(red|yellow|green|no_budget)$"),
+    status: str | None = Query(
+        None,
+        pattern=r"^(incomplete_cost|red|yellow|green|no_budget)$",
+    ),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
     q: str | None = Query(None, max_length=128),
@@ -360,7 +394,7 @@ def board(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """盈亏看板（§16.2）：合同(XSDD)级 红/黄/绿 状态灯，黄红置顶。"""
+    """合同预算消耗参考：成本缺失优先，其后才允许红/黄/绿参考状态。"""
     record_access_log(ctx, "board", "maintenance")
     data = maintenance_cost.board(
         db, date_from, date_to, status, user_ctx=ctx, q_text=q,

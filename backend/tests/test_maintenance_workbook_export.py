@@ -985,9 +985,53 @@ def test_excel_column_preflight_matches_empty_and_reserved_fee_category_semantic
                 for cell in workbook["项目预算"][13]
                 if cell.value is not None
             ]
-            assert headings == ["月份", "备件消耗", "(未分类费用)", "当月合计"]
+            assert headings == [
+                "月份",
+                "已知备件成本参考（混合原值·兼容）",
+                "(未分类费用)",
+                "当月合计",
+            ]
         finally:
             workbook.close()
+
+
+def test_fee_categories_named_like_cost_tiers_remain_visible_in_monthly_table(db):
+    batch = _batch(db)
+    contract = "XSDD-COST-TIER-CATEGORY"
+    _order(db, batch, raw_id="COST-TIER-CATEGORY", contract=contract)
+    for index, (category, amount) in enumerate((
+        ("备件实际参考", Decimal("11")),
+        ("备件估算参考", Decimal("22")),
+    ), 1):
+        db.add(FProjectExpense(
+            raw_line_id=f"EXP-COST-TIER-CATEGORY-{index}",
+            bxd_no=f"BXD-COST-TIER-CATEGORY-{index}",
+            line_no=index,
+            data_status="已结束",
+            expense_date=date(2026, 7, 16),
+            fee_category=category,
+            linked_sales_order_no=contract,
+            amount=amount,
+            import_batch_id=batch.id,
+        ))
+    db.commit()
+
+    response = _admin_client(db).get(
+        "/api/maintenance/export-workbook",
+        params={"contract": contract},
+    )
+
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(io.BytesIO(response.content), read_only=True)
+    try:
+        sheet = workbook["项目预算"]
+        headings = [cell.value for cell in sheet[13] if cell.value is not None]
+        values = [cell.value for cell in sheet[14]][:len(headings)]
+        row = dict(zip(headings, values, strict=True))
+        assert row["备件实际参考"] == 11
+        assert row["备件估算参考"] == 22
+    finally:
+        workbook.close()
 
 
 @pytest.mark.parametrize("mode", ("single", "bulk"))
