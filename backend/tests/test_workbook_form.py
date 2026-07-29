@@ -152,6 +152,150 @@ def test_expense_transform_uses_postgresql_money_rounding_for_both_tax_bases():
     assert result.lines[3]["amount_inc_tax"] == Decimal("1.00")
 
 
+@pytest.mark.parametrize(
+    ("column", "marker", "amount", "expected_basis", "expected_ex", "expected_inc"),
+    [
+        (
+            "是否含税",
+            "含税",
+            Decimal("113.00"),
+            "inc",
+            Decimal("100.00"),
+            Decimal("113.00"),
+        ),
+        (
+            "是否含税(必填)",
+            "含税",
+            Decimal("113.00"),
+            "inc",
+            Decimal("100.00"),
+            Decimal("113.00"),
+        ),
+        (
+            "含税标记",
+            "未税",
+            Decimal("100.00"),
+            "ex",
+            Decimal("100.00"),
+            Decimal("113.00"),
+        ),
+        (
+            "报销明细.是否含税",
+            "是",
+            Decimal("113.00"),
+            "inc",
+            Decimal("100.00"),
+            Decimal("113.00"),
+        ),
+        (
+            "报销明细.含税标记",
+            "否",
+            Decimal("100.00"),
+            "ex",
+            Decimal("100.00"),
+            Decimal("113.00"),
+        ),
+        (
+            "是否含税",
+            1.0,
+            Decimal("113.00"),
+            "inc",
+            Decimal("100.00"),
+            Decimal("113.00"),
+        ),
+        (
+            "是否含税",
+            0.0,
+            Decimal("100.00"),
+            "ex",
+            Decimal("100.00"),
+            Decimal("113.00"),
+        ),
+    ],
+)
+def test_expense_transform_honors_explicit_tax_marker_columns(
+    column,
+    marker,
+    amount,
+    expected_basis,
+    expected_ex,
+    expected_inc,
+):
+    row = {
+        **_canon_row(amount=amount, reason="显式税务标记"),
+        column: marker,
+    }
+
+    result = transform(
+        pd.DataFrame([row]),
+        mapping.EXPENSE,
+        anchor="XSDD-TAX-MARKER",
+    )
+
+    assert not result.errors
+    assert result.lines[0]["tax_basis"] == expected_basis
+    assert result.lines[0]["amount_ex_tax"] == expected_ex
+    assert result.lines[0]["amount_inc_tax"] == expected_inc
+
+
+def test_expense_transform_rejects_conflicting_tax_marker_columns():
+    row = {
+        **_canon_row(amount=Decimal("113.00"), reason="冲突税务标记"),
+        "金额口径": "含税",
+        "是否含税(必填)": "未税",
+    }
+
+    result = transform(
+        pd.DataFrame([row]),
+        mapping.EXPENSE,
+        anchor="XSDD-TAX-CONFLICT",
+    )
+
+    assert not result.lines
+    assert result.errors[0].error_type == "conflicting_tax_basis"
+
+
+def test_uploaded_xlsx_tax_markers_flow_through_reader_and_transform(tmp_path):
+    """真实 .xlsx 路径必须保留税务标记，并逐行拒绝冲突口径。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "报销明细"
+    ws.append(["销售订单", "XSDD-XLSX-TAX"])
+    headers = [*_CANON, "金额口径", "是否含税(必填)"]
+    ws.append(headers)
+    valid = _canon_row(amount=Decimal("113.00"), reason="真实表格含税标记")
+    conflict = _canon_row(
+        d="2026-05-02",
+        amount=Decimal("113.00"),
+        reason="真实表格冲突标记",
+    )
+    ws.append([valid.get(column) for column in _CANON] + [None, "含税"])
+    ws.append(
+        [conflict.get(column) for column in _CANON] + ["含税", "未税"]
+    )
+    path = tmp_path / "expense-tax-markers.xlsx"
+    wb.save(path)
+    wb.close()
+
+    sheets = reader.read_workbook(str(path))
+    expense = next(
+        sheet for sheet in sheets if sheet.file_type == mapping.EXPENSE
+    )
+    result = transform(
+        expense.df,
+        expense.file_type,
+        anchor=expense.anchor,
+    )
+
+    assert len(result.lines) == 1
+    assert result.lines[0]["tax_basis"] == "inc"
+    assert result.lines[0]["amount_ex_tax"] == Decimal("100.00")
+    assert result.lines[0]["amount_inc_tax"] == Decimal("113.00")
+    assert [error.error_type for error in result.errors] == [
+        "conflicting_tax_basis"
+    ]
+
+
 def test_expense_transform_rejects_raw_amount_that_disagrees_with_tax_basis():
     row = {
         **_canon_row(amount=Decimal("999.00"), reason="原值冲突"),

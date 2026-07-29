@@ -531,15 +531,7 @@ def downgrade() -> None:
                        OR sales_display_basis IS DISTINCT FROM 'ex'
                 )
                 OR EXISTS (
-                    SELECT 1
-                    FROM f_project_expense
-                    WHERE tax_basis IS DISTINCT FROM 'default_ex'
-                       OR tax_rate_used IS DISTINCT FROM 0.13
-                       OR amount_ex_tax IS DISTINCT FROM amount
-                       OR amount_inc_tax IS DISTINCT FROM CASE
-                            WHEN amount IS NULL THEN NULL
-                            ELSE round(amount * 1.13, 2)
-                          END
+                    SELECT 1 FROM f_project_expense
                 )
                 OR EXISTS (
                     SELECT 1 FROM sys_role_template
