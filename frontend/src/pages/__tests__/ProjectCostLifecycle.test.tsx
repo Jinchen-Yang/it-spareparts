@@ -260,7 +260,7 @@ describe("维保项目生命周期筛选", () => {
     expect(screen.getByRole("heading", { name: "下载中心" })).toBeInTheDocument();
     expect(screen.getByLabelText("维保订单导出日期")).toBeInTheDocument();
     for (const name of [
-      "导出当前项目统计 CSV",
+      "导出项目成本 CSV",
       "导出合同详细盈亏 CSV",
       "导出订单汇总 Excel",
       "批量导出项目工作簿 ZIP",
@@ -270,6 +270,8 @@ describe("维保项目生命周期筛选", () => {
     ]) {
       expect(screen.getByRole("button", { name })).toBeInTheDocument();
     }
+    expect(screen.getByText(/项目成本 CSV 按项目汇总.*合同详细盈亏 CSV 按合同汇总/))
+      .toBeInTheDocument();
     expect(screen.getByText("导入更新工作簿")).toBeInTheDocument();
     expect(screen.queryByText("详细盈亏")).toBeNull();
   });
@@ -287,7 +289,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage view="downloads" />);
 
     await waitForDownloadsReady();
-    expect(screen.getByRole("button", { name: "导出当前项目统计 CSV" }))
+    expect(screen.getByRole("button", { name: "导出项目成本 CSV" }))
       .toBeInTheDocument();
     expect(screen.getByRole("button", { name: "导出单项目明细 CSV" }))
       .toBeInTheDocument();
@@ -585,7 +587,7 @@ describe("维保项目生命周期筛选", () => {
     const summaryButton = screen.getByRole("button", { name: "导出订单汇总 Excel" });
     expect(zipButton).toHaveClass("ant-btn-primary");
     expect(summaryButton).not.toHaveClass("ant-btn-primary");
-    expect(screen.getByRole("button", { name: "导出当前项目统计 CSV" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "导出项目成本 CSV" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "导出单合同工作簿 XLSX" }))
       .toBeInTheDocument();
     expect(screen.getByRole("button", { name: "下载固定回填模板" }))
@@ -668,6 +670,27 @@ describe("维保项目生命周期筛选", () => {
       expect(screen.getByRole("radio", { name: "全部" })).toHaveAttribute("checked");
     },
   );
+
+  it("点击相对日期档立即按需读取业务日并展示实际闭区间", async () => {
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/as-of") {
+        return Promise.resolve({ data: { as_of: "2026-07-17" } });
+      }
+      return Promise.reject(new Error("unexpected"));
+    });
+    render(<ProjectCostPage view="downloads" />);
+    expect(get).not.toHaveBeenCalledWith("/maintenance/as-of");
+
+    fireEvent.click(screen.getByRole("radio", { name: "近7天" }));
+
+    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/as-of"));
+    expect(await screen.findByText(
+      "实际闭区间：2026-07-11 至 2026-07-17（含首尾）",
+    )).toBeInTheDocument();
+    expect(get.mock.calls.filter(([path]) => (
+      path === "/maintenance/projects" || path === "/maintenance/board"
+    ))).toHaveLength(0);
+  });
 
   it("项目数据切换期限时分别更新项目事实和详细盈亏", async () => {
     installSuccessResponses();
@@ -973,11 +996,8 @@ describe("维保项目生命周期筛选", () => {
     expect(screen.queryByText("¥1,000")).toBeNull();
   });
 
-  it.each([
-    ["显式 incomplete", "incomplete"],
-    ["质量字段异常为空但其他成本事实可见", null],
-  ])("利润权限受限且%s时仍 fail-closed 展示补数事实，决策外观保持中性",
-    async (_label, costQuality) => {
+  it("利润权限受限但成本质量显式 incomplete 时仍展示补数事实，决策外观保持中性",
+    async () => {
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: true,
       data_purchase_cost: true,
@@ -992,7 +1012,7 @@ describe("维保项目生命周期筛选", () => {
           ...response.data.rows[0],
           decision_status: undefined,
           status: undefined,
-          cost_quality: costQuality,
+          cost_quality: "incomplete",
           missing_cost_lines: 1,
           budget: null,
           remaining: null,
@@ -1013,6 +1033,43 @@ describe("维保项目生命周期筛选", () => {
     expect(within(card).queryByText(/剩余预算|预算余量|预算已用完/)).toBeNull();
     expect(within(card).queryByRole("progressbar")).toBeNull();
     expect(card).not.toHaveStyle({ borderLeft: "4px solid #8c8c8c" });
+  });
+
+  it("利润权限受限且成本质量未知时保持中性，不把可见金额推断为成本不完整",
+    async () => {
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: true,
+      data_profit: false,
+      own_customers_only: false,
+    }));
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/projects") return Promise.resolve(projects());
+      if (path === "/maintenance/board") {
+        const response = board("XS-PROFIT-UNKNOWN");
+        response.data.rows[0] = {
+          ...response.data.rows[0],
+          decision_status: undefined,
+          status: undefined,
+          cost_quality: null,
+          missing_cost_lines: null,
+          budget: null,
+          remaining: null,
+          remaining_pct: null,
+        };
+        return Promise.resolve({
+          data: { ...response.data, profit_restricted: true },
+        });
+      }
+      return Promise.reject(new Error("unexpected"));
+    });
+
+    render(<ProjectCostPage />);
+
+    const card = await screen.findByTestId("maintenance-board-card-XS-PROFIT-UNKNOWN");
+    expect(within(card).queryByText("成本证据不完整")).toBeNull();
+    expect(card).not.toHaveTextContent(/预算余量|预算已用完|需补数据/);
+    expect(within(card).queryByRole("progressbar")).toBeNull();
   });
 
   it("权限限制标志不一致时按任一 true 收口，不能泄漏决策状态", async () => {
@@ -1037,6 +1094,44 @@ describe("维保项目生命周期筛选", () => {
     expect(screen.queryByRole("radiogroup", { name: "预算消耗参考状态筛选" })).toBeNull();
     expect(card).not.toHaveTextContent(/预算余量 > 20%|剩余预算/);
     expect(card).not.toHaveStyle({ borderLeft: "4px solid #8c8c8c" });
+  });
+
+  it.each([
+    ["decision_restricted", { decision_restricted: true }],
+    ["profit_restricted", { decision_restricted: false, profit_restricted: true }],
+    ["ranking_restricted", { decision_restricted: false, ranking_restricted: true }],
+  ])("%s 且决策和成本状态未知时提醒保持中性，不误报待补成本",
+    async (_label, restrictedFlags) => {
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/board") {
+        const response = board("XS-RESTRICTED-UNKNOWN");
+        response.data.rows[0] = {
+          ...response.data.rows[0],
+          decision_status: undefined,
+          status: undefined,
+          cost_quality: null,
+          actual_cost_inc: null,
+          actual_cost_ex: null,
+          estimated_cost_inc: null,
+          estimated_cost_ex: null,
+          actual_lines: null,
+          estimated_lines: null,
+          missing_cost_lines: null,
+          known_cost_total: null,
+        };
+        return Promise.resolve({
+          data: { ...response.data, ...restrictedFlags },
+        });
+      }
+      return Promise.reject(new Error("unexpected"));
+    });
+
+    render(<ProjectCostPage view="reminders" />);
+
+    expect(await screen.findByText("XS-RESTRICTED-UNKNOWN")).toBeInTheDocument();
+    expect(screen.getByText("经营判断受限")).toBeInTheDocument();
+    expect(screen.queryByText("成本不完整，需补数据")).toBeNull();
+    expect(screen.queryByText(/成本缺失 .* 行/)).toBeNull();
   });
 
   it("项目成本字段不受限时 cost_quality null 按需补数据 fail-closed", async () => {
@@ -1274,7 +1369,7 @@ describe("维保项目生命周期筛选", () => {
     await waitForDownloadsReady();
     const zipButton = screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" });
     const orderButton = screen.getByRole("button", { name: "导出订单汇总 Excel" });
-    const csvButton = screen.getByRole("button", { name: "导出当前项目统计 CSV" });
+    const csvButton = screen.getByRole("button", { name: "导出项目成本 CSV" });
 
     fireEvent.click(zipButton);
     fireEvent.click(zipButton);
@@ -1985,7 +2080,7 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage view="downloads" />);
     await waitForDownloadsReady();
 
-    fireEvent.click(screen.getByRole("button", { name: "导出当前项目统计 CSV" }));
+    fireEvent.click(screen.getByRole("button", { name: "导出项目成本 CSV" }));
 
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/export", expect.objectContaining({
       params: expect.objectContaining({ lifecycle: "all" }),
@@ -2022,6 +2117,36 @@ describe("维保项目生命周期筛选", () => {
     expect(get.mock.calls.filter(([path]) => path === "/maintenance/projects")).toHaveLength(0);
   });
 
+  it("项目提醒保留待补成本、待补费用、红黄绿和无预算六类筛选", async () => {
+    installSuccessResponses();
+    render(<ProjectCostPage view="reminders" />);
+    await screen.findByText("XSDD-1");
+
+    for (const label of [
+      "全部提醒",
+      "待补成本",
+      "待补费用",
+      "红色预警",
+      "黄色关注",
+      "绿色参考",
+      "无预算",
+    ]) {
+      expect(screen.getByRole("radio", { name: label })).toBeInTheDocument();
+    }
+
+    fireEvent.click(screen.getByRole("radio", { name: "待补成本" }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith(
+      "/maintenance/board",
+      expect.objectContaining({
+        params: expect.objectContaining({
+          lifecycle: "ongoing",
+          status: "incomplete_cost",
+        }),
+      }),
+    ));
+    expect(get.mock.calls.filter(([path]) => path === "/maintenance/projects")).toHaveLength(0);
+  });
+
   it("项目 CSV 慢请求防重复且不与主 XLSX 导出互锁", async () => {
     const csvPending = deferred<{ data: Blob }>();
     get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
@@ -2034,7 +2159,7 @@ describe("维保项目生命周期筛选", () => {
     });
     render(<ProjectCostPage view="downloads" />);
     await waitForDownloadsReady();
-    const csvButton = screen.getByRole("button", { name: "导出当前项目统计 CSV" });
+    const csvButton = screen.getByRole("button", { name: "导出项目成本 CSV" });
     const xlsxButton = screen.getByRole("button", { name: "导出订单汇总 Excel" });
 
     fireEvent.click(csvButton);
@@ -2218,8 +2343,39 @@ describe("维保项目生命周期筛选", () => {
     expect(await screen.findByText("当前筛选暂无提醒")).toBeInTheDocument();
     expect(screen.queryByText("暂无数据（导入维保出库后自动生成）")).toBeNull();
     expect(get.mock.calls.filter(([path]) => path === "/maintenance/projects")).toHaveLength(0);
+    });
   });
-});
+
+  it("项目事实迟到响应不能覆盖详细盈亏的期限计数和业务日", async () => {
+    const pendingProjects = deferred<ReturnType<typeof projects>>();
+    const pendingBoard = deferred<ReturnType<typeof board>>();
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/projects") return pendingProjects.promise;
+      if (path === "/maintenance/board") return pendingBoard.promise;
+      return Promise.reject(new Error("unexpected"));
+    });
+
+    render(<ProjectCostPage />);
+
+    const boardResponse = board("XSDD-BOARD-ASOF", "ongoing", "2026-07-20");
+    boardResponse.data.lifecycle_counts = { ongoing: 9, ended: 8, missing: 7 };
+    await act(async () => {
+      pendingBoard.resolve(boardResponse);
+    });
+    expect(await screen.findByText("详细盈亏截止 2026-07-20")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "进行中 9" })).toBeInTheDocument();
+
+    const projectResponse = projects("迟到项目事实", "ongoing", "2026-07-01");
+    projectResponse.data.lifecycle_counts = { ongoing: 1, ended: 2, missing: 3 };
+    await act(async () => {
+      pendingProjects.resolve(projectResponse);
+    });
+
+    expect(await screen.findByText("项目事实截止 2026-07-01")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "进行中 9" })).toBeInTheDocument();
+    expect(screen.getByText("项目事实期限：进行中 1 · 已结束 2 · 缺失 3"))
+      .toBeInTheDocument();
+  });
 
 describe("项目维保管理员统一口径", () => {
   it("采用服务端维保口径且普通页面没有个人切换入口", async () => {

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException, Request
 from openpyxl import load_workbook
 from sqlalchemy import func, select
 
@@ -1533,20 +1534,34 @@ def test_roundtrip_import_requires_same_cost_and_profit_visibility_as_export(db)
         permissions=permissions.effective("purchaser", None),
         is_authenticated=True,
     )
-    upload = UploadFile(
-        filename="maintenance_roundtrip.xlsx",
-        file=io.BytesIO(b"must-not-be-read"),
+    body_read = False
+
+    async def forbidden_receive():
+        nonlocal body_read
+        body_read = True
+        raise AssertionError("permission failure must happen before body read")
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/maintenance/roundtrip-import",
+            "headers": [],
+        },
+        forbidden_receive,
     )
 
     with pytest.raises(HTTPException) as caught:
-        maintenance_api.roundtrip_import(
-            file=upload,
-            db=db,
-            _auth="purchaser",
-            _page=None,
-            ctx=ctx,
+        asyncio.run(
+            maintenance_api.roundtrip_import(
+                request=request,
+                db=db,
+                _auth="purchaser",
+                _page=None,
+                ctx=ctx,
+            )
         )
 
     assert caught.value.status_code == 403
     assert "无成本及利润查看权限" in caught.value.detail
-    assert upload.file.tell() == 0
+    assert body_read is False

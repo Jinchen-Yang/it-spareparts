@@ -425,8 +425,25 @@ def _state_model():
 
 def _safe(value: Any) -> Any:
     if isinstance(value, str):
-        return safe_xlsx_text(value)
+        escaped = safe_xlsx_text(value)
+        # Roundtrip values must keep their signed/original semantics. The standard
+        # export helper prefixes formula-looking text with an apostrophe, but that
+        # would change contract numbers and break the HMAC on re-import. These cells
+        # are instead forced to OpenXML string type by ``_append_literal_row``.
+        if escaped.startswith("'") and escaped[1:].lstrip()[:1] in ("=", "+", "-", "@"):
+            return escaped[1:]
+        return escaped
     return value
+
+
+def _append_literal_row(ws, values: Iterable[Any]) -> None:
+    """Append data while forcing every string to OpenXML text, never a formula."""
+    ws.append([_safe(value) for value in values])
+    row = ws.max_row
+    for column in range(1, ws.max_column + 1):
+        cell = ws.cell(row=row, column=column)
+        if isinstance(cell.value, str):
+            cell.data_type = "s"
 
 
 def _iso(value: date | datetime | None) -> str:
@@ -984,11 +1001,11 @@ def _append_table(
             f"{ws.title} 超过 {MAX_ROWS_PER_TABLE} 行导出安全上限",
             status_code=413,
         )
-    ws.append(list(headers))
+    _append_literal_row(ws, headers)
     if not rows:
         rows = [[None] * len(headers)]
     for values in rows:
-        ws.append([_safe(value) for value in values])
+        _append_literal_row(ws, values)
 
     table = Table(
         displayName=table_name,
@@ -1449,9 +1466,9 @@ def _dictionary_sheet(workbook: Workbook) -> None:
 
 def _metadata_sheet(workbook: Workbook, metadata: dict[str, str]) -> None:
     ws = workbook.create_sheet("99_元数据")
-    ws.append(["key", "value"])
+    _append_literal_row(ws, ["key", "value"])
     for key in sorted(metadata):
-        ws.append([key, metadata[key]])
+        _append_literal_row(ws, [key, metadata[key]])
     table = Table(displayName="tbl_metadata_v1", ref=f"A1:B{len(metadata) + 1}")
     _table_style(table)
     ws.add_table(table)
@@ -1468,13 +1485,13 @@ def _contract_revisions_sheet(
             status_code=413,
         )
     ws = workbook.create_sheet("99_合同版本")
-    ws.append(list(_CONTRACT_REVISION_HEADERS))
+    _append_literal_row(ws, _CONTRACT_REVISION_HEADERS)
     for contract, revision in sorted(revisions.items()):
         if not contract or len(contract) > 64:
             raise RoundtripWorkbookError("合同号为空或超过 64 字符，不能生成回填模板")
         if revision < 0 or revision > 2_147_483_647:
             raise RoundtripWorkbookError("合同 revision 超出允许范围")
-        ws.append([contract, revision])
+        _append_literal_row(ws, [contract, revision])
     # Excel Table 至少保留一行；空集合用全空哨兵，导入解析时忽略。
     if not revisions:
         ws.append([None, None])
@@ -1601,6 +1618,7 @@ def _roundtrip_bundle_contracts(
             func.btrim(FMaintenanceOrder.linked_sales_order_no) != "",
         )
         .order_by(FMaintenanceOrder.linked_sales_order_no)
+        .limit(MAX_ROUNDTRIP_BUNDLE_CONTRACTS + 1)
     ).all()
     return [str(value).strip() for value in values if value and str(value).strip()]
 
@@ -1957,7 +1975,11 @@ def _parse_table(workbook, sheet: str) -> list[_ParsedRow]:
                     raise RoundtripWorkbookError(
                         f"{sheet} 第 {row_number} 行“{header}”超过 Excel 文本上限"
                     )
-                if _FORMULA_START.match(value):
+                if (
+                    sheet != "01_项目"
+                    and header != "合同号"
+                    and _FORMULA_START.match(value)
+                ):
                     raise RoundtripWorkbookError(
                         f"{sheet} 第 {row_number} 行“{header}”疑似公式，拒绝导入"
                     )
@@ -1991,9 +2013,7 @@ def _load_and_parse(path: str):
         for worksheet in workbook.worksheets:
             # 只遍历实际存储的单元格，避免恶意放大的 worksheet dimension 触发全区扫描。
             for cell in worksheet._cells.values():
-                if cell.data_type == "f" or (
-                    isinstance(cell.value, str) and _FORMULA_START.match(cell.value)
-                ):
+                if cell.data_type == "f":
                     raise RoundtripWorkbookError(
                         f"{worksheet.title} 包含公式，固定回填工作簿只允许静态值"
                     )

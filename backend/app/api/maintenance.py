@@ -9,14 +9,16 @@ import io
 import os
 import re
 import tempfile
+import threading
 from contextlib import suppress
 from datetime import date
 from tempfile import SpooledTemporaryFile
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from starlette.datastructures import UploadFile
 
 from app.auth import current_role, require_admin
 from app.business_time import business_today
@@ -42,6 +44,8 @@ _MAX_CSV_CELL_CHARS = 32_767
 _MAX_CSV_DYNAMIC_TEXT_BYTES = 64 * 1024 * 1024
 _MAX_CSV_OUTPUT_BYTES = 512 * 1024 * 1024
 _INVALID_CSV_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff]")
+_ROUNDTRIP_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+_ROUNDTRIP_IMPORT_PARSE_LOCK = threading.Lock()
 
 
 class _ClosingStreamingResponse(StreamingResponse):
@@ -920,8 +924,60 @@ def _save_roundtrip_upload(file: UploadFile) -> tuple[str, str]:
     return path, original_name[:256]
 
 
+async def _parse_and_save_roundtrip_upload(request: Request) -> tuple[str, str]:
+    """鉴权后才解析 multipart，并同时限制总请求体、文件数和文件字节数。"""
+    file_limit = config.MAX_UPLOAD_MB * 1024 * 1024
+    body_limit = file_limit + _ROUNDTRIP_MULTIPART_OVERHEAD_BYTES
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Content-Length 格式无效") from exc
+        if declared_length < 0:
+            raise HTTPException(status_code=400, detail="Content-Length 格式无效")
+        if declared_length > body_limit:
+            raise HTTPException(
+                status_code=413,
+                detail=f"工作簿超过 {config.MAX_UPLOAD_MB}MB 上传上限",
+            )
+
+    consumed = 0
+
+    async def limited_receive():
+        nonlocal consumed
+        message = await request.receive()
+        if message["type"] == "http.request":
+            consumed += len(message.get("body", b""))
+            if consumed > body_limit:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"工作簿超过 {config.MAX_UPLOAD_MB}MB 上传上限",
+                )
+        return message
+
+    limited_request = Request(request.scope, limited_receive)
+    async with limited_request.form(
+        max_files=1,
+        max_fields=0,
+        max_part_size=1024,
+    ) as form:
+        items = form.multi_items()
+        if (
+            len(items) != 1
+            or items[0][0] != "file"
+            or not isinstance(items[0][1], UploadFile)
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="必须且只能上传一个名为 file 的 .xlsx 工作簿",
+            )
+        return _save_roundtrip_upload(items[0][1])
+
+
 @router.post("/roundtrip-import")
-def roundtrip_import(
+async def roundtrip_import(
+    request: Request,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
@@ -930,17 +986,25 @@ def roundtrip_import(
         require_data="data_profit",
     )),
     ctx: UserContext = Depends(get_current_user_context),
-    file: UploadFile = File(...),
 ) -> dict:
     """校验并原子应用系统导出的固定协议工作簿。
 
-    身份、页面、显式写动作及数据可见依赖均排在 ``UploadFile`` 之前解析；应用层也在
-    调用 ``_save_roundtrip_upload``（首次读取上传体）前完成实名与字段权限校验。
+    路由签名不声明 ``UploadFile``，避免 FastAPI 在依赖执行前消费 multipart。身份、页面、
+    显式写动作和数据可见依赖全部通过后，才进入限并发、限总字节的解析路径。
     """
     if not ctx.is_authenticated or not ctx.user_id:
         raise HTTPException(status_code=401, detail="维保回填必须使用实名登录账号")
     _require_roundtrip_permissions(ctx)
-    path, original_name = _save_roundtrip_upload(file)
+    if not _ROUNDTRIP_IMPORT_PARSE_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="已有维保回填文件正在解析，请稍后重试",
+            headers={"Retry-After": "5"},
+        )
+    try:
+        path, original_name = await _parse_and_save_roundtrip_upload(request)
+    finally:
+        _ROUNDTRIP_IMPORT_PARSE_LOCK.release()
     try:
         record_access_log(
             ctx,

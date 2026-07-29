@@ -1,6 +1,7 @@
 """DEV-15 roundtrip security boundaries missed by the happy-path contract tests."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from datetime import date
 from decimal import Decimal
@@ -33,6 +34,7 @@ from tests.test_maintenance_roundtrip import (
     _export_to_path,
     _seed_contract,
 )
+from tests.test_maintenance_export_headers import _admin_client
 
 
 def _expense_count(db, contract: str) -> int:
@@ -41,6 +43,66 @@ def _expense_count(db, contract: str) -> int:
             FProjectExpense.linked_sales_order_no == contract
         )
     )
+
+
+def _multipart_upload_body(size: int) -> tuple[bytes, str]:
+    boundary = "itdata-roundtrip-security-boundary"
+    body = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; '
+        'filename="maintenance_roundtrip.xlsx"\r\n'
+        "Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n"
+        "\r\n"
+    ).encode() + (b"x" * size) + f"\r\n--{boundary}--\r\n".encode()
+    return body, boundary
+
+
+def _asgi_roundtrip_import_with_receive_meter(
+    body: bytes,
+    boundary: str,
+    *,
+    token: str | None = None,
+    include_content_length: bool = True,
+) -> tuple[int, int, dict[bytes, bytes]]:
+    consumed = 0
+    sent: list[dict] = []
+    delivered = False
+
+    async def receive():
+        nonlocal consumed, delivered
+        if delivered:
+            return {"type": "http.disconnect"}
+        delivered = True
+        consumed += len(body)
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    headers = [
+        (b"content-type", f"multipart/form-data; boundary={boundary}".encode()),
+    ]
+    if include_content_length:
+        headers.append((b"content-length", str(len(body)).encode()))
+    if token is not None:
+        headers.append((b"authorization", f"Bearer {token}".encode()))
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/maintenance/roundtrip-import",
+        "raw_path": b"/api/maintenance/roundtrip-import",
+        "query_string": b"",
+        "headers": headers,
+        "client": ("127.0.0.1", 54321),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+    asyncio.run(app(scope, receive, send))
+    start = next(message for message in sent if message["type"] == "http.response.start")
+    return start["status"], consumed, dict(start["headers"])
 
 
 def test_signed_contract_scope_rejects_mixed_cross_contract_workbook_atomically(
@@ -814,6 +876,113 @@ def test_roundtrip_apply_action_defaults_fail_closed_for_non_operators():
     assert permissions.template_for("readonly")[
         "action_maintenance_roundtrip_apply"
     ] is False
+
+
+def test_roundtrip_import_anonymous_401_does_not_read_multipart_body(db):
+    body, boundary = _multipart_upload_body(2 * 1024 * 1024)
+
+    status, consumed, _headers = _asgi_roundtrip_import_with_receive_meter(
+        body,
+        boundary,
+    )
+
+    assert status == 401
+    assert consumed == 0
+
+
+def test_roundtrip_import_customer_blind_403_does_not_read_multipart_body(db):
+    base = permissions.effective("boss", None)
+    overrides = {"data_customer": False}
+    user = SysUser(
+        username="roundtrip-asgi-no-customer",
+        role="boss",
+        display_name="ASGI 无客户权限回填员",
+        password_hash=hash_password("roundtrip-password"),
+        template_code="boss",
+        template_version=1,
+        template_perms=base,
+        perm_overrides=overrides,
+        permissions=permissions.effective_from_snapshot(base, overrides),
+    )
+    db.add(user)
+    db.commit()
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={
+            "username": "roundtrip-asgi-no-customer",
+            "password": "roundtrip-password",
+        },
+    )
+    assert login.status_code == 200
+    body, boundary = _multipart_upload_body(2 * 1024 * 1024)
+
+    status, consumed, _headers = _asgi_roundtrip_import_with_receive_meter(
+        body,
+        boundary,
+        token=login.json()["token"],
+    )
+
+    assert status == 403
+    assert consumed == 0
+
+
+def test_roundtrip_import_declared_oversize_413_before_reading_multipart_body(
+    db,
+    monkeypatch,
+):
+    client = _admin_client(db)
+    token = client.headers["Authorization"].removeprefix("Bearer ")
+    monkeypatch.setattr(maintenance_api.config, "MAX_UPLOAD_MB", 1)
+    body, boundary = _multipart_upload_body(2 * 1024 * 1024)
+
+    status, consumed, _headers = _asgi_roundtrip_import_with_receive_meter(
+        body,
+        boundary,
+        token=token,
+    )
+
+    assert status == 413
+    assert consumed == 0
+
+
+def test_roundtrip_import_chunked_oversize_stops_at_body_byte_limit(
+    db,
+    monkeypatch,
+):
+    client = _admin_client(db)
+    token = client.headers["Authorization"].removeprefix("Bearer ")
+    monkeypatch.setattr(maintenance_api.config, "MAX_UPLOAD_MB", 1)
+    body, boundary = _multipart_upload_body(2 * 1024 * 1024)
+
+    status, consumed, _headers = _asgi_roundtrip_import_with_receive_meter(
+        body,
+        boundary,
+        token=token,
+        include_content_length=False,
+    )
+
+    assert status == 413
+    assert consumed == len(body)
+
+
+def test_roundtrip_import_busy_429_before_body_with_retry_after(db):
+    client = _admin_client(db)
+    token = client.headers["Authorization"].removeprefix("Bearer ")
+    body, boundary = _multipart_upload_body(2 * 1024 * 1024)
+    assert maintenance_api._ROUNDTRIP_IMPORT_PARSE_LOCK.acquire(blocking=False)
+    try:
+        status, consumed, headers = _asgi_roundtrip_import_with_receive_meter(
+            body,
+            boundary,
+            token=token,
+        )
+    finally:
+        maintenance_api._ROUNDTRIP_IMPORT_PARSE_LOCK.release()
+
+    assert status == 429
+    assert consumed == 0
+    assert headers[b"retry-after"] == b"5"
 
 
 def test_roundtrip_apply_action_403_happens_before_application_reads_upload(

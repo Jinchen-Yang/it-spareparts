@@ -105,6 +105,7 @@ type BoardStatus =
 type LifecycleStatus = "ongoing" | "ended" | "missing";
 type LifecycleFilter = LifecycleStatus | "all";
 type LifecycleCounts = Record<LifecycleStatus, number>;
+type ReminderStatusFilter = BoardStatus | "all";
 type ExportDatePreset = "all" | "today" | "last7" | "last14" | "last21" | "last30" | "month" | "custom";
 
 interface BoardRow extends DualMarginFields {
@@ -404,18 +405,22 @@ const BOARD_STATUSES = new Set<BoardStatus>([
 
 function normalizeDecisionStatus(
   decisionStatus: string | null | undefined,
-): BoardStatus {
+): BoardStatus | null {
   return BOARD_STATUSES.has(decisionStatus as BoardStatus)
     ? decisionStatus as BoardStatus
-    : "incomplete_cost";
+    : null;
 }
 
-function normalizeCostQuality(value: string | null | undefined): CostQuality {
-  if (value === "actual_only" || value === "contains_estimate") return value;
-  return "incomplete";
+function normalizeCostQuality(value: string | null | undefined): CostQuality | null {
+  if (
+    value === "actual_only"
+    || value === "contains_estimate"
+    || value === "incomplete"
+  ) return value;
+  return null;
 }
 
-function effectiveBoardStatus(row: BoardRow): BoardStatus {
+function effectiveBoardStatus(row: BoardRow): BoardStatus | null {
   const status = normalizeDecisionStatus(row.decision_status);
   return normalizeCostQuality(row.cost_quality) === "incomplete"
     || status === "incomplete_cost"
@@ -669,12 +674,24 @@ export default function ProjectCostPage({
   const [exportRange, setExportRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [exportDatePreset, setExportDatePreset] = useState<ExportDatePreset>("all");
   const exportDatePresetRef = useRef<ExportDatePreset>("all");
+  const [exportAsOf, setExportAsOf] = useState("");
+  const [exportScopeLoading, setExportScopeLoading] = useState(false);
+  const exportScopeSeq = useRef(0);
+  const exportScopeRequest = useRef<{
+    preset: ExportDatePreset;
+    promise: Promise<[Dayjs, Dayjs] | null>;
+  } | null>(null);
   const [q, setQ] = useState("");
   const [downloadProject, setDownloadProject] = useState("");
   const [downloadContract, setDownloadContract] = useState("");
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
-  const [lifecycleCounts, setLifecycleCounts] = useState<LifecycleCounts>(EMPTY_LIFECYCLE_COUNTS);
-  const [asOf, setAsOf] = useState("");
+  const [reminderStatus, setReminderStatus] = useState<ReminderStatusFilter>("all");
+  const [projectLifecycleCounts, setProjectLifecycleCounts] =
+    useState<LifecycleCounts>(EMPTY_LIFECYCLE_COUNTS);
+  const [boardLifecycleCounts, setBoardLifecycleCounts] =
+    useState<LifecycleCounts>(EMPTY_LIFECYCLE_COUNTS);
+  const [projectAsOf, setProjectAsOf] = useState("");
+  const [boardAsOf, setBoardAsOf] = useState("");
   const [rows, setRows] = useState<ProjectRow[]>([]);
   const [projectCostRestricted, setProjectCostRestricted] = useState(false);
   const [board, setBoard] = useState<BoardRow[]>([]);
@@ -734,6 +751,9 @@ export default function ProjectCostPage({
   const boardParams = () => ({
     q: q || undefined,
     lifecycle,
+    status: view === "reminders" && reminderStatus !== "all"
+      ? reminderStatus
+      : undefined,
   });
 
   const loadProjects = async () => {
@@ -743,6 +763,8 @@ export default function ProjectCostPage({
     setRows([]);
     setProjectCostRestricted(false);
     setStartDate("");
+    setProjectAsOf("");
+    setProjectLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
     try {
       const { data } = await api.get("/maintenance/projects", {
         params: lifecycleParams(),
@@ -751,8 +773,8 @@ export default function ProjectCostPage({
       setRows(data.rows);
       setProjectCostRestricted(!!data.ranking_restricted);
       setStartDate(data.start_date);
-      setAsOf(data.as_of || "");
-      setLifecycleCounts(data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
+      setProjectAsOf(data.as_of || "");
+      setProjectLifecycleCounts(data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
     } catch {
       if (seq !== projectsSeq.current) return;
       setRows([]);
@@ -770,14 +792,16 @@ export default function ProjectCostPage({
     setBoard([]);
     setBoardPage(1);
     setBoardDecisionRestricted(false);
+    setBoardAsOf("");
+    setBoardLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
     try {
       const { data } = await api.get("/maintenance/board", {
         params: boardParams(),
       });
       if (seq !== boardSeq.current) return;
       setBoard(data.rows);
-      setAsOf(data.as_of || "");
-      setLifecycleCounts(data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
+      setBoardAsOf(data.as_of || "");
+      setBoardLifecycleCounts(data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
       setBoardDecisionRestricted(
         data.decision_restricted === true
         || data.profit_restricted === true
@@ -794,17 +818,26 @@ export default function ProjectCostPage({
   };
 
   useEffect(() => {
-    setLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
-    setAsOf("");
     if (view === "downloads") {
       projectsSeq.current += 1;
       boardSeq.current += 1;
+      exportScopeSeq.current += 1;
+      exportScopeRequest.current = null;
+      exportDatePresetRef.current = "all";
+      setExportDatePreset("all");
+      setExportRange(null);
+      setExportAsOf("");
+      setExportScopeLoading(false);
       setProjectsLoading(false);
       setBoardLoading(false);
       setProjectsLoadError(false);
       setBoardLoadError(false);
       setRows([]);
       setBoard([]);
+      setProjectAsOf("");
+      setBoardAsOf("");
+      setProjectLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
+      setBoardLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
       return;
     }
     if (view === "reminders") {
@@ -818,7 +851,7 @@ export default function ProjectCostPage({
     void loadProjects();
     void loadBoard();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, lifecycle, view]);
+  }, [q, lifecycle, reminderStatus, view]);
 
   const loadLines = async (project: string, page: number, month?: string) => {
     const seq = ++linesSeq.current;
@@ -879,6 +912,43 @@ export default function ProjectCostPage({
     api.get(path, { params: { ...baseParams(), ...extra }, responseType: "blob" })
       .then((res) => saveDownloadResponse(res, filename, expectedTypes));
 
+  const requestRelativeExportScope = (
+    requestedPreset: ExportDatePreset,
+  ): Promise<[Dayjs, Dayjs] | null> => {
+    const seq = ++exportScopeSeq.current;
+    setExportScopeLoading(true);
+    setExportRange(null);
+    setExportAsOf("");
+    const promise = api.get("/maintenance/as-of")
+      .then(({ data }) => {
+        if (
+          seq !== exportScopeSeq.current
+          || exportDatePresetRef.current !== requestedPreset
+        ) return null;
+        const latestAsOf = typeof data?.as_of === "string" ? data.as_of : "";
+        const anchor = latestAsOf ? dayjs(latestAsOf) : null;
+        if (!anchor?.isValid()) throw new Error("invalid as_of");
+        const resolvedRange = presetRange(requestedPreset, anchor);
+        setExportAsOf(latestAsOf);
+        setExportRange(resolvedRange);
+        return resolvedRange;
+      })
+      .catch(() => {
+        if (
+          seq === exportScopeSeq.current
+          && exportDatePresetRef.current === requestedPreset
+        ) {
+          message.error("日期基准加载失败，请重试该日期档");
+        }
+        return null;
+      })
+      .finally(() => {
+        if (seq === exportScopeSeq.current) setExportScopeLoading(false);
+      });
+    exportScopeRequest.current = { preset: requestedPreset, promise };
+    return promise;
+  };
+
   const resolveExportScope = async (
     requestedPreset: ExportDatePreset,
   ): Promise<{
@@ -887,14 +957,11 @@ export default function ProjectCostPage({
   } | null> => {
     let resolvedRange = exportRange;
     if (requestedPreset !== "all" && requestedPreset !== "custom") {
-      const { data } = await api.get("/maintenance/as-of");
-      if (exportDatePresetRef.current !== requestedPreset) return null;
-      const latestAsOf = typeof data?.as_of === "string" ? data.as_of : "";
-      const anchor = latestAsOf ? dayjs(latestAsOf) : null;
-      if (!anchor?.isValid()) throw new Error("invalid as_of");
-      resolvedRange = presetRange(requestedPreset, anchor);
-      setAsOf(latestAsOf);
-      setExportRange(resolvedRange);
+      const active = exportScopeRequest.current;
+      resolvedRange = active?.preset === requestedPreset
+        ? await active.promise
+        : await requestRelativeExportScope(requestedPreset);
+      if (!resolvedRange || exportDatePresetRef.current !== requestedPreset) return null;
     }
     const params = buildOrderExportParams(requestedPreset, resolvedRange);
     if (!params) {
@@ -1187,9 +1254,9 @@ export default function ProjectCostPage({
     { title: "成本完整性", dataIndex: "cost_quality", width: 160,
       render: (rawQuality: string | null, row) => {
         // 成本字段确由 RBAC 隐藏时保持中性；不受限响应的 null/未知值仍 fail-closed。
-        if (rawQuality == null && projectCostRestricted) return "—";
         const quality = normalizeCostQuality(rawQuality);
-        if (quality === "incomplete") {
+        if (quality == null && projectCostRestricted) return "—";
+        if (quality == null || quality === "incomplete") {
           return <Tag color="orange">需补数据 · {row.missing_cost_lines ?? "—"} 行</Tag>;
         }
         if (quality === "contains_estimate") {
@@ -1326,10 +1393,14 @@ export default function ProjectCostPage({
                   const preset = value as ExportDatePreset;
                   exportDatePresetRef.current = preset;
                   setExportDatePreset(preset);
-                  if (preset === "all" || preset === "custom") setExportRange(null);
-                  const anchor = asOf ? dayjs(asOf) : null;
-                  if (anchor && preset !== "all" && preset !== "custom") {
-                    setExportRange(presetRange(preset, anchor));
+                  if (preset === "all" || preset === "custom") {
+                    exportScopeSeq.current += 1;
+                    exportScopeRequest.current = null;
+                    setExportScopeLoading(false);
+                    setExportRange(null);
+                    setExportAsOf("");
+                  } else {
+                    void requestRelativeExportScope(preset);
                   }
                 }}
                 options={[
@@ -1348,15 +1419,32 @@ export default function ProjectCostPage({
               aria-label="导出自定义起止日期"
               value={exportRange}
               onChange={(value) => {
+                exportScopeSeq.current += 1;
+                exportScopeRequest.current = null;
                 exportDatePresetRef.current = "custom";
                 setExportDatePreset("custom");
+                setExportScopeLoading(false);
+                setExportAsOf("");
                 setExportRange(value as [Dayjs, Dayjs] | null);
               }}
             />
             <Alert
               type="info"
               showIcon
-              message={`相对日期按 ${asOf || "后端业务日"} 计算；“全部”不附带日期范围。`}
+              message={exportScopeLoading
+                ? "正在读取后端业务日并计算实际闭区间…"
+                : exportDatePreset !== "all"
+                  && exportDatePreset !== "custom"
+                  && exportRange
+                  ? `实际闭区间：${exportRange[0].format("YYYY-MM-DD")} 至 ${
+                    exportRange[1].format("YYYY-MM-DD")
+                  }（含首尾）`
+                  : exportDatePreset === "custom"
+                    ? "自定义日期按所选首尾日期闭区间导出。"
+                    : "相对日期按后端业务日计算；“全部”不附带日期范围。"}
+              description={exportAsOf
+                ? `后端业务日 ${exportAsOf}`
+                : undefined}
             />
             {Object.entries(activeDownloads).map(([key, label]) => (
               <Alert
@@ -1378,7 +1466,7 @@ export default function ProjectCostPage({
                 disabled={exportingProjects}
                 onClick={exportProjectsCsv}
               >
-                导出当前项目统计 CSV
+                导出项目成本 CSV
               </Button>
               <Button
                 loading={exportingProfit}
@@ -1403,6 +1491,11 @@ export default function ProjectCostPage({
                 </Button>
               )}
             </Space>
+            <Alert
+              type="info"
+              showIcon
+              message="项目成本 CSV 按项目汇总备件成本；合同详细盈亏 CSV 按合同汇总收入、成本、费用、利润与证据状态。"
+            />
             <Space wrap style={{ width: "100%" }}>
               <Input
                 aria-label="单项目名称"
@@ -1515,15 +1608,42 @@ export default function ProjectCostPage({
                   value={lifecycle}
                   onChange={(value) => setLifecycle(value as LifecycleFilter)}
                   options={[
-                    { label: `进行中 ${lifecycleCounts.ongoing}`, value: "ongoing" },
-                    { label: `已结束 ${lifecycleCounts.ended}`, value: "ended" },
-                    { label: `期限缺失 ${lifecycleCounts.missing}`, value: "missing" },
+                    { label: `进行中 ${boardLifecycleCounts.ongoing}`, value: "ongoing" },
+                    { label: `已结束 ${boardLifecycleCounts.ended}`, value: "ended" },
+                    { label: `期限缺失 ${boardLifecycleCounts.missing}`, value: "missing" },
                     {
                       label: `全部 ${
-                        lifecycleCounts.ongoing + lifecycleCounts.ended + lifecycleCounts.missing
+                        boardLifecycleCounts.ongoing
+                        + boardLifecycleCounts.ended
+                        + boardLifecycleCounts.missing
                       }`,
                       value: "all",
                     },
+                  ]}
+                />
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>提醒类型</div>
+              <div style={{
+                width: "100%",
+                minWidth: 0,
+                maxWidth: "100%",
+                overflowX: "auto",
+                paddingBottom: 2,
+              }}>
+                <Segmented
+                  aria-label="项目提醒类型筛选"
+                  value={reminderStatus}
+                  onChange={(value) => setReminderStatus(value as ReminderStatusFilter)}
+                  options={[
+                    { label: "全部提醒", value: "all" },
+                    { label: "待补成本", value: "incomplete_cost" },
+                    { label: "待补费用", value: "expense_data_unavailable" },
+                    { label: "红色预警", value: "red" },
+                    { label: "黄色关注", value: "yellow" },
+                    { label: "绿色参考", value: "green" },
+                    { label: "无预算", value: "no_budget" },
                   ]}
                 />
               </div>
@@ -1552,8 +1672,11 @@ export default function ProjectCostPage({
           ) : (
             <Space direction="vertical" size={10} style={{ width: "100%" }}>
               {board.map((item) => {
-                const status = effectiveBoardStatus(item);
-                const meta = STATUS_META[status];
+                const knownCostQuality = normalizeCostQuality(item.cost_quality);
+                const status = boardDecisionRestricted
+                  ? knownCostQuality === "incomplete" ? "incomplete_cost" : null
+                  : effectiveBoardStatus(item) ?? "incomplete_cost";
+                const meta = status == null ? null : STATUS_META[status];
                 return (
                   <Alert
                     key={item.contract || "(none)"}
@@ -1563,14 +1686,16 @@ export default function ProjectCostPage({
                       <Space wrap>
                         <b>{item.contract || "（未关联合同）"}</b>
                         <Tag color={status === "red" ? "red" : status === "yellow" ? "gold" : "default"}>
-                          {meta.label}
+                          {meta?.label || "经营判断受限"}
                         </Tag>
                         <LifecycleTag status={item.lifecycle_status} />
                       </Space>
                     }
-                    description={`成本缺失 ${item.missing_cost_lines ?? "—"} 行 · 费用${
-                      item.expense_data_available === true ? "已就绪" : "未就绪"
-                    }`}
+                    description={status == null
+                      ? "当前账号仅展示获准事实，不推断成本、费用或预算状态"
+                      : `成本缺失 ${item.missing_cost_lines ?? "—"} 行 · 费用${
+                        item.expense_data_available === true ? "已就绪" : "未就绪"
+                      }`}
                   />
                 );
               })}
@@ -1591,7 +1716,9 @@ export default function ProjectCostPage({
         title={<Space>详细盈亏
           <Tooltip title="按合同聚合收入、备件成本与费用。含税、未税独立计算；任一口径证据不完整时，该口径毛利保持为空并显示原因。">
             <InfoCircleOutlined style={{ color: "var(--mb-text-3)" }} />
-          </Tooltip></Space>}
+          </Tooltip>
+          <Tag>{`详细盈亏截止 ${boardAsOf || "—"}`}</Tag>
+        </Space>}
         loading={boardLoading}
       >
         <Space direction="vertical" size={12} style={{ width: "100%", marginBottom: 12 }}>
@@ -1609,12 +1736,18 @@ export default function ProjectCostPage({
                 value={lifecycle}
                 onChange={(value) => setLifecycle(value as LifecycleFilter)}
                 options={[
-                  { label: `进行中 ${lifecycleCounts.ongoing}`, value: "ongoing" },
-                  { label: `已结束 ${lifecycleCounts.ended}`, value: "ended" },
-                  { label: <span style={{ color: lifecycleCounts.missing ? "#d46b08" : undefined }}>
-                    期限缺失 {lifecycleCounts.missing}
+                  { label: `进行中 ${boardLifecycleCounts.ongoing}`, value: "ongoing" },
+                  { label: `已结束 ${boardLifecycleCounts.ended}`, value: "ended" },
+                  { label: <span style={{
+                    color: boardLifecycleCounts.missing ? "#d46b08" : undefined,
+                  }}>
+                    期限缺失 {boardLifecycleCounts.missing}
                   </span>, value: "missing" },
-                  { label: `全部 ${lifecycleCounts.ongoing + lifecycleCounts.ended + lifecycleCounts.missing}`,
+                  { label: `全部 ${
+                    boardLifecycleCounts.ongoing
+                    + boardLifecycleCounts.ended
+                    + boardLifecycleCounts.missing
+                  }`,
                     value: "all" },
                 ]}
               />
@@ -1681,7 +1814,9 @@ export default function ProjectCostPage({
               const costIncomplete = !costFactsMasked
                 && normalizedQuality === "incomplete";
               const decisionIncomplete = !boardDecisionRestricted && (
-                b.cost_quality == null || normalizedDecision === "incomplete_cost"
+                normalizedQuality == null
+                || normalizedDecision == null
+                || normalizedDecision === "incomplete_cost"
               );
               const incomplete = costIncomplete || decisionIncomplete;
               const decisionStatus = boardDecisionRestricted
@@ -1852,12 +1987,22 @@ export default function ProjectCostPage({
 
       <Card
         title="项目成本事实分层"
-        extra={isAdmin ? (
-          <Button type="primary" loading={recomputing} onClick={recompute}>
-            重算成本
-          </Button>
-        ) : null}
+        extra={(
+          <Space wrap>
+            <Tag>{`项目事实截止 ${projectAsOf || "—"}`}</Tag>
+            {isAdmin && (
+              <Button type="primary" loading={recomputing} onClick={recompute}>
+                重算成本
+              </Button>
+            )}
+          </Space>
+        )}
       >
+        <div style={{ color: "var(--mb-text-3)", fontSize: 12.5, marginBottom: 10 }}>
+          项目事实期限：进行中 {projectLifecycleCounts.ongoing}
+          {" · "}已结束 {projectLifecycleCounts.ended}
+          {" · "}缺失 {projectLifecycleCounts.missing}
+        </div>
         {projectsLoadError && (
           <Alert
             type="error"

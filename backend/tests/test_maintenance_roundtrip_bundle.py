@@ -33,6 +33,40 @@ def _metadata(payload: bytes) -> dict[str, str]:
         workbook.close()
 
 
+def _assert_contract_is_literal_text(payload: bytes, contract: str) -> None:
+    workbook = load_workbook(io.BytesIO(payload), data_only=False)
+    try:
+        for sheet_name, header in (
+            ("01_项目", "合同号"),
+            ("02_维保订单", "合同号"),
+        ):
+            sheet = workbook[sheet_name]
+            columns = {
+                str(cell.value): cell.column
+                for cell in sheet[1]
+                if cell.value is not None
+            }
+            cell = sheet.cell(row=2, column=columns[header])
+            assert cell.value == contract
+            assert cell.data_type == "s"
+
+        revision_cell = workbook["99_合同版本"].cell(row=2, column=1)
+        assert revision_cell.value == contract
+        assert revision_cell.data_type == "s"
+
+        metadata_sheet = workbook["99_元数据"]
+        metadata_row = next(
+            row
+            for row in range(2, metadata_sheet.max_row + 1)
+            if metadata_sheet.cell(row=row, column=1).value == "contract_scope"
+        )
+        metadata_cell = metadata_sheet.cell(row=metadata_row, column=2)
+        assert metadata_cell.value == contract
+        assert metadata_cell.data_type == "s"
+    finally:
+        workbook.close()
+
+
 def _customer_blind_maintenance_client(db) -> TestClient:
     base = permissions.effective("boss", None)
     overrides = {"data_customer": False}
@@ -180,6 +214,67 @@ def test_roundtrip_bundle_endpoint_splits_contracts_into_independently_signed_wo
         assert imported.json()["changed_rows"] == 0
 
 
+def test_single_roundtrip_formula_like_contract_is_literal_and_imports_unchanged(db):
+    contract = '=HYPERLINK("https://127.0.0.1","x")'
+    _seed_contract(db, suffix="formula-single", contract=contract)
+    client = _admin_client(db)
+
+    response = client.get(
+        "/api/maintenance/roundtrip-template",
+        params={"contract": contract},
+    )
+
+    assert response.status_code == 200, response.text
+    _assert_contract_is_literal_text(response.content, contract)
+    metadata = _metadata(response.content)
+    signature = metadata.pop("metadata_hmac")
+    assert signature == maintenance_roundtrip._metadata_hmac(metadata)
+    imported = client.post(
+        "/api/maintenance/roundtrip-import",
+        files={
+            "file": (
+                "formula-contract.xlsx",
+                response.content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+        },
+    )
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["contracts"] == [contract]
+    assert imported.json()["changed_rows"] == 0
+
+
+def test_batch_roundtrip_formula_like_contract_is_literal_and_imports_unchanged(db):
+    contract = '=HYPERLINK("https://127.0.0.1","batch")'
+    _seed_contract(db, suffix="formula-batch", contract=contract)
+    client = _admin_client(db)
+
+    response = client.get("/api/maintenance/roundtrip-templates")
+
+    assert response.status_code == 200, response.text
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.testzip() is None
+        assert len(archive.namelist()) == 1
+        payload = archive.read(archive.namelist()[0])
+    _assert_contract_is_literal_text(payload, contract)
+    metadata = _metadata(payload)
+    signature = metadata.pop("metadata_hmac")
+    assert signature == maintenance_roundtrip._metadata_hmac(metadata)
+    imported = client.post(
+        "/api/maintenance/roundtrip-import",
+        files={
+            "file": (
+                "formula-contract-batch.xlsx",
+                payload,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+        },
+    )
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["contracts"] == [contract]
+    assert imported.json()["changed_rows"] == 0
+
+
 def test_roundtrip_bundle_rejects_contract_count_at_500_boundary_before_render(
     db,
     monkeypatch,
@@ -205,6 +300,35 @@ def test_roundtrip_bundle_rejects_contract_count_at_500_boundary_before_render(
     assert caught.value.status_code == 413
     assert "必须少于 2 个" in str(caught.value)
     assert rendered is False
+
+
+def test_roundtrip_bundle_contract_discovery_limits_distinct_query_to_501(
+    db,
+    monkeypatch,
+):
+    _seed_contract(db, suffix="query-limit", contract="XSDD-QUERY-LIMIT")
+    original_scalars = db.scalars
+    captured_limits: list[int | None] = []
+
+    def recording_scalars(statement, *args, **kwargs):
+        limit_clause = getattr(statement, "_limit_clause", None)
+        captured_limits.append(
+            None if limit_clause is None else int(limit_clause.value)
+        )
+        return original_scalars(statement, *args, **kwargs)
+
+    monkeypatch.setattr(db, "scalars", recording_scalars)
+
+    contracts = maintenance_roundtrip._roundtrip_bundle_contracts(
+        db,
+        date_from=None,
+        date_to=None,
+    )
+
+    assert contracts == ["XSDD-QUERY-LIMIT"]
+    assert captured_limits == [
+        maintenance_roundtrip.MAX_ROUNDTRIP_BUNDLE_CONTRACTS + 1
+    ]
 
 
 def test_roundtrip_bundle_rejects_total_uncompressed_size_at_limit_without_response(
