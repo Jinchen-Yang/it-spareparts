@@ -29,6 +29,17 @@ def test_canonicalize_no_duplicate_columns():
     assert out.count("明细.产品名称(必填)") == 1 and "明细.产品名称#" in out
 
 
+def test_purchase_tax_marker_alias_is_not_shadowed_by_expense_loose_column():
+    columns = mapping.canonicalize_columns(["是否含税(选填)"])
+    frame = reader._coalesce_value_aliases(
+        pd.DataFrame([["是"]], columns=columns),
+        mapping.PURCHASE,
+    )
+
+    assert list(frame.columns) == ["是否含税(必填)"]
+    assert frame["是否含税(必填)"].iloc[0] == "是"
+
+
 def test_detect_file_type_tolerant():
     assert mapping.detect_file_type(["采购单号", "明细.产品名称"]) == mapping.PURCHASE
     assert mapping.detect_file_type(["采购单号(必填)"]) == mapping.PURCHASE

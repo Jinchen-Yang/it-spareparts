@@ -245,8 +245,19 @@ _EDITABLE_COLUMNS = {
 _REQUIRED_COLUMNS = {
     "02_维保订单": {"操作", "变更原因"},
     "03_订单明细": {"操作", "变更原因"},
-    "04_报销明细": {"操作", "合同号", "报销日期", "未税金额"},
-    "05_人工成本回填": {"操作", "人工未税单位成本", "回填原因"},
+    "04_报销明细": {
+        "操作",
+        "合同号",
+        "报销日期",
+        "未税金额",
+        "变更原因",
+    },
+    "05_人工成本回填": {
+        "操作",
+        "人工未税单位成本",
+        "回填原因",
+        "依据说明",
+    },
 }
 _ALLOWED_OPERATIONS = {"", "KEEP", "CREATE", "UPDATE", "VOID"}
 _OPERATION_CHOICES_BY_SHEET = {
@@ -929,6 +940,11 @@ def _instructions_sheet(workbook: Workbook, metadata: dict[str, str]) -> None:
     ]
     notes = [
         ("黄色单元格", "允许填写；蓝灰单元格由系统维护，请勿修改隐藏技术列。"),
+        (
+            "桃色单元格",
+            "按所选操作必填：CREATE / UPDATE 填对应业务字段；"
+            "VOID 时，报销必须填变更原因，人工成本必须填回填原因。",
+        ),
         ("KEEP / 留空", "不写数据库；即使删除整行，也不会被解释为删除。"),
         ("CREATE", "新增报销或人工成本；订单、订单明细在 1.0 版暂不允许新增。"),
         ("UPDATE", "更新现有行；系统会校验导出时版本，旧工作簿不会覆盖新数据。"),
@@ -977,9 +993,10 @@ def _instructions_sheet(workbook: Workbook, metadata: dict[str, str]) -> None:
         ws.cell(row=row, column=1, value=title)
         ws.cell(row=row, column=2, value=content)
         ws.cell(row=row, column=1).font = Font(bold=True)
-        ws.cell(row=row, column=1).fill = (
-            _EDIT_FILL if row == notes_start_row else _SYSTEM_FILL
-        )
+        ws.cell(row=row, column=1).fill = {
+            "黄色单元格": _EDIT_FILL,
+            "桃色单元格": _REQUIRED_FILL,
+        }.get(title, _SYSTEM_FILL)
         for column in (1, 2):
             ws.cell(row=row, column=column).border = _BORDER
             ws.cell(row=row, column=column).alignment = _WRAP
@@ -2401,20 +2418,23 @@ def _manual_values(row: _ParsedRow) -> dict[str, Any]:
         required=True,
     )
     evidence_text = _text_value(
-        row.values.get("依据说明"), field="依据说明", row=row, limit=32767
+        row.values.get("依据说明"),
+        field="依据说明",
+        row=row,
+        limit=32767,
+        required=True,
     )
-    evidence = None
-    if evidence_text:
-        try:
-            decoded_evidence = json.loads(evidence_text)
-        except json.JSONDecodeError:
-            evidence = {"note": evidence_text}
-        else:
-            evidence = (
-                decoded_evidence
-                if isinstance(decoded_evidence, dict)
-                else {"note": evidence_text}
-            )
+    assert evidence_text is not None
+    try:
+        decoded_evidence = json.loads(evidence_text)
+    except json.JSONDecodeError:
+        evidence = {"note": evidence_text}
+    else:
+        evidence = (
+            decoded_evidence
+            if isinstance(decoded_evidence, dict)
+            else {"note": evidence_text}
+        )
     return {
         "unit_cost_ex_tax": unit_ex,
         "unit_cost_inc_tax": tax_policy.inc_from_ex(unit_ex),

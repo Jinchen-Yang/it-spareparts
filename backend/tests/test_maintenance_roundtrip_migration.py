@@ -914,6 +914,11 @@ def test_dev15_downgrade_rejects_non_object_permission_payloads(db):
             "SELECT count(*) FROM f_project_expense "
             "WHERE raw_line_id='EXP-DEV15-BLOCK'",
         ),
+        (
+            "expense_default_ex",
+            "SELECT count(*) FROM f_project_expense "
+            "WHERE raw_line_id='EXP-DEV15-DEFAULT-EX-BLOCK'",
+        ),
     ],
 )
 def test_dev15_downgrade_guard_preserves_each_new_business_fact(
@@ -1002,15 +1007,20 @@ def test_dev15_downgrade_guard_preserves_each_new_business_fact(
             WHERE id=1
             """
         ))
-    elif case == "expense":
+    elif case in {"expense", "expense_default_ex"}:
+        is_default_ex = case == "expense_default_ex"
         expense = FProjectExpense(
-            raw_line_id="EXP-DEV15-BLOCK",
+            raw_line_id=(
+                "EXP-DEV15-DEFAULT-EX-BLOCK"
+                if is_default_ex
+                else "EXP-DEV15-BLOCK"
+            ),
             linked_sales_order_no="XS-DEV15-BLOCK",
             data_status="已结束",
             amount=Decimal("1"),
-            amount_ex_tax=Decimal("0.88"),
-            amount_inc_tax=Decimal("1"),
-            tax_basis="inc",
+            amount_ex_tax=Decimal("1") if is_default_ex else Decimal("0.88"),
+            amount_inc_tax=Decimal("1.13") if is_default_ex else Decimal("1"),
+            tax_basis="default_ex" if is_default_ex else "inc",
             import_batch_id=batch.id,
         )
         db.add(expense)

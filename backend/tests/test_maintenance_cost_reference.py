@@ -1457,6 +1457,41 @@ def test_all_active_pools_are_cost_references(
     assert line.reference_pool_group_id == 910
 
 
+def test_multiple_active_pools_close_pool_reference_and_use_own_history(db, batch):
+    """同一 PN 落入多个 active 池时不选池，继续本 PN 历史价。"""
+    _load_purchases(
+        db,
+        batch,
+        {"P1": f.purchase_head("P1", on=date(2026, 1, 8), tax_rate=Decimal("0"))},
+        [
+            f.purchase_line("P1", "PL-TARGET", "PN-MULTI-POOL", qty="1", price="66"),
+            f.purchase_line("P1", "PL-PEER-A", "PN-POOL-PEER-A", qty="1", price="88"),
+            f.purchase_line("P1", "PL-PEER-B", "PN-POOL-PEER-B", qty="1", price="99"),
+        ],
+    )
+    _load_maintenance(
+        db,
+        batch,
+        {"M1": f.maintenance_head("M1", on=date(2026, 3, 10))},
+        [f.maintenance_line("M1", "ML1", "PN-MULTI-POOL", qty="1")],
+    )
+    db.flush()
+    _add_pool(db, 911, 1, "PN-MULTI-POOL", "PN-POOL-PEER-A")
+    _add_pool(db, 912, 1, "PN-MULTI-POOL", "PN-POOL-PEER-B")
+    db.commit()
+
+    stats = maintenance_cost.recompute(db)
+
+    line = _line(db, "ML1")
+    assert stats["purchase_history"] == 1
+    assert stats["pool_purchase"] == 0
+    assert stats["pool_sales"] == 0
+    assert line.cost_source == "purchase_history"
+    assert line.unit_cost_ex_tax == Decimal("66.00")
+    assert line.reference_pool_group_id is None
+    assert line.reference_pool_version is None
+
+
 def test_reference_failure_rolls_back_reset_and_keeps_previous_cost(
     db,
     batch,

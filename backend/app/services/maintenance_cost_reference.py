@@ -515,10 +515,15 @@ def build_reference_index(
         pool_members_mut[group_id].add(member_part_id)
         if member_part_id in targets:
             target_groups_mut[member_part_id].append((group_id, version))
-    # 写路径保证唯一；若历史脏数据让同一 PN 同属多个 active 池则 fail-closed，不擅自选池。
+    unique_target_groups = {
+        part_id: tuple(sorted(set(groups)))
+        for part_id, groups in target_groups_mut.items()
+    }
+    # 写路径保证唯一；历史脏数据让同一 PN 同属多个 active 池时只关闭池级参考，
+    # 不擅自选择任一池，随后按既定瀑布继续尝试本 PN 历史采购/销售。
     target_pool = {
         part_id: groups[0]
-        for part_id, groups in target_groups_mut.items()
+        for part_id, groups in unique_target_groups.items()
         if len(groups) == 1
     }
     pool_members = {

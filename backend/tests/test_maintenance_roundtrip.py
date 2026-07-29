@@ -23,7 +23,7 @@ from app.models.maintenance import (
     MaintenanceManualCostOverride,
     MaintenanceRoundtripOperation,
 )
-from app.models.system import SysAuditLog, SysImportBatch
+from app.models.system import SysAuditLog, SysImportBatch, SysRawFile
 from app.security import UserContext
 from app.services import maintenance_cost
 from app.services import maintenance_roundtrip
@@ -155,6 +155,37 @@ def test_blank_roundtrip_template_has_fixed_protocol_and_tables(db):
             assert validations[0].formula1 == formula
             assert validations[0].error == error
 
+        manual_sheet = workbook["05_人工成本回填"]
+        manual_headers = {
+            str(cell.value): cell.column
+            for cell in manual_sheet[1]
+            if cell.value is not None
+        }
+        required_fill = manual_sheet.cell(
+            row=2,
+            column=manual_headers["人工未税单位成本"],
+        ).fill.fgColor.rgb
+        assert (
+            manual_sheet.cell(
+                row=2,
+                column=manual_headers["依据说明"],
+            ).fill.fgColor.rgb
+            == required_fill
+        )
+        expense_sheet = workbook["04_报销明细"]
+        expense_headers = {
+            str(cell.value): cell.column
+            for cell in expense_sheet[1]
+            if cell.value is not None
+        }
+        assert (
+            expense_sheet.cell(
+                row=2,
+                column=expense_headers["变更原因"],
+            ).fill.fgColor.rgb
+            == required_fill
+        )
+
         metadata = {
             workbook["99_元数据"].cell(row=row, column=1).value: str(
                 workbook["99_元数据"].cell(row=row, column=2).value or ""
@@ -189,6 +220,21 @@ def test_blank_roundtrip_template_has_fixed_protocol_and_tables(db):
             for row in workbook["00_使用说明"].iter_rows()
             for cell in row
             if cell.value
+        )
+        assert "VOID 时，报销必须填变更原因，人工成本必须填回填原因" in (
+            instruction_text
+        )
+        instruction_sheet = workbook["00_使用说明"]
+        instruction_rows = {
+            str(instruction_sheet.cell(row=row, column=1).value): row
+            for row in range(1, instruction_sheet.max_row + 1)
+        }
+        assert (
+            instruction_sheet.cell(
+                row=instruction_rows["桃色单元格"],
+                column=1,
+            ).fill.fgColor.rgb
+            == required_fill
         )
         assert "只有不带 date_from/date_to 的全量范围模板" in instruction_text
         assert (
@@ -361,6 +407,154 @@ def test_blank_template_without_dates_never_claims_full_snapshot(db, tmp_path):
     assert report["expense_snapshot_complete_contracts"] == []
 
 
+def test_unchanged_full_snapshot_only_attests_protocol_and_exact_replay_is_stable(
+    db,
+    tmp_path,
+):
+    contract = "XSDD-RT-UNCHANGED"
+    order_id, line_id = _seed_contract(
+        db,
+        suffix="UNCHANGED",
+        contract=contract,
+    )
+    # 先稳定派生成本字段，确保后续断言只衡量原样导入本身。
+    maintenance_cost.recompute(db)
+    path = _export_to_path(
+        db,
+        tmp_path / "unchanged-full.xlsx",
+        contract=contract,
+    )
+
+    fact_models = (
+        FMaintenanceOrder,
+        FMaintenanceLine,
+        FProjectExpense,
+        MaintenanceManualCostOverride,
+    )
+    fact_counts_before = {
+        model: db.scalar(select(func.count()).select_from(model))
+        for model in fact_models
+    }
+    order_before = {
+        column.name: getattr(db.get(FMaintenanceOrder, order_id), column.name)
+        for column in FMaintenanceOrder.__table__.columns
+    }
+    line_before = {
+        column.name: getattr(db.get(FMaintenanceLine, line_id), column.name)
+        for column in FMaintenanceLine.__table__.columns
+    }
+    audit_count_before = db.scalar(
+        select(func.count()).select_from(SysAuditLog)
+    )
+    roundtrip_batch_count_before = db.scalar(
+        select(func.count())
+        .select_from(SysImportBatch)
+        .where(
+            SysImportBatch.file_type == maintenance_roundtrip.ROUNDTRIP_FILE_TYPE
+        )
+    )
+    raw_file_count_before = db.scalar(
+        select(func.count()).select_from(SysRawFile)
+    )
+    assert db.get(MaintenanceContractWorkbookState, contract) is None
+
+    first = maintenance_roundtrip.import_roundtrip_workbook(
+        db,
+        str(path),
+        filename=path.name,
+        operated_by="tester",
+    )
+
+    assert first["no_op"] is False
+    assert first["changed_rows"] == 0
+    assert first["counts"]["create"] == 0
+    assert first["counts"]["update"] == 0
+    assert first["counts"]["void"] == 0
+    assert first["contracts"] == [contract]
+    db.expire_all()
+    assert {
+        model: db.scalar(select(func.count()).select_from(model))
+        for model in fact_models
+    } == fact_counts_before
+    assert {
+        column.name: getattr(db.get(FMaintenanceOrder, order_id), column.name)
+        for column in FMaintenanceOrder.__table__.columns
+    } == order_before
+    assert {
+        column.name: getattr(db.get(FMaintenanceLine, line_id), column.name)
+        for column in FMaintenanceLine.__table__.columns
+    } == line_before
+    assert (
+        db.scalar(select(func.count()).select_from(SysAuditLog))
+        == audit_count_before
+    )
+
+    state = db.get(MaintenanceContractWorkbookState, contract)
+    assert state.expense_snapshot_complete is True
+    assert state.revision == 1
+    assert state.last_import_batch_id == first["batch_id"]
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(SysImportBatch)
+            .where(
+                SysImportBatch.file_type
+                == maintenance_roundtrip.ROUNDTRIP_FILE_TYPE
+            )
+        )
+        == roundtrip_batch_count_before + 1
+    )
+    archived = db.scalar(
+        select(SysRawFile).where(SysRawFile.batch_id == first["batch_id"])
+    )
+    assert archived is not None
+    assert archived.file_hash == first["file_hash"]
+    assert archived.storage_path
+    assert (
+        db.scalar(select(func.count()).select_from(SysRawFile))
+        == raw_file_count_before + 1
+    )
+
+    replay = maintenance_roundtrip.import_roundtrip_workbook(
+        db,
+        str(path),
+        filename=path.name,
+        operated_by="tester",
+    )
+
+    assert replay["no_op"] is True
+    assert replay["logical_replay"] is False
+    assert replay["batch_id"] == first["batch_id"]
+    db.expire_all()
+    replay_state = db.get(MaintenanceContractWorkbookState, contract)
+    assert replay_state.expense_snapshot_complete is True
+    assert replay_state.revision == 1
+    assert replay_state.last_import_batch_id == first["batch_id"]
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(SysImportBatch)
+            .where(
+                SysImportBatch.file_type
+                == maintenance_roundtrip.ROUNDTRIP_FILE_TYPE
+            )
+        )
+        == roundtrip_batch_count_before + 1
+    )
+    assert (
+        db.scalar(select(func.count()).select_from(SysRawFile))
+        == raw_file_count_before + 1
+    )
+    assert (
+        db.scalar(select(func.count()).select_from(SysAuditLog))
+        == audit_count_before
+    )
+    assert {
+        model: db.scalar(select(func.count()).select_from(model))
+        for model in fact_models
+    } == fact_counts_before
+
+
 def test_full_scope_expense_create_is_tax_normalized_audited_and_idempotent(
     db,
     tmp_path,
@@ -511,6 +705,7 @@ def test_same_create_client_uuid_is_independent_across_sheets(db, tmp_path):
             "操作": "CREATE",
             "人工未税单位成本": Decimal("1.00"),
             "回填原因": "跨 sheet UUID",
+            "依据说明": "跨 sheet UUID 独立性测试",
             "__client_row_id": client_row_id,
         },
     )
@@ -1229,6 +1424,54 @@ def test_manual_cost_create_only_for_none_source_and_recompute_uses_it(db, tmp_p
         )
     finally:
         workbook.close()
+
+
+def test_manual_cost_create_requires_evidence_and_leaves_business_data_unchanged(
+    db,
+    tmp_path,
+):
+    _order_id, line_id = _seed_contract(
+        db,
+        suffix="MANUAL-NO-EVIDENCE",
+        contract="XSDD-RT-MANUAL-NO-EVIDENCE",
+    )
+    maintenance_cost.recompute(db)
+    assert db.get(FMaintenanceLine, line_id).cost_source == "none"
+    path = _export_to_path(
+        db,
+        tmp_path / "manual-no-evidence.xlsx",
+        contract="XSDD-RT-MANUAL-NO-EVIDENCE",
+    )
+    _edit_data_row(
+        path,
+        "05_人工成本回填",
+        {
+            "操作": "CREATE",
+            "人工未税单位成本": Decimal("2.50"),
+            "回填原因": "三个月内无采购和销售参考",
+            "依据说明": "",
+        },
+    )
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="缺少“依据说明”",
+    ):
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    db.rollback()
+    db.expire_all()
+    assert db.scalar(
+        select(func.count())
+        .select_from(MaintenanceManualCostOverride)
+        .where(MaintenanceManualCostOverride.line_id == line_id)
+    ) == 0
+    assert db.get(FMaintenanceLine, line_id).cost_source == "none"
 
 
 def test_manual_cost_create_accepts_zero_and_recompute_applies_zero(db, tmp_path):

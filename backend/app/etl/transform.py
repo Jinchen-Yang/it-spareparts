@@ -399,11 +399,30 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
             tax_policy.round_money(amount_inc_tax)
             if amount_inc_tax is not None else None
         )
-        tax_basis_raw = cleaner.clean_str(
-            gv("报销明细.金额口径", "金额口径", "税务口径", "含税/未税"),
+        basis_columns = (
+            "报销明细.金额口径",
+            "金额口径",
+            "税务口径",
+            "含税/未税",
+            "是否含税",
+            "是否含税(必填)",
+            "含税标记",
+            "报销明细.是否含税",
+            "报销明细.含税标记",
         )
-        basis_key = (tax_basis_raw or "").strip().casefold()
-        inc_values = {"含税", "含税金额", "含税口径", "inc", "inc_tax"}
+        inc_values = {
+            "含税",
+            "含税金额",
+            "含税口径",
+            "inc",
+            "inc_tax",
+            "是",
+            "yes",
+            "y",
+            "true",
+            "1",
+            "1.0",
+        }
         ex_values = {
             "未税",
             "不含税",
@@ -412,19 +431,47 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
             "未税口径",
             "ex",
             "ex_tax",
+            "否",
+            "no",
+            "n",
+            "false",
+            "0",
+            "0.0",
         }
-        if basis_key in inc_values:
-            basis_hint = "inc"
-        elif basis_key in ex_values:
-            basis_hint = "ex"
-        elif basis_key:
+        basis_hints: list[tuple[str, str]] = []
+        bad_basis: tuple[str, str] | None = None
+        for basis_column in basis_columns:
+            tax_basis_raw = cleaner.clean_str(gv(basis_column))
+            basis_key = (tax_basis_raw or "").strip().casefold()
+            if not basis_key:
+                continue
+            if basis_key in inc_values:
+                basis_hints.append((basis_column, "inc"))
+            elif basis_key in ex_values:
+                basis_hints.append((basis_column, "ex"))
+            else:
+                bad_basis = (basis_column, tax_basis_raw)
+                break
+        if bad_basis is not None:
+            basis_column, tax_basis_raw = bad_basis
             res.errors.append(ErrorRec(
                 row_no,
                 "bad_tax_basis",
-                f"无法识别金额口径：{tax_basis_raw}（仅支持含税/未税）",
+                f"无法识别{basis_column}：{tax_basis_raw}（仅支持含税/未税）",
                 _row_dict(row, full_map),
             ))
             continue
+        distinct_hints = {hint for _column, hint in basis_hints}
+        if len(distinct_hints) > 1:
+            res.errors.append(ErrorRec(
+                row_no,
+                "conflicting_tax_basis",
+                "同一行的金额口径字段互相冲突，请统一为含税或未税",
+                _row_dict(row, full_map),
+            ))
+            continue
+        if distinct_hints:
+            basis_hint = next(iter(distinct_hints))
         else:
             basis_hint = None
 
