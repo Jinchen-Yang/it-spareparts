@@ -52,7 +52,7 @@ export default function InventoryPage() {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<(WhRow & { pn_std: string }) | null>(null);
   const [form] = Form.useForm();
-  const { basis } = useTaxBasis();
+  const basis = useTaxBasis("purchase");
 
   const load = async (p = page) => {
     setLoading(true);

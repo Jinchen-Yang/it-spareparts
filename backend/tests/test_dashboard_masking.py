@@ -25,15 +25,18 @@ def _ctx(**over):
 
 @pytest.fixture()
 def seeded(db):
-    x = DimPart(pn_std="PN-X", brand="BX"); y = DimPart(pn_std="PN-Y", brand="BY")
-    db.add_all([x, y]); db.flush()
+    x = DimPart(pn_std="PN-X", brand="BX")
+    y = DimPart(pn_std="PN-Y", brand="BY")
+    db.add_all([x, y])
+    db.flush()
     db.add(PartSubstitute(part_id_a=min(x.id, y.id), part_id_b=max(x.id, y.id),
                           status="active", direction="both", substitute_type="same_spec"))
     db.flush()
     # 人工池是唯一真值（Slice 1）：经 pool_catalog 建池，不再自动重算
     pool_catalog.create_pool(db, name="池-XY", member_part_ids=[x.id, y.id], operated_by="t")
     b = SysImportBatch(filename="t.xlsx", file_type="purchase", file_hash="hmask")
-    db.add(b); db.flush()
+    db.add(b)
+    db.flush()
     po = {"P1": f.purchase_head("P1", on=date(2026, 1, 5), is_tax_inclusive=True),
           "P2": f.purchase_head("P2", on=date(2026, 1, 9), is_tax_inclusive=True)}
     pl = [f.purchase_line("P1", "PLX1", "PN-X", qty="5", price="113"),
@@ -44,7 +47,8 @@ def seeded(db):
     sl = [f.sales_line("S1", "SLY", "PN-Y", qty="10", price="400"),
           f.sales_line("S1", "SLX", "PN-X", qty="2", price="400")]
     loader.load(db, f.sales_result(so, sl), b.id, date(2026, 6, 1))
-    db.commit(); profit.recompute(db)
+    db.commit()
+    profit.recompute(db)
     gid = db.execute(select(pool.PartPoolMember.group_id)).scalar()
     return gid
 
@@ -56,6 +60,7 @@ def test_kpi_masks_purchase_and_profit(db, seeded):
     assert k["gross_profit"] is None           # 毛利遮（data_profit=False）
     # 销售额不是成本，仍可见
     assert k["sales_ex_tax"] is not None
+    assert k["sales_inc_tax"] is not None
 
 
 def test_ranking_historical_profit_without_cost_fails_closed(db, seeded):
@@ -81,6 +86,12 @@ def test_ranking_profit_restricted_hides_classification(db, seeded):
     assert r["counts"]["loss"] is None
     # 非利润的数据质量计数仍可给（不泄漏盈亏归属）
     assert r["counts"]["total_parts"] is not None
+    masked = security.apply_field_visibility(r, ctx)
+    assert masked["ranking"]["items"]
+    assert all(
+        row["revenue_ex"] is not None and row["revenue_inc"] is not None
+        for row in masked["ranking"]["items"]
+    )
 
 
 def test_pool_masks_cost_benchmark_savings(db, seeded):
@@ -124,13 +135,16 @@ def test_sales_orders_masks_total_gross_profit(db, seeded):
     for row in d["items"]:
         assert row["total_gross_profit"] is None  # 毛利遮
         assert row["total_revenue"] is not None    # 营收非成本，可见
+        assert row["total_revenue_ex"] is not None
+        assert row["total_revenue_inc"] is not None
 
 
 def test_order_sort_by_hidden_field_falls_back_to_date(db):
     """复审三轮同类扩展：利润被脱敏的角色按 gross_profit 排序时，行序本身泄漏盈亏排名 →
     后端退回按日期排序。构造"日期序≠毛利序"的两单来区分。"""
     b = SysImportBatch(filename="s.xlsx", file_type="purchase", file_hash="hsortleak")
-    db.add(b); db.flush()
+    db.add(b)
+    db.flush()
     db.add_all([DimPart(pn_std="PN-SX", brand="BX"), DimPart(pn_std="PN-SY", brand="BY")])
     db.flush()
     po = {"P1": f.purchase_head("P1", on=date(2026, 1, 1), is_tax_inclusive=True)}
@@ -142,7 +156,8 @@ def test_order_sort_by_hidden_field_falls_back_to_date(db):
     sl = [f.sales_line("OA", "SA", "PN-SX", qty="1", price="400"),   # 毛利高
           f.sales_line("OB", "SB", "PN-SY", qty="1", price="226")]   # 毛利≈0
     loader.load(db, f.sales_result(so, sl), b.id, date(2026, 6, 1))
-    db.commit(); profit.recompute(db)
+    db.commit()
+    profit.recompute(db)
 
     def order(ctx, sort):
         return [i["order_no"] for i in dashboard.sales_orders(

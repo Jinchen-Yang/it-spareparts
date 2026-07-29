@@ -149,7 +149,7 @@ export default function BatchNormalizeModal({ open, onClose, onApplied }: {
       title: "近期销售额", dataIndex: "recent_sales_amount", width: 100,
       render: (v: number | null) => {
         const s = splitFixed(v == null ? null : Math.round(v), "inc");
-        return <TaxMoney inc={s.inc} ex={s.ex} />;
+        return <TaxMoney scope="sales" inc={s.inc} ex={s.ex} />;
       },
     },
   ];

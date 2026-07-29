@@ -127,6 +127,39 @@ describe("稳定深链", () => {
     expect(unifiedSearch).not.toHaveBeenCalled();   // 纯 part_id 深链不触发搜索
   });
 
+  it("采购销售优先展示后端双税价，采购未标注口径仍按未税原值", async () => {
+    fetchOverview.mockResolvedValue({
+      ...ovFix(),
+      purchases_recent: [
+        {
+          order_no: "PO-EXPLICIT", order_date: "2026-07-01", supplier: "供应商甲",
+          qty: 1, unit_price: 113, source_type: "销售订单", is_tax_inclusive: true,
+          price_inc: 120, price_ex: 99,
+        },
+        {
+          order_no: "PO-UNKNOWN", order_date: "2026-07-02", supplier: "供应商乙",
+          qty: 1, unit_price: 100, source_type: "销售订单", is_tax_inclusive: null,
+          price_inc: 100, price_ex: 88.5,
+        },
+      ],
+      sales_recent: [{
+        order_no: "SO-EXPLICIT", order_date: "2026-07-03", customer: "客户甲",
+        qty: 1, unit_price: 226, price_inc: 250, price_ex: 200,
+      }],
+    });
+
+    renderAt("/parts?part_id=42");
+    await screen.findByText("型号全景：");
+
+    expect(screen.getByText("¥120")).toBeInTheDocument();
+    expect(screen.getByText("¥99")).toBeInTheDocument();
+    expect(screen.getByText("¥113")).toBeInTheDocument();
+    expect(screen.getByText("¥100")).toBeInTheDocument();
+    expect(screen.getByText("¥200")).toBeInTheDocument();
+    expect(screen.queryByText("¥88.5")).toBeNull();
+    expect(screen.queryByText("¥226")).toBeNull();
+  });
+
   it("/parts?pn=<PN> 兼容入口：解析后 URL 自动改写成稳定 part_id 深链", async () => {
     renderAt("/parts?pn=02311DYQ");
     await waitFor(() => expect(fetchOverview).toHaveBeenCalledWith({ pn_std: "02311DYQ" }));
@@ -182,8 +215,9 @@ describe("精确即唯一", () => {
 
     await waitFor(() => expect(fetchPoolReference).toHaveBeenCalledWith(42, { range: "90d" }));
     expect(await screen.findByRole("region", { name: "02311DYQ 的池价格参考" })).toBeInTheDocument();
-    expect(screen.getByLabelText("采购参考")).toHaveTextContent("池均价 ¥500.00");
-    expect(screen.getByLabelText("销售参考")).toHaveTextContent("池均价 ¥800.00");
+    expect(screen.getByLabelText("采购参考"))
+      .toHaveTextContent("池均价 含 ¥565 · 不含 ¥500");
+    expect(screen.getByLabelText("销售参考")).toHaveTextContent("池均价 ¥800");
   });
 
   it("订单历史按采购、销售顺序置顶，分别占满一整行，其他全景信息后置", async () => {

@@ -9,7 +9,6 @@
 import json
 from decimal import Decimal
 
-import pytest
 from fastapi.testclient import TestClient
 
 from app.auth import hash_password
@@ -34,7 +33,8 @@ def _seed_pool(db, name="矩阵池", pns=("API-A", "API-B")):
     ids = []
     for pn in pns:
         p = DimPart(pn_std=pn)
-        db.add(p); db.flush()
+        db.add(p)
+        db.flush()
         ids.append(p.id)
     created = svc.create_pool(db, name=name, member_part_ids=ids, operated_by="seed")
     return created, ids
@@ -66,7 +66,8 @@ def _mk_parts(db, *pns):
     ids = []
     for pn in pns:
         p = DimPart(pn_std=pn)
-        db.add(p); db.flush()
+        db.add(p)
+        db.flush()
         ids.append(p.id)
     db.commit()
     return ids
@@ -380,7 +381,8 @@ def test_permission_registry_wiring(db):
     admin = _mk_client(db, "meta_admin", "admin")
     meta = admin.get("/api/accounts/_meta").json()
     assert meta["action_keys"] == ["action_pool_manage", "action_pool_set_policy",
-                                   "action_account_manage", "action_data_quality_review"]
+                                   "action_account_manage", "action_data_quality_review",
+                                   "action_maintenance_roundtrip_apply"]
 
 
 # ---------------------------------------------------------------- 端到端闭环
@@ -396,7 +398,8 @@ def test_full_management_flow(db):
     gid, ver = r.json()["group_id"], r.json()["version"]
 
     r = c.patch(f"/api/pools/{gid}", json={"version": ver, "description": "闭环说明"})
-    assert r.status_code == 200; ver = r.json()["version"]
+    assert r.status_code == 200
+    ver = r.json()["version"]
 
     r = c.patch(f"/api/pools/{gid}/members",
                 json={"version": ver, "add_part_ids": [p3]})
@@ -405,10 +408,12 @@ def test_full_management_flow(db):
 
     r = c.put(f"/api/pools/{gid}/price-policy",
               json={"version": ver, "purchase_value": "100"})
-    assert r.status_code == 200; ver = r.json()["version"]
+    assert r.status_code == 200
+    ver = r.json()["version"]
 
     r = c.post(f"/api/pools/{gid}/archive", json={"version": ver})
-    assert r.status_code == 200; ver = r.json()["version"]
+    assert r.status_code == 200
+    ver = r.json()["version"]
     r = c.post(f"/api/pools/{gid}/restore", json={"version": ver})
     assert r.status_code == 200
 

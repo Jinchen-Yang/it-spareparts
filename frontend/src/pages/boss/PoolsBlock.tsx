@@ -15,11 +15,19 @@ import { Link, useNavigate } from "react-router-dom";
 import { dashboardPools, type PoolListItem, type PoolSort, type PoolsResp } from "../../api";
 import { listPnPools, type PnPoolListResp } from "../../api/pools";
 import PoolPolicyCoverage from "../../components/pools/PoolPolicyCoverage";
-import { EMPTY, moneyExact } from "../../utils/format";
+import {
+  TaxMoneyByBasis,
+  taxBasisCaption,
+  useTaxBasis,
+  type TaxBasis,
+} from "../../context/TaxBasis";
+import { EMPTY, splitFixed } from "../../utils/format";
 import { MUTED, poolAnalysisPath, useGuardedFetch, type DateRange } from "./shared";
 
 type MetricMode = "total" | "average";
-const MODE_LABEL: Record<MetricMode, string> = { total: "金额合计(未税)", average: "平均单价(未税)" };
+const MODE_NAME: Record<MetricMode, string> = { total: "金额合计", average: "平均单价" };
+const metricLabel = (mode: MetricMode, basis: TaxBasis) =>
+  `${MODE_NAME[mode]}(${taxBasisCaption(basis)})`;
 // 双编码之三：颜色（合计=蓝、均价=紫），文字标签始终在场，色觉障碍不丢信息
 const MODE_COLOR: Record<MetricMode, string> = { total: "#3E6FD1", average: "#7A5AC8" };
 
@@ -27,8 +35,8 @@ function metricSort(side: "purchase" | "sales", mode: MetricMode): PoolSort {
   return `${side}_${mode}` as PoolSort;
 }
 
-function MetricHeaderToggle({ side, mode, onToggle }: {
-  side: "purchase" | "sales"; mode: MetricMode; onToggle: () => void;
+function MetricHeaderToggle({ side, mode, basis, onToggle }: {
+  side: "purchase" | "sales"; mode: MetricMode; basis: TaxBasis; onToggle: () => void;
 }) {
   const sideLabel = side === "purchase" ? "采购" : "销售";
   const next = mode === "total" ? "平均单价" : "金额合计";
@@ -39,7 +47,7 @@ function MetricHeaderToggle({ side, mode, onToggle }: {
         type="button"
         onClick={(e) => { e.stopPropagation(); onToggle(); }}
         onKeyDown={(e) => e.stopPropagation()}
-        aria-label={`${sideLabel}指标：当前显示${MODE_LABEL[mode]}，点击切换为${next}`}
+        aria-label={`${sideLabel}指标：当前显示${metricLabel(mode, basis)}，点击切换为${next}`}
         title={`点击切换为${next}`}
         style={{
           display: "inline-flex", alignItems: "center", gap: 3, cursor: "pointer",
@@ -47,7 +55,7 @@ function MetricHeaderToggle({ side, mode, onToggle }: {
           color: MODE_COLOR[mode], fontSize: 12, padding: "0 6px", lineHeight: "18px",
         }}>
         <SwapOutlined aria-hidden />
-        {MODE_LABEL[mode]}
+        {metricLabel(mode, basis)}
       </button>
     </span>
   );
@@ -65,6 +73,8 @@ export default function PoolsBlock({
   dateRange, scopeNote, localCostRestricted, localGovernanceRestricted, canOpenPoolManagement,
 }: PoolsBlockProps) {
   const navigate = useNavigate();
+  const purchaseBasis = useTaxBasis("purchase");
+  const salesBasis = useTaxBasis("sales");
   const [pMode, setPMode] = useState<MetricMode>("total");
   const [sMode, setSMode] = useState<MetricMode>("total");
   const [sort, setSort] = useState<PoolSort>("savings");
@@ -131,16 +141,20 @@ export default function PoolsBlock({
         </Link>) },
     { title: "成员", dataIndex: "member_count", key: "member_count", width: 68, align: "right",
       ...sortProps("member_count") },
-    { title: <MetricHeaderToggle side="purchase" mode={pMode} onToggle={togglePMode} />,
+    { title: <MetricHeaderToggle side="purchase" mode={pMode} basis={purchaseBasis}
+        onToggle={togglePMode} />,
       key: metricSort("purchase", pMode), width: 150, align: "right",
       ...sortProps(metricSort("purchase", pMode)),
       render: (_, r) => {
         const v = metricValue(r.purchase_metrics, pMode);
         if (v == null && localCostRestricted) return <span style={MUTED}>无成本权限</span>;
-        return v == null ? <span style={MUTED}>{EMPTY}</span>
-          : <span style={{ color: MODE_COLOR[pMode] }}>{moneyExact(v)}</span>;
+        const pair = splitFixed(v, "ex");
+        return <span style={{ color: MODE_COLOR[pMode] }}>
+          <TaxMoneyByBasis basis={purchaseBasis} inc={pair.inc} ex={pair.ex} exact />
+        </span>;
       } },
-    { title: <MetricHeaderToggle side="sales" mode={sMode} onToggle={toggleSMode} />,
+    { title: <MetricHeaderToggle side="sales" mode={sMode} basis={salesBasis}
+        onToggle={toggleSMode} />,
       key: metricSort("sales", sMode), width: 150, align: "right",
       ...sortProps(metricSort("sales", sMode)),
       render: (_, r) => {
@@ -149,8 +163,10 @@ export default function PoolsBlock({
         if (v == null && sMode === "total" && localCostRestricted) {
           return <span style={MUTED}>无成本权限</span>;
         }
-        return v == null ? <span style={MUTED}>{EMPTY}</span>
-          : <span style={{ color: MODE_COLOR[sMode] }}>{moneyExact(v)}</span>;
+        const pair = splitFixed(v, "ex");
+        return <span style={{ color: MODE_COLOR[sMode] }}>
+          <TaxMoneyByBasis basis={salesBasis} inc={pair.inc} ex={pair.ex} exact />
+        </span>;
       } },
     { title: "采购超限", key: "purchase_violation_count", width: 92, align: "right",
       ...sortProps("purchase_violation_count"),
@@ -163,7 +179,17 @@ export default function PoolsBlock({
       ...sortProps("savings"),
       render: (v) => v == null
         ? (localCostRestricted ? <span style={MUTED}>无成本权限</span> : <span style={MUTED}>{EMPTY}</span>)
-        : <span style={{ color: "#9a7b43" }}>{moneyExact(v)}</span> },
+        : <span style={{ color: "#9a7b43" }}>{(() => {
+            const pair = splitFixed(v, "ex");
+            return (
+              <TaxMoneyByBasis
+                basis={purchaseBasis}
+                inc={pair.inc}
+                ex={pair.ex}
+                exact
+              />
+            );
+          })()}</span> },
     { title: "标记", key: "flags", width: 130, render: (_, r) => (
       <span>
         {r.needs_calibration && <Tag color="orange">关系待校准</Tag>}

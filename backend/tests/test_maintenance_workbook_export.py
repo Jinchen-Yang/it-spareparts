@@ -261,7 +261,7 @@ def test_bulk_export_uses_inclusive_dates_and_all_keeps_null_dates_but_not_inact
         assert null_row["命中最晚日期"] == ""
 
 
-def test_date_range_selects_contract_but_workbook_keeps_complete_contract_content(db):
+def test_date_range_limits_each_generated_workbook_to_the_closed_interval(db):
     batch = _batch(db)
     inside = _order(
         db, batch, raw_id="COMPLETE-IN", contract="XSDD-COMPLETE", on=date(2026, 7, 15),
@@ -294,6 +294,28 @@ def test_date_range_selects_contract_but_workbook_keeps_complete_contract_conten
             import_batch_id=batch.id,
         ),
     ])
+    db.add_all([
+        FProjectExpense(
+            raw_line_id="EXP-COMPLETE-IN",
+            data_status="已结束",
+            expense_date=date(2026, 7, 20),
+            linked_sales_order_no="XSDD-COMPLETE",
+            amount=Decimal("10"),
+            amount_ex_tax=Decimal("10"),
+            amount_inc_tax=Decimal("11.30"),
+            import_batch_id=batch.id,
+        ),
+        FProjectExpense(
+            raw_line_id="EXP-COMPLETE-OUT",
+            data_status="已结束",
+            expense_date=date(2026, 6, 20),
+            linked_sales_order_no="XSDD-COMPLETE",
+            amount=Decimal("20"),
+            amount_ex_tax=Decimal("20"),
+            amount_inc_tax=Decimal("22.60"),
+            import_batch_id=batch.id,
+        ),
+    ])
     db.commit()
 
     response = _admin_client(db).get(
@@ -307,7 +329,13 @@ def test_date_range_selects_contract_but_workbook_keeps_complete_contract_conten
     exported_orders = {
         cell.value for cell in workbook["备件明细-氚云"]["A"][1:]
     }
-    assert exported_orders == {"WBDD-COMPLETE-IN", "WBDD-COMPLETE-OUT"}
+    exported_expense_dates = {
+        cell.value
+        for cell in workbook["报销明细"]["A"][2:]
+        if cell.value is not None and cell.row < workbook["报销明细"].max_row
+    }
+    assert exported_orders == {"WBDD-COMPLETE-IN"}
+    assert exported_expense_dates == {"2026-07-20"}
 
 
 def test_bulk_export_requires_profit_permission_before_reading_selected_orders(
@@ -476,6 +504,8 @@ def test_workbook_renderer_forces_all_dynamic_formula_like_text_to_strings(db):
         reason="  =REASON",
         linked_sales_order_no="XSDD-TEXT",
         amount=Decimal("10"),
+        amount_ex_tax=Decimal("10"),
+        amount_inc_tax=Decimal("11.30"),
         import_batch_id=batch.id,
     ))
     db.commit()
@@ -645,6 +675,8 @@ def test_bulk_export_rejects_total_expense_line_limit_before_build(db, monkeypat
         expense_date=date(2026, 7, 16),
         linked_sales_order_no="XSDD-EXPENSE-LIMIT",
         amount=Decimal("10"),
+        amount_ex_tax=Decimal("10"),
+        amount_inc_tax=Decimal("11.30"),
         import_batch_id=batch.id,
     ))
     db.commit()
@@ -681,6 +713,8 @@ def test_bulk_export_rejects_single_workbook_expense_line_limit_before_build(
         expense_date=date(2026, 7, 16),
         linked_sales_order_no="XSDD-EXP-SINGLE",
         amount=Decimal("10"),
+        amount_ex_tax=Decimal("10"),
+        amount_inc_tax=Decimal("11.30"),
         import_batch_id=batch.id,
     ))
     db.commit()
@@ -799,6 +833,8 @@ def test_single_export_rejects_expense_line_limit_before_materializing_data(
         expense_date=date(2026, 7, 16),
         linked_sales_order_no="XSDD-SINGLE-EXP",
         amount=Decimal("10"),
+        amount_ex_tax=Decimal("10"),
+        amount_inc_tax=Decimal("11.30"),
         import_batch_id=batch.id,
     ))
     db.commit()
@@ -947,6 +983,8 @@ def test_dynamic_text_budget_counts_rendered_fee_category_prefix_before_material
         fee_category="X",
         linked_sales_order_no="C",
         amount=Decimal("10"),
+        amount_ex_tax=Decimal("10"),
+        amount_inc_tax=Decimal("11.30"),
         import_batch_id=batch.id,
     ))
     db.commit()
@@ -983,6 +1021,8 @@ def test_excel_column_limit_uses_max_categories_per_contract_not_global_distinct
             fee_category=f"仅合同{index}的分类",
             linked_sales_order_no=contract,
             amount=Decimal("10"),
+            amount_ex_tax=Decimal("10"),
+            amount_inc_tax=Decimal("11.30"),
             import_batch_id=batch.id,
         ))
     db.commit()
@@ -1020,6 +1060,8 @@ def test_excel_column_preflight_counts_normalized_and_part_named_fee_categories(
             fee_category=category,
             linked_sales_order_no=contract,
             amount=Decimal("10"),
+            amount_ex_tax=Decimal("10"),
+            amount_inc_tax=Decimal("11.30"),
             import_batch_id=batch.id,
         ))
     db.commit()
@@ -1047,6 +1089,8 @@ def test_fee_categories_named_like_cost_tiers_remain_visible_in_monthly_table(db
             fee_category=category,
             linked_sales_order_no=contract,
             amount=amount,
+            amount_ex_tax=amount,
+            amount_inc_tax=(amount * Decimal("1.13")).quantize(Decimal("0.01")),
             import_batch_id=batch.id,
         ))
     db.commit()
@@ -1060,11 +1104,19 @@ def test_fee_categories_named_like_cost_tiers_remain_visible_in_monthly_table(db
     workbook = load_workbook(io.BytesIO(response.content), read_only=True)
     try:
         sheet = workbook["项目预算"]
-        headings = [cell.value for cell in sheet[13] if cell.value is not None]
-        values = [cell.value for cell in sheet[14]][:len(headings)]
+        heading_index = next(
+            index
+            for index, cells in enumerate(sheet.iter_rows(), 1)
+            if cells[0].value == "月份"
+        )
+        headings = [
+            cell.value for cell in sheet[heading_index]
+            if cell.value is not None
+        ]
+        values = [cell.value for cell in sheet[heading_index + 1]][:len(headings)]
         row = dict(zip(headings, values, strict=True))
-        assert row["费用分类：备件实际参考"] == 11
-        assert row["费用分类：备件估算参考"] == 22
+        assert row["当前已导入报销（非全量）·备件实际参考"] == 11
+        assert row["当前已导入报销（非全量）·备件估算参考"] == 22
     finally:
         workbook.close()
 

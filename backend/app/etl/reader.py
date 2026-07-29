@@ -10,6 +10,7 @@ from itertools import repeat
 from typing import NamedTuple
 
 import pandas as pd
+from openpyxl import load_workbook as openpyxl_load_workbook
 
 from app import config
 from app.etl import mapping, sheet_selection
@@ -27,6 +28,9 @@ _XML_SPECIAL_PREFIXES = (b"<!--", b"<![CDATA[", b"<?", _XML_DOCTYPE_PREFIX)
 _XML_SPECIAL_START = re.compile(rb"<!--|<!\[CDATA\[|<\?|<!DOCTYPE")
 _XML_TAG_DELIMITER = re.compile(rb"['\">]")
 _XML_COMPLETE_TAG = re.compile(rb"""<(?:[^'">]|"[^"]*"|'[^']*')*>""")
+ROUNDTRIP_PROTOCOL_ID = "ITDATA_MAINT_ROUNDTRIP"
+_ROUNDTRIP_METADATA_SHEET = "99_元数据"
+_ROUNDTRIP_PROTOCOL_SCAN_ROWS = 256
 
 
 class ReaderError(Exception):
@@ -824,6 +828,48 @@ def require_clean_columns(sheet: SheetData) -> None:
     if sheet.dup_cols:
         raise ReaderError(
             f"工作表「{sheet.sheet_name}」表头存在重复列名：{sheet.dup_cols}，请确认导出模版")
+
+
+def reject_roundtrip_workbook(path: str) -> None:
+    """让通用导入在任何 hash 去重或业务写入前拒绝固定回填协议。
+
+    只扫描元数据表前 256 行两列，不信任 worksheet dimension；ZIP 与 XML 资源上限仍
+    先复用正式 reader 的安全闸门。损坏文件继续交给正式解析路径给出统一错误。
+    """
+    _check_xlsx_archive_safety(path)
+    _check_workbook_size(path)
+    try:
+        workbook = openpyxl_load_workbook(
+            path,
+            read_only=True,
+            data_only=False,
+            keep_links=False,
+        )
+    except Exception:
+        return
+    try:
+        if _ROUNDTRIP_METADATA_SHEET not in workbook.sheetnames:
+            return
+        worksheet = workbook[_ROUNDTRIP_METADATA_SHEET]
+        for key, value in worksheet.iter_rows(
+            min_row=1,
+            max_row=_ROUNDTRIP_PROTOCOL_SCAN_ROWS,
+            min_col=1,
+            max_col=2,
+            values_only=True,
+        ):
+            if str(key or "").strip() != "protocol_id":
+                continue
+            if str(value or "").strip() == ROUNDTRIP_PROTOCOL_ID:
+                raise ReaderError(
+                    "这是系统固定维保回填工作簿，请使用维保项目回填入口"
+                    "（维保项目 → 导入回填），"
+                    "通用数据导入不会处理该协议。",
+                    code="roundtrip_wrong_endpoint",
+                )
+            return
+    finally:
+        workbook.close()
 
 
 def inspect_workbook(path: str, *, load_data: bool = True) -> list[SheetInspection]:

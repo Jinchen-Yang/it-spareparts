@@ -12,7 +12,6 @@
 追溯与合并回滚归属判定的前提；商品身份只体现在 part_id。
 """
 import logging
-from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -24,7 +23,12 @@ from app.etl import mapping
 from app.etl.transform import SOFT_ERROR_TYPES, TransformResult
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inventory import Inventory
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    FProjectExpense,
+    MaintenanceContractWorkbookState,
+)
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysAuditLog
@@ -337,8 +341,8 @@ _SALES_LINE_UPD = ["order_id", "line_no", "part_id", "pn_std", "pn_raw", "descri
                     "brand", "category_major", "category_minor", "machine_or_part", "unit",
                     "qty", "unit_price", "line_amount", "generic_product", "serial_numbers",
                     "anomaly_flags", "import_batch_id"]
-# 维保：成本回填字段(unit_cost/cost_amount/cost_source/cost_tax_basis/price_month/
-# trace_months/linked_purchase_order_no)为 maintenance_cost.recompute 专属，一律排除
+# 维保：legacy 成本、双税成本及 reference_* provenance 均由
+# maintenance_cost.recompute 独占回填；导入修复不得覆盖。
 _MAINT_ORDER_UPD = ["order_no", "order_date", "linked_sales_order_no", "project_raw",
                      "project_std", "customer_id", "end_customer", "demand_type",
                      "business_type", "salesperson", "warehouse", "maint_start", "maint_end",
@@ -542,7 +546,46 @@ def _load_maintenance(session: Session, result: TransformResult, batch_id: int,
 # 可更新字段（upsert 修复模式）：排除幂等主键 raw_line_id
 _EXPENSE_UPD = ["bxd_no", "line_no", "data_status", "expense_date", "person",
                 "expense_type", "fee_category", "reason", "linked_sales_order_no",
-                "amount", "import_batch_id"]
+                "amount", "amount_ex_tax", "amount_inc_tax", "tax_basis",
+                "tax_rate_used", "import_batch_id"]
+
+
+def _invalidate_expense_snapshot_state(
+    session: Session,
+    *,
+    contracts: set[str],
+    batch_id: int,
+    operated_by: str | None,
+) -> None:
+    """普通报销导入改变事实后，使旧“费用全量快照”声明立即失效。"""
+    if not contracts:
+        return
+    rows = [
+        {
+            "contract_no": contract,
+            "revision": 1,
+            "expense_snapshot_complete": False,
+            "last_import_batch_id": batch_id,
+            "updated_by": operated_by,
+        }
+        for contract in sorted(contracts)
+    ]
+    stmt = pg_insert(MaintenanceContractWorkbookState).values(rows)
+    session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[
+                MaintenanceContractWorkbookState.contract_no,
+            ],
+            set_={
+                "revision":
+                    MaintenanceContractWorkbookState.revision + 1,
+                "expense_snapshot_complete": False,
+                "last_import_batch_id": batch_id,
+                "updated_by": operated_by,
+                "updated_at": func.now(),
+            },
+        ),
+    )
 
 
 def _load_expense(session: Session, result: TransformResult, batch_id: int,
@@ -557,10 +600,32 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
     """
     upsert = (mode == "upsert")
     audit = (operated_by, batch_id) if (upsert and audit_overwrites) else None
+    contracts = {
+        ln["linked_sales_order_no"]
+        for ln in result.lines
+        if ln.get("linked_sales_order_no")
+    }
+    if upsert:
+        changed_contracts = set(contracts)
+    else:
+        raw_ids = [ln["raw_line_id"] for ln in result.lines]
+        existing_raw_ids = set(
+            session.scalars(
+                select(FProjectExpense.raw_line_id).where(
+                    FProjectExpense.raw_line_id.in_(raw_ids),
+                ),
+            )
+        ) if raw_ids else set()
+        changed_contracts = {
+            ln["linked_sales_order_no"]
+            for ln in result.lines
+            if (
+                ln.get("linked_sales_order_no")
+                and ln["raw_line_id"] not in existing_raw_ids
+            )
+        }
     replaced = 0
     if upsert and result.lines:
-        contracts = {ln["linked_sales_order_no"] for ln in result.lines
-                     if ln.get("linked_sales_order_no")}
         if contracts:
             # 替换前留痕：被删行的 before 快照进审计（金额数据的回溯能力，超量只记总数）
             if audit:
@@ -581,6 +646,15 @@ def _load_expense(session: Session, result: TransformResult, batch_id: int,
     rows = [{**ln, "import_batch_id": batch_id} for ln in result.lines]
     stats = _upsert_facts(session, FProjectExpense, rows, FProjectExpense.raw_line_id,
                           _EXPENSE_UPD if upsert else None, audit=audit)
+    if changed_contracts and (
+        stats["inserted"] or stats["updated"] or replaced
+    ):
+        _invalidate_expense_snapshot_state(
+            session,
+            contracts=changed_contracts,
+            batch_id=batch_id,
+            operated_by=operated_by,
+        )
     return {
         "source_rows_total": result.rows_total,
         "fact_rows_inserted": stats["inserted"],

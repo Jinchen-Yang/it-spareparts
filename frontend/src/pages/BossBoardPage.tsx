@@ -13,7 +13,17 @@ import { useMemo, type ReactNode } from "react";
 import { Alert, Button, Card } from "antd";
 import PageHeader from "../components/PageHeader";
 import { dashboardKpi, type DashboardKpi } from "../api";
-import { moneyExact, pct } from "../utils/format";
+import {
+  TaxMoneyByBasis,
+  taxBasisCaption,
+  useTaxBasis,
+} from "../context/TaxBasis";
+import {
+  completeTaxPair,
+  pct,
+  splitFixed,
+  type TaxSplit,
+} from "../utils/format";
 import FilterBar from "./boss/FilterBar";
 import MorningDisciplineSummary from "./boss/MorningDisciplineSummary";
 import OrdersBlock from "./boss/OrdersBlock";
@@ -21,14 +31,65 @@ import PoolsBlock from "./boss/PoolsBlock";
 import RankingBlock from "./boss/RankingBlock";
 import { MUTED, useBoardFilters, useGuardedFetch, useLocalRestrictions } from "./boss/shared";
 
+function explicitOrLegacyPair(
+  legacyEx: number | null,
+  explicitInc: number | null | undefined,
+  explicitEx: number | null | undefined,
+  explicitAvailable: boolean,
+): TaxSplit {
+  return explicitAvailable
+    ? completeTaxPair(explicitInc, explicitEx)
+    : splitFixed(legacyEx, "ex");
+}
+
 function KpiStrip({ k }: { k: DashboardKpi }) {
+  const purchaseBasis = useTaxBasis("purchase");
+  const salesBasis = useTaxBasis("sales");
+  const taxValue = (pair: TaxSplit, basis: typeof salesBasis) => (
+    <TaxMoneyByBasis
+      basis={basis}
+      inc={pair.inc}
+      ex={pair.ex}
+      exact
+      stack
+    />
+  );
+  const salesPair = explicitOrLegacyPair(
+    k.sales_ex_tax,
+    k.sales_inc_tax,
+    k.sales_ex_tax,
+    "sales_inc_tax" in k,
+  );
+  const purchasePair = explicitOrLegacyPair(
+    k.purchase_ex_tax,
+    k.purchase_inc_tax,
+    k.purchase_ex_tax,
+    "purchase_inc_tax" in k,
+  );
+  const grossProfitPair = explicitOrLegacyPair(
+    k.gross_profit,
+    k.gross_profit_inc,
+    k.gross_profit_ex,
+    "gross_profit_inc" in k || "gross_profit_ex" in k,
+  );
+  const uncostedPair = explicitOrLegacyPair(
+    k.sales_uncosted_ex_tax,
+    k.sales_uncosted_inc_tax,
+    k.sales_uncosted_ex_tax,
+    "sales_uncosted_inc_tax" in k,
+  );
   const cards: [string, ReactNode, string?, boolean?][] = [
-    ["销售额（未税）", moneyExact(k.sales_ex_tax)],
-    ["采购额（未税）", moneyExact(k.purchase_ex_tax)],
-    ["毛利额", moneyExact(k.gross_profit)],
+    [`销售额（${taxBasisCaption(salesBasis)}）`, taxValue(salesPair, salesBasis)],
+    [`采购额（${taxBasisCaption(purchaseBasis)}）`, taxValue(purchasePair, purchaseBasis)],
+    [`毛利额（${taxBasisCaption(salesBasis)}）`, taxValue(grossProfitPair, salesBasis)],
     ["毛利率", pct(k.gross_margin), "分母=已配成本营收"],
     ["成本覆盖率", pct(k.cost_coverage), "已配成本营收 / 销售额", true],
-    ["未配成本营收", moneyExact(k.sales_uncosted_ex_tax), "这部分利润未计入", true],
+    [
+      `未配成本营收（${taxBasisCaption(salesBasis)}）`,
+      taxValue(uncostedPair, salesBasis),
+      "这部分利润未计入",
+      true,
+    ],
   ];
   return (
     <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 8 }}>
@@ -47,6 +108,7 @@ function KpiStrip({ k }: { k: DashboardKpi }) {
 export default function BossBoardPage() {
   const { filters, dateRange, patch, clearAll, hasFilter } = useBoardFilters();
   const local = useLocalRestrictions();
+  const salesBasis = useTaxBasis("sales");
 
   const kpi = useGuardedFetch<DashboardKpi>(() => dashboardKpi(dateRange), [dateRange]);
 
@@ -74,7 +136,7 @@ export default function BossBoardPage() {
   return (
     <>
       <PageHeader title="老板经营看板"
-        subtitle="最近订单发生了什么 · 价格是否在池参考带内 · 哪些型号赚钱/亏钱（金额均未税）" />
+        subtitle="最近订单发生了什么 · 价格是否在池参考带内 · 哪些型号赚钱/亏钱（金额按管理员三域口径展示）" />
 
       {/* ① 全局筛选栏 */}
       <Card size="small" style={{ marginBottom: 12 }}>
@@ -99,7 +161,23 @@ export default function BossBoardPage() {
               KPI 统计范围：{dateRange.date_from} ~ {dateRange.date_to}（仅受时间筛选影响） ·
               订单健康：已生效 {kpi.data.orders_active} · 进行中 {kpi.data.orders_in_progress} ·
               取消/作废 {kpi.data.orders_cancelled} · 异常行 {kpi.data.anomaly_lines} ·
-              被排除营收 {moneyExact(kpi.data.excluded_revenue)}
+              被排除营收 {(() => {
+                const pair = explicitOrLegacyPair(
+                  kpi.data.excluded_revenue,
+                  kpi.data.excluded_revenue_inc,
+                  kpi.data.excluded_revenue_ex,
+                  "excluded_revenue_inc" in kpi.data
+                    || "excluded_revenue_ex" in kpi.data,
+                );
+                return (
+                  <TaxMoneyByBasis
+                    basis={salesBasis}
+                    inc={pair.inc}
+                    ex={pair.ex}
+                    exact
+                  />
+                );
+              })()}
             </div>
           )}
         </>

@@ -138,10 +138,54 @@ describe("利润维度与数据范围一致", () => {
     for (const title of ["移动加权 · 毛利", "先进先出 FIFO · 毛利"]) {
       const card = screen.getByText(title).closest(".ant-card");
       expect(card).not.toBeNull();
-      expect(card).toHaveTextContent("不含 -");
+      expect(card?.querySelector(".ant-statistic-content")).toHaveTextContent("-");
       expect(card).toHaveTextContent("毛利率 -");
       expect(card).not.toHaveTextContent("¥0");
     }
+  });
+
+  it("利润表和 KPI 优先采用后端明确双税字段，旧单字段只作兼容", async () => {
+    localStorage.setItem("permissions", JSON.stringify({
+      page_profit: true,
+      own_customers_only: false,
+      data_customer: true,
+      data_purchase_cost: true,
+      data_profit: true,
+    }));
+    get.mockResolvedValue({ data: { rows: [{
+      dimension: "DUAL-PN",
+      revenue: 100,
+      revenue_inc: 120,
+      revenue_ex: 91,
+      revenue_costed: 80,
+      revenue_costed_inc: 96,
+      revenue_costed_ex: 73,
+      cost_moving_avg: 50,
+      cost_moving_avg_inc: 60,
+      cost_moving_avg_ex: 45,
+      gross_profit_moving: 30,
+      gross_profit_moving_inc: 36,
+      gross_profit_moving_ex: 28,
+      gross_margin_moving: 0.3836,
+      cost_fifo: 51,
+      cost_fifo_inc: 61,
+      cost_fifo_ex: 46,
+      gross_profit_fifo: 29,
+      gross_profit_fifo_inc: 35,
+      gross_profit_fifo_ex: 27,
+      gross_margin_fifo: 0.3699,
+      lines: 1,
+      no_cost: 0,
+      excluded_revenue: 0,
+    }] } });
+
+    render(<ProfitPage />);
+    await screen.findByText("DUAL-PN");
+
+    expect(screen.getAllByText("¥91").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("¥28").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("¥27").length).toBeGreaterThan(0);
+    expect(screen.queryByText("¥100")).toBeNull();
   });
 });
 

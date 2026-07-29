@@ -1,6 +1,5 @@
 """项目追踪工作簿表单闭环（§17）：宽松报销导入 / 页级锚 / 内容幂等键 /
 多 sheet 白名单 / upsert=以本表为准 / 导出↔导入 round-trip。"""
-from datetime import date
 from decimal import Decimal
 
 import pandas as pd
@@ -108,6 +107,67 @@ def test_loose_transform_row_link_beats_anchor_and_missing_link_errors():
     assert res.lines[1]["linked_sales_order_no"] == "XSDD-PAGE"
     res2 = transform(pd.DataFrame([_canon_row(amount=70)]), mapping.EXPENSE)  # 无锚无行级
     assert not res2.lines and res2.errors[0].error_type == "missing_link"
+
+
+def test_expense_transform_uses_postgresql_money_rounding_for_both_tax_bases():
+    df = pd.DataFrame([
+        _canon_row(amount=Decimal("0.50"), reason="未税中点"),
+        {
+            **_canon_row(
+                amount=Decimal("1.00"),
+                reason="含税反算",
+                d="2026-05-02",
+            ),
+            "金额口径": "含税",
+        },
+        _canon_row(
+            amount=Decimal("0.505"),
+            reason="先舍入权威金额再派生",
+            d="2026-05-03",
+        ),
+        {
+            **_canon_row(
+                amount=Decimal("1.00"),
+                reason="显式双列含税权威",
+                d="2026-05-04",
+            ),
+            "未税金额": Decimal("0.88"),
+            "含税金额": Decimal("1.00"),
+            "金额口径": "含税",
+        },
+    ])
+
+    result = transform(df, mapping.EXPENSE, anchor="XSDD-ROUND")
+
+    assert not result.errors
+    assert result.lines[0]["amount_ex_tax"] == Decimal("0.50")
+    assert result.lines[0]["amount_inc_tax"] == Decimal("0.57")
+    assert result.lines[1]["amount_inc_tax"] == Decimal("1.00")
+    assert result.lines[1]["amount_ex_tax"] == Decimal("0.88")
+    assert result.lines[2]["amount_ex_tax"] == Decimal("0.51")
+    assert result.lines[2]["amount_inc_tax"] == Decimal("0.58")
+    assert result.lines[3]["tax_basis"] == "inc"
+    assert result.lines[3]["amount"] == Decimal("1.00")
+    assert result.lines[3]["amount_ex_tax"] == Decimal("0.88")
+    assert result.lines[3]["amount_inc_tax"] == Decimal("1.00")
+
+
+def test_expense_transform_rejects_raw_amount_that_disagrees_with_tax_basis():
+    row = {
+        **_canon_row(amount=Decimal("999.00"), reason="原值冲突"),
+        "未税金额": Decimal("0.88"),
+        "含税金额": Decimal("1.00"),
+        "金额口径": "含税",
+    }
+
+    result = transform(
+        pd.DataFrame([row]),
+        mapping.EXPENSE,
+        anchor="XSDD-ROUND",
+    )
+
+    assert not result.lines
+    assert result.errors[0].error_type == "inconsistent_raw_amount"
 
 
 # ---------- reader：锚行探测 + 多 sheet ----------

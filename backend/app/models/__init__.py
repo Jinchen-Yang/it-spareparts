@@ -4,7 +4,14 @@ from app.models.data_quality import FactDataQualityIssue
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier, PartAlias
 from app.models.inquiry import FPartInquiry
 from app.models.inventory import Inventory, PartSubstitute
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    FProjectExpense,
+    MaintenanceContractWorkbookState,
+    MaintenanceManualCostOverride,
+    MaintenanceRoundtripOperation,
+)
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -17,6 +24,7 @@ from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import (
     SysAuditLog,
+    SysBusinessSetting,
     SysImportBatch,
     SysImportError,
     SysImportJob,
@@ -43,6 +51,10 @@ __all__ = [
     "FPurchaseLine",
     "FMaintenanceOrder",
     "FMaintenanceLine",
+    "FProjectExpense",
+    "MaintenanceContractWorkbookState",
+    "MaintenanceManualCostOverride",
+    "MaintenanceRoundtripOperation",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",
@@ -53,6 +65,7 @@ __all__ = [
     "SysImportJob",
     "SysRawFile",
     "SysAuditLog",
+    "SysBusinessSetting",
     "SysUser",
     "SysRoleTemplate",
 ]

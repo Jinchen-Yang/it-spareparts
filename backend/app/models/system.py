@@ -4,9 +4,11 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     func,
@@ -81,6 +83,57 @@ class SysRoleTemplate(Base):
     updated_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
 
+class SysBusinessSetting(Base):
+    """类型化业务设置单例。
+
+    不使用自由 key/value：每个设置都必须在模型和迁移中声明类型、合法值、默认值与
+    回滚行为。id 固定为 1；version 供管理员界面的乐观锁使用。
+    """
+
+    __tablename__ = "sys_business_setting"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_sys_business_setting_singleton"),
+        CheckConstraint(
+            "maintenance_project_profit_default_basis IN ('inc', 'ex', 'both')",
+            name="ck_sys_business_setting_maintenance_profit_basis",
+        ),
+        CheckConstraint(
+            "purchase_display_basis IN ('inc', 'ex', 'both')",
+            name="ck_sys_business_setting_purchase_display_basis",
+        ),
+        CheckConstraint(
+            "sales_display_basis IN ('inc', 'ex', 'both')",
+            name="ck_sys_business_setting_sales_display_basis",
+        ),
+        CheckConstraint("version >= 1", name="ck_sys_business_setting_version"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        SmallInteger,
+        primary_key=True,
+        default=1,
+        server_default="1",
+    )
+    maintenance_project_profit_default_basis: Mapped[str] = mapped_column(
+        String(8),
+        default="both",
+        server_default="both",
+    )
+    purchase_display_basis: Mapped[str] = mapped_column(
+        String(8),
+        default="both",
+        server_default="both",
+    )
+    sales_display_basis: Mapped[str] = mapped_column(
+        String(8),
+        default="ex",
+        server_default="ex",
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+
 class SysImportJob(Base):
     """批量导入作业（一次「批量上传」聚合的 N 个 batch，§9）。
 
@@ -123,10 +176,12 @@ class SysImportBatch(Base):
     )
     report_json: Mapped[dict | None] = mapped_column(JSONB)
 
-    # 仅对 success 批次的 file_hash 唯一 → 失败可重试、重复成功文件被挡（§5/§6.1）
+    # 仅对同一 file_type 的 success file_hash 唯一。固定维保回填与通用导入是
+    # 不同协议命名空间，错入口的历史记录不能污染正确入口的幂等判断。
     __table_args__ = (
         Index(
             "ux_batch_success_hash",
+            "file_type",
             "file_hash",
             unique=True,
             postgresql_where=text("status = 'success'"),

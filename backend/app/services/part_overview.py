@@ -10,10 +10,10 @@ import logging
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app import config, security
+from app import config, security, tax_policy
 from app.services import inventory as inventory_service
 from app.services import part_resolver
 from app.services.query_filters import active_orders, col_matches_any, keyword_groups_or_substr
@@ -200,14 +200,31 @@ def _paginate(db: Session, base_stmt, page: int, page_size: int, mapper) -> dict
 
 
 def _purchase_row(r):
+    raw = Decimal(r[4]) if r[4] is not None else None
+    if raw is None:
+        price_ex = price_inc = None
+    elif r[6] is True:
+        price_inc = tax_policy.round_money(raw)
+        price_ex = tax_policy.ex_from_inc(price_inc)
+    else:
+        price_ex = tax_policy.round_money(raw)
+        price_inc = tax_policy.inc_from_ex(price_ex)
     return {"order_no": r[0], "order_date": r[1], "supplier": r[2],
             "qty": _d(r[3]), "unit_price": _d(r[4]), "source_type": r[5],
-            "is_tax_inclusive": r[6]}   # 单价口径：含税单→含税、不含单→不含税（前端分列，零计算）
+            "is_tax_inclusive": r[6],
+            "price_ex": _d(price_ex) if price_ex is not None else None,
+            "price_inc": _d(price_inc) if price_inc is not None else None}
 
 
 def _sales_row(r):
+    price_inc = Decimal(r[4]) if r[4] is not None else None
+    if price_inc is not None:
+        price_inc = tax_policy.round_money(price_inc)
+    price_ex = tax_policy.ex_from_inc(price_inc) if price_inc is not None else None
     return {"order_no": r[0], "order_date": r[1], "customer": r[2],
-            "qty": _d(r[3]), "unit_price": _d(r[4]), "salesperson": r[5]}
+            "qty": _d(r[3]), "unit_price": _d(r[4]), "salesperson": r[5],
+            "price_ex": _d(price_ex) if price_ex is not None else None,
+            "price_inc": _d(price_inc) if price_inc is not None else None}
 
 
 def _empty_page(page: int, page_size: int) -> dict:

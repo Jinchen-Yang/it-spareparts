@@ -1,6 +1,6 @@
 """维保成本事实分层与预算决策门禁的单一真值。
 
-本模块只解释已经由 ``maintenance_cost.recompute`` 产出的成本结果，不改变六层取价
+本模块只解释已经由 ``maintenance_cost.recompute`` 产出的成本结果，不改变取价
 瀑布。所有项目、合同、CSV、工作簿与 Agent 都应复用这里的分类和决策，避免各自把
 估算价或缺失价重新解释成经营结论。
 """
@@ -10,8 +10,15 @@ from typing import Iterable
 from sqlalchemy import and_, or_
 
 
-ACTUAL_SOURCES = frozenset({"direct", "window", "month_avg"})
-ESTIMATED_SOURCES = frozenset({"trace_avg", "sales_ref"})
+ACTUAL_SOURCES = frozenset({"direct", "window", "month_avg", "manual"})
+ESTIMATED_SOURCES = frozenset({
+    "trace_avg",
+    "sales_ref",
+    "pool_purchase",
+    "pool_sales",
+    "purchase_history",
+    "sales_history",
+})
 KNOWN_SOURCES = ACTUAL_SOURCES | ESTIMATED_SOURCES
 TAX_BASES = frozenset({"inc", "ex"})
 
@@ -48,6 +55,15 @@ ESTIMATED_LOW_BUCKETS = frozenset({
     COST_BUCKET_ESTIMATED_INC_LOW,
     COST_BUCKET_ESTIMATED_EX_LOW,
 })
+COST_DERIVED_ANOMALY_FLAGS = frozenset({
+    "no_cost",
+    "cost_overflow",
+    "tax_rate_estimated",
+    "inc_tax_estimated",
+    "ex_tax_estimated",
+    "stale_cost_reference",
+    "reference_date_missing",
+})
 
 _ZERO = Decimal("0")
 _CENT = Decimal("0.01")
@@ -81,6 +97,44 @@ def source_tier(
     if source in ESTIMATED_SOURCES:
         return "estimated"
     return "missing"
+
+
+def normalized_tax_tier(
+    *,
+    source: str | None,
+    tax_basis: str | None,
+    legacy_amount: Decimal | None,
+    normalized_amount: Decimal | None,
+    normalized_basis: str,
+    anomaly_flags: Iterable[str] | None,
+) -> str:
+    """解释一行归一双税成本的 actual / estimated / missing。
+
+    legacy 来源本身必须先是已知成本；未知来源即使夹带双税金额或估算 flag 也不能
+    被提升。实际来源只在该目标税口径经过缺税率换算时降为 estimated。
+    """
+    legacy_tier = source_tier(source, tax_basis, legacy_amount)
+    if legacy_tier == "missing" or normalized_basis not in TAX_BASES:
+        return "missing"
+    try:
+        value = Decimal(normalized_amount) if normalized_amount is not None else None
+    except (ArithmeticError, TypeError, ValueError):
+        return "missing"
+    if (
+        value is None
+        or not value.is_finite()
+        or value < _ZERO
+        or value >= _MAX_AMOUNT_EXCLUSIVE
+    ):
+        return "missing"
+    if legacy_tier == "estimated":
+        return "estimated"
+    flags = frozenset(anomaly_flags or ())
+    return (
+        "estimated"
+        if f"{normalized_basis}_tax_estimated" in flags
+        else "actual"
+    )
 
 
 def summarize_records(
@@ -137,7 +191,7 @@ def summarize_aggregate(
     }
     quality = (
         "incomplete"
-        if missing_cost_lines
+        if lines <= 0 or missing_cost_lines
         else "contains_estimate"
         if estimated_lines
         else "actual_only"
@@ -239,15 +293,23 @@ def budget_decision(
     *,
     budget: Decimal | None,
     expense_total: Decimal = _ZERO,
+    expense_data_available: bool = True,
     warn_pct: Decimal,
 ) -> dict:
-    """按成本质量决定是否允许计算预算余量。"""
+    """按成本与费用完整性决定是否允许计算预算余量。"""
     known_spend_total = (
         Decimal(summary["known_cost_total"]) + Decimal(expense_total or _ZERO)
     ).quantize(_CENT)
     if summary["cost_quality"] == "incomplete":
         return {
             "decision_status": "incomplete_cost",
+            "known_spend_total": known_spend_total,
+            "remaining": None,
+            "remaining_pct": None,
+        }
+    if not expense_data_available:
+        return {
+            "decision_status": "expense_data_unavailable",
             "known_spend_total": known_spend_total,
             "remaining": None,
             "remaining_pct": None,

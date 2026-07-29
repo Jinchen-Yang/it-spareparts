@@ -5,9 +5,9 @@ import os
 import re
 import stat
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
 from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, get_settings
@@ -49,14 +49,21 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def successful_batch_ids_by_hash(session: Session, file_hashes: set[str]) -> dict[str, int]:
+def successful_batch_ids_by_hash(
+    session: Session,
+    file_hashes: set[str],
+    *,
+    file_type: str | None = None,
+) -> dict[str, int]:
     if not file_hashes:
         return {}
-    rows = session.execute(
-        select(SysImportBatch.file_hash, SysImportBatch.id).where(
-            SysImportBatch.file_hash.in_(file_hashes), SysImportBatch.status == "success"
-        )
-    ).all()
+    query = select(SysImportBatch.file_hash, SysImportBatch.id).where(
+        SysImportBatch.file_hash.in_(file_hashes),
+        SysImportBatch.status == "success",
+    )
+    if file_type is not None:
+        query = query.where(SysImportBatch.file_type == file_type)
+    rows = session.execute(query).all()
     return {file_hash: batch_id for file_hash, batch_id in rows}
 
 
@@ -228,7 +235,29 @@ def run_import(session: Session, file_path: str, original_name: str,
         {"k": DATA_CHANGE_ADVISORY_LOCK_KEY},
     )
 
-    # 2) hash 去重：skip 模式拒绝重复成功文件（幂等）；upsert(修复)模式是"显式要求重处理"。
+    def new_batch(status: str) -> SysImportBatch:
+        return SysImportBatch(
+            filename=original_name,
+            file_type="unknown",
+            file_hash=file_hash,
+            uploaded_by=uploaded_by,
+            import_job_id=import_job_id,
+            status=status,
+        )
+
+    # 2) 固定维保回填工作簿必须先于通用 hash 去重分流，否则历史同 hash
+    # 成功批次会把“入口错误”误报成“重复文件”。同时，损坏/超限等 ReaderError
+    # 仍需建立失败批次，保证批量作业逐文件审计完整。
+    try:
+        reader.reject_roundtrip_workbook(file_path)
+    except ReaderError as exc:
+        batch = new_batch("failed")
+        batch.report_json = {"error": str(exc)}
+        session.add(batch)
+        session.flush()
+        raise
+
+    # 3) hash 去重：skip 模式拒绝重复成功文件（幂等）；upsert(修复)模式是"显式要求重处理"。
     #    旧成功批次必须等新批次完整通过后再 supersede；否则新文件预检/装载失败会破坏
     #    既有成功审计链。两次状态切换在同一事务 flush，仍满足 success hash 偏唯一索引。
     duplicate_batch_id = successful_batch_ids_by_hash(session, {file_hash}).get(file_hash)
@@ -236,10 +265,8 @@ def run_import(session: Session, file_path: str, original_name: str,
         if mode != "upsert":
             raise DuplicateFileError(duplicate_batch_id)
 
-    # 3) 建 batch（先占位，类型稍后回填）
-    batch = SysImportBatch(filename=original_name, file_type="unknown",
-                           file_hash=file_hash, uploaded_by=uploaded_by,
-                           import_job_id=import_job_id, status="processing")
+    # 4) 建 batch（先占位，类型稍后回填）
+    batch = new_batch("processing")
     session.add(batch)
     session.flush()  # 取 batch.id
 

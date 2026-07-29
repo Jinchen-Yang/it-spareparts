@@ -67,7 +67,8 @@ def recent_purchases(db: Session, user_ctx: security.UserContext | None = None,
             FPurchaseOrder.purchaser,
             FPurchaseOrder.source_type,
             FPurchaseOrder.data_status,
-            FPurchaseOrder.is_tax_inclusive,      # 单价/金额口径：含税单→含税、不含单→未税（前端按此分两列，零计算）
+            # 原始税务口径；双口径金额由服务端按固定 13% 生成，前端只负责显示。
+            FPurchaseOrder.is_tax_inclusive,
             DimSupplier.name_normalized.label("supplier"),
             DimPart.pn_std,                       # canonical（合并后为存活型号）
             DimPart.needs_review,

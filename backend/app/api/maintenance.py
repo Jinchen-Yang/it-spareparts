@@ -6,13 +6,15 @@
 """
 import csv
 import io
+import os
 import re
+import tempfile
 from contextlib import suppress
 from datetime import date
 from tempfile import SpooledTemporaryFile
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -21,12 +23,13 @@ from app.business_time import business_today
 from app.db import get_db
 from app.security import (
     UserContext, apply_field_visibility, get_current_user_context, record_access_log,
-    is_scoped_sales, require_page,
+    is_scoped_sales, require_action, require_page,
 )
 from app import config
 from app.services import (
     maintenance_cost,
     maintenance_export,
+    maintenance_roundtrip,
     maintenance_workbook_export,
     maintenance_workbook_renderer,
 )
@@ -74,7 +77,15 @@ def recompute(db: Session = Depends(get_db),
               _auth: str = Depends(require_admin),   # 全表重算(~1min 写库)：限管理员，与导入触发方口径一致
               ctx: UserContext = Depends(get_current_user_context)) -> dict:
     record_access_log(ctx, "recompute", "maintenance")
-    return maintenance_cost.recompute(db)
+    try:
+        return maintenance_cost.recompute(db)
+    except maintenance_cost.MaintenanceCostRecomputeBusy as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+            headers={"Retry-After": "5"},
+        ) from exc
 
 
 @router.get("/projects")
@@ -270,14 +281,19 @@ def export(
               "已知成本参考(混合原值)", "成本完整性",
               "已知成本参考-含税小计(兼容)", "已知成本参考-不含税小计(兼容)",
               "已知成本参考合计(兼容)", "覆盖率%",
-              *(_SOURCE_LABEL[s] + "(行)" for s in ("direct", "window", "month_avg",
-                                                    "trace_avg", "sales_ref", "none")),
+              "备件成本-含税归一", "含税口径完整", "含税口径质量", "含税口径缺失行",
+              "备件成本-未税归一", "未税口径完整", "未税口径质量", "未税口径缺失行",
+              *(_SOURCE_LABEL[s] + "(行)" for s in (
+                  "direct", "window", "month_avg", "trace_avg", "sales_ref",
+                  "pool_purchase", "pool_sales", "purchase_history",
+                  "sales_history", "manual", "none",
+              )),
               "月份数", "关联销售订单", "合同额(含税参考)", "合同被多项目共用"]
     rows = []
     for r in data["rows"]:
         bs = r["by_source"]
         source_counts = (
-            [None] * 6
+            [None] * 11
             if bs is None
             else [
                 bs.get("direct", 0),
@@ -285,6 +301,11 @@ def export(
                 bs.get("month_avg", 0),
                 bs.get("trace_avg", 0),
                 bs.get("sales_ref", 0),
+                bs.get("pool_purchase", 0),
+                bs.get("pool_sales", 0),
+                bs.get("purchase_history", 0),
+                bs.get("sales_history", 0),
+                bs.get("manual", 0),
                 bs.get("none", 0),
             ]
         )
@@ -301,6 +322,18 @@ def export(
                      r["actual_lines"], r["estimated_lines"], r["missing_cost_lines"],
                      r["known_cost_total"], quality_label.get(r["cost_quality"], r["cost_quality"]),
                      r["cost_inc"], r["cost_ex"], r["cost_total"], r["coverage_pct"],
+                     r.get("parts_cost_inc_tax"), r.get("parts_cost_inc_tax_complete"),
+                     quality_label.get(
+                         r.get("parts_cost_inc_tax_quality"),
+                         r.get("parts_cost_inc_tax_quality"),
+                     ),
+                     r.get("parts_cost_inc_tax_missing_lines"),
+                     r.get("parts_cost_ex_tax"), r.get("parts_cost_ex_tax_complete"),
+                     quality_label.get(
+                         r.get("parts_cost_ex_tax_quality"),
+                         r.get("parts_cost_ex_tax_quality"),
+                     ),
+                     r.get("parts_cost_ex_tax_missing_lines"),
                      *source_counts,
                      r["months"], _safe("、".join(r["sales_orders"])),
                      r["contract_amount"], "是" if r["contract_shared"] else ""])
@@ -330,6 +363,14 @@ def orders_export(
     record_access_log(ctx, "orders_export", "maintenance", audit_scope)
     try:
         output = maintenance_export.build_workbook(db, ctx, date_from, date_to)
+    except maintenance_export.ExcelExportBusy as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": "5"},
+        ) from exc
+    except maintenance_export.ExcelExportTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
     except (maintenance_export.ExcelCellTooLong, maintenance_export.ExcelRowLimitExceeded) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     _release_db_before_stream(db, output)
@@ -430,8 +471,12 @@ def lines_export(
             detail=f"CSV 数据行超过 {_MAX_CSV_DATA_ROWS} 行上限",
         )
     header = ["日期", "维保单号", "需求类型", "业务类型", "出库仓库", "PN", "描述",
-              "数量", "退货", "单价", "金额", "成本事实层级", "成本来源", "置信度", "含税口径", "取价月",
-              "追溯月数", "距采购天数", "关联采购单", "异常标记"]
+              "数量", "退货", "单价", "金额",
+              "含税单位成本", "未税单位成本", "含税成本金额", "未税成本金额",
+              "成本事实层级", "成本来源", "置信度", "含税口径", "取价月",
+              "追溯月数", "距采购天数", "关联采购单",
+              "参考侧", "参考池ID", "参考池版本", "参考样本数",
+              "参考起始日", "参考截止日", "最近样本日", "异常标记"]
 
     def rows():
         source_rows = maintenance_cost.iter_project_lines(
@@ -449,12 +494,18 @@ def lines_export(
                     r["order_date"], r["order_no"], r["demand_type"], r["business_type"],
                     r["warehouse"], r["pn_std"], r["description"],
                     r["qty"], r["return_qty"], r["unit_cost"], r["cost_amount"],
+                    r.get("unit_cost_inc_tax"), r.get("unit_cost_ex_tax"),
+                    r.get("cost_amount_inc_tax"), r.get("cost_amount_ex_tax"),
                     {"actual": "实际采购参考", "estimated": "估算参考",
                      "missing": "成本缺失"}.get(r["cost_tier"], r["cost_tier"]),
                     _SOURCE_LABEL.get(r["cost_source"], r["cost_source"]),
                     _CONF_LABEL.get(r["confidence"], r["confidence"] or ""),
                     r["cost_tax_basis"], r["price_month"], r["trace_months"],
                     r["price_distance_days"], r["linked_purchase_order_no"],
+                    r.get("reference_side"), r.get("reference_pool_group_id"),
+                    r.get("reference_pool_version"), r.get("reference_sample_count"),
+                    r.get("reference_from_date"), r.get("reference_to_date"),
+                    r.get("reference_latest_date"),
                     "、".join(r["anomaly_flags"] or []),
                 ]
         finally:
@@ -475,7 +526,10 @@ def lines_export(
 def board(
     status: str | None = Query(
         None,
-        pattern=r"^(incomplete_cost|red|yellow|green|no_budget)$",
+        pattern=(
+            r"^(incomplete_cost|expense_data_unavailable|"
+            r"red|yellow|green|no_budget)$"
+        ),
     ),
     date_from: date | None = Query(None),
     date_to: date | None = Query(None),
@@ -486,7 +540,7 @@ def board(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """合同预算消耗参考：成本缺失优先，其后才允许红/黄/绿参考状态。"""
+    """合同预算消耗参考：成本或费用数据不完整时不计算红黄绿。"""
     record_access_log(ctx, "board", "maintenance")
     data = maintenance_cost.board(
         db, date_from, date_to, status, user_ctx=ctx, q_text=q,
@@ -507,6 +561,8 @@ def _build_workbook(contract: str, data: dict):
 @router.get("/export-workbook")
 def export_workbook(
     contract: str = Query(..., max_length=64),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),   # 硬鉴权：缺/失效凭证 → 401
     _page: None = Depends(require_page("page_maintenance")),
@@ -518,9 +574,18 @@ def export_workbook(
     「产品成本」按财务习惯填单据级总成本于每张 WBDD 首行；行级取价明细作附加列（增强不破坏）。
     """
     _require_workbook_export_permissions(ctx)
+    if (date_from is None) != (date_to is None):
+        raise HTTPException(status_code=422, detail="date_from 与 date_to 必须同时提供")
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(status_code=422, detail="date_from 不能晚于 date_to")
     record_access_log(ctx, "export_workbook", "maintenance", {"contract": contract})
     try:
-        output = maintenance_workbook_export.build_contract_workbook_file(db, contract)
+        output = maintenance_workbook_export.build_contract_workbook_file(
+            db,
+            contract,
+            date_from=date_from,
+            date_to=date_to,
+        )
     except maintenance_workbook_export.WorkbookExportRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     _release_db_before_stream(db, output)
@@ -537,3 +602,131 @@ def export_workbook(
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+@router.get("/roundtrip-template")
+def roundtrip_template(
+    contract: str | None = Query(None, max_length=64),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    blank: bool = Query(False),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> StreamingResponse:
+    """导出固定协议的维保项目可编辑工作簿。"""
+    _require_workbook_export_permissions(ctx)
+    record_access_log(
+        ctx,
+        "roundtrip_template",
+        "maintenance",
+        {
+            "contract": contract,
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+            "blank": blank,
+        },
+    )
+    try:
+        output = maintenance_roundtrip.build_roundtrip_template(
+            db,
+            contract=contract,
+            date_from=date_from,
+            date_to=date_to,
+            exported_by=ctx.user_id,
+            blank=blank,
+        )
+    except maintenance_roundtrip.RoundtripWorkbookError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    _release_db_before_stream(db, output)
+    return _ClosingStreamingResponse(
+        _iter_download_chunks(output),
+        resource=output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": _content_disposition(
+                "maintenance_roundtrip_template.xlsx",
+            ),
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _save_roundtrip_upload(file: UploadFile) -> tuple[str, str]:
+    original_name = (
+        (file.filename or "maintenance_roundtrip.xlsx")
+        .replace("\\", "/")
+        .rsplit("/", 1)[-1]
+    )
+    if not original_name.lower().endswith(".xlsx"):
+        raise HTTPException(
+            status_code=400,
+            detail="维保回填只支持系统导出的 .xlsx 工作簿",
+        )
+    limit = config.MAX_UPLOAD_MB * 1024 * 1024
+    fd, path = tempfile.mkstemp(suffix=".xlsx")
+    size = 0
+    try:
+        with os.fdopen(fd, "wb") as output:
+            while chunk := file.file.read(_DOWNLOAD_CHUNK_BYTES):
+                size += len(chunk)
+                if size > limit:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"工作簿超过 {config.MAX_UPLOAD_MB}MB 上传上限",
+                    )
+                output.write(chunk)
+    except BaseException:
+        with suppress(FileNotFoundError):
+            os.remove(path)
+        raise
+    return path, original_name[:256]
+
+
+@router.post("/roundtrip-import")
+def roundtrip_import(
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action(
+        "action_maintenance_roundtrip_apply",
+        require_data="data_profit",
+    )),
+    ctx: UserContext = Depends(get_current_user_context),
+    file: UploadFile = File(...),
+) -> dict:
+    """校验并原子应用系统导出的固定协议工作簿。
+
+    身份、页面、显式写动作及数据可见依赖均排在 ``UploadFile`` 之前解析；应用层也在
+    调用 ``_save_roundtrip_upload``（首次读取上传体）前完成实名与字段权限校验。
+    """
+    if not ctx.is_authenticated or not ctx.user_id:
+        raise HTTPException(status_code=401, detail="维保回填必须使用实名登录账号")
+    _require_workbook_export_permissions(ctx)
+    path, original_name = _save_roundtrip_upload(file)
+    try:
+        record_access_log(
+            ctx,
+            "roundtrip_import",
+            "maintenance",
+            {"filename": original_name},
+        )
+        return maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            path,
+            filename=original_name,
+            operated_by=ctx.user_id,
+        )
+    except maintenance_roundtrip.RoundtripWorkbookError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except maintenance_cost.MaintenanceCostRecomputeBusy as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+            headers={"Retry-After": "5"},
+        ) from exc
+    finally:
+        with suppress(FileNotFoundError):
+            os.remove(path)

@@ -139,7 +139,8 @@ describe("池内 PN 股票式价格图", () => {
     const { rerender } = render(<PoolPnPriceMap data={DATA} isMobile />);
     act(() => lastChart().emit("click", { seriesName: "价格区间", dataIndex: 1 }));
     expect(screen.getByTestId("price-map-selected")).toHaveTextContent("加权均价 ¥120");
-    expect(screen.getByTestId("price-map-selected")).toHaveTextContent("最近原始价 ¥230");
+    expect(screen.getByTestId("price-map-selected"))
+      .toHaveTextContent("最近原始价(未税审计值) ¥230");
 
     const updated = {
       ...DATA,

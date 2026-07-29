@@ -7,9 +7,10 @@ import {
   dashboardPurchaseOrders, dashboardSales,
   type OrdersResp, type PurchaseOrderRow, type SalesOrderRow,
 } from "../../api";
-import { EMPTY, moneyExact, qty } from "../../utils/format";
+import { taxSidesForBasis, useTaxBasis } from "../../context/TaxBasis";
+import { EMPTY, moneyExact, qty, splitFixed } from "../../utils/format";
 import PartsTable, { type OrderSide } from "./PartsTable";
-import { MUTED, useGuardedFetch, fmtMoneyR, type DateRange } from "./shared";
+import { MUTED, useGuardedFetch, type DateRange } from "./shared";
 
 interface OrderDetailModalProps {
   side: OrderSide;
@@ -23,6 +24,7 @@ export default function OrderDetailModal({
   side, orderNo, onClose, localCostRestricted, dateRange,
 }: OrderDetailModalProps) {
   const isPurchase = side === "purchase";
+  const basis = useTaxBasis(side);
   const { data, loading, error } = useGuardedFetch<OrdersResp<SalesOrderRow | PurchaseOrderRow>>(
     () => {
       if (!orderNo) return Promise.resolve({ data: null as never });
@@ -65,9 +67,19 @@ export default function OrderDetailModal({
               <>
                 <Descriptions.Item label="采购员">{(row as PurchaseOrderRow).purchaser || EMPTY}</Descriptions.Item>
                 <Descriptions.Item label="类型">{(row as PurchaseOrderRow).source_type || EMPTY}</Descriptions.Item>
-                <Descriptions.Item label="金额(未税)">
-                  {fmtMoneyR((row as PurchaseOrderRow).total_amount, costRestricted, "无成本权限")}
-                </Descriptions.Item>
+                {taxSidesForBasis(basis).map((taxSide) => (
+                  <Descriptions.Item
+                    key={`purchase-amount-${taxSide}`}
+                    label={`采购金额(${taxSide === "inc" ? "含税" : "不含税"})`}
+                  >
+                    {costRestricted
+                      ? <span style={MUTED}>无成本权限</span>
+                      : moneyExact(splitFixed(
+                        (row as PurchaseOrderRow).total_amount,
+                        "ex",
+                      )[taxSide])}
+                  </Descriptions.Item>
+                ))}
                 <Descriptions.Item label="关联销售单">
                   {(row as PurchaseOrderRow).linked_sales_order || EMPTY}
                 </Descriptions.Item>
@@ -82,10 +94,17 @@ export default function OrderDetailModal({
                   {partsRestricted ? <span style={MUTED}>无权限</span>
                     : ((row as SalesOrderRow).customer || EMPTY)}
                 </Descriptions.Item>
-                <Descriptions.Item label="营收(未税)">
-                  {(row as SalesOrderRow).total_revenue == null
-                    ? EMPTY : moneyExact((row as SalesOrderRow).total_revenue)}
-                </Descriptions.Item>
+                {taxSidesForBasis(basis).map((taxSide) => (
+                  <Descriptions.Item
+                    key={`sales-revenue-${taxSide}`}
+                    label={`销售营收(${taxSide === "inc" ? "含税" : "不含税"})`}
+                  >
+                    {moneyExact(splitFixed(
+                      (row as SalesOrderRow).total_revenue,
+                      "ex",
+                    )[taxSide])}
+                  </Descriptions.Item>
+                ))}
                 <Descriptions.Item label="采购拉通">
                   {(row as SalesOrderRow).linked_purchase ? <Tag color="blue">已生效</Tag> : EMPTY}
                 </Descriptions.Item>

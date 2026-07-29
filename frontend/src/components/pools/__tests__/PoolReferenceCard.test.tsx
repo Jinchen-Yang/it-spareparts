@@ -48,21 +48,23 @@ function renderCard(value: PoolReference, props: {
 }
 
 describe("PoolReferenceCard", () => {
-  it("展示同一池的采购/销售参考、窗口、样本与未税口径，并可进入池详情", () => {
+  it("展示同一池的采购/销售参考、管理员税务口径、规则值与窗口，并可进入池详情", () => {
     renderCard(reference());
 
     expect(screen.getByRole("region", { name: "ST4000NM0035 的池价格参考" })).toBeInTheDocument();
     expect(screen.getByText("4T SAS 3.5硬盘池")).toBeInTheDocument();
     expect(screen.getByText("16 个 PN")).toBeInTheDocument();
     const purchase = screen.getByLabelText("采购参考");
-    expect(purchase).toHaveTextContent("池均价 ¥698.20");
-    expect(purchase).toHaveTextContent("中位 ¥682.30");
-    expect(purchase).toHaveTextContent("人工上限 ¥725.66");
-    expect(purchase).toHaveTextContent("本型号均价 ¥760.00");
-    expect(screen.getByText(/高于池均价.*61\.80/)).toBeInTheDocument();
-    expect(screen.getByText(/高于人工约束.*34\.34/)).toBeInTheDocument();
+    expect(purchase).toHaveTextContent("采购参考（含税 / 不含税）");
+    expect(purchase).toHaveTextContent("池均价 含 ¥788.97 · 不含 ¥698.2");
+    expect(purchase).toHaveTextContent("中位 含 ¥771 · 不含 ¥682.3");
+    expect(purchase).toHaveTextContent("人工上限(未税) ¥725.66");
+    expect(purchase).toHaveTextContent("本型号均价 含 ¥858.8 · 不含 ¥760");
+    expect(screen.getByText(/高于池均价.*61\.8.*未税差额/)).toBeInTheDocument();
+    expect(screen.getByText(/高于人工约束.*34\.34.*未税差额/)).toBeInTheDocument();
     expect(screen.getByText("未设置")).toBeInTheDocument();
-    expect(screen.getByText(/采购 42 单.*销售 67 单.*统一未税.*近 90 天/)).toBeInTheDocument();
+    expect(screen.getByText(/采购 42 单.*销售 67 单.*业务价按管理员口径.*约束\/差额为未税规则值.*近 90 天/))
+      .toBeInTheDocument();
     expect(screen.getByRole("link", { name: "查看互通池详情" })).toHaveAttribute(
       "href",
       "/pool-analysis/12?range=90d&pn=ST4000NM0035",

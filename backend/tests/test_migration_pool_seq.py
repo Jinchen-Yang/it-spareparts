@@ -87,4 +87,4 @@ def test_single_alembic_head(migrated):
     from alembic.script import ScriptDirectory
     heads = ScriptDirectory.from_config(_cfg()).get_heads()
     # 钉住当前发布 head，避免新增迁移误分叉。
-    assert heads == ["c9d4e7f2a6b1"], f"应只有一个 head=c9d4e7f2a6b1，实得 {heads}"
+    assert heads == ["f1c8e4a7b2d9"], f"应只有一个 head=f1c8e4a7b2d9，实得 {heads}"

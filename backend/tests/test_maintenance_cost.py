@@ -20,7 +20,12 @@ from tests import factories as f
 
 @pytest.fixture()
 def batch(db):
-    b = SysImportBatch(filename="t.xlsx", file_type="maintenance", file_hash="hm1")
+    b = SysImportBatch(
+        filename="t.xlsx",
+        file_type="maintenance",
+        file_hash="hm1",
+        status="success",
+    )
     db.add(b)
     db.flush()
     return b
@@ -89,8 +94,8 @@ def test_month_avg(db, batch):
     assert ln.trace_months == 0
 
 
-def test_trace_avg_and_cap(db, batch):
-    """B 追溯：缺当月往前找最近采购月（记月数）；超 3 个月不追、落销售参考层。"""
+def test_three_month_reference_priority(db, batch):
+    """前三层未命中后，3 个月内按本 PN 采购→销售历史补价。"""
     _load_purchases(db, batch, {
         "P1": f.purchase_head("P1", on=date(2026, 1, 10)),   # PN-C：3 月出库 → 追溯 2 个月
         "P2": f.purchase_head("P2", on=date(2025, 10, 10)),  # PN-D：5 个月前 → 超上限
@@ -98,7 +103,12 @@ def test_trace_avg_and_cap(db, batch):
         f.purchase_line("P1", "PL1", "PN-C", qty="1", price="50"),
         f.purchase_line("P2", "PL2", "PN-D", qty="1", price="70"),
     ])
-    sb = SysImportBatch(filename="s.xlsx", file_type="sales", file_hash="hs1")
+    sb = SysImportBatch(
+        filename="s.xlsx",
+        file_type="sales",
+        file_hash="hs1",
+        status="success",
+    )
     db.add(sb)
     db.flush()
     loader.load(db, f.sales_result(
@@ -110,15 +120,20 @@ def test_trace_avg_and_cap(db, batch):
     ])
     db.commit()
     stats = maintenance_cost.recompute(db)
-    assert stats["trace_avg"] == 1 and stats["sales_ref"] == 1
+    assert stats["trace_avg"] == 0 and stats["sales_ref"] == 0
+    assert stats["purchase_history"] == 1 and stats["sales_history"] == 1
     c = _line(db, "ML1")
-    assert (c.cost_source, c.trace_months, c.price_month) == ("trace_avg", 2, "2026-01")
+    assert (c.cost_source, c.trace_months, c.price_month) == (
+        "purchase_history",
+        2,
+        "2026-01",
+    )
     assert c.unit_cost == Decimal("50.00")
     assert c.cost_bucket == maintenance_cost_quality.COST_BUCKET_ESTIMATED_EX_LOW
     d = _line(db, "ML2")
-    assert d.cost_source == "sales_ref"               # 采购超追溯上限 → 没有采购有销售
+    assert d.cost_source == "sales_history"  # 采购超 3 个月后使用 3 个月内销售
     assert d.unit_cost == Decimal("88.00")
-    assert d.cost_tax_basis == "ex"                    # sales_head 默认无税率 → ex
+    assert d.cost_tax_basis == "inc"  # 销售原始单价恒为含税，原始税率只留审计
 
 
 def test_none_no_cost_flag(db, batch):
@@ -228,7 +243,12 @@ def test_recompute_idempotent_and_upsert_preserves_cost(db, batch):
 
 def test_projects_aggregate_shared_contract(db, batch):
     """项目聚合：税口径分列小计、来源分布、共用合同标记（Q5）。"""
-    sb = SysImportBatch(filename="s.xlsx", file_type="sales", file_hash="hs2")
+    sb = SysImportBatch(
+        filename="s.xlsx",
+        file_type="sales",
+        file_hash="hs2",
+        status="success",
+    )
     db.add(sb)
     db.flush()
     loader.load(db, f.sales_result(
@@ -257,9 +277,9 @@ def test_projects_aggregate_shared_contract(db, batch):
     assert rows["项目甲"]["coverage_pct"] == 100.0
     assert rows["项目乙"]["by_source"]["none"] == 1
     assert rows["项目乙"]["coverage_pct"] == 50.0
-    # 同一 XSDD 挂两个项目 → 共用标记；合同额=1000×1.06
+    # 同一 XSDD 挂两个项目 → 共用标记；合同额统一按 13%=1000×1.13
     assert rows["项目甲"]["contract_shared"] and rows["项目乙"]["contract_shared"]
-    assert rows["项目甲"]["contract_amount"] == 1060.0
+    assert rows["项目甲"]["contract_amount"] == 1130.0
 
 
 # ---------- 导入识别 / 转换 ----------

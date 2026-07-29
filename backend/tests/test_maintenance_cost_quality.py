@@ -259,6 +259,77 @@ def test_aggregate_summary_keeps_cent_quantization_after_fast_return():
     assert summary["known_cost_total"] == Decimal("6.01")
 
 
+def test_empty_aggregate_is_incomplete_instead_of_fabricating_complete_zero_cost():
+    summary = maintenance_cost_quality.summarize_aggregate(
+        lines=0,
+        actual_cost_inc=Decimal("0"),
+        actual_cost_ex=Decimal("0"),
+        estimated_cost_inc=Decimal("0"),
+        estimated_cost_ex=Decimal("0"),
+        actual_lines=0,
+        estimated_lines=0,
+        missing_cost_lines=0,
+    )
+
+    assert summary["known_cost_total"] == Decimal("0.00")
+    assert summary["cost_quality"] == "incomplete"
+
+
+def test_tax_estimate_flags_cannot_promote_an_unknown_cost_source(db):
+    """脏 flag 不能把 bucket=missing 的双税金额伪装成完整估算成本。"""
+    batch = SysImportBatch(
+        filename="unknown-dual-cost.xlsx",
+        file_type="maintenance",
+        file_hash="unknown-dual-cost",
+        status="success",
+    )
+    db.add(batch)
+    db.flush()
+    loader.load(
+        db,
+        f.maintenance_result(
+            {
+                "M1": f.maintenance_head(
+                    "M1",
+                    on=date(2026, 3, 10),
+                    project="未知成本来源项目",
+                ),
+            },
+            [f.maintenance_line("M1", "ML-UNKNOWN-DUAL", "PN-UNKNOWN-DUAL", qty="1")],
+        ),
+        batch.id,
+        date(2026, 6, 1),
+    )
+    line = db.scalar(
+        select(FMaintenanceLine).where(
+            FMaintenanceLine.raw_line_id == "ML-UNKNOWN-DUAL",
+        )
+    )
+    line.cost_source = "future_source"
+    line.cost_tax_basis = "ex"
+    line.unit_cost = Decimal("100")
+    line.cost_amount = Decimal("100")
+    line.unit_cost_inc_tax = Decimal("113")
+    line.unit_cost_ex_tax = Decimal("100")
+    line.cost_amount_inc_tax = Decimal("113")
+    line.cost_amount_ex_tax = Decimal("100")
+    line.anomaly_flags = [
+        "tax_rate_estimated",
+        "inc_tax_estimated",
+        "ex_tax_estimated",
+    ]
+    db.commit()
+
+    row = maintenance_cost.projects_aggregate(db, lifecycle="all")["rows"][0]
+
+    assert row["parts_cost_inc_tax"] == 0.0
+    assert row["parts_cost_ex_tax"] == 0.0
+    assert row["parts_cost_inc_tax_quality"] == "incomplete"
+    assert row["parts_cost_ex_tax_quality"] == "incomplete"
+    assert row["parts_cost_inc_tax_missing_lines"] == 1
+    assert row["parts_cost_ex_tax_missing_lines"] == 1
+
+
 def test_incomplete_cost_blocks_budget_decision_and_remaining_values():
     summary = maintenance_cost_quality.summarize_records([
         ("direct", "inc", Decimal("800.00")),
@@ -275,6 +346,27 @@ def test_incomplete_cost_blocks_budget_decision_and_remaining_values():
     assert decision == {
         "decision_status": "incomplete_cost",
         "known_spend_total": Decimal("850.00"),
+        "remaining": None,
+        "remaining_pct": None,
+    }
+
+
+def test_missing_expense_watermark_blocks_budget_remaining_without_fabricating_zero():
+    summary = maintenance_cost_quality.summarize_records([
+        ("direct", "inc", Decimal("800.00")),
+    ])
+
+    decision = maintenance_cost_quality.budget_decision(
+        summary,
+        budget=Decimal("1000.00"),
+        expense_total=Decimal("0.00"),
+        expense_data_available=False,
+        warn_pct=Decimal("0.20"),
+    )
+
+    assert decision == {
+        "decision_status": "expense_data_unavailable",
+        "known_spend_total": Decimal("800.00"),
         "remaining": None,
         "remaining_pct": None,
     }
@@ -318,6 +410,7 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
         filename="quality.xlsx",
         file_type="maintenance",
         file_hash="issue156-quality",
+        status="success",
     )
     db.add(batch)
     db.flush()
@@ -422,10 +515,23 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
         "month_avg": 0,
         "trace_avg": 1,
         "sales_ref": 0,
-        "none": 7,
-    }
+        "pool_purchase": 0,
+        "pool_sales": 0,
+            "purchase_history": 0,
+            "sales_history": 0,
+            "manual": 0,
+            "none": 7,
+        }
     assert sum(row["by_source"].values()) == row["lines"]
     assert row["by_source"]["none"] == row["missing_cost_lines"]
+    # 历史手工事实没有新双税列，normalized 口径必须 fail-closed 为不完整，不能拿
+    # legacy 原始税口径静默冒充双税结果。
+    assert row["parts_cost_inc_tax"] == 0.0
+    assert row["parts_cost_ex_tax"] == 0.0
+    assert row["parts_cost_inc_tax_complete"] is False
+    assert row["parts_cost_ex_tax_complete"] is False
+    assert row["parts_cost_inc_tax_quality"] == "incomplete"
+    assert row["parts_cost_ex_tax_quality"] == "incomplete"
 
     actual, estimated, missing = maintenance_cost_quality.sql_tier_predicates(
         FMaintenanceLine.cost_source,
@@ -500,6 +606,7 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
         filename="contract-quality.xlsx",
         file_type="maintenance",
         file_hash="issue156-contract-quality",
+        status="success",
     )
     db.add(batch)
     db.flush()
@@ -578,7 +685,7 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
     all_rows = maintenance_cost.board(db, lifecycle="all")["rows"]
     assert [item["decision_status"] for item in all_rows] == [
         "incomplete_cost",
-        "green",
+        "expense_data_unavailable",
     ]
     assert all("cost_bucket" not in item for item in all_rows)
     assert all(
@@ -629,7 +736,8 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
         )["rows"]
     finally:
         event.remove(engine, "before_cursor_execute", before_execute)
-    assert select_count <= 3
+    # 双口径贡献毛利新增合同费用快照水位查询；仍保持固定查询数，不随项目数增长。
+    assert select_count <= 4
     assert [item["contract"] for item in searched_rows] == ["XS-QUALITY"]
     assert {project["project"] for project in searched_rows[0]["projects"]} == {
         "共享合同项目甲",

@@ -6,7 +6,7 @@ from functools import reduce
 from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.orm import Session
 
-from app import config, security
+from app import config, security, tax_policy
 from app.models.dimensions import DimPart
 from app.models.inventory import Inventory
 from app.models.system import SysAuditLog
@@ -70,12 +70,18 @@ def backfill_costs(db: Session) -> dict:
     库存金额 = 展示数量(人工修正优先) × 单位成本。无采购记录的商品保持 NULL（界面显示"未计算"）。
     整改 P3：按 part_id 关联（合并后源/目标采购历史归并，与利润口径一致）。
     """
-    ex = "/ (1 + COALESCE(po.tax_rate, 0))" if config.TAX_BASIS == "ex_tax" else ""
     active = f"AND po.data_status = '{config.ACTIVE_STATUS}'" if config.ACTIVE_STATUS_ONLY else ""
     sql = text(f"""
         WITH cost AS (
             SELECT pl.part_id,
-                   SUM(pl.qty * pl.unit_price {ex}) / NULLIF(SUM(pl.qty), 0) AS uc
+                   SUM(
+                       pl.qty
+                       * CASE
+                           WHEN po.is_tax_inclusive IS TRUE
+                           THEN pl.unit_price / :tax_factor
+                           ELSE pl.unit_price
+                         END
+                   ) / NULLIF(SUM(pl.qty), 0) AS uc
             FROM f_purchase_line pl
             JOIN f_purchase_order po ON pl.order_id = po.id
             WHERE pl.unit_price > 0 AND pl.qty > 0
@@ -88,7 +94,13 @@ def backfill_costs(db: Session) -> dict:
                                                  THEN i.manual_qty ELSE i.source_qty END), 2)
         FROM cost c WHERE c.part_id = i.part_id
     """)
-    res = db.execute(sql, {"types": config.COST_PURCHASE_TYPES})
+    res = db.execute(
+        sql,
+        {
+            "types": config.COST_PURCHASE_TYPES,
+            "tax_factor": tax_policy.TAX_FACTOR,
+        },
+    )
     db.commit()
     filled = db.scalar(select(func.count()).select_from(Inventory).where(Inventory.unit_cost.is_not(None)))
     total = db.scalar(select(func.count()).select_from(Inventory))

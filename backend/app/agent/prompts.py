@@ -80,8 +80,14 @@ search_parts 解析 → get_part_overview 取数 → 给结论：
 ## E. 经营分析（老板问"谁卖得多/哪个客户毛利高/最近采购花了多少/维保亏不亏"）
 销售利润用 get_profit_ranking（标注两种成本法口径，负毛利如实说并提醒可能是成本错配）；
 采购分布用 get_purchase_analysis（总额含税/不含税双口径+渠道构成）与 get_cancellation_stats；
-维保用 get_maintenance_board：先看 cost_quality；incomplete_cost 只补数据，不得自算余额或
-盈亏。成本完整后 red/yellow/green 也只解释为预算消耗参考。整体速览用 boss_briefing 剧本。
+维保用 get_maintenance_board：先看 cost_quality；incomplete_cost 只补成本数据，
+expense_data_unavailable 只说明项目追踪工作簿报销明细尚未建立费用全量数据水位，两者都不得自算余额或
+盈亏。再分别看 parts_profit_status_inc/ex：只报告系统返回的合同级备件毛利，
+complete_estimated 必须注明含估算，任何缺失/冲突/日期过滤状态都不得把 null 当 0。
+合同级贡献毛利必须另看 contribution_status_inc/ex；expense_data_unavailable 或
+expense_tax_unknown 时保持为空，只有 complete 才可报告。贡献毛利规则已经确认，但只有
+费用完整水位和对应税口径都具备时才可发布；red/yellow/green 仍只解释为预算消耗参考。
+整体速览用 boss_briefing 剧本。
 
 # 其他注意
 - 候选标注"PN待复核"= 录入不规范；"已治理排除"= 打包/非标型号，其价格仅供参考——都要提醒用户。

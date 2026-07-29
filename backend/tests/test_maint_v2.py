@@ -6,18 +6,26 @@ import pandas as pd
 import pytest
 from sqlalchemy import select
 
-from app import config
 from app.etl import loader, mapping
 from app.etl.transform import transform
-from app.models.maintenance import FMaintenanceLine, FProjectExpense
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FProjectExpense,
+    MaintenanceContractWorkbookState,
+)
 from app.models.system import SysImportBatch
-from app.services import maintenance_cost
+from app.services import maintenance_cost, maintenance_workbook_renderer
 from tests import factories as f
 
 
 @pytest.fixture()
 def batch(db):
-    b = SysImportBatch(filename="t.xlsx", file_type="maintenance", file_hash="hv2")
+    b = SysImportBatch(
+        filename="t.xlsx",
+        file_type="maintenance",
+        file_hash="hv2",
+        status="success",
+    )
     db.add(b)
     db.flush()
     return b
@@ -90,7 +98,7 @@ def test_window_tie_prefers_earlier_same_day_weighted(db, batch):
 
 
 def test_outside_window_month_avg_and_confidence_ladder(db, batch):
-    """窗口外同月 → month_avg(medium)；跨月 → trace_avg(low)。"""
+    """窗口外同月 → month_avg(medium)；跨月 → purchase_history(low)。"""
     _load_purchases(db, batch, {
         "P1": f.purchase_head("P1", on=date(2026, 3, 1)),    # 出库 3/20 距 19 天：窗口外、同月
         "P2": f.purchase_head("P2", on=date(2026, 2, 10)),   # PN-Y：出库 3/20 → 跨月追溯
@@ -104,9 +112,10 @@ def test_outside_window_month_avg_and_confidence_ladder(db, batch):
                        f.maintenance_line("M1", "MLX2", "PN-Y", qty="1")])
     db.commit()
     stats = maintenance_cost.recompute(db)
-    assert stats["month_avg"] == 1 and stats["trace_avg"] == 1
+    assert stats["month_avg"] == 1 and stats["purchase_history"] == 1
     assert _line(db, "MLX1").confidence == "medium"
     ln_y = _line(db, "MLX2")
+    assert ln_y.cost_source == "purchase_history"
     assert ln_y.confidence == "low" and ln_y.price_distance_days is None
 
 
@@ -143,8 +152,8 @@ def _one_contract(db, batch, tag: str, budget: str, cost: str):
     }, [f.maintenance_line(f"M-{tag}", f"ML-{tag}", f"PN-{tag}", qty="1")])
 
 
-def test_board_status_lights_and_order(db, batch):
-    """绿(>20%剩余)/黄(0<剩余≤20%，含恰好 20% 边界)/红(超支)/无预算，黄红置顶排序。"""
+def test_board_fails_closed_without_complete_expense_watermark(db, batch):
+    """费用全量水位未建立时，预算灯和无预算结论都不得绕过费用门禁。"""
     _one_contract(db, batch, "G", budget="1000", cost="100")     # 剩余 90% → green
     _one_contract(db, batch, "B", budget="1000", cost="800")     # 剩余恰 20% → yellow（≤ 含边界）
     _one_contract(db, batch, "R", budget="1000", cost="1200")    # 超支 → red
@@ -156,38 +165,58 @@ def test_board_status_lights_and_order(db, batch):
     maintenance_cost.recompute(db)
     b = maintenance_cost.board(db, lifecycle="all")
     st = {r["contract"]: r["status"] for r in b["rows"]}
-    assert st["XS-G"] == "green" and st["XS-B"] == "yellow" and st["XS-R"] == "red"
-    assert st[None] == "no_budget"
-    order = [r["status"] for r in b["rows"]]
-    assert order.index("red") < order.index("yellow") < order.index("green")
-    red = next(r for r in b["rows"] if r["status"] == "red")
-    assert red["remaining"] == -200.0 and red["budget"] == 1000.0
-    # 状态过滤
+    assert set(st.values()) == {"expense_data_unavailable"}
     assert all(
-        r["status"] == "yellow"
-        for r in maintenance_cost.board(db, status="yellow", lifecycle="all")["rows"]
+        row["expense_data_available"] is False
+        and row["spent_expense"] is None
+        and row["spent"] is None
+        and row["remaining"] is None
+        for row in b["rows"]
     )
+    assert b["status_counts"] == {
+        "red": 0, "yellow": 0, "green": 0, "no_budget": 0,
+    }
+    unavailable = maintenance_cost.board(
+        db,
+        status="expense_data_unavailable",
+        lifecycle="all",
+    )["rows"]
+    assert len(unavailable) == 4
+    assert maintenance_cost.board(
+        db,
+        status="yellow",
+        lifecycle="all",
+    )["rows"] == []
 
 
-def test_board_includes_active_expenses_only(db, batch):
-    """已花 = 备件 + 生效(已结束)报销；流程中的报销不计。绿卡被费用推成红卡。"""
+def test_board_does_not_publish_partial_expenses_as_complete_spend(db, batch):
+    """已有零散生效费用仍不等于建立全量水位，完整支出必须保持空值。"""
     _one_contract(db, batch, "E", budget="1000", cost="100")
     db.add(FProjectExpense(raw_line_id="EXP-1", bxd_no="BXD-20260301-1", line_no=1,
                            data_status="已结束", expense_date=date(2026, 3, 8),
                            fee_category="差旅", linked_sales_order_no="XS-E",
-                           amount=Decimal("950"), import_batch_id=batch.id))
+                           amount=Decimal("950"),
+                           amount_ex_tax=Decimal("950"),
+                           amount_inc_tax=Decimal("1073.50"),
+                           import_batch_id=batch.id))
     db.add(FProjectExpense(raw_line_id="EXP-2", bxd_no="BXD-20260301-2", line_no=1,
                            data_status="流程中", expense_date=date(2026, 3, 9),
                            fee_category="差旅", linked_sales_order_no="XS-E",
-                           amount=Decimal("9999"), import_batch_id=batch.id))
+                           amount=Decimal("9999"),
+                           amount_ex_tax=Decimal("9999"),
+                           amount_inc_tax=Decimal("11298.87"),
+                           import_batch_id=batch.id))
     db.commit()
     maintenance_cost.recompute(db)
     row = next(
         r for r in maintenance_cost.board(db, lifecycle="all")["rows"]
         if r["contract"] == "XS-E"
     )
-    assert row["spent_expense"] == 950.0
-    assert row["spent"] == 1050.0 and row["status"] == "red"
+    assert row["expense_data_available"] is False
+    assert row["spent_expense"] is None
+    assert row["spent"] is None
+    assert row["remaining"] is None
+    assert row["status"] == "expense_data_unavailable"
 
 
 # ---------- BXD 报销导入（§16.3）----------
@@ -260,17 +289,26 @@ def test_workbook_doc_level_backfill(db, batch):
     db.add(FProjectExpense(raw_line_id="EXP-W", bxd_no="BXD-20260301-9", line_no=1,
                            data_status="已结束", expense_date=date(2026, 3, 20),
                            fee_category="驻场工程师", linked_sales_order_no="XS-W",
-                           amount=Decimal("400"), import_batch_id=batch.id))
+                           amount=Decimal("400"),
+                           amount_ex_tax=Decimal("400"),
+                           amount_inc_tax=Decimal("452"),
+                           import_batch_id=batch.id))
     db.add(FProjectExpense(raw_line_id="EXP-W-PART-NAMED",
                            bxd_no="BXD-20260301-10", line_no=1,
-                           data_status="已结束", expense_date=date(2026, 3, 21),
-                           fee_category="备件消耗", linked_sales_order_no="XS-W",
-                           amount=Decimal("50"), import_batch_id=batch.id))
+                               data_status="已结束", expense_date=date(2026, 3, 21),
+                               fee_category="备件消耗", linked_sales_order_no="XS-W",
+                               amount=Decimal("50"),
+                               amount_ex_tax=Decimal("50"),
+                               amount_inc_tax=Decimal("56.50"),
+                               import_batch_id=batch.id))
     db.add(FProjectExpense(raw_line_id="EXP-W-STATIC-NAMED",
                            bxd_no="BXD-20260301-11", line_no=1,
-                           data_status="已结束", expense_date=date(2026, 3, 22),
-                           fee_category="月份", linked_sales_order_no="XS-W",
-                           amount=Decimal("10"), import_batch_id=batch.id))
+                               data_status="已结束", expense_date=date(2026, 3, 22),
+                               fee_category="月份", linked_sales_order_no="XS-W",
+                               amount=Decimal("10"),
+                               amount_ex_tax=Decimal("10"),
+                               amount_inc_tax=Decimal("11.30"),
+                               import_batch_id=batch.id))
     db.commit()
     maintenance_cost.recompute(db)
     data = maintenance_cost.contract_workbook_data(db, "XS-W")
@@ -282,7 +320,7 @@ def test_workbook_doc_level_backfill(db, batch):
         "月份": Decimal("10"),
         "驻场工程师": Decimal("400"),
     }
-    assert data["budget"] == Decimal("5000.00")
+    assert data["budget"] == Decimal("5650.00")
 
     # 模板渲染：三页齐全、标题含合同号、表头深色白字、产品成本只填单据首行且高亮、金额千分位
     from app.api.maintenance import _build_workbook
@@ -290,19 +328,27 @@ def test_workbook_doc_level_backfill(db, batch):
     assert wb.sheetnames == ["项目预算", "备件明细-氚云", "报销明细", "填写说明"]
     ws = wb["项目预算"]
     assert "XS-W" in ws["A1"].value
+    monthly_header_row = next(
+        row
+        for row in range(1, ws.max_row + 1)
+        if ws.cell(row, 1).value == "月份"
+    )
     monthly_headings = [
         cell.value
-        for cell in ws[13]
+        for cell in ws[monthly_header_row]
         if cell.value is not None
     ]
-    monthly_values = [cell.value for cell in ws[14]][:len(monthly_headings)]
+    monthly_values = [
+        cell.value
+        for cell in ws[monthly_header_row + 1]
+    ][:len(monthly_headings)]
     assert dict(zip(monthly_headings, monthly_values, strict=True)) == {
         "月份": "2026-03",
         "已知备件成本参考（混合原值·兼容）": 300,
-        "费用分类：备件消耗": 50,
-        "费用分类：月份": 10,
-        "费用分类：驻场工程师": 400,
-        "当月合计": 760,
+        "当前已导入报销（非全量）·备件消耗": 50,
+        "当前已导入报销（非全量）·月份": 10,
+        "当前已导入报销（非全量）·驻场工程师": 400,
+        "当月已知合计（费用非全量）": 760,
     }
     ws2 = wb["备件明细-氚云"]
     assert ws2.cell(1, 1).font.color.rgb.endswith("FFFFFF")           # 表头白字
@@ -317,3 +363,150 @@ def test_workbook_doc_level_backfill(db, batch):
     assert ws3.cell(1, 1).value == "销售订单" and ws3.cell(1, 2).value == "XS-W"
     assert ws3.cell(2, 1).value == "报销日期" and ws3.cell(2, 6).value == "报销金额"
     assert ws3.cell(3, 6).number_format == "#,##0.00"
+
+
+def test_date_scoped_workbook_keeps_period_facts_but_blocks_budget_decision(
+    db,
+    batch,
+):
+    """区间支出不能与整合同预算比较；全量导出仍保留原预算决策。"""
+    contract = "XS-SCOPED-BUDGET"
+    _load_sales(
+        db,
+        batch,
+        {
+            "S-SCOPED": f.sales_head(
+                "S-SCOPED",
+                order_no=contract,
+                amount_ex_tax=Decimal("884.96"),
+            ),
+        },
+        [f.sales_line("S-SCOPED", "SL-SCOPED", "PN-SCOPED", qty="1")],
+    )
+    for suffix, order_date, cost in (
+        ("OLD", date(2026, 3, 10), "800"),
+        ("SELECTED", date(2026, 4, 10), "100"),
+    ):
+        order_no = f"WBDD-SCOPED-{suffix}"
+        _load_purchases(
+            db,
+            batch,
+            {
+                f"P-SCOPED-{suffix}": f.purchase_head(
+                    f"P-SCOPED-{suffix}",
+                    on=order_date,
+                    source_type="维保需求",
+                    linked_maintenance_order_no=order_no,
+                ),
+            },
+            [
+                f.purchase_line(
+                    f"P-SCOPED-{suffix}",
+                    f"PL-SCOPED-{suffix}",
+                    f"PN-SCOPED-{suffix}",
+                    qty="1",
+                    price=cost,
+                ),
+            ],
+        )
+        _load_maintenance(
+            db,
+            batch,
+            {
+                f"M-SCOPED-{suffix}": f.maintenance_head(
+                    f"M-SCOPED-{suffix}",
+                    order_no=order_no,
+                    on=order_date,
+                    sales_order=contract,
+                ),
+            },
+            [
+                f.maintenance_line(
+                    f"M-SCOPED-{suffix}",
+                    f"ML-SCOPED-{suffix}",
+                    f"PN-SCOPED-{suffix}",
+                    qty="1",
+                ),
+            ],
+        )
+    db.add(MaintenanceContractWorkbookState(
+        contract_no=contract,
+        expense_snapshot_complete=True,
+    ))
+    db.commit()
+    maintenance_cost.recompute(db)
+
+    full = maintenance_cost.contract_workbook_data(db, contract)
+    scoped = maintenance_cost.contract_workbook_data(
+        db,
+        contract,
+        date_from=date(2026, 4, 1),
+        date_to=date(2026, 4, 30),
+    )
+
+    assert full["date_filtered"] is False
+    assert full["budget"] == Decimal("1000.00")
+    assert full["decision"] == {
+        "decision_status": "yellow",
+        "known_spend_total": Decimal("900.00"),
+        "remaining": Decimal("100.00"),
+        "remaining_pct": Decimal("10.00"),
+    }
+    assert scoped["date_filtered"] is True
+    assert scoped["cost_summary"]["known_cost_total"] == Decimal("100.00")
+    assert scoped["decision"] == {
+        "decision_status": "filtered_scope",
+        "known_spend_total": Decimal("100.00"),
+        "remaining": None,
+        "remaining_pct": None,
+    }
+
+    full_workbook = maintenance_workbook_renderer.render_contract_workbook(
+        contract,
+        full,
+        lambda value: value,
+    )
+    scoped_workbook = maintenance_workbook_renderer.render_contract_workbook(
+        contract,
+        scoped,
+        lambda value: value,
+    )
+    try:
+        def value_after(sheet, label):
+            label_cell = next(
+                cell
+                for row_cells in sheet.iter_rows()
+                for cell in row_cells
+                if cell.value == label
+            )
+            return sheet.cell(
+                row=label_cell.row,
+                column=label_cell.column + 1,
+            ).value
+
+        full_sheet = full_workbook["项目预算"]
+        assert value_after(
+            full_sheet,
+            "完整项目支出参考（备件+报销）",
+        ) == 900
+        assert value_after(full_sheet, "剩余预算") == 100
+
+        scoped_sheet = scoped_workbook["项目预算"]
+        assert "日期筛选下不计算合同预算余量/红黄绿" in scoped_sheet["A2"].value
+        assert value_after(
+            scoped_sheet,
+            "所选期间支出参考（备件+报销）",
+        ) == 100
+        assert value_after(scoped_sheet, "剩余预算") == "—"
+        assert value_after(
+            scoped_sheet,
+            "预算消耗参考状态",
+        ) == "日期筛选下不计算合同预算余量/红黄绿"
+        assert all(
+            cell.value != "完整项目支出参考（备件+报销）"
+            for row_cells in scoped_sheet.iter_rows()
+            for cell in row_cells
+        )
+    finally:
+        full_workbook.close()
+        scoped_workbook.close()

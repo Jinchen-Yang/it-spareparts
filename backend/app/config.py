@@ -135,7 +135,7 @@ COST_PURCHASE_TYPES = ["销售订单", "指定采购", "维保需求"]   # 甲�
 # 甲方确认(v1)：仅"备件销售"计营收；维保/换货/整机销售不计——维保营收以后单独开模块再算
 REVENUE_BUSINESS_TYPES = ["备件销售"]
 
-# 含税口径：ex_tax（默认，按不含税算毛利）| as_is（原价粗算）
+# 历史兼容配置：正式业务计算已固定双口径 + 13%，不再允许此项改变计算事实。
 TAX_BASIS = "ex_tax"
 
 # 正式利润统一税率（甲方 2026-07-11：采购与销售统一按 13% 做业务计算口径，
@@ -143,7 +143,7 @@ TAX_BASIS = "ex_tax"
 # 含税÷1.13 → 未税；未税×1.13 → 含税。
 # 原则：**不覆盖原始单据的 tax_rate / 0% / 空税率**（保留可追溯），仅用于生成"未税计算字段"。
 # 销售 unit_price 恒含税 → 一律 ÷1.13；采购 unit_price 口径跟随头表 is_tax_inclusive：
-# 含税单(或口径未知，含税为常态) ÷1.13、明确不含税单取原值。旧的"逐单 tax_rate 换算"
+# 只有明确含税单才 ÷1.13；明确不含税或口径未知均按未税原值。旧的"逐单 tax_rate 换算"
 # 因大量 0%/空税率会静默虚高未税额，已弃用，统一到此常量。
 PROFIT_VAT_RATE = Decimal("0.13")
 
@@ -344,6 +344,9 @@ FIELD_GROUPS = {
     # ⚠️ 脱敏靠精确 key 匹配：服务层产出的派生键名必须逐字登记，差一字即漏（见下面成组补登）。
     "purchase_cost": ["unit_price", "avg_cost", "latest_cost", "matched_cost",
                       "weighted_avg_cost", "cost_moving_avg", "cost_fifo",
+                      "cost_moving_avg_ex", "cost_moving_avg_inc",
+                      "cost_fifo_ex", "cost_fifo_inc",
+                      "revenue_costed_ex", "revenue_costed_inc",
                       "line_amount", "inventory_value", "unit_cost",
                       "recent_purchase_price", "cost", "cost_amount",
                       # part_overview._profit_summary 的聚合成本派生键
@@ -353,7 +356,8 @@ FIELD_GROUPS = {
                       "recent_purchase_min", "recent_purchase_max",
                       # §8.8 采购分析面板派生价格/金额键（任何新派生键必须登记，否则对无
                       # data_purchase_cost 角色静默泄漏成本——见 2026-06-15 销售越权教训）
-                      "total_amount", "amount", "price_ex", "price_inc",
+                      "total_amount", "total_amount_inc", "total_amount_ex",
+                      "amount", "amount_inc", "amount_ex", "price_ex", "price_inc",
                       "price_ex_min", "price_ex_max", "price_ex_last", "price_ex_avg",
                       "price_inc_min", "price_inc_max", "price_inc_last", "price_inc_avg",
                       "price_last",
@@ -367,15 +371,28 @@ FIELD_GROUPS = {
                       "cost_quality", "cost_tier", "by_source", "coverage_pct",
                       "cost_source", "cost_tax_basis", "price_month", "trace_months",
                       "linked_purchase_order_no",
+                      # 维保双税成本底座与历史补价 provenance（均可反推采购/销售成本事实）
+                      "unit_cost_inc_tax", "unit_cost_ex_tax",
+                      "cost_amount_inc_tax", "cost_amount_ex_tax",
+                      "parts_cost_inc_tax", "parts_cost_ex_tax",
+                      "parts_cost_inc_tax_complete", "parts_cost_ex_tax_complete",
+                      "parts_cost_inc_tax_quality", "parts_cost_ex_tax_quality",
+                      "parts_cost_inc_tax_missing_lines", "parts_cost_ex_tax_missing_lines",
+                      "reference_side", "reference_pool_group_id",
+                      "reference_pool_version", "reference_sample_count",
+                      "reference_from_date", "reference_to_date",
+                      "reference_latest_date",
                       # 老板看板（dashboard/pool）派生成本键：采购额、采购价统计容器、
                       # 未税单价、池标杆成本、双端溢价、两级节省——全部反推采购成本，随 data_purchase_cost 遮。
                       # 容器级登记（purchase_price/benchmark/savings）避免与销售侧同名内层键(wavg/median)冲突。
-                      "purchase_ex_tax", "purchase_price", "unit_price_ex_tax",
+                      "purchase_ex_tax", "purchase_inc_tax",
+                      "purchase_price", "unit_price_ex_tax", "unit_price_inc_tax",
+                      "amount_ex_tax", "amount_inc_tax",
                       "benchmark", "savings", "theoretical_saving", "supply_available_upper",
                       "theoretical_max", "unit_saving", "cost_ex_tax", "purchase_premium_pct",
                       # 订单拉通-采购侧一单一行的未税采购额（键名带 total_ 前缀，与上面容器键
                       # purchase_ex_tax 不同名，复审 P0：漏登记会绕过 data_purchase_cost 泄漏采购额）
-                      "total_ex_tax",
+                      "total_ex_tax", "total_inc_tax",
                       # 池成员"采购溢价判定"布尔：反推该型号采购价高于标杆（采购成本比较信号）
                       "brand_premium_purchase",
                       # 维保 v2（§16）：盈亏看板与取价元信息派生键（budget=合同额亦可反推毛利）
@@ -398,8 +415,21 @@ FIELD_GROUPS = {
     # 毛利金额：能反推成本（profit.aggregate 两法派生键一并登记）
     # total_gross_profit = 订单拉通-销售侧一单一行毛利（键名带 total_ 前缀，与 gross_profit
     # 不同名，复审 P0：漏登记会绕过 data_profit 泄漏毛利）
-    "profit_amount": ["gross_profit", "gross_profit_moving", "gross_profit_fifo",
-                      "total_gross_profit",
+    "profit_amount": ["gross_profit", "gross_profit_ex", "gross_profit_inc",
+                      "gross_profit_moving", "gross_profit_moving_ex",
+                      "gross_profit_moving_inc",
+                      "gross_profit_fifo", "gross_profit_fifo_ex",
+                      "gross_profit_fifo_inc",
+                      "total_gross_profit", "total_gross_profit_ex",
+                      "total_gross_profit_inc",
+                      # 维保合同毛利、费用门禁和状态；状态本身也会泄漏盈亏/证据结论，
+                      # 必须随 data_profit 一起递归遮蔽。不要登记通用 revenue_inc/ex：
+                      # 普通销售营收使用同名键且本来公开；维保服务在受限分支结构化清空收入。
+                      "parts_gross_profit_inc", "parts_gross_profit_ex",
+                      "parts_profit_status_inc", "parts_profit_status_ex",
+                      "expense_inc", "expense_ex",
+                      "contribution_profit_inc", "contribution_profit_ex",
+                      "contribution_status_inc", "contribution_status_ex",
                       # 维保预算消耗参考决策；禁止登记通用 status（会误伤流程状态）
                       "decision_status", "contract_amount",
                       "budget", "remaining", "remaining_pct"],
@@ -407,6 +437,8 @@ FIELD_GROUPS = {
     "profit_rate":   ["gross_margin", "avg_margin", "margin_band",
                       "avg_margin_moving", "avg_margin_fifo",
                       "gross_margin_moving", "gross_margin_fifo",
+                      "parts_gross_margin_inc", "parts_gross_margin_ex",
+                      "contribution_margin_inc", "contribution_margin_ex",
                       # 数据治理汇总/指标里的盈亏派生结论同样属于利润信息。
                       "sales_neg_margin", "margin_computable_pct"],
     # 互通池价格治理（data_pool_price_governance，§12）：人工约束价及其原始录入值。

@@ -28,12 +28,22 @@ router = APIRouter(
 _DIMS = ("part", "salesperson", "customer")
 _COUPLED_FINANCIAL_FIELDS = (
     "revenue_costed",
+    "revenue_costed_ex",
+    "revenue_costed_inc",
     "no_cost",
     "cost_moving_avg",
+    "cost_moving_avg_ex",
+    "cost_moving_avg_inc",
     "gross_profit_moving",
+    "gross_profit_moving_ex",
+    "gross_profit_moving_inc",
     "gross_margin_moving",
     "cost_fifo",
+    "cost_fifo_ex",
+    "cost_fifo_inc",
     "gross_profit_fifo",
+    "gross_profit_fifo_ex",
+    "gross_profit_fifo_inc",
     "gross_margin_fifo",
 )
 
@@ -132,15 +142,39 @@ def export(
     buf = io.StringIO()
     buf.write("﻿")  # BOM，Excel 正确识别 UTF-8
     w = csv.writer(buf)
-    w.writerow(["维度", "营收(不含税)", "已配成本营收",
-                "移动加权-成本", "移动加权-毛利", "移动加权-毛利率",
-                "FIFO-成本", "FIFO-毛利", "FIFO-毛利率",
-                "行数", "无成本行", "被排除营收"])
+    w.writerow(["维度", "营收(含税)", "营收(不含税)",
+                "已配成本营收(含税)", "已配成本营收(不含税)",
+                "移动加权-成本(含税)", "移动加权-成本(不含税)",
+                "移动加权-毛利(含税)", "移动加权-毛利(不含税)", "移动加权-毛利率",
+                "FIFO-成本(含税)", "FIFO-成本(不含税)",
+                "FIFO-毛利(含税)", "FIFO-毛利(不含税)", "FIFO-毛利率",
+                "行数", "无成本行", "被排除营收(含税)", "被排除营收(不含税)"])
+
+    def _value(row: dict, field: str, legacy_field: str | None = None):
+        """兼容旧聚合形状；缺失字段输出空单元格，不让导出因 KeyError 整体失败。"""
+        if field in row:
+            return row[field]
+        return row.get(legacy_field) if legacy_field is not None else None
+
     for r in data["rows"]:
-        w.writerow([_safe(r["dimension"]), r["revenue"], r["revenue_costed"],
-                    r["cost_moving_avg"], r["gross_profit_moving"], r["gross_margin_moving"],
-                    r["cost_fifo"], r["gross_profit_fifo"], r["gross_margin_fifo"],
-                    r["lines"], r["no_cost"], r["excluded_revenue"]])
+        w.writerow([
+            _safe(r.get("dimension")),
+            _value(r, "revenue_inc", "revenue"), r.get("revenue_ex"),
+            _value(r, "revenue_costed_inc", "revenue_costed"),
+            r.get("revenue_costed_ex"),
+            _value(r, "cost_moving_avg_inc", "cost_moving_avg"),
+            r.get("cost_moving_avg_ex"),
+            _value(r, "gross_profit_moving_inc", "gross_profit_moving"),
+            r.get("gross_profit_moving_ex"),
+            r.get("gross_margin_moving"),
+            _value(r, "cost_fifo_inc", "cost_fifo"), r.get("cost_fifo_ex"),
+            _value(r, "gross_profit_fifo_inc", "gross_profit_fifo"),
+            r.get("gross_profit_fifo_ex"),
+            r.get("gross_margin_fifo"),
+            r.get("lines"), r.get("no_cost"),
+            _value(r, "excluded_revenue_inc", "excluded_revenue"),
+            r.get("excluded_revenue_ex"),
+        ])
     buf.seek(0)
     return StreamingResponse(
         iter([buf.getvalue()]), media_type="text/csv",

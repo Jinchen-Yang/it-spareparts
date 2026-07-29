@@ -9,8 +9,6 @@
 每个账号把自定义存在 sys_user.permissions(JSONB)；为空 → 回退该 role 的模板(ROLE_TEMPLATES)。
 admin 恒为全开（不可被自己/他人锁死）。权限随登录写进 token，改权限后下次登录生效。
 """
-from app import config
-
 # data 开关 → 对应要隐藏的 config.FIELD_GROUPS 组名
 DATA_GROUPS: dict[str, list[str]] = {
     "data_supplier": ["supplier_info"],
@@ -39,6 +37,8 @@ ACTION_KEYS: list[str] = [
     # 授予/撤销本键与 page_accounts 仅限 admin 角色操作者（api/accounts._guard_account_write）。
     "action_account_manage",
     "action_data_quality_review",  # 逐条核实采购/销售事实疑点
+    # 直接应用固定维保回填工作簿（原子写订单/报销/人工成本），不走审批。
+    "action_maintenance_roundtrip_apply",
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ACTION_KEYS, *ROW_KEYS]
@@ -68,6 +68,7 @@ LABELS: dict[str, str] = {
     "page_accounts": "账号与权限中心（查看）",
     "action_account_manage": "账号与权限管理（建号/改权/批量/模板）",
     "action_data_quality_review": "数据疑点核实（逐条确认/重新打开）",
+    "action_maintenance_roundtrip_apply": "维保固定工作簿直接回填",
 }
 
 
@@ -97,6 +98,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "page_boss_board": False,
                  "action_pool_manage": False, "action_pool_set_policy": False,
                  "action_data_quality_review": False,
+                 "action_maintenance_roundtrip_apply": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
@@ -118,6 +120,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "data_pool_price_governance": True,
         "action_pool_manage": False, "action_pool_set_policy": False,
         "action_data_quality_review": False,
+        "action_maintenance_roundtrip_apply": False,
         "own_customers_only": True,
     },
     "purchaser": {
@@ -137,6 +140,9 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "data_pool_price_governance": True,
         "action_pool_manage": False, "action_pool_set_policy": False,
         "action_data_quality_review": False,
+        # 采购默认没有利润可见权限，故固定工作簿写入也默认失败关闭；
+        # 管理员可给同时具备成本+利润可见权限的指定工作人员单独授权。
+        "action_maintenance_roundtrip_apply": False,
         "own_customers_only": False,
     },
 }
@@ -175,6 +181,7 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     "action_pool_set_policy": "data_pool_price_governance",
     # 逐条确认必须看得到原始价格和规则证据，不能在证据被脱敏时盲判。
     "action_data_quality_review": "data_purchase_cost",
+    "action_maintenance_roundtrip_apply": "data_profit",
 }
 
 # "页面内操作必须能进页面"的动作→页面依赖（权限中心 v2）：改账号权限先要能打开
@@ -183,6 +190,7 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
 ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_account_manage": "page_accounts",
     "action_data_quality_review": "page_governance",
+    "action_maintenance_roundtrip_apply": "page_maintenance",
 }
 
 # 数据之间的可推导依赖：营收在经营报表中是公开口径，毛利一旦可见，
@@ -253,7 +261,11 @@ def hidden_groups(perms: dict | None) -> set[str]:
 # ══════════════════════════ 权限中心 v2 ══════════════════════════
 
 # 高风险键：授予/撤销仅限 admin 角色操作者（防非 admin 的账号管理代理自我提权/互相提权）
-HIGH_RISK_KEYS: set[str] = {"page_accounts", "action_account_manage"}
+HIGH_RISK_KEYS: set[str] = {
+    "page_accounts",
+    "action_account_manage",
+    "action_maintenance_roundtrip_apply",
+}
 
 # 前端矩阵五分组（顺序即展示序）：页面入口 / 数据可见 / 操作能力 / 行级范围 / 高风险管理
 UI_GROUPS: list[dict] = [
@@ -265,7 +277,12 @@ UI_GROUPS: list[dict] = [
      "keys": list(DATA_GROUPS)},
     {"key": "action", "label": "操作能力",
      "hint": "决定能不能执行写操作（新建/修改/设置）。看见≠能改，改的能力在这里单独授权。",
-     "keys": ["action_pool_manage", "action_pool_set_policy", "action_data_quality_review"]},
+     "keys": [
+         "action_pool_manage",
+         "action_pool_set_policy",
+         "action_data_quality_review",
+         "action_maintenance_roundtrip_apply",
+     ]},
     {"key": "row", "label": "行级范围",
      "hint": "在能看的数据里进一步收紧范围（限制型开关：勾上=看得更少）。",
      "keys": list(ROW_KEYS)},
@@ -470,6 +487,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "数据维护人员（需单独授权）"],
         "sensitivity": "high",
         "risk": "结论会实名留痕，并为后续正式参考口径提供依据；必须看着原始证据逐条判断。",
+    },
+    "action_maintenance_roundtrip_apply": {
+        "label": "维保固定工作簿直接回填",
+        "summary": "允许把系统导出的固定维保工作簿直接、原子地写回订单、报销和人工成本。",
+        "can": "在签名合同及日期范围内执行 CREATE、UPDATE、VOID；成功后立即生效，不走审批。",
+        "cannot": "不能越过模板签名范围，不能绕过成本与利润可见权限；同一行键改成不同内容会被拒绝。",
+        "typical": ["老板", "管理员指定的数据维护人员"],
+        "sensitivity": "critical",
+        "risk": "会直接改写经营事实并触发成本重算；默认仅管理员和老板开启，其他工作人员须由管理员单独授权。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {

@@ -11,7 +11,7 @@ import { APP_VERSION, CHANGELOG, LATEST } from "./version";
 import { NAV_GROUPS, matchDetailRoute, matchNavItem } from "./nav";
 import type { NavItem } from "./nav";
 import ChangePasswordModal from "./components/ChangePasswordModal";
-import { TaxBasisToggle } from "./context/TaxBasis";
+import { TaxPolicyBoundary } from "./context/TaxBasis";
 
 const { Header, Content, Sider } = Layout;
 
@@ -268,10 +268,6 @@ export default function AppShell({
             <>
               <Breadcrumb items={breadcrumbItems} />
               <span style={{ flex: 1 }} />
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: 16, whiteSpace: "nowrap" }}>
-                <span style={{ color: COLORS.text2, fontSize: 12.5 }}>价格</span>
-                <TaxBasisToggle />
-              </span>
               <span
                 onClick={() => setChangelogOpen(true)}
                 title="查看更新日志"
@@ -320,15 +316,17 @@ export default function AppShell({
               }
             />
           )}
-          <Suspense
-            fallback={
-              <div style={{ display: "flex", justifyContent: "center", paddingTop: 120 }}>
-                <Spin size="large" />
-              </div>
-            }
-          >
-            <Outlet />
-          </Suspense>
+          <TaxPolicyBoundary>
+            <Suspense
+              fallback={
+                <div style={{ display: "flex", justifyContent: "center", paddingTop: 120 }}>
+                  <Spin size="large" />
+                </div>
+              }
+            >
+              <Outlet />
+            </Suspense>
+          </TaxPolicyBoundary>
         </Content>
       </Layout>
 
@@ -344,15 +342,6 @@ export default function AppShell({
         >
           <Brand />
           <div style={{ flex: 1, overflowY: "auto" }}>{menu}</div>
-          <div
-            style={{
-              padding: "12px 20px", borderTop: `1px solid ${COLORS.borderSoft}`,
-              display: "flex", alignItems: "center", gap: 8,
-            }}
-          >
-            <span style={{ color: COLORS.text2, fontSize: 12.5 }}>价格</span>
-            <TaxBasisToggle />
-          </div>
         </Drawer>
       )}
 

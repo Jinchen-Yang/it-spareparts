@@ -545,6 +545,8 @@ def test_profit_report_and_export_do_not_allow_cross_permission_inference(
         "rows": [{
             "dimension": "SECURE-PN",
             "revenue": 100.0,
+            "revenue_ex": 100.0,
+            "revenue_inc": 113.0,
             "revenue_costed": 100.0,
             "cost_moving_avg": 60.0,
             "gross_profit_moving": 40.0,
@@ -566,6 +568,8 @@ def test_profit_report_and_export_do_not_allow_cross_permission_inference(
         "cost_fifo", "gross_profit_fifo", "gross_margin_fifo",
     )
     assert all(row[key] is None for key in protected)
+    assert row["revenue_ex"] == 100.0
+    assert row["revenue_inc"] == 113.0
     assert row["revenue_costed"] is None
     assert row["no_cost"] is None
 
@@ -576,8 +580,8 @@ def test_profit_report_and_export_do_not_allow_cross_permission_inference(
     exported = client.get("/api/profit/export", params={"dimension": "part"})
     assert exported.status_code == 200, exported.text
     csv_rows = list(csv.reader(io.StringIO(exported.content.decode("utf-8-sig"))))
-    assert csv_rows[1][1] == "100.0"
-    assert csv_rows[1][2] == ""
+    assert csv_rows[1][1] == "113.0"
+    assert csv_rows[1][2] == "100.0"
     assert csv_rows[1][3:9] == ["", "", "", "", "", ""]
     assert csv_rows[1][10] == ""
     assert client.get("/api/profit/export", params={

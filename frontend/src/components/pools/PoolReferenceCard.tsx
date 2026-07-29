@@ -5,6 +5,13 @@ import type {
   PoolReference,
   PoolReferenceSide,
 } from "../../api/poolAnalysis";
+import {
+  TaxMoneyByBasis,
+  taxBasisCaption,
+  useTaxBasis,
+  type TaxBasis,
+} from "../../context/TaxBasis";
+import { moneyExact, splitFixed } from "../../utils/format";
 
 export interface PoolReferenceCardProps {
   reference: PoolReference;
@@ -13,22 +20,18 @@ export interface PoolReferenceCardProps {
   forceRestricted?: boolean;
 }
 
-const money = (value: number | null) => value == null
-  ? null
-  : `¥${Number(value).toLocaleString("zh-CN", {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })}`;
-
 function deltaLabel(value: number | null, target: "池均价" | "人工约束") {
   if (value == null) return null;
   const direction = value > 0 ? "高于" : value < 0 ? "低于" : "等于";
-  const amount = money(Math.abs(value));
-  return `${direction}${target}${value === 0 ? "" : ` ${amount}`}`;
+  const amount = moneyExact(Math.abs(value));
+  return `${direction}${target}${value === 0 ? "" : ` ${amount}（未税差额）`}`;
 }
 
-function PriceSide({ kind, value, forceRestricted = false }: {
-  kind: PoolAnalysisSide; value: PoolReferenceSide; forceRestricted?: boolean;
+function PriceSide({ kind, value, basis, forceRestricted = false }: {
+  kind: PoolAnalysisSide;
+  value: PoolReferenceSide;
+  basis: TaxBasis;
+  forceRestricted?: boolean;
 }) {
   const title = kind === "purchase" ? "采购参考" : "销售参考";
   const limitLabel = kind === "purchase" ? "人工上限" : "人工下限";
@@ -45,17 +48,25 @@ function PriceSide({ kind, value, forceRestricted = false }: {
 
   const pool = value.pool_stats;
   const part = value.part_stats;
+  const taxValue = (raw: number | null | undefined) => {
+    const pair = splitFixed(raw, "ex");
+    return raw == null
+      ? "暂无样本"
+      : <TaxMoneyByBasis basis={basis} inc={pair.inc} ex={pair.ex} exact />;
+  };
   return (
     <div style={sidePanelStyle} aria-label={title}>
-      <div style={{ fontWeight: 600, marginBottom: 8 }}>{title}</div>
+      <div style={{ fontWeight: 600, marginBottom: 8 }}>
+        {title}（{taxBasisCaption(basis)}）
+      </div>
       <div style={metricsStyle}>
-        <span>池均价 <b>{money(pool?.weighted_avg ?? null) || "暂无样本"}</b></span>
-        <span>中位 <b>{money(pool?.median ?? null) || "暂无样本"}</b></span>
-        <span>{limitLabel} <b>{value.constraint.status === "unset"
-          ? "未设置" : money(value.constraint.value) || "未设置"}</b></span>
+        <span>池均价 <b>{taxValue(pool?.weighted_avg)}</b></span>
+        <span>中位 <b>{taxValue(pool?.median)}</b></span>
+        <span>{limitLabel}(未税) <b>{value.constraint.status === "unset"
+          ? "未设置" : moneyExact(value.constraint.value)}</b></span>
       </div>
       <div style={{ ...metricsStyle, marginTop: 6 }}>
-        <span>本型号均价 <b>{money(part?.weighted_avg ?? null) || "暂无样本"}</b></span>
+        <span>本型号均价 <b>{taxValue(part?.weighted_avg)}</b></span>
         {deltaLabel(value.delta_to_pool_avg, "池均价") && (
           <Tag color={value.delta_to_pool_avg != null && value.delta_to_pool_avg > 0 ? "volcano" : "green"}>
             {deltaLabel(value.delta_to_pool_avg, "池均价")}
@@ -99,6 +110,8 @@ export default function PoolReferenceCard({
   compact = false,
   forceRestricted = false,
 }: PoolReferenceCardProps) {
+  const purchaseBasis = useTaxBasis("purchase");
+  const salesBasis = useTaxBasis("sales");
   const label = `${reference.pn_std || "当前型号"} 的池价格参考`;
   if (!reference.pool) {
     return (
@@ -128,7 +141,8 @@ export default function PoolReferenceCard({
   const sampleText = [
     purchaseSamples,
     salesSamples,
-    "统一未税",
+    "业务价按管理员口径",
+    "约束/差额为未税规则值",
     reference.window.range === "90d" ? "近 90 天" : reference.window.range,
   ].join(" · ");
 
@@ -156,6 +170,7 @@ export default function PoolReferenceCard({
               key={kind}
               kind={kind}
               value={kind === "purchase" ? reference.purchase_reference : reference.sales_reference}
+              basis={kind === "purchase" ? purchaseBasis : salesBasis}
               forceRestricted={forceRestricted}
             />
           ))}

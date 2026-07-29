@@ -116,6 +116,7 @@ def test_lifecycle_filter_preserves_cross_status_shared_contract_warning(db):
         filename="maintenance-lifecycle-shared.xlsx",
         file_type="maintenance",
         file_hash="maintenance-lifecycle-shared",
+        status="success",
     )
     db.add(batch)
     db.flush()
@@ -220,17 +221,21 @@ def test_board_uses_same_contract_lifecycle_and_default(db, lifecycle_data):
     assert default["as_of"] == as_of.isoformat()
 
 
-def test_board_combines_outbound_date_status_and_lifecycle_filters(db, lifecycle_data):
+def test_board_combines_outbound_date_expense_gate_and_lifecycle_filters(
+    db,
+    lifecycle_data,
+):
     data = maintenance_cost.board(
         db,
         date_to=date(2026, 3, 31),
-        status="no_budget",
+        status="expense_data_unavailable",
         lifecycle="missing",
         as_of=lifecycle_data,
     )
     assert {row["contract"] for row in data["rows"]} == {"XS-MISS", "XS-MIX"}
     assert data["lifecycle_counts"] == {"ongoing": 1, "ended": 1, "missing": 2}
-    assert data["status_counts"] == {"red": 0, "yellow": 0, "green": 0, "no_budget": 2}
+    assert data["status_counts"] == {"red": 0, "yellow": 0, "green": 0, "no_budget": 0}
+    assert data["decision_status_counts"]["expense_data_unavailable"] == 2
 
 
 def test_board_project_search_matches_projects_scope(db, lifecycle_data):
@@ -327,7 +332,8 @@ def test_lifecycle_filters_keep_query_count_constant(db, lifecycle_data):
         lambda: maintenance_cost.board(db, lifecycle="missing", as_of=lifecycle_data)
     )
     assert project_all == project_one <= 2
-    assert board_all == board_one <= 3
+    # 合同费用快照完整性是独立证据水位，新增一条固定查询但不随合同数增长。
+    assert board_all == board_one <= 4
 
 
 def _admin_client(db) -> TestClient:

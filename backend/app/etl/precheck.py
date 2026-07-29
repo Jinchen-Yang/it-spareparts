@@ -56,6 +56,7 @@ def failed_file_result(filename: str, code: str, message: str) -> dict:
 
 
 def inspect_file(path: str, filename: str) -> dict:
+    reader.reject_roundtrip_workbook(path)
     inspected = reader.inspect_workbook(path, load_data=False)
     selection = sheet_selection.select_workbook_sheets(inspected)
     file_issues: list[dict] = []

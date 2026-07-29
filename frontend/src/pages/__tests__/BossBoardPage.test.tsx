@@ -22,6 +22,7 @@ const dashboardPool = vi.fn();
 const dashboardPriceDisciplineSummary = vi.fn();
 const listPnPools = vi.fn();
 const fetchDashboardOrderDetail = vi.fn();
+const getSystemSettings = vi.fn();
 
 vi.mock("../../api", () => ({
   default: { get: vi.fn(), post: vi.fn() },
@@ -41,12 +42,16 @@ vi.mock("../../api/poolAnalysis", () => ({
 vi.mock("../../api/pools", () => ({
   listPnPools: (...a: unknown[]) => listPnPools(...a),
 }));
+vi.mock("../../api/systemSettings", () => ({
+  getSystemSettings: (...a: unknown[]) => getSystemSettings(...a),
+}));
 vi.mock("../../components/PartPicker", () => ({
   default: (p: { value?: number | null }) => (
     <input aria-label="PN 型号筛选" readOnly value={p.value ?? ""} />),
 }));
 
 import BossBoardPage from "../BossBoardPage";
+import { TaxBasisProvider } from "../../context/TaxBasis";
 
 const D = "YYYY-MM-DD";
 const KPI = {
@@ -133,7 +138,7 @@ function renderAt(url: string) {
   return render(
     <MemoryRouter initialEntries={[url]}>
       <Routes>
-        <Route path="/boss" element={<><BossBoardPage /><Probe /></>} />
+        <Route path="/boss" element={<TaxBasisProvider><BossBoardPage /><Probe /></TaxBasisProvider>} />
         <Route path="/pool-analysis/:groupId" element={<div>池分析详情页桩</div>} />
         <Route path="/pool-management" element={<><div>池管理页桩</div><Probe /></>} />
         <Route path="/parts" element={<div>型号查询页桩</div>} />
@@ -146,6 +151,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
   localStorage.setItem("role", "admin");
+  getSystemSettings.mockResolvedValue({ data: {
+    purchase_display_basis: "ex",
+    sales_display_basis: "ex",
+    maintenance_display_basis: "both",
+    version: 2,
+  } });
   dashboardKpi.mockResolvedValue({ data: KPI });
   dashboardPartRanking.mockResolvedValue({ data: rankingResp });
   dashboardSales.mockResolvedValue({ data: ordersResp([]) });
@@ -279,7 +290,7 @@ describe("最近订单：PN 首屏直出 + 展开明细", () => {
     renderAt("/boss");
     const orderLink = await screen.findByRole("button", { name: /订单 CG-001，展开明细/ });
     fireEvent.click(orderLink);
-    await screen.findAllByText("人工最高采购价");
+    await screen.findAllByText("人工最高采购价(未税)");
     expect(screen.getAllByText("内存池").length).toBeGreaterThan(0);          // 池链接
     expect(screen.getAllByText("超采购上限").length).toBeGreaterThan(0);       // 越线行状态
     expect(screen.getAllByText("未入池").length).toBeGreaterThan(0);           // 无池行
@@ -381,7 +392,7 @@ describe("互通池列表：表头 合计↔均价 循环切换", () => {
     renderAt("/boss");
     // 先按采购指标列排序（当前=金额合计）
     const toggle = await screen.findByRole("button",
-      { name: "采购指标：当前显示金额合计(未税)，点击切换为平均单价" });
+      { name: "采购指标：当前显示金额合计(不含税)，点击切换为平均单价" });
     const th = toggle.closest("th")!;
     fireEvent.click(th);
     await waitFor(() => expect(dashboardPools).toHaveBeenCalledWith(
@@ -389,7 +400,7 @@ describe("互通池列表：表头 合计↔均价 循环切换", () => {
     // 表头循环切换 → 显示口径与排序字段一起变
     fireEvent.click(toggle);
     await screen.findByRole("button",
-      { name: "采购指标：当前显示平均单价(未税)，点击切换为金额合计" });
+      { name: "采购指标：当前显示平均单价(不含税)，点击切换为金额合计" });
     await waitFor(() => expect(dashboardPools).toHaveBeenCalledWith(
       expect.objectContaining({ sort: "purchase_average" })));
   });
@@ -424,6 +435,129 @@ describe("互通池列表：表头 合计↔均价 循环切换", () => {
 });
 
 describe("盈亏榜", () => {
+  it("小额双税毛利优先显示后端逐口径结果，不从未税净额二次换算", async () => {
+    getSystemSettings.mockResolvedValue({ data: {
+      purchase_display_basis: "ex",
+      sales_display_basis: "inc",
+      maintenance_display_basis: "both",
+      version: 2,
+    } });
+    dashboardKpi.mockResolvedValue({ data: {
+      ...KPI,
+      gross_profit: 0.02,
+      gross_profit_ex: 0.02,
+      gross_profit_inc: 0.03,
+      sales_uncosted_ex_tax: 0.02,
+      sales_uncosted_inc_tax: 0.03,
+    } });
+    const roundingRankingRow = {
+      ...rankingResp.profitable[0],
+      pn_std: "PN-ROUND",
+      revenue: 0.04,
+      revenue_ex: 0.04,
+      revenue_inc: 0.05,
+      gross_profit_moving: 0.02,
+      gross_profit_moving_ex: 0.02,
+      gross_profit_moving_inc: 0.03,
+      gross_profit_fifo: 0.02,
+      gross_profit_fifo_ex: 0.02,
+      gross_profit_fifo_inc: 0.03,
+    };
+    dashboardPartRanking.mockResolvedValue({ data: {
+      ...rankingResp,
+      profitable: [roundingRankingRow],
+    } });
+    dashboardSales.mockResolvedValue({ data: ordersResp([
+      {
+        order_id: 31,
+        order_no: "XS-ROUND",
+        order_date: "2026-07-09",
+        occurred_date: "2026-07-09",
+        is_future: false,
+        salesperson: "李四",
+        customer: "客户甲",
+        business_type: "备件销售",
+        data_status: "已生效",
+        part_count: 1,
+        pn_count: 1,
+        total_qty: 1,
+        total_quantity: 1,
+        total_revenue: 0.04,
+        total_revenue_ex: 0.04,
+        total_revenue_inc: 0.05,
+        total_amount: 0.04,
+        total_gross_profit: 0.02,
+        total_gross_profit_ex: 0.02,
+        total_gross_profit_inc: 0.03,
+        linked_purchase: false,
+        parts: [],
+        pn_preview: ["PN-ROUND"],
+      },
+    ]) });
+    dashboardPurchaseOrders.mockResolvedValue({ data: ordersResp([]) });
+
+    renderAt("/boss");
+
+    const grossCard = (await screen.findByText("毛利额（含税）")).closest(".ant-card")!;
+    expect(grossCard).toHaveTextContent("¥0.03");
+    const uncostedCard = screen.getByText("未配成本营收（含税）").closest(".ant-card")!;
+    expect(uncostedCard).toHaveTextContent("¥0.03");
+
+    const tables = await screen.findAllByRole("table");
+    const rankingTable = tables.find((table) => within(table).queryByText("PN-ROUND")
+      && within(table).queryByRole("columnheader", { name: "毛利(移动加权)(含税)" }))!;
+    expect(within(rankingTable).getByText("¥0.03")).toBeInTheDocument();
+    const salesTable = tables.find((table) => within(table).queryByText("XS-ROUND"))!;
+    expect(within(salesTable).getByText("¥0.03")).toBeInTheDocument();
+  });
+
+  it("桌面端按采购与销售各自的管理员口径展示经营金额、订单、明细、池指标和排名", async () => {
+    getSystemSettings.mockResolvedValue({ data: {
+      purchase_display_basis: "inc",
+      sales_display_basis: "both",
+      maintenance_display_basis: "both",
+      version: 2,
+    } });
+    dashboardSales.mockResolvedValue({ data: ordersResp([
+      { order_id: 21, order_no: "XS-1", order_date: "2026-07-09", occurred_date: "2026-07-09",
+        is_future: false, salesperson: "李四", customer: "客户甲", business_type: "备件销售",
+        data_status: "已生效", part_count: 1, pn_count: 1, total_qty: 2, total_quantity: 2,
+        total_revenue: 300, total_amount: 300, total_gross_profit: 60, linked_purchase: false,
+        parts: [{ line_id: 21, part_id: 101, pn_std: "PN-S", description: "销售件", brand: null,
+          quantity: 2, unit_price_ex_tax: 150, amount: 300, counts_revenue: true,
+          in_stats_scope: true, pool_group_id: 7, pool_name: "内存池",
+          pool_avg_sale_price: 140, min_sale_price: 130, ...REF_OK }],
+        pn_preview: ["PN-S"] },
+    ]) });
+
+    renderAt("/boss");
+
+    expect(await screen.findByText("销售额（含税 / 不含税）")).toBeInTheDocument();
+    const salesKpi = screen.getByText("销售额（含税 / 不含税）").closest(".ant-card")!;
+    expect(salesKpi).toHaveTextContent("含 ¥1,130");
+    expect(salesKpi).toHaveTextContent("不含 ¥1,000");
+    expect(screen.getByText("采购额（含税）").closest(".ant-card")).toHaveTextContent("¥904");
+
+    expect(screen.getByRole("columnheader", { name: "采购金额(含税)" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "销售营收(含税)" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "销售营收(不含税)" })).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: /订单 CG-001，展开明细/ }));
+    expect(screen.getByRole("columnheader", { name: "单价(含税)" })).toBeInTheDocument();
+    expect(screen.queryByRole("columnheader", { name: "单价(不含税)" })).toBeNull();
+    expect(screen.getAllByText("¥113").length).toBeGreaterThan(0);
+
+    const poolTable = (await screen.findAllByRole("table"))
+      .find((table) => within(table).queryAllByText("内存池").length > 0
+        && within(table).queryByRole("button", { name: /采购指标/ }))!;
+    expect(within(poolTable).getByRole("button", {
+      name: "采购指标：当前显示金额合计(含税)，点击切换为平均单价",
+    })).toBeInTheDocument();
+    expect(within(poolTable).getByRole("button", {
+      name: "销售指标：当前显示金额合计(含税 / 不含税)，点击切换为平均单价",
+    })).toBeInTheDocument();
+  });
+
   it("盈亏榜显示成本覆盖率与未配成本营收提示；无成本型号不入榜说明在场", async () => {
     renderAt("/boss");
     await screen.findByText(/无成本 1（毛利未知，不入正式排名）/);

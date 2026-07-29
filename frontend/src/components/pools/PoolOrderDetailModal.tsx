@@ -7,7 +7,8 @@ import {
   type PoolAnalysisRange,
   type PoolAnalysisSide,
 } from "../../api/poolAnalysis";
-import { moneyExact, qty } from "../../utils/format";
+import { taxSidesForBasis, useTaxBasis } from "../../context/TaxBasis";
+import { completeTaxPair, moneyExact, qty, splitFixed } from "../../utils/format";
 import PoolIdentityLink from "./PoolIdentityLink";
 
 type Item = PoolAnalysisOrderDetail["items"][number];
@@ -29,6 +30,7 @@ export default function PoolOrderDetailModal({ side, orderId, range = "90d", dat
   loadDetail?: PoolOrderDetailLoader;
   onClose: () => void;
 }) {
+  const basis = useTaxBasis(side);
   const [detail, setDetail] = useState<PoolAnalysisOrderDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -47,9 +49,10 @@ export default function PoolOrderDetailModal({ side, orderId, range = "90d", dat
     return () => { seq.current += 1; };
   }, [side, orderId, loadDetail]);
 
-  const price = (value: number | null | undefined) => forcePriceRestricted || detail?.price_restricted
-    ? <span style={muted}>无池价格权限</span>
-    : value == null ? <span style={muted}>—</span> : moneyExact(value);
+  const price = (value: number | null | undefined, taxSide: "inc" | "ex") =>
+    forcePriceRestricted || detail?.price_restricted
+      ? <span style={muted}>无池价格权限</span>
+      : moneyExact(splitFixed(value, "ex")[taxSide]);
   const columns: ColumnsType<Item> = [
     { title: "PN", key: "pn", width: 190, render: (_, row) => (
       <span>
@@ -60,12 +63,26 @@ export default function PoolOrderDetailModal({ side, orderId, range = "90d", dat
     ) },
     { title: "描述", dataIndex: "description", width: 180, ellipsis: true },
     { title: "数量", dataIndex: "quantity", width: 72, align: "right", render: qty },
-    { title: "未税单价", key: "price", width: 108, align: "right", render: (_, row) => price(
-      side === "purchase" ? row.purchase_unit_price_ex_tax : row.sale_unit_price_ex_tax,
-    ) },
-    { title: "未税金额", key: "amount", width: 116, align: "right", render: (_, row) => price(
-      side === "purchase" ? row.purchase_line_value_ex_tax : row.sale_line_value_ex_tax,
-    ) },
+    ...taxSidesForBasis(basis).map((taxSide) => ({
+      title: `单价(${taxSide === "inc" ? "含税" : "不含税"})`,
+      key: `price_${taxSide}`,
+      width: 112,
+      align: "right" as const,
+      render: (_: unknown, row: Item) => price(
+        side === "purchase" ? row.purchase_unit_price_ex_tax : row.sale_unit_price_ex_tax,
+        taxSide,
+      ),
+    })),
+    ...taxSidesForBasis(basis).map((taxSide) => ({
+      title: `金额(${taxSide === "inc" ? "含税" : "不含税"})`,
+      key: `amount_${taxSide}`,
+      width: 120,
+      align: "right" as const,
+      render: (_: unknown, row: Item) => price(
+        side === "purchase" ? row.purchase_line_value_ex_tax : row.sale_line_value_ex_tax,
+        taxSide,
+      ),
+    })),
     { title: "数据提示", dataIndex: "anomaly_flags", width: 130,
       render: (flags: string[]) => flags?.length ? flags.map((flag) => <Tag key={flag} color="orange">{flag}</Tag>) : "—" },
   ];
@@ -76,7 +93,11 @@ export default function PoolOrderDetailModal({ side, orderId, range = "90d", dat
     : detail?.customer_restricted ? "无客户权限" : order?.customer || "—";
   const employee = side === "purchase" ? order?.purchaser : order?.salesperson;
   const orderAmount = side === "purchase"
-    ? order?.purchase_order_amount_ex_tax : order?.sale_order_amount_ex_tax;
+    ? completeTaxPair(
+      order?.purchase_order_amount_inc_tax,
+      order?.purchase_order_amount_ex_tax,
+    )
+    : splitFixed(order?.sale_order_amount_ex_tax, "ex");
 
   return (
     <Modal
@@ -95,7 +116,16 @@ export default function PoolOrderDetailModal({ side, orderId, range = "90d", dat
             <Descriptions.Item label={side === "purchase" ? "供应商" : "客户"}>{counterparty}</Descriptions.Item>
             <Descriptions.Item label="业务类型">{side === "purchase" ? order?.source_type || "—" : order?.business_type || "—"}</Descriptions.Item>
             <Descriptions.Item label="状态">{order?.data_status || "—"}</Descriptions.Item>
-            <Descriptions.Item label="订单未税金额">{price(orderAmount)}</Descriptions.Item>
+            {taxSidesForBasis(basis).map((taxSide) => (
+              <Descriptions.Item
+                key={`order-amount-${taxSide}`}
+                label={`订单金额(${taxSide === "inc" ? "含税" : "不含税"})`}
+              >
+                {forcePriceRestricted || detail?.price_restricted
+                  ? <span style={muted}>无池价格权限</span>
+                  : moneyExact(orderAmount[taxSide])}
+              </Descriptions.Item>
+            ))}
           </Descriptions>
           <Table<Item>
             size="small"
@@ -104,7 +134,7 @@ export default function PoolOrderDetailModal({ side, orderId, range = "90d", dat
             columns={columns}
             dataSource={detail?.items ?? []}
             pagination={false}
-            scroll={{ x: 780 }}
+            scroll={{ x: basis === "both" ? 980 : 780 }}
             locale={{ emptyText: loading ? "加载中" : "订单没有可显示的明细" }}
           />
         </>

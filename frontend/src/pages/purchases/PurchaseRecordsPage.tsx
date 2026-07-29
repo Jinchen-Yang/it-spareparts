@@ -22,7 +22,7 @@ import {
 export default function PurchaseRecordsPage() {
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
-  const { basis } = useTaxBasis();
+  const basis = useTaxBasis("purchase");
 
   // 筛选状态存进 URL query，复制链接可恢复
   const [sp, setSp] = useSearchParams();
@@ -69,11 +69,11 @@ export default function PurchaseRecordsPage() {
       .finally(() => { if (seq === loadSeqRef.current) setLoading(false); });
   }, [days, status, qParam, supplierParam, page, pageSize]);
 
-  // 单价/金额双列：按订单税口径归列，另一侧 "—"；跟随全局开关。零计算。
+  // 单价/金额双列：按订单税口径解释原值，缺失侧统一按 13% 补齐。
   const priceColumns: ColumnsType<RecentPurchaseRow> = [
     { title: "口径", key: "tax_basis", width: 74, align: "center",
       render: (_, r) => (r.is_tax_inclusive == null
-        ? <span style={{ color: "var(--mb-text-3)" }}>—</span>
+        ? <Tag color="orange">未标注·按未税</Tag>
         : <Tag color={r.is_tax_inclusive ? "default" : "blue"}>{r.is_tax_inclusive ? "含税" : "不含税"}</Tag>) },
     ...(basis !== "ex" ? [{ title: "单价(含税)", key: "up_inc", width: 110, align: "right",
       render: (_, r) => fmtMoney(byTax(r.unit_price, r.is_tax_inclusive).inc) }] as ColumnsType<RecentPurchaseRow> : []),
@@ -109,16 +109,31 @@ export default function PurchaseRecordsPage() {
 
   // 移动端详情抽屉字段（次要字段），价格明确标含/不含
   const detailFields = (r: RecentPurchaseRow): DetailField[] => {
-    const taxLabel = r.is_tax_inclusive == null ? "—" : (r.is_tax_inclusive ? "含税" : "不含税");
+    const taxLabel = r.is_tax_inclusive == null
+      ? "未标注（按未税）"
+      : (r.is_tax_inclusive ? "含税" : "不含税");
+    const unitPrice = byTax(r.unit_price, r.is_tax_inclusive);
+    const lineAmount = byTax(r.line_amount, r.is_tax_inclusive);
+    const taxFields: DetailField[] = [
+      ...(basis !== "ex"
+        ? [
+            { label: "单价(含税)", value: fmtMoney(unitPrice.inc) },
+            { label: "金额(含税)", value: fmtMoney(lineAmount.inc) },
+          ]
+        : []),
+      ...(basis !== "inc"
+        ? [
+            { label: "单价(不含税)", value: fmtMoney(unitPrice.ex) },
+            { label: "金额(不含税)", value: fmtMoney(lineAmount.ex) },
+          ]
+        : []),
+    ];
     return [
       { label: "描述", value: r.description },
       { label: "品牌", value: r.brand },
       { label: "数量", value: r.qty == null ? null : Number(r.qty) },
       { label: "价格口径", value: taxLabel },
-      { label: "单价(含税)", value: fmtMoney(byTax(r.unit_price, r.is_tax_inclusive).inc) },
-      { label: "单价(不含税)", value: fmtMoney(byTax(r.unit_price, r.is_tax_inclusive).ex) },
-      { label: "金额(含税)", value: fmtMoney(byTax(r.line_amount, r.is_tax_inclusive).inc) },
-      { label: "金额(不含税)", value: fmtMoney(byTax(r.line_amount, r.is_tax_inclusive).ex) },
+      ...taxFields,
       { label: "供应商", value: r.supplier },
       { label: "采购类型", value: r.source_type },
       { label: "采购员", value: r.purchaser },

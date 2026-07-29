@@ -1,9 +1,7 @@
 """老板看板 KPI：未税口径 + 成本覆盖率/未配成本营收（防毛利虚高）+ 未来日期排除 + 订单健康。"""
 from datetime import date
-from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
 
 from app.etl import loader
 from app.models.system import SysImportBatch
@@ -16,7 +14,8 @@ AS_OF = date(2026, 6, 1)   # 固定"今天"，使 2026-12-02 成为未来日期
 @pytest.fixture()
 def seeded(db):
     b = SysImportBatch(filename="t.xlsx", file_type="purchase", file_hash="hkpi")
-    db.add(b); db.flush()
+    db.add(b)
+    db.flush()
     # 采购：PN-A 含税单价 113（÷1.13=100 未税），10 个，已生效；另一张进行中单不计金额
     porders = {
         "P1": f.purchase_head("P1", on=date(2026, 1, 5), is_tax_inclusive=True),
@@ -81,3 +80,42 @@ def test_kpi_future_sale_excluded_from_revenue(db, seeded):
     k = dashboard.kpi(db, None, None, as_of=date(2026, 12, 31))
     assert k["sales_ex_tax"] == 500.0       # 300 + S3(200)
     assert k["orders_future"] == 0
+
+
+def test_purchase_kpi_rounds_ex_before_deriving_inc(db):
+    batch = SysImportBatch(
+        filename="purchase-midpoint.xlsx",
+        file_type="purchase",
+        file_hash="purchase-kpi-midpoint-half-up",
+    )
+    db.add(batch)
+    db.flush()
+    loader.load(
+        db,
+        f.purchase_result(
+            {
+                "P-MID": f.purchase_head(
+                    "P-MID",
+                    on=date(2026, 1, 5),
+                    is_tax_inclusive=False,
+                ),
+            },
+            [
+                f.purchase_line(
+                    "P-MID",
+                    "PL-MID",
+                    "PN-MID",
+                    qty="50.5",
+                    price="0.01",
+                ),
+            ],
+        ),
+        batch.id,
+        date(2026, 6, 1),
+    )
+    db.commit()
+
+    result = dashboard.kpi(db, None, None, as_of=AS_OF)
+
+    assert result["purchase_ex_tax"] == 0.51
+    assert result["purchase_inc_tax"] == 0.58

@@ -13,6 +13,7 @@ import {
 import type {
   AgentToolCall, AgentUploadResult, ChatSessionMeta, FilePreview, SessionStreamEvent,
 } from "../api";
+import { clearSessionScopedPreferences } from "../sessionPreferences";
 import { COLORS } from "../theme";
 
 const TOOL_LABEL: Record<string, string> = {
@@ -469,6 +470,7 @@ export default function ChatPage() {
       }
       if (code === "401") {
         localStorage.setItem("chat_draft", opts.message || "");
+        clearSessionScopedPreferences();
         localStorage.removeItem("token");
         message.error("登录已过期，请重新登录");
         setTimeout(() => location.reload(), 800);
