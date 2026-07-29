@@ -198,6 +198,9 @@ def _acquire_shared_source_lock(db: Session) -> None:
 def _preflight_resource_limits(
     db: Session,
     matches: list[_ContractMatch],
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
 ) -> None:
     contracts = [match.contract for match in matches]
     text_bytes_by_contract = {
@@ -210,6 +213,10 @@ def _preflight_resource_limits(
     ]
     if config.ACTIVE_STATUS_ONLY:
         part_filters.append(FMaintenanceOrder.data_status == config.ACTIVE_STATUS)
+    if date_from is not None:
+        part_filters.append(FMaintenanceOrder.order_date >= date_from)
+    if date_to is not None:
+        part_filters.append(FMaintenanceOrder.order_date <= date_to)
 
     rendered_project = func.coalesce(
         func.nullif(FMaintenanceOrder.project_raw, ""),
@@ -269,14 +276,19 @@ def _preflight_resource_limits(
         + _octet_length(FProjectExpense.bxd_no)
         + EXPENSE_RENDERED_TEXT_OVERHEAD_BYTES
     )
+    expense_filters = [
+        FProjectExpense.linked_sales_order_no.in_(contracts),
+    ]
+    if date_from is not None:
+        expense_filters.append(FProjectExpense.expense_date >= date_from)
+    if date_to is not None:
+        expense_filters.append(FProjectExpense.expense_date <= date_to)
     expense_rows = db.execute(
         select(
             FProjectExpense.linked_sales_order_no,
             func.count(FProjectExpense.id),
             func.coalesce(func.sum(expense_text_bytes), 0),
-        ).where(
-            FProjectExpense.linked_sales_order_no.in_(contracts),
-        )
+        ).where(*expense_filters)
         .group_by(FProjectExpense.linked_sales_order_no)
     ).all()
     expense_count = sum(int(count) for _contract, count, _text_bytes in expense_rows)
@@ -305,7 +317,7 @@ def _preflight_resource_limits(
             fee_category.label("category"),
         )
         .where(
-            FProjectExpense.linked_sales_order_no.in_(contracts),
+            *expense_filters,
             FProjectExpense.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS,
             FProjectExpense.amount.is_not(None),
             FProjectExpense.expense_date.is_not(None),
@@ -411,22 +423,41 @@ def build_contract_workbook_file(
     db: Session,
     contract: str,
     resource_limits_preflighted: bool = False,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
 ) -> SpooledTemporaryFile:
     """构建一本项目工作簿；返回的流归调用方所有。
 
     单本入口必须在 ORM 物化前独立预检。批量入口已对整批一次性预检，可显式复用
     该结论，避免每本重复执行聚合查询。
     """
+    if (date_from is None) != (date_to is None):
+        raise WorkbookExportRejected("date_from 与 date_to 必须同时提供")
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise WorkbookExportRejected("date_from 不能晚于 date_to")
     if not resource_limits_preflighted:
         _acquire_shared_source_lock(db)
         _preflight_resource_limits(
             db,
             [_ContractMatch(contract, 0, None, None)],
+            date_from=date_from,
+            date_to=date_to,
         )
     output = SpooledTemporaryFile(max_size=5 * 1024 * 1024, mode="w+b")
     workbook = None
     try:
-        data = maintenance_cost.contract_workbook_data(db, contract)
+        # 无日期时保留既有两参数调用契约，避免内部扩展点和运维脚本因新增可选参数失效。
+        # 只有显式范围导出才传日期并启用闭区间内容过滤。
+        if date_from is None and date_to is None:
+            data = maintenance_cost.contract_workbook_data(db, contract)
+        else:
+            data = maintenance_cost.contract_workbook_data(
+                db,
+                contract,
+                date_from=date_from,
+                date_to=date_to,
+            )
         workbook = Workbook()
         workbook = maintenance_workbook_renderer.render_contract_workbook(
             contract,
@@ -455,7 +486,7 @@ def _build_contract_workbooks_zip(
     date_from: date | None = None,
     date_to: date | None = None,
 ) -> SpooledTemporaryFile:
-    """按命中维保单选择合同，并把完整项目工作簿打入一个 ZIP。"""
+    """按命中维保单选择合同，并把对应时间范围内容打入一个 ZIP。"""
     if (date_from is None) != (date_to is None):
         raise WorkbookExportRejected("date_from 与 date_to 必须同时提供")
     if date_from is not None and date_to is not None and date_from > date_to:
@@ -477,7 +508,12 @@ def _build_contract_workbooks_zip(
         raise WorkbookExportRejected("所选范围内的已生效维保订单均未关联合同")
     if len(matches) > MAX_WORKBOOKS:
         raise WorkbookExportRejected(f"命中合同超过批量上限 {MAX_WORKBOOKS} 本")
-    _preflight_resource_limits(db, matches)
+    _preflight_resource_limits(
+        db,
+        matches,
+        date_from=date_from,
+        date_to=date_to,
+    )
     output = SpooledTemporaryFile(max_size=16 * 1024 * 1024, mode="w+b")
     try:
         used_member_names: set[str] = set()
@@ -525,11 +561,24 @@ def _build_contract_workbooks_zip(
                     finally:
                         unlinked_orders.close()
             for match, member_name in exports:
-                workbook = build_contract_workbook_file(
-                    db,
-                    match.contract,
-                    True,
-                )
+                if date_from is None:
+                    # Preserve the original call shape for the all-time export
+                    # path so existing wrappers and instrumentation remain
+                    # compatible. Date bounds are only meaningful when a
+                    # range was explicitly selected.
+                    workbook = build_contract_workbook_file(
+                        db,
+                        match.contract,
+                        True,
+                    )
+                else:
+                    workbook = build_contract_workbook_file(
+                        db,
+                        match.contract,
+                        True,
+                        date_from=date_from,
+                        date_to=date_to,
+                    )
                 try:
                     with archive.open(member_name, mode="w", force_zip64=True) as member:
                         shutil.copyfileobj(workbook, member, length=1024 * 1024)

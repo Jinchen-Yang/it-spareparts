@@ -5,6 +5,7 @@ import LoginPage from "./pages/LoginPage";
 import AppShell from "./AppShell";
 import { DETAIL_ROUTES, NAV_ITEMS, NAV_REDIRECTS, defaultPath } from "./nav";
 import { clearSessionScopedPreferences } from "./sessionPreferences";
+import { TaxBasisProvider } from "./context/TaxBasis";
 
 /** 安全读取本地权限快照：localStorage 被写坏时回退为空而非抛错致整页白屏（审计 U-1）。 */
 function readPerms(): Record<string, boolean> {
@@ -82,22 +83,24 @@ export default function App() {
   const redirects = NAV_REDIRECTS.filter((r) => !r.perm || allowedKeys.has(r.perm));
 
   return (
-    <BrowserRouter key={token}>
-      <Routes>
-        <Route element={<AppShell allowed={allowed} onLogout={logout} onToken={setToken} />}>
-          {allowed.map((it) => (
-            <Route key={it.key} path={it.path} element={<it.page />} />
-          ))}
-          {allowedDetails.map((r) => (
-            <Route key={r.key} path={r.path} element={<r.page />} />
-          ))}
-          {redirects.map((r) => (
-            <Route key={r.from} path={r.from} element={<Navigate to={r.to} replace />} />
-          ))}
-          {/* 根路径与无权限/不存在的地址一律回默认页 */}
-          <Route path="*" element={<Navigate to={home} replace />} />
-        </Route>
-      </Routes>
-    </BrowserRouter>
+    <TaxBasisProvider key={token}>
+      <BrowserRouter key={token}>
+        <Routes>
+          <Route element={<AppShell allowed={allowed} onLogout={logout} onToken={setToken} />}>
+            {allowed.map((it) => (
+              <Route key={it.key} path={it.path} element={<it.page />} />
+            ))}
+            {allowedDetails.map((r) => (
+              <Route key={r.key} path={r.path} element={<r.page />} />
+            ))}
+            {redirects.map((r) => (
+              <Route key={r.from} path={r.from} element={<Navigate to={r.to} replace />} />
+            ))}
+            {/* 根路径与无权限/不存在的地址一律回默认页 */}
+            <Route path="*" element={<Navigate to={home} replace />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </TaxBasisProvider>
   );
 }

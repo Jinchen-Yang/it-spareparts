@@ -3,6 +3,7 @@ import { Tag, Tooltip } from "antd";
 import type { SetURLSearchParams } from "react-router-dom";
 import type { PurchaseAnalysisRow, RecentPurchaseRow } from "../../api";
 import type { TaxBasis } from "../../context/TaxBasis";
+import { completeTaxPair, splitByFlag } from "../../utils/format";
 
 // 采购三页共用的展示辅助。全部从原 PurchasesPage.tsx 逐字搬运，零逻辑改动。
 
@@ -42,9 +43,8 @@ export const fmt = (v: number | null | undefined) =>
 // 金额场景固定两位小数（含¥0.00 对齐）；数量/比值用 fmt
 export const fmtMoney = (v: number | null | undefined) =>
   v == null ? "—" : Number(v).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-// 单价/金额按订单税口径归列（零计算，只镜像 Excel 原值；缺的一侧留空 → "—"）
-export const byTax = (v: number | null | undefined, isInc: boolean | null) =>
-  isInc === false ? { inc: null, ex: v ?? null } : { inc: v ?? null, ex: null };
+// 单价/金额按订单税口径解释原值，再按统一 13% 税率补齐另一侧；未标注统一按未税。
+export const byTax = splitByFlag;
 
 export function Sparkline({ data, accent }: { data: number[] | null; accent: string }) {
   if (!data || data.length === 0) return <span style={{ color: "var(--mb-text-3)" }}>—</span>;
@@ -79,15 +79,18 @@ export function PriceCell({ row, basis }: { row: PurchaseAnalysisRow; basis: Tax
       {last != null && <TrendArrow t={row.price_trend} />}
     </div>
   );
+  const min = completeTaxPair(row.price_inc_min, row.price_ex_min);
+  const max = completeTaxPair(row.price_inc_max, row.price_ex_max);
+  const last = completeTaxPair(row.price_inc_last, row.price_ex_last);
   if (basis === "both")
     return (
       <>
-        {line("含", row.price_inc_min, row.price_inc_max, row.price_inc_last)}
-        {line("不含", row.price_ex_min, row.price_ex_max, row.price_ex_last)}
+        {line("含", min.inc, max.inc, last.inc)}
+        {line("不含", min.ex, max.ex, last.ex)}
       </>
     );
-  if (basis === "ex") return line("", row.price_ex_min, row.price_ex_max, row.price_ex_last);
-  return line("", row.price_inc_min, row.price_inc_max, row.price_inc_last);
+  if (basis === "ex") return line("", min.ex, max.ex, last.ex);
+  return line("", min.inc, max.inc, last.inc);
 }
 
 export function KpiCard({ label, value, sub, highlight }: {
@@ -154,18 +157,11 @@ export function activatableProps(onActivate: () => void, label: string) {
 }
 
 /**
- * 移动端卡片里的单价随全局含税/不含税口径显示，并标明价格属性（含/不含）。
- * 零计算，仅按订单税口径把 unit_price 归到含/不含一侧（同桌面双列语义）：
- * - inc：只看含税价，非含税订单显示 "—"
- * - ex：只看不含税价，含税订单显示 "—"
- * - both：按本单实际口径标 "含 X" 或 "不含 X"
+ * 移动端卡片里的单价随管理员统一口径显示。原值按订单口径解释，缺失侧按 13% 补齐。
  */
 export function mobileUnitPrice(row: RecentPurchaseRow, basis: TaxBasis): ReactNode {
   const { inc, ex } = byTax(row.unit_price, row.is_tax_inclusive);
   if (basis === "inc") return <>单价(含税) {fmtMoney(inc)}</>;
   if (basis === "ex") return <>单价(不含税) {fmtMoney(ex)}</>;
-  // both：本单要么含税要么不含税，只有一侧有值
-  const isInc = row.is_tax_inclusive;
-  if (isInc == null) return <>单价 —</>;
-  return <>单价{isInc ? "(含税)" : "(不含税)"} {fmtMoney(isInc ? inc : ex)}</>;
+  return <>单价 含 {fmtMoney(inc)} · 不含 {fmtMoney(ex)}</>;
 }

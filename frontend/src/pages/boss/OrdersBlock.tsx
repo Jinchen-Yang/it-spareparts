@@ -13,10 +13,21 @@ import {
   dashboardPurchaseOrders, dashboardSales,
   type OrdersQuery, type OrdersResp, type PurchaseOrderRow, type SalesOrderRow,
 } from "../../api";
-import { EMPTY, moneyExact, qty } from "../../utils/format";
+import {
+  taxSidesForBasis,
+  useTaxBasis,
+} from "../../context/TaxBasis";
+import {
+  completeTaxPair,
+  EMPTY,
+  moneyExact,
+  qty,
+  splitFixed,
+  type TaxSplit,
+} from "../../utils/format";
 import PartsTable, { PartLink, type OrderSide } from "./PartsTable";
 import {
-  MUTED, fmtMoneyR, orderReferenceSummary, useGuardedFetch, type DateRange,
+  MUTED, orderReferenceSummary, useGuardedFetch, type DateRange,
 } from "./shared";
 
 type AnyOrder = SalesOrderRow | PurchaseOrderRow;
@@ -54,11 +65,33 @@ function isV2OrderContract(data: OrdersResp<AnyOrder> | null): boolean {
   return Number.isFinite(n) && n >= 2;
 }
 
+function purchaseOrderAmountPair(row: PurchaseOrderRow): TaxSplit {
+  return "total_amount_inc" in row || "total_amount_ex" in row
+    ? completeTaxPair(row.total_amount_inc, row.total_amount_ex)
+    : splitFixed(row.total_amount, "ex");
+}
+
+function salesOrderRevenuePair(row: SalesOrderRow): TaxSplit {
+  return "total_revenue_inc" in row || "total_revenue_ex" in row
+    ? completeTaxPair(row.total_revenue_inc, row.total_revenue_ex)
+    : splitFixed(row.total_revenue, "ex");
+}
+
+function salesOrderProfitPair(row: SalesOrderRow): TaxSplit {
+  return "total_gross_profit_inc" in row || "total_gross_profit_ex" in row
+    ? completeTaxPair(
+      row.total_gross_profit_inc,
+      row.total_gross_profit_ex,
+    )
+    : splitFixed(row.total_gross_profit, "ex");
+}
+
 export default function OrdersBlock({
   side, range, partId, poolId, person, scopeNote,
   localProfitRestricted, localCostRestricted,
 }: OrdersBlockProps) {
   const isPurchase = side === "purchase";
+  const basis = useTaxBasis(side);
   const [q, setQ] = useState<string | undefined>(undefined);
   const [status, setStatus] = useState<string>("");
   const [sort, setSort] = useState<string>("order_date");
@@ -151,9 +184,21 @@ export default function OrdersBlock({
         render: (v: string | null) => v ?? <span style={MUTED}>{EMPTY}</span> },
       { title: "类型", dataIndex: "source_type", width: 92,
         render: (v: string | null) => (v ? <Tag>{v}</Tag> : EMPTY) },
-      { title: "金额(未税)", dataIndex: "total_amount", key: "amount", width: 116, align: "right" as const,
-        ...sortProps("amount", costRestricted),
-        render: (v: number | null) => fmtMoneyR(v, costRestricted, "无成本权限") },
+      ...taxSidesForBasis(basis).map((taxSide) => ({
+        title: `采购金额(${taxSide === "inc" ? "含税" : "不含税"})`,
+        dataIndex: "total_amount",
+        key: basis === "both" ? `amount_${taxSide}` : "amount",
+        width: 126,
+        align: "right" as const,
+        ...(basis !== "both" || taxSide === "ex"
+          ? sortProps("amount", costRestricted) : {}),
+        render: (_: unknown, row: AnyOrder) => {
+          if (costRestricted) return <span style={MUTED}>无成本权限</span>;
+          return moneyExact(
+            purchaseOrderAmountPair(row as PurchaseOrderRow)[taxSide],
+          );
+        },
+      })),
       { title: "关联销售单", dataIndex: "linked_sales_order", width: 128,
         render: (v: string | null) => v || <span style={MUTED}>{EMPTY}</span> },
     ] : [
@@ -163,14 +208,36 @@ export default function OrdersBlock({
       { title: "客户", dataIndex: "customer", width: 130, ellipsis: true,
         render: (v: string | null) => partsRestricted
           ? <span style={MUTED}>无权限</span> : (v ?? <span style={MUTED}>{EMPTY}</span>) },
-      { title: "营收(未税)", dataIndex: "total_revenue", key: "revenue", width: 116, align: "right" as const,
-        ...sortProps("revenue"), render: (v: number | null) => v == null
-          ? <span style={MUTED}>{EMPTY}</span> : moneyExact(v) },
-      { title: "毛利", dataIndex: "total_gross_profit", key: "gross_profit", width: 108, align: "right" as const,
-        ...sortProps("gross_profit", profitRestricted),
-        render: (v: number | null) => profitRestricted ? <Tag>无利润权限</Tag>
-          : v == null ? <Tag>无成本</Tag>
-            : <span style={{ color: v < 0 ? "#c0524a" : undefined }}>{moneyExact(v)}</span> },
+      ...taxSidesForBasis(basis).map((taxSide) => ({
+        title: `销售营收(${taxSide === "inc" ? "含税" : "不含税"})`,
+        dataIndex: "total_revenue",
+        key: basis === "both" ? `revenue_${taxSide}` : "revenue",
+        width: 126,
+        align: "right" as const,
+        ...(basis !== "both" || taxSide === "ex" ? sortProps("revenue") : {}),
+        render: (_: unknown, row: AnyOrder) => moneyExact(
+          salesOrderRevenuePair(row as SalesOrderRow)[taxSide],
+        ),
+      })),
+      ...taxSidesForBasis(basis).map((taxSide) => ({
+        title: `销售毛利(${taxSide === "inc" ? "含税" : "不含税"})`,
+        dataIndex: "total_gross_profit",
+        key: basis === "both" ? `gross_profit_${taxSide}` : "gross_profit",
+        width: 122,
+        align: "right" as const,
+        ...(basis !== "both" || taxSide === "ex"
+          ? sortProps("gross_profit", profitRestricted) : {}),
+        render: (_: unknown, row: AnyOrder) => {
+          if (profitRestricted) return <Tag>无利润权限</Tag>;
+          const value = salesOrderProfitPair(row as SalesOrderRow)[taxSide];
+          if (value == null) return <Tag>无成本</Tag>;
+          return (
+            <span style={{ color: value < 0 ? "#c0524a" : undefined }}>
+              {moneyExact(value)}
+            </span>
+          );
+        },
+      })),
     ]),
     { title: "状态", dataIndex: "data_status", width: 82,
       render: (v) => (v ? <Tag>{v}</Tag> : EMPTY) },

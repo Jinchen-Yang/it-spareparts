@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Card, DatePicker, Input, Button, Space, Tag, Tooltip, message, Statistic, Row, Col,
-  Drawer, Progress, Alert, Empty, Segmented,
+  Drawer, Progress, Alert, Empty, Segmented, Upload,
 } from "antd";
 import { InfoCircleOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -10,12 +10,9 @@ import PageHeader from "../components/PageHeader";
 import dayjs from "dayjs";
 import type { Dayjs } from "dayjs";
 import api from "../api";
-import { getSystemSettings } from "../api/systemSettings";
-import type { MaintenanceProfitDefaultBasis } from "../api/systemSettings";
-import { MAINTENANCE_PROFIT_BASIS_KEY } from "../sessionPreferences";
+import { TaxMoney, useTaxBasis } from "../context/TaxBasis";
+import type { TaxBasis } from "../context/TaxBasis";
 import { money, pct } from "../utils/format";
-
-export { MAINTENANCE_PROFIT_BASIS_KEY } from "../sessionPreferences";
 
 type PartsProfitStatus =
   | "complete_actual"
@@ -50,6 +47,8 @@ interface DualMarginFields {
   contribution_margin_ex?: number | null;
   contribution_status_inc?: ContributionStatus | string | null;
   contribution_status_ex?: ContributionStatus | string | null;
+  expense_inc?: number | null;
+  expense_ex?: number | null;
 }
 
 interface ProjectRow {
@@ -86,6 +85,8 @@ interface LineRow {
   pn_std: string | null; description: string | null;
   qty: number | null; return_qty: number | null;
   unit_cost: number | null; cost_amount: number | null;
+  unit_cost_inc_tax?: number | null; unit_cost_ex_tax?: number | null;
+  cost_amount_inc_tax?: number | null; cost_amount_ex_tax?: number | null;
   cost_tier: "actual" | "estimated" | "missing" | null;
   cost_source: string | null; cost_tax_basis: string | null;
   price_month: string | null; trace_months: number | null;
@@ -170,7 +171,7 @@ const SOURCE_ORDER = [
 ];
 const COVERAGE_WARN_PCT = 80;   // 覆盖率预警线（经验值，非验收线；<此值标红提示核对无成本行）
 
-const PROFIT_BASIS_LABEL: Record<MaintenanceProfitDefaultBasis, string> = {
+const PROFIT_BASIS_LABEL: Record<TaxBasis, string> = {
   inc: "含税",
   ex: "未税",
   both: "含税与未税",
@@ -232,7 +233,7 @@ const CONTRIBUTION_STATUS_META: Record<string, ProfitStatusMeta> = {
     detail: "备件毛利与费用证据均完整，可展示合同级贡献毛利。",
   },
   expense_tax_unknown: {
-    label: "费用税务口径待确认",
+    label: "费用税务口径缺失",
     color: "orange",
     detail: "报销费用缺少税务口径，合同级贡献毛利保持为空。",
   },
@@ -248,32 +249,8 @@ const CONTRIBUTION_STATUS_META: Record<string, ProfitStatusMeta> = {
   },
 };
 
-function validProfitBasis(value: unknown): value is MaintenanceProfitDefaultBasis {
-  return value === "inc" || value === "ex" || value === "both";
-}
-
-export function readMaintenanceProfitBasisOverride(): MaintenanceProfitDefaultBasis | null {
-  try {
-    const value = localStorage.getItem(MAINTENANCE_PROFIT_BASIS_KEY);
-    return validProfitBasis(value) ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeMaintenanceProfitBasisOverride(
-  basis: MaintenanceProfitDefaultBasis | null,
-) {
-  try {
-    if (basis == null) localStorage.removeItem(MAINTENANCE_PROFIT_BASIS_KEY);
-    else localStorage.setItem(MAINTENANCE_PROFIT_BASIS_KEY, basis);
-  } catch {
-    // 隐私模式等场景仍更新当前页面状态；只是不跨刷新保存。
-  }
-}
-
 function selectedProfitBases(
-  basis: MaintenanceProfitDefaultBasis,
+  basis: TaxBasis,
 ): Array<"inc" | "ex"> {
   return basis === "both" ? ["inc", "ex"] : [basis];
 }
@@ -410,7 +387,7 @@ function MarginFacts({ row, basis }: {
       <div>备件成本 {money(partsCost)}</div>
       <div>毛利 {money(partsProfit)} · {pct(partsMargin, 2)}</div>
       <div style={{ marginTop: 4 }}>
-        <strong>合同级贡献毛利（费用口径待确认）</strong>{" "}
+        <strong>合同级贡献毛利</strong>{" "}
         <ProfitStatusTag status={contributionStatus} kind="contribution" />
       </div>
       <div>
@@ -455,6 +432,58 @@ export function buildOrderExportParams(
     date_from: range[0].format("YYYY-MM-DD"),
     date_to: range[1].format("YYYY-MM-DD"),
   } : {};
+}
+
+export function formatRoundtripImportSummary(data: unknown): string {
+  if (!data || typeof data !== "object") return "回填文件导入成功";
+  const row = data as Record<string, unknown>;
+  if (typeof row.message === "string" && row.message.trim()) return row.message.trim();
+  if (row.no_op === true) return "该工作簿此前已成功导入，本次未重复更新";
+  const counts = (
+    row.counts && typeof row.counts === "object"
+      ? row.counts
+      : {}
+  ) as Record<string, unknown>;
+  const protocolParts: string[] = [];
+  if (typeof row.changed_rows === "number") {
+    protocolParts.push(`变更 ${row.changed_rows} 行`);
+  }
+  const protocolMetrics: Array<[string, string]> = [
+    ["新增", "create"],
+    ["更新", "update"],
+    ["作废", "void"],
+    ["保留", "keep"],
+  ];
+  for (const [label, key] of protocolMetrics) {
+    if (typeof counts[key] === "number") {
+      protocolParts.push(`${label} ${counts[key]} 行`);
+    }
+  }
+  if (protocolParts.length) return `回填完成：${protocolParts.join(" · ")}`;
+  const metrics: Array<[string, string[]]> = [
+    ["处理", ["rows_total", "total_rows", "processed"]],
+    ["新增", ["rows_inserted", "inserted", "created"]],
+    ["更新", ["rows_updated", "updated"]],
+    ["跳过", ["rows_skipped", "skipped"]],
+    ["失败", ["rows_error", "errors", "rejected"]],
+  ];
+  const parts = metrics.flatMap(([label, keys]) => {
+    const key = keys.find((candidate) => typeof row[candidate] === "number");
+    return key ? [`${label} ${row[key]} 行`] : [];
+  });
+  return parts.length ? `回填完成：${parts.join(" · ")}` : "回填文件导入成功";
+}
+
+export function formatMaintenanceRecomputeSummary(
+  data: Record<string, number | null | undefined>,
+): string {
+  return (
+    `重算完成：${data.lines_in_scope ?? 0} 行 · 专属采购 ${data.direct ?? 0}` +
+    ` · ±7天 ${data.window ?? 0} · 当月均价 ${data.month_avg ?? 0}` +
+    ` · 池采购 ${data.pool_purchase ?? 0} · 池销售 ${data.pool_sales ?? 0}` +
+    ` · 本PN采购 ${data.purchase_history ?? 0} · 本PN销售 ${data.sales_history ?? 0}` +
+    ` · 人工回填 ${data.manual ?? 0} · 无成本 ${data.none ?? 0}`
+  );
 }
 
 function presetRange(preset: ExportDatePreset, anchor: Dayjs): [Dayjs, Dayjs] {
@@ -558,14 +587,11 @@ export default function ProjectCostPage() {
     && localPermissions.data_purchase_cost === true
     && localPermissions.data_profit === true
   );
-  const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
-  const [profitBasisOverride, setProfitBasisOverride] = useState<
-    MaintenanceProfitDefaultBasis | null
-  >(readMaintenanceProfitBasisOverride);
-  const [adminProfitBasis, setAdminProfitBasis] = useState<
-    MaintenanceProfitDefaultBasis | null
-  >(null);
-  const [profitBasisFallback, setProfitBasisFallback] = useState(false);
+  const canApplyRoundtripWorkbook = canExportProjectWorkbooks && (
+    isAdmin || localPermissions.action_maintenance_roundtrip_apply === true
+  );
+  const maintenanceBasis = useTaxBasis("maintenance");
+  const [exportRange, setExportRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [exportDatePreset, setExportDatePreset] = useState<ExportDatePreset>("all");
   const exportDatePresetRef = useRef<ExportDatePreset>("all");
   const [q, setQ] = useState("");
@@ -585,6 +611,10 @@ export default function ProjectCostPage() {
   const [exportingWorkbooks, setExportingWorkbooks] = useState(false);
   const exportingWorkbooksRef = useRef(false);
   const [exportingProjects, setExportingProjects] = useState(false);
+  const [downloadingTemplate, setDownloadingTemplate] = useState(false);
+  const [importingRoundtrip, setImportingRoundtrip] = useState(false);
+  const [roundtripResult, setRoundtripResult] = useState<string | null>(null);
+  const [roundtripError, setRoundtripError] = useState<string | null>(null);
   // 明细抽屉
   const [detailProject, setDetailProject] = useState<string | null>(null);
   const [lines, setLines] = useState<LineRow[]>([]);
@@ -597,52 +627,13 @@ export default function ProjectCostPage() {
   const detailRef = useRef<string | null>(null);
   // 页面两组聚合请求共享代次：快速切换期限/日期/搜索时，迟到响应不能覆盖最新筛选。
   const pageSeq = useRef(0);
-  const effectiveProfitBasis = profitBasisOverride ?? adminProfitBasis ?? "both";
-
-  useEffect(() => {
-    let active = true;
-    getSystemSettings()
-      .then(({ data }) => {
-        if (!active) return;
-        if (validProfitBasis(data.maintenance_project_profit_default_basis)) {
-          setAdminProfitBasis(data.maintenance_project_profit_default_basis);
-          setProfitBasisFallback(false);
-        } else {
-          setAdminProfitBasis("both");
-          setProfitBasisFallback(true);
-        }
-      })
-      .catch(() => {
-        if (!active) return;
-        setAdminProfitBasis("both");
-        setProfitBasisFallback(true);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const chooseProfitBasis = (basis: MaintenanceProfitDefaultBasis) => {
-    writeMaintenanceProfitBasisOverride(basis);
-    setProfitBasisOverride(basis);
-  };
-
-  const restoreAdminProfitBasis = () => {
-    writeMaintenanceProfitBasisOverride(null);
-    setProfitBasisOverride(null);
-  };
-
   const baseParams = () => ({
     q: q || undefined,
-    date_from: range?.[0]?.format("YYYY-MM-DD"),
-    date_to: range?.[1]?.format("YYYY-MM-DD"),
   });
 
   const lifecycleParams = () => ({ ...baseParams(), lifecycle });
   const boardParams = () => ({
     q: q || undefined,
-    date_from: range?.[0]?.format("YYYY-MM-DD"),
-    date_to: range?.[1]?.format("YYYY-MM-DD"),
     lifecycle,
   });
 
@@ -687,7 +678,7 @@ export default function ProjectCostPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, range, lifecycle]);
+  }, [q, lifecycle]);
 
   const loadLines = async (project: string, page: number, month?: string) => {
     const seq = ++linesSeq.current;
@@ -728,12 +719,7 @@ export default function ProjectCostPage() {
     const hide = message.loading("正在重算项目成本，约需 1 分钟，请勿刷新页面…", 0);
     try {
       const { data } = await api.post("/maintenance/recompute");
-      message.success(
-        `重算完成：${data.lines_in_scope} 行 · 专属采购 ${data.direct} · ±7天 ${data.window}` +
-        ` · 当月均价 ${data.month_avg} · 追溯 ${data.trace_avg} · 销售参考 ${data.sales_ref}` +
-        ` · 池采购 ${data.pool_purchase} · 池销售 ${data.pool_sales}` +
-        ` · 本PN历史采购 ${data.purchase_history} · 本PN历史销售 ${data.sales_history}` +
-        ` · 无成本 ${data.none}`);
+      message.success(formatMaintenanceRecomputeSummary(data));
       load();
     } catch {
       message.error("重算失败（需要管理员权限）");
@@ -747,38 +733,45 @@ export default function ProjectCostPage() {
     api.get(path, { params: { ...baseParams(), ...extra }, responseType: "blob" })
       .then((res) => saveBlob(res.data, filename));
 
-  const exportOrders = async () => {
-    const requestedPreset = exportDatePreset;
-    let exportRange = range;
-    const initialParams = buildOrderExportParams(requestedPreset, exportRange);
+  const resolveExportScope = async (
+    requestedPreset: ExportDatePreset,
+  ): Promise<{
+    params: { date_from?: string; date_to?: string };
+    range: [Dayjs, Dayjs] | null;
+  } | null> => {
+    let resolvedRange = exportRange;
+    const initialParams = buildOrderExportParams(requestedPreset, resolvedRange);
     if (!initialParams) {
-      message.warning(exportDatePreset === "custom"
+      message.warning(requestedPreset === "custom"
         ? "请选择自定义起止日期"
         : "日期基准尚未加载，请稍后重试");
-      return;
+      return null;
     }
+    if (requestedPreset !== "all" && requestedPreset !== "custom") {
+      const { data } = await api.get("/maintenance/as-of");
+      if (exportDatePresetRef.current !== requestedPreset) return null;
+      const latestAsOf = typeof data?.as_of === "string" ? data.as_of : "";
+      const anchor = latestAsOf ? dayjs(latestAsOf) : null;
+      if (!anchor?.isValid()) throw new Error("invalid as_of");
+      resolvedRange = presetRange(requestedPreset, anchor);
+      setAsOf(latestAsOf);
+      setExportRange(resolvedRange);
+    }
+    const params = buildOrderExportParams(requestedPreset, resolvedRange);
+    return params ? { params, range: resolvedRange } : null;
+  };
+
+  const exportOrders = async () => {
     setExporting(true);
     try {
-      if (requestedPreset !== "all" && requestedPreset !== "custom") {
-        const { data } = await api.get("/maintenance/as-of");
-        if (exportDatePresetRef.current !== requestedPreset) return;
-        const latestAsOf = typeof data?.as_of === "string" ? data.as_of : "";
-        const anchor = latestAsOf ? dayjs(latestAsOf) : null;
-        if (!anchor?.isValid()) throw new Error("invalid as_of");
-        exportRange = presetRange(requestedPreset, anchor);
-        setAsOf(latestAsOf);
-        setRange(exportRange);
-      }
-      const params = buildOrderExportParams(requestedPreset, exportRange);
-      if (!params) {
-        message.warning(exportDatePreset === "custom"
-          ? "请选择自定义起止日期"
-          : "日期基准尚未加载，请稍后重试");
-        return;
-      }
-      const res = await api.get("/maintenance/orders/export", { params, responseType: "blob" });
-      saveBlob(res.data, exportRange
-        ? `maintenance_orders_${exportRange[0].format("YYYY-MM-DD")}_${exportRange[1].format("YYYY-MM-DD")}.xlsx`
+      const scope = await resolveExportScope(exportDatePreset);
+      if (!scope) return;
+      const res = await api.get("/maintenance/orders/export", {
+        params: scope.params,
+        responseType: "blob",
+      });
+      saveBlob(res.data, scope.range
+        ? `maintenance_orders_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.xlsx`
         : "maintenance_orders_all.xlsx");
     } catch (error) {
       const { status, detail } = await readExportError(error);
@@ -794,38 +787,18 @@ export default function ProjectCostPage() {
 
   const exportWorkbooks = async () => {
     if (exportingWorkbooksRef.current) return;
-    const requestedPreset = exportDatePreset;
-    let exportRange = range;
-    const initialParams = buildOrderExportParams(requestedPreset, exportRange);
-    if (!initialParams) {
-      message.warning(requestedPreset === "custom"
-        ? "请选择自定义起止日期"
-        : "日期基准尚未加载，请稍后重试");
-      return;
-    }
     exportingWorkbooksRef.current = true;
     setExportingWorkbooks(true);
+    const hide = message.loading("正在生成批量工作簿，数据较多时可能需要 1–2 分钟，请勿重复点击…", 0);
     try {
-      if (requestedPreset !== "all" && requestedPreset !== "custom") {
-        const { data } = await api.get("/maintenance/as-of");
-        if (exportDatePresetRef.current !== requestedPreset) return;
-        const latestAsOf = typeof data?.as_of === "string" ? data.as_of : "";
-        const anchor = latestAsOf ? dayjs(latestAsOf) : null;
-        if (!anchor?.isValid()) throw new Error("invalid as_of");
-        exportRange = presetRange(requestedPreset, anchor);
-        setAsOf(latestAsOf);
-        setRange(exportRange);
-      }
-      const params = buildOrderExportParams(requestedPreset, exportRange);
-      if (!params) {
-        message.warning(requestedPreset === "custom"
-          ? "请选择自定义起止日期"
-          : "日期基准尚未加载，请稍后重试");
-        return;
-      }
-      const res = await api.get("/maintenance/export-workbooks", { params, responseType: "blob" });
-      saveBlob(res.data, exportRange
-        ? `maintenance_project_workbooks_${exportRange[0].format("YYYY-MM-DD")}_${exportRange[1].format("YYYY-MM-DD")}.zip`
+      const scope = await resolveExportScope(exportDatePreset);
+      if (!scope) return;
+      const res = await api.get("/maintenance/export-workbooks", {
+        params: scope.params,
+        responseType: "blob",
+      });
+      saveBlob(res.data, scope.range
+        ? `maintenance_project_workbooks_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.zip`
         : "maintenance_project_workbooks_all.zip");
     } catch (error) {
       const { status, detail } = await readExportError(error);
@@ -837,6 +810,7 @@ export default function ProjectCostPage() {
             ? "已有批量工作簿导出正在执行，请稍后重试"
             : "批量项目工作簿导出失败，请稍后重试"));
     } finally {
+      hide();
       exportingWorkbooksRef.current = false;
       setExportingWorkbooks(false);
     }
@@ -846,19 +820,111 @@ export default function ProjectCostPage() {
     if (exportingProjects) return;
     setExportingProjects(true);
     try {
-      await download("/maintenance/export", "maintenance_projects.csv", { lifecycle });
-    } catch {
-      message.error("项目 CSV 导出失败，请稍后重试或检查权限");
+      const scope = await resolveExportScope(exportDatePreset);
+      if (!scope) return;
+      await download("/maintenance/export", "maintenance_projects.csv", {
+        ...scope.params,
+        lifecycle,
+      });
+    } catch (error) {
+      const { detail } = await readExportError(error);
+      message.error(detail || "项目 CSV 导出失败，请稍后重试或检查权限");
     } finally {
       setExportingProjects(false);
     }
   };
 
-  const exportLines = () => {
+  const exportLines = async () => {
     if (!detailProject) return;
-    download("/maintenance/lines/export", `项目备件明细.csv`,
-      { project: detailProject, month: linesMonth })
-      .catch(() => message.error("明细导出失败，请稍后重试"));
+    try {
+      const scope = await resolveExportScope(exportDatePreset);
+      if (!scope) return;
+      await download("/maintenance/lines/export", "项目备件明细.csv", {
+        ...scope.params,
+        project: detailProject,
+        month: linesMonth,
+      });
+    } catch (error) {
+      const { detail } = await readExportError(error);
+      message.error(detail || "明细导出失败，请稍后重试");
+    }
+  };
+
+  const exportSingleWorkbook = async (contract: string) => {
+    try {
+      const scope = await resolveExportScope(exportDatePreset);
+      if (!scope) return;
+      await download("/maintenance/export-workbook", `项目工作簿_${contract}.xlsx`, {
+        ...scope.params,
+        contract,
+      });
+    } catch (error) {
+      const { detail } = await readExportError(error);
+      message.error(detail || "工作簿导出失败，请稍后重试或检查权限");
+    }
+  };
+
+  const downloadRoundtripTemplate = async (contract?: string) => {
+    if (downloadingTemplate) return;
+    setDownloadingTemplate(true);
+    setRoundtripError(null);
+    const hide = message.loading("正在生成固定回填模板，请勿重复点击…", 0);
+    try {
+      const scope = await resolveExportScope(exportDatePreset);
+      if (!scope) return;
+      const res = await api.get("/maintenance/roundtrip-template", {
+        params: {
+          ...scope.params,
+          ...(contract ? { contract } : {}),
+        },
+        responseType: "blob",
+      });
+      const safeContract = contract?.replace(/[\\/:*?"<>|]/g, "_");
+      const scopeLabel = scope.range
+        ? `${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}`
+        : "全部";
+      saveBlob(
+        res.data,
+        `维保项目回填模板_${safeContract ? `${safeContract}_` : ""}${scopeLabel}.xlsx`,
+      );
+    } catch (error) {
+      const { detail } = await readExportError(error);
+      const text = detail || "固定回填模板下载失败，请稍后重试";
+      setRoundtripError(text);
+      message.error(text);
+    } finally {
+      hide();
+      setDownloadingTemplate(false);
+    }
+  };
+
+  const importRoundtripWorkbook = async (file: File) => {
+    if (importingRoundtrip) return;
+    setImportingRoundtrip(true);
+    setRoundtripResult(null);
+    setRoundtripError(null);
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const { data } = await api.post("/maintenance/roundtrip-import", body);
+      const summary = formatRoundtripImportSummary(data);
+      setRoundtripResult(summary);
+      message.success(summary);
+      await load();
+    } catch (error) {
+      const response = (
+        typeof error === "object" && error !== null && "response" in error
+      )
+        ? (error as { response?: { data?: { detail?: unknown } } }).response
+        : undefined;
+      const detail = typeof response?.data?.detail === "string"
+        ? response.data.detail
+        : "回填工作簿导入失败，请检查模板内容后重试";
+      setRoundtripError(detail);
+      message.error(detail);
+    } finally {
+      setImportingRoundtrip(false);
+    }
   };
 
   const projectCols: ColumnsType<ProjectRow> = [
@@ -869,10 +935,14 @@ export default function ProjectCostPage() {
       render: (v: string | null) => v || <span style={{ color: "var(--mb-warning)" }}>未填写</span> },
     { title: "出库行", dataIndex: "lines", width: 80, align: "right" },
     { title: "数量", dataIndex: "qty", width: 80, align: "right" },
-    { title: "实际参考(含税)", dataIndex: "actual_cost_inc", width: 130, align: "right", render: money },
-    { title: "实际参考(不含税)", dataIndex: "actual_cost_ex", width: 140, align: "right", render: money },
-    { title: "估算参考(含税)", dataIndex: "estimated_cost_inc", width: 130, align: "right", render: money },
-    { title: "估算参考(不含税)", dataIndex: "estimated_cost_ex", width: 140, align: "right", render: money },
+    ...(maintenanceBasis !== "ex" ? [
+      { title: "实际参考(含税)", dataIndex: "actual_cost_inc", width: 130, align: "right" as const, render: money },
+      { title: "估算参考(含税)", dataIndex: "estimated_cost_inc", width: 130, align: "right" as const, render: money },
+    ] : []),
+    ...(maintenanceBasis !== "inc" ? [
+      { title: "实际参考(未税)", dataIndex: "actual_cost_ex", width: 140, align: "right" as const, render: money },
+      { title: "估算参考(未税)", dataIndex: "estimated_cost_ex", width: 140, align: "right" as const, render: money },
+    ] : []),
     { title: "成本完整性", dataIndex: "cost_quality", width: 160,
       render: (rawQuality: string | null, row) => {
         // 成本字段确由 RBAC 隐藏时保持中性；不受限响应的 null/未知值仍 fail-closed。
@@ -936,8 +1006,14 @@ export default function ProjectCostPage() {
     { title: "数量", dataIndex: "qty", width: 70, align: "right" },
     { title: "退货", dataIndex: "return_qty", width: 70, align: "right",
       render: (v: number | null) => (v ? <Tag color="orange">{v}</Tag> : "-") },
-    { title: "单价", dataIndex: "unit_cost", width: 100, align: "right", render: money },
-    { title: "金额", dataIndex: "cost_amount", width: 110, align: "right", render: money },
+    ...(maintenanceBasis !== "ex" ? [
+      { title: "单位成本(含税)", dataIndex: "unit_cost_inc_tax", width: 120, align: "right" as const, render: money },
+      { title: "成本金额(含税)", dataIndex: "cost_amount_inc_tax", width: 130, align: "right" as const, render: money },
+    ] : []),
+    ...(maintenanceBasis !== "inc" ? [
+      { title: "单位成本(未税)", dataIndex: "unit_cost_ex_tax", width: 120, align: "right" as const, render: money },
+      { title: "成本金额(未税)", dataIndex: "cost_amount_ex_tax", width: 130, align: "right" as const, render: money },
+    ] : []),
     { title: "成本事实层级", dataIndex: "cost_tier", width: 120,
       render: (value: string | null) => value && COST_TIER_META[value]
         ? <Tag color={COST_TIER_META[value].color}>{COST_TIER_META[value].label}</Tag>
@@ -1011,45 +1087,14 @@ export default function ProjectCostPage() {
           </div>
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>
-              合同级毛利展示口径
+              项目维保展示口径
             </div>
             <Space wrap>
-              <Segmented
-                aria-label="合同级毛利展示口径"
-                value={effectiveProfitBasis}
-                onChange={(value) => {
-                  chooseProfitBasis(value as MaintenanceProfitDefaultBasis);
-                }}
-                options={[
-                  { label: "含税毛利", value: "inc" },
-                  { label: "未税毛利", value: "ex" },
-                  { label: "同时显示", value: "both" },
-                ]}
-              />
-              <Button
-                size="small"
-                disabled={profitBasisOverride == null}
-                onClick={restoreAdminProfitBasis}
-              >
-                恢复管理员默认
-              </Button>
+              <Tag color="blue">{PROFIT_BASIS_LABEL[maintenanceBasis]}</Tag>
               <span style={{ color: "var(--mb-text-3)", fontSize: 12.5 }}>
-                {adminProfitBasis == null
-                  ? "正在读取管理员默认…"
-                  : `管理员默认：${PROFIT_BASIS_LABEL[adminProfitBasis]}`}
-                {profitBasisOverride != null ? " · 当前为个人临时选择" : " · 当前跟随默认"}
+                由管理员在系统设置中统一配置，普通员工不能临时切换。
               </span>
             </Space>
-            {profitBasisFallback && (
-              <Alert
-                type="warning"
-                showIcon
-                style={{ marginTop: 8 }}
-                message={profitBasisOverride == null
-                  ? "管理员默认读取失败，本次安全回退为含税与未税同时显示。"
-                  : "管理员默认读取失败，当前继续使用已保存的个人临时选择。"}
-              />
-            )}
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 24, width: "100%", minWidth: 0 }}>
             <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowX: "auto", paddingBottom: 2 }}>
@@ -1060,12 +1105,12 @@ export default function ProjectCostPage() {
                   const preset = value as ExportDatePreset;
                   exportDatePresetRef.current = preset;
                   setExportDatePreset(preset);
-                  if (preset === "all") setRange(null);
-                  if (preset === "custom") setRange(null);
-                   const anchor = asOf ? dayjs(asOf) : null;
-                   if (anchor && preset !== "all" && preset !== "custom") {
-                     setRange(presetRange(preset, anchor));
-                   }
+                  if (preset === "all") setExportRange(null);
+                  if (preset === "custom") setExportRange(null);
+                  const anchor = asOf ? dayjs(asOf) : null;
+                  if (anchor && preset !== "all" && preset !== "custom") {
+                    setExportRange(presetRange(preset, anchor));
+                  }
                 }}
                 options={[
                   { label: "全部", value: "all" },
@@ -1080,11 +1125,12 @@ export default function ProjectCostPage() {
               />
             </div>
             <DatePicker.RangePicker
-              value={range}
+              aria-label="导出自定义起止日期"
+              value={exportRange}
               onChange={(v) => {
                 exportDatePresetRef.current = "custom";
                 setExportDatePreset("custom");
-                setRange(v as [Dayjs, Dayjs] | null);
+                setExportRange(v as [Dayjs, Dayjs] | null);
               }}
             />
             <Input.Search
@@ -1117,19 +1163,55 @@ export default function ProjectCostPage() {
               onClick={exportProjectsCsv}
               disabled={!rows.length || exportingProjects}
             >导出当前项目统计 CSV</Button>
+            {canExportProjectWorkbooks && (
+              <>
+                <Button
+                  loading={downloadingTemplate}
+                  disabled={downloadingTemplate}
+                  onClick={() => void downloadRoundtripTemplate()}
+                >
+                  下载固定回填模板
+                </Button>
+                {canApplyRoundtripWorkbook && (
+                  <Upload
+                    accept=".xlsx"
+                    maxCount={1}
+                    showUploadList={false}
+                    disabled={importingRoundtrip}
+                    beforeUpload={(file) => {
+                      void importRoundtripWorkbook(file);
+                      return false;
+                    }}
+                  >
+                    <Button loading={importingRoundtrip} disabled={importingRoundtrip}>
+                      导入更新工作簿
+                    </Button>
+                  </Upload>
+                )}
+              </>
+            )}
             <div
               aria-label="批量导出说明"
               style={{ width: "100%", color: "var(--mb-text-2)", fontSize: 12.5, lineHeight: 1.6 }}
             >
-              <div>批量项目工作簿 ZIP：时间范围只决定纳入哪些合同，每本仍包含该合同完整数据。</div>
-              <div>订单汇总 Excel：汇总范围内的订单及明细；两种批量导出不受项目搜索或维保期限筛选影响。</div>
+              <div>日期只控制导出内容，不改变页面项目、合同毛利或明细列表。</div>
+              <div>日期范围同时限制每本工作簿内的订单、明细和报销；选择“全部”才导出完整合同数据。</div>
+              <div>批量导出不受项目搜索或维保期限筛选影响，以所选日期范围为准。</div>
+              <div>固定回填模板可由工作人员填写订单或报销更新后直接导回；系统自动校验并返回处理摘要，无需审批。</div>
+              <div>全局模板数据过多时，请在下方合同卡点击“回填模板”，按单个合同分批处理。</div>
             </div>
           </div>
+          {roundtripResult && (
+            <Alert type="success" showIcon message={roundtripResult} />
+          )}
+          {roundtripError && (
+            <Alert type="error" showIcon message={roundtripError} />
+          )}
           <Alert
             type={lifecycleCounts.missing ? "warning" : "info"}
             showIcon
-            message={`日期范围筛选出库日期；批量导出按维保单制单日期；维保期限状态按 ${asOf || "后端请求当天"} 判断。`}
-            description={`批量工作簿只按范围决定合同是否入包，每本保持完整；终止日当天仍算进行中；未填写终止日期的项目归入“期限缺失”。当前有 ${lifecycleCounts.missing} 个期限缺失项目。`}
+            message={`日期范围仅用于导出；维保期限状态按 ${asOf || "后端请求当天"} 判断。`}
+            description={`页面始终展示当前完整项目视图；终止日当天仍算进行中，未填写终止日期的项目归入“期限缺失”。当前有 ${lifecycleCounts.missing} 个期限缺失项目。`}
           />
           {loadError && (
             <Alert
@@ -1187,8 +1269,8 @@ export default function ProjectCostPage() {
         )}
         {board.length === 0 ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={
-            q || range || lifecycle !== "ongoing"
-              ? "当前筛选暂无合同，请调整项目、日期或期限状态"
+            q || lifecycle !== "ongoing"
+              ? "当前筛选暂无合同，请调整项目或期限状态"
               : "暂无数据（导入维保出库后自动生成）"
           } />
         ) : (
@@ -1255,11 +1337,20 @@ export default function ProjectCostPage() {
                       )}
                       <LifecycleTag status={b.lifecycle_status} />
                       {b.contract && canExportProjectWorkbooks && (
-                        <a style={{ fontSize: 12 }} onClick={() =>
-                          download("/maintenance/export-workbook", `项目工作簿_${b.contract}.xlsx`,
-                                   { contract: b.contract })
-                            .catch(() => message.error("工作簿导出失败，请稍后重试或检查权限"))
-                        }>单本工作簿</a>
+                        <>
+                          <a
+                            style={{ fontSize: 12 }}
+                            onClick={() => void exportSingleWorkbook(b.contract!)}
+                          >
+                            单本工作簿
+                          </a>
+                          <a
+                            style={{ fontSize: 12 }}
+                            onClick={() => void downloadRoundtripTemplate(b.contract!)}
+                          >
+                            回填模板
+                          </a>
+                        </>
                       )}
                     </Space>
                   </div>
@@ -1267,13 +1358,13 @@ export default function ProjectCostPage() {
                     <div
                       style={{
                         display: "grid",
-                        gridTemplateColumns: effectiveProfitBasis === "both"
+                        gridTemplateColumns: maintenanceBasis === "both"
                           ? "repeat(2, minmax(0, 1fr))" : "1fr",
                         gap: 10,
                         marginTop: 10,
                       }}
                     >
-                      {selectedProfitBases(effectiveProfitBasis).map((basis) => (
+                      {selectedProfitBases(maintenanceBasis).map((basis) => (
                         <div
                           key={basis}
                           style={{
@@ -1328,14 +1419,17 @@ export default function ProjectCostPage() {
                     </div>
                   )}
                   <div style={{ marginTop: 6, fontSize: 12, color: "#6b665e" }}>
-                    实际参考：含税 {money(b.actual_cost_inc)} / 不含税 {money(b.actual_cost_ex)}
+                    实际参考：<TaxMoney scope="maintenance"
+                      inc={b.actual_cost_inc} ex={b.actual_cost_ex} />
                     <br />
-                    估算参考：含税 {money(b.estimated_cost_inc)} / 不含税 {money(b.estimated_cost_ex)}
+                    估算参考：<TaxMoney scope="maintenance"
+                      inc={b.estimated_cost_inc} ex={b.estimated_cost_ex} />
                     {" · "}
                     {b.missing_cost_lines == null ? "缺失 —" : `缺失 ${b.missing_cost_lines} 行`}
                     {" · "}报销费用{" "}
                     {b.expense_data_available === true
-                      ? money(b.spent_expense)
+                      ? <TaxMoney scope="maintenance"
+                          inc={b.expense_inc ?? null} ex={b.expense_ex ?? null} />
                       : "数据未就绪（无记录不等于0）"}
                     {(b.low_conf_pct ?? 0) >= 30 && (
                       <Tooltip title="低置信（追溯/销售参考）成本占比高，金额估算成分大，建议核对">
@@ -1365,18 +1459,26 @@ export default function ProjectCostPage() {
 
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic title="项目数" value={rows.length} /></Card></Col>
-        <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
-          title="实际采购参考（含税）"
-          {...costStat(totalActualInc)} /></Card></Col>
-        <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
-          title="实际采购参考（不含税）"
-          {...costStat(totalActualEx)} /></Card></Col>
-        <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
-          title="估算参考（含税）"
-          {...costStat(totalEstimatedInc)} /></Card></Col>
-        <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
-          title="估算参考（不含税）"
-          {...costStat(totalEstimatedEx)} /></Card></Col>
+        {maintenanceBasis !== "ex" && (
+          <>
+            <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
+              title="实际采购参考（含税）"
+              {...costStat(totalActualInc)} /></Card></Col>
+            <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
+              title="估算参考（含税）"
+              {...costStat(totalEstimatedInc)} /></Card></Col>
+          </>
+        )}
+        {maintenanceBasis !== "inc" && (
+          <>
+            <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
+              title="实际采购参考（未税）"
+              {...costStat(totalActualEx)} /></Card></Col>
+            <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
+              title="估算参考（未税）"
+              {...costStat(totalEstimatedEx)} /></Card></Col>
+          </>
+        )}
         <Col xs={24} sm={12} lg={4}><Card size="small"><Statistic
           title="缺失成本行"
           value={totalMissing == null ? "—" : totalMissing}
@@ -1396,10 +1498,10 @@ export default function ProjectCostPage() {
           loading={loading}
           columns={projectCols}
           dataSource={rows}
-          scroll={{ x: 1960 }}
+          scroll={{ x: maintenanceBasis === "both" ? 1960 : 1640 }}
           pagination={{ pageSize: 20, showSizeChanger: true }}
-          locale={{ emptyText: (q || range || lifecycle !== "ongoing")
-            ? "当前筛选无结果，请调整搜索、日期或期限状态"
+          locale={{ emptyText: (q || lifecycle !== "ongoing")
+            ? "当前筛选无结果，请调整搜索或期限状态"
             : <Empty description="尚未导入维保出库数据，请到【数据导入】上传氚云维保订单 Excel" /> }}
         />
       </Card>

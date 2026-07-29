@@ -6,9 +6,10 @@ import { Table, Tag, Tooltip } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { Link } from "react-router-dom";
 import type { PurchaseOrderPart, SalesOrderPart } from "../../api";
-import { EMPTY, moneyExact, pctSigned, qty } from "../../utils/format";
+import { taxSidesForBasis, useTaxBasis } from "../../context/TaxBasis";
+import { EMPTY, moneyExact, pctSigned, qty, splitFixed } from "../../utils/format";
 import {
-  MUTED, ReferenceStatusTag, fmtMoneyR, poolAnalysisPath, readLocalPerms, type DateRange,
+  MUTED, ReferenceStatusTag, poolAnalysisPath, readLocalPerms, type DateRange,
 } from "./shared";
 
 export type OrderSide = "purchase" | "sales";
@@ -81,9 +82,18 @@ export interface PartsTableProps {
 
 export default function PartsTable({ side, parts = [], dateRange, costRestricted, manualRestricted }: PartsTableProps) {
   const isPurchase = side === "purchase";
+  const basis = useTaxBasis(side);
   // 销售侧 unit_price_ex_tax/amount 与采购成本键同名，对 cost-blind 账号会被后端有意过遮
   // （契约既定取舍）：null 且账号受限 → 显示无权限而非「-」
   const priceRestricted = costRestricted;
+  const taxMoney = (
+    value: number | null | undefined,
+    taxSide: "inc" | "ex",
+    restricted: boolean,
+  ) => {
+    if (restricted && value == null) return <span style={MUTED}>无成本权限</span>;
+    return moneyExact(splitFixed(value, "ex")[taxSide]);
+  };
 
   const columns: ColumnsType<AnyPart> = [
     { title: "PN", key: "pn", width: 170, render: (_, p) => (
@@ -94,21 +104,39 @@ export default function PartsTable({ side, parts = [], dateRange, costRestricted
     { title: "描述", dataIndex: "description", width: 200, ellipsis: true,
       render: (v) => v || <span style={MUTED}>{EMPTY}</span> },
     { title: "数量", dataIndex: "quantity", width: 72, align: "right", render: qty },
-    { title: "未税单价", dataIndex: "unit_price_ex_tax", width: 100, align: "right",
-      render: (v) => fmtMoneyR(v, priceRestricted && v == null, "无成本权限") },
-    { title: "金额(未税)", dataIndex: "amount", width: 110, align: "right",
-      render: (v) => fmtMoneyR(v, priceRestricted && v == null, "无成本权限") },
+    ...taxSidesForBasis(basis).map((taxSide) => ({
+      title: `单价(${taxSide === "inc" ? "含税" : "不含税"})`,
+      dataIndex: "unit_price_ex_tax",
+      key: `unit_price_${taxSide}`,
+      width: 112,
+      align: "right" as const,
+      render: (v: number | null) => taxMoney(v, taxSide, priceRestricted),
+    })),
+    ...taxSidesForBasis(basis).map((taxSide) => ({
+      title: `金额(${taxSide === "inc" ? "含税" : "不含税"})`,
+      dataIndex: "amount",
+      key: `amount_${taxSide}`,
+      width: 118,
+      align: "right" as const,
+      render: (v: number | null) => taxMoney(v, taxSide, priceRestricted),
+    })),
     { title: "所属池", key: "pool", width: 130, ellipsis: true,
       render: (_, p) => <PoolLink groupId={p.pool_group_id} name={p.pool_name} dateRange={dateRange} /> },
-    { title: "池均价", key: "pool_avg", width: 100, align: "right",
-      render: (_, p) => {
-        const v = isPurchase
+    ...taxSidesForBasis(basis).map((taxSide) => ({
+      title: `池均价(${taxSide === "inc" ? "含税" : "不含税"})`,
+      key: `pool_avg_${taxSide}`,
+      width: 112,
+      align: "right" as const,
+      render: (_: unknown, p: AnyPart) => {
+        const value = isPurchase
           ? (p as PurchaseOrderPart).pool_avg_purchase_price
           : (p as SalesOrderPart).pool_avg_sale_price;
         if (p.pool_group_id == null) return <span style={MUTED}>{EMPTY}</span>;
-        return fmtMoneyR(v, isPurchase && costRestricted && v == null, "无成本权限");
-      } },
-    { title: isPurchase ? "人工最高采购价" : "人工最低销售价", key: "limit", width: 128, align: "right",
+        return taxMoney(value, taxSide, isPurchase && costRestricted);
+      },
+    })),
+    { title: isPurchase ? "人工最高采购价(未税)" : "人工最低销售价(未税)",
+      key: "limit", width: 148, align: "right",
       render: (_, p) => {
         if (p.pool_group_id == null) return <span style={MUTED}>{EMPTY}</span>;
         const v = isPurchase
@@ -118,7 +146,7 @@ export default function PartsTable({ side, parts = [], dateRange, costRestricted
         if (v == null) return <span style={MUTED}>未设置</span>;
         return moneyExact(v);
       } },
-    { title: "差额", key: "delta", width: 140, align: "right",
+    { title: "差额(未税)", key: "delta", width: 140, align: "right",
       render: (_, p) => p.pool_group_id == null
         ? <span style={MUTED}>{EMPTY}</span>
         : <DeltaCell p={p} side={side} restricted={manualRestricted} /> },
@@ -140,7 +168,7 @@ export default function PartsTable({ side, parts = [], dateRange, costRestricted
       columns={columns}
       dataSource={parts}
       pagination={false}
-      scroll={{ x: 1150 }}
+      scroll={{ x: basis === "both" ? 1540 : 1220 }}
     />
   );
 }

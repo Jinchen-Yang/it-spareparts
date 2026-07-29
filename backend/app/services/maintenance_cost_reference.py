@@ -4,23 +4,23 @@
 模块一次性批量读取有效互通池、采购和销售事实，在内存按自然月建立索引；逐条维保
 行解析不再访问数据库，避免重算随行数产生 N+1。
 
-这里严格只处理旧成本瀑布最终会落 ``none`` 的行。既有
-``direct -> window -> month_avg -> trace_avg -> sales_ref`` 仍由
-``maintenance_cost`` 负责，二者不得交换优先级。
+这里严格只处理 ``direct -> window -> month_avg`` 最终仍未命中的行，并按
+``pool_purchase -> pool_sales -> purchase_history -> sales_history`` 解析。
 """
 
 from __future__ import annotations
 
+import calendar
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Iterable, Literal
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
-from app import config
+from app import config, tax_policy
 from app.models.data_quality import FactDataQualityIssue
 from app.models.inventory import PartPool, PartPoolMember
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
@@ -35,7 +35,6 @@ ReferenceSource = Literal[
     "sales_history",
 ]
 
-_CENT = Decimal("0.01")
 _ZERO = Decimal("0")
 _MONEY_MAX = Decimal(10) ** 12
 
@@ -88,24 +87,20 @@ class CostReference:
 
 
 def _effective_rate(rate: Decimal | None) -> tuple[Decimal, bool]:
-    """返回可计算税率；空/负值使用统一业务税率并显式标记估算。"""
-    if rate is None:
-        return Decimal(config.PROFIT_VAT_RATE), True
-    value = Decimal(rate)
-    if not value.is_finite() or value < _ZERO or value >= Decimal("1"):
-        return Decimal(config.PROFIT_VAT_RATE), True
-    return value, False
+    """业务计算始终使用统一 13%；原始税率只随样本保留作审计。"""
+    del rate
+    return tax_policy.TAX_RATE, False
 
 
 def normalize_cost_sample(sample: CostSample) -> NormalizedCost:
-    """按单条订单真实税率先归一双口径，避免混合原值后再整体换税。
+    """按统一 13% 把原始单价归一成双口径。
 
     采购行单价跟随 ``is_tax_inclusive``；未知口径沿用现有维保规则视作未税。
-    销售行 ``unit_price`` 的模型契约恒为含税原值。legacy_basis 则刻意复刻旧引擎
-    的选值语义，保证既有 ``unit_cost/cost_amount`` 不因新增双税列漂移。
+    销售行 ``unit_price`` 的模型契约恒为含税原值。原订单税率不参与业务计算，
+    但仍保留在 ``CostSample`` 供审计。
     """
-    rate, estimated = _effective_rate(sample.tax_rate)
-    factor = Decimal("1") + rate
+    _rate, estimated = _effective_rate(sample.tax_rate)
+    factor = tax_policy.TAX_FACTOR
     price = Decimal(sample.unit_price)
     if (
         not price.is_finite()
@@ -125,8 +120,7 @@ def normalize_cost_sample(sample: CostSample) -> NormalizedCost:
     else:
         inc, ex = price, price / factor
         inc_estimated, ex_estimated = False, estimated
-        # 旧 sales_ref 仅在税率为正时标为 inc；0%/空值虽原价相同仍标为 ex。
-        legacy_basis = "inc" if sample.tax_rate is not None and sample.tax_rate > 0 else "ex"
+        legacy_basis = "inc"
     return NormalizedCost(
         unit_cost_inc_tax=inc,
         unit_cost_ex_tax=ex,
@@ -145,6 +139,15 @@ def _month_distance(later: date, earlier: date) -> int:
     return (later.year - earlier.year) * 12 + later.month - earlier.month
 
 
+def _shift_months(value: date, months: int) -> date:
+    """按自然月移动并钳制月末；如 5 月 31 日往前 3 月得到 2 月 28/29 日。"""
+    absolute_month = value.year * 12 + value.month - 1 + months
+    year, month_index = divmod(absolute_month, 12)
+    month = month_index + 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
 def _pick_legacy(
     totals: dict[str, tuple[Decimal, Decimal]],
 ) -> tuple[Decimal, Literal["inc", "ex"]]:
@@ -156,7 +159,7 @@ def _pick_legacy(
     for basis in preference:
         amount, qty = totals.get(basis, (_ZERO, _ZERO))
         if qty > _ZERO:
-            return (amount / qty).quantize(_CENT), basis
+            return tax_policy.round_money(amount / qty), basis
     raise ValueError("reference month has no positive legacy sample")
 
 
@@ -229,8 +232,8 @@ def summarize_samples(
         }
     )
     return (
-        (inc_amount / total_qty).quantize(_CENT),
-        (ex_amount / total_qty).quantize(_CENT),
+        tax_policy.round_money(inc_amount / total_qty),
+        tax_policy.round_money(ex_amount / total_qty),
         legacy,
         legacy_basis,
         count,
@@ -288,13 +291,17 @@ class CostReferenceIndex:
         ordered_months: tuple[str, ...] | None = None,
     ) -> tuple[str, tuple[CostSample, ...]] | None:
         as_of_month = _month_key(as_of)
+        earliest = _shift_months(as_of, -config.MAINT_TRACE_MAX_MONTHS)
         for month in ordered_months or tuple(sorted(monthly, reverse=True)):
             if month > as_of_month:
                 continue
             eligible = tuple(
                 sample
                 for sample in monthly[month]
-                if sample.part_id in allowed_parts and sample.occurred_on <= as_of
+                if (
+                    sample.part_id in allowed_parts
+                    and earliest <= sample.occurred_on <= as_of
+                )
             )
             if eligible:
                 return month, eligible
@@ -363,15 +370,8 @@ class CostReferenceIndex:
         if reference_date_missing or first is None or latest is None:
             raise ValueError("historical reference sample must have a date")
         trace = _month_distance(as_of, latest)
-        flags = []
-        if estimated:
-            flags.append("tax_rate_estimated")
-        if inc_estimated:
-            flags.append("inc_tax_estimated")
-        if ex_estimated:
-            flags.append("ex_tax_estimated")
-        if trace > 12:
-            flags.append("stale_cost_reference")
+        # 统一 13% 是确定性业务政策，不属于“缺税率估算”。
+        assert not estimated and not inc_estimated and not ex_estimated
         result = CostReference(
             source=source,
             unit_cost_inc_tax=inc,
@@ -388,7 +388,7 @@ class CostReferenceIndex:
             reference_latest_date=latest,
             price_month=month,
             trace_months=trace,
-            anomaly_flags=tuple(flags),
+            anomaly_flags=(),
         )
         self._reference_cache[reference_key] = result
         return result
@@ -493,7 +493,6 @@ def build_reference_index(
         .join(PartPool, PartPool.group_id == PartPoolMember.group_id)
         .where(
             PartPool.status == "active",
-            PartPool.source == "manual",
             PartPoolMember.part_id.in_(targets),
         )
     )
@@ -506,7 +505,6 @@ def build_reference_index(
         .join(PartPoolMember, PartPoolMember.group_id == PartPool.group_id)
         .where(
             PartPool.status == "active",
-            PartPool.source == "manual",
             PartPool.group_id.in_(target_groups),
         )
         .order_by(PartPool.group_id, PartPoolMember.part_id)
@@ -553,13 +551,6 @@ def build_reference_index(
             FPurchaseLine.unit_price.is_not(None),
             FPurchaseLine.unit_price > 0,
             FPurchaseLine.unit_price < _MONEY_MAX,
-            or_(
-                FPurchaseOrder.tax_rate.is_(None),
-                and_(
-                    FPurchaseOrder.tax_rate >= 0,
-                    FPurchaseOrder.tax_rate < 1,
-                ),
-            ),
             ~_confirmed_source_error("purchase", FPurchaseLine.id),
         )
     )
@@ -602,13 +593,6 @@ def build_reference_index(
             FSalesLine.unit_price.is_not(None),
             FSalesLine.unit_price > 0,
             FSalesLine.unit_price < _MONEY_MAX,
-            or_(
-                FSalesOrder.tax_rate.is_(None),
-                and_(
-                    FSalesOrder.tax_rate >= 0,
-                    FSalesOrder.tax_rate < 1,
-                ),
-            ),
             ~_confirmed_source_error("sales", FSalesLine.id),
         )
     )

@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from sqlalchemy import select
 
-from app import permissions, security
+from app import config, permissions, security
 from app.agent import tools
 from app.auth import hash_password
 from app.etl import loader
@@ -499,7 +499,7 @@ def test_cost_blind_lines_remove_cost_derived_anomaly_flags(
 
 
 def test_new_maintenance_fields_are_registered_without_masking_generic_status():
-    purchase_fields = set(permissions.config.FIELD_GROUPS["purchase_cost"])
+    purchase_fields = set(config.FIELD_GROUPS["purchase_cost"])
     assert {
         "actual_cost_inc", "actual_cost_ex",
         "estimated_cost_inc", "estimated_cost_ex", "known_cost_total",
@@ -515,8 +515,8 @@ def test_new_maintenance_fields_are_registered_without_masking_generic_status():
         "reference_sample_count", "reference_from_date", "reference_to_date",
         "reference_latest_date",
     } <= purchase_fields
-    profit_amount_fields = set(permissions.config.FIELD_GROUPS["profit_amount"])
-    profit_rate_fields = set(permissions.config.FIELD_GROUPS["profit_rate"])
+    profit_amount_fields = set(config.FIELD_GROUPS["profit_amount"])
+    profit_rate_fields = set(config.FIELD_GROUPS["profit_rate"])
     assert {
         "parts_gross_profit_inc", "parts_gross_profit_ex",
         "parts_profit_status_inc", "parts_profit_status_ex",
@@ -527,19 +527,23 @@ def test_new_maintenance_fields_are_registered_without_masking_generic_status():
         "parts_gross_margin_inc", "parts_gross_margin_ex",
         "contribution_margin_inc", "contribution_margin_ex",
     } <= profit_rate_fields
-    assert {
-        "gross_profit_inc", "gross_profit_ex",
-        "profit_status_inc", "profit_status_ex",
-    }.isdisjoint(profit_amount_fields)
+    # 看板仍产出通用双口径毛利；维保只退休了通用 profit_status，改用 parts_*。
+    assert {"gross_profit_inc", "gross_profit_ex"} <= profit_amount_fields
+    assert {"profit_status_inc", "profit_status_ex"}.isdisjoint(
+        profit_amount_fields
+    )
     assert {
         "gross_margin_inc", "gross_margin_ex",
     }.isdisjoint(profit_rate_fields)
+    # revenue_inc/ex 是普通销售与维保共用的通用键。销售营收不属于利润脱敏；
+    # 维保 board 在 profit_restricted 分支单独清空，不能在全局字段组误伤销售。
+    assert {"revenue_inc", "revenue_ex"}.isdisjoint(profit_amount_fields)
     assert "decision_status" in profit_amount_fields
     assert {
         "contract_amount", "budget", "remaining", "remaining_pct",
     } <= profit_amount_fields
     assert "status" not in {
         field
-        for fields in permissions.config.FIELD_GROUPS.values()
+        for fields in config.FIELD_GROUPS.values()
         for field in fields
     }

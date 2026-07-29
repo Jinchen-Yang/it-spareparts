@@ -126,10 +126,13 @@ _TABLES = [
     # 「退役 ID 永不复用」语义跨用例保持
     "part_pool_price_policy", "part_pool_member", "part_pool",
     "f_part_inquiry", "part_substitute", "inventory",
+    "maintenance_manual_cost_override",
+    "maintenance_roundtrip_operation",
     "f_project_expense",
     "f_maintenance_line", "f_maintenance_order",
     "f_sales_line", "f_sales_order", "f_purchase_line", "f_purchase_order",
     "part_alias", "dim_part", "dim_supplier", "dim_customer",
+    "maintenance_contract_workbook_state",
     "sys_audit_log", "sys_access_log", "sys_raw_file", "sys_import_error", "sys_import_batch",
     "sys_import_job", "sys_user",
     "sys_business_setting",
@@ -161,8 +164,9 @@ def _reseed_templates(conn) -> None:
 def _reseed_business_setting(conn) -> None:
     conn.execute(text(
         "INSERT INTO sys_business_setting"
-        " (id, maintenance_project_profit_default_basis, version)"
-        " VALUES (1, 'both', 1)"))
+        " (id, maintenance_project_profit_default_basis,"
+        " purchase_display_basis, sales_display_basis, version)"
+        " VALUES (1, 'both', 'both', 'ex', 1)"))
 
 
 @pytest.fixture(scope="session", autouse=True)

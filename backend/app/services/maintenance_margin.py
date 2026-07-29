@@ -5,8 +5,9 @@
 """
 from decimal import Decimal
 
+from app import tax_policy
 
-_CENT = Decimal("0.01")
+
 _RATE = Decimal("0.0001")
 _ZERO = Decimal("0")
 _COMPLETE_QUALITIES = frozenset({"actual_only", "contains_estimate"})
@@ -22,7 +23,7 @@ def _money(value: Decimal | None) -> Decimal | None:
         return None
     if not normalized.is_finite():
         return None
-    return normalized.quantize(_CENT)
+    return tax_policy.round_money(normalized)
 
 
 def _margin(profit: Decimal | None, revenue: Decimal | None) -> Decimal | None:
@@ -47,38 +48,44 @@ def calculate_contract_margin(
     parts_cost_ex_tax: Decimal | None,
     cost_quality_inc: str,
     cost_quality_ex: str,
-    unknown_expense_total: Decimal | None,
     expense_data_available: bool,
     date_filtered: bool,
+    expense_inc: Decimal | None = None,
+    expense_ex: Decimal | None = None,
+    unknown_expense_total: Decimal | None = None,
     revenue_ambiguous_inc: bool = False,
     revenue_ambiguous_ex: bool = False,
 ) -> dict[str, Decimal | str | None]:
     """计算合同级含税、未税备件毛利与合同级贡献毛利。
 
-    ``unknown_expense_total`` 是当前只有原金额、没有税务字段的生效报销。非零时仍可
-    给出不含报销的备件毛利，但合同级贡献毛利两套都保持空值。
+    合同收入统一按 13% 从未税值生成含税值，传入的原始 ``tax_rate`` 只为兼容旧调用，
+    不参与业务计算。``unknown_expense_total`` 同样只兼容迁移前的未拆税费用证据。
     """
+    del tax_rate
     revenue_ex = _money(revenue_ex)
     parts_cost_inc_tax = _money(parts_cost_inc_tax)
     parts_cost_ex_tax = _money(parts_cost_ex_tax)
+    expense_inc = _money(expense_inc)
+    expense_ex = _money(expense_ex)
     unknown_expense_total = _money(unknown_expense_total)
-    expense_tax_unknown = (
-        expense_data_available
-        and (unknown_expense_total is None or unknown_expense_total != _ZERO)
-    )
     expense_unavailable = not expense_data_available
+    # 兼容旧调用：明确传入 unknown=0 代表已证明无报销；非零或非法则两套都失败关闭。
+    legacy_expense_complete = (
+        unknown_expense_total is not None and unknown_expense_total == _ZERO
+    )
+    if expense_data_available and legacy_expense_complete:
+        if expense_inc is None:
+            expense_inc = _ZERO
+        if expense_ex is None:
+            expense_ex = _ZERO
+    expense_tax_unknown = {
+        "inc": expense_data_available and expense_inc is None,
+        "ex": expense_data_available and expense_ex is None,
+    }
 
     revenue_inc = None
-    invalid_tax_rate = tax_rate is not None and (
-        not tax_rate.is_finite() or not (_ZERO <= tax_rate < Decimal("1"))
-    )
-    if (
-        not revenue_ambiguous_inc
-        and revenue_ex is not None
-        and tax_rate is not None
-        and not invalid_tax_rate
-    ):
-        revenue_inc = (revenue_ex * (Decimal(1) + tax_rate)).quantize(_CENT)
+    if not revenue_ambiguous_inc and revenue_ex is not None:
+        revenue_inc = tax_policy.inc_from_ex(revenue_ex)
 
     result: dict[str, Decimal | str | None] = {
         "revenue_inc": revenue_inc,
@@ -91,8 +98,8 @@ def calculate_contract_margin(
         "parts_gross_margin_ex": None,
         "parts_profit_status_inc": "incomplete_cost",
         "parts_profit_status_ex": "incomplete_cost",
-        "expense_inc": None if expense_unavailable or expense_tax_unknown else _ZERO,
-        "expense_ex": None if expense_unavailable or expense_tax_unknown else _ZERO,
+        "expense_inc": None if expense_unavailable else expense_inc,
+        "expense_ex": None if expense_unavailable else expense_ex,
         "contribution_profit_inc": None,
         "contribution_profit_ex": None,
         "contribution_margin_inc": None,
@@ -111,7 +118,9 @@ def calculate_contract_margin(
     cost_complete_inc = cost_quality_inc in _COMPLETE_QUALITIES
     cost_complete_ex = cost_quality_ex in _COMPLETE_QUALITIES
     if cost_complete_inc and revenue_inc is not None and parts_cost_inc_tax is not None:
-        parts_profit_inc = (revenue_inc - parts_cost_inc_tax).quantize(_CENT)
+        parts_profit_inc = tax_policy.round_money(
+            revenue_inc - parts_cost_inc_tax,
+        )
         result["parts_gross_profit_inc"] = parts_profit_inc
         result["parts_gross_margin_inc"] = _margin(parts_profit_inc, revenue_inc)
     if (
@@ -120,7 +129,9 @@ def calculate_contract_margin(
         and revenue_ex is not None
         and parts_cost_ex_tax is not None
     ):
-        parts_profit_ex = (revenue_ex - parts_cost_ex_tax).quantize(_CENT)
+        parts_profit_ex = tax_policy.round_money(
+            revenue_ex - parts_cost_ex_tax,
+        )
         result["parts_gross_profit_ex"] = parts_profit_ex
         result["parts_gross_margin_ex"] = _margin(parts_profit_ex, revenue_ex)
 
@@ -130,10 +141,6 @@ def calculate_contract_margin(
         result["parts_profit_status_inc"] = "missing_revenue"
     elif not cost_complete_inc or parts_cost_inc_tax is None:
         result["parts_profit_status_inc"] = "incomplete_cost"
-    elif invalid_tax_rate:
-        result["parts_profit_status_inc"] = "invalid_tax_rate"
-    elif tax_rate is None:
-        result["parts_profit_status_inc"] = "missing_tax_rate"
     else:
         result["parts_profit_status_inc"] = _complete_status(cost_quality_inc)
 
@@ -154,13 +161,13 @@ def calculate_contract_margin(
         if expense_unavailable:
             result[f"contribution_status_{basis}"] = "expense_data_unavailable"
             continue
-        if expense_tax_unknown:
+        if expense_tax_unknown[basis]:
             result[f"contribution_status_{basis}"] = "expense_tax_unknown"
             continue
         parts_profit = result[f"parts_gross_profit_{basis}"]
         expense = result[f"expense_{basis}"]
         contribution_profit = (
-            parts_profit - expense
+            tax_policy.round_money(parts_profit - expense)
             if isinstance(parts_profit, Decimal) and isinstance(expense, Decimal)
             else None
         )

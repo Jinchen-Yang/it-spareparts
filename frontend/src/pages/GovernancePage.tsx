@@ -67,7 +67,7 @@ const ISSUE_LABELS: Record<string, string> = {
 
 /** 型号治理（原有页签：非标/待复核/已排除 + 排除操作） */
 function PartsTab() {
-  const { basis } = useTaxBasis();
+  const basis = useTaxBasis("sales");
   const [kind, setKind] = useState("nonstd");
   const [rows, setRows] = useState<PartRow[]>([]);
   const [total, setTotal] = useState(0);

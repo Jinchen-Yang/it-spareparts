@@ -48,9 +48,11 @@ def _expected_by_pn_grouping(db):
     """旧口径（按 pn_std 文本分组）手工回放，作为等价性基准。"""
     rows = db.execute(select(FSalesLine.id, FSalesLine.pn_std)).all()
     pn_of = dict(rows)
-    # 采购价统一按 13% 换未税（fixture 的 is_tax_inclusive=None → 视作含税 ÷1.13），
-    # 与 profit._load_purchase_events 同口径，保证等价性基准仍成立
-    ex = lambda p: profit._ex_tax_purchase(Decimal(p), None)
+    # fixture 的 is_tax_inclusive=None 按甲方约定视为未税原值；
+    # 与 profit._load_purchase_events 同口径，保证等价性基准仍成立。
+    def ex(price):
+        return profit._ex_tax_purchase(Decimal(price), None)
+
     pur = defaultdict(list)
     pur["PN-X"] = [cost.PurchaseEvent(date(2026, 1, 5), Decimal(10), ex(80)),
                    cost.PurchaseEvent(date(2026, 1, 20), Decimal(10), ex(100))]

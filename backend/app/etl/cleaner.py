@@ -97,12 +97,23 @@ def parse_rate(x) -> Decimal | None:
     return val.quantize(Decimal("0.0001"))
 
 
-def _parse_decimal(x, places: str, label: str) -> Decimal | None:
+def _parse_decimal(
+    x,
+    places: str,
+    label: str,
+    *,
+    rounding: str | None = None,
+) -> Decimal | None:
     if _is_blank(x):
         return None
     s = _THOUSANDS.sub("", str(x).strip())
     try:
-        val = Decimal(s).quantize(Decimal(places))
+        value = Decimal(s)
+        val = (
+            value.quantize(Decimal(places))
+            if rounding is None
+            else value.quantize(Decimal(places), rounding=rounding)
+        )
     except (InvalidOperation, ValueError) as exc:
         raise ValueError(f"{label}非数字: {x!r}") from exc
     # 越列限保护：超出 Numeric(14, scale) 可表达范围时抛 ValueError 走坏行隔离，
@@ -113,8 +124,8 @@ def _parse_decimal(x, places: str, label: str) -> Decimal | None:
     return val
 
 
-def parse_money(x) -> Decimal | None:
-    return _parse_decimal(x, "0.01", "金额")
+def parse_money(x, *, rounding: str | None = None) -> Decimal | None:
+    return _parse_decimal(x, "0.01", "金额", rounding=rounding)
 
 
 def parse_qty(x) -> Decimal | None:

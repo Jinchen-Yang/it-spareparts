@@ -116,6 +116,7 @@ def test_lifecycle_filter_preserves_cross_status_shared_contract_warning(db):
         filename="maintenance-lifecycle-shared.xlsx",
         file_type="maintenance",
         file_hash="maintenance-lifecycle-shared",
+        status="success",
     )
     db.add(batch)
     db.flush()
@@ -331,7 +332,8 @@ def test_lifecycle_filters_keep_query_count_constant(db, lifecycle_data):
         lambda: maintenance_cost.board(db, lifecycle="missing", as_of=lifecycle_data)
     )
     assert project_all == project_one <= 2
-    assert board_all == board_one <= 3
+    # 合同费用快照完整性是独立证据水位，新增一条固定查询但不随合同数增长。
+    assert board_all == board_one <= 4
 
 
 def _admin_client(db) -> TestClient:

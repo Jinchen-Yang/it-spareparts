@@ -55,9 +55,9 @@ describe("全员互通池价格分析页", () => {
     }));
 
     const row = await screen.findByRole("row", { name: /硬盘互通池/ });
-    expect(row).toHaveTextContent("¥500.00");
-    expect(row).toHaveTextContent("¥490.00");
-    expect(row).toHaveTextContent("¥550.00");
+    expect(row).toHaveTextContent("含 ¥565 · 不含 ¥500");
+    expect(row).toHaveTextContent("含 ¥553.7 · 不含 ¥490");
+    expect(row).toHaveTextContent("¥550");
     expect(row).toHaveTextContent("未设置");
     expect(within(row).getByRole("link", { name: "查看硬盘互通池价格详情" }))
       .toHaveAttribute("href", "/pool-analysis/7?range=90d");
@@ -141,8 +141,8 @@ describe("全员互通池价格分析页", () => {
     renderAt();
     const row = await screen.findByRole("row", { name: /硬盘互通池/ });
     expect(within(row).getByText("无池价格权限")).toBeInTheDocument();
-    expect(row).toHaveTextContent("¥800.00");
-    expect(row).toHaveTextContent("¥790.00");
+    expect(row).toHaveTextContent("¥800");
+    expect(row).toHaveTextContent("¥790");
   });
 
   it("约束价状态受限时整侧池价格隐藏，不能通过均价反推", async () => {

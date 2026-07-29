@@ -13,23 +13,31 @@ import type {
   PurchaseAnalysis, PurchaseAnalysisRow, PurchaseDrillItem,
 } from "../../api";
 import { useTaxBasis, TaxMoney } from "../../context/TaxBasis";
+import type { TaxBasis } from "../../context/TaxBasis";
+import { completeTaxPair } from "../../utils/format";
 import {
   ANALYSIS_DAYS, ADVICE_COLOR, fmt, Sparkline, PriceCell, KpiCard, readNum,
   useUrlPatch, activatableProps,
 } from "./shared";
 
 // 逐笔比价下钻的列定义 + 拉取（桌面展开行、移动端抽屉共用同一数据源 fetchPurchaseDrill）
-const DRILL_COLUMNS: ColumnsType<PurchaseDrillItem> = [
+function drillColumns(basis: TaxBasis): ColumnsType<PurchaseDrillItem> {
+  return [
   { title: "日期", dataIndex: "order_date", width: 100, render: (v) => v || "—" },
   { title: "采购员", dataIndex: "purchaser", width: 90, render: (v) => v || "—" },
   { title: "供应商", dataIndex: "supplier", ellipsis: true, render: (v) => v || <span style={{ color: "var(--mb-text-3)" }}>（不可见）</span> },
   { title: "渠道", dataIndex: "source_channel", width: 100, render: (v) => v ? <Tag>{v}</Tag> : "—" },
   { title: "口径", dataIndex: "is_tax_inclusive", width: 70,
-    render: (v) => (v == null ? "—" : <Tag color={v ? "default" : "blue"}>{v ? "含税" : "未税"}</Tag>) },
-  { title: "未税价", dataIndex: "price_ex", width: 90, align: "right", render: fmt },
-  { title: "含税价", dataIndex: "price_inc", width: 90, align: "right", render: fmt },
+    render: (v) => <Tag color={v == null ? "orange" : v ? "default" : "blue"}>
+      {v == null ? "未标注·按未税" : v ? "含税" : "未税"}
+    </Tag> },
+  ...(basis !== "inc" ? [{ title: "未税价", key: "price_ex", width: 90, align: "right" as const,
+    render: (_: unknown, row: PurchaseDrillItem) => fmt(completeTaxPair(row.price_inc, row.price_ex).ex) }] : []),
+  ...(basis !== "ex" ? [{ title: "含税价", key: "price_inc", width: 90, align: "right" as const,
+    render: (_: unknown, row: PurchaseDrillItem) => fmt(completeTaxPair(row.price_inc, row.price_ex).inc) }] : []),
   { title: "数量", dataIndex: "qty", width: 70, align: "right", render: (v) => (v == null ? "—" : Number(v)) },
-];
+  ];
+}
 
 function useDrill(partId: number | null, days: number, excludeDesignated: boolean) {
   const [items, setItems] = useState<PurchaseDrillItem[] | null>(null);
@@ -46,34 +54,45 @@ function useDrill(partId: number | null, days: number, excludeDesignated: boolea
 }
 
 // 桌面展开行下钻表
-function DrillTable({ partId, days, excludeDesignated }: { partId: number; days: number; excludeDesignated: boolean }) {
+function DrillTable({ partId, days, excludeDesignated, basis }: {
+  partId: number;
+  days: number;
+  excludeDesignated: boolean;
+  basis: TaxBasis;
+}) {
   const items = useDrill(partId, days, excludeDesignated);
   return (
     <Table<PurchaseDrillItem>
       size="small"
-      rowKey={(r, i) => `${r.order_no}-${i}`}
+      rowKey="line_id"
       loading={items === null}
       dataSource={items || []}
       pagination={false}
-      columns={DRILL_COLUMNS}
+      columns={drillColumns(basis)}
     />
   );
 }
 
-function ExpandedAnalysis({ partId, days, excludeDesignated, dateFrom, dateTo }: {
+function ExpandedAnalysis({ partId, days, excludeDesignated, dateFrom, dateTo, basis }: {
   partId: number; days: number; excludeDesignated: boolean; dateFrom?: string; dateTo?: string;
+  basis: TaxBasis;
 }) {
   return (
     <div style={{ display: "grid", gap: 12 }}>
       <PoolReferencePanel partId={partId} side="purchase" range="custom"
         dateFrom={dateFrom} dateTo={dateTo} compact />
-      <DrillTable partId={partId} days={days} excludeDesignated={excludeDesignated} />
+      <DrillTable partId={partId} days={days} excludeDesignated={excludeDesignated} basis={basis} />
     </div>
   );
 }
 
 // 移动端抽屉里的逐笔下钻：卡片式（谁采的/哪家/含税未税/数量），恢复桌面下钻的全部逐笔信息
-function MobileDrill({ partId, days, excludeDesignated }: { partId: number; days: number; excludeDesignated: boolean }) {
+function MobileDrill({ partId, days, excludeDesignated, basis }: {
+  partId: number;
+  days: number;
+  excludeDesignated: boolean;
+  basis: TaxBasis;
+}) {
   const items = useDrill(partId, days, excludeDesignated);
   return (
     <div style={{ marginTop: 8 }}>
@@ -84,11 +103,13 @@ function MobileDrill({ partId, days, excludeDesignated }: { partId: number; days
         <div style={{ color: "var(--mb-text-3)", padding: "8px 0" }}>窗口内无逐笔记录</div>
       ) : (
         items.map((it, i) => (
-          <div key={`${it.order_no}-${i}`} style={{ padding: "10px 0", borderTop: i ? "1px solid var(--mb-border)" : "none" }}>
+          <div key={it.line_id} style={{ padding: "10px 0", borderTop: i ? "1px solid var(--mb-border)" : "none" }}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
               <span style={{ fontWeight: 500 }}>{it.order_date || "—"}</span>
               <span>
-                {it.is_tax_inclusive == null ? null : <Tag color={it.is_tax_inclusive ? "default" : "blue"}>{it.is_tax_inclusive ? "含税" : "未税"}</Tag>}
+                <Tag color={it.is_tax_inclusive == null ? "orange" : it.is_tax_inclusive ? "default" : "blue"}>
+                  {it.is_tax_inclusive == null ? "未标注·按未税" : it.is_tax_inclusive ? "含税" : "未税"}
+                </Tag>
                 {it.source_channel ? <Tag>{it.source_channel}</Tag> : null}
               </span>
             </div>
@@ -96,7 +117,15 @@ function MobileDrill({ partId, days, excludeDesignated }: { partId: number; days
               采购员 {it.purchaser || "—"} · 供应商 {it.supplier || "（不可见）"}
             </div>
             <div style={{ fontSize: 13, color: "var(--mb-text-2)", marginTop: 2 }}>
-              单号 {it.order_no || "—"} · 数量 {it.qty == null ? "—" : Number(it.qty)} · 未税 {fmt(it.price_ex)} · 含税 {fmt(it.price_inc)}
+              {(() => {
+                const pair = completeTaxPair(it.price_inc, it.price_ex);
+                const price = basis === "both"
+                  ? <>未税 {fmt(pair.ex)} · 含税 {fmt(pair.inc)}</>
+                  : basis === "ex"
+                    ? <>未税 {fmt(pair.ex)}</>
+                    : <>含税 {fmt(pair.inc)}</>;
+                return <>单号 {it.order_no || "—"} · 数量 {it.qty == null ? "—" : Number(it.qty)} · {price}</>;
+              })()}
             </div>
           </div>
         ))
@@ -123,12 +152,12 @@ function SourceComposition({ comp, accent }: {
         {comp.map((c, i) => (
           <span key={c.channel} style={{ color: "#6b665e" }}>
             <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: palette[i % palette.length], marginRight: 5 }} />
-            {c.channel} <TaxMoney inc={c.amount_inc} ex={c.amount_ex} /> · {c.order_count}单
+            {c.channel} <TaxMoney scope="purchase" inc={c.amount_inc} ex={c.amount_ex} /> · {c.order_count}单
           </span>
         ))}
       </div>
       <div style={{ fontSize: 11.5, color: "var(--mb-text-3)", marginTop: 4 }}>
-        含税/不含税均为订单级真实总额（Excel 原值，零计算），跟随顶栏「价格口径」开关
+        含税/未税按管理员统一口径展示；仅有一侧原值时按统一 13% 税率补齐
       </div>
     </div>
   );
@@ -139,7 +168,7 @@ export default function PurchaseAnalysisPage() {
   const accent = token.colorPrimary;
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
-  const { basis } = useTaxBasis();
+  const basis = useTaxBasis("purchase");
 
   const [sp, setSp] = useSearchParams();
   const patch = useUrlPatch(sp, setSp);
@@ -217,7 +246,7 @@ export default function PurchaseAnalysisPage() {
         {isMobile && <div style={{ marginBottom: 14 }}>{filters}</div>}
 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
-          <KpiCard label={`近 ${days} 天采购额`} value={<TaxMoney inc={kpi?.total_amount_inc ?? null} ex={kpi?.total_amount_ex ?? null} stack />} sub="订单级真实总额（含税 / 不含税）" />
+          <KpiCard label={`近 ${days} 天采购额`} value={<TaxMoney scope="purchase" inc={kpi?.total_amount_inc ?? null} ex={kpi?.total_amount_ex ?? null} stack />} sub="订单总额（含税 / 未税）" />
           <KpiCard label="采购单数" value={kpi ? String(kpi.order_count) : "—"} sub={bySrc} />
           <KpiCard label="涉及型号" value={kpi ? String(kpi.part_count) : "—"} sub={kpi?.truncated ? `仅显示前 ${kpi.shown}` : undefined} />
           <KpiCard label="频发待计划" value={kpi ? String(kpi.frequent_count) : "—"} sub={`≥ ${data?.window.freq_threshold ?? 3} 次 / 窗口`} highlight />
@@ -267,7 +296,7 @@ export default function PurchaseAnalysisPage() {
               onExpandedRowsChange: (keys) => setExpandedKeys(keys as number[]),
               expandedRowRender: (r) => <ExpandedAnalysis partId={r.part_id} days={days}
                 excludeDesignated={excludeDesignated}
-                dateFrom={data?.window.since} dateTo={data?.window.until} />,
+                dateFrom={data?.window.since} dateTo={data?.window.until} basis={basis} />,
               rowExpandable: () => true,
             }}
           />
@@ -299,7 +328,8 @@ export default function PurchaseAnalysisPage() {
           <div style={{ display: "grid", gap: 12 }}>
             <PoolReferencePanel partId={detail.part_id} side="purchase" range="custom"
               dateFrom={data?.window.since} dateTo={data?.window.until} compact />
-            <MobileDrill partId={detail.part_id} days={days} excludeDesignated={excludeDesignated} />
+            <MobileDrill partId={detail.part_id} days={days}
+              excludeDesignated={excludeDesignated} basis={basis} />
           </div>
         )}
       </MobileDetailDrawer>

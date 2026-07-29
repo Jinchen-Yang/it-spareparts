@@ -17,7 +17,7 @@ from datetime import date as _date
 from sqlalchemy import and_, func, select, update
 from sqlalchemy.orm import Session
 
-from app import config, security
+from app import config, security, tax_policy
 from app.services.query_filters import active_orders
 from app.etl import anomaly
 from app.models.dimensions import DimCustomer, DimPart
@@ -30,20 +30,21 @@ _RATE = Decimal("0.0001")
 
 
 # 税口径同一规则的两种表示：本文件是 replay 期 Python 标量版（作用于 Decimal），
-# services/pricing.py 是 SQL 列表达式版（看板/池聚合用）。二者共享 config.PROFIT_VAT_RATE +
-# 同样的 is_tax_inclusive 分支，改口径须同步改两处（标量与 SQL 无法直接复用同一实现）。
+# services/pricing.py 是 SQL 列表达式版（看板/池聚合用）。二者共享
+# tax_policy.TAX_FACTOR + 同样的 is_tax_inclusive 分支；标量与 SQL 表达式无法直接复用。
 def _ex_tax_sale(amount: Decimal) -> Decimal:
     """销售含税额 → 未税额（统一 13%）。销售 unit_price 恒为含税单价。见 pricing.sale_ex_unit（SQL 版）。"""
-    if config.TAX_BASIS == "ex_tax":
-        return amount / (Decimal(1) + config.PROFIT_VAT_RATE)
-    return amount
+    return amount / tax_policy.TAX_FACTOR
 
 
 def _ex_tax_purchase(price: Decimal, is_tax_inclusive: bool | None) -> Decimal:
-    """采购单价 → 未税单价（统一 13%）。含税单(或口径未知，含税为常态) ÷1.13；
-    明确不含税单(is_tax_inclusive is False)取原值——采购 unit_price 口径跟随头表标记。"""
-    if config.TAX_BASIS == "ex_tax" and is_tax_inclusive is not False:
-        return price / (Decimal(1) + config.PROFIT_VAT_RATE)
+    """采购单价 → 未税单价（统一 13%）。
+
+    只有 ``is_tax_inclusive is True`` 才把原值视为含税并除以 1.13；
+    False/None 均按甲方约定视为未税原值。
+    """
+    if is_tax_inclusive is True:
+        return price / tax_policy.TAX_FACTOR
     return price
 
 
@@ -119,7 +120,7 @@ def recompute(db: Session) -> dict:
         fifo = lc.fifo if lc else None
         active = mov if active_is_moving else fifo
 
-        revenue = _ex_tax_sale(qty * up).quantize(_CENT)
+        revenue = tax_policy.round_money(_ex_tax_sale(qty * up))
         is_excluded_part = m["part"] in excluded_parts
         counts = (m["business_type"] in config.REVENUE_BUSINESS_TYPES) and not is_excluded_part
         if counts:
@@ -167,6 +168,33 @@ def recompute(db: Session) -> dict:
 
 def _f(x):
     return float(x) if x is not None else None
+
+
+def _money(value):
+    if value is None:
+        return None
+    return tax_policy.round_money(value)
+
+
+def _inc_from_ex(value):
+    rounded = _money(value)
+    if rounded is None:
+        return None
+    return tax_policy.inc_from_ex(rounded)
+
+
+def _money_difference(minuend, subtrahend):
+    left = _money(minuend)
+    right = _money(subtrahend)
+    if left is None or right is None:
+        return None
+    return tax_policy.round_money(left - right)
+
+
+def _inc_difference_from_ex(minuend_ex, subtrahend_ex):
+    left_inc = _inc_from_ex(minuend_ex)
+    right_inc = _inc_from_ex(subtrahend_ex)
+    return _money_difference(left_inc, right_inc)
 
 
 def aggregate(db: Session, dimension: str, date_from: _date | None,
@@ -232,24 +260,47 @@ def aggregate(db: Session, dimension: str, date_from: _date | None,
             return round((float(rev) - float(cost)) / float(rev), 4)
         return None
 
-    def _gp(rev, cost):
-        return round(float(rev) - float(cost), 2) if rev is not None and cost is not None else None
-
     rows = []
     for r in db.execute(stmt).all():
-        rc = r.rev_costed
+        revenue_ex = _money(r.revenue)
+        revenue_costed_ex = _money(r.rev_costed)
+        cost_moving_ex = _money(r.cost_ma)
+        cost_fifo_ex = _money(r.cost_ff)
+        excluded_revenue_ex = _money(r.excluded_revenue)
+        gp_moving = _money_difference(revenue_costed_ex, cost_moving_ex)
+        gp_fifo = _money_difference(revenue_costed_ex, cost_fifo_ex)
         rows.append({
             "dimension": r.dim or "(未知)",
-            "revenue": _f(r.revenue),                 # 计营收总额(全部计营收行)
-            "revenue_costed": _f(rc),                 # 其中已配到成本的营收(毛利分母)
+            "revenue": _f(revenue_ex),                 # 计营收总额(全部计营收行)
+            "revenue_ex": _f(revenue_ex),
+            "revenue_inc": _f(_inc_from_ex(revenue_ex)),
+            "revenue_costed": _f(revenue_costed_ex),   # 其中已配到成本的营收(毛利分母)
+            "revenue_costed_ex": _f(revenue_costed_ex),
+            "revenue_costed_inc": _f(_inc_from_ex(revenue_costed_ex)),
             # 移动加权
-            "cost_moving_avg": _f(r.cost_ma),
-            "gross_profit_moving": _gp(rc, r.cost_ma),
-            "gross_margin_moving": _margin(rc, r.cost_ma),
+            "cost_moving_avg": _f(cost_moving_ex),
+            "cost_moving_avg_ex": _f(cost_moving_ex),
+            "cost_moving_avg_inc": _f(_inc_from_ex(cost_moving_ex)),
+            "gross_profit_moving": _f(gp_moving),
+            "gross_profit_moving_ex": _f(gp_moving),
+            "gross_profit_moving_inc": _f(
+                _inc_difference_from_ex(revenue_costed_ex, cost_moving_ex),
+            ),
+            "gross_margin_moving": _margin(revenue_costed_ex, cost_moving_ex),
             # 先进先出
-            "cost_fifo": _f(r.cost_ff),
-            "gross_profit_fifo": _gp(rc, r.cost_ff),
-            "gross_margin_fifo": _margin(rc, r.cost_ff),
-            "lines": r.lines, "no_cost": r.no_cost, "excluded_revenue": _f(r.excluded_revenue),
+            "cost_fifo": _f(cost_fifo_ex),
+            "cost_fifo_ex": _f(cost_fifo_ex),
+            "cost_fifo_inc": _f(_inc_from_ex(cost_fifo_ex)),
+            "gross_profit_fifo": _f(gp_fifo),
+            "gross_profit_fifo_ex": _f(gp_fifo),
+            "gross_profit_fifo_inc": _f(
+                _inc_difference_from_ex(revenue_costed_ex, cost_fifo_ex),
+            ),
+            "gross_margin_fifo": _margin(revenue_costed_ex, cost_fifo_ex),
+            "lines": r.lines,
+            "no_cost": r.no_cost,
+            "excluded_revenue": _f(excluded_revenue_ex),
+            "excluded_revenue_ex": _f(excluded_revenue_ex),
+            "excluded_revenue_inc": _f(_inc_from_ex(excluded_revenue_ex)),
         })
     return {"dimension": dimension, "rows": rows}

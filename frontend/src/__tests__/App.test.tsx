@@ -5,6 +5,17 @@ vi.mock("../pages/LoginPage", () => ({
   default: () => <div>登录页</div>,
 }));
 
+vi.mock("../api/systemSettings", () => ({
+  getSystemSettings: () => Promise.resolve({
+    data: {
+      purchase_display_basis: "both",
+      sales_display_basis: "ex",
+      maintenance_display_basis: "both",
+      version: 1,
+    },
+  }),
+}));
+
 vi.mock("../AppShell", async () => {
   const { Outlet } = await import("react-router-dom");
   return { default: () => <Outlet /> };

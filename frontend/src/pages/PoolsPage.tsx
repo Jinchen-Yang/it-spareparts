@@ -12,6 +12,13 @@ import {
   type PoolAnalysisRange,
   type PoolReferenceSide,
 } from "../api/poolAnalysis";
+import {
+  TaxMoneyByBasis,
+  taxBasisCaption,
+  useTaxBasis,
+  type TaxBasis,
+} from "../context/TaxBasis";
+import { moneyExact, splitFixed } from "../utils/format";
 import { strictIsoDateRange } from "../utils/date";
 import { useLocalRestrictions } from "./boss/shared";
 
@@ -25,24 +32,29 @@ const RANGE_OPTIONS = [
 ];
 const VALID_RANGES = new Set(RANGE_OPTIONS.map((option) => option.value));
 
-const money = (value: number | null | undefined) => value == null ? null : `¥${Number(value).toLocaleString("zh-CN", {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-})}`;
-
-function PriceSummary({ side, kind, forceRestricted = false }: {
-  side: PoolReferenceSide; kind: "purchase" | "sales"; forceRestricted?: boolean;
+function PriceSummary({ side, kind, basis, forceRestricted = false }: {
+  side: PoolReferenceSide;
+  kind: "purchase" | "sales";
+  basis: TaxBasis;
+  forceRestricted?: boolean;
 }) {
   if (forceRestricted || side.restricted || side.constraint.status === "restricted") {
     return <Tag aria-label={`${kind === "purchase" ? "采购" : "销售"}池价格无权限`}>无池价格权限</Tag>;
   }
   const limitName = kind === "purchase" ? "人工上限" : "人工下限";
-  const limit = side.constraint.status === "unset" ? "未设置" : money(side.constraint.value) || "未设置";
+  const limit = side.constraint.status === "unset"
+    ? "未设置" : moneyExact(side.constraint.value);
+  const taxValue = (value: number | null | undefined) => {
+    const pair = splitFixed(value, "ex");
+    return value == null
+      ? "暂无样本"
+      : <TaxMoneyByBasis basis={basis} inc={pair.inc} ex={pair.ex} exact />;
+  };
   return (
     <div style={{ display: "grid", gap: 3, fontSize: 12.5, lineHeight: 1.45 }}>
-      <span>均价 <b>{money(side.pool_stats?.weighted_avg) || "暂无样本"}</b></span>
-      <span>中位 <b>{money(side.pool_stats?.median) || "暂无样本"}</b></span>
-      <span>{limitName} <b>{limit}</b></span>
+      <span>均价 <b>{taxValue(side.pool_stats?.weighted_avg)}</b></span>
+      <span>中位 <b>{taxValue(side.pool_stats?.median)}</b></span>
+      <span>{limitName}(未税) <b>{limit}</b></span>
       <span style={{ color: "var(--mb-text-3)" }}>
         {side.pool_stats?.order_count ?? 0} 单 / {side.pool_stats?.line_count ?? 0} 笔
       </span>
@@ -61,6 +73,8 @@ function readPage(value: string | null): number {
  */
 export default function PoolsPage() {
   const local = useLocalRestrictions();
+  const purchaseBasis = useTaxBasis("purchase");
+  const salesBasis = useTaxBasis("sales");
   const [sp, setSp] = useSearchParams();
   const parsedCustom = strictIsoDateRange(sp.get("from"), sp.get("to"));
   const hasCustomInput = sp.has("from") || sp.has("to") || sp.get("range") === "custom";
@@ -137,20 +151,22 @@ export default function PoolsPage() {
     },
     { title: "成员 PN", dataIndex: "member_count", width: 86, align: "right" },
     {
-      title: "采购参考（统一未税）",
+      title: `采购参考（${taxBasisCaption(purchaseBasis)}）`,
       key: "purchase",
       width: 220,
       render: (_, row) => <PriceSummary side={row.purchase_reference} kind="purchase"
+        basis={purchaseBasis}
         forceRestricted={local.governance} />,
     },
     {
-      title: "销售参考（统一未税）",
+      title: `销售参考（${taxBasisCaption(salesBasis)}）`,
       key: "sales",
       width: 220,
       render: (_, row) => <PriceSummary side={row.sales_reference} kind="sales"
+        basis={salesBasis}
         forceRestricted={local.governance} />,
     },
-  ], [detailQuery.toString(), local.governance]);
+  ], [detailQuery.toString(), local.governance, purchaseBasis, salesBasis]);
 
   return (
     <div data-testid="pool-analysis-list-page"
@@ -206,7 +222,7 @@ export default function PoolsPage() {
             style={{ width: "min(100%, 320px)" }}
           />
           <span style={{ color: "var(--mb-text-3)", fontSize: 12.5 }}>
-            默认近 90 天 · 价格统一换算为未税口径
+            默认近 90 天 · 采购/销售价格按管理员各自口径展示；人工约束价保留未税规则值
           </span>
         </div>
 

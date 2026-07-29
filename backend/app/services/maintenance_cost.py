@@ -2,18 +2,17 @@
 
 独立旁路：不改 cost.replay / profit.recompute 的任何语义（回归红线）。
 
-取价瀑布（每条有效出库行；旧五层保持零漂移，仅对原 none 行追加历史参考）：
+取价瀑布（每条有效出库行）：
   A0 direct    —— 专属采购直配：采购单「维保需求单」== 本行维保单号（WBDD），同 part 加权价
   A1 window    —— 出库日 ±MAINT_PRICE_WINDOW_DAYS 天内最近采购价（同距取更早、同日加权）
   A2 month_avg —— 同 part 出库当月采购加权均价（客户口径 Q1：当月加权）
-  B  trace_avg —— 向前追溯最近有采购的月份，上限 MAINT_TRACE_MAX_MONTHS（Q1/Q6：≤3 月，≥1 月标注）
-  C  sales_ref —— 「没有采购有销售」：备件销售真实成交价，同样 当月→追溯（Q3，客户原话标注）
-  D1 pool_purchase → pool_sales —— 有效互通 PN 池全体成员（含目标 PN）最近非空历史月
-  D2 purchase_history → sales_history —— 本 PN 最近非空历史月
-  E  none      —— 无成本，留人工
-每层取价 含税(inc) 优先、逐条标注 cost_tax_basis（Q4：原值口径，不换算）。
+  B1 pool_purchase → pool_sales —— 有效互通 PN 池全体成员（含目标 PN）三个月内参考
+  B2 purchase_history → sales_history —— 本 PN 三个月内参考
+  C  manual    —— 自动瀑布仍缺失时的人工回填
+  D  none      —— 无成本，待人工
+trace_avg/sales_ref 仅保留历史数据兼容，新重算不再产生。
 confidence：direct/window=high（校准中位偏差 0%）、month_avg=medium（6.9%）、
-trace_avg/sales_ref/新增历史参考=low（不伪装精确；超过 12 个月另标陈旧）。
+历史参考=low，人工回填=high。
 起算日（MAINT_COST_START_DATE）前的行不计价：cost_source=NULL，区别于"算了但没算出来"的 none。
 """
 import logging
@@ -26,9 +25,14 @@ from decimal import Decimal
 from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.orm import Session, aliased
 
-from app import config, security
+from app import config, security, tax_policy
 from app.business_time import business_today
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    FProjectExpense,
+    MaintenanceManualCostOverride,
+)
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.services import (
@@ -58,12 +62,14 @@ COSTED_SOURCES = (
     "pool_sales",
     "purchase_history",
     "sales_history",
+    "manual",
 )
 # v2 §16.1：置信度按来源定档——direct/window 校准中位偏差 0%、month_avg 6.9%、追溯/销售参考 25%+
 _CONFIDENCE = {"direct": "high", "window": "high", "month_avg": "medium",
                "trace_avg": "low", "sales_ref": "low",
                "pool_purchase": "low", "pool_sales": "low",
-               "purchase_history": "low", "sales_history": "low"}
+               "purchase_history": "low", "sales_history": "low",
+               "manual": "high"}
 
 
 def _ym(d: date) -> str:
@@ -180,7 +186,7 @@ def _pick_window(daily: dict, daily_dates: dict, part: int, odate: date, max_day
     for basis in _basis_order():
         s = slots.get(basis)
         if s and s[1] > 0:
-            return (s[0] / s[1]).quantize(_CENT), basis, best[0], best[1]
+            return tax_policy.round_money(s[0] / s[1]), basis, best[0], best[1]
     return None
 
 
@@ -225,7 +231,7 @@ def _pick(monthly: dict, part: int, ym: str):
     for basis in _basis_order():
         slot = monthly.get((part, ym, basis))
         if slot and slot[1] > 0:
-            return (slot[0] / slot[1]).quantize(_CENT), basis
+            return tax_policy.round_money(slot[0] / slot[1]), basis
     return None
 
 
@@ -260,12 +266,9 @@ def _resolve_legacy_cost(
     direct_samples: dict,
     daily_samples: dict,
     monthly_samples: dict,
-    sales_monthly: dict,
-    sales_monthly_samples: dict,
-    max_trace: int,
     window_days: int,
 ) -> _LegacyCostSelection:
-    """严格复刻 direct→window→month→trace→sales 的既有选择顺序。"""
+    """解析自动瀑布前三层；历史参考必须在通用池优先的新解析器中完成。"""
     if qty is None:
         return _LegacyCostSelection(source="none")
 
@@ -282,7 +285,7 @@ def _resolve_legacy_cost(
             slot = slots.get(basis)
             if slot and slot[1] > 0:
                 return _LegacyCostSelection(
-                    unit_cost=(slot[0] / slot[1]).quantize(_CENT),
+                    unit_cost=tax_policy.round_money(slot[0] / slot[1]),
                     basis=basis,
                     source="direct",
                     price_month=None if reference_date_missing else month,
@@ -323,36 +326,6 @@ def _resolve_legacy_cost(
             selected_samples=monthly_samples.get((part, month)),
         )
 
-    for trace in range(1, max_trace + 1):
-        price_month = _ym_shift(month, trace)
-        picked = _pick(monthly, part, price_month)
-        if picked:
-            unit_cost, basis = picked
-            return _LegacyCostSelection(
-                unit_cost=unit_cost,
-                basis=basis,
-                source="trace_avg",
-                price_month=price_month,
-                trace_months=trace,
-                selected_samples=monthly_samples.get((part, price_month)),
-            )
-
-    for trace in range(0, max_trace + 1):
-        price_month = _ym_shift(month, trace)
-        picked = _pick(sales_monthly, part, price_month)
-        if picked:
-            unit_cost, basis = picked
-            return _LegacyCostSelection(
-                unit_cost=unit_cost,
-                basis=basis,
-                source="sales_ref",
-                price_month=price_month,
-                trace_months=trace,
-                selected_samples=sales_monthly_samples.get(
-                    (part, price_month)
-                ),
-            )
-
     return _LegacyCostSelection()
 
 
@@ -365,7 +338,7 @@ class MaintenanceCostRecomputeBusy(RuntimeError):
     """导入或另一轮重算正在持有数据变更锁。"""
 
 
-def recompute(db: Session) -> dict:
+def recompute(db: Session, *, commit: bool = True) -> dict:
     """重算所有作用域内维保出库行的成本，批量回填。返回各来源计数。
 
     作用域 = 已生效 且 order_date ≥ MAINT_COST_START_DATE；起算日前/无日期 → 不计价（cost_source=NULL）；
@@ -390,8 +363,6 @@ def recompute(db: Session) -> dict:
         daily_samples,
         monthly_samples,
     ) = _purchase_pools(db)
-    sales_monthly, sales_monthly_samples = _sales_pool(db)
-
     db.execute(
         update(FMaintenanceLine).values(
             unit_cost=None, cost_amount=None, cost_source=None, cost_tax_basis=None,
@@ -419,7 +390,6 @@ def recompute(db: Session) -> dict:
     rows = db.execute(q).all()
 
     start = config.MAINT_COST_START_DATE
-    max_trace = config.MAINT_TRACE_MAX_MONTHS
     window_days = config.MAINT_PRICE_WINDOW_DAYS
     legacy_selections = {
         row.id: _resolve_legacy_cost(
@@ -434,9 +404,6 @@ def recompute(db: Session) -> dict:
             direct_samples=direct_samples,
             daily_samples=daily_samples,
             monthly_samples=monthly_samples,
-            sales_monthly=sales_monthly,
-            sales_monthly_samples=sales_monthly_samples,
-            max_trace=max_trace,
             window_days=window_days,
         )
         for row in rows
@@ -458,11 +425,22 @@ def recompute(db: Session) -> dict:
             default=start,
         ),
     )
+    manual_overrides = {
+        override.line_id: override
+        for override in db.scalars(
+            select(MaintenanceManualCostOverride).where(
+                MaintenanceManualCostOverride.active.is_(True),
+                MaintenanceManualCostOverride.line_id.in_(
+                    [row.id for row in reference_scope],
+                ),
+            )
+        )
+    } if reference_scope else {}
     stats = {"lines_in_scope": 0, "out_of_scope": 0, "missing_qty": 0,
              "direct": 0, "window": 0, "month_avg": 0, "trace_avg": 0, "sales_ref": 0,
              "pool_purchase": 0, "pool_sales": 0,
              "purchase_history": 0, "sales_history": 0,
-             "none": 0, "cost_overflow": 0}
+             "manual": 0, "none": 0, "cost_overflow": 0}
     updates = []
     for lid, part, qty, rqty, flags, order_no, odate in rows:
         if odate is None or odate < start:      # 起算日外：不计价，flags 已由上面 SQL 收敛
@@ -488,8 +466,7 @@ def recompute(db: Session) -> dict:
             base_flags.append("missing_qty")
             stats["missing_qty"] += 1
 
-        # 既有五层只新增双税/证据底座，legacy 价格、来源、税口径完全沿用旧选择。
-        if source in {"direct", "window", "month_avg", "trace_avg", "sales_ref"}:
+        if source in {"direct", "window", "month_avg"}:
             if selected_samples:
                 (
                     unit_cost_inc,
@@ -505,7 +482,7 @@ def recompute(db: Session) -> dict:
                     reference_date_missing,
                 ) = maintenance_cost_reference.summarize_samples(selected_samples)
                 reference_to_date = reference_latest_date
-                reference_side = "sales" if source == "sales_ref" else "purchase"
+                reference_side = "purchase"
                 if tax_rate_estimated:
                     base_flags.append("tax_rate_estimated")
                 if inc_tax_estimated:
@@ -517,7 +494,7 @@ def recompute(db: Session) -> dict:
                     reference_to_date = None
                     reference_latest_date = None
                     base_flags.append("reference_date_missing")
-        # D 旧五层全部失配后才进入历史参考；严禁改变既有命中的来源与 legacy 结果。
+        # 前三层全部失配后，严格按池采购→池销售→本 PN 采购→本 PN 销售。
         if source is None:
             reference = reference_index.resolve(part, odate)
             if reference is not None:
@@ -536,6 +513,23 @@ def recompute(db: Session) -> dict:
                 reference_to_date = reference.reference_to_date
                 reference_latest_date = reference.reference_latest_date
                 base_flags.extend(reference.anomaly_flags)
+        # 人工成本只能接管自动瀑布仍未命中的行；不允许覆盖任何自动证据。
+        if source is None and (override := manual_overrides.get(lid)) is not None:
+            try:
+                manual_ex = Decimal(override.unit_cost_ex_tax)
+                manual_inc = Decimal(override.unit_cost_inc_tax)
+            except (ArithmeticError, TypeError, ValueError):
+                manual_ex = manual_inc = Decimal("NaN")
+            if (
+                manual_ex.is_finite()
+                and manual_inc.is_finite()
+                and _ZERO <= manual_ex < _MONEY_MAX
+                and _ZERO <= manual_inc < _MONEY_MAX
+            ):
+                source = "manual"
+                basis = "ex"
+                unit_cost = unit_cost_ex = tax_policy.round_money(manual_ex)
+                unit_cost_inc = tax_policy.round_money(manual_inc)
         if source is None:
             source = "none"
             base_flags.append("no_cost")
@@ -546,10 +540,14 @@ def recompute(db: Session) -> dict:
         cost_amount_inc = cost_amount_ex = None
         if unit_cost is not None:
             eff_qty = max((qty or _ZERO) - (rqty or _ZERO), _ZERO)
-            cost_amount = (eff_qty * unit_cost).quantize(_CENT)
+            cost_amount = tax_policy.round_money(eff_qty * unit_cost)
             if unit_cost_inc is not None and unit_cost_ex is not None:
-                cost_amount_inc = (eff_qty * unit_cost_inc).quantize(_CENT)
-                cost_amount_ex = (eff_qty * unit_cost_ex).quantize(_CENT)
+                cost_amount_inc = tax_policy.round_money(
+                    eff_qty * unit_cost_inc,
+                )
+                cost_amount_ex = tax_policy.round_money(
+                    eff_qty * unit_cost_ex,
+                )
             # 溢出守卫：单价/数量异常导致金额超 Numeric(14,2) 容量 → 行级隔离（可见可修，不拖垮全批）
             amounts = (
                 unit_cost,
@@ -594,7 +592,10 @@ def recompute(db: Session) -> dict:
 
     for i in range(0, len(updates), 1000):
         db.execute(update(FMaintenanceLine), updates[i:i + 1000])
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     _log.info("maintenance_cost.recompute: %s", stats)
     return stats
 
@@ -674,7 +675,7 @@ def _parts_tax_basis_summary(
     prefix = f"parts_cost_{basis}_tax"
     if lines <= 0:
         return {
-            prefix: Decimal(amount or _ZERO).quantize(_CENT),
+            prefix: tax_policy.round_money(amount or _ZERO),
             f"{prefix}_complete": False,
             f"{prefix}_quality": "incomplete",
             f"{prefix}_missing_lines": 0,
@@ -690,7 +691,7 @@ def _parts_tax_basis_summary(
         else "actual_only"
     )
     return {
-        prefix: Decimal(amount or _ZERO).quantize(_CENT),
+        prefix: tax_policy.round_money(amount or _ZERO),
         f"{prefix}_complete": missing_lines == 0,
         f"{prefix}_quality": quality,
         f"{prefix}_missing_lines": missing_lines,
@@ -848,14 +849,15 @@ def projects_aggregate(db: Session, date_from: date | None = None,
     contract: dict[str, Decimal] = {}
     all_orders = list(order_no_projects.keys())
     if all_orders:
-        cq = active_orders(
-            select(FSalesOrder.order_no, FSalesOrder.amount_ex_tax, FSalesOrder.tax_rate)
-            .where(FSalesOrder.order_no.in_(all_orders)), FSalesOrder)
-        for ono, ex, trate in db.execute(cq).all():
-            if ex is None:
-                continue
-            inc = (ex * (Decimal(1) + (trate or _ZERO))).quantize(_CENT)
-            contract[ono] = max(contract.get(ono, _ZERO), inc)
+        contract = {
+            order_no: evidence.legacy_contract_amount_inc
+            for order_no, evidence in
+            maintenance_margin_evidence.load_contract_revenue_evidence(
+                db,
+                all_orders,
+            ).items()
+            if evidence.legacy_contract_amount_inc is not None
+        }
 
     rows = []
     for r, lifecycle_status in raw:
@@ -883,12 +885,12 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             estimated_lines=estimated_lines,
             missing_cost_lines=missing_cost_lines,
         )
-        cost_inc = (
+        cost_inc = tax_policy.round_money(
             cost_summary["actual_cost_inc"] + cost_summary["estimated_cost_inc"]
-        ).quantize(_CENT)
-        cost_ex = (
+        )
+        cost_ex = tax_policy.round_money(
             cost_summary["actual_cost_ex"] + cost_summary["estimated_cost_ex"]
-        ).quantize(_CENT)
+        )
         dual_summary = _dual_cost_summary_from_row(r, lines=r.lines)
         rows.append({
             "project": r.project,
@@ -1075,19 +1077,16 @@ def project_lines(db: Session, project: str, month: str | None = None,
 # ============================================================
 
 def _contract_amounts(db: Session, order_nos: list[str]) -> dict[str, Decimal]:
-    """XSDD → 合同额（含税参考 = 不含税×(1+税率)）；重复单号取最大。"""
-    out: dict[str, Decimal] = {}
-    if not order_nos:
-        return out
-    cq = active_orders(
-        select(FSalesOrder.order_no, FSalesOrder.amount_ex_tax, FSalesOrder.tax_rate)
-        .where(FSalesOrder.order_no.in_(order_nos)), FSalesOrder)
-    for ono, ex, trate in db.execute(cq).all():
-        if ex is None:
-            continue
-        inc = (ex * (Decimal(1) + (trate or _ZERO))).quantize(_CENT)
-        out[ono] = max(out.get(ono, _ZERO), inc)
-    return out
+    """XSDD → 最新有效版本的 13% 含税合同额。"""
+    return {
+        order_no: evidence.legacy_contract_amount_inc
+        for order_no, evidence in
+        maintenance_margin_evidence.load_contract_revenue_evidence(
+            db,
+            order_nos,
+        ).items()
+        if evidence.legacy_contract_amount_inc is not None
+    }
 
 
 def _expense_by_contract(db: Session, date_from: date | None = None,
@@ -1278,6 +1277,12 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
         date_from=date_from,
         date_to=date_to,
     )
+    expense_snapshot_complete = (
+        maintenance_margin_evidence.load_expense_snapshot_completeness(
+            db,
+            contract_nos,
+        )
+    )
     # 旧预算看板继续使用历史“含税参考取最大、费用净额”语义；正式双口径毛利
     # 同时复用同两次查询里的严格证据，不新增查询也不暗改兼容结果。
     contracts = {
@@ -1290,10 +1295,6 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
         for contract_no, evidence in expense_evidence.items()
     }
     warn = Decimal(str(config.MAINT_BUDGET_WARN_PCT))
-    # 生产尚未用项目追踪工作簿报销明细建立可证明完整的费用数据水位。即使库里已有零散报销行，也只能
-    # 作为“当前已知记录”，不得把其余合同的无记录解释为费用为 0。
-    expense_data_available = False
-
     rows = []
     for cno, g in groups.items():
         cost_summary = g["single_project_summary"]
@@ -1323,6 +1324,7 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
         budget = contracts.get(cno) if cno else None
         contract_revenue = revenue_evidence.get(cno)
         contract_expense = expense_evidence.get(cno)
+        expense_data_available = expense_snapshot_complete.get(cno, False)
         margin_result = maintenance_margin.calculate_contract_margin(
             revenue_ex=(
                 contract_revenue.revenue_ex
@@ -1336,8 +1338,12 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             parts_cost_ex_tax=dual_summary["parts_cost_ex_tax"],
             cost_quality_inc=dual_summary["parts_cost_inc_tax_quality"],
             cost_quality_ex=dual_summary["parts_cost_ex_tax_quality"],
-            unknown_expense_total=(
-                contract_expense.unknown_tax_total
+            expense_inc=(
+                contract_expense.expense_inc
+                if contract_expense is not None else _ZERO
+            ),
+            expense_ex=(
+                contract_expense.expense_ex
                 if contract_expense is not None else _ZERO
             ),
             expense_data_available=expense_data_available,
@@ -1495,14 +1501,20 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             "lifecycle_counts": lifecycle_counts}
 
 
-def contract_workbook_data(db: Session, contract: str) -> dict:
+def contract_workbook_data(
+    db: Session,
+    contract: str,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> dict:
     """§16.4 工作簿导出数据：合同抬头 + 月度×分类汇总 + 出库明细(单据级回填) + 报销明细。"""
+    date_filtered = date_from is not None or date_to is not None
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     stmt = (
         select(ml, mo).join(mo, ml.order_id == mo.id)
         .where(mo.linked_sales_order_no == contract)
     )
-    stmt = _scoped_filters(stmt, None, None)
+    stmt = _scoped_filters(stmt, date_from, date_to)
     stmt = stmt.order_by(mo.order_date.asc().nullslast(), mo.order_no, ml.line_no.asc().nullslast(), ml.id)
     lines = db.execute(stmt).all()
 
@@ -1563,9 +1575,18 @@ def contract_workbook_data(db: Session, contract: str) -> dict:
         ))
 
     pe = FProjectExpense
+    expense_stmt = select(pe).where(pe.linked_sales_order_no == contract)
+    if date_from is not None:
+        expense_stmt = expense_stmt.where(pe.expense_date >= date_from)
+    if date_to is not None:
+        expense_stmt = expense_stmt.where(pe.expense_date <= date_to)
     exp_rows = db.execute(
-        select(pe).where(pe.linked_sales_order_no == contract)
-        .order_by(pe.expense_date.asc().nullslast(), pe.bxd_no, pe.line_no, pe.id)
+        expense_stmt.order_by(
+            pe.expense_date.asc().nullslast(),
+            pe.bxd_no,
+            pe.line_no,
+            pe.id,
+        )
     ).scalars().all()
 
     # 月度汇总分命名空间保存，避免费用分类与内置的备件成本列同名时互相覆盖。
@@ -1593,29 +1614,17 @@ def contract_workbook_data(db: Session, contract: str) -> dict:
                 e.fee_category or "(未分类费用)"
             ] += e.amount
 
-    sales_orders = db.execute(active_orders(
-        select(FSalesOrder).where(FSalesOrder.order_no == contract),
-        FSalesOrder,
-    )).scalars().all()
-    revenue_evidence = maintenance_margin_evidence.summarize_revenue_candidates(
-        (order.amount_ex_tax, order.tax_rate)
-        for order in sales_orders
+    revenue_evidence = maintenance_margin_evidence.load_contract_revenue_evidence(
+        db,
+        [contract],
+    ).get(contract)
+    contract_tax_rate = (
+        tax_policy.TAX_RATE
+        if revenue_evidence is not None else None
     )
-    contract_tax_rate = None
-    contract_tax_status = "missing"
-    if revenue_evidence is not None:
-        if revenue_evidence.tax_rate_ambiguous:
-            contract_tax_status = "ambiguous"
-        elif revenue_evidence.tax_rate is not None:
-            candidate_tax_rate = Decimal(revenue_evidence.tax_rate)
-            if (
-                candidate_tax_rate.is_finite()
-                and Decimal("0") <= candidate_tax_rate < Decimal("1")
-            ):
-                contract_tax_rate = candidate_tax_rate
-                contract_tax_status = "available"
-            else:
-                contract_tax_status = "invalid"
+    contract_tax_status = (
+        "available" if revenue_evidence is not None else "missing"
+    )
     budget = (
         revenue_evidence.legacy_contract_amount_inc
         if revenue_evidence is not None else None
@@ -1629,7 +1638,12 @@ def contract_workbook_data(db: Session, contract: str) -> dict:
         ),
         _ZERO,
     )
-    expense_data_available = False
+    expense_data_available = (
+        maintenance_margin_evidence.load_expense_snapshot_completeness(
+            db,
+            [contract],
+        ).get(contract, False)
+    )
     decision = maintenance_cost_quality.budget_decision(
         cost_summary,
         budget=budget,
@@ -1637,8 +1651,20 @@ def contract_workbook_data(db: Session, contract: str) -> dict:
         expense_data_available=expense_data_available,
         warn_pct=Decimal(str(config.MAINT_BUDGET_WARN_PCT)),
     )
-    active_expense_evidence = maintenance_margin_evidence.summarize_expense_amounts(
-        expense.amount
+    if date_filtered:
+        # 区间支出只是所选期间事实，不能与整合同预算比较并推导红黄绿或余量。
+        decision = {
+            "decision_status": "filtered_scope",
+            "known_spend_total": decision["known_spend_total"],
+            "remaining": None,
+            "remaining_pct": None,
+        }
+    active_expense_evidence = maintenance_margin_evidence.summarize_expense_records(
+        (
+            expense.amount,
+            expense.amount_ex_tax,
+            expense.amount_inc_tax,
+        )
         for expense in exp_rows
         if expense.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
     )
@@ -1655,13 +1681,16 @@ def contract_workbook_data(db: Session, contract: str) -> dict:
         parts_cost_ex_tax=dual_cost_summary["parts_cost_ex_tax"],
         cost_quality_inc=dual_cost_summary["parts_cost_inc_tax_quality"],
         cost_quality_ex=dual_cost_summary["parts_cost_ex_tax_quality"],
-        unknown_expense_total=(
-            active_expense_evidence.unknown_tax_total
+        expense_inc=(
+            active_expense_evidence.expense_inc
             if active_expense_evidence is not None else _ZERO
         ),
-        # 工作簿与看板同一门禁：报销明细覆盖范围与完整性未证明前只发布备件毛利。
+        expense_ex=(
+            active_expense_evidence.expense_ex
+            if active_expense_evidence is not None else _ZERO
+        ),
         expense_data_available=expense_data_available,
-        date_filtered=False,
+        date_filtered=date_filtered,
         revenue_ambiguous_inc=(
             revenue_evidence.ambiguous_inc
             if revenue_evidence is not None else False
@@ -1672,6 +1701,7 @@ def contract_workbook_data(db: Session, contract: str) -> dict:
         ),
     )
     return {"contract": contract, "budget": budget,
+            "date_filtered": date_filtered,
             "contract_tax_rate": contract_tax_rate,
             "contract_tax_status": contract_tax_status,
             "lines": lines, "doc_total": doc_total,

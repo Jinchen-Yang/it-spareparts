@@ -22,7 +22,14 @@ import PoolPnPriceMap from "../components/charts/PoolPnPriceMap";
 import MobileDetailDrawer, { type DetailField } from "../components/MobileDetailDrawer";
 import PoolOrderDetailModal from "../components/pools/PoolOrderDetailModal";
 import PurchaseTypeSelect from "../components/pools/PurchaseTypeSelect";
-import { EMPTY, moneyExact, qty } from "../utils/format";
+import {
+  TaxMoneyByBasis,
+  taxBasisCaption,
+  taxSidesForBasis,
+  useTaxBasis,
+  type TaxBasis,
+} from "../context/TaxBasis";
+import { EMPTY, moneyExact, qty, splitFixed } from "../utils/format";
 import { ISO_DATE_FORMAT, strictIsoDateRange } from "../utils/date";
 import { poolAnalysisPartPath } from "../utils/poolAnalysisNavigation";
 import { PartLink } from "./boss/PartsTable";
@@ -94,6 +101,8 @@ export default function PoolAnalysisPage() {
   const navigate = useNavigate();
   const [sp, setSp] = useSearchParams();
   const local = useLocalRestrictions();
+  const purchaseBasis = useTaxBasis("purchase");
+  const salesBasis = useTaxBasis("sales");
   const screens = Grid.useBreakpoint();
   const isMobile = screens.md === false;
 
@@ -227,6 +236,19 @@ export default function PoolAnalysisPage() {
   const memberRestricted = (member: PoolAnalysisMember, side: "purchase" | "sales") =>
     isReferenceRestricted(side === "purchase" ? member.purchase_reference : member.sales_reference,
       local.governance);
+  const basisForSide = (side: "purchase" | "sales"): TaxBasis =>
+    side === "purchase" ? purchaseBasis : salesBasis;
+  const taxValue = (side: "purchase" | "sales", value: number | null | undefined) => {
+    const pair = splitFixed(value, "ex");
+    return (
+      <TaxMoneyByBasis
+        basis={basisForSide(side)}
+        inc={pair.inc}
+        ex={pair.ex}
+        exact
+      />
+    );
+  };
 
   // ---- 成员表 ----
   const focusedMembers = useMemo(() => {
@@ -250,34 +272,44 @@ export default function PoolAnalysisPage() {
       </span>) },
     { title: "描述", dataIndex: "description", width: 180, ellipsis: true,
       render: (v) => v || <span style={MUTED}>{EMPTY}</span> },
-    { title: "采购均价(窗口)", key: "pavg", width: 118, align: "right",
-      render: (_, m) => {
+    ...taxSidesForBasis(purchaseBasis).map((taxSide) => ({
+      title: `采购均价(${taxSide === "inc" ? "含税" : "不含税"})`,
+      key: `pavg_${taxSide}`,
+      width: 118,
+      align: "right" as const,
+      render: (_: unknown, m: PoolAnalysisMember) => {
         const v = m.purchase_reference.part_stats?.weighted_avg;
         if (memberRestricted(m, "purchase")) return <span style={MUTED}>无池价格权限</span>;
-        return v == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(v);
-      } },
+        return moneyExact(splitFixed(v, "ex")[taxSide]);
+      },
+    })),
     { title: "采购量", key: "pq", width: 82, align: "right",
       render: (_, m) => memberRestricted(m, "purchase")
         ? <span style={MUTED}>无池价格权限</span>
         : qty(m.purchase_reference.part_stats?.total_qty) },
-    { title: "采购 vs 池均", key: "pd", width: 106, align: "right",
+    { title: "采购 vs 池均(未税差额)", key: "pd", width: 142, align: "right",
       render: (_, m) => {
         const v = m.purchase_reference.delta_to_pool_avg;
         if (memberRestricted(m, "purchase")) return <span style={MUTED}>无池价格权限</span>;
         return v == null ? <span style={MUTED}>{EMPTY}</span>
           : <span style={{ color: v > 0 ? "#c0524a" : undefined }}>{signedMoney(v)}</span>;
       } },
-    { title: "销售均价(窗口)", key: "savg", width: 118, align: "right",
-      render: (_, m) => {
+    ...taxSidesForBasis(salesBasis).map((taxSide) => ({
+      title: `销售均价(${taxSide === "inc" ? "含税" : "不含税"})`,
+      key: `savg_${taxSide}`,
+      width: 118,
+      align: "right" as const,
+      render: (_: unknown, m: PoolAnalysisMember) => {
         const v = m.sales_reference.part_stats?.weighted_avg;
         if (memberRestricted(m, "sales")) return <span style={MUTED}>无池价格权限</span>;
-        return v == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(v);
-      } },
+        return moneyExact(splitFixed(v, "ex")[taxSide]);
+      },
+    })),
     { title: "销量", key: "sq", width: 78, align: "right",
       render: (_, m) => memberRestricted(m, "sales")
         ? <span style={MUTED}>无池价格权限</span>
         : qty(m.sales_reference.part_stats?.total_qty) },
-    { title: "销售 vs 池均", key: "sd", width: 106, align: "right",
+    { title: "销售 vs 池均(未税差额)", key: "sd", width: 142, align: "right",
       render: (_, m) => {
         const v = m.sales_reference.delta_to_pool_avg;
         if (memberRestricted(m, "sales")) return <span style={MUTED}>无池价格权限</span>;
@@ -300,26 +332,35 @@ export default function PoolAnalysisPage() {
       { label: "型号", value: <PartLink partId={member.part_id} pn={member.pn_std} /> },
       { label: "品牌", value: member.brand || EMPTY },
       { label: "描述", value: member.description || EMPTY },
-      { label: "采购均价", value: value("purchase", moneyExact(purchase.part_stats?.weighted_avg)) },
+      { label: `采购均价(${taxBasisCaption(purchaseBasis)})`,
+        value: value("purchase", taxValue("purchase", purchase.part_stats?.weighted_avg)) },
       { label: "采购量", value: value("purchase", qty(purchase.part_stats?.total_qty)) },
-      { label: "采购 vs 池均", value: value("purchase", signedMoney(purchase.delta_to_pool_avg) || EMPTY) },
-      { label: "采购池约束", value: constraint("purchase", purchase) },
-      { label: "销售均价", value: value("sales", moneyExact(sales.part_stats?.weighted_avg)) },
+      { label: "采购 vs 池均(未税差额)",
+        value: value("purchase", signedMoney(purchase.delta_to_pool_avg) || EMPTY) },
+      { label: "采购池约束(未税)", value: constraint("purchase", purchase) },
+      { label: `销售均价(${taxBasisCaption(salesBasis)})`,
+        value: value("sales", taxValue("sales", sales.part_stats?.weighted_avg)) },
       { label: "销售量", value: value("sales", qty(sales.part_stats?.total_qty)) },
-      { label: "销售 vs 池均", value: value("sales", signedMoney(sales.delta_to_pool_avg) || EMPTY) },
-      { label: "销售池约束", value: constraint("sales", sales) },
+      { label: "销售 vs 池均(未税差额)",
+        value: value("sales", signedMoney(sales.delta_to_pool_avg) || EMPTY) },
+      { label: "销售池约束(未税)", value: constraint("sales", sales) },
     ];
   };
 
   const mobileMemberSummary = (member: PoolAnalysisMember, side: "purchase" | "sales") => {
     const reference = side === "purchase" ? member.purchase_reference : member.sales_reference;
     if (memberRestricted(member, side)) return <span style={MUTED}>无池价格权限</span>;
-    return <>{side === "purchase" ? "采购" : "销售"}均价 {moneyExact(reference.part_stats?.weighted_avg)} ·
+    return <>{side === "purchase" ? "采购" : "销售"}均价 {taxValue(
+      side,
+      reference.part_stats?.weighted_avg,
+    )} ·
       数量 {qty(reference.part_stats?.total_qty)}</>;
   };
 
   // ---- 订单板块（行粒度，点单号看订单全貌）----
-  const orderCols = (side: "purchase" | "sales"): ColumnsType<PoolAnalysisOrderLine> => [
+  const orderCols = (side: "purchase" | "sales"): ColumnsType<PoolAnalysisOrderLine> => {
+    const displayBasis = basisForSide(side);
+    return [
     { title: "日期", dataIndex: "order_date", width: 104, render: (v) => v || EMPTY },
     { title: "单号", dataIndex: "order_no", width: 140, render: (v, row) => (
       <Button type="link" size="small" onClick={() => setOrderModal({ side, orderId: row.order_id })}
@@ -345,25 +386,36 @@ export default function PoolAnalysisPage() {
     ]),
     { title: "PN", key: "pn", width: 160, render: (_, r) => <PartLink partId={r.part_id} pn={r.pn_std} /> },
     { title: "数量", dataIndex: "quantity", width: 72, align: "right", render: qty },
-    { title: "未税单价", key: "unit_price", width: 96, align: "right",
-      render: (_, row) => {
+    ...taxSidesForBasis(displayBasis).map((taxSide) => ({
+      title: `单价(${taxSide === "inc" ? "含税" : "不含税"})`,
+      key: `unit_price_${taxSide}`,
+      width: 108,
+      align: "right" as const,
+      render: (_: unknown, row: PoolAnalysisOrderLine) => {
         const value = side === "purchase"
           ? (row as PoolAnalysisPurchaseOrderLine).purchase_unit_price_ex_tax
           : (row as PoolAnalysisSaleOrderLine).sale_unit_price_ex_tax;
         return sideRestricted(side)
           ? <span style={MUTED}>无池价格权限</span>
-          : value == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(value);
-      } },
-    { title: "金额(未税)", key: "line_value", width: 104, align: "right",
-      render: (_, row) => {
+          : moneyExact(splitFixed(value, "ex")[taxSide]);
+      },
+    })),
+    ...taxSidesForBasis(displayBasis).map((taxSide) => ({
+      title: `金额(${taxSide === "inc" ? "含税" : "不含税"})`,
+      key: `line_value_${taxSide}`,
+      width: 112,
+      align: "right" as const,
+      render: (_: unknown, row: PoolAnalysisOrderLine) => {
         const value = side === "purchase"
           ? (row as PoolAnalysisPurchaseOrderLine).purchase_line_value_ex_tax
           : (row as PoolAnalysisSaleOrderLine).sale_line_value_ex_tax;
         return sideRestricted(side)
           ? <span style={MUTED}>无池价格权限</span>
-          : value == null ? <span style={MUTED}>{EMPTY}</span> : moneyExact(value);
-    } },
-  ];
+          : moneyExact(splitFixed(value, "ex")[taxSide]);
+      },
+    })),
+    ];
+  };
 
   const orderPagination = (side: "purchase" | "sales") => {
     const block = side === "purchase" ? d?.purchase_orders : d?.sales_orders;
@@ -413,7 +465,7 @@ export default function PoolAnalysisPage() {
                   <span>数量 {qty(row.quantity)}</span>
                   {sideRestricted(side)
                     ? <span style={MUTED}>无池价格权限</span>
-                    : <span>未税单价 {moneyExact(price)}</span>}
+                    : <span>单价({taxBasisCaption(basisForSide(side))}) {taxValue(side, price)}</span>}
                 </div>
               </div>
             </List.Item>
@@ -443,7 +495,7 @@ export default function PoolAnalysisPage() {
       style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowX: "hidden" }}>
       <PageHeader
         title={d ? `${d.name || `通用号池 #${groupId}`}` : `通用号池 #${groupId}`}
-        subtitle="池分析详情（只读）：成员排名 · 约束价参考 · 订单明细（金额均未税）"
+        subtitle="池分析详情（只读）：业务价格按采购/销售管理员口径展示；人工约束与差额保留未税规则值"
         extra={
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap",
             width: isMobile ? "100%" : undefined, minWidth: 0 }}>
@@ -487,29 +539,29 @@ export default function PoolAnalysisPage() {
                 <Descriptions size="small" column={{ xs: 1, sm: 2, md: 4 }}>
                   <Descriptions.Item label="池编号">#{d.group_id}</Descriptions.Item>
                   <Descriptions.Item label="成员数">{d.member_count}</Descriptions.Item>
-                  <Descriptions.Item label="人工最高采购价">
+                  <Descriptions.Item label="人工最高采购价(未税)">
                     {sideRestricted("purchase") ? <span style={MUTED}>无池价格权限</span>
                       : d.purchase_reference.constraint.status === "unset"
                         ? <span style={MUTED}>未设置</span>
                         : moneyExact(d.purchase_reference.constraint.value)}
                   </Descriptions.Item>
-                  <Descriptions.Item label="人工最低销售价">
+                  <Descriptions.Item label="人工最低销售价(未税)">
                     {sideRestricted("sales") ? <span style={MUTED}>无池价格权限</span>
                       : d.sales_reference.constraint.status === "unset"
                         ? <span style={MUTED}>未设置</span>
                         : moneyExact(d.sales_reference.constraint.value)}
                   </Descriptions.Item>
-                  <Descriptions.Item label="窗口采购">
+                  <Descriptions.Item label={`窗口采购(${taxBasisCaption(purchaseBasis)})`}>
                     {sideRestricted("purchase")
                       ? <span style={MUTED}>无池价格权限</span>
-                      : <>{moneyExact(d.purchase_reference.pool_stats?.total_amount)} ·
+                      : <>{taxValue("purchase", d.purchase_reference.pool_stats?.total_amount)} ·
                           {qty(d.purchase_reference.pool_stats?.total_qty)} 件 ·
                           {d.purchase_reference.pool_stats?.order_count ?? 0} 单</>}
                   </Descriptions.Item>
-                  <Descriptions.Item label="窗口销售">
+                  <Descriptions.Item label={`窗口销售(${taxBasisCaption(salesBasis)})`}>
                     {sideRestricted("sales")
                       ? <span style={MUTED}>无池价格权限</span>
-                      : <>{moneyExact(d.sales_reference.pool_stats?.total_amount)} ·
+                      : <>{taxValue("sales", d.sales_reference.pool_stats?.total_amount)} ·
                           {qty(d.sales_reference.pool_stats?.total_qty)} 件 ·
                           {d.sales_reference.pool_stats?.order_count ?? 0} 单</>}
                   </Descriptions.Item>
@@ -645,6 +697,7 @@ export default function PoolAnalysisPage() {
                     action={<Button size="small" onClick={reloadPriceMap}>重试</Button>} />
                     : priceMap ? <PoolPnPriceMap key={currentPriceMapScopeKey}
                       data={priceMap} loading={priceMapLoading}
+                      basis={basisForSide(priceMap.side)}
                       isMobile={isMobile}
                       onPartOpen={(partId) => navigate(poolAnalysisPartPath(
                         partId, partNavigationContext,

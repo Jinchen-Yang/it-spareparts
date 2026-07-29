@@ -49,13 +49,51 @@ export const escapeHtml = (s: string | null | undefined): string =>
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
 
-// 含税/不含税分列（零计算，只镜像真实值；缺的一侧 null → 显示 EMPTY，绝不用税率换算）。
+// 采购、销售统一按 13% 增值税率补齐双口径。API 已明确给出双值时优先使用 API；
+// 只有一侧原始值时才走这里换算，避免“选择含税后整列为空”。
 export type TaxSplit = { inc: number | null; ex: number | null };
 
-// 采购：口径跟随订单 is_tax_inclusive（含税单→含税侧、不含单→不含税侧、未标注→含税侧）。
-export const splitByFlag = (v: number | null | undefined, isInc: boolean | null): TaxSplit =>
-  isInc === false ? { inc: null, ex: v ?? null } : { inc: v ?? null, ex: null };
+export const STANDARD_VAT_RATE = 0.13;
 
-// 固定口径：销售价/参考价/询价=含税；成本/库存估值/营收=不含税。只填该侧，另一侧留空。
-export const splitFixed = (v: number | null | undefined, side: "inc" | "ex"): TaxSplit =>
-  side === "inc" ? { inc: v ?? null, ex: null } : { inc: null, ex: v ?? null };
+/**
+ * 与 PostgreSQL round(numeric, 2) / 后端 Decimal ROUND_HALF_UP 对齐。
+ * JSON 数字进入 JS 后是二进制浮点，2.675 * 100 可能落在 267.499…；
+ * 按量级补一个极小容差，再对绝对值取整，才能同时保证正负中点远离 0。
+ */
+const roundMoney = (value: number): number => {
+  const scaled = Math.abs(value) * 100;
+  const tolerance = Number.EPSILON * Math.max(1, scaled) * 4;
+  return Math.sign(value) * Math.round(scaled + tolerance) / 100;
+};
+
+/** 从一侧原始金额按固定 13% 税率得到完整含税/未税金额。 */
+export function splitFixed(
+  value: number | null | undefined,
+  sourceBasis: "inc" | "ex",
+): TaxSplit {
+  if (value == null) return { inc: null, ex: null };
+  const source = roundMoney(value);
+  return sourceBasis === "inc"
+    ? { inc: source, ex: roundMoney(source / (1 + STANDARD_VAT_RATE)) }
+    : { inc: roundMoney(source * (1 + STANDARD_VAT_RATE)), ex: source };
+}
+
+/**
+ * 优先保留 API 明确给出的双值，只在其中一侧缺失时按固定 13% 补齐。
+ * 这使后端未来返回更精确的逐侧金额时不会被前端估算覆盖。
+ */
+export function completeTaxPair(
+  inc: number | null | undefined,
+  ex: number | null | undefined,
+): TaxSplit {
+  if (inc != null && ex != null) return { inc, ex };
+  if (inc != null) return splitFixed(inc, "inc");
+  if (ex != null) return splitFixed(ex, "ex");
+  return { inc: null, ex: null };
+}
+
+// 采购：明确含税时原值为含税；明确未税或未标注时原值统一按未税处理。
+export const splitByFlag = (
+  value: number | null | undefined,
+  isInc: boolean | null,
+): TaxSplit => splitFixed(value, isInc === true ? "inc" : "ex");

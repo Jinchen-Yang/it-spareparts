@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from sqlalchemy import exists, or_
 
-from app import config, security
+from app import config, security, tax_policy
 from app.models.dimensions import DimCustomer, DimPart
 from app.models.inventory import PartPool, PartPoolMember
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
@@ -39,7 +39,31 @@ def _f(x) -> float | None:
 
 
 def _r(x, n=2) -> float | None:
-    return round(float(x), n) if x is not None else None
+    if x is None:
+        return None
+    if n == 2:
+        return float(tax_policy.round_money(x))
+    return round(float(x), n)
+
+
+def _inc_from_ex(value):
+    if value is None:
+        return None
+    return tax_policy.inc_from_ex(tax_policy.round_money(value))
+
+
+def _money_difference(minuend, subtrahend):
+    if minuend is None or subtrahend is None:
+        return None
+    return tax_policy.round_money(
+        tax_policy.round_money(minuend) - tax_policy.round_money(subtrahend),
+    )
+
+
+def _inc_difference_from_ex(minuend_ex, subtrahend_ex):
+    left_inc = _inc_from_ex(minuend_ex)
+    right_inc = _inc_from_ex(subtrahend_ex)
+    return _money_difference(left_inc, right_inc)
 
 
 def kpi(db: Session, date_from: date | None, date_to: date | None,
@@ -61,7 +85,7 @@ def kpi(db: Session, date_from: date | None, date_to: date | None,
         select(
             func.sum(sl.revenue_amount).filter(counts).label("sales_ex_tax"),
             func.sum(sl.revenue_amount).filter(costed).label("sales_costed"),
-            func.sum(sl.gross_profit).filter(costed).label("gross_profit"),
+            func.sum(sl.cost_amount).filter(costed).label("sales_cost"),
             func.sum(sl.revenue_amount).filter(sl.counts_revenue.is_(False)).label("excluded_rev"),
             func.count().filter(and_(counts, func.cardinality(sl.anomaly_flags) > 0)).label("anomaly_lines"),
         )
@@ -75,12 +99,13 @@ def kpi(db: Session, date_from: date | None, date_to: date | None,
         sales_stmt = security.apply_data_scope(sales_stmt, user_ctx)
     s = db.execute(sales_stmt).one()
 
-    sales_ex = s.sales_ex_tax or Decimal(0)
-    sales_costed = s.sales_costed or Decimal(0)
-    gross = s.gross_profit or Decimal(0)
+    sales_ex = tax_policy.round_money(s.sales_ex_tax or Decimal(0))
+    sales_costed = tax_policy.round_money(s.sales_costed or Decimal(0))
+    sales_cost = tax_policy.round_money(s.sales_cost or Decimal(0))
+    gross = _money_difference(sales_costed, sales_cost)
     margin = (gross / sales_costed) if sales_costed else None            # 毛利率分母=已配成本营收
     coverage = (sales_costed / sales_ex) if sales_ex else None           # 成本覆盖率
-    uncosted = sales_ex - sales_costed                                   # 未配成本营收（利润未计）
+    uncosted = _money_difference(sales_ex, sales_costed)                 # 未配成本营收（利润未计）
 
     # ---- 采购侧（已生效 + [from, min(to,today)]，未税额）----
     pur_stmt = (
@@ -91,7 +116,13 @@ def kpi(db: Session, date_from: date | None, date_to: date | None,
     if date_from:
         pur_stmt = pur_stmt.where(FPurchaseOrder.order_date >= date_from)
     pur_stmt = pur_stmt.where(FPurchaseOrder.order_date <= upper)
-    purchase_ex = db.execute(pur_stmt).scalar() or Decimal(0)
+    purchase_ex = tax_policy.round_money(
+        db.execute(pur_stmt).scalar() or Decimal(0),
+    )
+    excluded_revenue = (
+        tax_policy.round_money(s.excluded_rev)
+        if s.excluded_rev is not None else None
+    )
 
     # ---- 订单健康（全状态，销售+采购，[from, to] 不裁未来——反而要数出未来单）----
     counts_by_status = _order_health(db, date_from, date_to, today)
@@ -102,13 +133,25 @@ def kpi(db: Session, date_from: date | None, date_to: date | None,
                    "as_of": today.isoformat(), "future_excluded": True},
         # 金额（未税）
         "sales_ex_tax": _f(sales_ex),
+        "sales_inc_tax": _f(_inc_from_ex(sales_ex)),
         "purchase_ex_tax": _f(purchase_ex),
+        "purchase_inc_tax": _f(_inc_from_ex(purchase_ex)),
         "sales_costed_ex_tax": _f(sales_costed),
+        "sales_costed_inc_tax": _f(_inc_from_ex(sales_costed)),
         "gross_profit": _f(gross),
+        "gross_profit_ex": _f(gross),
+        "gross_profit_inc": _f(
+            _inc_difference_from_ex(sales_costed, sales_cost),
+        ),
         "gross_margin": round(float(margin), 4) if margin is not None else None,
         "cost_coverage": round(float(coverage), 4) if coverage is not None else None,
         "sales_uncosted_ex_tax": _f(uncosted),
-        "excluded_revenue": _f(s.excluded_rev),
+        "sales_uncosted_inc_tax": _f(
+            _inc_difference_from_ex(sales_ex, sales_costed),
+        ),
+        "excluded_revenue": _f(excluded_revenue),
+        "excluded_revenue_ex": _f(excluded_revenue),
+        "excluded_revenue_inc": _f(_inc_from_ex(excluded_revenue)),
         # 订单健康
         **counts_by_status,
         "anomaly_lines": s.anomaly_lines or 0,
@@ -239,25 +282,51 @@ def part_ranking(db: Session, date_from: date | None, date_to: date | None,
     pstats = _purchase_price_stats(db, date_from, upper)
     sstats = _sale_price_stats(db, date_from, upper)
 
-    def _gp(rev, cost):
-        return _r(float(rev) - float(cost)) if rev is not None and cost is not None else None
-
     def _margin(rev, cost):
         return round((float(rev) - float(cost)) / float(rev), 4) if rev and cost is not None and float(rev) else None
 
     rows = []
     for r in db.execute(stmt):
-        rc = r.rev_costed
-        gp_mov, gp_ff = _gp(rc, r.cost_ma), _gp(rc, r.cost_ff)
+        revenue_ex = tax_policy.round_money(r.revenue) if r.revenue is not None else None
+        revenue_costed_ex = (
+            tax_policy.round_money(r.rev_costed)
+            if r.rev_costed is not None else None
+        )
+        cost_moving_ex = (
+            tax_policy.round_money(r.cost_ma)
+            if r.cost_ma is not None else None
+        )
+        cost_fifo_ex = (
+            tax_policy.round_money(r.cost_ff)
+            if r.cost_ff is not None else None
+        )
+        gp_mov = _money_difference(revenue_costed_ex, cost_moving_ex)
+        gp_ff = _money_difference(revenue_costed_ex, cost_fifo_ex)
         rows.append({
             "part_id": r.part_id, "pn_std": r.pn_std, "description": r.description, "brand": r.brand,
-            "revenue": _f(r.revenue), "qty_sold": _f(r.qty_sold),
+            "revenue": _f(revenue_ex),
+            "revenue_ex": _f(revenue_ex),
+            "revenue_inc": _f(_inc_from_ex(revenue_ex)),
+            "qty_sold": _f(r.qty_sold),
             "order_count": r.order_count,
-            "revenue_costed": _f(rc),
-            "cost_coverage": round(float(rc) / float(r.revenue), 4) if rc and r.revenue else None,
+            "revenue_costed": _f(revenue_costed_ex),
+            "cost_coverage": (
+                round(float(revenue_costed_ex) / float(revenue_ex), 4)
+                if revenue_costed_ex and revenue_ex else None
+            ),
             "no_cost": r.no_cost, "lines": r.lines,
-            "gross_profit_moving": gp_mov, "gross_margin_moving": _margin(rc, r.cost_ma),
-            "gross_profit_fifo": gp_ff, "gross_margin_fifo": _margin(rc, r.cost_ff),
+            "gross_profit_moving": _f(gp_mov),
+            "gross_margin_moving": _margin(revenue_costed_ex, cost_moving_ex),
+            "gross_profit_moving_ex": _f(gp_mov),
+            "gross_profit_moving_inc": _f(
+                _inc_difference_from_ex(revenue_costed_ex, cost_moving_ex),
+            ),
+            "gross_profit_fifo": _f(gp_ff),
+            "gross_margin_fifo": _margin(revenue_costed_ex, cost_fifo_ex),
+            "gross_profit_fifo_ex": _f(gp_ff),
+            "gross_profit_fifo_inc": _f(
+                _inc_difference_from_ex(revenue_costed_ex, cost_fifo_ex),
+            ),
             "purchase_price": pstats.get(r.part_id), "sale_price": sstats.get(r.part_id),
             "_sort": (gp_ff if use_fifo else gp_mov),
         })
@@ -441,8 +510,13 @@ def _sales_parts(db: Session, order_ids: list[int], date_from: date | None, uppe
         out.setdefault(r.order_id, []).append({
             "line_id": r.id, "part_id": r.part_id, "pn_std": r.pn_std,
             "description": r.description, "brand": r.brand,
-            "quantity": _f(r.qty), "unit_price_ex_tax": _r(r.unit_ex),
-            "amount": _f(r.revenue_amount), "counts_revenue": bool(r.counts_revenue),
+            "quantity": _f(r.qty),
+            "unit_price_ex_tax": _r(r.unit_ex),
+            "unit_price_inc_tax": _r(_inc_from_ex(r.unit_ex)),
+            "amount": _f(r.revenue_amount),
+            "amount_ex_tax": _f(r.revenue_amount),
+            "amount_inc_tax": _f(_inc_from_ex(r.revenue_amount)),
+            "counts_revenue": bool(r.counts_revenue),
             "in_stats_scope": in_scope,
             "pool_group_id": gid, "pool_name": pm["pool_name"] if pm else None,
             "pool_avg_sale_price": pool_avg,
@@ -491,8 +565,12 @@ def _purchase_parts(db: Session, order_ids: list[int], date_from: date | None, u
         out.setdefault(r.order_id, []).append({
             "line_id": r.id, "part_id": r.part_id, "pn_std": r.pn_std,
             "description": r.description, "brand": r.brand,
-            "quantity": _f(r.qty), "unit_price_ex_tax": _r(r.unit_ex),
+            "quantity": _f(r.qty),
+            "unit_price_ex_tax": _r(r.unit_ex),
+            "unit_price_inc_tax": _r(_inc_from_ex(r.unit_ex)),
             "amount": _r(r.amount),
+            "amount_ex_tax": _r(r.amount),
+            "amount_inc_tax": _r(_inc_from_ex(r.amount)),
             "in_stats_scope": in_scope,
             "pool_group_id": gid, "pool_name": pm["pool_name"] if pm else None,
             "pool_avg_purchase_price": pool_avg,
@@ -552,6 +630,8 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
     linked = exists().where(and_(FPurchaseOrder.linked_sales_order_no == so.order_no,
                                  FPurchaseOrder.data_status == config.ACTIVE_STATUS))
     rev = func.sum(sl.revenue_amount).filter(counts)
+    rev_costed = func.sum(sl.revenue_amount).filter(costed)
+    cost = func.sum(sl.cost_amount).filter(costed)
     gp = func.sum(sl.gross_profit).filter(costed)
     base = (
         select(
@@ -559,7 +639,10 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
             DimCustomer.name_normalized.label("customer"), so.business_type, so.data_status,
             func.count(func.distinct(sl.part_id)).label("part_count"),
             func.sum(sl.qty).filter(counts).label("total_qty"),
-            rev.label("total_revenue"), gp.label("total_gross_profit"),
+            rev.label("total_revenue"),
+            rev_costed.label("total_revenue_costed"),
+            cost.label("total_cost"),
+            gp.label("total_gross_profit"),
             linked.label("linked_purchase"),
         )
         .join(sl, sl.order_id == so.id)
@@ -613,6 +696,19 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
 
     items = []
     for r in db.execute(stmt):
+        revenue_ex = (
+            tax_policy.round_money(r.total_revenue)
+            if r.total_revenue is not None else None
+        )
+        revenue_costed_ex = (
+            tax_policy.round_money(r.total_revenue_costed)
+            if r.total_revenue_costed is not None else None
+        )
+        cost_ex = (
+            tax_policy.round_money(r.total_cost)
+            if r.total_cost is not None else None
+        )
+        gross_profit_ex = _money_difference(revenue_costed_ex, cost_ex)
         items.append({
             "order_id": r.id, "order_no": r.order_no,
             "order_date": r.order_date.isoformat() if r.order_date else None,
@@ -622,8 +718,17 @@ def sales_orders(db: Session, *, date_from: date | None = None, date_to: date | 
             "business_type": r.business_type, "data_status": r.data_status,
             "part_count": r.part_count, "pn_count": r.part_count,
             "total_qty": _f(r.total_qty), "total_quantity": _f(r.total_qty),
-            "total_revenue": _f(r.total_revenue), "total_amount": _f(r.total_revenue),
-            "total_gross_profit": _f(r.total_gross_profit),
+            "total_revenue": _f(revenue_ex),
+            "total_amount": _f(revenue_ex),
+            "total_revenue_ex": _f(revenue_ex),
+            "total_revenue_inc": _f(_inc_from_ex(revenue_ex)),
+            "total_amount_ex": _f(revenue_ex),
+            "total_amount_inc": _f(_inc_from_ex(revenue_ex)),
+            "total_gross_profit": _f(gross_profit_ex),
+            "total_gross_profit_ex": _f(gross_profit_ex),
+            "total_gross_profit_inc": _f(
+                _inc_difference_from_ex(revenue_costed_ex, cost_ex),
+            ),
             "linked_purchase": bool(r.linked_purchase),
         })
     # v2：嵌套 parts（价格参考随行）。受限销售已在入口整段短路。
@@ -703,6 +808,10 @@ def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date
     stmt = base.order_by(direction, po.id.desc()).limit(page_size).offset((page - 1) * page_size)
     items = []
     for r in db.execute(stmt):
+        total_ex_tax = (
+            tax_policy.round_money(r.total_ex_tax)
+            if r.total_ex_tax is not None else None
+        )
         items.append({
             "order_id": r.id, "order_no": r.order_no,
             "order_date": r.order_date.isoformat() if r.order_date else None,
@@ -712,7 +821,11 @@ def purchase_orders(db: Session, *, date_from: date | None = None, date_to: date
             "linked_sales_order": r.linked_sales_order_no,
             "part_count": r.part_count, "pn_count": r.part_count,
             "total_qty": _f(r.total_qty), "total_quantity": _f(r.total_qty),
-            "total_ex_tax": _f(r.total_ex_tax), "total_amount": _f(r.total_ex_tax),
+            "total_ex_tax": _f(total_ex_tax),
+            "total_inc_tax": _f(_inc_from_ex(total_ex_tax)),
+            "total_amount": _f(total_ex_tax),
+            "total_amount_ex": _f(total_ex_tax),
+            "total_amount_inc": _f(_inc_from_ex(total_ex_tax)),
         })
     manual_restricted = security.is_field_hidden(user_ctx, "purchase_ceiling_ex_tax")
     stats_upper = min(date_to, today) if date_to else today

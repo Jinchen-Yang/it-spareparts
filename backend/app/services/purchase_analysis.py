@@ -6,7 +6,7 @@
 
 口径：
 - 与全站一致 ACTIVE_STATUS_ONLY 过滤已生效；型号展示走 dim_part canonical pn_std（part_id 主口径）。
-- 含税/未税两套价都返回，前端切换显示；不含税单的"含税价"按用户口径留空（不按 13% 估）。
+- 含税/未税两套价都按原始录入口径和统一 13% 在服务端生成，前端不自行猜税。
 - 默认排除"指定采购"（大额批量补库，库里一定有），聚焦销售订单/维保需求的应急采购。
 - 来源渠道取自 dim_supplier.source_channel（导入时派生，可人工修正）；缺失记"未分类"。
 """
@@ -14,30 +14,44 @@ from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
-from app import config, security
+from app import config, security, tax_policy
 from app.services.query_filters import active_orders
 from app.models import DimPart, DimSupplier, FPurchaseLine, FPurchaseOrder
 from app.services import pool_metrics
 from app.services.purchase_query import apply_keyword
 
 _CENT = Decimal("0.01")
+_TAX_FACTOR = tax_policy.TAX_FACTOR
 
 
 def _line_prices(unit_price, is_inc):
-    """单行的 (未税价, 含税价)——零计算，只镜像 Excel 原值（甲方口径：系统不算税率）。
-
-    含税单→只有含税价、未税价留空；不含税单→只有未税价、含税价留空；
-    未标注(None，改造前老数据)→按含税列放（沿用旧「单价(含税)」默认）。
-    另一侧一律留 None → 前端显示 "--"，绝不用税率反推另一侧。
-    """
+    """单行 ``(未税价, 含税价)``；原始口径保留，另一侧固定按 13% 生成。"""
     if unit_price is None:
         return None, None
-    if is_inc is False:                          # 不含税单：单价即未税价
-        return unit_price, None
-    return None, unit_price                       # 含税单 / 未标注：单价即含税价
+    price = Decimal(unit_price)
+    if is_inc is True:
+        return price / _TAX_FACTOR, price
+    # 甲方口径：没有明确含税标记时，原始值统一按未税处理。
+    return price, price * _TAX_FACTOR
+
+
+def _order_amounts(amount_ex, amount_inc, is_inc):
+    """订单 ``(未税额, 含税额)``；按头表原始口径选权威值，再固定 13% 生成另一侧。"""
+    ex = Decimal(amount_ex) if amount_ex is not None else None
+    inc = Decimal(amount_inc) if amount_inc is not None else None
+    if is_inc is True and inc is not None:
+        return tax_policy.ex_from_inc(inc), tax_policy.round_money(inc)
+    if is_inc is not True and ex is not None:
+        return tax_policy.round_money(ex), tax_policy.inc_from_ex(ex)
+    # 历史缺口：口径侧为空时使用另一列的显式语义，不把它误解释为头表口径。
+    if ex is not None:
+        return tax_policy.round_money(ex), tax_policy.inc_from_ex(ex)
+    if inc is not None:
+        return tax_policy.ex_from_inc(inc), tax_policy.round_money(inc)
+    return None, None
 
 
 def _window_lines(db: Session, user_ctx, since: date, until: date,
@@ -55,7 +69,8 @@ def _window_lines(db: Session, user_ctx, since: date, until: date,
             FPurchaseOrder.order_no, FPurchaseOrder.order_date,
             FPurchaseOrder.purchaser, FPurchaseOrder.source_type,
             FPurchaseOrder.is_tax_inclusive, FPurchaseOrder.tax_rate,
-            FPurchaseOrder.amount_ex_tax, FPurchaseOrder.amount_inc_tax,  # 订单级真实含税/不含税总额（Excel原值，供KPI双总额，零计算）
+            # 订单原始口径金额；服务端按固定 13% 生成另一侧供 KPI 双总额。
+            FPurchaseOrder.amount_ex_tax, FPurchaseOrder.amount_inc_tax,
             DimSupplier.name_normalized.label("supplier"),
             DimSupplier.source_channel,
             FPurchaseLine.qty, FPurchaseLine.unit_price, FPurchaseLine.line_amount,
@@ -124,8 +139,8 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
     all_orders: set = set()
     orders_by_source: dict[str, set] = defaultdict(set)
     comp: dict[str, dict] = defaultdict(lambda: {"amount": Decimal(0), "orders": set(), "lines": 0})
-    # 订单级真实含税/不含税总额（每单只计一次；含税总额=Σamount_inc_tax、不含税=Σamount_ex_tax，零计算）
-    order_amt: dict = {}   # oid -> (ex, inc, channel)
+    # 每单只计一次；原始口径选权威金额，另一侧固定按 13% 生成。
+    order_amt: dict = {}   # oid -> (ex_raw, inc_raw, is_inc, channel)
 
     for r in rows:
         pid = r["part_id"]
@@ -181,7 +196,12 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
         co["orders"].add(oid)
         co["lines"] += 1
         if oid not in order_amt:            # 每单只登记一次订单级真实金额
-            order_amt[oid] = (r["amount_ex_tax"], r["amount_inc_tax"], ch)
+            order_amt[oid] = (
+                r["amount_ex_tax"],
+                r["amount_inc_tax"],
+                r["is_tax_inclusive"],
+                ch,
+            )
 
     def _wavg(pairs):
         tot_q = sum((q for _, q in pairs), Decimal(0))
@@ -211,8 +231,14 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
         channels = sorted(
             ({"channel": ch, "times": len(c["orders"]), "qty": _f(c["qty"]),
               "amount": _f(c["amount"].quantize(_CENT)),
-              "price_ex_last": _f(c["ex_last"].quantize(_CENT)) if c["ex_last"] is not None else None,
-              "price_inc_last": _f(c["inc_last"].quantize(_CENT)) if c["inc_last"] is not None else None}
+              "price_ex_last": (
+                  _f(tax_policy.round_money(c["ex_last"]))
+                  if c["ex_last"] is not None else None
+              ),
+              "price_inc_last": (
+                  _f(tax_policy.round_money(c["inc_last"]))
+                  if c["inc_last"] is not None else None
+              )}
              for ch, c in p["channels"].items()),
             key=lambda x: (-x["times"], -(x["qty"] or 0)))
         out_rows.append({
@@ -220,14 +246,34 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
             "description": p["description"], "brand": p["brand"],
             "buy_times": buy_times, "total_qty": _f(p["total_qty"]),
             "daily": [_f(x) for x in p["daily"]] if p["daily"] is not None else None,
-            "price_ex_min": _f(min(ex_vals).quantize(_CENT)) if ex_vals else None,
-            "price_ex_max": _f(max(ex_vals).quantize(_CENT)) if ex_vals else None,
-            "price_ex_avg": _f(_wavg(p["ex_list"]).quantize(_CENT)) if ex_vals else None,
-            "price_ex_last": _f(ex_sorted[-1][1].quantize(_CENT)) if ex_sorted and ex_sorted[-1][1] is not None else None,
-            "price_inc_min": _f(min(inc_vals).quantize(_CENT)) if inc_vals else None,
-            "price_inc_max": _f(max(inc_vals).quantize(_CENT)) if inc_vals else None,
-            "price_inc_avg": _f(_wavg(p["inc_list"]).quantize(_CENT)) if inc_vals else None,
-            "price_inc_last": _f(orders_sorted[-1][2].quantize(_CENT)) if orders_sorted and orders_sorted[-1][2] is not None else None,
+            "price_ex_min": (
+                _f(tax_policy.round_money(min(ex_vals))) if ex_vals else None
+            ),
+            "price_ex_max": (
+                _f(tax_policy.round_money(max(ex_vals))) if ex_vals else None
+            ),
+            "price_ex_avg": (
+                _f(tax_policy.round_money(_wavg(p["ex_list"])))
+                if ex_vals else None
+            ),
+            "price_ex_last": (
+                _f(tax_policy.round_money(ex_sorted[-1][1]))
+                if ex_sorted and ex_sorted[-1][1] is not None else None
+            ),
+            "price_inc_min": (
+                _f(tax_policy.round_money(min(inc_vals))) if inc_vals else None
+            ),
+            "price_inc_max": (
+                _f(tax_policy.round_money(max(inc_vals))) if inc_vals else None
+            ),
+            "price_inc_avg": (
+                _f(tax_policy.round_money(_wavg(p["inc_list"])))
+                if inc_vals else None
+            ),
+            "price_inc_last": (
+                _f(tax_policy.round_money(orders_sorted[-1][2]))
+                if orders_sorted and orders_sorted[-1][2] is not None else None
+            ),
             "price_trend": trend, "source_types": sorted(p["source_types"]),
             "is_frequent": is_freq, "advice": advice, "channels": channels,
         })
@@ -239,14 +285,11 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
         row["pool_name"] = identity["pool_name"] if identity else None
     out_rows.sort(key=lambda x: (-x["buy_times"], -(x["total_qty"] or 0)))
     total_amount = sum((co["amount"] for co in comp.values()), Decimal(0))
-    # 订单级真实双总额（零计算）：含税=Σamount_inc_tax、不含税=Σamount_ex_tax；再按渠道拆一份。
-    # 某侧缺失时用另一侧的真实值兜底（老单常只有不含税金额、无采购金额；不含税单两额本就相等）——
-    # 这不是税率换算，只是"没有这侧真实值就用那侧真实值"，保证两侧覆盖同一批订单、含税≥不含税。
+    # 订单级双总额：按原始口径统一 13% 生成两侧，再按渠道拆分。
     comp_amt: dict[str, dict] = defaultdict(lambda: {"ex": Decimal(0), "inc": Decimal(0)})
     total_inc = total_ex = Decimal(0)
-    for a_ex, a_inc, a_ch in order_amt.values():
-        ex = a_ex if a_ex is not None else a_inc
-        inc = a_inc if a_inc is not None else a_ex
+    for a_ex, a_inc, is_inc, a_ch in order_amt.values():
+        ex, inc = _order_amounts(a_ex, a_inc, is_inc)
         if ex is not None:
             total_ex += ex
             comp_amt[a_ch]["ex"] += ex
@@ -255,8 +298,8 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
             comp_amt[a_ch]["inc"] += inc
     kpi = {
         "total_amount": _f(total_amount.quantize(_CENT)),
-        "total_amount_inc": _f(total_inc.quantize(_CENT)),
-        "total_amount_ex": _f(total_ex.quantize(_CENT)),
+        "total_amount_inc": _f(tax_policy.round_money(total_inc)),
+        "total_amount_ex": _f(tax_policy.round_money(total_ex)),
         "order_count": len(all_orders),
         "order_count_by_source": {k: len(v) for k, v in orders_by_source.items()},
         "part_count": len(parts),
@@ -267,8 +310,8 @@ def analysis(db: Session, user_ctx: security.UserContext | None = None, *,
     }
     source_composition = sorted(
         ({"channel": ch, "amount": _f(co["amount"].quantize(_CENT)),
-          "amount_inc": _f(comp_amt[ch]["inc"].quantize(_CENT)),
-          "amount_ex": _f(comp_amt[ch]["ex"].quantize(_CENT)),
+          "amount_inc": _f(tax_policy.round_money(comp_amt[ch]["inc"])),
+          "amount_ex": _f(tax_policy.round_money(comp_amt[ch]["ex"])),
           "order_count": len(co["orders"]), "line_count": co["lines"]}
          for ch, co in comp.items()),
         key=lambda x: -(x["amount"] or 0))
@@ -297,14 +340,15 @@ def part_purchases(db: Session, user_ctx: security.UserContext | None = None, *,
     for r in rows:
         ex, inc = _line_prices(r["unit_price"], r["is_tax_inclusive"])
         items.append({
+            "line_id": r["line_id"],
             "order_date": r["order_date"].isoformat() if r["order_date"] else None,
             "order_no": r["order_no"], "purchaser": r["purchaser"],
             "supplier": r["supplier"], "source_channel": r["source_channel"] or config.SOURCE_CHANNEL_UNKNOWN,
             "source_type": r["source_type"], "qty": _f(r["qty"]),
             "is_tax_inclusive": r["is_tax_inclusive"],
             "unit_price": _f(r["unit_price"]),
-            "price_ex": _f(ex.quantize(_CENT)) if ex is not None else None,
-            "price_inc": _f(inc.quantize(_CENT)) if inc is not None else None,
+            "price_ex": _f(tax_policy.round_money(ex)) if ex is not None else None,
+            "price_inc": _f(tax_policy.round_money(inc)) if inc is not None else None,
         })
     items.sort(key=lambda x: (x["order_date"] or "", x["order_no"] or ""), reverse=True)
     return {"part_id": part_id, "days": days, "items": items}
@@ -335,11 +379,32 @@ def cancellation_stats(db: Session, user_ctx: security.UserContext | None = None
     """
     gran = granularity if granularity in _CANCEL_GRANULARITY else "month"
     period = func.date_trunc(gran, FPurchaseOrder.order_date)
-    amount = func.coalesce(FPurchaseOrder.amount_inc_tax, FPurchaseOrder.amount_ex_tax)
+    # 每张订单先按权威侧舍入到分，再按固定 13% 推导另一侧，最后才聚合。
+    # True=含税权威；False/NULL=未税权威。历史权威侧缺失时才使用另一
+    # 个明确命名字段回退，绝不能像旧实现一样 coalesce 后把两种口径混加。
+    source_ex = func.round(FPurchaseOrder.amount_ex_tax, 2)
+    source_inc = func.round(FPurchaseOrder.amount_inc_tax, 2)
+    inc_from_ex = func.round(source_ex * _TAX_FACTOR, 2)
+    ex_from_inc = func.round(source_inc / _TAX_FACTOR, 2)
+    amount_ex = case(
+        (
+            FPurchaseOrder.is_tax_inclusive.is_(True),
+            func.coalesce(ex_from_inc, source_ex),
+        ),
+        else_=func.coalesce(source_ex, ex_from_inc),
+    )
+    amount_inc = case(
+        (
+            FPurchaseOrder.is_tax_inclusive.is_(True),
+            func.coalesce(source_inc, inc_from_ex),
+        ),
+        else_=func.coalesce(inc_from_ex, source_inc),
+    )
     stmt = (
         select(period.label("period"), FPurchaseOrder.data_status.label("status"),
                func.count().label("cnt"),
-               func.coalesce(func.sum(amount), 0).label("amt"))
+               func.coalesce(func.sum(amount_ex), 0).label("amt_ex"),
+               func.coalesce(func.sum(amount_inc), 0).label("amt_inc"))
         .where(FPurchaseOrder.order_date.is_not(None))
     )
     if days:
@@ -349,7 +414,7 @@ def cancellation_stats(db: Session, user_ctx: security.UserContext | None = None
 
     periods: dict[str, dict] = {}
     statuses: set[str] = set()
-    for period_dt, status, cnt, amt in db.execute(stmt).all():
+    for period_dt, status, cnt, amt_ex, amt_inc in db.execute(stmt).all():
         if period_dt is None:
             continue
         lbl = _period_label(period_dt, gran)
@@ -357,23 +422,45 @@ def cancellation_stats(db: Session, user_ctx: security.UserContext | None = None
         statuses.add(st)
         p = periods.setdefault(lbl, {
             "period": lbl, "total": 0, "cancelled": 0,
-            "cancelled_amount": Decimal(0), "by_status": {}})
-        p["by_status"][st] = {"count": cnt, "amount": _f((amt or Decimal(0)).quantize(_CENT))}
+            "_cancelled_amount_ex": Decimal(0),
+            "_cancelled_amount_inc": Decimal(0),
+            "by_status": {}})
+        status_ex = tax_policy.round_money(amt_ex or Decimal(0))
+        status_inc = tax_policy.round_money(amt_inc or Decimal(0))
+        p["by_status"][st] = {
+            "count": cnt,
+            "amount_ex": _f(status_ex),
+            "amount_inc": _f(status_inc),
+            # 旧客户端兼容字段明确映射到未税，禁止继续承载混合口径。
+            "amount": _f(status_ex),
+        }
         p["total"] += cnt
         if _is_cancelled_status(st):
             p["cancelled"] += cnt
-            p["cancelled_amount"] += (amt or Decimal(0))
+            p["_cancelled_amount_ex"] += status_ex
+            p["_cancelled_amount_inc"] += status_inc
 
     rows = []
     for p in periods.values():
         p["cancel_rate"] = round(100.0 * p["cancelled"] / p["total"], 2) if p["total"] else 0.0
-        p["cancelled_amount"] = _f(p["cancelled_amount"].quantize(_CENT))
+        cancelled_ex = tax_policy.round_money(p.pop("_cancelled_amount_ex"))
+        cancelled_inc = tax_policy.round_money(p.pop("_cancelled_amount_inc"))
+        p["cancelled_amount_ex"] = _f(cancelled_ex)
+        p["cancelled_amount_inc"] = _f(cancelled_inc)
+        p["cancelled_amount"] = _f(cancelled_ex)
         rows.append(p)
     rows.sort(key=lambda r: r["period"], reverse=True)   # 最近期间在前
 
     total = sum(r["total"] for r in rows)
     cancelled = sum(r["cancelled"] for r in rows)
-    cancelled_amt = sum(r["cancelled_amount"] for r in rows)
+    cancelled_amt_ex = tax_policy.round_money(sum(
+        (Decimal(str(r["cancelled_amount_ex"])) for r in rows),
+        Decimal(0),
+    ))
+    cancelled_amt_inc = tax_policy.round_money(sum(
+        (Decimal(str(r["cancelled_amount_inc"])) for r in rows),
+        Decimal(0),
+    ))
     return {
         "granularity": gran,
         "statuses": sorted(statuses),
@@ -381,6 +468,8 @@ def cancellation_stats(db: Session, user_ctx: security.UserContext | None = None
         "summary": {
             "total": total, "cancelled": cancelled,
             "cancel_rate": round(100.0 * cancelled / total, 2) if total else 0.0,
-            "cancelled_amount": round(cancelled_amt, 2),
+            "cancelled_amount_ex": _f(cancelled_amt_ex),
+            "cancelled_amount_inc": _f(cancelled_amt_inc),
+            "cancelled_amount": _f(cancelled_amt_ex),
         },
     }

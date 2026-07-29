@@ -10,7 +10,7 @@ from datetime import date, timedelta
 
 import pandas as pd
 
-from app import config
+from app import config, tax_policy
 from app.etl import anomaly, cleaner, mapping
 
 # 非"硬错误"的软标记类型：不计入 fact_rows_error（见 loader），只在错误列表里以"可忽略"展示。
@@ -341,8 +341,22 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
                         return v
             return None
 
-        raw_date, raw_amount = gv("报销日期"), gv("报销明细.报销金额", "报销金额")
-        if raw_amount is None:
+        raw_date = gv("报销日期")
+        raw_amount = gv("报销明细.报销金额", "报销金额")
+        raw_amount_ex = gv(
+            "报销明细.报销金额（未税）",
+            "报销金额（未税）",
+            "报销金额(未税)",
+            "未税金额",
+            "不含税金额",
+        )
+        raw_amount_inc = gv(
+            "报销明细.报销金额（含税）",
+            "报销金额（含税）",
+            "报销金额(含税)",
+            "含税金额",
+        )
+        if raw_amount is None and raw_amount_ex is None and raw_amount_inc is None:
             res.rows_skipped_no_data += 1          # 空行/只有日期的行：跳过不算错
             continue
         if raw_date is None:
@@ -357,13 +371,146 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
             continue
         try:
             expense_date = cleaner.parse_date(raw_date)
-            amount = cleaner.parse_money(raw_amount)
+            amount = cleaner.parse_money(
+                raw_amount,
+                rounding=tax_policy.MONEY_ROUNDING,
+            )
+            amount_ex_tax = cleaner.parse_money(
+                raw_amount_ex,
+                rounding=tax_policy.MONEY_ROUNDING,
+            )
+            amount_inc_tax = cleaner.parse_money(
+                raw_amount_inc,
+                rounding=tax_policy.MONEY_ROUNDING,
+            )
         except ValueError as exc:
             res.errors.append(ErrorRec(row_no, "bad_number", str(exc), _row_dict(row, full_map)))
             continue
-        if expense_date is None or amount is None:
+        if expense_date is None:
             res.rows_skipped_no_data += 1
             continue
+
+        amount = tax_policy.round_money(amount) if amount is not None else None
+        amount_ex_tax = (
+            tax_policy.round_money(amount_ex_tax)
+            if amount_ex_tax is not None else None
+        )
+        amount_inc_tax = (
+            tax_policy.round_money(amount_inc_tax)
+            if amount_inc_tax is not None else None
+        )
+        tax_basis_raw = cleaner.clean_str(
+            gv("报销明细.金额口径", "金额口径", "税务口径", "含税/未税"),
+        )
+        basis_key = (tax_basis_raw or "").strip().casefold()
+        inc_values = {"含税", "含税金额", "含税口径", "inc", "inc_tax"}
+        ex_values = {
+            "未税",
+            "不含税",
+            "未税金额",
+            "不含税金额",
+            "未税口径",
+            "ex",
+            "ex_tax",
+        }
+        if basis_key in inc_values:
+            basis_hint = "inc"
+        elif basis_key in ex_values:
+            basis_hint = "ex"
+        elif basis_key:
+            res.errors.append(ErrorRec(
+                row_no,
+                "bad_tax_basis",
+                f"无法识别金额口径：{tax_basis_raw}（仅支持含税/未税）",
+                _row_dict(row, full_map),
+            ))
+            continue
+        else:
+            basis_hint = None
+
+        if amount_ex_tax is not None or amount_inc_tax is not None:
+            # 显式双税列优先；“金额口径”决定权威侧，缺口只能由同口径 raw amount 补齐。
+            tax_basis = basis_hint or (
+                "ex" if amount_ex_tax is not None else "inc"
+            )
+            if tax_basis == "inc":
+                authority = (
+                    amount_inc_tax
+                    if amount_inc_tax is not None else amount
+                )
+                if authority is None:
+                    res.errors.append(ErrorRec(
+                        row_no,
+                        "missing_authoritative_tax_amount",
+                        "金额口径为含税，但未提供含税金额",
+                        _row_dict(row, full_map),
+                    ))
+                    continue
+                expected_ex = tax_policy.ex_from_inc(authority)
+                if amount_ex_tax is not None and amount_ex_tax != expected_ex:
+                    res.errors.append(ErrorRec(
+                        row_no,
+                        "inconsistent_tax_amount",
+                        "含税金额与未税金额不符合统一 13% 税率",
+                        _row_dict(row, full_map),
+                    ))
+                    continue
+                amount_inc_tax = authority
+                amount_ex_tax = expected_ex
+            else:
+                authority = (
+                    amount_ex_tax
+                    if amount_ex_tax is not None else amount
+                )
+                if authority is None:
+                    res.errors.append(ErrorRec(
+                        row_no,
+                        "missing_authoritative_tax_amount",
+                        "金额口径为未税，但未提供未税金额",
+                        _row_dict(row, full_map),
+                    ))
+                    continue
+                expected_inc = tax_policy.inc_from_ex(authority)
+                if amount_inc_tax is not None and amount_inc_tax != expected_inc:
+                    res.errors.append(ErrorRec(
+                        row_no,
+                        "inconsistent_tax_amount",
+                        "含税金额与未税金额不符合统一 13% 税率",
+                        _row_dict(row, full_map),
+                    ))
+                    continue
+                amount_ex_tax = authority
+                amount_inc_tax = expected_inc
+
+            if amount is not None and amount != authority:
+                res.errors.append(ErrorRec(
+                    row_no,
+                    "inconsistent_raw_amount",
+                    "报销金额与金额口径指定的权威含税/未税金额不一致",
+                    _row_dict(row, full_map),
+                ))
+                continue
+            amount = authority
+        else:
+            if amount is None:
+                res.rows_skipped_no_data += 1
+                continue
+            if basis_hint == "inc":
+                tax_basis = "inc"
+                amount_inc_tax = amount
+                amount_ex_tax = tax_policy.ex_from_inc(amount)
+            elif basis_hint == "ex":
+                tax_basis = "ex"
+                amount_ex_tax = amount
+                amount_inc_tax = tax_policy.inc_from_ex(amount)
+            else:
+                tax_basis = "default_ex"
+                amount_ex_tax = amount
+                amount_inc_tax = tax_policy.inc_from_ex(amount)
+
+        amount = tax_policy.round_money(amount)
+        amount_ex_tax = tax_policy.round_money(amount_ex_tax)
+        amount_inc_tax = tax_policy.round_money(amount_inc_tax)
 
         xsdd = _clip(cleaner.clean_str(gv("维保销售订单", "销售订单")) or anchor)
         if not xsdd:
@@ -413,6 +560,10 @@ def _transform_expense(df: pd.DataFrame, anchor: str | None = None) -> Transform
             "reason": reason,
             "linked_sales_order_no": xsdd,
             "amount": amount,
+            "amount_ex_tax": amount_ex_tax,
+            "amount_inc_tax": amount_inc_tax,
+            "tax_basis": tax_basis,
+            "tax_rate_used": tax_policy.TAX_RATE,
         })
     res.rows_inactive = sum(
         1 for r in res.lines

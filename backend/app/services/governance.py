@@ -8,6 +8,7 @@ from decimal import Decimal
 from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.orm import Session
 
+from app import tax_policy
 from app.models.dimensions import DimPart
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysAuditLog
@@ -93,7 +94,13 @@ def list_parts(db: Session, kind: str, page: int, page_size: int) -> dict:
             "pn_std": p.pn_std, "description": p.description,
             "needs_review": p.needs_review, "is_excluded": p.is_excluded,
             "exclude_reason": p.exclude_reason,
-            "sales_lines": agg[0], "revenue": _f(rev),
+            "sales_lines": agg[0],
+            "revenue": _f(rev),
+            "revenue_ex": _f(rev),
+            "revenue_inc": _f(
+                tax_policy.inc_from_ex(rev)
+                if rev is not None else None
+            ),
             "gross_margin": round(margin, 4) if margin is not None else None,
         })
     return {"kind": kind, "total": total, "page": page, "page_size": page_size, "items": items}

@@ -22,15 +22,15 @@ def _calculate(**overrides):
 def test_calculates_inc_and_ex_contract_margin_independently():
     result = _calculate()
 
-    assert result["revenue_inc"] == Decimal("1060.00")
+    assert result["revenue_inc"] == Decimal("1130.00")
     assert result["revenue_ex"] == Decimal("1000.00")
-    assert result["parts_gross_profit_inc"] == Decimal("834.00")
+    assert result["parts_gross_profit_inc"] == Decimal("904.00")
     assert result["parts_gross_profit_ex"] == Decimal("800.00")
     assert result["parts_profit_status_inc"] == "complete_actual"
     assert result["parts_profit_status_ex"] == "complete_actual"
-    assert result["contribution_profit_inc"] == Decimal("834.00")
+    assert result["contribution_profit_inc"] == Decimal("904.00")
     assert result["contribution_profit_ex"] == Decimal("800.00")
-    assert result["contribution_margin_inc"] == Decimal("0.7868")
+    assert result["contribution_margin_inc"] == Decimal("0.8000")
     assert result["contribution_margin_ex"] == Decimal("0.8000")
     assert result["contribution_status_inc"] == "complete"
     assert result["contribution_status_ex"] == "complete"
@@ -48,21 +48,21 @@ def test_estimated_cost_is_visible_but_never_labeled_actual():
 
     assert result["parts_profit_status_inc"] == "complete_estimated"
     assert result["parts_profit_status_ex"] == "complete_estimated"
-    assert result["contribution_profit_inc"] == Decimal("834.00")
+    assert result["contribution_profit_inc"] == Decimal("904.00")
     assert result["contribution_profit_ex"] == Decimal("800.00")
     assert result["contribution_status_inc"] == "complete"
     assert result["contribution_status_ex"] == "complete"
 
 
-def test_missing_contract_tax_rate_only_blocks_inc_basis():
+def test_missing_contract_tax_rate_does_not_override_fixed_policy():
     result = _calculate(tax_rate=None)
 
-    assert result["revenue_inc"] is None
-    assert result["parts_gross_profit_inc"] is None
-    assert result["parts_gross_margin_inc"] is None
-    assert result["parts_profit_status_inc"] == "missing_tax_rate"
-    assert result["contribution_profit_inc"] is None
-    assert result["contribution_status_inc"] == "missing_tax_rate"
+    assert result["revenue_inc"] == Decimal("1130.00")
+    assert result["parts_gross_profit_inc"] == Decimal("904.00")
+    assert result["parts_gross_margin_inc"] == Decimal("0.8000")
+    assert result["parts_profit_status_inc"] == "complete_actual"
+    assert result["contribution_profit_inc"] == Decimal("904.00")
+    assert result["contribution_status_inc"] == "complete"
     assert result["parts_gross_profit_ex"] == Decimal("800.00")
     assert result["parts_profit_status_ex"] == "complete_actual"
     assert result["contribution_profit_ex"] == Decimal("800.00")
@@ -104,15 +104,15 @@ def test_tax_only_duplicate_conflict_blocks_inc_but_not_ex_basis():
     assert result["contribution_status_ex"] == "complete"
 
 
-def test_out_of_range_contract_tax_rate_only_blocks_inc_basis():
+def test_raw_contract_tax_rate_never_overrides_fixed_policy():
     for invalid_rate in (Decimal("1"), Decimal("1.3"), Decimal("NaN")):
         result = _calculate(tax_rate=invalid_rate)
 
-        assert result["revenue_inc"] is None
-        assert result["parts_gross_profit_inc"] is None
-        assert result["parts_profit_status_inc"] == "invalid_tax_rate"
-        assert result["contribution_profit_inc"] is None
-        assert result["contribution_status_inc"] == "invalid_tax_rate"
+        assert result["revenue_inc"] == Decimal("1130.00")
+        assert result["parts_gross_profit_inc"] == Decimal("904.00")
+        assert result["parts_profit_status_inc"] == "complete_actual"
+        assert result["contribution_profit_inc"] == Decimal("904.00")
+        assert result["contribution_status_inc"] == "complete"
         assert result["parts_gross_profit_ex"] == Decimal("800.00")
         assert result["parts_profit_status_ex"] == "complete_actual"
         assert result["contribution_profit_ex"] == Decimal("800.00")
@@ -157,7 +157,7 @@ def test_cost_evidence_fails_closed_per_tax_basis_not_globally():
 def test_nonzero_expense_without_tax_fields_keeps_parts_margin_but_blocks_project_margin():
     result = _calculate(unknown_expense_total=Decimal("50"))
 
-    assert result["parts_gross_profit_inc"] == Decimal("834.00")
+    assert result["parts_gross_profit_inc"] == Decimal("904.00")
     assert result["parts_gross_profit_ex"] == Decimal("800.00")
     assert result["parts_profit_status_inc"] == "complete_actual"
     assert result["parts_profit_status_ex"] == "complete_actual"
@@ -167,13 +167,30 @@ def test_nonzero_expense_without_tax_fields_keeps_parts_margin_but_blocks_projec
     assert result["contribution_status_ex"] == "expense_tax_unknown"
 
 
+def test_dual_expense_is_subtracted_from_each_contribution_margin():
+    result = _calculate(
+        unknown_expense_total=None,
+        expense_inc=Decimal("113"),
+        expense_ex=Decimal("100"),
+    )
+
+    assert result["expense_inc"] == Decimal("113.00")
+    assert result["expense_ex"] == Decimal("100.00")
+    assert result["contribution_profit_inc"] == Decimal("791.00")
+    assert result["contribution_profit_ex"] == Decimal("700.00")
+    assert result["contribution_margin_inc"] == Decimal("0.7000")
+    assert result["contribution_margin_ex"] == Decimal("0.7000")
+    assert result["contribution_status_inc"] == "complete"
+    assert result["contribution_status_ex"] == "complete"
+
+
 def test_unavailable_expense_dataset_never_treats_absence_as_zero():
     result = _calculate(
         unknown_expense_total=Decimal("0"),
         expense_data_available=False,
     )
 
-    assert result["parts_gross_profit_inc"] == Decimal("834.00")
+    assert result["parts_gross_profit_inc"] == Decimal("904.00")
     assert result["parts_gross_profit_ex"] == Decimal("800.00")
     assert result["parts_profit_status_inc"] == "complete_actual"
     assert result["parts_profit_status_ex"] == "complete_actual"
@@ -186,7 +203,7 @@ def test_unavailable_expense_dataset_never_treats_absence_as_zero():
 def test_invalid_expense_amount_is_never_silently_treated_as_zero():
     result = _calculate(unknown_expense_total=Decimal("NaN"))
 
-    assert result["parts_gross_profit_inc"] == Decimal("834.00")
+    assert result["parts_gross_profit_inc"] == Decimal("904.00")
     assert result["parts_gross_profit_ex"] == Decimal("800.00")
     assert result["parts_profit_status_inc"] == "complete_actual"
     assert result["parts_profit_status_ex"] == "complete_actual"

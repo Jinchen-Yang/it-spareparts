@@ -78,7 +78,10 @@ def test_production_scale_recompute_has_fixed_queries_and_bounded_runtime(db):
             {
                 "P-OLD": f.purchase_head(
                     "P-OLD",
-                    on=date(2025, 1, 8),
+                    # Exactly three natural months before the maintenance
+                    # order: eligible for the pool fallback but outside the
+                    # direct/window/month layers.
+                    on=date(2025, 12, 10),
                     tax_rate=Decimal("0"),
                 ),
                 "P-RECENT": f.purchase_head(

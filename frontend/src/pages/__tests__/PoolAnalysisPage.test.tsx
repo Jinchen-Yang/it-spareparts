@@ -337,7 +337,7 @@ describe("深链与取数", () => {
       date_from: "2026-06-01", date_to: "2026-06-30",
       purchase_page: 1, sales_page: 1, orders_page_size: 20 }));
     await screen.findByText("内存互通池");
-    expect(screen.getByText("人工最高采购价")).toBeInTheDocument();
+    expect(screen.getByText("人工最高采购价(未税)")).toBeInTheDocument();
     expect(screen.getByText("¥105")).toBeInTheDocument();
   });
 
@@ -618,10 +618,11 @@ describe("390px 移动详情", () => {
     const dialog = drawer.closest(".ant-drawer") as HTMLElement;
     expect(dialog).toBeTruthy();
     expect(dialog.querySelector(".ant-drawer-content-wrapper")).toHaveStyle({ height: "100%" });
-    expect(within(dialog).getByText("采购均价").parentElement).toHaveTextContent("¥110");
+    expect(within(dialog).getByText("采购均价(含税 / 不含税)").parentElement)
+      .toHaveTextContent("含 ¥124.3 · 不含 ¥110");
     expect(within(dialog).getByText("采购量").parentElement).toHaveTextContent("10");
-    expect(within(dialog).getByText("采购 vs 池均").parentElement).toHaveTextContent("+¥10");
-    expect(within(dialog).getByText("采购池约束").parentElement).toHaveTextContent("¥105");
+    expect(within(dialog).getByText("采购 vs 池均(未税差额)").parentElement).toHaveTextContent("+¥10");
+    expect(within(dialog).getByText("采购池约束(未税)").parentElement).toHaveTextContent("¥105");
 
     const order = screen.getByRole("button", { name: "查看采购订单 CG-77 内容" });
     order.focus();

@@ -1,16 +1,20 @@
 import { api } from "../api";
 
-export type MaintenanceProfitDefaultBasis = "inc" | "ex" | "both";
+export type TaxDisplayBasis = "inc" | "ex" | "both";
 
 export interface SystemSettings {
-  maintenance_project_profit_default_basis: MaintenanceProfitDefaultBasis;
+  purchase_display_basis: TaxDisplayBasis;
+  sales_display_basis: TaxDisplayBasis;
+  maintenance_display_basis: TaxDisplayBasis;
   version: number;
   updated_by?: string | null;
   updated_at?: string | null;
 }
 
 export interface SystemSettingsUpdate {
-  maintenance_project_profit_default_basis: MaintenanceProfitDefaultBasis;
+  purchase_display_basis: TaxDisplayBasis;
+  sales_display_basis: TaxDisplayBasis;
+  maintenance_display_basis: TaxDisplayBasis;
   expected_version: number;
 }
 

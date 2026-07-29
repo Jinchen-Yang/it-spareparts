@@ -1,4 +1,4 @@
-"""系统业务设置：维保合同级毛利默认展示口径。"""
+"""系统业务设置：采购、销售与项目维保的统一双税展示口径。"""
 
 from datetime import datetime
 from typing import Literal
@@ -10,19 +10,14 @@ from sqlalchemy.orm import Session
 from app.auth import current_identity, require_admin
 from app.db import get_db
 from app.models.system import SysBusinessSetting
-from app.security import require_page
 from app.services import system_settings
 
 router = APIRouter(prefix="/system-settings", tags=["system-settings"])
 
-_maintenance_page_gate = require_page("page_maintenance")
-
-
 def _read_gate(
     ident: dict = Depends(current_identity),
-    _: None = Depends(_maintenance_page_gate),
 ) -> dict:
-    """严格登录校验 + 维保页面权限，两层都通过才可读取默认值。"""
+    """任一真实登录身份可读取统一口径；非管理员的审计身份由响应层隐藏。"""
 
     return ident
 
@@ -30,14 +25,18 @@ def _read_gate(
 class SystemSettingsView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    maintenance_project_profit_default_basis: Literal["inc", "ex", "both"]
+    maintenance_display_basis: Literal["inc", "ex", "both"]
+    purchase_display_basis: Literal["inc", "ex", "both"]
+    sales_display_basis: Literal["inc", "ex", "both"]
     version: int
     updated_by: str | None = None
     updated_at: datetime | None = None
 
 
 class SystemSettingsUpdate(BaseModel):
-    maintenance_project_profit_default_basis: Literal["inc", "ex", "both"]
+    maintenance_display_basis: Literal["inc", "ex", "both"]
+    purchase_display_basis: Literal["inc", "ex", "both"]
+    sales_display_basis: Literal["inc", "ex", "both"]
     expected_version: int = Field(ge=1)
 
 
@@ -46,7 +45,16 @@ def _view(
     *,
     include_audit_identity: bool = True,
 ) -> SystemSettingsView:
-    view = SystemSettingsView.model_validate(setting)
+    view = SystemSettingsView(
+        maintenance_display_basis=(
+            setting.maintenance_project_profit_default_basis
+        ),
+        purchase_display_basis=setting.purchase_display_basis,
+        sales_display_basis=setting.sales_display_basis,
+        version=setting.version,
+        updated_by=setting.updated_by,
+        updated_at=setting.updated_at,
+    )
     if not include_audit_identity:
         view.updated_by = None
         view.updated_at = None
@@ -78,9 +86,11 @@ def update_system_settings(
     _: str = Depends(require_admin),
 ) -> SystemSettingsView:
     try:
-        setting = system_settings.update_maintenance_project_profit_default_basis(
+        setting = system_settings.update_business_settings(
             db,
-            basis=body.maintenance_project_profit_default_basis,
+            maintenance_basis=body.maintenance_display_basis,
+            purchase_basis=body.purchase_display_basis,
+            sales_basis=body.sales_display_basis,
             expected_version=body.expected_version,
             operated_by=ident["sub"],
         )

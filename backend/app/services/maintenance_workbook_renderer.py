@@ -3,8 +3,6 @@
 本模块只负责把已经查询好的合同工作簿数据渲染成 openpyxl Workbook。
 查询、权限、批量选择、临时文件与 ZIP 生命周期由上层导出服务负责。
 """
-from decimal import Decimal
-
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -22,6 +20,7 @@ SOURCE_LABELS = {
     "pool_sales": "预估·互通池销售均价",
     "purchase_history": "预估·本PN采购历史",
     "sales_history": "预估·本PN销售历史",
+    "manual": "实际·人工回填",
     "none": "成本缺失",
 }
 CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}
@@ -42,6 +41,7 @@ _CENTER = Alignment(horizontal="center", vertical="center")
 _STATUS_STYLE = {
     "incomplete_cost": ("成本不完整，需补数据", "8C8C8C"),
     "expense_data_unavailable": ("费用数据未就绪", "8C8C8C"),
+    "filtered_scope": ("日期筛选下不计算合同预算余量/红黄绿", "8C8C8C"),
     "red": ("预算已用完或超预算", "C0524A"),
     "yellow": ("预算余量≤20%", "B8860B"),
     "green": ("预算余量>20%", "3F7A45"),
@@ -70,7 +70,7 @@ _PARTS_PROFIT_STATUS_LABELS = {
 _CONTRIBUTION_STATUS_LABELS = {
     **_PARTS_PROFIT_STATUS_LABELS,
     "complete": "完整",
-    "expense_tax_unknown": "费用税务口径待确认",
+    "expense_tax_unknown": "费用税务口径缺失",
     "expense_data_unavailable": "费用数据未就绪",
 }
 
@@ -94,7 +94,7 @@ def render_contract_workbook(
     *,
     workbook: Workbook | None = None,
 ) -> Workbook:
-    """把完整合同数据渲染成四个 Sheet 的财务工作簿。"""
+    """把合同工作簿数据渲染成四个 Sheet。"""
     owns_workbook = workbook is None
     workbook = workbook or Workbook()
     try:
@@ -117,6 +117,7 @@ def _populate_contract_workbook(
     dual_cost_summary = data["dual_cost_summary"]
     margin = data.get("margin")
     decision = data["decision"]
+    date_filtered = data.get("date_filtered") is True
     expense_data_available = data.get("expense_data_available") is True
     spent_parts = float(cost_summary["known_cost_total"])
     raw_expense_total = float(data["expense_total"])
@@ -126,11 +127,17 @@ def _populate_contract_workbook(
         for expense in data["expenses"]
     )
     if expense_data_available:
-        expense_summary_label = "生效报销费用"
+        expense_summary_label = (
+            "所选期间生效报销费用"
+            if date_filtered else "生效报销费用"
+        )
         expense_summary_value = raw_expense_total
         expense_summary_format = _MONEY
     elif has_active_expense:
-        expense_summary_label = "当前已导入报销（非全量）"
+        expense_summary_label = (
+            "所选期间当前已导入报销（非全量）"
+            if date_filtered else "当前已导入报销（非全量）"
+        )
         expense_summary_value = raw_expense_total
         expense_summary_format = _MONEY
     else:
@@ -166,10 +173,15 @@ def _populate_contract_workbook(
     budget_sheet["A1"].font = _TITLE_FONT
     budget_sheet.row_dimensions[1].height = 26
     budget_sheet.merge_cells("A2:F2")
+    scope_note = (
+        "所选期间成本/报销事实仅供参考 · "
+        "日期筛选下不计算合同预算余量/红黄绿 · "
+        if date_filtered
+        else "成本或费用数据未就绪时不计算预算余量或红黄绿 · "
+    )
     budget_sheet["A2"] = (
         "实际、估算、缺失分层同源 · 已知金额为含税/不含税混合原值参考 · "
-        "成本或费用数据未就绪时不计算预算余量或红黄绿 · "
-        "导出自 IT 备件智能管理系统"
+        f"{scope_note}导出自 IT 备件智能管理系统"
     )
     budget_sheet["A2"].font = _SUB_FONT
 
@@ -196,7 +208,9 @@ def _populate_contract_workbook(
          _QUALITY_LABELS[dual_cost_summary["parts_cost_ex_tax_quality"]], None),
         ("已知备件成本参考（混合原值）", spent_parts, _MONEY,
          expense_summary_label, expense_summary_value, expense_summary_format),
-        ("完整项目支出参考（备件+报销）",
+        (
+         "所选期间支出参考（备件+报销）"
+         if date_filtered else "完整项目支出参考（备件+报销）",
          spent if spent is not None else "—",
          _MONEY if spent is not None else None,
          "剩余预算", remaining if remaining is not None else "—",
@@ -302,18 +316,18 @@ def _populate_contract_workbook(
                 parts_margin_ex_format,
             ),
             (
-                "合同级贡献毛利（含税·费用口径待确认）",
+                "合同级贡献毛利（含税）",
                 contribution_inc,
                 contribution_inc_format,
-                "合同级贡献毛利（未税·费用口径待确认）",
+                "合同级贡献毛利（未税）",
                 contribution_ex,
                 contribution_ex_format,
             ),
             (
-                "合同级贡献毛利率（含税·费用口径待确认）",
+                "合同级贡献毛利率（含税）",
                 contribution_margin_inc,
                 contribution_margin_inc_format,
-                "合同级贡献毛利率（未税·费用口径待确认）",
+                "合同级贡献毛利率（未税）",
                 contribution_margin_ex,
                 contribution_margin_ex_format,
             ),

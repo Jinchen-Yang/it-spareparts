@@ -19,7 +19,7 @@ from app.db import SessionLocal
 from app.etl import loader, mapping
 from app.etl.transform import transform
 from app.main import app
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import FMaintenanceLine
 from app.models.system import SysImportBatch, SysUser
 from app.services import maintenance_cost, merge
 from tests import factories as f
@@ -118,7 +118,11 @@ def test_readonly_template_closes_page_maintenance():
 # ---------- C02：Numeric 溢出隔离 ----------
 
 def test_overflow_isolated(db, batch):
-    _load = lambda o, l: loader.load(db, f.purchase_result(o, l), batch.id, date(2026, 6, 1))
+    def _load(orders, lines):
+        loader.load(
+            db, f.purchase_result(orders, lines), batch.id, date(2026, 6, 1)
+        )
+
     _load({"P1": f.purchase_head("P1", on=date(2026, 3, 2))},
           [f.purchase_line("P1", "PL1", "PN-BIG", qty="1", price="99999999999.99")])
     loader.load(db, f.maintenance_result(
@@ -203,7 +207,11 @@ def test_project_prefix_requires_dash():
 # ---------- C03：合并 repoint 维保行，成本存活 ----------
 
 def test_merge_repoints_maintenance_line(db, batch):
-    _load = lambda o, l: loader.load(db, f.purchase_result(o, l), batch.id, date(2026, 6, 1))
+    def _load(orders, lines):
+        loader.load(
+            db, f.purchase_result(orders, lines), batch.id, date(2026, 6, 1)
+        )
+
     # A、B 同物理件不同 PN；专属采购挂 B、维保出库用 A
     _load({"P1": f.purchase_head("P1", order_no="CG1", on=date(2026, 3, 2),
                                  source_type="维保需求", linked_maintenance_order_no="WB1")},
@@ -240,7 +248,11 @@ def test_merge_repoints_maintenance_line(db, batch):
 
 def test_contract_incomplete_flag(db, batch):
     # 项目关联 XSDD-2（未导入销售）→ contract_incomplete，合同额不按 0 静默低估
-    _load = lambda o, l: loader.load(db, f.purchase_result(o, l), batch.id, date(2026, 6, 1))
+    def _load(orders, lines):
+        loader.load(
+            db, f.purchase_result(orders, lines), batch.id, date(2026, 6, 1)
+        )
+
     _load({"P1": f.purchase_head("P1", on=date(2026, 3, 2))},
           [f.purchase_line("P1", "PL1", "PN-J", qty="1", price="100")])
     loader.load(db, f.maintenance_result(

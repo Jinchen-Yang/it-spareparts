@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.models.system import SysAuditLog, SysBusinessSetting
 
 ProfitDefaultBasis = Literal["inc", "ex", "both"]
+DisplayBasis = Literal["inc", "ex", "both"]
 
 
 class BusinessSettingMissing(RuntimeError):
@@ -44,14 +45,18 @@ def _snapshot(setting: SysBusinessSetting) -> dict:
     return {
         "maintenance_project_profit_default_basis":
             setting.maintenance_project_profit_default_basis,
+        "purchase_display_basis": setting.purchase_display_basis,
+        "sales_display_basis": setting.sales_display_basis,
         "version": setting.version,
     }
 
 
-def update_maintenance_project_profit_default_basis(
+def update_business_settings(
     db: Session,
     *,
-    basis: ProfitDefaultBasis,
+    maintenance_basis: ProfitDefaultBasis,
+    purchase_basis: DisplayBasis,
+    sales_basis: DisplayBasis,
     expected_version: int,
     operated_by: str,
 ) -> SysBusinessSetting:
@@ -64,11 +69,18 @@ def update_maintenance_project_profit_default_basis(
     setting = get_business_setting(db, for_update=True)
     if expected_version != setting.version:
         raise BusinessSettingVersionConflict(expected_version, setting.version)
-    if basis == setting.maintenance_project_profit_default_basis:
+    if (
+        maintenance_basis
+        == setting.maintenance_project_profit_default_basis
+        and purchase_basis == setting.purchase_display_basis
+        and sales_basis == setting.sales_display_basis
+    ):
         return setting
 
     before = _snapshot(setting)
-    setting.maintenance_project_profit_default_basis = basis
+    setting.maintenance_project_profit_default_basis = maintenance_basis
+    setting.purchase_display_basis = purchase_basis
+    setting.sales_display_basis = sales_basis
     setting.version += 1
     setting.updated_by = operated_by
     setting.updated_at = datetime.now(timezone.utc)
@@ -76,12 +88,31 @@ def update_maintenance_project_profit_default_basis(
         SysAuditLog(
             entity_type="sys_business_setting",
             entity_id=setting.id,
-            action="maintenance_profit_basis_update",
+            action="business_display_basis_update",
             before_json=before,
             after_json=_snapshot(setting),
-            reason="仅影响维保合同级毛利的默认展示口径，不改变双口径计算事实",
+            reason="统一更新采购、销售、项目维保展示口径，不改变双口径计算事实",
             operated_by=operated_by,
         ),
     )
     db.flush()
     return setting
+
+
+def update_maintenance_project_profit_default_basis(
+    db: Session,
+    *,
+    basis: ProfitDefaultBasis,
+    expected_version: int,
+    operated_by: str,
+) -> SysBusinessSetting:
+    """旧内部调用兼容；保留采购、销售当前值并走同一原子更新实现。"""
+    current = get_business_setting(db)
+    return update_business_settings(
+        db,
+        maintenance_basis=basis,
+        purchase_basis=current.purchase_display_basis,
+        sales_basis=current.sales_display_basis,
+        expected_version=expected_version,
+        operated_by=operated_by,
+    )

@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { message } from "antd";
 
@@ -21,7 +22,9 @@ import { NAV_ITEMS } from "../../nav";
 import type { SystemSettings } from "../../api/systemSettings";
 
 const initial: SystemSettings = {
-  maintenance_project_profit_default_basis: "both",
+  purchase_display_basis: "both",
+  sales_display_basis: "ex",
+  maintenance_display_basis: "both",
   version: 3,
   updated_by: null,
   updated_at: null,
@@ -37,33 +40,39 @@ afterEach(() => {
   message.destroy();
 });
 
-describe("维保合同级毛利默认展示口径", () => {
-  it("明确说明只影响默认展示，并提供含税、未税、同时显示三项", async () => {
+describe("管理员统一税口径展示策略", () => {
+  it("分采购、销售、项目维保三域配置，销售初始默认未税", async () => {
     render(<SystemSettingsPage />);
-    await screen.findByText("维保合同级毛利默认展示口径");
+    await screen.findByText("税口径统一展示策略");
 
-    expect(screen.getByText(/只影响项目成本页的默认展示/)).toBeInTheDocument();
-    expect(await screen.findByRole("radio", { name: /含税毛利/ })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /未税毛利/ })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: /同时显示/ })).toBeChecked();
+    expect(screen.getByText(/普通员工不能临时切换/)).toBeInTheDocument();
+    const purchase = screen.getByRole("radiogroup", { name: "采购展示口径" });
+    const sales = screen.getByRole("radiogroup", { name: "销售展示口径" });
+    const maintenance = screen.getByRole("radiogroup", { name: "项目维保展示口径" });
+    expect(within(purchase).getByRole("radio", { name: "同时显示" })).toBeChecked();
+    expect(within(sales).getByRole("radio", { name: "不含税" })).toBeChecked();
+    expect(within(maintenance).getByRole("radio", { name: "同时显示" })).toBeChecked();
   });
 
-  it("保存时携带当前版本，成功后采用服务端的新版本", async () => {
+  it("保存时原子携带三域和当前版本，成功后采用服务端新版本", async () => {
     updateSystemSettings.mockResolvedValue({
       data: {
         ...initial,
-        maintenance_project_profit_default_basis: "inc",
+        maintenance_display_basis: "inc",
         version: 4,
         updated_by: "admin",
         updated_at: "2026-07-28T20:00:00+08:00",
       },
     });
     render(<SystemSettingsPage />);
-    fireEvent.click(await screen.findByRole("radio", { name: /含税毛利/ }));
+    const maintenance = await screen.findByRole("radiogroup", { name: "项目维保展示口径" });
+    fireEvent.click(within(maintenance).getByRole("radio", { name: "含税" }));
     fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
 
     await waitFor(() => expect(updateSystemSettings).toHaveBeenCalledWith({
-      maintenance_project_profit_default_basis: "inc",
+      purchase_display_basis: "both",
+      sales_display_basis: "ex",
+      maintenance_display_basis: "inc",
       expected_version: 3,
     }));
     await waitFor(() => expect(
@@ -76,14 +85,15 @@ describe("维保合同级毛利默认展示口径", () => {
       response: { status: 409, data: { detail: "设置已被其他管理员修改，请刷新后重试" } },
     });
     render(<SystemSettingsPage />);
-    fireEvent.click(await screen.findByRole("radio", { name: /未税毛利/ }));
+    const purchase = await screen.findByRole("radiogroup", { name: "采购展示口径" });
+    fireEvent.click(within(purchase).getByRole("radio", { name: "含税" }));
     fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
 
     expect(await screen.findByText(/已被其他管理员修改/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新加载" })).toBeInTheDocument();
     expect(screen.getByText(/当前版本：v3/)).toBeInTheDocument();
 
-    const inc = screen.getByRole("radio", { name: /含税毛利/ });
+    const inc = within(purchase).getByRole("radio", { name: "含税" });
     expect(inc).toBeDisabled();
     fireEvent.click(inc);
     expect(screen.getByText(/已被其他管理员修改/)).toBeInTheDocument();
@@ -100,8 +110,9 @@ describe("维保合同级毛利默认展示口径", () => {
     }));
     render(<SystemSettingsPage />);
 
-    const inc = await screen.findByRole("radio", { name: /含税毛利/ });
-    const ex = screen.getByRole("radio", { name: /未税毛利/ });
+    const purchase = await screen.findByRole("radiogroup", { name: "采购展示口径" });
+    const inc = within(purchase).getByRole("radio", { name: "含税" });
+    const ex = within(purchase).getByRole("radio", { name: "不含税" });
     fireEvent.click(inc);
     fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
     await waitFor(() => expect(updateSystemSettings).toHaveBeenCalledTimes(1));
@@ -115,7 +126,7 @@ describe("维保合同级毛利默认展示口径", () => {
     resolveSave({
       data: {
         ...initial,
-        maintenance_project_profit_default_basis: "inc",
+        purchase_display_basis: "inc",
         version: 4,
       },
     });
@@ -130,7 +141,8 @@ describe("维保合同级毛利默认展示口径", () => {
     render(<SystemSettingsPage />);
     await screen.findByText(/当前版本：v3/);
 
-    fireEvent.click(screen.getByRole("radio", { name: /未税毛利/ }));
+    const sales = screen.getByRole("radiogroup", { name: "销售展示口径" });
+    fireEvent.click(within(sales).getByRole("radio", { name: "含税" }));
     fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
     await screen.findByRole("button", { name: "重新加载" });
 
@@ -146,7 +158,8 @@ describe("维保合同级毛利默认展示口径", () => {
   it("普通保存错误显示可恢复提示", async () => {
     updateSystemSettings.mockRejectedValue(new Error("network down"));
     render(<SystemSettingsPage />);
-    fireEvent.click(await screen.findByRole("radio", { name: /未税毛利/ }));
+    const sales = await screen.findByRole("radiogroup", { name: "销售展示口径" });
+    fireEvent.click(within(sales).getByRole("radio", { name: "含税" }));
     fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
 
     expect(await screen.findByText(/保存失败/)).toBeInTheDocument();

@@ -128,13 +128,34 @@ EXPENSE_LINE = {
     "报销明细.序号": "line_no",
     "报销明细.费用分类": "fee_category",
     "报销明细.报销金额": "amount",
+    "报销明细.报销金额（未税）": "amount_ex_tax",
+    "报销明细.报销金额（含税）": "amount_inc_tax",
+    "报销明细.金额口径": "tax_basis",
 }
 
 # §17.3 宽松变体列（项目追踪工作簿报销页 / 任意含最小列的表格）。
 # 不并入 EXPENSE_HEAD：EXPENSE_HEAD 同时是 ffill 头字段清单——「单号」若 ffill 会把上一行
 # 的单号灌进无单号行，复合幂等键 单号#序号 随即撞键静默丢行。这里只登记进 _ALL_KEYS
 # 供 canonicalize_columns 剥 (必填) 注解，transform 直接按列名读。
-EXPENSE_LOOSE_COLS = {"报销金额", "费用分类", "单号", "序号", "费用单号", "报销单号", "销售订单"}
+EXPENSE_LOOSE_COLS = {
+    "报销金额",
+    "报销金额（未税）",
+    "报销金额(未税)",
+    "未税金额",
+    "不含税金额",
+    "报销金额（含税）",
+    "报销金额(含税)",
+    "含税金额",
+    "金额口径",
+    "税务口径",
+    "含税/未税",
+    "费用分类",
+    "单号",
+    "序号",
+    "费用单号",
+    "报销单号",
+    "销售订单",
+}
 
 # ---- 产品库存（单实体，无 head/line 之分，无 ffill）----
 INVENTORY_MAP = {
@@ -256,7 +277,15 @@ def detect_file_type(cols: list[str]) -> str | None:
         return EXPENSE
     # 宽松变体（§17.3 项目追踪工作簿报销页/来源无关模板）：报销金额 是强特征——
     # 采购/销售/维保出库/库存导出均无此列，零误伤；辅以 费用分类 或 报销日期 双保险
-    if "报销金额" in sig and ("费用分类" in sig or "报销日期" in sig):
+    has_expense_amount = any(
+        value == "报销金额"
+        or "报销金额（未税）" in value
+        or "报销金额(未税)" in value
+        or "报销金额（含税）" in value
+        or "报销金额(含税)" in value
+        for value in sig
+    ) or bool(sig & {"未税金额", "不含税金额", "含税金额"})
+    if has_expense_amount and ("费用分类" in sig or "报销日期" in sig):
         return EXPENSE
     if "订单编号" in sig and "业务类型" in sig:
         return SALES

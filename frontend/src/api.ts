@@ -183,7 +183,8 @@ export interface RecentPurchaseRow {
   description: string | null;
   brand: string | null;
   qty: number | null;
-  is_tax_inclusive: boolean | null;   // 单价/金额税口径：含税单→含税、不含单→不含税（前端按此分两列，零计算）
+  // 原始税务口径；双口径金额由服务端按固定 13% 生成，前端只负责显示。
+  is_tax_inclusive: boolean | null;
   unit_price: number | null;
   line_amount: number | null;
 }
@@ -201,14 +202,31 @@ export interface CancellationPeriodRow {
   total: number;
   cancelled: number;
   cancel_rate: number;
+  cancelled_amount_ex: number;
+  cancelled_amount_inc: number;
+  /** 兼容旧客户端：明确等于 cancelled_amount_ex。 */
   cancelled_amount: number;
-  by_status: Record<string, { count: number; amount: number }>;
+  by_status: Record<string, {
+    count: number;
+    amount_ex: number;
+    amount_inc: number;
+    /** 兼容旧客户端：明确等于 amount_ex。 */
+    amount: number;
+  }>;
 }
 export interface CancellationStats {
   granularity: string;
   statuses: string[];
   rows: CancellationPeriodRow[];
-  summary: { total: number; cancelled: number; cancel_rate: number; cancelled_amount: number };
+  summary: {
+    total: number;
+    cancelled: number;
+    cancel_rate: number;
+    cancelled_amount_ex: number;
+    cancelled_amount_inc: number;
+    /** 兼容旧客户端：明确等于 cancelled_amount_ex。 */
+    cancelled_amount: number;
+  };
 }
 export const fetchCancellationStats = (params: { granularity?: string; days?: number }) =>
   api.get<CancellationStats>("/purchases/cancellation-stats", { params });
@@ -247,7 +265,8 @@ export interface PurchaseAnalysis {
   window: { days: number; since: string; until: string; freq_threshold: number;
             exclude_designated: boolean; daily: boolean };
   kpi: { total_amount: number | null;
-         total_amount_inc: number | null; total_amount_ex: number | null;   // 订单级真实含税/不含税总额（零计算）
+         // 服务端按订单原始口径与固定 13% 生成的双口径总额。
+         total_amount_inc: number | null; total_amount_ex: number | null;
          order_count: number;
          order_count_by_source: Record<string, number>; part_count: number;
          frequent_count: number; shown: number; truncated: number };
@@ -257,6 +276,7 @@ export interface PurchaseAnalysis {
   rows: PurchaseAnalysisRow[];
 }
 export interface PurchaseDrillItem {
+  line_id: number;
   order_date: string | null; order_no: string | null; purchaser: string | null;
   supplier: string | null; source_channel: string; source_type: string | null;
   qty: number | null; is_tax_inclusive: boolean | null; unit_price: number | null;
@@ -473,7 +493,9 @@ export interface PurchaseRow {
   qty: number | null;
   unit_price: number | null;
   source_type: string | null;
-  is_tax_inclusive: boolean | null;   // 单价口径：含税单→含税、不含单→不含税（前端分列，零计算）
+  is_tax_inclusive: boolean | null;
+  price_inc?: number | null;
+  price_ex?: number | null;
 }
 export interface SalesRow {
   order_no: string;
@@ -481,6 +503,8 @@ export interface SalesRow {
   customer: string | null;
   qty: number | null;
   unit_price: number | null;
+  price_inc?: number | null;
+  price_ex?: number | null;
 }
 export interface InventoryRow {
   warehouse: string;
@@ -495,10 +519,15 @@ export interface InventoryRow {
 // ===== 老板经营看板（page_boss_board）· v2 契约（PR#93）=====
 export interface DashboardKpi {
   window: { date_from: string | null; date_to: string | null; as_of: string; future_excluded: boolean };
-  sales_ex_tax: number | null; purchase_ex_tax: number | null;
-  sales_costed_ex_tax: number | null; gross_profit: number | null;
+  sales_ex_tax: number | null; sales_inc_tax?: number | null;
+  purchase_ex_tax: number | null; purchase_inc_tax?: number | null;
+  sales_costed_ex_tax: number | null; sales_costed_inc_tax?: number | null;
+  gross_profit: number | null;
+  gross_profit_ex?: number | null; gross_profit_inc?: number | null;
   gross_margin: number | null; cost_coverage: number | null;
-  sales_uncosted_ex_tax: number | null; excluded_revenue: number | null;
+  sales_uncosted_ex_tax: number | null; sales_uncosted_inc_tax?: number | null;
+  excluded_revenue: number | null;
+  excluded_revenue_ex?: number | null; excluded_revenue_inc?: number | null;
   orders_active: number; orders_in_progress: number; orders_cancelled: number;
   orders_future: number; anomaly_lines: number;
 }
@@ -597,9 +626,13 @@ export interface PriceStats {
 // 成本/毛利类字段按角色可能被脱敏成 null，故一律 `number | null`。
 export interface PartRankingRow {
   part_id: number; pn_std: string; description: string | null; brand: string | null;
-  qty_sold: number | null; revenue: number | null; order_count: number;
+  qty_sold: number | null; revenue: number | null;
+  revenue_ex?: number | null; revenue_inc?: number | null;
+  order_count: number;
   revenue_costed: number | null; no_cost: number; lines: number;
   gross_profit_moving: number | null; gross_profit_fifo: number | null;
+  gross_profit_moving_ex?: number | null; gross_profit_moving_inc?: number | null;
+  gross_profit_fifo_ex?: number | null; gross_profit_fifo_inc?: number | null;
   gross_margin_moving: number | null; gross_margin_fifo: number | null;
   purchase_price: PriceStats | null; sale_price: PriceStats | null;
   cost_coverage: number | null;
@@ -658,7 +691,11 @@ export interface SalesOrderRow {
   data_status: string | null; part_count: number; pn_count?: number;
   total_qty: number | null; total_quantity: number | null;
   total_revenue: number | null; total_amount: number | null;
-  total_gross_profit: number | null; linked_purchase: boolean;
+  total_revenue_ex?: number | null; total_revenue_inc?: number | null;
+  total_amount_ex?: number | null; total_amount_inc?: number | null;
+  total_gross_profit: number | null;
+  total_gross_profit_ex?: number | null; total_gross_profit_inc?: number | null;
+  linked_purchase: boolean;
   /** v2 fields are optional during rolling deployment against a pre-v2 backend. */
   parts?: SalesOrderPart[]; pn_preview?: string[];
 }
@@ -669,6 +706,8 @@ export interface PurchaseOrderRow {
   linked_sales_order: string | null; part_count: number; pn_count?: number;
   total_qty: number | null; total_quantity: number | null;
   total_ex_tax: number | null; total_amount: number | null;
+  total_inc_tax?: number | null;
+  total_amount_ex?: number | null; total_amount_inc?: number | null;
   /** v2 fields are optional during rolling deployment against a pre-v2 backend. */
   parts?: PurchaseOrderPart[]; pn_preview?: string[];
 }

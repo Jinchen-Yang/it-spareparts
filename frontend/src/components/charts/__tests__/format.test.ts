@@ -1,7 +1,8 @@
 /** 图表底座公共格式化：空值语义（null→占位符，绝不 0）、金额/数量/百分比/HTML 转义。 */
 import { describe, expect, it } from "vitest";
 import {
-  EMPTY, escapeHtml, money, moneyAxis, moneyExact, pctSigned, qty,
+  completeTaxPair, EMPTY, escapeHtml, money, moneyAxis, moneyExact, pctSigned, qty,
+  splitByFlag, splitFixed,
 } from "../../../utils/format";
 
 describe("空值语义", () => {
@@ -60,5 +61,30 @@ describe("既有 money 不回归", () => {
   it("money 维持原行为（其它页面在用）", () => {
     expect(money(null)).toBe(EMPTY);
     expect(money(1000)).toContain("1,000");
+  });
+});
+
+describe("固定 13% 双税口径", () => {
+  it("从含税或未税原值补齐另一侧并按分保留两位", () => {
+    expect(splitFixed(113, "inc")).toEqual({ inc: 113, ex: 100 });
+    expect(splitFixed(100, "ex")).toEqual({ inc: 113, ex: 100 });
+    expect(splitFixed(null, "ex")).toEqual({ inc: null, ex: null });
+  });
+
+  it("金额中点与后端/PostgreSQL 一样按分远离零舍入，且先舍入原始侧", () => {
+    expect(splitFixed(0.505, "ex")).toEqual({ inc: 0.58, ex: 0.51 });
+    expect(splitFixed(2.675, "ex")).toEqual({ inc: 3.03, ex: 2.68 });
+    expect(splitFixed(-0.505, "ex")).toEqual({ inc: -0.58, ex: -0.51 });
+    expect(splitFixed(1.005, "inc")).toEqual({ inc: 1.01, ex: 0.89 });
+  });
+
+  it("采购未标注税口径时按未税原值处理", () => {
+    expect(splitByFlag(100, null)).toEqual({ inc: 113, ex: 100 });
+    expect(splitByFlag(113, true)).toEqual({ inc: 113, ex: 100 });
+  });
+
+  it("API 双值优先，仅补缺失侧", () => {
+    expect(completeTaxPair(120, 100)).toEqual({ inc: 120, ex: 100 });
+    expect(completeTaxPair(null, 100)).toEqual({ inc: 113, ex: 100 });
   });
 });

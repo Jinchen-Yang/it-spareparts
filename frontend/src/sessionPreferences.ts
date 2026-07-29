@@ -1,10 +1,9 @@
-/** 只在当前登录会话内沿用的展示偏好；切换账号时必须清除。 */
-export const MAINTENANCE_PROFIT_BASIS_KEY = "maintenance_project_profit_basis";
-
+/** 清理旧版本遗留的个人税口径。新版本只使用管理员服务端统一策略。 */
 export function clearSessionScopedPreferences() {
   try {
-    localStorage.removeItem(MAINTENANCE_PROFIT_BASIS_KEY);
+    localStorage.removeItem("maintenance_project_profit_basis");
+    localStorage.removeItem("tax_basis");
   } catch {
-    // localStorage 被禁用时，会话本来也不会持久化偏好。
+    // localStorage 被禁用时没有遗留偏好需要清理。
   }
 }

@@ -3,6 +3,7 @@
 验证核心口径：取消单能查到、能统计，但不影响"已生效"业务计算。
 """
 from datetime import date
+from decimal import Decimal
 
 import pytest
 
@@ -85,6 +86,61 @@ def test_cancellation_stats_by_year(db, batch):
     assert len(res["rows"]) == 1
     assert res["rows"][0]["period"] == "2026"
     assert res["rows"][0]["total"] == 6 and res["rows"][0]["cancelled"] == 2
+
+
+def test_cancellation_stats_aggregates_each_order_by_its_authoritative_tax_basis(db, batch):
+    orders = {
+        "INC": f.purchase_head(
+            "INC",
+            on=date(2026, 3, 1),
+            data_status="已取消",
+            is_tax_inclusive=True,
+            amount_ex_tax=Decimal("999.00"),
+            amount_inc_tax=Decimal("113.00"),
+        ),
+        "EX": f.purchase_head(
+            "EX",
+            on=date(2026, 3, 2),
+            data_status="已取消",
+            is_tax_inclusive=False,
+            amount_ex_tax=Decimal("100.00"),
+            amount_inc_tax=Decimal("999.00"),
+        ),
+        "DEFAULT_EX": f.purchase_head(
+            "DEFAULT_EX",
+            on=date(2026, 3, 3),
+            data_status="已取消",
+            is_tax_inclusive=None,
+            amount_ex_tax=Decimal("50.00"),
+            amount_inc_tax=Decimal("999.00"),
+        ),
+    }
+    lines = [
+        f.purchase_line(raw_id, f"L-{raw_id}", f"PN-{raw_id}", qty="1", price="1")
+        for raw_id in orders
+    ]
+    loader.load(
+        db,
+        f.purchase_result(orders, lines),
+        batch.id,
+        date(2026, 6, 1),
+        mode="skip",
+    )
+    db.commit()
+
+    result = purchase_analysis.cancellation_stats(db, granularity="month")
+    march = next(row for row in result["rows"] if row["period"] == "2026-03")
+    cancelled = march["by_status"]["已取消"]
+
+    assert cancelled["amount_ex"] == 250.0
+    assert cancelled["amount_inc"] == 282.5
+    assert cancelled["amount"] == 250.0
+    assert march["cancelled_amount_ex"] == 250.0
+    assert march["cancelled_amount_inc"] == 282.5
+    assert march["cancelled_amount"] == 250.0
+    assert result["summary"]["cancelled_amount_ex"] == 250.0
+    assert result["summary"]["cancelled_amount_inc"] == 282.5
+    assert result["summary"]["cancelled_amount"] == 250.0
 
 
 def test_cancelled_counted_in_stats_but_excluded_from_active(db, batch):

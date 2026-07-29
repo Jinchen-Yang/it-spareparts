@@ -15,11 +15,30 @@ import {
   updateSystemSettings,
 } from "../api/systemSettings";
 import type {
-  MaintenanceProfitDefaultBasis,
   SystemSettings,
+  TaxDisplayBasis,
 } from "../api/systemSettings";
+import {
+  announceTaxDisplayPolicyChanged,
+  TAX_BASIS_OPTIONS,
+  useTaxDisplayPolicy,
+} from "../context/TaxBasis";
 
 const { Text } = Typography;
+
+interface SettingsDraft {
+  purchase_display_basis: TaxDisplayBasis;
+  sales_display_basis: TaxDisplayBasis;
+  maintenance_display_basis: TaxDisplayBasis;
+}
+
+function toDraft(settings: SystemSettings): SettingsDraft {
+  return {
+    purchase_display_basis: settings.purchase_display_basis,
+    sales_display_basis: settings.sales_display_basis,
+    maintenance_display_basis: settings.maintenance_display_basis,
+  };
+}
 
 function errorDetail(error: unknown): string | undefined {
   if (
@@ -48,21 +67,23 @@ function isConflict(error: unknown): boolean {
 
 export default function SystemSettingsPage() {
   const [settings, setSettings] = useState<SystemSettings | null>(null);
-  const [basis, setBasis] = useState<MaintenanceProfitDefaultBasis>("both");
+  const [draft, setDraft] = useState<SettingsDraft | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
+  const { refresh: refreshDisplayPolicy } = useTaxDisplayPolicy();
 
   const load = useCallback(async () => {
     setLoading(true);
     setSettings(null);
+    setDraft(null);
     setError(null);
     setConflict(false);
     try {
       const { data } = await getSystemSettings();
       setSettings(data);
-      setBasis(data.maintenance_project_profit_default_basis);
+      setDraft(toDraft(data));
     } catch {
       setError("加载系统设置失败，请检查网络后重新加载。");
     } finally {
@@ -75,18 +96,20 @@ export default function SystemSettingsPage() {
   }, [load]);
 
   const save = async () => {
-    if (!settings) return;
+    if (!settings || !draft) return;
     setSaving(true);
     setError(null);
     setConflict(false);
     try {
       const { data } = await updateSystemSettings({
-        maintenance_project_profit_default_basis: basis,
+        ...draft,
         expected_version: settings.version,
       });
       setSettings(data);
-      setBasis(data.maintenance_project_profit_default_basis);
-      message.success("系统设置已保存");
+      setDraft(toDraft(data));
+      announceTaxDisplayPolicyChanged(data.version);
+      await refreshDisplayPolicy(data.version);
+      message.success("统一展示口径已保存并生效");
     } catch (requestError) {
       if (isConflict(requestError)) {
         setConflict(true);
@@ -105,18 +128,59 @@ export default function SystemSettingsPage() {
     }
   };
 
+  const updateBasis = (
+    key: keyof SettingsDraft,
+    value: TaxDisplayBasis,
+  ) => {
+    setDraft((current) => current ? { ...current, [key]: value } : current);
+    setError(null);
+  };
+
+  const dirty = Boolean(settings && draft && (
+    draft.purchase_display_basis !== settings.purchase_display_basis
+    || draft.sales_display_basis !== settings.sales_display_basis
+    || draft.maintenance_display_basis !== settings.maintenance_display_basis
+  ));
+
+  const basisGroup = (
+    title: string,
+    description: string,
+    key: keyof SettingsDraft,
+  ) => (
+    <div>
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>{title}</div>
+      <Text type="secondary">{description}</Text>
+      <div style={{ marginTop: 10 }}>
+        <div role="radiogroup" aria-label={`${title}展示口径`}>
+          <Radio.Group
+            name={`system-settings-${key}`}
+            value={draft?.[key]}
+            disabled={loading || saving || conflict}
+            onChange={(event) => {
+              updateBasis(key, event.target.value as TaxDisplayBasis);
+            }}
+            options={TAX_BASIS_OPTIONS.map((option) => ({
+              ...option,
+              label: option.value === "both" ? "同时显示" : option.label,
+            }))}
+          />
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <>
       <PageHeader
         title="系统设置"
-        subtitle="集中管理跨账号生效的业务默认值。"
+        subtitle="由管理员统一控制采购、销售和项目维保的税口径展示。"
       />
       <Alert
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="展示默认值，不是计算开关"
-        description="此设置只影响项目成本页的默认展示；含税与未税毛利会同时保留，切换默认值不会删除、覆盖或重算业务数据。"
+        message="管理员统一展示，不是个人偏好或计算开关"
+        description="普通员工不能临时切换。修改这里只改变各业务模块展示哪一侧，不删除或覆盖原始业务数据；采购、销售仅有一侧原值时，另一侧统一按 13% 税率补齐。"
       />
       {error && (
         <Alert
@@ -135,25 +199,26 @@ export default function SystemSettingsPage() {
           )}
         />
       )}
-      <Card title="维保合同级毛利默认展示口径">
+      <Card title="税口径统一展示策略">
         {loading && !settings ? (
           <Spin />
-        ) : settings ? (
+        ) : settings && draft ? (
           <Space direction="vertical" size={18} style={{ width: "100%" }}>
-            <Radio.Group
-              value={basis}
-              disabled={loading || saving || conflict}
-              onChange={(event) => {
-                setBasis(event.target.value as MaintenanceProfitDefaultBasis);
-                setError(null);
-              }}
-            >
-              <Space direction="vertical" size={12}>
-                <Radio value="inc">含税毛利</Radio>
-                <Radio value="ex">未税毛利</Radio>
-                <Radio value="both">同时显示</Radio>
-              </Space>
-            </Radio.Group>
+            {basisGroup(
+              "采购",
+              "采购分析、采购明细和采购成本相关页面使用此口径。",
+              "purchase_display_basis",
+            )}
+            {basisGroup(
+              "销售",
+              "销售与利润页面使用此口径；系统初始默认展示未税。",
+              "sales_display_basis",
+            )}
+            {basisGroup(
+              "项目维保",
+              "项目维保成本、合同级备件毛利和贡献毛利使用此口径。",
+              "maintenance_display_basis",
+            )}
             <Text type="secondary">
               当前版本：v{settings.version}
               {settings.updated_by ? ` · 最近由 ${settings.updated_by} 更新` : ""}
@@ -166,7 +231,7 @@ export default function SystemSettingsPage() {
                   saving
                   || loading
                   || conflict
-                  || basis === settings.maintenance_project_profit_default_basis
+                  || !dirty
                 }
                 onClick={() => void save()}
               >

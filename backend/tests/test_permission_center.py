@@ -485,12 +485,12 @@ def test_audit_trail_for_templates_and_bulk(db, admin_client):
         "usernames": ["au1"], "operation": "grant", "keys": ["page_governance"],
         "dry_run": False, "fingerprint": pv["fingerprint"]})
     logs = db.query(SysAuditLog).all()
-    actions = {(l.entity_type, l.action) for l in logs}
+    actions = {(log.entity_type, log.action) for log in logs}
     assert ("sys_role_template", "template_create") in actions
     assert ("sys_role_template", "template_update") in actions
     assert ("sys_user", "account_bulk_update") in actions
-    assert all(l.operated_by == "admin" for l in logs
-               if l.action in ("template_create", "template_update", "account_bulk_update"))
+    assert all(log.operated_by == "admin" for log in logs
+               if log.action in ("template_create", "template_update", "account_bulk_update"))
 
 
 # ---------- 10. 迁移对账（直接测迁移文件里的回填纯函数） ----------
@@ -510,13 +510,15 @@ def _load_migration():
      "data_pool_price_governance": True},
 ])
 def test_migration_reconciliation(role, custom):
-    """逐账号对账：回填出的 快照⊕覆盖 与旧口径 effective(role, custom) 逐键一致。"""
+    """历史迁移创建时已有的键逐项对账；后续新键由各自迁移显式补入。"""
     mig = _load_migration()
     filled = mig._backfill_one(role, custom)
     new_eff = permissions.effective_from_snapshot(filled["template_perms"],
                                                   filled["perm_overrides"])
     old_eff = permissions.effective(role, custom)
-    assert new_eff == old_eff
+    assert {key: new_eff[key] for key in mig._KEYS} == {
+        key: old_eff[key] for key in mig._KEYS
+    }
 
 
 def test_migration_admin_short_circuit():

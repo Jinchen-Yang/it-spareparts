@@ -1,4 +1,4 @@
-"""维保项目毛利默认口径：单例设置、权限、乐观锁与审计契约。"""
+"""统一双税展示口径：单例设置、权限、乐观锁与审计契约。"""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -35,6 +35,8 @@ def test_singleton_seed_and_database_checks(db):
     setting = db.get(SysBusinessSetting, 1)
     assert setting is not None
     assert setting.maintenance_project_profit_default_basis == "both"
+    assert setting.purchase_display_basis == "both"
+    assert setting.sales_display_basis == "ex"
     assert setting.version == 1
 
     singleton_savepoint = db.begin_nested()
@@ -57,18 +59,17 @@ def test_singleton_seed_and_database_checks(db):
     db.expire_all()
 
 
-def test_get_requires_login_and_maintenance_page_permission(db):
+def test_get_requires_login_but_not_a_specific_page_permission(db):
     assert TestClient(app).get("/api/system-settings").status_code == 401
 
     denied = _client_for(db, "denied", "readonly", page_maintenance=False)
-    assert denied.get("/api/system-settings").status_code == 403
-
-    allowed = _client_for(db, "allowed", "purchaser", page_maintenance=True)
-    response = allowed.get("/api/system-settings")
+    response = denied.get("/api/system-settings")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert response.json() == {
-        "maintenance_project_profit_default_basis": "both",
+        "maintenance_display_basis": "both",
+        "purchase_display_basis": "both",
+        "sales_display_basis": "ex",
         "version": 1,
     }
 
@@ -78,7 +79,9 @@ def test_put_is_admin_only_and_records_audit_in_same_commit(db):
     assert non_admin.put(
         "/api/system-settings",
         json={
-            "maintenance_project_profit_default_basis": "inc",
+            "maintenance_display_basis": "inc",
+            "purchase_display_basis": "ex",
+            "sales_display_basis": "both",
             "expected_version": 1,
         },
     ).status_code == 403
@@ -87,12 +90,16 @@ def test_put_is_admin_only_and_records_audit_in_same_commit(db):
     response = admin.put(
         "/api/system-settings",
         json={
-            "maintenance_project_profit_default_basis": "inc",
+            "maintenance_display_basis": "inc",
+            "purchase_display_basis": "ex",
+            "sales_display_basis": "both",
             "expected_version": 1,
         },
     )
     assert response.status_code == 200, response.text
-    assert response.json()["maintenance_project_profit_default_basis"] == "inc"
+    assert response.json()["maintenance_display_basis"] == "inc"
+    assert response.json()["purchase_display_basis"] == "ex"
+    assert response.json()["sales_display_basis"] == "both"
     assert response.json()["version"] == 2
     assert response.json()["updated_by"] == "admin"
 
@@ -100,7 +107,9 @@ def test_put_is_admin_only_and_records_audit_in_same_commit(db):
     public_view = non_admin.get("/api/system-settings")
     assert public_view.status_code == 200
     assert public_view.json() == {
-        "maintenance_project_profit_default_basis": "inc",
+        "maintenance_display_basis": "inc",
+        "purchase_display_basis": "ex",
+        "sales_display_basis": "both",
         "version": 2,
     }
 
@@ -114,13 +123,17 @@ def test_put_is_admin_only_and_records_audit_in_same_commit(db):
     assert setting is not None and setting.version == 2
     assert audit is not None
     assert audit.entity_id == 1
-    assert audit.action == "maintenance_profit_basis_update"
+    assert audit.action == "business_display_basis_update"
     assert audit.before_json == {
         "maintenance_project_profit_default_basis": "both",
+        "purchase_display_basis": "both",
+        "sales_display_basis": "ex",
         "version": 1,
     }
     assert audit.after_json == {
         "maintenance_project_profit_default_basis": "inc",
+        "purchase_display_basis": "ex",
+        "sales_display_basis": "both",
         "version": 2,
     }
     assert audit.operated_by == "admin"
@@ -139,7 +152,9 @@ def test_put_optimistic_lock_and_same_value_idempotency(db):
         first = admin.put(
             "/api/system-settings",
             json={
-                "maintenance_project_profit_default_basis": "ex",
+                "maintenance_display_basis": "ex",
+                "purchase_display_basis": "inc",
+                "sales_display_basis": "ex",
                 "expected_version": 1,
             },
         )
@@ -155,7 +170,9 @@ def test_put_optimistic_lock_and_same_value_idempotency(db):
     stale = admin.put(
         "/api/system-settings",
         json={
-            "maintenance_project_profit_default_basis": "both",
+            "maintenance_display_basis": "both",
+            "purchase_display_basis": "both",
+            "sales_display_basis": "both",
             "expected_version": 1,
         },
     )
@@ -165,7 +182,9 @@ def test_put_optimistic_lock_and_same_value_idempotency(db):
     idempotent = admin.put(
         "/api/system-settings",
         json={
-            "maintenance_project_profit_default_basis": "ex",
+            "maintenance_display_basis": "ex",
+            "purchase_display_basis": "inc",
+            "sales_display_basis": "ex",
             "expected_version": 2,
         },
     )

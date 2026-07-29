@@ -39,6 +39,24 @@ def test_derive_tax_rate_bounded():
     assert cleaner.derive_tax_rate(Decimal("100"), Decimal("-5")) is None   # 负税率非法
 
 
+@pytest.mark.parametrize(
+    ("tax_flag", "expected_ex", "expected_inc"),
+    [
+        (True, Decimal("100"), Decimal("113")),
+        (False, Decimal("113"), Decimal("127.69")),
+        (None, Decimal("113"), Decimal("127.69")),
+    ],
+)
+def test_line_prices_only_explicit_true_is_tax_inclusive(
+    tax_flag,
+    expected_ex,
+    expected_inc,
+):
+    ex, inc = pa._line_prices(Decimal("113"), tax_flag)
+    assert ex == expected_ex
+    assert inc == expected_inc
+
+
 def test_classify_channel_word_boundary():
     # 'inc' 是 'Vince' 子串，但整词匹配不误判；短名 → 个人
     assert cleaner.classify_source_channel("Vince", "Vince", None) == "个人"
@@ -116,18 +134,17 @@ def test_aggregation_basics(db, batch):
 
 
 def test_tax_inclusive_exclusive_prices(db, batch):
-    """零计算口径：每单单价只落在自己的税口径列，另一侧留 None（不用税率反推）。"""
+    """原始口径保留，另一侧统一按 13% 生成。"""
     _seed(db, batch)
     res = pa.analysis(db, None, days=7, as_of=_AS_OF)
     st = next(r for r in res["rows"] if r["pn_std"] == "ST8000NM000A")
-    # 未税价只由不含税单贡献：O2=1900、O3=1750；O1(含税)不再反推未税
-    assert st["price_ex_min"] == 1750.0 and st["price_ex_max"] == 1900.0
-    # 最近一单(O1 06-25)是含税单 → 未税列最近价留空
-    assert st["price_ex_last"] is None
-    # 含税价只有含税单 O1 贡献（不含单留 None）
+    # O1 含税 2260 → 未税 2000；O2/O3 原始未税不变。
+    assert st["price_ex_min"] == 1750.0 and st["price_ex_max"] == 2000.0
+    assert st["price_ex_last"] == 2000.0
+    # O2/O3 未税也生成含税价。
     assert st["price_inc_last"] == 2260.0
-    assert st["price_inc_min"] == 2260.0 and st["price_inc_max"] == 2260.0
-    # 价格趋势按未税序列(不含税单 1750→1900)：上行
+    assert st["price_inc_min"] == 1977.5 and st["price_inc_max"] == 2260.0
+    # 价格趋势按统一未税序列 1750→1900→2000：上行。
     assert st["price_trend"] == "up"
 
 
@@ -138,7 +155,7 @@ def test_channel_split_and_composition(db, batch):
     chans = {c["channel"]: c for c in st["channels"]}
     assert set(chans) == {"淘宝", "正规供应商", "个人"}
     assert chans["淘宝"]["times"] == 1 and chans["淘宝"]["price_inc_last"] == 2260.0
-    assert chans["正规供应商"]["price_inc_last"] is None      # 不含单含税价留空
+    assert chans["正规供应商"]["price_inc_last"] == 2147.0
     # 来源构成（合计）：淘宝金额最高(9040) > 个人(5250) > 正规(3800)
     comp = {c["channel"]: c for c in res["source_composition"]}
     assert comp["淘宝"]["amount"] == 9040.0
@@ -146,7 +163,7 @@ def test_channel_split_and_composition(db, batch):
 
 
 def test_kpi_dual_totals_from_order_amounts(db, batch):
-    """KPI/渠道双总额取订单级真实金额(零计算)+ coalesce 兜底：某侧缺用另一侧真实值。"""
+    """KPI/渠道双总额按订单原始口径统一 13% 生成。"""
     lines = [
         f.purchase_line("A1", "AL1", "DUAL-X", qty="1", price="1130"),   # 含税单(两额齐)
         f.purchase_line("A2", "AL2", "DUAL-X", qty="1", price="1000"),   # 不含单(两额相等)
@@ -166,13 +183,25 @@ def test_kpi_dual_totals_from_order_amounts(db, batch):
     loader.load(db, f.purchase_result(heads, lines), batch.id, _AS_OF, mode="skip")
     db.commit()
     res = pa.analysis(db, None, days=7, as_of=_AS_OF)
-    # 含税总额 = 1130 + 1000 + 500(兜底) = 2630；不含税 = 1000 + 1000 + 500 = 2500；含税≥不含税
-    assert res["kpi"]["total_amount_inc"] == 2630.0
+    # A2/A3 是未税权威值，含税分别生成 1130/565；原表另一侧旧值不覆盖口径。
+    assert res["kpi"]["total_amount_inc"] == 2825.0
     assert res["kpi"]["total_amount_ex"] == 2500.0
     assert res["kpi"]["total_amount_inc"] >= res["kpi"]["total_amount_ex"]
     comp = res["source_composition"]
-    assert sum(c["amount_inc"] for c in comp) == 2630.0
+    assert sum(c["amount_inc"] for c in comp) == 2825.0
     assert sum(c["amount_ex"] for c in comp) == 2500.0
+
+
+def test_order_amounts_use_fixed_tax_policy_cent_rounding():
+    """订单换算逐单舍入到分，并与 PostgreSQL midpoint 规则一致。"""
+    assert pa._order_amounts(Decimal("0.50"), None, False) == (
+        Decimal("0.50"),
+        Decimal("0.57"),
+    )
+    assert pa._order_amounts(None, Decimal("1.00"), True) == (
+        Decimal("0.88"),
+        Decimal("1.00"),
+    )
 
 
 def test_exclude_designated_toggle(db, batch):
@@ -200,8 +229,7 @@ def test_drilldown_and_rbac_supplier_mask(db, batch):
     assert len(drill["items"]) == 3
     newest = drill["items"][0]                       # 06-25 含税单
     assert newest["is_tax_inclusive"] is True
-    # 零计算：含税单只有含税价，未税价留空（不再 2260/1.13）
-    assert newest["price_ex"] is None and newest["price_inc"] == 2260.0
+    assert newest["price_ex"] == 2000.0 and newest["price_inc"] == 2260.0
     # 销售：供应商遮蔽（data_supplier=False），但进价可见（data_purchase_cost=True）
     sales = security.UserContext(user_id="liu", role="sales")
     masked = security.apply_field_visibility(drill, sales)

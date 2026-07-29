@@ -10,7 +10,7 @@ from typing import Iterable
 from sqlalchemy import and_, or_
 
 
-ACTUAL_SOURCES = frozenset({"direct", "window", "month_avg"})
+ACTUAL_SOURCES = frozenset({"direct", "window", "month_avg", "manual"})
 ESTIMATED_SOURCES = frozenset({
     "trace_avg",
     "sales_ref",

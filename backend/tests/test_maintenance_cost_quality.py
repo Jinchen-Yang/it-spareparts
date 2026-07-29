@@ -281,6 +281,7 @@ def test_tax_estimate_flags_cannot_promote_an_unknown_cost_source(db):
         filename="unknown-dual-cost.xlsx",
         file_type="maintenance",
         file_hash="unknown-dual-cost",
+        status="success",
     )
     db.add(batch)
     db.flush()
@@ -409,6 +410,7 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
         filename="quality.xlsx",
         file_type="maintenance",
         file_hash="issue156-quality",
+        status="success",
     )
     db.add(batch)
     db.flush()
@@ -515,10 +517,11 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
         "sales_ref": 0,
         "pool_purchase": 0,
         "pool_sales": 0,
-        "purchase_history": 0,
-        "sales_history": 0,
-        "none": 7,
-    }
+            "purchase_history": 0,
+            "sales_history": 0,
+            "manual": 0,
+            "none": 7,
+        }
     assert sum(row["by_source"].values()) == row["lines"]
     assert row["by_source"]["none"] == row["missing_cost_lines"]
     # 历史手工事实没有新双税列，normalized 口径必须 fail-closed 为不完整，不能拿
@@ -603,6 +606,7 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
         filename="contract-quality.xlsx",
         file_type="maintenance",
         file_hash="issue156-contract-quality",
+        status="success",
     )
     db.add(batch)
     db.flush()
@@ -732,7 +736,8 @@ def test_shared_contract_missing_cost_blocks_the_whole_contract_decision(db):
         )["rows"]
     finally:
         event.remove(engine, "before_cursor_execute", before_execute)
-    assert select_count <= 3
+    # 双口径贡献毛利新增合同费用快照水位查询；仍保持固定查询数，不随项目数增长。
+    assert select_count <= 4
     assert [item["contract"] for item in searched_rows] == ["XS-QUALITY"]
     assert {project["project"] for project in searched_rows[0]["projects"]} == {
         "共享合同项目甲",

@@ -23,6 +23,7 @@ def batch(db):
         filename="maintenance-reference.xlsx",
         file_type="maintenance",
         file_hash="maintenance-reference",
+        status="success",
     )
     db.add(item)
     db.flush()
@@ -102,7 +103,7 @@ def _add_pool(
 def test_tax_rate_domain_defense_estimates_one_or_greater_and_nonfinite(
     dirty_rate,
 ):
-    """纯计算纵深防御：100%/越界/NaN 税率一律回退 13% 并显式 estimated。"""
+    """原始脏税率只留审计，业务计算仍固定 13% 且不再标作估算。"""
     normalized = maintenance_cost_reference.normalize_cost_sample(
         maintenance_cost_reference.CostSample(
             side="purchase",
@@ -116,7 +117,37 @@ def test_tax_rate_domain_defense_estimates_one_or_greater_and_nonfinite(
     )
     assert normalized.unit_cost_ex_tax == Decimal("100")
     assert normalized.unit_cost_inc_tax == Decimal("113.00")
-    assert normalized.tax_rate_estimated is True
+    assert normalized.tax_rate_estimated is False
+
+
+@pytest.mark.parametrize(
+    ("is_tax_inclusive", "expected_ex", "expected_inc", "expected_basis"),
+    [
+        (True, Decimal("100"), Decimal("113"), "inc"),
+        (False, Decimal("113"), Decimal("127.69"), "ex"),
+        (None, Decimal("113"), Decimal("127.69"), "ex"),
+    ],
+)
+def test_purchase_sample_only_explicit_true_is_treated_as_tax_inclusive(
+    is_tax_inclusive,
+    expected_ex,
+    expected_inc,
+    expected_basis,
+):
+    normalized = maintenance_cost_reference.normalize_cost_sample(
+        maintenance_cost_reference.CostSample(
+            side="purchase",
+            part_id=1,
+            occurred_on=date(2026, 3, 1),
+            qty=Decimal("1"),
+            unit_price=Decimal("113"),
+            tax_rate=Decimal("0.06"),
+            is_tax_inclusive=is_tax_inclusive,
+        )
+    )
+    assert normalized.unit_cost_ex_tax == expected_ex
+    assert normalized.unit_cost_inc_tax == expected_inc
+    assert normalized.legacy_basis == expected_basis
 
 
 @pytest.mark.parametrize(
@@ -156,7 +187,7 @@ def test_missing_cost_uses_active_pool_latest_purchase_month_with_dual_tax(
     _load_purchases(
         db,
         batch,
-        {"P1": f.purchase_head("P1", on=date(2025, 10, 8))},
+        {"P1": f.purchase_head("P1", on=date(2026, 1, 8))},
         [f.purchase_line("P1", "PL1", "PN-POOL-SAMPLE", qty="2", price="100")],
     )
     _load_maintenance(
@@ -188,7 +219,7 @@ def test_missing_cost_uses_active_pool_latest_purchase_month_with_dual_tax(
     line = _line(db, "ML1")
     assert stats["pool_purchase"] == 1
     assert line.cost_source == "pool_purchase"
-    # 未注明税率的未税采购按统一 13% 估算另一口径；legacy 字段仍取原始未税值。
+    # 未注明口径按未税原值，另一侧按统一 13% 确定性生成。
     assert line.unit_cost == Decimal("100.00")
     assert line.cost_amount == Decimal("300.00")
     assert line.unit_cost_ex_tax == Decimal("100.00")
@@ -199,12 +230,12 @@ def test_missing_cost_uses_active_pool_latest_purchase_month_with_dual_tax(
     assert line.reference_pool_group_id == 901
     assert line.reference_pool_version == 7
     assert line.reference_sample_count == 1
-    assert line.reference_from_date == date(2025, 10, 8)
-    assert line.reference_to_date == date(2025, 10, 8)
-    assert line.reference_latest_date == date(2025, 10, 8)
-    assert line.trace_months == 5
+    assert line.reference_from_date == date(2026, 1, 8)
+    assert line.reference_to_date == date(2026, 1, 8)
+    assert line.reference_latest_date == date(2026, 1, 8)
+    assert line.trace_months == 2
     assert line.confidence == "low"
-    assert "tax_rate_estimated" in line.anomaly_flags
+    assert "tax_rate_estimated" not in line.anomaly_flags
     first_snapshot = (
         line.cost_source,
         line.unit_cost,
@@ -247,6 +278,7 @@ def test_missing_cost_uses_active_pool_latest_purchase_month_with_dual_tax(
     assert project["parts_cost_ex_tax"] == 300.0
     assert project["parts_cost_inc_tax_complete"] is True
     assert project["parts_cost_ex_tax_complete"] is True
+    # 池均价本身属于估算来源；固定 13% 不额外制造税率估算 flag。
     assert project["parts_cost_inc_tax_quality"] == "contains_estimate"
     assert project["parts_cost_ex_tax_quality"] == "contains_estimate"
 
@@ -464,7 +496,7 @@ def test_pool_sales_is_used_when_active_pool_has_no_purchase_sample(
         {
             "S1": f.sales_head(
                 "S1",
-                on=date(2025, 11, 20),
+                on=date(2026, 1, 20),
                 tax_rate=Decimal("0.06"),
             )
         },
@@ -492,12 +524,12 @@ def test_pool_sales_is_used_when_active_pool_has_no_purchase_sample(
     assert line.cost_source == "pool_sales"
     assert line.unit_cost == Decimal("106.00")
     assert line.unit_cost_inc_tax == Decimal("106.00")
-    assert line.unit_cost_ex_tax == Decimal("100.00")
+    assert line.unit_cost_ex_tax == Decimal("93.81")
     assert line.cost_amount_inc_tax == Decimal("212.00")
-    assert line.cost_amount_ex_tax == Decimal("200.00")
+    assert line.cost_amount_ex_tax == Decimal("187.62")
     assert line.reference_side == "sales"
     assert line.reference_pool_group_id == 902
-    assert line.trace_months == 4
+    assert line.trace_months == 2
 
 
 def test_purchase_history_uses_latest_eligible_month_quantity_weighted_average(
@@ -509,9 +541,9 @@ def test_purchase_history_uses_latest_eligible_month_quantity_weighted_average(
         db,
         batch,
         {
-            "P0": f.purchase_head("P0", on=date(2025, 8, 1), tax_rate=Decimal("0.13")),
-            "P1": f.purchase_head("P1", on=date(2025, 10, 2), tax_rate=Decimal("0.13")),
-            "P2": f.purchase_head("P2", on=date(2025, 10, 20), tax_rate=Decimal("0.13")),
+            "P0": f.purchase_head("P0", on=date(2025, 12, 1), tax_rate=Decimal("0.13")),
+            "P1": f.purchase_head("P1", on=date(2026, 1, 2), tax_rate=Decimal("0.13")),
+            "P2": f.purchase_head("P2", on=date(2026, 1, 20), tax_rate=Decimal("0.13")),
             "PF": f.purchase_head("PF", on=date(2026, 4, 1), tax_rate=Decimal("0.13")),
         },
         [
@@ -536,25 +568,25 @@ def test_purchase_history_uses_latest_eligible_month_quantity_weighted_average(
     assert line.unit_cost_ex_tax == Decimal("175.00")
     assert line.unit_cost_inc_tax == Decimal("197.75")
     assert line.reference_sample_count == 2
-    assert line.reference_from_date == date(2025, 10, 2)
-    assert line.reference_to_date == date(2025, 10, 20)
-    assert line.reference_latest_date == date(2025, 10, 20)
-    assert line.price_month == "2025-10"
-    assert line.trace_months == 5
+    assert line.reference_from_date == date(2026, 1, 2)
+    assert line.reference_to_date == date(2026, 1, 20)
+    assert line.reference_latest_date == date(2026, 1, 20)
+    assert line.price_month == "2026-01"
+    assert line.trace_months == 2
 
 
-def test_sales_history_is_last_reference_and_zero_tax_keeps_both_bases_equal(
+def test_sales_history_is_last_reference_and_uses_fixed_thirteen_percent(
     db,
     batch,
 ):
-    """无池/采购历史时才用本 PN 销售历史；0% 税率不得错误套用 13%。"""
+    """无池/采购历史时才用本 PN 销售历史；原始 0% 不覆盖固定 13%。"""
     _load_sales(
         db,
         batch,
         {
             "S1": f.sales_head(
                 "S1",
-                on=date(2025, 9, 9),
+                on=date(2026, 1, 9),
                 tax_rate=Decimal("0"),
             )
         },
@@ -581,9 +613,9 @@ def test_sales_history_is_last_reference_and_zero_tax_keeps_both_bases_equal(
     line = _line(db, "ML1")
     assert line.cost_source == "sales_history"
     assert line.unit_cost_inc_tax == Decimal("88.00")
-    assert line.unit_cost_ex_tax == Decimal("88.00")
+    assert line.unit_cost_ex_tax == Decimal("77.88")
     assert line.cost_amount_inc_tax == Decimal("264.00")
-    assert line.cost_amount_ex_tax == Decimal("264.00")
+    assert line.cost_amount_ex_tax == Decimal("233.64")
     assert line.reference_side == "sales"
     assert "tax_rate_estimated" not in line.anomaly_flags
     assert "has_return" in line.anomaly_flags
@@ -597,7 +629,7 @@ def test_only_active_pool_is_considered_and_pool_purchase_beats_pool_sales(
     _load_purchases(
         db,
         batch,
-        {"P1": f.purchase_head("P1", on=date(2025, 9, 1), tax_rate=Decimal("0"))},
+        {"P1": f.purchase_head("P1", on=date(2026, 1, 1), tax_rate=Decimal("0"))},
         [
             f.purchase_line("P1", "PL1", "PN-ACTIVE-PURCHASE", qty="1", price="70"),
             f.purchase_line("P1", "PL2", "PN-ARCHIVED-PURCHASE", qty="1", price="10"),
@@ -651,7 +683,7 @@ def test_active_pool_average_includes_target_part_history(
     _load_purchases(
         db,
         batch,
-        {"P1": f.purchase_head("P1", on=date(2025, 8, 8), tax_rate=Decimal("0"))},
+        {"P1": f.purchase_head("P1", on=date(2026, 1, 8), tax_rate=Decimal("0"))},
         [f.purchase_line("P1", "PL1", "PN-OWN-HISTORY", qty="1", price="66")],
     )
     # 先让空样本同伴建入 dim_part。
@@ -688,8 +720,8 @@ def test_pool_weighted_average_combines_target_and_other_members(
         db,
         batch,
         {
-            "P1": f.purchase_head("P1", on=date(2025, 8, 8), tax_rate=Decimal("0")),
-            "P2": f.purchase_head("P2", on=date(2025, 8, 9), tax_rate=Decimal("0")),
+            "P1": f.purchase_head("P1", on=date(2026, 1, 8), tax_rate=Decimal("0")),
+            "P2": f.purchase_head("P2", on=date(2026, 1, 9), tax_rate=Decimal("0")),
         },
         [
             f.purchase_line("P1", "PL1", "PN-POOL-WEIGHT-TARGET", qty="1", price="100"),
@@ -735,8 +767,8 @@ def test_confirmed_source_error_is_excluded_before_latest_month_selection(
         db,
         batch,
         {
-            "P1": f.purchase_head("P1", on=date(2025, 10, 8), tax_rate=Decimal("0")),
-            "P2": f.purchase_head("P2", on=date(2025, 12, 8), tax_rate=Decimal("0")),
+            "P1": f.purchase_head("P1", on=date(2026, 1, 8), tax_rate=Decimal("0")),
+            "P2": f.purchase_head("P2", on=date(2026, 2, 8), tax_rate=Decimal("0")),
         },
         [
             f.purchase_line("P1", "PL-VALID", "PN-DQ-PEER", qty="1", price="80"),
@@ -777,7 +809,7 @@ def test_confirmed_source_error_is_excluded_before_latest_month_selection(
     line = _line(db, "ML1")
     assert line.cost_source == "pool_purchase"
     assert line.unit_cost == Decimal("80.00")
-    assert line.price_month == "2025-10"
+    assert line.price_month == "2026-01"
     assert line.reference_sample_count == 1
 
 
@@ -792,13 +824,13 @@ def test_mixed_tax_samples_are_normalized_per_order_before_weighted_average(
         {
             "P1": f.purchase_head(
                 "P1",
-                on=date(2025, 10, 2),
+                on=date(2026, 1, 2),
                 is_tax_inclusive=True,
                 tax_rate=Decimal("0.06"),
             ),
             "P2": f.purchase_head(
                 "P2",
-                on=date(2025, 10, 20),
+                on=date(2026, 1, 20),
                 is_tax_inclusive=False,
                 tax_rate=Decimal("0.13"),
             ),
@@ -820,9 +852,9 @@ def test_mixed_tax_samples_are_normalized_per_order_before_weighted_average(
 
     line = _line(db, "ML1")
     assert line.cost_source == "purchase_history"
-    # (106 含税 + 113 含税) / 2；未税两笔均为 100。
+    # 两笔逐单归一后再汇总：含税 (106+113)/2，未税 (106/1.13+100)/2。
     assert line.unit_cost_inc_tax == Decimal("109.50")
-    assert line.unit_cost_ex_tax == Decimal("100.00")
+    assert line.unit_cost_ex_tax == Decimal("96.90")
     # legacy 继续执行 inc_first，只取原含税样本，不改既有字段语义。
     assert (line.unit_cost, line.cost_tax_basis) == (Decimal("106.00"), "inc")
     assert "tax_rate_estimated" not in line.anomaly_flags
@@ -875,11 +907,11 @@ def test_pool_reference_never_looks_ahead_for_each_maintenance_line(
     assert (late.unit_cost, late.price_month) == (Decimal("90.00"), "2026-03")
 
 
-def test_reference_older_than_twelve_months_is_explicitly_marked_stale(
+def test_reference_older_than_three_months_requires_manual_backfill(
     db,
     batch,
 ):
-    """历史兜底不限 12 个月，但超过 12 个月必须显式低置信陈旧标记。"""
+    """采购与销售历史仅看 3 个月；更老事实不得自动生成成本。"""
     _load_purchases(
         db,
         batch,
@@ -897,17 +929,17 @@ def test_reference_older_than_twelve_months_is_explicitly_marked_stale(
     maintenance_cost.recompute(db)
 
     line = _line(db, "ML1")
-    assert line.cost_source == "purchase_history"
-    assert line.trace_months == 26
-    assert line.confidence == "low"
-    assert "stale_cost_reference" in line.anomaly_flags
+    assert line.cost_source == "none"
+    assert line.unit_cost is None
+    assert line.trace_months is None
+    assert "no_cost" in line.anomaly_flags
 
 
-def test_existing_window_month_trace_and_sales_sources_get_dual_costs_without_drift(
+def test_window_month_purchase_and_sales_history_get_dual_costs_without_drift(
     db,
     batch,
 ):
-    """其余既有四层保持原来源/legacy 值，同时全部补齐双税成本。"""
+    """窗口、当月、3 月采购与销售历史全部补齐双税成本。"""
     _load_purchases(
         db,
         batch,
@@ -977,8 +1009,18 @@ def test_existing_window_month_trace_and_sales_sources_get_dual_costs_without_dr
     expected = {
         "MLW": ("window", Decimal("100.00"), Decimal("113.00"), Decimal("100.00")),
         "MLM": ("month_avg", Decimal("100.00"), Decimal("113.00"), Decimal("100.00")),
-        "MLT": ("trace_avg", Decimal("80.00"), Decimal("90.40"), Decimal("80.00")),
-        "MLS": ("sales_ref", Decimal("113.00"), Decimal("113.00"), Decimal("100.00")),
+        "MLT": (
+            "purchase_history",
+            Decimal("80.00"),
+            Decimal("90.40"),
+            Decimal("80.00"),
+        ),
+        "MLS": (
+            "sales_history",
+            Decimal("113.00"),
+            Decimal("113.00"),
+            Decimal("100.00"),
+        ),
     }
     for raw_line_id, values in expected.items():
         line = _line(db, raw_line_id)
@@ -1006,7 +1048,7 @@ def test_reference_index_uses_fixed_three_queries_and_resolve_is_sql_free(
         maintenance_id = f"M{index}"
         purchase_orders[purchase_id] = f.purchase_head(
             purchase_id,
-            on=date(2025, 8, 1),
+            on=date(2026, 1, 1),
             tax_rate=Decimal("0"),
         )
         purchase_lines.append(
@@ -1125,28 +1167,28 @@ def test_nonpositive_or_inactive_history_never_becomes_a_cost_reference(
     assert "no_cost" in line.anomaly_flags
 
 
-def test_invalid_tax_rate_is_fail_closed_before_reference_month_selection(
+def test_raw_tax_rate_never_changes_fixed_reference_month_selection(
     db,
     batch,
 ):
-    """税率合法域为 0..1；越界事实不参与参考，不能污染最新月份。"""
+    """原始税率只供审计；业务固定 13%，最新有效价格事实仍可参与。"""
     _load_purchases(
         db,
         batch,
         {
             "PV": f.purchase_head(
                 "PV",
-                on=date(2025, 9, 1),
+                on=date(2026, 2, 1),
                 tax_rate=Decimal("0.13"),
             ),
             "PI": f.purchase_head(
                 "PI",
-                on=date(2025, 11, 1),
+                on=date(2026, 3, 1),
                 tax_rate=Decimal("1.30"),
             ),
             "P100": f.purchase_head(
                 "P100",
-                on=date(2025, 12, 1),
+                on=date(2026, 4, 1),
                 tax_rate=Decimal("1"),
             ),
         },
@@ -1168,8 +1210,9 @@ def test_invalid_tax_rate_is_fail_closed_before_reference_month_selection(
 
     line = _line(db, "ML1")
     assert line.cost_source == "purchase_history"
-    assert line.price_month == "2025-09"
-    assert line.unit_cost == Decimal("50.00")
+    assert line.price_month == "2026-04"
+    assert line.unit_cost == Decimal("2.00")
+    assert line.unit_cost_inc_tax == Decimal("2.26")
 
 
 def test_recompute_skips_reference_queries_when_old_five_layers_resolve_all(
@@ -1235,7 +1278,7 @@ def test_recompute_builds_history_scope_from_only_old_five_layer_misses(
             ),
             "P-OLD": f.purchase_head(
                 "P-OLD",
-                on=date(2025, 1, 8),
+                on=date(2026, 1, 8),
                 tax_rate=Decimal("0"),
             ),
         },
@@ -1309,7 +1352,7 @@ def test_same_pool_and_as_of_share_reference_aggregation(monkeypatch):
     sample = maintenance_cost_reference.CostSample(
         side="purchase",
         part_id=3,
-        occurred_on=date(2025, 10, 1),
+        occurred_on=date(2026, 1, 1),
         qty=Decimal("2"),
         unit_price=Decimal("80"),
         tax_rate=Decimal("0"),
@@ -1318,7 +1361,7 @@ def test_same_pool_and_as_of_share_reference_aggregation(monkeypatch):
     index = maintenance_cost_reference.CostReferenceIndex(
         target_pool={1: (99, 4), 2: (99, 4)},
         pool_members={99: frozenset({1, 2, 3})},
-        purchases={3: {"2025-10": (sample,)}},
+        purchases={3: {"2026-01": (sample,)}},
         sales={},
     )
     summary_calls = 0
@@ -1347,18 +1390,18 @@ def test_same_pool_and_as_of_share_reference_aggregation(monkeypatch):
 @pytest.mark.parametrize(
     ("target_has_own_history", "expected_source", "expected_cost"),
     [
-        (True, "purchase_history", Decimal("66.00")),
-        (False, "none", None),
+        (True, "pool_purchase", Decimal("133.00")),
+        (False, "pool_purchase", Decimal("200.00")),
     ],
 )
-def test_active_legacy_generated_pool_is_not_a_cost_reference(
+def test_all_active_pools_are_cost_references(
     db,
     batch,
     target_has_own_history,
     expected_source,
     expected_cost,
 ):
-    """未人工确认的 active legacy_generated 池不得用于池均价。"""
+    """池来源只作审计；任何 active 池都按同一池价规则参与。"""
     target_pn = (
         "PN-LEGACY-POOL-OWN"
         if target_has_own_history
@@ -1386,7 +1429,7 @@ def test_active_legacy_generated_pool_is_not_a_cost_reference(
     _load_purchases(
         db,
         batch,
-        {"P1": f.purchase_head("P1", on=date(2025, 1, 8), tax_rate=Decimal("0"))},
+        {"P1": f.purchase_head("P1", on=date(2026, 1, 8), tax_rate=Decimal("0"))},
         purchase_lines,
     )
     _load_maintenance(
@@ -1411,7 +1454,7 @@ def test_active_legacy_generated_pool_is_not_a_cost_reference(
     line = _line(db, "ML1")
     assert line.cost_source == expected_source
     assert line.unit_cost == expected_cost
-    assert line.reference_pool_group_id is None
+    assert line.reference_pool_group_id == 910
 
 
 def test_reference_failure_rolls_back_reset_and_keeps_previous_cost(

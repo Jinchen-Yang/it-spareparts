@@ -6,7 +6,13 @@ import type { ECOption } from "./echartsCore";
 import EChartContainer from "./EChartContainer";
 import { CHART_COLORS } from "./chartTheme";
 import type { PoolPriceMapMember, PoolPriceMapResponse } from "../../api/poolAnalysis";
-import { EMPTY, escapeHtml, moneyExact, qty } from "../../utils/format";
+import {
+  TaxMoneyByBasis,
+  taxBasisCaption,
+  taxSidesForBasis,
+  type TaxBasis,
+} from "../../context/TaxBasis";
+import { EMPTY, escapeHtml, moneyExact, qty, splitFixed } from "../../utils/format";
 import { activatableProps } from "../../pages/purchases/shared";
 
 interface ChartClickParams {
@@ -47,8 +53,21 @@ export function resolvePriceMapClick(
 }
 
 /** 纯 option 工厂：图和等价表都只消费响应 members，不做第二套统计。 */
-export function buildPoolPnPriceMapOption(data: PoolPriceMapResponse): ECOption {
+export function buildPoolPnPriceMapOption(
+  data: PoolPriceMapResponse,
+  basis: TaxBasis = "ex",
+): ECOption {
   const sideName = data.side === "purchase" ? "采购" : "销售";
+  const chartSide = basis === "inc" ? "inc" : "ex";
+  const chartValue = (value: number | null | undefined) =>
+    splitFixed(value, "ex")[chartSide];
+  const displayValue = (value: number | null | undefined) => {
+    const pair = splitFixed(value, "ex");
+    if (basis === "both") {
+      return `含 ${moneyExact(pair.inc)} · 不含 ${moneyExact(pair.ex)}`;
+    }
+    return moneyExact(pair[basis]);
+  };
   const renderItem: NonNullable<CustomSeriesOption["renderItem"]> = (_params, api) => {
     const category = Number(api.value(0));
     const minimum = api.value(1) as number | null;
@@ -98,20 +117,20 @@ export function buildPoolPnPriceMapOption(data: PoolPriceMapResponse): ECOption 
 
   const markData: Array<Record<string, unknown>> = [];
   if (data.pool_stats?.weighted_avg != null) {
-    markData.push({ name: "池加权均价", xAxis: data.pool_stats.weighted_avg,
+    markData.push({ name: "池加权均价", xAxis: chartValue(data.pool_stats.weighted_avg),
       lineStyle: { color: CHART_COLORS.sales, type: "dashed", width: 1.5 },
       label: { color: CHART_COLORS.emphasis } });
   }
   if (data.current_constraint.value != null) {
     markData.push({ name: `当前${sideName}${data.side === "purchase" ? "上限" : "下限"}`,
-      xAxis: data.current_constraint.value,
+      xAxis: chartValue(data.current_constraint.value),
       lineStyle: { color: CHART_COLORS.purchase, type: "solid", width: 2 },
       label: { color: CHART_COLORS.purchase } });
   }
   const seriesData = data.members.map((member, index) => [
-    index, member.stats?.min ?? null, member.stats?.max ?? null,
-    member.stats?.median ?? null, member.stats?.weighted_avg ?? null,
-    member.stats?.latest ?? null,
+    index, chartValue(member.stats?.min), chartValue(member.stats?.max),
+    chartValue(member.stats?.median), chartValue(member.stats?.weighted_avg),
+    chartValue(member.stats?.latest),
   ]);
   return {
     animationDuration: 280,
@@ -129,16 +148,19 @@ export function buildPoolPnPriceMapOption(data: PoolPriceMapResponse): ECOption 
         const q = member.quality_counts;
         return [
           `<b>${escapeHtml(member.pn_std ?? `#${member.part_id}`)}</b>`,
-          `区间 ${moneyExact(member.stats.min)} — ${moneyExact(member.stats.max)}`,
-          `中位 ${moneyExact(member.stats.median)} · 加权均价 ${moneyExact(member.stats.weighted_avg)}`,
-          `最近正式价 ${moneyExact(member.stats.latest)} · ${escapeHtml(member.stats.latest_date ?? EMPTY)}`,
+          `区间 ${displayValue(member.stats.min)} — ${displayValue(member.stats.max)}`,
+          `中位 ${displayValue(member.stats.median)} · 加权均价 ${displayValue(member.stats.weighted_avg)}`,
+          `最近正式价 ${displayValue(member.stats.latest)} · ${escapeHtml(member.stats.latest_date ?? EMPTY)}`,
           `数量 ${qty(member.stats.total_qty)} · ${member.stats.order_count} 单 · ${member.stats.line_count} 行`,
           q && (q.suspected || q.confirmed_source_error)
             ? `数据标记：疑点 ${q.suspected} · 确认源错误 ${q.confirmed_source_error}` : "",
         ].filter(Boolean).join("<br/>");
       },
     },
-    xAxis: { type: "value", name: `${sideName}未税单价`, nameLocation: "middle", nameGap: 30,
+    xAxis: { type: "value",
+      name: basis === "both" ? `${sideName}单价（坐标为不含税；悬浮显示双口径）`
+        : `${sideName}${taxBasisCaption(basis)}单价`,
+      nameLocation: "middle", nameGap: 30,
       axisLabel: { formatter: (value: number) => `¥${value.toLocaleString("zh-CN")}` },
       splitLine: { lineStyle: { color: CHART_COLORS.splitLine } } },
     yAxis: { type: "category", inverse: true,
@@ -158,20 +180,21 @@ export function buildPoolPnPriceMapOption(data: PoolPriceMapResponse): ECOption 
 
 export interface PoolPnPriceMapProps {
   data: PoolPriceMapResponse;
+  basis?: TaxBasis;
   loading?: boolean;
   onPartOpen?: (partId: number) => void;
   /** 小屏没有 hover，点图/表后先展示同页固定详情；桌面则一次点击直接下钻。 */
   isMobile?: boolean;
 }
 
-export default function PoolPnPriceMap({ data, loading, onPartOpen,
+export default function PoolPnPriceMap({ data, basis = "ex", loading, onPartOpen,
   isMobile = false }: PoolPnPriceMapProps) {
   // 只保存稳定身份；统计、原始追溯与疑点标记始终从当前响应派生，不能把旧窗口
   // 的整条 member 带进新筛选结果。
   const [selectedPartId, setSelectedPartId] = useState<number | null>(null);
   const selected = useMemo(() => data.members.find((member) => member.part_id === selectedPartId)
     ?? null, [data.members, selectedPartId]);
-  const option = useMemo(() => buildPoolPnPriceMapOption(data), [data]);
+  const option = useMemo(() => buildPoolPnPriceMapOption(data, basis), [data, basis]);
   const sideName = data.side === "purchase" ? "采购" : "销售";
 
   useEffect(() => {
@@ -191,18 +214,29 @@ export default function PoolPnPriceMap({ data, loading, onPartOpen,
     { title: "PN", dataIndex: "pn_std", width: 150,
       render: (value, member) => <span style={{ fontFamily: "monospace" }}>
         {value ?? `#${member.part_id}`}</span> },
-    { title: "最低", key: "min", width: 90, align: "right",
-      render: (_, member) => member.stats ? moneyExact(member.stats.min) : <span style={muted}>暂无正式参考样本</span> },
-    { title: "最高", key: "max", width: 90, align: "right", render: (_, member) => moneyExact(member.stats?.max) },
-    { title: "中位", key: "median", width: 90, align: "right", render: (_, member) => moneyExact(member.stats?.median) },
-    { title: "加权均价", key: "average", width: 100, align: "right",
-      render: (_, member) => moneyExact(member.stats?.weighted_avg) },
-    { title: "最近正式价", key: "latest", width: 108, align: "right",
-      render: (_, member) => moneyExact(member.stats?.latest) },
+    ...(["min", "max", "median", "weighted_avg", "latest"] as const).flatMap((field) =>
+      taxSidesForBasis(basis).map((taxSide) => ({
+        title: `${{
+          min: "最低",
+          max: "最高",
+          median: "中位",
+          weighted_avg: "加权均价",
+          latest: "最近正式价",
+        }[field]}(${taxSide === "inc" ? "含税" : "不含税"})`,
+        key: `${field}_${taxSide}`,
+        width: field === "weighted_avg" || field === "latest" ? 118 : 100,
+        align: "right" as const,
+        render: (_: unknown, member: PoolPriceMapMember) => {
+          if (!member.stats && field === "min") {
+            return <span style={muted}>暂无正式参考样本</span>;
+          }
+          return moneyExact(splitFixed(member.stats?.[field], "ex")[taxSide]);
+        },
+      }))),
     { title: "数量 / 样本", key: "sample", width: 120,
       render: (_, member) => member.stats
         ? `${qty(member.stats.total_qty)} / ${member.stats.order_count}单${member.stats.line_count}行` : EMPTY },
-    { title: "当前约束", key: "constraint", width: 125,
+    { title: "当前约束(未税差额)", key: "constraint", width: 155,
       render: (_, member) => {
         const ref = member.current_reference;
         if (!ref) return <span style={muted}>{data.current_constraint.status === "unset" ? "未设置" : EMPTY}</span>;
@@ -259,11 +293,23 @@ export default function PoolPnPriceMap({ data, loading, onPartOpen,
           查看型号全景</Button>}
       </div>
       {selected.stats ? <div style={{ marginTop: 6 }}>
-        区间 {moneyExact(selected.stats.min)} — {moneyExact(selected.stats.max)} ·
-        中位 {moneyExact(selected.stats.median)} · 加权均价 {moneyExact(selected.stats.weighted_avg)}
+        区间 {(() => {
+          const pair = splitFixed(selected.stats.min, "ex");
+          return <TaxMoneyByBasis basis={basis} inc={pair.inc} ex={pair.ex} exact />;
+        })()} — {(() => {
+          const pair = splitFixed(selected.stats.max, "ex");
+          return <TaxMoneyByBasis basis={basis} inc={pair.inc} ex={pair.ex} exact />;
+        })()} ·
+        中位 {(() => {
+          const pair = splitFixed(selected.stats.median, "ex");
+          return <TaxMoneyByBasis basis={basis} inc={pair.inc} ex={pair.ex} exact />;
+        })()} · 加权均价 {(() => {
+          const pair = splitFixed(selected.stats.weighted_avg, "ex");
+          return <TaxMoneyByBasis basis={basis} inc={pair.inc} ex={pair.ex} exact />;
+        })()}
       </div> : <div style={{ ...muted, marginTop: 6 }}>暂无正式参考样本</div>}
       {selected.latest_raw_record && <div style={{ marginTop: 4 }}>
-        最近原始价 {moneyExact(selected.latest_raw_record.price_ex_tax)} ·
+        最近原始价(未税审计值) {moneyExact(selected.latest_raw_record.price_ex_tax)} ·
         {selected.latest_raw_record.order_no} · {selected.latest_raw_record.employee || EMPTY} ·
         <Tag color={selected.latest_raw_record.quality_status === "confirmed_source_error" ? "red"
           : selected.latest_raw_record.quality_status === "open_or_source_changed" ? "orange" : undefined}>
@@ -272,7 +318,8 @@ export default function PoolPnPriceMap({ data, loading, onPartOpen,
     </div>}
 
     <Table<PoolPriceMapMember> rowKey="part_id" size="small" pagination={false}
-      columns={columns} dataSource={data.members} scroll={{ x: 1040 }}
+      columns={columns} dataSource={data.members}
+      scroll={{ x: basis === "both" ? 1540 : 1040 }}
       locale={{ emptyText: "池内暂无成员" }}
       onRow={(member) => ({ ...activatableProps(() => activate(member),
         isMobile ? `查看 ${member.pn_std ?? `#${member.part_id}`} 型号价格详情`

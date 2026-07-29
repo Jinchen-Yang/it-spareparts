@@ -9,6 +9,8 @@ from decimal import Decimal
 
 from sqlalchemy import (
     ARRAY,
+    Boolean,
+    CheckConstraint,
     Computed,
     Date,
     ForeignKey,
@@ -17,13 +19,15 @@ from sqlalchemy import (
     SmallInteger,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-from app.models._types import Money, Qty, TZDateTime
+from app.models._types import Money, Qty, Rate, TZDateTime
 
 
 _VALID_MAINTENANCE_COST_SQL = (
@@ -32,7 +36,7 @@ _VALID_MAINTENANCE_COST_SQL = (
     " AND cost_amount < 1000000000000"
 )
 _ACTUAL_MAINTENANCE_SOURCE_SQL = (
-    "cost_source IN ('direct', 'month_avg', 'window')"
+    "cost_source IN ('direct', 'month_avg', 'window', 'manual')"
 )
 _ESTIMATED_MAINTENANCE_SOURCE_SQL = (
     "cost_source IN ("
@@ -177,11 +181,251 @@ class FProjectExpense(Base):
     reason: Mapped[str | None] = mapped_column(Text)                     # 支出事由
     linked_sales_order_no: Mapped[str | None] = mapped_column(String(64))  # XSDD，项目/合同归集键
     amount: Mapped[Decimal | None] = mapped_column(Money)                # 报销金额（行级）
+    # 财务计算固定按 13% 同时保留双口径；amount 继续保留员工实际填入的原值作审计。
+    amount_ex_tax: Mapped[Decimal | None] = mapped_column(Money)
+    amount_inc_tax: Mapped[Decimal | None] = mapped_column(Money)
+    tax_basis: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="default_ex",
+        server_default="default_ex",
+    )
+    tax_rate_used: Mapped[Decimal] = mapped_column(
+        Rate,
+        nullable=False,
+        default=Decimal("0.13"),
+        server_default="0.13",
+    )
     import_batch_id: Mapped[int] = mapped_column(ForeignKey("sys_import_batch.id"))
     created_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
 
     __table_args__ = (
+        CheckConstraint(
+            "tax_basis IN ('default_ex', 'ex', 'inc')",
+            name="ck_project_expense_tax_basis",
+        ),
+        CheckConstraint(
+            "tax_rate_used = 0.13",
+            name="ck_project_expense_tax_rate_used",
+        ),
+        CheckConstraint(
+            """
+            (
+                amount IS NULL
+                AND amount_ex_tax IS NULL
+                AND amount_inc_tax IS NULL
+            )
+            OR (
+                amount IS NOT NULL
+                AND amount_ex_tax IS NOT NULL
+                AND amount_inc_tax IS NOT NULL
+            )
+            """,
+            name="ck_project_expense_tax_amount_presence",
+        ),
+        CheckConstraint(
+            """
+            (amount_ex_tax IS NULL AND amount_inc_tax IS NULL)
+            OR (
+                tax_basis IN ('default_ex', 'ex')
+                AND amount_inc_tax
+                    = round(amount_ex_tax * NUMERIC '1.13', 2)
+            )
+            OR (
+                tax_basis = 'inc'
+                AND amount_ex_tax
+                    = round(amount_inc_tax / NUMERIC '1.13', 2)
+            )
+            """,
+            name="ck_project_expense_tax_amounts_match",
+        ),
+        CheckConstraint(
+            """
+            (
+                amount IS NULL
+                AND amount_ex_tax IS NULL
+                AND amount_inc_tax IS NULL
+            )
+            OR (
+                tax_basis IN ('default_ex', 'ex')
+                AND amount = amount_ex_tax
+            )
+            OR (
+                tax_basis = 'inc'
+                AND amount = amount_inc_tax
+            )
+            """,
+            name="ck_project_expense_amount_matches_basis",
+        ),
         Index("ix_pe_bxd", "bxd_no"),
         Index("ix_pe_linked", "linked_sales_order_no"),
         Index("ix_pe_status_date", "data_status", "expense_date"),
+    )
+
+
+class MaintenanceManualCostOverride(Base):
+    """自动成本瀑布仍缺失时，管理员对单条维保明细提供的可审计成本证据。"""
+
+    __tablename__ = "maintenance_manual_cost_override"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    line_id: Mapped[int] = mapped_column(
+        ForeignKey("f_maintenance_line.id"),
+        nullable=False,
+        unique=True,
+    )
+    unit_cost_ex_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    unit_cost_inc_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    tax_rate_used: Mapped[Decimal] = mapped_column(
+        Rate,
+        nullable=False,
+        default=Decimal("0.13"),
+        server_default="0.13",
+    )
+    reason: Mapped[str | None] = mapped_column(Text)
+    evidence: Mapped[dict | None] = mapped_column(JSONB)
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+    active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(
+        TZDateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "unit_cost_ex_tax >= 0 AND unit_cost_ex_tax < 1000000000000",
+            name="ck_maintenance_manual_cost_ex",
+        ),
+        CheckConstraint(
+            "unit_cost_inc_tax >= 0 AND unit_cost_inc_tax < 1000000000000",
+            name="ck_maintenance_manual_cost_inc",
+        ),
+        CheckConstraint(
+            "tax_rate_used = 0.13",
+            name="ck_maintenance_manual_cost_tax_rate",
+        ),
+        CheckConstraint(
+            """
+            unit_cost_inc_tax
+                = round(unit_cost_ex_tax * NUMERIC '1.13', 2)
+            """,
+            name="ck_maintenance_manual_cost_tax_amounts_match",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_maintenance_manual_cost_version",
+        ),
+        Index(
+            "ix_maintenance_manual_cost_override_active",
+            "active",
+            "line_id",
+        ),
+    )
+
+
+class MaintenanceContractWorkbookState(Base):
+    """合同往返工作簿状态；完整快照声明是贡献毛利发布的费用侧门禁。"""
+
+    __tablename__ = "maintenance_contract_workbook_state"
+
+    contract_no: Mapped[str] = mapped_column(String(64), primary_key=True)
+    revision: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+    expense_complete_through: Mapped[date | None] = mapped_column(Date)
+    expense_snapshot_complete: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    last_export_id: Mapped[str | None] = mapped_column(String(64))
+    last_import_batch_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sys_import_batch.id"),
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(
+        TZDateTime,
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "revision >= 1",
+            name="ck_maintenance_contract_workbook_state_revision",
+        ),
+        Index(
+            "ix_maintenance_contract_workbook_state_complete",
+            "expense_snapshot_complete",
+            "contract_no",
+        ),
+    )
+
+
+class MaintenanceRoundtripOperation(Base):
+    """固定工作簿中一条显式写操作的逻辑幂等账本。
+
+    文件级 SHA-256 只能识别完全相同的 ZIP；Excel/openpyxl 重新保存会改变 ZIP 字节。
+    ``export_id + sheet_code + client_row_id`` 才是跨重新保存稳定的业务操作键，
+    ``payload_hash`` 则阻止复用同一键提交不同内容。
+    """
+
+    __tablename__ = "maintenance_roundtrip_operation"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    export_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    sheet_code: Mapped[str] = mapped_column(String(32), nullable=False)
+    client_row_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    operation: Mapped[str] = mapped_column(String(8), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    import_batch_id: Mapped[int] = mapped_column(
+        ForeignKey("sys_import_batch.id"),
+        nullable=False,
+    )
+    applied_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    applied_at: Mapped[datetime] = mapped_column(
+        TZDateTime,
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "operation IN ('CREATE', 'UPDATE', 'VOID')",
+            name="ck_maintenance_roundtrip_operation_kind",
+        ),
+        CheckConstraint(
+            "payload_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_maintenance_roundtrip_operation_payload_hash",
+        ),
+        UniqueConstraint(
+            "export_id",
+            "sheet_code",
+            "client_row_id",
+            name="uq_maintenance_roundtrip_operation_key",
+        ),
+        Index(
+            "ix_maintenance_roundtrip_operation_batch",
+            "import_batch_id",
+            "id",
+        ),
     )

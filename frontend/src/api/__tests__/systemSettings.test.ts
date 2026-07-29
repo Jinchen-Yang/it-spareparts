@@ -24,13 +24,17 @@ it("loads the typed singleton endpoint", () => {
   expect(get).toHaveBeenCalledWith("/system-settings");
 });
 
-it("sends the selected basis with the expected version", () => {
+it("sends all three administrator-controlled bases atomically with the expected version", () => {
   updateSystemSettings({
-    maintenance_project_profit_default_basis: "ex",
+    purchase_display_basis: "both",
+    sales_display_basis: "ex",
+    maintenance_display_basis: "inc",
     expected_version: 7,
   });
   expect(put).toHaveBeenCalledWith("/system-settings", {
-    maintenance_project_profit_default_basis: "ex",
+    purchase_display_basis: "both",
+    sales_display_basis: "ex",
+    maintenance_display_basis: "inc",
     expected_version: 7,
   });
 });

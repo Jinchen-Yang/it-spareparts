@@ -7,29 +7,59 @@ import ResizableTable from "../components/ResizableTable";
 import PageHeader from "../components/PageHeader";
 import type { Dayjs } from "dayjs";
 import api from "../api";
-import { pct, splitFixed, money } from "../utils/format";
+import { completeTaxPair, pct, splitFixed, money } from "../utils/format";
+import type { TaxSplit } from "../utils/format";
 import { useTaxBasis, TaxMoney } from "../context/TaxBasis";
 
 interface ProfitRow {
   dimension: string;
   revenue: number | null;
+  revenue_inc?: number | null;
+  revenue_ex?: number | null;
   revenue_costed: number | null;
+  revenue_costed_inc?: number | null;
+  revenue_costed_ex?: number | null;
   cost_moving_avg: number | null;
+  cost_moving_avg_inc?: number | null;
+  cost_moving_avg_ex?: number | null;
   gross_profit_moving: number | null;
+  gross_profit_moving_inc?: number | null;
+  gross_profit_moving_ex?: number | null;
   gross_margin_moving: number | null;
   cost_fifo: number | null;
+  cost_fifo_inc?: number | null;
+  cost_fifo_ex?: number | null;
   gross_profit_fifo: number | null;
+  gross_profit_fifo_inc?: number | null;
+  gross_profit_fifo_ex?: number | null;
   gross_margin_fifo: number | null;
   lines: number;
   no_cost: number | null;
   excluded_revenue: number | null;
 }
 
+type ProfitMoneyField =
+  | "revenue"
+  | "revenue_costed"
+  | "cost_moving_avg"
+  | "gross_profit_moving"
+  | "cost_fifo"
+  | "gross_profit_fifo";
+
+function profitMoneyPair(row: ProfitRow, field: ProfitMoneyField): TaxSplit {
+  const explicit = completeTaxPair(
+    row[`${field}_inc` as keyof ProfitRow] as number | null | undefined,
+    row[`${field}_ex` as keyof ProfitRow] as number | null | undefined,
+  );
+  return explicit.inc != null || explicit.ex != null
+    ? explicit
+    : splitFixed(row[field], "ex");
+}
 
 const DIM_LABEL: Record<string, string> = { part: "型号", salesperson: "销售员", customer: "客户" };
 
 export default function ProfitPage() {
-  const { basis } = useTaxBasis();
+  const basis = useTaxBasis("sales");
   const role = localStorage.getItem("role") || "";
   const isAdmin = role === "admin";
   let localPerms: Record<string, boolean> = {};
@@ -101,25 +131,30 @@ export default function ProfitPage() {
     <span style={{ color: v != null && v < 0 ? "var(--mb-danger)" : undefined }}>{pct(v, 2)}</span>
   );
 
-  // 金额分列（营收/成本/毛利均为「不含税」固定口径 splitFixed(v,"ex")）：
-  // 含税侧无真实值 → money(null)="-"，绝不税率换算。毛利可负 → 负数标红。
+  // 利润 API 的既有金额字段均为未税口径；展示含税侧时统一按 13% 补齐。
+  // 新 API 双值优先；仅兼容旧响应时才由未税原值按 13% 补齐。
   const moneyTwoCols = (
-    field: keyof ProfitRow, incTitle: string, exTitle: string, width: number,
+    field: ProfitMoneyField, incTitle: string, exTitle: string, width: number,
     opts?: { sorter?: boolean },
   ): ColumnsType<ProfitRow> => {
     // 列已拆成含税/不含税两列，单元格只渲染本列单值（表格里不套内联双值 TaxMoney）。
-    const cell = (v: number | null, side: "inc" | "ex") => {
-      const val = splitFixed(v, "ex")[side];
+    const cell = (row: ProfitRow, side: "inc" | "ex") => {
+      const val = profitMoneyPair(row, field)[side];
       return <span style={{ color: val != null && val < 0 ? "var(--mb-danger)" : undefined }}>{money(val)}</span>;
     };
-    const sorter = opts?.sorter
-      ? (a: ProfitRow, b: ProfitRow) => ((a[field] as number) ?? 0) - ((b[field] as number) ?? 0)
-      : undefined;
     return [
       ...(basis !== "ex" ? [{ title: incTitle, key: `${String(field)}_inc`, width, align: "right" as const,
-        render: (_: unknown, r: ProfitRow) => cell(r[field] as number | null, "inc"), sorter }] as ColumnsType<ProfitRow> : []),
+        render: (_: unknown, r: ProfitRow) => cell(r, "inc"),
+        sorter: opts?.sorter
+          ? (a: ProfitRow, b: ProfitRow) =>
+            (profitMoneyPair(a, field).inc ?? 0) - (profitMoneyPair(b, field).inc ?? 0)
+          : undefined }] as ColumnsType<ProfitRow> : []),
       ...(basis !== "inc" ? [{ title: exTitle, key: `${String(field)}_ex`, width, align: "right" as const,
-        render: (_: unknown, r: ProfitRow) => cell(r[field] as number | null, "ex"), sorter }] as ColumnsType<ProfitRow> : []),
+        render: (_: unknown, r: ProfitRow) => cell(r, "ex"),
+        sorter: opts?.sorter
+          ? (a: ProfitRow, b: ProfitRow) =>
+            (profitMoneyPair(a, field).ex ?? 0) - (profitMoneyPair(b, field).ex ?? 0)
+          : undefined }] as ColumnsType<ProfitRow> : []),
     ];
   };
 
@@ -148,16 +183,20 @@ export default function ProfitPage() {
       render: (v: number | null) => (v ? <Tag color="orange">{v}</Tag> : v) },
   ];
 
-  const sum = (k: keyof ProfitRow): number | null => {
+  const sumMoney = (field: ProfitMoneyField, side: keyof TaxSplit): number | null => {
     const values = rows
-      .map((row) => row[k])
+      .map((row) => profitMoneyPair(row, field)[side])
       .filter((value): value is number => typeof value === "number");
     return values.length ? values.reduce((total, value) => total + value, 0) : null;
   };
-  const totalRev = sum("revenue");
-  const totalRevCosted = sum("revenue_costed");
-  const totalGpMa = sum("gross_profit_moving");
-  const totalGpFifo = sum("gross_profit_fifo");
+  const totalPair = (field: ProfitMoneyField): TaxSplit => ({
+    inc: sumMoney(field, "inc"),
+    ex: sumMoney(field, "ex"),
+  });
+  const totalRevPair = totalPair("revenue");
+  const totalRevCosted = sumMoney("revenue_costed", "ex");
+  const totalGpMaPair = totalPair("gross_profit_moving");
+  const totalGpFifoPair = totalPair("gross_profit_fifo");
   const marginText = (profit: number | null, revenue: number | null) => (
     profit != null && revenue != null && revenue !== 0
       ? `${((profit / revenue) * 100).toFixed(2)}%`
@@ -199,19 +238,19 @@ export default function ProfitPage() {
       <Row gutter={16}>
         <Col span={8}><Card size="small">
           <Statistic title="合计营收" value={0}
-            formatter={() => <TaxMoney inc={null} ex={totalRev} />} />
+            formatter={() => <TaxMoney scope="sales" inc={totalRevPair.inc} ex={totalRevPair.ex} />} />
         </Card></Col>
         <Col span={8}><Card size="small">
           <Statistic title="移动加权 · 毛利" value={0}
-            valueStyle={{ color: totalGpMa != null && totalGpMa < 0 ? "var(--mb-danger)" : undefined }}
-            formatter={() => <TaxMoney inc={null} ex={totalGpMa} />} />
-          <span style={{ color: "var(--mb-text-3)" }}>毛利率 {marginText(totalGpMa, totalRevCosted)}</span>
+            valueStyle={{ color: totalGpMaPair.ex != null && totalGpMaPair.ex < 0 ? "var(--mb-danger)" : undefined }}
+            formatter={() => <TaxMoney scope="sales" inc={totalGpMaPair.inc} ex={totalGpMaPair.ex} />} />
+          <span style={{ color: "var(--mb-text-3)" }}>毛利率 {marginText(totalGpMaPair.ex, totalRevCosted)}</span>
         </Card></Col>
         <Col span={8}><Card size="small">
           <Statistic title="先进先出 FIFO · 毛利" value={0}
-            valueStyle={{ color: totalGpFifo != null && totalGpFifo < 0 ? "var(--mb-danger)" : undefined }}
-            formatter={() => <TaxMoney inc={null} ex={totalGpFifo} />} />
-          <span style={{ color: "var(--mb-text-3)" }}>毛利率 {marginText(totalGpFifo, totalRevCosted)}</span>
+            valueStyle={{ color: totalGpFifoPair.ex != null && totalGpFifoPair.ex < 0 ? "var(--mb-danger)" : undefined }}
+            formatter={() => <TaxMoney scope="sales" inc={totalGpFifoPair.inc} ex={totalGpFifoPair.ex} />} />
+          <span style={{ color: "var(--mb-text-3)" }}>毛利率 {marginText(totalGpFifoPair.ex, totalRevCosted)}</span>
         </Card></Col>
       </Row>
 
