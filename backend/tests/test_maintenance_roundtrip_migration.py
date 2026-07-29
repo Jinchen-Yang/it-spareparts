@@ -1,16 +1,16 @@
 """DEV-15 migration lifecycle and fail-closed downgrade tests."""
 
 import io
+import json
 import os
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
-from sqlalchemy import inspect, select, text
-from sqlalchemy.exc import DBAPIError, IntegrityError
-
+from app import permissions as permission_service
 from app.etl import loader
 from app.models.maintenance import (
     FMaintenanceLine,
@@ -20,8 +20,10 @@ from app.models.maintenance import (
     MaintenanceRoundtripOperation,
 )
 from app.models.system import SysImportBatch
-from tests import factories as f
+from sqlalchemy import inspect, select, text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
+from tests import factories as f
 
 _PREV = "e5f9a2b3c4d5"
 _HEAD = "f1c8e4a7b2d9"
@@ -480,6 +482,405 @@ def test_dev15_upgrade_refuses_unaudited_legacy_expenses(db):
                     ),
                     {"batch_id": batch_id},
                 )
+        alembic_command.upgrade(cfg, "head")
+
+
+def test_dev15_upgrade_normalizes_legacy_json_null_permission_payloads(db):
+    """Production legacy rows store JSON ``null``, not SQL NULL or objects."""
+    engine = db.get_bind()
+    user_id = db.execute(
+        text(
+            """
+            INSERT INTO sys_user
+                (username, role, password_hash, template_perms,
+                 permissions, perm_overrides)
+            VALUES
+                ('dev15-json-null-user', 'sales', 'not-used',
+                 '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)
+            RETURNING id
+            """
+        )
+    ).scalar_one()
+    db.commit()
+    db.close()
+    cfg = _cfg()
+
+    try:
+        alembic_command.downgrade(cfg, _PREV)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    UPDATE sys_user
+                    SET permissions = 'null'::jsonb,
+                        perm_overrides = 'null'::jsonb
+                    WHERE id = :user_id
+                    """
+                ),
+                {"user_id": user_id},
+            )
+
+        alembic_command.upgrade(cfg, _HEAD)
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    """
+                    SELECT jsonb_typeof(permissions),
+                           jsonb_typeof(perm_overrides),
+                           jsonb_typeof(template_perms),
+                           permissions
+                               ? 'action_maintenance_roundtrip_apply',
+                           permissions
+                               ->> 'action_maintenance_roundtrip_apply',
+                           template_perms
+                               ->> 'action_maintenance_roundtrip_apply',
+                           perm_overrides
+                               ? 'action_maintenance_roundtrip_apply'
+                    FROM sys_user
+                    WHERE id = :user_id
+                    """
+                ),
+                {"user_id": user_id},
+            ).one()
+            assert row == (
+                "object",
+                "object",
+                "object",
+                True,
+                "false",
+                "false",
+                False,
+            )
+    finally:
+        alembic_command.upgrade(cfg, "head")
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM sys_user WHERE id = :user_id"),
+                {"user_id": user_id},
+            )
+
+
+@pytest.mark.parametrize(
+    "role",
+    ["admin", "boss", "sales", "purchaser", "readonly", "unknown-role"],
+)
+def test_dev15_legacy_permissions_json_null_normalization_is_equivalent(role):
+    """Replacing a legacy JSON null with only the new role default is neutral."""
+    normalized = {
+        "action_maintenance_roundtrip_apply": role in ("admin", "boss"),
+    }
+    assert permission_service.effective(
+        role,
+        normalized,
+    ) == permission_service.effective(role, None)
+
+
+@pytest.mark.parametrize("sentinel_kind", ["sql_null", "json_null"])
+def test_dev15_migration_preserves_legacy_template_fallback(
+    db,
+    sentinel_kind,
+):
+    """Both NULL encodings must keep role + legacy-permissions fallback."""
+    engine = db.get_bind()
+    user_id = db.execute(
+        text(
+            """
+            INSERT INTO sys_user
+                (username, role, password_hash, template_perms,
+                 permissions, perm_overrides)
+            VALUES
+                (:username, 'sales', 'not-used',
+                 '{}'::jsonb,
+                 '{"page_inventory": false}'::jsonb,
+                 '{}'::jsonb)
+            RETURNING id
+            """
+        ),
+        {"username": f"dev15-{sentinel_kind}-template"},
+    ).scalar_one()
+    db.commit()
+    db.close()
+    cfg = _cfg()
+
+    try:
+        alembic_command.downgrade(cfg, _PREV)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    UPDATE sys_user
+                    SET template_perms = CASE
+                            WHEN :is_sql_null THEN NULL::jsonb
+                            ELSE 'null'::jsonb
+                        END,
+                        perm_overrides = CASE
+                            WHEN :is_sql_null THEN NULL::jsonb
+                            ELSE 'null'::jsonb
+                        END
+                    WHERE id = :user_id
+                    """
+                ),
+                {
+                    "is_sql_null": sentinel_kind == "sql_null",
+                    "user_id": user_id,
+                },
+            )
+
+        def snapshot():
+            with engine.connect() as connection:
+                row = connection.execute(
+                    text(
+                        """
+                        SELECT role, template_perms, permissions, perm_overrides,
+                               template_perms IS NULL AS template_sql_null,
+                               template_perms = 'null'::jsonb
+                                   AS template_json_null,
+                               perm_overrides IS NULL AS overrides_sql_null,
+                               perm_overrides = 'null'::jsonb
+                                   AS overrides_json_null
+                        FROM sys_user
+                        WHERE id = :user_id
+                        """
+                    ),
+                    {"user_id": user_id},
+                ).mappings().one()
+            effective = permission_service.effective_for_user(
+                SimpleNamespace(
+                    role=row["role"],
+                    template_perms=row["template_perms"],
+                    permissions=row["permissions"],
+                    perm_overrides=row["perm_overrides"],
+                )
+            )
+            markers = (
+                row["template_sql_null"],
+                row["template_json_null"],
+                row["overrides_sql_null"],
+                row["overrides_json_null"],
+            )
+            return row, effective, markers
+
+        before_row, before_effective, before_markers = snapshot()
+        expected_markers = (
+            (True, None, True, None)
+            if sentinel_kind == "sql_null"
+            else (False, True, False, True)
+        )
+        assert before_markers == expected_markers
+
+        alembic_command.upgrade(cfg, _HEAD)
+        upgraded_row, upgraded_effective, upgraded_markers = snapshot()
+        assert upgraded_markers == expected_markers
+        assert upgraded_effective == before_effective
+        assert upgraded_row["permissions"]["page_inventory"] is False
+        assert (
+            upgraded_row["permissions"][
+                "action_maintenance_roundtrip_apply"
+            ]
+            is False
+        )
+
+        alembic_command.downgrade(cfg, _PREV)
+        downgraded_row, downgraded_effective, downgraded_markers = snapshot()
+        assert downgraded_markers == expected_markers
+        assert downgraded_effective == before_effective
+        assert downgraded_row["permissions"] == before_row["permissions"]
+    finally:
+        alembic_command.upgrade(cfg, "head")
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM sys_user WHERE id = :user_id"),
+                {"user_id": user_id},
+            )
+
+
+@pytest.mark.parametrize(
+    ("target", "invalid_payload", "expected_type"),
+    [
+        ("role_template.permissions", [], "array"),
+        ("user.template_perms", "invalid", "string"),
+        ("user.permissions", 1, "number"),
+        ("user.perm_overrides", True, "boolean"),
+    ],
+)
+def test_dev15_upgrade_rejects_non_object_permission_payloads(
+    db,
+    target,
+    invalid_payload,
+    expected_type,
+):
+    engine = db.get_bind()
+    user_id = db.execute(
+        text(
+            """
+            INSERT INTO sys_user
+                (username, role, password_hash, template_perms,
+                 permissions, perm_overrides)
+            VALUES
+                ('dev15-json-array-user', 'sales', 'not-used',
+                 '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)
+            RETURNING id
+            """
+        )
+    ).scalar_one()
+    db.commit()
+    db.close()
+    cfg = _cfg()
+    column = target.removeprefix("user.")
+    original = None
+
+    try:
+        alembic_command.downgrade(cfg, _PREV)
+        with engine.begin() as connection:
+            if target == "role_template.permissions":
+                original = connection.execute(
+                    text(
+                        """
+                        SELECT permissions
+                        FROM sys_role_template
+                        WHERE code = 'sales'
+                        """
+                    )
+                ).scalar_one()
+                connection.execute(
+                    text(
+                        """
+                        UPDATE sys_role_template
+                        SET permissions = CAST(:invalid_payload AS jsonb)
+                        WHERE code = 'sales'
+                        """
+                    ),
+                    {"invalid_payload": json.dumps(invalid_payload)},
+                )
+            else:
+                original = connection.execute(
+                    text(f"SELECT {column} FROM sys_user WHERE id = :user_id"),
+                    {"user_id": user_id},
+                ).scalar_one()
+                connection.execute(
+                    text(
+                        f"""
+                        UPDATE sys_user
+                        SET {column} = CAST(:invalid_payload AS jsonb)
+                        WHERE id = :user_id
+                        """
+                    ),
+                    {
+                        "invalid_payload": json.dumps(invalid_payload),
+                        "user_id": user_id,
+                    },
+                )
+
+        with pytest.raises(
+            DBAPIError,
+            match="permission JSONB payload must be an object",
+        ):
+            alembic_command.upgrade(cfg, _HEAD)
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == _PREV
+            if target == "role_template.permissions":
+                actual_type = connection.execute(
+                    text(
+                        """
+                        SELECT jsonb_typeof(permissions)
+                        FROM sys_role_template
+                        WHERE code = 'sales'
+                        """
+                    )
+                ).scalar_one()
+            else:
+                actual_type = connection.execute(
+                    text(
+                        f"""
+                        SELECT jsonb_typeof({column})
+                        FROM sys_user
+                        WHERE id = :user_id
+                        """
+                    ),
+                    {"user_id": user_id},
+                ).scalar_one()
+            assert actual_type == expected_type
+    finally:
+        with engine.begin() as connection:
+            if target == "role_template.permissions" and original is not None:
+                connection.execute(
+                    text(
+                        """
+                        UPDATE sys_role_template
+                        SET permissions = CAST(:original AS jsonb)
+                        WHERE code = 'sales'
+                        """
+                    ),
+                    {"original": json.dumps(original)},
+                )
+            elif original is not None:
+                connection.execute(
+                    text(
+                        f"""
+                        UPDATE sys_user
+                        SET {column} = CAST(:original AS jsonb)
+                        WHERE id = :user_id
+                        """
+                    ),
+                    {
+                        "original": json.dumps(original),
+                        "user_id": user_id,
+                    },
+                )
+        alembic_command.upgrade(cfg, "head")
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM sys_user WHERE id = :user_id"),
+                {"user_id": user_id},
+            )
+
+
+def test_dev15_downgrade_rejects_non_object_permission_payloads(db):
+    engine = db.get_bind()
+    user_id = db.execute(
+        text(
+            """
+            INSERT INTO sys_user
+                (username, role, password_hash, template_perms,
+                 permissions, perm_overrides)
+            VALUES
+                ('dev15-json-array-downgrade', 'sales', 'not-used',
+                 '{}'::jsonb, '{}'::jsonb, '[]'::jsonb)
+            RETURNING id
+            """
+        )
+    ).scalar_one()
+    db.commit()
+    db.close()
+    cfg = _cfg()
+
+    try:
+        with pytest.raises(DBAPIError, match="downgrade blocked"):
+            alembic_command.downgrade(cfg, _PREV)
+
+        with engine.connect() as connection:
+            assert connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one() == _HEAD
+            assert connection.execute(
+                text(
+                    """
+                    SELECT jsonb_typeof(perm_overrides)
+                    FROM sys_user
+                    WHERE id = :user_id
+                    """
+                ),
+                {"user_id": user_id},
+            ).scalar_one() == "array"
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM sys_user WHERE id = :user_id"),
+                {"user_id": user_id},
+            )
         alembic_command.upgrade(cfg, "head")
 
 

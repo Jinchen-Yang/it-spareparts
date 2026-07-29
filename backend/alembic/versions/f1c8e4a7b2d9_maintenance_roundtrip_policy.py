@@ -60,6 +60,49 @@ def _cost_bucket_sql(actual_sources: str) -> str:
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
 
+    # Permission-center v2 historically serialized an absent mapping in two
+    # forms: SQL NULL and JSON ``null``. PostgreSQL's JSONB delete operator
+    # rejects scalar JSON ``null`` ("cannot delete from scalar"), so handle
+    # each empty form according to that column's runtime meaning: preserve the
+    # template fallback sentinel, normalize only mappings that are edited, and
+    # fail closed for every other non-object payload.
+    op.execute(
+        """
+        DO $migration$
+        BEGIN
+          IF EXISTS (
+              SELECT 1 FROM sys_role_template
+              WHERE permissions IS NOT NULL
+                AND permissions <> 'null'::jsonb
+                AND jsonb_typeof(permissions) IS DISTINCT FROM 'object'
+          )
+          OR EXISTS (
+              SELECT 1 FROM sys_user
+              WHERE template_perms IS NOT NULL
+                AND template_perms <> 'null'::jsonb
+                AND jsonb_typeof(template_perms) IS DISTINCT FROM 'object'
+          )
+          OR EXISTS (
+              SELECT 1 FROM sys_user
+              WHERE permissions IS NOT NULL
+                AND permissions <> 'null'::jsonb
+                AND jsonb_typeof(permissions) IS DISTINCT FROM 'object'
+          )
+          OR EXISTS (
+              SELECT 1 FROM sys_user
+              WHERE perm_overrides IS NOT NULL
+                AND perm_overrides <> 'null'::jsonb
+                AND jsonb_typeof(perm_overrides) IS DISTINCT FROM 'object'
+          )
+          THEN
+            RAISE EXCEPTION
+              'f1c8e4a7b2d9 upgrade blocked: permission JSONB payload must be an object, SQL NULL, or JSON null';
+          END IF;
+        END
+        $migration$;
+        """
+    )
+
     # File hashes are idempotency keys within an import protocol, not globally.
     # In particular, a historical generic-import success for a roundtrip XLSX
     # must not block the dedicated, signature-validating endpoint.
@@ -74,7 +117,10 @@ def upgrade() -> None:
     op.execute(
         """
         UPDATE sys_role_template
-        SET permissions = COALESCE(permissions, '{}'::jsonb)
+        SET permissions = CASE
+                WHEN jsonb_typeof(permissions) = 'object' THEN permissions
+                ELSE '{}'::jsonb
+            END
             || jsonb_build_object(
                 'action_maintenance_roundtrip_apply',
                 code IN ('admin', 'boss')
@@ -84,20 +130,29 @@ def upgrade() -> None:
     op.execute(
         """
         UPDATE sys_user
-        SET template_perms = COALESCE(template_perms, '{}'::jsonb)
-            || jsonb_build_object(
+        SET template_perms = template_perms || jsonb_build_object(
                 'action_maintenance_roundtrip_apply',
                 COALESCE(template_code, role) IN ('admin', 'boss')
             ),
-            perm_overrides = COALESCE(perm_overrides, '{}'::jsonb)
+            perm_overrides = CASE
+                    WHEN jsonb_typeof(perm_overrides) = 'object'
+                    THEN perm_overrides
+                    ELSE '{}'::jsonb
+                END
                 - 'action_maintenance_roundtrip_apply'
-        WHERE template_perms IS NOT NULL
+        -- SQL NULL and JSON null both mean "no v2 snapshot": runtime falls
+        -- back to role + legacy permissions.  Preserve that sentinel instead
+        -- of turning it into a partial snapshot that would deny every old key.
+        WHERE jsonb_typeof(template_perms) = 'object'
         """
     )
     op.execute(
         """
         UPDATE sys_user
-        SET permissions = COALESCE(permissions, '{}'::jsonb)
+        SET permissions = CASE
+                WHEN jsonb_typeof(permissions) = 'object' THEN permissions
+                ELSE '{}'::jsonb
+            END
             || jsonb_build_object(
                 'action_maintenance_roundtrip_apply',
                 role IN ('admin', 'boss')
@@ -486,6 +541,34 @@ def downgrade() -> None:
                             ELSE round(amount * 1.13, 2)
                           END
                 )
+                OR EXISTS (
+                    SELECT 1 FROM sys_role_template
+                    WHERE permissions IS NOT NULL
+                      AND permissions <> 'null'::jsonb
+                      AND jsonb_typeof(permissions)
+                          IS DISTINCT FROM 'object'
+                )
+                OR EXISTS (
+                    SELECT 1 FROM sys_user
+                    WHERE template_perms IS NOT NULL
+                      AND template_perms <> 'null'::jsonb
+                      AND jsonb_typeof(template_perms)
+                          IS DISTINCT FROM 'object'
+                )
+                OR EXISTS (
+                    SELECT 1 FROM sys_user
+                    WHERE permissions IS NOT NULL
+                      AND permissions <> 'null'::jsonb
+                      AND jsonb_typeof(permissions)
+                          IS DISTINCT FROM 'object'
+                )
+                OR EXISTS (
+                    SELECT 1 FROM sys_user
+                    WHERE perm_overrides IS NOT NULL
+                      AND perm_overrides <> 'null'::jsonb
+                      AND jsonb_typeof(perm_overrides)
+                          IS DISTINCT FROM 'object'
+                )
               THEN
                 RAISE EXCEPTION
                     'f1c8e4a7b2d9 downgrade blocked: DEV-15 business writes would be lost; freeze writes and use the documented export/replay or forward-fix path';
@@ -559,7 +642,10 @@ def downgrade() -> None:
     op.execute(
         """
         UPDATE sys_user
-        SET permissions = permissions - 'action_maintenance_roundtrip_apply'
+        SET permissions = CASE
+                WHEN jsonb_typeof(permissions) = 'object' THEN permissions
+                ELSE '{}'::jsonb
+            END - 'action_maintenance_roundtrip_apply'
         WHERE permissions IS NOT NULL
         """
     )
@@ -569,15 +655,22 @@ def downgrade() -> None:
         SET template_perms =
                 template_perms - 'action_maintenance_roundtrip_apply',
             perm_overrides =
-                perm_overrides - 'action_maintenance_roundtrip_apply'
-        WHERE template_perms IS NOT NULL
+                CASE
+                    WHEN jsonb_typeof(perm_overrides) = 'object'
+                    THEN perm_overrides
+                    ELSE '{}'::jsonb
+                END - 'action_maintenance_roundtrip_apply'
+        WHERE jsonb_typeof(template_perms) = 'object'
         """
     )
     op.execute(
         """
         UPDATE sys_role_template
         SET permissions =
-            permissions - 'action_maintenance_roundtrip_apply'
+            CASE
+                WHEN jsonb_typeof(permissions) = 'object' THEN permissions
+                ELSE '{}'::jsonb
+            END - 'action_maintenance_roundtrip_apply'
         """
     )
     op.drop_index("ux_batch_success_hash", table_name="sys_import_batch")
