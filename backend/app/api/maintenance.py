@@ -4,8 +4,11 @@
 + require_page('page_maintenance') 页面准入（admin/boss/purchaser 模板默认开）。
 成本金额字段随 data_purchase_cost 脱敏（成本 7 键 + 聚合派生键已登记 FIELD_GROUPS）。
 """
+
+import asyncio
 import csv
 import io
+import logging
 import os
 import re
 import tempfile
@@ -15,14 +18,18 @@ from datetime import date
 from tempfile import SpooledTemporaryFile
 from urllib.parse import quote
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
+from python_multipart.exceptions import FormParserError, MultipartParseError
+from python_multipart.multipart import parse_options_header
 from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from app.auth import current_role, require_admin
 from app.business_time import business_today
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.security import (
     UserContext, apply_field_visibility, get_current_user_context, record_access_log,
     is_scoped_sales, require_action, require_page,
@@ -45,7 +52,67 @@ _MAX_CSV_DYNAMIC_TEXT_BYTES = 64 * 1024 * 1024
 _MAX_CSV_OUTPUT_BYTES = 512 * 1024 * 1024
 _INVALID_CSV_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ufffe\uffff]")
 _ROUNDTRIP_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+_ROUNDTRIP_PARSE_CHUNK_BYTES = 64 * 1024
 _ROUNDTRIP_IMPORT_PARSE_LOCK = threading.Lock()
+logger = logging.getLogger(__name__)
+
+
+def _remove_roundtrip_temp(path: str | None) -> None:
+    """Best-effort temp cleanup; cleanup failures must never replace the request result."""
+    if path is None:
+        return
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        with suppress(Exception):
+            logger.warning("无法删除维保回填临时文件 %s", path, exc_info=True)
+
+
+async def _wait_for_roundtrip_task_terminal(
+    task: asyncio.Task,
+) -> asyncio.CancelledError | None:
+    """Wait through repeated caller cancellation without ever cancelling ``task``."""
+    cancellation = None
+    current_task = asyncio.current_task()
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if current_task is not None and current_task.cancelling():
+                if cancellation is None:
+                    cancellation = exc
+                continue
+            break
+        except BaseException:
+            break
+    return cancellation
+
+
+async def _close_roundtrip_form(form) -> asyncio.CancelledError | None:
+    close_worker = asyncio.create_task(form.close())
+    cancellation = await _wait_for_roundtrip_task_terminal(close_worker)
+    try:
+        close_worker.result()
+    except BaseException as exc:
+        if cancellation is not None:
+            raise cancellation from exc
+        raise
+    return cancellation
+
+
+def _validate_date_pair(date_from: date | None, date_to: date | None) -> None:
+    if (date_from is None) != (date_to is None):
+        raise HTTPException(
+            status_code=422,
+            detail="date_from 与 date_to 必须同时提供",
+        )
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(
+            status_code=422,
+            detail="date_from 不能晚于 date_to",
+        )
 
 
 class _ClosingStreamingResponse(StreamingResponse):
@@ -103,6 +170,7 @@ def projects(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    _validate_date_pair(date_from, date_to)
     record_access_log(ctx, "projects", "maintenance")
     data = maintenance_cost.projects_aggregate(
         db, date_from, date_to, q, user_ctx=ctx,
@@ -184,6 +252,14 @@ def _require_workbook_export_permissions(ctx: UserContext) -> None:
         raise HTTPException(
             status_code=403,
             detail="无成本及利润查看权限，不能导出项目成本工作簿",
+        )
+
+
+def _require_full_contract_scope(ctx: UserContext) -> None:
+    if is_scoped_sales(ctx):
+        raise HTTPException(
+            status_code=403,
+            detail="受限销售账号不能查看合同级维保数据",
         )
 
 
@@ -287,6 +363,7 @@ def export(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
+    _validate_date_pair(date_from, date_to)
     record_access_log(ctx, "export", "maintenance")
     data = maintenance_cost.projects_aggregate(
         db, date_from, date_to, q, user_ctx=ctx,
@@ -459,7 +536,7 @@ def export_workbooks(
             headers={"Retry-After": "5"},
         ) from exc
     except maintenance_workbook_export.WorkbookExportRejected as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     _release_db_before_stream(db, output)
     scope = f"{date_from.isoformat()}_{date_to.isoformat()}" if date_from and date_to else "all"
     return _ClosingStreamingResponse(
@@ -579,6 +656,8 @@ def board(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """合同预算消耗参考：成本或费用数据不完整时不计算红黄绿。"""
+    _validate_date_pair(date_from, date_to)
+    _require_full_contract_scope(ctx)
     record_access_log(ctx, "board", "maintenance")
     data = maintenance_cost.board(
         db, date_from, date_to, status, user_ctx=ctx, q_text=q,
@@ -634,6 +713,8 @@ def board_export(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     """合同级详细盈亏 CSV；与看板复用同一计算、范围与脱敏口径。"""
+    _validate_date_pair(date_from, date_to)
+    _require_full_contract_scope(ctx)
     record_access_log(
         ctx,
         "board_export",
@@ -664,10 +745,14 @@ def board_export(
     header = [
         "合同",
         "关联项目",
+        "order_count",
+        "missing_detail_orders",
         "revenue_inc",
         "revenue_ex",
         "expense_inc",
         "expense_ex",
+        "parts_cost_inc_tax",
+        "parts_cost_ex_tax",
         "parts_gross_profit_inc",
         "parts_gross_profit_ex",
         "parts_gross_margin_inc",
@@ -695,6 +780,8 @@ def board_export(
                 for project in row.get("projects", [])
                 if project.get("project")
             ),
+            row.get("order_count"),
+            row.get("missing_detail_orders"),
             *(
                 row.get(field)
                 for field in (
@@ -702,6 +789,8 @@ def board_export(
                     "revenue_ex",
                     "expense_inc",
                     "expense_ex",
+                    "parts_cost_inc_tax",
+                    "parts_cost_ex_tax",
                     "parts_gross_profit_inc",
                     "parts_gross_profit_ex",
                     "parts_gross_margin_inc",
@@ -773,7 +862,7 @@ def export_workbook(
     except maintenance_workbook_export.WorkbookExportNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except maintenance_workbook_export.WorkbookExportRejected as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     _release_db_before_stream(db, output)
     return _ClosingStreamingResponse(
         _iter_download_chunks(output),
@@ -918,14 +1007,27 @@ def _save_roundtrip_upload(file: UploadFile) -> tuple[str, str]:
                     )
                 output.write(chunk)
     except BaseException:
-        with suppress(FileNotFoundError):
-            os.remove(path)
+        _remove_roundtrip_temp(path)
         raise
     return path, original_name[:256]
 
 
 async def _parse_and_save_roundtrip_upload(request: Request) -> tuple[str, str]:
     """鉴权后才解析 multipart，并同时限制总请求体、文件数和文件字节数。"""
+    content_type = request.headers.get("content-type", "")
+    media_type = content_type.partition(";")[0].strip().lower()
+    if media_type != "multipart/form-data":
+        raise HTTPException(
+            status_code=415,
+            detail="维保回填只接受 multipart/form-data",
+        )
+    try:
+        _parsed_media_type, content_type_params = parse_options_header(content_type)
+    except (ValueError, UnicodeError) as exc:
+        raise HTTPException(status_code=400, detail="multipart Content-Type 格式无效") from exc
+    boundary = content_type_params.get(b"boundary")
+    if not boundary:
+        raise HTTPException(status_code=400, detail="multipart boundary 缺失或为空")
     file_limit = config.MAX_UPLOAD_MB * 1024 * 1024
     body_limit = file_limit + _ROUNDTRIP_MULTIPART_OVERHEAD_BYTES
     content_length = request.headers.get("content-length")
@@ -943,25 +1045,74 @@ async def _parse_and_save_roundtrip_upload(request: Request) -> tuple[str, str]:
             )
 
     consumed = 0
+    frame_body = b""
+    frame_offset = 0
+    frame_more_body = False
 
     async def limited_receive():
-        nonlocal consumed
+        nonlocal consumed, frame_body, frame_offset, frame_more_body
+        if frame_offset < len(frame_body):
+            chunk_end = min(
+                frame_offset + _ROUNDTRIP_PARSE_CHUNK_BYTES,
+                len(frame_body),
+            )
+            chunk = frame_body[frame_offset:chunk_end]
+            frame_offset = chunk_end
+            has_pending = frame_offset < len(frame_body)
+            await anyio.lowlevel.checkpoint()
+            return {
+                "type": "http.request",
+                "body": chunk,
+                "more_body": has_pending or frame_more_body,
+            }
         message = await request.receive()
         if message["type"] == "http.request":
-            consumed += len(message.get("body", b""))
+            body = message.get("body", b"")
+            consumed += len(body)
             if consumed > body_limit:
                 raise HTTPException(
                     status_code=413,
                     detail=f"工作簿超过 {config.MAX_UPLOAD_MB}MB 上传上限",
                 )
+            frame_body = body
+            frame_offset = min(_ROUNDTRIP_PARSE_CHUNK_BYTES, len(frame_body))
+            frame_more_body = bool(message.get("more_body"))
+            chunk = frame_body[:frame_offset]
+            has_pending = frame_offset < len(frame_body)
+            await anyio.lowlevel.checkpoint()
+            return {
+                "type": "http.request",
+                "body": chunk,
+                "more_body": has_pending or frame_more_body,
+            }
         return message
 
     limited_request = Request(request.scope, limited_receive)
-    async with limited_request.form(
-        max_files=1,
-        max_fields=0,
-        max_part_size=1024,
-    ) as form:
+    parser = None
+    form = None
+    owned_path = None
+    try:
+        try:
+            parser = MultiPartParser(
+                limited_request.headers,
+                limited_request.stream(),
+                max_files=1,
+                max_fields=0,
+                max_part_size=1024,
+            )
+            form = await parser.parse()
+        except HTTPException:
+            raise
+        except (
+            MultiPartException,
+            FormParserError,
+            MultipartParseError,
+            UnicodeError,
+        ) as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="multipart 请求格式无效",
+            ) from exc
         items = form.multi_items()
         if (
             len(items) != 1
@@ -972,13 +1123,134 @@ async def _parse_and_save_roundtrip_upload(request: Request) -> tuple[str, str]:
                 status_code=422,
                 detail="必须且只能上传一个名为 file 的 .xlsx 工作簿",
             )
-        return _save_roundtrip_upload(items[0][1])
+        save_worker = asyncio.create_task(
+            anyio.to_thread.run_sync(
+                _save_roundtrip_upload,
+                items[0][1],
+                abandon_on_cancel=False,
+            )
+        )
+        save_cancellation = await _wait_for_roundtrip_task_terminal(save_worker)
+        try:
+            owned_path, original_name = save_worker.result()
+        except BaseException as exc:
+            if save_cancellation is not None:
+                raise save_cancellation from exc
+            raise
+        if save_cancellation is not None:
+            raise save_cancellation
+
+        form_to_close = form
+        form = None
+        close_cancellation = await _close_roundtrip_form(form_to_close)
+        if close_cancellation is not None:
+            raise close_cancellation
+
+        result = (owned_path, original_name)
+        owned_path = None
+        return result
+    except BaseException:
+        _remove_roundtrip_temp(owned_path)
+        raise
+    finally:
+        if form is not None:
+            try:
+                await _close_roundtrip_form(form)
+            except BaseException:
+                with suppress(Exception):
+                    logger.warning(
+                        "关闭维保回填 multipart 临时文件失败",
+                        exc_info=True,
+                    )
+        elif parser is not None:
+            for partial_file in parser._files_to_close_on_error:
+                with suppress(Exception):
+                    partial_file.close()
+
+
+def _import_roundtrip_in_worker(
+    path: str,
+    original_name: str,
+    operated_by: str,
+    ctx: UserContext,
+) -> dict:
+    """在线程内完成审计、事务、回滚和关闭，避免跨线程使用 Session。"""
+    db = SessionLocal()
+    try:
+        record_access_log(
+            ctx,
+            "roundtrip_import",
+            "maintenance",
+            {"filename": original_name},
+        )
+        result = maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            path,
+            filename=original_name,
+            operated_by=operated_by,
+        )
+    except BaseException:
+        try:
+            db.rollback()
+        except BaseException:
+            with suppress(Exception):
+                logger.warning(
+                    "维保回填失败后的数据库回滚也失败",
+                    exc_info=True,
+                )
+        try:
+            db.close()
+        except BaseException:
+            with suppress(Exception):
+                logger.warning(
+                    "维保回填失败后的数据库会话关闭也失败",
+                    exc_info=True,
+                )
+        raise
+    else:
+        try:
+            db.close()
+        except BaseException:
+            with suppress(Exception):
+                logger.warning(
+                    "维保回填成功后的数据库会话关闭失败",
+                    exc_info=True,
+                )
+        return result
+
+
+async def _wait_for_roundtrip_import_worker(
+    path: str,
+    original_name: str,
+    operated_by: str,
+    ctx: UserContext,
+) -> dict:
+    """普通请求取消时仍等待已启动 worker 收尾，防止提前删文件或释放进程锁。"""
+    worker = asyncio.create_task(
+        anyio.to_thread.run_sync(
+            _import_roundtrip_in_worker,
+            path,
+            original_name,
+            operated_by,
+            ctx,
+            abandon_on_cancel=False,
+        )
+    )
+    cancellation = await _wait_for_roundtrip_task_terminal(worker)
+    try:
+        result = worker.result()
+    except BaseException as exc:
+        if cancellation is not None:
+            raise cancellation from exc
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 @router.post("/roundtrip-import")
 async def roundtrip_import(
     request: Request,
-    db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action(
@@ -1001,31 +1273,26 @@ async def roundtrip_import(
             detail="已有维保回填文件正在解析，请稍后重试",
             headers={"Retry-After": "5"},
         )
+    path = None
     try:
         path, original_name = await _parse_and_save_roundtrip_upload(request)
+        try:
+            return await _wait_for_roundtrip_import_worker(
+                path,
+                original_name,
+                ctx.user_id,
+                ctx,
+            )
+        except maintenance_roundtrip.RoundtripWorkbookError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        except maintenance_cost.MaintenanceCostRecomputeBusy as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=str(exc),
+                headers={"Retry-After": "5"},
+            ) from exc
     finally:
-        _ROUNDTRIP_IMPORT_PARSE_LOCK.release()
-    try:
-        record_access_log(
-            ctx,
-            "roundtrip_import",
-            "maintenance",
-            {"filename": original_name},
-        )
-        return maintenance_roundtrip.import_roundtrip_workbook(
-            db,
-            path,
-            filename=original_name,
-            operated_by=ctx.user_id,
-        )
-    except maintenance_roundtrip.RoundtripWorkbookError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except maintenance_cost.MaintenanceCostRecomputeBusy as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=str(exc),
-            headers={"Retry-After": "5"},
-        ) from exc
-    finally:
-        with suppress(FileNotFoundError):
-            os.remove(path)
+        try:
+            _remove_roundtrip_temp(path)
+        finally:
+            _ROUNDTRIP_IMPORT_PARSE_LOCK.release()

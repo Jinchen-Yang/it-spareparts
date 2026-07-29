@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import unicodedata
@@ -49,8 +50,8 @@ from app.services import maintenance_cost
 from app.services.maintenance_workbook_export import (
     MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK as STANDARD_MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK,
 )
-from app.services.maintenance_workbook_export import safe_xlsx_text
 
+_log = logging.getLogger(__name__)
 
 PROTOCOL_ID = reader.ROUNDTRIP_PROTOCOL_ID
 SCHEMA_VERSION = "1.0"
@@ -89,6 +90,9 @@ _MANUAL_RENDERED_TEXT_OVERHEAD_BYTES = 128
 _BLANK_RENDERED_TEXT_OVERHEAD_BYTES = BLANK_CREATE_ROWS * 64 * 2
 
 _INVALID_BUNDLE_MEMBER_CHARS = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
+_INVALID_XLSX_TEXT_CONTROLS = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]"
+)
 
 _TECH_HEADERS = (
     "操作",
@@ -280,7 +284,6 @@ _OPERATION_CHOICES_BY_SHEET = {
     "04_报销明细": ("KEEP", "CREATE", "UPDATE", "VOID"),
     "05_人工成本回填": ("KEEP", "CREATE", "UPDATE", "VOID"),
 }
-_FORMULA_START = re.compile(r"^\s*=")
 _CONTRACT_REVISION_TABLE = "tbl_contract_revisions_v1"
 _CONTRACT_REVISION_HEADERS = ("合同号", "revision")
 
@@ -425,14 +428,13 @@ def _state_model():
 
 def _safe(value: Any) -> Any:
     if isinstance(value, str):
-        escaped = safe_xlsx_text(value)
-        # Roundtrip values must keep their signed/original semantics. The standard
-        # export helper prefixes formula-looking text with an apostrophe, but that
-        # would change contract numbers and break the HMAC on re-import. These cells
-        # are instead forced to OpenXML string type by ``_append_literal_row``.
-        if escaped.startswith("'") and escaped[1:].lstrip()[:1] in ("=", "+", "-", "@"):
-            return escaped[1:]
-        return escaped
+        if _INVALID_XLSX_TEXT_CONTROLS.search(value):
+            raise RoundtripWorkbookError("文本包含 XLSX 不允许的控制字符")
+        if len(value) > MAX_CELL_CHARS:
+            raise RoundtripWorkbookError(
+                f"文本超过 Excel 单元格上限 {MAX_CELL_CHARS} 个字符",
+                status_code=413,
+            )
     return value
 
 
@@ -1690,7 +1692,7 @@ def build_roundtrip_template_bundle(
         raise RoundtripWorkbookError("所选范围内没有可导出的已关联合同维保数据")
     if len(contracts) >= MAX_ROUNDTRIP_BUNDLE_CONTRACTS:
         raise RoundtripWorkbookError(
-            f"命中合同 {len(contracts)} 个，必须少于 "
+            f"命中合同至少 {MAX_ROUNDTRIP_BUNDLE_CONTRACTS} 个，必须少于 "
             f"{MAX_ROUNDTRIP_BUNDLE_CONTRACTS} 个；请缩小日期范围",
             status_code=413,
         )
@@ -1975,14 +1977,6 @@ def _parse_table(workbook, sheet: str) -> list[_ParsedRow]:
                     raise RoundtripWorkbookError(
                         f"{sheet} 第 {row_number} 行“{header}”超过 Excel 文本上限"
                     )
-                if (
-                    sheet != "01_项目"
-                    and header != "合同号"
-                    and _FORMULA_START.match(value)
-                ):
-                    raise RoundtripWorkbookError(
-                        f"{sheet} 第 {row_number} 行“{header}”疑似公式，拒绝导入"
-                    )
             values[header] = value
         operation = str(values.get("操作") or "").strip().upper()
         if operation not in _ALLOWED_OPERATIONS:
@@ -2022,7 +2016,17 @@ def _load_and_parse(path: str):
         rows = {sheet: _parse_table(workbook, sheet) for sheet in _TABLE_SPECS}
         return workbook, metadata, revisions, rows
     except BaseException:
-        workbook.close()
+        try:
+            workbook.close()
+        except BaseException:
+            try:
+                _log.warning(
+                    "维保工作簿解析失败后的关闭清理失败；保留原始校验错误",
+                    exc_info=True,
+                )
+            except BaseException:
+                # 关闭与日志都只是清理动作，绝不能覆盖原始校验异常。
+                pass
         raise
 
 
@@ -3688,6 +3692,17 @@ def _recompute_in_transaction(db: Session) -> dict:
         raise
 
 
+def _log_import_cleanup_failure(operation: str) -> None:
+    try:
+        _log.exception(
+            "维保工作簿回填的%s清理失败；保留原始处理结果",
+            operation,
+        )
+    except BaseException:
+        # Logging is diagnostic only and must never replace the import outcome.
+        pass
+
+
 def import_roundtrip_workbook(
     db: Session,
     path: str,
@@ -3912,8 +3927,14 @@ def import_roundtrip_workbook(
             "recompute": recompute_stats,
         }
     except BaseException:
-        db.rollback()
+        try:
+            db.rollback()
+        except BaseException:
+            _log_import_cleanup_failure("事务回滚")
         raise
     finally:
         if workbook is not None:
-            workbook.close()
+            try:
+                workbook.close()
+            except BaseException:
+                _log_import_cleanup_failure("工作簿关闭")

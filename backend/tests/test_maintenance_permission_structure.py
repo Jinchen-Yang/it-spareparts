@@ -124,7 +124,7 @@ def test_api_profit_blind_board_removes_status_filter_counts_and_ranking(
     assert all(row["actual_lines"] == 1 for row in data["rows"])
     assert all(row["known_cost_total"] is not None for row in data["rows"])
     assert all(row["spent_expense"] is None for row in data["rows"])
-    assert all(row["expense_data_available"] is False for row in data["rows"])
+    assert all(row["expense_data_available"] is None for row in data["rows"])
     assert all(row["budget"] is None for row in data["rows"])
     assert all(row["remaining"] is None for row in data["rows"])
     assert all(row["remaining_pct"] is None for row in data["rows"])
@@ -191,6 +191,10 @@ def test_agent_uses_same_board_collapse_and_neutral_project_truncation(
         for row in profit_blind["rows"]
     )
     assert all(row["known_cost_total"] is not None for row in profit_blind["rows"])
+    assert all(
+        row["expense_data_available"] is None
+        for row in profit_blind["rows"]
+    )
     assert all(row["budget"] is None for row in profit_blind["rows"])
     assert all(row["remaining"] is None for row in profit_blind["rows"])
     assert all(row["remaining_pct"] is None for row in profit_blind["rows"])
@@ -522,6 +526,7 @@ def test_new_maintenance_fields_are_registered_without_masking_generic_status():
         "parts_profit_status_inc", "parts_profit_status_ex",
         "contribution_profit_inc", "contribution_profit_ex",
         "contribution_status_inc", "contribution_status_ex",
+        "expense_data_available", "expense_evidence_status",
     } <= profit_amount_fields
     assert {
         "parts_gross_margin_inc", "parts_gross_margin_ex",

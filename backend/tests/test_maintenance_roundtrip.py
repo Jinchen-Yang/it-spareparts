@@ -108,6 +108,114 @@ def _edit_data_row(path, sheet: str, values: dict[str, object], *, row: int = 2)
         workbook.close()
 
 
+def test_roundtrip_import_preserves_primary_and_attempts_all_cleanup(
+    monkeypatch,
+):
+    events: list[str] = []
+    primary_error = RuntimeError("import primary")
+
+    class CleanupFailingWorkbook:
+        def close(self):
+            events.append("close")
+            raise OSError("close secondary")
+
+    class CleanupFailingDb:
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def rollback(self):
+            events.append("rollback")
+            raise LookupError("rollback secondary")
+
+    def fail_validation(_rows):
+        raise primary_error
+
+    monkeypatch.setattr(
+        maintenance_roundtrip.pipeline,
+        "sha256_file",
+        lambda _path: "real-service-cleanup-hash",
+    )
+    monkeypatch.setattr(
+        maintenance_roundtrip.pipeline,
+        "successful_batch_ids_by_hash",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        maintenance_roundtrip,
+        "_load_and_parse",
+        lambda _path: (
+            CleanupFailingWorkbook(),
+            {},
+            {},
+            {"01_项目": []},
+        ),
+    )
+    monkeypatch.setattr(
+        maintenance_roundtrip,
+        "_validate_project_rows",
+        fail_validation,
+    )
+
+    with pytest.raises(RuntimeError, match="import primary") as caught:
+        maintenance_roundtrip.import_roundtrip_workbook(
+            CleanupFailingDb(),
+            "/tmp/roundtrip-primary.xlsx",
+            filename="roundtrip-primary.xlsx",
+            operated_by="tester",
+        )
+
+    assert caught.value is primary_error
+    assert events == ["rollback", "close"]
+
+
+def test_roundtrip_import_returns_committed_success_when_workbook_close_fails(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-CLOSE-AFTER-COMMIT"
+    _seed_contract(db, suffix="CLOSE-AFTER-COMMIT", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "close-after-commit.xlsx",
+        contract=contract,
+    )
+    original_load_and_parse = maintenance_roundtrip._load_and_parse
+    close_calls = 0
+
+    class CloseFailingWorkbook:
+        def __init__(self, workbook):
+            self._workbook = workbook
+
+        def close(self):
+            nonlocal close_calls
+            close_calls += 1
+            self._workbook.close()
+            raise OSError("close after commit")
+
+    def load_with_close_failure(import_path):
+        workbook, metadata, revisions, rows = original_load_and_parse(import_path)
+        return CloseFailingWorkbook(workbook), metadata, revisions, rows
+
+    monkeypatch.setattr(
+        maintenance_roundtrip,
+        "_load_and_parse",
+        load_with_close_failure,
+    )
+
+    result = maintenance_roundtrip.import_roundtrip_workbook(
+        db,
+        str(path),
+        filename=path.name,
+        operated_by="tester",
+    )
+
+    assert result["status"] == "success"
+    assert result["no_op"] is False
+    assert close_calls == 1
+    assert db.get(SysImportBatch, result["batch_id"]).status == "success"
+
+
 def test_blank_roundtrip_template_has_fixed_protocol_and_tables(db):
     output = maintenance_roundtrip.build_roundtrip_template(
         db,
@@ -1555,7 +1663,6 @@ def test_roundtrip_import_requires_same_cost_and_profit_visibility_as_export(db)
         asyncio.run(
             maintenance_api.roundtrip_import(
                 request=request,
-                db=db,
                 _auth="purchaser",
                 _page=None,
                 ctx=ctx,

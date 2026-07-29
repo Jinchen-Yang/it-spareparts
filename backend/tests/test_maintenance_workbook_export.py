@@ -241,6 +241,7 @@ def test_contract_workbook_audits_expense_inc_ex_and_evidence_status(db):
         MaintenanceContractWorkbookState(
             contract_no="XSDD-EXPENSE-AUDIT",
             revision=1,
+            expense_complete_through=date.max,
             expense_snapshot_complete=True,
         ),
     ])
@@ -340,6 +341,7 @@ def test_contract_workbook_excludes_expenses_before_maintenance_cost_start_date(
         MaintenanceContractWorkbookState(
             contract_no="XSDD-EXPENSE-START",
             revision=1,
+            expense_complete_through=date.max,
             expense_snapshot_complete=True,
         ),
     ])
@@ -727,7 +729,7 @@ def test_single_and_bulk_reject_text_over_excel_cell_limit_without_truncation(db
     bulk = client.get("/api/maintenance/export-workbooks")
 
     for response in (single, bulk):
-        assert response.status_code == 422
+        assert response.status_code == 413
         assert "32767" in response.json()["detail"]
 
 
@@ -740,7 +742,7 @@ def test_bulk_export_rejects_contract_limit_before_rendering_any_workbook(db, mo
 
     response = _admin_client(db).get("/api/maintenance/export-workbooks")
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert response.json()["detail"] == "命中合同超过批量上限 1 本"
 
 
@@ -765,7 +767,7 @@ def test_bulk_export_rejects_selected_order_limit_before_contract_selection(db, 
 
     response = _admin_client(db).get("/api/maintenance/export-workbooks")
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert response.json()["detail"] == "命中维保订单超过批量上限 1 条"
 
 
@@ -790,7 +792,7 @@ def test_bulk_export_rejects_total_part_line_limit_before_build(db, monkeypatch)
 
     response = _admin_client(db).get("/api/maintenance/export-workbooks")
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert response.json()["detail"] == "项目工作簿备件明细超过批量上限 0 行"
 
 
@@ -829,9 +831,163 @@ def test_bulk_export_rejects_single_workbook_part_line_limit_before_build(
 
     response = _admin_client(db).get("/api/maintenance/export-workbooks")
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert "单个项目工作簿备件明细超过上限 0 行" in response.json()["detail"]
     assert builder_calls == []
+
+
+def test_bulk_export_counts_zero_detail_order_placeholder_before_build(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        maintenance_workbook_export,
+        "MAX_PART_LINES_PER_WORKBOOK",
+        0,
+        raising=False,
+    )
+    builder_calls = []
+
+    def fake_builder(*_args, **_kwargs):
+        builder_calls.append("built")
+        return io.BytesIO(b"not-a-real-workbook")
+
+    monkeypatch.setattr(
+        maintenance_workbook_export,
+        "build_contract_workbook_file",
+        fake_builder,
+    )
+    batch = _batch(db)
+    _order(
+        db,
+        batch,
+        raw_id="PART-ZERO-DETAIL-LIMIT",
+        contract="XSDD-PART-ZERO-DETAIL",
+    )
+    db.commit()
+
+    response = _admin_client(db).get("/api/maintenance/export-workbooks")
+
+    assert response.status_code == 413
+    assert (
+        "单个项目工作簿备件明细超过上限 0 行"
+        in response.json()["detail"]
+    )
+    assert builder_calls == []
+
+
+def test_bulk_export_counts_mixed_detail_and_placeholder_rows_before_build(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        maintenance_workbook_export,
+        "MAX_PART_LINES_PER_WORKBOOK",
+        1,
+        raising=False,
+    )
+    builder_calls = []
+
+    def fake_builder(*_args, **_kwargs):
+        builder_calls.append("built")
+        return io.BytesIO(b"not-a-real-workbook")
+
+    monkeypatch.setattr(
+        maintenance_workbook_export,
+        "build_contract_workbook_file",
+        fake_builder,
+    )
+    batch = _batch(db)
+    order_with_detail = _order(
+        db,
+        batch,
+        raw_id="PART-MIXED-WITH-DETAIL",
+        contract="XSDD-PART-MIXED",
+    )
+    _order(
+        db,
+        batch,
+        raw_id="PART-MIXED-WITHOUT-DETAIL",
+        contract="XSDD-PART-MIXED",
+    )
+    part = DimPart(pn_std="PART-MIXED-LIMIT")
+    db.add(part)
+    db.flush()
+    db.add(FMaintenanceLine(
+        raw_line_id="LINE-PART-MIXED-LIMIT",
+        order_id=order_with_detail.id,
+        line_no=1,
+        part_id=part.id,
+        pn_std="PART-MIXED-LIMIT",
+        qty=Decimal("1"),
+        anomaly_flags=[],
+        import_batch_id=batch.id,
+    ))
+    db.commit()
+
+    response = _admin_client(db).get("/api/maintenance/export-workbooks")
+
+    assert response.status_code == 413
+    assert (
+        "单个项目工作簿备件明细超过上限 1 行"
+        in response.json()["detail"]
+    )
+    assert builder_calls == []
+
+
+def test_bulk_export_allows_mixed_rendered_part_rows_exactly_at_limits(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        maintenance_workbook_export,
+        "MAX_PART_LINES",
+        2,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        maintenance_workbook_export,
+        "MAX_PART_LINES_PER_WORKBOOK",
+        2,
+        raising=False,
+    )
+    batch = _batch(db)
+    order_with_detail = _order(
+        db,
+        batch,
+        raw_id="PART-MIXED-BOUNDARY-WITH-DETAIL",
+        contract="XSDD-PART-MIXED-BOUNDARY",
+    )
+    _order(
+        db,
+        batch,
+        raw_id="PART-MIXED-BOUNDARY-WITHOUT-DETAIL",
+        contract="XSDD-PART-MIXED-BOUNDARY",
+    )
+    part = DimPart(pn_std="PART-MIXED-BOUNDARY")
+    db.add(part)
+    db.flush()
+    db.add(FMaintenanceLine(
+        raw_line_id="LINE-PART-MIXED-BOUNDARY",
+        order_id=order_with_detail.id,
+        line_no=1,
+        part_id=part.id,
+        pn_std="PART-MIXED-BOUNDARY",
+        qty=Decimal("1"),
+        anomaly_flags=[],
+        import_batch_id=batch.id,
+    ))
+    db.commit()
+
+    response = _admin_client(db).get("/api/maintenance/export-workbooks")
+
+    assert response.status_code == 200, response.text
+    with ZipFile(io.BytesIO(response.content)) as archive:
+        workbook = _only_workbook(archive)
+        try:
+            assert workbook["备件明细-氚云"].max_row == 3
+        finally:
+            workbook.close()
 
 
 def test_bulk_export_rejects_total_expense_line_limit_before_build(db, monkeypatch):
@@ -854,7 +1010,7 @@ def test_bulk_export_rejects_total_expense_line_limit_before_build(db, monkeypat
 
     response = _admin_client(db).get("/api/maintenance/export-workbooks")
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert response.json()["detail"] == "项目工作簿报销明细超过批量上限 0 行"
 
 
@@ -892,7 +1048,7 @@ def test_bulk_export_rejects_single_workbook_expense_line_limit_before_build(
 
     response = _admin_client(db).get("/api/maintenance/export-workbooks")
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert "单个项目工作簿报销明细超过上限 0 行" in response.json()["detail"]
     assert builder_calls == []
 
@@ -930,7 +1086,7 @@ def test_bulk_export_rejects_dynamic_text_budget_before_rendering(db, monkeypatc
 
     response = _admin_client(db).get("/api/maintenance/export-workbooks")
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert "单个项目工作簿动态文本超过安全上限" in response.json()["detail"]
     assert builder_calls == []
 
@@ -973,8 +1129,46 @@ def test_single_export_rejects_part_line_limit_before_materializing_data(
         params={"contract": "XSDD-SINGLE-PART"},
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert "单个项目工作簿备件明细超过上限 0 行" in response.json()["detail"]
+    assert materialize_calls == []
+
+
+def test_single_export_counts_zero_detail_order_placeholder_before_materializing(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        maintenance_workbook_export,
+        "MAX_PART_LINES_PER_WORKBOOK",
+        0,
+        raising=False,
+    )
+    materialize_calls = []
+    monkeypatch.setattr(
+        maintenance_workbook_export.maintenance_cost,
+        "contract_workbook_data",
+        lambda *_args: materialize_calls.append("materialized"),
+    )
+    batch = _batch(db)
+    _order(
+        db,
+        batch,
+        raw_id="SINGLE-ZERO-DETAIL-LIMIT",
+        contract="XSDD-SINGLE-ZERO-DETAIL",
+    )
+    db.commit()
+
+    response = _admin_client(db).get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "XSDD-SINGLE-ZERO-DETAIL"},
+    )
+
+    assert response.status_code == 413
+    assert (
+        "单个项目工作簿备件明细超过上限 0 行"
+        in response.json()["detail"]
+    )
     assert materialize_calls == []
 
 
@@ -1015,7 +1209,7 @@ def test_single_export_rejects_expense_line_limit_before_materializing_data(
         params={"contract": "XSDD-SINGLE-EXP"},
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert "单个项目工作簿报销明细超过上限 0 行" in response.json()["detail"]
     assert materialize_calls == []
 
@@ -1059,7 +1253,44 @@ def test_single_export_rejects_dynamic_text_budget_before_materializing_data(
         params={"contract": "XSDD-SINGLE-TEXT"},
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 413
+    assert "单个项目工作簿动态文本超过安全上限" in response.json()["detail"]
+    assert materialize_calls == []
+
+
+def test_single_export_counts_zero_detail_placeholder_dynamic_text_preflight(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        maintenance_workbook_export,
+        "MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK",
+        128,
+        raising=False,
+    )
+    materialize_calls = []
+    monkeypatch.setattr(
+        maintenance_workbook_export.maintenance_cost,
+        "contract_workbook_data",
+        lambda *_args: materialize_calls.append("materialized"),
+    )
+    batch = _batch(db)
+    order = _order(
+        db,
+        batch,
+        raw_id="R",
+        contract="C",
+    )
+    order.project_raw = "X" * 80
+    order.project_std = None
+    db.commit()
+
+    response = _admin_client(db).get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "C"},
+    )
+
+    assert response.status_code == 413
     assert "单个项目工作簿动态文本超过安全上限" in response.json()["detail"]
     assert materialize_calls == []
 
@@ -1113,7 +1344,7 @@ def test_dynamic_text_budget_counts_generated_date_and_label_text_before_materia
         params={"contract": "C"},
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert "单个项目工作簿动态文本超过安全上限" in response.json()["detail"]
     assert materialize_calls == []
 
@@ -1165,7 +1396,7 @@ def test_dynamic_text_budget_counts_rendered_fee_category_prefix_before_material
         params={"contract": "C"},
     )
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert "单个项目工作簿动态文本超过安全上限" in response.json()["detail"]
     assert materialize_calls == []
 
@@ -1239,7 +1470,7 @@ def test_excel_column_preflight_counts_normalized_and_part_named_fee_categories(
 
     response = _admin_client(db).get("/api/maintenance/export-workbooks")
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert response.json()["detail"] == "项目预算 Sheet 超过 Excel 列数上限"
 
 
@@ -1334,7 +1565,7 @@ def test_bulk_export_rejects_final_zip_size_without_returning_partial_archive(db
 
     response = _admin_client(db).get("/api/maintenance/export-workbooks")
 
-    assert response.status_code == 422
+    assert response.status_code == 413
     assert response.json()["detail"] == "批量工作簿 ZIP 超过 512 MiB 上限"
 
 

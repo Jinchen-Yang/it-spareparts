@@ -13,6 +13,8 @@ from app import config, permissions
 from app.api import maintenance as maintenance_api
 from app.auth import hash_password
 from app.main import app
+from app.models.dimensions import DimCustomer
+from app.models.maintenance import FMaintenanceOrder
 from app.models.system import SysUser
 from app.security import UserContext
 from app.services import maintenance_roundtrip
@@ -215,7 +217,7 @@ def test_roundtrip_bundle_endpoint_splits_contracts_into_independently_signed_wo
 
 
 def test_single_roundtrip_formula_like_contract_is_literal_and_imports_unchanged(db):
-    contract = '=HYPERLINK("https://127.0.0.1","x")'
+    contract = '\'=HYPERLINK("https://127.0.0.1","x")'
     _seed_contract(db, suffix="formula-single", contract=contract)
     client = _admin_client(db)
 
@@ -275,6 +277,66 @@ def test_batch_roundtrip_formula_like_contract_is_literal_and_imports_unchanged(
     assert imported.json()["changed_rows"] == 0
 
 
+def test_roundtrip_equals_leading_business_text_stays_literal_and_roundtrips(db):
+    order_id, _line_id = _seed_contract(
+        db,
+        suffix="literal-fields",
+        contract="XSDD-LITERAL-FIELDS",
+    )
+    customer = DimCustomer(
+        name_raw='=HYPERLINK("https://127.0.0.1","customer")',
+    )
+    db.add(customer)
+    db.flush()
+    order = db.get(FMaintenanceOrder, order_id)
+    assert order is not None
+    order.customer_id = customer.id
+    order.project_raw = '=-1+2 project'
+    order.project_std = order.project_raw
+    order.end_customer = '\'=SUM(1,2) end-customer'
+    db.commit()
+    client = _admin_client(db)
+
+    response = client.get(
+        "/api/maintenance/roundtrip-template",
+        params={"contract": "XSDD-LITERAL-FIELDS"},
+    )
+
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(io.BytesIO(response.content), data_only=False)
+    try:
+        sheet = workbook["02_维保订单"]
+        columns = {
+            str(cell.value): cell.column
+            for cell in sheet[1]
+            if cell.value is not None
+        }
+        expected = {
+            "项目名称": order.project_raw,
+            "客户名称": customer.name_raw,
+            "最终客户": order.end_customer,
+        }
+        for header, value in expected.items():
+            cell = sheet.cell(row=2, column=columns[header])
+            assert cell.value == value
+            assert cell.data_type == "s"
+    finally:
+        workbook.close()
+
+    imported = client.post(
+        "/api/maintenance/roundtrip-import",
+        files={
+            "file": (
+                "literal-fields.xlsx",
+                response.content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+        },
+    )
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["changed_rows"] == 0
+
+
 def test_roundtrip_bundle_rejects_contract_count_at_500_boundary_before_render(
     db,
     monkeypatch,
@@ -298,6 +360,7 @@ def test_roundtrip_bundle_rejects_contract_count_at_500_boundary_before_render(
         )
 
     assert caught.value.status_code == 413
+    assert "命中合同至少 2 个" in str(caught.value)
     assert "必须少于 2 个" in str(caught.value)
     assert rendered is False
 

@@ -428,6 +428,8 @@ FIELD_GROUPS = {
                       "parts_gross_profit_inc", "parts_gross_profit_ex",
                       "parts_profit_status_inc", "parts_profit_status_ex",
                       "expense_inc", "expense_ex",
+                      # 费用快照完整性与证据状态本身会泄漏逐合同财务数据覆盖情况。
+                      "expense_data_available", "expense_evidence_status",
                       "contribution_profit_inc", "contribution_profit_ex",
                       "contribution_status_inc", "contribution_status_ex",
                       # 维保预算消耗参考决策；禁止登记通用 status（会误伤流程状态）

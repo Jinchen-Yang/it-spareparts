@@ -523,8 +523,14 @@ type BlobDownloadResponse = {
 };
 
 class InvalidDownloadResponseError extends Error {
+  constructor(message = "服务器返回的不是可下载文件，请稍后重试或联系管理员") {
+    super(message);
+  }
+}
+
+class DownloadSessionChangedError extends Error {
   constructor() {
-    super("服务器返回的不是可下载文件，请稍后重试或联系管理员");
+    super("登录账号已变更，旧会话下载已取消，请重新操作");
   }
 }
 
@@ -568,19 +574,353 @@ function responseFilename(headers: unknown, fallback: string): string {
   return safeDownloadFilename(quoted || plain, fallback);
 }
 
-function saveDownloadResponse(
+const ZIP_EOCD_MIN_BYTES = 22;
+const ZIP_EOCD_MAX_COMMENT_BYTES = 0xffff;
+const ZIP_EOCD_SEARCH_BYTES = ZIP_EOCD_MIN_BYTES + ZIP_EOCD_MAX_COMMENT_BYTES;
+const ZIP_MAX_CENTRAL_DIRECTORY_BYTES = 32 * 1024 * 1024;
+const ZIP_MAX_ENTRY_COUNT = 4096;
+const ZIP_LOCAL_HEADER_BYTES = 30;
+const ZIP_CENTRAL_HEADER_BYTES = 46;
+
+function invalidArchiveError(isXlsx: boolean): InvalidDownloadResponseError {
+  return new InvalidDownloadResponseError(
+    isXlsx
+      ? "服务器返回的 Excel 文件损坏或结构不完整，已取消下载"
+      : "服务器返回的 ZIP 文件损坏或结构不完整，已取消下载",
+  );
+}
+
+function unsupportedZip64Error(): InvalidDownloadResponseError {
+  return new InvalidDownloadResponseError(
+    "服务器返回的文件使用了暂不支持的 ZIP64 格式，已取消下载，请联系管理员",
+  );
+}
+
+async function blobSliceBytes(blob: Blob, start: number, end: number): Promise<Uint8Array> {
+  if (
+    !Number.isSafeInteger(start)
+    || !Number.isSafeInteger(end)
+    || start < 0
+    || end < start
+    || end > blob.size
+  ) {
+    throw new Error("invalid blob slice");
+  }
+  const slice = blob.slice(start, end);
+  const arrayBuffer = (slice as Blob & {
+    arrayBuffer?: () => Promise<ArrayBuffer>;
+  }).arrayBuffer;
+  if (typeof arrayBuffer === "function") {
+    return new Uint8Array(await arrayBuffer.call(slice));
+  }
+  return new Promise<Uint8Array>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) {
+        resolve(new Uint8Array(reader.result));
+      } else {
+        reject(new Error("download prefix is not binary"));
+      }
+    };
+    reader.onerror = () => reject(reader.error || new Error("download prefix read failed"));
+    reader.readAsArrayBuffer(slice);
+  });
+}
+
+function zipView(bytes: Uint8Array): DataView {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+function hasZip64Extra(extra: Uint8Array): boolean | null {
+  const view = zipView(extra);
+  let cursor = 0;
+  while (cursor < extra.length) {
+    if (cursor + 4 > extra.length) return null;
+    const fieldId = view.getUint16(cursor, true);
+    const fieldSize = view.getUint16(cursor + 2, true);
+    cursor += 4;
+    if (cursor + fieldSize > extra.length) return null;
+    if (fieldId === 0x0001) return true;
+    cursor += fieldSize;
+  }
+  return false;
+}
+
+function decodeZipEntryName(bytes: Uint8Array, utf8: boolean): string | null {
+  try {
+    return new TextDecoder(utf8 ? "utf-8" : "windows-1252", {
+      fatal: utf8,
+    }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+type ParsedZipEntry = {
+  compressedSize: number;
+  crc32: number;
+  flags: number;
+  localHeaderOffset: number;
+  method: number;
+  name: string;
+  nameBytes: Uint8Array;
+  uncompressedSize: number;
+};
+
+async function validateZipContainer(blob: Blob, requireXlsx: boolean): Promise<void> {
+  const invalid = (): never => {
+    throw invalidArchiveError(requireXlsx);
+  };
+  if (blob.size < ZIP_EOCD_MIN_BYTES) invalid();
+  if (blob.size > 0xffffffff) throw unsupportedZip64Error();
+
+  const tailStart = Math.max(0, blob.size - ZIP_EOCD_SEARCH_BYTES);
+  const tail = await blobSliceBytes(blob, tailStart, blob.size);
+  const tailView = zipView(tail);
+  let eocdInTail = -1;
+  for (let cursor = tail.length - ZIP_EOCD_MIN_BYTES; cursor >= 0; cursor -= 1) {
+    if (tailView.getUint32(cursor, true) !== 0x06054b50) continue;
+    const commentLength = tailView.getUint16(cursor + 20, true);
+    if (cursor + ZIP_EOCD_MIN_BYTES + commentLength === tail.length) {
+      eocdInTail = cursor;
+      break;
+    }
+  }
+  if (eocdInTail < 0) invalid();
+
+  if (
+    eocdInTail >= 20
+    && tailView.getUint32(eocdInTail - 20, true) === 0x07064b50
+  ) {
+    throw unsupportedZip64Error();
+  }
+
+  const diskNumber = tailView.getUint16(eocdInTail + 4, true);
+  const centralDiskNumber = tailView.getUint16(eocdInTail + 6, true);
+  const entriesOnDisk = tailView.getUint16(eocdInTail + 8, true);
+  const entryCount = tailView.getUint16(eocdInTail + 10, true);
+  const centralSize = tailView.getUint32(eocdInTail + 12, true);
+  const centralOffset = tailView.getUint32(eocdInTail + 16, true);
+  if (
+    entriesOnDisk === 0xffff
+    || entryCount === 0xffff
+    || centralSize === 0xffffffff
+    || centralOffset === 0xffffffff
+  ) {
+    throw unsupportedZip64Error();
+  }
+  if (
+    diskNumber !== 0
+    || centralDiskNumber !== 0
+    || entriesOnDisk !== entryCount
+    || entryCount > ZIP_MAX_ENTRY_COUNT
+    || centralSize > ZIP_MAX_CENTRAL_DIRECTORY_BYTES
+  ) {
+    invalid();
+  }
+  const eocdOffset = tailStart + eocdInTail;
+  if (
+    !Number.isSafeInteger(centralOffset + centralSize)
+    || centralOffset + centralSize !== eocdOffset
+  ) {
+    invalid();
+  }
+  if (entryCount === 0) {
+    if (centralOffset !== 0 || centralSize !== 0 || eocdOffset !== 0) invalid();
+    if (requireXlsx) {
+      throw new InvalidDownloadResponseError(
+        "服务器返回的 Excel 文件不是有效的 XLSX 工作簿，已取消下载",
+      );
+    }
+    return;
+  }
+  if (
+    centralSize < entryCount * ZIP_CENTRAL_HEADER_BYTES
+    || centralOffset >= eocdOffset
+  ) {
+    invalid();
+  }
+
+  const central = await blobSliceBytes(
+    blob,
+    centralOffset,
+    centralOffset + centralSize,
+  );
+  const centralView = zipView(central);
+  const entries: ParsedZipEntry[] = [];
+  const names = new Set<string>();
+  let cursor = 0;
+  for (let index = 0; index < entryCount; index += 1) {
+    if (
+      cursor + ZIP_CENTRAL_HEADER_BYTES > central.length
+      || centralView.getUint32(cursor, true) !== 0x02014b50
+    ) {
+      invalid();
+    }
+    const flags = centralView.getUint16(cursor + 8, true);
+    const method = centralView.getUint16(cursor + 10, true);
+    const crc32 = centralView.getUint32(cursor + 16, true);
+    const compressedSize = centralView.getUint32(cursor + 20, true);
+    const uncompressedSize = centralView.getUint32(cursor + 24, true);
+    const nameLength = centralView.getUint16(cursor + 28, true);
+    const extraLength = centralView.getUint16(cursor + 30, true);
+    const commentLength = centralView.getUint16(cursor + 32, true);
+    const diskStart = centralView.getUint16(cursor + 34, true);
+    const localHeaderOffset = centralView.getUint32(cursor + 42, true);
+    if (
+      compressedSize === 0xffffffff
+      || uncompressedSize === 0xffffffff
+      || localHeaderOffset === 0xffffffff
+      || diskStart === 0xffff
+    ) {
+      throw unsupportedZip64Error();
+    }
+    if (diskStart !== 0 || nameLength === 0) invalid();
+    const recordEnd = (
+      cursor
+      + ZIP_CENTRAL_HEADER_BYTES
+      + nameLength
+      + extraLength
+      + commentLength
+    );
+    if (recordEnd > central.length) invalid();
+    const nameBytes = central.slice(
+      cursor + ZIP_CENTRAL_HEADER_BYTES,
+      cursor + ZIP_CENTRAL_HEADER_BYTES + nameLength,
+    );
+    const extra = central.slice(
+      cursor + ZIP_CENTRAL_HEADER_BYTES + nameLength,
+      cursor + ZIP_CENTRAL_HEADER_BYTES + nameLength + extraLength,
+    );
+    const zip64Extra = hasZip64Extra(extra);
+    if (zip64Extra == null) invalid();
+    if (zip64Extra) throw unsupportedZip64Error();
+    const name = (
+      decodeZipEntryName(nameBytes, (flags & 0x0800) !== 0) ?? invalid()
+    );
+    if (name.length === 0) invalid();
+    if (names.has(name)) invalid();
+    names.add(name);
+    entries.push({
+      compressedSize,
+      crc32,
+      flags,
+      localHeaderOffset,
+      method,
+      name,
+      nameBytes,
+      uncompressedSize,
+    });
+    cursor = recordEnd;
+  }
+  if (cursor !== central.length) invalid();
+
+  const localOffsets = new Set<number>();
+  const localRanges: Array<[number, number]> = [];
+  for (const entry of entries) {
+    if (
+      entry.localHeaderOffset >= centralOffset
+      || localOffsets.has(entry.localHeaderOffset)
+    ) {
+      invalid();
+    }
+    localOffsets.add(entry.localHeaderOffset);
+    const fixedEnd = entry.localHeaderOffset + ZIP_LOCAL_HEADER_BYTES;
+    if (fixedEnd > centralOffset) invalid();
+    const local = await blobSliceBytes(blob, entry.localHeaderOffset, fixedEnd);
+    const localView = zipView(local);
+    if (localView.getUint32(0, true) !== 0x04034b50) invalid();
+    const localFlags = localView.getUint16(6, true);
+    const localMethod = localView.getUint16(8, true);
+    const localCrc32 = localView.getUint32(14, true);
+    const localCompressedSize = localView.getUint32(18, true);
+    const localUncompressedSize = localView.getUint32(22, true);
+    const localNameLength = localView.getUint16(26, true);
+    const localExtraLength = localView.getUint16(28, true);
+    if (
+      localFlags !== entry.flags
+      || localMethod !== entry.method
+      || localNameLength !== entry.nameBytes.length
+    ) {
+      invalid();
+    }
+    if (
+      localCompressedSize === 0xffffffff
+      || localUncompressedSize === 0xffffffff
+    ) {
+      throw unsupportedZip64Error();
+    }
+    if (
+      (entry.flags & 0x0008) === 0
+      && (
+        localCrc32 !== entry.crc32
+        || localCompressedSize !== entry.compressedSize
+        || localUncompressedSize !== entry.uncompressedSize
+      )
+    ) {
+      invalid();
+    }
+    const variableEnd = fixedEnd + localNameLength + localExtraLength;
+    if (variableEnd > centralOffset) invalid();
+    const variable = await blobSliceBytes(blob, fixedEnd, variableEnd);
+    const localName = variable.slice(0, localNameLength);
+    if (
+      localName.some((value, index) => value !== entry.nameBytes[index])
+    ) {
+      invalid();
+    }
+    const localZip64Extra = hasZip64Extra(variable.slice(localNameLength));
+    if (localZip64Extra == null) invalid();
+    if (localZip64Extra) throw unsupportedZip64Error();
+    const dataEnd = variableEnd + entry.compressedSize;
+    if (!Number.isSafeInteger(dataEnd) || dataEnd > centralOffset) invalid();
+    localRanges.push([entry.localHeaderOffset, dataEnd]);
+  }
+  localRanges.sort(([left], [right]) => left - right);
+  for (let index = 1; index < localRanges.length; index += 1) {
+    if (localRanges[index][0] < localRanges[index - 1][1]) invalid();
+  }
+
+  if (
+    requireXlsx
+    && (!names.has("[Content_Types].xml") || !names.has("xl/workbook.xml"))
+  ) {
+    throw new InvalidDownloadResponseError(
+      "服务器返回的 Excel 文件不是有效的 XLSX 工作簿，已取消下载",
+    );
+  }
+}
+
+async function saveDownloadResponse(
   response: BlobDownloadResponse,
   fallbackFilename: string,
   expectedTypes: readonly string[],
-) {
+  beforeSave?: () => boolean,
+): Promise<void> {
   if (!(response.data instanceof Blob)) throw new InvalidDownloadResponseError();
+  if (response.data.size === 0) {
+    throw new InvalidDownloadResponseError(
+      "服务器返回了空文件，已取消下载，请重试或联系管理员",
+    );
+  }
   const contentType = (
     responseHeader(response.headers, "content-type")
     || response.data.type
   ).split(";")[0].trim().toLowerCase();
-  if (contentType && !expectedTypes.includes(contentType)) {
+  if (!contentType) {
+    throw new InvalidDownloadResponseError(
+      "服务器未返回文件类型，已取消下载，请重试或联系管理员",
+    );
+  }
+  if (!expectedTypes.includes(contentType)) {
     throw new InvalidDownloadResponseError();
   }
+  if (expectedTypes.includes(XLSX_CONTENT_TYPES[0])) {
+    await validateZipContainer(response.data, true);
+  } else if (expectedTypes.includes(ZIP_CONTENT_TYPES[0])) {
+    await validateZipContainer(response.data, false);
+  }
+  if (beforeSave && !beforeSave()) return;
   saveBlob(response.data, responseFilename(response.headers, fallbackFilename));
 }
 
@@ -588,7 +928,10 @@ async function readExportError(error: unknown): Promise<{
   status?: number;
   detail?: string;
 }> {
-  if (error instanceof InvalidDownloadResponseError) {
+  if (
+    error instanceof InvalidDownloadResponseError
+    || error instanceof DownloadSessionChangedError
+  ) {
     return { detail: error.message };
   }
   const response = (error as {
@@ -676,6 +1019,7 @@ export default function ProjectCostPage({
   const exportDatePresetRef = useRef<ExportDatePreset>("all");
   const [exportAsOf, setExportAsOf] = useState("");
   const [exportScopeLoading, setExportScopeLoading] = useState(false);
+  const [exportScopeError, setExportScopeError] = useState(false);
   const exportScopeSeq = useRef(0);
   const exportScopeRequest = useRef<{
     preset: ExportDatePreset;
@@ -696,6 +1040,8 @@ export default function ProjectCostPage({
   const [projectCostRestricted, setProjectCostRestricted] = useState(false);
   const [board, setBoard] = useState<BoardRow[]>([]);
   const [boardDecisionRestricted, setBoardDecisionRestricted] = useState(false);
+  const [reminderFilterRestricted, setReminderFilterRestricted] = useState(false);
+  const [reminderFilterRejected, setReminderFilterRejected] = useState(false);
   const [boardPage, setBoardPage] = useState(1);
   const [startDate, setStartDate] = useState("");
   const [projectsLoading, setProjectsLoading] = useState(false);
@@ -705,17 +1051,14 @@ export default function ProjectCostPage({
   const [recomputing, setRecomputing] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportingWorkbooks, setExportingWorkbooks] = useState(false);
-  const exportingWorkbooksRef = useRef(false);
   const [exportingProjects, setExportingProjects] = useState(false);
   const [exportingProfit, setExportingProfit] = useState(false);
   const [exportingLines, setExportingLines] = useState(false);
-  const exportingLinesRef = useRef(false);
   const [exportingSingleWorkbook, setExportingSingleWorkbook] = useState(false);
-  const exportingSingleWorkbookRef = useRef(false);
   const [downloadingTemplate, setDownloadingTemplate] = useState(false);
-  const downloadingTemplateRef = useRef(false);
   const [downloadingTemplateBundle, setDownloadingTemplateBundle] = useState(false);
-  const downloadingTemplateBundleRef = useRef(false);
+  const downloadControllersRef = useRef<Set<AbortController>>(new Set());
+  const operationLocksRef = useRef<Set<string>>(new Set());
   const [importingRoundtrip, setImportingRoundtrip] = useState(false);
   const [activeDownloads, setActiveDownloads] = useState<Record<string, string>>({});
   const [roundtripResult, setRoundtripResult] = useState<string | null>(null);
@@ -746,6 +1089,20 @@ export default function ProjectCostPage({
       return next;
     });
   };
+  const acquireOperation = (key: string): boolean => {
+    if (operationLocksRef.current.has(key)) return false;
+    operationLocksRef.current.add(key);
+    return true;
+  };
+  const releaseOperation = (key: string) => {
+    operationLocksRef.current.delete(key);
+  };
+
+  useEffect(() => () => {
+    for (const controller of downloadControllersRef.current) controller.abort();
+    downloadControllersRef.current.clear();
+    operationLocksRef.current.clear();
+  }, []);
 
   const lifecycleParams = () => ({ ...baseParams(), lifecycle });
   const boardParams = () => ({
@@ -786,6 +1143,19 @@ export default function ProjectCostPage({
   };
 
   const loadBoard = async () => {
+    if (scopedSales) {
+      boardSeq.current += 1;
+      setBoard([]);
+      setBoardPage(1);
+      setBoardLoading(false);
+      setBoardLoadError(false);
+      setBoardDecisionRestricted(true);
+      setReminderFilterRestricted(true);
+      setReminderFilterRejected(false);
+      setBoardAsOf("");
+      setBoardLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
+      return;
+    }
     const seq = ++boardSeq.current;
     setBoardLoading(true);
     setBoardLoadError(false);
@@ -807,10 +1177,29 @@ export default function ProjectCostPage({
         || data.profit_restricted === true
         || data.ranking_restricted === true,
       );
+      const statusFilterRestricted = (
+        data.decision_restricted === true
+        || data.profit_restricted === true
+        || data.ranking_restricted === true
+      );
+      setReminderFilterRestricted(statusFilterRestricted);
+      const requestedReminderStatus = reminderStatus !== "all";
+      const statusFilterRejected = requestedReminderStatus
+        && data.status_filter_applied !== true;
+      if (requestedReminderStatus && !statusFilterRestricted) {
+        setReminderFilterRejected(statusFilterRejected);
+      }
+      if (statusFilterRestricted || statusFilterRejected) {
+        setReminderStatus("all");
+      }
     } catch {
       if (seq !== boardSeq.current) return;
       setBoard([]);
       setBoardDecisionRestricted(false);
+      if (view === "reminders" && reminderStatus !== "all") {
+        setReminderFilterRejected(true);
+        setReminderStatus("all");
+      }
       setBoardLoadError(true);
     } finally {
       if (seq === boardSeq.current) setBoardLoading(false);
@@ -828,6 +1217,7 @@ export default function ProjectCostPage({
       setExportRange(null);
       setExportAsOf("");
       setExportScopeLoading(false);
+      setExportScopeError(false);
       setProjectsLoading(false);
       setBoardLoading(false);
       setProjectsLoadError(false);
@@ -903,20 +1293,58 @@ export default function ProjectCostPage({
     }
   };
 
+  const requestAndSaveDownload = async (
+    path: string,
+    params: Record<string, unknown>,
+    filename: string,
+    expectedTypes: readonly string[],
+  ): Promise<void> => {
+    const sessionToken = localStorage.getItem("token");
+    const controller = new AbortController();
+    downloadControllersRef.current.add(controller);
+    try {
+      const response = await api.get(path, {
+        params,
+        responseType: "blob",
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (localStorage.getItem("token") !== sessionToken) {
+        throw new DownloadSessionChangedError();
+      }
+      await saveDownloadResponse(response, filename, expectedTypes, () => {
+        if (controller.signal.aborted) return false;
+        if (localStorage.getItem("token") !== sessionToken) {
+          throw new DownloadSessionChangedError();
+        }
+        return true;
+      });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      throw error;
+    } finally {
+      downloadControllersRef.current.delete(controller);
+    }
+  };
+
   const download = (
     path: string,
     filename: string,
     expectedTypes: readonly string[],
     extra?: Record<string, unknown>,
-  ) =>
-    api.get(path, { params: { ...baseParams(), ...extra }, responseType: "blob" })
-      .then((res) => saveDownloadResponse(res, filename, expectedTypes));
+  ) => requestAndSaveDownload(
+    path,
+    { ...baseParams(), ...extra },
+    filename,
+    expectedTypes,
+  );
 
   const requestRelativeExportScope = (
     requestedPreset: ExportDatePreset,
   ): Promise<[Dayjs, Dayjs] | null> => {
     const seq = ++exportScopeSeq.current;
     setExportScopeLoading(true);
+    setExportScopeError(false);
     setExportRange(null);
     setExportAsOf("");
     const promise = api.get("/maintenance/as-of")
@@ -938,6 +1366,8 @@ export default function ProjectCostPage({
           seq === exportScopeSeq.current
           && exportDatePresetRef.current === requestedPreset
         ) {
+          exportScopeRequest.current = null;
+          setExportScopeError(true);
           message.error("日期基准加载失败，请重试该日期档");
         }
         return null;
@@ -974,17 +1404,15 @@ export default function ProjectCostPage({
   };
 
   const exportOrders = async () => {
+    if (!acquireOperation("orders")) return;
     setExporting(true);
     beginDownload("orders", "正在生成订单汇总 Excel，请勿关闭页面或重复点击");
     try {
       const scope = await resolveExportScope(exportDatePreset);
       if (!scope) return;
-      const res = await api.get("/maintenance/orders/export", {
-        params: scope.params,
-        responseType: "blob",
-      });
-      saveDownloadResponse(
-        res,
+      await requestAndSaveDownload(
+        "/maintenance/orders/export",
+        scope.params,
         scope.range
           ? `maintenance_orders_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.xlsx`
           : "maintenance_orders_all.xlsx",
@@ -1000,23 +1428,20 @@ export default function ProjectCostPage({
     } finally {
       endDownload("orders");
       setExporting(false);
+      releaseOperation("orders");
     }
   };
 
   const exportWorkbooks = async () => {
-    if (exportingWorkbooksRef.current) return;
-    exportingWorkbooksRef.current = true;
+    if (!acquireOperation("workbooks")) return;
     setExportingWorkbooks(true);
     const hide = message.loading("正在生成批量工作簿，数据较多时可能需要 1–2 分钟，请勿重复点击…", 0);
     try {
       const scope = await resolveExportScope(exportDatePreset);
       if (!scope) return;
-      const res = await api.get("/maintenance/export-workbooks", {
-        params: scope.params,
-        responseType: "blob",
-      });
-      saveDownloadResponse(
-        res,
+      await requestAndSaveDownload(
+        "/maintenance/export-workbooks",
+        scope.params,
         scope.range
           ? `maintenance_project_workbooks_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.zip`
           : "maintenance_project_workbooks_all.zip",
@@ -1033,13 +1458,13 @@ export default function ProjectCostPage({
             : "批量项目工作簿导出失败，请稍后重试"));
     } finally {
       hide();
-      exportingWorkbooksRef.current = false;
       setExportingWorkbooks(false);
+      releaseOperation("workbooks");
     }
   };
 
   const exportProjectsCsv = async () => {
-    if (exportingProjects) return;
+    if (!acquireOperation("projects-csv")) return;
     setExportingProjects(true);
     try {
       const scope = await resolveExportScope(exportDatePreset);
@@ -1053,11 +1478,12 @@ export default function ProjectCostPage({
       message.error(detail || "项目 CSV 导出失败，请稍后重试或检查权限");
     } finally {
       setExportingProjects(false);
+      releaseOperation("projects-csv");
     }
   };
 
   const exportContractProfitCsv = async () => {
-    if (exportingProfit) return;
+    if (!acquireOperation("contract-profit")) return;
     setExportingProfit(true);
     beginDownload("contract-profit", "正在生成合同详细盈亏 CSV，请勿重复点击");
     try {
@@ -1078,6 +1504,7 @@ export default function ProjectCostPage({
     } finally {
       endDownload("contract-profit");
       setExportingProfit(false);
+      releaseOperation("contract-profit");
     }
   };
 
@@ -1086,8 +1513,7 @@ export default function ProjectCostPage({
       message.warning("请先输入要导出的项目名称");
       return;
     }
-    if (exportingLinesRef.current) return;
-    exportingLinesRef.current = true;
+    if (!acquireOperation("project-lines")) return;
     setExportingLines(true);
     beginDownload("project-lines", "正在生成单项目明细 CSV，请勿重复点击");
     try {
@@ -1103,14 +1529,13 @@ export default function ProjectCostPage({
       message.error(detail || "明细导出失败，请稍后重试");
     } finally {
       endDownload("project-lines");
-      exportingLinesRef.current = false;
       setExportingLines(false);
+      releaseOperation("project-lines");
     }
   };
 
   const exportSingleWorkbook = async (contract: string) => {
-    if (exportingSingleWorkbookRef.current) return;
-    exportingSingleWorkbookRef.current = true;
+    if (!acquireOperation("single-workbook")) return;
     setExportingSingleWorkbook(true);
     beginDownload("single-workbook", "正在生成单合同工作簿 XLSX，请勿重复点击");
     try {
@@ -1130,33 +1555,29 @@ export default function ProjectCostPage({
       message.error(detail || "工作簿导出失败，请稍后重试或检查权限");
     } finally {
       endDownload("single-workbook");
-      exportingSingleWorkbookRef.current = false;
       setExportingSingleWorkbook(false);
+      releaseOperation("single-workbook");
     }
   };
 
   const downloadRoundtripTemplate = async (contract?: string) => {
-    if (downloadingTemplateRef.current) return;
-    downloadingTemplateRef.current = true;
+    if (!acquireOperation("roundtrip-template")) return;
     setDownloadingTemplate(true);
     setRoundtripError(null);
     const hide = message.loading("正在生成固定回填模板，请勿重复点击…", 0);
     try {
       const scope = await resolveExportScope(exportDatePreset);
       if (!scope) return;
-      const res = await api.get("/maintenance/roundtrip-template", {
-        params: {
-          ...scope.params,
-          ...(contract ? { contract } : {}),
-        },
-        responseType: "blob",
-      });
       const safeContract = contract?.replace(/[\\/:*?"<>|]/g, "_");
       const scopeLabel = scope.range
         ? `${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}`
         : "全部";
-      saveDownloadResponse(
-        res,
+      await requestAndSaveDownload(
+        "/maintenance/roundtrip-template",
+        {
+          ...scope.params,
+          ...(contract ? { contract } : {}),
+        },
         `维保项目回填模板_${safeContract ? `${safeContract}_` : ""}${scopeLabel}.xlsx`,
         XLSX_CONTENT_TYPES,
       );
@@ -1167,14 +1588,13 @@ export default function ProjectCostPage({
       message.error(text);
     } finally {
       hide();
-      downloadingTemplateRef.current = false;
       setDownloadingTemplate(false);
+      releaseOperation("roundtrip-template");
     }
   };
 
   const downloadRoundtripTemplateBundle = async () => {
-    if (downloadingTemplateBundleRef.current) return;
-    downloadingTemplateBundleRef.current = true;
+    if (!acquireOperation("roundtrip-bundle")) return;
     setDownloadingTemplateBundle(true);
     setRoundtripError(null);
     beginDownload(
@@ -1184,12 +1604,9 @@ export default function ProjectCostPage({
     try {
       const scope = await resolveExportScope(exportDatePreset);
       if (!scope) return;
-      const res = await api.get("/maintenance/roundtrip-templates", {
-        params: scope.params,
-        responseType: "blob",
-      });
-      saveDownloadResponse(
-        res,
+      await requestAndSaveDownload(
+        "/maintenance/roundtrip-templates",
+        scope.params,
         scope.range
           ? `维保项目批量回填模板_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.zip`
           : "维保项目批量回填模板.zip",
@@ -1202,13 +1619,13 @@ export default function ProjectCostPage({
       message.error(text);
     } finally {
       endDownload("roundtrip-bundle");
-      downloadingTemplateBundleRef.current = false;
       setDownloadingTemplateBundle(false);
+      releaseOperation("roundtrip-bundle");
     }
   };
 
   const importRoundtripWorkbook = async (file: File) => {
-    if (importingRoundtrip) return;
+    if (!acquireOperation("roundtrip-import")) return;
     setImportingRoundtrip(true);
     setRoundtripResult(null);
     setRoundtripError(null);
@@ -1232,6 +1649,7 @@ export default function ProjectCostPage({
       message.error(detail);
     } finally {
       setImportingRoundtrip(false);
+      releaseOperation("roundtrip-import");
     }
   };
 
@@ -1397,6 +1815,7 @@ export default function ProjectCostPage({
                     exportScopeSeq.current += 1;
                     exportScopeRequest.current = null;
                     setExportScopeLoading(false);
+                    setExportScopeError(false);
                     setExportRange(null);
                     setExportAsOf("");
                   } else {
@@ -1424,14 +1843,17 @@ export default function ProjectCostPage({
                 exportDatePresetRef.current = "custom";
                 setExportDatePreset("custom");
                 setExportScopeLoading(false);
+                setExportScopeError(false);
                 setExportAsOf("");
                 setExportRange(value as [Dayjs, Dayjs] | null);
               }}
             />
             <Alert
-              type="info"
+              type={exportScopeError ? "error" : "info"}
               showIcon
-              message={exportScopeLoading
+              message={exportScopeError
+                ? "日期基准加载失败，尚未应用日期范围。"
+                : exportScopeLoading
                 ? "正在读取后端业务日并计算实际闭区间…"
                 : exportDatePreset !== "all"
                   && exportDatePreset !== "custom"
@@ -1445,6 +1867,16 @@ export default function ProjectCostPage({
               description={exportAsOf
                 ? `后端业务日 ${exportAsOf}`
                 : undefined}
+              action={exportScopeError ? (
+                <Button
+                  size="small"
+                  danger
+                  loading={exportScopeLoading}
+                  onClick={() => void requestRelativeExportScope(exportDatePresetRef.current)}
+                >
+                  重试日期基准
+                </Button>
+              ) : undefined}
             />
             {Object.entries(activeDownloads).map(([key, label]) => (
               <Alert
@@ -1468,13 +1900,15 @@ export default function ProjectCostPage({
               >
                 导出项目成本 CSV
               </Button>
-              <Button
-                loading={exportingProfit}
-                disabled={exportingProfit}
-                onClick={exportContractProfitCsv}
-              >
-                导出合同详细盈亏 CSV
-              </Button>
+              {!scopedSales && (
+                <Button
+                  loading={exportingProfit}
+                  disabled={exportingProfit}
+                  onClick={exportContractProfitCsv}
+                >
+                  导出合同详细盈亏 CSV
+                </Button>
+              )}
               {!scopedSales && (
                 <Button loading={exporting} disabled={exporting} onClick={exportOrders}>
                   导出订单汇总 Excel
@@ -1494,7 +1928,9 @@ export default function ProjectCostPage({
             <Alert
               type="info"
               showIcon
-              message="项目成本 CSV 按项目汇总备件成本；合同详细盈亏 CSV 按合同汇总收入、成本、费用、利润与证据状态。"
+              message={scopedSales
+                ? "项目成本 CSV 与单项目明细仅包含当前销售本人范围；合同级下载需要完整合同口径，受限销售账号不提供。"
+                : "项目成本 CSV 按项目汇总备件成本；合同详细盈亏 CSV 按合同汇总收入、成本、费用、利润与证据状态。"}
             />
             <Space wrap style={{ width: "100%" }}>
               <Input
@@ -1550,7 +1986,7 @@ export default function ProjectCostPage({
               <Alert
                 type="info"
                 showIcon
-                message="全量超过单本资源上限时，改用按合同拆分的批量可回填 ZIP；每本仍需单独导入。"
+                message="全量固定模板返回 413 时，请输入单合同、缩小日期范围，或改用按合同拆分的批量可回填 ZIP；每本仍需单独导入。"
               />
               <Button
                 type="primary"
@@ -1635,18 +2071,67 @@ export default function ProjectCostPage({
                 <Segmented
                   aria-label="项目提醒类型筛选"
                   value={reminderStatus}
-                  onChange={(value) => setReminderStatus(value as ReminderStatusFilter)}
+                  onChange={(value) => {
+                    setReminderFilterRejected(false);
+                    setReminderStatus(value as ReminderStatusFilter);
+                  }}
                   options={[
                     { label: "全部提醒", value: "all" },
-                    { label: "待补成本", value: "incomplete_cost" },
-                    { label: "待补费用", value: "expense_data_unavailable" },
-                    { label: "红色预警", value: "red" },
-                    { label: "黄色关注", value: "yellow" },
-                    { label: "绿色参考", value: "green" },
-                    { label: "无预算", value: "no_budget" },
+                    {
+                      label: "待补成本",
+                      value: "incomplete_cost",
+                      disabled: reminderFilterRestricted || scopedSales,
+                    },
+                    {
+                      label: "待补费用",
+                      value: "expense_data_unavailable",
+                      disabled: reminderFilterRestricted || scopedSales,
+                    },
+                    {
+                      label: "红色预警",
+                      value: "red",
+                      disabled: reminderFilterRestricted || scopedSales,
+                    },
+                    {
+                      label: "黄色关注",
+                      value: "yellow",
+                      disabled: reminderFilterRestricted || scopedSales,
+                    },
+                    {
+                      label: "绿色参考",
+                      value: "green",
+                      disabled: reminderFilterRestricted || scopedSales,
+                    },
+                    {
+                      label: "无预算",
+                      value: "no_budget",
+                      disabled: reminderFilterRestricted || scopedSales,
+                    },
                   ]}
                 />
               </div>
+              {(reminderFilterRestricted || scopedSales) && (
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginTop: 8 }}
+                  message={scopedSales
+                    ? "受限销售账号不提供合同级经营提醒"
+                    : "当前账号无权判断经营提醒类型"}
+                  description={scopedSales
+                    ? "项目事实仍按当前销售本人范围提供；合同提醒需要完整合同口径。"
+                    : "已重置为全部提醒；期限与获准事实仍可查看。"}
+                />
+              )}
+              {reminderFilterRejected && !reminderFilterRestricted && !scopedSales && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginTop: 8 }}
+                  message="提醒类型筛选未被后端确认应用"
+                  description="已回退为全部提醒；只有后端明确返回 applied=true 才保留具体经营筛选。"
+                />
+              )}
             </div>
             <Input.Search
               placeholder="搜索项目名"
@@ -1660,7 +2145,14 @@ export default function ProjectCostPage({
           </Space>
         </Card>
         <Card title="项目提醒" loading={boardLoading}>
-          {boardLoadError ? (
+          {scopedSales ? (
+            <Alert
+              type="info"
+              showIcon
+              message="受限销售账号不提供合同级经营提醒"
+              description="请在项目数据中查看本人范围的项目事实。"
+            />
+          ) : boardLoadError ? (
             <Alert
               type="error"
               showIcon
@@ -1671,7 +2163,7 @@ export default function ProjectCostPage({
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前筛选暂无提醒" />
           ) : (
             <Space direction="vertical" size={10} style={{ width: "100%" }}>
-              {board.map((item) => {
+              {pagedBoard.map((item) => {
                 const knownCostQuality = normalizeCostQuality(item.cost_quality);
                 const status = boardDecisionRestricted
                   ? knownCostQuality === "incomplete" ? "incomplete_cost" : null
@@ -1699,6 +2191,17 @@ export default function ProjectCostPage({
                   />
                 );
               })}
+              {board.length > BOARD_PAGE_SIZE && (
+                <Pagination
+                  aria-label="项目提醒分页"
+                  current={boardPage}
+                  pageSize={BOARD_PAGE_SIZE}
+                  total={board.length}
+                  showSizeChanger={false}
+                  onChange={setBoardPage}
+                  style={{ marginTop: 8, textAlign: "right" }}
+                />
+              )}
             </Space>
           )}
         </Card>
@@ -1778,7 +2281,14 @@ export default function ProjectCostPage({
             description="实际、估算、缺失等成本事实仍按账号的数据权限显示。"
           />
         )}
-        {boardLoadError ? (
+        {scopedSales ? (
+          <Alert
+            type="info"
+            showIcon
+            message="受限销售账号不提供合同级详细盈亏"
+            description="下方项目事实仍严格按当前销售本人范围加载。"
+          />
+        ) : boardLoadError ? (
           <Alert
             type="error"
             showIcon

@@ -237,12 +237,59 @@ def test_date_filtered_board_never_compares_period_cost_with_full_revenue(db):
     assert row["contribution_profit_ex"] is None
     assert row["parts_profit_status_inc"] == "filtered_scope"
     assert row["parts_profit_status_ex"] == "filtered_scope"
-    assert row["contribution_status_inc"] == "filtered_scope"
-    assert row["contribution_status_ex"] == "filtered_scope"
+    assert row["contribution_status_inc"] == "expense_data_unavailable"
+    assert row["contribution_status_ex"] == "expense_data_unavailable"
     assert row["decision_status"] == "expense_data_unavailable"
     assert row["status"] == "expense_data_unavailable"
     assert row["remaining"] is None
     assert row["remaining_pct"] is None
+
+
+def test_board_without_date_to_requires_expense_watermark_through_as_of(db):
+    _load_complete_contract(db)
+    db.add(MaintenanceContractWorkbookState(
+        contract_no="XS-MARGIN",
+        revision=1,
+        expense_complete_through=date(2026, 3, 31),
+        expense_snapshot_complete=True,
+    ))
+    db.commit()
+
+    row = maintenance_cost.board(
+        db,
+        lifecycle="all",
+        as_of=date(2026, 4, 1),
+    )["rows"][0]
+
+    assert row["expense_data_available"] is False
+    assert row["contribution_status_inc"] == "expense_data_unavailable"
+    assert row["contribution_status_ex"] == "expense_data_unavailable"
+
+
+def test_contract_workbook_without_date_to_requires_watermark_through_today(
+    db,
+    monkeypatch,
+):
+    _load_complete_contract(db)
+    db.add(MaintenanceContractWorkbookState(
+        contract_no="XS-MARGIN",
+        revision=1,
+        expense_complete_through=date(2026, 3, 31),
+        expense_snapshot_complete=True,
+    ))
+    db.commit()
+    monkeypatch.setattr(
+        maintenance_cost,
+        "business_today",
+        lambda: date(2026, 4, 1),
+    )
+
+    data = maintenance_cost.contract_workbook_data(db, "XS-MARGIN")
+
+    assert data["expense_data_available"] is False
+    assert data["expense_evidence_status"] == "expense_data_unavailable"
+    assert data["margin"]["contribution_status_inc"] == "expense_data_unavailable"
+    assert data["margin"]["contribution_status_ex"] == "expense_data_unavailable"
 
 
 def test_date_filtered_budget_decision_preserves_evidence_gates_then_filters_complete(
@@ -277,6 +324,7 @@ def test_date_filtered_budget_decision_preserves_evidence_gates_then_filters_com
     db.add(MaintenanceContractWorkbookState(
         contract_no="XS-MARGIN",
         revision=1,
+        expense_complete_through=date(2026, 3, 31),
         expense_snapshot_complete=True,
     ))
     db.commit()
@@ -532,11 +580,11 @@ def test_empty_contract_workbook_does_not_fabricate_zero_cost_margin(db):
     assert data["decision"]["remaining"] is None
     assert data["decision"]["remaining_pct"] is None
     assert data["dual_cost_summary"] == {
-        "parts_cost_inc_tax": Decimal("0.00"),
+        "parts_cost_inc_tax": None,
         "parts_cost_inc_tax_complete": False,
         "parts_cost_inc_tax_quality": "incomplete",
         "parts_cost_inc_tax_missing_lines": 0,
-        "parts_cost_ex_tax": Decimal("0.00"),
+        "parts_cost_ex_tax": None,
         "parts_cost_ex_tax_complete": False,
         "parts_cost_ex_tax_quality": "incomplete",
         "parts_cost_ex_tax_missing_lines": 0,

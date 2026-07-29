@@ -193,7 +193,13 @@ def test_missing_cost_uses_active_pool_latest_purchase_month_with_dual_tax(
     _load_maintenance(
         db,
         batch,
-        {"M1": f.maintenance_head("M1", on=date(2026, 3, 15))},
+        {
+            "M1": f.maintenance_head(
+                "M1",
+                on=date(2026, 3, 15),
+                sales_order="XS-POOL-TARGET",
+            ),
+        },
         [f.maintenance_line("M1", "ML1", "PN-POOL-TARGET", qty="3")],
     )
     db.flush()

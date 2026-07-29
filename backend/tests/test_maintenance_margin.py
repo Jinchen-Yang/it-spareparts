@@ -240,6 +240,96 @@ def test_date_filtered_costs_are_not_compared_with_full_contract_revenue():
     assert result["contribution_status_ex"] == "filtered_scope"
 
 
+def test_date_filtered_scope_preserves_expense_tax_evidence_failure():
+    result = _calculate(
+        date_filtered=True,
+        unknown_expense_total=None,
+        expense_inc=None,
+        expense_ex=None,
+    )
+
+    assert result["parts_gross_profit_inc"] is None
+    assert result["parts_gross_profit_ex"] is None
+    assert result["contribution_profit_inc"] is None
+    assert result["contribution_profit_ex"] is None
+    assert result["parts_profit_status_inc"] == "filtered_scope"
+    assert result["parts_profit_status_ex"] == "filtered_scope"
+    assert result["contribution_status_inc"] == "expense_tax_unknown"
+    assert result["contribution_status_ex"] == "expense_tax_unknown"
+
+
+def test_date_filtered_scope_preserves_unavailable_expense_evidence_failure():
+    result = _calculate(
+        date_filtered=True,
+        expense_data_available=False,
+    )
+
+    assert result["parts_gross_profit_inc"] is None
+    assert result["parts_gross_profit_ex"] is None
+    assert result["contribution_profit_inc"] is None
+    assert result["contribution_profit_ex"] is None
+    assert result["parts_profit_status_inc"] == "filtered_scope"
+    assert result["parts_profit_status_ex"] == "filtered_scope"
+    assert result["contribution_status_inc"] == "expense_data_unavailable"
+    assert result["contribution_status_ex"] == "expense_data_unavailable"
+
+
+def test_date_filtered_scope_preserves_missing_revenue_evidence_failure():
+    result = _calculate(
+        date_filtered=True,
+        revenue_ex=None,
+    )
+
+    assert result["revenue_inc"] is None
+    assert result["revenue_ex"] is None
+    assert result["parts_gross_profit_inc"] is None
+    assert result["parts_gross_profit_ex"] is None
+    assert result["contribution_profit_inc"] is None
+    assert result["contribution_profit_ex"] is None
+    assert result["parts_profit_status_inc"] == "missing_revenue"
+    assert result["parts_profit_status_ex"] == "missing_revenue"
+    assert result["contribution_status_inc"] == "missing_revenue"
+    assert result["contribution_status_ex"] == "missing_revenue"
+
+
+def test_date_filtered_scope_preserves_ambiguous_revenue_evidence_failure():
+    result = _calculate(
+        date_filtered=True,
+        revenue_ambiguous_inc=True,
+        revenue_ambiguous_ex=True,
+    )
+
+    assert result["revenue_inc"] is None
+    assert result["revenue_ex"] is None
+    assert result["parts_gross_profit_inc"] is None
+    assert result["parts_gross_profit_ex"] is None
+    assert result["contribution_profit_inc"] is None
+    assert result["contribution_profit_ex"] is None
+    assert result["parts_profit_status_inc"] == "ambiguous_revenue"
+    assert result["parts_profit_status_ex"] == "ambiguous_revenue"
+    assert result["contribution_status_inc"] == "ambiguous_revenue"
+    assert result["contribution_status_ex"] == "ambiguous_revenue"
+
+
+def test_date_filtered_scope_preserves_incomplete_cost_evidence_failure():
+    result = _calculate(
+        date_filtered=True,
+        parts_cost_inc_tax=None,
+        parts_cost_ex_tax=None,
+        cost_quality_inc="incomplete",
+        cost_quality_ex="incomplete",
+    )
+
+    assert result["parts_gross_profit_inc"] is None
+    assert result["parts_gross_profit_ex"] is None
+    assert result["contribution_profit_inc"] is None
+    assert result["contribution_profit_ex"] is None
+    assert result["parts_profit_status_inc"] == "incomplete_cost"
+    assert result["parts_profit_status_ex"] == "incomplete_cost"
+    assert result["contribution_status_inc"] == "incomplete_cost"
+    assert result["contribution_status_ex"] == "incomplete_cost"
+
+
 def test_nonpositive_revenue_keeps_amount_but_not_margin_rate():
     result = _calculate(
         revenue_ex=Decimal("0"),

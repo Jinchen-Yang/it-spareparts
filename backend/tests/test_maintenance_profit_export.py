@@ -13,10 +13,12 @@ from sqlalchemy import select
 from app.main import app
 from app.models.maintenance import (
     FMaintenanceLine,
+    FMaintenanceOrder,
     FProjectExpense,
     MaintenanceContractWorkbookState,
 )
 from app.models.sales import FSalesOrder
+from app.services import maintenance_margin_evidence
 from tests.test_maintenance_export_headers import (
     _admin_client,
     _cost_blind_maintenance_client,
@@ -31,6 +33,8 @@ _WORKBOOK_LABELS = {
     "revenue_ex": "合同收入（未税）",
     "expense_inc": "报销费用（含税）",
     "expense_ex": "报销费用（未税）",
+    "parts_cost_inc_tax": "备件成本（含税归一）",
+    "parts_cost_ex_tax": "备件成本（未税归一）",
     "parts_gross_profit_inc": "合同级备件毛利（含税）",
     "parts_gross_profit_ex": "合同级备件毛利（未税）",
     "parts_gross_margin_inc": "合同级备件毛利率（含税）",
@@ -42,6 +46,28 @@ _WORKBOOK_LABELS = {
 }
 _CENT = Decimal("0.01")
 _RATE = Decimal("0.0001")
+_FULL_EXPENSE_COVERAGE = date.max
+_PARTS_STATUS_LABELS = {
+    "complete_actual": "完整：仅实际成本",
+    "complete_estimated": "完整：含估算成本",
+    "missing_revenue": "合同收入缺失",
+    "missing_tax_rate": "合同税率缺失",
+    "invalid_tax_rate": "合同税率异常",
+    "ambiguous_revenue": "重复合同收入冲突",
+    "incomplete_cost": "成本不完整",
+    "filtered_scope": "日期筛选下暂不计算",
+}
+_CONTRIBUTION_STATUS_LABELS = {
+    **_PARTS_STATUS_LABELS,
+    "complete": "完整",
+    "expense_tax_unknown": "费用税务口径缺失",
+    "expense_data_unavailable": "费用数据未就绪",
+}
+_EXPENSE_STATUS_LABELS = {
+    "complete": "完整",
+    "expense_tax_unknown": "费用税务口径缺失",
+    "expense_data_unavailable": "未就绪（无记录不等于0）",
+}
 
 
 def _summary(workbook) -> dict[str, object]:
@@ -73,6 +99,47 @@ def _assert_numeric_parity(
         for summary in workbook_summaries:
             workbook_value = _quantized(summary[label], quantum)
             assert workbook_value == board_value
+    _assert_status_parity(board, csv_row, *workbook_summaries)
+
+
+def _assert_status_parity(
+    board: dict,
+    csv_row: dict[str, str],
+    *workbook_summaries: dict[str, object],
+) -> None:
+    for basis, basis_label in (("inc", "含税"), ("ex", "未税")):
+        parts_status = board[f"parts_profit_status_{basis}"]
+        contribution_status = board[f"contribution_status_{basis}"]
+        assert csv_row[f"parts_profit_status_{basis}"] == parts_status
+        assert csv_row[f"contribution_status_{basis}"] == contribution_status
+        for summary in workbook_summaries:
+            assert summary[f"{basis_label}备件毛利状态"] == (
+                _PARTS_STATUS_LABELS[parts_status]
+            )
+            assert summary[f"{basis_label}贡献毛利状态"] == (
+                _CONTRIBUTION_STATUS_LABELS[contribution_status]
+            )
+
+        revenue_status = (
+            "available"
+            if board[f"revenue_{basis}"] is not None
+            else parts_status
+        )
+        assert csv_row[f"收入证据状态-{basis_label}"] == revenue_status
+
+    contribution_statuses = {
+        board["contribution_status_inc"],
+        board["contribution_status_ex"],
+    }
+    if board["expense_data_available"] is not True:
+        expense_status = "expense_data_unavailable"
+    elif "expense_tax_unknown" in contribution_statuses:
+        expense_status = "expense_tax_unknown"
+    else:
+        expense_status = "complete"
+    assert csv_row["费用证据状态"] == expense_status
+    for summary in workbook_summaries:
+        assert summary["费用证据状态"] == _EXPENSE_STATUS_LABELS[expense_status]
 
 
 def _quantized(value: object, quantum: Decimal) -> Decimal | None:
@@ -157,6 +224,7 @@ def test_rounding_boundary_has_decimal_parity_across_all_four_carriers(db):
         MaintenanceContractWorkbookState(
             contract_no="XS-MARGIN",
             revision=1,
+            expense_complete_through=_FULL_EXPENSE_COVERAGE,
             expense_snapshot_complete=True,
         ),
     ])
@@ -255,6 +323,7 @@ def test_unknown_expense_tax_evidence_fails_closed_across_all_four_carriers(db):
         MaintenanceContractWorkbookState(
             contract_no="XS-MARGIN",
             revision=1,
+            expense_complete_through=_FULL_EXPENSE_COVERAGE,
             expense_snapshot_complete=True,
         ),
     ])
@@ -287,6 +356,7 @@ def test_missing_cost_fails_closed_across_all_four_carriers(db):
     db.add(MaintenanceContractWorkbookState(
         contract_no="XS-MARGIN",
         revision=1,
+        expense_complete_through=_FULL_EXPENSE_COVERAGE,
         expense_snapshot_complete=True,
     ))
     db.commit()
@@ -304,6 +374,274 @@ def test_missing_cost_fails_closed_across_all_four_carriers(db):
     assert bundled["含税口径质量"] == "成本不完整，需补数据"
     assert bundled["未税口径质量"] == "成本不完整，需补数据"
     _assert_numeric_parity(board, csv_data, single, bundled)
+
+
+def test_zero_detail_contract_stays_in_all_four_carriers_and_costs_fail_closed(db):
+    batch = _load_complete_contract(db)
+    line = db.scalar(select(FMaintenanceLine))
+    assert line is not None
+    db.delete(line)
+    db.add_all([
+        FProjectExpense(
+            raw_line_id="EXP-MARGIN-ZERO-DETAIL",
+            bxd_no="BXD-MARGIN-ZERO-DETAIL",
+            line_no=1,
+            linked_sales_order_no="XS-MARGIN",
+            data_status="已结束",
+            expense_date=date(2026, 3, 12),
+            amount=Decimal("10"),
+            amount_ex_tax=Decimal("10"),
+            amount_inc_tax=Decimal("11.30"),
+            tax_basis="ex",
+            import_batch_id=batch.id,
+        ),
+        MaintenanceContractWorkbookState(
+            contract_no="XS-MARGIN",
+            revision=1,
+            expense_complete_through=_FULL_EXPENSE_COVERAGE,
+            expense_snapshot_complete=True,
+        ),
+    ])
+    db.commit()
+    client = _admin_client(db)
+
+    board, csv_data, single, bundled = _four_carriers(client)
+
+    assert board["contract"] == "XS-MARGIN"
+    assert board["order_count"] == 1
+    assert board["missing_detail_orders"] == 1
+    assert board["lines"] == 0
+    assert board["cost_quality"] == "incomplete"
+    for field in (
+        "actual_cost_inc",
+        "actual_cost_ex",
+        "estimated_cost_inc",
+        "estimated_cost_ex",
+        "known_cost_total",
+        "spent_parts",
+        "parts_cost_inc_tax",
+        "parts_cost_ex_tax",
+        "parts_gross_profit_inc",
+        "parts_gross_profit_ex",
+        "parts_gross_margin_inc",
+        "parts_gross_margin_ex",
+        "contribution_profit_inc",
+        "contribution_profit_ex",
+        "contribution_margin_inc",
+        "contribution_margin_ex",
+    ):
+        assert board[field] is None
+    assert board["revenue_ex"] is not None
+    assert board["expense_ex"] == 10.0
+    assert csv_data["成本证据状态"] == "incomplete"
+    assert csv_data["order_count"] == "1"
+    assert csv_data["missing_detail_orders"] == "1"
+    assert single["命中维保订单"] == 1
+    assert single["有明细订单"] == 0
+    assert single["无明细订单"] == 1
+    assert single["订单结构完整性"] == "不完整：存在无配件明细订单"
+    assert bundled["命中维保订单"] == 1
+    assert bundled["有明细订单"] == 0
+    assert bundled["无明细订单"] == 1
+    assert bundled["订单结构完整性"] == "不完整：存在无配件明细订单"
+    assert single["成本完整性"] == "成本不完整，需补数据"
+    assert bundled["成本完整性"] == "成本不完整，需补数据"
+    _assert_numeric_parity(board, csv_data, single, bundled)
+
+    response = client.get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "XS-MARGIN"},
+    )
+    workbook = load_workbook(io.BytesIO(response.content), data_only=False)
+    try:
+        parts = workbook["备件明细-氚云"]
+        assert parts["A2"].value == "WBDD-MARGIN"
+        assert parts["K2"].value == "暂无配件明细"
+        assert parts["M2"].value is None
+        assert parts["W2"].value == "成本缺失"
+    finally:
+        workbook.close()
+
+
+def test_mixed_detail_contract_keeps_known_facts_but_all_margins_fail_closed(
+    db,
+):
+    batch = _load_complete_contract(db)
+    original_order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.linked_sales_order_no == "XS-MARGIN",
+    ))
+    original_line = db.scalar(select(FMaintenanceLine))
+    original_sale = db.scalar(select(FSalesOrder).where(
+        FSalesOrder.order_no == "XS-MARGIN",
+    ))
+    assert original_order is not None
+    assert original_line is not None
+    assert original_sale is not None
+    db.add_all([
+        FMaintenanceLine(
+            raw_line_id="ML-MARGIN-SECOND",
+            order_id=original_order.id,
+            line_no=2,
+            part_id=original_line.part_id,
+            pn_std=original_line.pn_std,
+            pn_raw=original_line.pn_raw,
+            description="第二条已知成本明细",
+            qty=original_line.qty,
+            return_qty=original_line.return_qty,
+            unit_cost=original_line.unit_cost,
+            cost_amount=original_line.cost_amount,
+            unit_cost_inc_tax=original_line.unit_cost_inc_tax,
+            unit_cost_ex_tax=original_line.unit_cost_ex_tax,
+            cost_amount_inc_tax=original_line.cost_amount_inc_tax,
+            cost_amount_ex_tax=original_line.cost_amount_ex_tax,
+            cost_source=original_line.cost_source,
+            confidence=original_line.confidence,
+            cost_tax_basis=original_line.cost_tax_basis,
+            anomaly_flags=original_line.anomaly_flags,
+            import_batch_id=batch.id,
+        ),
+        FMaintenanceOrder(
+            raw_order_id="M-MARGIN-ZERO",
+            order_no="WBDD-MARGIN-ZERO",
+            order_date=date(2026, 3, 11),
+            linked_sales_order_no="XS-MARGIN",
+            project_raw="双口径毛利项目",
+            project_std="双口径毛利项目",
+            salesperson=original_order.salesperson,
+            maint_start=original_order.maint_start,
+            maint_end=original_order.maint_end,
+            data_status=original_order.data_status,
+            import_batch_id=batch.id,
+        ),
+        FSalesOrder(
+            raw_order_id="S-MARGIN-SECOND-EVIDENCE",
+            order_no="XS-MARGIN",
+            order_date=original_sale.order_date,
+            salesperson=original_sale.salesperson,
+            amount_ex_tax=Decimal("1000"),
+            tax_rate=original_sale.tax_rate,
+            data_status=original_sale.data_status,
+            import_batch_id=batch.id,
+        ),
+        FProjectExpense(
+            raw_line_id="EXP-MARGIN-MIXED-1",
+            bxd_no="BXD-MARGIN-MIXED-1",
+            line_no=1,
+            linked_sales_order_no="XS-MARGIN",
+            data_status="已结束",
+            expense_date=date(2026, 3, 12),
+            amount=Decimal("10"),
+            amount_ex_tax=Decimal("10"),
+            amount_inc_tax=Decimal("11.30"),
+            tax_basis="ex",
+            import_batch_id=batch.id,
+        ),
+        FProjectExpense(
+            raw_line_id="EXP-MARGIN-MIXED-2",
+            bxd_no="BXD-MARGIN-MIXED-2",
+            line_no=1,
+            linked_sales_order_no="XS-MARGIN",
+            data_status="已结束",
+            expense_date=date(2026, 3, 13),
+            amount=Decimal("20"),
+            amount_ex_tax=Decimal("20"),
+            amount_inc_tax=Decimal("22.60"),
+            tax_basis="ex",
+            import_batch_id=batch.id,
+        ),
+        MaintenanceContractWorkbookState(
+            contract_no="XS-MARGIN",
+            revision=1,
+            expense_complete_through=_FULL_EXPENSE_COVERAGE,
+            expense_snapshot_complete=True,
+        ),
+    ])
+    db.commit()
+
+    board, csv_data, single, bundled = _four_carriers(_admin_client(db))
+
+    assert board["contract"] == "XS-MARGIN"
+    assert board["order_count"] == 2
+    assert board["missing_detail_orders"] == 1
+    assert board["lines"] == 2
+    assert board["cost_quality"] == "incomplete"
+    assert board["parts_cost_inc_tax"] == 452.0
+    assert board["parts_cost_ex_tax"] == 400.0
+    assert board["revenue_inc"] == 1130.0
+    assert board["revenue_ex"] == 1000.0
+    assert board["expense_inc"] == 33.9
+    assert board["expense_ex"] == 30.0
+    for field in (
+        "parts_gross_profit_inc",
+        "parts_gross_profit_ex",
+        "parts_gross_margin_inc",
+        "parts_gross_margin_ex",
+        "contribution_profit_inc",
+        "contribution_profit_ex",
+        "contribution_margin_inc",
+        "contribution_margin_ex",
+    ):
+        assert board[field] is None
+    assert csv_data["order_count"] == "2"
+    assert csv_data["missing_detail_orders"] == "1"
+    assert csv_data["成本证据状态"] == "incomplete"
+    for summary in (single, bundled):
+        assert summary["命中维保订单"] == 2
+        assert summary["有明细订单"] == 1
+        assert summary["无明细订单"] == 1
+        assert summary["订单结构完整性"] == "不完整：存在无配件明细订单"
+        assert summary["成本完整性"] == "成本不完整，需补数据"
+    _assert_numeric_parity(board, csv_data, single, bundled)
+
+
+def test_blank_contract_values_are_excluded_from_board_csv_single_and_zip(db):
+    batch = _load_complete_contract(db)
+    for index, contract in enumerate((None, "", "   "), 1):
+        db.add(FMaintenanceOrder(
+            raw_order_id=f"M-BLANK-CONTRACT-{index}",
+            order_no=f"WBDD-BLANK-CONTRACT-{index}",
+            order_date=date(2026, 3, 10 + index),
+            linked_sales_order_no=contract,
+            project_raw=f"空白合同项目{index}",
+            project_std=f"空白合同项目{index}",
+            maint_end=date(2027, 12, 31),
+            data_status="已生效",
+            import_batch_id=batch.id,
+        ))
+    db.commit()
+    client = _admin_client(db)
+
+    board_response = client.get(
+        "/api/maintenance/board",
+        params={"lifecycle": "all"},
+    )
+    csv_response = client.get(
+        "/api/maintenance/board/export",
+        params={"lifecycle": "all"},
+    )
+    blank_single = client.get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "   "},
+    )
+    bundle_response = client.get("/api/maintenance/export-workbooks")
+
+    assert board_response.status_code == 200, board_response.text
+    assert [row["contract"] for row in board_response.json()["rows"]] == [
+        "XS-MARGIN",
+    ]
+    assert _csv_row(csv_response)["合同"] == "XS-MARGIN"
+    assert blank_single.status_code == 404
+    with ZipFile(io.BytesIO(bundle_response.content)) as archive:
+        workbook_members = [
+            name for name in archive.namelist()
+            if name.startswith("项目工作簿/")
+        ]
+        manifest = list(csv.DictReader(io.StringIO(
+            archive.read("导出清单.csv").decode("utf-8-sig"),
+        )))
+    assert len(workbook_members) == 1
+    assert sum(row["记录类型"] == "已生成" for row in manifest) == 1
+    assert sum(row["记录类型"] == "已跳过" for row in manifest) == 3
 
 
 def test_date_filter_keeps_the_same_scope_across_all_four_carriers(db):
@@ -338,6 +676,7 @@ def test_date_filter_keeps_the_same_scope_across_all_four_carriers(db):
         MaintenanceContractWorkbookState(
             contract_no="XS-MARGIN",
             revision=1,
+            expense_complete_through=date(2026, 3, 31),
             expense_snapshot_complete=True,
         ),
     ])
@@ -360,6 +699,200 @@ def test_date_filter_keeps_the_same_scope_across_all_four_carriers(db):
     assert csv_data["费用证据状态"] == "complete"
     assert single["费用证据状态"] == "完整"
     assert bundled["费用证据状态"] == "完整"
+    _assert_numeric_parity(board, csv_data, single, bundled)
+
+
+def test_date_filter_with_null_expense_watermark_fails_closed_in_all_carriers(
+    db,
+):
+    _load_complete_contract(db)
+    db.add(MaintenanceContractWorkbookState(
+        contract_no="XS-MARGIN",
+        revision=1,
+        expense_complete_through=None,
+        expense_snapshot_complete=True,
+    ))
+    db.commit()
+
+    board, csv_data, single, bundled = _four_carriers(
+        _admin_client(db),
+        board_params={
+            "date_from": "2026-03-01",
+            "date_to": "2026-03-31",
+        },
+    )
+
+    assert board["expense_data_available"] is False
+    assert board["parts_profit_status_inc"] == "filtered_scope"
+    assert board["parts_profit_status_ex"] == "filtered_scope"
+    assert board["contribution_status_inc"] == "expense_data_unavailable"
+    assert board["contribution_status_ex"] == "expense_data_unavailable"
+    assert csv_data["费用证据状态"] == "expense_data_unavailable"
+    for summary in (single, bundled):
+        assert summary["费用证据状态"] == "未就绪（无记录不等于0）"
+        assert summary["含税贡献毛利状态"] == "费用数据未就绪"
+        assert summary["未税贡献毛利状态"] == "费用数据未就绪"
+    _assert_numeric_parity(board, csv_data, single, bundled)
+
+
+def test_date_filter_after_expense_watermark_fails_closed_in_all_carriers(db):
+    _load_complete_contract(db)
+    db.add(MaintenanceContractWorkbookState(
+        contract_no="XS-MARGIN",
+        revision=1,
+        expense_complete_through=date(2026, 3, 30),
+        expense_snapshot_complete=True,
+    ))
+    db.commit()
+
+    board, csv_data, single, bundled = _four_carriers(
+        _admin_client(db),
+        board_params={
+            "date_from": "2026-03-01",
+            "date_to": "2026-03-31",
+        },
+    )
+
+    assert board["expense_data_available"] is False
+    assert board["contribution_status_inc"] == "expense_data_unavailable"
+    assert board["contribution_status_ex"] == "expense_data_unavailable"
+    assert csv_data["费用证据状态"] == "expense_data_unavailable"
+    for summary in (single, bundled):
+        assert summary["费用证据状态"] == "未就绪（无记录不等于0）"
+        assert summary["含税贡献毛利状态"] == "费用数据未就绪"
+        assert summary["未税贡献毛利状态"] == "费用数据未就绪"
+    _assert_numeric_parity(board, csv_data, single, bundled)
+
+
+def test_date_filter_preserves_expense_tax_failure_across_all_four_carriers(db):
+    batch = _load_complete_contract(db)
+    db.add_all([
+        FProjectExpense(
+            raw_line_id="EXP-MARGIN-DATE-TAX-UNKNOWN",
+            bxd_no="BXD-MARGIN-DATE-TAX-UNKNOWN",
+            line_no=1,
+            linked_sales_order_no="XS-MARGIN",
+            data_status="已结束",
+            expense_date=date(2026, 3, 12),
+            amount=None,
+            amount_ex_tax=None,
+            amount_inc_tax=None,
+            import_batch_id=batch.id,
+        ),
+        MaintenanceContractWorkbookState(
+            contract_no="XS-MARGIN",
+            revision=1,
+            expense_complete_through=date(2026, 3, 31),
+            expense_snapshot_complete=True,
+        ),
+    ])
+    db.commit()
+
+    board, csv_data, single, bundled = _four_carriers(
+        _admin_client(db),
+        board_params={
+            "date_from": "2026-03-01",
+            "date_to": "2026-03-31",
+        },
+    )
+
+    assert board["parts_profit_status_inc"] == "filtered_scope"
+    assert board["parts_profit_status_ex"] == "filtered_scope"
+    assert board["contribution_status_inc"] == "expense_tax_unknown"
+    assert board["contribution_status_ex"] == "expense_tax_unknown"
+    assert csv_data["费用证据状态"] == "expense_tax_unknown"
+    assert single["费用证据状态"] == "费用税务口径缺失"
+    assert bundled["费用证据状态"] == "费用税务口径缺失"
+    _assert_numeric_parity(board, csv_data, single, bundled)
+
+
+def test_date_filter_preserves_missing_revenue_across_all_four_carriers(db):
+    _load_complete_contract(db)
+    sales_order = db.scalar(select(FSalesOrder).where(
+        FSalesOrder.order_no == "XS-MARGIN",
+    ))
+    assert sales_order is not None
+    db.delete(sales_order)
+    db.add(MaintenanceContractWorkbookState(
+        contract_no="XS-MARGIN",
+        revision=1,
+        expense_complete_through=date(2026, 3, 31),
+        expense_snapshot_complete=True,
+    ))
+    db.commit()
+
+    board, csv_data, single, bundled = _four_carriers(
+        _admin_client(db),
+        board_params={
+            "date_from": "2026-03-01",
+            "date_to": "2026-03-31",
+        },
+    )
+
+    assert board["parts_profit_status_inc"] == "missing_revenue"
+    assert board["parts_profit_status_ex"] == "missing_revenue"
+    assert board["contribution_status_inc"] == "missing_revenue"
+    assert board["contribution_status_ex"] == "missing_revenue"
+    assert csv_data["收入证据状态-含税"] == "missing_revenue"
+    assert csv_data["收入证据状态-未税"] == "missing_revenue"
+    assert single["含税备件毛利状态"] == "合同收入缺失"
+    assert single["未税备件毛利状态"] == "合同收入缺失"
+    assert bundled["含税备件毛利状态"] == "合同收入缺失"
+    assert bundled["未税备件毛利状态"] == "合同收入缺失"
+    _assert_numeric_parity(board, csv_data, single, bundled)
+
+
+def test_date_filter_preserves_ambiguous_revenue_across_all_four_carriers(
+    db,
+    monkeypatch,
+):
+    _load_complete_contract(db)
+    db.add(MaintenanceContractWorkbookState(
+        contract_no="XS-MARGIN",
+        revision=1,
+        expense_complete_through=date(2026, 3, 31),
+        expense_snapshot_complete=True,
+    ))
+    db.commit()
+
+    def ambiguous_revenue(_db, contract_nos):
+        return {
+            contract_no: maintenance_margin_evidence.RevenueEvidence(
+                revenue_ex=Decimal("1000"),
+                tax_rate=Decimal("0.13"),
+                tax_rate_ambiguous=False,
+                ambiguous_inc=True,
+                ambiguous_ex=True,
+                record_count=2,
+                legacy_contract_amount_inc=Decimal("1130"),
+            )
+            for contract_no in contract_nos
+        }
+
+    monkeypatch.setattr(
+        maintenance_margin_evidence,
+        "load_contract_revenue_evidence",
+        ambiguous_revenue,
+    )
+
+    board, csv_data, single, bundled = _four_carriers(
+        _admin_client(db),
+        board_params={
+            "date_from": "2026-03-01",
+            "date_to": "2026-03-31",
+        },
+    )
+
+    assert board["parts_profit_status_inc"] == "ambiguous_revenue"
+    assert board["parts_profit_status_ex"] == "ambiguous_revenue"
+    assert board["contribution_status_inc"] == "ambiguous_revenue"
+    assert board["contribution_status_ex"] == "ambiguous_revenue"
+    assert csv_data["收入证据状态-含税"] == "ambiguous_revenue"
+    assert csv_data["收入证据状态-未税"] == "ambiguous_revenue"
+    assert single["含税备件毛利状态"] == "重复合同收入冲突"
+    assert single["未税备件毛利状态"] == "重复合同收入冲突"
+    assert bundled["含税备件毛利状态"] == "重复合同收入冲突"
+    assert bundled["未税备件毛利状态"] == "重复合同收入冲突"
     _assert_numeric_parity(board, csv_data, single, bundled)
 
 
@@ -422,18 +955,45 @@ def test_contract_profit_csv_has_explicit_empty_and_access_semantics(db):
     assert no_page_response.status_code == 403
 
 
-def test_contract_profit_csv_masks_profit_and_evidence_for_profit_blind_user(db):
+def test_contract_profit_carriers_mask_evidence_for_profit_blind_user(db):
     _load_complete_contract(db)
+    admin_board_response = _admin_client(db).get(
+        "/api/maintenance/board",
+        params={"lifecycle": "all"},
+    )
     client = _profit_blind_maintenance_client(db)
 
+    board_response = client.get(
+        "/api/maintenance/board",
+        params={"lifecycle": "all"},
+    )
     response = client.get(
         "/api/maintenance/board/export",
         params={"lifecycle": "all"},
     )
+    single_workbook_response = client.get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "XS-MARGIN"},
+    )
+    bulk_workbook_response = client.get("/api/maintenance/export-workbooks")
 
+    assert admin_board_response.status_code == 200, admin_board_response.text
+    assert admin_board_response.json()["rows"][0]["expense_data_available"] is False
+    assert board_response.status_code == 200, board_response.text
+    board_row = board_response.json()["rows"][0]
+    assert board_row["expense_data_available"] is None
+    assert board_row["expense_inc"] is None
+    assert board_row["expense_ex"] is None
+    assert board_row["contribution_status_inc"] is None
+    assert board_row["contribution_status_ex"] is None
     assert response.status_code == 200, response.text
     row = _csv_row(response)
-    for field in _WORKBOOK_LABELS:
+    assert row["parts_cost_inc_tax"] == "226.0"
+    assert row["parts_cost_ex_tax"] == "200.0"
+    for field in set(_WORKBOOK_LABELS) - {
+        "parts_cost_inc_tax",
+        "parts_cost_ex_tax",
+    }:
         assert row[field] == ""
     assert row["成本证据状态"] == "actual_only"
     assert row["成本证据状态-含税"] == "actual_only"
@@ -441,6 +1001,8 @@ def test_contract_profit_csv_masks_profit_and_evidence_for_profit_blind_user(db)
     assert row["收入证据状态-含税"] == "restricted"
     assert row["收入证据状态-未税"] == "restricted"
     assert row["费用证据状态"] == "restricted"
+    assert single_workbook_response.status_code == 403
+    assert bulk_workbook_response.status_code == 403
 
 
 def test_contract_profit_csv_masks_cost_and_derived_profit_for_cost_blind_user(db):
