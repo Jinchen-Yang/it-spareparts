@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Card, DatePicker, Input, Button, Space, Tag, Tooltip, message, Statistic, Row, Col,
-  Drawer, Progress, Alert, Empty, Segmented, Upload,
+  Drawer, Progress, Alert, Empty, Segmented, Upload, Pagination,
 } from "antd";
 import { InfoCircleOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -135,7 +135,6 @@ const STATUS_META: Record<BoardStatus, { label: string; color: string; bg: strin
   green: { label: "预算余量 > 20%", color: "#3f7a45", bg: "rgba(63,122,69,0.07)" },
   no_budget: { label: "无预算(未关联合同额)", color: "#8c8c8c", bg: "rgba(0,0,0,0.03)" },
 };
-const NEUTRAL_META = { label: "", color: "#8c8c8c", bg: "rgba(0,0,0,0.03)" };
 const LIFECYCLE_META: Record<LifecycleStatus, { label: string; color: string }> = {
   ongoing: { label: "进行中", color: "blue" },
   ended: { label: "已结束", color: "default" },
@@ -170,6 +169,7 @@ const SOURCE_ORDER = [
   "pool_purchase", "pool_sales", "purchase_history", "sales_history", "none",
 ];
 const COVERAGE_WARN_PCT = 80;   // 覆盖率预警线（经验值，非验收线；<此值标红提示核对无成本行）
+const BOARD_PAGE_SIZE = 12;
 
 const PROFIT_BASIS_LABEL: Record<TaxBasis, string> = {
   inc: "含税",
@@ -512,17 +512,87 @@ function saveBlob(blob: Blob, filename: string) {
   }
 }
 
+type BlobDownloadResponse = {
+  data: Blob;
+  headers?: unknown;
+};
+
+class InvalidDownloadResponseError extends Error {
+  constructor() {
+    super("服务器返回的不是可下载文件，请稍后重试或联系管理员");
+  }
+}
+
+const CSV_CONTENT_TYPES = ["text/csv", "application/csv"] as const;
+const XLSX_CONTENT_TYPES = [
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+] as const;
+const ZIP_CONTENT_TYPES = ["application/zip", "application/x-zip-compressed"] as const;
+
+function responseHeader(headers: unknown, name: string): string | undefined {
+  if (!headers || typeof headers !== "object") return undefined;
+  const getter = (headers as { get?: unknown }).get;
+  if (typeof getter === "function") {
+    const value = getter.call(headers, name);
+    return typeof value === "string" ? value : undefined;
+  }
+  const record = headers as Record<string, unknown>;
+  const value = record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()];
+  return typeof value === "string" ? value : undefined;
+}
+
+function safeDownloadFilename(value: string | undefined, fallback: string): string {
+  if (!value) return fallback;
+  const basename = value.split(/[\\/]/).pop()?.replace(/[\u0000-\u001f\u007f:*?"<>|]/g, "_").trim();
+  return basename || fallback;
+}
+
+function responseFilename(headers: unknown, fallback: string): string {
+  const disposition = responseHeader(headers, "content-disposition");
+  if (!disposition) return fallback;
+  const encoded = disposition.match(/filename\*\s*=\s*UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return safeDownloadFilename(decodeURIComponent(encoded.trim().replace(/^"|"$/g, "")), fallback);
+    } catch {
+      return fallback;
+    }
+  }
+  const quoted = disposition.match(/filename\s*=\s*"([^"]+)"/i)?.[1];
+  const plain = disposition.match(/filename\s*=\s*([^;\s]+)/i)?.[1];
+  return safeDownloadFilename(quoted || plain, fallback);
+}
+
+function saveDownloadResponse(
+  response: BlobDownloadResponse,
+  fallbackFilename: string,
+  expectedTypes: readonly string[],
+) {
+  if (!(response.data instanceof Blob)) throw new InvalidDownloadResponseError();
+  const contentType = (
+    responseHeader(response.headers, "content-type")
+    || response.data.type
+  ).split(";")[0].trim().toLowerCase();
+  if (contentType && !expectedTypes.includes(contentType)) {
+    throw new InvalidDownloadResponseError();
+  }
+  saveBlob(response.data, responseFilename(response.headers, fallbackFilename));
+}
+
 async function readExportError(error: unknown): Promise<{
   status?: number;
   detail?: string;
 }> {
+  if (error instanceof InvalidDownloadResponseError) {
+    return { detail: error.message };
+  }
   const response = (error as {
     response?: { status?: number; data?: unknown };
   })?.response;
   let detail: string | undefined;
   if (
     response?.status != null
-    && [403, 422, 429].includes(response.status)
+    && [403, 404, 413, 422, 429].includes(response.status)
     && response.data instanceof Blob
   ) {
     try {
@@ -569,7 +639,11 @@ const SourceLegend = (
   </div>
 );
 
-export default function ProjectCostPage() {
+export default function ProjectCostPage({
+  view = "data",
+}: {
+  view?: "data" | "downloads" | "reminders";
+}) {
   const role = localStorage.getItem("role") || "";
   const isAdmin = role === "admin";
   let localPermissions: Record<string, boolean> = {};
@@ -584,6 +658,7 @@ export default function ProjectCostPage() {
   );
   const canExportProjectWorkbooks = isAdmin || (
     !scopedSales
+    && localPermissions.data_customer === true
     && localPermissions.data_purchase_cost === true
     && localPermissions.data_profit === true
   );
@@ -595,6 +670,8 @@ export default function ProjectCostPage() {
   const [exportDatePreset, setExportDatePreset] = useState<ExportDatePreset>("all");
   const exportDatePresetRef = useRef<ExportDatePreset>("all");
   const [q, setQ] = useState("");
+  const [downloadProject, setDownloadProject] = useState("");
+  const [downloadContract, setDownloadContract] = useState("");
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
   const [lifecycleCounts, setLifecycleCounts] = useState<LifecycleCounts>(EMPTY_LIFECYCLE_COUNTS);
   const [asOf, setAsOf] = useState("");
@@ -602,17 +679,28 @@ export default function ProjectCostPage() {
   const [projectCostRestricted, setProjectCostRestricted] = useState(false);
   const [board, setBoard] = useState<BoardRow[]>([]);
   const [boardDecisionRestricted, setBoardDecisionRestricted] = useState(false);
-  const [boardFilter, setBoardFilter] = useState<string>("all");
+  const [boardPage, setBoardPage] = useState(1);
   const [startDate, setStartDate] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState(false);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsLoadError, setProjectsLoadError] = useState(false);
+  const [boardLoading, setBoardLoading] = useState(false);
+  const [boardLoadError, setBoardLoadError] = useState(false);
   const [recomputing, setRecomputing] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportingWorkbooks, setExportingWorkbooks] = useState(false);
   const exportingWorkbooksRef = useRef(false);
   const [exportingProjects, setExportingProjects] = useState(false);
+  const [exportingProfit, setExportingProfit] = useState(false);
+  const [exportingLines, setExportingLines] = useState(false);
+  const exportingLinesRef = useRef(false);
+  const [exportingSingleWorkbook, setExportingSingleWorkbook] = useState(false);
+  const exportingSingleWorkbookRef = useRef(false);
   const [downloadingTemplate, setDownloadingTemplate] = useState(false);
+  const downloadingTemplateRef = useRef(false);
+  const [downloadingTemplateBundle, setDownloadingTemplateBundle] = useState(false);
+  const downloadingTemplateBundleRef = useRef(false);
   const [importingRoundtrip, setImportingRoundtrip] = useState(false);
+  const [activeDownloads, setActiveDownloads] = useState<Record<string, string>>({});
   const [roundtripResult, setRoundtripResult] = useState<string | null>(null);
   const [roundtripError, setRoundtripError] = useState<string | null>(null);
   // 明细抽屉
@@ -625,11 +713,22 @@ export default function ProjectCostPage() {
   // 请求序号守卫：抽屉快速翻页/切项目时，迟到响应不得覆盖新结果
   const linesSeq = useRef(0);
   const detailRef = useRef<string | null>(null);
-  // 页面两组聚合请求共享代次：快速切换期限/日期/搜索时，迟到响应不能覆盖最新筛选。
-  const pageSeq = useRef(0);
+  // 两类业务对象独立加载、独立失败、独立重试；各自用请求代次阻止迟到响应覆盖新筛选。
+  const projectsSeq = useRef(0);
+  const boardSeq = useRef(0);
   const baseParams = () => ({
     q: q || undefined,
   });
+  const beginDownload = (key: string, label: string) => {
+    setActiveDownloads((current) => ({ ...current, [key]: label }));
+  };
+  const endDownload = (key: string) => {
+    setActiveDownloads((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
 
   const lifecycleParams = () => ({ ...baseParams(), lifecycle });
   const boardParams = () => ({
@@ -637,48 +736,89 @@ export default function ProjectCostPage() {
     lifecycle,
   });
 
-  const load = async () => {
-    const seq = ++pageSeq.current;
-    setLoading(true);
-    setLoadError(false);
-    // 筛选已经变化时不继续展示上一筛选的结果，避免用户把旧数据误认成新口径。
+  const loadProjects = async () => {
+    const seq = ++projectsSeq.current;
+    setProjectsLoading(true);
+    setProjectsLoadError(false);
     setRows([]);
-    setBoard([]);
-    setLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
-    setAsOf("");
+    setProjectCostRestricted(false);
+    setStartDate("");
     try {
-      const [{ data }, bd] = await Promise.all([
-        api.get("/maintenance/projects", { params: lifecycleParams() }),
-        api.get("/maintenance/board", { params: boardParams() }),
-      ]);
-      if (seq !== pageSeq.current) return;
+      const { data } = await api.get("/maintenance/projects", {
+        params: lifecycleParams(),
+      });
+      if (seq !== projectsSeq.current) return;
       setRows(data.rows);
       setProjectCostRestricted(!!data.ranking_restricted);
       setStartDate(data.start_date);
-      setBoard(bd.data.rows);
-      setAsOf(data.as_of || bd.data.as_of || "");
-      setLifecycleCounts(data.lifecycle_counts || bd.data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
-      const decisionRestricted = bd.data.decision_restricted === true
-        || bd.data.profit_restricted === true
-        || bd.data.ranking_restricted === true
-        || data.ranking_restricted === true;
-      setBoardDecisionRestricted(decisionRestricted);
-      if (decisionRestricted) setBoardFilter("all");
+      setAsOf(data.as_of || "");
+      setLifecycleCounts(data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
     } catch {
-      if (seq !== pageSeq.current) return;
+      if (seq !== projectsSeq.current) return;
       setRows([]);
       setProjectCostRestricted(false);
-      setBoard([]);
-      setLoadError(true);
+      setProjectsLoadError(true);
     } finally {
-      if (seq === pageSeq.current) setLoading(false);
+      if (seq === projectsSeq.current) setProjectsLoading(false);
+    }
+  };
+
+  const loadBoard = async () => {
+    const seq = ++boardSeq.current;
+    setBoardLoading(true);
+    setBoardLoadError(false);
+    setBoard([]);
+    setBoardPage(1);
+    setBoardDecisionRestricted(false);
+    try {
+      const { data } = await api.get("/maintenance/board", {
+        params: boardParams(),
+      });
+      if (seq !== boardSeq.current) return;
+      setBoard(data.rows);
+      setAsOf(data.as_of || "");
+      setLifecycleCounts(data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
+      setBoardDecisionRestricted(
+        data.decision_restricted === true
+        || data.profit_restricted === true
+        || data.ranking_restricted === true,
+      );
+    } catch {
+      if (seq !== boardSeq.current) return;
+      setBoard([]);
+      setBoardDecisionRestricted(false);
+      setBoardLoadError(true);
+    } finally {
+      if (seq === boardSeq.current) setBoardLoading(false);
     }
   };
 
   useEffect(() => {
-    load();
+    setLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
+    setAsOf("");
+    if (view === "downloads") {
+      projectsSeq.current += 1;
+      boardSeq.current += 1;
+      setProjectsLoading(false);
+      setBoardLoading(false);
+      setProjectsLoadError(false);
+      setBoardLoadError(false);
+      setRows([]);
+      setBoard([]);
+      return;
+    }
+    if (view === "reminders") {
+      projectsSeq.current += 1;
+      setProjectsLoading(false);
+      setProjectsLoadError(false);
+      setRows([]);
+      void loadBoard();
+      return;
+    }
+    void loadProjects();
+    void loadBoard();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, lifecycle]);
+  }, [q, lifecycle, view]);
 
   const loadLines = async (project: string, page: number, month?: string) => {
     const seq = ++linesSeq.current;
@@ -720,7 +860,8 @@ export default function ProjectCostPage() {
     try {
       const { data } = await api.post("/maintenance/recompute");
       message.success(formatMaintenanceRecomputeSummary(data));
-      load();
+      void loadProjects();
+      void loadBoard();
     } catch {
       message.error("重算失败（需要管理员权限）");
     } finally {
@@ -729,9 +870,14 @@ export default function ProjectCostPage() {
     }
   };
 
-  const download = (path: string, filename: string, extra?: Record<string, unknown>) =>
+  const download = (
+    path: string,
+    filename: string,
+    expectedTypes: readonly string[],
+    extra?: Record<string, unknown>,
+  ) =>
     api.get(path, { params: { ...baseParams(), ...extra }, responseType: "blob" })
-      .then((res) => saveBlob(res.data, filename));
+      .then((res) => saveDownloadResponse(res, filename, expectedTypes));
 
   const resolveExportScope = async (
     requestedPreset: ExportDatePreset,
@@ -740,13 +886,6 @@ export default function ProjectCostPage() {
     range: [Dayjs, Dayjs] | null;
   } | null> => {
     let resolvedRange = exportRange;
-    const initialParams = buildOrderExportParams(requestedPreset, resolvedRange);
-    if (!initialParams) {
-      message.warning(requestedPreset === "custom"
-        ? "请选择自定义起止日期"
-        : "日期基准尚未加载，请稍后重试");
-      return null;
-    }
     if (requestedPreset !== "all" && requestedPreset !== "custom") {
       const { data } = await api.get("/maintenance/as-of");
       if (exportDatePresetRef.current !== requestedPreset) return null;
@@ -758,11 +897,18 @@ export default function ProjectCostPage() {
       setExportRange(resolvedRange);
     }
     const params = buildOrderExportParams(requestedPreset, resolvedRange);
-    return params ? { params, range: resolvedRange } : null;
+    if (!params) {
+      message.warning(requestedPreset === "custom"
+        ? "请选择自定义起止日期"
+        : "日期基准尚未加载，请稍后重试");
+      return null;
+    }
+    return { params, range: resolvedRange };
   };
 
   const exportOrders = async () => {
     setExporting(true);
+    beginDownload("orders", "正在生成订单汇总 Excel，请勿关闭页面或重复点击");
     try {
       const scope = await resolveExportScope(exportDatePreset);
       if (!scope) return;
@@ -770,9 +916,13 @@ export default function ProjectCostPage() {
         params: scope.params,
         responseType: "blob",
       });
-      saveBlob(res.data, scope.range
-        ? `maintenance_orders_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.xlsx`
-        : "maintenance_orders_all.xlsx");
+      saveDownloadResponse(
+        res,
+        scope.range
+          ? `maintenance_orders_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.xlsx`
+          : "maintenance_orders_all.xlsx",
+        XLSX_CONTENT_TYPES,
+      );
     } catch (error) {
       const { status, detail } = await readExportError(error);
       message.error(detail || (status === 403
@@ -781,6 +931,7 @@ export default function ProjectCostPage() {
           ? "导出日期参数无效"
           : "导出失败，请稍后重试"));
     } finally {
+      endDownload("orders");
       setExporting(false);
     }
   };
@@ -797,9 +948,13 @@ export default function ProjectCostPage() {
         params: scope.params,
         responseType: "blob",
       });
-      saveBlob(res.data, scope.range
-        ? `maintenance_project_workbooks_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.zip`
-        : "maintenance_project_workbooks_all.zip");
+      saveDownloadResponse(
+        res,
+        scope.range
+          ? `maintenance_project_workbooks_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.zip`
+          : "maintenance_project_workbooks_all.zip",
+        ZIP_CONTENT_TYPES,
+      );
     } catch (error) {
       const { status, detail } = await readExportError(error);
       message.error(detail || (status === 403
@@ -822,9 +977,9 @@ export default function ProjectCostPage() {
     try {
       const scope = await resolveExportScope(exportDatePreset);
       if (!scope) return;
-      await download("/maintenance/export", "maintenance_projects.csv", {
+      await download("/maintenance/export", "maintenance_projects.csv", CSV_CONTENT_TYPES, {
         ...scope.params,
-        lifecycle,
+        lifecycle: "all",
       });
     } catch (error) {
       const { detail } = await readExportError(error);
@@ -834,38 +989,88 @@ export default function ProjectCostPage() {
     }
   };
 
-  const exportLines = async () => {
-    if (!detailProject) return;
+  const exportContractProfitCsv = async () => {
+    if (exportingProfit) return;
+    setExportingProfit(true);
+    beginDownload("contract-profit", "正在生成合同详细盈亏 CSV，请勿重复点击");
     try {
       const scope = await resolveExportScope(exportDatePreset);
       if (!scope) return;
-      await download("/maintenance/lines/export", "项目备件明细.csv", {
+      await download(
+        "/maintenance/board/export",
+        "maintenance_contract_profit.csv",
+        CSV_CONTENT_TYPES,
+        {
+          ...scope.params,
+          lifecycle: "all",
+        },
+      );
+    } catch (error) {
+      const { detail } = await readExportError(error);
+      message.error(detail || "合同详细盈亏 CSV 导出失败，请稍后重试或检查权限");
+    } finally {
+      endDownload("contract-profit");
+      setExportingProfit(false);
+    }
+  };
+
+  const exportLines = async (project = detailProject) => {
+    if (!project) {
+      message.warning("请先输入要导出的项目名称");
+      return;
+    }
+    if (exportingLinesRef.current) return;
+    exportingLinesRef.current = true;
+    setExportingLines(true);
+    beginDownload("project-lines", "正在生成单项目明细 CSV，请勿重复点击");
+    try {
+      const scope = await resolveExportScope(exportDatePreset);
+      if (!scope) return;
+      await download("/maintenance/lines/export", "项目备件明细.csv", CSV_CONTENT_TYPES, {
         ...scope.params,
-        project: detailProject,
+        project,
         month: linesMonth,
       });
     } catch (error) {
       const { detail } = await readExportError(error);
       message.error(detail || "明细导出失败，请稍后重试");
+    } finally {
+      endDownload("project-lines");
+      exportingLinesRef.current = false;
+      setExportingLines(false);
     }
   };
 
   const exportSingleWorkbook = async (contract: string) => {
+    if (exportingSingleWorkbookRef.current) return;
+    exportingSingleWorkbookRef.current = true;
+    setExportingSingleWorkbook(true);
+    beginDownload("single-workbook", "正在生成单合同工作簿 XLSX，请勿重复点击");
     try {
       const scope = await resolveExportScope(exportDatePreset);
       if (!scope) return;
-      await download("/maintenance/export-workbook", `项目工作簿_${contract}.xlsx`, {
+      await download(
+        "/maintenance/export-workbook",
+        `项目工作簿_${contract}.xlsx`,
+        XLSX_CONTENT_TYPES,
+        {
         ...scope.params,
         contract,
-      });
+        },
+      );
     } catch (error) {
       const { detail } = await readExportError(error);
       message.error(detail || "工作簿导出失败，请稍后重试或检查权限");
+    } finally {
+      endDownload("single-workbook");
+      exportingSingleWorkbookRef.current = false;
+      setExportingSingleWorkbook(false);
     }
   };
 
   const downloadRoundtripTemplate = async (contract?: string) => {
-    if (downloadingTemplate) return;
+    if (downloadingTemplateRef.current) return;
+    downloadingTemplateRef.current = true;
     setDownloadingTemplate(true);
     setRoundtripError(null);
     const hide = message.loading("正在生成固定回填模板，请勿重复点击…", 0);
@@ -883,9 +1088,10 @@ export default function ProjectCostPage() {
       const scopeLabel = scope.range
         ? `${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}`
         : "全部";
-      saveBlob(
-        res.data,
+      saveDownloadResponse(
+        res,
         `维保项目回填模板_${safeContract ? `${safeContract}_` : ""}${scopeLabel}.xlsx`,
+        XLSX_CONTENT_TYPES,
       );
     } catch (error) {
       const { detail } = await readExportError(error);
@@ -894,7 +1100,43 @@ export default function ProjectCostPage() {
       message.error(text);
     } finally {
       hide();
+      downloadingTemplateRef.current = false;
       setDownloadingTemplate(false);
+    }
+  };
+
+  const downloadRoundtripTemplateBundle = async () => {
+    if (downloadingTemplateBundleRef.current) return;
+    downloadingTemplateBundleRef.current = true;
+    setDownloadingTemplateBundle(true);
+    setRoundtripError(null);
+    beginDownload(
+      "roundtrip-bundle",
+      "正在按合同生成可回填工作簿 ZIP，请勿关闭页面或重复点击",
+    );
+    try {
+      const scope = await resolveExportScope(exportDatePreset);
+      if (!scope) return;
+      const res = await api.get("/maintenance/roundtrip-templates", {
+        params: scope.params,
+        responseType: "blob",
+      });
+      saveDownloadResponse(
+        res,
+        scope.range
+          ? `维保项目批量回填模板_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.zip`
+          : "维保项目批量回填模板.zip",
+        ZIP_CONTENT_TYPES,
+      );
+    } catch (error) {
+      const { detail } = await readExportError(error);
+      const text = detail || "批量可回填工作簿下载失败，请稍后重试";
+      setRoundtripError(text);
+      message.error(text);
+    } finally {
+      endDownload("roundtrip-bundle");
+      downloadingTemplateBundleRef.current = false;
+      setDownloadingTemplateBundle(false);
     }
   };
 
@@ -910,7 +1152,6 @@ export default function ProjectCostPage() {
       const summary = formatRoundtripImportSummary(data);
       setRoundtripResult(summary);
       message.success(summary);
-      await load();
     } catch (error) {
       const response = (
         typeof error === "object" && error !== null && "response" in error
@@ -1057,18 +1298,312 @@ export default function ProjectCostPage() {
   const monthOptions = detailProject
     ? (rows.find((r) => r.project === detailProject)?.months || 0)
     : 0;
+  const pagedBoard = board.slice(
+    (boardPage - 1) * BOARD_PAGE_SIZE,
+    boardPage * BOARD_PAGE_SIZE,
+  );
+
+  if (view === "downloads") {
+    return (
+      <Space direction="vertical" size="large" style={{ width: "100%" }}>
+        <PageHeader
+          title="下载中心"
+          subtitle="集中选择日期和业务对象后下载；大文件生成期间按钮保持锁定，失败时显示服务端的准确原因。"
+        />
+        <Card title="下载范围">
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <div style={{
+              width: "100%",
+              minWidth: 0,
+              maxWidth: "100%",
+              overflowX: "auto",
+              paddingBottom: 2,
+            }}>
+              <Segmented
+                aria-label="维保订单导出日期"
+                value={exportDatePreset}
+                onChange={(value) => {
+                  const preset = value as ExportDatePreset;
+                  exportDatePresetRef.current = preset;
+                  setExportDatePreset(preset);
+                  if (preset === "all" || preset === "custom") setExportRange(null);
+                  const anchor = asOf ? dayjs(asOf) : null;
+                  if (anchor && preset !== "all" && preset !== "custom") {
+                    setExportRange(presetRange(preset, anchor));
+                  }
+                }}
+                options={[
+                  { label: "全部", value: "all" },
+                  { label: "今天", value: "today" },
+                  { label: "近7天", value: "last7" },
+                  { label: "近14天", value: "last14" },
+                  { label: "近21天", value: "last21" },
+                  { label: "近30天", value: "last30" },
+                  { label: "本月", value: "month" },
+                  { label: "自定义", value: "custom" },
+                ]}
+              />
+            </div>
+            <DatePicker.RangePicker
+              aria-label="导出自定义起止日期"
+              value={exportRange}
+              onChange={(value) => {
+                exportDatePresetRef.current = "custom";
+                setExportDatePreset("custom");
+                setExportRange(value as [Dayjs, Dayjs] | null);
+              }}
+            />
+            <Alert
+              type="info"
+              showIcon
+              message={`相对日期按 ${asOf || "后端业务日"} 计算；“全部”不附带日期范围。`}
+            />
+            {Object.entries(activeDownloads).map(([key, label]) => (
+              <Alert
+                key={key}
+                type="info"
+                showIcon
+                role="status"
+                message={label}
+              />
+            ))}
+          </Space>
+        </Card>
+
+        <Card title="项目与合同下载">
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Space wrap>
+              <Button
+                loading={exportingProjects}
+                disabled={exportingProjects}
+                onClick={exportProjectsCsv}
+              >
+                导出当前项目统计 CSV
+              </Button>
+              <Button
+                loading={exportingProfit}
+                disabled={exportingProfit}
+                onClick={exportContractProfitCsv}
+              >
+                导出合同详细盈亏 CSV
+              </Button>
+              {!scopedSales && (
+                <Button loading={exporting} disabled={exporting} onClick={exportOrders}>
+                  导出订单汇总 Excel
+                </Button>
+              )}
+              {canExportProjectWorkbooks && (
+                <Button
+                  type="primary"
+                  loading={exportingWorkbooks}
+                  disabled={exportingWorkbooks}
+                  onClick={exportWorkbooks}
+                >
+                  批量导出项目工作簿 ZIP
+                </Button>
+              )}
+            </Space>
+            <Space wrap style={{ width: "100%" }}>
+              <Input
+                aria-label="单项目名称"
+                placeholder="输入完整项目名称"
+                value={downloadProject}
+                onChange={(event) => setDownloadProject(event.target.value)}
+                style={{ width: "min(320px, 100%)" }}
+              />
+              <Button
+                loading={exportingLines}
+                disabled={exportingLines}
+                onClick={() => void exportLines(downloadProject.trim())}
+              >
+                导出单项目明细 CSV
+              </Button>
+            </Space>
+            {canExportProjectWorkbooks && (
+              <Space wrap style={{ width: "100%" }}>
+                <Input
+                  aria-label="单合同编号"
+                  placeholder="输入完整合同编号"
+                  value={downloadContract}
+                  onChange={(event) => setDownloadContract(event.target.value)}
+                  style={{ width: "min(320px, 100%)" }}
+                />
+                <Button
+                  loading={exportingSingleWorkbook}
+                  disabled={exportingSingleWorkbook}
+                  onClick={() => downloadContract.trim()
+                    ? void exportSingleWorkbook(downloadContract.trim())
+                    : message.warning("请先输入要导出的合同编号")}
+                >
+                  导出单合同工作簿 XLSX
+                </Button>
+                <Button
+                  loading={downloadingTemplate}
+                  disabled={downloadingTemplate}
+                  onClick={() => void downloadRoundtripTemplate(
+                    downloadContract.trim() || undefined,
+                  )}
+                >
+                  下载固定回填模板
+                </Button>
+              </Space>
+            )}
+          </Space>
+        </Card>
+
+        {canExportProjectWorkbooks && (
+          <Card title="固定回填工作簿">
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              <Alert
+                type="info"
+                showIcon
+                message="全量超过单本资源上限时，改用按合同拆分的批量可回填 ZIP；每本仍需单独导入。"
+              />
+              <Button
+                type="primary"
+                loading={downloadingTemplateBundle}
+                disabled={downloadingTemplateBundle}
+                onClick={() => void downloadRoundtripTemplateBundle()}
+              >
+                批量下载可回填工作簿 ZIP
+              </Button>
+              {canApplyRoundtripWorkbook && (
+                <Upload
+                  accept=".xlsx"
+                  maxCount={1}
+                  showUploadList={false}
+                  disabled={importingRoundtrip}
+                  beforeUpload={(file) => {
+                    void importRoundtripWorkbook(file);
+                    return false;
+                  }}
+                >
+                  <Button loading={importingRoundtrip} disabled={importingRoundtrip}>
+                    导入更新工作簿
+                  </Button>
+                </Upload>
+              )}
+              {roundtripResult && <Alert type="success" showIcon message={roundtripResult} />}
+              {roundtripError && <Alert type="error" showIcon message={roundtripError} />}
+            </Space>
+          </Card>
+        )}
+      </Space>
+    );
+  }
+
+  if (view === "reminders") {
+    return (
+      <Space direction="vertical" size="large" style={{ width: "100%" }}>
+        <PageHeader
+          title="项目提醒"
+          subtitle="集中查看期限、成本完整性、费用水位和预算参考；提醒不阻挡项目数据阅读。"
+        />
+        <Card title="提醒筛选">
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>维保期限</div>
+              <div style={{
+                width: "100%",
+                minWidth: 0,
+                maxWidth: "100%",
+                overflowX: "auto",
+                paddingBottom: 2,
+              }}>
+                <Segmented
+                  aria-label="维保期限筛选"
+                  value={lifecycle}
+                  onChange={(value) => setLifecycle(value as LifecycleFilter)}
+                  options={[
+                    { label: `进行中 ${lifecycleCounts.ongoing}`, value: "ongoing" },
+                    { label: `已结束 ${lifecycleCounts.ended}`, value: "ended" },
+                    { label: `期限缺失 ${lifecycleCounts.missing}`, value: "missing" },
+                    {
+                      label: `全部 ${
+                        lifecycleCounts.ongoing + lifecycleCounts.ended + lifecycleCounts.missing
+                      }`,
+                      value: "all",
+                    },
+                  ]}
+                />
+              </div>
+            </div>
+            <Input.Search
+              placeholder="搜索项目名"
+              allowClear
+              style={{ width: "min(320px, 100%)" }}
+              onChange={(event) => {
+                if (!event.target.value) setQ("");
+              }}
+              onSearch={(value) => setQ(value.trim())}
+            />
+          </Space>
+        </Card>
+        <Card title="项目提醒" loading={boardLoading}>
+          {boardLoadError ? (
+            <Alert
+              type="error"
+              showIcon
+              message="项目提醒加载失败，旧结果已清空。"
+              action={<Button size="small" danger onClick={() => void loadBoard()}>重试</Button>}
+            />
+          ) : board.length === 0 ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前筛选暂无提醒" />
+          ) : (
+            <Space direction="vertical" size={10} style={{ width: "100%" }}>
+              {board.map((item) => {
+                const status = effectiveBoardStatus(item);
+                const meta = STATUS_META[status];
+                return (
+                  <Alert
+                    key={item.contract || "(none)"}
+                    type={status === "red" || status === "incomplete_cost" ? "warning" : "info"}
+                    showIcon
+                    message={
+                      <Space wrap>
+                        <b>{item.contract || "（未关联合同）"}</b>
+                        <Tag color={status === "red" ? "red" : status === "yellow" ? "gold" : "default"}>
+                          {meta.label}
+                        </Tag>
+                        <LifecycleTag status={item.lifecycle_status} />
+                      </Space>
+                    }
+                    description={`成本缺失 ${item.missing_cost_lines ?? "—"} 行 · 费用${
+                      item.expense_data_available === true ? "已就绪" : "未就绪"
+                    }`}
+                  />
+                );
+              })}
+            </Space>
+          )}
+        </Card>
+      </Space>
+    );
+  }
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <PageHeader
-        title="项目成本"
+        title="项目数据"
         subtitle={`维保备件成本按实际采购参考、估算参考、成本缺失分层；合同毛利同时保留含税与未税事实，证据不完整时保持空值${startDate ? ` · 起算日 ${startDate}` : ""}`}
       />
-      <Card>
-        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+      <Card
+        title={<Space>详细盈亏
+          <Tooltip title="按合同聚合收入、备件成本与费用。含税、未税独立计算；任一口径证据不完整时，该口径毛利保持为空并显示原因。">
+            <InfoCircleOutlined style={{ color: "var(--mb-text-3)" }} />
+          </Tooltip></Space>}
+        loading={boardLoading}
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%", marginBottom: 12 }}>
           <div>
             <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>维保期限</div>
-            <div style={{ maxWidth: "100%", overflowX: "auto", paddingBottom: 2 }}>
+            <div style={{
+              width: "100%",
+              minWidth: 0,
+              maxWidth: "100%",
+              overflowX: "auto",
+              paddingBottom: 2,
+            }}>
               <Segmented
                 aria-label="维保期限筛选"
                 value={lifecycle}
@@ -1085,199 +1620,53 @@ export default function ProjectCostPage() {
               />
             </div>
           </div>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>
-              项目维保展示口径
-            </div>
-            <Space wrap>
-              <Tag color="blue">{PROFIT_BASIS_LABEL[maintenanceBasis]}</Tag>
-              <span style={{ color: "var(--mb-text-3)", fontSize: 12.5 }}>
-                由管理员在系统设置中统一配置，普通员工不能临时切换。
-              </span>
-            </Space>
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 24, width: "100%", minWidth: 0 }}>
-            <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowX: "auto", paddingBottom: 2 }}>
-              <Segmented
-                aria-label="维保订单导出日期"
-                value={exportDatePreset}
-                onChange={(value) => {
-                  const preset = value as ExportDatePreset;
-                  exportDatePresetRef.current = preset;
-                  setExportDatePreset(preset);
-                  if (preset === "all") setExportRange(null);
-                  if (preset === "custom") setExportRange(null);
-                  const anchor = asOf ? dayjs(asOf) : null;
-                  if (anchor && preset !== "all" && preset !== "custom") {
-                    setExportRange(presetRange(preset, anchor));
-                  }
-                }}
-                options={[
-                  { label: "全部", value: "all" },
-                  { label: "今天", value: "today", disabled: !asOf },
-                  { label: "近7天", value: "last7", disabled: !asOf },
-                  { label: "近14天", value: "last14", disabled: !asOf },
-                  { label: "近21天", value: "last21", disabled: !asOf },
-                  { label: "近30天", value: "last30", disabled: !asOf },
-                  { label: "本月", value: "month", disabled: !asOf },
-                  { label: "自定义", value: "custom" },
-                ]}
-              />
-            </div>
-            <DatePicker.RangePicker
-              aria-label="导出自定义起止日期"
-              value={exportRange}
-              onChange={(v) => {
-                exportDatePresetRef.current = "custom";
-                setExportDatePreset("custom");
-                setExportRange(v as [Dayjs, Dayjs] | null);
-              }}
-            />
-            <Input.Search
-              placeholder="搜索项目名"
-              allowClear
-              style={{ width: "min(260px, 100%)" }}
-              onChange={(event) => {
-                if (!event.target.value) setQ("");
-              }}
-              onSearch={(v) => setQ(v.trim())}
-            />
-            {isAdmin && (
-              <Button type="primary" loading={recomputing} onClick={recompute}>重算成本</Button>
-            )}
-            {canExportProjectWorkbooks && (
-              <Button
-                type="primary"
-                loading={exportingWorkbooks}
-                disabled={exportingWorkbooks}
-                onClick={exportWorkbooks}
-              >
-                批量导出项目工作簿 ZIP
-              </Button>
-            )}
-            <Button loading={exporting} disabled={exporting} onClick={exportOrders}>
-              导出订单汇总 Excel
-            </Button>
-            <Button
-              loading={exportingProjects}
-              onClick={exportProjectsCsv}
-              disabled={!rows.length || exportingProjects}
-            >导出当前项目统计 CSV</Button>
-            {canExportProjectWorkbooks && (
-              <>
-                <Button
-                  loading={downloadingTemplate}
-                  disabled={downloadingTemplate}
-                  onClick={() => void downloadRoundtripTemplate()}
-                >
-                  下载固定回填模板
-                </Button>
-                {canApplyRoundtripWorkbook && (
-                  <Upload
-                    accept=".xlsx"
-                    maxCount={1}
-                    showUploadList={false}
-                    disabled={importingRoundtrip}
-                    beforeUpload={(file) => {
-                      void importRoundtripWorkbook(file);
-                      return false;
-                    }}
-                  >
-                    <Button loading={importingRoundtrip} disabled={importingRoundtrip}>
-                      导入更新工作簿
-                    </Button>
-                  </Upload>
-                )}
-              </>
-            )}
-            <div
-              aria-label="批量导出说明"
-              style={{ width: "100%", color: "var(--mb-text-2)", fontSize: 12.5, lineHeight: 1.6 }}
-            >
-              <div>日期只控制导出内容，不改变页面项目、合同毛利或明细列表。</div>
-              <div>日期范围同时限制每本工作簿内的订单、明细和报销；选择“全部”才导出完整合同数据。</div>
-              <div>批量导出不受项目搜索或维保期限筛选影响，以所选日期范围为准。</div>
-              <div>固定回填模板可由工作人员填写订单或报销更新后直接导回；系统自动校验并返回处理摘要，无需审批。</div>
-              <div>全局模板数据过多时，请在下方合同卡点击“回填模板”，按单个合同分批处理。</div>
-            </div>
-          </div>
-          {roundtripResult && (
-            <Alert type="success" showIcon message={roundtripResult} />
-          )}
-          {roundtripError && (
-            <Alert type="error" showIcon message={roundtripError} />
-          )}
-          <Alert
-            type={lifecycleCounts.missing ? "warning" : "info"}
-            showIcon
-            message={`日期范围仅用于导出；维保期限状态按 ${asOf || "后端请求当天"} 判断。`}
-            description={`页面始终展示当前完整项目视图；终止日当天仍算进行中，未填写终止日期的项目归入“期限缺失”。当前有 ${lifecycleCounts.missing} 个期限缺失项目。`}
+          <Input.Search
+            placeholder="搜索项目名"
+            allowClear
+            style={{ width: "min(260px, 100%)" }}
+            onChange={(event) => {
+              if (!event.target.value) setQ("");
+            }}
+            onSearch={(value) => setQ(value.trim())}
           />
-          {loadError && (
-            <Alert
-              type="error"
-              showIcon
-              message="项目成本加载失败，旧结果已清空。"
-              description="请检查网络或账号权限后重试；错误期间不会继续展示上一筛选的数据。"
-              action={<Button size="small" danger onClick={load}>重试</Button>}
-            />
-          )}
         </Space>
-      </Card>
-
-      <Card
-        title={<Space>合同预算与双口径毛利
-          <Tooltip title="按合同聚合收入、备件成本与费用。含税、未税独立计算；任一口径证据不完整时，该口径毛利保持为空并显示原因。">
-            <InfoCircleOutlined style={{ color: "var(--mb-text-3)" }} />
-          </Tooltip></Space>}
-      >
-        {!boardDecisionRestricted && (
-          <div style={{ maxWidth: "100%", overflowX: "auto", marginBottom: 12, paddingBottom: 2 }}>
-            <Segmented
-              aria-label="预算消耗参考状态筛选"
-              value={boardFilter}
-              onChange={(v) => setBoardFilter(v as string)}
-              options={[
-                { label: `全部 ${board.length}`, value: "all" },
-                { label: `待补成本 ${board.filter((b) =>
-                  effectiveBoardStatus(b) === "incomplete_cost").length}`,
-                  value: "incomplete_cost" },
-                { label: `待补费用数据 ${board.filter((b) =>
-                  effectiveBoardStatus(b) === "expense_data_unavailable").length}`,
-                  value: "expense_data_unavailable" },
-                { label: `🔴 ${board.filter((b) =>
-                  effectiveBoardStatus(b) === "red").length}`, value: "red" },
-                { label: `🟡 ${board.filter((b) =>
-                  effectiveBoardStatus(b) === "yellow").length}`, value: "yellow" },
-                { label: `🟢 ${board.filter((b) =>
-                  effectiveBoardStatus(b) === "green").length}`, value: "green" },
-                { label: `无预算 ${board.filter((b) =>
-                  effectiveBoardStatus(b) === "no_budget").length}`,
-                  value: "no_budget" },
-              ]}
-            />
-          </div>
-        )}
+        <Space wrap style={{ marginBottom: 12 }}>
+          <Tag color="blue">{PROFIT_BASIS_LABEL[maintenanceBasis]}</Tag>
+          <span style={{ color: "var(--mb-text-3)", fontSize: 12.5 }}>
+            由管理员在系统设置中统一配置，普通员工不能临时切换。
+          </span>
+        </Space>
         {boardDecisionRestricted && (
           <Alert
             type="info"
             showIcon
             style={{ marginBottom: 12 }}
-            message="当前账号不展示预算消耗决策分类与状态筛选"
-            description="合同按最近出库日期排列；实际、估算、缺失等成本事实仍按账号的数据权限显示。"
+            message="当前账号不展示合同金额、毛利等受限字段"
+            description="实际、估算、缺失等成本事实仍按账号的数据权限显示。"
           />
         )}
-        {board.length === 0 ? (
+        {boardLoadError ? (
+          <Alert
+            type="error"
+            showIcon
+            message="详细盈亏加载失败"
+            description="项目成本事实仍可独立查看；可只重试详细盈亏。"
+            action={(
+              <Button size="small" danger onClick={() => void loadBoard()}>
+                重试详细盈亏
+              </Button>
+            )}
+          />
+        ) : board.length === 0 ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={
             q || lifecycle !== "ongoing"
               ? "当前筛选暂无合同，请调整项目或期限状态"
               : "暂无数据（导入维保出库后自动生成）"
           } />
         ) : (
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            {(boardDecisionRestricted || boardFilter === "all"
-              ? board : board.filter((b) =>
-                effectiveBoardStatus(b) === boardFilter)).map((b) => {
+          <>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            {pagedBoard.map((b) => {
               // 决策字段被 RBAC 隐藏时保持中性；不受限响应则对缺失/null/未知值
               // 一律 fail-closed，禁止回退旧 status 伪造绿灯。
               const normalizedQuality = normalizeCostQuality(b.cost_quality);
@@ -1299,21 +1688,10 @@ export default function ProjectCostPage() {
                 ? undefined : incomplete ? "incomplete_cost" : normalizedDecision;
               const expenseUnavailable = !boardDecisionRestricted
                 && decisionStatus === "expense_data_unavailable";
-              const meta = decisionStatus ? STATUS_META[decisionStatus] : NEUTRAL_META;
-              const hasBudgetDecision = decisionStatus === "red"
-                || decisionStatus === "yellow"
-                || decisionStatus === "green";
-              const spentPct = !boardDecisionRestricted && !incomplete && hasBudgetDecision
+              const spentPct = !boardDecisionRestricted && !incomplete && !expenseUnavailable
                 && b.budget != null && b.budget > 0 && b.spent != null
                 && b.remaining != null && b.remaining_pct != null
                 ? Math.round((b.spent / b.budget) * 100) : null;
-              let timePct: number | null = null;
-              if (!incomplete && !expenseUnavailable && b.maint_start && b.maint_end) {
-                const s0 = new Date(b.maint_start).getTime();
-                const e0 = new Date(b.maint_end).getTime();
-                if (e0 > s0) timePct = Math.min(Math.max(
-                  Math.round(((Date.now() - s0) / (e0 - s0)) * 100), 0), 100);
-              }
               return (
                 <div
                   key={b.contract ?? "(none)"}
@@ -1321,37 +1699,14 @@ export default function ProjectCostPage() {
                   style={{
                   width: 370, maxWidth: "100%", boxSizing: "border-box",
                   borderRadius: 8, padding: "12px 14px",
-                  border: "1px solid " + meta.color + "44",
-                  borderLeft: "4px solid " + meta.color, background: meta.bg,
+                  border: "1px solid var(--mb-border)",
+                  background: "var(--mb-surface)",
                   }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <b style={{ fontFamily: "monospace", fontSize: 13 }}>{b.contract || "（未关联合同）"}</b>
                     <Space size={6}>
-                      {decisionStatus && (
-                        <Tag color={decisionStatus === "red" ? "red" : decisionStatus === "yellow" ? "gold"
-                          : decisionStatus === "green" ? "green"
-                            : decisionStatus === "incomplete_cost" ? "orange" : "default"}>
-                          {meta.label}
-                        </Tag>
-                      )}
                       <LifecycleTag status={b.lifecycle_status} />
-                      {b.contract && canExportProjectWorkbooks && (
-                        <>
-                          <a
-                            style={{ fontSize: 12 }}
-                            onClick={() => void exportSingleWorkbook(b.contract!)}
-                          >
-                            单本工作簿
-                          </a>
-                          <a
-                            style={{ fontSize: 12 }}
-                            onClick={() => void downloadRoundtripTemplate(b.contract!)}
-                          >
-                            回填模板
-                          </a>
-                        </>
-                      )}
                     </Space>
                   </div>
                   {!boardDecisionRestricted && (
@@ -1384,25 +1739,24 @@ export default function ProjectCostPage() {
                   )}
                   {incomplete ? (
                     <Alert
-                      type="warning"
-                      showIcon
+                      type="info"
                       style={{ marginTop: 8 }}
-                      message="成本不完整，需补数据"
-                      description="当前仅展示已知成本事实，不计算预算余额或红黄绿参考。"
+                      message="成本证据不完整"
+                      description="当前仅展示已知成本事实，不计算预算余额。"
                     />
                   ) : expenseUnavailable ? (
                     <Alert
-                      type="warning"
-                      showIcon
+                      type="info"
                       style={{ marginTop: 8 }}
-                      message="费用数据未就绪"
-                      description="当前只展示已知备件成本；无报销记录不等于费用为 0，不计算完整支出、预算余额或红黄绿参考。"
+                      message="费用证据未就绪"
+                      description="当前只展示已知备件成本；无报销记录不等于费用为 0，不计算完整支出或预算余额。"
                     />
                   ) : !boardDecisionRestricted && (
                     <div style={{ marginTop: 8, fontSize: 12.5 }}>
-                      合同额参考 {money(b.budget)} · 已知支出兼容参考（混合原值） {money(b.spent)}
+                      合同额参考 {b.budget != null && b.budget > 0 ? money(b.budget) : "—"}
+                      {" · "}已知支出兼容参考（混合原值） {money(b.spent)}
                       {" · "}剩余预算{" "}
-                      <span style={{ color: meta.color, fontWeight: 600 }}>
+                      <span style={{ fontWeight: 600 }}>
                         {money(b.remaining)}{b.remaining_pct != null ? `（${b.remaining_pct}%）` : ""}
                       </span>
                     </div>
@@ -1410,11 +1764,9 @@ export default function ProjectCostPage() {
                   {spentPct != null && (
                     <div style={{ marginTop: 4 }}>
                       <Progress percent={Math.min(spentPct, 100)} size="small"
-                                strokeColor={meta.color} showInfo={false} />
+                                strokeColor="var(--mb-accent)" showInfo={false} />
                       <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>
-                        预算消耗参考 {spentPct}%{spentPct > 100 ? "（超过合同额参考）" : ""}
-                        {timePct != null ? ` / 时间进度 ${timePct}%` : ""}
-                        {timePct != null && spentPct > timePct + 15 ? " · 支出进度快于时间 ⚠" : ""}
+                        已知支出占合同额参考 {spentPct}%
                       </div>
                     </div>
                   )}
@@ -1453,7 +1805,19 @@ export default function ProjectCostPage() {
                 </div>
               );
             })}
-          </div>
+            </div>
+            {board.length > BOARD_PAGE_SIZE && (
+              <Pagination
+                aria-label="详细盈亏合同分页"
+                current={boardPage}
+                pageSize={BOARD_PAGE_SIZE}
+                total={board.length}
+                showSizeChanger={false}
+                onChange={setBoardPage}
+                style={{ marginTop: 16, textAlign: "right" }}
+              />
+            )}
+          </>
         )}
       </Card>
 
@@ -1486,7 +1850,28 @@ export default function ProjectCostPage() {
         /></Card></Col>
       </Row>
 
-      <Card title="项目成本事实分层">
+      <Card
+        title="项目成本事实分层"
+        extra={isAdmin ? (
+          <Button type="primary" loading={recomputing} onClick={recompute}>
+            重算成本
+          </Button>
+        ) : null}
+      >
+        {projectsLoadError && (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="项目成本事实加载失败"
+            description="详细盈亏仍可独立查看；可只重试项目事实。"
+            action={(
+              <Button size="small" danger onClick={() => void loadProjects()}>
+                重试项目事实
+              </Button>
+            )}
+          />
+        )}
         <Alert
           type="info" showIcon style={{ marginBottom: 12 }}
           message="含税与未税收入、成本、毛利独立展示；含估算会明确标识，成本、收入、税率或费用证据不完整时对应毛利保持为空，不以 0 补齐。"
@@ -1495,7 +1880,7 @@ export default function ProjectCostPage() {
           storageKey="maint-projects"
           rowKey="project"
           size="small"
-          loading={loading}
+          loading={projectsLoading}
           columns={projectCols}
           dataSource={rows}
           scroll={{ x: maintenanceBasis === "both" ? 1960 : 1640 }}
@@ -1523,7 +1908,6 @@ export default function ProjectCostPage() {
                 }}
               />
             )}
-            <Button size="small" onClick={exportLines} disabled={!linesTotal}>导出明细 CSV</Button>
           </Space>
         }
       >

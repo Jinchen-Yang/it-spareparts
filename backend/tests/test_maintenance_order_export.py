@@ -170,34 +170,21 @@ def _seed_orders(db, specs):
     db.commit()
 
 
-def test_empty_export_is_valid_two_sheet_xlsx_with_headers(db):
+def test_empty_export_returns_clear_422_without_generating_an_xlsx(db):
     response = _admin_client(db).get("/api/maintenance/orders/export")
 
-    assert response.status_code == 200, response.text
-    assert response.headers["content-type"] == (
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-    assert response.content[:2] == b"PK"
-    assert response.headers["cache-control"] == "no-store"
-    assert response.headers["x-content-type-options"] == "nosniff"
-    workbook = _workbook(response)
-    assert workbook.sheetnames == ["维保订单", "订单明细"]
-    assert list(workbook["维保订单"].values) == [
-        ("数据库ID", "原始订单ID", "维保单号", "制单日期", "销售订单", "项目名", "终端客户",
-         "需求类型", "业务类型", "销售人员", "出库仓库", "维保开始日期", "维保终止日期", "流程状态"),
-    ]
-    assert list(workbook["订单明细"].values) == [maintenance_export.LINE_HEADERS]
+    assert response.status_code == 422
+    assert response.json()["detail"] == "所选范围内没有可导出的维保订单"
 
 
-def test_legacy_project_workbook_uses_sensitive_download_headers(db):
+def test_legacy_project_workbook_returns_404_for_unknown_contract(db):
     response = _admin_client(db).get(
         "/api/maintenance/export-workbook",
         params={"contract": "XSDD-NOT-FOUND"},
     )
 
-    assert response.status_code == 200, response.text
-    assert response.headers["cache-control"] == "no-store"
-    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.status_code == 404
+    assert response.json()["detail"] == "合同不存在：XSDD-NOT-FOUND"
 
 
 def test_export_closes_workbook_stream_after_response_is_consumed(db, monkeypatch):
@@ -249,6 +236,7 @@ def test_build_workbook_cleans_writer_temp_files_when_database_stream_fails(db, 
 
 
 def test_build_workbook_closes_output_and_cleans_temp_files_when_save_fails(db, monkeypatch):
+    _seed_orders(db, [("SAVE-FAIL", date(2026, 7, 1), "已生效", None, 1)])
     before = set(ALL_TEMP_FILES)
     output = io.BytesIO()
     monkeypatch.setattr(maintenance_export, "SpooledTemporaryFile", lambda **kwargs: output)
@@ -266,6 +254,7 @@ def test_build_workbook_closes_output_and_cleans_temp_files_when_save_fails(db, 
 
 
 def test_export_rejects_final_xlsx_size_and_cleans_all_resources(db, monkeypatch):
+    _seed_orders(db, [("SIZE-LIMIT", date(2026, 7, 1), "已生效", None, 1)])
     before = set(ALL_TEMP_FILES)
     output = io.BytesIO()
     monkeypatch.setattr(maintenance_export, "SpooledTemporaryFile", lambda **kwargs: output)
@@ -424,6 +413,7 @@ def test_second_order_export_is_rejected_before_preflight_with_retry_after(db, m
 
 
 def test_database_lock_rejects_concurrent_export_across_sessions(db):
+    _seed_orders(db, [("LOCK", date(2026, 7, 1), "已生效", None, 1)])
     client = _admin_client(db)
     ctx = UserContext(user_id="holder", role="admin")
     with SessionLocal() as holder:
@@ -690,6 +680,7 @@ def test_export_removes_xml_forbidden_unicode_noncharacters(db):
 
 
 def test_range_export_filename_contains_actual_boundaries(db):
+    _seed_orders(db, [("RANGE", date(2026, 7, 15), "已生效", None, 1)])
     response = _admin_client(db).get(
         "/api/maintenance/orders/export",
         params={"date_from": "2026-07-01", "date_to": "2026-07-31"},
@@ -703,6 +694,7 @@ def test_range_export_filename_contains_actual_boundaries(db):
 
 
 def test_export_audit_log_records_all_and_date_range_scopes(db, monkeypatch):
+    _seed_orders(db, [("AUDIT", date(2026, 7, 15), "已生效", None, 1)])
     audit = Mock()
     monkeypatch.setattr(maintenance_api, "record_access_log", audit)
     client = _admin_client(db)

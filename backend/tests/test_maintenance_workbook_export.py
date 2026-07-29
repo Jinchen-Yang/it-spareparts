@@ -18,7 +18,12 @@ from app.auth import hash_password
 from app.db import SessionLocal
 from app.main import app
 from app.models.dimensions import DimPart
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FMaintenanceOrder,
+    FProjectExpense,
+    MaintenanceContractWorkbookState,
+)
 from app.models.system import SysImportBatch, SysUser
 from app.security import UserContext
 from app.services import maintenance_workbook_export
@@ -192,6 +197,175 @@ def test_bulk_export_rejects_when_all_selected_orders_lack_contract(db):
     assert response.json()["detail"] == "所选范围内的已生效维保订单均未关联合同"
 
 
+def test_workbook_selection_excludes_contracts_before_maintenance_cost_start_date(db):
+    batch = _batch(db)
+    _order(
+        db,
+        batch,
+        raw_id="PRE-COST-START",
+        contract="XSDD-PRE-COST-START",
+        on=date(2023, 12, 31),
+    )
+    db.commit()
+    client = _admin_client(db)
+
+    single = client.get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "XSDD-PRE-COST-START"},
+    )
+    bulk = client.get("/api/maintenance/export-workbooks")
+
+    assert single.status_code == 422
+    assert "起算日" in single.json()["detail"]
+    assert bulk.status_code == 422
+    assert "起算日" in bulk.json()["detail"]
+
+
+def test_contract_workbook_audits_expense_inc_ex_and_evidence_status(db):
+    batch = _batch(db)
+    _order(db, batch, raw_id="EXPENSE-AUDIT", contract="XSDD-EXPENSE-AUDIT")
+    db.add_all([
+        FProjectExpense(
+            raw_line_id="EXPENSE-AUDIT-ROW",
+            bxd_no="BXD-EXPENSE-AUDIT",
+            line_no=1,
+            data_status="已结束",
+            expense_date=date(2026, 7, 16),
+            linked_sales_order_no="XSDD-EXPENSE-AUDIT",
+            amount=Decimal("100"),
+            amount_ex_tax=Decimal("100"),
+            amount_inc_tax=Decimal("113"),
+            tax_basis="ex",
+            import_batch_id=batch.id,
+        ),
+        MaintenanceContractWorkbookState(
+            contract_no="XSDD-EXPENSE-AUDIT",
+            revision=1,
+            expense_snapshot_complete=True,
+        ),
+    ])
+    db.commit()
+
+    response = _admin_client(db).get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "XSDD-EXPENSE-AUDIT"},
+    )
+
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(io.BytesIO(response.content), data_only=False)
+    try:
+        summary = {}
+        for row in workbook["项目预算"].iter_rows(min_row=3, values_only=True):
+            if row[0]:
+                summary[str(row[0])] = row[1]
+            if len(row) > 2 and row[2]:
+                summary[str(row[2])] = row[3]
+        assert summary["报销费用（含税）"] == 113
+        assert summary["报销费用（未税）"] == 100
+        assert summary["费用证据状态"] == "完整"
+
+        details = workbook["报销明细"]
+        headers = [cell.value for cell in details[2]]
+        row = dict(zip(headers, [cell.value for cell in details[3]], strict=True))
+        assert row["报销金额（含税）"] == 113
+        assert row["报销金额（未税）"] == 100
+        assert row["费用证据状态"] == "双口径已确认"
+    finally:
+        workbook.close()
+
+
+def test_contract_workbook_keeps_unready_expense_tax_amounts_blank(db):
+    batch = _batch(db)
+    _order(db, batch, raw_id="EXPENSE-UNREADY", contract="XSDD-EXPENSE-UNREADY")
+    db.add(FProjectExpense(
+        raw_line_id="EXPENSE-UNREADY-ROW",
+        bxd_no="BXD-EXPENSE-UNREADY",
+        line_no=1,
+        data_status="已结束",
+        expense_date=date(2026, 7, 16),
+        linked_sales_order_no="XSDD-EXPENSE-UNREADY",
+        amount=Decimal("100"),
+        amount_ex_tax=Decimal("100"),
+        amount_inc_tax=Decimal("113"),
+        tax_basis="ex",
+        import_batch_id=batch.id,
+    ))
+    db.commit()
+
+    response = _admin_client(db).get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "XSDD-EXPENSE-UNREADY"},
+    )
+
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(io.BytesIO(response.content), data_only=False)
+    try:
+        summary = {}
+        for row in workbook["项目预算"].iter_rows(min_row=3, values_only=True):
+            if row[0]:
+                summary[str(row[0])] = row[1]
+            if len(row) > 2 and row[2]:
+                summary[str(row[2])] = row[3]
+        assert summary["报销费用（含税）"] == "—"
+        assert summary["报销费用（未税）"] == "—"
+        assert summary["费用证据状态"] == "未就绪（无记录不等于0）"
+
+        details = workbook["报销明细"]
+        headers = [cell.value for cell in details[2]]
+        row = dict(zip(headers, [cell.value for cell in details[3]], strict=True))
+        assert row["报销金额（含税）"] is None
+        assert row["报销金额（未税）"] is None
+        assert row["费用证据状态"] == "费用快照未就绪"
+    finally:
+        workbook.close()
+
+
+def test_contract_workbook_excludes_expenses_before_maintenance_cost_start_date(db):
+    batch = _batch(db)
+    _order(db, batch, raw_id="POST-START", contract="XSDD-EXPENSE-START")
+    db.add_all([
+        FProjectExpense(
+            raw_line_id="EXPENSE-BEFORE-START",
+            bxd_no="BXD-BEFORE-START",
+            line_no=1,
+            data_status="已结束",
+            expense_date=date(2023, 12, 31),
+            linked_sales_order_no="XSDD-EXPENSE-START",
+            amount=Decimal("100"),
+            amount_ex_tax=Decimal("100"),
+            amount_inc_tax=Decimal("113"),
+            tax_basis="ex",
+            import_batch_id=batch.id,
+        ),
+        MaintenanceContractWorkbookState(
+            contract_no="XSDD-EXPENSE-START",
+            revision=1,
+            expense_snapshot_complete=True,
+        ),
+    ])
+    db.commit()
+
+    response = _admin_client(db).get(
+        "/api/maintenance/export-workbook",
+        params={"contract": "XSDD-EXPENSE-START"},
+    )
+
+    assert response.status_code == 200, response.text
+    workbook = load_workbook(io.BytesIO(response.content), data_only=False)
+    try:
+        summary = {}
+        for row in workbook["项目预算"].iter_rows(min_row=3, values_only=True):
+            if row[0]:
+                summary[str(row[0])] = row[1]
+            if len(row) > 2 and row[2]:
+                summary[str(row[2])] = row[3]
+        assert summary["报销费用（含税）"] == 0
+        assert summary["报销费用（未税）"] == 0
+        assert workbook["报销明细"].max_row == 2
+    finally:
+        workbook.close()
+
+
 def test_bulk_export_lists_each_unlinked_order_without_skipping_linked_contracts(db):
     batch = _batch(db)
     _order(db, batch, raw_id="LINKED", contract="XSDD-LINKED", on=date(2026, 7, 14))
@@ -218,7 +392,7 @@ def test_bulk_export_lists_each_unlinked_order_without_skipping_linked_contracts
         }]
 
 
-def test_bulk_export_uses_inclusive_dates_and_all_keeps_null_dates_but_not_inactive(db):
+def test_bulk_export_uses_inclusive_dates_and_all_excludes_null_dates_and_inactive(db):
     batch = _batch(db)
     _order(db, batch, raw_id="A-FIRST", contract="XSDD-A", on=date(2026, 7, 1))
     _order(db, batch, raw_id="A-LAST", contract="XSDD-A", on=date(2026, 7, 31))
@@ -254,11 +428,8 @@ def test_bulk_export_uses_inclusive_dates_and_all_keeps_null_dates_but_not_inact
     with ZipFile(io.BytesIO(all_dates.content)) as archive:
         generated = [row for row in _manifest(archive) if row["记录类型"] == "已生成"]
         assert [row["合同号"] for row in generated] == [
-            "XSDD-A", "XSDD-NULL", "XSDD-OUTSIDE",
+            "XSDD-A", "XSDD-OUTSIDE",
         ]
-        null_row = next(row for row in generated if row["合同号"] == "XSDD-NULL")
-        assert null_row["命中最早日期"] == ""
-        assert null_row["命中最晚日期"] == ""
 
 
 def test_date_range_limits_each_generated_workbook_to_the_closed_interval(db):
@@ -523,8 +694,8 @@ def test_workbook_renderer_forces_all_dynamic_formula_like_text_to_strings(db):
     assert [parts.cell(2, column).value for column in (1, 4, 10, 11, 16)] == [
         "'=ORDER", "'+PROJECT", "'-PN", "'=DESCRIPTION", "'+SERIAL",
     ]
-    assert [expenses.cell(3, column).data_type for column in (2, 3, 4, 5, 8)] == ["s"] * 5
-    assert [expenses.cell(3, column).value for column in (2, 3, 4, 5, 8)] == [
+    assert [expenses.cell(3, column).data_type for column in (2, 3, 4, 5, 11)] == ["s"] * 5
+    assert [expenses.cell(3, column).value for column in (2, 3, 4, 5, 11)] == [
         "'+PERSON", "'-TYPE", "'@CATEGORY", "'  =REASON", "'=EXPENSE",
     ]
 
@@ -1293,7 +1464,11 @@ def test_single_builder_closes_output_and_workbook_when_rendering_fails(db, monk
     )
 
     with pytest.raises(RuntimeError, match="render failed"):
-        maintenance_workbook_export.build_contract_workbook_file(db, "XSDD-FAIL")
+        maintenance_workbook_export.build_contract_workbook_file(
+            db,
+            "XSDD-FAIL",
+            resource_limits_preflighted=True,
+        )
 
     assert output.closed
     assert workbook.closed

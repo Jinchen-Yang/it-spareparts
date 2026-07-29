@@ -50,6 +50,10 @@ class WorkbookExportRejected(ValueError):
     """可安全展示给调用方的整批拒绝原因。"""
 
 
+class WorkbookExportNotFound(WorkbookExportRejected):
+    """请求的单合同业务对象不存在。"""
+
+
 class WorkbookExportBusy(RuntimeError):
     """当前应用实例已有一个批量工作簿构建任务。"""
 
@@ -106,7 +110,7 @@ class _ContractMatch:
     date_to: date | None
 
 
-def _selection_filters(
+def _requested_scope_filters(
     date_from: date | None,
     date_to: date | None,
 ) -> tuple:
@@ -117,6 +121,16 @@ def _selection_filters(
             FMaintenanceOrder.order_date <= date_to,
         )
     return filters
+
+
+def _selection_filters(
+    date_from: date | None,
+    date_to: date | None,
+) -> tuple:
+    return (
+        *_requested_scope_filters(date_from, date_to),
+        FMaintenanceOrder.order_date >= config.MAINT_COST_START_DATE,
+    )
 
 
 def _valid_contract_filter():
@@ -278,6 +292,7 @@ def _preflight_resource_limits(
     )
     expense_filters = [
         FProjectExpense.linked_sales_order_no.in_(contracts),
+        FProjectExpense.expense_date >= config.MAINT_COST_START_DATE,
     ]
     if date_from is not None:
         expense_filters.append(FProjectExpense.expense_date >= date_from)
@@ -438,6 +453,41 @@ def build_contract_workbook_file(
         raise WorkbookExportRejected("date_from 不能晚于 date_to")
     if not resource_limits_preflighted:
         _acquire_shared_source_lock(db)
+        contract_exists = bool(
+            db.scalar(
+                select(func.count(FMaintenanceOrder.id)).where(
+                    FMaintenanceOrder.linked_sales_order_no == contract,
+                )
+            )
+        )
+        if not contract_exists:
+            raise WorkbookExportNotFound(f"合同不存在：{contract}")
+        selected_orders = int(
+            db.scalar(
+                select(func.count(FMaintenanceOrder.id)).where(
+                    FMaintenanceOrder.linked_sales_order_no == contract,
+                    *_selection_filters(date_from, date_to),
+                )
+            )
+            or 0
+        )
+        if selected_orders == 0:
+            historical_orders = int(
+                db.scalar(
+                    select(func.count(FMaintenanceOrder.id)).where(
+                        FMaintenanceOrder.linked_sales_order_no == contract,
+                        *_requested_scope_filters(date_from, date_to),
+                    )
+                )
+                or 0
+            )
+            raise WorkbookExportRejected(
+                (
+                    "合同只有项目成本起算日前数据，不能生成误导性空账"
+                    if historical_orders
+                    else "合同存在，但所选范围内没有可导出的维保数据"
+                ),
+            )
         _preflight_resource_limits(
             db,
             [_ContractMatch(contract, 0, None, None)],
@@ -498,7 +548,21 @@ def _build_contract_workbooks_zip(
         )
     ) or 0
     if selected_orders == 0:
-        raise WorkbookExportRejected("所选范围内没有已生效维保订单")
+        historical_orders = int(
+            db.scalar(
+                select(func.count(FMaintenanceOrder.id)).where(
+                    *_requested_scope_filters(date_from, date_to),
+                )
+            )
+            or 0
+        )
+        raise WorkbookExportRejected(
+            (
+                "所选范围只有项目成本起算日前数据，不能生成误导性空账"
+                if historical_orders
+                else "所选范围内没有已生效维保订单"
+            ),
+        )
     if selected_orders > MAX_SELECTED_ORDERS:
         raise WorkbookExportRejected(
             f"命中维保订单超过批量上限 {MAX_SELECTED_ORDERS} 条",

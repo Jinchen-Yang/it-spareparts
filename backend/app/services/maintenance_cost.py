@@ -619,6 +619,28 @@ def _scoped_filters(stmt, date_from, date_to):
     return stmt
 
 
+def _effective_cost_date_from(date_from: date | None) -> date:
+    """项目成本及其费用证据统一不得早于项目成本起算日。"""
+    if date_from is None:
+        return config.MAINT_COST_START_DATE
+    return max(date_from, config.MAINT_COST_START_DATE)
+
+
+def _date_filtered_budget_decision(decision: dict, *, date_filtered: bool) -> dict:
+    """期间支出不得和整合同预算比较，但证据缺口仍须保持最高优先级。"""
+    if not date_filtered or decision["decision_status"] in {
+        "incomplete_cost",
+        "expense_data_unavailable",
+    }:
+        return decision
+    return {
+        "decision_status": "filtered_scope",
+        "known_spend_total": decision["known_spend_total"],
+        "remaining": None,
+        "remaining_pct": None,
+    }
+
+
 def _matched_maintenance_contracts(date_from, date_to, q_text: str):
     """找出命中项目搜索的合同号，但不裁掉同合同下的其他项目成本。
 
@@ -943,11 +965,17 @@ def _project_lines_query(
     month: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    user_ctx: security.UserContext | None = None,
 ):
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     base = select(ml, mo).join(mo, ml.order_id == mo.id)
     base = base.where(mo.project_std == project if project != "(未填项目)"
                       else mo.project_std.is_(None))
+    if security.is_scoped_sales(user_ctx):
+        if user_ctx and user_ctx.salesperson_name:
+            base = base.where(mo.salesperson == user_ctx.salesperson_name)
+        else:
+            base = base.where(text("false"))
     base = _scoped_filters(base, date_from, date_to)
     if month:
         base = base.where(func.to_char(mo.order_date, "YYYY-MM") == month)
@@ -960,10 +988,31 @@ def project_line_count(
     month: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    user_ctx: security.UserContext | None = None,
 ) -> int:
     """返回与项目明细/CSV 完全同作用域的行数，供资源预检。"""
-    base = _project_lines_query(project, month, date_from, date_to)
+    base = _project_lines_query(
+        project,
+        month,
+        date_from,
+        date_to,
+        user_ctx=user_ctx,
+    )
     return db.scalar(select(func.count()).select_from(base.subquery())) or 0
+
+
+def project_exists(
+    db: Session,
+    project: str,
+    *,
+    user_ctx: security.UserContext | None = None,
+) -> bool:
+    """在调用者可见行范围内判断项目对象，不暴露范围外项目的存在性。"""
+    visible = _project_lines_query(
+        project,
+        user_ctx=user_ctx,
+    )
+    return bool(db.scalar(select(visible.exists())))
 
 
 def _serialize_project_line(
@@ -1036,7 +1085,13 @@ def iter_project_lines(
 ):
     """流式遍历项目明细；与分页 API 共用查询和序列化真相源。"""
     ml, mo = FMaintenanceLine, FMaintenanceOrder
-    statement = _project_lines_query(project, month, date_from, date_to).order_by(
+    statement = _project_lines_query(
+        project,
+        month,
+        date_from,
+        date_to,
+        user_ctx=user_ctx,
+    ).order_by(
         mo.order_date.desc().nullslast(), ml.id.desc(),
     ).execution_options(stream_results=True, yield_per=yield_per)
     hide_cost_signals = security.is_field_hidden(user_ctx, "cost_total")
@@ -1058,7 +1113,13 @@ def project_lines(db: Session, project: str, month: str | None = None,
                   user_ctx: security.UserContext | None = None) -> dict:
     """单项目 SKU 级明细（分页）：含成本来源/税口径/追溯月/关联采购单，逐行可解释。"""
     ml, mo = FMaintenanceLine, FMaintenanceOrder
-    base = _project_lines_query(project, month, date_from, date_to)
+    base = _project_lines_query(
+        project,
+        month,
+        date_from,
+        date_to,
+        user_ctx=user_ctx,
+    )
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     page = max(page, 1)
     paged = base.order_by(
@@ -1119,6 +1180,7 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
     红黄绿；完整且无正预算才返回 ``no_budget``。
     """
     lifecycle = _normalize_lifecycle(lifecycle)
+    date_filtered = date_from is not None or date_to is not None
     as_of = as_of or business_today()
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     contract_col = func.coalesce(mo.linked_sales_order_no, "")
@@ -1274,7 +1336,7 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
     expense_evidence = maintenance_margin_evidence.load_untyped_expense_evidence(
         db,
         contract_nos,
-        date_from=date_from,
+        date_from=_effective_cost_date_from(date_from),
         date_to=date_to,
     )
     expense_snapshot_complete = (
@@ -1347,7 +1409,7 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
                 if contract_expense is not None else _ZERO
             ),
             expense_data_available=expense_data_available,
-            date_filtered=date_from is not None or date_to is not None,
+            date_filtered=date_filtered,
             revenue_ambiguous_inc=(
                 contract_revenue.ambiguous_inc
                 if contract_revenue is not None else False
@@ -1363,6 +1425,10 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             expense_total=expense,
             expense_data_available=expense_data_available,
             warn_pct=warn,
+        )
+        decision = _date_filtered_budget_decision(
+            decision,
+            date_filtered=date_filtered,
         )
         st = decision["decision_status"]
         remaining = decision["remaining"]
@@ -1415,10 +1481,11 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
     order = {
         "incomplete_cost": 0,
         "expense_data_unavailable": 1,
-        "red": 2,
-        "yellow": 3,
-        "green": 4,
-        "no_budget": 5,
+        "filtered_scope": 2,
+        "red": 3,
+        "yellow": 4,
+        "green": 5,
+        "no_budget": 6,
     }
     decision_restricted = profit_restricted or cost_restricted
     if decision_restricted:
@@ -1576,8 +1643,9 @@ def contract_workbook_data(
 
     pe = FProjectExpense
     expense_stmt = select(pe).where(pe.linked_sales_order_no == contract)
-    if date_from is not None:
-        expense_stmt = expense_stmt.where(pe.expense_date >= date_from)
+    expense_stmt = expense_stmt.where(
+        pe.expense_date >= _effective_cost_date_from(date_from),
+    )
     if date_to is not None:
         expense_stmt = expense_stmt.where(pe.expense_date <= date_to)
     exp_rows = db.execute(
@@ -1651,14 +1719,10 @@ def contract_workbook_data(
         expense_data_available=expense_data_available,
         warn_pct=Decimal(str(config.MAINT_BUDGET_WARN_PCT)),
     )
-    if date_filtered:
-        # 区间支出只是所选期间事实，不能与整合同预算比较并推导红黄绿或余量。
-        decision = {
-            "decision_status": "filtered_scope",
-            "known_spend_total": decision["known_spend_total"],
-            "remaining": None,
-            "remaining_pct": None,
-        }
+    decision = _date_filtered_budget_decision(
+        decision,
+        date_filtered=date_filtered,
+    )
     active_expense_evidence = maintenance_margin_evidence.summarize_expense_records(
         (
             expense.amount,
@@ -1668,6 +1732,22 @@ def contract_workbook_data(
         for expense in exp_rows
         if expense.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
     )
+    if not expense_data_available:
+        expense_inc = None
+        expense_ex = None
+        expense_evidence_status = "expense_data_unavailable"
+    elif active_expense_evidence is None:
+        expense_inc = _ZERO
+        expense_ex = _ZERO
+        expense_evidence_status = "complete"
+    else:
+        expense_inc = active_expense_evidence.expense_inc
+        expense_ex = active_expense_evidence.expense_ex
+        expense_evidence_status = (
+            "complete"
+            if expense_inc is not None and expense_ex is not None
+            else "expense_tax_unknown"
+        )
     margin_result = maintenance_margin.calculate_contract_margin(
         revenue_ex=(
             revenue_evidence.revenue_ex
@@ -1712,6 +1792,9 @@ def contract_workbook_data(
             "margin": margin_result,
             "decision": decision,
             "expense_data_available": expense_data_available,
+            "expense_inc": expense_inc,
+            "expense_ex": expense_ex,
+            "expense_evidence_status": expense_evidence_status,
             "expenses": exp_rows, "expense_total": expense_total,
             "monthly_parts": dict(monthly_parts),
             "monthly_expenses": {

@@ -344,6 +344,7 @@ def test_roundtrip_template_uses_visible_content_only_for_bounded_row_heights(
 
 
 def test_instruction_scope_summary_shows_all_scope_snapshot_from_signed_metadata(db):
+    _seed_contract(db, suffix="ALL-SCOPE", contract="XSDD-RT-ALL-SCOPE")
     output = maintenance_roundtrip.build_roundtrip_template(
         db,
         exported_by="tester",

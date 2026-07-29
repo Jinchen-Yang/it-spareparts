@@ -33,7 +33,7 @@ from openpyxl.utils import get_column_letter, range_boundaries
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.page import PageMargins
 from openpyxl.worksheet.table import Table, TableStyleInfo
-from sqlalchemy import distinct, func, select, text
+from sqlalchemy import Text, cast, distinct, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app import config, tax_policy
@@ -46,12 +46,15 @@ from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProject
 from app.models.maintenance import MaintenanceRoundtripOperation
 from app.models.system import SysAuditLog, SysImportBatch, SysRawFile
 from app.services import maintenance_cost
+from app.services.maintenance_workbook_export import (
+    MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK as STANDARD_MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK,
+)
 from app.services.maintenance_workbook_export import safe_xlsx_text
 
 
 PROTOCOL_ID = reader.ROUNDTRIP_PROTOCOL_ID
 SCHEMA_VERSION = "1.0"
-APP_VERSION = "1.19.0"
+APP_VERSION = "1.20.0"
 ROUNDTRIP_FILE_TYPE = "maint_roundtrip"
 TAX_RATE = tax_policy.TAX_RATE
 SHEET_NAMES = (
@@ -73,8 +76,19 @@ MAX_METADATA_ROWS = 128
 MAX_CELL_CHARS = 32_767
 MAX_WORKBOOK_BYTES = 256 * 1024 * 1024
 MAX_ROUNDTRIP_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
+MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK = STANDARD_MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK
+MAX_ROUNDTRIP_BUNDLE_CONTRACTS = 500
+MAX_ROUNDTRIP_BUNDLE_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_ROUNDTRIP_BUNDLE_MEMBER_BYTES = 240
 BLANK_CREATE_ROWS = 50
 ROUNDTRIP_EXPORT_ADVISORY_LOCK_KEY = 0x5254_584C  # "RTXL"
+_ORDER_RENDERED_TEXT_OVERHEAD_BYTES = 128
+_LINE_RENDERED_TEXT_OVERHEAD_BYTES = 128
+_EXPENSE_RENDERED_TEXT_OVERHEAD_BYTES = 128
+_MANUAL_RENDERED_TEXT_OVERHEAD_BYTES = 128
+_BLANK_RENDERED_TEXT_OVERHEAD_BYTES = BLANK_CREATE_ROWS * 64 * 2
+
+_INVALID_BUNDLE_MEMBER_CHARS = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
 
 _TECH_HEADERS = (
     "操作",
@@ -578,6 +592,134 @@ def _validate_date_pair(date_from: date | None, date_to: date | None) -> None:
         raise RoundtripWorkbookError("date_from 不能晚于 date_to")
 
 
+def _octet_length(value):
+    """在 PostgreSQL 端统计固定模板将输出的 UTF-8 文本字节。"""
+    return func.octet_length(func.coalesce(value, ""))
+
+
+def _selected_dynamic_text_bytes(
+    db: Session,
+    *,
+    order_filters: list,
+    expense_filters: list,
+) -> int:
+    """在 ORM 行物化前，以一个标量查询预估当前工作簿的动态文本总量。
+
+    项目页按订单行保守重复计入合同号和项目名，避免为精确去重再增加一次数据库
+    往返。其余表达式与固定模板真实输出列保持一致；行令牌、客户端行 ID 和预留
+    新增行使用固定开销计入。
+    """
+    rendered_project = func.coalesce(
+        func.nullif(FMaintenanceOrder.project_raw, ""),
+        FMaintenanceOrder.project_std,
+        "",
+    )
+    order_text_bytes = (
+        _octet_length(FMaintenanceOrder.order_no)
+        # 订单页各一次，项目页的合同号/项目名及 entity id 各再保守计两次。
+        + _octet_length(FMaintenanceOrder.linked_sales_order_no) * 3
+        + _octet_length(rendered_project) * 3
+        + _octet_length(DimCustomer.name_raw)
+        + _octet_length(FMaintenanceOrder.end_customer)
+        + _octet_length(FMaintenanceOrder.demand_type)
+        + _octet_length(FMaintenanceOrder.business_type)
+        + _octet_length(FMaintenanceOrder.salesperson)
+        + _octet_length(FMaintenanceOrder.warehouse)
+        + _octet_length(FMaintenanceOrder.data_status)
+        + _ORDER_RENDERED_TEXT_OVERHEAD_BYTES
+    )
+    order_total = (
+        select(func.coalesce(func.sum(order_text_bytes), 0))
+        .select_from(FMaintenanceOrder)
+        .outerjoin(DimCustomer, DimCustomer.id == FMaintenanceOrder.customer_id)
+        .where(*order_filters)
+        .scalar_subquery()
+    )
+
+    line_text_bytes = (
+        _octet_length(FMaintenanceOrder.order_no)
+        + _octet_length(FMaintenanceLine.pn_std)
+        + _octet_length(FMaintenanceLine.description)
+        + _octet_length(FMaintenanceLine.serial_numbers)
+        + _octet_length(FMaintenanceLine.cost_source)
+        + _LINE_RENDERED_TEXT_OVERHEAD_BYTES
+    )
+    line_total = (
+        select(func.coalesce(func.sum(line_text_bytes), 0))
+        .select_from(FMaintenanceLine)
+        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+        .where(*order_filters)
+        .scalar_subquery()
+    )
+
+    expense_text_bytes = (
+        _octet_length(FProjectExpense.linked_sales_order_no)
+        + _octet_length(FProjectExpense.person)
+        + _octet_length(FProjectExpense.expense_type)
+        + _octet_length(FProjectExpense.fee_category)
+        + _octet_length(FProjectExpense.reason)
+        + _octet_length(FProjectExpense.data_status)
+        + _octet_length(FProjectExpense.bxd_no)
+        + _octet_length(FProjectExpense.tax_basis)
+        + _EXPENSE_RENDERED_TEXT_OVERHEAD_BYTES
+    )
+    expense_total = (
+        select(func.coalesce(func.sum(expense_text_bytes), 0))
+        .select_from(FProjectExpense)
+        .where(*expense_filters)
+        .scalar_subquery()
+    )
+
+    model = getattr(maintenance_models, "MaintenanceManualCostOverride", None)
+    if model is None:
+        manual_text_bytes = (
+            _octet_length(FMaintenanceOrder.order_no)
+            + _octet_length(FMaintenanceLine.pn_std)
+            + _octet_length(FMaintenanceLine.cost_source)
+            + _MANUAL_RENDERED_TEXT_OVERHEAD_BYTES
+        )
+        manual_total = (
+            select(func.coalesce(func.sum(manual_text_bytes), 0))
+            .select_from(FMaintenanceLine)
+            .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+            .where(*order_filters, FMaintenanceLine.cost_source == "none")
+            .scalar_subquery()
+        )
+    else:
+        manual_text_bytes = (
+            _octet_length(FMaintenanceOrder.order_no)
+            + _octet_length(FMaintenanceLine.pn_std)
+            + _octet_length(FMaintenanceLine.cost_source)
+            + _octet_length(model.reason)
+            # JSONB::text is equal to or more conservative than the displayed
+            # ensure_ascii=False JSON/note representation.
+            + _octet_length(cast(model.evidence, Text))
+            + _MANUAL_RENDERED_TEXT_OVERHEAD_BYTES
+        )
+        manual_total = (
+            select(func.coalesce(func.sum(manual_text_bytes), 0))
+            .select_from(FMaintenanceLine)
+            .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+            .outerjoin(model, model.line_id == FMaintenanceLine.id)
+            .where(
+                *order_filters,
+                or_(model.id.is_not(None), FMaintenanceLine.cost_source == "none"),
+            )
+            .scalar_subquery()
+        )
+
+    total = db.scalar(
+        select(
+            order_total
+            + line_total
+            + expense_total
+            + manual_total
+            + _BLANK_RENDERED_TEXT_OVERHEAD_BYTES
+        )
+    )
+    return int(total or 0)
+
+
 def _selected_data(
     db: Session,
     *,
@@ -601,9 +743,31 @@ def _selected_data(
         date_from=date_from,
         date_to=date_to,
     )
+    if contract and contract.strip():
+        contract_value = contract.strip()
+        contract_exists = bool(
+            db.scalar(
+                select(func.count(FMaintenanceOrder.id)).where(
+                    FMaintenanceOrder.linked_sales_order_no == contract_value,
+                )
+            )
+        )
+        if not contract_exists:
+            raise RoundtripWorkbookError(
+                f"合同不存在：{contract_value}",
+                status_code=404,
+            )
     order_count = int(
         db.scalar(select(func.count(FMaintenanceOrder.id)).where(*filters)) or 0
     )
+    if order_count == 0:
+        raise RoundtripWorkbookError(
+            (
+                "合同存在，但所选范围内没有可导出的维保数据"
+                if contract and contract.strip()
+                else "所选范围内没有可导出的维保数据"
+            ),
+        )
     if order_count > MAX_ROWS_PER_TABLE:
         raise RoundtripWorkbookError(
             f"02_维保订单命中 {order_count} 行，超过 {MAX_ROWS_PER_TABLE} 行导出上限；"
@@ -659,7 +823,19 @@ def _selected_data(
             status_code=413,
         )
 
-    # 上述 COUNT 和轻量 DISTINCT 都在任何 ORM 行全量物化/openpyxl 构建之前完成。
+    dynamic_text_bytes = _selected_dynamic_text_bytes(
+        db,
+        order_filters=filters,
+        expense_filters=expense_filters,
+    )
+    if dynamic_text_bytes > MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK:
+        raise RoundtripWorkbookError(
+            "单个维保回填工作簿动态文本超过 64 MiB 安全上限；"
+            "请按合同或日期缩小范围",
+            status_code=413,
+        )
+
+    # 上述 COUNT、轻量 DISTINCT 和字节聚合都在任何 ORM 行全量物化/openpyxl 构建前完成。
     orders = db.execute(
         select(FMaintenanceOrder, DimCustomer.name_raw)
         .outerjoin(DimCustomer, DimCustomer.id == FMaintenanceOrder.customer_id)
@@ -1403,6 +1579,144 @@ def build_roundtrip_template(
         raise
     finally:
         workbook.close()
+
+
+def _roundtrip_bundle_contracts(
+    db: Session,
+    *,
+    date_from: date | None,
+    date_to: date | None,
+) -> list[str]:
+    filters = _selection_filters(
+        contract=None,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    values = db.scalars(
+        select(FMaintenanceOrder.linked_sales_order_no)
+        .distinct()
+        .where(
+            *filters,
+            FMaintenanceOrder.linked_sales_order_no.is_not(None),
+            func.btrim(FMaintenanceOrder.linked_sales_order_no) != "",
+        )
+        .order_by(FMaintenanceOrder.linked_sales_order_no)
+    ).all()
+    return [str(value).strip() for value in values if value and str(value).strip()]
+
+
+def _bundle_member_collision_key(name: str) -> str:
+    return unicodedata.normalize("NFKC", name).casefold().rstrip(" .")
+
+
+def _utf8_prefix(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _roundtrip_bundle_member_name(contract: str, used_names: set[str]) -> str:
+    clean = unicodedata.normalize("NFKC", contract)
+    clean = "".join(
+        "_" if unicodedata.category(character) in {"Cc", "Cf"} else character
+        for character in clean
+    )
+    clean = _INVALID_BUNDLE_MEMBER_CHARS.sub("_", clean)
+    while ".." in clean:
+        clean = clean.replace("..", "_")
+    clean = clean.strip(" ._") or "contract"
+
+    def leaf(suffix: str = "") -> str:
+        prefix = "maintenance_roundtrip_"
+        extension = ".xlsx"
+        fixed_bytes = len((prefix + suffix + extension).encode("utf-8"))
+        stem = _utf8_prefix(
+            clean,
+            max(MAX_ROUNDTRIP_BUNDLE_MEMBER_BYTES - fixed_bytes, 0),
+        ).rstrip(" ._") or "contract"
+        return f"{prefix}{stem}{suffix}{extension}"
+
+    name = leaf()
+    collision_key = _bundle_member_collision_key(name)
+    if collision_key in used_names:
+        digest = hashlib.sha256(contract.encode("utf-8")).hexdigest()[:10]
+        name = leaf(f"_{digest}")
+        collision_key = _bundle_member_collision_key(name)
+        suffix = 2
+        while collision_key in used_names:
+            name = leaf(f"_{digest}_{suffix}")
+            collision_key = _bundle_member_collision_key(name)
+            suffix += 1
+    used_names.add(collision_key)
+    return f"维保回填模板/{name}"
+
+
+def build_roundtrip_template_bundle(
+    db: Session,
+    *,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    exported_by: str | None,
+) -> SpooledTemporaryFile:
+    """按合同拆分生成可独立校验、仍需逐本导入的固定回填工作簿 ZIP。"""
+    _validate_date_pair(date_from, date_to)
+    _lock_single_template_builder(db)
+    _lock_shared_snapshot(db)
+    contracts = _roundtrip_bundle_contracts(
+        db,
+        date_from=date_from,
+        date_to=date_to,
+    )
+    if not contracts:
+        raise RoundtripWorkbookError("所选范围内没有可导出的已关联合同维保数据")
+    if len(contracts) >= MAX_ROUNDTRIP_BUNDLE_CONTRACTS:
+        raise RoundtripWorkbookError(
+            f"命中合同 {len(contracts)} 个，必须少于 "
+            f"{MAX_ROUNDTRIP_BUNDLE_CONTRACTS} 个；请缩小日期范围",
+            status_code=413,
+        )
+
+    output = SpooledTemporaryFile(max_size=16 * 1024 * 1024, mode="w+b")
+    used_names: set[str] = set()
+    total_uncompressed = 0
+    try:
+        with zipfile.ZipFile(
+            output,
+            mode="w",
+            compression=zipfile.ZIP_STORED,
+            allowZip64=True,
+        ) as archive:
+            for contract in contracts:
+                workbook = build_roundtrip_template(
+                    db,
+                    contract=contract,
+                    date_from=date_from,
+                    date_to=date_to,
+                    exported_by=exported_by,
+                )
+                try:
+                    workbook.seek(0, os.SEEK_END)
+                    workbook_bytes = workbook.tell()
+                    total_uncompressed += workbook_bytes
+                    if total_uncompressed >= MAX_ROUNDTRIP_BUNDLE_UNCOMPRESSED_BYTES:
+                        raise RoundtripWorkbookError(
+                            "批量可回填工作簿解压后总大小必须小于 512 MiB；"
+                            "请缩小日期范围",
+                            status_code=413,
+                        )
+                    workbook.seek(0)
+                    member_name = _roundtrip_bundle_member_name(contract, used_names)
+                    with archive.open(member_name, mode="w", force_zip64=True) as member:
+                        while chunk := workbook.read(1024 * 1024):
+                            member.write(chunk)
+                finally:
+                    workbook.close()
+        output.seek(0)
+        return output
+    except BaseException:
+        output.close()
+        raise
 
 
 def _assert_safe_workbook_package(path: str) -> None:

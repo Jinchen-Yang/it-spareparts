@@ -183,6 +183,22 @@ def _require_workbook_export_permissions(ctx: UserContext) -> None:
         )
 
 
+def _require_roundtrip_customer_permission(ctx: UserContext) -> None:
+    """可编辑客户字段的固定协议必须失败关闭，不能靠导出置空规避。"""
+    if ctx.role == "admin":
+        return
+    if not ctx.permissions or ctx.permissions.get("data_customer") is not True:
+        raise HTTPException(
+            status_code=403,
+            detail="无客户信息查看权限，不能导出或导入固定回填工作簿",
+        )
+
+
+def _require_roundtrip_permissions(ctx: UserContext) -> None:
+    _require_workbook_export_permissions(ctx)
+    _require_roundtrip_customer_permission(ctx)
+
+
 def _csv_stream(
     header: list,
     rows,
@@ -273,6 +289,11 @@ def export(
         lifecycle=lifecycle, as_of=business_today(),
     )
     data = apply_field_visibility(data, ctx)   # 导出同样过脱敏层（§8.5）
+    if not data["rows"]:
+        raise HTTPException(
+            status_code=422,
+            detail="所选范围内没有可导出的项目数据",
+        )
     header = ["项目", "期限状态", "维保终止日期",
               "出库行数", "出库数量",
               "实际采购参考-含税", "实际采购参考-不含税",
@@ -363,6 +384,8 @@ def orders_export(
     record_access_log(ctx, "orders_export", "maintenance", audit_scope)
     try:
         output = maintenance_export.build_workbook(db, ctx, date_from, date_to)
+    except maintenance_export.ExcelExportEmpty as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except maintenance_export.ExcelExportBusy as exc:
         raise HTTPException(
             status_code=429,
@@ -461,10 +484,21 @@ def lines_export(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     """单项目 SKU 明细导出（财务逐行复核入账用）——全量、含成本来源/税口径。"""
+    if (date_from is None) != (date_to is None):
+        raise HTTPException(status_code=422, detail="date_from 与 date_to 必须同时提供")
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(status_code=422, detail="date_from 不能晚于 date_to")
     record_access_log(ctx, "lines_export", "maintenance", {"project": project})
+    if not maintenance_cost.project_exists(db, project, user_ctx=ctx):
+        raise HTTPException(status_code=404, detail=f"项目不存在：{project}")
     line_count = maintenance_cost.project_line_count(
-        db, project, month, date_from, date_to,
+        db, project, month, date_from, date_to, user_ctx=ctx,
     )
+    if line_count == 0:
+        raise HTTPException(
+            status_code=422,
+            detail="项目存在，但所选范围内没有可导出的明细",
+        )
     if line_count > _MAX_CSV_DATA_ROWS:
         raise HTTPException(
             status_code=413,
@@ -549,6 +583,152 @@ def board(
     return apply_field_visibility(data, ctx)
 
 
+def _revenue_evidence_status(row: dict, basis: str) -> str:
+    if row.get(f"revenue_{basis}") is not None:
+        return "available"
+    status = row.get(f"parts_profit_status_{basis}")
+    if status in {
+        "missing_revenue",
+        "missing_tax_rate",
+        "invalid_tax_rate",
+        "ambiguous_revenue",
+    }:
+        return status
+    return "restricted" if status is None else str(status)
+
+
+def _expense_evidence_status(row: dict) -> str:
+    statuses = {
+        row.get("contribution_status_inc"),
+        row.get("contribution_status_ex"),
+    }
+    if statuses == {None}:
+        return "restricted"
+    if row.get("expense_data_available") is not True:
+        return "expense_data_unavailable"
+    if "expense_tax_unknown" in statuses:
+        return "expense_tax_unknown"
+    return "complete"
+
+
+@router.get("/board/export")
+def board_export(
+    status: str | None = Query(
+        None,
+        pattern=(
+            r"^(incomplete_cost|expense_data_unavailable|"
+            r"red|yellow|green|no_budget)$"
+        ),
+    ),
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    q: str | None = Query(None, max_length=128),
+    lifecycle: str = Query("ongoing", pattern=r"^(ongoing|ended|missing|all)$"),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> StreamingResponse:
+    """合同级详细盈亏 CSV；与看板复用同一计算、范围与脱敏口径。"""
+    record_access_log(
+        ctx,
+        "board_export",
+        "maintenance",
+        {
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+            "status": status,
+            "lifecycle": lifecycle,
+        },
+    )
+    data = maintenance_cost.board(
+        db,
+        date_from,
+        date_to,
+        status,
+        user_ctx=ctx,
+        q_text=q,
+        lifecycle=lifecycle,
+        as_of=business_today(),
+    )
+    data = apply_field_visibility(data, ctx)
+    if not data["rows"]:
+        raise HTTPException(
+            status_code=422,
+            detail="所选范围内没有可导出的合同详细盈亏数据",
+        )
+    header = [
+        "合同",
+        "关联项目",
+        "revenue_inc",
+        "revenue_ex",
+        "expense_inc",
+        "expense_ex",
+        "parts_gross_profit_inc",
+        "parts_gross_profit_ex",
+        "parts_gross_margin_inc",
+        "parts_gross_margin_ex",
+        "contribution_profit_inc",
+        "contribution_profit_ex",
+        "contribution_margin_inc",
+        "contribution_margin_ex",
+        "parts_profit_status_inc",
+        "parts_profit_status_ex",
+        "contribution_status_inc",
+        "contribution_status_ex",
+        "成本证据状态",
+        "成本证据状态-含税",
+        "成本证据状态-未税",
+        "收入证据状态-含税",
+        "收入证据状态-未税",
+        "费用证据状态",
+    ]
+    rows = [
+        [
+            row.get("contract"),
+            "、".join(
+                str(project.get("project") or "")
+                for project in row.get("projects", [])
+                if project.get("project")
+            ),
+            *(
+                row.get(field)
+                for field in (
+                    "revenue_inc",
+                    "revenue_ex",
+                    "expense_inc",
+                    "expense_ex",
+                    "parts_gross_profit_inc",
+                    "parts_gross_profit_ex",
+                    "parts_gross_margin_inc",
+                    "parts_gross_margin_ex",
+                    "contribution_profit_inc",
+                    "contribution_profit_ex",
+                    "contribution_margin_inc",
+                    "contribution_margin_ex",
+                    "parts_profit_status_inc",
+                    "parts_profit_status_ex",
+                    "contribution_status_inc",
+                    "contribution_status_ex",
+                )
+            ),
+            row.get("cost_quality"),
+            row.get("parts_cost_inc_tax_quality"),
+            row.get("parts_cost_ex_tax_quality"),
+            _revenue_evidence_status(row, "inc"),
+            _revenue_evidence_status(row, "ex"),
+            _expense_evidence_status(row),
+        ]
+        for row in data["rows"]
+    ]
+    return _csv_stream(
+        header,
+        rows,
+        "maintenance_contract_profit.csv",
+        db=db,
+    )
+
+
 # 兼容既有内部测试与调用；真实实现只保留在 service renderer。
 def _build_workbook(contract: str, data: dict):
     return maintenance_workbook_renderer.render_contract_workbook(
@@ -586,6 +766,8 @@ def export_workbook(
             date_from=date_from,
             date_to=date_to,
         )
+    except maintenance_workbook_export.WorkbookExportNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except maintenance_workbook_export.WorkbookExportRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     _release_db_before_stream(db, output)
@@ -616,7 +798,7 @@ def roundtrip_template(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> StreamingResponse:
     """导出固定协议的维保项目可编辑工作簿。"""
-    _require_workbook_export_permissions(ctx)
+    _require_roundtrip_permissions(ctx)
     record_access_log(
         ctx,
         "roundtrip_template",
@@ -638,7 +820,11 @@ def roundtrip_template(
             blank=blank,
         )
     except maintenance_roundtrip.RoundtripWorkbookError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc),
+            headers={"Retry-After": "5"} if exc.status_code == 429 else None,
+        ) from exc
     _release_db_before_stream(db, output)
     return _ClosingStreamingResponse(
         _iter_download_chunks(output),
@@ -647,6 +833,55 @@ def roundtrip_template(
         headers={
             "Content-Disposition": _content_disposition(
                 "maintenance_roundtrip_template.xlsx",
+            ),
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/roundtrip-templates")
+def roundtrip_templates(
+    date_from: date | None = Query(None),
+    date_to: date | None = Query(None),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> StreamingResponse:
+    """按合同拆分导出可独立校验的固定回填工作簿 ZIP。"""
+    _require_roundtrip_permissions(ctx)
+    record_access_log(
+        ctx,
+        "roundtrip_templates",
+        "maintenance",
+        {
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+        },
+    )
+    try:
+        output = maintenance_roundtrip.build_roundtrip_template_bundle(
+            db,
+            date_from=date_from,
+            date_to=date_to,
+            exported_by=ctx.user_id,
+        )
+    except maintenance_roundtrip.RoundtripWorkbookError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc),
+            headers={"Retry-After": "5"} if exc.status_code == 429 else None,
+        ) from exc
+    _release_db_before_stream(db, output)
+    return _ClosingStreamingResponse(
+        _iter_download_chunks(output),
+        resource=output,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": _content_disposition(
+                "维保项目批量回填模板.zip",
+                ascii_fallback="maintenance_roundtrip_templates.zip",
             ),
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
@@ -704,7 +939,7 @@ def roundtrip_import(
     """
     if not ctx.is_authenticated or not ctx.user_id:
         raise HTTPException(status_code=401, detail="维保回填必须使用实名登录账号")
-    _require_workbook_export_permissions(ctx)
+    _require_roundtrip_permissions(ctx)
     path, original_name = _save_roundtrip_upload(file)
     try:
         record_access_log(

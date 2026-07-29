@@ -19,9 +19,11 @@ from app.main import app
 from app.etl import pipeline
 from app.etl.reader import ReaderError
 from app.models.maintenance import (
+    FMaintenanceLine,
     FMaintenanceOrder,
     FProjectExpense,
     MaintenanceContractWorkbookState,
+    MaintenanceManualCostOverride,
     MaintenanceRoundtripOperation,
 )
 from app.models.system import SysAuditLog, SysImportBatch, SysUser
@@ -522,10 +524,10 @@ def test_unknown_invalid_file_rolls_back_preflight_transaction(db, tmp_path):
     ("counts", "expected_sheet"),
     [
         ([maintenance_roundtrip.MAX_ROWS_PER_TABLE + 1], "02_维保订单"),
-        ([0, maintenance_roundtrip.MAX_ROWS_PER_TABLE + 1], "03_订单明细"),
+        ([1, maintenance_roundtrip.MAX_ROWS_PER_TABLE + 1], "03_订单明细"),
         (
             [
-                0,
+                1,
                 0,
                 maintenance_roundtrip.MAX_ROWS_PER_TABLE
                 - maintenance_roundtrip.BLANK_CREATE_ROWS
@@ -570,6 +572,159 @@ def test_export_row_caps_fail_before_full_orm_materialization(
 
     assert caught.value.status_code == 413
     assert session.execute_called is False
+
+
+def test_dynamic_text_cap_fails_before_orm_materialization_or_rendering():
+    class CountAndBudgetOnlySession:
+        def __init__(self):
+            self._values = iter(
+                [
+                    1,
+                    0,
+                    0,
+                    maintenance_roundtrip.MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK + 1,
+                ]
+            )
+            self.execute_called = False
+
+        def scalar(self, _statement):
+            return next(self._values)
+
+        def scalars(self, _statement):
+            # DISTINCT contract discovery is bounded and does not materialize ORM rows.
+            return SimpleNamespace(all=lambda: [])
+
+        def execute(self, _statement):
+            self.execute_called = True
+            raise AssertionError("ORM materialization happened before byte-cap rejection")
+
+    session = CountAndBudgetOnlySession()
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="动态文本超过 64 MiB",
+    ) as caught:
+        maintenance_roundtrip._selected_data(
+            session,
+            contract=None,
+            date_from=None,
+            date_to=None,
+            blank=False,
+        )
+
+    assert caught.value.status_code == 413
+    assert session.execute_called is False
+
+
+def test_dynamic_text_budget_counts_all_unbounded_output_and_utf8_boundary(
+    db,
+    monkeypatch,
+):
+    contract = "XSDD-RT-UTF8-BUDGET"
+    _order_id, line_id = _seed_contract(
+        db,
+        suffix="UTF8-BUDGET",
+        contract=contract,
+    )
+    line = db.get(FMaintenanceLine, line_id)
+    line.cost_source = "none"
+    line.serial_numbers = None
+    expense = FProjectExpense(
+        raw_line_id="EXP-RT-UTF8-BUDGET",
+        bxd_no="BXD-RT-UTF8-BUDGET",
+        line_no=1,
+        data_status="已结束",
+        expense_date=date(2026, 7, 20),
+        linked_sales_order_no=contract,
+        amount=Decimal("10"),
+        amount_ex_tax=Decimal("10"),
+        amount_inc_tax=Decimal("11.30"),
+        reason=None,
+        import_batch_id=line.import_batch_id,
+    )
+    override = MaintenanceManualCostOverride(
+        line_id=line.id,
+        unit_cost_ex_tax=Decimal("1"),
+        unit_cost_inc_tax=Decimal("1.13"),
+        tax_rate_used=Decimal("0.13"),
+        reason=None,
+        evidence={"note": ""},
+        active=True,
+        updated_by="tester",
+    )
+    db.add_all([expense, override])
+    db.commit()
+
+    order_filters = maintenance_roundtrip._selection_filters(
+        contract=contract,
+        date_from=None,
+        date_to=None,
+    )
+    expense_filters = [FProjectExpense.linked_sales_order_no == contract]
+
+    def measured_bytes() -> int:
+        return maintenance_roundtrip._selected_dynamic_text_bytes(
+            db,
+            order_filters=order_filters,
+            expense_filters=expense_filters,
+        )
+
+    measured = measured_bytes()
+    for entity, field in (
+        (line, "description"),
+        (line, "serial_numbers"),
+        (expense, "reason"),
+        (override, "reason"),
+    ):
+        setattr(entity, field, f"{getattr(entity, field) or ''}中")
+        db.flush()
+        current = measured_bytes()
+        assert current == measured + len("中".encode())
+        measured = current
+
+    override.evidence = {"note": "中"}
+    db.flush()
+    current = measured_bytes()
+    assert current == measured + len("中".encode())
+    measured = current
+    db.commit()
+
+    # 等于上限仍可构建；少 1 byte 时必须在任何 openpyxl 渲染前拒绝。
+    monkeypatch.setattr(
+        maintenance_roundtrip,
+        "MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK",
+        measured,
+    )
+    output = maintenance_roundtrip.build_roundtrip_template(
+        db,
+        contract=contract,
+        exported_by="tester",
+    )
+    output.close()
+    db.rollback()
+
+    rendered = []
+    monkeypatch.setattr(
+        maintenance_roundtrip,
+        "_instructions_sheet",
+        lambda *_args, **_kwargs: rendered.append("rendered"),
+    )
+    monkeypatch.setattr(
+        maintenance_roundtrip,
+        "MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK",
+        measured - 1,
+    )
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="动态文本超过 64 MiB",
+    ) as caught:
+        maintenance_roundtrip.build_roundtrip_template(
+            db,
+            contract=contract,
+            exported_by="tester",
+        )
+
+    assert caught.value.status_code == 413
+    assert rendered == []
 
 
 def test_roundtrip_uncompressed_package_cap_is_64_mib(tmp_path, monkeypatch):
@@ -709,4 +864,62 @@ def test_roundtrip_apply_action_403_happens_before_application_reads_upload(
 
     assert response.status_code == 403
     assert response.json()["detail"] == "无此操作权限"
+    assert called is False
+
+
+def test_roundtrip_import_requires_customer_info_before_reading_upload(
+    db,
+    monkeypatch,
+):
+    base = permissions.effective("boss", None)
+    overrides = {"data_customer": False}
+    user = SysUser(
+        username="roundtrip-no-customer-info",
+        role="boss",
+        display_name="无客户权限回填员",
+        password_hash=hash_password("roundtrip-password"),
+        template_code="boss",
+        template_version=1,
+        template_perms=base,
+        perm_overrides=overrides,
+        permissions=permissions.effective_from_snapshot(base, overrides),
+    )
+    db.add(user)
+    db.commit()
+    called = False
+
+    def fail_if_upload_is_read(_file):
+        nonlocal called
+        called = True
+        raise AssertionError("customer permission must fail before upload read")
+
+    monkeypatch.setattr(
+        maintenance_api,
+        "_save_roundtrip_upload",
+        fail_if_upload_is_read,
+    )
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={
+            "username": "roundtrip-no-customer-info",
+            "password": "roundtrip-password",
+        },
+    )
+    assert login.status_code == 200
+
+    response = client.post(
+        "/api/maintenance/roundtrip-import",
+        headers={"Authorization": f"Bearer {login.json()['token']}"},
+        files={
+            "file": (
+                "maintenance_roundtrip.xlsx",
+                b"must-not-reach-application-reader",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 403
+    assert "客户信息" in response.json()["detail"]
     assert called is False
