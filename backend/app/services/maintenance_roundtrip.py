@@ -225,6 +225,15 @@ MAX_ROUNDTRIP_TABLE_ELEMENTS = 512
 MAX_ROUNDTRIP_WORKSHEET_STRUCTURAL_ELEMENTS = 10_000
 MAX_ROUNDTRIP_CELL_XML_ELEMENTS = 128
 MAX_ROUNDTRIP_SHARED_STRING_XML_ELEMENTS = 128
+_HYPERLINK_RELATIONSHIP_TYPES = frozenset(
+    {
+        (
+            "http://schemas.openxmlformats.org/"
+            "officeDocument/2006/relationships/hyperlink"
+        ),
+        "http://purl.oclc.org/ooxml/officeDocument/relationships/hyperlink",
+    }
+)
 
 _HEADER_FILL = PatternFill("solid", fgColor="35506B")
 _HEADER_FONT = Font(color="FFFFFF", bold=True)
@@ -1927,6 +1936,7 @@ def _roundtrip_table_part(
     worksheet_path: str,
     sheet_name: str,
     expected_table_name: str | None,
+    hyperlink_relationship_ids: set[str] | None = None,
 ) -> str | None:
     expected_relation_id = _roundtrip_table_relation_id(
         archive,
@@ -1941,6 +1951,7 @@ def _roundtrip_table_part(
         raise RoundtripWorkbookError(f"{sheet_name} 缺少协议 Excel Table")
 
     table_targets: list[str] = []
+    seen_relationship_ids: set[str] = set()
     with archive.open(relationship_path) as relationships:
         open_tags: list[str] = []
         open_elements: list[ET.Element] = []
@@ -1966,7 +1977,12 @@ def _roundtrip_table_part(
                     if tag != "Relationship":
                         raise RoundtripWorkbookError("工作簿关系文件结构无效")
                     relation_id = element.attrib.get("Id")
-                    is_table = element.attrib.get("Type", "").endswith("/table")
+                    if not relation_id or relation_id in seen_relationship_ids:
+                        raise RoundtripWorkbookError("工作簿关系 ID 缺失或重复")
+                    seen_relationship_ids.add(relation_id)
+                    relationship_type = element.attrib.get("Type", "")
+                    is_table = relationship_type.endswith("/table")
+                    is_hyperlink = relationship_type in _HYPERLINK_RELATIONSHIP_TYPES
                     if is_table:
                         if (
                             expected_relation_id is None
@@ -1992,6 +2008,17 @@ def _roundtrip_table_part(
                                 f"{sheet_name} 的 Excel Table 部件不存在"
                             )
                         table_targets.append(target)
+                    elif is_hyperlink:
+                        if (
+                            element.attrib.get("TargetMode", "").casefold()
+                            != "external"
+                            or not element.attrib.get("Target")
+                        ):
+                            raise RoundtripWorkbookError(
+                                f"{sheet_name} 的超链接关系结构无效"
+                            )
+                        if hyperlink_relationship_ids is not None:
+                            hyperlink_relationship_ids.add(relation_id)
                     elif relation_id == expected_relation_id:
                         raise RoundtripWorkbookError(
                             f"{sheet_name} 的 tablePart 关系类型不符合协议"
@@ -2121,6 +2148,7 @@ def _scan_roundtrip_worksheet(
     max_row: int,
     max_column: int,
     table_scoped: bool,
+    hyperlink_relationship_ids: frozenset[str] = frozenset(),
 ) -> tuple[int, int]:
     current_row = 0
     current_column = 0
@@ -2134,6 +2162,9 @@ def _scan_roundtrip_worksheet(
     cell_xml_elements = 0
     scope_name = "Table 范围外" if table_scoped else "协议范围外"
     outside_coordinate: str | None = None
+    merged_range_cells = 0
+    hyperlink_range_cells = 0
+    expanding_range_cell_limit = max_row * max_column
 
     def note_outside(coordinate: str) -> None:
         nonlocal outside_coordinate
@@ -2145,6 +2176,37 @@ def _scan_roundtrip_worksheet(
             f"{sheet_name} 存在 {scope_name}单元格或维度：{coordinate}",
             status_code=413,
         )
+
+    def validate_expanding_range(
+        ref: str | None,
+        *,
+        label: str,
+        current_cells: int,
+    ) -> int:
+        bounds = _roundtrip_range_bounds(ref or "")
+        if bounds is None:
+            raise RoundtripWorkbookError(f"{sheet_name} 的{label}范围无效")
+        min_column, min_row, range_max_column, range_max_row = bounds
+        if (
+            min_column < 1
+            or min_row < 1
+            or range_max_column > max_column
+            or range_max_row > max_row
+        ):
+            raise RoundtripWorkbookError(
+                f"{sheet_name} 的{label}范围超出{scope_name}：{ref}",
+                status_code=413,
+            )
+        range_cells = (
+            range_max_column - min_column + 1
+        ) * (range_max_row - min_row + 1)
+        expanded_cells = current_cells + range_cells
+        if expanded_cells > expanding_range_cell_limit:
+            raise RoundtripWorkbookError(
+                f"{sheet_name} 的{label}展开范围超过协议安全上限",
+                status_code=413,
+            )
+        return expanded_cells
 
     with archive.open(worksheet_path) as worksheet_xml:
         for event, element in reader._safe_xml_iterparse(worksheet_xml):
@@ -2176,7 +2238,31 @@ def _scan_roundtrip_worksheet(
                             f"{sheet_name} 结构性 XML 元素超过协议安全上限",
                             status_code=413,
                         )
-                if tag == "dimension":
+                if tag == "mergeCell":
+                    merged_range_cells = validate_expanding_range(
+                        element.attrib.get("ref"),
+                        label="合并单元格",
+                        current_cells=merged_range_cells,
+                    )
+                elif tag == "hyperlink":
+                    hyperlink_range_cells = validate_expanding_range(
+                        element.attrib.get("ref"),
+                        label="超链接",
+                        current_cells=hyperlink_range_cells,
+                    )
+                    relation_ids = [
+                        value
+                        for name, value in element.attrib.items()
+                        if reader._xml_local_name(name) == "id"
+                    ]
+                    if len(relation_ids) > 1 or (
+                        relation_ids
+                        and relation_ids[0] not in hyperlink_relationship_ids
+                    ):
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 的超链接关系类型不符合协议"
+                        )
+                elif tag == "dimension":
                     ref = element.attrib.get("ref")
                     bounds = _roundtrip_range_bounds(ref or "")
                     if bounds is None:
@@ -2435,11 +2521,13 @@ def _assert_roundtrip_xml_envelope(archive: zipfile.ZipFile) -> None:
     total_cells = 0
     for sheet_name, worksheet_path in sheet_parts:
         envelope = envelopes[sheet_name]
+        hyperlink_relationship_ids: set[str] = set()
         table_path = _roundtrip_table_part(
             archive,
             worksheet_path=worksheet_path,
             sheet_name=sheet_name,
             expected_table_name=envelope.table_name,
+            hyperlink_relationship_ids=hyperlink_relationship_ids,
         )
         if table_path is None:
             max_row, max_column = envelope.max_row, envelope.max_column
@@ -2457,6 +2545,7 @@ def _assert_roundtrip_xml_envelope(archive: zipfile.ZipFile) -> None:
             max_row=max_row,
             max_column=max_column,
             table_scoped=table_path is not None,
+            hyperlink_relationship_ids=frozenset(hyperlink_relationship_ids),
         )
         total_rows += rows
         total_cells += cells

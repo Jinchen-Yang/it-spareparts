@@ -32,7 +32,7 @@ from app.business_time import business_today
 from app.db import SessionLocal, get_db
 from app.security import (
     UserContext, apply_field_visibility, get_current_user_context, record_access_log,
-    is_scoped_sales, require_action, require_page,
+    is_field_hidden, is_scoped_sales, require_action, require_page,
 )
 from app import config
 from app.services import (
@@ -369,6 +369,7 @@ def export(
         db, date_from, date_to, q, user_ctx=ctx,
         lifecycle=lifecycle, as_of=business_today(),
     )
+    contract_amount_restricted = is_field_hidden(ctx, "contract_amount")
     data = apply_field_visibility(data, ctx)   # 导出同样过脱敏层（§8.5）
     if not data["rows"]:
         raise HTTPException(
@@ -391,7 +392,8 @@ def export(
                   "pool_purchase", "pool_sales", "purchase_history",
                   "sales_history", "manual", "none",
               )),
-              "月份数", "关联销售订单", "合同额(含税参考)", "合同被多项目共用"]
+              "月份数", "关联销售订单", "合同额(含税参考)",
+              "合同额证据状态", "合同被多项目共用"]
     rows = []
     for r in data["rows"]:
         bs = r["by_source"]
@@ -441,7 +443,20 @@ def export(
                      r.get("parts_cost_ex_tax_missing_lines"),
                      *source_counts,
                      r["months"], _safe("、".join(r["sales_orders"])),
-                     r["contract_amount"], "是" if r["contract_shared"] else ""])
+                     r["contract_amount"],
+                     (
+                         "未关联合同"
+                         if not r["sales_orders"]
+                         else "不完整"
+                         if r["contract_incomplete"] is True
+                         else "受限"
+                         if (
+                             r["contract_incomplete"] is None
+                             or contract_amount_restricted
+                         )
+                         else "完整"
+                     ),
+                     "是" if r["contract_shared"] else ""])
     return _csv_stream(header, rows, "maintenance_projects.csv", db=db)
 
 

@@ -1111,6 +1111,333 @@ def test_roundtrip_rejects_forged_dimension_outside_table_before_openpyxl(
     assert opened is False
 
 
+def test_roundtrip_rejects_huge_merged_range_before_openpyxl(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-HUGE-MERGE"
+    _seed_contract(db, suffix="HUGE-MERGE", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "huge-merge.xlsx",
+        contract=contract,
+    )
+    worksheet_path = _roundtrip_worksheet_path(path, "00_使用说明")
+
+    def forge_merged_range(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        merged_cell = next(
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "mergeCell"
+        )
+        merged_cell.set("ref", "A1:XFD1048576")
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_xlsx_member(path, worksheet_path, forge_merged_range)
+    opened = False
+
+    def forbidden_load(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("超大合并范围不应进入 openpyxl")
+
+    monkeypatch.setattr(maintenance_roundtrip, "load_workbook", forbidden_load)
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="合并单元格.*范围",
+    ) as caught:
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    assert caught.value.status_code == 413
+    assert opened is False
+
+
+def test_roundtrip_rejects_huge_hyperlink_range_before_openpyxl(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-HUGE-HYPERLINK"
+    _seed_contract(db, suffix="HUGE-HYPERLINK", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "huge-hyperlink.xlsx",
+        contract=contract,
+    )
+    worksheet_path = _roundtrip_worksheet_path(path, "00_使用说明")
+
+    def add_huge_hyperlink(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        namespace = root.tag.rsplit("}", 1)[0].lstrip("{")
+        hyperlinks = ET.Element(f"{{{namespace}}}hyperlinks")
+        ET.SubElement(
+            hyperlinks,
+            f"{{{namespace}}}hyperlink",
+            {
+                "ref": "A1:XFD1048576",
+                "location": "'00_使用说明'!A1",
+            },
+        )
+        root.append(hyperlinks)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_xlsx_member(path, worksheet_path, add_huge_hyperlink)
+    opened = False
+
+    def forbidden_load(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("超大超链接范围不应进入 openpyxl")
+
+    monkeypatch.setattr(maintenance_roundtrip, "load_workbook", forbidden_load)
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="超链接.*范围",
+    ) as caught:
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    assert caught.value.status_code == 413
+    assert opened is False
+
+
+def test_roundtrip_hyperlink_must_use_hyperlink_relationship_before_openpyxl(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-HYPERLINK-REL"
+    _seed_contract(db, suffix="HYPERLINK-REL", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "hyperlink-rel.xlsx",
+        contract=contract,
+    )
+    worksheet_path = _roundtrip_worksheet_path(path, "02_维保订单")
+
+    def point_hyperlink_at_table_relationship(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        namespace = root.tag.rsplit("}", 1)[0].lstrip("{")
+        table_part = next(
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "tablePart"
+        )
+        relation_id = next(
+            value
+            for name, value in table_part.attrib.items()
+            if name.rsplit("}", 1)[-1] == "id"
+        )
+        hyperlinks = ET.Element(f"{{{namespace}}}hyperlinks")
+        ET.SubElement(
+            hyperlinks,
+            f"{{{namespace}}}hyperlink",
+            {
+                "ref": "A1",
+                (
+                    "{http://schemas.openxmlformats.org/"
+                    "officeDocument/2006/relationships}id"
+                ): relation_id,
+            },
+        )
+        root.append(hyperlinks)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_xlsx_member(
+        path,
+        worksheet_path,
+        point_hyperlink_at_table_relationship,
+    )
+    opened = False
+
+    def forbidden_load(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("错配的超链接关系不应进入 openpyxl")
+
+    monkeypatch.setattr(maintenance_roundtrip, "load_workbook", forbidden_load)
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="超链接关系类型",
+    ):
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    assert opened is False
+
+
+def test_roundtrip_accepts_generated_instruction_merge_ranges(db, tmp_path):
+    contract = "XSDD-RT-LEGAL-MERGES"
+    _seed_contract(db, suffix="LEGAL-MERGES", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "legal-merges.xlsx",
+        contract=contract,
+    )
+
+    workbook, _metadata, _revisions, _rows = (
+        maintenance_roundtrip._load_and_parse(str(path))
+    )
+    try:
+        merge_ranges = {
+            str(cell_range)
+            for cell_range in workbook["00_使用说明"].merged_cells.ranges
+        }
+        assert {"A1:B1", "A3:B3", "A10:B10"} <= merge_ranges
+    finally:
+        workbook.close()
+
+
+def test_roundtrip_accepts_bounded_hyperlink_relationship(db, tmp_path):
+    contract = "XSDD-RT-LEGAL-HYPERLINK"
+    _seed_contract(db, suffix="LEGAL-HYPERLINK", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "legal-hyperlink.xlsx",
+        contract=contract,
+    )
+    workbook = load_workbook(path, data_only=False)
+    try:
+        workbook["00_使用说明"]["A4"].hyperlink = "https://example.invalid/help"
+        workbook.save(path)
+    finally:
+        workbook.close()
+
+    maintenance_roundtrip._assert_safe_workbook_package(str(path))
+
+
+def test_roundtrip_rejects_cumulative_merged_range_expansion_before_openpyxl(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-MERGE-EXPANSION"
+    _seed_contract(db, suffix="MERGE-EXPANSION", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "merge-expansion.xlsx",
+        contract=contract,
+    )
+    worksheet_path = _roundtrip_worksheet_path(path, "00_使用说明")
+
+    def add_overlapping_merges(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        merge_cells = next(
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "mergeCells"
+        )
+        namespace = merge_cells.tag.rsplit("}", 1)[0].lstrip("{")
+        # The instruction-sheet envelope contains 38 cells. Its three legitimate
+        # 2-cell ranges consume six; seventeen repeats push declared expansion to 40.
+        for _index in range(17):
+            ET.SubElement(
+                merge_cells,
+                f"{{{namespace}}}mergeCell",
+                {"ref": "A1:B1"},
+            )
+        merge_cells.set("count", str(len(merge_cells)))
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_xlsx_member(path, worksheet_path, add_overlapping_merges)
+    opened = False
+
+    def forbidden_load(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("累计超限合并范围不应进入 openpyxl")
+
+    monkeypatch.setattr(maintenance_roundtrip, "load_workbook", forbidden_load)
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="合并单元格展开范围超过",
+    ) as caught:
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    assert caught.value.status_code == 413
+    assert opened is False
+
+
+def test_roundtrip_rejects_cumulative_hyperlink_expansion_before_openpyxl(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-HYPERLINK-EXPANSION"
+    _seed_contract(db, suffix="HYPERLINK-EXPANSION", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "hyperlink-expansion.xlsx",
+        contract=contract,
+    )
+    worksheet_path = _roundtrip_worksheet_path(path, "00_使用说明")
+
+    def add_overlapping_hyperlinks(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        namespace = root.tag.rsplit("}", 1)[0].lstrip("{")
+        hyperlinks = ET.Element(f"{{{namespace}}}hyperlinks")
+        # Each single-cell ref is small, but openpyxl expands every declaration.
+        for _index in range(39):
+            ET.SubElement(
+                hyperlinks,
+                f"{{{namespace}}}hyperlink",
+                {
+                    "ref": "A1",
+                    "location": "'00_使用说明'!A1",
+                },
+            )
+        root.append(hyperlinks)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_xlsx_member(path, worksheet_path, add_overlapping_hyperlinks)
+    opened = False
+
+    def forbidden_load(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("累计超限超链接范围不应进入 openpyxl")
+
+    monkeypatch.setattr(maintenance_roundtrip, "load_workbook", forbidden_load)
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="超链接展开范围超过",
+    ) as caught:
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    assert caught.value.status_code == 413
+    assert opened is False
+
+
 def test_roundtrip_rejects_sparse_huge_coordinate_before_openpyxl(
     db,
     tmp_path,

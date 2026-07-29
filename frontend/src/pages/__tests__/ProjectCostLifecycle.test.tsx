@@ -814,6 +814,14 @@ describe("维保项目生命周期筛选", () => {
       .toBeInTheDocument();
     expect(screen.getByRole("button", { name: "导出订单汇总 Excel" }))
       .toBeInTheDocument();
+    expect(screen.getByLabelText("项目成本 CSV 项目搜索"))
+      .toHaveStyle({ width: "100%" });
+    const projectLifecycle = screen.getByRole("radiogroup", {
+      name: "项目成本 CSV 期限状态筛选",
+    });
+    expect(projectLifecycle.parentElement).toHaveStyle({
+      width: "100%", minWidth: "0", maxWidth: "100%", overflowX: "auto",
+    });
   });
 
   it("375px 窄屏项目提醒让期限二级导航独立横向滚动", async () => {
@@ -2955,24 +2963,33 @@ describe("维保项目生命周期筛选", () => {
     })));
   });
 
-  it("下载中心项目成本 CSV 显式导出全部期限，不暗带页面进行中口径", async () => {
+  it("下载中心项目成本 CSV 使用独立项目搜索和期限状态筛选", async () => {
     installSuccessResponses();
-    get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
-      const lifecycle = config?.params?.lifecycle ?? "ongoing";
-      if (path === "/maintenance/projects") return Promise.resolve(projects("当前项目", lifecycle));
-      if (path === "/maintenance/board") return Promise.resolve(board(undefined, lifecycle));
-      if (path === "/maintenance/export") return Promise.resolve(csvDownload());
-      return Promise.resolve(xlsxDownload());
-    });
     render(<ProjectCostPage view="downloads" />);
     await waitForDownloadsReady();
 
+    fireEvent.change(screen.getByLabelText("项目成本 CSV 项目搜索"), {
+      target: { value: "联通项目" },
+    });
+    fireEvent.click(screen.getByRole("radio", { name: "已结束" }));
     fireEvent.click(screen.getByRole("button", { name: "导出项目成本 CSV" }));
 
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/export", expect.objectContaining({
-      params: expect.objectContaining({ lifecycle: "all" }),
+      params: {
+        q: "联通项目",
+        lifecycle: "ended",
+      },
       responseType: "blob",
     })));
+    expect(get.mock.calls.some(([path]) => (
+      path === "/maintenance/projects" || path === "/maintenance/board"
+    ))).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith(
+      "/maintenance/orders/export",
+      expect.objectContaining({ params: {} }),
+    ));
   });
 
   it("项目提醒搜索只下发详细盈亏看板，不加载项目事实", async () => {

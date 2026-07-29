@@ -1032,6 +1032,9 @@ export default function ProjectCostPage({
   } | null>(null);
   const mountedRef = useRef(true);
   const [q, setQ] = useState("");
+  const [downloadProjectQuery, setDownloadProjectQuery] = useState("");
+  const [downloadProjectLifecycle, setDownloadProjectLifecycle] =
+    useState<LifecycleFilter>("all");
   const [downloadProject, setDownloadProject] = useState("");
   const [downloadContract, setDownloadContract] = useState("");
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
@@ -1541,10 +1544,17 @@ export default function ProjectCostPage({
     try {
       const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
-      await download("/maintenance/export", "maintenance_projects.csv", CSV_CONTENT_TYPES, {
-        ...scope.params,
-        lifecycle: "all",
-      }, sessionToken);
+      await requestAndSaveDownload(
+        "/maintenance/export",
+        {
+          ...scope.params,
+          q: downloadProjectQuery.trim() || undefined,
+          lifecycle: downloadProjectLifecycle,
+        },
+        "maintenance_projects.csv",
+        CSV_CONTENT_TYPES,
+        sessionToken,
+      );
     } catch (error) {
       const { detail } = await readExportError(error);
       message.error(detail || "项目 CSV 导出失败，请稍后重试或检查权限");
@@ -1994,14 +2004,62 @@ export default function ProjectCostPage({
 
         <Card title="项目与合同下载">
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Card size="small" title="项目成本 CSV 筛选">
+              <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                <div style={{ color: "var(--mb-text-3)", fontSize: 12.5 }}>
+                  仅影响“导出项目成本 CSV”；日期仍使用上方统一下载范围。
+                </div>
+                <Row gutter={[12, 12]}>
+                  <Col xs={24} md={10}>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>
+                      项目搜索
+                    </div>
+                    <Input
+                      aria-label="项目成本 CSV 项目搜索"
+                      placeholder="按项目名称关键词筛选（可选）"
+                      allowClear
+                      value={downloadProjectQuery}
+                      onChange={(event) => setDownloadProjectQuery(event.target.value)}
+                      style={{ width: "100%" }}
+                    />
+                  </Col>
+                  <Col xs={24} md={14}>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>
+                      期限状态
+                    </div>
+                    <div style={{
+                      width: "100%",
+                      minWidth: 0,
+                      maxWidth: "100%",
+                      overflowX: "auto",
+                      paddingBottom: 2,
+                    }}>
+                      <Segmented
+                        aria-label="项目成本 CSV 期限状态筛选"
+                        value={downloadProjectLifecycle}
+                        onChange={(value) => {
+                          setDownloadProjectLifecycle(value as LifecycleFilter);
+                        }}
+                        options={[
+                          { label: "全部期限", value: "all" },
+                          { label: "进行中", value: "ongoing" },
+                          { label: "已结束", value: "ended" },
+                          { label: "期限缺失", value: "missing" },
+                        ]}
+                      />
+                    </div>
+                  </Col>
+                </Row>
+                <Button
+                  loading={exportingProjects}
+                  disabled={exportingProjects}
+                  onClick={exportProjectsCsv}
+                >
+                  导出项目成本 CSV
+                </Button>
+              </Space>
+            </Card>
             <Space wrap>
-              <Button
-                loading={exportingProjects}
-                disabled={exportingProjects}
-                onClick={exportProjectsCsv}
-              >
-                导出项目成本 CSV
-              </Button>
               {!scopedSales && (
                 <Button
                   loading={exportingProfit}

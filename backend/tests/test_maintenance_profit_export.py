@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app import permissions, security
 from app.agent import tools
+from app.auth import hash_password
 from app.main import app
 from app.models.maintenance import (
     FMaintenanceLine,
@@ -20,6 +21,7 @@ from app.models.maintenance import (
     MaintenanceContractWorkbookState,
 )
 from app.models.sales import FSalesOrder
+from app.models.system import SysUser
 from app.services import maintenance_margin_evidence
 from tests.test_maintenance_export_headers import (
     _admin_client,
@@ -86,6 +88,35 @@ def _csv_row(response) -> dict[str, str]:
     rows = list(csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))))
     assert len(rows) == 1
     return rows[0]
+
+
+def _scoped_sales_maintenance_client(db) -> TestClient:
+    base = permissions.effective("sales", None)
+    overrides = {"page_maintenance": True, "own_customers_only": True}
+    db.add(SysUser(
+        username="maintenance_profit_export_scoped_sales",
+        role="sales",
+        salesperson_name="测试销售",
+        password_hash=hash_password("pw123456"),
+        is_active=True,
+        template_code="sales",
+        template_version=1,
+        template_perms=base,
+        perm_overrides=overrides,
+        permissions=permissions.effective_from_snapshot(base, overrides),
+    ))
+    db.commit()
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={
+            "username": "maintenance_profit_export_scoped_sales",
+            "password": "pw123456",
+        },
+    )
+    assert login.status_code == 200, login.text
+    client.headers.update({"Authorization": f"Bearer {login.json()['token']}"})
+    return client
 
 
 def _assert_numeric_parity(
@@ -700,6 +731,7 @@ def test_project_carriers_keep_mixed_detail_orders_and_fail_cost_closed(db):
     assert csv_data["订单结构完整性"] == "不完整"
     assert csv_data["成本完整性"] == "成本不完整，需补数据"
     assert csv_data["已知成本参考(混合原值)"] == "200.0"
+    assert csv_data["合同额证据状态"] == "完整"
 
     agent_project = agent_data["rows"][0]
     assert agent_project["order_count"] == project["order_count"]
@@ -818,6 +850,16 @@ def test_project_carriers_exclude_blank_contract_without_dropping_known_cost(db)
     assert csv_data["已知成本参考(混合原值)"] == "200.0"
     assert csv_data["关联销售订单"] == ""
     assert csv_data["合同额(含税参考)"] == ""
+    assert csv_data["合同额证据状态"] == "未关联合同"
+
+    restricted_response = _profit_blind_maintenance_client(db).get(
+        "/api/maintenance/export",
+        params={"lifecycle": "all"},
+    )
+    assert restricted_response.status_code == 200, restricted_response.text
+    restricted_csv_data = _csv_row(restricted_response)
+    assert restricted_csv_data["合同额(含税参考)"] == ""
+    assert restricted_csv_data["合同额证据状态"] == "未关联合同"
 
     agent_project = agent_data["rows"][0]
     assert agent_project["known_cost_total"] == project["known_cost_total"]
@@ -866,12 +908,88 @@ def test_project_carriers_do_not_turn_missing_contract_revenue_into_zero(db):
     assert csv_data["已知成本参考(混合原值)"] == "200.0"
     assert csv_data["关联销售订单"] == "XS-MARGIN"
     assert csv_data["合同额(含税参考)"] == ""
+    assert csv_data["合同额证据状态"] == "不完整"
+
+    restricted_response = _profit_blind_maintenance_client(db).get(
+        "/api/maintenance/export",
+        params={"lifecycle": "all"},
+    )
+    assert restricted_response.status_code == 200, restricted_response.text
+    restricted_csv_data = _csv_row(restricted_response)
+    assert restricted_csv_data["合同额(含税参考)"] == ""
+    assert restricted_csv_data["合同额证据状态"] == "不完整"
 
     agent_project = agent_data["rows"][0]
     assert agent_project["known_cost_total"] == project["known_cost_total"]
     assert agent_project["sales_orders"] == ["XS-MARGIN"]
     assert agent_project["contract_amount"] is None
     assert agent_project["contract_incomplete"] is True
+
+
+def test_project_summary_csv_marks_partial_contract_revenue_incomplete_without_dropping_known_amount(
+    db,
+):
+    batch = _load_complete_contract(db)
+    original_order = db.scalar(
+        select(FMaintenanceOrder).where(
+            FMaintenanceOrder.linked_sales_order_no == "XS-MARGIN",
+        ),
+    )
+    assert original_order is not None
+    db.add(FMaintenanceOrder(
+        raw_order_id="M-MARGIN-PARTIAL-REVENUE",
+        order_no="WBDD-MARGIN-PARTIAL-REVENUE",
+        order_date=date(2026, 3, 11),
+        linked_sales_order_no="XS-MISSING-REVENUE",
+        project_raw=original_order.project_raw,
+        project_std=original_order.project_std,
+        salesperson=original_order.salesperson,
+        maint_start=original_order.maint_start,
+        maint_end=original_order.maint_end,
+        data_status=original_order.data_status,
+        import_batch_id=batch.id,
+    ))
+    db.commit()
+
+    response = _admin_client(db).get(
+        "/api/maintenance/export",
+        params={"lifecycle": "all"},
+    )
+
+    assert response.status_code == 200, response.text
+    csv_data = _csv_row(response)
+    assert Decimal(csv_data["合同额(含税参考)"]) == Decimal("1130.0")
+    assert csv_data["合同额证据状态"] == "不完整"
+
+
+def test_project_summary_csv_marks_scoped_sales_contract_evidence_restricted(db):
+    _load_complete_contract(db)
+
+    response = _scoped_sales_maintenance_client(db).get(
+        "/api/maintenance/export",
+        params={"lifecycle": "all"},
+    )
+
+    assert response.status_code == 200, response.text
+    csv_data = _csv_row(response)
+    assert csv_data["关联销售订单"] == "XS-MARGIN"
+    assert csv_data["合同额(含税参考)"] == ""
+    assert csv_data["合同额证据状态"] == "受限"
+
+
+def test_project_summary_csv_marks_hidden_contract_amount_restricted(db):
+    _load_complete_contract(db)
+
+    response = _profit_blind_maintenance_client(db).get(
+        "/api/maintenance/export",
+        params={"lifecycle": "all"},
+    )
+
+    assert response.status_code == 200, response.text
+    csv_data = _csv_row(response)
+    assert csv_data["关联销售订单"] == "XS-MARGIN"
+    assert csv_data["合同额(含税参考)"] == ""
+    assert csv_data["合同额证据状态"] == "受限"
 
 
 def test_blank_contract_values_are_excluded_from_board_csv_single_and_zip(db):
