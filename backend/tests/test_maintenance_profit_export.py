@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from sqlalchemy import select
 
+from app import permissions, security
+from app.agent import tools
 from app.main import app
 from app.models.maintenance import (
     FMaintenanceLine,
@@ -127,16 +129,7 @@ def _assert_status_parity(
         )
         assert csv_row[f"收入证据状态-{basis_label}"] == revenue_status
 
-    contribution_statuses = {
-        board["contribution_status_inc"],
-        board["contribution_status_ex"],
-    }
-    if board["expense_data_available"] is not True:
-        expense_status = "expense_data_unavailable"
-    elif "expense_tax_unknown" in contribution_statuses:
-        expense_status = "expense_tax_unknown"
-    else:
-        expense_status = "complete"
+    expense_status = board["expense_evidence_status"]
     assert csv_row["费用证据状态"] == expense_status
     for summary in workbook_summaries:
         assert summary["费用证据状态"] == _EXPENSE_STATUS_LABELS[expense_status]
@@ -376,6 +369,55 @@ def test_missing_cost_fails_closed_across_all_four_carriers(db):
     _assert_numeric_parity(board, csv_data, single, bundled)
 
 
+def test_missing_cost_does_not_hide_independent_expense_tax_evidence(db):
+    batch = _load_complete_contract(db)
+    line = db.scalar(select(FMaintenanceLine))
+    assert line is not None
+    line.unit_cost = None
+    line.cost_amount = None
+    line.unit_cost_inc_tax = None
+    line.unit_cost_ex_tax = None
+    line.cost_amount_inc_tax = None
+    line.cost_amount_ex_tax = None
+    line.cost_source = "none"
+    line.cost_tax_basis = None
+    db.add_all([
+        FProjectExpense(
+            raw_line_id="EXP-MISSING-COST-TAX-UNKNOWN",
+            bxd_no="BXD-MISSING-COST-TAX-UNKNOWN",
+            line_no=1,
+            linked_sales_order_no="XS-MARGIN",
+            data_status="已结束",
+            expense_date=date(2026, 3, 12),
+            amount=None,
+            amount_ex_tax=None,
+            amount_inc_tax=None,
+            import_batch_id=batch.id,
+        ),
+        MaintenanceContractWorkbookState(
+            contract_no="XS-MARGIN",
+            revision=1,
+            expense_complete_through=_FULL_EXPENSE_COVERAGE,
+            expense_snapshot_complete=True,
+        ),
+    ])
+    db.commit()
+
+    board, csv_data, single, bundled = _four_carriers(_admin_client(db))
+
+    assert board["parts_profit_status_inc"] == "incomplete_cost"
+    assert board["parts_profit_status_ex"] == "incomplete_cost"
+    assert board["contribution_status_inc"] == "incomplete_cost"
+    assert board["contribution_status_ex"] == "incomplete_cost"
+    assert board["expense_data_available"] is True
+    assert board["expense_inc"] is None
+    assert board["expense_ex"] is None
+    assert board["expense_evidence_status"] == "expense_tax_unknown"
+    assert csv_data["费用证据状态"] == "expense_tax_unknown"
+    assert single["费用证据状态"] == "费用税务口径缺失"
+    assert bundled["费用证据状态"] == "费用税务口径缺失"
+
+
 def test_zero_detail_contract_stays_in_all_four_carriers_and_costs_fail_closed(db):
     batch = _load_complete_contract(db)
     line = db.scalar(select(FMaintenanceLine))
@@ -592,6 +634,244 @@ def test_mixed_detail_contract_keeps_known_facts_but_all_margins_fail_closed(
         assert summary["订单结构完整性"] == "不完整：存在无配件明细订单"
         assert summary["成本完整性"] == "成本不完整，需补数据"
     _assert_numeric_parity(board, csv_data, single, bundled)
+
+
+def test_project_carriers_keep_mixed_detail_orders_and_fail_cost_closed(db):
+    batch = _load_complete_contract(db)
+    original_order = db.scalar(select(FMaintenanceOrder).where(
+        FMaintenanceOrder.linked_sales_order_no == "XS-MARGIN",
+    ))
+    assert original_order is not None
+    db.add(FMaintenanceOrder(
+        raw_order_id="M-MARGIN-PROJECT-ZERO",
+        order_no="WBDD-MARGIN-PROJECT-ZERO",
+        order_date=date(2026, 3, 11),
+        linked_sales_order_no="XS-MARGIN",
+        project_raw=original_order.project_raw,
+        project_std=original_order.project_std,
+        salesperson=original_order.salesperson,
+        maint_start=original_order.maint_start,
+        maint_end=original_order.maint_end,
+        data_status=original_order.data_status,
+        import_batch_id=batch.id,
+    ))
+    db.commit()
+    client = _admin_client(db)
+
+    projects_response = client.get(
+        "/api/maintenance/projects",
+        params={"lifecycle": "all"},
+    )
+    csv_response = client.get(
+        "/api/maintenance/export",
+        params={"lifecycle": "all"},
+    )
+    admin_ctx = security.UserContext(
+        user_id="admin",
+        role="admin",
+        permissions=permissions.effective("admin", None),
+        is_authenticated=True,
+    )
+    agent_data = tools.dispatch(
+        db,
+        "get_maintenance_projects",
+        {},
+        admin_ctx,
+    )
+
+    assert projects_response.status_code == 200, projects_response.text
+    assert csv_response.status_code == 200, csv_response.text
+    project = projects_response.json()["rows"][0]
+    assert project["project"] == "双口径毛利项目"
+    assert project["order_count"] == 2
+    assert project["missing_detail_orders"] == 1
+    assert project["structure_complete"] is False
+    assert project["lines"] == 1
+    assert project["known_cost_total"] == 200.0
+    assert project["cost_quality"] == "incomplete"
+    assert project["parts_cost_inc_tax"] == 226.0
+    assert project["parts_cost_ex_tax"] == 200.0
+    assert project["parts_cost_inc_tax_complete"] is False
+    assert project["parts_cost_ex_tax_complete"] is False
+
+    csv_data = _csv_row(csv_response)
+    assert csv_data["维保订单数"] == "2"
+    assert csv_data["无明细订单数"] == "1"
+    assert csv_data["订单结构完整性"] == "不完整"
+    assert csv_data["成本完整性"] == "成本不完整，需补数据"
+    assert csv_data["已知成本参考(混合原值)"] == "200.0"
+
+    agent_project = agent_data["rows"][0]
+    assert agent_project["order_count"] == project["order_count"]
+    assert agent_project["missing_detail_orders"] == project["missing_detail_orders"]
+    assert agent_project["structure_complete"] is project["structure_complete"]
+    assert agent_project["cost_quality"] == project["cost_quality"]
+
+
+def test_project_carriers_keep_zero_detail_project_without_fake_zero_cost(db):
+    _load_complete_contract(db)
+    line = db.scalar(select(FMaintenanceLine))
+    assert line is not None
+    db.delete(line)
+    db.commit()
+    client = _admin_client(db)
+
+    projects_response = client.get(
+        "/api/maintenance/projects",
+        params={"lifecycle": "all"},
+    )
+    csv_response = client.get(
+        "/api/maintenance/export",
+        params={"lifecycle": "all"},
+    )
+    admin_ctx = security.UserContext(
+        user_id="admin",
+        role="admin",
+        permissions=permissions.effective("admin", None),
+        is_authenticated=True,
+    )
+    agent_data = tools.dispatch(
+        db,
+        "get_maintenance_projects",
+        {},
+        admin_ctx,
+    )
+
+    assert projects_response.status_code == 200, projects_response.text
+    assert csv_response.status_code == 200, csv_response.text
+    project = projects_response.json()["rows"][0]
+    assert project["project"] == "双口径毛利项目"
+    assert project["order_count"] == 1
+    assert project["missing_detail_orders"] == 1
+    assert project["structure_complete"] is False
+    assert project["lines"] == 0
+    assert project["cost_quality"] == "incomplete"
+    for field in (
+        "actual_cost_inc",
+        "actual_cost_ex",
+        "estimated_cost_inc",
+        "estimated_cost_ex",
+        "known_cost_total",
+        "cost_inc",
+        "cost_ex",
+        "cost_total",
+        "parts_cost_inc_tax",
+        "parts_cost_ex_tax",
+    ):
+        assert project[field] is None
+
+    csv_data = _csv_row(csv_response)
+    assert csv_data["维保订单数"] == "1"
+    assert csv_data["无明细订单数"] == "1"
+    assert csv_data["订单结构完整性"] == "不完整"
+    assert csv_data["已知成本参考(混合原值)"] == ""
+    assert csv_data["成本完整性"] == "成本不完整，需补数据"
+
+    agent_project = agent_data["rows"][0]
+    assert agent_project["order_count"] == project["order_count"]
+    assert agent_project["missing_detail_orders"] == project["missing_detail_orders"]
+    assert agent_project["structure_complete"] is project["structure_complete"]
+    assert agent_project["known_cost_total"] is None
+    assert agent_project["cost_quality"] == "incomplete"
+
+
+def test_project_carriers_exclude_blank_contract_without_dropping_known_cost(db):
+    _load_complete_contract(db)
+    order = db.scalar(select(FMaintenanceOrder))
+    assert order is not None
+    order.linked_sales_order_no = "   "
+    db.commit()
+    client = _admin_client(db)
+
+    projects_response = client.get(
+        "/api/maintenance/projects",
+        params={"lifecycle": "all"},
+    )
+    csv_response = client.get(
+        "/api/maintenance/export",
+        params={"lifecycle": "all"},
+    )
+    admin_ctx = security.UserContext(
+        user_id="admin",
+        role="admin",
+        permissions=permissions.effective("admin", None),
+        is_authenticated=True,
+    )
+    agent_data = tools.dispatch(
+        db,
+        "get_maintenance_projects",
+        {},
+        admin_ctx,
+    )
+
+    assert projects_response.status_code == 200, projects_response.text
+    assert csv_response.status_code == 200, csv_response.text
+    project = projects_response.json()["rows"][0]
+    assert project["project"] == "双口径毛利项目"
+    assert project["known_cost_total"] == 200.0
+    assert project["cost_quality"] == "actual_only"
+    assert project["sales_orders"] == []
+    assert project["contract_amount"] is None
+    assert project["contract_incomplete"] is False
+
+    csv_data = _csv_row(csv_response)
+    assert csv_data["已知成本参考(混合原值)"] == "200.0"
+    assert csv_data["关联销售订单"] == ""
+    assert csv_data["合同额(含税参考)"] == ""
+
+    agent_project = agent_data["rows"][0]
+    assert agent_project["known_cost_total"] == project["known_cost_total"]
+    assert agent_project["sales_orders"] == []
+    assert agent_project["contract_amount"] is None
+
+
+def test_project_carriers_do_not_turn_missing_contract_revenue_into_zero(db):
+    _load_complete_contract(db)
+    sale = db.scalar(select(FSalesOrder))
+    assert sale is not None
+    db.delete(sale)
+    db.commit()
+    client = _admin_client(db)
+
+    projects_response = client.get(
+        "/api/maintenance/projects",
+        params={"lifecycle": "all"},
+    )
+    csv_response = client.get(
+        "/api/maintenance/export",
+        params={"lifecycle": "all"},
+    )
+    admin_ctx = security.UserContext(
+        user_id="admin",
+        role="admin",
+        permissions=permissions.effective("admin", None),
+        is_authenticated=True,
+    )
+    agent_data = tools.dispatch(
+        db,
+        "get_maintenance_projects",
+        {},
+        admin_ctx,
+    )
+
+    assert projects_response.status_code == 200, projects_response.text
+    assert csv_response.status_code == 200, csv_response.text
+    project = projects_response.json()["rows"][0]
+    assert project["known_cost_total"] == 200.0
+    assert project["sales_orders"] == ["XS-MARGIN"]
+    assert project["contract_amount"] is None
+    assert project["contract_incomplete"] is True
+
+    csv_data = _csv_row(csv_response)
+    assert csv_data["已知成本参考(混合原值)"] == "200.0"
+    assert csv_data["关联销售订单"] == "XS-MARGIN"
+    assert csv_data["合同额(含税参考)"] == ""
+
+    agent_project = agent_data["rows"][0]
+    assert agent_project["known_cost_total"] == project["known_cost_total"]
+    assert agent_project["sales_orders"] == ["XS-MARGIN"]
+    assert agent_project["contract_amount"] is None
+    assert agent_project["contract_incomplete"] is True
 
 
 def test_blank_contract_values_are_excluded_from_board_csv_single_and_zip(db):

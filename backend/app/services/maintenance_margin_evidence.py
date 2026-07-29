@@ -52,6 +52,21 @@ class ExpenseEvidence:
         )
 
 
+def expense_evidence_status(
+    evidence: ExpenseEvidence | None,
+    *,
+    data_available: bool,
+) -> str:
+    """独立解释费用证据，不受成本/收入等贡献毛利主阻断状态影响。"""
+    if not data_available:
+        return "expense_data_unavailable"
+    if evidence is None:
+        return "complete"
+    if evidence.expense_inc is None or evidence.expense_ex is None:
+        return "expense_tax_unknown"
+    return "complete"
+
+
 def _decimal_key(value: Decimal | None):
     if value is None:
         return None

@@ -610,7 +610,6 @@ def _build_contract_workbooks_zip(
             with archive.open(
                 "导出清单.csv",
                 mode="w",
-                force_zip64=True,
             ) as manifest_bytes:
                 manifest_bytes.write(b"\xef\xbb\xbf")
                 with io.TextIOWrapper(
@@ -659,7 +658,7 @@ def _build_contract_workbooks_zip(
                         date_to=date_to,
                     )
                 try:
-                    with archive.open(member_name, mode="w", force_zip64=True) as member:
+                    with archive.open(member_name, mode="w") as member:
                         shutil.copyfileobj(workbook, member, length=1024 * 1024)
                 finally:
                     workbook.close()

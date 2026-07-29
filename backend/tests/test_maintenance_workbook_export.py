@@ -2,6 +2,7 @@
 import asyncio
 import csv
 import io
+import struct
 from datetime import date
 from decimal import Decimal
 from zipfile import ZIP_STORED, ZipFile
@@ -124,6 +125,37 @@ def _only_workbook(archive: ZipFile):
     return load_workbook(io.BytesIO(archive.read(member)), data_only=False)
 
 
+def _extra_field_ids(extra: bytes) -> list[int]:
+    field_ids: list[int] = []
+    offset = 0
+    while offset < len(extra):
+        assert len(extra) - offset >= 4
+        field_id, size = struct.unpack_from("<HH", extra, offset)
+        offset += 4
+        assert size <= len(extra) - offset
+        field_ids.append(field_id)
+        offset += size
+    return field_ids
+
+
+def _assert_zip_uses_only_zip32_member_headers(payload: bytes) -> None:
+    local_header = struct.Struct("<IHHHHHIIIHH")
+    with ZipFile(io.BytesIO(payload)) as archive:
+        assert archive.testzip() is None
+        for info in archive.infolist():
+            fields = local_header.unpack_from(payload, info.header_offset)
+            assert fields[0] == 0x04034B50
+            assert fields[1] < 45
+            assert fields[7] != 0xFFFFFFFF
+            assert fields[8] != 0xFFFFFFFF
+            name_length, extra_length = fields[9], fields[10]
+            extra_offset = info.header_offset + local_header.size + name_length
+            local_extra = payload[extra_offset:extra_offset + extra_length]
+            assert 0x0001 not in _extra_field_ids(local_extra)
+            assert 0x0001 not in _extra_field_ids(info.extra)
+            assert archive.read(info.filename)
+
+
 def test_bulk_export_returns_one_zip_with_one_contract_workbook(db):
     batch = _batch(db)
     _order(db, batch, raw_id="ONE", contract="XSDD-ONE")
@@ -160,6 +192,17 @@ def test_bulk_export_returns_one_zip_with_one_contract_workbook(db):
             "跳过制单日期": "",
             "说明": "",
         }]
+
+
+def test_bulk_export_uses_zip32_headers_accepted_by_browser_validator(db):
+    batch = _batch(db)
+    _order(db, batch, raw_id="ZIP32", contract="XSDD-ZIP32")
+    db.commit()
+
+    response = _admin_client(db).get("/api/maintenance/export-workbooks")
+
+    assert response.status_code == 200, response.text
+    _assert_zip_uses_only_zip32_member_headers(response.content)
 
 
 @pytest.mark.parametrize(

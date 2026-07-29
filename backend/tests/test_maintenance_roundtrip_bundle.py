@@ -20,6 +20,9 @@ from app.security import UserContext
 from app.services import maintenance_roundtrip
 from tests.test_maintenance_export_headers import _admin_client, _cost_blind_maintenance_client
 from tests.test_maintenance_roundtrip import _seed_contract
+from tests.test_maintenance_workbook_export import (
+    _assert_zip_uses_only_zip32_member_headers,
+)
 
 
 def _metadata(payload: bytes) -> dict[str, str]:
@@ -214,6 +217,15 @@ def test_roundtrip_bundle_endpoint_splits_contracts_into_independently_signed_wo
         assert imported.status_code == 200, imported.text
         assert imported.json()["contracts"] == [contract]
         assert imported.json()["changed_rows"] == 0
+
+
+def test_roundtrip_bundle_uses_zip32_headers_accepted_by_browser_validator(db):
+    _seed_contract(db, suffix="zip32-bundle", contract="XSDD-ZIP32-BUNDLE")
+
+    response = _admin_client(db).get("/api/maintenance/roundtrip-templates")
+
+    assert response.status_code == 200, response.text
+    _assert_zip_uses_only_zip32_member_headers(response.content)
 
 
 def test_single_roundtrip_formula_like_contract_is_literal_and_imports_unchanged(db):

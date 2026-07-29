@@ -376,6 +376,7 @@ def export(
             detail="所选范围内没有可导出的项目数据",
         )
     header = ["项目", "期限状态", "维保终止日期",
+              "维保订单数", "无明细订单数", "订单结构完整性",
               "出库行数", "出库数量",
               "实际采购参考-含税", "实际采购参考-不含税",
               "估算参考-含税", "估算参考-不含税",
@@ -418,6 +419,8 @@ def export(
             "incomplete": "成本不完整，需补数据",
         }
         rows.append([_safe(r["project"]), lifecycle_label[r["lifecycle_status"]], r["maint_end"],
+                     r["order_count"], r["missing_detail_orders"],
+                     "完整" if r["structure_complete"] else "不完整",
                      r["lines"], r["qty"],
                      r["actual_cost_inc"], r["actual_cost_ex"],
                      r["estimated_cost_inc"], r["estimated_cost_ex"],
@@ -681,17 +684,8 @@ def _revenue_evidence_status(row: dict, basis: str) -> str:
 
 
 def _expense_evidence_status(row: dict) -> str:
-    statuses = {
-        row.get("contribution_status_inc"),
-        row.get("contribution_status_ex"),
-    }
-    if statuses == {None}:
-        return "restricted"
-    if row.get("expense_data_available") is not True:
-        return "expense_data_unavailable"
-    if "expense_tax_unknown" in statuses:
-        return "expense_tax_unknown"
-    return "complete"
+    status = row.get("expense_evidence_status")
+    return "restricted" if status is None else str(status)
 
 
 @router.get("/board/export")

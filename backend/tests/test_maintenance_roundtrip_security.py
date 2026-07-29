@@ -3,9 +3,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import os
 import threading
 import time
+import xml.etree.ElementTree as ET
+import zipfile
+from collections.abc import Callable
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -23,7 +27,7 @@ from app.api import maintenance as maintenance_api
 from app.auth import hash_password
 from app.db import SessionLocal
 from app.main import app
-from app.etl import pipeline
+from app.etl import pipeline, reader
 from app.etl.reader import ReaderError
 from app.models.maintenance import (
     FMaintenanceLine,
@@ -48,6 +52,95 @@ def _expense_count(db, contract: str) -> int:
         select(func.count(FProjectExpense.id)).where(
             FProjectExpense.linked_sales_order_no == contract
         )
+    )
+
+
+def _rewrite_xlsx_package(
+    path,
+    *,
+    transforms: dict[str, Callable[[bytes], bytes]],
+    extra_members: dict[str, bytes] | None = None,
+) -> None:
+    output = io.BytesIO()
+    with (
+        zipfile.ZipFile(path) as source,
+        zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as target,
+    ):
+        for member in source.infolist():
+            payload = source.read(member)
+            transform = transforms.get(member.filename)
+            if transform is not None:
+                payload = transform(payload)
+            target.writestr(member, payload)
+        for member_name, payload in (extra_members or {}).items():
+            target.writestr(member_name, payload)
+    path.write_bytes(output.getvalue())
+
+
+def _rewrite_xlsx_member(path, member_name: str, transform) -> None:
+    _rewrite_xlsx_package(path, transforms={member_name: transform})
+
+
+def _roundtrip_worksheet_path(path, sheet_name: str) -> str:
+    with zipfile.ZipFile(path) as archive:
+        return dict(reader._workbook_sheet_parts(archive))[sheet_name]
+
+
+def _roundtrip_table_path(path, sheet_name: str) -> str:
+    with zipfile.ZipFile(path) as archive:
+        worksheet_path = dict(reader._workbook_sheet_parts(archive))[sheet_name]
+        envelope = maintenance_roundtrip._roundtrip_sheet_envelopes()[sheet_name]
+        table_path = maintenance_roundtrip._roundtrip_table_part(
+            archive,
+            worksheet_path=worksheet_path,
+            sheet_name=sheet_name,
+            expected_table_name=envelope.table_name,
+        )
+    assert table_path is not None
+    return table_path
+
+
+def _add_shared_strings_part(path, shared_strings: bytes) -> None:
+    def add_content_type(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        namespace = root.tag.rsplit("}", 1)[0].lstrip("{")
+        ET.SubElement(
+            root,
+            f"{{{namespace}}}Override",
+            {
+                "PartName": "/xl/sharedStrings.xml",
+                "ContentType": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sharedStrings+xml"
+                ),
+            },
+        )
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def add_relationship(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        namespace = root.tag.rsplit("}", 1)[0].lstrip("{")
+        ET.SubElement(
+            root,
+            f"{{{namespace}}}Relationship",
+            {
+                "Id": "rIdSharedStringsSecurityTest",
+                "Type": (
+                    "http://schemas.openxmlformats.org/officeDocument/"
+                    "2006/relationships/sharedStrings"
+                ),
+                "Target": "sharedStrings.xml",
+            },
+        )
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_xlsx_package(
+        path,
+        transforms={
+            "[Content_Types].xml": add_content_type,
+            "xl/_rels/workbook.xml.rels": add_relationship,
+        },
+        extra_members={"xl/sharedStrings.xml": shared_strings},
     )
 
 
@@ -920,6 +1013,492 @@ def test_roundtrip_uncompressed_package_cap_is_64_mib(tmp_path, monkeypatch):
         maintenance_roundtrip._assert_safe_workbook_package(str(path))
 
     assert caught.value.status_code == 413
+
+
+def test_roundtrip_rejects_static_cell_outside_table_before_openpyxl(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-OUTSIDE-TABLE"
+    _seed_contract(db, suffix="OUTSIDE-TABLE", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "outside-table.xlsx",
+        contract=contract,
+    )
+    workbook = load_workbook(path, data_only=False)
+    try:
+        # The signed table currently ends at row 2. This is still below the generic
+        # 10k-row envelope, but must not be materialized by openpyxl.
+        workbook["02_维保订单"]["S5000"] = "Excel Table 范围外静态值"
+        workbook.save(path)
+    finally:
+        workbook.close()
+
+    opened = False
+
+    def forbidden_load(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("协议范围外单元格不应进入 openpyxl")
+
+    monkeypatch.setattr(maintenance_roundtrip, "load_workbook", forbidden_load)
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="Table 范围外",
+    ) as caught:
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    assert caught.value.status_code == 413
+    assert opened is False
+
+
+def test_roundtrip_rejects_forged_dimension_outside_table_before_openpyxl(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-FORGED-DIMENSION"
+    _seed_contract(db, suffix="FORGED-DIMENSION", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "forged-dimension.xlsx",
+        contract=contract,
+    )
+    worksheet_path = _roundtrip_worksheet_path(path, "02_维保订单")
+
+    def forge_dimension(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        dimension = next(
+            element
+            for element in root
+            if element.tag.rsplit("}", 1)[-1] == "dimension"
+        )
+        # This stays inside the generic 5M-cell cap, but is far beyond this
+        # workbook's signed A1:S2 table.
+        dimension.set("ref", "A1:S10001")
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_xlsx_member(path, worksheet_path, forge_dimension)
+    opened = False
+
+    def forbidden_load(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("伪造 worksheet dimension 不应进入 openpyxl")
+
+    monkeypatch.setattr(maintenance_roundtrip, "load_workbook", forbidden_load)
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="Table 范围外",
+    ) as caught:
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    assert caught.value.status_code == 413
+    assert opened is False
+
+
+def test_roundtrip_rejects_sparse_huge_coordinate_before_openpyxl(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-SPARSE-HUGE"
+    _seed_contract(db, suffix="SPARSE-HUGE", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "sparse-huge.xlsx",
+        contract=contract,
+    )
+    worksheet_path = _roundtrip_worksheet_path(path, "02_维保订单")
+
+    def add_sparse_cell(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        namespace = root.tag.rsplit("}", 1)[0].lstrip("{")
+
+        def tag(local_name: str) -> str:
+            return f"{{{namespace}}}{local_name}"
+
+        dimension = next(
+            element
+            for element in root
+            if element.tag.rsplit("}", 1)[-1] == "dimension"
+        )
+        # A forged small dimension must not hide the actual sparse coordinate.
+        dimension.set("ref", "A1")
+        first_row = next(
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "row"
+        )
+        # openpyxl treats any direct row child as cell-like. A renamed <c> must
+        # not bypass coordinate accounting.
+        cell = ET.SubElement(
+            first_row,
+            tag("x"),
+            {"r": "XFD1048576", "t": "inlineStr"},
+        )
+        inline_string = ET.SubElement(cell, tag("is"))
+        ET.SubElement(inline_string, tag("t")).text = "sparse"
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_xlsx_member(path, worksheet_path, add_sparse_cell)
+    opened = False
+
+    def forbidden_load(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("稀疏超大坐标不应进入 openpyxl")
+
+    monkeypatch.setattr(maintenance_roundtrip, "load_workbook", forbidden_load)
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="Table 范围外",
+    ) as caught:
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    assert caught.value.status_code == 413
+    assert opened is False
+
+
+def test_roundtrip_rejects_formula_nested_in_renamed_cell_before_openpyxl(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-RENAMED-FORMULA"
+    _seed_contract(db, suffix="RENAMED-FORMULA", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "renamed-formula.xlsx",
+        contract=contract,
+    )
+    worksheet_path = _roundtrip_worksheet_path(path, "02_维保订单")
+
+    def rename_formula_cell(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        cell = next(
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "c"
+            and element.attrib.get("r") == "A2"
+        )
+        namespace = cell.tag.rsplit("}", 1)[0].lstrip("{")
+        cell.tag = f"{{{namespace}}}x"
+        for child in list(cell):
+            cell.remove(child)
+        ET.SubElement(cell, f"{{{namespace}}}f").text = "1+1"
+        ET.SubElement(cell, f"{{{namespace}}}v").text = "2"
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_xlsx_member(path, worksheet_path, rename_formula_cell)
+    opened = False
+
+    def forbidden_load(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("重命名单元格中的公式不应进入 openpyxl")
+
+    monkeypatch.setattr(maintenance_roundtrip, "load_workbook", forbidden_load)
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="包含公式",
+    ):
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    assert opened is False
+
+
+def test_roundtrip_rejects_wide_worksheet_xml_before_openpyxl(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-WIDE-XML"
+    _seed_contract(db, suffix="WIDE-XML", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "wide-xml.xlsx",
+        contract=contract,
+    )
+    worksheet_path = _roundtrip_worksheet_path(path, "02_维保订单")
+
+    def widen_worksheet(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        namespace = root.tag.rsplit("}", 1)[0].lstrip("{")
+        for index in range(
+            maintenance_roundtrip.MAX_ROUNDTRIP_WORKSHEET_STRUCTURAL_ELEMENTS
+            + 1
+        ):
+            ET.SubElement(
+                root,
+                f"{{{namespace}}}junk",
+                {"index": str(index)},
+            )
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_xlsx_member(path, worksheet_path, widen_worksheet)
+    opened = False
+
+    def forbidden_load(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("超宽 worksheet XML 不应进入 openpyxl")
+
+    monkeypatch.setattr(maintenance_roundtrip, "load_workbook", forbidden_load)
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="结构性 XML 元素超过",
+    ) as caught:
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    assert caught.value.status_code == 413
+    assert opened is False
+
+
+@pytest.mark.parametrize(
+    "part_kind",
+    ["worksheet", "table", "relationship", "sharedStrings"],
+)
+def test_roundtrip_malformed_protocol_xml_is_controlled_4xx(
+    db,
+    tmp_path,
+    part_kind,
+):
+    contract = f"XSDD-RT-MALFORMED-{part_kind}"
+    _seed_contract(db, suffix=f"MALFORMED-{part_kind}", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / f"malformed-{part_kind}.xlsx",
+        contract=contract,
+    )
+    worksheet_path = _roundtrip_worksheet_path(path, "02_维保订单")
+    if part_kind == "worksheet":
+        target = worksheet_path
+    elif part_kind == "table":
+        target = _roundtrip_table_path(path, "02_维保订单")
+    elif part_kind == "relationship":
+        target = maintenance_roundtrip._roundtrip_relationship_part(
+            worksheet_path
+        )
+    else:
+        _add_shared_strings_part(path, b"<sst><si>")
+        target = "xl/sharedStrings.xml"
+
+    if part_kind != "sharedStrings":
+        _rewrite_xlsx_member(path, target, lambda payload: payload[:-1])
+
+    with pytest.raises(maintenance_roundtrip.RoundtripWorkbookError) as caught:
+        maintenance_roundtrip._assert_safe_workbook_package(str(path))
+
+    assert caught.value.status_code == 422
+    assert caught.value.__cause__ is not None
+
+
+def test_roundtrip_relationship_namespace_bomb_is_controlled_4xx(db, tmp_path):
+    contract = "XSDD-RT-REL-NAMESPACE"
+    _seed_contract(db, suffix="REL-NAMESPACE", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "relationship-namespace.xlsx",
+        contract=contract,
+    )
+    worksheet_path = _roundtrip_worksheet_path(path, "02_维保订单")
+    relationship_path = maintenance_roundtrip._roundtrip_relationship_part(
+        worksheet_path
+    )
+
+    def add_namespaces(payload: bytes) -> bytes:
+        root_start = payload.find(b"<Relationships")
+        root_end = payload.find(b">", root_start)
+        assert root_start >= 0 and root_end > root_start
+        declarations = b"".join(
+            f' xmlns:bad{index}="urn:bad:{index}"'.encode()
+            for index in range(reader._XML_NAME_LIMIT + 1)
+        )
+        return payload[:root_end] + declarations + payload[root_end:]
+
+    _rewrite_xlsx_member(path, relationship_path, add_namespaces)
+
+    with pytest.raises(maintenance_roundtrip.RoundtripWorkbookError) as caught:
+        maintenance_roundtrip._assert_safe_workbook_package(str(path))
+
+    assert caught.value.status_code == 422
+    assert isinstance(caught.value.__cause__, ReaderError)
+
+
+def test_roundtrip_table_part_must_match_its_table_relationship_before_openpyxl(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-TABLE-REL-MISMATCH"
+    _seed_contract(db, suffix="TABLE-REL-MISMATCH", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "table-rel-mismatch.xlsx",
+        contract=contract,
+    )
+    worksheet_path = _roundtrip_worksheet_path(path, "02_维保订单")
+    relationship_path = maintenance_roundtrip._roundtrip_relationship_part(
+        worksheet_path
+    )
+
+    def redirect_table_part(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        table_part = next(
+            element
+            for element in root.iter()
+            if element.tag.rsplit("}", 1)[-1] == "tablePart"
+        )
+        relation_attribute = next(
+            name
+            for name in table_part.attrib
+            if name.rsplit("}", 1)[-1] == "id"
+        )
+        table_part.set(relation_attribute, "rIdNotATable")
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    def add_non_table_relationship(payload: bytes) -> bytes:
+        root = ET.fromstring(payload)
+        namespace = root.tag.rsplit("}", 1)[0].lstrip("{")
+        ET.SubElement(
+            root,
+            f"{{{namespace}}}Relationship",
+            {
+                "Id": "rIdNotATable",
+                "Type": "urn:not-a-table",
+                "Target": "../tables/table1.xml",
+            },
+        )
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+    _rewrite_xlsx_package(
+        path,
+        transforms={
+            worksheet_path: redirect_table_part,
+            relationship_path: add_non_table_relationship,
+        },
+    )
+    opened = False
+
+    def forbidden_load(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("错配的 tablePart 关系不应进入 openpyxl")
+
+    monkeypatch.setattr(maintenance_roundtrip, "load_workbook", forbidden_load)
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="Table|tablePart",
+    ):
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    assert opened is False
+
+
+def test_roundtrip_counts_actual_shared_strings_before_openpyxl(
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    contract = "XSDD-RT-SHARED-STRINGS"
+    _seed_contract(db, suffix="SHARED-STRINGS", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "shared-strings.xlsx",
+        contract=contract,
+    )
+
+    shared_strings = (
+        b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        b'<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        b'count="1" uniqueCount="1">'
+        b"<si><t>one</t></si><si><t>two</t></si>"
+        b"</sst>"
+    )
+    _add_shared_strings_part(path, shared_strings)
+    monkeypatch.setattr(maintenance_roundtrip, "MAX_ROUNDTRIP_SHARED_STRINGS", 1)
+    opened = False
+
+    def forbidden_load(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("超量 sharedStrings 不应进入 openpyxl")
+
+    monkeypatch.setattr(maintenance_roundtrip, "load_workbook", forbidden_load)
+
+    with pytest.raises(
+        maintenance_roundtrip.RoundtripWorkbookError,
+        match="sharedStrings.*超过",
+    ) as caught:
+        maintenance_roundtrip.import_roundtrip_workbook(
+            db,
+            str(path),
+            filename=path.name,
+            operated_by="tester",
+        )
+
+    assert caught.value.status_code == 413
+    assert opened is False
+
+
+def test_roundtrip_xml_envelope_accepts_10000_row_table_boundary(db, tmp_path):
+    contract = "XSDD-RT-10K-BOUNDARY"
+    _seed_contract(db, suffix="10K-BOUNDARY", contract=contract)
+    path = _export_to_path(
+        db,
+        tmp_path / "ten-thousand-row-boundary.xlsx",
+        contract=contract,
+    )
+    workbook = load_workbook(path, data_only=False)
+    try:
+        worksheet = workbook["02_维保订单"]
+        worksheet.tables["tbl_orders_v1"].ref = "A1:S10001"
+        worksheet["S10001"] = "10k-boundary"
+        workbook.save(path)
+    finally:
+        workbook.close()
+
+    # 10,000 data rows plus the header is the inclusive protocol boundary.
+    maintenance_roundtrip._assert_safe_workbook_package(str(path))
 
 
 def test_template_build_concurrency_is_one(db):

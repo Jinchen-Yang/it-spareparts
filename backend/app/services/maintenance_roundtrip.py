@@ -16,9 +16,11 @@ import hmac
 import json
 import logging
 import os
+import posixpath
 import re
 import unicodedata
 import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -198,6 +200,31 @@ _TABLE_SPECS = {
     "04_报销明细": ("tbl_expenses_v1", _EXPENSE_HEADERS),
     "05_人工成本回填": ("tbl_manual_costs_v1", _MANUAL_HEADERS),
 }
+MAX_ROUNDTRIP_ROW_ELEMENTS = (
+    19
+    + len(_TABLE_SPECS) * (MAX_ROWS_PER_TABLE + 1)
+    + 7
+    + (MAX_CONTRACT_REVISIONS + 1)
+    + (MAX_METADATA_ROWS + 1)
+)
+MAX_ROUNDTRIP_CELL_ELEMENTS = (
+    2 * 19
+    + sum(
+        len(headers) * (MAX_ROWS_PER_TABLE + 1)
+        for _table_name, headers in _TABLE_SPECS.values()
+    )
+    + 3 * 7
+    + 2 * (MAX_CONTRACT_REVISIONS + 1)
+    + 2 * (MAX_METADATA_ROWS + 1)
+)
+MAX_ROUNDTRIP_SHARED_STRINGS = MAX_ROUNDTRIP_CELL_ELEMENTS
+MAX_ROUNDTRIP_XML_ELEMENTS_PER_PART = 4 * MAX_ROUNDTRIP_SHARED_STRINGS
+MAX_ROUNDTRIP_CONTENT_TYPE_ELEMENTS = config.IMPORT_XLSX_MAX_MEMBERS + 32
+MAX_ROUNDTRIP_RELATIONSHIP_ELEMENTS = 256
+MAX_ROUNDTRIP_TABLE_ELEMENTS = 512
+MAX_ROUNDTRIP_WORKSHEET_STRUCTURAL_ELEMENTS = 10_000
+MAX_ROUNDTRIP_CELL_XML_ELEMENTS = 128
+MAX_ROUNDTRIP_SHARED_STRING_XML_ELEMENTS = 128
 
 _HEADER_FILL = PatternFill("solid", fgColor="35506B")
 _HEADER_FONT = Font(color="FFFFFF", bold=True)
@@ -1727,7 +1754,7 @@ def build_roundtrip_template_bundle(
                         )
                     workbook.seek(0)
                     member_name = _roundtrip_bundle_member_name(contract, used_names)
-                    with archive.open(member_name, mode="w", force_zip64=True) as member:
+                    with archive.open(member_name, mode="w") as member:
                         while chunk := workbook.read(1024 * 1024):
                             member.write(chunk)
                 finally:
@@ -1737,6 +1764,712 @@ def build_roundtrip_template_bundle(
     except BaseException:
         output.close()
         raise
+
+
+@dataclass(frozen=True)
+class _RoundtripSheetEnvelope:
+    table_name: str | None
+    max_column: int
+    max_row: int
+
+
+def _roundtrip_sheet_envelopes() -> dict[str, _RoundtripSheetEnvelope]:
+    envelopes = {
+        "00_使用说明": _RoundtripSheetEnvelope(None, 2, 19),
+        **{
+            sheet: _RoundtripSheetEnvelope(
+                table_name,
+                len(headers),
+                MAX_ROWS_PER_TABLE + 1,
+            )
+            for sheet, (table_name, headers) in _TABLE_SPECS.items()
+        },
+        "98_字典": _RoundtripSheetEnvelope("tbl_dictionary_v1", 3, 7),
+        "99_合同版本": _RoundtripSheetEnvelope(
+            _CONTRACT_REVISION_TABLE,
+            2,
+            MAX_CONTRACT_REVISIONS + 1,
+        ),
+        "99_元数据": _RoundtripSheetEnvelope(
+            "tbl_metadata_v1",
+            2,
+            MAX_METADATA_ROWS + 1,
+        ),
+    }
+    return envelopes
+
+
+def _roundtrip_relationship_part(source_path: str) -> str:
+    directory, filename = posixpath.split(source_path)
+    return posixpath.join(directory, "_rels", f"{filename}.rels")
+
+
+def _enforce_roundtrip_xml_element_limit(
+    count: int,
+    *,
+    part: str,
+    limit: int | None = None,
+) -> None:
+    effective_limit = (
+        MAX_ROUNDTRIP_XML_ELEMENTS_PER_PART if limit is None else limit
+    )
+    if count > effective_limit:
+        raise RoundtripWorkbookError(
+            f"{part} XML 元素总量超过协议安全上限",
+            status_code=413,
+        )
+
+
+def _roundtrip_range_bounds(ref: str) -> tuple[int, int, int, int] | None:
+    refs = ref.split(":")
+    if len(refs) == 1:
+        refs *= 2
+    if len(refs) != 2:
+        return None
+    start = reader._cell_reference_bounds(refs[0])
+    end = reader._cell_reference_bounds(refs[1])
+    if start is None or end is None:
+        return None
+    min_row, min_column = start
+    max_row, max_column = end
+    if (
+        min_row < 1
+        or min_column < 1
+        or max_row < min_row
+        or max_column < min_column
+    ):
+        return None
+    return min_column, min_row, max_column, max_row
+
+
+def _roundtrip_table_relation_id(
+    archive: zipfile.ZipFile,
+    *,
+    worksheet_path: str,
+    sheet_name: str,
+    expected_table_name: str | None,
+) -> str | None:
+    declared_count: str | None = None
+    relation_ids: list[str] = []
+    saw_table_parts = False
+    open_tags: list[str] = []
+    open_elements: list[ET.Element] = []
+    element_count = 0
+    with archive.open(worksheet_path) as worksheet_xml:
+        for event, element in reader._safe_xml_iterparse(worksheet_xml):
+            tag = reader._xml_local_name(element.tag)
+            if event == "start":
+                element_count += 1
+                _enforce_roundtrip_xml_element_limit(
+                    element_count,
+                    part=worksheet_path,
+                )
+                depth = len(open_tags) + 1
+                if depth > reader._XML_DEPTH_LIMIT:
+                    raise RoundtripWorkbookError("工作簿 XML 层级超过安全上限")
+                parent = open_tags[-1] if open_tags else None
+                if tag == "tableParts":
+                    if saw_table_parts:
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 的 tableParts 结构无效"
+                        )
+                    saw_table_parts = True
+                    declared_count = element.attrib.get("count")
+                elif tag == "tablePart":
+                    if parent != "tableParts":
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 的 tableParts 结构无效"
+                        )
+                    relation_id = next(
+                        (
+                            value
+                            for name, value in element.attrib.items()
+                            if reader._xml_local_name(name) == "id"
+                        ),
+                        None,
+                    )
+                    if not relation_id or relation_ids:
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 的 tableParts 数量或关系无效"
+                        )
+                    relation_ids.append(relation_id)
+                open_tags.append(tag)
+                open_elements.append(element)
+                continue
+
+            if not open_tags or open_tags[-1] != tag:
+                raise RoundtripWorkbookError(
+                    f"{sheet_name} 的 worksheet XML 结构无效"
+                )
+            parent_element = (
+                open_elements[-2] if len(open_elements) > 1 else None
+            )
+            open_tags.pop()
+            open_elements.pop()
+            element.clear()
+            if parent_element is not None:
+                parent_element.remove(element)
+
+    if expected_table_name is None:
+        if relation_ids or declared_count not in {None, "0"}:
+            raise RoundtripWorkbookError(f"{sheet_name} 不允许附加 Excel Table")
+        return None
+    if declared_count != "1" or len(relation_ids) != 1:
+        raise RoundtripWorkbookError(
+            f"{sheet_name} 的 tableParts 数量或关系不符合协议"
+        )
+    return relation_ids[0]
+
+
+def _roundtrip_table_part(
+    archive: zipfile.ZipFile,
+    *,
+    worksheet_path: str,
+    sheet_name: str,
+    expected_table_name: str | None,
+) -> str | None:
+    expected_relation_id = _roundtrip_table_relation_id(
+        archive,
+        worksheet_path=worksheet_path,
+        sheet_name=sheet_name,
+        expected_table_name=expected_table_name,
+    )
+    relationship_path = _roundtrip_relationship_part(worksheet_path)
+    if relationship_path not in archive.namelist():
+        if expected_relation_id is None:
+            return None
+        raise RoundtripWorkbookError(f"{sheet_name} 缺少协议 Excel Table")
+
+    table_targets: list[str] = []
+    with archive.open(relationship_path) as relationships:
+        open_tags: list[str] = []
+        open_elements: list[ET.Element] = []
+        saw_root = False
+        element_count = 0
+        for event, element in reader._safe_xml_iterparse(relationships):
+            tag = reader._xml_local_name(element.tag)
+            if event == "start":
+                element_count += 1
+                _enforce_roundtrip_xml_element_limit(
+                    element_count,
+                    part=relationship_path,
+                    limit=MAX_ROUNDTRIP_RELATIONSHIP_ELEMENTS,
+                )
+                depth = len(open_tags) + 1
+                if depth > reader._XML_DEPTH_LIMIT:
+                    raise RoundtripWorkbookError("工作簿 XML 层级超过安全上限")
+                if depth == 1:
+                    if tag != "Relationships":
+                        raise RoundtripWorkbookError("工作簿关系文件结构无效")
+                    saw_root = True
+                elif depth == 2:
+                    if tag != "Relationship":
+                        raise RoundtripWorkbookError("工作簿关系文件结构无效")
+                    relation_id = element.attrib.get("Id")
+                    is_table = element.attrib.get("Type", "").endswith("/table")
+                    if is_table:
+                        if (
+                            expected_relation_id is None
+                            or relation_id != expected_relation_id
+                            or table_targets
+                        ):
+                            raise RoundtripWorkbookError(
+                                f"{sheet_name} 的 Excel Table 名称或数量不符合协议"
+                            )
+                        if (
+                            element.attrib.get("TargetMode", "").casefold()
+                            == "external"
+                        ):
+                            raise RoundtripWorkbookError(
+                                f"{sheet_name} 的 Excel Table 不能使用外部关系"
+                            )
+                        target = reader._normalize_internal_target(
+                            source_path=worksheet_path,
+                            target=element.attrib.get("Target", ""),
+                        )
+                        if target not in archive.namelist():
+                            raise RoundtripWorkbookError(
+                                f"{sheet_name} 的 Excel Table 部件不存在"
+                            )
+                        table_targets.append(target)
+                    elif relation_id == expected_relation_id:
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 的 tablePart 关系类型不符合协议"
+                        )
+                else:
+                    raise RoundtripWorkbookError("工作簿关系文件结构无效")
+                open_tags.append(tag)
+                open_elements.append(element)
+                continue
+
+            if not open_tags or open_tags[-1] != tag:
+                raise RoundtripWorkbookError("工作簿关系文件结构无效")
+            parent = open_elements[-2] if len(open_elements) > 1 else None
+            open_tags.pop()
+            open_elements.pop()
+            element.clear()
+            if parent is not None:
+                parent.remove(element)
+    if not saw_root:
+        raise RoundtripWorkbookError("工作簿关系文件结构无效")
+    if expected_relation_id is None:
+        return None
+    if len(table_targets) != 1:
+        raise RoundtripWorkbookError(
+            f"{sheet_name} 的 Excel Table 名称或数量不符合协议"
+        )
+    return table_targets[0]
+
+
+def _roundtrip_table_bounds(
+    archive: zipfile.ZipFile,
+    *,
+    table_path: str,
+    sheet_name: str,
+    envelope: _RoundtripSheetEnvelope,
+) -> tuple[int, int]:
+    table_ref: str | None = None
+    table_name: str | None = None
+    declared_columns: str | None = None
+    actual_columns = 0
+    saw_root = False
+    open_tags: list[str] = []
+    open_elements: list[ET.Element] = []
+    element_count = 0
+    with archive.open(table_path) as table_xml:
+        for event, element in reader._safe_xml_iterparse(table_xml):
+            tag = reader._xml_local_name(element.tag)
+            if event == "start":
+                element_count += 1
+                _enforce_roundtrip_xml_element_limit(
+                    element_count,
+                    part=table_path,
+                    limit=MAX_ROUNDTRIP_TABLE_ELEMENTS,
+                )
+                depth = len(open_tags) + 1
+                if depth > reader._XML_DEPTH_LIMIT:
+                    raise RoundtripWorkbookError("工作簿 XML 层级超过安全上限")
+                if depth == 1:
+                    if tag != "table":
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 的 Excel Table 结构无效"
+                        )
+                    saw_root = True
+                    table_ref = element.attrib.get("ref")
+                    table_name = element.attrib.get("displayName")
+                    internal_name = element.attrib.get("name")
+                    if internal_name not in {None, envelope.table_name}:
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 的 Excel Table 名称不符合协议"
+                        )
+                elif tag == "tableColumns":
+                    declared_columns = element.attrib.get("count")
+                elif tag == "tableColumn":
+                    actual_columns += 1
+                    if actual_columns > envelope.max_column:
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 的 Excel Table 列数超过协议上限",
+                            status_code=413,
+                        )
+                open_tags.append(tag)
+                open_elements.append(element)
+                continue
+
+            if not open_tags or open_tags[-1] != tag:
+                raise RoundtripWorkbookError(
+                    f"{sheet_name} 的 Excel Table 结构无效"
+                )
+            parent = open_elements[-2] if len(open_elements) > 1 else None
+            open_tags.pop()
+            open_elements.pop()
+            element.clear()
+            if parent is not None:
+                parent.remove(element)
+
+    if not saw_root or table_name != envelope.table_name or table_ref is None:
+        raise RoundtripWorkbookError(
+            f"{sheet_name} 的 Excel Table 名称或结构不符合协议"
+        )
+    if (
+        declared_columns is None
+        or re.fullmatch(r"[0-9]{1,3}", declared_columns) is None
+        or int(declared_columns) != envelope.max_column
+        or actual_columns != envelope.max_column
+    ):
+        raise RoundtripWorkbookError(
+            f"{sheet_name} 的 Excel Table 列数不符合协议"
+        )
+    bounds = _roundtrip_range_bounds(table_ref)
+    if bounds is None:
+        raise RoundtripWorkbookError(f"{sheet_name} 的 Excel Table 范围无效")
+    min_column, min_row, max_column, max_row = bounds
+    if (min_column, min_row, max_column) != (1, 1, envelope.max_column):
+        raise RoundtripWorkbookError(f"{sheet_name} 的 Excel Table 范围不符合协议")
+    if max_row < 2 or max_row > envelope.max_row:
+        raise RoundtripWorkbookError(
+            f"{sheet_name} 的 Excel Table 超过 {envelope.max_row - 1} 行安全上限",
+            status_code=413,
+        )
+    return max_row, max_column
+
+
+def _scan_roundtrip_worksheet(
+    archive: zipfile.ZipFile,
+    *,
+    worksheet_path: str,
+    sheet_name: str,
+    max_row: int,
+    max_column: int,
+    table_scoped: bool,
+) -> tuple[int, int]:
+    current_row = 0
+    current_column = 0
+    row_elements = 0
+    cell_elements = 0
+    open_tags: list[str] = []
+    open_elements: list[ET.Element] = []
+    element_count = 0
+    structural_elements = 0
+    cell_root_depth: int | None = None
+    cell_xml_elements = 0
+    scope_name = "Table 范围外" if table_scoped else "协议范围外"
+    outside_coordinate: str | None = None
+
+    def note_outside(coordinate: str) -> None:
+        nonlocal outside_coordinate
+        if outside_coordinate is None:
+            outside_coordinate = coordinate
+
+    def reject_outside(coordinate: str) -> None:
+        raise RoundtripWorkbookError(
+            f"{sheet_name} 存在 {scope_name}单元格或维度：{coordinate}",
+            status_code=413,
+        )
+
+    with archive.open(worksheet_path) as worksheet_xml:
+        for event, element in reader._safe_xml_iterparse(worksheet_xml):
+            tag = reader._xml_local_name(element.tag)
+            if event == "start":
+                element_count += 1
+                _enforce_roundtrip_xml_element_limit(
+                    element_count,
+                    part=worksheet_path,
+                )
+                depth = len(open_tags) + 1
+                if depth > reader._XML_DEPTH_LIMIT:
+                    raise RoundtripWorkbookError("工作簿 XML 层级超过安全上限")
+                parent = open_tags[-1] if open_tags else None
+                if cell_root_depth is not None:
+                    cell_xml_elements += 1
+                    if cell_xml_elements > MAX_ROUNDTRIP_CELL_XML_ELEMENTS:
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 单个 cell 的 XML 元素超过协议安全上限",
+                            status_code=413,
+                        )
+                elif tag != "row" and parent != "row":
+                    structural_elements += 1
+                    if (
+                        structural_elements
+                        > MAX_ROUNDTRIP_WORKSHEET_STRUCTURAL_ELEMENTS
+                    ):
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 结构性 XML 元素超过协议安全上限",
+                            status_code=413,
+                        )
+                if tag == "dimension":
+                    ref = element.attrib.get("ref")
+                    bounds = _roundtrip_range_bounds(ref or "")
+                    if bounds is None:
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 的 worksheet dimension 无效"
+                        )
+                    min_col, min_row, dimension_max_col, dimension_max_row = bounds
+                    if (
+                        min_col < 1
+                        or min_row < 1
+                        or dimension_max_col > max_column
+                        or dimension_max_row > max_row
+                    ):
+                        note_outside(ref or "")
+                elif tag == "row":
+                    if parent == "row":
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 的 worksheet row 结构无效"
+                        )
+                    row_elements += 1
+                    if row_elements > max_row:
+                        reject_outside(f"row-count={row_elements}")
+                    row_ref = element.attrib.get("r")
+                    if row_ref is None:
+                        current_row += 1
+                    elif re.fullmatch(r"[0-9]{1,7}", row_ref) is None:
+                        raise RoundtripWorkbookError(
+                            f"{sheet_name} 的 worksheet row 坐标无效"
+                        )
+                    else:
+                        current_row = reader._row_index(row_ref)
+                    current_column = 0
+                    if current_row < 1 or current_row > max_row:
+                        note_outside(f"row={current_row}")
+                elif parent == "row":
+                    # openpyxl treats every direct row child as cell-like, even
+                    # when an attacker renames <c>; mirror that behavior here.
+                    cell_root_depth = depth
+                    cell_xml_elements = 1
+                    cell_elements += 1
+                    if cell_elements > max_row * max_column:
+                        reject_outside(f"cell-count={cell_elements}")
+                    ref = element.attrib.get("r")
+                    if ref is None:
+                        current_column += 1
+                        cell_row, cell_column = current_row, current_column
+                        coordinate = f"row={cell_row},column={cell_column}"
+                    else:
+                        bounds = reader._cell_reference_bounds(ref)
+                        if bounds is None:
+                            raise RoundtripWorkbookError(
+                                f"{sheet_name} 的 worksheet cell 坐标无效"
+                            )
+                        cell_row, cell_column = bounds
+                        current_column = cell_column
+                        coordinate = ref
+                    if (
+                        cell_row != current_row
+                        or cell_row < 1
+                        or cell_row > max_row
+                        or cell_column < 1
+                        or cell_column > max_column
+                    ):
+                        note_outside(coordinate)
+                elif tag == "c":
+                    raise RoundtripWorkbookError(
+                        f"{sheet_name} 的 worksheet cell 结构无效"
+                    )
+                elif (
+                    tag == "f"
+                    and len(open_tags) >= 2
+                    and open_tags[-2] == "row"
+                ):
+                    raise RoundtripWorkbookError(
+                        f"{sheet_name} 包含公式，固定回填工作簿只允许静态值"
+                    )
+                open_tags.append(tag)
+                open_elements.append(element)
+                continue
+
+            if not open_tags or open_tags[-1] != tag:
+                raise RoundtripWorkbookError(
+                    f"{sheet_name} 的 worksheet XML 结构无效"
+                )
+            parent_element = (
+                open_elements[-2] if len(open_elements) > 1 else None
+            )
+            closing_cell = (
+                cell_root_depth is not None
+                and len(open_tags) == cell_root_depth
+            )
+            open_tags.pop()
+            open_elements.pop()
+            if tag == "row":
+                current_column = 0
+            element.clear()
+            if parent_element is not None:
+                parent_element.remove(element)
+            if closing_cell:
+                cell_root_depth = None
+                cell_xml_elements = 0
+    if outside_coordinate is not None:
+        reject_outside(outside_coordinate)
+    return row_elements, cell_elements
+
+
+def _roundtrip_shared_strings_part(archive: zipfile.ZipFile) -> str | None:
+    content_types_path = "[Content_Types].xml"
+    if content_types_path not in archive.namelist():
+        raise RoundtripWorkbookError("工作簿缺少 Content Types")
+    shared_string_type = (
+        "application/vnd.openxmlformats-officedocument."
+        "spreadsheetml.sharedStrings+xml"
+    )
+    targets: list[str] = []
+    open_tags: list[str] = []
+    open_elements: list[ET.Element] = []
+    saw_root = False
+    element_count = 0
+    with archive.open(content_types_path) as content_types:
+        for event, element in reader._safe_xml_iterparse(content_types):
+            tag = reader._xml_local_name(element.tag)
+            if event == "start":
+                element_count += 1
+                _enforce_roundtrip_xml_element_limit(
+                    element_count,
+                    part=content_types_path,
+                    limit=MAX_ROUNDTRIP_CONTENT_TYPE_ELEMENTS,
+                )
+                depth = len(open_tags) + 1
+                if depth > reader._XML_DEPTH_LIMIT:
+                    raise RoundtripWorkbookError("工作簿 XML 层级超过安全上限")
+                if depth == 1:
+                    if tag != "Types":
+                        raise RoundtripWorkbookError("Content Types 结构无效")
+                    saw_root = True
+                elif depth == 2 and tag == "Override":
+                    if element.attrib.get("ContentType") == shared_string_type:
+                        target = reader._normalize_internal_target(
+                            source_path=content_types_path,
+                            target=element.attrib.get("PartName", ""),
+                        )
+                        if target not in archive.namelist():
+                            raise RoundtripWorkbookError(
+                                "sharedStrings 部件不存在"
+                            )
+                        targets.append(target)
+                open_tags.append(tag)
+                open_elements.append(element)
+                continue
+
+            if not open_tags or open_tags[-1] != tag:
+                raise RoundtripWorkbookError("Content Types 结构无效")
+            parent = open_elements[-2] if len(open_elements) > 1 else None
+            open_tags.pop()
+            open_elements.pop()
+            element.clear()
+            if parent is not None:
+                parent.remove(element)
+    if not saw_root:
+        raise RoundtripWorkbookError("Content Types 结构无效")
+    if len(targets) > 1:
+        raise RoundtripWorkbookError("工作簿包含多个 sharedStrings 部件")
+    return targets[0] if targets else None
+
+
+def _scan_roundtrip_shared_strings(
+    archive: zipfile.ZipFile,
+    shared_strings_path: str | None,
+) -> int:
+    if shared_strings_path is None:
+        return 0
+    item_count = 0
+    current_chars = 0
+    current_item_elements = 0
+    open_tags: list[str] = []
+    open_elements: list[ET.Element] = []
+    saw_root = False
+    element_count = 0
+    with archive.open(shared_strings_path) as shared_strings:
+        for event, element in reader._safe_xml_iterparse(shared_strings):
+            tag = reader._xml_local_name(element.tag)
+            if event == "start":
+                element_count += 1
+                _enforce_roundtrip_xml_element_limit(
+                    element_count,
+                    part=shared_strings_path,
+                )
+                depth = len(open_tags) + 1
+                if depth > reader._XML_DEPTH_LIMIT:
+                    raise RoundtripWorkbookError("工作簿 XML 层级超过安全上限")
+                if depth == 1:
+                    if tag != "sst":
+                        raise RoundtripWorkbookError("sharedStrings 结构无效")
+                    saw_root = True
+                elif tag == "si":
+                    if len(open_tags) != 1 or open_tags[-1] != "sst":
+                        raise RoundtripWorkbookError("sharedStrings 结构无效")
+                    item_count += 1
+                    current_chars = 0
+                    current_item_elements = 1
+                    if item_count > MAX_ROUNDTRIP_SHARED_STRINGS:
+                        raise RoundtripWorkbookError(
+                            "sharedStrings 实际条目数超过协议安全上限",
+                            status_code=413,
+                        )
+                elif "si" in open_tags:
+                    current_item_elements += 1
+                    if (
+                        current_item_elements
+                        > MAX_ROUNDTRIP_SHARED_STRING_XML_ELEMENTS
+                    ):
+                        raise RoundtripWorkbookError(
+                            "sharedStrings 单条 XML 元素超过协议安全上限",
+                            status_code=413,
+                        )
+                open_tags.append(tag)
+                open_elements.append(element)
+                continue
+
+            if not open_tags or open_tags[-1] != tag:
+                raise RoundtripWorkbookError("sharedStrings 结构无效")
+            if tag == "t" and "si" in open_tags:
+                current_chars += len(element.text or "")
+                if current_chars > MAX_CELL_CHARS:
+                    raise RoundtripWorkbookError(
+                        "sharedStrings 单条文本超过 Excel 文本上限",
+                        status_code=413,
+                    )
+            parent = open_elements[-2] if len(open_elements) > 1 else None
+            open_tags.pop()
+            open_elements.pop()
+            element.clear()
+            if parent is not None:
+                parent.remove(element)
+    if not saw_root:
+        raise RoundtripWorkbookError("sharedStrings 结构无效")
+    return item_count
+
+
+def _assert_roundtrip_xml_envelope(archive: zipfile.ZipFile) -> None:
+    envelopes = _roundtrip_sheet_envelopes()
+    sheet_parts = reader._workbook_sheet_parts(archive)
+    if [name for name, _path in sheet_parts] != list(SHEET_NAMES):
+        raise RoundtripWorkbookError(
+            "工作表名称、顺序或数量被修改，请重新导出模板"
+        )
+    if len({path for _name, path in sheet_parts}) != len(sheet_parts):
+        raise RoundtripWorkbookError("多个工作表不能共享同一个 worksheet 部件")
+
+    _scan_roundtrip_shared_strings(
+        archive,
+        _roundtrip_shared_strings_part(archive),
+    )
+    total_rows = 0
+    total_cells = 0
+    for sheet_name, worksheet_path in sheet_parts:
+        envelope = envelopes[sheet_name]
+        table_path = _roundtrip_table_part(
+            archive,
+            worksheet_path=worksheet_path,
+            sheet_name=sheet_name,
+            expected_table_name=envelope.table_name,
+        )
+        if table_path is None:
+            max_row, max_column = envelope.max_row, envelope.max_column
+        else:
+            max_row, max_column = _roundtrip_table_bounds(
+                archive,
+                table_path=table_path,
+                sheet_name=sheet_name,
+                envelope=envelope,
+            )
+        rows, cells = _scan_roundtrip_worksheet(
+            archive,
+            worksheet_path=worksheet_path,
+            sheet_name=sheet_name,
+            max_row=max_row,
+            max_column=max_column,
+            table_scoped=table_path is not None,
+        )
+        total_rows += rows
+        total_cells += cells
+        if total_rows > MAX_ROUNDTRIP_ROW_ELEMENTS:
+            raise RoundtripWorkbookError(
+                "维保回填工作簿 row 元素总量超过协议安全上限",
+                status_code=413,
+            )
+        if total_cells > MAX_ROUNDTRIP_CELL_ELEMENTS:
+            raise RoundtripWorkbookError(
+                "维保回填工作簿 cell 元素总量超过协议安全上限",
+                status_code=413,
+            )
 
 
 def _assert_safe_workbook_package(path: str) -> None:
@@ -1751,7 +2484,6 @@ def _assert_safe_workbook_package(path: str) -> None:
         )
     try:
         reader._check_xlsx_archive_safety(path)
-        reader._check_workbook_size(path)
         with zipfile.ZipFile(path) as archive:
             total_uncompressed = sum(member.file_size for member in archive.infolist())
             if total_uncompressed > MAX_ROUNDTRIP_UNCOMPRESSED_BYTES:
@@ -1772,11 +2504,12 @@ def _assert_safe_workbook_package(path: str) -> None:
                 raise RoundtripWorkbookError(
                     "工作簿包含宏、外部链接或嵌入对象，拒绝导入"
                 )
+            _assert_roundtrip_xml_envelope(archive)
     except RoundtripWorkbookError:
         raise
     except reader.ReaderError as exc:
         raise RoundtripWorkbookError(str(exc)) from exc
-    except (OSError, zipfile.BadZipFile) as exc:
+    except Exception as exc:
         raise RoundtripWorkbookError("文件不是有效的 .xlsx 工作簿") from exc
 
 

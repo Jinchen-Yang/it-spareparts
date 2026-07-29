@@ -360,7 +360,8 @@ def test_boss_sees_same_incomplete_cost_gate_across_api_agent_and_workbook(
     assert project["missing_cost_lines"] == 1
     assert project["known_cost_total"] == 0.0
     assert project["cost_quality"] == "incomplete"
-    assert project["contract_amount"] is not None
+    # 测试批次没有 success 收入证据，不能把缺失合同金额伪造成 0。
+    assert project["contract_amount"] is None
 
     board_response = client.get(
         "/api/maintenance/board",

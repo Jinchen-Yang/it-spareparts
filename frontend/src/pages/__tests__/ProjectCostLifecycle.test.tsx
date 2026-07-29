@@ -36,6 +36,9 @@ function projects(project = "进行中项目", lifecycle: Lifecycle = "ongoing",
       rows: [{
         project,
         lines: 1,
+        order_count: 1,
+        missing_detail_orders: 0,
+        structure_complete: true,
         qty: 2,
         cost_inc: nullable(100),
         cost_ex: nullable(88.5),
@@ -334,6 +337,33 @@ describe("维保项目生命周期筛选", () => {
     expect(cardTitles).not.toContain("数据筛选");
   });
 
+  it("项目成本事实显式展示订单结构，存在无明细订单时不误报只有零行缺成本", async () => {
+    const response = projects("结构不完整项目");
+    response.data.rows[0] = {
+      ...response.data.rows[0],
+      order_count: 3,
+      missing_detail_orders: 2,
+      structure_complete: false,
+      missing_cost_lines: 0,
+      cost_quality: "incomplete",
+    };
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/projects") return Promise.resolve(response);
+      if (path === "/maintenance/board") return Promise.resolve(board());
+      return Promise.reject(new Error(`unexpected ${path}`));
+    });
+
+    render(<ProjectCostPage />);
+
+    expect(await screen.findByText("结构不完整项目")).toBeInTheDocument();
+    expect(screen.getAllByText("维保订单数").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("结构完整性").length).toBeGreaterThan(0);
+    expect(screen.getByText("不完整 · 无明细 2 单")).toBeInTheDocument();
+    expect(screen.getByText("需补数据 · 无明细 2 单 · 缺成本 0 行"))
+      .toBeInTheDocument();
+    expect(screen.queryByText("需补数据 · 0 行")).toBeNull();
+  });
+
   it("详细盈亏合同卡分页，首屏不一次展开全部合同", async () => {
     const manyContracts = board();
     manyContracts.data.rows = Array.from({ length: 25 }, (_, index) => ({
@@ -390,7 +420,7 @@ describe("维保项目生命周期筛选", () => {
     expect(screen.queryByText("详细盈亏")).toBeNull();
   });
 
-  it("下载中心全部 GET 文件请求都绑定可取消的会话级信号", async () => {
+  it("下载中心全部 GET 文件请求都绑定点击时会话和可取消信号", async () => {
     localStorage.setItem("token", "admin-token");
     get.mockImplementation((path: string) => {
       if ([
@@ -445,6 +475,9 @@ describe("维保项目生命周期筛选", () => {
       for (const path of paths) {
         const call = get.mock.calls.find(([calledPath]) => calledPath === path);
         expect(call?.[1]?.signal).toBeInstanceOf(AbortSignal);
+        expect(call?.[1]?.headers).toEqual({
+          Authorization: "Bearer admin-token",
+        });
       }
     });
     await waitFor(() => expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledTimes(paths.length));
@@ -871,7 +904,7 @@ describe("维保项目生命周期筛选", () => {
       .toBeNull();
   });
 
-  it("无客户信息权限时隐藏所有含可编辑客户字段的工作簿与导入入口", async () => {
+  it("无客户信息权限时保留普通工作簿并隐藏可回填工作簿与导入", async () => {
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: true,
       data_customer: false,
@@ -884,8 +917,10 @@ describe("维保项目生命周期筛选", () => {
     render(<ProjectCostPage view="downloads" />);
     await waitForDownloadsReady();
 
-    expect(screen.queryByRole("button", { name: "批量导出项目工作簿 ZIP" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "导出单合同工作簿 XLSX" })).toBeNull();
+    expect(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }))
+      .toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "导出单合同工作簿 XLSX" }))
+      .toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "下载固定回填模板" })).toBeNull();
     expect(screen.queryByRole("button", { name: "批量下载可回填工作簿 ZIP" })).toBeNull();
     expect(screen.queryByRole("button", { name: "导入更新工作簿" })).toBeNull();
@@ -910,11 +945,14 @@ describe("维保项目生命周期筛选", () => {
       return Promise.reject(new Error("unexpected"));
     });
     render(<ProjectCostPage view="downloads" />);
-    expect(get).not.toHaveBeenCalledWith("/maintenance/as-of");
+    expect(get.mock.calls.filter(([path]) => path === "/maintenance/as-of")).toHaveLength(0);
 
     fireEvent.click(screen.getByRole("radio", { name: "近7天" }));
 
-    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/as-of"));
+    await waitFor(() => expect(get).toHaveBeenCalledWith(
+      "/maintenance/as-of",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
     expect(await screen.findByText(
       "实际闭区间：2026-07-11 至 2026-07-17（含首尾）",
     )).toBeInTheDocument();
@@ -2237,9 +2275,12 @@ describe("维保项目生命周期筛选", () => {
     expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
   });
 
-  it("标准空 ZIP 仍可下载", async () => {
+  it.each([
+    ["/maintenance/export-workbooks", "批量导出项目工作簿 ZIP"],
+    ["/maintenance/roundtrip-templates", "批量下载可回填工作簿 ZIP"],
+  ])("%s 返回零成员 ZIP 时拒绝落盘", async (endpoint, buttonName) => {
     get.mockImplementation((path: string) => {
-      if (path === "/maintenance/export-workbooks") {
+      if (path === endpoint) {
         return Promise.resolve({
           data: archiveBlob(EMPTY_ZIP_BASE64, "application/zip"),
           headers: { "content-type": "application/zip" },
@@ -2247,12 +2288,16 @@ describe("维保项目生命周期筛选", () => {
       }
       return Promise.reject(new Error(`unexpected ${path}`));
     });
+    const errorMessage = vi.spyOn(message, "error");
     render(<ProjectCostPage view="downloads" />);
     await waitForDownloadsReady();
 
-    fireEvent.click(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }));
+    fireEvent.click(screen.getByRole("button", { name: buttonName }));
 
-    await waitFor(() => expect(HTMLAnchorElement.prototype.click).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(errorMessage).toHaveBeenCalledWith(
+      "服务器返回的 ZIP 文件损坏或结构不完整，已取消下载",
+    ));
+    expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
   });
 
   it("ZIP64 响应给出明确的不支持提示", async () => {
@@ -2390,6 +2435,117 @@ describe("维保项目生命周期筛选", () => {
     await waitFor(() => expect(errorMessage).toHaveBeenCalledWith(
       "登录账号已变更，旧会话下载已取消，请重新操作",
     ));
+    expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
+  });
+
+  it("相对日期等待业务日时切换账号，不得以新会话继续请求或落盘旧操作", async () => {
+    localStorage.setItem("token", "admin-token");
+    const asOfPending = deferred<{ data: { as_of: string } }>();
+    let asOfSignal: AbortSignal | undefined;
+    get.mockImplementation((
+      path: string,
+      config?: { signal?: AbortSignal },
+    ) => {
+      if (path === "/maintenance/as-of") {
+        asOfSignal = config?.signal;
+        return asOfPending.promise;
+      }
+      if (path === "/maintenance/export-workbooks") return Promise.resolve(zipDownload());
+      return Promise.reject(new Error(`unexpected ${path}`));
+    });
+    const errorMessage = vi.spyOn(message, "error");
+    render(<ProjectCostPage view="downloads" />);
+    await waitForDownloadsReady();
+    fireEvent.click(screen.getByText("近7天"));
+    fireEvent.click(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }));
+    await waitFor(() => expect(get.mock.calls.filter(([path]) => path === "/maintenance/as-of"))
+      .toHaveLength(1));
+
+    localStorage.setItem("token", "restricted-token");
+    await act(async () => {
+      asOfPending.resolve({ data: { as_of: "2026-07-17" } });
+      await asOfPending.promise;
+    });
+
+    await waitFor(() => expect(errorMessage).toHaveBeenCalledWith(
+      "登录账号已变更，旧会话下载已取消，请重新操作",
+    ));
+    expect(asOfSignal?.aborted).toBe(true);
+    expect(get.mock.calls.filter(([path]) => path === "/maintenance/export-workbooks"))
+      .toHaveLength(0);
+    expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
+  });
+
+  it("同一事件栈内切换账号时日期请求仍绑定点击时会话", async () => {
+    localStorage.setItem("token", "admin-token");
+    const asOfPending = deferred<{ data: { as_of: string } }>();
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/as-of") return asOfPending.promise;
+      return Promise.reject(new Error(`unexpected ${path}`));
+    });
+    render(<ProjectCostPage view="downloads" />);
+    await waitForDownloadsReady();
+
+    fireEvent.click(screen.getByText("近7天"));
+    localStorage.setItem("token", "restricted-token");
+
+    const asOfCall = get.mock.calls.find(([path]) => path === "/maintenance/as-of");
+    expect(asOfCall?.[1]?.headers).toEqual({
+      Authorization: "Bearer admin-token",
+    });
+    await act(async () => {
+      asOfPending.resolve({ data: { as_of: "2026-07-17" } });
+      await asOfPending.promise;
+    });
+    expect(asOfCall?.[1]?.signal?.aborted).toBe(true);
+  });
+
+  it("会话 token 缺失时下载请求不伪造 Bearer null", async () => {
+    localStorage.removeItem("token");
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/orders/export") return Promise.resolve(xlsxDownload());
+      return Promise.reject(new Error(`unexpected ${path}`));
+    });
+    render(<ProjectCostPage view="downloads" />);
+    await waitForDownloadsReady();
+
+    fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
+
+    await waitFor(() => {
+      const call = get.mock.calls.find(([path]) => path === "/maintenance/orders/export");
+      expect(call?.[1]?.headers).toBeUndefined();
+    });
+  });
+
+  it("相对日期等待业务日时卸载页面，会中止日期请求且不继续请求或落盘", async () => {
+    const asOfPending = deferred<{ data: { as_of: string } }>();
+    let asOfSignal: AbortSignal | undefined;
+    get.mockImplementation((
+      path: string,
+      config?: { signal?: AbortSignal },
+    ) => {
+      if (path === "/maintenance/as-of") {
+        asOfSignal = config?.signal;
+        return asOfPending.promise;
+      }
+      if (path === "/maintenance/export-workbooks") return Promise.resolve(zipDownload());
+      return Promise.reject(new Error(`unexpected ${path}`));
+    });
+    const { unmount } = render(<ProjectCostPage view="downloads" />);
+    await waitForDownloadsReady();
+    fireEvent.click(screen.getByText("近7天"));
+    fireEvent.click(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }));
+    await waitFor(() => expect(asOfSignal).toBeInstanceOf(AbortSignal));
+
+    unmount();
+    expect(asOfSignal?.aborted).toBe(true);
+    await act(async () => {
+      asOfPending.resolve({ data: { as_of: "2026-07-17" } });
+      await asOfPending.promise;
+    });
+
+    expect(get.mock.calls.filter(([path]) => path === "/maintenance/export-workbooks"))
+      .toHaveLength(0);
     expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
   });
 
@@ -3093,7 +3249,10 @@ describe("维保项目生命周期筛选", () => {
     fireEvent.click(screen.getByRole("button", { name: "导出订单汇总 Excel" }));
 
     const refreshed = { date_from: "2026-07-11", date_to: "2026-07-17" };
-    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/as-of"));
+    await waitFor(() => expect(get).toHaveBeenCalledWith(
+      "/maintenance/as-of",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/orders/export", expect.objectContaining({
       params: refreshed,
       responseType: "blob",
@@ -3152,7 +3311,10 @@ describe("维保项目生命周期筛选", () => {
     fireEvent.click(screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" }));
 
     const refreshed = { date_from: "2026-07-11", date_to: "2026-07-17" };
-    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/as-of"));
+    await waitFor(() => expect(get).toHaveBeenCalledWith(
+      "/maintenance/as-of",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
     await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/export-workbooks", expect.objectContaining({
       params: refreshed,
       responseType: "blob",
@@ -3160,6 +3322,49 @@ describe("维保项目生命周期筛选", () => {
     })));
     await waitFor(() => expect(downloadedName).toBe(
       "maintenance_project_workbooks_2026-07-11_2026-07-17.zip",
+    ));
+  });
+
+  it("相对日期首次导出完成后再次刷新业务日，不永久复用已完成的范围请求", async () => {
+    const firstAsOf = deferred<{ data: { as_of: string } }>();
+    let asOfCalls = 0;
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/as-of") {
+        asOfCalls += 1;
+        return asOfCalls === 1
+          ? firstAsOf.promise
+          : Promise.resolve({ data: { as_of: "2026-07-17" } });
+      }
+      if (path === "/maintenance/export-workbooks") return Promise.resolve(zipDownload());
+      return Promise.reject(new Error(`unexpected ${path}`));
+    });
+    render(<ProjectCostPage view="downloads" />);
+    await waitForDownloadsReady();
+    fireEvent.click(screen.getByText("近7天"));
+    const button = screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" });
+    fireEvent.click(button);
+
+    await act(async () => {
+      firstAsOf.resolve({ data: { as_of: "2026-07-16" } });
+      await firstAsOf.promise;
+    });
+    await waitFor(() => expect(get).toHaveBeenCalledWith(
+      "/maintenance/export-workbooks",
+      expect.objectContaining({
+        params: { date_from: "2026-07-10", date_to: "2026-07-16" },
+      }),
+    ));
+    await waitFor(() => expect(button).toBeEnabled());
+
+    fireEvent.click(button);
+
+    await waitFor(() => expect(get.mock.calls.filter(([path]) => path === "/maintenance/as-of"))
+      .toHaveLength(2));
+    await waitFor(() => expect(get).toHaveBeenCalledWith(
+      "/maintenance/export-workbooks",
+      expect.objectContaining({
+        params: { date_from: "2026-07-11", date_to: "2026-07-17" },
+      }),
     ));
   });
 
@@ -3225,7 +3430,10 @@ describe("维保项目生命周期筛选", () => {
     fireEvent.click(screen.getByText("近7天"));
     const zipButton = screen.getByRole("button", { name: "批量导出项目工作簿 ZIP" });
     fireEvent.click(zipButton);
-    await waitFor(() => expect(get).toHaveBeenCalledWith("/maintenance/as-of"));
+    await waitFor(() => expect(get).toHaveBeenCalledWith(
+      "/maintenance/as-of",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
 
     fireEvent.click(screen.getByRole("radio", { name: "全部" }));
     asOfPending.resolve({ data: { as_of: "2026-07-17" } });

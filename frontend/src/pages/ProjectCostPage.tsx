@@ -54,6 +54,9 @@ interface DualMarginFields {
 interface ProjectRow {
   project: string;
   lines: number;
+  order_count: number;
+  missing_detail_orders: number;
+  structure_complete: boolean;
   qty: number | null;
   cost_inc: number | null;
   cost_ex: number | null;
@@ -540,6 +543,10 @@ const XLSX_CONTENT_TYPES = [
 ] as const;
 const ZIP_CONTENT_TYPES = ["application/zip", "application/x-zip-compressed"] as const;
 
+function boundAuthorizationHeaders(sessionToken: string | null): Record<string, string> | undefined {
+  return sessionToken ? { Authorization: `Bearer ${sessionToken}` } : undefined;
+}
+
 function responseHeader(headers: unknown, name: string): string | undefined {
   if (!headers || typeof headers !== "object") return undefined;
   const getter = (headers as { get?: unknown }).get;
@@ -726,13 +733,7 @@ async function validateZipContainer(blob: Blob, requireXlsx: boolean): Promise<v
     invalid();
   }
   if (entryCount === 0) {
-    if (centralOffset !== 0 || centralSize !== 0 || eocdOffset !== 0) invalid();
-    if (requireXlsx) {
-      throw new InvalidDownloadResponseError(
-        "服务器返回的 Excel 文件不是有效的 XLSX 工作簿，已取消下载",
-      );
-    }
-    return;
+    invalid();
   }
   if (
     centralSize < entryCount * ZIP_CENTRAL_HEADER_BYTES
@@ -1006,11 +1007,13 @@ export default function ProjectCostPage({
   );
   const canExportProjectWorkbooks = isAdmin || (
     !scopedSales
-    && localPermissions.data_customer === true
     && localPermissions.data_purchase_cost === true
     && localPermissions.data_profit === true
   );
-  const canApplyRoundtripWorkbook = canExportProjectWorkbooks && (
+  const canExportRoundtripWorkbooks = canExportProjectWorkbooks && (
+    isAdmin || localPermissions.data_customer === true
+  );
+  const canApplyRoundtripWorkbook = canExportRoundtripWorkbooks && (
     isAdmin || localPermissions.action_maintenance_roundtrip_apply === true
   );
   const maintenanceBasis = useTaxBasis("maintenance");
@@ -1022,9 +1025,12 @@ export default function ProjectCostPage({
   const [exportScopeError, setExportScopeError] = useState(false);
   const exportScopeSeq = useRef(0);
   const exportScopeRequest = useRef<{
+    controller: AbortController;
     preset: ExportDatePreset;
     promise: Promise<[Dayjs, Dayjs] | null>;
+    sessionToken: string | null;
   } | null>(null);
+  const mountedRef = useRef(true);
   const [q, setQ] = useState("");
   const [downloadProject, setDownloadProject] = useState("");
   const [downloadContract, setDownloadContract] = useState("");
@@ -1098,10 +1104,17 @@ export default function ProjectCostPage({
     operationLocksRef.current.delete(key);
   };
 
-  useEffect(() => () => {
-    for (const controller of downloadControllersRef.current) controller.abort();
-    downloadControllersRef.current.clear();
-    operationLocksRef.current.clear();
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      exportScopeSeq.current += 1;
+      exportScopeRequest.current?.controller.abort();
+      exportScopeRequest.current = null;
+      for (const controller of downloadControllersRef.current) controller.abort();
+      downloadControllersRef.current.clear();
+      operationLocksRef.current.clear();
+    };
   }, []);
 
   const lifecycleParams = () => ({ ...baseParams(), lifecycle });
@@ -1211,6 +1224,7 @@ export default function ProjectCostPage({
       projectsSeq.current += 1;
       boardSeq.current += 1;
       exportScopeSeq.current += 1;
+      exportScopeRequest.current?.controller.abort();
       exportScopeRequest.current = null;
       exportDatePresetRef.current = "all";
       setExportDatePreset("all");
@@ -1298,8 +1312,12 @@ export default function ProjectCostPage({
     params: Record<string, unknown>,
     filename: string,
     expectedTypes: readonly string[],
+    sessionToken = localStorage.getItem("token"),
   ): Promise<void> => {
-    const sessionToken = localStorage.getItem("token");
+    if (!mountedRef.current) return;
+    if (localStorage.getItem("token") !== sessionToken) {
+      throw new DownloadSessionChangedError();
+    }
     const controller = new AbortController();
     downloadControllersRef.current.add(controller);
     try {
@@ -1307,13 +1325,14 @@ export default function ProjectCostPage({
         params,
         responseType: "blob",
         signal: controller.signal,
+        headers: boundAuthorizationHeaders(sessionToken),
       });
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || !mountedRef.current) return;
       if (localStorage.getItem("token") !== sessionToken) {
         throw new DownloadSessionChangedError();
       }
       await saveDownloadResponse(response, filename, expectedTypes, () => {
-        if (controller.signal.aborted) return false;
+        if (controller.signal.aborted || !mountedRef.current) return false;
         if (localStorage.getItem("token") !== sessionToken) {
           throw new DownloadSessionChangedError();
         }
@@ -1332,25 +1351,48 @@ export default function ProjectCostPage({
     filename: string,
     expectedTypes: readonly string[],
     extra?: Record<string, unknown>,
+    sessionToken = localStorage.getItem("token"),
   ) => requestAndSaveDownload(
     path,
     { ...baseParams(), ...extra },
     filename,
     expectedTypes,
+    sessionToken,
   );
 
   const requestRelativeExportScope = (
     requestedPreset: ExportDatePreset,
+    sessionToken = localStorage.getItem("token"),
   ): Promise<[Dayjs, Dayjs] | null> => {
+    const currentRequest = exportScopeRequest.current;
+    if (
+      currentRequest
+      && !currentRequest.controller.signal.aborted
+      && currentRequest.preset === requestedPreset
+      && currentRequest.sessionToken === sessionToken
+    ) {
+      return currentRequest.promise;
+    }
+    currentRequest?.controller.abort();
     const seq = ++exportScopeSeq.current;
+    const controller = new AbortController();
     setExportScopeLoading(true);
     setExportScopeError(false);
     setExportRange(null);
     setExportAsOf("");
-    const promise = api.get("/maintenance/as-of")
+    let request!: NonNullable<typeof exportScopeRequest.current>;
+    const promise = api.get("/maintenance/as-of", {
+      signal: controller.signal,
+      headers: boundAuthorizationHeaders(sessionToken),
+    })
       .then(({ data }) => {
+        if (localStorage.getItem("token") !== sessionToken) {
+          controller.abort();
+        }
         if (
-          seq !== exportScopeSeq.current
+          controller.signal.aborted
+          || !mountedRef.current
+          || seq !== exportScopeSeq.current
           || exportDatePresetRef.current !== requestedPreset
         ) return null;
         const latestAsOf = typeof data?.as_of === "string" ? data.as_of : "";
@@ -1363,34 +1405,59 @@ export default function ProjectCostPage({
       })
       .catch(() => {
         if (
-          seq === exportScopeSeq.current
+          !controller.signal.aborted
+          && mountedRef.current
+          && seq === exportScopeSeq.current
           && exportDatePresetRef.current === requestedPreset
+          && localStorage.getItem("token") === sessionToken
         ) {
-          exportScopeRequest.current = null;
           setExportScopeError(true);
           message.error("日期基准加载失败，请重试该日期档");
         }
         return null;
       })
       .finally(() => {
-        if (seq === exportScopeSeq.current) setExportScopeLoading(false);
+        if (mountedRef.current && seq === exportScopeSeq.current) {
+          setExportScopeLoading(false);
+        }
+        if (exportScopeRequest.current === request) {
+          exportScopeRequest.current = null;
+        }
       });
-    exportScopeRequest.current = { preset: requestedPreset, promise };
+    request = {
+      controller,
+      preset: requestedPreset,
+      promise,
+      sessionToken,
+    };
+    exportScopeRequest.current = request;
     return promise;
   };
 
   const resolveExportScope = async (
     requestedPreset: ExportDatePreset,
+    sessionToken: string | null,
   ): Promise<{
     params: { date_from?: string; date_to?: string };
     range: [Dayjs, Dayjs] | null;
   } | null> => {
+    if (!mountedRef.current) return null;
+    if (localStorage.getItem("token") !== sessionToken) {
+      throw new DownloadSessionChangedError();
+    }
     let resolvedRange = exportRange;
     if (requestedPreset !== "all" && requestedPreset !== "custom") {
       const active = exportScopeRequest.current;
-      resolvedRange = active?.preset === requestedPreset
+      resolvedRange = (
+        active?.preset === requestedPreset
+        && active.sessionToken === sessionToken
+      )
         ? await active.promise
-        : await requestRelativeExportScope(requestedPreset);
+        : await requestRelativeExportScope(requestedPreset, sessionToken);
+      if (!mountedRef.current) return null;
+      if (localStorage.getItem("token") !== sessionToken) {
+        throw new DownloadSessionChangedError();
+      }
       if (!resolvedRange || exportDatePresetRef.current !== requestedPreset) return null;
     }
     const params = buildOrderExportParams(requestedPreset, resolvedRange);
@@ -1405,10 +1472,11 @@ export default function ProjectCostPage({
 
   const exportOrders = async () => {
     if (!acquireOperation("orders")) return;
+    const sessionToken = localStorage.getItem("token");
     setExporting(true);
     beginDownload("orders", "正在生成订单汇总 Excel，请勿关闭页面或重复点击");
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
       await requestAndSaveDownload(
         "/maintenance/orders/export",
@@ -1417,6 +1485,7 @@ export default function ProjectCostPage({
           ? `maintenance_orders_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.xlsx`
           : "maintenance_orders_all.xlsx",
         XLSX_CONTENT_TYPES,
+        sessionToken,
       );
     } catch (error) {
       const { status, detail } = await readExportError(error);
@@ -1434,10 +1503,11 @@ export default function ProjectCostPage({
 
   const exportWorkbooks = async () => {
     if (!acquireOperation("workbooks")) return;
+    const sessionToken = localStorage.getItem("token");
     setExportingWorkbooks(true);
     const hide = message.loading("正在生成批量工作簿，数据较多时可能需要 1–2 分钟，请勿重复点击…", 0);
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
       await requestAndSaveDownload(
         "/maintenance/export-workbooks",
@@ -1446,6 +1516,7 @@ export default function ProjectCostPage({
           ? `maintenance_project_workbooks_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.zip`
           : "maintenance_project_workbooks_all.zip",
         ZIP_CONTENT_TYPES,
+        sessionToken,
       );
     } catch (error) {
       const { status, detail } = await readExportError(error);
@@ -1465,14 +1536,15 @@ export default function ProjectCostPage({
 
   const exportProjectsCsv = async () => {
     if (!acquireOperation("projects-csv")) return;
+    const sessionToken = localStorage.getItem("token");
     setExportingProjects(true);
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
       await download("/maintenance/export", "maintenance_projects.csv", CSV_CONTENT_TYPES, {
         ...scope.params,
         lifecycle: "all",
-      });
+      }, sessionToken);
     } catch (error) {
       const { detail } = await readExportError(error);
       message.error(detail || "项目 CSV 导出失败，请稍后重试或检查权限");
@@ -1484,10 +1556,11 @@ export default function ProjectCostPage({
 
   const exportContractProfitCsv = async () => {
     if (!acquireOperation("contract-profit")) return;
+    const sessionToken = localStorage.getItem("token");
     setExportingProfit(true);
     beginDownload("contract-profit", "正在生成合同详细盈亏 CSV，请勿重复点击");
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
       await download(
         "/maintenance/board/export",
@@ -1497,6 +1570,7 @@ export default function ProjectCostPage({
           ...scope.params,
           lifecycle: "all",
         },
+        sessionToken,
       );
     } catch (error) {
       const { detail } = await readExportError(error);
@@ -1514,16 +1588,17 @@ export default function ProjectCostPage({
       return;
     }
     if (!acquireOperation("project-lines")) return;
+    const sessionToken = localStorage.getItem("token");
     setExportingLines(true);
     beginDownload("project-lines", "正在生成单项目明细 CSV，请勿重复点击");
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
       await download("/maintenance/lines/export", "项目备件明细.csv", CSV_CONTENT_TYPES, {
         ...scope.params,
         project,
         month: linesMonth,
-      });
+      }, sessionToken);
     } catch (error) {
       const { detail } = await readExportError(error);
       message.error(detail || "明细导出失败，请稍后重试");
@@ -1536,10 +1611,11 @@ export default function ProjectCostPage({
 
   const exportSingleWorkbook = async (contract: string) => {
     if (!acquireOperation("single-workbook")) return;
+    const sessionToken = localStorage.getItem("token");
     setExportingSingleWorkbook(true);
     beginDownload("single-workbook", "正在生成单合同工作簿 XLSX，请勿重复点击");
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
       await download(
         "/maintenance/export-workbook",
@@ -1549,6 +1625,7 @@ export default function ProjectCostPage({
         ...scope.params,
         contract,
         },
+        sessionToken,
       );
     } catch (error) {
       const { detail } = await readExportError(error);
@@ -1562,11 +1639,12 @@ export default function ProjectCostPage({
 
   const downloadRoundtripTemplate = async (contract?: string) => {
     if (!acquireOperation("roundtrip-template")) return;
+    const sessionToken = localStorage.getItem("token");
     setDownloadingTemplate(true);
     setRoundtripError(null);
     const hide = message.loading("正在生成固定回填模板，请勿重复点击…", 0);
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
       const safeContract = contract?.replace(/[\\/:*?"<>|]/g, "_");
       const scopeLabel = scope.range
@@ -1580,6 +1658,7 @@ export default function ProjectCostPage({
         },
         `维保项目回填模板_${safeContract ? `${safeContract}_` : ""}${scopeLabel}.xlsx`,
         XLSX_CONTENT_TYPES,
+        sessionToken,
       );
     } catch (error) {
       const { detail } = await readExportError(error);
@@ -1595,6 +1674,7 @@ export default function ProjectCostPage({
 
   const downloadRoundtripTemplateBundle = async () => {
     if (!acquireOperation("roundtrip-bundle")) return;
+    const sessionToken = localStorage.getItem("token");
     setDownloadingTemplateBundle(true);
     setRoundtripError(null);
     beginDownload(
@@ -1602,7 +1682,7 @@ export default function ProjectCostPage({
       "正在按合同生成可回填工作簿 ZIP，请勿关闭页面或重复点击",
     );
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
       await requestAndSaveDownload(
         "/maintenance/roundtrip-templates",
@@ -1611,6 +1691,7 @@ export default function ProjectCostPage({
           ? `维保项目批量回填模板_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.zip`
           : "维保项目批量回填模板.zip",
         ZIP_CONTENT_TYPES,
+        sessionToken,
       );
     } catch (error) {
       const { detail } = await readExportError(error);
@@ -1660,6 +1741,15 @@ export default function ProjectCostPage({
     { title: "维保终止日期", dataIndex: "maint_end", width: 120,
       render: (v: string | null) => v || <span style={{ color: "var(--mb-warning)" }}>未填写</span> },
     { title: "出库行", dataIndex: "lines", width: 80, align: "right" },
+    { title: "维保订单数", dataIndex: "order_count", width: 110, align: "right" },
+    { title: "结构完整性", dataIndex: "structure_complete", width: 180,
+      render: (_: boolean, row) => (
+        row.structure_complete === true && (row.missing_detail_orders ?? 0) === 0
+          ? <Tag color="green">完整</Tag>
+          : <Tag color="orange">
+              不完整 · 无明细 {row.missing_detail_orders ?? "—"} 单
+            </Tag>
+      ) },
     { title: "数量", dataIndex: "qty", width: 80, align: "right" },
     ...(maintenanceBasis !== "ex" ? [
       { title: "实际参考(含税)", dataIndex: "actual_cost_inc", width: 130, align: "right" as const, render: money },
@@ -1673,6 +1763,16 @@ export default function ProjectCostPage({
       render: (rawQuality: string | null, row) => {
         // 成本字段确由 RBAC 隐藏时保持中性；不受限响应的 null/未知值仍 fail-closed。
         const quality = normalizeCostQuality(rawQuality);
+        if ((row.missing_detail_orders ?? 0) > 0) {
+          return (
+            <Tag color="orange">
+              需补数据 · 无明细 {row.missing_detail_orders} 单
+              {row.missing_cost_lines == null
+                ? ""
+                : ` · 缺成本 ${row.missing_cost_lines} 行`}
+            </Tag>
+          );
+        }
         if (quality == null && projectCostRestricted) return "—";
         if (quality == null || quality === "incomplete") {
           return <Tag color="orange">需补数据 · {row.missing_cost_lines ?? "—"} 行</Tag>;
@@ -1813,6 +1913,7 @@ export default function ProjectCostPage({
                   setExportDatePreset(preset);
                   if (preset === "all" || preset === "custom") {
                     exportScopeSeq.current += 1;
+                    exportScopeRequest.current?.controller.abort();
                     exportScopeRequest.current = null;
                     setExportScopeLoading(false);
                     setExportScopeError(false);
@@ -1839,6 +1940,7 @@ export default function ProjectCostPage({
               value={exportRange}
               onChange={(value) => {
                 exportScopeSeq.current += 1;
+                exportScopeRequest.current?.controller.abort();
                 exportScopeRequest.current = null;
                 exportDatePresetRef.current = "custom";
                 setExportDatePreset("custom");
@@ -1966,21 +2068,23 @@ export default function ProjectCostPage({
                 >
                   导出单合同工作簿 XLSX
                 </Button>
-                <Button
-                  loading={downloadingTemplate}
-                  disabled={downloadingTemplate}
-                  onClick={() => void downloadRoundtripTemplate(
-                    downloadContract.trim() || undefined,
-                  )}
-                >
-                  下载固定回填模板
-                </Button>
+                {canExportRoundtripWorkbooks && (
+                  <Button
+                    loading={downloadingTemplate}
+                    disabled={downloadingTemplate}
+                    onClick={() => void downloadRoundtripTemplate(
+                      downloadContract.trim() || undefined,
+                    )}
+                  >
+                    下载固定回填模板
+                  </Button>
+                )}
               </Space>
             )}
           </Space>
         </Card>
 
-        {canExportProjectWorkbooks && (
+        {canExportRoundtripWorkbooks && (
           <Card title="固定回填工作簿">
             <Space direction="vertical" size={12} style={{ width: "100%" }}>
               <Alert
@@ -2538,7 +2642,7 @@ export default function ProjectCostPage({
           loading={projectsLoading}
           columns={projectCols}
           dataSource={rows}
-          scroll={{ x: maintenanceBasis === "both" ? 1960 : 1640 }}
+          scroll={{ x: maintenanceBasis === "both" ? 2210 : 1890 }}
           pagination={{ pageSize: 20, showSizeChanger: true }}
           locale={{ emptyText: (q || lifecycle !== "ongoing")
             ? "当前筛选无结果，请调整搜索或期限状态"
