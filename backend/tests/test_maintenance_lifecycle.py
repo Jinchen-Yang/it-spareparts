@@ -250,7 +250,7 @@ def test_board_project_search_matches_projects_scope(db, lifecycle_data):
     assert board["lifecycle_counts"] == {"ongoing": 0, "ended": 0, "missing": 1}
 
 
-def test_board_search_does_not_merge_unrelated_unlinked_projects(db):
+def test_board_search_excludes_unlinked_projects_from_contract_board(db):
     as_of = business_today()
     batch = SysImportBatch(
         filename="maintenance-unlinked-search.xlsx",
@@ -285,10 +285,8 @@ def test_board_search_does_not_merge_unrelated_unlinked_projects(db):
     result = maintenance_cost.board(
         db, q_text="目标项目", lifecycle="all", as_of=as_of,
     )
-    assert len(result["rows"]) == 1
-    assert result["rows"][0]["contract"] is None
-    assert [p["project"] for p in result["rows"][0]["projects"]] == ["无合同-目标项目"]
-    assert result["lifecycle_counts"] == {"ongoing": 1, "ended": 0, "missing": 0}
+    assert result["rows"] == []
+    assert result["lifecycle_counts"] == {"ongoing": 0, "ended": 0, "missing": 0}
 
 
 def test_business_today_uses_shanghai_boundary_not_container_timezone():

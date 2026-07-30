@@ -49,6 +49,18 @@ _BULK_EXPORT_LOCK = threading.Lock()
 class WorkbookExportRejected(ValueError):
     """可安全展示给调用方的整批拒绝原因。"""
 
+    status_code = 422
+
+
+class WorkbookExportTooLarge(WorkbookExportRejected):
+    """标准工作簿导出命中明确资源上限。"""
+
+    status_code = 413
+
+
+class WorkbookExportNotFound(WorkbookExportRejected):
+    """请求的单合同业务对象不存在。"""
+
 
 class WorkbookExportBusy(RuntimeError):
     """当前应用实例已有一个批量工作簿构建任务。"""
@@ -71,7 +83,7 @@ class _SizeLimitedFile:
     def write(self, data):
         end = self._raw.tell() + len(data)
         if max(self._extent, end) > self._max_size:
-            raise WorkbookExportRejected(self._rejection_detail)
+            raise WorkbookExportTooLarge(self._rejection_detail)
         written = self._raw.write(data)
         self._extent = max(self._extent, self._raw.tell())
         return written
@@ -94,7 +106,7 @@ def safe_xlsx_text(value):
     if text.lstrip()[:1] in ("=", "+", "-", "@"):
         text = "'" + text
     if len(text) > 32767:
-        raise WorkbookExportRejected("文本超过 Excel 单元格上限 32767 个字符")
+        raise WorkbookExportTooLarge("文本超过 Excel 单元格上限 32767 个字符")
     return text
 
 
@@ -106,7 +118,7 @@ class _ContractMatch:
     date_to: date | None
 
 
-def _selection_filters(
+def _requested_scope_filters(
     date_from: date | None,
     date_to: date | None,
 ) -> tuple:
@@ -117,6 +129,16 @@ def _selection_filters(
             FMaintenanceOrder.order_date <= date_to,
         )
     return filters
+
+
+def _selection_filters(
+    date_from: date | None,
+    date_to: date | None,
+) -> tuple:
+    return (
+        *_requested_scope_filters(date_from, date_to),
+        FMaintenanceOrder.order_date >= config.MAINT_COST_START_DATE,
+    )
 
 
 def _valid_contract_filter():
@@ -135,7 +157,7 @@ def _contract_matches(
     rows = db.execute(
         select(
             FMaintenanceOrder.linked_sales_order_no,
-            func.count(FMaintenanceOrder.id),
+            func.count(func.distinct(FMaintenanceOrder.id)),
             func.min(FMaintenanceOrder.order_date),
             func.max(FMaintenanceOrder.order_date),
         )
@@ -244,27 +266,32 @@ def _preflight_resource_limits(
     part_rows = db.execute(
         select(
             FMaintenanceOrder.linked_sales_order_no,
-            func.count(FMaintenanceLine.id),
+            func.count(),
             func.coalesce(func.sum(part_text_bytes), 0),
         )
-        .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+        # Renderer semantics are one row per detail plus one placeholder row for
+        # every order without details.  The LEFT JOIN has exactly that cardinality;
+        # on placeholder rows the line-side text becomes empty while the order
+        # text and rendered-label/date overhead remain in the byte budget.
+        .select_from(FMaintenanceOrder)
+        .outerjoin(FMaintenanceLine, FMaintenanceLine.order_id == FMaintenanceOrder.id)
         .where(*part_filters)
         .group_by(FMaintenanceOrder.linked_sales_order_no)
     ).all()
     part_count = sum(int(count) for _contract, count, _text_bytes in part_rows)
     if part_count > MAX_PART_LINES:
-        raise WorkbookExportRejected(
+        raise WorkbookExportTooLarge(
             f"项目工作簿备件明细超过批量上限 {MAX_PART_LINES} 行",
         )
     for contract, count, text_bytes in part_rows:
         count = int(count)
         if count > MAX_PART_LINES_PER_WORKBOOK:
-            raise WorkbookExportRejected(
+            raise WorkbookExportTooLarge(
                 "单个项目工作簿备件明细超过上限 "
                 f"{MAX_PART_LINES_PER_WORKBOOK} 行（合同：{contract}）",
             )
         if count + 1 > MAX_EXCEL_ROWS:
-            raise WorkbookExportRejected("备件明细 Sheet 超过 Excel 行数上限")
+            raise WorkbookExportTooLarge("备件明细 Sheet 超过 Excel 行数上限")
         text_bytes_by_contract[contract] += int(text_bytes)
 
     expense_text_bytes = (
@@ -278,6 +305,7 @@ def _preflight_resource_limits(
     )
     expense_filters = [
         FProjectExpense.linked_sales_order_no.in_(contracts),
+        FProjectExpense.expense_date >= config.MAINT_COST_START_DATE,
     ]
     if date_from is not None:
         expense_filters.append(FProjectExpense.expense_date >= date_from)
@@ -293,18 +321,18 @@ def _preflight_resource_limits(
     ).all()
     expense_count = sum(int(count) for _contract, count, _text_bytes in expense_rows)
     if expense_count > MAX_EXPENSE_LINES:
-        raise WorkbookExportRejected(
+        raise WorkbookExportTooLarge(
             f"项目工作簿报销明细超过批量上限 {MAX_EXPENSE_LINES} 行",
         )
     for contract, count, text_bytes in expense_rows:
         count = int(count)
         if count > MAX_EXPENSE_LINES_PER_WORKBOOK:
-            raise WorkbookExportRejected(
+            raise WorkbookExportTooLarge(
                 "单个项目工作簿报销明细超过上限 "
                 f"{MAX_EXPENSE_LINES_PER_WORKBOOK} 行（合同：{contract}）",
             )
         if count + 3 > MAX_EXCEL_ROWS:
-            raise WorkbookExportRejected("报销明细 Sheet 超过 Excel 行数上限")
+            raise WorkbookExportTooLarge("报销明细 Sheet 超过 Excel 行数上限")
         text_bytes_by_contract[contract] += int(text_bytes)
 
     fee_category = func.coalesce(
@@ -345,13 +373,13 @@ def _preflight_resource_limits(
         default=0,
     )
     if category_count + 3 > MAX_EXCEL_COLUMNS:
-        raise WorkbookExportRejected("项目预算 Sheet 超过 Excel 列数上限")
+        raise WorkbookExportTooLarge("项目预算 Sheet 超过 Excel 列数上限")
     for contract, _count, text_bytes in category_rows:
         text_bytes_by_contract[contract] += int(text_bytes)
 
     for contract, text_bytes in text_bytes_by_contract.items():
         if text_bytes > MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK:
-            raise WorkbookExportRejected(
+            raise WorkbookExportTooLarge(
                 "单个项目工作簿动态文本超过安全上限 "
                 f"64 MiB（合同：{contract}）",
             )
@@ -436,8 +464,45 @@ def build_contract_workbook_file(
         raise WorkbookExportRejected("date_from 与 date_to 必须同时提供")
     if date_from is not None and date_to is not None and date_from > date_to:
         raise WorkbookExportRejected("date_from 不能晚于 date_to")
+    if not contract or not contract.strip():
+        raise WorkbookExportNotFound("合同不存在：空白合同号")
     if not resource_limits_preflighted:
         _acquire_shared_source_lock(db)
+        contract_exists = bool(
+            db.scalar(
+                select(func.count(FMaintenanceOrder.id)).where(
+                    FMaintenanceOrder.linked_sales_order_no == contract,
+                )
+            )
+        )
+        if not contract_exists:
+            raise WorkbookExportNotFound(f"合同不存在：{contract}")
+        selected_orders = int(
+            db.scalar(
+                select(func.count(FMaintenanceOrder.id)).where(
+                    FMaintenanceOrder.linked_sales_order_no == contract,
+                    *_selection_filters(date_from, date_to),
+                )
+            )
+            or 0
+        )
+        if selected_orders == 0:
+            historical_orders = int(
+                db.scalar(
+                    select(func.count(FMaintenanceOrder.id)).where(
+                        FMaintenanceOrder.linked_sales_order_no == contract,
+                        *_requested_scope_filters(date_from, date_to),
+                    )
+                )
+                or 0
+            )
+            raise WorkbookExportRejected(
+                (
+                    "合同只有项目成本起算日前数据，不能生成误导性空账"
+                    if historical_orders
+                    else "合同存在，但所选范围内没有可导出的维保数据"
+                ),
+            )
         _preflight_resource_limits(
             db,
             [_ContractMatch(contract, 0, None, None)],
@@ -498,16 +563,30 @@ def _build_contract_workbooks_zip(
         )
     ) or 0
     if selected_orders == 0:
-        raise WorkbookExportRejected("所选范围内没有已生效维保订单")
-    if selected_orders > MAX_SELECTED_ORDERS:
+        historical_orders = int(
+            db.scalar(
+                select(func.count(FMaintenanceOrder.id)).where(
+                    *_requested_scope_filters(date_from, date_to),
+                )
+            )
+            or 0
+        )
         raise WorkbookExportRejected(
+            (
+                "所选范围只有项目成本起算日前数据，不能生成误导性空账"
+                if historical_orders
+                else "所选范围内没有已生效维保订单"
+            ),
+        )
+    if selected_orders > MAX_SELECTED_ORDERS:
+        raise WorkbookExportTooLarge(
             f"命中维保订单超过批量上限 {MAX_SELECTED_ORDERS} 条",
         )
     matches = _contract_matches(db, date_from, date_to)
     if not matches:
         raise WorkbookExportRejected("所选范围内的已生效维保订单均未关联合同")
     if len(matches) > MAX_WORKBOOKS:
-        raise WorkbookExportRejected(f"命中合同超过批量上限 {MAX_WORKBOOKS} 本")
+        raise WorkbookExportTooLarge(f"命中合同超过批量上限 {MAX_WORKBOOKS} 本")
     _preflight_resource_limits(
         db,
         matches,
@@ -531,7 +610,6 @@ def _build_contract_workbooks_zip(
             with archive.open(
                 "导出清单.csv",
                 mode="w",
-                force_zip64=True,
             ) as manifest_bytes:
                 manifest_bytes.write(b"\xef\xbb\xbf")
                 with io.TextIOWrapper(
@@ -580,13 +658,13 @@ def _build_contract_workbooks_zip(
                         date_to=date_to,
                     )
                 try:
-                    with archive.open(member_name, mode="w", force_zip64=True) as member:
+                    with archive.open(member_name, mode="w") as member:
                         shutil.copyfileobj(workbook, member, length=1024 * 1024)
                 finally:
                     workbook.close()
         output.seek(0, 2)
         if output.tell() > MAX_ZIP_BYTES:
-            raise WorkbookExportRejected("批量工作簿 ZIP 超过 512 MiB 上限")
+            raise WorkbookExportTooLarge("批量工作簿 ZIP 超过 512 MiB 上限")
         output.seek(0)
         return output
     except BaseException:

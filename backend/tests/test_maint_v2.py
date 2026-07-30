@@ -157,7 +157,7 @@ def test_board_fails_closed_without_complete_expense_watermark(db, batch):
     _one_contract(db, batch, "G", budget="1000", cost="100")     # 剩余 90% → green
     _one_contract(db, batch, "B", budget="1000", cost="800")     # 剩余恰 20% → yellow（≤ 含边界）
     _one_contract(db, batch, "R", budget="1000", cost="1200")    # 超支 → red
-    # 无合同关联 → no_budget
+    # 无合同关联订单进入既有跳过/异常清单，不进入合同级看板。
     _load_maintenance(db, batch, {"M-N": f.maintenance_head("M-N", order_no="WBDD-N",
                                                             on=date(2026, 3, 10), sales_order=None)},
                       [f.maintenance_line("M-N", "ML-N", "PN-G", qty="1")])
@@ -181,7 +181,8 @@ def test_board_fails_closed_without_complete_expense_watermark(db, batch):
         status="expense_data_unavailable",
         lifecycle="all",
     )["rows"]
-    assert len(unavailable) == 4
+    assert len(unavailable) == 3
+    assert None not in st
     assert maintenance_cost.board(
         db,
         status="yellow",
@@ -431,6 +432,7 @@ def test_date_scoped_workbook_keeps_period_facts_but_blocks_budget_decision(
         )
     db.add(MaintenanceContractWorkbookState(
         contract_no=contract,
+        expense_complete_through=date.max,
         expense_snapshot_complete=True,
     ))
     db.commit()

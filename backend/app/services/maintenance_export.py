@@ -53,6 +53,10 @@ class ExcelExportTooLarge(ValueError):
     pass
 
 
+class ExcelExportEmpty(ValueError):
+    pass
+
+
 class ExcelExportBusy(RuntimeError):
     pass
 
@@ -181,6 +185,8 @@ def _preflight_row_limits(
             func.coalesce(func.sum(order_text_bytes), 0),
         ).where(*filters)
     ).one()
+    if order_count == 0:
+        raise ExcelExportEmpty("所选范围内没有可导出的维保订单")
     if order_count > MAX_DATA_ROWS_PER_SHEET:
         raise ExcelRowLimitExceeded("维保订单超过 Excel 单 Sheet 数据行上限 1048575")
 

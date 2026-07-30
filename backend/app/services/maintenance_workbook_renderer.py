@@ -119,34 +119,38 @@ def _populate_contract_workbook(
     decision = data["decision"]
     date_filtered = data.get("date_filtered") is True
     expense_data_available = data.get("expense_data_available") is True
-    spent_parts = float(cost_summary["known_cost_total"])
-    raw_expense_total = float(data["expense_total"])
-    has_active_expense = any(
-        expense.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
-        and expense.amount is not None
-        for expense in data["expenses"]
+    order_count = int(data.get("order_count", len(data.get("orders", []))))
+    orders_with_details = int(data.get(
+        "orders_with_details",
+        len({order.id for _line, order in data["lines"]}),
+    ))
+    missing_detail_orders = int(data.get(
+        "missing_detail_orders",
+        max(order_count - orders_with_details, 0),
+    ))
+    structure_complete = (
+        data.get("structure_complete", missing_detail_orders == 0) is True
+        and missing_detail_orders == 0
     )
-    if expense_data_available:
-        expense_summary_label = (
-            "所选期间生效报销费用"
-            if date_filtered else "生效报销费用"
-        )
-        expense_summary_value = raw_expense_total
-        expense_summary_format = _MONEY
-    elif has_active_expense:
-        expense_summary_label = (
-            "所选期间当前已导入报销（非全量）"
-            if date_filtered else "当前已导入报销（非全量）"
-        )
-        expense_summary_value = raw_expense_total
-        expense_summary_format = _MONEY
-    else:
-        expense_summary_label = "报销费用数据"
-        expense_summary_value = "未就绪（无记录不等于0）"
-        expense_summary_format = None
+    has_parts_lines = bool(data["lines"])
+    spent_parts = (
+        float(cost_summary["known_cost_total"])
+        if has_parts_lines else None
+    )
+    expense_inc = data.get("expense_inc")
+    expense_ex = data.get("expense_ex")
+    expense_evidence_status = data.get(
+        "expense_evidence_status",
+        "expense_data_unavailable",
+    )
+    expense_status_label = {
+        "complete": "完整",
+        "expense_tax_unknown": "费用税务口径缺失",
+        "expense_data_unavailable": "未就绪（无记录不等于0）",
+    }.get(expense_evidence_status, "未就绪（无记录不等于0）")
     spent = (
         float(decision["known_spend_total"])
-        if expense_data_available else None
+        if has_parts_lines and expense_data_available else None
     )
     remaining = (
         float(decision["remaining"])
@@ -188,26 +192,63 @@ def _populate_contract_workbook(
     key_values = [
         ("合同（销售订单）", safe_contract, None,
          "成本完整性", quality_label, None),
+        ("命中维保订单", order_count, None,
+         "有明细订单", orders_with_details, None),
+        ("无明细订单", missing_detail_orders, None,
+         "订单结构完整性",
+         (
+             "完整"
+             if structure_complete
+             else "不完整：存在无配件明细订单"
+         ),
+         None),
         ("合同金额（含税参考）",
          float(budget) if budget is not None else "（销售表未找到）",
          _MONEY if budget is not None else None,
          "预算消耗参考状态", status_label, None),
-        ("实际采购参考（含税）", float(cost_summary["actual_cost_inc"]), _MONEY,
+        ("实际采购参考（含税）",
+         float(cost_summary["actual_cost_inc"]) if has_parts_lines else None,
+         _MONEY if has_parts_lines else None,
          "实际参考行", cost_summary["actual_lines"], None),
-        ("实际采购参考（不含税）", float(cost_summary["actual_cost_ex"]), _MONEY,
+        ("实际采购参考（不含税）",
+         float(cost_summary["actual_cost_ex"]) if has_parts_lines else None,
+         _MONEY if has_parts_lines else None,
          "税率", tax_rate_value, tax_rate_format),
-        ("估算参考（含税）", float(cost_summary["estimated_cost_inc"]), _MONEY,
+        ("估算参考（含税）",
+         float(cost_summary["estimated_cost_inc"]) if has_parts_lines else None,
+         _MONEY if has_parts_lines else None,
          "估算参考行", cost_summary["estimated_lines"], None),
-        ("估算参考（不含税）", float(cost_summary["estimated_cost_ex"]), _MONEY,
+        ("估算参考（不含税）",
+         float(cost_summary["estimated_cost_ex"]) if has_parts_lines else None,
+         _MONEY if has_parts_lines else None,
          "缺失成本行", cost_summary["missing_cost_lines"], None),
-        ("备件成本（含税归一）", float(dual_cost_summary["parts_cost_inc_tax"]), _MONEY,
+        ("备件成本（含税归一）",
+         (
+             float(dual_cost_summary["parts_cost_inc_tax"])
+             if dual_cost_summary["parts_cost_inc_tax"] is not None else None
+         ),
+         _MONEY if dual_cost_summary["parts_cost_inc_tax"] is not None else None,
          "含税口径质量",
          _QUALITY_LABELS[dual_cost_summary["parts_cost_inc_tax_quality"]], None),
-        ("备件成本（未税归一）", float(dual_cost_summary["parts_cost_ex_tax"]), _MONEY,
+        ("备件成本（未税归一）",
+         (
+             float(dual_cost_summary["parts_cost_ex_tax"])
+             if dual_cost_summary["parts_cost_ex_tax"] is not None else None
+         ),
+         _MONEY if dual_cost_summary["parts_cost_ex_tax"] is not None else None,
          "未税口径质量",
          _QUALITY_LABELS[dual_cost_summary["parts_cost_ex_tax_quality"]], None),
-        ("已知备件成本参考（混合原值）", spent_parts, _MONEY,
-         expense_summary_label, expense_summary_value, expense_summary_format),
+        ("已知备件成本参考（混合原值）", spent_parts,
+         _MONEY if spent_parts is not None else None,
+         "费用证据状态", expense_status_label, None),
+        (
+         "报销费用（含税）",
+         float(expense_inc) if expense_inc is not None else "—",
+         _MONEY if expense_inc is not None else None,
+         "报销费用（未税）",
+         float(expense_ex) if expense_ex is not None else "—",
+         _MONEY if expense_ex is not None else None,
+        ),
         (
          "所选期间支出参考（备件+报销）"
          if date_filtered else "完整项目支出参考（备件+报销）",
@@ -236,11 +277,13 @@ def _populate_contract_workbook(
         parts_complete_ex = parts_status_ex in complete_parts_statuses
         revenue_inc, revenue_inc_format = margin_value(
             "revenue_inc",
-            allowed=parts_complete_inc or parts_status_inc == "incomplete_cost",
+            allowed=parts_complete_inc
+            or parts_status_inc in {"incomplete_cost", "filtered_scope"},
         )
         revenue_ex, revenue_ex_format = margin_value(
             "revenue_ex",
-            allowed=parts_complete_ex or parts_status_ex == "incomplete_cost",
+            allowed=parts_complete_ex
+            or parts_status_ex in {"incomplete_cost", "filtered_scope"},
         )
         parts_profit_inc, parts_profit_inc_format = margin_value(
             "parts_gross_profit_inc",
@@ -420,14 +463,24 @@ def _populate_contract_workbook(
         row += 1
         band = not band
         month_expenses = data["monthly_expenses"].get(year_month, {})
-        values = [float(data["monthly_parts"].get(year_month, 0))]
+        values = [
+            (
+                float(data["monthly_parts"].get(year_month, 0))
+                if has_parts_lines else None
+            )
+        ]
         values.extend(
             float(month_expenses.get(category, 0))
             for category in categories
         )
         for index, value in enumerate(values):
-            totals[index] += value
-        row_values = [safe_text(year_month), *values, round(sum(values), 2)]
+            if value is not None:
+                totals[index] += value
+        row_values = [
+            safe_text(year_month),
+            *values,
+            round(sum(value or 0 for value in values), 2),
+        ]
         for index, value in enumerate(row_values, 1):
             cell = budget_sheet.cell(row=row, column=index, value=value)
             cell.border = _BORDER
@@ -442,7 +495,10 @@ def _populate_contract_workbook(
             if expense_data_available
             else "当前已知合计（费用非全量）"
         ),
-        *[round(total, 2) for total in totals],
+        *[
+            None if index == 0 and not has_parts_lines else round(total, 2)
+            for index, total in enumerate(totals)
+        ],
         round(sum(totals), 2),
     ]
     for index, value in enumerate(total_row, 1):
@@ -469,7 +525,9 @@ def _populate_contract_workbook(
     _hdr_row(parts_sheet, 1, len(part_headers))
     parts_sheet.freeze_panes = "A2"
     previous_order, band = None, False
+    rendered_order_ids: set[int] = set()
     for line, order in data["lines"]:
+        rendered_order_ids.add(order.id)
         first = order.order_no != previous_order
         if first:
             band = not band
@@ -535,6 +593,53 @@ def _populate_contract_workbook(
                 color="B8860B",
                 bold=True,
             )
+    for order in data.get("orders", []):
+        if order.id in rendered_order_ids:
+            continue
+        band = not band
+        parts_sheet.append([
+            safe_text(order.order_no),
+            order.order_date.isoformat() if order.order_date else None,
+            safe_text(order.linked_sales_order_no),
+            safe_text(order.project_raw or order.project_std),
+            safe_text(order.demand_type),
+            safe_text(order.warehouse),
+            safe_text(order.salesperson),
+            safe_text(order.business_type),
+            None,
+            None,
+            "暂无配件明细",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "成本缺失",
+            None,
+            None,
+            None,
+            None,
+            "成本缺失",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ])
+        rendered_row = parts_sheet.max_row
+        for column in range(1, len(part_headers) + 1):
+            cell = parts_sheet.cell(row=rendered_row, column=column)
+            cell.border = _BORDER
+            if band:
+                cell.fill = _ALT_FILL
     parts_sheet.auto_filter.ref = (
         f"A1:{get_column_letter(len(part_headers))}{parts_sheet.max_row}"
     )
@@ -554,7 +659,8 @@ def _populate_contract_workbook(
         expense_sheet.cell(row=1, column=column).border = _BORDER
     expense_headers = [
         "报销日期", "报销人员", "报销类别", "费用分类", "支出事由",
-        "报销金额", "流程状态", "单号", "序号",
+        "报销金额", "报销金额（含税）", "报销金额（未税）",
+        "费用证据状态", "流程状态", "单号", "序号",
     ]
     amount_column = 6
     for column, heading in enumerate(expense_headers, 1):
@@ -569,6 +675,26 @@ def _populate_contract_workbook(
             safe_text(expense.fee_category),
             safe_text(expense.reason),
             float(expense.amount) if expense.amount is not None else None,
+            (
+                float(expense.amount_inc_tax)
+                if expense_data_available
+                and expense.amount_inc_tax is not None else None
+            ),
+            (
+                float(expense.amount_ex_tax)
+                if expense_data_available
+                and expense.amount_ex_tax is not None else None
+            ),
+            (
+                "费用快照未就绪"
+                if not expense_data_available
+                else "双口径已确认"
+                if (
+                    expense.amount_inc_tax is not None
+                    and expense.amount_ex_tax is not None
+                )
+                else "费用税务口径缺失"
+            ),
             safe_text(expense.data_status),
             safe_text(expense.bxd_no),
             expense.line_no,
@@ -582,30 +708,41 @@ def _populate_contract_workbook(
                 cell.fill = _ALT_FILL
             if inactive:
                 cell.font = Font(color="A0A0A0")
-        expense_sheet.cell(
-            row=rendered_row,
-            column=amount_column,
-        ).number_format = _MONEY
+        for column in (amount_column, amount_column + 1, amount_column + 2):
+            expense_sheet.cell(
+                row=rendered_row,
+                column=column,
+            ).number_format = _MONEY
     if data["expenses"]:
-        expense_sheet.auto_filter.ref = f"A2:I{expense_sheet.max_row}"
+        expense_sheet.auto_filter.ref = f"A2:L{expense_sheet.max_row}"
         total_row_index = expense_sheet.max_row + 1
         expense_sheet.cell(
             row=total_row_index,
             column=amount_column - 1,
-            value=(
-                "合计（仅已结束）"
-                if expense_data_available
-                else "当前已导入合计（非全量）"
-            ),
+            value="双口径合计（仅已结束）",
         ).font = Font(bold=True)
-        total_cell = expense_sheet.cell(
-            row=total_row_index,
-            column=amount_column,
-            value=raw_expense_total,
+        total_values = (
+            None,
+            float(expense_inc) if expense_inc is not None else None,
+            float(expense_ex) if expense_ex is not None else None,
         )
-        total_cell.font, total_cell.fill = Font(bold=True), _TOTAL_FILL
-        total_cell.number_format = _MONEY
-    _col_widths(expense_sheet, [12, 10, 12, 14, 42, 13, 10, 18, 6])
+        for offset, value in enumerate(total_values):
+            total_cell = expense_sheet.cell(
+                row=total_row_index,
+                column=amount_column + offset,
+                value=value,
+            )
+            total_cell.font, total_cell.fill = Font(bold=True), _TOTAL_FILL
+            total_cell.number_format = _MONEY
+        expense_sheet.cell(
+            row=total_row_index,
+            column=amount_column + 3,
+            value=expense_status_label,
+        ).font = Font(bold=True)
+    _col_widths(
+        expense_sheet,
+        [12, 10, 12, 14, 42, 13, 13, 13, 16, 10, 18, 6],
+    )
 
     instructions_sheet = workbook.create_sheet("填写说明")
     instructions_sheet.sheet_view.showGridLines = False

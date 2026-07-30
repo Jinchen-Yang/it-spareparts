@@ -2,7 +2,10 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from app.etl import loader
-from app.models.maintenance import FProjectExpense
+from app.models.maintenance import (
+    FProjectExpense,
+    MaintenanceContractWorkbookState,
+)
 from app.models.system import SysImportBatch
 from app.services import maintenance_margin_evidence
 from tests import factories as f
@@ -130,6 +133,66 @@ def test_compatibility_summary_also_uses_fixed_tax_rate():
     assert evidence.ambiguous_ex is True
     assert evidence.tax_rate_ambiguous is False
     assert evidence.tax_rate == Decimal("0.13")
+
+
+def test_expense_snapshot_completeness_requires_flag_and_watermark_coverage(db):
+    required_through = date(2026, 3, 31)
+    db.add_all([
+        MaintenanceContractWorkbookState(
+            contract_no="FLAG-FALSE",
+            revision=1,
+            expense_complete_through=required_through,
+            expense_snapshot_complete=False,
+        ),
+        MaintenanceContractWorkbookState(
+            contract_no="WATERMARK-NULL",
+            revision=1,
+            expense_complete_through=None,
+            expense_snapshot_complete=True,
+        ),
+        MaintenanceContractWorkbookState(
+            contract_no="WATERMARK-EARLY",
+            revision=1,
+            expense_complete_through=date(2026, 3, 30),
+            expense_snapshot_complete=True,
+        ),
+        MaintenanceContractWorkbookState(
+            contract_no="WATERMARK-EQUAL",
+            revision=1,
+            expense_complete_through=required_through,
+            expense_snapshot_complete=True,
+        ),
+        MaintenanceContractWorkbookState(
+            contract_no="WATERMARK-LATER",
+            revision=1,
+            expense_complete_through=date(2026, 4, 1),
+            expense_snapshot_complete=True,
+        ),
+    ])
+    db.commit()
+
+    completeness = (
+        maintenance_margin_evidence.load_expense_snapshot_completeness(
+            db,
+            [
+                "FLAG-FALSE",
+                "WATERMARK-NULL",
+                "WATERMARK-EARLY",
+                "WATERMARK-EQUAL",
+                "WATERMARK-LATER",
+                "NO-STATE",
+            ],
+            required_through=required_through,
+        )
+    )
+
+    assert completeness == {
+        "FLAG-FALSE": False,
+        "WATERMARK-NULL": False,
+        "WATERMARK-EARLY": False,
+        "WATERMARK-EQUAL": True,
+        "WATERMARK-LATER": True,
+    }
 
 
 def test_latest_revenue_uses_batch_id_to_break_timestamp_ties(db):

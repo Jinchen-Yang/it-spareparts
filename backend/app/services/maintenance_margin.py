@@ -3,6 +3,7 @@
 本模块不查询数据库，只把已核实的收入、备件成本和费用完整性转换成可展示结果。
 任何输入证据不完整时按口径 fail closed，不以 0 或另一税口径代替。
 """
+
 from decimal import Decimal
 
 from app import tax_policy
@@ -109,10 +110,30 @@ def calculate_contract_margin(
     }
 
     if date_filtered:
-        result["parts_profit_status_inc"] = "filtered_scope"
-        result["parts_profit_status_ex"] = "filtered_scope"
-        result["contribution_status_inc"] = "filtered_scope"
-        result["contribution_status_ex"] = "filtered_scope"
+        for basis in ("inc", "ex"):
+            parts_cost = parts_cost_inc_tax if basis == "inc" else parts_cost_ex_tax
+            cost_quality = cost_quality_inc if basis == "inc" else cost_quality_ex
+            revenue_ambiguous = (
+                revenue_ambiguous_inc if basis == "inc" else revenue_ambiguous_ex
+            )
+            parts_status = (
+                "ambiguous_revenue"
+                if revenue_ambiguous
+                else "missing_revenue"
+                if revenue_ex is None
+                else "incomplete_cost"
+                if cost_quality not in _COMPLETE_QUALITIES or parts_cost is None
+                else "filtered_scope"
+            )
+            result[f"parts_profit_status_{basis}"] = parts_status
+            if parts_status != "filtered_scope":
+                result[f"contribution_status_{basis}"] = parts_status
+            elif expense_unavailable:
+                result[f"contribution_status_{basis}"] = "expense_data_unavailable"
+            elif expense_tax_unknown[basis]:
+                result[f"contribution_status_{basis}"] = "expense_tax_unknown"
+            else:
+                result[f"contribution_status_{basis}"] = "filtered_scope"
         return result
 
     cost_complete_inc = cost_quality_inc in _COMPLETE_QUALITIES

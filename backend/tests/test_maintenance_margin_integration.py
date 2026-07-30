@@ -1,9 +1,15 @@
 from datetime import date
 from decimal import Decimal
 
+from sqlalchemy import select
+
 from app import permissions, security
 from app.etl import loader
-from app.models.maintenance import FProjectExpense
+from app.models.maintenance import (
+    FMaintenanceLine,
+    FProjectExpense,
+    MaintenanceContractWorkbookState,
+)
 from app.models.sales import FSalesOrder
 from app.models.system import SysImportBatch
 from app.services import maintenance_cost, maintenance_workbook_renderer
@@ -231,8 +237,105 @@ def test_date_filtered_board_never_compares_period_cost_with_full_revenue(db):
     assert row["contribution_profit_ex"] is None
     assert row["parts_profit_status_inc"] == "filtered_scope"
     assert row["parts_profit_status_ex"] == "filtered_scope"
-    assert row["contribution_status_inc"] == "filtered_scope"
-    assert row["contribution_status_ex"] == "filtered_scope"
+    assert row["contribution_status_inc"] == "expense_data_unavailable"
+    assert row["contribution_status_ex"] == "expense_data_unavailable"
+    assert row["decision_status"] == "expense_data_unavailable"
+    assert row["status"] == "expense_data_unavailable"
+    assert row["remaining"] is None
+    assert row["remaining_pct"] is None
+
+
+def test_board_without_date_to_requires_expense_watermark_through_as_of(db):
+    _load_complete_contract(db)
+    db.add(MaintenanceContractWorkbookState(
+        contract_no="XS-MARGIN",
+        revision=1,
+        expense_complete_through=date(2026, 3, 31),
+        expense_snapshot_complete=True,
+    ))
+    db.commit()
+
+    row = maintenance_cost.board(
+        db,
+        lifecycle="all",
+        as_of=date(2026, 4, 1),
+    )["rows"][0]
+
+    assert row["expense_data_available"] is False
+    assert row["contribution_status_inc"] == "expense_data_unavailable"
+    assert row["contribution_status_ex"] == "expense_data_unavailable"
+
+
+def test_contract_workbook_without_date_to_requires_watermark_through_today(
+    db,
+    monkeypatch,
+):
+    _load_complete_contract(db)
+    db.add(MaintenanceContractWorkbookState(
+        contract_no="XS-MARGIN",
+        revision=1,
+        expense_complete_through=date(2026, 3, 31),
+        expense_snapshot_complete=True,
+    ))
+    db.commit()
+    monkeypatch.setattr(
+        maintenance_cost,
+        "business_today",
+        lambda: date(2026, 4, 1),
+    )
+
+    data = maintenance_cost.contract_workbook_data(db, "XS-MARGIN")
+
+    assert data["expense_data_available"] is False
+    assert data["expense_evidence_status"] == "expense_data_unavailable"
+    assert data["margin"]["contribution_status_inc"] == "expense_data_unavailable"
+    assert data["margin"]["contribution_status_ex"] == "expense_data_unavailable"
+
+
+def test_date_filtered_budget_decision_preserves_evidence_gates_then_filters_complete(
+    db,
+):
+    _load_complete_contract(db)
+
+    def decision_statuses() -> tuple[str, str]:
+        board_row = maintenance_cost.board(
+            db,
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+            lifecycle="all",
+        )["rows"][0]
+        workbook_data = maintenance_cost.contract_workbook_data(
+            db,
+            "XS-MARGIN",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+        )
+        return (
+            board_row["decision_status"],
+            workbook_data["decision"]["decision_status"],
+        )
+
+    # 费用快照未确认仍是第一优先级，日期过滤不得掩盖证据缺口。
+    assert decision_statuses() == (
+        "expense_data_unavailable",
+        "expense_data_unavailable",
+    )
+
+    db.add(MaintenanceContractWorkbookState(
+        contract_no="XS-MARGIN",
+        revision=1,
+        expense_complete_through=date(2026, 3, 31),
+        expense_snapshot_complete=True,
+    ))
+    db.commit()
+    # 成本和费用证据完整时，期间支出不能与整合同预算比较。
+    assert decision_statuses() == ("filtered_scope", "filtered_scope")
+
+    line = db.scalars(select(FMaintenanceLine)).one()
+    line.cost_amount = None
+    db.commit()
+    # 缺成本比日期范围限制更具体，必须继续失败关闭并暴露真实缺口。
+    assert decision_statuses() == ("incomplete_cost", "incomplete_cost")
 
 
 def test_profit_blind_service_result_masks_margin_values_and_statuses(db):
@@ -477,11 +580,11 @@ def test_empty_contract_workbook_does_not_fabricate_zero_cost_margin(db):
     assert data["decision"]["remaining"] is None
     assert data["decision"]["remaining_pct"] is None
     assert data["dual_cost_summary"] == {
-        "parts_cost_inc_tax": Decimal("0.00"),
+        "parts_cost_inc_tax": None,
         "parts_cost_inc_tax_complete": False,
         "parts_cost_inc_tax_quality": "incomplete",
         "parts_cost_inc_tax_missing_lines": 0,
-        "parts_cost_ex_tax": Decimal("0.00"),
+        "parts_cost_ex_tax": None,
         "parts_cost_ex_tax_complete": False,
         "parts_cost_ex_tax_quality": "incomplete",
         "parts_cost_ex_tax_missing_lines": 0,

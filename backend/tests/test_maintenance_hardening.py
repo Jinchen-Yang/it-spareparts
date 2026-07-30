@@ -264,4 +264,4 @@ def test_contract_incomplete_flag(db, batch):
     maintenance_cost.recompute(db)
     row = maintenance_cost.projects_aggregate(db, lifecycle="all")["rows"][0]
     assert row["contract_incomplete"] is True
-    assert row["contract_amount"] == 0.0   # 无金额可加，但标记提示不全
+    assert row["contract_amount"] is None  # 无收入证据时失败关闭，不制造 0 合同额

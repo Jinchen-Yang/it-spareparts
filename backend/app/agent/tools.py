@@ -609,6 +609,11 @@ def _get_inventory(db: Session, args: dict, ctx: security.UserContext) -> dict:
 def _get_maintenance_board(db: Session, args: dict, ctx: security.UserContext) -> dict:
     if not security.page_allowed(ctx, "page_maintenance"):
         return _MAINT_PAGE_ERR
+    if security.is_scoped_sales(ctx):
+        return {
+            "error": "无权限：受限销售账号不能查看合同级维保数据。"
+            "可以查看本人范围的项目事实。"
+        }
     st = args.get("status")
     data = maintenance_cost.board(
         db, None, None,

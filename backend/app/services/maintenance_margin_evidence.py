@@ -52,6 +52,21 @@ class ExpenseEvidence:
         )
 
 
+def expense_evidence_status(
+    evidence: ExpenseEvidence | None,
+    *,
+    data_available: bool,
+) -> str:
+    """独立解释费用证据，不受成本/收入等贡献毛利主阻断状态影响。"""
+    if not data_available:
+        return "expense_data_unavailable"
+    if evidence is None:
+        return "complete"
+    if evidence.expense_inc is None or evidence.expense_ex is None:
+        return "expense_tax_unknown"
+    return "complete"
+
+
 def _decimal_key(value: Decimal | None):
     if value is None:
         return None
@@ -283,17 +298,24 @@ def load_untyped_expense_evidence(
 def load_expense_snapshot_completeness(
     db: Session,
     contract_nos: list[str],
+    *,
+    required_through: date,
 ) -> dict[str, bool]:
-    """读取合同费用完整快照门禁；没有状态行与显式 false 等价。"""
+    """读取合同费用完整快照门禁，并校验快照水位覆盖所需截止日。"""
     contract_nos = sorted({value for value in contract_nos if value})
     if not contract_nos:
         return {}
     return {
-        contract_no: bool(complete)
-        for contract_no, complete in db.execute(
+        contract_no: bool(
+            complete
+            and complete_through is not None
+            and complete_through >= required_through
+        )
+        for contract_no, complete, complete_through in db.execute(
             select(
                 MaintenanceContractWorkbookState.contract_no,
                 MaintenanceContractWorkbookState.expense_snapshot_complete,
+                MaintenanceContractWorkbookState.expense_complete_through,
             ).where(
                 MaintenanceContractWorkbookState.contract_no.in_(contract_nos),
             ),

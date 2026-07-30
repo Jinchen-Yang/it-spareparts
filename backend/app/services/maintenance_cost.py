@@ -619,22 +619,43 @@ def _scoped_filters(stmt, date_from, date_to):
     return stmt
 
 
+def _effective_cost_date_from(date_from: date | None) -> date:
+    """项目成本及其费用证据统一不得早于项目成本起算日。"""
+    if date_from is None:
+        return config.MAINT_COST_START_DATE
+    return max(date_from, config.MAINT_COST_START_DATE)
+
+
+def _date_filtered_budget_decision(decision: dict, *, date_filtered: bool) -> dict:
+    """期间支出不得和整合同预算比较，但证据缺口仍须保持最高优先级。"""
+    if not date_filtered or decision["decision_status"] in {
+        "incomplete_cost",
+        "expense_data_unavailable",
+    }:
+        return decision
+    return {
+        "decision_status": "filtered_scope",
+        "known_spend_total": decision["known_spend_total"],
+        "remaining": None,
+        "remaining_pct": None,
+    }
+
+
 def _matched_maintenance_contracts(date_from, date_to, q_text: str):
     """找出命中项目搜索的合同号，但不裁掉同合同下的其他项目成本。
 
     看板是合同粒度。搜索只负责召回合同；后续主查询仍聚合该合同在当前日期
     作用域内的完整项目、备件成本和期限，避免把共享合同重算得虚假健康。
     """
-    match_line = aliased(FMaintenanceLine)
     match_order = aliased(FMaintenanceOrder)
-    contract = func.coalesce(match_order.linked_sales_order_no, "")
+    contract = match_order.linked_sales_order_no
     stmt = (
         select(contract)
-        .select_from(match_line)
-        .join(match_order, match_line.order_id == match_order.id)
+        .select_from(match_order)
         .where(
             match_order.order_date >= config.MAINT_COST_START_DATE,
             match_order.linked_sales_order_no.is_not(None),
+            func.btrim(match_order.linked_sales_order_no) != "",
         )
     )
     stmt = active_orders(stmt, match_order)
@@ -675,7 +696,7 @@ def _parts_tax_basis_summary(
     prefix = f"parts_cost_{basis}_tax"
     if lines <= 0:
         return {
-            prefix: tax_policy.round_money(amount or _ZERO),
+            prefix: None,
             f"{prefix}_complete": False,
             f"{prefix}_quality": "incomplete",
             f"{prefix}_missing_lines": 0,
@@ -793,7 +814,11 @@ def projects_aggregate(db: Session, date_from: date | None = None,
     stmt = (
         select(
             proj.label("project"),
-            func.count().label("lines"),
+            func.count(func.distinct(mo.id)).label("order_count"),
+            func.count(func.distinct(mo.id)).filter(
+                ml.id.is_(None),
+            ).label("missing_detail_orders"),
+            func.count(ml.id).label("lines"),
             func.coalesce(func.sum(ml.qty), 0).label("qty"),
             func.coalesce(func.sum(ml.cost_amount).filter(
                 bucket == maintenance_cost_quality.COST_BUCKET_ACTUAL_INC,
@@ -808,17 +833,29 @@ def projects_aggregate(db: Session, date_from: date | None = None,
                 estimated_ex,
             ), 0).label("estimated_cost_ex"),
             func.count(func.distinct(func.date_trunc("month", mo.order_date))).label("months"),
-            func.count().filter(mo.maint_end.is_(None)).label("maint_end_missing"),
+            func.count(func.distinct(mo.id)).filter(
+                mo.maint_end.is_(None),
+            ).label("maint_end_missing"),
             func.max(mo.maint_end).label("latest_maint_end"),
             func.array_agg(func.distinct(mo.linked_sales_order_no))
-                .filter(mo.linked_sales_order_no.is_not(None)).label("sales_orders"),
+                .filter(
+                    mo.linked_sales_order_no.is_not(None),
+                    func.btrim(mo.linked_sales_order_no) != "",
+                ).label("sales_orders"),
             *_dual_cost_aggregate_columns(ml, actual_bucket, estimated_bucket),
             *src_cols,
         )
-        .join(mo, ml.order_id == mo.id)
+        .select_from(mo)
+        .outerjoin(ml, ml.order_id == mo.id)
         .group_by(proj)
     )
     stmt = _scoped_filters(stmt, date_from, date_to)
+    scoped_sales = security.is_scoped_sales(user_ctx)
+    if scoped_sales:
+        if user_ctx and user_ctx.salesperson_name:
+            stmt = stmt.where(mo.salesperson == user_ctx.salesperson_name)
+        else:
+            stmt = stmt.where(text("false"))
     if q_text and q_text.strip():
         # 分词模糊（大小写不敏感 + 变体，与全站搜索同源）：'联通 备件' 词序无关即可命中项目名
         for g in keyword_groups_or_substr(q_text):
@@ -848,7 +885,7 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             order_no_projects[ono].add(r.project)
     contract: dict[str, Decimal] = {}
     all_orders = list(order_no_projects.keys())
-    if all_orders:
+    if all_orders and not scoped_sales:
         contract = {
             order_no: evidence.legacy_contract_amount_inc
             for order_no, evidence in
@@ -873,8 +910,21 @@ def projects_aggregate(db: Session, date_from: date | None = None,
         )
         missing_cost_lines = r.lines - actual_lines - estimated_lines
         by_source["none"] = missing_cost_lines
-        missing = [o for o in sales_orders if o not in contract]
-        contract_amt = sum((contract.get(o) or _ZERO) for o in sales_orders)
+        missing = (
+            []
+            if scoped_sales
+            else [o for o in sales_orders if o not in contract]
+        )
+        known_contract_amounts = [
+            contract[order_no]
+            for order_no in sales_orders
+            if order_no in contract
+        ]
+        contract_amt = (
+            None
+            if scoped_sales or not known_contract_amounts
+            else sum(known_contract_amounts, _ZERO)
+        )
         cost_summary = maintenance_cost_quality.summarize_aggregate(
             lines=r.lines,
             actual_cost_inc=r.actual_cost_inc,
@@ -885,6 +935,8 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             estimated_lines=estimated_lines,
             missing_cost_lines=missing_cost_lines,
         )
+        if r.missing_detail_orders:
+            cost_summary["cost_quality"] = "incomplete"
         cost_inc = tax_policy.round_money(
             cost_summary["actual_cost_inc"] + cost_summary["estimated_cost_inc"]
         )
@@ -892,13 +944,32 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             cost_summary["actual_cost_ex"] + cost_summary["estimated_cost_ex"]
         )
         dual_summary = _dual_cost_summary_from_row(r, lines=r.lines)
+        if r.missing_detail_orders:
+            for basis in ("inc", "ex"):
+                prefix = f"parts_cost_{basis}_tax"
+                dual_summary[f"{prefix}_complete"] = False
+                dual_summary[f"{prefix}_quality"] = "incomplete"
+        public_cost_summary = dict(cost_summary)
+        if r.lines == 0:
+            cost_inc = cost_ex = None
+            for field in (
+                "actual_cost_inc",
+                "actual_cost_ex",
+                "estimated_cost_inc",
+                "estimated_cost_ex",
+                "known_cost_total",
+            ):
+                public_cost_summary[field] = None
         rows.append({
             "project": r.project,
+            "order_count": r.order_count,
+            "missing_detail_orders": r.missing_detail_orders,
+            "structure_complete": r.missing_detail_orders == 0,
             "lines": r.lines, "qty": _f(r.qty),
             "cost_inc": _f(cost_inc), "cost_ex": _f(cost_ex),
-            "cost_total": _f(cost_summary["known_cost_total"]),
+            "cost_total": _f(public_cost_summary["known_cost_total"]),
             **{key: _f(value) if isinstance(value, Decimal) else value
-               for key, value in cost_summary.items()},
+               for key, value in public_cost_summary.items()},
             **{key: _f(value) if isinstance(value, Decimal) else value
                for key, value in dual_summary.items()},
             "coverage_pct": round(
@@ -907,10 +978,17 @@ def projects_aggregate(db: Session, date_from: date | None = None,
             "by_source": by_source,
             "months": r.months,
             "sales_orders": sales_orders,
-            "contract_amount": _f(contract_amt) if sales_orders else None,
+            "contract_amount": (
+                _f(contract_amt)
+                if contract_amt is not None else None
+            ),
             "contract_shared": any(len(order_no_projects[o]) > 1 for o in sales_orders),
             # 部分/全部关联单号未在销售表中找到金额 → 合同额被低估，前端标注
-            "contract_incomplete": bool(sales_orders) and len(missing) > 0,
+            "contract_incomplete": (
+                None
+                if scoped_sales
+                else bool(sales_orders) and len(missing) > 0
+            ),
             "maint_end": (
                 r.latest_maint_end.isoformat()
                 if lifecycle_status != "missing" and r.latest_maint_end else None
@@ -943,11 +1021,17 @@ def _project_lines_query(
     month: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    user_ctx: security.UserContext | None = None,
 ):
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     base = select(ml, mo).join(mo, ml.order_id == mo.id)
     base = base.where(mo.project_std == project if project != "(未填项目)"
                       else mo.project_std.is_(None))
+    if security.is_scoped_sales(user_ctx):
+        if user_ctx and user_ctx.salesperson_name:
+            base = base.where(mo.salesperson == user_ctx.salesperson_name)
+        else:
+            base = base.where(text("false"))
     base = _scoped_filters(base, date_from, date_to)
     if month:
         base = base.where(func.to_char(mo.order_date, "YYYY-MM") == month)
@@ -960,10 +1044,38 @@ def project_line_count(
     month: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    user_ctx: security.UserContext | None = None,
 ) -> int:
     """返回与项目明细/CSV 完全同作用域的行数，供资源预检。"""
-    base = _project_lines_query(project, month, date_from, date_to)
+    base = _project_lines_query(
+        project,
+        month,
+        date_from,
+        date_to,
+        user_ctx=user_ctx,
+    )
     return db.scalar(select(func.count()).select_from(base.subquery())) or 0
+
+
+def project_exists(
+    db: Session,
+    project: str,
+    *,
+    user_ctx: security.UserContext | None = None,
+) -> bool:
+    """判断调用者是否可见项目对象，不把成本范围或明细存在性混入对象存在。"""
+    order = FMaintenanceOrder
+    visible = select(order.id).where(
+        order.project_std == project
+        if project != "(未填项目)"
+        else order.project_std.is_(None),
+    )
+    if security.is_scoped_sales(user_ctx):
+        if user_ctx and user_ctx.salesperson_name:
+            visible = visible.where(order.salesperson == user_ctx.salesperson_name)
+        else:
+            visible = visible.where(text("false"))
+    return bool(db.scalar(select(visible.exists())))
 
 
 def _serialize_project_line(
@@ -1036,7 +1148,13 @@ def iter_project_lines(
 ):
     """流式遍历项目明细；与分页 API 共用查询和序列化真相源。"""
     ml, mo = FMaintenanceLine, FMaintenanceOrder
-    statement = _project_lines_query(project, month, date_from, date_to).order_by(
+    statement = _project_lines_query(
+        project,
+        month,
+        date_from,
+        date_to,
+        user_ctx=user_ctx,
+    ).order_by(
         mo.order_date.desc().nullslast(), ml.id.desc(),
     ).execution_options(stream_results=True, yield_per=yield_per)
     hide_cost_signals = security.is_field_hidden(user_ctx, "cost_total")
@@ -1058,7 +1176,13 @@ def project_lines(db: Session, project: str, month: str | None = None,
                   user_ctx: security.UserContext | None = None) -> dict:
     """单项目 SKU 级明细（分页）：含成本来源/税口径/追溯月/关联采购单，逐行可解释。"""
     ml, mo = FMaintenanceLine, FMaintenanceOrder
-    base = _project_lines_query(project, month, date_from, date_to)
+    base = _project_lines_query(
+        project,
+        month,
+        date_from,
+        date_to,
+        user_ctx=user_ctx,
+    )
     total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     page = max(page, 1)
     paged = base.order_by(
@@ -1119,9 +1243,10 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
     红黄绿；完整且无正预算才返回 ``no_budget``。
     """
     lifecycle = _normalize_lifecycle(lifecycle)
+    date_filtered = date_from is not None or date_to is not None
     as_of = as_of or business_today()
     ml, mo = FMaintenanceLine, FMaintenanceOrder
-    contract_col = func.coalesce(mo.linked_sales_order_no, "")
+    contract_col = mo.linked_sales_order_no
     proj = func.coalesce(mo.project_std, "(未填项目)")
     bucket = ml.cost_bucket
     actual_bucket = bucket.between(
@@ -1147,7 +1272,11 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
     stmt = (
         select(
             contract_col.label("contract"), proj.label("project"),
-            func.count().label("lines"),
+            func.count(func.distinct(mo.id)).label("order_count"),
+            func.count(func.distinct(mo.id)).filter(
+                ml.id.is_(None),
+            ).label("missing_detail_orders"),
+            func.count(ml.id).label("lines"),
             func.coalesce(func.sum(ml.cost_amount).filter(
                 bucket == maintenance_cost_quality.COST_BUCKET_ACTUAL_INC,
             ), 0).label("actual_cost_inc"),
@@ -1167,26 +1296,26 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             ), 0).label("low_conf"),
             *_dual_cost_aggregate_columns(ml, actual_bucket, estimated_bucket),
             func.min(mo.maint_start).label("mstart"), func.max(mo.maint_end).label("mend"),
-            func.count().filter(mo.maint_end.is_(None)).label("mend_missing"),
+            func.count(func.distinct(mo.id)).filter(
+                mo.maint_end.is_(None),
+            ).label("mend_missing"),
             func.min(mo.order_date).label("first_out"), func.max(mo.order_date).label("last_out"),
         )
-        .join(mo, ml.order_id == mo.id)
+        .select_from(mo)
+        .outerjoin(ml, ml.order_id == mo.id)
+        .where(
+            mo.linked_sales_order_no.is_not(None),
+            func.btrim(mo.linked_sales_order_no) != "",
+        )
         .group_by(contract_col, proj)
     )
     stmt = _scoped_filters(stmt, date_from, date_to)
     if q_text and q_text.strip():
-        keyword_groups = keyword_groups_or_substr(q_text)
-        unlinked_match = and_(
-            mo.linked_sales_order_no.is_(None),
-            *(col_matches_any(mo.project_std, group) for group in keyword_groups),
-        )
-        stmt = stmt.where(or_(
-            and_(
-                mo.linked_sales_order_no.is_not(None),
-                contract_col.in_(_matched_maintenance_contracts(date_from, date_to, q_text)),
+        stmt = stmt.where(
+            contract_col.in_(
+                _matched_maintenance_contracts(date_from, date_to, q_text),
             ),
-            unlinked_match,
-        ))
+        )
     raw = db.execute(stmt).all()
 
     groups: dict[str, dict] = {}
@@ -1204,11 +1333,29 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             estimated_lines=r.estimated_lines,
             missing_cost_lines=missing_cost_lines,
         )
+        if r.missing_detail_orders:
+            project_summary["cost_quality"] = "incomplete"
         project_dual_summary = _dual_cost_summary_from_row(r, lines=r.lines)
+        if r.missing_detail_orders:
+            for basis in ("inc", "ex"):
+                prefix = f"parts_cost_{basis}_tax"
+                project_dual_summary[f"{prefix}_complete"] = False
+                project_dual_summary[f"{prefix}_quality"] = "incomplete"
+        project_public_summary = dict(project_summary)
+        if r.lines == 0:
+            for field in (
+                "actual_cost_inc",
+                "actual_cost_ex",
+                "estimated_cost_inc",
+                "estimated_cost_ex",
+                "known_cost_total",
+            ):
+                project_public_summary[field] = None
         g = groups.get(r.contract)
         if g is None:
             g = {
-                "projects": [], "lines": 0,
+                "projects": [], "order_count": 0,
+                "missing_detail_orders": 0, "lines": 0,
                 "actual_cost_inc": _ZERO, "actual_cost_ex": _ZERO,
                 "estimated_cost_inc": _ZERO, "estimated_cost_ex": _ZERO,
                 "actual_lines": 0, "estimated_lines": 0, "missing_cost_lines": 0,
@@ -1229,17 +1376,24 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             g["single_project_summary"] = None
         g["projects"].append({
             "project": r.project,
+            "order_count": r.order_count,
+            "missing_detail_orders": r.missing_detail_orders,
             "lines": r.lines,
-            "spent_parts": _f(project_summary["known_cost_total"]),
+            "spent_parts": (
+                _f(project_summary["known_cost_total"])
+                if r.lines else None
+            ),
             **{
                 key: _f(value) if isinstance(value, Decimal) else value
-                for key, value in project_summary.items()
+                for key, value in project_public_summary.items()
             },
             **{
                 key: _f(value) if isinstance(value, Decimal) else value
                 for key, value in project_dual_summary.items()
             },
         })
+        g["order_count"] += r.order_count
+        g["missing_detail_orders"] += r.missing_detail_orders
         g["lines"] += r.lines
         for key in (
             "actual_cost_inc", "actual_cost_ex",
@@ -1274,13 +1428,14 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
     expense_evidence = maintenance_margin_evidence.load_untyped_expense_evidence(
         db,
         contract_nos,
-        date_from=date_from,
+        date_from=_effective_cost_date_from(date_from),
         date_to=date_to,
     )
     expense_snapshot_complete = (
         maintenance_margin_evidence.load_expense_snapshot_completeness(
             db,
             contract_nos,
+            required_through=date_to or as_of,
         )
     )
     # 旧预算看板继续使用历史“含税参考取最大、费用净额”语义；正式双口径毛利
@@ -1309,7 +1464,23 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
                 estimated_lines=g["estimated_lines"],
                 missing_cost_lines=g["missing_cost_lines"],
             )
-        spent_parts = cost_summary["known_cost_total"]
+        if g["missing_detail_orders"]:
+            cost_summary["cost_quality"] = "incomplete"
+        has_parts_lines = g["lines"] > 0
+        spent_parts = (
+            cost_summary["known_cost_total"]
+            if has_parts_lines else None
+        )
+        public_cost_summary = dict(cost_summary)
+        if not has_parts_lines:
+            for field in (
+                "actual_cost_inc",
+                "actual_cost_ex",
+                "estimated_cost_inc",
+                "estimated_cost_ex",
+                "known_cost_total",
+            ):
+                public_cost_summary[field] = None
         dual_summary = {}
         for basis in ("inc", "ex"):
             prefix = f"parts_cost_{basis}_tax"
@@ -1320,11 +1491,20 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
                 actual_lines=g[f"{prefix}_actual_lines"],
                 estimated_lines=g[f"{prefix}_estimated_lines"],
             ))
+            if g["missing_detail_orders"]:
+                dual_summary[f"{prefix}_complete"] = False
+                dual_summary[f"{prefix}_quality"] = "incomplete"
         expense = (expenses.get(cno) or _ZERO).quantize(_CENT)
         budget = contracts.get(cno) if cno else None
         contract_revenue = revenue_evidence.get(cno)
         contract_expense = expense_evidence.get(cno)
         expense_data_available = expense_snapshot_complete.get(cno, False)
+        expense_evidence_status = (
+            maintenance_margin_evidence.expense_evidence_status(
+                contract_expense,
+                data_available=expense_data_available,
+            )
+        )
         margin_result = maintenance_margin.calculate_contract_margin(
             revenue_ex=(
                 contract_revenue.revenue_ex
@@ -1347,7 +1527,7 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
                 if contract_expense is not None else _ZERO
             ),
             expense_data_available=expense_data_available,
-            date_filtered=date_from is not None or date_to is not None,
+            date_filtered=date_filtered,
             revenue_ambiguous_inc=(
                 contract_revenue.ambiguous_inc
                 if contract_revenue is not None else False
@@ -1364,6 +1544,10 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             expense_data_available=expense_data_available,
             warn_pct=warn,
         )
+        decision = _date_filtered_budget_decision(
+            decision,
+            date_filtered=date_filtered,
+        )
         st = decision["decision_status"]
         remaining = decision["remaining"]
         remaining_pct = decision["remaining_pct"]
@@ -1379,10 +1563,12 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             "decision_status": st,
             "status": st,  # 兼容一版：与 decision_status 同一计算结果
             "projects": g["projects"],
+            "order_count": g["order_count"],
+            "missing_detail_orders": g["missing_detail_orders"],
             "lines": g["lines"],
             **{
                 key: _f(value) if isinstance(value, Decimal) else value
-                for key, value in cost_summary.items()
+                for key, value in public_cost_summary.items()
             },
             **{
                 key: _f(value) if isinstance(value, Decimal) else value
@@ -1397,12 +1583,20 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
             ) if g["lines"] else None,
             "spent_parts": _f(spent_parts),
             "spent_expense": _f(expense) if expense_data_available else None,
-            "spent": _f(spent) if expense_data_available else None,
+            "spent": (
+                _f(spent)
+                if has_parts_lines and expense_data_available
+                else None
+            ),
             "expense_data_available": expense_data_available,
+            "expense_evidence_status": expense_evidence_status,
             "budget": _f(budget), "remaining": _f(remaining),
             "remaining_pct": _f(remaining_pct),
             # 低置信成本占比高 → 卡片提示"估算成分高"
-            "low_conf_pct": round(float(g["low_conf"] / spent_parts * 100), 1) if spent_parts else 0.0,
+            "low_conf_pct": (
+                round(float(g["low_conf"] / spent_parts * 100), 1)
+                if spent_parts else None
+            ),
             "maint_start": g["mstart"].isoformat() if g["mstart"] else None,
             "maint_end": (
                 g["mend"].isoformat()
@@ -1415,10 +1609,11 @@ def board(db: Session, date_from: date | None = None, date_to: date | None = Non
     order = {
         "incomplete_cost": 0,
         "expense_data_unavailable": 1,
-        "red": 2,
-        "yellow": 3,
-        "green": 4,
-        "no_budget": 5,
+        "filtered_scope": 2,
+        "red": 3,
+        "yellow": 4,
+        "green": 5,
+        "no_budget": 6,
     }
     decision_restricted = profit_restricted or cost_restricted
     if decision_restricted:
@@ -1511,12 +1706,31 @@ def contract_workbook_data(
     date_filtered = date_from is not None or date_to is not None
     ml, mo = FMaintenanceLine, FMaintenanceOrder
     stmt = (
-        select(ml, mo).join(mo, ml.order_id == mo.id)
+        select(mo, ml)
+        .select_from(mo)
+        .outerjoin(ml, ml.order_id == mo.id)
         .where(mo.linked_sales_order_no == contract)
     )
     stmt = _scoped_filters(stmt, date_from, date_to)
-    stmt = stmt.order_by(mo.order_date.asc().nullslast(), mo.order_no, ml.line_no.asc().nullslast(), ml.id)
-    lines = db.execute(stmt).all()
+    stmt = stmt.order_by(
+        mo.order_date.asc().nullslast(),
+        mo.order_no,
+        ml.line_no.asc().nullslast(),
+        ml.id,
+    )
+    selected = db.execute(stmt).all()
+    orders = []
+    seen_order_ids: set[int] = set()
+    lines = []
+    for order, line in selected:
+        if order.id not in seen_order_ids:
+            seen_order_ids.add(order.id)
+            orders.append(order)
+        if line is not None:
+            lines.append((line, order))
+    order_count = len(orders)
+    orders_with_details = len({order.id for _line, order in lines})
+    missing_detail_orders = order_count - orders_with_details
 
     # 单据级已知成本参考；脏历史行同样走统一 fail-closed 分类，未知来源金额不纳入。
     doc_total: dict[str, Decimal] = defaultdict(lambda: _ZERO)
@@ -1542,6 +1756,8 @@ def contract_workbook_data(
         (ln.cost_source, ln.cost_tax_basis, ln.cost_amount)
         for ln, _order in lines
     )
+    if missing_detail_orders:
+        cost_summary["cost_quality"] = "incomplete"
     dual_cost_summary = {}
     for basis, field in (
         ("inc", "cost_amount_inc_tax"),
@@ -1573,11 +1789,16 @@ def contract_workbook_data(
             actual_lines=actual_lines,
             estimated_lines=estimated_lines,
         ))
+        if missing_detail_orders:
+            prefix = f"parts_cost_{basis}_tax"
+            dual_cost_summary[f"{prefix}_complete"] = False
+            dual_cost_summary[f"{prefix}_quality"] = "incomplete"
 
     pe = FProjectExpense
     expense_stmt = select(pe).where(pe.linked_sales_order_no == contract)
-    if date_from is not None:
-        expense_stmt = expense_stmt.where(pe.expense_date >= date_from)
+    expense_stmt = expense_stmt.where(
+        pe.expense_date >= _effective_cost_date_from(date_from),
+    )
     if date_to is not None:
         expense_stmt = expense_stmt.where(pe.expense_date <= date_to)
     exp_rows = db.execute(
@@ -1642,6 +1863,7 @@ def contract_workbook_data(
         maintenance_margin_evidence.load_expense_snapshot_completeness(
             db,
             [contract],
+            required_through=date_to or business_today(),
         ).get(contract, False)
     )
     decision = maintenance_cost_quality.budget_decision(
@@ -1651,14 +1873,10 @@ def contract_workbook_data(
         expense_data_available=expense_data_available,
         warn_pct=Decimal(str(config.MAINT_BUDGET_WARN_PCT)),
     )
-    if date_filtered:
-        # 区间支出只是所选期间事实，不能与整合同预算比较并推导红黄绿或余量。
-        decision = {
-            "decision_status": "filtered_scope",
-            "known_spend_total": decision["known_spend_total"],
-            "remaining": None,
-            "remaining_pct": None,
-        }
+    decision = _date_filtered_budget_decision(
+        decision,
+        date_filtered=date_filtered,
+    )
     active_expense_evidence = maintenance_margin_evidence.summarize_expense_records(
         (
             expense.amount,
@@ -1668,6 +1886,19 @@ def contract_workbook_data(
         for expense in exp_rows
         if expense.data_status == config.MAINT_EXPENSE_ACTIVE_STATUS
     )
+    expense_evidence_status = maintenance_margin_evidence.expense_evidence_status(
+        active_expense_evidence,
+        data_available=expense_data_available,
+    )
+    if not expense_data_available:
+        expense_inc = None
+        expense_ex = None
+    elif active_expense_evidence is None:
+        expense_inc = _ZERO
+        expense_ex = _ZERO
+    else:
+        expense_inc = active_expense_evidence.expense_inc
+        expense_ex = active_expense_evidence.expense_ex
     margin_result = maintenance_margin.calculate_contract_margin(
         revenue_ex=(
             revenue_evidence.revenue_ex
@@ -1704,6 +1935,11 @@ def contract_workbook_data(
             "date_filtered": date_filtered,
             "contract_tax_rate": contract_tax_rate,
             "contract_tax_status": contract_tax_status,
+            "orders": orders,
+            "order_count": order_count,
+            "orders_with_details": orders_with_details,
+            "missing_detail_orders": missing_detail_orders,
+            "structure_complete": missing_detail_orders == 0,
             "lines": lines, "doc_total": doc_total,
             "doc_cost_summary": doc_cost_summary,
             "line_cost_tiers": line_cost_tiers,
@@ -1712,6 +1948,9 @@ def contract_workbook_data(
             "margin": margin_result,
             "decision": decision,
             "expense_data_available": expense_data_available,
+            "expense_inc": expense_inc,
+            "expense_ex": expense_ex,
+            "expense_evidence_status": expense_evidence_status,
             "expenses": exp_rows, "expense_total": expense_total,
             "monthly_parts": dict(monthly_parts),
             "monthly_expenses": {

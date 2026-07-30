@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Card, DatePicker, Input, Button, Space, Tag, Tooltip, message, Statistic, Row, Col,
-  Drawer, Progress, Alert, Empty, Segmented, Upload,
+  Drawer, Progress, Alert, Empty, Segmented, Upload, Pagination,
 } from "antd";
 import { InfoCircleOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
@@ -54,6 +54,9 @@ interface DualMarginFields {
 interface ProjectRow {
   project: string;
   lines: number;
+  order_count: number;
+  missing_detail_orders: number;
+  structure_complete: boolean;
   qty: number | null;
   cost_inc: number | null;
   cost_ex: number | null;
@@ -105,7 +108,11 @@ type BoardStatus =
 type LifecycleStatus = "ongoing" | "ended" | "missing";
 type LifecycleFilter = LifecycleStatus | "all";
 type LifecycleCounts = Record<LifecycleStatus, number>;
+type ReminderStatusFilter = BoardStatus | "all";
 type ExportDatePreset = "all" | "today" | "last7" | "last14" | "last21" | "last30" | "month" | "custom";
+const DOWNLOAD_PROJECT_QUERY_MAX_LENGTH = 128;
+const DOWNLOAD_PROJECT_NAME_MAX_LENGTH = 256;
+const DOWNLOAD_CONTRACT_MAX_LENGTH = 64;
 
 interface BoardRow extends DualMarginFields {
   contract: string | null;
@@ -135,7 +142,6 @@ const STATUS_META: Record<BoardStatus, { label: string; color: string; bg: strin
   green: { label: "预算余量 > 20%", color: "#3f7a45", bg: "rgba(63,122,69,0.07)" },
   no_budget: { label: "无预算(未关联合同额)", color: "#8c8c8c", bg: "rgba(0,0,0,0.03)" },
 };
-const NEUTRAL_META = { label: "", color: "#8c8c8c", bg: "rgba(0,0,0,0.03)" };
 const LIFECYCLE_META: Record<LifecycleStatus, { label: string; color: string }> = {
   ongoing: { label: "进行中", color: "blue" },
   ended: { label: "已结束", color: "default" },
@@ -170,6 +176,7 @@ const SOURCE_ORDER = [
   "pool_purchase", "pool_sales", "purchase_history", "sales_history", "none",
 ];
 const COVERAGE_WARN_PCT = 80;   // 覆盖率预警线（经验值，非验收线；<此值标红提示核对无成本行）
+const BOARD_PAGE_SIZE = 12;
 
 const PROFIT_BASIS_LABEL: Record<TaxBasis, string> = {
   inc: "含税",
@@ -404,18 +411,22 @@ const BOARD_STATUSES = new Set<BoardStatus>([
 
 function normalizeDecisionStatus(
   decisionStatus: string | null | undefined,
-): BoardStatus {
+): BoardStatus | null {
   return BOARD_STATUSES.has(decisionStatus as BoardStatus)
     ? decisionStatus as BoardStatus
-    : "incomplete_cost";
+    : null;
 }
 
-function normalizeCostQuality(value: string | null | undefined): CostQuality {
-  if (value === "actual_only" || value === "contains_estimate") return value;
-  return "incomplete";
+function normalizeCostQuality(value: string | null | undefined): CostQuality | null {
+  if (
+    value === "actual_only"
+    || value === "contains_estimate"
+    || value === "incomplete"
+  ) return value;
+  return null;
 }
 
-function effectiveBoardStatus(row: BoardRow): BoardStatus {
+function effectiveBoardStatus(row: BoardRow): BoardStatus | null {
   const status = normalizeDecisionStatus(row.decision_status);
   return normalizeCostQuality(row.cost_quality) === "incomplete"
     || status === "incomplete_cost"
@@ -512,17 +523,521 @@ function saveBlob(blob: Blob, filename: string) {
   }
 }
 
+type BlobDownloadResponse = {
+  data: Blob;
+  headers?: unknown;
+};
+
+class InvalidDownloadResponseError extends Error {
+  constructor(message = "服务器返回的不是可下载文件，请稍后重试或联系管理员") {
+    super(message);
+  }
+}
+
+class DownloadSessionChangedError extends Error {
+  constructor() {
+    super("登录账号已变更，旧会话下载已取消，请重新操作");
+  }
+}
+
+const CSV_CONTENT_TYPES = ["text/csv", "application/csv"] as const;
+const XLSX_CONTENT_TYPES = [
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+] as const;
+const ZIP_CONTENT_TYPES = ["application/zip", "application/x-zip-compressed"] as const;
+
+function boundAuthorizationHeaders(sessionToken: string | null): Record<string, string> | undefined {
+  return sessionToken ? { Authorization: `Bearer ${sessionToken}` } : undefined;
+}
+
+function responseHeader(headers: unknown, name: string): string | undefined {
+  if (!headers || typeof headers !== "object") return undefined;
+  const getter = (headers as { get?: unknown }).get;
+  if (typeof getter === "function") {
+    const value = getter.call(headers, name);
+    return typeof value === "string" ? value : undefined;
+  }
+  const record = headers as Record<string, unknown>;
+  const value = record[name] ?? record[name.toLowerCase()] ?? record[name.toUpperCase()];
+  return typeof value === "string" ? value : undefined;
+}
+
+function safeDownloadFilename(value: string | undefined, fallback: string): string {
+  if (!value) return fallback;
+  const basename = value
+    .split(/[\\/]/)
+    .pop()
+    ?.replace(/\p{Cf}/gu, "")
+    .replace(/[\u0000-\u001f\u007f:*?"<>|]/g, "_")
+    .trim();
+  return basename || fallback;
+}
+
+function responseFilename(headers: unknown, fallback: string): string {
+  const disposition = responseHeader(headers, "content-disposition");
+  if (!disposition) return fallback;
+  const encoded = disposition.match(/filename\*\s*=\s*UTF-8''([^;]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return safeDownloadFilename(decodeURIComponent(encoded.trim().replace(/^"|"$/g, "")), fallback);
+    } catch {
+      return fallback;
+    }
+  }
+  const quoted = disposition.match(/filename\s*=\s*"([^"]+)"/i)?.[1];
+  const plain = disposition.match(/filename\s*=\s*([^;\s]+)/i)?.[1];
+  return safeDownloadFilename(quoted || plain, fallback);
+}
+
+const ZIP_EOCD_MIN_BYTES = 22;
+const ZIP_EOCD_MAX_COMMENT_BYTES = 0xffff;
+const ZIP_EOCD_SEARCH_BYTES = ZIP_EOCD_MIN_BYTES + ZIP_EOCD_MAX_COMMENT_BYTES;
+const ZIP_MAX_CENTRAL_DIRECTORY_BYTES = 32 * 1024 * 1024;
+const ZIP_MAX_ENTRY_COUNT = 4096;
+const ZIP_LOCAL_HEADER_BYTES = 30;
+const ZIP_CENTRAL_HEADER_BYTES = 46;
+
+function invalidArchiveError(isXlsx: boolean): InvalidDownloadResponseError {
+  return new InvalidDownloadResponseError(
+    isXlsx
+      ? "服务器返回的 Excel 文件损坏或结构不完整，已取消下载"
+      : "服务器返回的 ZIP 文件损坏或结构不完整，已取消下载",
+  );
+}
+
+function unsupportedZip64Error(): InvalidDownloadResponseError {
+  return new InvalidDownloadResponseError(
+    "服务器返回的文件使用了暂不支持的 ZIP64 格式，已取消下载，请联系管理员",
+  );
+}
+
+function throwIfDownloadAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException("The download was aborted.", "AbortError");
+  }
+}
+
+async function blobSliceBytes(
+  blob: Blob,
+  start: number,
+  end: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  throwIfDownloadAborted(signal);
+  if (
+    !Number.isSafeInteger(start)
+    || !Number.isSafeInteger(end)
+    || start < 0
+    || end < start
+    || end > blob.size
+  ) {
+    throw new Error("invalid blob slice");
+  }
+  const slice = blob.slice(start, end);
+  const arrayBuffer = (slice as Blob & {
+    arrayBuffer?: () => Promise<ArrayBuffer>;
+  }).arrayBuffer;
+  if (typeof arrayBuffer === "function") {
+    const bytes = new Uint8Array(await arrayBuffer.call(slice));
+    throwIfDownloadAborted(signal);
+    return bytes;
+  }
+  const bytes = await new Promise<Uint8Array>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) {
+        resolve(new Uint8Array(reader.result));
+      } else {
+        reject(new Error("download prefix is not binary"));
+      }
+    };
+    reader.onerror = () => reject(reader.error || new Error("download prefix read failed"));
+    reader.readAsArrayBuffer(slice);
+  });
+  throwIfDownloadAborted(signal);
+  return bytes;
+}
+
+function zipView(bytes: Uint8Array): DataView {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+function hasZip64Extra(extra: Uint8Array): boolean | null {
+  const view = zipView(extra);
+  let cursor = 0;
+  while (cursor < extra.length) {
+    if (cursor + 4 > extra.length) return null;
+    const fieldId = view.getUint16(cursor, true);
+    const fieldSize = view.getUint16(cursor + 2, true);
+    cursor += 4;
+    if (cursor + fieldSize > extra.length) return null;
+    if (fieldId === 0x0001) return true;
+    cursor += fieldSize;
+  }
+  return false;
+}
+
+function decodeZipEntryName(bytes: Uint8Array, utf8: boolean): string | null {
+  try {
+    return new TextDecoder(utf8 ? "utf-8" : "windows-1252", {
+      fatal: utf8,
+    }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+type ParsedZipEntry = {
+  compressedSize: number;
+  crc32: number;
+  flags: number;
+  localHeaderOffset: number;
+  method: number;
+  name: string;
+  nameBytes: Uint8Array;
+  uncompressedSize: number;
+};
+
+async function validateZipContainer(
+  blob: Blob,
+  requireXlsx: boolean,
+  signal?: AbortSignal,
+): Promise<void> {
+  const invalid = (): never => {
+    throw invalidArchiveError(requireXlsx);
+  };
+  throwIfDownloadAborted(signal);
+  if (blob.size < ZIP_EOCD_MIN_BYTES) invalid();
+  if (blob.size > 0xffffffff) throw unsupportedZip64Error();
+
+  const tailStart = Math.max(0, blob.size - ZIP_EOCD_SEARCH_BYTES);
+  const tail = await blobSliceBytes(blob, tailStart, blob.size, signal);
+  const tailView = zipView(tail);
+  let eocdInTail = -1;
+  for (let cursor = tail.length - ZIP_EOCD_MIN_BYTES; cursor >= 0; cursor -= 1) {
+    if (tailView.getUint32(cursor, true) !== 0x06054b50) continue;
+    const commentLength = tailView.getUint16(cursor + 20, true);
+    if (cursor + ZIP_EOCD_MIN_BYTES + commentLength === tail.length) {
+      eocdInTail = cursor;
+      break;
+    }
+  }
+  if (eocdInTail < 0) invalid();
+
+  if (
+    eocdInTail >= 20
+    && tailView.getUint32(eocdInTail - 20, true) === 0x07064b50
+  ) {
+    throw unsupportedZip64Error();
+  }
+
+  const diskNumber = tailView.getUint16(eocdInTail + 4, true);
+  const centralDiskNumber = tailView.getUint16(eocdInTail + 6, true);
+  const entriesOnDisk = tailView.getUint16(eocdInTail + 8, true);
+  const entryCount = tailView.getUint16(eocdInTail + 10, true);
+  const centralSize = tailView.getUint32(eocdInTail + 12, true);
+  const centralOffset = tailView.getUint32(eocdInTail + 16, true);
+  if (
+    entriesOnDisk === 0xffff
+    || entryCount === 0xffff
+    || centralSize === 0xffffffff
+    || centralOffset === 0xffffffff
+  ) {
+    throw unsupportedZip64Error();
+  }
+  if (
+    diskNumber !== 0
+    || centralDiskNumber !== 0
+    || entriesOnDisk !== entryCount
+    || entryCount > ZIP_MAX_ENTRY_COUNT
+    || centralSize > ZIP_MAX_CENTRAL_DIRECTORY_BYTES
+  ) {
+    invalid();
+  }
+  const eocdOffset = tailStart + eocdInTail;
+  if (
+    !Number.isSafeInteger(centralOffset + centralSize)
+    || centralOffset + centralSize !== eocdOffset
+  ) {
+    invalid();
+  }
+  if (entryCount === 0) {
+    invalid();
+  }
+  if (
+    centralSize < entryCount * ZIP_CENTRAL_HEADER_BYTES
+    || centralOffset >= eocdOffset
+  ) {
+    invalid();
+  }
+
+  const central = await blobSliceBytes(
+    blob,
+    centralOffset,
+    centralOffset + centralSize,
+    signal,
+  );
+  const centralView = zipView(central);
+  const entries: ParsedZipEntry[] = [];
+  const names = new Set<string>();
+  let cursor = 0;
+  for (let index = 0; index < entryCount; index += 1) {
+    throwIfDownloadAborted(signal);
+    if (
+      cursor + ZIP_CENTRAL_HEADER_BYTES > central.length
+      || centralView.getUint32(cursor, true) !== 0x02014b50
+    ) {
+      invalid();
+    }
+    const flags = centralView.getUint16(cursor + 8, true);
+    const method = centralView.getUint16(cursor + 10, true);
+    const crc32 = centralView.getUint32(cursor + 16, true);
+    const compressedSize = centralView.getUint32(cursor + 20, true);
+    const uncompressedSize = centralView.getUint32(cursor + 24, true);
+    const nameLength = centralView.getUint16(cursor + 28, true);
+    const extraLength = centralView.getUint16(cursor + 30, true);
+    const commentLength = centralView.getUint16(cursor + 32, true);
+    const diskStart = centralView.getUint16(cursor + 34, true);
+    const localHeaderOffset = centralView.getUint32(cursor + 42, true);
+    if (
+      compressedSize === 0xffffffff
+      || uncompressedSize === 0xffffffff
+      || localHeaderOffset === 0xffffffff
+      || diskStart === 0xffff
+    ) {
+      throw unsupportedZip64Error();
+    }
+    if (diskStart !== 0 || nameLength === 0) invalid();
+    const recordEnd = (
+      cursor
+      + ZIP_CENTRAL_HEADER_BYTES
+      + nameLength
+      + extraLength
+      + commentLength
+    );
+    if (recordEnd > central.length) invalid();
+    const nameBytes = central.slice(
+      cursor + ZIP_CENTRAL_HEADER_BYTES,
+      cursor + ZIP_CENTRAL_HEADER_BYTES + nameLength,
+    );
+    const extra = central.slice(
+      cursor + ZIP_CENTRAL_HEADER_BYTES + nameLength,
+      cursor + ZIP_CENTRAL_HEADER_BYTES + nameLength + extraLength,
+    );
+    const zip64Extra = hasZip64Extra(extra);
+    if (zip64Extra == null) invalid();
+    if (zip64Extra) throw unsupportedZip64Error();
+    const name = (
+      decodeZipEntryName(nameBytes, (flags & 0x0800) !== 0) ?? invalid()
+    );
+    if (name.length === 0) invalid();
+    if (names.has(name)) invalid();
+    names.add(name);
+    entries.push({
+      compressedSize,
+      crc32,
+      flags,
+      localHeaderOffset,
+      method,
+      name,
+      nameBytes,
+      uncompressedSize,
+    });
+    cursor = recordEnd;
+  }
+  if (cursor !== central.length) invalid();
+
+  const localOffsets = new Set<number>();
+  const localRanges: Array<[number, number]> = [];
+  for (const entry of entries) {
+    throwIfDownloadAborted(signal);
+    if (
+      entry.localHeaderOffset >= centralOffset
+      || localOffsets.has(entry.localHeaderOffset)
+    ) {
+      invalid();
+    }
+    localOffsets.add(entry.localHeaderOffset);
+    const fixedEnd = entry.localHeaderOffset + ZIP_LOCAL_HEADER_BYTES;
+    if (fixedEnd > centralOffset) invalid();
+    const local = await blobSliceBytes(
+      blob,
+      entry.localHeaderOffset,
+      fixedEnd,
+      signal,
+    );
+    const localView = zipView(local);
+    if (localView.getUint32(0, true) !== 0x04034b50) invalid();
+    const localFlags = localView.getUint16(6, true);
+    const localMethod = localView.getUint16(8, true);
+    const localCrc32 = localView.getUint32(14, true);
+    const localCompressedSize = localView.getUint32(18, true);
+    const localUncompressedSize = localView.getUint32(22, true);
+    const localNameLength = localView.getUint16(26, true);
+    const localExtraLength = localView.getUint16(28, true);
+    if (
+      localFlags !== entry.flags
+      || localMethod !== entry.method
+      || localNameLength !== entry.nameBytes.length
+    ) {
+      invalid();
+    }
+    if (
+      localCompressedSize === 0xffffffff
+      || localUncompressedSize === 0xffffffff
+    ) {
+      throw unsupportedZip64Error();
+    }
+    if (
+      (entry.flags & 0x0008) === 0
+      && (
+        localCrc32 !== entry.crc32
+        || localCompressedSize !== entry.compressedSize
+        || localUncompressedSize !== entry.uncompressedSize
+      )
+    ) {
+      invalid();
+    }
+    const variableEnd = fixedEnd + localNameLength + localExtraLength;
+    if (variableEnd > centralOffset) invalid();
+    const variable = await blobSliceBytes(blob, fixedEnd, variableEnd, signal);
+    const localName = variable.slice(0, localNameLength);
+    if (
+      localName.some((value, index) => value !== entry.nameBytes[index])
+    ) {
+      invalid();
+    }
+    const localZip64Extra = hasZip64Extra(variable.slice(localNameLength));
+    if (localZip64Extra == null) invalid();
+    if (localZip64Extra) throw unsupportedZip64Error();
+    const dataEnd = variableEnd + entry.compressedSize;
+    if (!Number.isSafeInteger(dataEnd) || dataEnd > centralOffset) invalid();
+    localRanges.push([entry.localHeaderOffset, dataEnd]);
+  }
+  localRanges.sort(([left], [right]) => left - right);
+  for (let index = 1; index < localRanges.length; index += 1) {
+    if (localRanges[index][0] < localRanges[index - 1][1]) invalid();
+  }
+
+  if (
+    requireXlsx
+    && (!names.has("[Content_Types].xml") || !names.has("xl/workbook.xml"))
+  ) {
+    throw new InvalidDownloadResponseError(
+      "服务器返回的 Excel 文件不是有效的 XLSX 工作簿，已取消下载",
+    );
+  }
+}
+
+async function saveDownloadResponse(
+  response: BlobDownloadResponse,
+  fallbackFilename: string,
+  expectedTypes: readonly string[],
+  beforeSave?: () => boolean,
+  signal?: AbortSignal,
+): Promise<void> {
+  throwIfDownloadAborted(signal);
+  if (!(response.data instanceof Blob)) throw new InvalidDownloadResponseError();
+  if (response.data.size === 0) {
+    throw new InvalidDownloadResponseError(
+      "服务器返回了空文件，已取消下载，请重试或联系管理员",
+    );
+  }
+  const contentType = (
+    responseHeader(response.headers, "content-type")
+    || response.data.type
+  ).split(";")[0].trim().toLowerCase();
+  if (!contentType) {
+    throw new InvalidDownloadResponseError(
+      "服务器未返回文件类型，已取消下载，请重试或联系管理员",
+    );
+  }
+  if (!expectedTypes.includes(contentType)) {
+    throw new InvalidDownloadResponseError();
+  }
+  if (expectedTypes.includes(XLSX_CONTENT_TYPES[0])) {
+    await validateZipContainer(response.data, true, signal);
+  } else if (expectedTypes.includes(ZIP_CONTENT_TYPES[0])) {
+    await validateZipContainer(response.data, false, signal);
+  }
+  throwIfDownloadAborted(signal);
+  if (beforeSave && !beforeSave()) return;
+  saveBlob(response.data, responseFilename(response.headers, fallbackFilename));
+}
+
+const EXPORT_VALIDATION_PARAM_LABELS: Record<string, string> = {
+  q: "项目搜索",
+  project: "项目名称",
+  contract: "合同编号",
+  date_from: "开始日期",
+  date_to: "结束日期",
+  lifecycle: "期限状态",
+  month: "月份",
+  status: "提醒类型",
+  file: "文件",
+};
+
+function formatExportValidationDetail(detail: unknown): string | undefined {
+  if (typeof detail === "string") return detail.trim() || undefined;
+  if (!Array.isArray(detail)) return undefined;
+  const messages = detail.flatMap((item): string[] => {
+    if (typeof item === "string") return item.trim() ? [item.trim()] : [];
+    if (!item || typeof item !== "object") return [];
+    const row = item as Record<string, unknown>;
+    const location = Array.isArray(row.loc) ? row.loc : [];
+    const parameter = [...location].reverse().find(
+      (value): value is string => typeof value === "string"
+        && value !== "query"
+        && value !== "body",
+    );
+    const label = parameter
+      ? EXPORT_VALIDATION_PARAM_LABELS[parameter] || `请求参数 ${parameter}`
+      : "请求参数";
+    const context = (
+      row.ctx && typeof row.ctx === "object"
+        ? row.ctx
+        : {}
+    ) as Record<string, unknown>;
+    if (
+      row.type === "string_too_long"
+      && Number.isSafeInteger(context.max_length)
+    ) {
+      return [`${label}不能超过 ${context.max_length} 个字符`];
+    }
+    if (
+      row.type === "string_too_short"
+      && Number.isSafeInteger(context.min_length)
+    ) {
+      return [`${label}不能少于 ${context.min_length} 个字符`];
+    }
+    if (row.type === "missing") return [`${label}不能为空`];
+    if (row.type === "string_pattern_mismatch") return [`${label}格式不正确`];
+    const rawMessage = typeof row.msg === "string"
+      ? row.msg.replace(/\p{Cf}/gu, "").trim()
+      : "";
+    return rawMessage ? [`${label}：${rawMessage}`] : [`${label}校验失败`];
+  });
+  const uniqueMessages = [...new Set(messages)].slice(0, 3);
+  return uniqueMessages.length ? uniqueMessages.join("；") : undefined;
+}
+
 async function readExportError(error: unknown): Promise<{
   status?: number;
   detail?: string;
 }> {
+  if (
+    error instanceof InvalidDownloadResponseError
+    || error instanceof DownloadSessionChangedError
+  ) {
+    return { detail: error.message };
+  }
   const response = (error as {
     response?: { status?: number; data?: unknown };
   })?.response;
   let detail: string | undefined;
   if (
     response?.status != null
-    && [403, 422, 429].includes(response.status)
+    && [403, 404, 413, 422, 429].includes(response.status)
     && response.data instanceof Blob
   ) {
     try {
@@ -535,7 +1050,7 @@ async function readExportError(error: unknown): Promise<{
           reader.readAsText(response.data as Blob);
         });
       const body = JSON.parse(text) as { detail?: unknown };
-      if (typeof body.detail === "string") detail = body.detail;
+      detail = formatExportValidationDetail(body.detail);
     } catch {
       // 非 JSON 错误体只使用安全的状态提示。
     }
@@ -569,7 +1084,11 @@ const SourceLegend = (
   </div>
 );
 
-export default function ProjectCostPage() {
+export default function ProjectCostPage({
+  view = "data",
+}: {
+  view?: "data" | "downloads" | "reminders";
+}) {
   const role = localStorage.getItem("role") || "";
   const isAdmin = role === "admin";
   let localPermissions: Record<string, boolean> = {};
@@ -587,32 +1106,66 @@ export default function ProjectCostPage() {
     && localPermissions.data_purchase_cost === true
     && localPermissions.data_profit === true
   );
-  const canApplyRoundtripWorkbook = canExportProjectWorkbooks && (
+  const canExportRoundtripWorkbooks = canExportProjectWorkbooks && (
+    isAdmin || localPermissions.data_customer === true
+  );
+  const canApplyRoundtripWorkbook = canExportRoundtripWorkbooks && (
     isAdmin || localPermissions.action_maintenance_roundtrip_apply === true
   );
   const maintenanceBasis = useTaxBasis("maintenance");
   const [exportRange, setExportRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [exportDatePreset, setExportDatePreset] = useState<ExportDatePreset>("all");
   const exportDatePresetRef = useRef<ExportDatePreset>("all");
+  const [exportAsOf, setExportAsOf] = useState("");
+  const [exportScopeLoading, setExportScopeLoading] = useState(false);
+  const [exportScopeError, setExportScopeError] = useState(false);
+  const exportScopeSeq = useRef(0);
+  const exportScopeRequest = useRef<{
+    controller: AbortController;
+    preset: ExportDatePreset;
+    promise: Promise<[Dayjs, Dayjs] | null>;
+    sessionToken: string | null;
+  } | null>(null);
+  const mountedRef = useRef(true);
   const [q, setQ] = useState("");
+  const [downloadProjectQuery, setDownloadProjectQuery] = useState("");
+  const [downloadProjectLifecycle, setDownloadProjectLifecycle] =
+    useState<LifecycleFilter>("all");
+  const [downloadProject, setDownloadProject] = useState("");
+  const [downloadContract, setDownloadContract] = useState("");
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
-  const [lifecycleCounts, setLifecycleCounts] = useState<LifecycleCounts>(EMPTY_LIFECYCLE_COUNTS);
-  const [asOf, setAsOf] = useState("");
+  const [reminderStatus, setReminderStatus] = useState<ReminderStatusFilter>("all");
+  const [projectLifecycleCounts, setProjectLifecycleCounts] =
+    useState<LifecycleCounts>(EMPTY_LIFECYCLE_COUNTS);
+  const [boardLifecycleCounts, setBoardLifecycleCounts] =
+    useState<LifecycleCounts>(EMPTY_LIFECYCLE_COUNTS);
+  const [projectAsOf, setProjectAsOf] = useState("");
+  const [boardAsOf, setBoardAsOf] = useState("");
   const [rows, setRows] = useState<ProjectRow[]>([]);
   const [projectCostRestricted, setProjectCostRestricted] = useState(false);
   const [board, setBoard] = useState<BoardRow[]>([]);
   const [boardDecisionRestricted, setBoardDecisionRestricted] = useState(false);
-  const [boardFilter, setBoardFilter] = useState<string>("all");
+  const [reminderFilterRestricted, setReminderFilterRestricted] = useState(false);
+  const [reminderFilterRejected, setReminderFilterRejected] = useState(false);
+  const [boardPage, setBoardPage] = useState(1);
   const [startDate, setStartDate] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState(false);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsLoadError, setProjectsLoadError] = useState(false);
+  const [boardLoading, setBoardLoading] = useState(false);
+  const [boardLoadError, setBoardLoadError] = useState(false);
   const [recomputing, setRecomputing] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportingWorkbooks, setExportingWorkbooks] = useState(false);
-  const exportingWorkbooksRef = useRef(false);
   const [exportingProjects, setExportingProjects] = useState(false);
+  const [exportingProfit, setExportingProfit] = useState(false);
+  const [exportingLines, setExportingLines] = useState(false);
+  const [exportingSingleWorkbook, setExportingSingleWorkbook] = useState(false);
   const [downloadingTemplate, setDownloadingTemplate] = useState(false);
+  const [downloadingTemplateBundle, setDownloadingTemplateBundle] = useState(false);
+  const downloadControllersRef = useRef<Set<AbortController>>(new Set());
+  const operationLocksRef = useRef<Set<string>>(new Set());
   const [importingRoundtrip, setImportingRoundtrip] = useState(false);
+  const [activeDownloads, setActiveDownloads] = useState<Record<string, string>>({});
   const [roundtripResult, setRoundtripResult] = useState<string | null>(null);
   const [roundtripError, setRoundtripError] = useState<string | null>(null);
   // 明细抽屉
@@ -625,60 +1178,183 @@ export default function ProjectCostPage() {
   // 请求序号守卫：抽屉快速翻页/切项目时，迟到响应不得覆盖新结果
   const linesSeq = useRef(0);
   const detailRef = useRef<string | null>(null);
-  // 页面两组聚合请求共享代次：快速切换期限/日期/搜索时，迟到响应不能覆盖最新筛选。
-  const pageSeq = useRef(0);
+  // 两类业务对象独立加载、独立失败、独立重试；各自用请求代次阻止迟到响应覆盖新筛选。
+  const projectsSeq = useRef(0);
+  const boardSeq = useRef(0);
   const baseParams = () => ({
     q: q || undefined,
   });
+  const beginDownload = (key: string, label: string) => {
+    setActiveDownloads((current) => ({ ...current, [key]: label }));
+  };
+  const endDownload = (key: string) => {
+    setActiveDownloads((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  };
+  const acquireOperation = (key: string): boolean => {
+    if (operationLocksRef.current.has(key)) return false;
+    operationLocksRef.current.add(key);
+    return true;
+  };
+  const releaseOperation = (key: string) => {
+    operationLocksRef.current.delete(key);
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      exportScopeSeq.current += 1;
+      exportScopeRequest.current?.controller.abort();
+      exportScopeRequest.current = null;
+      for (const controller of downloadControllersRef.current) controller.abort();
+      downloadControllersRef.current.clear();
+      operationLocksRef.current.clear();
+    };
+  }, []);
 
   const lifecycleParams = () => ({ ...baseParams(), lifecycle });
   const boardParams = () => ({
     q: q || undefined,
     lifecycle,
+    status: view === "reminders" && reminderStatus !== "all"
+      ? reminderStatus
+      : undefined,
   });
 
-  const load = async () => {
-    const seq = ++pageSeq.current;
-    setLoading(true);
-    setLoadError(false);
-    // 筛选已经变化时不继续展示上一筛选的结果，避免用户把旧数据误认成新口径。
+  const loadProjects = async () => {
+    const seq = ++projectsSeq.current;
+    setProjectsLoading(true);
+    setProjectsLoadError(false);
     setRows([]);
-    setBoard([]);
-    setLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
-    setAsOf("");
+    setProjectCostRestricted(false);
+    setStartDate("");
+    setProjectAsOf("");
+    setProjectLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
     try {
-      const [{ data }, bd] = await Promise.all([
-        api.get("/maintenance/projects", { params: lifecycleParams() }),
-        api.get("/maintenance/board", { params: boardParams() }),
-      ]);
-      if (seq !== pageSeq.current) return;
+      const { data } = await api.get("/maintenance/projects", {
+        params: lifecycleParams(),
+      });
+      if (seq !== projectsSeq.current) return;
       setRows(data.rows);
       setProjectCostRestricted(!!data.ranking_restricted);
       setStartDate(data.start_date);
-      setBoard(bd.data.rows);
-      setAsOf(data.as_of || bd.data.as_of || "");
-      setLifecycleCounts(data.lifecycle_counts || bd.data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
-      const decisionRestricted = bd.data.decision_restricted === true
-        || bd.data.profit_restricted === true
-        || bd.data.ranking_restricted === true
-        || data.ranking_restricted === true;
-      setBoardDecisionRestricted(decisionRestricted);
-      if (decisionRestricted) setBoardFilter("all");
+      setProjectAsOf(data.as_of || "");
+      setProjectLifecycleCounts(data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
     } catch {
-      if (seq !== pageSeq.current) return;
+      if (seq !== projectsSeq.current) return;
       setRows([]);
       setProjectCostRestricted(false);
-      setBoard([]);
-      setLoadError(true);
+      setProjectsLoadError(true);
     } finally {
-      if (seq === pageSeq.current) setLoading(false);
+      if (seq === projectsSeq.current) setProjectsLoading(false);
+    }
+  };
+
+  const loadBoard = async () => {
+    if (scopedSales) {
+      boardSeq.current += 1;
+      setBoard([]);
+      setBoardPage(1);
+      setBoardLoading(false);
+      setBoardLoadError(false);
+      setBoardDecisionRestricted(true);
+      setReminderFilterRestricted(true);
+      setReminderFilterRejected(false);
+      setBoardAsOf("");
+      setBoardLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
+      return;
+    }
+    const seq = ++boardSeq.current;
+    setBoardLoading(true);
+    setBoardLoadError(false);
+    setBoard([]);
+    setBoardPage(1);
+    setBoardDecisionRestricted(false);
+    setBoardAsOf("");
+    setBoardLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
+    try {
+      const { data } = await api.get("/maintenance/board", {
+        params: boardParams(),
+      });
+      if (seq !== boardSeq.current) return;
+      setBoard(data.rows);
+      setBoardAsOf(data.as_of || "");
+      setBoardLifecycleCounts(data.lifecycle_counts || EMPTY_LIFECYCLE_COUNTS);
+      setBoardDecisionRestricted(
+        data.decision_restricted === true
+        || data.profit_restricted === true
+        || data.ranking_restricted === true,
+      );
+      const statusFilterRestricted = (
+        data.decision_restricted === true
+        || data.profit_restricted === true
+        || data.ranking_restricted === true
+      );
+      setReminderFilterRestricted(statusFilterRestricted);
+      const requestedReminderStatus = reminderStatus !== "all";
+      const statusFilterRejected = requestedReminderStatus
+        && data.status_filter_applied !== true;
+      if (requestedReminderStatus && !statusFilterRestricted) {
+        setReminderFilterRejected(statusFilterRejected);
+      }
+      if (statusFilterRestricted || statusFilterRejected) {
+        setReminderStatus("all");
+      }
+    } catch {
+      if (seq !== boardSeq.current) return;
+      setBoard([]);
+      setBoardDecisionRestricted(false);
+      if (view === "reminders" && reminderStatus !== "all") {
+        setReminderFilterRejected(true);
+        setReminderStatus("all");
+      }
+      setBoardLoadError(true);
+    } finally {
+      if (seq === boardSeq.current) setBoardLoading(false);
     }
   };
 
   useEffect(() => {
-    load();
+    if (view === "downloads") {
+      projectsSeq.current += 1;
+      boardSeq.current += 1;
+      exportScopeSeq.current += 1;
+      exportScopeRequest.current?.controller.abort();
+      exportScopeRequest.current = null;
+      exportDatePresetRef.current = "all";
+      setExportDatePreset("all");
+      setExportRange(null);
+      setExportAsOf("");
+      setExportScopeLoading(false);
+      setExportScopeError(false);
+      setProjectsLoading(false);
+      setBoardLoading(false);
+      setProjectsLoadError(false);
+      setBoardLoadError(false);
+      setRows([]);
+      setBoard([]);
+      setProjectAsOf("");
+      setBoardAsOf("");
+      setProjectLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
+      setBoardLifecycleCounts(EMPTY_LIFECYCLE_COUNTS);
+      return;
+    }
+    if (view === "reminders") {
+      projectsSeq.current += 1;
+      setProjectsLoading(false);
+      setProjectsLoadError(false);
+      setRows([]);
+      void loadBoard();
+      return;
+    }
+    void loadProjects();
+    void loadBoard();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, lifecycle]);
+  }, [q, lifecycle, reminderStatus, view]);
 
   const loadLines = async (project: string, page: number, month?: string) => {
     const seq = ++linesSeq.current;
@@ -720,7 +1396,8 @@ export default function ProjectCostPage() {
     try {
       const { data } = await api.post("/maintenance/recompute");
       message.success(formatMaintenanceRecomputeSummary(data));
-      load();
+      void loadProjects();
+      void loadBoard();
     } catch {
       message.error("重算失败（需要管理员权限）");
     } finally {
@@ -729,50 +1406,186 @@ export default function ProjectCostPage() {
     }
   };
 
-  const download = (path: string, filename: string, extra?: Record<string, unknown>) =>
-    api.get(path, { params: { ...baseParams(), ...extra }, responseType: "blob" })
-      .then((res) => saveBlob(res.data, filename));
+  const requestAndSaveDownload = async (
+    path: string,
+    params: Record<string, unknown>,
+    filename: string,
+    expectedTypes: readonly string[],
+    sessionToken = localStorage.getItem("token"),
+  ): Promise<void> => {
+    if (!mountedRef.current) return;
+    if (localStorage.getItem("token") !== sessionToken) {
+      throw new DownloadSessionChangedError();
+    }
+    const controller = new AbortController();
+    downloadControllersRef.current.add(controller);
+    try {
+      const response = await api.get(path, {
+        params,
+        responseType: "blob",
+        signal: controller.signal,
+        headers: boundAuthorizationHeaders(sessionToken),
+      });
+      if (controller.signal.aborted || !mountedRef.current) return;
+      if (localStorage.getItem("token") !== sessionToken) {
+        throw new DownloadSessionChangedError();
+      }
+      await saveDownloadResponse(response, filename, expectedTypes, () => {
+        if (controller.signal.aborted || !mountedRef.current) return false;
+        if (localStorage.getItem("token") !== sessionToken) {
+          throw new DownloadSessionChangedError();
+        }
+        return true;
+      }, controller.signal);
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      throw error;
+    } finally {
+      downloadControllersRef.current.delete(controller);
+    }
+  };
+
+  const download = (
+    path: string,
+    filename: string,
+    expectedTypes: readonly string[],
+    extra?: Record<string, unknown>,
+    sessionToken = localStorage.getItem("token"),
+  ) => requestAndSaveDownload(
+    path,
+    { ...baseParams(), ...extra },
+    filename,
+    expectedTypes,
+    sessionToken,
+  );
+
+  const requestRelativeExportScope = (
+    requestedPreset: ExportDatePreset,
+    sessionToken = localStorage.getItem("token"),
+  ): Promise<[Dayjs, Dayjs] | null> => {
+    const currentRequest = exportScopeRequest.current;
+    if (
+      currentRequest
+      && !currentRequest.controller.signal.aborted
+      && currentRequest.preset === requestedPreset
+      && currentRequest.sessionToken === sessionToken
+    ) {
+      return currentRequest.promise;
+    }
+    currentRequest?.controller.abort();
+    const seq = ++exportScopeSeq.current;
+    const controller = new AbortController();
+    setExportScopeLoading(true);
+    setExportScopeError(false);
+    setExportRange(null);
+    setExportAsOf("");
+    let request!: NonNullable<typeof exportScopeRequest.current>;
+    const promise = api.get("/maintenance/as-of", {
+      signal: controller.signal,
+      headers: boundAuthorizationHeaders(sessionToken),
+    })
+      .then(({ data }) => {
+        if (localStorage.getItem("token") !== sessionToken) {
+          controller.abort();
+        }
+        if (
+          controller.signal.aborted
+          || !mountedRef.current
+          || seq !== exportScopeSeq.current
+          || exportDatePresetRef.current !== requestedPreset
+        ) return null;
+        const latestAsOf = typeof data?.as_of === "string" ? data.as_of : "";
+        const anchor = latestAsOf ? dayjs(latestAsOf) : null;
+        if (!anchor?.isValid()) throw new Error("invalid as_of");
+        const resolvedRange = presetRange(requestedPreset, anchor);
+        setExportAsOf(latestAsOf);
+        setExportRange(resolvedRange);
+        return resolvedRange;
+      })
+      .catch(() => {
+        if (
+          !controller.signal.aborted
+          && mountedRef.current
+          && seq === exportScopeSeq.current
+          && exportDatePresetRef.current === requestedPreset
+          && localStorage.getItem("token") === sessionToken
+        ) {
+          setExportScopeError(true);
+          message.error("日期基准加载失败，请重试该日期档");
+        }
+        return null;
+      })
+      .finally(() => {
+        if (mountedRef.current && seq === exportScopeSeq.current) {
+          setExportScopeLoading(false);
+        }
+        if (exportScopeRequest.current === request) {
+          exportScopeRequest.current = null;
+        }
+      });
+    request = {
+      controller,
+      preset: requestedPreset,
+      promise,
+      sessionToken,
+    };
+    exportScopeRequest.current = request;
+    return promise;
+  };
 
   const resolveExportScope = async (
     requestedPreset: ExportDatePreset,
+    sessionToken: string | null,
   ): Promise<{
     params: { date_from?: string; date_to?: string };
     range: [Dayjs, Dayjs] | null;
   } | null> => {
+    if (!mountedRef.current) return null;
+    if (localStorage.getItem("token") !== sessionToken) {
+      throw new DownloadSessionChangedError();
+    }
     let resolvedRange = exportRange;
-    const initialParams = buildOrderExportParams(requestedPreset, resolvedRange);
-    if (!initialParams) {
+    if (requestedPreset !== "all" && requestedPreset !== "custom") {
+      const active = exportScopeRequest.current;
+      resolvedRange = (
+        active?.preset === requestedPreset
+        && active.sessionToken === sessionToken
+      )
+        ? await active.promise
+        : await requestRelativeExportScope(requestedPreset, sessionToken);
+      if (!mountedRef.current) return null;
+      if (localStorage.getItem("token") !== sessionToken) {
+        throw new DownloadSessionChangedError();
+      }
+      if (!resolvedRange || exportDatePresetRef.current !== requestedPreset) return null;
+    }
+    const params = buildOrderExportParams(requestedPreset, resolvedRange);
+    if (!params) {
       message.warning(requestedPreset === "custom"
         ? "请选择自定义起止日期"
         : "日期基准尚未加载，请稍后重试");
       return null;
     }
-    if (requestedPreset !== "all" && requestedPreset !== "custom") {
-      const { data } = await api.get("/maintenance/as-of");
-      if (exportDatePresetRef.current !== requestedPreset) return null;
-      const latestAsOf = typeof data?.as_of === "string" ? data.as_of : "";
-      const anchor = latestAsOf ? dayjs(latestAsOf) : null;
-      if (!anchor?.isValid()) throw new Error("invalid as_of");
-      resolvedRange = presetRange(requestedPreset, anchor);
-      setAsOf(latestAsOf);
-      setExportRange(resolvedRange);
-    }
-    const params = buildOrderExportParams(requestedPreset, resolvedRange);
-    return params ? { params, range: resolvedRange } : null;
+    return { params, range: resolvedRange };
   };
 
   const exportOrders = async () => {
+    if (!acquireOperation("orders")) return;
+    const sessionToken = localStorage.getItem("token");
     setExporting(true);
+    beginDownload("orders", "正在生成订单汇总 Excel，请勿关闭页面或重复点击");
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
-      const res = await api.get("/maintenance/orders/export", {
-        params: scope.params,
-        responseType: "blob",
-      });
-      saveBlob(res.data, scope.range
-        ? `maintenance_orders_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.xlsx`
-        : "maintenance_orders_all.xlsx");
+      await requestAndSaveDownload(
+        "/maintenance/orders/export",
+        scope.params,
+        scope.range
+          ? `maintenance_orders_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.xlsx`
+          : "maintenance_orders_all.xlsx",
+        XLSX_CONTENT_TYPES,
+        sessionToken,
+      );
     } catch (error) {
       const { status, detail } = await readExportError(error);
       message.error(detail || (status === 403
@@ -781,25 +1594,29 @@ export default function ProjectCostPage() {
           ? "导出日期参数无效"
           : "导出失败，请稍后重试"));
     } finally {
+      endDownload("orders");
       setExporting(false);
+      releaseOperation("orders");
     }
   };
 
   const exportWorkbooks = async () => {
-    if (exportingWorkbooksRef.current) return;
-    exportingWorkbooksRef.current = true;
+    if (!acquireOperation("workbooks")) return;
+    const sessionToken = localStorage.getItem("token");
     setExportingWorkbooks(true);
     const hide = message.loading("正在生成批量工作簿，数据较多时可能需要 1–2 分钟，请勿重复点击…", 0);
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
-      const res = await api.get("/maintenance/export-workbooks", {
-        params: scope.params,
-        responseType: "blob",
-      });
-      saveBlob(res.data, scope.range
-        ? `maintenance_project_workbooks_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.zip`
-        : "maintenance_project_workbooks_all.zip");
+      await requestAndSaveDownload(
+        "/maintenance/export-workbooks",
+        scope.params,
+        scope.range
+          ? `maintenance_project_workbooks_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.zip`
+          : "maintenance_project_workbooks_all.zip",
+        ZIP_CONTENT_TYPES,
+        sessionToken,
+      );
     } catch (error) {
       const { status, detail } = await readExportError(error);
       message.error(detail || (status === 403
@@ -811,81 +1628,143 @@ export default function ProjectCostPage() {
             : "批量项目工作簿导出失败，请稍后重试"));
     } finally {
       hide();
-      exportingWorkbooksRef.current = false;
       setExportingWorkbooks(false);
+      releaseOperation("workbooks");
     }
   };
 
   const exportProjectsCsv = async () => {
-    if (exportingProjects) return;
+    if (!acquireOperation("projects-csv")) return;
+    const sessionToken = localStorage.getItem("token");
     setExportingProjects(true);
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
-      await download("/maintenance/export", "maintenance_projects.csv", {
-        ...scope.params,
-        lifecycle,
-      });
+      await requestAndSaveDownload(
+        "/maintenance/export",
+        {
+          ...scope.params,
+          q: downloadProjectQuery.trim() || undefined,
+          lifecycle: downloadProjectLifecycle,
+        },
+        "maintenance_projects.csv",
+        CSV_CONTENT_TYPES,
+        sessionToken,
+      );
     } catch (error) {
       const { detail } = await readExportError(error);
       message.error(detail || "项目 CSV 导出失败，请稍后重试或检查权限");
     } finally {
       setExportingProjects(false);
+      releaseOperation("projects-csv");
     }
   };
 
-  const exportLines = async () => {
-    if (!detailProject) return;
+  const exportContractProfitCsv = async () => {
+    if (!acquireOperation("contract-profit")) return;
+    const sessionToken = localStorage.getItem("token");
+    setExportingProfit(true);
+    beginDownload("contract-profit", "正在生成合同详细盈亏 CSV，请勿重复点击");
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
-      await download("/maintenance/lines/export", "项目备件明细.csv", {
+      await download(
+        "/maintenance/board/export",
+        "maintenance_contract_profit.csv",
+        CSV_CONTENT_TYPES,
+        {
+          ...scope.params,
+          lifecycle: "all",
+        },
+        sessionToken,
+      );
+    } catch (error) {
+      const { detail } = await readExportError(error);
+      message.error(detail || "合同详细盈亏 CSV 导出失败，请稍后重试或检查权限");
+    } finally {
+      endDownload("contract-profit");
+      setExportingProfit(false);
+      releaseOperation("contract-profit");
+    }
+  };
+
+  const exportLines = async (project = detailProject) => {
+    if (!project) {
+      message.warning("请先输入要导出的项目名称");
+      return;
+    }
+    if (!acquireOperation("project-lines")) return;
+    const sessionToken = localStorage.getItem("token");
+    setExportingLines(true);
+    beginDownload("project-lines", "正在生成单项目明细 CSV，请勿重复点击");
+    try {
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
+      if (!scope) return;
+      await download("/maintenance/lines/export", "项目备件明细.csv", CSV_CONTENT_TYPES, {
         ...scope.params,
-        project: detailProject,
+        project,
         month: linesMonth,
-      });
+      }, sessionToken);
     } catch (error) {
       const { detail } = await readExportError(error);
       message.error(detail || "明细导出失败，请稍后重试");
+    } finally {
+      endDownload("project-lines");
+      setExportingLines(false);
+      releaseOperation("project-lines");
     }
   };
 
   const exportSingleWorkbook = async (contract: string) => {
+    if (!acquireOperation("single-workbook")) return;
+    const sessionToken = localStorage.getItem("token");
+    setExportingSingleWorkbook(true);
+    beginDownload("single-workbook", "正在生成单合同工作簿 XLSX，请勿重复点击");
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
-      await download("/maintenance/export-workbook", `项目工作簿_${contract}.xlsx`, {
+      await download(
+        "/maintenance/export-workbook",
+        `项目工作簿_${contract}.xlsx`,
+        XLSX_CONTENT_TYPES,
+        {
         ...scope.params,
         contract,
-      });
+        },
+        sessionToken,
+      );
     } catch (error) {
       const { detail } = await readExportError(error);
       message.error(detail || "工作簿导出失败，请稍后重试或检查权限");
+    } finally {
+      endDownload("single-workbook");
+      setExportingSingleWorkbook(false);
+      releaseOperation("single-workbook");
     }
   };
 
   const downloadRoundtripTemplate = async (contract?: string) => {
-    if (downloadingTemplate) return;
+    if (!acquireOperation("roundtrip-template")) return;
+    const sessionToken = localStorage.getItem("token");
     setDownloadingTemplate(true);
     setRoundtripError(null);
     const hide = message.loading("正在生成固定回填模板，请勿重复点击…", 0);
     try {
-      const scope = await resolveExportScope(exportDatePreset);
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
       if (!scope) return;
-      const res = await api.get("/maintenance/roundtrip-template", {
-        params: {
-          ...scope.params,
-          ...(contract ? { contract } : {}),
-        },
-        responseType: "blob",
-      });
       const safeContract = contract?.replace(/[\\/:*?"<>|]/g, "_");
       const scopeLabel = scope.range
         ? `${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}`
         : "全部";
-      saveBlob(
-        res.data,
+      await requestAndSaveDownload(
+        "/maintenance/roundtrip-template",
+        {
+          ...scope.params,
+          ...(contract ? { contract } : {}),
+        },
         `维保项目回填模板_${safeContract ? `${safeContract}_` : ""}${scopeLabel}.xlsx`,
+        XLSX_CONTENT_TYPES,
+        sessionToken,
       );
     } catch (error) {
       const { detail } = await readExportError(error);
@@ -895,11 +1774,45 @@ export default function ProjectCostPage() {
     } finally {
       hide();
       setDownloadingTemplate(false);
+      releaseOperation("roundtrip-template");
+    }
+  };
+
+  const downloadRoundtripTemplateBundle = async () => {
+    if (!acquireOperation("roundtrip-bundle")) return;
+    const sessionToken = localStorage.getItem("token");
+    setDownloadingTemplateBundle(true);
+    setRoundtripError(null);
+    beginDownload(
+      "roundtrip-bundle",
+      "正在按合同生成可回填工作簿 ZIP，请勿关闭页面或重复点击",
+    );
+    try {
+      const scope = await resolveExportScope(exportDatePreset, sessionToken);
+      if (!scope) return;
+      await requestAndSaveDownload(
+        "/maintenance/roundtrip-templates",
+        scope.params,
+        scope.range
+          ? `维保项目批量回填模板_${scope.range[0].format("YYYY-MM-DD")}_${scope.range[1].format("YYYY-MM-DD")}.zip`
+          : "维保项目批量回填模板.zip",
+        ZIP_CONTENT_TYPES,
+        sessionToken,
+      );
+    } catch (error) {
+      const { detail } = await readExportError(error);
+      const text = detail || "批量可回填工作簿下载失败，请稍后重试";
+      setRoundtripError(text);
+      message.error(text);
+    } finally {
+      endDownload("roundtrip-bundle");
+      setDownloadingTemplateBundle(false);
+      releaseOperation("roundtrip-bundle");
     }
   };
 
   const importRoundtripWorkbook = async (file: File) => {
-    if (importingRoundtrip) return;
+    if (!acquireOperation("roundtrip-import")) return;
     setImportingRoundtrip(true);
     setRoundtripResult(null);
     setRoundtripError(null);
@@ -910,7 +1823,6 @@ export default function ProjectCostPage() {
       const summary = formatRoundtripImportSummary(data);
       setRoundtripResult(summary);
       message.success(summary);
-      await load();
     } catch (error) {
       const response = (
         typeof error === "object" && error !== null && "response" in error
@@ -924,6 +1836,7 @@ export default function ProjectCostPage() {
       message.error(detail);
     } finally {
       setImportingRoundtrip(false);
+      releaseOperation("roundtrip-import");
     }
   };
 
@@ -934,6 +1847,15 @@ export default function ProjectCostPage() {
     { title: "维保终止日期", dataIndex: "maint_end", width: 120,
       render: (v: string | null) => v || <span style={{ color: "var(--mb-warning)" }}>未填写</span> },
     { title: "出库行", dataIndex: "lines", width: 80, align: "right" },
+    { title: "维保订单数", dataIndex: "order_count", width: 110, align: "right" },
+    { title: "结构完整性", dataIndex: "structure_complete", width: 180,
+      render: (_: boolean, row) => (
+        row.structure_complete === true && (row.missing_detail_orders ?? 0) === 0
+          ? <Tag color="green">完整</Tag>
+          : <Tag color="orange">
+              不完整 · 无明细 {row.missing_detail_orders ?? "—"} 单
+            </Tag>
+      ) },
     { title: "数量", dataIndex: "qty", width: 80, align: "right" },
     ...(maintenanceBasis !== "ex" ? [
       { title: "实际参考(含税)", dataIndex: "actual_cost_inc", width: 130, align: "right" as const, render: money },
@@ -946,9 +1868,19 @@ export default function ProjectCostPage() {
     { title: "成本完整性", dataIndex: "cost_quality", width: 160,
       render: (rawQuality: string | null, row) => {
         // 成本字段确由 RBAC 隐藏时保持中性；不受限响应的 null/未知值仍 fail-closed。
-        if (rawQuality == null && projectCostRestricted) return "—";
         const quality = normalizeCostQuality(rawQuality);
-        if (quality === "incomplete") {
+        if ((row.missing_detail_orders ?? 0) > 0) {
+          return (
+            <Tag color="orange">
+              需补数据 · 无明细 {row.missing_detail_orders} 单
+              {row.missing_cost_lines == null
+                ? ""
+                : ` · 缺成本 ${row.missing_cost_lines} 行`}
+            </Tag>
+          );
+        }
+        if (quality == null && projectCostRestricted) return "—";
+        if (quality == null || quality === "incomplete") {
           return <Tag color="orange">需补数据 · {row.missing_cost_lines ?? "—"} 行</Tag>;
         }
         if (quality === "contains_estimate") {
@@ -1057,47 +1989,27 @@ export default function ProjectCostPage() {
   const monthOptions = detailProject
     ? (rows.find((r) => r.project === detailProject)?.months || 0)
     : 0;
+  const pagedBoard = board.slice(
+    (boardPage - 1) * BOARD_PAGE_SIZE,
+    boardPage * BOARD_PAGE_SIZE,
+  );
 
-  return (
-    <Space direction="vertical" size="large" style={{ width: "100%" }}>
-      <PageHeader
-        title="项目成本"
-        subtitle={`维保备件成本按实际采购参考、估算参考、成本缺失分层；合同毛利同时保留含税与未税事实，证据不完整时保持空值${startDate ? ` · 起算日 ${startDate}` : ""}`}
-      />
-      <Card>
-        <Space direction="vertical" size={12} style={{ width: "100%" }}>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>维保期限</div>
-            <div style={{ maxWidth: "100%", overflowX: "auto", paddingBottom: 2 }}>
-              <Segmented
-                aria-label="维保期限筛选"
-                value={lifecycle}
-                onChange={(value) => setLifecycle(value as LifecycleFilter)}
-                options={[
-                  { label: `进行中 ${lifecycleCounts.ongoing}`, value: "ongoing" },
-                  { label: `已结束 ${lifecycleCounts.ended}`, value: "ended" },
-                  { label: <span style={{ color: lifecycleCounts.missing ? "#d46b08" : undefined }}>
-                    期限缺失 {lifecycleCounts.missing}
-                  </span>, value: "missing" },
-                  { label: `全部 ${lifecycleCounts.ongoing + lifecycleCounts.ended + lifecycleCounts.missing}`,
-                    value: "all" },
-                ]}
-              />
-            </div>
-          </div>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>
-              项目维保展示口径
-            </div>
-            <Space wrap>
-              <Tag color="blue">{PROFIT_BASIS_LABEL[maintenanceBasis]}</Tag>
-              <span style={{ color: "var(--mb-text-3)", fontSize: 12.5 }}>
-                由管理员在系统设置中统一配置，普通员工不能临时切换。
-              </span>
-            </Space>
-          </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 24, width: "100%", minWidth: 0 }}>
-            <div style={{ width: "100%", minWidth: 0, maxWidth: "100%", overflowX: "auto", paddingBottom: 2 }}>
+  if (view === "downloads") {
+    return (
+      <Space direction="vertical" size="large" style={{ width: "100%" }}>
+        <PageHeader
+          title="下载中心"
+          subtitle="集中选择日期和业务对象后下载；大文件生成期间按钮保持锁定，失败时显示服务端的准确原因。"
+        />
+        <Card title="下载范围">
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <div style={{
+              width: "100%",
+              minWidth: 0,
+              maxWidth: "100%",
+              overflowX: "auto",
+              paddingBottom: 2,
+            }}>
               <Segmented
                 aria-label="维保订单导出日期"
                 value={exportDatePreset}
@@ -1105,21 +2017,26 @@ export default function ProjectCostPage() {
                   const preset = value as ExportDatePreset;
                   exportDatePresetRef.current = preset;
                   setExportDatePreset(preset);
-                  if (preset === "all") setExportRange(null);
-                  if (preset === "custom") setExportRange(null);
-                  const anchor = asOf ? dayjs(asOf) : null;
-                  if (anchor && preset !== "all" && preset !== "custom") {
-                    setExportRange(presetRange(preset, anchor));
+                  if (preset === "all" || preset === "custom") {
+                    exportScopeSeq.current += 1;
+                    exportScopeRequest.current?.controller.abort();
+                    exportScopeRequest.current = null;
+                    setExportScopeLoading(false);
+                    setExportScopeError(false);
+                    setExportRange(null);
+                    setExportAsOf("");
+                  } else {
+                    void requestRelativeExportScope(preset);
                   }
                 }}
                 options={[
                   { label: "全部", value: "all" },
-                  { label: "今天", value: "today", disabled: !asOf },
-                  { label: "近7天", value: "last7", disabled: !asOf },
-                  { label: "近14天", value: "last14", disabled: !asOf },
-                  { label: "近21天", value: "last21", disabled: !asOf },
-                  { label: "近30天", value: "last30", disabled: !asOf },
-                  { label: "本月", value: "month", disabled: !asOf },
+                  { label: "今天", value: "today" },
+                  { label: "近7天", value: "last7" },
+                  { label: "近14天", value: "last14" },
+                  { label: "近21天", value: "last21" },
+                  { label: "近30天", value: "last30" },
+                  { label: "本月", value: "month" },
                   { label: "自定义", value: "custom" },
                 ]}
               />
@@ -1127,157 +2044,533 @@ export default function ProjectCostPage() {
             <DatePicker.RangePicker
               aria-label="导出自定义起止日期"
               value={exportRange}
-              onChange={(v) => {
+              onChange={(value) => {
+                exportScopeSeq.current += 1;
+                exportScopeRequest.current?.controller.abort();
+                exportScopeRequest.current = null;
                 exportDatePresetRef.current = "custom";
                 setExportDatePreset("custom");
-                setExportRange(v as [Dayjs, Dayjs] | null);
+                setExportScopeLoading(false);
+                setExportScopeError(false);
+                setExportAsOf("");
+                setExportRange(value as [Dayjs, Dayjs] | null);
               }}
             />
+            <Alert
+              type={exportScopeError ? "error" : "info"}
+              showIcon
+              message={exportScopeError
+                ? "日期基准加载失败，尚未应用日期范围。"
+                : exportScopeLoading
+                ? "正在读取后端业务日并计算实际闭区间…"
+                : exportDatePreset !== "all"
+                  && exportDatePreset !== "custom"
+                  && exportRange
+                  ? `实际闭区间：${exportRange[0].format("YYYY-MM-DD")} 至 ${
+                    exportRange[1].format("YYYY-MM-DD")
+                  }（含首尾）`
+                  : exportDatePreset === "custom"
+                    ? "自定义日期按所选首尾日期闭区间导出。"
+                    : "相对日期按后端业务日计算；“全部”不附带日期范围。"}
+              description={exportAsOf
+                ? `后端业务日 ${exportAsOf}`
+                : undefined}
+              action={exportScopeError ? (
+                <Button
+                  size="small"
+                  danger
+                  loading={exportScopeLoading}
+                  onClick={() => void requestRelativeExportScope(exportDatePresetRef.current)}
+                >
+                  重试日期基准
+                </Button>
+              ) : undefined}
+            />
+            {Object.entries(activeDownloads).map(([key, label]) => (
+              <Alert
+                key={key}
+                type="info"
+                showIcon
+                role="status"
+                message={label}
+              />
+            ))}
+          </Space>
+        </Card>
+
+        <Card title="项目与合同下载">
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Card size="small" title="项目成本 CSV 筛选">
+              <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                <div style={{ color: "var(--mb-text-3)", fontSize: 12.5 }}>
+                  仅影响“导出项目成本 CSV”；日期仍使用上方统一下载范围。
+                </div>
+                <Row gutter={[12, 12]}>
+                  <Col xs={24} md={10}>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>
+                      项目搜索
+                    </div>
+                    <Input
+                      aria-label="项目成本 CSV 项目搜索"
+                      placeholder="按项目名称关键词筛选（可选）"
+                      allowClear
+                      maxLength={DOWNLOAD_PROJECT_QUERY_MAX_LENGTH}
+                      value={downloadProjectQuery}
+                      onChange={(event) => setDownloadProjectQuery(event.target.value)}
+                      style={{ width: "100%" }}
+                    />
+                  </Col>
+                  <Col xs={24} md={14}>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>
+                      期限状态
+                    </div>
+                    <div style={{
+                      width: "100%",
+                      minWidth: 0,
+                      maxWidth: "100%",
+                      overflowX: "auto",
+                      paddingBottom: 2,
+                    }}>
+                      <Segmented
+                        aria-label="项目成本 CSV 期限状态筛选"
+                        value={downloadProjectLifecycle}
+                        onChange={(value) => {
+                          setDownloadProjectLifecycle(value as LifecycleFilter);
+                        }}
+                        options={[
+                          { label: "全部期限", value: "all" },
+                          { label: "进行中", value: "ongoing" },
+                          { label: "已结束", value: "ended" },
+                          { label: "期限缺失", value: "missing" },
+                        ]}
+                      />
+                    </div>
+                  </Col>
+                </Row>
+                <Button
+                  loading={exportingProjects}
+                  disabled={exportingProjects}
+                  onClick={exportProjectsCsv}
+                >
+                  导出项目成本 CSV
+                </Button>
+              </Space>
+            </Card>
+            <Space wrap>
+              {!scopedSales && (
+                <Button
+                  loading={exportingProfit}
+                  disabled={exportingProfit}
+                  onClick={exportContractProfitCsv}
+                >
+                  导出合同详细盈亏 CSV
+                </Button>
+              )}
+              {!scopedSales && (
+                <Button loading={exporting} disabled={exporting} onClick={exportOrders}>
+                  导出订单汇总 Excel
+                </Button>
+              )}
+              {canExportProjectWorkbooks && (
+                <Button
+                  type="primary"
+                  loading={exportingWorkbooks}
+                  disabled={exportingWorkbooks}
+                  onClick={exportWorkbooks}
+                >
+                  批量导出项目工作簿 ZIP
+                </Button>
+              )}
+            </Space>
+            <Alert
+              type="info"
+              showIcon
+              message={scopedSales
+                ? "项目成本 CSV 与单项目明细仅包含当前销售本人范围；合同级下载需要完整合同口径，受限销售账号不提供。"
+                : "项目成本 CSV 按项目汇总备件成本；合同详细盈亏 CSV 按合同汇总收入、成本、费用、利润与证据状态。"}
+            />
+            <Space wrap style={{ width: "100%" }}>
+              <Input
+                aria-label="单项目名称"
+                placeholder="输入完整项目名称"
+                maxLength={DOWNLOAD_PROJECT_NAME_MAX_LENGTH}
+                value={downloadProject}
+                onChange={(event) => setDownloadProject(event.target.value)}
+                style={{ width: "min(320px, 100%)" }}
+              />
+              <Button
+                loading={exportingLines}
+                disabled={exportingLines}
+                onClick={() => void exportLines(downloadProject.trim())}
+              >
+                导出单项目明细 CSV
+              </Button>
+            </Space>
+            {canExportProjectWorkbooks && (
+              <Space wrap style={{ width: "100%" }}>
+                <Input
+                  aria-label="单合同编号"
+                  placeholder="输入完整合同编号"
+                  maxLength={DOWNLOAD_CONTRACT_MAX_LENGTH}
+                  value={downloadContract}
+                  onChange={(event) => setDownloadContract(event.target.value)}
+                  style={{ width: "min(320px, 100%)" }}
+                />
+                <Button
+                  loading={exportingSingleWorkbook}
+                  disabled={exportingSingleWorkbook}
+                  onClick={() => downloadContract.trim()
+                    ? void exportSingleWorkbook(downloadContract.trim())
+                    : message.warning("请先输入要导出的合同编号")}
+                >
+                  导出单合同工作簿 XLSX
+                </Button>
+                {canExportRoundtripWorkbooks && (
+                  <Button
+                    loading={downloadingTemplate}
+                    disabled={downloadingTemplate}
+                    onClick={() => void downloadRoundtripTemplate(
+                      downloadContract.trim() || undefined,
+                    )}
+                  >
+                    下载固定回填模板
+                  </Button>
+                )}
+              </Space>
+            )}
+          </Space>
+        </Card>
+
+        {canExportRoundtripWorkbooks && (
+          <Card title="固定回填工作簿">
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              <Alert
+                type="info"
+                showIcon
+                message="全量固定模板返回 413 时，请输入单合同、缩小日期范围，或改用按合同拆分的批量可回填 ZIP；每本仍需单独导入。"
+              />
+              <Button
+                type="primary"
+                loading={downloadingTemplateBundle}
+                disabled={downloadingTemplateBundle}
+                onClick={() => void downloadRoundtripTemplateBundle()}
+              >
+                批量下载可回填工作簿 ZIP
+              </Button>
+              {canApplyRoundtripWorkbook && (
+                <Upload
+                  accept=".xlsx"
+                  maxCount={1}
+                  showUploadList={false}
+                  disabled={importingRoundtrip}
+                  beforeUpload={(file) => {
+                    void importRoundtripWorkbook(file);
+                    return false;
+                  }}
+                >
+                  <Button loading={importingRoundtrip} disabled={importingRoundtrip}>
+                    导入更新工作簿
+                  </Button>
+                </Upload>
+              )}
+              {roundtripResult && <Alert type="success" showIcon message={roundtripResult} />}
+              {roundtripError && <Alert type="error" showIcon message={roundtripError} />}
+            </Space>
+          </Card>
+        )}
+      </Space>
+    );
+  }
+
+  if (view === "reminders") {
+    return (
+      <Space direction="vertical" size="large" style={{ width: "100%" }}>
+        <PageHeader
+          title="项目提醒"
+          subtitle="集中查看期限、成本完整性、费用水位和预算参考；提醒不阻挡项目数据阅读。"
+        />
+        <Card title="提醒筛选">
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>维保期限</div>
+              <div style={{
+                width: "100%",
+                minWidth: 0,
+                maxWidth: "100%",
+                overflowX: "auto",
+                paddingBottom: 2,
+              }}>
+                <Segmented
+                  aria-label="维保期限筛选"
+                  value={lifecycle}
+                  onChange={(value) => setLifecycle(value as LifecycleFilter)}
+                  options={[
+                    { label: `进行中 ${boardLifecycleCounts.ongoing}`, value: "ongoing" },
+                    { label: `已结束 ${boardLifecycleCounts.ended}`, value: "ended" },
+                    { label: `期限缺失 ${boardLifecycleCounts.missing}`, value: "missing" },
+                    {
+                      label: `全部 ${
+                        boardLifecycleCounts.ongoing
+                        + boardLifecycleCounts.ended
+                        + boardLifecycleCounts.missing
+                      }`,
+                      value: "all",
+                    },
+                  ]}
+                />
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>提醒类型</div>
+              <div style={{
+                width: "100%",
+                minWidth: 0,
+                maxWidth: "100%",
+                overflowX: "auto",
+                paddingBottom: 2,
+              }}>
+                <Segmented
+                  aria-label="项目提醒类型筛选"
+                  value={reminderStatus}
+                  onChange={(value) => {
+                    setReminderFilterRejected(false);
+                    setReminderStatus(value as ReminderStatusFilter);
+                  }}
+                  options={[
+                    { label: "全部提醒", value: "all" },
+                    {
+                      label: "待补成本",
+                      value: "incomplete_cost",
+                      disabled: reminderFilterRestricted || scopedSales,
+                    },
+                    {
+                      label: "待补费用",
+                      value: "expense_data_unavailable",
+                      disabled: reminderFilterRestricted || scopedSales,
+                    },
+                    {
+                      label: "红色预警",
+                      value: "red",
+                      disabled: reminderFilterRestricted || scopedSales,
+                    },
+                    {
+                      label: "黄色关注",
+                      value: "yellow",
+                      disabled: reminderFilterRestricted || scopedSales,
+                    },
+                    {
+                      label: "绿色参考",
+                      value: "green",
+                      disabled: reminderFilterRestricted || scopedSales,
+                    },
+                    {
+                      label: "无预算",
+                      value: "no_budget",
+                      disabled: reminderFilterRestricted || scopedSales,
+                    },
+                  ]}
+                />
+              </div>
+              {(reminderFilterRestricted || scopedSales) && (
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginTop: 8 }}
+                  message={scopedSales
+                    ? "受限销售账号不提供合同级经营提醒"
+                    : "当前账号无权判断经营提醒类型"}
+                  description={scopedSales
+                    ? "项目事实仍按当前销售本人范围提供；合同提醒需要完整合同口径。"
+                    : "已重置为全部提醒；期限与获准事实仍可查看。"}
+                />
+              )}
+              {reminderFilterRejected && !reminderFilterRestricted && !scopedSales && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  style={{ marginTop: 8 }}
+                  message="提醒类型筛选未被后端确认应用"
+                  description="已回退为全部提醒；只有后端明确返回 applied=true 才保留具体经营筛选。"
+                />
+              )}
+            </div>
             <Input.Search
               placeholder="搜索项目名"
               allowClear
-              style={{ width: "min(260px, 100%)" }}
+              style={{ width: "min(320px, 100%)" }}
               onChange={(event) => {
                 if (!event.target.value) setQ("");
               }}
-              onSearch={(v) => setQ(v.trim())}
+              onSearch={(value) => setQ(value.trim())}
             />
-            {isAdmin && (
-              <Button type="primary" loading={recomputing} onClick={recompute}>重算成本</Button>
-            )}
-            {canExportProjectWorkbooks && (
-              <Button
-                type="primary"
-                loading={exportingWorkbooks}
-                disabled={exportingWorkbooks}
-                onClick={exportWorkbooks}
-              >
-                批量导出项目工作簿 ZIP
-              </Button>
-            )}
-            <Button loading={exporting} disabled={exporting} onClick={exportOrders}>
-              导出订单汇总 Excel
-            </Button>
-            <Button
-              loading={exportingProjects}
-              onClick={exportProjectsCsv}
-              disabled={!rows.length || exportingProjects}
-            >导出当前项目统计 CSV</Button>
-            {canExportProjectWorkbooks && (
-              <>
-                <Button
-                  loading={downloadingTemplate}
-                  disabled={downloadingTemplate}
-                  onClick={() => void downloadRoundtripTemplate()}
-                >
-                  下载固定回填模板
-                </Button>
-                {canApplyRoundtripWorkbook && (
-                  <Upload
-                    accept=".xlsx"
-                    maxCount={1}
-                    showUploadList={false}
-                    disabled={importingRoundtrip}
-                    beforeUpload={(file) => {
-                      void importRoundtripWorkbook(file);
-                      return false;
-                    }}
-                  >
-                    <Button loading={importingRoundtrip} disabled={importingRoundtrip}>
-                      导入更新工作簿
-                    </Button>
-                  </Upload>
-                )}
-              </>
-            )}
-            <div
-              aria-label="批量导出说明"
-              style={{ width: "100%", color: "var(--mb-text-2)", fontSize: 12.5, lineHeight: 1.6 }}
-            >
-              <div>日期只控制导出内容，不改变页面项目、合同毛利或明细列表。</div>
-              <div>日期范围同时限制每本工作簿内的订单、明细和报销；选择“全部”才导出完整合同数据。</div>
-              <div>批量导出不受项目搜索或维保期限筛选影响，以所选日期范围为准。</div>
-              <div>固定回填模板可由工作人员填写订单或报销更新后直接导回；系统自动校验并返回处理摘要，无需审批。</div>
-              <div>全局模板数据过多时，请在下方合同卡点击“回填模板”，按单个合同分批处理。</div>
-            </div>
-          </div>
-          {roundtripResult && (
-            <Alert type="success" showIcon message={roundtripResult} />
-          )}
-          {roundtripError && (
-            <Alert type="error" showIcon message={roundtripError} />
-          )}
-          <Alert
-            type={lifecycleCounts.missing ? "warning" : "info"}
-            showIcon
-            message={`日期范围仅用于导出；维保期限状态按 ${asOf || "后端请求当天"} 判断。`}
-            description={`页面始终展示当前完整项目视图；终止日当天仍算进行中，未填写终止日期的项目归入“期限缺失”。当前有 ${lifecycleCounts.missing} 个期限缺失项目。`}
-          />
-          {loadError && (
+          </Space>
+        </Card>
+        <Card title="项目提醒" loading={boardLoading}>
+          {scopedSales ? (
+            <Alert
+              type="info"
+              showIcon
+              message="受限销售账号不提供合同级经营提醒"
+              description="请在项目数据中查看本人范围的项目事实。"
+            />
+          ) : boardLoadError ? (
             <Alert
               type="error"
               showIcon
-              message="项目成本加载失败，旧结果已清空。"
-              description="请检查网络或账号权限后重试；错误期间不会继续展示上一筛选的数据。"
-              action={<Button size="small" danger onClick={load}>重试</Button>}
+              message="项目提醒加载失败，旧结果已清空。"
+              action={<Button size="small" danger onClick={() => void loadBoard()}>重试</Button>}
             />
+          ) : board.length === 0 ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前筛选暂无提醒" />
+          ) : (
+            <Space direction="vertical" size={10} style={{ width: "100%" }}>
+              {pagedBoard.map((item) => {
+                const knownCostQuality = normalizeCostQuality(item.cost_quality);
+                const status = boardDecisionRestricted
+                  ? knownCostQuality === "incomplete" ? "incomplete_cost" : null
+                  : effectiveBoardStatus(item) ?? "incomplete_cost";
+                const meta = status == null ? null : STATUS_META[status];
+                return (
+                  <Alert
+                    key={item.contract || "(none)"}
+                    type={status === "red" || status === "incomplete_cost" ? "warning" : "info"}
+                    showIcon
+                    message={
+                      <Space wrap>
+                        <b>{item.contract || "（未关联合同）"}</b>
+                        <Tag color={status === "red" ? "red" : status === "yellow" ? "gold" : "default"}>
+                          {meta?.label || "经营判断受限"}
+                        </Tag>
+                        <LifecycleTag status={item.lifecycle_status} />
+                      </Space>
+                    }
+                    description={status == null
+                      ? "当前账号仅展示获准事实，不推断成本、费用或预算状态"
+                      : `成本缺失 ${item.missing_cost_lines ?? "—"} 行 · 费用${
+                        item.expense_data_available === true ? "已就绪" : "未就绪"
+                      }`}
+                  />
+                );
+              })}
+              {board.length > BOARD_PAGE_SIZE && (
+                <Pagination
+                  aria-label="项目提醒分页"
+                  current={boardPage}
+                  pageSize={BOARD_PAGE_SIZE}
+                  total={board.length}
+                  showSizeChanger={false}
+                  onChange={setBoardPage}
+                  style={{ marginTop: 8, textAlign: "right" }}
+                />
+              )}
+            </Space>
           )}
-        </Space>
-      </Card>
+        </Card>
+      </Space>
+    );
+  }
 
+  return (
+    <Space direction="vertical" size="large" style={{ width: "100%" }}>
+      <PageHeader
+        title="项目数据"
+        subtitle={`维保备件成本按实际采购参考、估算参考、成本缺失分层；合同毛利同时保留含税与未税事实，证据不完整时保持空值${startDate ? ` · 起算日 ${startDate}` : ""}`}
+      />
       <Card
-        title={<Space>合同预算与双口径毛利
+        title={<Space>详细盈亏
           <Tooltip title="按合同聚合收入、备件成本与费用。含税、未税独立计算；任一口径证据不完整时，该口径毛利保持为空并显示原因。">
             <InfoCircleOutlined style={{ color: "var(--mb-text-3)" }} />
-          </Tooltip></Space>}
+          </Tooltip>
+          <Tag>{`详细盈亏截止 ${boardAsOf || "—"}`}</Tag>
+        </Space>}
+        loading={boardLoading}
       >
-        {!boardDecisionRestricted && (
-          <div style={{ maxWidth: "100%", overflowX: "auto", marginBottom: 12, paddingBottom: 2 }}>
-            <Segmented
-              aria-label="预算消耗参考状态筛选"
-              value={boardFilter}
-              onChange={(v) => setBoardFilter(v as string)}
-              options={[
-                { label: `全部 ${board.length}`, value: "all" },
-                { label: `待补成本 ${board.filter((b) =>
-                  effectiveBoardStatus(b) === "incomplete_cost").length}`,
-                  value: "incomplete_cost" },
-                { label: `待补费用数据 ${board.filter((b) =>
-                  effectiveBoardStatus(b) === "expense_data_unavailable").length}`,
-                  value: "expense_data_unavailable" },
-                { label: `🔴 ${board.filter((b) =>
-                  effectiveBoardStatus(b) === "red").length}`, value: "red" },
-                { label: `🟡 ${board.filter((b) =>
-                  effectiveBoardStatus(b) === "yellow").length}`, value: "yellow" },
-                { label: `🟢 ${board.filter((b) =>
-                  effectiveBoardStatus(b) === "green").length}`, value: "green" },
-                { label: `无预算 ${board.filter((b) =>
-                  effectiveBoardStatus(b) === "no_budget").length}`,
-                  value: "no_budget" },
-              ]}
-            />
+        <Space direction="vertical" size={12} style={{ width: "100%", marginBottom: 12 }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>维保期限</div>
+            <div style={{
+              width: "100%",
+              minWidth: 0,
+              maxWidth: "100%",
+              overflowX: "auto",
+              paddingBottom: 2,
+            }}>
+              <Segmented
+                aria-label="维保期限筛选"
+                value={lifecycle}
+                onChange={(value) => setLifecycle(value as LifecycleFilter)}
+                options={[
+                  { label: `进行中 ${boardLifecycleCounts.ongoing}`, value: "ongoing" },
+                  { label: `已结束 ${boardLifecycleCounts.ended}`, value: "ended" },
+                  { label: <span style={{
+                    color: boardLifecycleCounts.missing ? "#d46b08" : undefined,
+                  }}>
+                    期限缺失 {boardLifecycleCounts.missing}
+                  </span>, value: "missing" },
+                  { label: `全部 ${
+                    boardLifecycleCounts.ongoing
+                    + boardLifecycleCounts.ended
+                    + boardLifecycleCounts.missing
+                  }`,
+                    value: "all" },
+                ]}
+              />
+            </div>
           </div>
-        )}
+          <Input.Search
+            placeholder="搜索项目名"
+            allowClear
+            style={{ width: "min(260px, 100%)" }}
+            onChange={(event) => {
+              if (!event.target.value) setQ("");
+            }}
+            onSearch={(value) => setQ(value.trim())}
+          />
+        </Space>
+        <Space wrap style={{ marginBottom: 12 }}>
+          <Tag color="blue">{PROFIT_BASIS_LABEL[maintenanceBasis]}</Tag>
+          <span style={{ color: "var(--mb-text-3)", fontSize: 12.5 }}>
+            由管理员在系统设置中统一配置，普通员工不能临时切换。
+          </span>
+        </Space>
         {boardDecisionRestricted && (
           <Alert
             type="info"
             showIcon
             style={{ marginBottom: 12 }}
-            message="当前账号不展示预算消耗决策分类与状态筛选"
-            description="合同按最近出库日期排列；实际、估算、缺失等成本事实仍按账号的数据权限显示。"
+            message="当前账号不展示合同金额、毛利等受限字段"
+            description="实际、估算、缺失等成本事实仍按账号的数据权限显示。"
           />
         )}
-        {board.length === 0 ? (
+        {scopedSales ? (
+          <Alert
+            type="info"
+            showIcon
+            message="受限销售账号不提供合同级详细盈亏"
+            description="下方项目事实仍严格按当前销售本人范围加载。"
+          />
+        ) : boardLoadError ? (
+          <Alert
+            type="error"
+            showIcon
+            message="详细盈亏加载失败"
+            description="项目成本事实仍可独立查看；可只重试详细盈亏。"
+            action={(
+              <Button size="small" danger onClick={() => void loadBoard()}>
+                重试详细盈亏
+              </Button>
+            )}
+          />
+        ) : board.length === 0 ? (
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={
             q || lifecycle !== "ongoing"
               ? "当前筛选暂无合同，请调整项目或期限状态"
               : "暂无数据（导入维保出库后自动生成）"
           } />
         ) : (
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            {(boardDecisionRestricted || boardFilter === "all"
-              ? board : board.filter((b) =>
-                effectiveBoardStatus(b) === boardFilter)).map((b) => {
+          <>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            {pagedBoard.map((b) => {
               // 决策字段被 RBAC 隐藏时保持中性；不受限响应则对缺失/null/未知值
               // 一律 fail-closed，禁止回退旧 status 伪造绿灯。
               const normalizedQuality = normalizeCostQuality(b.cost_quality);
@@ -1292,28 +2585,19 @@ export default function ProjectCostPage() {
               const costIncomplete = !costFactsMasked
                 && normalizedQuality === "incomplete";
               const decisionIncomplete = !boardDecisionRestricted && (
-                b.cost_quality == null || normalizedDecision === "incomplete_cost"
+                normalizedQuality == null
+                || normalizedDecision == null
+                || normalizedDecision === "incomplete_cost"
               );
               const incomplete = costIncomplete || decisionIncomplete;
               const decisionStatus = boardDecisionRestricted
                 ? undefined : incomplete ? "incomplete_cost" : normalizedDecision;
               const expenseUnavailable = !boardDecisionRestricted
                 && decisionStatus === "expense_data_unavailable";
-              const meta = decisionStatus ? STATUS_META[decisionStatus] : NEUTRAL_META;
-              const hasBudgetDecision = decisionStatus === "red"
-                || decisionStatus === "yellow"
-                || decisionStatus === "green";
-              const spentPct = !boardDecisionRestricted && !incomplete && hasBudgetDecision
+              const spentPct = !boardDecisionRestricted && !incomplete && !expenseUnavailable
                 && b.budget != null && b.budget > 0 && b.spent != null
                 && b.remaining != null && b.remaining_pct != null
                 ? Math.round((b.spent / b.budget) * 100) : null;
-              let timePct: number | null = null;
-              if (!incomplete && !expenseUnavailable && b.maint_start && b.maint_end) {
-                const s0 = new Date(b.maint_start).getTime();
-                const e0 = new Date(b.maint_end).getTime();
-                if (e0 > s0) timePct = Math.min(Math.max(
-                  Math.round(((Date.now() - s0) / (e0 - s0)) * 100), 0), 100);
-              }
               return (
                 <div
                   key={b.contract ?? "(none)"}
@@ -1321,37 +2605,14 @@ export default function ProjectCostPage() {
                   style={{
                   width: 370, maxWidth: "100%", boxSizing: "border-box",
                   borderRadius: 8, padding: "12px 14px",
-                  border: "1px solid " + meta.color + "44",
-                  borderLeft: "4px solid " + meta.color, background: meta.bg,
+                  border: "1px solid var(--mb-border)",
+                  background: "var(--mb-surface)",
                   }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <b style={{ fontFamily: "monospace", fontSize: 13 }}>{b.contract || "（未关联合同）"}</b>
                     <Space size={6}>
-                      {decisionStatus && (
-                        <Tag color={decisionStatus === "red" ? "red" : decisionStatus === "yellow" ? "gold"
-                          : decisionStatus === "green" ? "green"
-                            : decisionStatus === "incomplete_cost" ? "orange" : "default"}>
-                          {meta.label}
-                        </Tag>
-                      )}
                       <LifecycleTag status={b.lifecycle_status} />
-                      {b.contract && canExportProjectWorkbooks && (
-                        <>
-                          <a
-                            style={{ fontSize: 12 }}
-                            onClick={() => void exportSingleWorkbook(b.contract!)}
-                          >
-                            单本工作簿
-                          </a>
-                          <a
-                            style={{ fontSize: 12 }}
-                            onClick={() => void downloadRoundtripTemplate(b.contract!)}
-                          >
-                            回填模板
-                          </a>
-                        </>
-                      )}
                     </Space>
                   </div>
                   {!boardDecisionRestricted && (
@@ -1384,25 +2645,24 @@ export default function ProjectCostPage() {
                   )}
                   {incomplete ? (
                     <Alert
-                      type="warning"
-                      showIcon
+                      type="info"
                       style={{ marginTop: 8 }}
-                      message="成本不完整，需补数据"
-                      description="当前仅展示已知成本事实，不计算预算余额或红黄绿参考。"
+                      message="成本证据不完整"
+                      description="当前仅展示已知成本事实，不计算预算余额。"
                     />
                   ) : expenseUnavailable ? (
                     <Alert
-                      type="warning"
-                      showIcon
+                      type="info"
                       style={{ marginTop: 8 }}
-                      message="费用数据未就绪"
-                      description="当前只展示已知备件成本；无报销记录不等于费用为 0，不计算完整支出、预算余额或红黄绿参考。"
+                      message="费用证据未就绪"
+                      description="当前只展示已知备件成本；无报销记录不等于费用为 0，不计算完整支出或预算余额。"
                     />
                   ) : !boardDecisionRestricted && (
                     <div style={{ marginTop: 8, fontSize: 12.5 }}>
-                      合同额参考 {money(b.budget)} · 已知支出兼容参考（混合原值） {money(b.spent)}
+                      合同额参考 {b.budget != null && b.budget > 0 ? money(b.budget) : "—"}
+                      {" · "}已知支出兼容参考（混合原值） {money(b.spent)}
                       {" · "}剩余预算{" "}
-                      <span style={{ color: meta.color, fontWeight: 600 }}>
+                      <span style={{ fontWeight: 600 }}>
                         {money(b.remaining)}{b.remaining_pct != null ? `（${b.remaining_pct}%）` : ""}
                       </span>
                     </div>
@@ -1410,11 +2670,9 @@ export default function ProjectCostPage() {
                   {spentPct != null && (
                     <div style={{ marginTop: 4 }}>
                       <Progress percent={Math.min(spentPct, 100)} size="small"
-                                strokeColor={meta.color} showInfo={false} />
+                                strokeColor="var(--mb-accent)" showInfo={false} />
                       <div style={{ fontSize: 11.5, color: "var(--mb-text-3)" }}>
-                        预算消耗参考 {spentPct}%{spentPct > 100 ? "（超过合同额参考）" : ""}
-                        {timePct != null ? ` / 时间进度 ${timePct}%` : ""}
-                        {timePct != null && spentPct > timePct + 15 ? " · 支出进度快于时间 ⚠" : ""}
+                        已知支出占合同额参考 {spentPct}%
                       </div>
                     </div>
                   )}
@@ -1453,7 +2711,19 @@ export default function ProjectCostPage() {
                 </div>
               );
             })}
-          </div>
+            </div>
+            {board.length > BOARD_PAGE_SIZE && (
+              <Pagination
+                aria-label="详细盈亏合同分页"
+                current={boardPage}
+                pageSize={BOARD_PAGE_SIZE}
+                total={board.length}
+                showSizeChanger={false}
+                onChange={setBoardPage}
+                style={{ marginTop: 16, textAlign: "right" }}
+              />
+            )}
+          </>
         )}
       </Card>
 
@@ -1486,7 +2756,38 @@ export default function ProjectCostPage() {
         /></Card></Col>
       </Row>
 
-      <Card title="项目成本事实分层">
+      <Card
+        title="项目成本事实分层"
+        extra={(
+          <Space wrap>
+            <Tag>{`项目事实截止 ${projectAsOf || "—"}`}</Tag>
+            {isAdmin && (
+              <Button type="primary" loading={recomputing} onClick={recompute}>
+                重算成本
+              </Button>
+            )}
+          </Space>
+        )}
+      >
+        <div style={{ color: "var(--mb-text-3)", fontSize: 12.5, marginBottom: 10 }}>
+          项目事实期限：进行中 {projectLifecycleCounts.ongoing}
+          {" · "}已结束 {projectLifecycleCounts.ended}
+          {" · "}缺失 {projectLifecycleCounts.missing}
+        </div>
+        {projectsLoadError && (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="项目成本事实加载失败"
+            description="详细盈亏仍可独立查看；可只重试项目事实。"
+            action={(
+              <Button size="small" danger onClick={() => void loadProjects()}>
+                重试项目事实
+              </Button>
+            )}
+          />
+        )}
         <Alert
           type="info" showIcon style={{ marginBottom: 12 }}
           message="含税与未税收入、成本、毛利独立展示；含估算会明确标识，成本、收入、税率或费用证据不完整时对应毛利保持为空，不以 0 补齐。"
@@ -1495,10 +2796,10 @@ export default function ProjectCostPage() {
           storageKey="maint-projects"
           rowKey="project"
           size="small"
-          loading={loading}
+          loading={projectsLoading}
           columns={projectCols}
           dataSource={rows}
-          scroll={{ x: maintenanceBasis === "both" ? 1960 : 1640 }}
+          scroll={{ x: maintenanceBasis === "both" ? 2210 : 1890 }}
           pagination={{ pageSize: 20, showSizeChanger: true }}
           locale={{ emptyText: (q || lifecycle !== "ongoing")
             ? "当前筛选无结果，请调整搜索或期限状态"
@@ -1523,7 +2824,6 @@ export default function ProjectCostPage() {
                 }}
               />
             )}
-            <Button size="small" onClick={exportLines} disabled={!linesTotal}>导出明细 CSV</Button>
           </Space>
         }
       >

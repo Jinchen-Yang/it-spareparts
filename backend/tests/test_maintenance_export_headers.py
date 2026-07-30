@@ -17,6 +17,7 @@ from app.main import app
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.system import SysImportBatch, SysUser
 from app.services import maintenance_cost
+from tests.test_maintenance_margin_integration import _load_complete_contract
 from tests import factories as f
 
 
@@ -112,9 +113,81 @@ def _profit_blind_maintenance_client(db) -> TestClient:
     return client
 
 
-def test_chinese_project_lines_csv_uses_ascii_header_and_utf8_filename(db):
+def _seed_maintenance_export_object(
+    db,
+    *,
+    project: str,
+    contract: str = "XSDD-EXPORT",
+    suffix: str = "object",
+) -> None:
+    batch = SysImportBatch(
+        filename=f"maintenance-export-{suffix}.xlsx",
+        file_type="maintenance",
+        file_hash=f"maintenance-export-{suffix}",
+    )
+    db.add(batch)
+    db.flush()
+    loader.load(
+        db,
+        f.maintenance_result(
+            {
+                f"M-{suffix}": f.maintenance_head(
+                    f"M-{suffix}",
+                    order_no=f"WBDD-{suffix}",
+                    project=project,
+                    sales_order=contract,
+                    on=date(2026, 7, 15),
+                ),
+            },
+            [f.maintenance_line(f"M-{suffix}", f"ML-{suffix}", f"PN-{suffix}")],
+        ),
+        batch.id,
+        date(2026, 7, 16),
+    )
+    db.commit()
+
+
+def test_contract_profit_csv_is_distinct_from_existing_project_cost_csv(db):
+    _load_complete_contract(db)
     client = _admin_client(db)
+
+    profit = client.get(
+        "/api/maintenance/board/export",
+        params={"lifecycle": "all"},
+    )
+    project_cost = client.get(
+        "/api/maintenance/export",
+        params={"lifecycle": "all"},
+    )
+
+    assert profit.status_code == 200, profit.text
+    assert project_cost.status_code == 200, project_cost.text
+    assert "maintenance_contract_profit.csv" in profit.headers["content-disposition"]
+    profit_rows = list(
+        csv.DictReader(io.StringIO(profit.content.decode("utf-8-sig"))),
+    )
+    project_rows = list(
+        csv.DictReader(io.StringIO(project_cost.content.decode("utf-8-sig"))),
+    )
+    assert len(profit_rows) == 1
+    assert profit_rows[0]["合同"] == "XS-MARGIN"
+    assert profit_rows[0]["关联项目"] == "双口径毛利项目"
+    assert profit_rows[0]["revenue_inc"] == "1130.0"
+    assert profit_rows[0]["revenue_ex"] == "1000.0"
+    assert profit_rows[0]["parts_gross_profit_inc"] == "904.0"
+    assert profit_rows[0]["parts_gross_profit_ex"] == "800.0"
+    assert profit_rows[0]["成本证据状态"] == "actual_only"
+    assert profit_rows[0]["收入证据状态-含税"] == "available"
+    assert profit_rows[0]["费用证据状态"] == "expense_data_unavailable"
+    assert "项目" in project_rows[0]
+    assert "合同" not in project_rows[0]
+    assert "revenue_inc" not in project_rows[0]
+
+
+def test_chinese_project_lines_csv_uses_ascii_header_and_utf8_filename(db):
     project = "华北核心网维保项目"
+    _seed_maintenance_export_object(db, project=project, suffix="chinese-project")
+    client = _admin_client(db)
 
     response = client.get("/api/maintenance/lines/export", params={"project": project})
 
@@ -245,6 +318,9 @@ def test_project_summary_csv_sanitizes_formula_after_controls_and_whitespace(db,
                 "project": "\x01  =PROJECT()",
                 "lifecycle_status": "ongoing",
                 "maint_end": "2027-01-01",
+                "order_count": 1,
+                "missing_detail_orders": 0,
+                "structure_complete": True,
                 "lines": 1,
                 "qty": 1,
                 "actual_cost_inc": 1,
@@ -267,6 +343,7 @@ def test_project_summary_csv_sanitizes_formula_after_controls_and_whitespace(db,
                 "months": 1,
                 "sales_orders": ["\t@CONTRACT()"],
                 "contract_amount": 10,
+                "contract_incomplete": False,
                 "contract_shared": False,
             }],
         }
@@ -288,6 +365,11 @@ def test_project_lines_csv_rejects_over_one_million_before_row_materialization(
 ):
     monkeypatch.setattr(
         maintenance_cost,
+        "project_exists",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        maintenance_cost,
         "project_line_count",
         lambda *_args, **_kwargs: 1_000_001,
     )
@@ -306,6 +388,11 @@ def test_project_lines_csv_rejects_over_one_million_before_row_materialization(
 
 
 def test_project_lines_csv_rejects_escaped_cell_over_excel_limit(db, monkeypatch):
+    monkeypatch.setattr(
+        maintenance_cost,
+        "project_exists",
+        lambda *_args, **_kwargs: True,
+    )
     monkeypatch.setattr(
         maintenance_cost,
         "project_line_count",
@@ -368,11 +455,16 @@ def test_project_lines_csv_rejects_total_dynamic_text_budget_before_response(
     db,
     monkeypatch,
 ):
+    monkeypatch.setattr(
+        maintenance_cost,
+        "project_exists",
+        lambda *_args, **_kwargs: True,
+    )
     monkeypatch.setattr(maintenance_api, "_MAX_CSV_DYNAMIC_TEXT_BYTES", 10)
     monkeypatch.setattr(
         maintenance_cost,
         "project_line_count",
-        lambda *_args, **_kwargs: 0,
+        lambda *_args, **_kwargs: 1,
     )
     response = _admin_client(db).get(
         "/api/maintenance/lines/export",
@@ -384,11 +476,16 @@ def test_project_lines_csv_rejects_total_dynamic_text_budget_before_response(
 
 
 def test_project_lines_csv_rejects_total_encoded_output_budget(db, monkeypatch):
+    monkeypatch.setattr(
+        maintenance_cost,
+        "project_exists",
+        lambda *_args, **_kwargs: True,
+    )
     monkeypatch.setattr(maintenance_api, "_MAX_CSV_OUTPUT_BYTES", 10)
     monkeypatch.setattr(
         maintenance_cost,
         "project_line_count",
-        lambda *_args, **_kwargs: 0,
+        lambda *_args, **_kwargs: 1,
     )
     response = _admin_client(db).get(
         "/api/maintenance/lines/export",
@@ -428,8 +525,14 @@ def test_project_line_iterator_closes_server_result_when_consumer_stops(monkeypa
 
 
 def test_chinese_contract_workbook_uses_ascii_header_and_utf8_filename(db):
-    client = _admin_client(db)
     contract = "北京联通核心网维保合同"
+    _seed_maintenance_export_object(
+        db,
+        project="中文合同项目",
+        contract=contract,
+        suffix="chinese-contract",
+    )
+    client = _admin_client(db)
 
     response = client.get(
         "/api/maintenance/export-workbook",
@@ -448,8 +551,9 @@ def test_chinese_contract_workbook_uses_ascii_header_and_utf8_filename(db):
 
 
 def test_project_filename_cannot_inject_headers_or_paths(db):
-    client = _admin_client(db)
     project = "华北\r\nX-Injected: yes/../../escape"
+    _seed_maintenance_export_object(db, project=project, suffix="unsafe-project")
+    client = _admin_client(db)
 
     response = client.get("/api/maintenance/lines/export", params={"project": project})
 
@@ -464,6 +568,7 @@ def test_project_filename_cannot_inject_headers_or_paths(db):
 
 
 def test_project_summary_csv_uses_same_dual_filename_contract(db):
+    _seed_maintenance_export_object(db, project="项目汇总", suffix="summary")
     client = _admin_client(db)
 
     response = client.get("/api/maintenance/export", params={"lifecycle": "all"})
@@ -485,6 +590,9 @@ def test_project_summary_csv_uses_layered_cost_truth_and_keeps_masked_sources_bl
                 "project": "成本分层项目",
                 "lifecycle_status": "ongoing",
                 "maint_end": "2027-01-01",
+                "order_count": 1,
+                "missing_detail_orders": 0,
+                "structure_complete": True,
                 "lines": 3,
                 "qty": 3,
                 "actual_cost_inc": 100,
@@ -511,6 +619,7 @@ def test_project_summary_csv_uses_layered_cost_truth_and_keeps_masked_sources_bl
                 "months": 1,
                 "sales_orders": ["XS-CSV"],
                 "contract_amount": 1000,
+                "contract_incomplete": False,
                 "contract_shared": False,
             }],
         }
@@ -583,6 +692,12 @@ def test_export_endpoints_keep_anonymous_401_and_no_page_403(db, path, params):
 
 
 def test_cost_blind_user_can_export_masked_csv_but_workbook_stays_403(db):
+    _seed_maintenance_export_object(
+        db,
+        project="中文项目",
+        contract="中文合同",
+        suffix="cost-blind",
+    )
     client = _cost_blind_maintenance_client(db)
 
     csv_response = client.get(
