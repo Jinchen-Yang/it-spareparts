@@ -902,6 +902,8 @@ describe("维保项目生命周期筛选", () => {
       const response = board("XS-REMINDER-EXPENSE-UNKNOWN");
       response.data.rows[0] = {
         ...response.data.rows[0],
+        decision_status: "green",
+        status: "green",
         expense_data_available: undefined,
         expense_inc: null,
         expense_ex: null,
@@ -915,7 +917,12 @@ describe("维保项目生命周期筛选", () => {
       await screen.findByRole("list", { name: "项目提醒卡片" }),
     ).getByRole("listitem");
     expect(card).toHaveTextContent("费用：待核验");
+    expect(card).toHaveTextContent("经营判断待核验");
     expect(card).not.toHaveTextContent("费用：不可见");
+    expect(card).not.toHaveTextContent(
+      /预算已用完或超预算|预算余量 ≤ 20%|预算余量 > 20%|费用水位/,
+    );
+    expect(within(card).queryByRole("progressbar")).toBeNull();
   });
 
   it("无成本权限提醒只展示获准事实且不泄漏成本数量或回填入口", async () => {
