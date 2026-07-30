@@ -84,9 +84,13 @@ it("keeps fallback policy internal but blocks monetary content when policy loadi
     </TaxBasisProvider>,
   );
 
-  expect(await screen.findByText("both|ex|both")).toBeInTheDocument();
+  // The fallback probe renders synchronously; wait for the rejected request's
+  // actual fail-closed boundary before asserting the internal fallback values.
+  expect(
+    await screen.findByText("金额展示口径加载失败"),
+  ).toBeInTheDocument();
+  expect(screen.getByText("both|ex|both")).toBeInTheDocument();
   expect(screen.getByText("—")).toBeInTheDocument();
-  expect(screen.getByText("金额展示口径加载失败")).toBeInTheDocument();
   expect(screen.queryByText("敏感金额 ¥999")).toBeNull();
 });
 
