@@ -9,7 +9,6 @@ readonly ROOT_STATE="$CONTROL_DIR/v120-state.state"
 readonly LOCK_PATH=/run/lock/it-spareparts-v120
 readonly EXPECTED_DB_HEAD=f1c8e4a7b2d9
 readonly EXPECTED_OLD_COMMIT=ab42005b5b94bf98b3db0e4bff87e5df9da2f7ca
-readonly EXPECTED_OLD_RUNNING_SOURCE_COMMIT=a1cf00910f08da7f27a9e6e0faaacc3a3cce9bab
 readonly EXPECTED_HTTPS_HOST=hbzgc.icu
 readonly EDGE_CADDYFILE=/opt/personal-ai-assistant/Caddyfile
 readonly EDGE_COMPOSE=/opt/personal-ai-assistant/compose.production.yml
@@ -261,8 +260,7 @@ v120_state_load "$ROOT_STATE"
 
 [[ "${RELEASE_ID:-}" =~ ^v120-[0-9a-f]{12}-[0-9]{14}$ ]]
 [ "${OLD_COMMIT:-}" = "$EXPECTED_OLD_COMMIT" ]
-[ "${OLD_RUNNING_SOURCE_COMMIT:-}" \
-  = "$EXPECTED_OLD_RUNNING_SOURCE_COMMIT" ]
+[[ "${OLD_RUNNING_SOURCE_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]]
 [ "$OLD_COMMIT" != "$OLD_RUNNING_SOURCE_COMMIT" ]
 [ "${DB_HEAD:-}" = "$EXPECTED_DB_HEAD" ]
 check_sha256_id "${OLD_APP_IMAGE_ID:-}"

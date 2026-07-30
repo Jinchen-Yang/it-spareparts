@@ -28,6 +28,20 @@ fatal() {
   exit 1
 }
 
+read_control_manifest_hash() {
+  local key=$1
+  local output_name=$2
+  local value
+  [ "$(sudo grep -c "^${key}=" "$CONTROL_CURRENT/manifest.txt")" = 1 ] \
+    || fatal "root control manifest lacks $key"
+  value=$(
+    sudo sed -n "s/^${key}=//p" "$CONTROL_CURRENT/manifest.txt"
+  )
+  [[ "$value" =~ ^[0-9a-f]{64}$ ]] \
+    || fatal "root control manifest has invalid $key"
+  printf -v "$output_name" '%s' "$value"
+}
+
 # shellcheck source=.deploy/v120_state.sh
 source "$SCRIPT_DIR/v120_state.sh"
 
@@ -139,6 +153,18 @@ TRUSTED_SOURCE_HASH=$(
 )
 [[ "$TRUSTED_SOURCE_HASH" =~ ^[0-9a-f]{64}$ ]] \
   || fatal "root control manifest lacks a trusted source hash"
+for supply_key in \
+  BACKEND_REQUIREMENTS_SHA256 \
+  BACKEND_UV_LOCK_SHA256 \
+  FRONTEND_PACKAGE_LOCK_SHA256 \
+  BACKEND_SBOM_SHA256 \
+  FRONTEND_SBOM_SHA256 \
+  BACKEND_BASE_DIGEST \
+  FRONTEND_BUILD_BASE_DIGEST \
+  FRONTEND_RUNTIME_BASE_DIGEST
+do
+  read_control_manifest_hash "$supply_key" "$supply_key"
+done
 
 ATTEMPT_NO=1
 PARENT_RELEASE_ID=none
@@ -146,7 +172,9 @@ PARENT_STATE_HASH=\
 0000000000000000000000000000000000000000000000000000000000000000
 ROLLBACK_POLICY=old_allowed
 FORWARD_REPAIR=0
+OLD_RUNNING_SOURCE_COMMIT=$EXPECTED_RUNNING_SOURCE_COMMIT
 declare -A PREVIOUS_STATE=()
+declare -A SUPERSESSION_BASE=()
 if [ -n "$SUPERSEDES_REQUEST" ]; then
   [ "$(sudo stat -c '%F %a %U:%G %h' "$ROOT_STATE")" \
     = "regular file 600 root:root 1" ] \
@@ -161,14 +189,15 @@ if [ -n "$SUPERSEDES_REQUEST" ]; then
     || fatal "cannot validate parent root authority"
   [ "${PREVIOUS_STATE[RELEASE_ID]}" = "$SUPERSEDES_REQUEST" ] \
     || fatal "superseded release does not match root authority"
-  [[ "${PREVIOUS_STATE[RELEASE_PHASE]}" =~ ^(rolled_back|failed_closed)$ ]] \
-    || fatal "only rolled-back or failed-closed releases may be superseded"
+  v120_state_select_supersession_base PREVIOUS_STATE SUPERSESSION_BASE \
+    || fatal "only observed, rolled-back or failed-closed releases may be superseded"
   ATTEMPT_NO=$((10#${PREVIOUS_STATE[ATTEMPT_NO]} + 1))
   [ "$ATTEMPT_NO" -le 999 ] || fatal "release attempt limit exceeded"
   PARENT_RELEASE_ID=${PREVIOUS_STATE[RELEASE_ID]}
   PARENT_STATE_HASH=$(sha256sum "$ROOT_SNAPSHOT_TEMP" | cut -d' ' -f1)
-  if [ "${PREVIOUS_STATE[RELEASE_PHASE]}" = failed_closed ]; then
-    ROLLBACK_POLICY=forward_only
+  OLD_RUNNING_SOURCE_COMMIT=${SUPERSESSION_BASE[RUNNING_SOURCE_COMMIT]}
+  ROLLBACK_POLICY=${SUPERSESSION_BASE[ROLLBACK_POLICY]}
+  if [ "${SUPERSESSION_BASE[REQUIRE_RUNNING]}" = 0 ]; then
     FORWARD_REPAIR=1
   fi
 fi
@@ -217,6 +246,13 @@ else
   OLD_FRONTEND_IMAGE_ID=$(sudo docker inspect -f '{{.Image}}' "$OLD_FRONTEND_CID")
   APP_IMAGE_REF=$(sudo docker inspect -f '{{.Config.Image}}' "$OLD_APP_CID")
   FRONTEND_IMAGE_REF=$(sudo docker inspect -f '{{.Config.Image}}' "$OLD_FRONTEND_CID")
+  if [ -n "$SUPERSEDES_REQUEST" ]; then
+    [ "$OLD_APP_IMAGE_ID" = "${SUPERSESSION_BASE[APP_IMAGE_ID]}" ] \
+      || fatal "running app image differs from superseded root authority"
+    [ "$OLD_FRONTEND_IMAGE_ID" \
+      = "${SUPERSESSION_BASE[FRONTEND_IMAGE_ID]}" ] \
+      || fatal "running frontend image differs from superseded root authority"
+  fi
 fi
 [[ "$OLD_APP_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
 [[ "$OLD_FRONTEND_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
@@ -329,6 +365,38 @@ sudo find "$RELEASE_SRC" -xdev -type f \
 sudo grep -q 'APP_VERSION = "1.20.0"' \
   "$RELEASE_SRC/frontend/src/version.ts"
 
+verify_release_source_hash() {
+  local relative=$1
+  local expected=$2
+  [ "$(sudo sha256sum "$RELEASE_SRC/$relative" | cut -d' ' -f1)" \
+    = "$expected" ] || fatal "$relative differs from the control manifest"
+}
+
+verify_release_source_hash \
+  backend/requirements.lock "$BACKEND_REQUIREMENTS_SHA256"
+verify_release_source_hash backend/uv.lock "$BACKEND_UV_LOCK_SHA256"
+verify_release_source_hash \
+  frontend/package-lock.json "$FRONTEND_PACKAGE_LOCK_SHA256"
+verify_release_source_hash \
+  backend/dependency-sbom.cdx.json "$BACKEND_SBOM_SHA256"
+verify_release_source_hash \
+  frontend/dependency-sbom.cdx.json "$FRONTEND_SBOM_SHA256"
+grep -Fx \
+  "FROM --platform=linux/amd64 python:3.11-slim@sha256:$BACKEND_BASE_DIGEST" \
+  "$RELEASE_SRC/backend/Dockerfile" >/dev/null \
+  || fatal "backend base digest differs from the control manifest"
+grep -Fx \
+  "FROM --platform=linux/amd64 node:20-alpine@sha256:$FRONTEND_BUILD_BASE_DIGEST AS build" \
+  "$RELEASE_SRC/frontend/Dockerfile" >/dev/null \
+  || fatal "frontend build base digest differs from the control manifest"
+grep -Fx \
+  "FROM --platform=linux/amd64 nginx:1.27-alpine@sha256:$FRONTEND_RUNTIME_BASE_DIGEST" \
+  "$RELEASE_SRC/frontend/Dockerfile" >/dev/null \
+  || fatal "frontend runtime base digest differs from the control manifest"
+python3 "$RELEASE_SRC/.deploy/generate_dependency_sbom.py" \
+  --check "$RELEASE_SRC" \
+  || fatal "dependency SBOM does not match the committed locks"
+
 MIGRATION_DIR="$RELEASE_SRC/backend/alembic/versions"
 [ "$(sudo find "$MIGRATION_DIR" -mindepth 1 -maxdepth 1 \
   -type f -printf x | wc -c)" = "$EXPECTED_MIGRATION_FILE_COUNT" ] \
@@ -376,13 +444,10 @@ NEW_FRONTEND_IMAGE_ID=$(
 )
 [[ "$NEW_APP_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
 [[ "$NEW_FRONTEND_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
-[ "$NEW_APP_IMAGE_ID" != "$OLD_APP_IMAGE_ID" ]
-[ "$NEW_FRONTEND_IMAGE_ID" != "$OLD_FRONTEND_IMAGE_ID" ]
 
 STATE_FORMAT=$V120_STATE_FORMAT
 STATE_GENERATION=0
 OLD_COMMIT=$EXPECTED_CHECKOUT_COMMIT
-OLD_RUNNING_SOURCE_COMMIT=$EXPECTED_RUNNING_SOURCE_COMMIT
 # Read indirectly by v120_state_write_file.
 # shellcheck disable=SC2034
 DB_HEAD=$EXPECTED_DB_HEAD

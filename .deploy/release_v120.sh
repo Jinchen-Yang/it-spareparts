@@ -9,8 +9,8 @@ readonly CONTROL_CURRENT="$CONTROL_DIR/current"
 readonly LOCK_PATH=/run/lock/it-spareparts-v120
 readonly EXPECTED_DB_HEAD=f1c8e4a7b2d9
 readonly EXPECTED_OLD_COMMIT=ab42005b5b94bf98b3db0e4bff87e5df9da2f7ca
-readonly EXPECTED_OLD_RUNNING_SOURCE_COMMIT=a1cf00910f08da7f27a9e6e0faaacc3a3cce9bab
 readonly EXPECTED_HTTPS_HOST=hbzgc.icu
+readonly ASSISTANT_HEALTH_URL=https://118.25.94.90/health
 readonly EDGE_CADDYFILE=/opt/personal-ai-assistant/Caddyfile
 readonly EDGE_COMPOSE=/opt/personal-ai-assistant/compose.production.yml
 SCRIPT_DIR=$(
@@ -22,6 +22,20 @@ readonly SCRIPT_DIR
 fatal() {
   printf 'FATAL: %s\n' "$*" >&2
   exit 1
+}
+
+read_control_manifest_hash() {
+  local key=$1
+  local output_name=$2
+  local value
+  [ "$(sudo grep -c "^${key}=" "$CONTROL_CURRENT/manifest.txt")" = 1 ] \
+    || fatal "root control manifest lacks $key"
+  value=$(
+    sudo sed -n "s/^${key}=//p" "$CONTROL_CURRENT/manifest.txt"
+  )
+  [[ "$value" =~ ^[0-9a-f]{64}$ ]] \
+    || fatal "root control manifest has invalid $key"
+  printf -v "$output_name" '%s' "$value"
 }
 
 # This is executable code from the verified release archive, never release data.
@@ -96,7 +110,54 @@ PY
   return 1
 }
 
-check_frontend_and_https() {
+probe_json_health() {
+  local endpoint=$1
+  local expected_status=$2
+  local expected_kind=$3
+  case "$expected_status:$expected_kind" in
+    ok:app|ok:db|ready:assistant) ;;
+    *) return 64 ;;
+  esac
+  curl --noproxy '*' --proto '=https' --tlsv1.2 \
+    --connect-timeout 5 --max-time 15 --max-redirs 0 \
+    -fsS --write-out $'\n%{http_code}\n%{content_type}' "$endpoint" |
+    python3 -c '
+import json
+import sys
+
+raw = sys.stdin.buffer.read()
+body_and_status, separator, content_type = raw.rpartition(b"\n")
+if not separator:
+    raise SystemExit(1)
+body, separator, status = body_and_status.rpartition(b"\n")
+if not separator:
+    raise SystemExit(1)
+try:
+    status_code = int(status.decode("ascii", "strict"))
+except (UnicodeDecodeError, ValueError):
+    raise SystemExit(1)
+if not 200 <= status_code < 300:
+    raise SystemExit(1)
+mime = content_type.decode("ascii", "strict").split(";", 1)[0].strip().lower()
+if mime != "application/json":
+    raise SystemExit(1)
+try:
+    payload = json.loads(body)
+except (json.JSONDecodeError, UnicodeDecodeError):
+    raise SystemExit(1)
+if not isinstance(payload, dict) or payload.get("status") != sys.argv[1]:
+    raise SystemExit(1)
+if sys.argv[2] == "db" and payload.get("db") != "reachable":
+    raise SystemExit(1)
+' "$expected_status" "$expected_kind"
+}
+
+check_external_health_semantics() {
+  probe_json_health "https://$EXPECTED_HTTPS_HOST/health" ok app \
+    && probe_json_health "https://$EXPECTED_HTTPS_HOST/health/db" ok db
+}
+
+check_rollback_frontend_readiness() {
   local _
   local https_result
   for _ in $(seq 1 30); do
@@ -114,6 +175,12 @@ check_frontend_and_https() {
     sleep 1
   done
   return 1
+}
+
+check_candidate_external_readiness() {
+  check_rollback_frontend_readiness \
+    && check_external_health_semantics \
+    && probe_json_health "$ASSISTANT_HEALTH_URL" ready assistant
 }
 
 run_monitor_with_retry() {
@@ -405,7 +472,7 @@ restore_old_business_inline() {
     = "$EDGE_CADDY_HASH" ] || return 1
   [ "$(sudo sha256sum "$EDGE_COMPOSE" | cut -d' ' -f1)" \
     = "$EDGE_COMPOSE_HASH" ] || return 1
-  check_frontend_and_https || return $?
+  check_rollback_frontend_readiness || return $?
   run_monitor_with_retry || return $?
 
   rolled_back_at=$(date --iso-8601=seconds) || return $?
@@ -658,6 +725,48 @@ cleanup_restore_container() {
   RESTORE_CONTAINER=
 }
 
+v120_publish_exact_evidence() (
+  set -Eeuo pipefail
+  local source=$1
+  local destination=$2
+  local destination_parent
+  local status
+  destination_parent=$(dirname -- "$destination")
+  cleanup_source() {
+    rm -f -- "$source" || return 97
+  }
+  [ -f "$source" ] && [ ! -L "$source" ] \
+    && [ "$(stat -c '%a %U %h' "$source")" \
+      = "600 $(id -un) 1" ] || {
+    cleanup_source
+    return 73
+  }
+  [ -d "$destination_parent" ] && [ ! -L "$destination_parent" ] || {
+    cleanup_source
+    return 73
+  }
+  if ln -T -- "$source" "$destination" 2>/dev/null; then
+    chmod 600 "$destination"
+    sync -f "$destination"
+    cleanup_source
+    sync -d "$destination_parent"
+    return 0
+  fi
+  status=$?
+  if [ -f "$destination" ] && [ ! -L "$destination" ] \
+      && [ "$(stat -c '%a %U %h' "$destination")" \
+        = "600 $(id -un) 1" ] \
+      && cmp -s "$source" "$destination"; then
+    cleanup_source
+    sync -f "$destination"
+    sync -d "$destination_parent"
+    return 0
+  fi
+  cleanup_source || return $?
+  [ "$status" -ne 0 ] || status=73
+  return 73
+)
+
 if [ "${V120_RELEASE_LIBRARY_ONLY:-0}" = 1 ]; then
   [ "${V120_STATE_TEST_MODE:-0}" = 1 ] \
     && [ "${BASH_SOURCE[0]}" != "$0" ] \
@@ -669,6 +778,7 @@ RELEASE_COMPLETE=0
 BUSINESS_MUTATING=0
 RESTORE_CONTAINER=
 IMAGE_BUNDLE_TMP=
+SUPPLY_CHAIN_TEMP=
 ROOT_SNAPSHOT=
 release_abort() {
   local status=$?
@@ -676,6 +786,9 @@ release_abort() {
   trap - EXIT HUP INT TERM
   if [ -n "$IMAGE_BUNDLE_TMP" ]; then
     rm -f -- "$IMAGE_BUNDLE_TMP" || status=97
+  fi
+  if [ -n "$SUPPLY_CHAIN_TEMP" ]; then
+    rm -f -- "$SUPPLY_CHAIN_TEMP" || status=97
   fi
   if ! cleanup_restore_container; then
     printf 'FATAL: failed to remove isolated restore container\n' >&2
@@ -744,9 +857,8 @@ v120_state_load "$STATE"
 [[ "${TARGET_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] || fatal "invalid target commit"
 [ "${OLD_COMMIT:-}" = "$EXPECTED_OLD_COMMIT" ] \
   || fatal "old checkout baseline mismatch"
-[ "${OLD_RUNNING_SOURCE_COMMIT:-}" = \
-    "$EXPECTED_OLD_RUNNING_SOURCE_COMMIT" ] \
-  || fatal "old business source baseline mismatch"
+[[ "${OLD_RUNNING_SOURCE_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]] \
+  || fatal "old business source baseline is invalid"
 [ "$OLD_COMMIT" != "$OLD_RUNNING_SOURCE_COMMIT" ] \
   || fatal "checkout and old business source must remain distinct"
 [ "${DB_HEAD:-}" = "$EXPECTED_DB_HEAD" ] || fatal "database head mismatch"
@@ -792,6 +904,8 @@ for artifact in "$SOURCE_TAR" "$SOURCE_SUM"; do
     = "600 root:root 1" ] \
     || fatal "release source artifact owner/mode mismatch"
 done
+v120_evidence_reset_authorized "$STATE" \
+  || fatal "root authority does not authorize this release state"
 
 cd "$APP_DIR"
 [ "$(sha256sum docker-compose.yml | cut -d' ' -f1)" \
@@ -836,6 +950,8 @@ for script_name in \
   observe_v120.sh \
   rollback_v120.sh \
   install_v120_control.sh \
+  hsts_v120_root.sh \
+  hsts_v120_operator.sh \
   package_v120_control.sh \
   v120_state.sh \
   sync_v120_root_state.sh
@@ -928,11 +1044,49 @@ EDGE_COMPOSE_HASH=$(sudo sha256sum "$EDGE_COMPOSE" | cut -d' ' -f1)
 EVIDENCE_DIR="$APP_DIR/backups/$RELEASE_ID-release"
 STATE_HASH=$(sha256sum "$STATE" | cut -d' ' -f1)
 [[ "$STATE_HASH" =~ ^[0-9a-f]{64}$ ]]
-v120_evidence_reset_authorized "$STATE" \
-  || fatal "root authority does not permit evidence reset"
 v120_prepare_evidence_dir \
   "$EVIDENCE_DIR" "$RELEASE_ID" "$TARGET_COMMIT" "$STATE_HASH" \
   || fatal "cannot prepare retry-safe release evidence"
+verify_root_control
+for supply_key in \
+  BACKEND_REQUIREMENTS_SHA256 \
+  BACKEND_UV_LOCK_SHA256 \
+  FRONTEND_PACKAGE_LOCK_SHA256 \
+  BACKEND_SBOM_SHA256 \
+  FRONTEND_SBOM_SHA256 \
+  BACKEND_BASE_DIGEST \
+  FRONTEND_BUILD_BASE_DIGEST \
+  FRONTEND_RUNTIME_BASE_DIGEST
+do
+  read_control_manifest_hash "$supply_key" "$supply_key"
+done
+SUPPLY_CHAIN_EVIDENCE="$EVIDENCE_DIR/supply-chain-provenance.txt"
+SUPPLY_CHAIN_TEMP=$(mktemp "$EVIDENCE_DIR/.supply-chain.XXXXXX")
+{
+  printf 'EVIDENCE_FORMAT=v120-supply-chain-1\n'
+  printf 'TARGET_COMMIT=%s\n' "$TARGET_COMMIT"
+  printf 'CONTROL_MANIFEST_HASH=%s\n' "$CONTROL_MANIFEST_HASH"
+  for supply_key in \
+    BACKEND_REQUIREMENTS_SHA256 \
+    BACKEND_UV_LOCK_SHA256 \
+    FRONTEND_PACKAGE_LOCK_SHA256 \
+    BACKEND_SBOM_SHA256 \
+    FRONTEND_SBOM_SHA256 \
+    BACKEND_BASE_DIGEST \
+    FRONTEND_BUILD_BASE_DIGEST \
+    FRONTEND_RUNTIME_BASE_DIGEST
+  do
+    printf '%s=%s\n' "$supply_key" "${!supply_key}"
+  done
+  printf 'NEW_APP_IMAGE_ID=%s\n' "$NEW_APP_IMAGE_ID"
+  printf 'NEW_FRONTEND_IMAGE_ID=%s\n' "$NEW_FRONTEND_IMAGE_ID"
+} > "$SUPPLY_CHAIN_TEMP"
+chmod 600 "$SUPPLY_CHAIN_TEMP"
+sync -f "$SUPPLY_CHAIN_TEMP"
+v120_publish_exact_evidence \
+  "$SUPPLY_CHAIN_TEMP" "$SUPPLY_CHAIN_EVIDENCE" \
+  || fatal "supply-chain evidence conflicts with existing evidence"
+SUPPLY_CHAIN_TEMP=
 
 image_bytes=0
 for image in \
@@ -1162,7 +1316,8 @@ check_loopback_8080
     '{{with index .NetworkSettings.Networks "it-spareparts-ingress"}}yes{{end}}' \
     "$NEW_FRONTEND_CID"
 )" = yes ]
-check_frontend_and_https || fatal "frontend/HTTPS readiness failed"
+check_candidate_external_readiness \
+  || fatal "candidate frontend/HTTPS semantic readiness failed"
 
 [ "$(compose ps -q db)" = "$BASE_DB_CID" ]
 [ "$(sudo docker ps -q --no-trunc \

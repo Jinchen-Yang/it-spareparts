@@ -269,8 +269,10 @@ v120_state_validate_schema() {
   fi
   [ "${state_ref[OLD_COMMIT]}" \
     = ab42005b5b94bf98b3db0e4bff87e5df9da2f7ca ] || return 1
-  [ "${state_ref[OLD_RUNNING_SOURCE_COMMIT]}" \
-    = a1cf00910f08da7f27a9e6e0faaacc3a3cce9bab ] || return 1
+  if [ "$attempt_no" = 1 ]; then
+    [ "${state_ref[OLD_RUNNING_SOURCE_COMMIT]}" \
+      = a1cf00910f08da7f27a9e6e0faaacc3a3cce9bab ] || return 1
+  fi
   [ "${state_ref[OLD_COMMIT]}" != "${state_ref[OLD_RUNNING_SOURCE_COMMIT]}" ] \
     || return 1
   [ "${state_ref[OLD_APP_ROLLBACK_TAG]}" \
@@ -546,7 +548,8 @@ v120_state_validate_supersession() {
   local -n new_ref=$new_name
 
   [[ "$old_hash" =~ ^[0-9a-f]{64}$ ]] || return 73
-  [[ "${old_ref[RELEASE_PHASE]}" =~ ^(rolled_back|failed_closed)$ ]] \
+  [[ "${old_ref[RELEASE_PHASE]}" \
+    =~ ^(observed|rolled_back|failed_closed)$ ]] \
     || return 73
   [ "${new_ref[RELEASE_PHASE]}" = built ] \
     && [ "${new_ref[STATE_GENERATION]}" = 0 ] || return 73
@@ -556,14 +559,75 @@ v120_state_validate_supersession() {
     && [ "${new_ref[PARENT_STATE_HASH]}" = "$old_hash" ] || return 73
   [ "${new_ref[RELEASE_ID]}" != "${old_ref[RELEASE_ID]}" ] || return 73
   case "${old_ref[RELEASE_PHASE]}" in
+    observed)
+      [ "${new_ref[ROLLBACK_POLICY]}" = old_allowed ] || return 73
+      [ "${new_ref[OLD_RUNNING_SOURCE_COMMIT]}" \
+        = "${old_ref[TARGET_COMMIT]}" ] || return 73
+      [ "${new_ref[OLD_APP_IMAGE_ID]}" \
+        = "${old_ref[NEW_APP_IMAGE_ID]}" ] || return 73
+      [ "${new_ref[OLD_FRONTEND_IMAGE_ID]}" \
+        = "${old_ref[NEW_FRONTEND_IMAGE_ID]}" ] || return 73
+      ;;
     rolled_back)
       [ "${new_ref[ROLLBACK_POLICY]}" = old_allowed ] || return 73
+      [ "${new_ref[OLD_RUNNING_SOURCE_COMMIT]}" \
+        = "${old_ref[OLD_RUNNING_SOURCE_COMMIT]}" ] || return 73
+      [ "${new_ref[OLD_APP_IMAGE_ID]}" \
+        = "${old_ref[OLD_APP_IMAGE_ID]}" ] || return 73
+      [ "${new_ref[OLD_FRONTEND_IMAGE_ID]}" \
+        = "${old_ref[OLD_FRONTEND_IMAGE_ID]}" ] || return 73
       ;;
     failed_closed)
       [ "${new_ref[ROLLBACK_POLICY]}" = forward_only ] || return 73
+      [ "${new_ref[OLD_RUNNING_SOURCE_COMMIT]}" \
+        = "${old_ref[OLD_RUNNING_SOURCE_COMMIT]}" ] || return 73
+      [ "${new_ref[OLD_APP_IMAGE_ID]}" \
+        = "${old_ref[OLD_APP_IMAGE_ID]}" ] || return 73
+      [ "${new_ref[OLD_FRONTEND_IMAGE_ID]}" \
+        = "${old_ref[OLD_FRONTEND_IMAGE_ID]}" ] || return 73
       ;;
   esac
+  [ "${new_ref[APP_IMAGE_REF]}" = "${old_ref[APP_IMAGE_REF]}" ] \
+    && [ "${new_ref[FRONTEND_IMAGE_REF]}" \
+      = "${old_ref[FRONTEND_IMAGE_REF]}" ] || return 73
   return 0
+}
+
+v120_state_select_supersession_base() {
+  local parent_name=$1
+  local output_name=$2
+  local -n parent_ref=$parent_name
+  # Both nameref targets are caller-declared associative arrays.
+  # shellcheck disable=SC2178
+  local -n output_ref=$output_name
+  local key
+  for key in "${!output_ref[@]}"; do
+    unset 'output_ref[$key]'
+  done
+  case "${parent_ref[RELEASE_PHASE]:-}" in
+    observed)
+      output_ref[RUNNING_SOURCE_COMMIT]=${parent_ref[TARGET_COMMIT]}
+      output_ref[APP_IMAGE_ID]=${parent_ref[NEW_APP_IMAGE_ID]}
+      output_ref[FRONTEND_IMAGE_ID]=${parent_ref[NEW_FRONTEND_IMAGE_ID]}
+      output_ref[ROLLBACK_POLICY]=old_allowed
+      output_ref[REQUIRE_RUNNING]=1
+      ;;
+    rolled_back)
+      output_ref[RUNNING_SOURCE_COMMIT]=${parent_ref[OLD_RUNNING_SOURCE_COMMIT]}
+      output_ref[APP_IMAGE_ID]=${parent_ref[OLD_APP_IMAGE_ID]}
+      output_ref[FRONTEND_IMAGE_ID]=${parent_ref[OLD_FRONTEND_IMAGE_ID]}
+      output_ref[ROLLBACK_POLICY]=old_allowed
+      output_ref[REQUIRE_RUNNING]=1
+      ;;
+    failed_closed)
+      output_ref[RUNNING_SOURCE_COMMIT]=${parent_ref[OLD_RUNNING_SOURCE_COMMIT]}
+      output_ref[APP_IMAGE_ID]=${parent_ref[OLD_APP_IMAGE_ID]}
+      output_ref[FRONTEND_IMAGE_ID]=${parent_ref[OLD_FRONTEND_IMAGE_ID]}
+      output_ref[ROLLBACK_POLICY]=forward_only
+      output_ref[REQUIRE_RUNNING]=0
+      ;;
+    *) return 73 ;;
+  esac
 }
 
 v120_state_prepare_update() {

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import base64
 import grp
 import hashlib
+import importlib.util
+import io
+import json
 import os
 import pwd
 import re
@@ -9,7 +13,11 @@ import shutil
 import signal
 import stat
 import subprocess
+import threading
 import time
+import textwrap
+import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -27,6 +35,16 @@ PACKAGE_CONTROL = ROOT / ".deploy" / "package_v120_control.sh"
 CRON_SPEC = ROOT / ".deploy" / "it-spareparts.cron"
 DEPLOY_GUIDE = ROOT / "docs" / "DEPLOY.md"
 RELEASE_RUNBOOK = ROOT / "docs" / "releases" / "v1.20-release-runbook.md"
+BACKEND_DOCKERFILE = ROOT / "backend" / "Dockerfile"
+FRONTEND_DOCKERFILE = ROOT / "frontend" / "Dockerfile"
+BACKEND_REQUIREMENTS_LOCK = ROOT / "backend" / "requirements.lock"
+BACKEND_UV_LOCK = ROOT / "backend" / "uv.lock"
+FRONTEND_PACKAGE_LOCK = ROOT / "frontend" / "package-lock.json"
+SBOM_GENERATOR = ROOT / ".deploy" / "generate_dependency_sbom.py"
+BACKEND_SBOM = ROOT / "backend" / "dependency-sbom.cdx.json"
+FRONTEND_SBOM = ROOT / "frontend" / "dependency-sbom.cdx.json"
+ARTIFACT_VALIDATOR = ROOT / ".deploy" / "validate_release_artifacts.py"
+MOBILE_RELEASE_PROBE = ROOT / ".deploy" / "mobile_release_probe.mjs"
 DEFAULT_TARGET = "a" * 40
 DEFAULT_RELEASE_ID = "v120-aaaaaaaaaaaa-20260730160000"
 ZERO_HASH = "0" * 64
@@ -47,6 +65,11 @@ def _built_values(
     parent_release_id: str | None = None,
     parent_state_hash: str | None = None,
     rollback_policy: str = "old_allowed",
+    old_running_source_commit: str = (
+        "a1cf00910f08da7f27a9e6e0faaacc3a3cce9bab"
+    ),
+    old_app_image_id: str = "sha256:" + "b" * 64,
+    old_frontend_image_id: str = "sha256:" + "c" * 64,
 ) -> dict[str, str]:
     release_id = release_id or (
         f"v120-{target[:12]}-20260730160000"
@@ -69,12 +92,10 @@ def _built_values(
         "ROLLBACK_POLICY": rollback_policy,
         "TARGET_COMMIT": target,
         "OLD_COMMIT": "ab42005b5b94bf98b3db0e4bff87e5df9da2f7ca",
-        "OLD_RUNNING_SOURCE_COMMIT": (
-            "a1cf00910f08da7f27a9e6e0faaacc3a3cce9bab"
-        ),
+        "OLD_RUNNING_SOURCE_COMMIT": old_running_source_commit,
         "DB_HEAD": "f1c8e4a7b2d9",
-        "OLD_APP_IMAGE_ID": "sha256:" + "b" * 64,
-        "OLD_FRONTEND_IMAGE_ID": "sha256:" + "c" * 64,
+        "OLD_APP_IMAGE_ID": old_app_image_id,
+        "OLD_FRONTEND_IMAGE_ID": old_frontend_image_id,
         "APP_IMAGE_REF": "it-spareparts-app",
         "FRONTEND_IMAGE_REF": "it-spareparts-frontend",
         "OLD_APP_ROLLBACK_TAG": (
@@ -326,6 +347,323 @@ def _run_installer_library(
         env=test_env,
         check=False,
     )
+
+
+def _make_v3_control_version(versions: Path) -> tuple[Path, str, str]:
+    target = "4" * 40
+    names_and_keys = (
+        ("v120_state.sh", "V120_STATE_SHA256", b"#!/bin/bash\ntrue\n"),
+        (
+            "sync-v120-root-state.sh",
+            "ROOT_SYNC_SHA256",
+            b"#!/bin/bash\ntrue\n",
+        ),
+        ("rollback-v120.sh", "ROLLBACK_SHA256", b"#!/bin/bash\ntrue\n"),
+        (
+            "install-v120-control.sh",
+            "INSTALLER_SHA256",
+            b"#!/bin/bash\ntrue\n",
+        ),
+        ("hsts-v120-root.sh", "HSTS_ROOT_SHA256", b"#!/bin/bash\ntrue\n"),
+        (
+            "hsts-v120-operator.sh",
+            "HSTS_OPERATOR_SHA256",
+            b"#!/bin/bash\ntrue\n",
+        ),
+        ("edge-v120-root.sh", "EDGE_ROOT_SHA256", b"#!/bin/bash\ntrue\n"),
+        (
+            "edge-v120-operator.sh",
+            "EDGE_OPERATOR_SHA256",
+            b"#!/bin/bash\ntrue\n",
+        ),
+        ("it-spareparts.cron", "CRON_SHA256", b"SHELL=/bin/sh\n"),
+        ("source.tar", "SOURCE_TAR_SHA256", b"trusted-source\n"),
+    )
+    staging = versions / "staging"
+    staging.mkdir(mode=0o700)
+    lines = ["CONTROL_FORMAT=v120-control-3", f"TARGET_COMMIT={target}"]
+    for name, key, content in names_and_keys:
+        artifact = staging / name
+        artifact.write_bytes(content)
+        artifact.chmod(0o700 if name.endswith(".sh") else 0o600)
+        lines.append(f"{key}={hashlib.sha256(content).hexdigest()}")
+    for key in (
+        "BACKEND_REQUIREMENTS_SHA256",
+        "BACKEND_UV_LOCK_SHA256",
+        "FRONTEND_PACKAGE_LOCK_SHA256",
+        "BACKEND_SBOM_SHA256",
+        "FRONTEND_SBOM_SHA256",
+        "BACKEND_BASE_DIGEST",
+        "FRONTEND_BUILD_BASE_DIGEST",
+        "FRONTEND_RUNTIME_BASE_DIGEST",
+    ):
+        lines.append(f"{key}={hashlib.sha256(key.encode()).hexdigest()}")
+    manifest = staging / "manifest.txt"
+    manifest.write_text("\n".join(lines) + "\n", encoding="ascii")
+    manifest.chmod(0o600)
+    manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    final = versions / manifest_hash
+    staging.rename(final)
+    return final, manifest_hash, target
+
+
+def _semantic_health_stub_body(function_name: str) -> str:
+    return rf'''
+curl() {{
+  local target="${{@: -1}}"
+  if [ "$target" = https://hbzgc.icu/ ]; then
+    if [[ " $* " == *"%{{remote_ip}}"* ]]; then
+      printf '200 118.25.94.90 0'
+    else
+      printf '200 0'
+    fi
+  elif [[ "$target" == http://hbzgc.icu/* ]]; then
+    suffix=${{target#http://hbzgc.icu}}
+    printf '308 https://hbzgc.icu%s' "$suffix"
+  elif [ "$target" = https://118.25.94.90/health ]; then
+    case "${{TEST_ASSISTANT_HEALTH:-ready}}" in
+      ready) printf '{{"status":"ready"}}\n200\napplication/json' ;;
+      html) printf '<!doctype html>assistant\n200\ntext/html' ;;
+      mime) printf '{{"status":"ready"}}\n200\ntext/plain' ;;
+      ok) printf '{{"status":"ok"}}\n200\napplication/json' ;;
+      missing)
+        printf '{{"service":"assistant"}}\n200\napplication/json' ;;
+      malformed) printf '{{bad\n200\napplication/json' ;;
+      http-error) return 22 ;;
+      *) return 97 ;;
+    esac
+  elif [ "${{TEST_HEALTH_HTML:-0}}" = 1 ]; then
+    printf '<!doctype html>SPA\n200\ntext/html'
+  elif [[ "$target" == */health/db ]]; then
+    printf '{{"status":"ok","db":"reachable"}}\n200\napplication/json'
+  else
+    printf '{{"status":"ok"}}\n200\napplication/json'
+  fi
+}}
+{function_name}
+'''
+
+
+def test_release_external_readiness_rejects_spa_fake_200() -> None:
+    accepted = _run_release_library(
+        _semantic_health_stub_body("check_candidate_external_readiness")
+    )
+    rejected = _run_release_library(
+        _semantic_health_stub_body("check_candidate_external_readiness"),
+        env_overrides={"TEST_HEALTH_HTML": "1"},
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert rejected.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("mode", "accepted"),
+    (
+        ("ready", True),
+        ("html", False),
+        ("mime", False),
+        ("ok", False),
+        ("missing", False),
+        ("malformed", False),
+        ("http-error", False),
+    ),
+)
+def test_release_candidate_requires_semantic_assistant_ready_health(
+    mode: str,
+    accepted: bool,
+) -> None:
+    result = _run_release_library(
+        _semantic_health_stub_body(
+            "check_candidate_external_readiness "
+            "&& printf CANDIDATE_READY"
+        ),
+        env_overrides={"TEST_ASSISTANT_HEALTH": mode},
+    )
+
+    assert (result.returncode == 0) is accepted, result.stderr
+    assert ("CANDIDATE_READY" in result.stdout) is accepted
+
+
+def test_old_business_rollback_readiness_does_not_require_new_health_contract() -> None:
+    body = r'''
+curl() {
+  local target="${@: -1}"
+  if [[ "$target" == https://* ]]; then
+    printf '200 0'
+  else
+    return 0
+  fi
+}
+check_external_health_semantics() { return 99; }
+check_rollback_frontend_readiness
+'''
+
+    result = _run_release_library(body)
+
+    assert result.returncode == 0, result.stderr
+    release = RELEASE.read_text(encoding="utf-8")
+    restore = release[
+        release.index("restore_old_business_inline()") :
+        release.index("fail_closed_from_root()")
+    ]
+    assert "check_rollback_frontend_readiness" in restore
+    assert "check_candidate_external_readiness" not in restore
+    switch = release[release.index('advance_state \\\n  BACKUP "$BACKUP"') :]
+    assert "check_candidate_external_readiness" in switch
+
+
+def test_observer_external_health_rejects_spa_fake_200() -> None:
+    accepted = _run_observer_library(
+        _semantic_health_stub_body("check_external_health_semantics")
+    )
+    rejected = _run_observer_library(
+        _semantic_health_stub_body("check_external_health_semantics"),
+        env={"TEST_HEALTH_HTML": "1"},
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert rejected.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("mode", "accepted"),
+    (
+        ("ready", True),
+        ("html", False),
+        ("mime", False),
+        ("ok", False),
+        ("missing", False),
+        ("malformed", False),
+        ("http-error", False),
+    ),
+)
+def test_observer_requires_semantic_assistant_ready_health(
+    mode: str,
+    accepted: bool,
+) -> None:
+    result = _run_observer_library(
+        _semantic_health_stub_body(
+            'probe_json_health "$ASSISTANT_HEALTH_URL" ready assistant'
+        ),
+        env={"TEST_ASSISTANT_HEALTH": mode},
+    )
+
+    assert (result.returncode == 0) is accepted, result.stderr
+
+
+def test_observer_checks_assistant_health_inside_every_observation() -> None:
+    source = OBSERVE.read_text(encoding="utf-8")
+    observe_body = source[
+        source.index("observe() {") : source.index(
+            'if [ "${V120_OBSERVER_LIBRARY_ONLY:-0}" = 1 ]'
+        )
+    ]
+
+    assert (
+        'probe_json_health "$ASSISTANT_HEALTH_URL" ready assistant'
+        in observe_body
+    )
+
+
+@pytest.mark.parametrize("minute", (0, 5, 15, 30))
+@pytest.mark.parametrize(
+    ("mode", "accepted"),
+    (
+        ("ready", True),
+        ("html", False),
+        ("mime", False),
+        ("ok", False),
+        ("missing", False),
+        ("malformed", False),
+    ),
+)
+def test_each_observation_window_gates_pass_on_assistant_health(
+    tmp_path: Path,
+    minute: int,
+    mode: str,
+    accepted: bool,
+) -> None:
+    evidence_dir = tmp_path / f"evidence-{minute}-{mode}"
+    evidence_dir.mkdir()
+    body = _semantic_health_stub_body("") + r'''
+EVIDENCE_DIR=$1
+minute=$2
+NEW_APP_CID=app-cid
+NEW_FRONTEND_CID=frontend-cid
+NEW_APP_IMAGE_ID=app-image
+NEW_FRONTEND_IMAGE_ID=frontend-image
+BASE_DB_CID=db-cid
+BASE_DB_IMAGE_ID=db-image
+BASE_DB_RESTARTS=0
+BASE_EDGE_CID=edge-cid
+BASE_EDGE_RESTARTS=0
+EDGE_CADDY_HASH=caddy-hash
+EDGE_COMPOSE_HASH=compose-hash
+MONITOR_SWITCH_MTIME=1
+LAST_MONITOR_MTIME=1
+SWITCHED_AT=2026-07-31T00:00:00+08:00
+compose() {
+  case "$*" in
+    "ps -q app") printf '%s\n' "$NEW_APP_CID" ;;
+    "ps -q frontend") printf '%s\n' "$NEW_FRONTEND_CID" ;;
+    "ps -q db") printf '%s\n' "$BASE_DB_CID" ;;
+    "port frontend 80") printf '127.0.0.1:8080\n' ;;
+    "logs --since "*) return 0 ;;
+    *) return 97 ;;
+  esac
+}
+sudo() {
+  local rendered=$*
+  local target="${@: -1}"
+  if [[ "$rendered" == *"docker inspect -f {{.Image}}"* ]]; then
+    case "$target" in
+      "$NEW_APP_CID") printf '%s\n' "$NEW_APP_IMAGE_ID" ;;
+      "$NEW_FRONTEND_CID") printf '%s\n' "$NEW_FRONTEND_IMAGE_ID" ;;
+      "$BASE_DB_CID") printf '%s\n' "$BASE_DB_IMAGE_ID" ;;
+      *) return 97 ;;
+    esac
+  elif [[ "$rendered" == *"docker inspect -f {{.RestartCount}}"* ]]; then
+    printf '0\n'
+  elif [[ "$rendered" == *"docker ps -q --no-trunc"* ]]; then
+    printf '%s\n' "$BASE_EDGE_CID"
+  elif [[ "$rendered" == *"it-spareparts-ingress"* ]]; then
+    printf 'yes\n'
+  elif [[ "$rendered" == *"sha256sum $EDGE_CADDYFILE"* ]]; then
+    printf '%s  %s\n' "$EDGE_CADDY_HASH" "$EDGE_CADDYFILE"
+  elif [[ "$rendered" == *"sha256sum $EDGE_COMPOSE"* ]]; then
+    printf '%s  %s\n' "$EDGE_COMPOSE_HASH" "$EDGE_COMPOSE"
+  else
+    return 97
+  fi
+}
+check_compose_identity() { return 0; }
+check_loopback_8080() { return 0; }
+check_internal_health() { return 0; }
+check_external_health_semantics() { return 0; }
+capture_cron_journal() { : > "$1"; }
+systemctl() { printf 'active\n'; }
+stat() { printf '1\n'; }
+grep() {
+  [[ "$*" == *"ok=Y"* ]]
+}
+observe "$minute" 0
+'''
+    result = _run_observer_library(
+        body,
+        str(evidence_dir),
+        str(minute),
+        env={"TEST_ASSISTANT_HEALTH": mode},
+    )
+    evidence = evidence_dir / f"observe-{minute}m.txt"
+
+    assert (result.returncode == 0) is accepted, result.stderr
+    assert ("OBSERVE_OK" in result.stdout) is accepted
+    assert evidence.exists() is accepted
+    if accepted:
+        assert "result=PASS" in evidence.read_text(encoding="utf-8")
+    else:
+        assert not list(evidence_dir.glob("observe-*m.txt"))
 
 
 def test_observer_preflights_noninteractive_root_journal_access(
@@ -832,6 +1170,1163 @@ def test_build_uses_single_link_no_clobber_state_publish() -> None:
     assert 'ln -- "$STATE_TEMP" "$STATE"' not in build
 
 
+def test_control_only_successor_may_reuse_either_or_both_runtime_images() -> None:
+    build = _script(BUILD)
+
+    assert '[ "$NEW_APP_IMAGE_ID" != "$OLD_APP_IMAGE_ID" ]' not in build
+    assert (
+        '[ "$NEW_FRONTEND_IMAGE_ID" != "$OLD_FRONTEND_IMAGE_ID" ]'
+        not in build
+    )
+    assert '[[ "$NEW_APP_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]' in build
+    assert (
+        '[[ "$NEW_FRONTEND_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]'
+        in build
+    )
+
+
+def test_container_builds_use_immutable_amd64_bases_and_frozen_locks() -> None:
+    backend = BACKEND_DOCKERFILE.read_text(encoding="utf-8")
+    frontend = FRONTEND_DOCKERFILE.read_text(encoding="utf-8")
+
+    backend_from = re.findall(r"^FROM .+$", backend, re.MULTILINE)
+    frontend_from = re.findall(r"^FROM .+$", frontend, re.MULTILINE)
+    assert len(backend_from) == 1
+    assert len(frontend_from) == 2
+    for instruction in (*backend_from, *frontend_from):
+        assert "--platform=linux/amd64" in instruction
+        assert re.search(r"@sha256:[0-9a-f]{64}(?:\s|$)", instruction)
+    assert "COPY requirements.lock uv.lock pyproject.toml ./" in backend
+    assert "pip install --no-cache-dir --require-hashes" in backend
+    assert "-r requirements.lock" in backend
+    assert (
+        "pip install --no-cache-dir --no-deps --no-build-isolation ."
+        in backend
+    )
+    assert "pip install --no-cache-dir --retries 5 ." not in backend
+    assert "pip install --no-cache-dir --retries 5 --upgrade pip" not in backend
+    assert "COPY package.json package-lock.json ./" in frontend
+    assert "package-lock.json*" not in frontend
+    assert "npm ci --no-audit --no-fund" in frontend
+    assert "npm install " not in frontend
+
+
+def test_dependency_locks_and_cyclonedx_sboms_are_fresh() -> None:
+    assert BACKEND_REQUIREMENTS_LOCK.is_file()
+    assert BACKEND_UV_LOCK.is_file()
+    assert FRONTEND_PACKAGE_LOCK.is_file()
+    assert BACKEND_SBOM.is_file()
+    assert FRONTEND_SBOM.is_file()
+    uv_hash_before = hashlib.sha256(BACKEND_UV_LOCK.read_bytes()).hexdigest()
+    exported = subprocess.run(
+        [
+            "uv",
+            "--no-config",
+            "export",
+            "--frozen",
+            "--offline",
+            "--default-index",
+            "https://pypi.org/simple",
+            "--no-dev",
+            "--no-emit-project",
+            "--format",
+            "requirements-txt",
+            "--no-header",
+        ],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+        env={
+            "HOME": os.environ["HOME"],
+            "PATH": os.environ["PATH"],
+            "UV_NO_CONFIG": "1",
+        },
+        check=False,
+    )
+    assert exported.returncode == 0, exported.stderr
+    assert hashlib.sha256(BACKEND_UV_LOCK.read_bytes()).hexdigest() == (
+        uv_hash_before
+    )
+    assert BACKEND_REQUIREMENTS_LOCK.read_text(encoding="utf-8") == (
+        exported.stdout
+    )
+    checked = subprocess.run(
+        ["python3", str(SBOM_GENERATOR), "--check", str(ROOT)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert checked.returncode == 0, checked.stderr
+    for path in (BACKEND_SBOM, FRONTEND_SBOM):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["bomFormat"] == "CycloneDX"
+        assert payload["specVersion"] == "1.5"
+        assert payload["metadata"]["component"]["type"] == "application"
+        assert payload["components"]
+        refs = [component["bom-ref"] for component in payload["components"]]
+        assert len(refs) == len(set(refs))
+    backend_components = json.loads(
+        BACKEND_SBOM.read_text(encoding="utf-8")
+    )["components"]
+    backend_names = {component["name"] for component in backend_components}
+    assert "fastapi" in backend_names
+    assert "pytest" not in backend_names
+    frontend_components = json.loads(
+        FRONTEND_SBOM.read_text(encoding="utf-8")
+    )["components"]
+    frontend_names = {component["name"] for component in frontend_components}
+    assert "react-router-dom" in frontend_names
+    assert "vitest" not in frontend_names
+    assert "@testing-library/react" not in frontend_names
+    assert any(
+        component["purl"].startswith("pkg:npm/%40ant-design/icons@")
+        for component in frontend_components
+    )
+
+
+def test_sbom_check_rejects_pyproject_dependency_drift(
+    tmp_path: Path,
+) -> None:
+    fixture = tmp_path / "repo"
+    for relative in (
+        ".deploy/generate_dependency_sbom.py",
+        "backend/pyproject.toml",
+        "backend/uv.lock",
+        "backend/requirements.lock",
+        "backend/dependency-sbom.cdx.json",
+        "frontend/package-lock.json",
+        "frontend/dependency-sbom.cdx.json",
+    ):
+        destination = fixture / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative, destination)
+    pyproject = fixture / "backend" / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text(encoding="utf-8").replace(
+            '"fastapi==0.136.1"',
+            '"fastapi==0.136.2"',
+        ),
+        encoding="utf-8",
+    )
+
+    drifted = subprocess.run(
+        [
+            "python3",
+            str(fixture / ".deploy" / "generate_dependency_sbom.py"),
+            "--check",
+            str(fixture),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert drifted.returncode != 0
+    assert "pyproject.toml and uv.lock dependency metadata differ" in (
+        drifted.stderr
+    )
+
+
+def test_supply_chain_inputs_and_image_provenance_are_fail_closed() -> None:
+    package = _script(PACKAGE_CONTROL)
+    installer = _script(INSTALL_CONTROL)
+    build = _script(BUILD)
+    release = _script(RELEASE)
+    provenance_keys = (
+        "BACKEND_REQUIREMENTS_SHA256",
+        "BACKEND_UV_LOCK_SHA256",
+        "FRONTEND_PACKAGE_LOCK_SHA256",
+        "BACKEND_SBOM_SHA256",
+        "FRONTEND_SBOM_SHA256",
+        "BACKEND_BASE_DIGEST",
+        "FRONTEND_BUILD_BASE_DIGEST",
+        "FRONTEND_RUNTIME_BASE_DIGEST",
+    )
+    for key in provenance_keys:
+        assert key in package
+        assert key in installer
+        assert key in build
+        assert key in release
+    assert "CONTROL_FORMAT=v120-control-3" in package
+    assert 'python3 "$RELEASE_SRC/.deploy/generate_dependency_sbom.py"' in build
+    assert '--check "$RELEASE_SRC"' in build
+    for relative in (
+        "backend/requirements.lock",
+        "backend/uv.lock",
+        "frontend/package-lock.json",
+        "backend/dependency-sbom.cdx.json",
+        "frontend/dependency-sbom.cdx.json",
+    ):
+        assert relative in build
+    assert "supply-chain-provenance.txt" in release
+    assert "NEW_APP_IMAGE_ID" in release
+    assert "NEW_FRONTEND_IMAGE_ID" in release
+    assert "v120_publish_exact_evidence" in release
+    assert (
+        '"$SUPPLY_CHAIN_TEMP" "$SUPPLY_CHAIN_EVIDENCE"' in release
+    )
+    assert 'mv -T -- "$SUPPLY_CHAIN_TEMP" "$SUPPLY_CHAIN_EVIDENCE"' not in (
+        release
+    )
+
+
+def test_supply_chain_evidence_publish_is_atomic_idempotent_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "supply-chain-provenance.txt"
+    first = tmp_path / "first.tmp"
+    first.write_text("exact evidence\n", encoding="ascii")
+    first.chmod(0o600)
+    body = 'v120_publish_exact_evidence "$1" "$2"'
+
+    created = _run_release_library(body, str(first), str(destination))
+
+    assert created.returncode == 0, created.stderr
+    assert not first.exists()
+    assert destination.read_text(encoding="ascii") == "exact evidence\n"
+    assert destination.stat().st_nlink == 1
+    assert destination.stat().st_mode & 0o777 == 0o600
+
+    identical = tmp_path / "identical.tmp"
+    identical.write_text("exact evidence\n", encoding="ascii")
+    identical.chmod(0o600)
+    repeated = _run_release_library(body, str(identical), str(destination))
+    assert repeated.returncode == 0, repeated.stderr
+    assert not identical.exists()
+    assert destination.read_text(encoding="ascii") == "exact evidence\n"
+
+    differing = tmp_path / "differing.tmp"
+    differing.write_text("different evidence\n", encoding="ascii")
+    differing.chmod(0o600)
+    rejected = _run_release_library(body, str(differing), str(destination))
+    assert rejected.returncode == 73
+    assert not differing.exists()
+    assert destination.read_text(encoding="ascii") == "exact evidence\n"
+
+    for unsafe_kind in ("symlink", "directory"):
+        unsafe_destination = tmp_path / f"unsafe-{unsafe_kind}"
+        if unsafe_kind == "symlink":
+            unsafe_destination.symlink_to(destination)
+        else:
+            unsafe_destination.mkdir()
+        unsafe_mode = unsafe_destination.lstat().st_mode & 0o777
+        candidate = tmp_path / f"{unsafe_kind}.tmp"
+        candidate.write_text("exact evidence\n", encoding="ascii")
+        candidate.chmod(0o600)
+        unsafe = _run_release_library(
+            body,
+            str(candidate),
+            str(unsafe_destination),
+        )
+        assert unsafe.returncode == 73
+        assert not candidate.exists()
+        if unsafe_kind == "symlink":
+            assert unsafe_destination.is_symlink()
+        else:
+            assert unsafe_destination.is_dir()
+            assert not list(unsafe_destination.iterdir())
+            assert unsafe_destination.stat().st_mode & 0o777 == unsafe_mode
+
+
+def test_v2_current_can_install_v3_successor_but_v3_gate_rejects_v2(
+    tmp_path: Path,
+) -> None:
+    control = tmp_path / "control"
+    versions = control / "versions"
+    versions.mkdir(parents=True, mode=0o700)
+    control.chmod(0o700)
+    versions.chmod(0o700)
+    v2_names_and_keys = (
+        ("v120_state.sh", "V120_STATE_SHA256", b"#!/bin/bash\ntrue\n"),
+        (
+            "sync-v120-root-state.sh",
+            "ROOT_SYNC_SHA256",
+            b"#!/bin/bash\ntrue\n",
+        ),
+        ("rollback-v120.sh", "ROLLBACK_SHA256", b"#!/bin/bash\ntrue\n"),
+        (
+            "install-v120-control.sh",
+            "INSTALLER_SHA256",
+            b"#!/bin/bash\ntrue\n",
+        ),
+        ("it-spareparts.cron", "CRON_SHA256", b"SHELL=/bin/sh\n"),
+        ("source.tar", "SOURCE_TAR_SHA256", b"trusted-source\n"),
+    )
+    v3_only_names_and_keys = (
+        ("hsts-v120-root.sh", "HSTS_ROOT_SHA256", b"#!/bin/bash\ntrue\n"),
+        (
+            "hsts-v120-operator.sh",
+            "HSTS_OPERATOR_SHA256",
+            b"#!/bin/bash\ntrue\n",
+        ),
+        ("edge-v120-root.sh", "EDGE_ROOT_SHA256", b"#!/bin/bash\ntrue\n"),
+        (
+            "edge-v120-operator.sh",
+            "EDGE_OPERATOR_SHA256",
+            b"#!/bin/bash\ntrue\n",
+        ),
+    )
+
+    def make_version(format_name: str) -> tuple[Path, str]:
+        version = versions / f"{format_name}-staging"
+        version.mkdir(mode=0o700)
+        lines = [
+            f"CONTROL_FORMAT={format_name}",
+            "TARGET_COMMIT=" + "4" * 40,
+        ]
+        names_and_keys = v2_names_and_keys
+        if format_name == "v120-control-3":
+            names_and_keys = (
+                *v2_names_and_keys[:4],
+                *v3_only_names_and_keys,
+                *v2_names_and_keys[4:],
+            )
+        for name, key, content in names_and_keys:
+            artifact = version / name
+            artifact.write_bytes(content)
+            artifact.chmod(0o700 if name.endswith(".sh") else 0o600)
+            lines.append(f"{key}={hashlib.sha256(content).hexdigest()}")
+        if format_name == "v120-control-3":
+            for key in (
+                "BACKEND_REQUIREMENTS_SHA256",
+                "BACKEND_UV_LOCK_SHA256",
+                "FRONTEND_PACKAGE_LOCK_SHA256",
+                "BACKEND_SBOM_SHA256",
+                "FRONTEND_SBOM_SHA256",
+                "BACKEND_BASE_DIGEST",
+                "FRONTEND_BUILD_BASE_DIGEST",
+                "FRONTEND_RUNTIME_BASE_DIGEST",
+            ):
+                lines.append(
+                    f"{key}={hashlib.sha256(key.encode()).hexdigest()}"
+                )
+        manifest = version / "manifest.txt"
+        manifest.write_text("\n".join(lines) + "\n", encoding="ascii")
+        manifest.chmod(0o600)
+        manifest_hash = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        final = versions / manifest_hash
+        version.rename(final)
+        return final, manifest_hash
+
+    _, v2_hash = make_version("v120-control-2")
+    v3, v3_hash = make_version("v120-control-3")
+    current = control / "current"
+    current.symlink_to(f"versions/{v2_hash}")
+    env = os.environ.copy()
+    env.update(
+        {
+            "V120_STATE_TEST_MODE": "1",
+            "V120_INSTALLER_LIBRARY_ONLY": "1",
+        }
+    )
+    command = r'''
+source "$1"
+validate_current_predecessor_for_successor "$2" "$3"
+validate_package_directory "$4" "$5"
+publish_current_pointer "$2" "$3" "$5"
+'''
+    upgraded = subprocess.run(
+        [
+            "bash",
+            "-c",
+            command,
+            "bash",
+            str(INSTALL_CONTROL),
+            str(control),
+            str(versions),
+            str(v3),
+            v3_hash,
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    assert upgraded.returncode == 0, upgraded.stderr
+    assert os.readlink(current) == f"versions/{v3_hash}"
+
+    v2_manifest = versions / v2_hash / "manifest.txt"
+    v3_only = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; declare -A parsed=(); '
+            'parse_manifest "$2" parsed',
+            "bash",
+            str(INSTALL_CONTROL),
+            str(v2_manifest),
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    assert v3_only.returncode != 0
+
+
+def _load_artifact_validator() -> object:
+    spec = importlib.util.spec_from_file_location(
+        "release_artifact_validator",
+        ARTIFACT_VALIDATOR,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_artifact_validator_preflights_member_count_before_inflation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = _load_artifact_validator()
+    archive_path = tmp_path / "too-many.zip"
+    archive_path.write_bytes(b"PK fixture")
+
+    class Info:
+        file_size = 1
+        compress_size = 1
+
+        def __init__(self, index: int) -> None:
+            self.filename = f"合同-{index}.xlsx"
+
+        @staticmethod
+        def is_dir() -> bool:
+            return False
+
+    class Archive:
+        def __enter__(self) -> object:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        @staticmethod
+        def infolist() -> list[Info]:
+            return [Info(index) for index in range(501)]
+
+        @staticmethod
+        def testzip() -> None:
+            raise AssertionError("CRC/inflation ran before central-directory limits")
+
+        @staticmethod
+        def read(_member: object) -> bytes:
+            raise AssertionError("member inflation ran before preflight")
+
+    monkeypatch.setattr(validator.zipfile, "ZipFile", lambda *_args: Archive())
+
+    with pytest.raises(SystemExit):
+        validator.validate_zip(archive_path)
+
+
+def test_artifact_validator_rejects_compression_bomb_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = _load_artifact_validator()
+    archive_path = tmp_path / "bomb.zip"
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("合同.xlsx", b"0" * (8 * 1024 * 1024))
+    original_open = zipfile.ZipFile.open
+
+    def forbidden_open(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("compressed bomb was inflated before ratio preflight")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", forbidden_open)
+    try:
+        with pytest.raises(SystemExit):
+            validator.validate_zip(archive_path)
+    finally:
+        monkeypatch.setattr(zipfile.ZipFile, "open", original_open)
+
+
+def test_artifact_validator_streams_large_legitimate_worksheet() -> None:
+    validator = _load_artifact_validator()
+    original = validator.self_test_xlsx("worksheets/sheet1.xml")
+    rewritten = io.BytesIO()
+    worksheet = (
+        b'<worksheet xmlns="'
+        + validator.SHEET_NS.encode()
+        + b'"><sheetData><row><c><v>'
+        + base64.b64encode(os.urandom(13 * 1024 * 1024))
+        + b"</v></c></row></sheetData></worksheet>"
+    )
+    assert len(worksheet) > 16 * 1024 * 1024
+    with zipfile.ZipFile(io.BytesIO(original)) as source:
+        with zipfile.ZipFile(rewritten, "w", zipfile.ZIP_DEFLATED) as target:
+            for info in source.infolist():
+                content = source.read(info)
+                if info.filename == "xl/worksheets/sheet1.xml":
+                    content = worksheet
+                target.writestr(info.filename, content)
+    assert len(rewritten.getvalue()) < 64 * 1024 * 1024
+
+    assert validator.validate_xlsx_bytes(rewritten.getvalue()) == 1
+
+
+def _xlsx_with_workbook_relationship(
+    validator: object,
+    *,
+    relationship_id: str,
+    relationship_type: str,
+    target: str,
+    member_name: str | None,
+    member_content: bytes | None,
+) -> bytes:
+    original = validator.self_test_xlsx("worksheets/sheet1.xml")
+    with zipfile.ZipFile(io.BytesIO(original)) as source:
+        members = {
+            info.filename: source.read(info)
+            for info in source.infolist()
+        }
+    relationship = (
+        f'<Relationship Id="{relationship_id}" '
+        f'Type="{validator.DOCUMENT_REL_NS}/{relationship_type}" '
+        f'Target="{target}"/>'
+    ).encode()
+    members["xl/_rels/workbook.xml.rels"] = members[
+        "xl/_rels/workbook.xml.rels"
+    ].replace(b"</Relationships>", relationship + b"</Relationships>")
+    if member_name is not None and member_content is not None:
+        members[member_name] = member_content
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_STORED) as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+    return output.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("relationship_type", "target", "member_name", "member_content"),
+    (
+        ("styles", "styles.xml", "xl/styles.xml", b"<styleSheet"),
+        (
+            "sharedStrings",
+            "sharedStrings.xml",
+            "xl/sharedStrings.xml",
+            b"<sst><si>",
+        ),
+    ),
+)
+def test_artifact_validator_rejects_malformed_referenced_ooxml_parts(
+    relationship_type: str,
+    target: str,
+    member_name: str,
+    member_content: bytes,
+) -> None:
+    validator = _load_artifact_validator()
+    payload = _xlsx_with_workbook_relationship(
+        validator,
+        relationship_id="rId2",
+        relationship_type=relationship_type,
+        target=target,
+        member_name=member_name,
+        member_content=member_content,
+    )
+
+    with pytest.raises(SystemExit):
+        validator.validate_xlsx_bytes(payload)
+
+
+def test_artifact_validator_rejects_missing_relationship_target() -> None:
+    validator = _load_artifact_validator()
+    payload = _xlsx_with_workbook_relationship(
+        validator,
+        relationship_id="rId2",
+        relationship_type="styles",
+        target="styles.xml",
+        member_name=None,
+        member_content=None,
+    )
+
+    with pytest.raises(SystemExit):
+        validator.validate_xlsx_bytes(payload)
+
+
+def test_artifact_validator_reads_referenced_part_to_crc_eof() -> None:
+    validator = _load_artifact_validator()
+    payload = bytearray(
+        _xlsx_with_workbook_relationship(
+            validator,
+            relationship_id="rId2",
+            relationship_type="styles",
+            target="styles.xml",
+            member_name="xl/styles.xml",
+            member_content=(
+                f'<styleSheet xmlns="{validator.SHEET_NS}"/>'.encode()
+            ),
+        )
+    )
+    marker = b"<styleSheet"
+    marker_offset = payload.index(marker)
+    payload[marker_offset + 2] ^= 0x01
+
+    with pytest.raises(SystemExit):
+        validator.validate_xlsx_bytes(bytes(payload))
+
+
+def _write_fake_pipe_chrome(path: Path) -> None:
+    path.write_text(
+        textwrap.dedent(
+            r"""
+        #!/usr/bin/env python3
+        import base64
+        import json
+        import os
+        import signal
+        import sys
+        import time
+        from urllib.parse import urlparse
+
+        args_log = os.environ.get("MOBILE_TEST_ARGS_LOG")
+        cleanup_log = os.environ.get("MOBILE_PROBE_TEST_CLEANUP_LOG")
+        if args_log:
+            with open(args_log, "w", encoding="utf-8") as handle:
+                json.dump(sys.argv[1:], handle)
+        if os.environ.get("MOBILE_TEST_IGNORE_TERM") == "1":
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        elif cleanup_log:
+            def terminate(_signal, _frame):
+                with open(cleanup_log, "a", encoding="utf-8") as handle:
+                    handle.write("chrome-terminal\n")
+                raise SystemExit(0)
+
+            signal.signal(signal.SIGTERM, terminate)
+        route = "/"
+        buffer = b""
+        while True:
+            chunk = os.read(3, 65536)
+            if not chunk:
+                if os.environ.get("MOBILE_TEST_IGNORE_TERM") == "1":
+                    time.sleep(30)
+                break
+            buffer += chunk
+            while b"\0" in buffer:
+                frame, buffer = buffer.split(b"\0", 1)
+                if not frame:
+                    continue
+                message = json.loads(frame)
+                method = message["method"]
+                params = message.get("params", {})
+                result = {}
+                if (
+                    method not in ("Target.getTargets", "Target.attachToTarget")
+                    and message.get("sessionId") != "session-1"
+                ):
+                    response = {
+                        "id": message["id"],
+                        "error": {"message": "missing page session"},
+                    }
+                    os.write(
+                        4,
+                        json.dumps(response).encode("utf-8") + b"\0",
+                    )
+                    continue
+                if method == "Target.getTargets":
+                    if os.environ.get("MOBILE_TEST_STALL") == "1":
+                        time.sleep(30)
+                    result = {
+                        "targetInfos": [{
+                            "targetId": "page-1",
+                            "type": "page",
+                            "url": "about:blank",
+                        }]
+                    }
+                elif method == "Target.attachToTarget":
+                    result = {"sessionId": "session-1"}
+                elif method == "Page.navigate":
+                    route = urlparse(params["url"]).path
+                    if (
+                        os.environ.get("MOBILE_TEST_REDIRECT_ROUTE")
+                        and route == "/maintenance"
+                    ):
+                        route = os.environ["MOBILE_TEST_REDIRECT_ROUTE"]
+                    result = {"frameId": "frame-1"}
+                elif method == "Runtime.evaluate":
+                    expression = params.get("expression", "")
+                    if "location.pathname" in expression:
+                        result = {"result": {"value": {
+                            "route": route,
+                            "width": 375,
+                            "globalOverflow": False,
+                            "failed": False,
+                            "hasContent": True,
+                            "hasAnchor": (
+                                os.environ.get("MOBILE_TEST_MISSING_ANCHOR")
+                                != route
+                            ),
+                        }}}
+                    elif "/api/maintenance/board/export" in expression:
+                        result = {"result": {"value": {
+                            "status": 200,
+                            "disposition": (
+                                "attachment; filename=fixture.csv"
+                            ),
+                            "type": "text/csv; charset=utf-8",
+                            "cache": "no-store",
+                        }}}
+                    else:
+                        result = {"result": {"value": True}}
+                elif method == "Page.captureScreenshot":
+                    result = {
+                        "data": base64.b64encode(b"png").decode("ascii")
+                    }
+                response = {
+                    "id": message["id"],
+                    "result": result,
+                }
+                if "sessionId" in message:
+                    response["sessionId"] = message["sessionId"]
+                os.write(
+                    4,
+                    json.dumps(response).encode("utf-8") + b"\0",
+                )
+        if cleanup_log:
+            with open(cleanup_log, "a", encoding="utf-8") as handle:
+                handle.write("chrome-terminal\n")
+        """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def _run_mobile_pipe_case(
+    tmp_path: Path,
+    case: str,
+    *,
+    redirect: str | None = None,
+    missing_anchor: str | None = None,
+    ignore_term: bool = False,
+    stall: bool = False,
+    overall_timeout_ms: int | None = None,
+    profile_rm_failures: str | None = None,
+    cleanup_log: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path, Path]:
+    case_dir = tmp_path / case
+    case_dir.mkdir(mode=0o700)
+    work = case_dir / "work"
+    work.mkdir(mode=0o700)
+    login = work / "login.json"
+    token = "fixture-token-must-not-reach-argv"
+    login.write_text(
+        json.dumps(
+            {
+                "token": token,
+                "role": "admin",
+                "name": "fixture",
+                "permissions": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    login.chmod(0o600)
+    fake_chrome = case_dir / "fake-chrome"
+    _write_fake_pipe_chrome(fake_chrome)
+    args_log = case_dir / "chrome-args.json"
+    evidence = work / "evidence.txt"
+    screenshot = work / "screen.png"
+    env = os.environ.copy()
+    env["MOBILE_TEST_ARGS_LOG"] = str(args_log)
+    if cleanup_log:
+        env["MOBILE_PROBE_TEST_CLEANUP_LOG"] = str(
+            case_dir / "cleanup.log"
+        )
+    if redirect is not None:
+        env["MOBILE_TEST_REDIRECT_ROUTE"] = redirect
+    if missing_anchor is not None:
+        env["MOBILE_TEST_MISSING_ANCHOR"] = missing_anchor
+    if ignore_term:
+        env["MOBILE_TEST_IGNORE_TERM"] = "1"
+    if stall:
+        env["MOBILE_TEST_STALL"] = "1"
+    if overall_timeout_ms is not None:
+        env["MOBILE_PROBE_TEST_MODE"] = "1"
+        env["MOBILE_PROBE_TEST_OVERALL_TIMEOUT_MS"] = str(
+            overall_timeout_ms
+        )
+    if profile_rm_failures is not None:
+        env["MOBILE_PROBE_TEST_MODE"] = "1"
+        env["MOBILE_PROBE_TEST_PROFILE_RM_FAILURES"] = profile_rm_failures
+    result = subprocess.run(
+        [
+            "/usr/bin/node",
+            str(MOBILE_RELEASE_PROBE),
+            str(fake_chrome),
+            str(login),
+            str(evidence),
+            str(screenshot),
+            str(work),
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+        timeout=20,
+    )
+    return result, login, evidence, screenshot, args_log
+
+
+def test_mobile_probe_uses_fake_cdp_pipe_without_tcp_or_token_argv(
+    tmp_path: Path,
+) -> None:
+    result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
+        tmp_path,
+        "accepted",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert evidence.is_file() and screenshot.is_file()
+    assert not login.exists()
+    args = json.loads(args_log.read_text(encoding="utf-8"))
+    assert "--remote-debugging-pipe" in args
+    assert not any("remote-debugging-port" in arg for arg in args)
+    assert not any("remote-debugging-address" in arg for arg in args)
+    assert "fixture-token-must-not-reach-argv" not in json.dumps(args)
+    assert not list((tmp_path / "accepted" / "work").glob("chrome-profile-*"))
+
+
+@pytest.mark.parametrize(
+    ("redirect", "missing_anchor"),
+    (
+        ("/maintenance/projects", None),
+        (None, "/maintenance/downloads"),
+    ),
+)
+def test_mobile_probe_fails_closed_on_route_or_anchor_mismatch(
+    tmp_path: Path,
+    redirect: str | None,
+    missing_anchor: str | None,
+) -> None:
+    result, login, evidence, screenshot, _args = _run_mobile_pipe_case(
+        tmp_path,
+        "rejected-route" if redirect else "rejected-anchor",
+        redirect=redirect,
+        missing_anchor=missing_anchor,
+    )
+
+    assert result.returncode != 0
+    assert not login.exists()
+    assert not evidence.exists()
+    assert not screenshot.exists()
+
+
+def test_mobile_probe_double_failure_still_cleans_response_and_profile(
+    tmp_path: Path,
+) -> None:
+    result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
+        tmp_path,
+        "double-failure",
+        redirect="/maintenance/projects",
+        ignore_term=True,
+    )
+
+    assert result.returncode != 0
+    assert not login.exists()
+    assert not evidence.exists()
+    assert not screenshot.exists()
+    args = json.loads(args_log.read_text(encoding="utf-8"))
+    profile_arg = next(arg for arg in args if arg.startswith("--user-data-dir="))
+    assert not Path(profile_arg.partition("=")[2]).exists()
+
+
+def test_mobile_probe_does_not_delete_unvalidated_external_login(
+    tmp_path: Path,
+) -> None:
+    case = tmp_path / "unsafe-external-login"
+    case.mkdir(mode=0o700)
+    work = case / "work"
+    work.mkdir(mode=0o700)
+    external_login = case / "external-login.json"
+    payload = '{"token":"must-remain"}'
+    external_login.write_text(payload, encoding="utf-8")
+    external_login.chmod(0o600)
+    fake_chrome = case / "fake-chrome"
+    _write_fake_pipe_chrome(fake_chrome)
+
+    result = subprocess.run(
+        [
+            "/usr/bin/node",
+            str(MOBILE_RELEASE_PROBE),
+            str(fake_chrome),
+            str(external_login),
+            str(work / "evidence.txt"),
+            str(work / "screen.png"),
+            str(work),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert external_login.read_text(encoding="utf-8") == payload
+    assert not (work / "evidence.txt").exists()
+    assert not (work / "screen.png").exists()
+    assert not list(work.glob("chrome-profile-*"))
+
+
+def test_mobile_probe_overall_timeout_cancels_work_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    started = time.monotonic()
+    result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
+        tmp_path,
+        "overall-timeout",
+        stall=True,
+        overall_timeout_ms=50,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode != 0
+    assert "mobile release probe timed out" in result.stderr
+    assert elapsed < 5
+    assert not login.exists()
+    assert not evidence.exists()
+    assert not screenshot.exists()
+    args = json.loads(args_log.read_text(encoding="utf-8"))
+    profile_arg = next(arg for arg in args if arg.startswith("--user-data-dir="))
+    profile = Path(profile_arg.partition("=")[2])
+    time.sleep(0.2)
+    assert not profile.exists()
+    assert not evidence.exists()
+    assert not screenshot.exists()
+
+
+@pytest.mark.parametrize(
+    "failures",
+    (
+        "ENOTEMPTY",
+        "EBUSY,EPERM,ENOTEMPTY",
+    ),
+)
+def test_mobile_probe_retries_transient_profile_removal_after_chrome_exit(
+    tmp_path: Path,
+    failures: str,
+) -> None:
+    result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
+        tmp_path,
+        f"profile-retry-{failures.replace(',', '-')}",
+        profile_rm_failures=failures,
+        cleanup_log=True,
+    )
+    case = args_log.parent
+    events = (case / "cleanup.log").read_text(encoding="utf-8").splitlines()
+    args = json.loads(args_log.read_text(encoding="utf-8"))
+    profile_arg = next(arg for arg in args if arg.startswith("--user-data-dir="))
+
+    assert result.returncode == 0, result.stderr
+    assert not login.exists()
+    assert evidence.is_file() and screenshot.is_file()
+    assert not Path(profile_arg.partition("=")[2]).exists()
+    assert events[0] == "chrome-terminal"
+    assert events[1:-1] == [
+        f"profile-remove-error:{code}" for code in failures.split(",")
+    ]
+    assert events[-1] == "profile-removed"
+
+
+def test_mobile_probe_profile_retry_exhaustion_fails_closed_for_outer_cleanup(
+    tmp_path: Path,
+) -> None:
+    failures = ",".join(["ENOTEMPTY"] * 6)
+    result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
+        tmp_path,
+        "profile-retry-exhausted",
+        profile_rm_failures=failures,
+        cleanup_log=True,
+    )
+    work = login.parent
+    args = json.loads(args_log.read_text(encoding="utf-8"))
+    profile_arg = next(arg for arg in args if arg.startswith("--user-data-dir="))
+    profile = Path(profile_arg.partition("=")[2])
+
+    assert result.returncode != 0
+    assert "ENOTEMPTY" in result.stderr
+    assert not login.exists()
+    assert not evidence.exists()
+    assert not screenshot.exists()
+    assert profile.is_dir() and stat.S_IMODE(profile.stat().st_mode) == 0o700
+    assert "profile-removed" not in (
+        args_log.parent / "cleanup.log"
+    ).read_text(encoding="utf-8")
+    shutil.rmtree(work)
+    assert not work.exists()
+
+
+def test_mobile_probe_does_not_retry_or_swallow_non_transient_profile_error(
+    tmp_path: Path,
+) -> None:
+    result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
+        tmp_path,
+        "profile-non-transient",
+        profile_rm_failures="EIO",
+        cleanup_log=True,
+    )
+    events = (
+        args_log.parent / "cleanup.log"
+    ).read_text(encoding="utf-8").splitlines()
+    args = json.loads(args_log.read_text(encoding="utf-8"))
+    profile_arg = next(arg for arg in args if arg.startswith("--user-data-dir="))
+    profile = Path(profile_arg.partition("=")[2])
+
+    assert result.returncode != 0
+    assert "EIO" in result.stderr
+    assert events == ["chrome-terminal", "profile-remove-error:EIO"]
+    assert profile.is_dir()
+    assert not login.exists()
+    assert not evidence.exists()
+    assert not screenshot.exists()
+    shutil.rmtree(login.parent)
+
+
+def test_mobile_probe_static_pipe_contract_is_portable() -> None:
+    probe = MOBILE_RELEASE_PROBE.read_text(encoding="utf-8")
+    runbook = (
+        ROOT / "docs" / "releases" / "edge-v120-scoped-runbook.md"
+    ).read_text(encoding="utf-8")
+
+    assert 'from "node:child_process"' in probe
+    assert "--remote-debugging-pipe" in probe
+    assert "remote-debugging-port" not in probe
+    assert "remote-debugging-address" not in probe
+    assert "remote-allow-origins" not in probe
+    assert "WebSocket" not in probe
+    assert "DevToolsActivePort" not in probe
+    assert 'stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"]' in probe
+    assert "chrome.stdio[3]" in probe and "chrome.stdio[4]" in probe
+    assert "Emulation.setDeviceMetricsOverride" in probe
+    assert "OVERALL_TIMEOUT_MS" in probe
+    assert "rejectPending" in probe
+    assert 'chrome.kill("SIGTERM")' in probe
+    assert 'chrome.kill("SIGKILL")' in probe
+    assert "fs.rmSync(profilePath" in probe
+    assert "fs.rmSync(validatedLoginPath" in probe
+    assert "for (const [output, owned]" in probe
+    assert "MOBILE_PROBE_TEST_ORIGIN" in probe
+    assert "MOBILE_PROBE_TEST_MODE" in probe
+    assert "MOBILE_PROBE_TEST_OVERALL_TIMEOUT_MS" in probe
+    assert "mobile probe work directory is unsafe" in probe
+    assert "must be a direct child of the private work dir" in probe
+    assert "env -u MOBILE_PROBE_TEST_ORIGIN -u MOBILE_PROBE_TEST_MODE" in runbook
+    assert "mobile_listeners_before" in runbook
+    assert "mobile_listeners_after" in runbook
+    assert "origin=https://hbzgc.icu" in runbook
+    assert re.search(r"CHROME_SHA256_EXPECTED=[0-9a-f]{64}", runbook)
+    assert re.search(r"NODE_SHA256_EXPECTED=[0-9a-f]{64}", runbook)
+    assert "CHROME_BIN=/opt/google/chrome/google-chrome" in runbook
+    assert "NODE_BIN=/usr/bin/node" in runbook
+
+
+@pytest.mark.skipif(
+    os.environ.get("IT_DATA_RELEASE_HOST_LIVE") != "1",
+    reason="release-host Chrome pipe smoke is explicitly opt-in",
+)
+def test_mobile_probe_real_chrome_pipe_against_loopback_fixture(
+    tmp_path: Path,
+) -> None:
+    class FixtureHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            if self.path.startswith("/api/maintenance/board/export?"):
+                body = b"contract,profit\\nfixture,1.00\\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header(
+                    "Content-Disposition",
+                    "attachment; filename=fixture.csv",
+                )
+                self.send_header("Cache-Control", "no-store")
+            else:
+                body = (
+                    "<!doctype html><meta charset=utf-8>"
+                    "<meta name=viewport content='width=device-width'>"
+                    "<main>详细盈亏 下载中心 项目提醒</main>"
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        case = tmp_path / "real-chrome-pipe"
+        case.mkdir(mode=0o700)
+        work = case / "work"
+        work.mkdir(mode=0o700)
+        login = work / "login.json"
+        login.write_text(
+            json.dumps(
+                {
+                    "token": "fixture-only-token",
+                    "role": "admin",
+                    "name": "fixture",
+                    "permissions": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        login.chmod(0o600)
+        evidence = work / "evidence.txt"
+        screenshot = work / "screen.png"
+        listeners_before = subprocess.run(
+            ["ss", "-H", "-ltnp"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        env = os.environ.copy()
+        env["MOBILE_PROBE_TEST_MODE"] = "1"
+        env["MOBILE_PROBE_TEST_ORIGIN"] = (
+            f"http://127.0.0.1:{server.server_port}"
+        )
+
+        result = subprocess.run(
+            [
+                "/usr/bin/node",
+                str(MOBILE_RELEASE_PROBE),
+                "/opt/google/chrome/google-chrome",
+                str(login),
+                str(evidence),
+                str(screenshot),
+                str(work),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        listeners_after = subprocess.run(
+            ["ss", "-H", "-ltnp"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+        assert result.returncode == 0, result.stderr
+        assert listeners_after == listeners_before
+        assert not login.exists()
+        assert evidence.is_file() and evidence.stat().st_size > 0
+        assert screenshot.is_file() and screenshot.stat().st_size > 0
+        assert (
+            f"origin=http://127.0.0.1:{server.server_port}"
+            in evidence.read_text(encoding="utf-8")
+        )
+        assert not list(work.glob("chrome-profile-*"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def test_built_retry_rebuilds_only_its_marked_evidence_directory(
     tmp_path: Path,
 ) -> None:
@@ -1239,6 +2734,166 @@ def test_supersession_policy_phase_table(
     assert (result.returncode == 0) is expected, result.stderr
 
 
+def test_observed_release_can_be_superseded_with_exact_runtime_parent(
+    tmp_path: Path,
+) -> None:
+    parent_values = _phase_values(
+        "observed",
+        rollback_policy="forward_only",
+        attempt_no=2,
+    )
+    parent = tmp_path / "parent.state"
+    parent.write_text(_render_state(parent_values), encoding="ascii")
+    parent.chmod(0o600)
+    parent_hash = hashlib.sha256(parent.read_bytes()).hexdigest()
+    child = tmp_path / "child.state"
+    child.write_text(
+        _built_state(
+            target="b" * 40,
+            attempt_no=3,
+            parent_release_id=parent_values["RELEASE_ID"],
+            parent_state_hash=parent_hash,
+            rollback_policy="old_allowed",
+            old_running_source_commit=parent_values["TARGET_COMMIT"],
+            old_app_image_id=parent_values["NEW_APP_IMAGE_ID"],
+            old_frontend_image_id=parent_values["NEW_FRONTEND_IMAGE_ID"],
+        ),
+        encoding="ascii",
+    )
+    child.chmod(0o600)
+
+    result = _run_state(
+        parent,
+        'declare -A old_state=() new_state=(); '
+        'v120_state_parse_to_array "$1" old_state; '
+        'v120_state_parse_to_array "$2" new_state; '
+        'v120_state_validate_supersession old_state new_state "$3"',
+        str(child),
+        parent_hash,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "wrong_field",
+    (
+        "OLD_RUNNING_SOURCE_COMMIT",
+        "OLD_APP_IMAGE_ID",
+        "OLD_FRONTEND_IMAGE_ID",
+    ),
+)
+def test_observed_supersession_rejects_runtime_not_bound_to_parent(
+    tmp_path: Path,
+    wrong_field: str,
+) -> None:
+    parent_values = _phase_values(
+        "observed",
+        rollback_policy="forward_only",
+        attempt_no=2,
+    )
+    parent = tmp_path / "parent.state"
+    parent.write_text(_render_state(parent_values), encoding="ascii")
+    parent.chmod(0o600)
+    parent_hash = hashlib.sha256(parent.read_bytes()).hexdigest()
+    child_values = _built_values(
+        target="b" * 40,
+        attempt_no=3,
+        parent_release_id=parent_values["RELEASE_ID"],
+        parent_state_hash=parent_hash,
+        rollback_policy="old_allowed",
+        old_running_source_commit=parent_values["TARGET_COMMIT"],
+        old_app_image_id=parent_values["NEW_APP_IMAGE_ID"],
+        old_frontend_image_id=parent_values["NEW_FRONTEND_IMAGE_ID"],
+    )
+    if wrong_field.endswith("_IMAGE_ID"):
+        child_values[wrong_field] = "sha256:" + "0" * 64
+    else:
+        child_values[wrong_field] = "e" * 40
+    child = tmp_path / "child.state"
+    child.write_text(_render_state(child_values), encoding="ascii")
+    child.chmod(0o600)
+
+    result = _run_state(
+        parent,
+        'declare -A old_state=() new_state=(); '
+        'v120_state_parse_to_array "$1" old_state; '
+        'v120_state_parse_to_array "$2" new_state; '
+        'v120_state_validate_supersession old_state new_state "$3"',
+        str(child),
+        parent_hash,
+    )
+
+    assert result.returncode == 73
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ("prepared", "backup_verified", "opening", "switched"),
+)
+def test_supersession_base_rejects_inflight_parent_phase(
+    tmp_path: Path,
+    phase: str,
+) -> None:
+    parent = tmp_path / "parent.state"
+    parent.write_text(_phase_state(phase), encoding="ascii")
+    parent.chmod(0o600)
+
+    result = _run_state(
+        parent,
+        'declare -A parent=() base=(); '
+        'v120_state_parse_to_array "$1" parent; '
+        "v120_state_select_supersession_base parent base",
+    )
+
+    assert result.returncode == 73
+
+
+def test_observed_parent_selects_promoted_images_as_rollback_base(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "parent.state"
+    parent_values = _phase_values(
+        "observed",
+        rollback_policy="forward_only",
+        attempt_no=2,
+    )
+    parent.write_text(_render_state(parent_values), encoding="ascii")
+    parent.chmod(0o600)
+
+    result = _run_state(
+        parent,
+        'declare -A parent=() base=(); '
+        'v120_state_parse_to_array "$1" parent; '
+        'v120_state_select_supersession_base parent base; '
+        'printf "%s\\n%s\\n%s\\n%s\\n%s\\n" '
+        '"${base[RUNNING_SOURCE_COMMIT]}" "${base[APP_IMAGE_ID]}" '
+        '"${base[FRONTEND_IMAGE_ID]}" "${base[ROLLBACK_POLICY]}" '
+        '"${base[REQUIRE_RUNNING]}"',
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        parent_values["TARGET_COMMIT"],
+        parent_values["NEW_APP_IMAGE_ID"],
+        parent_values["NEW_FRONTEND_IMAGE_ID"],
+        "old_allowed",
+        "1",
+    ]
+
+
+def test_release_and_rollback_accept_parent_bound_dynamic_running_source() -> None:
+    release = _script(RELEASE)
+    rollback = _script(ROLLBACK)
+
+    assert "EXPECTED_OLD_RUNNING_SOURCE_COMMIT" not in release
+    assert "EXPECTED_OLD_RUNNING_SOURCE_COMMIT" not in rollback
+    release_main = release.split("trap release_abort EXIT", 1)[1]
+    authority_check = 'v120_evidence_reset_authorized "$STATE"'
+    container_read = "BASE_DB_CID=$(compose ps -q db)"
+    assert release_main.index(authority_check) < release_main.index(container_read)
+
+
 def test_supersession_rejects_wrong_parent_state_hash(
     tmp_path: Path,
 ) -> None:
@@ -1376,9 +3031,22 @@ def test_control_package_is_built_from_exact_git_objects(
         ".deploy/sync_v120_root_state.sh",
         ".deploy/rollback_v120.sh",
         ".deploy/install_v120_control.sh",
+        ".deploy/hsts_v120_root.sh",
+        ".deploy/hsts_v120_operator.sh",
+        ".deploy/edge_v120_root.sh",
+        ".deploy/edge_v120_operator.sh",
         ".deploy/it-spareparts.cron",
     )
-    for relative in source_paths:
+    supply_paths = (
+        "backend/Dockerfile",
+        "backend/requirements.lock",
+        "backend/uv.lock",
+        "backend/dependency-sbom.cdx.json",
+        "frontend/Dockerfile",
+        "frontend/package-lock.json",
+        "frontend/dependency-sbom.cdx.json",
+    )
+    for relative in (*source_paths, *supply_paths):
         destination = repo / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, destination)
@@ -1430,7 +3098,7 @@ def test_control_package_is_built_from_exact_git_objects(
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() == manifest_hash
     assert manifest.stat().st_mode & 0o777 == 0o600
     assert manifest.read_text(encoding="ascii").splitlines()[:2] == [
-        "CONTROL_FORMAT=v120-control-2",
+        "CONTROL_FORMAT=v120-control-3",
         f"TARGET_COMMIT={target}",
     ]
     source_tar = package / "source.tar"
@@ -1454,6 +3122,10 @@ def test_control_package_is_built_from_exact_git_objects(
         "sync-v120-root-state.sh",
         "rollback-v120.sh",
         "install-v120-control.sh",
+        "hsts-v120-root.sh",
+        "hsts-v120-operator.sh",
+        "edge-v120-root.sh",
+        "edge-v120-operator.sh",
         "it-spareparts.cron",
     )
     for relative, name in zip(source_paths, package_names, strict=True):
@@ -1477,9 +3149,22 @@ def test_control_packager_rejects_forged_loose_git_object(
         ".deploy/sync_v120_root_state.sh",
         ".deploy/rollback_v120.sh",
         ".deploy/install_v120_control.sh",
+        ".deploy/hsts_v120_root.sh",
+        ".deploy/hsts_v120_operator.sh",
+        ".deploy/edge_v120_root.sh",
+        ".deploy/edge_v120_operator.sh",
         ".deploy/it-spareparts.cron",
     )
-    for relative in source_paths:
+    supply_paths = (
+        "backend/Dockerfile",
+        "backend/requirements.lock",
+        "backend/uv.lock",
+        "backend/dependency-sbom.cdx.json",
+        "frontend/Dockerfile",
+        "frontend/package-lock.json",
+        "frontend/dependency-sbom.cdx.json",
+    )
+    for relative in (*source_paths, *supply_paths):
         destination = repo / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / relative, destination)
@@ -1597,6 +3282,68 @@ def test_installer_rejects_symlink_directory_without_changing_target_mode(
     assert target.stat().st_mode & 0o777 == 0o711
 
 
+def test_installer_creates_exact_persistent_shared_caddy_lock(
+    tmp_path: Path,
+) -> None:
+    lock = tmp_path / "shared-caddy.lock"
+    account = pwd.getpwuid(os.getuid())
+    group = grp.getgrgid(os.getgid())
+    env = os.environ.copy()
+    env.update(
+        {
+            "V120_STATE_TEST_MODE": "1",
+            "V120_INSTALLER_LIBRARY_ONLY": "1",
+        }
+    )
+    command = (
+        'source "$1"; '
+        'ensure_new_or_exact_lock_file "$2" "$3" "$4"'
+    )
+
+    created = subprocess.run(
+        [
+            "bash",
+            "-c",
+            command,
+            "bash",
+            str(INSTALL_CONTROL),
+            str(lock),
+            account.pw_name,
+            group.gr_name,
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert created.returncode == 0, created.stderr
+    metadata = lock.stat()
+    assert stat.S_ISREG(metadata.st_mode)
+    assert stat.S_IMODE(metadata.st_mode) == 0o600
+    assert metadata.st_nlink == 1
+    hardlink = tmp_path / "shared-caddy-hardlink"
+    os.link(lock, hardlink)
+    rejected = subprocess.run(
+        [
+            "bash",
+            "-c",
+            command,
+            "bash",
+            str(INSTALL_CONTROL),
+            str(lock),
+            account.pw_name,
+            group.gr_name,
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert "lock file" in rejected.stderr
+
+
 def test_bootstrap_authorization_is_explicit_and_never_self_minted(
     tmp_path: Path,
 ) -> None:
@@ -1606,14 +3353,26 @@ def test_bootstrap_authorization_is_explicit_and_never_self_minted(
     manifest.write_text(
         "\n".join(
             (
-                "CONTROL_FORMAT=v120-control-2",
+                "CONTROL_FORMAT=v120-control-3",
                 f"TARGET_COMMIT={target}",
                 "V120_STATE_SHA256=" + "5" * 64,
                 "ROOT_SYNC_SHA256=" + "6" * 64,
                 "ROLLBACK_SHA256=" + "7" * 64,
                 "INSTALLER_SHA256=" + "8" * 64,
+                "HSTS_ROOT_SHA256=" + "b" * 64,
+                "HSTS_OPERATOR_SHA256=" + "c" * 64,
+                "EDGE_ROOT_SHA256=" + "d" * 64,
+                "EDGE_OPERATOR_SHA256=" + "e" * 64,
                 "CRON_SHA256=" + "9" * 64,
                 "SOURCE_TAR_SHA256=" + "a" * 64,
+                "BACKEND_REQUIREMENTS_SHA256=" + "1" * 64,
+                "BACKEND_UV_LOCK_SHA256=" + "2" * 64,
+                "FRONTEND_PACKAGE_LOCK_SHA256=" + "3" * 64,
+                "BACKEND_SBOM_SHA256=" + "4" * 64,
+                "FRONTEND_SBOM_SHA256=" + "5" * 64,
+                "BACKEND_BASE_DIGEST=" + "6" * 64,
+                "FRONTEND_BUILD_BASE_DIGEST=" + "7" * 64,
+                "FRONTEND_RUNTIME_BASE_DIGEST=" + "8" * 64,
             )
         )
         + "\n",
@@ -1851,6 +3610,85 @@ def test_current_control_pointer_switch_is_atomic_at_failpoint(
     assert (current / "generation").read_text(encoding="ascii") == "new\n"
 
 
+def test_interrupted_initial_bootstrap_is_exactly_reentrant(
+    tmp_path: Path,
+) -> None:
+    control = tmp_path / "control"
+    versions = control / "versions"
+    archive = control / "archive"
+    versions.mkdir(parents=True, mode=0o700)
+    archive.mkdir(mode=0o700)
+    control.chmod(0o700)
+    versions.chmod(0o700)
+    archive.chmod(0o700)
+    _version, manifest_hash, target = _make_v3_control_version(versions)
+    authorization = tmp_path / "bootstrap.authorization"
+    authorization.write_text(
+        "AUTHORIZATION_FORMAT=v120-bootstrap-1\n"
+        f"CONTROL_MANIFEST_HASH={manifest_hash}\n"
+        f"TARGET_COMMIT={target}\n",
+        encoding="ascii",
+    )
+    authorization.chmod(0o600)
+    marker = tmp_path / "authority.marker"
+    state = control / "v120-state.state"
+    invocation = (
+        'validate_interrupted_bootstrap_state "$1" "$2" "$3" '
+        '"$4" "$5" "$6" "$7"'
+    )
+
+    accepted = _run_installer_library(
+        invocation,
+        str(control),
+        str(versions),
+        str(archive),
+        str(authorization),
+        str(marker),
+        str(state),
+        manifest_hash,
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    current = control / "current"
+    failed_pointer = _run_installer_library(
+        'publish_current_pointer "$1" "$2" "$3"',
+        str(control),
+        str(versions),
+        manifest_hash,
+        env={"V120_INSTALLER_TEST_FAILPOINT": "kill_before_current_rename"},
+    )
+    assert failed_pointer.returncode != 0
+    assert not current.exists() and not current.is_symlink()
+    retried = _run_installer_library(
+        invocation + '; publish_current_pointer "$1" "$2" "$7"',
+        str(control),
+        str(versions),
+        str(archive),
+        str(authorization),
+        str(marker),
+        str(state),
+        manifest_hash,
+    )
+    assert retried.returncode == 0, retried.stderr
+    assert current.is_symlink()
+    assert os.readlink(current) == f"versions/{manifest_hash}"
+
+    current.unlink()
+    rogue = versions / ("f" * 64)
+    rogue.mkdir(mode=0o700)
+    rejected = _run_installer_library(
+        invocation,
+        str(control),
+        str(versions),
+        str(archive),
+        str(authorization),
+        str(marker),
+        str(state),
+        manifest_hash,
+    )
+    assert rejected.returncode != 0
+
+
 def test_whole_control_manifest_is_revalidated_before_use(
     tmp_path: Path,
 ) -> None:
@@ -1869,11 +3707,31 @@ def test_whole_control_manifest_is_revalidated_before_use(
             "INSTALLER_SHA256",
             b"#!/bin/bash\ntrue\n",
         ),
+        (
+            "hsts-v120-root.sh",
+            "HSTS_ROOT_SHA256",
+            b"#!/bin/bash\ntrue\n",
+        ),
+        (
+            "hsts-v120-operator.sh",
+            "HSTS_OPERATOR_SHA256",
+            b"#!/bin/bash\ntrue\n",
+        ),
+        (
+            "edge-v120-root.sh",
+            "EDGE_ROOT_SHA256",
+            b"#!/bin/bash\ntrue\n",
+        ),
+        (
+            "edge-v120-operator.sh",
+            "EDGE_OPERATOR_SHA256",
+            b"#!/bin/bash\ntrue\n",
+        ),
         ("it-spareparts.cron", "CRON_SHA256", b"SHELL=/bin/sh\n"),
         ("source.tar", "SOURCE_TAR_SHA256", b"trusted-source\n"),
     )
     manifest_lines = [
-        "CONTROL_FORMAT=v120-control-2",
+        "CONTROL_FORMAT=v120-control-3",
         "TARGET_COMMIT=" + "4" * 40,
     ]
     for name, key, content in names_and_keys:
@@ -1881,6 +3739,17 @@ def test_whole_control_manifest_is_revalidated_before_use(
         artifact.write_bytes(content)
         artifact.chmod(0o700 if name.endswith(".sh") else 0o600)
         manifest_lines.append(f"{key}={hashlib.sha256(content).hexdigest()}")
+    for key in (
+        "BACKEND_REQUIREMENTS_SHA256",
+        "BACKEND_UV_LOCK_SHA256",
+        "FRONTEND_PACKAGE_LOCK_SHA256",
+        "BACKEND_SBOM_SHA256",
+        "FRONTEND_SBOM_SHA256",
+        "BACKEND_BASE_DIGEST",
+        "FRONTEND_BUILD_BASE_DIGEST",
+        "FRONTEND_RUNTIME_BASE_DIGEST",
+    ):
+        manifest_lines.append(f"{key}={hashlib.sha256(key.encode()).hexdigest()}")
     manifest = package / "manifest.txt"
     manifest.write_text("\n".join(manifest_lines) + "\n", encoding="ascii")
     manifest.chmod(0o600)
@@ -2363,6 +4232,17 @@ def test_release_runbook_extracts_all_dependencies_before_shellcheck() -> None:
     assert section.count(first_loop) == 2
 
 
+def test_control_installer_passes_bare_shellcheck_x() -> None:
+    result = subprocess.run(
+        ["shellcheck", "-x", str(INSTALL_CONTROL)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_release_runbook_stages_the_exact_required_release_artifacts() -> None:
     runbook = RELEASE_RUNBOOK.read_text(encoding="utf-8")
     release_script = _script(RELEASE)
@@ -2374,6 +4254,8 @@ def test_release_runbook_stages_the_exact_required_release_artifacts() -> None:
         "observe_v120.sh",
         "rollback_v120.sh",
         "install_v120_control.sh",
+        "hsts_v120_root.sh",
+        "hsts_v120_operator.sh",
         "package_v120_control.sh",
         "v120_state.sh",
         "sync_v120_root_state.sh",
@@ -2464,6 +4346,13 @@ def test_release_runbook_stages_the_exact_required_release_artifacts() -> None:
         < release_exec
         < observer_exec
     )
+
+
+def test_v3_runbook_names_all_nine_control_files_and_source_tar() -> None:
+    runbook = RELEASE_RUNBOOK.read_text(encoding="utf-8")
+
+    assert "九个固定控制件和完整 `source.tar`" in runbook
+    assert "五个固定控制件" not in runbook
 
 
 def test_release_runbook_runs_extracted_tools_through_trusted_bash() -> None:

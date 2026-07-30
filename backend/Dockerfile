@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM --platform=linux/amd64 python:3.11-slim@sha256:00af38ae2ed311628970782e8a2d7f014d8909dbc63cb97bc0a158187f4db045
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
@@ -10,12 +10,12 @@ ARG PIP_INDEX_URL=https://pypi.org/simple
 ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
     PIP_DEFAULT_TIMEOUT=120
 
-# 先装依赖，利用层缓存
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir --retries 5 --upgrade pip \
-    && pip install --no-cache-dir --retries 5 .
+# 依赖闭包由 committed uv.lock 导出的 requirements.lock 固定并校验 hash。
+COPY requirements.lock uv.lock pyproject.toml ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 COPY . .
+RUN pip install --no-cache-dir --no-deps --no-build-isolation .
 
 EXPOSE 8000
 

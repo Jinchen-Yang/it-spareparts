@@ -17,6 +17,13 @@
 > Git object store 或工作树直接安装。v1.20 的 backup/monitor 使用独立
 > `/etc/cron.d/it-spareparts`，旧 user crontab 必须按 Runbook 一次性迁移，
 > 不得并存。
+> HSTS 从 300 提升到 31536000 还必须遵循
+> [`docs/releases/hsts-v120-scoped-runbook.md`](releases/hsts-v120-scoped-runbook.md)
+> 的 generation-scoped snapshot、CAS rollback 与 unknown-SSH reconciliation；
+> 禁止直接编辑 Compose 或复用整套 ingress rollback。
+> Issue #178 最终态另保留一个纯跳转兼容入口：应用仍只监听
+> `127.0.0.1:8080`，Caddy 只在 Docker-owned `10.0.0.11:8080` 接收旧公网
+> NAT 流量，并将安全的 GET/HEAD 以 308 跳到 `https://hbzgc.icu`；它不代理业务。
 
 ---
 
@@ -211,7 +218,9 @@ sudo docker compose exec app alembic upgrade head
 
 1. 由域名所有者确认独立正式 FQDN，并将其 `A` 记录指向服务器公网 IPv4。
 2. 80/443 只由获批的 Caddy/Nginx 入口监听；不要覆盖同机已有站点。
-3. 腾讯云安全组只向公网放行 80/443；**不得放行 8080**。
+3. 腾讯云安全组默认只放行 80/443。Issue #178 经单独批准后，才可把
+   **TCP 8080** 精确开放给旧公网入口；主机防火墙与 Docker 必须仍只落到
+   `10.0.0.11:8080` 的 redirect-only Caddy，应用不得暴露。
 4. 按
    [`HTTPS 入口 Runbook`](releases/https-ingress-runbook.md)
    完成证书、HTTP→HTTPS、响应头、回滚和外网验收。
@@ -220,7 +229,8 @@ sudo docker compose exec app alembic upgrade head
 
 ```bash
 sudo ss -ltnp '( sport = :8080 )'
-# 只能出现 127.0.0.1:8080；不得出现 0.0.0.0:8080 或 [::]:8080。
+# Issue #178 最终态只能出现应用 127.0.0.1:8080 与 Docker-owned
+# 10.0.0.11:8080；不得出现 0.0.0.0:8080、[::]:8080 或其他地址。
 ```
 
 ---

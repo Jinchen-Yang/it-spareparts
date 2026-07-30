@@ -1,4 +1,11 @@
-# IT 备件系统 HTTPS 入口与公网 8080 收口 Runbook
+# IT 备件系统 HTTPS 入口与 Issue #178 旧 8080 兼容 Runbook
+
+> 本文第 1–8 节记录首次 HTTPS 接入时“公网 8080 不可达”的阶段基线。Issue #178
+> 最终态已取代该阶段结论：应用仍只监听 `127.0.0.1:8080`；经单独批准的安全组/
+> 防火墙 **TCP 8080** 只转入 Docker-owned `10.0.0.11:8080` Caddy
+> redirect-only 站点，GET/HEAD=308、unsafe=405，禁止业务上游、Cookie 与业务正文。
+> 最终发布与观察以
+> [`edge-v120-scoped-runbook.md`](edge-v120-scoped-runbook.md) 为准。
 
 适用范围：生产使用独立正式域名，现有 Docker Caddy 终止 TLS；IT 备件
 `frontend` 只在宿主机 `127.0.0.1:8080` 和隔离的 Docker ingress 网络上提供服务。
@@ -47,8 +54,9 @@ personal-ai-assistant-caddy
 `ubuntu:ubuntu 600`，Caddyfile/Compose 则必须是 `root:root` 且 group/world
 不可写。本次不宣称用 root-owned 子文件防御可信部署管理员。
 
-宿主机的 `127.0.0.1:8080` 只用于本机探针和 SSH 隧道。安全组、防火墙及 Docker
-均不得对公网发布 8080。
+首次 HTTPS 接入阶段，宿主机的 `127.0.0.1:8080` 只用于本机探针和 SSH 隧道，
+并保持旧公网 8080 不可达。Issue #178 最终提升后，安全组、防火墙与 Docker
+只能按文首的精确 redirect-only 契约开放，不得把应用端口或通配监听发布出去。
 
 ## 3. 构建并交付精确工件
 
@@ -345,7 +353,8 @@ test -z "$(printf '%s\n' "$listeners" |
   awk '$4 != "127.0.0.1:8080" {print}')"
 ```
 
-从此刻起不得恢复公网 8080，即使后续 HTTPS 接入失败也只能执行第 11 节安全回滚。
+在首次 HTTPS 接入阶段不得恢复旧公网 8080，即使接入失败也只能执行第 11 节
+阶段回滚；Issue #178 的后续正式提升属于独立 generation，不复用本段回滚。
 
 ## 7. 持久配置 Caddy
 
@@ -552,8 +561,9 @@ unset normalized_headers
 rm -f "$headers_file"
 ```
 
-还必须从服务器外部网络确认 `$IT_DATA_IPV4:8080` 连接失败。服务器自身的回环检查
-不能代替外网验收。
+首次 HTTPS 接入阶段还必须从服务器外部网络确认 `$IT_DATA_IPV4:8080` 不可达。
+服务器自身的回环检查不能代替外网验收；Issue #178 最终提升后则改为外部验证
+GET/HEAD=308、unsafe=405、零 Cookie/零业务正文。
 
 ## 9. 业务验收
 
@@ -656,77 +666,16 @@ test "$(stat -c '%U:%G' monitor.status)" = "ubuntu:ubuntu"
 - 下载文件 CRC、临时文件回收和卡住的 `processing` 批次。
 - 原 personal assistant 路由不受影响。
 
-30 分钟全部通过后，把 `compose.production.yml` 的 Caddy environment 中
-`IT_DATA_HSTS_MAX_AGE` 从 `300` 提升到 `31536000`，然后执行：
-
-```bash
-set -Eeuo pipefail
-cd /opt/personal-ai-assistant
-sudo docker compose --env-file .env -f compose.production.yml \
-  config --format json |
-  jq -e --arg expected_host "$IT_DATA_HOST" '
-    (.services.caddy.environment.IT_DATA_HOST == $expected_host)
-    and
-    (.services.caddy.environment.IT_DATA_UPSTREAM ==
-      "it-spareparts-frontend:80")
-    and
-    (.services.caddy.environment.IT_DATA_HSTS_MAX_AGE == "31536000")
-    and
-    (.networks.it_data_ingress.name == "it-spareparts-ingress")
-    and
-    (.networks.it_data_ingress.external == true)
-    and
-    (.services.caddy.networks.assistant.gw_priority == 1)
-    and
-    ((.services.caddy.networks.it_data_ingress.gw_priority // 0) == 0)
-  ' >/dev/null
-
-# 只允许 HSTS 值变化：规范化该值后，完整 Compose 渲染摘要必须与首次候选一致。
-HSTS_RENDER_SHA256=$(
-  sudo docker compose --env-file .env -f compose.production.yml \
-    config --format json |
-    python3 -c '
-import json
-import sys
-
-config = json.load(sys.stdin)
-environment = config["services"]["caddy"]["environment"]
-assert environment["IT_DATA_HSTS_MAX_AGE"] == "31536000"
-environment["IT_DATA_HSTS_MAX_AGE"] = "<normalized>"
-json.dump(config, sys.stdout, sort_keys=True, separators=(",", ":"))
-' |
-    sha256sum |
-    awk '{print $1}'
-)
-test "$HSTS_RENDER_SHA256" = "$(
-  sudo cat "$EVIDENCE_DIR/assistant-compose.candidate.normalized.sha256"
-)"
-
-sudo docker exec \
-  -e IT_DATA_HOST="$IT_DATA_HOST" \
-  -e IT_DATA_UPSTREAM='it-spareparts-frontend:80' \
-  -e IT_DATA_HSTS_MAX_AGE='31536000' \
-  personal-ai-assistant-caddy \
-  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-sudo docker compose --env-file .env -f compose.production.yml \
-  up -d --no-deps --force-recreate caddy
-test "$(sudo docker inspect -f '{{.State.Running}}' \
-  personal-ai-assistant-caddy)" = true
-sudo docker exec personal-ai-assistant-caddy \
-  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-sudo docker exec personal-ai-assistant-caddy \
-  wget -qO- https://acme-v02.api.letsencrypt.org/directory >/dev/null
-sudo docker exec personal-ai-assistant-caddy \
-  wget -qO- http://it-spareparts-frontend/ >/dev/null
-curl --proto '=https' --tlsv1.2 -fsS "$ASSISTANT_SMOKE_URL" >/dev/null
-EXPECTED_HSTS_MAX_AGE=31536000
-```
-
-设置上述期望值后重做第 8 节。仍不增加 `includeSubDomains` 或 `preload`。
+30 分钟全部通过后仍保持 `IT_DATA_HSTS_MAX_AGE=300`。HSTS 提升不得再直接编辑
+Compose，也不得复用本 Runbook 的整套 ingress 回滚。只能按照
+[`v1.20 HSTS scoped CAS Runbook`](hsts-v120-scoped-runbook.md) 建立绑定 exact
+root authority 的 generation snapshot，完成 scoped rollback/reconciliation 演练后
+再提升到 `31536000`。仍不增加 `includeSubDomains` 或 `preload`。
 
 ## 11. 一键安全回滚
 
-任何入口或原 personal assistant 验收失败时，优先执行第 5 节已经打印并固化的
+本节只适用于首次 HTTPS ingress 接入，禁止用于后续 HSTS 提升。首次接入时，任何
+入口或原 personal assistant 验收失败，优先执行第 5 节已经打印并固化的
 `sudo /var/lib/it-spareparts-release-control/rollback-now.sh`。这个 root-only
 文件自带精确证据目录和原 assistant `/health` 参数，且其祖先目录不允许应用账号
 替换；即使原 shell 已退出也不需要人工重建变量：
@@ -752,5 +701,6 @@ DNS 记录由域名所有者另行决定保留或删除，脚本不会擅自改 
 ssh -L 18080:127.0.0.1:8080 it-spareparts-prod
 ```
 
-只有风险负责人明确接受明文传输风险后，才允许另立变更单临时恢复公网 8080；这不
-属于正常回滚。
+首次 HTTPS 接入的阶段回滚不恢复公网 8080。Issue #178 经风险负责人单独批准的
+最终入口不是业务明文回退，而是固定 308/405 的 Caddy redirect-only 兼容层；任何
+超出该契约的变化必须另立变更单。
