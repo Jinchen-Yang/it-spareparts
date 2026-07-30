@@ -110,6 +110,9 @@ type LifecycleFilter = LifecycleStatus | "all";
 type LifecycleCounts = Record<LifecycleStatus, number>;
 type ReminderStatusFilter = BoardStatus | "all";
 type ExportDatePreset = "all" | "today" | "last7" | "last14" | "last21" | "last30" | "month" | "custom";
+const DOWNLOAD_PROJECT_QUERY_MAX_LENGTH = 128;
+const DOWNLOAD_PROJECT_NAME_MAX_LENGTH = 256;
+const DOWNLOAD_CONTRACT_MAX_LENGTH = 64;
 
 interface BoardRow extends DualMarginFields {
   contract: string | null;
@@ -561,7 +564,12 @@ function responseHeader(headers: unknown, name: string): string | undefined {
 
 function safeDownloadFilename(value: string | undefined, fallback: string): string {
   if (!value) return fallback;
-  const basename = value.split(/[\\/]/).pop()?.replace(/[\u0000-\u001f\u007f:*?"<>|]/g, "_").trim();
+  const basename = value
+    .split(/[\\/]/)
+    .pop()
+    ?.replace(/\p{Cf}/gu, "")
+    .replace(/[\u0000-\u001f\u007f:*?"<>|]/g, "_")
+    .trim();
   return basename || fallback;
 }
 
@@ -603,7 +611,19 @@ function unsupportedZip64Error(): InvalidDownloadResponseError {
   );
 }
 
-async function blobSliceBytes(blob: Blob, start: number, end: number): Promise<Uint8Array> {
+function throwIfDownloadAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new DOMException("The download was aborted.", "AbortError");
+  }
+}
+
+async function blobSliceBytes(
+  blob: Blob,
+  start: number,
+  end: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  throwIfDownloadAborted(signal);
   if (
     !Number.isSafeInteger(start)
     || !Number.isSafeInteger(end)
@@ -618,9 +638,11 @@ async function blobSliceBytes(blob: Blob, start: number, end: number): Promise<U
     arrayBuffer?: () => Promise<ArrayBuffer>;
   }).arrayBuffer;
   if (typeof arrayBuffer === "function") {
-    return new Uint8Array(await arrayBuffer.call(slice));
+    const bytes = new Uint8Array(await arrayBuffer.call(slice));
+    throwIfDownloadAborted(signal);
+    return bytes;
   }
-  return new Promise<Uint8Array>((resolve, reject) => {
+  const bytes = await new Promise<Uint8Array>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
       if (reader.result instanceof ArrayBuffer) {
@@ -632,6 +654,8 @@ async function blobSliceBytes(blob: Blob, start: number, end: number): Promise<U
     reader.onerror = () => reject(reader.error || new Error("download prefix read failed"));
     reader.readAsArrayBuffer(slice);
   });
+  throwIfDownloadAborted(signal);
+  return bytes;
 }
 
 function zipView(bytes: Uint8Array): DataView {
@@ -674,15 +698,20 @@ type ParsedZipEntry = {
   uncompressedSize: number;
 };
 
-async function validateZipContainer(blob: Blob, requireXlsx: boolean): Promise<void> {
+async function validateZipContainer(
+  blob: Blob,
+  requireXlsx: boolean,
+  signal?: AbortSignal,
+): Promise<void> {
   const invalid = (): never => {
     throw invalidArchiveError(requireXlsx);
   };
+  throwIfDownloadAborted(signal);
   if (blob.size < ZIP_EOCD_MIN_BYTES) invalid();
   if (blob.size > 0xffffffff) throw unsupportedZip64Error();
 
   const tailStart = Math.max(0, blob.size - ZIP_EOCD_SEARCH_BYTES);
-  const tail = await blobSliceBytes(blob, tailStart, blob.size);
+  const tail = await blobSliceBytes(blob, tailStart, blob.size, signal);
   const tailView = zipView(tail);
   let eocdInTail = -1;
   for (let cursor = tail.length - ZIP_EOCD_MIN_BYTES; cursor >= 0; cursor -= 1) {
@@ -746,12 +775,14 @@ async function validateZipContainer(blob: Blob, requireXlsx: boolean): Promise<v
     blob,
     centralOffset,
     centralOffset + centralSize,
+    signal,
   );
   const centralView = zipView(central);
   const entries: ParsedZipEntry[] = [];
   const names = new Set<string>();
   let cursor = 0;
   for (let index = 0; index < entryCount; index += 1) {
+    throwIfDownloadAborted(signal);
     if (
       cursor + ZIP_CENTRAL_HEADER_BYTES > central.length
       || centralView.getUint32(cursor, true) !== 0x02014b50
@@ -819,6 +850,7 @@ async function validateZipContainer(blob: Blob, requireXlsx: boolean): Promise<v
   const localOffsets = new Set<number>();
   const localRanges: Array<[number, number]> = [];
   for (const entry of entries) {
+    throwIfDownloadAborted(signal);
     if (
       entry.localHeaderOffset >= centralOffset
       || localOffsets.has(entry.localHeaderOffset)
@@ -828,7 +860,12 @@ async function validateZipContainer(blob: Blob, requireXlsx: boolean): Promise<v
     localOffsets.add(entry.localHeaderOffset);
     const fixedEnd = entry.localHeaderOffset + ZIP_LOCAL_HEADER_BYTES;
     if (fixedEnd > centralOffset) invalid();
-    const local = await blobSliceBytes(blob, entry.localHeaderOffset, fixedEnd);
+    const local = await blobSliceBytes(
+      blob,
+      entry.localHeaderOffset,
+      fixedEnd,
+      signal,
+    );
     const localView = zipView(local);
     if (localView.getUint32(0, true) !== 0x04034b50) invalid();
     const localFlags = localView.getUint16(6, true);
@@ -863,7 +900,7 @@ async function validateZipContainer(blob: Blob, requireXlsx: boolean): Promise<v
     }
     const variableEnd = fixedEnd + localNameLength + localExtraLength;
     if (variableEnd > centralOffset) invalid();
-    const variable = await blobSliceBytes(blob, fixedEnd, variableEnd);
+    const variable = await blobSliceBytes(blob, fixedEnd, variableEnd, signal);
     const localName = variable.slice(0, localNameLength);
     if (
       localName.some((value, index) => value !== entry.nameBytes[index])
@@ -897,7 +934,9 @@ async function saveDownloadResponse(
   fallbackFilename: string,
   expectedTypes: readonly string[],
   beforeSave?: () => boolean,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfDownloadAborted(signal);
   if (!(response.data instanceof Blob)) throw new InvalidDownloadResponseError();
   if (response.data.size === 0) {
     throw new InvalidDownloadResponseError(
@@ -917,12 +956,69 @@ async function saveDownloadResponse(
     throw new InvalidDownloadResponseError();
   }
   if (expectedTypes.includes(XLSX_CONTENT_TYPES[0])) {
-    await validateZipContainer(response.data, true);
+    await validateZipContainer(response.data, true, signal);
   } else if (expectedTypes.includes(ZIP_CONTENT_TYPES[0])) {
-    await validateZipContainer(response.data, false);
+    await validateZipContainer(response.data, false, signal);
   }
+  throwIfDownloadAborted(signal);
   if (beforeSave && !beforeSave()) return;
   saveBlob(response.data, responseFilename(response.headers, fallbackFilename));
+}
+
+const EXPORT_VALIDATION_PARAM_LABELS: Record<string, string> = {
+  q: "项目搜索",
+  project: "项目名称",
+  contract: "合同编号",
+  date_from: "开始日期",
+  date_to: "结束日期",
+  lifecycle: "期限状态",
+  month: "月份",
+  status: "提醒类型",
+  file: "文件",
+};
+
+function formatExportValidationDetail(detail: unknown): string | undefined {
+  if (typeof detail === "string") return detail.trim() || undefined;
+  if (!Array.isArray(detail)) return undefined;
+  const messages = detail.flatMap((item): string[] => {
+    if (typeof item === "string") return item.trim() ? [item.trim()] : [];
+    if (!item || typeof item !== "object") return [];
+    const row = item as Record<string, unknown>;
+    const location = Array.isArray(row.loc) ? row.loc : [];
+    const parameter = [...location].reverse().find(
+      (value): value is string => typeof value === "string"
+        && value !== "query"
+        && value !== "body",
+    );
+    const label = parameter
+      ? EXPORT_VALIDATION_PARAM_LABELS[parameter] || `请求参数 ${parameter}`
+      : "请求参数";
+    const context = (
+      row.ctx && typeof row.ctx === "object"
+        ? row.ctx
+        : {}
+    ) as Record<string, unknown>;
+    if (
+      row.type === "string_too_long"
+      && Number.isSafeInteger(context.max_length)
+    ) {
+      return [`${label}不能超过 ${context.max_length} 个字符`];
+    }
+    if (
+      row.type === "string_too_short"
+      && Number.isSafeInteger(context.min_length)
+    ) {
+      return [`${label}不能少于 ${context.min_length} 个字符`];
+    }
+    if (row.type === "missing") return [`${label}不能为空`];
+    if (row.type === "string_pattern_mismatch") return [`${label}格式不正确`];
+    const rawMessage = typeof row.msg === "string"
+      ? row.msg.replace(/\p{Cf}/gu, "").trim()
+      : "";
+    return rawMessage ? [`${label}：${rawMessage}`] : [`${label}校验失败`];
+  });
+  const uniqueMessages = [...new Set(messages)].slice(0, 3);
+  return uniqueMessages.length ? uniqueMessages.join("；") : undefined;
 }
 
 async function readExportError(error: unknown): Promise<{
@@ -954,7 +1050,7 @@ async function readExportError(error: unknown): Promise<{
           reader.readAsText(response.data as Blob);
         });
       const body = JSON.parse(text) as { detail?: unknown };
-      if (typeof body.detail === "string") detail = body.detail;
+      detail = formatExportValidationDetail(body.detail);
     } catch {
       // 非 JSON 错误体只使用安全的状态提示。
     }
@@ -1340,7 +1436,7 @@ export default function ProjectCostPage({
           throw new DownloadSessionChangedError();
         }
         return true;
-      });
+      }, controller.signal);
     } catch (error) {
       if (controller.signal.aborted) return;
       throw error;
@@ -2018,6 +2114,7 @@ export default function ProjectCostPage({
                       aria-label="项目成本 CSV 项目搜索"
                       placeholder="按项目名称关键词筛选（可选）"
                       allowClear
+                      maxLength={DOWNLOAD_PROJECT_QUERY_MAX_LENGTH}
                       value={downloadProjectQuery}
                       onChange={(event) => setDownloadProjectQuery(event.target.value)}
                       style={{ width: "100%" }}
@@ -2096,6 +2193,7 @@ export default function ProjectCostPage({
               <Input
                 aria-label="单项目名称"
                 placeholder="输入完整项目名称"
+                maxLength={DOWNLOAD_PROJECT_NAME_MAX_LENGTH}
                 value={downloadProject}
                 onChange={(event) => setDownloadProject(event.target.value)}
                 style={{ width: "min(320px, 100%)" }}
@@ -2113,6 +2211,7 @@ export default function ProjectCostPage({
                 <Input
                   aria-label="单合同编号"
                   placeholder="输入完整合同编号"
+                  maxLength={DOWNLOAD_CONTRACT_MAX_LENGTH}
                   value={downloadContract}
                   onChange={(event) => setDownloadContract(event.target.value)}
                   style={{ width: "min(320px, 100%)" }}

@@ -420,6 +420,19 @@ describe("维保项目生命周期筛选", () => {
     expect(screen.queryByText("详细盈亏")).toBeNull();
   });
 
+  it("下载中心项目搜索、项目名称和合同编号遵守后端长度上限", async () => {
+    installSuccessResponses();
+    render(<ProjectCostPage view="downloads" />);
+    await waitForDownloadsReady();
+
+    expect(screen.getByLabelText("项目成本 CSV 项目搜索"))
+      .toHaveAttribute("maxlength", "128");
+    expect(screen.getByLabelText("单项目名称"))
+      .toHaveAttribute("maxlength", "256");
+    expect(screen.getByLabelText("单合同编号"))
+      .toHaveAttribute("maxlength", "64");
+  });
+
   it("下载中心全部 GET 文件请求都绑定点击时会话和可取消信号", async () => {
     localStorage.setItem("token", "admin-token");
     get.mockImplementation((path: string) => {
@@ -2056,6 +2069,38 @@ describe("维保项目生命周期筛选", () => {
     await waitFor(() => expect(downloadedName).toBe("project_workbook_中文合同.xlsx"));
   });
 
+  it("下载文件名保留正常中文但剔除 Unicode 格式与双向控制字符", async () => {
+    const unsafeFilename = "project_中文\u202E\u200B\u2066合同.xlsx";
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/export-workbook") return Promise.resolve({
+        data: xlsxDownload().data,
+        headers: {
+          "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "content-disposition":
+            `attachment; filename="project_workbook.xlsx"; filename*=UTF-8''${
+              encodeURIComponent(unsafeFilename)
+            }`,
+        },
+      });
+      return Promise.reject(new Error(`unexpected ${path}`));
+    });
+    let downloadedName = "";
+    vi.mocked(HTMLAnchorElement.prototype.click).mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      downloadedName = this.download;
+    });
+    render(<ProjectCostPage view="downloads" />);
+    await waitForDownloadsReady();
+    fireEvent.change(screen.getByLabelText("单合同编号"), {
+      target: { value: "XSDD-1" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "导出单合同工作簿 XLSX" }));
+
+    await waitFor(() => expect(downloadedName).toBe("project_中文合同.xlsx"));
+  });
+
   it("HTTP 200 HTML 响应 fail-closed 且不触发文件保存", async () => {
     installSuccessResponses();
     get.mockImplementation((path: string, config?: { params?: { lifecycle?: Lifecycle } }) => {
@@ -2613,7 +2658,7 @@ describe("维保项目生命周期筛选", () => {
     expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled();
   });
 
-  it("异步文件结构校验期间卸载页面时复核中止状态且不落盘", async () => {
+  it("异步文件结构校验期间卸载页面时立即停止后续成员扫描且不落盘", async () => {
     const validationPending = deferred<void>();
     const archiveBytesValue = archiveBytes(VALID_ZIP_BASE64);
     const archive = zipDownload().data;
@@ -2658,6 +2703,7 @@ describe("维保项目生命周期筛选", () => {
       await validationPending.promise;
     });
 
+    await waitFor(() => expect(slice).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(HTMLAnchorElement.prototype.click).not.toHaveBeenCalled());
   });
 
@@ -2738,6 +2784,34 @@ describe("维保项目生命周期筛选", () => {
 
     await waitFor(() => expect(errorMessage).toHaveBeenCalledWith(
       "订单明细超过 Excel 单 Sheet 数据行上限 1048575",
+    ));
+  });
+
+  it("422 JSON Blob 的 FastAPI 数组型 detail 转成准确的中文参数提示", async () => {
+    get.mockImplementation((path: string) => {
+      if (path === "/maintenance/export") return Promise.reject({
+        response: {
+          status: 422,
+          data: new Blob([JSON.stringify({
+            detail: [{
+              type: "string_too_long",
+              loc: ["query", "q"],
+              msg: "String should have at most 128 characters",
+              ctx: { max_length: 128 },
+            }],
+          })], { type: "application/json" }),
+        },
+      });
+      return Promise.reject(new Error(`unexpected ${path}`));
+    });
+    const errorMessage = vi.spyOn(message, "error");
+    render(<ProjectCostPage view="downloads" />);
+    await waitForDownloadsReady();
+
+    fireEvent.click(screen.getByRole("button", { name: "导出项目成本 CSV" }));
+
+    await waitFor(() => expect(errorMessage).toHaveBeenCalledWith(
+      "项目搜索不能超过 128 个字符",
     ));
   });
 
