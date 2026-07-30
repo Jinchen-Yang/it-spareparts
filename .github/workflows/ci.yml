@@ -38,6 +38,11 @@ jobs:
         env:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:5433/spareparts_test
         run: uv run --extra dev pytest -q
+      - name: 扫描后端生产依赖漏洞
+        working-directory: backend
+        run: |
+          uv export --frozen --no-dev --no-hashes --no-emit-project |
+            uvx pip-audit -r /dev/stdin
 
   frontend:
     name: 前端类型检查 + 构建
@@ -57,3 +62,6 @@ jobs:
       - name: 行为测试（vitest：池管理页权限矩阵/键盘可达/归档只读）
         working-directory: frontend
         run: npm run test
+      - name: 扫描前端生产依赖漏洞
+        working-directory: frontend
+        run: npm run audit:prod

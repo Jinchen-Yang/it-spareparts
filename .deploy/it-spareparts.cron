@@ -1,0 +1,4 @@
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+0 3 * * * ubuntu umask 077; /home/ubuntu/apps/it-spareparts/backup.sh >> /home/ubuntu/apps/it-spareparts/backup.log 2>&1
+*/5 * * * * ubuntu /home/ubuntu/apps/it-spareparts/.deploy/monitor.sh

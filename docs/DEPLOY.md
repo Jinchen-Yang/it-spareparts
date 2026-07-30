@@ -4,6 +4,19 @@
 > Docker 前端只监听 `127.0.0.1:8080`。生产用户必须通过独立正式域名的
 > HTTPS 入口登录；完整代理与回滚步骤见
 > [`docs/releases/https-ingress-runbook.md`](releases/https-ingress-runbook.md)。
+>
+> v1.20 的精确 SHA 构建、可恢复备份、宿主机 backup/monitor 安装、业务镜像
+> 切流与回滚必须遵循
+> [`docs/releases/v1.20-release-runbook.md`](releases/v1.20-release-runbook.md)，
+> 并使用 `.deploy/build_v120.sh`、`.deploy/release_v120.sh`、
+> `.deploy/observe_v120.sh`、`.deploy/rollback_v120.sh` 以及严格的
+> `.deploy/v120_state.sh` 状态 codec。`.state` 是不可执行数据，禁止用
+> `source`/`.`/`eval` 读取；root 状态只能由版本化 sync helper 原子更新。
+> root 控制件必须先由 `.deploy/package_v120_control.sh` 在可信控制机打成
+> 哈希寻址包，再经已认证 SSH 复制、校验并安装；禁止 root 从生产应用账号控制的
+> Git object store 或工作树直接安装。v1.20 的 backup/monitor 使用独立
+> `/etc/cron.d/it-spareparts`，旧 user crontab 必须按 Runbook 一次性迁移，
+> 不得并存。
 
 ---
 
@@ -225,6 +238,10 @@ sudo ss -ltnp '( sport = :8080 )'
 
 ## 十、备份(强烈建议在客户用之前配上)
 
+> 下面的 user-crontab 安装块只用于尚未进入 v1.20 发布控制面的旧环境。
+> v1.20 生产不得执行该 cron 安装块；必须使用版本 Runbook 将现有两条旧任务一次性
+> 迁移到 `/etc/cron.d/it-spareparts`。两种调度方式不能并存。
+
 ```bash
 cd ~/apps/it-spareparts || exit 1
 APP_DIR=$(pwd -P)
@@ -321,8 +338,9 @@ sudo docker compose logs -f frontend
 # 重启
 sudo docker compose restart app
 
-# 升级必须按 docs/releases/ 中对应版本 Runbook，从精确 commit SHA 的 git archive
-# 构建并留存 checksum/镜像 ID/回滚证据；不要在生产工作区直接 git pull 或现场构建。
+# 升级必须按 docs/releases/ 中对应版本 Runbook，从可信控制机生成并签入 manifest
+# 的精确 source.tar 构建，留存 checksum/镜像 ID/回滚证据；生产工作区不得从
+# app-owned Git 生成发布源，也不要直接 git pull。
 # HTTPS 启用后 docker-compose.yml 由 root 固定管理，直接 git pull 也会破坏安全门禁。
 
 # 停服
@@ -343,6 +361,10 @@ sudo docker compose up -d --build
 HTTPS、同域 HTTP→HTTPS 跳转、证书 7 天续期余量、磁盘，以及最新备份的
 新鲜度与 checksum 完整性；正常静默（只刷 `monitor.status` 心跳），异常追加
 `monitor.log` 并（可选）发钉钉。
+
+> 下方 user-crontab 安装块同样只保留给旧环境。v1.20 生产以
+> `/etc/cron.d/it-spareparts` 为唯一调度源，按版本 Runbook 安装和验收。
+
 ```bash
 # 首次安装或升级巡检脚本（幂等；会清理本项目旧路径，不影响其他项目 cron）
 cd ~/apps/it-spareparts || exit 1
@@ -413,9 +435,9 @@ cat "$APP_DIR/monitor.status"   # 看最近一次巡检结果
 
 **本次生产修复 / 以后升级的验收**：
 
-1. 先执行上面的幂等安装块，再确认 `test -x "$MONITOR_SCRIPT"` 成功，且
-   `crontab -l | grep -F "$MONITOR_SCRIPT"` 只返回一条、绝对路径以
-   `"$APP_DIR/.deploy/monitor.sh"` 结尾。
+1. 旧环境先执行上面的幂等安装块；v1.20 则验证 user crontab 已无本项目任务，
+   `/etc/cron.d/it-spareparts` 为 `644 root:root`，其中 backup/monitor 各恰好
+   一条，并确认 `test -x "$MONITOR_SCRIPT"` 成功。
 2. 确认 `.https_monitor_url` 是当前正式根域名、权限为 `600`；手工执行一次
    `"$MONITOR_SCRIPT"`。如返回非零，先检查 `monitor.status` / `monitor.log`，
    不得把异常结果当作通过。记录当前状态时间戳与 `monitor.log` 行数。
