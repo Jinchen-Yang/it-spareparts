@@ -451,6 +451,7 @@ v120_state_publish_new() {
   local candidate=$1
   local destination=$2
   local state_dir
+  local move_status=0
   # Populated through an indirect reference in v120_state_parse_to_array.
   # shellcheck disable=SC2034
   local -A candidate_state=()
@@ -460,10 +461,18 @@ v120_state_publish_new() {
   v120_state_parse_to_array "$candidate" candidate_state || return $?
   [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 74
 
-  # GNU mv -n maps to renameat2(RENAME_NOREPLACE) on Linux.  It deliberately
-  # returns success when it declines an overwrite, so the surviving candidate
-  # is the authoritative collision signal.
-  mv -nT -- "$candidate" "$destination" || return $?
+  # GNU mv -n maps to renameat2(RENAME_NOREPLACE) on Linux, but its collision
+  # exit status differs between coreutils releases and downstream builds.
+  # Normalize only the observable no-clobber outcome (both names survive);
+  # preserve every other mv failure so genuine I/O errors are never hidden.
+  mv -nT -- "$candidate" "$destination" || move_status=$?
+  if [ "$move_status" -ne 0 ]; then
+    if { [ -e "$candidate" ] || [ -L "$candidate" ]; } \
+        && { [ -e "$destination" ] || [ -L "$destination" ]; }; then
+      return 74
+    fi
+    return "$move_status"
+  fi
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then
     return 74
   fi

@@ -781,6 +781,50 @@ v120_state_publish_new "$1" "$2"
     assert candidate.read_text(encoding="ascii") == _built_state()
 
 
+def test_new_state_publish_normalizes_nonzero_no_clobber_collision(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / ".v120-state.new"
+    destination = tmp_path / "release.state"
+    candidate.write_text(_built_state(), encoding="ascii")
+    candidate.chmod(0o600)
+    body = r'''
+mv() {
+  local raced_destination=${!#}
+  printf 'racer-won\n' > "$raced_destination"
+  return 1
+}
+v120_state_publish_new "$1" "$2"
+'''
+
+    result = _run_state(candidate, body, str(destination))
+
+    assert result.returncode == 74
+    assert destination.read_text(encoding="ascii") == "racer-won\n"
+    assert candidate.read_text(encoding="ascii") == _built_state()
+
+
+def test_new_state_publish_propagates_mv_failure_without_collision(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / ".v120-state.new"
+    destination = tmp_path / "release.state"
+    candidate.write_text(_built_state(), encoding="ascii")
+    candidate.chmod(0o600)
+    body = r'''
+mv() {
+  return 41
+}
+v120_state_publish_new "$1" "$2"
+'''
+
+    result = _run_state(candidate, body, str(destination))
+
+    assert result.returncode == 41
+    assert not destination.exists()
+    assert candidate.read_text(encoding="ascii") == _built_state()
+
+
 def test_build_uses_single_link_no_clobber_state_publish() -> None:
     build = _script(BUILD)
 
