@@ -684,6 +684,31 @@ describe("维保项目生命周期筛选", () => {
     expect(within(card).queryByRole("progressbar")).toBeNull();
   });
 
+  it("费用未就绪却夹带 green 时降级为费用未就绪且不显示正式绿色判断", async () => {
+    get.mockImplementation((path: string) => {
+      if (path !== "/maintenance/board") return Promise.reject(new Error("unexpected"));
+      const response = board("XS-REMINDER-DIRTY-GREEN");
+      response.data.rows[0] = {
+        ...response.data.rows[0],
+        decision_status: "green",
+        status: "green",
+        expense_data_available: false,
+      };
+      return Promise.resolve(response);
+    });
+
+    render(<ProjectCostPage view="reminders" />);
+
+    const card = within(
+      await screen.findByRole("list", { name: "项目提醒卡片" }),
+    ).getByRole("listitem");
+    expect(card).toHaveTextContent("费用：未就绪（无记录不等于 0）");
+    expect(card).toHaveTextContent("费用水位：暂不计算（费用未就绪）");
+    expect(card).toHaveTextContent("费用数据未就绪");
+    expect(card).not.toHaveTextContent("预算余量 > 20%");
+    expect(within(card).queryByRole("progressbar")).toBeNull();
+  });
+
   it("无预算提醒不把缺少合同额伪装成零余额", async () => {
     get.mockImplementation((path: string) => {
       if (path !== "/maintenance/board") return Promise.reject(new Error("unexpected"));
@@ -708,6 +733,83 @@ describe("维保项目生命周期筛选", () => {
     expect(card).not.toHaveTextContent(/剩余预算|余额 ¥0/);
     expect(within(card).queryByRole("progressbar")).toBeNull();
   });
+
+  it.each([
+    ["red", null],
+    ["yellow", null],
+    ["green", null],
+    ["red", 0],
+    ["yellow", 0],
+    ["green", 0],
+  ])(
+    "夹带%s经营状态且预算为%s时统一降级无预算",
+    async (dirtyStatus, budget) => {
+      get.mockImplementation((path: string) => {
+        if (path !== "/maintenance/board") return Promise.reject(new Error("unexpected"));
+        const response = board(`XS-REMINDER-NO-BUDGET-${dirtyStatus}-${budget}`);
+        response.data.rows[0] = {
+          ...response.data.rows[0],
+          decision_status: dirtyStatus,
+          status: dirtyStatus,
+          budget,
+          spent: 100,
+          remaining: 900,
+          remaining_pct: 90,
+        };
+        return Promise.resolve(response);
+      });
+
+      render(<ProjectCostPage view="reminders" />);
+
+      const card = within(
+        await screen.findByRole("list", { name: "项目提醒卡片" }),
+      ).getByRole("listitem");
+      expect(card).toHaveTextContent("费用水位：无预算（未关联合同额）");
+      expect(card).toHaveTextContent("无预算(未关联合同额)");
+      expect(card).not.toHaveTextContent(
+        /预算已用完或超预算|预算余量 ≤ 20%|预算余量 > 20%|剩余预算/,
+      );
+      expect(within(card).queryByRole("progressbar")).toBeNull();
+    },
+  );
+
+  it.each([
+    ["red", "spent"],
+    ["red", "remaining"],
+    ["red", "remaining_pct"],
+    ["yellow", "spent"],
+    ["yellow", "remaining"],
+    ["yellow", "remaining_pct"],
+    ["green", "spent"],
+    ["green", "remaining"],
+    ["green", "remaining_pct"],
+  ] as const)(
+    "夹带%s经营状态但%s无效时保持中性待核验",
+    async (dirtyStatus, invalidField) => {
+      get.mockImplementation((path: string) => {
+        if (path !== "/maintenance/board") return Promise.reject(new Error("unexpected"));
+        const response = board(`XS-REMINDER-INVALID-${dirtyStatus}-${invalidField}`);
+        response.data.rows[0] = {
+          ...response.data.rows[0],
+          decision_status: dirtyStatus,
+          status: dirtyStatus,
+          [invalidField]: null,
+        };
+        return Promise.resolve(response);
+      });
+
+      render(<ProjectCostPage view="reminders" />);
+
+      const card = within(
+        await screen.findByRole("list", { name: "项目提醒卡片" }),
+      ).getByRole("listitem");
+      expect(card).toHaveTextContent("经营判断待核验");
+      expect(card).not.toHaveTextContent(
+        /预算已用完或超预算|预算余量 ≤ 20%|预算余量 > 20%|费用水位：合同额参考/,
+      );
+      expect(within(card).queryByRole("progressbar")).toBeNull();
+    },
+  );
 
   it("旧提醒响应缺少新证据字段时保持待核验且不沿用旧 green", async () => {
     get.mockImplementation((path: string) => {
@@ -806,7 +908,8 @@ describe("维保项目生命周期筛选", () => {
     expect(card).toHaveTextContent("XS-REMINDER-COST-MASKED项目");
     expect(card).toHaveTextContent("成本事实：无权限");
     expect(card).toHaveTextContent("成本：无权限");
-    expect(card).toHaveTextContent("费用水位：不可判断（权限受限）");
+    expect(card).toHaveTextContent("经营判断受限");
+    expect(card).not.toHaveTextContent("费用水位");
     expect(card).not.toHaveTextContent(/实际参考：|估算参考：|成本：缺|预算余量|剩余预算/);
     expect(within(card).queryByRole("progressbar")).toBeNull();
     expect(within(card).queryByRole("link", { name: "去人工回填" })).toBeNull();
@@ -832,13 +935,59 @@ describe("维保项目生命周期筛选", () => {
       await screen.findByRole("list", { name: "项目提醒卡片" }),
     ).getByRole("listitem");
     expect(card).toHaveTextContent("成本事实：无权限");
-    expect(card).toHaveTextContent("费用水位：不可判断（权限受限）");
     expect(card).toHaveTextContent("经营判断受限");
+    expect(card).not.toHaveTextContent("费用水位");
     expect(card).not.toHaveTextContent(
       /实际参考：|估算参考：|缺失成本行：|预算余量 > 20%|剩余预算/,
     );
     expect(within(card).queryByRole("progressbar")).toBeNull();
   });
+
+  it.each([false, true])(
+    "无成本权限时旧响应夹带成本不完整且限制标志为%s仍只显示中性受限结论",
+    async (restrictedFlag) => {
+      localStorage.setItem("permissions", JSON.stringify({
+        page_maintenance: true,
+        data_customer: true,
+        data_purchase_cost: false,
+        data_profit: true,
+        action_maintenance_roundtrip_apply: true,
+        own_customers_only: false,
+      }));
+      get.mockImplementation((path: string) => {
+        if (path !== "/maintenance/board") return Promise.reject(new Error("unexpected"));
+        const response = board("XS-REMINDER-STALE-INCOMPLETE");
+        response.data.rows[0] = {
+          ...response.data.rows[0],
+          decision_status: "incomplete_cost",
+          status: "incomplete_cost",
+          cost_quality: "incomplete",
+          missing_cost_lines: 259,
+        };
+        return Promise.resolve({
+          data: {
+            ...response.data,
+            decision_restricted: restrictedFlag,
+            profit_restricted: restrictedFlag,
+            ranking_restricted: restrictedFlag,
+          },
+        });
+      });
+
+      render(<ProjectCostPage view="reminders" />);
+
+      const card = within(
+        await screen.findByRole("list", { name: "项目提醒卡片" }),
+      ).getByRole("listitem");
+      expect(card).toHaveTextContent("成本事实：无权限");
+      expect(card).toHaveTextContent("经营判断受限");
+      expect(card).not.toHaveTextContent(
+        /成本不完整|需补数据|缺 259|缺失成本行|费用水位|剩余预算/,
+      );
+      expect(within(card).queryByRole("progressbar")).toBeNull();
+      expect(within(card).queryByRole("link", { name: "去人工回填" })).toBeNull();
+    },
+  );
 
   it("无客户信息权限时提醒不泄漏合同编号或合同预填入口", async () => {
     localStorage.setItem("permissions", JSON.stringify({
@@ -872,6 +1021,34 @@ describe("维保项目生命周期筛选", () => {
     expect(card).not.toHaveTextContent("XS-SECRET-CONTRACT");
     expect(within(card).queryByRole("link", { name: "去人工回填" })).toBeNull();
   });
+
+  it.each([
+    ["明确关闭", false],
+    ["权限键缺失", undefined],
+  ])(
+    "回填动作权限%s时即使可下载模板也隐藏提醒页动作入口",
+    async (_permissionCase, actionPermission) => {
+      const permissions: Record<string, boolean> = {
+        page_maintenance: true,
+        data_customer: true,
+        data_purchase_cost: true,
+        data_profit: true,
+        own_customers_only: false,
+      };
+      if (actionPermission !== undefined) {
+        permissions.action_maintenance_roundtrip_apply = actionPermission;
+      }
+      localStorage.setItem("permissions", JSON.stringify(permissions));
+      installSuccessResponses();
+
+      render(<ProjectCostPage view="reminders" />);
+
+      const card = within(
+        await screen.findByRole("list", { name: "项目提醒卡片" }),
+      ).getByRole("listitem");
+      expect(within(card).queryByRole("link", { name: "去人工回填" })).toBeNull();
+    },
+  );
 
   it("获准用户可从提醒携合同上下文去回填并返回提醒", async () => {
     installSuccessResponses();

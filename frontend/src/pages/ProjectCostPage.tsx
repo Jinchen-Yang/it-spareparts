@@ -2511,22 +2511,58 @@ export default function ProjectCostPage({
                     || !canViewCostFacts
                     || !canViewProfitFacts
                   );
+                  const evidenceStatus = knownCostQuality == null
+                    ? "incomplete_cost"
+                    : effectiveBoardStatus(item) ?? "incomplete_cost";
+                  const formalBudgetStatus = (
+                    evidenceStatus === "red"
+                    || evidenceStatus === "yellow"
+                    || evidenceStatus === "green"
+                  );
+                  const hasPositiveBudget = (
+                    item.budget != null
+                    && Number.isFinite(item.budget)
+                    && item.budget > 0
+                  );
+                  const hasCompleteWaterlineFacts = (
+                    item.spent != null
+                    && Number.isFinite(item.spent)
+                    && item.remaining != null
+                    && Number.isFinite(item.remaining)
+                    && item.remaining_pct != null
+                    && Number.isFinite(item.remaining_pct)
+                  );
                   const status = decisionFactsRestricted
-                    ? knownCostQuality === "incomplete" ? "incomplete_cost" : null
-                    : knownCostQuality == null
-                      ? "incomplete_cost"
-                      : effectiveBoardStatus(item) ?? "incomplete_cost";
+                    ? null
+                    : (
+                      formalBudgetStatus
+                      && item.expense_data_available === false
+                    )
+                      ? "expense_data_unavailable"
+                      : (
+                        formalBudgetStatus
+                        && item.expense_data_available !== true
+                      )
+                        ? null
+                        : (
+                          formalBudgetStatus
+                          && !hasPositiveBudget
+                        )
+                          ? "no_budget"
+                          : (
+                            formalBudgetStatus
+                            && !hasCompleteWaterlineFacts
+                          )
+                            ? null
+                            : evidenceStatus;
                   const meta = status == null ? null : STATUS_META[status];
                   const hasBudgetWaterline = (
                     !decisionFactsRestricted
                     && (status === "red" || status === "yellow" || status === "green")
                     && knownCostQuality !== "incomplete"
                     && item.expense_data_available === true
-                    && item.budget != null
-                    && item.budget > 0
-                    && item.spent != null
-                    && item.remaining != null
-                    && item.remaining_pct != null
+                    && hasPositiveBudget
+                    && hasCompleteWaterlineFacts
                   );
                   const spentPct = hasBudgetWaterline
                     ? Math.round((item.spent! / item.budget!) * 100)
@@ -2681,15 +2717,6 @@ export default function ProjectCostPage({
                           费用水位：无预算（未关联合同额）
                         </div>
                       )}
-                      {status == null && (
-                        <div style={{
-                          marginTop: 8,
-                          fontSize: 12,
-                          color: "var(--mb-text-3)",
-                        }}>
-                          费用水位：不可判断（权限受限）
-                        </div>
-                      )}
                       <Space wrap size={[4, 4]} style={{ marginTop: 8 }}>
                         {costFactsMasked ? (
                           <Tag>成本：无权限</Tag>
@@ -2708,14 +2735,16 @@ export default function ProjectCostPage({
                               : status === "green" ? "green"
                                 : undefined
                         }>
-                          {meta?.label || "经营判断受限"}
+                          {meta?.label || (
+                            decisionFactsRestricted ? "经营判断受限" : "经营判断待核验"
+                          )}
                         </Tag>
                       </Space>
-                      {canExportRoundtripWorkbooks && (
+                      {canApplyRoundtripWorkbook && (
                         <div style={{ marginTop: 8, fontSize: 12 }}>
                           <a href={buildReminderRefillHref(
                             item.contract,
-                            canExportRoundtripWorkbooks,
+                            canApplyRoundtripWorkbook,
                           )}>
                             去人工回填
                           </a>
