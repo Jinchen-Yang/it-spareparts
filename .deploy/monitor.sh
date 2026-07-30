@@ -197,8 +197,25 @@ latest=$(
 if [ -z "$latest" ]; then
   add "未找到任何数据库备份文件"
 else
-  age_h=$(( ( $(date +%s) - $(stat -c %Y "$latest") ) / 3600 ))
-  [ "$age_h" -ge 26 ] && add "最新备份已 ${age_h} 小时未刷新（${latest##*/}）—— cron 可能没在跑"
+  latest_checksum="$latest.sha256"
+  if [ -L "$latest_checksum" ] || [ ! -f "$latest_checksum" ]; then
+    add "最新备份缺少有效 checksum（${latest##*/}）"
+  else
+    checksum_line_count=$(wc -l < "$latest_checksum" 2>/dev/null || true)
+    expected_hash=$(
+      sed -n '1{s/[[:space:]].*$//;p;}' "$latest_checksum" 2>/dev/null
+    )
+    if [ "$checksum_line_count" != 1 ] \
+        || [[ ! "$expected_hash" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      add "最新备份 checksum 格式非法（${latest##*/}）"
+    elif ! printf '%s  %s\n' "$expected_hash" "$latest" \
+        | timeout --kill-after=2s 30s sha256sum -c - >/dev/null 2>&1; then
+      add "最新备份 checksum 校验失败（${latest##*/}）"
+    else
+      age_h=$(( ( $(date +%s) - $(stat -c %Y "$latest") ) / 3600 ))
+      [ "$age_h" -ge 26 ] && add "最新备份已 ${age_h} 小时未刷新（${latest##*/}）—— cron 可能没在跑"
+    fi
+  fi
 fi
 
 TS=$(date '+%Y-%m-%dT%H:%M:%S%:z')
