@@ -1493,6 +1493,144 @@ describe("维保项目生命周期筛选", () => {
     expect(screen.queryByText("¥999")).toBeNull();
   });
 
+  it("项目出库明细按接口 id 稳定区分不同 PN 和数量", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const projectResponse = projects("多行明细项目");
+    projectResponse.data.rows[0].months = 2;
+    get.mockImplementation((
+      path: string,
+      config?: { params?: { month?: string } },
+    ) => {
+      if (path === "/maintenance/projects") return Promise.resolve(projectResponse);
+      if (path === "/maintenance/board") return Promise.resolve(board());
+      if (path === "/maintenance/lines") {
+        const filteredRows = config?.params?.month
+          ? [{
+              id: "ML-MONTH",
+              order_no: "WBDD-LINE-MONTH",
+              order_date: "2026-06-30",
+              demand_type: "维保",
+              business_type: "备件维保",
+              warehouse: "北京仓",
+              pn_std: "PN-STABLE-MONTH",
+              description: "月份筛选明细",
+              qty: 7,
+              return_qty: 0,
+              unit_cost: null,
+              cost_amount: null,
+              cost_tier: "missing",
+              cost_source: "none",
+              cost_tax_basis: null,
+              price_month: null,
+              trace_months: null,
+              linked_purchase_order_no: null,
+              price_distance_days: null,
+              confidence: null,
+              anomaly_flags: [],
+            }]
+          : [
+              {
+                id: "ML-101",
+                order_no: "WBDD-LINE-A",
+                order_date: "2026-07-29",
+                demand_type: "维保",
+                business_type: "备件维保",
+                warehouse: "北京仓",
+                pn_std: "PN-STABLE-A",
+                description: "第一条明细",
+                qty: 1,
+                return_qty: 0,
+                unit_cost: null,
+                cost_amount: null,
+                cost_tier: "missing",
+                cost_source: "none",
+                cost_tax_basis: null,
+                price_month: null,
+                trace_months: null,
+                linked_purchase_order_no: null,
+                price_distance_days: null,
+                confidence: null,
+                anomaly_flags: [],
+              },
+              {
+                id: "ML-202",
+                order_no: "WBDD-LINE-B",
+                order_date: "2026-07-30",
+                demand_type: "维保",
+                business_type: "备件维保",
+                warehouse: "北京仓",
+                pn_std: "PN-STABLE-B",
+                description: "第二条明细",
+                qty: 2,
+                return_qty: 0,
+                unit_cost: null,
+                cost_amount: null,
+                cost_tier: "missing",
+                cost_source: "none",
+                cost_tax_basis: null,
+                price_month: null,
+                trace_months: null,
+                linked_purchase_order_no: null,
+                price_distance_days: null,
+                confidence: null,
+                anomaly_flags: [],
+              },
+            ];
+        return Promise.resolve({
+          data: {
+            total: filteredRows.length,
+            page: 1,
+            page_size: 50,
+            rows: filteredRows,
+          },
+        });
+      }
+      return Promise.reject(new Error(`unexpected ${path}`));
+    });
+
+    render(<ProjectCostPage />);
+    await screen.findByText("多行明细项目");
+    fireEvent.click(screen.getByText("明细"));
+
+    const firstRow = await waitFor(() => {
+      const row = document.querySelector('tr[data-row-key="ML-101"]');
+      expect(row).not.toBeNull();
+      return row as HTMLTableRowElement;
+    });
+    const secondRow = document.querySelector('tr[data-row-key="ML-202"]') as HTMLTableRowElement;
+    expect(secondRow).not.toBeNull();
+    expect(within(firstRow).getByText("PN-STABLE-A")).toBeInTheDocument();
+    expect(within(firstRow).getByText("1")).toBeInTheDocument();
+    expect(within(secondRow).getByText("PN-STABLE-B")).toBeInTheDocument();
+    expect(within(secondRow).getByText("2")).toBeInTheDocument();
+    expect(consoleError.mock.calls.flat().join(" "))
+      .not.toContain("Each child in a list should have a unique key prop");
+
+    fireEvent.click(screen.getByPlaceholderText("按月筛选"));
+    const monthCell = await waitFor(() => {
+      const cell = document.querySelector(
+        ".ant-picker-month-panel .ant-picker-cell-in-view",
+      );
+      expect(cell).not.toBeNull();
+      return cell as HTMLElement;
+    });
+    fireEvent.click(monthCell);
+
+    const filteredRow = await waitFor(() => {
+      const row = document.querySelector('tr[data-row-key="ML-MONTH"]');
+      expect(row).not.toBeNull();
+      return row as HTMLTableRowElement;
+    });
+    expect(within(filteredRow).getByText("PN-STABLE-MONTH")).toBeInTheDocument();
+    expect(within(filteredRow).getByText("7")).toBeInTheDocument();
+    expect(document.querySelector('tr[data-row-key="ML-101"]')).toBeNull();
+    expect(document.querySelector('tr[data-row-key="ML-202"]')).toBeNull();
+    expect(get.mock.calls.some(([path, config]) => (
+      path === "/maintenance/lines"
+      && /^\d{4}-\d{2}$/.test(config?.params?.month ?? "")
+    ))).toBe(true);
+  });
+
   it("旧筛选最后返回也不能覆盖新筛选", async () => {
     const oldBoard = deferred<ReturnType<typeof board>>();
     const newBoard = deferred<ReturnType<typeof board>>();

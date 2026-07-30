@@ -15,6 +15,8 @@ confidence：direct/window=high（校准中位偏差 0%）、month_avg=medium（
 历史参考=low，人工回填=high。
 起算日（MAINT_COST_START_DATE）前的行不计价：cost_source=NULL，区别于"算了但没算出来"的 none。
 """
+import hashlib
+import hmac
 import logging
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
@@ -27,6 +29,7 @@ from sqlalchemy.orm import Session, aliased
 
 from app import config, security, tax_policy
 from app.business_time import business_today
+from app.config import get_settings
 from app.models.maintenance import (
     FMaintenanceLine,
     FMaintenanceOrder,
@@ -1093,7 +1096,13 @@ def _serialize_project_line(
     flags = ln.anomaly_flags or []
     if hide_cost_signals:
         flags = [flag for flag in flags if flag not in _COST_DERIVED_FLAGS]
+    public_id = hmac.new(
+        get_settings().secret_key.encode("utf-8"),
+        f"maintenance-project-line:{ln.raw_line_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()[:24]
     return {
+        "id": f"ML-{public_id}",
         "order_no": order.order_no,
         "order_date": order.order_date.isoformat() if order.order_date else None,
         "demand_type": order.demand_type,
