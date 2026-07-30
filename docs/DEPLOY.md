@@ -226,32 +226,85 @@ sudo ss -ltnp '( sport = :8080 )'
 ## 十、备份(强烈建议在客户用之前配上)
 
 ```bash
-# 创建备份目录
-sudo mkdir -p /var/backups/spareparts && sudo chown $USER:$USER /var/backups/spareparts
+cd ~/apps/it-spareparts || exit 1
+APP_DIR=$(pwd -P)
+BACKUP_DIR=/var/backups/spareparts
 
-# 写每日备份脚本
-cat > ~/apps/it-spareparts/backup.sh <<'EOF'
-#!/usr/bin/env bash
-set -e
-cd "$(dirname "$0")"
-DATE=$(date +%Y%m%d-%H%M)
-sudo docker compose exec -T db pg_dump -U spareparts -Fc spareparts \
-  > /var/backups/spareparts/db-$DATE.dump
-# 只留最近 14 天
-find /var/backups/spareparts -name 'db-*.dump' -mtime +14 -delete
-EOF
-chmod +x ~/apps/it-spareparts/backup.sh
+# 拒绝把既有 symlink 当成备份目录，避免 install/chown 跟随到意外目标。
+test ! -L "$BACKUP_DIR" || { echo "$BACKUP_DIR 不能是符号链接"; exit 1; }
+# 新建和既有真实目录都收紧为仅当前运维用户可访问。
+sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" "$BACKUP_DIR"
 
-# 加 cron(每天凌晨 3 点)
-(crontab -l 2>/dev/null; echo "0 3 * * * $HOME/apps/it-spareparts/backup.sh >> $HOME/apps/it-spareparts/backup.log 2>&1") | crontab -
+# 使用仓库内受测试的脚本，不再维护容易漂移的内联副本。
+# 脚本需复制到应用根目录，才能从该目录读取 docker-compose.yml。
+install -m 700 "$APP_DIR/.deploy/backup.sh" "$APP_DIR/backup.sh"
 
-# 测试一次
-~/apps/it-spareparts/backup.sh
-ls -la /var/backups/spareparts/
+# 幂等安装 cron（每天凌晨 3 点）：清理本应用新旧路径的重复项，保留其他任务。
+# BACKUP_CRON_INSTALL_BEGIN
+BACKUP_SCRIPT="$APP_DIR/backup.sh"
+REPO_BACKUP_SCRIPT="$APP_DIR/.deploy/backup.sh"
+BACKUP_LOG="$APP_DIR/backup.log"
+test -x "$BACKUP_SCRIPT" || { echo "$BACKUP_SCRIPT 不可执行"; exit 1; }
+touch "$BACKUP_LOG"
+chmod 600 "$BACKUP_LOG"
+(
+  set -eu
+  CRON_CURRENT=
+  CRON_FILTERED=
+  CRON_ERROR=
+  cleanup_cron_install() {
+    [ -z "$CRON_CURRENT" ] || rm -f -- "$CRON_CURRENT"
+    [ -z "$CRON_FILTERED" ] || rm -f -- "$CRON_FILTERED"
+    [ -z "$CRON_ERROR" ] || rm -f -- "$CRON_ERROR"
+  }
+  trap cleanup_cron_install EXIT
+  CRON_CURRENT=$(mktemp)
+  CRON_FILTERED=$(mktemp)
+  CRON_ERROR=$(mktemp)
+
+  if LC_ALL=C crontab -l > "$CRON_CURRENT" 2> "$CRON_ERROR"; then
+    :
+  else
+    CRON_READ_STATUS=$?
+    EXPECTED_EMPTY="no crontab for $(id -un)"
+    if [ "$CRON_READ_STATUS" -ne 1 ] \
+        || [ "$(cat "$CRON_ERROR")" != "$EXPECTED_EMPTY" ] \
+        || [ -s "$CRON_CURRENT" ]; then
+      cat "$CRON_ERROR" >&2
+      exit "$CRON_READ_STATUS"
+    fi
+    : > "$CRON_CURRENT"
+  fi
+
+  if grep -Fv -e "$REPO_BACKUP_SCRIPT" -e "$BACKUP_SCRIPT" \
+      "$CRON_CURRENT" > "$CRON_FILTERED"; then
+    :
+  else
+    CRON_FILTER_STATUS=$?
+    [ "$CRON_FILTER_STATUS" -eq 1 ] || exit "$CRON_FILTER_STATUS"
+  fi
+  printf '0 3 * * * umask 077; %s >> %s 2>&1\n' \
+    "$BACKUP_SCRIPT" "$BACKUP_LOG" >> "$CRON_FILTERED"
+  crontab "$CRON_FILTERED"
+)
+# BACKUP_CRON_INSTALL_END
+
+# 测试一次；本次运行也会把历史 dump/sha256 的权限统一修复为 600。
+"$APP_DIR/backup.sh"
+test "$(stat -c '%a' "$BACKUP_DIR")" = 700
+find "$BACKUP_DIR" -maxdepth 1 -type f \
+  \( -name 'db-*.dump' -o -name 'db-*.dump.sha256' \) \
+  -printf '%m %p\n'
 ```
+
+验收口径：备份 cron 必须恰好一条，`backup.log`、dump 与 `.sha256` 必须是
+`600`，备份目录必须是 `700`；出现其他结果即视为部署失败。脚本使用稳定
+`flock` 拒绝重叠执行，先把 dump 写入同目录临时文件，完成 TOC 与 checksum
+校验后再原子发布；失败或同分钟重跑都不会截断既有恢复点。
 
 恢复命令(灾难时):
 ```bash
+sha256sum -c /var/backups/spareparts/db-<日期>.dump.sha256
 sudo docker compose exec -T db pg_restore -U spareparts -d spareparts --clean --if-exists \
   < /var/backups/spareparts/db-<日期>.dump
 ```
@@ -287,18 +340,63 @@ sudo docker compose up -d --build
 **日志轮转**：docker-compose 已统一 `json-file` 单文件 10MB×5（每服务最多 50MB），不会撑满磁盘。
 
 **健康巡检**（`.deploy/monitor.sh`，cron 每 5 分钟）：检查容器、DB、正式
-HTTPS、同域 HTTP→HTTPS 跳转、证书 7 天续期余量、磁盘和备份新鲜度；正常静默
-（只刷 `monitor.status` 心跳），异常追加 `monitor.log` 并（可选）发钉钉。
+HTTPS、同域 HTTP→HTTPS 跳转、证书 7 天续期余量、磁盘，以及最新备份的
+新鲜度与 checksum 完整性；正常静默（只刷 `monitor.status` 心跳），异常追加
+`monitor.log` 并（可选）发钉钉。
 ```bash
 # 首次安装或升级巡检脚本（幂等；会清理本项目旧路径，不影响其他项目 cron）
 cd ~/apps/it-spareparts || exit 1
 APP_DIR=$(pwd -P)
+# MONITOR_CRON_INSTALL_BEGIN
 LEGACY_MONITOR="$APP_DIR/monitor.sh"
 MONITOR_SCRIPT="$APP_DIR/.deploy/monitor.sh"
 test -f "$MONITOR_SCRIPT" || { echo "缺少 $MONITOR_SCRIPT"; exit 1; }
 test -x "$MONITOR_SCRIPT" || { echo "$MONITOR_SCRIPT 不可执行"; exit 1; }
-( crontab -l 2>/dev/null | grep -Fv -e "$LEGACY_MONITOR" -e "$MONITOR_SCRIPT"; \
-  printf '*/5 * * * * %s\n' "$MONITOR_SCRIPT" ) | crontab -
+(
+  set -eu
+  MONITOR_CRON_CURRENT=
+  MONITOR_CRON_FILTERED=
+  MONITOR_CRON_ERROR=
+  cleanup_monitor_cron_install() {
+    [ -z "$MONITOR_CRON_CURRENT" ] \
+      || rm -f -- "$MONITOR_CRON_CURRENT"
+    [ -z "$MONITOR_CRON_FILTERED" ] \
+      || rm -f -- "$MONITOR_CRON_FILTERED"
+    [ -z "$MONITOR_CRON_ERROR" ] \
+      || rm -f -- "$MONITOR_CRON_ERROR"
+  }
+  trap cleanup_monitor_cron_install EXIT
+  MONITOR_CRON_CURRENT=$(mktemp)
+  MONITOR_CRON_FILTERED=$(mktemp)
+  MONITOR_CRON_ERROR=$(mktemp)
+
+  if LC_ALL=C crontab -l \
+      > "$MONITOR_CRON_CURRENT" 2> "$MONITOR_CRON_ERROR"; then
+    :
+  else
+    MONITOR_CRON_READ_STATUS=$?
+    MONITOR_EXPECTED_EMPTY="no crontab for $(id -un)"
+    if [ "$MONITOR_CRON_READ_STATUS" -ne 1 ] \
+        || [ "$(cat "$MONITOR_CRON_ERROR")" != "$MONITOR_EXPECTED_EMPTY" ] \
+        || [ -s "$MONITOR_CRON_CURRENT" ]; then
+      cat "$MONITOR_CRON_ERROR" >&2
+      exit "$MONITOR_CRON_READ_STATUS"
+    fi
+    : > "$MONITOR_CRON_CURRENT"
+  fi
+
+  if grep -Fv -e "$LEGACY_MONITOR" -e "$MONITOR_SCRIPT" \
+      "$MONITOR_CRON_CURRENT" > "$MONITOR_CRON_FILTERED"; then
+    :
+  else
+    MONITOR_CRON_FILTER_STATUS=$?
+    [ "$MONITOR_CRON_FILTER_STATUS" -eq 1 ] \
+      || exit "$MONITOR_CRON_FILTER_STATUS"
+  fi
+  printf '*/5 * * * * %s\n' "$MONITOR_SCRIPT" >> "$MONITOR_CRON_FILTERED"
+  crontab "$MONITOR_CRON_FILTERED"
+)
+# MONITOR_CRON_INSTALL_END
 # 启用钉钉告警：把钉钉群机器人 webhook URL 写进下面文件即可（不填则只记 monitor.log）
 umask 077
 printf '%s\n' 'https://oapi.dingtalk.com/robot/send?access_token=xxx' > "$APP_DIR/.alert_webhook"

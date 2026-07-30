@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -42,7 +43,13 @@ def _monitor_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
 
     backup_dir = tmp_path / "backups"
     backup_dir.mkdir()
-    (backup_dir / "db-current.dump").write_bytes(b"fresh")
+    backup = backup_dir / "db-current.dump"
+    backup.write_bytes(b"fresh")
+    digest = hashlib.sha256(backup.read_bytes()).hexdigest()
+    (backup_dir / "db-current.dump.sha256").write_text(
+        f"{digest}  {backup}\n",
+        encoding="utf-8",
+    )
 
     calls = tmp_path / "calls.log"
     stub_dir = tmp_path / "bin"
@@ -227,39 +234,108 @@ def test_monitor_deployment_artifact_contract() -> None:
 
 def test_monitor_crontab_rewrite_is_scoped_to_this_application(tmp_path: Path) -> None:
     app_dir = tmp_path / "apps" / "it-spareparts"
+    (app_dir / ".deploy").mkdir(parents=True)
     legacy = app_dir / "monitor.sh"
     current = app_dir / ".deploy" / "monitor.sh"
-    existing = "\n".join(
-        [
-            "0 3 * * * /srv/backup.sh",
-            f"*/5 * * * * {legacy}",
-            f"*/10 * * * * {current}",
-            "*/5 * * * * /srv/another-product/monitor.sh",
-        ]
+    _write_executable(current, "#!/bin/sh\n")
+    cron_state = tmp_path / "crontab.txt"
+    cron_state.write_text(
+        "\n".join(
+            [
+                "0 3 * * * /srv/backup.sh",
+                f"*/5 * * * * {legacy}",
+                f"*/10 * * * * {current}",
+                "*/5 * * * * /srv/another-product/monitor.sh",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
     )
-    command = r"""
-    LEGACY_MONITOR="$APP_DIR/monitor.sh"
-    MONITOR_SCRIPT="$APP_DIR/.deploy/monitor.sh"
-    {
-      grep -Fv -e "$LEGACY_MONITOR" -e "$MONITOR_SCRIPT"
-      printf '*/5 * * * * %s\n' "$MONITOR_SCRIPT"
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    _write_executable(
+        stub_dir / "crontab",
+        r"""
+        #!/usr/bin/env bash
+        case "${1:-}" in
+          -l)
+            if [ "${STUB_CRONTAB_LIST_STATUS:-0}" -ne 0 ]; then
+              printf 'simulated monitor crontab read failure\n' >&2
+              exit "$STUB_CRONTAB_LIST_STATUS"
+            fi
+            if [ ! -f "$STUB_CRONTAB_STATE" ]; then
+              printf 'no crontab for %s\n' "$(/usr/bin/id -un)" >&2
+              exit 1
+            fi
+            cat "$STUB_CRONTAB_STATE"
+            ;;
+          -*)
+            exit 64
+            ;;
+          *)
+            [ "$#" -eq 1 ] && [ -f "$1" ] || exit 64
+            tmp=$(/usr/bin/mktemp)
+            cat "$1" > "$tmp"
+            /usr/bin/mv "$tmp" "$STUB_CRONTAB_STATE"
+            ;;
+        esac
+        """,
+    )
+    deploy_text = DEPLOY_DOC.read_text(encoding="utf-8")
+    begin = "# MONITOR_CRON_INSTALL_BEGIN"
+    end = "# MONITOR_CRON_INSTALL_END"
+    assert begin in deploy_text and end in deploy_text
+    snippet = deploy_text.split(begin, 1)[1].split(end, 1)[0]
+    assert snippet.index("trap cleanup_monitor_cron_install EXIT") < snippet.index(
+        "MONITOR_CRON_CURRENT=$(mktemp)"
+    )
+    env = {
+        **os.environ,
+        "APP_DIR": str(app_dir),
+        "PATH": f"{stub_dir}:{os.environ['PATH']}",
+        "STUB_CRONTAB_STATE": str(cron_state),
     }
-    """
 
-    result = subprocess.run(
-        ["bash", "-c", textwrap.dedent(command)],
-        check=True,
-        capture_output=True,
-        env={**os.environ, "APP_DIR": str(app_dir)},
-        input=existing,
-        text=True,
-    )
+    for _ in range(2):
+        result = subprocess.run(
+            ["bash", "-eu", "-o", "pipefail", "-c", snippet],
+            check=False,
+            capture_output=True,
+            env=env,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
 
-    lines = result.stdout.splitlines()
+    lines = cron_state.read_text(encoding="utf-8").splitlines()
     assert "0 3 * * * /srv/backup.sh" in lines
     assert "*/5 * * * * /srv/another-product/monitor.sh" in lines
     assert not any(str(legacy) in line for line in lines)
     assert lines.count(f"*/5 * * * * {current}") == 1
+
+    before_failure = cron_state.read_bytes()
+    failed = subprocess.run(
+        ["bash", "-eu", "-o", "pipefail", "-c", snippet],
+        check=False,
+        capture_output=True,
+        env={**env, "STUB_CRONTAB_LIST_STATUS": "74"},
+        text=True,
+    )
+    assert failed.returncode != 0
+    assert cron_state.read_bytes() == before_failure
+
+    _write_executable(
+        stub_dir / "grep",
+        "#!/usr/bin/env bash\nexit 2\n",
+    )
+    filter_failed = subprocess.run(
+        ["bash", "-eu", "-o", "pipefail", "-c", snippet],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+    assert filter_failed.returncode != 0
+    assert cron_state.read_bytes() == before_failure
 
 
 def test_monitor_healthy_path_checks_internal_app_and_writes_iso_heartbeat(
@@ -298,6 +374,71 @@ def test_monitor_healthy_path_checks_internal_app_and_writes_iso_heartbeat(
     )
     assert not (script.parents[1] / "monitor.log").exists()
     assert not list(script.parents[1].glob(".monitor.status.tmp.*"))
+
+
+def test_monitor_rejects_latest_backup_without_checksum(tmp_path: Path) -> None:
+    """新鲜 dump 没有匹配 checksum 时不能被巡检当成健康恢复点。"""
+    script, env, _calls = _monitor_fixture(tmp_path)
+    backup_dir = Path(env["MONITOR_BACKUP_DIR"])
+    (backup_dir / "db-current.dump.sha256").unlink()
+
+    result = subprocess.run(
+        [str(script)],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    monitor_log = (script.parents[1] / "monitor.log").read_text(encoding="utf-8")
+    assert "最新备份缺少有效 checksum" in monitor_log
+
+
+def test_monitor_rejects_latest_backup_with_invalid_checksum(tmp_path: Path) -> None:
+    """dump 在 checksum 生成后被损坏时，巡检必须告警。"""
+    script, env, _calls = _monitor_fixture(tmp_path)
+    backup_dir = Path(env["MONITOR_BACKUP_DIR"])
+    (backup_dir / "db-current.dump").write_bytes(b"corrupted-after-publish")
+
+    result = subprocess.run(
+        [str(script)],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    monitor_log = (script.parents[1] / "monitor.log").read_text(encoding="utf-8")
+    assert "最新备份 checksum 校验失败" in monitor_log
+
+
+def test_monitor_verifies_checksum_against_the_selected_latest_dump(
+    tmp_path: Path,
+) -> None:
+    """checksum 内部即使指向另一个有效文件，也不能替代对 latest dump 的校验。"""
+    script, env, _calls = _monitor_fixture(tmp_path)
+    backup_dir = Path(env["MONITOR_BACKUP_DIR"])
+    wrong_target = backup_dir / "different-file.bin"
+    wrong_target.write_bytes(b"valid-but-not-the-selected-backup")
+    wrong_digest = hashlib.sha256(wrong_target.read_bytes()).hexdigest()
+    (backup_dir / "db-current.dump.sha256").write_text(
+        f"{wrong_digest}  {wrong_target}\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [str(script)],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    monitor_log = (script.parents[1] / "monitor.log").read_text(encoding="utf-8")
+    assert "最新备份 checksum 校验失败" in monitor_log
 
 
 def test_monitor_probes_https_edge_redirect_and_certificate_expiry(
