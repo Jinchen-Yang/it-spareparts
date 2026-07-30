@@ -2366,6 +2366,36 @@ def test_release_runbook_extracts_all_dependencies_before_shellcheck() -> None:
         assert section.count(first_loop) == 2
 
 
+def test_release_runbook_runs_extracted_tools_through_trusted_bash() -> None:
+    runbook = RELEASE_RUNBOOK.read_text(encoding="utf-8")
+
+    build_command = (
+        'sudo -u ubuntu /usr/bin/bash "$tools/.deploy/build_v120.sh"'
+    )
+    build = (
+        f'{build_command} "$target_commit"'
+    )
+    superseding_build = (
+        f'{build_command} \\\n'
+        '  "$target_commit" --supersedes \'<父 RELEASE_ID>\''
+    )
+    release = (
+        'sudo -u ubuntu /usr/bin/bash "$tools/.deploy/release_v120.sh" '
+        '"$state"'
+    )
+    observer = (
+        'sudo -u ubuntu /usr/bin/bash "$tools/.deploy/observe_v120.sh" '
+        '"$state"'
+    )
+
+    assert runbook.count(build_command) == 2
+    assert build in runbook
+    assert superseding_build in runbook
+    assert runbook.count(release) == 1
+    assert runbook.count(observer) == 1
+    assert 'sudo -u ubuntu "$tools/.deploy/' not in runbook
+
+
 def test_release_runbook_archives_only_the_exact_legacy_https_control() -> None:
     runbook = RELEASE_RUNBOOK.read_text(encoding="utf-8")
     legacy_hash = (
