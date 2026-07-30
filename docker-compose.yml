@@ -67,8 +67,20 @@ services:
     depends_on:
       - app
     ports:
-      - "${FRONTEND_PORT:-8080}:80"   # 浏览器访问 http://<服务器IP>:8080
+      # 只给宿主机反向代理/SSH 隧道使用；生产用户必须经 HTTPS 入口访问。
+      - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
+    networks:
+      default:
+      # 公网代理只进入这条隔离网络，不能借此访问 app 或 db。
+      ingress:
+        aliases:
+          - it-spareparts-frontend
     restart: unless-stopped
+
+networks:
+  ingress:
+    name: ${IT_DATA_INGRESS_NETWORK:-it-spareparts-ingress}
+    internal: true
 
 volumes:
   postgres_data:

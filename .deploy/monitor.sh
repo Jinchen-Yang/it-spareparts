@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 生产健康巡检（cron 每 5 分钟）：容器 / DB / 入口 / 磁盘 / 备份新鲜度。
+# 生产健康巡检（cron 每 5 分钟）：容器 / DB / HTTPS、跳转、证书 / 磁盘 / 备份。
 # 正常静默(只刷新 monitor.status)，异常追加 monitor.log 并(可选)发钉钉。
 # 钉钉告警：把钉钉群机器人 webhook URL 写到 ~/apps/it-spareparts/.alert_webhook 即启用；无则只记日志。
 set -uo pipefail   # 不用 -e：要收集所有问题而非首个失败就退出
@@ -103,6 +103,37 @@ if [ -e .alert_webhook ] || [ -L .alert_webhook ]; then
   fi
 fi
 
+HTTPS_MONITOR_SAFE=N
+HTTPS_MONITOR_URL=
+HTTPS_MONITOR_HOST=
+if [ -e .https_monitor_url ] || [ -L .https_monitor_url ]; then
+  https_monitor_mode=$(stat -c '%a' -- .https_monitor_url 2>/dev/null || true)
+  if [ -L .https_monitor_url ] || [ ! -f .https_monitor_url ] \
+      || [ ! -r .https_monitor_url ] \
+      || [[ ! "$https_monitor_mode" =~ ^[0-7]+$ ]] \
+      || [ "${https_monitor_mode: -2}" != "00" ]; then
+    add "HTTPS 监控配置权限不安全，已拒绝读取（要求普通文件且 group/world 无权限）"
+  else
+    HTTPS_MONITOR_URL=$(cat .https_monitor_url)
+    if [[ "$HTTPS_MONITOR_URL" =~ ^https://([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?)/$ ]]; then
+      HTTPS_MONITOR_HOST=${BASH_REMATCH[1]}
+      if [[ "$HTTPS_MONITOR_HOST" == *.* \
+          && "$HTTPS_MONITOR_HOST" =~ [A-Za-z] \
+          && "$HTTPS_MONITOR_HOST" != *..* \
+          && "$HTTPS_MONITOR_HOST" != *.-* \
+          && "$HTTPS_MONITOR_HOST" != *-.* ]]; then
+        HTTPS_MONITOR_SAFE=Y
+      else
+        add "HTTPS 监控地址非法（仅允许正式 FQDN 的根路径）"
+      fi
+    else
+      add "HTTPS 监控地址非法（仅允许 https://正式域名/）"
+    fi
+  fi
+else
+  add "HTTPS 监控配置缺失，无法验证正式入口、跳转和证书"
+fi
+
 # 1) 容器：db/app/frontend 都应 Up
 ps_out=$(compose ps --format '{{.Service}} {{.Status}}' 2>/dev/null)
 for svc in db app frontend; do
@@ -116,14 +147,49 @@ compose exec -T db pg_isready -U spareparts -q 2>/dev/null || add "数据库不�
 # 3) 应用本体（容器内部）与前端入口
 probe_app /health || add "应用存活探针异常（容器内 /health）"
 probe_app /health/db || add "应用数据库探针异常（容器内 /health/db）"
-code=$(curl -s -o /dev/null -w '%{http_code}' -m 8 http://localhost:8080/ 2>/dev/null || echo 000)
+code=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' -m 8 \
+  http://127.0.0.1:8080/ 2>/dev/null || echo 000)
 [ "$code" = "200" ] || add "前端入口异常：HTTP $code"
 
-# 4) 磁盘 < 90%
+# 4) 正式 HTTPS 边缘、HTTP 跳转与证书续期余量
+if [ "$HTTPS_MONITOR_SAFE" = Y ]; then
+  if ! https_code=$(curl --noproxy '*' --proto '=https' --tlsv1.2 \
+      --connect-timeout 5 --max-time 12 -sS -o /dev/null \
+      -w '%{http_code}' "$HTTPS_MONITOR_URL" 2>/dev/null); then
+    https_code=000
+  fi
+  [ "$https_code" = "200" ] \
+    || add "HTTPS 正式入口异常：HTTP $https_code"
+
+  HTTP_MONITOR_URL="http://$HTTPS_MONITOR_HOST/"
+  if ! redirect_result=$(curl --noproxy '*' --proto '=http' \
+      --connect-timeout 5 --max-time 12 --max-redirs 0 \
+      -sS -o /dev/null -w '%{http_code} %{redirect_url}' \
+      "$HTTP_MONITOR_URL" 2>/dev/null); then
+    redirect_result="000 -"
+  fi
+  read -r redirect_code redirect_url <<< "$redirect_result"
+  case "$redirect_code" in
+    301|302|307|308) ;;
+    *) add "HTTP 到 HTTPS 跳转异常：HTTP ${redirect_code:-000}" ;;
+  esac
+  [ "$redirect_url" = "$HTTPS_MONITOR_URL" ] \
+    || add "HTTP 跳转目标异常（必须回到同域 HTTPS 根路径）"
+
+  if ! timeout --kill-after=2s 12s \
+      openssl s_client -connect "$HTTPS_MONITOR_HOST:443" \
+        -servername "$HTTPS_MONITOR_HOST" </dev/null 2>/dev/null |
+      timeout --kill-after=2s 12s \
+        openssl x509 -checkend 604800 -noout >/dev/null 2>&1; then
+    add "HTTPS 证书将在 7 天内到期或证书链读取失败"
+  fi
+fi
+
+# 5) 磁盘 < 90%
 use=$(df / | awk 'NR==2{gsub("%","",$5);print $5}')
 [ "${use:-0}" -ge 90 ] && add "根分区磁盘使用 ${use}%，接近写满"
 
-# 5) 最新备份 < 26 小时（每日 3am 备份，留余量）
+# 6) 最新备份 < 26 小时（每日 3am 备份，留余量）
 latest=$(
   find "$BACKUP_DIR" -maxdepth 1 -type f -name 'db-*.dump' -printf '%T@ %p\n' \
     2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-

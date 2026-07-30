@@ -12,6 +12,7 @@ dist/
 *.xlsx
 *.egg-info/
 .alert_webhook
+.https_monitor_url
 .monitor.lock
 monitor.log
 monitor.status

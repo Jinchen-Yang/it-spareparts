@@ -36,6 +36,9 @@ def _monitor_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
     deploy_dir.mkdir(parents=True)
     script = deploy_dir / "monitor.sh"
     shutil.copy2(MONITOR_SCRIPT, script)
+    edge_url = app_root / ".https_monitor_url"
+    edge_url.write_text("https://itdata.example.test/\n", encoding="utf-8")
+    edge_url.chmod(0o600)
 
     backup_dir = tmp_path / "backups"
     backup_dir.mkdir()
@@ -83,12 +86,59 @@ def _monitor_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
         r"""
         #!/usr/bin/env bash
         set -u
-        if [[ "$*" == *"http://localhost:8080/"* ]]; then
+        if [[ "$*" == *"http://127.0.0.1:8080/"* ]]; then
           printf '%s\n' "curl frontend" >> "$STUB_CALL_LOG"
           printf '%s' "${STUB_FRONTEND_HTTP_CODE:-200}"
           exit "${STUB_FRONTEND_EXIT:-0}"
         fi
+        if [[ "$*" == *" -d "* ]]; then
+          printf '%s\n' "curl webhook" >> "$STUB_CALL_LOG"
+          exit 0
+        fi
+        target="${@: -1}"
+        if [[ "$target" == https://* ]]; then
+          printf '%s\n' "curl https edge $target" >> "$STUB_CALL_LOG"
+          printf '%s' "${STUB_HTTPS_HTTP_CODE:-200}"
+          exit "${STUB_HTTPS_EXIT:-0}"
+        fi
+        if [[ "$target" == http://* ]]; then
+          printf '%s\n' "curl http redirect $target" >> "$STUB_CALL_LOG"
+          printf '%s %s' \
+            "${STUB_REDIRECT_HTTP_CODE:-308}" \
+            "${STUB_REDIRECT_URL:-https://itdata.example.test/}"
+          exit "${STUB_REDIRECT_EXIT:-0}"
+        fi
         printf '%s\n' "curl webhook" >> "$STUB_CALL_LOG"
+        """,
+    )
+    _write_executable(
+        stub_dir / "openssl",
+        r"""
+        #!/usr/bin/env bash
+        set -u
+        case "${1:-}" in
+          s_client)
+            host=""
+            while [ "$#" -gt 0 ]; do
+              if [ "$1" = "-servername" ]; then
+                host=$2
+                break
+              fi
+              shift
+            done
+            printf '%s\n' "openssl s_client $host" >> "$STUB_CALL_LOG"
+            printf '%s\n' "stub certificate"
+            exit "${STUB_TLS_CONNECT_EXIT:-0}"
+            ;;
+          x509)
+            cat >/dev/null
+            printf '%s\n' "openssl x509 checkend ${3:-missing}" >> "$STUB_CALL_LOG"
+            exit "${STUB_CERT_CHECK_EXIT:-0}"
+            ;;
+          *)
+            exit 97
+            ;;
+        esac
         """,
     )
     _write_executable(
@@ -157,12 +207,17 @@ def test_monitor_deployment_artifact_contract() -> None:
     assert "/home/ubuntu/apps/it-spareparts/monitor.sh" not in deploy_text
     assert "umask 077" in deploy_text
     assert 'chmod 600 "$APP_DIR/.alert_webhook"' in deploy_text
+    assert 'chmod 600 "$APP_DIR/.https_monitor_url"' in deploy_text
+    assert "证书 7 天续期余量" in deploy_text
     assert "连续两个 cron 周期" in deploy_text
     assert "ok=Y" in deploy_text
     assert "monitor.log" in deploy_text
     assert "journalctl" in deploy_text
 
     assert ".alert_webhook" in GITIGNORE.read_text(encoding="utf-8").splitlines()
+    assert ".https_monitor_url" in GITIGNORE.read_text(
+        encoding="utf-8"
+    ).splitlines()
 
     script_text = MONITOR_SCRIPT.read_text(encoding="utf-8")
     assert script_text.count("sudo ") == script_text.count("sudo -n ")
@@ -243,6 +298,143 @@ def test_monitor_healthy_path_checks_internal_app_and_writes_iso_heartbeat(
     )
     assert not (script.parents[1] / "monitor.log").exists()
     assert not list(script.parents[1].glob(".monitor.status.tmp.*"))
+
+
+def test_monitor_probes_https_edge_redirect_and_certificate_expiry(
+    tmp_path: Path,
+) -> None:
+    script, env, calls = _monitor_fixture(tmp_path)
+
+    result = subprocess.run(
+        [str(script)],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    command_log = calls.read_text(encoding="utf-8")
+    assert "curl https edge https://itdata.example.test/\n" in command_log
+    assert "curl http redirect http://itdata.example.test/\n" in command_log
+    assert "openssl s_client itdata.example.test\n" in command_log
+    assert "openssl x509 checkend 604800\n" in command_log
+
+
+@pytest.mark.parametrize(
+    ("env_override", "expected_problem"),
+    [
+        ({"STUB_HTTPS_HTTP_CODE": "502"}, "HTTPS 正式入口异常：HTTP 502"),
+        (
+            {
+                "STUB_REDIRECT_HTTP_CODE": "200",
+                "STUB_REDIRECT_URL": "-",
+            },
+            "HTTP 到 HTTPS 跳转异常：HTTP 200",
+        ),
+        (
+            {
+                "STUB_REDIRECT_HTTP_CODE": "308",
+                "STUB_REDIRECT_URL": "https://attacker.example/",
+            },
+            "HTTP 跳转目标异常（必须回到同域 HTTPS 根路径）",
+        ),
+        (
+            {"STUB_CERT_CHECK_EXIT": "1"},
+            "HTTPS 证书将在 7 天内到期或证书链读取失败",
+        ),
+    ],
+)
+def test_monitor_https_edge_failures_raise_alert(
+    tmp_path: Path,
+    env_override: dict[str, str],
+    expected_problem: str,
+) -> None:
+    script, env, _calls = _monitor_fixture(tmp_path)
+    env.update(env_override)
+
+    result = subprocess.run(
+        [str(script)],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    status = (script.parents[1] / "monitor.status").read_text(encoding="utf-8")
+    assert "ok=N(" in status
+    monitor_log = (script.parents[1] / "monitor.log").read_text(encoding="utf-8")
+    assert expected_problem in monitor_log
+
+
+@pytest.mark.parametrize(
+    ("url", "mode", "expected_problem"),
+    [
+        (
+            "https://itdata.example.test/",
+            0o644,
+            "HTTPS 监控配置权限不安全",
+        ),
+        (
+            "https://itdata.example.test/private",
+            0o600,
+            "HTTPS 监控地址非法",
+        ),
+        (
+            "https://118.25.94.90/",
+            0o600,
+            "HTTPS 监控地址非法",
+        ),
+    ],
+)
+def test_monitor_rejects_unsafe_https_probe_configuration(
+    tmp_path: Path,
+    url: str,
+    mode: int,
+    expected_problem: str,
+) -> None:
+    script, env, calls = _monitor_fixture(tmp_path)
+    edge_url = script.parents[1] / ".https_monitor_url"
+    edge_url.write_text(f"{url}\n", encoding="utf-8")
+    edge_url.chmod(mode)
+
+    result = subprocess.run(
+        [str(script)],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    monitor_log = (script.parents[1] / "monitor.log").read_text(encoding="utf-8")
+    assert expected_problem in monitor_log
+    command_log = calls.read_text(encoding="utf-8")
+    assert "curl https edge" not in command_log
+    assert "openssl s_client" not in command_log
+
+
+def test_monitor_fails_closed_when_https_probe_configuration_is_missing(
+    tmp_path: Path,
+) -> None:
+    script, env, calls = _monitor_fixture(tmp_path)
+    (script.parents[1] / ".https_monitor_url").unlink()
+
+    result = subprocess.run(
+        [str(script)],
+        check=False,
+        capture_output=True,
+        env=env,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    monitor_log = (script.parents[1] / "monitor.log").read_text(encoding="utf-8")
+    assert "HTTPS 监控配置缺失" in monitor_log
+    command_log = calls.read_text(encoding="utf-8")
+    assert "curl https edge" not in command_log
+    assert "openssl s_client" not in command_log
 
 
 def test_monitor_unhealthy_db_probe_logs_safely_and_sets_failure_heartbeat(
