@@ -2398,11 +2398,11 @@ def test_release_runbook_stages_the_exact_required_release_artifacts() -> None:
 
     release_command = (
         'sudo -u ubuntu /usr/bin/bash "$tools/.deploy/release_v120.sh" '
-        '"$state"'
+        '"$state" </dev/null'
     )
     observer_command = (
         'sudo -u ubuntu /usr/bin/bash "$tools/.deploy/observe_v120.sh" '
-        '"$state"'
+        '"$state" </dev/null'
     )
     section_end = runbook.index(observer_command, array_start) + len(
         observer_command
@@ -2481,11 +2481,11 @@ def test_release_runbook_runs_extracted_tools_through_trusted_bash() -> None:
     )
     release = (
         'sudo -u ubuntu /usr/bin/bash "$tools/.deploy/release_v120.sh" '
-        '"$state"'
+        '"$state" </dev/null'
     )
     observer = (
         'sudo -u ubuntu /usr/bin/bash "$tools/.deploy/observe_v120.sh" '
-        '"$state"'
+        '"$state" </dev/null'
     )
 
     assert runbook.count(build_command) == 2
@@ -2494,6 +2494,59 @@ def test_release_runbook_runs_extracted_tools_through_trusted_bash() -> None:
     assert runbook.count(release) == 1
     assert runbook.count(observer) == 1
     assert 'sudo -u ubuntu "$tools/.deploy/' not in runbook
+
+
+def test_release_runbook_subscripts_cannot_drain_outer_stdin(
+    tmp_path: Path,
+) -> None:
+    runbook = RELEASE_RUNBOOK.read_text(encoding="utf-8")
+    commands = [
+        line
+        for line in runbook.splitlines()
+        if line.startswith(
+            (
+                "sudo -u ubuntu /usr/bin/bash "
+                '"$tools/.deploy/release_v120.sh"',
+                "sudo -u ubuntu /usr/bin/bash "
+                '"$tools/.deploy/observe_v120.sh"',
+            )
+        )
+    ]
+    assert len(commands) == 2
+
+    deploy = tmp_path / ".deploy"
+    deploy.mkdir()
+    log = tmp_path / "calls.log"
+    (deploy / "release_v120.sh").write_text(
+        'cat >/dev/null\nprintf "release\\n" >> "$TEST_CALL_LOG"\n',
+        encoding="utf-8",
+    )
+    (deploy / "observe_v120.sh").write_text(
+        'printf "observe\\n" >> "$TEST_CALL_LOG"\n',
+        encoding="utf-8",
+    )
+    outer_script = "\n".join(
+        [
+            "set -euo pipefail",
+            "sudo() { shift 2; \"$@\"; }",
+            'tools=$1',
+            'state=$2',
+            'export TEST_CALL_LOG=$3',
+            *commands,
+            "",
+        ]
+    )
+
+    result = subprocess.run(
+        ["/usr/bin/bash", "-s", str(tmp_path), "unused", str(log)],
+        input=outer_script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert log.read_text(encoding="utf-8") == "release\nobserve\n"
 
 
 def test_release_runbook_archives_only_the_exact_legacy_https_control() -> None:
