@@ -2346,24 +2346,154 @@ def test_deploy_guide_routes_v120_to_the_versioned_runbook() -> None:
 def test_release_runbook_extracts_all_dependencies_before_shellcheck() -> None:
     runbook = RELEASE_RUNBOOK.read_text(encoding="utf-8")
 
-    for names in (
-        "build_v120.sh v120_state.sh",
-        "release_v120.sh observe_v120.sh v120_state.sh",
-    ):
-        first_loop = f"for name in {names}; do"
-        start = runbook.index(first_loop)
-        end = runbook.index('chmod 755 "$tools"', start)
-        section = runbook[start:end]
-        extraction_done = section.index("\ndone\n")
-        source_root = section.index('cd "$tools"')
-        shellcheck_loop = section.index(first_loop, extraction_done + 1)
-        shellcheck_call = section.index(
-            'shellcheck -x "$tools/.deploy/$name"',
-            shellcheck_loop,
-        )
+    names = "build_v120.sh v120_state.sh"
+    first_loop = f"for name in {names}; do"
+    start = runbook.index(first_loop)
+    end = runbook.index('chmod 755 "$tools"', start)
+    section = runbook[start:end]
+    extraction_done = section.index("\ndone\n")
+    source_root = section.index('cd "$tools"')
+    shellcheck_loop = section.index(first_loop, extraction_done + 1)
+    shellcheck_call = section.index(
+        'shellcheck -x "$tools/.deploy/$name"',
+        shellcheck_loop,
+    )
 
-        assert extraction_done < source_root < shellcheck_loop < shellcheck_call
-        assert section.count(first_loop) == 2
+    assert extraction_done < source_root < shellcheck_loop < shellcheck_call
+    assert section.count(first_loop) == 2
+
+
+def test_release_runbook_stages_the_exact_required_release_artifacts() -> None:
+    runbook = RELEASE_RUNBOOK.read_text(encoding="utf-8")
+    release_script = _script(RELEASE)
+    expected_scripts = (
+        "backup.sh",
+        "monitor.sh",
+        "build_v120.sh",
+        "release_v120.sh",
+        "observe_v120.sh",
+        "rollback_v120.sh",
+        "install_v120_control.sh",
+        "package_v120_control.sh",
+        "v120_state.sh",
+        "sync_v120_root_state.sh",
+    )
+
+    required_start = release_script.index("for script_name in \\\n")
+    required_end = release_script.index("\ndo\n", required_start)
+    required_scripts = tuple(
+        line.strip().removesuffix("\\").strip()
+        for line in release_script[required_start:required_end]
+        .splitlines()[1:]
+    )
+    assert required_scripts == expected_scripts
+
+    array_start = runbook.index("release_scripts=(\n")
+    array_end = runbook.index("\n)", array_start)
+    runbook_scripts = tuple(
+        line.strip()
+        for line in runbook[array_start:array_end].splitlines()[1:]
+    )
+    assert runbook_scripts == required_scripts
+
+    release_command = (
+        'sudo -u ubuntu /usr/bin/bash "$tools/.deploy/release_v120.sh" '
+        '"$state"'
+    )
+    observer_command = (
+        'sudo -u ubuntu /usr/bin/bash "$tools/.deploy/observe_v120.sh" '
+        '"$state"'
+    )
+    section_end = runbook.index(observer_command, array_start) + len(
+        observer_command
+    )
+    section = runbook[array_start:section_end]
+    scripts_loop = 'for name in "${release_scripts[@]}"; do'
+    first_loop = section.index(scripts_loop)
+    script_owner = section.index(
+        'chown root:root "$tools/.deploy/$name"',
+        first_loop,
+    )
+    script_mode = section.index(
+        'chmod 555 "$tools/.deploy/$name"',
+        script_owner,
+    )
+    script_syntax = section.index(
+        'bash -n "$tools/.deploy/$name"',
+        script_mode,
+    )
+    extraction_done = section.index("\ndone\n", first_loop)
+    cron_extract = section.index(
+        'tar -xOf "$control/source.tar" ".deploy/$release_data"',
+        extraction_done,
+    )
+    cron_owner = section.index(
+        'chown root:root "$tools/.deploy/$release_data"',
+        cron_extract,
+    )
+    cron_mode = section.index(
+        'chmod 444 "$tools/.deploy/$release_data"',
+        cron_owner,
+    )
+    source_root = section.index('cd "$tools"', cron_mode)
+    shellcheck_loop = section.index(
+        scripts_loop,
+        extraction_done + 1,
+    )
+    shellcheck_call = section.index(
+        'shellcheck -x "$tools/.deploy/$name"',
+        shellcheck_loop,
+    )
+    release_exec = section.index(release_command, shellcheck_call)
+    observer_exec = section.index(observer_command, release_exec)
+
+    assert "release_data=it-spareparts.cron" in section
+    assert section.count(scripts_loop) == 2
+    assert (
+        first_loop
+        < script_owner
+        < script_mode
+        < script_syntax
+        < extraction_done
+        < cron_extract
+        < cron_owner
+        < cron_mode
+        < source_root
+        < shellcheck_loop
+        < shellcheck_call
+        < release_exec
+        < observer_exec
+    )
+
+
+def test_release_runbook_runs_extracted_tools_through_trusted_bash() -> None:
+    runbook = RELEASE_RUNBOOK.read_text(encoding="utf-8")
+
+    build_command = (
+        'sudo -u ubuntu /usr/bin/bash "$tools/.deploy/build_v120.sh"'
+    )
+    build = (
+        f'{build_command} "$target_commit"'
+    )
+    superseding_build = (
+        f'{build_command} \\\n'
+        '  "$target_commit" --supersedes \'<父 RELEASE_ID>\''
+    )
+    release = (
+        'sudo -u ubuntu /usr/bin/bash "$tools/.deploy/release_v120.sh" '
+        '"$state"'
+    )
+    observer = (
+        'sudo -u ubuntu /usr/bin/bash "$tools/.deploy/observe_v120.sh" '
+        '"$state"'
+    )
+
+    assert runbook.count(build_command) == 2
+    assert build in runbook
+    assert superseding_build in runbook
+    assert runbook.count(release) == 1
+    assert runbook.count(observer) == 1
+    assert 'sudo -u ubuntu "$tools/.deploy/' not in runbook
 
 
 def test_release_runbook_archives_only_the_exact_legacy_https_control() -> None:
