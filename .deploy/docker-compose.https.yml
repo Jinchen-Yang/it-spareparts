@@ -1,0 +1,19 @@
+# 旧版本切换 HTTPS 时使用：
+#   docker compose -f docker-compose.yml -f .deploy/docker-compose.https.yml up -d frontend
+#
+# Compose 2.24.4+ 支持 !override。正式版本的主 compose 已默认回环绑定，
+# 保留本文件是为了在不切换业务镜像的前提下先关闭旧版公网 8080。
+services:
+  frontend:
+    ports: !override
+      - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
+    networks:
+      default:
+      ingress:
+        aliases:
+          - it-spareparts-frontend
+
+networks:
+  ingress:
+    name: ${IT_DATA_INGRESS_NETWORK:-it-spareparts-ingress}
+    internal: true

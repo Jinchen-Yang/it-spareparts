@@ -1,0 +1,23 @@
+# 将此站点块合并到现有 Caddyfile；不要覆盖同机其他站点。
+# 必填环境变量：
+#   IT_DATA_HOST       正式域名，例如 itdata.example.com
+#   IT_DATA_UPSTREAM   宿主机 Caddy 用 127.0.0.1:8080；
+#                      Docker Caddy 接入隔离 ingress 网络后用
+#                      it-spareparts-frontend:80
+# 可选：
+#   IT_DATA_HSTS_MAX_AGE  首次发布建议 300；观察通过后再提升到 31536000
+https://{$IT_DATA_HOST} {
+	reverse_proxy {$IT_DATA_UPSTREAM} {
+		# 下载与 SSE 立即向客户端转发，避免外层代理攒到响应结束。
+		flush_interval -1
+	}
+
+	header {
+		Strict-Transport-Security "max-age={$IT_DATA_HSTS_MAX_AGE:300}"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+}
