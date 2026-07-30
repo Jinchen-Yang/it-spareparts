@@ -82,7 +82,7 @@ interface ProjectRow {
 }
 
 interface LineRow {
-  id: number;
+  id: string;
   order_no: string; order_date: string | null; demand_type: string | null;
   business_type: string | null; warehouse: string | null;
   pn_std: string | null; description: string | null;
