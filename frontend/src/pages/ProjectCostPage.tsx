@@ -2495,17 +2495,7 @@ export default function ProjectCostPage({
               >
                 {pagedBoard.map((item) => {
                   const knownCostQuality = normalizeCostQuality(item.cost_quality);
-                  const costFactsMasked = !canViewCostFacts || [
-                    item.cost_quality,
-                    item.actual_cost_inc,
-                    item.actual_cost_ex,
-                    item.estimated_cost_inc,
-                    item.estimated_cost_ex,
-                    item.actual_lines,
-                    item.estimated_lines,
-                    item.missing_cost_lines,
-                    item.known_cost_total,
-                  ].every((value) => value == null);
+                  const costFactsRestricted = !canViewCostFacts;
                   const decisionFactsRestricted = (
                     boardDecisionRestricted
                     || !canViewCostFacts
@@ -2627,7 +2617,7 @@ export default function ProjectCostPage({
                         )}
                       </div>
                       <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.8 }}>
-                        {costFactsMasked ? (
+                        {costFactsRestricted ? (
                           <div>成本事实：无权限</div>
                         ) : (
                           <>
@@ -2666,7 +2656,7 @@ export default function ProjectCostPage({
                           ) : item.expense_data_available === false ? (
                             "费用：未就绪（无记录不等于 0）"
                           ) : (
-                            "费用：不可见"
+                            "费用：待核验"
                           )}
                         </div>
                       </div>
@@ -2718,7 +2708,7 @@ export default function ProjectCostPage({
                         </div>
                       )}
                       <Space wrap size={[4, 4]} style={{ marginTop: 8 }}>
-                        {costFactsMasked ? (
+                        {costFactsRestricted ? (
                           <Tag>成本：无权限</Tag>
                         ) : knownCostQuality === "incomplete" ? (
                           <Tag color="orange">

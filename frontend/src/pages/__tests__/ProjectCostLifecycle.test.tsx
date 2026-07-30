@@ -865,6 +865,59 @@ describe("维保项目生命周期筛选", () => {
     expect(within(card).queryByRole("progressbar")).toBeNull();
   });
 
+  it("有成本权限但所有成本证据缺失时展示待核验而不是无权限", async () => {
+    get.mockImplementation((path: string) => {
+      if (path !== "/maintenance/board") return Promise.reject(new Error("unexpected"));
+      const response = board("XS-REMINDER-COST-UNKNOWN");
+      response.data.rows[0] = {
+        ...response.data.rows[0],
+        actual_cost_inc: null,
+        actual_cost_ex: null,
+        estimated_cost_inc: null,
+        estimated_cost_ex: null,
+        actual_lines: null,
+        estimated_lines: null,
+        missing_cost_lines: null,
+        known_cost_total: null,
+        cost_quality: null,
+      };
+      return Promise.resolve(response);
+    });
+
+    render(<ProjectCostPage view="reminders" />);
+
+    const card = within(
+      await screen.findByRole("list", { name: "项目提醒卡片" }),
+    ).getByRole("listitem");
+    expect(card).toHaveTextContent("实际参考：含 - · 不含 -");
+    expect(card).toHaveTextContent("估算参考：含 - · 不含 -");
+    expect(card).toHaveTextContent("缺失成本行：待核验");
+    expect(card).toHaveTextContent("成本：待核验");
+    expect(card).not.toHaveTextContent(/成本事实：无权限|成本：无权限/);
+  });
+
+  it("有费用权限但旧响应未给费用可用性时展示待核验而不是不可见", async () => {
+    get.mockImplementation((path: string) => {
+      if (path !== "/maintenance/board") return Promise.reject(new Error("unexpected"));
+      const response = board("XS-REMINDER-EXPENSE-UNKNOWN");
+      response.data.rows[0] = {
+        ...response.data.rows[0],
+        expense_data_available: undefined,
+        expense_inc: null,
+        expense_ex: null,
+      };
+      return Promise.resolve(response);
+    });
+
+    render(<ProjectCostPage view="reminders" />);
+
+    const card = within(
+      await screen.findByRole("list", { name: "项目提醒卡片" }),
+    ).getByRole("listitem");
+    expect(card).toHaveTextContent("费用：待核验");
+    expect(card).not.toHaveTextContent("费用：不可见");
+  });
+
   it("无成本权限提醒只展示获准事实且不泄漏成本数量或回填入口", async () => {
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: true,
