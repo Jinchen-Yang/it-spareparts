@@ -25,4 +25,12 @@ describe("v1.20.0 release notes", () => {
     expect(notes).toMatch(/报销含税、未税和证据状态/);
     expect(notes).toMatch(/回填模板的导出与导入.*客户信息权限/);
   });
+
+  it("documents stable maintenance rows and the HTTPS production boundary", () => {
+    const notes = LATEST.items.join("\n");
+    expect(notes).toMatch(/项目出库明细缺少稳定行标识/);
+    expect(notes).toMatch(/多行、翻页、重复刷新和按月筛选/);
+    expect(notes).toMatch(/生产登录、权限接口和文件导出统一启用 HTTPS/);
+    expect(notes).toMatch(/公网 8080 已关闭/);
+  });
 });
