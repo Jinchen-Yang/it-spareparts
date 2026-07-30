@@ -2343,6 +2343,29 @@ def test_deploy_guide_routes_v120_to_the_versioned_runbook() -> None:
     assert "observe_v120.sh" in guide
 
 
+def test_release_runbook_extracts_all_dependencies_before_shellcheck() -> None:
+    runbook = RELEASE_RUNBOOK.read_text(encoding="utf-8")
+
+    for names in (
+        "build_v120.sh v120_state.sh",
+        "release_v120.sh observe_v120.sh v120_state.sh",
+    ):
+        first_loop = f"for name in {names}; do"
+        start = runbook.index(first_loop)
+        end = runbook.index('chmod 755 "$tools"', start)
+        section = runbook[start:end]
+        extraction_done = section.index("\ndone\n")
+        source_root = section.index('cd "$tools"')
+        shellcheck_loop = section.index(first_loop, extraction_done + 1)
+        shellcheck_call = section.index(
+            'shellcheck -x "$tools/.deploy/$name"',
+            shellcheck_loop,
+        )
+
+        assert extraction_done < source_root < shellcheck_loop < shellcheck_call
+        assert section.count(first_loop) == 2
+
+
 def test_release_runbook_archives_only_the_exact_legacy_https_control() -> None:
     runbook = RELEASE_RUNBOOK.read_text(encoding="utf-8")
     legacy_hash = (
