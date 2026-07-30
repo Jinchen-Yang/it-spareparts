@@ -113,6 +113,53 @@ type ExportDatePreset = "all" | "today" | "last7" | "last14" | "last21" | "last3
 const DOWNLOAD_PROJECT_QUERY_MAX_LENGTH = 128;
 const DOWNLOAD_PROJECT_NAME_MAX_LENGTH = 256;
 const DOWNLOAD_CONTRACT_MAX_LENGTH = 64;
+const UNSAFE_DOWNLOAD_CONTRACT_PATTERN =
+  /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufffd]/u;
+
+function safeDownloadContract(value: string): string {
+  const normalized = value.trim();
+  if (
+    !normalized
+    || normalized.length > DOWNLOAD_CONTRACT_MAX_LENGTH
+    || UNSAFE_DOWNLOAD_CONTRACT_PATTERN.test(normalized)
+  ) {
+    return "";
+  }
+  return normalized;
+}
+
+export function buildReminderRefillHref(
+  contract: string | null,
+  canPrefillContract: boolean,
+): string {
+  const params = new URLSearchParams({ from: "reminders" });
+  const safeContract = canPrefillContract
+    ? safeDownloadContract(contract || "")
+    : "";
+  if (safeContract) params.set("contract", safeContract);
+  return `/maintenance/downloads?${params.toString()}`;
+}
+
+export function readReminderDownloadContext(
+  search: string,
+  canPrefillContract: boolean,
+): { contract: string; returnToReminders: boolean } {
+  const params = new URLSearchParams(search);
+  const fromValues = params.getAll("from");
+  const contractValues = params.getAll("contract");
+  const returnToReminders = (
+    fromValues.length === 1
+    && fromValues[0] === "reminders"
+  );
+  const contract = (
+    returnToReminders
+    && canPrefillContract
+    && contractValues.length === 1
+  )
+    ? safeDownloadContract(contractValues[0])
+    : "";
+  return { contract, returnToReminders };
+}
 
 interface BoardRow extends DualMarginFields {
   contract: string | null;
@@ -1106,12 +1153,18 @@ export default function ProjectCostPage({
     && localPermissions.data_purchase_cost === true
     && localPermissions.data_profit === true
   );
+  const canViewCostFacts = isAdmin || localPermissions.data_purchase_cost === true;
+  const canViewProfitFacts = isAdmin || localPermissions.data_profit === true;
   const canExportRoundtripWorkbooks = canExportProjectWorkbooks && (
     isAdmin || localPermissions.data_customer === true
   );
+  const canViewContractFacts = isAdmin || localPermissions.data_customer === true;
   const canApplyRoundtripWorkbook = canExportRoundtripWorkbooks && (
     isAdmin || localPermissions.action_maintenance_roundtrip_apply === true
   );
+  const reminderDownloadContext = view === "downloads" && typeof window !== "undefined"
+    ? readReminderDownloadContext(window.location.search, canExportRoundtripWorkbooks)
+    : { contract: "", returnToReminders: false };
   const maintenanceBasis = useTaxBasis("maintenance");
   const [exportRange, setExportRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [exportDatePreset, setExportDatePreset] = useState<ExportDatePreset>("all");
@@ -1132,7 +1185,9 @@ export default function ProjectCostPage({
   const [downloadProjectLifecycle, setDownloadProjectLifecycle] =
     useState<LifecycleFilter>("all");
   const [downloadProject, setDownloadProject] = useState("");
-  const [downloadContract, setDownloadContract] = useState("");
+  const [downloadContract, setDownloadContract] = useState(
+    () => reminderDownloadContext.contract,
+  );
   const [lifecycle, setLifecycle] = useState<LifecycleFilter>("ongoing");
   const [reminderStatus, setReminderStatus] = useState<ReminderStatusFilter>("all");
   const [projectLifecycleCounts, setProjectLifecycleCounts] =
@@ -2000,6 +2055,9 @@ export default function ProjectCostPage({
         <PageHeader
           title="下载中心"
           subtitle="集中选择日期和业务对象后下载；大文件生成期间按钮保持锁定，失败时显示服务端的准确原因。"
+          extra={reminderDownloadContext.returnToReminders
+            ? <a href="/maintenance/reminders">返回项目提醒</a>
+            : undefined}
         />
         <Card title="下载范围">
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
@@ -2423,35 +2481,269 @@ export default function ProjectCostPage({
           ) : board.length === 0 ? (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前筛选暂无提醒" />
           ) : (
-            <Space direction="vertical" size={10} style={{ width: "100%" }}>
-              {pagedBoard.map((item) => {
-                const knownCostQuality = normalizeCostQuality(item.cost_quality);
-                const status = boardDecisionRestricted
-                  ? knownCostQuality === "incomplete" ? "incomplete_cost" : null
-                  : effectiveBoardStatus(item) ?? "incomplete_cost";
-                const meta = status == null ? null : STATUS_META[status];
-                return (
-                  <Alert
-                    key={item.contract || "(none)"}
-                    type={status === "red" || status === "incomplete_cost" ? "warning" : "info"}
-                    showIcon
-                    message={
-                      <Space wrap>
-                        <b>{item.contract || "（未关联合同）"}</b>
-                        <Tag color={status === "red" ? "red" : status === "yellow" ? "gold" : "default"}>
-                          {meta?.label || "经营判断受限"}
-                        </Tag>
+            <>
+              <div
+                role="list"
+                aria-label="项目提醒卡片"
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 340px), 1fr))",
+                  gap: 12,
+                  width: "100%",
+                  minWidth: 0,
+                }}
+              >
+                {pagedBoard.map((item) => {
+                  const knownCostQuality = normalizeCostQuality(item.cost_quality);
+                  const costFactsRestricted = !canViewCostFacts;
+                  const decisionFactsRestricted = (
+                    boardDecisionRestricted
+                    || !canViewCostFacts
+                    || !canViewProfitFacts
+                  );
+                  const evidenceStatus = knownCostQuality == null
+                    ? "incomplete_cost"
+                    : effectiveBoardStatus(item) ?? "incomplete_cost";
+                  const formalBudgetStatus = (
+                    evidenceStatus === "red"
+                    || evidenceStatus === "yellow"
+                    || evidenceStatus === "green"
+                  );
+                  const hasPositiveBudget = (
+                    item.budget != null
+                    && Number.isFinite(item.budget)
+                    && item.budget > 0
+                  );
+                  const hasCompleteWaterlineFacts = (
+                    item.spent != null
+                    && Number.isFinite(item.spent)
+                    && item.remaining != null
+                    && Number.isFinite(item.remaining)
+                    && item.remaining_pct != null
+                    && Number.isFinite(item.remaining_pct)
+                  );
+                  const status = decisionFactsRestricted
+                    ? null
+                    : (
+                      formalBudgetStatus
+                      && item.expense_data_available === false
+                    )
+                      ? "expense_data_unavailable"
+                      : (
+                        formalBudgetStatus
+                        && item.expense_data_available !== true
+                      )
+                        ? null
+                        : (
+                          formalBudgetStatus
+                          && !hasPositiveBudget
+                        )
+                          ? "no_budget"
+                          : (
+                            formalBudgetStatus
+                            && !hasCompleteWaterlineFacts
+                          )
+                            ? null
+                            : evidenceStatus;
+                  const meta = status == null ? null : STATUS_META[status];
+                  const hasBudgetWaterline = (
+                    !decisionFactsRestricted
+                    && (status === "red" || status === "yellow" || status === "green")
+                    && knownCostQuality !== "incomplete"
+                    && item.expense_data_available === true
+                    && hasPositiveBudget
+                    && hasCompleteWaterlineFacts
+                  );
+                  const spentPct = hasBudgetWaterline
+                    ? Math.round((item.spent! / item.budget!) * 100)
+                    : null;
+                  return (
+                    <article
+                      key={item.contract || "(none)"}
+                      role="listitem"
+                      style={{
+                        minWidth: 0,
+                        width: "100%",
+                        maxWidth: "100%",
+                        boxSizing: "border-box",
+                        border: "1px solid var(--mb-border)",
+                        borderRadius: 8,
+                        padding: "12px 14px",
+                        background: "var(--mb-surface)",
+                      }}
+                    >
+                      <div style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "flex-start",
+                        gap: 8,
+                      }}>
+                        <b style={{
+                          minWidth: 0,
+                          overflowWrap: "anywhere",
+                          fontFamily: "monospace",
+                          fontSize: 13,
+                        }}>
+                          {canViewContractFacts
+                            ? item.contract || "（未关联合同）"
+                            : "合同信息受限"}
+                        </b>
                         <LifecycleTag status={item.lifecycle_status} />
+                      </div>
+                      <div style={{ marginTop: 6, fontSize: 12, color: "var(--mb-text-2)" }}>
+                        期限：{item.maint_end ? `截止 ${item.maint_end}` : "日期未提供"}
+                      </div>
+                      <div style={{ marginTop: 8, fontSize: 12.5 }}>
+                        {item.projects.slice(0, 3).map((project) => (
+                          <div
+                            key={project.project}
+                            title={project.project}
+                            style={{
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            项目：{project.project}
+                          </div>
+                        ))}
+                        {item.projects.length === 0 && (
+                          <div style={{ color: "var(--mb-text-3)" }}>项目：未提供</div>
+                        )}
+                        {item.projects.length > 3 && (
+                          <div style={{ color: "var(--mb-text-3)" }}>
+                            …等 {item.projects.length} 个项目
+                          </div>
+                        )}
+                      </div>
+                      <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.8 }}>
+                        {costFactsRestricted ? (
+                          <div>成本事实：无权限</div>
+                        ) : (
+                          <>
+                            <div>
+                              实际参考：<TaxMoney
+                                scope="maintenance"
+                                inc={item.actual_cost_inc}
+                                ex={item.actual_cost_ex}
+                              />
+                            </div>
+                            <div>
+                              估算参考：<TaxMoney
+                                scope="maintenance"
+                                inc={item.estimated_cost_inc}
+                                ex={item.estimated_cost_ex}
+                              />
+                            </div>
+                            <div>
+                              缺失成本行：{item.missing_cost_lines == null
+                                ? "待核验"
+                                : `${item.missing_cost_lines} 行`}
+                            </div>
+                          </>
+                        )}
+                        <div>
+                          {!canViewProfitFacts ? (
+                            "费用：不可见"
+                          ) : item.expense_data_available === true ? (
+                            <>
+                              费用：已就绪 · <TaxMoney
+                                scope="maintenance"
+                                inc={item.expense_inc ?? null}
+                                ex={item.expense_ex ?? null}
+                              />
+                            </>
+                          ) : item.expense_data_available === false ? (
+                            "费用：未就绪（无记录不等于 0）"
+                          ) : (
+                            "费用：待核验"
+                          )}
+                        </div>
+                      </div>
+                      {hasBudgetWaterline && spentPct != null && (
+                        <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6 }}>
+                          <div>
+                            费用水位：合同额参考 {money(item.budget)}
+                            {" · "}已知支出 {money(item.spent)}
+                            {" · "}剩余预算 {money(item.remaining)}
+                            {`（${item.remaining_pct}%）`}
+                          </div>
+                          <Progress
+                            percent={Math.min(Math.max(spentPct, 0), 100)}
+                            size="small"
+                            strokeColor={
+                              status === "red" ? "#c0524a"
+                                : status === "yellow" ? "#b8860b"
+                                  : "#3f7a45"
+                            }
+                            showInfo={false}
+                          />
+                        </div>
+                      )}
+                      {status === "expense_data_unavailable" && (
+                        <div style={{
+                          marginTop: 8,
+                          fontSize: 12,
+                          color: "var(--mb-text-3)",
+                        }}>
+                          费用水位：暂不计算（费用未就绪）
+                        </div>
+                      )}
+                      {status === "incomplete_cost" && (
+                        <div style={{
+                          marginTop: 8,
+                          fontSize: 12,
+                          color: "var(--mb-text-3)",
+                        }}>
+                          费用水位：暂不计算（成本证据不完整）
+                        </div>
+                      )}
+                      {status === "no_budget" && (
+                        <div style={{
+                          marginTop: 8,
+                          fontSize: 12,
+                          color: "var(--mb-text-3)",
+                        }}>
+                          费用水位：无预算（未关联合同额）
+                        </div>
+                      )}
+                      <Space wrap size={[4, 4]} style={{ marginTop: 8 }}>
+                        {costFactsRestricted ? (
+                          <Tag>成本：无权限</Tag>
+                        ) : knownCostQuality === "incomplete" ? (
+                          <Tag color="orange">
+                            成本：缺 {item.missing_cost_lines ?? "—"} 行
+                          </Tag>
+                        ) : knownCostQuality == null ? (
+                          <Tag>成本：待核验</Tag>
+                        ) : (
+                          <Tag color="green">成本：完整</Tag>
+                        )}
+                        <Tag color={
+                          status === "red" ? "red"
+                            : status === "yellow" ? "gold"
+                              : status === "green" ? "green"
+                                : undefined
+                        }>
+                          {meta?.label || (
+                            decisionFactsRestricted ? "经营判断受限" : "经营判断待核验"
+                          )}
+                        </Tag>
                       </Space>
-                    }
-                    description={status == null
-                      ? "当前账号仅展示获准事实，不推断成本、费用或预算状态"
-                      : `成本缺失 ${item.missing_cost_lines ?? "—"} 行 · 费用${
-                        item.expense_data_available === true ? "已就绪" : "未就绪"
-                      }`}
-                  />
-                );
-              })}
+                      {canApplyRoundtripWorkbook && (
+                        <div style={{ marginTop: 8, fontSize: 12 }}>
+                          <a href={buildReminderRefillHref(
+                            item.contract,
+                            canApplyRoundtripWorkbook,
+                          )}>
+                            去人工回填
+                          </a>
+                        </div>
+                      )}
+                    </article>
+                  );
+                })}
+              </div>
               {board.length > BOARD_PAGE_SIZE && (
                 <Pagination
                   aria-label="项目提醒分页"
@@ -2463,7 +2755,7 @@ export default function ProjectCostPage({
                   style={{ marginTop: 8, textAlign: "right" }}
                 />
               )}
-            </Space>
+            </>
           )}
         </Card>
       </Space>
