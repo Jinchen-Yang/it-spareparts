@@ -138,8 +138,15 @@ describe("规则校准预览", () => {
     login();
     render(<DataQualityCalibrationPanel />);
     expect(await screen.findByText("PN-4T")).toBeInTheDocument();
+    // CI 负载高时，预览内容可能先于 finally 中的 loading=false 提交。
+    // 等按钮恢复真实可点击状态，再模拟用户刷新，避免点击仍在 loading 的按钮。
+    const refreshButton = screen.getByRole("button", { name: /刷新模拟预览/ });
+    await waitFor(() => {
+      expect(refreshButton).toHaveAccessibleName("刷新模拟预览");
+      expect(refreshButton).toBeEnabled();
+    });
     getPurchasePriceCalibration.mockRejectedValueOnce(new Error("network"));
-    fireEvent.click(screen.getByRole("button", { name: "刷新模拟预览" }));
+    fireEvent.click(refreshButton);
 
     expect(await screen.findByText("校准预览加载失败，旧结果已清空。"))
       .toBeInTheDocument();
