@@ -8,6 +8,7 @@ import os
 import re
 import runpy
 import stat
+import struct
 import subprocess
 import sys
 import textwrap
@@ -102,6 +103,55 @@ def _minimal_xlsx() -> bytes:
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>""",
         )
     return content.getvalue()
+
+
+def _zip64_eocd(raw: bytes, *, disk_count: int = 1) -> bytes:
+    eocd_offset = raw.rfind(b"PK\x05\x06")
+    assert eocd_offset >= 0
+    (
+        _signature,
+        disk_number,
+        directory_disk,
+        entries_on_disk,
+        entries_total,
+        directory_size,
+        directory_offset,
+        comment_size,
+    ) = struct.unpack("<4s4H2IH", raw[eocd_offset : eocd_offset + 22])
+    assert disk_number == directory_disk == comment_size == 0
+    assert directory_offset + directory_size == eocd_offset
+    zip64_record = struct.pack(
+        "<4sQ2H2I4Q",
+        b"PK\x06\x06",
+        44,
+        45,
+        45,
+        0,
+        0,
+        entries_on_disk,
+        entries_total,
+        directory_size,
+        directory_offset,
+    )
+    locator = struct.pack(
+        "<4sIQI",
+        b"PK\x06\x07",
+        0,
+        eocd_offset,
+        disk_count,
+    )
+    legacy_eocd = struct.pack(
+        "<4s4H2IH",
+        b"PK\x05\x06",
+        0,
+        0,
+        0xFFFF,
+        0xFFFF,
+        0xFFFFFFFF,
+        0xFFFFFFFF,
+        0,
+    )
+    return raw[:eocd_offset] + zip64_record + locator + legacy_eocd
 
 
 def _state(app_compose_hash: str) -> str:
@@ -1934,6 +1984,227 @@ def test_release_artifact_validator_rejects_oversized_xlsx_before_open(
     )
 
     with pytest.raises(SystemExit, match="XLSX is empty or exceeds 64 MiB"):
+        validator["main"]()
+
+
+def test_release_artifact_validator_rejects_declared_zip_fanout_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = tmp_path / "zip.headers"
+    headers.write_text("Content-Type: application/zip\r\n", encoding="ascii")
+    malicious = tmp_path / "declared-fanout.zip"
+    declared_entries = 501
+    central_directory_size = declared_entries * 46
+    with malicious.open("wb") as target:
+        target.seek(central_directory_size)
+        target.write(
+            struct.pack(
+                "<4s4H2IH",
+                b"PK\x05\x06",
+                0,
+                0,
+                declared_entries,
+                declared_entries,
+                central_directory_size,
+                0,
+                0,
+            )
+        )
+
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+
+    def reject_zipfile_open(*args: object, **kwargs: object) -> None:
+        pytest.fail("ZipFile was called before the central directory was bounded")
+
+    monkeypatch.setattr(zipfile, "ZipFile", reject_zipfile_open)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(ARTIFACT_VALIDATOR),
+            "zip",
+            str(malicious),
+            str(headers),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="ZIP entry count is outside"):
+        validator["main"]()
+
+
+def test_release_artifact_validator_rejects_actual_xlsx_fanout_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = tmp_path / "xlsx.headers"
+    headers.write_text(
+        "Content-Type: "
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n",
+        encoding="ascii",
+    )
+    malicious = tmp_path / "actual-fanout.xlsx"
+    central_header = b"PK\x01\x02" + b"\0" * 42
+    central_directory = central_header * 257
+    malicious.write_bytes(
+        central_directory
+        + struct.pack(
+            "<4s4H2IH",
+            b"PK\x05\x06",
+            0,
+            0,
+            1,
+            1,
+            len(central_directory),
+            0,
+            0,
+        )
+    )
+
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+
+    def reject_zipfile_open(*args: object, **kwargs: object) -> None:
+        pytest.fail("ZipFile was called before XLSX directory fanout was bounded")
+
+    monkeypatch.setattr(zipfile, "ZipFile", reject_zipfile_open)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(ARTIFACT_VALIDATOR),
+            "xlsx",
+            str(malicious),
+            str(headers),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="ZIP entry count is outside"):
+        validator["main"]()
+
+
+def test_release_artifact_validator_rejects_prefixed_zip_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = tmp_path / "zip.headers"
+    headers.write_text("Content-Type: application/zip\r\n", encoding="ascii")
+    content = io.BytesIO()
+    with zipfile.ZipFile(content, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("合同一.xlsx", _minimal_xlsx())
+    prefixed = tmp_path / "prefixed.zip"
+    prefixed.write_bytes(b"self-extracting-prefix" + content.getvalue())
+
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+
+    def reject_zipfile_open(*args: object, **kwargs: object) -> None:
+        pytest.fail("ZipFile was called before prefixed ZIP metadata was rejected")
+
+    monkeypatch.setattr(zipfile, "ZipFile", reject_zipfile_open)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(ARTIFACT_VALIDATOR),
+            "zip",
+            str(prefixed),
+            str(headers),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="directory bounds are inconsistent"):
+        validator["main"]()
+
+
+def test_release_artifact_validator_rejects_encrypted_metadata_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = tmp_path / "zip.headers"
+    headers.write_text("Content-Type: application/zip\r\n", encoding="ascii")
+    central_header = bytearray(b"PK\x01\x02" + b"\0" * 42)
+    struct.pack_into("<H", central_header, 8, 0x1)
+    malicious = tmp_path / "encrypted-directory.zip"
+    malicious.write_bytes(
+        central_header
+        + struct.pack(
+            "<4s4H2IH",
+            b"PK\x05\x06",
+            0,
+            0,
+            1,
+            1,
+            len(central_header),
+            0,
+            0,
+        )
+    )
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+
+    def reject_zipfile_open(*args: object, **kwargs: object) -> None:
+        pytest.fail("ZipFile was called before encrypted metadata was rejected")
+
+    monkeypatch.setattr(zipfile, "ZipFile", reject_zipfile_open)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(ARTIFACT_VALIDATOR),
+            "zip",
+            str(malicious),
+            str(headers),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="encrypted or masked"):
+        validator["main"]()
+
+
+def test_release_artifact_validator_accepts_zip64_and_rejects_multidisk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = tmp_path / "zip.headers"
+    headers.write_text("Content-Type: application/zip\r\n", encoding="ascii")
+    content = io.BytesIO()
+    with zipfile.ZipFile(content, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("合同一.xlsx", _minimal_xlsx())
+    valid_zip64 = tmp_path / "valid-zip64.zip"
+    valid_zip64.write_bytes(_zip64_eocd(content.getvalue()))
+
+    valid = subprocess.run(
+        [
+            "python3",
+            str(ARTIFACT_VALIDATOR),
+            "zip",
+            str(valid_zip64),
+            str(headers),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert valid.returncode == 0, valid.stderr
+
+    multidisk = tmp_path / "multidisk-zip64.zip"
+    multidisk.write_bytes(_zip64_eocd(content.getvalue(), disk_count=2))
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+
+    def reject_zipfile_open(*args: object, **kwargs: object) -> None:
+        pytest.fail("ZipFile was called before multi-disk ZIP64 was rejected")
+
+    monkeypatch.setattr(zipfile, "ZipFile", reject_zipfile_open)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(ARTIFACT_VALIDATOR),
+            "zip",
+            str(multidisk),
+            str(headers),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="multi-disk ZIP64"):
         validator["main"]()
 
 

@@ -10,6 +10,7 @@ import os
 import pathlib
 import posixpath
 import stat
+import struct
 import sys
 import tempfile
 import zipfile
@@ -64,8 +65,16 @@ MAX_WORKSHEET_XML_BYTES = 48 * 1024 * 1024
 MAX_ZIP_BYTES = 512 * 1024 * 1024
 MAX_ZIP_MEMBERS = 500
 MAX_XLSX_MEMBERS = 256
+MAX_ZIP_CENTRAL_DIRECTORY_BYTES = 16 * 1024 * 1024
+MAX_XLSX_CENTRAL_DIRECTORY_BYTES = 8 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 250
 STREAM_CHUNK_BYTES = 64 * 1024
+ZIP_EOCD_BYTES = 22
+ZIP_MAX_COMMENT_BYTES = 65_535
+ZIP64_LOCATOR_BYTES = 20
+ZIP64_EOCD_BYTES = 56
+ZIP_CENTRAL_HEADER_BYTES = 46
+ZIP_ENCRYPTION_FLAGS = 0x0001 | 0x0040 | 0x2000
 PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 DOCUMENT_REL_NS = (
@@ -144,6 +153,198 @@ def open_bounded_artifact(
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def read_zip_bytes_at(
+    source: BinaryIO,
+    file_size: int,
+    offset: int,
+    size: int,
+) -> bytes:
+    if (
+        offset < 0
+        or size < 0
+        or offset > file_size
+        or size > file_size - offset
+    ):
+        fail("ZIP record points outside the artifact")
+    source.seek(offset)
+    content = source.read(size)
+    if len(content) != size:
+        fail("ZIP record is truncated")
+    return content
+
+
+def locate_zip_eocd(source: BinaryIO, file_size: int) -> tuple[int, tuple[int, ...]]:
+    if file_size < ZIP_EOCD_BYTES:
+        fail("ZIP end-of-central-directory record is missing")
+    tail_size = min(file_size, ZIP_EOCD_BYTES + ZIP_MAX_COMMENT_BYTES)
+    tail_offset = file_size - tail_size
+    tail = read_zip_bytes_at(source, file_size, tail_offset, tail_size)
+    candidates: list[int] = []
+    cursor = 0
+    while True:
+        candidate = tail.find(b"PK\x05\x06", cursor)
+        if candidate < 0:
+            break
+        if candidate + ZIP_EOCD_BYTES <= len(tail):
+            comment_size = struct.unpack_from("<H", tail, candidate + 20)[0]
+            absolute = tail_offset + candidate
+            if absolute + ZIP_EOCD_BYTES + comment_size == file_size:
+                candidates.append(candidate)
+        cursor = candidate + 1
+    if len(candidates) != 1:
+        fail("ZIP end-of-central-directory record is missing or ambiguous")
+    candidate = candidates[0]
+    record = tail[candidate : candidate + ZIP_EOCD_BYTES]
+    fields = struct.unpack("<4s4H2IH", record)
+    return tail_offset + candidate, fields[1:]
+
+
+def require_legacy_zip64_match(
+    legacy: int,
+    sentinel: int,
+    actual: int,
+) -> None:
+    if legacy not in (sentinel, actual):
+        fail("ZIP64 metadata disagrees with the legacy directory record")
+
+
+def resolve_zip_directory(
+    source: BinaryIO,
+    file_size: int,
+) -> tuple[int, int, int]:
+    eocd_offset, legacy = locate_zip_eocd(source, file_size)
+    (
+        disk_number,
+        directory_disk,
+        entries_on_disk,
+        entries_total,
+        directory_size,
+        directory_offset,
+        _comment_size,
+    ) = legacy
+    locator_offset = eocd_offset - ZIP64_LOCATOR_BYTES
+    locator = (
+        read_zip_bytes_at(source, file_size, locator_offset, ZIP64_LOCATOR_BYTES)
+        if locator_offset >= 0
+        else b""
+    )
+    has_zip64_locator = locator.startswith(b"PK\x06\x07")
+    has_zip64_sentinel = (
+        disk_number == 0xFFFF
+        or directory_disk == 0xFFFF
+        or entries_on_disk == 0xFFFF
+        or entries_total == 0xFFFF
+        or directory_size == 0xFFFFFFFF
+        or directory_offset == 0xFFFFFFFF
+    )
+    if not has_zip64_locator:
+        if has_zip64_sentinel:
+            fail("ZIP64 locator is missing")
+        if disk_number != 0 or directory_disk != 0 or entries_on_disk != entries_total:
+            fail("multi-disk ZIP files are not permitted")
+        if directory_offset + directory_size != eocd_offset:
+            fail("ZIP central directory bounds are inconsistent")
+        return entries_total, directory_size, directory_offset
+
+    _, locator_disk, zip64_offset, disk_count = struct.unpack("<4sIQI", locator)
+    if locator_disk != 0 or disk_count != 1:
+        fail("multi-disk ZIP64 files are not permitted")
+    prefix = read_zip_bytes_at(source, file_size, zip64_offset, 12)
+    signature, record_size = struct.unpack("<4sQ", prefix)
+    if signature != b"PK\x06\x06":
+        fail("ZIP64 end-of-central-directory record is missing")
+    if record_size != ZIP64_EOCD_BYTES - 12:
+        fail("ZIP64 extensible directory data is not permitted")
+    if zip64_offset + ZIP64_EOCD_BYTES != locator_offset:
+        fail("ZIP64 directory records are not contiguous")
+    record = read_zip_bytes_at(
+        source,
+        file_size,
+        zip64_offset,
+        ZIP64_EOCD_BYTES,
+    )
+    (
+        _signature,
+        _record_size,
+        _created_version,
+        _required_version,
+        zip64_disk_number,
+        zip64_directory_disk,
+        zip64_entries_on_disk,
+        zip64_entries_total,
+        zip64_directory_size,
+        zip64_directory_offset,
+    ) = struct.unpack("<4sQ2H2I4Q", record)
+    if (
+        zip64_disk_number != 0
+        or zip64_directory_disk != 0
+        or zip64_entries_on_disk != zip64_entries_total
+    ):
+        fail("multi-disk ZIP64 files are not permitted")
+    require_legacy_zip64_match(disk_number, 0xFFFF, zip64_disk_number)
+    require_legacy_zip64_match(directory_disk, 0xFFFF, zip64_directory_disk)
+    require_legacy_zip64_match(entries_on_disk, 0xFFFF, zip64_entries_on_disk)
+    require_legacy_zip64_match(entries_total, 0xFFFF, zip64_entries_total)
+    require_legacy_zip64_match(directory_size, 0xFFFFFFFF, zip64_directory_size)
+    require_legacy_zip64_match(directory_offset, 0xFFFFFFFF, zip64_directory_offset)
+    if zip64_directory_offset + zip64_directory_size != zip64_offset:
+        fail("ZIP64 central directory bounds are inconsistent")
+    return zip64_entries_total, zip64_directory_size, zip64_directory_offset
+
+
+def preflight_zip_directory(
+    source: BinaryIO,
+    file_size: int,
+    *,
+    max_entries: int,
+    max_directory_bytes: int,
+) -> None:
+    entries, directory_size, directory_offset = resolve_zip_directory(
+        source,
+        file_size,
+    )
+    if not 1 <= entries <= max_entries:
+        fail("ZIP entry count is outside the permitted range")
+    if not 1 <= directory_size <= max_directory_bytes:
+        fail("ZIP central directory size is outside the permitted range")
+    if directory_offset > file_size or directory_size > file_size - directory_offset:
+        fail("ZIP central directory points outside the artifact")
+
+    cursor = directory_offset
+    directory_end = directory_offset + directory_size
+    actual_entries = 0
+    while cursor < directory_end:
+        if actual_entries >= max_entries:
+            fail("ZIP entry count is outside the permitted range")
+        if directory_end - cursor < ZIP_CENTRAL_HEADER_BYTES:
+            fail("ZIP central directory header is truncated")
+        header = read_zip_bytes_at(
+            source,
+            file_size,
+            cursor,
+            ZIP_CENTRAL_HEADER_BYTES,
+        )
+        if not header.startswith(b"PK\x01\x02"):
+            fail("ZIP central directory header is malformed")
+        flags = struct.unpack_from("<H", header, 8)[0]
+        name_size, extra_size, comment_size = struct.unpack_from("<3H", header, 28)
+        disk_start = struct.unpack_from("<H", header, 34)[0]
+        if flags & ZIP_ENCRYPTION_FLAGS:
+            fail("ZIP contains encrypted or masked directory metadata")
+        if disk_start != 0:
+            fail("multi-disk ZIP members are not permitted")
+        entry_size = (
+            ZIP_CENTRAL_HEADER_BYTES + name_size + extra_size + comment_size
+        )
+        if entry_size > directory_end - cursor:
+            fail("ZIP central directory entry exceeds its declared bounds")
+        cursor += entry_size
+        actual_entries += 1
+    if cursor != directory_end or actual_entries != entries:
+        fail("ZIP central directory entry count is inconsistent")
+    source.seek(0)
 
 
 def validate_xlsx(path: pathlib.Path) -> int:
@@ -402,7 +603,14 @@ def validate_xlsx_bytes(raw: bytes) -> int:
     if not raw or len(raw) > MAX_XLSX_BYTES:
         fail("XLSX is empty or exceeds 64 MiB")
     try:
-        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        source = io.BytesIO(raw)
+        preflight_zip_directory(
+            source,
+            len(raw),
+            max_entries=MAX_XLSX_MEMBERS,
+            max_directory_bytes=MAX_XLSX_CENTRAL_DIRECTORY_BYTES,
+        )
+        with zipfile.ZipFile(source) as archive:
             infos = preflight_zip(
                 archive,
                 max_members=MAX_XLSX_MEMBERS,
@@ -532,7 +740,13 @@ def validate_zip(path: pathlib.Path) -> tuple[int, int]:
             limit=MAX_ZIP_BYTES,
             size_error="batch ZIP is empty or exceeds 512 MiB",
             label="batch ZIP",
-        ) as (source, _expected_size):
+        ) as (source, expected_size):
+            preflight_zip_directory(
+                source,
+                expected_size,
+                max_entries=MAX_ZIP_MEMBERS,
+                max_directory_bytes=MAX_ZIP_CENTRAL_DIRECTORY_BYTES,
+            )
             with zipfile.ZipFile(source) as archive:
                 infos = preflight_zip(
                     archive,
