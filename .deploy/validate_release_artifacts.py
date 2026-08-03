@@ -181,24 +181,18 @@ def locate_zip_eocd(source: BinaryIO, file_size: int) -> tuple[int, tuple[int, .
     tail_size = min(file_size, ZIP_EOCD_BYTES + ZIP_MAX_COMMENT_BYTES)
     tail_offset = file_size - tail_size
     tail = read_zip_bytes_at(source, file_size, tail_offset, tail_size)
-    candidates: list[int] = []
-    cursor = 0
-    while True:
-        candidate = tail.find(b"PK\x05\x06", cursor)
-        if candidate < 0:
-            break
-        if candidate + ZIP_EOCD_BYTES <= len(tail):
-            comment_size = struct.unpack_from("<H", tail, candidate + 20)[0]
-            absolute = tail_offset + candidate
-            if absolute + ZIP_EOCD_BYTES + comment_size == file_size:
-                candidates.append(candidate)
-        cursor = candidate + 1
-    if len(candidates) != 1:
-        fail("ZIP end-of-central-directory record is missing or ambiguous")
-    candidate = candidates[0]
+    candidate = tail.rfind(b"PK\x05\x06")
+    if candidate < 0:
+        fail("ZIP end-of-central-directory record is missing")
+    if candidate + ZIP_EOCD_BYTES > len(tail):
+        fail("ZIP end-of-central-directory record is truncated")
+    comment_size = struct.unpack_from("<H", tail, candidate + 20)[0]
+    absolute = tail_offset + candidate
+    if absolute + ZIP_EOCD_BYTES + comment_size != file_size:
+        fail("ZIP comment length is inconsistent")
     record = tail[candidate : candidate + ZIP_EOCD_BYTES]
     fields = struct.unpack("<4s4H2IH", record)
-    return tail_offset + candidate, fields[1:]
+    return absolute, fields[1:]
 
 
 def require_legacy_zip64_match(

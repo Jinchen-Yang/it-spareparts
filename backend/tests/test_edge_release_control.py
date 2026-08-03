@@ -2159,6 +2159,61 @@ def test_release_artifact_validator_rejects_encrypted_metadata_before_open(
         validator["main"]()
 
 
+def test_release_artifact_validator_rejects_later_inconsistent_eocd_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = tmp_path / "zip.headers"
+    headers.write_text("Content-Type: application/zip\r\n", encoding="ascii")
+    content = io.BytesIO()
+    with zipfile.ZipFile(content, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("合同一.xlsx", _minimal_xlsx())
+    malicious_content = bytearray(content.getvalue())
+    real_eocd_offset = malicious_content.rfind(b"PK\x05\x06")
+    assert real_eocd_offset >= 0
+    fake_eocd = struct.pack(
+        "<4s4H2IH",
+        b"PK\x05\x06",
+        0,
+        0,
+        1,
+        1,
+        46,
+        0,
+        0,
+    )
+    fake_comment = fake_eocd + b"trailing-bytes"
+    struct.pack_into(
+        "<H",
+        malicious_content,
+        real_eocd_offset + 20,
+        len(fake_comment),
+    )
+    malicious_content.extend(fake_comment)
+    malicious = tmp_path / "later-inconsistent-eocd.zip"
+    malicious.write_bytes(malicious_content)
+
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+
+    def reject_zipfile_open(*args: object, **kwargs: object) -> None:
+        pytest.fail("ZipFile was called after a later inconsistent EOCD signature")
+
+    monkeypatch.setattr(zipfile, "ZipFile", reject_zipfile_open)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(ARTIFACT_VALIDATOR),
+            "zip",
+            str(malicious),
+            str(headers),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="ZIP comment length is inconsistent"):
+        validator["main"]()
+
+
 def test_release_artifact_validator_accepts_zip64_and_rejects_multidisk(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
