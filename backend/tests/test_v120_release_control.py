@@ -50,6 +50,14 @@ DEFAULT_RELEASE_ID = "v120-aaaaaaaaaaaa-20260730160000"
 ZERO_HASH = "0" * 64
 
 
+def _test_node() -> str:
+    node = shutil.which("node")
+    assert node is not None, (
+        "Node.js must be available on PATH for mobile probe tests"
+    )
+    return node
+
+
 def _script(path: Path) -> str:
     assert path.is_file()
     assert path.stat().st_mode & stat.S_IXUSR
@@ -1950,7 +1958,7 @@ def _run_mobile_pipe_case(
         env["MOBILE_PROBE_TEST_PROFILE_RM_FAILURES"] = profile_rm_failures
     result = subprocess.run(
         [
-            "/usr/bin/node",
+            _test_node(),
             str(MOBILE_RELEASE_PROBE),
             str(fake_chrome),
             str(login),
@@ -2046,7 +2054,7 @@ def test_mobile_probe_does_not_delete_unvalidated_external_login(
 
     result = subprocess.run(
         [
-            "/usr/bin/node",
+            _test_node(),
             str(MOBILE_RELEASE_PROBE),
             str(fake_chrome),
             str(external_login),
@@ -2290,7 +2298,7 @@ def test_mobile_probe_real_chrome_pipe_against_loopback_fixture(
 
         result = subprocess.run(
             [
-                "/usr/bin/node",
+                _test_node(),
                 str(MOBILE_RELEASE_PROBE),
                 "/opt/google/chrome/google-chrome",
                 str(login),

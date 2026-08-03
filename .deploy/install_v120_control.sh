@@ -81,8 +81,9 @@ ensure_new_or_exact_directory() {
   local owner=$3
   local group=$4
   if [ -e "$path" ] || [ -L "$path" ]; then
-    [ -d "$path" ] && [ ! -L "$path" ] \
-      || fatal "unsafe directory: $path"
+    if [ ! -d "$path" ] || [ -L "$path" ]; then
+      fatal "unsafe directory: $path"
+    fi
     [ "$(stat -c '%a %U:%G' "$path")" = "$mode $owner:$group" ] \
       || fatal "directory owner/mode mismatch: $path"
     return 0
@@ -123,8 +124,9 @@ ensure_new_or_exact_lock_file() {
 check_control_directories() {
   local path
   for path in "$CONTROL_DIR" "$VERSIONS_DIR" "$ARCHIVE_DIR"; do
-    [ -d "$path" ] && [ ! -L "$path" ] \
-      || fatal "unsafe control directory: $path"
+    if [ ! -d "$path" ] || [ -L "$path" ]; then
+      fatal "unsafe control directory: $path"
+    fi
     [ "$(stat -c '%a %U:%G' "$path")" = "700 root:root" ] \
       || fatal "control directory owner/mode mismatch: $path"
   done
@@ -142,8 +144,9 @@ prepare_install_directories() {
 }
 
 acquire_release_lock() {
-  [ -d "$LOCK_PATH" ] && [ ! -L "$LOCK_PATH" ] \
-    || fatal "release lock is unsafe"
+  if [ ! -d "$LOCK_PATH" ] || [ -L "$LOCK_PATH" ]; then
+    fatal "release lock is unsafe"
+  fi
   [ "$(stat -c '%a %U:%G' "$LOCK_PATH")" = "750 root:ubuntu" ] \
     || fatal "release lock owner/mode mismatch"
   exec 9<"$LOCK_PATH"
@@ -273,32 +276,36 @@ validate_package_directory() {
     expected_owner="$(id -un):$(id -gn)"
   fi
 
-  [ -d "$package_dir" ] && [ ! -L "$package_dir" ] \
-    || fatal "control package directory is unsafe"
+  if [ ! -d "$package_dir" ] || [ -L "$package_dir" ]; then
+    fatal "control package directory is unsafe"
+  fi
   [ "$(stat -c '%a %U:%G' "$package_dir")" \
     = "700 $expected_owner" ] \
     || fatal "control package directory owner/mode mismatch"
-  [ -f "$package_dir/manifest.txt" ] \
-    && [ ! -L "$package_dir/manifest.txt" ] \
-    && [ "$(stat -c '%a %U:%G %h' "$package_dir/manifest.txt")" \
-      = "600 $expected_owner 1" ] \
-    || fatal "control manifest is unsafe"
+  if [ ! -f "$package_dir/manifest.txt" ] \
+      || [ -L "$package_dir/manifest.txt" ] \
+      || [ "$(stat -c '%a %U:%G %h' "$package_dir/manifest.txt")" \
+        != "600 $expected_owner 1" ]; then
+    fatal "control manifest is unsafe"
+  fi
   [ "$(sha256sum "$package_dir/manifest.txt" | cut -d' ' -f1)" \
     = "$expected_manifest_hash" ] || fatal "control manifest hash mismatch"
   parse_manifest "$package_dir/manifest.txt" manifest \
     || fatal "invalid control manifest"
   for index in "${!PACKAGE_NAMES[@]}"; do
     source="$package_dir/${PACKAGE_NAMES[$index]}"
-    [ -f "$source" ] && [ ! -L "$source" ] \
-      && [ "$(stat -c '%a %U:%G %h' "$source")" \
-        = "${VERSION_MODES[$index]} $expected_owner 1" ] \
-      || fatal "unsafe packaged control file"
+    if [ ! -f "$source" ] || [ -L "$source" ] \
+        || [ "$(stat -c '%a %U:%G %h' "$source")" \
+          != "${VERSION_MODES[$index]} $expected_owner 1" ]; then
+      fatal "unsafe packaged control file"
+    fi
     limit=262144
     [ "${PACKAGE_NAMES[$index]}" != source.tar ] \
       || limit=$SOURCE_TAR_LIMIT
-    [ "$(stat -c '%s' "$source")" -gt 0 ] \
-      && [ "$(stat -c '%s' "$source")" -le "$limit" ] \
-      || fatal "packaged control file size is unsafe"
+    if [ "$(stat -c '%s' "$source")" -le 0 ] \
+        || [ "$(stat -c '%s' "$source")" -gt "$limit" ]; then
+      fatal "packaged control file size is unsafe"
+    fi
     actual=$(sha256sum "$source" | cut -d' ' -f1)
     [ "$actual" = "${manifest[${MANIFEST_KEYS[$index]}]}" ] \
       || fatal "packaged control file hash mismatch"
@@ -406,8 +413,9 @@ stage_inbox_package() {
   local staging
   local index
   local limit
-  [ -d "$inbox" ] && [ ! -L "$inbox" ] \
-    || fatal "operator-transfer package is missing or unsafe"
+  if [ ! -d "$inbox" ] || [ -L "$inbox" ]; then
+    fatal "operator-transfer package is missing or unsafe"
+  fi
   staging=$(mktemp -d "$CONTROL_DIR/.incoming-control.XXXXXX")
   STAGED_PACKAGE=$staging
   chmod 700 "$staging"
@@ -492,10 +500,11 @@ publish_current_pointer() (
 verify_current_version() {
   local expected_manifest_hash=$1
   local expected_target="versions/$expected_manifest_hash"
-  [ -L "$CURRENT_LINK" ] \
-    && [ "$(stat -c '%F %U:%G %h' "$CURRENT_LINK")" \
-      = "symbolic link root:root 1" ] \
-    || fatal "current control pointer is unsafe"
+  if [ ! -L "$CURRENT_LINK" ] \
+      || [ "$(stat -c '%F %U:%G %h' "$CURRENT_LINK")" \
+        != "symbolic link root:root 1" ]; then
+    fatal "current control pointer is unsafe"
+  fi
   [ "$(readlink -- "$CURRENT_LINK")" = "$expected_target" ] \
     || fatal "current control pointer targets another version"
   validate_package_directory \
@@ -636,15 +645,17 @@ preflight_authority_evidence() {
   ) || fatal "authority evidence is incomplete; recovery must fail closed"
 
   if [ "$mode" = existing ]; then
-    [ -f "$AUTHORITY_MARKER" ] && [ ! -L "$AUTHORITY_MARKER" ] \
-      && [ "$(stat -c '%a %U:%G %h' "$AUTHORITY_MARKER")" \
-        = "600 root:root 1" ] \
-      || fatal "authority marker is unsafe"
+    if [ ! -f "$AUTHORITY_MARKER" ] || [ -L "$AUTHORITY_MARKER" ] \
+        || [ "$(stat -c '%a %U:%G %h' "$AUTHORITY_MARKER")" \
+          != "600 root:root 1" ]; then
+      fatal "authority marker is unsafe"
+    fi
     AUTHORITY_INITIALIZING=0
     return 0
   fi
-  [ -f "$BOOTSTRAP_AUTH" ] && [ ! -L "$BOOTSTRAP_AUTH" ] \
-    || fatal "explicit one-time bootstrap authorization is required"
+  if [ ! -f "$BOOTSTRAP_AUTH" ] || [ -L "$BOOTSTRAP_AUTH" ]; then
+    fatal "explicit one-time bootstrap authorization is required"
+  fi
   AUTHORITY_INITIALIZING=1
 }
 
@@ -939,7 +950,7 @@ active_systemd_timer_duplicates_absent() {
 }
 
 other_scheduler_duplicates_absent() {
-  static_scheduler_duplicates_absent || return $?
+  static_scheduler_duplicates_absent / || return $?
   active_systemd_timer_duplicates_absent || return $?
 }
 
@@ -953,8 +964,9 @@ install_cron() {
   other_scheduler_duplicates_absent \
     || fatal "another scheduler still runs backup or monitor"
   if [ -e "$CRON_DEST" ] || [ -L "$CRON_DEST" ]; then
-    [ -f "$CRON_DEST" ] && [ ! -L "$CRON_DEST" ] \
-      || fatal "unsafe cron destination"
+    if [ ! -f "$CRON_DEST" ] || [ -L "$CRON_DEST" ]; then
+      fatal "unsafe cron destination"
+    fi
   fi
   temporary=$(mktemp -- /etc/cron.d/.it-spareparts.XXXXXX)
   install -m 644 -o root -g root \
@@ -980,9 +992,10 @@ verify_cron() {
 }
 
 if [ "${V120_INSTALLER_LIBRARY_ONLY:-0}" = 1 ]; then
-  [ "${V120_STATE_TEST_MODE:-0}" = 1 ] \
-    && [ "${BASH_SOURCE[0]}" != "$0" ] \
-    || fatal "installer library mode is test-only and must be sourced"
+  if [ "${V120_STATE_TEST_MODE:-0}" != 1 ] \
+      || [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    fatal "installer library mode is test-only and must be sourced"
+  fi
   return 0
 fi
 
@@ -1029,6 +1042,7 @@ case "$ACTION" in
     if [ "$CONTROL_WAS_PRESENT" = 1 ] \
         && [ "$AUTHORITY_INITIALIZING" = 0 ]; then
       validate_current_predecessor_for_successor \
+        "$CONTROL_DIR" "$VERSIONS_DIR" \
         || fatal "current control predecessor is invalid"
     fi
     stage_inbox_package "$EXPECTED_MANIFEST_HASH"
