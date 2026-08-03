@@ -4,12 +4,17 @@
 from __future__ import annotations
 
 import csv
+import contextlib
 import io
+import os
 import pathlib
 import posixpath
+import stat
 import sys
 import tempfile
 import zipfile
+from collections.abc import Iterator
+from typing import BinaryIO
 from xml.etree import ElementTree
 
 
@@ -85,6 +90,73 @@ def content_type(headers: pathlib.Path) -> str:
     if len(values) != 1:
         fail("Content-Type must appear exactly once")
     return "; ".join(part.strip() for part in values[0].split(";"))
+
+
+def artifact_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+@contextlib.contextmanager
+def open_bounded_artifact(
+    path: pathlib.Path,
+    *,
+    limit: int,
+    size_error: str,
+    label: str,
+) -> Iterator[tuple[BinaryIO, int]]:
+    try:
+        before = path.lstat()
+    except OSError as exc:
+        fail(f"cannot stat {label}: {exc}")
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > limit
+    ):
+        fail(size_error)
+
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        fail(f"cannot open {label} safely: {exc}")
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or artifact_identity(opened) != artifact_identity(before)
+        ):
+            fail(f"{label} changed before it could be opened safely")
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = -1
+            yield source, opened.st_size
+            after = os.fstat(source.fileno())
+            if artifact_identity(after) != artifact_identity(opened):
+                fail(f"{label} changed while it was being validated")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def validate_xlsx(path: pathlib.Path) -> int:
+    with open_bounded_artifact(
+        path,
+        limit=MAX_XLSX_BYTES,
+        size_error="XLSX is empty or exceeds 64 MiB",
+        label="XLSX",
+    ) as (source, expected_size):
+        raw = source.read(MAX_XLSX_BYTES + 1)
+        if len(raw) != expected_size or source.read(1):
+            fail("XLSX size changed while it was being read")
+        return validate_xlsx_bytes(raw)
 
 
 def safe_member_names(archive: zipfile.ZipFile) -> list[str]:
@@ -455,22 +527,26 @@ def validate_csv(path: pathlib.Path) -> tuple[int, int]:
 
 def validate_zip(path: pathlib.Path) -> tuple[int, int]:
     try:
-        if path.stat().st_size > MAX_ZIP_BYTES:
-            fail("batch ZIP exceeds 512 MiB")
-        with zipfile.ZipFile(path) as archive:
-            infos = preflight_zip(
-                archive,
-                max_members=MAX_ZIP_MEMBERS,
-                max_member_bytes=MAX_XLSX_BYTES,
-                max_total_bytes=MAX_ZIP_BYTES,
-                required_suffix=".xlsx",
-            )
-            sheets = 0
-            for info in infos:
-                sheets += validate_xlsx_bytes(
-                    read_member_bounded(archive, info, MAX_XLSX_BYTES)
+        with open_bounded_artifact(
+            path,
+            limit=MAX_ZIP_BYTES,
+            size_error="batch ZIP is empty or exceeds 512 MiB",
+            label="batch ZIP",
+        ) as (source, _expected_size):
+            with zipfile.ZipFile(source) as archive:
+                infos = preflight_zip(
+                    archive,
+                    max_members=MAX_ZIP_MEMBERS,
+                    max_member_bytes=MAX_XLSX_BYTES,
+                    max_total_bytes=MAX_ZIP_BYTES,
+                    required_suffix=".xlsx",
                 )
-            return len(infos), sheets
+                sheets = 0
+                for info in infos:
+                    sheets += validate_xlsx_bytes(
+                        read_member_bounded(archive, info, MAX_XLSX_BYTES)
+                    )
+                return len(infos), sheets
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         fail(f"batch ZIP cannot be opened: {exc}")
 
@@ -597,7 +673,7 @@ def main() -> None:
         columns, rows = validate_csv(artifact)
         print(f"VALID kind=csv columns={columns} rows={rows}")
     elif kind == "xlsx":
-        sheets = validate_xlsx_bytes(artifact.read_bytes())
+        sheets = validate_xlsx(artifact)
         print(f"VALID kind=xlsx sheets={sheets}")
     else:
         members, sheets = validate_zip(artifact)

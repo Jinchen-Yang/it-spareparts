@@ -6,8 +6,10 @@ import http.client
 import io
 import os
 import re
+import runpy
 import stat
 import subprocess
+import sys
 import textwrap
 import time
 import zipfile
@@ -1883,6 +1885,56 @@ def test_release_artifact_validator_rejects_mime_and_fake_files(
             check=False,
         )
         assert invalid.returncode != 0, kind
+
+
+def test_release_artifact_validator_rejects_oversized_xlsx_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = tmp_path / "xlsx.headers"
+    headers.write_text(
+        "Content-Type: "
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n",
+        encoding="ascii",
+    )
+    oversized = tmp_path / "oversized.xlsx"
+    with oversized.open("wb") as target:
+        target.seek(64 * 1024 * 1024)
+        target.write(b"\0")
+
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    real_open = Path.open
+    real_os_open = os.open
+
+    def reject_artifact_open(path: Path, *args: object, **kwargs: object):
+        if path == oversized:
+            pytest.fail("oversized XLSX was opened before its size was rejected")
+        return real_open(path, *args, **kwargs)
+
+    def reject_artifact_os_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *args: object,
+        **kwargs: object,
+    ):
+        if Path(path) == oversized:
+            pytest.fail("oversized XLSX was opened before its size was rejected")
+        return real_os_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", reject_artifact_open)
+    monkeypatch.setattr(os, "open", reject_artifact_os_open)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(ARTIFACT_VALIDATOR),
+            "xlsx",
+            str(oversized),
+            str(headers),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="XLSX is empty or exceeds 64 MiB"):
+        validator["main"]()
 
 
 def test_release_artifact_validator_accepts_opc_targets_and_rejects_traversal(
