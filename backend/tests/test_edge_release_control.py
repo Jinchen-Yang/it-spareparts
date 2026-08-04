@@ -844,6 +844,48 @@ def test_edge_cas_supports_root_owned_production_config_modes(
     assert not list(assistant.glob(".edge-cas-*"))
 
 
+def test_edge_cas_chmod_failure_retains_backup_for_retry(tmp_path: Path) -> None:
+    env, _control, assistant, _calls = _fixture(tmp_path)
+    compose = assistant / "compose.production.yml"
+    caddyfile = assistant / "Caddyfile"
+    compose.chmod(0o644)
+    caddyfile.chmod(0o644)
+    marker = tmp_path / "cas-chmod-failed-once"
+    _write_executable(
+        Path(env["EDGE_COMMAND_DIR"]) / "chmod",
+        f"""
+        #!/usr/bin/env bash
+        set -euo pipefail
+        marker='{marker}'
+        if [ "$1" = 600 ] && [[ "$2" = *'/.edge-cas-'* ]] \
+            && [ ! -e "$marker" ]; then
+          : > "$marker"
+          exit 70
+        fi
+        exec /usr/bin/chmod "$@"
+        """,
+    )
+    assert _run_root(env, "prepare").returncode == 0
+
+    interrupted = _run_root(env, "promote")
+
+    assert interrupted.returncode != 0
+    assert marker.is_file()
+    cas_backups = list(assistant.glob(".edge-cas-*"))
+    assert len(cas_backups) == 1
+    assert stat.S_IMODE(cas_backups[0].stat().st_mode) == 0o644
+    assert _run_root(env, "inspect").stdout == "exact-promote-pending\n"
+
+    resumed = _run_root(env, "promote")
+
+    assert resumed.returncode == 0, resumed.stderr
+    assert _run_root(env, "inspect").stdout == "exact-promoted\n"
+    assert stat.S_IMODE(compose.stat().st_mode) == 0o644
+    assert stat.S_IMODE(caddyfile.stat().st_mode) == 0o644
+    assert not list(assistant.glob(".edge-cas-*"))
+    assert _run_root(env, "rollback").returncode == 0
+
+
 def test_edge_cas_rechecks_live_file_before_each_rename(tmp_path: Path) -> None:
     env, _control, assistant, _calls = _fixture(tmp_path)
     assert _run_root(env, "prepare").returncode == 0
