@@ -1383,27 +1383,266 @@ def test_supply_chain_inputs_and_image_provenance_are_fail_closed() -> None:
     )
 
 
-def test_protected_release_source_reads_use_noninteractive_sudo() -> None:
-    build = _script(BUILD)
+_PROTECTED_BUILD_VARIABLE = re.compile(
+    r"\$(?:\{)?(?:BUILD_ROOT|RELEASE_SRC_CANDIDATE|RELEASE_SRC|"
+    r"BUILD_OVERRIDE|MIGRATION_DIR)(?:\})?"
+)
+
+
+def _normalize_shell_command(command: str) -> str:
+    command = textwrap.dedent(command).strip()
+    command = re.sub(r"\\\n[ \t]*", " ", command)
+    return re.sub(r"\s+", " ", command)
+
+
+def _logical_shell_commands(script: str) -> tuple[str, ...]:
+    commands: list[str] = []
+    current: list[str] = []
+    single_quoted = False
+    double_quoted = False
+    command_substitution_depth = 0
+
+    for line in script.splitlines():
+        current.append(line)
+        escaped = False
+        index = 0
+        while index < len(line):
+            character = line[index]
+            if escaped:
+                escaped = False
+            elif character == "\\" and not single_quoted:
+                escaped = True
+            elif single_quoted:
+                if character == "'":
+                    single_quoted = False
+            elif character == "'" and not double_quoted:
+                single_quoted = True
+            elif character == '"':
+                double_quoted = not double_quoted
+            elif character == "$" and line[index : index + 2] == "$(":
+                command_substitution_depth += 1
+                index += 1
+            elif character == ")" and command_substitution_depth:
+                command_substitution_depth -= 1
+            index += 1
+
+        trailing_backslashes = len(line) - len(line.rstrip("\\"))
+        continued = trailing_backslashes % 2 == 1
+        if not any(
+            (
+                continued,
+                single_quoted,
+                double_quoted,
+                command_substitution_depth,
+            )
+        ):
+            command = "\n".join(current)
+            commands.append(_normalize_shell_command(command))
+            current = []
+
+    assert not current, "unterminated logical shell command"
+    return tuple(commands)
+
+
+_SAFE_PROTECTED_NON_FILE_COMMANDS = frozenset(
+    {
+        'RELEASE_SRC_CANDIDATE="$BUILD_ROOT/$RELEASE_ID"',
+        "RELEASE_SRC=$RELEASE_SRC_CANDIDATE",
+        'BUILD_OVERRIDE="$RELEASE_SRC/docker-compose.build-override.yml"',
+        'MIGRATION_DIR="$RELEASE_SRC/backend/alembic/versions"',
+        "RELEASE_SRC=",
+    }
+)
+_SAFE_PROTECTED_SUDO_COMMANDS = frozenset(
+    _normalize_shell_command(command)
+    for command in (
+        r'''sudo mkdir -- "$RELEASE_SRC_CANDIDATE"''',
+        r'''sudo chown root:root "$RELEASE_SRC"''',
+        r'''sudo chmod 700 "$RELEASE_SRC"''',
+        r'''sudo tar --no-same-owner --no-same-permissions \
+          -xf "$CONTROL_CURRENT/source.tar" -C "$RELEASE_SRC"''',
+        r'''sudo env \
+          BUILD_OVERRIDE="$BUILD_OVERRIDE" \
+          NEW_APP_CANDIDATE_TAG="$NEW_APP_CANDIDATE_TAG" \
+          NEW_FRONTEND_CANDIDATE_TAG="$NEW_FRONTEND_CANDIDATE_TAG" \
+          sh -c '
+            set -eu
+            umask 077
+            {
+              printf "services:\n"
+              printf "  app:\n"
+              printf "    image: %s\n" "$NEW_APP_CANDIDATE_TAG"
+              printf "  frontend:\n"
+              printf "    image: %s\n" "$NEW_FRONTEND_CANDIDATE_TAG"
+            } > "$BUILD_OVERRIDE"
+            chown root:root "$BUILD_OVERRIDE"
+            chmod 400 "$BUILD_OVERRIDE"
+          ' ''',
+        r'''sudo find "$RELEASE_SRC" -xdev -type d -exec chmod 555 {} +''',
+        r'''sudo find "$RELEASE_SRC" -xdev -type f \
+          ! -path "$BUILD_OVERRIDE" -exec chmod 444 {} +''',
+        r'''sudo grep -q 'APP_VERSION = "1.20.0"' \
+          "$RELEASE_SRC/frontend/src/version.ts"''',
+        r'''[ "$(sudo sha256sum "$RELEASE_SRC/$relative" | cut -d' ' -f1)" \
+          = "$expected" ] || fatal "$relative differs from the control manifest"''',
+        r'''sudo -n grep -Fx \
+          "FROM --platform=linux/amd64 python:3.11-slim@sha256:$BACKEND_BASE_DIGEST" \
+          "$RELEASE_SRC/backend/Dockerfile" >/dev/null \
+          || fatal "backend base digest differs from the control manifest"''',
+        r'''sudo -n grep -Fx \
+          "FROM --platform=linux/amd64 node:20-alpine@sha256:$FRONTEND_BUILD_BASE_DIGEST AS build" \
+          "$RELEASE_SRC/frontend/Dockerfile" >/dev/null \
+          || fatal "frontend build base digest differs from the control manifest"''',
+        r'''sudo -n grep -Fx \
+          "FROM --platform=linux/amd64 nginx:1.27-alpine@sha256:$FRONTEND_RUNTIME_BASE_DIGEST" \
+          "$RELEASE_SRC/frontend/Dockerfile" >/dev/null \
+          || fatal "frontend runtime base digest differs from the control manifest"''',
+        r'''sudo -n python3 "$RELEASE_SRC/.deploy/generate_dependency_sbom.py" \
+          --check "$RELEASE_SRC" \
+          || fatal "dependency SBOM does not match the committed locks"''',
+        r'''[ "$(sudo find "$MIGRATION_DIR" -mindepth 1 -maxdepth 1 \
+          -type f -printf x | wc -c)" = "$EXPECTED_MIGRATION_FILE_COUNT" ] \
+          || fatal "v1.20 contains an unexpected DB migration count"''',
+        r'''UNEXPECTED_MIGRATION_ENTRY=$(
+          sudo find "$MIGRATION_DIR" -mindepth 1 -maxdepth 1 \
+            ! -type f -print -quit
+        )''',
+        r'''MIGRATION_INVENTORY_SHA256=$(
+          sudo find "$MIGRATION_DIR" -mindepth 1 -maxdepth 1 \
+              -type f -printf '%f\n' |
+            LC_ALL=C sort |
+            while IFS= read -r migration_file; do
+              migration_hash=$(
+                sudo sha256sum "$MIGRATION_DIR/$migration_file" | cut -d' ' -f1
+              )
+              printf '%s  backend/alembic/versions/%s\n' \
+                "$migration_hash" "$migration_file"
+            done |
+            sha256sum | cut -d' ' -f1
+        )''',
+        r'''sudo env \
+          -u COMPOSE_FILE \
+          -u COMPOSE_PROJECT_NAME \
+          -u COMPOSE_PROFILES \
+          docker compose \
+            --project-name "$BUILD_PROJECT" \
+            --env-file "$APP_DIR/.env" \
+            --project-directory "$RELEASE_SRC" \
+            -f "$RELEASE_SRC/docker-compose.yml" \
+            -f "$BUILD_OVERRIDE" \
+            build --pull app frontend''',
+        r'''sudo find "$RELEASE_SRC" -xdev -depth -mindepth 1 -delete''',
+        r'''sudo rmdir "$RELEASE_SRC"''',
+    )
+)
+
+
+def _assert_protected_release_source_reads_use_sudo(build: str) -> None:
     assert 'sudo chmod 700 "$BUILD_ROOT"' in build
     assert 'sudo chmod 755 "$BUILD_ROOT"' not in build
-    protected = build.split(
-        'sudo find "$RELEASE_SRC" -xdev -type f',
-        1,
-    )[1].split(
-        "MIGRATION_DIR=",
-        1,
-    )[0]
-
-    assert protected.count("sudo -n grep -Fx") == 3
-    assert (
-        'sudo -n python3 "$RELEASE_SRC/.deploy/generate_dependency_sbom.py"'
-        in protected
+    stage_start = 'RELEASE_SRC_CANDIDATE="$BUILD_ROOT/$RELEASE_ID"'
+    stage_end = "\nv120_release_lock\n"
+    assert build.count(stage_start) == 1
+    assert build.count(stage_end) == 1
+    protected_stage = build[build.index(stage_start) : build.index(stage_end)]
+    protected_commands = tuple(
+        command
+        for command in _logical_shell_commands(protected_stage)
+        if _PROTECTED_BUILD_VARIABLE.search(command)
     )
-    assert re.search(
-        r"(?m)^[ \t]*(?:grep|python3)(?:[ \t]|$)",
-        protected,
-    ) is None
+    unauthorized = tuple(
+        command
+        for command in protected_commands
+        if command not in _SAFE_PROTECTED_NON_FILE_COMMANDS
+        and command not in _SAFE_PROTECTED_SUDO_COMMANDS
+    )
+
+    assert not unauthorized, (
+        "protected release source command is outside the exact sudo "
+        f"allowlist: {unauthorized!r}"
+    )
+
+
+def test_protected_release_source_reads_use_noninteractive_sudo() -> None:
+    _assert_protected_release_source_reads_use_sudo(_script(BUILD))
+
+
+@pytest.mark.parametrize(
+    ("marker", "unauthorized_read"),
+    (
+        (
+            "verify_release_source_hash() {",
+            '/usr/bin/grep -q root "$RELEASE_SRC/backend/Dockerfile"',
+        ),
+        (
+            "verify_release_source_hash() {",
+            '/usr/bin/env grep -q root "$RELEASE_SRC/backend/Dockerfile"',
+        ),
+        (
+            "verify_release_source_hash() {",
+            '/usr/bin/env \\\n+  grep -q root "$RELEASE_SRC/backend/Dockerfile"',
+        ),
+        (
+            "verify_release_source_hash() {",
+            'command grep -q root "$RELEASE_SRC/backend/Dockerfile"',
+        ),
+        (
+            "verify_release_source_hash() {",
+            'cat "$RELEASE_SRC/backend/Dockerfile" >/dev/null',
+        ),
+        (
+            "verify_release_source_hash() {",
+            'sed -n 1p "$RELEASE_SRC/backend/Dockerfile" >/dev/null',
+        ),
+        (
+            "verify_release_source_hash() {",
+            'awk "NR == 1" "$RELEASE_SRC/backend/Dockerfile"',
+        ),
+        (
+            "verify_release_source_hash() {",
+            'LEAK=$(cat "$RELEASE_SRC/backend/Dockerfile")',
+        ),
+        (
+            "verify_release_source_hash() {",
+            'sudo true; cat "$RELEASE_SRC/backend/Dockerfile" >/dev/null',
+        ),
+        (
+            'MIGRATION_DIR="$RELEASE_SRC/backend/alembic/versions"',
+            'cat "$MIGRATION_DIR/f1c8e4a7b2d9_v120.py" >/dev/null',
+        ),
+        (
+            'BUILD_OVERRIDE="$RELEASE_SRC/docker-compose.build-override.yml"',
+            'cat "$BUILD_OVERRIDE" >/dev/null',
+        ),
+    ),
+    ids=(
+        "absolute-grep",
+        "env-grep",
+        "continued-env-grep",
+        "command-grep",
+        "cat",
+        "sed",
+        "awk",
+        "command-substitution",
+        "sudo-token-is-not-enough",
+        "after-old-slice",
+        "before-old-slice",
+    ),
+)
+def test_protected_release_source_audit_rejects_unauthorized_reads(
+    marker: str,
+    unauthorized_read: str,
+) -> None:
+    build = _script(BUILD)
+    assert build.count(marker) == 1
+    mutated = build.replace(
+        marker,
+        f"{marker}\n{unauthorized_read}",
+        1,
+    )
+
+    with pytest.raises(AssertionError, match="protected release source"):
+        _assert_protected_release_source_reads_use_sudo(mutated)
 
 
 def test_supply_chain_evidence_publish_is_atomic_idempotent_and_fail_closed(
