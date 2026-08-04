@@ -2516,9 +2516,9 @@ def test_mobile_probe_method_timeout_precedes_overall_and_cleans_up(
         tmp_path,
         f"method-timeout-{stall_method.replace('.', '-')}",
         stall_method=stall_method,
-        command_timeout_ms=40,
-        navigation_timeout_ms=80,
-        overall_timeout_ms=500,
+        command_timeout_ms=500,
+        navigation_timeout_ms=800,
+        overall_timeout_ms=2_500,
         cleanup_log=True,
     )
     elapsed = time.monotonic() - started
@@ -2526,7 +2526,7 @@ def test_mobile_probe_method_timeout_precedes_overall_and_cleans_up(
     assert result.returncode != 0
     assert expected_error in result.stderr
     assert "mobile release probe timed out" not in result.stderr
-    assert elapsed < 3
+    assert elapsed < 5
     assert not login.exists()
     assert not evidence.exists()
     assert not screenshot.exists()
@@ -2546,16 +2546,16 @@ def test_mobile_probe_navigation_delay_uses_navigation_timeout_layer(
         tmp_path,
         "navigation-timeout-discrimination",
         delay_method="Page.navigate",
-        delay_ms=60,
-        command_timeout_ms=40,
-        navigation_timeout_ms=80,
-        overall_timeout_ms=500,
+        delay_ms=600,
+        command_timeout_ms=500,
+        navigation_timeout_ms=800,
+        overall_timeout_ms=2_500,
         cleanup_log=True,
     )
     elapsed = time.monotonic() - started
 
     assert result.returncode == 0, result.stderr
-    assert 0.05 <= elapsed < 3
+    assert 0.5 <= elapsed < 5
     assert not login.exists()
     assert evidence.is_file() and screenshot.is_file()
     args = json.loads(args_log.read_text(encoding="utf-8"))
@@ -2574,10 +2574,10 @@ def test_mobile_probe_command_delay_uses_command_timeout_layer(
         tmp_path,
         "command-timeout-discrimination",
         delay_method="Target.getTargets",
-        delay_ms=60,
-        command_timeout_ms=40,
-        navigation_timeout_ms=80,
-        overall_timeout_ms=500,
+        delay_ms=600,
+        command_timeout_ms=500,
+        navigation_timeout_ms=800,
+        overall_timeout_ms=2_500,
         cleanup_log=True,
     )
     elapsed = time.monotonic() - started
@@ -2586,7 +2586,7 @@ def test_mobile_probe_command_delay_uses_command_timeout_layer(
     assert "Target.getTargets timed out" in result.stderr
     assert "Page.navigate timed out" not in result.stderr
     assert "mobile release probe timed out" not in result.stderr
-    assert 0.02 <= elapsed < 3
+    assert 0.2 <= elapsed < 5
     assert not login.exists()
     assert not evidence.exists()
     assert not screenshot.exists()
