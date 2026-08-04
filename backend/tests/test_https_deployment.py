@@ -116,15 +116,17 @@ def test_https_transition_override_closes_legacy_public_port(tmp_path: Path) -> 
 
 
 def test_deployment_guidance_cannot_reopen_plaintext_login() -> None:
-    """运维文档不得把公网 HTTP 重新变成受支持的登录入口。"""
+    """旧 8080 只能做纯跳转，绝不能重新暴露明文应用。"""
     deploy_doc = DEPLOY_DOC.read_text(encoding="utf-8")
     env_example = ENV_EXAMPLE.read_text(encoding="utf-8")
 
     assert "http://<服务器公网IP>:8080" not in deploy_doc
     assert "sudo ufw allow 8080" not in deploy_doc
     assert "来源 `0.0.0.0/0`" not in deploy_doc
-    assert "不得放行 8080" in deploy_doc
-    assert "禁止开放公网 8080" in env_example
+    assert "redirect-only Caddy" in deploy_doc
+    assert "应用不得暴露" in deploy_doc
+    assert "不得出现 0.0.0.0:8080" in deploy_doc
+    assert "禁止把应用开放到公网 8080" in env_example
 
 
 def test_caddy_template_and_runbook_preserve_https_safety_boundary() -> None:
@@ -153,9 +155,9 @@ def test_caddy_template_and_runbook_preserve_https_safety_boundary() -> None:
     assert "for artifact_path in" in runbook
     assert "for path in" not in runbook
     assert "gw_priority: 1" in runbook
-    assert "EXPECTED_HSTS_MAX_AGE=31536000" in runbook
-    assert "assistant-compose.candidate.normalized.sha256" in runbook
-    assert 'environment["IT_DATA_HSTS_MAX_AGE"] = "<normalized>"' in runbook
+    assert "hsts-v120-scoped-runbook.md" in runbook
+    assert "仍保持 `IT_DATA_HSTS_MAX_AGE=300`" in runbook
+    assert "不得再直接编辑" in runbook
     assert 'test "$(id -un)" = ubuntu' in runbook
     assert "rollback-now.sh" in runbook
     assert (
@@ -181,13 +183,14 @@ def test_caddy_template_and_runbook_preserve_https_safety_boundary() -> None:
         not in runbook
     )
     assert "不得把重新开放明文 8080 当成常规回滚" in runbook
+    assert "禁止用于后续 HSTS 提升" in runbook
     assert "0、5、15、30 分钟" in runbook
     assert runbook.count(
         "caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile"
-    ) >= 4
+    ) >= 3
     assert runbook.count(
         'curl --proto \'=https\' --tlsv1.2 -fsS "$ASSISTANT_SMOKE_URL"'
-    ) >= 3
+    ) >= 2
 
     mode = ROLLBACK_SCRIPT.stat().st_mode
     assert mode & 0o100

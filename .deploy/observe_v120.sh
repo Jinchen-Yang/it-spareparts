@@ -9,6 +9,7 @@ readonly CONTROL_CURRENT="$CONTROL_DIR/current"
 readonly ROOT_STATE="$CONTROL_DIR/v120-state.state"
 readonly LOCK_PATH=/run/lock/it-spareparts-v120
 readonly EXPECTED_HTTPS_HOST=hbzgc.icu
+readonly ASSISTANT_HEALTH_URL=https://118.25.94.90/health
 readonly EDGE_CADDYFILE=/opt/personal-ai-assistant/Caddyfile
 readonly EDGE_COMPOSE=/opt/personal-ai-assistant/compose.production.yml
 SCRIPT_DIR=$(
@@ -157,6 +158,53 @@ for path in ("/health", "/health/db"):
 PY
 }
 
+probe_json_health() {
+  local endpoint=$1
+  local expected_status=$2
+  local expected_kind=$3
+  case "$expected_status:$expected_kind" in
+    ok:app|ok:db|ready:assistant) ;;
+    *) return 64 ;;
+  esac
+  curl --noproxy '*' --proto '=https' --tlsv1.2 \
+    --connect-timeout 5 --max-time 15 --max-redirs 0 \
+    -fsS --write-out $'\n%{http_code}\n%{content_type}' "$endpoint" |
+    python3 -c '
+import json
+import sys
+
+raw = sys.stdin.buffer.read()
+body_and_status, separator, content_type = raw.rpartition(b"\n")
+if not separator:
+    raise SystemExit(1)
+body, separator, status = body_and_status.rpartition(b"\n")
+if not separator:
+    raise SystemExit(1)
+try:
+    status_code = int(status.decode("ascii", "strict"))
+except (UnicodeDecodeError, ValueError):
+    raise SystemExit(1)
+if not 200 <= status_code < 300:
+    raise SystemExit(1)
+mime = content_type.decode("ascii", "strict").split(";", 1)[0].strip().lower()
+if mime != "application/json":
+    raise SystemExit(1)
+try:
+    payload = json.loads(body)
+except (json.JSONDecodeError, UnicodeDecodeError):
+    raise SystemExit(1)
+if not isinstance(payload, dict) or payload.get("status") != sys.argv[1]:
+    raise SystemExit(1)
+if sys.argv[2] == "db" and payload.get("db") != "reachable":
+    raise SystemExit(1)
+' "$expected_status" "$expected_kind"
+}
+
+check_external_health_semantics() {
+  probe_json_health "https://$EXPECTED_HTTPS_HOST/health" ok app \
+    && probe_json_health "https://$EXPECTED_HTTPS_HOST/health/db" ok db
+}
+
 wait_minutes() {
   local minutes=$1
   local half_minutes=$((minutes * 2))
@@ -280,6 +328,10 @@ observe() {
       "$frontend_cid"
   )" = yes ]
   check_internal_health
+  check_external_health_semantics \
+    || fatal "external JSON health failed at ${minute}m"
+  probe_json_health "$ASSISTANT_HEALTH_URL" ready assistant \
+    || fatal "original assistant semantic health failed at ${minute}m"
 
   https_result=$(
     curl --noproxy '*' --proto '=https' --tlsv1.2 \

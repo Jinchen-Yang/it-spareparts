@@ -14,6 +14,7 @@ readonly ARCHIVE_DIR="$CONTROL_DIR/archive"
 readonly LOCK_PATH=/run/lock/it-spareparts-v120
 readonly CRON_DEST=/etc/cron.d/it-spareparts
 readonly MARKER_DIR=/etc/it-spareparts
+readonly CADDY_LOCK_PATH="$MARKER_DIR/shared-caddy.lock"
 readonly AUTHORITY_MARKER="$MARKER_DIR/v120-authority.marker"
 readonly BOOTSTRAP_AUTH="$MARKER_DIR/v120-bootstrap.authorization"
 readonly ROOT_STATE="$CONTROL_DIR/v120-state.state"
@@ -22,6 +23,10 @@ readonly -a PACKAGE_NAMES=(
   sync-v120-root-state.sh
   rollback-v120.sh
   install-v120-control.sh
+  hsts-v120-root.sh
+  hsts-v120-operator.sh
+  edge-v120-root.sh
+  edge-v120-operator.sh
   it-spareparts.cron
   source.tar
 )
@@ -30,10 +35,39 @@ readonly -a MANIFEST_KEYS=(
   ROOT_SYNC_SHA256
   ROLLBACK_SHA256
   INSTALLER_SHA256
+  HSTS_ROOT_SHA256
+  HSTS_OPERATOR_SHA256
+  EDGE_ROOT_SHA256
+  EDGE_OPERATOR_SHA256
+  CRON_SHA256
+  SOURCE_TAR_SHA256
+  BACKEND_REQUIREMENTS_SHA256
+  BACKEND_UV_LOCK_SHA256
+  FRONTEND_PACKAGE_LOCK_SHA256
+  BACKEND_SBOM_SHA256
+  FRONTEND_SBOM_SHA256
+  BACKEND_BASE_DIGEST
+  FRONTEND_BUILD_BASE_DIGEST
+  FRONTEND_RUNTIME_BASE_DIGEST
+)
+readonly -a VERSION_MODES=(700 700 700 700 700 700 700 700 600 600)
+readonly -a PREDECESSOR_PACKAGE_NAMES=(
+  v120_state.sh
+  sync-v120-root-state.sh
+  rollback-v120.sh
+  install-v120-control.sh
+  it-spareparts.cron
+  source.tar
+)
+readonly -a PREDECESSOR_MANIFEST_KEYS=(
+  V120_STATE_SHA256
+  ROOT_SYNC_SHA256
+  ROLLBACK_SHA256
+  INSTALLER_SHA256
   CRON_SHA256
   SOURCE_TAR_SHA256
 )
-readonly -a VERSION_MODES=(700 700 700 700 600 600)
+readonly -a PREDECESSOR_VERSION_MODES=(700 700 700 700 600 600)
 readonly SOURCE_TAR_LIMIT=67108864
 
 fatal() {
@@ -47,8 +81,9 @@ ensure_new_or_exact_directory() {
   local owner=$3
   local group=$4
   if [ -e "$path" ] || [ -L "$path" ]; then
-    [ -d "$path" ] && [ ! -L "$path" ] \
-      || fatal "unsafe directory: $path"
+    if [ ! -d "$path" ] || [ -L "$path" ]; then
+      fatal "unsafe directory: $path"
+    fi
     [ "$(stat -c '%a %U:%G' "$path")" = "$mode $owner:$group" ] \
       || fatal "directory owner/mode mismatch: $path"
     return 0
@@ -60,14 +95,43 @@ ensure_new_or_exact_directory() {
     || fatal "new directory owner/mode mismatch: $path"
 }
 
+exact_lock_file() {
+  local path=$1
+  local owner=$2
+  local group=$3
+  [ -f "$path" ] && [ ! -L "$path" ] \
+    && [ "$(stat -c '%F %a %U:%G %h' "$path")" \
+      = "regular empty file 600 $owner:$group 1" ]
+}
+
+ensure_new_or_exact_lock_file() {
+  local path=$1
+  local owner=$2
+  local group=$3
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    exact_lock_file "$path" "$owner" "$group" \
+      || fatal "shared Caddy lock file is unsafe"
+    return 0
+  fi
+  ( set -o noclobber; : > "$path" ) 2>/dev/null \
+    || fatal "cannot create shared Caddy lock file"
+  chown "$owner:$group" "$path"
+  chmod 600 "$path"
+  exact_lock_file "$path" "$owner" "$group" \
+    || fatal "new shared Caddy lock file is unsafe"
+}
+
 check_control_directories() {
   local path
   for path in "$CONTROL_DIR" "$VERSIONS_DIR" "$ARCHIVE_DIR"; do
-    [ -d "$path" ] && [ ! -L "$path" ] \
-      || fatal "unsafe control directory: $path"
+    if [ ! -d "$path" ] || [ -L "$path" ]; then
+      fatal "unsafe control directory: $path"
+    fi
     [ "$(stat -c '%a %U:%G' "$path")" = "700 root:root" ] \
       || fatal "control directory owner/mode mismatch: $path"
   done
+  exact_lock_file "$CADDY_LOCK_PATH" root root \
+    || fatal "shared Caddy lock file is unsafe"
 }
 
 prepare_install_directories() {
@@ -76,11 +140,13 @@ prepare_install_directories() {
   ensure_new_or_exact_directory "$VERSIONS_DIR" 700 root root
   ensure_new_or_exact_directory "$ARCHIVE_DIR" 700 root root
   ensure_new_or_exact_directory "$MARKER_DIR" 700 root root
+  ensure_new_or_exact_lock_file "$CADDY_LOCK_PATH" root root
 }
 
 acquire_release_lock() {
-  [ -d "$LOCK_PATH" ] && [ ! -L "$LOCK_PATH" ] \
-    || fatal "release lock is unsafe"
+  if [ ! -d "$LOCK_PATH" ] || [ -L "$LOCK_PATH" ]; then
+    fatal "release lock is unsafe"
+  fi
   [ "$(stat -c '%a %U:%G' "$LOCK_PATH")" = "750 root:ubuntu" ] \
     || fatal "release lock owner/mode mismatch"
   exec 9<"$LOCK_PATH"
@@ -94,7 +160,12 @@ acquire_release_lock() {
 manifest_key_allowed() {
   case "$1" in
     CONTROL_FORMAT|TARGET_COMMIT|V120_STATE_SHA256|ROOT_SYNC_SHA256|\
-    ROLLBACK_SHA256|INSTALLER_SHA256|CRON_SHA256|SOURCE_TAR_SHA256)
+    ROLLBACK_SHA256|INSTALLER_SHA256|HSTS_ROOT_SHA256|\
+    HSTS_OPERATOR_SHA256|EDGE_ROOT_SHA256|EDGE_OPERATOR_SHA256|\
+    CRON_SHA256|SOURCE_TAR_SHA256|BACKEND_REQUIREMENTS_SHA256|\
+    BACKEND_UV_LOCK_SHA256|FRONTEND_PACKAGE_LOCK_SHA256|\
+    BACKEND_SBOM_SHA256|FRONTEND_SBOM_SHA256|BACKEND_BASE_DIGEST|\
+    FRONTEND_BUILD_BASE_DIGEST|FRONTEND_RUNTIME_BASE_DIGEST)
       return 0
       ;;
     *) return 1 ;;
@@ -123,10 +194,53 @@ parse_manifest() {
     [ -z "${output_ref[$key]+x}" ] || return 64
     output_ref["$key"]=$value
   done < "$manifest_path"
+  [ "$count" -eq 20 ] || return 64
+  [ "${output_ref[CONTROL_FORMAT]:-}" = v120-control-3 ] || return 64
+  [[ "${output_ref[TARGET_COMMIT]:-}" =~ ^[0-9a-f]{40}$ ]] || return 64
+  for key in "${MANIFEST_KEYS[@]}"; do
+    [[ "${output_ref[$key]:-}" =~ ^[0-9a-f]{64}$ ]] || return 64
+  done
+}
+
+predecessor_manifest_key_allowed() {
+  case "$1" in
+    CONTROL_FORMAT|TARGET_COMMIT|V120_STATE_SHA256|ROOT_SYNC_SHA256|\
+    ROLLBACK_SHA256|INSTALLER_SHA256|CRON_SHA256|SOURCE_TAR_SHA256)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+parse_predecessor_manifest_v2() {
+  local manifest_path=$1
+  local output_name=$2
+  # The caller declares output_name as an associative array; this nameref
+  # intentionally preserves that array interface for the v2 parser.
+  # shellcheck disable=SC2178
+  local -n output_ref=$output_name
+  local line
+  local key
+  local value
+  local count=0
+  output_ref=()
+  [ -f "$manifest_path" ] && [ ! -L "$manifest_path" ] \
+    && [ "$(stat -c '%h' "$manifest_path")" = 1 ] \
+    && [ "$(stat -c '%s' "$manifest_path")" -le 4096 ] \
+    || return 64
+  while IFS= read -r line; do
+    count=$((count + 1))
+    [[ "$line" == *=* ]] && [[ "${line#*=}" != *=* ]] || return 64
+    key=${line%%=*}
+    value=${line#*=}
+    predecessor_manifest_key_allowed "$key" || return 64
+    [ -z "${output_ref[$key]+x}" ] || return 64
+    output_ref["$key"]=$value
+  done < "$manifest_path"
   [ "$count" -eq 8 ] || return 64
   [ "${output_ref[CONTROL_FORMAT]:-}" = v120-control-2 ] || return 64
   [[ "${output_ref[TARGET_COMMIT]:-}" =~ ^[0-9a-f]{40}$ ]] || return 64
-  for key in "${MANIFEST_KEYS[@]}"; do
+  for key in "${PREDECESSOR_MANIFEST_KEYS[@]}"; do
     [[ "${output_ref[$key]:-}" =~ ^[0-9a-f]{64}$ ]] || return 64
   done
 }
@@ -162,32 +276,36 @@ validate_package_directory() {
     expected_owner="$(id -un):$(id -gn)"
   fi
 
-  [ -d "$package_dir" ] && [ ! -L "$package_dir" ] \
-    || fatal "control package directory is unsafe"
+  if [ ! -d "$package_dir" ] || [ -L "$package_dir" ]; then
+    fatal "control package directory is unsafe"
+  fi
   [ "$(stat -c '%a %U:%G' "$package_dir")" \
     = "700 $expected_owner" ] \
     || fatal "control package directory owner/mode mismatch"
-  [ -f "$package_dir/manifest.txt" ] \
-    && [ ! -L "$package_dir/manifest.txt" ] \
-    && [ "$(stat -c '%a %U:%G %h' "$package_dir/manifest.txt")" \
-      = "600 $expected_owner 1" ] \
-    || fatal "control manifest is unsafe"
+  if [ ! -f "$package_dir/manifest.txt" ] \
+      || [ -L "$package_dir/manifest.txt" ] \
+      || [ "$(stat -c '%a %U:%G %h' "$package_dir/manifest.txt")" \
+        != "600 $expected_owner 1" ]; then
+    fatal "control manifest is unsafe"
+  fi
   [ "$(sha256sum "$package_dir/manifest.txt" | cut -d' ' -f1)" \
     = "$expected_manifest_hash" ] || fatal "control manifest hash mismatch"
   parse_manifest "$package_dir/manifest.txt" manifest \
     || fatal "invalid control manifest"
   for index in "${!PACKAGE_NAMES[@]}"; do
     source="$package_dir/${PACKAGE_NAMES[$index]}"
-    [ -f "$source" ] && [ ! -L "$source" ] \
-      && [ "$(stat -c '%a %U:%G %h' "$source")" \
-        = "${VERSION_MODES[$index]} $expected_owner 1" ] \
-      || fatal "unsafe packaged control file"
+    if [ ! -f "$source" ] || [ -L "$source" ] \
+        || [ "$(stat -c '%a %U:%G %h' "$source")" \
+          != "${VERSION_MODES[$index]} $expected_owner 1" ]; then
+      fatal "unsafe packaged control file"
+    fi
     limit=262144
     [ "${PACKAGE_NAMES[$index]}" != source.tar ] \
       || limit=$SOURCE_TAR_LIMIT
-    [ "$(stat -c '%s' "$source")" -gt 0 ] \
-      && [ "$(stat -c '%s' "$source")" -le "$limit" ] \
-      || fatal "packaged control file size is unsafe"
+    if [ "$(stat -c '%s' "$source")" -le 0 ] \
+        || [ "$(stat -c '%s' "$source")" -gt "$limit" ]; then
+      fatal "packaged control file size is unsafe"
+    fi
     actual=$(sha256sum "$source" | cut -d' ' -f1)
     [ "$actual" = "${manifest[${MANIFEST_KEYS[$index]}]}" ] \
       || fatal "packaged control file hash mismatch"
@@ -197,14 +315,107 @@ validate_package_directory() {
   done
 }
 
+validate_predecessor_package_v2() {
+  local package_dir=$1
+  local expected_manifest_hash=$2
+  local expected_owner="root:root"
+  local index
+  local actual
+  local limit
+  local source
+  declare -A manifest=()
+  if [ "${V120_STATE_TEST_MODE:-0}" = 1 ]; then
+    expected_owner="$(id -un):$(id -gn)"
+  fi
+  [ -d "$package_dir" ] && [ ! -L "$package_dir" ] \
+    || return 73
+  [ "$(stat -c '%a %U:%G' "$package_dir")" \
+    = "700 $expected_owner" ] || return 73
+  [ -f "$package_dir/manifest.txt" ] \
+    && [ ! -L "$package_dir/manifest.txt" ] \
+    && [ "$(stat -c '%a %U:%G %h' "$package_dir/manifest.txt")" \
+      = "600 $expected_owner 1" ] || return 73
+  [ "$(sha256sum "$package_dir/manifest.txt" | cut -d' ' -f1)" \
+    = "$expected_manifest_hash" ] || return 73
+  parse_predecessor_manifest_v2 "$package_dir/manifest.txt" manifest \
+    || return 73
+  for index in "${!PREDECESSOR_PACKAGE_NAMES[@]}"; do
+    source="$package_dir/${PREDECESSOR_PACKAGE_NAMES[$index]}"
+    [ -f "$source" ] && [ ! -L "$source" ] \
+      && [ "$(stat -c '%a %U:%G %h' "$source")" \
+        = "${PREDECESSOR_VERSION_MODES[$index]} $expected_owner 1" ] \
+      || return 73
+    limit=262144
+    [ "${PREDECESSOR_PACKAGE_NAMES[$index]}" != source.tar ] \
+      || limit=$SOURCE_TAR_LIMIT
+    [ "$(stat -c '%s' "$source")" -gt 0 ] \
+      && [ "$(stat -c '%s' "$source")" -le "$limit" ] \
+      || return 73
+    actual=$(sha256sum "$source" | cut -d' ' -f1)
+    [ "$actual" \
+      = "${manifest[${PREDECESSOR_MANIFEST_KEYS[$index]}]}" ] \
+      || return 73
+    if [[ "${PREDECESSOR_PACKAGE_NAMES[$index]}" == *.sh ]]; then
+      bash -n "$source" || return 73
+    fi
+  done
+}
+
+validate_current_predecessor_for_successor() {
+  local control_dir=${1:-$CONTROL_DIR}
+  local versions_dir=${2:-$VERSIONS_DIR}
+  local current="$control_dir/current"
+  local expected_owner="root:root"
+  local manifest
+  local manifest_hash
+  local target
+  local version
+  local format
+  if [ "${V120_STATE_TEST_MODE:-0}" = 1 ]; then
+    expected_owner="$(id -un):$(id -gn)"
+  fi
+  [ -d "$control_dir" ] && [ ! -L "$control_dir" ] \
+    && [ "$(stat -c '%a %U:%G' "$control_dir")" \
+      = "700 $expected_owner" ] || return 73
+  [ -d "$versions_dir" ] && [ ! -L "$versions_dir" ] \
+    && [ "$(stat -c '%a %U:%G' "$versions_dir")" \
+      = "700 $expected_owner" ] || return 73
+  [ -L "$current" ] \
+    && [ "$(stat -c '%F %U:%G %h' "$current")" \
+      = "symbolic link $expected_owner 1" ] || return 73
+  target=$(readlink -- "$current") || return 73
+  [[ "$target" =~ ^versions/([0-9a-f]{64})$ ]] || return 73
+  manifest_hash=${BASH_REMATCH[1]}
+  version="$versions_dir/$manifest_hash"
+  [ "$(realpath -e -- "$current")" = "$version" ] || return 73
+  manifest="$version/manifest.txt"
+  [ -f "$manifest" ] && [ ! -L "$manifest" ] \
+    && [ "$(sha256sum "$manifest" | cut -d' ' -f1)" \
+      = "$manifest_hash" ] || return 73
+  [ "$(grep -c '^CONTROL_FORMAT=' "$manifest")" = 1 ] || return 73
+  format=$(sed -n 's/^CONTROL_FORMAT=//p' "$manifest")
+  case "$format" in
+    v120-control-2)
+      validate_predecessor_package_v2 "$version" "$manifest_hash"
+      ;;
+    v120-control-3)
+      validate_package_directory "$version" "$manifest_hash"
+      ;;
+    *)
+      return 73
+      ;;
+  esac
+}
+
 stage_inbox_package() {
   local expected_manifest_hash=$1
   local inbox="/var/tmp/it-spareparts-control-$expected_manifest_hash"
   local staging
   local index
   local limit
-  [ -d "$inbox" ] && [ ! -L "$inbox" ] \
-    || fatal "operator-transfer package is missing or unsafe"
+  if [ ! -d "$inbox" ] || [ -L "$inbox" ]; then
+    fatal "operator-transfer package is missing or unsafe"
+  fi
   staging=$(mktemp -d "$CONTROL_DIR/.incoming-control.XXXXXX")
   STAGED_PACKAGE=$staging
   chmod 700 "$staging"
@@ -259,6 +470,15 @@ publish_current_pointer() (
   [ -d "$control_dir" ] && [ ! -L "$control_dir" ] || return 74
   [ -d "$versions_dir" ] && [ ! -L "$versions_dir" ] || return 74
   [ -d "$version" ] && [ ! -L "$version" ] || return 74
+  local stale
+  for stale in "$control_dir"/.current.*; do
+    [ -e "$stale" ] || [ -L "$stale" ] || continue
+    [ -L "$stale" ] \
+      && [ "$(readlink -- "$stale")" \
+        = "versions/$expected_manifest_hash" ] \
+      || return 74
+    rm -f -- "$stale" || return $?
+  done
   temporary=$(mktemp -- "$control_dir/.current.XXXXXX") || return $?
   rm -f -- "$temporary" || return $?
   trap '[ -z "$temporary" ] || rm -f -- "$temporary"' EXIT
@@ -280,10 +500,11 @@ publish_current_pointer() (
 verify_current_version() {
   local expected_manifest_hash=$1
   local expected_target="versions/$expected_manifest_hash"
-  [ -L "$CURRENT_LINK" ] \
-    && [ "$(stat -c '%F %U:%G %h' "$CURRENT_LINK")" \
-      = "symbolic link root:root 1" ] \
-    || fatal "current control pointer is unsafe"
+  if [ ! -L "$CURRENT_LINK" ] \
+      || [ "$(stat -c '%F %U:%G %h' "$CURRENT_LINK")" \
+        != "symbolic link root:root 1" ]; then
+    fatal "current control pointer is unsafe"
+  fi
   [ "$(readlink -- "$CURRENT_LINK")" = "$expected_target" ] \
     || fatal "current control pointer targets another version"
   validate_package_directory \
@@ -338,8 +559,66 @@ authority_evidence_mode() {
   return 77
 }
 
+validate_interrupted_bootstrap_state() {
+  local control_dir=$1
+  local versions_dir=$2
+  local archive_dir=$3
+  local authorization=$4
+  local marker=$5
+  local state=$6
+  local expected_manifest_hash=$7
+  local expected_owner="root:root"
+  local entry
+  local versions
+  if [ "${V120_STATE_TEST_MODE:-0}" = 1 ]; then
+    expected_owner="$(id -un):$(id -gn)"
+  fi
+  [[ "$expected_manifest_hash" =~ ^[0-9a-f]{64}$ ]] || return 77
+  [ -d "$control_dir" ] && [ ! -L "$control_dir" ] \
+    && [ "$(stat -c '%a %U:%G' "$control_dir")" \
+      = "700 $expected_owner" ] \
+    && [ -d "$versions_dir" ] && [ ! -L "$versions_dir" ] \
+    && [ "$(stat -c '%a %U:%G' "$versions_dir")" \
+      = "700 $expected_owner" ] \
+    && [ -d "$archive_dir" ] && [ ! -L "$archive_dir" ] \
+    && [ "$(stat -c '%a %U:%G' "$archive_dir")" \
+      = "700 $expected_owner" ] \
+    || return 77
+  [ ! -e "$control_dir/current" ] && [ ! -L "$control_dir/current" ] \
+    && [ ! -e "$marker" ] && [ ! -L "$marker" ] \
+    && [ ! -e "$state" ] && [ ! -L "$state" ] \
+    || return 77
+  for entry in "$control_dir"/* "$control_dir"/.[!.]*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    case "$(basename -- "$entry")" in
+      archive|versions) ;;
+      .current.??????)
+        [ -L "$entry" ] \
+          && [ "$(readlink -- "$entry")" \
+            = "versions/$expected_manifest_hash" ] \
+          || return 77
+        ;;
+      *) return 77 ;;
+    esac
+  done
+  [ -z "$(find "$archive_dir" -mindepth 1 -maxdepth 1 -print -quit)" ] \
+    || return 77
+  versions=$(
+    find "$versions_dir" -mindepth 1 -maxdepth 1 -printf '%f\n'
+  ) || return 77
+  [ "$versions" = "$expected_manifest_hash" ] || return 77
+  validate_package_directory \
+    "$versions_dir/$expected_manifest_hash" "$expected_manifest_hash" \
+    || return 77
+  validate_bootstrap_authorization \
+    "$authorization" \
+    "$versions_dir/$expected_manifest_hash/manifest.txt" \
+    "$expected_manifest_hash" || return 77
+}
+
 preflight_authority_evidence() {
   local control_was_present=$1
+  local expected_manifest_hash=$2
   local authorization_exists=0
   local marker_exists=0
   local mode
@@ -350,6 +629,15 @@ preflight_authority_evidence() {
     || state_exists=1
   [ ! -e "$BOOTSTRAP_AUTH" ] && [ ! -L "$BOOTSTRAP_AUTH" ] \
     || authorization_exists=1
+  if [ "$marker_exists:$state_exists:$control_was_present:$authorization_exists" \
+      = 0:0:1:1 ]; then
+    validate_interrupted_bootstrap_state \
+      "$CONTROL_DIR" "$VERSIONS_DIR" "$ARCHIVE_DIR" "$BOOTSTRAP_AUTH" \
+      "$AUTHORITY_MARKER" "$ROOT_STATE" "$expected_manifest_hash" \
+      || fatal "interrupted bootstrap state is not exact"
+    AUTHORITY_INITIALIZING=1
+    return 0
+  fi
   mode=$(
     authority_evidence_mode \
       "$marker_exists" "$state_exists" "$control_was_present" \
@@ -357,15 +645,17 @@ preflight_authority_evidence() {
   ) || fatal "authority evidence is incomplete; recovery must fail closed"
 
   if [ "$mode" = existing ]; then
-    [ -f "$AUTHORITY_MARKER" ] && [ ! -L "$AUTHORITY_MARKER" ] \
-      && [ "$(stat -c '%a %U:%G %h' "$AUTHORITY_MARKER")" \
-        = "600 root:root 1" ] \
-      || fatal "authority marker is unsafe"
+    if [ ! -f "$AUTHORITY_MARKER" ] || [ -L "$AUTHORITY_MARKER" ] \
+        || [ "$(stat -c '%a %U:%G %h' "$AUTHORITY_MARKER")" \
+          != "600 root:root 1" ]; then
+      fatal "authority marker is unsafe"
+    fi
     AUTHORITY_INITIALIZING=0
     return 0
   fi
-  [ -f "$BOOTSTRAP_AUTH" ] && [ ! -L "$BOOTSTRAP_AUTH" ] \
-    || fatal "explicit one-time bootstrap authorization is required"
+  if [ ! -f "$BOOTSTRAP_AUTH" ] || [ -L "$BOOTSTRAP_AUTH" ]; then
+    fatal "explicit one-time bootstrap authorization is required"
+  fi
   AUTHORITY_INITIALIZING=1
 }
 
@@ -660,7 +950,7 @@ active_systemd_timer_duplicates_absent() {
 }
 
 other_scheduler_duplicates_absent() {
-  static_scheduler_duplicates_absent || return $?
+  static_scheduler_duplicates_absent / || return $?
   active_systemd_timer_duplicates_absent || return $?
 }
 
@@ -674,8 +964,9 @@ install_cron() {
   other_scheduler_duplicates_absent \
     || fatal "another scheduler still runs backup or monitor"
   if [ -e "$CRON_DEST" ] || [ -L "$CRON_DEST" ]; then
-    [ -f "$CRON_DEST" ] && [ ! -L "$CRON_DEST" ] \
-      || fatal "unsafe cron destination"
+    if [ ! -f "$CRON_DEST" ] || [ -L "$CRON_DEST" ]; then
+      fatal "unsafe cron destination"
+    fi
   fi
   temporary=$(mktemp -- /etc/cron.d/.it-spareparts.XXXXXX)
   install -m 644 -o root -g root \
@@ -701,9 +992,10 @@ verify_cron() {
 }
 
 if [ "${V120_INSTALLER_LIBRARY_ONLY:-0}" = 1 ]; then
-  [ "${V120_STATE_TEST_MODE:-0}" = 1 ] \
-    && [ "${BASH_SOURCE[0]}" != "$0" ] \
-    || fatal "installer library mode is test-only and must be sourced"
+  if [ "${V120_STATE_TEST_MODE:-0}" != 1 ] \
+      || [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    fatal "installer library mode is test-only and must be sourced"
+  fi
   return 0
 fi
 
@@ -743,9 +1035,16 @@ case "$ACTION" in
   install)
     ensure_new_or_exact_directory "$LOCK_PATH" 750 root ubuntu
     acquire_release_lock
-    preflight_authority_evidence "$CONTROL_WAS_PRESENT"
+    preflight_authority_evidence \
+      "$CONTROL_WAS_PRESENT" "$EXPECTED_MANIFEST_HASH"
     prepare_install_directories
     check_control_directories
+    if [ "$CONTROL_WAS_PRESENT" = 1 ] \
+        && [ "$AUTHORITY_INITIALIZING" = 0 ]; then
+      validate_current_predecessor_for_successor \
+        "$CONTROL_DIR" "$VERSIONS_DIR" \
+        || fatal "current control predecessor is invalid"
+    fi
     stage_inbox_package "$EXPECTED_MANIFEST_HASH"
     validate_authority_for_version \
       "$EXPECTED_MANIFEST_HASH" "$STAGED_PACKAGE"
