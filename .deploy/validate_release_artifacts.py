@@ -63,11 +63,15 @@ CONTENT_TYPES = {
 MAX_XML_BYTES = 16 * 1024 * 1024
 MAX_XLSX_BYTES = 256 * 1024 * 1024
 MAX_XLSX_METADATA_BYTES = 64 * 1024 * 1024
-MAX_XLSX_LARGE_XML_BYTES = 2 * 1024 * 1024 * 1024
+MAX_XLSX_LARGE_XML_BYTES = 4 * 1024 * 1024 * 1024
 MAX_XLSX_NON_XML_BYTES = MAX_XLSX_BYTES
 MAX_XLSX_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
 MAX_XLSX_XML_DEPTH = 256
-MAX_XLSX_XML_ELEMENTS = 32_000_000
+# The production maintenance export permits 1,048,575 data rows plus one
+# header across 35 columns. Conservatively treating every cell as an openpyxl
+# inline string (c + is + t) yields 111,149,058 structural elements including
+# worksheet/sheetData and row elements, so retain headroom above that limit.
+MAX_XLSX_XML_ELEMENTS = 120_000_000
 MAX_ZIP_BYTES = 512 * 1024 * 1024
 MAX_ZIP_WORKBOOKS = 500
 MAX_ZIP_MEMBERS = MAX_ZIP_WORKBOOKS + 1
@@ -368,6 +372,7 @@ def preflight_zip_directory(
         actual_entries += 1
     if cursor != directory_end or actual_entries != entries:
         fail("ZIP central directory entry count is inconsistent")
+    source.seek(0)
 
 
 def validate_xlsx(path: pathlib.Path) -> int:

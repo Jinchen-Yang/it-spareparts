@@ -2101,6 +2101,32 @@ def test_release_artifact_validator_accepts_large_numeric_worksheet(
     assert bundled.returncode == 0, bundled.stderr
 
 
+def test_release_artifact_validator_limits_cover_maximum_maintenance_export() -> None:
+    from app.services import maintenance_export
+
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    rows_with_header = maintenance_export.MAX_DATA_ROWS_PER_SHEET + 1
+    widest_sheet_columns = max(
+        len(maintenance_export.ORDER_HEADERS),
+        len(maintenance_export.LINE_HEADERS),
+    )
+    # openpyxl inline strings use c + is + t, so three elements per cell is
+    # the conservative bound even though numeric/date cells only use c + v.
+    maximum_worksheet_elements = 2 + rows_with_header * (
+        1 + 3 * widest_sheet_columns
+    )
+
+    assert maintenance_export.MAX_DATA_ROWS_PER_SHEET == 1_048_575
+    assert widest_sheet_columns == 35
+    assert maximum_worksheet_elements == 111_149_058
+    assert validator["MAX_XLSX_XML_ELEMENTS"] >= maximum_worksheet_elements
+    assert validator["MAX_XLSX_LARGE_XML_BYTES"] >= 4 * 1024 * 1024 * 1024
+    assert (
+        validator["MAX_XLSX_EXPANDED_BYTES"]
+        >= validator["MAX_XLSX_LARGE_XML_BYTES"]
+    )
+
+
 def test_release_artifact_validator_accepts_500_workbook_bundle_boundary(
     tmp_path: Path,
 ) -> None:
