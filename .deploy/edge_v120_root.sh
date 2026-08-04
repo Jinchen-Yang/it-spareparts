@@ -1167,6 +1167,10 @@ install_snapshot() {
         }
     return 73
   fi
+  # rename_exchange leaves the former live config at the private CAS path.
+  # Production configs are root-owned 0644, while retained CAS backups must
+  # become root-only before finalization validates and removes them.
+  chmod 600 "$temporary" || return $?
   sync -f "$destination" || return $?
   sync -f "$temporary" || return $?
   sync -d "$(dirname -- "$destination")" || return $?
