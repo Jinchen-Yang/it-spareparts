@@ -15,6 +15,7 @@ import sys
 import tempfile
 import zipfile
 from collections.abc import Iterator
+from datetime import date
 from typing import BinaryIO
 from xml.etree import ElementTree
 
@@ -60,11 +61,16 @@ CONTENT_TYPES = {
     "zip": ZIP_CONTENT_TYPE,
 }
 MAX_XML_BYTES = 16 * 1024 * 1024
-MAX_XLSX_BYTES = 64 * 1024 * 1024
+MAX_XLSX_BYTES = 256 * 1024 * 1024
 MAX_WORKSHEET_XML_BYTES = 48 * 1024 * 1024
 MAX_ZIP_BYTES = 512 * 1024 * 1024
-MAX_ZIP_MEMBERS = 500
+MAX_ZIP_WORKBOOKS = 500
+MAX_ZIP_MEMBERS = MAX_ZIP_WORKBOOKS + 1
 MAX_XLSX_MEMBERS = 256
+MAX_MANIFEST_BYTES = MAX_ZIP_BYTES
+MAX_MANIFEST_FIELD_CHARS = 1024
+MAX_MANIFEST_LINE_CHARS = 16 * 1024
+XLSX_SPOOL_MEMORY_BYTES = 8 * 1024 * 1024
 MAX_ZIP_CENTRAL_DIRECTORY_BYTES = 16 * 1024 * 1024
 MAX_XLSX_CENTRAL_DIRECTORY_BYTES = 8 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 250
@@ -75,6 +81,19 @@ ZIP64_LOCATOR_BYTES = 20
 ZIP64_EOCD_BYTES = 56
 ZIP_CENTRAL_HEADER_BYTES = 46
 ZIP_ENCRYPTION_FLAGS = 0x0001 | 0x0040 | 0x2000
+MANIFEST_NAME = "导出清单.csv"
+MANIFEST_HEADER = (
+    "记录类型",
+    "合同号",
+    "文件名",
+    "命中订单数",
+    "命中最早日期",
+    "命中最晚日期",
+    "跳过维保单号",
+    "跳过原始订单ID",
+    "跳过制单日期",
+    "说明",
+)
 PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 DOCUMENT_REL_NS = (
@@ -345,13 +364,10 @@ def validate_xlsx(path: pathlib.Path) -> int:
     with open_bounded_artifact(
         path,
         limit=MAX_XLSX_BYTES,
-        size_error="XLSX is empty or exceeds 64 MiB",
+        size_error="XLSX is empty or exceeds 256 MiB",
         label="XLSX",
     ) as (source, expected_size):
-        raw = source.read(MAX_XLSX_BYTES + 1)
-        if len(raw) != expected_size or source.read(1):
-            fail("XLSX size changed while it was being read")
-        return validate_xlsx_bytes(raw)
+        return validate_xlsx_file(source, expected_size)
 
 
 def safe_member_names(archive: zipfile.ZipFile) -> list[str]:
@@ -593,14 +609,13 @@ def parse_xml(raw: bytes, name: str) -> ElementTree.Element:
         fail(f"{name} XML is malformed: {exc}")
 
 
-def validate_xlsx_bytes(raw: bytes) -> int:
-    if not raw or len(raw) > MAX_XLSX_BYTES:
-        fail("XLSX is empty or exceeds 64 MiB")
+def validate_xlsx_file(source: BinaryIO, size: int) -> int:
+    if not 1 <= size <= MAX_XLSX_BYTES:
+        fail("XLSX is empty or exceeds 256 MiB")
     try:
-        source = io.BytesIO(raw)
         preflight_zip_directory(
             source,
-            len(raw),
+            size,
             max_entries=MAX_XLSX_MEMBERS,
             max_directory_bytes=MAX_XLSX_CENTRAL_DIRECTORY_BYTES,
         )
@@ -708,6 +723,10 @@ def validate_xlsx_bytes(raw: bytes) -> int:
         fail(f"XLSX package cannot be opened: {exc}")
 
 
+def validate_xlsx_bytes(raw: bytes) -> int:
+    return validate_xlsx_file(io.BytesIO(raw), len(raw))
+
+
 def validate_csv(path: pathlib.Path) -> tuple[int, int]:
     try:
         with path.open(encoding="utf-8-sig", newline="") as source:
@@ -727,6 +746,163 @@ def validate_csv(path: pathlib.Path) -> tuple[int, int]:
     return len(CSV_HEADER), count
 
 
+def preflight_workbook_bundle(
+    archive: zipfile.ZipFile,
+) -> tuple[zipfile.ZipInfo, list[zipfile.ZipInfo]]:
+    infos = archive.infolist()
+    names = safe_member_names(archive)
+    if not 2 <= len(infos) <= MAX_ZIP_MEMBERS:
+        fail("batch ZIP member count is outside the permitted range")
+    manifests = [info for info in infos if info.filename == MANIFEST_NAME]
+    workbooks = [info for info in infos if info.filename != MANIFEST_NAME]
+    if len(manifests) != 1:
+        fail(f"batch ZIP must contain exactly one {MANIFEST_NAME}")
+    if not 1 <= len(workbooks) <= MAX_ZIP_WORKBOOKS:
+        fail("batch ZIP workbook count is outside the permitted range")
+
+    total = 0
+    for info in infos:
+        if info.is_dir():
+            fail("batch ZIP contains a directory member")
+        if getattr(info, "flag_bits", 0) & ZIP_ENCRYPTION_FLAGS:
+            fail("batch ZIP contains an encrypted member")
+        size_limit = (
+            MAX_MANIFEST_BYTES
+            if info.filename == MANIFEST_NAME
+            else MAX_XLSX_BYTES
+        )
+        if info.filename != MANIFEST_NAME and not info.filename.lower().endswith(
+            ".xlsx"
+        ):
+            fail("batch ZIP contains a member outside its export contract")
+        if (
+            info.file_size <= 0
+            or info.compress_size < 0
+            or info.file_size > size_limit
+            or info.compress_size > size_limit
+        ):
+            fail("batch ZIP member size is outside the permitted range")
+        total += info.file_size
+        if total > MAX_ZIP_BYTES:
+            fail("batch ZIP expands beyond its permitted total size")
+        if info.file_size > 1024 * 1024 and (
+            info.compress_size == 0
+            or info.file_size / info.compress_size > MAX_COMPRESSION_RATIO
+        ):
+            fail("batch ZIP member compression ratio is unsafe")
+    if len(names) != len(infos):
+        fail("batch ZIP central directory is inconsistent")
+    return manifests[0], workbooks
+
+
+def validate_manifest_date(value: str) -> None:
+    if not value:
+        return
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        fail("batch ZIP manifest contains an invalid date")
+    if parsed.isoformat() != value:
+        fail("batch ZIP manifest date is not canonical")
+
+
+def bounded_manifest_lines(source: io.TextIOWrapper) -> Iterator[str]:
+    while True:
+        line = source.readline(MAX_MANIFEST_LINE_CHARS + 1)
+        if not line:
+            return
+        if len(line) > MAX_MANIFEST_LINE_CHARS:
+            fail("batch ZIP manifest physical line is too long")
+        yield line
+
+
+def validate_bundle_manifest(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    workbook_names: set[str],
+) -> None:
+    generated_names: set[str] = set()
+    try:
+        with archive.open(info) as source:
+            if source.read(3) != b"\xef\xbb\xbf":
+                fail("batch ZIP manifest must be UTF-8-SIG")
+            text = io.TextIOWrapper(
+                source,
+                encoding="utf-8",
+                errors="strict",
+                newline="",
+            )
+            previous_field_limit = csv.field_size_limit()
+            try:
+                csv.field_size_limit(MAX_MANIFEST_FIELD_CHARS)
+                rows = csv.reader(bounded_manifest_lines(text), strict=True)
+                if tuple(next(rows, ())) != MANIFEST_HEADER:
+                    fail("batch ZIP manifest header does not match the export contract")
+                for row in rows:
+                    if len(row) != len(MANIFEST_HEADER) or any(
+                        len(field) > MAX_MANIFEST_FIELD_CHARS for field in row
+                    ):
+                        fail("batch ZIP manifest contains a malformed row")
+                    if row[0] == "已生成":
+                        if (
+                            not row[1]
+                            or row[2] not in workbook_names
+                            or row[2] in generated_names
+                            or not row[3].isdigit()
+                            or int(row[3]) <= 0
+                            or any(row[6:])
+                        ):
+                            fail("batch ZIP manifest contains a malformed generated row")
+                        validate_manifest_date(row[4])
+                        validate_manifest_date(row[5])
+                        generated_names.add(row[2])
+                    elif row[0] == "已跳过":
+                        if (
+                            any(row[1:6])
+                            or not row[7]
+                            or row[9] != "未关联合同"
+                        ):
+                            fail("batch ZIP manifest contains a malformed skipped row")
+                        validate_manifest_date(row[8])
+                    else:
+                        fail("batch ZIP manifest contains an unknown record type")
+            finally:
+                csv.field_size_limit(previous_field_limit)
+                text.detach()
+            if source.tell() != info.file_size or source.read(1):
+                fail("batch ZIP manifest size differs from the central directory")
+    except (UnicodeError, csv.Error, zipfile.BadZipFile) as exc:
+        fail(f"batch ZIP manifest cannot be parsed: {exc}")
+    if generated_names != workbook_names:
+        fail("batch ZIP manifest workbook names do not match the archive")
+
+
+def copy_member_to_file(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    target: BinaryIO,
+    limit: int,
+) -> None:
+    if not 1 <= info.file_size <= limit:
+        fail(f"{info.filename} exceeds its copy limit")
+    consumed = 0
+    try:
+        with archive.open(info) as source:
+            while True:
+                chunk = source.read(STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                consumed += len(chunk)
+                if consumed > limit or consumed > info.file_size:
+                    fail(f"{info.filename} expanded beyond its declared size")
+                target.write(chunk)
+    except zipfile.BadZipFile as exc:
+        fail(f"ZIP CRC verification failed: {exc}")
+    if consumed != info.file_size:
+        fail(f"{info.filename} size differs from the central directory")
+    target.seek(0)
+
+
 def validate_zip(path: pathlib.Path) -> tuple[int, int]:
     try:
         with open_bounded_artifact(
@@ -742,19 +918,30 @@ def validate_zip(path: pathlib.Path) -> tuple[int, int]:
                 max_directory_bytes=MAX_ZIP_CENTRAL_DIRECTORY_BYTES,
             )
             with zipfile.ZipFile(source) as archive:
-                infos = preflight_zip(
+                manifest, workbooks = preflight_workbook_bundle(archive)
+                workbook_names = {info.filename for info in workbooks}
+                validate_bundle_manifest(
                     archive,
-                    max_members=MAX_ZIP_MEMBERS,
-                    max_member_bytes=MAX_XLSX_BYTES,
-                    max_total_bytes=MAX_ZIP_BYTES,
-                    required_suffix=".xlsx",
+                    manifest,
+                    workbook_names,
                 )
                 sheets = 0
-                for info in infos:
-                    sheets += validate_xlsx_bytes(
-                        read_member_bounded(archive, info, MAX_XLSX_BYTES)
-                    )
-                return len(infos), sheets
+                for info in workbooks:
+                    with tempfile.SpooledTemporaryFile(
+                        max_size=XLSX_SPOOL_MEMORY_BYTES,
+                        mode="w+b",
+                    ) as workbook:
+                        copy_member_to_file(
+                            archive,
+                            info,
+                            workbook,
+                            MAX_XLSX_BYTES,
+                        )
+                        sheets += validate_xlsx_file(
+                            workbook,
+                            info.file_size,
+                        )
+                return len(workbooks) + 1, sheets
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         fail(f"batch ZIP cannot be opened: {exc}")
 
@@ -835,8 +1022,27 @@ def run_self_test() -> None:
         xlsx_path = root / "valid.xlsx"
         xlsx_path.write_bytes(absolute)
         zip_path = root / "valid.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("合同一.xlsx", absolute)
+        workbook_name = "项目工作簿/project_workbook_合同一.xlsx"
+        manifest = io.StringIO(newline="")
+        manifest_writer = csv.writer(manifest)
+        manifest_writer.writerow(MANIFEST_HEADER)
+        manifest_writer.writerow(
+            (
+                "已生成",
+                "合同一",
+                workbook_name,
+                "1",
+                "2026-07-01",
+                "2026-07-01",
+                "",
+                "",
+                "",
+                "",
+            )
+        )
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as archive:
+            archive.writestr(MANIFEST_NAME, "\ufeff" + manifest.getvalue())
+            archive.writestr(workbook_name, absolute)
         if content_type(csv_headers) != CSV_CONTENT_TYPE:
             fail("self-test CSV Content-Type is wrong")
         validate_csv(csv_path)

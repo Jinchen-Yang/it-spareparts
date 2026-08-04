@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import fcntl
 import hashlib
 import http.client
@@ -103,6 +104,60 @@ def _minimal_xlsx() -> bytes:
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>""",
         )
     return content.getvalue()
+
+
+def _bundle_manifest(
+    workbook_names: list[str],
+    *,
+    include_skipped: bool = False,
+) -> str:
+    content = io.StringIO(newline="")
+    writer = csv.writer(content)
+    writer.writerow(
+        (
+            "记录类型",
+            "合同号",
+            "文件名",
+            "命中订单数",
+            "命中最早日期",
+            "命中最晚日期",
+            "跳过维保单号",
+            "跳过原始订单ID",
+            "跳过制单日期",
+            "说明",
+        )
+    )
+    for index, workbook_name in enumerate(workbook_names, start=1):
+        writer.writerow(
+            (
+                "已生成",
+                f"合同{index}",
+                workbook_name,
+                "1",
+                "2026-07-01",
+                "2026-07-01",
+                "",
+                "",
+                "",
+                "",
+            )
+        )
+    if include_skipped:
+        writer.writerow(
+            (
+                "已跳过",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "WBDD-unlinked",
+                "raw-unlinked",
+                "2026-07-01",
+                "未关联合同",
+            )
+        )
+    return "\ufeff" + content.getvalue()
 
 
 def _zip64_eocd(raw: bytes, *, disk_count: int = 1) -> bytes:
@@ -1900,8 +1955,13 @@ def test_release_artifact_validator_rejects_mime_and_fake_files(
     xlsx_file = tmp_path / "orders.xlsx"
     xlsx_file.write_bytes(_minimal_xlsx())
     zip_file = tmp_path / "workbooks.zip"
-    with zipfile.ZipFile(zip_file, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("合同一.xlsx", _minimal_xlsx())
+    workbook_name = "项目工作簿/project_workbook_合同一.xlsx"
+    with zipfile.ZipFile(zip_file, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr(
+            "导出清单.csv",
+            _bundle_manifest([workbook_name], include_skipped=True),
+        )
+        archive.writestr(workbook_name, _minimal_xlsx())
 
     for kind, artifact, headers in (
         ("csv", csv_file, csv_header),
@@ -1937,6 +1997,124 @@ def test_release_artifact_validator_rejects_mime_and_fake_files(
         assert invalid.returncode != 0, kind
 
 
+def test_release_artifact_validator_accepts_500_workbook_bundle_boundary(
+    tmp_path: Path,
+) -> None:
+    headers = tmp_path / "zip.headers"
+    headers.write_text("Content-Type: application/zip\r\n", encoding="ascii")
+    workbook_names = [
+        f"项目工作簿/project_workbook_{index:03d}.xlsx"
+        for index in range(500)
+    ]
+    bundle = tmp_path / "maximum-workbook-count.zip"
+    workbook = _minimal_xlsx()
+    with zipfile.ZipFile(bundle, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("导出清单.csv", _bundle_manifest(workbook_names))
+        for workbook_name in workbook_names:
+            archive.writestr(workbook_name, workbook)
+
+    validated = subprocess.run(
+        [
+            "python3",
+            str(ARTIFACT_VALIDATOR),
+            "zip",
+            str(bundle),
+            str(headers),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert validated.returncode == 0, validated.stderr
+    assert "members=501 sheets=500" in validated.stdout
+
+
+def test_release_artifact_validator_rejects_bundle_manifest_name_mismatch(
+    tmp_path: Path,
+) -> None:
+    headers = tmp_path / "zip.headers"
+    headers.write_text("Content-Type: application/zip\r\n", encoding="ascii")
+    archived_name = "项目工作簿/project_workbook_actual.xlsx"
+    bundle = tmp_path / "manifest-mismatch.zip"
+    with zipfile.ZipFile(bundle, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr(
+            "导出清单.csv",
+            _bundle_manifest(["项目工作簿/project_workbook_missing.xlsx"]),
+        )
+        archive.writestr(archived_name, _minimal_xlsx())
+
+    validated = subprocess.run(
+        [
+            "python3",
+            str(ARTIFACT_VALIDATOR),
+            "zip",
+            str(bundle),
+            str(headers),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert validated.returncode != 0
+    assert "malformed generated row" in validated.stderr
+
+
+def test_release_artifact_validator_uses_file_backed_256_mib_xlsx_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = tmp_path / "xlsx.headers"
+    headers.write_text(
+        "Content-Type: "
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n",
+        encoding="ascii",
+    )
+    sparse = tmp_path / "over-old-limit.xlsx"
+    directory_offset = 65 * 1024 * 1024
+    central_header = b"PK\x01\x02" + b"\0" * 42
+    with sparse.open("wb") as target:
+        target.seek(directory_offset)
+        target.write(central_header)
+        target.write(
+            struct.pack(
+                "<4s4H2IH",
+                b"PK\x05\x06",
+                0,
+                0,
+                1,
+                1,
+                len(central_header),
+                directory_offset,
+                0,
+            )
+        )
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+
+    def reject_bytes_allocation(*args: object, **kwargs: object) -> None:
+        pytest.fail("XLSX was wrapped in BytesIO instead of validated from its fd")
+
+    def reached_file_backed_zipfile(*args: object, **kwargs: object) -> None:
+        raise SystemExit("reached file-backed ZipFile")
+
+    monkeypatch.setattr(io, "BytesIO", reject_bytes_allocation)
+    monkeypatch.setattr(zipfile, "ZipFile", reached_file_backed_zipfile)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(ARTIFACT_VALIDATOR),
+            "xlsx",
+            str(sparse),
+            str(headers),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="reached file-backed ZipFile"):
+        validator["main"]()
+
+
 def test_release_artifact_validator_rejects_oversized_xlsx_before_open(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1949,7 +2127,7 @@ def test_release_artifact_validator_rejects_oversized_xlsx_before_open(
     )
     oversized = tmp_path / "oversized.xlsx"
     with oversized.open("wb") as target:
-        target.seek(64 * 1024 * 1024)
+        target.seek(256 * 1024 * 1024)
         target.write(b"\0")
 
     validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
@@ -1983,7 +2161,7 @@ def test_release_artifact_validator_rejects_oversized_xlsx_before_open(
         ],
     )
 
-    with pytest.raises(SystemExit, match="XLSX is empty or exceeds 64 MiB"):
+    with pytest.raises(SystemExit, match="XLSX is empty or exceeds 256 MiB"):
         validator["main"]()
 
 
@@ -1994,7 +2172,7 @@ def test_release_artifact_validator_rejects_declared_zip_fanout_before_open(
     headers = tmp_path / "zip.headers"
     headers.write_text("Content-Type: application/zip\r\n", encoding="ascii")
     malicious = tmp_path / "declared-fanout.zip"
-    declared_entries = 501
+    declared_entries = 502
     central_directory_size = declared_entries * 46
     with malicious.open("wb") as target:
         target.seek(central_directory_size)
@@ -2089,8 +2267,10 @@ def test_release_artifact_validator_rejects_prefixed_zip_before_open(
     headers = tmp_path / "zip.headers"
     headers.write_text("Content-Type: application/zip\r\n", encoding="ascii")
     content = io.BytesIO()
-    with zipfile.ZipFile(content, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("合同一.xlsx", _minimal_xlsx())
+    workbook_name = "项目工作簿/project_workbook_合同一.xlsx"
+    with zipfile.ZipFile(content, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("导出清单.csv", _bundle_manifest([workbook_name]))
+        archive.writestr(workbook_name, _minimal_xlsx())
     prefixed = tmp_path / "prefixed.zip"
     prefixed.write_bytes(b"self-extracting-prefix" + content.getvalue())
 
@@ -2221,8 +2401,10 @@ def test_release_artifact_validator_accepts_zip64_and_rejects_multidisk(
     headers = tmp_path / "zip.headers"
     headers.write_text("Content-Type: application/zip\r\n", encoding="ascii")
     content = io.BytesIO()
-    with zipfile.ZipFile(content, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("合同一.xlsx", _minimal_xlsx())
+    workbook_name = "项目工作簿/project_workbook_合同一.xlsx"
+    with zipfile.ZipFile(content, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("导出清单.csv", _bundle_manifest([workbook_name]))
+        archive.writestr(workbook_name, _minimal_xlsx())
     valid_zip64 = tmp_path / "valid-zip64.zip"
     valid_zip64.write_bytes(_zip64_eocd(content.getvalue()))
 
