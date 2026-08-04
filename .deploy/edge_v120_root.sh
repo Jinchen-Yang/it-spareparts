@@ -1167,11 +1167,25 @@ install_snapshot() {
         }
     return 73
   fi
+  keep=1
+  # rename_exchange leaves the former live config at the private CAS path.
+  # Production configs are root-owned 0644, while retained CAS backups must
+  # become root-only before finalization validates and removes them.
+  chmod 600 "$temporary" || return $?
   sync -f "$destination" || return $?
   sync -f "$temporary" || return $?
   sync -d "$(dirname -- "$destination")" || return $?
-  keep=1
   trap - RETURN
+}
+
+secure_cas_backup() {
+  local path=$1 expected=$2
+  safe_regular "$path" || return 73
+  [ "$(sha256sum "$path" | cut -d' ' -f1)" = "$expected" ] \
+    || return 73
+  chmod 600 "$path" || return $?
+  safe_cas_file "$path" || return 73
+  sync -f "$path" || return $?
 }
 
 finalize_edge_cas_backups() {
@@ -1183,12 +1197,9 @@ finalize_edge_cas_backups() {
       && [ ! -e "$caddy_backup" ] && [ ! -L "$caddy_backup" ]; then
     return 0
   fi
-  safe_cas_file "$compose_backup" && safe_cas_file "$caddy_backup" \
-    || return 73
-  [ "$(sha256sum "$compose_backup" | cut -d' ' -f1)" \
-    = "$expected_compose" ] \
-    && [ "$(sha256sum "$caddy_backup" | cut -d' ' -f1)" \
-      = "$expected_caddy" ] || return 73
+  secure_cas_backup "$compose_backup" "$expected_compose" \
+    && secure_cas_backup "$caddy_backup" "$expected_caddy" \
+    || return $?
   rm -f -- "$compose_backup" "$caddy_backup" || return $?
   sync -d "$ASSISTANT_DIR" || return $?
 }
