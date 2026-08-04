@@ -845,6 +845,15 @@ def test_edge_and_hsts_share_persistent_lock_and_document_writer_order() -> None
     assert "v120 锁，再获取 shared-Caddy 锁" in runbook
 
 
+def test_edge_production_authority_accepts_observer_owned_app_mirror() -> None:
+    edge = EDGE_ROOT.read_text(encoding="utf-8")
+
+    assert "safe_app_authority_mirror() {" in edge
+    assert '"600 ubuntu:ubuntu 1"' in edge
+    assert '! safe_app_authority_mirror "$app_state"' in edge
+    assert '! safe_regular "$app_state"' not in edge
+
+
 def test_edge_promotion_requires_exact_pre_hsts_header(tmp_path: Path) -> None:
     env, _control, _assistant, _calls = _fixture(tmp_path)
     assert _run_root(env, "prepare").returncode == 0
@@ -2045,6 +2054,8 @@ def test_final_observation_rechecks_public_nat_and_business_artifacts() -> None:
     assert "Location" in runbook
     assert "anonymous-api-401" in runbook
     assert "technical-token-403" in runbook
+    assert runbook.count("technical-token-403 status=%s") == 2
+    assert '> "$LOCAL_EVIDENCE/technical-token-403.txt"' in runbook
     assert "authorized-csv" in runbook
     assert "authorized-xlsx" in runbook
     assert "authorized-zip-crc" in runbook
@@ -2065,6 +2076,65 @@ def test_final_observation_rechecks_public_nat_and_business_artifacts() -> None:
     assert "allow=GET,HEAD" in runbook
     assert "ServerAliveInterval=5" in runbook
     assert "ServerAliveCountMax=2" in runbook
+
+
+def test_final_runbook_download_header_gate_accepts_curl_crlf(
+    tmp_path: Path,
+) -> None:
+    runbook = EDGE_RUNBOOK.read_text(encoding="utf-8")
+    function = re.search(
+        r"^download_readonly\(\) \{\n.*?^\}\n",
+        runbook,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert function is not None
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(
+        fake_bin / "curl",
+        r"""
+        #!/usr/bin/env bash
+        set -Eeuo pipefail
+        headers=
+        output=
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            -D) headers=$2; shift 2 ;;
+            -o) output=$2; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        test -n "$headers" && test -n "$output"
+        printf 'HTTP/2 200\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Disposition: attachment; filename="fixture.csv"\r\n\r\n' > "$headers"
+        printf 'fixture\n' > "$output"
+        printf 200
+        """,
+    )
+    admin_header = tmp_path / "admin.header"
+    admin_header.write_text(
+        "Authorization: Bearer fixture-only\n", encoding="ascii"
+    )
+    script = (
+        "set -Eeuo pipefail\n"
+        f"WORK_DIR={str(tmp_path)!r}\n"
+        f"admin_header={str(admin_header)!r}\n"
+        + function.group(0)
+        + 'download_readonly "https://example.invalid/export" '
+        '"$WORK_DIR/export.csv" "$WORK_DIR/export.headers" 1024 5\n'
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=False,
+        env={
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+        },
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_release_artifact_validator_rejects_mime_and_fake_files(

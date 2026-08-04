@@ -76,6 +76,16 @@ safe_regular() {
     && [ $((8#$(stat -c '%a' "$path") & 8#022)) -eq 0 ]
 }
 
+safe_app_authority_mirror() {
+  local path=$1
+  if [ "$TEST_MODE" = 1 ]; then
+    safe_regular "$path" && [ "$(stat -c '%a' "$path")" = 600 ]
+    return
+  fi
+  [ -f "$path" ] && [ ! -L "$path" ] \
+    && [ "$(stat -c '%a %U:%G %h' "$path")" = "600 ubuntu:ubuntu 1" ]
+}
+
 safe_app_env() {
   if [ "$TEST_MODE" = 1 ]; then
     safe_regular "$APP_ENV" && [ "$(stat -c '%a' "$APP_ENV")" = 600 ]
@@ -230,7 +240,7 @@ verify_release_authority() {
     || fatal "root release authority does not authorize edge"
   AUTH_RELEASE_ID=${AUTHORITY_STATE[RELEASE_ID]}
   app_state="$APP_DIR/backups/$AUTH_RELEASE_ID.state"
-  if ! safe_regular "$app_state" \
+  if ! safe_app_authority_mirror "$app_state" \
       || ! cmp -s -- "$state" "$app_state"; then
     fatal "root and app release authority mirrors differ"
   fi
