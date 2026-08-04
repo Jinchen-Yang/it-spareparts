@@ -735,29 +735,38 @@ profile 或登录响应移出 `WORK_DIR`；截图只能写入本次私有 eviden
 
 ```bash
 approved_login_available "$APPROVED_ADMIN_LOGIN_JSON"
-CHROME_BIN=/opt/google/chrome/google-chrome
+CHROME_LAUNCHER=/opt/google/chrome/google-chrome
+CHROME_REAL_BIN=/opt/google/chrome/chrome
 NODE_BIN=/usr/bin/node
-CHROME_VERSION_EXPECTED='Google Chrome 150.0.7871.186'
-NODE_VERSION_EXPECTED='v24.18.0'
-CHROME_SHA256_EXPECTED=aea09d69ce7f24d5901f6bfb15dd44d0c856e793e0a498f8d8393ec7d2c308ec
-NODE_SHA256_EXPECTED=41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c
-test -x "$CHROME_BIN" && test ! -L "$CHROME_BIN"
+CHROME_VERSION_EXPECTED='Google Chrome 151.0.7922.71'
+NODE_VERSION_EXPECTED='v24.18.1'
+CHROME_LAUNCHER_SHA256_EXPECTED=aea09d69ce7f24d5901f6bfb15dd44d0c856e793e0a498f8d8393ec7d2c308ec
+CHROME_REAL_SHA256_EXPECTED=4cf210c4a0aeee3e69a73639260918a7448626d6b99892ec61e20750bc7c7079
+NODE_SHA256_EXPECTED=f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a
+test -f "$CHROME_LAUNCHER" && test -x "$CHROME_LAUNCHER" \
+  && test ! -L "$CHROME_LAUNCHER"
+test -f "$CHROME_REAL_BIN" && test -x "$CHROME_REAL_BIN" \
+  && test ! -L "$CHROME_REAL_BIN"
 test -x "$NODE_BIN" && test ! -L "$NODE_BIN"
+test "$(od -An -tx1 -N4 "$CHROME_REAL_BIN" | tr -d ' \n')" = 7f454c46
 chrome_version=$(
-  "$CHROME_BIN" --version | tr -d '\r\n' | sed 's/[[:space:]]*$//'
+  "$CHROME_REAL_BIN" --version | tr -d '\r\n' | sed 's/[[:space:]]*$//'
 )
 node_version=$(
   "$NODE_BIN" --version | tr -d '\r\n' | sed 's/[[:space:]]*$//'
 )
 test "$chrome_version" = "$CHROME_VERSION_EXPECTED"
 test "$node_version" = "$NODE_VERSION_EXPECTED"
-test "$(sha256sum "$CHROME_BIN" | cut -d' ' -f1)" \
-  = "$CHROME_SHA256_EXPECTED"
+test "$(sha256sum "$CHROME_LAUNCHER" | cut -d' ' -f1)" \
+  = "$CHROME_LAUNCHER_SHA256_EXPECTED"
+test "$(sha256sum "$CHROME_REAL_BIN" | cut -d' ' -f1)" \
+  = "$CHROME_REAL_SHA256_EXPECTED"
 test "$(sha256sum "$NODE_BIN" | cut -d' ' -f1)" = "$NODE_SHA256_EXPECTED"
 mobile_script="$WORK_DIR/mobile-probe.mjs"
 # 实际执行的是 source.tar 中已绑定哈希的脚本；它对每项 `expectedRoute`
 # 做 location.pathname 精确比较，并分别检查“详细盈亏”“下载中心”“项目提醒”；
-# Node 自行通过 `--remote-debugging-pipe` 启动 exact Chrome，pipe framing、
+# launcher 保留 Google Chrome 的启动语义，但不能代替真实 ELF 的版本、magic 与哈希
+# 固定；Node 通过 `--remote-debugging-pipe` 启动 launcher，pipe framing、
 # 每条 CDP command、Chrome 退出和整体 Node 都带 deadline；浏览器内下载使用
 # `AbortSignal.timeout`。登录响应与 0700 profile 在成功和失败路径都会被删除。
 install -m 500 "$MOBILE_RELEASE_PROBE" "$mobile_script"
@@ -766,7 +775,7 @@ mobile_screenshot_tmp="$WORK_DIR/mobile-browser-redacted.png"
 mobile_listeners_before=$(ss -H -ltnp)
 env -u MOBILE_PROBE_TEST_ORIGIN -u MOBILE_PROBE_TEST_MODE \
   timeout --kill-after=5s 180s "$NODE_BIN" \
-  "$mobile_script" "$CHROME_BIN" "$admin_response" \
+  "$mobile_script" "$CHROME_LAUNCHER" "$admin_response" \
   "$mobile_evidence_tmp" "$mobile_screenshot_tmp" "$WORK_DIR"
 mobile_listeners_after=$(ss -H -ltnp)
 test "$mobile_listeners_after" = "$mobile_listeners_before"

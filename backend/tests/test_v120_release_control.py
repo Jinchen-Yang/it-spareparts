@@ -1815,6 +1815,7 @@ def _write_fake_pipe_chrome(path: Path) -> None:
 
             signal.signal(signal.SIGTERM, terminate)
         route = "/"
+        stall_method = os.environ.get("MOBILE_TEST_STALL_METHOD")
         buffer = b""
         while True:
             chunk = os.read(3, 65536)
@@ -1831,6 +1832,8 @@ def _write_fake_pipe_chrome(path: Path) -> None:
                 method = message["method"]
                 params = message.get("params", {})
                 result = {}
+                if method == stall_method:
+                    time.sleep(30)
                 if (
                     method not in ("Target.getTargets", "Target.attachToTarget")
                     and message.get("sessionId") != "session-1"
@@ -1845,8 +1848,6 @@ def _write_fake_pipe_chrome(path: Path) -> None:
                     )
                     continue
                 if method == "Target.getTargets":
-                    if os.environ.get("MOBILE_TEST_STALL") == "1":
-                        time.sleep(30)
                     result = {
                         "targetInfos": [{
                             "targetId": "page-1",
@@ -1920,7 +1921,7 @@ def _run_mobile_pipe_case(
     redirect: str | None = None,
     missing_anchor: str | None = None,
     ignore_term: bool = False,
-    stall: bool = False,
+    stall_method: str | None = None,
     overall_timeout_ms: int | None = None,
     profile_rm_failures: str | None = None,
     cleanup_log: bool = False,
@@ -1960,8 +1961,8 @@ def _run_mobile_pipe_case(
         env["MOBILE_TEST_MISSING_ANCHOR"] = missing_anchor
     if ignore_term:
         env["MOBILE_TEST_IGNORE_TERM"] = "1"
-    if stall:
-        env["MOBILE_TEST_STALL"] = "1"
+    if stall_method is not None:
+        env["MOBILE_TEST_STALL_METHOD"] = stall_method
     if overall_timeout_ms is not None:
         env["MOBILE_PROBE_TEST_MODE"] = "1"
         env["MOBILE_PROBE_TEST_OVERALL_TIMEOUT_MS"] = str(
@@ -2089,14 +2090,16 @@ def test_mobile_probe_does_not_delete_unvalidated_external_login(
     assert not list(work.glob("chrome-profile-*"))
 
 
+@pytest.mark.parametrize("stall_method", ("Target.getTargets", "Page.navigate"))
 def test_mobile_probe_overall_timeout_cancels_work_before_cleanup(
     tmp_path: Path,
+    stall_method: str,
 ) -> None:
     started = time.monotonic()
     result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
         tmp_path,
         "overall-timeout",
-        stall=True,
+        stall_method=stall_method,
         overall_timeout_ms=50,
     )
     elapsed = time.monotonic() - started
@@ -2219,6 +2222,8 @@ def test_mobile_probe_static_pipe_contract_is_portable() -> None:
     assert 'stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"]' in probe
     assert "chrome.stdio[3]" in probe and "chrome.stdio[4]" in probe
     assert "Emulation.setDeviceMetricsOverride" in probe
+    assert "const NAVIGATION_TIMEOUT_MS = 30_000;" in probe
+    assert "sessionId, NAVIGATION_TIMEOUT_MS" in probe
     assert "OVERALL_TIMEOUT_MS" in probe
     assert "rejectPending" in probe
     assert 'chrome.kill("SIGTERM")' in probe
@@ -2235,10 +2240,31 @@ def test_mobile_probe_static_pipe_contract_is_portable() -> None:
     assert "mobile_listeners_before" in runbook
     assert "mobile_listeners_after" in runbook
     assert "origin=https://hbzgc.icu" in runbook
-    assert re.search(r"CHROME_SHA256_EXPECTED=[0-9a-f]{64}", runbook)
-    assert re.search(r"NODE_SHA256_EXPECTED=[0-9a-f]{64}", runbook)
-    assert "CHROME_BIN=/opt/google/chrome/google-chrome" in runbook
+    assert (
+        "CHROME_REAL_SHA256_EXPECTED="
+        "4cf210c4a0aeee3e69a73639260918a7448626d6b99892ec61e20750bc7c7079"
+        in runbook
+    )
+    assert (
+        "CHROME_LAUNCHER_SHA256_EXPECTED="
+        "aea09d69ce7f24d5901f6bfb15dd44d0c856e793e0a498f8d8393ec7d2c308ec"
+        in runbook
+    )
+    assert (
+        "NODE_SHA256_EXPECTED="
+        "f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a"
+        in runbook
+    )
+    assert (
+        "CHROME_LAUNCHER=/opt/google/chrome/google-chrome" in runbook
+    )
+    assert "CHROME_REAL_BIN=/opt/google/chrome/chrome" in runbook
+    assert (
+        "CHROME_REAL_BIN=/opt/google/chrome/google-chrome" not in runbook
+    )
+    assert 'od -An -tx1 -N4 "$CHROME_REAL_BIN"' in runbook
     assert "NODE_BIN=/usr/bin/node" in runbook
+    assert '"$mobile_script" "$CHROME_LAUNCHER"' in runbook
 
 
 @pytest.mark.skipif(
@@ -2323,7 +2349,7 @@ def test_mobile_probe_real_chrome_pipe_against_loopback_fixture(
             check=False,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=45,
             env=env,
         )
         listeners_after = subprocess.run(

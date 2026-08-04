@@ -10,6 +10,7 @@ const [
   workDir,
 ] = process.argv.slice(2);
 const CDP_TIMEOUT_MS = 10_000;
+const NAVIGATION_TIMEOUT_MS = 30_000;
 const PROFILE_REMOVE_MAX_RETRIES = 5;
 const PROFILE_REMOVE_RETRY_DELAY_MS = 100;
 const TRANSIENT_PROFILE_REMOVE_ERRORS = new Set([
@@ -294,14 +295,19 @@ function startChrome() {
   bindPipeFrames(cdpOutput);
 }
 
-function command(method, params = {}, sessionId) {
+function command(
+  method,
+  params = {},
+  sessionId,
+  timeoutMs = CDP_TIMEOUT_MS,
+) {
   ensureActive();
   const id = nextId++;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error(`${method} timed out`));
-    }, CDP_TIMEOUT_MS);
+    }, timeoutMs);
     pending.set(id, { resolve, reject, timer });
     const message = { id, method, params };
     if (sessionId) message.sessionId = sessionId;
@@ -314,6 +320,10 @@ function command(method, params = {}, sessionId) {
       entry.reject(error);
     });
   });
+}
+
+function navigate(url, sessionId) {
+  return command("Page.navigate", { url }, sessionId, NAVIGATION_TIMEOUT_MS);
 }
 
 async function stopChrome() {
@@ -363,7 +373,7 @@ async function main() {
     },
     sessionId,
   );
-  await command("Page.navigate", { url: `${origin}/` }, sessionId);
+  await navigate(`${origin}/`, sessionId);
   await delay(ROUTE_DELAY_MS);
   const localValues = {
     token: login.token,
@@ -388,11 +398,7 @@ async function main() {
   ];
   const checks = [];
   for (const { expectedRoute, anchor } of routes) {
-    await command(
-      "Page.navigate",
-      { url: `${origin}${expectedRoute}` },
-      sessionId,
-    );
+    await navigate(`${origin}${expectedRoute}`, sessionId);
     await delay(ROUTE_DELAY_MS);
     const evaluated = await command(
       "Runtime.evaluate",
@@ -458,11 +464,7 @@ async function main() {
     throw new Error("mobile download contract failed");
   }
 
-  await command(
-    "Page.navigate",
-    { url: `${origin}/maintenance` },
-    sessionId,
-  );
+  await navigate(`${origin}/maintenance`, sessionId);
   await delay(ROUTE_DELAY_MS);
   await command(
     "Runtime.evaluate",
