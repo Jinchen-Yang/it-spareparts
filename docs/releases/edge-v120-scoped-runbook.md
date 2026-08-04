@@ -743,12 +743,37 @@ NODE_VERSION_EXPECTED='v24.18.1'
 CHROME_LAUNCHER_SHA256_EXPECTED=aea09d69ce7f24d5901f6bfb15dd44d0c856e793e0a498f8d8393ec7d2c308ec
 CHROME_REAL_SHA256_EXPECTED=4cf210c4a0aeee3e69a73639260918a7448626d6b99892ec61e20750bc7c7079
 NODE_SHA256_EXPECTED=f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a
-test -f "$CHROME_LAUNCHER" && test -x "$CHROME_LAUNCHER" \
-  && test ! -L "$CHROME_LAUNCHER"
-test -f "$CHROME_REAL_BIN" && test -x "$CHROME_REAL_BIN" \
-  && test ! -L "$CHROME_REAL_BIN"
-test -x "$NODE_BIN" && test ! -L "$NODE_BIN"
+
+assert_secure_release_parent() {
+  local parent=$1 mode
+  test "$(readlink -e -- "$parent")" = "$parent"
+  test ! -L "$parent"
+  test "$(LC_ALL=C stat -c '%F|%u|%g' -- "$parent")" = 'directory|0|0'
+  mode=$(stat -c '%a' -- "$parent")
+  test $((8#$mode & 8#22)) -eq 0
+}
+assert_exact_release_file() {
+  local candidate=$1
+  test "$(readlink -e -- "$candidate")" = "$candidate"
+  test ! -L "$candidate"
+  test "$(LC_ALL=C stat -c '%F|%u|%g|%a|%h' -- "$candidate")" \
+    = 'regular file|0|0|755|1'
+}
+release_file_identity() {
+  LC_ALL=C stat -c '%d|%i|%s|%Y|%Z|%u|%g|%a|%h' -- "$1"
+}
+for release_parent in \
+  / /opt /opt/google /opt/google/chrome /usr /usr/bin; do
+  assert_secure_release_parent "$release_parent"
+done
+assert_exact_release_file "$CHROME_LAUNCHER"
+assert_exact_release_file "$CHROME_REAL_BIN"
+assert_exact_release_file "$NODE_BIN"
+CHROME_LAUNCHER_IDENTITY_BEFORE=$(release_file_identity "$CHROME_LAUNCHER")
+CHROME_REAL_IDENTITY_BEFORE=$(release_file_identity "$CHROME_REAL_BIN")
+NODE_IDENTITY_BEFORE=$(release_file_identity "$NODE_BIN")
 test "$(od -An -tx1 -N4 "$CHROME_REAL_BIN" | tr -d ' \n')" = 7f454c46
+test "$(od -An -tx1 -N4 "$NODE_BIN" | tr -d ' \n')" = 7f454c46
 chrome_version=$(
   "$CHROME_REAL_BIN" --version | tr -d '\r\n' | sed 's/[[:space:]]*$//'
 )
@@ -762,6 +787,11 @@ test "$(sha256sum "$CHROME_LAUNCHER" | cut -d' ' -f1)" \
 test "$(sha256sum "$CHROME_REAL_BIN" | cut -d' ' -f1)" \
   = "$CHROME_REAL_SHA256_EXPECTED"
 test "$(sha256sum "$NODE_BIN" | cut -d' ' -f1)" = "$NODE_SHA256_EXPECTED"
+test "$(release_file_identity "$CHROME_LAUNCHER")" \
+  = "$CHROME_LAUNCHER_IDENTITY_BEFORE"
+test "$(release_file_identity "$CHROME_REAL_BIN")" \
+  = "$CHROME_REAL_IDENTITY_BEFORE"
+test "$(release_file_identity "$NODE_BIN")" = "$NODE_IDENTITY_BEFORE"
 mobile_script="$WORK_DIR/mobile-probe.mjs"
 # 实际执行的是 source.tar 中已绑定哈希的脚本；它对每项 `expectedRoute`
 # 做 location.pathname 精确比较，并分别检查“详细盈亏”“下载中心”“项目提醒”；
@@ -774,6 +804,11 @@ mobile_evidence_tmp="$WORK_DIR/mobile-browser.txt"
 mobile_screenshot_tmp="$WORK_DIR/mobile-browser-redacted.png"
 mobile_listeners_before=$(ss -H -ltnp)
 env -u MOBILE_PROBE_TEST_ORIGIN -u MOBILE_PROBE_TEST_MODE \
+  -u MOBILE_PROBE_TEST_COMMAND_TIMEOUT_MS \
+  -u MOBILE_PROBE_TEST_NAVIGATION_TIMEOUT_MS \
+  -u MOBILE_PROBE_TEST_OVERALL_TIMEOUT_MS \
+  -u MOBILE_PROBE_TEST_PROFILE_RM_FAILURES \
+  -u MOBILE_PROBE_TEST_CLEANUP_LOG \
   timeout --kill-after=5s 180s "$NODE_BIN" \
   "$mobile_script" "$CHROME_LAUNCHER" "$admin_response" \
   "$mobile_evidence_tmp" "$mobile_screenshot_tmp" "$WORK_DIR"

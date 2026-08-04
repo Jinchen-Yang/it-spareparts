@@ -1813,6 +1813,17 @@ def test_final_runbook_orders_app_edge_hsts_and_observation_with_rollback() -> N
         "f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a"
         in runbook
     )
+    assert "assert_secure_release_parent() {" in runbook
+    assert "assert_exact_release_file() {" in runbook
+    assert "release_file_identity() {" in runbook
+    assert 'test "$(readlink -e -- "$candidate")" = "$candidate"' in runbook
+    assert "regular file|0|0|755|1" in runbook
+    assert "8#$mode & 8#22" in runbook
+    assert 'od -An -tx1 -N4 "$CHROME_REAL_BIN"' in runbook
+    assert 'od -An -tx1 -N4 "$NODE_BIN"' in runbook
+    assert "CHROME_LAUNCHER_IDENTITY_BEFORE=" in runbook
+    assert "CHROME_REAL_IDENTITY_BEFORE=" in runbook
+    assert "NODE_IDENTITY_BEFORE=" in runbook
     assert "timeout --kill-after=5s 180s" in runbook
     assert "AbortSignal.timeout" in mobile_probe
     assert "expectedRoute" in mobile_probe
@@ -1850,10 +1861,31 @@ def test_mobile_runtime_contract_matches_this_control_host() -> None:
     assert (
         "CHROME_REAL_BIN=/opt/google/chrome/google-chrome" not in runbook
     )
-    assert chrome_launcher.is_file() and not chrome_launcher.is_symlink()
-    assert chrome_real.is_file() and not chrome_real.is_symlink()
-    assert node.is_file() and not node.is_symlink()
+    binaries = (chrome_launcher, chrome_real, node)
+    parent_dirs = {parent for binary in binaries for parent in binary.parents}
+    identities_before: dict[Path, tuple[int, ...]] = {}
+    for binary in binaries:
+        metadata = binary.lstat()
+        assert binary.resolve(strict=True) == binary
+        assert stat.S_ISREG(metadata.st_mode) and not binary.is_symlink()
+        assert metadata.st_uid == 0 and metadata.st_gid == 0
+        assert stat.S_IMODE(metadata.st_mode) == 0o755
+        assert metadata.st_nlink == 1
+        identities_before[binary] = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+    for parent in parent_dirs:
+        metadata = parent.lstat()
+        assert parent.resolve(strict=True) == parent
+        assert stat.S_ISDIR(metadata.st_mode) and not parent.is_symlink()
+        assert metadata.st_uid == 0 and metadata.st_gid == 0
+        assert stat.S_IMODE(metadata.st_mode) & 0o022 == 0
     assert chrome_real.read_bytes()[:4] == b"\x7fELF"
+    assert node.read_bytes()[:4] == b"\x7fELF"
     assert hashlib.sha256(chrome_launcher.read_bytes()).hexdigest() == (
         "aea09d69ce7f24d5901f6bfb15dd44d0c856e793e0a498f8d8393ec7d2c308ec"
     )
@@ -1877,6 +1909,15 @@ def test_mobile_runtime_contract_matches_this_control_host() -> None:
     ).stdout.rstrip(" \t\r\n")
     assert chrome_version == "Google Chrome 151.0.7922.71"
     assert node_version == "v24.18.1"
+    for binary, identity_before in identities_before.items():
+        metadata = binary.lstat()
+        assert (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        ) == identity_before
     assert "tr -d '\\r\\n' | sed 's/[[:space:]]*$//'" in runbook
 
 

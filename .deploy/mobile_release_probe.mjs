@@ -9,8 +9,11 @@ const [
   screenshotPath,
   workDir,
 ] = process.argv.slice(2);
+const TEST_MODE = process.env.MOBILE_PROBE_TEST_MODE === "1";
 const CDP_TIMEOUT_MS = 10_000;
 const NAVIGATION_TIMEOUT_MS = 30_000;
+const TEST_TIMEOUT_MIN_MS = 20;
+const TEST_TIMEOUT_MAX_MS = 1_000;
 const PROFILE_REMOVE_MAX_RETRIES = 5;
 const PROFILE_REMOVE_RETRY_DELAY_MS = 100;
 const TRANSIENT_PROFILE_REMOVE_ERRORS = new Set([
@@ -19,7 +22,25 @@ const TRANSIENT_PROFILE_REMOVE_ERRORS = new Set([
   "EPERM",
 ]);
 const PRODUCTION_ORIGIN = "https://hbzgc.icu";
-const TEST_MODE = process.env.MOBILE_PROBE_TEST_MODE === "1";
+
+function boundedTestTimeout(variableName, productionTimeoutMs) {
+  if (!TEST_MODE) return productionTimeoutMs;
+  const requested = Number(process.env[variableName] ?? 0);
+  return Number.isSafeInteger(requested) &&
+    requested >= TEST_TIMEOUT_MIN_MS &&
+    requested <= TEST_TIMEOUT_MAX_MS
+    ? requested
+    : productionTimeoutMs;
+}
+
+const COMMAND_TIMEOUT_MS = boundedTestTimeout(
+  "MOBILE_PROBE_TEST_COMMAND_TIMEOUT_MS",
+  CDP_TIMEOUT_MS,
+);
+const NAVIGATION_COMMAND_TIMEOUT_MS = boundedTestTimeout(
+  "MOBILE_PROBE_TEST_NAVIGATION_TIMEOUT_MS",
+  NAVIGATION_TIMEOUT_MS,
+);
 const requestedTestOrigin = process.env.MOBILE_PROBE_TEST_ORIGIN;
 const testCleanupLog = TEST_MODE
   ? process.env.MOBILE_PROBE_TEST_CLEANUP_LOG
@@ -299,7 +320,7 @@ function command(
   method,
   params = {},
   sessionId,
-  timeoutMs = CDP_TIMEOUT_MS,
+  timeoutMs = COMMAND_TIMEOUT_MS,
 ) {
   ensureActive();
   const id = nextId++;
@@ -323,7 +344,12 @@ function command(
 }
 
 function navigate(url, sessionId) {
-  return command("Page.navigate", { url }, sessionId, NAVIGATION_TIMEOUT_MS);
+  return command(
+    "Page.navigate",
+    { url },
+    sessionId,
+    NAVIGATION_COMMAND_TIMEOUT_MS,
+  );
 }
 
 async function stopChrome() {
