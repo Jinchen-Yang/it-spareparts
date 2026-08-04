@@ -543,6 +543,10 @@ printf '%s\n' "$technical_code"
 REMOTE
 )
 test "$technical_code" = 403
+printf '%s technical-token-403 status=%s\n' \
+  "$(date -Ins)" "$technical_code" \
+  > "$LOCAL_EVIDENCE/technical-token-403.txt"
+chmod 600 "$LOCAL_EVIDENCE/technical-token-403.txt"
 ```
 
 远端 0/5/15/30、binding 与技术 `403` 也必须在同一 generation-scoped 目录生成
@@ -670,9 +674,12 @@ download_readonly() {
     -H @"$admin_header" -D "$headers" -o "$output" \
     -w '%{http_code}' "$url")
   test "$code" = 200
-  grep -Eiq '^Cache-Control: *no-store\r?$' "$headers"
-  grep -Eiq '^X-Content-Type-Options: *nosniff\r?$' "$headers"
-  grep -Eiq '^Content-Disposition: *attachment;' "$headers"
+  normalized_headers=$(mktemp "$WORK_DIR/.download-headers.XXXXXX")
+  tr -d '\r' < "$headers" > "$normalized_headers"
+  grep -Eiq '^Cache-Control: *no-store$' "$normalized_headers"
+  grep -Eiq '^X-Content-Type-Options: *nosniff$' "$normalized_headers"
+  grep -Eiq '^Content-Disposition: *attachment;' "$normalized_headers"
+  rm -- "$normalized_headers"
 }
 
 admin_response="$WORK_DIR/admin-login.json"
