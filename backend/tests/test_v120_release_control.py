@@ -49,6 +49,7 @@ MOBILE_RELEASE_PROBE = ROOT / ".deploy" / "mobile_release_probe.mjs"
 DEFAULT_TARGET = "a" * 40
 DEFAULT_RELEASE_ID = "v120-aaaaaaaaaaaa-20260730160000"
 ZERO_HASH = "0" * 64
+MOBILE_TOKEN_SENTINEL = "fixture-token-must-not-reach-any-output"
 
 
 def _test_node() -> str:
@@ -1802,9 +1803,17 @@ def _write_fake_pipe_chrome(path: Path) -> None:
 
         args_log = os.environ.get("MOBILE_TEST_ARGS_LOG")
         cleanup_log = os.environ.get("MOBILE_PROBE_TEST_CLEANUP_LOG")
+        failure_sentinel = os.environ.get("MOBILE_TEST_FAILURE_SENTINEL", "")
+        cdp_error_method = os.environ.get("MOBILE_TEST_CDP_ERROR_METHOD")
         if args_log:
             with open(args_log, "w", encoding="utf-8") as handle:
                 json.dump(sys.argv[1:], handle)
+        if os.environ.get("MOBILE_TEST_STDERR_SENTINEL") == "1":
+            print(
+                f"fixture Chrome stderr: {failure_sentinel}",
+                file=sys.stderr,
+                flush=True,
+            )
         if os.environ.get("MOBILE_TEST_IGNORE_TERM") == "1":
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
         elif cleanup_log:
@@ -1815,6 +1824,11 @@ def _write_fake_pipe_chrome(path: Path) -> None:
 
             signal.signal(signal.SIGTERM, terminate)
         route = "/"
+        stall_method = os.environ.get("MOBILE_TEST_STALL_METHOD")
+        delay_method = os.environ.get("MOBILE_TEST_DELAY_METHOD")
+        delay_seconds = (
+            int(os.environ.get("MOBILE_TEST_DELAY_MS", "0")) / 1000
+        )
         buffer = b""
         while True:
             chunk = os.read(3, 65536)
@@ -1831,6 +1845,23 @@ def _write_fake_pipe_chrome(path: Path) -> None:
                 method = message["method"]
                 params = message.get("params", {})
                 result = {}
+                if method == stall_method:
+                    time.sleep(30)
+                if method == delay_method:
+                    time.sleep(delay_seconds)
+                    delay_method = None
+                if method == cdp_error_method:
+                    response = {
+                        "id": message["id"],
+                        "error": {
+                            "message": f"fixture CDP error: {failure_sentinel}"
+                        },
+                    }
+                    os.write(
+                        4,
+                        json.dumps(response).encode("utf-8") + b"\0",
+                    )
+                    continue
                 if (
                     method not in ("Target.getTargets", "Target.attachToTarget")
                     and message.get("sessionId") != "session-1"
@@ -1845,8 +1876,6 @@ def _write_fake_pipe_chrome(path: Path) -> None:
                     )
                     continue
                 if method == "Target.getTargets":
-                    if os.environ.get("MOBILE_TEST_STALL") == "1":
-                        time.sleep(30)
                     result = {
                         "targetInfos": [{
                             "targetId": "page-1",
@@ -1920,7 +1949,14 @@ def _run_mobile_pipe_case(
     redirect: str | None = None,
     missing_anchor: str | None = None,
     ignore_term: bool = False,
-    stall: bool = False,
+    stall_method: str | None = None,
+    delay_method: str | None = None,
+    delay_ms: int | None = None,
+    test_mode: bool | None = None,
+    command_timeout_ms: int | None = None,
+    navigation_timeout_ms: int | None = None,
+    stderr_token_failure: bool = False,
+    cdp_error_method: str | None = None,
     overall_timeout_ms: int | None = None,
     profile_rm_failures: str | None = None,
     cleanup_log: bool = False,
@@ -1930,11 +1966,10 @@ def _run_mobile_pipe_case(
     work = case_dir / "work"
     work.mkdir(mode=0o700)
     login = work / "login.json"
-    token = "fixture-token-must-not-reach-argv"
     login.write_text(
         json.dumps(
             {
-                "token": token,
+                "token": MOBILE_TOKEN_SENTINEL,
                 "role": "admin",
                 "name": "fixture",
                 "permissions": {},
@@ -1960,8 +1995,28 @@ def _run_mobile_pipe_case(
         env["MOBILE_TEST_MISSING_ANCHOR"] = missing_anchor
     if ignore_term:
         env["MOBILE_TEST_IGNORE_TERM"] = "1"
-    if stall:
-        env["MOBILE_TEST_STALL"] = "1"
+    if stall_method is not None:
+        env["MOBILE_TEST_STALL_METHOD"] = stall_method
+    if delay_method is not None:
+        env["MOBILE_TEST_DELAY_METHOD"] = delay_method
+    if delay_ms is not None:
+        env["MOBILE_TEST_DELAY_MS"] = str(delay_ms)
+    if test_mode is not None:
+        env["MOBILE_PROBE_TEST_MODE"] = "1" if test_mode else "0"
+    if command_timeout_ms is not None:
+        env["MOBILE_PROBE_TEST_COMMAND_TIMEOUT_MS"] = str(
+            command_timeout_ms
+        )
+    if navigation_timeout_ms is not None:
+        env["MOBILE_PROBE_TEST_NAVIGATION_TIMEOUT_MS"] = str(
+            navigation_timeout_ms
+        )
+    if stderr_token_failure or cdp_error_method is not None:
+        env["MOBILE_TEST_FAILURE_SENTINEL"] = MOBILE_TOKEN_SENTINEL
+    if stderr_token_failure:
+        env["MOBILE_TEST_STDERR_SENTINEL"] = "1"
+    if cdp_error_method is not None:
+        env["MOBILE_TEST_CDP_ERROR_METHOD"] = cdp_error_method
     if overall_timeout_ms is not None:
         env["MOBILE_PROBE_TEST_MODE"] = "1"
         env["MOBILE_PROBE_TEST_OVERALL_TIMEOUT_MS"] = str(
@@ -1989,12 +2044,23 @@ def _run_mobile_pipe_case(
     return result, login, evidence, screenshot, args_log
 
 
-def test_mobile_probe_uses_fake_cdp_pipe_without_tcp_or_token_argv(
+def _assert_mobile_token_absent(
+    result: subprocess.CompletedProcess[str],
+    *paths: Path,
+) -> None:
+    sentinel = MOBILE_TOKEN_SENTINEL.encode()
+    outputs = [result.stdout.encode(), result.stderr.encode()]
+    outputs.extend(path.read_bytes() for path in paths if path.exists())
+    assert all(sentinel not in output for output in outputs)
+
+
+def test_mobile_probe_uses_fake_cdp_pipe_without_tcp_or_token_leak(
     tmp_path: Path,
 ) -> None:
     result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
         tmp_path,
         "accepted",
+        cleanup_log=True,
     )
 
     assert result.returncode == 0, result.stderr
@@ -2004,8 +2070,58 @@ def test_mobile_probe_uses_fake_cdp_pipe_without_tcp_or_token_argv(
     assert "--remote-debugging-pipe" in args
     assert not any("remote-debugging-port" in arg for arg in args)
     assert not any("remote-debugging-address" in arg for arg in args)
-    assert "fixture-token-must-not-reach-argv" not in json.dumps(args)
+    cleanup_log = args_log.parent / "cleanup.log"
+    _assert_mobile_token_absent(
+        result,
+        args_log,
+        evidence,
+        screenshot,
+        cleanup_log,
+    )
     assert not list((tmp_path / "accepted" / "work").glob("chrome-profile-*"))
+
+
+@pytest.mark.parametrize("failure_source", ("chrome-stderr", "cdp-error"))
+def test_mobile_probe_redacts_known_token_from_failure_outputs(
+    tmp_path: Path,
+    failure_source: str,
+) -> None:
+    result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
+        tmp_path,
+        f"redacted-{failure_source}",
+        redirect=(
+            "/maintenance/projects"
+            if failure_source == "chrome-stderr"
+            else None
+        ),
+        stderr_token_failure=failure_source == "chrome-stderr",
+        cdp_error_method=(
+            "Target.getTargets" if failure_source == "cdp-error" else None
+        ),
+        test_mode=True,
+        cleanup_log=True,
+    )
+    cleanup_log = args_log.parent / "cleanup.log"
+
+    assert result.returncode != 0
+    assert "[REDACTED]" in result.stderr
+    assert not login.exists()
+    assert not evidence.exists()
+    assert not screenshot.exists()
+    args = json.loads(args_log.read_text(encoding="utf-8"))
+    profile_arg = next(arg for arg in args if arg.startswith("--user-data-dir="))
+    assert not Path(profile_arg.partition("=")[2]).exists()
+    assert cleanup_log.read_text(encoding="utf-8").splitlines() == [
+        "chrome-terminal",
+        "profile-removed",
+    ]
+    _assert_mobile_token_absent(
+        result,
+        args_log,
+        evidence,
+        screenshot,
+        cleanup_log,
+    )
 
 
 @pytest.mark.parametrize(
@@ -2089,14 +2205,16 @@ def test_mobile_probe_does_not_delete_unvalidated_external_login(
     assert not list(work.glob("chrome-profile-*"))
 
 
+@pytest.mark.parametrize("stall_method", ("Target.getTargets", "Page.navigate"))
 def test_mobile_probe_overall_timeout_cancels_work_before_cleanup(
     tmp_path: Path,
+    stall_method: str,
 ) -> None:
     started = time.monotonic()
     result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
         tmp_path,
         "overall-timeout",
-        stall=True,
+        stall_method=stall_method,
         overall_timeout_ms=50,
     )
     elapsed = time.monotonic() - started
@@ -2114,6 +2232,160 @@ def test_mobile_probe_overall_timeout_cancels_work_before_cleanup(
     assert not profile.exists()
     assert not evidence.exists()
     assert not screenshot.exists()
+
+
+@pytest.mark.parametrize(
+    ("stall_method", "expected_error"),
+    (
+        ("Target.getTargets", "Target.getTargets timed out"),
+        ("Page.navigate", "Page.navigate timed out"),
+    ),
+)
+def test_mobile_probe_method_timeout_precedes_overall_and_cleans_up(
+    tmp_path: Path,
+    stall_method: str,
+    expected_error: str,
+) -> None:
+    started = time.monotonic()
+    result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
+        tmp_path,
+        f"method-timeout-{stall_method.replace('.', '-')}",
+        stall_method=stall_method,
+        command_timeout_ms=40,
+        navigation_timeout_ms=80,
+        overall_timeout_ms=500,
+        cleanup_log=True,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+    assert "mobile release probe timed out" not in result.stderr
+    assert elapsed < 3
+    assert not login.exists()
+    assert not evidence.exists()
+    assert not screenshot.exists()
+    args = json.loads(args_log.read_text(encoding="utf-8"))
+    profile_arg = next(arg for arg in args if arg.startswith("--user-data-dir="))
+    assert not Path(profile_arg.partition("=")[2]).exists()
+    assert (args_log.parent / "cleanup.log").read_text(
+        encoding="utf-8"
+    ).splitlines() == ["chrome-terminal", "profile-removed"]
+
+
+def test_mobile_probe_navigation_delay_uses_navigation_timeout_layer(
+    tmp_path: Path,
+) -> None:
+    started = time.monotonic()
+    result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
+        tmp_path,
+        "navigation-timeout-discrimination",
+        delay_method="Page.navigate",
+        delay_ms=60,
+        command_timeout_ms=40,
+        navigation_timeout_ms=80,
+        overall_timeout_ms=500,
+        cleanup_log=True,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 0, result.stderr
+    assert 0.05 <= elapsed < 3
+    assert not login.exists()
+    assert evidence.is_file() and screenshot.is_file()
+    args = json.loads(args_log.read_text(encoding="utf-8"))
+    profile_arg = next(arg for arg in args if arg.startswith("--user-data-dir="))
+    assert not Path(profile_arg.partition("=")[2]).exists()
+    assert (args_log.parent / "cleanup.log").read_text(
+        encoding="utf-8"
+    ).splitlines() == ["chrome-terminal", "profile-removed"]
+
+
+def test_mobile_probe_command_delay_uses_command_timeout_layer(
+    tmp_path: Path,
+) -> None:
+    started = time.monotonic()
+    result, login, evidence, screenshot, args_log = _run_mobile_pipe_case(
+        tmp_path,
+        "command-timeout-discrimination",
+        delay_method="Target.getTargets",
+        delay_ms=60,
+        command_timeout_ms=40,
+        navigation_timeout_ms=80,
+        overall_timeout_ms=500,
+        cleanup_log=True,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode != 0
+    assert "Target.getTargets timed out" in result.stderr
+    assert "Page.navigate timed out" not in result.stderr
+    assert "mobile release probe timed out" not in result.stderr
+    assert 0.02 <= elapsed < 3
+    assert not login.exists()
+    assert not evidence.exists()
+    assert not screenshot.exists()
+    args = json.loads(args_log.read_text(encoding="utf-8"))
+    profile_arg = next(arg for arg in args if arg.startswith("--user-data-dir="))
+    assert not Path(profile_arg.partition("=")[2]).exists()
+    assert (args_log.parent / "cleanup.log").read_text(
+        encoding="utf-8"
+    ).splitlines() == ["chrome-terminal", "profile-removed"]
+
+
+@pytest.mark.parametrize("delay_method", ("Target.getTargets", "Page.navigate"))
+def test_mobile_probe_production_ignores_test_timeout_injection(
+    tmp_path: Path,
+    delay_method: str,
+) -> None:
+    result, login, evidence, screenshot, _args = _run_mobile_pipe_case(
+        tmp_path,
+        f"production-timeout-override-{delay_method.replace('.', '-')}",
+        delay_method=delay_method,
+        delay_ms=60,
+        test_mode=False,
+        command_timeout_ms=20,
+        navigation_timeout_ms=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not login.exists()
+    assert evidence.is_file() and screenshot.is_file()
+
+
+@pytest.mark.parametrize(
+    ("delay_method", "requested_timeout", "delay_ms"),
+    (
+        ("Target.getTargets", 1, 50),
+        ("Page.navigate", 1, 50),
+        ("Target.getTargets", 1_001, 1_050),
+        ("Page.navigate", 1_001, 1_050),
+    ),
+)
+def test_mobile_probe_rejects_out_of_bounds_test_method_timeout(
+    tmp_path: Path,
+    delay_method: str,
+    requested_timeout: int,
+    delay_ms: int,
+) -> None:
+    is_navigation = delay_method == "Page.navigate"
+    result, login, evidence, screenshot, _args = _run_mobile_pipe_case(
+        tmp_path,
+        (
+            f"bounded-timeout-{delay_method.replace('.', '-')}"
+            f"-{requested_timeout}"
+        ),
+        delay_method=delay_method,
+        delay_ms=delay_ms,
+        test_mode=True,
+        command_timeout_ms=(None if is_navigation else requested_timeout),
+        navigation_timeout_ms=(requested_timeout if is_navigation else None),
+        overall_timeout_ms=5_000,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not login.exists()
+    assert evidence.is_file() and screenshot.is_file()
 
 
 @pytest.mark.parametrize(
@@ -2219,6 +2491,13 @@ def test_mobile_probe_static_pipe_contract_is_portable() -> None:
     assert 'stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"]' in probe
     assert "chrome.stdio[3]" in probe and "chrome.stdio[4]" in probe
     assert "Emulation.setDeviceMetricsOverride" in probe
+    assert "const TEST_TIMEOUT_MIN_MS = 20;" in probe
+    assert "const TEST_TIMEOUT_MAX_MS = 1_000;" in probe
+    assert "boundedTestTimeout(" in probe
+    assert "MOBILE_PROBE_TEST_COMMAND_TIMEOUT_MS" in probe
+    assert "MOBILE_PROBE_TEST_NAVIGATION_TIMEOUT_MS" in probe
+    assert "const NAVIGATION_TIMEOUT_MS = 30_000;" in probe
+    assert "NAVIGATION_COMMAND_TIMEOUT_MS" in probe
     assert "OVERALL_TIMEOUT_MS" in probe
     assert "rejectPending" in probe
     assert 'chrome.kill("SIGTERM")' in probe
@@ -2235,10 +2514,40 @@ def test_mobile_probe_static_pipe_contract_is_portable() -> None:
     assert "mobile_listeners_before" in runbook
     assert "mobile_listeners_after" in runbook
     assert "origin=https://hbzgc.icu" in runbook
-    assert re.search(r"CHROME_SHA256_EXPECTED=[0-9a-f]{64}", runbook)
-    assert re.search(r"NODE_SHA256_EXPECTED=[0-9a-f]{64}", runbook)
-    assert "CHROME_BIN=/opt/google/chrome/google-chrome" in runbook
+    assert (
+        "CHROME_REAL_SHA256_EXPECTED="
+        "4cf210c4a0aeee3e69a73639260918a7448626d6b99892ec61e20750bc7c7079"
+        in runbook
+    )
+    assert (
+        "CHROME_LAUNCHER_SHA256_EXPECTED="
+        "aea09d69ce7f24d5901f6bfb15dd44d0c856e793e0a498f8d8393ec7d2c308ec"
+        in runbook
+    )
+    assert (
+        "NODE_SHA256_EXPECTED="
+        "f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a"
+        in runbook
+    )
+    assert (
+        "CHROME_LAUNCHER=/opt/google/chrome/google-chrome" in runbook
+    )
+    assert "CHROME_REAL_BIN=/opt/google/chrome/chrome" in runbook
+    assert (
+        "CHROME_REAL_BIN=/opt/google/chrome/google-chrome" not in runbook
+    )
+    assert "assert_secure_release_parent() {" in runbook
+    assert "assert_exact_release_file() {" in runbook
+    assert "release_file_identity() {" in runbook
+    assert "regular file|0|0|755|1" in runbook
+    assert "8#$mode & 8#22" in runbook
+    assert 'od -An -tx1 -N4 "$CHROME_REAL_BIN"' in runbook
+    assert 'od -An -tx1 -N4 "$NODE_BIN"' in runbook
+    assert "CHROME_LAUNCHER_IDENTITY_BEFORE=" in runbook
+    assert "CHROME_REAL_IDENTITY_BEFORE=" in runbook
+    assert "NODE_IDENTITY_BEFORE=" in runbook
     assert "NODE_BIN=/usr/bin/node" in runbook
+    assert '"$mobile_script" "$CHROME_LAUNCHER"' in runbook
 
 
 @pytest.mark.skipif(
@@ -2323,7 +2632,7 @@ def test_mobile_probe_real_chrome_pipe_against_loopback_fixture(
             check=False,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=45,
             env=env,
         )
         listeners_after = subprocess.run(

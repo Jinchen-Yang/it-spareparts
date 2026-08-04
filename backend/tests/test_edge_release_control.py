@@ -1785,10 +1785,45 @@ def test_final_runbook_orders_app_edge_hsts_and_observation_with_rollback() -> N
         "probe_json_health https://118.25.94.90/health ready assistant"
         in runbook
     )
-    assert "CHROME_BIN=/opt/google/chrome/google-chrome" in runbook
+    assert (
+        "CHROME_LAUNCHER=/opt/google/chrome/google-chrome" in runbook
+    )
+    assert "CHROME_REAL_BIN=/opt/google/chrome/chrome" in runbook
+    assert (
+        "CHROME_REAL_BIN=/opt/google/chrome/google-chrome" not in runbook
+    )
     assert "NODE_BIN=/usr/bin/node" in runbook
-    assert "CHROME_SHA256_EXPECTED=" in runbook
-    assert "NODE_SHA256_EXPECTED=" in runbook
+    assert (
+        "CHROME_VERSION_EXPECTED='Google Chrome 151.0.7922.71'"
+        in runbook
+    )
+    assert "NODE_VERSION_EXPECTED='v24.18.1'" in runbook
+    assert (
+        "CHROME_REAL_SHA256_EXPECTED="
+        "4cf210c4a0aeee3e69a73639260918a7448626d6b99892ec61e20750bc7c7079"
+        in runbook
+    )
+    assert (
+        "CHROME_LAUNCHER_SHA256_EXPECTED="
+        "aea09d69ce7f24d5901f6bfb15dd44d0c856e793e0a498f8d8393ec7d2c308ec"
+        in runbook
+    )
+    assert (
+        "NODE_SHA256_EXPECTED="
+        "f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a"
+        in runbook
+    )
+    assert "assert_secure_release_parent() {" in runbook
+    assert "assert_exact_release_file() {" in runbook
+    assert "release_file_identity() {" in runbook
+    assert 'test "$(readlink -e -- "$candidate")" = "$candidate"' in runbook
+    assert "regular file|0|0|755|1" in runbook
+    assert "8#$mode & 8#22" in runbook
+    assert 'od -An -tx1 -N4 "$CHROME_REAL_BIN"' in runbook
+    assert 'od -An -tx1 -N4 "$NODE_BIN"' in runbook
+    assert "CHROME_LAUNCHER_IDENTITY_BEFORE=" in runbook
+    assert "CHROME_REAL_IDENTITY_BEFORE=" in runbook
+    assert "NODE_IDENTITY_BEFORE=" in runbook
     assert "timeout --kill-after=5s 180s" in runbook
     assert "AbortSignal.timeout" in mobile_probe
     assert "expectedRoute" in mobile_probe
@@ -1814,19 +1849,54 @@ def test_final_runbook_orders_app_edge_hsts_and_observation_with_rollback() -> N
 )
 def test_mobile_runtime_contract_matches_this_control_host() -> None:
     runbook = EDGE_RUNBOOK.read_text(encoding="utf-8")
-    chrome = Path("/opt/google/chrome/google-chrome")
+    chrome_launcher = Path("/opt/google/chrome/google-chrome")
+    chrome_real = Path("/opt/google/chrome/chrome")
     node = Path("/usr/bin/node")
 
-    assert chrome.is_file() and not chrome.is_symlink()
-    assert node.is_file() and not node.is_symlink()
-    assert hashlib.sha256(chrome.read_bytes()).hexdigest() == (
+    assert chrome_real != chrome_launcher
+    assert (
+        "CHROME_LAUNCHER=/opt/google/chrome/google-chrome" in runbook
+    )
+    assert "CHROME_REAL_BIN=/opt/google/chrome/chrome" in runbook
+    assert (
+        "CHROME_REAL_BIN=/opt/google/chrome/google-chrome" not in runbook
+    )
+    binaries = (chrome_launcher, chrome_real, node)
+    parent_dirs = {parent for binary in binaries for parent in binary.parents}
+    identities_before: dict[Path, tuple[int, ...]] = {}
+    for binary in binaries:
+        metadata = binary.lstat()
+        assert binary.resolve(strict=True) == binary
+        assert stat.S_ISREG(metadata.st_mode) and not binary.is_symlink()
+        assert metadata.st_uid == 0 and metadata.st_gid == 0
+        assert stat.S_IMODE(metadata.st_mode) == 0o755
+        assert metadata.st_nlink == 1
+        identities_before[binary] = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+    for parent in parent_dirs:
+        metadata = parent.lstat()
+        assert parent.resolve(strict=True) == parent
+        assert stat.S_ISDIR(metadata.st_mode) and not parent.is_symlink()
+        assert metadata.st_uid == 0 and metadata.st_gid == 0
+        assert stat.S_IMODE(metadata.st_mode) & 0o022 == 0
+    assert chrome_real.read_bytes()[:4] == b"\x7fELF"
+    assert node.read_bytes()[:4] == b"\x7fELF"
+    assert hashlib.sha256(chrome_launcher.read_bytes()).hexdigest() == (
         "aea09d69ce7f24d5901f6bfb15dd44d0c856e793e0a498f8d8393ec7d2c308ec"
     )
+    assert hashlib.sha256(chrome_real.read_bytes()).hexdigest() == (
+        "4cf210c4a0aeee3e69a73639260918a7448626d6b99892ec61e20750bc7c7079"
+    )
     assert hashlib.sha256(node.read_bytes()).hexdigest() == (
-        "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c"
+        "f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a"
     )
     chrome_version = subprocess.run(
-        [str(chrome), "--version"],
+        [str(chrome_real), "--version"],
         check=True,
         capture_output=True,
         text=True,
@@ -1837,8 +1907,17 @@ def test_mobile_runtime_contract_matches_this_control_host() -> None:
         capture_output=True,
         text=True,
     ).stdout.rstrip(" \t\r\n")
-    assert chrome_version == "Google Chrome 150.0.7871.186"
-    assert node_version == "v24.18.0"
+    assert chrome_version == "Google Chrome 151.0.7922.71"
+    assert node_version == "v24.18.1"
+    for binary, identity_before in identities_before.items():
+        metadata = binary.lstat()
+        assert (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        ) == identity_before
     assert "tr -d '\\r\\n' | sed 's/[[:space:]]*$//'" in runbook
 
 

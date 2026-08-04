@@ -9,7 +9,12 @@ const [
   screenshotPath,
   workDir,
 ] = process.argv.slice(2);
+const TEST_MODE = process.env.MOBILE_PROBE_TEST_MODE === "1";
 const CDP_TIMEOUT_MS = 10_000;
+const NAVIGATION_TIMEOUT_MS = 30_000;
+const TEST_TIMEOUT_MIN_MS = 20;
+const TEST_TIMEOUT_MAX_MS = 1_000;
+const REDACTION_MARKER = "[REDACTED]";
 const PROFILE_REMOVE_MAX_RETRIES = 5;
 const PROFILE_REMOVE_RETRY_DELAY_MS = 100;
 const TRANSIENT_PROFILE_REMOVE_ERRORS = new Set([
@@ -18,7 +23,25 @@ const TRANSIENT_PROFILE_REMOVE_ERRORS = new Set([
   "EPERM",
 ]);
 const PRODUCTION_ORIGIN = "https://hbzgc.icu";
-const TEST_MODE = process.env.MOBILE_PROBE_TEST_MODE === "1";
+
+function boundedTestTimeout(variableName, productionTimeoutMs) {
+  if (!TEST_MODE) return productionTimeoutMs;
+  const requested = Number(process.env[variableName] ?? 0);
+  return Number.isSafeInteger(requested) &&
+    requested >= TEST_TIMEOUT_MIN_MS &&
+    requested <= TEST_TIMEOUT_MAX_MS
+    ? requested
+    : productionTimeoutMs;
+}
+
+const COMMAND_TIMEOUT_MS = boundedTestTimeout(
+  "MOBILE_PROBE_TEST_COMMAND_TIMEOUT_MS",
+  CDP_TIMEOUT_MS,
+);
+const NAVIGATION_COMMAND_TIMEOUT_MS = boundedTestTimeout(
+  "MOBILE_PROBE_TEST_NAVIGATION_TIMEOUT_MS",
+  NAVIGATION_TIMEOUT_MS,
+);
 const requestedTestOrigin = process.env.MOBILE_PROBE_TEST_ORIGIN;
 const testCleanupLog = TEST_MODE
   ? process.env.MOBILE_PROBE_TEST_CLEANUP_LOG
@@ -54,8 +77,16 @@ let evidenceOwned = false;
 let screenshotOwned = false;
 let probeAborted = false;
 let stderrTail = "";
+let knownToken;
 const pending = new Map();
 let nextId = 1;
+
+function redactKnownToken(value) {
+  const text = String(value);
+  return knownToken
+    ? text.split(knownToken).join(REDACTION_MARKER)
+    : text;
+}
 
 function withDeadline(promise, label, timeoutMs, onTimeout) {
   return new Promise((resolve, reject) => {
@@ -240,7 +271,9 @@ function bindPipeFrames(stream) {
       pending.delete(message.id);
       clearTimeout(entry.timer);
       if (message.error) {
-        entry.reject(new Error(JSON.stringify(message.error)));
+        entry.reject(
+          new Error(redactKnownToken(JSON.stringify(message.error))),
+        );
       } else {
         entry.resolve(message.result);
       }
@@ -294,14 +327,19 @@ function startChrome() {
   bindPipeFrames(cdpOutput);
 }
 
-function command(method, params = {}, sessionId) {
+function command(
+  method,
+  params = {},
+  sessionId,
+  timeoutMs = COMMAND_TIMEOUT_MS,
+) {
   ensureActive();
   const id = nextId++;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
       reject(new Error(`${method} timed out`));
-    }, CDP_TIMEOUT_MS);
+    }, timeoutMs);
     pending.set(id, { resolve, reject, timer });
     const message = { id, method, params };
     if (sessionId) message.sessionId = sessionId;
@@ -314,6 +352,15 @@ function command(method, params = {}, sessionId) {
       entry.reject(error);
     });
   });
+}
+
+function navigate(url, sessionId) {
+  return command(
+    "Page.navigate",
+    { url },
+    sessionId,
+    NAVIGATION_COMMAND_TIMEOUT_MS,
+  );
 }
 
 async function stopChrome() {
@@ -341,6 +388,7 @@ async function main() {
   if (typeof login.token !== "string" || !login.token) {
     throw new Error("approved login did not return a token");
   }
+  knownToken = login.token;
   startChrome();
   const targets = await command("Target.getTargets");
   const page = targets.targetInfos?.find((item) => item.type === "page");
@@ -363,7 +411,7 @@ async function main() {
     },
     sessionId,
   );
-  await command("Page.navigate", { url: `${origin}/` }, sessionId);
+  await navigate(`${origin}/`, sessionId);
   await delay(ROUTE_DELAY_MS);
   const localValues = {
     token: login.token,
@@ -388,11 +436,7 @@ async function main() {
   ];
   const checks = [];
   for (const { expectedRoute, anchor } of routes) {
-    await command(
-      "Page.navigate",
-      { url: `${origin}${expectedRoute}` },
-      sessionId,
-    );
+    await navigate(`${origin}${expectedRoute}`, sessionId);
     await delay(ROUTE_DELAY_MS);
     const evaluated = await command(
       "Runtime.evaluate",
@@ -458,11 +502,7 @@ async function main() {
     throw new Error("mobile download contract failed");
   }
 
-  await command(
-    "Page.navigate",
-    { url: `${origin}/maintenance` },
-    sessionId,
-  );
+  await navigate(`${origin}/maintenance`, sessionId);
   await delay(ROUTE_DELAY_MS);
   await command(
     "Runtime.evaluate",
@@ -557,7 +597,11 @@ if (primaryError || cleanupErrors.length) {
     stderrTail ? new Error(stderrTail.trim()) : undefined,
   ]
     .filter(Boolean)
-    .map((error) => (error instanceof Error ? error.message : String(error)));
+    .map((error) =>
+      redactKnownToken(
+        error instanceof Error ? error.message : String(error),
+      ),
+    );
   console.error(messages.join("\n"));
   process.exitCode = 1;
 }
