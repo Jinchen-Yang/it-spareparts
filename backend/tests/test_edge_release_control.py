@@ -8,6 +8,7 @@ import io
 import os
 import re
 import runpy
+import shutil
 import stat
 import struct
 import subprocess
@@ -37,6 +38,7 @@ APP_CID = "a" * 64
 DB_CID = "b" * 64
 CADDY_CID = "c" * 64
 FRONTEND_CID = "f" * 64
+XLSX_SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -158,6 +160,50 @@ def _bundle_manifest(
             )
         )
     return "\ufeff" + content.getvalue()
+
+
+def _excel_column_name(index: int) -> str:
+    name = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        name = chr(ord("A") + remainder) + name
+    return name
+
+
+def _write_large_numeric_xlsx(path: Path) -> int:
+    with zipfile.ZipFile(io.BytesIO(_minimal_xlsx())) as source:
+        with zipfile.ZipFile(
+            path,
+            "w",
+            zipfile.ZIP_DEFLATED,
+            allowZip64=True,
+        ) as target:
+            for info in source.infolist():
+                if info.filename != "xl/worksheets/sheet1.xml":
+                    target.writestr(info.filename, source.read(info))
+            with target.open(
+                "xl/worksheets/sheet1.xml",
+                "w",
+                force_zip64=True,
+            ) as worksheet:
+                worksheet.write(
+                    (
+                        f'<worksheet xmlns="{XLSX_SHEET_NS}"><sheetData>'
+                    ).encode()
+                )
+                columns = [_excel_column_name(index) for index in range(1, 35)]
+                for row_number in range(1, 50_001):
+                    cells = "".join(
+                        f'<c r="{column}{row_number}" t="n"><v>'
+                        f"{row_number + column_number}</v></c>"
+                        for column_number, column in enumerate(columns, start=1)
+                    )
+                    worksheet.write(
+                        f'<row r="{row_number}">{cells}</row>'.encode()
+                    )
+                worksheet.write(b"</sheetData></worksheet>")
+    with zipfile.ZipFile(path) as archive:
+        return archive.getinfo("xl/worksheets/sheet1.xml").file_size
 
 
 def _zip64_eocd(raw: bytes, *, disk_count: int = 1) -> bytes:
@@ -1995,6 +2041,64 @@ def test_release_artifact_validator_rejects_mime_and_fake_files(
             check=False,
         )
         assert invalid.returncode != 0, kind
+
+
+def test_release_artifact_validator_accepts_large_numeric_worksheet(
+    tmp_path: Path,
+) -> None:
+    xlsx_headers = tmp_path / "xlsx.headers"
+    xlsx_headers.write_text(
+        "Content-Type: "
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\r\n",
+        encoding="ascii",
+    )
+    zip_headers = tmp_path / "zip.headers"
+    zip_headers.write_text("Content-Type: application/zip\r\n", encoding="ascii")
+    workbook = tmp_path / "large-numeric.xlsx"
+    worksheet_size = _write_large_numeric_xlsx(workbook)
+    assert worksheet_size > 48 * 1024 * 1024
+    assert workbook.stat().st_size < 256 * 1024 * 1024
+
+    standalone = subprocess.run(
+        [
+            "python3",
+            str(ARTIFACT_VALIDATOR),
+            "xlsx",
+            str(workbook),
+            str(xlsx_headers),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    workbook_name = "项目工作簿/project_workbook_large_numeric.xlsx"
+    bundle = tmp_path / "large-numeric-bundle.zip"
+    with zipfile.ZipFile(
+        bundle,
+        "w",
+        zipfile.ZIP_STORED,
+        allowZip64=True,
+    ) as archive:
+        archive.writestr("导出清单.csv", _bundle_manifest([workbook_name]))
+        with archive.open(workbook_name, "w", force_zip64=True) as target:
+            with workbook.open("rb") as source:
+                shutil.copyfileobj(source, target, length=1024 * 1024)
+    bundled = subprocess.run(
+        [
+            "python3",
+            str(ARTIFACT_VALIDATOR),
+            "zip",
+            str(bundle),
+            str(zip_headers),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert standalone.returncode == 0, standalone.stderr
+    assert bundled.returncode == 0, bundled.stderr
 
 
 def test_release_artifact_validator_accepts_500_workbook_bundle_boundary(

@@ -62,7 +62,12 @@ CONTENT_TYPES = {
 }
 MAX_XML_BYTES = 16 * 1024 * 1024
 MAX_XLSX_BYTES = 256 * 1024 * 1024
-MAX_WORKSHEET_XML_BYTES = 48 * 1024 * 1024
+MAX_XLSX_METADATA_BYTES = 64 * 1024 * 1024
+MAX_XLSX_LARGE_XML_BYTES = 2 * 1024 * 1024 * 1024
+MAX_XLSX_NON_XML_BYTES = MAX_XLSX_BYTES
+MAX_XLSX_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
+MAX_XLSX_XML_DEPTH = 256
+MAX_XLSX_XML_ELEMENTS = 32_000_000
 MAX_ZIP_BYTES = 512 * 1024 * 1024
 MAX_ZIP_WORKBOOKS = 500
 MAX_ZIP_MEMBERS = MAX_ZIP_WORKBOOKS + 1
@@ -94,6 +99,12 @@ MANIFEST_HEADER = (
     "跳过制单日期",
     "说明",
 )
+REQUIRED_XLSX_METADATA = {
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "xl/workbook.xml",
+    "xl/_rels/workbook.xml.rels",
+}
 PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 SHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 DOCUMENT_REL_NS = (
@@ -357,7 +368,6 @@ def preflight_zip_directory(
         actual_entries += 1
     if cursor != directory_end or actual_entries != entries:
         fail("ZIP central directory entry count is inconsistent")
-    source.seek(0)
 
 
 def validate_xlsx(path: pathlib.Path) -> int:
@@ -486,6 +496,63 @@ class BoundedXmlMember:
             fail(f"{self.info.filename} XML contains a doctype")
         self.scan_tail = scan[-8:]
         return chunk
+
+
+class StreamingXmlSink:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.depth = 0
+        self.elements = 0
+        self.root_seen = False
+
+    def start(self, _tag: str, _attributes: dict[str, str]) -> None:
+        self.depth += 1
+        self.elements += 1
+        if self.depth > MAX_XLSX_XML_DEPTH:
+            fail(f"{self.name} XML nesting is too deep")
+        if self.elements > MAX_XLSX_XML_ELEMENTS:
+            fail(f"{self.name} XML element count is too large")
+        if self.elements == 1:
+            self.root_seen = True
+
+    def end(self, _tag: str) -> None:
+        if self.depth <= 0:
+            fail(f"{self.name} XML element nesting is inconsistent")
+        self.depth -= 1
+
+    def data(self, _data: str) -> None:
+        return
+
+    def close(self) -> None:
+        if not self.root_seen or self.depth != 0:
+            fail(f"{self.name} XML root is missing or incomplete")
+
+
+def validate_large_xml_member_streaming(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+) -> None:
+    if not 1 <= info.file_size <= MAX_XLSX_LARGE_XML_BYTES:
+        fail(f"{info.filename} XML is empty or oversized")
+    try:
+        with archive.open(info) as source:
+            reader = BoundedXmlMember(
+                source,
+                info,
+                MAX_XLSX_LARGE_XML_BYTES,
+            )
+            parser = ElementTree.XMLParser(
+                target=StreamingXmlSink(info.filename),
+            )
+            while chunk := reader.read(STREAM_CHUNK_BYTES):
+                parser.feed(chunk)
+            parser.close()
+            if reader.consumed != info.file_size:
+                fail(f"{info.filename} size differs from the central directory")
+    except ElementTree.ParseError as exc:
+        fail(f"{info.filename} XML is malformed: {exc}")
+    except zipfile.BadZipFile as exc:
+        fail(f"ZIP CRC verification failed: {exc}")
 
 
 def parse_xml_member_streaming(
@@ -623,41 +690,41 @@ def validate_xlsx_file(source: BinaryIO, size: int) -> int:
             infos = preflight_zip(
                 archive,
                 max_members=MAX_XLSX_MEMBERS,
-                max_member_bytes=MAX_WORKSHEET_XML_BYTES,
-                max_total_bytes=MAX_XLSX_BYTES,
+                max_member_bytes=MAX_XLSX_LARGE_XML_BYTES,
+                max_total_bytes=MAX_XLSX_EXPANDED_BYTES,
             )
             names = [info.filename for info in infos]
             name_set = set(names)
-            required = {
-                "[Content_Types].xml",
-                "_rels/.rels",
-                "xl/workbook.xml",
-                "xl/_rels/workbook.xml.rels",
-            }
-            if not required.issubset(names):
+            if not REQUIRED_XLSX_METADATA.issubset(names):
                 fail("XLSX is missing required OOXML package parts")
+            metadata_names = {
+                name
+                for name in names
+                if name in REQUIRED_XLSX_METADATA or name.endswith(".rels")
+            }
+            metadata_total = sum(
+                info.file_size
+                for info in infos
+                if info.filename in metadata_names
+            )
+            if metadata_total > MAX_XLSX_METADATA_BYTES:
+                fail("XLSX metadata expands beyond its permitted total size")
             roots: dict[str, ElementTree.Element] = {}
             for info in infos:
-                if info.filename.endswith(".xml") or info.filename.endswith(
-                    ".rels"
-                ):
-                    limit = (
-                        MAX_WORKSHEET_XML_BYTES
-                        if info.filename.startswith("xl/worksheets/")
-                        and info.filename.endswith(".xml")
-                        else MAX_XML_BYTES
-                    )
+                if info.filename in metadata_names:
                     roots[info.filename] = parse_xml_member_streaming(
                         archive,
                         infos,
                         info.filename,
-                        limit,
+                        MAX_XML_BYTES,
                     )
+                elif info.filename.endswith(".xml"):
+                    validate_large_xml_member_streaming(archive, info)
                 else:
                     drain_member_streaming(
                         archive,
                         info,
-                        MAX_WORKSHEET_XML_BYTES,
+                        MAX_XLSX_NON_XML_BYTES,
                     )
             validate_relationship_closure(roots, name_set)
             content_types = roots["[Content_Types].xml"]
