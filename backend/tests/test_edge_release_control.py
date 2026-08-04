@@ -386,6 +386,8 @@ def _fixture(tmp_path: Path) -> tuple[dict[str, str], Path, Path, Path]:
         "    ports:\n"
         '      - "80:80"\n'
         '      - "443:443"\n'
+        "    env_file:\n"
+        "      - .env\n"
         "    environment:\n"
         '      IT_DATA_HSTS_MAX_AGE: "300"\n',
         encoding="utf-8",
@@ -419,10 +421,18 @@ def _fixture(tmp_path: Path) -> tuple[dict[str, str], Path, Path, Path]:
         printf 'docker %s\\n' "$*" >> "$EDGE_TEST_CALL_LOG"
         if [[ "$*" == *"config --format json"* ]]; then
           compose=
+          project_directory=
           while [ "$#" -gt 0 ]; do
             if [ "$1" = -f ]; then compose=$2; shift 2; continue; fi
+            if [ "$1" = --project-directory ]; then
+              project_directory=$2
+              shift 2
+              continue
+            fi
             shift
           done
+          test "$project_directory" = "$EDGE_ASSISTANT_DIR"
+          test -f "$project_directory/.env"
           python3 - "$compose" <<'PY'
 import hashlib, json, sys
 print(json.dumps({{"source": hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest()}}))
@@ -898,6 +908,25 @@ def test_edge_candidate_env_allowlist_is_not_persisted(tmp_path: Path) -> None:
     generation = control / "edge" / "generations" / GENERATION
     assert not list(generation.glob("*env*"))
     assert b"run --rm --env-file " in calls.read_bytes()
+
+
+def test_edge_render_uses_live_project_directory_for_relative_env_file(
+    tmp_path: Path,
+) -> None:
+    env, _control, assistant, calls = _fixture(tmp_path)
+
+    result = _run_root(env, "prepare")
+
+    assert result.returncode == 0, result.stderr
+    render_calls = [
+        line
+        for line in calls.read_text(encoding="utf-8").splitlines()
+        if "config --format json" in line
+    ]
+    assert render_calls
+    assert all(
+        f"--project-directory {assistant}" in line for line in render_calls
+    )
 
 
 def test_edge_promotion_requires_exact_pre_hsts_header(tmp_path: Path) -> None:

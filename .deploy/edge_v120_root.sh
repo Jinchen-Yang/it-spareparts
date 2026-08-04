@@ -353,7 +353,8 @@ verify_release_authority() {
 }
 
 render_sha256() {
-  docker compose --env-file "$ASSISTANT_ENV" -f "$1" \
+  docker compose --env-file "$ASSISTANT_ENV" \
+    --project-directory "$ASSISTANT_DIR" -f "$1" \
     config --format json | sha256sum | cut -d' ' -f1
 }
 
