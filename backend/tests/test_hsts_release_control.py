@@ -160,8 +160,10 @@ def _fixture(tmp_path: Path) -> tuple[dict[str, str], Path, Path, Path]:
         "https://it.example.test { reverse_proxy it-spareparts-frontend:80 }\n"
         ":8080 {\n"
         "  @safe method GET HEAD\n"
+        "  @unsafe not method GET HEAD\n"
         "  redir @safe https://hbzgc.icu{uri} 308\n"
-        "  respond 405\n"
+        '  header @unsafe Allow "GET, HEAD"\n'
+        "  respond @unsafe 405\n"
         "}\n",
         encoding="utf-8",
     )
@@ -480,7 +482,7 @@ def _fixture(tmp_path: Path) -> tuple[dict[str, str], Path, Path, Path]:
                 || [[ " $* " == *" -X PUT "* ]] \
                 || [[ " $* " == *" -X PATCH "* ]] \
                 || [[ " $* " == *" -X DELETE "* ]]; then
-              printf 'HTTP/1.1 405 Method Not Allowed\r\n\r\n'
+              printf 'HTTP/1.1 405 Method Not Allowed\r\nAllow: GET, HEAD\r\n\r\n'
             else
               printf 'HTTP/1.1 308 Permanent Redirect\r\n'
               printf 'Location: https://hbzgc.icu/edge-check/path?scope=1\r\n\r\n'

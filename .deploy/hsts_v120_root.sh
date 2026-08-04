@@ -1402,6 +1402,9 @@ verify_runtime() {
     printf '%s' "$headers" | tr -d '\r' \
       | grep -Fx 'HTTP/1.1 405 Method Not Allowed' >/dev/null \
       || fatal "legacy edge unsafe method changed"
+    [ "$(printf '%s' "$headers" | tr -d '\r' \
+      | grep -Eic '^allow: *GET, HEAD$' || true)" -eq 1 ] \
+      || fatal "legacy edge unsafe method Allow header changed"
     [ "$(printf '%s' "$headers" | tr '[:upper:]' '[:lower:]' \
       | grep -c '^set-cookie:' || true)" -eq 0 ] \
       || fatal "legacy edge unsafe method emitted a cookie"

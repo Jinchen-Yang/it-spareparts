@@ -61,8 +61,14 @@ CONTENT_TYPES = {
     "zip": ZIP_CONTENT_TYPE,
 }
 MAX_XML_BYTES = 16 * 1024 * 1024
+MAX_CSV_BYTES = 512 * 1024 * 1024
+MAX_CSV_LINE_CHARS = 2 * 1024 * 1024
+MAX_CSV_FIELD_CHARS = 32_767
 MAX_XLSX_BYTES = 256 * 1024 * 1024
 MAX_XLSX_METADATA_BYTES = 64 * 1024 * 1024
+MAX_XLSX_METADATA_XML_DEPTH = 64
+MAX_XLSX_METADATA_XML_ELEMENTS = 100_000
+MAX_XLSX_METADATA_TOTAL_XML_ELEMENTS = 250_000
 MAX_XLSX_LARGE_XML_BYTES = 4 * 1024 * 1024 * 1024
 MAX_XLSX_NON_XML_BYTES = MAX_XLSX_BYTES
 MAX_XLSX_EXPANDED_BYTES = 4 * 1024 * 1024 * 1024
@@ -528,9 +534,63 @@ class StreamingXmlSink:
     def data(self, _data: str) -> None:
         return
 
+    def doctype(self, _name: str, _pubid: str, _system: str) -> None:
+        fail(f"{self.name} XML contains a doctype")
+
     def close(self) -> None:
         if not self.root_seen or self.depth != 0:
             fail(f"{self.name} XML root is missing or incomplete")
+
+
+class MetadataXmlBudget:
+    def __init__(self) -> None:
+        self.elements = 0
+
+    def consume(self) -> None:
+        self.elements += 1
+        if self.elements > MAX_XLSX_METADATA_TOTAL_XML_ELEMENTS:
+            fail("XLSX metadata XML element count is too large")
+
+
+class BoundedTreeBuilder:
+    def __init__(self, name: str, budget: MetadataXmlBudget) -> None:
+        self.name = name
+        self.budget = budget
+        self.builder = ElementTree.TreeBuilder()
+        self.depth = 0
+        self.elements = 0
+
+    def start(
+        self,
+        tag: str,
+        attributes: dict[str, str],
+    ) -> ElementTree.Element:
+        self.depth += 1
+        self.elements += 1
+        if self.depth > MAX_XLSX_METADATA_XML_DEPTH:
+            fail(f"{self.name} XML nesting is too deep")
+        if self.elements > MAX_XLSX_METADATA_XML_ELEMENTS:
+            fail(f"{self.name} XML element count is too large")
+        self.budget.consume()
+        return self.builder.start(tag, attributes)
+
+    def end(self, tag: str) -> ElementTree.Element:
+        if self.depth <= 0:
+            fail(f"{self.name} XML element nesting is inconsistent")
+        element = self.builder.end(tag)
+        self.depth -= 1
+        return element
+
+    def data(self, data: str) -> None:
+        self.builder.data(data)
+
+    def doctype(self, _name: str, _pubid: str, _system: str) -> None:
+        fail(f"{self.name} XML contains a doctype")
+
+    def close(self) -> ElementTree.Element:
+        if self.elements == 0 or self.depth != 0:
+            fail(f"{self.name} XML root is missing or incomplete")
+        return self.builder.close()
 
 
 def validate_large_xml_member_streaming(
@@ -565,6 +625,7 @@ def parse_xml_member_streaming(
     infos: list[zipfile.ZipInfo],
     name: str,
     limit: int,
+    budget: MetadataXmlBudget,
 ) -> ElementTree.Element:
     info = next((candidate for candidate in infos if candidate.filename == name), None)
     if info is None or info.file_size <= 0 or info.file_size > limit:
@@ -572,9 +633,12 @@ def parse_xml_member_streaming(
     try:
         with archive.open(info) as source:
             reader = BoundedXmlMember(source, info, limit)
-            root = ElementTree.parse(reader).getroot()
-            if reader.read(1):
-                fail(f"{name} XML has trailing unread content")
+            parser = ElementTree.XMLParser(
+                target=BoundedTreeBuilder(name, budget),
+            )
+            while chunk := reader.read(STREAM_CHUNK_BYTES):
+                parser.feed(chunk)
+            root = parser.close()
             if reader.consumed != info.file_size:
                 fail(f"{name} size differs from the central directory")
             return root
@@ -672,15 +736,6 @@ def validate_relationship_closure(
                 fail("XLSX relationship target is missing or unsafe")
 
 
-def parse_xml(raw: bytes, name: str) -> ElementTree.Element:
-    if not raw or len(raw) > MAX_XML_BYTES or b"<!DOCTYPE" in raw.upper():
-        fail(f"{name} XML is empty, oversized, or contains a doctype")
-    try:
-        return ElementTree.fromstring(raw)
-    except ElementTree.ParseError as exc:
-        fail(f"{name} XML is malformed: {exc}")
-
-
 def validate_xlsx_file(source: BinaryIO, size: int) -> int:
     if not 1 <= size <= MAX_XLSX_BYTES:
         fail("XLSX is empty or exceeds 256 MiB")
@@ -715,6 +770,7 @@ def validate_xlsx_file(source: BinaryIO, size: int) -> int:
             if metadata_total > MAX_XLSX_METADATA_BYTES:
                 fail("XLSX metadata expands beyond its permitted total size")
             roots: dict[str, ElementTree.Element] = {}
+            metadata_budget = MetadataXmlBudget()
             for info in infos:
                 if info.filename in metadata_names:
                     roots[info.filename] = parse_xml_member_streaming(
@@ -722,6 +778,7 @@ def validate_xlsx_file(source: BinaryIO, size: int) -> int:
                         infos,
                         info.filename,
                         MAX_XML_BYTES,
+                        metadata_budget,
                     )
                 elif info.filename.endswith(".xml"):
                     validate_large_xml_member_streaming(archive, info)
@@ -801,16 +858,42 @@ def validate_xlsx_bytes(raw: bytes) -> int:
 
 def validate_csv(path: pathlib.Path) -> tuple[int, int]:
     try:
-        with path.open(encoding="utf-8-sig", newline="") as source:
-            rows = csv.reader(source)
-            header = next(rows, None)
-            if header != CSV_HEADER:
-                fail("CSV header does not match the contract-profit export")
-            count = 0
-            for row in rows:
-                if len(row) != len(CSV_HEADER) or not row[0].strip():
-                    fail("CSV contains a malformed business row")
-                count += 1
+        with open_bounded_artifact(
+            path,
+            limit=MAX_CSV_BYTES,
+            size_error="CSV is empty or exceeds 512 MiB",
+            label="CSV",
+        ) as (binary, _expected_size):
+            source = io.TextIOWrapper(
+                binary,
+                encoding="utf-8-sig",
+                errors="strict",
+                newline="",
+            )
+            previous_field_limit = csv.field_size_limit()
+            csv.field_size_limit(MAX_CSV_FIELD_CHARS)
+            try:
+                def bounded_lines() -> Iterator[str]:
+                    while True:
+                        line = source.readline(MAX_CSV_LINE_CHARS + 1)
+                        if not line:
+                            return
+                        if len(line) > MAX_CSV_LINE_CHARS:
+                            fail("CSV physical line is too long")
+                        yield line
+
+                rows = csv.reader(bounded_lines(), strict=True)
+                header = next(rows, None)
+                if header != CSV_HEADER:
+                    fail("CSV header does not match the contract-profit export")
+                count = 0
+                for row in rows:
+                    if len(row) != len(CSV_HEADER) or not row[0].strip():
+                        fail("CSV contains a malformed business row")
+                    count += 1
+            finally:
+                csv.field_size_limit(previous_field_limit)
+                source.detach()
     except (OSError, UnicodeError, csv.Error) as exc:
         fail(f"CSV cannot be parsed: {exc}")
     if count == 0:

@@ -44,6 +44,7 @@ SBOM_GENERATOR = ROOT / ".deploy" / "generate_dependency_sbom.py"
 BACKEND_SBOM = ROOT / "backend" / "dependency-sbom.cdx.json"
 FRONTEND_SBOM = ROOT / "frontend" / "dependency-sbom.cdx.json"
 ARTIFACT_VALIDATOR = ROOT / ".deploy" / "validate_release_artifacts.py"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 MOBILE_RELEASE_PROBE = ROOT / ".deploy" / "mobile_release_probe.mjs"
 DEFAULT_TARGET = "a" * 40
 DEFAULT_RELEASE_ID = "v120-aaaaaaaaaaaa-20260730160000"
@@ -1581,6 +1582,19 @@ def _load_artifact_validator() -> object:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_ci_pins_setup_uv_action_and_binary_version() -> None:
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    setup = re.search(
+        r"- uses: astral-sh/setup-uv@v8\.3\.2\n"
+        r"\s+with:\n"
+        r'\s+version: "0\.11\.31"\n',
+        workflow,
+    )
+
+    assert setup is not None
+    assert workflow.count("astral-sh/setup-uv@v8.3.2") == 1
 
 
 def test_artifact_validator_preflights_member_count_before_inflation(

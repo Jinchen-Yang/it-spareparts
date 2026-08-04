@@ -316,6 +316,8 @@ probe_public_edge() {
     POST|PUT|PATCH|DELETE)
       test "$code" = 405
       location=none
+      allow=$(tr -d '\r' < "$headers" | sed -n 's/^[Aa]llow: *//p')
+      test "$allow" = 'GET, HEAD'
       ;;
     *) return 64 ;;
   esac
@@ -326,7 +328,13 @@ probe_public_edge() {
   test ! -s "$body"
   {
     date -Ins
-    printf 'method=%s status=%s Location=%s\n' "$method" "$code" "$location"
+    if test "$location" = none; then
+      printf 'method=%s status=%s Location=%s allow=GET,HEAD\n' \
+        "$method" "$code" "$location"
+    else
+      printf 'method=%s status=%s Location=%s\n' \
+        "$method" "$code" "$location"
+    fi
   } >> "$LOCAL_EVIDENCE/minute-$minute-public-8080.txt"
   rm -f -- "$headers" "$body"
 }
@@ -654,9 +662,11 @@ download_readonly() {
   url=$1
   output=$2
   headers=$3
-  max_time=$4
+  max_bytes=$4
+  max_time=$5
   code=$(curl --noproxy '*' --proto '=https' --tlsv1.2 \
-    --connect-timeout 5 --max-time "$max_time" --max-redirs 0 -sS \
+    --connect-timeout 5 --max-time "$max_time" --max-filesize "$max_bytes" \
+    --max-redirs 0 -sS \
     -H @"$admin_header" -D "$headers" -o "$output" \
     -w '%{http_code}' "$url")
   test "$code" = 200
@@ -676,11 +686,11 @@ zip_file="$WORK_DIR/maintenance-workbooks.zip"
 zip_headers="$WORK_DIR/maintenance-workbooks.headers"
 download_readonly \
   "$API_ORIGIN/api/maintenance/board/export?lifecycle=all" \
-  "$csv_file" "$csv_headers" 60
+  "$csv_file" "$csv_headers" 536870912 60
 download_readonly "$API_ORIGIN/api/maintenance/orders/export" \
-  "$xlsx_file" "$xlsx_headers" 120
+  "$xlsx_file" "$xlsx_headers" 268435456 120
 download_readonly "$API_ORIGIN/api/maintenance/export-workbooks" \
-  "$zip_file" "$zip_headers" 120
+  "$zip_file" "$zip_headers" 536870912 120
 
 csv_validation=$(python3 "$ARTIFACT_VALIDATOR" csv "$csv_file" "$csv_headers")
 xlsx_validation=$(

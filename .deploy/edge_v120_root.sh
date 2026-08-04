@@ -416,8 +416,10 @@ if not text.endswith("\n"):
 text += """
 :8080 {
 \t@safe method GET HEAD
+\t@unsafe not method GET HEAD
 \tredir @safe https://hbzgc.icu{uri} 308
-\trespond 405
+\theader @unsafe Allow "GET, HEAD"
+\trespond @unsafe 405
 }
 """
 fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -1311,6 +1313,9 @@ verify_runtime() {
     printf '%s' "$headers" | tr -d '\r' \
       | grep -Fx 'HTTP/1.1 405 Method Not Allowed' >/dev/null \
       || fatal "legacy edge unsafe method is not rejected"
+    [ "$(printf '%s' "$headers" | tr -d '\r' \
+      | grep -Eic '^allow: *GET, HEAD$' || true)" -eq 1 ] \
+      || fatal "legacy edge unsafe method Allow header is not exact"
     cookie_count=$(printf '%s' "$headers" | tr '[:upper:]' '[:lower:]' \
       | grep -c '^set-cookie:' || true)
     [ "$cookie_count" -eq 0 ] \

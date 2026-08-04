@@ -108,6 +108,18 @@ def _minimal_xlsx() -> bytes:
     return content.getvalue()
 
 
+def _replace_xlsx_member(payload: bytes, name: str, content: bytes) -> bytes:
+    rewritten = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(payload)) as source:
+        with zipfile.ZipFile(rewritten, "w", zipfile.ZIP_DEFLATED) as target:
+            for info in source.infolist():
+                target.writestr(
+                    info.filename,
+                    content if info.filename == name else source.read(info),
+                )
+    return rewritten.getvalue()
+
+
 def _bundle_manifest(
     workbook_names: list[str],
     *,
@@ -520,7 +532,7 @@ PY
               || [[ " $* " == *" -X PUT "* ]] \
               || [[ " $* " == *" -X PATCH "* ]] \
               || [[ " $* " == *" -X DELETE "* ]]; then
-            printf 'HTTP/1.1 405 Method Not Allowed\r\n\r\n'
+            printf 'HTTP/1.1 405 Method Not Allowed\r\nAllow: GET, HEAD\r\n\r\n'
           else
             suffix=${target#http://10.0.0.11:8080}
             printf 'HTTP/1.1 308 Permanent Redirect\r\nLocation: https://hbzgc.icu%s\r\n\r\n' "$suffix"
@@ -734,10 +746,12 @@ def test_edge_prepare_promote_and_rollback_are_exact_and_scoped(
     assert "redir @safe https://hbzgc.icu{uri} 308" in caddy
     assert "permanent" not in caddy.split(":8080 {", 1)[1]
     assert "@safe method GET HEAD" in caddy
-    assert "respond 405" in caddy
+    assert "@unsafe not method GET HEAD" in caddy
+    assert 'header @unsafe Allow "GET, HEAD"' in caddy
+    assert "respond @unsafe 405" in caddy
     edge_block = caddy.split(":8080 {", 1)[1].split("}", 1)[0]
     assert "reverse_proxy" not in edge_block
-    assert "header" not in edge_block
+    assert "header @safe" not in edge_block
     assert _run_root(env, "inspect").stdout == "exact-promoted\n"
     log = calls.read_text(encoding="utf-8")
     assert "http://10.0.0.11:8080/edge-check/path?scope=1" in log
@@ -1057,6 +1071,7 @@ def test_edge_real_caddy_2114_contract_is_explicit_308_and_bodyless(
             conn.close()
             assert response.status == 308
             assert headers["location"] == "https://hbzgc.icu/a/b?x=1"
+            assert "allow" not in headers
             assert "set-cookie" not in headers
             assert body == b""
         for method in ("POST", "PUT", "PATCH", "DELETE"):
@@ -1067,6 +1082,7 @@ def test_edge_real_caddy_2114_contract_is_explicit_308_and_bodyless(
             headers = {key.lower(): value for key, value in response.getheaders()}
             conn.close()
             assert response.status == 405
+            assert headers["allow"] == "GET, HEAD"
             assert "set-cookie" not in headers
             assert body == b""
     finally:
@@ -1959,7 +1975,11 @@ def test_final_observation_rechecks_public_nat_and_business_artifacts() -> None:
     assert "/api/maintenance/orders/export" in runbook
     assert "/api/maintenance/export-workbooks" in runbook
     assert '--max-time "$max_time"' in runbook
-    assert '"$zip_file" "$zip_headers" 120' in runbook
+    assert '--max-filesize "$max_bytes"' in runbook
+    assert '"$csv_file" "$csv_headers" 536870912 60' in runbook
+    assert '"$xlsx_file" "$xlsx_headers" 268435456 120' in runbook
+    assert '"$zip_file" "$zip_headers" 536870912 120' in runbook
+    assert "allow=GET,HEAD" in runbook
     assert "ServerAliveInterval=5" in runbook
     assert "ServerAliveCountMax=2" in runbook
 
@@ -2101,10 +2121,188 @@ def test_release_artifact_validator_accepts_large_numeric_worksheet(
     assert bundled.returncode == 0, bundled.stderr
 
 
+@pytest.mark.parametrize(
+    "member",
+    ("xl/workbook.xml", "xl/worksheets/sheet1.xml"),
+)
+@pytest.mark.parametrize(
+    ("codec", "declaration"),
+    (
+        ("utf-16", "UTF-16"),
+        ("utf-16-le", "UTF-16LE"),
+        ("utf-16-be", "UTF-16BE"),
+    ),
+)
+def test_release_artifact_validator_rejects_utf16_doctype_in_all_xml_targets(
+    member: str,
+    codec: str,
+    declaration: str,
+) -> None:
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    malicious = (
+        f'<?xml version="1.0" encoding="{declaration}"?>'
+        '<!DOCTYPE workbook [<!ENTITY x "expanded">]>'
+        '<workbook xmlns="'
+        f'{validator["SHEET_NS"]}'
+        '"><sheets/></workbook>'
+    ).encode(codec)
+    payload = _replace_xlsx_member(_minimal_xlsx(), member, malicious)
+
+    with pytest.raises(SystemExit, match="XML contains a doctype"):
+        validator["validate_xlsx_bytes"](payload)
+
+
+def test_release_artifact_validator_bounds_metadata_xml_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    monkeypatch.setitem(
+        validator["validate_xlsx_bytes"].__globals__,
+        "MAX_XLSX_METADATA_XML_DEPTH",
+        4,
+    )
+    workbook = (
+        f'<workbook xmlns="{validator["SHEET_NS"]}" '
+        f'xmlns:r="{validator["DOCUMENT_REL_NS"]}">'
+        '<sheets><group><group><sheet name="Sheet1" sheetId="1" '
+        'r:id="rId1"/></group></group></sheets></workbook>'
+    ).encode()
+    payload = _replace_xlsx_member(
+        _minimal_xlsx(), "xl/workbook.xml", workbook
+    )
+
+    with pytest.raises(SystemExit, match="XML nesting is too deep"):
+        validator["validate_xlsx_bytes"](payload)
+
+
+def test_release_artifact_validator_bounds_metadata_xml_elements_per_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    monkeypatch.setitem(
+        validator["validate_xlsx_bytes"].__globals__,
+        "MAX_XLSX_METADATA_XML_ELEMENTS",
+        8,
+    )
+    workbook = (
+        f'<workbook xmlns="{validator["SHEET_NS"]}" '
+        f'xmlns:r="{validator["DOCUMENT_REL_NS"]}">'
+        '<unused/><unused/><unused/><unused/><unused/><unused/>'
+        '<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/>'
+        '</sheets></workbook>'
+    ).encode()
+    payload = _replace_xlsx_member(
+        _minimal_xlsx(), "xl/workbook.xml", workbook
+    )
+
+    with pytest.raises(SystemExit, match="XML element count is too large"):
+        validator["validate_xlsx_bytes"](payload)
+
+
+def test_release_artifact_validator_bounds_cumulative_metadata_xml_elements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    monkeypatch.setitem(
+        validator["validate_xlsx_bytes"].__globals__,
+        "MAX_XLSX_METADATA_TOTAL_XML_ELEMENTS",
+        8,
+    )
+
+    with pytest.raises(SystemExit, match="metadata XML element count"):
+        validator["validate_xlsx_bytes"](_minimal_xlsx())
+
+
+def _write_validator_csv(path: Path, *, first_field: str = "C-1") -> None:
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    with path.open("w", encoding="utf-8-sig", newline="") as target:
+        writer = csv.writer(target)
+        writer.writerow(validator["CSV_HEADER"])
+        writer.writerow(
+            [first_field, "P-1"]
+            + ["1"] * (len(validator["CSV_HEADER"]) - 2)
+        )
+
+
+def test_release_artifact_validator_rejects_csv_symlink(tmp_path: Path) -> None:
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    artifact = tmp_path / "profit.csv"
+    _write_validator_csv(artifact)
+    symlink = tmp_path / "profit-link.csv"
+    symlink.symlink_to(artifact)
+
+    with pytest.raises(SystemExit, match="CSV is empty or exceeds"):
+        validator["validate_csv"](symlink)
+
+
+def test_release_artifact_validator_rejects_oversized_csv_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    monkeypatch.setitem(
+        validator["validate_csv"].__globals__, "MAX_CSV_BYTES", 128
+    )
+    artifact = tmp_path / "oversized.csv"
+    artifact.write_bytes(b"x" * 129)
+    real_os_open = os.open
+
+    def reject_artifact_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *args: object,
+        **kwargs: object,
+    ):
+        if Path(path) == artifact:
+            pytest.fail("oversized CSV was opened before its size was rejected")
+        return real_os_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", reject_artifact_open)
+
+    with pytest.raises(SystemExit, match="CSV is empty or exceeds 512 MiB"):
+        validator["validate_csv"](artifact)
+
+
+def test_release_artifact_validator_bounds_csv_physical_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    validator_globals = validator["validate_csv"].__globals__
+    monkeypatch.setitem(validator_globals, "MAX_CSV_LINE_CHARS", 1024)
+    monkeypatch.setitem(validator_globals, "MAX_CSV_FIELD_CHARS", 4096)
+    artifact = tmp_path / "long-line.csv"
+    _write_validator_csv(artifact, first_field="C" * 1500)
+
+    with pytest.raises(SystemExit, match="physical line is too long"):
+        validator["validate_csv"](artifact)
+
+
+def test_release_artifact_validator_bounds_csv_field(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    validator_globals = validator["validate_csv"].__globals__
+    monkeypatch.setitem(validator_globals, "MAX_CSV_LINE_CHARS", 4096)
+    monkeypatch.setitem(validator_globals, "MAX_CSV_FIELD_CHARS", 32)
+    artifact = tmp_path / "long-field.csv"
+    _write_validator_csv(artifact, first_field="C" * 64)
+
+    with pytest.raises(SystemExit, match="field larger than field limit"):
+        validator["validate_csv"](artifact)
+
+
 def test_release_artifact_validator_limits_cover_maximum_maintenance_export() -> None:
+    from app.api import maintenance as maintenance_api
     from app.services import maintenance_export
 
     validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    csv_columns = len(validator["CSV_HEADER"])
+    # csv.writer can double every quote and add a pair of wrapping quotes.
+    # Include delimiters and CRLF to cover a legal worst-case physical row.
+    maximum_csv_line_chars = csv_columns * (
+        2 * maintenance_api._MAX_CSV_CELL_CHARS + 2
+    ) + (csv_columns - 1) + 2
     rows_with_header = maintenance_export.MAX_DATA_ROWS_PER_SHEET + 1
     widest_sheet_columns = max(
         len(maintenance_export.ORDER_HEADERS),
@@ -2117,6 +2315,17 @@ def test_release_artifact_validator_limits_cover_maximum_maintenance_export() ->
     )
 
     assert maintenance_export.MAX_DATA_ROWS_PER_SHEET == 1_048_575
+    assert csv_columns == 28
+    assert maximum_csv_line_chars == 1_835_037
+    assert (
+        validator["MAX_CSV_BYTES"]
+        >= maintenance_api._MAX_CSV_OUTPUT_BYTES
+    )
+    assert (
+        validator["MAX_CSV_FIELD_CHARS"]
+        >= maintenance_api._MAX_CSV_CELL_CHARS
+    )
+    assert validator["MAX_CSV_LINE_CHARS"] >= maximum_csv_line_chars
     assert widest_sheet_columns == 35
     assert maximum_worksheet_elements == 111_149_058
     assert validator["MAX_XLSX_XML_ELEMENTS"] >= maximum_worksheet_elements
