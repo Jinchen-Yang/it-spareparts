@@ -381,19 +381,19 @@ verify_release_source_hash \
   backend/dependency-sbom.cdx.json "$BACKEND_SBOM_SHA256"
 verify_release_source_hash \
   frontend/dependency-sbom.cdx.json "$FRONTEND_SBOM_SHA256"
-grep -Fx \
+sudo -n grep -Fx \
   "FROM --platform=linux/amd64 python:3.11-slim@sha256:$BACKEND_BASE_DIGEST" \
   "$RELEASE_SRC/backend/Dockerfile" >/dev/null \
   || fatal "backend base digest differs from the control manifest"
-grep -Fx \
+sudo -n grep -Fx \
   "FROM --platform=linux/amd64 node:20-alpine@sha256:$FRONTEND_BUILD_BASE_DIGEST AS build" \
   "$RELEASE_SRC/frontend/Dockerfile" >/dev/null \
   || fatal "frontend build base digest differs from the control manifest"
-grep -Fx \
+sudo -n grep -Fx \
   "FROM --platform=linux/amd64 nginx:1.27-alpine@sha256:$FRONTEND_RUNTIME_BASE_DIGEST" \
   "$RELEASE_SRC/frontend/Dockerfile" >/dev/null \
   || fatal "frontend runtime base digest differs from the control manifest"
-python3 "$RELEASE_SRC/.deploy/generate_dependency_sbom.py" \
+sudo -n python3 "$RELEASE_SRC/.deploy/generate_dependency_sbom.py" \
   --check "$RELEASE_SRC" \
   || fatal "dependency SBOM does not match the committed locks"
 
