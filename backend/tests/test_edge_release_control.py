@@ -124,6 +124,8 @@ def _bundle_manifest(
     workbook_names: list[str],
     *,
     include_skipped: bool = False,
+    generated_order_count: int = 1,
+    skipped_rows: int | None = None,
 ) -> str:
     content = io.StringIO(newline="")
     writer = csv.writer(content)
@@ -147,7 +149,7 @@ def _bundle_manifest(
                 "已生成",
                 f"合同{index}",
                 workbook_name,
-                "1",
+                str(generated_order_count),
                 "2026-07-01",
                 "2026-07-01",
                 "",
@@ -156,7 +158,9 @@ def _bundle_manifest(
                 "",
             )
         )
-    if include_skipped:
+    if skipped_rows is None:
+        skipped_rows = int(include_skipped)
+    for skipped_index in range(skipped_rows):
         writer.writerow(
             (
                 "已跳过",
@@ -165,8 +169,8 @@ def _bundle_manifest(
                 "",
                 "",
                 "",
-                "WBDD-unlinked",
-                "raw-unlinked",
+                f"WBDD-unlinked-{skipped_index}",
+                f"raw-unlinked-{skipped_index}",
                 "2026-07-01",
                 "未关联合同",
             )
@@ -2213,15 +2217,21 @@ def test_release_artifact_validator_bounds_cumulative_metadata_xml_elements(
         validator["validate_xlsx_bytes"](_minimal_xlsx())
 
 
-def _write_validator_csv(path: Path, *, first_field: str = "C-1") -> None:
+def _write_validator_csv(
+    path: Path,
+    *,
+    first_field: str = "C-1",
+    data_rows: int = 1,
+) -> None:
     validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
     with path.open("w", encoding="utf-8-sig", newline="") as target:
         writer = csv.writer(target)
         writer.writerow(validator["CSV_HEADER"])
-        writer.writerow(
-            [first_field, "P-1"]
-            + ["1"] * (len(validator["CSV_HEADER"]) - 2)
-        )
+        for index in range(data_rows):
+            writer.writerow(
+                [f"{first_field}-{index}", "P-1"]
+                + ["1"] * (len(validator["CSV_HEADER"]) - 2)
+            )
 
 
 def test_release_artifact_validator_rejects_csv_symlink(tmp_path: Path) -> None:
@@ -2292,9 +2302,30 @@ def test_release_artifact_validator_bounds_csv_field(
         validator["validate_csv"](artifact)
 
 
+def test_release_artifact_validator_bounds_csv_data_rows_excluding_header(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    monkeypatch.setitem(
+        validator["validate_csv"].__globals__,
+        "MAX_CSV_DATA_ROWS",
+        2,
+    )
+    boundary = tmp_path / "boundary.csv"
+    oversized = tmp_path / "too-many-rows.csv"
+    _write_validator_csv(boundary, data_rows=2)
+    _write_validator_csv(oversized, data_rows=3)
+
+    assert validator["validate_csv"](boundary) == (28, 2)
+    with pytest.raises(SystemExit, match="CSV data row count is too large"):
+        validator["validate_csv"](oversized)
+
+
 def test_release_artifact_validator_limits_cover_maximum_maintenance_export() -> None:
     from app.api import maintenance as maintenance_api
     from app.services import maintenance_export
+    from app.services import maintenance_workbook_export
 
     validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
     csv_columns = len(validator["CSV_HEADER"])
@@ -2317,6 +2348,14 @@ def test_release_artifact_validator_limits_cover_maximum_maintenance_export() ->
     assert maintenance_export.MAX_DATA_ROWS_PER_SHEET == 1_048_575
     assert csv_columns == 28
     assert maximum_csv_line_chars == 1_835_037
+    assert (
+        validator["MAX_CSV_DATA_ROWS"]
+        == maintenance_api._MAX_CSV_DATA_ROWS
+    )
+    assert (
+        validator["MAX_MANIFEST_SELECTED_ORDERS"]
+        == maintenance_workbook_export.MAX_SELECTED_ORDERS
+    )
     assert (
         validator["MAX_CSV_BYTES"]
         >= maintenance_api._MAX_CSV_OUTPUT_BYTES
@@ -2367,6 +2406,37 @@ def test_release_artifact_validator_accepts_500_workbook_bundle_boundary(
 
     assert validated.returncode == 0, validated.stderr
     assert "members=501 sheets=500" in validated.stdout
+
+
+def test_release_artifact_validator_bounds_manifest_selected_orders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    validator = runpy.run_path(str(ARTIFACT_VALIDATOR))
+    monkeypatch.setitem(
+        validator["validate_zip"].__globals__,
+        "MAX_MANIFEST_SELECTED_ORDERS",
+        3,
+    )
+    workbook_name = "项目工作簿/project_workbook_boundary.xlsx"
+    workbook = _minimal_xlsx()
+    boundary = tmp_path / "manifest-selected-orders-boundary.zip"
+    oversized = tmp_path / "manifest-selected-orders-too-large.zip"
+    for path, skipped_rows in ((boundary, 1), (oversized, 2)):
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
+            archive.writestr(
+                "导出清单.csv",
+                _bundle_manifest(
+                    [workbook_name],
+                    generated_order_count=2,
+                    skipped_rows=skipped_rows,
+                ),
+            )
+            archive.writestr(workbook_name, workbook)
+
+    assert validator["validate_zip"](boundary) == (2, 1)
+    with pytest.raises(SystemExit, match="selected order count is too large"):
+        validator["validate_zip"](oversized)
 
 
 def test_release_artifact_validator_rejects_bundle_manifest_name_mismatch(

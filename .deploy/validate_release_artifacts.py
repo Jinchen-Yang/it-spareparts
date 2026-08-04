@@ -64,6 +64,7 @@ MAX_XML_BYTES = 16 * 1024 * 1024
 MAX_CSV_BYTES = 512 * 1024 * 1024
 MAX_CSV_LINE_CHARS = 2 * 1024 * 1024
 MAX_CSV_FIELD_CHARS = 32_767
+MAX_CSV_DATA_ROWS = 1_000_000
 MAX_XLSX_BYTES = 256 * 1024 * 1024
 MAX_XLSX_METADATA_BYTES = 64 * 1024 * 1024
 MAX_XLSX_METADATA_XML_DEPTH = 64
@@ -85,6 +86,7 @@ MAX_XLSX_MEMBERS = 256
 MAX_MANIFEST_BYTES = MAX_ZIP_BYTES
 MAX_MANIFEST_FIELD_CHARS = 1024
 MAX_MANIFEST_LINE_CHARS = 16 * 1024
+MAX_MANIFEST_SELECTED_ORDERS = 250_000
 XLSX_SPOOL_MEMORY_BYTES = 8 * 1024 * 1024
 MAX_ZIP_CENTRAL_DIRECTORY_BYTES = 16 * 1024 * 1024
 MAX_XLSX_CENTRAL_DIRECTORY_BYTES = 8 * 1024 * 1024
@@ -888,9 +890,11 @@ def validate_csv(path: pathlib.Path) -> tuple[int, int]:
                     fail("CSV header does not match the contract-profit export")
                 count = 0
                 for row in rows:
+                    count += 1
+                    if count > MAX_CSV_DATA_ROWS:
+                        fail("CSV data row count is too large")
                     if len(row) != len(CSV_HEADER) or not row[0].strip():
                         fail("CSV contains a malformed business row")
-                    count += 1
             finally:
                 csv.field_size_limit(previous_field_limit)
                 source.detach()
@@ -977,6 +981,7 @@ def validate_bundle_manifest(
     workbook_names: set[str],
 ) -> None:
     generated_names: set[str] = set()
+    selected_orders = 0
     try:
         with archive.open(info) as source:
             if source.read(3) != b"\xef\xbb\xbf":
@@ -1010,6 +1015,7 @@ def validate_bundle_manifest(
                             fail("batch ZIP manifest contains a malformed generated row")
                         validate_manifest_date(row[4])
                         validate_manifest_date(row[5])
+                        selected_orders += int(row[3])
                         generated_names.add(row[2])
                     elif row[0] == "已跳过":
                         if (
@@ -1019,8 +1025,13 @@ def validate_bundle_manifest(
                         ):
                             fail("batch ZIP manifest contains a malformed skipped row")
                         validate_manifest_date(row[8])
+                        selected_orders += 1
                     else:
                         fail("batch ZIP manifest contains an unknown record type")
+                    if selected_orders > MAX_MANIFEST_SELECTED_ORDERS:
+                        fail(
+                            "batch ZIP manifest selected order count is too large"
+                        )
             finally:
                 csv.field_size_limit(previous_field_limit)
                 text.detach()
