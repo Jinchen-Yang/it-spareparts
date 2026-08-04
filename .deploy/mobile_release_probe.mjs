@@ -14,6 +14,7 @@ const CDP_TIMEOUT_MS = 10_000;
 const NAVIGATION_TIMEOUT_MS = 30_000;
 const TEST_TIMEOUT_MIN_MS = 20;
 const TEST_TIMEOUT_MAX_MS = 1_000;
+const REDACTION_MARKER = "[REDACTED]";
 const PROFILE_REMOVE_MAX_RETRIES = 5;
 const PROFILE_REMOVE_RETRY_DELAY_MS = 100;
 const TRANSIENT_PROFILE_REMOVE_ERRORS = new Set([
@@ -76,8 +77,16 @@ let evidenceOwned = false;
 let screenshotOwned = false;
 let probeAborted = false;
 let stderrTail = "";
+let knownToken;
 const pending = new Map();
 let nextId = 1;
+
+function redactKnownToken(value) {
+  const text = String(value);
+  return knownToken
+    ? text.split(knownToken).join(REDACTION_MARKER)
+    : text;
+}
 
 function withDeadline(promise, label, timeoutMs, onTimeout) {
   return new Promise((resolve, reject) => {
@@ -262,7 +271,9 @@ function bindPipeFrames(stream) {
       pending.delete(message.id);
       clearTimeout(entry.timer);
       if (message.error) {
-        entry.reject(new Error(JSON.stringify(message.error)));
+        entry.reject(
+          new Error(redactKnownToken(JSON.stringify(message.error))),
+        );
       } else {
         entry.resolve(message.result);
       }
@@ -377,6 +388,7 @@ async function main() {
   if (typeof login.token !== "string" || !login.token) {
     throw new Error("approved login did not return a token");
   }
+  knownToken = login.token;
   startChrome();
   const targets = await command("Target.getTargets");
   const page = targets.targetInfos?.find((item) => item.type === "page");
@@ -585,7 +597,11 @@ if (primaryError || cleanupErrors.length) {
     stderrTail ? new Error(stderrTail.trim()) : undefined,
   ]
     .filter(Boolean)
-    .map((error) => (error instanceof Error ? error.message : String(error)));
+    .map((error) =>
+      redactKnownToken(
+        error instanceof Error ? error.message : String(error),
+      ),
+    );
   console.error(messages.join("\n"));
   process.exitCode = 1;
 }
