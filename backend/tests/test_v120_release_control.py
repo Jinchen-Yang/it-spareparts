@@ -1358,7 +1358,10 @@ def test_supply_chain_inputs_and_image_provenance_are_fail_closed() -> None:
         assert key in build
         assert key in release
     assert "CONTROL_FORMAT=v120-control-3" in package
-    assert 'python3 "$RELEASE_SRC/.deploy/generate_dependency_sbom.py"' in build
+    assert (
+        'sudo -n python3 "$RELEASE_SRC/.deploy/generate_dependency_sbom.py"'
+        in build
+    )
     assert '--check "$RELEASE_SRC"' in build
     for relative in (
         "backend/requirements.lock",
@@ -1378,6 +1381,29 @@ def test_supply_chain_inputs_and_image_provenance_are_fail_closed() -> None:
     assert 'mv -T -- "$SUPPLY_CHAIN_TEMP" "$SUPPLY_CHAIN_EVIDENCE"' not in (
         release
     )
+
+
+def test_protected_release_source_reads_use_noninteractive_sudo() -> None:
+    build = _script(BUILD)
+    assert 'sudo chmod 700 "$BUILD_ROOT"' in build
+    assert 'sudo chmod 755 "$BUILD_ROOT"' not in build
+    protected = build.split(
+        'sudo find "$RELEASE_SRC" -xdev -type f',
+        1,
+    )[1].split(
+        "MIGRATION_DIR=",
+        1,
+    )[0]
+
+    assert protected.count("sudo -n grep -Fx") == 3
+    assert (
+        'sudo -n python3 "$RELEASE_SRC/.deploy/generate_dependency_sbom.py"'
+        in protected
+    )
+    assert re.search(
+        r"(?m)^[ \t]*(?:grep|python3)(?:[ \t]|$)",
+        protected,
+    ) is None
 
 
 def test_supply_chain_evidence_publish_is_atomic_idempotent_and_fail_closed(
