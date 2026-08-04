@@ -1312,6 +1312,83 @@ def test_promotion_cas_rechecks_live_compose_immediately_before_rename(
     )
 
 
+def test_hsts_cas_supports_root_owned_production_config_mode(
+    tmp_path: Path,
+) -> None:
+    env, _control, assistant, _calls = _fixture(tmp_path)
+    compose = assistant / "compose.production.yml"
+    compose.chmod(0o644)
+    runtime = tmp_path / "runtime-hsts"
+    runtime.write_text("300\n", encoding="ascii")
+    env["HSTS_TEST_RUNTIME_FILE"] = str(runtime)
+    before = compose.read_bytes()
+    assert _run_root(env, "prepare").returncode == 0
+    env["HSTS_TEST_FAILPOINT"] = "after-config-cas-before-lineage"
+
+    interrupted = _run_root(env, "promote")
+
+    assert interrupted.returncode != 0
+    cas_backups = list(assistant.glob(".hsts-cas-*"))
+    assert len(cas_backups) == 1
+    assert stat.S_IMODE(cas_backups[0].stat().st_mode) == 0o600
+    env.pop("HSTS_TEST_FAILPOINT")
+
+    promoted = _run_root(env, "promote")
+
+    assert promoted.returncode == 0, promoted.stderr
+    assert stat.S_IMODE(compose.stat().st_mode) == 0o644
+    assert not list(assistant.glob(".hsts-cas-*"))
+
+    rolled_back = _run_root(env, "rollback")
+
+    assert rolled_back.returncode == 0, rolled_back.stderr
+    assert compose.read_bytes() == before
+    assert stat.S_IMODE(compose.stat().st_mode) == 0o644
+    assert not list(assistant.glob(".hsts-cas-*"))
+
+
+def test_hsts_cas_chmod_failure_retains_backup_for_retry(tmp_path: Path) -> None:
+    env, _control, assistant, _calls = _fixture(tmp_path)
+    compose = assistant / "compose.production.yml"
+    compose.chmod(0o644)
+    runtime = tmp_path / "runtime-hsts"
+    runtime.write_text("300\n", encoding="ascii")
+    env["HSTS_TEST_RUNTIME_FILE"] = str(runtime)
+    marker = tmp_path / "cas-chmod-failed-once"
+    _write_executable(
+        Path(env["HSTS_COMMAND_DIR"]) / "chmod",
+        f"""
+        #!/usr/bin/env bash
+        set -euo pipefail
+        marker='{marker}'
+        if [ "$1" = 600 ] && [[ "$2" = *'/.hsts-cas-'* ]] \
+            && [ ! -e "$marker" ]; then
+          : > "$marker"
+          exit 70
+        fi
+        exec /usr/bin/chmod "$@"
+        """,
+    )
+    assert _run_root(env, "prepare").returncode == 0
+
+    interrupted = _run_root(env, "promote")
+
+    assert interrupted.returncode != 0
+    assert marker.is_file()
+    cas_backups = list(assistant.glob(".hsts-cas-*"))
+    assert len(cas_backups) == 1
+    assert stat.S_IMODE(cas_backups[0].stat().st_mode) == 0o644
+    assert _run_root(env, "inspect").stdout == "exact-promote-pending\n"
+
+    resumed = _run_root(env, "promote")
+
+    assert resumed.returncode == 0, resumed.stderr
+    assert _run_root(env, "inspect").stdout == "exact-promoted\n"
+    assert stat.S_IMODE(compose.stat().st_mode) == 0o644
+    assert not list(assistant.glob(".hsts-cas-*"))
+    assert _run_root(env, "rollback").returncode == 0
+
+
 def test_hsts_exchange_restores_noncooperative_writer_without_recreate(
     tmp_path: Path,
 ) -> None:

@@ -1579,11 +1579,26 @@ install_hsts_candidate() {
         }
     return 73
   fi
+  keep=1
+  # rename_exchange leaves the former live Compose file at the private CAS
+  # path. Production keeps that file root-owned 0644, while a retained backup
+  # must be root-only before any later finalizer is allowed to remove it.
+  chmod 600 "$candidate" || return $?
   sync -f "$COMPOSE_FILE" || return $?
   sync -f "$candidate" || return $?
   sync -d "$ASSISTANT_DIR" || return $?
-  keep=1
   trap - RETURN
+}
+
+secure_hsts_cas_backup() {
+  local path=$1 expected_hash=$2 expected_render=$3
+  safe_regular "$path" || return 73
+  [ "$(sha256sum "$path" | cut -d' ' -f1)" = "$expected_hash" ] \
+    || return 73
+  [ "$(render_sha256 "$path")" = "$expected_render" ] || return 73
+  chmod 600 "$path" || return $?
+  safe_hsts_cas_file "$path" || return 73
+  sync -f "$path" || return $?
 }
 
 finalize_hsts_cas_backup() {
@@ -1593,10 +1608,8 @@ finalize_hsts_cas_backup() {
   if [ ! -e "$backup" ] && [ ! -L "$backup" ]; then
     return 0
   fi
-  safe_hsts_cas_file "$backup" \
-    && [ "$(sha256sum "$backup" | cut -d' ' -f1)" = "$expected_hash" ] \
-    && [ "$(render_sha256 "$backup")" = "$expected_render" ] \
-    || return 73
+  secure_hsts_cas_backup "$backup" "$expected_hash" "$expected_render" \
+    || return $?
   rm -f -- "$backup" || return $?
   sync -d "$ASSISTANT_DIR" || return $?
 }
