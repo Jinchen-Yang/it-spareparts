@@ -35,9 +35,13 @@ fi
 PROBLEMS=()
 add() { PROBLEMS+=("$1"); }
 
-compose() {
+docker_command() {
   timeout --kill-after="$DOCKER_KILL_AFTER" "$DOCKER_TIMEOUT" \
-    sudo -n docker compose "$@"
+    sudo -n docker "$@"
+}
+
+compose() {
+  docker_command compose "$@"
 }
 
 probe_app() {
@@ -141,8 +145,17 @@ for svc in db app frontend; do
   printf '%s' "$line" | grep -qi "up" || add "容器 $svc 未运行（${line:-缺失}）"
 done
 
-# 2) 数据库可达
-compose exec -T db pg_isready -U spareparts -q 2>/dev/null || add "数据库不可达（pg_isready 失败）"
+# 2) 数据库可达。这里不用 `docker compose exec`：镜像归档刚结束时，
+# Compose exec 客户端可能在容器内命令已经成功退出后仍不返回，造成超时假告警。
+if ! db_cid=$(compose ps -q db 2>/dev/null); then
+  db_cid=
+fi
+if [[ "$db_cid" =~ ^[0-9a-f]{64}$ ]] \
+    && docker_command exec "$db_cid" pg_isready -U spareparts -q 2>/dev/null; then
+  :
+else
+  add "数据库不可达（pg_isready 失败）"
+fi
 
 # 3) 应用本体（容器内部）与前端入口
 probe_app /health || add "应用存活探针异常（容器内 /health）"

@@ -73,7 +73,10 @@ def _monitor_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
           *"docker compose ps --format"*)
             printf '%s\n' "db Up 1 hour (healthy)" "app Up 1 hour" "frontend Up 1 hour"
             ;;
-          *"docker compose exec -T db pg_isready"*)
+          *"docker compose ps -q db"*)
+            printf '%s\n' "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            ;;
+          *"docker exec dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd pg_isready"*)
             exit "${STUB_DB_READY_EXIT:-0}"
             ;;
           *"docker compose exec -T app python - /health/db"*)
@@ -372,6 +375,13 @@ def test_monitor_healthy_path_checks_internal_app_and_writes_iso_heartbeat(
         "-n docker compose exec -T app python - /health/db http://127.0.0.1:8000\n"
         in command_log
     )
+    assert (
+        "-n docker exec "
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd "
+        "pg_isready -U spareparts -q\n"
+        in command_log
+    )
+    assert "docker compose exec -T db pg_isready" not in command_log
     assert not (script.parents[1] / "monitor.log").exists()
     assert not list(script.parents[1].glob(".monitor.status.tmp.*"))
 
