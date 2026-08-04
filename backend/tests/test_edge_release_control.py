@@ -436,6 +436,9 @@ PY
           *"inspect -f "*"Id"*personal-ai-assistant-caddy*)
             cat "$EDGE_STUB_CADDY_CID_FILE"; exit 0 ;;
           *"inspect -f "*"State.Running"*personal-ai-assistant-caddy*) printf 'true\\n'; exit 0 ;;
+          *"inspect -f "*"Config.Env"*personal-ai-assistant-caddy*)
+            printf '%s\\n' '["PATH=/usr/bin","ASSISTANT_HOST=118.25.94.90","IT_DATA_HOST=hbzgc.icu","IT_DATA_HSTS_MAX_AGE=300","IT_DATA_UPSTREAM=it-spareparts-frontend:80","IGNORED_SECRET=fixture-secret"]'
+            exit 0 ;;
           *"inspect -f "*"Image"*)
             case "${{@: -1}}" in
               {APP_CID}) printf 'sha256:%064d\\n' 0 | tr 0 d ;;
@@ -474,7 +477,25 @@ PY
                 > "$EDGE_STUB_CADDY_CID_FILE"
             fi
             exit 0 ;;
-          *"caddy validate"*) exit 0 ;;
+          *"caddy validate"*)
+            if [ "$1" = run ]; then
+              env_file=
+              while [ "$#" -gt 0 ]; do
+                if [ "$1" = --env-file ]; then
+                  env_file=$2
+                  break
+                fi
+                shift
+              done
+              test -n "$env_file" && test -f "$env_file"
+              test "$(cat "$env_file")" = "$(printf '%s\\n' \
+                'ASSISTANT_HOST=118.25.94.90' \
+                'IT_DATA_HOST=hbzgc.icu' \
+                'IT_DATA_HSTS_MAX_AGE=300' \
+                'IT_DATA_UPSTREAM=it-spareparts-frontend:80')"
+              exit "${{EDGE_STUB_CANDIDATE_VALIDATE_RC:-0}}"
+            fi
+            exit 0 ;;
         esac
         exit 0
         """,
@@ -852,6 +873,31 @@ def test_edge_production_authority_accepts_observer_owned_app_mirror() -> None:
     assert '"600 ubuntu:ubuntu 1"' in edge
     assert '! safe_app_authority_mirror "$app_state"' in edge
     assert '! safe_regular "$app_state"' not in edge
+
+
+def test_edge_prepare_cleans_staging_when_candidate_validation_fails(
+    tmp_path: Path,
+) -> None:
+    env, control, _assistant, _calls = _fixture(tmp_path)
+    env["EDGE_STUB_CANDIDATE_VALIDATE_RC"] = "72"
+
+    result = _run_root(env, "prepare")
+
+    assert result.returncode != 0
+    generations = control / "edge" / "generations"
+    assert not (generations / GENERATION).exists()
+    assert not list(generations.glob(".incoming-*"))
+
+
+def test_edge_candidate_env_allowlist_is_not_persisted(tmp_path: Path) -> None:
+    env, control, _assistant, calls = _fixture(tmp_path)
+
+    result = _run_root(env, "prepare")
+
+    assert result.returncode == 0, result.stderr
+    generation = control / "edge" / "generations" / GENERATION
+    assert not list(generation.glob("*env*"))
+    assert b"run --rm --env-file " in calls.read_bytes()
 
 
 def test_edge_promotion_requires_exact_pre_hsts_header(tmp_path: Path) -> None:

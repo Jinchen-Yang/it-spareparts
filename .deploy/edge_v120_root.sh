@@ -440,6 +440,52 @@ with os.fdopen(fd, "wb") as handle:
 PY
 }
 
+write_caddy_candidate_env() {
+  local destination=$1
+  docker inspect -f '{{json .Config.Env}}' personal-ai-assistant-caddy |
+    python3 -c '
+import json
+import os
+import re
+import sys
+
+destination = sys.argv[1]
+required = (
+    "ASSISTANT_HOST",
+    "IT_DATA_HOST",
+    "IT_DATA_HSTS_MAX_AGE",
+    "IT_DATA_UPSTREAM",
+)
+payload = json.load(sys.stdin)
+if not isinstance(payload, list) or not all(isinstance(item, str) for item in payload):
+    raise SystemExit(1)
+values = {}
+for item in payload:
+    key, separator, value = item.partition("=")
+    if key not in required:
+        continue
+    if not separator or key in values or "\n" in value or "\r" in value:
+        raise SystemExit(1)
+    values[key] = value
+if set(values) != set(required):
+    raise SystemExit(1)
+if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", values["ASSISTANT_HOST"]):
+    raise SystemExit(1)
+if values["IT_DATA_HOST"] != "hbzgc.icu":
+    raise SystemExit(1)
+if values["IT_DATA_HSTS_MAX_AGE"] != "300":
+    raise SystemExit(1)
+if values["IT_DATA_UPSTREAM"] != "it-spareparts-frontend:80":
+    raise SystemExit(1)
+fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="ascii") as target:
+    for key in required:
+        target.write(f"{key}={values[key]}\n")
+    target.flush()
+    os.fsync(target.fileno())
+' "$destination"
+}
+
 manifest_value() {
   local manifest=$1 key=$2 count value
   count=$(grep -c "^${key}=" "$manifest" || true)
@@ -1496,7 +1542,7 @@ prepare_generation() {
   staging=$(mktemp -d -- "$GENERATIONS_DIR/.incoming-$generation.XXXXXX")
   cleanup_prepare() {
     status=$?
-    trap - RETURN
+    trap - EXIT HUP INT TERM
     if [ -n "$staging" ] && [ -d "$staging" ]; then
       if ! find "$staging" -depth -mindepth 1 -delete; then
         [ "$status" -ne 0 ] || status=97
@@ -1505,9 +1551,12 @@ prepare_generation() {
         [ "$status" -ne 0 ] || status=97
       fi
     fi
-    return "$status"
+    exit "$status"
   }
-  trap cleanup_prepare RETURN
+  trap cleanup_prepare EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   chmod 700 "$staging"
   cp -- "$COMPOSE_FILE" "$staging/compose.pre"
   cp -- "$CADDYFILE" "$staging/Caddyfile.pre"
@@ -1515,15 +1564,21 @@ prepare_generation() {
   [ "$(grep -F -c -- "$EDGE_BINDING" "$staging/compose.post")" -eq 1 ] \
     || fatal "edge Compose candidate binding is not exact"
   make_post_caddyfile "$CADDYFILE" "$staging/Caddyfile.post"
+  write_caddy_candidate_env "$staging/Caddy.env" \
+    || fatal "cannot build scoped Caddy candidate environment"
   chmod 600 "$staging"/compose.* "$staging"/Caddyfile.*
   if [ "$TEST_MODE" != 1 ]; then chown -R root:root "$staging"; fi
-  docker run --rm --network none --read-only \
+  docker run --rm --env-file "$staging/Caddy.env" --network none --read-only \
     --tmpfs /config:rw,nosuid,nodev,noexec \
     --tmpfs /data:rw,nosuid,nodev,noexec \
     --volume "$staging/Caddyfile.post:/etc/caddy/Caddyfile:ro" \
     "$AUTH_CADDY_IMAGE" \
     caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
     >/dev/null || fatal "edge Caddy candidate validation failed"
+  rm -- "$staging/Caddy.env" \
+    || fatal "cannot remove scoped Caddy candidate environment"
+  sync -d "$staging" ||
+    fatal "cannot persist scoped Caddy candidate environment removal"
   {
     printf 'EDGE_FORMAT=edge-v120-1\n'
     printf 'TARGET_COMMIT=%s\nGENERATION=%s\n' "$target" "$generation"
@@ -1569,7 +1624,7 @@ prepare_generation() {
   mv -T -- "$staging" "$dir" || return $?
   staging=
   sync -d "$GENERATIONS_DIR" || return $?
-  trap - RETURN
+  trap - EXIT HUP INT TERM
   printf 'EDGE_PREPARE_OK generation=%s idempotent=0\n' "$generation"
 }
 
