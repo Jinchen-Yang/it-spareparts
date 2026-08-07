@@ -108,7 +108,7 @@ v120_state_value_valid() {
           && "$value" =~ ^[0-9a-f]{40}$ ]]
       ;;
     DB_HEAD)
-      [ "$value" = f1c8e4a7b2d9 ]
+      [ "$value" = c6f2a8e9d4b1 ]
       ;;
     OLD_APP_IMAGE_ID|OLD_FRONTEND_IMAGE_ID|NEW_APP_IMAGE_ID|\
     NEW_FRONTEND_IMAGE_ID|BASE_DB_IMAGE_ID)

@@ -26,7 +26,8 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from tests import factories as f
 
 _PREV = "e5f9a2b3c4d5"
-_HEAD = "f1c8e4a7b2d9"
+_DEV15_HEAD = "f1c8e4a7b2d9"
+_CURRENT_HEAD = "c6f2a8e9d4b1"
 
 
 def _cfg(*, output_buffer=None) -> AlembicConfig:
@@ -229,7 +230,7 @@ def test_dev15_upgrade_constraints_and_clean_round_trip(db):
                 )
             )
 
-        alembic_command.upgrade(cfg, _HEAD)
+        alembic_command.upgrade(cfg, _DEV15_HEAD)
         with engine.connect() as connection:
             assert {
                 "maintenance_manual_cost_override",
@@ -395,7 +396,7 @@ def test_dev15_upgrade_constraints_and_clean_round_trip(db):
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == _HEAD
+            ).scalar_one() == _CURRENT_HEAD
     finally:
         alembic_command.upgrade(cfg, "head")
 
@@ -440,7 +441,7 @@ def test_dev15_upgrade_refuses_unaudited_legacy_expenses(db):
             match="historical project expenses require "
             "archived-workbook tax-basis audit and replay",
         ):
-            alembic_command.upgrade(cfg, _HEAD)
+            alembic_command.upgrade(cfg, _DEV15_HEAD)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -520,7 +521,7 @@ def test_dev15_upgrade_normalizes_legacy_json_null_permission_payloads(db):
                 {"user_id": user_id},
             )
 
-        alembic_command.upgrade(cfg, _HEAD)
+        alembic_command.upgrade(cfg, _DEV15_HEAD)
         with engine.connect() as connection:
             row = connection.execute(
                 text(
@@ -668,7 +669,7 @@ def test_dev15_migration_preserves_legacy_template_fallback(
         )
         assert before_markers == expected_markers
 
-        alembic_command.upgrade(cfg, _HEAD)
+        alembic_command.upgrade(cfg, _DEV15_HEAD)
         upgraded_row, upgraded_effective, upgraded_markers = snapshot()
         assert upgraded_markers == expected_markers
         assert upgraded_effective == before_effective
@@ -775,7 +776,7 @@ def test_dev15_upgrade_rejects_non_object_permission_payloads(
             DBAPIError,
             match="permission JSONB payload must be an object",
         ):
-            alembic_command.upgrade(cfg, _HEAD)
+            alembic_command.upgrade(cfg, _DEV15_HEAD)
 
         with engine.connect() as connection:
             assert connection.execute(
@@ -864,7 +865,7 @@ def test_dev15_downgrade_rejects_non_object_permission_payloads(db):
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == _HEAD
+            ).scalar_one() == _DEV15_HEAD
             assert connection.execute(
                 text(
                     """
@@ -1040,7 +1041,7 @@ def test_dev15_downgrade_guard_preserves_each_new_business_fact(
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == _HEAD
+            ).scalar_one() == _DEV15_HEAD
             assert connection.execute(text(preservation_sql)).scalar_one() == 1
     finally:
         # A rejected PostgreSQL transactional migration stays at head. Keep the
@@ -1055,7 +1056,7 @@ def test_dev15_downgrade_guard_preserves_each_new_business_fact(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == _HEAD
+        ).scalar_one() == _CURRENT_HEAD
         assert connection.execute(
             text(
                 """
@@ -1085,7 +1086,7 @@ def test_dev15_downgrade_guard_renders_in_offline_sql():
     output = io.StringIO()
     alembic_command.downgrade(
         _cfg(output_buffer=output),
-        f"{_HEAD}:{_PREV}",
+        f"{_DEV15_HEAD}:{_PREV}",
         sql=True,
     )
     rendered = output.getvalue()

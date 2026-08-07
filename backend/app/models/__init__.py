@@ -12,6 +12,7 @@ from app.models.maintenance import (
     MaintenanceManualCostOverride,
     MaintenanceRoundtripOperation,
 )
+from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -55,6 +56,8 @@ __all__ = [
     "MaintenanceContractWorkbookState",
     "MaintenanceManualCostOverride",
     "MaintenanceRoundtripOperation",
+    "MaintenanceProject",
+    "MaintenanceProjectContract",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",

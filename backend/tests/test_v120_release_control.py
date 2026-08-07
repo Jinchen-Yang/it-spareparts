@@ -103,7 +103,7 @@ def _built_values(
         "TARGET_COMMIT": target,
         "OLD_COMMIT": "ab42005b5b94bf98b3db0e4bff87e5df9da2f7ca",
         "OLD_RUNNING_SOURCE_COMMIT": old_running_source_commit,
-        "DB_HEAD": "f1c8e4a7b2d9",
+        "DB_HEAD": "c6f2a8e9d4b1",
         "OLD_APP_IMAGE_ID": old_app_image_id,
         "OLD_FRONTEND_IMAGE_ID": old_frontend_image_id,
         "APP_IMAGE_REF": "it-spareparts-app",
@@ -4413,8 +4413,8 @@ def test_build_migration_inventory_gate_matches_reviewed_tree() -> None:
     inventory_hash = hashlib.sha256(inventory).hexdigest()
     build = _script(BUILD)
 
-    assert len(migration_files) == 32
-    assert "readonly EXPECTED_MIGRATION_FILE_COUNT=32" in build
+    assert len(migration_files) == 33
+    assert "readonly EXPECTED_MIGRATION_FILE_COUNT=33" in build
     assert inventory_hash in build
 
 

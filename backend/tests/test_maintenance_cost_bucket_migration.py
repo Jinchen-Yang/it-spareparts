@@ -15,7 +15,7 @@ from app.services import maintenance_cost_quality
 from tests import factories as f
 
 _PREV = "f8c3d1a6b2e4"
-_HEAD = "f1c8e4a7b2d9"
+_HEAD = "c6f2a8e9d4b1"
 
 
 def _cfg() -> AlembicConfig:
