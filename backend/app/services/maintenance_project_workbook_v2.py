@@ -29,9 +29,9 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 PROTOCOL_ID = "ITDATA_MAINT_PROJECT_WORKBOOK/2.0"
 SCHEMA_VERSION = "2.0"
 ENDPOINT_CONTRACT = {
-    "export": "GET /api/maintenance/projects/{project_id}/workbook",
-    "validate": "POST /api/maintenance/projects/{project_id}/workbook/validate",
-    "apply": "POST /api/maintenance/projects/{project_id}/workbook/apply",
+    "export": "GET /api/maintenance/projects/stable/{project_id}/workbook",
+    "validate": "POST /api/maintenance/projects/stable/{project_id}/workbook/validate",
+    "apply": "POST /api/maintenance/projects/stable/{project_id}/workbook/apply",
     "errors": "GET /api/maintenance/workbook-validations/{validation_id}/errors.xlsx",
 }
 VISIBLE_SHEETS = (
