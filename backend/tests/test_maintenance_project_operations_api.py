@@ -1052,6 +1052,33 @@ def test_expense_status_lifecycle_counts_only_approved_and_preserves_voided_fact
 def test_archived_project_rejects_site_issue_and_expense_status_changes(db):
     project = _project(db, project_id="project-archived-fact-status")
     client = _client(db, username="archived_fact_status_admin")
+    contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-archived-facts",
+            "contract_no": "XS-ARCHIVED-FACTS",
+            "contract_amount": "1000.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立归档写边界测试合同",
+        },
+    )
+    assert contract.status_code == 201, contract.text
+    collection = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/collections",
+        json={
+            "project_contract_id": contract.json()["project_contract_id"],
+            "report_month": "2026-07-01",
+            "cumulative_amount": "10.00",
+            "status": "confirmed",
+            "reason": "建立归档写边界测试回款",
+        },
+    )
+    assert collection.status_code == 201, collection.text
     part = DimPart(pn_std="PN-SYNTH-ARCHIVED-STATUS")
     db.add(part)
     db.commit()
@@ -1119,10 +1146,41 @@ def test_archived_project_rejects_site_issue_and_expense_status_changes(db):
             "reason": "归档后不应生效",
         },
     )
+    contract_update = client.patch(
+        f"/api/maintenance/projects/stable/contracts/"
+        f"{contract.json()['project_contract_id']}",
+        json={
+            "version": 1,
+            "contract_status": "synthetic-changed",
+            "reason": "归档后不应修改合同",
+        },
+    )
+    collection_update = client.patch(
+        f"/api/maintenance/projects/stable/collections/"
+        f"{collection.json()['collection_id']}",
+        json={
+            "version": 1,
+            "cumulative_amount": "20.00",
+            "reason": "归档后不应修改回款",
+        },
+    )
+    cost_update = client.patch(
+        f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
+        json={
+            "line_id": "issue-line-archived-status",
+            "version": 1,
+            "unit_cost_ex_tax": "1.00",
+            "evidence": "归档后无效证据",
+            "reason": "归档后不应补价",
+        },
+    )
     assert issue_update.status_code == 400
     assert issue_update.json()["detail"] == "项目主档已归档"
     assert expense_update.status_code == 400
     assert expense_update.json()["detail"] == "项目主档已归档"
+    assert contract_update.status_code == 400
+    assert collection_update.status_code == 400
+    assert cost_update.status_code == 400
 
     db.expire_all()
     assert db.get(MaintenanceSiteIssueLine, "issue-line-archived-status").cost_amount is None
@@ -1130,7 +1188,7 @@ def test_archived_project_rejects_site_issue_and_expense_status_changes(db):
         MaintenanceProjectExpenseAttribution,
         "expense-archived-status",
     ).normalized_status == "unknown"
-    assert db.get(MaintenanceProjectWorkbookState, project.project_id).revision == 2
+    assert db.get(MaintenanceProjectWorkbookState, project.project_id).revision == 4
     assert list(
         db.scalars(
             select(MaintenanceProjectOperationAudit).where(

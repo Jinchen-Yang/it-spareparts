@@ -818,9 +818,11 @@ def fill_manual_cost(
     reason: str,
     operated_by: str,
 ) -> dict | None:
-    if db.get(MaintenanceProject, project_id) is None:
+    project = _lock_project_for_fact_write(db, project_id)
+    if project is None:
         return None
-    get_or_create_workbook_state(db, project_id=project_id, lock=True)
+    if not project.is_active:
+        raise MaintenanceOperationError("项目主档已归档")
     result = db.execute(
         select(MaintenanceSiteIssueLine, MaintenanceSiteIssue)
         .join(MaintenanceSiteIssue, MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
@@ -954,6 +956,11 @@ def update_contract(
     if project_id is None:
         return None
     get_or_create_workbook_state(db, project_id=project_id, lock=True)
+    project = _project(db, project_id)
+    if project is None:
+        return None
+    if not project.is_active:
+        raise MaintenanceOperationError("项目主档已归档")
     row = db.scalar(
         select(MaintenanceProjectContract)
         .where(MaintenanceProjectContract.project_contract_id == project_contract_id)
@@ -1046,6 +1053,11 @@ def archive_contract(
     if project_id is None:
         return None
     get_or_create_workbook_state(db, project_id=project_id, lock=True)
+    project = _project(db, project_id)
+    if project is None:
+        return None
+    if not project.is_active:
+        raise MaintenanceOperationError("项目主档已归档")
     row = db.scalar(
         select(MaintenanceProjectContract)
         .where(MaintenanceProjectContract.project_contract_id == project_contract_id)
@@ -1159,6 +1171,11 @@ def update_collection(
     if project_id is None:
         return None
     get_or_create_workbook_state(db, project_id=project_id, lock=True)
+    project = _project(db, project_id)
+    if project is None:
+        return None
+    if not project.is_active:
+        raise MaintenanceOperationError("项目主档已归档")
     row = db.scalar(
         select(MaintenanceCollectionSnapshot)
         .where(MaintenanceCollectionSnapshot.collection_id == collection_id)
