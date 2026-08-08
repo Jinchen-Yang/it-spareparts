@@ -105,7 +105,7 @@ class SiteIssueCreate(BaseModel):
     status_mapping_state: str
     normalized_status: str
     status_mapping_version: str = Field(min_length=1, max_length=64)
-    lines: list[SiteIssueLineCreate] = Field(min_length=1)
+    lines: list[SiteIssueLineCreate] = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=1, max_length=1000)
 
 

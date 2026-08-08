@@ -51,6 +51,7 @@ _QUANTITY_QUANTUM = Decimal("0.001")
 _QUANTITY_MAX_EXCLUSIVE = Decimal("100000000000")
 _MONEY_QUANTUM = Decimal("0.01")
 _MONEY_MAX_EXCLUSIVE = Decimal("1000000000000")
+_SITE_ISSUE_LINE_LIMIT = 200
 
 
 def _quantity(value: Decimal | str) -> Decimal:
@@ -104,6 +105,17 @@ def _resolve_site_issue_cost(
             issue_date=issue_date,
             line=line,
         )
+    except maintenance_consumption_cost.CostResolutionError as exc:
+        raise MaintenanceOperationError(str(exc)) from exc
+
+
+def _resolve_site_issue_costs(
+    db: Session,
+    *,
+    lines: list[tuple[date, MaintenanceSiteIssueLine]],
+) -> list[MaintenanceSiteIssueLine]:
+    try:
+        return maintenance_consumption_cost.resolve_lines(db, lines=lines)
     except maintenance_consumption_cost.CostResolutionError as exc:
         raise MaintenanceOperationError(str(exc)) from exc
 
@@ -552,19 +564,9 @@ def create_site_issue(
         raise MaintenanceOperationError("未映射现场领用必须使用 unknown 标准状态")
     if not lines:
         raise MaintenanceOperationError("现场领用至少需要一条明细")
-    row = MaintenanceSiteIssue(
-        issue_id=str(uuid4()),
-        project_id=project_id,
-        issue_no=_required(issue_no, "现场领用单号"),
-        issue_date=issue_date,
-        raw_status=_required(raw_status, "现场领用原始状态"),
-        status_mapping_state=status_mapping_state,
-        normalized_status=normalized_status,
-        status_mapping_version=_required(status_mapping_version, "状态映射版本"),
-        version=1,
-    )
-    db.add(row)
-    db.flush()
+    if len(lines) > _SITE_ISSUE_LINE_LIMIT:
+        raise MaintenanceOperationError("现场领用单最多允许 200 条明细")
+    issue_id = str(uuid4())
     saved_lines: list[MaintenanceSiteIssueLine] = []
     seen_line_ids: set[str] = set()
     seen_line_numbers: set[int] = set()
@@ -575,27 +577,43 @@ def create_site_issue(
             raise MaintenanceOperationError("现场领用明细编号或行号重复")
         seen_line_ids.add(line_id)
         seen_line_numbers.add(line_no)
-        quantity = _quantity(raw_line["quantity"])
-        line = MaintenanceSiteIssueLine(
-            issue_line_id=line_id,
-            issue_id=row.issue_id,
-            line_no=line_no,
-            part_id=int(raw_line["part_id"]),
-            pn=_required(raw_line.get("pn"), "料号", 128),
-            quantity=quantity,
-            linked_purchase_line_id=raw_line.get("linked_purchase_line_id"),
-            manual_unit_cost=None,
-            reference_sample_ids=[],
-            reference_sample_count=0,
-            reference_samples=[],
-            algorithm_version=maintenance_consumption_cost.ALGORITHM_VERSION,
-            version=1,
+        saved_lines.append(
+            MaintenanceSiteIssueLine(
+                issue_line_id=line_id,
+                issue_id=issue_id,
+                line_no=line_no,
+                part_id=int(raw_line["part_id"]),
+                pn=_required(raw_line.get("pn"), "料号", 128),
+                quantity=_quantity(raw_line["quantity"]),
+                linked_purchase_line_id=raw_line.get("linked_purchase_line_id"),
+                manual_unit_cost=None,
+                reference_sample_ids=[],
+                reference_sample_count=0,
+                reference_samples=[],
+                algorithm_version=maintenance_consumption_cost.ALGORITHM_VERSION,
+                version=1,
+            )
         )
-        db.add(line)
-        db.flush()
-        if status_mapping_state == "mapped" and normalized_status == "confirmed":
-            _resolve_site_issue_cost(db, issue_date=issue_date, line=line)
-        saved_lines.append(line)
+
+    row = MaintenanceSiteIssue(
+        issue_id=issue_id,
+        project_id=project_id,
+        issue_no=_required(issue_no, "现场领用单号"),
+        issue_date=issue_date,
+        raw_status=_required(raw_status, "现场领用原始状态"),
+        status_mapping_state=status_mapping_state,
+        normalized_status=normalized_status,
+        status_mapping_version=_required(status_mapping_version, "状态映射版本"),
+        version=1,
+    )
+    db.add(row)
+    db.add_all(saved_lines)
+    db.flush()
+    if status_mapping_state == "mapped" and normalized_status == "confirmed":
+        _resolve_site_issue_costs(
+            db,
+            lines=[(issue_date, line) for line in saved_lines],
+        )
     payload = site_issue_dict(row, saved_lines)
     _fact_audit(
         db,
@@ -701,14 +719,15 @@ def update_site_issue_status(
         status_mapping_version, "状态映射版本"
     )
     if previous_status != "confirmed" and normalized_status == "confirmed":
+        before_by_line = {
+            line.issue_line_id: site_issue_line_dict(line) for line in lines
+        }
+        _resolve_site_issue_costs(
+            db,
+            lines=[(row.issue_date, line) for line in lines],
+        )
         for line in lines:
-            line_before = site_issue_line_dict(line)
-            _resolve_site_issue_cost(
-                db,
-                issue_date=row.issue_date,
-                line=line,
-            )
-            if site_issue_line_dict(line) != line_before:
+            if site_issue_line_dict(line) != before_by_line[line.issue_line_id]:
                 line.version += 1
 
     candidate = site_issue_dict(row, lines)

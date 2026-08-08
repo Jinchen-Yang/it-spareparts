@@ -20,6 +20,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceProjectExpenseAttribution,
     MaintenanceProjectOperationAudit,
     MaintenanceProjectWorkbookState,
+    MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
 )
 from app.models.dimensions import DimPart
@@ -133,6 +134,29 @@ def _count_get_queries(
     return response.json(), query_count
 
 
+def _count_write_queries(
+    db,
+    client: TestClient,
+    *,
+    method: str,
+    path: str,
+    payload: dict,
+) -> tuple[object, int]:
+    engine = db.get_bind()
+    query_count = 0
+
+    def count_query(*_args) -> None:
+        nonlocal query_count
+        query_count += 1
+
+    event.listen(engine, "before_cursor_execute", count_query)
+    try:
+        response = client.request(method, path, json=payload)
+    finally:
+        event.remove(engine, "before_cursor_execute", count_query)
+    return response, query_count
+
+
 def _batch(db, suffix: str) -> SysImportBatch:
     batch = SysImportBatch(
         filename=f"synthetic-{suffix}.xlsx",
@@ -143,6 +167,378 @@ def _batch(db, suffix: str) -> SysImportBatch:
     db.add(batch)
     db.flush()
     return batch
+
+
+def _site_issue_lines(part: DimPart, *, count: int, prefix: str) -> list[dict]:
+    return [
+        {
+            "issue_line_id": f"{prefix}-{line_no}",
+            "line_no": line_no,
+            "part_id": part.id,
+            "pn": part.pn_std,
+            "quantity": "1",
+        }
+        for line_no in range(1, count + 1)
+    ]
+
+
+def test_site_issue_create_api_accepts_200_and_rejects_201_lines(db):
+    project = _project(db, project_id="project-site-issue-api-limit")
+    client = _client(db, username="site_issue_api_limit_admin")
+    part = DimPart(pn_std="PN-SITE-ISSUE-API-LIMIT")
+    db.add(part)
+    db.commit()
+
+    accepted = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-API-LIMIT-200",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": _site_issue_lines(part, count=200, prefix="issue-api-accepted"),
+            "reason": "验证现场领用单 API 可接收上限行数",
+        },
+    )
+    assert accepted.status_code == 201, accepted.text
+    assert len(accepted.json()["lines"]) == 200
+
+    rejected = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-API-LIMIT-201",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": _site_issue_lines(part, count=201, prefix="issue-api-limit"),
+            "reason": "验证现场领用单 API 明细上限",
+        },
+    )
+
+    assert rejected.status_code == 422, rejected.text
+    assert db.get(MaintenanceSiteIssueLine, "issue-api-limit-1") is None
+
+
+def test_site_issue_create_service_rejects_more_than_200_lines(db):
+    project = _project(db, project_id="project-site-issue-service-limit")
+    part = DimPart(pn_std="PN-SITE-ISSUE-SERVICE-LIMIT")
+    db.add(part)
+    db.commit()
+
+    with pytest.raises(
+        operations_service.MaintenanceOperationError,
+        match="最多允许 200 条明细",
+    ):
+        operations_service.create_site_issue(
+            db,
+            project_id=project.project_id,
+            issue_no="ISSUE-SERVICE-LIMIT-201",
+            issue_date=date(2026, 8, 1),
+            raw_status="synthetic-confirmed",
+            status_mapping_state="mapped",
+            normalized_status="confirmed",
+            status_mapping_version="synthetic-map-v1",
+            lines=_site_issue_lines(
+                part,
+                count=201,
+                prefix="issue-service-limit",
+            ),
+            reason="验证服务层现场领用单明细上限",
+            operated_by="service-limit-test",
+        )
+
+
+def test_site_issue_create_query_count_is_bounded_and_all_lines_are_costed(db):
+    project = _project(db, project_id="project-site-issue-create-scale")
+    client = _client(db, username="site_issue_create_scale_admin")
+    part = DimPart(pn_std="PN-SITE-ISSUE-CREATE-SCALE")
+    db.add(part)
+    db.flush()
+    batch = _batch(db, "site-issue-create-scale")
+    order = FPurchaseOrder(
+        raw_order_id="PO-H-SITE-ISSUE-CREATE-SCALE",
+        order_no="PO-SITE-ISSUE-CREATE-SCALE",
+        order_date=date(2026, 8, 1),
+        data_status="已生效",
+        is_tax_inclusive=False,
+        import_batch_id=batch.id,
+    )
+    db.add(order)
+    db.flush()
+    purchase_line = FPurchaseLine(
+        raw_line_id="PO-L-SITE-ISSUE-CREATE-SCALE",
+        order_id=order.id,
+        part_id=part.id,
+        pn_std=part.pn_std,
+        qty=100,
+        unit_price=25,
+        import_batch_id=batch.id,
+    )
+    db.add(purchase_line)
+    db.commit()
+
+    def create_payload(*, suffix: str, count: int) -> dict:
+        lines = _site_issue_lines(part, count=count, prefix=f"issue-scale-{suffix}")
+        for line in lines:
+            line["quantity"] = "2"
+            line["linked_purchase_line_id"] = purchase_line.id
+        return {
+            "issue_no": f"ISSUE-CREATE-SCALE-{suffix}",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": lines,
+            "reason": "验证现场领用创建批量取价",
+        }
+
+    one_response, one_queries = _count_write_queries(
+        db,
+        client,
+        method="POST",
+        path=f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        payload=create_payload(suffix="ONE", count=1),
+    )
+    many_response, many_queries = _count_write_queries(
+        db,
+        client,
+        method="POST",
+        path=f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        payload=create_payload(suffix="MANY", count=40),
+    )
+
+    assert one_response.status_code == 201, one_response.text
+    assert many_response.status_code == 201, many_response.text
+    assert many_queries <= one_queries + 8, (one_queries, many_queries)
+    assert len(many_response.json()["lines"]) == 40
+    assert {
+        (line["cost_source"], line["unit_cost"], line["cost_amount"])
+        for line in many_response.json()["lines"]
+    } == {("direct_purchase", "25.00", "50.00")}
+
+
+def test_site_issue_confirm_query_count_is_bounded_and_versions_remain_audited(db):
+    project = _project(db, project_id="project-site-issue-confirm-scale")
+    client = _client(db, username="site_issue_confirm_scale_admin")
+    part = DimPart(pn_std="PN-SITE-ISSUE-CONFIRM-SCALE")
+    db.add(part)
+    db.flush()
+    batch = _batch(db, "site-issue-confirm-scale")
+    order = FPurchaseOrder(
+        raw_order_id="PO-H-SITE-ISSUE-CONFIRM-SCALE",
+        order_no="PO-SITE-ISSUE-CONFIRM-SCALE",
+        order_date=date(2026, 8, 1),
+        data_status="已生效",
+        is_tax_inclusive=False,
+        import_batch_id=batch.id,
+    )
+    db.add(order)
+    db.flush()
+    purchase_line = FPurchaseLine(
+        raw_line_id="PO-L-SITE-ISSUE-CONFIRM-SCALE",
+        order_id=order.id,
+        part_id=part.id,
+        pn_std=part.pn_std,
+        qty=100,
+        unit_price=25,
+        import_batch_id=batch.id,
+    )
+    db.add(purchase_line)
+    db.commit()
+
+    def create_unknown(*, suffix: str, count: int) -> dict:
+        lines = _site_issue_lines(part, count=count, prefix=f"issue-confirm-{suffix}")
+        for line in lines:
+            line["quantity"] = "2"
+            line["linked_purchase_line_id"] = purchase_line.id
+        response = client.post(
+            f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+            json={
+                "issue_no": f"ISSUE-CONFIRM-SCALE-{suffix}",
+                "issue_date": "2026-08-01",
+                "raw_status": "synthetic-pending",
+                "status_mapping_state": "unmapped",
+                "normalized_status": "unknown",
+                "status_mapping_version": "synthetic-map-v1",
+                "lines": lines,
+                "reason": "建立待确认批量现场领用",
+            },
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    one_issue = create_unknown(suffix="ONE", count=1)
+    many_issue = create_unknown(suffix="MANY", count=40)
+
+    def confirm(issue_id: str) -> tuple[object, int]:
+        return _count_write_queries(
+            db,
+            client,
+            method="PATCH",
+            path=f"/api/maintenance/projects/stable/site-issues/{issue_id}/status",
+            payload={
+                "version": 1,
+                "raw_status": "synthetic-confirmed",
+                "normalized_status": "confirmed",
+                "status_mapping_version": "synthetic-map-v2",
+                "reason": "确认批量现场领用",
+            },
+        )
+
+    one_response, one_queries = confirm(one_issue["issue_id"])
+    many_response, many_queries = confirm(many_issue["issue_id"])
+
+    assert one_response.status_code == 200, one_response.text
+    assert many_response.status_code == 200, many_response.text
+    assert many_queries <= one_queries + 8, (one_queries, many_queries)
+    assert many_response.json()["version"] == 2
+    assert len(many_response.json()["lines"]) == 40
+    assert {
+        (
+            line["version"],
+            line["cost_source"],
+            line["unit_cost"],
+            line["cost_amount"],
+        )
+        for line in many_response.json()["lines"]
+    } == {(2, "direct_purchase", "25.00", "50.00")}
+
+    state = db.get(MaintenanceProjectWorkbookState, project.project_id)
+    assert state.revision == 4
+    status_audits = list(
+        db.scalars(
+            select(MaintenanceProjectOperationAudit).where(
+                MaintenanceProjectOperationAudit.project_id == project.project_id,
+                MaintenanceProjectOperationAudit.entity_type == "site_issue",
+                MaintenanceProjectOperationAudit.action == "status_update",
+            )
+        )
+    )
+    assert len(status_audits) == 2
+    many_audit = next(
+        audit for audit in status_audits if audit.entity_id == many_issue["issue_id"]
+    )
+    assert many_audit.before_json["normalized_status"] == "unknown"
+    assert many_audit.after_json["normalized_status"] == "confirmed"
+    assert len(many_audit.after_json["lines"]) == 40
+
+
+def test_site_issue_batch_confirm_cost_failure_is_atomic(db):
+    project = _project(db, project_id="project-site-issue-confirm-atomic")
+    client = _client(db, username="site_issue_confirm_atomic_admin")
+    valid_part = DimPart(pn_std="PN-SITE-ISSUE-CONFIRM-ATOMIC-VALID")
+    overflow_part = DimPart(pn_std="PN-SITE-ISSUE-CONFIRM-ATOMIC-OVERFLOW")
+    db.add_all([valid_part, overflow_part])
+    db.flush()
+    batch = _batch(db, "site-issue-confirm-atomic")
+    order = FPurchaseOrder(
+        raw_order_id="PO-H-SITE-ISSUE-CONFIRM-ATOMIC",
+        order_no="PO-SITE-ISSUE-CONFIRM-ATOMIC",
+        order_date=date(2026, 8, 1),
+        data_status="已生效",
+        is_tax_inclusive=False,
+        import_batch_id=batch.id,
+    )
+    db.add(order)
+    db.flush()
+    valid_purchase = FPurchaseLine(
+        raw_line_id="PO-L-SITE-ISSUE-CONFIRM-ATOMIC-VALID",
+        order_id=order.id,
+        part_id=valid_part.id,
+        pn_std=valid_part.pn_std,
+        qty=1,
+        unit_price=10,
+        import_batch_id=batch.id,
+    )
+    overflow_purchase = FPurchaseLine(
+        raw_line_id="PO-L-SITE-ISSUE-CONFIRM-ATOMIC-OVERFLOW",
+        order_id=order.id,
+        part_id=overflow_part.id,
+        pn_std=overflow_part.pn_std,
+        qty=1,
+        unit_price=Decimal("500000000000.00"),
+        import_batch_id=batch.id,
+    )
+    db.add_all([valid_purchase, overflow_purchase])
+    db.commit()
+
+    created = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-CONFIRM-ATOMIC",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-pending",
+            "status_mapping_state": "unmapped",
+            "normalized_status": "unknown",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-confirm-atomic-valid",
+                    "line_no": 1,
+                    "part_id": valid_part.id,
+                    "pn": valid_part.pn_std,
+                    "quantity": "1",
+                    "linked_purchase_line_id": valid_purchase.id,
+                },
+                {
+                    "issue_line_id": "issue-confirm-atomic-overflow",
+                    "line_no": 2,
+                    "part_id": overflow_part.id,
+                    "pn": overflow_part.pn_std,
+                    "quantity": "2",
+                    "linked_purchase_line_id": overflow_purchase.id,
+                },
+            ],
+            "reason": "建立批量确认失败原子性测试领用单",
+        },
+    )
+    assert created.status_code == 201, created.text
+    issue_id = created.json()["issue_id"]
+
+    failed = client.patch(
+        f"/api/maintenance/projects/stable/site-issues/{issue_id}/status",
+        json={
+            "version": 1,
+            "raw_status": "synthetic-confirmed",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v2",
+            "reason": "验证任一行取价失败时整单回滚",
+        },
+    )
+    assert failed.status_code == 400, failed.text
+    assert "成本金额" in failed.json()["detail"]
+
+    db.expire_all()
+    issue = db.get(MaintenanceSiteIssue, issue_id)
+    assert issue.normalized_status == "unknown"
+    assert issue.status_mapping_state == "unmapped"
+    assert issue.version == 1
+    for line_id in (
+        "issue-confirm-atomic-valid",
+        "issue-confirm-atomic-overflow",
+    ):
+        line = db.get(MaintenanceSiteIssueLine, line_id)
+        assert line.cost_source is None
+        assert line.cost_amount is None
+        assert line.version == 1
+    state = db.get(MaintenanceProjectWorkbookState, project.project_id)
+    assert state.revision == 1
+    assert (
+        db.query(MaintenanceProjectOperationAudit)
+        .filter_by(
+            project_id=project.project_id,
+            entity_type="site_issue",
+            entity_id=issue_id,
+            action="status_update",
+        )
+        .count()
+        == 0
+    )
 
 
 def test_numeric_normalizers_reject_non_finite_values_as_business_errors():
