@@ -3050,6 +3050,186 @@ def test_operations_directory_card_matches_workspace_summary(db):
     assert directory.json()["rows"] == [workspace.json()["project"]]
 
 
+def test_workspace_details_are_independently_paged_without_truncating_totals_or_workbook(db):
+    project = _project(db, project_id="project-workspace-server-pages")
+    contract = MaintenanceProjectContract(
+        project_contract_id="pc-workspace-server-pages",
+        project_id=project.project_id,
+        contract_id="contract-workspace-server-pages",
+        contract_no="XS-WORKSPACE-PAGES",
+        contract_amount=Decimal("1000.00"),
+        contract_status="synthetic-active",
+        status_mapping_state="mapped",
+        status_mapping_version="synthetic-map-v1",
+        included_in_total=True,
+        effective_from=date(2023, 1, 1),
+        source="synthetic-test",
+    )
+    part = DimPart(pn_std="PN-WORKSPACE-PAGES", description="分页仍展示的备件")
+    db.add_all([contract, part])
+    db.flush()
+
+    confirmed_issue = MaintenanceSiteIssue(
+        issue_id="issue-workspace-confirmed",
+        project_id=project.project_id,
+        issue_no="WBDD-WORKSPACE-CONFIRMED",
+        issue_date=date(2026, 8, 1),
+        raw_status="synthetic-confirmed",
+        status_mapping_state="mapped",
+        normalized_status="confirmed",
+        status_mapping_version="synthetic-map-v1",
+    )
+    void_issue = MaintenanceSiteIssue(
+        issue_id="issue-workspace-void",
+        project_id=project.project_id,
+        issue_no="WBDD-WORKSPACE-VOID",
+        issue_date=date(2026, 8, 2),
+        raw_status="synthetic-void",
+        status_mapping_state="mapped",
+        normalized_status="void",
+        status_mapping_version="synthetic-map-v1",
+    )
+    db.add_all([confirmed_issue, void_issue])
+    db.flush()
+    for line_no in range(1, 46):
+        has_cost = line_no % 2 == 0
+        db.add(
+            MaintenanceSiteIssueLine(
+                issue_line_id=f"workspace-confirmed-{line_no:03d}",
+                issue_id=confirmed_issue.issue_id,
+                line_no=line_no,
+                part_id=part.id,
+                pn=part.pn_std,
+                quantity=Decimal("1.000"),
+                unit_cost=Decimal("10.00") if has_cost else None,
+                cost_amount=Decimal("10.00") if has_cost else None,
+                cost_source="direct_purchase" if has_cost else None,
+                algorithm_version="synthetic-v1",
+            )
+        )
+    for line_no in range(1, 6):
+        db.add(
+            MaintenanceSiteIssueLine(
+                issue_line_id=f"workspace-void-{line_no:03d}",
+                issue_id=void_issue.issue_id,
+                line_no=line_no,
+                part_id=part.id,
+                pn=part.pn_std,
+                quantity=Decimal("1.000"),
+                algorithm_version="synthetic-v1",
+            )
+        )
+    for offset in range(25):
+        report_month = date(2023 + offset // 12, offset % 12 + 1, 1)
+        db.add(
+            MaintenanceCollectionSnapshot(
+                collection_id=f"workspace-collection-{offset + 1:03d}",
+                project_id=project.project_id,
+                project_contract_id=contract.project_contract_id,
+                report_month=report_month,
+                cumulative_amount=Decimal(offset + 1) * Decimal("10.00"),
+                status="confirmed",
+            )
+        )
+    for row_no in range(1, 51):
+        approved = row_no <= 45
+        db.add(
+            MaintenanceProjectExpenseAttribution(
+                expense_id=f"workspace-expense-{row_no:03d}",
+                project_id=project.project_id,
+                project_contract_id=contract.project_contract_id,
+                expense_ref=f"BXD-WORKSPACE-{row_no:03d}",
+                expense_date=date(2026, 8, 3),
+                amount_ex_tax=Decimal("2.00"),
+                raw_status="synthetic-approved" if approved else "synthetic-rejected",
+                status_mapping_state="mapped",
+                normalized_status="approved" if approved else "rejected",
+                status_mapping_version="synthetic-map-v1",
+            )
+        )
+    db.commit()
+    client = _client(db, username="workspace_server_pages_admin")
+    path = f"/api/maintenance/projects/stable/{project.project_id}/workspace"
+    params = {
+        "as_of": "2026-12-31",
+        "collection_page": 2,
+        "collection_page_size": 10,
+        "requisition_page": 3,
+        "requisition_page_size": 10,
+        "expense_page": 4,
+        "expense_page_size": 10,
+    }
+
+    response = client.get(path, params=params)
+    assert response.status_code == 200, response.text
+    workspace = response.json()
+    assert workspace["collection_snapshots"]["total"] == 25
+    assert workspace["collection_snapshots"]["page"] == 2
+    assert workspace["collection_snapshots"]["page_size"] == 10
+    assert [row["collection_id"] for row in workspace["collection_snapshots"]["rows"]] == [
+        f"workspace-collection-{row_no:03d}" for row_no in range(11, 21)
+    ]
+    assert workspace["requisitions"]["total"] == 50
+    assert workspace["requisitions"]["page"] == 3
+    assert workspace["requisitions"]["page_size"] == 10
+    assert [row["line_id"] for row in workspace["requisitions"]["rows"]] == [
+        f"workspace-confirmed-{row_no:03d}" for row_no in range(21, 31)
+    ]
+    assert workspace["approved_expenses"]["total"] == 45
+    assert workspace["approved_expenses"]["page"] == 4
+    assert workspace["approved_expenses"]["page_size"] == 10
+    assert [row["expense_id"] for row in workspace["approved_expenses"]["rows"]] == [
+        f"workspace-expense-{row_no:03d}" for row_no in range(31, 41)
+    ]
+    assert workspace["project"]["metrics"]["site_requisition_known_cost"] == "220.00"
+    assert workspace["project"]["metrics"]["missing_cost_lines"] == 23
+    assert workspace["project"]["metrics"]["approved_expense"] == "90.00"
+    assert [sheet["row_count"] for sheet in workspace["workbook_preview"]["sheets"][:3]] == [
+        26,
+        45,
+        45,
+    ]
+
+    full_workspace = operations_service.project_workbook_workspace(
+        db,
+        project_id=project.project_id,
+        as_of=date(2026, 12, 31),
+        user_ctx=UserContext(
+            user_id="workspace-server-pages",
+            role="admin",
+            permissions=None,
+        ),
+    )
+    assert full_workspace is not None
+    assert len(full_workspace["collection_snapshots"]) == 25
+    assert len(full_workspace["confirmed_site_consumptions"]) == 45
+    assert len(full_workspace["approved_expenses"]) == 45
+
+    _one_row, one_row_queries = _count_get_queries(
+        db,
+        client,
+        path=path,
+        params={
+            "as_of": "2026-12-31",
+            "collection_page_size": 1,
+            "requisition_page_size": 1,
+            "expense_page_size": 1,
+        },
+    )
+    _all_rows, all_rows_queries = _count_get_queries(
+        db,
+        client,
+        path=path,
+        params={
+            "as_of": "2026-12-31",
+            "collection_page_size": 100,
+            "requisition_page_size": 100,
+            "expense_page_size": 100,
+        },
+    )
+    assert all_rows_queries == one_row_queries
+
+
 def test_cost_gap_list_query_count_does_not_scale_with_page_size(db):
     project = _project(db, project_id="project-cost-gap-page-scale")
     client = _client(db, username="cost_gap_page_scale_admin")

@@ -9,6 +9,7 @@ import {
   type MaintenanceCollectionSnapshotRow,
   type MaintenanceProjectWorkspace,
   type MaintenanceSiteRequisitionRow,
+  type MaintenanceWorkspaceParams,
 } from "../../api/maintenanceOperations";
 import ContractPortfolio from "../../components/maintenance/ContractPortfolio";
 import ProjectFinancialProgress from "../../components/maintenance/ProjectFinancialProgress";
@@ -90,6 +91,15 @@ const collectionColumns: ColumnsType<MaintenanceCollectionSnapshotRow> = [
   { title: "版本", dataIndex: "version", width: 75, align: "right" },
 ];
 
+const INITIAL_DETAIL_PAGES: Required<MaintenanceWorkspaceParams> = {
+  collection_page: 1,
+  collection_page_size: 20,
+  requisition_page: 1,
+  requisition_page_size: 20,
+  expense_page: 1,
+  expense_page_size: 20,
+};
+
 export default function MaintenanceProjectWorkspacePage({ projectId }: {
   projectId?: string;
 }) {
@@ -98,10 +108,13 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
   const [workspace, setWorkspace] = useState<MaintenanceProjectWorkspace | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [detailPages, setDetailPages] = useState(INITIAL_DETAIL_PAGES);
   const generation = useRef(0);
   const [{ canManageProject }] = useState(readMaintenanceCapabilities);
 
-  const load = async () => {
+  const load = async (
+    requestedPages: Required<MaintenanceWorkspaceParams> = detailPages,
+  ) => {
     if (!resolvedProjectId) {
       setLoading(false);
       setLoadError(true);
@@ -111,7 +124,10 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
     setLoading(true);
     setLoadError(false);
     try {
-      const { data } = await getMaintenanceProjectWorkspace(resolvedProjectId);
+      const { data } = await getMaintenanceProjectWorkspace(
+        resolvedProjectId,
+        requestedPages,
+      );
       if (request === generation.current) setWorkspace(data);
     } catch {
       if (request === generation.current) {
@@ -124,11 +140,43 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
   };
 
   useEffect(() => {
-    void load();
+    setDetailPages(INITIAL_DETAIL_PAGES);
+    setWorkspace(null);
+    void load(INITIAL_DETAIL_PAGES);
     return () => { generation.current += 1; };
     // resolvedProjectId is the complete request identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedProjectId]);
+
+  const loadCollectionPage = (page: number, pageSize: number) => {
+    const next = {
+      ...detailPages,
+      collection_page: page,
+      collection_page_size: pageSize,
+    };
+    setDetailPages(next);
+    void load(next);
+  };
+
+  const loadRequisitionPage = (page: number, pageSize: number) => {
+    const next = {
+      ...detailPages,
+      requisition_page: page,
+      requisition_page_size: pageSize,
+    };
+    setDetailPages(next);
+    void load(next);
+  };
+
+  const loadExpensePage = (page: number, pageSize: number) => {
+    const next = {
+      ...detailPages,
+      expense_page: page,
+      expense_page_size: pageSize,
+    };
+    setDetailPages(next);
+    void load(next);
+  };
 
   if (loadError) {
     return (
@@ -196,8 +244,15 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
             size="small"
             columns={collectionColumns}
             dataSource={workspace.collection_snapshots.rows}
+            loading={loading}
             scroll={{ x: 980 }}
-            pagination={{ pageSize: 20, showSizeChanger: true }}
+            pagination={{
+              current: workspace.collection_snapshots.page,
+              pageSize: workspace.collection_snapshots.page_size,
+              total: workspace.collection_snapshots.total,
+              showSizeChanger: true,
+              onChange: loadCollectionPage,
+            }}
             locale={{ emptyText: "暂无回款记录" }}
           />
         </div>
@@ -217,8 +272,15 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
             size="small"
             columns={requisitionColumns}
             dataSource={workspace.requisitions.rows}
+            loading={loading}
             scroll={{ x: 1200 }}
-            pagination={{ pageSize: 20, showSizeChanger: true }}
+            pagination={{
+              current: workspace.requisitions.page,
+              pageSize: workspace.requisitions.page_size,
+              total: workspace.requisitions.total,
+              showSizeChanger: true,
+              onChange: loadRequisitionPage,
+            }}
             locale={{ emptyText: "暂无现场领用记录" }}
           />
         </div>
@@ -231,8 +293,15 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
             size="small"
             columns={expenseColumns}
             dataSource={workspace.approved_expenses.rows}
+            loading={loading}
             scroll={{ x: 1120 }}
-            pagination={{ pageSize: 20, showSizeChanger: true }}
+            pagination={{
+              current: workspace.approved_expenses.page,
+              pageSize: workspace.approved_expenses.page_size,
+              total: workspace.approved_expenses.total,
+              showSizeChanger: true,
+              onChange: loadExpensePage,
+            }}
             locale={{ emptyText: "暂无审批通过报销" }}
           />
         </div>
@@ -253,7 +322,7 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
           <ProjectWorkbookActions
             projectId={project.project_id}
             projectCode={project.project_code}
-            onApplied={load}
+            onApplied={() => load(detailPages)}
           />
         </div>
       </Card>

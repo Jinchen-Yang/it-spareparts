@@ -637,6 +637,12 @@ def patch_project_cost_gap(
 def stable_project_workspace(
     project_id: str = Path(..., min_length=1, max_length=36),
     as_of: date | None = None,
+    collection_page: int = Query(1, ge=1),
+    collection_page_size: int = Query(20, ge=1, le=100),
+    requisition_page: int = Query(1, ge=1),
+    requisition_page_size: int = Query(20, ge=1, le=100),
+    expense_page: int = Query(1, ge=1),
+    expense_page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
@@ -648,6 +654,12 @@ def stable_project_workspace(
         project_id=project_id,
         as_of=effective_as_of,
         user_ctx=ctx,
+        collection_page=collection_page,
+        collection_page_size=collection_page_size,
+        requisition_page=requisition_page,
+        requisition_page_size=requisition_page_size,
+        expense_page=expense_page,
+        expense_page_size=expense_page_size,
     )
     if payload is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")

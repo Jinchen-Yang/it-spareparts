@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
@@ -83,6 +83,8 @@ const workspace = {
       version: 3,
     }],
     total: 3,
+    page: 1,
+    page_size: 20,
   },
   requisitions: {
     rows: [{
@@ -111,6 +113,8 @@ const workspace = {
       cost_status: "not_counted",
     }],
     total: 2,
+    page: 1,
+    page_size: 20,
   },
   approved_expenses: {
     rows: [{
@@ -125,6 +129,8 @@ const workspace = {
       approval_status: "approved",
     }],
     total: 1,
+    page: 1,
+    page_size: 20,
   },
   reminders: [{
     reminder_id: "reminder-1",
@@ -232,6 +238,54 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(screen.queryByRole("link", { name: "去人工回填成本" })).toBeNull();
     expect(screen.queryByRole("button", { name: "上传月度更新" })).toBeNull();
     expect(screen.getByRole("button", { name: "下载完整四表" })).toBeInTheDocument();
+  });
+
+  it("切换回款页时带齐三类独立页码并采用服务端返回的第二页", async () => {
+    const firstPage = {
+      ...workspace,
+      collection_snapshots: {
+        ...workspace.collection_snapshots,
+        total: 21,
+      },
+    };
+    const secondPage = {
+      ...firstPage,
+      collection_snapshots: {
+        ...firstPage.collection_snapshots,
+        page: 2,
+        rows: [{
+          ...workspace.collection_snapshots.rows[0],
+          collection_id: "collection-21",
+          report_month: "2026-09-01",
+          receipt_reference: "RECEIPT-PAGE-2",
+        }],
+      },
+    };
+    getMaintenanceProjectWorkspace
+      .mockResolvedValueOnce({ data: firstPage })
+      .mockResolvedValueOnce({ data: secondPage });
+
+    render(
+      <MemoryRouter>
+        <MaintenanceProjectWorkspacePage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    const collections = await screen.findByTestId("collection-snapshot-table");
+    fireEvent.click(within(collections).getByTitle("2"));
+
+    await waitFor(() => expect(getMaintenanceProjectWorkspace).toHaveBeenLastCalledWith(
+      "project-1",
+      {
+        collection_page: 2,
+        collection_page_size: 20,
+        requisition_page: 1,
+        requisition_page_size: 20,
+        expense_page: 1,
+        expense_page_size: 20,
+      },
+    ));
+    expect(await within(collections).findByText("RECEIPT-PAGE-2")).toBeInTheDocument();
   });
 
   it("成本汇总被脱敏时不把未知状态误标为缺价", async () => {

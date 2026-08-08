@@ -45,6 +45,30 @@ describe("maintenance operations API", () => {
 
     expect(get).toHaveBeenCalledWith(
       "/maintenance/projects/stable/project%2F%E5%8D%B1%E9%99%A9/workspace",
+      { params: {} },
+    );
+  });
+
+  it("工作台请求透传三类独立服务端分页", () => {
+    getMaintenanceProjectWorkspace("project-1", {
+      collection_page: 2,
+      collection_page_size: 10,
+      requisition_page: 3,
+      requisition_page_size: 50,
+      expense_page: 4,
+      expense_page_size: 100,
+    });
+
+    expect(get).toHaveBeenCalledWith(
+      "/maintenance/projects/stable/project-1/workspace",
+      { params: {
+        collection_page: 2,
+        collection_page_size: 10,
+        requisition_page: 3,
+        requisition_page_size: 50,
+        expense_page: 4,
+        expense_page_size: 100,
+      } },
     );
   });
 
@@ -218,6 +242,8 @@ describe("maintenance operations API", () => {
             version: 1,
           }],
           total: 1,
+          page: 1,
+          page_size: 20,
         },
         requisitions: {
           rows: [{
@@ -234,6 +260,8 @@ describe("maintenance operations API", () => {
             cost_status: "available",
           }],
           total: 1,
+          page: 1,
+          page_size: 20,
         },
         approved_expenses: {
           rows: [{
@@ -246,6 +274,8 @@ describe("maintenance operations API", () => {
             approval_status: "approved",
           }],
           total: 1,
+          page: 1,
+          page_size: 20,
         },
         reminders: [],
         workbook_preview: {

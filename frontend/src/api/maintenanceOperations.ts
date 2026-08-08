@@ -122,14 +122,20 @@ export interface MaintenanceProjectWorkspace {
   collection_snapshots: {
     rows: MaintenanceCollectionSnapshotRow[];
     total: number;
+    page: number;
+    page_size: number;
   };
   requisitions: {
     rows: MaintenanceSiteRequisitionRow[];
     total: number;
+    page: number;
+    page_size: number;
   };
   approved_expenses: {
     rows: MaintenanceApprovedExpenseRow[];
     total: number;
+    page: number;
+    page_size: number;
   };
   reminders: MaintenanceProjectReminder[];
   workbook_preview: MaintenanceWorkbookPreview;
@@ -368,8 +374,20 @@ export const listMaintenanceProjectOperations = (
 const projectBase = (projectId: string) =>
   `/maintenance/projects/stable/${encodeURIComponent(projectId)}`;
 
-export const getMaintenanceProjectWorkspace = (projectId: string) =>
-  api.get<MaintenanceProjectWorkspace>(`${projectBase(projectId)}/workspace`)
+export interface MaintenanceWorkspaceParams {
+  collection_page?: number;
+  collection_page_size?: number;
+  requisition_page?: number;
+  requisition_page_size?: number;
+  expense_page?: number;
+  expense_page_size?: number;
+}
+
+export const getMaintenanceProjectWorkspace = (
+  projectId: string,
+  params: MaintenanceWorkspaceParams = {},
+) =>
+  api.get<MaintenanceProjectWorkspace>(`${projectBase(projectId)}/workspace`, { params })
     .then((response) => ({ ...response, data: normalizeWorkspace(response.data) }));
 
 export const downloadMaintenanceProjectWorkbook = (projectId: string) =>
