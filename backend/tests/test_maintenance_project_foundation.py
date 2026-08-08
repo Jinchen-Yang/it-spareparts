@@ -1225,7 +1225,7 @@ def test_empty_foundation_schema_downgrade_and_upgrade_rebuilds_full_contract(db
         with engine.connect() as connection:
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "d8a3c7e4f2b1"
+                == "e2f4a6c8b1d3"
             )
             assert connection.execute(
                 text(
