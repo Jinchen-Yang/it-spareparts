@@ -1284,19 +1284,25 @@ def test_nonempty_stable_project_facts_block_destructive_schema_downgrade(db):
     db.commit()
     db.close()
 
-    with pytest.raises(DBAPIError, match="downgrade blocked"):
-        alembic_command.downgrade(_alembic_cfg(), "f1c8e4a7b2d9")
+    try:
+        with pytest.raises(DBAPIError, match="downgrade blocked"):
+            alembic_command.downgrade(_alembic_cfg(), "f1c8e4a7b2d9")
 
-    with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "d8a3c7e4f2b1"
-        )
-        assert (
-            connection.scalar(
-                text(
-                    "SELECT count(*) FROM maintenance_project "
-                    "WHERE project_id='00000000-0000-4000-8000-000000000016'"
+        with engine.connect() as connection:
+            assert connection.scalar(
+                text("SELECT version_num FROM alembic_version")
+            ) == ("d8a3c7e4f2b1")
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT count(*) FROM maintenance_project "
+                        "WHERE project_id='00000000-0000-4000-8000-000000000016'"
+                    )
                 )
+                == 1
             )
-            == 1
-        )
+    finally:
+        # The multi-revision downgrade intentionally stops at the project-master
+        # guard. Restore the session database so later test files still run at
+        # the declared head.
+        alembic_command.upgrade(_alembic_cfg(), "head")
