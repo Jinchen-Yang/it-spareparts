@@ -16,7 +16,7 @@ import json
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
-from sqlalchemy import null, select
+from sqlalchemy import delete, func, null, select, update
 from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart
@@ -26,14 +26,18 @@ from app.models.maintenance_project import (
 )
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
+    MaintenanceProjectExpenseAttribution,
     MaintenanceProjectWorkbookOperation,
     MaintenanceProjectWorkbookState,
     MaintenanceProjectWorkbookValidation,
+    MaintenanceSiteIssue,
+    MaintenanceSiteIssueLine,
 )
 from app.security import UserContext
 from app.services import maintenance_project_operations as operations
 from app.services.maintenance_project_workbook_v2 import (
     CollectionCreate,
+    MAX_ROWS_PER_TABLE,
     ProjectWorkbookV2Error,
     WorkbookApplyResult,
     WorkbookIssue,
@@ -47,6 +51,9 @@ from app.services.maintenance_project_workbook_v2 import (
 
 
 VALIDATION_TTL = timedelta(minutes=30)
+EXPIRED_VALIDATION_RETENTION = timedelta(days=7)
+APPLIED_VALIDATION_RETENTION = timedelta(days=30)
+VALIDATION_CLEANUP_BATCH_SIZE = 200
 _PLAN_VERSION = "maintenance-project-workbook-plan/1"
 
 
@@ -82,6 +89,109 @@ def _issues_payload(issues: Sequence[WorkbookIssue]) -> list[dict[str, Any]]:
         }
         for issue in issues
     ]
+
+
+def cleanup_project_workbook_validations(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Compact expired/applied plans and retire old metadata-only records."""
+
+    cleanup_at = now or _now()
+    expiring_ids = (
+        select(MaintenanceProjectWorkbookValidation.validation_id)
+        .where(
+            MaintenanceProjectWorkbookValidation.status.in_(("valid", "error")),
+            MaintenanceProjectWorkbookValidation.expires_at <= cleanup_at,
+        )
+        .order_by(
+            MaintenanceProjectWorkbookValidation.expires_at,
+            MaintenanceProjectWorkbookValidation.validation_id,
+        )
+        .limit(VALIDATION_CLEANUP_BATCH_SIZE)
+        .with_for_update(skip_locked=True)
+    )
+    db.execute(
+        update(MaintenanceProjectWorkbookValidation)
+        .where(
+            MaintenanceProjectWorkbookValidation.validation_id.in_(expiring_ids)
+        )
+        .values(
+            status="expired",
+            plan_json=null(),
+            issues_json=[],
+            error_workbook=null(),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    applied_plan_ids = (
+        select(MaintenanceProjectWorkbookValidation.validation_id)
+        .where(
+            MaintenanceProjectWorkbookValidation.status == "applied",
+            MaintenanceProjectWorkbookValidation.plan_json.is_not(None),
+        )
+        .order_by(
+            MaintenanceProjectWorkbookValidation.applied_at,
+            MaintenanceProjectWorkbookValidation.validation_id,
+        )
+        .limit(VALIDATION_CLEANUP_BATCH_SIZE)
+        .with_for_update(skip_locked=True)
+    )
+    db.execute(
+        update(MaintenanceProjectWorkbookValidation)
+        .where(
+            MaintenanceProjectWorkbookValidation.validation_id.in_(applied_plan_ids)
+        )
+        .values(plan_json=null())
+        .execution_options(synchronize_session=False)
+    )
+    expired_retention_ids = (
+        select(MaintenanceProjectWorkbookValidation.validation_id)
+        .where(
+            MaintenanceProjectWorkbookValidation.status == "expired",
+            MaintenanceProjectWorkbookValidation.expires_at
+            <= cleanup_at - EXPIRED_VALIDATION_RETENTION,
+        )
+        .order_by(
+            MaintenanceProjectWorkbookValidation.expires_at,
+            MaintenanceProjectWorkbookValidation.validation_id,
+        )
+        .limit(VALIDATION_CLEANUP_BATCH_SIZE)
+        .with_for_update(skip_locked=True)
+    )
+    db.execute(
+        delete(MaintenanceProjectWorkbookValidation).where(
+            MaintenanceProjectWorkbookValidation.validation_id.in_(
+                expired_retention_ids
+            )
+        )
+        .execution_options(synchronize_session=False)
+    )
+    applied_retention_ids = (
+        select(MaintenanceProjectWorkbookValidation.validation_id)
+        .where(
+            MaintenanceProjectWorkbookValidation.status == "applied",
+            MaintenanceProjectWorkbookValidation.applied_at.is_not(None),
+            MaintenanceProjectWorkbookValidation.applied_at
+            <= cleanup_at - APPLIED_VALIDATION_RETENTION,
+        )
+        .order_by(
+            MaintenanceProjectWorkbookValidation.applied_at,
+            MaintenanceProjectWorkbookValidation.validation_id,
+        )
+        .limit(VALIDATION_CLEANUP_BATCH_SIZE)
+        .with_for_update(skip_locked=True)
+    )
+    db.execute(
+        delete(MaintenanceProjectWorkbookValidation).where(
+            MaintenanceProjectWorkbookValidation.validation_id.in_(
+                applied_retention_ids
+            )
+        )
+        .execution_options(synchronize_session=False)
+    )
+    db.flush()
 
 
 def _serialize_validation(validation: WorkbookValidation) -> dict[str, Any]:
@@ -270,6 +380,93 @@ class MaintenanceProjectWorkbookAdapter:
 
     def load_workspace(self, project_id: str) -> Mapping[str, Any]:
         state = self._state(project_id)
+        count_row = self.db.execute(
+            select(
+                select(func.count())
+                .select_from(MaintenanceProjectContract)
+                .where(MaintenanceProjectContract.project_id == project_id)
+                .scalar_subquery()
+                .label("contracts"),
+                select(func.count())
+                .select_from(MaintenanceCollectionSnapshot)
+                .where(
+                    MaintenanceCollectionSnapshot.project_id == project_id,
+                    MaintenanceCollectionSnapshot.report_month <= self.as_of,
+                )
+                .scalar_subquery()
+                .label("collections"),
+                select(func.count())
+                .select_from(MaintenanceSiteIssueLine)
+                .join(
+                    MaintenanceSiteIssue,
+                    MaintenanceSiteIssue.issue_id
+                    == MaintenanceSiteIssueLine.issue_id,
+                )
+                .where(
+                    MaintenanceSiteIssue.project_id == project_id,
+                    MaintenanceSiteIssue.issue_date <= self.as_of,
+                    MaintenanceSiteIssue.status_mapping_state == "mapped",
+                    MaintenanceSiteIssue.normalized_status == "confirmed",
+                )
+                .scalar_subquery()
+                .label("consumptions"),
+                select(func.count())
+                .select_from(MaintenanceSiteIssueLine)
+                .join(
+                    MaintenanceSiteIssue,
+                    MaintenanceSiteIssue.issue_id
+                    == MaintenanceSiteIssueLine.issue_id,
+                )
+                .where(
+                    MaintenanceSiteIssue.project_id == project_id,
+                    MaintenanceSiteIssue.issue_date <= self.as_of,
+                )
+                .scalar_subquery()
+                .label("loaded_consumptions"),
+                select(func.count())
+                .select_from(MaintenanceProjectExpenseAttribution)
+                .where(
+                    MaintenanceProjectExpenseAttribution.project_id == project_id,
+                    MaintenanceProjectExpenseAttribution.expense_date <= self.as_of,
+                    MaintenanceProjectExpenseAttribution.status_mapping_state
+                    == "mapped",
+                    MaintenanceProjectExpenseAttribution.normalized_status
+                    == "approved",
+                )
+                .scalar_subquery()
+                .label("expenses"),
+                select(func.count())
+                .select_from(MaintenanceProjectExpenseAttribution)
+                .where(
+                    MaintenanceProjectExpenseAttribution.project_id == project_id,
+                    MaintenanceProjectExpenseAttribution.expense_date <= self.as_of,
+                )
+                .scalar_subquery()
+                .label("loaded_expenses"),
+            )
+        ).one()
+        labels = {
+            "contracts": "合同",
+            "collections": "回款",
+            "consumptions": "已确认现场领用明细",
+            "expenses": "已审批报销",
+            "loaded_consumptions": "现场领用全量事实",
+            "loaded_expenses": "报销全量事实",
+        }
+        oversized = [
+            f"{labels[key]}={int(getattr(count_row, key))}"
+            for key in labels
+            if int(getattr(count_row, key)) > MAX_ROWS_PER_TABLE
+        ]
+        if oversized:
+            message = (
+                f"项目工作簿超过单表 {MAX_ROWS_PER_TABLE} 行导出上限："
+                + "、".join(oversized)
+            )
+            raise ProjectWorkbookV2Error(
+                message,
+                issues=(WorkbookIssue("export_row_limit", message),),
+            )
         raw = operations.project_workbook_workspace(
             self.db,
             project_id=project_id,
@@ -542,6 +739,7 @@ class MaintenanceProjectWorkbookAdapter:
         if result.status != "applied":
             raise ProjectWorkbookV2Error("工作簿已应用，拒绝重复提交", status_code=409)
         row.status = "applied"
+        row.plan_json = null()
         row.applied_at = _now()
         state.last_applied_at = row.applied_at
         self.db.flush()

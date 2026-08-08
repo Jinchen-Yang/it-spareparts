@@ -411,6 +411,11 @@ class MaintenanceProjectWorkbookValidation(Base):
         ),
         Index("ix_maintenance_project_workbook_validation_expires", "expires_at"),
         Index(
+            "ix_maintenance_project_workbook_validation_status_applied",
+            "status",
+            "applied_at",
+        ),
+        Index(
             "ix_maintenance_project_workbook_validation_project_file",
             "project_id",
             "file_sha256",

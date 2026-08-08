@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, null, select
 
 from app import auth
 from app.api import (
@@ -22,17 +22,28 @@ from app.api import (
     maintenance_projects,
 )
 from app.auth import hash_password
-from app.models.maintenance_project import MaintenanceProject
+from app.models.dimensions import DimPart
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectContract,
+)
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
+    MaintenanceProjectExpenseAttribution,
     MaintenanceProjectWorkbookOperation,
     MaintenanceProjectWorkbookState,
     MaintenanceProjectWorkbookValidation,
+    MaintenanceSiteIssue,
+    MaintenanceSiteIssueLine,
 )
 from app.models.system import SysUser
 from app.security import UserContext
 from app.services import maintenance_project_workbook_adapter
-from app.services.maintenance_project_workbook_v2 import COLLECTION_TABLE, PROTOCOL_ID
+from app.services.maintenance_project_workbook_v2 import (
+    COLLECTION_TABLE,
+    PROTOCOL_ID,
+    ProjectWorkbookV2Error,
+)
 
 
 def _client(db, *, username: str) -> TestClient:
@@ -177,6 +188,448 @@ def _validate(client: TestClient, project_id: str, content: bytes, name="update.
     )
 
 
+def test_export_preflights_row_limit_before_loading_full_workspace(db, monkeypatch):
+    client = _client(db, username="workbook_preflight_admin")
+    project_id, _contract = _project_and_contract(client, db, suffix="preflight")
+    monkeypatch.setattr(
+        maintenance_project_workbook_adapter,
+        "MAX_ROWS_PER_TABLE",
+        0,
+        raising=False,
+    )
+
+    def fail_full_workspace_load(*_args, **_kwargs):
+        raise AssertionError("full ORM workspace loaded before row-limit preflight")
+
+    monkeypatch.setattr(
+        maintenance_project_workbook_adapter.operations,
+        "project_workbook_workspace",
+        fail_full_workspace_load,
+    )
+
+    response = client.get(
+        f"/api/maintenance/projects/stable/{project_id}/workbook"
+    )
+
+    assert response.status_code == 422, response.text
+    assert "合同" in response.json()["detail"]["message"]
+
+
+def test_workspace_preflight_counts_each_exported_fact_category(db, monkeypatch):
+    client = _client(db, username="workbook_preflight_categories_admin")
+    project_id, contract = _project_and_contract(
+        client,
+        db,
+        suffix="preflight-cat",
+    )
+    second_contract = MaintenanceProjectContract(
+        project_contract_id="preflight-second-contract",
+        project_id=project_id,
+        contract_id="preflight-second-contract-source",
+        contract_no="XS-PREFLIGHT-SECOND",
+        contract_amount=100,
+        contract_status="active",
+        status_mapping_state="mapped",
+        status_mapping_version="synthetic-map-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        source="synthetic-test",
+    )
+    part = DimPart(pn_std="PN-WORKBOOK-PREFLIGHT")
+    issue = MaintenanceSiteIssue(
+        issue_id="preflight-issue",
+        project_id=project_id,
+        issue_no="ISSUE-PREFLIGHT",
+        issue_date=date(2026, 8, 1),
+        raw_status="confirmed",
+        status_mapping_state="mapped",
+        normalized_status="confirmed",
+        status_mapping_version="synthetic-map-v1",
+    )
+    db.add_all([second_contract, part, issue])
+    db.flush()
+    db.add_all(
+        [
+            MaintenanceCollectionSnapshot(
+                collection_id=f"preflight-collection-{index}",
+                project_id=project_id,
+                project_contract_id=contract["project_contract_id"],
+                report_month=date(2026, month, 1),
+                cumulative_amount=index * 100,
+                status="confirmed",
+            )
+            for index, month in enumerate((7, 8), start=1)
+        ]
+        + [
+            MaintenanceSiteIssueLine(
+                issue_line_id=f"preflight-line-{index}",
+                issue_id=issue.issue_id,
+                line_no=index,
+                part_id=part.id,
+                pn=part.pn_std,
+                quantity=1,
+                algorithm_version="synthetic-cost-v1",
+            )
+            for index in (1, 2)
+        ]
+        + [
+            MaintenanceProjectExpenseAttribution(
+                expense_id=f"preflight-expense-{index}",
+                project_id=project_id,
+                expense_ref=f"BX-PREFLIGHT-{index}",
+                expense_date=date(2026, 8, index),
+                amount_ex_tax=10,
+                raw_status="approved",
+                status_mapping_state="mapped",
+                normalized_status="approved",
+                status_mapping_version="synthetic-map-v1",
+            )
+            for index in (1, 2)
+        ]
+    )
+    db.commit()
+    monkeypatch.setattr(
+        maintenance_project_workbook_adapter,
+        "MAX_ROWS_PER_TABLE",
+        1,
+    )
+    adapter = maintenance_project_workbook_adapter.MaintenanceProjectWorkbookAdapter(
+        db,
+        user_ctx=UserContext(
+            user_id="workbook_preflight_categories_admin",
+            role="admin",
+            is_authenticated=True,
+        ),
+        operator="workbook_preflight_categories_admin",
+        as_of=date(2026, 8, 9),
+    )
+
+    with pytest.raises(ProjectWorkbookV2Error) as caught:
+        adapter.load_workspace(project_id)
+
+    message = str(caught.value)
+    assert "合同=2" in message
+    assert "回款=2" in message
+    assert "已确认现场领用明细=2" in message
+    assert "已审批报销=2" in message
+
+
+def test_workspace_preflight_bounds_ineligible_facts_loaded_for_completeness(
+    db,
+    monkeypatch,
+):
+    project_id = "project-workbook-loaded-facts"
+    project = MaintenanceProject(
+        project_id=project_id,
+        project_code="WB-LOADED-FACTS",
+        display_name="合成全量事实预检项目",
+        lifecycle_status="ongoing",
+    )
+    part = DimPart(pn_std="PN-WORKBOOK-LOADED-FACTS")
+    issue = MaintenanceSiteIssue(
+        issue_id="loaded-void-issue",
+        project_id=project_id,
+        issue_no="ISSUE-LOADED-VOID",
+        issue_date=date(2026, 8, 1),
+        raw_status="void",
+        status_mapping_state="mapped",
+        normalized_status="void",
+        status_mapping_version="synthetic-map-v1",
+    )
+    db.add_all([project, part, issue])
+    db.flush()
+    db.add_all(
+        [
+            MaintenanceSiteIssueLine(
+                issue_line_id=f"loaded-void-line-{index}",
+                issue_id=issue.issue_id,
+                line_no=index,
+                part_id=part.id,
+                pn=part.pn_std,
+                quantity=1,
+                algorithm_version="synthetic-cost-v1",
+            )
+            for index in (1, 2)
+        ]
+        + [
+            MaintenanceProjectExpenseAttribution(
+                expense_id=f"loaded-rejected-expense-{index}",
+                project_id=project_id,
+                expense_ref=f"BX-LOADED-REJECTED-{index}",
+                expense_date=date(2026, 8, index),
+                amount_ex_tax=10,
+                raw_status="rejected",
+                status_mapping_state="mapped",
+                normalized_status="rejected",
+                status_mapping_version="synthetic-map-v1",
+            )
+            for index in (1, 2)
+        ]
+    )
+    db.commit()
+    monkeypatch.setattr(
+        maintenance_project_workbook_adapter,
+        "MAX_ROWS_PER_TABLE",
+        1,
+    )
+    adapter = maintenance_project_workbook_adapter.MaintenanceProjectWorkbookAdapter(
+        db,
+        user_ctx=UserContext(
+            user_id="workbook_loaded_facts_admin",
+            role="admin",
+            is_authenticated=True,
+        ),
+        operator="workbook_loaded_facts_admin",
+        as_of=date(2026, 8, 9),
+    )
+
+    with pytest.raises(ProjectWorkbookV2Error) as caught:
+        adapter.load_workspace(project_id)
+
+    message = str(caught.value)
+    assert "现场领用全量事实=2" in message
+    assert "报销全量事实=2" in message
+    assert "已确认现场领用明细" not in message
+    assert "已审批报销" not in message
+
+
+def test_validate_opportunistically_expires_compacts_and_retires_records(db):
+    client = _client(db, username="workbook_retention_validate_admin")
+    project_id, _contract = _project_and_contract(
+        client,
+        db,
+        suffix="retention-validate",
+    )
+    now = datetime.now(timezone.utc)
+    rows = [
+        MaintenanceProjectWorkbookValidation(
+            validation_id="retention-expired-valid",
+            project_id=project_id,
+            export_id="retention-export-valid",
+            expected_revision=0,
+            file_sha256="1" * 64,
+            plan_json={"large": "plan"},
+            status="valid",
+            issues_json=[{"message": "stale"}],
+            error_workbook=None,
+            created_by="workbook_retention_validate_admin",
+            expires_at=now - timedelta(minutes=1),
+        ),
+        MaintenanceProjectWorkbookValidation(
+            validation_id="retention-expired-error",
+            project_id=project_id,
+            export_id="retention-export-error",
+            expected_revision=0,
+            file_sha256="2" * 64,
+            plan_json=null(),
+            status="error",
+            issues_json=[{"message": "stale"}],
+            error_workbook=b"large-error-workbook",
+            created_by="workbook_retention_validate_admin",
+            expires_at=now - timedelta(minutes=1),
+        ),
+        MaintenanceProjectWorkbookValidation(
+            validation_id="retention-current-applied",
+            project_id=project_id,
+            export_id="retention-export-applied",
+            expected_revision=0,
+            file_sha256="3" * 64,
+            plan_json={"large": "applied-plan"},
+            status="applied",
+            issues_json=[],
+            error_workbook=None,
+            created_by="workbook_retention_validate_admin",
+            expires_at=now + timedelta(days=1),
+            applied_at=now,
+        ),
+        MaintenanceProjectWorkbookValidation(
+            validation_id="retention-old-expired",
+            project_id=project_id,
+            export_id="retention-export-old-expired",
+            expected_revision=0,
+            file_sha256="4" * 64,
+            plan_json=null(),
+            status="expired",
+            issues_json=[],
+            error_workbook=None,
+            created_by="workbook_retention_validate_admin",
+            expires_at=now - timedelta(days=8),
+        ),
+        MaintenanceProjectWorkbookValidation(
+            validation_id="retention-old-applied",
+            project_id=project_id,
+            export_id="retention-export-old-applied",
+            expected_revision=0,
+            file_sha256="5" * 64,
+            plan_json=null(),
+            status="applied",
+            issues_json=[],
+            error_workbook=None,
+            created_by="workbook_retention_validate_admin",
+            expires_at=now - timedelta(days=31),
+            applied_at=now - timedelta(days=31),
+        ),
+    ]
+    db.add_all(rows)
+    db.commit()
+
+    response = _validate(client, project_id, b"not-an-xlsx")
+
+    assert response.status_code == 200, response.text
+    for validation_id in (
+        "retention-expired-valid",
+        "retention-expired-error",
+    ):
+        row = db.get(MaintenanceProjectWorkbookValidation, validation_id)
+        db.refresh(row)
+        assert row.status == "expired"
+        assert row.plan_json is None
+        assert row.issues_json == []
+        assert row.error_workbook is None
+    applied = db.get(
+        MaintenanceProjectWorkbookValidation,
+        "retention-current-applied",
+    )
+    db.refresh(applied)
+    assert applied.status == "applied"
+    assert applied.plan_json is None
+    assert (
+        db.get(MaintenanceProjectWorkbookValidation, "retention-old-expired")
+        is None
+    )
+    assert (
+        db.get(MaintenanceProjectWorkbookValidation, "retention-old-applied")
+        is None
+    )
+
+
+def test_validation_cleanup_limits_each_phase_to_one_fixed_batch(db, monkeypatch):
+    project = MaintenanceProject(
+        project_id="project-workbook-cleanup-batch",
+        project_code="WB-CLEANUP-BATCH",
+        display_name="合成清理批次项目",
+        lifecycle_status="ongoing",
+    )
+    db.add(project)
+    db.flush()
+    now = datetime.now(timezone.utc)
+    db.add_all(
+        [
+            MaintenanceProjectWorkbookValidation(
+                validation_id=f"cleanup-batch-{index:03d}",
+                project_id=project.project_id,
+                export_id=f"cleanup-export-{index:03d}",
+                expected_revision=0,
+                file_sha256=f"{index:064x}",
+                plan_json={"large": "plan"},
+                status="valid",
+                issues_json=[{"message": "stale"}],
+                error_workbook=None,
+                created_by="workbook_cleanup_batch_admin",
+                expires_at=now - timedelta(minutes=1),
+            )
+            for index in range(3)
+        ]
+    )
+    db.commit()
+    monkeypatch.setattr(
+        maintenance_project_workbook_adapter,
+        "VALIDATION_CLEANUP_BATCH_SIZE",
+        2,
+    )
+
+    maintenance_project_workbook_adapter.cleanup_project_workbook_validations(
+        db,
+        now=now,
+    )
+    db.commit()
+
+    statuses = list(
+        db.scalars(
+            select(MaintenanceProjectWorkbookValidation.status).order_by(
+                MaintenanceProjectWorkbookValidation.validation_id
+            )
+        )
+    )
+    assert statuses == ["expired", "expired", "valid"]
+
+
+def test_apply_and_error_download_persist_opportunistic_expiration(db):
+    client = _client(db, username="workbook_retention_paths_admin")
+    project_id, _contract = _project_and_contract(
+        client,
+        db,
+        suffix="retention-paths",
+    )
+    state = db.get(MaintenanceProjectWorkbookState, project_id)
+    db.refresh(state)
+    now = datetime.now(timezone.utc)
+    expired_valid = MaintenanceProjectWorkbookValidation(
+        validation_id="retention-apply-expired",
+        project_id=project_id,
+        export_id="retention-apply-export",
+        expected_revision=state.revision,
+        file_sha256="6" * 64,
+        plan_json={"large": "expired-plan"},
+        status="valid",
+        issues_json=[{"message": "stale"}],
+        error_workbook=None,
+        created_by="workbook_retention_paths_admin",
+        expires_at=now - timedelta(seconds=1),
+    )
+    db.add(expired_valid)
+    db.commit()
+
+    apply_response = client.post(
+        f"/api/maintenance/projects/stable/{project_id}/workbook/apply",
+        json={
+            "validation_token": expired_valid.validation_id,
+            "data_version": state.data_version,
+        },
+    )
+
+    assert apply_response.status_code == 409, apply_response.text
+    db.expire_all()
+    persisted_valid = db.get(
+        MaintenanceProjectWorkbookValidation,
+        expired_valid.validation_id,
+    )
+    assert persisted_valid.status == "expired"
+    assert persisted_valid.plan_json is None
+    assert persisted_valid.issues_json == []
+
+    expired_error = MaintenanceProjectWorkbookValidation(
+        validation_id="retention-download-expired",
+        project_id=project_id,
+        export_id="retention-download-export",
+        expected_revision=state.revision,
+        file_sha256="7" * 64,
+        plan_json=null(),
+        status="error",
+        issues_json=[{"message": "stale"}],
+        error_workbook=b"large-error-workbook",
+        created_by="workbook_retention_paths_admin",
+        expires_at=now - timedelta(seconds=1),
+    )
+    db.add(expired_error)
+    db.commit()
+
+    download_response = client.get(
+        "/api/maintenance/workbook-validations/"
+        f"{expired_error.validation_id}/errors.xlsx"
+    )
+
+    assert download_response.status_code == 404, download_response.text
+    db.expire_all()
+    persisted_error = db.get(
+        MaintenanceProjectWorkbookValidation,
+        expired_error.validation_id,
+    )
+    assert persisted_error.status == "expired"
+    assert persisted_error.issues_json == []
+    assert persisted_error.error_workbook is None
+
+
 def test_export_validate_apply_is_a_server_owned_atomic_loop(db):
     client = _client(db, username="workbook_loop_admin")
     project_id, contract = _project_and_contract(client, db, suffix="loop")
@@ -269,6 +722,13 @@ def test_export_validate_apply_is_a_server_owned_atomic_loop(db):
     assert (
         db.get(MaintenanceProjectWorkbookValidation, plan["validation_token"]).status
         == "applied"
+    )
+    assert (
+        db.get(
+            MaintenanceProjectWorkbookValidation,
+            plan["validation_token"],
+        ).plan_json
+        is None
     )
     operation_types = list(
         db.scalars(
@@ -749,8 +1209,15 @@ def test_apply_rejects_expired_wrong_project_replay_and_client_plan(db):
         db.scalar(select(func.count()).select_from(MaintenanceCollectionSnapshot)) == 0
     )
 
-    row.expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
-    db.commit()
+    db.expire_all()
+    row = db.get(MaintenanceProjectWorkbookValidation, plan["validation_token"])
+    assert row.status == "expired"
+    assert row.plan_json is None
+    fresh_plan = _validate(client, project_id, content).json()
+    body = {
+        "validation_token": fresh_plan["validation_token"],
+        "data_version": fresh_plan["data_version"],
+    }
     applied = client.post(
         f"/api/maintenance/projects/stable/{project_id}/workbook/apply",
         json=body,

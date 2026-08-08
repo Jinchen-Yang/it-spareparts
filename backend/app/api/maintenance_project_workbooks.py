@@ -35,6 +35,7 @@ from app.security import (
 )
 from app.services.maintenance_project_workbook_adapter import (
     MaintenanceProjectWorkbookAdapter,
+    cleanup_project_workbook_validations,
     workbook_preview,
 )
 from app.services.maintenance_project_workbook_v2 import ProjectWorkbookV2Error
@@ -91,6 +92,19 @@ def _safe_export_operator(ident: dict) -> str:
     return str(ident.get("sub") or ident.get("role") or "maintenance-export")[:64]
 
 
+def _run_validation_retention_cleanup(db: Session) -> None:
+    """Keep request behavior available when an opportunistic cleanup fails."""
+
+    if not isinstance(db, Session):
+        return
+    try:
+        cleanup_project_workbook_validations(db)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("项目工作簿校验记录机会式清理失败", exc_info=True)
+
+
 def _validate_project_workbook_in_worker(
     *,
     project_id: str,
@@ -105,6 +119,7 @@ def _validate_project_workbook_in_worker(
     db: Session | None = None
     try:
         db = SessionLocal()
+        _run_validation_retention_cleanup(db)
         operator = _real_operator(db, ident)
         content = FilePath(upload_path).read_bytes()
         adapter = MaintenanceProjectWorkbookAdapter(
@@ -298,6 +313,7 @@ def apply_project_workbook_plan(
     _no_store(response)
     _require_roundtrip_permissions(ctx)
     operator = _real_operator(db, ident)
+    _run_validation_retention_cleanup(db)
     adapter = MaintenanceProjectWorkbookAdapter(
         db,
         user_ctx=ctx,
@@ -349,6 +365,7 @@ def download_project_workbook_errors(
 ) -> Response:
     _require_roundtrip_permissions(ctx)
     operator = _real_operator(db, ident)
+    _run_validation_retention_cleanup(db)
     adapter = MaintenanceProjectWorkbookAdapter(
         db,
         user_ctx=ctx,
