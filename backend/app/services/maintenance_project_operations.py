@@ -13,7 +13,7 @@ import hashlib
 import json
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -435,7 +435,13 @@ def create_site_issue(
     return payload
 
 
-def list_cost_gaps(db: Session, *, project_id: str) -> dict | None:
+def list_cost_gaps(
+    db: Session,
+    *,
+    project_id: str,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict | None:
     project = db.get(MaintenanceProject, project_id)
     if project is None:
         return None
@@ -506,7 +512,20 @@ def list_cost_gaps(db: Session, *, project_id: str) -> dict | None:
                 "price_basis": line.price_basis,
             }
         )
-    return {"rows": rows, "total": len(rows)}
+    total = len(rows)
+    offset = (page - 1) * page_size
+    state = db.get(MaintenanceProjectWorkbookState, project_id)
+    return {
+        "rows": rows[offset : offset + page_size],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "data_version": (
+            state.data_version
+            if state is not None
+            else _workbook_data_version(project_id, 0)
+        ),
+    }
 
 
 def fill_manual_cost(
@@ -1152,9 +1171,28 @@ def project_workspace(
         ),
         start=Decimal("0.00"),
     )
+    contract_numbers_by_id = {
+        row["project_contract_id"]: row["contract_no"] for row in base["contracts"]
+    }
+    contract_rows = [
+        {
+            **row,
+            "amount_status": (
+                "restricted"
+                if is_field_hidden(user_ctx, "contract_amount")
+                else "missing" if row["contract_amount"] is None else "available"
+            ),
+            "received_amount": (
+                None
+                if is_field_hidden(user_ctx, "contract_amount")
+                else _money(latest_confirmed.get(row["project_contract_id"]))
+            ),
+        }
+        for row in base["contracts"]
+    ]
     project_summary = {
         **base["project"],
-        "contracts": base["contracts"],
+        "contracts": contract_rows,
         "metrics": {
             "total_contract_amount": _money(total),
             "known_contract_amount": _money(known_contract_amount),
@@ -1174,6 +1212,7 @@ def project_workspace(
             "missing_cost_lines": cost_gap_count,
         },
         "reminder_count": 0,
+        "as_of": as_of.isoformat(),
     }
     reminders = _system_tasks(
         project_id=project_id,
@@ -1235,6 +1274,16 @@ def project_workspace(
         reminders = [
             row for row in reminders if not row["rule_key"].startswith("cost")
         ]
+    if profit_restricted:
+        reminders = [
+            row
+            for row in reminders
+            if not row["rule_key"].startswith(("collection:", "cost_ratio:"))
+        ]
+    if expense_restricted:
+        reminders = [
+            row for row in reminders if not row["rule_key"].startswith("cost_ratio:")
+        ]
     if expense_restricted:
         approved_expense_rows = []
     project_summary["metrics"].update(
@@ -1278,7 +1327,9 @@ def project_workspace(
                 else project_summary["metrics"]["cost_status"]
             ),
             "cost_complete": (
-                None if cost_restricted else project_summary["metrics"]["cost_complete"]
+                None
+                if cost_restricted or expense_restricted
+                else project_summary["metrics"]["cost_complete"]
             ),
             "missing_cost_lines": (
                 None
@@ -1288,31 +1339,100 @@ def project_workspace(
         }
     )
     project_summary["reminder_count"] = len(reminders)
+    applicable_contracts_by_date: dict[date, str | None] = {}
+    part_ids = {line.part_id for _issue, line in issue_rows}
+    part_descriptions = {
+        part_id: description
+        for part_id, description in db.execute(
+            select(DimPart.id, DimPart.description).where(DimPart.id.in_(part_ids))
+        )
+    } if part_ids else {}
+
+    def contract_numbers_on(issue_date: date) -> str | None:
+        if issue_date not in applicable_contracts_by_date:
+            numbers = [
+                row["contract_no"]
+                for row in base["contracts"]
+                if row["included_in_total"]
+                and date.fromisoformat(row["effective_from"]) <= issue_date
+                and (
+                    row["effective_to"] is None
+                    or issue_date < date.fromisoformat(row["effective_to"])
+                )
+            ]
+            applicable_contracts_by_date[issue_date] = " / ".join(numbers) or None
+        return applicable_contracts_by_date[issue_date]
+
+    requisition_payload_rows = [
+        {
+            **row,
+            "line_id": row["issue_line_id"],
+            "order_no": row["issue_no"],
+            "order_date": row["issue_date"],
+            "contract_no": contract_numbers_on(date.fromisoformat(row["issue_date"])),
+            "description": part_descriptions.get(row["part_id"]),
+            "cost_status": (
+                "restricted"
+                if cost_restricted
+                else "not_counted" if not row["counts_cost"]
+                else "missing" if row["cost_amount"] is None
+                else "available"
+            ),
+        }
+        for row in requisition_rows
+    ]
+    expense_payload_rows = [
+        {
+            **expense_dict(row),
+            "expense_no": row.expense_ref,
+            "contract_no": contract_numbers_by_id.get(row.project_contract_id),
+            "category": None,
+            "reason": None,
+            "amount": _money(row.amount_ex_tax),
+            "approval_status": "approved",
+            "counts_cost": True,
+        }
+        for row in approved_expense_rows
+    ]
+    reminder_rows = [
+        {
+            **row,
+            "reminder_id": row["task_id"],
+            "type": row["rule_key"],
+            "due_date": None,
+        }
+        for row in reminders
+    ]
+    state = db.get(MaintenanceProjectWorkbookState, project_id)
+    last_exported_at = (
+        state.last_exported_at.isoformat() if state and state.last_exported_at else None
+    )
     payload = {
         "project": project_summary,
-        "requisitions": {"rows": requisition_rows, "total": len(requisition_rows)},
-        "approved_expenses": {
-            "rows": [
-                {
-                    **expense_dict(row),
-                    "counts_cost": (
-                        row.status_mapping_state == "mapped"
-                        and row.normalized_status == "approved"
-                    ),
-                }
-                for row in approved_expense_rows
-            ],
-            "total": len(approved_expense_rows),
+        "requisitions": {
+            "rows": requisition_payload_rows,
+            "total": len(requisition_payload_rows),
         },
-        "reminders": reminders,
+        "approved_expenses": {
+            "rows": expense_payload_rows,
+            "total": len(expense_payload_rows),
+        },
+        "reminders": reminder_rows,
         "workbook_preview": {
-            "protocol_version": "maintenance-project-workbook-v2",
+            "protocol_version": "2.0",
             "sheets": [
-                {"code": "overview", "name": "总览", "row_count": 1, "ownership": "system"},
-                {"code": "consumption", "name": "备件消耗", "row_count": len(requisition_rows), "ownership": "system"},
-                {"code": "expenses", "name": "报销单", "row_count": len(approved_expense_rows), "ownership": "system"},
-                {"code": "tracking", "name": "项目经理追踪", "row_count": len(reminders), "ownership": "manager"},
+                {"code": "overview", "name": "01_总览", "row_count": 1, "ownership": "append_only"},
+                {"code": "site_requisitions", "name": "02_备件消耗", "row_count": len(requisition_payload_rows), "ownership": "system"},
+                {"code": "approved_expenses", "name": "03_报销单", "row_count": len(expense_payload_rows), "ownership": "system"},
+                {"code": "manager_tracking", "name": "04_项目经理追踪与提醒", "row_count": len(reminder_rows), "ownership": "system"},
             ],
+            "latest_tracking_month": as_of.strftime("%Y-%m"),
+            "last_exported_at": last_exported_at,
+            "data_version": (
+                state.data_version
+                if state is not None
+                else _workbook_data_version(project_id, 0)
+            ),
         },
         "as_of": as_of.isoformat(),
         "completeness": completeness,
@@ -1440,13 +1560,31 @@ def project_operations(
     *,
     as_of: date,
     user_ctx: UserContext,
+    q_text: str | None = None,
+    lifecycle: str = "all",
+    reminder: str | None = None,
+    include_inactive: bool = False,
+    page: int = 1,
+    page_size: int = 24,
 ) -> dict:
     rows: list[dict] = []
+    filters = []
+    if not include_inactive:
+        filters.append(MaintenanceProject.is_active.is_(True))
+    if lifecycle != "all":
+        filters.append(MaintenanceProject.lifecycle_status == lifecycle)
+    if q_text and (search := q_text.strip()):
+        filters.append(
+            or_(
+                MaintenanceProject.project_code.icontains(search, autoescape=True),
+                MaintenanceProject.display_name.icontains(search, autoescape=True),
+            )
+        )
     project_ids = list(
         db.scalars(
             select(MaintenanceProject.project_id)
-            .where(MaintenanceProject.is_active.is_(True))
-            .order_by(MaintenanceProject.project_code)
+            .where(*filters)
+            .order_by(MaintenanceProject.project_code, MaintenanceProject.project_id)
         )
     )
     for project_id in project_ids:
@@ -1456,8 +1594,28 @@ def project_operations(
             as_of=as_of,
             user_ctx=user_ctx,
         )
-        if workspace is not None:
+        if workspace is not None and (
+            reminder is None
+            or (
+                workspace["reminders"]
+                and (
+                    reminder == "all"
+                    or any(
+                        row["type"] == reminder or row["severity"] == reminder
+                        for row in workspace["reminders"]
+                    )
+                )
+            )
+        ):
             rows.append(workspace["project"])
-    payload = {"rows": rows, "total": len(rows), "as_of": as_of.isoformat()}
+    total = len(rows)
+    offset = (page - 1) * page_size
+    payload = {
+        "rows": rows[offset : offset + page_size],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "as_of": as_of.isoformat(),
+    }
     payload["data_version"] = _payload_token(payload)
     return payload

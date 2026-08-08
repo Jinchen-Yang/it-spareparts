@@ -3,7 +3,7 @@
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -365,6 +365,8 @@ def create_project_site_issue(
 @router.get("/{project_id}/cost-gaps")
 def project_cost_gaps(
     project_id: str = Path(..., min_length=1, max_length=36),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
@@ -372,7 +374,12 @@ def project_cost_gaps(
 ) -> dict:
     if is_field_hidden(ctx, "unit_cost"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权查看或回填采购成本")
-    payload = operations.list_cost_gaps(db, project_id=project_id)
+    payload = operations.list_cost_gaps(
+        db,
+        project_id=project_id,
+        page=page,
+        page_size=page_size,
+    )
     if payload is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
     return payload
@@ -483,6 +490,14 @@ def stable_project_tasks(
 @router.get("/operations")
 def stable_project_operations(
     as_of: date | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(24, ge=1, le=200),
+    q: str | None = Query(default=None, max_length=256),
+    lifecycle: str = Query(
+        "all", pattern="^(ongoing|ended|missing|all)$"
+    ),
+    reminder: str | None = Query(default=None, min_length=1, max_length=64),
+    include_inactive: bool = False,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
@@ -492,4 +507,10 @@ def stable_project_operations(
         db,
         as_of=as_of or business_today(),
         user_ctx=ctx,
+        q_text=q,
+        lifecycle=lifecycle,
+        reminder=reminder,
+        include_inactive=include_inactive,
+        page=page,
+        page_size=page_size,
     )

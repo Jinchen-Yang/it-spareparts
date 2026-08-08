@@ -359,6 +359,17 @@ def test_confirmed_site_issue_uses_direct_then_full_purchase_window(db):
     assert metrics["site_requisition_known_cost"] == "71.46"
     assert metrics["actual_project_cost_known"] == "71.46"
     assert metrics["missing_cost_lines"] == 0
+    requisitions = {row["line_id"]: row for row in workspace["requisitions"]["rows"]}
+    assert requisitions["issue-line-direct"]["order_no"] == "ISSUE-SYNTH-001"
+    assert requisitions["issue-line-direct"]["order_date"] == "2026-05-10"
+    assert requisitions["issue-line-direct"]["contract_no"] == "XS-SITE-ISSUE-001"
+    assert requisitions["issue-line-direct"]["cost_status"] == "available"
+    assert workspace["workbook_preview"]["sheets"][0] == {
+        "code": "overview",
+        "name": "01_总览",
+        "row_count": 1,
+        "ownership": "append_only",
+    }
 
 
 def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
@@ -516,6 +527,11 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
     assert restricted_metrics["cost_status"] is None
     assert restricted["requisitions"]["rows"][0]["unit_cost"] is None
     assert restricted["requisitions"]["rows"][0]["reference_samples"] == []
+    assert restricted["requisitions"]["rows"][0]["cost_status"] == "restricted"
+    assert not any(
+        row["rule_key"].startswith(("collection:", "cost_ratio:"))
+        for row in restricted["reminders"]
+    )
 
 
 def test_only_explicitly_mapped_approved_expense_counts(db):
@@ -576,6 +592,9 @@ def test_only_explicitly_mapped_approved_expense_counts(db):
     assert metrics["approved_expense"] == "50.00"
     assert metrics["actual_project_cost_known"] == "50.00"
     assert workspace["approved_expenses"]["total"] == 1
+    assert workspace["approved_expenses"]["rows"][0]["contract_no"] == "XS-EXPENSE-001"
+    assert workspace["approved_expenses"]["rows"][0]["amount"] == "50.00"
+    assert workspace["approved_expenses"]["rows"][0]["approval_status"] == "approved"
     assert workspace["completeness"]["status"] == "incomplete"
     assert {row["code"] for row in workspace["completeness"]["issues"]} >= {
         "unmapped_expense_status"
@@ -654,3 +673,21 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
     )
     assert operations.status_code == 200, operations.text
     assert operations.json()["total"] == 3
+    assert operations.json()["page"] == 1
+    assert operations.json()["page_size"] == 24
+    assert operations.json()["rows"][0]["as_of"] == "2026-07-31"
+
+    filtered = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={
+            "as_of": "2026-07-31",
+            "q": "threshold-101",
+            "lifecycle": "missing",
+            "reminder": "cost_ratio:red",
+            "page": 1,
+            "page_size": 1,
+        },
+    )
+    assert filtered.status_code == 200, filtered.text
+    assert filtered.json()["total"] == 1
+    assert filtered.json()["rows"][0]["project_id"] == "project-threshold-101"

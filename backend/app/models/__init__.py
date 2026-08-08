@@ -17,6 +17,16 @@ from app.models.maintenance_project import (
     MaintenanceProjectAuditLog,
     MaintenanceProjectContract,
 )
+from app.models.maintenance_project_operations import (
+    MaintenanceCollectionSnapshot,
+    MaintenanceProjectExpenseAttribution,
+    MaintenanceProjectOperationAudit,
+    MaintenanceProjectWorkbookOperation,
+    MaintenanceProjectWorkbookState,
+    MaintenanceProjectWorkbookValidation,
+    MaintenanceSiteIssue,
+    MaintenanceSiteIssueLine,
+)
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -63,6 +73,14 @@ __all__ = [
     "MaintenanceProject",
     "MaintenanceProjectAuditLog",
     "MaintenanceProjectContract",
+    "MaintenanceCollectionSnapshot",
+    "MaintenanceProjectExpenseAttribution",
+    "MaintenanceProjectOperationAudit",
+    "MaintenanceProjectWorkbookOperation",
+    "MaintenanceProjectWorkbookState",
+    "MaintenanceProjectWorkbookValidation",
+    "MaintenanceSiteIssue",
+    "MaintenanceSiteIssueLine",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",
