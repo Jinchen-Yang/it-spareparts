@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -1225,7 +1226,7 @@ def test_empty_foundation_schema_downgrade_and_upgrade_rebuilds_full_contract(db
         with engine.connect() as connection:
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "e2f4a6c8b1d3"
+                == ScriptDirectory.from_config(cfg).get_current_head()
             )
             assert connection.execute(
                 text(
@@ -1269,6 +1270,41 @@ def test_empty_foundation_schema_downgrade_and_upgrade_rebuilds_full_contract(db
                 ).scalars()
             )
             assert key_constraints <= constraints
+            dual_tax_columns = set(
+                connection.execute(
+                    text(
+                        "SELECT table_name || '.' || column_name "
+                        "FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() AND ("
+                        "(table_name = 'maintenance_site_issue_line' AND "
+                        "column_name IN ('unit_cost_ex_tax', 'unit_cost_inc_tax', "
+                        "'cost_amount_ex_tax', 'cost_amount_inc_tax')) OR "
+                        "(table_name = 'maintenance_project_expense_attribution' AND "
+                        "column_name = 'amount_inc_tax'))"
+                    )
+                ).scalars()
+            )
+            assert dual_tax_columns == {
+                "maintenance_site_issue_line.unit_cost_ex_tax",
+                "maintenance_site_issue_line.unit_cost_inc_tax",
+                "maintenance_site_issue_line.cost_amount_ex_tax",
+                "maintenance_site_issue_line.cost_amount_inc_tax",
+                "maintenance_project_expense_attribution.amount_inc_tax",
+            }
+            strict_status_constraints = dict(
+                connection.execute(
+                    text(
+                        "SELECT conname, convalidated FROM pg_constraint "
+                        "WHERE conname IN ("
+                        "'ck_maintenance_site_issue_unmapped_unknown', "
+                        "'ck_maintenance_project_expense_unmapped_unknown')"
+                    )
+                ).all()
+            )
+            assert strict_status_constraints == {
+                "ck_maintenance_site_issue_unmapped_unknown": False,
+                "ck_maintenance_project_expense_unmapped_unknown": False,
+            }
     finally:
         alembic_command.upgrade(cfg, "head")
 
