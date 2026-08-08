@@ -268,6 +268,8 @@ def test_summary_uses_latest_monthly_cumulative_snapshot_not_month_sum():
     assert summary["confirmed_cumulative_collection_amount"] == Decimal("40000.00")
     assert summary["collection_rate"] == Decimal("0.4")
     assert summary["known_consumption_cost"] == Decimal("0")
+    assert summary["approved_expense"] == Decimal("1000.00")
+    assert summary["known_project_cost"] == Decimal("1000.00")
     assert summary["missing_cost_rows"] == 1
     assert summary["cost_alert"] == "incomplete"
 
@@ -275,18 +277,39 @@ def test_summary_uses_latest_monthly_cumulative_snapshot_not_month_sum():
 @pytest.mark.parametrize(
     ("cost", "expected"),
     [
-        ("80000.00", "green"),
+        ("79000.00", "green"),
+        ("80000.00", "yellow"),
         ("80000.01", "yellow"),
         ("100000.00", "yellow"),
         ("100000.01", "red"),
     ],
 )
-def test_cost_alert_thresholds_are_strictly_over_80_and_100_percent(cost, expected):
+def test_cost_alert_thresholds_include_80_and_exclude_only_over_100(cost, expected):
     workspace = _workspace()
+    workspace["expenses"] = []
     workspace["consumptions"][0]["unit_cost"] = Decimal(cost)
     workspace["consumptions"][0]["cost_amount"] = Decimal(cost)
     summary = workbook_v2.compute_project_summary(workspace)
     assert summary["cost_alert"] == expected
+
+
+def test_summary_fails_closed_when_any_contract_amount_is_missing():
+    workspace = _workspace()
+    workspace["contracts"].append({
+        "project_contract_id": "project-contract-missing",
+        "contract_no": "XSDD-MISSING",
+        "contract_amount": None,
+        "version": 1,
+    })
+
+    summary = workbook_v2.compute_project_summary(workspace)
+
+    assert summary["known_contract_amount"] == Decimal("100000.00")
+    assert summary["contract_amount_complete"] is False
+    assert summary["total_contract_amount"] is None
+    assert summary["collection_rate"] is None
+    assert summary["cost_rate_lower_bound"] is None
+    assert summary["cost_alert"] == "no_contract_amount"
 
 
 def test_signed_metadata_and_unchanged_upload_is_noop():
@@ -406,6 +429,68 @@ def test_readonly_tamper_or_missing_existing_collection_is_rejected(mutation):
     assert caught.value.status_code == 422
 
 
+@pytest.mark.parametrize("cell", ["B1", "B6", "B8", "B14"])
+def test_summary_tamper_is_rejected(cell):
+    workspace = _workspace()
+    exported = workbook_v2.build_project_workbook(
+        workspace,
+        hmac_key=HMAC_KEY,
+        exported_by="tester",
+    )
+    tampered = _edit_workbook(
+        exported.content,
+        lambda book: setattr(book["01_总览"][cell], "value", "tampered"),
+    )
+
+    with pytest.raises(workbook_v2.ProjectWorkbookV2Error, match="项目摘要被修改"):
+        workbook_v2.validate_project_workbook(
+            tampered,
+            workspace=workspace,
+            hmac_key=HMAC_KEY,
+        )
+
+
+def test_sparse_far_away_cell_is_rejected_before_rectangular_iteration():
+    workspace = _workspace()
+    exported = workbook_v2.build_project_workbook(
+        workspace,
+        hmac_key=HMAC_KEY,
+        exported_by="tester",
+    )
+    unsafe = _edit_workbook(
+        exported.content,
+        lambda book: setattr(book["02_备件消耗"]["XFD1048576"], "value", "x"),
+    )
+
+    with pytest.raises(workbook_v2.ProjectWorkbookV2Error, match="声明范围"):
+        workbook_v2.validate_project_workbook(
+            unsafe,
+            workspace=workspace,
+            hmac_key=HMAC_KEY,
+        )
+
+
+def test_formula_prefix_business_text_roundtrips_without_digest_drift():
+    workspace = _workspace()
+    workspace["project"]["project_name"] = "-医院维保项目"
+    workspace["collections"][0]["remark"] = "@一期款"
+    workspace["consumptions"][0]["part_name"] = "+备件一"
+    workspace["tasks"][0]["title"] = "=确认下月巡检"
+    exported = workbook_v2.build_project_workbook(
+        workspace,
+        hmac_key=HMAC_KEY,
+        exported_by="tester",
+    )
+
+    validation = workbook_v2.validate_project_workbook(
+        exported.content,
+        workspace=workspace,
+        hmac_key=HMAC_KEY,
+    )
+
+    assert validation.unchanged is True
+
+
 def test_stale_revision_is_409_and_validation_failure_has_zero_writes():
     original = _workspace(revision=7)
     exported = workbook_v2.build_project_workbook(
@@ -433,6 +518,17 @@ def test_stale_revision_is_409_and_validation_failure_has_zero_writes():
         workbook_v2.apply_project_workbook(validation, repository=repository)
     assert apply_error.value.status_code == 409
     assert repository.atomic_calls == []
+
+    adapter = _FakeEndpointAdapter(_workspace(revision=8))
+    with pytest.raises(workbook_v2.ProjectWorkbookV2Error) as wrapper_error:
+        workbook_v2.validate_and_store_project_workbook(
+            "project-001",
+            uploaded,
+            adapter=adapter,
+            hmac_key=HMAC_KEY,
+        )
+    assert wrapper_error.value.status_code == 409
+    assert adapter.errors == {}
 
     tampered = _edit_workbook(
         uploaded,
@@ -558,6 +654,11 @@ def test_error_workbook_is_first_sheet_error_list_and_cannot_be_imported():
     [
         ("xl/vbaProject.bin", b"macro", "宏或外部链接"),
         ("xl/externalLinks/externalLink1.xml", b"<externalLink/>", "宏或外部链接"),
+        (
+            "xl/worksheets/_rels/synthetic.xml.rels",
+            b'<Relationship TargetMode = "External" Target="https://example.invalid"/>',
+            "宏或外部链接",
+        ),
         ("xl/media/compression-bomb.bin", b"0" * 2_000_000, "ZIP bomb"),
     ],
 )
@@ -575,6 +676,35 @@ def test_macro_external_link_and_zip_bomb_are_rejected(member, payload, message)
             hmac_key=HMAC_KEY,
         )
     assert message in str(caught.value)
+
+
+def test_huge_cumulative_amount_is_a_controlled_validation_error():
+    workspace = _workspace()
+    exported = workbook_v2.build_project_workbook(
+        workspace,
+        hmac_key=HMAC_KEY,
+        exported_by="tester",
+    )
+    uploaded = _append_collection(exported.content)
+
+    def set_huge_amount(book):
+        sheet = book["01_总览"]
+        table = sheet.tables["tbl_collections_v2"]
+        min_col, min_row, max_col, max_row = range_boundaries(table.ref)
+        headers = [sheet.cell(min_row, col).value for col in range(min_col, max_col + 1)]
+        target = next(
+            row for row in range(min_row + 1, max_row + 1)
+            if sheet.cell(row, headers.index("操作") + 1).value == "CREATE"
+        )
+        sheet.cell(target, headers.index("累计回款金额") + 1, "1e100")
+
+    with pytest.raises(workbook_v2.ProjectWorkbookV2Error) as caught:
+        workbook_v2.validate_project_workbook(
+            _edit_workbook(uploaded, set_huge_amount),
+            workspace=workspace,
+            hmac_key=HMAC_KEY,
+        )
+    assert caught.value.issues[0].code == "invalid_cumulative_amount"
 
 
 def test_cross_version_upload_is_controlled_422_and_hmac_key_has_no_default():

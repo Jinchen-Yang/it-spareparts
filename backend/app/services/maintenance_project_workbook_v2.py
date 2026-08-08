@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import re
 import uuid
 import zipfile
@@ -47,6 +48,9 @@ MAX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
 MAX_ZIP_MEMBERS = 256
 MAX_COMPRESSION_RATIO = 200
 MAX_ROWS_PER_TABLE = 20_000
+MAX_WORKSHEET_ROWS = MAX_ROWS_PER_TABLE + 200
+MAX_WORKSHEET_COLUMNS = 64
+MAX_DECLARED_CELLS = 500_000
 MAX_CELL_CHARS = 32_767
 
 CONTRACT_TABLE = "tbl_project_contracts_v2"
@@ -275,7 +279,13 @@ def _number(value: Any) -> float | None:
         raise ProjectWorkbookV2Error(f"金额或数量不是有效数字：{value}") from exc
     if not number.is_finite():
         raise ProjectWorkbookV2Error("金额或数量不能是 NaN 或 Infinity")
-    return float(number)
+    try:
+        rendered = float(number)
+    except (OverflowError, ValueError) as exc:
+        raise ProjectWorkbookV2Error("金额或数量超过工作簿安全范围") from exc
+    if not math.isfinite(rendered):
+        raise ProjectWorkbookV2Error("金额或数量超过工作簿安全范围")
+    return rendered
 
 
 def _iso(value: Any) -> str:
@@ -298,7 +308,7 @@ def _iso(value: Any) -> str:
 
 def _canonical(rows: Iterable[Sequence[Any]]) -> str:
     return json.dumps(
-        [[_iso(value) for value in row] for row in rows],
+        [[_iso(_safe_text(value)) for value in row] for row in rows],
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -306,7 +316,10 @@ def _canonical(rows: Iterable[Sequence[Any]]) -> str:
 
 def _digest(rows_by_table: Mapping[str, Sequence[Sequence[Any]]]) -> str:
     payload = {
-        table: [[_iso(value) for value in row] for row in rows_by_table[table]]
+        table: [
+            [_iso(_safe_text(value)) for value in row]
+            for row in rows_by_table[table]
+        ]
         for table in sorted(rows_by_table)
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -321,6 +334,15 @@ def _metadata_signature(metadata: Mapping[str, str], hmac_key: bytes) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hmac.new(hmac_key, payload, hashlib.sha256).hexdigest()
+
+
+def _safe_metadata(metadata: Mapping[str, Any]) -> dict[str, str]:
+    """Return exactly the strings that will be written into the metadata table."""
+
+    return {
+        str(key): str(_safe_text(str(value)))
+        for key, value in metadata.items()
+    }
 
 
 def preview_project_workbook(workspace: Mapping[str, Any]) -> dict[str, int]:
@@ -352,10 +374,19 @@ def preview_project_workbook(workspace: Mapping[str, Any]) -> dict[str, int]:
 def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
     """Compute project KPIs without double-counting monthly cumulative snapshots."""
 
-    total_contract_amount = sum(
-        (Decimal(str(row.get("contract_amount") or 0)) for row in workspace.get("contracts") or []),
+    contracts = list(workspace.get("contracts") or [])
+    known_contract_amount = sum(
+        (
+            Decimal(str(row["contract_amount"]))
+            for row in contracts
+            if row.get("contract_amount") is not None
+        ),
         Decimal("0"),
     )
+    contract_amount_complete = bool(contracts) and all(
+        row.get("contract_amount") is not None for row in contracts
+    )
+    total_contract_amount = known_contract_amount if contract_amount_complete else None
     as_of = workspace.get("as_of")
     as_of_month = _month_text(as_of) or "9999-12"
     latest: dict[str, tuple[str, Decimal]] = {}
@@ -381,27 +412,45 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
             missing_cost_rows += 1
         if row.get("cost_amount") is not None:
             known_cost += Decimal(str(row["cost_amount"]))
+    approved_expense = sum(
+        (
+            Decimal(str(row["amount"]))
+            for row in workspace.get("expenses") or []
+            if str(row.get("approval_status") or "") == "已审批"
+            and row.get("amount") is not None
+        ),
+        Decimal("0"),
+    )
+    known_project_cost = known_cost + approved_expense
     collection_rate = (
-        confirmed / total_contract_amount if total_contract_amount > 0 else None
+        confirmed / total_contract_amount
+        if total_contract_amount is not None and total_contract_amount > 0
+        else None
     )
     cost_rate = (
-        known_cost / total_contract_amount if total_contract_amount > 0 else None
+        known_project_cost / total_contract_amount
+        if total_contract_amount is not None and total_contract_amount > 0
+        else None
     )
-    if missing_cost_rows:
-        cost_alert = "incomplete"
-    elif cost_rate is None:
+    if cost_rate is None:
         cost_alert = "no_contract_amount"
     elif cost_rate > Decimal("1"):
         cost_alert = "red"
-    elif cost_rate > Decimal("0.8"):
+    elif cost_rate >= Decimal("0.8"):
         cost_alert = "yellow"
+    elif missing_cost_rows:
+        cost_alert = "incomplete"
     else:
         cost_alert = "green"
     return {
         "total_contract_amount": total_contract_amount,
+        "known_contract_amount": known_contract_amount,
+        "contract_amount_complete": contract_amount_complete,
         "confirmed_cumulative_collection_amount": confirmed,
         "collection_rate": collection_rate,
         "known_consumption_cost": known_cost,
+        "approved_expense": approved_expense,
+        "known_project_cost": known_project_cost,
         "missing_cost_rows": missing_cost_rows,
         "cost_rate_lower_bound": cost_rate,
         "cost_alert": cost_alert,
@@ -531,10 +580,10 @@ def _task_rows(workspace: Mapping[str, Any]):
     ) for row in workspace.get("tasks") or []]
 
 
-def _summary_sheet(sheet, workspace, contracts, collections):
+def _summary_rows(workspace: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
     project = workspace["project"]
     metrics = compute_project_summary(workspace)
-    summary = (
+    return (
         ("项目编号", project.get("project_code")),
         ("项目名称", project.get("project_name")),
         ("项目经理", project.get("manager_name")),
@@ -547,17 +596,23 @@ def _summary_sheet(sheet, workspace, contracts, collections):
         ("已确认累计回款", _number(metrics["confirmed_cumulative_collection_amount"])),
         ("回款进度", _number(metrics["collection_rate"])),
         ("已知实际消耗", _number(metrics["known_consumption_cost"])),
+        ("已审批报销", _number(metrics["approved_expense"])),
+        ("项目实际成本（已知）", _number(metrics["known_project_cost"])),
         ("缺少价格成本行", metrics["missing_cost_rows"]),
-        ("消耗/合同额（下界）", _number(metrics["cost_rate_lower_bound"])),
+        ("项目成本/合同额（已知下界）", _number(metrics["cost_rate_lower_bound"])),
         ("成本预警", metrics["cost_alert"]),
     )
+
+
+def _summary_sheet(sheet, workspace, contracts, collections):
+    summary = _summary_rows(workspace)
     for row_index, (label, value) in enumerate(summary, 1):
         sheet.cell(row_index, 1, label).fill = _SUBHEADER_FILL
         sheet.cell(row_index, 1).font = Font(bold=True)
         sheet.cell(row_index, 2, _safe_text(value))
-    for row_index in (6, 7, 9):
+    for row_index in (6, 7, 9, 10, 11):
         sheet.cell(row_index, 2).number_format = _MONEY_FORMAT
-    for row_index in (8, 11):
+    for row_index in (8, 13):
         sheet.cell(row_index, 2).number_format = "0.00%"
     contract_start = len(summary) + 3
     _table(
@@ -669,8 +724,9 @@ def build_project_workbook(
         EXPENSE_TABLE: expenses,
         TASK_TABLE: tasks,
     }
+    summary_rows = _summary_rows(workspace)
     entity_versions = _entity_versions(workspace)
-    metadata = {
+    metadata = _safe_metadata({
         "protocol_id": PROTOCOL_ID,
         "schema_version": SCHEMA_VERSION,
         "error_report": "false",
@@ -684,6 +740,7 @@ def build_project_workbook(
         "data_version": str(workspace.get("data_version") or ""),
         "table_map": json.dumps(_TABLE_MAP, ensure_ascii=False, sort_keys=True),
         "snapshot_digest": _digest(snapshot_rows),
+        "summary_digest": _digest({"summary": summary_rows}),
         "entity_versions_digest": hashlib.sha256(
             _canonical(entity_versions).encode("utf-8")
         ).hexdigest(),
@@ -691,7 +748,7 @@ def build_project_workbook(
         "collection_client_ids_digest": hashlib.sha256(
             _canonical([(value,) for value in collection_client_ids]).encode("utf-8")
         ).hexdigest(),
-    }
+    })
     metadata["metadata_hmac"] = _metadata_signature(metadata, key)
 
     book = Workbook()
@@ -811,7 +868,7 @@ def build_error_workbook(
     if not issue_rows:
         issue_rows = [("workbook_invalid", "工作簿校验失败", None, None, None)]
     empty_digest = hashlib.sha256(b"[]").hexdigest()
-    metadata = {
+    metadata = _safe_metadata({
         "protocol_id": PROTOCOL_ID,
         "schema_version": SCHEMA_VERSION,
         "error_report": "true",
@@ -825,12 +882,13 @@ def build_error_workbook(
         "data_version": "error-report",
         "table_map": "{}",
         "snapshot_digest": empty_digest,
+        "summary_digest": empty_digest,
         "entity_versions_digest": empty_digest,
         "collection_existing_count": "0",
         "collection_client_ids_digest": empty_digest,
         "source_sha256": source_sha256,
         "error_count": str(len(issue_rows)),
-    }
+    })
     metadata["metadata_hmac"] = _metadata_signature(metadata, key)
     book = Workbook()
     try:
@@ -903,8 +961,27 @@ def _assert_safe_package(content: bytes) -> None:
             if folded.endswith((".xml", ".rels")):
                 raw = archive.read(info)
                 lower = raw.lower()
-                if b"macroenabled" in lower or b'targetmode="external"' in lower:
+                if b"macroenabled" in lower or re.search(
+                    rb"targetmode\s*=\s*['\"]\s*external\s*['\"]",
+                    lower,
+                ):
                     raise ProjectWorkbookV2Error("不允许宏或外部链接工作簿")
+
+
+def _assert_safe_dimensions(book) -> None:
+    """Reject sparse far-away cells before any rectangular worksheet iteration."""
+
+    for sheet in book.worksheets:
+        max_row = int(sheet.max_row or 0)
+        max_column = int(sheet.max_column or 0)
+        if (
+            max_row > MAX_WORKSHEET_ROWS
+            or max_column > MAX_WORKSHEET_COLUMNS
+            or max_row * max_column > MAX_DECLARED_CELLS
+        ):
+            raise ProjectWorkbookV2Error(
+                f"{sheet.title} 的声明范围超过工作簿安全上限"
+            )
 
 
 def _read_table(book, sheet_name: str, table_name: str, headers: Sequence[str]):
@@ -944,6 +1021,7 @@ def _read_metadata(book) -> dict[str, str]:
         "export_id",
         "table_map",
         "snapshot_digest",
+        "summary_digest",
         "entity_versions_digest",
         "collection_existing_count",
         "collection_client_ids_digest",
@@ -980,7 +1058,11 @@ def _parse_positive_decimal(value: Any, *, row: int) -> Decimal:
         amount = Decimal(str(value))
     except (InvalidOperation, ValueError):
         amount = Decimal("NaN")
-    if not amount.is_finite() or amount <= 0:
+    if (
+        not amount.is_finite()
+        or amount <= 0
+        or amount >= Decimal("1000000000000")
+    ):
         _raise_issue(
             "invalid_cumulative_amount",
             "累计回款金额必须大于 0",
@@ -988,7 +1070,16 @@ def _parse_positive_decimal(value: Any, *, row: int) -> Decimal:
             row=row,
             column="累计回款金额",
         )
-    return amount.quantize(Decimal("0.01"))
+    try:
+        return amount.quantize(Decimal("0.01"))
+    except InvalidOperation:
+        _raise_issue(
+            "invalid_cumulative_amount",
+            "累计回款金额超过安全范围",
+            sheet="01_总览",
+            row=row,
+            column="累计回款金额",
+        )
 
 
 def validate_project_workbook(
@@ -1023,6 +1114,7 @@ def validate_project_workbook(
             raise ProjectWorkbookV2Error("工作簿元数据签名无效；请重新导出")
         if tuple(book.sheetnames) != SHEET_NAMES:
             raise ProjectWorkbookV2Error("工作表名称、顺序或数量不符合 v2 协议")
+        _assert_safe_dimensions(book)
         visible = tuple(sheet.title for sheet in book.worksheets if sheet.sheet_state == "visible")
         if visible != VISIBLE_SHEETS:
             raise ProjectWorkbookV2Error("可见工作表必须严格为项目四表")
@@ -1049,6 +1141,20 @@ def validate_project_workbook(
                 raise ProjectWorkbookV2Error(f"{sheet_name} 的 Excel Table 名称或数量不符合协议")
         if json.loads(metadata["table_map"]) != {key: list(value) for key, value in _TABLE_MAP.items()}:
             raise ProjectWorkbookV2Error("工作簿数据表映射被修改")
+
+        expected_summary_rows = len(_summary_rows(workspace))
+        summary_rows = [
+            (
+                book["01_总览"].cell(row, 1).value,
+                book["01_总览"].cell(row, 2).value,
+            )
+            for row in range(1, expected_summary_rows + 1)
+        ]
+        if not hmac.compare_digest(
+            _digest({"summary": summary_rows}),
+            metadata["summary_digest"],
+        ):
+            raise ProjectWorkbookV2Error("01_总览项目摘要被修改；请重新导出")
 
         current_project_id = str((workspace.get("project") or {}).get("project_id") or "")
         if metadata["project_id"] != current_project_id:
@@ -1343,6 +1449,8 @@ def validate_and_store_project_workbook(
                 status_code=409,
             )
     except ProjectWorkbookV2Error as exc:
+        if exc.status_code == 409:
+            raise
         validation_id = str(uuid.uuid4())
         try:
             source_hash = hashlib.sha256(content).hexdigest()
