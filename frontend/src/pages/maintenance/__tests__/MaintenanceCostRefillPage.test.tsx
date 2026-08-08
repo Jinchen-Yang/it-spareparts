@@ -92,7 +92,21 @@ beforeEach(() => {
       data_version: "v1",
     },
   });
-  updateMaintenanceCostGap.mockResolvedValue({ data: { ...gap, current_unit_cost: 92 } });
+  updateMaintenanceCostGap.mockResolvedValue({
+    data: {
+      issue_line_id: "line-1",
+      version: 8,
+      unit_cost: 103.96,
+      cost_amount: 207.92,
+      unit_cost_ex_tax: 92,
+      unit_cost_inc_tax: 103.96,
+      cost_amount_ex_tax: 184,
+      cost_amount_inc_tax: 207.92,
+      cost_source: "manual",
+      manual_applied: true,
+      resolution: "manual",
+    },
+  });
   recomputeMaintenanceCostGaps.mockResolvedValue({
     data: { resolved: 0, remaining: 1, data_version: "v7" },
   });
@@ -212,6 +226,7 @@ describe("MaintenanceCostRefillPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
     const dialog = await screen.findByRole("dialog", { name: "回填成本" });
     fireEvent.click(within(dialog).getByRole("button", { name: "采用采购 ±7 天加权参考" }));
+    expect(within(dialog).getByTestId("inc-tax-unit-cost-preview")).toHaveTextContent("¥103.96");
     fireEvent.change(within(dialog).getByLabelText("回填原因"), {
       target: { value: "已核对采购发票" },
     });
@@ -230,6 +245,25 @@ describe("MaintenanceCostRefillPage", () => {
     expect(await screen.findByText("成本已回填")).toBeInTheDocument();
   });
 
+  it("未税输入变化时按 13% 和 HALF_UP 实时预览含税单位成本", async () => {
+    render(
+      <MemoryRouter>
+        <MaintenanceCostRefillPage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("PN-MISSING");
+    fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
+    const dialog = await screen.findByRole("dialog", { name: "回填成本" });
+    const input = within(dialog).getByLabelText("未税单位成本");
+    fireEvent.change(input, { target: { value: "100.5" } });
+
+    expect(within(dialog).getByTestId("inc-tax-unit-cost-preview"))
+      .toHaveTextContent("¥113.57");
+    expect(within(dialog).getByText(/13%/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/HALF_UP/)).toBeInTheDocument();
+  });
+
   it("人工保存前出现系统证据时明确提示采用系统价格", async () => {
     updateMaintenanceCostGap.mockResolvedValueOnce({
       data: {
@@ -237,6 +271,10 @@ describe("MaintenanceCostRefillPage", () => {
         version: 8,
         unit_cost: "92.00",
         cost_amount: "184.00",
+        unit_cost_ex_tax: "81.42",
+        unit_cost_inc_tax: "92.00",
+        cost_amount_ex_tax: "162.83",
+        cost_amount_inc_tax: "184.00",
         cost_source: "purchase_window",
         manual_applied: false,
         resolution: "automatic_evidence",

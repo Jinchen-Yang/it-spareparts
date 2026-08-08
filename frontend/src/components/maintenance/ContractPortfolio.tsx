@@ -51,9 +51,20 @@ export default function ContractPortfolio({
             alignItems: "baseline", flexWrap: "wrap",
           }}>
             <strong style={{ overflowWrap: "anywhere" }}>{contract.contract_no}</strong>
-            <span style={{ fontVariantNumeric: "tabular-nums" }}>
-              {contract.amount_status === "restricted" ? "—" : money(contract.contract_amount)}
-            </span>
+            {contract.contract_amount_basis === "inc_tax" ? (
+              <span style={{ display: "inline-flex", alignItems: "baseline", gap: 6 }}>
+                <span style={{ color: "var(--mb-text-3)", fontSize: 12 }}>
+                  合同额（含税）
+                </span>
+                <span style={{ fontVariantNumeric: "tabular-nums" }}>
+                  {contract.amount_status === "restricted" ? "—" : money(contract.contract_amount)}
+                </span>
+              </span>
+            ) : (
+              <span style={{ color: "var(--mb-warning)", fontSize: 12 }}>
+                合同额税口径不可确认
+              </span>
+            )}
           </div>
           <div style={{ color: "var(--mb-text-3)", fontSize: 12, marginTop: 3 }}>
             原始状态：{contract.contract_status?.trim() || "未提供"}

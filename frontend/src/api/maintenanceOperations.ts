@@ -8,6 +8,7 @@ export interface MaintenanceContractSummary {
   contract_id: string;
   contract_no: string;
   contract_amount: number | null;
+  contract_amount_basis: "inc_tax" | null;
   contract_status: string | null;
   status_mapping_state: "mapped" | "unmapped";
   included_in_total: boolean;
@@ -19,12 +20,20 @@ export interface MaintenanceContractSummary {
 export interface MaintenanceOperationsMetrics {
   total_contract_amount: number | null;
   known_contract_amount: number | null;
+  contract_amount_basis: "inc_tax" | null;
   contract_amount_complete: boolean | null;
   received_amount: number | null;
   collection_progress_pct: number | null;
   site_requisition_known_cost: number | null;
+  site_requisition_known_cost_ex_tax: number | null;
+  site_requisition_known_cost_inc_tax: number | null;
   approved_expense: number | null;
+  approved_expense_ex_tax: number | null;
+  approved_expense_inc_tax: number | null;
   actual_project_cost_known: number | null;
+  actual_project_cost_known_ex_tax: number | null;
+  actual_project_cost_known_inc_tax: number | null;
+  cost_progress_basis: "inc_tax" | null;
   cost_rate_lower_bound_pct: number | null;
   cost_status: "normal" | "yellow" | "red" | "unknown" | null;
   cost_complete: boolean | null;
@@ -64,6 +73,10 @@ export interface MaintenanceSiteRequisitionRow {
   quantity: number | null;
   unit_cost: number | null;
   cost_amount: number | null;
+  unit_cost_ex_tax: number | null;
+  unit_cost_inc_tax: number | null;
+  cost_amount_ex_tax: number | null;
+  cost_amount_inc_tax: number | null;
   cost_source: string | null;
   cost_status: "available" | "missing" | "restricted" | "not_counted" | string;
 }
@@ -78,6 +91,8 @@ export interface MaintenanceApprovedExpenseRow {
   category?: string | null;
   expense_reason?: string | null;
   amount: number | null;
+  amount_ex_tax: number | null;
+  amount_inc_tax: number | null;
   approval_status: "approved" | string;
 }
 
@@ -215,8 +230,12 @@ export interface MaintenanceCostGapUpdate {
 export interface MaintenanceCostGapUpdateResult {
   issue_line_id: string;
   version: number;
-  unit_cost: number | string | null;
-  cost_amount: number | string | null;
+  unit_cost: number | null;
+  cost_amount: number | null;
+  unit_cost_ex_tax: number | null;
+  unit_cost_inc_tax: number | null;
+  cost_amount_ex_tax: number | null;
+  cost_amount_inc_tax: number | null;
   cost_source: string | null;
   manual_applied: boolean;
   resolution: "manual" | "automatic_evidence" | string;
@@ -255,27 +274,57 @@ function finiteNumberOrNull(value: unknown): number | null {
   return parsed;
 }
 
+function incTaxBasisOrNull(value: unknown): "inc_tax" | null {
+  return value === "inc_tax" ? "inc_tax" : null;
+}
+
 function normalizeContract(
   contract: MaintenanceContractSummary,
 ): MaintenanceContractSummary {
+  const amountRestricted = contract.amount_status === "restricted";
   return {
     ...contract,
-    contract_amount: finiteNumberOrNull(contract.contract_amount),
+    contract_amount: amountRestricted ? null : finiteNumberOrNull(contract.contract_amount),
+    contract_amount_basis: incTaxBasisOrNull(contract.contract_amount_basis),
     received_amount: finiteNumberOrNull(contract.received_amount),
   };
 }
 
 function normalizeMetrics(metrics: MaintenanceOperationsMetrics): MaintenanceOperationsMetrics {
+  const contractRestricted = metrics.contract_amount_complete === null;
+  const costRestricted = metrics.cost_complete === null;
   return {
     ...metrics,
-    total_contract_amount: finiteNumberOrNull(metrics.total_contract_amount),
-    known_contract_amount: finiteNumberOrNull(metrics.known_contract_amount),
+    total_contract_amount: contractRestricted
+      ? null : finiteNumberOrNull(metrics.total_contract_amount),
+    known_contract_amount: contractRestricted
+      ? null : finiteNumberOrNull(metrics.known_contract_amount),
+    contract_amount_basis: incTaxBasisOrNull(metrics.contract_amount_basis),
     received_amount: finiteNumberOrNull(metrics.received_amount),
-    collection_progress_pct: finiteNumberOrNull(metrics.collection_progress_pct),
-    site_requisition_known_cost: finiteNumberOrNull(metrics.site_requisition_known_cost),
-    approved_expense: finiteNumberOrNull(metrics.approved_expense),
-    actual_project_cost_known: finiteNumberOrNull(metrics.actual_project_cost_known),
-    cost_rate_lower_bound_pct: finiteNumberOrNull(metrics.cost_rate_lower_bound_pct),
+    collection_progress_pct: contractRestricted
+      ? null : finiteNumberOrNull(metrics.collection_progress_pct),
+    site_requisition_known_cost: costRestricted
+      ? null : finiteNumberOrNull(metrics.site_requisition_known_cost),
+    site_requisition_known_cost_ex_tax: costRestricted
+      ? null : finiteNumberOrNull(metrics.site_requisition_known_cost_ex_tax),
+    site_requisition_known_cost_inc_tax: costRestricted
+      ? null : finiteNumberOrNull(metrics.site_requisition_known_cost_inc_tax),
+    approved_expense: costRestricted
+      ? null : finiteNumberOrNull(metrics.approved_expense),
+    approved_expense_ex_tax: costRestricted
+      ? null : finiteNumberOrNull(metrics.approved_expense_ex_tax),
+    approved_expense_inc_tax: costRestricted
+      ? null : finiteNumberOrNull(metrics.approved_expense_inc_tax),
+    actual_project_cost_known: costRestricted
+      ? null : finiteNumberOrNull(metrics.actual_project_cost_known),
+    actual_project_cost_known_ex_tax: costRestricted
+      ? null : finiteNumberOrNull(metrics.actual_project_cost_known_ex_tax),
+    actual_project_cost_known_inc_tax: costRestricted
+      ? null : finiteNumberOrNull(metrics.actual_project_cost_known_inc_tax),
+    cost_progress_basis: incTaxBasisOrNull(metrics.cost_progress_basis),
+    cost_rate_lower_bound_pct: costRestricted
+      ? null : finiteNumberOrNull(metrics.cost_rate_lower_bound_pct),
+    cost_status: costRestricted ? null : metrics.cost_status,
   };
 }
 
@@ -298,9 +347,11 @@ function normalizeOperationsDirectory(
 
 function normalizeWorkspace(data: MaintenanceProjectWorkspace): MaintenanceProjectWorkspace {
   if (!data?.project) return data;
+  const project = normalizeProjectSummary(data.project);
+  const costRestricted = project.metrics.cost_complete === null;
   return {
     ...data,
-    project: normalizeProjectSummary(data.project),
+    project,
     collection_snapshots: {
       ...data.collection_snapshots,
       rows: Array.isArray(data.collection_snapshots?.rows)
@@ -313,12 +364,23 @@ function normalizeWorkspace(data: MaintenanceProjectWorkspace): MaintenanceProje
     requisitions: {
       ...data.requisitions,
       rows: Array.isArray(data.requisitions?.rows)
-        ? data.requisitions.rows.map((row) => ({
-          ...row,
-          quantity: finiteNumberOrNull(row.quantity),
-          unit_cost: finiteNumberOrNull(row.unit_cost),
-          cost_amount: finiteNumberOrNull(row.cost_amount),
-        }))
+        ? data.requisitions.rows.map((row) => {
+          const rowCostRestricted = costRestricted || row.cost_status === "restricted";
+          return {
+            ...row,
+            quantity: finiteNumberOrNull(row.quantity),
+            unit_cost: rowCostRestricted ? null : finiteNumberOrNull(row.unit_cost),
+            cost_amount: rowCostRestricted ? null : finiteNumberOrNull(row.cost_amount),
+            unit_cost_ex_tax: rowCostRestricted
+              ? null : finiteNumberOrNull(row.unit_cost_ex_tax),
+            unit_cost_inc_tax: rowCostRestricted
+              ? null : finiteNumberOrNull(row.unit_cost_inc_tax),
+            cost_amount_ex_tax: rowCostRestricted
+              ? null : finiteNumberOrNull(row.cost_amount_ex_tax),
+            cost_amount_inc_tax: rowCostRestricted
+              ? null : finiteNumberOrNull(row.cost_amount_inc_tax),
+          };
+        })
         : [],
     },
     approved_expenses: {
@@ -326,7 +388,9 @@ function normalizeWorkspace(data: MaintenanceProjectWorkspace): MaintenanceProje
       rows: Array.isArray(data.approved_expenses?.rows)
         ? data.approved_expenses.rows.map((row) => ({
           ...row,
-          amount: finiteNumberOrNull(row.amount),
+          amount: costRestricted ? null : finiteNumberOrNull(row.amount),
+          amount_ex_tax: costRestricted ? null : finiteNumberOrNull(row.amount_ex_tax),
+          amount_inc_tax: costRestricted ? null : finiteNumberOrNull(row.amount_inc_tax),
         }))
         : [],
     },
@@ -354,6 +418,20 @@ function normalizeCostGapDirectory(
 ): MaintenanceCostGapDirectory {
   if (!data || !Array.isArray(data.rows)) return data;
   return { ...data, rows: data.rows.map(normalizeCostGap) };
+}
+
+function normalizeCostGapUpdateResult(
+  data: MaintenanceCostGapUpdateResult,
+): MaintenanceCostGapUpdateResult {
+  return {
+    ...data,
+    unit_cost: finiteNumberOrNull(data.unit_cost),
+    cost_amount: finiteNumberOrNull(data.cost_amount),
+    unit_cost_ex_tax: finiteNumberOrNull(data.unit_cost_ex_tax),
+    unit_cost_inc_tax: finiteNumberOrNull(data.unit_cost_inc_tax),
+    cost_amount_ex_tax: finiteNumberOrNull(data.cost_amount_ex_tax),
+    cost_amount_inc_tax: finiteNumberOrNull(data.cost_amount_inc_tax),
+  };
 }
 
 export interface MaintenanceOperationsListParams {
@@ -434,4 +512,5 @@ export const recomputeMaintenanceCostGaps = (
 export const updateMaintenanceCostGap = (
   projectId: string,
   input: MaintenanceCostGapUpdate,
-) => api.patch<MaintenanceCostGapUpdateResult>(`${projectBase(projectId)}/cost-gaps`, input);
+) => api.patch<MaintenanceCostGapUpdateResult>(`${projectBase(projectId)}/cost-gaps`, input)
+  .then((response) => ({ ...response, data: normalizeCostGapUpdateResult(response.data) }));

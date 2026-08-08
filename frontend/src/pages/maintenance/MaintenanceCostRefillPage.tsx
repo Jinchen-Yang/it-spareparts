@@ -27,7 +27,7 @@ import {
 } from "../../api/maintenanceOperations";
 import PageHeader from "../../components/PageHeader";
 import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
-import { money } from "../../utils/format";
+import { money, moneyExact, splitFixed } from "../../utils/format";
 
 const SOURCE_LABELS: Record<string, string> = {
   direct_purchase: "关联采购",
@@ -387,6 +387,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
     && !projects.some((project) => project.project_id === fallbackProject.project_id)
     ? [fallbackProject, ...projects]
     : projects;
+  const incTaxUnitCostPreview = splitFixed(unitCost, "ex").inc;
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
@@ -505,6 +506,18 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
                 onChange={(value) => setUnitCost(value)}
               />
             </label>
+            <div
+              data-testid="inc-tax-unit-cost-preview"
+              style={{
+                borderRadius: 8,
+                background: "var(--mb-inset)",
+                color: "var(--mb-text-2)",
+                padding: "9px 11px",
+                fontSize: 12.5,
+              }}
+            >
+              {`按 13% 增值税和 HALF_UP 换算，含税单位成本预览：${moneyExact(incTaxUnitCostPreview)}`}
+            </div>
             <label>
               价格证据
               <Input.TextArea

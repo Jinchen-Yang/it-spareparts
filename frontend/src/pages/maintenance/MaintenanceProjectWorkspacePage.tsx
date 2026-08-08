@@ -18,32 +18,63 @@ import WorkbookFourSheetPreview from "../../components/maintenance/WorkbookFourS
 import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
 import "../../components/maintenance/maintenanceOperations.css";
 import PageHeader from "../../components/PageHeader";
+import {
+  taxSidesForBasis,
+  useTaxBasis,
+  type TaxBasis,
+  type TaxSide,
+} from "../../context/TaxBasis";
 import { money } from "../../utils/format";
 
-const requisitionColumns: ColumnsType<MaintenanceSiteRequisitionRow> = [
+const taxSideLabel = (side: TaxSide) => side === "inc" ? "含税" : "不含税";
+
+const requisitionBaseColumns: ColumnsType<MaintenanceSiteRequisitionRow> = [
   { title: "领用日期", dataIndex: "order_date", width: 110, render: (value) => value || "—" },
   { title: "现场领用单", dataIndex: "order_no", width: 150 },
   { title: "合同", dataIndex: "contract_no", width: 140, render: (value) => value || "—" },
   { title: "PN", dataIndex: "pn", width: 150, render: (value) => value || "—" },
   { title: "描述", dataIndex: "description", width: 220, render: (value) => value || "—" },
   { title: "数量", dataIndex: "quantity", width: 80, align: "right" },
-  { title: "单位成本", dataIndex: "unit_cost", width: 120, align: "right", render: money },
-  { title: "已知成本", dataIndex: "cost_amount", width: 120, align: "right", render: money },
-  {
-    title: "成本状态",
-    dataIndex: "cost_status",
-    width: 120,
-    render: (value) => value === "missing"
-      ? <Tag color="orange">待回填成本</Tag>
-      : value === "restricted"
-        ? <Tag>成本不可见</Tag>
-        : value === "not_counted"
-          ? <Tag>未计入成本</Tag>
-          : <Tag color="green">已有成本</Tag>,
-  },
 ];
 
-const expenseColumns: ColumnsType<MaintenanceApprovedExpenseRow> = [
+const requisitionStatusColumn: ColumnsType<MaintenanceSiteRequisitionRow>[number] = {
+  title: "成本状态",
+  dataIndex: "cost_status",
+  width: 120,
+  render: (value) => value === "missing"
+    ? <Tag color="orange">待回填成本</Tag>
+    : value === "restricted"
+      ? <Tag>成本不可见</Tag>
+      : value === "not_counted"
+        ? <Tag>未计入成本</Tag>
+        : <Tag color="green">已有成本</Tag>,
+};
+
+function requisitionColumns(basis: TaxBasis): ColumnsType<MaintenanceSiteRequisitionRow> {
+  const sides = taxSidesForBasis(basis);
+  return [
+    ...requisitionBaseColumns,
+    ...sides.map((side) => ({
+      title: `单位成本（${taxSideLabel(side)}）`,
+      key: `unit_cost_${side}`,
+      dataIndex: side === "inc" ? "unit_cost_inc_tax" : "unit_cost_ex_tax",
+      width: 130,
+      align: "right" as const,
+      render: money,
+    })),
+    ...sides.map((side) => ({
+      title: `已知成本（${taxSideLabel(side)}）`,
+      key: `cost_amount_${side}`,
+      dataIndex: side === "inc" ? "cost_amount_inc_tax" : "cost_amount_ex_tax",
+      width: 130,
+      align: "right" as const,
+      render: money,
+    })),
+    requisitionStatusColumn,
+  ];
+}
+
+const expenseBaseColumns: ColumnsType<MaintenanceApprovedExpenseRow> = [
   {
     title: "报销单号",
     width: 170,
@@ -54,9 +85,22 @@ const expenseColumns: ColumnsType<MaintenanceApprovedExpenseRow> = [
   { title: "申请人", dataIndex: "applicant", width: 110, render: (value) => value || "未提供" },
   { title: "费用分类", dataIndex: "category", width: 130, render: (value) => value || "未提供" },
   { title: "支出事由", dataIndex: "expense_reason", render: (value) => value || "未提供" },
-  { title: "金额", dataIndex: "amount", width: 120, align: "right", render: money },
-  { title: "审批状态", width: 110, render: () => <Tag color="green">审批通过</Tag> },
 ];
+
+function expenseColumns(basis: TaxBasis): ColumnsType<MaintenanceApprovedExpenseRow> {
+  return [
+    ...expenseBaseColumns,
+    ...taxSidesForBasis(basis).map((side) => ({
+      title: `金额（${taxSideLabel(side)}）`,
+      key: `amount_${side}`,
+      dataIndex: side === "inc" ? "amount_inc_tax" : "amount_ex_tax",
+      width: 130,
+      align: "right" as const,
+      render: money,
+    })),
+    { title: "审批状态", width: 110, render: () => <Tag color="green">审批通过</Tag> },
+  ];
+}
 
 const collectionStatus = (status: string) => {
   if (status === "confirmed") return <Tag color="green">已确认</Tag>;
@@ -104,6 +148,7 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
   projectId?: string;
 }) {
   const params = useParams<{ projectId: string }>();
+  const maintenanceBasis = useTaxBasis("maintenance");
   const resolvedProjectId = projectId ?? params.projectId ?? "";
   const [workspace, setWorkspace] = useState<MaintenanceProjectWorkspace | null>(null);
   const [loading, setLoading] = useState(true);
@@ -270,10 +315,10 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
           <Table
             rowKey="line_id"
             size="small"
-            columns={requisitionColumns}
+            columns={requisitionColumns(maintenanceBasis)}
             dataSource={workspace.requisitions.rows}
             loading={loading}
-            scroll={{ x: 1200 }}
+            scroll={{ x: maintenanceBasis === "both" ? 1460 : 1200 }}
             pagination={{
               current: workspace.requisitions.page,
               pageSize: workspace.requisitions.page_size,
@@ -291,10 +336,10 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
           <Table
             rowKey="expense_id"
             size="small"
-            columns={expenseColumns}
+            columns={expenseColumns(maintenanceBasis)}
             dataSource={workspace.approved_expenses.rows}
             loading={loading}
-            scroll={{ x: 1120 }}
+            scroll={{ x: maintenanceBasis === "both" ? 1250 : 1120 }}
             pagination={{
               current: workspace.approved_expenses.page,
               pageSize: workspace.approved_expenses.page_size,

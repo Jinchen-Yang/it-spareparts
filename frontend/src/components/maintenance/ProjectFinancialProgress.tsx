@@ -2,16 +2,24 @@ import { Progress, Space, Tag } from "antd";
 
 import { money } from "../../utils/format";
 
-export type CostWaterlineStatus = "normal" | "yellow" | "red" | "unknown" | "restricted" | "contract_restricted" | "no_contract";
+export type CostWaterlineStatus = "normal" | "yellow" | "red" | "unknown" | "restricted" | "contract_restricted" | "no_contract" | "cost_basis_unknown" | "contract_basis_unknown";
 
 export interface ProjectFinancialMetrics {
   total_contract_amount: number | null;
+  contract_amount_basis: "inc_tax" | null;
   contract_amount_complete: boolean | null;
   received_amount: number | null;
   collection_progress_pct?: number | null;
   site_requisition_known_cost: number | null;
+  site_requisition_known_cost_ex_tax: number | null;
+  site_requisition_known_cost_inc_tax: number | null;
   approved_expense: number | null;
+  approved_expense_ex_tax: number | null;
+  approved_expense_inc_tax: number | null;
   actual_project_cost_known: number | null;
+  actual_project_cost_known_ex_tax: number | null;
+  actual_project_cost_known_inc_tax: number | null;
+  cost_progress_basis: "inc_tax" | null;
   cost_rate_lower_bound_pct?: number | null;
   cost_status?: CostWaterlineStatus | null;
   cost_complete: boolean | null;
@@ -59,6 +67,8 @@ const STATUS_META: Record<CostWaterlineStatus, { label: string; color: string; t
   restricted: { label: "成本不可见/无权限", color: "var(--mb-text-3)", tag: "default" },
   contract_restricted: { label: "合同额不可见/无权限", color: "var(--mb-text-3)", tag: "default" },
   no_contract: { label: "合同额不足，无法计算", color: "var(--mb-text-3)", tag: "default" },
+  cost_basis_unknown: { label: "成本税口径不可确认", color: "var(--mb-text-3)", tag: "default" },
+  contract_basis_unknown: { label: "合同额税口径不可确认", color: "var(--mb-text-3)", tag: "default" },
 };
 
 function numericPercent(numerator: number | null, denominator: number | null): number | null {
@@ -122,29 +132,44 @@ function MetricProgress({
 export default function ProjectFinancialProgress({ metrics }: {
   metrics: ProjectFinancialMetrics;
 }) {
+  const contractBasisConfirmed = metrics.contract_amount_basis === "inc_tax";
+  const costBasisConfirmed = metrics.cost_progress_basis === "inc_tax";
   const canonicalStatus = metrics.cost_status;
-  const costWaterline = canonicalStatus != null
-    ? {
-      status: canonicalStatus,
-      percent: metrics.cost_rate_lower_bound_pct ?? null,
-    }
-    : classifyCostWaterline({
-      totalContractAmount: metrics.total_contract_amount,
-      actualProjectCostKnown: metrics.actual_project_cost_known,
-      costComplete: metrics.cost_complete,
-      contractAmountComplete: metrics.contract_amount_complete,
-    });
-  const sitePercent = metrics.contract_amount_complete
-    ? numericPercent(metrics.site_requisition_known_cost, metrics.total_contract_amount)
+  const costWaterline = !contractBasisConfirmed
+    ? { status: "contract_basis_unknown" as const, percent: null }
+    : !costBasisConfirmed
+      ? { status: "cost_basis_unknown" as const, percent: null }
+      : canonicalStatus != null
+        ? {
+          status: canonicalStatus,
+          percent: metrics.cost_rate_lower_bound_pct ?? null,
+        }
+        : classifyCostWaterline({
+          totalContractAmount: metrics.total_contract_amount,
+          actualProjectCostKnown: metrics.actual_project_cost_known_inc_tax,
+          costComplete: metrics.cost_complete,
+          contractAmountComplete: metrics.contract_amount_complete,
+        });
+  const sitePercent = contractBasisConfirmed
+    && costBasisConfirmed
+    && metrics.contract_amount_complete
+    ? numericPercent(
+      metrics.site_requisition_known_cost_inc_tax,
+      metrics.total_contract_amount,
+    )
     : null;
-  const collectionPercent = metrics.collection_progress_pct !== undefined
-    ? metrics.collection_progress_pct
-    : metrics.contract_amount_complete
-      ? numericPercent(metrics.received_amount, metrics.total_contract_amount)
-      : null;
+  const collectionPercent = !contractBasisConfirmed
+    ? null
+    : metrics.collection_progress_pct !== undefined
+      ? metrics.collection_progress_pct
+      : metrics.contract_amount_complete
+        ? numericPercent(metrics.received_amount, metrics.total_contract_amount)
+        : null;
   const collectionColor = collectionPercent != null && collectionPercent > 100
     ? "var(--mb-warning)" : "var(--mb-accent)";
-  const knownCostLowerBound = metrics.contract_amount_complete
+  const knownCostLowerBound = contractBasisConfirmed
+    && costBasisConfirmed
+    && metrics.contract_amount_complete
     && metrics.cost_complete === false
     && costWaterline.percent != null
     ? `已知下限 ≥${percentLabel(costWaterline.percent)}`
@@ -153,34 +178,44 @@ export default function ProjectFinancialProgress({ metrics }: {
   return (
     <Space direction="vertical" size={14} style={{ width: "100%" }}>
       <MetricProgress
-        label="回款 / 全部合同额"
+        label="回款 / 全部合同额（含税）"
         numerator={metrics.received_amount}
-        denominator={metrics.total_contract_amount}
+        denominator={contractBasisConfirmed ? metrics.total_contract_amount : null}
         percent={collectionPercent}
         color={collectionColor}
         testId="collection-progress"
       >
-        {metrics.contract_amount_complete === null ? (
+        {!contractBasisConfirmed ? (
+          <div>合同额税口径不可确认，暂不计算比例。</div>
+        ) : metrics.contract_amount_complete === null ? (
           <div>合同额不可见，暂不计算比例。</div>
         ) : metrics.contract_amount_complete === false && (
           <div>合同额证据不完整，暂不计算比例。</div>
         )}
       </MetricProgress>
       <MetricProgress
-        label="项目实际成本 / 全部合同额"
-        numerator={metrics.actual_project_cost_known}
-        denominator={metrics.total_contract_amount}
+        label="项目实际成本（含税） / 全部合同额（含税）"
+        numerator={costBasisConfirmed ? metrics.actual_project_cost_known_inc_tax : null}
+        denominator={contractBasisConfirmed ? metrics.total_contract_amount : null}
         percent={costWaterline.percent}
         percentText={knownCostLowerBound || undefined}
         color={STATUS_META[costWaterline.status].color}
         testId="project-cost-progress"
       >
         <div>
-          现场领用已知成本 {money(metrics.site_requisition_known_cost)}
-          {" · "}审批通过报销 {money(metrics.approved_expense)}
+          现场领用已知成本（含税） {money(
+            costBasisConfirmed ? metrics.site_requisition_known_cost_inc_tax : null,
+          )}
+          {" · "}审批通过报销（含税） {money(
+            costBasisConfirmed ? metrics.approved_expense_inc_tax : null,
+          )}
         </div>
-        <div>现场领用占合同额 {percentLabel(sitePercent)}</div>
-        {metrics.cost_complete === null || metrics.contract_amount_complete === null
+        <div>现场领用成本（含税）占合同额（含税） {percentLabel(sitePercent)}</div>
+        {!contractBasisConfirmed ? (
+          <div>合同额税口径不可确认，暂不计算比例。</div>
+        ) : !costBasisConfirmed ? (
+          <div>成本税口径不可确认，暂不计算比例。</div>
+        ) : metrics.cost_complete === null || metrics.contract_amount_complete === null
           ? null : metrics.contract_amount_complete === false ? (
           <>
             <div>合同额证据不完整，暂不计算比例。</div>

@@ -2,8 +2,9 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
-const { getMaintenanceProjectWorkspace } = vi.hoisted(() => ({
+const { getMaintenanceProjectWorkspace, taxBasisState } = vi.hoisted(() => ({
   getMaintenanceProjectWorkspace: vi.fn(),
+  taxBasisState: { value: "both" as "inc" | "ex" | "both" },
 }));
 
 vi.mock("../../../api/maintenanceOperations", async () => {
@@ -11,6 +12,13 @@ vi.mock("../../../api/maintenanceOperations", async () => {
     "../../../api/maintenanceOperations",
   );
   return { ...actual, getMaintenanceProjectWorkspace };
+});
+
+vi.mock("../../../context/TaxBasis", async () => {
+  const actual = await vi.importActual<typeof import("../../../context/TaxBasis")>(
+    "../../../context/TaxBasis",
+  );
+  return { ...actual, useTaxBasis: () => taxBasisState.value };
 });
 
 import MaintenanceProjectWorkspacePage from "../MaintenanceProjectWorkspacePage";
@@ -29,6 +37,7 @@ const workspace = {
       contract_id: "c-1",
       contract_no: "XSDD-001",
       contract_amount: 1000,
+      contract_amount_basis: "inc_tax",
       contract_status: "已生效",
       status_mapping_state: "mapped",
       included_in_total: true,
@@ -39,11 +48,19 @@ const workspace = {
     metrics: {
       total_contract_amount: 1000,
       known_contract_amount: 1000,
+      contract_amount_basis: "inc_tax",
       contract_amount_complete: true,
       received_amount: 600,
       site_requisition_known_cost: 450,
+      site_requisition_known_cost_ex_tax: 398.23,
+      site_requisition_known_cost_inc_tax: 450,
       approved_expense: 350,
+      approved_expense_ex_tax: 309.73,
+      approved_expense_inc_tax: 350,
       actual_project_cost_known: 800,
+      actual_project_cost_known_ex_tax: 707.96,
+      actual_project_cost_known_inc_tax: 800,
+      cost_progress_basis: "inc_tax",
       cost_complete: false,
       missing_cost_lines: 1,
     },
@@ -97,6 +114,10 @@ const workspace = {
       quantity: 2,
       unit_cost: null,
       cost_amount: null,
+      unit_cost_ex_tax: null,
+      unit_cost_inc_tax: null,
+      cost_amount_ex_tax: null,
+      cost_amount_inc_tax: null,
       cost_source: null,
       cost_status: "missing",
     }, {
@@ -109,10 +130,30 @@ const workspace = {
       quantity: 1,
       unit_cost: null,
       cost_amount: null,
+      unit_cost_ex_tax: null,
+      unit_cost_inc_tax: null,
+      cost_amount_ex_tax: null,
+      cost_amount_inc_tax: null,
       cost_source: null,
       cost_status: "not_counted",
+    }, {
+      line_id: "line-3",
+      order_no: "WBDD-003",
+      order_date: "2026-08-03",
+      contract_no: "XSDD-001",
+      pn: "PN-COSTED",
+      description: "已有双税成本的现场领用件",
+      quantity: 2,
+      unit_cost: 113,
+      cost_amount: 226,
+      unit_cost_ex_tax: 100,
+      unit_cost_inc_tax: 113,
+      cost_amount_ex_tax: 200,
+      cost_amount_inc_tax: 226,
+      cost_source: "manual",
+      cost_status: "available",
     }],
-    total: 2,
+    total: 3,
     page: 1,
     page_size: 20,
   },
@@ -126,6 +167,8 @@ const workspace = {
       category: "差旅",
       expense_reason: "现场支持",
       amount: 350,
+      amount_ex_tax: 309.73,
+      amount_inc_tax: 350,
       approval_status: "approved",
     }],
     total: 1,
@@ -158,6 +201,7 @@ const workspace = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  taxBasisState.value = "both";
   localStorage.clear();
   localStorage.setItem("role", "admin");
   getMaintenanceProjectWorkspace.mockResolvedValue({ data: workspace });
@@ -177,8 +221,10 @@ describe("MaintenanceProjectWorkspacePage", () => {
 
     expect(await screen.findByRole("heading", { name: "移动维保项目" })).toBeInTheDocument();
     expect(screen.getAllByText("XSDD-001").length).toBeGreaterThanOrEqual(3);
-    expect(screen.getByText("回款 / 全部合同额")).toBeInTheDocument();
-    expect(screen.getByText("项目实际成本 / 全部合同额")).toBeInTheDocument();
+    expect(screen.getByText("回款 / 全部合同额（含税）")).toBeInTheDocument();
+    expect(screen.getByText("项目实际成本（含税） / 全部合同额（含税）"))
+      .toBeInTheDocument();
+    expect(screen.getAllByText("合同额（含税）").length).toBeGreaterThanOrEqual(1);
 
     const collections = screen.getByTestId("collection-snapshot-table");
     expect(within(collections).getByText("2026-06")).toBeInTheDocument();
@@ -195,6 +241,15 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(within(requisitions).getByText("待回填成本")).toBeInTheDocument();
     expect(within(requisitions).getByText("未计入成本")).toBeInTheDocument();
     expect(within(requisitions).getByText("待补价格的现场领用件")).toBeInTheDocument();
+    for (const header of [
+      "单位成本（含税）",
+      "单位成本（不含税）",
+      "已知成本（含税）",
+      "已知成本（不含税）",
+    ]) {
+      expect(within(requisitions).getByRole("columnheader", { name: header })).toBeInTheDocument();
+    }
+    expect(within(requisitions).getByText("PN-COSTED")).toBeInTheDocument();
 
     const expenses = screen.getByTestId("approved-expense-table");
     expect(within(expenses).getByText("审批通过")).toBeInTheDocument();
@@ -203,6 +258,10 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(within(expenses).getByText("张三")).toBeInTheDocument();
     expect(within(expenses).getByText("差旅")).toBeInTheDocument();
     expect(within(expenses).getByText("现场支持")).toBeInTheDocument();
+    expect(within(expenses).getByRole("columnheader", { name: "金额（含税）" }))
+      .toBeInTheDocument();
+    expect(within(expenses).getByRole("columnheader", { name: "金额（不含税）" }))
+      .toBeInTheDocument();
     expect(screen.getByText("存在待补成本")).toBeInTheDocument();
 
     const preview = screen.getByTestId("workbook-four-sheet-preview");
@@ -214,6 +273,34 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(screen.getByRole("button", { name: "下载完整四表" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "上传月度更新" })).toBeInTheDocument();
     expect(screen.queryByText(/扇形图|饼图/)).toBeNull();
+  });
+
+  it.each([
+    ["inc", "含税", "不含税"],
+    ["ex", "不含税", "含税"],
+  ] as const)("维保金额口径为 %s 时只展示%s列", async (basis, shown, hidden) => {
+    taxBasisState.value = basis;
+    render(
+      <MemoryRouter>
+        <MaintenanceProjectWorkspacePage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    const requisitions = await screen.findByTestId("site-requisition-table");
+    expect(within(requisitions).getByRole("columnheader", { name: `单位成本（${shown}）` }))
+      .toBeInTheDocument();
+    expect(within(requisitions).getByRole("columnheader", { name: `已知成本（${shown}）` }))
+      .toBeInTheDocument();
+    expect(within(requisitions).queryByRole("columnheader", { name: `单位成本（${hidden}）` }))
+      .toBeNull();
+    expect(within(requisitions).getByText(basis === "inc" ? "¥113" : "¥100"))
+      .toBeInTheDocument();
+
+    const expenses = screen.getByTestId("approved-expense-table");
+    expect(within(expenses).getByRole("columnheader", { name: `金额（${shown}）` }))
+      .toBeInTheDocument();
+    expect(within(expenses).queryByRole("columnheader", { name: `金额（${hidden}）` }))
+      .toBeNull();
   });
 
   it("无项目管理权限时隐藏人工成本回填入口", async () => {
@@ -297,8 +384,14 @@ describe("MaintenanceProjectWorkspacePage", () => {
           metrics: {
             ...workspace.project.metrics,
             site_requisition_known_cost: null,
+            site_requisition_known_cost_ex_tax: null,
+            site_requisition_known_cost_inc_tax: null,
             approved_expense: null,
+            approved_expense_ex_tax: null,
+            approved_expense_inc_tax: null,
             actual_project_cost_known: null,
+            actual_project_cost_known_ex_tax: null,
+            actual_project_cost_known_inc_tax: null,
             cost_complete: null,
             missing_cost_lines: null,
           },
