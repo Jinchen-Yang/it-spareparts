@@ -19,6 +19,10 @@ export interface MaintenanceProjectDirectory {
   data_version: string;
 }
 
+export interface MaintenanceProjectOverview {
+  project: MaintenanceProject;
+}
+
 export interface MaintenanceProjectCreateInput {
   project_code: string;
   display_name: string;
@@ -42,6 +46,9 @@ export const listMaintenanceProjects = (params: { page?: number; page_size?: num
   api.get<MaintenanceProjectDirectory>("/maintenance/projects/stable", {
     params: { include_inactive: true, ...params },
   });
+
+export const getMaintenanceProject = (projectId: string) =>
+  api.get<MaintenanceProjectOverview>(`/maintenance/projects/stable/${projectId}`);
 
 export const createMaintenanceProject = (body: MaintenanceProjectCreateInput) =>
   api.post<MaintenanceProject>("/maintenance/projects/stable", body);

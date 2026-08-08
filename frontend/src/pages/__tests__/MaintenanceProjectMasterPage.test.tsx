@@ -4,6 +4,7 @@ import { message } from "antd";
 
 const listMaintenanceProjects = vi.fn();
 const createMaintenanceProject = vi.fn();
+const getMaintenanceProject = vi.fn();
 const updateMaintenanceProject = vi.fn();
 const archiveMaintenanceProject = vi.fn();
 const restoreMaintenanceProject = vi.fn();
@@ -11,6 +12,7 @@ const restoreMaintenanceProject = vi.fn();
 vi.mock("../../api/maintenanceProjects", () => ({
   listMaintenanceProjects: (...args: unknown[]) => listMaintenanceProjects(...args),
   createMaintenanceProject: (...args: unknown[]) => createMaintenanceProject(...args),
+  getMaintenanceProject: (...args: unknown[]) => getMaintenanceProject(...args),
   updateMaintenanceProject: (...args: unknown[]) => updateMaintenanceProject(...args),
   archiveMaintenanceProject: (...args: unknown[]) => archiveMaintenanceProject(...args),
   restoreMaintenanceProject: (...args: unknown[]) => restoreMaintenanceProject(...args),
@@ -23,7 +25,8 @@ const ACTIVE_PROJECT = {
   project_code: "XM-001",
   display_name: "一号维保项目",
   project_manager_id: "manager-1",
-  lifecycle_status: "missing",
+  // Even legacy-looking values must not be interpreted until the authority is locked.
+  lifecycle_status: "ongoing",
   is_active: true,
   version: 3,
 };
@@ -74,6 +77,7 @@ beforeEach(() => {
   localStorage.setItem("role", "readonly");
   localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true }));
   listMaintenanceProjects.mockReturnValue(directory());
+  getMaintenanceProject.mockResolvedValue({ data: { project: ACTIVE_PROJECT } });
 });
 
 afterEach(() => {
@@ -320,6 +324,41 @@ describe("MaintenanceProjectMasterPage", () => {
     await waitFor(() => expect(archiveMaintenanceProject).toHaveBeenCalledWith(
       "project-1",
       { version: 3, reason: "项目已结束" },
+    ));
+  });
+
+  it("归档冲突后可刷新最新版本并保留原因再提交", async () => {
+    enableProjectManagement();
+    archiveMaintenanceProject
+      .mockRejectedValueOnce({
+        response: { status: 409, data: { detail: "项目已更新，请刷新" } },
+      })
+      .mockResolvedValueOnce({
+        data: { ...ACTIVE_PROJECT, is_active: false, version: 5 },
+      });
+    getMaintenanceProject.mockResolvedValue({
+      data: { project: { ...ACTIVE_PROJECT, version: 4 } },
+    });
+    render(<MaintenanceProjectMasterPage />);
+    await screen.findByText("XM-001");
+
+    fireEvent.click(screen.getByRole("button", { name: "归档" }));
+    fireEvent.change(screen.getByLabelText("归档原因"), {
+      target: { value: "项目已经结束" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认归档" }));
+
+    expect(await screen.findByText("项目已更新，请刷新")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", {
+      name: "刷新最新版本并保留原因",
+    }));
+    await waitFor(() => expect(getMaintenanceProject).toHaveBeenCalledWith("project-1"));
+    expect(screen.getByLabelText("归档原因")).toHaveValue("项目已经结束");
+
+    fireEvent.click(screen.getByRole("button", { name: "确认归档" }));
+    await waitFor(() => expect(archiveMaintenanceProject).toHaveBeenLastCalledWith(
+      "project-1",
+      { version: 4, reason: "项目已经结束" },
     ));
   });
 

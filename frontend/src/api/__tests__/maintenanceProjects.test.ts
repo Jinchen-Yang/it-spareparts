@@ -15,6 +15,7 @@ vi.mock("../../api", () => ({
 import {
   archiveMaintenanceProject,
   createMaintenanceProject,
+  getMaintenanceProject,
   listMaintenanceProjects,
   restoreMaintenanceProject,
   updateMaintenanceProject,
@@ -37,6 +38,11 @@ describe("maintenance project master API", () => {
     expect(get).toHaveBeenCalledWith("/maintenance/projects/stable", {
       params: { include_inactive: true, page: 2, page_size: 50 },
     });
+  });
+
+  it("loads one project exactly when recovering from a version conflict", () => {
+    getMaintenanceProject("project-1");
+    expect(get).toHaveBeenCalledWith("/maintenance/projects/stable/project-1");
   });
 
   it("creates a project without writing an unsettled lifecycle status", () => {

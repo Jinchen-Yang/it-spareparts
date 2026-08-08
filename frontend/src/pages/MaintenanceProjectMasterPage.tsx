@@ -6,6 +6,7 @@ import {
   listMaintenanceProjects,
   archiveMaintenanceProject,
   createMaintenanceProject,
+  getMaintenanceProject,
   restoreMaintenanceProject,
   updateMaintenanceProject,
   type MaintenanceProject,
@@ -39,13 +40,7 @@ function isConflict(error: unknown): boolean {
   );
 }
 
-function lifecycleTag(status: string) {
-  if (status === "ongoing" || status === "active") {
-    return <Tag color="blue">进行中</Tag>;
-  }
-  if (status === "ended" || status === "inactive") {
-    return <Tag>已结束</Tag>;
-  }
+function lifecycleTag() {
   return <Tag color="orange">业务期限待确认</Tag>;
 }
 
@@ -71,6 +66,7 @@ export default function MaintenanceProjectMasterPage() {
   const [lifecycleReason, setLifecycleReason] = useState("");
   const [lifecycleSaving, setLifecycleSaving] = useState(false);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
+  const [lifecycleConflict, setLifecycleConflict] = useState(false);
   const loadGeneration = useRef(0);
 
   const load = useCallback(async (requestedPage: number) => {
@@ -207,6 +203,7 @@ export default function MaintenanceProjectMasterPage() {
     setLifecycleProject(project);
     setLifecycleReason("");
     setLifecycleError(null);
+    setLifecycleConflict(false);
   };
 
   const submitLifecycleChange = async () => {
@@ -224,14 +221,36 @@ export default function MaintenanceProjectMasterPage() {
         message.success("项目主档已恢复");
       }
       setLifecycleProject(null);
+      setLifecycleConflict(false);
       await load(currentPage);
     } catch (error) {
+      setLifecycleConflict(isConflict(error));
       setLifecycleError(errorDetail(
         error,
         isConflict(error)
           ? "项目主档已被他人修改，请刷新列表后再重试。"
           : "操作失败，请检查后重试。",
       ));
+    } finally {
+      setLifecycleSaving(false);
+    }
+  };
+
+  const refreshLifecycleAfterConflict = async () => {
+    if (!lifecycleProject) return;
+    setLifecycleSaving(true);
+    try {
+      const { data } = await getMaintenanceProject(lifecycleProject.project_id);
+      const latest = data.project;
+      setLifecycleProject(latest);
+      setRows((current) => current.map((row) => (
+        row.project_id === latest.project_id ? latest : row
+      )));
+      setLifecycleConflict(false);
+      setLifecycleError(null);
+      message.info("项目最新版本已刷新，操作原因已保留");
+    } catch (error) {
+      setLifecycleError(errorDetail(error, "刷新失败，操作原因仍已保留，请稍后重试。"));
     } finally {
       setLifecycleSaving(false);
     }
@@ -258,7 +277,7 @@ export default function MaintenanceProjectMasterPage() {
       title: "业务期限",
       dataIndex: "lifecycle_status",
       key: "lifecycle_status",
-      render: (status: string) => lifecycleTag(status),
+      render: () => lifecycleTag(),
     },
     {
       title: "主档状态",
@@ -449,10 +468,15 @@ export default function MaintenanceProjectMasterPage() {
           </p>
           {lifecycleError && (
             <Alert
-              type="error"
+              type={lifecycleConflict ? "warning" : "error"}
               showIcon
               style={{ marginBottom: 16 }}
               message={lifecycleError}
+              action={lifecycleConflict ? (
+                <Button size="small" onClick={() => void refreshLifecycleAfterConflict()}>
+                  刷新最新版本并保留原因
+                </Button>
+              ) : undefined}
             />
           )}
           <label htmlFor="maintenance-project-lifecycle-reason">
