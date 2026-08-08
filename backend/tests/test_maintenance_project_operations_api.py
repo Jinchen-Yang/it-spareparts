@@ -48,6 +48,30 @@ def _client(db, *, username: str = "maintenance_facts_admin") -> TestClient:
     return client
 
 
+def _permission_client(db, *, username: str, permissions: dict) -> TestClient:
+    db.add(
+        SysUser(
+            username=username,
+            role="boss",
+            display_name="合成维保权限账号",
+            password_hash=hash_password("synthetic-password-123"),
+            permissions=permissions,
+        )
+    )
+    db.commit()
+    app = FastAPI()
+    app.include_router(auth.router, prefix="/api")
+    app.include_router(maintenance_project_operations.router, prefix="/api")
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": username, "password": "synthetic-password-123"},
+    )
+    assert login.status_code == 200, login.text
+    client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+    return client
+
+
 def _project(db, *, project_id: str = "project-synthetic-facts") -> MaintenanceProject:
     project = MaintenanceProject(
         project_id=project_id,
@@ -1197,6 +1221,71 @@ def test_archived_project_rejects_site_issue_and_expense_status_changes(db):
             )
         )
     ) == []
+
+
+def test_new_fact_commands_fail_closed_by_action_and_data_permissions(db):
+    project = _project(db, project_id="project-fact-command-permissions")
+    common = {
+        "page_maintenance": True,
+        "data_purchase_cost": True,
+        "data_profit": True,
+        "action_maintenance_roundtrip_apply": True,
+    }
+    no_action = _permission_client(
+        db,
+        username="fact_command_no_action",
+        permissions={**common, "action_maintenance_roundtrip_apply": False},
+    )
+    no_cost = _permission_client(
+        db,
+        username="fact_command_no_cost",
+        permissions={**common, "data_purchase_cost": False},
+    )
+    no_profit = _permission_client(
+        db,
+        username="fact_command_no_profit",
+        permissions={**common, "data_profit": False},
+    )
+
+    readiness_body = {
+        "ready_through": "2026-07-01",
+        "reason": "权限测试不应写入",
+    }
+    site_body = {
+        "version": 1,
+        "raw_status": "confirmed",
+        "normalized_status": "confirmed",
+        "status_mapping_version": "permission-test-v1",
+        "reason": "权限测试不应写入",
+    }
+    expense_body = {
+        "version": 1,
+        "raw_status": "approved",
+        "normalized_status": "approved",
+        "status_mapping_version": "permission-test-v1",
+        "reason": "权限测试不应写入",
+    }
+    assert no_action.put(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+        json=readiness_body,
+    ).status_code == 403
+    assert no_cost.patch(
+        "/api/maintenance/projects/stable/site-issues/not-created/status",
+        json=site_body,
+    ).status_code == 403
+    assert no_profit.patch(
+        "/api/maintenance/projects/stable/expenses/not-created/status",
+        json=expense_body,
+    ).status_code == 403
+
+    anonymous_app = FastAPI()
+    anonymous_app.include_router(maintenance_project_operations.router, prefix="/api")
+    anonymous = TestClient(anonymous_app)
+    assert anonymous.put(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+        json=readiness_body,
+    ).status_code == 401
+    assert db.get(MaintenanceProjectWorkbookState, project.project_id) is None
 
 
 def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
