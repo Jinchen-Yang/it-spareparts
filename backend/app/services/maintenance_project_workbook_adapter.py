@@ -54,6 +54,23 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _excel_date(value: Any) -> date | None:
+    """Keep exported dates as real Excel dates instead of ISO text."""
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise ProjectWorkbookV2Error(
+            "项目事实包含无效日期，暂不能导出工作簿", status_code=409
+        ) from exc
+
+
 def _issues_payload(issues: Sequence[WorkbookIssue]) -> list[dict[str, Any]]:
     return [
         {
@@ -289,7 +306,7 @@ class MaintenanceProjectWorkbookAdapter:
                 "collection_id": item["collection_id"],
                 "project_contract_id": item["project_contract_id"],
                 "contract_no": contract_no_by_id.get(item["project_contract_id"], ""),
-                "report_month": item["report_month"],
+                "report_month": _excel_date(item["report_month"]),
                 "cumulative_amount": item["cumulative_amount"],
                 "voucher_no": item["receipt_reference"],
                 "status": {
@@ -306,7 +323,7 @@ class MaintenanceProjectWorkbookAdapter:
             {
                 "consumption_id": item["issue_line_id"],
                 "issue_no": item["issue_no"],
-                "issue_date": item["issue_date"],
+                "issue_date": _excel_date(item["issue_date"]),
                 "part_no": item["pn"],
                 "part_name": descriptions.get(item.get("part_id")),
                 "quantity": item["quantity"],
@@ -325,16 +342,16 @@ class MaintenanceProjectWorkbookAdapter:
             {
                 "expense_id": item["expense_id"],
                 "expense_no": item["expense_ref"],
-                "expense_date": item["expense_date"],
-                "applicant": None,
-                "category": None,
+                "expense_date": _excel_date(item["expense_date"]),
+                "applicant": item.get("applicant"),
+                "category": item.get("category"),
                 "amount": item["amount_ex_tax"],
                 "approval_status": (
                     "已审批"
                     if item["normalized_status"] == "approved"
                     else item["normalized_status"]
                 ),
-                "remark": None,
+                "remark": item.get("expense_reason"),
             }
             for item in raw["approved_expenses"]
         ]
@@ -343,7 +360,7 @@ class MaintenanceProjectWorkbookAdapter:
                 "task_id": item["task_id"],
                 "task_type": item.get("task_type") or item.get("rule_key"),
                 "title": item["title"],
-                "due_date": item.get("due_date"),
+                "due_date": _excel_date(item.get("due_date")),
                 "status": item.get("status") or "待处理",
                 "owner": item.get("owner") or raw["project"].get("project_manager_id"),
                 "detail": item.get("detail"),

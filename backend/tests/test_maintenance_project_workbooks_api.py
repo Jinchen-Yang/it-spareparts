@@ -339,6 +339,46 @@ def test_unchanged_monthly_workbook_can_confirm_zero_row_update(db):
     assert replay.status_code == 409
 
 
+def test_export_preserves_approved_expense_business_fields(db):
+    client = _client(db, username="workbook_expense_admin")
+    project_id, contract = _project_and_contract(client, db, suffix="expense")
+    created = client.post(
+        f"/api/maintenance/projects/stable/{project_id}/expenses",
+        json={
+            "expense_id": "expense-workbook-001",
+            "project_contract_id": contract["project_contract_id"],
+            "expense_ref": "BX-WORKBOOK-001",
+            "expense_date": "2026-08-01",
+            "applicant": "合成报销人",
+            "category": "差旅费",
+            "expense_reason": "项目现场支持",
+            "amount_ex_tax": "50.00",
+            "raw_status": "synthetic-finished",
+            "status_mapping_state": "mapped",
+            "normalized_status": "approved",
+            "status_mapping_version": "synthetic-expense-map-v1",
+            "reason": "验证报销字段进入工作簿",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    book = load_workbook(BytesIO(_download(client, project_id)), data_only=False)
+    try:
+        sheet = book["03_报销单"]
+        assert [sheet.cell(2, column).value for column in range(1, 9)] == [
+            "expense-workbook-001",
+            "BX-WORKBOOK-001",
+            datetime(2026, 8, 1, 0, 0),
+            "合成报销人",
+            "差旅费",
+            50,
+            "已审批",
+            "项目现场支持",
+        ]
+    finally:
+        book.close()
+
+
 def test_apply_rejects_expired_wrong_project_replay_and_client_plan(db):
     client = _client(db, username="workbook_fail_close_admin")
     project_id, contract = _project_and_contract(client, db, suffix="source")
