@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 
 from app import auth
 from app.auth import hash_password
@@ -52,6 +53,26 @@ def _project(db, *, project_id: str = "project-synthetic-facts") -> MaintenanceP
     db.add(project)
     db.commit()
     return project
+
+
+def _count_endpoint_queries(db, client: TestClient, *, params: dict) -> tuple[dict, int]:
+    engine = db.get_bind()
+    query_count = 0
+
+    def count_query(*_args) -> None:
+        nonlocal query_count
+        query_count += 1
+
+    event.listen(engine, "before_cursor_execute", count_query)
+    try:
+        response = client.get(
+            "/api/maintenance/projects/stable/operations",
+            params=params,
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", count_query)
+    assert response.status_code == 200, response.text
+    return response.json(), query_count
 
 
 def _batch(db, suffix: str) -> SysImportBatch:
@@ -228,6 +249,17 @@ def test_confirmed_monthly_collection_snapshot_drives_workspace_progress(db):
     assert "collection:incomplete" in {
         row["rule_key"] for row in payload["reminders"]
     }
+    filtered = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={
+            "as_of": "2026-02-28",
+            "q": project.project_code,
+            "reminder": "collection:incomplete",
+        },
+    )
+    assert filtered.status_code == 200, filtered.text
+    assert filtered.json()["total"] == 1
+    assert filtered.json()["rows"][0]["project_id"] == project.project_id
     db.expire_all()
     assert db.get(MaintenanceProjectWorkbookState, project.project_id).revision == 4
 
@@ -720,3 +752,84 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
     assert filtered.status_code == 200, filtered.text
     assert filtered.json()["total"] == 1
     assert filtered.json()["rows"][0]["project_id"] == "project-threshold-101"
+
+
+def test_operations_directory_queries_do_not_scale_with_off_page_projects(db):
+    client = _client(db, username="directory_query_admin")
+    db.add_all(
+        MaintenanceProject(
+            project_id=f"directory-query-{index:03d}",
+            project_code=f"DIRECTORY-{index:03d}",
+            display_name=f"目录查询项目 {index:03d}",
+            lifecycle_status="ongoing",
+        )
+        for index in range(2)
+    )
+    db.commit()
+
+    params = {
+        "as_of": "2026-08-31",
+        "lifecycle": "ongoing",
+        "page": 1,
+        "page_size": 1,
+    }
+    first, baseline_queries = _count_endpoint_queries(db, client, params=params)
+    assert first["total"] == 2
+    assert len(first["rows"]) == 1
+
+    db.add_all(
+        MaintenanceProject(
+            project_id=f"directory-query-{index:03d}",
+            project_code=f"DIRECTORY-{index:03d}",
+            display_name=f"目录查询项目 {index:03d}",
+            lifecycle_status="ongoing",
+        )
+        for index in range(2, 32)
+    )
+    db.commit()
+
+    expanded, expanded_queries = _count_endpoint_queries(db, client, params=params)
+    assert expanded["total"] == 32
+    assert expanded["rows"] == first["rows"]
+    assert expanded_queries <= baseline_queries + 1
+
+
+def test_operations_reminder_filter_queries_do_not_load_every_project_workspace(db):
+    client = _client(db, username="directory_reminder_query_admin")
+    db.add_all(
+        MaintenanceProject(
+            project_id=f"directory-reminder-{index:03d}",
+            project_code=f"REMINDER-{index:03d}",
+            display_name=f"提醒目录项目 {index:03d}",
+            lifecycle_status="ongoing",
+        )
+        for index in range(2)
+    )
+    db.commit()
+
+    params = {
+        "as_of": "2026-08-31",
+        "lifecycle": "ongoing",
+        "reminder": "all",
+        "page": 1,
+        "page_size": 1,
+    }
+    first, baseline_queries = _count_endpoint_queries(db, client, params=params)
+    assert first["total"] == 2
+    assert len(first["rows"]) == 1
+
+    db.add_all(
+        MaintenanceProject(
+            project_id=f"directory-reminder-{index:03d}",
+            project_code=f"REMINDER-{index:03d}",
+            display_name=f"提醒目录项目 {index:03d}",
+            lifecycle_status="ongoing",
+        )
+        for index in range(2, 32)
+    )
+    db.commit()
+
+    expanded, expanded_queries = _count_endpoint_queries(db, client, params=params)
+    assert expanded["total"] == 32
+    assert expanded["rows"] == first["rows"]
+    assert expanded_queries <= baseline_queries + 1
