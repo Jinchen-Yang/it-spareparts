@@ -53,13 +53,20 @@ _QUANTITY_MAX_EXCLUSIVE = Decimal("100000000000")
 
 def _quantity(value: Decimal | str) -> Decimal:
     try:
-        normalized = Decimal(value).quantize(
+        parsed = Decimal(value)
+        if not parsed.is_finite():
+            raise InvalidOperation
+        normalized = parsed.quantize(
             _QUANTITY_QUANTUM,
             rounding=ROUND_HALF_UP,
         )
     except (InvalidOperation, ValueError) as exc:
         raise MaintenanceOperationError("现场领用数量超出允许范围") from exc
-    if normalized <= 0 or normalized >= _QUANTITY_MAX_EXCLUSIVE:
+    if (
+        not normalized.is_finite()
+        or normalized <= 0
+        or normalized >= _QUANTITY_MAX_EXCLUSIVE
+    ):
         raise MaintenanceOperationError("现场领用数量超出允许范围")
     return normalized
 
@@ -1070,7 +1077,11 @@ def fill_manual_cost(
         )
     if issue.status_mapping_state != "mapped" or issue.normalized_status != "confirmed":
         raise MaintenanceOperationError("只有已确认且状态已映射的现场领用可以补价")
-    if manual_unit_cost < 0 or manual_unit_cost >= Decimal("1000000000000"):
+    if (
+        not manual_unit_cost.is_finite()
+        or manual_unit_cost < 0
+        or manual_unit_cost >= Decimal("1000000000000")
+    ):
         raise MaintenanceOperationError("人工未税单价超出允许范围")
     before = site_issue_line_dict(line)
     if line.cost_source is not None or line.cost_amount is not None:

@@ -32,23 +32,33 @@ class CostResolutionError(ValueError):
 
 
 def _amount(value: Decimal, *, label: str = "成本单价") -> Decimal:
+    if not value.is_finite():
+        raise CostResolutionError(f"现场领用{label}超出允许范围")
     try:
         normalized = value.quantize(_CENT, rounding=ROUND_HALF_UP)
     except InvalidOperation as exc:
         raise CostResolutionError(f"现场领用{label}超出允许范围") from exc
-    if normalized < 0 or normalized >= _MONEY_MAX_EXCLUSIVE:
+    if (
+        not normalized.is_finite()
+        or normalized < 0
+        or normalized >= _MONEY_MAX_EXCLUSIVE
+    ):
         raise CostResolutionError(f"现场领用{label}超出允许范围")
     return normalized
 
 
 def _valid(qty: Decimal | None, unit_price: Decimal | None) -> bool:
+    if qty is None or unit_price is None:
+        return False
+    normalized_qty = Decimal(qty)
+    normalized_price = Decimal(unit_price)
     return (
-        qty is not None
-        and unit_price is not None
-        and Decimal(qty) > 0
-        and Decimal(unit_price) > 0
-        and Decimal(qty) < _QUANTITY_MAX_EXCLUSIVE
-        and Decimal(unit_price) < _MONEY_MAX_EXCLUSIVE
+        normalized_qty.is_finite()
+        and normalized_price.is_finite()
+        and normalized_qty > 0
+        and normalized_price > 0
+        and normalized_qty < _QUANTITY_MAX_EXCLUSIVE
+        and normalized_price < _MONEY_MAX_EXCLUSIVE
     )
 
 

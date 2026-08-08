@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 from sqlalchemy import event, select
 
 from app import auth
@@ -23,6 +24,7 @@ from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysAccessLog, SysImportBatch, SysUser
 from app.security import UserContext
+from app.services import maintenance_consumption_cost as cost_service
 from app.services import maintenance_project_operations as operations_service
 
 
@@ -140,6 +142,16 @@ def _batch(db, suffix: str) -> SysImportBatch:
     return batch
 
 
+def test_numeric_normalizers_reject_non_finite_values_as_business_errors():
+    for value in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
+        with pytest.raises(operations_service.MaintenanceOperationError):
+            operations_service._quantity(value)
+        with pytest.raises(cost_service.CostResolutionError):
+            cost_service._amount(value)
+        assert cost_service._valid(value, Decimal("1")) is False
+        assert cost_service._valid(Decimal("1"), value) is False
+
+
 def test_site_issue_quantity_uses_numeric_14_3_boundary_with_controlled_rejection(db):
     project = _project(db, project_id="project-quantity-boundary")
     client = _client(db, username="quantity_boundary_admin")
@@ -194,6 +206,27 @@ def test_site_issue_quantity_uses_numeric_14_3_boundary_with_controlled_rejectio
     )
     assert 400 <= first_illegal.status_code < 500, first_illegal.text
     assert db.get(MaintenanceSiteIssueLine, "issue-line-quantity-first-illegal") is None
+
+    non_finite = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-QUANTITY-NON-FINITE",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [{
+                "issue_line_id": "issue-line-quantity-non-finite",
+                "line_no": 1,
+                "part_id": part.id,
+                "pn": part.pn_std,
+                "quantity": "NaN",
+            }],
+            "reason": "验证非有限数量受控拒绝",
+        },
+    )
+    assert 400 <= non_finite.status_code < 500, non_finite.text
 
 
 def test_manual_cost_amount_uses_numeric_14_2_boundary_with_controlled_rejection(db):
@@ -263,6 +296,37 @@ def test_manual_cost_amount_uses_numeric_14_2_boundary_with_controlled_rejection
     assert rejected.unit_cost is None
     assert rejected.cost_amount is None
     assert rejected.version == 1
+
+    with pytest.raises(
+        operations_service.MaintenanceOperationError,
+        match="人工未税单价超出允许范围",
+    ):
+        operations_service.fill_manual_cost(
+            db,
+            project_id=project.project_id,
+            issue_line_id="issue-line-cost-first-illegal",
+            version=1,
+            manual_unit_cost=Decimal("NaN"),
+            evidence="非有限金额证据",
+            reason="验证非有限成本受控拒绝",
+            operated_by="cost-boundary-test",
+        )
+    db.rollback()
+    non_finite_line = db.get(
+        MaintenanceSiteIssueLine,
+        "issue-line-cost-first-illegal",
+    )
+    non_finite_line.manual_unit_cost = Decimal("NaN")
+    with pytest.raises(
+        cost_service.CostResolutionError,
+        match="成本单价超出允许范围",
+    ):
+        cost_service.resolve_line(
+            db,
+            issue_date=date(2026, 8, 1),
+            line=non_finite_line,
+        )
+    db.rollback()
 
 
 def test_cost_amount_overflow_is_controlled_on_every_resolution_entrypoint(db):
