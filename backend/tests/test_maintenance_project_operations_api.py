@@ -225,6 +225,9 @@ def test_confirmed_monthly_collection_snapshot_drives_workspace_progress(db):
     assert payload["as_of"] == "2026-02-28"
     assert payload["data_version"]
     assert payload["completeness"]["status"] == "complete"
+    assert "collection:incomplete" in {
+        row["rule_key"] for row in payload["reminders"]
+    }
     db.expire_all()
     assert db.get(MaintenanceProjectWorkbookState, project.project_id).revision == 4
 

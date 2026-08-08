@@ -975,6 +975,8 @@ def _system_tasks(
     project_id: str,
     completeness: dict,
     has_confirmed_collection: bool,
+    confirmed_collection: Decimal,
+    total_contract_amount: Decimal | None,
     cost_gap_count: int,
     cost_status: str,
     as_of: date,
@@ -1030,6 +1032,21 @@ def _system_tasks(
                 severity="info",
                 title="补充已确认累计回款",
                 detail="当前没有已确认的累计回款快照",
+                owner=project_manager_id,
+            )
+        )
+    elif (
+        total_contract_amount is not None
+        and total_contract_amount > 0
+        and confirmed_collection < total_contract_amount
+    ):
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="collection:incomplete",
+                severity="info",
+                title="项目回款尚未完成",
+                detail="当前已确认累计回款低于全部合同额",
                 owner=project_manager_id,
             )
         )
@@ -1264,6 +1281,8 @@ def project_workspace(
         project_id=project_id,
         completeness=completeness,
         has_confirmed_collection=bool(latest_confirmed),
+        confirmed_collection=confirmed_collection,
+        total_contract_amount=(Decimal(total) if total is not None else None),
         cost_gap_count=cost_gap_count,
         cost_status=cost_status,
         as_of=as_of,
