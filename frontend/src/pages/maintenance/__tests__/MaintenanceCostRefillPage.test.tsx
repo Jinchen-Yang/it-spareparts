@@ -264,6 +264,67 @@ describe("MaintenanceCostRefillPage", () => {
     expect(within(dialog).getByText(/HALF_UP/)).toBeInTheDocument();
   });
 
+  it("允许有证据的零元更换并保留 0.00 含税预览和保存值", async () => {
+    render(
+      <MemoryRouter>
+        <MaintenanceCostRefillPage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("PN-MISSING");
+    fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
+    const dialog = await screen.findByRole("dialog", { name: "回填成本" });
+    fireEvent.change(within(dialog).getByLabelText("未税单位成本"), {
+      target: { value: "0" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("价格证据"), {
+      target: { value: "厂家免费更换确认单 FREE-001" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("回填原因"), {
+      target: { value: "有证据的免费更换" },
+    });
+
+    expect(within(dialog).getByTestId("inc-tax-unit-cost-preview"))
+      .toHaveTextContent("¥0.00");
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
+
+    await waitFor(() => expect(updateMaintenanceCostGap).toHaveBeenCalledWith(
+      "project-1",
+      {
+        line_id: "line-1",
+        version: 7,
+        unit_cost_ex_tax: 0,
+        evidence: "厂家免费更换确认单 FREE-001",
+        reason: "有证据的免费更换",
+      },
+    ));
+  });
+
+  it("负数成本仍被拒绝且不会发出保存请求", async () => {
+    render(
+      <MemoryRouter>
+        <MaintenanceCostRefillPage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("PN-MISSING");
+    fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
+    const dialog = await screen.findByRole("dialog", { name: "回填成本" });
+    fireEvent.change(within(dialog).getByLabelText("未税单位成本"), {
+      target: { value: "-0.01" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("价格证据"), {
+      target: { value: "异常负价证据" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("回填原因"), {
+      target: { value: "验证负数拦截" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
+
+    expect(await within(dialog).findByText(/请填写有效未税单位成本/)).toBeInTheDocument();
+    expect(updateMaintenanceCostGap).not.toHaveBeenCalled();
+  });
+
   it("人工保存前出现系统证据时明确提示采用系统价格", async () => {
     updateMaintenanceCostGap.mockResolvedValueOnce({
       data: {

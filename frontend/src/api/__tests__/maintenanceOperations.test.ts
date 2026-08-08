@@ -138,6 +138,27 @@ describe("maintenance operations API", () => {
     );
   });
 
+  it("零元人工回填请求保留成本 0 和证据，不把 0 当成空值", () => {
+    updateMaintenanceCostGap("project/1", {
+      line_id: "line-free",
+      version: 3,
+      unit_cost_ex_tax: 0,
+      evidence: "厂家免费更换确认单 FREE-001",
+      reason: "有证据的免费更换",
+    });
+
+    expect(patch).toHaveBeenCalledWith(
+      "/maintenance/projects/stable/project%2F1/cost-gaps",
+      {
+        line_id: "line-free",
+        version: 3,
+        unit_cost_ex_tax: 0,
+        evidence: "厂家免费更换确认单 FREE-001",
+        reason: "有证据的免费更换",
+      },
+    );
+  });
+
   it("按稳定项目重新匹配后到的系统价格证据", () => {
     recomputeMaintenanceCostGaps("project/1", {
       reason: "重新匹配后到采购或销售价格证据",

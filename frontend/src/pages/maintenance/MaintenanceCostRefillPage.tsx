@@ -266,7 +266,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
   };
 
   const save = async () => {
-    if (!editing || unitCost === null || unitCost <= 0 || !evidence.trim() || !reason.trim()) {
+    if (!editing || unitCost === null || unitCost < 0 || !evidence.trim() || !reason.trim()) {
       setFormError("请填写有效未税单位成本、证据和回填原因。成本不会由系统猜测。");
       return;
     }
@@ -388,6 +388,12 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
     ? [fallbackProject, ...projects]
     : projects;
   const incTaxUnitCostPreview = splitFixed(unitCost, "ex").inc;
+  const incTaxUnitCostPreviewText = incTaxUnitCostPreview === null
+    ? moneyExact(null)
+    : `¥${incTaxUnitCostPreview.toLocaleString("zh-CN", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
@@ -499,7 +505,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
               未税单位成本
               <InputNumber
                 aria-label="未税单位成本"
-                min={0.000001}
+                min={0}
                 precision={6}
                 style={{ width: "100%", marginTop: 5 }}
                 value={unitCost}
@@ -516,7 +522,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
                 fontSize: 12.5,
               }}
             >
-              {`按 13% 增值税和 HALF_UP 换算，含税单位成本预览：${moneyExact(incTaxUnitCostPreview)}`}
+              {`按 13% 增值税和 HALF_UP 换算，含税单位成本预览：${incTaxUnitCostPreviewText}`}
             </div>
             <label>
               价格证据
