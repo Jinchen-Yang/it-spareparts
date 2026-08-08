@@ -1,4 +1,9 @@
 interface LocalMaintenancePermissions {
+  page_maintenance?: boolean;
+  data_customer?: boolean;
+  data_purchase_cost?: boolean;
+  data_profit?: boolean;
+  own_customers_only?: boolean;
   action_maintenance_roundtrip_apply?: boolean;
   action_maintenance_project_manage?: boolean;
 }
@@ -13,11 +18,25 @@ function readLocalPermissions(): LocalMaintenancePermissions {
 }
 
 export function readMaintenanceCapabilities() {
-  const isAdmin = localStorage.getItem("role") === "admin";
+  const role = localStorage.getItem("role") || "";
+  const isAdmin = role === "admin";
   const permissions = readLocalPermissions();
+  const scopedSales = !isAdmin && (
+    permissions.own_customers_only === true
+    || (permissions.own_customers_only == null && role === "sales")
+  );
+  const canDownloadRoundtrip = isAdmin || (
+    !scopedSales
+    && permissions.page_maintenance === true
+    && permissions.data_customer === true
+    && permissions.data_purchase_cost === true
+    && permissions.data_profit === true
+  );
   return {
-    canApplyRoundtrip: isAdmin
-      || permissions.action_maintenance_roundtrip_apply === true,
+    canDownloadRoundtrip,
+    canApplyRoundtrip: canDownloadRoundtrip && (
+      isAdmin || permissions.action_maintenance_roundtrip_apply === true
+    ),
     canManageProject: isAdmin
       || permissions.action_maintenance_project_manage === true,
   };

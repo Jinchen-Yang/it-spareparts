@@ -29,7 +29,9 @@ export default function ProjectWorkbookActions({
   projectCode: string;
   onApplied?: () => void | Promise<void>;
 }) {
-  const [{ canApplyRoundtrip }] = useState(readMaintenanceCapabilities);
+  const [{ canApplyRoundtrip, canDownloadRoundtrip }] = useState(
+    readMaintenanceCapabilities,
+  );
   const inputRef = useRef<HTMLInputElement>(null);
   const validationGeneration = useRef(0);
   const downloadInFlight = useRef(false);
@@ -123,14 +125,16 @@ export default function ProjectWorkbookActions({
   return (
     <Space direction="vertical" size={12} style={{ width: "100%" }}>
       <Space wrap>
-        <Button
-          aria-label="下载完整四表"
-          icon={<DownloadOutlined />}
-          loading={downloading}
-          onClick={() => void download()}
-        >
-          下载完整四表
-        </Button>
+        {canDownloadRoundtrip && (
+          <Button
+            aria-label="下载完整四表"
+            icon={<DownloadOutlined />}
+            loading={downloading}
+            onClick={() => void download()}
+          >
+            下载完整四表
+          </Button>
+        )}
         {canApplyRoundtrip && (
           <>
             <Button

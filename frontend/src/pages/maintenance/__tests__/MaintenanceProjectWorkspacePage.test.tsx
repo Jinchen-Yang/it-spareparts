@@ -150,6 +150,11 @@ describe("MaintenanceProjectWorkspacePage", () => {
   it("无项目管理权限时隐藏人工成本回填入口", async () => {
     localStorage.setItem("role", "readonly");
     localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_customer: true,
+      data_purchase_cost: true,
+      data_profit: true,
+      own_customers_only: false,
       action_maintenance_project_manage: false,
       action_maintenance_roundtrip_apply: false,
     }));

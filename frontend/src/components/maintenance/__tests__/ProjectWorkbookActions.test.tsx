@@ -137,6 +137,11 @@ describe("ProjectWorkbookActions", () => {
   it("无回填应用权限时保留下载，但不暴露上传入口", () => {
     localStorage.setItem("role", "readonly");
     localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_customer: true,
+      data_purchase_cost: true,
+      data_profit: true,
+      own_customers_only: false,
       action_maintenance_roundtrip_apply: false,
     }));
 
@@ -145,5 +150,22 @@ describe("ProjectWorkbookActions", () => {
     expect(screen.getByRole("button", { name: "下载完整四表" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "上传月度更新" })).toBeNull();
     expect(screen.queryByLabelText("选择月度更新工作簿")).toBeNull();
+  });
+
+  it("缺少完整四表所需数据权限时同时隐藏下载和上传", () => {
+    localStorage.setItem("role", "readonly");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_customer: true,
+      data_purchase_cost: false,
+      data_profit: true,
+      own_customers_only: false,
+      action_maintenance_roundtrip_apply: true,
+    }));
+
+    render(<ProjectWorkbookActions projectId="project-1" projectCode="XM-001" />);
+
+    expect(screen.queryByRole("button", { name: "下载完整四表" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "上传月度更新" })).toBeNull();
   });
 });
