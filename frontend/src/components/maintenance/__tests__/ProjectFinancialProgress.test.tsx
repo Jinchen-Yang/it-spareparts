@@ -11,9 +11,12 @@ afterEach(cleanup);
 describe("项目双进度", () => {
   it.each([
     [799, "normal"],
+    [799.99, "yellow"],
     [800, "yellow"],
     [1000, "yellow"],
-    [1000.01, "red"],
+    [1000.01, "yellow"],
+    [1000.04, "yellow"],
+    [1000.1, "red"],
   ] as const)("合同额 1000、已知项目成本 %s 时为 %s", (actualCost, expected) => {
     expect(classifyCostWaterline({
       totalContractAmount: 1000,

@@ -42,8 +42,8 @@ export function classifyCostWaterline({
   }
   const rawPercent = (actualProjectCostKnown / totalContractAmount) * 100;
   const percent = Number(rawPercent.toFixed(2));
-  if (rawPercent > 100) return { status: "red", percent };
-  if (rawPercent >= 80) return { status: "yellow", percent };
+  if (percent > 100) return { status: "red", percent };
+  if (percent >= 80) return { status: "yellow", percent };
   if (costComplete === false) return { status: "unknown", percent };
   return { status: "normal", percent };
 }
