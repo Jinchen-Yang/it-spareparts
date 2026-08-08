@@ -61,6 +61,7 @@ const loadPurchaseAnalysis = () => import("./pages/purchases/PurchaseAnalysisPag
 const loadPurchaseExceptions = () => import("./pages/purchases/PurchaseExceptionsPage");
 const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage");
 const loadProjectCost = () => import("./pages/ProjectCostPage");
+const loadMaintenanceProjectMaster = () => import("./pages/MaintenanceProjectMasterPage");
 const loadProjectDownloads = () => import("./pages/ProjectDownloadsPage");
 const loadProjectReminders = () => import("./pages/ProjectRemindersPage");
 const loadInventory = () => import("./pages/InventoryPage");
@@ -81,6 +82,7 @@ const PurchaseAnalysisPage = lazy(loadPurchaseAnalysis);
 const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
 const PurchaseRecordsPage = lazy(loadPurchaseRecords);
 const ProjectCostPage = lazy(loadProjectCost);
+const MaintenanceProjectMasterPage = lazy(loadMaintenanceProjectMaster);
 const ProjectDownloadsPage = lazy(loadProjectDownloads);
 const ProjectRemindersPage = lazy(loadProjectReminders);
 const InventoryPage = lazy(loadInventory);
@@ -137,6 +139,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "维保管理",
     items: [
       { key: "maintenance", path: "/maintenance", label: "项目数据", icon: <ToolOutlined />, perm: "page_maintenance", page: ProjectCostPage, load: loadProjectCost },
+      { key: "maintenance-project-master", path: "/maintenance/project-master", label: "项目主档", icon: <ProfileOutlined />, perm: "page_maintenance", page: MaintenanceProjectMasterPage, load: loadMaintenanceProjectMaster },
       { key: "maintenance-downloads", path: "/maintenance/downloads", label: "下载中心", icon: <CloudUploadOutlined />, perm: "page_maintenance", page: ProjectDownloadsPage, load: loadProjectDownloads },
       { key: "maintenance-reminders", path: "/maintenance/reminders", label: "项目提醒", icon: <WarningOutlined />, perm: "page_maintenance", page: ProjectRemindersPage, load: loadProjectReminders },
     ],

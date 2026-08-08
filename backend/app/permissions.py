@@ -39,6 +39,8 @@ ACTION_KEYS: list[str] = [
     "action_data_quality_review",  # 逐条核实采购/销售事实疑点
     # 直接应用固定维保回填工作簿（原子写订单/报销/人工成本），不走审批。
     "action_maintenance_roundtrip_apply",
+    # 维护稳定维保项目主档（建档/改展示信息/归档恢复）。
+    "action_maintenance_project_manage",
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ACTION_KEYS, *ROW_KEYS]
@@ -69,6 +71,7 @@ LABELS: dict[str, str] = {
     "action_account_manage": "账号与权限管理（建号/改权/批量/模板）",
     "action_data_quality_review": "数据疑点核实（逐条确认/重新打开）",
     "action_maintenance_roundtrip_apply": "维保固定工作簿直接回填",
+    "action_maintenance_project_manage": "维保项目主档管理",
 }
 
 
@@ -88,7 +91,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     "admin": _full(),
     # boss 由 _full() 生成会把全部动作打开；账号管理与数据疑点核实必须显式关闭。
     "boss": {**_full(), "page_accounts": False, "action_account_manage": False,
-             "action_data_quality_review": False},
+             "action_data_quality_review": False,
+             "action_maintenance_project_manage": False},
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
     # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
     # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
@@ -99,6 +103,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "action_pool_manage": False, "action_pool_set_policy": False,
                  "action_data_quality_review": False,
                  "action_maintenance_roundtrip_apply": False,
+                 "action_maintenance_project_manage": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
@@ -121,6 +126,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_pool_manage": False, "action_pool_set_policy": False,
         "action_data_quality_review": False,
         "action_maintenance_roundtrip_apply": False,
+        "action_maintenance_project_manage": False,
         "own_customers_only": True,
     },
     "purchaser": {
@@ -143,6 +149,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         # 采购默认没有利润可见权限，故固定工作簿写入也默认失败关闭；
         # 管理员可给同时具备成本+利润可见权限的指定工作人员单独授权。
         "action_maintenance_roundtrip_apply": False,
+        "action_maintenance_project_manage": False,
         "own_customers_only": False,
     },
 }
@@ -182,6 +189,7 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     # 逐条确认必须看得到原始价格和规则证据，不能在证据被脱敏时盲判。
     "action_data_quality_review": "data_purchase_cost",
     "action_maintenance_roundtrip_apply": "data_profit",
+    "action_maintenance_project_manage": "data_profit",
 }
 
 # "页面内操作必须能进页面"的动作→页面依赖（权限中心 v2）：改账号权限先要能打开
@@ -191,6 +199,7 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_account_manage": "page_accounts",
     "action_data_quality_review": "page_governance",
     "action_maintenance_roundtrip_apply": "page_maintenance",
+    "action_maintenance_project_manage": "page_maintenance",
 }
 
 # 数据之间的可推导依赖：营收在经营报表中是公开口径，毛利一旦可见，
@@ -265,6 +274,7 @@ HIGH_RISK_KEYS: set[str] = {
     "page_accounts",
     "action_account_manage",
     "action_maintenance_roundtrip_apply",
+    "action_maintenance_project_manage",
 }
 
 # 前端矩阵五分组（顺序即展示序）：页面入口 / 数据可见 / 操作能力 / 行级范围 / 高风险管理
@@ -282,6 +292,7 @@ UI_GROUPS: list[dict] = [
          "action_pool_set_policy",
          "action_data_quality_review",
          "action_maintenance_roundtrip_apply",
+         "action_maintenance_project_manage",
      ]},
     {"key": "row", "label": "行级范围",
      "hint": "在能看的数据里进一步收紧范围（限制型开关：勾上=看得更少）。",
@@ -496,6 +507,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["老板", "管理员指定的数据维护人员"],
         "sensitivity": "critical",
         "risk": "会直接改写经营事实并触发成本重算；默认仅管理员和老板开启，其他工作人员须由管理员单独授权。",
+    },
+    "action_maintenance_project_manage": {
+        "label": "维保项目主档管理",
+        "summary": "允许新建稳定维保项目，并维护展示信息、归档与恢复。",
+        "can": "建立不可变项目身份，修改展示名称和负责人标识，归档或恢复项目主档。",
+        "cannot": "不能删除项目、修改稳定项目编号，也不能新增或修改项目合同关系。",
+        "typical": ["管理员", "项目数据维护人员（需单独授权）"],
+        "sensitivity": "critical",
+        "risk": "项目身份会成为回款、领用、费用和待办的关联地基；误建或误归档会影响后续全链路归集。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {

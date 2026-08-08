@@ -1028,7 +1028,7 @@ def test_stable_routes_do_not_shadow_legacy_projects_api(db):
     assert anonymous_stable.status_code == 401
 
 
-def test_stable_project_foundation_routes_are_read_only(db):
+def test_stable_project_foundation_rejects_unsupported_write_methods(db):
     project = MaintenanceProject(
         project_id="00000000-0000-4000-8000-000000000025",
         project_code="MAINT-SYNTH-READ-ONLY",
@@ -1041,7 +1041,7 @@ def test_stable_project_foundation_routes_are_read_only(db):
     client = TestClient(app)
     headers = {"Authorization": f"Bearer {token}"}
 
-    for method in ["post", "put", "patch", "delete"]:
+    for method in ["put", "delete"]:
         directory = client.request(
             method.upper(),
             "/api/maintenance/projects/stable",
@@ -1054,8 +1054,8 @@ def test_stable_project_foundation_routes_are_read_only(db):
             headers=headers,
             json={},
         )
-        assert directory.status_code in {404, 405}
-        assert overview.status_code in {404, 405}
+        assert directory.status_code == 405
+        assert overview.status_code == 405
 
 
 def test_stable_project_directory_and_overview_reads_are_access_logged(db):
@@ -1216,25 +1216,28 @@ def test_empty_foundation_schema_downgrade_and_upgrade_rebuilds_full_contract(db
                 text(
                     "SELECT to_regclass(name) FROM "
                     "(VALUES ('maintenance_project'), "
-                    "('maintenance_project_contract')) AS tables(name)"
-                )
-            ).scalars().all() == [None, None]
+                        "('maintenance_project_contract'), "
+                        "('maintenance_project_audit_log')) AS tables(name)"
+                    )
+                ).scalars().all() == [None, None, None]
 
         alembic_command.upgrade(cfg, "head")
         with engine.connect() as connection:
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == "c6f2a8e9d4b1"
+                == "d8a3c7e4f2b1"
             )
             assert connection.execute(
                 text(
                     "SELECT to_regclass(name) FROM "
                     "(VALUES ('maintenance_project'), "
-                    "('maintenance_project_contract')) AS tables(name)"
+                        "('maintenance_project_contract'), "
+                        "('maintenance_project_audit_log')) AS tables(name)"
                 )
             ).scalars().all() == [
                 "maintenance_project",
                 "maintenance_project_contract",
+                "maintenance_project_audit_log",
             ]
             index_definitions = dict(
                 connection.execute(
@@ -1286,7 +1289,7 @@ def test_nonempty_stable_project_facts_block_destructive_schema_downgrade(db):
 
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "c6f2a8e9d4b1"
+            "d8a3c7e4f2b1"
         )
         assert (
             connection.scalar(

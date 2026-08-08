@@ -8,7 +8,7 @@ import {
 } from "../nav";
 
 describe("维保管理信息架构", () => {
-  it("固定展示项目数据、下载中心、项目提醒三个并列入口", () => {
+  it("固定展示项目数据、项目主档、下载中心、项目提醒四个并列入口", () => {
     const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance");
 
     expect(maintenance?.items.map(({ key, path, label }) => ({
@@ -20,6 +20,11 @@ describe("维保管理信息架构", () => {
         key: "maintenance",
         path: "/maintenance",
         label: "项目数据",
+      },
+      {
+        key: "maintenance-project-master",
+        path: "/maintenance/project-master",
+        label: "项目主档",
       },
       {
         key: "maintenance-downloads",

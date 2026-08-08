@@ -133,6 +133,7 @@ _TABLES = [
     "f_sales_line", "f_sales_order", "f_purchase_line", "f_purchase_order",
     "part_alias", "dim_part", "dim_supplier", "dim_customer",
     "maintenance_contract_workbook_state",
+    "maintenance_project_audit_log",
     "maintenance_project_contract", "maintenance_project",
     "sys_audit_log", "sys_access_log", "sys_raw_file", "sys_import_error", "sys_import_batch",
     "sys_import_job", "sys_user",
