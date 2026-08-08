@@ -709,7 +709,7 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
         "/api/maintenance/projects/stable/operations",
         params={
             "as_of": "2026-07-31",
-            "q": "threshold-101",
+            "q": "XS-project-threshold-101",
             "lifecycle": "missing",
             "reminder": "cost_ratio:red",
             "page": 1,

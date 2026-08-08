@@ -1659,6 +1659,14 @@ def project_operations(
             or_(
                 MaintenanceProject.project_code.icontains(search, autoescape=True),
                 MaintenanceProject.display_name.icontains(search, autoescape=True),
+                MaintenanceProject.project_id.in_(
+                    select(MaintenanceProjectContract.project_id).where(
+                        MaintenanceProjectContract.contract_no.icontains(
+                            search,
+                            autoescape=True,
+                        )
+                    )
+                ),
             )
         )
     project_ids = list(
