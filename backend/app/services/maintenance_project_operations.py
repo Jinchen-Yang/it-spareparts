@@ -1826,16 +1826,25 @@ def _visible_tasks(
         )
     if expense_restricted:
         hidden_issue_codes.update(
-            {"unmapped_expense_status", "expense_data_not_ready"}
+            {
+                "unmapped_expense_status",
+                "expense_data_not_ready",
+                "expense_readiness_in_future",
+            }
         )
-    if completeness.get("status") != "restricted" and hidden_issue_codes:
+    if hidden_issue_codes:
+        original_status = completeness.get("status")
         visible_issues = [
             issue
             for issue in completeness.get("issues", [])
             if issue.get("code") not in hidden_issue_codes
         ]
         completeness = {
-            "status": "incomplete" if visible_issues else "complete",
+            "status": (
+                "restricted"
+                if original_status == "restricted"
+                else "incomplete" if visible_issues else "complete"
+            ),
             "issues": visible_issues,
         }
         reminders = [
@@ -2141,6 +2150,16 @@ def _project_card_from_facts(
                 None
                 if cost_restricted
                 else project_summary["metrics"]["missing_cost_lines"]
+            ),
+            "expense_data_ready": (
+                None
+                if expense_restricted
+                else project_summary["metrics"]["expense_data_ready"]
+            ),
+            "expense_ready_through": (
+                None
+                if expense_restricted
+                else project_summary["metrics"]["expense_ready_through"]
             ),
         }
     )

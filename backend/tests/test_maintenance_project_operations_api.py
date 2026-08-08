@@ -2575,6 +2575,53 @@ def test_legacy_future_expense_readiness_fails_closed_until_audited_correction(
         "expense_data_not_ready",
     }
 
+    restricted = _permission_client(
+        db,
+        username="expense_readiness_future_restricted",
+        permissions={"page_maintenance": True, "data_profit": False},
+    )
+    restricted_workspace = restricted.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-08-31"},
+    )
+    assert restricted_workspace.status_code == 200, restricted_workspace.text
+    restricted_payload = restricted_workspace.json()
+    restricted_metrics = restricted_payload["project"]["metrics"]
+    assert restricted_metrics["expense_data_ready"] is None
+    assert restricted_metrics["expense_ready_through"] is None
+    hidden_expense_codes = {
+        "expense_readiness_in_future",
+        "expense_data_not_ready",
+        "unmapped_expense_status",
+    }
+    assert hidden_expense_codes.isdisjoint(
+        row["code"] for row in restricted_payload["completeness"]["issues"]
+    )
+    assert all(
+        not any(row["rule_key"].endswith(code) for code in hidden_expense_codes)
+        for row in restricted_payload["reminders"]
+    )
+
+    restricted_directory = restricted.get(
+        "/api/maintenance/projects/stable/operations",
+        params={"as_of": "2026-08-31", "q": project.project_code},
+    )
+    assert restricted_directory.status_code == 200, restricted_directory.text
+    assert restricted_directory.json()["total"] == 1
+    restricted_card_metrics = restricted_directory.json()["rows"][0]["metrics"]
+    assert restricted_card_metrics["expense_data_ready"] is None
+    assert restricted_card_metrics["expense_ready_through"] is None
+    restricted_future_filter = restricted.get(
+        "/api/maintenance/projects/stable/operations",
+        params={
+            "as_of": "2026-08-31",
+            "q": project.project_code,
+            "reminder": "completeness:expense_readiness_in_future",
+        },
+    )
+    assert restricted_future_filter.status_code == 200, restricted_future_filter.text
+    assert restricted_future_filter.json()["total"] == 0
+
     filtered = client.get(
         "/api/maintenance/projects/stable/operations",
         params={
