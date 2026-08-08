@@ -2230,6 +2230,11 @@ def project_workbook_workspace(
         ],
         "expense_attributions": expense_attributions,
         "derived_tasks": workspace["reminders"],
+        # The workbook renderer consumes the same KPI/completeness contract as
+        # the project page.  This prevents a second denominator, readiness, or
+        # warning implementation from drifting inside the XLSX layer.
+        "canonical_metrics": dict(workspace["project"]["metrics"]),
+        "canonical_completeness": dict(workspace["completeness"]),
     }
     payload["data_version"] = (
         state.data_version if state is not None else _workbook_data_version(project_id, 0)

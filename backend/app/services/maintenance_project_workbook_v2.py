@@ -355,11 +355,7 @@ def _safe_metadata(metadata: Mapping[str, Any]) -> dict[str, str]:
 
 def preview_project_workbook(workspace: Mapping[str, Any]) -> dict[str, int]:
     consumptions = list(workspace.get("consumptions") or [])
-    collections = [
-        row
-        for row in workspace.get("collections") or []
-        if str(row.get("status") or "") == "已确认"
-    ]
+    collections = list(workspace.get("collections") or [])
     expenses = [
         row
         for row in workspace.get("expenses") or []
@@ -380,7 +376,100 @@ def preview_project_workbook(workspace: Mapping[str, Any]) -> dict[str, int]:
 
 
 def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
-    """Compute project KPIs without double-counting monthly cumulative snapshots."""
+    """Use the project workspace KPI contract, with a pure fallback for callers.
+
+    Production workbooks receive ``canonical_metrics`` from
+    :func:`maintenance_project_operations.project_workspace`; keeping the
+    fallback here makes the workbook core reusable in isolated tests without
+    creating a second production KPI definition.
+    """
+
+    canonical = workspace.get("canonical_metrics")
+    if isinstance(canonical, Mapping):
+        def decimal_value(key: str) -> Decimal | None:
+            value = canonical.get(key)
+            if value is None:
+                return None
+            try:
+                number = Decimal(str(value))
+            except (InvalidOperation, ValueError) as exc:
+                raise ProjectWorkbookV2Error(
+                    f"项目 canonical metric {key} 不是有效数字"
+                ) from exc
+            if not number.is_finite():
+                raise ProjectWorkbookV2Error(
+                    f"项目 canonical metric {key} 不是有限数字"
+                )
+            return number
+
+        total_contract_amount = decimal_value("total_contract_amount")
+        known_contract_amount = decimal_value("known_contract_amount") or Decimal("0")
+        contract_amount_complete = (
+            canonical.get("contract_amount_complete") is True
+            and total_contract_amount is not None
+        )
+        confirmed = decimal_value("received_amount") or Decimal("0")
+        known_cost = decimal_value("site_requisition_known_cost") or Decimal("0")
+        approved_expense = decimal_value("approved_expense") or Decimal("0")
+        known_project_cost = (
+            decimal_value("actual_project_cost_known")
+            or known_cost + approved_expense
+        )
+        collection_pct = decimal_value("collection_progress_pct")
+        cost_pct = decimal_value("cost_rate_lower_bound_pct")
+        collection_rate = (
+            collection_pct / Decimal("100")
+            if contract_amount_complete and collection_pct is not None
+            else None
+        )
+        cost_rate = (
+            cost_pct / Decimal("100")
+            if contract_amount_complete and cost_pct is not None
+            else None
+        )
+        try:
+            missing_cost_rows = int(canonical.get("missing_cost_lines") or 0)
+        except (TypeError, ValueError) as exc:
+            raise ProjectWorkbookV2Error(
+                "项目 canonical metric missing_cost_lines 无效"
+            ) from exc
+        if not contract_amount_complete:
+            cost_alert = "no_contract_amount"
+        elif cost_rate is not None and cost_rate > Decimal("1"):
+            cost_alert = "red"
+        elif cost_rate is not None and cost_rate >= Decimal("0.8"):
+            cost_alert = "yellow"
+        elif (
+            canonical.get("cost_complete") is not True
+            or canonical.get("cost_status") != "normal"
+        ):
+            cost_alert = "incomplete"
+        else:
+            cost_alert = "green"
+        completeness = workspace.get("canonical_completeness")
+        if not isinstance(completeness, Mapping):
+            completeness = {"status": "unknown", "issues": []}
+        return {
+            "total_contract_amount": (
+                total_contract_amount if contract_amount_complete else None
+            ),
+            "known_contract_amount": known_contract_amount,
+            "contract_amount_complete": contract_amount_complete,
+            "confirmed_cumulative_collection_amount": confirmed,
+            "collection_rate": collection_rate,
+            "known_consumption_cost": known_cost,
+            "approved_expense": approved_expense,
+            "known_project_cost": known_project_cost,
+            "missing_cost_rows": missing_cost_rows,
+            "cost_rate_lower_bound": cost_rate,
+            "cost_alert": cost_alert,
+            "completeness_status": str(completeness.get("status") or "unknown"),
+            "completeness_issues": tuple(
+                str(issue.get("code") or "unknown")
+                for issue in completeness.get("issues") or []
+                if isinstance(issue, Mapping)
+            ),
+        }
 
     all_contracts = list(workspace.get("contracts") or [])
     contracts = [
@@ -404,6 +493,11 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
         row.get("contract_amount") is not None for row in contracts
     )
     total_contract_amount = known_contract_amount if contract_amount_complete else None
+    eligible_contract_ids = {
+        str(row.get("project_contract_id") or "")
+        for row in contracts
+        if row.get("project_contract_id")
+    }
     as_of = workspace.get("as_of")
     as_of_month = _month_text(as_of) or "9999-12"
     latest: dict[str, tuple[str, Decimal]] = {}
@@ -411,6 +505,8 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
         if str(row.get("status") or "") != "已确认":
             continue
         relation_id = str(row.get("project_contract_id") or "")
+        if relation_id not in eligible_contract_ids:
+            continue
         report_month = _month_text(row.get("report_month"))
         if not relation_id or not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", report_month):
             continue
@@ -471,6 +567,14 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
         "missing_cost_rows": missing_cost_rows,
         "cost_rate_lower_bound": cost_rate,
         "cost_alert": cost_alert,
+        "completeness_status": (
+            "complete"
+            if contract_amount_complete and not missing_cost_rows
+            else "incomplete"
+        ),
+        "completeness_issues": (
+            ("missing_consumption_cost",) if missing_cost_rows else ()
+        ),
     }
 
 
@@ -542,8 +646,6 @@ def _project_rows(workspace: Mapping[str, Any], hmac_key: bytes, export_id: str)
     ]
     collections = []
     for row in workspace.get("collections") or []:
-        if str(row.get("status") or "") != "已确认":
-            continue
         entity_id = str(row.get("collection_id") or "")
         base_version = str(row.get("version") or "")
         token_payload = f"{export_id}|collection|{entity_id}|{base_version}".encode()
@@ -633,6 +735,8 @@ def _summary_rows(workspace: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
         ("缺少价格成本行", metrics["missing_cost_rows"]),
         ("项目成本/合同额（已知下界）", _number(metrics["cost_rate_lower_bound"])),
         ("成本预警", metrics["cost_alert"]),
+        ("数据完整性", metrics["completeness_status"]),
+        ("完整性问题", "、".join(metrics["completeness_issues"])),
     )
 
 
@@ -697,7 +801,6 @@ def _entity_versions(workspace: Mapping[str, Any]) -> list[tuple[str, str, str]]
     rows.extend(
         ("collection", str(item.get("collection_id") or ""), str(item.get("version") or ""))
         for item in workspace.get("collections") or []
-        if str(item.get("status") or "") == "已确认"
     )
     return rows
 
@@ -740,11 +843,7 @@ def build_project_workbook(
     consumptions = _consumption_rows(workspace)
     expenses = _expense_rows(workspace)
     tasks = _task_rows(workspace)
-    existing_count = sum(
-        1
-        for row in workspace.get("collections") or []
-        if str(row.get("status") or "") == "已确认"
-    )
+    existing_count = len(workspace.get("collections") or [])
     existing_collections = collection_rows[:existing_count]
     collection_client_ids = [
         str(row[11]) for row in collection_rows if row[8] in (None, "")
@@ -816,7 +915,8 @@ def build_project_workbook(
         dictionary = book.create_sheet("98_字典")
         dictionary.append(("字段", "允许值"))
         dictionary.append(("回款操作", "KEEP / CREATE"))
-        dictionary.append(("回款状态", "已确认"))
+        dictionary.append(("既有回款状态", "已确认 / 未确认 / 已作废（只读）"))
+        dictionary.append(("新增回款状态", "已确认"))
         dictionary.sheet_state = "hidden"
         versions = book.create_sheet("99_实体版本")
         _table(
@@ -1299,19 +1399,21 @@ def validate_project_workbook(
                 _month_text(row.get("report_month")),
             )
         }
-        snapshot_amounts: dict[tuple[str, str], Decimal] = {}
+        confirmed_snapshot_amounts: dict[tuple[str, str], Decimal] = {}
         for row in existing:
             key_tuple = (str(row[1]), _month_text(row[3]))
-            if key_tuple in snapshot_amounts:
+            if key_tuple in confirmed_snapshot_amounts and str(row[6] or "") == "已确认":
                 raise ProjectWorkbookV2Error(
                     "导出快照内存在重复的项目合同关系/月"
                 )
             try:
-                snapshot_amounts[key_tuple] = Decimal(str(row[4]))
+                amount = Decimal(str(row[4]))
             except (InvalidOperation, ValueError):
                 raise ProjectWorkbookV2Error(
                     "既有累计回款金额无效；请先修复系统数据"
                 ) from None
+            if str(row[6] or "") == "已确认":
+                confirmed_snapshot_amounts[key_tuple] = amount
         creates: list[CollectionCreate] = []
         seen_client_ids: set[str] = set()
         for index, row in enumerate(collection_rows, 1):
@@ -1390,7 +1492,7 @@ def validate_project_workbook(
             amount = _parse_positive_decimal(row[4], row=excel_row)
             snapshot_key = (project_contract_id, report_month.strftime("%Y-%m"))
             if (
-                snapshot_key in snapshot_amounts
+                snapshot_key in confirmed_snapshot_amounts
                 or snapshot_key in occupied_contract_months
             ):
                 _raise_issue(
@@ -1402,12 +1504,12 @@ def validate_project_workbook(
                 )
             earlier = [
                 existing_amount
-                for (relation, month), existing_amount in snapshot_amounts.items()
+                for (relation, month), existing_amount in confirmed_snapshot_amounts.items()
                 if relation == project_contract_id and month < snapshot_key[1]
             ]
             later = [
                 existing_amount
-                for (relation, month), existing_amount in snapshot_amounts.items()
+                for (relation, month), existing_amount in confirmed_snapshot_amounts.items()
                 if relation == project_contract_id and month > snapshot_key[1]
             ]
             if earlier and amount < max(earlier):
@@ -1426,7 +1528,7 @@ def validate_project_workbook(
                     row=excel_row,
                     column="累计回款金额",
                 )
-            snapshot_amounts[snapshot_key] = amount
+            confirmed_snapshot_amounts[snapshot_key] = amount
             status = str(row[6] or "已确认").strip()
             if status != "已确认":
                 _raise_issue("unconfirmed_collection", "只允许导入已确认的回款", sheet="01_总览", row=excel_row, column="状态")

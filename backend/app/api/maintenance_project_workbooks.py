@@ -14,7 +14,7 @@ from app.api.maintenance import (
     _content_disposition,
     _parse_and_save_roundtrip_upload,
     _remove_roundtrip_temp,
-    _require_workbook_export_permissions,
+    _require_roundtrip_permissions,
 )
 from app.api.maintenance_project_operations import _real_operator
 from app.auth import current_identity, current_role
@@ -92,7 +92,7 @@ def export_project_workbook(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> Response:
-    _require_workbook_export_permissions(ctx)
+    _require_roundtrip_permissions(ctx)
     adapter = MaintenanceProjectWorkbookAdapter(
         db,
         user_ctx=ctx,
@@ -145,7 +145,7 @@ async def validate_project_workbook_upload(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     _no_store(response)
-    _require_workbook_export_permissions(ctx)
+    _require_roundtrip_permissions(ctx)
     operator = _real_operator(db, ident)
     upload_path: str | None = None
     try:
@@ -226,7 +226,7 @@ def apply_project_workbook_plan(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     _no_store(response)
-    _require_workbook_export_permissions(ctx)
+    _require_roundtrip_permissions(ctx)
     operator = _real_operator(db, ident)
     adapter = MaintenanceProjectWorkbookAdapter(
         db,
@@ -277,7 +277,7 @@ def download_project_workbook_errors(
     ),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> Response:
-    _require_workbook_export_permissions(ctx)
+    _require_roundtrip_permissions(ctx)
     operator = _real_operator(db, ident)
     adapter = MaintenanceProjectWorkbookAdapter(
         db,

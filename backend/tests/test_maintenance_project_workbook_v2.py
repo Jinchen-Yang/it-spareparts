@@ -274,6 +274,139 @@ def test_summary_uses_latest_monthly_cumulative_snapshot_not_month_sum():
     assert summary["cost_alert"] == "incomplete"
 
 
+def test_summary_excludes_confirmed_collection_from_historical_or_not_included_contracts():
+    workspace = _workspace()
+    workspace["contracts"][0].update(
+        {"included_in_total": True, "is_effective": True}
+    )
+    workspace["contracts"].extend(
+        [
+            {
+                "project_contract_id": "project-contract-historical",
+                "contract_no": "XSDD-HISTORICAL",
+                "contract_amount": Decimal("200000.00"),
+                "included_in_total": True,
+                "is_effective": False,
+                "version": 1,
+            },
+            {
+                "project_contract_id": "project-contract-excluded",
+                "contract_no": "XSDD-EXCLUDED",
+                "contract_amount": Decimal("300000.00"),
+                "included_in_total": False,
+                "is_effective": False,
+                "version": 1,
+            },
+        ]
+    )
+    workspace["collections"].extend(
+        [
+            {
+                "collection_id": "collection-historical",
+                "project_contract_id": "project-contract-historical",
+                "contract_no": "XSDD-HISTORICAL",
+                "report_month": "2026-08",
+                "cumulative_amount": Decimal("180000.00"),
+                "status": "已确认",
+                "version": 1,
+            },
+            {
+                "collection_id": "collection-excluded",
+                "project_contract_id": "project-contract-excluded",
+                "contract_no": "XSDD-EXCLUDED",
+                "report_month": "2026-08",
+                "cumulative_amount": Decimal("250000.00"),
+                "status": "已确认",
+                "version": 1,
+            },
+        ]
+    )
+
+    summary = workbook_v2.compute_project_summary(workspace)
+
+    assert summary["total_contract_amount"] == Decimal("100000.00")
+    assert summary["confirmed_cumulative_collection_amount"] == Decimal("30000.00")
+    assert summary["collection_rate"] == Decimal("0.3")
+
+
+@pytest.mark.parametrize(
+    ("known_cost", "cost_complete", "canonical_status", "expected"),
+    [
+        ("79000.00", False, "unknown", "incomplete"),
+        ("80000.00", False, "yellow", "yellow"),
+        ("100001.00", False, "red", "red"),
+        ("79000.00", True, "normal", "green"),
+    ],
+)
+def test_summary_reuses_canonical_metrics_and_fails_closed_below_safe_thresholds(
+    known_cost,
+    cost_complete,
+    canonical_status,
+    expected,
+):
+    workspace = _workspace()
+    workspace["canonical_metrics"] = {
+        "total_contract_amount": "100000.00",
+        "known_contract_amount": "100000.00",
+        "contract_amount_complete": True,
+        "received_amount": "30000.00",
+        "collection_progress_pct": "30.00",
+        "site_requisition_known_cost": known_cost,
+        "approved_expense": "0.00",
+        "actual_project_cost_known": known_cost,
+        "cost_rate_lower_bound_pct": str(
+            (Decimal(known_cost) / Decimal("100000.00") * Decimal("100"))
+        ),
+        "cost_status": canonical_status,
+        "cost_complete": cost_complete,
+        "missing_cost_lines": 1 if not cost_complete else 0,
+    }
+    workspace["canonical_completeness"] = {
+        "status": "incomplete" if not cost_complete else "complete",
+        "issues": ([{"code": "expense_data_not_ready"}] if not cost_complete else []),
+    }
+    # Deliberately contradictory workbook rows prove the summary does not
+    # reimplement a second KPI definition beside project_workspace.
+    workspace["collections"][0]["cumulative_amount"] = Decimal("99999.00")
+    workspace["consumptions"][0]["cost_amount"] = Decimal("1.00")
+
+    summary = workbook_v2.compute_project_summary(workspace)
+
+    assert summary["confirmed_cumulative_collection_amount"] == Decimal("30000.00")
+    assert summary["collection_rate"] == Decimal("0.3")
+    assert summary["known_project_cost"] == Decimal(known_cost)
+    assert summary["cost_alert"] == expected
+
+
+def test_summary_closes_both_ratios_when_canonical_contract_scope_is_incomplete():
+    workspace = _workspace()
+    workspace["canonical_metrics"] = {
+        "total_contract_amount": None,
+        "known_contract_amount": "100000.00",
+        "contract_amount_complete": False,
+        "received_amount": "30000.00",
+        "collection_progress_pct": None,
+        "site_requisition_known_cost": "90000.00",
+        "approved_expense": "0.00",
+        "actual_project_cost_known": "90000.00",
+        "cost_rate_lower_bound_pct": None,
+        "cost_status": "unknown",
+        "cost_complete": False,
+        "missing_cost_lines": 0,
+    }
+    workspace["canonical_completeness"] = {
+        "status": "incomplete",
+        "issues": [{"code": "missing_contract_amount"}],
+    }
+
+    summary = workbook_v2.compute_project_summary(workspace)
+
+    assert summary["total_contract_amount"] is None
+    assert summary["collection_rate"] is None
+    assert summary["cost_rate_lower_bound"] is None
+    assert summary["cost_alert"] == "no_contract_amount"
+
+
 @pytest.mark.parametrize(
     ("cost", "expected"),
     [
@@ -711,6 +844,120 @@ def test_hidden_nonconfirmed_snapshot_still_blocks_duplicate_contract_month():
             hmac_key=HMAC_KEY,
         )
     assert caught.value.issues[0].code == "duplicate_contract_month"
+
+
+def test_all_collection_statuses_are_signed_locked_and_covered_by_snapshot_validation():
+    workspace = _workspace()
+    workspace["collections"].extend(
+        [
+            {
+                "collection_id": "collection-unconfirmed",
+                "project_contract_id": "project-contract-001",
+                "contract_no": "XSDD-20260001",
+                "report_month": "2026-05",
+                "cumulative_amount": Decimal("10000.00"),
+                "voucher_no": "HK-UNCONFIRMED",
+                "status": "未确认",
+                "remark": "历史未确认事实",
+                "version": 4,
+            },
+            {
+                "collection_id": "collection-void",
+                "project_contract_id": "project-contract-001",
+                "contract_no": "XSDD-20260001",
+                "report_month": "2026-06",
+                "cumulative_amount": Decimal("20000.00"),
+                "voucher_no": "HK-VOID",
+                "status": "已作废",
+                "remark": "历史作废事实",
+                "version": 5,
+            },
+        ]
+    )
+    artifact = workbook_v2.build_project_workbook(
+        workspace,
+        hmac_key=HMAC_KEY,
+        exported_by="tester",
+    )
+
+    assert artifact.preview["collections"] == 3
+    book = load_workbook(io.BytesIO(artifact.content), data_only=False)
+    try:
+        overview = book["01_总览"]
+        table = overview.tables[workbook_v2.COLLECTION_TABLE]
+        min_col, min_row, max_col, max_row = range_boundaries(table.ref)
+        headers = [
+            overview.cell(min_row, column).value
+            for column in range(min_col, max_col + 1)
+        ]
+        historical_rows = [
+            {
+                headers[column - min_col]: overview.cell(row, column).value
+                for column in range(min_col, max_col + 1)
+            }
+            for row in range(min_row + 1, min_row + 4)
+        ]
+        assert [row["状态"] for row in historical_rows] == [
+            "已确认",
+            "未确认",
+            "已作废",
+        ]
+        assert all(row["操作"] == "KEEP" for row in historical_rows)
+        assert all(row["__row_token"] for row in historical_rows)
+        for row in range(min_row + 1, min_row + 4):
+            assert all(
+                overview.cell(row, column).protection.locked
+                for column in range(min_col, max_col + 1)
+            )
+
+        versions = book["99_实体版本"]
+        version_table = versions.tables[workbook_v2.ENTITY_VERSION_TABLE]
+        v_min_col, v_min_row, v_max_col, v_max_row = range_boundaries(version_table.ref)
+        version_rows = {
+            versions.cell(row, v_min_col + 1).value
+            for row in range(v_min_row + 1, v_max_row + 1)
+            if versions.cell(row, v_min_col).value == "collection"
+        }
+        assert version_rows == {
+            "collection-001",
+            "collection-unconfirmed",
+            "collection-void",
+        }
+    finally:
+        book.close()
+
+    unchanged = workbook_v2.validate_project_workbook(
+        artifact.content,
+        workspace=workspace,
+        hmac_key=HMAC_KEY,
+    )
+    assert unchanged.unchanged is True
+    assert unchanged.creates == ()
+
+    def tamper_void_fact(book):
+        sheet = book["01_总览"]
+        table = sheet.tables[workbook_v2.COLLECTION_TABLE]
+        min_col, min_row, max_col, max_row = range_boundaries(table.ref)
+        headers = [
+            sheet.cell(min_row, column).value
+            for column in range(min_col, max_col + 1)
+        ]
+        entity_col = min_col + headers.index("__entity_id")
+        amount_col = min_col + headers.index("累计回款金额")
+        target = next(
+            row
+            for row in range(min_row + 1, max_row + 1)
+            if sheet.cell(row, entity_col).value == "collection-void"
+        )
+        sheet.cell(target, amount_col, Decimal("20001.00"))
+
+    with pytest.raises(workbook_v2.ProjectWorkbookV2Error) as caught:
+        workbook_v2.validate_project_workbook(
+            _edit_workbook(artifact.content, tamper_void_fact),
+            workspace=workspace,
+            hmac_key=HMAC_KEY,
+        )
+    assert "只读业务数据或既有回款被修改" in str(caught.value)
 
 
 def test_client_row_id_is_signed_and_cumulative_amount_cannot_decrease():

@@ -386,6 +386,8 @@ class MaintenanceProjectWorkbookAdapter:
             "consumptions": consumptions,
             "expenses": expenses,
             "tasks": tasks,
+            "canonical_metrics": dict(raw["canonical_metrics"]),
+            "canonical_completeness": dict(raw["canonical_completeness"]),
             "data_version": state.data_version,
         }
 

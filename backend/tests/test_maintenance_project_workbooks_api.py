@@ -566,6 +566,7 @@ def test_workbook_endpoints_fail_closed_by_permission(
     )
     permissions = {
         "page_maintenance": True,
+        "data_customer": True,
         "data_purchase_cost": True,
         "data_profit": True,
         "action_maintenance_roundtrip_apply": True,
@@ -607,6 +608,101 @@ def test_workbook_endpoints_fail_closed_by_permission(
     )
     assert response.status_code == 403
     assert upload_read is False
+
+
+def test_project_workbook_export_validate_apply_and_error_download_require_customer_before_side_effects(
+    db,
+    monkeypatch,
+):
+    admin = _client(db, username="workbook_customer_permission_seed")
+    project_id, _contract = _project_and_contract(
+        admin,
+        db,
+        suffix="customer-permission",
+    )
+    client = _permission_client(
+        db,
+        username="workbook_without_customer_permission",
+        permissions={
+            "page_maintenance": True,
+            "data_customer": False,
+            "data_purchase_cost": True,
+            "data_profit": True,
+            "action_maintenance_roundtrip_apply": True,
+        },
+    )
+    state = db.get(MaintenanceProjectWorkbookState, project_id)
+    assert state is not None
+    before = {
+        "revision": state.revision,
+        "data_version": state.data_version,
+        "last_export_id": state.last_export_id,
+        "operations": db.scalar(
+            select(func.count()).select_from(MaintenanceProjectWorkbookOperation)
+        ),
+        "validations": db.scalar(
+            select(func.count()).select_from(MaintenanceProjectWorkbookValidation)
+        ),
+        "collections": db.scalar(
+            select(func.count()).select_from(MaintenanceCollectionSnapshot)
+        ),
+    }
+    upload_read = False
+
+    async def fail_if_upload_is_read(_request):
+        nonlocal upload_read
+        upload_read = True
+        raise AssertionError("unauthorized upload reached the parser")
+
+    monkeypatch.setattr(
+        maintenance_project_workbooks,
+        "_parse_and_save_roundtrip_upload",
+        fail_if_upload_is_read,
+    )
+
+    responses = [
+        client.get(f"/api/maintenance/projects/stable/{project_id}/workbook"),
+        client.post(
+            f"/api/maintenance/projects/stable/{project_id}/workbook/validate",
+            files={
+                "file": (
+                    "must-not-be-read.xlsx",
+                    b"must-not-be-read",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        ),
+        client.post(
+            f"/api/maintenance/projects/stable/{project_id}/workbook/apply",
+            json={
+                "validation_token": "must-not-be-read",
+                "data_version": state.data_version,
+            },
+        ),
+        client.get(
+            "/api/maintenance/workbook-validations/must-not-be-read/errors.xlsx"
+        ),
+    ]
+
+    assert [response.status_code for response in responses] == [403, 403, 403, 403]
+    assert upload_read is False
+    db.expire_all()
+    unchanged_state = db.get(MaintenanceProjectWorkbookState, project_id)
+    after = {
+        "revision": unchanged_state.revision,
+        "data_version": unchanged_state.data_version,
+        "last_export_id": unchanged_state.last_export_id,
+        "operations": db.scalar(
+            select(func.count()).select_from(MaintenanceProjectWorkbookOperation)
+        ),
+        "validations": db.scalar(
+            select(func.count()).select_from(MaintenanceProjectWorkbookValidation)
+        ),
+        "collections": db.scalar(
+            select(func.count()).select_from(MaintenanceCollectionSnapshot)
+        ),
+    }
+    assert after == before
 
 
 def test_workbook_export_requires_authentication(db):
