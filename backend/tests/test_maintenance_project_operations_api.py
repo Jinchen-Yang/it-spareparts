@@ -293,6 +293,29 @@ def test_direct_site_issue_api_exposes_server_owned_provenance(db):
     assert requisition["source"] == "direct_api"
     assert requisition["import_batch_id"] is None
 
+    derived_write = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-DERIVED-COST-WRITE",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [{
+                "issue_line_id": "issue-line-derived-cost-write",
+                "line_no": 1,
+                "part_id": part.id,
+                "pn": part.pn_std,
+                "quantity": "1",
+                "unit_cost_inc_tax": "999.00",
+            }],
+            "reason": "验证客户端不能写服务器派生成本",
+        },
+    )
+    assert derived_write.status_code == 422, derived_write.text
+    assert db.get(MaintenanceSiteIssueLine, "issue-line-derived-cost-write") is None
+
 
 def test_site_issue_create_query_count_is_bounded_and_all_lines_are_costed(db):
     project = _project(db, project_id="project-site-issue-create-scale")
@@ -727,6 +750,27 @@ def test_money_write_paths_use_half_up_and_reject_rounded_overflow(db):
     )
     assert overflow_expense.status_code == 400, overflow_expense.text
 
+    derived_overflow_expense = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses",
+        json={
+            "expense_id": "expense-inc-tax-overflow",
+            "expense_ref": "BX-INC-TAX-OVERFLOW",
+            "expense_date": "2026-01-01",
+            "amount_ex_tax": "884955752212.39",
+            "raw_status": "synthetic-finished",
+            "status_mapping_state": "mapped",
+            "normalized_status": "approved",
+            "status_mapping_version": "synthetic-expense-map-v1",
+            "reason": "验证服务器派生含税报销金额溢出受控拒绝",
+        },
+    )
+    assert derived_overflow_expense.status_code == 400, derived_overflow_expense.text
+    assert "含税" in derived_overflow_expense.json()["detail"]
+    assert db.get(
+        MaintenanceProjectExpenseAttribution,
+        "expense-inc-tax-overflow",
+    ) is None
+
     overflow_manual = client.patch(
         f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
         json={
@@ -847,6 +891,13 @@ def test_manual_cost_amount_uses_numeric_14_2_boundary_with_controlled_rejection
                     "pn": part.pn_std,
                     "quantity": "2",
                 },
+                {
+                    "issue_line_id": "issue-line-cost-inc-tax-overflow",
+                    "line_no": 3,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                },
             ],
             "reason": "建立成本金额 Numeric(14,2) 边界领用",
         },
@@ -858,14 +909,39 @@ def test_manual_cost_amount_uses_numeric_14_2_boundary_with_controlled_rejection
         json={
             "line_id": "issue-line-cost-maximum",
             "version": 1,
-            "unit_cost_ex_tax": "999999999999.99",
+            "unit_cost_ex_tax": "884955752212.38",
             "evidence": "最大合法金额边界证据",
             "reason": "验证 Numeric(14,2) 最大合法成本金额",
         },
     )
     assert maximum.status_code == 200, maximum.text
-    assert maximum.json()["unit_cost"] == "999999999999.99"
-    assert maximum.json()["cost_amount"] == "999999999999.99"
+    assert maximum.json()["unit_cost"] == "884955752212.38"
+    assert maximum.json()["unit_cost_inc_tax"] == "999999999999.99"
+    assert maximum.json()["cost_amount"] == "884955752212.38"
+    assert maximum.json()["cost_amount_inc_tax"] == "999999999999.99"
+
+    inc_tax_overflow = client.patch(
+        f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
+        json={
+            "line_id": "issue-line-cost-inc-tax-overflow",
+            "version": 1,
+            "unit_cost_ex_tax": "884955752212.39",
+            "evidence": "含税派生金额溢出边界证据",
+            "reason": "验证服务器派生含税成本溢出受控拒绝",
+        },
+    )
+    assert inc_tax_overflow.status_code == 400, inc_tax_overflow.text
+    assert "含税" in inc_tax_overflow.json()["detail"]
+    db.expire_all()
+    inc_tax_rejected = db.get(
+        MaintenanceSiteIssueLine,
+        "issue-line-cost-inc-tax-overflow",
+    )
+    assert inc_tax_rejected.unit_cost_ex_tax is None
+    assert inc_tax_rejected.unit_cost_inc_tax is None
+    assert inc_tax_rejected.cost_amount_ex_tax is None
+    assert inc_tax_rejected.cost_amount_inc_tax is None
+    assert inc_tax_rejected.version == 1
 
     first_illegal = client.patch(
         f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
@@ -1549,6 +1625,7 @@ def test_confirmed_site_issue_uses_direct_then_full_purchase_window(db):
         },
     ).json()
     assert contract["version"] == 1
+    assert contract["contract_amount_basis"] == "inc_tax"
 
     batch = _batch(db, "site-issue-cost")
     direct_part = DimPart(pn_std="PN-SYNTH-DIRECT")
@@ -1646,10 +1723,17 @@ def test_confirmed_site_issue_uses_direct_then_full_purchase_window(db):
     lines = {row["issue_line_id"]: row for row in created.json()["lines"]}
     assert lines["issue-line-direct"]["cost_source"] == "direct_purchase"
     assert lines["issue-line-direct"]["cost_amount"] == "19.46"
+    assert lines["issue-line-direct"]["unit_cost_ex_tax"] == "9.73"
+    assert lines["issue-line-direct"]["unit_cost_inc_tax"] == "10.99"
+    assert lines["issue-line-direct"]["cost_amount_ex_tax"] == "19.46"
+    assert lines["issue-line-direct"]["cost_amount_inc_tax"] == "21.98"
+    assert lines["issue-line-direct"]["tax_rate_used"] == "0.13"
     assert lines["issue-line-direct"]["price_basis"] == "ex_tax"
     assert lines["issue-line-direct"]["reference_samples"][0]["tax_conversion"] == "divide_1.13"
     assert lines["issue-line-window"]["cost_source"] == "purchase_window"
     assert lines["issue-line-window"]["unit_cost"] == "26.00"
+    assert lines["issue-line-window"]["unit_cost_inc_tax"] == "29.38"
+    assert lines["issue-line-window"]["cost_amount_inc_tax"] == "58.76"
     assert lines["issue-line-window"]["reference_sample_count"] == 2
 
     workspace = client.get(
@@ -1657,8 +1741,11 @@ def test_confirmed_site_issue_uses_direct_then_full_purchase_window(db):
         params={"as_of": "2026-05-31"},
     ).json()
     metrics = workspace["project"]["metrics"]
-    assert metrics["site_requisition_known_cost"] == "71.46"
-    assert metrics["actual_project_cost_known"] == "71.46"
+    assert metrics["contract_amount_basis"] == "inc_tax"
+    assert metrics["site_requisition_known_cost"] == "80.74"
+    assert metrics["site_requisition_known_cost_ex_tax"] == "71.46"
+    assert metrics["site_requisition_known_cost_inc_tax"] == "80.74"
+    assert metrics["actual_project_cost_known"] == "80.74"
     assert metrics["missing_cost_lines"] == 0
     requisitions = {row["line_id"]: row for row in workspace["requisitions"]["rows"]}
     assert requisitions["issue-line-direct"]["order_no"] == "ISSUE-SYNTH-001"
@@ -1935,6 +2022,8 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
     assert lines["issue-line-sales-fallback"]["cost_source"] == "sales_window"
     assert lines["issue-line-sales-fallback"]["unit_cost"] == "133.33"
     assert lines["issue-line-sales-fallback"]["cost_amount"] == "399.99"
+    assert lines["issue-line-sales-fallback"]["unit_cost_inc_tax"] == "150.66"
+    assert lines["issue-line-sales-fallback"]["cost_amount_inc_tax"] == "451.98"
     assert all(
         sample["tax_conversion"] == "divide_1.13"
         for sample in lines["issue-line-sales-fallback"]["reference_samples"]
@@ -1964,6 +2053,11 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
     assert filled.status_code == 200, filled.text
     assert filled.json()["cost_source"] == "manual"
     assert filled.json()["cost_amount"] == "50.00"
+    assert filled.json()["manual_unit_cost_inc_tax"] == "14.13"
+    assert filled.json()["unit_cost_ex_tax"] == "12.50"
+    assert filled.json()["unit_cost_inc_tax"] == "14.13"
+    assert filled.json()["cost_amount_ex_tax"] == "50.00"
+    assert filled.json()["cost_amount_inc_tax"] == "56.52"
     assert filled.json()["version"] == 2
 
     state_before_repeat = db.get(
@@ -2037,9 +2131,17 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
     restricted_metrics = restricted["project"]["metrics"]
     assert restricted_metrics["contract_amount_complete"] is None
     assert restricted_metrics["site_requisition_known_cost"] is None
+    assert restricted_metrics["site_requisition_known_cost_ex_tax"] is None
+    assert restricted_metrics["site_requisition_known_cost_inc_tax"] is None
     assert restricted_metrics["actual_project_cost_known"] is None
+    assert restricted_metrics["actual_project_cost_known_ex_tax"] is None
+    assert restricted_metrics["actual_project_cost_known_inc_tax"] is None
     assert restricted_metrics["cost_status"] is None
     assert restricted["requisitions"]["rows"][0]["unit_cost"] is None
+    assert restricted["requisitions"]["rows"][0]["unit_cost_ex_tax"] is None
+    assert restricted["requisitions"]["rows"][0]["unit_cost_inc_tax"] is None
+    assert restricted["requisitions"]["rows"][0]["cost_amount_ex_tax"] is None
+    assert restricted["requisitions"]["rows"][0]["cost_amount_inc_tax"] is None
     assert restricted["requisitions"]["rows"][0]["reference_samples"] == []
     assert restricted["requisitions"]["rows"][0]["cost_status"] == "restricted"
     assert not any(
@@ -2085,6 +2187,29 @@ def test_only_explicitly_mapped_approved_expense_counts(db):
         },
     )
     assert approved.status_code == 201, approved.text
+    assert approved.json()["amount_ex_tax"] == "50.00"
+    assert approved.json()["amount_inc_tax"] == "56.50"
+    assert approved.json()["tax_rate_used"] == "0.13"
+    derived_expense_write = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses",
+        json={
+            "expense_id": "expense-derived-tax-write",
+            "expense_ref": "BX-DERIVED-TAX-WRITE",
+            "expense_date": "2026-07-10",
+            "amount_ex_tax": "50.00",
+            "amount_inc_tax": "1.00",
+            "raw_status": "synthetic-finished",
+            "status_mapping_state": "mapped",
+            "normalized_status": "approved",
+            "status_mapping_version": "synthetic-expense-map-v1",
+            "reason": "验证客户端不能写服务器派生报销金额",
+        },
+    )
+    assert derived_expense_write.status_code == 422, derived_expense_write.text
+    assert db.get(
+        MaintenanceProjectExpenseAttribution,
+        "expense-derived-tax-write",
+    ) is None
     unmapped = client.post(
         f"/api/maintenance/projects/stable/{project.project_id}/expenses",
         json={
@@ -2106,13 +2231,20 @@ def test_only_explicitly_mapped_approved_expense_counts(db):
         params={"as_of": "2026-07-31"},
     ).json()
     metrics = workspace["project"]["metrics"]
-    assert metrics["approved_expense"] == "50.00"
-    assert metrics["actual_project_cost_known"] == "50.00"
+    assert metrics["approved_expense"] == "56.50"
+    assert metrics["approved_expense_ex_tax"] == "50.00"
+    assert metrics["approved_expense_inc_tax"] == "56.50"
+    assert metrics["actual_project_cost_known"] == "56.50"
+    assert metrics["actual_project_cost_known_ex_tax"] == "50.00"
+    assert metrics["actual_project_cost_known_inc_tax"] == "56.50"
+    assert metrics["cost_progress_basis"] == "inc_tax"
     assert workspace["approved_expenses"]["total"] == 1
     assert workspace["approved_expenses"]["rows"][0]["contract_no"] == "XS-EXPENSE-001"
     assert workspace["approved_expenses"]["rows"][0]["category"] == "差旅费"
     assert workspace["approved_expenses"]["rows"][0]["reason"] == "项目现场支持"
-    assert workspace["approved_expenses"]["rows"][0]["amount"] == "50.00"
+    assert workspace["approved_expenses"]["rows"][0]["amount"] == "56.50"
+    assert workspace["approved_expenses"]["rows"][0]["amount_ex_tax"] == "50.00"
+    assert workspace["approved_expenses"]["rows"][0]["amount_inc_tax"] == "56.50"
     assert workspace["approved_expenses"]["rows"][0]["approval_status"] == "approved"
     assert workspace["completeness"]["status"] == "incomplete"
     assert {row["code"] for row in workspace["completeness"]["issues"]} >= {
@@ -2272,7 +2404,7 @@ def test_expense_status_lifecycle_counts_only_approved_and_preserves_voided_fact
         params={"as_of": "2026-07-31"},
     )
     assert workspace.status_code == 200, workspace.text
-    assert workspace.json()["project"]["metrics"]["approved_expense"] == "75.00"
+    assert workspace.json()["project"]["metrics"]["approved_expense"] == "84.75"
 
     stale = client.patch(
         "/api/maintenance/projects/stable/expenses/expense-status-001/status",
@@ -2574,13 +2706,20 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
     ]
     client = _client(db, username="threshold_task_admin")
 
-    for project, amount in zip(projects, ("80.00", "100.00", "101.00"), strict=True):
+    threshold_cases = (
+        ("113.00", "80.00"),   # inc-tax 90.40 / 113.00 = 80.00%
+        ("113.00", "100.00"),  # inc-tax 113.00 / 113.00 = 100.00%
+        ("200.00", "177.00"),  # inc-tax 200.01 / 200.00 = 100.01%
+    )
+    for project, (contract_amount, amount) in zip(
+        projects, threshold_cases, strict=True
+    ):
         contract = client.post(
             f"/api/maintenance/projects/stable/{project.project_id}/contracts",
             json={
                 "contract_id": f"contract-{project.project_id}",
                 "contract_no": f"XS-{project.project_id}",
-                "contract_amount": "100.00",
+                "contract_amount": contract_amount,
                 "contract_status": "synthetic-active",
                 "status_mapping_state": "mapped",
                 "status_mapping_version": "synthetic-map-v1",
@@ -2689,9 +2828,9 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
 def test_directory_reminder_filters_use_the_same_rounded_cost_threshold_as_cards(db):
     client = _client(db, username="rounded_threshold_admin")
     cases = [
-        ("rounded-up-to-80", "300.00", "239.99", "yellow"),
-        ("rounded-down-to-100", "300.00", "300.01", "yellow"),
-        ("half-cent-to-red", "20000.00", "20001.00", "red"),
+        ("rounded-up-to-80", "300.00", "212.38", "yellow"),
+        ("rounded-down-to-100", "300.00", "265.49", "yellow"),
+        ("half-cent-to-red", "20000.00", "17700.00", "red"),
     ]
     for suffix, contract_amount, cost_amount, _expected in cases:
         project = _project(db, project_id=f"project-{suffix}")
@@ -3191,6 +3330,10 @@ def test_workspace_details_are_independently_paged_without_truncating_totals_or_
                 quantity=Decimal("1.000"),
                 unit_cost=Decimal("10.00") if has_cost else None,
                 cost_amount=Decimal("10.00") if has_cost else None,
+                unit_cost_ex_tax=Decimal("10.00") if has_cost else None,
+                unit_cost_inc_tax=Decimal("11.30") if has_cost else None,
+                cost_amount_ex_tax=Decimal("10.00") if has_cost else None,
+                cost_amount_inc_tax=Decimal("11.30") if has_cost else None,
                 cost_source="direct_purchase" if has_cost else None,
                 algorithm_version="synthetic-v1",
             )
@@ -3229,6 +3372,7 @@ def test_workspace_details_are_independently_paged_without_truncating_totals_or_
                 expense_ref=f"BXD-WORKSPACE-{row_no:03d}",
                 expense_date=date(2026, 8, 3),
                 amount_ex_tax=Decimal("2.00"),
+                amount_inc_tax=Decimal("2.26"),
                 raw_status="synthetic-approved" if approved else "synthetic-rejected",
                 status_mapping_state="mapped",
                 normalized_status="approved" if approved else "rejected",
@@ -3269,9 +3413,14 @@ def test_workspace_details_are_independently_paged_without_truncating_totals_or_
     assert [row["expense_id"] for row in workspace["approved_expenses"]["rows"]] == [
         f"workspace-expense-{row_no:03d}" for row_no in range(31, 41)
     ]
-    assert workspace["project"]["metrics"]["site_requisition_known_cost"] == "220.00"
+    assert workspace["approved_expenses"]["rows"][0]["amount"] == "2.26"
+    assert workspace["approved_expenses"]["rows"][0]["amount_ex_tax"] == "2.00"
+    assert workspace["approved_expenses"]["rows"][0]["amount_inc_tax"] == "2.26"
+    assert workspace["approved_expenses"]["rows"][0]["tax_rate_used"] == "0.13"
+    assert workspace["project"]["metrics"]["site_requisition_known_cost"] == "248.60"
+    assert workspace["project"]["metrics"]["site_requisition_known_cost_ex_tax"] == "220.00"
     assert workspace["project"]["metrics"]["missing_cost_lines"] == 23
-    assert workspace["project"]["metrics"]["approved_expense"] == "90.00"
+    assert workspace["project"]["metrics"]["approved_expense"] == "101.70"
     assert [sheet["row_count"] for sheet in workspace["workbook_preview"]["sheets"][:3]] == [
         26,
         45,

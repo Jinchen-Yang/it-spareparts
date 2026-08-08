@@ -269,6 +269,7 @@ def project_overview_from_facts(
             "contract_id": relation.contract_id,
             "contract_no": relation.contract_no,
             "contract_amount": None if amount_restricted else relation.contract_amount,
+            "contract_amount_basis": "inc_tax",
             "contract_status": relation.contract_status,
             "status_mapping_state": relation.status_mapping_state,
             "status_mapping_version": relation.status_mapping_version,

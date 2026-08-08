@@ -1,16 +1,20 @@
 """Real migration checks for stable-project operating facts and workbook state."""
 
 import os
+from decimal import Decimal
 
+import pytest
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import DBAPIError
 
 from app.db import engine
 
 
 _PREV = "d8a3c7e4f2b1"
 _PRE_PROVENANCE = "f3b7d9e1c5a2"
+_PRE_DUAL_TAX = "a4c9e1f2b6d8"
 _TABLES = {
     "maintenance_collection_snapshot",
     "maintenance_project_operation_audit",
@@ -50,11 +54,24 @@ def test_operating_fact_schema_contains_evidence_and_server_validation(db):
     }
     assert {
         "manual_unit_cost",
+        "manual_unit_cost_inc_tax",
+        "unit_cost_ex_tax",
+        "unit_cost_inc_tax",
+        "cost_amount_ex_tax",
+        "cost_amount_inc_tax",
+        "tax_rate_used",
         "manual_evidence",
         "price_basis",
         "reference_samples",
         "algorithm_version",
     } <= cost_columns
+    expense_columns = {
+        column["name"]
+        for column in inspector.get_columns(
+            "maintenance_project_expense_attribution"
+        )
+    }
+    assert {"amount_ex_tax", "amount_inc_tax", "tax_rate_used"} <= expense_columns
     validation_columns = {
         column["name"]
         for column in inspector.get_columns("maintenance_project_workbook_validation")
@@ -197,5 +214,161 @@ def test_operating_fact_empty_schema_downgrades_and_upgrades(db):
         alembic_command.upgrade(cfg, "head")
         with engine.connect() as connection:
             assert _TABLES <= set(inspect(connection).get_table_names())
+    finally:
+        alembic_command.upgrade(cfg, "head")
+
+
+def test_dual_tax_migration_backfills_and_round_trips(db):
+    db.close()
+    cfg = _cfg()
+    alembic_command.downgrade(cfg, _PRE_DUAL_TAX)
+    try:
+        with engine.begin() as connection:
+            part_id = connection.execute(
+                text(
+                    "INSERT INTO dim_part (pn_std) VALUES ('PN-MIGRATION-DUAL-TAX') "
+                    "RETURNING id"
+                )
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_project "
+                    "(project_id, project_code, display_name, lifecycle_status) "
+                    "VALUES ('migration-dual-tax-project', "
+                    "'MIGRATION-DUAL-TAX', '迁移双税项目', 'ongoing')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_site_issue "
+                    "(issue_id, project_id, issue_no, issue_date, raw_status, "
+                    "status_mapping_state, normalized_status, status_mapping_version) "
+                    "VALUES ('migration-dual-tax-issue', "
+                    "'migration-dual-tax-project', 'ISSUE-MIGRATION-DUAL-TAX', "
+                    "DATE '2026-08-01', 'confirmed', 'mapped', 'confirmed', "
+                    "'migration-map-v1')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_site_issue_line "
+                    "(issue_line_id, issue_id, line_no, part_id, pn, quantity, "
+                    "manual_unit_cost, manual_evidence, unit_cost, cost_amount, "
+                    "cost_source, algorithm_version) VALUES "
+                    "('migration-dual-tax-line', 'migration-dual-tax-issue', 1, "
+                    ":part_id, 'PN-MIGRATION-DUAL-TAX', 2, 5, 'legacy evidence', "
+                    "10, 20, 'manual', 'legacy-v1')"
+                ),
+                {"part_id": part_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_project_expense_attribution "
+                    "(expense_id, project_id, expense_ref, expense_date, "
+                    "amount_ex_tax, raw_status, status_mapping_state, "
+                    "normalized_status, status_mapping_version) VALUES "
+                    "('migration-dual-tax-expense', 'migration-dual-tax-project', "
+                    "'BX-MIGRATION-DUAL-TAX', DATE '2026-08-01', 50, "
+                    "'approved', 'mapped', 'approved', 'migration-map-v1')"
+                )
+            )
+
+        # The predecessor allowed a legacy result whose stored amount did not
+        # equal quantity × unit cost.  The new invariant must fail closed with
+        # a useful message, not silently rewrite historical accounting facts.
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_site_issue_line "
+                    "(issue_line_id, issue_id, line_no, part_id, pn, quantity, "
+                    "unit_cost, cost_amount, cost_source, algorithm_version) "
+                    "VALUES ('migration-dual-tax-invalid-line', "
+                    "'migration-dual-tax-issue', 2, :part_id, "
+                    "'PN-MIGRATION-DUAL-TAX', 2, 10, 19, 'manual', 'legacy-v1')"
+                ),
+                {"part_id": part_id},
+            )
+        with pytest.raises(DBAPIError, match="legacy cost_amount does not equal"):
+            alembic_command.upgrade(cfg, "head")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "DELETE FROM maintenance_site_issue_line "
+                    "WHERE issue_line_id = 'migration-dual-tax-invalid-line'"
+                )
+            )
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE maintenance_project_expense_attribution "
+                    "SET amount_ex_tax = 884955752212.39 "
+                    "WHERE expense_id = 'migration-dual-tax-expense'"
+                )
+            )
+        with pytest.raises(DBAPIError, match="cannot be represented"):
+            alembic_command.upgrade(cfg, "head")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE maintenance_project_expense_attribution "
+                    "SET amount_ex_tax = 50 "
+                    "WHERE expense_id = 'migration-dual-tax-expense'"
+                )
+            )
+
+        alembic_command.upgrade(cfg, "head")
+        with engine.connect() as connection:
+            line = connection.execute(
+                text(
+                    "SELECT manual_unit_cost_inc_tax, unit_cost_ex_tax, "
+                    "unit_cost_inc_tax, cost_amount_ex_tax, cost_amount_inc_tax, "
+                    "tax_rate_used FROM maintenance_site_issue_line "
+                    "WHERE issue_line_id = 'migration-dual-tax-line'"
+                )
+            ).one()
+            assert tuple(line) == (
+                Decimal("5.65"),
+                Decimal("10.00"),
+                Decimal("11.30"),
+                Decimal("20.00"),
+                Decimal("22.60"),
+                Decimal("0.1300"),
+            )
+            expense = connection.execute(
+                text(
+                    "SELECT amount_ex_tax, amount_inc_tax, tax_rate_used "
+                    "FROM maintenance_project_expense_attribution "
+                    "WHERE expense_id = 'migration-dual-tax-expense'"
+                )
+            ).one()
+            assert tuple(expense) == (
+                Decimal("50.00"),
+                Decimal("56.50"),
+                Decimal("0.1300"),
+            )
+
+        alembic_command.downgrade(cfg, _PRE_DUAL_TAX)
+        with engine.connect() as connection:
+            inspector = inspect(connection)
+            assert "unit_cost_inc_tax" not in {
+                column["name"]
+                for column in inspector.get_columns("maintenance_site_issue_line")
+            }
+            assert connection.execute(
+                text(
+                    "SELECT unit_cost, cost_amount FROM maintenance_site_issue_line "
+                    "WHERE issue_line_id = 'migration-dual-tax-line'"
+                )
+            ).one() == (Decimal("10.00"), Decimal("20.00"))
+
+        alembic_command.upgrade(cfg, "head")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT cost_amount_inc_tax FROM maintenance_site_issue_line "
+                    "WHERE issue_line_id = 'migration-dual-tax-line'"
+                )
+            ).scalar_one() == Decimal("22.60")
     finally:
         alembic_command.upgrade(cfg, "head")

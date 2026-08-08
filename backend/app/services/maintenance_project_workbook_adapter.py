@@ -526,6 +526,10 @@ class MaintenanceProjectWorkbookAdapter:
                 "quantity": item["quantity"],
                 "unit_cost": item["unit_cost"],
                 "cost_amount": item["cost_amount"],
+                "unit_cost_ex_tax": item["unit_cost_ex_tax"],
+                "unit_cost_inc_tax": item["unit_cost_inc_tax"],
+                "cost_amount_ex_tax": item["cost_amount_ex_tax"],
+                "cost_amount_inc_tax": item["cost_amount_inc_tax"],
                 "cost_status": (
                     "缺少价格成本"
                     if item["unit_cost"] is None or item["cost_amount"] is None
@@ -542,7 +546,9 @@ class MaintenanceProjectWorkbookAdapter:
                 "expense_date": _excel_date(item["expense_date"]),
                 "applicant": item.get("applicant"),
                 "category": item.get("category"),
-                "amount": item["amount_ex_tax"],
+                "amount": item["amount_inc_tax"],
+                "amount_ex_tax": item["amount_ex_tax"],
+                "amount_inc_tax": item["amount_inc_tax"],
                 "approval_status": (
                     "已审批"
                     if item["normalized_status"] == "approved"

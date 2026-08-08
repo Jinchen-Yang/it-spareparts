@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-from app.models._types import Money, Qty, TZDateTime
+from app.models._types import Money, Qty, Rate, TZDateTime
 
 
 class MaintenanceCollectionSnapshot(Base):
@@ -196,10 +196,23 @@ class MaintenanceSiteIssueLine(Base):
     linked_purchase_line_id: Mapped[int | None] = mapped_column(
         ForeignKey("f_purchase_line.id")
     )
+    # Legacy ``manual_unit_cost`` remains the ex-tax input/alias.  Its
+    # inc-tax counterpart and every resolved amount are server-owned facts.
     manual_unit_cost: Mapped[Decimal | None] = mapped_column(Money)
+    manual_unit_cost_inc_tax: Mapped[Decimal | None] = mapped_column(Money)
     manual_evidence: Mapped[str | None] = mapped_column(Text)
     unit_cost: Mapped[Decimal | None] = mapped_column(Money)
     cost_amount: Mapped[Decimal | None] = mapped_column(Money)
+    unit_cost_ex_tax: Mapped[Decimal | None] = mapped_column(Money)
+    unit_cost_inc_tax: Mapped[Decimal | None] = mapped_column(Money)
+    cost_amount_ex_tax: Mapped[Decimal | None] = mapped_column(Money)
+    cost_amount_inc_tax: Mapped[Decimal | None] = mapped_column(Money)
+    tax_rate_used: Mapped[Decimal] = mapped_column(
+        Rate,
+        nullable=False,
+        default=Decimal("0.13"),
+        server_default="0.13",
+    )
     cost_source: Mapped[str | None] = mapped_column(String(24))
     price_basis: Mapped[str] = mapped_column(
         String(16), nullable=False, default="ex_tax", server_default="ex_tax"
@@ -235,6 +248,10 @@ class MaintenanceSiteIssueLine(Base):
             name="ck_maintenance_site_issue_line_manual_cost",
         ),
         CheckConstraint(
+            "manual_unit_cost_inc_tax IS NULL OR (manual_unit_cost_inc_tax >= 0 AND manual_unit_cost_inc_tax < 1000000000000)",
+            name="ck_maintenance_site_issue_line_manual_cost_inc_tax",
+        ),
+        CheckConstraint(
             "unit_cost IS NULL OR (unit_cost >= 0 AND unit_cost < 1000000000000)",
             name="ck_maintenance_site_issue_line_unit_cost",
         ),
@@ -247,9 +264,33 @@ class MaintenanceSiteIssueLine(Base):
             name="ck_maintenance_site_issue_line_manual_evidence_pair",
         ),
         CheckConstraint(
-            "(cost_source IS NULL AND unit_cost IS NULL AND cost_amount IS NULL) OR "
-            "(cost_source IS NOT NULL AND unit_cost IS NOT NULL AND cost_amount IS NOT NULL)",
+            "(manual_unit_cost IS NULL AND manual_unit_cost_inc_tax IS NULL) OR "
+            "(manual_unit_cost IS NOT NULL AND manual_unit_cost_inc_tax = round(manual_unit_cost * NUMERIC '1.13', 2))",
+            name="ck_maintenance_site_issue_line_manual_tax_pair",
+        ),
+        CheckConstraint(
+            "(cost_source IS NULL AND unit_cost IS NULL AND cost_amount IS NULL "
+            "AND unit_cost_ex_tax IS NULL AND unit_cost_inc_tax IS NULL "
+            "AND cost_amount_ex_tax IS NULL AND cost_amount_inc_tax IS NULL) OR "
+            "(cost_source IS NOT NULL AND unit_cost IS NOT NULL AND cost_amount IS NOT NULL "
+            "AND unit_cost_ex_tax IS NOT NULL AND unit_cost_inc_tax IS NOT NULL "
+            "AND cost_amount_ex_tax IS NOT NULL AND cost_amount_inc_tax IS NOT NULL)",
             name="ck_maintenance_site_issue_line_cost_result_pair",
+        ),
+        CheckConstraint(
+            "unit_cost IS NULL OR (unit_cost = unit_cost_ex_tax AND cost_amount = cost_amount_ex_tax)",
+            name="ck_maintenance_site_issue_line_legacy_ex_tax_aliases",
+        ),
+        CheckConstraint(
+            "unit_cost_ex_tax IS NULL OR ("
+            "unit_cost_inc_tax = round(unit_cost_ex_tax * NUMERIC '1.13', 2) "
+            "AND cost_amount_ex_tax = round(quantity * unit_cost_ex_tax, 2) "
+            "AND cost_amount_inc_tax = round(quantity * unit_cost_inc_tax, 2))",
+            name="ck_maintenance_site_issue_line_dual_tax_amounts",
+        ),
+        CheckConstraint(
+            "tax_rate_used = 0.13",
+            name="ck_maintenance_site_issue_line_tax_rate_used",
         ),
         CheckConstraint(
             "price_basis = 'ex_tax'",
@@ -289,6 +330,13 @@ class MaintenanceProjectExpenseAttribution(Base):
     category: Mapped[str | None] = mapped_column(String(64))
     expense_reason: Mapped[str | None] = mapped_column(Text)
     amount_ex_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    amount_inc_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    tax_rate_used: Mapped[Decimal] = mapped_column(
+        Rate,
+        nullable=False,
+        default=Decimal("0.13"),
+        server_default="0.13",
+    )
     raw_status: Mapped[str] = mapped_column(String(64), nullable=False)
     status_mapping_state: Mapped[str] = mapped_column(String(16), nullable=False)
     normalized_status: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -317,6 +365,18 @@ class MaintenanceProjectExpenseAttribution(Base):
         CheckConstraint(
             "amount_ex_tax >= 0 AND amount_ex_tax < 1000000000000",
             name="ck_maintenance_project_expense_amount",
+        ),
+        CheckConstraint(
+            "amount_inc_tax >= 0 AND amount_inc_tax < 1000000000000",
+            name="ck_maintenance_project_expense_amount_inc_tax",
+        ),
+        CheckConstraint(
+            "amount_inc_tax = round(amount_ex_tax * NUMERIC '1.13', 2)",
+            name="ck_maintenance_project_expense_dual_tax_amounts",
+        ),
+        CheckConstraint(
+            "tax_rate_used = 0.13",
+            name="ck_maintenance_project_expense_tax_rate_used",
         ),
         CheckConstraint("version >= 1", name="ck_maintenance_project_expense_version"),
         UniqueConstraint("project_id", "expense_ref", name="uq_maintenance_project_expense_ref"),

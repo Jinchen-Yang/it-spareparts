@@ -65,7 +65,7 @@ METADATA_TABLE = "tbl_metadata_v2"
 CONTRACT_HEADERS = (
     "项目合同关系ID",
     "合同编号",
-    "合同额（全部合同）",
+    "合同额（含税，全部合同）",
     "原始合同状态",
     "状态映射",
     "是否计入全部合同额",
@@ -80,7 +80,7 @@ COLLECTION_HEADERS = (
     "项目合同关系ID",
     "合同编号",
     "报告月份",
-    "累计回款金额",
+    "累计回款金额（含税）",
     "回款凭证号",
     "状态",
     "备注",
@@ -97,7 +97,9 @@ CONSUMPTION_HEADERS = (
     "备件名称",
     "实际领用数量",
     "未税单位成本",
-    "实际消耗成本",
+    "含税单位成本",
+    "实际消耗成本（未税）",
+    "实际消耗成本（含税）",
     "成本完整性",
     "成本来源",
 )
@@ -107,7 +109,8 @@ EXPENSE_HEADERS = (
     "报销日期",
     "报销人",
     "费用分类",
-    "已审批金额",
+    "已审批金额（未税）",
+    "已审批金额（含税）",
     "审批状态",
     "备注",
 )
@@ -404,27 +407,61 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
 
         total_contract_amount = decimal_value("total_contract_amount")
         known_contract_amount = decimal_value("known_contract_amount") or Decimal("0")
+        contract_amount_basis_valid = (
+            canonical.get("contract_amount_basis") == "inc_tax"
+        )
+        cost_progress_basis_valid = (
+            canonical.get("cost_progress_basis") == "inc_tax"
+        )
         contract_amount_complete = (
             canonical.get("contract_amount_complete") is True
             and total_contract_amount is not None
         )
         confirmed = decimal_value("received_amount") or Decimal("0")
-        known_cost = decimal_value("site_requisition_known_cost") or Decimal("0")
-        approved_expense = decimal_value("approved_expense") or Decimal("0")
-        known_project_cost = (
-            decimal_value("actual_project_cost_known")
-            or known_cost + approved_expense
+        known_cost_ex_tax = (
+            decimal_value("site_requisition_known_cost_ex_tax") or Decimal("0")
+        )
+        known_cost_inc_tax = (
+            decimal_value("site_requisition_known_cost_inc_tax")
+            or decimal_value("site_requisition_known_cost")
+            or Decimal("0")
+        )
+        approved_expense_ex_tax = (
+            decimal_value("approved_expense_ex_tax") or Decimal("0")
+        )
+        approved_expense_inc_tax = (
+            decimal_value("approved_expense_inc_tax")
+            or decimal_value("approved_expense")
+            or Decimal("0")
+        )
+        known_project_cost_ex_tax = (
+            decimal_value("actual_project_cost_known_ex_tax")
+            or known_cost_ex_tax + approved_expense_ex_tax
+        )
+        known_project_cost_inc_tax = (
+            decimal_value("actual_project_cost_known_inc_tax")
+            or decimal_value("actual_project_cost_known")
+            or known_cost_inc_tax + approved_expense_inc_tax
         )
         collection_pct = decimal_value("collection_progress_pct")
         cost_pct = decimal_value("cost_rate_lower_bound_pct")
         collection_rate = (
             collection_pct / Decimal("100")
-            if contract_amount_complete and collection_pct is not None
+            if (
+                contract_amount_complete
+                and contract_amount_basis_valid
+                and collection_pct is not None
+            )
             else None
         )
         cost_rate = (
             cost_pct / Decimal("100")
-            if contract_amount_complete and cost_pct is not None
+            if (
+                contract_amount_complete
+                and contract_amount_basis_valid
+                and cost_progress_basis_valid
+                and cost_pct is not None
+            )
             else None
         )
         try:
@@ -433,7 +470,9 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
             raise ProjectWorkbookV2Error(
                 "项目 canonical metric missing_cost_lines 无效"
             ) from exc
-        if not contract_amount_complete:
+        if not contract_amount_basis_valid or not cost_progress_basis_valid:
+            cost_alert = "basis_unknown"
+        elif not contract_amount_complete:
             cost_alert = "no_contract_amount"
         elif cost_rate is not None and cost_rate > Decimal("1"):
             cost_alert = "red"
@@ -449,6 +488,13 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
         completeness = workspace.get("canonical_completeness")
         if not isinstance(completeness, Mapping):
             completeness = {"status": "unknown", "issues": []}
+        completeness_issues = [
+            str(issue.get("code") or "unknown")
+            for issue in completeness.get("issues") or []
+            if isinstance(issue, Mapping)
+        ]
+        if not contract_amount_basis_valid or not cost_progress_basis_valid:
+            completeness_issues.append("basis_unknown")
         return {
             "total_contract_amount": (
                 total_contract_amount if contract_amount_complete else None
@@ -457,18 +503,24 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
             "contract_amount_complete": contract_amount_complete,
             "confirmed_cumulative_collection_amount": confirmed,
             "collection_rate": collection_rate,
-            "known_consumption_cost": known_cost,
-            "approved_expense": approved_expense,
-            "known_project_cost": known_project_cost,
+            "known_consumption_cost": known_cost_inc_tax,
+            "known_consumption_cost_ex_tax": known_cost_ex_tax,
+            "known_consumption_cost_inc_tax": known_cost_inc_tax,
+            "approved_expense": approved_expense_inc_tax,
+            "approved_expense_ex_tax": approved_expense_ex_tax,
+            "approved_expense_inc_tax": approved_expense_inc_tax,
+            "known_project_cost": known_project_cost_inc_tax,
+            "known_project_cost_ex_tax": known_project_cost_ex_tax,
+            "known_project_cost_inc_tax": known_project_cost_inc_tax,
             "missing_cost_rows": missing_cost_rows,
             "cost_rate_lower_bound": cost_rate,
             "cost_alert": cost_alert,
-            "completeness_status": str(completeness.get("status") or "unknown"),
-            "completeness_issues": tuple(
-                str(issue.get("code") or "unknown")
-                for issue in completeness.get("issues") or []
-                if isinstance(issue, Mapping)
+            "completeness_status": (
+                "incomplete"
+                if not contract_amount_basis_valid or not cost_progress_basis_valid
+                else str(completeness.get("status") or "unknown")
             ),
+            "completeness_issues": tuple(dict.fromkeys(completeness_issues)),
         }
 
     all_contracts = list(workspace.get("contracts") or [])
@@ -518,30 +570,45 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
             latest[relation_id] = (report_month, amount)
     confirmed = sum((item[1] for item in latest.values()), Decimal("0"))
 
-    known_cost = Decimal("0")
+    known_cost_ex_tax = Decimal("0")
+    known_cost_inc_tax = Decimal("0")
     missing_cost_rows = 0
     for row in workspace.get("consumptions") or []:
         if row.get("unit_cost") is None or row.get("cost_amount") is None:
             missing_cost_rows += 1
-        if row.get("cost_amount") is not None:
-            known_cost += Decimal(str(row["cost_amount"]))
-    approved_expense = sum(
+        cost_ex_tax = row.get("cost_amount_ex_tax", row.get("cost_amount"))
+        cost_inc_tax = row.get("cost_amount_inc_tax", row.get("cost_amount"))
+        if cost_ex_tax is not None:
+            known_cost_ex_tax += Decimal(str(cost_ex_tax))
+        if cost_inc_tax is not None:
+            known_cost_inc_tax += Decimal(str(cost_inc_tax))
+    approved_expense_ex_tax = sum(
         (
-            Decimal(str(row["amount"]))
+            Decimal(str(row.get("amount_ex_tax", row.get("amount"))))
             for row in workspace.get("expenses") or []
             if str(row.get("approval_status") or "") == "已审批"
-            and row.get("amount") is not None
+            and row.get("amount_ex_tax", row.get("amount")) is not None
         ),
         Decimal("0"),
     )
-    known_project_cost = known_cost + approved_expense
+    approved_expense_inc_tax = sum(
+        (
+            Decimal(str(row.get("amount_inc_tax", row.get("amount"))))
+            for row in workspace.get("expenses") or []
+            if str(row.get("approval_status") or "") == "已审批"
+            and row.get("amount_inc_tax", row.get("amount")) is not None
+        ),
+        Decimal("0"),
+    )
+    known_project_cost_ex_tax = known_cost_ex_tax + approved_expense_ex_tax
+    known_project_cost_inc_tax = known_cost_inc_tax + approved_expense_inc_tax
     collection_rate = (
         confirmed / total_contract_amount
         if total_contract_amount is not None and total_contract_amount > 0
         else None
     )
     cost_rate = (
-        known_project_cost / total_contract_amount
+        known_project_cost_inc_tax / total_contract_amount
         if total_contract_amount is not None and total_contract_amount > 0
         else None
     )
@@ -561,9 +628,15 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
         "contract_amount_complete": contract_amount_complete,
         "confirmed_cumulative_collection_amount": confirmed,
         "collection_rate": collection_rate,
-        "known_consumption_cost": known_cost,
-        "approved_expense": approved_expense,
-        "known_project_cost": known_project_cost,
+        "known_consumption_cost": known_cost_inc_tax,
+        "known_consumption_cost_ex_tax": known_cost_ex_tax,
+        "known_consumption_cost_inc_tax": known_cost_inc_tax,
+        "approved_expense": approved_expense_inc_tax,
+        "approved_expense_ex_tax": approved_expense_ex_tax,
+        "approved_expense_inc_tax": approved_expense_inc_tax,
+        "known_project_cost": known_project_cost_inc_tax,
+        "known_project_cost_ex_tax": known_project_cost_ex_tax,
+        "known_project_cost_inc_tax": known_project_cost_inc_tax,
         "missing_cost_rows": missing_cost_rows,
         "cost_rate_lower_bound": cost_rate,
         "cost_alert": cost_alert,
@@ -677,8 +750,10 @@ def _consumption_rows(workspace: Mapping[str, Any]):
         row.get("part_no"),
         row.get("part_name"),
         _number(row.get("quantity")),
-        _number(row.get("unit_cost")),
-        _number(row.get("cost_amount")),
+        _number(row.get("unit_cost_ex_tax", row.get("unit_cost"))),
+        _number(row.get("unit_cost_inc_tax")),
+        _number(row.get("cost_amount_ex_tax", row.get("cost_amount"))),
+        _number(row.get("cost_amount_inc_tax")),
         row.get("cost_status") or (
             "缺少价格成本"
             if row.get("unit_cost") is None or row.get("cost_amount") is None
@@ -695,7 +770,8 @@ def _expense_rows(workspace: Mapping[str, Any]):
         row.get("expense_date"),
         row.get("applicant"),
         row.get("category"),
-        _number(row.get("amount")),
+        _number(row.get("amount_ex_tax", row.get("amount"))),
+        _number(row.get("amount_inc_tax", row.get("amount"))),
         row.get("approval_status"),
         row.get("remark"),
     ) for row in workspace.get("expenses") or []
@@ -724,16 +800,19 @@ def _summary_rows(workspace: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
         ("数据截至", workspace.get("as_of")),
         (
             "口径",
-            "合同额为该项目全部合同额；回款为每合同每月累计快照；实际消耗为现场领用单",
+            "合同额与回款均为含税；成本同时展示未税/含税；预警按含税成本÷含税合同额；实际消耗为现场领用单",
         ),
-        ("全部合同额（当前计入口径）", _number(metrics["total_contract_amount"])),
-        ("已确认累计回款", _number(metrics["confirmed_cumulative_collection_amount"])),
+        ("全部合同额（含税，当前计入口径）", _number(metrics["total_contract_amount"])),
+        ("已确认累计回款（含税）", _number(metrics["confirmed_cumulative_collection_amount"])),
         ("回款进度", _number(metrics["collection_rate"])),
-        ("已知实际消耗", _number(metrics["known_consumption_cost"])),
-        ("已审批报销", _number(metrics["approved_expense"])),
-        ("项目实际成本（已知）", _number(metrics["known_project_cost"])),
+        ("已知实际消耗（未税）", _number(metrics["known_consumption_cost_ex_tax"])),
+        ("已知实际消耗（含税）", _number(metrics["known_consumption_cost_inc_tax"])),
+        ("已审批报销（未税）", _number(metrics["approved_expense_ex_tax"])),
+        ("已审批报销（含税）", _number(metrics["approved_expense_inc_tax"])),
+        ("项目实际成本（未税，已知）", _number(metrics["known_project_cost_ex_tax"])),
+        ("项目实际成本（含税，已知）", _number(metrics["known_project_cost_inc_tax"])),
         ("缺少价格成本行", metrics["missing_cost_rows"]),
-        ("项目成本/合同额（已知下界）", _number(metrics["cost_rate_lower_bound"])),
+        ("项目成本（含税）/合同额（含税，已知下界）", _number(metrics["cost_rate_lower_bound"])),
         ("成本预警", metrics["cost_alert"]),
         ("数据完整性", metrics["completeness_status"]),
         ("完整性问题", "、".join(metrics["completeness_issues"])),
@@ -746,10 +825,25 @@ def _summary_sheet(sheet, workspace, contracts, collections):
         sheet.cell(row_index, 1, label).fill = _SUBHEADER_FILL
         sheet.cell(row_index, 1).font = Font(bold=True)
         sheet.cell(row_index, 2, _safe_text(value))
-    for row_index in (6, 7, 9, 10, 11):
-        sheet.cell(row_index, 2).number_format = _MONEY_FORMAT
-    for row_index in (8, 13):
-        sheet.cell(row_index, 2).number_format = "0.00%"
+    percentage_labels = {
+        "回款进度",
+        "项目成本（含税）/合同额（含税，已知下界）",
+    }
+    money_labels = {
+        "全部合同额（含税，当前计入口径）",
+        "已确认累计回款（含税）",
+        "已知实际消耗（未税）",
+        "已知实际消耗（含税）",
+        "已审批报销（未税）",
+        "已审批报销（含税）",
+        "项目实际成本（未税，已知）",
+        "项目实际成本（含税，已知）",
+    }
+    for row_index, (label, _value) in enumerate(summary, 1):
+        if label in money_labels:
+            sheet.cell(row_index, 2).number_format = _MONEY_FORMAT
+        elif label in percentage_labels:
+            sheet.cell(row_index, 2).number_format = "0.00%"
     contract_start = len(summary) + 3
     _table(
         sheet,
@@ -993,9 +1087,14 @@ def build_project_workbook(
                 for row in range(2, sheet.max_row + 1):
                     sheet.cell(row, col).number_format = _DATE_FORMAT
         for sheet_name, money_headers in {
-            "01_总览": {"合同额（全部合同）", "累计回款金额"},
-            "02_备件消耗": {"未税单位成本", "实际消耗成本"},
-            "03_报销单": {"已审批金额"},
+            "01_总览": {"合同额（含税，全部合同）", "累计回款金额（含税）"},
+            "02_备件消耗": {
+                "未税单位成本",
+                "含税单位成本",
+                "实际消耗成本（未税）",
+                "实际消耗成本（含税）",
+            },
+            "03_报销单": {"已审批金额（未税）", "已审批金额（含税）"},
         }.items():
             sheet = book[sheet_name]
             for table in sheet.tables.values():

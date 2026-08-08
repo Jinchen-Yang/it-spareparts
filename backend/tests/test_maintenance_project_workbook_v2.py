@@ -40,7 +40,7 @@ def _append_collection(
             "项目合同关系ID": "project-contract-001",
             "合同编号": "XSDD-20260001",
             "报告月份": "2026-08",
-            "累计回款金额": amount,
+            "累计回款金额（含税）": amount,
             "回款凭证号": "HK-NEW",
             "状态": "已确认",
             "备注": "二期款",
@@ -183,6 +183,10 @@ def _workspace(*, revision: int = 7) -> dict:
                 "quantity": Decimal("2"),
                 "unit_cost": None,
                 "cost_amount": None,
+                "unit_cost_ex_tax": None,
+                "unit_cost_inc_tax": None,
+                "cost_amount_ex_tax": None,
+                "cost_amount_inc_tax": None,
                 "cost_status": "缺少价格成本",
                 "cost_source": "none",
             }
@@ -194,7 +198,9 @@ def _workspace(*, revision: int = 7) -> dict:
                 "expense_date": date(2026, 7, 25),
                 "applicant": "李四",
                 "category": "差旅费",
-                "amount": Decimal("1000.00"),
+                "amount": Decimal("1130.00"),
+                "amount_ex_tax": Decimal("1000.00"),
+                "amount_inc_tax": Decimal("1130.00"),
                 "approval_status": "已审批",
                 "remark": "现场支持",
             }
@@ -247,6 +253,27 @@ def test_export_is_four_visible_sheets_and_keeps_missing_cost_as_blank():
         assert overview.cell(collection_end, 1).protection.locked is False
         assert book["02_备件消耗"].protection.sheet is True
 
+        contract_sheet = book["01_总览"]
+        contract_table = contract_sheet.tables["tbl_project_contracts_v2"]
+        contract_min_col, contract_min_row, contract_max_col, _ = range_boundaries(
+            contract_table.ref
+        )
+        assert "合同额（含税，全部合同）" in [
+            contract_sheet.cell(contract_min_row, col).value
+            for col in range(contract_min_col, contract_max_col + 1)
+        ]
+
+        expense_sheet = book["03_报销单"]
+        expense_headers = [cell.value for cell in expense_sheet[1]]
+        assert "已审批金额（未税）" in expense_headers
+        assert "已审批金额（含税）" in expense_headers
+        assert expense_sheet.cell(
+            2, expense_headers.index("已审批金额（未税）") + 1
+        ).value == 1000
+        assert expense_sheet.cell(
+            2, expense_headers.index("已审批金额（含税）") + 1
+        ).value == 1130
+
         sheet = book["02_备件消耗"]
         table = sheet.tables["tbl_consumptions_v2"]
         # Table starts at A1; verify unknown cost stays unknown, never becomes 0.
@@ -255,9 +282,12 @@ def test_export_is_four_visible_sheets_and_keeps_missing_cost_as_blank():
             for col in range(1, len(table.tableColumns) + 1)
         ]
         unit_cost_col = header_values.index("未税单位成本") + 1
-        amount_col = header_values.index("实际消耗成本") + 1
+        amount_ex_col = header_values.index("实际消耗成本（未税）") + 1
+        amount_inc_col = header_values.index("实际消耗成本（含税）") + 1
         assert sheet.cell(2, unit_cost_col).value is None
-        assert sheet.cell(2, amount_col).value is None
+        assert sheet.cell(2, header_values.index("含税单位成本") + 1).value is None
+        assert sheet.cell(2, amount_ex_col).value is None
+        assert sheet.cell(2, amount_inc_col).value is None
         assert sheet.cell(2, header_values.index("成本完整性") + 1).value == "缺少价格成本"
     finally:
         book.close()
@@ -283,8 +313,10 @@ def test_summary_uses_latest_monthly_cumulative_snapshot_not_month_sum():
     assert summary["confirmed_cumulative_collection_amount"] == Decimal("40000.00")
     assert summary["collection_rate"] == Decimal("0.4")
     assert summary["known_consumption_cost"] == Decimal("0")
-    assert summary["approved_expense"] == Decimal("1000.00")
-    assert summary["known_project_cost"] == Decimal("1000.00")
+    assert summary["approved_expense_ex_tax"] == Decimal("1000.00")
+    assert summary["approved_expense_inc_tax"] == Decimal("1130.00")
+    assert summary["approved_expense"] == Decimal("1130.00")
+    assert summary["known_project_cost"] == Decimal("1130.00")
     assert summary["missing_cost_rows"] == 1
     assert summary["cost_alert"] == "incomplete"
 
@@ -361,6 +393,8 @@ def test_summary_reuses_canonical_metrics_and_fails_closed_below_safe_thresholds
 ):
     workspace = _workspace()
     workspace["canonical_metrics"] = {
+        "contract_amount_basis": "inc_tax",
+        "cost_progress_basis": "inc_tax",
         "total_contract_amount": "100000.00",
         "known_contract_amount": "100000.00",
         "contract_amount_complete": True,
@@ -396,6 +430,8 @@ def test_summary_reuses_canonical_metrics_and_fails_closed_below_safe_thresholds
 def test_summary_closes_both_ratios_when_canonical_contract_scope_is_incomplete():
     workspace = _workspace()
     workspace["canonical_metrics"] = {
+        "contract_amount_basis": "inc_tax",
+        "cost_progress_basis": "inc_tax",
         "total_contract_amount": None,
         "known_contract_amount": "100000.00",
         "contract_amount_complete": False,
@@ -423,6 +459,48 @@ def test_summary_closes_both_ratios_when_canonical_contract_scope_is_incomplete(
 
 
 @pytest.mark.parametrize(
+    ("contract_basis", "cost_basis"),
+    [(None, "inc_tax"), ("ex_tax", "inc_tax"), ("inc_tax", None), ("inc_tax", "ex_tax")],
+)
+def test_summary_fails_closed_when_canonical_tax_basis_is_missing_or_invalid(
+    contract_basis,
+    cost_basis,
+):
+    workspace = _workspace()
+    workspace["canonical_metrics"] = {
+        "contract_amount_basis": contract_basis,
+        "cost_progress_basis": cost_basis,
+        "total_contract_amount": "100000.00",
+        "known_contract_amount": "100000.00",
+        "contract_amount_complete": True,
+        "received_amount": "30000.00",
+        "collection_progress_pct": "30.00",
+        "site_requisition_known_cost_ex_tax": "70000.00",
+        "site_requisition_known_cost_inc_tax": "80000.00",
+        "approved_expense_ex_tax": "0.00",
+        "approved_expense_inc_tax": "0.00",
+        "actual_project_cost_known_ex_tax": "70000.00",
+        "actual_project_cost_known_inc_tax": "80000.00",
+        "cost_rate_lower_bound_pct": "80.00",
+        "cost_status": "yellow",
+        "cost_complete": True,
+        "missing_cost_lines": 0,
+    }
+    workspace["canonical_completeness"] = {"status": "complete", "issues": []}
+
+    summary = workbook_v2.compute_project_summary(workspace)
+
+    if contract_basis == "inc_tax":
+        assert summary["collection_rate"] == Decimal("0.3")
+    else:
+        assert summary["collection_rate"] is None
+    assert summary["cost_rate_lower_bound"] is None
+    assert summary["cost_alert"] == "basis_unknown"
+    assert summary["completeness_status"] == "incomplete"
+    assert "basis_unknown" in summary["completeness_issues"]
+
+
+@pytest.mark.parametrize(
     ("cost", "expected"),
     [
         ("79000.00", "green"),
@@ -437,6 +515,10 @@ def test_cost_alert_thresholds_include_80_and_exclude_only_over_100(cost, expect
     workspace["expenses"] = []
     workspace["consumptions"][0]["unit_cost"] = Decimal(cost)
     workspace["consumptions"][0]["cost_amount"] = Decimal(cost)
+    workspace["consumptions"][0]["unit_cost_ex_tax"] = Decimal(cost)
+    workspace["consumptions"][0]["unit_cost_inc_tax"] = Decimal(cost)
+    workspace["consumptions"][0]["cost_amount_ex_tax"] = Decimal(cost)
+    workspace["consumptions"][0]["cost_amount_inc_tax"] = Decimal(cost)
     summary = workbook_v2.compute_project_summary(workspace)
     assert summary["cost_alert"] == expected
 
@@ -958,7 +1040,7 @@ def test_all_collection_statuses_are_signed_locked_and_covered_by_snapshot_valid
             for column in range(min_col, max_col + 1)
         ]
         entity_col = min_col + headers.index("__entity_id")
-        amount_col = min_col + headers.index("累计回款金额")
+        amount_col = min_col + headers.index("累计回款金额（含税）")
         target = next(
             row
             for row in range(min_row + 1, max_row + 1)
@@ -1115,7 +1197,7 @@ def test_error_workbook_is_first_sheet_error_list_and_cannot_be_imported():
             "累计回款金额必须大于 0",
             "01_总览",
             14,
-            "累计回款金额",
+            "累计回款金额（含税）",
         ),
     )
     content = workbook_v2.build_error_workbook(
@@ -1194,7 +1276,7 @@ def test_huge_cumulative_amount_is_a_controlled_validation_error():
             row for row in range(min_row + 1, max_row + 1)
             if sheet.cell(row, headers.index("操作") + 1).value == "CREATE"
         )
-        sheet.cell(target, headers.index("累计回款金额") + 1, "1e100")
+        sheet.cell(target, headers.index("累计回款金额（含税）") + 1, "1e100")
 
     with pytest.raises(workbook_v2.ProjectWorkbookV2Error) as caught:
         workbook_v2.validate_project_workbook(

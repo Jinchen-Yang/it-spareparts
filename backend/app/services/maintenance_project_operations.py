@@ -34,6 +34,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceProjectWorkbookState,
 )
 from app.business_time import BUSINESS_TZ, business_today
+from app import tax_policy
 from app.security import UserContext, is_field_hidden
 from app.services import maintenance_project
 from app.services import maintenance_consumption_cost
@@ -91,6 +92,12 @@ def _money_amount(value: Decimal | str, *, label: str) -> Decimal:
 
 def _money(value: Decimal | None) -> str | None:
     return format(value, ".2f") if value is not None else None
+
+
+def _rate(value: Decimal) -> str:
+    """Serialize fixed rates identically before and after a database refresh."""
+
+    return format(value.normalize(), "f")
 
 
 def _resolve_site_issue_cost(
@@ -180,6 +187,7 @@ def contract_dict(row: MaintenanceProjectContract) -> dict:
         "contract_id": row.contract_id,
         "contract_no": row.contract_no,
         "contract_amount": _money(row.contract_amount),
+        "contract_amount_basis": "inc_tax",
         "contract_status": row.contract_status,
         "status_mapping_state": row.status_mapping_state,
         "status_mapping_version": row.status_mapping_version,
@@ -347,9 +355,15 @@ def site_issue_line_dict(row: MaintenanceSiteIssueLine) -> dict:
         "quantity": _qty(row.quantity),
         "linked_purchase_line_id": row.linked_purchase_line_id,
         "manual_unit_cost": _money(row.manual_unit_cost),
+        "manual_unit_cost_inc_tax": _money(row.manual_unit_cost_inc_tax),
         "manual_evidence": row.manual_evidence,
         "unit_cost": _money(row.unit_cost),
         "cost_amount": _money(row.cost_amount),
+        "unit_cost_ex_tax": _money(row.unit_cost_ex_tax),
+        "unit_cost_inc_tax": _money(row.unit_cost_inc_tax),
+        "cost_amount_ex_tax": _money(row.cost_amount_ex_tax),
+        "cost_amount_inc_tax": _money(row.cost_amount_inc_tax),
+        "tax_rate_used": _rate(row.tax_rate_used),
         "cost_source": row.cost_source,
         "price_basis": row.price_basis,
         "reference_side": row.reference_side,
@@ -398,6 +412,8 @@ def expense_dict(row: MaintenanceProjectExpenseAttribution) -> dict:
         "category": row.category,
         "expense_reason": row.expense_reason,
         "amount_ex_tax": _money(row.amount_ex_tax),
+        "amount_inc_tax": _money(row.amount_inc_tax),
+        "tax_rate_used": _rate(row.tax_rate_used),
         "raw_status": row.raw_status,
         "status_mapping_state": row.status_mapping_state,
         "normalized_status": row.normalized_status,
@@ -437,6 +453,10 @@ def create_expense(
     if status_mapping_state != "mapped" and normalized_status != "unknown":
         raise MaintenanceOperationError("未映射报销必须使用 unknown 标准状态")
     amount_ex_tax = _money_amount(amount_ex_tax, label="报销未税金额")
+    amount_inc_tax = _money_amount(
+        tax_policy.inc_from_ex(amount_ex_tax),
+        label="报销含税金额",
+    )
     if project_contract_id is not None:
         relation = db.scalar(
             select(MaintenanceProjectContract).where(
@@ -460,6 +480,8 @@ def create_expense(
             else None
         ),
         amount_ex_tax=amount_ex_tax,
+        amount_inc_tax=amount_inc_tax,
+        tax_rate_used=tax_policy.TAX_RATE,
         raw_status=_required(raw_status, "报销原始状态"),
         status_mapping_state=status_mapping_state,
         normalized_status=normalized_status,
@@ -926,6 +948,8 @@ def list_cost_gaps(
                 "description": part.description,
                 "quantity": format(line.quantity, "f"),
                 "current_unit_cost": _money(line.unit_cost),
+                "current_unit_cost_ex_tax": _money(line.unit_cost_ex_tax),
+                "current_unit_cost_inc_tax": _money(line.unit_cost_inc_tax),
                 "references": [
                     {
                         "source": line.cost_source,
@@ -969,6 +993,12 @@ _COST_SOURCE_PRIORITY = {
 _COST_RESOLUTION_FIELDS = (
     "unit_cost",
     "cost_amount",
+    "unit_cost_ex_tax",
+    "unit_cost_inc_tax",
+    "cost_amount_ex_tax",
+    "cost_amount_inc_tax",
+    "manual_unit_cost_inc_tax",
+    "tax_rate_used",
     "cost_source",
     "price_basis",
     "reference_side",
@@ -1117,7 +1147,7 @@ def recompute_cost_gaps(
                     MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
                 )
                 .where(
-                    *candidate_filters, MaintenanceSiteIssueLine.cost_amount.is_(None)
+                    *candidate_filters, MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None)
                 )
             )
             or 0
@@ -1833,10 +1863,12 @@ def _project_card_from_facts(
     *,
     base: dict,
     latest_confirmed: dict[str, Decimal],
-    consumed_known: Decimal,
+    consumed_known_ex_tax: Decimal,
+    consumed_known_inc_tax: Decimal,
     cost_gap_count: int,
     unmapped_issue_count: int,
-    approved_expense: Decimal,
+    approved_expense_ex_tax: Decimal,
+    approved_expense_inc_tax: Decimal,
     unmapped_expense_count: int,
     state: MaintenanceProjectWorkbookState | None,
     as_of: date,
@@ -1858,9 +1890,12 @@ def _project_card_from_facts(
     expense_data_ready = bool(
         expense_ready_through and expense_ready_through >= as_of.replace(day=1)
     )
-    actual_cost_known = consumed_known + approved_expense
+    actual_cost_known_ex_tax = consumed_known_ex_tax + approved_expense_ex_tax
+    actual_cost_known_inc_tax = consumed_known_inc_tax + approved_expense_inc_tax
     cost_rate, cost_status = _cost_rate_and_status(
-        actual_cost_known=actual_cost_known,
+        # Contract amount is explicitly inc-tax, so alerts must compare like
+        # with like.  Ex-tax totals remain visible as accounting facts only.
+        actual_cost_known=actual_cost_known_inc_tax,
         total_contract_amount=(Decimal(total) if total is not None else None),
         has_incomplete_cost_facts=bool(
             cost_gap_count
@@ -1930,13 +1965,21 @@ def _project_card_from_facts(
         "contracts": contract_rows,
         "metrics": {
             "total_contract_amount": _money(total),
+            "contract_amount_basis": "inc_tax",
             "known_contract_amount": _money(known_contract_amount),
             "contract_amount_complete": base["completeness"]["status"] == "complete",
             "received_amount": _money(confirmed_collection),
             "collection_progress_pct": _money(collection_progress),
-            "site_requisition_known_cost": _money(consumed_known),
-            "approved_expense": _money(approved_expense),
-            "actual_project_cost_known": _money(actual_cost_known),
+            "site_requisition_known_cost": _money(consumed_known_inc_tax),
+            "site_requisition_known_cost_ex_tax": _money(consumed_known_ex_tax),
+            "site_requisition_known_cost_inc_tax": _money(consumed_known_inc_tax),
+            "approved_expense": _money(approved_expense_inc_tax),
+            "approved_expense_ex_tax": _money(approved_expense_ex_tax),
+            "approved_expense_inc_tax": _money(approved_expense_inc_tax),
+            "actual_project_cost_known": _money(actual_cost_known_inc_tax),
+            "actual_project_cost_known_ex_tax": _money(actual_cost_known_ex_tax),
+            "actual_project_cost_known_inc_tax": _money(actual_cost_known_inc_tax),
+            "cost_progress_basis": "inc_tax",
             "cost_rate_lower_bound_pct": _money(cost_rate),
             "cost_status": cost_status,
             "cost_complete": (
@@ -1996,15 +2039,45 @@ def _project_card_from_facts(
                 if cost_restricted
                 else project_summary["metrics"]["site_requisition_known_cost"]
             ),
+            "site_requisition_known_cost_ex_tax": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["site_requisition_known_cost_ex_tax"]
+            ),
+            "site_requisition_known_cost_inc_tax": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["site_requisition_known_cost_inc_tax"]
+            ),
             "approved_expense": (
                 None
                 if expense_restricted
                 else project_summary["metrics"]["approved_expense"]
             ),
+            "approved_expense_ex_tax": (
+                None
+                if expense_restricted
+                else project_summary["metrics"]["approved_expense_ex_tax"]
+            ),
+            "approved_expense_inc_tax": (
+                None
+                if expense_restricted
+                else project_summary["metrics"]["approved_expense_inc_tax"]
+            ),
             "actual_project_cost_known": (
                 None
                 if cost_restricted or expense_restricted
                 else project_summary["metrics"]["actual_project_cost_known"]
+            ),
+            "actual_project_cost_known_ex_tax": (
+                None
+                if cost_restricted or expense_restricted
+                else project_summary["metrics"]["actual_project_cost_known_ex_tax"]
+            ),
+            "actual_project_cost_known_inc_tax": (
+                None
+                if cost_restricted or expense_restricted
+                else project_summary["metrics"]["actual_project_cost_known_inc_tax"]
             ),
             "cost_rate_lower_bound_pct": (
                 None
@@ -2109,7 +2182,7 @@ def project_workspace(
             func.count().label("total"),
             func.count().filter(eligible_issue).label("eligible_total"),
             func.count()
-            .filter(and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount.is_(None)))
+            .filter(and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None)))
             .label("cost_gap_count"),
             func.count()
             .filter(MaintenanceSiteIssue.status_mapping_state != "mapped")
@@ -2117,12 +2190,21 @@ def project_workspace(
             func.coalesce(
                 func.sum(
                     case(
-                        (eligible_issue, MaintenanceSiteIssueLine.cost_amount),
+                        (eligible_issue, MaintenanceSiteIssueLine.cost_amount_ex_tax),
                         else_=Decimal("0.00"),
                     )
                 ),
                 Decimal("0.00"),
-            ).label("consumed_known"),
+            ).label("consumed_known_ex_tax"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax),
+                        else_=Decimal("0.00"),
+                    )
+                ),
+                Decimal("0.00"),
+            ).label("consumed_known_inc_tax"),
         )
         .select_from(MaintenanceSiteIssue)
         .join(
@@ -2138,7 +2220,8 @@ def project_workspace(
     eligible_requisition_total = int(issue_fact.eligible_total)
     cost_gap_count = int(issue_fact.cost_gap_count)
     unmapped_issue_count = int(issue_fact.unmapped_issue_count)
-    consumed_known = Decimal(issue_fact.consumed_known)
+    consumed_known_ex_tax = Decimal(issue_fact.consumed_known_ex_tax)
+    consumed_known_inc_tax = Decimal(issue_fact.consumed_known_inc_tax)
 
     expense_eligible = and_(
         MaintenanceProjectExpenseAttribution.status_mapping_state == "mapped",
@@ -2161,7 +2244,19 @@ def project_workspace(
                     )
                 ),
                 Decimal("0.00"),
-            ).label("approved_expense"),
+            ).label("approved_expense_ex_tax"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            expense_eligible,
+                            MaintenanceProjectExpenseAttribution.amount_inc_tax,
+                        ),
+                        else_=Decimal("0.00"),
+                    )
+                ),
+                Decimal("0.00"),
+            ).label("approved_expense_inc_tax"),
         ).where(
             MaintenanceProjectExpenseAttribution.project_id == project_id,
             MaintenanceProjectExpenseAttribution.expense_date <= as_of,
@@ -2169,7 +2264,8 @@ def project_workspace(
     ).one()
     approved_expense_total = int(expense_fact.approved_total)
     unmapped_expense_count = int(expense_fact.unmapped_expense_count)
-    approved_expense = Decimal(expense_fact.approved_expense)
+    approved_expense_ex_tax = Decimal(expense_fact.approved_expense_ex_tax)
+    approved_expense_inc_tax = Decimal(expense_fact.approved_expense_inc_tax)
 
     collection_total = int(
         db.scalar(
@@ -2186,10 +2282,12 @@ def project_workspace(
     project_summary, reminders, completeness = _project_card_from_facts(
         base=base,
         latest_confirmed=latest_confirmed,
-        consumed_known=consumed_known,
+        consumed_known_ex_tax=consumed_known_ex_tax,
+        consumed_known_inc_tax=consumed_known_inc_tax,
         cost_gap_count=cost_gap_count,
         unmapped_issue_count=unmapped_issue_count,
-        approved_expense=approved_expense,
+        approved_expense_ex_tax=approved_expense_ex_tax,
+        approved_expense_inc_tax=approved_expense_inc_tax,
         unmapped_expense_count=unmapped_expense_count,
         state=state,
         as_of=as_of,
@@ -2266,9 +2364,15 @@ def project_workspace(
     if cost_restricted:
         hidden_cost_keys = {
             "manual_unit_cost",
+            "manual_unit_cost_inc_tax",
             "manual_evidence",
             "unit_cost",
             "cost_amount",
+            "unit_cost_ex_tax",
+            "unit_cost_inc_tax",
+            "cost_amount_ex_tax",
+            "cost_amount_inc_tax",
+            "tax_rate_used",
             "cost_source",
             "price_basis",
             "reference_side",
@@ -2339,7 +2443,7 @@ def project_workspace(
             "contract_no": contract_numbers_by_id.get(row.project_contract_id),
             "category": row.category,
             "reason": row.expense_reason,
-            "amount": _money(row.amount_ex_tax),
+            "amount": _money(row.amount_inc_tax),
             "approval_status": "approved",
             "counts_cost": True,
         }
@@ -2653,17 +2757,25 @@ def _project_cards_for_ids(
 
     cost_facts: dict[str, dict[str, Decimal | int]] = defaultdict(
         lambda: {
-            "consumed_known": Decimal("0.00"),
+            "consumed_known_ex_tax": Decimal("0.00"),
+            "consumed_known_inc_tax": Decimal("0.00"),
             "cost_gap_count": 0,
             "unmapped_issue_count": 0,
         }
     )
-    for project_id, mapping_state, normalized_status, cost_amount in db.execute(
+    for (
+        project_id,
+        mapping_state,
+        normalized_status,
+        cost_amount_ex_tax,
+        cost_amount_inc_tax,
+    ) in db.execute(
         select(
             MaintenanceSiteIssue.project_id,
             MaintenanceSiteIssue.status_mapping_state,
             MaintenanceSiteIssue.normalized_status,
-            MaintenanceSiteIssueLine.cost_amount,
+            MaintenanceSiteIssueLine.cost_amount_ex_tax,
+            MaintenanceSiteIssueLine.cost_amount_inc_tax,
         )
         .join(
             MaintenanceSiteIssueLine,
@@ -2678,23 +2790,32 @@ def _project_cards_for_ids(
         eligible = mapping_state == "mapped" and normalized_status == "confirmed"
         if mapping_state != "mapped":
             facts["unmapped_issue_count"] += 1
-        if eligible and cost_amount is None:
+        if eligible and cost_amount_inc_tax is None:
             facts["cost_gap_count"] += 1
         elif eligible:
-            facts["consumed_known"] += Decimal(cost_amount)
+            facts["consumed_known_ex_tax"] += Decimal(cost_amount_ex_tax)
+            facts["consumed_known_inc_tax"] += Decimal(cost_amount_inc_tax)
 
     expense_facts: dict[str, dict[str, Decimal | int]] = defaultdict(
         lambda: {
-            "approved_expense": Decimal("0.00"),
+            "approved_expense_ex_tax": Decimal("0.00"),
+            "approved_expense_inc_tax": Decimal("0.00"),
             "unmapped_expense_count": 0,
         }
     )
-    for project_id, mapping_state, normalized_status, amount in db.execute(
+    for (
+        project_id,
+        mapping_state,
+        normalized_status,
+        amount_ex_tax,
+        amount_inc_tax,
+    ) in db.execute(
         select(
             MaintenanceProjectExpenseAttribution.project_id,
             MaintenanceProjectExpenseAttribution.status_mapping_state,
             MaintenanceProjectExpenseAttribution.normalized_status,
             MaintenanceProjectExpenseAttribution.amount_ex_tax,
+            MaintenanceProjectExpenseAttribution.amount_inc_tax,
         ).where(
             MaintenanceProjectExpenseAttribution.project_id.in_(project_ids),
             MaintenanceProjectExpenseAttribution.expense_date <= as_of,
@@ -2704,7 +2825,8 @@ def _project_cards_for_ids(
         if mapping_state != "mapped":
             facts["unmapped_expense_count"] += 1
         if mapping_state == "mapped" and normalized_status == "approved":
-            facts["approved_expense"] += Decimal(amount)
+            facts["approved_expense_ex_tax"] += Decimal(amount_ex_tax)
+            facts["approved_expense_inc_tax"] += Decimal(amount_inc_tax)
 
     state_by_project = {
         state.project_id: state
@@ -2735,10 +2857,20 @@ def _project_cards_for_ids(
         card, _reminders, _completeness = _project_card_from_facts(
             base=base,
             latest_confirmed=latest_confirmed_by_project[project.project_id],
-            consumed_known=Decimal(project_cost_facts["consumed_known"]),
+            consumed_known_ex_tax=Decimal(
+                project_cost_facts["consumed_known_ex_tax"]
+            ),
+            consumed_known_inc_tax=Decimal(
+                project_cost_facts["consumed_known_inc_tax"]
+            ),
             cost_gap_count=int(project_cost_facts["cost_gap_count"]),
             unmapped_issue_count=int(project_cost_facts["unmapped_issue_count"]),
-            approved_expense=Decimal(project_expense_facts["approved_expense"]),
+            approved_expense_ex_tax=Decimal(
+                project_expense_facts["approved_expense_ex_tax"]
+            ),
+            approved_expense_inc_tax=Decimal(
+                project_expense_facts["approved_expense_inc_tax"]
+            ),
             unmapped_expense_count=int(
                 project_expense_facts["unmapped_expense_count"]
             ),
@@ -2892,7 +3024,7 @@ def _directory_reminder_query(
             MaintenanceSiteIssue.project_id,
             func.count()
             .filter(
-                and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount.is_(None))
+                and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None))
             )
             .label("cost_gap_count"),
             func.count()
@@ -2901,7 +3033,7 @@ def _directory_reminder_query(
             func.coalesce(
                 func.sum(
                     case(
-                        (eligible_issue, MaintenanceSiteIssueLine.cost_amount),
+                        (eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax),
                         else_=Decimal("0.00"),
                     )
                 ),
@@ -2934,7 +3066,7 @@ def _directory_reminder_query(
                                 MaintenanceProjectExpenseAttribution.normalized_status
                                 == "approved",
                             ),
-                            MaintenanceProjectExpenseAttribution.amount_ex_tax,
+                            MaintenanceProjectExpenseAttribution.amount_inc_tax,
                         ),
                         else_=Decimal("0.00"),
                     )

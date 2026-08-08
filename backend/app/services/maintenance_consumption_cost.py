@@ -282,12 +282,44 @@ def _apply_resolution(
         to_date if source in {"purchase_window", "sales_window"} else None
     )
     line.algorithm_version = ALGORITHM_VERSION
-    line.unit_cost = unit_cost
-    line.cost_amount = (
-        _amount(Decimal(line.quantity) * unit_cost, label="成本金额")
-        if unit_cost is not None
+    line.tax_rate_used = tax_policy.TAX_RATE
+    line.manual_unit_cost_inc_tax = (
+        _amount(
+            tax_policy.inc_from_ex(Decimal(line.manual_unit_cost)),
+            label="人工含税单价",
+        )
+        if line.manual_unit_cost is not None
         else None
     )
+    if unit_cost is None:
+        line.unit_cost = None
+        line.cost_amount = None
+        line.unit_cost_ex_tax = None
+        line.unit_cost_inc_tax = None
+        line.cost_amount_ex_tax = None
+        line.cost_amount_inc_tax = None
+        return line
+
+    unit_cost_ex_tax = _amount(Decimal(unit_cost), label="未税成本单价")
+    unit_cost_inc_tax = _amount(
+        tax_policy.inc_from_ex(unit_cost_ex_tax),
+        label="含税成本单价",
+    )
+    cost_amount_ex_tax = _amount(
+        Decimal(line.quantity) * unit_cost_ex_tax,
+        label="未税成本金额",
+    )
+    cost_amount_inc_tax = _amount(
+        Decimal(line.quantity) * unit_cost_inc_tax,
+        label="含税成本金额",
+    )
+    # Backward-compatible aliases are deliberately pinned to the ex-tax facts.
+    line.unit_cost = unit_cost_ex_tax
+    line.cost_amount = cost_amount_ex_tax
+    line.unit_cost_ex_tax = unit_cost_ex_tax
+    line.unit_cost_inc_tax = unit_cost_inc_tax
+    line.cost_amount_ex_tax = cost_amount_ex_tax
+    line.cost_amount_inc_tax = cost_amount_inc_tax
     return line
 
 

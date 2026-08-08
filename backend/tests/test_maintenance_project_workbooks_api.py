@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 import hashlib
 from io import BytesIO
 from types import SimpleNamespace
@@ -280,6 +281,7 @@ def test_workspace_preflight_counts_each_exported_fact_category(db, monkeypatch)
                 expense_ref=f"BX-PREFLIGHT-{index}",
                 expense_date=date(2026, 8, index),
                 amount_ex_tax=10,
+                amount_inc_tax=Decimal("11.30"),
                 raw_status="approved",
                 status_mapping_state="mapped",
                 normalized_status="approved",
@@ -359,6 +361,7 @@ def test_workspace_preflight_bounds_ineligible_facts_loaded_for_completeness(
                 expense_ref=f"BX-LOADED-REJECTED-{index}",
                 expense_date=date(2026, 8, index),
                 amount_ex_tax=10,
+                amount_inc_tax=Decimal("11.30"),
                 raw_status="rejected",
                 status_mapping_state="mapped",
                 normalized_status="rejected",
@@ -1177,13 +1180,14 @@ def test_export_preserves_approved_expense_business_fields(db):
     book = load_workbook(BytesIO(_download(client, project_id)), data_only=False)
     try:
         sheet = book["03_报销单"]
-        assert [sheet.cell(2, column).value for column in range(1, 9)] == [
+        assert [sheet.cell(2, column).value for column in range(1, 10)] == [
             "expense-workbook-001",
             "BX-WORKBOOK-001",
             datetime(2026, 8, 1, 0, 0),
             "合成报销人",
             "差旅费",
             50,
+            56.5,
             "已审批",
             "项目现场支持",
         ]
