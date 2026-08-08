@@ -184,15 +184,15 @@
 
 | 对象 | 最小规范字段 | 主键与关联 | 业务影响 |
 |---|---|---|---|
-| 项目 | `project_id`、`project_code`、`project_name`、`project_manager_id`、`status` | `project_id` 是稳定主键；名称只用于展示和候选匹配 | 聚合合同、回款、领用、费用和系统待办 |
-| 项目合同关系 | `project_contract_id`、`project_id`、`contract_id`、`contract_no`、`contract_amount`、`contract_status`、`included_in_total`、`effective_from`、`effective_to` | 关系行使用稳定 ID；同一合同重复关系幂等 | 截至 `as_of` 明确纳入统计且处于生效区间的合同金额求和，页面逐份标注 |
+| 项目 | `project_id`、`project_code`、`display_name`、`project_manager_id`、`lifecycle_status`、`is_active`、`version`、`created_at`、`updated_at` | `project_id` 是稳定主键；名称只用于展示和候选匹配 | 聚合合同、回款、领用、费用和系统待办 |
+| 项目合同关系 | `project_contract_id`、`project_id`、`contract_id`、`contract_no`、`contract_amount`、`contract_status`、`status_mapping_state`、`status_mapping_version`、`included_in_total`、`effective_from`、`effective_to`、`source`、`version`、`created_at`、`updated_at` | 关系行使用稳定 ID；同一合同重复关系幂等；映射状态与规则集版本可审计 | 截至 `as_of` 明确纳入统计且处于生效区间的合同金额求和，页面逐份标注 |
 | 回款事实 | `collection_id`、`project_id`、`contract_id`、`collection_date`、`collection_amount`、`receipt_reference`、`status`、`remark` | 已有行以稳定 ID 定位；新行以 `export_id + client_row_id` 幂等创建 | 已确认累计回款进入回款进度；冲销、退款或未确认状态不计入 |
 
 回款工作簿采用全量往返：项目经理下载当前全量表，在 `01_总览` Sheet 的固定 `tbl_collections` 回款明细表尾追加新记录后上传整本文件；同页固定 `tbl_project_contracts` 合同清单只读。下载范围可以是一个项目或有权限的全量范围，两个表必须使用同一 `scope + as_of`。
 
 以下属于安全实现建议，需要在全量往返实现 Issue 中单独验收：每个可写行包含 `操作`、`__entity_id`、`__base_version`、`__row_token` 和 `__client_row_id`；隐藏元数据包含协议版本、`export_id`、范围、版本、导出时间、签名和 `as_of`。原样回填应为零业务事实变更；删除 Excel 行不得直接删除系统事实；上传前应返回差异预览；签名、版本、关键字段或金额错误应整本零写入并保留审计。
 
-合同进入总额的规范判定为 `included_in_total = true` 且 `effective_from <= as_of < effective_to`；`effective_to` 为空表示持续生效。来源合同状态必须经版本化映射生成 `included_in_total`，不得从展示文本临时猜测。来源状态未映射、计入合同金额缺失、同合同重复关系冲突或同合同跨项目冲突时，项目合同总额为 `null` 并返回完整性原因。
+合同进入总额的规范判定为 `included_in_total = true` 且 `effective_from <= as_of < effective_to`；`effective_to` 为空表示持续生效。来源合同状态必须经版本化映射生成 `included_in_total`，并逐行保留 `status_mapping_state` 与非空 `status_mapping_version`，不得用关系行版本冒充映射规则集版本，也不得从展示文本临时猜测。未映射关系不得标记为计入；来源状态未映射、计入合同金额缺失、同合同重复关系冲突或同合同跨项目冲突时，项目合同总额为 `null` 并返回完整性原因。
 
 ### 7.2 现场领用单
 
