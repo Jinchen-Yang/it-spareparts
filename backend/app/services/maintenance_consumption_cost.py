@@ -154,21 +154,8 @@ def _purchase_window(
 def _sales_window(
     db: Session, *, part_id: int, issue_date: date, from_date: date, to_date: date
 ) -> tuple[Decimal, list[dict]] | None:
-    samples = [
-        {
-            "sample_id": f"sales:{row.id}",
-            "document_no": row.order_no,
-            "document_date": row.order_date.isoformat(),
-            "distance_days": abs((row.order_date - issue_date).days),
-            "quantity": format(row.qty, "f"),
-            "unit_price_raw": format(row.unit_price, "f"),
-            "unit_price_ex_tax": format(
-                Decimal(row.unit_price) / tax_policy.TAX_FACTOR,
-                "f",
-            ),
-            "tax_conversion": "divide_1.13",
-        }
-        for row in db.execute(
+    raw_samples = list(
+        db.execute(
             select(
                 FSalesLine.id,
                 FSalesLine.qty,
@@ -187,6 +174,23 @@ def _sales_window(
             )
             .order_by(FSalesOrder.order_date, FSalesLine.id)
         )
+    )
+    samples = [
+        {
+            "sample_id": f"sales:{row.id}",
+            "document_no": row.order_no,
+            "document_date": row.order_date.isoformat(),
+            "distance_days": abs((row.order_date - issue_date).days),
+            "quantity": format(row.qty, "f"),
+            "unit_price_raw": format(row.unit_price, "f"),
+            "unit_price_ex_tax": format(
+                Decimal(row.unit_price) / tax_policy.TAX_FACTOR,
+                "f",
+            ),
+            "tax_conversion": "divide_1.13",
+        }
+        for row in raw_samples
+        if _valid(row.qty, row.unit_price)
     ]
     value = _weighted(samples)
     if value is None:

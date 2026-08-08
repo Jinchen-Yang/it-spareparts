@@ -104,6 +104,29 @@ def _count_endpoint_queries(db, client: TestClient, *, params: dict) -> tuple[di
     return response.json(), query_count
 
 
+def _count_get_queries(
+    db,
+    client: TestClient,
+    *,
+    path: str,
+    params: dict,
+) -> tuple[dict, int]:
+    engine = db.get_bind()
+    query_count = 0
+
+    def count_query(*_args) -> None:
+        nonlocal query_count
+        query_count += 1
+
+    event.listen(engine, "before_cursor_execute", count_query)
+    try:
+        response = client.get(path, params=params)
+    finally:
+        event.remove(engine, "before_cursor_execute", count_query)
+    assert response.status_code == 200, response.text
+    return response.json(), query_count
+
+
 def _batch(db, suffix: str) -> SysImportBatch:
     batch = SysImportBatch(
         filename=f"synthetic-{suffix}.xlsx",
@@ -1765,3 +1788,174 @@ def test_sensitive_operations_reads_are_access_logged_with_scope(db):
     assert rows[1].detail["as_of"] == "2026-08-31"
     assert rows[3].detail["page_size"] == 24
     assert rows[3].detail["returned"] == 1
+
+
+def test_operations_directory_query_count_is_constant_across_page_sizes(db):
+    client = _client(db, username="directory_page_scale_admin")
+    db.add_all(
+        MaintenanceProject(
+            project_id=f"directory-page-scale-{index:03d}",
+            project_code=f"PAGE-SCALE-{index:03d}",
+            display_name=f"目录分页项目 {index:03d}",
+            lifecycle_status="ongoing",
+        )
+        for index in range(200)
+    )
+    db.commit()
+    base_params = {
+        "as_of": "2026-08-31",
+        "lifecycle": "ongoing",
+        "page": 1,
+    }
+
+    one, one_queries = _count_endpoint_queries(
+        db, client, params={**base_params, "page_size": 1}
+    )
+    twenty_four, twenty_four_queries = _count_endpoint_queries(
+        db, client, params={**base_params, "page_size": 24}
+    )
+    two_hundred, two_hundred_queries = _count_endpoint_queries(
+        db, client, params={**base_params, "page_size": 200}
+    )
+
+    assert len(one["rows"]) == 1
+    assert len(twenty_four["rows"]) == 24
+    assert len(two_hundred["rows"]) == 200
+    assert twenty_four_queries <= one_queries + 1
+    assert two_hundred_queries <= one_queries + 1
+
+
+def test_operations_directory_card_matches_workspace_summary(db):
+    project = _project(db, project_id="project-directory-card-parity")
+    project.lifecycle_status = "ongoing"
+    db.commit()
+    client = _client(db, username="directory_card_parity_admin")
+    contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-directory-parity",
+            "contract_no": "XS-DIRECTORY-PARITY",
+            "contract_amount": "1000.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立目录卡片口径测试合同",
+        },
+    ).json()
+    collection = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/collections",
+        json={
+            "project_contract_id": contract["project_contract_id"],
+            "report_month": "2026-08-01",
+            "cumulative_amount": "350.00",
+            "status": "confirmed",
+            "reason": "确认目录卡片测试回款",
+        },
+    )
+    assert collection.status_code == 201, collection.text
+    expense = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses",
+        json={
+            "expense_id": "expense-directory-parity",
+            "expense_ref": "BX-DIRECTORY-PARITY",
+            "expense_date": "2026-08-10",
+            "amount_ex_tax": "125.00",
+            "raw_status": "synthetic-approved",
+            "status_mapping_state": "mapped",
+            "normalized_status": "approved",
+            "status_mapping_version": "synthetic-expense-map-v1",
+            "reason": "导入目录卡片测试报销",
+        },
+    )
+    assert expense.status_code == 201, expense.text
+    ready = client.put(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+        json={
+            "ready_through": "2026-08-01",
+            "reason": "确认目录卡片测试报销完整",
+        },
+    )
+    assert ready.status_code == 200, ready.text
+
+    workspace = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-08-31"},
+    )
+    directory = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={
+            "as_of": "2026-08-31",
+            "q": project.project_code,
+            "lifecycle": "ongoing",
+        },
+    )
+
+    assert workspace.status_code == 200, workspace.text
+    assert directory.status_code == 200, directory.text
+    assert directory.json()["rows"] == [workspace.json()["project"]]
+
+
+def test_cost_gap_list_query_count_does_not_scale_with_page_size(db):
+    project = _project(db, project_id="project-cost-gap-page-scale")
+    client = _client(db, username="cost_gap_page_scale_admin")
+    contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-cost-gap-page-scale",
+            "contract_no": "XS-COST-GAP-PAGE-SCALE",
+            "contract_amount": "1000.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立缺价分页查询测试合同",
+        },
+    )
+    assert contract.status_code == 201, contract.text
+    part = DimPart(pn_std="PN-COST-GAP-PAGE-SCALE")
+    db.add(part)
+    db.commit()
+    issue = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-COST-GAP-PAGE-SCALE",
+            "issue_date": "2026-08-10",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-issue-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": f"issue-line-page-scale-{index:03d}",
+                    "line_no": index + 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                }
+                for index in range(40)
+            ],
+            "reason": "建立缺价分页查询测试领用行",
+        },
+    )
+    assert issue.status_code == 201, issue.text
+    path = f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps"
+
+    one, one_queries = _count_get_queries(
+        db, client, path=path, params={"page": 1, "page_size": 1}
+    )
+    forty, forty_queries = _count_get_queries(
+        db, client, path=path, params={"page": 1, "page_size": 40}
+    )
+
+    assert one["total"] == forty["total"] == 40
+    assert len(one["rows"]) == 1
+    assert len(forty["rows"]) == 40
+    assert {row["contract_no"] for row in forty["rows"]} == {
+        "XS-COST-GAP-PAGE-SCALE"
+    }
+    assert forty_queries <= one_queries + 1

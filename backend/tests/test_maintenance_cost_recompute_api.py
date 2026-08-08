@@ -1,6 +1,8 @@
 """Late-arriving evidence recomputation for stable-project cost gaps."""
 
 from datetime import date
+from decimal import Decimal
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -17,6 +19,7 @@ from app.models.maintenance_project_operations import (
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysUser
+from app.services import maintenance_consumption_cost
 from tests.test_maintenance_project_operations_api import _batch, _client, _project
 
 
@@ -155,6 +158,63 @@ def _limited_client(
     assert login.status_code == 200, login.text
     client.headers["Authorization"] = f"Bearer {login.json()['token']}"
     return client
+
+
+def test_sales_fallback_persists_only_valid_samples_when_result_contains_over_limit(
+    monkeypatch,
+):
+    valid = SimpleNamespace(
+        id=101,
+        qty=Decimal("2"),
+        unit_price=Decimal("113"),
+        order_no="SO-VALID",
+        order_date=date(2026, 6, 12),
+    )
+    over_limit = SimpleNamespace(
+        id=102,
+        qty=Decimal("1"),
+        unit_price=Decimal("1000000000000"),
+        order_no="SO-OVER-LIMIT",
+        order_date=date(2026, 6, 13),
+    )
+
+    class SalesResultSession:
+        def execute(self, _statement):
+            return [valid, over_limit]
+
+    monkeypatch.setattr(
+        maintenance_consumption_cost,
+        "_direct_purchase",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        maintenance_consumption_cost,
+        "_purchase_window",
+        lambda *_args, **_kwargs: None,
+    )
+    line = MaintenanceSiteIssueLine(
+        issue_line_id="issue-line-sales-valid-filter",
+        issue_id="issue-sales-valid-filter",
+        line_no=1,
+        part_id=1,
+        pn="PN-SALES-VALID-FILTER",
+        quantity=Decimal("3"),
+    )
+
+    maintenance_consumption_cost.resolve_line(
+        SalesResultSession(),
+        issue_date=date(2026, 6, 10),
+        line=line,
+    )
+
+    assert line.cost_source == "sales_window"
+    assert line.unit_cost == Decimal("100.00")
+    assert line.cost_amount == Decimal("300.00")
+    assert line.reference_sample_count == 1
+    assert line.reference_sample_ids == ["sales:101"]
+    assert [sample["document_no"] for sample in line.reference_samples] == [
+        "SO-VALID"
+    ]
 
 
 def test_recompute_persists_t_plus_three_purchase_once_with_line_audit(db):

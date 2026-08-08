@@ -768,42 +768,72 @@ def list_cost_gaps(
     project = db.get(MaintenanceProject, project_id)
     if project is None:
         return None
-    rows: list[dict] = []
-    gaps = db.execute(
-            select(MaintenanceSiteIssue, MaintenanceSiteIssueLine, DimPart)
+    gap_filters = (
+        MaintenanceSiteIssue.project_id == project_id,
+        MaintenanceSiteIssue.status_mapping_state == "mapped",
+        MaintenanceSiteIssue.normalized_status == "confirmed",
+        MaintenanceSiteIssueLine.cost_amount.is_(None),
+    )
+    total = int(
+        db.scalar(
+            select(func.count())
+            .select_from(MaintenanceSiteIssueLine)
             .join(
-                MaintenanceSiteIssueLine,
-                MaintenanceSiteIssueLine.issue_id == MaintenanceSiteIssue.issue_id,
+                MaintenanceSiteIssue,
+                MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
             )
-            .join(DimPart, DimPart.id == MaintenanceSiteIssueLine.part_id)
-            .where(
-                MaintenanceSiteIssue.project_id == project_id,
-                MaintenanceSiteIssue.status_mapping_state == "mapped",
-                MaintenanceSiteIssue.normalized_status == "confirmed",
-                MaintenanceSiteIssueLine.cost_amount.is_(None),
-            )
-            .order_by(
-                MaintenanceSiteIssue.issue_date,
-                MaintenanceSiteIssue.issue_no,
-                MaintenanceSiteIssueLine.line_no,
-            )
-        ).all()
-    for issue, line, part in gaps:
-        contract_numbers = list(
+            .where(*gap_filters)
+        )
+        or 0
+    )
+    offset = (page - 1) * page_size
+    gaps = db.execute(
+        select(MaintenanceSiteIssue, MaintenanceSiteIssueLine, DimPart)
+        .join(
+            MaintenanceSiteIssueLine,
+            MaintenanceSiteIssueLine.issue_id == MaintenanceSiteIssue.issue_id,
+        )
+        .join(DimPart, DimPart.id == MaintenanceSiteIssueLine.part_id)
+        .where(*gap_filters)
+        .order_by(
+            MaintenanceSiteIssue.issue_date,
+            MaintenanceSiteIssue.issue_no,
+            MaintenanceSiteIssueLine.line_no,
+        )
+        .offset(offset)
+        .limit(page_size)
+    ).all()
+
+    contracts: list[MaintenanceProjectContract] = []
+    if gaps:
+        issue_dates = [issue.issue_date for issue, _line, _part in gaps]
+        contracts = list(
             db.scalars(
-                select(MaintenanceProjectContract.contract_no)
+                select(MaintenanceProjectContract)
                 .where(
                     MaintenanceProjectContract.project_id == project_id,
                     MaintenanceProjectContract.included_in_total.is_(True),
-                    MaintenanceProjectContract.effective_from <= issue.issue_date,
-                    (
-                        MaintenanceProjectContract.effective_to.is_(None)
-                        | (MaintenanceProjectContract.effective_to > issue.issue_date)
+                    MaintenanceProjectContract.effective_from <= max(issue_dates),
+                    or_(
+                        MaintenanceProjectContract.effective_to.is_(None),
+                        MaintenanceProjectContract.effective_to > min(issue_dates),
                     ),
                 )
                 .order_by(MaintenanceProjectContract.contract_no)
             )
         )
+
+    rows: list[dict] = []
+    for issue, line, part in gaps:
+        contract_numbers = [
+            contract.contract_no
+            for contract in contracts
+            if contract.effective_from <= issue.issue_date
+            and (
+                contract.effective_to is None
+                or contract.effective_to > issue.issue_date
+            )
+        ]
         rows.append(
             {
                 "line_id": line.issue_line_id,
@@ -835,11 +865,9 @@ def list_cost_gaps(
                 "price_basis": line.price_basis,
             }
         )
-    total = len(rows)
-    offset = (page - 1) * page_size
     state = db.get(MaintenanceProjectWorkbookState, project_id)
     return {
-        "rows": rows[offset : offset + page_size],
+        "rows": rows,
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -1652,6 +1680,222 @@ def _visible_tasks(
     return reminders, completeness
 
 
+def _project_card_from_facts(
+    *,
+    base: dict,
+    latest_confirmed: dict[str, Decimal],
+    consumed_known: Decimal,
+    cost_gap_count: int,
+    unmapped_issue_count: int,
+    approved_expense: Decimal,
+    unmapped_expense_count: int,
+    state: MaintenanceProjectWorkbookState | None,
+    as_of: date,
+    user_ctx: UserContext,
+) -> tuple[dict, list[dict], dict]:
+    """Assemble the canonical project card from preloaded summary facts."""
+
+    confirmed_collection = sum(latest_confirmed.values(), start=Decimal("0.00"))
+    total = base["total_contract_amount"]
+    collection_progress = (
+        (confirmed_collection / Decimal(total) * Decimal("100")).quantize(
+            Decimal("0.01")
+        )
+        if total is not None and Decimal(total) > 0
+        else None
+    )
+    expense_ready_through = state.expense_ready_through if state else None
+    expense_data_ready = bool(
+        expense_ready_through and expense_ready_through >= as_of.replace(day=1)
+    )
+    actual_cost_known = consumed_known + approved_expense
+    cost_rate = (
+        (actual_cost_known / Decimal(total) * Decimal("100")).quantize(
+            Decimal("0.01")
+        )
+        if total is not None and Decimal(total) > 0
+        else None
+    )
+    if cost_rate is None:
+        cost_status = "unknown"
+    elif cost_rate > Decimal("100"):
+        cost_status = "red"
+    elif cost_rate >= Decimal("80"):
+        cost_status = "yellow"
+    elif (
+        cost_gap_count
+        or unmapped_issue_count
+        or unmapped_expense_count
+        or not expense_data_ready
+    ):
+        cost_status = "unknown"
+    else:
+        cost_status = "normal"
+
+    completeness_issues = list(base["completeness"].get("issues", []))
+    if cost_gap_count:
+        completeness_issues.append(
+            {"code": "missing_consumption_cost", "line_count": cost_gap_count}
+        )
+    if unmapped_issue_count:
+        completeness_issues.append(
+            {"code": "unmapped_site_issue_status", "line_count": unmapped_issue_count}
+        )
+    if unmapped_expense_count:
+        completeness_issues.append(
+            {"code": "unmapped_expense_status", "row_count": unmapped_expense_count}
+        )
+    if not expense_data_ready:
+        completeness_issues.append(
+            {
+                "code": "expense_data_not_ready",
+                "ready_through": (
+                    expense_ready_through.isoformat() if expense_ready_through else None
+                ),
+                "required_month": as_of.strftime("%Y-%m"),
+            }
+        )
+    completeness = dict(base["completeness"])
+    if completeness.get("status") != "restricted" and completeness_issues:
+        completeness = {"status": "incomplete", "issues": completeness_issues}
+
+    effective_contracts = [row for row in base["contracts"] if row["is_effective"]]
+    known_contract_amount = sum(
+        (
+            Decimal(row["contract_amount"])
+            for row in effective_contracts
+            if row["contract_amount"] is not None
+        ),
+        start=Decimal("0.00"),
+    )
+    profit_restricted = is_field_hidden(user_ctx, "contract_amount")
+    cost_restricted = is_field_hidden(user_ctx, "unit_cost")
+    expense_restricted = is_field_hidden(user_ctx, "expense_inc")
+    contract_rows = [
+        {
+            **row,
+            "amount_status": (
+                "restricted"
+                if profit_restricted
+                else "missing" if row["contract_amount"] is None else "available"
+            ),
+            "received_amount": (
+                None
+                if profit_restricted
+                else _money(latest_confirmed.get(row["project_contract_id"]))
+            ),
+        }
+        for row in base["contracts"]
+    ]
+    project_summary = {
+        **base["project"],
+        "contracts": contract_rows,
+        "metrics": {
+            "total_contract_amount": _money(total),
+            "known_contract_amount": _money(known_contract_amount),
+            "contract_amount_complete": base["completeness"]["status"] == "complete",
+            "received_amount": _money(confirmed_collection),
+            "collection_progress_pct": _money(collection_progress),
+            "site_requisition_known_cost": _money(consumed_known),
+            "approved_expense": _money(approved_expense),
+            "actual_project_cost_known": _money(actual_cost_known),
+            "cost_rate_lower_bound_pct": _money(cost_rate),
+            "cost_status": cost_status,
+            "cost_complete": (
+                cost_gap_count == 0
+                and unmapped_issue_count == 0
+                and unmapped_expense_count == 0
+                and expense_data_ready
+            ),
+            "missing_cost_lines": cost_gap_count,
+            "expense_data_ready": expense_data_ready,
+            "expense_ready_through": (
+                expense_ready_through.isoformat() if expense_ready_through else None
+            ),
+        },
+        "reminder_count": 0,
+        "as_of": as_of.isoformat(),
+    }
+    reminders = _system_tasks(
+        project_id=base["project"]["project_id"],
+        completeness=completeness,
+        has_confirmed_collection=bool(latest_confirmed),
+        confirmed_collection=confirmed_collection,
+        total_contract_amount=(Decimal(total) if total is not None else None),
+        cost_gap_count=cost_gap_count,
+        cost_status=cost_status,
+        as_of=as_of,
+        project_manager_id=base["project"]["project_manager_id"],
+        last_applied_at=state.last_applied_at if state else None,
+    )
+    reminders, completeness = _visible_tasks(
+        reminders,
+        completeness,
+        user_ctx=user_ctx,
+    )
+    project_summary["metrics"].update(
+        {
+            "contract_amount_complete": (
+                None
+                if profit_restricted
+                else project_summary["metrics"]["contract_amount_complete"]
+            ),
+            "known_contract_amount": (
+                None
+                if profit_restricted
+                else project_summary["metrics"]["known_contract_amount"]
+            ),
+            "received_amount": (
+                None if profit_restricted else project_summary["metrics"]["received_amount"]
+            ),
+            "collection_progress_pct": (
+                None
+                if profit_restricted
+                else project_summary["metrics"]["collection_progress_pct"]
+            ),
+            "site_requisition_known_cost": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["site_requisition_known_cost"]
+            ),
+            "approved_expense": (
+                None
+                if expense_restricted
+                else project_summary["metrics"]["approved_expense"]
+            ),
+            "actual_project_cost_known": (
+                None
+                if cost_restricted or expense_restricted
+                else project_summary["metrics"]["actual_project_cost_known"]
+            ),
+            "cost_rate_lower_bound_pct": (
+                None
+                if cost_restricted or expense_restricted or profit_restricted
+                else project_summary["metrics"]["cost_rate_lower_bound_pct"]
+            ),
+            "cost_status": (
+                None
+                if cost_restricted or expense_restricted or profit_restricted
+                else project_summary["metrics"]["cost_status"]
+            ),
+            "cost_complete": (
+                None
+                if cost_restricted or expense_restricted
+                else project_summary["metrics"]["cost_complete"]
+            ),
+            "missing_cost_lines": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["missing_cost_lines"]
+            ),
+        }
+    )
+    project_summary["reminder_count"] = sum(
+        1 for row in reminders if row["status"] != "completed"
+    )
+    return project_summary, reminders, completeness
+
+
 def project_workspace(
     db: Session,
     *,
@@ -1901,6 +2145,18 @@ def project_workspace(
     reminders, completeness = _visible_tasks(
         reminders,
         completeness,
+        user_ctx=user_ctx,
+    )
+    project_summary, reminders, completeness = _project_card_from_facts(
+        base=base,
+        latest_confirmed=latest_confirmed,
+        consumed_known=consumed_known,
+        cost_gap_count=cost_gap_count,
+        unmapped_issue_count=unmapped_issue_count,
+        approved_expense=approved_expense,
+        unmapped_expense_count=unmapped_expense_count,
+        state=state,
+        as_of=as_of,
         user_ctx=user_ctx,
     )
     if cost_restricted:
@@ -2240,6 +2496,192 @@ def project_workbook_workspace(
         state.data_version if state is not None else _workbook_data_version(project_id, 0)
     )
     return payload
+
+
+def _project_cards_for_ids(
+    db: Session,
+    *,
+    project_ids: list[str],
+    as_of: date,
+    user_ctx: UserContext,
+) -> dict[str, dict]:
+    """Load and assemble directory cards in a fixed number of queries."""
+
+    if not project_ids:
+        return {}
+    projects = list(
+        db.scalars(
+            select(MaintenanceProject).where(
+                MaintenanceProject.project_id.in_(project_ids)
+            )
+        )
+    )
+    contracts = list(
+        db.scalars(
+            select(MaintenanceProjectContract)
+            .where(MaintenanceProjectContract.project_id.in_(project_ids))
+            .order_by(
+                MaintenanceProjectContract.project_id,
+                MaintenanceProjectContract.contract_no,
+                MaintenanceProjectContract.effective_from,
+                MaintenanceProjectContract.project_contract_id,
+            )
+        )
+    )
+    contracts_by_project: dict[str, list[MaintenanceProjectContract]] = defaultdict(list)
+    effective_contract_ids: set[str] = set()
+    effective_relation_project: dict[str, str] = {}
+    for contract in contracts:
+        contracts_by_project[contract.project_id].append(contract)
+        if contract.included_in_total and contract.effective_from <= as_of and (
+            contract.effective_to is None or as_of < contract.effective_to
+        ):
+            effective_contract_ids.add(contract.contract_id)
+            effective_relation_project[contract.project_contract_id] = contract.project_id
+
+    projects_by_contract: dict[str, set[str]] = defaultdict(set)
+    if effective_contract_ids:
+        for contract_id, related_project_id in db.execute(
+            select(
+                MaintenanceProjectContract.contract_id,
+                MaintenanceProjectContract.project_id,
+            ).where(
+                MaintenanceProjectContract.contract_id.in_(effective_contract_ids),
+                MaintenanceProjectContract.included_in_total.is_(True),
+                MaintenanceProjectContract.effective_from <= as_of,
+                or_(
+                    MaintenanceProjectContract.effective_to.is_(None),
+                    MaintenanceProjectContract.effective_to > as_of,
+                ),
+            )
+        ):
+            projects_by_contract[contract_id].add(related_project_id)
+    cross_project_contract_ids = {
+        contract_id
+        for contract_id, related_project_ids in projects_by_contract.items()
+        if len(related_project_ids) > 1
+    }
+
+    latest_confirmed_by_project: dict[str, dict[str, Decimal]] = defaultdict(dict)
+    if effective_relation_project:
+        for relation_id, amount in db.execute(
+            select(
+                MaintenanceCollectionSnapshot.project_contract_id,
+                MaintenanceCollectionSnapshot.cumulative_amount,
+            )
+            .where(
+                MaintenanceCollectionSnapshot.project_contract_id.in_(
+                    effective_relation_project
+                ),
+                MaintenanceCollectionSnapshot.status == "confirmed",
+                MaintenanceCollectionSnapshot.report_month <= as_of,
+            )
+            .order_by(
+                MaintenanceCollectionSnapshot.project_contract_id,
+                MaintenanceCollectionSnapshot.report_month.desc(),
+                MaintenanceCollectionSnapshot.collection_id.desc(),
+            )
+        ):
+            project_id = effective_relation_project[relation_id]
+            latest_confirmed_by_project[project_id].setdefault(relation_id, amount)
+
+    cost_facts: dict[str, dict[str, Decimal | int]] = defaultdict(
+        lambda: {
+            "consumed_known": Decimal("0.00"),
+            "cost_gap_count": 0,
+            "unmapped_issue_count": 0,
+        }
+    )
+    for project_id, mapping_state, normalized_status, cost_amount in db.execute(
+        select(
+            MaintenanceSiteIssue.project_id,
+            MaintenanceSiteIssue.status_mapping_state,
+            MaintenanceSiteIssue.normalized_status,
+            MaintenanceSiteIssueLine.cost_amount,
+        )
+        .join(
+            MaintenanceSiteIssueLine,
+            MaintenanceSiteIssueLine.issue_id == MaintenanceSiteIssue.issue_id,
+        )
+        .where(
+            MaintenanceSiteIssue.project_id.in_(project_ids),
+            MaintenanceSiteIssue.issue_date <= as_of,
+        )
+    ):
+        facts = cost_facts[project_id]
+        eligible = mapping_state == "mapped" and normalized_status == "confirmed"
+        if mapping_state != "mapped":
+            facts["unmapped_issue_count"] += 1
+        if eligible and cost_amount is None:
+            facts["cost_gap_count"] += 1
+        elif eligible:
+            facts["consumed_known"] += Decimal(cost_amount)
+
+    expense_facts: dict[str, dict[str, Decimal | int]] = defaultdict(
+        lambda: {
+            "approved_expense": Decimal("0.00"),
+            "unmapped_expense_count": 0,
+        }
+    )
+    for project_id, mapping_state, normalized_status, amount in db.execute(
+        select(
+            MaintenanceProjectExpenseAttribution.project_id,
+            MaintenanceProjectExpenseAttribution.status_mapping_state,
+            MaintenanceProjectExpenseAttribution.normalized_status,
+            MaintenanceProjectExpenseAttribution.amount_ex_tax,
+        ).where(
+            MaintenanceProjectExpenseAttribution.project_id.in_(project_ids),
+            MaintenanceProjectExpenseAttribution.expense_date <= as_of,
+        )
+    ):
+        facts = expense_facts[project_id]
+        if mapping_state != "mapped":
+            facts["unmapped_expense_count"] += 1
+        if mapping_state == "mapped" and normalized_status == "approved":
+            facts["approved_expense"] += Decimal(amount)
+
+    state_by_project = {
+        state.project_id: state
+        for state in db.scalars(
+            select(MaintenanceProjectWorkbookState).where(
+                MaintenanceProjectWorkbookState.project_id.in_(project_ids)
+            )
+        )
+    }
+    cards: dict[str, dict] = {}
+    for project in projects:
+        base = maintenance_project.project_overview_from_facts(
+            project=project,
+            contracts=contracts_by_project[project.project_id],
+            cross_project_conflicts={
+                contract.contract_id
+                for contract in contracts_by_project[project.project_id]
+                if contract.contract_id in cross_project_contract_ids
+                and contract.included_in_total
+                and contract.effective_from <= as_of
+                and (contract.effective_to is None or as_of < contract.effective_to)
+            },
+            as_of=as_of,
+            user_ctx=user_ctx,
+        )
+        project_cost_facts = cost_facts[project.project_id]
+        project_expense_facts = expense_facts[project.project_id]
+        card, _reminders, _completeness = _project_card_from_facts(
+            base=base,
+            latest_confirmed=latest_confirmed_by_project[project.project_id],
+            consumed_known=Decimal(project_cost_facts["consumed_known"]),
+            cost_gap_count=int(project_cost_facts["cost_gap_count"]),
+            unmapped_issue_count=int(project_cost_facts["unmapped_issue_count"]),
+            approved_expense=Decimal(project_expense_facts["approved_expense"]),
+            unmapped_expense_count=int(
+                project_expense_facts["unmapped_expense_count"]
+            ),
+            state=state_by_project.get(project.project_id),
+            as_of=as_of,
+            user_ctx=user_ctx,
+        )
+        cards[project.project_id] = card
+    return cards
 
 
 def _directory_reminder_project_ids(
@@ -2646,15 +3088,17 @@ def project_operations(
         )
         total = len(matching_project_ids)
         project_ids = matching_project_ids[offset : offset + page_size]
-    for project_id in project_ids:
-        workspace = project_workspace(
-            db,
-            project_id=project_id,
-            as_of=as_of,
-            user_ctx=user_ctx,
-        )
-        if workspace is not None:
-            rows.append(workspace["project"])
+    cards_by_project = _project_cards_for_ids(
+        db,
+        project_ids=project_ids,
+        as_of=as_of,
+        user_ctx=user_ctx,
+    )
+    rows.extend(
+        cards_by_project[project_id]
+        for project_id in project_ids
+        if project_id in cards_by_project
+    )
     payload = {
         "rows": rows,
         "total": total,
