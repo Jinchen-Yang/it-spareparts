@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Empty, Input, Pagination, Segmented, Space } from "antd";
+import { useSearchParams } from "react-router-dom";
 
 import {
   listMaintenanceProjectOperations,
@@ -12,11 +13,13 @@ import PageHeader from "../../components/PageHeader";
 const PAGE_SIZE = 24;
 
 export default function MaintenanceProjectsPage() {
+  const [searchParams] = useSearchParams();
+  const reminderFilter = searchParams.get("reminder") || undefined;
   const [rows, setRows] = useState<MaintenanceProjectOperationsSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [q, setQ] = useState("");
-  const [lifecycle, setLifecycle] = useState("ongoing");
+  const [lifecycle, setLifecycle] = useState(reminderFilter ? "all" : "ongoing");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const generation = useRef(0);
@@ -35,6 +38,7 @@ export default function MaintenanceProjectsPage() {
         page_size: PAGE_SIZE,
         q: query || undefined,
         lifecycle: nextLifecycle,
+        reminder: reminderFilter,
       });
       if (request !== generation.current) return;
       setRows(data.rows ?? []);
@@ -48,7 +52,7 @@ export default function MaintenanceProjectsPage() {
     } finally {
       if (request === generation.current) setLoading(false);
     }
-  }, []);
+  }, [reminderFilter]);
 
   useEffect(() => {
     void load(1, q, lifecycle);

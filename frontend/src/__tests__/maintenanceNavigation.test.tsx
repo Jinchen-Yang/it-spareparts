@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DETAIL_ROUTES,
   NAV_GROUPS,
   NAV_ITEMS,
   NAV_REDIRECTS,
@@ -8,7 +9,7 @@ import {
 } from "../nav";
 
 describe("维保管理信息架构", () => {
-  it("固定展示项目数据、项目主档、下载中心、项目提醒四个并列入口", () => {
+  it("固定展示项目面板、项目主档、月度更新和成本回填四个入口", () => {
     const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance");
 
     expect(maintenance?.items.map(({ key, path, label }) => ({
@@ -17,9 +18,9 @@ describe("维保管理信息架构", () => {
       label,
     }))).toEqual([
       {
-        key: "maintenance",
-        path: "/maintenance",
-        label: "项目数据",
+        key: "maintenance-projects",
+        path: "/maintenance/projects",
+        label: "项目面板",
       },
       {
         key: "maintenance-project-master",
@@ -27,22 +28,28 @@ describe("维保管理信息架构", () => {
         label: "项目主档",
       },
       {
-        key: "maintenance-downloads",
-        path: "/maintenance/downloads",
-        label: "下载中心",
+        key: "maintenance-updates",
+        path: "/maintenance/updates",
+        label: "月度更新",
       },
       {
-        key: "maintenance-reminders",
-        path: "/maintenance/reminders",
-        label: "项目提醒",
+        key: "maintenance-cost-refill",
+        path: "/maintenance/cost-refill",
+        label: "成本回填",
       },
     ]);
   });
 
-  it("/maintenance 直接渲染项目数据且不存在旧错误路由或重定向", () => {
-    expect(matchNavItem("/maintenance")?.label).toBe("项目数据");
-    expect(NAV_ITEMS.some((item) => item.path === "/maintenance/projects")).toBe(false);
-    expect(NAV_ITEMS.some((item) => item.path === "/maintenance/alerts")).toBe(false);
-    expect(NAV_REDIRECTS.some((item) => item.from === "/maintenance")).toBe(false);
+  it("旧维保路径继续可访问并进入新的稳定项目流程", () => {
+    expect(matchNavItem("/maintenance/projects")?.label).toBe("项目面板");
+    expect(NAV_REDIRECTS).toContainEqual({
+      from: "/maintenance",
+      to: "/maintenance/projects",
+      perm: "page_maintenance",
+    });
+    expect(DETAIL_ROUTES.some((route) => route.path === "/maintenance/downloads")).toBe(true);
+    expect(DETAIL_ROUTES.some((route) => route.path === "/maintenance/reminders")).toBe(true);
+    expect(DETAIL_ROUTES.some((route) => route.path === "/maintenance/legacy")).toBe(true);
+    expect(NAV_ITEMS.some((item) => item.path === "/maintenance/downloads")).toBe(false);
   });
 });
