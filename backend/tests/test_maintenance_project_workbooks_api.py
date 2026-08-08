@@ -56,6 +56,31 @@ def _client(db, *, username: str) -> TestClient:
     return client
 
 
+def _permission_client(db, *, username: str, permissions: dict) -> TestClient:
+    db.add(
+        SysUser(
+            username=username,
+            role="boss",
+            display_name="合成工作簿权限账号",
+            password_hash=hash_password("synthetic-password-123"),
+            permissions=permissions,
+        )
+    )
+    db.commit()
+    app = FastAPI()
+    app.include_router(auth.router, prefix="/api")
+    app.include_router(maintenance_project_operations.router, prefix="/api")
+    app.include_router(maintenance_project_workbooks.router, prefix="/api")
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": username, "password": "synthetic-password-123"},
+    )
+    assert login.status_code == 200, login.text
+    client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+    return client
+
+
 def _project_and_contract(client: TestClient, db, *, suffix: str) -> tuple[str, dict]:
     project_id = f"project-workbook-{suffix}"
     db.add(
@@ -511,6 +536,92 @@ def test_validate_requires_exactly_one_xlsx_file(db):
         ],
     )
     assert multiple.status_code == 400 or multiple.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("case_name", "permission_overrides", "path_kind"),
+    [
+        ("no-page", {"page_maintenance": False}, "export"),
+        ("no-cost", {"data_purchase_cost": False}, "export"),
+        ("no-profit", {"data_profit": False}, "export"),
+        (
+            "no-action",
+            {"action_maintenance_roundtrip_apply": False},
+            "validate",
+        ),
+    ],
+)
+def test_workbook_endpoints_fail_closed_by_permission(
+    db,
+    monkeypatch,
+    case_name,
+    permission_overrides,
+    path_kind,
+):
+    admin = _client(db, username=f"workbook_permission_seed_{case_name}")
+    project_id, _contract = _project_and_contract(
+        admin,
+        db,
+        suffix=f"perm-{case_name}",
+    )
+    permissions = {
+        "page_maintenance": True,
+        "data_purchase_cost": True,
+        "data_profit": True,
+        "action_maintenance_roundtrip_apply": True,
+        **permission_overrides,
+    }
+    client = _permission_client(
+        db,
+        username=f"workbook_permission_{case_name}",
+        permissions=permissions,
+    )
+    if path_kind == "export":
+        response = client.get(
+            f"/api/maintenance/projects/stable/{project_id}/workbook"
+        )
+        assert response.status_code == 403
+        return
+
+    upload_read = False
+
+    async def fail_if_upload_is_read(_request):
+        nonlocal upload_read
+        upload_read = True
+        raise AssertionError("unauthorized upload reached the parser")
+
+    monkeypatch.setattr(
+        maintenance_project_workbooks,
+        "_parse_and_save_roundtrip_upload",
+        fail_if_upload_is_read,
+    )
+    response = client.post(
+        f"/api/maintenance/projects/stable/{project_id}/workbook/validate",
+        files={
+            "file": (
+                "update.xlsx",
+                b"not-read",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert response.status_code == 403
+    assert upload_read is False
+
+
+def test_workbook_export_requires_authentication(db):
+    admin = _client(db, username="workbook_anonymous_seed_admin")
+    project_id, _contract = _project_and_contract(
+        admin,
+        db,
+        suffix="perm-anonymous",
+    )
+    app = FastAPI()
+    app.include_router(maintenance_project_workbooks.router, prefix="/api")
+    response = TestClient(app).get(
+        f"/api/maintenance/projects/stable/{project_id}/workbook"
+    )
+    assert response.status_code == 401
 
 
 def test_stale_plan_and_same_file_replay_fail_closed(db):
