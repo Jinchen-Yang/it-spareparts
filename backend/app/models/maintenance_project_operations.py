@@ -171,7 +171,7 @@ class MaintenanceSiteIssue(Base):
             name="ck_maintenance_site_issue_import_batch",
         ),
         CheckConstraint(
-            "status_mapping_state = 'mapped' OR normalized_status = 'unknown'",
+            "(status_mapping_state = 'mapped') = (normalized_status <> 'unknown')",
             name="ck_maintenance_site_issue_unmapped_unknown",
         ),
         CheckConstraint("version >= 1", name="ck_maintenance_site_issue_version"),
@@ -359,7 +359,7 @@ class MaintenanceProjectExpenseAttribution(Base):
             name="ck_maintenance_project_expense_status",
         ),
         CheckConstraint(
-            "status_mapping_state = 'mapped' OR normalized_status = 'unknown'",
+            "(status_mapping_state = 'mapped') = (normalized_status <> 'unknown')",
             name="ck_maintenance_project_expense_unmapped_unknown",
         ),
         CheckConstraint(

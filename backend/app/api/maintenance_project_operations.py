@@ -157,6 +157,8 @@ class ExpenseReadinessMark(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ready_through: date
+    expected_version: int | None = Field(default=None, ge=0)
+    correction_reason: str | None = Field(default=None, min_length=1, max_length=1000)
     reason: str = Field(min_length=1, max_length=1000)
 
 
@@ -565,6 +567,8 @@ def mark_project_expense_readiness(
         not_found_message="维保项目不存在",
         project_id=project_id,
         ready_through=body.ready_through,
+        expected_version=body.expected_version,
+        correction_reason=body.correction_reason,
         reason=body.reason,
     )
 

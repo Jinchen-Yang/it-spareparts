@@ -1,20 +1,25 @@
 """Real migration checks for stable-project operating facts and workbook state."""
 
 import os
+from datetime import date
 from decimal import Decimal
 
 import pytest
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from sqlalchemy import inspect, text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.orm import Session
 
 from app.db import engine
+from app.security import UserContext
+from app.services import maintenance_project_operations as operations_service
 
 
 _PREV = "d8a3c7e4f2b1"
 _PRE_PROVENANCE = "f3b7d9e1c5a2"
 _PRE_DUAL_TAX = "a4c9e1f2b6d8"
+_PRE_STATUS_PAIR = "b7d2f4a6c8e1"
 _TABLES = {
     "maintenance_collection_snapshot",
     "maintenance_project_operation_audit",
@@ -370,5 +375,124 @@ def test_dual_tax_migration_backfills_and_round_trips(db):
                     "WHERE issue_line_id = 'migration-dual-tax-line'"
                 )
             ).scalar_one() == Decimal("22.60")
+    finally:
+        alembic_command.upgrade(cfg, "head")
+
+
+def test_strict_status_pair_migration_preserves_legacy_anomalies_and_blocks_new(db):
+    db.close()
+    cfg = _cfg()
+    alembic_command.downgrade(cfg, _PRE_STATUS_PAIR)
+    try:
+        with engine.begin() as connection:
+            part_id = connection.execute(
+                text(
+                    "INSERT INTO dim_part (pn_std) "
+                    "VALUES ('PN-MIGRATION-STATUS-PAIR') RETURNING id"
+                )
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_project "
+                    "(project_id, project_code, display_name, lifecycle_status) "
+                    "VALUES ('migration-status-pair-project', "
+                    "'MIGRATION-STATUS-PAIR', '迁移状态对项目', 'ongoing')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_site_issue "
+                    "(issue_id, project_id, issue_no, issue_date, raw_status, "
+                    "status_mapping_state, normalized_status, status_mapping_version) "
+                    "VALUES ('migration-status-pair-issue', "
+                    "'migration-status-pair-project', 'ISSUE-STATUS-PAIR', "
+                    "DATE '2026-08-01', 'legacy-unknown', 'mapped', 'unknown', "
+                    "'legacy-map-v1')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_site_issue_line "
+                    "(issue_line_id, issue_id, line_no, part_id, pn, quantity, "
+                    "algorithm_version) VALUES ('migration-status-pair-line', "
+                    "'migration-status-pair-issue', 1, :part_id, "
+                    "'PN-MIGRATION-STATUS-PAIR', 1, 'legacy-v1')"
+                ),
+                {"part_id": part_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_project_expense_attribution "
+                    "(expense_id, project_id, expense_ref, expense_date, "
+                    "amount_ex_tax, amount_inc_tax, tax_rate_used, raw_status, "
+                    "status_mapping_state, normalized_status, status_mapping_version) "
+                    "VALUES ('migration-status-pair-expense', "
+                    "'migration-status-pair-project', 'BX-STATUS-PAIR', "
+                    "DATE '2026-08-01', 10, 11.30, 0.13, 'legacy-unknown', "
+                    "'mapped', 'unknown', 'legacy-map-v1')"
+                )
+            )
+
+        alembic_command.upgrade(cfg, "head")
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT status_mapping_state, normalized_status "
+                    "FROM maintenance_site_issue "
+                    "WHERE issue_id = 'migration-status-pair-issue'"
+                )
+            ).one() == ("mapped", "unknown")
+            assert connection.execute(
+                text(
+                    "SELECT status_mapping_state, normalized_status "
+                    "FROM maintenance_project_expense_attribution "
+                    "WHERE expense_id = 'migration-status-pair-expense'"
+                )
+            ).one() == ("mapped", "unknown")
+
+        with Session(engine) as session:
+            workspace = operations_service.project_workspace(
+                session,
+                project_id="migration-status-pair-project",
+                as_of=date(2026, 8, 31),
+                user_ctx=UserContext(
+                    user_id="migration-status-pair-reviewer",
+                    role="admin",
+                    permissions=None,
+                ),
+            )
+            assert workspace is not None
+            assert workspace["project"]["metrics"]["cost_complete"] is False
+            assert {row["code"] for row in workspace["completeness"]["issues"]} >= {
+                "unmapped_site_issue_status",
+                "unmapped_expense_status",
+            }
+
+        with pytest.raises(IntegrityError):
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO maintenance_project_expense_attribution "
+                        "(expense_id, project_id, expense_ref, expense_date, "
+                        "amount_ex_tax, amount_inc_tax, tax_rate_used, raw_status, "
+                        "status_mapping_state, normalized_status, "
+                        "status_mapping_version) VALUES "
+                        "('migration-status-pair-new-invalid', "
+                        "'migration-status-pair-project', 'BX-STATUS-PAIR-INVALID', "
+                        "DATE '2026-08-02', 10, 11.30, 0.13, 'new-unknown', "
+                        "'mapped', 'unknown', 'new-map-v1')"
+                    )
+                )
+
+        alembic_command.downgrade(cfg, _PRE_STATUS_PAIR)
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT normalized_status "
+                    "FROM maintenance_project_expense_attribution "
+                    "WHERE expense_id = 'migration-status-pair-expense'"
+                )
+            ).scalar_one() == "unknown"
+        alembic_command.upgrade(cfg, "head")
     finally:
         alembic_command.upgrade(cfg, "head")

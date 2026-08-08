@@ -317,6 +317,112 @@ def test_direct_site_issue_api_exposes_server_owned_provenance(db):
     assert db.get(MaintenanceSiteIssueLine, "issue-line-derived-cost-write") is None
 
 
+def test_create_rejects_mapped_unknown_status_pairs_without_writes(db):
+    project = _project(db, project_id="project-mapped-unknown-rejected")
+    client = _client(db, username="mapped_unknown_rejected_admin")
+    part = DimPart(pn_std="PN-MAPPED-UNKNOWN-REJECTED")
+    db.add(part)
+    db.commit()
+
+    site_body = {
+        "issue_no": "ISSUE-MAPPED-UNKNOWN-REJECTED",
+        "issue_date": "2026-08-01",
+        "raw_status": "synthetic-unknown",
+        "status_mapping_state": "mapped",
+        "normalized_status": "unknown",
+        "status_mapping_version": "synthetic-map-v1",
+        "lines": [{
+            "issue_line_id": "issue-line-mapped-unknown-rejected",
+            "line_no": 1,
+            "part_id": part.id,
+            "pn": part.pn_std,
+            "quantity": "1",
+        }],
+        "reason": "验证 mapped 不能伪装成 unknown",
+    }
+    site = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json=site_body,
+    )
+    assert site.status_code == 400, site.text
+    assert "mapped" in site.json()["detail"]
+    assert db.scalar(
+        select(MaintenanceSiteIssue).where(
+            MaintenanceSiteIssue.project_id == project.project_id
+        )
+    ) is None
+
+    expense_body = {
+        "expense_id": "expense-mapped-unknown-rejected",
+        "expense_ref": "BX-MAPPED-UNKNOWN-REJECTED",
+        "expense_date": "2026-08-01",
+        "amount_ex_tax": "10.00",
+        "raw_status": "synthetic-unknown",
+        "status_mapping_state": "mapped",
+        "normalized_status": "unknown",
+        "status_mapping_version": "synthetic-map-v1",
+        "reason": "验证 mapped 报销不能伪装成 unknown",
+    }
+    expense = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses",
+        json=expense_body,
+    )
+    assert expense.status_code == 400, expense.text
+    assert "mapped" in expense.json()["detail"]
+    assert db.get(
+        MaintenanceProjectExpenseAttribution,
+        "expense-mapped-unknown-rejected",
+    ) is None
+
+    with pytest.raises(
+        operations_service.MaintenanceOperationError,
+        match="mapped.*unknown",
+    ):
+        operations_service.create_site_issue(
+            db,
+            project_id=project.project_id,
+            issue_no="ISSUE-MAPPED-UNKNOWN-SERVICE",
+            issue_date=date(2026, 8, 1),
+            raw_status="synthetic-unknown",
+            status_mapping_state="mapped",
+            normalized_status="unknown",
+            status_mapping_version="synthetic-map-v1",
+            lines=[{
+                "issue_line_id": "issue-line-mapped-unknown-service",
+                "line_no": 1,
+                "part_id": part.id,
+                "pn": part.pn_std,
+                "quantity": "1",
+            }],
+            reason="服务层拒绝非法映射",
+            operated_by="mapped-unknown-test",
+        )
+    db.rollback()
+    with pytest.raises(
+        operations_service.MaintenanceOperationError,
+        match="mapped.*unknown",
+    ):
+        operations_service.create_expense(
+            db,
+            project_id=project.project_id,
+            expense_id="expense-mapped-unknown-service",
+            project_contract_id=None,
+            expense_ref="BX-MAPPED-UNKNOWN-SERVICE",
+            expense_date=date(2026, 8, 1),
+            applicant=None,
+            category=None,
+            expense_reason=None,
+            amount_ex_tax=Decimal("10.00"),
+            raw_status="synthetic-unknown",
+            status_mapping_state="mapped",
+            normalized_status="unknown",
+            status_mapping_version="synthetic-map-v1",
+            reason="服务层拒绝非法映射",
+            operated_by="mapped-unknown-test",
+        )
+    db.rollback()
+
+
 def test_site_issue_create_query_count_is_bounded_and_all_lines_are_costed(db):
     project = _project(db, project_id="project-site-issue-create-scale")
     client = _client(db, username="site_issue_create_scale_admin")
@@ -2253,7 +2359,15 @@ def test_only_explicitly_mapped_approved_expense_counts(db):
     }
 
 
-def test_expense_readiness_is_explicit_monthly_monotonic_and_audited(db):
+def test_expense_readiness_is_explicit_monthly_correctable_and_audited(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        operations_service,
+        "business_today",
+        lambda: date(2026, 8, 9),
+    )
     project = _project(db, project_id="project-expense-readiness")
     client = _client(db, username="expense_readiness_admin")
     client.post(
@@ -2281,6 +2395,16 @@ def test_expense_readiness_is_explicit_monthly_monotonic_and_audited(db):
     assert before["project"]["metrics"]["cost_complete"] is False
     assert before["project"]["metrics"]["cost_status"] == "unknown"
 
+    future = client.put(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+        json={
+            "ready_through": "2026-09-01",
+            "reason": "未来月份不得提前宣告完整",
+        },
+    )
+    assert future.status_code == 400, future.text
+    assert "未来" in future.json()["detail"]
+
     marked = client.put(
         f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
         json={
@@ -2290,6 +2414,7 @@ def test_expense_readiness_is_explicit_monthly_monotonic_and_audited(db):
     )
     assert marked.status_code == 200, marked.text
     assert marked.json()["expense_ready_through"] == "2026-07-01"
+    assert marked.json()["version"] >= 1
     after = client.get(
         f"/api/maintenance/projects/stable/{project.project_id}/workspace",
         params={"as_of": "2026-07-31"},
@@ -2297,6 +2422,8 @@ def test_expense_readiness_is_explicit_monthly_monotonic_and_audited(db):
     assert after["project"]["metrics"]["expense_data_ready"] is True
     assert after["project"]["metrics"]["cost_complete"] is True
     assert after["project"]["metrics"]["cost_status"] == "normal"
+    assert after["workbook_revision"] == marked.json()["version"]
+    workspace_version = after["workbook_revision"]
     assert "expense_data_not_ready" not in {
         row["code"] for row in after["completeness"]["issues"]
     }
@@ -2305,7 +2432,14 @@ def test_expense_readiness_is_explicit_monthly_monotonic_and_audited(db):
         entity_type="expense_readiness",
     ).one()
     assert audit.action == "mark_ready"
-    assert audit.after_json == {"expense_ready_through": "2026-07-01"}
+    assert audit.before_json == {
+        "expense_ready_through": None,
+        "version": marked.json()["version"] - 1,
+    }
+    assert audit.after_json == {
+        "expense_ready_through": "2026-07-01",
+        "version": marked.json()["version"],
+    }
 
     invalid_day = client.put(
         f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
@@ -2317,6 +2451,166 @@ def test_expense_readiness_is_explicit_monthly_monotonic_and_audited(db):
         json={"ready_through": "2026-06-01", "reason": "禁止回退"},
     )
     assert regressed.status_code == 409
+
+    stale = client.put(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+        json={
+            "ready_through": "2026-06-01",
+            "expected_version": workspace_version - 1,
+            "correction_reason": "使用过期版本尝试纠错",
+            "reason": "并发冲突测试",
+        },
+    )
+    assert stale.status_code == 409
+    assert "当前版本" in stale.json()["detail"]
+
+    missing_correction_reason = client.put(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+        json={
+            "ready_through": "2026-06-01",
+            "expected_version": workspace_version,
+            "reason": "缺少纠错原因",
+        },
+    )
+    assert missing_correction_reason.status_code == 400
+    assert "纠错原因" in missing_correction_reason.json()["detail"]
+
+    restricted = _permission_client(
+        db,
+        username="expense_readiness_correction_denied",
+        permissions={
+            "page_maintenance": True,
+            "data_profit": True,
+            "action_maintenance_roundtrip_apply": False,
+        },
+    )
+    denied = restricted.put(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+        json={
+            "ready_through": "2026-06-01",
+            "expected_version": workspace_version,
+            "correction_reason": "无权限账号不得纠错",
+            "reason": "权限测试",
+        },
+    )
+    assert denied.status_code == 403
+
+    corrected = client.put(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+        json={
+            "ready_through": "2026-06-01",
+            "expected_version": workspace_version,
+            "correction_reason": "财务复核发现七月数据尚未完整同步",
+            "reason": "纠正误填费用水位",
+        },
+    )
+    assert corrected.status_code == 200, corrected.text
+    assert corrected.json()["expense_ready_through"] == "2026-06-01"
+    assert corrected.json()["version"] == marked.json()["version"] + 1
+    audits = list(
+        db.scalars(
+            select(MaintenanceProjectOperationAudit)
+            .where(
+                MaintenanceProjectOperationAudit.project_id == project.project_id,
+                MaintenanceProjectOperationAudit.entity_type == "expense_readiness",
+            )
+            .order_by(MaintenanceProjectOperationAudit.id)
+        )
+    )
+    assert [row.action for row in audits] == ["mark_ready", "correct_ready"]
+    assert audits[1].before_json == {
+        "expense_ready_through": "2026-07-01",
+        "version": marked.json()["version"],
+    }
+    assert audits[1].after_json == {
+        "expense_ready_through": "2026-06-01",
+        "version": corrected.json()["version"],
+    }
+    assert audits[1].reason == "财务复核发现七月数据尚未完整同步"
+
+
+def test_legacy_future_expense_readiness_fails_closed_until_audited_correction(
+    db,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        operations_service,
+        "business_today",
+        lambda: date(2026, 8, 9),
+    )
+    project = _project(db, project_id="project-ready-future-legacy")
+    client = _client(db, username="expense_readiness_future_legacy_admin")
+    contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-expense-readiness-future-legacy",
+            "contract_no": "XS-EXPENSE-READINESS-FUTURE-LEGACY",
+            "contract_amount": "1000.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立历史未来费用水位测试合同",
+        },
+    )
+    assert contract.status_code == 201, contract.text
+
+    state = db.get(MaintenanceProjectWorkbookState, project.project_id)
+    state.expense_ready_through = date(2026, 9, 1)
+    db.commit()
+
+    workspace = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-08-31"},
+    )
+    assert workspace.status_code == 200, workspace.text
+    payload = workspace.json()
+    assert payload["project"]["metrics"]["expense_data_ready"] is False
+    assert payload["project"]["metrics"]["cost_complete"] is False
+    assert payload["project"]["metrics"]["cost_status"] == "unknown"
+    assert {row["code"] for row in payload["completeness"]["issues"]} >= {
+        "expense_readiness_in_future",
+        "expense_data_not_ready",
+    }
+
+    filtered = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={
+            "as_of": "2026-08-31",
+            "q": project.project_code,
+            "reminder": "completeness:expense_data_not_ready",
+        },
+    )
+    assert filtered.status_code == 200, filtered.text
+    assert filtered.json()["total"] == 1
+
+    corrected = client.put(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+        json={
+            "ready_through": "2026-08-01",
+            "expected_version": payload["workbook_revision"],
+            "correction_reason": "纠正历史误填的未来费用水位",
+            "reason": "修复历史未来水位",
+        },
+    )
+    assert corrected.status_code == 200, corrected.text
+    assert corrected.json()["expense_ready_through"] == "2026-08-01"
+    audit = db.query(MaintenanceProjectOperationAudit).filter_by(
+        project_id=project.project_id,
+        entity_type="expense_readiness",
+    ).one()
+    assert audit.action == "correct_ready"
+    assert audit.before_json == {
+        "expense_ready_through": "2026-09-01",
+        "version": payload["workbook_revision"],
+    }
+    assert audit.after_json == {
+        "expense_ready_through": "2026-08-01",
+        "version": corrected.json()["version"],
+    }
+    assert audit.reason == "纠正历史误填的未来费用水位"
 
 
 def test_expense_status_lifecycle_counts_only_approved_and_preserves_voided_fact(db):

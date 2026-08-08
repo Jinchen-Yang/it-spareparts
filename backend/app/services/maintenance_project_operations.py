@@ -450,6 +450,8 @@ def create_expense(
         raise MaintenanceOperationError("报销状态映射结果无效")
     if normalized_status not in {"approved", "rejected", "void", "unknown"}:
         raise MaintenanceOperationError("报销标准状态无效")
+    if status_mapping_state == "mapped" and normalized_status == "unknown":
+        raise MaintenanceOperationError("mapped 报销不能使用 unknown 标准状态")
     if status_mapping_state != "mapped" and normalized_status != "unknown":
         raise MaintenanceOperationError("未映射报销必须使用 unknown 标准状态")
     amount_ex_tax = _money_amount(amount_ex_tax, label="报销未税金额")
@@ -512,6 +514,8 @@ def mark_expense_readiness(
     *,
     project_id: str,
     ready_through: date,
+    expected_version: int | None = None,
+    correction_reason: str | None = None,
     reason: str,
     operated_by: str,
 ) -> dict | None:
@@ -524,15 +528,35 @@ def mark_expense_readiness(
         raise MaintenanceOperationError("项目主档已归档")
     if ready_through.day != 1:
         raise MaintenanceOperationError("费用数据水位必须使用当月第一天")
+    current_business_month = business_today().replace(day=1)
+    if ready_through > current_business_month:
+        raise MaintenanceOperationError("费用数据水位不能超过当前业务月份，禁止填写未来月份")
     state = get_or_create_workbook_state(db, project_id=project_id, lock=True)
-    if state.expense_ready_through is not None and ready_through < state.expense_ready_through:
-        raise MaintenanceOperationConflict("费用数据水位不能回退")
+    is_correction = bool(
+        state.expense_ready_through is not None
+        and ready_through < state.expense_ready_through
+    )
+    if is_correction:
+        if expected_version is None:
+            raise MaintenanceOperationConflict(
+                "费用数据水位下调必须提供 expected_version"
+            )
+        if expected_version != state.revision:
+            raise MaintenanceOperationConflict(
+                f"费用数据版本冲突：当前版本为 {state.revision}"
+            )
+        correction_reason = _required(
+            correction_reason,
+            "费用数据水位纠错原因",
+            1000,
+        )
     before = {
         "expense_ready_through": (
             state.expense_ready_through.isoformat()
             if state.expense_ready_through
             else None
-        )
+        ),
+        "version": state.revision,
     }
     if state.expense_ready_through == ready_through:
         return {
@@ -543,16 +567,19 @@ def mark_expense_readiness(
     state.expense_ready_through = ready_through
     state.revision += 1
     state.data_version = _workbook_data_version(project_id, state.revision)
-    after = {"expense_ready_through": ready_through.isoformat()}
+    after = {
+        "expense_ready_through": ready_through.isoformat(),
+        "version": state.revision,
+    }
     _fact_audit(
         db,
         project_id=project_id,
         entity_type="expense_readiness",
         entity_id=project_id,
-        action="mark_ready",
+        action="correct_ready" if is_correction else "mark_ready",
         before=before,
         after=after,
-        reason=reason,
+        reason=correction_reason if is_correction else reason,
         operated_by=operated_by,
     )
     db.flush()
@@ -588,6 +615,8 @@ def create_site_issue(
         raise MaintenanceOperationError("现场领用状态映射结果无效")
     if normalized_status not in {"confirmed", "void", "unknown"}:
         raise MaintenanceOperationError("现场领用标准状态无效")
+    if status_mapping_state == "mapped" and normalized_status == "unknown":
+        raise MaintenanceOperationError("mapped 现场领用不能使用 unknown 标准状态")
     if status_mapping_state != "mapped" and normalized_status != "unknown":
         raise MaintenanceOperationError("未映射现场领用必须使用 unknown 标准状态")
     if not lines:
@@ -1887,8 +1916,14 @@ def _project_card_from_facts(
         else None
     )
     expense_ready_through = state.expense_ready_through if state else None
+    current_business_month = business_today().replace(day=1)
+    expense_readiness_in_future = bool(
+        expense_ready_through and expense_ready_through > current_business_month
+    )
     expense_data_ready = bool(
-        expense_ready_through and expense_ready_through >= as_of.replace(day=1)
+        expense_ready_through
+        and expense_ready_through >= as_of.replace(day=1)
+        and not expense_readiness_in_future
     )
     actual_cost_known_ex_tax = consumed_known_ex_tax + approved_expense_ex_tax
     actual_cost_known_inc_tax = consumed_known_inc_tax + approved_expense_inc_tax
@@ -1917,6 +1952,14 @@ def _project_card_from_facts(
     if unmapped_expense_count:
         completeness_issues.append(
             {"code": "unmapped_expense_status", "row_count": unmapped_expense_count}
+        )
+    if expense_readiness_in_future:
+        completeness_issues.append(
+            {
+                "code": "expense_readiness_in_future",
+                "ready_through": expense_ready_through.isoformat(),
+                "current_business_month": current_business_month.strftime("%Y-%m"),
+            }
         )
     if not expense_data_ready:
         completeness_issues.append(
@@ -2185,7 +2228,12 @@ def project_workspace(
             .filter(and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None)))
             .label("cost_gap_count"),
             func.count()
-            .filter(MaintenanceSiteIssue.status_mapping_state != "mapped")
+            .filter(
+                or_(
+                    MaintenanceSiteIssue.status_mapping_state != "mapped",
+                    MaintenanceSiteIssue.normalized_status == "unknown",
+                )
+            )
             .label("unmapped_issue_count"),
             func.coalesce(
                 func.sum(
@@ -2231,7 +2279,14 @@ def project_workspace(
         select(
             func.count().filter(expense_eligible).label("approved_total"),
             func.count()
-            .filter(MaintenanceProjectExpenseAttribution.status_mapping_state != "mapped")
+            .filter(
+                or_(
+                    MaintenanceProjectExpenseAttribution.status_mapping_state
+                    != "mapped",
+                    MaintenanceProjectExpenseAttribution.normalized_status
+                    == "unknown",
+                )
+            )
             .label("unmapped_expense_count"),
             func.coalesce(
                 func.sum(
@@ -2497,6 +2552,7 @@ def project_workspace(
     ]
     payload = {
         "project": project_summary,
+        "workbook_revision": state.revision if state is not None else 0,
         "collection_snapshots": {
             "rows": collection_rows,
             "total": collection_total,
@@ -2788,7 +2844,7 @@ def _project_cards_for_ids(
     ):
         facts = cost_facts[project_id]
         eligible = mapping_state == "mapped" and normalized_status == "confirmed"
-        if mapping_state != "mapped":
+        if mapping_state != "mapped" or normalized_status == "unknown":
             facts["unmapped_issue_count"] += 1
         if eligible and cost_amount_inc_tax is None:
             facts["cost_gap_count"] += 1
@@ -2822,7 +2878,7 @@ def _project_cards_for_ids(
         )
     ):
         facts = expense_facts[project_id]
-        if mapping_state != "mapped":
+        if mapping_state != "mapped" or normalized_status == "unknown":
             facts["unmapped_expense_count"] += 1
         if mapping_state == "mapped" and normalized_status == "approved":
             facts["approved_expense_ex_tax"] += Decimal(amount_ex_tax)
@@ -3028,7 +3084,12 @@ def _directory_reminder_query(
             )
             .label("cost_gap_count"),
             func.count()
-            .filter(MaintenanceSiteIssue.status_mapping_state != "mapped")
+            .filter(
+                or_(
+                    MaintenanceSiteIssue.status_mapping_state != "mapped",
+                    MaintenanceSiteIssue.normalized_status == "unknown",
+                )
+            )
             .label("unmapped_issue_count"),
             func.coalesce(
                 func.sum(
@@ -3053,7 +3114,12 @@ def _directory_reminder_query(
             MaintenanceProjectExpenseAttribution.project_id,
             func.count()
             .filter(
-                MaintenanceProjectExpenseAttribution.status_mapping_state != "mapped"
+                or_(
+                    MaintenanceProjectExpenseAttribution.status_mapping_state
+                    != "mapped",
+                    MaintenanceProjectExpenseAttribution.normalized_status
+                    == "unknown",
+                )
             )
             .label("unmapped_expense_count"),
             func.coalesce(
@@ -3159,6 +3225,7 @@ def _directory_reminder_query(
     )
 
     month_start = as_of.replace(day=1)
+    current_business_month = business_today().replace(day=1)
     next_month = (
         month_start.replace(year=month_start.year + 1, month=1)
         if month_start.month == 12
@@ -3185,6 +3252,7 @@ def _directory_reminder_query(
     expense_not_ready = or_(
         facts.c.expense_ready_through.is_(None),
         facts.c.expense_ready_through < month_start,
+        facts.c.expense_ready_through > current_business_month,
     )
     cost_value = facts.c.consumed_known + facts.c.approved_expense
     rounded_cost_rate = func.round(
