@@ -412,11 +412,26 @@ def test_strict_status_pair_migration_preserves_legacy_anomalies_and_blocks_new(
             )
             connection.execute(
                 text(
+                    "INSERT INTO maintenance_site_issue "
+                    "(issue_id, project_id, issue_no, issue_date, raw_status, "
+                    "status_mapping_state, normalized_status, status_mapping_version) "
+                    "VALUES ('migration-status-pair-issue-multi', "
+                    "'migration-status-pair-project', 'ISSUE-STATUS-PAIR-MULTI', "
+                    "DATE '2026-08-01', 'legacy-unknown', 'mapped', 'unknown', "
+                    "'legacy-map-v1')"
+                )
+            )
+            connection.execute(
+                text(
                     "INSERT INTO maintenance_site_issue_line "
                     "(issue_line_id, issue_id, line_no, part_id, pn, quantity, "
-                    "algorithm_version) VALUES ('migration-status-pair-line', "
-                    "'migration-status-pair-issue', 1, :part_id, "
-                    "'PN-MIGRATION-STATUS-PAIR', 1, 'legacy-v1')"
+                    "algorithm_version) VALUES "
+                    "('migration-status-pair-line-1', "
+                    "'migration-status-pair-issue-multi', 1, :part_id, "
+                    "'PN-MIGRATION-STATUS-PAIR', 1, 'legacy-v1'), "
+                    "('migration-status-pair-line-2', "
+                    "'migration-status-pair-issue-multi', 2, :part_id, "
+                    "'PN-MIGRATION-STATUS-PAIR', 2, 'legacy-v1')"
                 ),
                 {"part_id": part_id},
             )
@@ -437,11 +452,13 @@ def test_strict_status_pair_migration_preserves_legacy_anomalies_and_blocks_new(
         with engine.connect() as connection:
             assert connection.execute(
                 text(
-                    "SELECT status_mapping_state, normalized_status "
+                    "SELECT count(*) "
                     "FROM maintenance_site_issue "
-                    "WHERE issue_id = 'migration-status-pair-issue'"
+                    "WHERE project_id = 'migration-status-pair-project' "
+                    "AND status_mapping_state = 'mapped' "
+                    "AND normalized_status = 'unknown'"
                 )
-            ).one() == ("mapped", "unknown")
+            ).scalar_one() == 2
             assert connection.execute(
                 text(
                     "SELECT status_mapping_state, normalized_status "
@@ -467,6 +484,27 @@ def test_strict_status_pair_migration_preserves_legacy_anomalies_and_blocks_new(
                 "unmapped_site_issue_status",
                 "unmapped_expense_status",
             }
+            site_issue = next(
+                row
+                for row in workspace["completeness"]["issues"]
+                if row["code"] == "unmapped_site_issue_status"
+            )
+            assert site_issue["line_count"] == 2
+
+            directory = operations_service.project_operations(
+                session,
+                as_of=date(2026, 8, 31),
+                user_ctx=UserContext(
+                    user_id="migration-status-pair-reviewer",
+                    role="admin",
+                    permissions=None,
+                ),
+                q_text="MIGRATION-STATUS-PAIR",
+                reminder="completeness:unmapped_site_issue_status",
+            )
+            assert directory["total"] == 1
+            assert directory["rows"][0]["metrics"]["cost_complete"] is False
+            assert directory["rows"][0]["metrics"]["cost_status"] == "unknown"
 
         with pytest.raises(IntegrityError):
             with engine.begin() as connection:

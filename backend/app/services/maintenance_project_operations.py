@@ -2227,14 +2227,6 @@ def project_workspace(
             func.count()
             .filter(and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None)))
             .label("cost_gap_count"),
-            func.count()
-            .filter(
-                or_(
-                    MaintenanceSiteIssue.status_mapping_state != "mapped",
-                    MaintenanceSiteIssue.normalized_status == "unknown",
-                )
-            )
-            .label("unmapped_issue_count"),
             func.coalesce(
                 func.sum(
                     case(
@@ -2267,7 +2259,19 @@ def project_workspace(
     requisition_total = int(issue_fact.total)
     eligible_requisition_total = int(issue_fact.eligible_total)
     cost_gap_count = int(issue_fact.cost_gap_count)
-    unmapped_issue_count = int(issue_fact.unmapped_issue_count)
+    unmapped_issue_count = int(
+        db.scalar(
+            select(func.count(func.distinct(MaintenanceSiteIssue.issue_id))).where(
+                MaintenanceSiteIssue.project_id == project_id,
+                MaintenanceSiteIssue.issue_date <= as_of,
+                or_(
+                    MaintenanceSiteIssue.status_mapping_state != "mapped",
+                    MaintenanceSiteIssue.normalized_status == "unknown",
+                ),
+            )
+        )
+        or 0
+    )
     consumed_known_ex_tax = Decimal(issue_fact.consumed_known_ex_tax)
     consumed_known_inc_tax = Decimal(issue_fact.consumed_known_inc_tax)
 
@@ -2819,6 +2823,22 @@ def _project_cards_for_ids(
             "unmapped_issue_count": 0,
         }
     )
+    for project_id, anomaly_count in db.execute(
+        select(
+            MaintenanceSiteIssue.project_id,
+            func.count(func.distinct(MaintenanceSiteIssue.issue_id)),
+        )
+        .where(
+            MaintenanceSiteIssue.project_id.in_(project_ids),
+            MaintenanceSiteIssue.issue_date <= as_of,
+            or_(
+                MaintenanceSiteIssue.status_mapping_state != "mapped",
+                MaintenanceSiteIssue.normalized_status == "unknown",
+            ),
+        )
+        .group_by(MaintenanceSiteIssue.project_id)
+    ):
+        cost_facts[project_id]["unmapped_issue_count"] = int(anomaly_count)
     for (
         project_id,
         mapping_state,
@@ -2844,8 +2864,6 @@ def _project_cards_for_ids(
     ):
         facts = cost_facts[project_id]
         eligible = mapping_state == "mapped" and normalized_status == "confirmed"
-        if mapping_state != "mapped" or normalized_status == "unknown":
-            facts["unmapped_issue_count"] += 1
         if eligible and cost_amount_inc_tax is None:
             facts["cost_gap_count"] += 1
         elif eligible:
@@ -3083,14 +3101,6 @@ def _directory_reminder_query(
                 and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None))
             )
             .label("cost_gap_count"),
-            func.count()
-            .filter(
-                or_(
-                    MaintenanceSiteIssue.status_mapping_state != "mapped",
-                    MaintenanceSiteIssue.normalized_status == "unknown",
-                )
-            )
-            .label("unmapped_issue_count"),
             func.coalesce(
                 func.sum(
                     case(
@@ -3108,6 +3118,23 @@ def _directory_reminder_query(
         .where(MaintenanceSiteIssue.issue_date <= as_of)
         .group_by(MaintenanceSiteIssue.project_id)
         .cte("directory_issue_fact")
+    )
+    issue_status_by_project = (
+        select(
+            MaintenanceSiteIssue.project_id,
+            func.count(func.distinct(MaintenanceSiteIssue.issue_id)).label(
+                "unmapped_issue_count"
+            ),
+        )
+        .where(
+            MaintenanceSiteIssue.issue_date <= as_of,
+            or_(
+                MaintenanceSiteIssue.status_mapping_state != "mapped",
+                MaintenanceSiteIssue.normalized_status == "unknown",
+            ),
+        )
+        .group_by(MaintenanceSiteIssue.project_id)
+        .cte("directory_issue_status_fact")
     )
     expense_by_project = (
         select(
@@ -3175,7 +3202,7 @@ def _directory_reminder_query(
             func.coalesce(issue_by_project.c.cost_gap_count, 0).label(
                 "cost_gap_count"
             ),
-            func.coalesce(issue_by_project.c.unmapped_issue_count, 0).label(
+            func.coalesce(issue_status_by_project.c.unmapped_issue_count, 0).label(
                 "unmapped_issue_count"
             ),
             func.coalesce(
@@ -3210,6 +3237,10 @@ def _directory_reminder_query(
         .outerjoin(
             issue_by_project,
             issue_by_project.c.project_id == MaintenanceProject.project_id,
+        )
+        .outerjoin(
+            issue_status_by_project,
+            issue_status_by_project.c.project_id == MaintenanceProject.project_id,
         )
         .outerjoin(
             expense_by_project,
