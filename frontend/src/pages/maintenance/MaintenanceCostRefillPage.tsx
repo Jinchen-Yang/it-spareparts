@@ -21,6 +21,7 @@ import {
   recomputeMaintenanceCostGaps,
   updateMaintenanceCostGap,
   type MaintenanceCostGap,
+  type MaintenanceCostGapRecomputeResult,
   type MaintenanceCostReference,
   type MaintenanceProjectOperationsSummary,
 } from "../../api/maintenanceOperations";
@@ -118,6 +119,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
   const selectedProjectIdRef = useRef(selectedProjectId);
   const editingRef = useRef<MaintenanceCostGap | null>(editing);
   const recomputeGeneration = useRef(0);
+  const skipNextPageLoad = useRef(false);
   selectedProjectIdRef.current = selectedProjectId;
   editingRef.current = editing;
 
@@ -144,35 +146,41 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
     return () => { projectListGeneration.current += 1; };
   }, [loadProjectOptions]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (targetPage = page): Promise<boolean> => {
     if (!canManageProject || !selectedProjectId) {
       loadGeneration.current += 1;
       setRows([]);
       setTotal(0);
-      return;
+      return true;
     }
     const generation = ++loadGeneration.current;
     setLoading(true);
     setLoadError(false);
     try {
       const { data } = await listMaintenanceCostGaps(selectedProjectId, {
-        page,
+        page: targetPage,
         page_size: 20,
       });
-      if (generation !== loadGeneration.current) return;
+      if (generation !== loadGeneration.current) return false;
       setRows(data.rows);
       setTotal(data.total);
+      return true;
     } catch {
-      if (generation !== loadGeneration.current) return;
+      if (generation !== loadGeneration.current) return false;
       setRows([]);
       setTotal(0);
       setLoadError(true);
+      return false;
     } finally {
       if (generation === loadGeneration.current) setLoading(false);
     }
   }, [canManageProject, page, selectedProjectId]);
 
   useEffect(() => {
+    if (skipNextPageLoad.current) {
+      skipNextPageLoad.current = false;
+      return () => { loadGeneration.current += 1; };
+    }
     void load();
     return () => { loadGeneration.current += 1; };
   }, [load]);
@@ -298,28 +306,46 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
     setRecomputing(true);
     setRecomputeError("");
     setSuccess("");
+    let result: MaintenanceCostGapRecomputeResult;
     try {
-      const { data } = await recomputeMaintenanceCostGaps(targetProjectId, {
+      const response = await recomputeMaintenanceCostGaps(targetProjectId, {
         reason: "重新匹配后到采购或销售价格证据",
       });
-      if (
-        request !== recomputeGeneration.current
-        || selectedProjectIdRef.current !== targetProjectId
-      ) return;
-      setSuccess(data.resolved > 0
-        ? `已补齐 ${data.resolved} 行系统价格，仍有 ${data.remaining} 行缺价。`
-        : `没有发现新的系统价格，仍有 ${data.remaining} 行缺价。`);
-      await load();
+      result = response.data;
     } catch {
       if (
         request === recomputeGeneration.current
         && selectedProjectIdRef.current === targetProjectId
       ) {
         setRecomputeError("系统价格重新匹配失败，缺价数据未改动，请稍后重试。");
+        setRecomputing(false);
       }
-    } finally {
-      if (request === recomputeGeneration.current) setRecomputing(false);
+      return;
     }
+    if (
+      request !== recomputeGeneration.current
+      || selectedProjectIdRef.current !== targetProjectId
+    ) return;
+    setSuccess(result.resolved > 0
+      ? `已更新 ${result.resolved} 行系统价格，仍有 ${result.remaining} 行缺价。`
+      : `没有发现新的系统价格，仍有 ${result.remaining} 行缺价。`);
+    const refreshed = await load(1);
+    if (
+      page !== 1
+      && request === recomputeGeneration.current
+      && selectedProjectIdRef.current === targetProjectId
+    ) {
+      skipNextPageLoad.current = true;
+      setPage(1);
+    }
+    if (
+      !refreshed
+      && request === recomputeGeneration.current
+      && selectedProjectIdRef.current === targetProjectId
+    ) {
+      setRecomputeError("系统价格已更新，但缺价清单刷新失败，请手动重试。");
+    }
+    if (request === recomputeGeneration.current) setRecomputing(false);
   };
 
   const columns: ColumnsType<MaintenanceCostGap> = [

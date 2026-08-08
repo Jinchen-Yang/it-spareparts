@@ -808,6 +808,13 @@ def list_cost_gaps(
 
 
 _AUTOMATIC_COST_SOURCES = {"direct_purchase", "purchase_window", "sales_window"}
+_COST_SOURCE_PRIORITY = {
+    None: 0,
+    "manual": 1,
+    "sales_window": 2,
+    "purchase_window": 3,
+    "direct_purchase": 4,
+}
 _COST_RESOLUTION_FIELDS = (
     "unit_cost",
     "cost_amount",
@@ -821,6 +828,23 @@ _COST_RESOLUTION_FIELDS = (
     "reference_window_to",
     "algorithm_version",
 )
+
+
+def _cost_resolution_snapshot(line: MaintenanceSiteIssueLine) -> dict:
+    return {field: getattr(line, field) for field in _COST_RESOLUTION_FIELDS}
+
+
+def _restore_cost_resolution(
+    line: MaintenanceSiteIssueLine,
+    snapshot: dict,
+) -> None:
+    for field, value in snapshot.items():
+        setattr(line, field, value)
+
+
+def _cost_source_priority(source: str | None) -> int:
+    # Unknown future sources fail closed as stronger than today's waterfall.
+    return _COST_SOURCE_PRIORITY.get(source, len(_COST_SOURCE_PRIORITY) + 1)
 
 
 def recompute_cost_gaps(
@@ -854,7 +878,6 @@ def recompute_cost_gaps(
                 MaintenanceSiteIssue.project_id == project_id,
                 MaintenanceSiteIssue.status_mapping_state == "mapped",
                 MaintenanceSiteIssue.normalized_status == "confirmed",
-                MaintenanceSiteIssueLine.cost_amount.is_(None),
             )
             .order_by(
                 MaintenanceSiteIssue.issue_date,
@@ -867,17 +890,20 @@ def recompute_cost_gaps(
     resolved = 0
     for line, issue in candidates:
         before = site_issue_line_dict(line)
-        prior_resolution = {
-            field: getattr(line, field) for field in _COST_RESOLUTION_FIELDS
-        }
+        prior_resolution = _cost_resolution_snapshot(line)
+        prior_priority = _cost_source_priority(line.cost_source)
         maintenance_consumption_cost.resolve_line(
             db,
             issue_date=issue.issue_date,
             line=line,
         )
-        if line.cost_source not in _AUTOMATIC_COST_SOURCES:
-            for field, value in prior_resolution.items():
-                setattr(line, field, value)
+        candidate_resolution = _cost_resolution_snapshot(line)
+        candidate_priority = _cost_source_priority(line.cost_source)
+        if (
+            candidate_priority < prior_priority
+            or candidate_resolution == prior_resolution
+        ):
+            _restore_cost_resolution(line, prior_resolution)
             continue
         line.version += 1
         after = site_issue_line_dict(line)
@@ -899,7 +925,9 @@ def recompute_cost_gaps(
     db.flush()
     return {
         "resolved": resolved,
-        "remaining": len(candidates) - resolved,
+        "remaining": sum(
+            line.cost_amount is None for line, _issue in candidates
+        ),
         "data_version": state.data_version,
     }
 

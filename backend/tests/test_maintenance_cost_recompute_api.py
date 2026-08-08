@@ -15,6 +15,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssueLine,
 )
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
+from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysUser
 from tests.test_maintenance_project_operations_api import _batch, _client, _project
 
@@ -54,7 +55,7 @@ def _add_late_purchase(
     suffix: str,
     unit_price: int,
     order_date: date = date(2026, 6, 13),
-) -> None:
+) -> FPurchaseOrder:
     batch = _batch(db, suffix.lower())
     order = FPurchaseOrder(
         raw_order_id=f"PO-H-{suffix}",
@@ -78,6 +79,40 @@ def _add_late_purchase(
         )
     )
     db.commit()
+    return order
+
+
+def _add_late_sale(
+    db,
+    *,
+    part: DimPart,
+    suffix: str,
+    unit_price_inc_tax: int,
+    order_date: date = date(2026, 6, 12),
+) -> FSalesOrder:
+    batch = _batch(db, suffix.lower())
+    order = FSalesOrder(
+        raw_order_id=f"SO-H-{suffix}",
+        order_no=f"SO-{suffix}",
+        order_date=order_date,
+        data_status="已生效",
+        import_batch_id=batch.id,
+    )
+    db.add(order)
+    db.flush()
+    db.add(
+        FSalesLine(
+            raw_line_id=f"SO-L-{suffix}",
+            order_id=order.id,
+            part_id=part.id,
+            pn_std=part.pn_std,
+            qty=4,
+            unit_price=unit_price_inc_tax,
+            import_batch_id=batch.id,
+        )
+    )
+    db.commit()
+    return order
 
 
 def _limited_client(
@@ -281,3 +316,141 @@ def test_manual_fill_persists_new_auto_evidence_instead_of_rolling_it_back(db):
     ).one()
     assert audit.before_json["cost_source"] is None
     assert audit.after_json["cost_source"] == "purchase_window"
+
+
+def test_recompute_upgrades_sales_window_to_purchase_window(db):
+    project = _project(db, project_id="project-sales-to-purchase")
+    client = _client(db, username="sales_to_purchase_admin")
+    part = _create_gap(db, client, project_id=project.project_id, suffix="SALES-TO-PURCHASE")
+    path = f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps/recompute"
+    _add_late_sale(
+        db,
+        part=part,
+        suffix="SALES-FIRST",
+        unit_price_inc_tax=113,
+    )
+    first = client.post(path, json={"reason": "先按销售窗口匹配"})
+    assert first.status_code == 200, first.text
+    assert first.json()["resolved"] == 1
+    db.expire_all()
+    line = db.get(MaintenanceSiteIssueLine, "issue-line-SALES-TO-PURCHASE")
+    assert line.cost_source == "sales_window"
+    assert line.unit_cost == 100
+    assert line.version == 2
+
+    _add_late_purchase(db, part=part, suffix="PURCHASE-LATER", unit_price=70)
+    upgraded = client.post(path, json={"reason": "后到采购证据优先于销售"})
+
+    assert upgraded.status_code == 200, upgraded.text
+    assert upgraded.json()["resolved"] == 1
+    db.expire_all()
+    line = db.get(MaintenanceSiteIssueLine, line.issue_line_id)
+    assert line.cost_source == "purchase_window"
+    assert line.unit_cost == 70
+    assert line.version == 3
+    audits = db.query(MaintenanceProjectOperationAudit).filter_by(
+        project_id=project.project_id,
+        entity_id=line.issue_line_id,
+        action="auto_recompute",
+    ).order_by(MaintenanceProjectOperationAudit.id).all()
+    assert [row.after_json["cost_source"] for row in audits] == [
+        "sales_window",
+        "purchase_window",
+    ]
+
+
+def test_recompute_updates_purchase_weight_when_new_window_sample_arrives(db):
+    project = _project(db, project_id="project-purchase-weight-refresh")
+    client = _client(db, username="purchase_weight_refresh_admin")
+    part = _create_gap(db, client, project_id=project.project_id, suffix="WEIGHT-REFRESH")
+    path = f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps/recompute"
+    _add_late_purchase(db, part=part, suffix="WEIGHT-A", unit_price=20)
+    first = client.post(path, json={"reason": "首次采购窗口加权"})
+    assert first.status_code == 200, first.text
+    state_after_first = db.get(MaintenanceProjectWorkbookState, project.project_id)
+    first_revision = state_after_first.revision
+    db.expire_all()
+    line = db.get(MaintenanceSiteIssueLine, "issue-line-WEIGHT-REFRESH")
+    assert line.unit_cost == 20
+    assert line.reference_sample_count == 1
+
+    _add_late_purchase(
+        db,
+        part=part,
+        suffix="WEIGHT-B",
+        unit_price=40,
+        order_date=date(2026, 6, 14),
+    )
+    updated = client.post(path, json={"reason": "纳入新到采购样本重算均价"})
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["resolved"] == 1
+    db.expire_all()
+    line = db.get(MaintenanceSiteIssueLine, line.issue_line_id)
+    assert line.cost_source == "purchase_window"
+    assert line.unit_cost == 30
+    assert line.reference_sample_count == 2
+    assert line.version == 3
+    assert db.get(MaintenanceProjectWorkbookState, project.project_id).revision == first_revision + 1
+
+
+def test_recompute_upgrades_manual_cost_to_automatic_purchase(db):
+    project = _project(db, project_id="project-manual-to-purchase")
+    client = _client(db, username="manual_to_purchase_admin")
+    part = _create_gap(db, client, project_id=project.project_id, suffix="MANUAL-TO-PURCHASE")
+    filled = client.patch(
+        f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
+        json={
+            "line_id": "issue-line-MANUAL-TO-PURCHASE",
+            "version": 1,
+            "unit_cost_ex_tax": "12.50",
+            "evidence": "已审批人工价格证据",
+            "reason": "暂时人工补价",
+        },
+    )
+    assert filled.status_code == 200, filled.text
+    assert filled.json()["cost_source"] == "manual"
+    _add_late_purchase(db, part=part, suffix="AUTO-AFTER-MANUAL", unit_price=18)
+
+    upgraded = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps/recompute",
+        json={"reason": "后到采购证据替换人工口径"},
+    )
+
+    assert upgraded.status_code == 200, upgraded.text
+    assert upgraded.json()["resolved"] == 1
+    db.expire_all()
+    line = db.get(MaintenanceSiteIssueLine, "issue-line-MANUAL-TO-PURCHASE")
+    assert line.cost_source == "purchase_window"
+    assert line.unit_cost == 18
+    assert line.manual_unit_cost == 12.5
+    assert line.manual_evidence == "已审批人工价格证据"
+    assert line.version == 3
+
+
+def test_recompute_never_downgrades_purchase_to_sales_when_evidence_disappears(db):
+    project = _project(db, project_id="project-no-cost-downgrade")
+    client = _client(db, username="no_cost_downgrade_admin")
+    part = _create_gap(db, client, project_id=project.project_id, suffix="NO-DOWNGRADE")
+    path = f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps/recompute"
+    purchase = _add_late_purchase(db, part=part, suffix="STRONG-PURCHASE", unit_price=60)
+    _add_late_sale(db, part=part, suffix="WEAK-SALE", unit_price_inc_tax=113)
+    assert client.post(path, json={"reason": "首次采用采购"}).json()["resolved"] == 1
+    db.expire_all()
+    line = db.get(MaintenanceSiteIssueLine, "issue-line-NO-DOWNGRADE")
+    version_before = line.version
+    state = db.get(MaintenanceProjectWorkbookState, project.project_id)
+    revision_before = state.revision
+    purchase.data_status = "已作废"
+    db.commit()
+
+    repeated = client.post(path, json={"reason": "弱证据不得覆盖采购"})
+
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["resolved"] == 0
+    db.expire_all()
+    line = db.get(MaintenanceSiteIssueLine, line.issue_line_id)
+    assert line.cost_source == "purchase_window"
+    assert line.unit_cost == 60
+    assert line.version == version_before
+    assert db.get(MaintenanceProjectWorkbookState, project.project_id).revision == revision_before

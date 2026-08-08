@@ -127,10 +127,69 @@ describe("MaintenanceCostRefillPage", () => {
       "project-1",
       { reason: "重新匹配后到采购或销售价格证据" },
     ));
-    expect(await screen.findByText("已补齐 1 行系统价格，仍有 0 行缺价。"))
+    expect(await screen.findByText("已更新 1 行系统价格，仍有 0 行缺价。"))
       .toBeInTheDocument();
     await waitFor(() => expect(listMaintenanceCostGaps).toHaveBeenCalledTimes(2));
     expect(screen.getByText("当前项目没有待回填成本")).toBeInTheDocument();
+  });
+
+  it("系统价格更新成功但清单刷新失败时保留成功事实并单独提示刷新错误", async () => {
+    listMaintenanceCostGaps
+      .mockResolvedValueOnce({
+        data: { rows: [gap], total: 1, page: 1, page_size: 20, data_version: "v7" },
+      })
+      .mockRejectedValueOnce(new Error("refresh failed"));
+    recomputeMaintenanceCostGaps.mockResolvedValueOnce({
+      data: { resolved: 1, remaining: 0, data_version: "v8" },
+    });
+    render(
+      <MemoryRouter>
+        <MaintenanceCostRefillPage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("PN-MISSING");
+    fireEvent.click(screen.getByRole("button", { name: "重新匹配系统价格" }));
+
+    expect(await screen.findByText("已更新 1 行系统价格，仍有 0 行缺价。"))
+      .toBeInTheDocument();
+    expect(await screen.findByText("系统价格已更新，但缺价清单刷新失败，请手动重试。"))
+      .toBeInTheDocument();
+    expect(screen.queryByText(/数据未改动/)).toBeNull();
+  });
+
+  it("高页码重算后显式回到第 1 页加载，避免清单缩水后停留空页", async () => {
+    const pageTwoGap = { ...gap, line_id: "line-21", pn: "PN-PAGE-2" };
+    listMaintenanceCostGaps
+      .mockResolvedValueOnce({
+        data: { rows: [gap], total: 21, page: 1, page_size: 20, data_version: "v7" },
+      })
+      .mockResolvedValueOnce({
+        data: { rows: [pageTwoGap], total: 21, page: 2, page_size: 20, data_version: "v7" },
+      })
+      .mockResolvedValue({
+        data: { rows: [], total: 0, page: 1, page_size: 20, data_version: "v8" },
+      });
+    recomputeMaintenanceCostGaps.mockResolvedValueOnce({
+      data: { resolved: 1, remaining: 0, data_version: "v8" },
+    });
+    render(
+      <MemoryRouter>
+        <MaintenanceCostRefillPage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("PN-MISSING");
+    fireEvent.click(screen.getByTitle("2"));
+    await screen.findByText("PN-PAGE-2");
+    fireEvent.click(screen.getByRole("button", { name: "重新匹配系统价格" }));
+
+    await waitFor(() => expect(listMaintenanceCostGaps).toHaveBeenLastCalledWith(
+      "project-1",
+      { page: 1, page_size: 20 },
+    ));
+    expect(await screen.findByText("当前项目没有待回填成本")).toBeInTheDocument();
+    expect(screen.queryByTitle("2")).toBeNull();
   });
 
   it("展示关联采购和前后 7 天加权证据，人工确认后按版本回填", async () => {
