@@ -4,15 +4,17 @@ from datetime import UTC, date, datetime
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import event
+from sqlalchemy import event, select
 
 from app import auth
 from app.auth import hash_password
 from app.api import maintenance_project_operations
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
+    MaintenanceProjectExpenseAttribution,
     MaintenanceProjectOperationAudit,
     MaintenanceProjectWorkbookState,
+    MaintenanceSiteIssueLine,
 )
 from app.models.dimensions import DimPart
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
@@ -416,6 +418,171 @@ def test_confirmed_site_issue_uses_direct_then_full_purchase_window(db):
     }
 
 
+def test_site_issue_status_lifecycle_resolves_cost_and_void_only_stops_counting(db):
+    project = _project(db, project_id="project-site-issue-status")
+    client = _client(db, username="site_issue_status_admin")
+    contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-site-status-001",
+            "contract_no": "XS-SITE-STATUS-001",
+            "contract_amount": "1000.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立状态生命周期测试合同",
+        },
+    )
+    assert contract.status_code == 201, contract.text
+
+    batch = _batch(db, "site-issue-status")
+    part = DimPart(pn_std="PN-SYNTH-STATUS")
+    db.add(part)
+    db.flush()
+    order = FPurchaseOrder(
+        raw_order_id="PO-H-STATUS",
+        order_no="PO-STATUS",
+        order_date=date(2026, 5, 10),
+        data_status="已生效",
+        import_batch_id=batch.id,
+    )
+    db.add(order)
+    db.flush()
+    purchase_line = FPurchaseLine(
+        raw_line_id="PO-L-STATUS",
+        order_id=order.id,
+        part_id=part.id,
+        pn_std=part.pn_std,
+        qty=10,
+        unit_price=25,
+        import_batch_id=batch.id,
+    )
+    db.add(purchase_line)
+    db.commit()
+
+    created = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-SYNTH-STATUS",
+            "issue_date": "2026-05-10",
+            "raw_status": "synthetic-pending",
+            "status_mapping_state": "unmapped",
+            "normalized_status": "unknown",
+            "status_mapping_version": "synthetic-issue-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-status",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "2",
+                    "linked_purchase_line_id": purchase_line.id,
+                }
+            ],
+            "reason": "导入待确认现场领用",
+        },
+    )
+    assert created.status_code == 201, created.text
+    issue = created.json()
+    assert issue["normalized_status"] == "unknown"
+    assert issue["lines"][0]["cost_amount"] is None
+    assert issue["lines"][0]["version"] == 1
+
+    confirmed = client.patch(
+        f"/api/maintenance/projects/stable/site-issues/{issue['issue_id']}/status",
+        json={
+            "version": 1,
+            "raw_status": "synthetic-confirmed",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-issue-map-v2",
+            "reason": "现场负责人确认领用",
+        },
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    confirmed_payload = confirmed.json()
+    assert confirmed_payload["status_mapping_state"] == "mapped"
+    assert confirmed_payload["normalized_status"] == "confirmed"
+    assert confirmed_payload["version"] == 2
+    assert confirmed_payload["lines"][0]["cost_source"] == "direct_purchase"
+    assert confirmed_payload["lines"][0]["cost_amount"] == "50.00"
+    assert confirmed_payload["lines"][0]["version"] == 2
+
+    stale = client.patch(
+        f"/api/maintenance/projects/stable/site-issues/{issue['issue_id']}/status",
+        json={
+            "version": 1,
+            "raw_status": "synthetic-void",
+            "normalized_status": "void",
+            "status_mapping_version": "synthetic-issue-map-v2",
+            "reason": "使用过期版本作废",
+        },
+    )
+    assert stale.status_code == 409
+
+    voided = client.patch(
+        f"/api/maintenance/projects/stable/site-issues/{issue['issue_id']}/status",
+        json={
+            "version": 2,
+            "raw_status": "synthetic-void",
+            "normalized_status": "void",
+            "status_mapping_version": "synthetic-issue-map-v2",
+            "reason": "原单据已作废",
+        },
+    )
+    assert voided.status_code == 200, voided.text
+    voided_payload = voided.json()
+    assert voided_payload["normalized_status"] == "void"
+    assert voided_payload["version"] == 3
+    assert voided_payload["lines"][0]["cost_amount"] == "50.00"
+    assert voided_payload["lines"][0]["version"] == 2
+
+    cannot_reopen = client.patch(
+        f"/api/maintenance/projects/stable/site-issues/{issue['issue_id']}/status",
+        json={
+            "version": 3,
+            "raw_status": "synthetic-confirmed-again",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-issue-map-v3",
+            "reason": "不允许恢复已作废事实",
+        },
+    )
+    assert cannot_reopen.status_code == 400
+
+    workspace = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-05-31"},
+    )
+    assert workspace.status_code == 200, workspace.text
+    assert workspace.json()["project"]["metrics"]["site_requisition_known_cost"] == "0.00"
+
+    db.expire_all()
+    line = db.get(MaintenanceSiteIssueLine, "issue-line-status")
+    assert line.cost_amount == 50
+    state = db.get(MaintenanceProjectWorkbookState, project.project_id)
+    assert state.revision == 4
+    audits = list(
+        db.scalars(
+            select(MaintenanceProjectOperationAudit)
+            .where(
+                MaintenanceProjectOperationAudit.entity_type == "site_issue",
+                MaintenanceProjectOperationAudit.entity_id == issue["issue_id"],
+                MaintenanceProjectOperationAudit.action == "status_update",
+            )
+            .order_by(MaintenanceProjectOperationAudit.id)
+        )
+    )
+    assert len(audits) == 2
+    assert audits[0].before_json["normalized_status"] == "unknown"
+    assert audits[0].before_json["lines"][0]["cost_amount"] is None
+    assert audits[0].after_json["normalized_status"] == "confirmed"
+    assert audits[0].after_json["lines"][0]["cost_amount"] == "50.00"
+    assert audits[1].before_json["normalized_status"] == "confirmed"
+    assert audits[1].after_json["normalized_status"] == "void"
+
+
 def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
     project = _project(db, project_id="project-sales-manual-gap")
     client = _client(db, username="sales_manual_gap_admin")
@@ -716,6 +883,262 @@ def test_expense_readiness_is_explicit_monthly_monotonic_and_audited(db):
         json={"ready_through": "2026-06-01", "reason": "禁止回退"},
     )
     assert regressed.status_code == 409
+
+
+def test_expense_status_lifecycle_counts_only_approved_and_preserves_voided_fact(db):
+    project = _project(db, project_id="project-expense-status")
+    client = _client(db, username="expense_status_admin")
+    contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-expense-status-001",
+            "contract_no": "XS-EXPENSE-STATUS-001",
+            "contract_amount": "1000.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立报销状态测试合同",
+        },
+    )
+    assert contract.status_code == 201, contract.text
+    created = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses",
+        json={
+            "expense_id": "expense-status-001",
+            "project_contract_id": contract.json()["project_contract_id"],
+            "expense_ref": "BX-SYNTH-STATUS",
+            "expense_date": "2026-07-10",
+            "amount_ex_tax": "75.00",
+            "raw_status": "synthetic-pending",
+            "status_mapping_state": "unmapped",
+            "normalized_status": "unknown",
+            "status_mapping_version": "synthetic-expense-map-v1",
+            "reason": "导入待审批报销事实",
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["version"] == 1
+
+    unknown = client.patch(
+        "/api/maintenance/projects/stable/expenses/expense-status-001/status",
+        json={
+            "version": 1,
+            "raw_status": "synthetic-awaiting-review",
+            "normalized_status": "unknown",
+            "status_mapping_version": "synthetic-expense-map-v2",
+            "reason": "补充最新待审批状态证据",
+        },
+    )
+    assert unknown.status_code == 200, unknown.text
+    assert unknown.json()["status_mapping_state"] == "unmapped"
+    assert unknown.json()["normalized_status"] == "unknown"
+    assert unknown.json()["version"] == 2
+
+    rejected = client.patch(
+        "/api/maintenance/projects/stable/expenses/expense-status-001/status",
+        json={
+            "version": 2,
+            "raw_status": "synthetic-rejected",
+            "normalized_status": "rejected",
+            "status_mapping_version": "synthetic-expense-map-v2",
+            "reason": "审批结果为驳回",
+        },
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["status_mapping_state"] == "mapped"
+    assert rejected.json()["normalized_status"] == "rejected"
+    assert rejected.json()["version"] == 3
+
+    approved = client.patch(
+        "/api/maintenance/projects/stable/expenses/expense-status-001/status",
+        json={
+            "version": 3,
+            "raw_status": "synthetic-approved",
+            "normalized_status": "approved",
+            "status_mapping_version": "synthetic-expense-map-v3",
+            "reason": "重新提交后审批完成",
+        },
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["normalized_status"] == "approved"
+    assert approved.json()["version"] == 4
+    workspace = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-07-31"},
+    )
+    assert workspace.status_code == 200, workspace.text
+    assert workspace.json()["project"]["metrics"]["approved_expense"] == "75.00"
+
+    stale = client.patch(
+        "/api/maintenance/projects/stable/expenses/expense-status-001/status",
+        json={
+            "version": 3,
+            "raw_status": "synthetic-void",
+            "normalized_status": "void",
+            "status_mapping_version": "synthetic-expense-map-v3",
+            "reason": "过期版本作废",
+        },
+    )
+    assert stale.status_code == 409
+    voided = client.patch(
+        "/api/maintenance/projects/stable/expenses/expense-status-001/status",
+        json={
+            "version": 4,
+            "raw_status": "synthetic-void",
+            "normalized_status": "void",
+            "status_mapping_version": "synthetic-expense-map-v3",
+            "reason": "原报销单已作废",
+        },
+    )
+    assert voided.status_code == 200, voided.text
+    assert voided.json()["normalized_status"] == "void"
+    assert voided.json()["amount_ex_tax"] == "75.00"
+    assert voided.json()["version"] == 5
+    cannot_reopen = client.patch(
+        "/api/maintenance/projects/stable/expenses/expense-status-001/status",
+        json={
+            "version": 5,
+            "raw_status": "synthetic-approved-again",
+            "normalized_status": "approved",
+            "status_mapping_version": "synthetic-expense-map-v4",
+            "reason": "不允许恢复已作废报销",
+        },
+    )
+    assert cannot_reopen.status_code == 400
+
+    workspace = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-07-31"},
+    )
+    assert workspace.status_code == 200, workspace.text
+    assert workspace.json()["project"]["metrics"]["approved_expense"] == "0.00"
+    assert workspace.json()["approved_expenses"]["total"] == 0
+
+    db.expire_all()
+    expense = db.get(MaintenanceProjectExpenseAttribution, "expense-status-001")
+    assert expense is not None
+    assert expense.normalized_status == "void"
+    assert expense.amount_ex_tax == 75
+    state = db.get(MaintenanceProjectWorkbookState, project.project_id)
+    assert state.revision == 6
+    audits = list(
+        db.scalars(
+            select(MaintenanceProjectOperationAudit)
+            .where(
+                MaintenanceProjectOperationAudit.entity_type == "expense",
+                MaintenanceProjectOperationAudit.entity_id == "expense-status-001",
+                MaintenanceProjectOperationAudit.action == "status_update",
+            )
+            .order_by(MaintenanceProjectOperationAudit.id)
+        )
+    )
+    assert [row.before_json["normalized_status"] for row in audits] == [
+        "unknown",
+        "unknown",
+        "rejected",
+        "approved",
+    ]
+    assert [row.after_json["normalized_status"] for row in audits] == [
+        "unknown",
+        "rejected",
+        "approved",
+        "void",
+    ]
+
+
+def test_archived_project_rejects_site_issue_and_expense_status_changes(db):
+    project = _project(db, project_id="project-archived-fact-status")
+    client = _client(db, username="archived_fact_status_admin")
+    part = DimPart(pn_std="PN-SYNTH-ARCHIVED-STATUS")
+    db.add(part)
+    db.commit()
+    issue = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-SYNTH-ARCHIVED",
+            "issue_date": "2026-07-10",
+            "raw_status": "synthetic-pending",
+            "status_mapping_state": "unmapped",
+            "normalized_status": "unknown",
+            "status_mapping_version": "synthetic-issue-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-archived-status",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                }
+            ],
+            "reason": "建立归档拒绝测试领用",
+        },
+    )
+    assert issue.status_code == 201, issue.text
+    expense = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses",
+        json={
+            "expense_id": "expense-archived-status",
+            "expense_ref": "BX-SYNTH-ARCHIVED",
+            "expense_date": "2026-07-10",
+            "amount_ex_tax": "10.00",
+            "raw_status": "synthetic-pending",
+            "status_mapping_state": "unmapped",
+            "normalized_status": "unknown",
+            "status_mapping_version": "synthetic-expense-map-v1",
+            "reason": "建立归档拒绝测试报销",
+        },
+    )
+    assert expense.status_code == 201, expense.text
+
+    db.expire_all()
+    archived_project = db.get(MaintenanceProject, project.project_id)
+    archived_project.is_active = False
+    archived_project.version += 1
+    db.commit()
+
+    issue_update = client.patch(
+        f"/api/maintenance/projects/stable/site-issues/{issue.json()['issue_id']}/status",
+        json={
+            "version": 1,
+            "raw_status": "synthetic-confirmed",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-issue-map-v2",
+            "reason": "归档后不应生效",
+        },
+    )
+    expense_update = client.patch(
+        "/api/maintenance/projects/stable/expenses/expense-archived-status/status",
+        json={
+            "version": 1,
+            "raw_status": "synthetic-approved",
+            "normalized_status": "approved",
+            "status_mapping_version": "synthetic-expense-map-v2",
+            "reason": "归档后不应生效",
+        },
+    )
+    assert issue_update.status_code == 400
+    assert issue_update.json()["detail"] == "项目主档已归档"
+    assert expense_update.status_code == 400
+    assert expense_update.json()["detail"] == "项目主档已归档"
+
+    db.expire_all()
+    assert db.get(MaintenanceSiteIssueLine, "issue-line-archived-status").cost_amount is None
+    assert db.get(
+        MaintenanceProjectExpenseAttribution,
+        "expense-archived-status",
+    ).normalized_status == "unknown"
+    assert db.get(MaintenanceProjectWorkbookState, project.project_id).revision == 2
+    assert list(
+        db.scalars(
+            select(MaintenanceProjectOperationAudit).where(
+                MaintenanceProjectOperationAudit.project_id == project.project_id,
+                MaintenanceProjectOperationAudit.action == "status_update",
+            )
+        )
+    ) == []
 
 
 def test_cost_thresholds_and_generated_tasks_are_deterministic(db):

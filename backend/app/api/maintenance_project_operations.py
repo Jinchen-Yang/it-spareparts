@@ -108,6 +108,16 @@ class SiteIssueCreate(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class SiteIssueStatusPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(ge=1)
+    raw_status: str = Field(min_length=1, max_length=64)
+    normalized_status: str
+    status_mapping_version: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 class ManualCostPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -140,6 +150,16 @@ class ExpenseReadinessMark(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ready_through: date
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class ExpenseStatusPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(ge=1)
+    raw_status: str = Field(min_length=1, max_length=64)
+    normalized_status: str
+    status_mapping_version: str = Field(min_length=1, max_length=64)
     reason: str = Field(min_length=1, max_length=1000)
 
 
@@ -373,6 +393,50 @@ def create_project_site_issue(
         raise
 
 
+@router.patch("/site-issues/{issue_id}/status")
+def patch_project_site_issue_status(
+    body: SiteIssueStatusPatch,
+    issue_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_roundtrip_apply",
+            require_data="data_purchase_cost",
+        )
+    ),
+) -> dict:
+    operator = _real_operator(db, ident)
+    try:
+        payload = operations.update_site_issue_status(
+            db,
+            issue_id=issue_id,
+            version=body.version,
+            raw_status=body.raw_status,
+            normalized_status=body.normalized_status,
+            status_mapping_version=body.status_mapping_version,
+            reason=body.reason,
+            operated_by=operator,
+        )
+        if payload is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "现场领用单不存在")
+        db.commit()
+        return payload
+    except HTTPException:
+        db.rollback()
+        raise
+    except operations.MaintenanceOperationConflict as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except operations.MaintenanceOperationError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+
 @router.get("/{project_id}/cost-gaps")
 def project_cost_gaps(
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -457,6 +521,50 @@ def mark_project_expense_readiness(
         ready_through=body.ready_through,
         reason=body.reason,
     )
+
+
+@router.patch("/expenses/{expense_id}/status")
+def patch_project_expense_status(
+    body: ExpenseStatusPatch,
+    expense_id: str = Path(..., min_length=1, max_length=64),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_roundtrip_apply",
+            require_data="data_profit",
+        )
+    ),
+) -> dict:
+    operator = _real_operator(db, ident)
+    try:
+        payload = operations.update_expense_status(
+            db,
+            expense_id=expense_id,
+            version=body.version,
+            raw_status=body.raw_status,
+            normalized_status=body.normalized_status,
+            status_mapping_version=body.status_mapping_version,
+            reason=body.reason,
+            operated_by=operator,
+        )
+        if payload is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "报销归集事实不存在")
+        db.commit()
+        return payload
+    except HTTPException:
+        db.rollback()
+        raise
+    except operations.MaintenanceOperationConflict as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except operations.MaintenanceOperationError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.patch("/{project_id}/cost-gaps")

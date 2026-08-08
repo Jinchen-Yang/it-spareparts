@@ -517,6 +517,203 @@ def create_site_issue(
     return payload
 
 
+_SITE_ISSUE_STATUS_TRANSITIONS = {
+    "unknown": {"confirmed", "void"},
+    "confirmed": {"void"},
+    "void": set(),
+}
+
+_EXPENSE_STATUS_TRANSITIONS = {
+    "unknown": {"approved", "rejected", "void"},
+    "rejected": {"approved", "void"},
+    "approved": {"void"},
+    "void": set(),
+}
+
+
+def _status_transition_allowed(
+    transitions: dict[str, set[str]],
+    *,
+    current: str,
+    target: str,
+) -> bool:
+    return target == current or target in transitions.get(current, set())
+
+
+def update_site_issue_status(
+    db: Session,
+    *,
+    issue_id: str,
+    version: int,
+    raw_status: str,
+    normalized_status: str,
+    status_mapping_version: str,
+    reason: str,
+    operated_by: str,
+) -> dict | None:
+    """Advance one site issue without deleting or erasing its cost evidence."""
+
+    project_id = db.scalar(
+        select(MaintenanceSiteIssue.project_id).where(
+            MaintenanceSiteIssue.issue_id == issue_id
+        )
+    )
+    if project_id is None:
+        return None
+    get_or_create_workbook_state(db, project_id=project_id, lock=True)
+    project = _project(db, project_id)
+    if project is None:
+        return None
+    if not project.is_active:
+        raise MaintenanceOperationError("项目主档已归档")
+    row = db.scalar(
+        select(MaintenanceSiteIssue)
+        .where(MaintenanceSiteIssue.issue_id == issue_id)
+        .with_for_update()
+    )
+    if row is None:
+        return None
+    lines = list(
+        db.scalars(
+            select(MaintenanceSiteIssueLine)
+            .where(MaintenanceSiteIssueLine.issue_id == issue_id)
+            .order_by(MaintenanceSiteIssueLine.line_no)
+            .with_for_update()
+        )
+    )
+    if row.version != version:
+        raise MaintenanceOperationConflict(
+            f"现场领用单已变化（当前版本 {row.version}），请刷新后重试"
+        )
+    if normalized_status not in {"confirmed", "void"}:
+        raise MaintenanceOperationError("现场领用状态只能更新为已确认或已作废")
+    if not _status_transition_allowed(
+        _SITE_ISSUE_STATUS_TRANSITIONS,
+        current=row.normalized_status,
+        target=normalized_status,
+    ):
+        raise MaintenanceOperationError(
+            f"现场领用状态不能从 {row.normalized_status} 变更为 {normalized_status}"
+        )
+
+    before = site_issue_dict(row, lines)
+    previous_status = row.normalized_status
+    row.raw_status = _required(raw_status, "现场领用原始状态")
+    row.status_mapping_state = "mapped"
+    row.normalized_status = normalized_status
+    row.status_mapping_version = _required(
+        status_mapping_version, "状态映射版本"
+    )
+    if previous_status != "confirmed" and normalized_status == "confirmed":
+        for line in lines:
+            line_before = site_issue_line_dict(line)
+            maintenance_consumption_cost.resolve_line(
+                db,
+                issue_date=row.issue_date,
+                line=line,
+            )
+            if site_issue_line_dict(line) != line_before:
+                line.version += 1
+
+    candidate = site_issue_dict(row, lines)
+    if candidate == before:
+        return before
+    row.version += 1
+    after = site_issue_dict(row, lines)
+    _fact_audit(
+        db,
+        project_id=project_id,
+        entity_type="site_issue",
+        entity_id=row.issue_id,
+        action="status_update",
+        before=before,
+        after=after,
+        reason=reason,
+        operated_by=operated_by,
+    )
+    bump_workbook_revision(db, project_id=project_id)
+    db.flush()
+    return after
+
+
+def update_expense_status(
+    db: Session,
+    *,
+    expense_id: str,
+    version: int,
+    raw_status: str,
+    normalized_status: str,
+    status_mapping_version: str,
+    reason: str,
+    operated_by: str,
+) -> dict | None:
+    """Advance one attributed expense while preserving the original fact row."""
+
+    project_id = db.scalar(
+        select(MaintenanceProjectExpenseAttribution.project_id).where(
+            MaintenanceProjectExpenseAttribution.expense_id == expense_id
+        )
+    )
+    if project_id is None:
+        return None
+    get_or_create_workbook_state(db, project_id=project_id, lock=True)
+    project = _project(db, project_id)
+    if project is None:
+        return None
+    if not project.is_active:
+        raise MaintenanceOperationError("项目主档已归档")
+    row = db.scalar(
+        select(MaintenanceProjectExpenseAttribution)
+        .where(MaintenanceProjectExpenseAttribution.expense_id == expense_id)
+        .with_for_update()
+    )
+    if row is None:
+        return None
+    if row.version != version:
+        raise MaintenanceOperationConflict(
+            f"报销归集事实已变化（当前版本 {row.version}），请刷新后重试"
+        )
+    if normalized_status not in {"approved", "rejected", "void", "unknown"}:
+        raise MaintenanceOperationError("报销标准状态无效")
+    if not _status_transition_allowed(
+        _EXPENSE_STATUS_TRANSITIONS,
+        current=row.normalized_status,
+        target=normalized_status,
+    ):
+        raise MaintenanceOperationError(
+            f"报销状态不能从 {row.normalized_status} 变更为 {normalized_status}"
+        )
+
+    before = expense_dict(row)
+    row.raw_status = _required(raw_status, "报销原始状态")
+    row.status_mapping_state = (
+        "unmapped" if normalized_status == "unknown" else "mapped"
+    )
+    row.normalized_status = normalized_status
+    row.status_mapping_version = _required(
+        status_mapping_version, "状态映射版本"
+    )
+    candidate = expense_dict(row)
+    if candidate == before:
+        return before
+    row.version += 1
+    after = expense_dict(row)
+    _fact_audit(
+        db,
+        project_id=project_id,
+        entity_type="expense",
+        entity_id=row.expense_id,
+        action="status_update",
+        before=before,
+        after=after,
+        reason=reason,
+        operated_by=operated_by,
+    )
+    bump_workbook_revision(db, project_id=project_id)
+    db.flush()
+    return after
+
+
 def list_cost_gaps(
     db: Session,
     *,
