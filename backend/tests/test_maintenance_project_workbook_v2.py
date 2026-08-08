@@ -224,6 +224,13 @@ def test_export_is_four_visible_sheets_and_keeps_missing_cost_as_blank():
         assert set(book["02_备件消耗"].tables) == {"tbl_consumptions_v2"}
         assert set(book["03_报销单"].tables) == {"tbl_expenses_v2"}
         assert set(book["04_项目经理追踪与提醒"].tables) == {"tbl_tasks_v2"}
+        overview = book["01_总览"]
+        collection_table = overview.tables["tbl_collections_v2"]
+        _, collection_header, _, collection_end = range_boundaries(collection_table.ref)
+        assert overview.protection.sheet is True
+        assert overview.cell(collection_header + 1, 1).protection.locked is True
+        assert overview.cell(collection_end, 1).protection.locked is False
+        assert book["02_备件消耗"].protection.sheet is True
 
         sheet = book["02_备件消耗"]
         table = sheet.tables["tbl_consumptions_v2"]

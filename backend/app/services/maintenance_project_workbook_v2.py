@@ -19,7 +19,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill, Protection
 from openpyxl.utils import get_column_letter, range_boundaries
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.table import Table, TableStyleInfo
@@ -577,14 +577,20 @@ def _summary_sheet(sheet, workspace, contracts, collections):
         start_row=collection_start,
     )
     for row in range(collection_start + 1, collection_end + 1):
+        is_new_row = sheet.cell(row, 9).value in (None, "")
         for col in range(1, 9):
-            sheet.cell(row, col).fill = _EDIT_FILL
+            if is_new_row:
+                sheet.cell(row, col).fill = _EDIT_FILL
+                sheet.cell(row, col).protection = Protection(locked=False)
     validation = DataValidation(type="list", formula1='"KEEP,CREATE"', allow_blank=True)
     sheet.add_data_validation(validation)
     validation.add(f"A{collection_start + 1}:A{collection_end}")
     for col in range(9, 13):
         sheet.column_dimensions[get_column_letter(col)].hidden = True
     sheet.freeze_panes = f"A{collection_start + 1}"
+    sheet.protection.sheet = True
+    sheet.protection.selectLockedCells = False
+    sheet.protection.selectUnlockedCells = True
 
 
 def _entity_versions(workspace: Mapping[str, Any]) -> list[tuple[str, str, str]]:
