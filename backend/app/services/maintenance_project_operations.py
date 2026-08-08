@@ -7,7 +7,8 @@ facts added by the stable-project workspace.
 
 from __future__ import annotations
 
-from datetime import date
+from calendar import monthrange
+from datetime import date, datetime
 from decimal import Decimal
 import hashlib
 import json
@@ -31,6 +32,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssueLine,
     MaintenanceProjectWorkbookState,
 )
+from app.business_time import business_today
 from app.security import UserContext, is_field_hidden
 from app.services import maintenance_project
 from app.services import maintenance_consumption_cost
@@ -946,6 +948,10 @@ def _task(
     title: str,
     detail: str,
     entity_id: str | None = None,
+    task_type: str | None = None,
+    due_date: date | None = None,
+    task_status: str = "open",
+    owner: str | None = None,
 ) -> dict:
     identity = f"{project_id}:{rule_key}:{entity_id or '-'}"
     return {
@@ -956,6 +962,10 @@ def _task(
         "title": title,
         "detail": detail,
         "entity_id": entity_id,
+        "task_type": task_type or rule_key.split(":", 1)[0],
+        "due_date": due_date.isoformat() if due_date else None,
+        "status": task_status,
+        "owner": owner,
         "generated_by": "system",
     }
 
@@ -967,8 +977,39 @@ def _system_tasks(
     has_confirmed_collection: bool,
     cost_gap_count: int,
     cost_status: str,
+    as_of: date,
+    project_manager_id: str | None,
+    last_applied_at: datetime | None,
 ) -> list[dict]:
     tasks: list[dict] = []
+    due_date = date(as_of.year, as_of.month, monthrange(as_of.year, as_of.month)[1])
+    applied_date = business_today(last_applied_at) if last_applied_at else None
+    monthly_completed = bool(
+        applied_date
+        and applied_date.year == as_of.year
+        and applied_date.month == as_of.month
+    )
+    tasks.append(
+        _task(
+            project_id=project_id,
+            rule_key=f"manager_update:{as_of:%Y-%m}",
+            severity=("info" if monthly_completed or as_of < due_date else "warning"),
+            title=(
+                f"{as_of:%Y年%m月}项目工作簿已回填"
+                if monthly_completed
+                else f"请回填{as_of:%Y年%m月}项目工作簿"
+            ),
+            detail=(
+                f"本月工作簿已于 {applied_date.isoformat()} 应用"
+                if monthly_completed
+                else "下载全量四表，在 01_总览回款表尾追加后上传并应用"
+            ),
+            task_type="项目经理月度更新",
+            due_date=due_date,
+            task_status="completed" if monthly_completed else "pending",
+            owner=project_manager_id,
+        )
+    )
     for issue in completeness.get("issues", []):
         code = str(issue.get("code") or "incomplete")
         tasks.append(
@@ -978,6 +1019,7 @@ def _system_tasks(
                 severity="warning",
                 title="补全项目经营事实",
                 detail=code,
+                owner=project_manager_id,
             )
         )
     if not has_confirmed_collection:
@@ -988,6 +1030,7 @@ def _system_tasks(
                 severity="info",
                 title="补充已确认累计回款",
                 detail="当前没有已确认的累计回款快照",
+                owner=project_manager_id,
             )
         )
     if cost_gap_count:
@@ -998,6 +1041,7 @@ def _system_tasks(
                 severity="warning",
                 title="回填现场领用缺价",
                 detail=f"仍有 {cost_gap_count} 条已确认领用缺少成本",
+                owner=project_manager_id,
             )
         )
     if cost_status in {"yellow", "red"}:
@@ -1008,6 +1052,7 @@ def _system_tasks(
                 severity="critical" if cost_status == "red" else "warning",
                 title="项目成本达到预警阈值",
                 detail="成本已超过合同额" if cost_status == "red" else "成本已达到合同额 80%",
+                owner=project_manager_id,
             )
         )
     return sorted(tasks, key=lambda row: (row["severity"], row["rule_key"], row["task_id"]))
@@ -1214,12 +1259,16 @@ def project_workspace(
         "reminder_count": 0,
         "as_of": as_of.isoformat(),
     }
+    state = db.get(MaintenanceProjectWorkbookState, project_id)
     reminders = _system_tasks(
         project_id=project_id,
         completeness=completeness,
         has_confirmed_collection=bool(latest_confirmed),
         cost_gap_count=cost_gap_count,
         cost_status=cost_status,
+        as_of=as_of,
+        project_manager_id=base["project"]["project_manager_id"],
+        last_applied_at=state.last_applied_at if state else None,
     )
     cost_restricted = is_field_hidden(user_ctx, "unit_cost")
     profit_restricted = is_field_hidden(user_ctx, "contract_amount")
@@ -1338,7 +1387,9 @@ def project_workspace(
             ),
         }
     )
-    project_summary["reminder_count"] = len(reminders)
+    project_summary["reminder_count"] = sum(
+        1 for row in reminders if row["status"] != "completed"
+    )
     applicable_contracts_by_date: dict[date, str | None] = {}
     part_ids = {line.part_id for _issue, line in issue_rows}
     part_descriptions = {
@@ -1398,12 +1449,10 @@ def project_workspace(
         {
             **row,
             "reminder_id": row["task_id"],
-            "type": row["rule_key"],
-            "due_date": None,
+            "type": row["task_type"],
         }
         for row in reminders
     ]
-    state = db.get(MaintenanceProjectWorkbookState, project_id)
     last_exported_at = (
         state.last_exported_at.isoformat() if state and state.last_exported_at else None
     )
@@ -1597,11 +1646,16 @@ def project_operations(
         if workspace is not None and (
             reminder is None
             or (
-                workspace["reminders"]
+                any(row["status"] != "completed" for row in workspace["reminders"])
                 and (
                     reminder == "all"
                     or any(
-                        row["type"] == reminder or row["severity"] == reminder
+                        row["status"] != "completed"
+                        and (
+                            row["type"] == reminder
+                            or row["rule_key"] == reminder
+                            or row["severity"] == reminder
+                        )
                         for row in workspace["reminders"]
                     )
                 )

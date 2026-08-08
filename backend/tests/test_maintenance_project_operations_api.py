@@ -1,6 +1,6 @@
 """Stable maintenance-project operating facts through their public API."""
 
-from datetime import date
+from datetime import UTC, date, datetime
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -662,6 +662,26 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
     assert first.status_code == 200, first.text
     assert first.json() == second.json()
     assert "cost_ratio:red" in {row["rule_key"] for row in first.json()["rows"]}
+    monthly = next(
+        row for row in first.json()["rows"] if row["rule_key"] == "manager_update:2026-07"
+    )
+    assert monthly["task_type"] == "项目经理月度更新"
+    assert monthly["due_date"] == "2026-07-31"
+    assert monthly["status"] == "pending"
+
+    state = db.get(MaintenanceProjectWorkbookState, projects[2].project_id)
+    state.last_applied_at = datetime(2026, 7, 20, 8, tzinfo=UTC)
+    db.commit()
+    completed = client.get(
+        f"/api/maintenance/projects/stable/{projects[2].project_id}/tasks",
+        params={"as_of": "2026-07-31"},
+    ).json()
+    completed_monthly = next(
+        row
+        for row in completed["rows"]
+        if row["rule_key"] == "manager_update:2026-07"
+    )
+    assert completed_monthly["status"] == "completed"
     assert client.post(
         f"/api/maintenance/projects/stable/{projects[2].project_id}/tasks",
         json={"title": "禁止用户创建"},
