@@ -84,8 +84,18 @@ def bump_workbook_revision(
     """Bump once inside the caller's transaction after an operating-fact write."""
 
     state = get_or_create_workbook_state(db, project_id=project_id, lock=True)
+    return bump_locked_workbook_revision(db, state=state)
+
+
+def bump_locked_workbook_revision(
+    db: Session,
+    *,
+    state: MaintenanceProjectWorkbookState,
+) -> MaintenanceProjectWorkbookState:
+    """Bump a state row the caller already locked with ``FOR UPDATE``."""
+
     state.revision += 1
-    state.data_version = _workbook_data_version(project_id, state.revision)
+    state.data_version = _workbook_data_version(state.project_id, state.revision)
     db.flush()
     return state
 
@@ -887,6 +897,8 @@ def create_collection(
     project = _lock_project_for_fact_write(db, project_id)
     if project is None:
         return None
+    if not project.is_active:
+        raise MaintenanceOperationError("项目主档已归档")
     relation = db.scalar(
         select(MaintenanceProjectContract).where(
             MaintenanceProjectContract.project_contract_id == project_contract_id,

@@ -13,7 +13,11 @@ import pytest
 from sqlalchemy import func, select
 
 from app import auth
-from app.api import maintenance_project_operations, maintenance_project_workbooks
+from app.api import (
+    maintenance_project_operations,
+    maintenance_project_workbooks,
+    maintenance_projects,
+)
 from app.auth import hash_password
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
@@ -41,6 +45,7 @@ def _client(db, *, username: str) -> TestClient:
     app.include_router(auth.router, prefix="/api")
     app.include_router(maintenance_project_operations.router, prefix="/api")
     app.include_router(maintenance_project_workbooks.router, prefix="/api")
+    app.include_router(maintenance_projects.router, prefix="/api")
     client = TestClient(app)
     login = client.post(
         "/api/auth/login",
@@ -570,6 +575,104 @@ def test_stale_plan_and_same_file_replay_fail_closed(db):
         db.scalar(select(func.count()).select_from(MaintenanceCollectionSnapshot)) == 2
     )
     assert cloned_plan["validation_token"] != first_plan["validation_token"]
+
+
+@pytest.mark.parametrize("master_change", ["rename", "manager", "archive"])
+def test_project_master_change_invalidates_a_validated_workbook_plan(
+    db,
+    master_change,
+):
+    client = _client(db, username=f"workbook_master_{master_change}_admin")
+    project_id, contract = _project_and_contract(
+        client,
+        db,
+        suffix=f"master-{master_change}",
+    )
+    content = _append_collection(
+        _download(client, project_id),
+        project_contract_id=contract["project_contract_id"],
+        contract_no=contract["contract_no"],
+    )
+    plan = _validate(client, project_id, content).json()
+    before_revision = db.get(MaintenanceProjectWorkbookState, project_id).revision
+
+    if master_change == "archive":
+        changed = client.post(
+            f"/api/maintenance/projects/stable/{project_id}/archive",
+            json={"version": 1, "reason": "验证归档使旧工作簿计划失效"},
+        )
+    else:
+        field = (
+            {"display_name": "校验后更正的项目名称"}
+            if master_change == "rename"
+            else {"project_manager_id": "manager-after-validation"}
+        )
+        changed = client.patch(
+            f"/api/maintenance/projects/stable/{project_id}",
+            json={
+                "version": 1,
+                **field,
+                "reason": "验证主档变化使旧工作簿计划失效",
+            },
+        )
+    assert changed.status_code == 200, changed.text
+    db.expire_all()
+    assert (
+        db.get(MaintenanceProjectWorkbookState, project_id).revision
+        == before_revision + 1
+    )
+
+    stale = client.post(
+        f"/api/maintenance/projects/stable/{project_id}/workbook/apply",
+        json={
+            "validation_token": plan["validation_token"],
+            "data_version": plan["data_version"],
+        },
+    )
+    assert stale.status_code == 409, stale.text
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(MaintenanceCollectionSnapshot)
+            .where(MaintenanceCollectionSnapshot.project_id == project_id)
+        )
+        == 0
+    )
+
+
+def test_archived_project_rejects_new_collection(db):
+    client = _client(db, username="workbook_archived_collection_admin")
+    project_id, contract = _project_and_contract(
+        client,
+        db,
+        suffix="archived-collection",
+    )
+    archived = client.post(
+        f"/api/maintenance/projects/stable/{project_id}/archive",
+        json={"version": 1, "reason": "项目结束后禁止新增回款"},
+    )
+    assert archived.status_code == 200, archived.text
+
+    response = client.post(
+        f"/api/maintenance/projects/stable/{project_id}/collections",
+        json={
+            "project_contract_id": contract["project_contract_id"],
+            "report_month": "2026-08-01",
+            "cumulative_amount": "320.00",
+            "status": "confirmed",
+            "reason": "归档后误录回款",
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "归档" in response.json()["detail"]
+    assert (
+        db.scalar(
+            select(func.count())
+            .select_from(MaintenanceCollectionSnapshot)
+            .where(MaintenanceCollectionSnapshot.project_id == project_id)
+        )
+        == 0
+    )
 
 
 def test_unexpected_second_row_failure_rolls_back_first_row_and_ledgers(
