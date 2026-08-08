@@ -20,7 +20,7 @@ _ACTION = "action_maintenance_project_manage"
 
 def _validate_permission_json() -> None:
     op.execute(
-        f"""
+        """
         DO $migration$
         BEGIN
           IF EXISTS (
