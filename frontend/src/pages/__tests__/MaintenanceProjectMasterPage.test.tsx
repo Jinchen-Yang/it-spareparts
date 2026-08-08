@@ -362,6 +362,59 @@ describe("MaintenanceProjectMasterPage", () => {
     ));
   });
 
+  it("归档冲突刷新发现已被他人归档时结束操作，不会反向恢复", async () => {
+    enableProjectManagement();
+    archiveMaintenanceProject.mockRejectedValueOnce({
+      response: { status: 409, data: { detail: "项目已更新，请刷新" } },
+    });
+    getMaintenanceProject.mockResolvedValue({
+      data: { project: { ...ACTIVE_PROJECT, is_active: false, version: 4 } },
+    });
+    render(<MaintenanceProjectMasterPage />);
+    await screen.findByText("XM-001");
+
+    fireEvent.click(screen.getByRole("button", { name: "归档" }));
+    fireEvent.change(screen.getByLabelText("归档原因"), {
+      target: { value: "项目已经结束" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认归档" }));
+    fireEvent.click(await screen.findByRole("button", {
+      name: "刷新最新版本并保留原因",
+    }));
+
+    await waitFor(() => expect(getMaintenanceProject).toHaveBeenCalledWith("project-1"));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "确认归档" })).toBeNull());
+    expect(archiveMaintenanceProject).toHaveBeenCalledTimes(1);
+    expect(restoreMaintenanceProject).not.toHaveBeenCalled();
+  });
+
+  it("恢复冲突刷新发现已被他人恢复时结束操作，不会反向归档", async () => {
+    enableProjectManagement();
+    listMaintenanceProjects.mockReturnValue(directory([ARCHIVED_PROJECT]));
+    restoreMaintenanceProject.mockRejectedValueOnce({
+      response: { status: 409, data: { detail: "项目已更新，请刷新" } },
+    });
+    getMaintenanceProject.mockResolvedValue({
+      data: { project: { ...ARCHIVED_PROJECT, is_active: true, version: 8 } },
+    });
+    render(<MaintenanceProjectMasterPage />);
+    await screen.findByText("XM-ARCHIVED");
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复" }));
+    fireEvent.change(screen.getByLabelText("恢复原因"), {
+      target: { value: "项目重新启动" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认恢复" }));
+    fireEvent.click(await screen.findByRole("button", {
+      name: "刷新最新版本并保留原因",
+    }));
+
+    await waitFor(() => expect(getMaintenanceProject).toHaveBeenCalledWith("project-2"));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "确认恢复" })).toBeNull());
+    expect(restoreMaintenanceProject).toHaveBeenCalledTimes(1);
+    expect(archiveMaintenanceProject).not.toHaveBeenCalled();
+  });
+
   it("恢复也必须经过二次确认并使用归档主档的当前版本", async () => {
     enableProjectManagement();
     listMaintenanceProjects.mockReturnValue(directory([ARCHIVED_PROJECT]));

@@ -63,6 +63,7 @@ export default function MaintenanceProjectMasterPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [lifecycleProject, setLifecycleProject] = useState<MaintenanceProject | null>(null);
+  const [lifecycleTargetActive, setLifecycleTargetActive] = useState<boolean | null>(null);
   const [lifecycleReason, setLifecycleReason] = useState("");
   const [lifecycleSaving, setLifecycleSaving] = useState(false);
   const [lifecycleError, setLifecycleError] = useState<string | null>(null);
@@ -201,6 +202,7 @@ export default function MaintenanceProjectMasterPage() {
 
   const openLifecycleConfirm = (project: MaintenanceProject) => {
     setLifecycleProject(project);
+    setLifecycleTargetActive(!project.is_active);
     setLifecycleReason("");
     setLifecycleError(null);
     setLifecycleConflict(false);
@@ -208,19 +210,20 @@ export default function MaintenanceProjectMasterPage() {
 
   const submitLifecycleChange = async () => {
     const cleanReason = lifecycleReason.trim();
-    if (!lifecycleProject || !cleanReason) return;
+    if (!lifecycleProject || lifecycleTargetActive === null || !cleanReason) return;
     setLifecycleSaving(true);
     setLifecycleError(null);
     try {
       const input = { version: lifecycleProject.version, reason: cleanReason };
-      if (lifecycleProject.is_active) {
-        await archiveMaintenanceProject(lifecycleProject.project_id, input);
-        message.success("项目主档已归档");
-      } else {
+      if (lifecycleTargetActive) {
         await restoreMaintenanceProject(lifecycleProject.project_id, input);
         message.success("项目主档已恢复");
+      } else {
+        await archiveMaintenanceProject(lifecycleProject.project_id, input);
+        message.success("项目主档已归档");
       }
       setLifecycleProject(null);
+      setLifecycleTargetActive(null);
       setLifecycleConflict(false);
       await load(currentPage);
     } catch (error) {
@@ -237,15 +240,24 @@ export default function MaintenanceProjectMasterPage() {
   };
 
   const refreshLifecycleAfterConflict = async () => {
-    if (!lifecycleProject) return;
+    if (!lifecycleProject || lifecycleTargetActive === null) return;
     setLifecycleSaving(true);
     try {
       const { data } = await getMaintenanceProject(lifecycleProject.project_id);
       const latest = data.project;
-      setLifecycleProject(latest);
       setRows((current) => current.map((row) => (
         row.project_id === latest.project_id ? latest : row
       )));
+      if (latest.is_active === lifecycleTargetActive) {
+        const completedAction = lifecycleTargetActive ? "恢复" : "归档";
+        setLifecycleProject(null);
+        setLifecycleTargetActive(null);
+        setLifecycleConflict(false);
+        setLifecycleError(null);
+        message.info(`项目已由他人完成${completedAction}，无需重复操作`);
+        return;
+      }
+      setLifecycleProject(latest);
       setLifecycleConflict(false);
       setLifecycleError(null);
       message.info("项目最新版本已刷新，操作原因已保留");
@@ -450,21 +462,24 @@ export default function MaintenanceProjectMasterPage() {
       )}
       {canManage && (
         <Modal
-          title={`二次确认${lifecycleProject?.is_active ? "归档" : "恢复"}项目`}
+          title={`二次确认${lifecycleTargetActive ? "恢复" : "归档"}项目`}
           open={lifecycleProject !== null}
-          okText={`确认${lifecycleProject?.is_active ? "归档" : "恢复"}`}
+          okText={`确认${lifecycleTargetActive ? "恢复" : "归档"}`}
           cancelText="取消"
           confirmLoading={lifecycleSaving}
           okButtonProps={{ disabled: !lifecycleReason.trim() }}
           maskClosable={!lifecycleSaving}
           closable={!lifecycleSaving}
-          onCancel={() => setLifecycleProject(null)}
+          onCancel={() => {
+            setLifecycleProject(null);
+            setLifecycleTargetActive(null);
+          }}
           onOk={() => void submitLifecycleChange()}
         >
           <p>
-            {lifecycleProject?.is_active
-              ? "归档后该主档保留历史，但不能继续编辑；如需使用可再次恢复。"
-              : "恢复后该主档会重新变为有效状态。"}
+            {lifecycleTargetActive
+              ? "恢复后该主档会重新变为有效状态。"
+              : "归档后该主档保留历史，但不能继续编辑；如需使用可再次恢复。"}
           </p>
           {lifecycleError && (
             <Alert
@@ -481,7 +496,7 @@ export default function MaintenanceProjectMasterPage() {
           )}
           <label htmlFor="maintenance-project-lifecycle-reason">
             <div style={{ marginBottom: 6 }}>
-              {lifecycleProject?.is_active ? "归档原因" : "恢复原因"}
+              {lifecycleTargetActive ? "恢复原因" : "归档原因"}
             </div>
             <Input.TextArea
               id="maintenance-project-lifecycle-reason"
