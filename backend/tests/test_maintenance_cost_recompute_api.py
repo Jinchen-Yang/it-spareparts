@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 
 from app import auth, permissions
 from app.api import maintenance_project_operations
@@ -14,6 +15,7 @@ from app.models.dimensions import DimPart
 from app.models.maintenance_project_operations import (
     MaintenanceProjectOperationAudit,
     MaintenanceProjectWorkbookState,
+    MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
 )
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
@@ -21,6 +23,67 @@ from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysUser
 from app.services import maintenance_consumption_cost
 from tests.test_maintenance_project_operations_api import _batch, _client, _project
+
+
+def _count_recompute_queries(
+    db,
+    client: TestClient,
+    *,
+    project_id: str,
+) -> tuple[dict, int, list[str]]:
+    engine = db.get_bind()
+    statements: list[str] = []
+
+    def record_statement(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        response = client.post(
+            f"/api/maintenance/projects/stable/{project_id}/cost-gaps/recompute",
+            json={"reason": "验证批量重算查询与锁范围"},
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+    assert response.status_code == 200, response.text
+    return response.json(), len(statements), statements
+
+
+def _add_unresolved_lines(db, *, project_id: str, count: int) -> None:
+    part = DimPart(pn_std=f"PN-BATCH-{project_id}")
+    db.add(part)
+    db.flush()
+    issue = MaintenanceSiteIssue(
+        issue_id=f"issue-{project_id}",
+        project_id=project_id,
+        issue_no=f"ISSUE-{project_id}",
+        issue_date=date(2026, 6, 10),
+        raw_status="synthetic-confirmed",
+        status_mapping_state="mapped",
+        normalized_status="confirmed",
+        status_mapping_version="synthetic-map-v1",
+    )
+    db.add(issue)
+    db.add_all(
+        MaintenanceSiteIssueLine(
+            issue_line_id=f"line-{project_id}-{index:03d}",
+            issue_id=issue.issue_id,
+            line_no=index + 1,
+            part_id=part.id,
+            pn=part.pn_std,
+            quantity=Decimal("1"),
+            algorithm_version=maintenance_consumption_cost.ALGORITHM_VERSION,
+        )
+        for index in range(count)
+    )
+    db.commit()
 
 
 def _create_gap(db, client: TestClient, *, project_id: str, suffix: str) -> DimPart:
@@ -514,3 +577,34 @@ def test_recompute_never_downgrades_purchase_to_sales_when_evidence_disappears(d
     assert line.unit_cost == 60
     assert line.version == version_before
     assert db.get(MaintenanceProjectWorkbookState, project.project_id).revision == revision_before
+
+
+def test_recompute_batches_evidence_reads_and_does_not_lock_every_issue_line(db):
+    one = _project(db, project_id="project-recompute-scale-one")
+    forty = _project(db, project_id="project-recompute-scale-forty")
+    client = _client(db, username="recompute_scale_admin")
+    _add_unresolved_lines(db, project_id=one.project_id, count=1)
+    _add_unresolved_lines(db, project_id=forty.project_id, count=40)
+
+    one_payload, one_query_count, one_statements = _count_recompute_queries(
+        db,
+        client,
+        project_id=one.project_id,
+    )
+    forty_payload, forty_query_count, forty_statements = _count_recompute_queries(
+        db,
+        client,
+        project_id=forty.project_id,
+    )
+
+    assert one_payload["resolved"] == forty_payload["resolved"] == 0
+    assert one_payload["remaining"] == 1
+    assert forty_payload["remaining"] == 40
+    assert forty_query_count <= one_query_count + 1
+    issue_line_reads = [
+        statement
+        for statement in [*one_statements, *forty_statements]
+        if "maintenance_site_issue_line" in statement.lower()
+    ]
+    assert issue_line_reads
+    assert all("for update" not in statement.lower() for statement in issue_line_reads)

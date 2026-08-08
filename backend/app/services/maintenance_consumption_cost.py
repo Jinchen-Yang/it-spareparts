@@ -8,8 +8,10 @@ scope of this fact chain and therefore never offset consumption.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from typing import Iterable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -220,6 +222,223 @@ def _sales_window(
     return value, samples
 
 
+def _purchase_sample(row, *, issue_date: date) -> dict:
+    unit_ex = (
+        Decimal(row.unit_price) / tax_policy.TAX_FACTOR
+        if row.is_tax_inclusive is True
+        else _amount(Decimal(row.unit_price))
+    )
+    return {
+        "sample_id": f"purchase:{row.id}",
+        "document_no": row.order_no,
+        "document_date": row.order_date.isoformat() if row.order_date else None,
+        "distance_days": (
+            abs((row.order_date - issue_date).days) if row.order_date else None
+        ),
+        "quantity": format(row.qty, "f"),
+        "unit_price_raw": format(row.unit_price, "f"),
+        "unit_price_ex_tax": format(unit_ex, "f"),
+        "tax_conversion": ("divide_1.13" if row.is_tax_inclusive is True else "none"),
+    }
+
+
+def _sales_sample(row, *, issue_date: date) -> dict:
+    return {
+        "sample_id": f"sales:{row.id}",
+        "document_no": row.order_no,
+        "document_date": row.order_date.isoformat(),
+        "distance_days": abs((row.order_date - issue_date).days),
+        "quantity": format(row.qty, "f"),
+        "unit_price_raw": format(row.unit_price, "f"),
+        "unit_price_ex_tax": format(
+            Decimal(row.unit_price) / tax_policy.TAX_FACTOR,
+            "f",
+        ),
+        "tax_conversion": "divide_1.13",
+    }
+
+
+def _apply_resolution(
+    line: MaintenanceSiteIssueLine,
+    *,
+    issue_date: date,
+    source: str | None,
+    side: str | None,
+    unit_cost: Decimal | None,
+    samples: list[dict],
+) -> MaintenanceSiteIssueLine:
+    from_date = issue_date - timedelta(days=7)
+    to_date = issue_date + timedelta(days=7)
+    line.cost_source = source
+    line.price_basis = "ex_tax"
+    line.reference_side = side
+    line.reference_samples = samples
+    line.reference_sample_ids = [sample["sample_id"] for sample in samples]
+    line.reference_sample_count = len(samples)
+    line.reference_window_from = (
+        from_date if source in {"purchase_window", "sales_window"} else None
+    )
+    line.reference_window_to = (
+        to_date if source in {"purchase_window", "sales_window"} else None
+    )
+    line.algorithm_version = ALGORITHM_VERSION
+    line.unit_cost = unit_cost
+    line.cost_amount = (
+        _amount(Decimal(line.quantity) * unit_cost, label="成本金额")
+        if unit_cost is not None
+        else None
+    )
+    return line
+
+
+def resolve_lines(
+    db: Session,
+    *,
+    lines: Iterable[tuple[date, MaintenanceSiteIssueLine]],
+) -> list[MaintenanceSiteIssueLine]:
+    """Resolve one bounded batch with three evidence reads, never per-line SQL."""
+
+    entries = list(lines)
+    if not entries:
+        return []
+    part_ids = {line.part_id for _issue_date, line in entries}
+    linked_ids = {
+        line.linked_purchase_line_id
+        for _issue_date, line in entries
+        if line.linked_purchase_line_id is not None
+    }
+    from_date = min(issue_date for issue_date, _line in entries) - timedelta(days=7)
+    to_date = max(issue_date for issue_date, _line in entries) + timedelta(days=7)
+
+    direct_by_id = {}
+    if linked_ids:
+        direct_by_id = {
+            row.id: row
+            for row in db.execute(
+                select(
+                    FPurchaseLine.id,
+                    FPurchaseLine.part_id,
+                    FPurchaseLine.qty,
+                    FPurchaseLine.unit_price,
+                    FPurchaseOrder.is_tax_inclusive,
+                    FPurchaseOrder.order_no,
+                    FPurchaseOrder.order_date,
+                )
+                .join(FPurchaseOrder, FPurchaseOrder.id == FPurchaseLine.order_id)
+                .where(
+                    FPurchaseLine.id.in_(linked_ids),
+                    FPurchaseOrder.data_status == config.ACTIVE_STATUS,
+                )
+            )
+        }
+
+    purchase_by_part: dict[int, list] = defaultdict(list)
+    for row in db.execute(
+        select(
+            FPurchaseLine.id,
+            FPurchaseLine.part_id,
+            FPurchaseLine.qty,
+            FPurchaseLine.unit_price,
+            FPurchaseOrder.is_tax_inclusive,
+            FPurchaseOrder.order_no,
+            FPurchaseOrder.order_date,
+        )
+        .join(FPurchaseOrder, FPurchaseOrder.id == FPurchaseLine.order_id)
+        .where(
+            FPurchaseLine.part_id.in_(part_ids),
+            FPurchaseOrder.data_status == config.ACTIVE_STATUS,
+            FPurchaseOrder.order_date >= from_date,
+            FPurchaseOrder.order_date <= to_date,
+            FPurchaseLine.qty > 0,
+            FPurchaseLine.unit_price > 0,
+        )
+        .order_by(FPurchaseOrder.order_date, FPurchaseLine.id)
+    ):
+        if _valid(row.qty, row.unit_price):
+            purchase_by_part[row.part_id].append(row)
+
+    sales_by_part: dict[int, list] = defaultdict(list)
+    for row in db.execute(
+        select(
+            FSalesLine.id,
+            FSalesLine.part_id,
+            FSalesLine.qty,
+            FSalesLine.unit_price,
+            FSalesOrder.order_no,
+            FSalesOrder.order_date,
+        )
+        .join(FSalesOrder, FSalesOrder.id == FSalesLine.order_id)
+        .where(
+            FSalesLine.part_id.in_(part_ids),
+            FSalesOrder.data_status == config.ACTIVE_STATUS,
+            FSalesOrder.order_date >= from_date,
+            FSalesOrder.order_date <= to_date,
+            FSalesLine.qty > 0,
+            FSalesLine.unit_price > 0,
+        )
+        .order_by(FSalesOrder.order_date, FSalesLine.id)
+    ):
+        if _valid(row.qty, row.unit_price):
+            sales_by_part[row.part_id].append(row)
+
+    resolved: list[MaintenanceSiteIssueLine] = []
+    for issue_date, line in entries:
+        source: str | None = None
+        side: str | None = None
+        unit_cost: Decimal | None = None
+        samples: list[dict] = []
+        direct = direct_by_id.get(line.linked_purchase_line_id)
+        if (
+            direct is not None
+            and direct.part_id == line.part_id
+            and _valid(direct.qty, direct.unit_price)
+        ):
+            source, side = "direct_purchase", "purchase"
+            unit_cost = (
+                tax_policy.ex_from_inc(direct.unit_price)
+                if direct.is_tax_inclusive is True
+                else _amount(Decimal(direct.unit_price))
+            )
+            samples = [_purchase_sample(direct, issue_date=issue_date)]
+            samples[0]["unit_price_ex_tax"] = format(unit_cost, "f")
+        else:
+            window_from = issue_date - timedelta(days=7)
+            window_to = issue_date + timedelta(days=7)
+            purchase_samples = [
+                _purchase_sample(row, issue_date=issue_date)
+                for row in purchase_by_part[line.part_id]
+                if window_from <= row.order_date <= window_to
+            ]
+            purchase_cost = _weighted(purchase_samples)
+            if purchase_cost is not None:
+                source, side = "purchase_window", "purchase"
+                unit_cost, samples = purchase_cost, purchase_samples
+            else:
+                sales_samples = [
+                    _sales_sample(row, issue_date=issue_date)
+                    for row in sales_by_part[line.part_id]
+                    if window_from <= row.order_date <= window_to
+                ]
+                sales_cost = _weighted(sales_samples)
+                if sales_cost is not None:
+                    source, side = "sales_window", "sales"
+                    unit_cost, samples = sales_cost, sales_samples
+                elif line.manual_unit_cost is not None:
+                    source, side = "manual", "manual"
+                    unit_cost = _amount(Decimal(line.manual_unit_cost))
+        resolved.append(
+            _apply_resolution(
+                line,
+                issue_date=issue_date,
+                source=source,
+                side=side,
+                unit_cost=unit_cost,
+                samples=samples,
+            )
+        )
+    return resolved
+
+
 def resolve_line(
     db: Session,
     *,
@@ -265,19 +484,11 @@ def resolve_line(
                 source, side = "manual", "manual"
                 unit_cost = _amount(Decimal(line.manual_unit_cost))
 
-    line.cost_source = source
-    line.price_basis = "ex_tax"
-    line.reference_side = side
-    line.reference_samples = samples
-    line.reference_sample_ids = [sample["sample_id"] for sample in samples]
-    line.reference_sample_count = len(samples)
-    line.reference_window_from = from_date if source in {"purchase_window", "sales_window"} else None
-    line.reference_window_to = to_date if source in {"purchase_window", "sales_window"} else None
-    line.algorithm_version = ALGORITHM_VERSION
-    line.unit_cost = unit_cost
-    line.cost_amount = (
-        _amount(Decimal(line.quantity) * unit_cost, label="成本金额")
-        if unit_cost is not None
-        else None
+    return _apply_resolution(
+        line,
+        issue_date=issue_date,
+        source=source,
+        side=side,
+        unit_cost=unit_cost,
+        samples=samples,
     )
-    return line

@@ -11,7 +11,10 @@ from sqlalchemy import event, select
 from app import auth
 from app.auth import hash_password
 from app.api import maintenance_project_operations
-from app.models.maintenance_project import MaintenanceProject
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectContract,
+)
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
     MaintenanceProjectExpenseAttribution,
@@ -2189,6 +2192,24 @@ def test_operations_reminder_filter_queries_do_not_load_every_project_workspace(
         for index in range(2)
     )
     db.commit()
+    db.add_all(
+        MaintenanceProjectContract(
+            project_contract_id=f"drc-{project_index:03d}-{contract_index}",
+            project_id=f"directory-reminder-{project_index:03d}",
+            contract_id=f"directory-contract-{project_index:03d}-{contract_index}",
+            contract_no=f"XS-DIRECTORY-{project_index:03d}-{contract_index}",
+            contract_amount=Decimal("100.00"),
+            contract_status="synthetic-active",
+            status_mapping_state="mapped",
+            status_mapping_version="synthetic-map-v1",
+            included_in_total=True,
+            effective_from=date(2026, 1, 1),
+            source="synthetic-test",
+        )
+        for project_index in range(2)
+        for contract_index in range(4)
+    )
+    db.commit()
 
     params = {
         "as_of": "2026-08-31",
@@ -2212,10 +2233,86 @@ def test_operations_reminder_filter_queries_do_not_load_every_project_workspace(
     )
     db.commit()
 
-    expanded, expanded_queries = _count_endpoint_queries(db, client, params=params)
+    db.add_all(
+        MaintenanceProjectContract(
+            project_contract_id=f"drc-{project_index:03d}-{contract_index}",
+            project_id=f"directory-reminder-{project_index:03d}",
+            contract_id=f"directory-contract-{project_index:03d}-{contract_index}",
+            contract_no=f"XS-DIRECTORY-{project_index:03d}-{contract_index}",
+            contract_amount=Decimal("100.00"),
+            contract_status="synthetic-active",
+            status_mapping_state="mapped",
+            status_mapping_version="synthetic-map-v1",
+            included_in_total=True,
+            effective_from=date(2026, 1, 1),
+            source="synthetic-test",
+        )
+        for project_index in range(2, 32)
+        for contract_index in range(4)
+    )
+    db.commit()
+
+    loaded_contract_projects: list[str] = []
+
+    def record_loaded_contract(target, _context) -> None:
+        loaded_contract_projects.append(target.project_id)
+
+    event.listen(MaintenanceProjectContract, "load", record_loaded_contract)
+    try:
+        expanded, expanded_queries = _count_endpoint_queries(
+            db, client, params=params
+        )
+    finally:
+        event.remove(MaintenanceProjectContract, "load", record_loaded_contract)
+
     assert expanded["total"] == 32
-    assert expanded["rows"] == first["rows"]
+    assert expanded["rows"][0]["project_id"] == first["rows"][0]["project_id"]
     assert expanded_queries <= baseline_queries + 1
+    assert loaded_contract_projects == ["directory-reminder-000"] * 4
+
+
+def test_operations_reminder_predicates_match_canonical_open_tasks(db):
+    project = _project(db, project_id="directory-reminder-parity")
+    client = _client(db, username="directory_reminder_parity_admin")
+    params = {"as_of": "2026-08-30"}
+    tasks = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/tasks",
+        params=params,
+    )
+    assert tasks.status_code == 200, tasks.text
+    open_tasks = [row for row in tasks.json()["rows"] if row["status"] != "completed"]
+    selectors = {
+        "all",
+        *(row["rule_key"] for row in open_tasks),
+        *(row["task_type"] for row in open_tasks),
+        *(row["severity"] for row in open_tasks),
+    }
+
+    for selector in selectors:
+        response = client.get(
+            "/api/maintenance/projects/stable/operations",
+            params={
+                **params,
+                "q": project.project_code,
+                "lifecycle": project.lifecycle_status,
+                "reminder": selector,
+            },
+        )
+        assert response.status_code == 200, (selector, response.text)
+        assert response.json()["total"] == 1, selector
+        assert response.json()["rows"][0]["project_id"] == project.project_id
+
+    unmatched = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={
+            **params,
+            "q": project.project_code,
+            "lifecycle": project.lifecycle_status,
+            "reminder": "cost_ratio:red",
+        },
+    )
+    assert unmatched.status_code == 200, unmatched.text
+    assert unmatched.json()["total"] == 0
 
 
 def test_sensitive_operations_reads_are_access_logged_with_scope(db):
