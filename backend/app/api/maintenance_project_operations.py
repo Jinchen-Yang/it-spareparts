@@ -125,6 +125,9 @@ class ExpenseCreate(BaseModel):
     project_contract_id: str | None = Field(default=None, max_length=36)
     expense_ref: str = Field(min_length=1, max_length=128)
     expense_date: date
+    applicant: str | None = Field(default=None, max_length=64)
+    category: str | None = Field(default=None, max_length=64)
+    expense_reason: str | None = Field(default=None, max_length=32767)
     amount_ex_tax: Decimal = Field(ge=0)
     raw_status: str = Field(min_length=1, max_length=64)
     status_mapping_state: str

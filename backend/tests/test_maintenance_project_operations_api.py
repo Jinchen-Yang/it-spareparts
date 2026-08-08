@@ -562,6 +562,9 @@ def test_only_explicitly_mapped_approved_expense_counts(db):
             "project_contract_id": contract["project_contract_id"],
             "expense_ref": "BX-SYNTH-APPROVED",
             "expense_date": "2026-07-10",
+            "applicant": "合成报销人",
+            "category": "差旅费",
+            "expense_reason": "项目现场支持",
             "amount_ex_tax": "50.00",
             "raw_status": "synthetic-finished",
             "status_mapping_state": "mapped",
@@ -596,6 +599,8 @@ def test_only_explicitly_mapped_approved_expense_counts(db):
     assert metrics["actual_project_cost_known"] == "50.00"
     assert workspace["approved_expenses"]["total"] == 1
     assert workspace["approved_expenses"]["rows"][0]["contract_no"] == "XS-EXPENSE-001"
+    assert workspace["approved_expenses"]["rows"][0]["category"] == "差旅费"
+    assert workspace["approved_expenses"]["rows"][0]["reason"] == "项目现场支持"
     assert workspace["approved_expenses"]["rows"][0]["amount"] == "50.00"
     assert workspace["approved_expenses"]["rows"][0]["approval_status"] == "approved"
     assert workspace["completeness"]["status"] == "incomplete"
