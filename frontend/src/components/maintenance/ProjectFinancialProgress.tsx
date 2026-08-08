@@ -2,11 +2,11 @@ import { Progress, Space, Tag } from "antd";
 
 import { money } from "../../utils/format";
 
-export type CostWaterlineStatus = "normal" | "yellow" | "red" | "unknown" | "restricted" | "no_contract";
+export type CostWaterlineStatus = "normal" | "yellow" | "red" | "unknown" | "restricted" | "contract_restricted" | "no_contract";
 
 export interface ProjectFinancialMetrics {
   total_contract_amount: number | null;
-  contract_amount_complete: boolean;
+  contract_amount_complete: boolean | null;
   received_amount: number | null;
   site_requisition_known_cost: number | null;
   approved_expense: number | null;
@@ -24,9 +24,12 @@ export function classifyCostWaterline({
   totalContractAmount: number | null;
   actualProjectCostKnown: number | null;
   costComplete: boolean | null;
-  contractAmountComplete?: boolean;
+  contractAmountComplete?: boolean | null;
 }): { status: CostWaterlineStatus; percent: number | null } {
   if (costComplete === null) return { status: "restricted", percent: null };
+  if (contractAmountComplete === null) {
+    return { status: "contract_restricted", percent: null };
+  }
   if (
     !contractAmountComplete
     || totalContractAmount == null
@@ -51,6 +54,7 @@ const STATUS_META: Record<CostWaterlineStatus, { label: string; color: string; t
   red: { label: "超过 100%", color: "var(--mb-danger)", tag: "red" },
   unknown: { label: "成本未完整，当前为下限", color: "var(--mb-text-3)", tag: "default" },
   restricted: { label: "成本不可见/无权限", color: "var(--mb-text-3)", tag: "default" },
+  contract_restricted: { label: "合同额不可见/无权限", color: "var(--mb-text-3)", tag: "default" },
   no_contract: { label: "合同额不足，无法计算", color: "var(--mb-text-3)", tag: "default" },
 };
 
@@ -145,7 +149,9 @@ export default function ProjectFinancialProgress({ metrics }: {
         color={collectionColor}
         testId="collection-progress"
       >
-        {!metrics.contract_amount_complete && (
+        {metrics.contract_amount_complete === null ? (
+          <div>合同额不可见，暂不计算比例。</div>
+        ) : metrics.contract_amount_complete === false && (
           <div>合同额证据不完整，暂不计算比例。</div>
         )}
       </MetricProgress>
@@ -163,7 +169,8 @@ export default function ProjectFinancialProgress({ metrics }: {
           {" · "}审批通过报销 {money(metrics.approved_expense)}
         </div>
         <div>现场领用占合同额 {percentLabel(sitePercent)}</div>
-        {metrics.cost_complete === null ? null : !metrics.contract_amount_complete ? (
+        {metrics.cost_complete === null || metrics.contract_amount_complete === null
+          ? null : metrics.contract_amount_complete === false ? (
           <>
             <div>合同额证据不完整，暂不计算比例。</div>
             {metrics.cost_complete === false && (

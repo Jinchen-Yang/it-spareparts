@@ -68,6 +68,23 @@ describe("项目双进度", () => {
     expect(cost).not.toHaveTextContent("已知下限");
   });
 
+  it("合同额权限受限时不冒充证据不完整，也不展示百分比", () => {
+    render(<ProjectFinancialProgress metrics={{
+      total_contract_amount: null,
+      contract_amount_complete: null,
+      received_amount: null,
+      site_requisition_known_cost: 30,
+      approved_expense: 20,
+      actual_project_cost_known: 50,
+      cost_complete: true,
+      missing_cost_lines: 0,
+    }} />);
+
+    expect(screen.getByText("合同额不可见，暂不计算比例。")).toBeInTheDocument();
+    expect(screen.getByText("合同额不可见/无权限")).toBeInTheDocument();
+    expect(screen.queryByText("合同额证据不完整，暂不计算比例。")).toBeNull();
+  });
+
   it("没有可计算合同额时仍展示缺价事实，但不拼接空的下限文案", () => {
     render(<ProjectFinancialProgress metrics={{
       total_contract_amount: null,

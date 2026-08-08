@@ -19,7 +19,7 @@ export interface MaintenanceContractSummary {
 export interface MaintenanceOperationsMetrics {
   total_contract_amount: number | null;
   known_contract_amount: number | null;
-  contract_amount_complete: boolean;
+  contract_amount_complete: boolean | null;
   received_amount: number | null;
   site_requisition_known_cost: number | null;
   approved_expense: number | null;

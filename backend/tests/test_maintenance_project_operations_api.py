@@ -525,6 +525,7 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
         ),
     )
     restricted_metrics = restricted["project"]["metrics"]
+    assert restricted_metrics["contract_amount_complete"] is None
     assert restricted_metrics["site_requisition_known_cost"] is None
     assert restricted_metrics["actual_project_cost_known"] is None
     assert restricted_metrics["cost_status"] is None

@@ -1369,6 +1369,11 @@ def project_workspace(
         approved_expense_rows = []
     project_summary["metrics"].update(
         {
+            "contract_amount_complete": (
+                None
+                if profit_restricted
+                else project_summary["metrics"]["contract_amount_complete"]
+            ),
             "known_contract_amount": (
                 None
                 if profit_restricted
