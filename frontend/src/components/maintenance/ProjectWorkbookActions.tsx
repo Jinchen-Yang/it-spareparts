@@ -132,7 +132,9 @@ export default function ProjectWorkbookActions({
       setValidation(null);
       setStatus({
         type: "success",
-        message: `已应用 ${data.changed_rows.toLocaleString("zh-CN")} 行更新`,
+        message: data.changed_rows === 0
+          ? "已确认本月更新，无新增回款"
+          : `已应用 ${data.changed_rows.toLocaleString("zh-CN")} 行更新`,
       });
       await onApplied?.();
     } catch {
@@ -194,7 +196,9 @@ export default function ProjectWorkbookActions({
           showIcon
           type={validation.can_apply ? "success" : "error"}
           message={validation.can_apply
-            ? "校验通过，尚未写入系统"
+            ? changeEntries.length === 0
+              ? "校验通过，可确认本月已更新"
+              : "校验通过，尚未写入系统"
             : "校验未通过，未写入系统"}
           description={(
             <Space direction="vertical" size={8} style={{ width: "100%" }}>
@@ -225,7 +229,9 @@ export default function ProjectWorkbookActions({
               )}
               {canApplyRoundtrip && validation.can_apply && (
                 <Button type="primary" loading={applying} onClick={() => void apply()}>
-                  确认应用本次更新
+                  {changeEntries.length === 0
+                    ? "确认本月已更新（无新增回款）"
+                    : "确认应用本次更新"}
                 </Button>
               )}
             </Space>

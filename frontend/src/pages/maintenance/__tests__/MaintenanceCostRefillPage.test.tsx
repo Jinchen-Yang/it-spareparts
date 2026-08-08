@@ -1,9 +1,14 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
-const { listMaintenanceCostGaps, updateMaintenanceCostGap } = vi.hoisted(() => ({
+const {
+  listMaintenanceCostGaps,
+  listMaintenanceProjectOperations,
+  updateMaintenanceCostGap,
+} = vi.hoisted(() => ({
   listMaintenanceCostGaps: vi.fn(),
+  listMaintenanceProjectOperations: vi.fn(),
   updateMaintenanceCostGap: vi.fn(),
 }));
 
@@ -11,7 +16,12 @@ vi.mock("../../../api/maintenanceOperations", async () => {
   const actual = await vi.importActual<typeof import("../../../api/maintenanceOperations")>(
     "../../../api/maintenanceOperations",
   );
-  return { ...actual, listMaintenanceCostGaps, updateMaintenanceCostGap };
+  return {
+    ...actual,
+    listMaintenanceCostGaps,
+    listMaintenanceProjectOperations,
+    updateMaintenanceCostGap,
+  };
 });
 
 import MaintenanceCostRefillPage from "../MaintenanceCostRefillPage";
@@ -65,6 +75,19 @@ beforeEach(() => {
   localStorage.setItem("role", "admin");
   listMaintenanceCostGaps.mockResolvedValue({
     data: { rows: [gap], total: 1, page: 1, page_size: 20, data_version: "v7" },
+  });
+  listMaintenanceProjectOperations.mockResolvedValue({
+    data: {
+      rows: [
+        { project_id: "project-1", project_code: "XM-001", display_name: "项目 A" },
+        { project_id: "project-2", project_code: "XM-002", display_name: "项目 B" },
+      ],
+      total: 2,
+      page: 1,
+      page_size: 200,
+      as_of: "2026-08-08",
+      data_version: "v1",
+    },
   });
   updateMaintenanceCostGap.mockResolvedValue({ data: { ...gap, current_unit_cost: 92 } });
 });
@@ -147,6 +170,60 @@ describe("MaintenanceCostRefillPage", () => {
       "project-1",
       expect.objectContaining({ version: 8, reason: "冲突时不能丢掉" }),
     ));
+  });
+
+  it("版本冲突刷新未返回时切换项目，不会重新打开旧项目草稿", async () => {
+    let resolveConflict!: (value: { data: {
+      rows: Array<typeof gap>;
+      total: number;
+      page: number;
+      page_size: number;
+      data_version: string;
+    } }) => void;
+    const pendingConflict = new Promise<Parameters<typeof resolveConflict>[0]>((resolve) => {
+      resolveConflict = resolve;
+    });
+    listMaintenanceCostGaps
+      .mockResolvedValueOnce({
+        data: { rows: [gap], total: 1, page: 1, page_size: 20, data_version: "v7" },
+      })
+      .mockReturnValueOnce(pendingConflict)
+      .mockResolvedValue({
+        data: { rows: [], total: 0, page: 1, page_size: 20, data_version: "v1" },
+      });
+    updateMaintenanceCostGap.mockRejectedValueOnce({ response: { status: 409 } });
+
+    render(
+      <MemoryRouter initialEntries={["/maintenance/cost-refill?project_id=project-1"]}>
+        <MaintenanceCostRefillPage />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("PN-MISSING");
+    fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
+    const dialog = await screen.findByRole("dialog", { name: "回填成本" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "采用采购 ±7 天加权参考" }));
+    fireEvent.change(within(dialog).getByLabelText("回填原因"), {
+      target: { value: "旧项目草稿" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
+    await waitFor(() => expect(listMaintenanceCostGaps).toHaveBeenCalledTimes(2));
+
+    fireEvent.mouseDown(screen.getByRole("combobox"));
+    fireEvent.click(await screen.findByText("XM-002 · 项目 B"));
+    await waitFor(() => expect(listMaintenanceCostGaps).toHaveBeenCalledWith(
+      "project-2",
+      { page: 1, page_size: 20 },
+    ));
+
+    await act(async () => {
+      resolveConflict({
+        data: { rows: [{ ...gap, version: 8 }], total: 1, page: 1, page_size: 20, data_version: "v8" },
+      });
+      await pendingConflict;
+    });
+    expect(screen.queryByRole("dialog", { name: "回填成本" })).toBeNull();
+    expect(updateMaintenanceCostGap).toHaveBeenCalledTimes(1);
   });
 
   it("无项目管理权限时拒绝直接进入回填页面且不读取缺价数据", async () => {

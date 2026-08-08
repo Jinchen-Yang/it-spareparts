@@ -146,6 +146,41 @@ describe("ProjectWorkbookActions", () => {
     expect(URL.createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
   });
 
+  it("没有新增回款时明确确认本月已更新，不声称应用了零行", async () => {
+    validateMaintenanceProjectWorkbook.mockResolvedValueOnce({
+      data: {
+        validation_token: "token-unchanged",
+        project_id: "project-1",
+        data_version: "version-3",
+        filename: "无变化.xlsx",
+        preview: {
+          protocol_version: "2.0",
+          sheets: [],
+          latest_tracking_month: "2026-08",
+          last_exported_at: null,
+          data_version: "version-3",
+        },
+        changes: { collection_append: 0 },
+        warnings: ["未检测到新增回款；确认后将记录本月已更新"],
+        errors: [],
+        can_apply: true,
+      },
+    });
+    applyMaintenanceProjectWorkbook.mockResolvedValueOnce({
+      data: { applied: true, changed_rows: 0, data_version: "version-4" },
+    });
+    render(<ProjectWorkbookActions projectId="project-1" projectCode="XM-001" />);
+
+    fireEvent.change(screen.getByLabelText("选择月度更新工作簿"), {
+      target: { files: [new File(["same"], "无变化.xlsx")] },
+    });
+
+    expect(await screen.findByText("校验通过，可确认本月已更新")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "确认本月已更新（无新增回款）" }));
+    expect(await screen.findByText("已确认本月更新，无新增回款")).toBeInTheDocument();
+    expect(screen.queryByText("已应用 0 行更新")).toBeNull();
+  });
+
   it("无回填应用权限时保留下载，但不暴露上传入口", () => {
     localStorage.setItem("role", "readonly");
     localStorage.setItem("permissions", JSON.stringify({

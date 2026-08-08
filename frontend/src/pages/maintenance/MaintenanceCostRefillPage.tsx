@@ -111,6 +111,11 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
   const [success, setSuccess] = useState("");
   const loadGeneration = useRef(0);
   const projectListGeneration = useRef(0);
+  const conflictGeneration = useRef(0);
+  const selectedProjectIdRef = useRef(selectedProjectId);
+  const editingRef = useRef<MaintenanceCostGap | null>(editing);
+  selectedProjectIdRef.current = selectedProjectId;
+  editingRef.current = editing;
 
   const loadProjectOptions = useCallback(async (q = "") => {
     if (!canManageProject || projectId) return;
@@ -183,11 +188,21 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
   }
 
   const openRefill = (gap: MaintenanceCostGap) => {
+    conflictGeneration.current += 1;
+    editingRef.current = gap;
     setEditing(gap);
     setUnitCost(gap.current_unit_cost);
     setEvidence("");
     setReason("");
     setFormError("");
+    setConflictBlocked(false);
+  };
+
+  const closeRefill = () => {
+    conflictGeneration.current += 1;
+    editingRef.current = null;
+    setEditing(null);
+    setRefreshingConflict(false);
     setConflictBlocked(false);
   };
 
@@ -198,6 +213,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
   };
 
   const refreshLatestGap = async (staleGap: MaintenanceCostGap) => {
+    const request = ++conflictGeneration.current;
     setRefreshingConflict(true);
     setConflictBlocked(true);
     try {
@@ -205,24 +221,33 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
         page,
         page_size: 20,
       });
-      if (selectedProjectId === staleGap.project_id) {
-        setRows(data.rows);
-        setTotal(data.total);
-      }
+      const currentEditing = editingRef.current;
+      if (
+        request !== conflictGeneration.current
+        || selectedProjectIdRef.current !== staleGap.project_id
+        || !currentEditing
+        || currentEditing.project_id !== staleGap.project_id
+        || currentEditing.line_id !== staleGap.line_id
+      ) return false;
+      setRows(data.rows);
+      setTotal(data.total);
       const latestGap = data.rows.find((row) => row.line_id === staleGap.line_id);
       if (!latestGap) {
         setFormError("该行已不在待回填清单中；草稿已保留，请返回项目核对最新状态。");
         return false;
       }
+      editingRef.current = latestGap;
       setEditing(latestGap);
       setConflictBlocked(false);
       setFormError("已刷新到最新版本；当前草稿已保留，请核对后重新保存。");
       return true;
     } catch {
-      setFormError("最新版本加载失败；草稿已保留，请重新获取后再保存。");
+      if (request === conflictGeneration.current) {
+        setFormError("最新版本加载失败；草稿已保留，请重新获取后再保存。");
+      }
       return false;
     } finally {
-      setRefreshingConflict(false);
+      if (request === conflictGeneration.current) setRefreshingConflict(false);
     }
   };
 
@@ -241,6 +266,8 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
         evidence: evidence.trim(),
         reason: reason.trim(),
       });
+      conflictGeneration.current += 1;
+      editingRef.current = null;
       setEditing(null);
       setConflictBlocked(false);
       setSuccess("成本已回填");
@@ -326,7 +353,13 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
                 if (open && projects.length === 0) void loadProjectOptions();
               }}
               onChange={(value) => {
+                conflictGeneration.current += 1;
+                selectedProjectIdRef.current = value;
+                editingRef.current = null;
                 setEditing(null);
+                setRefreshingConflict(false);
+                setConflictBlocked(false);
+                setFormError("");
                 setSelectedProjectId(value);
                 setPage(1);
               }}
@@ -371,7 +404,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
       <Modal
         title="回填成本"
         open={Boolean(editing)}
-        onCancel={() => !saving && setEditing(null)}
+        onCancel={() => !saving && closeRefill()}
         footer={null}
         destroyOnHidden
       >
@@ -432,7 +465,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
                   重新获取最新版本
                 </Button>
               )}
-              <Button disabled={saving} onClick={() => setEditing(null)}>取消</Button>
+              <Button disabled={saving} onClick={closeRefill}>取消</Button>
             </Space>
           </Space>
         )}
