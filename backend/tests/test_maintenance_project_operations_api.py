@@ -10,7 +10,10 @@ from app import auth
 from app.auth import hash_password
 from app.api import maintenance_project_operations
 from app.models.maintenance_project import MaintenanceProject
-from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
+from app.models.maintenance_project_operations import (
+    MaintenanceProjectOperationAudit,
+    MaintenanceProjectWorkbookState,
+)
 from app.models.dimensions import DimPart
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
@@ -245,7 +248,13 @@ def test_confirmed_monthly_collection_snapshot_drives_workspace_progress(db):
     assert metrics["collection_progress_pct"] == "25.00"
     assert payload["as_of"] == "2026-02-28"
     assert payload["data_version"]
-    assert payload["completeness"]["status"] == "complete"
+    assert payload["completeness"]["status"] == "incomplete"
+    assert "expense_data_not_ready" in {
+        row["code"] for row in payload["completeness"]["issues"]
+    }
+    assert "completeness:expense_data_not_ready" in {
+        row["rule_key"] for row in payload["reminders"]
+    }
     assert "collection:incomplete" in {
         row["rule_key"] for row in payload["reminders"]
     }
@@ -638,8 +647,75 @@ def test_only_explicitly_mapped_approved_expense_counts(db):
     assert workspace["approved_expenses"]["rows"][0]["approval_status"] == "approved"
     assert workspace["completeness"]["status"] == "incomplete"
     assert {row["code"] for row in workspace["completeness"]["issues"]} >= {
-        "unmapped_expense_status"
+        "unmapped_expense_status",
+        "expense_data_not_ready",
     }
+
+
+def test_expense_readiness_is_explicit_monthly_monotonic_and_audited(db):
+    project = _project(db, project_id="project-expense-readiness")
+    client = _client(db, username="expense_readiness_admin")
+    client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-expense-readiness",
+            "contract_no": "XS-EXPENSE-READINESS",
+            "contract_amount": "1000.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立费用水位测试合同",
+        },
+    )
+
+    before = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-07-31"},
+    ).json()
+    assert before["project"]["metrics"]["approved_expense"] == "0.00"
+    assert before["project"]["metrics"]["expense_data_ready"] is False
+    assert before["project"]["metrics"]["cost_complete"] is False
+    assert before["project"]["metrics"]["cost_status"] == "unknown"
+
+    marked = client.put(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+        json={
+            "ready_through": "2026-07-01",
+            "reason": "财务接口确认七月已审批报销同步完成，允许零行",
+        },
+    )
+    assert marked.status_code == 200, marked.text
+    assert marked.json()["expense_ready_through"] == "2026-07-01"
+    after = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-07-31"},
+    ).json()
+    assert after["project"]["metrics"]["expense_data_ready"] is True
+    assert after["project"]["metrics"]["cost_complete"] is True
+    assert after["project"]["metrics"]["cost_status"] == "normal"
+    assert "expense_data_not_ready" not in {
+        row["code"] for row in after["completeness"]["issues"]
+    }
+    audit = db.query(MaintenanceProjectOperationAudit).filter_by(
+        project_id=project.project_id,
+        entity_type="expense_readiness",
+    ).one()
+    assert audit.action == "mark_ready"
+    assert audit.after_json == {"expense_ready_through": "2026-07-01"}
+
+    invalid_day = client.put(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+        json={"ready_through": "2026-08-02", "reason": "日期格式错误"},
+    )
+    assert invalid_day.status_code == 400
+    regressed = client.put(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+        json={"ready_through": "2026-06-01", "reason": "禁止回退"},
+    )
+    assert regressed.status_code == 409
 
 
 def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
@@ -682,6 +758,14 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
             },
         )
         assert response.status_code == 201, response.text
+        ready = client.put(
+            f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+            json={
+                "ready_through": "2026-07-01",
+                "reason": "确认阈值测试月份报销数据完整",
+            },
+        )
+        assert ready.status_code == 200, ready.text
 
     statuses = []
     for project in projects:

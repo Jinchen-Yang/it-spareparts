@@ -136,6 +136,13 @@ class ExpenseCreate(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class ExpenseReadinessMark(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ready_through: date
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 def _real_operator(db: Session, ident: dict) -> str:
     if ident.get("authn") != "sys_user" or ident.get("fb"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "经营事实写入必须使用实名系统账号")
@@ -197,13 +204,14 @@ def _contract_write_result(
     *,
     db: Session,
     ident: dict,
+    not_found_message: str = "项目合同关系不存在",
     **kwargs,
 ) -> dict:
     operator = _real_operator(db, ident)
     try:
         payload = operation(db, operated_by=operator, **kwargs)
         if payload is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "项目合同关系不存在")
+            raise HTTPException(status.HTTP_404_NOT_FOUND, not_found_message)
         db.commit()
         return payload
     except HTTPException:
@@ -424,6 +432,31 @@ def create_project_expense(
     except Exception:
         db.rollback()
         raise
+
+
+@router.put("/{project_id}/expenses/readiness")
+def mark_project_expense_readiness(
+    body: ExpenseReadinessMark,
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_roundtrip_apply",
+            require_data="data_profit",
+        )
+    ),
+) -> dict:
+    return _contract_write_result(
+        operations.mark_expense_readiness,
+        db=db,
+        ident=ident,
+        not_found_message="维保项目不存在",
+        project_id=project_id,
+        ready_through=body.ready_through,
+        reason=body.reason,
+    )
 
 
 @router.patch("/{project_id}/cost-gaps")

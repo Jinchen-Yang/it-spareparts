@@ -361,6 +361,23 @@ def test_export_preserves_approved_expense_business_fields(db):
         },
     )
     assert created.status_code == 201, created.text
+    excluded = client.post(
+        f"/api/maintenance/projects/stable/{project_id}/contracts",
+        json={
+            "contract_id": "contract-expense-historical",
+            "contract_no": "XS-EXPENSE-HISTORICAL",
+            "contract_amount": None,
+            "contract_status": "已终止",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": False,
+            "effective_from": "2025-01-01",
+            "effective_to": "2025-12-31",
+            "source": "synthetic-test",
+            "reason": "验证工作簿展示全部关联合同",
+        },
+    )
+    assert excluded.status_code == 201, excluded.text
 
     book = load_workbook(BytesIO(_download(client, project_id)), data_only=False)
     try:
@@ -375,6 +392,29 @@ def test_export_preserves_approved_expense_business_fields(db):
             "已审批",
             "项目现场支持",
         ]
+        overview = book["01_总览"]
+        contract_table = overview.tables["tbl_project_contracts_v2"]
+        min_col, min_row, max_col, max_row = range_boundaries(contract_table.ref)
+        headers = [
+            overview.cell(min_row, column).value
+            for column in range(min_col, max_col + 1)
+        ]
+        contracts = [
+            {
+                headers[index]: overview.cell(row, min_col + index).value
+                for index in range(len(headers))
+            }
+            for row in range(min_row + 1, max_row + 1)
+        ]
+        historical = next(
+            row
+            for row in contracts
+            if row["合同编号"] == "XS-EXPENSE-HISTORICAL"
+        )
+        assert historical["原始合同状态"] == "已终止"
+        assert historical["是否计入全部合同额"] == "否"
+        assert historical["当前是否生效"] == "否"
+        assert historical["金额完整性"] == "缺少合同额"
     finally:
         book.close()
 
@@ -393,6 +433,16 @@ def test_apply_rejects_expired_wrong_project_replay_and_client_plan(db):
         "validation_token": plan["validation_token"],
         "data_version": plan["data_version"],
     }
+
+    other_client = _client(db, username="workbook_apply_other_admin")
+    wrong_user = other_client.post(
+        f"/api/maintenance/projects/stable/{project_id}/workbook/apply",
+        json=body,
+    )
+    assert wrong_user.status_code == 409
+    assert (
+        db.scalar(select(func.count()).select_from(MaintenanceCollectionSnapshot)) == 0
+    )
 
     wrong_project = client.post(
         f"/api/maintenance/projects/stable/{other_project_id}/workbook/apply",

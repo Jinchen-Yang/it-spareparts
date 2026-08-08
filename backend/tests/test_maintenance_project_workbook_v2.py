@@ -312,6 +312,65 @@ def test_summary_fails_closed_when_any_contract_amount_is_missing():
     assert summary["cost_alert"] == "no_contract_amount"
 
 
+def test_contract_sheet_displays_all_relationships_but_denominator_is_labeled():
+    workspace = _workspace()
+    workspace["contracts"][0].update(
+        {
+            "contract_status": "履行中",
+            "status_mapping_state": "mapped",
+            "included_in_total": True,
+            "is_effective": True,
+            "effective_from": "2026-01-01",
+            "effective_to": None,
+        }
+    )
+    workspace["contracts"].append(
+        {
+            "project_contract_id": "project-contract-historical",
+            "contract_no": "XSDD-HISTORICAL",
+            "contract_amount": None,
+            "contract_status": "已终止",
+            "status_mapping_state": "mapped",
+            "included_in_total": False,
+            "is_effective": False,
+            "effective_from": "2025-01-01",
+            "effective_to": "2025-12-31",
+            "version": 1,
+        }
+    )
+
+    summary = workbook_v2.compute_project_summary(workspace)
+    artifact = workbook_v2.build_project_workbook(
+        workspace,
+        hmac_key=HMAC_KEY,
+        exported_by="tester",
+    )
+
+    assert summary["total_contract_amount"] == Decimal("100000.00")
+    assert summary["contract_amount_complete"] is True
+    assert artifact.preview["contracts"] == 2
+    book = load_workbook(io.BytesIO(artifact.content), data_only=False)
+    try:
+        sheet = book["01_总览"]
+        table = sheet.tables[workbook_v2.CONTRACT_TABLE]
+        min_col, min_row, max_col, _ = range_boundaries(table.ref)
+        headers = [
+            sheet.cell(min_row, column).value
+            for column in range(min_col, max_col + 1)
+        ]
+        historical = {
+            headers[index]: sheet.cell(min_row + 2, min_col + index).value
+            for index in range(len(headers))
+        }
+        assert historical["合同编号"] == "XSDD-HISTORICAL"
+        assert historical["原始合同状态"] == "已终止"
+        assert historical["是否计入全部合同额"] == "否"
+        assert historical["当前是否生效"] == "否"
+        assert historical["金额完整性"] == "缺少合同额"
+    finally:
+        book.close()
+
+
 def test_signed_metadata_and_unchanged_upload_is_noop():
     workspace = _workspace()
     artifact = workbook_v2.build_project_workbook(
@@ -567,6 +626,87 @@ def test_same_project_contract_and_report_month_is_rejected():
     with pytest.raises(workbook_v2.ProjectWorkbookV2Error) as caught:
         workbook_v2.validate_project_workbook(
             duplicate_month,
+            workspace=workspace,
+            hmac_key=HMAC_KEY,
+        )
+    assert caught.value.issues[0].code == "duplicate_contract_month"
+
+
+@pytest.mark.parametrize(
+    ("workspace_change", "month", "expected_code"),
+    [
+        (lambda workspace: None, "2026-09", "future_report_month"),
+        (
+            lambda workspace: workspace["contracts"][0].update(
+                {"effective_from": "2026-09-01"}
+            ),
+            "2026-08",
+            "contract_inactive_for_report_month",
+        ),
+        (
+            lambda workspace: workspace["contracts"][0].update(
+                {"status_mapping_state": "unmapped"}
+            ),
+            "2026-08",
+            "unmapped_project_contract",
+        ),
+    ],
+)
+def test_validate_rejects_business_invalid_appends_before_apply(
+    workspace_change, month, expected_code
+):
+    workspace = _workspace()
+    workspace_change(workspace)
+    exported = workbook_v2.build_project_workbook(
+        workspace,
+        hmac_key=HMAC_KEY,
+        exported_by="tester",
+    )
+    uploaded = _append_collection(exported.content)
+
+    def replace_month(book):
+        sheet = book["01_总览"]
+        table = sheet.tables[workbook_v2.COLLECTION_TABLE]
+        min_col, min_row, max_col, max_row = range_boundaries(table.ref)
+        headers = [
+            sheet.cell(min_row, column).value
+            for column in range(min_col, max_col + 1)
+        ]
+        target = next(
+            row
+            for row in range(min_row + 1, max_row + 1)
+            if sheet.cell(row, headers.index("操作") + 1).value == "CREATE"
+        )
+        sheet.cell(target, headers.index("报告月份") + 1, month)
+
+    uploaded = _edit_workbook(uploaded, replace_month)
+    with pytest.raises(workbook_v2.ProjectWorkbookV2Error) as caught:
+        workbook_v2.validate_project_workbook(
+            uploaded,
+            workspace=workspace,
+            hmac_key=HMAC_KEY,
+        )
+    assert caught.value.issues[0].code == expected_code
+
+
+def test_hidden_nonconfirmed_snapshot_still_blocks_duplicate_contract_month():
+    workspace = _workspace()
+    workspace["collections"][0].update(
+        {
+            "report_month": "2026-08",
+            "status": "未确认",
+        }
+    )
+    exported = workbook_v2.build_project_workbook(
+        workspace,
+        hmac_key=HMAC_KEY,
+        exported_by="tester",
+    )
+    uploaded = _append_collection(exported.content)
+
+    with pytest.raises(workbook_v2.ProjectWorkbookV2Error) as caught:
+        workbook_v2.validate_project_workbook(
+            uploaded,
             workspace=workspace,
             hmac_key=HMAC_KEY,
         )

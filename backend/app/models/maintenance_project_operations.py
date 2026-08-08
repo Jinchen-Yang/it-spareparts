@@ -314,6 +314,7 @@ class MaintenanceProjectWorkbookState(Base):
     last_export_id: Mapped[str | None] = mapped_column(String(64))
     last_exported_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     last_applied_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    expense_ready_through: Mapped[date | None] = mapped_column(Date)
     data_version: Mapped[str] = mapped_column(String(64), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now(), onupdate=func.now()
@@ -321,6 +322,11 @@ class MaintenanceProjectWorkbookState(Base):
 
     __table_args__ = (
         CheckConstraint("revision >= 0", name="ck_maintenance_project_workbook_state_revision"),
+        CheckConstraint(
+            "expense_ready_through IS NULL OR "
+            "expense_ready_through = date_trunc('month', expense_ready_through)::date",
+            name="ck_maintenance_project_expense_ready_month",
+        ),
     )
 
 

@@ -56,6 +56,11 @@ def test_operating_fact_schema_contains_evidence_and_server_validation(db):
         "expires_at",
         "applied_at",
     } <= validation_columns
+    state_columns = {
+        column["name"]
+        for column in inspector.get_columns("maintenance_project_workbook_state")
+    }
+    assert "expense_ready_through" in state_columns
 
 
 def test_operating_fact_empty_schema_downgrades_and_upgrades(db):

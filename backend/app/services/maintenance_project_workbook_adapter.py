@@ -373,11 +373,15 @@ class MaintenanceProjectWorkbookAdapter:
                 "project_code": raw["project"]["project_code"],
                 "project_name": raw["project"]["display_name"],
                 "manager_name": raw["project"].get("project_manager_id"),
+                "is_active": raw["project"].get("is_active"),
                 "version": raw["project"]["version"],
             },
             "workbook_revision": state.revision,
             "as_of": raw["as_of"],
-            "contracts": list(raw["effective_contracts"]),
+            # The workbook displays every linked contract and labels whether it
+            # participates in the current denominator. Financial summaries still
+            # use only current, included relations.
+            "contracts": list(raw["all_contracts"]),
             "collections": collections,
             "consumptions": consumptions,
             "expenses": expenses,
@@ -496,6 +500,10 @@ class MaintenanceProjectWorkbookAdapter:
         if row.project_id != project_id:
             raise ProjectWorkbookV2Error(
                 "validation_token 不属于当前项目", status_code=409
+            )
+        if not hmac.compare_digest(row.created_by, self.operator):
+            raise ProjectWorkbookV2Error(
+                "validation_token 不属于当前用户", status_code=409
             )
         if row.status == "applied":
             raise ProjectWorkbookV2Error(

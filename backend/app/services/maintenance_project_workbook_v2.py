@@ -14,6 +14,7 @@ import math
 import re
 import uuid
 import zipfile
+from calendar import monthrange
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -65,6 +66,13 @@ CONTRACT_HEADERS = (
     "项目合同关系ID",
     "合同编号",
     "合同额（全部合同）",
+    "原始合同状态",
+    "状态映射",
+    "是否计入全部合同额",
+    "当前是否生效",
+    "金额完整性",
+    "生效日期",
+    "失效日期",
     "__base_version",
 )
 COLLECTION_HEADERS = (
@@ -374,7 +382,16 @@ def preview_project_workbook(workspace: Mapping[str, Any]) -> dict[str, int]:
 def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
     """Compute project KPIs without double-counting monthly cumulative snapshots."""
 
-    contracts = list(workspace.get("contracts") or [])
+    all_contracts = list(workspace.get("contracts") or [])
+    contracts = [
+        row
+        for row in all_contracts
+        if (
+            bool(row.get("is_effective"))
+            if "is_effective" in row
+            else bool(row.get("included_in_total", True))
+        )
+    ]
     known_contract_amount = sum(
         (
             Decimal(str(row["contract_amount"]))
@@ -504,6 +521,21 @@ def _project_rows(workspace: Mapping[str, Any], hmac_key: bytes, export_id: str)
             row.get("project_contract_id"),
             row.get("contract_no"),
             _number(row.get("contract_amount")),
+            row.get("contract_status"),
+            (
+                "已映射"
+                if row.get("status_mapping_state") == "mapped"
+                else "待映射"
+            ),
+            "是" if row.get("included_in_total", True) else "否",
+            (
+                "是"
+                if row.get("is_effective", row.get("included_in_total", True))
+                else "否"
+            ),
+            "金额完整" if row.get("contract_amount") is not None else "缺少合同额",
+            row.get("effective_from"),
+            row.get("effective_to"),
             row.get("version"),
         )
         for row in workspace.get("contracts") or []
@@ -592,7 +624,7 @@ def _summary_rows(workspace: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
             "口径",
             "合同额为该项目全部合同额；回款为每合同每月累计快照；实际消耗为现场领用单",
         ),
-        ("全部合同额", _number(metrics["total_contract_amount"])),
+        ("全部合同额（当前计入口径）", _number(metrics["total_contract_amount"])),
         ("已确认累计回款", _number(metrics["confirmed_cumulative_collection_amount"])),
         ("回款进度", _number(metrics["collection_rate"])),
         ("已知实际消耗", _number(metrics["known_consumption_cost"])),
@@ -1159,6 +1191,10 @@ def validate_project_workbook(
         current_project_id = str((workspace.get("project") or {}).get("project_id") or "")
         if metadata["project_id"] != current_project_id:
             raise ProjectWorkbookV2Error("工作簿项目与当前项目不一致", status_code=409)
+        if not bool((workspace.get("project") or {}).get("is_active", True)):
+            raise ProjectWorkbookV2Error(
+                "项目已归档，不能校验或应用回款工作簿", status_code=409
+            )
         try:
             expected_revision = int(metadata["workbook_revision"])
             current_revision = int(workspace["workbook_revision"])
@@ -1242,6 +1278,27 @@ def validate_project_workbook(
 
         project_contract_nos = {str(row[0]): str(row[1] or "") for row in contracts}
         project_contract_ids = set(project_contract_nos)
+        contract_facts = {
+            str(row.get("project_contract_id") or ""): row
+            for row in workspace.get("contracts") or []
+        }
+        as_of_text = _iso(workspace.get("as_of"))[:10]
+        try:
+            latest_report_month = date.fromisoformat(as_of_text).replace(day=1)
+        except ValueError as exc:
+            raise ProjectWorkbookV2Error("项目数据截至日期无效") from exc
+        occupied_contract_months = {
+            (
+                str(row.get("project_contract_id") or ""),
+                _month_text(row.get("report_month")),
+            )
+            for row in workspace.get("collections") or []
+            if row.get("project_contract_id")
+            and re.fullmatch(
+                r"\d{4}-(0[1-9]|1[0-2])",
+                _month_text(row.get("report_month")),
+            )
+        }
         snapshot_amounts: dict[tuple[str, str], Decimal] = {}
         for row in existing:
             key_tuple = (str(row[1]), _month_text(row[3]))
@@ -1293,9 +1350,49 @@ def validate_project_workbook(
                 _raise_issue("duplicate_client_row_id", "新增回款 client_row_id 重复", sheet="01_总览", row=excel_row)
             seen_client_ids.add(client_row_id)
             report_month = _parse_month(row[3], row=excel_row)
+            if report_month > latest_report_month:
+                _raise_issue(
+                    "future_report_month",
+                    "回款报告月份不能晚于项目数据截至月份",
+                    sheet="01_总览",
+                    row=excel_row,
+                    column="报告月份",
+                )
+            contract_fact = contract_facts.get(project_contract_id) or {}
+            if contract_fact.get("status_mapping_state") not in (None, "mapped"):
+                _raise_issue(
+                    "unmapped_project_contract",
+                    "新增回款关联合同状态尚未映射",
+                    sheet="01_总览",
+                    row=excel_row,
+                    column="项目合同关系ID",
+                )
+            month_end = report_month.replace(
+                day=monthrange(report_month.year, report_month.month)[1]
+            )
+            effective_from = contract_fact.get("effective_from")
+            effective_to = contract_fact.get("effective_to")
+            try:
+                starts = date.fromisoformat(str(effective_from)) if effective_from else None
+                ends = date.fromisoformat(str(effective_to)) if effective_to else None
+            except ValueError as exc:
+                raise ProjectWorkbookV2Error("项目合同生效日期无效") from exc
+            if (starts is not None and starts > month_end) or (
+                ends is not None and ends <= report_month
+            ):
+                _raise_issue(
+                    "contract_inactive_for_report_month",
+                    "新增回款关联合同在该报告月份无效",
+                    sheet="01_总览",
+                    row=excel_row,
+                    column="报告月份",
+                )
             amount = _parse_positive_decimal(row[4], row=excel_row)
             snapshot_key = (project_contract_id, report_month.strftime("%Y-%m"))
-            if snapshot_key in snapshot_amounts:
+            if (
+                snapshot_key in snapshot_amounts
+                or snapshot_key in occupied_contract_months
+            ):
                 _raise_issue(
                     "duplicate_contract_month",
                     "同一项目合同关系的同一报告月份只能有一条累计回款快照",

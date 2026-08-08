@@ -270,12 +270,18 @@ def upgrade() -> None:
         sa.Column("last_export_id", sa.String(64), nullable=True),
         sa.Column("last_exported_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_applied_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("expense_ready_through", sa.Date(), nullable=True),
         sa.Column("data_version", sa.String(64), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["project_id"], ["maintenance_project.project_id"]),
         sa.CheckConstraint(
             "revision >= 0",
             name="ck_maintenance_project_workbook_state_revision",
+        ),
+        sa.CheckConstraint(
+            "expense_ready_through IS NULL OR "
+            "expense_ready_through = date_trunc('month', expense_ready_through)::date",
+            name="ck_maintenance_project_expense_ready_month",
         ),
     )
     op.create_table(

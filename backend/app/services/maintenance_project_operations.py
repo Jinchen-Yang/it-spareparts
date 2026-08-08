@@ -361,6 +361,62 @@ def create_expense(
     return payload
 
 
+def mark_expense_readiness(
+    db: Session,
+    *,
+    project_id: str,
+    ready_through: date,
+    reason: str,
+    operated_by: str,
+) -> dict | None:
+    """Confirm that the approved-expense feed is complete through one month."""
+
+    project = _lock_project_for_fact_write(db, project_id)
+    if project is None:
+        return None
+    if not project.is_active:
+        raise MaintenanceOperationError("项目主档已归档")
+    if ready_through.day != 1:
+        raise MaintenanceOperationError("费用数据水位必须使用当月第一天")
+    state = get_or_create_workbook_state(db, project_id=project_id, lock=True)
+    if state.expense_ready_through is not None and ready_through < state.expense_ready_through:
+        raise MaintenanceOperationConflict("费用数据水位不能回退")
+    before = {
+        "expense_ready_through": (
+            state.expense_ready_through.isoformat()
+            if state.expense_ready_through
+            else None
+        )
+    }
+    if state.expense_ready_through == ready_through:
+        return {
+            "project_id": project_id,
+            **before,
+            "data_version": state.data_version,
+        }
+    state.expense_ready_through = ready_through
+    state.revision += 1
+    state.data_version = _workbook_data_version(project_id, state.revision)
+    after = {"expense_ready_through": ready_through.isoformat()}
+    _fact_audit(
+        db,
+        project_id=project_id,
+        entity_type="expense_readiness",
+        entity_id=project_id,
+        action="mark_ready",
+        before=before,
+        after=after,
+        reason=reason,
+        operated_by=operated_by,
+    )
+    db.flush()
+    return {
+        "project_id": project_id,
+        **after,
+        "data_version": state.data_version,
+    }
+
+
 def create_site_issue(
     db: Session,
     *,
@@ -1028,13 +1084,22 @@ def _system_tasks(
     )
     for issue in completeness.get("issues", []):
         code = str(issue.get("code") or "incomplete")
+        if code == "expense_data_not_ready":
+            title = "确认本月审批报销数据已就绪"
+            detail = (
+                f"当前费用水位 {issue.get('ready_through') or '未确认'}；"
+                f"需要覆盖 {issue.get('required_month') or '本月'}"
+            )
+        else:
+            title = "补全项目经营事实"
+            detail = code
         tasks.append(
             _task(
                 project_id=project_id,
                 rule_key=f"completeness:{code}",
                 severity="warning",
-                title="补全项目经营事实",
-                detail=code,
+                title=title,
+                detail=detail,
                 owner=project_manager_id,
             )
         )
@@ -1106,7 +1171,9 @@ def _visible_tasks(
             {"missing_consumption_cost", "unmapped_site_issue_status"}
         )
     if expense_restricted:
-        hidden_issue_codes.add("unmapped_expense_status")
+        hidden_issue_codes.update(
+            {"unmapped_expense_status", "expense_data_not_ready"}
+        )
     if completeness.get("status") != "restricted" and hidden_issue_codes:
         visible_issues = [
             issue
@@ -1254,6 +1321,12 @@ def project_workspace(
     unmapped_expense_count = sum(
         1 for row in expense_rows if row.status_mapping_state != "mapped"
     )
+    state = db.get(MaintenanceProjectWorkbookState, project_id)
+    expense_ready_through = state.expense_ready_through if state else None
+    expense_data_ready = bool(
+        expense_ready_through
+        and expense_ready_through >= as_of.replace(day=1)
+    )
     actual_cost_known = consumed_known + approved_expense
     cost_rate = (
         (actual_cost_known / Decimal(total) * Decimal("100")).quantize(Decimal("0.01"))
@@ -1266,7 +1339,12 @@ def project_workspace(
         cost_status = "red"
     elif cost_rate >= Decimal("80"):
         cost_status = "yellow"
-    elif cost_gap_count or unmapped_issue_count or unmapped_expense_count:
+    elif (
+        cost_gap_count
+        or unmapped_issue_count
+        or unmapped_expense_count
+        or not expense_data_ready
+    ):
         cost_status = "unknown"
     else:
         cost_status = "normal"
@@ -1283,6 +1361,18 @@ def project_workspace(
     if unmapped_expense_count:
         completeness_issues.append(
             {"code": "unmapped_expense_status", "row_count": unmapped_expense_count}
+        )
+    if not expense_data_ready:
+        completeness_issues.append(
+            {
+                "code": "expense_data_not_ready",
+                "ready_through": (
+                    expense_ready_through.isoformat()
+                    if expense_ready_through
+                    else None
+                ),
+                "required_month": as_of.strftime("%Y-%m"),
+            }
         )
     completeness = dict(base["completeness"])
     if completeness.get("status") != "restricted" and completeness_issues:
@@ -1334,13 +1424,19 @@ def project_workspace(
                 cost_gap_count == 0
                 and unmapped_issue_count == 0
                 and unmapped_expense_count == 0
+                and expense_data_ready
             ),
             "missing_cost_lines": cost_gap_count,
+            "expense_data_ready": expense_data_ready,
+            "expense_ready_through": (
+                expense_ready_through.isoformat()
+                if expense_ready_through
+                else None
+            ),
         },
         "reminder_count": 0,
         "as_of": as_of.isoformat(),
     }
-    state = db.get(MaintenanceProjectWorkbookState, project_id)
     reminders = _system_tasks(
         project_id=project_id,
         completeness=completeness,
@@ -1641,6 +1737,7 @@ def project_workbook_workspace(
         },
         "workbook_revision": revision,
         "as_of": as_of.isoformat(),
+        "all_contracts": list(workspace["project"]["contracts"]),
         "effective_contracts": [
             row for row in workspace["project"]["contracts"] if row["is_effective"]
         ],
@@ -1808,14 +1905,16 @@ def _directory_reminder_project_ids(
         if mapping_state == "mapped" and normalized_status == "approved":
             facts["approved_expense"] += Decimal(amount)
 
-    last_applied_by_project = dict(
-        db.execute(
+    state_by_project = {
+        project_id: (last_applied_at, expense_ready_through)
+        for project_id, last_applied_at, expense_ready_through in db.execute(
             select(
                 MaintenanceProjectWorkbookState.project_id,
                 MaintenanceProjectWorkbookState.last_applied_at,
+                MaintenanceProjectWorkbookState.expense_ready_through,
             ).where(MaintenanceProjectWorkbookState.project_id.in_(project_ids))
-        ).all()
-    )
+        )
+    }
     amount_restricted = is_field_hidden(user_ctx, "contract_amount")
     matching_project_ids: list[str] = []
     for project in projects:
@@ -1893,6 +1992,14 @@ def _directory_reminder_project_ids(
         unmapped_expense_count = int(
             project_expense_facts["unmapped_expense_count"]
         )
+        last_applied_at, expense_ready_through = state_by_project.get(
+            project.project_id,
+            (None, None),
+        )
+        expense_data_ready = bool(
+            expense_ready_through
+            and expense_ready_through >= as_of.replace(day=1)
+        )
         completeness_issues = list(completeness.get("issues", []))
         if cost_gap_count:
             completeness_issues.append(
@@ -1912,6 +2019,18 @@ def _directory_reminder_project_ids(
                     "row_count": unmapped_expense_count,
                 }
             )
+        if not expense_data_ready:
+            completeness_issues.append(
+                {
+                    "code": "expense_data_not_ready",
+                    "ready_through": (
+                        expense_ready_through.isoformat()
+                        if expense_ready_through
+                        else None
+                    ),
+                    "required_month": as_of.strftime("%Y-%m"),
+                }
+            )
         if completeness.get("status") != "restricted" and completeness_issues:
             completeness = {"status": "incomplete", "issues": completeness_issues}
 
@@ -1929,7 +2048,12 @@ def _directory_reminder_project_ids(
             cost_status = "red"
         elif cost_rate >= Decimal("80"):
             cost_status = "yellow"
-        elif cost_gap_count or unmapped_issue_count or unmapped_expense_count:
+        elif (
+            cost_gap_count
+            or unmapped_issue_count
+            or unmapped_expense_count
+            or not expense_data_ready
+        ):
             cost_status = "unknown"
         else:
             cost_status = "normal"
@@ -1950,7 +2074,7 @@ def _directory_reminder_project_ids(
             cost_status=cost_status,
             as_of=as_of,
             project_manager_id=project.project_manager_id,
-            last_applied_at=last_applied_by_project.get(project.project_id),
+            last_applied_at=last_applied_at,
         )
         tasks, _visible_completeness = _visible_tasks(
             tasks,
