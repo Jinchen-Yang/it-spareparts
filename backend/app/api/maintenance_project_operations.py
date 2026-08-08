@@ -321,6 +321,8 @@ def create_project_collection(
             **body.model_dump(exclude={"reason"}),
             reason=body.reason,
             operated_by=operator,
+            source="direct_api",
+            import_batch_id=None,
         )
         if payload is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
@@ -381,6 +383,8 @@ def create_project_site_issue(
             **body.model_dump(exclude={"reason"}),
             reason=body.reason,
             operated_by=operator,
+            source="direct_api",
+            import_batch_id=None,
         )
         if payload is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")

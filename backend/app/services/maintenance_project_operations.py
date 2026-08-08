@@ -288,6 +288,8 @@ def collection_dict(row: MaintenanceCollectionSnapshot) -> dict:
         "status": row.status,
         "receipt_reference": row.receipt_reference,
         "remark": row.remark,
+        "source": row.source,
+        "import_batch_id": row.import_batch_id,
         "version": row.version,
     }
 
@@ -378,6 +380,8 @@ def site_issue_dict(
         "status_mapping_state": row.status_mapping_state,
         "normalized_status": row.normalized_status,
         "status_mapping_version": row.status_mapping_version,
+        "source": row.source,
+        "import_batch_id": row.import_batch_id,
         "version": row.version,
         "lines": [site_issue_line_dict(line) for line in lines],
     }
@@ -550,6 +554,8 @@ def create_site_issue(
     lines: list[dict],
     reason: str,
     operated_by: str,
+    source: str = "direct_api",
+    import_batch_id: str | None = None,
 ) -> dict | None:
     project = _lock_project_for_fact_write(db, project_id)
     if project is None:
@@ -604,6 +610,8 @@ def create_site_issue(
         status_mapping_state=status_mapping_state,
         normalized_status=normalized_status,
         status_mapping_version=_required(status_mapping_version, "状态映射版本"),
+        source=source,
+        import_batch_id=import_batch_id,
         version=1,
     )
     db.add(row)
@@ -1430,6 +1438,8 @@ def create_collection(
     reason: str,
     operated_by: str,
     bump_revision: bool = True,
+    source: str = "direct_api",
+    import_batch_id: str | None = None,
 ) -> dict | None:
     project = _lock_project_for_fact_write(db, project_id)
     if project is None:
@@ -1465,6 +1475,8 @@ def create_collection(
         status=status,
         receipt_reference=(receipt_reference.strip() if receipt_reference else None),
         remark=(remark.strip() if remark else None),
+        source=source,
+        import_batch_id=import_batch_id,
         version=1,
     )
     db.add(row)
@@ -2219,6 +2231,8 @@ def project_workspace(
                 "issue_date": issue.issue_date.isoformat(),
                 "status_mapping_state": issue.status_mapping_state,
                 "normalized_status": issue.normalized_status,
+                "source": issue.source,
+                "import_batch_id": issue.import_batch_id,
                 **site_issue_line_dict(line),
                 "counts_cost": eligible,
             }
@@ -2371,6 +2385,8 @@ def project_workspace(
             ),
             "status": row.status,
             "remark": None if profit_restricted else row.remark,
+            "source": row.source,
+            "import_batch_id": row.import_batch_id,
             "version": row.version,
         }
         for row in db.scalars(collection_statement)

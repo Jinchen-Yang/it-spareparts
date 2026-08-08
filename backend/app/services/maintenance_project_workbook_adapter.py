@@ -863,6 +863,8 @@ class MaintenanceProjectWorkbookAdapter:
                 reason=f"项目工作簿回填 {validation.validation_id}",
                 operated_by=self.operator,
                 bump_revision=False,
+                source="workbook",
+                import_batch_id=validation.file_sha256,
             )
             if created is None:
                 raise ProjectWorkbookV2Error("维保项目不存在", status_code=404)
@@ -874,6 +876,7 @@ class MaintenanceProjectWorkbookAdapter:
                     operation_key=item.operation_key,
                     payload_hash=item.payload_hash,
                     operation_type="collection_create",
+                    entity_id=created["collection_id"],
                     operated_by=self.operator,
                 )
             )

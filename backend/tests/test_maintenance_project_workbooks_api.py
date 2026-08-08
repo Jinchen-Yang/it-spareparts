@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 from io import BytesIO
 from types import SimpleNamespace
 import threading
@@ -738,6 +739,66 @@ def test_export_validate_apply_is_a_server_owned_atomic_loop(db):
         )
     )
     assert operation_types == ["file_export", "collection_create", "file_apply"]
+
+
+def test_workbook_collection_keeps_durable_provenance_after_direct_correction(db):
+    client = _client(db, username="workbook_provenance_admin")
+    project_id, contract = _project_and_contract(
+        client,
+        db,
+        suffix="provenance",
+    )
+    edited = _append_collection(
+        _download(client, project_id),
+        project_contract_id=contract["project_contract_id"],
+        contract_no=contract["contract_no"],
+    )
+    file_sha256 = hashlib.sha256(edited).hexdigest()
+    validation = _validate(client, project_id, edited)
+    assert validation.status_code == 200, validation.text
+    plan = validation.json()
+
+    applied = client.post(
+        f"/api/maintenance/projects/stable/{project_id}/workbook/apply",
+        json={
+            "validation_token": plan["validation_token"],
+            "data_version": plan["data_version"],
+        },
+    )
+    assert applied.status_code == 200, applied.text
+
+    db.expire_all()
+    collection = db.scalar(
+        select(MaintenanceCollectionSnapshot).where(
+            MaintenanceCollectionSnapshot.project_id == project_id
+        )
+    )
+    assert collection.source == "workbook"
+    assert collection.import_batch_id == file_sha256
+    create_operation = db.scalar(
+        select(MaintenanceProjectWorkbookOperation).where(
+            MaintenanceProjectWorkbookOperation.operation_type
+            == "collection_create",
+            MaintenanceProjectWorkbookOperation.entity_id
+            == collection.collection_id,
+        )
+    )
+    assert create_operation is not None
+    assert create_operation.file_sha256 == collection.import_batch_id
+
+    corrected = client.patch(
+        f"/api/maintenance/projects/stable/collections/{collection.collection_id}",
+        json={
+            "version": collection.version,
+            "cumulative_amount": "321.00",
+            "status": "void",
+            "reason": "通过受控 API 更正并作废工作簿创建的回款",
+        },
+    )
+    assert corrected.status_code == 200, corrected.text
+    assert corrected.json()["status"] == "void"
+    assert corrected.json()["source"] == "workbook"
+    assert corrected.json()["import_batch_id"] == file_sha256
 
 
 def test_invalid_file_returns_persisted_error_workbook_without_writes(

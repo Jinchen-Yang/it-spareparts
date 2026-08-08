@@ -39,6 +39,10 @@ class MaintenanceCollectionSnapshot(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     receipt_reference: Mapped[str | None] = mapped_column(String(128))
     remark: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="legacy", server_default="legacy"
+    )
+    import_batch_id: Mapped[str | None] = mapped_column(String(64))
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
@@ -51,6 +55,15 @@ class MaintenanceCollectionSnapshot(Base):
         CheckConstraint(
             "status IN ('confirmed', 'unconfirmed', 'void')",
             name="ck_maintenance_collection_status",
+        ),
+        CheckConstraint(
+            "source IN ('legacy', 'direct_api', 'workbook')",
+            name="ck_maintenance_collection_source",
+        ),
+        CheckConstraint(
+            "(source = 'workbook' AND import_batch_id IS NOT NULL) OR "
+            "(source IN ('legacy', 'direct_api') AND import_batch_id IS NULL)",
+            name="ck_maintenance_collection_import_batch",
         ),
         CheckConstraint(
             "cumulative_amount >= 0 AND cumulative_amount < 1000000000000",
@@ -127,6 +140,10 @@ class MaintenanceSiteIssue(Base):
     status_mapping_state: Mapped[str] = mapped_column(String(16), nullable=False)
     normalized_status: Mapped[str] = mapped_column(String(16), nullable=False)
     status_mapping_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="legacy", server_default="legacy"
+    )
+    import_batch_id: Mapped[str | None] = mapped_column(String(64))
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
@@ -143,6 +160,15 @@ class MaintenanceSiteIssue(Base):
         CheckConstraint(
             "normalized_status IN ('confirmed', 'void', 'unknown')",
             name="ck_maintenance_site_issue_normalized_status",
+        ),
+        CheckConstraint(
+            "source IN ('legacy', 'direct_api', 'workbook')",
+            name="ck_maintenance_site_issue_source",
+        ),
+        CheckConstraint(
+            "(source = 'workbook' AND import_batch_id IS NOT NULL) OR "
+            "(source IN ('legacy', 'direct_api') AND import_batch_id IS NULL)",
+            name="ck_maintenance_site_issue_import_batch",
         ),
         CheckConstraint(
             "status_mapping_state = 'mapped' OR normalized_status = 'unknown'",
@@ -344,6 +370,9 @@ class MaintenanceProjectWorkbookOperation(Base):
     operation_key: Mapped[str] = mapped_column(String(128), nullable=False)
     payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     operation_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    entity_id: Mapped[str | None] = mapped_column(
+        ForeignKey("maintenance_collection_snapshot.collection_id")
+    )
     operated_by: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
@@ -362,6 +391,10 @@ class MaintenanceProjectWorkbookOperation(Base):
             "ix_maintenance_project_workbook_operation_project_file",
             "project_id",
             "file_sha256",
+        ),
+        Index(
+            "ix_maintenance_project_workbook_operation_entity",
+            "entity_id",
         ),
     )
 

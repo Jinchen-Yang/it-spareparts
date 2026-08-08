@@ -252,6 +252,48 @@ def test_site_issue_create_service_rejects_more_than_200_lines(db):
         )
 
 
+def test_direct_site_issue_api_exposes_server_owned_provenance(db):
+    project = _project(db, project_id="project-direct-site-issue-provenance")
+    client = _client(db, username="direct_site_issue_provenance_admin")
+    part = DimPart(pn_std="PN-DIRECT-SITE-ISSUE-PROVENANCE")
+    db.add(part)
+    db.commit()
+
+    created = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-DIRECT-PROVENANCE",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-direct-provenance",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                }
+            ],
+            "reason": "通过受控 API 新增现场领用",
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["source"] == "direct_api"
+    assert created.json()["import_batch_id"] is None
+    workspace = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-08-31"},
+    )
+    assert workspace.status_code == 200, workspace.text
+    requisition = workspace.json()["requisitions"]["rows"][0]
+    assert requisition["source"] == "direct_api"
+    assert requisition["import_batch_id"] is None
+
+
 def test_site_issue_create_query_count_is_bounded_and_all_lines_are_costed(db):
     project = _project(db, project_id="project-site-issue-create-scale")
     client = _client(db, username="site_issue_create_scale_admin")
@@ -1090,6 +1132,50 @@ def test_contract_relationship_update_and_archive_use_optimistic_lock(db):
     assert archived.json()["version"] == 3
 
 
+def test_direct_collection_api_exposes_server_owned_provenance(db):
+    project = _project(db, project_id="project-direct-collection-provenance")
+    client = _client(db, username="direct_collection_provenance_admin")
+    contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-direct-collection-provenance",
+            "contract_no": "XS-DIRECT-COLLECTION-PROVENANCE",
+            "contract_amount": "1000.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立回款来源测试合同",
+        },
+    )
+    assert contract.status_code == 201, contract.text
+
+    created = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/collections",
+        json={
+            "project_contract_id": contract.json()["project_contract_id"],
+            "report_month": "2026-08-01",
+            "cumulative_amount": "320.00",
+            "status": "confirmed",
+            "reason": "通过受控 API 新增回款",
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["source"] == "direct_api"
+    assert created.json()["import_batch_id"] is None
+    workspace = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-08-31"},
+    )
+    assert workspace.status_code == 200, workspace.text
+    collection = workspace.json()["collection_snapshots"]["rows"][0]
+    assert collection["source"] == "direct_api"
+    assert collection["import_batch_id"] is None
+
+
 def test_confirmed_monthly_collection_snapshot_drives_workspace_progress(db):
     project = _project(db, project_id="project-collection-workspace")
     client = _client(db, username="collection_workspace_admin")
@@ -1259,6 +1345,8 @@ def test_workspace_exposes_all_collection_statuses_through_as_of_and_hides_money
         "receipt_reference": "RECEIPT-JAN",
         "status": "confirmed",
         "remark": "一月已确认",
+        "source": "direct_api",
+        "import_batch_id": None,
         "version": 1,
     }
 
