@@ -1836,7 +1836,8 @@ def _project_card_from_facts(
     total = base["total_contract_amount"]
     collection_progress = (
         (confirmed_collection / Decimal(total) * Decimal("100")).quantize(
-            Decimal("0.01")
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
         )
         if total is not None and Decimal(total) > 0
         else None
@@ -2063,7 +2064,10 @@ def project_workspace(
     confirmed_collection = sum(latest_confirmed.values(), start=Decimal("0.00"))
     total = base["total_contract_amount"]
     collection_progress = (
-        (confirmed_collection / Decimal(total) * Decimal("100")).quantize(Decimal("0.01"))
+        (confirmed_collection / Decimal(total) * Decimal("100")).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
         if total is not None and Decimal(total) > 0
         else None
     )

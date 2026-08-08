@@ -2638,6 +2638,18 @@ def test_directory_reminder_filters_use_the_same_rounded_cost_threshold_as_cards
             },
         )
         assert response.status_code == 201, response.text
+        if suffix == "half-cent-to-red":
+            collection = client.post(
+                f"/api/maintenance/projects/stable/{project.project_id}/collections",
+                json={
+                    "project_contract_id": contract["project_contract_id"],
+                    "report_month": "2026-07-01",
+                    "cumulative_amount": "20001.00",
+                    "status": "confirmed",
+                    "reason": "验证回款进度 HALF_UP 半分边界",
+                },
+            )
+            assert collection.status_code == 201, collection.text
         ready = client.put(
             f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
             json={
@@ -2686,6 +2698,15 @@ def test_directory_reminder_filters_use_the_same_rounded_cost_threshold_as_cards
     assert {row["project_id"] for row in red.json()["rows"]} == {
         "project-half-cent-to-red",
     }
+    half_cent_workspace = client.get(
+        "/api/maintenance/projects/stable/project-half-cent-to-red/workspace",
+        params={"as_of": "2026-07-31"},
+    )
+    assert half_cent_workspace.status_code == 200, half_cent_workspace.text
+    assert (
+        half_cent_workspace.json()["project"]["metrics"]["collection_progress_pct"]
+        == "100.01"
+    )
 
 
 def test_operations_directory_queries_do_not_scale_with_off_page_projects(db):

@@ -33,6 +33,27 @@ describe("项目双进度", () => {
     })).toMatchObject({ status: "unknown", percent: 50 });
   });
 
+  it("直接使用服务端 Decimal HALF_UP 的成本率与红黄状态", () => {
+    render(<ProjectFinancialProgress metrics={{
+      total_contract_amount: 200,
+      contract_amount_complete: true,
+      received_amount: 200.01,
+      collection_progress_pct: 100.01,
+      site_requisition_known_cost: 200.01,
+      approved_expense: 0,
+      actual_project_cost_known: 200.01,
+      cost_rate_lower_bound_pct: 100.01,
+      cost_status: "red",
+      cost_complete: true,
+      missing_cost_lines: 0,
+    }} />);
+
+    expect(screen.getByTestId("collection-progress")).toHaveTextContent("100.01%");
+    const cost = screen.getByTestId("project-cost-progress");
+    expect(cost).toHaveTextContent("100.01%");
+    expect(within(cost).getByText("超过 100%")).toBeInTheDocument();
+  });
+
   it("合同额证据不完整时两条进度都不计算百分比", () => {
     render(<ProjectFinancialProgress metrics={{
       total_contract_amount: 1000,

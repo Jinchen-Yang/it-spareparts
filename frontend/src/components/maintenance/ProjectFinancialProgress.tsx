@@ -8,9 +8,12 @@ export interface ProjectFinancialMetrics {
   total_contract_amount: number | null;
   contract_amount_complete: boolean | null;
   received_amount: number | null;
+  collection_progress_pct?: number | null;
   site_requisition_known_cost: number | null;
   approved_expense: number | null;
   actual_project_cost_known: number | null;
+  cost_rate_lower_bound_pct?: number | null;
+  cost_status?: CostWaterlineStatus | null;
   cost_complete: boolean | null;
   missing_cost_lines: number | null;
 }
@@ -119,18 +122,26 @@ function MetricProgress({
 export default function ProjectFinancialProgress({ metrics }: {
   metrics: ProjectFinancialMetrics;
 }) {
-  const costWaterline = classifyCostWaterline({
-    totalContractAmount: metrics.total_contract_amount,
-    actualProjectCostKnown: metrics.actual_project_cost_known,
-    costComplete: metrics.cost_complete,
-    contractAmountComplete: metrics.contract_amount_complete,
-  });
+  const canonicalStatus = metrics.cost_status;
+  const costWaterline = canonicalStatus != null
+    ? {
+      status: canonicalStatus,
+      percent: metrics.cost_rate_lower_bound_pct ?? null,
+    }
+    : classifyCostWaterline({
+      totalContractAmount: metrics.total_contract_amount,
+      actualProjectCostKnown: metrics.actual_project_cost_known,
+      costComplete: metrics.cost_complete,
+      contractAmountComplete: metrics.contract_amount_complete,
+    });
   const sitePercent = metrics.contract_amount_complete
     ? numericPercent(metrics.site_requisition_known_cost, metrics.total_contract_amount)
     : null;
-  const collectionPercent = metrics.contract_amount_complete
-    ? numericPercent(metrics.received_amount, metrics.total_contract_amount)
-    : null;
+  const collectionPercent = metrics.collection_progress_pct !== undefined
+    ? metrics.collection_progress_pct
+    : metrics.contract_amount_complete
+      ? numericPercent(metrics.received_amount, metrics.total_contract_amount)
+      : null;
   const collectionColor = collectionPercent != null && collectionPercent > 100
     ? "var(--mb-warning)" : "var(--mb-accent)";
   const knownCostLowerBound = metrics.contract_amount_complete

@@ -21,9 +21,12 @@ export interface MaintenanceOperationsMetrics {
   known_contract_amount: number | null;
   contract_amount_complete: boolean | null;
   received_amount: number | null;
+  collection_progress_pct: number | null;
   site_requisition_known_cost: number | null;
   approved_expense: number | null;
   actual_project_cost_known: number | null;
+  cost_rate_lower_bound_pct: number | null;
+  cost_status: "normal" | "yellow" | "red" | "unknown" | null;
   cost_complete: boolean | null;
   missing_cost_lines: number | null;
 }
@@ -262,9 +265,11 @@ function normalizeMetrics(metrics: MaintenanceOperationsMetrics): MaintenanceOpe
     total_contract_amount: finiteNumberOrNull(metrics.total_contract_amount),
     known_contract_amount: finiteNumberOrNull(metrics.known_contract_amount),
     received_amount: finiteNumberOrNull(metrics.received_amount),
+    collection_progress_pct: finiteNumberOrNull(metrics.collection_progress_pct),
     site_requisition_known_cost: finiteNumberOrNull(metrics.site_requisition_known_cost),
     approved_expense: finiteNumberOrNull(metrics.approved_expense),
     actual_project_cost_known: finiteNumberOrNull(metrics.actual_project_cost_known),
+    cost_rate_lower_bound_pct: finiteNumberOrNull(metrics.cost_rate_lower_bound_pct),
   };
 }
 
