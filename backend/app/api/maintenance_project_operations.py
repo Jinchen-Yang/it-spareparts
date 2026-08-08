@@ -13,7 +13,7 @@ from app.auth import current_identity, current_role
 from app.business_time import business_today
 from app.db import get_db
 from app.models.system import SysUser
-from app.security import is_field_hidden, require_action, require_page
+from app.security import is_field_hidden, record_access_log, require_action, require_page
 from app.security import UserContext, get_current_user_context
 from app.services import maintenance_project_operations as operations
 
@@ -463,6 +463,17 @@ def project_cost_gaps(
     )
     if payload is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
+    record_access_log(
+        ctx,
+        "stable_project_cost_gaps",
+        "maintenance_project",
+        {
+            "project_id": project_id,
+            "page": page,
+            "page_size": page_size,
+            "total": payload["total"],
+        },
+    )
     return payload
 
 
@@ -630,14 +641,27 @@ def stable_project_workspace(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    effective_as_of = as_of or business_today()
     payload = operations.project_workspace(
         db,
         project_id=project_id,
-        as_of=as_of or business_today(),
+        as_of=effective_as_of,
         user_ctx=ctx,
     )
     if payload is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
+    record_access_log(
+        ctx,
+        "stable_project_workspace",
+        "maintenance_project",
+        {
+            "project_id": project_id,
+            "as_of": effective_as_of.isoformat(),
+            "requisition_total": payload["requisitions"]["total"],
+            "approved_expense_total": payload["approved_expenses"]["total"],
+            "reminder_total": len(payload["reminders"]),
+        },
+    )
     return payload
 
 
@@ -650,14 +674,25 @@ def stable_project_tasks(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    effective_as_of = as_of or business_today()
     payload = operations.project_tasks(
         db,
         project_id=project_id,
-        as_of=as_of or business_today(),
+        as_of=effective_as_of,
         user_ctx=ctx,
     )
     if payload is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
+    record_access_log(
+        ctx,
+        "stable_project_tasks",
+        "maintenance_project",
+        {
+            "project_id": project_id,
+            "as_of": effective_as_of.isoformat(),
+            "total": payload["total"],
+        },
+    )
     return payload
 
 
@@ -677,9 +712,10 @@ def stable_project_operations(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    return operations.project_operations(
+    effective_as_of = as_of or business_today()
+    payload = operations.project_operations(
         db,
-        as_of=as_of or business_today(),
+        as_of=effective_as_of,
         user_ctx=ctx,
         q_text=q,
         lifecycle=lifecycle,
@@ -688,3 +724,20 @@ def stable_project_operations(
         page=page,
         page_size=page_size,
     )
+    record_access_log(
+        ctx,
+        "stable_project_operations",
+        "maintenance",
+        {
+            "as_of": effective_as_of.isoformat(),
+            "q": q,
+            "lifecycle": lifecycle,
+            "reminder": reminder,
+            "include_inactive": include_inactive,
+            "page": page,
+            "page_size": page_size,
+            "total": payload["total"],
+            "returned": len(payload["rows"]),
+        },
+    )
+    return payload

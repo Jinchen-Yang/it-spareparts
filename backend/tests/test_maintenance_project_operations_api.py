@@ -19,8 +19,7 @@ from app.models.maintenance_project_operations import (
 from app.models.dimensions import DimPart
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
-from app.models.system import SysUser
-from app.models.system import SysImportBatch
+from app.models.system import SysAccessLog, SysImportBatch, SysUser
 from app.security import UserContext
 from app.services import maintenance_project_operations as operations_service
 
@@ -1487,3 +1486,61 @@ def test_operations_reminder_filter_queries_do_not_load_every_project_workspace(
     assert expanded["total"] == 32
     assert expanded["rows"] == first["rows"]
     assert expanded_queries <= baseline_queries + 1
+
+
+def test_sensitive_operations_reads_are_access_logged_with_scope(db):
+    project = _project(db, project_id="project-sensitive-read-audit")
+    client = _client(db, username="operations_read_audit_admin")
+    project_path = f"/api/maintenance/projects/stable/{project.project_id}"
+
+    assert client.get(f"{project_path}/cost-gaps").status_code == 200
+    assert client.get(
+        f"{project_path}/workspace", params={"as_of": "2026-08-31"}
+    ).status_code == 200
+    assert client.get(
+        f"{project_path}/tasks", params={"as_of": "2026-08-31"}
+    ).status_code == 200
+    assert client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={
+            "as_of": "2026-08-31",
+            "lifecycle": "all",
+            "page": 1,
+            "page_size": 24,
+        },
+    ).status_code == 200
+
+    db.expire_all()
+    rows = list(
+        db.scalars(
+            select(SysAccessLog)
+            .where(SysAccessLog.username == "operations_read_audit_admin")
+            .where(
+                SysAccessLog.action.in_(
+                    {
+                        "stable_project_cost_gaps",
+                        "stable_project_workspace",
+                        "stable_project_tasks",
+                        "stable_project_operations",
+                    }
+                )
+            )
+            .order_by(SysAccessLog.id)
+        )
+    )
+    assert [row.action for row in rows] == [
+        "stable_project_cost_gaps",
+        "stable_project_workspace",
+        "stable_project_tasks",
+        "stable_project_operations",
+    ]
+    assert rows[0].detail == {
+        "project_id": project.project_id,
+        "page": 1,
+        "page_size": 20,
+        "total": 0,
+    }
+    assert rows[1].detail["project_id"] == project.project_id
+    assert rows[1].detail["as_of"] == "2026-08-31"
+    assert rows[3].detail["page_size"] == 24
+    assert rows[3].detail["returned"] == 1
