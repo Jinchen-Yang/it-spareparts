@@ -2574,6 +2574,16 @@ def test_legacy_future_expense_readiness_fails_closed_until_audited_correction(
         "expense_readiness_in_future",
         "expense_data_not_ready",
     }
+    future_filter = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={
+            "as_of": "2026-08-31",
+            "q": project.project_code,
+            "reminder": "completeness:expense_readiness_in_future",
+        },
+    )
+    assert future_filter.status_code == 200, future_filter.text
+    assert future_filter.json()["total"] == 1
 
     restricted = _permission_client(
         db,

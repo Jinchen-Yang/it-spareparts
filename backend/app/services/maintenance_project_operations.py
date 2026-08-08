@@ -3299,10 +3299,13 @@ def _directory_reminder_query(
         facts.c.duplicate_count == 0,
         facts.c.conflict_count == 0,
     )
+    expense_readiness_in_future = (
+        facts.c.expense_ready_through > current_business_month
+    )
     expense_not_ready = or_(
         facts.c.expense_ready_through.is_(None),
         facts.c.expense_ready_through < month_start,
-        facts.c.expense_ready_through > current_business_month,
+        expense_readiness_in_future,
     )
     cost_value = facts.c.consumed_known + facts.c.approved_expense
     rounded_cost_rate = func.round(
@@ -3354,6 +3357,10 @@ def _directory_reminder_query(
         ),
         "completeness:expense_data_not_ready": and_(
             literal(profit_visible and expense_visible), expense_not_ready
+        ),
+        "completeness:expense_readiness_in_future": and_(
+            literal(profit_visible and expense_visible),
+            expense_readiness_in_future,
         ),
         "collection:missing_confirmed": and_(
             literal(profit_visible), facts.c.collection_count == 0
