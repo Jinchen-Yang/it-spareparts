@@ -17,7 +17,7 @@ import zipfile
 from calendar import monthrange
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from openpyxl import Workbook, load_workbook
@@ -1233,11 +1233,7 @@ def _parse_positive_decimal(value: Any, *, row: int) -> Decimal:
         amount = Decimal(str(value))
     except (InvalidOperation, ValueError):
         amount = Decimal("NaN")
-    if (
-        not amount.is_finite()
-        or amount <= 0
-        or amount >= Decimal("1000000000000")
-    ):
+    if not amount.is_finite():
         _raise_issue(
             "invalid_cumulative_amount",
             "累计回款金额必须大于 0",
@@ -1246,7 +1242,7 @@ def _parse_positive_decimal(value: Any, *, row: int) -> Decimal:
             column="累计回款金额",
         )
     try:
-        return amount.quantize(Decimal("0.01"))
+        normalized = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     except InvalidOperation:
         _raise_issue(
             "invalid_cumulative_amount",
@@ -1255,6 +1251,15 @@ def _parse_positive_decimal(value: Any, *, row: int) -> Decimal:
             row=row,
             column="累计回款金额",
         )
+    if normalized <= 0 or normalized >= Decimal("1000000000000"):
+        _raise_issue(
+            "invalid_cumulative_amount",
+            "累计回款金额必须大于 0 且不超过安全范围",
+            sheet="01_总览",
+            row=row,
+            column="累计回款金额",
+        )
+    return normalized
 
 
 def validate_project_workbook(

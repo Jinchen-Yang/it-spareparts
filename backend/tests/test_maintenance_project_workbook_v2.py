@@ -1205,6 +1205,32 @@ def test_huge_cumulative_amount_is_a_controlled_validation_error():
     assert caught.value.issues[0].code == "invalid_cumulative_amount"
 
 
+def test_appended_cumulative_amount_uses_half_up_and_rejects_rounded_overflow():
+    workspace = _workspace()
+    exported = workbook_v2.build_project_workbook(
+        workspace,
+        hmac_key=HMAC_KEY,
+        exported_by="tester",
+    )
+    rounded = workbook_v2.validate_project_workbook(
+        _append_collection(exported.content, amount=Decimal("30000.005")),
+        workspace=workspace,
+        hmac_key=HMAC_KEY,
+    )
+    assert rounded.creates[0].cumulative_amount == Decimal("30000.01")
+
+    with pytest.raises(workbook_v2.ProjectWorkbookV2Error) as caught:
+        workbook_v2.validate_project_workbook(
+            _append_collection(
+                exported.content,
+                amount=Decimal("999999999999.999"),
+            ),
+            workspace=workspace,
+            hmac_key=HMAC_KEY,
+        )
+    assert caught.value.issues[0].code == "invalid_cumulative_amount"
+
+
 def test_cross_version_upload_is_controlled_422_and_hmac_key_has_no_default():
     legacy = Workbook()
     try:

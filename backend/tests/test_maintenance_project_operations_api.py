@@ -155,6 +155,153 @@ def test_numeric_normalizers_reject_non_finite_values_as_business_errors():
         assert cost_service._valid(Decimal("1"), value) is False
 
 
+def test_money_write_paths_use_half_up_and_reject_rounded_overflow(db):
+    project = _project(db, project_id="project-money-normalization")
+    client = _client(db, username="money_normalization_admin")
+    contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-money-normalization",
+            "contract_no": "XS-MONEY-NORMALIZATION",
+            "contract_amount": "1.005",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "验证合同金额统一四舍五入",
+        },
+    )
+    assert contract.status_code == 201, contract.text
+    assert contract.json()["contract_amount"] == "1.01"
+
+    collection = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/collections",
+        json={
+            "project_contract_id": contract.json()["project_contract_id"],
+            "report_month": "2026-01-01",
+            "cumulative_amount": "1.005",
+            "status": "confirmed",
+            "reason": "验证回款金额统一四舍五入",
+        },
+    )
+    assert collection.status_code == 201, collection.text
+    assert collection.json()["cumulative_amount"] == "1.01"
+
+    expense = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses",
+        json={
+            "expense_id": "expense-money-normalization",
+            "project_contract_id": contract.json()["project_contract_id"],
+            "expense_ref": "BX-MONEY-NORMALIZATION",
+            "expense_date": "2026-01-01",
+            "amount_ex_tax": "1.005",
+            "raw_status": "synthetic-finished",
+            "status_mapping_state": "mapped",
+            "normalized_status": "approved",
+            "status_mapping_version": "synthetic-expense-map-v1",
+            "reason": "验证报销金额统一四舍五入",
+        },
+    )
+    assert expense.status_code == 201, expense.text
+    assert expense.json()["amount_ex_tax"] == "1.01"
+
+    part = DimPart(pn_std="PN-MONEY-NORMALIZATION")
+    db.add(part)
+    db.commit()
+    issue = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-MONEY-NORMALIZATION",
+            "issue_date": "2026-01-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [{
+                "issue_line_id": "issue-line-money-normalization",
+                "line_no": 1,
+                "part_id": part.id,
+                "pn": part.pn_std,
+                "quantity": "1",
+            }],
+            "reason": "建立人工成本金额归一化领用",
+        },
+    )
+    assert issue.status_code == 201, issue.text
+    manual = client.patch(
+        f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
+        json={
+            "line_id": "issue-line-money-normalization",
+            "version": 1,
+            "unit_cost_ex_tax": "1.005",
+            "evidence": "金额归一化证据",
+            "reason": "验证人工成本统一四舍五入",
+        },
+    )
+    assert manual.status_code == 200, manual.text
+    assert manual.json()["unit_cost"] == "1.01"
+    assert manual.json()["cost_amount"] == "1.01"
+
+    rounded_overflow = "999999999999.999"
+    overflow_contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-money-overflow",
+            "contract_no": "XS-MONEY-OVERFLOW",
+            "contract_amount": rounded_overflow,
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "验证舍入后合同金额溢出受控拒绝",
+        },
+    )
+    assert overflow_contract.status_code == 400, overflow_contract.text
+
+    overflow_collection = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/collections",
+        json={
+            "project_contract_id": contract.json()["project_contract_id"],
+            "report_month": "2026-02-01",
+            "cumulative_amount": rounded_overflow,
+            "status": "unconfirmed",
+            "reason": "验证舍入后回款金额溢出受控拒绝",
+        },
+    )
+    assert overflow_collection.status_code == 400, overflow_collection.text
+
+    overflow_expense = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/expenses",
+        json={
+            "expense_id": "expense-money-overflow",
+            "expense_ref": "BX-MONEY-OVERFLOW",
+            "expense_date": "2026-01-01",
+            "amount_ex_tax": rounded_overflow,
+            "raw_status": "synthetic-finished",
+            "status_mapping_state": "mapped",
+            "normalized_status": "approved",
+            "status_mapping_version": "synthetic-expense-map-v1",
+            "reason": "验证舍入后报销金额溢出受控拒绝",
+        },
+    )
+    assert overflow_expense.status_code == 400, overflow_expense.text
+
+    overflow_manual = client.patch(
+        f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
+        json={
+            "line_id": "issue-line-money-normalization",
+            "version": 2,
+            "unit_cost_ex_tax": rounded_overflow,
+            "evidence": "舍入后溢出证据",
+            "reason": "验证舍入后人工成本溢出受控拒绝",
+        },
+    )
+    assert overflow_manual.status_code == 400, overflow_manual.text
+
+
 def test_site_issue_quantity_uses_numeric_14_3_boundary_with_controlled_rejection(db):
     project = _project(db, project_id="project-quantity-boundary")
     client = _client(db, username="quantity_boundary_admin")
@@ -2058,17 +2205,18 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
 def test_directory_reminder_filters_use_the_same_rounded_cost_threshold_as_cards(db):
     client = _client(db, username="rounded_threshold_admin")
     cases = [
-        ("rounded-up-to-80", "239.99"),
-        ("rounded-down-to-100", "300.01"),
+        ("rounded-up-to-80", "300.00", "239.99", "yellow"),
+        ("rounded-down-to-100", "300.00", "300.01", "yellow"),
+        ("half-cent-to-red", "20000.00", "20001.00", "red"),
     ]
-    for suffix, cost_amount in cases:
+    for suffix, contract_amount, cost_amount, _expected in cases:
         project = _project(db, project_id=f"project-{suffix}")
         contract = client.post(
             f"/api/maintenance/projects/stable/{project.project_id}/contracts",
             json={
                 "contract_id": f"contract-{suffix}",
                 "contract_no": f"XS-{suffix}",
-                "contract_amount": "300.00",
+                "contract_amount": contract_amount,
                 "contract_status": "synthetic-active",
                 "status_mapping_state": "mapped",
                 "status_mapping_version": "synthetic-map-v1",
@@ -2112,8 +2260,8 @@ def test_directory_reminder_filters_use_the_same_rounded_cost_threshold_as_cards
         row["project_id"]: row["metrics"]["cost_status"]
         for row in directory.json()["rows"]
     } == {
-        "project-rounded-up-to-80": "yellow",
-        "project-rounded-down-to-100": "yellow",
+        f"project-{suffix}": expected
+        for suffix, _contract, _cost, expected in cases
     }
 
     yellow = client.get(
@@ -2139,7 +2287,9 @@ def test_directory_reminder_filters_use_the_same_rounded_cost_threshold_as_cards
         },
     )
     assert red.status_code == 200, red.text
-    assert red.json()["total"] == 0
+    assert {row["project_id"] for row in red.json()["rows"]} == {
+        "project-half-cent-to-red",
+    }
 
 
 def test_operations_directory_queries_do_not_scale_with_off_page_projects(db):

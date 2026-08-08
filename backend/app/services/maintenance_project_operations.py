@@ -49,6 +49,8 @@ class MaintenanceOperationConflict(Exception):
 
 _QUANTITY_QUANTUM = Decimal("0.001")
 _QUANTITY_MAX_EXCLUSIVE = Decimal("100000000000")
+_MONEY_QUANTUM = Decimal("0.01")
+_MONEY_MAX_EXCLUSIVE = Decimal("1000000000000")
 
 
 def _quantity(value: Decimal | str) -> Decimal:
@@ -69,6 +71,25 @@ def _quantity(value: Decimal | str) -> Decimal:
     ):
         raise MaintenanceOperationError("现场领用数量超出允许范围")
     return normalized
+
+
+def _money_amount(value: Decimal | str, *, label: str) -> Decimal:
+    """Normalize every Numeric(14,2) write before validation and persistence."""
+
+    try:
+        parsed = Decimal(value)
+        if not parsed.is_finite():
+            raise InvalidOperation
+        normalized = parsed.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError) as exc:
+        raise MaintenanceOperationError(f"{label}超出允许范围") from exc
+    if normalized < 0 or normalized >= _MONEY_MAX_EXCLUSIVE:
+        raise MaintenanceOperationError(f"{label}超出允许范围")
+    return normalized
+
+
+def _money(value: Decimal | None) -> str | None:
+    return format(value, ".2f") if value is not None else None
 
 
 def _resolve_site_issue_cost(
@@ -146,9 +167,7 @@ def contract_dict(row: MaintenanceProjectContract) -> dict:
         "project_id": row.project_id,
         "contract_id": row.contract_id,
         "contract_no": row.contract_no,
-        "contract_amount": (
-            format(row.contract_amount, "f") if row.contract_amount is not None else None
-        ),
+        "contract_amount": _money(row.contract_amount),
         "contract_status": row.contract_status,
         "status_mapping_state": row.status_mapping_state,
         "status_mapping_version": row.status_mapping_version,
@@ -241,10 +260,6 @@ def _fact_audit(
             operated_by=_required(operated_by, "操作人"),
         )
     )
-
-
-def _money(value: Decimal | None) -> str | None:
-    return format(value, ".2f") if value is not None else None
 
 
 def _qty(value: Decimal) -> str:
@@ -405,8 +420,7 @@ def create_expense(
         raise MaintenanceOperationError("报销标准状态无效")
     if status_mapping_state != "mapped" and normalized_status != "unknown":
         raise MaintenanceOperationError("未映射报销必须使用 unknown 标准状态")
-    if amount_ex_tax < 0 or amount_ex_tax >= Decimal("1000000000000"):
-        raise MaintenanceOperationError("报销未税金额超出允许范围")
+    amount_ex_tax = _money_amount(amount_ex_tax, label="报销未税金额")
     if project_contract_id is not None:
         relation = db.scalar(
             select(MaintenanceProjectContract).where(
@@ -1120,12 +1134,7 @@ def fill_manual_cost(
         )
     if issue.status_mapping_state != "mapped" or issue.normalized_status != "confirmed":
         raise MaintenanceOperationError("只有已确认且状态已映射的现场领用可以补价")
-    if (
-        not manual_unit_cost.is_finite()
-        or manual_unit_cost < 0
-        or manual_unit_cost >= Decimal("1000000000000")
-    ):
-        raise MaintenanceOperationError("人工未税单价超出允许范围")
+    manual_unit_cost = _money_amount(manual_unit_cost, label="人工未税单价")
     before = site_issue_line_dict(line)
     if line.cost_source is not None or line.cost_amount is not None:
         raise MaintenanceOperationConflict("该领用行已有成本，人工补价只能处理缺价行")
@@ -1207,10 +1216,8 @@ def create_contract(
         raise MaintenanceOperationError("未映射合同不能计入合同总额")
     if effective_to is not None and effective_to <= effective_from:
         raise MaintenanceOperationError("合同关系结束日期必须晚于开始日期")
-    if contract_amount is not None and (
-        contract_amount < 0 or contract_amount >= Decimal("1000000000000")
-    ):
-        raise MaintenanceOperationError("合同金额超出允许范围")
+    if contract_amount is not None:
+        contract_amount = _money_amount(contract_amount, label="合同金额")
     row = MaintenanceProjectContract(
         project_contract_id=str(uuid4()),
         project_id=project_id,
@@ -1310,6 +1317,8 @@ def update_contract(
             }[key])
         elif key == "contract_status":
             value = str(value).strip() if value else None
+        elif key == "contract_amount" and value is not None:
+            value = _money_amount(value, label="合同金额")
         setattr(row, key, value)
     if row.status_mapping_state not in {"mapped", "unmapped"}:
         raise MaintenanceOperationError("合同状态映射结果无效")
@@ -1317,10 +1326,6 @@ def update_contract(
         raise MaintenanceOperationError("未映射合同不能计入合同总额")
     if row.effective_to is not None and row.effective_to <= row.effective_from:
         raise MaintenanceOperationError("合同关系结束日期必须晚于开始日期")
-    if row.contract_amount is not None and (
-        row.contract_amount < 0 or row.contract_amount >= Decimal("1000000000000")
-    ):
-        raise MaintenanceOperationError("合同金额超出允许范围")
     after = contract_dict(row)
     if after == before:
         return before
@@ -1424,8 +1429,7 @@ def create_collection(
         raise MaintenanceOperationError("回款报告月份必须使用当月第一天")
     if status not in {"confirmed", "unconfirmed", "void"}:
         raise MaintenanceOperationError("回款确认状态无效")
-    if cumulative_amount < 0 or cumulative_amount >= Decimal("1000000000000"):
-        raise MaintenanceOperationError("累计回款超出允许范围")
+    cumulative_amount = _money_amount(cumulative_amount, label="累计回款")
     if status == "confirmed":
         _validate_confirmed_collection_monotonicity(
             db,
@@ -1505,17 +1509,18 @@ def update_collection(
     ):
         raise MaintenanceOperationError("报告月份、累计回款和确认状态不能清空")
     proposed_report_month = updates.get("report_month", row.report_month)
-    proposed_amount = updates.get("cumulative_amount", row.cumulative_amount)
+    updates = dict(updates)
+    proposed_amount = _money_amount(
+        updates.get("cumulative_amount", row.cumulative_amount),
+        label="累计回款",
+    )
+    if "cumulative_amount" in updates:
+        updates["cumulative_amount"] = proposed_amount
     proposed_status = updates.get("status", row.status)
     if proposed_report_month.day != 1:
         raise MaintenanceOperationError("回款报告月份必须使用当月第一天")
     if proposed_status not in {"confirmed", "unconfirmed", "void"}:
         raise MaintenanceOperationError("回款确认状态无效")
-    if (
-        proposed_amount < 0
-        or proposed_amount >= Decimal("1000000000000")
-    ):
-        raise MaintenanceOperationError("累计回款超出允许范围")
     if proposed_status == "confirmed":
         _validate_confirmed_collection_monotonicity(
             db,
@@ -1778,7 +1783,7 @@ def _cost_rate_and_status(
             actual_cost_known
             / total_contract_amount
             * Decimal("100")
-        ).quantize(Decimal("0.01"))
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         if total_contract_amount is not None and total_contract_amount > 0
         else None
     )
