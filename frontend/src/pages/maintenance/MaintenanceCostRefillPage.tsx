@@ -1,0 +1,388 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Alert,
+  Button,
+  Card,
+  Empty,
+  Input,
+  InputNumber,
+  Modal,
+  Select,
+  Space,
+  Table,
+  Tag,
+} from "antd";
+import type { ColumnsType } from "antd/es/table";
+import { useSearchParams } from "react-router-dom";
+
+import {
+  listMaintenanceCostGaps,
+  listMaintenanceProjectOperations,
+  updateMaintenanceCostGap,
+  type MaintenanceCostGap,
+  type MaintenanceCostReference,
+  type MaintenanceProjectOperationsSummary,
+} from "../../api/maintenanceOperations";
+import PageHeader from "../../components/PageHeader";
+import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
+import { money } from "../../utils/format";
+
+const SOURCE_LABELS: Record<string, string> = {
+  linked_purchase: "关联采购",
+  purchase_window: "采购 ±7 天加权",
+  sales_window: "销售 ±7 天加权",
+};
+
+function referenceLabel(reference: MaintenanceCostReference): string {
+  return SOURCE_LABELS[reference.source] || reference.source;
+}
+
+function referenceEvidence(reference: MaintenanceCostReference): string {
+  return [
+    referenceLabel(reference),
+    reference.document_no ? `单据 ${reference.document_no}` : null,
+    reference.document_date ? `日期 ${reference.document_date}` : null,
+    reference.distance_days === null ? null : `距领用日 ${reference.distance_days} 天`,
+    reference.sample_lines ? `${reference.sample_lines} 个样本` : null,
+    reference.weighted_unit_price === null
+      ? null : `加权未税单价 ${reference.weighted_unit_price}`,
+  ].filter(Boolean).join("；");
+}
+
+function ReferenceList({ references, selectable, onSelect }: {
+  references: MaintenanceCostReference[];
+  selectable?: boolean;
+  onSelect?: (reference: MaintenanceCostReference) => void;
+}) {
+  if (references.length === 0) return <Tag color="orange">无可用参考，需人工核实后留痕</Tag>;
+  return (
+    <Space direction="vertical" size={5} style={{ width: "100%" }}>
+      {references.map((reference, index) => (
+        <div key={`${reference.source}-${reference.document_no || index}`}>
+          <Space size={6} wrap>
+            <Tag color={reference.source === "linked_purchase" ? "green" : "blue"}>
+              {referenceLabel(reference)}
+            </Tag>
+            <span>{reference.document_no || "无单据号"}</span>
+            <span>{money(reference.weighted_unit_price)}</span>
+            {reference.distance_days !== null && <span>{`${reference.distance_days} 天`}</span>}
+            <span style={{ color: "var(--mb-text-3)", fontSize: 12 }}>
+              {`${reference.sample_lines} 个样本`}
+            </span>
+            {selectable && reference.weighted_unit_price !== null && (
+              <Button
+                size="small"
+                aria-label={`采用${referenceLabel(reference)}参考`}
+                onClick={() => onSelect?.(reference)}
+              >
+                采用该参考
+              </Button>
+            )}
+          </Space>
+        </div>
+      ))}
+    </Space>
+  );
+}
+
+export default function MaintenanceCostRefillPage({ projectId }: { projectId?: string }) {
+  const [{ canManageProject }] = useState(readMaintenanceCapabilities);
+  const [searchParams] = useSearchParams();
+  const initialProjectId = projectId || searchParams.get("project_id") || "";
+  const [selectedProjectId, setSelectedProjectId] = useState(initialProjectId);
+  const [projects, setProjects] = useState<MaintenanceProjectOperationsSummary[]>([]);
+  const [rows, setRows] = useState<MaintenanceCostGap[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [loadingProjects, setLoadingProjects] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [editing, setEditing] = useState<MaintenanceCostGap | null>(null);
+  const [unitCost, setUnitCost] = useState<number | null>(null);
+  const [evidence, setEvidence] = useState("");
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState("");
+  const [success, setSuccess] = useState("");
+  const loadGeneration = useRef(0);
+  const projectListGeneration = useRef(0);
+
+  const loadProjectOptions = useCallback(async (q = "") => {
+    if (!canManageProject || projectId) return;
+    const generation = ++projectListGeneration.current;
+    setLoadingProjects(true);
+    try {
+      const { data } = await listMaintenanceProjectOperations({
+        page: 1,
+        page_size: 200,
+        q: q || undefined,
+      });
+      if (generation === projectListGeneration.current) setProjects(data.rows);
+    } catch {
+      if (generation === projectListGeneration.current) setProjects([]);
+    } finally {
+      if (generation === projectListGeneration.current) setLoadingProjects(false);
+    }
+  }, [canManageProject, projectId]);
+
+  useEffect(() => {
+    void loadProjectOptions();
+    return () => { projectListGeneration.current += 1; };
+  }, [loadProjectOptions]);
+
+  const load = useCallback(async () => {
+    if (!canManageProject || !selectedProjectId) {
+      loadGeneration.current += 1;
+      setRows([]);
+      setTotal(0);
+      return;
+    }
+    const generation = ++loadGeneration.current;
+    setLoading(true);
+    setLoadError(false);
+    try {
+      const { data } = await listMaintenanceCostGaps(selectedProjectId, {
+        page,
+        page_size: 20,
+      });
+      if (generation !== loadGeneration.current) return;
+      setRows(data.rows);
+      setTotal(data.total);
+    } catch {
+      if (generation !== loadGeneration.current) return;
+      setRows([]);
+      setTotal(0);
+      setLoadError(true);
+    } finally {
+      if (generation === loadGeneration.current) setLoading(false);
+    }
+  }, [canManageProject, page, selectedProjectId]);
+
+  useEffect(() => {
+    void load();
+    return () => { loadGeneration.current += 1; };
+  }, [load]);
+
+  if (!canManageProject) {
+    return (
+      <Space direction="vertical" size="large" style={{ width: "100%" }}>
+        <PageHeader title="缺失成本人工回填" />
+        <Alert
+          showIcon
+          type="warning"
+          message="无人工成本回填权限"
+          description="请联系管理员授予维保项目管理权限。"
+        />
+      </Space>
+    );
+  }
+
+  const openRefill = (gap: MaintenanceCostGap) => {
+    setEditing(gap);
+    setUnitCost(gap.current_unit_cost);
+    setEvidence("");
+    setReason("");
+    setFormError("");
+  };
+
+  const chooseReference = (reference: MaintenanceCostReference) => {
+    setUnitCost(reference.weighted_unit_price);
+    setEvidence(referenceEvidence(reference));
+    setFormError("");
+  };
+
+  const save = async () => {
+    if (!editing || unitCost === null || unitCost <= 0 || !evidence.trim() || !reason.trim()) {
+      setFormError("请填写有效未税单位成本、证据和回填原因。成本不会由系统猜测。");
+      return;
+    }
+    setSaving(true);
+    setFormError("");
+    try {
+      await updateMaintenanceCostGap(editing.project_id, {
+        line_id: editing.line_id,
+        version: editing.version,
+        unit_cost_ex_tax: unitCost,
+        evidence: evidence.trim(),
+        reason: reason.trim(),
+      });
+      setEditing(null);
+      setSuccess("成本已回填");
+      await load();
+    } catch (error) {
+      if ((error as { response?: { status?: number } }).response?.status === 409) {
+        setFormError("数据已被他人更新，请刷新项目后重新核对；当前草稿已保留。");
+      } else {
+        setFormError("保存失败，当前草稿已保留，请稍后重试。");
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const columns: ColumnsType<MaintenanceCostGap> = [
+    { title: "领用日期", dataIndex: "order_date", width: 110, render: (value) => value || "—" },
+    { title: "现场领用单", dataIndex: "order_no", width: 140 },
+    { title: "合同", dataIndex: "contract_no", width: 130, render: (value) => value || "—" },
+    { title: "PN", dataIndex: "pn", width: 150, render: (value) => value || "—" },
+    { title: "描述", dataIndex: "description", width: 170, render: (value) => value || "—" },
+    { title: "数量", dataIndex: "quantity", width: 80, align: "right" },
+    {
+      title: "可核对价格证据",
+      dataIndex: "references",
+      width: 360,
+      render: (references: MaintenanceCostReference[]) => <ReferenceList references={references} />,
+    },
+    {
+      title: "操作",
+      width: 90,
+      fixed: "right",
+      render: (_, gap) => (
+        <Button
+          type="link"
+          aria-label={`回填 ${gap.pn || gap.order_no}`}
+          onClick={() => openRefill(gap)}
+        >
+          回填
+        </Button>
+      ),
+    },
+  ];
+  const fallbackProject = rows[0] && rows[0].project_id === selectedProjectId
+    ? {
+      project_id: rows[0].project_id,
+      project_code: rows[0].project_code,
+      display_name: "当前项目",
+    }
+    : null;
+  const projectOptions = fallbackProject
+    && !projects.some((project) => project.project_id === fallbackProject.project_id)
+    ? [fallbackProject, ...projects]
+    : projects;
+
+  return (
+    <Space direction="vertical" size="large" style={{ width: "100%" }}>
+      <PageHeader
+        title="缺失成本人工回填"
+        subtitle="只列出系统无法自动取价的现场领用行；先核对关联采购，再看前后 7 天采购和销售加权参考。"
+      />
+      <Card>
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          {!projectId && (
+            <Select
+              showSearch
+              loading={loadingProjects}
+              style={{ width: "min(100%, 420px)" }}
+              placeholder="选择维保项目"
+              value={selectedProjectId || undefined}
+              filterOption={false}
+              options={projectOptions.map((project) => ({
+                value: project.project_id,
+                label: `${project.project_code} · ${project.display_name}`,
+              }))}
+              onSearch={(value) => void loadProjectOptions(value.trim())}
+              onOpenChange={(open) => {
+                if (open && projects.length === 0) void loadProjectOptions();
+              }}
+              onChange={(value) => {
+                setEditing(null);
+                setSelectedProjectId(value);
+                setPage(1);
+              }}
+            />
+          )}
+          <Alert
+            showIcon
+            type="info"
+            message="参考价只用于人工核对，不会自动写入；无可靠参考时保持空白并标注。"
+          />
+          {success && <Alert showIcon closable type="success" message={success} />}
+          {loadError && (
+            <Alert
+              showIcon
+              type="error"
+              message="缺失成本清单加载失败"
+              action={<Button size="small" danger onClick={() => void load()}>重试</Button>}
+            />
+          )}
+          {!selectedProjectId ? (
+            <Empty description="请先选择项目" />
+          ) : (
+            <Table
+              rowKey="line_id"
+              loading={loading}
+              columns={columns}
+              dataSource={rows}
+              scroll={{ x: 1240 }}
+              locale={{ emptyText: "当前项目没有待回填成本" }}
+              pagination={{
+                current: page,
+                pageSize: 20,
+                total,
+                showSizeChanger: false,
+                onChange: setPage,
+              }}
+            />
+          )}
+        </Space>
+      </Card>
+
+      <Modal
+        title="回填成本"
+        open={Boolean(editing)}
+        onCancel={() => !saving && setEditing(null)}
+        footer={null}
+        destroyOnHidden
+      >
+        {editing && (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            <Alert
+              type="warning"
+              showIcon
+              message={`${editing.order_no} · ${editing.pn || "无 PN"} · 数量 ${editing.quantity ?? "—"}`}
+            />
+            <ReferenceList references={editing.references} selectable onSelect={chooseReference} />
+            <label>
+              未税单位成本
+              <InputNumber
+                aria-label="未税单位成本"
+                min={0.000001}
+                precision={6}
+                style={{ width: "100%", marginTop: 5 }}
+                value={unitCost}
+                onChange={(value) => setUnitCost(value)}
+              />
+            </label>
+            <label>
+              价格证据
+              <Input.TextArea
+                aria-label="价格证据"
+                rows={2}
+                style={{ marginTop: 5 }}
+                value={evidence}
+                onChange={(event) => setEvidence(event.target.value)}
+              />
+            </label>
+            <label>
+              回填原因
+              <Input.TextArea
+                aria-label="回填原因"
+                rows={2}
+                style={{ marginTop: 5 }}
+                value={reason}
+                onChange={(event) => setReason(event.target.value)}
+              />
+            </label>
+            {formError && <Alert showIcon type="error" message={formError} />}
+            <Space>
+              <Button type="primary" loading={saving} onClick={() => void save()}>
+                保存成本
+              </Button>
+              <Button disabled={saving} onClick={() => setEditing(null)}>取消</Button>
+            </Space>
+          </Space>
+        )}
+      </Modal>
+    </Space>
+  );
+}
