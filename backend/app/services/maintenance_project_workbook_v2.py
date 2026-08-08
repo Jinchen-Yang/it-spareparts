@@ -818,6 +818,48 @@ def _metadata_sheet(book: Workbook, metadata: Mapping[str, str]) -> None:
     sheet.sheet_state = "veryHidden"
 
 
+def _assert_export_row_limits(workspace: Mapping[str, Any]) -> None:
+    """Reject any export that the v2 validator would reject unchanged."""
+
+    contract_rows = len(workspace.get("contracts") or [])
+    existing_collection_rows = len(workspace.get("collections") or [])
+    collection_rows = existing_collection_rows + max(
+        BLANK_COLLECTION_ROWS,
+        contract_rows,
+    )
+    table_rows = {
+        CONTRACT_TABLE: max(contract_rows, 1),
+        COLLECTION_TABLE: max(collection_rows, 1),
+        CONSUMPTION_TABLE: max(len(workspace.get("consumptions") or []), 1),
+        EXPENSE_TABLE: max(len(workspace.get("expenses") or []), 1),
+        TASK_TABLE: max(len(workspace.get("tasks") or []), 1),
+        ENTITY_VERSION_TABLE: max(
+            1 + contract_rows + existing_collection_rows,
+            1,
+        ),
+    }
+    oversized = [
+        f"{table}={rows}"
+        for table, rows in table_rows.items()
+        if rows > MAX_ROWS_PER_TABLE
+    ]
+    summary_rows = len(_summary_rows(workspace))
+    contract_start = summary_rows + 3
+    collection_start = contract_start + max(contract_rows, 1) + 3
+    overview_max_row = collection_start + table_rows[COLLECTION_TABLE]
+    if overview_max_row > MAX_WORKSHEET_ROWS:
+        oversized.append(f"01_总览声明行={overview_max_row}")
+    if oversized:
+        message = (
+            f"项目工作簿超过单表 {MAX_ROWS_PER_TABLE} 行或工作表安全范围："
+            + "、".join(oversized)
+        )
+        raise ProjectWorkbookV2Error(
+            message,
+            issues=(WorkbookIssue("export_row_limit", message),),
+        )
+
+
 def build_project_workbook(
     workspace: Mapping[str, Any],
     *,
@@ -839,6 +881,7 @@ def build_project_workbook(
         raise ProjectWorkbookV2Error("缺少有效的项目工作簿 revision") from exc
     export_id = export_id or str(uuid.uuid4())
     exported_at = exported_at or datetime.now(timezone.utc)
+    _assert_export_row_limits(workspace)
     contracts, collection_rows = _project_rows(workspace, key, export_id)
     consumptions = _consumption_rows(workspace)
     expenses = _expense_rows(workspace)
@@ -1532,14 +1575,34 @@ def validate_project_workbook(
             status = str(row[6] or "已确认").strip()
             if status != "已确认":
                 _raise_issue("unconfirmed_collection", "只允许导入已确认的回款", sheet="01_总览", row=excel_row, column="状态")
+            voucher_no = (
+                str(row[5]).strip() if row[5] not in (None, "") else None
+            )
+            if voucher_no is not None and len(voucher_no) > 128:
+                _raise_issue(
+                    "receipt_reference_too_long",
+                    "回款凭证号不能超过 128 个字符",
+                    sheet="01_总览",
+                    row=excel_row,
+                    column="回款凭证号",
+                )
+            remark = str(row[7]).strip() if row[7] not in (None, "") else None
+            if remark is not None and len(remark) > MAX_CELL_CHARS:
+                _raise_issue(
+                    "collection_remark_too_long",
+                    f"备注不能超过 {MAX_CELL_CHARS} 个字符",
+                    sheet="01_总览",
+                    row=excel_row,
+                    column="备注",
+                )
             payload = {
                 "project_contract_id": project_contract_id,
                 "contract_no": contract_no,
                 "report_month": report_month.strftime("%Y-%m"),
                 "cumulative_amount": format(amount, "f"),
-                "voucher_no": str(row[5]).strip() if row[5] not in (None, "") else None,
+                "voucher_no": voucher_no,
                 "status": status,
-                "remark": str(row[7]).strip() if row[7] not in (None, "") else None,
+                "remark": remark,
             }
             payload_hash = hashlib.sha256(
                 json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")

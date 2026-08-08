@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
+from types import SimpleNamespace
+import threading
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries
@@ -27,6 +30,7 @@ from app.models.maintenance_project_operations import (
     MaintenanceProjectWorkbookValidation,
 )
 from app.models.system import SysUser
+from app.security import UserContext
 from app.services import maintenance_project_workbook_adapter
 from app.services.maintenance_project_workbook_v2 import COLLECTION_TABLE, PROTOCOL_ID
 
@@ -276,7 +280,16 @@ def test_export_validate_apply_is_a_server_owned_atomic_loop(db):
     assert operation_types == ["file_export", "collection_create", "file_apply"]
 
 
-def test_invalid_file_returns_persisted_error_workbook_without_writes(db):
+def test_invalid_file_returns_persisted_error_workbook_without_writes(
+    db,
+    monkeypatch,
+):
+    access_logs = []
+    monkeypatch.setattr(
+        maintenance_project_workbooks,
+        "record_access_log",
+        lambda *args: access_logs.append(args),
+    )
     client = _client(db, username="workbook_error_admin")
     project_id, _contract = _project_and_contract(client, db, suffix="error")
     before_revision = db.get(MaintenanceProjectWorkbookState, project_id).revision
@@ -295,11 +308,18 @@ def test_invalid_file_returns_persisted_error_workbook_without_writes(db):
     assert error_file.content.startswith(b"PK")
     assert error_file.headers["cache-control"] == "no-store"
     assert error_file.headers["x-content-type-options"] == "nosniff"
+    assert len(access_logs) == 1
+    assert access_logs[0][1:] == (
+        "download_workbook_errors",
+        f"maintenance_workbook_validation:{result['validation_token']}",
+        {"validation_id": result["validation_token"]},
+    )
     other_client = _client(db, username="workbook_error_other_admin")
     wrong_user = other_client.get(
         f"/api/maintenance/workbook-validations/{result['validation_token']}/errors.xlsx"
     )
     assert wrong_user.status_code == 404
+    assert len(access_logs) == 1
     row = db.get(MaintenanceProjectWorkbookValidation, result["validation_token"])
     db.refresh(row)
     assert row.status == "error"
@@ -310,6 +330,230 @@ def test_invalid_file_returns_persisted_error_workbook_without_writes(db):
     assert (
         db.scalar(select(func.count()).select_from(MaintenanceCollectionSnapshot)) == 0
     )
+
+
+def test_validate_worker_owns_session_and_runs_outside_event_loop(
+    tmp_path,
+    monkeypatch,
+):
+    upload = tmp_path / "update.xlsx"
+    upload.write_bytes(b"synthetic")
+    events = []
+    worker_threads = []
+
+    class FakeSession:
+        def commit(self):
+            events.append(("commit", threading.get_ident()))
+
+        def rollback(self):
+            events.append(("rollback", threading.get_ident()))
+
+        def close(self):
+            events.append(("close", threading.get_ident()))
+
+    class FakeAdapter:
+        def __init__(self, worker_db, **_kwargs):
+            worker_threads.append(threading.get_ident())
+            assert isinstance(worker_db, FakeSession)
+
+        def validate(self, project_id, content, *, hmac_key):
+            assert project_id == "project-worker"
+            assert content == b"synthetic"
+            assert hmac_key == b"x" * 16
+            return (
+                SimpleNamespace(metadata={}, creates=(), unchanged=True),
+                (),
+                "validation-worker",
+            )
+
+        def load_workspace(self, project_id):
+            assert project_id == "project-worker"
+            return {
+                "as_of": "2026-08-09",
+                "data_version": "worker-version",
+                "contracts": [],
+                "collections": [],
+                "consumptions": [],
+                "expenses": [],
+                "tasks": [],
+            }
+
+    monkeypatch.setattr(
+        maintenance_project_workbooks,
+        "SessionLocal",
+        FakeSession,
+    )
+    monkeypatch.setattr(
+        maintenance_project_workbooks,
+        "MaintenanceProjectWorkbookAdapter",
+        FakeAdapter,
+    )
+    monkeypatch.setattr(
+        maintenance_project_workbooks,
+        "_real_operator",
+        lambda worker_db, ident: ident["sub"],
+    )
+    ctx = UserContext(
+        user_id="worker-user",
+        role="admin",
+        is_authenticated=True,
+    )
+
+    async def exercise():
+        loop_thread = threading.get_ident()
+        result = await maintenance_project_workbooks._run_project_workbook_validation_worker(
+            project_id="project-worker",
+            upload_path=str(upload),
+            original_name="update.xlsx",
+            ident={"sub": "worker-user"},
+            ctx=ctx,
+            hmac_key=b"x" * 16,
+        )
+        return loop_thread, result
+
+    loop_thread, result = asyncio.run(exercise())
+
+    assert result["validation_token"] == "validation-worker"
+    assert worker_threads and worker_threads[0] != loop_thread
+    assert events == [
+        ("commit", worker_threads[0]),
+        ("close", worker_threads[0]),
+    ]
+
+
+def test_validate_worker_cancellation_waits_for_terminal_thread(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_worker(**_kwargs):
+        entered.set()
+        assert release.wait(timeout=2)
+        finished.set()
+        return {"can_apply": True}
+
+    monkeypatch.setattr(
+        maintenance_project_workbooks,
+        "_validate_project_workbook_in_worker",
+        blocking_worker,
+    )
+
+    async def exercise():
+        task = asyncio.create_task(
+            maintenance_project_workbooks._run_project_workbook_validation_worker()
+        )
+        assert await asyncio.to_thread(entered.wait, 1)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        completed_before_release = task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return completed_before_release
+
+    assert asyncio.run(exercise()) is False
+    assert finished.is_set()
+
+
+def test_cancelled_validate_keeps_temp_and_limiter_until_worker_finishes(
+    tmp_path,
+    monkeypatch,
+):
+    upload = tmp_path / "owned-until-worker-finishes.xlsx"
+    upload.write_bytes(b"synthetic")
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    async def parsed_upload(_request):
+        return str(upload), "update.xlsx"
+
+    def blocking_worker(**kwargs):
+        assert kwargs["upload_path"] == str(upload)
+        assert upload.exists()
+        entered.set()
+        assert release.wait(timeout=2)
+        assert upload.exists()
+        finished.set()
+        return {"can_apply": True}
+
+    monkeypatch.setattr(
+        maintenance_project_workbooks,
+        "_parse_and_save_roundtrip_upload",
+        parsed_upload,
+    )
+    monkeypatch.setattr(
+        maintenance_project_workbooks,
+        "_validate_project_workbook_in_worker",
+        blocking_worker,
+    )
+    ctx = UserContext(
+        user_id="cancel-user",
+        role="admin",
+        is_authenticated=True,
+    )
+    limiter = maintenance_project_workbooks._PROJECT_WORKBOOK_VALIDATE_LIMITER
+
+    async def exercise():
+        task = asyncio.create_task(
+            maintenance_project_workbooks.validate_project_workbook_upload(
+                request=object(),
+                response=Response(),
+                project_id="project-cancel",
+                ident={"sub": "cancel-user"},
+                _auth="admin",
+                _page=None,
+                _action=None,
+                ctx=ctx,
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 1)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert task.done() is False
+        assert upload.exists()
+        assert limiter.acquire(blocking=False) is False
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    assert finished.is_set()
+    assert upload.exists() is False
+    assert limiter.acquire(blocking=False)
+    limiter.release()
+
+
+def test_validate_concurrency_limiter_rejects_before_upload_read(db, monkeypatch):
+    client = _client(db, username="workbook_validate_busy_admin")
+    project_id, _contract = _project_and_contract(
+        client,
+        db,
+        suffix="validate-busy",
+    )
+    upload_read = False
+
+    async def fail_if_read(_request):
+        nonlocal upload_read
+        upload_read = True
+        raise AssertionError("busy validation consumed upload")
+
+    monkeypatch.setattr(
+        maintenance_project_workbooks,
+        "_parse_and_save_roundtrip_upload",
+        fail_if_read,
+    )
+    limiter = maintenance_project_workbooks._PROJECT_WORKBOOK_VALIDATE_LIMITER
+    assert limiter.acquire(blocking=False)
+    try:
+        response = _validate(client, project_id, b"must-not-be-read")
+    finally:
+        limiter.release()
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "5"
+    assert upload_read is False
 
 
 def test_unchanged_monthly_workbook_can_confirm_zero_row_update(db):

@@ -77,6 +77,21 @@ def _add_zip_member(content: bytes, name: str, payload: bytes) -> bytes:
     return output.getvalue()
 
 
+def _replace_zip_bytes(content: bytes, old: bytes, new: bytes) -> bytes:
+    output = io.BytesIO()
+    replaced = False
+    with zipfile.ZipFile(io.BytesIO(content), "r") as source:
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as target:
+            for item in source.infolist():
+                payload = source.read(item.filename)
+                if old in payload:
+                    payload = payload.replace(old, new)
+                    replaced = True
+                target.writestr(item, payload)
+    assert replaced
+    return output.getvalue()
+
+
 class _FakeRepository:
     def __init__(self, *, revision: int = 7):
         self.revision = revision
@@ -995,6 +1010,102 @@ def test_client_row_id_is_signed_and_cumulative_amount_cannot_decrease():
             hmac_key=HMAC_KEY,
         )
     assert amount_error.value.issues[0].code == "cumulative_decrease"
+
+
+@pytest.mark.parametrize(
+    ("header", "value", "expected_code"),
+    [
+        ("回款凭证号", "V" * 129, "receipt_reference_too_long"),
+        ("备注", "R" * 32768, "collection_remark_too_long"),
+    ],
+)
+def test_collection_text_limits_are_rejected_during_validate(
+    header,
+    value,
+    expected_code,
+):
+    workspace = _workspace()
+    exported = workbook_v2.build_project_workbook(
+        workspace,
+        hmac_key=HMAC_KEY,
+        exported_by="tester",
+    )
+    uploaded = _append_collection(exported.content)
+
+    marker = "OVERSIZED_REMARK_MARKER" if header == "备注" else value
+
+    def set_oversized_value(book):
+        sheet = book["01_总览"]
+        table = sheet.tables[workbook_v2.COLLECTION_TABLE]
+        min_col, min_row, max_col, max_row = range_boundaries(table.ref)
+        headers = [
+            sheet.cell(min_row, column).value
+            for column in range(min_col, max_col + 1)
+        ]
+        operation_col = min_col + headers.index("操作")
+        target = next(
+            row
+            for row in range(min_row + 1, max_row + 1)
+            if sheet.cell(row, operation_col).value == "CREATE"
+        )
+        sheet.cell(target, min_col + headers.index(header), marker)
+
+    unsafe = _edit_workbook(uploaded, set_oversized_value)
+    if header == "备注":
+        unsafe = _replace_zip_bytes(
+            unsafe,
+            marker.encode("utf-8"),
+            value.encode("utf-8"),
+        )
+
+    with pytest.raises(workbook_v2.ProjectWorkbookV2Error) as caught:
+        workbook_v2.validate_project_workbook(
+            unsafe,
+            workspace=workspace,
+            hmac_key=HMAC_KEY,
+        )
+
+    assert caught.value.issues[0].code == expected_code
+
+
+def test_export_rejects_more_than_validator_row_limit():
+    workspace = _workspace()
+    template = dict(workspace["consumptions"][0])
+    workspace["consumptions"] = [
+        {**template, "consumption_id": f"issue-line-{index}"}
+        for index in range(workbook_v2.MAX_ROWS_PER_TABLE + 1)
+    ]
+
+    with pytest.raises(workbook_v2.ProjectWorkbookV2Error) as caught:
+        workbook_v2.build_project_workbook(
+            workspace,
+            hmac_key=HMAC_KEY,
+            exported_by="tester",
+        )
+
+    assert caught.value.issues[0].code == "export_row_limit"
+
+
+def test_export_at_validator_row_limit_can_be_validated_unchanged():
+    workspace = _workspace()
+    template = dict(workspace["consumptions"][0])
+    workspace["consumptions"] = [
+        {**template, "consumption_id": f"issue-line-{index}"}
+        for index in range(workbook_v2.MAX_ROWS_PER_TABLE)
+    ]
+
+    exported = workbook_v2.build_project_workbook(
+        workspace,
+        hmac_key=HMAC_KEY,
+        exported_by="tester",
+    )
+    validation = workbook_v2.validate_project_workbook(
+        exported.content,
+        workspace=workspace,
+        hmac_key=HMAC_KEY,
+    )
+
+    assert validation.unchanged is True
 
 
 def test_error_workbook_is_first_sheet_error_list_and_cannot_be_imported():

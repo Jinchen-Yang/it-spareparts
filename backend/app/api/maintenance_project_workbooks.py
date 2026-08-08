@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
+import logging
 from pathlib import Path as FilePath
+import threading
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response, status
@@ -15,15 +19,17 @@ from app.api.maintenance import (
     _parse_and_save_roundtrip_upload,
     _remove_roundtrip_temp,
     _require_roundtrip_permissions,
+    _wait_for_roundtrip_task_terminal,
 )
 from app.api.maintenance_project_operations import _real_operator
 from app.auth import current_identity, current_role
 from app.business_time import business_today
 from app.config import get_settings
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.security import (
     UserContext,
     get_current_user_context,
+    record_access_log,
     require_action,
     require_page,
 )
@@ -36,6 +42,8 @@ from app.services.maintenance_project_workbook_v2 import ProjectWorkbookV2Error
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 _XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_PROJECT_WORKBOOK_VALIDATE_LIMITER = threading.BoundedSemaphore(value=1)
+logger = logging.getLogger(__name__)
 
 
 class WorkbookApplyRequest(BaseModel):
@@ -81,6 +89,100 @@ def _http_error(exc: ProjectWorkbookV2Error) -> HTTPException:
 
 def _safe_export_operator(ident: dict) -> str:
     return str(ident.get("sub") or ident.get("role") or "maintenance-export")[:64]
+
+
+def _validate_project_workbook_in_worker(
+    *,
+    project_id: str,
+    upload_path: str,
+    original_name: str,
+    ident: dict,
+    ctx: UserContext,
+    hmac_key: bytes,
+) -> dict:
+    """Run the complete validation transaction on one worker-owned Session."""
+
+    db: Session | None = None
+    try:
+        db = SessionLocal()
+        operator = _real_operator(db, ident)
+        content = FilePath(upload_path).read_bytes()
+        adapter = MaintenanceProjectWorkbookAdapter(
+            db,
+            user_ctx=ctx,
+            operator=operator,
+            as_of=business_today(),
+        )
+        validation, issues, validation_id = adapter.validate(
+            project_id,
+            content,
+            hmac_key=hmac_key,
+        )
+        workspace = adapter.load_workspace(project_id)
+        exported_at = (
+            validation.metadata.get("exported_at")
+            if validation is not None
+            else None
+        )
+        payload = {
+            "validation_token": validation_id,
+            "project_id": project_id,
+            "data_version": workspace["data_version"],
+            "filename": original_name,
+            "preview": workbook_preview(
+                workspace,
+                data_version=str(workspace["data_version"]),
+                exported_at=exported_at,
+            ),
+            "changes": {
+                "collection_append": len(validation.creates) if validation else 0
+            },
+            "warnings": (
+                ["未检测到新增回款；确认后将记录本月已更新"]
+                if validation is not None and validation.unchanged
+                else []
+            ),
+            "errors": [issue.message for issue in issues],
+            "can_apply": validation is not None,
+        }
+        db.commit()
+        return payload
+    except BaseException:
+        if db is not None:
+            with suppress(Exception):
+                db.rollback()
+        raise
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except BaseException:
+                with suppress(Exception):
+                    logger.warning(
+                        "项目工作簿校验 worker 关闭数据库会话失败",
+                        exc_info=True,
+                    )
+
+
+async def _run_project_workbook_validation_worker(**kwargs) -> dict:
+    """Wait for terminal worker state even when the caller is cancelled."""
+
+    worker = asyncio.create_task(
+        anyio.to_thread.run_sync(
+            lambda: _validate_project_workbook_in_worker(**kwargs),
+            abandon_on_cancel=False,
+        )
+    )
+    cancellation = await _wait_for_roundtrip_task_terminal(worker)
+    try:
+        result = worker.result()
+    except BaseException as exc:
+        if cancellation is not None:
+            raise cancellation from exc
+        raise
+    if cancellation is not None:
+        raise cancellation
+    return result
 
 
 @router.get("/projects/stable/{project_id}/workbook")
@@ -132,7 +234,6 @@ async def validate_project_workbook_upload(
     request: Request,
     response: Response,
     project_id: str = Path(..., min_length=1, max_length=36),
-    db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
@@ -146,66 +247,35 @@ async def validate_project_workbook_upload(
 ) -> dict:
     _no_store(response)
     _require_roundtrip_permissions(ctx)
-    operator = _real_operator(db, ident)
+    if not _PROJECT_WORKBOOK_VALIDATE_LIMITER.acquire(blocking=False):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "已有项目工作簿正在校验，请稍后重试",
+            headers={"Retry-After": "5"},
+        )
     upload_path: str | None = None
     try:
         upload_path, original_name = await _parse_and_save_roundtrip_upload(request)
-        content = await anyio.to_thread.run_sync(FilePath(upload_path).read_bytes)
-        adapter = MaintenanceProjectWorkbookAdapter(
-            db,
-            user_ctx=ctx,
-            operator=operator,
-            as_of=business_today(),
-        )
-        validation, issues, validation_id = adapter.validate(
-            project_id,
-            content,
+        return await _run_project_workbook_validation_worker(
+            project_id=project_id,
+            upload_path=upload_path,
+            original_name=original_name,
+            ident=ident,
+            ctx=ctx,
             hmac_key=_hmac_key(),
         )
-        workspace = adapter.load_workspace(project_id)
-        exported_at = (
-            validation.metadata.get("exported_at") if validation is not None else None
-        )
-        payload = {
-            "validation_token": validation_id,
-            "project_id": project_id,
-            "data_version": workspace["data_version"],
-            "filename": original_name,
-            "preview": workbook_preview(
-                workspace,
-                data_version=str(workspace["data_version"]),
-                exported_at=exported_at,
-            ),
-            "changes": {
-                "collection_append": len(validation.creates) if validation else 0
-            },
-            "warnings": (
-                ["未检测到新增回款；确认后将记录本月已更新"]
-                if validation is not None and validation.unchanged
-                else []
-            ),
-            "errors": [issue.message for issue in issues],
-            "can_apply": validation is not None,
-        }
-        db.commit()
-        return payload
-    except HTTPException:
-        db.rollback()
-        raise
     except ProjectWorkbookV2Error as exc:
-        db.rollback()
         raise _http_error(exc) from exc
     except IntegrityError as exc:
-        db.rollback()
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             "工作簿校验记录冲突，请重新上传",
         ) from exc
-    except Exception:
-        db.rollback()
-        raise
     finally:
-        _remove_roundtrip_temp(upload_path)
+        try:
+            _remove_roundtrip_temp(upload_path)
+        finally:
+            _PROJECT_WORKBOOK_VALIDATE_LIMITER.release()
 
 
 @router.post("/projects/stable/{project_id}/workbook/apply")
@@ -288,6 +358,12 @@ def download_project_workbook_errors(
     content = adapter.load_error_workbook(validation_id)
     if content is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "错误工作簿不存在或已过期")
+    record_access_log(
+        ctx,
+        "download_workbook_errors",
+        f"maintenance_workbook_validation:{validation_id}",
+        {"validation_id": validation_id},
+    )
     return Response(
         content=content,
         media_type=_XLSX_MEDIA_TYPE,
