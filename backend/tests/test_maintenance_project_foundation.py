@@ -3,6 +3,7 @@
 import os
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from alembic import command as alembic_command
@@ -14,11 +15,16 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from app.auth import hash_password
 from app.db import engine
 from app.main import app
-from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectContract,
+)
 from app.models.system import SysAccessLog, SysUser
 
 
-def _token(db, *, username: str, role: str = "admin", permissions: dict | None = None) -> str:
+def _token(
+    db, *, username: str, role: str = "admin", permissions: dict | None = None
+) -> str:
     db.add(
         SysUser(
             username=username,
@@ -46,9 +52,7 @@ def _get(client: TestClient, path: str, token: str, **params):
 
 
 def _alembic_cfg() -> AlembicConfig:
-    cfg = AlembicConfig(
-        os.path.join(os.path.dirname(__file__), "..", "alembic.ini")
-    )
+    cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     cfg.set_main_option(
         "script_location",
         os.path.join(os.path.dirname(__file__), "..", "alembic"),
@@ -75,6 +79,7 @@ def test_stable_project_overview_sums_all_effective_contracts_to_the_cent(db):
                 contract_amount=Decimal("100.10"),
                 contract_status="effective",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=True,
                 effective_from=date(2026, 1, 1),
                 source="synthetic-test",
@@ -87,6 +92,7 @@ def test_stable_project_overview_sums_all_effective_contracts_to_the_cent(db):
                 contract_amount=Decimal("200.20"),
                 contract_status="effective",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=True,
                 effective_from=date(2026, 1, 1),
                 source="synthetic-test",
@@ -117,6 +123,146 @@ def test_stable_project_overview_sums_all_effective_contracts_to_the_cent(db):
     assert payload["completeness"] == {"status": "complete", "issues": []}
     assert payload["as_of"] == "2026-08-08"
     assert payload["data_version"]
+    assert {
+        contract["status_mapping_version"] for contract in payload["contracts"]
+    } == {"contract-status-map-v1"}
+
+    amount_changed_without_version_bump = db.get(
+        MaintenanceProjectContract,
+        "10000000-0000-4000-8000-000000000001",
+    )
+    assert amount_changed_without_version_bump is not None
+    amount_changed_without_version_bump.contract_amount = Decimal("101.10")
+    db.commit()
+    changed = _get(
+        TestClient(app),
+        f"/api/maintenance/projects/stable/{project.project_id}",
+        token,
+        as_of="2026-08-08",
+    ).json()
+    assert changed["data_version"] != payload["data_version"]
+    assert Decimal(str(changed["total_contract_amount"])) == Decimal("301.30")
+
+
+def test_directory_data_version_covers_as_of_and_all_filtered_pages(db):
+    first = MaintenanceProject(
+        project_id="00000000-0000-4000-8000-000000000021",
+        project_code="MAINT-VERSION-A-FIRST",
+        display_name="版本标识第一页",
+        lifecycle_status="active",
+    )
+    db.add(first)
+    db.commit()
+    token = _token(db, username="maint_project_directory_version_admin")
+    client = TestClient(app)
+
+    initial = _get(
+        client,
+        "/api/maintenance/projects/stable",
+        token,
+        page_size=1,
+        as_of="2026-08-08",
+    ).json()
+    shifted_as_of = _get(
+        client,
+        "/api/maintenance/projects/stable",
+        token,
+        page_size=1,
+        as_of="2026-08-09",
+    ).json()
+    assert shifted_as_of["rows"] == initial["rows"]
+    assert shifted_as_of["total"] == initial["total"]
+    assert shifted_as_of["data_version"] != initial["data_version"]
+
+    after_page = MaintenanceProject(
+        project_id="00000000-0000-4000-8000-000000000022",
+        project_code="MAINT-VERSION-Z-AFTER-PAGE",
+        display_name="版本标识后续页",
+        lifecycle_status="active",
+        version=7,
+    )
+    db.add(after_page)
+    db.commit()
+    changed = _get(
+        client,
+        "/api/maintenance/projects/stable",
+        token,
+        page_size=1,
+        as_of="2026-08-08",
+    ).json()
+
+    assert changed["rows"] == initial["rows"]
+    assert changed["total"] == initial["total"] + 1
+    assert changed["data_version"] != initial["data_version"]
+
+
+def test_overview_data_version_covers_as_of_and_cross_project_relations(db):
+    target = MaintenanceProject(
+        project_id="00000000-0000-4000-8000-000000000023",
+        project_code="MAINT-VERSION-TARGET",
+        display_name="版本标识目标项目",
+        lifecycle_status="active",
+    )
+    target_relation = MaintenanceProjectContract(
+        project_contract_id="10000000-0000-4000-8000-000000000023",
+        project_id=target.project_id,
+        contract_id="contract-version-cross-scope",
+        contract_no="CONTRACT-VERSION-CROSS-SCOPE",
+        contract_amount=Decimal("100.00"),
+        contract_status="effective",
+        status_mapping_state="mapped",
+        status_mapping_version="contract-status-map-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        source="synthetic-test",
+    )
+    db.add_all([target, target_relation])
+    db.commit()
+    token = _token(db, username="maint_project_overview_version_admin")
+    client = TestClient(app)
+    path = f"/api/maintenance/projects/stable/{target.project_id}"
+
+    initial = _get(client, path, token, as_of="2026-08-08").json()
+    shifted_as_of = _get(client, path, token, as_of="2026-08-09").json()
+    assert shifted_as_of["contracts"] == initial["contracts"]
+    assert shifted_as_of["data_version"] != initial["data_version"]
+
+    counterpart = MaintenanceProject(
+        project_id="00000000-0000-4000-8000-000000000024",
+        project_code="MAINT-VERSION-COUNTERPART",
+        display_name="版本标识对端项目",
+        lifecycle_status="active",
+    )
+    counterpart_relation = MaintenanceProjectContract(
+        project_contract_id="10000000-0000-4000-8000-000000000024",
+        project_id=counterpart.project_id,
+        contract_id=target_relation.contract_id,
+        contract_no=target_relation.contract_no,
+        contract_amount=Decimal("100.00"),
+        contract_status="effective",
+        status_mapping_state="mapped",
+        status_mapping_version="contract-status-map-v1",
+        included_in_total=True,
+        effective_from=date(2026, 1, 1),
+        source="synthetic-test",
+        version=4,
+    )
+    db.add_all([counterpart, counterpart_relation])
+    db.commit()
+    conflicted = _get(client, path, token, as_of="2026-08-08").json()
+
+    assert conflicted["data_version"] != initial["data_version"]
+    assert conflicted["completeness"]["issues"] == [
+        {
+            "code": "cross_project_contract_conflict",
+            "contract_ids": [target_relation.contract_id],
+        }
+    ]
+
+    counterpart_relation.version += 1
+    db.commit()
+    version_bumped = _get(client, path, token, as_of="2026-08-08").json()
+    assert version_bumped["data_version"] == conflicted["data_version"]
 
 
 def test_missing_effective_contract_amount_fails_closed_with_reason(db):
@@ -136,6 +282,7 @@ def test_missing_effective_contract_amount_fails_closed_with_reason(db):
             contract_amount=None,
             contract_status="effective",
             status_mapping_state="mapped",
+            status_mapping_version="contract-status-map-v1",
             included_in_total=True,
             effective_from=date(2026, 1, 1),
             source="synthetic-test",
@@ -183,6 +330,7 @@ def test_expired_or_excluded_relationships_remain_visible_but_do_not_enter_total
                 contract_amount=Decimal("400.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=True,
                 effective_from=date(2026, 8, 8),
                 source="synthetic-test",
@@ -195,6 +343,7 @@ def test_expired_or_excluded_relationships_remain_visible_but_do_not_enter_total
                 contract_amount=Decimal("900.00"),
                 contract_status="expired",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=True,
                 effective_from=date(2026, 1, 1),
                 effective_to=date(2026, 8, 8),
@@ -208,6 +357,7 @@ def test_expired_or_excluded_relationships_remain_visible_but_do_not_enter_total
                 contract_amount=Decimal("800.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=False,
                 effective_from=date(2026, 1, 1),
                 source="synthetic-test",
@@ -257,7 +407,8 @@ def test_unmapped_source_status_fails_closed_instead_of_guessing_display_text(db
             contract_amount=Decimal("500.00"),
             contract_status="看起来已生效但未建映射",
             status_mapping_state="unmapped",
-            included_in_total=True,
+            status_mapping_version="contract-status-map-v1",
+            included_in_total=False,
             effective_from=date(2026, 1, 1),
             source="synthetic-test",
         )
@@ -276,10 +427,11 @@ def test_unmapped_source_status_fails_closed_instead_of_guessing_display_text(db
     payload = response.json()
     assert payload["total_contract_amount"] is None
     assert payload["completeness"]["issues"] == [
+        {"code": "no_effective_contracts", "contract_ids": []},
         {
             "code": "unmapped_contract_status",
             "contract_ids": ["contract-synth-unmapped"],
-        }
+        },
     ]
 
 
@@ -301,6 +453,7 @@ def test_current_unmapped_relationship_fails_closed_even_when_not_included(db):
                 contract_amount=Decimal("100.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=True,
                 effective_from=date(2026, 1, 1),
                 source="synthetic-test",
@@ -313,6 +466,7 @@ def test_current_unmapped_relationship_fails_closed_even_when_not_included(db):
                 contract_amount=Decimal("200.00"),
                 contract_status="来源状态尚未映射",
                 status_mapping_state="unmapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=False,
                 effective_from=date(2026, 1, 1),
                 source="synthetic-test",
@@ -341,6 +495,49 @@ def test_current_unmapped_relationship_fails_closed_even_when_not_included(db):
     ]
 
 
+@pytest.mark.parametrize(
+    ("mapping_version", "mapping_state", "included"),
+    [
+        ("   ", "mapped", True),
+        ("contract-status-map-v1", "unmapped", True),
+    ],
+    ids=["blank-mapping-version", "unmapped-cannot-enter-total"],
+)
+def test_mapping_provenance_constraints_fail_closed(
+    db,
+    mapping_version,
+    mapping_state,
+    included,
+):
+    project = MaintenanceProject(
+        project_id="00000000-0000-4000-8000-000000000026",
+        project_code="MAINT-SYNTH-MAPPING-CONSTRAINT",
+        display_name="合成映射约束项目",
+        lifecycle_status="active",
+    )
+    db.add(project)
+    db.commit()
+    db.add(
+        MaintenanceProjectContract(
+            project_contract_id="10000000-0000-4000-8000-000000000026",
+            project_id=project.project_id,
+            contract_id="contract-synth-mapping-constraint",
+            contract_no="CONTRACT-SYNTH-MAPPING-CONSTRAINT",
+            contract_amount=Decimal("100.00"),
+            contract_status="effective",
+            status_mapping_state=mapping_state,
+            status_mapping_version=mapping_version,
+            included_in_total=included,
+            effective_from=date(2026, 1, 1),
+            source="synthetic-test",
+        )
+    )
+
+    with pytest.raises(IntegrityError):
+        db.flush()
+    db.rollback()
+
+
 def test_overlapping_duplicate_contract_relationships_never_double_count(db):
     project = MaintenanceProject(
         project_id="00000000-0000-4000-8000-000000000005",
@@ -359,6 +556,7 @@ def test_overlapping_duplicate_contract_relationships_never_double_count(db):
                 contract_amount=Decimal("600.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=True,
                 effective_from=date(2026, 1, 1),
                 source="synthetic-test-a",
@@ -371,6 +569,7 @@ def test_overlapping_duplicate_contract_relationships_never_double_count(db):
                 contract_amount=Decimal("600.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=True,
                 effective_from=date(2026, 2, 1),
                 source="synthetic-test-b",
@@ -414,6 +613,7 @@ def test_exact_duplicate_relationship_identity_is_rejected_by_storage(db):
         "contract_amount": Decimal("700.00"),
         "contract_status": "effective",
         "status_mapping_state": "mapped",
+        "status_mapping_version": "contract-status-map-v1",
         "included_in_total": True,
         "effective_from": date(2026, 1, 1),
         "source": "synthetic-test",
@@ -462,6 +662,7 @@ def test_cross_project_contract_conflict_fails_closed_and_is_auditable(db):
                 contract_amount=Decimal("800.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=True,
                 effective_from=date(2026, 1, 1),
                 source="synthetic-test",
@@ -491,7 +692,10 @@ def test_cross_project_contract_conflict_fails_closed_and_is_auditable(db):
 @pytest.mark.parametrize(
     "requested_active",
     [True, False],
-    ids=["active-project-reads-inactive-conflict", "inactive-project-reads-active-conflict"],
+    ids=[
+        "active-project-reads-inactive-conflict",
+        "inactive-project-reads-active-conflict",
+    ],
 )
 def test_cross_project_conflict_includes_inactive_project_relationships(
     db,
@@ -522,6 +726,7 @@ def test_cross_project_conflict_includes_inactive_project_relationships(
                 contract_amount=Decimal("850.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=True,
                 effective_from=date(2026, 1, 1),
                 source="synthetic-test",
@@ -578,6 +783,7 @@ def test_same_display_name_projects_stay_independent_and_rename_keeps_relationsh
                 contract_amount=Decimal(amount),
                 contract_status="effective",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=True,
                 effective_from=date(2026, 1, 1),
                 source="synthetic-test",
@@ -606,7 +812,9 @@ def test_same_display_name_projects_stay_independent_and_rename_keeps_relationsh
         q="maint-synth-same-a",
         as_of="2026-08-08",
     )
-    assert [row["project_id"] for row in code_search.json()["rows"]] == [first.project_id]
+    assert [row["project_id"] for row in code_search.json()["rows"]] == [
+        first.project_id
+    ]
 
     first_overview = _get(
         client,
@@ -649,12 +857,23 @@ def test_directory_contains_search_uses_trigram_indexes_without_changing_semanti
     token = _token(db, username="maint_project_search_index_admin")
     client = TestClient(app)
 
-    code_search = _get(
-        client,
-        "/api/maintenance/projects/stable",
-        token,
-        q="needle",
-    )
+    captured: list[tuple[str, object]] = []
+
+    def capture_directory_sql(_conn, _cursor, statement, parameters, _context, _many):
+        if statement.lstrip().upper().startswith("SELECT"):
+            captured.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", capture_directory_sql)
+    try:
+        code_search = _get(
+            client,
+            "/api/maintenance/projects/stable",
+            token,
+            q="needle",
+            include_inactive="true",
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture_directory_sql)
     name_search = _get(
         client,
         "/api/maintenance/projects/stable",
@@ -672,19 +891,24 @@ def test_directory_contains_search_uses_trigram_indexes_without_changing_semanti
 
     db.execute(text("ANALYZE maintenance_project"))
     db.execute(text("SET LOCAL enable_seqscan = off"))
-    plan = "\n".join(
-        db.execute(
-            text(
-                "EXPLAIN (FORMAT TEXT) "
-                "SELECT project_id FROM maintenance_project "
-                "WHERE lower(project_code) LIKE lower(:pattern) "
-                "OR lower(display_name) LIKE lower(:pattern)"
-            ),
-            {"pattern": "%needle%"},
-        ).scalars()
+    db.execute(text("SET LOCAL enable_indexscan = off"))
+    directory_sql, directory_parameters = next(
+        (statement, parameters)
+        for statement, parameters in captured
+        if "ORDER BY maintenance_project.project_code" in statement
     )
-    assert "ix_maintenance_project_code_trgm" in plan
-    assert "ix_maintenance_project_display_name_trgm" in plan
+    assert " ILIKE " in directory_sql
+    assert "lower(maintenance_project.project_code)" not in directory_sql
+    plan = "\n".join(
+        db.connection()
+        .exec_driver_sql(
+            f"EXPLAIN (FORMAT TEXT) {directory_sql}",
+            directory_parameters,
+        )
+        .scalars()
+    )
+    assert "ix_maintenance_project_code_trgm" in plan, plan
+    assert "ix_maintenance_project_display_name_trgm" in plan, plan
 
 
 def test_contract_amount_permission_hides_lines_total_and_amount_completeness(db):
@@ -705,6 +929,7 @@ def test_contract_amount_permission_hides_lines_total_and_amount_completeness(db
                 contract_amount=Decimal("1200.00"),
                 contract_status="effective",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=True,
                 effective_from=date(2026, 1, 1),
                 source="synthetic-test",
@@ -717,6 +942,7 @@ def test_contract_amount_permission_hides_lines_total_and_amount_completeness(db
                 contract_amount=None,
                 contract_status="effective",
                 status_mapping_state="mapped",
+                status_mapping_version="contract-status-map-v1",
                 included_in_total=True,
                 effective_from=date(2026, 1, 1),
                 source="synthetic-test",
@@ -737,7 +963,25 @@ def test_contract_amount_permission_hides_lines_total_and_amount_completeness(db
     payload = response.json()
     assert payload["total_contract_amount"] is None
     assert all(contract["contract_amount"] is None for contract in payload["contracts"])
+    assert all(contract["version"] is None for contract in payload["contracts"])
     assert payload["completeness"] == {"status": "restricted", "issues": []}
+
+    hidden_relation = db.get(
+        MaintenanceProjectContract,
+        "10000000-0000-4000-8000-000000000016",
+    )
+    assert hidden_relation is not None
+    hidden_relation.contract_amount = Decimal("987654.32")
+    hidden_relation.version += 1
+    db.commit()
+    after_hidden_amount_change = _get(
+        TestClient(app),
+        f"/api/maintenance/projects/stable/{project.project_id}",
+        token,
+        as_of="2026-08-08",
+    ).json()
+    assert after_hidden_amount_change["data_version"] == payload["data_version"]
+    assert after_hidden_amount_change["contracts"] == payload["contracts"]
 
 
 def test_project_without_effective_contracts_returns_null_not_zero(db):
@@ -784,6 +1028,36 @@ def test_stable_routes_do_not_shadow_legacy_projects_api(db):
     assert anonymous_stable.status_code == 401
 
 
+def test_stable_project_foundation_routes_are_read_only(db):
+    project = MaintenanceProject(
+        project_id="00000000-0000-4000-8000-000000000025",
+        project_code="MAINT-SYNTH-READ-ONLY",
+        display_name="合成只读项目",
+        lifecycle_status="active",
+    )
+    db.add(project)
+    db.commit()
+    token = _token(db, username="maint_project_read_only_admin")
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    for method in ["post", "put", "patch", "delete"]:
+        directory = client.request(
+            method.upper(),
+            "/api/maintenance/projects/stable",
+            headers=headers,
+            json={},
+        )
+        overview = client.request(
+            method.upper(),
+            f"/api/maintenance/projects/stable/{project.project_id}",
+            headers=headers,
+            json={},
+        )
+        assert directory.status_code in {404, 405}
+        assert overview.status_code in {404, 405}
+
+
 def test_stable_project_directory_and_overview_reads_are_access_logged(db):
     project = MaintenanceProject(
         project_id="00000000-0000-4000-8000-000000000013",
@@ -797,11 +1071,14 @@ def test_stable_project_directory_and_overview_reads_are_access_logged(db):
     client = TestClient(app)
 
     assert _get(client, "/api/maintenance/projects/stable", token).status_code == 200
-    assert _get(
-        client,
-        f"/api/maintenance/projects/stable/{project.project_id}",
-        token,
-    ).status_code == 200
+    assert (
+        _get(
+            client,
+            f"/api/maintenance/projects/stable/{project.project_id}",
+            token,
+        ).status_code
+        == 200
+    )
 
     db.expire_all()
     actions = list(
@@ -846,6 +1123,7 @@ def test_stable_project_queries_do_not_grow_with_contract_count(db):
                     contract_amount=Decimal("10.00"),
                     contract_status="effective",
                     status_mapping_state="mapped",
+                    status_mapping_version="contract-status-map-v1",
                     included_in_total=True,
                     effective_from=date(2026, 1, 1),
                     source="synthetic-test",
@@ -858,7 +1136,9 @@ def test_stable_project_queries_do_not_grow_with_contract_count(db):
     def captured_get(path: str) -> tuple[object, list[str]]:
         statements: list[str] = []
 
-        def before_cursor_execute(_conn, _cursor, statement, _parameters, _context, _many):
+        def before_cursor_execute(
+            _conn, _cursor, statement, _parameters, _context, _many
+        ):
             if statement.lstrip().upper().startswith("SELECT"):
                 statements.append(statement)
 
@@ -884,7 +1164,110 @@ def test_stable_project_queries_do_not_grow_with_contract_count(db):
     assert sum("maintenance_project_contract" in query for query in few_queries) == 2
     assert sum("maintenance_project_contract" in query for query in many_queries) == 2
     assert directory_response.status_code == 200
-    assert not any("maintenance_project_contract" in query for query in directory_queries)
+    assert not any(
+        "maintenance_project_contract" in query for query in directory_queries
+    )
+
+
+def test_empty_foundation_schema_downgrade_and_upgrade_rebuilds_full_contract(db):
+    db.close()
+    cfg = _alembic_cfg()
+    migration_source = (
+        Path(__file__).parents[1]
+        / "alembic/versions/c6f2a8e9d4b1_maintenance_project_contract_foundation.py"
+    ).read_text(encoding="utf-8")
+    lock_start = migration_source.index(
+        "LOCK TABLE maintenance_project_contract, maintenance_project"
+    )
+    assert lock_start < migration_source.index("IN ACCESS EXCLUSIVE MODE")
+    assert lock_start < migration_source.index("DO $migration$")
+    explicit_indexes = {
+        "ix_maintenance_project_active_code",
+        "ix_maintenance_project_code_trgm",
+        "ix_maintenance_project_display_name",
+        "ix_maintenance_project_display_name_trgm",
+        "ix_maintenance_project_contract_contract",
+        "ix_maintenance_project_contract_effective",
+        "ix_maintenance_project_contract_project",
+    }
+    key_constraints = {
+        "ck_maintenance_project_version",
+        "maintenance_project_pkey",
+        "maintenance_project_project_code_key",
+        "ck_maintenance_project_contract_status_mapping",
+        "ck_maintenance_project_contract_mapping_version",
+        "ck_maintenance_project_contract_unmapped_excluded",
+        "ck_maintenance_project_contract_interval",
+        "ck_maintenance_project_contract_amount",
+        "ck_maintenance_project_contract_version",
+        "maintenance_project_contract_project_id_fkey",
+        "maintenance_project_contract_pkey",
+        "uq_maintenance_project_contract_identity",
+    }
+
+    try:
+        alembic_command.downgrade(cfg, "f1c8e4a7b2d9")
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(text("SELECT version_num FROM alembic_version"))
+                == "f1c8e4a7b2d9"
+            )
+            assert connection.execute(
+                text(
+                    "SELECT to_regclass(name) FROM "
+                    "(VALUES ('maintenance_project'), "
+                    "('maintenance_project_contract')) AS tables(name)"
+                )
+            ).scalars().all() == [None, None]
+
+        alembic_command.upgrade(cfg, "head")
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(text("SELECT version_num FROM alembic_version"))
+                == "c6f2a8e9d4b1"
+            )
+            assert connection.execute(
+                text(
+                    "SELECT to_regclass(name) FROM "
+                    "(VALUES ('maintenance_project'), "
+                    "('maintenance_project_contract')) AS tables(name)"
+                )
+            ).scalars().all() == [
+                "maintenance_project",
+                "maintenance_project_contract",
+            ]
+            index_definitions = dict(
+                connection.execute(
+                    text(
+                        "SELECT indexname, indexdef FROM pg_indexes "
+                        "WHERE schemaname = current_schema() "
+                        "AND tablename IN "
+                        "('maintenance_project', 'maintenance_project_contract')"
+                    )
+                ).all()
+            )
+            assert explicit_indexes <= index_definitions.keys()
+            assert (
+                "USING gin (project_code gin_trgm_ops)"
+                in index_definitions["ix_maintenance_project_code_trgm"]
+            )
+            assert (
+                "USING gin (display_name gin_trgm_ops)"
+                in index_definitions["ix_maintenance_project_display_name_trgm"]
+            )
+            constraints = set(
+                connection.execute(
+                    text(
+                        "SELECT conname FROM pg_constraint "
+                        "WHERE conrelid IN "
+                        "('maintenance_project'::regclass, "
+                        "'maintenance_project_contract'::regclass)"
+                    )
+                ).scalars()
+            )
+            assert key_constraints <= constraints
+    finally:
+        alembic_command.upgrade(cfg, "head")
 
 
 def test_nonempty_stable_project_facts_block_destructive_schema_downgrade(db):
@@ -905,9 +1288,12 @@ def test_nonempty_stable_project_facts_block_destructive_schema_downgrade(db):
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
             "c6f2a8e9d4b1"
         )
-        assert connection.scalar(
-            text(
-                "SELECT count(*) FROM maintenance_project "
-                "WHERE project_id='00000000-0000-4000-8000-000000000016'"
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT count(*) FROM maintenance_project "
+                    "WHERE project_id='00000000-0000-4000-8000-000000000016'"
+                )
             )
-        ) == 1
+            == 1
+        )

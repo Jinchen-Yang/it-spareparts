@@ -3,29 +3,30 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections import Counter
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models.maintenance_project import MaintenanceProject, MaintenanceProjectContract
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectContract,
+)
 from app.security import UserContext, is_field_hidden
 
 
-def _version_token(projects: list[MaintenanceProject]) -> str:
-    facts: list[str] = []
-    for project in projects:
-        facts.append(f"project:{project.project_id}:{project.version}")
-        for relation in sorted(
-            project.contracts,
-            key=lambda row: row.project_contract_id,
-        ):
-            facts.append(
-                f"contract:{relation.project_contract_id}:{relation.version}"
-            )
-    return hashlib.sha256("|".join(facts).encode("utf-8")).hexdigest()
+def _payload_token(payload: dict) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _is_current(relation: MaintenanceProjectContract, as_of: date) -> bool:
@@ -59,7 +60,22 @@ def project_directory(
             )
         )
 
-    total = db.scalar(select(func.count()).select_from(MaintenanceProject).where(*filters)) or 0
+    filtered_facts = list(
+        db.execute(
+            select(
+                MaintenanceProject.project_id,
+                MaintenanceProject.project_code,
+                MaintenanceProject.display_name,
+                MaintenanceProject.project_manager_id,
+                MaintenanceProject.lifecycle_status,
+                MaintenanceProject.is_active,
+                MaintenanceProject.version,
+            )
+            .where(*filters)
+            .order_by(MaintenanceProject.project_id)
+        ).all()
+    )
+    total = len(filtered_facts)
     projects = list(
         db.execute(
             select(MaintenanceProject)
@@ -81,16 +97,20 @@ def project_directory(
         }
         for project in projects
     ]
-    # Directory does not load contracts; its token covers only the returned identities.
-    token_facts = [f"{row['project_id']}:{row['version']}" for row in rows]
-    return {
+    payload = {
         "rows": rows,
         "total": total,
         "page": page,
         "page_size": page_size,
         "as_of": as_of.isoformat(),
-        "data_version": hashlib.sha256("|".join(token_facts).encode()).hexdigest(),
     }
+    payload["data_version"] = _payload_token(
+        {
+            "as_of": payload["as_of"],
+            "projects": [tuple(fact) for fact in filtered_facts],
+        }
+    )
+    return payload
 
 
 def project_overview(
@@ -115,11 +135,16 @@ def project_overview(
     effective = [relation for relation in contracts if _is_effective(relation, as_of)]
     effective_ids = sorted({relation.contract_id for relation in effective})
 
-    cross_project_conflicts: set[str] = set()
+    cross_relationships: list[tuple[str, str, str]] = []
     if effective_ids:
-        cross_project_conflicts = set(
-            db.execute(
-                select(MaintenanceProjectContract.contract_id)
+        cross_relationships = [
+            (contract_id, project_contract_id, related_project_id)
+            for contract_id, project_contract_id, related_project_id in db.execute(
+                select(
+                    MaintenanceProjectContract.contract_id,
+                    MaintenanceProjectContract.project_contract_id,
+                    MaintenanceProjectContract.project_id,
+                )
                 .where(
                     MaintenanceProjectContract.contract_id.in_(effective_ids),
                     MaintenanceProjectContract.included_in_total.is_(True),
@@ -129,10 +154,22 @@ def project_overview(
                         MaintenanceProjectContract.effective_to > as_of,
                     ),
                 )
-                .group_by(MaintenanceProjectContract.contract_id)
-                .having(func.count(func.distinct(MaintenanceProjectContract.project_id)) > 1)
-            ).scalars()
-        )
+                .order_by(
+                    MaintenanceProjectContract.contract_id,
+                    MaintenanceProjectContract.project_id,
+                    MaintenanceProjectContract.project_contract_id,
+                )
+            ).all()
+        ]
+
+    projects_by_contract: dict[str, set[str]] = {}
+    for contract_id, _relationship_id, related_project_id in cross_relationships:
+        projects_by_contract.setdefault(contract_id, set()).add(related_project_id)
+    cross_project_conflicts = {
+        contract_id
+        for contract_id, project_ids in projects_by_contract.items()
+        if len(project_ids) > 1
+    }
 
     issues: list[dict] = []
     if not effective:
@@ -144,7 +181,9 @@ def project_overview(
         if count > 1
     )
     if repeated:
-        issues.append({"code": "duplicate_effective_contract", "contract_ids": repeated})
+        issues.append(
+            {"code": "duplicate_effective_contract", "contract_ids": repeated}
+        )
 
     unmapped = sorted(
         {
@@ -160,7 +199,9 @@ def project_overview(
         {row.contract_id for row in effective if row.contract_amount is None}
     )
     if missing_amount:
-        issues.append({"code": "missing_contract_amount", "contract_ids": missing_amount})
+        issues.append(
+            {"code": "missing_contract_amount", "contract_ids": missing_amount}
+        )
 
     if cross_project_conflicts:
         issues.append(
@@ -184,39 +225,43 @@ def project_overview(
         )
         completeness = {"status": "complete", "issues": []}
 
-    return {
-        "project": {
-            "project_id": project.project_id,
-            "project_code": project.project_code,
-            "display_name": project.display_name,
-            "project_manager_id": project.project_manager_id,
-            "lifecycle_status": project.lifecycle_status,
-            "is_active": project.is_active,
-            "version": project.version,
-        },
-        "contracts": [
-            {
-                "project_contract_id": relation.project_contract_id,
-                "contract_id": relation.contract_id,
-                "contract_no": relation.contract_no,
-                "contract_amount": None if amount_restricted else relation.contract_amount,
-                "contract_status": relation.contract_status,
-                "status_mapping_state": relation.status_mapping_state,
-                "included_in_total": relation.included_in_total,
-                "effective_from": relation.effective_from.isoformat(),
-                "effective_to": (
-                    relation.effective_to.isoformat() if relation.effective_to else None
-                ),
-                "is_effective": _is_effective(relation, as_of),
-                "source": relation.source,
-                "version": relation.version,
-            }
-            for relation in contracts
-        ],
+    project_payload = {
+        "project_id": project.project_id,
+        "project_code": project.project_code,
+        "display_name": project.display_name,
+        "project_manager_id": project.project_manager_id,
+        "lifecycle_status": project.lifecycle_status,
+        "is_active": project.is_active,
+        "version": project.version,
+    }
+    contract_payload = [
+        {
+            "project_contract_id": relation.project_contract_id,
+            "contract_id": relation.contract_id,
+            "contract_no": relation.contract_no,
+            "contract_amount": None if amount_restricted else relation.contract_amount,
+            "contract_status": relation.contract_status,
+            "status_mapping_state": relation.status_mapping_state,
+            "status_mapping_version": relation.status_mapping_version,
+            "included_in_total": relation.included_in_total,
+            "effective_from": relation.effective_from.isoformat(),
+            "effective_to": (
+                relation.effective_to.isoformat() if relation.effective_to else None
+            ),
+            "is_effective": _is_effective(relation, as_of),
+            "source": relation.source,
+            "version": None if amount_restricted else relation.version,
+        }
+        for relation in contracts
+    ]
+    payload = {
+        "project": project_payload,
+        "contracts": contract_payload,
         "contract_count": len(contracts),
         "effective_contract_count": len(effective),
         "total_contract_amount": total_amount,
         "completeness": completeness,
         "as_of": as_of.isoformat(),
-        "data_version": _version_token([project]),
     }
+    payload["data_version"] = _payload_token(payload)
+    return payload

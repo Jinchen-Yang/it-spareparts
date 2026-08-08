@@ -65,15 +65,15 @@ class MaintenanceProject(Base):
         Index("ix_maintenance_project_active_code", "is_active", "project_code"),
         Index(
             "ix_maintenance_project_code_trgm",
-            func.lower(project_code).label("project_code_lower"),
+            project_code,
             postgresql_using="gin",
-            postgresql_ops={"project_code_lower": "gin_trgm_ops"},
+            postgresql_ops={"project_code": "gin_trgm_ops"},
         ),
         Index(
             "ix_maintenance_project_display_name_trgm",
-            func.lower(display_name).label("display_name_lower"),
+            display_name,
             postgresql_using="gin",
-            postgresql_ops={"display_name_lower": "gin_trgm_ops"},
+            postgresql_ops={"display_name": "gin_trgm_ops"},
         ),
     )
 
@@ -94,6 +94,7 @@ class MaintenanceProjectContract(Base):
     # Raw source status is preserved.  Inclusion is never guessed from this text.
     contract_status: Mapped[str | None] = mapped_column(String(64))
     status_mapping_state: Mapped[str] = mapped_column(String(16), nullable=False)
+    status_mapping_version: Mapped[str] = mapped_column(String(64), nullable=False)
     included_in_total: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -127,6 +128,14 @@ class MaintenanceProjectContract(Base):
         CheckConstraint(
             "status_mapping_state IN ('mapped', 'unmapped')",
             name="ck_maintenance_project_contract_status_mapping",
+        ),
+        CheckConstraint(
+            "char_length(btrim(status_mapping_version)) > 0",
+            name="ck_maintenance_project_contract_mapping_version",
+        ),
+        CheckConstraint(
+            "status_mapping_state = 'mapped' OR included_in_total = false",
+            name="ck_maintenance_project_contract_unmapped_excluded",
         ),
         CheckConstraint(
             "effective_to IS NULL OR effective_to > effective_from",

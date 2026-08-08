@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import subprocess
@@ -416,9 +417,7 @@ def test_backup_rejects_directory_and_lock_symlinks(tmp_path: Path) -> None:
         text=True,
     )
     assert lock_result.returncode == 1
-    assert "备份锁文件不能是符号链接" in (
-        lock_result.stdout + lock_result.stderr
-    )
+    assert "备份锁文件不能是符号链接" in (lock_result.stdout + lock_result.stderr)
     assert lock_target.read_text(encoding="utf-8") == "unchanged"
 
 
@@ -519,7 +518,7 @@ def test_deploy_guide_installs_the_hardened_backup_artifact() -> None:
     """部署手册不能继续复制一份绕过权限保护的旧内联脚本。"""
     guide = DEPLOY_DOC.read_text(encoding="utf-8")
 
-    assert 'install -d -m 700' in guide
+    assert "install -d -m 700" in guide
     assert guide.index('test ! -L "$BACKUP_DIR"') < guide.index(
         "sudo install -d -m 700"
     )
@@ -605,10 +604,7 @@ def test_backup_crontab_install_is_idempotent_and_scoped(tmp_path: Path) -> None
         assert result.returncode == 0, result.stderr or result.stdout
 
     lines = cron_state.read_text(encoding="utf-8").splitlines()
-    expected = (
-        f"0 3 * * * umask 077; {app_dir}/backup.sh "
-        f">> {app_dir}/backup.log 2>&1"
-    )
+    expected = f"0 3 * * * umask 077; {app_dir}/backup.sh >> {app_dir}/backup.log 2>&1"
     assert lines.count(expected) == 1
     assert "MAILTO=ops@example.test" in lines
     assert "15 2 * * * /srv/another-product/backup.sh" in lines
@@ -716,23 +712,394 @@ def test_backup_crontab_read_failure_is_fail_closed(tmp_path: Path) -> None:
     assert cron_state.read_text(encoding="utf-8") == original
 
 
-def test_current_restore_drill_fails_closed_and_compares_stable_project_tables() -> None:
-    """后续 schema 发布使用当前恢复门禁；不得污染历史 v1.20 固定控制面。"""
+def test_current_restore_drill_fails_closed_and_compares_stable_project_tables() -> (
+    None
+):
+    """当前恢复门禁使用受限隔离容器，并钉住唯一已审核 schema head。"""
     script = RESTORE_DRILL_SCRIPT.read_text(encoding="utf-8")
     guide = DEPLOY_DOC.read_text(encoding="utf-8")
 
     assert RESTORE_DRILL_SCRIPT.stat().st_mode & stat.S_IXUSR
     subprocess.run(["bash", "-n", str(RESTORE_DRILL_SCRIPT)], check=True)
-    assert "pg_restore -U spareparts -d restore_test --exit-on-error" in script
+    assert "RESTORE_DRILL_TEST_MODE 禁止以 root 运行" in script
+    assert "RESTORE_DRILL_TEST_COMMAND_DIR" in script
+    assert 'export PATH="$COMMAND_DIR:$BASE_PATH"' in script
+    assert '[ -d "$COMMAND_DIR" ] && [ ! -L "$COMMAND_DIR" ]' in script
+    assert '[ -f "$DUMP" ] && [ ! -L "$DUMP" ]' in script
+    assert '[ -f "$DUMP.sha256" ] && [ ! -L "$DUMP.sha256" ]' in script
+    assert '[ -d "$DOCKER_ROOT" ] && [ ! -L "$DOCKER_ROOT" ]' in script
+    assert "readonly EXPECTED_DB_HEAD=c6f2a8e9d4b1" in script
+    assert '"$SOURCE_DB_HEAD" = "$EXPECTED_DB_HEAD"' in script
+    assert '"$RESTORED_DB_HEAD" = "$EXPECTED_DB_HEAD"' in script
+    assert "compose ps -q db" in script
+    assert "docker inspect" in script
+    assert "insufficient space for isolated restore" in script
+    assert "SELECT pg_database_size(current_database());" in script
+    assert "SOURCE_DB_SIZE * 2" in script
+    assert "BACKUP_SIZE * 4" in script
+    assert "2147483648" in script
+    assert "name=^/${RESTORE_CONTAINER}$" in script
+    assert "restore container name already exists" in script
+    assert "docker create" in script
+    assert "docker start" in script
+    assert "--network none" in script
+    assert "--memory 1g" in script
+    assert "--memory-swap 1g" in script
+    assert "--cpus 1" in script
+    assert "--pids-limit 256" in script
+    assert "pg_isready -U postgres" in script
+    assert "isolated restore DB did not become ready" in script
+    assert "cleanup_restore_container" in script
+    assert "claim_restore_container" in script
+    assert '--cidfile "$RESTORE_CID_FILE"' in script
+    assert 'sudo wc -l -- "$RESTORE_CID_FILE"' in script
+    assert "sudo sed -n '1p' -- \"$RESTORE_CID_FILE\"" in script
+    assert 'wc -l < "$RESTORE_CID_FILE"' not in script
+    assert 'docker rm -fv "$RESTORE_CID"' in script
+    assert '--filter "id=${RESTORE_CID}"' in script
+    assert "source_readonly_sql" in script
+    assert "default_transaction_read_only=on" in script
+    assert "compose -e PGOPTIONS" not in script
+    assert "docker compose exec -T \\\n    -e PGOPTIONS" in script
+    assert "ls -t" not in script
+    assert "head -1" not in script
+    assert "nullglob" in script
+    assert '"$candidate" -nt "$DUMP"' in script
+    assert "docker exec -i" in script
+    assert "pg_restore -U postgres -d restore_test --exit-on-error" in script
+    assert "CREATE DATABASE restore_test" not in script
+    assert "DROP DATABASE restore_test" not in script
     assert "maintenance_project|' || count(*) FROM maintenance_project" in script
     assert (
-        "maintenance_project_contract|' || count(*) "
-        "FROM maintenance_project_contract"
+        "maintenance_project_contract|' || count(*) FROM maintenance_project_contract"
     ) in script
-    assert "SOURCE_DB_HEAD" in script
-    assert "RESTORED_DB_HEAD" in script
-    assert '"$RESTORED_DB_HEAD" = "$SOURCE_DB_HEAD"' in script
     assert "diff -u" in script
     assert "|| true" not in script
     assert '"$APP_DIR/.deploy/restore_drill.sh"' in guide
     assert "两张稳定维保项目表逐表行数" in guide
+
+
+def test_current_restore_drill_runs_restore_only_in_restricted_container(
+    tmp_path: Path,
+) -> None:
+    dump = tmp_path / "db-current.dump"
+    dump.write_bytes(b"synthetic-current-backup" * 100)
+    digest = hashlib.sha256(dump.read_bytes()).hexdigest()
+    dump.with_suffix(".dump.sha256").write_text(
+        f"{digest}  {dump}\n",
+        encoding="utf-8",
+    )
+    dump.chmod(0o600)
+    dump.with_suffix(".dump.sha256").chmod(0o600)
+    command_dir = tmp_path / "bin"
+    command_dir.mkdir()
+    command_log = tmp_path / "sudo.log"
+    _write_executable(
+        command_dir / "df",
+        """
+        #!/usr/bin/env bash
+        printf '%s\n' 'Filesystem 1-blocks Used Available Use% Mounted on'
+        printf 'stub 999999999999 0 %s 0%% /var/lib/docker\n' \
+          "${RESTORE_STUB_DOCKER_FREE:-999999999999}"
+        """,
+    )
+    _write_executable(
+        command_dir / "sudo",
+        r"""
+        #!/usr/bin/env bash
+        printf '%s\n' "$*" >> "$RESTORE_STUB_LOG"
+        case "$*" in
+          "docker compose ps -q db")
+            printf '%064d\n' 1
+            ;;
+          docker\ inspect*\{\{.Image\}\}*)
+            printf 'sha256:%064d\n' 2
+            ;;
+          docker\ inspect*\{\{.Id\}\}*)
+            printf '%s\n' "${@: -1}"
+            ;;
+          "docker compose exec -T db pg_restore --list")
+            ;;
+          docker\ compose\ exec\ -T\ -e\ PGOPTIONS=-c\ default_transaction_read_only=on\ db\ psql*alembic_version*)
+            printf '%s\n' "$RESTORE_STUB_SOURCE_HEAD"
+            ;;
+          docker\ compose\ exec\ -T\ -e\ PGOPTIONS=-c\ default_transaction_read_only=on\ db\ psql*pg_database_size*)
+            printf '%s\n' "$RESTORE_STUB_SOURCE_DB_SIZE"
+            ;;
+          docker\ compose\ exec\ -T\ -e\ PGOPTIONS=-c\ default_transaction_read_only=on\ db\ psql*)
+            printf '%s\n' "$RESTORE_STUB_SOURCE_COUNTS"
+            ;;
+          docker\ ps\ -aq*name=*)
+            printf '%s' "${RESTORE_STUB_EXISTING:-}"
+            ;;
+          docker\ ps\ -aq*id=*)
+            printf '%s' "${RESTORE_STUB_REMAINING:-}"
+            ;;
+          docker\ create*)
+            cidfile=''
+            for ((index = 1; index <= $#; index++)); do
+              if [ "${!index}" = "--cidfile" ]; then
+                next_index=$((index + 1))
+                cidfile=${!next_index}
+                break
+              fi
+            done
+            [ -n "$cidfile" ] || exit 65
+            if [ "${RESTORE_STUB_CREATE_WRITES_CID:-1}" = 1 ]; then
+              printf '%064d\n' 3 > "$cidfile"
+              chmod 600 "$cidfile"
+            fi
+            if [ "${RESTORE_STUB_SIGNAL_AFTER_CREATE:-0}" = 1 ]; then
+              kill -TERM "$PPID"
+            fi
+            printf '%064d\n' 3
+            exit "${RESTORE_STUB_CREATE_STATUS:-0}"
+            ;;
+          wc\ -l\ --*|sed\ -n\ 1p\ --*)
+            command "$@"
+            ;;
+          docker\ start*)
+            ;;
+          docker\ exec*pg_isready\ -U\ postgres*)
+            ;;
+          docker\ exec*createdb\ -U\ postgres\ restore_test*)
+            ;;
+          docker\ exec\ -i*pg_restore\ -U\ postgres*)
+            ;;
+          docker\ exec*psql*alembic_version*)
+            printf '%s\n' "$RESTORE_STUB_RESTORED_HEAD"
+            ;;
+          docker\ exec*psql*)
+            printf '%s\n' "$RESTORE_STUB_RESTORED_COUNTS"
+            ;;
+          docker\ rm\ -f*)
+            exit "${RESTORE_STUB_RM_STATUS:-0}"
+            ;;
+          *)
+            printf 'unexpected sudo command: %s\n' "$*" >&2
+            exit 64
+            ;;
+        esac
+        """,
+    )
+    run_env = {
+        **os.environ,
+        "PATH": f"{command_dir}:{os.environ['PATH']}",
+        "RESTORE_DRILL_TEST_MODE": "1",
+        "RESTORE_DRILL_TEST_COMMAND_DIR": str(command_dir),
+        "RESTORE_DRILL_TEST_DUMP": str(dump),
+        "RESTORE_DRILL_TEST_DOCKER_ROOT": str(tmp_path),
+        "RESTORE_STUB_LOG": str(command_log),
+        "RESTORE_STUB_SOURCE_HEAD": "c6f2a8e9d4b1",
+        "RESTORE_STUB_SOURCE_DB_SIZE": "1000",
+        "RESTORE_STUB_RESTORED_HEAD": "c6f2a8e9d4b1",
+        "RESTORE_STUB_SOURCE_COUNTS": (
+            "maintenance_project|2\nmaintenance_project_contract|3"
+        ),
+        "RESTORE_STUB_RESTORED_COUNTS": (
+            "maintenance_project|2\nmaintenance_project_contract|3"
+        ),
+    }
+    result = subprocess.run(
+        [str(RESTORE_DRILL_SCRIPT)],
+        env=run_env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    commands = command_log.read_text(encoding="utf-8")
+    restore_cid = f"{3:064d}"
+    create_command = next(
+        line for line in commands.splitlines() if line.startswith("docker create")
+    )
+    assert "--network none" in create_command
+    assert "--cidfile" in create_command
+    assert "--memory 1g --memory-swap 1g --cpus 1 --pids-limit 256" in create_command
+    assert f"docker start {restore_cid}" in commands
+    assert "default_transaction_read_only=on" in commands
+    assert (
+        "docker compose exec -T -e "
+        "PGOPTIONS=-c default_transaction_read_only=on db psql"
+    ) in commands
+    assert "SELECT pg_database_size(current_database());" in commands
+    assert f"docker exec -i {restore_cid} pg_restore" in commands
+    assert f"docker rm -fv {restore_cid}" in commands
+    assert "docker compose exec -T db createdb" not in commands
+    assert "docker compose exec -T db pg_restore -U" not in commands
+
+    drift_log = tmp_path / "source-drift.log"
+    drift = subprocess.run(
+        [str(RESTORE_DRILL_SCRIPT)],
+        env={
+            **run_env,
+            "RESTORE_STUB_LOG": str(drift_log),
+            "RESTORE_STUB_SOURCE_HEAD": "f1c8e4a7b2d9",
+            "RESTORE_STUB_RESTORED_HEAD": "f1c8e4a7b2d9",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert drift.returncode != 0
+    assert "source database head is not the reviewed current head" in drift.stderr
+    assert "docker create" not in drift_log.read_text(encoding="utf-8")
+
+    low_disk_log = tmp_path / "low-disk.log"
+    low_disk = subprocess.run(
+        [str(RESTORE_DRILL_SCRIPT)],
+        env={
+            **run_env,
+            "RESTORE_STUB_LOG": str(low_disk_log),
+            "RESTORE_STUB_DOCKER_FREE": "2147483648",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert low_disk.returncode != 0
+    assert "insufficient space for isolated restore" in low_disk.stderr
+    assert "docker create" not in low_disk_log.read_text(encoding="utf-8")
+
+    create_failure_log = tmp_path / "create-failure.log"
+    create_failure = subprocess.run(
+        [str(RESTORE_DRILL_SCRIPT)],
+        env={
+            **run_env,
+            "RESTORE_STUB_LOG": str(create_failure_log),
+            "RESTORE_STUB_CREATE_STATUS": "72",
+            "RESTORE_STUB_CREATE_WRITES_CID": "0",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert create_failure.returncode != 0
+    assert "docker rm -fv" not in create_failure_log.read_text(encoding="utf-8")
+
+    partial_create_log = tmp_path / "partial-create-failure.log"
+    partial_create = subprocess.run(
+        [str(RESTORE_DRILL_SCRIPT)],
+        env={
+            **run_env,
+            "RESTORE_STUB_LOG": str(partial_create_log),
+            "RESTORE_STUB_CREATE_STATUS": "72",
+            "RESTORE_STUB_CREATE_WRITES_CID": "1",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert partial_create.returncode != 0
+    assert f"docker rm -fv {restore_cid}" in partial_create_log.read_text(
+        encoding="utf-8"
+    )
+
+    signaled_create_log = tmp_path / "signaled-create.log"
+    signaled_create = subprocess.run(
+        [str(RESTORE_DRILL_SCRIPT)],
+        env={
+            **run_env,
+            "RESTORE_STUB_LOG": str(signaled_create_log),
+            "RESTORE_STUB_SIGNAL_AFTER_CREATE": "1",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert signaled_create.returncode != 0
+    assert f"docker rm -fv {restore_cid}" in signaled_create_log.read_text(
+        encoding="utf-8"
+    )
+
+    restored_head_log = tmp_path / "restored-head-drift.log"
+    restored_head_drift = subprocess.run(
+        [str(RESTORE_DRILL_SCRIPT)],
+        env={
+            **run_env,
+            "RESTORE_STUB_LOG": str(restored_head_log),
+            "RESTORE_STUB_RESTORED_HEAD": "f1c8e4a7b2d9",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert restored_head_drift.returncode != 0
+    assert "restored database head is not the reviewed current head" in (
+        restored_head_drift.stderr
+    )
+    assert f"docker rm -fv {restore_cid}" in (
+        restored_head_log.read_text(encoding="utf-8")
+    )
+
+    count_diff_log = tmp_path / "count-diff.log"
+    count_diff = subprocess.run(
+        [str(RESTORE_DRILL_SCRIPT)],
+        env={
+            **run_env,
+            "RESTORE_STUB_LOG": str(count_diff_log),
+            "RESTORE_STUB_RESTORED_COUNTS": (
+                "maintenance_project|2\nmaintenance_project_contract|4"
+            ),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert count_diff.returncode != 0
+    assert f"docker rm -fv {restore_cid}" in count_diff_log.read_text(encoding="utf-8")
+
+    rm_failure_log = tmp_path / "rm-failure.log"
+    rm_failure = subprocess.run(
+        [str(RESTORE_DRILL_SCRIPT)],
+        env={
+            **run_env,
+            "RESTORE_STUB_LOG": str(rm_failure_log),
+            "RESTORE_STUB_RM_STATUS": "71",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rm_failure.returncode != 0
+    assert "恢复成功" not in rm_failure.stdout
+    assert f"docker rm -fv {restore_cid}" in rm_failure_log.read_text(encoding="utf-8")
+
+    residual_log = tmp_path / "residual-container.log"
+    residual = subprocess.run(
+        [str(RESTORE_DRILL_SCRIPT)],
+        env={
+            **run_env,
+            "RESTORE_STUB_LOG": str(residual_log),
+            "RESTORE_STUB_REMAINING": "4" * 64,
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert residual.returncode != 0
+    assert "恢复成功" not in residual.stdout
+    assert residual_log.read_text(encoding="utf-8").count("docker ps -aq") >= 2
+
+    other_dump = tmp_path / "different-valid.dump"
+    other_dump.write_bytes(b"different-valid-backup")
+    other_digest = hashlib.sha256(other_dump.read_bytes()).hexdigest()
+    dump.write_bytes(b"tampered-selected-dump")
+    dump.with_suffix(".dump.sha256").write_text(
+        f"{other_digest}  {other_dump}\n",
+        encoding="utf-8",
+    )
+    misleading_log = tmp_path / "misleading-checksum.log"
+    misleading = subprocess.run(
+        [str(RESTORE_DRILL_SCRIPT)],
+        env={**run_env, "RESTORE_STUB_LOG": str(misleading_log)},
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert misleading.returncode != 0
+    misleading_commands = (
+        misleading_log.read_text(encoding="utf-8") if misleading_log.exists() else ""
+    )
+    assert "docker create" not in misleading_commands

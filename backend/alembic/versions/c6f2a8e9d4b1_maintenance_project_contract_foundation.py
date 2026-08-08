@@ -54,11 +54,11 @@ def upgrade() -> None:
     )
     op.execute(
         "CREATE INDEX ix_maintenance_project_code_trgm "
-        "ON maintenance_project USING gin (lower(project_code) gin_trgm_ops)"
+        "ON maintenance_project USING gin (project_code gin_trgm_ops)"
     )
     op.execute(
         "CREATE INDEX ix_maintenance_project_display_name_trgm "
-        "ON maintenance_project USING gin (lower(display_name) gin_trgm_ops)"
+        "ON maintenance_project USING gin (display_name gin_trgm_ops)"
     )
 
     op.create_table(
@@ -70,6 +70,7 @@ def upgrade() -> None:
         sa.Column("contract_amount", sa.Numeric(14, 2), nullable=True),
         sa.Column("contract_status", sa.String(length=64), nullable=True),
         sa.Column("status_mapping_state", sa.String(length=16), nullable=False),
+        sa.Column("status_mapping_version", sa.String(length=64), nullable=False),
         sa.Column(
             "included_in_total",
             sa.Boolean(),
@@ -95,6 +96,14 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "status_mapping_state IN ('mapped', 'unmapped')",
             name="ck_maintenance_project_contract_status_mapping",
+        ),
+        sa.CheckConstraint(
+            "char_length(btrim(status_mapping_version)) > 0",
+            name="ck_maintenance_project_contract_mapping_version",
+        ),
+        sa.CheckConstraint(
+            "status_mapping_state = 'mapped' OR included_in_total = false",
+            name="ck_maintenance_project_contract_unmapped_excluded",
         ),
         sa.CheckConstraint(
             "effective_to IS NULL OR effective_to > effective_from",
@@ -144,6 +153,10 @@ def downgrade() -> None:
     # only remove the empty foundation; once populated it must use a forward fix
     # or an explicit export/replay plan rather than silently deleting identity.
     op.execute(
+        "LOCK TABLE maintenance_project_contract, maintenance_project "
+        "IN ACCESS EXCLUSIVE MODE"
+    )
+    op.execute(
         """
         DO $migration$
         BEGIN
@@ -178,6 +191,10 @@ def downgrade() -> None:
         "ix_maintenance_project_code_trgm",
         table_name="maintenance_project",
     )
-    op.drop_index("ix_maintenance_project_active_code", table_name="maintenance_project")
-    op.drop_index("ix_maintenance_project_display_name", table_name="maintenance_project")
+    op.drop_index(
+        "ix_maintenance_project_active_code", table_name="maintenance_project"
+    )
+    op.drop_index(
+        "ix_maintenance_project_display_name", table_name="maintenance_project"
+    )
     op.drop_table("maintenance_project")
