@@ -140,6 +140,268 @@ def _batch(db, suffix: str) -> SysImportBatch:
     return batch
 
 
+def test_site_issue_quantity_uses_numeric_14_3_boundary_with_controlled_rejection(db):
+    project = _project(db, project_id="project-quantity-boundary")
+    client = _client(db, username="quantity_boundary_admin")
+    part = DimPart(pn_std="PN-QUANTITY-BOUNDARY")
+    db.add(part)
+    db.commit()
+
+    maximum = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-QUANTITY-MAXIMUM",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-quantity-maximum",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "99999999999.999",
+                }
+            ],
+            "reason": "验证 Numeric(14,3) 最大合法数量",
+        },
+    )
+    assert maximum.status_code == 201, maximum.text
+    assert maximum.json()["lines"][0]["quantity"] == "99999999999.999"
+
+    first_illegal = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-QUANTITY-FIRST-ILLEGAL",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-quantity-first-illegal",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "100000000000",
+                }
+            ],
+            "reason": "验证 Numeric(14,3) 首个非法数量受控拒绝",
+        },
+    )
+    assert 400 <= first_illegal.status_code < 500, first_illegal.text
+    assert db.get(MaintenanceSiteIssueLine, "issue-line-quantity-first-illegal") is None
+
+
+def test_manual_cost_amount_uses_numeric_14_2_boundary_with_controlled_rejection(db):
+    project = _project(db, project_id="project-cost-amount-boundary")
+    client = _client(db, username="cost_amount_boundary_admin")
+    part = DimPart(pn_std="PN-COST-AMOUNT-BOUNDARY")
+    db.add(part)
+    db.commit()
+    created = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-COST-AMOUNT-BOUNDARY",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-cost-maximum",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                },
+                {
+                    "issue_line_id": "issue-line-cost-first-illegal",
+                    "line_no": 2,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "2",
+                },
+            ],
+            "reason": "建立成本金额 Numeric(14,2) 边界领用",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    maximum = client.patch(
+        f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
+        json={
+            "line_id": "issue-line-cost-maximum",
+            "version": 1,
+            "unit_cost_ex_tax": "999999999999.99",
+            "evidence": "最大合法金额边界证据",
+            "reason": "验证 Numeric(14,2) 最大合法成本金额",
+        },
+    )
+    assert maximum.status_code == 200, maximum.text
+    assert maximum.json()["unit_cost"] == "999999999999.99"
+    assert maximum.json()["cost_amount"] == "999999999999.99"
+
+    first_illegal = client.patch(
+        f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
+        json={
+            "line_id": "issue-line-cost-first-illegal",
+            "version": 1,
+            "unit_cost_ex_tax": "500000000000.00",
+            "evidence": "首个非法金额边界证据",
+            "reason": "验证 Numeric(14,2) 首个非法成本金额受控拒绝",
+        },
+    )
+    assert first_illegal.status_code == 400, first_illegal.text
+    assert "成本金额" in first_illegal.json()["detail"]
+    db.expire_all()
+    rejected = db.get(MaintenanceSiteIssueLine, "issue-line-cost-first-illegal")
+    assert rejected.unit_cost is None
+    assert rejected.cost_amount is None
+    assert rejected.version == 1
+
+
+def test_cost_amount_overflow_is_controlled_on_every_resolution_entrypoint(db):
+    client = _client(db, username="cost_overflow_entrypoints_admin")
+
+    def add_overflow_purchase(part: DimPart, suffix: str) -> FPurchaseLine:
+        batch = _batch(db, f"cost-overflow-{suffix}")
+        order = FPurchaseOrder(
+            raw_order_id=f"PO-H-COST-OVERFLOW-{suffix}",
+            order_no=f"PO-COST-OVERFLOW-{suffix}",
+            order_date=date(2026, 8, 1),
+            data_status="已生效",
+            is_tax_inclusive=False,
+            import_batch_id=batch.id,
+        )
+        db.add(order)
+        db.flush()
+        line = FPurchaseLine(
+            raw_line_id=f"PO-L-COST-OVERFLOW-{suffix}",
+            order_id=order.id,
+            part_id=part.id,
+            pn_std=part.pn_std,
+            qty=1,
+            unit_price=Decimal("500000000000.00"),
+            import_batch_id=batch.id,
+        )
+        db.add(line)
+        db.commit()
+        return line
+
+    create_project = _project(db, project_id="project-cost-overflow-create")
+    create_part = DimPart(pn_std="PN-COST-OVERFLOW-CREATE")
+    db.add(create_part)
+    db.commit()
+    direct = add_overflow_purchase(create_part, "CREATE")
+    created = client.post(
+        f"/api/maintenance/projects/stable/{create_project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-COST-OVERFLOW-CREATE",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [{
+                "issue_line_id": "issue-line-cost-overflow-create",
+                "line_no": 1,
+                "part_id": create_part.id,
+                "pn": create_part.pn_std,
+                "quantity": "2",
+                "linked_purchase_line_id": direct.id,
+            }],
+            "reason": "验证创建路径成本金额溢出受控拒绝",
+        },
+    )
+    assert created.status_code == 400, created.text
+    assert "成本金额" in created.json()["detail"]
+    assert db.get(MaintenanceSiteIssueLine, "issue-line-cost-overflow-create") is None
+
+    status_project = _project(db, project_id="project-cost-overflow-status")
+    status_part = DimPart(pn_std="PN-COST-OVERFLOW-STATUS")
+    db.add(status_part)
+    db.commit()
+    status_purchase = add_overflow_purchase(status_part, "STATUS")
+    pending = client.post(
+        f"/api/maintenance/projects/stable/{status_project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-COST-OVERFLOW-STATUS",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-pending",
+            "status_mapping_state": "unmapped",
+            "normalized_status": "unknown",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [{
+                "issue_line_id": "issue-line-cost-overflow-status",
+                "line_no": 1,
+                "part_id": status_part.id,
+                "pn": status_part.pn_std,
+                "quantity": "2",
+                "linked_purchase_line_id": status_purchase.id,
+            }],
+            "reason": "建立待确认成本金额溢出领用",
+        },
+    )
+    assert pending.status_code == 201, pending.text
+    confirmed = client.patch(
+        f"/api/maintenance/projects/stable/site-issues/{pending.json()['issue_id']}/status",
+        json={
+            "version": 1,
+            "raw_status": "synthetic-confirmed",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v2",
+            "reason": "验证状态路径成本金额溢出受控拒绝",
+        },
+    )
+    assert confirmed.status_code == 400, confirmed.text
+    assert "成本金额" in confirmed.json()["detail"]
+    db.expire_all()
+    pending_line = db.get(MaintenanceSiteIssueLine, "issue-line-cost-overflow-status")
+    assert pending_line.cost_amount is None
+    assert pending_line.version == 1
+
+    recompute_project = _project(db, project_id="project-cost-overflow-recompute")
+    recompute_part = DimPart(pn_std="PN-COST-OVERFLOW-RECOMPUTE")
+    db.add(recompute_part)
+    db.commit()
+    gap = client.post(
+        f"/api/maintenance/projects/stable/{recompute_project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-COST-OVERFLOW-RECOMPUTE",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [{
+                "issue_line_id": "issue-line-cost-overflow-recompute",
+                "line_no": 1,
+                "part_id": recompute_part.id,
+                "pn": recompute_part.pn_std,
+                "quantity": "2",
+            }],
+            "reason": "建立待重算成本金额溢出领用",
+        },
+    )
+    assert gap.status_code == 201, gap.text
+    add_overflow_purchase(recompute_part, "RECOMPUTE")
+    recomputed = client.post(
+        f"/api/maintenance/projects/stable/{recompute_project.project_id}/cost-gaps/recompute",
+        json={"reason": "验证重算路径成本金额溢出受控拒绝"},
+    )
+    assert recomputed.status_code == 400, recomputed.text
+    assert "成本金额" in recomputed.json()["detail"]
+    db.expire_all()
+    gap_line = db.get(MaintenanceSiteIssueLine, "issue-line-cost-overflow-recompute")
+    assert gap_line.cost_amount is None
+    assert gap_line.version == 1
+
+
 def test_contract_relationship_create_is_versioned_and_audited(db):
     project = _project(db)
     client = _client(db)
@@ -409,7 +671,33 @@ def test_workspace_exposes_all_collection_statuses_through_as_of_and_hides_money
     assert all(row["cumulative_amount"] is None for row in hidden_rows)
     assert all(row["receipt_reference"] is None for row in hidden_rows)
     assert hidden_rows[0]["contract_no"] == "XS-COLLECTION-DETAIL"
-    assert hidden_rows[0]["remark"] == "一月已确认"
+    assert all(row["remark"] is None for row in hidden_rows)
+
+    restricted_workbook = operations_service.project_workbook_workspace(
+        db,
+        project_id=project.project_id,
+        as_of=date(2026, 3, 31),
+        user_ctx=UserContext(
+            user_id="collection-detail-restricted",
+            role="boss",
+            permissions={"page_maintenance": True, "data_profit": False},
+        ),
+    )
+    assert restricted_workbook is not None
+    workbook_rows = restricted_workbook["collection_snapshots"]
+    assert [row["status"] for row in workbook_rows] == [
+        "confirmed",
+        "unconfirmed",
+        "void",
+    ]
+    assert [row["report_month"] for row in workbook_rows] == [
+        "2026-01-01",
+        "2026-02-01",
+        "2026-03-01",
+    ]
+    assert all(row["cumulative_amount"] is None for row in workbook_rows)
+    assert all(row["receipt_reference"] is None for row in workbook_rows)
+    assert all(row["remark"] is None for row in workbook_rows)
 
 
 def test_confirmed_collection_is_monotonic_across_months_without_failed_side_effects(db):
@@ -1696,6 +1984,93 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
     assert filtered.status_code == 200, filtered.text
     assert filtered.json()["total"] == 1
     assert filtered.json()["rows"][0]["project_id"] == "project-threshold-101"
+
+
+def test_directory_reminder_filters_use_the_same_rounded_cost_threshold_as_cards(db):
+    client = _client(db, username="rounded_threshold_admin")
+    cases = [
+        ("rounded-up-to-80", "239.99"),
+        ("rounded-down-to-100", "300.01"),
+    ]
+    for suffix, cost_amount in cases:
+        project = _project(db, project_id=f"project-{suffix}")
+        contract = client.post(
+            f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+            json={
+                "contract_id": f"contract-{suffix}",
+                "contract_no": f"XS-{suffix}",
+                "contract_amount": "300.00",
+                "contract_status": "synthetic-active",
+                "status_mapping_state": "mapped",
+                "status_mapping_version": "synthetic-map-v1",
+                "included_in_total": True,
+                "effective_from": "2026-01-01",
+                "source": "synthetic-test",
+                "reason": "建立两位小数预警边界合同",
+            },
+        ).json()
+        response = client.post(
+            f"/api/maintenance/projects/stable/{project.project_id}/expenses",
+            json={
+                "expense_id": f"expense-{suffix}",
+                "project_contract_id": contract["project_contract_id"],
+                "expense_ref": f"BX-{suffix}",
+                "expense_date": "2026-07-10",
+                "amount_ex_tax": cost_amount,
+                "raw_status": "synthetic-finished",
+                "status_mapping_state": "mapped",
+                "normalized_status": "approved",
+                "status_mapping_version": "synthetic-expense-map-v1",
+                "reason": "导入两位小数预警边界报销",
+            },
+        )
+        assert response.status_code == 201, response.text
+        ready = client.put(
+            f"/api/maintenance/projects/stable/{project.project_id}/expenses/readiness",
+            json={
+                "ready_through": "2026-07-01",
+                "reason": "确认两位小数边界月份报销完整",
+            },
+        )
+        assert ready.status_code == 200, ready.text
+
+    directory = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={"as_of": "2026-07-31", "page_size": 10},
+    )
+    assert directory.status_code == 200, directory.text
+    assert {
+        row["project_id"]: row["metrics"]["cost_status"]
+        for row in directory.json()["rows"]
+    } == {
+        "project-rounded-up-to-80": "yellow",
+        "project-rounded-down-to-100": "yellow",
+    }
+
+    yellow = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={
+            "as_of": "2026-07-31",
+            "reminder": "cost_ratio:yellow",
+            "page_size": 10,
+        },
+    )
+    assert yellow.status_code == 200, yellow.text
+    assert {row["project_id"] for row in yellow.json()["rows"]} == {
+        "project-rounded-up-to-80",
+        "project-rounded-down-to-100",
+    }
+
+    red = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={
+            "as_of": "2026-07-31",
+            "reminder": "cost_ratio:red",
+            "page_size": 10,
+        },
+    )
+    assert red.status_code == 200, red.text
+    assert red.json()["total"] == 0
 
 
 def test_operations_directory_queries_do_not_scale_with_off_page_projects(db):

@@ -10,7 +10,7 @@ from __future__ import annotations
 from calendar import monthrange
 from collections import Counter, defaultdict
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 from uuid import uuid4
@@ -45,6 +45,39 @@ class MaintenanceOperationError(Exception):
 
 class MaintenanceOperationConflict(Exception):
     """Concurrent or duplicate operating-fact request."""
+
+
+_QUANTITY_QUANTUM = Decimal("0.001")
+_QUANTITY_MAX_EXCLUSIVE = Decimal("100000000000")
+
+
+def _quantity(value: Decimal | str) -> Decimal:
+    try:
+        normalized = Decimal(value).quantize(
+            _QUANTITY_QUANTUM,
+            rounding=ROUND_HALF_UP,
+        )
+    except (InvalidOperation, ValueError) as exc:
+        raise MaintenanceOperationError("现场领用数量超出允许范围") from exc
+    if normalized <= 0 or normalized >= _QUANTITY_MAX_EXCLUSIVE:
+        raise MaintenanceOperationError("现场领用数量超出允许范围")
+    return normalized
+
+
+def _resolve_site_issue_cost(
+    db: Session,
+    *,
+    issue_date: date,
+    line: MaintenanceSiteIssueLine,
+) -> MaintenanceSiteIssueLine:
+    try:
+        return maintenance_consumption_cost.resolve_line(
+            db,
+            issue_date=issue_date,
+            line=line,
+        )
+    except maintenance_consumption_cost.CostResolutionError as exc:
+        raise MaintenanceOperationError(str(exc)) from exc
 
 
 def _workbook_data_version(project_id: str, revision: int) -> str:
@@ -521,9 +554,7 @@ def create_site_issue(
             raise MaintenanceOperationError("现场领用明细编号或行号重复")
         seen_line_ids.add(line_id)
         seen_line_numbers.add(line_no)
-        quantity = Decimal(raw_line["quantity"])
-        if quantity <= 0 or quantity >= Decimal("1000000000000"):
-            raise MaintenanceOperationError("现场领用数量超出允许范围")
+        quantity = _quantity(raw_line["quantity"])
         line = MaintenanceSiteIssueLine(
             issue_line_id=line_id,
             issue_id=row.issue_id,
@@ -542,7 +573,7 @@ def create_site_issue(
         db.add(line)
         db.flush()
         if status_mapping_state == "mapped" and normalized_status == "confirmed":
-            maintenance_consumption_cost.resolve_line(db, issue_date=issue_date, line=line)
+            _resolve_site_issue_cost(db, issue_date=issue_date, line=line)
         saved_lines.append(line)
     payload = site_issue_dict(row, saved_lines)
     _fact_audit(
@@ -651,7 +682,7 @@ def update_site_issue_status(
     if previous_status != "confirmed" and normalized_status == "confirmed":
         for line in lines:
             line_before = site_issue_line_dict(line)
-            maintenance_consumption_cost.resolve_line(
+            _resolve_site_issue_cost(
                 db,
                 issue_date=row.issue_date,
                 line=line,
@@ -964,7 +995,7 @@ def recompute_cost_gaps(
         before = site_issue_line_dict(line)
         prior_resolution = _cost_resolution_snapshot(line)
         prior_priority = _cost_source_priority(line.cost_source)
-        maintenance_consumption_cost.resolve_line(
+        _resolve_site_issue_cost(
             db,
             issue_date=issue.issue_date,
             line=line,
@@ -1048,11 +1079,11 @@ def fill_manual_cost(
     previous_evidence = line.manual_evidence
     line.manual_unit_cost = None
     line.manual_evidence = None
-    maintenance_consumption_cost.resolve_line(db, issue_date=issue.issue_date, line=line)
+    _resolve_site_issue_cost(db, issue_date=issue.issue_date, line=line)
     if line.cost_source in _AUTOMATIC_COST_SOURCES:
         line.manual_unit_cost = previous_manual
         line.manual_evidence = previous_evidence
-        maintenance_consumption_cost.resolve_line(db, issue_date=issue.issue_date, line=line)
+        _resolve_site_issue_cost(db, issue_date=issue.issue_date, line=line)
         line.version += 1
         after = site_issue_line_dict(line)
         _fact_audit(
@@ -1075,7 +1106,7 @@ def fill_manual_cost(
         }
     line.manual_unit_cost = manual_unit_cost
     line.manual_evidence = _required(evidence, "人工补价证据", 1000)
-    maintenance_consumption_cost.resolve_line(db, issue_date=issue.issue_date, line=line)
+    _resolve_site_issue_cost(db, issue_date=issue.issue_date, line=line)
     line.version += 1
     after = site_issue_line_dict(line)
     _fact_audit(
@@ -1680,6 +1711,34 @@ def _visible_tasks(
     return reminders, completeness
 
 
+def _cost_rate_and_status(
+    *,
+    actual_cost_known: Decimal,
+    total_contract_amount: Decimal | None,
+    has_incomplete_cost_facts: bool,
+) -> tuple[Decimal | None, str]:
+    """Apply the canonical two-decimal display threshold exactly once."""
+
+    cost_rate = (
+        (
+            actual_cost_known
+            / total_contract_amount
+            * Decimal("100")
+        ).quantize(Decimal("0.01"))
+        if total_contract_amount is not None and total_contract_amount > 0
+        else None
+    )
+    if cost_rate is None:
+        return None, "unknown"
+    if cost_rate > Decimal("100"):
+        return cost_rate, "red"
+    if cost_rate >= Decimal("80"):
+        return cost_rate, "yellow"
+    if has_incomplete_cost_facts:
+        return cost_rate, "unknown"
+    return cost_rate, "normal"
+
+
 def _project_card_from_facts(
     *,
     base: dict,
@@ -1709,28 +1768,16 @@ def _project_card_from_facts(
         expense_ready_through and expense_ready_through >= as_of.replace(day=1)
     )
     actual_cost_known = consumed_known + approved_expense
-    cost_rate = (
-        (actual_cost_known / Decimal(total) * Decimal("100")).quantize(
-            Decimal("0.01")
-        )
-        if total is not None and Decimal(total) > 0
-        else None
+    cost_rate, cost_status = _cost_rate_and_status(
+        actual_cost_known=actual_cost_known,
+        total_contract_amount=(Decimal(total) if total is not None else None),
+        has_incomplete_cost_facts=bool(
+            cost_gap_count
+            or unmapped_issue_count
+            or unmapped_expense_count
+            or not expense_data_ready
+        ),
     )
-    if cost_rate is None:
-        cost_status = "unknown"
-    elif cost_rate > Decimal("100"):
-        cost_status = "red"
-    elif cost_rate >= Decimal("80"):
-        cost_status = "yellow"
-    elif (
-        cost_gap_count
-        or unmapped_issue_count
-        or unmapped_expense_count
-        or not expense_data_ready
-    ):
-        cost_status = "unknown"
-    else:
-        cost_status = "normal"
 
     completeness_issues = list(base["completeness"].get("issues", []))
     if cost_gap_count:
@@ -2018,26 +2065,16 @@ def project_workspace(
         and expense_ready_through >= as_of.replace(day=1)
     )
     actual_cost_known = consumed_known + approved_expense
-    cost_rate = (
-        (actual_cost_known / Decimal(total) * Decimal("100")).quantize(Decimal("0.01"))
-        if total is not None and Decimal(total) > 0
-        else None
+    cost_rate, cost_status = _cost_rate_and_status(
+        actual_cost_known=actual_cost_known,
+        total_contract_amount=(Decimal(total) if total is not None else None),
+        has_incomplete_cost_facts=bool(
+            cost_gap_count
+            or unmapped_issue_count
+            or unmapped_expense_count
+            or not expense_data_ready
+        ),
     )
-    if cost_rate is None:
-        cost_status = "unknown"
-    elif cost_rate > Decimal("100"):
-        cost_status = "red"
-    elif cost_rate >= Decimal("80"):
-        cost_status = "yellow"
-    elif (
-        cost_gap_count
-        or unmapped_issue_count
-        or unmapped_expense_count
-        or not expense_data_ready
-    ):
-        cost_status = "unknown"
-    else:
-        cost_status = "normal"
 
     completeness_issues = list(base["completeness"].get("issues", []))
     if cost_gap_count:
@@ -2325,7 +2362,7 @@ def project_workspace(
                 None if profit_restricted else row.receipt_reference
             ),
             "status": row.status,
-            "remark": row.remark,
+            "remark": None if profit_restricted else row.remark,
             "version": row.version,
         }
         for row in db.scalars(
@@ -2431,6 +2468,7 @@ def project_workbook_workspace(
                 **row,
                 "cumulative_amount": None,
                 "receipt_reference": None,
+                "remark": None,
             }
             for row in collections
         ]
@@ -2962,26 +3000,16 @@ def _directory_reminder_project_ids(
         actual_cost_known = Decimal(project_cost_facts["consumed_known"]) + Decimal(
             project_expense_facts["approved_expense"]
         )
-        cost_rate = (
-            actual_cost_known / total_contract_amount * Decimal("100")
-            if total_contract_amount is not None and total_contract_amount > 0
-            else None
+        _cost_rate, cost_status = _cost_rate_and_status(
+            actual_cost_known=actual_cost_known,
+            total_contract_amount=total_contract_amount,
+            has_incomplete_cost_facts=bool(
+                cost_gap_count
+                or unmapped_issue_count
+                or unmapped_expense_count
+                or not expense_data_ready
+            ),
         )
-        if cost_rate is None:
-            cost_status = "unknown"
-        elif cost_rate > Decimal("100"):
-            cost_status = "red"
-        elif cost_rate >= Decimal("80"):
-            cost_status = "yellow"
-        elif (
-            cost_gap_count
-            or unmapped_issue_count
-            or unmapped_expense_count
-            or not expense_data_ready
-        ):
-            cost_status = "unknown"
-        else:
-            cost_status = "normal"
 
         confirmed_collection = sum(
             latest_confirmed_by_project[project.project_id].values(),

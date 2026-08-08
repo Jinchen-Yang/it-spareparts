@@ -9,7 +9,7 @@ scope of this fact chain and therefore never offset consumption.
 from __future__ import annotations
 
 from datetime import date, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -23,10 +23,22 @@ from app.models.sales import FSalesLine, FSalesOrder
 
 ALGORITHM_VERSION = "site-issue-cost-v1"
 _CENT = Decimal("0.01")
+_MONEY_MAX_EXCLUSIVE = Decimal("1000000000000")
+_QUANTITY_MAX_EXCLUSIVE = Decimal("100000000000")
 
 
-def _amount(value: Decimal) -> Decimal:
-    return value.quantize(_CENT, rounding=ROUND_HALF_UP)
+class CostResolutionError(ValueError):
+    """A resolved monetary value cannot be represented by Numeric(14,2)."""
+
+
+def _amount(value: Decimal, *, label: str = "成本单价") -> Decimal:
+    try:
+        normalized = value.quantize(_CENT, rounding=ROUND_HALF_UP)
+    except InvalidOperation as exc:
+        raise CostResolutionError(f"现场领用{label}超出允许范围") from exc
+    if normalized < 0 or normalized >= _MONEY_MAX_EXCLUSIVE:
+        raise CostResolutionError(f"现场领用{label}超出允许范围")
+    return normalized
 
 
 def _valid(qty: Decimal | None, unit_price: Decimal | None) -> bool:
@@ -35,8 +47,8 @@ def _valid(qty: Decimal | None, unit_price: Decimal | None) -> bool:
         and unit_price is not None
         and Decimal(qty) > 0
         and Decimal(unit_price) > 0
-        and Decimal(qty) < Decimal("1000000000000")
-        and Decimal(unit_price) < Decimal("1000000000000")
+        and Decimal(qty) < _QUANTITY_MAX_EXCLUSIVE
+        and Decimal(unit_price) < _MONEY_MAX_EXCLUSIVE
     )
 
 
@@ -253,5 +265,9 @@ def resolve_line(
     line.reference_window_to = to_date if source in {"purchase_window", "sales_window"} else None
     line.algorithm_version = ALGORITHM_VERSION
     line.unit_cost = unit_cost
-    line.cost_amount = _amount(Decimal(line.quantity) * unit_cost) if unit_cost is not None else None
+    line.cost_amount = (
+        _amount(Decimal(line.quantity) * unit_cost, label="成本金额")
+        if unit_cost is not None
+        else None
+    )
     return line
