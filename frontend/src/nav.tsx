@@ -17,6 +17,7 @@ import {
   TeamOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
+import { readMaintenanceCapabilities } from "./components/maintenance/maintenancePermissions";
 
 /**
  * 导航单一真值源：路由、侧栏菜单、面包屑、页面标题都从这里生成。
@@ -37,6 +38,8 @@ export interface NavItem {
   /** 任一权限即可见（与 perm 互斥；perm 优先）：给"多个动作权限共享一个入口"的页面用。
    * 互通PN池管理页 manage / set_policy 两权限各管一半操作，任何一个开都必须能进页面。 */
   anyPerm?: string[];
+  /** 组合权限可见性；用于必须同时满足多项数据与动作权限的业务入口。 */
+  visibleWhen?: () => boolean;
   page: LazyExoticComponent<ComponentType>;
   /** 与 page 共用同一 import() 工厂：空闲时预取，点菜单即秒开 */
   load: () => Promise<{ default: ComponentType }>;
@@ -147,8 +150,8 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { key: "maintenance-projects", path: "/maintenance/projects", label: "项目面板", icon: <DashboardOutlined />, perm: "page_maintenance", page: MaintenanceProjectsPage, load: loadMaintenanceProjects },
       { key: "maintenance-project-master", path: "/maintenance/project-master", label: "项目主档", icon: <ProfileOutlined />, perm: "page_maintenance", page: MaintenanceProjectMasterPage, load: loadMaintenanceProjectMaster },
-      { key: "maintenance-updates", path: "/maintenance/updates", label: "月度更新", icon: <CloudUploadOutlined />, perm: "page_maintenance", page: MaintenanceProjectUpdatesPage, load: loadMaintenanceProjectUpdates },
-      { key: "maintenance-cost-refill", path: "/maintenance/cost-refill", label: "成本回填", icon: <DollarOutlined />, perm: "page_maintenance", page: MaintenanceCostRefillPage, load: loadMaintenanceCostRefill },
+      { key: "maintenance-updates", path: "/maintenance/updates", label: "月度更新", icon: <CloudUploadOutlined />, visibleWhen: () => readMaintenanceCapabilities().canApplyRoundtrip, page: MaintenanceProjectUpdatesPage, load: loadMaintenanceProjectUpdates },
+      { key: "maintenance-cost-refill", path: "/maintenance/cost-refill", label: "成本回填", icon: <DollarOutlined />, visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceCostRefillPage, load: loadMaintenanceCostRefill },
     ],
   },
   {

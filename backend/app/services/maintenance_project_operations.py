@@ -1042,8 +1042,8 @@ def fill_manual_cost(
     if manual_unit_cost < 0 or manual_unit_cost >= Decimal("1000000000000"):
         raise MaintenanceOperationError("人工未税单价超出允许范围")
     before = site_issue_line_dict(line)
-    if line.cost_source in _AUTOMATIC_COST_SOURCES and line.cost_amount is not None:
-        raise MaintenanceOperationConflict("已有自动价格证据，人工补价不能覆盖")
+    if line.cost_source is not None or line.cost_amount is not None:
+        raise MaintenanceOperationConflict("该领用行已有成本，人工补价只能处理缺价行")
     previous_manual = line.manual_unit_cost
     previous_evidence = line.manual_evidence
     line.manual_unit_cost = None

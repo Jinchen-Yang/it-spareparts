@@ -1,6 +1,7 @@
 """Stable maintenance-project operating facts through their public API."""
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -976,6 +977,52 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
     assert filled.json()["cost_source"] == "manual"
     assert filled.json()["cost_amount"] == "50.00"
     assert filled.json()["version"] == 2
+
+    state_before_repeat = db.get(
+        MaintenanceProjectWorkbookState, project.project_id
+    ).revision
+    audit_count_before_repeat = len(
+        list(
+            db.scalars(
+                select(MaintenanceProjectOperationAudit).where(
+                    MaintenanceProjectOperationAudit.project_id == project.project_id,
+                    MaintenanceProjectOperationAudit.entity_id
+                    == "issue-line-manual-gap",
+                )
+            )
+        )
+    )
+    cannot_replace_manual = client.patch(
+        f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
+        json={
+            "line_id": "issue-line-manual-gap",
+            "version": 2,
+            "unit_cost_ex_tax": "99.00",
+            "evidence": "不应覆盖既有人工成本",
+            "reason": "验证人工补价只接管缺价行",
+        },
+    )
+    assert cannot_replace_manual.status_code == 409
+    db.expire_all()
+    manual_line = db.get(MaintenanceSiteIssueLine, "issue-line-manual-gap")
+    assert manual_line.unit_cost == Decimal("12.50")
+    assert manual_line.cost_amount == Decimal("50.00")
+    assert manual_line.version == 2
+    assert (
+        db.get(MaintenanceProjectWorkbookState, project.project_id).revision
+        == state_before_repeat
+    )
+    assert len(
+        list(
+            db.scalars(
+                select(MaintenanceProjectOperationAudit).where(
+                    MaintenanceProjectOperationAudit.project_id == project.project_id,
+                    MaintenanceProjectOperationAudit.entity_id
+                    == "issue-line-manual-gap",
+                )
+            )
+        )
+    ) == audit_count_before_repeat
 
     cannot_override = client.patch(
         f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
