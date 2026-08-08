@@ -72,7 +72,7 @@ function enableProjectManagement() {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   localStorage.clear();
   localStorage.setItem("role", "readonly");
   localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true }));
@@ -355,7 +355,9 @@ describe("MaintenanceProjectMasterPage", () => {
     await waitFor(() => expect(getMaintenanceProject).toHaveBeenCalledWith("project-1"));
     expect(screen.getByLabelText("归档原因")).toHaveValue("项目已经结束");
 
-    fireEvent.click(screen.getByRole("button", { name: "确认归档" }));
+    const retryButton = await screen.findByRole("button", { name: "确认归档" });
+    await waitFor(() => expect(retryButton).toBeEnabled());
+    fireEvent.click(retryButton);
     await waitFor(() => expect(archiveMaintenanceProject).toHaveBeenLastCalledWith(
       "project-1",
       { version: 4, reason: "项目已经结束" },
