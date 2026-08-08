@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
 const { listMaintenanceProjectOperations } = vi.hoisted(() => ({
   listMaintenanceProjectOperations: vi.fn(),
@@ -14,6 +14,11 @@ vi.mock("../../../api/maintenanceOperations", async () => {
 });
 
 import MaintenanceProjectsPage from "../MaintenanceProjectsPage";
+
+function LocationProbe() {
+  const location = useLocation();
+  return <div>{`${location.pathname}${location.search}${location.hash}`}</div>;
+}
 
 const summary = {
   project_id: "project-1",
@@ -88,6 +93,8 @@ describe("MaintenanceProjectsPage", () => {
     expect(within(card).getByText("XM-001")).toBeInTheDocument();
     expect(within(card).getByText("XSDD-001")).toBeInTheDocument();
     expect(within(card).getByText("XSDD-002")).toBeInTheDocument();
+    expect(within(card).getByText("原始状态：已生效")).toBeInTheDocument();
+    expect(within(card).getByText("原始状态：未提供")).toBeInTheDocument();
     expect(within(card).getByText("金额缺失")).toBeInTheDocument();
     expect(within(card).getByText("状态未映射")).toBeInTheDocument();
     expect(within(card).getByText(/缺 2 行成本/)).toBeInTheDocument();
@@ -113,5 +120,53 @@ describe("MaintenanceProjectsPage", () => {
       q: "联通",
       page: 1,
     }));
+  });
+
+  it("成本汇总被脱敏时卡片不误标为成本待补", async () => {
+    listMaintenanceProjectOperations.mockResolvedValueOnce({
+      data: {
+        rows: [{
+          ...summary,
+          metrics: {
+            ...summary.metrics,
+            site_requisition_known_cost: null,
+            approved_expense: null,
+            actual_project_cost_known: null,
+            cost_complete: null,
+            missing_cost_lines: null,
+          },
+        }],
+        total: 1,
+        page: 1,
+        page_size: 24,
+        as_of: "2026-08-08",
+        data_version: "v1",
+      },
+    });
+
+    render(<MemoryRouter><MaintenanceProjectsPage /></MemoryRouter>);
+
+    const card = await screen.findByTestId("maintenance-project-card-project-1");
+    expect(within(card).getByText("成本不可见/无权限")).toBeInTheDocument();
+    expect(within(card).queryByText("成本待补")).toBeNull();
+    expect(card).not.toHaveTextContent("缺 null 行成本");
+  });
+
+  it("带 project_id 的旧提醒深链直接进入稳定项目详情", async () => {
+    render(
+      <MemoryRouter initialEntries={[
+        "/maintenance/projects?project_id=project%2F1&reminder=all#urgent",
+      ]}>
+        <Routes>
+          <Route path="/maintenance/projects" element={<MaintenanceProjectsPage />} />
+          <Route path="/maintenance/projects/:projectId" element={<LocationProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(
+      "/maintenance/projects/project%2F1?reminder=all#urgent",
+    )).toBeInTheDocument();
+    expect(listMaintenanceProjectOperations).not.toHaveBeenCalled();
   });
 });

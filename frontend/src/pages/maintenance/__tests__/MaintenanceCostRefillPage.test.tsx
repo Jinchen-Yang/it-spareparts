@@ -30,7 +30,7 @@ const gap = {
   current_unit_cost: null,
   references: [
     {
-      source: "linked_purchase",
+      source: "direct_purchase",
       document_no: "PO-LINKED",
       document_date: "2026-07-31",
       distance_days: -1,
@@ -82,6 +82,10 @@ describe("MaintenanceCostRefillPage", () => {
     );
 
     expect(await screen.findByText("PN-MISSING")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "返回项目" })).toHaveAttribute(
+      "href",
+      "/maintenance/projects/project-1",
+    );
     expect(screen.getByText("关联采购")).toBeInTheDocument();
     expect(screen.getByText("采购 ±7 天加权")).toBeInTheDocument();
     expect(screen.getByText("销售 ±7 天加权")).toBeInTheDocument();
@@ -108,7 +112,15 @@ describe("MaintenanceCostRefillPage", () => {
     expect(await screen.findByText("成本已回填")).toBeInTheDocument();
   });
 
-  it("版本冲突时保留表单草稿并要求刷新核对", async () => {
+  it("版本冲突时自动刷新到最新版本并保留草稿后可再次保存", async () => {
+    const latestGap = { ...gap, version: 8 };
+    listMaintenanceCostGaps
+      .mockResolvedValueOnce({
+        data: { rows: [gap], total: 1, page: 1, page_size: 20, data_version: "v7" },
+      })
+      .mockResolvedValue({
+        data: { rows: [latestGap], total: 1, page: 1, page_size: 20, data_version: "v8" },
+      });
     updateMaintenanceCostGap.mockRejectedValueOnce({ response: { status: 409 } });
     render(
       <MemoryRouter>
@@ -125,9 +137,16 @@ describe("MaintenanceCostRefillPage", () => {
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
 
-    expect(await within(dialog).findByText("数据已被他人更新，请刷新项目后重新核对；当前草稿已保留。"))
+    expect(await within(dialog).findByText("已刷新到最新版本；当前草稿已保留，请核对后重新保存。"))
       .toBeInTheDocument();
+    await waitFor(() => expect(listMaintenanceCostGaps).toHaveBeenCalledTimes(2));
     expect(within(dialog).getByLabelText("回填原因")).toHaveValue("冲突时不能丢掉");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
+    await waitFor(() => expect(updateMaintenanceCostGap).toHaveBeenLastCalledWith(
+      "project-1",
+      expect.objectContaining({ version: 8, reason: "冲突时不能丢掉" }),
+    ));
   });
 
   it("无项目管理权限时拒绝直接进入回填页面且不读取缺价数据", async () => {
@@ -144,6 +163,23 @@ describe("MaintenanceCostRefillPage", () => {
 
     expect(screen.getByText("无人工成本回填权限")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "保存成本" })).toBeNull();
+    await waitFor(() => expect(listMaintenanceCostGaps).not.toHaveBeenCalled());
+  });
+
+  it("只有项目管理动作权限但无采购成本字段权限时不展示回填入口", async () => {
+    localStorage.setItem("role", "readonly");
+    localStorage.setItem("permissions", JSON.stringify({
+      action_maintenance_project_manage: true,
+      data_purchase_cost: false,
+    }));
+
+    render(
+      <MemoryRouter>
+        <MaintenanceCostRefillPage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("无人工成本回填权限")).toBeInTheDocument();
     await waitFor(() => expect(listMaintenanceCostGaps).not.toHaveBeenCalled());
   });
 });

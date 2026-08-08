@@ -5,6 +5,7 @@ import { Alert, Button, Descriptions, Space, Spin, Tag } from "antd";
 import {
   applyMaintenanceProjectWorkbook,
   downloadMaintenanceProjectWorkbook,
+  downloadMaintenanceWorkbookValidationErrors,
   validateMaintenanceProjectWorkbook,
   type MaintenanceWorkbookValidation,
 } from "../../api/maintenanceOperations";
@@ -35,8 +36,10 @@ export default function ProjectWorkbookActions({
   const inputRef = useRef<HTMLInputElement>(null);
   const validationGeneration = useRef(0);
   const downloadInFlight = useRef(false);
+  const errorDetailsDownloadInFlight = useRef(false);
   const applyInFlight = useRef(false);
   const [downloading, setDownloading] = useState(false);
+  const [downloadingErrorDetails, setDownloadingErrorDetails] = useState(false);
   const [validating, setValidating] = useState(false);
   const [applying, setApplying] = useState(false);
   const [validation, setValidation] = useState<MaintenanceWorkbookValidation | null>(null);
@@ -88,6 +91,31 @@ export default function ProjectWorkbookActions({
         setValidating(false);
         if (inputRef.current) inputRef.current.value = "";
       }
+    }
+  };
+
+  const downloadValidationErrors = async () => {
+    if (!validation?.errors.length || errorDetailsDownloadInFlight.current) return;
+    errorDetailsDownloadInFlight.current = true;
+    setDownloadingErrorDetails(true);
+    setStatus(null);
+    try {
+      const { data } = await downloadMaintenanceWorkbookValidationErrors(
+        validation.validation_token,
+      );
+      const url = URL.createObjectURL(data);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${safeFilenamePart(projectCode)}_维保工作簿错误明细.xlsx`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setStatus({ type: "error", message: "错误明细表下载失败，请重试" });
+    } finally {
+      errorDetailsDownloadInFlight.current = false;
+      setDownloadingErrorDetails(false);
     }
   };
 
@@ -185,6 +213,16 @@ export default function ProjectWorkbookActions({
               {validation.errors.map((error) => (
                 <Alert key={error} type="error" showIcon message={error} />
               ))}
+              {validation.errors.length > 0 && (
+                <Button
+                  aria-label="下载错误明细表"
+                  icon={<DownloadOutlined />}
+                  loading={downloadingErrorDetails}
+                  onClick={() => void downloadValidationErrors()}
+                >
+                  下载错误明细表
+                </Button>
+              )}
               {canApplyRoundtrip && validation.can_apply && (
                 <Button type="primary" loading={applying} onClick={() => void apply()}>
                   确认应用本次更新

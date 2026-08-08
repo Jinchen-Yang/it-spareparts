@@ -24,8 +24,8 @@ export interface MaintenanceOperationsMetrics {
   site_requisition_known_cost: number | null;
   approved_expense: number | null;
   actual_project_cost_known: number | null;
-  cost_complete: boolean;
-  missing_cost_lines: number;
+  cost_complete: boolean | null;
+  missing_cost_lines: number | null;
 }
 
 export interface MaintenanceProjectOperationsSummary {
@@ -62,15 +62,18 @@ export interface MaintenanceSiteRequisitionRow {
   unit_cost: number | null;
   cost_amount: number | null;
   cost_source: string | null;
-  cost_status: "available" | "missing" | "restricted" | string;
+  cost_status: "available" | "missing" | "restricted" | "not_counted" | string;
 }
 
 export interface MaintenanceApprovedExpenseRow {
   expense_id: string;
+  expense_no?: string | null;
+  expense_ref?: string | null;
   expense_date: string | null;
   contract_no: string | null;
-  category: string | null;
-  reason: string | null;
+  applicant?: string | null;
+  category?: string | null;
+  expense_reason?: string | null;
   amount: number | null;
   approval_status: "approved" | string;
 }
@@ -140,7 +143,7 @@ export interface MaintenanceWorkbookApplyResult {
 }
 
 export interface MaintenanceCostReference {
-  source: "linked_purchase" | "purchase_window" | "sales_window" | string;
+  source: "direct_purchase" | "linked_purchase" | "purchase_window" | "sales_window" | "manual" | string;
   document_no: string | null;
   document_date: string | null;
   distance_days: number | null;
@@ -185,9 +188,26 @@ export interface MaintenanceCostGapUpdate {
 }
 
 function finiteNumberOrNull(value: unknown): number | null {
-  if (value === null || value === undefined || value === "") return null;
-  const parsed = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" && typeof value !== "string") return null;
+  const normalized = typeof value === "string" ? value.trim() : value;
+  if (normalized === "") return null;
+  if (
+    typeof normalized === "string"
+    && !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(normalized)
+  ) return null;
+  if (typeof normalized === "string" && normalized.includes(".")) {
+    const mantissa = normalized.toLowerCase().split("e", 1)[0];
+    const significantDigits = mantissa
+      .replace(/^[+-]/, "")
+      .replace(".", "")
+      .replace(/^0+/, "")
+      .replace(/0+$/, "");
+    if (significantDigits.length > 15) return null;
+  }
+  const parsed = typeof normalized === "number" ? normalized : Number(normalized);
+  if (!Number.isFinite(parsed) || Math.abs(parsed) > Number.MAX_SAFE_INTEGER) return null;
+  return parsed;
 }
 
 function normalizeContract(
@@ -304,6 +324,12 @@ export const getMaintenanceProjectWorkspace = (projectId: string) =>
 
 export const downloadMaintenanceProjectWorkbook = (projectId: string) =>
   api.get<Blob>(`${projectBase(projectId)}/workbook`, { responseType: "blob" });
+
+export const downloadMaintenanceWorkbookValidationErrors = (validationToken: string) =>
+  api.get<Blob>(
+    `/maintenance/workbook-validations/${encodeURIComponent(validationToken)}/errors.xlsx`,
+    { responseType: "blob" },
+  );
 
 export const validateMaintenanceProjectWorkbook = (projectId: string, file: File) => {
   const form = new FormData();

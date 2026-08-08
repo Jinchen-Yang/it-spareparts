@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Empty, Input, Pagination, Segmented, Space } from "antd";
-import { useSearchParams } from "react-router-dom";
+import { Navigate, useLocation, useSearchParams } from "react-router-dom";
 
 import {
   listMaintenanceProjectOperations,
@@ -14,6 +14,8 @@ const PAGE_SIZE = 24;
 
 export default function MaintenanceProjectsPage() {
   const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const projectDeepLinkId = searchParams.get("project_id")?.trim() || "";
   const reminderFilter = searchParams.get("reminder") || undefined;
   const [rows, setRows] = useState<MaintenanceProjectOperationsSummary[]>([]);
   const [total, setTotal] = useState(0);
@@ -55,9 +57,26 @@ export default function MaintenanceProjectsPage() {
   }, [reminderFilter]);
 
   useEffect(() => {
+    if (projectDeepLinkId) return undefined;
     void load(1, q, lifecycle);
     return () => { generation.current += 1; };
-  }, [lifecycle, load, q]);
+  }, [lifecycle, load, projectDeepLinkId, q]);
+
+  if (projectDeepLinkId) {
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete("project_id");
+    const nextSearch = nextParams.toString();
+    return (
+      <Navigate
+        replace
+        to={{
+          pathname: `/maintenance/projects/${encodeURIComponent(projectDeepLinkId)}`,
+          search: nextSearch ? `?${nextSearch}` : "",
+          hash: location.hash,
+        }}
+      />
+    );
+  }
 
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>

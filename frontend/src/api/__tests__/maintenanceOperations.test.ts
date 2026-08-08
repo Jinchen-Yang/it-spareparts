@@ -15,6 +15,7 @@ vi.mock("../../api", () => ({
 import {
   applyMaintenanceProjectWorkbook,
   downloadMaintenanceProjectWorkbook,
+  downloadMaintenanceWorkbookValidationErrors,
   getMaintenanceProjectWorkspace,
   listMaintenanceCostGaps,
   listMaintenanceProjectOperations,
@@ -77,6 +78,15 @@ describe("maintenance operations API", () => {
     );
   });
 
+  it("按校验令牌下载工作簿错误明细", () => {
+    downloadMaintenanceWorkbookValidationErrors("token/危险");
+
+    expect(get).toHaveBeenCalledWith(
+      "/maintenance/workbook-validations/token%2F%E5%8D%B1%E9%99%A9/errors.xlsx",
+      { responseType: "blob" },
+    );
+  });
+
   it("读取并按版本回填一个项目的缺价领用行", () => {
     listMaintenanceCostGaps("project/1", { page: 2, page_size: 20 });
     updateMaintenanceCostGap("project/1", {
@@ -128,9 +138,9 @@ describe("maintenance operations API", () => {
           }],
           metrics: {
             total_contract_amount: "1000.50",
-            known_contract_amount: "Infinity",
+            known_contract_amount: "   ",
             contract_amount_complete: true,
-            received_amount: "600.25",
+            received_amount: "9007199254740991.1",
             site_requisition_known_cost: "300.10",
             approved_expense: "99.90",
             actual_project_cost_known: "400.00",
@@ -154,6 +164,7 @@ describe("maintenance operations API", () => {
     expect(data.rows[0].contracts[0].received_amount).toBe(600.25);
     expect(data.rows[0].metrics.site_requisition_known_cost).toBe(300.1);
     expect(data.rows[0].metrics.known_contract_amount).toBeNull();
+    expect(data.rows[0].metrics.received_amount).toBeNull();
   });
 
   it("工作台边界同时归一化领用数量、单位成本、成本金额和审批报销", async () => {

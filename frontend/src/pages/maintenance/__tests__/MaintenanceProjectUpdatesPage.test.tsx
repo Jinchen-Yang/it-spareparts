@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
@@ -24,7 +24,18 @@ const project = {
   lifecycle_status: "ongoing",
   is_active: true,
   version: 3,
-  contracts: [],
+  contracts: [{
+    project_contract_id: "pc-1",
+    contract_id: "contract-1",
+    contract_no: "XSDD-001",
+    contract_amount: 1000,
+    contract_status: "已生效",
+    status_mapping_state: "mapped",
+    included_in_total: true,
+    is_effective: true,
+    amount_status: "available",
+    received_amount: 600,
+  }],
   metrics: {
     total_contract_amount: 1000,
     known_contract_amount: 1000,
@@ -91,5 +102,56 @@ describe("MaintenanceProjectUpdatesPage", () => {
     expect(screen.getByRole("button", { name: "下载完整四表" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "上传月度更新" })).toBeInTheDocument();
     await waitFor(() => expect(getMaintenanceProjectWorkspace).toHaveBeenCalledWith("project-1"));
+  });
+
+  it("旧下载链接只有合同时自动定位唯一关联项目", async () => {
+    render(
+      <MemoryRouter initialEntries={[
+        "/maintenance/updates?from=reminders&contract=XSDD-001",
+      ]}>
+        <MaintenanceProjectUpdatesPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(listMaintenanceProjectOperations).toHaveBeenCalledWith(
+      expect.objectContaining({ q: "XSDD-001" }),
+    ));
+    await waitFor(() => expect(getMaintenanceProjectWorkspace).toHaveBeenCalledWith("project-1"));
+    expect(await screen.findByRole("button", { name: "下载完整四表" })).toBeInTheDocument();
+  });
+
+  it("切换项目后立即移除旧项目的工作簿操作", async () => {
+    const secondProject = {
+      ...project,
+      project_id: "project-2",
+      project_code: "XM-002",
+      display_name: "第二维保项目",
+      contracts: [],
+    };
+    listMaintenanceProjectOperations.mockResolvedValue({
+      data: {
+        rows: [project, secondProject],
+        total: 2,
+        page: 1,
+        page_size: 200,
+        as_of: "2026-08-08",
+        data_version: "v1",
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/maintenance/updates?project_id=project-1"]}>
+        <MaintenanceProjectUpdatesPage />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("button", { name: "下载完整四表" })).toBeInTheDocument();
+
+    getMaintenanceProjectWorkspace.mockReturnValueOnce(new Promise(() => undefined));
+    fireEvent.mouseDown(screen.getByRole("combobox"));
+    fireEvent.click(await screen.findByText("XM-002 · 第二维保项目"));
+
+    await waitFor(() => expect(getMaintenanceProjectWorkspace).toHaveBeenCalledWith("project-2"));
+    expect(screen.queryByRole("button", { name: "下载完整四表" })).toBeNull();
+    expect(screen.queryByText("完整四表内容")).toBeNull();
   });
 });

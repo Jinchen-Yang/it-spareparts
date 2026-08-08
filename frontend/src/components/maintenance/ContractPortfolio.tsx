@@ -55,6 +55,9 @@ export default function ContractPortfolio({
               {contract.amount_status === "restricted" ? "—" : money(contract.contract_amount)}
             </span>
           </div>
+          <div style={{ color: "var(--mb-text-3)", fontSize: 12, marginTop: 3 }}>
+            原始状态：{contract.contract_status?.trim() || "未提供"}
+          </div>
           <Space wrap size={[4, 4]} style={{ marginTop: 5 }}>
             {contractTags(contract)}
           </Space>

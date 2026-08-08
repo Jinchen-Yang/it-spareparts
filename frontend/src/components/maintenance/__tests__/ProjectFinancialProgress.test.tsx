@@ -1,9 +1,12 @@
 import { render, screen, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { cleanup } from "@testing-library/react";
 
 import ProjectFinancialProgress, {
   classifyCostWaterline,
 } from "../ProjectFinancialProgress";
+
+afterEach(cleanup);
 
 describe("项目双进度", () => {
   it.each([
@@ -27,6 +30,61 @@ describe("项目双进度", () => {
     })).toMatchObject({ status: "unknown", percent: 50 });
   });
 
+  it("合同额证据不完整时两条进度都不计算百分比", () => {
+    render(<ProjectFinancialProgress metrics={{
+      total_contract_amount: 1000,
+      contract_amount_complete: false,
+      received_amount: 300,
+      site_requisition_known_cost: 450,
+      approved_expense: 50,
+      actual_project_cost_known: 500,
+      cost_complete: true,
+      missing_cost_lines: 0,
+    }} />);
+
+    const collection = screen.getByTestId("collection-progress");
+    const cost = screen.getByTestId("project-cost-progress");
+    expect(collection).not.toHaveTextContent("30%");
+    expect(cost).not.toHaveTextContent("50%");
+    expect(screen.getAllByText("合同额证据不完整，暂不计算比例。")).toHaveLength(2);
+  });
+
+  it("成本字段被脱敏时只说明不可见，不推断缺价或成本比例", () => {
+    render(<ProjectFinancialProgress metrics={{
+      total_contract_amount: 1000,
+      contract_amount_complete: true,
+      received_amount: 300,
+      site_requisition_known_cost: null,
+      approved_expense: null,
+      actual_project_cost_known: null,
+      cost_complete: null,
+      missing_cost_lines: null,
+    }} />);
+
+    const cost = screen.getByTestId("project-cost-progress");
+    expect(within(cost).getByText("成本不可见/无权限")).toBeInTheDocument();
+    expect(cost).not.toHaveTextContent("缺 null 行成本");
+    expect(cost).not.toHaveTextContent("成本待补");
+    expect(cost).not.toHaveTextContent("已知下限");
+  });
+
+  it("没有可计算合同额时仍展示缺价事实，但不拼接空的下限文案", () => {
+    render(<ProjectFinancialProgress metrics={{
+      total_contract_amount: null,
+      contract_amount_complete: true,
+      received_amount: 0,
+      site_requisition_known_cost: 30,
+      approved_expense: 20,
+      actual_project_cost_known: 50,
+      cost_complete: false,
+      missing_cost_lines: 2,
+    }} />);
+
+    const cost = screen.getByTestId("project-cost-progress");
+    expect(within(cost).getByText("缺 2 行成本；当前无可计算合同额，暂不显示下限。")).toBeInTheDocument();
+    expect(cost).not.toHaveTextContent("；，");
+  });
+
   it("展示回款、项目实际成本两条进度，并拆分现场领用与审批通过报销", () => {
     render(<ProjectFinancialProgress metrics={{
       total_contract_amount: 1000,
@@ -45,6 +103,8 @@ describe("项目双进度", () => {
     expect(within(cost).getByText(/现场领用已知成本 ¥450/)).toBeInTheDocument();
     expect(within(cost).getByText(/审批通过报销 ¥350/)).toBeInTheDocument();
     expect(within(cost).getByText(/缺 3 行成本/)).toBeInTheDocument();
+    expect(within(cost).getAllByText("已知下限 ≥80%").length).toBeGreaterThanOrEqual(1);
     expect(within(cost).getByText(/现场领用占合同额 45%/)).toBeInTheDocument();
+    expect(within(cost).queryByText("低于 80%")).toBeNull();
   });
 });

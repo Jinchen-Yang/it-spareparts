@@ -37,7 +37,9 @@ export function readMaintenanceCapabilities() {
     canApplyRoundtrip: canDownloadRoundtrip && (
       isAdmin || permissions.action_maintenance_roundtrip_apply === true
     ),
-    canManageProject: isAdmin
-      || permissions.action_maintenance_project_manage === true,
+    canManageProject: isAdmin || (
+      permissions.data_purchase_cost === true
+      && permissions.action_maintenance_project_manage === true
+    ),
   };
 }

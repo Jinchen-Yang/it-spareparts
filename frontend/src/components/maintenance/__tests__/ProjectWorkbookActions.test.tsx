@@ -4,10 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   applyMaintenanceProjectWorkbook,
   downloadMaintenanceProjectWorkbook,
+  downloadMaintenanceWorkbookValidationErrors,
   validateMaintenanceProjectWorkbook,
 } = vi.hoisted(() => ({
   applyMaintenanceProjectWorkbook: vi.fn(),
   downloadMaintenanceProjectWorkbook: vi.fn(),
+  downloadMaintenanceWorkbookValidationErrors: vi.fn(),
   validateMaintenanceProjectWorkbook: vi.fn(),
 }));
 
@@ -19,6 +21,7 @@ vi.mock("../../../api/maintenanceOperations", async () => {
     ...actual,
     applyMaintenanceProjectWorkbook,
     downloadMaintenanceProjectWorkbook,
+    downloadMaintenanceWorkbookValidationErrors,
     validateMaintenanceProjectWorkbook,
   };
 });
@@ -30,6 +33,9 @@ beforeEach(() => {
   localStorage.clear();
   localStorage.setItem("role", "admin");
   downloadMaintenanceProjectWorkbook.mockResolvedValue({ data: new Blob(["xlsx"]) });
+  downloadMaintenanceWorkbookValidationErrors.mockResolvedValue({
+    data: new Blob(["error-details"]),
+  });
   validateMaintenanceProjectWorkbook.mockResolvedValue({
     data: {
       validation_token: "token-1",
@@ -132,6 +138,12 @@ describe("ProjectWorkbookActions", () => {
     expect(await screen.findByText("校验未通过，未写入系统")).toBeInTheDocument();
     expect(screen.getByText("02_备件消耗是系统生成表，禁止修改")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "确认应用本次更新" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "下载错误明细表" }));
+    await waitFor(() => expect(downloadMaintenanceWorkbookValidationErrors).toHaveBeenCalledWith(
+      "token-bad",
+    ));
+    expect(URL.createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
   });
 
   it("无回填应用权限时保留下载，但不暴露上传入口", () => {

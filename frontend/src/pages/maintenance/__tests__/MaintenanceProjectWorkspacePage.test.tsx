@@ -63,16 +63,30 @@ const workspace = {
       cost_amount: null,
       cost_source: null,
       cost_status: "missing",
+    }, {
+      line_id: "line-2",
+      order_no: "WBDD-002",
+      order_date: "2026-08-02",
+      contract_no: "XSDD-001",
+      pn: "PN-NOT-COUNTED",
+      description: "未确认现场领用",
+      quantity: 1,
+      unit_cost: null,
+      cost_amount: null,
+      cost_source: null,
+      cost_status: "not_counted",
     }],
-    total: 1,
+    total: 2,
   },
   approved_expenses: {
     rows: [{
       expense_id: "expense-1",
+      expense_ref: "BXD-202608-001",
       expense_date: "2026-08-02",
       contract_no: "XSDD-001",
+      applicant: "张三",
       category: "差旅",
-      reason: "现场支持",
+      expense_reason: "现场支持",
       amount: 350,
       approval_status: "approved",
     }],
@@ -129,10 +143,15 @@ describe("MaintenanceProjectWorkspacePage", () => {
     const requisitions = screen.getByTestId("site-requisition-table");
     expect(within(requisitions).getByText("PN-MISSING")).toBeInTheDocument();
     expect(within(requisitions).getByText("待回填成本")).toBeInTheDocument();
+    expect(within(requisitions).getByText("未计入成本")).toBeInTheDocument();
     expect(within(requisitions).getByText("待补价格的现场领用件")).toBeInTheDocument();
 
     const expenses = screen.getByTestId("approved-expense-table");
     expect(within(expenses).getByText("审批通过")).toBeInTheDocument();
+    expect(within(expenses).getAllByText("报销单号").length).toBeGreaterThanOrEqual(1);
+    expect(within(expenses).getByText("BXD-202608-001")).toBeInTheDocument();
+    expect(within(expenses).getByText("张三")).toBeInTheDocument();
+    expect(within(expenses).getByText("差旅")).toBeInTheDocument();
     expect(within(expenses).getByText("现场支持")).toBeInTheDocument();
     expect(screen.getByText("存在待补成本")).toBeInTheDocument();
 
@@ -169,5 +188,34 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(screen.queryByRole("link", { name: "去人工回填成本" })).toBeNull();
     expect(screen.queryByRole("button", { name: "上传月度更新" })).toBeNull();
     expect(screen.getByRole("button", { name: "下载完整四表" })).toBeInTheDocument();
+  });
+
+  it("成本汇总被脱敏时不把未知状态误标为缺价", async () => {
+    getMaintenanceProjectWorkspace.mockResolvedValueOnce({
+      data: {
+        ...workspace,
+        project: {
+          ...workspace.project,
+          metrics: {
+            ...workspace.project.metrics,
+            site_requisition_known_cost: null,
+            approved_expense: null,
+            actual_project_cost_known: null,
+            cost_complete: null,
+            missing_cost_lines: null,
+          },
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <MaintenanceProjectWorkspacePage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("成本不可见/无权限")).toBeInTheDocument();
+    expect(screen.queryByText(/缺 null 行成本/)).toBeNull();
+    expect(screen.getByText("成本明细不可见")).toBeInTheDocument();
   });
 });

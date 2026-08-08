@@ -54,7 +54,8 @@ export default function MaintenanceProjectCard({ project }: {
         {project.reminder_count > 0
           ? <Badge count={project.reminder_count}><Tag color="orange">系统提醒</Tag></Badge>
           : <Tag color="green">暂无提醒</Tag>}
-        {!project.metrics.cost_complete && <Tag color="orange">成本待补</Tag>}
+        {project.metrics.cost_complete === false && <Tag color="orange">成本待补</Tag>}
+        {project.metrics.cost_complete === null && <Tag>成本不可见</Tag>}
       </Space>
     </Card>
   );

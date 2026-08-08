@@ -13,7 +13,7 @@ import {
   Tag,
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 
 import {
   listMaintenanceCostGaps,
@@ -28,9 +28,11 @@ import { readMaintenanceCapabilities } from "../../components/maintenance/mainte
 import { money } from "../../utils/format";
 
 const SOURCE_LABELS: Record<string, string> = {
+  direct_purchase: "关联采购",
   linked_purchase: "关联采购",
   purchase_window: "采购 ±7 天加权",
   sales_window: "销售 ±7 天加权",
+  manual: "人工回填",
 };
 
 function referenceLabel(reference: MaintenanceCostReference): string {
@@ -60,7 +62,8 @@ function ReferenceList({ references, selectable, onSelect }: {
       {references.map((reference, index) => (
         <div key={`${reference.source}-${reference.document_no || index}`}>
           <Space size={6} wrap>
-            <Tag color={reference.source === "linked_purchase" ? "green" : "blue"}>
+            <Tag color={reference.source === "direct_purchase" || reference.source === "linked_purchase"
+              ? "green" : "blue"}>
               {referenceLabel(reference)}
             </Tag>
             <span>{reference.document_no || "无单据号"}</span>
@@ -102,6 +105,8 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
   const [evidence, setEvidence] = useState("");
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
+  const [refreshingConflict, setRefreshingConflict] = useState(false);
+  const [conflictBlocked, setConflictBlocked] = useState(false);
   const [formError, setFormError] = useState("");
   const [success, setSuccess] = useState("");
   const loadGeneration = useRef(0);
@@ -183,12 +188,42 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
     setEvidence("");
     setReason("");
     setFormError("");
+    setConflictBlocked(false);
   };
 
   const chooseReference = (reference: MaintenanceCostReference) => {
     setUnitCost(reference.weighted_unit_price);
     setEvidence(referenceEvidence(reference));
     setFormError("");
+  };
+
+  const refreshLatestGap = async (staleGap: MaintenanceCostGap) => {
+    setRefreshingConflict(true);
+    setConflictBlocked(true);
+    try {
+      const { data } = await listMaintenanceCostGaps(staleGap.project_id, {
+        page,
+        page_size: 20,
+      });
+      if (selectedProjectId === staleGap.project_id) {
+        setRows(data.rows);
+        setTotal(data.total);
+      }
+      const latestGap = data.rows.find((row) => row.line_id === staleGap.line_id);
+      if (!latestGap) {
+        setFormError("该行已不在待回填清单中；草稿已保留，请返回项目核对最新状态。");
+        return false;
+      }
+      setEditing(latestGap);
+      setConflictBlocked(false);
+      setFormError("已刷新到最新版本；当前草稿已保留，请核对后重新保存。");
+      return true;
+    } catch {
+      setFormError("最新版本加载失败；草稿已保留，请重新获取后再保存。");
+      return false;
+    } finally {
+      setRefreshingConflict(false);
+    }
   };
 
   const save = async () => {
@@ -207,11 +242,12 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
         reason: reason.trim(),
       });
       setEditing(null);
+      setConflictBlocked(false);
       setSuccess("成本已回填");
       await load();
     } catch (error) {
       if ((error as { response?: { status?: number } }).response?.status === 409) {
-        setFormError("数据已被他人更新，请刷新项目后重新核对；当前草稿已保留。");
+        await refreshLatestGap(editing);
       } else {
         setFormError("保存失败，当前草稿已保留，请稍后重试。");
       }
@@ -265,6 +301,11 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
       <PageHeader
         title="缺失成本人工回填"
         subtitle="只列出系统无法自动取价的现场领用行；先核对关联采购，再看前后 7 天采购和销售加权参考。"
+        extra={selectedProjectId ? (
+          <Link to={`/maintenance/projects/${encodeURIComponent(selectedProjectId)}`}>
+            返回项目
+          </Link>
+        ) : undefined}
       />
       <Card>
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
@@ -375,9 +416,22 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
             </label>
             {formError && <Alert showIcon type="error" message={formError} />}
             <Space>
-              <Button type="primary" loading={saving} onClick={() => void save()}>
+              <Button
+                type="primary"
+                loading={saving}
+                disabled={conflictBlocked}
+                onClick={() => void save()}
+              >
                 保存成本
               </Button>
+              {conflictBlocked && (
+                <Button
+                  loading={refreshingConflict}
+                  onClick={() => editing && void refreshLatestGap(editing)}
+                >
+                  重新获取最新版本
+                </Button>
+              )}
               <Button disabled={saving} onClick={() => setEditing(null)}>取消</Button>
             </Space>
           </Space>

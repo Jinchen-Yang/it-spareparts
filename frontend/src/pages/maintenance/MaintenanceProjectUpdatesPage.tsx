@@ -23,6 +23,7 @@ export default function MaintenanceProjectUpdatesPage() {
   const [loadError, setLoadError] = useState(false);
   const generation = useRef(0);
   const projectListGeneration = useRef(0);
+  const legacyContract = searchParams.get("contract")?.trim() || "";
 
   const loadProjectOptions = useCallback(async (q = "") => {
     const request = ++projectListGeneration.current;
@@ -42,9 +43,22 @@ export default function MaintenanceProjectUpdatesPage() {
   }, []);
 
   useEffect(() => {
-    void loadProjectOptions();
+    void loadProjectOptions(legacyContract);
     return () => { projectListGeneration.current += 1; };
-  }, [loadProjectOptions]);
+  }, [legacyContract, loadProjectOptions]);
+
+  useEffect(() => {
+    if (projectId || !legacyContract) return;
+    const matches = projects.filter((project) => project.contracts.some(
+      (contract) => contract.contract_no.trim() === legacyContract,
+    ));
+    if (matches.length !== 1) return;
+    const matchedProjectId = matches[0].project_id;
+    setProjectId(matchedProjectId);
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("project_id", matchedProjectId);
+    setSearchParams(nextParams, { replace: true });
+  }, [legacyContract, projectId, projects, searchParams, setSearchParams]);
 
   const loadWorkspace = useCallback(async () => {
     if (!projectId) {
@@ -55,6 +69,7 @@ export default function MaintenanceProjectUpdatesPage() {
     const request = ++generation.current;
     setLoadingWorkspace(true);
     setLoadError(false);
+    setWorkspace(null);
     try {
       const { data } = await getMaintenanceProjectWorkspace(projectId);
       if (request === generation.current) setWorkspace(data);
@@ -74,8 +89,14 @@ export default function MaintenanceProjectUpdatesPage() {
   }, [loadWorkspace]);
 
   const selectProject = (value: string) => {
+    generation.current += 1;
+    setWorkspace(null);
+    setLoadError(false);
+    setLoadingWorkspace(true);
     setProjectId(value);
-    setSearchParams({ project_id: value }, { replace: true });
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set("project_id", value);
+    setSearchParams(nextParams, { replace: true });
   };
   const optionProjects = workspace
     && !projects.some((project) => project.project_id === workspace.project.project_id)

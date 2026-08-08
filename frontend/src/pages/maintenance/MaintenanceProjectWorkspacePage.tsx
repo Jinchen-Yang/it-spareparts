@@ -33,15 +33,25 @@ const requisitionColumns: ColumnsType<MaintenanceSiteRequisitionRow> = [
     width: 120,
     render: (value) => value === "missing"
       ? <Tag color="orange">待回填成本</Tag>
-      : value === "restricted" ? <Tag>成本不可见</Tag> : <Tag color="green">已有成本</Tag>,
+      : value === "restricted"
+        ? <Tag>成本不可见</Tag>
+        : value === "not_counted"
+          ? <Tag>未计入成本</Tag>
+          : <Tag color="green">已有成本</Tag>,
   },
 ];
 
 const expenseColumns: ColumnsType<MaintenanceApprovedExpenseRow> = [
+  {
+    title: "报销单号",
+    width: 170,
+    render: (_, row) => row.expense_no || row.expense_ref || "—",
+  },
   { title: "报销日期", dataIndex: "expense_date", width: 110, render: (value) => value || "—" },
   { title: "合同", dataIndex: "contract_no", width: 140, render: (value) => value || "—" },
-  { title: "费用分类", dataIndex: "category", width: 130, render: (value) => value || "—" },
-  { title: "支出事由", dataIndex: "reason", render: (value) => value || "—" },
+  { title: "申请人", dataIndex: "applicant", width: 110, render: (value) => value || "未提供" },
+  { title: "费用分类", dataIndex: "category", width: 130, render: (value) => value || "未提供" },
+  { title: "支出事由", dataIndex: "expense_reason", render: (value) => value || "未提供" },
   { title: "金额", dataIndex: "amount", width: 120, align: "right", render: money },
   { title: "审批状态", width: 110, render: () => <Tag color="green">审批通过</Tag> },
 ];
@@ -147,9 +157,11 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
 
       <Card
         title="现场领用全量明细"
-        extra={!project.metrics.cost_complete
-          ? <Tag color="orange">缺 {project.metrics.missing_cost_lines} 行成本，明细仍完整展示</Tag>
-          : <Tag color="green">成本完整</Tag>}
+        extra={project.metrics.cost_complete === null
+          ? <Tag>成本明细不可见</Tag>
+          : project.metrics.cost_complete === false
+            ? <Tag color="orange">缺 {project.metrics.missing_cost_lines} 行成本，明细仍完整展示</Tag>
+            : <Tag color="green">成本完整</Tag>}
       >
         <div data-testid="site-requisition-table">
           <Table
@@ -171,7 +183,7 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
             size="small"
             columns={expenseColumns}
             dataSource={workspace.approved_expenses.rows}
-            scroll={{ x: 760 }}
+            scroll={{ x: 1120 }}
             pagination={{ pageSize: 20, showSizeChanger: true }}
             locale={{ emptyText: "暂无审批通过报销" }}
           />
