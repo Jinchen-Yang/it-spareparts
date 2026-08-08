@@ -6,6 +6,7 @@ import { Link, useParams } from "react-router-dom";
 import {
   getMaintenanceProjectWorkspace,
   type MaintenanceApprovedExpenseRow,
+  type MaintenanceCollectionSnapshotRow,
   type MaintenanceProjectWorkspace,
   type MaintenanceSiteRequisitionRow,
 } from "../../api/maintenanceOperations";
@@ -54,6 +55,39 @@ const expenseColumns: ColumnsType<MaintenanceApprovedExpenseRow> = [
   { title: "支出事由", dataIndex: "expense_reason", render: (value) => value || "未提供" },
   { title: "金额", dataIndex: "amount", width: 120, align: "right", render: money },
   { title: "审批状态", width: 110, render: () => <Tag color="green">审批通过</Tag> },
+];
+
+const collectionStatus = (status: string) => {
+  if (status === "confirmed") return <Tag color="green">已确认</Tag>;
+  if (status === "unconfirmed") return <Tag color="orange">待确认</Tag>;
+  if (status === "void") return <Tag>已作废</Tag>;
+  return <Tag>{status || "未知"}</Tag>;
+};
+
+const collectionColumns: ColumnsType<MaintenanceCollectionSnapshotRow> = [
+  {
+    title: "报告月",
+    dataIndex: "report_month",
+    width: 105,
+    render: (value: string) => value ? value.slice(0, 7) : "—",
+  },
+  { title: "合同编号", dataIndex: "contract_no", width: 170, render: (value) => value || "—" },
+  {
+    title: "累计回款",
+    dataIndex: "cumulative_amount",
+    width: 130,
+    align: "right",
+    render: money,
+  },
+  {
+    title: "凭证",
+    dataIndex: "receipt_reference",
+    width: 180,
+    render: (value) => value || "—",
+  },
+  { title: "状态", dataIndex: "status", width: 100, render: collectionStatus },
+  { title: "备注", dataIndex: "remark", render: (value) => value || "—" },
+  { title: "版本", dataIndex: "version", width: 75, align: "right" },
 ];
 
 export default function MaintenanceProjectWorkspacePage({ projectId }: {
@@ -153,6 +187,20 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
 
       <Card title="全部关联合同">
         <ContractPortfolio contracts={project.contracts} />
+      </Card>
+
+      <Card title="回款明细" extra={<Tag>{`截至 ${workspace.as_of}`}</Tag>}>
+        <div data-testid="collection-snapshot-table">
+          <Table
+            rowKey="collection_id"
+            size="small"
+            columns={collectionColumns}
+            dataSource={workspace.collection_snapshots.rows}
+            scroll={{ x: 980 }}
+            pagination={{ pageSize: 20, showSizeChanger: true }}
+            locale={{ emptyText: "暂无回款记录" }}
+          />
+        </div>
       </Card>
 
       <Card

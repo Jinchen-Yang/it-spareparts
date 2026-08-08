@@ -205,6 +205,20 @@ describe("maintenance operations API", () => {
           reminder_count: 0,
           as_of: "2026-08-08",
         },
+        collection_snapshots: {
+          rows: [{
+            collection_id: "collection-1",
+            project_contract_id: "pc-1",
+            contract_no: "HT-1",
+            report_month: "2026-08-01",
+            cumulative_amount: "18.80",
+            receipt_reference: "RECEIPT-1",
+            status: "confirmed",
+            remark: null,
+            version: 1,
+          }],
+          total: 1,
+        },
         requisitions: {
           rows: [{
             line_id: "line-1",
@@ -254,5 +268,6 @@ describe("maintenance operations API", () => {
       cost_amount: 33.25,
     }));
     expect(data.approved_expenses.rows[0].amount).toBe(8.8);
+    expect(data.collection_snapshots.rows[0].cumulative_amount).toBe(18.8);
   });
 });

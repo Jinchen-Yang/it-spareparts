@@ -5,12 +5,12 @@ import { money } from "../../utils/format";
 
 function contractTags(contract: MaintenanceContractSummary) {
   const tags = [];
-  if (contract.is_effective && contract.included_in_total) {
-    tags.push(<Tag color="green" key="included">计入合同总额</Tag>);
-  } else if (!contract.is_effective) {
-    tags.push(<Tag key="historical">非当前有效</Tag>);
-  } else {
+  if (!contract.included_in_total) {
     tags.push(<Tag key="excluded">不计入合同总额</Tag>);
+  } else if (contract.is_effective) {
+    tags.push(<Tag color="green" key="included">计入合同总额</Tag>);
+  } else {
+    tags.push(<Tag key="historical">非当前有效</Tag>);
   }
   if (contract.status_mapping_state !== "mapped") {
     tags.push(<Tag color="orange" key="unmapped">状态未映射</Tag>);

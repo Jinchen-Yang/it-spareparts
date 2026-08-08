@@ -78,6 +78,18 @@ export interface MaintenanceApprovedExpenseRow {
   approval_status: "approved" | string;
 }
 
+export interface MaintenanceCollectionSnapshotRow {
+  collection_id: string;
+  project_contract_id: string;
+  contract_no: string | null;
+  report_month: string;
+  cumulative_amount: number | null;
+  receipt_reference: string | null;
+  status: "confirmed" | "unconfirmed" | "void" | string;
+  remark: string | null;
+  version: number;
+}
+
 export interface MaintenanceProjectReminder {
   reminder_id: string;
   type: string;
@@ -104,6 +116,10 @@ export interface MaintenanceWorkbookPreview {
 
 export interface MaintenanceProjectWorkspace {
   project: MaintenanceProjectOperationsSummary;
+  collection_snapshots: {
+    rows: MaintenanceCollectionSnapshotRow[];
+    total: number;
+  };
   requisitions: {
     rows: MaintenanceSiteRequisitionRow[];
     total: number;
@@ -274,6 +290,15 @@ function normalizeWorkspace(data: MaintenanceProjectWorkspace): MaintenanceProje
   return {
     ...data,
     project: normalizeProjectSummary(data.project),
+    collection_snapshots: {
+      ...data.collection_snapshots,
+      rows: Array.isArray(data.collection_snapshots?.rows)
+        ? data.collection_snapshots.rows.map((row) => ({
+          ...row,
+          cumulative_amount: finiteNumberOrNull(row.cumulative_amount),
+        }))
+        : [],
+    },
     requisitions: {
       ...data.requisitions,
       rows: Array.isArray(data.requisitions?.rows)

@@ -77,6 +77,7 @@ class CollectionPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: int = Field(ge=1)
+    report_month: date | None = None
     cumulative_amount: Decimal | None = Field(default=None, ge=0)
     status: str | None = None
     receipt_reference: str | None = Field(default=None, max_length=128)

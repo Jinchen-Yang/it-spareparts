@@ -50,6 +50,40 @@ const workspace = {
     reminder_count: 1,
     as_of: "2026-08-08",
   },
+  collection_snapshots: {
+    rows: [{
+      collection_id: "collection-1",
+      project_contract_id: "pc-1",
+      contract_no: "XSDD-001",
+      report_month: "2026-06-01",
+      cumulative_amount: 500,
+      receipt_reference: "RECEIPT-202606",
+      status: "confirmed",
+      remark: "六月已确认",
+      version: 2,
+    }, {
+      collection_id: "collection-2",
+      project_contract_id: "pc-1",
+      contract_no: "XSDD-001",
+      report_month: "2026-07-01",
+      cumulative_amount: 600,
+      receipt_reference: null,
+      status: "unconfirmed",
+      remark: "七月待财务确认",
+      version: 1,
+    }, {
+      collection_id: "collection-3",
+      project_contract_id: "pc-1",
+      contract_no: "XSDD-001",
+      report_month: "2026-08-01",
+      cumulative_amount: 650,
+      receipt_reference: "RECEIPT-VOID",
+      status: "void",
+      remark: "凭证重复，已作废",
+      version: 3,
+    }],
+    total: 3,
+  },
   requisitions: {
     rows: [{
       line_id: "line-1",
@@ -139,6 +173,16 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(screen.getAllByText("XSDD-001").length).toBeGreaterThanOrEqual(3);
     expect(screen.getByText("回款 / 全部合同额")).toBeInTheDocument();
     expect(screen.getByText("项目实际成本 / 全部合同额")).toBeInTheDocument();
+
+    const collections = screen.getByTestId("collection-snapshot-table");
+    expect(within(collections).getByText("2026-06")).toBeInTheDocument();
+    expect(within(collections).getByText("2026-07")).toBeInTheDocument();
+    expect(within(collections).getByText("2026-08")).toBeInTheDocument();
+    expect(within(collections).getByText("已确认")).toBeInTheDocument();
+    expect(within(collections).getByText("待确认")).toBeInTheDocument();
+    expect(within(collections).getByText("已作废")).toBeInTheDocument();
+    expect(within(collections).getByText("RECEIPT-202606")).toBeInTheDocument();
+    expect(within(collections).getByText("凭证重复，已作废")).toBeInTheDocument();
 
     const requisitions = screen.getByTestId("site-requisition-table");
     expect(within(requisitions).getByText("PN-MISSING")).toBeInTheDocument();

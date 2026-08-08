@@ -11,6 +11,7 @@ from app.auth import hash_password
 from app.api import maintenance_project_operations
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
+    MaintenanceCollectionSnapshot,
     MaintenanceProjectExpenseAttribution,
     MaintenanceProjectOperationAudit,
     MaintenanceProjectWorkbookState,
@@ -296,6 +297,226 @@ def test_confirmed_monthly_collection_snapshot_drives_workspace_progress(db):
     assert filtered.json()["rows"][0]["project_id"] == project.project_id
     db.expire_all()
     assert db.get(MaintenanceProjectWorkbookState, project.project_id).revision == 4
+
+
+def test_workspace_exposes_all_collection_statuses_through_as_of_and_hides_money(db):
+    project = _project(db, project_id="project-collection-detail")
+    client = _client(db, username="collection_detail_admin")
+    contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-collection-detail",
+            "contract_no": "XS-COLLECTION-DETAIL",
+            "contract_amount": "1000.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立回款下钻测试合同",
+        },
+    ).json()
+    snapshots = [
+        ("2026-01-01", "100.00", "confirmed", "RECEIPT-JAN", "一月已确认"),
+        ("2026-02-01", "150.00", "unconfirmed", "RECEIPT-FEB", "二月待确认"),
+        ("2026-03-01", "180.00", "void", "RECEIPT-MAR", "三月已作废"),
+        ("2026-04-01", "250.00", "confirmed", "RECEIPT-APR", "四月已确认"),
+    ]
+    created = []
+    for month, amount, snapshot_status, receipt, remark in snapshots:
+        response = client.post(
+            f"/api/maintenance/projects/stable/{project.project_id}/collections",
+            json={
+                "project_contract_id": contract["project_contract_id"],
+                "report_month": month,
+                "cumulative_amount": amount,
+                "status": snapshot_status,
+                "receipt_reference": receipt,
+                "remark": remark,
+                "reason": f"建立 {month} 回款快照",
+            },
+        )
+        assert response.status_code == 201, response.text
+        created.append(response.json())
+
+    workspace = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-03-31"},
+    )
+    assert workspace.status_code == 200, workspace.text
+    rows = workspace.json()["collection_snapshots"]["rows"]
+    assert [row["status"] for row in rows] == ["confirmed", "unconfirmed", "void"]
+    assert [row["report_month"] for row in rows] == [
+        "2026-01-01",
+        "2026-02-01",
+        "2026-03-01",
+    ]
+    assert workspace.json()["collection_snapshots"]["total"] == 3
+    assert rows[0] == {
+        "collection_id": created[0]["collection_id"],
+        "project_contract_id": contract["project_contract_id"],
+        "contract_no": "XS-COLLECTION-DETAIL",
+        "report_month": "2026-01-01",
+        "cumulative_amount": "100.00",
+        "receipt_reference": "RECEIPT-JAN",
+        "status": "confirmed",
+        "remark": "一月已确认",
+        "version": 1,
+    }
+
+    restricted = _permission_client(
+        db,
+        username="collection_detail_restricted",
+        permissions={"page_maintenance": True, "data_profit": False},
+    )
+    hidden = restricted.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-03-31"},
+    )
+    assert hidden.status_code == 200, hidden.text
+    hidden_rows = hidden.json()["collection_snapshots"]["rows"]
+    assert len(hidden_rows) == 3
+    assert {row["status"] for row in hidden_rows} == {
+        "confirmed",
+        "unconfirmed",
+        "void",
+    }
+    assert all(row["cumulative_amount"] is None for row in hidden_rows)
+    assert all(row["receipt_reference"] is None for row in hidden_rows)
+    assert hidden_rows[0]["contract_no"] == "XS-COLLECTION-DETAIL"
+    assert hidden_rows[0]["remark"] == "一月已确认"
+
+
+def test_confirmed_collection_is_monotonic_across_months_without_failed_side_effects(db):
+    project = _project(db, project_id="project-collection-monotonic")
+    client = _client(db, username="collection_monotonic_admin")
+    contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-collection-monotonic",
+            "contract_no": "XS-COLLECTION-MONOTONIC",
+            "contract_amount": "1000.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立累计回款单调性合同",
+        },
+    ).json()
+
+    def create(month: str, amount: str, snapshot_status: str = "confirmed"):
+        return client.post(
+            f"/api/maintenance/projects/stable/{project.project_id}/collections",
+            json={
+                "project_contract_id": contract["project_contract_id"],
+                "report_month": month,
+                "cumulative_amount": amount,
+                "status": snapshot_status,
+                "reason": "验证累计回款单调性",
+            },
+        )
+
+    january = create("2026-01-01", "100.00")
+    march = create("2026-03-01", "300.00")
+    assert january.status_code == march.status_code == 201
+
+    def committed_counts() -> tuple[int, int, int]:
+        db.expire_all()
+        return (
+            len(list(db.scalars(select(MaintenanceCollectionSnapshot).where(
+                MaintenanceCollectionSnapshot.project_id == project.project_id
+            )))),
+            len(list(db.scalars(select(MaintenanceProjectOperationAudit).where(
+                MaintenanceProjectOperationAudit.project_id == project.project_id,
+                MaintenanceProjectOperationAudit.entity_type == "collection",
+            )))),
+            db.get(MaintenanceProjectWorkbookState, project.project_id).revision,
+        )
+
+    before_failure = committed_counts()
+    below_earlier = create("2026-02-01", "50.00")
+    assert below_earlier.status_code == 400
+    assert "不得低于更早月份" in below_earlier.json()["detail"]
+    assert committed_counts() == before_failure
+
+    february = create("2026-02-01", "200.00")
+    assert february.status_code == 201, february.text
+
+    before_failure = committed_counts()
+    above_later = client.patch(
+        f"/api/maintenance/projects/stable/collections/{february.json()['collection_id']}",
+        json={
+            "version": 1,
+            "cumulative_amount": "350.00",
+            "reason": "不应超过三月累计回款",
+        },
+    )
+    assert above_later.status_code == 400
+    assert "不得高于更晚月份" in above_later.json()["detail"]
+    assert committed_counts() == before_failure
+
+    moved_after_later = client.patch(
+        f"/api/maintenance/projects/stable/collections/{february.json()['collection_id']}",
+        json={
+            "version": 1,
+            "report_month": "2026-04-01",
+            "reason": "不应把较低累计值移到三月之后",
+        },
+    )
+    assert moved_after_later.status_code == 400
+    assert "不得低于更早月份" in moved_after_later.json()["detail"]
+    assert committed_counts() == before_failure
+
+    second_contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-collection-status-transition",
+            "contract_no": "XS-COLLECTION-STATUS",
+            "contract_amount": "500.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立确认状态切换测试合同",
+        },
+    ).json()
+    first = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/collections",
+        json={
+            "project_contract_id": second_contract["project_contract_id"],
+            "report_month": "2026-01-01",
+            "cumulative_amount": "100.00",
+            "status": "confirmed",
+            "reason": "建立一月已确认快照",
+        },
+    )
+    pending = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/collections",
+        json={
+            "project_contract_id": second_contract["project_contract_id"],
+            "report_month": "2026-02-01",
+            "cumulative_amount": "50.00",
+            "status": "unconfirmed",
+            "reason": "建立二月待确认快照",
+        },
+    )
+    assert first.status_code == pending.status_code == 201
+    before_failure = committed_counts()
+    confirm_invalid = client.patch(
+        f"/api/maintenance/projects/stable/collections/{pending.json()['collection_id']}",
+        json={
+            "version": 1,
+            "status": "confirmed",
+            "reason": "不应确认倒退累计回款",
+        },
+    )
+    assert confirm_invalid.status_code == 400
+    assert committed_counts() == before_failure
 
 
 def test_confirmed_site_issue_uses_direct_then_full_purchase_window(db):

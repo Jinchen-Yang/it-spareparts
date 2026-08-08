@@ -225,6 +225,50 @@ def collection_dict(row: MaintenanceCollectionSnapshot) -> dict:
     }
 
 
+def _validate_confirmed_collection_monotonicity(
+    db: Session,
+    *,
+    project_contract_id: str,
+    report_month: date,
+    cumulative_amount: Decimal,
+    exclude_collection_id: str | None = None,
+) -> None:
+    """Lock sibling snapshots and reject a confirmed cumulative-value reversal."""
+
+    statement = (
+        select(MaintenanceCollectionSnapshot)
+        .where(
+            MaintenanceCollectionSnapshot.project_contract_id
+            == project_contract_id,
+            MaintenanceCollectionSnapshot.status == "confirmed",
+        )
+        .order_by(
+            MaintenanceCollectionSnapshot.report_month,
+            MaintenanceCollectionSnapshot.collection_id,
+        )
+        .with_for_update()
+    )
+    if exclude_collection_id is not None:
+        statement = statement.where(
+            MaintenanceCollectionSnapshot.collection_id != exclude_collection_id
+        )
+    for sibling in db.scalars(statement):
+        if (
+            sibling.report_month < report_month
+            and cumulative_amount < sibling.cumulative_amount
+        ):
+            raise MaintenanceOperationError(
+                "已确认累计回款不得低于更早月份的已确认累计回款"
+            )
+        if (
+            sibling.report_month > report_month
+            and cumulative_amount > sibling.cumulative_amount
+        ):
+            raise MaintenanceOperationError(
+                "已确认累计回款不得高于更晚月份的已确认累计回款"
+            )
+
+
 def site_issue_line_dict(row: MaintenanceSiteIssueLine) -> dict:
     return {
         "issue_line_id": row.issue_line_id,
@@ -1269,6 +1313,13 @@ def create_collection(
         raise MaintenanceOperationError("回款确认状态无效")
     if cumulative_amount < 0 or cumulative_amount >= Decimal("1000000000000"):
         raise MaintenanceOperationError("累计回款超出允许范围")
+    if status == "confirmed":
+        _validate_confirmed_collection_monotonicity(
+            db,
+            project_contract_id=project_contract_id,
+            report_month=report_month,
+            cumulative_amount=cumulative_amount,
+        )
     row = MaintenanceCollectionSnapshot(
         collection_id=str(uuid4()),
         project_id=project_id,
@@ -1337,19 +1388,41 @@ def update_collection(
     before = collection_dict(row)
     if any(
         key in updates and updates[key] is None
-        for key in {"cumulative_amount", "status"}
+        for key in {"report_month", "cumulative_amount", "status"}
     ):
-        raise MaintenanceOperationError("累计回款和确认状态不能清空")
-    for key in {"cumulative_amount", "status", "receipt_reference", "remark"}:
-        if key in updates:
-            setattr(row, key, updates[key])
-    if row.status not in {"confirmed", "unconfirmed", "void"}:
+        raise MaintenanceOperationError("报告月份、累计回款和确认状态不能清空")
+    proposed_report_month = updates.get("report_month", row.report_month)
+    proposed_amount = updates.get("cumulative_amount", row.cumulative_amount)
+    proposed_status = updates.get("status", row.status)
+    if proposed_report_month.day != 1:
+        raise MaintenanceOperationError("回款报告月份必须使用当月第一天")
+    if proposed_status not in {"confirmed", "unconfirmed", "void"}:
         raise MaintenanceOperationError("回款确认状态无效")
     if (
-        row.cumulative_amount < 0
-        or row.cumulative_amount >= Decimal("1000000000000")
+        proposed_amount < 0
+        or proposed_amount >= Decimal("1000000000000")
     ):
         raise MaintenanceOperationError("累计回款超出允许范围")
+    if proposed_status == "confirmed":
+        _validate_confirmed_collection_monotonicity(
+            db,
+            project_contract_id=row.project_contract_id,
+            report_month=proposed_report_month,
+            cumulative_amount=proposed_amount,
+            exclude_collection_id=row.collection_id,
+        )
+    for key in {
+        "report_month",
+        "cumulative_amount",
+        "status",
+        "receipt_reference",
+        "remark",
+    }:
+        if key in updates:
+            value = updates[key]
+            if key in {"receipt_reference", "remark"}:
+                value = value.strip() if value and value.strip() else None
+            setattr(row, key, value)
     after = collection_dict(row)
     if after == before:
         return before
@@ -1983,8 +2056,40 @@ def project_workspace(
     last_exported_at = (
         state.last_exported_at.isoformat() if state and state.last_exported_at else None
     )
+    collection_rows = [
+        {
+            "collection_id": row.collection_id,
+            "project_contract_id": row.project_contract_id,
+            "contract_no": contract_numbers_by_id.get(row.project_contract_id),
+            "report_month": row.report_month.isoformat(),
+            "cumulative_amount": (
+                None if profit_restricted else _money(row.cumulative_amount)
+            ),
+            "receipt_reference": (
+                None if profit_restricted else row.receipt_reference
+            ),
+            "status": row.status,
+            "remark": row.remark,
+            "version": row.version,
+        }
+        for row in db.scalars(
+            select(MaintenanceCollectionSnapshot)
+            .where(
+                MaintenanceCollectionSnapshot.project_id == project_id,
+                MaintenanceCollectionSnapshot.report_month <= as_of,
+            )
+            .order_by(
+                MaintenanceCollectionSnapshot.report_month,
+                MaintenanceCollectionSnapshot.collection_id,
+            )
+        )
+    ]
     payload = {
         "project": project_summary,
+        "collection_snapshots": {
+            "rows": collection_rows,
+            "total": len(collection_rows),
+        },
         "requisitions": {
             "rows": requisition_payload_rows,
             "total": len(requisition_payload_rows),
