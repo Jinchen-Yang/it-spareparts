@@ -19,6 +19,7 @@ import {
   getMaintenanceProjectWorkspace,
   listMaintenanceCostGaps,
   listMaintenanceProjectOperations,
+  recomputeMaintenanceCostGaps,
   updateMaintenanceCostGap,
   validateMaintenanceProjectWorkbook,
 } from "../maintenanceOperations";
@@ -110,6 +111,17 @@ describe("maintenance operations API", () => {
         evidence: "采购单 PO-1",
         reason: "核对采购发票",
       },
+    );
+  });
+
+  it("按稳定项目重新匹配后到的系统价格证据", () => {
+    recomputeMaintenanceCostGaps("project/1", {
+      reason: "重新匹配后到采购或销售价格证据",
+    });
+
+    expect(post).toHaveBeenCalledWith(
+      "/maintenance/projects/stable/project%2F1/cost-gaps/recompute",
+      { reason: "重新匹配后到采购或销售价格证据" },
     );
   });
 

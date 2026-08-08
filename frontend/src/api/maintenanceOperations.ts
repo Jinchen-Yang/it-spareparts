@@ -187,6 +187,26 @@ export interface MaintenanceCostGapUpdate {
   reason: string;
 }
 
+export interface MaintenanceCostGapUpdateResult {
+  issue_line_id: string;
+  version: number;
+  unit_cost: number | string | null;
+  cost_amount: number | string | null;
+  cost_source: string | null;
+  manual_applied: boolean;
+  resolution: "manual" | "automatic_evidence" | string;
+}
+
+export interface MaintenanceCostGapRecomputeInput {
+  reason: string;
+}
+
+export interface MaintenanceCostGapRecomputeResult {
+  resolved: number;
+  remaining: number;
+  data_version: string;
+}
+
 function finiteNumberOrNull(value: unknown): number | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== "number" && typeof value !== "string") return null;
@@ -355,8 +375,15 @@ export const listMaintenanceCostGaps = (
 ) => api.get<MaintenanceCostGapDirectory>(`${projectBase(projectId)}/cost-gaps`, { params })
   .then((response) => ({ ...response, data: normalizeCostGapDirectory(response.data) }));
 
+export const recomputeMaintenanceCostGaps = (
+  projectId: string,
+  input: MaintenanceCostGapRecomputeInput,
+) => api.post<MaintenanceCostGapRecomputeResult>(
+  `${projectBase(projectId)}/cost-gaps/recompute`,
+  input,
+);
+
 export const updateMaintenanceCostGap = (
   projectId: string,
   input: MaintenanceCostGapUpdate,
-) => api.patch<MaintenanceCostGap>(`${projectBase(projectId)}/cost-gaps`, input)
-  .then((response) => ({ ...response, data: normalizeCostGap(response.data) }));
+) => api.patch<MaintenanceCostGapUpdateResult>(`${projectBase(projectId)}/cost-gaps`, input);

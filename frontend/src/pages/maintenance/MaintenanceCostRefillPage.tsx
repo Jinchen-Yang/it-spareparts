@@ -18,6 +18,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import {
   listMaintenanceCostGaps,
   listMaintenanceProjectOperations,
+  recomputeMaintenanceCostGaps,
   updateMaintenanceCostGap,
   type MaintenanceCostGap,
   type MaintenanceCostReference,
@@ -109,11 +110,14 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
   const [conflictBlocked, setConflictBlocked] = useState(false);
   const [formError, setFormError] = useState("");
   const [success, setSuccess] = useState("");
+  const [recomputing, setRecomputing] = useState(false);
+  const [recomputeError, setRecomputeError] = useState("");
   const loadGeneration = useRef(0);
   const projectListGeneration = useRef(0);
   const conflictGeneration = useRef(0);
   const selectedProjectIdRef = useRef(selectedProjectId);
   const editingRef = useRef<MaintenanceCostGap | null>(editing);
+  const recomputeGeneration = useRef(0);
   selectedProjectIdRef.current = selectedProjectId;
   editingRef.current = editing;
 
@@ -172,6 +176,8 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
     void load();
     return () => { loadGeneration.current += 1; };
   }, [load]);
+
+  useEffect(() => () => { recomputeGeneration.current += 1; }, []);
 
   if (!canManageProject) {
     return (
@@ -259,7 +265,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
     setSaving(true);
     setFormError("");
     try {
-      await updateMaintenanceCostGap(editing.project_id, {
+      const { data } = await updateMaintenanceCostGap(editing.project_id, {
         line_id: editing.line_id,
         version: editing.version,
         unit_cost_ex_tax: unitCost,
@@ -270,7 +276,9 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
       editingRef.current = null;
       setEditing(null);
       setConflictBlocked(false);
-      setSuccess("成本已回填");
+      setSuccess(data.resolution === "automatic_evidence"
+        ? "保存时发现新的系统价格，已采用系统证据并刷新清单。"
+        : "成本已回填");
       await load();
     } catch (error) {
       if ((error as { response?: { status?: number } }).response?.status === 409) {
@@ -280,6 +288,37 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
       }
     } finally {
       setSaving(false);
+    }
+  };
+
+  const recompute = async () => {
+    const targetProjectId = selectedProjectId;
+    if (!targetProjectId) return;
+    const request = ++recomputeGeneration.current;
+    setRecomputing(true);
+    setRecomputeError("");
+    setSuccess("");
+    try {
+      const { data } = await recomputeMaintenanceCostGaps(targetProjectId, {
+        reason: "重新匹配后到采购或销售价格证据",
+      });
+      if (
+        request !== recomputeGeneration.current
+        || selectedProjectIdRef.current !== targetProjectId
+      ) return;
+      setSuccess(data.resolved > 0
+        ? `已补齐 ${data.resolved} 行系统价格，仍有 ${data.remaining} 行缺价。`
+        : `没有发现新的系统价格，仍有 ${data.remaining} 行缺价。`);
+      await load();
+    } catch {
+      if (
+        request === recomputeGeneration.current
+        && selectedProjectIdRef.current === targetProjectId
+      ) {
+        setRecomputeError("系统价格重新匹配失败，缺价数据未改动，请稍后重试。");
+      }
+    } finally {
+      if (request === recomputeGeneration.current) setRecomputing(false);
     }
   };
 
@@ -360,6 +399,10 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
                 setRefreshingConflict(false);
                 setConflictBlocked(false);
                 setFormError("");
+                recomputeGeneration.current += 1;
+                setRecomputing(false);
+                setRecomputeError("");
+                setSuccess("");
                 setSelectedProjectId(value);
                 setPage(1);
               }}
@@ -368,9 +411,18 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
           <Alert
             showIcon
             type="info"
-            message="参考价只用于人工核对，不会自动写入；无可靠参考时保持空白并标注。"
+            message="采购或销售数据可能晚于领用到达；可先重新匹配系统价格，仍无可靠证据的行再人工回填。"
           />
+          <Button
+            style={{ alignSelf: "flex-start" }}
+            loading={recomputing}
+            disabled={!selectedProjectId || loading}
+            onClick={() => void recompute()}
+          >
+            重新匹配系统价格
+          </Button>
           {success && <Alert showIcon closable type="success" message={success} />}
+          {recomputeError && <Alert showIcon type="error" message={recomputeError} />}
           {loadError && (
             <Alert
               showIcon

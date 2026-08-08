@@ -128,6 +128,12 @@ class ManualCostPatch(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class CostGapRecompute(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 class ExpenseCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -458,6 +464,30 @@ def project_cost_gaps(
     if payload is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
     return payload
+
+
+@router.post("/{project_id}/cost-gaps/recompute")
+def recompute_project_cost_gaps(
+    body: CostGapRecompute,
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_project_manage",
+            require_data="data_purchase_cost",
+        )
+    ),
+) -> dict:
+    return _contract_write_result(
+        operations.recompute_cost_gaps,
+        db=db,
+        ident=ident,
+        not_found_message="维保项目不存在",
+        project_id=project_id,
+        reason=body.reason,
+    )
 
 
 @router.post("/{project_id}/expenses", status_code=status.HTTP_201_CREATED)

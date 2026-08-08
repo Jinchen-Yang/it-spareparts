@@ -807,6 +807,103 @@ def list_cost_gaps(
     }
 
 
+_AUTOMATIC_COST_SOURCES = {"direct_purchase", "purchase_window", "sales_window"}
+_COST_RESOLUTION_FIELDS = (
+    "unit_cost",
+    "cost_amount",
+    "cost_source",
+    "price_basis",
+    "reference_side",
+    "reference_sample_ids",
+    "reference_sample_count",
+    "reference_samples",
+    "reference_window_from",
+    "reference_window_to",
+    "algorithm_version",
+)
+
+
+def recompute_cost_gaps(
+    db: Session,
+    *,
+    project_id: str,
+    reason: str,
+    operated_by: str,
+) -> dict | None:
+    """Persist newly available deterministic evidence for unresolved issue lines.
+
+    A single project revision represents the whole controlled run, while every
+    resolved line retains its own before/after audit and optimistic-lock version.
+    Repeating a run after all possible matches are resolved is a no-op.
+    """
+
+    project = _lock_project_for_fact_write(db, project_id)
+    if project is None:
+        return None
+    if not project.is_active:
+        raise MaintenanceOperationError("项目主档已归档")
+    state = get_or_create_workbook_state(db, project_id=project_id)
+    candidates = list(
+        db.execute(
+            select(MaintenanceSiteIssueLine, MaintenanceSiteIssue)
+            .join(
+                MaintenanceSiteIssue,
+                MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
+            )
+            .where(
+                MaintenanceSiteIssue.project_id == project_id,
+                MaintenanceSiteIssue.status_mapping_state == "mapped",
+                MaintenanceSiteIssue.normalized_status == "confirmed",
+                MaintenanceSiteIssueLine.cost_amount.is_(None),
+            )
+            .order_by(
+                MaintenanceSiteIssue.issue_date,
+                MaintenanceSiteIssue.issue_no,
+                MaintenanceSiteIssueLine.line_no,
+            )
+            .with_for_update(of=MaintenanceSiteIssueLine)
+        )
+    )
+    resolved = 0
+    for line, issue in candidates:
+        before = site_issue_line_dict(line)
+        prior_resolution = {
+            field: getattr(line, field) for field in _COST_RESOLUTION_FIELDS
+        }
+        maintenance_consumption_cost.resolve_line(
+            db,
+            issue_date=issue.issue_date,
+            line=line,
+        )
+        if line.cost_source not in _AUTOMATIC_COST_SOURCES:
+            for field, value in prior_resolution.items():
+                setattr(line, field, value)
+            continue
+        line.version += 1
+        after = site_issue_line_dict(line)
+        _fact_audit(
+            db,
+            project_id=project_id,
+            entity_type="site_issue_cost",
+            entity_id=line.issue_line_id,
+            action="auto_recompute",
+            before=before,
+            after=after,
+            reason=reason,
+            operated_by=operated_by,
+        )
+        resolved += 1
+
+    if resolved:
+        bump_locked_workbook_revision(db, state=state)
+    db.flush()
+    return {
+        "resolved": resolved,
+        "remaining": len(candidates) - resolved,
+        "data_version": state.data_version,
+    }
+
+
 def fill_manual_cost(
     db: Session,
     *,
@@ -823,6 +920,7 @@ def fill_manual_cost(
         return None
     if not project.is_active:
         raise MaintenanceOperationError("项目主档已归档")
+    state = get_or_create_workbook_state(db, project_id=project_id)
     result = db.execute(
         select(MaintenanceSiteIssueLine, MaintenanceSiteIssue)
         .join(MaintenanceSiteIssue, MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
@@ -844,16 +942,37 @@ def fill_manual_cost(
     if manual_unit_cost < 0 or manual_unit_cost >= Decimal("1000000000000"):
         raise MaintenanceOperationError("人工未税单价超出允许范围")
     before = site_issue_line_dict(line)
+    if line.cost_source in _AUTOMATIC_COST_SOURCES and line.cost_amount is not None:
+        raise MaintenanceOperationConflict("已有自动价格证据，人工补价不能覆盖")
     previous_manual = line.manual_unit_cost
     previous_evidence = line.manual_evidence
     line.manual_unit_cost = None
     line.manual_evidence = None
     maintenance_consumption_cost.resolve_line(db, issue_date=issue.issue_date, line=line)
-    if line.cost_source in {"direct_purchase", "purchase_window", "sales_window"}:
+    if line.cost_source in _AUTOMATIC_COST_SOURCES:
         line.manual_unit_cost = previous_manual
         line.manual_evidence = previous_evidence
         maintenance_consumption_cost.resolve_line(db, issue_date=issue.issue_date, line=line)
-        raise MaintenanceOperationConflict("已有自动价格证据，人工补价不能覆盖")
+        line.version += 1
+        after = site_issue_line_dict(line)
+        _fact_audit(
+            db,
+            project_id=issue.project_id,
+            entity_type="site_issue_cost",
+            entity_id=line.issue_line_id,
+            action="auto_recompute",
+            before=before,
+            after=after,
+            reason=reason,
+            operated_by=operated_by,
+        )
+        bump_locked_workbook_revision(db, state=state)
+        db.flush()
+        return {
+            **after,
+            "manual_applied": False,
+            "resolution": "automatic_evidence",
+        }
     line.manual_unit_cost = manual_unit_cost
     line.manual_evidence = _required(evidence, "人工补价证据", 1000)
     maintenance_consumption_cost.resolve_line(db, issue_date=issue.issue_date, line=line)
@@ -870,9 +989,9 @@ def fill_manual_cost(
         reason=reason,
         operated_by=operated_by,
     )
-    bump_workbook_revision(db, project_id=issue.project_id)
+    bump_locked_workbook_revision(db, state=state)
     db.flush()
-    return after
+    return {**after, "manual_applied": True, "resolution": "manual"}
 
 
 def create_contract(

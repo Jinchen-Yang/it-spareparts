@@ -5,10 +5,12 @@ import { MemoryRouter } from "react-router-dom";
 const {
   listMaintenanceCostGaps,
   listMaintenanceProjectOperations,
+  recomputeMaintenanceCostGaps,
   updateMaintenanceCostGap,
 } = vi.hoisted(() => ({
   listMaintenanceCostGaps: vi.fn(),
   listMaintenanceProjectOperations: vi.fn(),
+  recomputeMaintenanceCostGaps: vi.fn(),
   updateMaintenanceCostGap: vi.fn(),
 }));
 
@@ -20,6 +22,7 @@ vi.mock("../../../api/maintenanceOperations", async () => {
     ...actual,
     listMaintenanceCostGaps,
     listMaintenanceProjectOperations,
+    recomputeMaintenanceCostGaps,
     updateMaintenanceCostGap,
   };
 });
@@ -90,6 +93,9 @@ beforeEach(() => {
     },
   });
   updateMaintenanceCostGap.mockResolvedValue({ data: { ...gap, current_unit_cost: 92 } });
+  recomputeMaintenanceCostGaps.mockResolvedValue({
+    data: { resolved: 0, remaining: 1, data_version: "v7" },
+  });
 });
 afterEach(() => {
   cleanup();
@@ -97,6 +103,36 @@ afterEach(() => {
 });
 
 describe("MaintenanceCostRefillPage", () => {
+  it("重新匹配后到系统价格并刷新缺价清单", async () => {
+    listMaintenanceCostGaps
+      .mockResolvedValueOnce({
+        data: { rows: [gap], total: 1, page: 1, page_size: 20, data_version: "v7" },
+      })
+      .mockResolvedValueOnce({
+        data: { rows: [], total: 0, page: 1, page_size: 20, data_version: "v8" },
+      });
+    recomputeMaintenanceCostGaps.mockResolvedValueOnce({
+      data: { resolved: 1, remaining: 0, data_version: "v8" },
+    });
+    render(
+      <MemoryRouter>
+        <MaintenanceCostRefillPage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("PN-MISSING");
+    fireEvent.click(screen.getByRole("button", { name: "重新匹配系统价格" }));
+
+    await waitFor(() => expect(recomputeMaintenanceCostGaps).toHaveBeenCalledWith(
+      "project-1",
+      { reason: "重新匹配后到采购或销售价格证据" },
+    ));
+    expect(await screen.findByText("已补齐 1 行系统价格，仍有 0 行缺价。"))
+      .toBeInTheDocument();
+    await waitFor(() => expect(listMaintenanceCostGaps).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("当前项目没有待回填成本")).toBeInTheDocument();
+  });
+
   it("展示关联采购和前后 7 天加权证据，人工确认后按版本回填", async () => {
     render(
       <MemoryRouter>
@@ -133,6 +169,37 @@ describe("MaintenanceCostRefillPage", () => {
       }),
     ));
     expect(await screen.findByText("成本已回填")).toBeInTheDocument();
+  });
+
+  it("人工保存前出现系统证据时明确提示采用系统价格", async () => {
+    updateMaintenanceCostGap.mockResolvedValueOnce({
+      data: {
+        issue_line_id: "line-1",
+        version: 8,
+        unit_cost: "92.00",
+        cost_amount: "184.00",
+        cost_source: "purchase_window",
+        manual_applied: false,
+        resolution: "automatic_evidence",
+      },
+    });
+    render(
+      <MemoryRouter>
+        <MaintenanceCostRefillPage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("PN-MISSING");
+    fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
+    const dialog = await screen.findByRole("dialog", { name: "回填成本" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "采用采购 ±7 天加权参考" }));
+    fireEvent.change(within(dialog).getByLabelText("回填原因"), {
+      target: { value: "保存前再次核对" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
+
+    expect(await screen.findByText("保存时发现新的系统价格，已采用系统证据并刷新清单。"))
+      .toBeInTheDocument();
   });
 
   it("版本冲突时自动刷新到最新版本并保留草稿后可再次保存", async () => {
