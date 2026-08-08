@@ -52,6 +52,14 @@ def upgrade() -> None:
         "maintenance_project",
         ["is_active", "project_code"],
     )
+    op.execute(
+        "CREATE INDEX ix_maintenance_project_code_trgm "
+        "ON maintenance_project USING gin (lower(project_code) gin_trgm_ops)"
+    )
+    op.execute(
+        "CREATE INDEX ix_maintenance_project_display_name_trgm "
+        "ON maintenance_project USING gin (lower(display_name) gin_trgm_ops)"
+    )
 
     op.create_table(
         "maintenance_project_contract",
@@ -162,6 +170,14 @@ def downgrade() -> None:
         table_name="maintenance_project_contract",
     )
     op.drop_table("maintenance_project_contract")
+    op.drop_index(
+        "ix_maintenance_project_display_name_trgm",
+        table_name="maintenance_project",
+    )
+    op.drop_index(
+        "ix_maintenance_project_code_trgm",
+        table_name="maintenance_project",
+    )
     op.drop_index("ix_maintenance_project_active_code", table_name="maintenance_project")
     op.drop_index("ix_maintenance_project_display_name", table_name="maintenance_project")
     op.drop_table("maintenance_project")

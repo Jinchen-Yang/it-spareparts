@@ -283,6 +283,64 @@ def test_unmapped_source_status_fails_closed_instead_of_guessing_display_text(db
     ]
 
 
+def test_current_unmapped_relationship_fails_closed_even_when_not_included(db):
+    project = MaintenanceProject(
+        project_id="00000000-0000-4000-8000-000000000017",
+        project_code="MAINT-SYNTH-UNMAPPED-EXCLUDED",
+        display_name="合成未映射排除项目",
+        lifecycle_status="active",
+    )
+    db.add(project)
+    db.add_all(
+        [
+            MaintenanceProjectContract(
+                project_contract_id="10000000-0000-4000-8000-000000000018",
+                project_id=project.project_id,
+                contract_id="contract-synth-mapped-included",
+                contract_no="CONTRACT-SYNTH-MAPPED-INCLUDED",
+                contract_amount=Decimal("100.00"),
+                contract_status="effective",
+                status_mapping_state="mapped",
+                included_in_total=True,
+                effective_from=date(2026, 1, 1),
+                source="synthetic-test",
+            ),
+            MaintenanceProjectContract(
+                project_contract_id="10000000-0000-4000-8000-000000000019",
+                project_id=project.project_id,
+                contract_id="contract-synth-unmapped-excluded",
+                contract_no="CONTRACT-SYNTH-UNMAPPED-EXCLUDED",
+                contract_amount=Decimal("200.00"),
+                contract_status="来源状态尚未映射",
+                status_mapping_state="unmapped",
+                included_in_total=False,
+                effective_from=date(2026, 1, 1),
+                source="synthetic-test",
+            ),
+        ]
+    )
+    db.commit()
+    token = _token(db, username="maint_project_unmapped_excluded_admin")
+
+    response = _get(
+        TestClient(app),
+        f"/api/maintenance/projects/stable/{project.project_id}",
+        token,
+        as_of="2026-08-08",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["effective_contract_count"] == 1
+    assert payload["total_contract_amount"] is None
+    assert payload["completeness"]["issues"] == [
+        {
+            "code": "unmapped_contract_status",
+            "contract_ids": ["contract-synth-unmapped-excluded"],
+        }
+    ]
+
+
 def test_overlapping_duplicate_contract_relationships_never_double_count(db):
     project = MaintenanceProject(
         project_id="00000000-0000-4000-8000-000000000005",
@@ -430,6 +488,69 @@ def test_cross_project_contract_conflict_fails_closed_and_is_auditable(db):
     ]
 
 
+@pytest.mark.parametrize(
+    "requested_active",
+    [True, False],
+    ids=["active-project-reads-inactive-conflict", "inactive-project-reads-active-conflict"],
+)
+def test_cross_project_conflict_includes_inactive_project_relationships(
+    db,
+    requested_active,
+):
+    requested = MaintenanceProject(
+        project_id="00000000-0000-4000-8000-000000000018",
+        project_code="MAINT-SYNTH-CROSS-REQUESTED",
+        display_name="合成跨项目请求方",
+        lifecycle_status="active" if requested_active else "inactive",
+        is_active=requested_active,
+    )
+    counterpart = MaintenanceProject(
+        project_id="00000000-0000-4000-8000-000000000019",
+        project_code="MAINT-SYNTH-CROSS-COUNTERPART",
+        display_name="合成跨项目对端",
+        lifecycle_status="inactive" if requested_active else "active",
+        is_active=not requested_active,
+    )
+    db.add_all([requested, counterpart])
+    for index, project in enumerate([requested, counterpart], 20):
+        db.add(
+            MaintenanceProjectContract(
+                project_contract_id=f"10000000-0000-4000-8000-{index:012d}",
+                project_id=project.project_id,
+                contract_id="contract-synth-cross-inactive",
+                contract_no="CONTRACT-SYNTH-CROSS-INACTIVE",
+                contract_amount=Decimal("850.00"),
+                contract_status="effective",
+                status_mapping_state="mapped",
+                included_in_total=True,
+                effective_from=date(2026, 1, 1),
+                source="synthetic-test",
+            )
+        )
+    db.commit()
+    token = _token(
+        db,
+        username=f"maint_project_cross_inactive_{requested_active}",
+    )
+
+    response = _get(
+        TestClient(app),
+        f"/api/maintenance/projects/stable/{requested.project_id}",
+        token,
+        as_of="2026-08-08",
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_contract_amount"] is None
+    assert payload["completeness"]["issues"] == [
+        {
+            "code": "cross_project_contract_conflict",
+            "contract_ids": ["contract-synth-cross-inactive"],
+        }
+    ]
+
+
 def test_same_display_name_projects_stay_independent_and_rename_keeps_relationships(db):
     first = MaintenanceProject(
         project_id="00000000-0000-4000-8000-000000000009",
@@ -514,6 +635,56 @@ def test_same_display_name_projects_stay_independent_and_rename_keeps_relationsh
     assert renamed["project"]["display_name"] == "已更名但身份不变"
     assert renamed["project"]["project_id"] == first.project_id
     assert renamed["contracts"][0]["contract_id"] == "contract-synth-same-14"
+
+
+def test_directory_contains_search_uses_trigram_indexes_without_changing_semantics(db):
+    project = MaintenanceProject(
+        project_id="00000000-0000-4000-8000-000000000020",
+        project_code="MAINT-INDEX-NEEDLE-001",
+        display_name="合成搜索索引中文目标",
+        lifecycle_status="active",
+    )
+    db.add(project)
+    db.commit()
+    token = _token(db, username="maint_project_search_index_admin")
+    client = TestClient(app)
+
+    code_search = _get(
+        client,
+        "/api/maintenance/projects/stable",
+        token,
+        q="needle",
+    )
+    name_search = _get(
+        client,
+        "/api/maintenance/projects/stable",
+        token,
+        q="索引中文",
+    )
+
+    assert code_search.status_code == name_search.status_code == 200
+    assert [row["project_id"] for row in code_search.json()["rows"]] == [
+        project.project_id
+    ]
+    assert [row["project_id"] for row in name_search.json()["rows"]] == [
+        project.project_id
+    ]
+
+    db.execute(text("ANALYZE maintenance_project"))
+    db.execute(text("SET LOCAL enable_seqscan = off"))
+    plan = "\n".join(
+        db.execute(
+            text(
+                "EXPLAIN (FORMAT TEXT) "
+                "SELECT project_id FROM maintenance_project "
+                "WHERE lower(project_code) LIKE lower(:pattern) "
+                "OR lower(display_name) LIKE lower(:pattern)"
+            ),
+            {"pattern": "%needle%"},
+        ).scalars()
+    )
+    assert "ix_maintenance_project_code_trgm" in plan
+    assert "ix_maintenance_project_display_name_trgm" in plan
 
 
 def test_contract_amount_permission_hides_lines_total_and_amount_completeness(db):

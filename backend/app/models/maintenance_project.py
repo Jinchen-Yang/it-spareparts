@@ -63,6 +63,18 @@ class MaintenanceProject(Base):
         CheckConstraint("version >= 1", name="ck_maintenance_project_version"),
         Index("ix_maintenance_project_display_name", "display_name"),
         Index("ix_maintenance_project_active_code", "is_active", "project_code"),
+        Index(
+            "ix_maintenance_project_code_trgm",
+            func.lower(project_code).label("project_code_lower"),
+            postgresql_using="gin",
+            postgresql_ops={"project_code_lower": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_maintenance_project_display_name_trgm",
+            func.lower(display_name).label("display_name_lower"),
+            postgresql_using="gin",
+            postgresql_ops={"display_name_lower": "gin_trgm_ops"},
+        ),
     )
 
 

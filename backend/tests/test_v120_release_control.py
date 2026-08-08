@@ -103,7 +103,7 @@ def _built_values(
         "TARGET_COMMIT": target,
         "OLD_COMMIT": "ab42005b5b94bf98b3db0e4bff87e5df9da2f7ca",
         "OLD_RUNNING_SOURCE_COMMIT": old_running_source_commit,
-        "DB_HEAD": "c6f2a8e9d4b1",
+        "DB_HEAD": "f1c8e4a7b2d9",
         "OLD_APP_IMAGE_ID": old_app_image_id,
         "OLD_FRONTEND_IMAGE_ID": old_frontend_image_id,
         "APP_IMAGE_REF": "it-spareparts-app",
@@ -4398,24 +4398,15 @@ def test_whole_control_manifest_is_revalidated_before_use(
     assert "packaged control file hash mismatch" in rejected.stderr
 
 
-def test_build_migration_inventory_gate_matches_reviewed_tree() -> None:
-    migration_dir = ROOT / "backend" / "alembic" / "versions"
-    migration_files = sorted(
-        candidate
-        for candidate in migration_dir.iterdir()
-        if candidate.is_file()
-    )
-    inventory = "".join(
-        f"{hashlib.sha256(candidate.read_bytes()).hexdigest()}  "
-        f"backend/alembic/versions/{candidate.name}\n"
-        for candidate in migration_files
-    ).encode("ascii")
-    inventory_hash = hashlib.sha256(inventory).hexdigest()
+def test_build_migration_inventory_gate_remains_pinned_to_v120_reviewed_tree() -> None:
     build = _script(BUILD)
 
-    assert len(migration_files) == 33
-    assert "readonly EXPECTED_MIGRATION_FILE_COUNT=33" in build
-    assert inventory_hash in build
+    assert "readonly EXPECTED_DB_HEAD=f1c8e4a7b2d9" in build
+    assert "readonly EXPECTED_MIGRATION_FILE_COUNT=32" in build
+    assert (
+        "6a338c1efb99d41c72ce1e097f2cb1bbf64e79ffe968e8763e8fdee4c798d326"
+        in build
+    )
 
 
 @pytest.mark.parametrize(

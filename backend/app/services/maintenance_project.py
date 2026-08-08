@@ -28,12 +28,15 @@ def _version_token(projects: list[MaintenanceProject]) -> str:
     return hashlib.sha256("|".join(facts).encode("utf-8")).hexdigest()
 
 
-def _is_effective(relation: MaintenanceProjectContract, as_of: date) -> bool:
+def _is_current(relation: MaintenanceProjectContract, as_of: date) -> bool:
     return bool(
-        relation.included_in_total
-        and relation.effective_from <= as_of
+        relation.effective_from <= as_of
         and (relation.effective_to is None or as_of < relation.effective_to)
     )
+
+
+def _is_effective(relation: MaintenanceProjectContract, as_of: date) -> bool:
+    return bool(relation.included_in_total and _is_current(relation, as_of))
 
 
 def project_directory(
@@ -117,9 +120,7 @@ def project_overview(
         cross_project_conflicts = set(
             db.execute(
                 select(MaintenanceProjectContract.contract_id)
-                .join(MaintenanceProject)
                 .where(
-                    MaintenanceProject.is_active.is_(True),
                     MaintenanceProjectContract.contract_id.in_(effective_ids),
                     MaintenanceProjectContract.included_in_total.is_(True),
                     MaintenanceProjectContract.effective_from <= as_of,
@@ -146,7 +147,11 @@ def project_overview(
         issues.append({"code": "duplicate_effective_contract", "contract_ids": repeated})
 
     unmapped = sorted(
-        {row.contract_id for row in effective if row.status_mapping_state != "mapped"}
+        {
+            row.contract_id
+            for row in contracts
+            if _is_current(row, as_of) and row.status_mapping_state != "mapped"
+        }
     )
     if unmapped:
         issues.append({"code": "unmapped_contract_status", "contract_ids": unmapped})

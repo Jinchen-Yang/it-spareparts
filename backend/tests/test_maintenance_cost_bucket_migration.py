@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from sqlalchemy import select, text
 
 from app.etl import loader
@@ -15,7 +16,6 @@ from app.services import maintenance_cost_quality
 from tests import factories as f
 
 _PREV = "f8c3d1a6b2e4"
-_HEAD = "c6f2a8e9d4b1"
 
 
 def _cfg() -> AlembicConfig:
@@ -25,6 +25,12 @@ def _cfg() -> AlembicConfig:
         os.path.join(os.path.dirname(__file__), "..", "alembic"),
     )
     return cfg
+
+
+def _current_head() -> str:
+    head = ScriptDirectory.from_config(_cfg()).get_current_head()
+    assert head is not None
+    return head
 
 
 def test_nonempty_cost_bucket_downgrade_and_reupgrade_is_lossless(db):
@@ -96,7 +102,7 @@ def test_nonempty_cost_bucket_downgrade_and_reupgrade_is_lossless(db):
             ).scalar_one() == maintenance_cost_quality.COST_BUCKET_ESTIMATED_INC_LOW
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version"),
-            ).scalar_one() == _HEAD
+            ).scalar_one() == _current_head()
     finally:
         alembic_command.upgrade(cfg, "head")
 
@@ -192,6 +198,6 @@ def test_dual_cost_reference_migration_round_trip_preserves_legacy_facts(db):
             assert upgraded.unit_cost_inc_tax is None
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == _HEAD
+            ).scalar_one() == _current_head()
     finally:
         alembic_command.upgrade(cfg, "head")

@@ -12,6 +12,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKUP_SCRIPT = REPO_ROOT / ".deploy" / "backup.sh"
+RESTORE_DRILL_SCRIPT = REPO_ROOT / ".deploy" / "restore_drill.sh"
 DEPLOY_DOC = REPO_ROOT / "docs" / "DEPLOY.md"
 
 
@@ -713,3 +714,25 @@ def test_backup_crontab_read_failure_is_fail_closed(tmp_path: Path) -> None:
     )
     assert filter_failure.returncode != 0
     assert cron_state.read_text(encoding="utf-8") == original
+
+
+def test_current_restore_drill_fails_closed_and_compares_stable_project_tables() -> None:
+    """后续 schema 发布使用当前恢复门禁；不得污染历史 v1.20 固定控制面。"""
+    script = RESTORE_DRILL_SCRIPT.read_text(encoding="utf-8")
+    guide = DEPLOY_DOC.read_text(encoding="utf-8")
+
+    assert RESTORE_DRILL_SCRIPT.stat().st_mode & stat.S_IXUSR
+    subprocess.run(["bash", "-n", str(RESTORE_DRILL_SCRIPT)], check=True)
+    assert "pg_restore -U spareparts -d restore_test --exit-on-error" in script
+    assert "maintenance_project|' || count(*) FROM maintenance_project" in script
+    assert (
+        "maintenance_project_contract|' || count(*) "
+        "FROM maintenance_project_contract"
+    ) in script
+    assert "SOURCE_DB_HEAD" in script
+    assert "RESTORED_DB_HEAD" in script
+    assert '"$RESTORED_DB_HEAD" = "$SOURCE_DB_HEAD"' in script
+    assert "diff -u" in script
+    assert "|| true" not in script
+    assert '"$APP_DIR/.deploy/restore_drill.sh"' in guide
+    assert "两张稳定维保项目表逐表行数" in guide

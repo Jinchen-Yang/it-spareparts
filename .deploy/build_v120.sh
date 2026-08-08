@@ -6,11 +6,11 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 readonly EXPECTED_RUNNING_SOURCE_COMMIT=a1cf00910f08da7f27a9e6e0faaacc3a3cce9bab
 readonly EXPECTED_CHECKOUT_COMMIT=ab42005b5b94bf98b3db0e4bff87e5df9da2f7ca
-readonly EXPECTED_DB_HEAD=c6f2a8e9d4b1
+readonly EXPECTED_DB_HEAD=f1c8e4a7b2d9
 readonly EXPECTED_APP_COMPOSE_HASH=d9846dee51822e6385055faa86f3256452a3385435e96baf624c169d51b313af
-readonly EXPECTED_MIGRATION_FILE_COUNT=33
+readonly EXPECTED_MIGRATION_FILE_COUNT=32
 readonly EXPECTED_MIGRATION_INVENTORY_SHA256=\
-9de3507975f935aaa6a9ae808168025bb01040e6231d84a6d869506f24406dd5
+6a338c1efb99d41c72ce1e097f2cb1bbf64e79ffe968e8763e8fdee4c798d326
 readonly APP_DIR=/home/ubuntu/apps/it-spareparts
 readonly BUILD_ROOT=/var/lib/it-spareparts-v120-build
 readonly LOCK_PATH=/run/lock/it-spareparts-v120

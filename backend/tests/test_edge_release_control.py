@@ -283,7 +283,7 @@ def _state(app_compose_hash: str) -> str:
         ("TARGET_COMMIT", TARGET),
         ("OLD_COMMIT", "ab42005b5b94bf98b3db0e4bff87e5df9da2f7ca"),
         ("OLD_RUNNING_SOURCE_COMMIT", "4" * 40),
-        ("DB_HEAD", "c6f2a8e9d4b1"),
+        ("DB_HEAD", "f1c8e4a7b2d9"),
         ("OLD_APP_IMAGE_ID", "sha256:" + "6" * 64),
         ("OLD_FRONTEND_IMAGE_ID", "sha256:" + "7" * 64),
         ("APP_IMAGE_REF", "it-spareparts-app"),

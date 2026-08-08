@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from app import permissions as permission_service
 from app.etl import loader
 from app.models.maintenance import (
@@ -27,7 +28,6 @@ from tests import factories as f
 
 _PREV = "e5f9a2b3c4d5"
 _DEV15_HEAD = "f1c8e4a7b2d9"
-_CURRENT_HEAD = "c6f2a8e9d4b1"
 
 
 def _cfg(*, output_buffer=None) -> AlembicConfig:
@@ -40,6 +40,12 @@ def _cfg(*, output_buffer=None) -> AlembicConfig:
         os.path.join(os.path.dirname(__file__), "..", "alembic"),
     )
     return cfg
+
+
+def _current_head() -> str:
+    head = ScriptDirectory.from_config(_cfg()).get_current_head()
+    assert head is not None
+    return head
 
 
 def _maintenance_line(db, suffix: str) -> tuple[SysImportBatch, FMaintenanceLine]:
@@ -396,7 +402,7 @@ def test_dev15_upgrade_constraints_and_clean_round_trip(db):
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == _CURRENT_HEAD
+            ).scalar_one() == _current_head()
     finally:
         alembic_command.upgrade(cfg, "head")
 
@@ -1056,7 +1062,7 @@ def test_dev15_downgrade_guard_preserves_each_new_business_fact(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == _CURRENT_HEAD
+        ).scalar_one() == _current_head()
         assert connection.execute(
             text(
                 """
