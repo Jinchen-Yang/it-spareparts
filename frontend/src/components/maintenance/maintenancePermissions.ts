@@ -38,7 +38,8 @@ export function readMaintenanceCapabilities() {
       isAdmin || permissions.action_maintenance_roundtrip_apply === true
     ),
     canManageProject: isAdmin || (
-      permissions.data_purchase_cost === true
+      permissions.page_maintenance === true
+      && permissions.data_purchase_cost === true
       && permissions.action_maintenance_project_manage === true
     ),
   };

@@ -2449,8 +2449,8 @@ def project_workspace(
         "workbook_preview": {
             "protocol_version": "2.0",
             "sheets": [
-                {"code": "overview", "name": "01_总览", "row_count": 1, "ownership": "append_only"},
-                {"code": "site_requisitions", "name": "02_备件消耗", "row_count": len(requisition_payload_rows), "ownership": "system"},
+                {"code": "overview", "name": "01_总览", "row_count": len(contract_rows) + len(collection_rows), "ownership": "append_only"},
+                {"code": "site_requisitions", "name": "02_备件消耗", "row_count": sum(1 for row in requisition_payload_rows if row["counts_cost"]), "ownership": "system"},
                 {"code": "approved_expenses", "name": "03_报销单", "row_count": len(expense_payload_rows), "ownership": "system"},
                 {"code": "manager_tracking", "name": "04_项目经理追踪与提醒", "row_count": len(reminder_rows), "ownership": "system"},
             ],

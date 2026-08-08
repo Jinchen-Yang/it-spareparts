@@ -52,6 +52,13 @@ describe("维保管理信息架构", () => {
     expect(refill?.visibleWhen?.()).toBe(false);
 
     localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: false,
+      data_purchase_cost: true,
+      action_maintenance_project_manage: true,
+    }));
+    expect(refill?.visibleWhen?.()).toBe(false);
+
+    localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: true,
       data_customer: true,
       data_purchase_cost: true,

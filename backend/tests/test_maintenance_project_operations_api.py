@@ -637,6 +637,7 @@ def test_confirmed_monthly_collection_snapshot_drives_workspace_progress(db):
     assert "collection:incomplete" in {
         row["rule_key"] for row in payload["reminders"]
     }
+    assert payload["workbook_preview"]["sheets"][0]["row_count"] == 3
     filtered = client.get(
         "/api/maintenance/projects/stable/operations",
         params={
@@ -1039,6 +1040,7 @@ def test_confirmed_site_issue_uses_direct_then_full_purchase_window(db):
         "row_count": 1,
         "ownership": "append_only",
     }
+    assert workspace["workbook_preview"]["sheets"][1]["row_count"] == 2
 
 
 def test_site_issue_status_lifecycle_resolves_cost_and_void_only_stops_counting(db):
