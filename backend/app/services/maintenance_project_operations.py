@@ -1430,6 +1430,20 @@ def patch_site_issue(
         raise MaintenanceOperationError(
             "真实 WBDD/仓库发货适配器尚未接入，生产更正确认已失败关闭"
         )
+    if is_correction:
+        # A pre-#208 confirmation event may still be waiting for projection.
+        # Drain older project events before writing the newer correction so a
+        # later read cannot replay stale quantities over the corrected facts.
+        try:
+            maintenance_bad_returns.consume_pending_return_events(
+                db,
+                project_id=project_id,
+            )
+        except (
+            maintenance_bad_returns.BadReturnConflict,
+            maintenance_bad_returns.BadReturnError,
+        ) as exc:
+            raise MaintenanceOperationConflict(str(exc)) from exc
 
     old_lines = _site_issue_lines(db, issue_id=issue_id, lock=True)
     requested_ids = {

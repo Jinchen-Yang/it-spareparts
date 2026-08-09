@@ -6,7 +6,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Path, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.maintenance_project_scope import enforce_maintenance_project_access
@@ -16,6 +16,7 @@ from app.models.maintenance_bad_return import (
     MaintenanceBadReturn,
     MaintenanceReturnObligation,
 )
+from app.models.master_data import ProductCategory
 from app.models.system import SysUser
 from app.security import (
     UserContext,
@@ -142,6 +143,11 @@ def _raise_service_error(exc: Exception) -> None:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     if isinstance(exc, returns.BadReturnError):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    if isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == "55P03":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "该项目正在被其他操作处理，请稍后重试",
+        ) from exc
     raise exc
 
 
@@ -242,6 +248,43 @@ def get_project_return_rate(
         "maintenance_return_rate_read",
         "maintenance_project",
         {"project_id": project_id, "status": payload["status"]},
+    )
+    return payload
+
+
+@router.get("/return-categories")
+def list_return_categories(
+    db: Session = Depends(get_db),
+    _page: None = Depends(require_page("page_maintenance")),
+    _admin: str = Depends(require_admin),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """List stable category identities used by the admin-only resolution flow."""
+
+    rows = list(
+        db.scalars(
+            select(ProductCategory).order_by(
+                ProductCategory.category_major,
+                ProductCategory.category_minor.nullsfirst(),
+                ProductCategory.id,
+            )
+        )
+    )
+    payload = {
+        "categories": [
+            {
+                "category_id": row.id,
+                "category_major": row.category_major,
+                "category_minor": row.category_minor,
+            }
+            for row in rows
+        ]
+    }
+    record_access_log(
+        ctx,
+        "maintenance_return_category_list",
+        "product_category",
+        {"count": len(rows)},
     )
     return payload
 

@@ -26,6 +26,7 @@ import {
   downloadMaintenanceWorkbookValidationErrors,
   getMaintenanceManagerWorkbookStatus,
   getMaintenanceProjectWorkspace,
+  listMaintenanceReturnCategories,
   listMaintenanceCostGaps,
   listMaintenanceProjectOperations,
   patchSiteIssue,
@@ -291,6 +292,13 @@ describe("maintenance operations API", () => {
       expect.not.objectContaining({ exempt: expect.anything() }),
     );
     expect(get).not.toHaveBeenCalled();
+  });
+
+  it("管理员品类处理入口读取标准品类稳定编号", () => {
+    listMaintenanceReturnCategories();
+
+    expect(get).toHaveBeenCalledOnce();
+    expect(get).toHaveBeenCalledWith("/maintenance/return-categories");
   });
 
   it("把 AbortSignal 交给 POST 请求，不混入业务 body", () => {

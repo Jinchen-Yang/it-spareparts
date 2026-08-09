@@ -439,6 +439,12 @@ export interface MaintenanceReturnObligationDirectory {
   return_rate: MaintenanceReturnRate;
 }
 
+export interface MaintenanceReturnCategory {
+  category_id: number;
+  category_major: string;
+  category_minor: string | null;
+}
+
 export type MaintenanceBadReturnStatus =
   | "draft"
   | "submitted"
@@ -1342,6 +1348,10 @@ export const voidMaintenanceBadReturn = (
   returnId: string,
   input: MaintenanceBadReturnCommandInput,
 ) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/void`, input);
+
+export const listMaintenanceReturnCategories = () => api.get<{
+  categories: MaintenanceReturnCategory[];
+}>("/maintenance/return-categories");
 
 export const resolveMaintenanceReturnObligationCategory = (
   obligationId: string,

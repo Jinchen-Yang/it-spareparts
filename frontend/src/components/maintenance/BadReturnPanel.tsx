@@ -9,6 +9,7 @@ import {
   List,
   Modal,
   Progress,
+  Select,
   Space,
   Spin,
   Tag,
@@ -20,12 +21,15 @@ import { useEffect, useRef, useState } from "react";
 import {
   confirmMaintenanceBadReturnWarehouse,
   createMaintenanceBadReturnDraft,
+  listMaintenanceReturnCategories,
   markMaintenanceBadReturnInTransit,
+  resolveMaintenanceReturnObligationCategory,
   searchMaintenanceBadReturns,
   searchMaintenanceReturnObligations,
   submitMaintenanceBadReturn,
   voidMaintenanceBadReturn,
   type MaintenanceBadReturn,
+  type MaintenanceReturnCategory,
   type MaintenanceReturnObligation,
   type MaintenanceReturnRate,
 } from "../../api/maintenanceOperations";
@@ -106,11 +110,21 @@ export default function BadReturnPanel({
   const [voidReason, setVoidReason] = useState("");
   const [voidError, setVoidError] = useState<string | null>(null);
   const [voidSaving, setVoidSaving] = useState(false);
+  const [categoryTarget, setCategoryTarget] = useState<MaintenanceReturnObligation | null>(null);
+  const [returnCategories, setReturnCategories] = useState<MaintenanceReturnCategory[]>([]);
+  const [categoryId, setCategoryId] = useState<number | null>(null);
+  const [categoryReason, setCategoryReason] = useState("");
+  const [categoryError, setCategoryError] = useState<string | null>(null);
+  const [categoryLoading, setCategoryLoading] = useState(false);
+  const [categorySaving, setCategorySaving] = useState(false);
+  const [canResolveCategory] = useState(() => localStorage.getItem("role") === "admin");
   const draftCommandKey = useRef<string | null>(null);
   const submitCommandKey = useRef<string | null>(null);
   const transitCommandKey = useRef<string | null>(null);
   const warehouseCommandKey = useRef<string | null>(null);
   const voidCommandKey = useRef<string | null>(null);
+  const categoryCommandKey = useRef<string | null>(null);
+  const categoryLoadGeneration = useRef(0);
 
   activeProject.current = projectId;
 
@@ -208,11 +222,20 @@ export default function BadReturnPanel({
     setVoidReason("");
     setVoidError(null);
     setVoidSaving(false);
+    setCategoryTarget(null);
+    setReturnCategories([]);
+    setCategoryId(null);
+    setCategoryReason("");
+    setCategoryError(null);
+    setCategoryLoading(false);
+    setCategorySaving(false);
     draftCommandKey.current = null;
     submitCommandKey.current = null;
     transitCommandKey.current = null;
     warehouseCommandKey.current = null;
     voidCommandKey.current = null;
+    categoryCommandKey.current = null;
+    categoryLoadGeneration.current += 1;
     setSelected({});
     setObligationPage(1);
     setObligationPageSize(50);
@@ -240,6 +263,81 @@ export default function BadReturnPanel({
     && row.is_active
     && Number(row.remaining_quantity) > 0
   ));
+
+  const openCategoryResolution = async (row: MaintenanceReturnObligation) => {
+    if (!canResolveCategory || row.classification !== "pending_category") return;
+    const request = ++categoryLoadGeneration.current;
+    const requestedProject = projectId;
+    setCategoryTarget(row);
+    setReturnCategories([]);
+    setCategoryId(null);
+    setCategoryReason("");
+    setCategoryError(null);
+    setCategoryLoading(true);
+    categoryCommandKey.current = commandKey("bad-return-category");
+    try {
+      const { data } = await listMaintenanceReturnCategories();
+      if (
+        request !== categoryLoadGeneration.current
+        || activeProject.current !== requestedProject
+      ) return;
+      setReturnCategories(data.categories ?? []);
+    } catch {
+      if (
+        request === categoryLoadGeneration.current
+        && activeProject.current === requestedProject
+      ) setCategoryError("标准品类加载失败，请重试");
+    } finally {
+      if (
+        request === categoryLoadGeneration.current
+        && activeProject.current === requestedProject
+      ) setCategoryLoading(false);
+    }
+  };
+
+  const closeCategoryResolution = () => {
+    if (categorySaving) return;
+    categoryLoadGeneration.current += 1;
+    setCategoryTarget(null);
+    categoryCommandKey.current = null;
+  };
+
+  const resolveCategory = async () => {
+    const cleanReason = categoryReason.trim();
+    const idempotencyKey = categoryCommandKey.current;
+    if (!canResolveCategory || !categoryTarget || categoryId == null
+      || !cleanReason || !idempotencyKey) return;
+    const requestedProject = projectId;
+    setCategorySaving(true);
+    setCategoryError(null);
+    try {
+      const { data } = await resolveMaintenanceReturnObligationCategory(
+        categoryTarget.obligation_id,
+        {
+          project_id: requestedProject,
+          version: categoryTarget.version,
+          category_id: categoryId,
+          idempotency_key: idempotencyKey,
+          reason: cleanReason,
+        },
+      );
+      if (activeProject.current !== requestedProject) return;
+      setObligations((current) => current.map((row) => (
+        row.obligation_id === data.obligation_id ? data : row
+      )));
+      setCategoryTarget(null);
+      categoryCommandKey.current = null;
+      message.success("标准品类已关联，返还口径已重新判定");
+      void refreshObligationFacts();
+      onChanged();
+    } catch {
+      if (activeProject.current === requestedProject) {
+        setCategoryError("品类处理失败，义务版本或标准品类可能已变化，请刷新后重试");
+      }
+    } finally {
+      if (activeProject.current === requestedProject) setCategorySaving(false);
+    }
+  };
 
   const openDraft = (source: MaintenanceBadReturn | null = null) => {
     const sourceSelection = source == null ? {} : Object.fromEntries(
@@ -614,17 +712,31 @@ export default function BadReturnPanel({
             dataSource={obligations}
             renderItem={(row) => (
               <List.Item key={row.obligation_id}>
-                <Space wrap style={{ width: "100%", justifyContent: "space-between" }}>
-                  <Space wrap>
-                    <Text strong>{row.pn}</Text>
-                    <Text type="secondary">来源 {row.issue_no}</Text>
-                    {classificationTag(row)}
+                <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                  <Space wrap style={{ width: "100%", justifyContent: "space-between" }}>
+                    <Space wrap>
+                      <Text strong>{row.pn}</Text>
+                      <Text type="secondary">来源 {row.issue_no}</Text>
+                      {classificationTag(row)}
+                    </Space>
+                    <Text type="secondary">
+                      应返 {row.required_quantity} · 已登记 {row.registered_quantity}
+                      {" · "}仓库确认 {row.warehouse_confirmed_quantity}
+                      {" · "}未登记 {row.remaining_quantity}
+                    </Text>
                   </Space>
-                  <Text type="secondary">
-                    应返 {row.required_quantity} · 已登记 {row.registered_quantity}
-                    {" · "}仓库确认 {row.warehouse_confirmed_quantity}
-                    {" · "}未登记 {row.remaining_quantity}
-                  </Text>
+                  {row.classification === "pending_category" && (
+                    <Space wrap style={{ justifyContent: "space-between" }}>
+                      <Text type="warning">
+                        当前不计入返还率分母，管理员关联标准品类后才能判定是否应返。
+                      </Text>
+                      {canResolveCategory && (
+                        <Button size="small" onClick={() => void openCategoryResolution(row)}>
+                          处理品类
+                        </Button>
+                      )}
+                    </Space>
+                  )}
                 </Space>
               </List.Item>
             )}
@@ -740,6 +852,62 @@ export default function BadReturnPanel({
           </Space>
         )}
       </Space>
+
+      <Modal
+        title="处理品类待判定"
+        open={categoryTarget != null && canResolveCategory}
+        okText="确认关联"
+        cancelText="取消"
+        confirmLoading={categorySaving}
+        okButtonProps={{
+          disabled: categoryLoading || categoryId == null || !categoryReason.trim(),
+        }}
+        onOk={() => void resolveCategory()}
+        onCancel={closeCategoryResolution}
+        destroyOnHidden
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Alert
+            type="warning"
+            showIcon
+            message="仅管理员可关联标准品类"
+            description="系统只按标准一级品类精确判定：硬盘免返，其他品类明确应返；选择和原因会保留审计。"
+          />
+          {categoryTarget && (
+            <Text>待处理：{categoryTarget.pn} · 来源 {categoryTarget.issue_no}</Text>
+          )}
+          {categoryError && <Alert type="error" showIcon message={categoryError} />}
+          <label>
+            标准品类
+            <Select
+              aria-label="标准品类"
+              showSearch
+              loading={categoryLoading}
+              value={categoryId ?? undefined}
+              placeholder="选择标准品类"
+              optionFilterProp="label"
+              options={returnCategories.map((category) => ({
+                value: category.category_id,
+                label: category.category_minor
+                  ? `${category.category_major} / ${category.category_minor}`
+                  : category.category_major,
+              }))}
+              onChange={(value) => setCategoryId(value)}
+              style={{ width: "100%" }}
+            />
+          </label>
+          <label>
+            判定原因
+            <Input.TextArea
+              aria-label="判定原因"
+              value={categoryReason}
+              maxLength={1000}
+              rows={3}
+              onChange={(event) => setCategoryReason(event.target.value)}
+            />
+          </label>
+        </Space>
+      </Modal>
 
       <Modal
         title={replacementFor ? "建立替代坏件返还草稿" : "新建坏件返还草稿"}

@@ -33,6 +33,7 @@ OFFICIAL_RETURN_RATE_BASIS = "warehouse_confirmed_v1"
 _OBLIGATION_NAMESPACE = UUID("4f8cf18a-a83f-4fb1-9425-5057ec86f45d")
 _QUANTITY_MAX_EXCLUSIVE = Decimal("100000000000")
 _ACTIVE_RETURN_STATUSES = ("submitted", "in_transit", "warehouse_confirmed")
+_WRITE_LOCK_TIMEOUT = "5s"
 
 
 class BadReturnError(Exception):
@@ -167,6 +168,12 @@ def _lock_idempotency_key(db: Session, key: str) -> None:
     db.execute(
         select(func.pg_advisory_xact_lock(func.hashtextextended(key, 0)))
     )
+
+
+def _set_write_lock_timeout(db: Session) -> None:
+    """Bound PostgreSQL lock waits for this transaction; callers can retry."""
+
+    db.execute(select(func.set_config("lock_timeout", _WRITE_LOCK_TIMEOUT, True)))
 
 
 def _audit(
@@ -400,6 +407,8 @@ def consume_return_event(
 ) -> list[MaintenanceReturnObligation]:
     """Project one #207 outbox event exactly once inside the caller transaction."""
 
+    _set_write_lock_timeout(db)
+
     expected_prefix = "maintenance-return-obligations:"
     if event.downstream_reference is not None:
         if not event.downstream_reference.startswith(expected_prefix):
@@ -432,6 +441,33 @@ def consume_return_event(
             .with_for_update()
         )
     )
+    latest_obligation_version = max(
+        (row.source_issue_version for row in existing), default=0
+    )
+    latest_consumed_event_version = db.scalar(
+        select(func.max(MaintenanceSiteIssueReturnEvent.issue_version)).where(
+            MaintenanceSiteIssueReturnEvent.issue_id == event.issue_id,
+            MaintenanceSiteIssueReturnEvent.downstream_reference.like(
+                f"{expected_prefix}%"
+            ),
+        )
+    )
+    latest_projected_version = max(
+        latest_obligation_version,
+        int(latest_consumed_event_version or 0),
+    )
+    if event.issue_version < latest_projected_version:
+        # Historical/out-of-order source events are still acknowledged so they
+        # cannot retry forever, but they must never overwrite a newer issue
+        # projection. Existing rows include inactive obligations left by voids,
+        # so the version watermark also survives an empty active result set.
+        event.downstream_reference = (
+            f"maintenance-return-obligations:{event.issue_id}:"
+            f"stale-v{event.issue_version}:current-v{latest_projected_version}"
+        )
+        event.consumed_at = datetime.now(UTC)
+        db.flush()
+        return existing
     existing_by_delivery = {row.delivery_line_id: row for row in existing}
     quantities = _registered_quantities(
         db, {row.obligation_id for row in existing}
@@ -585,6 +621,7 @@ def consume_pending_return_events(
     project_id: str | None = None,
     project_ids: list[str] | set[str] | None = None,
 ) -> int:
+    _set_write_lock_timeout(db)
     if project_id is not None and project_ids is not None:
         raise ValueError("project_id and project_ids are mutually exclusive")
     filters = [MaintenanceSiteIssueReturnEvent.downstream_reference.is_(None)]
@@ -600,6 +637,9 @@ def consume_pending_return_events(
             select(MaintenanceSiteIssueReturnEvent)
             .where(*filters)
             .order_by(
+                MaintenanceSiteIssueReturnEvent.project_id,
+                MaintenanceSiteIssueReturnEvent.issue_id,
+                MaintenanceSiteIssueReturnEvent.issue_version,
                 MaintenanceSiteIssueReturnEvent.created_at,
                 MaintenanceSiteIssueReturnEvent.event_id,
             )
@@ -876,6 +916,7 @@ def create_bad_return(
     reason: str,
     operated_by: str,
 ) -> dict | None:
+    _set_write_lock_timeout(db)
     clean_key = _required(idempotency_key, "幂等键", 128)
     if len(clean_key) < 8:
         raise BadReturnError("幂等键至少需要 8 个字符")
@@ -1054,6 +1095,7 @@ def transition_bad_return(
     warehouse_reference: str | None = None,
     inbound_reference: str | None = None,
 ) -> dict | None:
+    _set_write_lock_timeout(db)
     clean_key = _required(idempotency_key, "幂等键", 128)
     if len(clean_key) < 8:
         raise BadReturnError("幂等键至少需要 8 个字符")
@@ -1273,6 +1315,7 @@ def resolve_obligation_category(
     reason: str,
     operated_by: str,
 ) -> dict | None:
+    _set_write_lock_timeout(db)
     clean_key = _required(idempotency_key, "幂等键", 128)
     if len(clean_key) < 8:
         raise BadReturnError("幂等键至少需要 8 个字符")
