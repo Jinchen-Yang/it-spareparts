@@ -125,6 +125,7 @@ def upgrade() -> None:
     op.create_table(
         "maintenance_migration_event",
         sa.Column("event_id", sa.String(length=36), nullable=False),
+        sa.Column("operation_key", sa.String(length=128), nullable=False),
         sa.Column("run_id", sa.String(length=36), nullable=False),
         sa.Column("project_id", sa.String(length=36), nullable=True),
         sa.Column("action", sa.String(length=32), nullable=False),
@@ -150,7 +151,7 @@ def upgrade() -> None:
             name="ck_maintenance_migration_event_status",
         ),
         sa.CheckConstraint(
-            "char_length(btrim(reason)) > 0 AND char_length(btrim(operated_by)) > 0",
+            "char_length(btrim(operation_key)) > 0 AND char_length(btrim(reason)) > 0 AND char_length(btrim(operated_by)) > 0",
             name="ck_maintenance_migration_event_identity",
         ),
         sa.ForeignKeyConstraint(
@@ -162,6 +163,7 @@ def upgrade() -> None:
             ["maintenance_migration_run.run_id"],
         ),
         sa.PrimaryKeyConstraint("event_id"),
+        sa.UniqueConstraint("operation_key"),
     )
     op.create_index(
         "ix_maintenance_migration_event_run_time",
@@ -330,6 +332,7 @@ def upgrade() -> None:
         sa.Column("plan_id", sa.String(length=36), nullable=False),
         sa.Column("project_id", sa.String(length=36), nullable=False),
         sa.Column("balance_key", sa.String(length=256), nullable=False),
+        sa.Column("pn", sa.String(length=256), nullable=True),
         sa.Column("quantity", sa.Numeric(precision=14, scale=3), nullable=False),
         sa.Column("evidence_hash", sa.String(length=64), nullable=False),
         sa.Column("approval_state", sa.String(length=16), nullable=False),

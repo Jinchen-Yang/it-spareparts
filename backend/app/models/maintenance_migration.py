@@ -223,6 +223,7 @@ class MaintenanceInventoryOpeningBalance(Base):
         ForeignKey("maintenance_project.project_id"), nullable=False
     )
     balance_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    pn: Mapped[str | None] = mapped_column(String(256))
     quantity: Mapped[Decimal] = mapped_column(Qty, nullable=False)
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     approval_state: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -330,6 +331,7 @@ class MaintenanceMigrationEvent(Base):
     __tablename__ = "maintenance_migration_event"
 
     event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    operation_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
     run_id: Mapped[str] = mapped_column(
         ForeignKey("maintenance_migration_run.run_id"), nullable=False
     )
@@ -358,7 +360,9 @@ class MaintenanceMigrationEvent(Base):
             name="ck_maintenance_migration_event_status",
         ),
         CheckConstraint(
-            "char_length(btrim(reason)) > 0 AND char_length(btrim(operated_by)) > 0",
+            "char_length(btrim(operation_key)) > 0 "
+            "AND char_length(btrim(reason)) > 0 "
+            "AND char_length(btrim(operated_by)) > 0",
             name="ck_maintenance_migration_event_identity",
         ),
         Index(

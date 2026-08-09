@@ -21,6 +21,7 @@ _MONEY_QUANTUM = Decimal("0.01")
 _MONEY_MAX_EXCLUSIVE = Decimal("1000000000000")
 _QTY_MAX_EXCLUSIVE = Decimal("1000000000000")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_BLOCKER_CODE_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 _COST_STATUSES = {"confirmed", "corrected"}
 _INVENTORY_MOVEMENT_TYPES = {
     "delivery",
@@ -135,6 +136,23 @@ def _blocker(
             "detail": detail,
         }
     )
+
+
+def _source_blockers(
+    payload: Mapping[str, Any], blockers: list[dict[str, Any]]
+) -> None:
+    for row in payload.get("source_blockers") or []:
+        if not isinstance(row, Mapping):
+            raise MigrationControlError("来源阻塞项无效")
+        code = _required_text(row.get("code"), "来源阻塞项代码", max_length=64)
+        if not _BLOCKER_CODE_RE.fullmatch(code):
+            raise MigrationControlError("来源阻塞项代码无效")
+        entity_value = row.get("entity_id")
+        entity_id = None
+        if entity_value is not None:
+            entity_id = _required_text(entity_value, "来源阻塞项实体", max_length=128)
+        detail = _required_text(row.get("detail"), "来源阻塞项说明", max_length=1000)
+        _blocker(blockers, code, entity_id=entity_id, detail=detail)
 
 
 def _cost_pair(
@@ -502,6 +520,7 @@ def _project_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
                 "quantity",
             ),
         ),
+        "source_coverage": _canonical(payload.get("source_coverage") or {}),
     }
 
 
@@ -512,6 +531,7 @@ def build_project_preview(payload: Mapping[str, Any]) -> dict[str, Any]:
     cutover_date = _parse_date(payload.get("cutover_date"), "切换日期")
     source_snapshot_hash = _hash(payload.get("source_snapshot_hash"), "来源快照哈希")
     blockers: list[dict[str, Any]] = []
+    _source_blockers(payload, blockers)
     historical_ex, historical_inc = _historical_cost(
         payload,
         cutover_date=cutover_date,

@@ -100,10 +100,11 @@ def test_migration_event_is_database_append_only(db):
             text(
                 """
                 INSERT INTO maintenance_migration_event
-                    (event_id, run_id, action, from_status, to_status,
+                    (event_id, operation_key, run_id, action, from_status, to_status,
                      payload_json, reason, operated_by)
                 VALUES
-                    ('append-only-event', 'append-only-run', 'preview', NULL,
+                    ('append-only-event', 'append-only-operation',
+                     'append-only-run', 'preview', NULL,
                      'previewed', '{}'::jsonb, '建立 dry-run', 'migration-test')
                 """
             )
