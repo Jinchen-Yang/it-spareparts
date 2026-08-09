@@ -146,6 +146,31 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
+    # Assignment and audit history are compliance records. Refuse a rollback
+    # that would silently discard them or fail later with an opaque check-
+    # constraint error.
+    op.execute(
+        "LOCK TABLE maintenance_project_user_assignment, "
+        "maintenance_project_audit_log IN ACCESS EXCLUSIVE MODE"
+    )
+    op.execute(
+        """
+        DO $migration$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM maintenance_project_user_assignment)
+             OR EXISTS (
+                SELECT 1
+                FROM maintenance_project_audit_log
+                WHERE entity_type = 'manager_assignment'
+             )
+          THEN
+            RAISE EXCEPTION
+              'a6c8d2e4f1b7 downgrade blocked: manager assignment history is not empty';
+          END IF;
+        END
+        $migration$;
+        """
+    )
     op.execute(
         "DROP TRIGGER IF EXISTS trg_maintenance_project_user_assignment_history "
         "ON maintenance_project_user_assignment"
