@@ -61,6 +61,24 @@
   gap: 16px;
 }
 
+.bad-return-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bad-return-metric-grid > * {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
 .site-issue-document-card {
   height: 100%;
   border-color: #d9e3f0;
@@ -85,6 +103,12 @@
 
   .site-issue-editor-grid,
   .site-issue-candidate-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 767px) {
+  .bad-return-metric-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }

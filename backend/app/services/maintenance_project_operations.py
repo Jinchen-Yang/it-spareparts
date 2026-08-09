@@ -41,9 +41,10 @@ from app.business_time import BUSINESS_TZ, business_today
 from app.config import get_settings
 from app import tax_policy
 from app.security import UserContext, is_field_hidden
+from app.services import maintenance_bad_returns
+from app.services import maintenance_consumption_cost
 from app.services import maintenance_project
 from app.services import maintenance_project_assignments
-from app.services import maintenance_consumption_cost
 
 
 class MaintenanceOperationError(Exception):
@@ -870,6 +871,20 @@ def _return_event_dict(row: MaintenanceSiteIssueReturnEvent) -> dict:
     }
 
 
+def _consume_site_issue_return_event(
+    db: Session,
+    event: MaintenanceSiteIssueReturnEvent,
+) -> None:
+    """Synchronously project #207's outbox event into #208 obligations."""
+
+    try:
+        maintenance_bad_returns.consume_return_event(db, event)
+    except maintenance_bad_returns.BadReturnConflict as exc:
+        raise MaintenanceOperationConflict(str(exc)) from exc
+    except maintenance_bad_returns.BadReturnError as exc:
+        raise MaintenanceOperationError(str(exc)) from exc
+
+
 def _site_issue_return_payload(
     issue: MaintenanceSiteIssue,
     lines: list[MaintenanceSiteIssueLine],
@@ -1194,6 +1209,7 @@ def confirm_site_issue(
     )
     db.add(event)
     db.flush()
+    _consume_site_issue_return_event(db, event)
     response = {
         **site_issue_dict(issue, lines),
         "return_obligation_event": _return_event_dict(event),
@@ -1500,6 +1516,8 @@ def patch_site_issue(
             payload=_site_issue_return_payload(issue, replacement_lines),
         )
         db.add(event)
+        db.flush()
+        _consume_site_issue_return_event(db, event)
     db.flush()
     response = {
         **site_issue_dict(issue, replacement_lines),
@@ -1586,6 +1604,23 @@ def void_site_issue(
     if issue.normalized_status not in {"draft", "confirmed", "corrected"}:
         raise MaintenanceOperationConflict("当前现场领用状态不能作废")
 
+    was_confirmed = issue.normalized_status in {"confirmed", "corrected"}
+    if was_confirmed:
+        # A confirmed issue may have an outbox event that has not yet been
+        # projected. Drain every earlier event for the stable project before
+        # creating the void event so a delayed projector can never resurrect
+        # the withdrawn obligation.
+        try:
+            maintenance_bad_returns.consume_pending_return_events(
+                db,
+                project_id=project_id,
+            )
+        except (
+            maintenance_bad_returns.BadReturnConflict,
+            maintenance_bad_returns.BadReturnError,
+        ) as exc:
+            raise MaintenanceOperationConflict(str(exc)) from exc
+
     return_events = list(
         db.scalars(
             select(MaintenanceSiteIssueReturnEvent)
@@ -1594,14 +1629,19 @@ def void_site_issue(
             .with_for_update()
         )
     )
-    if any(event.downstream_reference for event in return_events):
+    if any(
+        event.downstream_reference
+        and not event.downstream_reference.startswith(
+            "maintenance-return-obligations:"
+        )
+        for event in return_events
+    ):
         raise MaintenanceOperationConflict(
-            "返还义务已生成下游事实，不能直接作废，请走带原因的更正"
+            "返还事件已被未知下游消费，不能直接作废"
         )
 
     lines = _site_issue_lines(db, issue_id=issue_id, lock=True)
     before = site_issue_dict(issue, lines)
-    was_confirmed = issue.normalized_status in {"confirmed", "corrected"}
     issue.raw_status = "void"
     issue.status_mapping_state = "mapped"
     issue.normalized_status = "void"
@@ -1619,6 +1659,8 @@ def void_site_issue(
             payload=_site_issue_return_payload(issue, lines),
         )
         db.add(event)
+        db.flush()
+        _consume_site_issue_return_event(db, event)
     db.flush()
     response = {
         **site_issue_dict(issue, lines),
@@ -4037,6 +4079,10 @@ def project_workspace(
             project_ids=[project_id],
         ).get(project_id),
     )
+    project_summary["return_rate"] = maintenance_bad_returns.project_return_rate(
+        db,
+        project_id=project_id,
+    )
 
     issue_statement = (
         select(MaintenanceSiteIssue, MaintenanceSiteIssueLine)
@@ -4264,6 +4310,7 @@ def project_workspace(
             "page_size": expense_page_size or approved_expense_total or 1,
         },
         "reminders": reminder_rows,
+        "return_rate": project_summary["return_rate"],
         "workbook_preview": {
             "protocol_version": "2.0",
             "sheets": [
@@ -4615,6 +4662,10 @@ def _project_cards_for_ids(
         project_ids=project_ids,
     )
     cards: dict[str, dict] = {}
+    return_rates = maintenance_bad_returns.return_rates_for_projects(
+        db,
+        project_ids=project_ids,
+    )
     for project in projects:
         base = maintenance_project.project_overview_from_facts(
             project=project,
@@ -4667,6 +4718,7 @@ def _project_cards_for_ids(
             card,
             manager_assignments.get(project.project_id),
         )
+        card["return_rate"] = return_rates[project.project_id]
         cards[project.project_id] = card
     return cards
 

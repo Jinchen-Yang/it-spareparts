@@ -8,6 +8,7 @@ interface LocalMaintenancePermissions {
   action_maintenance_project_manage?: boolean;
   action_maintenance_demand_delete?: boolean;
   action_maintenance_site_issue_manage?: boolean;
+  action_maintenance_bad_return_manage?: boolean;
 }
 
 export interface MaintenanceCapabilities {
@@ -21,6 +22,7 @@ export interface MaintenanceCapabilities {
   canManageProject: boolean;
   canDeleteDemand: boolean;
   canManageSiteIssues: boolean;
+  canManageBadReturns: boolean;
 }
 
 function readLocalPermissions(): LocalMaintenancePermissions {
@@ -134,6 +136,10 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
       permissions.page_maintenance === true
       && permissions.data_purchase_cost === true
       && permissions.action_maintenance_site_issue_manage === true
+    ),
+    canManageBadReturns: isAdmin || (
+      permissions.page_maintenance === true
+      && permissions.action_maintenance_bad_return_manage === true
     ),
   };
 }

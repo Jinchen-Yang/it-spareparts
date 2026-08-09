@@ -1,7 +1,7 @@
 """Public workflow tests for server-owned site-consumption documents."""
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, date, datetime
+from datetime import date
 
 import pytest
 from fastapi import FastAPI
@@ -14,6 +14,7 @@ from app.api import maintenance_project_operations
 from app.auth import hash_password
 from app.models.dimensions import DimPart
 from app.models.inventory import Inventory
+from app.models.maintenance_bad_return import MaintenanceReturnObligation
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectUserAssignment,
@@ -852,7 +853,7 @@ def test_metadata_correction_keeps_line_identity_and_frozen_cost_evidence(db):
     )
 
 
-def test_confirmed_issue_can_be_corrected_and_voided_without_inventory_or_cost_offset(db):
+def test_confirmed_issue_can_be_corrected_then_fully_voided_without_registration(db):
     project = _project(db, project_id="project-site-issue-v2-correct-void")
     part = DimPart(pn_std="PN-SYNTH-CORRECT-VOID")
     db.add(part)
@@ -931,10 +932,7 @@ def test_confirmed_issue_can_be_corrected_and_voided_without_inventory_or_cost_o
         },
     )
     assert voided_response.status_code == 200, voided_response.text
-    voided = voided_response.json()
-    assert voided["workflow_status"] == "void"
-    assert voided["return_obligation_event"]["event_type"] == "return_obligation_voided"
-    assert voided["lines"][0]["cost_amount_ex_tax"] == "60.00"
+    assert voided_response.json()["workflow_status"] == "void"
 
     candidates = client.post(
         f"/api/maintenance/projects/stable/{project.project_id}/issue-candidates/search",
@@ -942,12 +940,20 @@ def test_confirmed_issue_can_be_corrected_and_voided_without_inventory_or_cost_o
     ).json()
     assert candidates["rows"][0]["confirmed_quantity"] == "0.000"
     assert candidates["rows"][0]["available_quantity"] == "5.000"
+    obligation = db.query(MaintenanceReturnObligation).filter_by(
+        issue_id=draft["issue_id"]
+    ).one()
+    assert obligation.obligation_id
+    assert obligation.required_quantity == 0  # no standard category: pending
+    assert obligation.source_quantity == 3
+    assert obligation.is_active is False
+    assert obligation.source_issue_version == voided_response.json()["version"]
     db.expire_all()
     unchanged = db.get(Inventory, inventory.id)
     assert (unchanged.source_qty, unchanged.manual_qty, unchanged.is_qty_overridden) == before_inventory
 
 
-def test_void_is_blocked_after_return_downstream_fact_but_correction_remains_available(db):
+def test_projected_return_obligation_does_not_block_safe_full_void(db):
     project = _project(db, project_id="project-site-issue-v2-downstream")
     delivery = _delivery_source(
         db,
@@ -976,33 +982,25 @@ def test_void_is_blocked_after_return_downstream_fact_but_correction_remains_ava
         .filter_by(issue_id=draft["issue_id"], event_type="return_obligation_created")
         .one()
     )
-    event.downstream_reference = "synthetic-return-fact-001"
-    event.consumed_at = datetime.now(UTC)
-    db.commit()
+    assert event.downstream_reference.startswith("maintenance-return-obligations:")
+    assert event.consumed_at is not None
 
-    rejected = client.post(
+    voided = client.post(
         f"/api/maintenance/site-issues/{draft['issue_id']}/void",
         json={
             "project_id": project.project_id,
             "version": confirmed["version"],
             "idempotency_key": "synthetic-site-issue-void-downstream",
-            "reason": "不得绕过已生成的返还事实",
+            "reason": "仅生成义务但尚未登记返还，可以整单撤回",
         },
     )
-    assert rejected.status_code == 409, rejected.text
-
-    corrected = client.patch(
-        f"/api/maintenance/site-issues/{draft['issue_id']}",
-        json={
-            "project_id": project.project_id,
-            "version": confirmed["version"],
-            "idempotency_key": "synthetic-site-issue-correct-downstream",
-            "lines": [{"delivery_line_id": delivery.delivery_line_id, "quantity": "2"}],
-            "reason": "通过更正通知下游",
-        },
-    )
-    assert corrected.status_code == 200, corrected.text
-    assert corrected.json()["workflow_status"] == "corrected"
+    assert voided.status_code == 200, voided.text
+    assert voided.json()["workflow_status"] == "void"
+    db.expire_all()
+    obligation = db.query(MaintenanceReturnObligation).filter_by(
+        issue_id=draft["issue_id"]
+    ).one()
+    assert obligation.is_active is False
 
 
 def test_concurrent_confirmations_never_overdraw_one_delivery_balance(db):
@@ -1279,10 +1277,8 @@ def test_command_receipts_are_append_only_and_return_events_only_allow_one_downs
         .filter_by(issue_id=draft["issue_id"])
         .one()
     )
-
-    event.downstream_reference = "synthetic-downstream-registration"
-    event.consumed_at = datetime.now(UTC)
-    db.commit()
+    assert event.downstream_reference.startswith("maintenance-return-obligations:")
+    assert event.consumed_at is not None
 
     with pytest.raises(DBAPIError, match="append-only"):
         with db.begin_nested():

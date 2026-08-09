@@ -100,6 +100,7 @@ export interface MaintenanceProjectOperationsSummary {
   version: number;
   contracts: MaintenanceContractSummary[];
   metrics: MaintenanceOperationsMetrics;
+  return_rate?: MaintenanceReturnRate | null;
   reminder_count: number;
   manager_assignment: MaintenanceManagerAssignment | null;
   task_summary: MaintenanceProjectTaskSummary;
@@ -218,6 +219,7 @@ export interface MaintenanceProjectWorkspace {
   };
   reminders: MaintenanceProjectReminder[];
   workbook_preview: MaintenanceWorkbookPreview;
+  return_rate?: MaintenanceReturnRate | null;
   as_of: string;
   data_version: string;
 }
@@ -343,6 +345,130 @@ export interface SiteIssueCommandInput {
   version: number;
   idempotency_key: string;
   reason: string;
+}
+
+export type MaintenanceReturnRateStatus =
+  | "available"
+  | "basis_incomplete"
+  | "no_return_required";
+
+export interface MaintenanceReturnRate {
+  project_id: string;
+  status: MaintenanceReturnRateStatus;
+  official_basis: "warehouse_confirmed_v1";
+  official_rate_pct: string | null;
+  registered_rate_pct: string | null;
+  warehouse_confirmed_rate_pct: string | null;
+  required_quantity: string;
+  registered_quantity: string;
+  warehouse_confirmed_quantity: string;
+  outstanding_quantity: string;
+  exempt_quantity: string;
+  pending_quantity: string;
+  required_count: number;
+  exempt_count: number;
+  pending_count: number;
+  business_assumption: string;
+}
+
+export type MaintenanceReturnObligationClassification =
+  | "required"
+  | "exempt"
+  | "pending_category";
+
+export interface MaintenanceReturnObligation {
+  obligation_id: string;
+  project_id: string;
+  issue_id: string;
+  issue_no: string | null;
+  issue_line_id: string;
+  delivery_line_id: string;
+  part_id: number;
+  pn: string;
+  source_quantity: string;
+  required_quantity: string;
+  classification: MaintenanceReturnObligationClassification;
+  category_id_snapshot: number | null;
+  category_major_snapshot: string | null;
+  category_minor_snapshot: string | null;
+  rule_version: string;
+  source_issue_version: number;
+  registered_quantity: string;
+  warehouse_confirmed_quantity: string;
+  remaining_quantity: string;
+  is_active: boolean;
+  version: number;
+}
+
+export interface MaintenanceReturnObligationDirectory {
+  project_id: string;
+  rows: MaintenanceReturnObligation[];
+  total: number;
+  page: number;
+  page_size: number;
+  return_rate: MaintenanceReturnRate;
+}
+
+export type MaintenanceBadReturnStatus =
+  | "draft"
+  | "submitted"
+  | "in_transit"
+  | "warehouse_confirmed"
+  | "void";
+
+export interface MaintenanceBadReturnLine {
+  return_line_id: string;
+  line_no: number;
+  obligation_id: string;
+  part_id: number;
+  pn: string;
+  quantity: string;
+}
+
+export interface MaintenanceBadReturn {
+  return_id: string;
+  return_no: string;
+  replaces_return_id: string | null;
+  project_id: string;
+  status: MaintenanceBadReturnStatus;
+  logistics_reference: string | null;
+  warehouse_reference: string | null;
+  inbound_reference: string | null;
+  note: string | null;
+  created_by: string;
+  submitted_at: string | null;
+  in_transit_at: string | null;
+  warehouse_confirmed_at: string | null;
+  voided_at: string | null;
+  version: number;
+  lines: MaintenanceBadReturnLine[];
+  inventory_effect: "none";
+  cost_effect: "none";
+  idempotent_replay?: boolean;
+}
+
+export interface MaintenanceBadReturnDirectory {
+  project_id: string;
+  rows: MaintenanceBadReturn[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface MaintenanceBadReturnCommandInput {
+  project_id: string;
+  version: number;
+  idempotency_key: string;
+  reason: string;
+}
+
+export interface MaintenanceReturnObligationSearchInput {
+  project_id: string;
+  q?: string;
+  classifications?: MaintenanceReturnObligationClassification[];
+  active_only?: boolean;
+  page?: number;
+  page_size?: number;
 }
 
 export interface MaintenanceWorkbookValidation {
@@ -899,3 +1025,78 @@ export const voidSiteIssue = (
   issueId: string,
   input: SiteIssueCommandInput,
 ) => api.post<SiteIssueDocument>(`${siteIssueBase(issueId)}/void`, input);
+
+export const searchMaintenanceReturnObligations = (
+  input: MaintenanceReturnObligationSearchInput,
+) => api.post<MaintenanceReturnObligationDirectory>(
+  "/maintenance/return-obligations/search",
+  {
+    project_id: input.project_id,
+    ...(input.q?.trim() ? { q: input.q.trim() } : {}),
+    ...(input.classifications ? { classifications: input.classifications } : {}),
+    ...(input.active_only == null ? {} : { active_only: input.active_only }),
+    page: input.page ?? 1,
+    page_size: input.page_size ?? 50,
+  },
+);
+
+export const searchMaintenanceBadReturns = (input: {
+  project_id: string;
+  statuses?: MaintenanceBadReturnStatus[];
+  page?: number;
+  page_size?: number;
+}) => api.post<MaintenanceBadReturnDirectory>("/maintenance/bad-returns/search", {
+  project_id: input.project_id,
+  ...(input.statuses ? { statuses: input.statuses } : {}),
+  page: input.page ?? 1,
+  page_size: input.page_size ?? 20,
+});
+
+export const createMaintenanceBadReturnDraft = (input: {
+  project_id: string;
+  idempotency_key: string;
+  replaces_return_id?: string;
+  lines: { obligation_id: string; quantity: number }[];
+  note?: string;
+  reason: string;
+}) => api.post<MaintenanceBadReturn>("/maintenance/bad-returns", input);
+
+const badReturnBase = (returnId: string) =>
+  `/maintenance/bad-returns/${encodeURIComponent(returnId)}`;
+
+export const submitMaintenanceBadReturn = (
+  returnId: string,
+  input: MaintenanceBadReturnCommandInput,
+) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/submit`, input);
+
+export const markMaintenanceBadReturnInTransit = (
+  returnId: string,
+  input: MaintenanceBadReturnCommandInput & { logistics_reference: string },
+) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/in-transit`, input);
+
+export const confirmMaintenanceBadReturnWarehouse = (
+  returnId: string,
+  input: MaintenanceBadReturnCommandInput & {
+    warehouse_reference: string;
+    inbound_reference?: string;
+  },
+) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/warehouse-confirm`, input);
+
+export const voidMaintenanceBadReturn = (
+  returnId: string,
+  input: MaintenanceBadReturnCommandInput,
+) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/void`, input);
+
+export const resolveMaintenanceReturnObligationCategory = (
+  obligationId: string,
+  input: {
+    project_id: string;
+    version: number;
+    category_id: number;
+    idempotency_key: string;
+    reason: string;
+  },
+) => api.post<MaintenanceReturnObligation>(
+  `/maintenance/return-obligations/${encodeURIComponent(obligationId)}/resolve-category`,
+  input,
+);

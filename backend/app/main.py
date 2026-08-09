@@ -20,6 +20,7 @@ from app.api import (
     maintenance_demands,
     maintenance_audit,
     maintenance_project_assignments,
+    maintenance_bad_returns,
     maintenance_project_operations,
     maintenance_project_workbooks,
     maintenance_projects,
@@ -80,6 +81,7 @@ app.include_router(
     maintenance_project_operations.site_issue_router,
     prefix=settings.api_prefix,
 )
+app.include_router(maintenance_bad_returns.router, prefix=settings.api_prefix)
 app.include_router(maintenance_project_workbooks.router, prefix=settings.api_prefix)
 app.include_router(maintenance_projects.router, prefix=settings.api_prefix)
 app.include_router(maintenance_audit.router, prefix=settings.api_prefix)

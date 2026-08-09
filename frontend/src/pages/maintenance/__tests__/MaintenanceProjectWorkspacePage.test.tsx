@@ -4,11 +4,15 @@ import { MemoryRouter } from "react-router-dom";
 
 const {
   getMaintenanceProjectWorkspace,
+  searchMaintenanceBadReturns,
+  searchMaintenanceReturnObligations,
   searchSiteIssueCandidates,
   searchSiteIssues,
   taxBasisState,
 } = vi.hoisted(() => ({
   getMaintenanceProjectWorkspace: vi.fn(),
+  searchMaintenanceBadReturns: vi.fn(),
+  searchMaintenanceReturnObligations: vi.fn(),
   searchSiteIssueCandidates: vi.fn(),
   searchSiteIssues: vi.fn(),
   taxBasisState: { value: "both" as "inc" | "ex" | "both" },
@@ -21,6 +25,8 @@ vi.mock("../../../api/maintenanceOperations", async () => {
   return {
     ...actual,
     getMaintenanceProjectWorkspace,
+    searchMaintenanceBadReturns,
+    searchMaintenanceReturnObligations,
     searchSiteIssueCandidates,
     searchSiteIssues,
   };
@@ -34,6 +40,25 @@ vi.mock("../../../context/TaxBasis", async () => {
 });
 
 import MaintenanceProjectWorkspacePage from "../MaintenanceProjectWorkspacePage";
+
+const workspaceReturnRate = {
+  project_id: "project-1",
+  status: "available" as const,
+  official_basis: "warehouse_confirmed_v1" as const,
+  official_rate_pct: "20.00",
+  registered_rate_pct: "40.00",
+  warehouse_confirmed_rate_pct: "20.00",
+  required_quantity: "5.000",
+  registered_quantity: "2.000",
+  warehouse_confirmed_quantity: "1.000",
+  outstanding_quantity: "4.000",
+  exempt_quantity: "1.000",
+  pending_quantity: "0.000",
+  required_count: 1,
+  exempt_count: 1,
+  pending_count: 0,
+  business_assumption: "官方返还率以仓库确认数量为准",
+};
 
 const workspace = {
   project: {
@@ -76,6 +101,7 @@ const workspace = {
       cost_complete: false,
       missing_cost_lines: 1,
     },
+    return_rate: workspaceReturnRate,
     reminder_count: 1,
     as_of: "2026-08-08",
   },
@@ -210,6 +236,7 @@ const workspace = {
     last_exported_at: null,
     data_version: "workspace-v1",
   },
+  return_rate: workspaceReturnRate,
   as_of: "2026-08-08",
   data_version: "workspace-v1",
 };
@@ -231,6 +258,18 @@ beforeEach(() => {
   });
   searchSiteIssues.mockResolvedValue({
     data: { project_id: "project-1", adapter, rows: [], total: 0, page: 1, page_size: 20 },
+  });
+  searchMaintenanceReturnObligations.mockResolvedValue({
+    data: {
+      rows: [],
+      total: 0,
+      page: 1,
+      page_size: 50,
+      return_rate: workspaceReturnRate,
+    },
+  });
+  searchMaintenanceBadReturns.mockResolvedValue({
+    data: { project_id: "project-1", rows: [], total: 0, page: 1, page_size: 20 },
   });
 });
 afterEach(() => {
@@ -306,6 +345,9 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(screen.getByRole("button", { name: "上传月度更新" })).toBeInTheDocument();
     expect(screen.getByTestId("site-issue-workflow")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新建领用单" })).toBeInTheDocument();
+    expect(screen.getByTestId("bad-return-panel")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建坏件返还单" })).toBeInTheDocument();
+    expect(screen.getByText("仓库确认返还率")).toBeInTheDocument();
     expect(screen.queryByText(/扇形图|饼图/)).toBeNull();
   });
 
@@ -348,6 +390,7 @@ describe("MaintenanceProjectWorkspacePage", () => {
       action_maintenance_project_manage: false,
       action_maintenance_roundtrip_apply: false,
       action_maintenance_site_issue_manage: false,
+      action_maintenance_bad_return_manage: false,
     }));
 
     render(
@@ -360,7 +403,34 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(screen.queryByRole("link", { name: "去人工回填成本" })).toBeNull();
     expect(screen.queryByRole("button", { name: "上传月度更新" })).toBeNull();
     expect(screen.queryByTestId("site-issue-workflow")).toBeNull();
+    expect(screen.getByTestId("bad-return-panel")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "新建坏件返还单" })).toBeNull();
     expect(screen.getByRole("button", { name: "下载完整四表" })).toBeInTheDocument();
+  });
+
+  it("坏件返还管理权限不依赖成本权限，且不连带开放现场领用管理", async () => {
+    localStorage.setItem("role", "maintenance_operator");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: false,
+      data_profit: false,
+      action_maintenance_project_manage: false,
+      action_maintenance_roundtrip_apply: false,
+      action_maintenance_site_issue_manage: false,
+      action_maintenance_bad_return_manage: true,
+    }));
+
+    render(
+      <MemoryRouter>
+        <MaintenanceProjectWorkspacePage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("heading", { name: "移动维保项目" })).toBeInTheDocument();
+    expect(screen.getByTestId("bad-return-panel")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建坏件返还单" })).toBeInTheDocument();
+    expect(screen.queryByTestId("site-issue-workflow")).toBeNull();
+    expect(screen.queryByRole("link", { name: "去人工回填成本" })).toBeNull();
   });
 
   it("切换回款页时带齐三类独立页码并采用服务端返回的第二页", async () => {

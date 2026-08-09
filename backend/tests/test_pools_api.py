@@ -385,7 +385,8 @@ def test_permission_registry_wiring(db):
                                    "action_maintenance_roundtrip_apply",
                                    "action_maintenance_project_manage",
                                    "action_maintenance_demand_delete",
-                                   "action_maintenance_site_issue_manage"]
+                                   "action_maintenance_site_issue_manage",
+                                   "action_maintenance_bad_return_manage"]
 
 
 # ---------------------------------------------------------------- 端到端闭环
