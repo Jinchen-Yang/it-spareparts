@@ -72,7 +72,9 @@ ready -> expired
 
 只有 `ready` 可下载。文件先写到同文件系统临时位置，完成二次打开、格式、大小和 SHA-256 校验后原子 rename；元数据发布失败时不能留下可猜测的正式对象。
 
-生成制品还必须保存由服务端计算的 `access_scope`，而不是只保存 owner。它至少覆盖创建时的数据权限、页面范围和行级限制；每次下载/预览都用当前 UserContext 判断当前范围是否仍覆盖该快照。用户降权或从全量范围变成“仅本人”后，旧敏感制品立即不可访问，只能在当前权限下重新生成。用户自己上传的原件与系统生成制品分开分类；缺少 scope 的 legacy 生成件执行显式保守策略，不能默认为 unrestricted。
+生成制品还必须保存由服务端计算的 `access_scope`，而不是只保存 owner。owner 必须是非空、稳定、已认证的 token subject；匿名或共享回退身份不能创建 v2 制品。scope 显式包含可见字段组、正向 data/page 权限和行级限制，不用一个不可解释的权限 hash 代替。当前可见字段/正向权限必须覆盖 required；限制型权限不得比创建时更窄，例如创建时可看全量、后来变成 `own_customers_only=true` 就必须拒绝。每次下载/预览实时重算。用户自己上传的原件与系统生成制品分开分类；legacy generated/unclassified 默认拒绝，不能由实现自行放宽。
+
+兼容是单向的：新代码可以读取旧 12 位 ID/旁车，新制品只写 UUID + v2 元数据/Store，不能为了“旧代码回滚后还能下载”再写一个绕过 scope guard 的旧旁车。滚动发布时隔离新旧 Agent 文件路由；若必须回滚，先关闭 v2 创建/下载，保留对象字节与数据库，修复后 forward deploy 恢复。安全回滚允许制品暂时不可用，不允许撤权失效。
 
 ## 4. 只读能力策略
 
@@ -90,13 +92,15 @@ ready -> expired
 
 | Egress | 含义 | 默认策略 |
 |---|---|---|
-| `model_context` | 结构化工具结果会进入当前模型上下文 | 仅允许发送当前身份可见且经过最小化的数据 |
+| `model_context` | 结构化工具结果会进入当前模型上下文 | 同时校验数据 sensitivity 与目标 Provider trust zone |
 | `external_provider` | 原始或派生内容会直接发给第二个外部服务，如视觉识别 | 默认拒绝，需服务端显式授权和数据分级 |
 | `none` | 能力本身不发起网络出境 | 允许仍取决于 effect/RBAC |
 
-`read_document` 不能因为名字是“读文件”就被视为纯本地操作：图片和扫描 PDF 可能调用 Vision provider。首期将它整体视为外部出境能力；未授权时 provider 必须零调用。后续可以拆成“本地抽取”和“视觉识别”两个更小的 Capability。
+主 LLM 本身也是出境边界。Provider 必须显式标记为 `private`、`approved_external` 或 `unknown`；默认 `unknown`，且未显式允许 `model_context` 时，敏感能力不暴露、dispatch 也不执行。私网 GPU 与获批外部 Provider 可以配置不同的 sensitivity allowlist。
 
-Capability 审计同样遵循最小化：只记录 actor、capability、参数键/集合长度/摘要 hash、Artifact ID 与状态。正常、策略拒绝和 handler 异常都不能把 raw args/results、单元格、整行报价、SQL、文件正文、URL 或凭据复制进日志。
+`read_document` 不能因为名字是“读文件”就被视为纯本地操作。首期直接拆边界：txt/docx/xlsx/文字 PDF 走本地抽取；图片或扫描 PDF 只返回 `requires_vision`，不会隐式外发。模型需要显式调用独立的视觉能力，而该能力只有在外部出境策略允许时才可见、可执行。
+
+Capability 审计同样遵循最小化：只记录 actor、capability、参数键/集合长度、Artifact ID 与状态。正常、策略拒绝和 handler 异常都不能把 raw args/results、单元格、整行报价、SQL、文件正文、URL 或凭据复制进日志。MVP 不记录参数值 hash；将来确需跨事件关联时只能使用服务端密钥化 HMAC，不能对低熵 PN/客户名使用可枚举的裸 SHA-256。
 
 这里“AI 只读”的准确含义是：**业务事实和源文件只读；Agent 控制面可以写自己的运行记录、审计和不可变派生制品。**
 
@@ -191,7 +195,7 @@ inspect -> infer schema -> propose mapping -> validate
 ## 10. 实施依赖
 
 1. #219：Capability Policy。
-2. #220：Artifact Store；#221：结构化交付；#222：上传/解析边界。
+2. #220：Artifact Store；#221：结构化交付；#222：依赖 #220 的上传/解析隔离边界。
 3. Durable Task/Step ledger 与计划校验器。
 4. Query Broker 与 Text2SQL。
 5. GPU 私网推理网关。
