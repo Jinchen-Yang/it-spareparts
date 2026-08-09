@@ -60,11 +60,16 @@ running -> paused_recoverable -> running
 running -> waiting_human -> running
 pending | planning | validated | running | paused_recoverable | waiting_human
   -> cancelling -> cancelled
-running -> succeeded | failed
-waiting_human -> failed  (interrupt expired or authorization revoked)
+running -> succeeded
+pending | planning | validated | running | paused_recoverable | waiting_human | cancelling
+  -> failed  (only after sealing real error evidence)
 ```
 
-不允许从终态恢复；恢复必须新建 attempt 并保留旧证据。LangGraph checkpoint 是运行实现，不是业务事实源；平台自己的 task/step 账本才是审计真相。
+只有 `running` 可以进入 `succeeded`。任一非终态可在封存真实错误 code/cause/phase、权限/策略快照和
+可得 Evidence 后进入 `failed`；`cancelling` 的取消执行本身发生可证明错误时也允许 failed。转换事务必须
+先如实结算 in-flight Step：handler 已完成就记录 completed/output，真实失败才记 failed，不能借 Task
+`failed` 跳过已完成 Step 记账或伪造未执行。不允许从终态恢复；恢复必须新建 attempt 并保留旧证据。
+LangGraph checkpoint 是运行实现，不是业务事实源；平台自己的 task/step 账本才是审计真相。
 
 ### 3.2 Artifact 聚合
 
@@ -97,11 +102,15 @@ resource/field union 描述“文件里实际装了什么”，不是拿各来�
 不同 predicate version/domain 不可比较、语义未知或 composition 未注册时标记 `unclassified` 并 fail closed，
 不得用 `intersection`、字符串拼接或“narrowest”标签伪装已安全合并。
 
-模板只有在确定性检查证明“不复制/派生模板中的业务数据，仅使用 allowlisted 结构/样式”后，才能标记
-`identity_only`：它对输出访问条件贡献 TOP、对 contained set union 贡献空集，但仍保存 template hash、
-owner、classification/proof version，且 Task 执行时必须有权读取模板。证明缺失、模板示例值进入输出、
-或输出 containment 扫描不一致时，模板按普通内容来源参与 union 和逐来源重授权。Artifact Set 的聚合
-scope 与任何成员都不得漏掉其实际内容来源。
+模板必须在进入模型/Change Plan 之前由本地确定性 classifier 完整扫描。`identity_only` 只允许
+allowlisted Sheet/表头结构、列顺序和安全样式；不得含示例值、规则文本、semantic examples、批注、
+隐藏业务文本或其派生内容。任一此类内容存在，或被送入模型、Change Plan、dry-run、Evidence、输出时，
+模板立即是 `business_content`，按普通来源参与 union 和逐来源重授权。
+
+`identity_only` 对输出访问条件贡献 TOP、对 contained set union 贡献空集，但仍保存 template hash、
+owner、classification/proof version，且 Task 执行时必须有权读取模板。输出后的 containment scan 只是
+防止分类漂移的二次门禁，永远不能把预先为 `business_content/unclassified` 的模板升级或“洗白”为
+`identity_only`。Artifact Set 的聚合 scope 与任何成员都不得漏掉实际内容来源。
 
 legacy 必须先分类再授权：
 
@@ -138,11 +147,37 @@ legacy 必须先分类再授权：
 | `artifact_projection -> vision_provider` | 有界图片/扫描页发送给独立视觉服务 | 默认拒绝，需显式字段/页/字节授权 |
 | `vision_output -> primary_model` | OCR/视觉结果再次进入主模型 | 是另一条独立边，不能继承上一跳授权 |
 
-主 LLM 本身也是出境边界。Provider 必须显式标记为 `private`、`approved_external` 或 `unknown`；默认 `unknown`，且没有命中对应 `egress_edges[]` 时，敏感能力不暴露、dispatch 也不执行。私网 GPU 与获批外部 Provider 可以配置不同的 sensitivity allowlist。
+主 LLM 本身也是全局出境边界，不是只管 `tool schema/result` 的附属检查。Provider 必须显式标记为
+`private`、`approved_external` 或 `unknown`；`unknown/disabled/unlisted` 必须在 API 预检阶段拒绝，
+system、当前 user message、history、tool result 和文件投影均不得调用该 Provider。预检通过不是
+持久授权；每次 provider call 立即从权威策略源重读 provider status、exact allowlist/model-context、
+sensitivity、external-file opt-in 和 policy version。任一项漂移、撤权或不可判定时 fail closed，
+当次及后续 provider call 字节数必须为 0。
+
+v1 没有可信的逐消息 content provenance，history 也可能含上轮客户文件摘录，因此**所有当前
+user/history prompt payload 一律按 `customer_file` 处理**。`approved_external` 主模型只有同时命中
+exact provider/model-context allowlist 且当前用户对外部文件处理的 opt-in 仍有效时才能收到它们；
+`private` Provider 不要求该 external-file opt-in，但仍需通过身份、模型、目的和 sensitivity 门禁。
+legacy/unknown history 不得降级为普通对话；撤销 opt-in 后的下一次及全部后续外部调用为 0。
+只有未来逐消息 provenance 能由服务端可验证地封存并经过独立迁移后，才可按消息细分。
 
 `read_document` 不能因为名字是“读文件”就被视为纯本地操作。首期直接拆边界：txt/docx/xlsx/文字 PDF 走本地抽取；图片或扫描 PDF 只返回 `requires_vision`，不会隐式外发。模型需要显式调用独立的视觉能力；像素到 Vision 与 Vision 输出到主模型必须分别命中 `egress_edges[]`，即使两者使用同一供应商也不能把一次授权传递到下一跳。
 
-Capability 审计同样遵循最小化：只记录 actor、capability、参数键/集合长度、Artifact ID 与状态。正常、策略拒绝和 handler 异常都不能把 raw args/results、单元格、整行报价、SQL、文件正文、URL 或凭据复制进日志。MVP 不记录参数值 hash；跨事件只关联服务端随机 ID 或下面统一 Envelope 的 fingerprint，不能对低熵 PN/客户名做可枚举 SHA-256/HMAC correlation token。
+Capability 审计同样遵循最小化：只记录 actor、capability、由 schema 推导的参数键/集合长度、
+已经权限校验的 Artifact ID 与状态。SSE、持久化 ChatMessage 和 trace 也只能使用这一最小元数据
+投影；不得返回或保存 raw args/results/values、单元格、整行报价、SQL、文件正文、URL 或凭据。
+正常、策略拒绝和 handler 异常走同一投影器，不得在 exception/debug 路径回退到原始对象。MVP 不记录
+参数值 hash；跨事件只关联服务端随机 ID 或下面统一 Envelope 的 fingerprint，不能对低熵
+PN/客户名做可枚举 SHA-256/HMAC correlation token。
+
+Provider 出境与遥测必须覆盖以下威胁闭环：
+
+| 威胁 | 失效后果 | 必需控制 |
+|---|---|---|
+| 只门禁 tool result，主模型先发 prompt | system/user/history 在工具前已出境 | API 预检 + 每次 provider call 复检，未授权时零网络调用 |
+| 把 legacy history 当普通文本 | 上轮文件摘录被发往外部模型 | v1 全量 user/history=`customer_file`，外部 Provider 叠加 opt-in |
+| 任务运行中策略漂移/撤权 | 旧快照继续外发 | 调用时读权威策略，不一致当次零字节外发 |
+| 错误/SSE/trace 序列化原始调用对象 | 拒绝路径也泄漏业务内容 | 共享 schema-derived 元数据投影器，raw keys 外的值不落盘不出 SSE |
 
 这里“AI 只读”的准确含义是：**业务事实和源文件只读；Agent 控制面可以写自己的运行记录、审计和不可变派生制品。**
 

@@ -45,11 +45,13 @@ authorization registry 识别并可重新求值。若实现不能保留并逐个
 
 模板分类只允许：
 
-- `business_content`：模板中的示例值、业务文本或数据会复制/派生进入输出；按普通内容来源保存 scope，
+- `business_content`：模板含任意示例值、规则文本、semantic examples、批注、隐藏业务文本或数据，
+  或其内容/派生内容会进入模型、Change Plan、dry-run、Evidence、输出；按普通内容来源保存 scope，
   进入内容 union 和每次访问重授权。
-- `identity_only`：确定性检查证明输出只使用 allowlisted 表头结构/列顺序/安全样式，不复制或派生模板
-  中的业务数据；对输出的业务 access condition 为 TOP、对 contained resource/field union 为 identity
-  empty，但仍保存 template hash、owner、classification/proof version，Task 执行时仍实时授权读取。
+- `identity_only`：模型调用前的本地全量检查证明模板只含 allowlisted Sheet/表头结构、列顺序和安全
+  样式，不含上述任何内容；对输出的业务 access condition 为 TOP、对 contained resource/field union
+  为 identity empty，但仍保存 template hash、owner、classification/proof version，Task 执行时仍实时
+  授权读取。
 - `unclassified`：无法证明上述任一类；不得进入模型、dry-run 或发布。
 
 legacy generated、缺失 scope 或证明版本未知的模板固定 `unclassified`，不能冒充 TOP。
@@ -61,6 +63,10 @@ legacy generated、缺失 scope 或证明版本未知的模板固定 `unclassifi
 1. 目标 Sheet、表头、顺序和展示样式；
 2. 示例行给出的格式与值域；
 3. 可选“规则说明”文本。
+
+第 2/3 类以及任何 semantic example 都使模板成为 `business_content`；需要它们参与规划时必须在进入
+模型前固化完整 source access snapshot，并让后续 Artifact 逐来源重授权。只有第 1 类且通过严格
+allowlist/hidden-content 扫描的模板才可能是 `identity_only`。
 
 这些都是模型提出映射的输入，不是可执行代码。自然语言规则必须被翻译成下面的 Typed Change Plan，
 再通过服务端 schema、预算和 allowlist。模板不能提供 Python、SQL、Excel 公式、宏、任意正则、路径、
@@ -114,6 +120,7 @@ budgets
 ```text
 validate_artifacts
  -> inspect_structure_locally
+ -> classify_template_scope_locally
  -> build_bounded_model_projection
  -> propose_change_plan
  -> validate_change_plan
@@ -146,6 +153,8 @@ Human Interrupt 必须先展示：目标列、源列映射、类型、操作、�
 
 不向模型发送公式、批注、隐藏内容、外链、绝对路径、Artifact owner、业务 Token 或整个工作簿。用户
 说明和单元格文本都放在 untrusted-data 区域；模型调用不提供工具，只能返回严格 JSON Change Plan。
+若投影包含模板示例值、规则文本、semantic examples 或其派生摘要，该模板在投影构建前必须已分类为
+`business_content`；不能以“只发给模型、不写入输出”为由使用 `identity_only`。
 
 `semantic_rewrite` 用于描述清洗等无法由确定性操作表达的列。它按有界批次接收 `row_ref/source_text/
 target_constraints/examples`，只能返回 `row_ref/proposed_text/confidence/reason_code`。服务端验证引用、
@@ -216,10 +225,12 @@ resource/field union 由完成后的 workbook/report containment scan 按实际�
 且所有 source owner/row subject/predicate conditions 分别成立。任一 source 撤权、条件失败、predicate
 未知/不兼容、containment 无法分类时，整个 Set 和相关成员 fail closed。
 
-`identity_only` 模板仍保留 provenance snapshot，但只要 proof version 仍有效且 output containment 未出现
-模板业务数据，它对输出条件贡献 TOP/empty identity；一旦样本值、隐藏业务文本或派生内容进入输出，
-必须重新分类为普通 contributing source。集合聚合 scope 和每个成员都不得漏掉实际内容来源。用户后续
-可以把输出文件手工送入现有导入预检查，但本工作流不直接调用导入或写业务库。
+`identity_only` 模板仍保留 provenance snapshot，且只有 pre-model classifier proof version 有效时才对
+输出条件贡献 TOP/empty identity。任何示例值、规则文本、semantic examples 或其派生内容进入模型、
+Change Plan、dry-run、Evidence 或输出，都必须在该边界之前分类为普通 contributing source。完成后的
+containment scan 只能发现漏标并 fail closed，不能反向证明或升级 `identity_only`。集合聚合 scope 和每个
+成员都不得漏掉实际内容来源。用户后续可以把输出文件手工送入现有导入预检查，但本工作流不直接调用
+导入或写业务库。
 
 Evidence 保存在 completed Step 中，只保留 Artifact refs、hash、版本、计数、风险/异常摘要、模型 usage
 和稳定错误码，不重复保存整表内容；完整性统一使用总纲 `integrity-envelope/v1`
@@ -243,6 +254,8 @@ Evidence 保存在 completed Step 中，只保留 Artifact refs、hash、版本�
   same-owner 和 predicate version/domain 边界均有矩阵测试；无 intersection/narrowest fallback。
 - 模板 `identity_only/business_content/unclassified` 分类、proof version、隐藏/示例值渗入输出和 containment
   漂移均 fail closed；identity-only 只有证明成立时才贡献 TOP/empty identity。
+- 规则文本、semantic examples、示例值进入模型/Change Plan/dry-run/Evidence 但输出未包含的样本仍必须
+  是 `business_content`；post-output containment 不能将其洗白为 identity-only。
 - 1/100/5,000 semantic cell、100,000 行、2,000,000 cell 和并发任务的时延/内存/磁盘压测。
 - 工作流前后业务表和源文件 hash 不变；迁移、全量 pytest、前端测试/build、真实浏览器下载/E2E 通过。
 

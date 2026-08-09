@@ -38,6 +38,8 @@
 8. 采购和销售两侧必须各自证明 `coverage_through`、成功 batch、原文件 SHA-256 与 completeness；
    已知陈旧/部分覆盖输出 `need_info`，技术查询/lineage/hash 错误则 Task 失败，二者不能混用。
 9. `project_id` 只证明项目身份上下文，不能单独构成某 PN 的具体补库需求。
+10. RPL-100 一旦在完整商业覆盖上命中“采购=0 且销售=0”，`recommend_reject` 立即锁定；多 active
+    池等后续异常只能作为解释上下文。只有 RPL-100 通过后，多 active 池才输出 `need_info`。
 
 ## 3. Typed Application Input
 
@@ -142,7 +144,7 @@ flowchart TD
   Q --> D["evaluate_hard_gate"]
   D -->|"采购=0 且销售=0"| E["collect_non_overriding_context"]
   D -->|"门槛通过"| F["collect_full_supporting_context"]
-  E --> G["evaluate_versioned_rules"]
+  E --> H["seal_evidence_package"]
   F --> G
   G --> H["seal_evidence_package"]
   H --> I["generate_explanation"]
@@ -159,9 +161,10 @@ flowchart TD
   `need_info`，技术错误使 Task 失败。只有两侧都通过才进入硬门槛。
 - `evaluate_hard_gate`：只对已证明完整覆盖的采购/销售计数执行不可覆盖的半年门槛。
 - `collect_non_overriding_context`：硬拒绝分支仍读取 active 池和维保事实，用于解释“为什么
-  这些证据不能覆盖硬规则”，但不得改变结论。
+  这些证据不能覆盖硬规则”，但不得进入后续规则求值或改变已锁定结论；多 active 池只记 caveat。
 - `collect_full_supporting_context`：读取库存、安全库存、active 池和分离的维保使用证据。
-- `evaluate_versioned_rules`：执行高频、稳定消耗、库存和具体业务证据规则。
+- `evaluate_versioned_rules`：只在 RPL-100 通过分支执行高频、active 池完整性、稳定消耗、库存和具体
+  业务证据规则。
 - `seal_evidence_package`：固化 Evidence、规则版本和统一 `integrity-envelope/v1`。
 - `generate_explanation`：可降级的 LLM 解释节点，不允许工具调用。
 - `human_interrupt/finalize`：复用 #226，不产生业务审批动作。
@@ -306,8 +309,12 @@ pool_source
 member_count
 ```
 
-不读取池价格政策。若脏数据导致同一 PN 同时位于多个 active 池，输出 `need_info`，不能像普通
-展示查询一样静默选择某个 group_id。
+不读取池价格政策。若脏数据导致同一 PN 同时位于多个 active 池，不能像普通展示查询一样静默选择
+某个 group_id；处理严格服从 RPL-100 优先级：
+
+- 若完整商业覆盖已证明采购=0且销售=0，outcome 仍为不可覆盖的 `recommend_reject`；Evidence 增加
+  `multiple_active_pools` caveat 和全部有界 pool refs，仅用于异常上下文。
+- 只有 RPL-100 已通过时，多 active 池才输出 `need_info`，阻止把任一 pool 当作正向支持。
 
 维保使用分成两套证据，禁止相加：
 
@@ -384,6 +391,10 @@ elif purchase_order_count == 0 and sales_order_count == 0:
     outcome = "recommend_reject"
     overrideable = False
 
+elif multiple_active_pool_memberships:
+    outcome = "need_info"
+    rule = "RPL-210-multiple-active-pools"
+
 elif policy.mode == "shadow":
     outcome = "human_review_required"
     support_class = "unscored"
@@ -424,7 +435,8 @@ in_transit_unknown
 ```
 
 active 池、维保消耗和申请理由即使存在，也必须在 Evidence 中标记为
-`non_overriding_support`，不能改变 `RPL-100`。
+`non_overriding_support`，不能改变 `RPL-100`。硬拒绝分支中的 `multiple_active_pools` 同样只是
+`non_overriding_anomaly`；不得把它升级为 `need_info` 覆盖 `recommend_reject`。
 
 `project_id`、`project_contract_id`、项目名称或“该项目需要”文字只用于确认身份/上下文，永远不能单独
 满足 `RPL-400`。有界事实必须在当前权限下解析为 same-part、有效状态和稳定版本，并证明 PN/数量/
@@ -619,7 +631,9 @@ Human Interrupt resolve 前重新验证 owner、用户状态、权限和 workflo
 
 ### 支持证据与阈值
 
-- archived 池不作为正向证据；多 active 池为 `need_info`。
+- archived 池不作为正向证据；RPL-100 通过后多 active 池为 `need_info`。
+- RPL-100 命中时多 active 池只增加异常 caveat，outcome 仍为不可覆盖的 `recommend_reject`；硬拒绝
+  分支不得进入 `evaluate_versioned_rules`。
 - canonical 与 legacy 维保数据分别展示且不相加。
 - 两套固定查询合同的 distinct count、qty、active month、日期边界与异常计数有独立 PostgreSQL 样本；
   模型不能增加 filter/group 或选择相加。

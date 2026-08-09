@@ -68,13 +68,18 @@ running -> paused_recoverable -> running
 running -> waiting_human -> running
 pending | planning | validated | running | paused_recoverable | waiting_human
   -> cancelling -> cancelled
-running -> succeeded | failed
-waiting_human -> failed  (interrupt expired or authorization revoked)
+running -> succeeded
+pending | planning | validated | running | paused_recoverable | waiting_human | cancelling
+  -> failed  (only after sealing real error evidence)
 ```
 
 `paused_recoverable` 只用于有账本证据、可安全恢复但当前不能继续的技术状态；不能用它绕过 budget、
 撤权或业务规则失败。`cancelling` 是协作式中间态，已真实完成的 Step 必须先如实落账。终态
-`succeeded/failed/cancelled` 均不可 resume；重新执行创建带 `parent_task_id` 的新 Task。
+`succeeded/failed/cancelled` 均不可 resume；重新执行创建带 `parent_task_id` 的新 Task。只有 running
+可进入 succeeded；任一非终态进入 failed 前必须在同一受控事务封存真实 error code/cause/phase、
+权限/策略 fingerprint 和可得 Evidence。若 in-flight handler 已完成，先记录 Step completed/output；只有
+真实 handler 失败才记 Step failed。Task failed 不能用于跳过 completed Step 记账，`cancelling -> failed`
+也只适用于取消流程本身有可证明错误。
 
 三个时钟独立持久化，不能用一个模糊的“最长自然时间”互相抵扣：
 
@@ -184,6 +189,7 @@ task.paused_recoverable
 task.resumed
 task.cancelling
 task.cancelled
+task.failed
 task.clock_budget_exceeded
 ```
 
@@ -199,6 +205,8 @@ Event 和访问日志只记录 task/step/interrupt ID、workflow/version、节�
 - Task/Step 计时字段使用 DB clock/整数毫秒；状态事务、elapsed、segment start 与 Event 原子一致；
   open compute crash 按 lease 上界保守累计且重放不重复计时。
 - 正常 pause/resume、7 天过期、取消、终态拒绝、创建新子 Task 全部符合状态矩阵。
+- 每个非终态在封存真实错误 Evidence 后可进入 failed，cancelling failure 亦可；只有 running 可
+  succeeded。crash-after-handler-success 必须先记录 Step completed，Task failed 不得吞掉完成事实。
 - owner-only、共享身份拒绝、跨用户 404；等待期间停用/撤权后不能恢复执行。
 - resolve 幂等与冲突、optimistic lock、双 worker lease、进程重启恢复和 crash-after-result 不重复执行。
 - Graph/Capability/runtime provider fingerprint 漂移时 fail closed。

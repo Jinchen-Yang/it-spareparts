@@ -75,7 +75,8 @@ flowchart LR
 - Quarantine tree → scanner/reviewer：所有文件的原始字节、规范化路径和解析视图；不得按
   `.gitignore`、入口引用或扩展名跳过未引用文件。
 - Candidate → evaluator：Skill Markdown、静态资产或脚本，以及合成/脱敏恶意输入；无生产数据。
-- Approved registry → production：内容寻址 bundle、Admission Manifest 和签名；生产不连接源仓库。
+- Approved registry → production：内容寻址 bundle、candidate、两份独立 signed approval、
+  ledger checkpoint、final admission 和 release signature；生产不连接源仓库。
 - Skill → planner：有界规划/格式内容；始终位于系统/开发者策略之后，并标记为第三方内容。
 - Planner → Capability Gateway：模型仍只能看到当前用户与 Provider 获准的既有 Capability 交集。
 - Script → sandbox：只读输入和空白临时输出目录；无网络、无 secrets、无宿主挂载。
@@ -114,16 +115,25 @@ declarative Skill 可以描述“优先查询库存，再生成表格”之类�
 “放进 Docker 容器”不构成充分隔离。可执行通道必须使用 gVisor、Kata、Firecracker 或经独立审核
 证明等效的强化沙箱，同时叠加 rootless/container/cgroup/LSM 控制。
 
-## 5. Admission Manifest
+## 5. Candidate、实名 Review 签名与 Final Admission
 
-每个候选先生成不含任何签名字段的 `skill-admission/v1` **unsigned payload**：
+提交者和审核者身份都不能由候选 JSON 自填。准入固定为三层不可变对象：candidate ->
+两份独立 reviewer approval -> final admission；每层使用不同 domain separator，所有签名
+detached，后层只绑定前层已计算的 hash。权威 candidate/review ledger 均 append-only，
+发布签名者不信任提交者随包挑选的审核对象。
+
+### 5.1 Candidate canonical payload
+
+扫描/评测完成后先生成 `skill-candidate/v1`。它不含 `reviewer/reviewers/review_status/decision/approval`，
+也不含任何 admission `status` 字段：
 
 ```json
 {
-  "schema_version": "skill-admission/v1",
+  "schema_version": "skill-candidate/v1",
   "skill_id": "publisher/name",
   "skill_version": "project-owned immutable version",
   "skill_class": "declarative_v1",
+  "candidate_submitter_subject": "authenticated subject",
   "source": {
     "canonical_repository": "https://github.com/OWNER/REPO",
     "commit_sha": "40-hex commit",
@@ -147,75 +157,143 @@ declarative Skill 可以描述“优先查询库存，再生成表格”之类�
   "license": {
     "spdx_id": "SPDX identifier or NOASSERTION",
     "license_path": "path inside exact tree",
-    "license_sha256": "sha256",
-    "review_status": "approved"
+    "license_sha256": "sha256"
   },
   "sbom": {
     "format": "SPDX-JSON or CycloneDX-JSON",
     "sha256": "sha256"
   },
-  "scans": [],
-  "adversarial_eval": {
-    "corpus_version": "version",
-    "report_sha256": "sha256",
-    "status": "passed"
-  },
-  "reviewers": [
-    {"subject": "reviewer-1", "role": "content_domain", "decision": "approved"},
-    {"subject": "reviewer-2", "role": "security_release", "decision": "approved"}
+  "evidence_refs": [
+    {"kind": "recursive_scan", "sha256": "report sha256"},
+    {"kind": "adversarial_eval", "sha256": "report sha256"}
   ],
-  "policy_version": "skill-admission-policy/v1",
-  "status": "approved"
+  "candidate_policy_version": "skill-candidate-policy/v1"
 }
 ```
 
-该对象用 RFC 8785 JSON Canonicalization Scheme 生成唯一 UTF-8 字节串；拒绝重复 key、NaN/Infinity、
-超出协议数值域、非规范 Unicode 或解析后再序列化不一致。`payload_sha256 = SHA-256(RFC8785(payload))`。
-签名不放进 payload，也不参与自身 hash，避免循环定义。随后生成独立文件
-`skill-admission-signature/v1`：
+RFC 8785 生成唯一 UTF-8 bytes；拒绝 duplicate key、NaN/Infinity、数值/Unicode 非规范或 round-trip
+不一致。`candidate_sha256 = SHA-256("it-spareparts.skill-candidate/v1\0" + RFC8785(candidate))`。
+Candidate 只是待审内容身份，不是“已通过”；scanner/eval 自报字段不能把它变成 admission。
+
+`candidate_submitter_subject` 必须由准入服务从当前 authenticated `sys_user` 或已验签的
+ingestion record 注入，API 不接受客户端提供该值。服务在同一事务内计算 hash 并向
+append-only candidate ledger 写入 `candidate_sha256/bundle_sha256/submitter_subject/ingestion_ref/
+created_at`；禁止 UPDATE/DELETE。后续每个 Reviewer 和 final signer 都从该 ledger 取提交者，
+并比对 candidate payload；不一致、ledger 缺失或不可用全部 fail closed。
+
+来源约束保持不变：official repository、exact commit/tree/subtree、完整 subtree inventory、每文件
+SHA-256、per-skill License、SBOM 和全部 Evidence hash 缺一即不能进入 Review。内部 fork 同时绑定
+upstream/fork exact commit 与完整 diff。Candidate 生成后任何字节/evidence 变化都必须产生新 hash。
+
+### 5.2 每位 Reviewer 的独立 signed approval
+
+每位实名 Reviewer 分别生成不含 signature 的 `skill-review-approval/v1`：
 
 ```json
 {
-  "schema_version": "skill-admission-signature/v1",
-  "payload_schema_version": "skill-admission/v1",
-  "canonicalization": "RFC8785",
-  "payload_sha256": "sha256 of canonical unsigned payload",
-  "algorithm": "Ed25519",
-  "key_id": "project skill release key id",
-  "signature_b64url": "detached signature"
+  "schema_version": "skill-review-approval/v1",
+  "candidate_sha256": "exact candidate sha256",
+  "bundle_sha256": "exact bundle sha256",
+  "reviewer_subject": "authenticated reviewer subject",
+  "role": "content_domain",
+  "decision": "approve",
+  "evidence_refs": [
+    {"kind": "recursive_scan", "sha256": "exact reviewed evidence sha256"}
+  ],
+  "review_policy_version": "skill-review-policy/v1",
+  "reviewed_at": "RFC3339 timestamp"
 }
 ```
 
-签名输入固定为 domain separator `it-spareparts.skill-admission/v1` 加 RFC 8785 payload 字节；验签前先
-重算 payload SHA-256，再按 `key_id` 选择本地 trust root 公钥。不得使用 HMAC 共享密钥冒充跨环境发布
-签名，也不得从 Manifest 内的 URL/JWKS 动态取得验签 key。
+`approval_sha256` 对 RFC 8785 payload 和 domain
+`it-spareparts.skill-review-approval/v1` 计算。Reviewer 使用分配给自己的独立 Ed25519 key 生成 detached
+signature envelope，包含 payload schema/hash、algorithm、`reviewer_key_id` 和 signature。服务端从本地
+`skill-reviewer-trust-roots/v1` 解析 key -> 实名 subject + allowlisted role；payload 中的 subject/role 只有
+与 trust-root 映射完全一致才有效，不能靠自填获得身份。
 
-约束：
+最终准入必须有一份 `content_domain` 和一份 `security_release` 的 `decision=approve`，并满足：
 
-- `canonical_repository` 必须是项目/作者的官方仓库；fork、镜像和聚合下载站默认拒绝。确需内部
-  fork 时，同时记录 upstream exact commit、fork exact commit 与完整 diff，并视为新的供应源。
-- branch、tag 和 release 名只作人类显示，不能替代 commit/tree 身份。
-- Git tree OID 与每文件 SHA-256 同时保存；Git 对象 hash 不能替代内容 SHA-256。
-- 文件清单覆盖整个 Skill subtree，包括 dotfile、未引用资产和 License；不允许扫描后再加文件。
-- 每个 Skill 核验其目录内适用 License；不能假设仓库根 License 自动覆盖所有子目录。
-- License 缺失、`NOASSERTION`、冲突或超出项目法务 allowlist 时阻断发布，不由模型解释兼容性。
-- declarative bundle 也生成文件级 SBOM；脚本 bundle 还必须包含解释器、直接/传递依赖和 base image。
-- 两名 Reviewer 必须是不同实名主体，候选作者不能自批；两人的 decision/evidence refs 进入同一个
-  unsigned payload。只有 policy engine 验证“两人、同 payload、全部门禁通过”后，隔离的 release signer
-  才能产生 detached signature；Reviewer 记录与 release signature 不能相互替代。
-- Manifest、评测报告、SBOM 和签名作为 release Evidence 保留，不复制 Skill 正文进普通日志。
+- 两个不同实名 subject、两个不同 key；同 subject 换 key、同 key 伪装两个 subject 都拒绝。
+- Reviewer 不得等于 candidate submitter、内部变更作者或 release signer；candidate 作者不能自批。
+- 每份 approval 同时绑定 exact candidate SHA-256、bundle SHA-256、role、decision 和其实际查阅的
+  evidence refs/hashes；缺失、未知、内容不匹配或未属于 candidate 的 Evidence 拒绝。
+- unknown/expired/retired/revoked reviewer key、role 不匹配、signature replay 到另一 candidate/bundle、
+  修改 decision/evidence 后复用签名均拒绝。
+- 任一有效 signed rejection 阻断该 candidate；不能删掉拒绝记录后重新拼装 admission。
 
-### 5.1 Trust root、轮换与撤销
+审核提交端点先验签、验 candidate/bundle/Evidence 归属与 reviewer trust-root 映射，再将
+`candidate_sha256/approval_payload_sha256/approval_signature_sha256/reviewer_subject/reviewer_key_id/
+role/decision/evidence_refs_hash/received_at`写入服务端 append-only review ledger；禁止
+UPDATE/DELETE。同一 approval hash 重放幂等返回原 ledger 记录；相同签名对不同 payload、
+同 key/subject/role 的互相冲突 decision 或证据不同一律隔离并告警，不做“最后写入覆盖”。
 
-- production 镜像/配置随发布携带版本化 `skill-trust-roots/v1` 公钥集合与本地 signed revocation list；
-  loader 无 Internet/JWKS/URL fetch，未知 key 默认拒绝。
-- key rotation 采用 overlap：先发布新公钥为 verify-only，再由 signer 切到新 key，观测完成后把旧 key
-  降为历史 verify-only。新 bundle 不得继续使用 retired key；旧 Task 仍保留原 signature Evidence。
-- key 或 signer 疑似泄露时，先全局 kill switch，随紧急配置发布把 key 标记 revoked；该 key 签出的
-  enabled bundle 立即 quarantine，运行中 Task 下一 Planner/Step fail closed。不能仅从 allowlist 删除
-  key 后让失败原因不可审计。
-- bundle/status revocation 与 key revocation 分开；二者都只能由 release/security 身份发布、都记录
-  原因、时间、影响 bundle/Task 和新 trust-policy fingerprint。
+### 5.3 Final admission 与 release signature
+
+Policy engine 先从权威 review ledger 读取并验签该 candidate 的全部 review，确认无 reject
+且有两份独立必需角色的 approval 后，再生成 `skill-admission/v1` final payload：
+
+```json
+{
+  "schema_version": "skill-admission/v1",
+  "candidate_sha256": "exact candidate sha256",
+  "bundle_sha256": "exact bundle sha256",
+  "candidate_ledger_record_sha256": "authoritative candidate record sha256",
+  "review_ledger_checkpoint": {
+    "candidate_sequence": 17,
+    "checkpoint_sha256": "authoritative review ledger checkpoint sha256"
+  },
+  "verified_approvals": [
+    {
+      "role": "content_domain",
+      "approval_payload_sha256": "sha256",
+      "approval_signature_sha256": "sha256",
+      "reviewer_key_id": "key id"
+    },
+    {
+      "role": "security_release",
+      "approval_payload_sha256": "sha256",
+      "approval_signature_sha256": "sha256",
+      "reviewer_key_id": "key id"
+    }
+  ],
+  "admission_policy_version": "skill-admission-policy/v1",
+  "admission_status": "approved"
+}
+```
+
+Bundle 随包携带 exact candidate、两份 approval payload + detached signatures 和 final payload；final 中的
+hash 必须逐字节回指这些对象。但随包对象只是可移交证据，不是审核全集的
+权威来源。隔离的 release signer 必须从 candidate ledger 获取真实 submitter，并从权威 review
+ledger 查询该 `candidate_sha256` 的**全部**已验签 review；任一 reject、两个角色不齐、
+身份/key 不独立、Evidence mismatch、ledger 不可用或 checkpoint 无法封存都 fail closed。
+
+最终化在服务端单个串行化事务内获取 per-candidate lock，将 `review_open -> finalizing`，读取
+完整 review ledger 并封存 sequence/checkpoint，再生成 final payload。并发 review 若先入 ledger 必须
+被纳入；若在关闭后到达则以 `review_closed` 拒绝并记录，不能静默丢弃。签名者重新验证
+candidate/bundle、两名 reviewer trust chain、角色/主体分离、Evidence hash 和 ledger checkpoint 后，
+才用独立 release key 对
+`it-spareparts.skill-admission/v1 + RFC8785(final_payload)` 生成 detached
+`skill-admission-signature/v1`。Reviewer key 不能签 final，release key 不能代替 Reviewer approval。
+
+Candidate 不引用 approval；approval 不引用 final/release signature；final 只引用已存在 approval hash；
+release signature 不进入 final payload，因此不存在循环 hash 或 self-signature。任何层出现自引用、hash
+cycle、对象缺失或顺序依赖不确定都 fail closed。
+
+### 5.4 Trust root、轮换与撤销
+
+- production 随发布携带分离的 `skill-reviewer-trust-roots/v1`、`skill-release-trust-roots/v1` 与 signed
+  revocation list；loader 无 Internet/JWKS/URL fetch，未知 key 默认拒绝。
+- Reviewer trust root 固定 key->subject->roles，release root 只认 release signer；两个 key 集不能重叠。
+- rotation 采用 overlap：先加入新公钥 verify-only，再切签发，旧 key 降为历史 verify-only，最后按
+  policy 退役。新 approval/admission 不得使用 retired key。
+- Reviewer/release key 疑似泄露先触发全局 kill switch，再发布 revoked 状态；由该 key 支撑的 enabled
+  admission 立即 quarantine，运行中 Task 下一 Planner/Step fail closed，且保留受影响链路和原因。
+- bundle/admission revocation 与 key revocation 分开；均由 release/security 身份发布并记录原因、时间、
+  影响 candidate/bundle/Task 和 trust-policy fingerprint。
+- Candidate、approval、final admission、Evidence、SBOM 和全部 detached signatures 作为 release
+  Evidence 保留，不把正文复制进普通日志。
+- candidate/review ledger 必须使用 append-only 存储、最小写身份和防篡改校验；任一 ledger
+  不可用、断链、回滚或与 release bundle 不一致时不得签发或加载。
 
 ## 6. 递归静态扫描
 
@@ -326,8 +404,12 @@ OCI image digest、provenance 和完整 License 文本。
 License 与实际需求一致。第二位 `security_release` Reviewer 检查：完整 tree diff、注入、Capability
 引用、脚本/安装/网络/secret 行为、SBOM、漏洞、沙箱、预算和回滚。
 
-两人必须查看 exact commit 与完整 subtree，不允许只看 README 或 scanner summary。任何文件变化、
-扫描规则变化、依赖/镜像变化或版本升级都会使旧签名失效并重新走两人 Review。
+两人必须查看 exact candidate/commit 与完整 subtree，不允许只看 README 或 scanner summary。
+每人只能用 trust-root 分配给自己角色的独立 key，将 exact candidate/bundle、decision 和实际
+查阅的 Evidence refs/hashes 签成自己的 detached approval，并提交权威 review ledger。
+任何文件、Evidence、扫描规则、依赖/镜像或版本变化都产生新 candidate hash，旧 approval 无效并
+重新走两人 Review。Reviewer 不能审自己提交/编写的候选，也不能同时担任该次
+release signer。
 
 ### 8.2 Declarative Skill 对抗集
 
@@ -390,14 +472,17 @@ process CPU time: 30 seconds
 ### 10.1 发布
 
 - Admission 在隔离 CI/安全工作站完成，网络只用于获取固定 source 和扫描数据库。
-- approved bundle 内容寻址；RFC 8785 unsigned payload、detached Ed25519 signature 和本地 trust-root
-  policy 随应用镜像/发布包进入生产；生产不保留 Git 凭据、signing key 或安装器。
+- approved bundle 内容寻址，并携带 exact candidate、两份 signed approval、权威 ledger
+  checkpoint、final admission 及 release signature；相关 RFC 8785 payload 和分离的 reviewer/release
+  trust-root policy 随应用镜像/发布包进入生产，生产不保留 Git 凭据、signing key 或安装器。
 - `ENABLE_THIRD_PARTY_SKILLS` 默认 false。只有部署清单显式声明的
   `skill_id/version/bundle_sha256` 可加载。
-- 启动时校验 detached signature、RFC 8785 payload hash、trust-root/revocation policy、bundle hash、
-  逐文件 hash、status 和 policy version；
+- 启动时按固定顺序校验 candidate ledger record 与 candidate/bundle/per-file hash，两份 approval
+  payload/signature 与 reviewer trust-root/撤销/角色/Evidence hash，review ledger checkpoint 与“无有效
+  reject”，final payload/hash，最后校验独立 release signature 与 release trust-root；
   任一不符则该 Skill 不可见，应用核心功能继续启动并产生安全告警。
-- Task/Plan 固化 `skill_id/version/bundle_sha256/admission_policy_version`；中途不能静默换版本。
+- Task/Plan 固化 `skill_id/version/bundle_sha256/candidate_sha256/final_admission_sha256/
+  approval_payload_sha256[]/review_ledger_checkpoint/admission_policy_version`；中途不能静默换版本。
 
 ### 10.2 Runtime Registry
 
@@ -433,6 +518,8 @@ Skill ID、未部署版本、hash 漂移、状态变化和 Capability 引用漂�
   来伪造“从未使用”。
 - bundle revocation、signing-key revocation 与 ordinary quarantine 都必须使缓存和下一 Step fail closed；
   key rotation 不能把旧 key 签出的未知新 bundle 继续视为可发布。
+- Reviewer key/release key/candidate 提交身份或 ledger checkpoint 的撤销必须沿完整链定位并
+  quarantine 受影响 bundle；不得只重签 final 来绕过历史 approval/rejection。
 
 ## 12. Audit 与检测
 
@@ -450,14 +537,17 @@ skill.revoked
 skill.runtime_hash_mismatch
 ```
 
-日志只记录 skill/version/bundle/manifest hash、source commit/tree、Reviewer subject、policy/tool/eval
-版本、状态、计数、耗时和稳定错误码。不得记录 Skill 正文、恶意测试正文、生产数据、环境值、
-Provider prompt/response 或 secrets。
+日志只记录 skill/version/candidate/bundle/final hash、source commit/tree、ledger checkpoint、
+Reviewer subject/key/role/decision、approval payload/signature hash、Evidence refs hash、policy/tool/eval 版本、
+状态、计数、耗时和稳定错误码。不得记录 Skill 正文、恶意测试正文、生产数据、环境值、
+Provider prompt/response 或 secrets。Candidate/review ledger 是独立权威记录，不能用这份普通
+审计日志替代。
 
 告警：
 
 - 生产出现网络安装/下载、未知 Skill 或 hash mismatch；
-- 非 release 身份尝试批准/恢复、Reviewer 重复或签名不匹配；
+- 非 release 身份尝试批准/恢复、Reviewer 重复、自批、unknown/revoked key、签名/Evidence
+  不匹配、ledger 不可用/回滚，或 final 遗漏已记录 rejection；
 - sandbox 网络/secret/宿主路径探针、syscall 拒绝、OOM、超时或异常输出；
 - 同一 Skill 注入拒绝率、未知 Capability 请求或异常 Plan 深度突增；
 - OSV/镜像新高危、License 变化、source 删除/归档或 admission Evidence 过期。
@@ -475,6 +565,7 @@ Provider prompt/response 或 secrets。
 | SK-007 | 高 Scorecard/零 CVE/高星被误当安全证明 | 恶意逻辑绕过人工审核 | High | 信号与批准分离、两人逐文件 Review、对抗评测 |
 | SK-008 | License 缺失或 vendored 依赖未披露 | 法务与发布风险 | Medium | per-skill License、完整 SBOM、NOASSERTION 阻断 |
 | SK-009 | 已发现恶意 Skill 仍被缓存或在旧 Task 继续运行 | 事件扩大、结论污染 | High | kill switch、hash keyed cache、每 Step 状态复验、可审计回滚 |
+| SK-010 | 候选自报 submitter/reviewer，同一人/key 占两角色，或发布包故意遗漏 rejection | 伪造独立 Review，未通过候选进入生产 | Critical | authenticated candidate ledger、per-reviewer trust root/signature、append-only review ledger、final signer 查询全集 |
 
 最影响风险等级的假设：生产 API 有商业敏感数据；第三方 Markdown 可影响 planner；脚本若开放会处理
 内部输入；#219 在任何第三方 Skill 启用前已完成并保持 fail closed。若任一假设变化，必须重新审查
@@ -487,11 +578,22 @@ Provider prompt/response 或 secrets。
 - exact commit/tree/subtree 与每文件 SHA-256 完整；branch/tag 漂移不改变已准入 bundle。
 - RFC 8785 canonical payload 的重复 key、数值/Unicode 边界、字段重排、空白差异和 tamper fixture 有
   确定结果；signature 是 detached，不存在自引用 hash。
-- 错 key/algorithm/domain、未知/retired/revoked key、payload/bundle hash 漂移全部拒绝；trust-root overlap
+- 客户端 candidate 创建请求自报 submitter/reviewer/status/decision 字段被拒绝；submitter 由 authenticated
+  sys_user/signed ingestion record 注入并与 append-only candidate ledger 一致，伪造、缺失、回滚或
+  ledger 不可用全部 fail closed。
+- 每份 approval 的错 candidate/bundle/role/decision/Evidence hash、错 key/algorithm/domain、未知/
+  retired/revoked key、payload/bundle hash 漂移全部拒绝；trust-root overlap
   rotation 和紧急 revocation 会隔离正确 bundle 集合且保留原因。
 - dotfile、未引用文件、大小写/NFC 冲突、symlink、submodule、路径逃逸和扫描后加文件全部拒绝。
-- License 路径/hash/SPDX、SBOM、Reviewer、scan/eval/tool versions 缺一项即不能 approved。
-- 作者自批、同一 Reviewer 两个角色、签署不同 manifest 或版本升级沿用旧审批均拒绝。
+- License 路径/hash/SPDX、SBOM、两份独立 Reviewer approval、scan/eval/tool versions 缺一项即
+  不能 approved。
+- 作者/提交者自批、Reviewer 兼 release signer、同 subject 换 key、同 key 伪装两 subject、
+  同一 Reviewer 两个角色、签署不同 candidate/bundle 或版本升级沿用旧 approval 均拒绝。
+- review ledger 禁止 UPDATE/DELETE；遗漏 rejection 拼装两份 approve、重放签名到另一候选、
+  并发 approve/reject 提交和 finalization 的竞态全部有确定结果：入 ledger 的 reject 必须阻断，
+  关闭后提交显式 `review_closed`，ledger/checkpoint 不可用时不签发。
+- final admission 必须绑定 candidate ledger record、review ledger checkpoint 与两份已验签 approval；
+  reviewer key 不能签 final，release key 不能代替 approval，任何循环引用/自签名都拒绝。
 - source repo 删除、归档或 tag 重指不会改变本地 approved bundle，但触发调查信号。
 - 固定 HTTPS citation 被列入 `static_reference_urls` 且运行时零 fetch/preview/unfurl；短链、动态 URL、
   内容依赖或“访问链接后执行”全部阻断。
@@ -524,8 +626,9 @@ Provider prompt/response 或 secrets。
 ### 14.5 发布、撤回与审计
 
 - 生产无 install/upload/import Skill endpoint，无 Git/package manager 凭据和在线更新路径。
-- 启动及每次 Planner/Step 前验证 exact bundle、detached signature/trust-root/revocation、状态、权限、
-  Capability 和 policy fingerprint。
+- 启动及每次 Planner/Step 前验证 exact candidate/bundle、candidate/review ledger checkpoint、
+  两份 approval payload/signature/reviewer trust root/Evidence hash、final/release signature/release trust root、
+  revocation、状态、权限、Capability 和 policy fingerprint。
 - kill/quarantine 对新 Plan 立即生效，进行中 Task 下一节点 fail closed，不静默换版本。
 - 回滚只切换到历史 approved immutable bundle；旧 Task/Evidence 保持原版本引用。
 - Admission/runtime/audit 日志不包含测试 payload、Skill 正文、生产数据或 secrets。
