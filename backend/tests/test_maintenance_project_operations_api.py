@@ -1,5 +1,9 @@
 """Stable maintenance-project operating facts through their public API."""
 
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as FutureTimeoutError,
+)
 import hashlib
 import json
 from datetime import UTC, date, datetime
@@ -4426,6 +4430,48 @@ def test_workspace_details_are_independently_paged_without_truncating_totals_or_
         },
     )
     assert all_rows_queries == one_row_queries
+
+
+def test_workbook_read_transaction_does_not_block_followup_workspace_read(db):
+    project = _project(db, project_id="project-workspace-read-lock-free")
+    client = _client(db, username="workspace_read_lock_free_admin")
+    path = f"/api/maintenance/projects/stable/{project.project_id}/workspace"
+
+    # The workbook adapter deliberately keeps this caller-owned transaction open.
+    # A read-only snapshot must not retain a project-row lock that stalls another
+    # user's workspace read until this transaction happens to end.
+    snapshot = operations_service.project_workbook_workspace(
+        db,
+        project_id=project.project_id,
+        as_of=date(2026, 8, 10),
+        user_ctx=UserContext(
+            user_id="workspace-read-lock-free",
+            role="admin",
+            permissions=None,
+        ),
+    )
+    assert snapshot is not None
+
+    timed_out = False
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            client.get,
+            path,
+            params={"as_of": "2026-08-10"},
+        )
+        try:
+            response = future.result(timeout=1)
+        except FutureTimeoutError:
+            timed_out = True
+            # Always release the old implementation's lock so a red test fails
+            # promptly instead of hanging the whole suite.
+            db.rollback()
+            response = future.result(timeout=2)
+        finally:
+            db.rollback()
+
+    assert not timed_out, "只读工作簿事务持有了项目行锁，阻塞了后续只读请求"
+    assert response.status_code == 200, response.text
 
 
 def test_cost_gap_list_query_count_does_not_scale_with_page_size(db):

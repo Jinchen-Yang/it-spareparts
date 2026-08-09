@@ -484,6 +484,14 @@ def test_late_stale_return_event_is_consumed_without_rolling_back_projection(db)
     )
     db.add(stale_event)
     db.commit()
+    assert (
+        bad_return_service.consume_pending_return_events(
+            db,
+            project_id=project.project_id,
+        )
+        == 1
+    )
+    db.commit()
 
     directory = client.post(
         "/api/maintenance/return-obligations/search",
@@ -568,6 +576,14 @@ def test_stale_creation_cannot_resurrect_empty_newer_void_projection(db):
     )
     db.add(void_event)
     db.commit()
+    assert (
+        bad_return_service.consume_pending_return_events(
+            db,
+            project_id=project.project_id,
+        )
+        == 1
+    )
+    db.commit()
 
     empty = client.post(
         "/api/maintenance/return-obligations/search",
@@ -587,6 +603,14 @@ def test_stale_creation_cannot_resurrect_empty_newer_void_projection(db):
         payload=payload,
     )
     db.add(stale_event)
+    db.commit()
+    assert (
+        bad_return_service.consume_pending_return_events(
+            db,
+            project_id=project.project_id,
+        )
+        == 1
+    )
     db.commit()
     still_empty = client.post(
         "/api/maintenance/return-obligations/search",
@@ -684,7 +708,9 @@ def test_confirmed_site_issue_void_fails_closed_after_return_registration(db):
     assert rate["registered_quantity"] == "1.000"
 
 
-def test_workspace_rate_synchronously_consumes_pending_project_event(db):
+def test_workspace_rate_is_read_only_and_does_not_consume_pending_project_event(
+    db,
+):
     client = _client(db, username="bad_return_pending_projection_admin")
     confirmed, obligation = _one_required_obligation(
         db,
@@ -713,13 +739,57 @@ def test_workspace_rate_synchronously_consumes_pending_project_event(db):
         params={"as_of": "2026-08-09"},
     )
     assert workspace.status_code == 200, workspace.text
-    assert workspace.json()["return_rate"]["status"] == "no_return_required"
-    assert workspace.json()["return_rate"]["required_quantity"] == "0.000"
+    assert workspace.json()["return_rate"]["status"] == "available"
+    assert workspace.json()["return_rate"]["required_quantity"] == "2.000"
     db.expire_all()
     projected = db.get(MaintenanceSiteIssueReturnEvent, pending_event.event_id)
-    assert projected.downstream_reference.startswith("maintenance-return-obligations:")
-    assert projected.consumed_at is not None
-    assert db.get(MaintenanceReturnObligation, obligation.obligation_id).is_active is False
+    assert projected.downstream_reference is None
+    assert projected.consumed_at is None
+    assert (
+        db.get(MaintenanceReturnObligation, obligation.obligation_id).is_active is True
+    )
+
+
+def test_obligation_search_is_read_only_and_does_not_consume_pending_project_event(
+    db,
+):
+    client = _client(db, username="bad_return_pending_search_admin")
+    confirmed, obligation = _one_required_obligation(
+        db,
+        client,
+        project_id="proj-return-pending-search",
+        quantity="2",
+        suffix="pending-search",
+    )
+    source_event = db.query(MaintenanceSiteIssueReturnEvent).filter_by(
+        issue_id=confirmed["issue_id"],
+        event_type="return_obligation_created",
+    ).one()
+    pending_event = MaintenanceSiteIssueReturnEvent(
+        event_id="00000000-0000-0000-0000-000000000998",
+        project_id=obligation.project_id,
+        issue_id=confirmed["issue_id"],
+        event_type="return_obligation_voided",
+        issue_version=confirmed["version"] + 1,
+        payload=source_event.payload,
+    )
+    db.add(pending_event)
+    db.commit()
+
+    directory = client.post(
+        "/api/maintenance/return-obligations/search",
+        json={"project_id": obligation.project_id, "page": 1, "page_size": 20},
+    )
+    assert directory.status_code == 200, directory.text
+    assert directory.json()["total"] == 1
+    assert directory.json()["return_rate"]["required_quantity"] == "2.000"
+    db.expire_all()
+    untouched = db.get(MaintenanceSiteIssueReturnEvent, pending_event.event_id)
+    assert untouched.downstream_reference is None
+    assert untouched.consumed_at is None
+    assert (
+        db.get(MaintenanceReturnObligation, obligation.obligation_id).is_active is True
+    )
 
 
 def test_admin_resolves_pending_category_by_linking_standard_category_only(db):

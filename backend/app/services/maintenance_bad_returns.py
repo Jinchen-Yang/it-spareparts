@@ -659,19 +659,9 @@ def return_rates_for_projects(
     ids = list(dict.fromkeys(project_ids))
     if not ids:
         return {}
-    # Rates are authoritative operational reads.  Wait for and consume every
-    # pending source event instead of returning a transiently stale percentage.
-    # The same project rows serialize site-issue and return-document writes, so
-    # no new source/return fact can slip in between draining and aggregation.
-    list(
-        db.scalars(
-            select(MaintenanceProject)
-            .where(MaintenanceProject.project_id.in_(ids))
-            .order_by(MaintenanceProject.project_id)
-            .with_for_update()
-        )
-    )
-    consume_pending_return_events(db, project_ids=ids)
+    # This projection is used by workspaces, cards, exports, and rate endpoints.
+    # Keep it strictly read-only: source-event projection belongs to the
+    # site-issue/bad-return write transaction, never to a dashboard read.
     obligation_facts: dict[str, dict[str, Decimal | int]] = defaultdict(
         lambda: {
             "required_quantity": Decimal("0"),
@@ -828,14 +818,8 @@ def search_return_obligations(
     page: int,
     page_size: int,
 ) -> dict | None:
-    project = db.scalar(
-        select(MaintenanceProject)
-        .where(MaintenanceProject.project_id == project_id)
-        .with_for_update()
-    )
-    if project is None:
+    if db.get(MaintenanceProject, project_id) is None:
         return None
-    consume_pending_return_events(db, project_id=project_id)
     filters = [MaintenanceReturnObligation.project_id == project_id]
     if active_only:
         filters.append(MaintenanceReturnObligation.is_active.is_(True))
