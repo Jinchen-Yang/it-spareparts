@@ -1407,6 +1407,27 @@ def patch_site_issue(
         if site_location is not None
         else issue.site_location
     )
+    old_line_signature = [
+        (line.delivery_line_id, _qty(Decimal(line.quantity))) for line in old_lines
+    ]
+    candidate_line_signature = [
+        (line.delivery_line_id, _qty(Decimal(line.quantity)))
+        for line in replacement_lines
+    ]
+    line_inputs_changed = candidate_line_signature != old_line_signature
+    date_changed = candidate_issue_date != issue.issue_date
+    metadata_changed = (
+        candidate_receiver != issue.receiver
+        or candidate_issued_by != issue.issued_by
+        or candidate_location != issue.site_location
+    )
+    if not (line_inputs_changed or date_changed or metadata_changed):
+        raise MaintenanceOperationError("现场领用业务内容没有变化")
+    if normalized_lines is not None and not line_inputs_changed:
+        # A client may resend the visible lines while changing only receiver or
+        # location. Keep the original server-owned line identities and frozen
+        # cost evidence instead of manufacturing replacement lines.
+        replacement_lines = old_lines
     before = site_issue_dict(issue, old_lines)
 
     event: MaintenanceSiteIssueReturnEvent | None = None
@@ -1428,12 +1449,13 @@ def patch_site_issue(
         )
         if blockers:
             raise MaintenanceOperationConflict("；".join(blockers))
-        maintenance_consumption_cost.resolve_lines(
-            db,
-            lines=[(candidate_issue_date, line) for line in replacement_lines],
-        )
+        if line_inputs_changed or date_changed:
+            maintenance_consumption_cost.resolve_lines(
+                db,
+                lines=[(candidate_issue_date, line) for line in replacement_lines],
+            )
 
-    if normalized_lines is not None:
+    if normalized_lines is not None and line_inputs_changed:
         for old_line in old_lines:
             db.delete(old_line)
         db.flush()

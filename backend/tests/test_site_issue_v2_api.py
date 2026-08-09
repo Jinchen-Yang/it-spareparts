@@ -737,6 +737,102 @@ def test_draft_patch_replaces_lines_with_server_ids_and_search_is_post_only(db):
     assert client_supplied_identity.status_code == 422
 
 
+def test_metadata_correction_keeps_line_identity_and_frozen_cost_evidence(db):
+    project = _project(db, project_id="project-site-v2-frozen-metadata")
+    part = DimPart(pn_std="PN-SYNTH-FROZEN-METADATA")
+    db.add(part)
+    db.flush()
+    purchase = _purchase_evidence(db, part=part)
+    delivery = MaintenanceSiteIssueDeliverySource(
+        delivery_line_id="synthetic-delivery-line-frozen-metadata",
+        adapter_key="synthetic_delivery_v1",
+        project_id=project.project_id,
+        source_order_id="synthetic-order-frozen-metadata",
+        source_line_id="synthetic-line-frozen-metadata",
+        delivery_no="SYNTH-FROZEN-METADATA",
+        delivery_date=date(2026, 8, 8),
+        part_id=part.id,
+        pn=part.pn_std,
+        delivered_quantity="5",
+        linked_purchase_line_id=purchase.id,
+        mapping_state="ready",
+        mapping_version="synthetic-delivery-map-v1",
+    )
+    db.add(delivery)
+    db.commit()
+    client = _client(db, username="site_issue_v2_frozen_metadata_admin")
+    draft = _create_draft(
+        client,
+        project_id=project.project_id,
+        delivery_line_id=delivery.delivery_line_id,
+        quantity="1",
+        key="synthetic-site-issue-create-frozen-metadata",
+    )
+    confirmed_response = client.post(
+        f"/api/maintenance/site-issues/{draft['issue_id']}/confirm",
+        json={
+            "project_id": project.project_id,
+            "version": draft["version"],
+            "idempotency_key": "synthetic-site-issue-confirm-frozen-metadata",
+            "reason": "冻结初次确认成本证据",
+        },
+    )
+    assert confirmed_response.status_code == 200, confirmed_response.text
+    confirmed = confirmed_response.json()
+    frozen_line = confirmed["lines"][0]
+    assert frozen_line["unit_cost_ex_tax"] == "20.00"
+
+    db.expire_all()
+    purchase_row = db.get(FPurchaseLine, purchase.id)
+    assert purchase_row is not None
+    purchase_row.unit_price = "99"
+    db.commit()
+
+    corrected_response = client.patch(
+        f"/api/maintenance/site-issues/{draft['issue_id']}",
+        json={
+            "project_id": project.project_id,
+            "version": confirmed["version"],
+            "idempotency_key": "synthetic-site-issue-correct-frozen-metadata",
+            "receiver": "更正后的合成接收人",
+            "lines": [
+                {
+                    "delivery_line_id": delivery.delivery_line_id,
+                    "quantity": "1",
+                }
+            ],
+            "reason": "仅更正接收人，不改变成本输入",
+        },
+    )
+    assert corrected_response.status_code == 200, corrected_response.text
+    corrected = corrected_response.json()
+    corrected_line = corrected["lines"][0]
+    assert corrected_line["issue_line_id"] == frozen_line["issue_line_id"]
+    assert corrected_line["unit_cost_ex_tax"] == "20.00"
+    assert corrected_line["reference_samples"] == frozen_line["reference_samples"]
+
+    no_change_key = "synthetic-site-issue-correct-no-business-change"
+    no_change = client.patch(
+        f"/api/maintenance/site-issues/{draft['issue_id']}",
+        json={
+            "project_id": project.project_id,
+            "version": corrected["version"],
+            "idempotency_key": no_change_key,
+            "receiver": "更正后的合成接收人",
+            "reason": "相同内容不能制造新更正事实",
+        },
+    )
+    assert no_change.status_code == 400, no_change.text
+    db.expire_all()
+    assert db.get(MaintenanceSiteIssue, draft["issue_id"]).version == corrected["version"]
+    assert (
+        db.query(MaintenanceSiteIssueCommand)
+        .filter_by(idempotency_key=no_change_key)
+        .count()
+        == 0
+    )
+
+
 def test_confirmed_issue_can_be_corrected_and_voided_without_inventory_or_cost_offset(db):
     project = _project(db, project_id="project-site-issue-v2-correct-void")
     part = DimPart(pn_std="PN-SYNTH-CORRECT-VOID")
