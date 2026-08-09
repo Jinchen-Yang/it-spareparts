@@ -406,7 +406,9 @@ class MaintenanceProjectWorkbookAdapter:
                     MaintenanceSiteIssue.project_id == project_id,
                     MaintenanceSiteIssue.issue_date <= self.as_of,
                     MaintenanceSiteIssue.status_mapping_state == "mapped",
-                    MaintenanceSiteIssue.normalized_status == "confirmed",
+                    MaintenanceSiteIssue.normalized_status.in_(
+                        ("confirmed", "corrected")
+                    ),
                 )
                 .scalar_subquery()
                 .label("consumptions"),

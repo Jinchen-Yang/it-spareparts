@@ -6,6 +6,7 @@ interface LocalMaintenancePermissions {
   own_customers_only?: boolean;
   action_maintenance_roundtrip_apply?: boolean;
   action_maintenance_project_manage?: boolean;
+  action_maintenance_site_issue_manage?: boolean;
 }
 
 export interface MaintenanceCapabilities {
@@ -17,6 +18,7 @@ export interface MaintenanceCapabilities {
   canDownloadRoundtrip: boolean;
   canApplyRoundtrip: boolean;
   canManageProject: boolean;
+  canManageSiteIssues: boolean;
 }
 
 function readLocalPermissions(): LocalMaintenancePermissions {
@@ -120,6 +122,11 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
       permissions.page_maintenance === true
       && permissions.data_purchase_cost === true
       && permissions.action_maintenance_project_manage === true
+    ),
+    canManageSiteIssues: isAdmin || (
+      permissions.page_maintenance === true
+      && permissions.data_purchase_cost === true
+      && permissions.action_maintenance_site_issue_manage === true
     ),
   };
 }

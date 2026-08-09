@@ -25,7 +25,10 @@ from app.models.maintenance_project_operations import (
     MaintenanceProjectWorkbookState,
     MaintenanceProjectWorkbookValidation,
     MaintenanceSiteIssue,
+    MaintenanceSiteIssueCommand,
+    MaintenanceSiteIssueDeliverySource,
     MaintenanceSiteIssueLine,
+    MaintenanceSiteIssueReturnEvent,
 )
 from app.models.master_data import (
     Brand,
@@ -80,7 +83,10 @@ __all__ = [
     "MaintenanceProjectWorkbookState",
     "MaintenanceProjectWorkbookValidation",
     "MaintenanceSiteIssue",
+    "MaintenanceSiteIssueCommand",
+    "MaintenanceSiteIssueDeliverySource",
     "MaintenanceSiteIssueLine",
+    "MaintenanceSiteIssueReturnEvent",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",

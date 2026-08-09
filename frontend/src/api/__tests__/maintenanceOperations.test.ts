@@ -14,14 +14,21 @@ vi.mock("../../api", () => ({
 
 import {
   applyMaintenanceProjectWorkbook,
+  confirmSiteIssue,
+  createSiteIssueDraft,
   downloadMaintenanceProjectWorkbook,
   downloadMaintenanceWorkbookValidationErrors,
   getMaintenanceProjectWorkspace,
   listMaintenanceCostGaps,
   listMaintenanceProjectOperations,
+  patchSiteIssue,
+  previewSiteIssue,
   recomputeMaintenanceCostGaps,
+  searchSiteIssueCandidates,
+  searchSiteIssues,
   updateMaintenanceCostGap,
   validateMaintenanceProjectWorkbook,
+  voidSiteIssue,
 } from "../maintenanceOperations";
 
 beforeEach(() => {
@@ -45,6 +52,90 @@ describe("maintenance operations API", () => {
       include_inactive: false,
     });
     expect(get).not.toHaveBeenCalled();
+  });
+
+  it("现场领用候选与单据搜索只通过 POST body，稳定 ID 做 URL 编码", () => {
+    searchSiteIssueCandidates("project/危险", { q: "SN 敏感词", page: 2 });
+    searchSiteIssues({
+      project_id: "project/危险",
+      q: "领用单 敏感词",
+      workflow_statuses: ["draft", "confirmed"],
+    });
+
+    expect(post).toHaveBeenNthCalledWith(
+      1,
+      "/maintenance/projects/stable/project%2F%E5%8D%B1%E9%99%A9/issue-candidates/search",
+      { q: "SN 敏感词", page: 2, page_size: 50 },
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      "/maintenance/site-issues/search",
+      {
+        project_id: "project/危险",
+        q: "领用单 敏感词",
+        workflow_statuses: ["draft", "confirmed"],
+        page: 1,
+        page_size: 20,
+      },
+    );
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("现场领用完整动作使用系统单据 ID，并把版本和幂等键放在 body", () => {
+    createSiteIssueDraft("project/1", {
+      idempotency_key: "draft-command-001",
+      issue_date: "2026-08-09",
+      receiver: "接收人",
+      issued_by: "发出人",
+      site_location: "现场 A",
+      lines: [{ delivery_line_id: "delivery-1", quantity: 2 }],
+      reason: "保存草稿",
+    });
+    patchSiteIssue("issue/1", {
+      project_id: "project/1",
+      version: 1,
+      idempotency_key: "patch-command-001",
+      receiver: "新接收人",
+      reason: "修改草稿",
+    });
+    previewSiteIssue("issue/1", { project_id: "project/1", version: 2 });
+    confirmSiteIssue("issue/1", {
+      project_id: "project/1",
+      version: 2,
+      idempotency_key: "confirm-command-001",
+      reason: "确认领用",
+    });
+    voidSiteIssue("issue/1", {
+      project_id: "project/1",
+      version: 3,
+      idempotency_key: "void-command-001",
+      reason: "作废领用",
+    });
+
+    expect(post).toHaveBeenNthCalledWith(
+      1,
+      "/maintenance/projects/stable/project%2F1/site-issues",
+      expect.objectContaining({ idempotency_key: "draft-command-001" }),
+    );
+    expect(patch).toHaveBeenCalledWith(
+      "/maintenance/site-issues/issue%2F1",
+      expect.objectContaining({ version: 1, idempotency_key: "patch-command-001" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      "/maintenance/site-issues/issue%2F1/preview",
+      { project_id: "project/1", version: 2 },
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      3,
+      "/maintenance/site-issues/issue%2F1/confirm",
+      expect.objectContaining({ version: 2, idempotency_key: "confirm-command-001" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      4,
+      "/maintenance/site-issues/issue%2F1/void",
+      expect.objectContaining({ version: 3, idempotency_key: "void-command-001" }),
+    );
   });
 
   it("无搜索词时保留 GET 目录兼容入口", () => {

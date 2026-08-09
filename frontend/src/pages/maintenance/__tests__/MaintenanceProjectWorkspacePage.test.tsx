@@ -2,8 +2,15 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
-const { getMaintenanceProjectWorkspace, taxBasisState } = vi.hoisted(() => ({
+const {
+  getMaintenanceProjectWorkspace,
+  searchSiteIssueCandidates,
+  searchSiteIssues,
+  taxBasisState,
+} = vi.hoisted(() => ({
   getMaintenanceProjectWorkspace: vi.fn(),
+  searchSiteIssueCandidates: vi.fn(),
+  searchSiteIssues: vi.fn(),
   taxBasisState: { value: "both" as "inc" | "ex" | "both" },
 }));
 
@@ -11,7 +18,12 @@ vi.mock("../../../api/maintenanceOperations", async () => {
   const actual = await vi.importActual<typeof import("../../../api/maintenanceOperations")>(
     "../../../api/maintenanceOperations",
   );
-  return { ...actual, getMaintenanceProjectWorkspace };
+  return {
+    ...actual,
+    getMaintenanceProjectWorkspace,
+    searchSiteIssueCandidates,
+    searchSiteIssues,
+  };
 });
 
 vi.mock("../../../context/TaxBasis", async () => {
@@ -208,6 +220,18 @@ beforeEach(() => {
   localStorage.clear();
   localStorage.setItem("role", "admin");
   getMaintenanceProjectWorkspace.mockResolvedValue({ data: workspace });
+  const adapter = {
+    key: "synthetic_delivery_v1",
+    state: "synthetic_ready",
+    production_ready: false,
+    detail: "真实发货适配器接入前不得用于生产确认",
+  };
+  searchSiteIssueCandidates.mockResolvedValue({
+    data: { adapter, rows: [], total: 0, page: 1, page_size: 50 },
+  });
+  searchSiteIssues.mockResolvedValue({
+    data: { project_id: "project-1", adapter, rows: [], total: 0, page: 1, page_size: 20 },
+  });
 });
 afterEach(() => {
   cleanup();
@@ -280,6 +304,8 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(within(preview).getAllByText("系统生成")).toHaveLength(3);
     expect(screen.getByRole("button", { name: "下载完整四表" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "上传月度更新" })).toBeInTheDocument();
+    expect(screen.getByTestId("site-issue-workflow")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建领用单" })).toBeInTheDocument();
     expect(screen.queryByText(/扇形图|饼图/)).toBeNull();
   });
 
@@ -321,6 +347,7 @@ describe("MaintenanceProjectWorkspacePage", () => {
       own_customers_only: false,
       action_maintenance_project_manage: false,
       action_maintenance_roundtrip_apply: false,
+      action_maintenance_site_issue_manage: false,
     }));
 
     render(
@@ -332,6 +359,7 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(await screen.findByRole("heading", { name: "移动维保项目" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "去人工回填成本" })).toBeNull();
     expect(screen.queryByRole("button", { name: "上传月度更新" })).toBeNull();
+    expect(screen.queryByTestId("site-issue-workflow")).toBeNull();
     expect(screen.getByRole("button", { name: "下载完整四表" })).toBeInTheDocument();
   });
 
