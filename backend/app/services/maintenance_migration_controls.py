@@ -472,7 +472,7 @@ def _project_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
         source: Any, *, identity: str, fields: tuple[str, ...]
     ) -> list[dict[str, Any]]:
         output = [
-            {field: _canonical(row.get(field)) for field in fields if field in row}
+            {field: _canonical(row.get(field)) for field in fields}
             for row in (source or [])
             if isinstance(row, Mapping)
         ]

@@ -77,6 +77,7 @@ def _site_issue_rows(
             "issue_no": issue.issue_no,
             "issue_date": issue.issue_date.isoformat(),
             "pn": line.pn,
+            "sn": getattr(line, "sn", None),
             "quantity": _qty_text(line.quantity),
             "workflow_status": issue.normalized_status,
             "stable_identity": issue.source in {"direct_api", "workbook"},

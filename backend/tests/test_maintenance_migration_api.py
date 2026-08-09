@@ -86,6 +86,28 @@ def _preview_body():
     }
 
 
+def _project_signoffs(preview):
+    plan = preview["plans"][0]
+    return [
+        {
+            "project_id": plan["project_id"],
+            "expected_plan_version": plan["version"],
+            "reason": "逐项核对接口项目候选",
+            "historical_baseline": {
+                "baseline_id": plan["historical_baseline"]["baseline_id"],
+                "expected_version": plan["historical_baseline"]["version"],
+            },
+            "opening_balances": [
+                {
+                    "opening_balance_id": row["opening_balance_id"],
+                    "expected_version": row["version"],
+                }
+                for row in plan["opening_balances"]
+            ],
+        }
+    ]
+
+
 def test_public_api_supports_preview_search_reconcile_and_independent_approval(
     db, monkeypatch
 ):
@@ -111,6 +133,13 @@ def test_public_api_supports_preview_search_reconcile_and_independent_approval(
     read_back = creator.get(f"/api/maintenance/migration-runs/{preview['run_id']}")
     assert read_back.status_code == 200, read_back.text
     assert read_back.json()["run_id"] == preview["run_id"]
+    evidence = creator.get(
+        f"/api/maintenance/migration-runs/{preview['run_id']}"
+        "/projects/migration-api-project/evidence",
+        params={"section": "inventory_movements", "page": 1, "page_size": 1},
+    )
+    assert evidence.status_code == 200, evidence.text
+    assert evidence.json()["items"][0]["document_no"] == "FH-MIGRATION-API"
 
     reconciled_response = creator.post(
         f"/api/maintenance/migration-runs/{preview['run_id']}/reconcile",
@@ -118,6 +147,7 @@ def test_public_api_supports_preview_search_reconcile_and_independent_approval(
             "expected_version": preview["version"],
             "operation_key": "migration-api-reconcile-key",
             "reason": "实名完成成本和库存对账",
+            "project_signoffs": _project_signoffs(preview),
         },
     )
     assert reconciled_response.status_code == 200, reconciled_response.text

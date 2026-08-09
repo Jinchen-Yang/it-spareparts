@@ -3,7 +3,7 @@
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -76,7 +76,7 @@ class MigrationSearchRequest(BaseModel):
     page_size: int = Field(default=20, ge=1, le=100)
 
 
-class MigrationReconcileRequest(BaseModel):
+class MigrationCommandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     expected_version: int = Field(ge=1)
@@ -84,7 +84,39 @@ class MigrationReconcileRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
-class MigrationApproveRequest(MigrationReconcileRequest):
+class HistoricalBaselineSignoffInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    baseline_id: str = Field(min_length=1, max_length=36)
+    expected_version: int = Field(ge=1)
+
+
+class OpeningBalanceSignoffInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    opening_balance_id: str = Field(min_length=1, max_length=36)
+    expected_version: int = Field(ge=1)
+
+
+class ProjectReconcileSignoffInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=36)
+    expected_plan_version: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=1000)
+    historical_baseline: HistoricalBaselineSignoffInput | None = None
+    opening_balances: list[OpeningBalanceSignoffInput] = Field(
+        default_factory=list, max_length=500
+    )
+
+
+class MigrationReconcileRequest(MigrationCommandRequest):
+    project_signoffs: list[ProjectReconcileSignoffInput] = Field(
+        min_length=1, max_length=50
+    )
+
+
+class MigrationApproveRequest(MigrationCommandRequest):
     supplied_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
@@ -185,6 +217,28 @@ def get_migration_run(
         _raise_service_error(exc)
 
 
+@router.get("/{run_id}/projects/{project_id}/evidence", dependencies=_access)
+def get_migration_project_evidence(
+    run_id: str = Path(..., min_length=1, max_length=36),
+    project_id: str = Path(..., min_length=1, max_length=36),
+    section: str = Query(..., min_length=1, max_length=64),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> dict:
+    try:
+        return runs.get_project_evidence(
+            db,
+            run_id=run_id,
+            project_id=project_id,
+            section=section,
+            page=page,
+            page_size=page_size,
+        )
+    except Exception as exc:
+        _raise_service_error(exc)
+
+
 @router.post("/{run_id}/reconcile", dependencies=_access)
 def reconcile_migration_run(
     body: MigrationReconcileRequest,
@@ -201,6 +255,9 @@ def reconcile_migration_run(
             operation_key=body.operation_key,
             reason=body.reason,
             operated_by=operator,
+            project_signoffs=[
+                signoff.model_dump(mode="json") for signoff in body.project_signoffs
+            ],
             warehouse_loader=load_project_inventory_movements,
         )
         db.commit()

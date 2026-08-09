@@ -232,6 +232,9 @@ def upgrade() -> None:
         ),
         sa.Column("blocker_count", sa.Integer(), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False),
+        sa.Column("reconciled_by", sa.String(length=64), nullable=True),
+        sa.Column("reconciled_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("reconciliation_reason", sa.Text(), nullable=True),
         sa.Column("version", sa.Integer(), server_default="1", nullable=False),
         sa.Column(
             "created_at",
@@ -256,6 +259,10 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "blocker_count >= 0 AND version >= 1",
             name="ck_maintenance_project_cutover_counts",
+        ),
+        sa.CheckConstraint(
+            "(status = 'previewed' AND reconciled_by IS NULL AND reconciled_at IS NULL AND reconciliation_reason IS NULL) OR (status IN ('reconciled', 'approved') AND reconciled_by IS NOT NULL AND reconciled_at IS NOT NULL AND char_length(btrim(reconciliation_reason)) > 0)",
+            name="ck_maintenance_project_cutover_reconciliation",
         ),
         sa.CheckConstraint(
             "char_length(source_snapshot_hash) = 64 AND char_length(input_fingerprint) = 64",

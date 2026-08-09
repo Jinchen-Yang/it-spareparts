@@ -204,16 +204,12 @@ def test_unreliable_historical_rows_remain_visible_when_baseline_is_required():
     preview = controls.build_project_preview(payload)
 
     assert preview["cost"]["historical_baseline_ex_tax"] == "100.00"
-    assert preview["evidence"]["historical_site_issues"] == [
-        {
-            "issue_line_id": "historical-legacy-1",
-            "issue_date": "2026-07-31",
-            "workflow_status": "confirmed",
-            "stable_identity": False,
-            "cost_amount_ex_tax": "50.00",
-            "cost_amount_inc_tax": "56.50",
-        }
-    ]
+    evidence = preview["evidence"]["historical_site_issues"][0]
+    assert evidence["issue_line_id"] == "historical-legacy-1"
+    assert evidence["workflow_status"] == "confirmed"
+    assert evidence["stable_identity"] is False
+    assert evidence["cost_amount_ex_tax"] == "50.00"
+    assert evidence["sn"] is None
 
 
 @pytest.mark.parametrize("document_date", [None, "2026-07-31"])

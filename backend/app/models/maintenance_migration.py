@@ -116,6 +116,9 @@ class MaintenanceProjectCutoverPlan(Base):
     total_cost_inc_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
     blocker_count: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
+    reconciled_by: Mapped[str | None] = mapped_column(String(64))
+    reconciled_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    reconciliation_reason: Mapped[str | None] = mapped_column(Text)
     version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
     )
@@ -150,6 +153,14 @@ class MaintenanceProjectCutoverPlan(Base):
         CheckConstraint(
             "blocker_count >= 0 AND version >= 1",
             name="ck_maintenance_project_cutover_counts",
+        ),
+        CheckConstraint(
+            "(status = 'previewed' AND reconciled_by IS NULL "
+            "AND reconciled_at IS NULL AND reconciliation_reason IS NULL) OR "
+            "(status IN ('reconciled', 'approved') "
+            "AND reconciled_by IS NOT NULL AND reconciled_at IS NOT NULL "
+            "AND char_length(btrim(reconciliation_reason)) > 0)",
+            name="ck_maintenance_project_cutover_reconciliation",
         ),
         UniqueConstraint(
             "run_id", "project_id", name="uq_maintenance_project_cutover_run_project"

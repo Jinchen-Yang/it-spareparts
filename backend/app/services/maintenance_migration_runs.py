@@ -36,6 +36,14 @@ WarehouseLoader = Callable[
     [Session, str, date], tuple[Sequence[Mapping[str, Any]], bool]
 ]
 
+_EVIDENCE_SECTIONS = {
+    "historical_site_issues",
+    "post_cutover_site_issues",
+    "expenses",
+    "opening_balances",
+    "inventory_movements",
+}
+
 
 class MaintenanceMigrationRunError(ValueError):
     pass
@@ -248,6 +256,36 @@ def _project_preview_map(wrapper: Mapping[str, Any]) -> dict[str, dict[str, Any]
     }
 
 
+def _public_preview(preview: Mapping[str, Any]) -> dict[str, Any]:
+    public = {
+        key: _jsonable(value) for key, value in preview.items() if key != "projects"
+    }
+    projects: list[dict[str, Any]] = []
+    for raw_project in preview.get("projects") or []:
+        project = dict(_jsonable(raw_project))
+        evidence = project.pop("evidence", {}) or {}
+        project["source_coverage"] = evidence.get("source_coverage", {})
+        project["evidence_summary"] = {
+            key: len(value) if isinstance(value, list) else int(value is not None)
+            for key, value in evidence.items()
+            if key != "source_coverage"
+        }
+        projects.append(project)
+    public["projects"] = projects
+    return public
+
+
+def _public_manifest(manifest: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if manifest is None:
+        return None
+    return {
+        key: _jsonable(value) for key, value in manifest.items() if key != "projects"
+    } | {
+        "project_count": len(manifest.get("projects") or []),
+        "evidence_available_via_pagination": True,
+    }
+
+
 def _persist_initial_rows(
     db: Session,
     *,
@@ -430,24 +468,53 @@ def create_preview_run(
     return get_run_detail(db, run_id=run.run_id)
 
 
-def _candidate_approvals(db: Session, *, run_id: str) -> dict[str, dict[str, Any]]:
+def _candidate_rows(
+    db: Session, *, run_id: str
+) -> tuple[
+    list[MaintenanceProjectCutoverPlan],
+    list[MaintenanceHistoricalCostBaseline],
+    list[MaintenanceInventoryOpeningBalance],
+]:
     plans = db.scalars(
         select(MaintenanceProjectCutoverPlan)
         .where(MaintenanceProjectCutoverPlan.run_id == run_id)
         .order_by(MaintenanceProjectCutoverPlan.project_id)
     ).all()
+    baselines = db.scalars(
+        select(MaintenanceHistoricalCostBaseline)
+        .join(
+            MaintenanceProjectCutoverPlan,
+            MaintenanceProjectCutoverPlan.plan_id
+            == MaintenanceHistoricalCostBaseline.plan_id,
+        )
+        .where(MaintenanceProjectCutoverPlan.run_id == run_id)
+        .order_by(MaintenanceHistoricalCostBaseline.plan_id)
+    ).all()
+    openings = db.scalars(
+        select(MaintenanceInventoryOpeningBalance)
+        .join(
+            MaintenanceProjectCutoverPlan,
+            MaintenanceProjectCutoverPlan.plan_id
+            == MaintenanceInventoryOpeningBalance.plan_id,
+        )
+        .where(MaintenanceProjectCutoverPlan.run_id == run_id)
+        .order_by(
+            MaintenanceInventoryOpeningBalance.plan_id,
+            MaintenanceInventoryOpeningBalance.balance_key,
+        )
+    ).all()
+    return list(plans), list(baselines), list(openings)
+
+
+def _candidate_approvals(db: Session, *, run_id: str) -> dict[str, dict[str, Any]]:
+    plans, baselines, openings = _candidate_rows(db, run_id=run_id)
+    baseline_by_plan = {row.plan_id: row for row in baselines}
+    openings_by_plan: dict[str, list[MaintenanceInventoryOpeningBalance]] = {}
+    for row in openings:
+        openings_by_plan.setdefault(row.plan_id, []).append(row)
     approvals: dict[str, dict[str, Any]] = {}
     for plan in plans:
-        baseline = db.scalar(
-            select(MaintenanceHistoricalCostBaseline).where(
-                MaintenanceHistoricalCostBaseline.plan_id == plan.plan_id
-            )
-        )
-        openings = db.scalars(
-            select(MaintenanceInventoryOpeningBalance)
-            .where(MaintenanceInventoryOpeningBalance.plan_id == plan.plan_id)
-            .order_by(MaintenanceInventoryOpeningBalance.balance_key)
-        ).all()
+        baseline = baseline_by_plan.get(plan.plan_id)
         approvals[plan.project_id] = {
             "historical_baseline": None
             if baseline is None
@@ -465,10 +532,152 @@ def _candidate_approvals(db: Session, *, run_id: str) -> dict[str, dict[str, Any
                     "evidence_hash": row.evidence_hash,
                     "approved": row.approval_state == "approved",
                 }
-                for row in openings
+                for row in openings_by_plan.get(plan.plan_id, [])
             ],
         }
     return approvals
+
+
+def _normalize_project_signoffs(
+    project_signoffs: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if not project_signoffs:
+        raise MaintenanceMigrationRunError("逐项目签字清单不能为空")
+    normalized: list[dict[str, Any]] = []
+    seen_projects: set[str] = set()
+    for signoff in project_signoffs:
+        project_id = _clean_text(
+            signoff.get("project_id"), "签字项目稳定编号", max_length=36
+        )
+        if project_id in seen_projects:
+            raise MaintenanceMigrationRunError("逐项目签字清单存在重复项目")
+        seen_projects.add(project_id)
+        try:
+            expected_plan_version = int(signoff.get("expected_plan_version"))
+        except (TypeError, ValueError) as exc:
+            raise MaintenanceMigrationRunError("签字项目版本无效") from exc
+        if expected_plan_version < 1:
+            raise MaintenanceMigrationRunError("签字项目版本无效")
+        baseline = signoff.get("historical_baseline")
+        normalized_baseline = None
+        if baseline is not None:
+            if not isinstance(baseline, Mapping):
+                raise MaintenanceMigrationRunError("历史基线签字项无效")
+            try:
+                baseline_version = int(baseline.get("expected_version"))
+            except (TypeError, ValueError) as exc:
+                raise MaintenanceMigrationRunError("历史基线签字版本无效") from exc
+            if baseline_version < 1:
+                raise MaintenanceMigrationRunError("历史基线签字版本无效")
+            normalized_baseline = {
+                "baseline_id": _clean_text(
+                    baseline.get("baseline_id"), "历史基线候选编号", max_length=36
+                ),
+                "expected_version": baseline_version,
+            }
+        normalized_openings: list[dict[str, Any]] = []
+        seen_openings: set[str] = set()
+        for opening in signoff.get("opening_balances") or []:
+            if not isinstance(opening, Mapping):
+                raise MaintenanceMigrationRunError("库存期初签字项无效")
+            opening_id = _clean_text(
+                opening.get("opening_balance_id"),
+                "库存期初候选编号",
+                max_length=36,
+            )
+            if opening_id in seen_openings:
+                raise MaintenanceMigrationRunError("库存期初签字项重复")
+            seen_openings.add(opening_id)
+            try:
+                opening_version = int(opening.get("expected_version"))
+            except (TypeError, ValueError) as exc:
+                raise MaintenanceMigrationRunError("库存期初签字版本无效") from exc
+            if opening_version < 1:
+                raise MaintenanceMigrationRunError("库存期初签字版本无效")
+            normalized_openings.append(
+                {
+                    "opening_balance_id": opening_id,
+                    "expected_version": opening_version,
+                }
+            )
+        normalized.append(
+            {
+                "project_id": project_id,
+                "expected_plan_version": expected_plan_version,
+                "reason": _clean_text(
+                    signoff.get("reason"), "逐项目签字理由", max_length=1000
+                ),
+                "historical_baseline": normalized_baseline,
+                "opening_balances": sorted(
+                    normalized_openings, key=lambda row: row["opening_balance_id"]
+                ),
+            }
+        )
+    return sorted(normalized, key=lambda row: row["project_id"])
+
+
+def _validate_project_signoffs(
+    *,
+    plans: Sequence[MaintenanceProjectCutoverPlan],
+    baselines: Sequence[MaintenanceHistoricalCostBaseline],
+    openings: Sequence[MaintenanceInventoryOpeningBalance],
+    signoffs: Sequence[Mapping[str, Any]],
+) -> tuple[set[str], dict[str, dict[str, Any]]]:
+    plans_by_project = {row.project_id: row for row in plans}
+    signoffs_by_project = {str(row["project_id"]): dict(row) for row in signoffs}
+    if set(plans_by_project) != set(signoffs_by_project):
+        raise MaintenanceMigrationRunConflict("逐项目签字清单不完整")
+    baselines_by_plan = {row.plan_id: row for row in baselines}
+    openings_by_plan: dict[str, list[MaintenanceInventoryOpeningBalance]] = {}
+    for row in openings:
+        openings_by_plan.setdefault(row.plan_id, []).append(row)
+
+    selected_ids: set[str] = set()
+    for project_id, plan in plans_by_project.items():
+        signoff = signoffs_by_project[project_id]
+        if plan.version != signoff["expected_plan_version"]:
+            raise MaintenanceMigrationRunConflict(
+                f"项目 {project_id} 版本已变化，请刷新后重新签字"
+            )
+        baseline = baselines_by_plan.get(plan.plan_id)
+        baseline_signoff = signoff.get("historical_baseline")
+        if (baseline is None) != (baseline_signoff is None):
+            raise MaintenanceMigrationRunConflict(
+                f"项目 {project_id} 的历史基线候选清单不完整"
+            )
+        if baseline is not None and baseline_signoff is not None:
+            if (
+                baseline.baseline_id != baseline_signoff["baseline_id"]
+                or baseline.version != baseline_signoff["expected_version"]
+                or baseline.approval_state != "pending"
+            ):
+                raise MaintenanceMigrationRunConflict(
+                    f"项目 {project_id} 的历史基线候选已变化"
+                )
+            selected_ids.add(baseline.baseline_id)
+
+        expected_openings = {
+            row.opening_balance_id: row
+            for row in openings_by_plan.get(plan.plan_id, [])
+        }
+        selected_openings = {
+            str(row["opening_balance_id"]): row
+            for row in signoff.get("opening_balances") or []
+        }
+        if set(expected_openings) != set(selected_openings):
+            raise MaintenanceMigrationRunConflict(
+                f"项目 {project_id} 的库存期初候选清单不完整"
+            )
+        for opening_id, opening in expected_openings.items():
+            if (
+                opening.version != selected_openings[opening_id]["expected_version"]
+                or opening.approval_state != "pending"
+            ):
+                raise MaintenanceMigrationRunConflict(
+                    f"项目 {project_id} 的库存期初候选已变化"
+                )
+            selected_ids.add(opening_id)
+    return selected_ids, signoffs_by_project
 
 
 def _rebuild(
@@ -476,16 +685,27 @@ def _rebuild(
     *,
     run: MaintenanceMigrationRun,
     loader: WarehouseLoader,
-    force_candidate_approval: bool,
+    selected_candidate_ids: set[str] | None,
 ) -> dict[str, Any]:
     specs = list(run.preview_json["source_specs"])
     approvals = _candidate_approvals(db, run_id=run.run_id)
-    if force_candidate_approval:
-        for item in approvals.values():
-            if item["historical_baseline"] is not None:
-                item["historical_baseline"]["approved"] = True
-            for opening in item["opening_balances"]:
-                opening["approved"] = True
+    if selected_candidate_ids is not None:
+        plans, baselines, openings = _candidate_rows(db, run_id=run.run_id)
+        project_by_plan = {row.plan_id: row.project_id for row in plans}
+        for baseline in baselines:
+            approvals[project_by_plan[baseline.plan_id]]["historical_baseline"][
+                "approved"
+            ] = baseline.baseline_id in selected_candidate_ids
+        for opening in openings:
+            project_openings = approvals[project_by_plan[opening.plan_id]][
+                "opening_balances"
+            ]
+            for candidate in project_openings:
+                if candidate["balance_key"] == opening.balance_key:
+                    candidate["approved"] = (
+                        opening.opening_balance_id in selected_candidate_ids
+                    )
+                    break
     try:
         payloads = _source_payloads_from_specs(
             db,
@@ -509,6 +729,7 @@ def _update_plans(
     run_id: str,
     wrapper: Mapping[str, Any],
     status: str,
+    reconciliations: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> None:
     previews = _project_preview_map(wrapper)
     plans = db.scalars(
@@ -532,6 +753,11 @@ def _update_plans(
         plan.total_cost_inc_tax = Decimal(cost["total_inc_tax"])
         plan.blocker_count = len(preview["approval_blockers"])
         plan.status = status
+        if reconciliations is not None:
+            reconciliation = reconciliations[plan.project_id]
+            plan.reconciled_by = reconciliation["operated_by"]
+            plan.reconciled_at = reconciliation["operated_at"]
+            plan.reconciliation_reason = reconciliation["reason"]
         plan.version += 1
 
 
@@ -582,17 +808,20 @@ def reconcile_run(
     operation_key: str,
     reason: str,
     operated_by: str,
+    project_signoffs: Sequence[Mapping[str, Any]],
     warehouse_loader: WarehouseLoader = unavailable_warehouse_loader,
 ) -> dict[str, Any]:
     clean_run_id = _clean_text(run_id, "迁移运行编号", max_length=36)
     clean_reason = _clean_text(reason, "对账理由", max_length=1000)
     operator = _clean_text(operated_by, "操作人", max_length=64)
+    signoffs = _normalize_project_signoffs(project_signoffs)
     event_key = _operation_key("reconcile", operation_key)
     command_fingerprint = controls.canonical_hash(
         {
             "run_id": clean_run_id,
             "expected_version": expected_version,
             "reason": clean_reason,
+            "project_signoffs": signoffs,
         }
     )
     _advisory_lock(db, event_key)
@@ -617,34 +846,32 @@ def reconcile_run(
     if run.status != "previewed":
         raise MaintenanceMigrationRunConflict("只有待对账 dry-run 可以执行对账")
 
+    plans, baselines, openings = _candidate_rows(db, run_id=run.run_id)
+    selected_candidate_ids, signoffs_by_project = _validate_project_signoffs(
+        plans=plans,
+        baselines=baselines,
+        openings=openings,
+        signoffs=signoffs,
+    )
+
     wrapper = _rebuild(
         db,
         run=run,
         loader=warehouse_loader,
-        force_candidate_approval=True,
+        selected_candidate_ids=selected_candidate_ids,
     )
     now = datetime.now(timezone.utc)
-    plans = db.scalars(
-        select(MaintenanceProjectCutoverPlan).where(
-            MaintenanceProjectCutoverPlan.run_id == run.run_id
-        )
-    ).all()
-    plan_ids = [row.plan_id for row in plans]
-    baselines = db.scalars(
-        select(MaintenanceHistoricalCostBaseline).where(
-            MaintenanceHistoricalCostBaseline.plan_id.in_(plan_ids)
-        )
-    ).all()
-    openings = db.scalars(
-        select(MaintenanceInventoryOpeningBalance).where(
-            MaintenanceInventoryOpeningBalance.plan_id.in_(plan_ids)
-        )
-    ).all()
     for row in [*baselines, *openings]:
+        if (
+            getattr(row, "baseline_id", None) not in selected_candidate_ids
+            and getattr(row, "opening_balance_id", None) not in selected_candidate_ids
+        ):
+            continue
+        project_id = row.project_id
         row.approval_state = "approved"
         row.approved_by = operator
         row.approved_at = now
-        row.approval_reason = clean_reason
+        row.approval_reason = signoffs_by_project[project_id]["reason"]
         row.version += 1
 
     _resolve_removed_discrepancies(
@@ -655,7 +882,20 @@ def reconcile_run(
         operated_by=operator,
         now=now,
     )
-    _update_plans(db, run_id=run.run_id, wrapper=wrapper, status="reconciled")
+    _update_plans(
+        db,
+        run_id=run.run_id,
+        wrapper=wrapper,
+        status="reconciled",
+        reconciliations={
+            project_id: {
+                "operated_by": operator,
+                "operated_at": now,
+                "reason": signoff["reason"],
+            }
+            for project_id, signoff in signoffs_by_project.items()
+        },
+    )
     run.status = "reconciled"
     run.preview_json = wrapper
     run.reconciled_by = operator
@@ -775,7 +1015,7 @@ def approve_run(
         db,
         run=run,
         loader=warehouse_loader,
-        force_candidate_approval=False,
+        selected_candidate_ids=None,
     )
     current_fingerprint = str(wrapper["preview"]["input_fingerprint"])
     persisted_fingerprint = str(run.preview_json["preview"]["input_fingerprint"])
@@ -842,32 +1082,27 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
     run = db.get(MaintenanceMigrationRun, run_id)
     if run is None:
         raise MaintenanceMigrationRunNotFound("迁移 dry-run 不存在")
-    plans = db.scalars(
-        select(MaintenanceProjectCutoverPlan)
-        .where(MaintenanceProjectCutoverPlan.run_id == run.run_id)
-        .order_by(MaintenanceProjectCutoverPlan.project_id)
+    plans, baselines, openings = _candidate_rows(db, run_id=run.run_id)
+    baseline_by_plan = {row.plan_id: row for row in baselines}
+    openings_by_plan: dict[str, list[MaintenanceInventoryOpeningBalance]] = {}
+    for row in openings:
+        openings_by_plan.setdefault(row.plan_id, []).append(row)
+    discrepancies = db.scalars(
+        select(MaintenanceMigrationDiscrepancy)
+        .where(MaintenanceMigrationDiscrepancy.run_id == run.run_id)
+        .order_by(
+            MaintenanceMigrationDiscrepancy.plan_id,
+            MaintenanceMigrationDiscrepancy.severity,
+            MaintenanceMigrationDiscrepancy.code,
+            MaintenanceMigrationDiscrepancy.entity_id,
+        )
     ).all()
+    discrepancies_by_plan: dict[str, list[MaintenanceMigrationDiscrepancy]] = {}
+    for row in discrepancies:
+        discrepancies_by_plan.setdefault(row.plan_id, []).append(row)
     plan_rows: list[dict[str, Any]] = []
     for plan in plans:
-        baseline = db.scalar(
-            select(MaintenanceHistoricalCostBaseline).where(
-                MaintenanceHistoricalCostBaseline.plan_id == plan.plan_id
-            )
-        )
-        openings = db.scalars(
-            select(MaintenanceInventoryOpeningBalance)
-            .where(MaintenanceInventoryOpeningBalance.plan_id == plan.plan_id)
-            .order_by(MaintenanceInventoryOpeningBalance.balance_key)
-        ).all()
-        discrepancies = db.scalars(
-            select(MaintenanceMigrationDiscrepancy)
-            .where(MaintenanceMigrationDiscrepancy.plan_id == plan.plan_id)
-            .order_by(
-                MaintenanceMigrationDiscrepancy.severity,
-                MaintenanceMigrationDiscrepancy.code,
-                MaintenanceMigrationDiscrepancy.entity_id,
-            )
-        ).all()
+        baseline = baseline_by_plan.get(plan.plan_id)
         plan_rows.append(
             {
                 "plan_id": plan.plan_id,
@@ -892,6 +1127,9 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
                 },
                 "blocker_count": plan.blocker_count,
                 "status": plan.status,
+                "reconciled_by": plan.reconciled_by,
+                "reconciled_at": _jsonable(plan.reconciled_at),
+                "reconciliation_reason": plan.reconciliation_reason,
                 "version": plan.version,
                 "historical_baseline": None
                 if baseline is None
@@ -903,6 +1141,7 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
                     "approval_state": baseline.approval_state,
                     "approved_by": baseline.approved_by,
                     "approved_at": _jsonable(baseline.approved_at),
+                    "approval_reason": baseline.approval_reason,
                     "version": baseline.version,
                 },
                 "opening_balances": [
@@ -915,9 +1154,10 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
                         "approval_state": row.approval_state,
                         "approved_by": row.approved_by,
                         "approved_at": _jsonable(row.approved_at),
+                        "approval_reason": row.approval_reason,
                         "version": row.version,
                     }
-                    for row in openings
+                    for row in openings_by_plan.get(plan.plan_id, [])
                 ],
                 "discrepancies": [
                     {
@@ -931,7 +1171,7 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
                         "resolved_at": _jsonable(row.resolved_at),
                         "version": row.version,
                     }
-                    for row in discrepancies
+                    for row in discrepancies_by_plan.get(plan.plan_id, [])
                 ],
             }
         )
@@ -949,8 +1189,8 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
         "rule_version": run.rule_version,
         "request_fingerprint": run.request_fingerprint,
         "source_snapshot_hash": run.source_snapshot_hash,
-        "preview": run.preview_json["preview"],
-        "manifest": run.manifest_json,
+        "preview": _public_preview(run.preview_json["preview"]),
+        "manifest": _public_manifest(run.manifest_json),
         "manifest_hash": run.manifest_hash,
         "created_by": run.created_by,
         "reconciled_by": run.reconciled_by,
@@ -974,6 +1214,46 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
             for row in events
         ],
         "production_activation_included": False,
+    }
+
+
+def get_project_evidence(
+    db: Session,
+    *,
+    run_id: str,
+    project_id: str,
+    section: str,
+    page: int,
+    page_size: int,
+) -> dict[str, Any]:
+    if section not in _EVIDENCE_SECTIONS:
+        raise MaintenanceMigrationRunError("迁移证据分区无效")
+    if page < 1 or page_size < 1 or page_size > 100:
+        raise MaintenanceMigrationRunError("迁移证据分页参数无效")
+    run = db.get(MaintenanceMigrationRun, run_id)
+    if run is None:
+        raise MaintenanceMigrationRunNotFound("迁移 dry-run 不存在")
+    project = next(
+        (
+            item
+            for item in run.preview_json["preview"]["projects"]
+            if str(item.get("project_id")) == project_id
+        ),
+        None,
+    )
+    if project is None:
+        raise MaintenanceMigrationRunNotFound("迁移项目证据不存在")
+    rows = list((project.get("evidence") or {}).get(section) or [])
+    offset = (page - 1) * page_size
+    return {
+        "run_id": run.run_id,
+        "project_id": project_id,
+        "section": section,
+        "source_snapshot_hash": project["source_snapshot_hash"],
+        "items": _jsonable(rows[offset : offset + page_size]),
+        "total": len(rows),
+        "page": page,
+        "page_size": page_size,
     }
 
 

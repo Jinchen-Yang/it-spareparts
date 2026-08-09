@@ -74,6 +74,30 @@ def _preview(db, *, key="migration-preview-key", loader=_warehouse_loader):
     return result
 
 
+def _project_signoffs(preview):
+    return [
+        {
+            "project_id": plan["project_id"],
+            "expected_plan_version": plan["version"],
+            "reason": f"逐项核对项目 {plan['project_id']}",
+            "historical_baseline": None
+            if plan["historical_baseline"] is None
+            else {
+                "baseline_id": plan["historical_baseline"]["baseline_id"],
+                "expected_version": plan["historical_baseline"]["version"],
+            },
+            "opening_balances": [
+                {
+                    "opening_balance_id": row["opening_balance_id"],
+                    "expected_version": row["version"],
+                }
+                for row in plan["opening_balances"]
+            ],
+        }
+        for plan in preview["plans"]
+    ]
+
+
 def _reconcile(db, preview, *, key="migration-reconcile-key", loader=_warehouse_loader):
     result = runs.reconcile_run(
         db,
@@ -82,6 +106,7 @@ def _reconcile(db, preview, *, key="migration-reconcile-key", loader=_warehouse_
         operation_key=key,
         reason="已逐项核对成本基线与库存期初",
         operated_by="reconciler-user",
+        project_signoffs=_project_signoffs(preview),
         warehouse_loader=loader,
     )
     db.commit()
@@ -129,6 +154,7 @@ def test_full_workflow_is_hash_bound_idempotent_and_never_activates_production(d
         operation_key="migration-reconcile-key",
         reason="已逐项核对成本基线与库存期初",
         operated_by="reconciler-user",
+        project_signoffs=_project_signoffs(preview),
         warehouse_loader=_warehouse_loader,
     )
     assert reconcile_replay["version"] == 2
@@ -191,6 +217,53 @@ def test_idempotency_key_reuse_with_changed_reason_or_operator_is_rejected(db):
             operated_by="another-user",
             warehouse_loader=_warehouse_loader,
         )
+
+
+def test_reconcile_rejects_omitted_candidate_without_approving_anything(db):
+    _seed_project(db)
+    preview = _preview(db)
+    signoffs = _project_signoffs(preview)
+    signoffs[0]["opening_balances"] = []
+
+    with pytest.raises(runs.MaintenanceMigrationRunConflict, match="候选清单不完整"):
+        runs.reconcile_run(
+            db,
+            run_id=preview["run_id"],
+            expected_version=preview["version"],
+            operation_key="omitted-candidate-reconcile",
+            reason="故意漏选库存期初",
+            operated_by="reconciler-user",
+            project_signoffs=signoffs,
+            warehouse_loader=_warehouse_loader,
+        )
+
+    unchanged = runs.get_run_detail(db, run_id=preview["run_id"])
+    assert unchanged["status"] == "previewed"
+    assert unchanged["plans"][0]["historical_baseline"]["approval_state"] == "pending"
+    assert unchanged["plans"][0]["opening_balances"][0]["approval_state"] == "pending"
+
+
+def test_run_detail_summarizes_evidence_and_evidence_rows_are_paginated(db):
+    _seed_project(db)
+    preview = _preview(db)
+
+    project_preview = preview["preview"]["projects"][0]
+    assert "evidence" not in project_preview
+    assert project_preview["evidence_summary"]["inventory_movements"] == 1
+
+    evidence = runs.get_project_evidence(
+        db,
+        run_id=preview["run_id"],
+        project_id="migration-run-project",
+        section="inventory_movements",
+        page=1,
+        page_size=1,
+    )
+
+    assert evidence["total"] == 1
+    assert evidence["items"][0]["document_no"] == "FH-MIGRATION-1"
+    assert evidence["items"][0]["sn"] is None
+    assert evidence["source_snapshot_hash"] == project_preview["source_snapshot_hash"]
 
 
 def test_final_approver_must_be_independent(db):
@@ -313,5 +386,6 @@ def test_search_and_optimistic_version_fail_closed(db):
             operation_key="wrong-version-reconcile",
             reason="错误版本必须失败",
             operated_by="reconciler-user",
+            project_signoffs=_project_signoffs(preview),
             warehouse_loader=_warehouse_loader,
         )
