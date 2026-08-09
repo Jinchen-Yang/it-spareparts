@@ -172,6 +172,33 @@ def test_account_center_can_auditably_whitelist_a_different_named_admin(db):
         settings.replenishment_beta_enabled = original_replenishment
 
 
+def test_named_admin_cannot_add_self_to_beta_allowlist(db):
+    admin = _named_admin(db, "beta-self-grant-admin")
+    db.commit()
+    original_token_version = admin.token_version
+
+    client, _ = _login(admin.username)
+    response = client.put(
+        f"/api/accounts/{admin.username}",
+        json={"overrides": {"page_maintenance_beta": True}},
+    )
+
+    assert response.status_code == 400
+    assert "另一位实名管理员" in response.json()["detail"]
+    db.expire_all()
+    unchanged = db.scalar(select(SysUser).where(SysUser.username == admin.username))
+    assert unchanged is not None
+    assert unchanged.perm_overrides == {}
+    assert unchanged.token_version == original_token_version
+    assert db.scalar(
+        select(SysAuditLog).where(
+            SysAuditLog.entity_type == "sys_user",
+            SysAuditLog.entity_id == unchanged.id,
+            SysAuditLog.action == "account_update",
+        )
+    ) is None
+
+
 def test_feature_snapshot_requires_explicit_page_bits_even_for_admin():
     graph = _closed_admin_snapshot()
     settings = get_settings()

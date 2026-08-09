@@ -185,8 +185,10 @@ def _guard_touch(ident: dict, u: SysUser) -> None:
 
 
 def _guard_high_risk_change(ident: dict, before_eff: dict, after_eff: dict, who: str) -> None:
-    """高风险键（账号管理两键）的授予/撤销仅限 admin 操作者；
-    且操作者不能撤销**自己**的高风险键（防自锁，谁来都不行）。"""
+    """高风险键的授予/撤销仅限 admin 操作者。
+
+    Beta 页面键代表生产灰度白名单，管理员不能给自己加入或移出；
+    其他高风险键仍禁止撤销自身权限，避免自锁。"""
     changed = {k for k in permissions.HIGH_RISK_KEYS
                if bool(before_eff.get(k)) != bool(after_eff.get(k))}
     if not changed:
@@ -196,6 +198,9 @@ def _guard_high_risk_change(ident: dict, before_eff: dict, after_eff: dict, who:
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             f"「{labels}」属高风险权限，仅管理员本人可授予或撤销")
     if ident.get("sub") == who:
+        beta_changed = changed & permissions.ACCOUNT_SCOPED_BETA_PAGE_KEYS
+        if beta_changed:
+            raise HTTPException(400, "不能更改当前登录账号自己的 Beta 白名单，请由另一位实名管理员操作")
         revoked = {k for k in changed if bool(before_eff.get(k)) and not bool(after_eff.get(k))}
         if revoked:
             raise HTTPException(400, "不能撤销当前登录账号自己的账号管理权限，请由另一位管理员操作")
