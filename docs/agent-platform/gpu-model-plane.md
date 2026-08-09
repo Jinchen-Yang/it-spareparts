@@ -112,7 +112,8 @@ deadline, response_schema_version
 ### Stage 0：只读盘点
 
 核对 SSH 主机指纹、OS/内核、GPU 型号与显存、驱动/CUDA、磁盘、Tailscale 版本与节点身份、
-监听端口、容器运行时和现有工作负载。只读，不安装、不重启、不改 ACL。
+监听端口、容器运行时和现有工作负载。同时记录 Tailnet 当前是 direct 还是 DERP relay、往返延迟和
+可用吞吐；只读，不安装、不重启、不改 ACL。未带外确认主机指纹时不得登录。
 
 ### Stage 1：离线基准
 
@@ -132,6 +133,9 @@ GPU 无法反向连接生产、Token 重放拒绝、断网/重启恢复和 24 �
 ## 8. 验收门禁
 
 - 公网/LAN 无法访问 Gateway 和 vLLM；只有生产机器身份可访问 Gateway 单端口。
+- 正常生产路径应建立 Tailnet direct connection；若网络条件只能使用 DERP relay，必须先用最大合法
+  请求做持续吞吐、p95/超时和断线测试，收紧 payload/并发并经发布审核显式接受，不得把 relay 当成
+  已验收直连。
 - GPU 对生产 API、数据库、SSH、Artifact 端口的主动连接探针全部失败。
 - 无凭据、错 audience/scope/task、过期、未来时间、重复 `jti`、超大/未知字段请求全部在推理前拒绝。
 - Gateway 重定向、DNS/Host 混淆和错误标记 private 的公网 origin 均 fail closed。
