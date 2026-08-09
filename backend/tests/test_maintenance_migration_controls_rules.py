@@ -45,24 +45,28 @@ def _project(**overrides):
         "inventory_movements": [
             {
                 "movement_id": "delivery-1",
+                "document_date": "2026-08-02",
                 "movement_type": "delivery",
                 "quantity": "3",
                 "balance_key": "warehouse-1:part-1",
             },
             {
                 "movement_id": "receipt-1",
+                "document_date": "2026-08-02",
                 "movement_type": "available_receipt",
                 "quantity": "2",
                 "balance_key": "warehouse-1:part-1",
             },
             {
                 "movement_id": "site-issue-1",
+                "document_date": "2026-08-02",
                 "movement_type": "site_issue",
                 "quantity": "2",
                 "balance_key": "warehouse-1:part-1",
             },
             {
                 "movement_id": "return-registration-1",
+                "document_date": "2026-08-02",
                 "movement_type": "return_registration",
                 "quantity": "1",
                 "balance_key": "warehouse-1:part-1",
@@ -163,6 +167,77 @@ def test_baseline_and_historical_issue_modes_are_mutually_exclusive():
 
     with pytest.raises(controls.MigrationControlError, match="不能同时"):
         controls.build_project_preview(payload)
+
+
+def test_baseline_mode_rejects_reliable_historical_issues_without_hiding_evidence():
+    payload = _project(
+        historical_site_issues=[
+            {
+                "issue_line_id": "historical-reliable-1",
+                "issue_date": "2026-07-31",
+                "workflow_status": "confirmed",
+                "cost_amount_ex_tax": "50.00",
+                "cost_amount_inc_tax": "56.50",
+                "stable_identity": True,
+            }
+        ]
+    )
+
+    with pytest.raises(controls.MigrationControlError, match="可靠历史领用"):
+        controls.build_project_preview(payload)
+
+
+def test_unreliable_historical_rows_remain_visible_when_baseline_is_required():
+    payload = _project(
+        historical_site_issues=[
+            {
+                "issue_line_id": "historical-legacy-1",
+                "issue_date": "2026-07-31",
+                "workflow_status": "confirmed",
+                "cost_amount_ex_tax": "50.00",
+                "cost_amount_inc_tax": "56.50",
+                "stable_identity": False,
+            }
+        ]
+    )
+
+    preview = controls.build_project_preview(payload)
+
+    assert preview["cost"]["historical_baseline_ex_tax"] == "100.00"
+    assert preview["evidence"]["historical_site_issues"] == [
+        {
+            "issue_line_id": "historical-legacy-1",
+            "issue_date": "2026-07-31",
+            "workflow_status": "confirmed",
+            "stable_identity": False,
+            "cost_amount_ex_tax": "50.00",
+            "cost_amount_inc_tax": "56.50",
+        }
+    ]
+
+
+@pytest.mark.parametrize("document_date", [None, "2026-07-31"])
+def test_inventory_movements_without_post_cutover_date_are_blocked_and_not_counted(
+    document_date,
+):
+    payload = _project()
+    payload["inventory_movements"] = [
+        {
+            "movement_id": "overlap-delivery",
+            "document_date": document_date,
+            "movement_type": "delivery",
+            "quantity": "3",
+            "balance_key": "warehouse-1:part-1",
+        }
+    ]
+
+    preview = controls.build_project_preview(payload)
+
+    assert preview["inventory"][0]["closing_quantity"] == "10"
+    assert preview["can_approve"] is False
+    assert "inventory_movement_date_overlap" in {
+        row["code"] for row in preview["approval_blockers"]
+    }
 
 
 def test_stable_historical_issue_mode_requires_identity_and_pre_cutover_date():

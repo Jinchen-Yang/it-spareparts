@@ -178,10 +178,19 @@ def _historical_cost(
         raise MigrationControlError("历史成本模式无效")
     if mode == "stable_site_issues" and baseline is not None:
         raise MigrationControlError("历史稳定领用与历史成本基线不能同时使用")
-    if mode == "approved_cost_baseline" and historical_rows:
-        raise MigrationControlError("历史成本基线与历史稳定领用不能同时使用")
 
     if mode == "approved_cost_baseline":
+        for row in historical_rows:
+            if not isinstance(row, Mapping):
+                raise MigrationControlError("历史领用来源无效")
+            if (
+                row.get("stable_identity") is True
+                and row.get("workflow_status") in _COST_STATUSES
+                and _parse_date(row.get("issue_date"), "历史领用日期") < cutover_date
+            ):
+                raise MigrationControlError(
+                    "检测到经确认且有稳定身份的可靠历史领用，不能改用历史成本基线"
+                )
         if not isinstance(baseline, Mapping):
             _blocker(
                 blockers,
@@ -354,6 +363,7 @@ def _expense_cost(
 def _inventory_preview(
     payload: Mapping[str, Any],
     *,
+    cutover_date: date,
     blockers: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     quantities: dict[str, dict[str, Decimal]] = {}
@@ -398,6 +408,24 @@ def _inventory_preview(
                 "unknown_inventory_movement",
                 entity_id=movement_id,
                 detail="库存变动类型未映射",
+            )
+            continue
+        try:
+            movement_date = _parse_date(row.get("document_date"), "库存变动单据日期")
+        except MigrationControlError:
+            _blocker(
+                blockers,
+                "inventory_movement_date_overlap",
+                entity_id=movement_id,
+                detail="库存变动缺少有效单据日期，不能证明发生在切换日后",
+            )
+            continue
+        if movement_date < cutover_date:
+            _blocker(
+                blockers,
+                "inventory_movement_date_overlap",
+                entity_id=movement_id,
+                detail="库存变动单据日期早于切换日，已从切换后库存重算中排除",
             )
             continue
         if key not in quantities:
@@ -543,7 +571,11 @@ def build_project_preview(payload: Mapping[str, Any]) -> dict[str, Any]:
         blockers=blockers,
     )
     expense_ex, expense_inc = _expense_cost(payload, blockers=blockers)
-    inventory = _inventory_preview(payload, blockers=blockers)
+    inventory = _inventory_preview(
+        payload,
+        cutover_date=cutover_date,
+        blockers=blockers,
+    )
     blockers.sort(key=lambda row: (row["code"], row.get("entity_id") or ""))
     project_input_fingerprint = canonical_hash(payload)
     return {

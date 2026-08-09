@@ -132,6 +132,7 @@ def _build(db, *, historical_mode="approved_cost_baseline", warehouse_ready=True
         inventory_movements=[
             {
                 "movement_id": "shipment-line",
+                "document_date": "2026-08-02",
                 "movement_type": "delivery",
                 "balance_key": "project:part",
                 "pn": "PN-MIGRATION-SOURCE",
@@ -153,6 +154,9 @@ def test_server_snapshot_uses_database_cost_facts_and_never_demand_rows(db):
     assert preview["cost"]["approved_expense_ex_tax"] == "5.00"
     assert preview["inventory"][0]["closing_quantity"] == "7"
     assert "maintenance_demands" not in payload
+    assert payload["historical_site_issues"][0]["issue_line_id"] == (
+        "migration-source-history-line"
+    )
 
 
 def test_legacy_historical_issue_is_not_claimed_as_stable_identity(db):

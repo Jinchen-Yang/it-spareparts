@@ -155,9 +155,6 @@ def build_project_source_payload(
         for row in issue_rows
         if date.fromisoformat(row["issue_date"]) >= cutover_date
     ]
-    if historical_mode == "approved_cost_baseline":
-        historical_rows = []
-
     source_blockers: list[dict[str, str]] = []
     if not warehouse_source_ready:
         source_blockers.append(

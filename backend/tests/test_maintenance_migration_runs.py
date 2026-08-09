@@ -269,6 +269,34 @@ def test_unavailable_warehouse_source_cannot_be_approved(db):
         )
 
 
+def test_warehouse_adapter_rejects_pre_cutover_movement_before_preview(db):
+    _seed_project(db)
+
+    def overlapping_loader(_db, project_id, _cutover_date):
+        return (
+            [
+                {
+                    "movement_id": f"pre-cutover:{project_id}",
+                    "document_date": "2026-07-31",
+                    "movement_type": "delivery",
+                    "balance_key": f"{project_id}:part-1",
+                    "quantity": "1",
+                }
+            ],
+            True,
+        )
+
+    with pytest.raises(runs.MaintenanceMigrationRunError, match="早于切换日"):
+        runs.create_preview_run(
+            db,
+            idempotency_key="pre-cutover-adapter-preview",
+            projects=[_spec()],
+            reason="适配器必须拒绝切换日前流水",
+            operated_by="creator-user",
+            warehouse_loader=overlapping_loader,
+        )
+
+
 def test_search_and_optimistic_version_fail_closed(db):
     _seed_project(db)
     preview = _preview(db)

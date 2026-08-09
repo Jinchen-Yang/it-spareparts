@@ -26,6 +26,10 @@ from app.services.maintenance_migration_source import (
     MaintenanceMigrationSourceError,
     build_project_source_payload,
 )
+from app.services.maintenance_migration_warehouse import (
+    MaintenanceMigrationWarehouseError,
+    validate_cutover_inventory_movements,
+)
 
 
 WarehouseLoader = Callable[
@@ -173,7 +177,13 @@ def _load_warehouse(
     cutover_date: date,
 ) -> tuple[Sequence[Mapping[str, Any]], bool]:
     movements, ready = loader(db, project_id, cutover_date)
-    return tuple(movements), bool(ready)
+    try:
+        validated = validate_cutover_inventory_movements(
+            tuple(movements), cutover_date=cutover_date
+        )
+    except MaintenanceMigrationWarehouseError as exc:
+        raise MaintenanceMigrationRunError(str(exc)) from exc
+    return validated, bool(ready)
 
 
 def _source_payloads_from_specs(
