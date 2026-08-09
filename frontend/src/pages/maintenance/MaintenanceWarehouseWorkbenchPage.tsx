@@ -78,6 +78,38 @@ function headerDiffText(diff: WarehouseImportPreview["header_diff"] | null | und
   return `新增 ${diff.added.length} 列、缺少 ${diff.removed.length} 列、移动 ${diff.moved.length} 列、名称变化 ${diff.label_changed.length} 列`;
 }
 
+function HeaderDiffEvidence({ diff }: {
+  diff: WarehouseImportPreview["header_diff"] | null | undefined;
+}) {
+  if (!diff || diff.state !== "unapproved_difference") {
+    return <Typography.Text>{headerDiffText(diff)}</Typography.Text>;
+  }
+  const detailLines = [
+    diff.added.length
+      ? `新增：${diff.added.map((item) => `${item.internal_code}@${item.position}`).join("、")}`
+      : null,
+    diff.removed.length
+      ? `缺少：${diff.removed.map((item) => `${item.internal_code}@${item.position}`).join("、")}`
+      : null,
+    diff.moved.length
+      ? `移动：${diff.moved.map((item) => `${item.internal_code} ${item.from_position}→${item.to_position}`).join("、")}`
+      : null,
+    diff.label_changed.length
+      ? `名称变化：${diff.label_changed.map((item) => `${item.internal_code}@${item.position}`).join("、")}`
+      : null,
+  ].filter((value): value is string => Boolean(value));
+  return (
+    <Space direction="vertical" size={0}>
+      <Typography.Text>{headerDiffText(diff)}</Typography.Text>
+      {detailLines.map((line) => (
+        <Typography.Text key={line} type="secondary" style={{ wordBreak: "break-all" }}>
+          {line}
+        </Typography.Text>
+      ))}
+    </Space>
+  );
+}
+
 export default function MaintenanceWarehouseWorkbenchPage() {
   const [{ canManageWarehouse }] = useState(readMaintenanceCapabilities);
   const [file, setFile] = useState<File | null>(null);
@@ -360,7 +392,7 @@ export default function MaintenanceWarehouseWorkbenchPage() {
                       <Typography.Text copyable>{preview.header_signature}</Typography.Text>
                     </Descriptions.Item>
                     <Descriptions.Item label="表头差异">
-                      {headerDiffText(preview.header_diff)}
+                      <HeaderDiffEvidence diff={preview.header_diff} />
                     </Descriptions.Item>
                   </Descriptions>
                   <Typography.Text type="secondary">
@@ -473,7 +505,7 @@ export default function MaintenanceWarehouseWorkbenchPage() {
             </Typography.Text>
           </Descriptions.Item>
           <Descriptions.Item label="表头差异">
-            {headerDiffText(selectedDocument?.batch?.header_diff)}
+            <HeaderDiffEvidence diff={selectedDocument?.batch?.header_diff} />
           </Descriptions.Item>
         </Descriptions>
         <Divider plain>当前与历史关联</Divider>
@@ -532,7 +564,7 @@ export default function MaintenanceWarehouseWorkbenchPage() {
                 </Space>
               </Descriptions.Item>
               <Descriptions.Item label="表头差异">
-                {headerDiffText(selected.batch?.header_diff)}
+                <HeaderDiffEvidence diff={selected.batch?.header_diff} />
               </Descriptions.Item>
               <Descriptions.Item label="字段 / 来源行">
                 {selected.field_code || "文件级"} / {selected.source_row || "—"}
@@ -558,6 +590,21 @@ export default function MaintenanceWarehouseWorkbenchPage() {
                 </Space>
               </Card>
             ))}
+          {(selected?.candidates || []).length > 0 && (
+            <>
+              <Divider plain>固化候选（裁决时不可超出此集合）</Divider>
+              {(selected?.candidates || []).map((candidate) => (
+                <Card key={`${candidate.target_type}:${candidate.target_id}`} size="small">
+                  <Space direction="vertical" size={0}>
+                    <Typography.Text>{candidate.label || candidate.target_type}</Typography.Text>
+                    <Typography.Text type="secondary" style={{ wordBreak: "break-all" }}>
+                      {candidate.target_type} / {candidate.target_id}
+                    </Typography.Text>
+                  </Space>
+                </Card>
+              ))}
+            </>
+          )}
           {(selected?.history || []).length > 0 && (
             <>
               <Divider plain>处理记录</Divider>
