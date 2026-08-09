@@ -86,6 +86,17 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
   const [writeConflict, setWriteConflict] = useState(false);
   const generation = useRef(0);
   const projectGeneration = useRef(0);
+  const excludedTargetProjectIds = useMemo(() => new Set(
+    (actionMode === "reassign" && actionRow ? [actionRow] : selectedRows)
+      .map((row) => row.assigned_project?.project_id)
+      .filter((projectId): projectId is string => projectId !== undefined),
+  ), [actionMode, actionRow, selectedRows]);
+
+  useEffect(() => {
+    if (targetProjectId && excludedTargetProjectIds.has(targetProjectId)) {
+      setTargetProjectId(undefined);
+    }
+  }, [excludedTargetProjectIds, targetProjectId]);
 
   const load = useCallback(async (
     requestedPage: number,
@@ -162,7 +173,8 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
   const submitAssignment = async () => {
     const cleanReason = reason.trim();
     const items = actionMode === "reassign" && actionRow ? [actionRow] : selectedRows;
-    if (!targetProjectId || !cleanReason || items.length === 0) return;
+    if (!targetProjectId || excludedTargetProjectIds.has(targetProjectId)
+      || !cleanReason || items.length === 0) return;
     setSaving(true);
     setWriteError(null);
     setWriteConflict(false);
@@ -426,7 +438,8 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
           cancelText="取消"
           confirmLoading={saving}
           okButtonProps={{
-            disabled: !targetProjectId || !reason.trim()
+            disabled: !targetProjectId || excludedTargetProjectIds.has(targetProjectId)
+              || !reason.trim()
               || (actionMode === "assign" && selectedRows.length === 0),
           }}
           maskClosable={!saving}
@@ -461,10 +474,13 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
                 filterOption={false}
                 loading={projectLoading}
                 style={{ width: "100%" }}
-                options={projects.filter((project) => project.is_active).map((project) => ({
-                  value: project.project_id,
-                  label: `${project.project_code} · ${project.display_name}`,
-                }))}
+                options={projects
+                  .filter((project) => project.is_active
+                    && !excludedTargetProjectIds.has(project.project_id))
+                  .map((project) => ({
+                    value: project.project_id,
+                    label: `${project.project_code} · ${project.display_name}`,
+                  }))}
                 onChange={setTargetProjectId}
                 onSearch={(value) => void loadProjects(value)}
               />

@@ -45,6 +45,12 @@ const SECOND_PROJECT = {
   project_code: "XM-002",
   display_name: "稳定项目乙",
 };
+const THIRD_PROJECT = {
+  ...ACTIVE_PROJECT,
+  project_id: "project-3",
+  project_code: "XM-003",
+  display_name: "稳定项目丙",
+};
 const ASSIGNED_ROW = {
   ...UNASSIGNED_ROW,
   raw_order_id: "WBDD-SYNTH-RAW-002",
@@ -192,7 +198,9 @@ describe("MaintenanceSourceOrderAssignmentsPage", () => {
     const reassign = await screen.findByRole("dialog", { name: "改派来源维保单" });
     expect(within(reassign).getByText(/将替换当前归属/)).toBeInTheDocument();
     fireEvent.mouseDown(within(reassign).getByRole("combobox"));
-    fireEvent.click(await screen.findByText("XM-002 · 稳定项目乙"));
+    expect(await screen.findByText("XM-002 · 稳定项目乙")).toBeInTheDocument();
+    expect(screen.queryByText("XM-001 · 稳定项目甲")).toBeNull();
+    fireEvent.click(screen.getByText("XM-002 · 稳定项目乙"));
     fireEvent.change(within(reassign).getByLabelText("改派原因"), {
       target: { value: "业务复核后确认改派" },
     });
@@ -264,6 +272,84 @@ describe("MaintenanceSourceOrderAssignmentsPage", () => {
     expect(within(dialog).getByText("XM-001 · 稳定项目甲")).toBeInTheDocument();
     expect(within(dialog).getByText(/已明确选择 1 张来源维保单/)).toBeInTheDocument();
     expect(assignMaintenanceSourceOrders).toHaveBeenCalledTimes(1);
+  });
+
+  it("批量冲突刷新后排除每张已选单据的当前项目", async () => {
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_profit: true,
+      action_maintenance_project_manage: true,
+    }));
+    const pendingRows = [
+      UNASSIGNED_ROW,
+      {
+        ...UNASSIGNED_ROW,
+        raw_order_id: "WBDD-SYNTH-RAW-003",
+        order_no: "WBDD-SYNTH-003",
+      },
+    ];
+    const refreshedRows = [
+      {
+        ...pendingRows[0],
+        assignment_id: "assignment-current-1",
+        assignment_version: 2,
+        assigned_project: {
+          project_id: ACTIVE_PROJECT.project_id,
+          project_code: ACTIVE_PROJECT.project_code,
+          display_name: ACTIVE_PROJECT.display_name,
+          is_active: true,
+        },
+      },
+      {
+        ...pendingRows[1],
+        assignment_id: "assignment-current-2",
+        assignment_version: 5,
+        assigned_project: {
+          project_id: SECOND_PROJECT.project_id,
+          project_code: SECOND_PROJECT.project_code,
+          display_name: SECOND_PROJECT.display_name,
+          is_active: true,
+        },
+      },
+    ];
+    listMaintenanceProjects.mockResolvedValue({
+      data: {
+        rows: [ACTIVE_PROJECT, SECOND_PROJECT, THIRD_PROJECT],
+        total: 3,
+        page: 1,
+        page_size: 100,
+      },
+    });
+    listMaintenanceSourceOrders
+      .mockReturnValueOnce(directory(pendingRows))
+      .mockReturnValueOnce(directory(refreshedRows));
+    assignMaintenanceSourceOrders.mockRejectedValue({
+      response: { status: 409, data: { detail: "项目归属已变化，请刷新后重试" } },
+    });
+    render(<MaintenanceSourceOrderAssignmentsPage />);
+    await screen.findByText("WBDD-SYNTH-001");
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[1]);
+    fireEvent.click(checkboxes[2]);
+    fireEvent.click(screen.getByRole("button", { name: "批量归属" }));
+    const dialog = await screen.findByRole("dialog", { name: "批量归属来源维保单" });
+    fireEvent.mouseDown(within(dialog).getByRole("combobox"));
+    fireEvent.click(await screen.findByText("XM-003 · 稳定项目丙"));
+    fireEvent.change(within(dialog).getByLabelText("归属原因"), {
+      target: { value: "保留批量冲突草稿" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认归属" }));
+    await within(dialog).findByText("项目归属已变化，请刷新后重试");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "刷新目录并保留草稿" }));
+
+    await waitFor(() => expect(listMaintenanceSourceOrders).toHaveBeenCalledTimes(2));
+    expect(within(dialog).getByDisplayValue("保留批量冲突草稿")).toBeInTheDocument();
+    expect(within(dialog).getByText("XM-003 · 稳定项目丙")).toBeInTheDocument();
+    fireEvent.mouseDown(within(dialog).getByRole("combobox"));
+    expect(screen.queryByText("XM-001 · 稳定项目甲")).toBeNull();
+    expect(screen.queryByText("XM-002 · 稳定项目乙")).toBeNull();
+    expect(within(dialog).getByRole("button", { name: "确认归属" })).not.toBeDisabled();
   });
 
   it("冲突刷新未返回所选单号时不会静默丢弃草稿", async () => {

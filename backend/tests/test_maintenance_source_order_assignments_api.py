@@ -444,7 +444,7 @@ def test_current_assignment_can_be_unassigned_without_deleting_source_order(db):
     assert directory["rows"][0]["assigned_project"] is None
 
 
-def test_identical_first_assignment_request_replay_is_audited_only_once(db):
+def test_same_target_assignment_replay_is_rejected_without_new_audit(db):
     source = _source_order(
         db,
         raw_order_id="WBDD-SYNTH-REPLAY-001",
@@ -474,8 +474,10 @@ def test_identical_first_assignment_request_replay_is_audited_only_once(db):
     )
 
     assert first.status_code == 200, first.text
-    assert replay.status_code == 200, replay.text
-    assert replay.json() == first.json()
+    assert replay.status_code == 400, replay.text
+    assert replay.json()["detail"] == (
+        f"来源维保单 {source.raw_order_id} 已归属于目标项目，不能重复归属"
+    )
     audits = list(
         db.scalars(
             select(MaintenanceProjectAuditLog).where(
@@ -486,6 +488,88 @@ def test_identical_first_assignment_request_replay_is_audited_only_once(db):
     )
     assert [(row.action, row.operated_by) for row in audits] == [
         ("assign", "replay_assignment_admin")
+    ]
+
+
+def test_same_target_item_rolls_back_entire_mixed_batch_and_audit(db):
+    assigned_source = _source_order(
+        db,
+        raw_order_id="WBDD-SYNTH-SAME-TARGET-001",
+        order_no="WBDD-SAME-TARGET-001",
+        project_raw="已归属来源单",
+    )
+    pending_source = _source_order(
+        db,
+        raw_order_id="WBDD-SYNTH-SAME-TARGET-002",
+        order_no="WBDD-SAME-TARGET-002",
+        project_raw="同批未归属来源单",
+    )
+    project = _project(
+        db,
+        project_id="00000000-0000-4000-8000-000000000222",
+        project_code="MAINT-SYNTH-201-V",
+        display_name="同目标原子拒绝项目",
+    )
+    client = _admin_client(db, "same_target_atomic_admin")
+    first = client.post(
+        "/api/maintenance/project-assignments/orders/assign",
+        json={
+            "project_id": project.project_id,
+            "items": [{"source_order_id": assigned_source.raw_order_id}],
+            "reason": "首次确认来源单归属",
+        },
+    )
+    assert first.status_code == 200, first.text
+    current = first.json()["assignments"][0]
+
+    rejected = client.post(
+        "/api/maintenance/project-assignments/orders/assign",
+        json={
+            "project_id": project.project_id,
+            "items": [
+                {"source_order_id": pending_source.raw_order_id},
+                {
+                    "source_order_id": assigned_source.raw_order_id,
+                    "expected_assignment_id": current["assignment_id"],
+                    "expected_version": current["version"],
+                },
+            ],
+            "reason": "同目标项必须使整个批次失败",
+        },
+    )
+
+    assert rejected.status_code == 400, rejected.text
+    assert rejected.json()["detail"] == (
+        f"来源维保单 {assigned_source.raw_order_id} "
+        "已归属于目标项目，不能重复归属"
+    )
+    directory = client.get(
+        "/api/maintenance/project-assignments/orders",
+        params=[
+            ("source_order_id", assigned_source.raw_order_id),
+            ("source_order_id", pending_source.raw_order_id),
+            ("assignment_status", "all"),
+        ],
+    )
+    assert directory.status_code == 200, directory.text
+    rows = {row["raw_order_id"]: row for row in directory.json()["rows"]}
+    assert rows[assigned_source.raw_order_id]["assignment_id"] == current[
+        "assignment_id"
+    ]
+    assert rows[assigned_source.raw_order_id]["assignment_version"] == current[
+        "version"
+    ]
+    assert rows[pending_source.raw_order_id]["assignment_id"] is None
+    audits = list(
+        db.scalars(
+            select(MaintenanceProjectAuditLog).where(
+                MaintenanceProjectAuditLog.entity_type
+                == "source_order_assignment"
+            )
+        )
+    )
+    assert [(row.action, row.operated_by) for row in audits] == [
+        ("assign", "same_target_atomic_admin")
     ]
 
 

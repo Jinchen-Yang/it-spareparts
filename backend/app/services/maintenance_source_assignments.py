@@ -211,16 +211,15 @@ def assign_source_orders(
                 f"来源维保单 {source_id} 的项目归属已变化，请刷新后重试"
             )
         if current_assignment is not None:
-            replay_of_same_target = (
-                current_assignment.project_id == project.project_id
-                and expected_id is None
-                and expected_version is None
-            )
+            if current_assignment.project_id == project.project_id:
+                raise SourceAssignmentError(
+                    f"来源维保单 {source_id} 已归属于目标项目，不能重复归属"
+                )
             expectation_matches = (
                 expected_id == current_assignment.assignment_id
                 and expected_version == current_assignment.version
             )
-            if not replay_of_same_target and not expectation_matches:
+            if not expectation_matches:
                 raise SourceAssignmentConflict(
                     f"来源维保单 {source_id} 的项目归属已变化，请刷新后重试"
                 )
