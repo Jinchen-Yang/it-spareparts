@@ -73,6 +73,8 @@ def main() -> None:
     assert "statement_timeout=120000" in release and "lock_timeout=5000" in release
     assert "--network none" in release and "isolated restore" in release
     assert all(point in release for point in ("0|5|15|30", "open-empty-beta", "pilot-smoke"))
+    assert 'if fields[1] == "admin"' in release and "permission snapshot" in release
+    assert "emergency_stop_app" in release
 
     module = load_manifest_module()
     head = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=ROOT, text=True).strip()
@@ -114,6 +116,19 @@ def main() -> None:
             "username": "named.pilot",
             "action": "action_maintenance_site_issue_manage",
             "target_sha": head,
+            "environment": "isolated",
+            "executor_id": "reviewer.one",
+            "completed_at": "2026-08-10T12:00:00+00:00",
+            "request": {
+                "method": "POST",
+                "path": "/api/maintenance/site-issues",
+                "payload_sha256": "1" * 64,
+            },
+            "result": {
+                "expected_status": 201,
+                "observed_status": 201,
+                "response_sha256": "2" * 64,
+            },
             "conclusion": "passed",
         }
         canary_path = folder / "site-issue-canary.json"
@@ -133,6 +148,39 @@ def main() -> None:
         path.write_text(json.dumps(allowed_write), encoding="utf-8")
         summary, evidence = module._parse_allowlist(path, target=head)
         assert summary["canary_evidence_count"] == 1 and evidence == [canary_path]
+
+        malformed_canary = json.loads(json.dumps(canary))
+        malformed_canary["result"]["observed_status"] = 500
+        canary_path.write_text(json.dumps(malformed_canary), encoding="utf-8")
+        allowed_write["canary_evidence"][0]["sha256"] = hashlib.sha256(
+            canary_path.read_bytes()
+        ).hexdigest()
+        path.write_text(json.dumps(allowed_write), encoding="utf-8")
+        try:
+            module._parse_allowlist(path, target=head)
+        except module.ManifestError:
+            pass
+        else:
+            raise AssertionError("failed write canary was accepted")
+
+        review = {
+            "format": "exact-sha-independent-review-v1",
+            "target_sha": head,
+            "scope": "full-release-candidate",
+            "reviewer_id": "reviewer.two",
+            "completed_at": "2026-08-10T12:00:00Z",
+            "p0_count": 0,
+            "p1_count": 0,
+            "conclusion": "approved",
+        }
+        assert module._validate_review_evidence(review, target=head) == "reviewer.two"
+        review["p1_count"] = 1
+        try:
+            module._validate_review_evidence(review, target=head)
+        except module.ManifestError:
+            pass
+        else:
+            raise AssertionError("review with unresolved P1 was accepted")
 
     print(f"v1.21 Beta release-control static self-test passed ({len(inventory)} migrations)")
 

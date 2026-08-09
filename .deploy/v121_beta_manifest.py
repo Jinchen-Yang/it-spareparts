@@ -18,7 +18,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -248,9 +247,50 @@ def _parse_allowlist(path: Path, *, target: str) -> tuple[dict[str, Any], list[P
             "action": action,
             "target_sha": target,
             "conclusion": "passed",
+            "environment": "isolated",
         }.items():
             if evidence_data.get(key) != value:
                 _fail(f"canary evidence is not bound to {username}/{action}/{target}: {key}")
+        executor = evidence_data.get("executor_id")
+        if not isinstance(executor, str) or not SAFE_ACCOUNT.fullmatch(executor):
+            _fail(f"canary evidence has an invalid executor id: {evidence_path}")
+        completed_at = evidence_data.get("completed_at")
+        if not isinstance(completed_at, str):
+            _fail(f"canary evidence lacks a completion time: {evidence_path}")
+        try:
+            parsed_time = dt.datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+        except ValueError:
+            _fail(f"canary evidence has an invalid completion time: {evidence_path}")
+        if parsed_time.tzinfo is None:
+            _fail(f"canary evidence completion time lacks a timezone: {evidence_path}")
+        request = evidence_data.get("request")
+        if not isinstance(request, dict) or set(request) != {"method", "path", "payload_sha256"}:
+            _fail(f"canary evidence has a malformed request: {evidence_path}")
+        if request["method"] not in {"POST", "PUT", "PATCH", "DELETE"}:
+            _fail(f"canary evidence request is not a write method: {evidence_path}")
+        if (
+            not isinstance(request["path"], str)
+            or not request["path"].startswith("/api/")
+            or any(character.isspace() for character in request["path"])
+        ):
+            _fail(f"canary evidence has an invalid API path: {evidence_path}")
+        if not SHA256.fullmatch(str(request["payload_sha256"])):
+            _fail(f"canary evidence has an invalid payload digest: {evidence_path}")
+        result = evidence_data.get("result")
+        if not isinstance(result, dict) or set(result) != {
+            "expected_status",
+            "observed_status",
+            "response_sha256",
+        }:
+            _fail(f"canary evidence has a malformed result: {evidence_path}")
+        if (
+            not isinstance(result["expected_status"], int)
+            or not 200 <= result["expected_status"] < 300
+            or result["observed_status"] != result["expected_status"]
+        ):
+            _fail(f"canary evidence did not observe the expected success status: {evidence_path}")
+        if not SHA256.fullmatch(str(result["response_sha256"])):
+            _fail(f"canary evidence has an invalid response digest: {evidence_path}")
         key = (username, action)
         if key in evidence:
             _fail(f"duplicate canary evidence for {username}/{action}")
@@ -294,8 +334,9 @@ def _parse_allowlist(path: Path, *, target: str) -> tuple[dict[str, Any], list[P
         if maintenance_enabled and not maintenance["page_maintenance"]:
             _fail(f"allowlist account {username} enables Maintenance Beta without stable Maintenance")
         replenishment_enabled = replenishment["page_replenishment_beta"]
-        if not maintenance_enabled and not replenishment_enabled:
-            _fail(f"allowlist account {username} grants no Beta page")
+        review_callback_enabled = replenishment["action_replenishment_review"]
+        if not maintenance_enabled and not replenishment_enabled and not review_callback_enabled:
+            _fail(f"allowlist account {username} has no effective Beta access")
         for action in MAINTENANCE_ACTIONS:
             if maintenance[action]:
                 if not maintenance_enabled:
@@ -306,7 +347,7 @@ def _parse_allowlist(path: Path, *, target: str) -> tuple[dict[str, Any], list[P
                 used_evidence.add(key)
         for action in ("action_replenishment_create", "action_replenishment_review"):
             if replenishment[action]:
-                if not replenishment_enabled:
+                if action == "action_replenishment_create" and not replenishment_enabled:
                     _fail(f"replenishment write {username}/{action} is enabled without its Beta page")
                 key = (username, action)
                 if key not in evidence:
@@ -377,7 +418,13 @@ def _validate_ci_evidence(data: Any, *, repository: str, target: str, required: 
 
 
 def _validate_rehearsal(
-    data: Any, *, target: str, parent: str, old_app: str, old_frontend: str
+    data: Any,
+    *,
+    target: str,
+    parent: str,
+    old_app: str,
+    old_frontend: str,
+    candidate_compose_sha256: str,
 ) -> None:
     if not isinstance(data, dict) or data.get("format") != "old-images-on-d9-rehearsal-v1":
         _fail("old-image rehearsal has the wrong format")
@@ -387,6 +434,7 @@ def _validate_rehearsal(
         "db_head": DB_TO,
         "old_app_image_id": old_app,
         "old_frontend_image_id": old_frontend,
+        "candidate_compose_sha256": candidate_compose_sha256,
         "isolated": True,
         "stable_smoke": "passed",
         "conclusion": "success",
@@ -419,7 +467,14 @@ def _validate_build_evidence(
             _fail(f"build evidence is not bound to the exact artifact: {key}")
 
 
-def _validate_migration_rehearsal(data: Any, *, target: str, parent: str, db_image: str) -> None:
+def _validate_migration_rehearsal(
+    data: Any,
+    *,
+    target: str,
+    parent: str,
+    db_image: str,
+    candidate_compose_sha256: str,
+) -> None:
     if not isinstance(data, dict) or data.get("format") != "v121-production-copy-migration-rehearsal-v1":
         _fail("production-copy migration rehearsal has the wrong format")
     expected = {
@@ -428,6 +483,7 @@ def _validate_migration_rehearsal(data: Any, *, target: str, parent: str, db_ima
         "from_revision": DB_FROM,
         "to_revision": DB_TO,
         "database_image_id": db_image,
+        "candidate_compose_sha256": candidate_compose_sha256,
         "statement_timeout_ms": 120000,
         "lock_timeout_ms": 5000,
         "isolated": True,
@@ -438,9 +494,40 @@ def _validate_migration_rehearsal(data: Any, *, target: str, parent: str, db_ima
             _fail(f"production-copy migration rehearsal mismatch: {key}")
     if not isinstance(data.get("duration_milliseconds"), int) or data["duration_milliseconds"] < 0:
         _fail("production-copy migration rehearsal lacks duration")
+    if not isinstance(data.get("restore_tmpfs_size"), str) or not re.fullmatch(
+        r"[1-9][0-9]*(m|g)", data["restore_tmpfs_size"]
+    ):
+        _fail("production-copy migration rehearsal has an invalid restore tmpfs size")
     for key in ("production_copy_dump_sha256", "pressure_samples_sha256"):
         if not SHA256.fullmatch(str(data.get(key, ""))):
             _fail(f"production-copy migration rehearsal digest is invalid: {key}")
+
+
+def _validate_review_evidence(data: Any, *, target: str) -> str:
+    if not isinstance(data, dict) or data.get("format") != "exact-sha-independent-review-v1":
+        _fail("independent review evidence has the wrong format")
+    expected = {
+        "target_sha": target,
+        "scope": "full-release-candidate",
+        "p0_count": 0,
+        "p1_count": 0,
+        "conclusion": "approved",
+    }
+    for key, value in expected.items():
+        if data.get(key) != value:
+            _fail(f"independent review evidence mismatch: {key}")
+    reviewer = data.get("reviewer_id")
+    if not isinstance(reviewer, str) or not re.fullmatch(r"[A-Za-z0-9_.@+-]{2,128}", reviewer):
+        _fail("independent review evidence has an invalid reviewer id")
+    if not isinstance(data.get("completed_at"), str) or not data["completed_at"]:
+        _fail("independent review evidence lacks a completion time")
+    try:
+        completed_at = dt.datetime.fromisoformat(data["completed_at"].replace("Z", "+00:00"))
+    except ValueError:
+        _fail("independent review evidence has an invalid completion time")
+    if completed_at.tzinfo is None:
+        _fail("independent review evidence completion time lacks a timezone")
+    return reviewer
 
 
 def _validate_image(value: str, label: str) -> None:
@@ -448,11 +535,27 @@ def _validate_image(value: str, label: str) -> None:
         _fail(f"{label} must be a full sha256 Docker image ID")
 
 
+def _validate_candidate_compose_contract(content: bytes) -> None:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        _fail(f"candidate Compose is not UTF-8: {exc}")
+    for key in REQUIRED_FLAGS:
+        pattern = re.compile(
+            rf"^\s*{re.escape(key)}:\s*\$\{{{re.escape(key)}:-false\}}\s*$",
+            re.MULTILINE,
+        )
+        if not pattern.search(text):
+            _fail(f"candidate Compose does not default {key} to false")
+
+
 def _capture_ci(args: argparse.Namespace) -> None:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository):
         _fail("repository must be owner/name")
     if not SHA40.fullmatch(args.target_sha):
         _fail("target SHA must be 40 lowercase hex characters")
+    if args.output.exists() or args.output.is_symlink():
+        _fail("CI evidence output already exists; evidence is immutable")
     branch = json.loads(_run("gh", "api", f"repos/{args.repository}/branches/main"))
     main_head = ((branch.get("commit") or {}).get("sha"))
     if main_head != args.target_sha:
@@ -491,7 +594,7 @@ def _capture_ci(args: argparse.Namespace) -> None:
         target=args.target_sha,
         required=args.required_check,
     )
-    args.output.parent.mkdir(parents=True, exist_ok=False) if not args.output.parent.exists() else None
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(_json_bytes(evidence))
     os.chmod(args.output, 0o600)
     print(f"CI_EVIDENCE_SHA256={_sha256_file(args.output)}")
@@ -502,7 +605,7 @@ def _generate(args: argparse.Namespace) -> None:
     if not SHA40.fullmatch(args.target_sha) or not SHA40.fullmatch(args.parent_production_sha):
         _fail("target and parent production SHAs must be full lowercase 40-character hashes")
     resolved_target = _run("git", "rev-parse", f"{args.target_sha}^{{commit}}", cwd=repo)
-    resolved_main = _run("git", "rev-parse", args.main_ref, cwd=repo)
+    resolved_main = _run("git", "rev-parse", "refs/remotes/origin/main", cwd=repo)
     if resolved_target != args.target_sha or resolved_main != args.target_sha:
         _fail("target SHA is not the exact local main ref head")
     if _run(
@@ -527,6 +630,32 @@ def _generate(args: argparse.Namespace) -> None:
         _fail("manifest HMAC key fingerprint must be a SHA-256 digest")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", args.manifest_hmac_key_id):
         _fail("manifest HMAC key id is invalid")
+    for path, label in (
+        (args.current_compose, "current compose"),
+        (args.ci_evidence, "CI evidence"),
+        (args.build_evidence, "build evidence"),
+        (args.source_tar, "source tar"),
+        (args.image_bundle, "image bundle"),
+        (args.migration_rehearsal, "migration rehearsal"),
+        (args.migration_pressure_samples, "migration pressure samples"),
+        (args.beta_allowlist, "Beta allowlist"),
+    ):
+        if not path.is_file() or path.is_symlink():
+            _fail(f"{label} must be a real file")
+    if len(args.review_evidence) < 2:
+        _fail("at least two independent exact-SHA reviews are required")
+    reviewers: set[str] = set()
+    review_sources: list[Path] = []
+    for path in args.review_evidence:
+        if not path.is_file() or path.is_symlink():
+            _fail("independent review evidence must be a real file")
+        reviewer = _validate_review_evidence(
+            json.loads(path.read_text(encoding="utf-8")), target=args.target_sha
+        )
+        if reviewer in reviewers:
+            _fail("independent reviews must have distinct reviewer ids")
+        reviewers.add(reviewer)
+        review_sources.append(path)
 
     ci_data = json.loads(args.ci_evidence.read_text(encoding="utf-8"))
     _validate_ci_evidence(
@@ -560,6 +689,9 @@ def _generate(args: argparse.Namespace) -> None:
         )
     if archive_probe.returncode or archive_probe.stdout.strip() != args.target_sha:
         _fail("source tar is not bound to target SHA")
+    candidate_compose = _git_bytes(repo, args.target_sha, "docker-compose.yml")
+    _validate_candidate_compose_contract(candidate_compose)
+    candidate_compose_hash = _sha256_bytes(candidate_compose)
     migration_rehearsal_data = json.loads(
         args.migration_rehearsal.read_text(encoding="utf-8")
     )
@@ -568,10 +700,14 @@ def _generate(args: argparse.Namespace) -> None:
         target=args.target_sha,
         parent=args.parent_production_sha,
         db_image=args.db_image_id,
+        candidate_compose_sha256=candidate_compose_hash,
     )
+    if _sha256_file(args.migration_pressure_samples) != migration_rehearsal_data.get(
+        "pressure_samples_sha256"
+    ):
+        _fail("production-copy migration pressure samples drifted")
     inventory = _migration_inventory(repo, args.target_sha)
     inventory_hash = _sha256_bytes(_json_bytes(inventory))
-    candidate_compose = _git_bytes(repo, args.target_sha, "docker-compose.yml")
     control_sources = {
         "v121_beta_manifest.py": _git_bytes(
             repo, args.target_sha, ".deploy/v121_beta_manifest.py"
@@ -581,13 +717,14 @@ def _generate(args: argparse.Namespace) -> None:
         ),
     }
     current_compose_hash = _sha256_file(args.current_compose)
-    candidate_compose_hash = _sha256_bytes(candidate_compose)
 
     rollback: dict[str, Any]
     rehearsal_copy: str | None = None
     if args.old_image_d9_rehearsal is None:
         rollback = {"mode": "forward_only_after_d9", "rehearsal_evidence": None}
     else:
+        if not args.old_image_d9_rehearsal.is_file() or args.old_image_d9_rehearsal.is_symlink():
+            _fail("old-image d9 rehearsal must be a real file")
         rehearsal_data = json.loads(args.old_image_d9_rehearsal.read_text(encoding="utf-8"))
         _validate_rehearsal(
             rehearsal_data,
@@ -595,6 +732,7 @@ def _generate(args: argparse.Namespace) -> None:
             parent=args.parent_production_sha,
             old_app=args.old_app_image_id,
             old_frontend=args.old_frontend_image_id,
+            candidate_compose_sha256=candidate_compose_hash,
         )
         rehearsal_copy = "old-images-on-d9-rehearsal.json"
         rollback = {
@@ -611,14 +749,17 @@ def _generate(args: argparse.Namespace) -> None:
     ci_copy = args.output_dir / "github-main-ci.json"
     build_copy = args.output_dir / "build-evidence.json"
     migration_rehearsal_copy = args.output_dir / "production-copy-migration-rehearsal.json"
+    migration_pressure_copy = args.output_dir / "production-copy-migration-pressure.jsonl"
     compose_copy = args.output_dir / "candidate-compose.yml"
     shutil.copyfile(args.ci_evidence, ci_copy)
     shutil.copyfile(args.build_evidence, build_copy)
     shutil.copyfile(args.migration_rehearsal, migration_rehearsal_copy)
+    shutil.copyfile(args.migration_pressure_samples, migration_pressure_copy)
     compose_copy.write_bytes(candidate_compose)
     os.chmod(ci_copy, 0o600)
     os.chmod(build_copy, 0o600)
     os.chmod(migration_rehearsal_copy, 0o600)
+    os.chmod(migration_pressure_copy, 0o600)
     os.chmod(compose_copy, 0o600)
     control_artifacts: list[dict[str, str]] = []
     for name, content in control_sources.items():
@@ -637,6 +778,20 @@ def _generate(args: argparse.Namespace) -> None:
         shutil.copyfile(source, destination)
         os.chmod(destination, 0o600)
         canary_artifacts.append({"path": relative, "sha256": _sha256_file(destination)})
+    review_artifacts: list[dict[str, str]] = []
+    for index, source in enumerate(sorted(review_sources, key=lambda item: str(item)), 1):
+        relative = f"independent-review-{index:03d}.json"
+        destination = args.output_dir / relative
+        shutil.copyfile(source, destination)
+        os.chmod(destination, 0o600)
+        review_data = json.loads(destination.read_text(encoding="utf-8"))
+        review_artifacts.append(
+            {
+                "path": relative,
+                "sha256": _sha256_file(destination),
+                "reviewer_id_sha256": _sha256_bytes(review_data["reviewer_id"].encode()),
+            }
+        )
 
     manifest = {
         "format": FORMAT,
@@ -680,8 +835,11 @@ def _generate(args: argparse.Namespace) -> None:
         "migration_rehearsal": {
             "path": "production-copy-migration-rehearsal.json",
             "sha256": _sha256_file(migration_rehearsal_copy),
+            "pressure_path": "production-copy-migration-pressure.jsonl",
+            "pressure_sha256": _sha256_file(migration_pressure_copy),
         },
         "controls": sorted(control_artifacts, key=lambda row: row["path"]),
+        "independent_reviews": review_artifacts,
         "initial_flags": {key: False for key in REQUIRED_FLAGS},
         "intended_beta_allowlist": {
             **allowlist_summary,
@@ -807,6 +965,29 @@ def _verify_package(package: Path) -> dict[str, Any]:
             _fail(f"control artifact is absent or unsafe: {relative}")
         if _sha256_file(artifact) != row.get("sha256"):
             _fail(f"control artifact digest drifted: {relative}")
+    reviews = data.get("independent_reviews")
+    if not isinstance(reviews, list) or len(reviews) < 2:
+        _fail("manifest lacks two independent reviews")
+    reviewers: set[str] = set()
+    for row in reviews:
+        if not isinstance(row, dict):
+            _fail("manifest independent review entry is malformed")
+        relative = row.get("path")
+        if not isinstance(relative, str) or Path(relative).name != relative:
+            _fail("manifest independent review path is unsafe")
+        artifact = package / relative
+        if not artifact.is_file() or artifact.is_symlink():
+            _fail("manifest independent review evidence is absent or unsafe")
+        if _sha256_file(artifact) != row.get("sha256"):
+            _fail("manifest independent review evidence drifted")
+        reviewer = _validate_review_evidence(
+            json.loads(artifact.read_text(encoding="utf-8")), target=data["target_sha"]
+        )
+        if _sha256_bytes(reviewer.encode()) != row.get("reviewer_id_sha256"):
+            _fail("manifest independent reviewer identity drifted")
+        if reviewer in reviewers:
+            _fail("manifest independent reviewers are not distinct")
+        reviewers.add(reviewer)
     ci_data = json.loads((package / data["ci"]["path"]).read_text(encoding="utf-8"))
     _validate_ci_evidence(
         ci_data,
@@ -830,12 +1011,25 @@ def _verify_package(package: Path) -> dict[str, Any]:
     if build_data.get("image_bundle_sha256") != build["image_bundle_sha256"]:
         _fail("build evidence image bundle drifted")
     rehearsal = data.get("migration_rehearsal") or {}
+    rehearsal_data = json.loads((package / rehearsal["path"]).read_text(encoding="utf-8"))
     _validate_migration_rehearsal(
-        json.loads((package / rehearsal["path"]).read_text(encoding="utf-8")),
+        rehearsal_data,
         target=data["target_sha"],
         parent=data["parent_production_sha"],
         db_image=database["image_id"],
+        candidate_compose_sha256=compose["candidate_sha256"],
     )
+    pressure_path = rehearsal.get("pressure_path")
+    if not isinstance(pressure_path, str) or Path(pressure_path).name != pressure_path:
+        _fail("migration pressure evidence path is unsafe")
+    pressure_artifact = package / pressure_path
+    if not pressure_artifact.is_file() or pressure_artifact.is_symlink():
+        _fail("migration pressure evidence is absent or unsafe")
+    pressure_digest = _sha256_file(pressure_artifact)
+    if pressure_digest != rehearsal.get("pressure_sha256"):
+        _fail("migration pressure evidence digest drifted")
+    if pressure_digest != rehearsal_data.get("pressure_samples_sha256"):
+        _fail("migration rehearsal does not bind packaged pressure evidence")
     rollback = data.get("rollback") or {}
     if rollback.get("mode") == "forward_only_after_d9":
         if rollback.get("rehearsal_evidence") is not None:
@@ -854,6 +1048,7 @@ def _verify_package(package: Path) -> dict[str, Any]:
             parent=data["parent_production_sha"],
             old_app=data["images"]["old_app_id"],
             old_frontend=data["images"]["old_frontend_id"],
+            candidate_compose_sha256=compose["candidate_sha256"],
         )
     else:
         _fail("unknown rollback policy")
@@ -880,7 +1075,6 @@ def _parser() -> argparse.ArgumentParser:
 
     generate = commands.add_parser("generate")
     generate.add_argument("--repo", type=Path, required=True)
-    generate.add_argument("--main-ref", default="refs/remotes/origin/main")
     generate.add_argument("--repository", required=True)
     generate.add_argument("--target-sha", required=True)
     generate.add_argument("--parent-production-sha", required=True)
@@ -895,7 +1089,9 @@ def _parser() -> argparse.ArgumentParser:
     generate.add_argument("--source-tar", type=Path, required=True)
     generate.add_argument("--image-bundle", type=Path, required=True)
     generate.add_argument("--migration-rehearsal", type=Path, required=True)
+    generate.add_argument("--migration-pressure-samples", type=Path, required=True)
     generate.add_argument("--required-check", action="append", required=True)
+    generate.add_argument("--review-evidence", action="append", type=Path, required=True)
     generate.add_argument("--beta-allowlist", type=Path, required=True)
     generate.add_argument("--manifest-hmac-key-id", required=True)
     generate.add_argument("--manifest-hmac-key-fingerprint", required=True)
