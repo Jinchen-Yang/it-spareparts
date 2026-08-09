@@ -78,11 +78,13 @@ def _sign(payload: bytes) -> str:
 
 def _make_token(role: str, sub: str, name: str | None,
                 fallback: bool = False, perms: dict | None = None,
-                token_version: int = 0) -> tuple[str, int]:
+                token_version: int = 0, authn: str | None = None) -> tuple[str, int]:
     exp = int(time.time()) + get_settings().token_ttl_hours * 3600
     payload: dict = {"role": role, "sub": sub, "name": name, "exp": exp, "tv": token_version}
     if perms is not None:
         payload["perms"] = perms
+    if authn is not None:
+        payload["authn"] = authn
     if fallback:
         # 共享口令回退登录：sub 是用户自报的任意字符串，不是实名身份。
         # 依赖 sub 做归属的功能（如对话会话）必须拒绝此类 token。
@@ -194,14 +196,16 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
         db.commit()
         _ev("login_success", user.role)
         token, exp = _make_token(user.role, user.username, user.salesperson_name,
-                                 perms=perms, token_version=user.token_version or 0)
+                                 perms=perms, token_version=user.token_version or 0,
+                                 authn="sys_user")
         return LoginResponse(token=token, role=user.role,
                              name=user.display_name or user.salesperson_name,
                              expires_at=exp, permissions=perms)
 
     # 回退：兼容既有部署的共享口令登录（sys_user 无此账号时）。
-    # admin 的 sub 固定为 'admin'（无冒充空间）；其余用户名是自报的，
-    # token 标记 fb=True，按 sub 归属的功能（对话会话）会拒绝。
+    # admin 的 sub 固定为 'admin'（无冒充空间）；其余用户名是自报的。
+    # authn 记录登录来源，供高风险实名门禁失败关闭。非 admin 仍标记 fb=True，
+    # 延续按 sub 归属功能对自报用户名的既有保护。
     # 先跑一次等量 pbkdf2 抹平时序：避免"已存在用户名走慢路径、不存在走快路径"暴露有效账号。
     verify_password(req.password, _DUMMY_PW_HASH)
     if not hmac.compare_digest(req.password, get_settings().admin_password):
@@ -209,8 +213,18 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
     role = "admin" if req.username == "admin" else "readonly"
     perms = permissions.runtime_safe(permissions.effective(role, None))
+    # Shared credentials are not a real SysUser identity and therefore never
+    # advertise the high-risk project-master write capability to the client.
+    perms["action_maintenance_project_manage"] = False
     _ev("login_success", role, {"path": "shared_password"})
-    token, exp = _make_token(role, req.username, None, fallback=(role != "admin"), perms=perms)
+    token, exp = _make_token(
+        role,
+        req.username,
+        None,
+        fallback=(role != "admin"),
+        perms=perms,
+        authn="shared",
+    )
     return LoginResponse(token=token, role=role, name=req.username, expires_at=exp, permissions=perms)
 
 
@@ -321,7 +335,8 @@ def change_password(req: ChangePasswordRequest, request: Request,
 
     perms = permissions.runtime_safe(permissions.effective_for_user(user))
     token, exp = _make_token(user.role, user.username, user.salesperson_name,
-                             perms=perms, token_version=user.token_version)
+                             perms=perms, token_version=user.token_version,
+                             authn="sys_user")
     return ChangePasswordResponse(token=token, expires_at=exp)
 
 

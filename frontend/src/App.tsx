@@ -36,10 +36,10 @@ export default function App() {
     const role = localStorage.getItem("role") || "";
     const isAdmin = role === "admin";
     const perms = readPerms();
-    // 权限规则与旧版一致：admin 全通；有 perm 键的查权限快照；anyPerm 任一命中即可见
-    // （互通PN池管理：manage / set_policy 两个动作权限共享入口）；两者都没有的仅 admin（账号管理）
+    // admin 全通；组合能力入口优先按完整能力判断；其余沿用单权限/任一权限规则。
     return NAV_ITEMS.filter((it) => isAdmin
-      || (it.perm ? !!perms[it.perm]
+      || (it.visibleWhen ? it.visibleWhen()
+        : it.perm ? !!perms[it.perm]
         : it.anyPerm ? it.anyPerm.some((p) => !!perms[p])
           : false));
   }, [token]);

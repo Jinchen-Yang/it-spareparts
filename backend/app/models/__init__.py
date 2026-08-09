@@ -12,6 +12,21 @@ from app.models.maintenance import (
     MaintenanceManualCostOverride,
     MaintenanceRoundtripOperation,
 )
+from app.models.maintenance_project import (
+    MaintenanceProject,
+    MaintenanceProjectAuditLog,
+    MaintenanceProjectContract,
+)
+from app.models.maintenance_project_operations import (
+    MaintenanceCollectionSnapshot,
+    MaintenanceProjectExpenseAttribution,
+    MaintenanceProjectOperationAudit,
+    MaintenanceProjectWorkbookOperation,
+    MaintenanceProjectWorkbookState,
+    MaintenanceProjectWorkbookValidation,
+    MaintenanceSiteIssue,
+    MaintenanceSiteIssueLine,
+)
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -55,6 +70,17 @@ __all__ = [
     "MaintenanceContractWorkbookState",
     "MaintenanceManualCostOverride",
     "MaintenanceRoundtripOperation",
+    "MaintenanceProject",
+    "MaintenanceProjectAuditLog",
+    "MaintenanceProjectContract",
+    "MaintenanceCollectionSnapshot",
+    "MaintenanceProjectExpenseAttribution",
+    "MaintenanceProjectOperationAudit",
+    "MaintenanceProjectWorkbookOperation",
+    "MaintenanceProjectWorkbookState",
+    "MaintenanceProjectWorkbookValidation",
+    "MaintenanceSiteIssue",
+    "MaintenanceSiteIssueLine",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",

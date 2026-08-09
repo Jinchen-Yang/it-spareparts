@@ -329,6 +329,15 @@ find "$BACKUP_DIR" -maxdepth 1 -type f \
 `flock` 拒绝重叠执行，先把 dump 写入同目录临时文件，完成 TOC 与 checksum
 校验后再原子发布；失败或同分钟重跑都不会截断既有恢复点。
 
+后续 schema 发布不能复用或改写历史 v1.20 exact-SHA 控制面。新 migration 落地后，
+必须在停写窗口生成第一份新 head 备份并执行当前恢复门禁；只有数据库 head 一致且包含
+`maintenance_project`、`maintenance_project_contract` 两张稳定维保项目表逐表行数
+在生产库与隔离恢复库完全一致，才可宣布该发布具备可恢复性：
+
+```bash
+"$APP_DIR/.deploy/restore_drill.sh"
+```
+
 恢复命令(灾难时):
 ```bash
 sha256sum -c /var/backups/spareparts/db-<日期>.dump.sha256
