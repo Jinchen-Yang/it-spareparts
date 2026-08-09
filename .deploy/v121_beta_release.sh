@@ -9,6 +9,7 @@ readonly DEFAULT_APP_DIR=/home/ubuntu/apps/it-spareparts
 readonly LOCK_DIR=/run/lock/it-spareparts-v121-beta
 readonly DEFAULT_PARENT_STATE=/var/lib/it-spareparts-release-control/v120-state.state
 readonly HOST_NAME=hbzgc.icu
+readonly OBSERVATION_GRACE_SECONDS=120
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly SCRIPT_DIR
 readonly MANIFEST_TOOL="$SCRIPT_DIR/v121_beta_manifest.py"
@@ -808,9 +809,35 @@ candidate_images_running() {
     && [ "$(docker inspect -f '{{.State.Running}}' "$frontend_cid")" = true ]
 }
 
-emergency_stop_app() {
-  compose stop app >/dev/null 2>&1 || true
-  [ -z "$(compose ps -q app 2>/dev/null)" ]
+emergency_stop_public_surface() {
+  local service running remaining container
+  for service in app frontend; do
+    running=$(docker ps --quiet \
+      --filter label=com.docker.compose.project=it-spareparts \
+      --filter "label=com.docker.compose.service=$service") || return 1
+    if [ -n "$running" ]; then
+      while IFS= read -r container; do
+        [ -n "$container" ] || continue
+        docker stop --time 20 "$container" >/dev/null \
+          || docker kill "$container" >/dev/null \
+          || return 1
+      done <<<"$running"
+    fi
+    remaining=$(docker ps --quiet \
+      --filter label=com.docker.compose.project=it-spareparts \
+      --filter "label=com.docker.compose.service=$service") || return 1
+    [ -z "$remaining" ] || return 1
+  done
+}
+
+fail_closed() {
+  local reason=$1
+  if emergency_stop_public_surface; then
+    state_update contained_public_surface_stopped \
+      '{"beta_contained":true,"public_surface_stopped":true,"manual_recovery_required":true}'
+    fatal "$reason; app and frontend were stopped"
+  fi
+  fatal "$reason; CRITICAL: app/frontend stop could not be proven"
 }
 
 recreate_app() {
@@ -825,15 +852,10 @@ recreate_app() {
 contain_failed_open() {
   local reason=$1
   if ! set_flags false false; then
-    emergency_stop_app || true
-    fatal "$reason; flags could not be persisted false, so the application was stopped"
+    fail_closed "$reason; flags could not be persisted false"
   fi
   if ! recreate_app; then
-    emergency_stop_app \
-      || fatal "$reason; flags are false, app recovery failed, and app stop is unproven"
-    state_update contained_app_stopped \
-      '{"beta_contained":true,"pilot_open_failed":true,"application_stopped":true}'
-    fatal "$reason; flags are false and the application was stopped because recovery failed"
+    fail_closed "$reason; flags are false but application recovery failed"
   fi
   state_update contained_after_failed_open \
     '{"beta_contained":true,"pilot_open_failed":true}'
@@ -1020,18 +1042,22 @@ migrate() {
     || fatal "old business containers did not stop"
   assert_db_unchanged
   local samples="$EVIDENCE_DIR/migration-db-pressure.jsonl"
+  local sampler_stop="$EVIDENCE_DIR/.migration-sampler-stop"
   : >"$samples"
   chmod 600 "$samples"
+  [ ! -e "$sampler_stop" ] && [ ! -L "$sampler_stop" ] \
+    || fatal "migration sampler stop marker already exists"
+  local started_ns ended_ns status sampler_status
+  started_ns=$(date +%s%N)
   (
-    while :; do
-      printf '{"captured_at":"%s","pressure":%s}\n' \
-        "$(date --iso-8601=seconds)" "$(database_pressure_json)" >>"$samples" || exit 1
+    while [ ! -e "$sampler_stop" ]; do
+      pressure=$(database_pressure_json) || exit 1
+      printf '{"captured_at":"%s","captured_at_epoch_ms":%s,"pressure":%s}\n' \
+        "$(date --iso-8601=seconds)" "$(date +%s%3N)" "$pressure" >>"$samples" || exit 1
       sleep 1
     done
   ) &
   local sampler_pid=$!
-  local started_ns ended_ns status
-  started_ns=$(date +%s%N)
   set +e
   compose run --rm --no-deps \
     -e "PGOPTIONS=-c statement_timeout=120000 -c lock_timeout=5000" \
@@ -1039,22 +1065,48 @@ migrate() {
   status=$?
   set -e
   ended_ns=$(date +%s%N)
-  kill "$sampler_pid" >/dev/null 2>&1 || true
-  wait "$sampler_pid" >/dev/null 2>&1 || true
+  install -m 600 /dev/null "$sampler_stop"
+  set +e
+  wait "$sampler_pid"
+  sampler_status=$?
+  set -e
+  rm -- "$sampler_stop"
   if [ "$status" -ne 0 ]; then
     state_update migration_failed '{"beta_contained":true,"database_restore_forbidden":true}'
     fatal "migration failed; Beta remains off, do not downgrade or restore DB; forward fix required"
+  fi
+  if [ "$sampler_status" -ne 0 ]; then
+    state_update migration_failed '{"beta_contained":true,"database_restore_forbidden":true}'
+    fatal "migration pressure sampler exited early; forward verification required"
   fi
   [ -s "$samples" ] || {
     state_update migration_failed '{"beta_contained":true,"database_restore_forbidden":true}'
     fatal "migration pressure sampler produced no evidence; forward verification required"
   }
-  if ! python3 - "$samples" <<'PY'
+  if ! python3 - "$samples" "$started_ns" "$ended_ns" <<'PY'
 import json,sys
 with open(sys.argv[1],encoding="utf-8") as stream:
     rows=[json.loads(line) for line in stream if line.strip()]
-if not rows or any("pressure" not in row for row in rows):
+required={"captured_at","captured_at_epoch_ms","pressure"}
+pressure_keys={"blocked_sessions","long_transactions","waiting_locks","total_locks"}
+if not rows or any(set(row) != required for row in rows):
     raise SystemExit("malformed migration pressure evidence")
+times=[]
+for row in rows:
+    if not isinstance(row["captured_at_epoch_ms"],int):
+        raise SystemExit("malformed migration pressure timestamp")
+    pressure=row["pressure"]
+    if not isinstance(pressure,dict) or set(pressure) != pressure_keys:
+        raise SystemExit("malformed migration pressure row")
+    if any(not isinstance(value,int) or value < 0 for value in pressure.values()):
+        raise SystemExit("malformed migration pressure value")
+    times.append(row["captured_at_epoch_ms"])
+if times != sorted(times) or any(right-left > 2500 for left,right in zip(times,times[1:])):
+    raise SystemExit("migration pressure sampling has a gap")
+started=int(sys.argv[2])//1_000_000
+ended=int(sys.argv[3])//1_000_000
+if times[0] > started+2000 or times[-1] < ended-2000:
+    raise SystemExit("migration pressure sampling does not cover the migration")
 PY
   then
     state_update migration_failed '{"beta_contained":true,"database_restore_forbidden":true}'
@@ -1125,15 +1177,10 @@ open_empty_beta() {
   smoke deny "$1" \
     || contain_failed_open "empty-stage deny smoke failed"
   if ! set_flags false false; then
-    emergency_stop_app || true
-    fatal "empty-stage passed but flags could not be persisted false; application was stopped"
+    fail_closed "empty-stage passed but flags could not be persisted false"
   fi
   if ! recreate_app; then
-    emergency_stop_app \
-      || fatal "empty-stage flags are false, app recovery failed, and app stop is unproven"
-    state_update contained_app_stopped \
-      '{"beta_contained":true,"application_stopped":true}'
-    fatal "empty-stage flags are false; application was stopped because recovery failed"
+    fail_closed "empty-stage flags are false but application recovery failed"
   fi
   state_update empty_beta_verified \
     '{"beta_contained":true,"empty_allowlist_stage_passed":true}'
@@ -1157,13 +1204,23 @@ pilot_smoke() {
     || contain_failed_open "pilot deny smoke failed"
   smoke allow "$2" \
     || contain_failed_open "pilot allow smoke failed"
-  local opened
+  local opened app_cid frontend_cid pilot_state
   opened=$(date +%s)
-  state_update pilot_open "$(python3 - "$opened" <<'PY'
+  app_cid=$(service_cid app) \
+    || contain_failed_open "cannot resolve pilot app container"
+  frontend_cid=$(service_cid frontend) \
+    || contain_failed_open "cannot resolve pilot frontend container"
+  pilot_state=$(python3 - "$opened" "$app_cid" "$frontend_cid" \
+    "$(container_restarts "$app_cid")" "$(container_restarts "$frontend_cid")" <<'PY'
 import json,sys
-print(json.dumps({"pilot_opened_at_epoch":int(sys.argv[1]),"allowlist_verified":True},separators=(",",":")))
+print(json.dumps({"pilot_opened_at_epoch":int(sys.argv[1]),
+ "pilot_app_container_id":sys.argv[2],"pilot_frontend_container_id":sys.argv[3],
+ "pilot_app_restart_count":int(sys.argv[4]),"pilot_frontend_restart_count":int(sys.argv[5]),
+ "allowlist_verified":True},separators=(",",":")))
 PY
-)"
+) || contain_failed_open "cannot capture pilot identity baseline"
+  state_update pilot_open "$pilot_state" \
+    || contain_failed_open "cannot persist pilot release state"
   printf 'named-account pilot smoke passed\n'
 }
 
@@ -1174,7 +1231,8 @@ observe() {
   require_phase pilot_open
   assert_flags true true false \
     || contain_failed_open "Beta flag drift detected before observation"
-  local opened now required_elapsed
+  local opened now required_elapsed elapsed
+  local app_cid frontend_cid
   local previous observation_file
   case "$minute" in
     0) ;;
@@ -1193,6 +1251,10 @@ if (row.get("format"),row.get("manifest_sha256"),row.get("minute"),row.get("resu
     "v121-observation-1",sys.argv[2],int(sys.argv[3]),"passed"
 ):
     raise SystemExit("previous observation evidence is invalid")
+elapsed=row.get("elapsed_seconds")
+minimum=int(sys.argv[3])*60
+if not isinstance(elapsed,int) or not minimum <= elapsed <= minimum+120:
+    raise SystemExit("previous observation was captured outside its window")
 PY
     then
       contain_failed_open "previous observation evidence is invalid"
@@ -1200,12 +1262,20 @@ PY
   done
   observation_file="$EVIDENCE_DIR/observe-${minute}.json"
   [ ! -e "$observation_file" ] && [ ! -L "$observation_file" ] \
-    || fatal "observation evidence already exists and is immutable"
-  opened=$(state_get pilot_opened_at_epoch)
+    || contain_failed_open "observation evidence already exists or is unsafe"
+  opened=$(state_get pilot_opened_at_epoch) \
+    || contain_failed_open "pilot opening time is unavailable"
   now=$(date +%s)
   required_elapsed=$((minute * 60))
-  [ "$((now-opened))" -ge "$required_elapsed" ] \
+  elapsed=$((now-opened))
+  [ "$elapsed" -ge "$required_elapsed" ] \
     || fatal "observation point $minute minutes has not been reached"
+  [ "$elapsed" -le "$((required_elapsed+OBSERVATION_GRACE_SECONDS))" ] \
+    || contain_failed_open "observation minute $minute missed its two-minute window"
+  app_cid=$(service_cid app) \
+    || contain_failed_open "cannot resolve observed app container"
+  frontend_cid=$(service_cid frontend) \
+    || contain_failed_open "cannot resolve observed frontend container"
   if ! internal_health \
       || ! smoke stable "$2" \
       || ! smoke deny "$3" \
@@ -1213,25 +1283,34 @@ PY
       || ! no_db_pressure \
       || ! db_matches_state \
       || ! candidate_images_running \
+      || [ "$app_cid" != "$(state_get pilot_app_container_id)" ] \
+      || [ "$frontend_cid" != "$(state_get pilot_frontend_container_id)" ] \
+      || [ "$(container_restarts "$app_cid")" != "$(state_get pilot_app_restart_count)" ] \
+      || [ "$(container_restarts "$frontend_cid")" != "$(state_get pilot_frontend_restart_count)" ] \
       || ! assert_intended_allowlist; then
     contain_failed_open "observation minute $minute failed"
   fi
-  write_json_atomic "$observation_file" "$(python3 - \
-    "$MANIFEST_SHA" "$minute" "$(database_pressure_json)" \
+  if ! write_json_atomic "$observation_file" "$(python3 - \
+    "$MANIFEST_SHA" "$minute" "$elapsed" "$(database_pressure_json)" \
     "$(container_restarts "$(db_cid)")" \
-    "$(container_restarts "$(service_cid app)")" \
-    "$(container_restarts "$(service_cid frontend)")" <<'PY'
+    "$(container_restarts "$app_cid")" \
+    "$(container_restarts "$frontend_cid")" "$app_cid" "$frontend_cid" <<'PY'
 import datetime as dt,json,sys
 print(json.dumps({"format":"v121-observation-1","manifest_sha256":sys.argv[1],
- "minute":int(sys.argv[2]),"database_pressure":json.loads(sys.argv[3]),
- "restart_counts":{"db":int(sys.argv[4]),"app":int(sys.argv[5]),"frontend":int(sys.argv[6])},
+ "minute":int(sys.argv[2]),"elapsed_seconds":int(sys.argv[3]),
+ "database_pressure":json.loads(sys.argv[4]),
+ "restart_counts":{"db":int(sys.argv[5]),"app":int(sys.argv[6]),"frontend":int(sys.argv[7])},
+ "container_ids":{"app":sys.argv[8],"frontend":sys.argv[9]},
  "stable_smoke":"passed","beta_deny_smoke":"passed","beta_allow_smoke":"passed",
  "observed_at":dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
  "result":"passed"},sort_keys=True,separators=(",",":")))
 PY
-)"
+)"; then
+    contain_failed_open "cannot persist observation minute $minute evidence"
+  fi
   if [ "$minute" = 30 ]; then
-    state_update observed '{"technical_observation_complete":true}'
+    state_update observed '{"technical_observation_complete":true}' \
+      || contain_failed_open "cannot persist completed observation state"
   fi
   printf 'observation minute %s passed\n' "$minute"
 }
@@ -1240,8 +1319,7 @@ contain() {
   [ "$#" -eq 0 ] || usage
   [ -f "$STATE" ] || fatal "release state missing"
   if ! set_flags false false; then
-    emergency_stop_app || true
-    fatal "flags could not be persisted false; application was stopped"
+    fail_closed "flags could not be persisted false"
   fi
   if [ "$(state_get phase)" = old_images_on_d9 ]; then
     docker image tag "$OLD_APP_IMAGE_ID" "$APP_IMAGE_REF"
@@ -1250,18 +1328,10 @@ contain() {
         || [ "$(container_image_id "$(service_cid app)")" != "$OLD_APP_IMAGE_ID" ] \
         || [ "$(container_image_id "$(service_cid frontend)")" != "$OLD_FRONTEND_IMAGE_ID" ] \
         || ! internal_health; then
-      emergency_stop_app \
-        || fatal "flags are false, old-image recovery failed, and app stop is unproven"
-      state_update contained_app_stopped \
-        '{"beta_contained":true,"application_stopped":true,"database_restore_forbidden":true}'
-      fatal "flags are false; old-image application was stopped because recovery failed"
+      fail_closed "flags are false but old-image application recovery failed"
     fi
   elif ! recreate_app; then
-    emergency_stop_app \
-      || fatal "flags are false, candidate recovery failed, and app stop is unproven"
-    state_update contained_app_stopped \
-      '{"beta_contained":true,"application_stopped":true}'
-    fatal "flags are false; candidate application was stopped because recovery failed"
+    fail_closed "flags are false but candidate application recovery failed"
   fi
   assert_flags false false false
   state_update contained '{"beta_contained":true}'
@@ -1271,10 +1341,14 @@ contain() {
 rollback_app() {
   [ "$#" -eq 0 ] || usage
   [ -f "$STATE" ] || fatal "release state missing"
-  [ "$(db_head)" = "$EXPECTED_TO" ] || fatal "rollback control only applies after committed d9"
-  set_flags false false
+  if ! set_flags false false; then
+    fail_closed "rollback could not persist both Beta flags false"
+  fi
+  if [ "$(db_head)" != "$EXPECTED_TO" ]; then
+    fail_closed "rollback control only applies after committed d9"
+  fi
   if [ "$ROLLBACK_MODE" != old_images_on_d9_allowed ]; then
-    recreate_app || fatal "flags are false but candidate app recovery is unproven"
+    recreate_app || fail_closed "old-image rollback is forbidden and candidate recovery failed"
     state_update contained_forward_fix \
       '{"beta_contained":true,"old_image_rollback_refused":true,"database_restore_forbidden":true}'
     fatal "old images were not rehearsed on d9; Beta was contained, forward fix is mandatory"
@@ -1282,17 +1356,19 @@ rollback_app() {
   local evidence_path evidence_sha
   evidence_path="$PACKAGE_DIR/$(manifest_get rollback.rehearsal_evidence.path)"
   evidence_sha=$(manifest_get rollback.rehearsal_evidence.sha256)
-  [ "$(sha256_file "$evidence_path")" = "$evidence_sha" ] \
-    || fatal "old-image d9 rehearsal evidence drifted"
-  docker image tag "$OLD_APP_IMAGE_ID" "$APP_IMAGE_REF"
-  docker image tag "$OLD_FRONTEND_IMAGE_ID" "$FRONTEND_IMAGE_REF"
-  compose up --no-deps --no-build --force-recreate -d app frontend
-  assert_db_unchanged
-  [ "$(container_image_id "$(service_cid app)")" = "$OLD_APP_IMAGE_ID" ] \
-    || fatal "old app image did not start"
-  [ "$(container_image_id "$(service_cid frontend)")" = "$OLD_FRONTEND_IMAGE_ID" ] \
-    || fatal "old frontend image did not start"
-  internal_health || fatal "rehearsed old-image application rollback is unhealthy"
+  if [ "$(sha256_file "$evidence_path")" != "$evidence_sha" ]; then
+    recreate_app || fail_closed "rollback evidence drifted and candidate recovery failed"
+    fatal "old-image d9 rehearsal evidence drifted; Beta remains closed on candidate images"
+  fi
+  if ! docker image tag "$OLD_APP_IMAGE_ID" "$APP_IMAGE_REF" \
+      || ! docker image tag "$OLD_FRONTEND_IMAGE_ID" "$FRONTEND_IMAGE_REF" \
+      || ! compose up --no-deps --no-build --force-recreate -d app frontend \
+      || ! db_matches_state \
+      || [ "$(container_image_id "$(service_cid app)")" != "$OLD_APP_IMAGE_ID" ] \
+      || [ "$(container_image_id "$(service_cid frontend)")" != "$OLD_FRONTEND_IMAGE_ID" ] \
+      || ! internal_health; then
+    fail_closed "rehearsed old-image application rollback failed"
+  fi
   state_update old_images_on_d9 \
     '{"beta_contained":true,"database_restore_forbidden":true,"database_revision":"d9f1a3c7e5b2"}'
   printf 'rehearsed old application images restored on d9; database was not downgraded or restored\n'

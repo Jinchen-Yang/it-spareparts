@@ -53,6 +53,47 @@ REPLENISHMENT_KEYS = (
     "action_replenishment_create",
     "action_replenishment_review",
 )
+ACTION_CANARY_ROUTES = {
+    "action_maintenance_roundtrip_apply": (
+        "POST",
+        "/api/maintenance/projects/stable/{project_id}/collections",
+    ),
+    "action_maintenance_manager_workbook_apply": (
+        "POST",
+        "/api/maintenance/project-manager/workbooks/v3/apply",
+    ),
+    "action_maintenance_project_manage": ("POST", "/api/maintenance/projects/stable"),
+    "action_maintenance_demand_delete": (
+        "POST",
+        "/api/maintenance/demands/delete-intents",
+    ),
+    "action_maintenance_site_issue_manage": (
+        "POST",
+        "/api/maintenance/site-issues/projects/{project_id}",
+    ),
+    "action_maintenance_bad_return_manage": ("POST", "/api/maintenance/bad-returns"),
+    "action_maintenance_acceptance_submit": (
+        "POST",
+        "/api/maintenance/projects/stable/{project_id}/acceptance/submit",
+    ),
+    "action_maintenance_acceptance_review": (
+        "POST",
+        "/api/maintenance/acceptance-deliverables/{deliverable_id}/review",
+    ),
+    "action_maintenance_warehouse_manage": (
+        "POST",
+        "/api/maintenance/warehouse-imports/{import_id}/apply",
+    ),
+    "action_maintenance_migration_review": (
+        "POST",
+        "/api/maintenance/migration-runs/{run_id}/approve",
+    ),
+    "action_replenishment_create": ("POST", "/api/replenishment-beta/applications"),
+    "action_replenishment_review": (
+        "POST",
+        "/api/replenishment-beta/applications/{application_id}/review-results",
+    ),
+}
 
 
 class ManifestError(RuntimeError):
@@ -91,6 +132,12 @@ def _sha256_file(path: Path) -> str:
 
 def _json_bytes(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def _route_path_matches(template: str, path: str) -> bool:
+    parts = re.split(r"(\{[A-Za-z_][A-Za-z0-9_]*\})", template)
+    pattern = "".join(r"[^/?#]+" if part.startswith("{") else re.escape(part) for part in parts)
+    return re.fullmatch(pattern, path) is not None
 
 
 def _git_bytes(repo: Path, commit: str, path: str) -> bytes:
@@ -204,7 +251,102 @@ def _migration_inventory(repo: Path, target: str) -> list[dict[str, Any]]:
     return [revisions[revision] for revision in sorted(selected)]
 
 
-def _parse_allowlist(path: Path, *, target: str) -> tuple[dict[str, Any], list[Path]]:
+def _validate_canary_document(
+    data: Any,
+    *,
+    repository: str,
+    target: str,
+    expected_username: str | None = None,
+    expected_action: str | None = None,
+) -> tuple[str, str, int]:
+    if not isinstance(data, dict) or data.get("format") != "v121-action-canary-v1":
+        _fail("canary evidence has the wrong format")
+    expected = {
+        "source": "github-commit-comment-api",
+        "repository": repository,
+        "target_sha": target,
+        "conclusion": "passed",
+        "environment": "isolated",
+    }
+    for key, value in expected.items():
+        if data.get(key) != value:
+            _fail(f"canary evidence mismatch: {key}")
+    username = data.get("username")
+    action = data.get("action")
+    if not isinstance(username, str) or not SAFE_ACCOUNT.fullmatch(username):
+        _fail("canary evidence has an invalid system username")
+    if action not in ACTION_CANARY_ROUTES:
+        _fail("canary evidence has an unknown action")
+    if expected_username is not None and username != expected_username:
+        _fail("canary evidence username differs from the allowlist")
+    if expected_action is not None and action != expected_action:
+        _fail("canary evidence action differs from the allowlist")
+    executor = data.get("executor_id")
+    if not isinstance(executor, str) or not SAFE_ACCOUNT.fullmatch(executor):
+        _fail("canary evidence has an invalid executor id")
+    if data.get("author_association") not in {"OWNER", "MEMBER", "COLLABORATOR"}:
+        _fail("canary executor is not a repository collaborator")
+    completed_at = data.get("completed_at")
+    if not isinstance(completed_at, str):
+        _fail("canary evidence lacks a completion time")
+    try:
+        parsed_time = dt.datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+    except ValueError:
+        _fail("canary evidence has an invalid completion time")
+    if parsed_time.tzinfo is None:
+        _fail("canary evidence completion time lacks a timezone")
+    comment_id = data.get("comment_id")
+    if not isinstance(comment_id, int) or comment_id <= 0:
+        _fail("canary evidence has an invalid GitHub comment id")
+    if not SHA256.fullmatch(str(data.get("body_sha256", ""))):
+        _fail("canary evidence has an invalid GitHub body digest")
+    comment_url = data.get("comment_url")
+    if not isinstance(comment_url, str) or not comment_url.startswith(
+        f"https://github.com/{repository}/commit/{target}#commitcomment-"
+    ):
+        _fail("canary evidence URL is not bound to the target commit")
+    request = data.get("request")
+    if not isinstance(request, dict) or set(request) != {
+        "method",
+        "path",
+        "route_template",
+        "payload_sha256",
+    }:
+        _fail("canary evidence has a malformed request")
+    expected_method, expected_route = ACTION_CANARY_ROUTES[action]
+    if request["method"] != expected_method or request["route_template"] != expected_route:
+        _fail("canary evidence is not bound to the action's canonical API")
+    if not isinstance(request["path"], str) or not _route_path_matches(
+        expected_route, request["path"]
+    ):
+        _fail("canary evidence path does not instantiate its canonical API")
+    if not SHA256.fullmatch(str(request["payload_sha256"])):
+        _fail("canary evidence has an invalid payload digest")
+    result = data.get("result")
+    if not isinstance(result, dict) or set(result) != {
+        "expected_status",
+        "observed_status",
+        "response_sha256",
+    }:
+        _fail("canary evidence has a malformed result")
+    if (
+        not isinstance(result["expected_status"], int)
+        or not 200 <= result["expected_status"] < 300
+        or result["observed_status"] != result["expected_status"]
+    ):
+        _fail("canary evidence did not observe the expected success status")
+    if not SHA256.fullmatch(str(result["response_sha256"])):
+        _fail("canary evidence has an invalid response digest")
+    return username, action, comment_id
+
+
+def _parse_allowlist(
+    path: Path,
+    *,
+    repository: str,
+    target: str,
+    verify_live_canaries: bool = False,
+) -> tuple[dict[str, Any], list[Path]]:
     """Validate the named-account permission graph and return privacy-safe digests."""
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or data.get("format") != "v121-beta-allowlist-v1":
@@ -240,57 +382,21 @@ def _parse_allowlist(path: Path, *, target: str) -> tuple[dict[str, Any], list[P
             evidence_data = json.loads(source.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             _fail(f"canary evidence is not JSON: {evidence_path} ({exc})")
-        if not isinstance(evidence_data, dict) or evidence_data.get("format") != "v121-action-canary-v1":
-            _fail(f"canary evidence has the wrong format: {evidence_path}")
-        for key, value in {
-            "username": username,
-            "action": action,
-            "target_sha": target,
-            "conclusion": "passed",
-            "environment": "isolated",
-        }.items():
-            if evidence_data.get(key) != value:
-                _fail(f"canary evidence is not bound to {username}/{action}/{target}: {key}")
-        executor = evidence_data.get("executor_id")
-        if not isinstance(executor, str) or not SAFE_ACCOUNT.fullmatch(executor):
-            _fail(f"canary evidence has an invalid executor id: {evidence_path}")
-        completed_at = evidence_data.get("completed_at")
-        if not isinstance(completed_at, str):
-            _fail(f"canary evidence lacks a completion time: {evidence_path}")
-        try:
-            parsed_time = dt.datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
-        except ValueError:
-            _fail(f"canary evidence has an invalid completion time: {evidence_path}")
-        if parsed_time.tzinfo is None:
-            _fail(f"canary evidence completion time lacks a timezone: {evidence_path}")
-        request = evidence_data.get("request")
-        if not isinstance(request, dict) or set(request) != {"method", "path", "payload_sha256"}:
-            _fail(f"canary evidence has a malformed request: {evidence_path}")
-        if request["method"] not in {"POST", "PUT", "PATCH", "DELETE"}:
-            _fail(f"canary evidence request is not a write method: {evidence_path}")
-        if (
-            not isinstance(request["path"], str)
-            or not request["path"].startswith("/api/")
-            or any(character.isspace() for character in request["path"])
-        ):
-            _fail(f"canary evidence has an invalid API path: {evidence_path}")
-        if not SHA256.fullmatch(str(request["payload_sha256"])):
-            _fail(f"canary evidence has an invalid payload digest: {evidence_path}")
-        result = evidence_data.get("result")
-        if not isinstance(result, dict) or set(result) != {
-            "expected_status",
-            "observed_status",
-            "response_sha256",
-        }:
-            _fail(f"canary evidence has a malformed result: {evidence_path}")
-        if (
-            not isinstance(result["expected_status"], int)
-            or not 200 <= result["expected_status"] < 300
-            or result["observed_status"] != result["expected_status"]
-        ):
-            _fail(f"canary evidence did not observe the expected success status: {evidence_path}")
-        if not SHA256.fullmatch(str(result["response_sha256"])):
-            _fail(f"canary evidence has an invalid response digest: {evidence_path}")
+        _, _, comment_id = _validate_canary_document(
+            evidence_data,
+            repository=repository,
+            target=target,
+            expected_username=username,
+            expected_action=action,
+        )
+        if verify_live_canaries:
+            live_canary = _fetch_canary_comment(
+                repository=repository,
+                target=target,
+                comment_id=comment_id,
+            )
+            if live_canary != evidence_data:
+                _fail(f"canary evidence drifted from the live GitHub API: {evidence_path}")
         key = (username, action)
         if key in evidence:
             _fail(f"duplicate canary evidence for {username}/{action}")
@@ -503,10 +609,163 @@ def _validate_migration_rehearsal(
             _fail(f"production-copy migration rehearsal digest is invalid: {key}")
 
 
-def _validate_review_evidence(data: Any, *, target: str) -> str:
-    if not isinstance(data, dict) or data.get("format") != "exact-sha-independent-review-v1":
+def _canary_comment_evidence(
+    payload: Any, *, repository: str, target: str
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        _fail("GitHub canary comment response is malformed")
+    try:
+        body = json.loads(payload.get("body", ""))
+    except (json.JSONDecodeError, TypeError):
+        _fail("GitHub canary comment body must be a JSON attestation")
+    required_body = {
+        "format",
+        "username",
+        "action",
+        "target_sha",
+        "environment",
+        "request",
+        "result",
+        "conclusion",
+    }
+    if not isinstance(body, dict) or set(body) != required_body:
+        _fail("GitHub canary attestation has an invalid field inventory")
+    user = payload.get("user")
+    executor = user.get("login") if isinstance(user, dict) else None
+    if (
+        not isinstance(executor, str)
+        or not SAFE_ACCOUNT.fullmatch(executor)
+        or user.get("type") != "User"
+    ):
+        _fail("GitHub canary attestation is not owned by a named human account")
+    if payload.get("author_association") not in {"OWNER", "MEMBER", "COLLABORATOR"}:
+        _fail("GitHub canary attestor is not a repository collaborator")
+    if payload.get("commit_id") != target:
+        _fail("GitHub canary comment is not attached to the exact target SHA")
+    if payload.get("created_at") != payload.get("updated_at"):
+        _fail("edited GitHub canary attestations are not accepted")
+    comment_id = payload.get("id")
+    if not isinstance(comment_id, int) or comment_id <= 0:
+        _fail("GitHub canary attestation has an invalid comment id")
+    comment_url = payload.get("html_url")
+    if not isinstance(comment_url, str) or not comment_url.startswith(
+        f"https://github.com/{repository}/commit/{target}#commitcomment-"
+    ):
+        _fail("GitHub canary attestation URL is not bound to the target commit")
+    evidence = {
+        **body,
+        "source": "github-commit-comment-api",
+        "repository": repository,
+        "executor_id": executor,
+        "author_association": payload["author_association"],
+        "comment_id": comment_id,
+        "comment_url": comment_url,
+        "completed_at": payload["created_at"],
+        "body_sha256": _sha256_bytes(payload["body"].encode()),
+    }
+    _validate_canary_document(evidence, repository=repository, target=target)
+    return evidence
+
+
+def _fetch_canary_comment(*, repository: str, target: str, comment_id: int) -> dict[str, Any]:
+    payload = json.loads(_run("gh", "api", f"repos/{repository}/comments/{comment_id}"))
+    return _canary_comment_evidence(payload, repository=repository, target=target)
+
+
+def _capture_canary(args: argparse.Namespace) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository):
+        _fail("repository must be owner/name")
+    if not SHA40.fullmatch(args.target_sha):
+        _fail("target SHA must be 40 lowercase hex characters")
+    if args.output.exists() or args.output.is_symlink():
+        _fail("canary evidence output already exists; evidence is immutable")
+    evidence = _fetch_canary_comment(
+        repository=args.repository,
+        target=args.target_sha,
+        comment_id=args.comment_id,
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_bytes(_json_bytes(evidence))
+    os.chmod(args.output, 0o600)
+    print(f"CANARY_EXECUTOR_ID={evidence['executor_id']}")
+    print(f"CANARY_EVIDENCE_SHA256={_sha256_file(args.output)}")
+
+
+def _review_comment_evidence(
+    payload: Any, *, repository: str, target: str
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        _fail("GitHub review comment response is malformed")
+    try:
+        body = json.loads(payload.get("body", ""))
+    except (json.JSONDecodeError, TypeError):
+        _fail("GitHub review comment body must be a JSON attestation")
+    expected_body = {
+        "format": "v121-independent-review-attestation-v1",
+        "target_sha": target,
+        "scope": "full-release-candidate",
+        "p0_count": 0,
+        "p1_count": 0,
+        "conclusion": "approved",
+    }
+    if not isinstance(body, dict) or set(body) != {*expected_body, "report_url"}:
+        _fail("GitHub review attestation has an invalid field inventory")
+    for key, value in expected_body.items():
+        if body.get(key) != value:
+            _fail(f"GitHub review attestation mismatch: {key}")
+    report_url = body.get("report_url")
+    if not isinstance(report_url, str) or not report_url.startswith(
+        f"https://github.com/{repository}/"
+    ):
+        _fail("GitHub review attestation report URL is not repository-owned")
+    user = payload.get("user")
+    reviewer = user.get("login") if isinstance(user, dict) else None
+    if (
+        not isinstance(reviewer, str)
+        or not SAFE_ACCOUNT.fullmatch(reviewer)
+        or user.get("type") != "User"
+    ):
+        _fail("GitHub review attestation is not owned by a named human account")
+    if payload.get("author_association") not in {"OWNER", "MEMBER", "COLLABORATOR"}:
+        _fail("GitHub review attestor is not a repository collaborator")
+    if payload.get("commit_id") != target:
+        _fail("GitHub review comment is not attached to the exact target SHA")
+    if payload.get("created_at") != payload.get("updated_at"):
+        _fail("edited GitHub review attestations are not accepted")
+    comment_id = payload.get("id")
+    if not isinstance(comment_id, int) or comment_id <= 0:
+        _fail("GitHub review attestation has an invalid comment id")
+    comment_url = payload.get("html_url")
+    if not isinstance(comment_url, str) or not comment_url.startswith(
+        f"https://github.com/{repository}/commit/{target}#commitcomment-"
+    ):
+        _fail("GitHub review attestation URL is not bound to the target commit")
+    return {
+        **expected_body,
+        "format": "github-exact-sha-independent-review-v1",
+        "source": "github-commit-comment-api",
+        "repository": repository,
+        "reviewer_id": reviewer,
+        "author_association": payload["author_association"],
+        "comment_id": comment_id,
+        "comment_url": comment_url,
+        "report_url": report_url,
+        "completed_at": payload["created_at"],
+        "body_sha256": _sha256_bytes(payload["body"].encode()),
+    }
+
+
+def _fetch_review_comment(*, repository: str, target: str, comment_id: int) -> dict[str, Any]:
+    payload = json.loads(_run("gh", "api", f"repos/{repository}/comments/{comment_id}"))
+    return _review_comment_evidence(payload, repository=repository, target=target)
+
+
+def _validate_review_evidence(data: Any, *, repository: str, target: str) -> tuple[str, int]:
+    if not isinstance(data, dict) or data.get("format") != "github-exact-sha-independent-review-v1":
         _fail("independent review evidence has the wrong format")
     expected = {
+        "source": "github-commit-comment-api",
+        "repository": repository,
         "target_sha": target,
         "scope": "full-release-candidate",
         "p0_count": 0,
@@ -527,7 +786,39 @@ def _validate_review_evidence(data: Any, *, target: str) -> str:
         _fail("independent review evidence has an invalid completion time")
     if completed_at.tzinfo is None:
         _fail("independent review evidence completion time lacks a timezone")
-    return reviewer
+    comment_id = data.get("comment_id")
+    if not isinstance(comment_id, int) or comment_id <= 0:
+        _fail("independent review evidence has an invalid GitHub comment id")
+    for key in ("body_sha256",):
+        if not SHA256.fullmatch(str(data.get(key, ""))):
+            _fail(f"independent review evidence has an invalid digest: {key}")
+    if data.get("author_association") not in {"OWNER", "MEMBER", "COLLABORATOR"}:
+        _fail("independent review evidence is not from a repository collaborator")
+    for key in ("comment_url", "report_url"):
+        if not isinstance(data.get(key), str) or not data[key].startswith(
+            f"https://github.com/{repository}/"
+        ):
+            _fail(f"independent review evidence has an invalid URL: {key}")
+    return reviewer, comment_id
+
+
+def _capture_review(args: argparse.Namespace) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository):
+        _fail("repository must be owner/name")
+    if not SHA40.fullmatch(args.target_sha):
+        _fail("target SHA must be 40 lowercase hex characters")
+    if args.output.exists() or args.output.is_symlink():
+        _fail("review evidence output already exists; evidence is immutable")
+    evidence = _fetch_review_comment(
+        repository=args.repository,
+        target=args.target_sha,
+        comment_id=args.comment_id,
+    )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_bytes(_json_bytes(evidence))
+    os.chmod(args.output, 0o600)
+    print(f"REVIEWER_ID={evidence['reviewer_id']}")
+    print(f"REVIEW_EVIDENCE_SHA256={_sha256_file(args.output)}")
 
 
 def _validate_image(value: str, label: str) -> None:
@@ -645,16 +936,30 @@ def _generate(args: argparse.Namespace) -> None:
     if len(args.review_evidence) < 2:
         _fail("at least two independent exact-SHA reviews are required")
     reviewers: set[str] = set()
+    review_comment_ids: set[int] = set()
     review_sources: list[Path] = []
     for path in args.review_evidence:
         if not path.is_file() or path.is_symlink():
             _fail("independent review evidence must be a real file")
-        reviewer = _validate_review_evidence(
-            json.loads(path.read_text(encoding="utf-8")), target=args.target_sha
+        review_data = json.loads(path.read_text(encoding="utf-8"))
+        reviewer, comment_id = _validate_review_evidence(
+            review_data,
+            repository=args.repository,
+            target=args.target_sha,
         )
         if reviewer in reviewers:
             _fail("independent reviews must have distinct reviewer ids")
+        if comment_id in review_comment_ids:
+            _fail("independent reviews must have distinct GitHub comment ids")
+        live_review = _fetch_review_comment(
+            repository=args.repository,
+            target=args.target_sha,
+            comment_id=comment_id,
+        )
+        if live_review != review_data:
+            _fail("independent review evidence drifted from the live GitHub API")
         reviewers.add(reviewer)
+        review_comment_ids.add(comment_id)
         review_sources.append(path)
 
     ci_data = json.loads(args.ci_evidence.read_text(encoding="utf-8"))
@@ -665,7 +970,10 @@ def _generate(args: argparse.Namespace) -> None:
         required=args.required_check,
     )
     allowlist_summary, canary_evidence = _parse_allowlist(
-        args.beta_allowlist, target=args.target_sha
+        args.beta_allowlist,
+        repository=args.repository,
+        target=args.target_sha,
+        verify_live_canaries=True,
     )
     build_data = json.loads(args.build_evidence.read_text(encoding="utf-8"))
     _validate_build_evidence(
@@ -918,6 +1226,7 @@ def _verify_package(package: Path) -> dict[str, Any]:
         "canary_evidence_count"
     ):
         _fail("manifest canary evidence count drifted")
+    canary_comment_ids: set[int] = set()
     for artifact_row in canary_artifacts:
         if not isinstance(artifact_row, dict):
             _fail("manifest canary evidence entry is malformed")
@@ -929,6 +1238,14 @@ def _verify_package(package: Path) -> dict[str, Any]:
             _fail("manifest canary evidence is absent or unsafe")
         if _sha256_file(artifact) != artifact_row.get("sha256"):
             _fail("manifest canary evidence digest drifted")
+        _, _, comment_id = _validate_canary_document(
+            json.loads(artifact.read_text(encoding="utf-8")),
+            repository=data["repository"],
+            target=data["target_sha"],
+        )
+        if comment_id in canary_comment_ids:
+            _fail("manifest canary GitHub comments are not distinct")
+        canary_comment_ids.add(comment_id)
     hmac_data = data.get("maintenance_manifest_hmac") or {}
     if not SHA256.fullmatch(str(hmac_data.get("key_fingerprint_sha256", ""))):
         _fail("manifest HMAC key fingerprint is invalid")
@@ -969,6 +1286,7 @@ def _verify_package(package: Path) -> dict[str, Any]:
     if not isinstance(reviews, list) or len(reviews) < 2:
         _fail("manifest lacks two independent reviews")
     reviewers: set[str] = set()
+    review_comment_ids: set[int] = set()
     for row in reviews:
         if not isinstance(row, dict):
             _fail("manifest independent review entry is malformed")
@@ -980,14 +1298,19 @@ def _verify_package(package: Path) -> dict[str, Any]:
             _fail("manifest independent review evidence is absent or unsafe")
         if _sha256_file(artifact) != row.get("sha256"):
             _fail("manifest independent review evidence drifted")
-        reviewer = _validate_review_evidence(
-            json.loads(artifact.read_text(encoding="utf-8")), target=data["target_sha"]
+        reviewer, comment_id = _validate_review_evidence(
+            json.loads(artifact.read_text(encoding="utf-8")),
+            repository=data["repository"],
+            target=data["target_sha"],
         )
         if _sha256_bytes(reviewer.encode()) != row.get("reviewer_id_sha256"):
             _fail("manifest independent reviewer identity drifted")
         if reviewer in reviewers:
             _fail("manifest independent reviewers are not distinct")
+        if comment_id in review_comment_ids:
+            _fail("manifest independent review comments are not distinct")
         reviewers.add(reviewer)
+        review_comment_ids.add(comment_id)
     ci_data = json.loads((package / data["ci"]["path"]).read_text(encoding="utf-8"))
     _validate_ci_evidence(
         ci_data,
@@ -1072,6 +1395,20 @@ def _parser() -> argparse.ArgumentParser:
     capture.add_argument("--required-check", action="append", required=True)
     capture.add_argument("--output", type=Path, required=True)
     capture.set_defaults(handler=_capture_ci)
+
+    capture_review = commands.add_parser("capture-review")
+    capture_review.add_argument("--repository", required=True)
+    capture_review.add_argument("--target-sha", required=True)
+    capture_review.add_argument("--comment-id", type=int, required=True)
+    capture_review.add_argument("--output", type=Path, required=True)
+    capture_review.set_defaults(handler=_capture_review)
+
+    capture_canary = commands.add_parser("capture-canary")
+    capture_canary.add_argument("--repository", required=True)
+    capture_canary.add_argument("--target-sha", required=True)
+    capture_canary.add_argument("--comment-id", type=int, required=True)
+    capture_canary.add_argument("--output", type=Path, required=True)
+    capture_canary.set_defaults(handler=_capture_canary)
 
     generate = commands.add_parser("generate")
     generate.add_argument("--repo", type=Path, required=True)

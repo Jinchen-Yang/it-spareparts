@@ -47,14 +47,16 @@ done
   && [ "$(stat -c '%a' "$CREDENTIAL")" = 600 ] || fatal "credential must be a real mode-600 file"
 [ ! -e "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] || fatal "output already exists"
 
-WORK=$(mktemp -d)
-DB_NAME="v121-rehearsal-db-${TARGET_SHA:0:12}"
-APP_NAME="v121-rehearsal-app-${TARGET_SHA:0:12}"
-NETWORK_NAME="v121-rehearsal-${TARGET_SHA:0:12}"
-PROJECT_NAME="v121rehearsal${TARGET_SHA:0:12}"
+WORK=$(mktemp -d -t v121-rehearsal.XXXXXXXX)
+RUN_TOKEN=$(basename -- "$WORK" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
+[ -n "$RUN_TOKEN" ] || fatal "cannot derive a unique rehearsal token"
+DB_NAME="v121-rehearsal-db-$RUN_TOKEN"
+APP_NAME="v121-rehearsal-app-$RUN_TOKEN"
+NETWORK_NAME="v121-rehearsal-$RUN_TOKEN"
+PROJECT_NAME="v121rehearsal$RUN_TOKEN"
 OLD_APP_CID=
 OLD_FRONTEND_CID=
-readonly WORK DB_NAME APP_NAME NETWORK_NAME PROJECT_NAME
+readonly WORK RUN_TOKEN DB_NAME APP_NAME NETWORK_NAME PROJECT_NAME
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
@@ -86,8 +88,10 @@ BEFORE_HEAD=$(docker exec "$DB_NAME" psql -X -U spareparts -d spareparts -At \
 [ "$BEFORE_HEAD" = "$FROM_REV" ] || fatal "production-copy dump is not at f1"
 
 PRESSURE="$WORK/output/migration-pressure.jsonl"
+SAMPLER_STOP="$WORK/migration-sampler.stop"
+START_NS=$(date +%s%N)
 (
-  while :; do
+  while [ ! -e "$SAMPLER_STOP" ]; do
     row=$(docker exec "$DB_NAME" psql -X -U spareparts -d spareparts -At -F '|' <<'SQL'
 WITH a AS (
   SELECT COALESCE(array_length(pg_blocking_pids(pid), 1), 0) blocked_by,
@@ -103,15 +107,14 @@ SELECT COALESCE((SELECT count(*) FROM a WHERE blocked_by>0),0),
        COALESCE((SELECT waiting FROM l),0), COALESCE((SELECT total FROM l),0);
 SQL
     ) || exit 1
-    printf '{"captured_at":"%s","blocked_sessions":%s,"long_transactions":%s,"waiting_locks":%s,"total_locks":%s}\n' \
-      "$(date --iso-8601=seconds)" "${row%%|*}" \
+    printf '{"captured_at":"%s","captured_at_epoch_ms":%s,"blocked_sessions":%s,"long_transactions":%s,"waiting_locks":%s,"total_locks":%s}\n' \
+      "$(date --iso-8601=seconds)" "$(date +%s%3N)" "${row%%|*}" \
       "$(cut -d'|' -f2 <<<"$row")" "$(cut -d'|' -f3 <<<"$row")" \
       "${row##*|}" >>"$PRESSURE"
     sleep 1
   done
 ) &
 SAMPLER_PID=$!
-START_NS=$(date +%s%N)
 set +e
 docker run --rm --network "$NETWORK_NAME" \
   -e DATABASE_URL=postgresql+psycopg://spareparts@db:5432/spareparts \
@@ -121,19 +124,35 @@ docker run --rm --network "$NETWORK_NAME" \
 MIGRATION_STATUS=$?
 set -e
 END_NS=$(date +%s%N)
-kill "$SAMPLER_PID" >/dev/null 2>&1 || true
-wait "$SAMPLER_PID" >/dev/null 2>&1 || true
+install -m 600 /dev/null "$SAMPLER_STOP"
+set +e
+wait "$SAMPLER_PID"
+SAMPLER_STATUS=$?
+set -e
+rm -- "$SAMPLER_STOP"
 [ "$MIGRATION_STATUS" -eq 0 ] || fatal "isolated production-copy migration failed"
+[ "$SAMPLER_STATUS" -eq 0 ] || fatal "isolated migration pressure sampler exited early"
 [ -s "$PRESSURE" ] || fatal "isolated migration pressure sampler produced no evidence"
-python3 - "$PRESSURE" <<'PY'
+python3 - "$PRESSURE" "$START_NS" "$END_NS" <<'PY'
 import json,sys
 with open(sys.argv[1],encoding="utf-8") as stream:
     rows=[json.loads(line) for line in stream if line.strip()]
 if not rows:
     raise SystemExit("empty migration pressure evidence")
-required={"captured_at","blocked_sessions","long_transactions","waiting_locks","total_locks"}
+required={"captured_at","captured_at_epoch_ms","blocked_sessions","long_transactions","waiting_locks","total_locks"}
 if any(set(row) != required for row in rows):
     raise SystemExit("malformed migration pressure evidence")
+times=[]
+for row in rows:
+    if any(not isinstance(row[key],int) or row[key] < 0 for key in required-{"captured_at"}):
+        raise SystemExit("malformed migration pressure value")
+    times.append(row["captured_at_epoch_ms"])
+if times != sorted(times) or any(right-left > 2500 for left,right in zip(times,times[1:])):
+    raise SystemExit("migration pressure sampling has a gap")
+started=int(sys.argv[2])//1_000_000
+ended=int(sys.argv[3])//1_000_000
+if times[0] > started+2000 or times[-1] < ended-2000:
+    raise SystemExit("migration pressure sampling does not cover the migration")
 PY
 AFTER_HEAD=$(docker exec "$DB_NAME" psql -X -U spareparts -d spareparts -At \
   -c 'SELECT version_num FROM alembic_version;')
