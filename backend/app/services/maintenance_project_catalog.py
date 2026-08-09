@@ -12,6 +12,8 @@ from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAuditLog,
 )
+from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
+from app.services import maintenance_project_operations as operations
 
 
 class MaintenanceProjectCatalogError(Exception):
@@ -78,6 +80,38 @@ def _audit(
     )
 
 
+def _lock_project_for_master_write(
+    db: Session,
+    *,
+    project_id: str,
+) -> tuple[MaintenanceProject | None, MaintenanceProjectWorkbookState | None]:
+    """Lock the workbook state before the project master row.
+
+    Workbook apply and operating-fact writes use the same state -> project/fact
+    order.  The unlocked existence probe avoids creating an orphan state for an
+    unknown project while preserving that global lock order.
+    """
+
+    exists = db.scalar(
+        select(MaintenanceProject.project_id).where(
+            MaintenanceProject.project_id == project_id
+        )
+    )
+    if exists is None:
+        return None, None
+    state = operations.get_or_create_workbook_state(
+        db,
+        project_id=project_id,
+        lock=True,
+    )
+    project = db.scalar(
+        select(MaintenanceProject)
+        .where(MaintenanceProject.project_id == project_id)
+        .with_for_update()
+    )
+    return project, state
+
+
 def create_project(
     db: Session,
     *,
@@ -136,12 +170,8 @@ def update_project(
     reason: str,
     operated_by: str,
 ) -> dict | None:
-    project = db.scalar(
-        select(MaintenanceProject)
-        .where(MaintenanceProject.project_id == project_id)
-        .with_for_update()
-    )
-    if project is None:
+    project, state = _lock_project_for_master_write(db, project_id=project_id)
+    if project is None or state is None:
         return None
     if not project.is_active:
         raise MaintenanceProjectCatalogError("项目主档已归档，请先恢复后再编辑")
@@ -186,6 +216,7 @@ def update_project(
         reason=clean_reason,
         operated_by=operated_by,
     )
+    operations.bump_locked_workbook_revision(db, state=state)
     db.flush()
     return after
 
@@ -199,20 +230,16 @@ def set_project_active(
     reason: str,
     operated_by: str,
 ) -> dict | None:
-    project = db.scalar(
-        select(MaintenanceProject)
-        .where(MaintenanceProject.project_id == project_id)
-        .with_for_update()
-    )
-    if project is None:
+    project, state = _lock_project_for_master_write(db, project_id=project_id)
+    if project is None or state is None:
         return None
     if project.version != version:
         raise MaintenanceProjectCatalogConflict(
             f"项目主档已被他人修改（当前版本 {project.version}），请刷新后重试"
         )
     if project.is_active == active:
-        state = "有效" if active else "归档"
-        raise MaintenanceProjectCatalogError(f"项目主档已是{state}状态")
+        state_label = "有效" if active else "归档"
+        raise MaintenanceProjectCatalogError(f"项目主档已是{state_label}状态")
     clean_reason = _clean_required(reason, label="操作原因", max_length=1000)
     before = project_dict(project)
     project.is_active = active
@@ -228,5 +255,6 @@ def set_project_active(
         reason=clean_reason,
         operated_by=operated_by,
     )
+    operations.bump_locked_workbook_revision(db, state=state)
     db.flush()
     return after

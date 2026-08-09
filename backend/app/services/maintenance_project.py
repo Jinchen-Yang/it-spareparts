@@ -171,6 +171,35 @@ def project_overview(
         if len(project_ids) > 1
     }
 
+    return project_overview_from_facts(
+        project=project,
+        contracts=contracts,
+        cross_project_conflicts=cross_project_conflicts,
+        as_of=as_of,
+        user_ctx=user_ctx,
+    )
+
+
+def project_overview_from_facts(
+    *,
+    project: MaintenanceProject,
+    contracts: list[MaintenanceProjectContract],
+    cross_project_conflicts: set[str],
+    as_of: date,
+    user_ctx: UserContext,
+) -> dict:
+    """Build one project overview from already-batched ORM facts.
+
+    Both the detail read and operations directory call this pure assembler so
+    contract completeness and visibility cannot drift between the two views.
+    """
+
+    contracts = sorted(
+        contracts,
+        key=lambda row: (row.contract_no, row.effective_from, row.project_contract_id),
+    )
+    effective = [relation for relation in contracts if _is_effective(relation, as_of)]
+
     issues: list[dict] = []
     if not effective:
         issues.append({"code": "no_effective_contracts", "contract_ids": []})
@@ -240,6 +269,7 @@ def project_overview(
             "contract_id": relation.contract_id,
             "contract_no": relation.contract_no,
             "contract_amount": None if amount_restricted else relation.contract_amount,
+            "contract_amount_basis": "inc_tax",
             "contract_status": relation.contract_status,
             "status_mapping_state": relation.status_mapping_state,
             "status_mapping_version": relation.status_mapping_version,

@@ -1,0 +1,39 @@
+.maintenance-project-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  width: 100%;
+}
+
+.maintenance-project-card {
+  min-width: 0;
+  height: 100%;
+}
+
+.maintenance-project-card > .ant-card-body {
+  min-width: 0;
+}
+
+@media (max-width: 1199px) {
+  .maintenance-project-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .maintenance-project-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.maintenance-workspace-two-column {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+@media (max-width: 991px) {
+  .maintenance-workspace-two-column {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
