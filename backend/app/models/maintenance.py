@@ -159,6 +159,149 @@ class FMaintenanceLine(Base):
     )
 
 
+class MaintenanceDemandDeleteIntent(Base):
+    """一次 WBDD 整单逻辑删除的不可变复核快照与状态机。"""
+
+    __tablename__ = "maintenance_demand_delete_intent"
+
+    intent_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), unique=True)
+    request_digest: Mapped[str] = mapped_column(String(64))
+    selection_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="reviewed")
+    reason: Mapped[str] = mapped_column(Text)
+    operated_by: Mapped[str] = mapped_column(String(64))
+    header_count: Mapped[int] = mapped_column(Integer)
+    line_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime)
+    not_before: Mapped[datetime | None] = mapped_column(TZDateTime)
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime)
+    executed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    terminal_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    result_json: Mapped[dict | None] = mapped_column(JSONB)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('reviewed', 'armed_wait', 'executed', "
+            "'cancelled', 'conflicted', 'expired')",
+            name="ck_maintenance_demand_delete_intent_status",
+        ),
+        CheckConstraint(
+            "char_length(btrim(reason)) > 0",
+            name="ck_maintenance_demand_delete_intent_reason",
+        ),
+        CheckConstraint(
+            "header_count BETWEEN 1 AND 1000",
+            name="ck_maintenance_demand_delete_intent_headers",
+        ),
+        CheckConstraint(
+            "line_count BETWEEN 0 AND 20000",
+            name="ck_maintenance_demand_delete_intent_lines",
+        ),
+        Index("ix_maintenance_demand_delete_intent_status_expiry", "status", "expires_at"),
+    )
+
+
+class MaintenanceDemandDeleteIntentItem(Base):
+    """意图中的逐单版本与完整复核行；创建后不得改写。"""
+
+    __tablename__ = "maintenance_demand_delete_intent_item"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    intent_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_demand_delete_intent.intent_id")
+    )
+    source_order_id: Mapped[str] = mapped_column(
+        ForeignKey("f_maintenance_order.raw_order_id")
+    )
+    ordinal: Mapped[int] = mapped_column(Integer)
+    version_digest: Mapped[str] = mapped_column(String(64))
+    snapshot_json: Mapped[dict] = mapped_column(JSONB)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "intent_id", "source_order_id",
+            name="uq_maintenance_demand_delete_intent_item_source",
+        ),
+        UniqueConstraint(
+            "intent_id", "ordinal",
+            name="uq_maintenance_demand_delete_intent_item_ordinal",
+        ),
+        CheckConstraint(
+            "ordinal >= 0",
+            name="ck_maintenance_demand_delete_intent_item_ordinal",
+        ),
+        Index("ix_maintenance_demand_delete_intent_item_source", "source_order_id"),
+    )
+
+
+class MaintenanceDemandTombstone(Base):
+    """WBDD 逻辑墓碑；同 raw_order_id 重导时仍保持删除，直至显式恢复。"""
+
+    __tablename__ = "maintenance_demand_tombstone"
+
+    source_order_id: Mapped[str] = mapped_column(
+        ForeignKey("f_maintenance_order.raw_order_id"), primary_key=True
+    )
+    delete_intent_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_demand_delete_intent.intent_id")
+    )
+    version_digest: Mapped[str] = mapped_column(String(64))
+    deleted_by: Mapped[str] = mapped_column(String(64))
+    delete_reason: Mapped[str] = mapped_column(Text)
+    deleted_at: Mapped[datetime] = mapped_column(TZDateTime)
+    restored_by: Mapped[str | None] = mapped_column(String(64))
+    restore_reason: Mapped[str | None] = mapped_column(Text)
+    restored_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(delete_reason)) > 0",
+            name="ck_maintenance_demand_tombstone_delete_reason",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_maintenance_demand_tombstone_version",
+        ),
+        Index("ix_maintenance_demand_tombstone_active", "source_order_id", "restored_at"),
+    )
+
+
+class MaintenanceDemandDeleteEvent(Base):
+    """WBDD 删除/恢复业务审计；数据库触发器保证 append-only。"""
+
+    __tablename__ = "maintenance_demand_delete_event"
+
+    event_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    intent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("maintenance_demand_delete_intent.intent_id")
+    )
+    source_order_id: Mapped[str | None] = mapped_column(
+        ForeignKey("f_maintenance_order.raw_order_id")
+    )
+    event_type: Mapped[str] = mapped_column(String(16))
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+    operated_by: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str] = mapped_column(Text)
+    payload_json: Mapped[dict] = mapped_column(JSONB)
+    occurred_at: Mapped[datetime] = mapped_column(TZDateTime)
+
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('armed', 'executed', 'cancelled', "
+            "'conflicted', 'expired', 'restored')",
+            name="ck_maintenance_demand_delete_event_type",
+        ),
+        CheckConstraint(
+            "char_length(btrim(reason)) > 0",
+            name="ck_maintenance_demand_delete_event_reason",
+        ),
+        Index("ix_maintenance_demand_delete_event_intent_time", "intent_id", "occurred_at"),
+        Index("ix_maintenance_demand_delete_event_source_time", "source_order_id", "occurred_at"),
+    )
+
+
 class FProjectExpense(Base):
     """维保报销单（BXD）费用行（§16.3）：经 XSDD 归集到合同/项目，盈亏看板"已花"的费用侧。
 

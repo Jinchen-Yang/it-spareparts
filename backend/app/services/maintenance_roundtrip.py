@@ -48,7 +48,7 @@ from app.models.dimensions import DimCustomer
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
 from app.models.maintenance import MaintenanceRoundtripOperation
 from app.models.system import SysAuditLog, SysImportBatch, SysRawFile
-from app.services import maintenance_cost
+from app.services import maintenance_cost, maintenance_demands
 from app.services.maintenance_workbook_export import (
     MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK as STANDARD_MAX_DYNAMIC_TEXT_BYTES_PER_WORKBOOK,
 )
@@ -630,7 +630,7 @@ def _selection_filters(
     date_from: date | None,
     date_to: date | None,
 ) -> list:
-    filters = []
+    filters = [maintenance_demands.active_demand_condition()]
     if contract:
         filters.append(FMaintenanceOrder.linked_sales_order_no == contract.strip())
     if date_from is not None:
@@ -804,6 +804,7 @@ def _selected_data(
             db.scalar(
                 select(func.count(FMaintenanceOrder.id)).where(
                     FMaintenanceOrder.linked_sales_order_no == contract_value,
+                    maintenance_demands.active_demand_condition(),
                 )
             )
         )
@@ -3131,7 +3132,10 @@ def _validate_order_changes(
         {
             entity.id: entity
             for entity in db.scalars(
-                select(FMaintenanceOrder).where(FMaintenanceOrder.id.in_(target_ids))
+                select(FMaintenanceOrder).where(
+                    FMaintenanceOrder.id.in_(target_ids),
+                    maintenance_demands.active_demand_condition(),
+                )
             ).all()
         }
         if target_ids
@@ -3244,7 +3248,12 @@ def _validate_line_changes(
         {
             entity.id: entity
             for entity in db.scalars(
-                select(FMaintenanceLine).where(FMaintenanceLine.id.in_(target_ids))
+                select(FMaintenanceLine)
+                .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+                .where(
+                    FMaintenanceLine.id.in_(target_ids),
+                    maintenance_demands.active_demand_condition(),
+                )
             ).all()
         }
         if target_ids
@@ -3255,7 +3264,10 @@ def _validate_line_changes(
         {
             order.id: order
             for order in db.scalars(
-                select(FMaintenanceOrder).where(FMaintenanceOrder.id.in_(order_ids))
+                select(FMaintenanceOrder).where(
+                    FMaintenanceOrder.id.in_(order_ids),
+                    maintenance_demands.active_demand_condition(),
+                )
             ).all()
         }
         if order_ids
@@ -3651,7 +3663,12 @@ def _validate_manual_changes(
         {
             line.id: line
             for line in db.scalars(
-                select(FMaintenanceLine).where(FMaintenanceLine.id.in_(line_ids))
+                select(FMaintenanceLine)
+                .join(FMaintenanceOrder, FMaintenanceOrder.id == FMaintenanceLine.order_id)
+                .where(
+                    FMaintenanceLine.id.in_(line_ids),
+                    maintenance_demands.active_demand_condition(),
+                )
             ).all()
         }
         if line_ids
@@ -3671,7 +3688,10 @@ def _validate_manual_changes(
         {
             order.id: order
             for order in db.scalars(
-                select(FMaintenanceOrder).where(FMaintenanceOrder.id.in_(order_ids))
+                select(FMaintenanceOrder).where(
+                    FMaintenanceOrder.id.in_(order_ids),
+                    maintenance_demands.active_demand_condition(),
+                )
             ).all()
         }
         if order_ids

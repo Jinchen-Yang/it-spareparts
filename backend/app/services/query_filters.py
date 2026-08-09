@@ -6,7 +6,7 @@
 """
 import re
 
-from sqlalchemy import or_
+from sqlalchemy import exists, or_, select
 
 from app import config
 
@@ -127,5 +127,30 @@ def active_orders(stmt, order_model):
     "无条件按生效过滤"的站点；带 status 入参的条件过滤（如 recent_purchases）不适用。
     """
     if config.ACTIVE_STATUS_ONLY:
-        return stmt.where(order_model.data_status == config.ACTIVE_STATUS)
+        stmt = stmt.where(order_model.data_status == config.ACTIVE_STATUS)
+    # WBDD has an additional business-effective boundary: active logical
+    # tombstones must exclude a whole demand from every derived read.  Keeping
+    # this beside the existing shared order-status filter prevents cost,
+    # inventory and project views from drifting apart.  The ETL loader does not
+    # use this helper, so a repeated raw_order_id can update its archived source
+    # row without reviving it.
+    from sqlalchemy import inspect
+
+    from app.models.maintenance import (
+        FMaintenanceOrder,
+        MaintenanceDemandTombstone,
+    )
+
+    inspected = inspect(order_model, raiseerr=False)
+    mapper = getattr(inspected, "mapper", None)
+    if mapper is not None and mapper.class_ is FMaintenanceOrder:
+        stmt = stmt.where(
+            ~exists(
+                select(1).where(
+                    MaintenanceDemandTombstone.source_order_id
+                    == order_model.raw_order_id,
+                    MaintenanceDemandTombstone.restored_at.is_(None),
+                )
+            )
+        )
     return stmt

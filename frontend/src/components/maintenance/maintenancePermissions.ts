@@ -6,6 +6,7 @@ interface LocalMaintenancePermissions {
   own_customers_only?: boolean;
   action_maintenance_roundtrip_apply?: boolean;
   action_maintenance_project_manage?: boolean;
+  action_maintenance_demand_delete?: boolean;
 }
 
 export interface MaintenanceCapabilities {
@@ -17,6 +18,7 @@ export interface MaintenanceCapabilities {
   canDownloadRoundtrip: boolean;
   canApplyRoundtrip: boolean;
   canManageProject: boolean;
+  canDeleteDemand: boolean;
 }
 
 function readLocalPermissions(): LocalMaintenancePermissions {
@@ -121,6 +123,11 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
       && permissions.data_purchase_cost === true
       && permissions.action_maintenance_project_manage === true
     ),
+    // This high-risk action is real-account only.  Shared admin credentials
+    // deliberately receive an explicit false from the backend, so unlike
+    // ordinary admin capabilities the UI must not bypass the permission map.
+    canDeleteDemand: permissions.page_maintenance === true
+      && permissions.action_maintenance_demand_delete === true,
   };
 }
 
