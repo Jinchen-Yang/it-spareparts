@@ -37,6 +37,7 @@ from app.security import UserContext, is_field_hidden
 from app.services.maintenance_manager_workbook_v3 import (
     SCHEMA_VERSION,
     TEMPLATE_VERSION,
+    AcceptanceDueDateChange,
     ManagerWorkbookExportArtifact,
     ManagerWorkbookValidation,
     MilestoneChange,
@@ -114,8 +115,113 @@ def _issue_from_dict(value: Mapping[str, Any]) -> WorkbookIssue:
     )
 
 
-def _change_dict(change: ServicePeriodChange | MilestoneChange) -> dict:
+def _change_dict(
+    change: ServicePeriodChange | MilestoneChange | AcceptanceDueDateChange,
+) -> dict:
     return _json_value(asdict(change))
+
+
+def _preview_changes(
+    validation: ManagerWorkbookValidation,
+    snapshot: Mapping[str, Any],
+) -> list[dict]:
+    projects = {
+        str(project.get("project_id")): project
+        for project in snapshot.get("projects") or []
+    }
+    contracts = {
+        str(contract.get("project_contract_id")): (project, contract)
+        for project in projects.values()
+        for contract in project.get("contracts") or []
+    }
+    items: list[dict] = []
+    for change in validation.service_period_changes:
+        project = projects.get(change.project_id) or {}
+        items.append(
+            {
+                "kind": "service_period",
+                "project_id": change.project_id,
+                "project_code": project.get("project_code"),
+                "project_name": project.get("project_name"),
+                "contract_no": None,
+                "sequence": None,
+                "before": {
+                    "service_start": project.get("service_start"),
+                    "service_end": project.get("service_end"),
+                    "completeness_state": (
+                        "complete"
+                        if project.get("service_start") and project.get("service_end")
+                        else "start_only"
+                        if project.get("service_start")
+                        else "end_only"
+                        if project.get("service_end")
+                        else "empty"
+                    ),
+                },
+                "after": {
+                    "service_start": change.service_start,
+                    "service_end": change.service_end,
+                    "completeness_state": change.completeness_state,
+                },
+            }
+        )
+    for change in validation.acceptance_due_date_changes:
+        project = projects.get(change.project_id) or {}
+        acceptance = project.get("acceptance") or {}
+        items.append(
+            {
+                "kind": "acceptance_due_date",
+                "project_id": change.project_id,
+                "project_code": project.get("project_code"),
+                "project_name": project.get("project_name"),
+                "contract_no": None,
+                "sequence": None,
+                "before": {
+                    "due_date": acceptance.get("due_date"),
+                    "configuration_state": acceptance.get("configuration_state"),
+                },
+                "after": {
+                    "due_date": change.due_date,
+                    "configuration_state": "configured",
+                },
+            }
+        )
+    for change in validation.milestone_changes:
+        project, contract = contracts.get(
+            change.project_contract_id, ({}, {})
+        )
+        current = next(
+            (
+                row
+                for row in contract.get("planned_milestones") or []
+                if int(row.get("sequence") or 0) == change.sequence
+            ),
+            None,
+        )
+        items.append(
+            {
+                "kind": "planned_collection_milestone",
+                "project_id": change.project_id,
+                "project_code": project.get("project_code"),
+                "project_name": project.get("project_name"),
+                "project_contract_id": change.project_contract_id,
+                "contract_no": contract.get("contract_no"),
+                "sequence": change.sequence,
+                "before": {
+                    "planned_date": current.get("planned_date") if current else None,
+                    "planned_amount": current.get("planned_amount") if current else None,
+                    "completeness_state": (
+                        current.get("completeness_state") if current else None
+                    ),
+                },
+                "after": {
+                    "planned_date": change.planned_date,
+                    "planned_amount": change.planned_amount,
+                    "completeness_state": change.completeness_state,
+                },
+            }
+        )
+    return _json_value(items)
 
 
 def _validation_plan(validation: ManagerWorkbookValidation, snapshot: Mapping[str, Any]) -> dict:
@@ -125,6 +231,10 @@ def _validation_plan(validation: ManagerWorkbookValidation, snapshot: Mapping[st
         ],
         "milestone_changes": [
             _change_dict(change) for change in validation.milestone_changes
+        ],
+        "acceptance_due_date_changes": [
+            _change_dict(change)
+            for change in validation.acceptance_due_date_changes
         ],
         "project_scope": [
             {
@@ -136,6 +246,7 @@ def _validation_plan(validation: ManagerWorkbookValidation, snapshot: Mapping[st
             for project in snapshot.get("projects") or []
         ],
         "warnings": [_issue_dict(issue) for issue in validation.warnings],
+        "preview_changes": _preview_changes(validation, snapshot),
     }
 
 
@@ -166,6 +277,15 @@ def _validation_from_batch(batch: MaintenanceManagerUploadBatch) -> ManagerWorkb
         )
         for row in plan.get("milestone_changes") or []
     )
+    acceptance_due_date_changes = tuple(
+        AcceptanceDueDateChange(
+            project_id=str(row["project_id"]),
+            project_version=int(row["project_version"]),
+            expected_version=int(row["expected_version"]),
+            due_date=date.fromisoformat(str(row["due_date"])),
+        )
+        for row in plan.get("acceptance_due_date_changes") or []
+    )
     issues = [_issue_from_dict(row) for row in batch.issues_json or []]
     warnings = tuple(issue for issue in issues if issue.severity == "warning")
     errors = tuple(issue for issue in issues if issue.severity != "warning")
@@ -179,6 +299,7 @@ def _validation_from_batch(batch: MaintenanceManagerUploadBatch) -> ManagerWorkb
         file_sha256=batch.file_sha256,
         service_period_changes=service_changes,
         milestone_changes=milestone_changes,
+        acceptance_due_date_changes=acceptance_due_date_changes,
         warnings=warnings,
         errors=errors,
     )
@@ -406,6 +527,7 @@ class MaintenanceManagerWorkbookAdapter:
                     "contracts": contract_payload,
                     "acceptance": {
                         "deliverable_id": deliverable.deliverable_id if deliverable else None,
+                        "due_date": deliverable.due_date if deliverable else None,
                         "configuration_state": (
                             deliverable.configuration_state
                             if deliverable
@@ -673,6 +795,73 @@ class MaintenanceManagerWorkbookAdapter:
             )
             changed_rows += 1
 
+        for value in plan.get("acceptance_due_date_changes") or []:
+            change = AcceptanceDueDateChange(
+                project_id=str(value["project_id"]),
+                project_version=int(value["project_version"]),
+                expected_version=int(value["expected_version"]),
+                due_date=date.fromisoformat(str(value["due_date"])),
+            )
+            current = self.db.scalar(
+                select(MaintenanceAcceptanceDeliverable)
+                .where(
+                    MaintenanceAcceptanceDeliverable.project_id
+                    == change.project_id,
+                    MaintenanceAcceptanceDeliverable.deliverable_type
+                    == "acceptance_report",
+                )
+                .with_for_update()
+            )
+            if change.expected_version == 0:
+                if current is not None:
+                    raise ManagerWorkbookConflict("验收报告截止日已被其他操作创建")
+                before = None
+                current = MaintenanceAcceptanceDeliverable(
+                    deliverable_id=str(uuid4()),
+                    project_id=change.project_id,
+                    deliverable_type="acceptance_report",
+                    due_date=change.due_date,
+                    submission_status="not_submitted",
+                    submitted_at=None,
+                    submitted_by=None,
+                    approval_status="not_reviewed",
+                    approved_at=None,
+                    approved_by=None,
+                    rejection_reason=None,
+                    configuration_state="configured",
+                    version=1,
+                )
+                self.db.add(current)
+            else:
+                if current is None or current.version != change.expected_version:
+                    raise ManagerWorkbookConflict("验收报告版本已变化")
+                before = {
+                    "due_date": current.due_date,
+                    "configuration_state": current.configuration_state,
+                    "version": current.version,
+                }
+                current.due_date = change.due_date
+                current.configuration_state = "configured"
+                current.version += 1
+            after = {
+                "due_date": current.due_date,
+                "configuration_state": current.configuration_state,
+                "version": current.version,
+            }
+            self.db.add(
+                MaintenanceProjectOperationAudit(
+                    project_id=change.project_id,
+                    entity_type="acceptance_deliverable",
+                    entity_id=current.deliverable_id,
+                    action="manager_workbook_apply",
+                    before_json=_json_value(before),
+                    after_json=_json_value(after),
+                    reason=reason,
+                    operated_by=self.operator,
+                )
+            )
+            changed_rows += 1
+
         for value in plan.get("milestone_changes") or []:
             change = MilestoneChange(
                 project_id=str(value["project_id"]),
@@ -793,12 +982,18 @@ class MaintenanceManagerWorkbookAdapter:
             == "configured"
         )
         latest_status = latest.status if latest else None
+        scope_matches_current = bool(
+            latest is not None
+            and latest.scope_version == snapshot["scope_version"]
+        )
         if (
             latest is not None
             and latest.status in {"valid", "error"}
             and latest.expires_at <= datetime.now(UTC)
         ):
             latest_status = "expired"
+        elif latest is not None and latest.status == "applied" and not scope_matches_current:
+            latest_status = "stale_scope"
         return {
             "report_month": report_month.isoformat(),
             "project_count": len(snapshot["projects"]),
@@ -808,6 +1003,7 @@ class MaintenanceManagerWorkbookAdapter:
                 {
                     "batch_id": latest.batch_id,
                     "status": latest_status,
+                    "scope_matches_current": scope_matches_current,
                     "created_at": latest.created_at.isoformat(),
                     "expires_at": latest.expires_at.isoformat(),
                     "applied_at": latest.applied_at.isoformat() if latest.applied_at else None,
@@ -821,6 +1017,6 @@ class MaintenanceManagerWorkbookAdapter:
                 if snapshot["projects"] and configured == len(snapshot["projects"])
                 else "pending_business_configuration"
             ),
-            "attachment_carrier": "pending_business_configuration",
-            "approval_role": "pending_business_configuration",
+            "attachment_carrier": "controlled_business_file",
+            "approval_role": "admin_only_pending_business_configuration",
         }

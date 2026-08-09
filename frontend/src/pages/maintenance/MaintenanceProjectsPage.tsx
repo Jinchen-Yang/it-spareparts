@@ -171,6 +171,10 @@ export default function MaintenanceProjectsPage() {
           value={taskType}
           options={[
             { label: "项目经理月度更新", value: "项目经理月度更新" },
+            { label: "维保期限", value: "维保期限" },
+            { label: "计划回款", value: "计划回款" },
+            { label: "验收报告", value: "验收报告" },
+            { label: "验收审批", value: "验收审批" },
             { label: "数据完整性", value: "completeness" },
             { label: "回款", value: "collection" },
             { label: "成本", value: "cost" },

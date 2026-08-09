@@ -30,6 +30,7 @@ from app.security import (
     UserContext,
     get_current_user_context,
     record_access_log,
+    require_action,
     require_page,
 )
 from app.services.maintenance_manager_workbook_adapter import (
@@ -142,11 +143,14 @@ def _validation_payload(validation, batch) -> dict:
         "changes": {
             "service_periods": len(validation.service_period_changes),
             "planned_collection_milestones": len(validation.milestone_changes),
+            "acceptance_due_dates": len(validation.acceptance_due_date_changes),
             "total": (
                 len(validation.service_period_changes)
                 + len(validation.milestone_changes)
+                + len(validation.acceptance_due_date_changes)
             ),
         },
+        "items": list((batch.plan_json or {}).get("preview_changes") or []),
         "warnings": [
             {
                 "code": issue.code,
@@ -330,6 +334,12 @@ def apply_manager_workbook(
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_manager_workbook_apply",
+            require_data="data_profit",
+        )
+    ),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     _no_store(response)

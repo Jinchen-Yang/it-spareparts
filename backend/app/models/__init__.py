@@ -30,7 +30,9 @@ from app.models.maintenance_project_operations import (
 )
 from app.models.maintenance_manager import (
     BusinessFile,
+    BusinessFileDownloadAudit,
     BusinessFileLink,
+    MaintenanceAcceptanceOperation,
     MaintenanceAcceptanceDeliverable,
     MaintenanceCollectionMilestone,
     MaintenanceManagerUploadBatch,
@@ -98,7 +100,9 @@ __all__ = [
     "MaintenanceCollectionMilestone",
     "MaintenanceAcceptanceDeliverable",
     "BusinessFile",
+    "BusinessFileDownloadAudit",
     "BusinessFileLink",
+    "MaintenanceAcceptanceOperation",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",

@@ -111,7 +111,7 @@ const summary = {
     overdue_count: 0,
     rows: [],
   },
-  missing_data_labels: ["合同额待补", "成本待补", "附件状态待接入"],
+  missing_data_labels: ["合同额待补", "成本待补", "验收附件待上传"],
   attachment_status: "not_integrated",
   as_of: "2026-08-08",
 };
@@ -157,7 +157,7 @@ describe("MaintenanceProjectsPage", () => {
       "href",
       "/maintenance/project-manager/monthly-workbook",
     );
-    expect(within(card).getByText("附件状态待接入")).toBeInTheDocument();
+    expect(within(card).getByText("验收附件待上传")).toBeInTheDocument();
     expect(within(card).getByRole("button", { name: "管理负责人" })).toBeInTheDocument();
     expect(within(card).getByRole("link", { name: "查看项目" })).toHaveAttribute(
       "href",

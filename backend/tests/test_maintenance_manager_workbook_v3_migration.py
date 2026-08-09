@@ -1,10 +1,16 @@
-"""Storage invariants for the manager workbook v3 foundation (#206)."""
+"""Storage invariants for the manager workbook and acceptance closure (#206)."""
 
 from datetime import UTC, datetime
+import os
 
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
 import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError
+
+from app import permissions
+from app.db import engine
 
 
 TABLES = {
@@ -15,7 +21,18 @@ TABLES = {
     "maintenance_acceptance_deliverable",
     "business_file",
     "business_file_link",
+    "maintenance_acceptance_operation",
+    "business_file_download_audit",
 }
+
+
+def _cfg() -> AlembicConfig:
+    cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
+    cfg.set_main_option(
+        "script_location",
+        os.path.join(os.path.dirname(__file__), "..", "alembic"),
+    )
+    return cfg
 
 
 def test_manager_workbook_v3_schema_has_longitudinal_and_attachment_foundations(db):
@@ -52,6 +69,89 @@ def test_manager_workbook_v3_schema_has_longitudinal_and_attachment_foundations(
         "approved_by",
         "configuration_state",
     } <= deliverable_columns
+    link_fks = {
+        tuple(constraint["constrained_columns"]): constraint["referred_table"]
+        for constraint in inspector.get_foreign_keys("business_file_link")
+    }
+    assert link_fks[("entity_id",)] == "maintenance_acceptance_deliverable"
+
+
+def test_acceptance_permissions_default_fail_closed_and_review_is_high_risk():
+    for key in (
+        "action_maintenance_manager_workbook_apply",
+        "action_maintenance_acceptance_submit",
+        "action_maintenance_acceptance_review",
+    ):
+        assert key in permissions.ACTION_KEYS
+        assert permissions.ACTION_PAGE_DEPENDENCIES[key] == "page_maintenance"
+        assert permissions.effective("admin", None)[key] is True
+        for role in ("boss", "sales", "purchaser", "readonly", "guest"):
+            assert permissions.effective(role, None)[key] is False
+    assert "action_maintenance_manager_workbook_apply" in permissions.HIGH_RISK_KEYS
+    assert "action_maintenance_acceptance_review" in permissions.HIGH_RISK_KEYS
+
+
+def test_acceptance_permission_upgrade_backfills_only_real_admin_role(db):
+    db.close()
+    config = _cfg()
+    alembic_command.downgrade(config, "b7e1c3a9d5f2")
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO sys_user
+                        (username, role, password_hash, template_code,
+                         template_perms, permissions, perm_overrides)
+                    VALUES
+                        ('issue206-migration-boss', 'boss', 'unused', 'admin',
+                         '{"sentinel": true}'::jsonb,
+                         '{"sentinel": true}'::jsonb,
+                         '{"action_maintenance_acceptance_review": true}'::jsonb),
+                        ('issue206-migration-admin', 'admin', 'unused', 'boss',
+                         '{"sentinel": true}'::jsonb,
+                         '{"sentinel": true}'::jsonb,
+                         '{"action_maintenance_acceptance_review": false}'::jsonb)
+                    """
+                )
+            )
+        alembic_command.upgrade(config, "head")
+        with engine.connect() as connection:
+            templates = dict(
+                connection.execute(
+                    text(
+                        """
+                        SELECT code,
+                               (permissions->>'action_maintenance_acceptance_review')::boolean
+                        FROM sys_role_template
+                        WHERE code IN ('admin', 'boss')
+                        """
+                    )
+                ).all()
+            )
+            users = {
+                username: (template_value, permission_value, has_override)
+                for username, template_value, permission_value, has_override
+                in connection.execute(
+                    text(
+                        """
+                        SELECT username,
+                               (template_perms->>'action_maintenance_acceptance_review')::boolean,
+                               (permissions->>'action_maintenance_acceptance_review')::boolean,
+                               perm_overrides ? 'action_maintenance_acceptance_review'
+                        FROM sys_user
+                        WHERE username LIKE 'issue206-migration-%'
+                        """
+                    )
+                )
+            }
+        assert templates == {"admin": True, "boss": False}
+        assert users == {
+            "issue206-migration-admin": (True, True, False),
+            "issue206-migration-boss": (False, False, False),
+        }
+    finally:
+        alembic_command.upgrade(config, "head")
 
 
 def test_storage_rejects_self_approval_and_external_url_as_attachment(db):
@@ -95,3 +195,69 @@ def test_storage_rejects_self_approval_and_external_url_as_attachment(db):
         )
         db.flush()
     db.rollback()
+
+
+def _seed_acceptance_audit(db, *, operation_id: str) -> None:
+    db.execute(
+        text(
+            "INSERT INTO maintenance_project "
+            "(project_id, project_code, display_name, lifecycle_status) VALUES "
+            "('issue206-audit-project', 'ISSUE206-AUDIT', '合成审计项目', 'ongoing')"
+        )
+    )
+    db.execute(
+        text(
+            "INSERT INTO maintenance_acceptance_deliverable "
+            "(deliverable_id, project_id, deliverable_type, due_date, submission_status, "
+            "approval_status, configuration_state, version) VALUES "
+            "('issue206-audit-deliverable', 'issue206-audit-project', 'acceptance_report', "
+            "'2026-08-31', 'not_submitted', 'not_reviewed', 'configured', 1)"
+        )
+    )
+    db.execute(
+        text(
+            "INSERT INTO maintenance_acceptance_operation "
+            "(operation_id, operation_key, payload_hash, operation_type, deliverable_id, "
+            "project_id, result_json, operated_by) VALUES "
+            "(:operation_id, :operation_key, :payload_hash, 'submit', "
+            "'issue206-audit-deliverable', 'issue206-audit-project', '{}'::jsonb, 'audit-user')"
+        ),
+        {
+            "operation_id": operation_id,
+            "operation_key": f"operation-key-{operation_id}",
+            "payload_hash": "a" * 64,
+        },
+    )
+    db.commit()
+
+
+def test_acceptance_operation_is_database_append_only(db):
+    _seed_acceptance_audit(db, operation_id="issue206-append-only")
+    with pytest.raises(DBAPIError, match="append-only"):
+        db.execute(
+            text(
+                "UPDATE maintenance_acceptance_operation SET operated_by = 'tampered' "
+                "WHERE operation_id = 'issue206-append-only'"
+            )
+        )
+        db.flush()
+    db.rollback()
+    with pytest.raises(DBAPIError, match="append-only"):
+        db.execute(
+            text(
+                "DELETE FROM maintenance_acceptance_operation "
+                "WHERE operation_id = 'issue206-append-only'"
+            )
+        )
+        db.flush()
+    db.rollback()
+
+
+def test_acceptance_downgrade_blocks_when_append_only_history_exists(db):
+    _seed_acceptance_audit(db, operation_id="issue206-downgrade-guard")
+    db.close()
+    with pytest.raises(Exception, match="downgrade blocked"):
+        alembic_command.downgrade(_cfg(), "b7e1c3a9d5f2")
+    with engine.connect() as connection:
+        current = connection.scalar(text("SELECT version_num FROM alembic_version"))
+    assert current == "c8f2d4a6b9e1"

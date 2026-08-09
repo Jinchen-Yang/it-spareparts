@@ -31,7 +31,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 
 PROTOCOL_ID = "ITDATA_MAINT_MANAGER_WORKBOOK/3.0"
 SCHEMA_VERSION = "3.0"
-TEMPLATE_VERSION = "3.0.0"
+TEMPLATE_VERSION = "3.1.0"
 
 OVERVIEW_SHEET = "01_本人项目总览"
 PLAN_SHEET = "02_计划回款节点"
@@ -63,6 +63,7 @@ OVERVIEW_HEADERS = (
     "项目名称",
     "维保开始日期",
     "维保结束日期",
+    "验收报告截止日",
     "维保期限完整性（系统生成）",
     "全部合同额（含税）",
     "合同额完整性（系统生成）",
@@ -75,6 +76,7 @@ OVERVIEW_HEADERS = (
     "业务配置状态（只读）",
     "__project_version",
     "__service_period_version",
+    "__acceptance_version",
     "__row_token",
 )
 PLAN_HEADERS = (
@@ -191,6 +193,14 @@ class MilestoneChange:
 
 
 @dataclass(frozen=True)
+class AcceptanceDueDateChange:
+    project_id: str
+    project_version: int
+    expected_version: int
+    due_date: date
+
+
+@dataclass(frozen=True)
 class ManagerWorkbookValidation:
     validation_id: str
     export_id: str
@@ -201,12 +211,19 @@ class ManagerWorkbookValidation:
     file_sha256: str
     service_period_changes: tuple[ServicePeriodChange, ...]
     milestone_changes: tuple[MilestoneChange, ...]
+    acceptance_due_date_changes: tuple[AcceptanceDueDateChange, ...] = field(
+        default_factory=tuple
+    )
     warnings: tuple[WorkbookIssue, ...] = field(default_factory=tuple)
     errors: tuple[WorkbookIssue, ...] = field(default_factory=tuple)
 
     @property
     def unchanged(self) -> bool:
-        return not self.service_period_changes and not self.milestone_changes
+        return (
+            not self.service_period_changes
+            and not self.milestone_changes
+            and not self.acceptance_due_date_changes
+        )
 
     @property
     def can_apply(self) -> bool:
@@ -422,6 +439,8 @@ def _entity_version_rows(snapshot: Mapping[str, Any]) -> list[tuple[str, str, in
     for project_id, project in projects.items():
         rows.append(("project", project_id, int(project.get("project_version") or 0)))
         rows.append(("service_period", project_id, int(project.get("service_period_version") or 0)))
+        acceptance = project.get("acceptance") or {}
+        rows.append(("acceptance", project_id, int(acceptance.get("version") or 0)))
     for relation_id, (_project, contract) in contracts.items():
         rows.append(("project_contract", relation_id, int(contract.get("contract_version") or 0)))
         by_sequence = {
@@ -462,12 +481,14 @@ def _overview_rows(snapshot: Mapping[str, Any], *, export_id: str, key: bytes) -
         acceptance = project.get("acceptance") or {}
         project_version = int(project.get("project_version") or 0)
         service_version = int(project.get("service_period_version") or 0)
+        acceptance_version = int(acceptance.get("version") or 0)
         rows.append((
             project_id,
             str(project.get("project_code") or ""),
             str(project.get("project_name") or project.get("display_name") or ""),
             start,
             end,
+            acceptance.get("due_date"),
             _service_completion(start, end),
             _money(total_contract),
             "complete" if contract_complete else "missing",
@@ -480,7 +501,14 @@ def _overview_rows(snapshot: Mapping[str, Any], *, export_id: str, key: bytes) -
             str(acceptance.get("configuration_state") or "pending_business_configuration"),
             project_version,
             service_version,
-            _row_token(export_id, "project", project_id, f"{project_version}:{service_version}", key),
+            acceptance_version,
+            _row_token(
+                export_id,
+                "project",
+                project_id,
+                f"{project_version}:{service_version}:{acceptance_version}",
+                key,
+            ),
         ))
     return rows
 
@@ -554,8 +582,11 @@ def _acceptance_rows(snapshot: Mapping[str, Any]) -> list[tuple[Any, ...]]:
 
 
 def _readonly_overview_projection(rows: Sequence[Sequence[Any]]) -> list[tuple[Any, ...]]:
-    # Columns 4-5 are the only editable cells in this sheet.
-    return [tuple(value for index, value in enumerate(row) if index not in (3, 4)) for row in rows]
+    # Columns 4-6 are the only editable cells in this sheet.
+    return [
+        tuple(value for index, value in enumerate(row) if index not in (3, 4, 5))
+        for row in rows
+    ]
 
 
 def _readonly_plan_projection(rows: Sequence[Sequence[Any]]) -> list[tuple[Any, ...]]:
@@ -672,7 +703,7 @@ def build_manager_workbook(
     instructions.column_dimensions["B"].width = 56
     instructions.column_dimensions["C"].width = 28
 
-    for sheet, editable_columns in ((overview, (4, 5)), (plan, (7, 8))):
+    for sheet, editable_columns in ((overview, (4, 5, 6)), (plan, (7, 8))):
         for row in range(6, sheet.max_row + 1):
             for column in range(1, sheet.max_column + 1):
                 cell = sheet.cell(row, column)
@@ -695,10 +726,13 @@ def build_manager_workbook(
     for sheet in (overview, plan):
         for row in range(6, sheet.max_row + 1):
             sheet.cell(row, 4 if sheet is overview else 7).number_format = _DATE_FORMAT
+            if sheet is overview:
+                sheet.cell(row, 5).number_format = _DATE_FORMAT
+                sheet.cell(row, 6).number_format = _DATE_FORMAT
     for row in range(6, overview.max_row + 1):
-        for column in (7, 9, 11):
+        for column in (8, 10, 12):
             overview.cell(row, column).number_format = _MONEY_FORMAT
-        for column in (10, 12):
+        for column in (11, 13):
             overview.cell(row, column).number_format = _PERCENT_FORMAT
     for row in range(6, plan.max_row + 1):
         for column in (5, 8):
@@ -706,7 +740,7 @@ def build_manager_workbook(
     overview_date_validation = DataValidation(type="date", operator="between", formula1="DATE(2000,1,1)", formula2="DATE(2199,12,31)", allow_blank=True)
     overview.add_data_validation(overview_date_validation)
     if overview.max_row >= 6:
-        overview_date_validation.add(f"D6:E{overview.max_row}")
+        overview_date_validation.add(f"D6:F{overview.max_row}")
     date_validation = DataValidation(type="date", operator="between", formula1="DATE(2000,1,1)", formula2="DATE(2199,12,31)", allow_blank=True)
     amount_validation = DataValidation(type="decimal", operator="between", formula1="0.01", formula2="999999999999.99", allow_blank=True)
     plan.add_data_validation(date_validation)
@@ -843,6 +877,18 @@ def validate_manager_workbook(
                 "工作簿元数据签名无效；请重新下载",
                 issues=(WorkbookIssue("metadata_tampered", "工作簿元数据签名无效"),),
             )
+        if metadata["template_version"] != TEMPLATE_VERSION:
+            raise ManagerWorkbookV3Error(
+                "工作簿模板版本已过期；请重新下载当前模板",
+                status_code=409,
+                issues=(
+                    WorkbookIssue(
+                        "template_version_mismatch",
+                        "工作簿模板版本不是当前版本；请重新下载",
+                        METADATA_SHEET,
+                    ),
+                ),
+            )
         if tuple(book.sheetnames) != SHEET_NAMES:
             raise ManagerWorkbookV3Error("工作表名称、顺序或数量不符合 v3 协议")
         visible = tuple(sheet.title for sheet in book.worksheets if sheet.sheet_state == "visible")
@@ -937,6 +983,7 @@ def validate_manager_workbook(
             raise ManagerWorkbookV3Error("每个项目合同关系必须完整保留 24 个计划期次")
 
         service_changes: list[ServicePeriodChange] = []
+        acceptance_due_date_changes: list[AcceptanceDueDateChange] = []
         warnings: list[WorkbookIssue] = []
         errors: list[WorkbookIssue] = []
         seen_projects: set[str] = set()
@@ -951,6 +998,12 @@ def validate_manager_workbook(
             expected_end = project.get("service_end")
             entered_start = _date_or_none(row[3], sheet=OVERVIEW_SHEET, row=excel_row, column="维保开始日期")
             entered_end = _date_or_none(row[4], sheet=OVERVIEW_SHEET, row=excel_row, column="维保结束日期")
+            entered_acceptance_due = _date_or_none(
+                row[5],
+                sheet=OVERVIEW_SHEET,
+                row=excel_row,
+                column="验收报告截止日",
+            )
             # Blank means preserve, never erase an existing fact.
             proposed_start = entered_start if entered_start is not None else expected_start
             proposed_end = entered_end if entered_end is not None else expected_end
@@ -969,6 +1022,24 @@ def validate_manager_workbook(
                 ))
             if state in {"start_only", "end_only"}:
                 warnings.append(WorkbookIssue("partial_service_period", "维保期限只填写了一端，系统会保留并标注不完整", OVERVIEW_SHEET, excel_row, severity="warning"))
+            acceptance = project.get("acceptance") or {}
+            expected_due = acceptance.get("due_date")
+            # Blank follows the same preserve-not-delete contract as all other
+            # manager workbook fields.
+            proposed_due = (
+                entered_acceptance_due
+                if entered_acceptance_due is not None
+                else expected_due
+            )
+            if proposed_due is not None and proposed_due != expected_due:
+                acceptance_due_date_changes.append(
+                    AcceptanceDueDateChange(
+                        project_id=project_id,
+                        project_version=int(project.get("project_version") or 0),
+                        expected_version=int(acceptance.get("version") or 0),
+                        due_date=proposed_due,
+                    )
+                )
 
         milestone_changes: list[MilestoneChange] = []
         seen_plan_keys: set[tuple[str, int]] = set()
@@ -1023,6 +1094,7 @@ def validate_manager_workbook(
             file_sha256=hashlib.sha256(content).hexdigest(),
             service_period_changes=tuple(service_changes),
             milestone_changes=tuple(milestone_changes),
+            acceptance_due_date_changes=tuple(acceptance_due_date_changes),
             warnings=tuple(warnings),
             errors=tuple(errors),
         )

@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from app.auth import hash_password
 from app.models.maintenance_manager import (
+    MaintenanceAcceptanceDeliverable,
     MaintenanceCollectionMilestone,
     MaintenanceManagerUploadBatch,
     MaintenanceManagerUploadBatchProject,
@@ -29,6 +30,8 @@ from app.services.maintenance_manager_workbook_adapter import (
     ManagerWorkbookConflict,
 )
 from app.services.maintenance_manager_workbook_v3 import (
+    OVERVIEW_SHEET,
+    OVERVIEW_TABLE,
     PLAN_SHEET,
     PLAN_TABLE,
     ManagerWorkbookV3Error,
@@ -134,6 +137,21 @@ def _set_plan(content: bytes, relation_id: str) -> bytes:
         book.close()
 
 
+def _set_acceptance_due(content: bytes, value: date) -> bytes:
+    book = load_workbook(io.BytesIO(content), data_only=False)
+    try:
+        sheet = book[OVERVIEW_SHEET]
+        table = sheet.tables[OVERVIEW_TABLE]
+        min_col, min_row, max_col, _max_row = range_boundaries(table.ref)
+        headers = [sheet.cell(min_row, column).value for column in range(min_col, max_col + 1)]
+        sheet.cell(min_row + 1, headers.index("验收报告截止日") + 1, value)
+        output = io.BytesIO()
+        book.save(output)
+        return output.getvalue()
+    finally:
+        book.close()
+
+
 def test_validate_then_apply_is_atomic_and_replay_safe(db):
     user, project_id, relation_id = _seed(db)
     adapter = _adapter(db, user)
@@ -202,6 +220,52 @@ def test_validate_then_apply_is_atomic_and_replay_safe(db):
         task_status="pending",
     )
     assert pending["total"] == 0
+
+
+def test_apply_creates_configured_acceptance_due_date_and_preview(db):
+    user, project_id, _relation_id = _seed(
+        db,
+        username="acceptance_due_manager",
+    )
+    adapter = _adapter(db, user)
+    artifact, _snapshot = adapter.export(date(2026, 8, 1), hmac_key=HMAC_KEY)
+    validation, batch = adapter.validate(
+        date(2026, 8, 1),
+        _set_acceptance_due(artifact.content, date(2026, 10, 31)),
+        hmac_key=HMAC_KEY,
+    )
+    assert len(validation.acceptance_due_date_changes) == 1
+    assert batch.plan_json["preview_changes"] == [{
+        "kind": "acceptance_due_date",
+        "project_id": project_id,
+        "project_code": "PM-acceptance_due_manager",
+        "project_name": "合成项目经理工作簿项目",
+        "contract_no": None,
+        "sequence": None,
+        "before": {
+            "due_date": None,
+            "configuration_state": "pending_business_configuration",
+        },
+        "after": {
+            "due_date": "2026-10-31",
+            "configuration_state": "configured",
+        },
+    }]
+    db.commit()
+
+    result = adapter.apply(batch.batch_id)
+    db.commit()
+    assert result["changed_rows"] == 1
+    deliverable = db.scalar(
+        select(MaintenanceAcceptanceDeliverable).where(
+            MaintenanceAcceptanceDeliverable.project_id == project_id,
+            MaintenanceAcceptanceDeliverable.deliverable_type == "acceptance_report",
+        )
+    )
+    assert deliverable is not None
+    assert deliverable.due_date == date(2026, 10, 31)
+    assert deliverable.configuration_state == "configured"
+    assert deliverable.version == 1
 
 
 def test_scope_change_after_validation_fails_before_any_write(db):
@@ -279,3 +343,79 @@ def test_expired_preview_revalidates_into_same_idempotency_ledger(db):
     db.rollback()
     unchanged_batch = db.get(MaintenanceManagerUploadBatch, batch.batch_id)
     assert unchanged_batch.expires_at <= datetime.now(UTC)
+
+
+def test_applied_status_becomes_stale_when_current_scope_changes(db):
+    user, _project_id, _relation_id = _seed(
+        db,
+        username="status_scope_manager",
+    )
+    adapter = _adapter(db, user)
+    artifact, _snapshot = adapter.export(date(2026, 8, 1), hmac_key=HMAC_KEY)
+    _validation, batch = adapter.validate(
+        date(2026, 8, 1),
+        artifact.content,
+        hmac_key=HMAC_KEY,
+    )
+    db.commit()
+    adapter.apply(batch.batch_id)
+    db.commit()
+    assert adapter.status(date(2026, 8, 1))["latest_batch"]["status"] == "applied"
+
+    project = MaintenanceProject(
+        project_id="status-scope-new-project",
+        project_code="PM-STATUS-SCOPE-NEW",
+        display_name="新增本人范围项目",
+        lifecycle_status="ongoing",
+    )
+    db.add(project)
+    db.flush()
+    db.add_all([
+        MaintenanceProjectUserAssignment(
+            assignment_id="status-scope-new-assignment",
+            project_id=project.project_id,
+            responsibility_type="primary_manager",
+            user_id=user.id,
+            assigned_at=datetime.now(UTC),
+            assigned_by="synthetic-admin",
+            assignment_reason="新增范围验证",
+        ),
+        MaintenanceProjectContract(
+            project_contract_id="status-scope-new-relation",
+            project_id=project.project_id,
+            contract_id="status-scope-new-contract",
+            contract_no="XS-STATUS-SCOPE-NEW",
+            contract_amount=1000,
+            contract_status="active",
+            status_mapping_state="mapped",
+            status_mapping_version="synthetic-v1",
+            included_in_total=True,
+            effective_from=date(2026, 1, 1),
+            source="synthetic-test",
+        ),
+    ])
+    db.commit()
+
+    current = adapter.status(date(2026, 8, 1))
+
+    assert current["latest_batch"]["status"] == "stale_scope"
+    assert current["latest_batch"]["scope_matches_current"] is False
+    assert current["project_count"] == 2
+
+    directory = project_operations(
+        db,
+        as_of=date(2026, 8, 9),
+        user_ctx=_ctx(user),
+        owner_scope="me",
+        task_type="项目经理月度更新",
+        task_status="pending",
+    )
+    assert directory["total"] == 2
+    assert all(
+        next(
+            task
+            for task in row["task_summary"]["rows"]
+            if task["task_type"] == "项目经理月度更新"
+        )["status"] == "pending"
+        for row in directory["rows"]
+    )

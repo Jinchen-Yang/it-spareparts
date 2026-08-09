@@ -95,6 +95,21 @@ def _edit_plan(content: bytes, *, sequence: int, date_value=..., amount_value=..
         book.close()
 
 
+def _edit_overview(content: bytes, *, header: str, value) -> bytes:
+    book = load_workbook(io.BytesIO(content), data_only=False)
+    try:
+        sheet = book[workbook_v3.OVERVIEW_SHEET]
+        table = sheet.tables[workbook_v3.OVERVIEW_TABLE]
+        min_col, min_row, max_col, _max_row = range_boundaries(table.ref)
+        headers = [sheet.cell(min_row, column).value for column in range(min_col, max_col + 1)]
+        sheet.cell(min_row + 1, headers.index(header) + 1, value)
+        output = io.BytesIO()
+        book.save(output)
+        return output.getvalue()
+    finally:
+        book.close()
+
+
 def _add_zip_member(content: bytes, name: str, payload: bytes) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(io.BytesIO(content), "r") as source:
@@ -207,13 +222,46 @@ class MaintenanceManagerWorkbookV3ContractTest(unittest.TestCase):
         self.assertEqual(change.completeness_state, "date_only")
         self.assertTrue(any(issue.code == "partial_plan_node" for issue in result.warnings))
 
+    def test_acceptance_due_date_is_an_editable_versioned_change(self):
+        snapshot = _snapshot()
+        artifact = workbook_v3.build_manager_workbook(snapshot, hmac_key=HMAC_KEY)
+        edited = _edit_overview(
+            artifact.content,
+            header="验收报告截止日",
+            value=date(2026, 11, 20),
+        )
+
+        result = workbook_v3.validate_manager_workbook(
+            edited,
+            snapshot=snapshot,
+            hmac_key=HMAC_KEY,
+        )
+
+        self.assertTrue(result.can_apply)
+        self.assertEqual(len(result.acceptance_due_date_changes), 1)
+        self.assertEqual(
+            result.acceptance_due_date_changes[0].due_date,
+            date(2026, 11, 20),
+        )
+        self.assertEqual(result.acceptance_due_date_changes[0].expected_version, 0)
+
     def test_manager_cannot_write_confirmed_actual_collection(self):
         snapshot = _snapshot()
         artifact = workbook_v3.build_manager_workbook(snapshot, hmac_key=HMAC_KEY)
         book = load_workbook(io.BytesIO(artifact.content), data_only=False)
         try:
             overview = book[workbook_v3.OVERVIEW_SHEET]
-            overview.cell(6, 9, 90000)
+            table = overview.tables[workbook_v3.OVERVIEW_TABLE]
+            min_col, min_row, max_col, _max_row = range_boundaries(table.ref)
+            headers = [
+                overview.cell(min_row, column).value
+                for column in range(min_col, max_col + 1)
+            ]
+            overview.cell(
+                min_row + 1,
+                headers.index("财务确认实收（只读）") + 1,
+                90000,
+            )
             output = io.BytesIO()
             book.save(output)
         finally:
@@ -246,6 +294,41 @@ class MaintenanceManagerWorkbookV3ContractTest(unittest.TestCase):
                 hmac_key=HMAC_KEY,
             )
         self.assertEqual(raised.exception.issues[0].code, "metadata_tampered")
+
+    def test_server_signed_non_current_template_version_is_rejected(self):
+        artifact = workbook_v3.build_manager_workbook(_snapshot(), hmac_key=HMAC_KEY)
+        book = load_workbook(io.BytesIO(artifact.content), data_only=False)
+        try:
+            metadata_sheet = book[workbook_v3.METADATA_SHEET]
+            table = metadata_sheet.tables[workbook_v3.METADATA_TABLE]
+            _min_col, min_row, _max_col, max_row = range_boundaries(table.ref)
+            rows = {
+                str(metadata_sheet.cell(row, 1).value): row
+                for row in range(min_row + 1, max_row + 1)
+            }
+            metadata_sheet.cell(rows["template_version"], 2, "2.9.9")
+            metadata = {
+                key: str(metadata_sheet.cell(row, 2).value or "")
+                for key, row in rows.items()
+            }
+            metadata_sheet.cell(
+                rows["metadata_hmac"],
+                2,
+                workbook_v3._signature(metadata, HMAC_KEY),
+            )
+            output = io.BytesIO()
+            book.save(output)
+        finally:
+            book.close()
+
+        with self.assertRaises(workbook_v3.ManagerWorkbookV3Error) as raised:
+            workbook_v3.validate_manager_workbook(
+                output.getvalue(),
+                snapshot=_snapshot(),
+                hmac_key=HMAC_KEY,
+            )
+
+        self.assertEqual(raised.exception.issues[0].code, "template_version_mismatch")
 
     def test_formula_and_external_link_packages_are_rejected(self):
         snapshot = _snapshot()

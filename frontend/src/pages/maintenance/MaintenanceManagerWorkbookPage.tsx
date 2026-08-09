@@ -13,6 +13,7 @@ import {
   Space,
   Spin,
   Steps,
+  Table,
   Tag,
   Typography,
 } from "antd";
@@ -24,9 +25,12 @@ import {
   getMaintenanceManagerWorkbookStatus,
   validateMaintenanceManagerWorkbook,
   type MaintenanceManagerWorkbookStatus,
+  type MaintenanceManagerWorkbookIssue,
+  type MaintenanceManagerWorkbookChangePreview,
   type MaintenanceManagerWorkbookValidation,
 } from "../../api/maintenanceOperations";
 import PageHeader from "../../components/PageHeader";
+import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
 
 
 function safeFilename(value: string): string {
@@ -36,10 +40,45 @@ function safeFilename(value: string): string {
 
 function statusTag(status: MaintenanceManagerWorkbookStatus["latest_batch"]): JSX.Element {
   if (!status) return <Tag color="gold">本月待上传</Tag>;
+  if (status.status === "stale_scope" || status.scope_matches_current === false) {
+    return <Tag color="orange">负责人范围已变化，需重新提交</Tag>;
+  }
   if (status.status === "applied") return <Tag color="green">本月已应用</Tag>;
   if (status.status === "valid") return <Tag color="blue">已校验待确认</Tag>;
   if (status.status === "expired") return <Tag>校验已过期</Tag>;
   return <Tag color="red">最近校验未通过</Tag>;
+}
+
+const changeKindLabel: Record<string, string> = {
+  service_period: "维保期限",
+  planned_collection_milestone: "计划回款节点",
+  acceptance_due_date: "验收报告截止日",
+};
+
+const changeFieldLabel: Record<string, string> = {
+  service_start: "开始日",
+  service_end: "结束日",
+  completeness_state: "完整度",
+  planned_date: "计划日期",
+  planned_amount: "计划金额",
+  due_date: "截止日",
+  configuration_state: "配置状态",
+};
+
+function changeState(value: Record<string, unknown>): string {
+  const rows = Object.entries(value).map(([field, raw]) => (
+    `${changeFieldLabel[field] || field}：${raw == null || raw === "" ? "空" : String(raw)}`
+  ));
+  return rows.length ? rows.join("；") : "空";
+}
+
+function issueLocation(issue: MaintenanceManagerWorkbookIssue): string | undefined {
+  const parts = [
+    issue.sheet || null,
+    issue.row != null ? `第 ${issue.row} 行` : null,
+    issue.column ? `第 ${issue.column} 列` : null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : undefined;
 }
 
 
@@ -53,6 +92,8 @@ export default function MaintenanceManagerWorkbookPage() {
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [uploadIssues, setUploadIssues] = useState<MaintenanceManagerWorkbookIssue[]>([]);
+  const [{ canApplyManagerWorkbook }] = useState(readMaintenanceCapabilities);
   const inputRef = useRef<HTMLInputElement>(null);
   const generation = useRef(0);
   const downloadLock = useRef(false);
@@ -96,6 +137,7 @@ export default function MaintenanceManagerWorkbookPage() {
     setValidation(null);
     setSuccess(null);
     setError(null);
+    setUploadIssues([]);
   };
 
   const download = async () => {
@@ -104,6 +146,7 @@ export default function MaintenanceManagerWorkbookPage() {
     setDownloading(true);
     setError(null);
     setSuccess(null);
+    setUploadIssues([]);
     try {
       const { data } = await downloadMaintenanceManagerWorkbook(reportMonth);
       const url = URL.createObjectURL(data);
@@ -138,9 +181,23 @@ export default function MaintenanceManagerWorkbookPage() {
     try {
       const { data } = await validateMaintenanceManagerWorkbook(reportMonth, file);
       if (request === generation.current) setValidation(data);
-    } catch {
+    } catch (reason: unknown) {
       if (request === generation.current) {
-        setError("文件校验失败，系统没有写入任何业务数据。请重新下载本月全量表后回填。");
+        const detail = (reason as {
+          response?: { data?: { detail?: unknown } };
+        } | null)?.response?.data?.detail;
+        const structured = detail && typeof detail === "object"
+          ? detail as { message?: unknown; issues?: unknown }
+          : null;
+        const issues = Array.isArray(structured?.issues)
+          ? structured.issues.filter((item): item is MaintenanceManagerWorkbookIssue => (
+            !!item && typeof item === "object" && "message" in item
+          ))
+          : [];
+        setUploadIssues(issues);
+        setError(typeof structured?.message === "string"
+          ? structured.message
+          : "文件校验失败，系统没有写入任何业务数据。请重新下载本月全量表后回填。");
       }
     } finally {
       if (request === generation.current) {
@@ -250,12 +307,16 @@ export default function MaintenanceManagerWorkbookPage() {
                 本人负责项目 {summary.project_count.toLocaleString("zh-CN")} 个
               </Descriptions.Item>
               <Descriptions.Item label="审批角色">
-                {summary.approval_role === "pending_business_configuration"
-                  ? <Tag color="gold">待业务配置</Tag>
-                  : <Tag color="green">已配置</Tag>}
+                {summary.approval_role === "admin_only_pending_business_configuration"
+                  ? <Tag color="orange">管理员临时审批（业务角色待定）</Tag>
+                  : summary.approval_role === "pending_business_configuration"
+                    ? <Tag color="gold">待业务配置</Tag>
+                    : <Tag color="green">已配置</Tag>}
               </Descriptions.Item>
               <Descriptions.Item label="附件载体">
-                {summary.attachment_carrier === "pending_business_configuration"
+                {summary.attachment_carrier === "controlled_business_file"
+                  ? <Tag color="green">受控附件存储与下载审计</Tag>
+                  : summary.attachment_carrier === "pending_business_configuration"
                   ? <Tag color="gold">待业务配置</Tag>
                   : <Tag color="green">已配置</Tag>}
               </Descriptions.Item>
@@ -278,6 +339,15 @@ export default function MaintenanceManagerWorkbookPage() {
         />
       )}
       {success && <Alert type="success" showIcon message={success} />}
+      {uploadIssues.map((issue, index) => (
+        <Alert
+          key={`upload-${issue.code}-${issue.row ?? index}-${issue.column ?? ""}`}
+          type="error"
+          showIcon
+          message={issue.message}
+          description={issueLocation(issue)}
+        />
+      ))}
 
       {validation && (
         <Card
@@ -298,6 +368,9 @@ export default function MaintenanceManagerWorkbookPage() {
                 <Descriptions.Item label="变更">
                   计划回款节点 {validation.changes.planned_collection_milestones.toLocaleString("zh-CN")} 项
                 </Descriptions.Item>
+                <Descriptions.Item label="变更">
+                  验收截止日 {validation.changes.acceptance_due_dates.toLocaleString("zh-CN")} 项
+                </Descriptions.Item>
                 <Descriptions.Item label="写入方式">
                   原子应用（全部成功或全部不写）
                 </Descriptions.Item>
@@ -316,9 +389,7 @@ export default function MaintenanceManagerWorkbookPage() {
                 type="warning"
                 showIcon
                 message={issue.message}
-                description={issue.sheet && issue.row
-                  ? `${issue.sheet} · 第 ${issue.row} 行`
-                  : undefined}
+                description={issueLocation(issue)}
               />
             ))}
             {validation.errors.map((issue, index) => (
@@ -327,11 +398,37 @@ export default function MaintenanceManagerWorkbookPage() {
                 type="error"
                 showIcon
                 message={issue.message}
-                description={issue.sheet && issue.row
-                  ? `${issue.sheet} · 第 ${issue.row} 行`
-                  : undefined}
+                description={issueLocation(issue)}
               />
             ))}
+            {!validation.already_applied && validation.items.length > 0 && (
+              <Table<MaintenanceManagerWorkbookChangePreview>
+                data-testid="manager-workbook-change-table"
+                rowKey={(row) => `${row.kind}-${row.project_id}-${row.project_contract_id || ""}-${row.sequence ?? ""}`}
+                size="small"
+                pagination={false}
+                scroll={{ x: 980 }}
+                dataSource={validation.items}
+                columns={[
+                  {
+                    title: "项目",
+                    width: 220,
+                    render: (_, row) => `${row.project_code || row.project_id} · ${row.project_name || "未命名"}`,
+                  },
+                  {
+                    title: "变更对象",
+                    width: 190,
+                    render: (_, row) => [
+                      changeKindLabel[row.kind] || row.kind,
+                      row.contract_no || null,
+                      row.sequence != null ? `第 ${row.sequence} 期` : null,
+                    ].filter(Boolean).join(" · "),
+                  },
+                  { title: "修改前", render: (_, row) => changeState(row.before) },
+                  { title: "修改后", render: (_, row) => changeState(row.after) },
+                ]}
+              />
+            )}
             {validation.can_apply && (
               <Space direction="vertical" size={6}>
                 <Typography.Text type="secondary">
@@ -342,10 +439,16 @@ export default function MaintenanceManagerWorkbookPage() {
                   icon={<CheckCircleOutlined />}
                   loading={applying}
                   aria-label="确认原子应用"
+                  disabled={!canApplyManagerWorkbook}
                   onClick={() => void apply()}
                 >
                   确认原子应用
                 </Button>
+                {!canApplyManagerWorkbook && (
+                  <Typography.Text type="warning">
+                    当前账号可下载和校验，但没有“月度全量表确认应用”权限，请由管理员单独授权。
+                  </Typography.Text>
+                )}
               </Space>
             )}
           </Space>

@@ -166,8 +166,28 @@ def test_export_validate_apply_uses_only_explicit_own_scope(db):
     assert preview["changes"] == {
         "service_periods": 0,
         "planned_collection_milestones": 1,
+        "acceptance_due_dates": 0,
         "total": 1,
     }
+    assert preview["items"] == [{
+        "kind": "planned_collection_milestone",
+        "project_id": owned_project_id,
+        "project_code": "PM-API-owned",
+        "project_name": "合成项目 owned",
+        "project_contract_id": relation_id,
+        "contract_no": "XS-PM-API-owned",
+        "sequence": 1,
+        "before": {
+            "planned_date": None,
+            "planned_amount": None,
+            "completeness_state": None,
+        },
+        "after": {
+            "planned_date": "2026-09-20",
+            "planned_amount": "18000.00",
+            "completeness_state": "complete",
+        },
+    }]
 
     mismatch = client.post(
         "/api/maintenance/project-manager/workbooks/v3/apply",
@@ -264,6 +284,63 @@ def test_status_fails_closed_without_contract_amount_permission(db):
 
     assert response.status_code == 403
     assert "全部合同额" in response.json()["detail"]
+
+
+def test_apply_requires_dedicated_manager_workbook_action(db):
+    user = SysUser(
+        username="pm_api_apply_denied",
+        role="purchaser",
+        display_name="合成只读项目经理",
+        password_hash=hash_password("synthetic-password-123"),
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "data_profit": True,
+            "action_maintenance_manager_workbook_apply": False,
+        },
+    )
+    db.add(user)
+    db.commit()
+    _project(db, suffix="apply-denied", manager=user)
+    app = FastAPI()
+    app.include_router(auth.router, prefix="/api")
+    app.include_router(maintenance_manager_workbooks.router, prefix="/api")
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": user.username, "password": "synthetic-password-123"},
+    )
+    assert login.status_code == 200, login.text
+    client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+
+    download = client.get(
+        "/api/maintenance/project-manager/workbooks/v3",
+        params={"report_month": "2026-08"},
+    )
+    assert download.status_code == 200, download.text
+    validation = client.post(
+        "/api/maintenance/project-manager/workbooks/v3/validate",
+        params={"report_month": "2026-08"},
+        files={
+            "file": (
+                "synthetic-manager-v3.xlsx",
+                download.content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert validation.status_code == 200, validation.text
+
+    denied = client.post(
+        "/api/maintenance/project-manager/workbooks/v3/apply",
+        json={
+            "validation_token": validation.json()["validation_token"],
+            "data_version": validation.json()["data_version"],
+        },
+    )
+
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "无此操作权限"
 
 
 def test_status_and_export_fail_closed_without_active_project_assignment(db):

@@ -35,8 +35,13 @@ from app.models.maintenance_project_operations import (
     MaintenanceProjectWorkbookState,
 )
 from app.models.maintenance_manager import (
+    BusinessFile,
+    BusinessFileLink,
+    MaintenanceAcceptanceDeliverable,
+    MaintenanceCollectionMilestone,
     MaintenanceManagerUploadBatch,
     MaintenanceManagerUploadBatchProject,
+    MaintenanceServicePeriod,
 )
 from app.models.maintenance_project import MaintenanceProjectUserAssignment
 from app.business_time import business_today
@@ -101,10 +106,27 @@ _EXACT_REMINDER_FILTERS = frozenset(
         "cost:sales_fallback_estimate",
         "cost_ratio:yellow",
         "cost_ratio:red",
+        "维保期限",
+        "计划回款",
+        "验收报告",
+        "验收审批",
+        "service_period:empty",
+        "service_period:start_only",
+        "service_period:end_only",
+        "collection_plan:missing",
+        "acceptance:missing_due",
+        "acceptance:missing_attachment",
+        "acceptance:report_due",
+        "acceptance:pending_review",
+        "acceptance:rejected",
     }
 )
 _MANAGER_UPDATE_FILTER = re.compile(
     r"manager_update:[0-9]{4}-(?:0[1-9]|1[0-2])\Z",
+    re.ASCII,
+)
+_COLLECTION_PLAN_FILTER = re.compile(
+    r"collection_plan:([A-Za-z0-9_-]{1,36}):([1-9]|1[0-9]|2[0-4])\Z",
     re.ASCII,
 )
 
@@ -117,6 +139,8 @@ def _validate_reminder_filter(reminder: str | None) -> None:
     if reminder in _EXACT_REMINDER_FILTERS:
         return
     if _MANAGER_UPDATE_FILTER.fullmatch(reminder):
+        return
+    if _COLLECTION_PLAN_FILTER.fullmatch(reminder):
         return
     raise MaintenanceOperationError("不支持的提醒筛选")
 
@@ -1891,6 +1915,177 @@ def _task_summary(tasks: list[dict], *, as_of: date) -> dict:
     }
 
 
+def _manager_tracking_facts(
+    db: Session,
+    *,
+    project_ids: list[str],
+) -> dict[str, dict]:
+    """Load manager-entered tracking facts in a fixed number of queries."""
+
+    facts: dict[str, dict] = {
+        project_id: {
+            "service_period": None,
+            "milestones": [],
+            "acceptance": None,
+        }
+        for project_id in project_ids
+    }
+    if not project_ids:
+        return facts
+    for period in db.scalars(
+        select(MaintenanceServicePeriod).where(
+            MaintenanceServicePeriod.project_id.in_(project_ids)
+        )
+    ):
+        facts[period.project_id]["service_period"] = period
+    for milestone in db.scalars(
+        select(MaintenanceCollectionMilestone)
+        .where(MaintenanceCollectionMilestone.project_id.in_(project_ids))
+        .order_by(
+            MaintenanceCollectionMilestone.project_id,
+            MaintenanceCollectionMilestone.project_contract_id,
+            MaintenanceCollectionMilestone.sequence,
+        )
+    ):
+        facts[milestone.project_id]["milestones"].append(milestone)
+    deliverables = list(
+        db.scalars(
+            select(MaintenanceAcceptanceDeliverable).where(
+                MaintenanceAcceptanceDeliverable.project_id.in_(project_ids),
+                MaintenanceAcceptanceDeliverable.deliverable_type
+                == "acceptance_report",
+            )
+        )
+    )
+    attachment_counts: dict[str, int] = defaultdict(int)
+    deliverable_ids = [row.deliverable_id for row in deliverables]
+    if deliverable_ids:
+        for deliverable_id, count in db.execute(
+            select(BusinessFileLink.entity_id, func.count(BusinessFileLink.link_id))
+            .join(BusinessFile, BusinessFile.file_id == BusinessFileLink.file_id)
+            .where(
+                BusinessFileLink.entity_type
+                == "maintenance_acceptance_deliverable",
+                BusinessFileLink.entity_id.in_(deliverable_ids),
+                BusinessFileLink.archived_at.is_(None),
+                BusinessFile.security_state == "active",
+            )
+            .group_by(BusinessFileLink.entity_id)
+        ):
+            attachment_counts[deliverable_id] = int(count)
+    for deliverable in deliverables:
+        facts[deliverable.project_id]["acceptance"] = (
+            deliverable,
+            attachment_counts[deliverable.deliverable_id],
+        )
+    return facts
+
+
+def _manager_tracking_payload(
+    *,
+    base: dict,
+    facts: dict | None,
+    latest_confirmed: dict[str, Decimal],
+    as_of: date,
+    hide_financial: bool,
+) -> dict:
+    facts = facts or {}
+    period: MaintenanceServicePeriod | None = facts.get("service_period")
+    service_period = {
+        "service_start": period.service_start.isoformat() if period and period.service_start else None,
+        "service_end": period.service_end.isoformat() if period and period.service_end else None,
+        "completeness_state": period.completeness_state if period else "empty",
+    }
+    contract_numbers = {
+        row["project_contract_id"]: row.get("contract_no")
+        for row in base.get("contracts") or []
+    }
+    cumulative_by_contract: dict[str, Decimal] = defaultdict(lambda: Decimal("0.00"))
+    outstanding: list[dict] = []
+    milestone_count = 0
+    for milestone in facts.get("milestones") or []:
+        milestone_count += 1
+        relation_id = milestone.project_contract_id
+        if milestone.planned_amount is not None:
+            cumulative_by_contract[relation_id] += Decimal(milestone.planned_amount)
+        target = cumulative_by_contract[relation_id]
+        actual = Decimal(latest_confirmed.get(relation_id, Decimal("0.00")))
+        complete = (
+            milestone.completeness_state == "complete"
+            and target > 0
+            and actual >= target
+        )
+        if complete:
+            continue
+        due = milestone.planned_date
+        overdue_days = max((as_of - due).days, 0) if due else 0
+        outstanding.append(
+            {
+                "project_contract_id": relation_id,
+                "contract_no": contract_numbers.get(relation_id),
+                "sequence": milestone.sequence,
+                "planned_date": due.isoformat() if due else None,
+                "planned_amount": (
+                    None if hide_financial or milestone.planned_amount is None
+                    else _money(milestone.planned_amount)
+                ),
+                "completeness_state": milestone.completeness_state,
+                "overdue_days": overdue_days,
+                "is_overdue": overdue_days > 0,
+            }
+        )
+    outstanding.sort(
+        key=lambda row: (
+            row["planned_date"] is None,
+            row["planned_date"] or "9999-12-31",
+            row["contract_no"] or "",
+            row["sequence"],
+        )
+    )
+    acceptance_pair = facts.get("acceptance")
+    deliverable = acceptance_pair[0] if acceptance_pair else None
+    attachment_count = int(acceptance_pair[1]) if acceptance_pair else 0
+    due_date = deliverable.due_date if deliverable else None
+    submission_status = deliverable.submission_status if deliverable else "not_submitted"
+    approval_status = deliverable.approval_status if deliverable else "not_reviewed"
+    acceptance_overdue = (
+        max((as_of - due_date).days, 0)
+        if due_date and submission_status != "submitted" and approval_status != "approved"
+        else 0
+    )
+    return {
+        "service_period": service_period,
+        "next_collection_milestone": outstanding[0] if outstanding else None,
+        "outstanding_collection_milestones": len(outstanding),
+        "configured_collection_milestones": milestone_count,
+        "acceptance": {
+            "deliverable_id": deliverable.deliverable_id if deliverable else None,
+            "due_date": due_date.isoformat() if due_date else None,
+            "submission_status": submission_status,
+            "submitted_at": (
+                deliverable.submitted_at.isoformat()
+                if deliverable and deliverable.submitted_at
+                else None
+            ),
+            "approval_status": approval_status,
+            "approved_at": (
+                deliverable.approved_at.isoformat()
+                if deliverable and deliverable.approved_at
+                else None
+            ),
+            "rejection_reason": deliverable.rejection_reason if deliverable else None,
+            "configuration_state": (
+                deliverable.configuration_state
+                if deliverable
+                else "pending_business_configuration"
+            ),
+            "attachment_count": attachment_count,
+            "overdue_days": acceptance_overdue,
+            "is_overdue": acceptance_overdue > 0,
+        },
+    }
+
+
 def _attach_manager_and_missing_labels(card: dict, assignment: dict | None) -> None:
     card["manager_assignment"] = assignment
     # The source-text manager is never an account identity. System tasks only
@@ -1904,17 +2099,26 @@ def _attach_manager_and_missing_labels(card: dict, assignment: dict | None) -> N
     labels: list[str] = []
     if assignment is None:
         labels.append("负责人待映射")
-    if card.get("lifecycle_status") == "missing":
-        labels.append("期限待补")
+    tracking = card.get("manager_tracking") or {}
+    service_period = tracking.get("service_period") or {}
+    if service_period.get("completeness_state") == "empty":
+        labels.append("维保期限待补")
+    elif service_period.get("completeness_state") in {"start_only", "end_only"}:
+        labels.append("维保期限不完整")
     metrics = card.get("metrics") or {}
     if metrics.get("contract_amount_complete") is False:
         labels.append("合同额待补")
     if metrics.get("cost_complete") is False:
         labels.append("成本待补")
-    # Attachment persistence is explicitly outside #205.  Do not fabricate a
-    # missing/present judgment before #206 provides an authoritative model.
-    card["attachment_status"] = "not_integrated"
-    labels.append("附件状态待接入")
+    acceptance = tracking.get("acceptance") or {}
+    attachment_count = int(acceptance.get("attachment_count") or 0)
+    card["attachment_status"] = "available" if attachment_count else "missing"
+    if not acceptance.get("due_date"):
+        labels.append("验收截止日待补")
+    if attachment_count == 0:
+        labels.append("验收附件待上传")
+    if acceptance.get("configuration_state") != "configured":
+        labels.append("验收业务配置待确认")
     card["missing_data_labels"] = labels
 
 
@@ -1933,6 +2137,12 @@ def _manager_update_completed_project_ids(
     if not project_ids:
         return set()
     month_start = report_month.replace(day=1)
+    valid_batch_ids = _manager_batches_matching_current_scope(
+        db,
+        report_month=month_start,
+    )
+    if not valid_batch_ids:
+        return set()
     return set(
         db.scalars(
             select(MaintenanceManagerUploadBatchProject.project_id)
@@ -1949,6 +2159,7 @@ def _manager_update_completed_project_ids(
             .where(
                 MaintenanceManagerUploadBatchProject.project_id.in_(project_ids),
                 MaintenanceManagerUploadBatch.status == "applied",
+                MaintenanceManagerUploadBatch.batch_id.in_(valid_batch_ids),
                 MaintenanceManagerUploadBatch.report_month == month_start,
                 MaintenanceProjectUserAssignment.archived_at.is_(None),
                 MaintenanceProjectUserAssignment.version
@@ -1958,6 +2169,78 @@ def _manager_update_completed_project_ids(
             )
         )
     )
+
+
+def _manager_batches_matching_current_scope(
+    db: Session,
+    *,
+    report_month: date,
+) -> set[str]:
+    """Applied monthly batches are complete only while their full owner scope matches.
+
+    A newly assigned, archived, restored, or version-changed project invalidates the
+    old whole-month completion signal. This mirrors the workbook status endpoint and
+    prevents an old partial scope from closing project-manager tasks.
+    """
+
+    batches = list(
+        db.scalars(
+            select(MaintenanceManagerUploadBatch).where(
+                MaintenanceManagerUploadBatch.status == "applied",
+                MaintenanceManagerUploadBatch.report_month
+                == report_month.replace(day=1),
+            )
+        )
+    )
+    if not batches:
+        return set()
+    owner_ids = {batch.owner_user_id for batch in batches}
+    current_scope: dict[int, list[dict]] = defaultdict(list)
+    for assignment, project in db.execute(
+        select(MaintenanceProjectUserAssignment, MaintenanceProject)
+        .join(
+            MaintenanceProject,
+            MaintenanceProject.project_id
+            == MaintenanceProjectUserAssignment.project_id,
+        )
+        .where(
+            MaintenanceProjectUserAssignment.user_id.in_(owner_ids),
+            MaintenanceProjectUserAssignment.responsibility_type == "primary_manager",
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+            MaintenanceProject.is_active.is_(True),
+        )
+        .order_by(
+            MaintenanceProjectUserAssignment.user_id,
+            MaintenanceProject.project_id,
+            MaintenanceProjectUserAssignment.assignment_id,
+        )
+    ):
+        current_scope[assignment.user_id].append(
+            {
+                "project_id": project.project_id,
+                "project_version": project.version,
+                "assignment_id": assignment.assignment_id,
+                "assignment_version": assignment.version,
+            }
+        )
+
+    valid: set[str] = set()
+    for batch in batches:
+        persisted = sorted(
+            [
+                {
+                    "project_id": str(row.get("project_id") or ""),
+                    "project_version": int(row.get("project_version") or 0),
+                    "assignment_id": str(row.get("assignment_id") or ""),
+                    "assignment_version": int(row.get("assignment_version") or 0),
+                }
+                for row in (batch.plan_json or {}).get("project_scope") or []
+            ],
+            key=lambda row: (row["project_id"], row["assignment_id"]),
+        )
+        if persisted and persisted == current_scope.get(batch.owner_user_id, []):
+            valid.add(batch.batch_id)
+    return valid
 
 
 def _system_tasks(
@@ -1972,6 +2255,7 @@ def _system_tasks(
     cost_status: str,
     as_of: date,
     manager_update_completed: bool = False,
+    manager_tracking: dict | None = None,
 ) -> list[dict]:
     tasks: list[dict] = []
     due_date = date(as_of.year, as_of.month, monthrange(as_of.year, as_of.month)[1])
@@ -2004,6 +2288,166 @@ def _system_tasks(
             ),
         )
     )
+    tracking = manager_tracking or {}
+    service_period = tracking.get("service_period") or {}
+    service_state = service_period.get("completeness_state") or "empty"
+    if service_state != "complete":
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key=f"service_period:{service_state}",
+                severity="warning",
+                title=(
+                    "补全维保开始和结束日期"
+                    if service_state == "empty"
+                    else "补全维保期限缺失的一端"
+                ),
+                detail="维保期限会直接显示在项目卡片，并用于项目期限提醒",
+                task_type="维保期限",
+                owner=None,
+                close_basis="维保开始日期和结束日期均已填写且结束日不早于开始日",
+            )
+        )
+    milestone = tracking.get("next_collection_milestone")
+    if milestone:
+        due = (
+            date.fromisoformat(milestone["planned_date"])
+            if milestone.get("planned_date")
+            else None
+        )
+        amount = milestone.get("planned_amount")
+        overdue_days = int(milestone.get("overdue_days") or 0)
+        detail_parts = [
+            f"合同 {milestone.get('contract_no') or '未提供'}",
+            f"第 {milestone.get('sequence')} 期",
+        ]
+        if amount is not None:
+            detail_parts.append(f"计划金额 {amount}")
+        if overdue_days:
+            detail_parts.append(f"已逾期 {overdue_days} 天")
+        elif due is None:
+            detail_parts.append("计划日期待补")
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key=(
+                    "collection_plan:"
+                    f"{milestone.get('project_contract_id')}:{milestone.get('sequence')}"
+                ),
+                severity="critical" if overdue_days else "info",
+                title=(
+                    "计划回款节点已逾期"
+                    if overdue_days
+                    else "跟进最近计划回款节点"
+                ),
+                detail=" · ".join(detail_parts),
+                entity_id=(
+                    f"{milestone.get('project_contract_id')}:{milestone.get('sequence')}"
+                ),
+                task_type="计划回款",
+                due_date=due,
+                owner=None,
+                close_basis="财务确认累计实收达到该节点累计计划金额，或月度全量表调整该计划",
+            )
+        )
+    elif int(tracking.get("configured_collection_milestones") or 0) == 0:
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="collection_plan:missing",
+                severity="warning",
+                title="补充计划回款节点",
+                detail="当前项目尚未设置任何计划回款日期或金额",
+                task_type="计划回款",
+                owner=None,
+                close_basis="至少存在一条计划回款节点",
+            )
+        )
+    acceptance = tracking.get("acceptance") or {}
+    acceptance_due = (
+        date.fromisoformat(acceptance["due_date"])
+        if acceptance.get("due_date")
+        else None
+    )
+    if acceptance_due is None:
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="acceptance:missing_due",
+                severity="warning",
+                title="补充验收报告截止日",
+                detail="截止日缺失不会隐藏项目，但无法生成到期提醒",
+                task_type="验收报告",
+                owner=None,
+                close_basis="验收报告截止日已配置",
+            )
+        )
+    if int(acceptance.get("attachment_count") or 0) == 0:
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="acceptance:missing_attachment",
+                severity="warning",
+                title="上传验收报告附件",
+                detail="尚无通过安全校验的有效验收附件",
+                task_type="验收报告",
+                due_date=acceptance_due,
+                owner=None,
+                close_basis="至少存在一个有效、未归档的受控验收附件",
+            )
+        )
+    submission_status = acceptance.get("submission_status") or "not_submitted"
+    approval_status = acceptance.get("approval_status") or "not_reviewed"
+    if submission_status != "submitted":
+        overdue_days = int(acceptance.get("overdue_days") or 0)
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="acceptance:report_due",
+                severity="critical" if overdue_days else "warning",
+                title=(
+                    "验收报告提交已逾期"
+                    if overdue_days
+                    else "按期提交验收报告"
+                ),
+                detail=(
+                    f"已逾期 {overdue_days} 天"
+                    if overdue_days
+                    else "提交必须包含至少一个有效附件"
+                ),
+                task_type="验收报告",
+                due_date=acceptance_due,
+                owner=None,
+                close_basis="验收报告已实名提交",
+            )
+        )
+    elif approval_status == "not_reviewed":
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="acceptance:pending_review",
+                severity="info",
+                title="验收报告待独立审批",
+                detail="提交人与审批人必须不同；业务审批角色未配置时仅 admin 可审批",
+                task_type="验收审批",
+                owner=None,
+                close_basis="验收报告已批准或已驳回",
+            )
+        )
+    elif approval_status == "rejected":
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="acceptance:rejected",
+                severity="warning",
+                title="验收报告被驳回，需修订后重新提交",
+                detail=str(acceptance.get("rejection_reason") or "审批人未填写可见原因"),
+                task_type="验收报告",
+                due_date=acceptance_due,
+                owner=None,
+                close_basis="修订附件并重新提交后进入待审批状态",
+            )
+        )
     for issue in completeness.get("issues", []):
         code = str(issue.get("code") or "incomplete")
         if code == "expense_data_not_ready":
@@ -2212,6 +2656,7 @@ def _project_card_from_facts(
     as_of: date,
     user_ctx: UserContext,
     manager_update_completed: bool = False,
+    manager_tracking_facts: dict | None = None,
 ) -> tuple[dict, list[dict], dict]:
     """Assemble the canonical project card from preloaded summary facts."""
 
@@ -2313,6 +2758,13 @@ def _project_card_from_facts(
         }
         for row in base["contracts"]
     ]
+    manager_tracking = _manager_tracking_payload(
+        base=base,
+        facts=manager_tracking_facts,
+        latest_confirmed=latest_confirmed,
+        as_of=as_of,
+        hide_financial=profit_restricted,
+    )
     project_summary = {
         **base["project"],
         "contracts": contract_rows,
@@ -2359,6 +2811,7 @@ def _project_card_from_facts(
             ),
         },
         "reminder_count": 0,
+        "manager_tracking": manager_tracking,
         "as_of": as_of.isoformat(),
     }
     reminders = _system_tasks(
@@ -2372,6 +2825,7 @@ def _project_card_from_facts(
         cost_status=cost_status,
         as_of=as_of,
         manager_update_completed=manager_update_completed,
+        manager_tracking=manager_tracking,
     )
     reminders, completeness = _visible_tasks(
         reminders,
@@ -2751,6 +3205,10 @@ def project_workspace(
         project_ids=[project_id],
         report_month=as_of,
     )
+    manager_tracking = _manager_tracking_facts(
+        db,
+        project_ids=[project_id],
+    ).get(project_id)
     project_summary, reminders, completeness = _project_card_from_facts(
         base=base,
         latest_confirmed=latest_confirmed,
@@ -2768,6 +3226,7 @@ def project_workspace(
         as_of=as_of,
         user_ctx=user_ctx,
         manager_update_completed=manager_update_completed,
+        manager_tracking_facts=manager_tracking,
     )
     _attach_manager_and_missing_labels(
         project_summary,
@@ -3355,6 +3814,10 @@ def _project_cards_for_ids(
         project_ids=project_ids,
         report_month=as_of,
     )
+    manager_tracking_by_project = _manager_tracking_facts(
+        db,
+        project_ids=project_ids,
+    )
     cards: dict[str, dict] = {}
     for project in projects:
         base = maintenance_project.project_overview_from_facts(
@@ -3406,6 +3869,7 @@ def _project_cards_for_ids(
             manager_update_completed=(
                 project.project_id in manager_update_completed_ids
             ),
+            manager_tracking_facts=manager_tracking_by_project.get(project.project_id),
         )
         _attach_manager_and_missing_labels(
             card,
@@ -3417,6 +3881,7 @@ def _project_cards_for_ids(
 
 def _directory_reminder_query(
     *,
+    db: Session,
     filters: list,
     as_of: date,
     user_ctx: UserContext,
@@ -3642,6 +4107,123 @@ def _directory_reminder_query(
         .group_by(MaintenanceProjectExpenseAttribution.project_id)
         .cte("directory_expense_fact")
     )
+    milestone_progress = (
+        select(
+            MaintenanceCollectionMilestone.project_id,
+            MaintenanceCollectionMilestone.project_contract_id,
+            MaintenanceCollectionMilestone.sequence,
+            MaintenanceCollectionMilestone.planned_date,
+            MaintenanceCollectionMilestone.completeness_state,
+            MaintenanceProjectContract.contract_no,
+            func.sum(
+                func.coalesce(
+                    MaintenanceCollectionMilestone.planned_amount,
+                    Decimal("0.00"),
+                )
+            )
+            .over(
+                partition_by=MaintenanceCollectionMilestone.project_contract_id,
+                order_by=MaintenanceCollectionMilestone.sequence,
+                rows=(None, 0),
+            )
+            .label("cumulative_target"),
+            func.coalesce(
+                ranked_collection.c.cumulative_amount,
+                Decimal("0.00"),
+            ).label("confirmed_collection"),
+        )
+        .join(
+            MaintenanceProjectContract,
+            MaintenanceProjectContract.project_contract_id
+            == MaintenanceCollectionMilestone.project_contract_id,
+        )
+        .outerjoin(
+            ranked_collection,
+            and_(
+                ranked_collection.c.project_contract_id
+                == MaintenanceCollectionMilestone.project_contract_id,
+                ranked_collection.c.row_number == 1,
+            ),
+        )
+        .cte("directory_milestone_progress")
+    )
+    outstanding_milestone = (
+        select(milestone_progress)
+        .where(
+            or_(
+                milestone_progress.c.completeness_state != "complete",
+                milestone_progress.c.cumulative_target <= Decimal("0.00"),
+                milestone_progress.c.confirmed_collection
+                < milestone_progress.c.cumulative_target,
+            )
+        )
+        .cte("directory_outstanding_milestone")
+    )
+    ranked_outstanding_milestone = (
+        select(
+            outstanding_milestone,
+            func.row_number()
+            .over(
+                partition_by=outstanding_milestone.c.project_id,
+                order_by=(
+                    case(
+                        (outstanding_milestone.c.planned_date.is_(None), 1),
+                        else_=0,
+                    ),
+                    outstanding_milestone.c.planned_date,
+                    outstanding_milestone.c.contract_no,
+                    outstanding_milestone.c.sequence,
+                ),
+            )
+            .label("project_row_number"),
+        )
+        .cte("directory_ranked_outstanding_milestone")
+    )
+    milestone_by_project = (
+        select(
+            MaintenanceCollectionMilestone.project_id,
+            func.count().label("milestone_count"),
+        )
+        .group_by(MaintenanceCollectionMilestone.project_id)
+        .cte("directory_milestone_fact")
+    )
+    acceptance_attachment_by_deliverable = (
+        select(
+            BusinessFileLink.entity_id.label("deliverable_id"),
+            func.count().label("attachment_count"),
+        )
+        .join(BusinessFile, BusinessFile.file_id == BusinessFileLink.file_id)
+        .where(
+            BusinessFileLink.entity_type
+            == "maintenance_acceptance_deliverable",
+            BusinessFileLink.archived_at.is_(None),
+            BusinessFile.security_state == "active",
+        )
+        .group_by(BusinessFileLink.entity_id)
+        .cte("directory_acceptance_attachment_fact")
+    )
+    acceptance_by_project = (
+        select(
+            MaintenanceAcceptanceDeliverable.project_id,
+            MaintenanceAcceptanceDeliverable.due_date,
+            MaintenanceAcceptanceDeliverable.submission_status,
+            MaintenanceAcceptanceDeliverable.approval_status,
+            func.coalesce(
+                acceptance_attachment_by_deliverable.c.attachment_count,
+                0,
+            ).label("attachment_count"),
+        )
+        .outerjoin(
+            acceptance_attachment_by_deliverable,
+            acceptance_attachment_by_deliverable.c.deliverable_id
+            == MaintenanceAcceptanceDeliverable.deliverable_id,
+        )
+        .where(
+            MaintenanceAcceptanceDeliverable.deliverable_type
+            == "acceptance_report"
+        )
+        .cte("directory_acceptance_fact")
+    )
     facts = (
         select(
             MaintenanceProject.project_id,
@@ -3689,6 +4271,35 @@ def _directory_reminder_query(
                 expense_by_project.c.approved_expense, Decimal("0.00")
             ).label("approved_expense"),
             MaintenanceProjectWorkbookState.expense_ready_through,
+            func.coalesce(
+                MaintenanceServicePeriod.completeness_state,
+                "empty",
+            ).label("service_period_state"),
+            func.coalesce(milestone_by_project.c.milestone_count, 0).label(
+                "milestone_count"
+            ),
+            ranked_outstanding_milestone.c.project_contract_id.label(
+                "next_milestone_contract_id"
+            ),
+            ranked_outstanding_milestone.c.sequence.label(
+                "next_milestone_sequence"
+            ),
+            ranked_outstanding_milestone.c.planned_date.label(
+                "next_milestone_date"
+            ),
+            acceptance_by_project.c.due_date.label("acceptance_due_date"),
+            func.coalesce(
+                acceptance_by_project.c.submission_status,
+                "not_submitted",
+            ).label("acceptance_submission_status"),
+            func.coalesce(
+                acceptance_by_project.c.approval_status,
+                "not_reviewed",
+            ).label("acceptance_approval_status"),
+            func.coalesce(
+                acceptance_by_project.c.attachment_count,
+                0,
+            ).label("acceptance_attachment_count"),
         )
         .select_from(MaintenanceProject)
         .outerjoin(
@@ -3724,12 +4335,36 @@ def _directory_reminder_query(
             MaintenanceProjectWorkbookState.project_id
             == MaintenanceProject.project_id,
         )
+        .outerjoin(
+            MaintenanceServicePeriod,
+            MaintenanceServicePeriod.project_id == MaintenanceProject.project_id,
+        )
+        .outerjoin(
+            milestone_by_project,
+            milestone_by_project.c.project_id == MaintenanceProject.project_id,
+        )
+        .outerjoin(
+            ranked_outstanding_milestone,
+            and_(
+                ranked_outstanding_milestone.c.project_id
+                == MaintenanceProject.project_id,
+                ranked_outstanding_milestone.c.project_row_number == 1,
+            ),
+        )
+        .outerjoin(
+            acceptance_by_project,
+            acceptance_by_project.c.project_id == MaintenanceProject.project_id,
+        )
         .where(*filters)
         .cte("directory_reminder_fact")
     )
 
     month_start = as_of.replace(day=1)
     current_business_month = business_today().replace(day=1)
+    valid_manager_batch_ids = _manager_batches_matching_current_scope(
+        db,
+        report_month=month_start,
+    )
     manager_completed = (
         select(literal(1))
         .select_from(MaintenanceManagerUploadBatchProject)
@@ -3746,6 +4381,7 @@ def _directory_reminder_query(
         .where(
             MaintenanceManagerUploadBatchProject.project_id == facts.c.project_id,
             MaintenanceManagerUploadBatch.status == "applied",
+            MaintenanceManagerUploadBatch.batch_id.in_(valid_manager_batch_ids),
             MaintenanceManagerUploadBatch.report_month == month_start,
             MaintenanceProjectUserAssignment.archived_at.is_(None),
             MaintenanceProjectUserAssignment.version
@@ -3795,6 +4431,48 @@ def _directory_reminder_query(
         rounded_cost_rate > Decimal("80"),
         rounded_cost_rate <= Decimal("100"),
     )
+    service_empty = facts.c.service_period_state == "empty"
+    service_start_only = facts.c.service_period_state == "start_only"
+    service_end_only = facts.c.service_period_state == "end_only"
+    service_incomplete = or_(
+        service_empty,
+        service_start_only,
+        service_end_only,
+    )
+    collection_plan_missing = facts.c.milestone_count == 0
+    collection_plan_next = facts.c.next_milestone_contract_id.is_not(None)
+    collection_plan_overdue = and_(
+        collection_plan_next,
+        facts.c.next_milestone_date.is_not(None),
+        facts.c.next_milestone_date < as_of,
+    )
+    collection_plan_info = and_(
+        collection_plan_next,
+        or_(
+            facts.c.next_milestone_date.is_(None),
+            facts.c.next_milestone_date >= as_of,
+        ),
+    )
+    acceptance_missing_due = facts.c.acceptance_due_date.is_(None)
+    acceptance_missing_attachment = facts.c.acceptance_attachment_count == 0
+    acceptance_report_due = facts.c.acceptance_submission_status != "submitted"
+    acceptance_report_overdue = and_(
+        acceptance_report_due,
+        facts.c.acceptance_due_date.is_not(None),
+        facts.c.acceptance_due_date < as_of,
+    )
+    acceptance_report_warning = and_(
+        acceptance_report_due,
+        or_(
+            facts.c.acceptance_due_date.is_(None),
+            facts.c.acceptance_due_date >= as_of,
+        ),
+    )
+    acceptance_pending_review = and_(
+        facts.c.acceptance_submission_status == "submitted",
+        facts.c.acceptance_approval_status == "not_reviewed",
+    )
+    acceptance_rejected = facts.c.acceptance_approval_status == "rejected"
     rule_conditions = {
         f"manager_update:{as_of:%Y-%m}": manager_open,
         "completeness:no_effective_contracts": and_(
@@ -3848,7 +4526,23 @@ def _directory_reminder_query(
         ),
         "cost_ratio:yellow": yellow,
         "cost_ratio:red": red,
+        "service_period:empty": service_empty,
+        "service_period:start_only": service_start_only,
+        "service_period:end_only": service_end_only,
+        "collection_plan:missing": collection_plan_missing,
+        "acceptance:missing_due": acceptance_missing_due,
+        "acceptance:missing_attachment": acceptance_missing_attachment,
+        "acceptance:report_due": acceptance_report_due,
+        "acceptance:pending_review": acceptance_pending_review,
+        "acceptance:rejected": acceptance_rejected,
     }
+    collection_plan_match = _COLLECTION_PLAN_FILTER.fullmatch(reminder or "")
+    if collection_plan_match is not None:
+        rule_conditions[reminder] = and_(
+            collection_plan_next,
+            facts.c.next_milestone_contract_id == collection_plan_match.group(1),
+            facts.c.next_milestone_sequence == int(collection_plan_match.group(2)),
+        )
     completeness_conditions = [
         condition
         for key, condition in rule_conditions.items()
@@ -3863,6 +4557,12 @@ def _directory_reminder_query(
         rule_conditions["cost:missing_price"],
         rule_conditions["cost:sales_fallback_estimate"],
         yellow,
+        service_incomplete,
+        collection_plan_missing,
+        acceptance_missing_due,
+        acceptance_missing_attachment,
+        acceptance_report_warning,
+        acceptance_rejected,
     ]
     if as_of.day == monthrange(as_of.year, as_of.month)[1]:
         warning_conditions.append(manager_open)
@@ -3878,11 +4578,29 @@ def _directory_reminder_query(
             rule_conditions["cost:sales_fallback_estimate"],
         ),
         "cost_ratio": or_(yellow, red),
+        "维保期限": service_incomplete,
+        "计划回款": or_(collection_plan_missing, collection_plan_next),
+        "验收报告": or_(
+            acceptance_missing_due,
+            acceptance_missing_attachment,
+            acceptance_report_due,
+            acceptance_rejected,
+        ),
+        "验收审批": acceptance_pending_review,
     }
     severity_conditions = {
-        "info": or_(manager_info, *collection_conditions),
+        "info": or_(
+            manager_info,
+            *collection_conditions,
+            collection_plan_info,
+            acceptance_pending_review,
+        ),
         "warning": or_(*warning_conditions),
-        "critical": red,
+        "critical": or_(
+            red,
+            collection_plan_overdue,
+            acceptance_report_overdue,
+        ),
     }
     if reminder is None:
         reminder_condition = literal(True)
@@ -3895,6 +4613,14 @@ def _directory_reminder_query(
             rule_conditions["cost:sales_fallback_estimate"],
             yellow,
             red,
+            service_incomplete,
+            collection_plan_missing,
+            collection_plan_next,
+            acceptance_missing_due,
+            acceptance_missing_attachment,
+            acceptance_report_due,
+            acceptance_pending_review,
+            acceptance_rejected,
         )
     else:
         reminder_condition = rule_conditions.get(
@@ -3912,7 +4638,7 @@ def _directory_reminder_query(
             as_of.month,
             monthrange(as_of.year, as_of.month)[1],
         )
-        task_facts: list[tuple[str, str, date | None, object]] = [
+        task_facts: list[tuple[str, str, object | None, object]] = [
             ("项目经理月度更新", "pending", manager_due, manager_open),
             (
                 "项目经理月度更新",
@@ -3924,7 +4650,41 @@ def _directory_reminder_query(
         task_facts.extend(
             (rule_key.split(":", 1)[0], "open", None, condition)
             for rule_key, condition in rule_conditions.items()
-            if not rule_key.startswith("manager_update:")
+            if rule_key.startswith(
+                ("completeness:", "collection:", "cost:", "cost_ratio:")
+            )
+        )
+        task_facts.extend(
+            [
+                ("维保期限", "open", None, service_incomplete),
+                ("计划回款", "open", None, collection_plan_missing),
+                (
+                    "计划回款",
+                    "open",
+                    facts.c.next_milestone_date,
+                    collection_plan_next,
+                ),
+                ("验收报告", "open", None, acceptance_missing_due),
+                (
+                    "验收报告",
+                    "open",
+                    facts.c.acceptance_due_date,
+                    acceptance_missing_attachment,
+                ),
+                (
+                    "验收报告",
+                    "open",
+                    facts.c.acceptance_due_date,
+                    acceptance_report_due,
+                ),
+                ("验收审批", "open", None, acceptance_pending_review),
+                (
+                    "验收报告",
+                    "open",
+                    facts.c.acceptance_due_date,
+                    acceptance_rejected,
+                ),
+            ]
         )
         selected_conditions = []
         for fact_type, fact_status, fact_due, condition in task_facts:
@@ -3937,10 +4697,17 @@ def _directory_reminder_query(
             if due_from is not None or due_to is not None:
                 if fact_due is None:
                     continue
-                if due_from is not None and fact_due < due_from:
-                    continue
-                if due_to is not None and fact_due > due_to:
-                    continue
+                if isinstance(fact_due, date):
+                    if due_from is not None and fact_due < due_from:
+                        continue
+                    if due_to is not None and fact_due > due_to:
+                        continue
+                else:
+                    condition = and_(condition, fact_due.is_not(None))
+                    if due_from is not None:
+                        condition = and_(condition, fact_due >= due_from)
+                    if due_to is not None:
+                        condition = and_(condition, fact_due <= due_to)
             selected_conditions.append(condition)
         task_condition = (
             or_(*selected_conditions) if selected_conditions else literal(False)
@@ -4022,6 +4789,7 @@ def project_operations(
         )
     else:
         matching_query = _directory_reminder_query(
+            db=db,
             filters=filters,
             as_of=as_of,
             user_ctx=user_ctx,

@@ -35,6 +35,11 @@ describe("维保管理信息架构", () => {
         label: "经理月报",
       },
       {
+        key: "maintenance-acceptance",
+        path: "/maintenance/acceptance",
+        label: "验收报告",
+      },
+      {
         key: "maintenance-updates",
         path: "/maintenance/updates",
         label: "月度更新",

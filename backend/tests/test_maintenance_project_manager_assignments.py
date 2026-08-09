@@ -412,12 +412,14 @@ def test_task_board_keeps_incomplete_project_and_filters_generated_tasks_in_post
     assert card["manager_assignment"] is None
     assert card["missing_data_labels"] == [
         "负责人待映射",
-        "期限待补",
+        "维保期限待补",
         "合同额待补",
         "成本待补",
-        "附件状态待接入",
+        "验收截止日待补",
+        "验收附件待上传",
+        "验收业务配置待确认",
     ]
-    assert card["attachment_status"] == "not_integrated"
+    assert card["attachment_status"] == "missing"
     monthly = next(
         row
         for row in card["task_summary"]["rows"]

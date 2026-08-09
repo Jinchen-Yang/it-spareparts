@@ -331,8 +331,17 @@ class BusinessFile(Base):
         ),
         CheckConstraint(
             "char_length(btrim(object_key)) > 0 AND "
-            "btrim(object_key) !~* '^(https?|ftp)://'",
+            "btrim(object_key) !~* '^(https?|ftp|file)://' AND "
+            "btrim(object_key) !~ '(^/|(^|/)\\.\\.(/|$))' AND "
+            "strpos(object_key, chr(92)) = 0",
             name="ck_business_file_object_key_not_external_url",
+        ),
+        CheckConstraint(
+            "char_length(btrim(original_filename)) BETWEEN 1 AND 256 AND "
+            "strpos(original_filename, '/') = 0 AND "
+            "strpos(original_filename, chr(92)) = 0 AND "
+            "original_filename !~ '[[:cntrl:]]'",
+            name="ck_business_file_original_filename_safe",
         ),
         CheckConstraint(
             "size_bytes > 0 AND size_bytes <= 52428800",
@@ -360,7 +369,11 @@ class BusinessFileLink(Base):
     link_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     file_id: Mapped[str] = mapped_column(ForeignKey("business_file.file_id"), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(48), nullable=False)
-    entity_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    entity_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("maintenance_acceptance_deliverable.deliverable_id"),
+        nullable=False,
+    )
     relation_type: Mapped[str] = mapped_column(String(24), nullable=False)
     acl_scope: Mapped[str] = mapped_column(String(32), nullable=False)
     created_by: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -402,6 +415,96 @@ class BusinessFileLink(Base):
             "entity_type",
             "entity_id",
             "archived_at",
+        ),
+    )
+
+
+class MaintenanceAcceptanceOperation(Base):
+    """Append-only idempotency ledger for acceptance writes."""
+
+    __tablename__ = "maintenance_acceptance_operation"
+
+    operation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    operation_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    operation_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    deliverable_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_acceptance_deliverable.deliverable_id"), nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_project.project_id"), nullable=False
+    )
+    result_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    operated_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "operation_type IN ('attachment_upload', 'submit', 'approve', 'reject')",
+            name="ck_maintenance_acceptance_operation_type",
+        ),
+        CheckConstraint(
+            "payload_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_maintenance_acceptance_operation_payload_present",
+        ),
+        CheckConstraint(
+            "char_length(btrim(operated_by)) > 0",
+            name="ck_maintenance_acceptance_operation_operator",
+        ),
+        Index(
+            "ix_maintenance_acceptance_operation_deliverable_time",
+            "deliverable_id",
+            "created_at",
+        ),
+    )
+
+
+class BusinessFileDownloadAudit(Base):
+    """Append-only proof of every controlled acceptance-file download."""
+
+    __tablename__ = "business_file_download_audit"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    file_id: Mapped[str] = mapped_column(
+        ForeignKey("business_file.file_id"), nullable=False
+    )
+    link_id: Mapped[str] = mapped_column(
+        ForeignKey("business_file_link.link_id"), nullable=False
+    )
+    deliverable_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_acceptance_deliverable.deliverable_id"), nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_project.project_id"), nullable=False
+    )
+    downloaded_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    sha256_at_download: Mapped[str] = mapped_column(String(64), nullable=False)
+    downloaded_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "char_length(btrim(downloaded_by)) > 0",
+            name="ck_business_file_download_audit_operator",
+        ),
+        CheckConstraint(
+            "sha256_at_download ~ '^[0-9a-f]{64}$'",
+            name="ck_business_file_download_audit_sha256",
+        ),
+        Index(
+            "ix_business_file_download_audit_file_time",
+            "file_id",
+            "downloaded_at",
+            "id",
+        ),
+        Index(
+            "ix_business_file_download_audit_project_time",
+            "project_id",
+            "downloaded_at",
+            "id",
         ),
     )
 
