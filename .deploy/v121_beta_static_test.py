@@ -81,12 +81,26 @@ def main() -> None:
     assert "emergency_stop_public_surface" in release and "fail_closed" in release
     assert "app/frontend stop could not be proven" in release
     assert "release package artifact has unsafe owner, mode or link count" in release
+    preclose_call = release.index("    preclose_beta_surface\n")
+    package_verify = release.index('python3 "$MANIFEST_TOOL" verify')
+    assert preclose_call < package_verify
+    assert "stopped before package verification" in release
+    assert "pilot app/frontend restarted before the observation baseline" in release
+    assert "completed outside its two-minute window" in release
 
     module = load_manifest_module()
     assert set(module.ACTION_CANARY_ROUTES) == {
         *module.MAINTENANCE_ACTIONS,
         "action_replenishment_create",
         "action_replenishment_review",
+    }
+    assert module.ACTION_CANARY_ROUTES["action_maintenance_roundtrip_apply"] == (
+        "POST",
+        "/api/maintenance/roundtrip-import",
+    )
+    assert callable(module._fetch_ci_evidence)
+    assert module._ci_live_identity({"captured_at": "ignored", "checks": []}) == {
+        "checks": []
     }
     head = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=ROOT, text=True).strip()
     inventory = module._migration_inventory(ROOT, head)

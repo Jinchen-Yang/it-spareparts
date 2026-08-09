@@ -66,6 +66,121 @@ readonly ENV_FILE="$APP_DIR/.env"
   || fatal "release control script is unsafe"
 [ "$(stat -c '%a %U:%G' "$PACKAGE_DIR")" = "700 root:root" ] \
   || fatal "production release package must be mode 700 root:root"
+
+if [ ! -e "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; then
+  mkdir -m 750 -- "$LOCK_DIR" || fatal "cannot create release lock directory"
+fi
+[ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] \
+  && [ "$(stat -c '%a %U:%G' "$LOCK_DIR")" = "750 root:root" ] \
+  || fatal "release lock directory is unsafe"
+exec 9>"$LOCK_DIR/lock"
+[ "$(stat -c '%a %U:%G %h' "$LOCK_DIR/lock")" = "600 root:root 1" ] \
+  || fatal "release lock file is unsafe"
+flock -n 9 || fatal "another v1.21 Beta release operation is running"
+
+set_flags() {
+  local maintenance=$1
+  local replenishment=$2
+  [ "$maintenance" = true ] || [ "$maintenance" = false ] || fatal "invalid maintenance flag"
+  [ "$replenishment" = true ] || [ "$replenishment" = false ] || fatal "invalid replenishment flag"
+  python3 - "$ENV_FILE" "$maintenance" "$replenishment" <<'PY'
+import os
+import pathlib
+import re
+import sys
+import tempfile
+
+path = pathlib.Path(sys.argv[1])
+stat = path.stat(follow_symlinks=False)
+if not path.is_file() or path.is_symlink():
+    raise SystemExit("unsafe .env")
+replacements = {
+    "MAINTENANCE_BETA_ENABLED": sys.argv[2],
+    "REPLENISHMENT_BETA_ENABLED": sys.argv[3],
+    "MAINTENANCE_CUTOVER_ENABLED": "false",
+}
+lines = path.read_text(encoding="utf-8").splitlines()
+seen = set()
+output = []
+for raw in lines:
+    match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", raw)
+    if match and match.group(1) in replacements:
+        key = match.group(1)
+        if key in seen:
+            raise SystemExit(f"duplicate protected .env key: {key}")
+        output.append(f"{key}={replacements[key]}")
+        seen.add(key)
+    else:
+        output.append(raw)
+for key in replacements:
+    if key not in seen:
+        output.append(f"{key}={replacements[key]}")
+fd, temporary = tempfile.mkstemp(prefix=".env-v121-", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        stream.write("\n".join(output) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chown(temporary, stat.st_uid, stat.st_gid)
+    os.chmod(temporary, stat.st_mode & 0o777)
+    os.replace(temporary, path)
+    directory_fd = os.open(path.parent, os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
+}
+
+emergency_stop_public_surface() {
+  local service running remaining container
+  for service in app frontend; do
+    running=$(docker ps --quiet \
+      --filter label=com.docker.compose.project=it-spareparts \
+      --filter "label=com.docker.compose.service=$service") || return 1
+    if [ -n "$running" ]; then
+      while IFS= read -r container; do
+        [ -n "$container" ] || continue
+        docker stop --time 20 "$container" >/dev/null \
+          || docker kill "$container" >/dev/null \
+          || return 1
+      done <<<"$running"
+    fi
+    remaining=$(docker ps --quiet \
+      --filter label=com.docker.compose.project=it-spareparts \
+      --filter "label=com.docker.compose.service=$service") || return 1
+    [ -z "$remaining" ] || return 1
+  done
+}
+
+fail_closed() {
+  local reason=$1
+  if emergency_stop_public_surface; then
+    fatal "$reason; app and frontend were stopped"
+  fi
+  fatal "$reason; CRITICAL: app/frontend stop could not be proven"
+}
+
+preclose_beta_surface() {
+  if ! set_flags false false; then
+    fail_closed "emergency pre-close could not persist all protected flags false"
+  fi
+  if ! emergency_stop_public_surface; then
+    fail_closed "emergency pre-close could not stop the public surface"
+  fi
+  printf 'all protected flags are false and app/frontend are stopped before package verification\n'
+}
+
+case "$COMMAND" in
+  contain|rollback-app)
+    [ "$#" -eq 0 ] || usage
+    preclose_beta_surface
+    ;;
+esac
+
 [ -f "$MANIFEST" ] && [ ! -L "$MANIFEST" ] \
   && [ "$(stat -c '%a %U:%G %h' "$MANIFEST")" = "600 root:root 1" ] \
   || fatal "production manifest is unsafe"
@@ -86,17 +201,6 @@ while IFS= read -r -d '' package_file; do
   [ "$(stat -c '%a %U:%G %h' "$package_file")" = "$package_mode root:root 1" ] \
     || fatal "release package artifact has unsafe owner, mode or link count"
 done < <(find "$PACKAGE_DIR" -mindepth 1 -maxdepth 1 -type f -print0)
-
-if [ ! -e "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; then
-  mkdir -m 750 -- "$LOCK_DIR" || fatal "cannot create release lock directory"
-fi
-[ -d "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] \
-  && [ "$(stat -c '%a %U:%G' "$LOCK_DIR")" = "750 root:root" ] \
-  || fatal "release lock directory is unsafe"
-exec 9>"$LOCK_DIR/lock"
-[ "$(stat -c '%a %U:%G %h' "$LOCK_DIR/lock")" = "600 root:root 1" ] \
-  || fatal "release lock file is unsafe"
-flock -n 9 || fatal "another v1.21 Beta release operation is running"
 
 manifest_get() {
   local dotted=$1
@@ -213,7 +317,10 @@ PY
 
 state_get() {
   local key=$1
-  [ -f "$STATE" ] && [ ! -L "$STATE" ] || fatal "release state is missing or unsafe"
+  [ -f "$STATE" ] && [ ! -L "$STATE" ] || {
+    printf 'release state is missing or unsafe\n' >&2
+    return 1
+  }
   python3 - "$STATE" "$key" <<'PY'
 import json
 import sys
@@ -260,12 +367,17 @@ finally:
 PY
 }
 
+phase_is() {
+  local wanted=$1
+  local state_manifest state_phase
+  state_manifest=$(state_get manifest_sha256) || return 1
+  state_phase=$(state_get phase) || return 1
+  [ "$state_manifest" = "$MANIFEST_SHA" ] && [ "$state_phase" = "$wanted" ]
+}
+
 require_phase() {
   local wanted=$1
-  [ "$(state_get manifest_sha256)" = "$MANIFEST_SHA" ] \
-    || fatal "release state manifest mismatch"
-  [ "$(state_get phase)" = "$wanted" ] \
-    || fatal "release phase must be $wanted"
+  phase_is "$wanted" || fatal "release state must belong to this manifest at phase $wanted"
 }
 
 safe_env_snapshot() {
@@ -407,58 +519,6 @@ if values["DB_HEAD"] != sys.argv[3]:
     raise SystemExit("live parent DB_HEAD differs from f1")
 if values["RELEASE_PHASE"] != "observed":
     raise SystemExit("live parent release is not observed")
-PY
-}
-
-set_flags() {
-  local maintenance=$1
-  local replenishment=$2
-  [ "$maintenance" = true ] || [ "$maintenance" = false ] || fatal "invalid maintenance flag"
-  [ "$replenishment" = true ] || [ "$replenishment" = false ] || fatal "invalid replenishment flag"
-  python3 - "$ENV_FILE" "$maintenance" "$replenishment" <<'PY'
-import os
-import pathlib
-import re
-import sys
-import tempfile
-
-path = pathlib.Path(sys.argv[1])
-stat = path.stat(follow_symlinks=False)
-if not path.is_file() or path.is_symlink():
-    raise SystemExit("unsafe .env")
-replacements = {
-    "MAINTENANCE_BETA_ENABLED": sys.argv[2],
-    "REPLENISHMENT_BETA_ENABLED": sys.argv[3],
-    "MAINTENANCE_CUTOVER_ENABLED": "false",
-}
-lines = path.read_text(encoding="utf-8").splitlines()
-seen = set()
-output = []
-for raw in lines:
-    match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", raw)
-    if match and match.group(1) in replacements:
-        key = match.group(1)
-        if key in seen:
-            raise SystemExit(f"duplicate protected .env key: {key}")
-        output.append(f"{key}={replacements[key]}")
-        seen.add(key)
-    else:
-        output.append(raw)
-for key in replacements:
-    if key not in seen:
-        output.append(f"{key}={replacements[key]}")
-fd, temporary = tempfile.mkstemp(prefix=".env-v121-", dir=path.parent)
-try:
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write("\n".join(output) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.chown(temporary, stat.st_uid, stat.st_gid)
-    os.chmod(temporary, stat.st_mode & 0o777)
-    os.replace(temporary, path)
-finally:
-    if os.path.exists(temporary):
-        os.unlink(temporary)
 PY
 }
 
@@ -809,41 +869,21 @@ candidate_images_running() {
     && [ "$(docker inspect -f '{{.State.Running}}' "$frontend_cid")" = true ]
 }
 
-emergency_stop_public_surface() {
-  local service running remaining container
-  for service in app frontend; do
-    running=$(docker ps --quiet \
-      --filter label=com.docker.compose.project=it-spareparts \
-      --filter "label=com.docker.compose.service=$service") || return 1
-    if [ -n "$running" ]; then
-      while IFS= read -r container; do
-        [ -n "$container" ] || continue
-        docker stop --time 20 "$container" >/dev/null \
-          || docker kill "$container" >/dev/null \
-          || return 1
-      done <<<"$running"
-    fi
-    remaining=$(docker ps --quiet \
-      --filter label=com.docker.compose.project=it-spareparts \
-      --filter "label=com.docker.compose.service=$service") || return 1
-    [ -z "$remaining" ] || return 1
-  done
-}
-
-fail_closed() {
-  local reason=$1
-  if emergency_stop_public_surface; then
-    state_update contained_public_surface_stopped \
-      '{"beta_contained":true,"public_surface_stopped":true,"manual_recovery_required":true}'
-    fatal "$reason; app and frontend were stopped"
-  fi
-  fatal "$reason; CRITICAL: app/frontend stop could not be proven"
-}
-
 recreate_app() {
   docker image tag "$NEW_APP_IMAGE_ID" "$APP_IMAGE_REF" \
     && [ "$(docker image inspect -f '{{.Id}}' "$APP_IMAGE_REF")" = "$NEW_APP_IMAGE_ID" ] \
     && compose up --no-deps --no-build --force-recreate -d app \
+    && db_matches_state \
+    && candidate_images_running \
+    && internal_health
+}
+
+recreate_candidate_public_surface() {
+  docker image tag "$NEW_APP_IMAGE_ID" "$APP_IMAGE_REF" \
+    && docker image tag "$NEW_FRONTEND_IMAGE_ID" "$FRONTEND_IMAGE_REF" \
+    && [ "$(docker image inspect -f '{{.Id}}' "$APP_IMAGE_REF")" = "$NEW_APP_IMAGE_ID" ] \
+    && [ "$(docker image inspect -f '{{.Id}}' "$FRONTEND_IMAGE_REF")" = "$NEW_FRONTEND_IMAGE_ID" ] \
+    && compose up --no-deps --no-build --force-recreate -d app frontend \
     && db_matches_state \
     && candidate_images_running \
     && internal_health
@@ -1189,6 +1229,8 @@ open_empty_beta() {
 
 pilot_smoke() {
   [ "$#" -eq 2 ] || usage
+  local opened app_cid frontend_cid current_app_cid current_frontend_cid
+  local app_restarts frontend_restarts pilot_state
   require_phase empty_beta_verified
   assert_flags false false false
   assert_intended_allowlist \
@@ -1200,18 +1242,36 @@ pilot_smoke() {
   if ! db_matches_state || ! candidate_images_running || ! internal_health; then
     contain_failed_open "candidate identity/health drifted before pilot"
   fi
+  app_cid=$(service_cid app) \
+    || contain_failed_open "cannot resolve initial pilot app container"
+  frontend_cid=$(service_cid frontend) \
+    || contain_failed_open "cannot resolve initial pilot frontend container"
+  [ -n "$app_cid" ] && [ -n "$frontend_cid" ] \
+    || contain_failed_open "initial pilot app/frontend container identity is empty"
+  app_restarts=$(container_restarts "$app_cid") \
+    || contain_failed_open "cannot read initial pilot app restart count"
+  frontend_restarts=$(container_restarts "$frontend_cid") \
+    || contain_failed_open "cannot read initial pilot frontend restart count"
+  if [ "$app_restarts" != 0 ] || [ "$frontend_restarts" != 0 ]; then
+    contain_failed_open "pilot app/frontend restarted before the observation baseline"
+  fi
   smoke deny "$1" \
     || contain_failed_open "pilot deny smoke failed"
   smoke allow "$2" \
     || contain_failed_open "pilot allow smoke failed"
-  local opened app_cid frontend_cid pilot_state
+  current_app_cid=$(service_cid app) \
+    || contain_failed_open "cannot recheck pilot app container"
+  current_frontend_cid=$(service_cid frontend) \
+    || contain_failed_open "cannot recheck pilot frontend container"
+  if [ "$current_app_cid" != "$app_cid" ] \
+      || [ "$current_frontend_cid" != "$frontend_cid" ] \
+      || [ "$(container_restarts "$app_cid")" != "$app_restarts" ] \
+      || [ "$(container_restarts "$frontend_cid")" != "$frontend_restarts" ]; then
+    contain_failed_open "pilot app/frontend identity or restart count changed during smoke"
+  fi
   opened=$(date +%s)
-  app_cid=$(service_cid app) \
-    || contain_failed_open "cannot resolve pilot app container"
-  frontend_cid=$(service_cid frontend) \
-    || contain_failed_open "cannot resolve pilot frontend container"
   pilot_state=$(python3 - "$opened" "$app_cid" "$frontend_cid" \
-    "$(container_restarts "$app_cid")" "$(container_restarts "$frontend_cid")" <<'PY'
+    "$app_restarts" "$frontend_restarts" <<'PY'
 import json,sys
 print(json.dumps({"pilot_opened_at_epoch":int(sys.argv[1]),
  "pilot_app_container_id":sys.argv[2],"pilot_frontend_container_id":sys.argv[3],
@@ -1228,7 +1288,8 @@ observe() {
   [ "$#" -eq 4 ] || usage
   local minute=$1
   case "$minute" in 0|5|15|30) ;; *) usage ;; esac
-  require_phase pilot_open
+  phase_is pilot_open \
+    || contain_failed_open "release state is unavailable or is not at pilot_open"
   assert_flags true true false \
     || contain_failed_open "Beta flag drift detected before observation"
   local opened now required_elapsed elapsed
@@ -1290,6 +1351,10 @@ PY
       || ! assert_intended_allowlist; then
     contain_failed_open "observation minute $minute failed"
   fi
+  now=$(date +%s)
+  elapsed=$((now-opened))
+  [ "$elapsed" -le "$((required_elapsed+OBSERVATION_GRACE_SECONDS))" ] \
+    || contain_failed_open "observation minute $minute completed outside its two-minute window"
   if ! write_json_atomic "$observation_file" "$(python3 - \
     "$MANIFEST_SHA" "$minute" "$elapsed" "$(database_pressure_json)" \
     "$(container_restarts "$(db_cid)")" \
@@ -1317,20 +1382,29 @@ PY
 
 contain() {
   [ "$#" -eq 0 ] || usage
-  [ -f "$STATE" ] || fatal "release state missing"
   if ! set_flags false false; then
     fail_closed "flags could not be persisted false"
   fi
-  if [ "$(state_get phase)" = old_images_on_d9 ]; then
-    docker image tag "$OLD_APP_IMAGE_ID" "$APP_IMAGE_REF"
-    if ! compose up --no-deps --no-build --force-recreate -d app \
+  [ -f "$STATE" ] && [ ! -L "$STATE" ] \
+    || fail_closed "release state is missing or unsafe after flags were persisted false"
+  local state_manifest phase
+  state_manifest=$(state_get manifest_sha256) \
+    || fail_closed "release state manifest is unreadable after flags were persisted false"
+  [ "$state_manifest" = "$MANIFEST_SHA" ] \
+    || fail_closed "release state belongs to another manifest after flags were persisted false"
+  phase=$(state_get phase) \
+    || fail_closed "release phase is unreadable after flags were persisted false"
+  if [ "$phase" = old_images_on_d9 ]; then
+    if ! docker image tag "$OLD_APP_IMAGE_ID" "$APP_IMAGE_REF" \
+        || ! docker image tag "$OLD_FRONTEND_IMAGE_ID" "$FRONTEND_IMAGE_REF" \
+        || ! compose up --no-deps --no-build --force-recreate -d app frontend \
         || ! db_matches_state \
         || [ "$(container_image_id "$(service_cid app)")" != "$OLD_APP_IMAGE_ID" ] \
         || [ "$(container_image_id "$(service_cid frontend)")" != "$OLD_FRONTEND_IMAGE_ID" ] \
         || ! internal_health; then
       fail_closed "flags are false but old-image application recovery failed"
     fi
-  elif ! recreate_app; then
+  elif ! recreate_candidate_public_surface; then
     fail_closed "flags are false but candidate application recovery failed"
   fi
   assert_flags false false false
@@ -1340,24 +1414,34 @@ contain() {
 
 rollback_app() {
   [ "$#" -eq 0 ] || usage
-  [ -f "$STATE" ] || fatal "release state missing"
   if ! set_flags false false; then
     fail_closed "rollback could not persist both Beta flags false"
   fi
+  [ -f "$STATE" ] && [ ! -L "$STATE" ] \
+    || fail_closed "release state is missing or unsafe after rollback flags were persisted false"
+  local state_manifest
+  state_manifest=$(state_get manifest_sha256) \
+    || fail_closed "rollback release state manifest is unreadable"
+  [ "$state_manifest" = "$MANIFEST_SHA" ] \
+    || fail_closed "rollback release state belongs to another manifest"
   if [ "$(db_head)" != "$EXPECTED_TO" ]; then
     fail_closed "rollback control only applies after committed d9"
   fi
   if [ "$ROLLBACK_MODE" != old_images_on_d9_allowed ]; then
-    recreate_app || fail_closed "old-image rollback is forbidden and candidate recovery failed"
+    recreate_candidate_public_surface \
+      || fail_closed "old-image rollback is forbidden and candidate recovery failed"
     state_update contained_forward_fix \
       '{"beta_contained":true,"old_image_rollback_refused":true,"database_restore_forbidden":true}'
     fatal "old images were not rehearsed on d9; Beta was contained, forward fix is mandatory"
   fi
   local evidence_path evidence_sha
-  evidence_path="$PACKAGE_DIR/$(manifest_get rollback.rehearsal_evidence.path)"
-  evidence_sha=$(manifest_get rollback.rehearsal_evidence.sha256)
+  evidence_path="$PACKAGE_DIR/$(manifest_get rollback.rehearsal_evidence.path)" \
+    || fail_closed "cannot resolve rollback rehearsal evidence path"
+  evidence_sha=$(manifest_get rollback.rehearsal_evidence.sha256) \
+    || fail_closed "cannot resolve rollback rehearsal evidence digest"
   if [ "$(sha256_file "$evidence_path")" != "$evidence_sha" ]; then
-    recreate_app || fail_closed "rollback evidence drifted and candidate recovery failed"
+    recreate_candidate_public_surface \
+      || fail_closed "rollback evidence drifted and candidate recovery failed"
     fatal "old-image d9 rehearsal evidence drifted; Beta remains closed on candidate images"
   fi
   if ! docker image tag "$OLD_APP_IMAGE_ID" "$APP_IMAGE_REF" \

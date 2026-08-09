@@ -56,7 +56,7 @@ REPLENISHMENT_KEYS = (
 ACTION_CANARY_ROUTES = {
     "action_maintenance_roundtrip_apply": (
         "POST",
-        "/api/maintenance/projects/stable/{project_id}/collections",
+        "/api/maintenance/roundtrip-import",
     ),
     "action_maintenance_manager_workbook_apply": (
         "POST",
@@ -840,16 +840,12 @@ def _validate_candidate_compose_contract(content: bytes) -> None:
             _fail(f"candidate Compose does not default {key} to false")
 
 
-def _capture_ci(args: argparse.Namespace) -> None:
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository):
-        _fail("repository must be owner/name")
-    if not SHA40.fullmatch(args.target_sha):
-        _fail("target SHA must be 40 lowercase hex characters")
-    if args.output.exists() or args.output.is_symlink():
-        _fail("CI evidence output already exists; evidence is immutable")
-    branch = json.loads(_run("gh", "api", f"repos/{args.repository}/branches/main"))
+def _fetch_ci_evidence(
+    *, repository: str, target: str, required: list[str]
+) -> dict[str, Any]:
+    branch = json.loads(_run("gh", "api", f"repos/{repository}/branches/main"))
     main_head = ((branch.get("commit") or {}).get("sha"))
-    if main_head != args.target_sha:
+    if main_head != target:
         _fail("GitHub main does not point at the requested exact SHA")
     response = json.loads(
         _run(
@@ -857,7 +853,7 @@ def _capture_ci(args: argparse.Namespace) -> None:
             "api",
             "-H",
             "Accept: application/vnd.github+json",
-            f"repos/{args.repository}/commits/{args.target_sha}/check-runs?per_page=100",
+            f"repos/{repository}/commits/{target}/check-runs?per_page=100",
         )
     )
     runs = response.get("check_runs")
@@ -865,22 +861,49 @@ def _capture_ci(args: argparse.Namespace) -> None:
         _fail("GitHub check-runs response is malformed")
     evidence = {
         "format": "github-main-ci-v1",
-        "repository": args.repository,
-        "target_sha": args.target_sha,
+        "repository": repository,
+        "target_sha": target,
         "main_head_sha": main_head,
         "captured_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
-        "checks": [
-            {
-                "name": item.get("name"),
-                "status": item.get("status"),
-                "conclusion": item.get("conclusion"),
-                "details_url": item.get("details_url"),
-            }
-            for item in runs
-        ],
+        "checks": sorted(
+            (
+                {
+                    "name": item.get("name"),
+                    "status": item.get("status"),
+                    "conclusion": item.get("conclusion"),
+                    "details_url": item.get("details_url"),
+                }
+                for item in runs
+            ),
+            key=lambda item: (
+                str(item["name"]),
+                str(item["details_url"]),
+                str(item["status"]),
+                str(item["conclusion"]),
+            ),
+        ),
     }
     _validate_ci_evidence(
         evidence,
+        repository=repository,
+        target=target,
+        required=required,
+    )
+    return evidence
+
+
+def _ci_live_identity(data: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in data.items() if key != "captured_at"}
+
+
+def _capture_ci(args: argparse.Namespace) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository):
+        _fail("repository must be owner/name")
+    if not SHA40.fullmatch(args.target_sha):
+        _fail("target SHA must be 40 lowercase hex characters")
+    if args.output.exists() or args.output.is_symlink():
+        _fail("CI evidence output already exists; evidence is immutable")
+    evidence = _fetch_ci_evidence(
         repository=args.repository,
         target=args.target_sha,
         required=args.required_check,
@@ -969,6 +992,13 @@ def _generate(args: argparse.Namespace) -> None:
         target=args.target_sha,
         required=args.required_check,
     )
+    live_ci_data = _fetch_ci_evidence(
+        repository=args.repository,
+        target=args.target_sha,
+        required=args.required_check,
+    )
+    if _ci_live_identity(live_ci_data) != _ci_live_identity(ci_data):
+        _fail("CI evidence drifted from the live GitHub API")
     allowlist_summary, canary_evidence = _parse_allowlist(
         args.beta_allowlist,
         repository=args.repository,
