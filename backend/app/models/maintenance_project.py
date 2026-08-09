@@ -278,7 +278,10 @@ class MaintenanceProjectAuditLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "entity_type IN ('project', 'project_contract', 'manager_assignment')",
+            "entity_type IN ("
+            "'project', 'project_contract', 'manager_assignment', "
+            "'source_order_assignment'"
+            ")",
             name="ck_maintenance_project_audit_entity_type",
         ),
         CheckConstraint(

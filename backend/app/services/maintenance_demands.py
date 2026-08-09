@@ -27,6 +27,7 @@ from app.models.maintenance import (
     MaintenanceDemandDeleteIntentItem,
     MaintenanceDemandTombstone,
 )
+from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_cost_invalidation
 
 
@@ -127,6 +128,7 @@ def _escape_like(value: str) -> str:
 def _order_version_payload(
     order: FMaintenanceOrder,
     lines: Iterable[FMaintenanceLine],
+    assignment: MaintenanceSourceOrderAssignment | None,
 ) -> dict:
     order_payload = {
         column.name: _json_value(getattr(order, column.name))
@@ -142,12 +144,27 @@ def _order_version_payload(
         for line in lines
     ]
     line_payloads.sort(key=lambda row: str(row.get("raw_line_id") or ""))
-    return {"header": order_payload, "lines": line_payloads}
+    assignment_payload = (
+        {
+            "assignment_id": assignment.assignment_id,
+            "project_id": assignment.project_id,
+            "version": assignment.version,
+            "is_active": assignment.is_active,
+        }
+        if assignment is not None
+        else None
+    )
+    return {
+        "header": order_payload,
+        "lines": line_payloads,
+        "active_project_assignment": assignment_payload,
+    }
 
 
 def _snapshot(
     order: FMaintenanceOrder,
     lines: list[FMaintenanceLine],
+    assignment: MaintenanceSourceOrderAssignment | None,
 ) -> dict:
     downstream = []
     if order.linked_sales_order_no:
@@ -156,6 +173,20 @@ def _snapshot(
                 "kind": "sales_order",
                 "label": f"关联销售单 {order.linked_sales_order_no}",
                 "reference_id": order.linked_sales_order_no,
+            }
+        )
+    assignment_payload = None
+    if assignment is not None:
+        assignment_payload = {
+            "assignment_id": assignment.assignment_id,
+            "project_id": assignment.project_id,
+            "version": assignment.version,
+        }
+        downstream.append(
+            {
+                "kind": "stable_project",
+                "label": "已确认稳定项目归属",
+                "reference_id": assignment.project_id,
             }
         )
     return {
@@ -167,7 +198,10 @@ def _snapshot(
         "linked_sales_order_no": order.linked_sales_order_no,
         "line_count": len(lines),
         "downstream_references": downstream,
-        "version_digest": _digest(_order_version_payload(order, lines)),
+        "active_project_assignment": assignment_payload,
+        "version_digest": _digest(
+            _order_version_payload(order, lines, assignment)
+        ),
     }
 
 
@@ -200,8 +234,28 @@ def _load_snapshots(
             line_statement = line_statement.with_for_update()
         for line in db.scalars(line_statement):
             lines_by_order[line.order_id].append(line)
+    assignment_statement = (
+        select(MaintenanceSourceOrderAssignment)
+        .where(
+            MaintenanceSourceOrderAssignment.source_order_id.in_(
+                [order.raw_order_id for order in orders]
+            ),
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+        .order_by(MaintenanceSourceOrderAssignment.source_order_id)
+    )
+    if lock:
+        assignment_statement = assignment_statement.with_for_update()
+    assignments_by_source = {
+        assignment.source_order_id: assignment
+        for assignment in db.scalars(assignment_statement)
+    }
     return {
-        order.raw_order_id: _snapshot(order, lines_by_order.get(order.id, []))
+        order.raw_order_id: _snapshot(
+            order,
+            lines_by_order.get(order.id, []),
+            assignments_by_source.get(order.raw_order_id),
+        )
         for order in orders
     }
 

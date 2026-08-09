@@ -98,6 +98,7 @@ export interface MaintenanceProjectOperationsSummary {
   lifecycle_status: MaintenanceLifecycleStatus;
   is_active: boolean;
   version: number;
+  manual_source_order_count: number;
   contracts: MaintenanceContractSummary[];
   metrics: MaintenanceOperationsMetrics;
   return_rate?: MaintenanceReturnRate | null;
@@ -842,6 +843,10 @@ function normalizeProjectSummary(
 ): MaintenanceProjectOperationsSummary {
   return {
     ...project,
+    manual_source_order_count: Number.isInteger(project.manual_source_order_count)
+      && project.manual_source_order_count >= 0
+      ? project.manual_source_order_count
+      : 0,
     contracts: Array.isArray(project.contracts)
       ? project.contracts.map((contract) => normalizeContract(contract, visibility))
       : [],

@@ -20,12 +20,14 @@ from sqlalchemy import and_, case, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAuditLog,
     MaintenanceProjectContract,
     MaintenanceProjectUserAssignment,
 )
+from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.dimensions import DimPart
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
@@ -55,6 +57,7 @@ from app.services import maintenance_bad_returns
 from app.services import maintenance_consumption_cost
 from app.services import maintenance_project
 from app.services import maintenance_project_assignments
+from app.services.query_filters import active_orders
 
 
 class MaintenanceOperationError(Exception):
@@ -4621,6 +4624,22 @@ def project_workspace(
         db,
         project_id=project_id,
     )
+    manual_count_statement = (
+        select(func.count())
+        .select_from(MaintenanceSourceOrderAssignment)
+        .join(
+            FMaintenanceOrder,
+            FMaintenanceOrder.raw_order_id
+            == MaintenanceSourceOrderAssignment.source_order_id,
+        )
+        .where(
+            MaintenanceSourceOrderAssignment.project_id == project_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    )
+    project_summary["manual_source_order_count"] = int(
+        db.scalar(active_orders(manual_count_statement, FMaintenanceOrder)) or 0
+    )
 
     issue_statement = (
         select(MaintenanceSiteIssue, MaintenanceSiteIssueLine)
@@ -5208,6 +5227,31 @@ def _project_cards_for_ids(
         db,
         project_ids=project_ids,
     )
+    manual_source_order_count_statement = (
+        select(
+            MaintenanceSourceOrderAssignment.project_id,
+            func.count(),
+        )
+        .join(
+            FMaintenanceOrder,
+            FMaintenanceOrder.raw_order_id
+            == MaintenanceSourceOrderAssignment.source_order_id,
+        )
+        .where(
+            MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+        .group_by(MaintenanceSourceOrderAssignment.project_id)
+    )
+    manual_source_order_counts = {
+        project_id: int(count)
+        for project_id, count in db.execute(
+            active_orders(
+                manual_source_order_count_statement,
+                FMaintenanceOrder,
+            )
+        )
+    }
     cards: dict[str, dict] = {}
     return_rates = maintenance_bad_returns.return_rates_for_projects(
         db,
@@ -5270,6 +5314,10 @@ def _project_cards_for_ids(
             manager_assignments.get(project.project_id),
         )
         card["return_rate"] = return_rates[project.project_id]
+        card["manual_source_order_count"] = manual_source_order_counts.get(
+            project.project_id,
+            0,
+        )
         cards[project.project_id] = card
     return cards
 

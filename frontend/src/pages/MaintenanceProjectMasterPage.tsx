@@ -341,9 +341,16 @@ export default function MaintenanceProjectMasterPage() {
       <PageHeader
         title="项目主档"
         subtitle="稳定项目编号是维保项目的长期身份；名称和负责人可审计变更。"
-        extra={canManage ? (
-          <Button type="primary" onClick={openCreate}>新建项目</Button>
-        ) : undefined}
+        extra={(
+          <Space>
+            <Button href="/maintenance/project-master/source-orders">
+              历史维保单归属
+            </Button>
+            {canManage && (
+              <Button type="primary" onClick={openCreate}>新建项目</Button>
+            )}
+          </Space>
+        )}
       />
       {loadError && (
         <Alert

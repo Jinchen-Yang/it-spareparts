@@ -93,10 +93,12 @@ def resolve_owner_scope(
     return scope
 
 
-def owned_project_condition(user_ctx: UserContext):
+def owned_project_ids(user_ctx: UserContext):
+    """Stable-project ids currently owned by the authenticated primary manager."""
+
     if not user_ctx.is_authenticated or not user_ctx.user_id:
-        return false()
-    return MaintenanceProject.project_id.in_(
+        return select(MaintenanceProjectUserAssignment.project_id).where(false())
+    return (
         select(MaintenanceProjectUserAssignment.project_id)
         .join(SysUser, SysUser.id == MaintenanceProjectUserAssignment.user_id)
         .where(
@@ -106,6 +108,10 @@ def owned_project_condition(user_ctx: UserContext):
             SysUser.is_active.is_(True),
         )
     )
+
+
+def owned_project_condition(user_ctx: UserContext):
+    return MaintenanceProject.project_id.in_(owned_project_ids(user_ctx))
 
 
 def can_access_project(

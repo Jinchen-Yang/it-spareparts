@@ -139,6 +139,7 @@ _TABLES = [
     "maintenance_demand_delete_intent_item",
     "maintenance_demand_delete_intent",
     "f_project_expense",
+    "maintenance_source_order_assignment",
     "f_maintenance_line", "f_maintenance_order",
     "f_sales_line", "f_sales_order", "f_purchase_line", "f_purchase_order",
     "part_alias", "dim_part", "dim_supplier", "dim_customer",
