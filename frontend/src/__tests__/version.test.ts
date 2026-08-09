@@ -1,36 +1,35 @@
 import { describe, expect, it } from "vitest";
 import { APP_VERSION, CHANGELOG, LATEST } from "../version";
 
-describe("v1.20.0 release notes", () => {
-  it("publishes the three project entry information architecture", () => {
-    expect(APP_VERSION).toBe("1.20.0");
+describe("v1.21.0 release notes", () => {
+  it("publishes the stable-by-default Beta boundary", () => {
+    expect(APP_VERSION).toBe("1.21.0");
     expect(LATEST).toBe(CHANGELOG[0]);
     expect(LATEST.version).toBe(APP_VERSION);
-    expect(LATEST.date).toBe("2026-07-30");
+    expect(LATEST.date).toBe("2026-08-10");
 
     const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/项目数据默认直接展示原有详细盈亏/);
-    expect(notes).toMatch(/下载中心.*项目提醒后置/);
-    expect(notes).toMatch(/旧能力继续保留/);
+    expect(notes).toMatch(/稳定版继续作为默认入口/);
+    expect(notes).toMatch(/实名白名单账号/);
+    expect(notes).toMatch(/Beta 新增流程使用附加事实、影子状态/);
+    expect(notes).toMatch(/正式成本和库存切换.*独立闸门/);
   });
 
-  it("documents fail-closed download semantics and safe batch roundtrip bounds", () => {
+  it("documents the integrated maintenance manager workflow", () => {
     const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/不存在的项目或合同明确返回 404/);
-    expect(notes).toMatch(/全局空范围明确返回 422/);
-    expect(notes).toMatch(/每个合同保持既有固定 Sheet、Table、行签名和版本协议/);
-    expect(notes).toMatch(/少于 500.*少于 512 MiB/);
-    expect(notes).toMatch(/超过任一上限整批拒绝.*不返回截断文件/);
-    expect(notes).toMatch(/合同详细盈亏 CSV.*单合同 XLSX.*逐分/);
-    expect(notes).toMatch(/报销含税、未税和证据状态/);
-    expect(notes).toMatch(/回填模板的导出与导入.*客户信息权限/);
+    expect(notes).toMatch(/项目方块工作台/);
+    expect(notes).toMatch(/缺合同额、价格或期限.*仍完整展示/);
+    expect(notes).toMatch(/已回款\/合同额.*已消耗\/合同额/);
+    expect(notes).toMatch(/80%.*黄色.*100%.*红色/);
+    expect(notes).toMatch(/服务端 7 秒/);
+    expect(notes).toMatch(/现场备件领用单.*不直接写库存/);
   });
 
-  it("documents stable maintenance rows and the HTTPS production boundary", () => {
+  it("documents the replenishment cart and its external-review boundary", () => {
     const notes = LATEST.items.join("\n");
-    expect(notes).toMatch(/项目出库明细缺少稳定行标识/);
-    expect(notes).toMatch(/多行、翻页、重复刷新和按月筛选/);
-    expect(notes).toMatch(/生产登录、权限接口和文件导出统一启用 HTTPS/);
-    expect(notes).toMatch(/公网 8080 已关闭/);
+    expect(notes).toMatch(/补库购物车 Beta/);
+    expect(notes).toMatch(/所属池和近半年采购\/销售价量/);
+    expect(notes).toMatch(/逐条审核反馈、打回复提、版本留存/);
+    expect(notes).toMatch(/不自动审批.*不修改库存/);
   });
 });
