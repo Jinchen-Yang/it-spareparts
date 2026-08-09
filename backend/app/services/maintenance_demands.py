@@ -812,11 +812,28 @@ def restore_demand(
     )
     if order_id is None:
         raise MaintenanceDemandNotFound("WBDD 来源单不存在")
-    invalidated_line_count = maintenance_cost_invalidation.invalidate_line_costs(
-        db,
-        condition=FMaintenanceLine.order_id == order_id,
-        pending_recompute=True,
-    )
+    cutover_enabled = get_settings().maintenance_cutover_enabled
+    if cutover_enabled:
+        # Once tombstones are the canonical production boundary, a restored
+        # order may have been reimported or its price evidence may have changed
+        # while it was hidden.  Clear every derived field before making it
+        # effective again so an old snapshot cannot masquerade as current cost.
+        # Release invariant: while any line is ``cost_recompute_pending``, the
+        # cutover flag is not a rollback switch.  Recompute and validate first,
+        # then a false rollback can safely expose the same canonical columns.
+        invalidated_line_count = maintenance_cost_invalidation.invalidate_line_costs(
+            db,
+            condition=FMaintenanceLine.order_id == order_id,
+            pending_recompute=True,
+        )
+        cost_state = "pending_recompute"
+    else:
+        # During the Beta trial tombstones are shadow facts: stable readers
+        # never stopped consuming this order.  Invalidating here would mutate
+        # the stable cost/project/export truth even though the Beta action was
+        # explicitly isolated from it.
+        invalidated_line_count = 0
+        cost_state = "stable_unchanged"
     tombstone.restored_by = operated_by
     tombstone.restore_reason = normalized_reason
     tombstone.restored_at = now
@@ -826,8 +843,9 @@ def restore_demand(
         "status": "restored",
         "restored_at": now.isoformat(),
         "tombstone_version": tombstone.version,
-        "cost_state": "pending_recompute",
+        "cost_state": cost_state,
         "invalidated_line_count": invalidated_line_count,
+        "cutover_enabled": cutover_enabled,
     }
     _event(
         db,

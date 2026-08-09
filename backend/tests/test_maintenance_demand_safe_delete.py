@@ -1,10 +1,12 @@
 """WBDD 跨页检索与可恢复逻辑删除的端到端契约。"""
 
+import io
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 
@@ -86,6 +88,28 @@ def _seed_demands(db, *, count: int = 3, lines_each: int = 2) -> list[str]:
     batch.status = "success"
     db.commit()
     return ids
+
+
+def _exported_first_line(db) -> tuple:
+    output = maintenance_export.build_workbook(
+        db,
+        UserContext(user_id="demand-delete-admin", role="admin"),
+    )
+    try:
+        output.seek(0)
+        workbook = load_workbook(
+            io.BytesIO(output.read()),
+            read_only=True,
+            data_only=True,
+        )
+    finally:
+        output.close()
+    try:
+        return next(
+            workbook["订单明细"].iter_rows(min_row=2, values_only=True)
+        )
+    finally:
+        workbook.close()
 
 
 def test_search_is_post_body_header_paginated_and_supports_pn(db):
@@ -502,7 +526,111 @@ def test_execute_detects_any_item_change_and_leaves_batch_untouched(db):
     assert db.scalar(select(func.count()).select_from(MaintenanceDemandTombstone)) == 0
 
 
-def test_tombstone_survives_same_raw_order_reimport_and_controlled_restore(db):
+def test_restore_stays_shadow_only_and_preserves_stable_cost_project_and_export(
+    db,
+    monkeypatch,
+):
+    settings = maintenance_demands.get_settings()
+    monkeypatch.setattr(settings, "maintenance_cutover_enabled", False)
+    raw_id = _seed_demands(db, count=1, lines_each=1)[0]
+    source_order = db.scalar(
+        select(FMaintenanceOrder).where(FMaintenanceOrder.raw_order_id == raw_id)
+    )
+    source_line = db.scalar(
+        select(FMaintenanceLine).where(FMaintenanceLine.order_id == source_order.id)
+    )
+    source_line.unit_cost = Decimal("100.00")
+    source_line.cost_amount = Decimal("100.00")
+    source_line.cost_source = "direct"
+    source_line.cost_tax_basis = "ex"
+    source_line.unit_cost_ex_tax = Decimal("100.00")
+    source_line.unit_cost_inc_tax = Decimal("113.00")
+    source_line.cost_amount_ex_tax = Decimal("100.00")
+    source_line.cost_amount_inc_tax = Decimal("113.00")
+    source_line.linked_purchase_order_no = "CGDD-STABLE"
+    source_line.confidence = "high"
+    db.commit()
+
+    stable_cost_before = (
+        source_line.unit_cost,
+        source_line.cost_amount,
+        source_line.cost_source,
+        source_line.cost_tax_basis,
+        source_line.unit_cost_inc_tax,
+        source_line.unit_cost_ex_tax,
+        source_line.cost_amount_inc_tax,
+        source_line.cost_amount_ex_tax,
+        source_line.linked_purchase_order_no,
+        source_line.confidence,
+        tuple(source_line.anomaly_flags or ()),
+    )
+    stable_project_before = maintenance_cost.projects_aggregate(db)["rows"]
+    stable_export_before = _exported_first_line(db)
+
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
+    intent = maintenance_demands.create_delete_intent(
+        db,
+        source_order_ids=[raw_id],
+        reason="Beta 影子删除恢复验证",
+        idempotency_key="safe-delete-shadow-restore",
+        operated_by="demand-delete-admin",
+        now=now,
+    )
+    maintenance_demands.arm_delete_intent(
+        db,
+        intent_id=intent["intent_id"],
+        digest=intent["selection_digest"],
+        operated_by="demand-delete-admin",
+        now=now,
+    )
+    maintenance_demands.execute_delete_intent(
+        db,
+        intent_id=intent["intent_id"],
+        digest=intent["selection_digest"],
+        operated_by="demand-delete-admin",
+        now=now + timedelta(seconds=7),
+    )
+    db.commit()
+
+    restored = maintenance_demands.restore_demand(
+        db,
+        source_order_id=raw_id,
+        reason="Beta 恢复不得改写稳定成本",
+        operated_by="demand-delete-admin",
+        now=now + timedelta(minutes=1),
+    )
+    db.commit()
+
+    assert restored["cost_state"] == "stable_unchanged"
+    assert restored["invalidated_line_count"] == 0
+    assert restored["cutover_enabled"] is False
+    db.expire_all()
+    source_line = db.scalar(
+        select(FMaintenanceLine).where(FMaintenanceLine.order_id == source_order.id)
+    )
+    assert (
+        source_line.unit_cost,
+        source_line.cost_amount,
+        source_line.cost_source,
+        source_line.cost_tax_basis,
+        source_line.unit_cost_inc_tax,
+        source_line.unit_cost_ex_tax,
+        source_line.cost_amount_inc_tax,
+        source_line.cost_amount_ex_tax,
+        source_line.linked_purchase_order_no,
+        source_line.confidence,
+        tuple(source_line.anomaly_flags or ()),
+    ) == stable_cost_before
+    assert maintenance_cost.projects_aggregate(db)["rows"] == stable_project_before
+    assert _exported_first_line(db) == stable_export_before
+
+
+def test_tombstone_survives_same_raw_order_reimport_and_controlled_restore(
+    db,
+    monkeypatch,
+):
+    settings = maintenance_demands.get_settings()
+    monkeypatch.setattr(settings, "maintenance_cutover_enabled", True)
     raw_id = _seed_demands(db, count=1, lines_each=1)[0]
     source_order = db.scalar(
         select(FMaintenanceOrder).where(FMaintenanceOrder.raw_order_id == raw_id)
@@ -638,6 +766,7 @@ def test_tombstone_survives_same_raw_order_reimport_and_controlled_restore(db):
     assert restored["status"] == "restored"
     assert restored["cost_state"] == "pending_recompute"
     assert restored["invalidated_line_count"] == 1
+    assert restored["cutover_enabled"] is True
     db.expire_all()
     source_line = db.scalar(
         select(FMaintenanceLine).where(FMaintenanceLine.order_id == source_order.id)
@@ -665,8 +794,24 @@ def test_tombstone_survives_same_raw_order_reimport_and_controlled_restore(db):
         select(FMaintenanceLine).where(FMaintenanceLine.order_id == source_order.id)
     )
     assert source_line.unit_cost == Decimal("250.00")
+    assert source_line.cost_amount == Decimal("750.00")
     assert source_line.linked_purchase_order_no == "CGDD-NEW"
     assert "cost_recompute_pending" not in source_line.anomaly_flags
+
+    # A cutover rollback is safe after the required recompute: the same
+    # canonical cost, project aggregate and export remain visible instead of
+    # resurrecting the archived pre-reimport cost snapshot.
+    cutover_project = maintenance_cost.projects_aggregate(db)["rows"]
+    cutover_export = _exported_first_line(db)
+    monkeypatch.setattr(settings, "maintenance_cutover_enabled", False)
+    db.expire_all()
+    source_line = db.scalar(
+        select(FMaintenanceLine).where(FMaintenanceLine.order_id == source_order.id)
+    )
+    assert source_line.unit_cost == Decimal("250.00")
+    assert source_line.cost_amount == Decimal("750.00")
+    assert maintenance_cost.projects_aggregate(db)["rows"] == cutover_project
+    assert _exported_first_line(db) == cutover_export
 
 
 def test_restore_rejects_overlong_reason_without_reflection_log_or_audit(db, caplog):
