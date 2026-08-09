@@ -130,6 +130,7 @@ detached，后层只绑定前层已计算的 hash。权威 candidate/review ledg
 ```json
 {
   "schema_version": "skill-candidate/v1",
+  "candidate_instance_id": "server-generated uuid",
   "skill_id": "publisher/name",
   "skill_version": "project-owned immutable version",
   "skill_class": "declarative_v1",
@@ -175,10 +176,11 @@ RFC 8785 生成唯一 UTF-8 bytes；拒绝 duplicate key、NaN/Infinity、数值
 不一致。`candidate_sha256 = SHA-256("it-spareparts.skill-candidate/v1\0" + RFC8785(candidate))`。
 Candidate 只是待审内容身份，不是“已通过”；scanner/eval 自报字段不能把它变成 admission。
 
-`candidate_submitter_subject` 必须由准入服务从当前 authenticated `sys_user` 或已验签的
-ingestion record 注入，API 不接受客户端提供该值。服务在同一事务内计算 hash 并向
-append-only candidate ledger 写入 `candidate_sha256/bundle_sha256/submitter_subject/ingestion_ref/
-created_at`；禁止 UPDATE/DELETE。后续每个 Reviewer 和 final signer 都从该 ledger 取提交者，
+`candidate_instance_id` 和 `candidate_submitter_subject` 必须由准入服务生成/从当前
+authenticated `sys_user` 或已验签的 ingestion record 注入，API 不接受客户端提供这两个值。
+服务在同一事务内计算 hash 并向 append-only candidate ledger 写入
+`candidate_instance_id/candidate_sha256/bundle_sha256/submitter_subject/ingestion_ref/created_at`；禁止
+UPDATE/DELETE。后续每个 Reviewer 和 final signer 都从该 ledger 取提交者，
 并比对 candidate payload；不一致、ledger 缺失或不可用全部 fail closed。
 
 来源约束保持不变：official repository、exact commit/tree/subtree、完整 subtree inventory、每文件
@@ -224,8 +226,13 @@ signature envelope，包含 payload schema/hash、algorithm、`reviewer_key_id` 
 审核提交端点先验签、验 candidate/bundle/Evidence 归属与 reviewer trust-root 映射，再将
 `candidate_sha256/approval_payload_sha256/approval_signature_sha256/reviewer_subject/reviewer_key_id/
 role/decision/evidence_refs_hash/received_at`写入服务端 append-only review ledger；禁止
-UPDATE/DELETE。同一 approval hash 重放幂等返回原 ledger 记录；相同签名对不同 payload、
-同 key/subject/role 的互相冲突 decision 或证据不同一律隔离并告警，不做“最后写入覆盖”。
+UPDATE/DELETE。同一 approval hash 重放幂等返回原 ledger 记录。相同签名对不同 payload，或
+同 key/subject/role 对同一 candidate 提交互相冲突的 decision/Evidence，不得只在 ledger 外
+隔离：服务必须先把每份已验签 review 和一条确定性 `review_conflict` marker 写入同一
+append-only ledger。marker 绑定冲突记录/payload/signature hash、subject/key/role、原因和
+`blocking=true`，使 candidate 永久进入 `review_conflicted`，不得通过后续 approve、管理员覆盖或
+重放来 final。若需重新审查，必须由服务创建新 `candidate_instance_id` 和新
+`candidate_sha256`，并重跑扫描、Evidence 与两人 Review。
 
 ### 5.3 Final admission 与 release signature
 
@@ -240,7 +247,8 @@ Policy engine 先从权威 review ledger 读取并验签该 candidate 的全部 
   "candidate_ledger_record_sha256": "authoritative candidate record sha256",
   "review_ledger_checkpoint": {
     "candidate_sequence": 17,
-    "checkpoint_sha256": "authoritative review ledger checkpoint sha256"
+    "checkpoint_sha256": "authoritative review ledger checkpoint sha256",
+    "blocking_marker_count": 0
   },
   "verified_approvals": [
     {
@@ -264,11 +272,14 @@ Policy engine 先从权威 review ledger 读取并验签该 candidate 的全部 
 Bundle 随包携带 exact candidate、两份 approval payload + detached signatures 和 final payload；final 中的
 hash 必须逐字节回指这些对象。但随包对象只是可移交证据，不是审核全集的
 权威来源。隔离的 release signer 必须从 candidate ledger 获取真实 submitter，并从权威 review
-ledger 查询该 `candidate_sha256` 的**全部**已验签 review；任一 reject、两个角色不齐、
-身份/key 不独立、Evidence mismatch、ledger 不可用或 checkpoint 无法封存都 fail closed。
+ledger 查询该 `candidate_sha256` 的**全部**已验签 review 和 blocking marker；任一 reject/
+`review_conflict`、两个角色不齐、身份/key 不独立、Evidence mismatch、ledger 不可用或 checkpoint
+无法封存都 fail closed。`review_ledger_checkpoint` 必须证明它覆盖 finalization 锁内的全部
+candidate ledger sequence 且 `blocking_marker_count=0`；不得通过截断 checkpoint 漏掉冲突。
 
 最终化在服务端单个串行化事务内获取 per-candidate lock，将 `review_open -> finalizing`，读取
-完整 review ledger 并封存 sequence/checkpoint，再生成 final payload。并发 review 若先入 ledger 必须
+完整 review ledger 并封存 sequence/checkpoint，再生成 final payload。有 `review_conflict` marker 的 candidate
+永久不允许从 `review_conflicted` 进入 `finalizing`。并发 review 若先入 ledger 必须
 被纳入；若在关闭后到达则以 `review_closed` 拒绝并记录，不能静默丢弃。签名者重新验证
 candidate/bundle、两名 reviewer trust chain、角色/主体分离、Evidence hash 和 ledger checkpoint 后，
 才用独立 release key 对
@@ -529,6 +540,7 @@ Admission 事件至少包括：
 skill.candidate_created
 skill.scan_completed
 skill.review_recorded
+skill.review_conflict_recorded
 skill.eval_completed
 skill.approved
 skill.activation_changed
@@ -547,7 +559,8 @@ Provider prompt/response 或 secrets。Candidate/review ledger 是独立权威�
 
 - 生产出现网络安装/下载、未知 Skill 或 hash mismatch；
 - 非 release 身份尝试批准/恢复、Reviewer 重复、自批、unknown/revoked key、签名/Evidence
-  不匹配、ledger 不可用/回滚，或 final 遗漏已记录 rejection；
+  不匹配、同 Reviewer 冲突 review、ledger 不可用/回滚，或 final 遗漏已记录
+  rejection/`review_conflict` marker；
 - sandbox 网络/secret/宿主路径探针、syscall 拒绝、OOM、超时或异常输出；
 - 同一 Skill 注入拒绝率、未知 Capability 请求或异常 Plan 深度突增；
 - OSV/镜像新高危、License 变化、source 删除/归档或 admission Evidence 过期。
@@ -565,7 +578,7 @@ Provider prompt/response 或 secrets。Candidate/review ledger 是独立权威�
 | SK-007 | 高 Scorecard/零 CVE/高星被误当安全证明 | 恶意逻辑绕过人工审核 | High | 信号与批准分离、两人逐文件 Review、对抗评测 |
 | SK-008 | License 缺失或 vendored 依赖未披露 | 法务与发布风险 | Medium | per-skill License、完整 SBOM、NOASSERTION 阻断 |
 | SK-009 | 已发现恶意 Skill 仍被缓存或在旧 Task 继续运行 | 事件扩大、结论污染 | High | kill switch、hash keyed cache、每 Step 状态复验、可审计回滚 |
-| SK-010 | 候选自报 submitter/reviewer，同一人/key 占两角色，或发布包故意遗漏 rejection | 伪造独立 Review，未通过候选进入生产 | Critical | authenticated candidate ledger、per-reviewer trust root/signature、append-only review ledger、final signer 查询全集 |
+| SK-010 | 候选自报 submitter/reviewer，同一人/key 占两角色，发布包遗漏 rejection，或冲突 review 被隔离在账本外 | 伪造独立 Review，未通过候选进入生产 | Critical | authenticated candidate ledger、per-reviewer trust root/signature、append-only review + conflict marker、final signer 查询全集/checkpoint |
 
 最影响风险等级的假设：生产 API 有商业敏感数据；第三方 Markdown 可影响 planner；脚本若开放会处理
 内部输入；#219 在任何第三方 Skill 启用前已完成并保持 fail closed。若任一假设变化，必须重新审查
@@ -578,8 +591,9 @@ Provider prompt/response 或 secrets。Candidate/review ledger 是独立权威�
 - exact commit/tree/subtree 与每文件 SHA-256 完整；branch/tag 漂移不改变已准入 bundle。
 - RFC 8785 canonical payload 的重复 key、数值/Unicode 边界、字段重排、空白差异和 tamper fixture 有
   确定结果；signature 是 detached，不存在自引用 hash。
-- 客户端 candidate 创建请求自报 submitter/reviewer/status/decision 字段被拒绝；submitter 由 authenticated
-  sys_user/signed ingestion record 注入并与 append-only candidate ledger 一致，伪造、缺失、回滚或
+- 客户端 candidate 创建请求自报 instance ID/submitter/reviewer/status/decision 字段被拒绝；
+  instance ID 由服务生成，submitter 由 authenticated sys_user/signed ingestion record 注入，两者均与
+  append-only candidate ledger 一致，伪造、缺失、回滚或
   ledger 不可用全部 fail closed。
 - 每份 approval 的错 candidate/bundle/role/decision/Evidence hash、错 key/algorithm/domain、未知/
   retired/revoked key、payload/bundle hash 漂移全部拒绝；trust-root overlap
@@ -592,6 +606,10 @@ Provider prompt/response 或 secrets。Candidate/review ledger 是独立权威�
 - review ledger 禁止 UPDATE/DELETE；遗漏 rejection 拼装两份 approve、重放签名到另一候选、
   并发 approve/reject 提交和 finalization 的竞态全部有确定结果：入 ledger 的 reject 必须阻断，
   关闭后提交显式 `review_closed`，ledger/checkpoint 不可用时不签发。
+- 同 reviewer/key/role 的冲突 decision 或 Evidence 必须先把两份 signed review 与 blocking
+  `review_conflict` marker 写入 append-only ledger；旧 candidate 永久不可 final，只能用新的
+  server-generated instance ID/candidate hash 重跑全流程。final checkpoint 截断 marker、marker count
+  不为 0 或冲突记录只在 ledger 外隔离均拒绝。
 - final admission 必须绑定 candidate ledger record、review ledger checkpoint 与两份已验签 approval；
   reviewer key 不能签 final，release key 不能代替 approval，任何循环引用/自签名都拒绝。
 - source repo 删除、归档或 tag 重指不会改变本地 approved bundle，但触发调查信号。

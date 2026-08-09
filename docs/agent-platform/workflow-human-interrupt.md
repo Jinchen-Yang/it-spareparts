@@ -77,9 +77,23 @@ pending | planning | validated | running | paused_recoverable | waiting_human | 
 撤权或业务规则失败。`cancelling` 是协作式中间态，已真实完成的 Step 必须先如实落账。终态
 `succeeded/failed/cancelled` 均不可 resume；重新执行创建带 `parent_task_id` 的新 Task。只有 running
 可进入 succeeded；任一非终态进入 failed 前必须在同一受控事务封存真实 error code/cause/phase、
-权限/策略 fingerprint 和可得 Evidence。若 in-flight handler 已完成，先记录 Step completed/output；只有
-真实 handler 失败才记 Step failed。Task failed 不能用于跳过 completed Step 记账，`cancelling -> failed`
-也只适用于取消流程本身有可证明错误。
+权限/策略 fingerprint 和可得 Evidence。`cancelling -> failed` 也只适用于取消流程本身有
+可证明错误。
+
+Task 终态与 Step 结算必须在同一受控事务完成：
+
+| Task 终态 | Step 真实结果/原状态 | Step 终态 | 稳定 reason |
+|---|---|---|---|
+| `failed` | handler 已成功 | `completed` | `handler_completed_before_task_failed` |
+| `failed` | handler 可证明真实失败 | `failed` | 原始稳定 handler error code |
+| `failed` | `planned/retry_wait` 或可证明未 dispatch | `skipped` | `task_failed_before_execution` |
+| `cancelled` | handler 已成功 | `completed` | `handler_completed_before_task_cancelled` |
+| `cancelled` | handler 可证明真实失败 | `failed` | 原始稳定 handler error code |
+| `cancelled` | `planned/retry_wait` 或确认未执行 | `cancelled` | `task_cancelled_before_execution` |
+
+in-flight Step 按真实结果结算；执行结果/副作用未知时不得完成 Task 终态，必须保持
+`cancelling` 或进入 `paused_recoverable` 等待 reconcile。终态 Task 下不得留任何
+`planned/running/retry_wait` Step；不得把未执行伪造为 failed/completed，或把 completed 伪造为 cancelled。
 
 三个时钟独立持久化，不能用一个模糊的“最长自然时间”互相抵扣：
 
@@ -153,10 +167,23 @@ resolve 必须携带 `client_request_id`、Interrupt `version` 和严格响应 s
 
 ## LangGraph 使用边界
 
-首版可以不引入 LangGraph；若引入，必须固定依赖版本和 hash，先核安全公告。只允许 JSON-compatible
-state 和自有 Serializer，禁止 `pickle_fallback`。若持久化 checkpoint，使用独立命名空间、大小上限、
+首版可以不引入 LangGraph；若引入，必须固定依赖版本和 hash，先核安全公告。当前契约只使用
+项目自有 strict JSON serializer，值类型精确限于 `object<string,...>/array/string/
+safe-integer/boolean/null`；`safe-integer` 只允许 `[-9007199254740991, 9007199254740991]`。
+非整数数值、Decimal 和超出 safe-integer 范围的整数必须在 schema 边界转为规范十进制字符串；
+UUID/时间也先转为规范字符串。serializer 本身拒绝 float，避免 RFC 8785/JCS 数值舍入歧义。不实例化默认
+`JsonPlusSerializer`，不使用 LangGraph 默认 msgpack 路径，禁止 `pickle_fallback`。若持久化 checkpoint，使用独立命名空间、大小上限、
 可选加密和总纲统一的 `integrity-envelope/v1`（purpose=`agent.checkpoint`、RFC 8785 +
 HMAC-SHA-256），但不能把 LangGraph checkpoint 当成 Task 状态真值，也不能自定义第二套 HMAC 拼接格式。
+
+未来若任一代码路径确需 LangGraph `JsonPlusSerializer`/msgpack，必须另立安全变更并同时满足：
+
+- `LANGGRAPH_STRICT_MSGPACK=true` 在启动时 fail-closed 验证，缺失/false 则该路径不可用；
+- 类型/tag 仍只允许上述 JSON 精确集，拒绝 float、bytes、tuple、set、datetime、UUID 对象、Decimal 对象、
+  Enum、extension tag、模块/类名、对象 constructor 和自定义 codec；
+- 固定深度/键数/数组/字符串/总字节上限，未知 tag/type 不降级为普通值；
+- 对恶意 ext tag、嵌套/大数组、duplicate/invalid key、伪造 Python class/module、pickle payload、
+  非规范数值和 tamper fixture 做回归，handler/object constructor 调用数必须为 0。
 
 Checkpoint 存储必须把 `payload_json` 与 `envelope_json` 相邻分开保存；Envelope 不得嵌回 payload 形成
 自引用。Envelope 固定包含 purpose、payload schema/version、RFC 8785、HMAC-SHA-256、key_id、
@@ -207,11 +234,19 @@ Event 和访问日志只记录 task/step/interrupt ID、workflow/version、节�
 - 正常 pause/resume、7 天过期、取消、终态拒绝、创建新子 Task 全部符合状态矩阵。
 - 每个非终态在封存真实错误 Evidence 后可进入 failed，cancelling failure 亦可；只有 running 可
   succeeded。crash-after-handler-success 必须先记录 Step completed，Task failed 不得吞掉完成事实。
+- Task failed 时真实失败 Step=failed、completed 保持、planned/retry_wait=skipped；Task cancelled
+  时 planned/retry_wait=cancelled，in-flight 按真实结果结算。终态 Task 下无非终态 Step，各路径
+  稳定 reason 精确且不伪造失败/取消/完成。
 - owner-only、共享身份拒绝、跨用户 404；等待期间停用/撤权后不能恢复执行。
 - resolve 幂等与冲突、optimistic lock、双 worker lease、进程重启恢复和 crash-after-result 不重复执行。
 - Graph/Capability/runtime provider fingerprint 漂移时 fail closed。
 - checkpoint payload/envelope 分离、版本/大小/RFC 8785/purpose/key rotation/tamper/MAC、损坏拒绝和
   pickle payload 拒绝。
+- 默认 `JsonPlusSerializer`/msgpack 路径在当前实现中不可达；仅自有 strict JSON serializer
+  接受 object/array/string/safe-integer/boolean/null。safe-integer 边界值可往返；非整数 float、
+  NaN/Infinity 和超范围 integer 直接进入 serializer 均 fail closed，规范十进制字符串可往返。
+  未来 msgpack 路径在 strict env 缺失、未知 type/tag 或恶意 payload 时
+  fail closed，对象 constructor/handler 调用数为 0。
 - Event/日志不含敏感哨兵串或人类响应正文。
 - 工作流前后业务事实表零写入；migration upgrade/check/downgrade/re-upgrade 和全量测试通过。
 

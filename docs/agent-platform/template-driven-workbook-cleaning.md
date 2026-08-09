@@ -68,6 +68,10 @@ legacy generated、缺失 scope 或证明版本未知的模板固定 `unclassifi
 模型前固化完整 source access snapshot，并让后续 Artifact 逐来源重授权。只有第 1 类且通过严格
 allowlist/hidden-content 扫描的模板才可能是 `identity_only`。
 
+首版只接受当前 active 实名 Task owner 自己拥有且实时授权通过的 immutable template；
+不是 signed/shared template，也不存在 signer/version 例外。首版 Change Plan 不提供任意 regex，
+不是把 regex 加 timeout 后放行。
+
 这些都是模型提出映射的输入，不是可执行代码。自然语言规则必须被翻译成下面的 Typed Change Plan，
 再通过服务端 schema、预算和 allowlist。模板不能提供 Python、SQL、Excel 公式、宏、任意正则、路径、
 URL、Skill 名、工具名或网络操作。

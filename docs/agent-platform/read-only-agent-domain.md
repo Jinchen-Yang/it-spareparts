@@ -66,9 +66,22 @@ pending | planning | validated | running | paused_recoverable | waiting_human | 
 ```
 
 只有 `running` 可以进入 `succeeded`。任一非终态可在封存真实错误 code/cause/phase、权限/策略快照和
-可得 Evidence 后进入 `failed`；`cancelling` 的取消执行本身发生可证明错误时也允许 failed。转换事务必须
-先如实结算 in-flight Step：handler 已完成就记录 completed/output，真实失败才记 failed，不能借 Task
-`failed` 跳过已完成 Step 记账或伪造未执行。不允许从终态恢复；恢复必须新建 attempt 并保留旧证据。
+可得 Evidence 后进入 `failed`；`cancelling` 的取消执行本身发生可证明错误时也允许 failed。
+转换 Task 终态的同一受控事务必须先结算所有 Step：
+
+| Task 终态 | Step 原状态/真实结果 | Step 终态 | 稳定 reason |
+|---|---|---|---|
+| `failed` | handler 已成功并封存输出 | 保持/`completed` | `handler_completed_before_task_failed` |
+| `failed` | handler 可证明真实失败 | `failed` | 原始稳定 handler error code |
+| `failed` | `planned/retry_wait` 或可证明未 dispatch | `skipped` | `task_failed_before_execution` |
+| `cancelled` | handler 已成功并封存输出 | 保持/`completed` | `handler_completed_before_task_cancelled` |
+| `cancelled` | handler 可证明真实失败 | `failed` | 原始稳定 handler error code |
+| `cancelled` | `planned/retry_wait` 或确认未执行 | `cancelled` | `task_cancelled_before_execution` |
+
+in-flight Step 必须按真实结果结算；若执行结果/副作用仍未知，Task 不得进入终态，应保持
+`cancelling` 或进入 `paused_recoverable` 等待 reconcile。终态 Task 下不得留有
+`planned/running/retry_wait` Step，也不得把未执行伪造成失败/完成，或把已完成伪造成取消。
+不允许从终态恢复；恢复必须新建 attempt 并保留旧证据。
 LangGraph checkpoint 是运行实现，不是业务事实源；平台自己的 task/step 账本才是审计真相。
 
 ### 3.2 Artifact 聚合
@@ -81,7 +94,7 @@ ready -> expired
 
 只有 `ready` 可下载。`failed/expired` 都是终态；对象清理失败保留 tombstone 并由 reconciler 重试，不能删掉账本后留下不可追踪对象。文件先写到同文件系统临时位置，完成二次打开、格式、大小和 SHA-256 校验后原子 rename；元数据发布失败时不能留下可猜测的正式对象。
 
-生成制品还必须保存由服务端计算的 `access_scope`，而不是只保存 owner。owner 必须是非空、稳定、已认证的 token subject；匿名或共享回退身份不能创建 v2 制品。scope 至少显式包含 `required_positive_permissions`、允许资源集合、可见字段组，以及 `row_subject + predicate_version + row_restriction`，不用一个不可解释的权限 hash 代替。行级范围的创建主体、当前主体和 Task owner 必须一致；谓词版本未知、不可比较或发生语义漂移时 fail closed。当前正向权限必须覆盖 required，资源/字段可见范围必须覆盖制品实际内容，当前行级谓词必须仍覆盖 stored row restriction；当前范围变窄到无法覆盖原内容时拒绝，例如创建时全量、后来变成 `own_customers_only=true`。后来扩权不改写 stored scope。每次下载/预览实时重算。
+生成制品还必须保存由服务端计算的 `access_scope`，而不是只保存 owner。owner 必须是非空、稳定、已认证的 token subject；匿名或共享回退身份不能创建 v2 制品。scope 至少显式包含 `required_positive_permissions`、允许资源集合、可见字段组，以及正式 `row_subject + predicate_version + condition`，不用一个不可解释的权限 hash 代替。行级范围的创建主体、当前主体和 Task owner 必须一致；谓词版本未知、不可比较或发生语义漂移时 fail closed。当前正向权限必须覆盖 required，资源/字段可见范围必须覆盖制品实际内容，当前行级谓词必须仍覆盖 stored `condition`；当前范围变窄到无法覆盖原内容时拒绝，例如创建时全量、后来变成 `own_customers_only=true`。后来扩权不改写 stored scope。每次下载/预览实时重算。
 
 多输入派生件不能把来源权限压成一个看似“更窄”的谓词。每个实际内容来源必须保存独立
 `source_access_snapshot`：source Artifact/hash、owner、required positive keys、实际 contained resources/
@@ -151,14 +164,21 @@ legacy 必须先分类再授权：
 `private`、`approved_external` 或 `unknown`；`unknown/disabled/unlisted` 必须在 API 预检阶段拒绝，
 system、当前 user message、history、tool result 和文件投影均不得调用该 Provider。预检通过不是
 持久授权；每次 provider call 立即从权威策略源重读 provider status、exact allowlist/model-context、
-sensitivity、external-file opt-in 和 policy version。任一项漂移、撤权或不可判定时 fail closed，
+sensitivity、`model_context_egress_opt_in`、`external_file_egress_opt_in` 和 policy version。
+任一必需条件漂移、撤权或不可判定时 fail closed，
 当次及后续 provider call 字节数必须为 0。
 
+`model_context_egress_opt_in` 和 `external_file_egress_opt_in` 是两个独立、按用户封存的
+可撤销同意，不能合并成一个布尔值。`approved_external` 的任意主模型上下文外发先要求
+前者；payload 只要包含 `customer_file` 再叠加要求后者。两个开关分别撤销时，对应测试都必须
+证明第二次及后续 provider call 为 0。全局/provider kill switch 只能收紧或禁用出境，永远不能
+充当用户同意。
+
 v1 没有可信的逐消息 content provenance，history 也可能含上轮客户文件摘录，因此**所有当前
-user/history prompt payload 一律按 `customer_file` 处理**。`approved_external` 主模型只有同时命中
-exact provider/model-context allowlist 且当前用户对外部文件处理的 opt-in 仍有效时才能收到它们；
-`private` Provider 不要求该 external-file opt-in，但仍需通过身份、模型、目的和 sensitivity 门禁。
-legacy/unknown history 不得降级为普通对话；撤销 opt-in 后的下一次及全部后续外部调用为 0。
+user/history prompt payload 一律按 `customer_file` 处理**。当前代码 v1 还没有可验证的 per-user consent
+真相源，因此 `approved_external + customer_file` 组合必须全部拒绝，不得从环境变量、全局开关、
+旧会话字段或管理员默认值推导同意。`private` Provider 不需这两个 egress opt-in，可在身份、
+exact model/purpose、sensitivity 和其余策略均通过时使用。legacy/unknown history 不得降级为普通对话。
 只有未来逐消息 provenance 能由服务端可验证地封存并经过独立迁移后，才可按消息细分。
 
 `read_document` 不能因为名字是“读文件”就被视为纯本地操作。首期直接拆边界：txt/docx/xlsx/文字 PDF 走本地抽取；图片或扫描 PDF 只返回 `requires_vision`，不会隐式外发。模型需要显式调用独立的视觉能力；像素到 Vision 与 Vision 输出到主模型必须分别命中 `egress_edges[]`，即使两者使用同一供应商也不能把一次授权传递到下一跳。
@@ -175,7 +195,8 @@ Provider 出境与遥测必须覆盖以下威胁闭环：
 | 威胁 | 失效后果 | 必需控制 |
 |---|---|---|
 | 只门禁 tool result，主模型先发 prompt | system/user/history 在工具前已出境 | API 预检 + 每次 provider call 复检，未授权时零网络调用 |
-| 把 legacy history 当普通文本 | 上轮文件摘录被发往外部模型 | v1 全量 user/history=`customer_file`，外部 Provider 叠加 opt-in |
+| 把 legacy history 当普通文本 | 上轮文件摘录被发往外部模型 | v1 全量 user/history=`customer_file`，当前代码对 approved external 全拒绝 |
+| 把 global kill switch 当用户 consent | 管理员开启外部模型即代替用户同意 | 独立 per-user model-context/file opt-in，两者每 call 复检 |
 | 任务运行中策略漂移/撤权 | 旧快照继续外发 | 调用时读权威策略，不一致当次零字节外发 |
 | 错误/SSE/trace 序列化原始调用对象 | 拒绝路径也泄漏业务内容 | 共享 schema-derived 元数据投影器，raw keys 外的值不落盘不出 SSE |
 

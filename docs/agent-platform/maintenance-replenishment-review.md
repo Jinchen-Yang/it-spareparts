@@ -145,7 +145,7 @@ flowchart TD
   D -->|"采购=0 且销售=0"| E["collect_non_overriding_context"]
   D -->|"门槛通过"| F["collect_full_supporting_context"]
   E --> H["seal_evidence_package"]
-  F --> G
+  F --> G["evaluate_versioned_rules"]
   G --> H["seal_evidence_package"]
   H --> I["generate_explanation"]
   I --> J["human_interrupt"]
