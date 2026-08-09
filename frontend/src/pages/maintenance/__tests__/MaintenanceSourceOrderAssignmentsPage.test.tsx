@@ -198,7 +198,9 @@ describe("MaintenanceSourceOrderAssignmentsPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /改\s*派/ }));
     const reassign = await screen.findByRole("dialog", { name: "改派来源维保单" });
-    expect(within(reassign).getByText(/将替换当前归属/)).toBeInTheDocument();
+    expect(within(reassign).getByText(
+      /WBDD-SYNTH-002 · 原始项目文字甲 · WBDD-SYNTH-RAW-002.*将替换当前归属：XM-001/,
+    )).toBeInTheDocument();
     fireEvent.mouseDown(within(reassign).getByRole("combobox"));
     expect(await screen.findByText("XM-002 · 稳定项目乙")).toBeInTheDocument();
     expect(screen.queryByText("XM-001 · 稳定项目甲")).toBeNull();
@@ -222,6 +224,10 @@ describe("MaintenanceSourceOrderAssignmentsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "撤销归属" }));
     const unassign = await screen.findByRole("dialog", { name: "撤销来源维保单归属" });
     expect(within(unassign).getByText(/不会删除来源维保单/)).toBeInTheDocument();
+    expect(within(unassign).getByTestId("source-unassignment-review"))
+      .toHaveTextContent(
+        "将撤销：WBDD-SYNTH-002 · 原始项目文字甲 · WBDD-SYNTH-RAW-002 · 当前项目 XM-001",
+      );
     fireEvent.change(within(unassign).getByLabelText("撤销原因"), {
       target: { value: "复核后暂时无法确定稳定项目" },
     });

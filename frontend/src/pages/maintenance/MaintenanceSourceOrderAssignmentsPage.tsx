@@ -86,6 +86,9 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
   const [writeConflict, setWriteConflict] = useState(false);
   const generation = useRef(0);
   const projectGeneration = useRef(0);
+  const actionRowIdentity = actionRow
+    ? `${actionRow.order_no} · ${actionRow.project_raw || "原项目名未提供"} · ${actionRow.raw_order_id}`
+    : "未知来源维保单";
   const excludedTargetProjectIds = useMemo(() => new Set(
     actionMode === "reassign" && actionRow?.assigned_project?.project_id
       ? [actionRow.assigned_project.project_id]
@@ -448,7 +451,7 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
           onOk={() => void submitAssignment()}
         >
           <p>{actionMode === "reassign"
-            ? `将替换当前归属：${actionRow?.assigned_project?.project_code || "未知"}；旧记录仍会保留。`
+            ? `来源维保单 ${actionRowIdentity}，将替换当前归属：${actionRow?.assigned_project?.project_code || "未知"}；旧记录仍会保留。`
             : `已明确选择 ${selectedRows.length} 张来源维保单；系统不会按名称补选。`}</p>
           {actionMode === "assign" && selectedRows.length > 0 && (
             <div
@@ -539,6 +542,11 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
             style={{ marginBottom: 16 }}
             message="撤销后不会删除来源维保单，也不会删除历史归属记录。"
           />
+          {actionRow && (
+            <p data-testid="source-unassignment-review">
+              {`将撤销：${actionRowIdentity} · 当前项目 ${actionRow.assigned_project?.project_code || "未知"}`}
+            </p>
+          )}
           {writeError && (
             <Alert
               type={writeConflict ? "warning" : "error"}
