@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Button,
   Card,
+  Descriptions,
+  Divider,
   Input,
   Modal,
   Select,
@@ -38,6 +40,7 @@ const ambiguityLabels: Record<string, string> = {
   field_conflict: "同一稳定 ID 内容冲突",
   unknown_enum: "未知枚举值",
   controlled_attachment: "附件需人工查看",
+  integration_blocker: "稳定关联依赖尚未就绪",
 };
 
 const documentLabels: Record<string, string> = {
@@ -58,9 +61,21 @@ function linkKind(targetType: string): string | undefined {
     maintenance_order: "maintenance_order",
     maintenance_project: "project",
     maintenance_site_issue: "site_issue",
+    maintenance_bad_return: "bad_return",
     dim_part: "part",
     warehouse_document: "warehouse_document",
   }[targetType];
+}
+
+function shortHash(value: string | null | undefined): string {
+  return value ? `${value.slice(0, 12)}…` : "—";
+}
+
+function headerDiffText(diff: WarehouseImportPreview["header_diff"] | null | undefined): string {
+  if (!diff) return "无表头对照证据";
+  if (diff.state === "approved_exact") return "完整双表头与批准基线逐列一致";
+  if (diff.state === "approved_baseline_unavailable") return "尚无正式批准基线，禁止应用";
+  return `新增 ${diff.added.length} 列、缺少 ${diff.removed.length} 列、移动 ${diff.moved.length} 列、名称变化 ${diff.label_changed.length} 列`;
 }
 
 export default function MaintenanceWarehouseWorkbenchPage() {
@@ -79,62 +94,70 @@ export default function MaintenanceWarehouseWorkbenchPage() {
   const [ambiguities, setAmbiguities] = useState<WarehouseAmbiguitySummary[]>([]);
   const [ambiguityTotal, setAmbiguityTotal] = useState(0);
   const [ambiguityPage, setAmbiguityPage] = useState(1);
+  const [ambiguityStatus, setAmbiguityStatus] = useState<"all" | "open" | "resolved">("all");
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [selectedDocument, setSelectedDocument] = useState<WarehouseDocumentSummary | null>(null);
   const [selected, setSelected] = useState<WarehouseAmbiguitySummary | null>(null);
   const [decision, setDecision] = useState<"acknowledge" | "link">("acknowledge");
   const [candidateIndex, setCandidateIndex] = useState<number | null>(null);
   const [resolutionReason, setResolutionReason] = useState("");
   const [resolutionBusy, setResolutionBusy] = useState(false);
-
-  const loadDocuments = useCallback(async () => {
-    const { data } = await searchWarehouseDocuments({
-      q: submittedQuery || undefined,
-      page: documentPage,
-      page_size: 50,
-    });
-    setDocuments(data.items);
-    setDocumentTotal(data.total);
-  }, [documentPage, submittedQuery]);
-
-  const loadAmbiguities = useCallback(async () => {
-    const { data } = await searchWarehouseAmbiguities({
-      q: submittedQuery || undefined,
-      status: "open",
-      page: ambiguityPage,
-      page_size: 50,
-    });
-    setAmbiguities(data.items);
-    setAmbiguityTotal(data.total);
-  }, [ambiguityPage, submittedQuery]);
+  const requestGeneration = useRef(0);
+  const previewGeneration = useRef(0);
 
   const reload = useCallback(async () => {
+    const generation = ++requestGeneration.current;
     setLoading(true);
     setLoadError("");
     try {
-      await Promise.all([loadDocuments(), loadAmbiguities()]);
+      const [documentResponse, ambiguityResponse] = await Promise.all([
+        searchWarehouseDocuments({
+          q: submittedQuery || undefined,
+          page: documentPage,
+          page_size: 50,
+        }),
+        searchWarehouseAmbiguities({
+          q: submittedQuery || undefined,
+          status: ambiguityStatus === "all" ? undefined : ambiguityStatus,
+          page: ambiguityPage,
+          page_size: 50,
+        }),
+      ]);
+      if (generation !== requestGeneration.current) return;
+      setDocuments(documentResponse.data.items);
+      setDocumentTotal(documentResponse.data.total);
+      setAmbiguities(ambiguityResponse.data.items);
+      setAmbiguityTotal(ambiguityResponse.data.total);
     } catch (error) {
+      if (generation !== requestGeneration.current) return;
       setLoadError(errorText(error, "仓库单据工作台加载失败，请重试。"));
     } finally {
-      setLoading(false);
+      if (generation === requestGeneration.current) setLoading(false);
     }
-  }, [loadAmbiguities, loadDocuments]);
+  }, [ambiguityPage, ambiguityStatus, documentPage, submittedQuery]);
 
-  useEffect(() => { void reload(); }, [reload]);
+  useEffect(() => {
+    void reload();
+    return () => { requestGeneration.current += 1; };
+  }, [reload]);
 
   const startPreview = async () => {
     if (!file) return;
+    const generation = ++previewGeneration.current;
     setImportBusy(true);
     setImportError("");
     setImportMessage("");
     setPreview(null);
     try {
       const { data } = await previewWarehouseImport(file);
+      if (generation !== previewGeneration.current) return;
       setPreview(data);
     } catch (error) {
+      if (generation !== previewGeneration.current) return;
       setImportError(errorText(error, "预览失败，请检查模板后重试。"));
     } finally {
-      setImportBusy(false);
+      if (generation === previewGeneration.current) setImportBusy(false);
     }
   };
 
@@ -162,13 +185,13 @@ export default function MaintenanceWarehouseWorkbenchPage() {
 
   const openResolution = (row: WarehouseAmbiguitySummary) => {
     setSelected(row);
-    setDecision(row.candidates.length ? "link" : "acknowledge");
-    setCandidateIndex(row.candidates.length === 1 ? 0 : null);
+    setDecision(row.status === "open" && row.candidates.length ? "link" : "acknowledge");
+    setCandidateIndex(row.status === "open" && row.candidates.length === 1 ? 0 : null);
     setResolutionReason("");
   };
 
   const resolve = async () => {
-    if (!selected || !resolutionReason.trim()) return;
+    if (!selected || selected.status !== "open" || !resolutionReason.trim()) return;
     const candidate = candidateIndex == null ? undefined : selected.candidates[candidateIndex];
     if (decision === "link" && (!candidate || !linkKind(candidate.target_type))) return;
     setResolutionBusy(true);
@@ -208,10 +231,36 @@ export default function MaintenanceWarehouseWorkbenchPage() {
     { title: "日期", dataIndex: "document_date", width: 120, render: (value) => value || "—" },
     { title: "明细", dataIndex: "line_count", width: 90, render: (value) => `${value} 行` },
     {
+      title: "来源批次",
+      width: 210,
+      render: (_, row) => (
+        <Space direction="vertical" size={0}>
+          <Typography.Text>{row.batch?.filename || "批次证据缺失"}</Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            文件 {shortHash(row.batch?.source_file_hash)} · 表头 {shortHash(row.batch?.header_signature)}
+          </Typography.Text>
+        </Space>
+      ),
+    },
+    {
       title: "关联状态",
       dataIndex: "open_ambiguity_count",
       width: 130,
-      render: (value: number) => value > 0 ? <Tag color="gold">{value} 条待处理</Tag> : <Tag color="green">已明确</Tag>,
+      render: (value: number, row) => (
+        <Space direction="vertical" size={2}>
+          {value > 0 ? <Tag color="gold">{value} 条待处理</Tag> : <Tag color="green">已明确</Tag>}
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {(row.links || []).filter((link) => link.status === "active").length} 条有效关联
+          </Typography.Text>
+        </Space>
+      ),
+    },
+    {
+      title: "操作",
+      width: 100,
+      render: (_, row) => (
+        <Button type="link" onClick={() => setSelectedDocument(row)}>查看证据</Button>
+      ),
     },
   ], []);
 
@@ -237,13 +286,23 @@ export default function MaintenanceWarehouseWorkbenchPage() {
         </Space>
       ),
     },
+    {
+      title: "状态",
+      dataIndex: "status",
+      width: 90,
+      render: (value) => value === "resolved"
+        ? <Tag color="green">已处理</Tag>
+        : <Tag color="gold">待处理</Tag>,
+    },
     { title: "候选", dataIndex: "candidates", width: 90, render: (value) => `${value.length} 个` },
     {
       title: "操作",
       width: 100,
-      render: (_, row) => canManageWarehouse
-        ? <Button type="link" onClick={() => openResolution(row)}>人工裁决</Button>
-        : <Typography.Text type="secondary">只读</Typography.Text>,
+      render: (_, row) => (
+        <Button type="link" onClick={() => openResolution(row)}>
+          {row.status === "open" && canManageWarehouse ? "人工裁决" : "查看证据"}
+        </Button>
+      ),
     },
   ], [canManageWarehouse]);
 
@@ -268,10 +327,13 @@ export default function MaintenanceWarehouseWorkbenchPage() {
             <input
               aria-label="选择仓库工作簿"
               type="file"
+              disabled={importBusy}
               accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               onChange={(event) => {
+                previewGeneration.current += 1;
                 setFile(event.target.files?.[0] || null);
                 setPreview(null);
+                setImportBusy(false);
                 setImportMessage("");
               }}
             />
@@ -285,8 +347,22 @@ export default function MaintenanceWarehouseWorkbenchPage() {
                     {documentLabels[preview.adapter_key] || preview.adapter_key} · {preview.document_count} 张 / {preview.line_count} 行
                   </Typography.Text>
                   {preview.version_state === "unknown_version" && (
-                    <Tag color="gold">必填结构可识别，但完整版本未知；应用后需人工确认版本</Tag>
+                    <Tag color="red">完整双表头未经批准：仅可预览，禁止应用</Tag>
                   )}
+                  {preview.version_state === "known" && (
+                    <Tag color="green">完整双表头已批准</Tag>
+                  )}
+                  <Descriptions size="small" column={1} bordered>
+                    <Descriptions.Item label="文件 SHA-256">
+                      <Typography.Text copyable>{preview.source_file_hash}</Typography.Text>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="表头 SHA-256">
+                      <Typography.Text copyable>{preview.header_signature}</Typography.Text>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="表头差异">
+                      {headerDiffText(preview.header_diff)}
+                    </Descriptions.Item>
+                  </Descriptions>
                   <Typography.Text type="secondary">
                     当前预览发现 {Object.values(preview.adapter_ambiguity_counts).reduce((sum, value) => sum + value, 0)} 条结构歧义
                   </Typography.Text>
@@ -301,7 +377,7 @@ export default function MaintenanceWarehouseWorkbenchPage() {
                   <Button
                     type="primary"
                     danger
-                    disabled={!importReason.trim()}
+                    disabled={!preview.can_apply || !importReason.trim()}
                     loading={importBusy}
                     onClick={() => void applyImport()}
                   >
@@ -317,7 +393,7 @@ export default function MaintenanceWarehouseWorkbenchPage() {
       )}
 
       <Card>
-        <Space.Compact style={{ width: "min(520px, 100%)", marginBottom: 16 }}>
+        <Space.Compact style={{ width: "min(760px, 100%)", marginBottom: 16 }}>
           <Input
             aria-label="搜索仓库单据"
             value={query}
@@ -326,12 +402,26 @@ export default function MaintenanceWarehouseWorkbenchPage() {
             placeholder="搜索单号或稳定 ID"
           />
           <Button onClick={() => { setDocumentPage(1); setAmbiguityPage(1); setSubmittedQuery(query.trim()); }}>搜索</Button>
+          <Select
+            aria-label="歧义历史状态"
+            value={ambiguityStatus}
+            style={{ width: 140 }}
+            onChange={(value) => {
+              setAmbiguityPage(1);
+              setAmbiguityStatus(value);
+            }}
+            options={[
+              { value: "all", label: "全部历史" },
+              { value: "open", label: "仅待处理" },
+              { value: "resolved", label: "仅已处理" },
+            ]}
+          />
         </Space.Compact>
         {loadError && <Alert type="error" showIcon message={loadError} style={{ marginBottom: 12 }} />}
         <Tabs items={[
           {
             key: "ambiguities",
-            label: `待处理歧义 ${ambiguityTotal}`,
+            label: `歧义与处理历史 ${ambiguityTotal}`,
             children: (
               <Table
                 rowKey="ambiguity_id"
@@ -359,13 +449,65 @@ export default function MaintenanceWarehouseWorkbenchPage() {
       </Card>
 
       <Modal
-        title="人工裁决关联歧义"
+        title="仓库单据证据"
+        open={selectedDocument !== null}
+        width={860}
+        onCancel={() => setSelectedDocument(null)}
+        footer={<Button onClick={() => setSelectedDocument(null)}>关闭</Button>}
+      >
+        <Descriptions size="small" column={1} bordered>
+          <Descriptions.Item label="单据 / 稳定 ID">
+            {selectedDocument?.document_no || "未提供单号"} / {selectedDocument?.source_document_id || "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="批次 / 文件">
+            {selectedDocument?.batch?.import_id || "批次证据缺失"} · {selectedDocument?.batch?.filename || "—"}
+          </Descriptions.Item>
+          <Descriptions.Item label="文件 SHA-256">
+            <Typography.Text copyable style={{ wordBreak: "break-all" }}>
+              {selectedDocument?.batch?.source_file_hash || "—"}
+            </Typography.Text>
+          </Descriptions.Item>
+          <Descriptions.Item label="表头 SHA-256">
+            <Typography.Text copyable style={{ wordBreak: "break-all" }}>
+              {selectedDocument?.batch?.header_signature || "—"}
+            </Typography.Text>
+          </Descriptions.Item>
+          <Descriptions.Item label="表头差异">
+            {headerDiffText(selectedDocument?.batch?.header_diff)}
+          </Descriptions.Item>
+        </Descriptions>
+        <Divider plain>当前与历史关联</Divider>
+        {(selectedDocument?.links || []).length === 0
+          ? <Typography.Text type="secondary">当前没有已固化关联</Typography.Text>
+          : (selectedDocument?.links || []).map((link) => (
+            <Card key={link.link_id} size="small" style={{ marginBottom: 8 }}>
+              <Space direction="vertical" size={2}>
+                <Space wrap>
+                  <Tag color={link.status === "active" ? "green" : "default"}>
+                    {link.status === "active" ? "当前有效" : "已被更正"}
+                  </Tag>
+                  <Typography.Text>{link.link_kind} → {link.target_id}</Typography.Text>
+                </Space>
+                <Typography.Text type="secondary">
+                  v{link.version} · {link.source === "manual" ? "人工" : "自动"} · {link.operated_by} · {link.reason}
+                </Typography.Text>
+              </Space>
+            </Card>
+          ))}
+      </Modal>
+
+      <Modal
+        title={selected?.status === "resolved" ? "歧义处理证据" : "人工裁决关联歧义"}
         open={selected !== null}
+        width={860}
         onCancel={() => setSelected(null)}
         onOk={() => void resolve()}
         okText="实名确认裁决"
         confirmLoading={resolutionBusy}
         okButtonProps={{ disabled: !resolutionReason.trim() || (decision === "link" && candidateIndex == null) }}
+        footer={selected && (selected.status === "resolved" || !canManageWarehouse)
+          ? <Button onClick={() => setSelected(null)}>关闭</Button>
+          : undefined}
       >
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Alert
@@ -374,17 +516,78 @@ export default function MaintenanceWarehouseWorkbenchPage() {
             message={selected ? (ambiguityLabels[selected.ambiguity_type] || selected.ambiguity_type) : ""}
             description="系统会记录裁决前后关系、版本、实名操作人和理由。"
           />
-          <Select
-            aria-label="裁决方式"
-            value={decision}
-            style={{ width: "100%" }}
-            onChange={(value) => setDecision(value)}
-            options={[
-              { value: "acknowledge", label: "仅确认问题已人工核实" },
-              { value: "link", label: "选择稳定目标建立关联", disabled: !selected?.candidates.length },
-            ]}
-          />
-          {decision === "link" && (
+          {selected && (
+            <Descriptions size="small" column={1} bordered>
+              <Descriptions.Item label="批次 / 文件">
+                {selected.batch?.import_id || selected.import_id} · {selected.batch?.filename || "文件证据缺失"}
+              </Descriptions.Item>
+              <Descriptions.Item label="文件 / 表头 SHA-256">
+                <Space direction="vertical" size={0}>
+                  <Typography.Text copyable style={{ wordBreak: "break-all" }}>
+                    {selected.batch?.source_file_hash || "—"}
+                  </Typography.Text>
+                  <Typography.Text copyable style={{ wordBreak: "break-all" }}>
+                    {selected.batch?.header_signature || "—"}
+                  </Typography.Text>
+                </Space>
+              </Descriptions.Item>
+              <Descriptions.Item label="表头差异">
+                {headerDiffText(selected.batch?.header_diff)}
+              </Descriptions.Item>
+              <Descriptions.Item label="字段 / 来源行">
+                {selected.field_code || "文件级"} / {selected.source_row || "—"}
+              </Descriptions.Item>
+              <Descriptions.Item label="值证据 Hash">
+                {selected.value_hash || "—"}
+              </Descriptions.Item>
+            </Descriptions>
+          )}
+          <Divider plain>已有与历史关联</Divider>
+          {(selected?.links || []).length === 0
+            ? <Typography.Text type="secondary">当前没有已固化关联</Typography.Text>
+            : (selected?.links || []).map((link) => (
+              <Card key={link.link_id} size="small">
+                <Space wrap>
+                  <Tag color={link.status === "active" ? "green" : "default"}>
+                    {link.status === "active" ? "当前有效" : "已被更正"}
+                  </Tag>
+                  <Typography.Text>{link.link_kind} → {link.target_id}</Typography.Text>
+                  <Typography.Text type="secondary">
+                    v{link.version} · {link.source === "manual" ? "人工" : "自动"} · {link.operated_by}
+                  </Typography.Text>
+                </Space>
+              </Card>
+            ))}
+          {(selected?.history || []).length > 0 && (
+            <>
+              <Divider plain>处理记录</Divider>
+              {(selected?.history || []).map((event) => (
+                <Card key={event.event_id} size="small" title={`${event.occurred_at} · ${event.operated_by}`}>
+                  <Typography.Paragraph>{event.reason}</Typography.Paragraph>
+                  <Typography.Text type="secondary">
+                    前：{JSON.stringify(event.before)}
+                  </Typography.Text>
+                  <br />
+                  <Typography.Text type="secondary">
+                    后：{JSON.stringify(event.after)}
+                  </Typography.Text>
+                </Card>
+              ))}
+            </>
+          )}
+          {selected?.status === "open" && canManageWarehouse && (
+            <Select
+              aria-label="裁决方式"
+              value={decision}
+              style={{ width: "100%" }}
+              onChange={(value) => setDecision(value)}
+              options={[
+                { value: "acknowledge", label: "仅确认问题已人工核实" },
+                { value: "link", label: "选择稳定目标建立关联", disabled: !selected?.candidates.length },
+              ]}
+            />
+          )}
+          {selected?.status === "open" && canManageWarehouse && decision === "link" && (
             <Select
               aria-label="稳定关联目标"
               value={candidateIndex}
@@ -397,14 +600,16 @@ export default function MaintenanceWarehouseWorkbenchPage() {
               }))}
             />
           )}
-          <Input.TextArea
-            aria-label="裁决理由"
-            value={resolutionReason}
-            onChange={(event) => setResolutionReason(event.target.value)}
-            maxLength={1000}
-            placeholder="填写核实依据，不要只写“确认”"
-            autoSize={{ minRows: 3, maxRows: 6 }}
-          />
+          {selected?.status === "open" && canManageWarehouse && (
+            <Input.TextArea
+              aria-label="裁决理由"
+              value={resolutionReason}
+              onChange={(event) => setResolutionReason(event.target.value)}
+              maxLength={1000}
+              placeholder="填写核实依据，不要只写“确认”"
+              autoSize={{ minRows: 3, maxRows: 6 }}
+            />
+          )}
         </Space>
       </Modal>
     </div>

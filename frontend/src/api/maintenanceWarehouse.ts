@@ -9,11 +9,74 @@ export interface WarehouseImportPreview {
   adapter_version: string;
   version_state: "known" | "unknown_version";
   header_signature: string;
+  header_pairs: WarehouseHeaderPair[];
+  header_diff: WarehouseHeaderDiff;
   data_row_count: number;
   document_count: number;
   line_count: number;
   adapter_ambiguity_counts: Record<string, number>;
   can_apply: boolean;
+}
+
+export interface WarehouseHeaderPair {
+  position: number;
+  internal_code: string;
+  business_label: string;
+}
+
+export interface WarehouseHeaderDiff {
+  state: "approved_exact" | "approved_baseline_unavailable" | "unapproved_difference";
+  baseline_signature: string | null;
+  added: Array<{ position: number; internal_code: string }>;
+  removed: Array<{ position: number; internal_code: string }>;
+  moved: Array<{ internal_code: string; from_position: number; to_position: number }>;
+  label_changed: Array<{
+    internal_code: string;
+    position: number;
+    approved_label_hash: string;
+    current_label_hash: string;
+  }>;
+}
+
+export interface WarehouseBatchEvidence {
+  import_id: string;
+  filename: string;
+  source_file_hash: string;
+  adapter_key: string;
+  adapter_version: string;
+  version_state: "known" | "unknown_version";
+  header_signature: string;
+  header_pairs: WarehouseHeaderPair[];
+  header_diff: WarehouseHeaderDiff | null;
+  applied_by: string;
+  applied_at: string;
+}
+
+export interface WarehouseLinkEvidence {
+  link_id: string;
+  line_id: string | null;
+  link_kind: string;
+  target_type: string;
+  target_id: string;
+  stable_key_kind: string;
+  stable_key_hash: string;
+  source: "automatic" | "manual";
+  status: "active" | "superseded";
+  supersedes_link_id: string | null;
+  version: number;
+  reason: string;
+  operated_by: string;
+  created_at: string;
+}
+
+export interface WarehouseAuditEvidence {
+  event_id: string;
+  action: string;
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown>;
+  reason: string;
+  operated_by: string;
+  occurred_at: string;
 }
 
 export interface WarehouseImportResult {
@@ -41,6 +104,8 @@ export interface WarehouseDocumentSummary {
   normalized_status: string;
   line_count: number;
   open_ambiguity_count: number;
+  batch: WarehouseBatchEvidence | null;
+  links: WarehouseLinkEvidence[];
 }
 
 export interface WarehouseLinkCandidate {
@@ -55,12 +120,17 @@ export interface WarehouseAmbiguitySummary {
   ambiguity_type: string;
   field_code: string | null;
   source_row: number | null;
+  value_hash: string | null;
   status: "open" | "resolved";
   version: number;
   candidates: WarehouseLinkCandidate[];
   resolution: Record<string, unknown> | null;
   resolution_reason: string | null;
   resolved_by: string | null;
+  resolved_at: string | null;
+  batch: WarehouseBatchEvidence | null;
+  links: WarehouseLinkEvidence[];
+  history: WarehouseAuditEvidence[];
   document: null | {
     document_id: string;
     document_type: string;
