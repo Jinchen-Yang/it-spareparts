@@ -137,7 +137,9 @@ def _blocker(
     )
 
 
-def _cost_pair(row: Mapping[str, Any], *, prefix: str) -> tuple[Decimal, Decimal] | None:
+def _cost_pair(
+    row: Mapping[str, Any], *, prefix: str
+) -> tuple[Decimal, Decimal] | None:
     ex_value = row.get("cost_amount_ex_tax")
     inc_value = row.get("cost_amount_inc_tax")
     if ex_value is None or inc_value is None:
@@ -196,6 +198,9 @@ def _historical_cost(
             raise MigrationControlError("历史领用稳定编号重复")
         seen.add(row_id)
         row_date = _parse_date(row.get("issue_date"), "历史领用日期")
+        workflow_status = row.get("workflow_status")
+        if workflow_status == "void":
+            continue
         eligible = True
         if row.get("stable_identity") is not True:
             eligible = False
@@ -213,7 +218,7 @@ def _historical_cost(
                 entity_id=row_id,
                 detail="历史领用日期必须早于切换日",
             )
-        if row.get("workflow_status") not in _COST_STATUSES:
+        if workflow_status not in _COST_STATUSES:
             eligible = False
             _blocker(
                 blockers,
@@ -221,15 +226,16 @@ def _historical_cost(
                 entity_id=row_id,
                 detail="历史领用尚未确认或已作废",
             )
-        pair = _cost_pair(row, prefix="历史领用")
+        pair = _cost_pair(row, prefix="历史领用") if eligible else None
         if pair is None:
-            eligible = False
-            _blocker(
-                blockers,
-                "historical_issue_missing_cost",
-                entity_id=row_id,
-                detail="历史领用成本未就绪",
-            )
+            if eligible:
+                eligible = False
+                _blocker(
+                    blockers,
+                    "historical_issue_missing_cost",
+                    entity_id=row_id,
+                    detail="历史领用成本未就绪",
+                )
         if eligible and pair is not None:
             total_ex += pair[0]
             total_inc += pair[1]
@@ -251,6 +257,9 @@ def _post_cutover_cost(
             raise MigrationControlError("现场领用稳定编号重复")
         seen.add(row_id)
         row_date = _parse_date(row.get("issue_date"), "现场领用日期")
+        workflow_status = row.get("workflow_status")
+        if workflow_status == "void":
+            continue
         eligible = True
         if row_date < cutover_date:
             eligible = False
@@ -260,7 +269,7 @@ def _post_cutover_cost(
                 entity_id=row_id,
                 detail="切换后领用日期早于切换日",
             )
-        if row.get("workflow_status") not in _COST_STATUSES:
+        if workflow_status not in _COST_STATUSES:
             eligible = False
             _blocker(
                 blockers,
@@ -268,15 +277,16 @@ def _post_cutover_cost(
                 entity_id=row_id,
                 detail="仅已确认或已更正的现场领用计入成本",
             )
-        pair = _cost_pair(row, prefix="现场领用")
+        pair = _cost_pair(row, prefix="现场领用") if eligible else None
         if pair is None:
-            eligible = False
-            _blocker(
-                blockers,
-                "missing_site_issue_cost",
-                entity_id=row_id,
-                detail="现场领用成本未就绪，不能静默按零计价",
-            )
+            if eligible:
+                eligible = False
+                _blocker(
+                    blockers,
+                    "missing_site_issue_cost",
+                    entity_id=row_id,
+                    detail="现场领用成本未就绪，不能静默按零计价",
+                )
         if eligible and pair is not None:
             total_ex += pair[0]
             total_inc += pair[1]
@@ -297,7 +307,10 @@ def _expense_cost(
             raise MigrationControlError("报销稳定编号重复")
         seen.add(row_id)
         _parse_date(row.get("expense_date"), "报销日期")
-        if row.get("normalized_status") != "approved":
+        normalized_status = row.get("normalized_status")
+        if normalized_status in {"rejected", "void"}:
+            continue
+        if normalized_status != "approved":
             _blocker(
                 blockers,
                 "expense_not_approved",
@@ -406,14 +419,98 @@ def _inventory_preview(
     return result
 
 
+def _project_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a stable, whitelisted audit view without copying arbitrary source fields."""
+
+    def rows(
+        source: Any, *, identity: str, fields: tuple[str, ...]
+    ) -> list[dict[str, Any]]:
+        output = [
+            {field: _canonical(row.get(field)) for field in fields if field in row}
+            for row in (source or [])
+            if isinstance(row, Mapping)
+        ]
+        return sorted(output, key=lambda row: str(row.get(identity) or ""))
+
+    baseline = payload.get("historical_baseline")
+    baseline_evidence = None
+    if isinstance(baseline, Mapping):
+        baseline_evidence = {
+            field: _canonical(baseline.get(field))
+            for field in (
+                "amount_ex_tax",
+                "amount_inc_tax",
+                "evidence_hash",
+                "approved",
+            )
+            if field in baseline
+        }
+    site_issue_fields = (
+        "issue_line_id",
+        "issue_id",
+        "issue_no",
+        "issue_date",
+        "pn",
+        "sn",
+        "quantity",
+        "workflow_status",
+        "stable_identity",
+        "cost_amount_ex_tax",
+        "cost_amount_inc_tax",
+    )
+    return {
+        "historical_baseline": baseline_evidence,
+        "historical_site_issues": rows(
+            payload.get("historical_site_issues"),
+            identity="issue_line_id",
+            fields=site_issue_fields,
+        ),
+        "post_cutover_site_issues": rows(
+            payload.get("post_cutover_site_issues"),
+            identity="issue_line_id",
+            fields=site_issue_fields,
+        ),
+        "expenses": rows(
+            payload.get("approved_expenses"),
+            identity="expense_id",
+            fields=(
+                "expense_id",
+                "expense_ref",
+                "expense_date",
+                "normalized_status",
+                "amount_ex_tax",
+                "amount_inc_tax",
+            ),
+        ),
+        "opening_balances": rows(
+            payload.get("opening_balances"),
+            identity="balance_key",
+            fields=("balance_key", "pn", "quantity", "evidence_hash", "approved"),
+        ),
+        "inventory_movements": rows(
+            payload.get("inventory_movements"),
+            identity="movement_id",
+            fields=(
+                "movement_id",
+                "document_id",
+                "document_no",
+                "document_date",
+                "movement_type",
+                "balance_key",
+                "pn",
+                "sn",
+                "quantity",
+            ),
+        ),
+    }
+
+
 def build_project_preview(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Build one project preview without mutating operational facts."""
 
     project_id = _required_text(payload.get("project_id"), "项目稳定编号")
     cutover_date = _parse_date(payload.get("cutover_date"), "切换日期")
-    source_snapshot_hash = _hash(
-        payload.get("source_snapshot_hash"), "来源快照哈希"
-    )
+    source_snapshot_hash = _hash(payload.get("source_snapshot_hash"), "来源快照哈希")
     blockers: list[dict[str, Any]] = []
     historical_ex, historical_inc = _historical_cost(
         payload,
@@ -448,6 +545,7 @@ def build_project_preview(payload: Mapping[str, Any]) -> dict[str, Any]:
             ),
         },
         "inventory": inventory,
+        "evidence": _project_evidence(payload),
         "ignored_return_offset_count": len(payload.get("return_offsets") or []),
         "approval_blockers": blockers,
         "can_approve": not blockers,
@@ -511,4 +609,3 @@ def validate_approval(
         raise MigrationControlError("迁移规则版本不一致")
     if preview.get("approval_blocker_count") or preview.get("can_approve") is not True:
         raise MigrationControlError("迁移仍有未解决差异，不能审批")
-
