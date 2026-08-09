@@ -7,6 +7,7 @@ import os
 import pytest
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
@@ -14,7 +15,6 @@ from app import permissions
 from app.db import engine
 
 
-REVISION = "a6d1e9c3b7f2"
 PREVIOUS = "f4b8c2d1e7a6"
 
 
@@ -24,6 +24,10 @@ def _cfg() -> AlembicConfig:
         "script_location", os.path.join(os.path.dirname(__file__), "..", "alembic")
     )
     return config
+
+
+def _current_head() -> str:
+    return ScriptDirectory.from_config(_cfg()).get_current_head()
 
 
 def test_schema_has_all_fact_tables_and_database_guards(db):
@@ -89,13 +93,17 @@ def test_empty_schema_downgrades_and_reupgrades(db):
             assert connection.scalar(text(
                 "SELECT to_regclass('maintenance_warehouse_import_batch')"
             )) is None
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == PREVIOUS
+            assert PREVIOUS in set(
+                connection.scalars(text("SELECT version_num FROM alembic_version"))
+            )
         alembic_command.upgrade(config, "head")
         with engine.connect() as connection:
             assert connection.scalar(text(
                 "SELECT to_regclass('maintenance_warehouse_import_batch')"
             )) == "maintenance_warehouse_import_batch"
-            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == REVISION
+            assert set(
+                connection.scalars(text("SELECT version_num FROM alembic_version"))
+            ) == {_current_head()}
     finally:
         alembic_command.upgrade(config, "head")
 
@@ -122,7 +130,9 @@ def test_nonempty_batch_blocks_downgrade_before_any_ddl(db):
     finally:
         alembic_command.upgrade(_cfg(), "head")
     with engine.connect() as connection:
-        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == REVISION
+        assert set(
+            connection.scalars(text("SELECT version_num FROM alembic_version"))
+        ) == {_current_head()}
         assert connection.scalar(text(
             "SELECT count(*) FROM maintenance_warehouse_import_batch"
         )) == 1

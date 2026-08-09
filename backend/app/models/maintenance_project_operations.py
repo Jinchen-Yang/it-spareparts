@@ -143,8 +143,8 @@ class MaintenanceSiteIssueDeliverySource(Base):
         ForeignKey("maintenance_project.project_id"), nullable=False
     )
     source_order_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    source_line_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    delivery_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_line_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    delivery_no: Mapped[str] = mapped_column(String(128), nullable=False)
     delivery_date: Mapped[date] = mapped_column(Date, nullable=False)
     part_id: Mapped[int] = mapped_column(ForeignKey("dim_part.id"), nullable=False)
     pn: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -164,7 +164,7 @@ class MaintenanceSiteIssueDeliverySource(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "adapter_key = 'synthetic_delivery_v1'",
+            "adapter_key IN ('synthetic_delivery_v1', 'warehouse_shipment_v1')",
             name="ck_maintenance_site_issue_delivery_adapter",
         ),
         CheckConstraint(
@@ -283,7 +283,7 @@ class MaintenanceSiteIssueLine(Base):
         ForeignKey("maintenance_site_issue_delivery_source.delivery_line_id")
     )
     source_order_id: Mapped[str | None] = mapped_column(String(64))
-    source_line_id: Mapped[str | None] = mapped_column(String(64))
+    source_line_id: Mapped[str | None] = mapped_column(String(128))
     serial_number: Mapped[str | None] = mapped_column(Text)
     linked_purchase_line_id: Mapped[int | None] = mapped_column(
         ForeignKey("f_purchase_line.id")

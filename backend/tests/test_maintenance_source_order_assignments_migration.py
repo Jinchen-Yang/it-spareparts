@@ -5,6 +5,7 @@ import os
 import pytest
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError
 
@@ -23,6 +24,10 @@ def _cfg() -> AlembicConfig:
         os.path.join(os.path.dirname(__file__), "..", "alembic"),
     )
     return cfg
+
+
+def _current_head() -> str:
+    return ScriptDirectory.from_config(_cfg()).get_current_head()
 
 
 def _seed_assignment_history(db, *, suffix: str) -> None:
@@ -157,8 +162,9 @@ def test_downgrade_blocks_nonempty_assignment_history(db):
         with pytest.raises(DBAPIError, match="downgrade blocked"):
             alembic_command.downgrade(cfg, _PREV)
         with engine.connect() as connection:
-            assert connection.execute(text("SELECT version_num FROM alembic_version"))\
-                .scalar_one() == _HEAD
+            assert set(
+                connection.scalars(text("SELECT version_num FROM alembic_version"))
+            ) == {_current_head()}
             assert connection.execute(
                 text("SELECT count(*) FROM maintenance_source_order_assignment")
             ).scalar_one() == 1

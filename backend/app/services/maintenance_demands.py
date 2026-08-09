@@ -722,6 +722,14 @@ def execute_delete_intent(
         intent_id=intent.intent_id,
     )
     db.flush()
+    from app.services import maintenance_warehouse
+
+    maintenance_warehouse.reconcile_project_assignment_links(
+        db,
+        operated_by=operated_by,
+        reason=intent.reason,
+        source_order_ids=set(source_order_ids),
+    )
     return result
 
 
@@ -819,4 +827,12 @@ def restore_demand(
         source_order_id=source_order_id,
     )
     db.flush()
+    from app.services import maintenance_warehouse
+
+    maintenance_warehouse.reconcile_project_assignment_links(
+        db,
+        operated_by=operated_by,
+        reason=normalized_reason,
+        source_order_ids={source_order_id},
+    )
     return result

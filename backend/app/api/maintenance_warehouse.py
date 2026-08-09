@@ -66,6 +66,12 @@ class AmbiguityResolveRequest(BaseModel):
     target_id: str | None = None
 
 
+class WarehouseIntegrationReconcileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 def _real_operator(db: Session, ident: dict) -> str:
     if ident.get("authn") != "sys_user" or ident.get("fb"):
         raise HTTPException(
@@ -395,5 +401,56 @@ def resolve_warehouse_ambiguity(
             maintenance_warehouse.MaintenanceWarehouseError,
             maintenance_warehouse.MaintenanceWarehouseConflict,
         )):
+            raise _service_http_error(exc) from exc
+        raise
+
+
+@router.post("/warehouse-integrations/reconcile")
+def reconcile_warehouse_integrations(
+    body: WarehouseIntegrationReconcileRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action("action_maintenance_warehouse_manage")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    """Repair only exact #201 assignment edges and their derived candidates."""
+
+    _no_store(response)
+    if ctx.role not in FULL_SCOPE_ROLES:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "仓储集成同步仅限全项目范围实名账号",
+        )
+    operated_by = _real_operator(db, ident)
+    try:
+        result = maintenance_warehouse.reconcile_project_assignment_links(
+            db,
+            operated_by=operated_by,
+            reason=body.reason,
+        )
+        db.commit()
+        record_access_log(
+            ctx,
+            "maintenance_warehouse_integration_reconcile",
+            "maintenance_warehouse",
+            {
+                "documents": result["documents"],
+                "links_created": result["links_created"],
+                "links_superseded": result["links_superseded"],
+            },
+        )
+        return result
+    except Exception as exc:
+        db.rollback()
+        if isinstance(
+            exc,
+            (
+                maintenance_warehouse.MaintenanceWarehouseError,
+                maintenance_warehouse.MaintenanceWarehouseConflict,
+            ),
+        ):
             raise _service_http_error(exc) from exc
         raise

@@ -1003,6 +1003,16 @@ def apply_import(
     db.add_all(ambiguity_models)
     if new_links or ambiguity_models:
         db.flush([*new_links, *ambiguity_models])
+    from app.services import maintenance_warehouse_site_issue_bridge
+
+    delivery_sources = (
+        maintenance_warehouse_site_issue_bridge.synchronize_delivery_sources(
+            db,
+            document_ids=set(document_ids.values()),
+        )
+    )
+    result = {**result, "delivery_sources": delivery_sources}
+    audit.after_json = result
     db.add(audit)
     db.flush([audit])
     return {
@@ -1421,6 +1431,302 @@ _ACKNOWLEDGEABLE_AMBIGUITIES = {
 }
 
 
+def reconcile_project_assignment_links(
+    db: Session,
+    *,
+    operated_by: str,
+    reason: str,
+    source_order_ids: set[str] | None = None,
+) -> dict:
+    """Reconcile warehouse project links from #201's current exact assignment.
+
+    This is the only automatic relationship repair: a warehouse document must
+    already have one active stable WBDD link.  Names, dates and PN proximity are
+    never used.  Reassignment supersedes the old link and keeps both generations.
+    """
+
+    clean_operator = (operated_by or "").strip()
+    clean_reason = (reason or "").strip()
+    if not clean_operator or len(clean_operator) > 64:
+        raise MaintenanceWarehouseError("实名操作人无效")
+    if not clean_reason or len(clean_reason) > 1000:
+        raise MaintenanceWarehouseError("关联同步理由无效")
+    if not _table_has_columns(
+        db,
+        "maintenance_source_order_assignment",
+        {"source_order_id", "project_id", "is_active"},
+    ):
+        return {
+            "documents": 0,
+            "links_created": 0,
+            "links_superseded": 0,
+            "ambiguities_resolved": 0,
+            "delivery_sources": {
+                "created": 0,
+                "updated": 0,
+                "deactivated": 0,
+                "eligible": 0,
+            },
+        }
+
+    order_link_statement = (
+        select(MaintenanceWarehouseDocumentLink)
+        .where(
+            MaintenanceWarehouseDocumentLink.line_id.is_(None),
+            MaintenanceWarehouseDocumentLink.link_kind == "maintenance_order",
+            MaintenanceWarehouseDocumentLink.target_type == "maintenance_order",
+            MaintenanceWarehouseDocumentLink.status == "active",
+        )
+        .order_by(
+            MaintenanceWarehouseDocumentLink.document_id,
+            MaintenanceWarehouseDocumentLink.link_id,
+        )
+    )
+    if source_order_ids is not None:
+        if not source_order_ids:
+            return {
+                "documents": 0,
+                "links_created": 0,
+                "links_superseded": 0,
+                "ambiguities_resolved": 0,
+                "delivery_sources": {
+                    "created": 0,
+                    "updated": 0,
+                    "deactivated": 0,
+                    "eligible": 0,
+                },
+            }
+        order_link_statement = order_link_statement.where(
+            MaintenanceWarehouseDocumentLink.target_id.in_(
+                sorted(source_order_ids)
+            )
+        )
+    order_link_statement = order_link_statement.with_for_update()
+    order_links = list(db.scalars(order_link_statement))
+    document_ids = {link.document_id for link in order_links}
+    linked_source_order_ids = {link.target_id for link in order_links}
+    effective_source_order_ids = (
+        set(
+            db.scalars(
+                active_orders(
+                    select(FMaintenanceOrder.raw_order_id).where(
+                        FMaintenanceOrder.raw_order_id.in_(
+                            sorted(linked_source_order_ids)
+                        )
+                    ),
+                    FMaintenanceOrder,
+                )
+            )
+        )
+        if linked_source_order_ids
+        else set()
+    )
+    current_assignments, available = _current_project_assignment_map(
+        db,
+        linked_source_order_ids,
+    )
+    if not available:
+        raise MaintenanceWarehouseConflict("项目归属稳定契约暂不可用")
+    project_links = {
+        link.document_id: link
+        for link in db.scalars(
+            select(MaintenanceWarehouseDocumentLink)
+            .where(
+                MaintenanceWarehouseDocumentLink.document_id.in_(
+                    sorted(document_ids)
+                ),
+                MaintenanceWarehouseDocumentLink.line_id.is_(None),
+                MaintenanceWarehouseDocumentLink.link_kind == "project",
+                MaintenanceWarehouseDocumentLink.target_type
+                == "maintenance_project",
+                MaintenanceWarehouseDocumentLink.status == "active",
+            )
+            .order_by(
+                MaintenanceWarehouseDocumentLink.document_id,
+                MaintenanceWarehouseDocumentLink.link_id,
+            )
+            .with_for_update()
+        )
+    } if document_ids else {}
+    ambiguities_by_document: dict[str, list[MaintenanceWarehouseAmbiguity]] = {}
+    if document_ids:
+        for ambiguity in db.scalars(
+            select(MaintenanceWarehouseAmbiguity)
+            .where(
+                MaintenanceWarehouseAmbiguity.document_id.in_(
+                    sorted(document_ids)
+                ),
+                MaintenanceWarehouseAmbiguity.line_id.is_(None),
+                MaintenanceWarehouseAmbiguity.status == "open",
+                or_(
+                    MaintenanceWarehouseAmbiguity.field_code == "project",
+                    MaintenanceWarehouseAmbiguity.field_code
+                    == "project_assignment_contract",
+                ),
+            )
+            .order_by(
+                MaintenanceWarehouseAmbiguity.document_id,
+                MaintenanceWarehouseAmbiguity.ambiguity_id,
+            )
+            .with_for_update()
+        ):
+            if ambiguity.document_id:
+                ambiguities_by_document.setdefault(
+                    ambiguity.document_id,
+                    [],
+                ).append(ambiguity)
+
+    created = 0
+    superseded = 0
+    resolved = 0
+    changed_documents: set[str] = set()
+    now = datetime.now(timezone.utc)
+    for order_link in order_links:
+        document_id = order_link.document_id
+        source_order_id = order_link.target_id
+        current_projects = current_assignments.get(source_order_id, [])
+        target_project_id = (
+            current_projects[0]
+            if source_order_id in effective_source_order_ids
+            and len(current_projects) == 1
+            else None
+        )
+        current_link = project_links.get(document_id)
+        before_link = _link_evidence(current_link) if current_link is not None else None
+        active_link = current_link
+        if current_link is not None and current_link.target_id != target_project_id:
+            current_link.status = "superseded"
+            current_link.version += 1
+            db.flush([current_link])
+            active_link = None
+            superseded += 1
+            changed_documents.add(document_id)
+        if target_project_id is not None and active_link is None:
+            next_version = 1 if current_link is None else current_link.version
+            link_id = _link_id(
+                document_id,
+                None,
+                "project",
+                "maintenance_project",
+                target_project_id,
+                version=next_version,
+            )
+            active_link = MaintenanceWarehouseDocumentLink(
+                link_id=link_id,
+                document_id=document_id,
+                line_id=None,
+                link_kind="project",
+                target_type="maintenance_project",
+                target_id=target_project_id,
+                stable_key_kind="active_source_order_assignment",
+                stable_key_hash=_hash(
+                    {
+                        "source_order_id": source_order_id,
+                        "project_id": target_project_id,
+                    }
+                ),
+                source="automatic",
+                status="active",
+                supersedes_link_id=(
+                    current_link.link_id if current_link is not None else None
+                ),
+                version=next_version,
+                reason=clean_reason,
+                operated_by=clean_operator,
+            )
+            db.add(active_link)
+            db.flush([active_link])
+            project_links[document_id] = active_link
+            created += 1
+            changed_documents.add(document_id)
+
+        if document_id in changed_documents:
+            after_link = (
+                _link_evidence(active_link) if active_link is not None else None
+            )
+            generation_marker = (
+                f"{active_link.link_id}:{active_link.version}"
+                if active_link is not None
+                else f"{current_link.link_id}:{current_link.version}"
+            )
+            db.add(
+                MaintenanceWarehouseAuditEvent(
+                    event_id=_uuid(
+                        "maintenance-warehouse-audit:integration:"
+                        f"{document_id}:{source_order_id}:"
+                        f"{target_project_id or 'unassigned'}:{generation_marker}"
+                    ),
+                    import_id=None,
+                    ambiguity_id=None,
+                    action="integration_reconciled",
+                    before_json={"project_link": before_link},
+                    after_json={
+                        "project_link": after_link,
+                        "source_order_id": source_order_id,
+                    },
+                    reason=clean_reason,
+                    operated_by=clean_operator,
+                )
+            )
+
+        if target_project_id is None or active_link is None:
+            continue
+        for ambiguity in ambiguities_by_document.get(document_id, []):
+            before = {
+                "status": ambiguity.status,
+                "version": ambiguity.version,
+                "ambiguity_type": ambiguity.ambiguity_type,
+                "field_code": ambiguity.field_code,
+            }
+            ambiguity.status = "resolved"
+            ambiguity.version += 1
+            ambiguity.resolution_json = {
+                "decision": "system_reconciled",
+                "link_kind": "project",
+                "target_type": "maintenance_project",
+                "target_id": target_project_id,
+                "active_link_id": active_link.link_id,
+            }
+            ambiguity.resolution_reason = clean_reason
+            ambiguity.resolved_by = clean_operator
+            ambiguity.resolved_at = now
+            db.add(
+                MaintenanceWarehouseAuditEvent(
+                    event_id=_uuid(
+                        "maintenance-warehouse-audit:resolve:"
+                        f"{ambiguity.ambiguity_id}:{ambiguity.version}"
+                    ),
+                    import_id=ambiguity.import_id,
+                    ambiguity_id=ambiguity.ambiguity_id,
+                    action="ambiguity_resolved",
+                    before_json=before,
+                    after_json={
+                        "status": ambiguity.status,
+                        "version": ambiguity.version,
+                        "resolution": ambiguity.resolution_json,
+                    },
+                    reason=clean_reason,
+                    operated_by=clean_operator,
+                )
+            )
+            resolved += 1
+    db.flush()
+    from app.services import maintenance_warehouse_site_issue_bridge
+
+    delivery_sources = maintenance_warehouse_site_issue_bridge.synchronize_delivery_sources(
+        db,
+        document_ids=document_ids,
+        source_order_ids=source_order_ids,
+    )
+    return {
+        "documents": len(document_ids),
+        "links_created": created,
+        "links_superseded": superseded,
+        "ambiguities_resolved": resolved,
+        "delivery_sources": delivery_sources,
+    }
+
+
 def _target_exists(
     db: Session,
     target_type: str,
@@ -1715,10 +2021,21 @@ def resolve_ambiguity(
         operated_by=operated_by,
     ))
     db.flush()
+    from app.services import maintenance_warehouse_site_issue_bridge
+
+    delivery_sources = (
+        maintenance_warehouse_site_issue_bridge.synchronize_delivery_sources(
+            db,
+            document_ids=(
+                {ambiguity.document_id} if ambiguity.document_id is not None else set()
+            ),
+        )
+    )
     return {
         "ambiguity_id": ambiguity.ambiguity_id,
         "status": ambiguity.status,
         "version": ambiguity.version,
         "resolution": resolution,
         "link_created": new_link is not None,
+        "delivery_sources": delivery_sources,
     }

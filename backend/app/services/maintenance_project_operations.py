@@ -57,6 +57,7 @@ from app.services import maintenance_bad_returns
 from app.services import maintenance_consumption_cost
 from app.services import maintenance_project
 from app.services import maintenance_project_assignments
+from app.services import maintenance_warehouse_site_issue_bridge
 from app.services.query_filters import active_orders
 
 
@@ -1031,7 +1032,8 @@ def _validate_site_issue_sources(
             blockers.append(f"第 {line.line_no} 行缺少稳定发货来源")
             continue
         if (
-            source.adapter_key != "synthetic_delivery_v1"
+            source.adapter_key
+            not in maintenance_warehouse_site_issue_bridge.SUPPORTED_DELIVERY_ADAPTERS
             or source.mapping_state != "ready"
             or not source.is_active
         ):
@@ -1072,9 +1074,80 @@ def _validate_site_issue_sources(
 
 
 def _site_issue_is_production_blocked() -> bool:
-    """Synthetic delivery identity is a development seam, never a prod adapter."""
-
     return get_settings().environment == "prod"
+
+
+def _site_issue_sources_are_production_ready(
+    sources: dict[str, MaintenanceSiteIssueDeliverySource],
+) -> bool:
+    return bool(sources) and all(
+        source.adapter_key
+        == maintenance_warehouse_site_issue_bridge.WAREHOUSE_DELIVERY_ADAPTER
+        for source in sources.values()
+    )
+
+
+def _site_issue_adapter_profile(
+    db: Session,
+    *,
+    project_id: str,
+) -> tuple[dict, tuple[str, ...]]:
+    counts = {
+        adapter_key: int(count)
+        for adapter_key, count in db.execute(
+            select(
+                MaintenanceSiteIssueDeliverySource.adapter_key,
+                func.count(),
+            )
+            .where(
+                MaintenanceSiteIssueDeliverySource.project_id == project_id,
+                MaintenanceSiteIssueDeliverySource.mapping_state == "ready",
+                MaintenanceSiteIssueDeliverySource.is_active.is_(True),
+            )
+            .group_by(MaintenanceSiteIssueDeliverySource.adapter_key)
+        )
+    }
+    warehouse_key = maintenance_warehouse_site_issue_bridge.WAREHOUSE_DELIVERY_ADAPTER
+    synthetic_key = "synthetic_delivery_v1"
+    if counts.get(warehouse_key, 0) > 0:
+        return (
+            {
+                "key": warehouse_key,
+                "state": "warehouse_ready",
+                "production_ready": True,
+                "detail": "仅展示已确认且稳定关联到当前项目的仓库发货明细",
+            },
+            (warehouse_key,),
+        )
+    if get_settings().environment != "prod" and counts.get(synthetic_key, 0) > 0:
+        return (
+            {
+                "key": synthetic_key,
+                "state": "synthetic_ready",
+                "production_ready": False,
+                "detail": "当前仅启用稳定合成发货契约；真实适配器接入前不得用于生产确认",
+            },
+            (synthetic_key,),
+        )
+    if get_settings().environment != "prod":
+        return (
+            {
+                "key": synthetic_key,
+                "state": "unavailable",
+                "production_ready": False,
+                "detail": "真实 WBDD/仓库发货适配器尚未接入，系统不会按项目名猜测",
+            },
+            (),
+        )
+    return (
+        {
+            "key": warehouse_key,
+            "state": "unavailable",
+            "production_ready": False,
+            "detail": "尚无已确认并完成 WBDD、项目和 PN 稳定关联的仓库发货明细",
+        },
+        (),
+    )
 
 
 def preview_site_issue(
@@ -1115,8 +1188,10 @@ def preview_site_issue(
         sources=sources,
         confirmed_quantities=confirmed,
     )
-    if _site_issue_is_production_blocked():
-        blockers.append("真实 WBDD/仓库发货适配器尚未接入，生产确认已失败关闭")
+    if _site_issue_is_production_blocked() and not (
+        _site_issue_sources_are_production_ready(sources)
+    ):
+        blockers.append("生产确认只接受已确认仓库发货明细，合成来源已失败关闭")
 
     preview_lines = [_clone_site_issue_line(line) for line in lines]
     maintenance_consumption_cost.resolve_lines(
@@ -1191,13 +1266,13 @@ def confirm_site_issue(
         raise MaintenanceOperationConflict("现场领用单版本已变化，请刷新后重试")
     if issue.normalized_status != "draft":
         raise MaintenanceOperationConflict("仅草稿现场领用单可以确认")
-    if _site_issue_is_production_blocked():
-        raise MaintenanceOperationError(
-            "真实 WBDD/仓库发货适配器尚未接入，生产确认已失败关闭"
-        )
 
     lines = _site_issue_lines(db, issue_id=issue_id, lock=True)
     delivery_ids = {line.delivery_line_id for line in lines if line.delivery_line_id}
+    maintenance_warehouse_site_issue_bridge.synchronize_delivery_sources(
+        db,
+        delivery_line_ids=delivery_ids,
+    )
     sources = _locked_site_issue_sources(
         db,
         delivery_line_ids=delivery_ids,
@@ -1213,6 +1288,12 @@ def confirm_site_issue(
         sources=sources,
         confirmed_quantities=confirmed,
     )
+    if _site_issue_is_production_blocked() and not (
+        _site_issue_sources_are_production_ready(sources)
+    ):
+        raise MaintenanceOperationError(
+            "生产确认只接受已确认仓库发货明细，合成来源已失败关闭"
+        )
     if blockers:
         raise MaintenanceOperationConflict("；".join(blockers))
 
@@ -1311,7 +1392,8 @@ def _build_site_issue_lines(
         if source is None:
             raise MaintenanceOperationError("发货来源适配器未提供完整稳定身份")
         if (
-            source.adapter_key != "synthetic_delivery_v1"
+            source.adapter_key
+            not in maintenance_warehouse_site_issue_bridge.SUPPORTED_DELIVERY_ADAPTERS
             or source.mapping_state != "ready"
             or not source.is_active
         ):
@@ -1429,10 +1511,6 @@ def patch_site_issue(
     if issue.normalized_status not in {"draft", "confirmed", "corrected"}:
         raise MaintenanceOperationConflict("已作废现场领用单不能编辑")
     is_correction = issue.normalized_status in {"confirmed", "corrected"}
-    if is_correction and _site_issue_is_production_blocked():
-        raise MaintenanceOperationError(
-            "真实 WBDD/仓库发货适配器尚未接入，生产更正确认已失败关闭"
-        )
     if is_correction:
         # A pre-#208 confirmation event may still be waiting for projection.
         # Drain older project events before writing the newer correction so a
@@ -1455,6 +1533,10 @@ def patch_site_issue(
     all_delivery_ids = {
         line.delivery_line_id for line in old_lines if line.delivery_line_id
     } | requested_ids
+    maintenance_warehouse_site_issue_bridge.synchronize_delivery_sources(
+        db,
+        delivery_line_ids=all_delivery_ids,
+    )
     sources = _locked_site_issue_sources(
         db,
         delivery_line_ids=all_delivery_ids,
@@ -1470,6 +1552,14 @@ def patch_site_issue(
         if normalized_lines is not None
         else old_lines
     )
+    if (
+        is_correction
+        and _site_issue_is_production_blocked()
+        and not _site_issue_sources_are_production_ready(sources)
+    ):
+        raise MaintenanceOperationError(
+            "生产更正确认只接受已确认仓库发货明细，合成来源已失败关闭"
+        )
     candidate_issue_date = issue_date or issue.issue_date
     candidate_receiver = (
         _required(receiver, "接收人", 128) if receiver is not None else issue.receiver
@@ -1808,16 +1898,17 @@ def search_site_issues(
     by_issue: dict[str, list[MaintenanceSiteIssueLine]] = defaultdict(list)
     for line in line_rows:
         by_issue[line.issue_id].append(line)
+    adapter, _candidate_adapters = _site_issue_adapter_profile(
+        db,
+        project_id=project_id,
+    )
     return {
         "project_id": project_id,
         "rows": [site_issue_dict(issue, by_issue[issue.issue_id]) for issue in issues],
         "total": total,
         "page": page,
         "page_size": page_size,
-        "adapter": {
-            "key": "synthetic_delivery_v1",
-            "production_ready": False,
-        },
+        "adapter": adapter,
     }
 
 
@@ -1836,24 +1927,11 @@ def search_site_issue_candidates(
     )
     if project is None:
         return None
-    adapter_available = bool(
-        db.scalar(
-            select(func.count())
-            .select_from(MaintenanceSiteIssueDeliverySource)
-            .where(MaintenanceSiteIssueDeliverySource.project_id == project_id)
-        )
+    adapter, candidate_adapters = _site_issue_adapter_profile(
+        db,
+        project_id=project_id,
     )
-    adapter = {
-        "key": "synthetic_delivery_v1",
-        "state": "synthetic_ready" if adapter_available else "unavailable",
-        "production_ready": False,
-        "detail": (
-            "当前仅启用稳定合成发货契约；真实适配器接入前不得用于生产确认"
-            if adapter_available
-            else "真实 WBDD/仓库发货适配器尚未接入，系统不会按项目名猜测"
-        ),
-    }
-    if not adapter_available:
+    if not candidate_adapters:
         return {
             "adapter": adapter,
             "rows": [],
@@ -1883,7 +1961,7 @@ def search_site_issue_candidates(
     confirmed_quantity = func.coalesce(consumed.c.confirmed_quantity, 0)
     filters = [
         MaintenanceSiteIssueDeliverySource.project_id == project_id,
-        MaintenanceSiteIssueDeliverySource.adapter_key == "synthetic_delivery_v1",
+        MaintenanceSiteIssueDeliverySource.adapter_key.in_(candidate_adapters),
         MaintenanceSiteIssueDeliverySource.mapping_state == "ready",
         MaintenanceSiteIssueDeliverySource.is_active.is_(True),
     ]
@@ -2052,6 +2130,10 @@ def create_site_issue_draft(
     if not project.is_active:
         raise MaintenanceOperationError("项目主档已归档")
 
+    maintenance_warehouse_site_issue_bridge.synchronize_delivery_sources(
+        db,
+        delivery_line_ids=seen_delivery_ids,
+    )
     source_rows = list(
         db.scalars(
             select(MaintenanceSiteIssueDeliverySource)
@@ -2072,7 +2154,8 @@ def create_site_issue_draft(
     for line_no, requested in enumerate(normalized_lines, start=1):
         source_row = sources[requested["delivery_line_id"]]
         if (
-            source_row.adapter_key != "synthetic_delivery_v1"
+            source_row.adapter_key
+            not in maintenance_warehouse_site_issue_bridge.SUPPORTED_DELIVERY_ADAPTERS
             or source_row.mapping_state != "ready"
             or not source_row.is_active
         ):

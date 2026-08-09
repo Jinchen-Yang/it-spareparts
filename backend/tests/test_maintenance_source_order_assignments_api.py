@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from app import config
 from app.auth import hash_password
 from app.etl import loader
 from app.main import app
@@ -84,6 +85,7 @@ def _source_order(db, *, raw_order_id: str, order_no: str, project_raw: str):
         order_date=date(2026, 1, 15),
         project_raw=project_raw,
         project_std=project_raw,
+        data_status=config.ACTIVE_STATUS,
         import_batch_id=batch.id,
     )
     db.add(order)
@@ -1053,9 +1055,10 @@ def test_exactly_one_hundred_source_orders_assign_atomically(db):
                 raw_order_id=source_id,
                 order_no=f"WBDD-HUNDRED-{index:03d}",
                 order_date=date(2026, 1, 15),
-                project_raw=f"合成批量原始文字 {index:03d}",
-                project_std=f"合成批量原始文字 {index:03d}",
-                import_batch_id=batch.id,
+                    project_raw=f"合成批量原始文字 {index:03d}",
+                    project_std=f"合成批量原始文字 {index:03d}",
+                    data_status=config.ACTIVE_STATUS,
+                    import_batch_id=batch.id,
             )
             for index, source_id in enumerate(source_ids)
         ]

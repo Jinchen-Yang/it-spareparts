@@ -342,6 +342,18 @@ def assign_source_orders(
         )
         resulting[source_id] = assignment
     db.flush()
+    # A source-order assignment is also the only stable project edge allowed
+    # for warehouse shipment candidates.  Repair that projection in the same
+    # transaction so reassignment can never leave an actionable old-project
+    # delivery row behind.
+    from app.services import maintenance_warehouse
+
+    maintenance_warehouse.reconcile_project_assignment_links(
+        db,
+        operated_by=operated_by,
+        reason=clean_reason,
+        source_order_ids=set(source_ids),
+    )
     return [assignment_dict(resulting[source_id]) for source_id in source_ids]
 
 
@@ -438,4 +450,12 @@ def unassign_source_orders(
         )
         archived.append(row)
     db.flush()
+    from app.services import maintenance_warehouse
+
+    maintenance_warehouse.reconcile_project_assignment_links(
+        db,
+        operated_by=operated_by,
+        reason=clean_reason,
+        source_order_ids=set(source_ids),
+    )
     return [assignment_dict(row) for row in archived]

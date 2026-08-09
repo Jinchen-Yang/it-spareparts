@@ -269,7 +269,11 @@ class MaintenanceWarehouseAuditEvent(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("action IN ('import_applied', 'ambiguity_resolved')", name="ck_maintenance_wh_audit_action"),
+        CheckConstraint(
+            "action IN ('import_applied', 'ambiguity_resolved', "
+            "'integration_reconciled')",
+            name="ck_maintenance_wh_audit_action",
+        ),
         CheckConstraint("char_length(btrim(reason)) > 0", name="ck_maintenance_wh_audit_reason"),
         CheckConstraint("char_length(btrim(operated_by)) > 0", name="ck_maintenance_wh_audit_operator"),
         Index("ix_maintenance_wh_audit_time", "occurred_at", "event_id"),

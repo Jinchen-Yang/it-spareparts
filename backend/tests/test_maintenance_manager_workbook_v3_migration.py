@@ -5,6 +5,7 @@ import os
 
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError
@@ -33,6 +34,10 @@ def _cfg() -> AlembicConfig:
         os.path.join(os.path.dirname(__file__), "..", "alembic"),
     )
     return cfg
+
+
+def _current_head() -> str:
+    return ScriptDirectory.from_config(_cfg()).get_current_head()
 
 
 def test_manager_workbook_v3_schema_has_longitudinal_and_attachment_foundations(db):
@@ -262,7 +267,7 @@ def test_acceptance_downgrade_blocks_when_append_only_history_exists(db):
         current = connection.scalar(text("SELECT version_num FROM alembic_version"))
     # The integration merge preflights every maintenance branch before Alembic
     # can remove the merge marker or partially traverse a sibling branch.
-    assert current == "f5a7c9e1b3d4"
+    assert current == _current_head()
 
 
 def test_combined_downgrade_keeps_both_branches_when_assignment_history_exists(db):
@@ -303,6 +308,6 @@ def test_combined_downgrade_keeps_both_branches_when_assignment_history_exists(d
         manager_table = connection.scalar(
             text("SELECT to_regclass('maintenance_manager_upload_batch')")
         )
-    assert current == "f5a7c9e1b3d4"
+    assert current == _current_head()
     assert assignment_table == "maintenance_project_user_assignment"
     assert manager_table == "maintenance_manager_upload_batch"

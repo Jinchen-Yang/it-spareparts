@@ -213,11 +213,23 @@ def test_preview_is_zero_write_and_apply_replay_is_zero_change(db):
         "maintenance_order",
         "part",
     }
+    # In the combined #201/#209 topology the assignment contract exists, but
+    # this WBDD is intentionally unassigned.  That is a resolvable missing
+    # stable project link, not an integration-contract outage.
     assert set(db.scalars(
         select(MaintenanceWarehouseAmbiguity.field_code).where(
-            MaintenanceWarehouseAmbiguity.ambiguity_type == "integration_blocker"
+            MaintenanceWarehouseAmbiguity.ambiguity_type == "missing_stable_link"
         )
-    )) == {"project_assignment_contract"}
+    )) >= {"project"}
+    assert not db.scalar(
+        select(func.count())
+        .select_from(MaintenanceWarehouseAmbiguity)
+        .where(
+            MaintenanceWarehouseAmbiguity.ambiguity_type == "integration_blocker",
+            MaintenanceWarehouseAmbiguity.field_code
+            == "project_assignment_contract",
+        )
+    )
     assert db.scalar(select(func.count()).select_from(
         MaintenanceWarehouseAmbiguity
     ).where(
