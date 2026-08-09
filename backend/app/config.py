@@ -159,6 +159,14 @@ MAINT_PRICE_WINDOW_DAYS = 7                       # ±窗口天数：出库日 �
 MAINT_BUDGET_WARN_PCT = Decimal("0.20")           # 盈亏看板黄灯阈值：剩余预算占比 ≤20% 报警（用户口径"只剩 20% 就报警"）
 MAINT_EXPENSE_ACTIVE_STATUS = "已结束"             # 报销单生效口径（其余枚举待全量数据确认）
 
+# 仓库导出模板的完整双表头合同。键是 adapter version，值是一个或多个
+# 已经人工复核的 ordered ((internal_code, business_label), ...) 元组。
+# 当前仓库与 Issue #209 没有四类正式文件的权威双表头，故生产默认必须为空；
+# 未命中合同的文件只能零写入预览，不能 apply。不得把合成 fixture 的 hash 填到这里。
+MAINTENANCE_WAREHOUSE_APPROVED_HEADER_CONTRACTS: dict[
+    str, tuple[tuple[tuple[str, str], ...], ...]
+] = {}
+
 # 目标毛利率（报价提示/低毛利标记用；整机拆解的"建议售价"=成本×1/(1-此值)）
 TARGET_MARGIN = Decimal("0.20")
 

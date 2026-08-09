@@ -10,13 +10,14 @@ import hmac
 import json
 from uuid import NAMESPACE_URL, uuid5
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import bindparam, column, false, func, or_, select, table, text
 from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart, PartAlias
 from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import MaintenanceSiteIssue
+from app.models.system import SysUser
 from app.models.maintenance_warehouse import (
     MaintenanceWarehouseAmbiguity,
     MaintenanceWarehouseAuditEvent,
@@ -25,6 +26,7 @@ from app.models.maintenance_warehouse import (
     MaintenanceWarehouseDocumentLink,
     MaintenanceWarehouseImportBatch,
 )
+from app.security import FULL_SCOPE_ROLES, UserContext
 from app.services.maintenance_warehouse_adapters import (
     ParsedWarehouseWorkbook,
     WarehouseAmbiguityFact,
@@ -67,6 +69,15 @@ def _plan(parsed: ParsedWarehouseWorkbook) -> dict:
         "adapter_version": parsed.adapter_version,
         "version_state": parsed.version_state,
         "header_signature": parsed.header_signature,
+        "header_pairs": [
+            {
+                "position": pair.position,
+                "internal_code": pair.internal_code,
+                "business_label": pair.business_label,
+            }
+            for pair in parsed.header_pairs
+        ],
+        "header_diff": parsed.header_diff,
         "data_row_count": parsed.data_row_count,
         "document_count": len(parsed.documents),
         "line_count": sum(len(item.lines) for item in parsed.documents),
@@ -97,18 +108,45 @@ def preview_import(content: bytes, *, filename: str, hmac_key: bytes) -> dict:
         "preview_token": _preview_token(parsed, hmac_key),
         "filename": _safe_filename(filename),
         **plan,
-        "can_apply": True,
+        "can_apply": parsed.version_state == "known",
     }
 
 
-def _advisory_key(parsed: ParsedWarehouseWorkbook) -> int:
-    raw = bytes.fromhex(parsed.source_file_hash[:16])
+def _advisory_key(identity: str) -> int:
+    raw = hashlib.sha256(identity.encode("utf-8")).digest()[:8]
     return int.from_bytes(raw, byteorder="big", signed=True)
 
 
-def _link_id(document_id: str, line_id: str | None, kind: str, target_type: str, target_id: str) -> str:
+def _lock_business_identities(db: Session, parsed: ParsedWarehouseWorkbook) -> None:
+    """Serialize different files that carry the same immutable business ID."""
+
+    identities = sorted({
+        f"maintenance-warehouse:{document.document_type}:{document.source_document_id}"
+        for document in parsed.documents
+    })
+    if not identities:
+        identities = [
+            f"maintenance-warehouse:{parsed.adapter_version}:{parsed.source_file_hash}"
+        ]
+    for identity in identities:
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:key)"),
+            {"key": _advisory_key(identity)},
+        )
+
+
+def _link_id(
+    document_id: str,
+    line_id: str | None,
+    kind: str,
+    target_type: str,
+    target_id: str,
+    *,
+    version: int = 1,
+) -> str:
     return _uuid(
-        f"maintenance-warehouse-link:{document_id}:{line_id or '-'}:{kind}:{target_type}:{target_id}"
+        f"maintenance-warehouse-link:{document_id}:{line_id or '-'}:{kind}:"
+        f"{target_type}:{target_id}:v{version}"
     )
 
 
@@ -203,6 +241,145 @@ def _warehouse_document_candidate_map(
     return output
 
 
+def _table_has_columns(db: Session, table_name: str, columns: set[str]) -> bool:
+    """Check optional sibling-branch contracts without importing absent models."""
+
+    if db.scalar(text("SELECT to_regclass(:name)"), {"name": table_name}) is None:
+        return False
+    found = set(db.scalars(
+        text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = :name"
+        ),
+        {"name": table_name},
+    ))
+    return columns <= found
+
+
+def _project_candidate_map(
+    db: Session,
+    *,
+    maintenance_candidates: dict[str, list[dict]],
+) -> tuple[dict[str, list[dict]], bool]:
+    """Consume #201's single active WBDD assignment; never recreate it."""
+
+    output = {reference: [] for reference in maintenance_candidates}
+    required = {"source_order_id", "project_id", "is_active"}
+    if not _table_has_columns(db, "maintenance_source_order_assignment", required):
+        return output, False
+    source_ids = {
+        candidate["target_id"]
+        for candidates in maintenance_candidates.values()
+        for candidate in candidates
+        if candidate.get("target_type") == "maintenance_order"
+    }
+    if not source_ids:
+        return output, True
+    statement = text(
+        "SELECT assignment.source_order_id, assignment.project_id, project.project_code "
+        "FROM maintenance_source_order_assignment AS assignment "
+        "JOIN maintenance_project AS project "
+        "  ON project.project_id = assignment.project_id "
+        "WHERE assignment.is_active IS TRUE "
+        "  AND project.is_active IS TRUE "
+        "  AND assignment.source_order_id IN :source_ids "
+        "ORDER BY assignment.source_order_id, assignment.project_id"
+    ).bindparams(bindparam("source_ids", expanding=True))
+    assigned: dict[str, list[dict]] = {}
+    for source_order_id, project_id, project_code in db.execute(
+        statement, {"source_ids": sorted(source_ids)}
+    ):
+        assigned.setdefault(str(source_order_id), []).append(
+            _candidate("maintenance_project", str(project_id), project_code)
+        )
+    for reference, candidates in maintenance_candidates.items():
+        if len(candidates) != 1:
+            continue
+        source_order_id = str(candidates[0]["target_id"])
+        output[reference] = assigned.get(source_order_id, [])
+    return output, True
+
+
+def _site_issue_candidate_map(
+    db: Session,
+    *,
+    source_order_ids: set[str],
+    source_line_ids: set[str],
+) -> tuple[dict[tuple[str, str], list[dict]], bool]:
+    """Consume explicit site issue line source IDs from #207 after integration."""
+
+    output: dict[tuple[str, str], list[dict]] = {}
+    required_line = {"source_order_id", "source_line_id", "serial_number", "issue_id"}
+    required_issue = {"issue_id", "issue_no", "project_id", "normalized_status"}
+    if not (
+        _table_has_columns(db, "maintenance_site_issue_line", required_line)
+        and _table_has_columns(db, "maintenance_site_issue", required_issue)
+    ):
+        return output, False
+    if not source_order_ids or not source_line_ids:
+        return output, True
+    statement = text(
+        "SELECT line.source_order_id, line.source_line_id, line.serial_number, "
+        "       issue.issue_id, issue.issue_no, issue.project_id "
+        "FROM maintenance_site_issue_line AS line "
+        "JOIN maintenance_site_issue AS issue ON issue.issue_id = line.issue_id "
+        "WHERE line.source_order_id IN :source_order_ids "
+        "  AND line.source_line_id IN :source_line_ids "
+        "  AND issue.normalized_status IN ('confirmed', 'corrected') "
+        "ORDER BY line.source_order_id, line.source_line_id, issue.issue_id"
+    ).bindparams(
+        bindparam("source_order_ids", expanding=True),
+        bindparam("source_line_ids", expanding=True),
+    )
+    for source_order_id, source_line_id, serial_number, issue_id, issue_no, project_id in db.execute(
+        statement,
+        {
+            "source_order_ids": sorted(source_order_ids),
+            "source_line_ids": sorted(source_line_ids),
+        },
+    ):
+        output.setdefault((str(source_order_id), str(source_line_id)), []).append({
+            **_candidate("maintenance_site_issue", str(issue_id), issue_no),
+            "project_id": str(project_id),
+            "serial_number": str(serial_number) if serial_number is not None else None,
+        })
+    return output, True
+
+
+def _bad_return_candidate_map(
+    db: Session,
+    references: set[str],
+) -> tuple[dict[str, list[dict]], bool]:
+    """Match only #208's explicit warehouse/inbound reference columns."""
+
+    output = {reference: [] for reference in references}
+    required = {
+        "return_id", "return_no", "project_id", "status",
+        "warehouse_reference", "inbound_reference",
+    }
+    if not _table_has_columns(db, "maintenance_bad_return", required):
+        return output, False
+    if not references:
+        return output, True
+    statement = text(
+        "SELECT return_id, return_no, project_id, warehouse_reference, inbound_reference "
+        "FROM maintenance_bad_return "
+        "WHERE status <> 'void' AND ("
+        "  warehouse_reference IN :references OR inbound_reference IN :references"
+        ") ORDER BY return_id"
+    ).bindparams(bindparam("references", expanding=True))
+    for return_id, return_no, project_id, warehouse_reference, inbound_reference in db.execute(
+        statement, {"references": sorted(references)}
+    ):
+        candidate = {
+            **_candidate("maintenance_bad_return", str(return_id), return_no),
+            "project_id": str(project_id),
+        }
+        for value in {warehouse_reference, inbound_reference} & references:
+            output[str(value)].append(candidate)
+    return output, True
+
+
 def _ambiguity_fact(
     *,
     code: str,
@@ -286,8 +463,12 @@ def apply_import(
     expected_token = _preview_token(parsed, hmac_key)
     if import_id != expected_id or not hmac.compare_digest(preview_token or "", expected_token):
         raise MaintenanceWarehouseConflict("文件与预览签名不一致，请重新预览")
+    if parsed.version_state != "known":
+        raise MaintenanceWarehouseConflict(
+            "模板完整双表头尚未获批准，只允许零写入预览"
+        )
 
-    db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _advisory_key(parsed)})
+    _lock_business_identities(db, parsed)
     existing_batch = db.scalar(
         select(MaintenanceWarehouseImportBatch).where(
             MaintenanceWarehouseImportBatch.source_file_hash == parsed.source_file_hash,
@@ -309,7 +490,7 @@ def apply_import(
     new_lines: list[MaintenanceWarehouseDocumentLine] = []
     new_links: list[MaintenanceWarehouseDocumentLink] = []
     ambiguity_facts: list[WarehouseAmbiguityFact] = list(parsed.ambiguities)
-    planned_link_keys: set[tuple[str, str | None, str, str, str]] = set()
+    planned_link_slots: set[tuple[str, str | None, str]] = set()
 
     existing_documents: dict[tuple[str, str], MaintenanceWarehouseDocument] = {}
     document_types = {document.document_type for document in parsed.documents}
@@ -419,18 +600,19 @@ def apply_import(
         and fact.line_source_id
     }
 
-    existing_link_keys: set[tuple[str, str | None, str, str, str]] = set()
+    existing_active_links: dict[
+        tuple[str, str | None, str], MaintenanceWarehouseDocumentLink
+    ] = {}
     for chunk in _chunks(set(document_ids.values())):
-        rows = db.execute(
-            select(
-                MaintenanceWarehouseDocumentLink.document_id,
-                MaintenanceWarehouseDocumentLink.line_id,
-                MaintenanceWarehouseDocumentLink.link_kind,
-                MaintenanceWarehouseDocumentLink.target_type,
-                MaintenanceWarehouseDocumentLink.target_id,
-            ).where(MaintenanceWarehouseDocumentLink.document_id.in_(chunk))
+        rows = db.scalars(
+            select(MaintenanceWarehouseDocumentLink).where(
+                MaintenanceWarehouseDocumentLink.document_id.in_(chunk),
+                MaintenanceWarehouseDocumentLink.status == "active",
+            )
         ).all()
-        existing_link_keys.update(tuple(row) for row in rows)
+        existing_active_links.update({
+            (row.document_id, row.line_id, row.link_kind): row for row in rows
+        })
 
     maintenance_refs = {
         value for document in parsed.documents
@@ -444,8 +626,36 @@ def apply_import(
         line.pn for document in parsed.documents for line in document.lines if line.pn
     }
     maintenance_candidates = _maintenance_order_candidate_map(db, maintenance_refs)
+    project_candidates, project_bridge_available = _project_candidate_map(
+        db, maintenance_candidates=maintenance_candidates
+    )
     upstream_candidates_from_db = _warehouse_document_candidate_map(db, upstream_refs)
     part_candidates = _part_candidate_map(db, part_refs)
+    stable_order_ids = {
+        str(candidate["target_id"])
+        for candidates in maintenance_candidates.values()
+        for candidate in candidates
+        if candidate.get("target_type") == "maintenance_order"
+    }
+    stable_line_ids = {
+        line.source_line_id
+        for document in parsed.documents
+        for line in document.lines
+    }
+    site_issue_candidates, site_issue_bridge_available = _site_issue_candidate_map(
+        db,
+        source_order_ids=stable_order_ids,
+        source_line_ids=stable_line_ids,
+    )
+    warehouse_identity_refs = {
+        str(value)
+        for document in parsed.documents
+        for value in (document.source_document_id, document.document_no)
+        if value
+    }
+    bad_return_candidates, bad_return_bridge_available = _bad_return_candidate_map(
+        db, warehouse_identity_refs
+    )
 
     # Upstream/downstream documents can coexist in one uploaded workbook.  Add
     # those deterministic, stable-ID candidates to the DB candidates; never
@@ -485,10 +695,33 @@ def apply_import(
         target = candidates[0]
         target_type = target["target_type"]
         target_id = str(target["target_id"])
-        key = (document_id, line_id, link_kind, target_type, target_id)
-        if key in existing_link_keys or key in planned_link_keys:
+        slot = (document_id, line_id, link_kind)
+        existing_link = existing_active_links.get(slot)
+        if existing_link is not None:
+            if (
+                existing_link.target_type == target_type
+                and existing_link.target_id == target_id
+            ):
+                return
+            ambiguity_facts.append(_ambiguity_fact(
+                code="field_conflict",
+                field_code=field_code,
+                document_source_id=document_source_id,
+                line_source_id=line_source_id,
+                value_hash=_hash(stable_value),
+                candidates=[
+                    _candidate(
+                        existing_link.target_type,
+                        existing_link.target_id,
+                        "当前有效关联",
+                    ),
+                    target,
+                ],
+            ))
             return
-        planned_link_keys.add(key)
+        if slot in planned_link_slots:
+            return
+        planned_link_slots.add(slot)
         new_links.append(MaintenanceWarehouseDocumentLink(
             link_id=_link_id(document_id, line_id, link_kind, target_type, target_id),
             document_id=document_id,
@@ -499,6 +732,8 @@ def apply_import(
             stable_key_kind=stable_key_kind,
             stable_key_hash=_hash(stable_value),
             source="automatic",
+            status="active",
+            supersedes_link_id=None,
             version=1,
             reason="系统按稳定键精确关联",
             operated_by=operated_by,
@@ -518,11 +753,44 @@ def apply_import(
                 candidates=maintenance_candidates.get(maintenance_ref, []),
                 field_code="maintenance_order",
             )
+            if project_bridge_available:
+                plan_link(
+                    document_source_id=document.source_document_id,
+                    line_source_id=None,
+                    link_kind="project",
+                    stable_key_kind="active_source_order_assignment",
+                    stable_value=maintenance_ref,
+                    candidates=project_candidates.get(maintenance_ref, []),
+                    field_code="project",
+                )
+            else:
+                ambiguity_facts.append(_ambiguity_fact(
+                    code="integration_blocker",
+                    field_code="project_assignment_contract",
+                    document_source_id=document.source_document_id,
+                    value_hash=_hash(maintenance_ref),
+                ))
         else:
             ambiguity_facts.append(_ambiguity_fact(
                 code="missing_stable_link", field_code="maintenance_order",
                 document_source_id=document.source_document_id,
             ))
+        exact_project_candidates = (
+            project_candidates.get(maintenance_ref, []) if maintenance_ref else []
+        )
+        exact_order_candidates = (
+            maintenance_candidates.get(maintenance_ref, []) if maintenance_ref else []
+        )
+        project_id = (
+            str(exact_project_candidates[0]["target_id"])
+            if len(exact_project_candidates) == 1
+            else None
+        )
+        source_order_id = (
+            str(exact_order_candidates[0]["target_id"])
+            if len(exact_order_candidates) == 1
+            else None
+        )
         upstream_ref = document.stable_refs.get("upstream_document")
         if upstream_ref:
             upstream_candidates = list(upstream_candidates_from_db.get(upstream_ref, []))
@@ -562,6 +830,80 @@ def apply_import(
                     document_source_id=document.source_document_id,
                     line_source_id=line.source_line_id,
                 ))
+            if document.document_type == "shipment":
+                if not site_issue_bridge_available:
+                    ambiguity_facts.append(_ambiguity_fact(
+                        code="integration_blocker",
+                        field_code="site_issue_source_contract",
+                        source_row=line.source_row,
+                        document_source_id=document.source_document_id,
+                        line_source_id=line.source_line_id,
+                    ))
+                elif not source_order_id or not project_id:
+                    ambiguity_facts.append(_ambiguity_fact(
+                        code="integration_blocker",
+                        field_code="site_issue_project_bridge",
+                        source_row=line.source_row,
+                        document_source_id=document.source_document_id,
+                        line_source_id=line.source_line_id,
+                    ))
+                elif not line.sn:
+                    ambiguity_facts.append(_ambiguity_fact(
+                        code="missing_stable_link",
+                        field_code="sn",
+                        source_row=line.source_row,
+                        document_source_id=document.source_document_id,
+                        line_source_id=line.source_line_id,
+                    ))
+                else:
+                    candidates = [
+                        candidate
+                        for candidate in site_issue_candidates.get(
+                            (source_order_id, line.source_line_id), []
+                        )
+                        if candidate.get("project_id") == project_id
+                        and candidate.get("serial_number") == line.sn
+                    ]
+                    plan_link(
+                        document_source_id=document.source_document_id,
+                        line_source_id=line.source_line_id,
+                        link_kind="site_issue",
+                        stable_key_kind="source_order_line_sn_exact",
+                        stable_value=f"{source_order_id}:{line.source_line_id}:{line.sn}",
+                        candidates=candidates,
+                        field_code="site_issue",
+                    )
+
+        if document.document_type in {"return", "receipt"}:
+            if not bad_return_bridge_available:
+                ambiguity_facts.append(_ambiguity_fact(
+                    code="integration_blocker",
+                    field_code="bad_return_contract",
+                    document_source_id=document.source_document_id,
+                ))
+            elif project_id:
+                candidates_by_identity: dict[tuple[str, str], dict] = {}
+                for reference in {
+                    document.source_document_id,
+                    document.document_no,
+                } - {None, ""}:
+                    for candidate in bad_return_candidates.get(str(reference), []):
+                        if candidate.get("project_id") == project_id:
+                            candidates_by_identity[
+                                (candidate["target_type"], candidate["target_id"])
+                            ] = candidate
+                plan_link(
+                    document_source_id=document.source_document_id,
+                    line_source_id=None,
+                    link_kind="bad_return",
+                    stable_key_kind="explicit_warehouse_reference",
+                    stable_value="|".join(sorted({
+                        document.source_document_id,
+                        document.document_no or "",
+                    } - {""})),
+                    candidates=list(candidates_by_identity.values()),
+                    field_code="bad_return",
+                )
 
     ambiguity_models: list[MaintenanceWarehouseAmbiguity] = []
     fingerprints: set[str] = set()
@@ -580,6 +922,8 @@ def apply_import(
         "adapter_version": parsed.adapter_version,
         "version_state": parsed.version_state,
         "source_file_hash": parsed.source_file_hash,
+        "header_signature": parsed.header_signature,
+        "header_diff": parsed.header_diff,
         "document_count": len(parsed.documents),
         "line_count": sum(len(document.lines) for document in parsed.documents),
         "ambiguity_count": len(ambiguity_models),
@@ -651,11 +995,117 @@ def apply_import(
     }
 
 
+def _document_scope_condition(db: Session, user_ctx: UserContext):
+    """#205-compatible project row scope; missing assignment contract means none."""
+
+    if user_ctx.role in FULL_SCOPE_ROLES:
+        return None
+    if not user_ctx.is_authenticated or not user_ctx.user_id:
+        return false()
+    required = {"project_id", "responsibility_type", "user_id", "archived_at"}
+    if not _table_has_columns(db, "maintenance_project_user_assignment", required):
+        return false()
+    assignment = table(
+        "maintenance_project_user_assignment",
+        column("project_id"),
+        column("responsibility_type"),
+        column("user_id"),
+        column("archived_at"),
+    )
+    return select(MaintenanceWarehouseDocumentLink.link_id).select_from(
+        MaintenanceWarehouseDocumentLink.__table__
+        .join(
+            assignment,
+            assignment.c.project_id == MaintenanceWarehouseDocumentLink.target_id,
+        )
+        .join(SysUser.__table__, SysUser.id == assignment.c.user_id)
+    ).where(
+        MaintenanceWarehouseDocumentLink.document_id
+        == MaintenanceWarehouseDocument.document_id,
+        MaintenanceWarehouseDocumentLink.link_kind == "project",
+        MaintenanceWarehouseDocumentLink.target_type == "maintenance_project",
+        MaintenanceWarehouseDocumentLink.status == "active",
+        assignment.c.responsibility_type == "primary_manager",
+        assignment.c.archived_at.is_(None),
+        SysUser.username == user_ctx.user_id,
+        SysUser.is_active.is_(True),
+    ).exists()
+
+
+def _can_access_document(
+    db: Session,
+    *,
+    document_id: str,
+    user_ctx: UserContext,
+) -> bool:
+    scope = _document_scope_condition(db, user_ctx)
+    if scope is None:
+        return True
+    return bool(db.scalar(
+        select(MaintenanceWarehouseDocument.document_id).where(
+            MaintenanceWarehouseDocument.document_id == document_id,
+            scope,
+        )
+    ))
+
+
+def _batch_evidence(batch: MaintenanceWarehouseImportBatch | None) -> dict | None:
+    if batch is None:
+        return None
+    return {
+        "import_id": batch.import_id,
+        "filename": batch.source_filename,
+        "source_file_hash": batch.source_file_hash,
+        "adapter_key": batch.adapter_key,
+        "adapter_version": batch.adapter_version,
+        "version_state": batch.version_state,
+        "header_signature": batch.header_signature,
+        "header_pairs": batch.header_pairs_json,
+        "header_diff": (batch.result_json or {}).get("header_diff"),
+        "applied_by": batch.applied_by,
+        "applied_at": batch.applied_at.isoformat(),
+    }
+
+
+def _link_evidence(link: MaintenanceWarehouseDocumentLink) -> dict:
+    return {
+        "link_id": link.link_id,
+        "line_id": link.line_id,
+        "link_kind": link.link_kind,
+        "target_type": link.target_type,
+        "target_id": link.target_id,
+        "stable_key_kind": link.stable_key_kind,
+        "stable_key_hash": link.stable_key_hash,
+        "source": link.source,
+        "status": link.status,
+        "supersedes_link_id": link.supersedes_link_id,
+        "version": link.version,
+        "reason": link.reason,
+        "operated_by": link.operated_by,
+        "created_at": link.created_at.isoformat(),
+    }
+
+
+def _audit_evidence(event: MaintenanceWarehouseAuditEvent) -> dict:
+    return {
+        "event_id": event.event_id,
+        "action": event.action,
+        "before": event.before_json,
+        "after": event.after_json,
+        "reason": event.reason,
+        "operated_by": event.operated_by,
+        "occurred_at": event.occurred_at.isoformat(),
+    }
+
+
 def search_documents(
     db: Session, *, q: str | None, document_type: str | None,
-    page: int, page_size: int,
+    page: int, page_size: int, user_ctx: UserContext,
 ) -> dict:
     filters = []
+    scope = _document_scope_condition(db, user_ctx)
+    if scope is not None:
+        filters.append(scope)
     if q:
         term = q.strip()
         filters.append(or_(
@@ -715,6 +1165,29 @@ def search_documents(
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
+    document_ids = [row.document_id for row, _line_count, _open_count in rows]
+    import_ids = [row.first_import_id for row, _line_count, _open_count in rows]
+    batches = {
+        batch.import_id: batch
+        for batch in db.scalars(
+            select(MaintenanceWarehouseImportBatch).where(
+                MaintenanceWarehouseImportBatch.import_id.in_(import_ids)
+            )
+        )
+    } if import_ids else {}
+    links_by_document: dict[str, list[MaintenanceWarehouseDocumentLink]] = {}
+    if document_ids:
+        for link in db.scalars(
+            select(MaintenanceWarehouseDocumentLink)
+            .where(MaintenanceWarehouseDocumentLink.document_id.in_(document_ids))
+            .order_by(
+                MaintenanceWarehouseDocumentLink.document_id,
+                MaintenanceWarehouseDocumentLink.link_kind,
+                MaintenanceWarehouseDocumentLink.created_at,
+                MaintenanceWarehouseDocumentLink.link_id,
+            )
+        ):
+            links_by_document.setdefault(link.document_id, []).append(link)
     items = []
     for row, line_count, open_count in rows:
         items.append({
@@ -727,6 +1200,11 @@ def search_documents(
             "normalized_status": row.normalized_status,
             "line_count": int(line_count or 0),
             "open_ambiguity_count": int(open_count or 0),
+            "batch": _batch_evidence(batches.get(row.first_import_id)),
+            "links": [
+                _link_evidence(link)
+                for link in links_by_document.get(row.document_id, [])
+            ],
         })
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
@@ -734,8 +1212,15 @@ def search_documents(
 def search_ambiguities(
     db: Session, *, q: str | None, status: str | None,
     ambiguity_type: str | None, page: int, page_size: int,
+    user_ctx: UserContext,
 ) -> dict:
     filters = []
+    scope = _document_scope_condition(db, user_ctx)
+    if scope is not None:
+        filters.extend([
+            MaintenanceWarehouseAmbiguity.document_id.is_not(None),
+            scope,
+        ])
     if status:
         if status not in {"open", "resolved"}:
             raise MaintenanceWarehouseError("歧义状态无效")
@@ -772,6 +1257,46 @@ def search_ambiguities(
             MaintenanceWarehouseAmbiguity.ambiguity_id,
         ).offset((page - 1) * page_size).limit(page_size)
     ).all()
+    ambiguity_ids = [ambiguity.ambiguity_id for ambiguity, _document in rows]
+    import_ids = [ambiguity.import_id for ambiguity, _document in rows]
+    document_ids = [
+        ambiguity.document_id
+        for ambiguity, _document in rows
+        if ambiguity.document_id is not None
+    ]
+    batches = {
+        batch.import_id: batch
+        for batch in db.scalars(
+            select(MaintenanceWarehouseImportBatch).where(
+                MaintenanceWarehouseImportBatch.import_id.in_(import_ids)
+            )
+        )
+    } if import_ids else {}
+    links_by_document: dict[str, list[MaintenanceWarehouseDocumentLink]] = {}
+    if document_ids:
+        for link in db.scalars(
+            select(MaintenanceWarehouseDocumentLink)
+            .where(MaintenanceWarehouseDocumentLink.document_id.in_(document_ids))
+            .order_by(
+                MaintenanceWarehouseDocumentLink.document_id,
+                MaintenanceWarehouseDocumentLink.link_kind,
+                MaintenanceWarehouseDocumentLink.created_at,
+                MaintenanceWarehouseDocumentLink.link_id,
+            )
+        ):
+            links_by_document.setdefault(link.document_id, []).append(link)
+    audits_by_ambiguity: dict[str, list[MaintenanceWarehouseAuditEvent]] = {}
+    if ambiguity_ids:
+        for event in db.scalars(
+            select(MaintenanceWarehouseAuditEvent)
+            .where(MaintenanceWarehouseAuditEvent.ambiguity_id.in_(ambiguity_ids))
+            .order_by(
+                MaintenanceWarehouseAuditEvent.occurred_at,
+                MaintenanceWarehouseAuditEvent.event_id,
+            )
+        ):
+            if event.ambiguity_id:
+                audits_by_ambiguity.setdefault(event.ambiguity_id, []).append(event)
     items = []
     for ambiguity, document in rows:
         items.append({
@@ -780,12 +1305,25 @@ def search_ambiguities(
             "ambiguity_type": ambiguity.ambiguity_type,
             "field_code": ambiguity.field_code,
             "source_row": ambiguity.source_row,
+            "value_hash": ambiguity.value_hash,
             "status": ambiguity.status,
             "version": ambiguity.version,
             "candidates": ambiguity.candidates_json,
             "resolution": ambiguity.resolution_json,
             "resolution_reason": ambiguity.resolution_reason,
             "resolved_by": ambiguity.resolved_by,
+            "resolved_at": (
+                ambiguity.resolved_at.isoformat() if ambiguity.resolved_at else None
+            ),
+            "batch": _batch_evidence(batches.get(ambiguity.import_id)),
+            "links": [
+                _link_evidence(link)
+                for link in links_by_document.get(ambiguity.document_id or "", [])
+            ],
+            "history": [
+                _audit_evidence(event)
+                for event in audits_by_ambiguity.get(ambiguity.ambiguity_id, [])
+            ],
             "document": None if document is None else {
                 "document_id": document.document_id,
                 "document_type": document.document_type,
@@ -800,8 +1338,18 @@ _LINK_TARGET_MATRIX = {
     "maintenance_order": "maintenance_order",
     "project": "maintenance_project",
     "site_issue": "maintenance_site_issue",
+    "bad_return": "maintenance_bad_return",
     "part": "dim_part",
     "warehouse_document": "warehouse_document",
+}
+
+_FIELD_LINK_KIND = {
+    "maintenance_order": "maintenance_order",
+    "project": "project",
+    "site_issue": "site_issue",
+    "bad_return": "bad_return",
+    "pn": "part",
+    "upstream_document": "warehouse_document",
 }
 
 
@@ -818,6 +1366,18 @@ def _target_exists(db: Session, target_type: str, target_id: str) -> bool:
         return db.scalar(select(MaintenanceSiteIssue.issue_id).where(
             MaintenanceSiteIssue.issue_id == target_id
         )) is not None
+    if target_type == "maintenance_bad_return":
+        if not _table_has_columns(
+            db, "maintenance_bad_return", {"return_id"}
+        ):
+            return False
+        return db.scalar(
+            text(
+                "SELECT return_id FROM maintenance_bad_return "
+                "WHERE return_id = :target_id"
+            ),
+            {"target_id": target_id},
+        ) is not None
     if target_type == "dim_part":
         try:
             part_id = int(target_id)
@@ -842,12 +1402,16 @@ def resolve_ambiguity(
     link_kind: str | None = None,
     target_type: str | None = None,
     target_id: str | None = None,
+    user_ctx: UserContext,
 ) -> dict:
     reason = (reason or "").strip()
     if not reason or len(reason) > 1000:
         raise MaintenanceWarehouseError("裁决理由无效")
     if decision not in {"acknowledge", "link"}:
         raise MaintenanceWarehouseError("裁决类型无效")
+    operated_by = (operated_by or "").strip()
+    if not operated_by or len(operated_by) > 64:
+        raise MaintenanceWarehouseError("实名操作人无效")
     ambiguity = db.scalar(
         select(MaintenanceWarehouseAmbiguity)
         .where(MaintenanceWarehouseAmbiguity.ambiguity_id == ambiguity_id)
@@ -857,6 +1421,16 @@ def resolve_ambiguity(
         raise MaintenanceWarehouseError("关联歧义不存在")
     if ambiguity.status != "open" or ambiguity.version != version:
         raise MaintenanceWarehouseConflict("歧义已被其他人处理，请刷新")
+    if (
+        ambiguity.document_id is None
+        and user_ctx.role not in FULL_SCOPE_ROLES
+    ) or (
+        ambiguity.document_id is not None
+        and not _can_access_document(
+            db, document_id=ambiguity.document_id, user_ctx=user_ctx
+        )
+    ):
+        raise MaintenanceWarehouseError("无权访问该仓库单据歧义")
     before = {
         "status": ambiguity.status,
         "version": ambiguity.version,
@@ -870,6 +1444,17 @@ def resolve_ambiguity(
             raise MaintenanceWarehouseError("关联裁决缺少稳定目标")
         if _LINK_TARGET_MATRIX.get(link_kind) != target_type:
             raise MaintenanceWarehouseError("关联类型与目标类型不匹配")
+        if ambiguity.ambiguity_type not in {"multiple_candidates", "field_conflict"}:
+            raise MaintenanceWarehouseError("该歧义类型不允许建立关联")
+        if _FIELD_LINK_KIND.get(ambiguity.field_code or "") != link_kind:
+            raise MaintenanceWarehouseError("裁决关联与歧义字段不匹配")
+        candidate_targets = {
+            (str(candidate.get("target_type") or ""), str(candidate.get("target_id") or ""))
+            for candidate in ambiguity.candidates_json
+            if isinstance(candidate, dict)
+        }
+        if (target_type, target_id) not in candidate_targets:
+            raise MaintenanceWarehouseError("稳定目标不属于该歧义的候选集合")
         if ambiguity.document_id is None:
             raise MaintenanceWarehouseError("该歧义没有可关联的单据事实")
         if not _target_exists(db, target_type, target_id):
@@ -879,11 +1464,45 @@ def resolve_ambiguity(
             "target_type": target_type,
             "target_id": target_id,
         })
-        link_id = _link_id(
-            ambiguity.document_id, ambiguity.line_id, link_kind, target_type, target_id
+        active_link = db.scalar(
+            select(MaintenanceWarehouseDocumentLink)
+            .where(
+                MaintenanceWarehouseDocumentLink.document_id == ambiguity.document_id,
+                MaintenanceWarehouseDocumentLink.line_id.is_(ambiguity.line_id)
+                if ambiguity.line_id is None
+                else MaintenanceWarehouseDocumentLink.line_id == ambiguity.line_id,
+                MaintenanceWarehouseDocumentLink.link_kind == link_kind,
+                MaintenanceWarehouseDocumentLink.status == "active",
+            )
+            .with_for_update()
         )
-        existing = db.get(MaintenanceWarehouseDocumentLink, link_id)
-        if existing is None:
+        if (
+            active_link is not None
+            and active_link.target_type == target_type
+            and active_link.target_id == target_id
+        ):
+            resolution["link_action"] = "retained"
+            resolution["active_link_id"] = active_link.link_id
+        else:
+            next_version = 1 if active_link is None else active_link.version + 1
+            link_id = _link_id(
+                ambiguity.document_id,
+                ambiguity.line_id,
+                link_kind,
+                target_type,
+                target_id,
+                version=next_version,
+            )
+            if active_link is not None:
+                before["active_link"] = {
+                    "link_id": active_link.link_id,
+                    "target_type": active_link.target_type,
+                    "target_id": active_link.target_id,
+                    "version": active_link.version,
+                }
+                active_link.status = "superseded"
+                active_link.version += 1
+                db.flush([active_link])
             new_link = MaintenanceWarehouseDocumentLink(
                 link_id=link_id,
                 document_id=ambiguity.document_id,
@@ -894,11 +1513,19 @@ def resolve_ambiguity(
                 stable_key_kind="manual_stable_id",
                 stable_key_hash=_hash(target_id),
                 source="manual",
-                version=1,
+                status="active",
+                supersedes_link_id=(
+                    active_link.link_id if active_link is not None else None
+                ),
+                version=next_version,
                 reason=reason,
                 operated_by=operated_by,
             )
             db.add(new_link)
+            resolution["link_action"] = (
+                "corrected" if active_link is not None else "created"
+            )
+            resolution["active_link_id"] = link_id
     now = datetime.now(timezone.utc)
     ambiguity.status = "resolved"
     ambiguity.version += 1

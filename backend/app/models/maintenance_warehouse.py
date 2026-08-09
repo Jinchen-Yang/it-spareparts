@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -142,6 +143,12 @@ class MaintenanceWarehouseDocumentLink(Base):
     stable_key_kind: Mapped[str] = mapped_column(String(32), nullable=False)
     stable_key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     source: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active", server_default="active"
+    )
+    supersedes_link_id: Mapped[str | None] = mapped_column(
+        ForeignKey("maintenance_warehouse_document_link.link_id"), unique=True
+    )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     operated_by: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -150,17 +157,25 @@ class MaintenanceWarehouseDocumentLink(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("link_kind IN ('maintenance_order', 'project', 'site_issue', 'part', 'warehouse_document')", name="ck_maintenance_wh_link_kind"),
-        CheckConstraint("target_type IN ('maintenance_order', 'maintenance_project', 'maintenance_site_issue', 'dim_part', 'warehouse_document')", name="ck_maintenance_wh_link_target_type"),
+        CheckConstraint("link_kind IN ('maintenance_order', 'project', 'site_issue', 'bad_return', 'part', 'warehouse_document')", name="ck_maintenance_wh_link_kind"),
+        CheckConstraint("target_type IN ('maintenance_order', 'maintenance_project', 'maintenance_site_issue', 'maintenance_bad_return', 'dim_part', 'warehouse_document')", name="ck_maintenance_wh_link_target_type"),
         CheckConstraint(
             "(link_kind = 'maintenance_order' AND target_type = 'maintenance_order') OR "
             "(link_kind = 'project' AND target_type = 'maintenance_project') OR "
             "(link_kind = 'site_issue' AND target_type = 'maintenance_site_issue') OR "
+            "(link_kind = 'bad_return' AND target_type = 'maintenance_bad_return') OR "
             "(link_kind = 'part' AND target_type = 'dim_part') OR "
             "(link_kind = 'warehouse_document' AND target_type = 'warehouse_document')",
             name="ck_maintenance_wh_link_target_matrix",
         ),
         CheckConstraint("source IN ('automatic', 'manual')", name="ck_maintenance_wh_link_source"),
+        CheckConstraint("status IN ('active', 'superseded')", name="ck_maintenance_wh_link_status"),
+        CheckConstraint(
+            "(status = 'active' AND ((version = 1 AND supersedes_link_id IS NULL) OR "
+            "(version >= 2 AND supersedes_link_id IS NOT NULL))) OR "
+            "(status = 'superseded' AND version >= 2)",
+            name="ck_maintenance_wh_link_supersession",
+        ),
         CheckConstraint("version >= 1", name="ck_maintenance_wh_link_version"),
         CheckConstraint("stable_key_hash ~ '^[a-f0-9]{64}$'", name="ck_maintenance_wh_link_key_hash"),
         CheckConstraint("char_length(btrim(reason)) > 0", name="ck_maintenance_wh_link_reason"),
@@ -170,9 +185,8 @@ class MaintenanceWarehouseDocumentLink(Base):
             document_id,
             func.coalesce(line_id, ""),
             link_kind,
-            target_type,
-            target_id,
             unique=True,
+            postgresql_where=text("status = 'active'"),
         ),
         Index("ix_maintenance_wh_link_document", "document_id", "line_id", "link_kind"),
         Index("ix_maintenance_wh_link_target", "target_type", "target_id"),
@@ -212,7 +226,7 @@ class MaintenanceWarehouseAmbiguity(Base):
         CheckConstraint(
             "ambiguity_type IN ('unknown_version', 'missing_document_id', 'missing_line_id', "
             "'missing_stable_link', 'multiple_candidates', 'field_conflict', "
-            "'unknown_enum', 'controlled_attachment')",
+            "'unknown_enum', 'controlled_attachment', 'integration_blocker')",
             name="ck_maintenance_wh_ambiguity_type",
         ),
         CheckConstraint("status IN ('open', 'resolved')", name="ck_maintenance_wh_ambiguity_status"),

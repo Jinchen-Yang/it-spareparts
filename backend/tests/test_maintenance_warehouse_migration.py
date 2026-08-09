@@ -47,7 +47,7 @@ def test_schema_has_all_fact_tables_and_database_guards(db):
         "trg_maintenance_warehouse_import_batch_immutable",
         "trg_maintenance_warehouse_document_immutable",
         "trg_maintenance_warehouse_document_line_immutable",
-        "trg_maintenance_warehouse_document_link_immutable",
+        "trg_maintenance_warehouse_document_link_supersession",
         "trg_maintenance_warehouse_audit_event_immutable",
         "trg_maintenance_warehouse_ambiguity_resolution",
     }

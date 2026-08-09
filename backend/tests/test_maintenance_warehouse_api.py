@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from openpyxl import Workbook
 from sqlalchemy import func, select
 
+from app import config
 from app.auth import hash_password
 from app.main import app
 from app.models.dimensions import DimPart
@@ -19,6 +20,7 @@ from app.models.maintenance_warehouse import (
     MaintenanceWarehouseImportBatch,
 )
 from app.models.system import SysImportBatch, SysUser
+from app.services.maintenance_warehouse_adapters import parse_warehouse_workbook
 
 
 SHIPMENT_PREFIX = "D107407Fvxu6voev32rlg4pkdu6nvdc83"
@@ -49,6 +51,18 @@ def _content() -> bytes:
     output = io.BytesIO()
     workbook.save(output)
     return output.getvalue()
+
+
+def _approve_synthetic_contract(monkeypatch) -> None:
+    parsed = parse_warehouse_workbook(_content())
+    contract = tuple(
+        (pair.internal_code, pair.business_label) for pair in parsed.header_pairs
+    )
+    monkeypatch.setattr(
+        config,
+        "MAINTENANCE_WAREHOUSE_APPROVED_HEADER_CONTRACTS",
+        {"shipment_v1": (contract,)},
+    )
 
 
 def _seed(db) -> None:
@@ -90,7 +104,8 @@ def _real_admin(db) -> TestClient:
     return client
 
 
-def test_preview_apply_post_search_and_resolution_end_to_end(db):
+def test_preview_apply_post_search_and_resolution_end_to_end(db, monkeypatch):
+    _approve_synthetic_contract(monkeypatch)
     _seed(db)
     client = _real_admin(db)
     content = _content()
@@ -127,15 +142,15 @@ def test_preview_apply_post_search_and_resolution_end_to_end(db):
         json={"status": "open", "page": 1, "page_size": 20},
     )
     assert ambiguities.status_code == 200, ambiguities.text
-    unknown = next(
+    blocker = next(
         item for item in ambiguities.json()["items"]
-        if item["ambiguity_type"] == "unknown_version"
+        if item["ambiguity_type"] == "integration_blocker"
     )
     resolved = client.post(
-        f"/api/maintenance/warehouse-ambiguities/{unknown['ambiguity_id']}/resolve",
+        f"/api/maintenance/warehouse-ambiguities/{blocker['ambiguity_id']}/resolve",
         json={
-            "version": unknown["version"],
-            "reason": "合成审核：确认可选列变化",
+            "version": blocker["version"],
+            "reason": "合成审核：确认依赖分支尚未合入",
             "decision": "acknowledge",
         },
     )
@@ -143,8 +158,23 @@ def test_preview_apply_post_search_and_resolution_end_to_end(db):
     assert resolved.json()["status"] == "resolved"
     assert db.scalar(select(func.count()).select_from(MaintenanceWarehouseAuditEvent)) == 2
 
+    history = client.post(
+        "/api/maintenance/warehouse-ambiguities/search",
+        json={"status": "resolved", "page": 1, "page_size": 20},
+    )
+    assert history.status_code == 200, history.text
+    item = next(
+        row for row in history.json()["items"]
+        if row["ambiguity_id"] == blocker["ambiguity_id"]
+    )
+    assert item["batch"]["source_file_hash"] == plan["source_file_hash"]
+    assert item["batch"]["header_diff"]["state"] == "approved_exact"
+    assert item["history"][0]["before"]["status"] == "open"
+    assert item["history"][0]["after"]["status"] == "resolved"
 
-def test_apply_rejects_shared_admin_before_any_write(db):
+
+def test_apply_rejects_shared_admin_before_any_write(db, monkeypatch):
+    _approve_synthetic_contract(monkeypatch)
     _seed(db)
     client = TestClient(app)
     login = client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
@@ -177,3 +207,50 @@ def test_overlong_post_search_is_not_reflected(db, caplog):
     assert response.status_code == 422
     assert sentinel not in response.text
     assert sentinel not in caplog.text
+
+
+def test_project_scoped_account_sees_no_warehouse_rows_without_205_assignment_contract(
+    db, monkeypatch
+):
+    _approve_synthetic_contract(monkeypatch)
+    _seed(db)
+    admin = _real_admin(db)
+    content = _content()
+    preview = admin.post(
+        "/api/maintenance/warehouse-imports/preview",
+        files={"file": ("synthetic-scope.xlsx", content)},
+    ).json()
+    applied = admin.post(
+        f"/api/maintenance/warehouse-imports/{preview['import_id']}/apply",
+        data={"preview_token": preview["preview_token"], "reason": "合成行级权限验证"},
+        files={"file": ("synthetic-scope.xlsx", content)},
+    )
+    assert applied.status_code == 200, applied.text
+
+    db.add(SysUser(
+        username="warehouse-scoped-manager",
+        role="purchaser",
+        display_name="合成项目经理",
+        password_hash=hash_password("synthetic-password-456"),
+    ))
+    db.commit()
+    scoped = TestClient(app)
+    login = scoped.post("/api/auth/login", json={
+        "username": "warehouse-scoped-manager",
+        "password": "synthetic-password-456",
+    })
+    assert login.status_code == 200, login.text
+    scoped.headers["Authorization"] = f"Bearer {login.json()['token']}"
+
+    documents = scoped.post(
+        "/api/maintenance/warehouse-documents/search",
+        json={"page": 1, "page_size": 20},
+    )
+    ambiguities = scoped.post(
+        "/api/maintenance/warehouse-ambiguities/search",
+        json={"page": 1, "page_size": 20},
+    )
+    assert documents.status_code == 200, documents.text
+    assert ambiguities.status_code == 200, ambiguities.text
+    assert documents.json()["total"] == 0
+    assert ambiguities.json()["total"] == 0

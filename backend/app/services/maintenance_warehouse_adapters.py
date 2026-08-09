@@ -21,7 +21,7 @@ from typing import Iterator
 import zipfile
 from xml.etree import ElementTree as ET
 
-from openpyxl.utils.datetime import from_excel
+from openpyxl.utils.datetime import MAC_EPOCH, WINDOWS_EPOCH, from_excel
 
 from app import config
 
@@ -31,7 +31,6 @@ _DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationshi
 _PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _NS = {"m": _MAIN_NS, "r": _DOC_REL_NS, "p": _PKG_REL_NS}
 _CELL_REF = re.compile(r"^([A-Z]+)([1-9][0-9]*)$")
-_CONTROLLED_LABEL = re.compile(r"附件|图片|报告", re.IGNORECASE)
 _MAX_CELL_CHARS = 32_767
 _MAX_REL_XML_BYTES = 4 * 1024 * 1024
 _MAX_TOTAL_TEXT_BYTES = 64 * 1024 * 1024
@@ -102,6 +101,7 @@ class ParsedWarehouseWorkbook:
     source_file_hash: str
     header_signature: str
     header_pairs: tuple[HeaderPair, ...]
+    header_diff: dict
     documents: list[WarehouseDocumentFact]
     ambiguities: list[WarehouseAmbiguityFact]
     data_row_count: int
@@ -114,7 +114,6 @@ class AdapterSpec:
     document_type: str
     line_prefix: str
     required_headers: frozenset[str]
-    known_header_signatures: frozenset[str]
     document_id_code: str | None
     document_no_code: str | None
     document_date_code: str
@@ -126,6 +125,7 @@ class AdapterSpec:
     quantity_code: str
     maintenance_order_codes: tuple[str, ...]
     upstream_document_codes: tuple[str, ...] = ()
+    controlled_field_codes: frozenset[str] = frozenset()
 
 
 _RETURN_COMMON = frozenset({
@@ -156,9 +156,6 @@ ADAPTERS: tuple[AdapterSpec, ...] = (
         key="return", version="return_v2", document_type="return",
         line_prefix=_RETURN_PREFIX,
         required_headers=_RETURN_COMMON | {"ObjectId", "SeqNo", f"{_RETURN_PREFIX}.ObjectId"},
-        known_header_signatures=frozenset({
-            "f4b7875cd8cefb6bb2468e9d8931d5e173123ef1699cfa7c9da4decd43d0e24e"
-        }),
         document_id_code="ObjectId", document_no_code="SeqNo",
         document_date_code="F0000001", status_code="Status",
         line_id_code=f"{_RETURN_PREFIX}.ObjectId",
@@ -168,13 +165,11 @@ ADAPTERS: tuple[AdapterSpec, ...] = (
         quantity_code=f"{_RETURN_PREFIX}.F0000011",
         maintenance_order_codes=("F0000139", "F0000156"),
         upstream_document_codes=("F0000166", "F0000165"),
+        controlled_field_codes=frozenset({f"{_RETURN_PREFIX}.F0000150"}),
     ),
     AdapterSpec(
         key="return", version="return_v1", document_type="return",
         line_prefix=_RETURN_PREFIX, required_headers=_RETURN_COMMON,
-        known_header_signatures=frozenset({
-            "b179ff9df3bfa42621f74620d85148bc1153cbc577fdcbc4a0c79292b844c2e7"
-        }),
         document_id_code=None, document_no_code=None,
         document_date_code="F0000001", status_code="Status", line_id_code=None,
         pn_code=f"{_RETURN_PREFIX}.F0000031",
@@ -183,13 +178,11 @@ ADAPTERS: tuple[AdapterSpec, ...] = (
         quantity_code=f"{_RETURN_PREFIX}.F0000011",
         maintenance_order_codes=("F0000139", "F0000156"),
         upstream_document_codes=("F0000166", "F0000165"),
+        controlled_field_codes=frozenset({f"{_RETURN_PREFIX}.F0000150"}),
     ),
     AdapterSpec(
         key="shipment", version="shipment_v1", document_type="shipment",
         line_prefix=_SHIPMENT_PREFIX, required_headers=_SHIPMENT_REQUIRED,
-        known_header_signatures=frozenset({
-            "fcc90f0fd21a1c6d51c3c34a08bc63a2489c121a9217a6111bec181dec5cd924"
-        }),
         document_id_code="ObjectId", document_no_code="SeqNo",
         document_date_code="F0000001", status_code="Status",
         line_id_code=f"{_SHIPMENT_PREFIX}.ObjectId",
@@ -199,13 +192,11 @@ ADAPTERS: tuple[AdapterSpec, ...] = (
         quantity_code=f"{_SHIPMENT_PREFIX}.F0000011",
         maintenance_order_codes=("F0000151", "F0000192"),
         upstream_document_codes=("F0000147", f"{_SHIPMENT_PREFIX}.F0000148"),
+        controlled_field_codes=frozenset({f"{_SHIPMENT_PREFIX}.F0000150"}),
     ),
     AdapterSpec(
         key="receipt", version="receipt_v1", document_type="receipt",
         line_prefix=_RECEIPT_PREFIX, required_headers=_RECEIPT_REQUIRED,
-        known_header_signatures=frozenset({
-            "26354f5b3d8e08a263e2bbb0f4205cfeea145d98c555fa36eea19b727a586042"
-        }),
         document_id_code="ObjectId", document_no_code="SeqNo",
         document_date_code="F0000001", status_code="Status",
         line_id_code=f"{_RECEIPT_PREFIX}.ObjectId",
@@ -215,6 +206,7 @@ ADAPTERS: tuple[AdapterSpec, ...] = (
         quantity_code=f"{_RECEIPT_PREFIX}.F0000011",
         maintenance_order_codes=("F0000142",),
         upstream_document_codes=("F0000179", "F0000178", "F0000147"),
+        controlled_field_codes=frozenset({f"{_RECEIPT_PREFIX}.F0000150"}),
     ),
 )
 
@@ -244,6 +236,126 @@ def _canonical_hash(value: object) -> str:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _approved_header_contracts(
+    adapter_version: str,
+) -> tuple[tuple[tuple[str, str], ...], ...]:
+    """Return code-reviewed full header contracts or fail on bad server config."""
+
+    raw_contracts = config.MAINTENANCE_WAREHOUSE_APPROVED_HEADER_CONTRACTS.get(
+        adapter_version, ()
+    )
+    contracts: list[tuple[tuple[str, str], ...]] = []
+    try:
+        for raw_contract in raw_contracts:
+            contract = tuple(
+                (str(code), str(label)) for code, label in raw_contract
+            )
+            if (
+                not contract
+                or any(not code or len(code) > 256 or len(label) > 512 for code, label in contract)
+                or len({code for code, _label in contract}) != len(contract)
+            ):
+                raise ValueError
+            contracts.append(contract)
+    except (TypeError, ValueError) as exc:
+        raise WarehouseWorkbookError(
+            "服务端仓库模板批准合同配置无效",
+            code="invalid_server_contract",
+        ) from exc
+    return tuple(contracts)
+
+
+def _header_diff(
+    current: tuple[tuple[str, str], ...],
+    contracts: tuple[tuple[tuple[str, str], ...], ...],
+) -> dict:
+    """Explain the nearest approved full-header contract without guessing."""
+
+    current_signature = _canonical_hash([list(pair) for pair in current])
+    if current in contracts:
+        return {
+            "state": "approved_exact",
+            "baseline_signature": current_signature,
+            "added": [],
+            "removed": [],
+            "moved": [],
+            "label_changed": [],
+        }
+    if not contracts:
+        return {
+            "state": "approved_baseline_unavailable",
+            "baseline_signature": None,
+            "added": [
+                {"position": index, "internal_code": code}
+                for index, (code, _label) in enumerate(current, start=1)
+            ],
+            "removed": [],
+            "moved": [],
+            "label_changed": [],
+        }
+
+    def describe(contract: tuple[tuple[str, str], ...]) -> dict:
+        baseline_by_code = {
+            code: (index, label)
+            for index, (code, label) in enumerate(contract, start=1)
+        }
+        current_by_code = {
+            code: (index, label)
+            for index, (code, label) in enumerate(current, start=1)
+        }
+        added = [
+            {"position": index, "internal_code": code}
+            for code, (index, _label) in current_by_code.items()
+            if code not in baseline_by_code
+        ]
+        removed = [
+            {"position": index, "internal_code": code}
+            for code, (index, _label) in baseline_by_code.items()
+            if code not in current_by_code
+        ]
+        moved = [
+            {
+                "internal_code": code,
+                "from_position": baseline_by_code[code][0],
+                "to_position": current_by_code[code][0],
+            }
+            for code in current_by_code.keys() & baseline_by_code.keys()
+            if current_by_code[code][0] != baseline_by_code[code][0]
+        ]
+        label_changed = [
+            {
+                "internal_code": code,
+                "position": current_by_code[code][0],
+                "approved_label_hash": _canonical_hash(baseline_by_code[code][1]),
+                "current_label_hash": _canonical_hash(current_by_code[code][1]),
+            }
+            for code in current_by_code.keys() & baseline_by_code.keys()
+            if current_by_code[code][1] != baseline_by_code[code][1]
+        ]
+        return {
+            "state": "unapproved_difference",
+            "baseline_signature": _canonical_hash([list(pair) for pair in contract]),
+            "added": sorted(added, key=lambda item: item["position"]),
+            "removed": sorted(removed, key=lambda item: item["position"]),
+            "moved": sorted(moved, key=lambda item: item["internal_code"]),
+            "label_changed": sorted(
+                label_changed, key=lambda item: item["internal_code"]
+            ),
+        }
+
+    candidates = [describe(contract) for contract in contracts]
+    return min(
+        candidates,
+        key=lambda item: (
+            len(item["added"])
+            + len(item["removed"])
+            + len(item["moved"])
+            + len(item["label_changed"]),
+            item["baseline_signature"],
+        ),
+    )
 
 
 def _clean_text(value: object | None) -> str | None:
@@ -300,6 +412,7 @@ def _safe_archive(content: bytes) -> tuple[zipfile.ZipFile, list[str]]:
         name.startswith("xl/externallinks/")
         or name.startswith("xl/embeddings/")
         or name.startswith("xl/oleobjects/")
+        or name.startswith("xl/activex/")
         or name.endswith("vbaproject.bin")
         for name in lowered
     ):
@@ -335,7 +448,7 @@ def _reject_unsafe_xml_prefix(archive: zipfile.ZipFile, name: str) -> None:
         raise WarehouseWorkbookError("工作簿 XML 声明无效", code="unsafe_xml")
 
 
-def _workbook_sheets(archive: zipfile.ZipFile) -> list[str]:
+def _workbook_sheets(archive: zipfile.ZipFile) -> tuple[list[str], datetime]:
     required = {"xl/workbook.xml", "xl/_rels/workbook.xml.rels"}
     if not required.issubset(set(archive.namelist())):
         raise WarehouseWorkbookError("工作簿缺少必要结构")
@@ -346,6 +459,15 @@ def _workbook_sheets(archive: zipfile.ZipFile) -> list[str]:
         relations = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
     except ET.ParseError as exc:
         raise WarehouseWorkbookError("工作簿结构无效") from exc
+    workbook_properties = workbook.find("m:workbookPr", _NS)
+    date_1904 = (
+        workbook_properties.attrib.get("date1904", "0").strip().lower()
+        if workbook_properties is not None
+        else "0"
+    )
+    if date_1904 not in {"0", "1", "false", "true"}:
+        raise WarehouseWorkbookError("工作簿日期系统无效")
+    epoch = MAC_EPOCH if date_1904 in {"1", "true"} else WINDOWS_EPOCH
     targets = {
         rel.attrib.get("Id"): rel.attrib.get("Target", "")
         for rel in relations
@@ -365,7 +487,7 @@ def _workbook_sheets(archive: zipfile.ZipFile) -> list[str]:
         if path not in archive.namelist() or not path.startswith("xl/worksheets/"):
             raise WarehouseWorkbookError("工作表关系无效")
         paths.append(path)
-    return paths
+    return paths, epoch
 
 
 def _shared_strings(archive: zipfile.ZipFile) -> list[str]:
@@ -484,6 +606,13 @@ def _ordered_row(values: dict[int, object | None], width: int) -> list[object | 
 
 
 def _select_adapter(internal_codes: set[str]) -> AdapterSpec:
+    # A return export that contains any wide identity column belongs to the
+    # wide protocol even when another identity column is missing.  Falling
+    # back to the narrow adapter would discard a real document ID and replace
+    # a precise missing-line blocker with two misleading missing-ID blockers.
+    return_wide_identity = {"ObjectId", "SeqNo", f"{_RETURN_PREFIX}.ObjectId"}
+    if _RETURN_COMMON <= internal_codes and return_wide_identity & internal_codes:
+        return next(adapter for adapter in ADAPTERS if adapter.version == "return_v2")
     matches = [adapter for adapter in ADAPTERS if adapter.required_headers <= internal_codes]
     if not matches:
         raise WarehouseWorkbookError("未识别的仓库单据表头协议", code="unknown_adapter")
@@ -494,7 +623,7 @@ def _select_adapter(internal_codes: set[str]) -> AdapterSpec:
     return finalists[0]
 
 
-def _typed_date(value: object | None) -> date | None:
+def _typed_date(value: object | None, *, epoch: datetime = WINDOWS_EPOCH) -> date | None:
     text = _clean_text(value)
     if text is None:
         return None
@@ -504,7 +633,7 @@ def _typed_date(value: object | None) -> date | None:
         number = None
     if number is not None:
         try:
-            converted = from_excel(number)
+            converted = from_excel(number, epoch=epoch)
             return converted.date() if isinstance(converted, datetime) else converted
         except (OverflowError, ValueError):
             return None
@@ -557,13 +686,43 @@ def _first_stable_ref(
     return next(iter(values), None)
 
 
+def _declared_fact_codes(adapter: AdapterSpec) -> set[str]:
+    """Codes whose scalar values may enter typed facts for this adapter.
+
+    Unknown full-header versions fail closed for every optional code: its
+    value is replaced by a controlled marker until a reviewed contract names
+    the field.  This protects attachment payloads even when a human label is
+    translated, renamed, blank, or duplicated.
+    """
+
+    return {
+        "F0000032",
+        "F0000061",
+        "F0000192",
+        *adapter.required_headers,
+        *adapter.maintenance_order_codes,
+        *adapter.upstream_document_codes,
+        *filter(None, (
+            adapter.document_id_code,
+            adapter.document_no_code,
+            adapter.document_date_code,
+            adapter.status_code,
+            adapter.line_id_code,
+            adapter.pn_code,
+            adapter.sn_code,
+            adapter.self_code,
+            adapter.quantity_code,
+        )),
+    }
+
+
 def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
     """Parse one XLSX without writing database state or retaining attachment values."""
 
     source_hash = hashlib.sha256(content).hexdigest()
     archive, _names = _safe_archive(content)
     try:
-        sheet_paths = _workbook_sheets(archive)
+        sheet_paths, epoch = _workbook_sheets(archive)
         shared = _shared_strings(archive)
         rows = _iter_rows(archive, sheet_paths[0], shared, yield_values=True)
         try:
@@ -597,17 +756,26 @@ def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
             [[item.internal_code, item.business_label] for item in pairs]
         )
         adapter = _select_adapter(set(internal))
-        version_state = (
-            "known" if signature in adapter.known_header_signatures else "unknown_version"
+        current_contract = tuple(
+            (item.internal_code, item.business_label) for item in pairs
         )
+        approved_contracts = _approved_header_contracts(adapter.version)
+        version_state = (
+            "known" if current_contract in approved_contracts else "unknown_version"
+        )
+        header_diff = _header_diff(current_contract, approved_contracts)
         ambiguities: list[WarehouseAmbiguityFact] = []
         if version_state == "unknown_version":
             ambiguities.append(WarehouseAmbiguityFact(
                 code="unknown_version", value_hash=signature
             ))
-        controlled_codes = {
-            pair.internal_code for pair in pairs if _CONTROLLED_LABEL.search(pair.business_label)
-        }
+        controlled_codes = set(adapter.controlled_field_codes)
+        if version_state == "unknown_version":
+            declared_codes = _declared_fact_codes(adapter)
+            controlled_codes.update(
+                pair.internal_code for pair in pairs
+                if pair.internal_code not in declared_codes
+            )
         by_document: dict[str, WarehouseDocumentFact] = {}
         line_index: dict[tuple[str, str], WarehouseLineFact] = {}
         data_row_count = 0
@@ -676,7 +844,9 @@ def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
                         line_source_id=line_source_id,
                         value_hash=_canonical_hash(raw_enum),
                     ))
-            document_date = _typed_date(row.get(adapter.document_date_code))
+            document_date = _typed_date(
+                row.get(adapter.document_date_code), epoch=epoch
+            )
             if _clean_text(row.get(adapter.document_date_code)) and document_date is None:
                 ambiguities.append(WarehouseAmbiguityFact(
                     code="field_conflict", field_code=adapter.document_date_code,
@@ -768,6 +938,7 @@ def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
             source_file_hash=source_hash,
             header_signature=signature,
             header_pairs=pairs,
+            header_diff=header_diff,
             documents=list(by_document.values()),
             ambiguities=ambiguities,
             data_row_count=data_row_count,

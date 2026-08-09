@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.db import SessionLocal, get_db
 from app.models.system import SysUser
 from app.security import (
+    FULL_SCOPE_ROLES,
     UserContext,
     get_current_user_context,
     record_access_log,
@@ -243,8 +244,14 @@ async def apply_warehouse_import(
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action("action_maintenance_warehouse_manage")),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     _no_store(response)
+    if ctx.role not in FULL_SCOPE_ROLES:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "仓库文件应用仅限全项目范围实名账号",
+        )
     operated_by = _real_operator(db, ident)
     if not _PARSE_LOCK.acquire(blocking=False):
         raise HTTPException(
@@ -301,6 +308,7 @@ def search_warehouse_documents(
             document_type=body.document_type,
             page=body.page,
             page_size=body.page_size,
+            user_ctx=ctx,
         )
     except maintenance_warehouse.MaintenanceWarehouseError as exc:
         raise _service_http_error(exc) from exc
@@ -322,6 +330,7 @@ def search_warehouse_ambiguities(
         "unknown_version", "missing_document_id", "missing_line_id",
         "missing_stable_link", "multiple_candidates", "field_conflict",
         "unknown_enum", "controlled_attachment",
+        "integration_blocker",
     }
     if body.ambiguity_type is not None and body.ambiguity_type not in allowed_types:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "仓库歧义类型无效")
@@ -341,6 +350,7 @@ def search_warehouse_ambiguities(
             ambiguity_type=body.ambiguity_type,
             page=body.page,
             page_size=body.page_size,
+            user_ctx=ctx,
         )
     except maintenance_warehouse.MaintenanceWarehouseError as exc:
         raise _service_http_error(exc) from exc
@@ -356,6 +366,7 @@ def resolve_warehouse_ambiguity(
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action("action_maintenance_warehouse_manage")),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     _no_store(response)
     operated_by = _real_operator(db, ident)
@@ -372,6 +383,7 @@ def resolve_warehouse_ambiguity(
             link_kind=body.link_kind,
             target_type=body.target_type,
             target_id=body.target_id,
+            user_ctx=ctx,
         )
         db.commit()
         return result

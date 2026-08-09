@@ -103,21 +103,36 @@ def upgrade() -> None:
         sa.Column("stable_key_kind", sa.String(32), nullable=False),
         sa.Column("stable_key_hash", sa.String(64), nullable=False),
         sa.Column("source", sa.String(16), nullable=False),
+        sa.Column("status", sa.String(16), server_default="active", nullable=False),
+        sa.Column(
+            "supersedes_link_id",
+            sa.String(36),
+            sa.ForeignKey("maintenance_warehouse_document_link.link_id"),
+            unique=True,
+        ),
         sa.Column("version", sa.Integer(), server_default="1", nullable=False),
         sa.Column("reason", sa.Text(), nullable=False),
         sa.Column("operated_by", sa.String(64), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.CheckConstraint("link_kind IN ('maintenance_order', 'project', 'site_issue', 'part', 'warehouse_document')", name="ck_maintenance_wh_link_kind"),
-        sa.CheckConstraint("target_type IN ('maintenance_order', 'maintenance_project', 'maintenance_site_issue', 'dim_part', 'warehouse_document')", name="ck_maintenance_wh_link_target_type"),
+        sa.CheckConstraint("link_kind IN ('maintenance_order', 'project', 'site_issue', 'bad_return', 'part', 'warehouse_document')", name="ck_maintenance_wh_link_kind"),
+        sa.CheckConstraint("target_type IN ('maintenance_order', 'maintenance_project', 'maintenance_site_issue', 'maintenance_bad_return', 'dim_part', 'warehouse_document')", name="ck_maintenance_wh_link_target_type"),
         sa.CheckConstraint(
             "(link_kind = 'maintenance_order' AND target_type = 'maintenance_order') OR "
             "(link_kind = 'project' AND target_type = 'maintenance_project') OR "
             "(link_kind = 'site_issue' AND target_type = 'maintenance_site_issue') OR "
+            "(link_kind = 'bad_return' AND target_type = 'maintenance_bad_return') OR "
             "(link_kind = 'part' AND target_type = 'dim_part') OR "
             "(link_kind = 'warehouse_document' AND target_type = 'warehouse_document')",
             name="ck_maintenance_wh_link_target_matrix",
         ),
         sa.CheckConstraint("source IN ('automatic', 'manual')", name="ck_maintenance_wh_link_source"),
+        sa.CheckConstraint("status IN ('active', 'superseded')", name="ck_maintenance_wh_link_status"),
+        sa.CheckConstraint(
+            "(status = 'active' AND ((version = 1 AND supersedes_link_id IS NULL) OR "
+            "(version >= 2 AND supersedes_link_id IS NOT NULL))) OR "
+            "(status = 'superseded' AND version >= 2)",
+            name="ck_maintenance_wh_link_supersession",
+        ),
         sa.CheckConstraint("version >= 1", name="ck_maintenance_wh_link_version"),
         sa.CheckConstraint("stable_key_hash ~ '^[a-f0-9]{64}$'", name="ck_maintenance_wh_link_key_hash"),
         sa.CheckConstraint("char_length(btrim(reason)) > 0", name="ck_maintenance_wh_link_reason"),
@@ -126,8 +141,9 @@ def upgrade() -> None:
     op.create_index(
         "uq_maintenance_wh_link_target",
         "maintenance_warehouse_document_link",
-        ["document_id", sa.text("coalesce(line_id, '')"), "link_kind", "target_type", "target_id"],
+        ["document_id", sa.text("coalesce(line_id, '')"), "link_kind"],
         unique=True,
+        postgresql_where=sa.text("status = 'active'"),
     )
     op.create_index("ix_maintenance_wh_link_document", "maintenance_warehouse_document_link", ["document_id", "line_id", "link_kind"])
     op.create_index("ix_maintenance_wh_link_target", "maintenance_warehouse_document_link", ["target_type", "target_id"])
@@ -154,7 +170,7 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "ambiguity_type IN ('unknown_version', 'missing_document_id', 'missing_line_id', "
             "'missing_stable_link', 'multiple_candidates', 'field_conflict', "
-            "'unknown_enum', 'controlled_attachment')",
+            "'unknown_enum', 'controlled_attachment', 'integration_blocker')",
             name="ck_maintenance_wh_ambiguity_type",
         ),
         sa.CheckConstraint("status IN ('open', 'resolved')", name="ck_maintenance_wh_ambiguity_status"),
@@ -206,13 +222,46 @@ def upgrade() -> None:
         "maintenance_warehouse_import_batch",
         "maintenance_warehouse_document",
         "maintenance_warehouse_document_line",
-        "maintenance_warehouse_document_link",
         "maintenance_warehouse_audit_event",
     ):
         op.execute(
             f"CREATE TRIGGER trg_{table}_immutable BEFORE UPDATE OR DELETE ON {table} "
             "FOR EACH ROW EXECUTE FUNCTION reject_maintenance_warehouse_immutable_mutation()"
         )
+    op.execute(
+        """
+        CREATE FUNCTION enforce_maintenance_warehouse_link_supersession()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF TG_OP = 'DELETE'
+             OR OLD.status <> 'active'
+             OR NEW.status <> 'superseded'
+             OR NEW.version <> OLD.version + 1
+             OR NEW.link_id IS DISTINCT FROM OLD.link_id
+             OR NEW.document_id IS DISTINCT FROM OLD.document_id
+             OR NEW.line_id IS DISTINCT FROM OLD.line_id
+             OR NEW.link_kind IS DISTINCT FROM OLD.link_kind
+             OR NEW.target_type IS DISTINCT FROM OLD.target_type
+             OR NEW.target_id IS DISTINCT FROM OLD.target_id
+             OR NEW.stable_key_kind IS DISTINCT FROM OLD.stable_key_kind
+             OR NEW.stable_key_hash IS DISTINCT FROM OLD.stable_key_hash
+             OR NEW.source IS DISTINCT FROM OLD.source
+             OR NEW.supersedes_link_id IS DISTINCT FROM OLD.supersedes_link_id
+             OR NEW.reason IS DISTINCT FROM OLD.reason
+             OR NEW.operated_by IS DISTINCT FROM OLD.operated_by
+             OR NEW.created_at IS DISTINCT FROM OLD.created_at
+          THEN
+            RAISE EXCEPTION 'maintenance warehouse link identity is immutable';
+          END IF;
+          RETURN NEW;
+        END; $$
+        """
+    )
+    op.execute(
+        "CREATE TRIGGER trg_maintenance_warehouse_document_link_supersession "
+        "BEFORE UPDATE OR DELETE ON maintenance_warehouse_document_link "
+        "FOR EACH ROW EXECUTE FUNCTION enforce_maintenance_warehouse_link_supersession()"
+    )
     op.execute(
         """
         CREATE FUNCTION enforce_maintenance_warehouse_ambiguity_resolution()
@@ -296,9 +345,13 @@ def downgrade() -> None:
     )
     op.execute("DROP TRIGGER trg_maintenance_warehouse_ambiguity_resolution ON maintenance_warehouse_ambiguity")
     op.execute("DROP FUNCTION enforce_maintenance_warehouse_ambiguity_resolution()")
+    op.execute(
+        "DROP TRIGGER trg_maintenance_warehouse_document_link_supersession "
+        "ON maintenance_warehouse_document_link"
+    )
+    op.execute("DROP FUNCTION enforce_maintenance_warehouse_link_supersession()")
     for table in (
         "maintenance_warehouse_audit_event",
-        "maintenance_warehouse_document_link",
         "maintenance_warehouse_document_line",
         "maintenance_warehouse_document",
         "maintenance_warehouse_import_batch",

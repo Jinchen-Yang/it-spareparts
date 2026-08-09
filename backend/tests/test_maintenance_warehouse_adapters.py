@@ -8,6 +8,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 from openpyxl import Workbook
+from openpyxl.utils.datetime import MAC_EPOCH
 
 from app import config
 from app.services.maintenance_warehouse_adapters import (
@@ -202,6 +203,81 @@ def test_attachment_content_is_never_preserved_or_reflected():
     assert {item.code for item in parsed.ambiguities} >= {"controlled_attachment"}
 
 
+def test_attachment_redaction_uses_stable_field_code_not_mutable_label():
+    headers = _shipment_headers() + [
+        (f"{SHIPMENT_PREFIX}.F0000150", "Attachment payload (renamed by exporter)")
+    ]
+    secret = "SYNTHETIC-ENGLISH-ATTACHMENT-MUST-NOT-SURVIVE"
+
+    parsed = parse_warehouse_workbook(
+        _xlsx(headers, [_shipment_row(headers, attachment=secret)])
+    )
+
+    assert secret not in repr(parsed)
+    controlled = [
+        item for item in parsed.ambiguities
+        if item.code == "controlled_attachment"
+    ]
+    assert f"{SHIPMENT_PREFIX}.F0000150" in {
+        item.field_code for item in controlled
+    }
+
+
+def test_mac_1904_epoch_is_used_for_numeric_dates():
+    headers = _shipment_headers()
+    workbook = Workbook()
+    workbook.epoch = MAC_EPOCH
+    sheet = workbook.active
+    sheet.append([code for code, _label in headers])
+    sheet.append([label for _code, label in headers])
+    row = _shipment_row(headers)
+    row[[code for code, _label in headers].index("F0000001")] = 44773
+    sheet.append(row)
+    output = io.BytesIO()
+    workbook.save(output)
+
+    parsed = parse_warehouse_workbook(output.getvalue())
+
+    assert parsed.documents[0].document_date.isoformat() == "2026-08-01"
+
+
+def test_activex_member_fails_closed():
+    source = _xlsx(_shipment_headers(), [_shipment_row(_shipment_headers())])
+    input_zip = zipfile.ZipFile(io.BytesIO(source))
+    output = io.BytesIO()
+    with input_zip, zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for item in input_zip.infolist():
+            archive.writestr(item, input_zip.read(item.filename))
+        archive.writestr("xl/activeX/activeX1.bin", b"synthetic-active-x")
+
+    with pytest.raises(WarehouseWorkbookError, match="嵌入对象"):
+        parse_warehouse_workbook(output.getvalue())
+
+
+def test_partial_wide_return_never_falls_back_to_narrow_adapter():
+    headers = [
+        ("F0000032", "返库类别"),
+        ("F0000192", "返库类型"),
+        ("F0000061", "返库备件/整机"),
+        ("F0000001", "返库日期"),
+        ("Status", "数据状态"),
+        (f"{RETURN_PREFIX}.F0000031", "备件明细.备件PN"),
+        (f"{RETURN_PREFIX}.F0000044", "备件明细.备件SN号"),
+        (f"{RETURN_PREFIX}.F0000011", "备件明细.返库数量"),
+        ("ObjectId", "数据ID(不可修改)"),
+        ("SeqNo", "返库单号(必填)"),
+    ]
+    parsed = parse_warehouse_workbook(_xlsx(headers, [[
+        "维保", "备件", "备件", "2026-08-01", "已完成", "SYN-PN", "SYN-SN", 1,
+        "SYN-DOC", "SYN-RETURN",
+    ]]))
+
+    assert parsed.adapter_version == "return_v2"
+    assert parsed.documents == []
+    assert {item.code for item in parsed.ambiguities} >= {"missing_line_id"}
+    assert not any(item.code == "missing_document_id" for item in parsed.ambiguities)
+
+
 def test_unknown_enum_becomes_ambiguity_without_guessing():
     headers = _shipment_headers()
     row = _shipment_row(headers)
@@ -260,3 +336,97 @@ def test_formula_in_hidden_option_sheet_also_fails_closed():
     workbook.save(output)
     with pytest.raises(WarehouseWorkbookError, match="公式"):
         parse_warehouse_workbook(output.getvalue())
+
+
+def test_synthetic_49_and_120_column_contracts_cover_all_four_adapter_signatures(
+    monkeypatch,
+):
+    def pad(
+        headers: list[tuple[str, str]], width: int, prefix: str
+    ) -> list[tuple[str, str]]:
+        return headers + [
+            (f"SYN_{prefix}_PAD_{index:03d}", f"合成占位列 {index:03d}")
+            for index in range(1, width - len(headers) + 1)
+        ]
+
+    return_common = [
+        ("F0000032", "返库类别"),
+        ("F0000192", "返库类型"),
+        ("F0000061", "返库备件/整机"),
+        ("F0000001", "返库日期"),
+        ("Status", "数据状态"),
+        (f"{RETURN_PREFIX}.F0000031", "备件明细.备件PN"),
+        (f"{RETURN_PREFIX}.F0000044", "备件明细.备件SN号"),
+        (f"{RETURN_PREFIX}.F0000011", "备件明细.返库数量"),
+    ]
+    return_v2 = return_common + [
+        ("ObjectId", "数据ID(不可修改)"),
+        ("SeqNo", "返库单号(必填)"),
+        (f"{RETURN_PREFIX}.ObjectId", "备件明细.数据ID(不可修改)"),
+    ]
+    receipt = [
+        ("ObjectId", "数据ID(不可修改)"),
+        ("SeqNo", "入库单号(必填)"),
+        ("F0000001", "入库日期(必填)"),
+        ("F0000032", "入库类别(必填)"),
+        ("F0000061", "入库备件/整机(必填)"),
+        ("Status", "数据状态"),
+        ("F0000142", "维保需求单(备件)(必填)"),
+        (f"{RECEIPT_PREFIX}.ObjectId", "备件明细.数据ID(不可修改)"),
+        (f"{RECEIPT_PREFIX}.F0000031", "备件明细.备件PN(必填)"),
+        (f"{RECEIPT_PREFIX}.F0000044", "备件明细.备件SN号(必填)"),
+        (f"{RECEIPT_PREFIX}.F0000011", "备件明细.入库数量"),
+    ]
+    structures = {
+        "return_v1": (
+            pad(return_common, 49, "RETURN_NARROW"),
+            ["维保", "备件", "备件", "2026-08-01", "已完成", "SYN-PN", "SYN-SN", 1],
+        ),
+        "return_v2": (
+            pad(return_v2, 120, "RETURN_WIDE"),
+            ["维保", "备件", "备件", "2026-08-01", "已完成", "SYN-PN", "SYN-SN", 1,
+             "SYN-RETURN-DOC", "SYN-RETURN-NO", "SYN-RETURN-LINE"],
+        ),
+        "shipment_v1": (
+            pad(_shipment_headers(), 49, "SHIPMENT"),
+            None,
+        ),
+        "receipt_v1": (
+            pad(receipt, 49, "RECEIPT"),
+            ["SYN-RECEIPT-DOC", "SYN-RECEIPT-NO", "2026-08-01", "维保入库",
+             "备件", "已审批", "SYN-WBDD", "SYN-RECEIPT-LINE", "SYN-PN", "SYN-SN", 3],
+        ),
+    }
+    contents: dict[str, bytes] = {}
+    contracts: dict[str, tuple[tuple[tuple[str, str], ...], ...]] = {}
+    unknown_signatures: set[str] = set()
+    for version, (headers, values) in structures.items():
+        row = (
+            _shipment_row(headers)
+            if version == "shipment_v1"
+            else [*(values or []), *([None] * (len(headers) - len(values or [])))]
+        )
+        content = _xlsx(headers, [row])
+        contents[version] = content
+        parsed = parse_warehouse_workbook(content)
+        assert parsed.adapter_version == version
+        assert parsed.version_state == "unknown_version"
+        unknown_signatures.add(parsed.header_signature)
+        contracts[version] = (tuple(
+            (pair.internal_code, pair.business_label) for pair in parsed.header_pairs
+        ),)
+
+    assert len(unknown_signatures) == 4
+    assert len(parse_warehouse_workbook(contents["return_v1"]).header_pairs) == 49
+    assert len(parse_warehouse_workbook(contents["return_v2"]).header_pairs) == 120
+
+    monkeypatch.setattr(
+        config,
+        "MAINTENANCE_WAREHOUSE_APPROVED_HEADER_CONTRACTS",
+        contracts,
+    )
+    for version, content in contents.items():
+        approved = parse_warehouse_workbook(content)
+        assert approved.adapter_version == version
+        assert approved.version_state == "known"
+        assert approved.header_diff["state"] == "approved_exact"
