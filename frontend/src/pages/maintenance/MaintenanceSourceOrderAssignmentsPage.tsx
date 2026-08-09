@@ -94,6 +94,12 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
       ? [actionRow.assigned_project.project_id]
       : [],
   ), [actionMode, actionRow]);
+  const crossTargetSelectedRows = useMemo(() => (
+    actionMode === "assign" && targetProjectId
+      ? selectedRows.filter((row) => row.assigned_project
+        && row.assigned_project.project_id !== targetProjectId)
+      : []
+  ), [actionMode, selectedRows, targetProjectId]);
 
   useEffect(() => {
     if (targetProjectId && excludedTargetProjectIds.has(targetProjectId)) {
@@ -177,7 +183,7 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
     const cleanReason = reason.trim();
     const items = actionMode === "reassign" && actionRow ? [actionRow] : selectedRows;
     if (!targetProjectId || excludedTargetProjectIds.has(targetProjectId)
-      || !cleanReason || items.length === 0) return;
+      || crossTargetSelectedRows.length > 0 || !cleanReason || items.length === 0) return;
     setSaving(true);
     setWriteError(null);
     setWriteConflict(false);
@@ -443,6 +449,7 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
           okButtonProps={{
             disabled: !targetProjectId || excludedTargetProjectIds.has(targetProjectId)
               || !reason.trim()
+              || crossTargetSelectedRows.length > 0
               || (actionMode === "assign" && selectedRows.length === 0),
           }}
           maskClosable={!saving}
@@ -453,6 +460,15 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
           <p>{actionMode === "reassign"
             ? `来源维保单 ${actionRowIdentity}，将替换当前归属：${actionRow?.assigned_project?.project_code || "未知"}；旧记录仍会保留。`
             : `已明确选择 ${selectedRows.length} 张来源维保单；系统不会按名称补选。`}</p>
+          {actionMode === "assign" && crossTargetSelectedRows.length > 0 && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={`${crossTargetSelectedRows.length} 张单据已被归到其他项目，当前批次不会静默改派`}
+              description="请先从本批次移除，再回到目录逐张使用“改派”并单独确认。其他未归属或已属于目标项目的单据仍可继续。"
+            />
+          )}
           {actionMode === "assign" && selectedRows.length > 0 && (
             <div
               data-testid="source-assignment-selection-review"
@@ -465,12 +481,48 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
                 borderRadius: 6,
               }}
             >
-              {selectedRows.map((row) => (
-                <div key={row.raw_order_id} style={{ marginBottom: 6 }}>
-                  <strong>{row.order_no}</strong>
-                  {` · ${row.project_raw || "原项目名未提供"} · ${row.raw_order_id}`}
-                </div>
-              ))}
+              {selectedRows.map((row) => {
+                const requiresExplicitReassignment = Boolean(
+                  targetProjectId
+                  && row.assigned_project
+                  && row.assigned_project.project_id !== targetProjectId,
+                );
+                return (
+                  <div
+                    key={row.raw_order_id}
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      justifyContent: "space-between",
+                      gap: 8,
+                      marginBottom: 8,
+                    }}
+                  >
+                    <div>
+                      <strong>{row.order_no}</strong>
+                      {` · ${row.project_raw || "原项目名未提供"} · ${row.raw_order_id}`}
+                      <div style={{ marginTop: 2, fontSize: 12, color: "#666" }}>
+                        当前归属：{row.assigned_project
+                          ? `${row.assigned_project.project_code} · ${row.assigned_project.display_name}`
+                          : "未归属"}
+                      </div>
+                    </div>
+                    {requiresExplicitReassignment && (
+                      <Button
+                        type="link"
+                        danger
+                        size="small"
+                        aria-label={`从本批次移除 ${row.order_no}`}
+                        onClick={() => setSelectedRows((previous) => previous.filter(
+                          (selected) => selected.raw_order_id !== row.raw_order_id,
+                        ))}
+                      >
+                        移出本批次
+                      </Button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
           {writeError && (

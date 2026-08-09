@@ -282,7 +282,7 @@ describe("MaintenanceSourceOrderAssignmentsPage", () => {
     expect(assignMaintenanceSourceOrders).toHaveBeenCalledTimes(1);
   });
 
-  it("批量冲突刷新后保留原目标并允许同目标项幂等重试", async () => {
+  it("批量冲突刷新后阻止静默改派并允许移除冲突项后幂等重试", async () => {
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: true,
       data_profit: true,
@@ -331,9 +331,11 @@ describe("MaintenanceSourceOrderAssignmentsPage", () => {
     listMaintenanceSourceOrders
       .mockReturnValueOnce(directory(pendingRows))
       .mockReturnValueOnce(directory(refreshedRows));
-    assignMaintenanceSourceOrders.mockRejectedValue({
-      response: { status: 409, data: { detail: "项目归属已变化，请刷新后重试" } },
-    });
+    assignMaintenanceSourceOrders
+      .mockRejectedValueOnce({
+        response: { status: 409, data: { detail: "项目归属已变化，请刷新后重试" } },
+      })
+      .mockResolvedValueOnce({ data: { assignments: [] } });
     render(<MaintenanceSourceOrderAssignmentsPage />);
     await screen.findByText("WBDD-SYNTH-001");
     const checkboxes = screen.getAllByRole("checkbox");
@@ -354,7 +356,32 @@ describe("MaintenanceSourceOrderAssignmentsPage", () => {
     await waitFor(() => expect(listMaintenanceSourceOrders).toHaveBeenCalledTimes(2));
     expect(within(dialog).getByDisplayValue("保留批量冲突草稿")).toBeInTheDocument();
     expect(within(dialog).getByText("XM-003 · 稳定项目丙")).toBeInTheDocument();
+    expect(within(dialog).getByText("1 张单据已被归到其他项目，当前批次不会静默改派"))
+      .toBeInTheDocument();
+    expect(within(dialog).getByText("当前归属：XM-002 · 稳定项目乙"))
+      .toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "确认归属" })).toBeDisabled();
+
+    fireEvent.click(within(dialog).getByRole("button", {
+      name: "从本批次移除 WBDD-SYNTH-003",
+    }));
+
+    await waitFor(() => expect(within(dialog).queryByText(
+      "1 张单据已被归到其他项目，当前批次不会静默改派",
+    )).not.toBeInTheDocument());
     expect(within(dialog).getByRole("button", { name: "确认归属" })).not.toBeDisabled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认归属" }));
+
+    await waitFor(() => expect(assignMaintenanceSourceOrders).toHaveBeenCalledTimes(2));
+    expect(assignMaintenanceSourceOrders).toHaveBeenLastCalledWith({
+      project_id: THIRD_PROJECT.project_id,
+      items: [{
+        source_order_id: pendingRows[0].raw_order_id,
+        expected_assignment_id: "assignment-current-1",
+        expected_version: 2,
+      }],
+      reason: "保留批量冲突草稿",
+    });
   });
 
   it("冲突刷新未返回所选单号时不会静默丢弃草稿", async () => {
