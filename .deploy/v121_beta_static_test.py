@@ -75,6 +75,7 @@ def main() -> None:
     assert all(point in release for point in ("0|5|15|30", "open-empty-beta", "pilot-smoke"))
     assert 'if fields[1] == "admin"' in release and "permission snapshot" in release
     assert "emergency_stop_app" in release
+    assert "release package artifact has unsafe owner, mode or link count" in release
 
     module = load_manifest_module()
     head = subprocess.check_output(("git", "rev-parse", "HEAD"), cwd=ROOT, text=True).strip()

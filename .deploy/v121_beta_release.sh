@@ -73,6 +73,18 @@ readonly ENV_FILE="$APP_DIR/.env"
   || fatal "manifest verifier is missing or unsafe"
 python3 "$MANIFEST_TOOL" verify "$PACKAGE_DIR" >/dev/null \
   || fatal "release package verification failed"
+unsafe_package_entry=$(find "$PACKAGE_DIR" -mindepth 1 -maxdepth 1 ! -type f -print -quit)
+if [ -n "$unsafe_package_entry" ]; then
+  fatal "release package must be a flat inventory of regular files"
+fi
+while IFS= read -r -d '' package_file; do
+  package_mode=600
+  case "$(basename -- "$package_file")" in
+    v121_beta_manifest.py|v121_beta_release.sh) package_mode=700 ;;
+  esac
+  [ "$(stat -c '%a %U:%G %h' "$package_file")" = "$package_mode root:root 1" ] \
+    || fatal "release package artifact has unsafe owner, mode or link count"
+done < <(find "$PACKAGE_DIR" -mindepth 1 -maxdepth 1 -type f -print0)
 
 if [ ! -e "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ]; then
   mkdir -m 750 -- "$LOCK_DIR" || fatal "cannot create release lock directory"
