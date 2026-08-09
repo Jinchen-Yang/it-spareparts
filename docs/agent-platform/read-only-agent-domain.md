@@ -70,11 +70,26 @@ prepared | validating -> failed
 ready -> expired
 ```
 
-只有 `ready` 可下载。文件先写到同文件系统临时位置，完成二次打开、格式、大小和 SHA-256 校验后原子 rename；元数据发布失败时不能留下可猜测的正式对象。
+只有 `ready` 可下载。`failed/expired` 都是终态；对象清理失败保留 tombstone 并由 reconciler 重试，不能删掉账本后留下不可追踪对象。文件先写到同文件系统临时位置，完成二次打开、格式、大小和 SHA-256 校验后原子 rename；元数据发布失败时不能留下可猜测的正式对象。
 
-生成制品还必须保存由服务端计算的 `access_scope`，而不是只保存 owner。owner 必须是非空、稳定、已认证的 token subject；匿名或共享回退身份不能创建 v2 制品。scope 显式包含可见字段组、正向 data/page 权限和行级限制，不用一个不可解释的权限 hash 代替。当前可见字段/正向权限必须覆盖 required；限制型权限不得比创建时更窄，例如创建时可看全量、后来变成 `own_customers_only=true` 就必须拒绝。每次下载/预览实时重算。用户自己上传的原件与系统生成制品分开分类；legacy generated/unclassified 默认拒绝，不能由实现自行放宽。
+生成制品还必须保存由服务端计算的 `access_scope`，而不是只保存 owner。owner 必须是非空、稳定、已认证的 token subject；匿名或共享回退身份不能创建 v2 制品。scope 至少显式包含 `required_positive_permissions`、允许资源集合、可见字段组，以及 `row_subject + predicate_version + row_restriction`，不用一个不可解释的权限 hash 代替。行级范围的创建主体、当前主体和 Task owner 必须一致；谓词版本未知、不可比较或发生语义漂移时 fail closed。当前正向权限必须覆盖 required，资源/字段可见范围必须覆盖制品实际内容，当前行级谓词必须仍覆盖 stored row restriction；当前范围变窄到无法覆盖原内容时拒绝，例如创建时全量、后来变成 `own_customers_only=true`。后来扩权不改写 stored scope。每次下载/预览实时重算。
+
+多输入派生件按固定格运算：所有输入必须同 owner；正向权限要求取 union；允许资源集合和 visible field 集合取 intersection；sensitivity 取最高等级；行级约束取 conjunction/最窄范围。只有被明确分类为 `unscoped_personal_template` 的个人模板才可在资源/字段交集中作为 TOP，缺失或未知 scope 不能当作 TOP。Artifact Set 的聚合 scope 与每个成员都不得比该结果更宽。
+
+legacy 必须先分类再授权：
+
+| legacy 类别 | 身份/元数据要求 | 普通下载/预览 |
+|---|---|---|
+| owner-owned upload | 12 hex、sidecar 完整、`kind=upload`、实名 owner 匹配 | owner 实时校验后允许 |
+| generated | 即使 sidecar 有 owner，也缺少可证明的创建时业务 scope | 默认拒绝 |
+| unclassified / sidecar 缺失或损坏 | 无法证明来源、owner 或 kind | 默认拒绝 |
+| v2 | UUID、DB metadata、Store 对象、完整 scope | owner + 实时 scope 交集后允许 |
+
+跨 owner 统一 404；同 owner 但撤权、scope 收窄或 legacy 分类不安全时使用稳定拒绝且写最小审计。未来管理员取证只能走独立 break-glass，不得复用普通端点。
 
 兼容是单向的：新代码可以读取旧 12 位 ID/旁车，新制品只写 UUID + v2 元数据/Store，不能为了“旧代码回滚后还能下载”再写一个绕过 scope guard 的旧旁车。滚动发布时隔离新旧 Agent 文件路由；若必须回滚，先关闭 v2 创建/下载，保留对象字节与数据库，修复后 forward deploy 恢复。安全回滚允许制品暂时不可用，不允许撤权失效。
+
+单个 Artifact 与 Artifact Set 的重试安全由 #230 的服务端 operation 账本提供：`UNIQUE(owner_sub, operation_id)`，同 key 同 RFC 8785 规范化请求 fingerprint 返回原输出，同 key 不同请求在 writer 前返回 409。输出 UUID/成员清单在写对象前固化；crash/retry/reconcile 必须复用这些身份。#230 验收前 Durable Task 固定 `artifact_create=false`。
 
 ## 4. 只读能力策略
 
@@ -88,39 +103,54 @@ ready -> expired
 
 `business_write`、Shell、任意 URL fetch、动态代码执行不进入注册表。例如基于原模板生成新工作簿同时具有 `file_read + artifact_create`，不能用单一标签隐藏其中一个效果。即使模型伪造工具名或参数，dispatch 也必须重新做身份、效果和资源检查。
 
-效果与数据出境是两个正交维度。每个 Capability 还必须声明：
+效果与数据出境是两个正交维度。每个 Capability 不声明一个会掩盖复合链路的单值 `egress`，而是声明零到多条 `egress_edges[]`。每条边固定 `source_zone`、`destination_provider/profile`、`purpose`、允许 sensitivity、字段/媒体 projection、最大字节、保留策略和 policy version。空数组才表示本能力不产生网络出境；未知边默认拒绝。
 
-| Egress | 含义 | 默认策略 |
+| Egress edge 示例 | 含义 | 默认策略 |
 |---|---|---|
-| `model_context` | 结构化工具结果会进入当前模型上下文 | 同时校验数据 sensitivity 与目标 Provider trust zone |
-| `external_provider` | 原始或派生内容会直接发给第二个外部服务，如视觉识别 | 默认拒绝，需服务端显式授权和数据分级 |
-| `none` | 能力本身不发起网络出境 | 允许仍取决于 effect/RBAC |
+| `tool_result -> primary_model` | 结构化工具结果进入当前主模型上下文 | 校验该结果 sensitivity 与目标 Provider trust zone |
+| `artifact_projection -> vision_provider` | 有界图片/扫描页发送给独立视觉服务 | 默认拒绝，需显式字段/页/字节授权 |
+| `vision_output -> primary_model` | OCR/视觉结果再次进入主模型 | 是另一条独立边，不能继承上一跳授权 |
 
-主 LLM 本身也是出境边界。Provider 必须显式标记为 `private`、`approved_external` 或 `unknown`；默认 `unknown`，且未显式允许 `model_context` 时，敏感能力不暴露、dispatch 也不执行。私网 GPU 与获批外部 Provider 可以配置不同的 sensitivity allowlist。
+主 LLM 本身也是出境边界。Provider 必须显式标记为 `private`、`approved_external` 或 `unknown`；默认 `unknown`，且没有命中对应 `egress_edges[]` 时，敏感能力不暴露、dispatch 也不执行。私网 GPU 与获批外部 Provider 可以配置不同的 sensitivity allowlist。
 
-`read_document` 不能因为名字是“读文件”就被视为纯本地操作。首期直接拆边界：txt/docx/xlsx/文字 PDF 走本地抽取；图片或扫描 PDF 只返回 `requires_vision`，不会隐式外发。模型需要显式调用独立的视觉能力，而该能力只有在外部出境策略允许时才可见、可执行。
+`read_document` 不能因为名字是“读文件”就被视为纯本地操作。首期直接拆边界：txt/docx/xlsx/文字 PDF 走本地抽取；图片或扫描 PDF 只返回 `requires_vision`，不会隐式外发。模型需要显式调用独立的视觉能力；像素到 Vision 与 Vision 输出到主模型必须分别命中 `egress_edges[]`，即使两者使用同一供应商也不能把一次授权传递到下一跳。
 
-Capability 审计同样遵循最小化：只记录 actor、capability、参数键/集合长度、Artifact ID 与状态。正常、策略拒绝和 handler 异常都不能把 raw args/results、单元格、整行报价、SQL、文件正文、URL 或凭据复制进日志。MVP 不记录参数值 hash；将来确需跨事件关联时只能使用服务端密钥化 HMAC，不能对低熵 PN/客户名使用可枚举的裸 SHA-256。
+Capability 审计同样遵循最小化：只记录 actor、capability、参数键/集合长度、Artifact ID 与状态。正常、策略拒绝和 handler 异常都不能把 raw args/results、单元格、整行报价、SQL、文件正文、URL 或凭据复制进日志。MVP 不记录参数值 hash；跨事件只关联服务端随机 ID 或下面统一 Envelope 的 fingerprint，不能对低熵 PN/客户名做可枚举 SHA-256/HMAC correlation token。
 
 这里“AI 只读”的准确含义是：**业务事实和源文件只读；Agent 控制面可以写自己的运行记录、审计和不可变派生制品。**
+
+### 4.1 统一完整性 Envelope
+
+Checkpoint、Evidence、source snapshot、Artifact operation request 等需要防篡改的 JSON 一律使用同一 `integrity-envelope/v1`，不再各自拼接 HMAC 字符串：
+
+```text
+header: schema_version, purpose, payload_schema_version,
+        canonicalization=RFC8785, algorithm=HMAC-SHA-256,
+        key_id, payload_sha256
+payload: domain object without envelope
+mac: base64url HMAC over domain-separator + RFC8785(header) + RFC8785(payload)
+```
+
+验证必须检查 allowlisted `purpose`、payload schema、key 状态、SHA-256、constant-time MAC 和大小预算；`key_id` 支持先加后删的轮换，旧 key 可保留 verify-only，撤销 key 对未完成 Task fail closed。Envelope 只提供完整性与来源认证，不提供加密或权限；敏感 payload 仍需最小化、ACL 和必要时的静态加密。日志只记录 purpose/key_id/fingerprint/状态，不能记录 payload 或对低熵业务值单独做可枚举 hash。第三方 Skill bundle 的跨环境发布使用第 9 节定义的非对称 detached signature，不用共享 HMAC 冒充供应链签名。
 
 ## 5. Text2SQL 边界
 
 Text2SQL 不是给模型一个 SQLAlchemy Session，而是一个独立 Query Broker：
 
 ```text
-自然语言 -> schema 子集 -> SQL 草案 -> SQLGlot AST 门禁
-         -> 独立只读连接 -> 语义视图/RLS -> 结果脱敏与截断 -> Evidence
+自然语言 -> Typed Query IR -> 权限化 Semantic Registry
+         -> 服务端确定性参数化编译 -> SQLGlot AST 二次门禁
+         -> 独立只读连接 -> 语义视图/FORCE RLS -> 脱敏与截断 -> Evidence
 ```
 
 四层防线缺一不可：
 
-1. 只向模型公开当前角色能见的语义视图和字段。
-2. AST 只接受单条 `SELECT`、只读 CTE 和受控 `UNION`，拒绝 DML/DDL/COPY/CALL/DO/SET/LOCK、`SELECT INTO`、`FOR UPDATE`、目录表和危险函数。
-3. PostgreSQL 使用独立 `agent_reader`、固定 `search_path`、只读事务、RLS、statement/lock/transaction timeout。
+1. 只向模型公开当前角色能见的 Dataset/字段/指标/操作符 Registry；模型和用户都只能提交 Typed Query IR，任何 SQL 文本都不是输入协议。
+2. 服务端编译器只从 Registry 模板生成单条、单 dataset、参数化 `SELECT`；首版禁止 JOIN、子查询、CTE、`UNION/INTERSECT/EXCEPT`、任意表达式和函数。SQLGlot 只复核编译产物，不解析或修复模型/用户 SQL。
+3. PostgreSQL 把 guard owner、security-barrier view owner 与 `agent_reader` 三角色分离；guard 启用并 `FORCE ROW LEVEL SECURITY`，reader 固定 `search_path`、只读事务和 statement/lock/transaction timeout，且不能读取 guard/基础表、TEMP 或 SET ROLE。
 4. Broker 强制行数、字节、估算成本和并发预算，并在返回模型前再次应用字段/低样本推断保护。
 
-SQLGlot 只是解析与门禁层，数据库权限才是最终安全边界。
+SQLGlot 只是确定性编译器之后的解析与门禁层，数据库权限才是最终安全边界；“SQLGlot 能拒绝”不能成为接收原始 SQL 的理由。
 
 ## 6. 表格规划模型
 
@@ -195,11 +225,11 @@ inspect -> infer schema -> propose mapping -> validate
 ## 10. 实施依赖
 
 1. #219：Capability Policy。
-2. #220：Artifact Store；#221：结构化交付；#222：依赖 #220 的上传/解析隔离边界。
-3. Durable Task/Step ledger 与计划校验器。
+2. #220：Artifact Store；#230：Artifact/Set 幂等 operation；#221：结构化交付；#222：依赖 #220 的上传/解析隔离边界。
+3. #223 Durable Task/Step ledger 与计划校验器；#230 未完成前保持 `artifact_create=false`。
 4. Query Broker 与 Text2SQL。
 5. GPU 私网推理网关。
-6. 维保补库评审图与人工模板清洗图。
+6. 维保补库评审图、#231 真实申请只读绑定/队列与人工模板清洗图。
 7. 浏览器 E2E、提示注入、权限、故障恢复、大文件和并发压测。
 
 每个分片独立 PR、独立审核、独立发布门禁；“可合并”不等于“可生产”。

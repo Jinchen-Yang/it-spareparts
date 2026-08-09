@@ -68,8 +68,16 @@ waiting_human -> cancelling -> cancelled
 waiting_human -> failed  (interrupt expired or authorization revoked)
 ```
 
-等待人工的自然时间不计入 active execution budget，但 Interrupt 最长保留 7 天。终态不可 resume；需要
-补充资料或改变输入时创建带 `parent_task_id` 的新 Task，不覆盖旧 Plan/Evidence。
+三个时钟独立持久化，不能用一个模糊的“最长自然时间”互相抵扣：
+
+- `active_compute_elapsed`：只累计 worker 内模型/工具/确定性节点实际执行时间；排队、lease、retry wait、
+  `paused_recoverable` 和 `waiting_human` 不计入。
+- `autonomous_wall_elapsed`：累计 Task 处于 planning/validated/running/retry_wait 的自然时间，包括排队、
+  模型、工具和退避；`waiting_human` 不计入，但 resolve 后从原累计值继续，不能刷新预算。
+- `interrupt_expires_at`：每次 Interrupt 打开时固定，首版最长 7 天；与上述两个预算无关，重试、读取、
+  worker 重启和 Task resume 都不能延长。
+
+终态不可 resume；需要补充资料或改变输入时创建带 `parent_task_id` 的新 Task，不覆盖旧 Plan/Evidence。
 
 新增 `agent_task_interrupt`：
 
@@ -112,7 +120,8 @@ resolve 必须携带 `client_request_id`、Interrupt `version` 和严格响应 s
 
 首版可以不引入 LangGraph；若引入，必须固定依赖版本和 hash，先核安全公告。只允许 JSON-compatible
 state 和自有 Serializer，禁止 `pickle_fallback`。若持久化 checkpoint，使用独立命名空间、大小上限、
-HMAC 完整性和可选加密，但不能把 LangGraph checkpoint 当成 Task 状态真值。
+可选加密和总纲统一的 `integrity-envelope/v1`（purpose=`agent.checkpoint`、RFC 8785 +
+HMAC-SHA-256），但不能把 LangGraph checkpoint 当成 Task 状态真值，也不能自定义第二套 HMAC 拼接格式。
 
 依赖准入下限不得低于已公开修复线：`langgraph-checkpoint>=4.0.0`（默认关闭 pickle fallback）和
 `langgraph>=1.0.10`（修复不安全 msgpack checkpoint loading）；实际合并时仍须重新读取最新 Advisory、
@@ -144,11 +153,13 @@ Event 和访问日志只记录 task/step/interrupt ID、workflow/version、节�
 
 - 未注册 workflow/version/node/edge/schema/capability 全部在 handler 前拒绝。
 - 模型或上传内容不能改变图、预算、结论字段、Interrupt response schema 或 Capability 集合。
+- `active_compute`、`autonomous_wall` 与 7 天 `interrupt_expires_at` 分别在边界失败；等待、重试、读取、
+  resolve 和重启不能错误抵扣或刷新另一个时钟。
 - 正常 pause/resume、7 天过期、取消、终态拒绝、创建新子 Task 全部符合状态矩阵。
 - owner-only、共享身份拒绝、跨用户 404；等待期间停用/撤权后不能恢复执行。
 - resolve 幂等与冲突、optimistic lock、双 worker lease、进程重启恢复和 crash-after-result 不重复执行。
 - Graph/Capability/runtime provider fingerprint 漂移时 fail closed。
-- checkpoint 版本、大小、HMAC、损坏拒绝、pickle payload 拒绝。
+- checkpoint 版本、大小、统一 Envelope/HMAC、key rotation、损坏拒绝、pickle payload 拒绝。
 - Event/日志不含敏感哨兵串或人类响应正文。
 - 工作流前后业务事实表零写入；migration upgrade/check/downgrade/re-upgrade 和全量测试通过。
 

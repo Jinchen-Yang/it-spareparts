@@ -8,7 +8,7 @@
 现有 `write_excel` 让模型逐个提交单元格坐标，难以处理列名漂移、多工作表、描述清洗、类型转换和
 大批量数据，也很难稳定重试。本流程改成“模型提议高层 Change Plan，确定性引擎批量执行”。
 
-硬依赖：#219、#220、#221、#222、#223、#226。敏感内容使用私网模型时还依赖 #225。
+硬依赖：#219、#220、#221、#222、#223、#226、#230。敏感内容使用私网模型时还依赖 #225。
 
 ```text
 Source Artifact + Human Template Artifact
@@ -24,7 +24,7 @@ Source Artifact + Human Template Artifact
 
 ## 2. 输入与权限
 
-首版只接收同一实名 Task owner 持有、状态为 `ready` 的不可变 XLSX 或 CSV Artifact：
+首版只接收**同一实名 Task owner** 持有、状态为 `ready` 的不可变 XLSX 或 CSV Artifact：
 
 - `source_artifact_id`：待清洗数据；
 - `template_artifact_id`：人工给出的目标结构与示例；
@@ -36,6 +36,11 @@ Source Artifact + Human Template Artifact
 Task 创建、读取、暂停恢复和下载均要求 active 实名 `sys_user`、`page_chat` 与实时 Artifact scope
 交集。能力效果为 `file_read + artifact_create`；不得因为是“编辑表格”而伪装为单一效果。普通 Artifact
 仍 owner-only，不允许管理员或老板跨 owner 兜底读取。
+
+source、template、Task、operation 和全部输出的 `owner_sub` 必须完全相同；任何跨 owner 组合统一 404。
+两份输入还必须都有可比较的 `row_subject/predicate_version`，未知或语义漂移 fail closed。仅被服务端
+明确分类为 `unscoped_personal_template` 的个人模板可在资源/字段限制运算中作为 TOP；缺失 scope、
+legacy generated 或 unclassified 文件不能冒充无限制模板。
 
 ## 3. Human Template 的含义
 
@@ -177,12 +182,30 @@ private Gateway 不可用时 Task 暂停或失败。
 - `exception_report`：未映射、类型失败、模型失败、截断和人工待处理项；
 - `manifest`：源/模板/输出 hash、Plan/workflow/model/operation 版本、计数和限制。
 
-若任一必需成员验证失败，集合整体不可见；重试同一 `operation_id/idempotency_key` 返回同一集合。Artifact
-scope 取 source/template sensitivity 和权限的保守并集，每次预览/下载实时重验。用户后续可以把输出文件
-手工送入现有导入预检查，但本工作流不直接调用导入或写业务库。
+若任一必需成员验证失败，集合整体不可见。Artifact/Set 的服务端 operation、请求 fingerprint、稳定成员
+UUID、409 冲突和 crash/reconcile 全部复用 #230；重试同一 `(owner_sub, operation_id)` 且请求相同返回
+同一集合，请求不同则在 writer 前 409。#230 未验收前本 Workflow 不得启用 `artifact_create`。
+
+Artifact Set scope 使用固定格运算，不写“保守合并”后留给实现猜测：
+
+```text
+owner_sub                    = source.owner = template.owner = Task.owner
+required_positive_permissions = union(source, template, workflow requirements)
+allowed_resource_set        = intersection(source, template, workflow visible resources)
+visible_field_set           = intersection(source, template, workflow visible fields)
+sensitivity                 = max(source, template, generated content)
+row_restriction             = conjunction / narrowest(source, template, workflow)
+row_subject                 = the same verified owner/subject
+predicate_version           = versioned comparable predicate contract
+```
+
+空/未知 resource、visible 或 predicate 不是 wildcard；交集为空则拒绝发布。集合聚合 scope 和每个成员
+scope 都不得更宽。每次预览/下载按当前权限重验是否仍覆盖 stored scope。用户后续可以把输出文件手工送入
+现有导入预检查，但本工作流不直接调用导入或写业务库。
 
 Evidence 保存在 completed Step 中，只保留 Artifact refs、hash、版本、计数、风险/异常摘要、模型 usage
-和稳定错误码，不重复保存整表内容。
+和稳定错误码，不重复保存整表内容；完整性统一使用总纲 `integrity-envelope/v1`
+（purpose=`workbook-cleaning.evidence`），不另创 HMAC 格式。
 
 ## 10. 验收
 
@@ -194,7 +217,11 @@ Evidence 保存在 completed Step 中，只保留 Artifact refs、hash、版本�
 - 输出公式/外链/宏为零；文本前缀中和；重开后数据、行数、键、MIME、hash 一致。
 - sample dry-run 后 Plan 不可修改；Human Interrupt 幂等、冲突、撤权、取消、过期和重启恢复。
 - crash-before-publish、crash-after-object、metadata 失败、磁盘满、同 operation 重试不产生半成品或重复文件。
+- 同 owner/key 同 fingerprint 返回同一 Set/member UUID；同 key 不同 request 在 writer 前 409；reconciler
+  重复运行幂等且不会让部分成员可见。
 - owner-only、scope 收窄拒绝、跨用户统一 404；日志/Event/模型请求不含敏感哨兵值和文件正文。
+- scope 公式的 positive union、resource/visible intersection、sensitivity max、row restriction narrowest、
+  same-owner 和 predicate version 边界均有矩阵测试。
 - 1/100/5,000 semantic cell、100,000 行、2,000,000 cell 和并发任务的时延/内存/磁盘压测。
 - 工作流前后业务表和源文件 hash 不变；迁移、全量 pytest、前端测试/build、真实浏览器下载/E2E 通过。
 
