@@ -14,12 +14,15 @@ vi.mock("../../api", () => ({
 
 import {
   applyMaintenanceProjectWorkbook,
+  archiveMaintenanceProjectManager,
+  assignMaintenanceProjectManager,
   downloadMaintenanceProjectWorkbook,
   downloadMaintenanceWorkbookValidationErrors,
   getMaintenanceProjectWorkspace,
   listMaintenanceCostGaps,
   listMaintenanceProjectOperations,
   recomputeMaintenanceCostGaps,
+  searchMaintenanceManagerAccounts,
   updateMaintenanceCostGap,
   validateMaintenanceProjectWorkbook,
 } from "../maintenanceOperations";
@@ -47,14 +50,80 @@ describe("maintenance operations API", () => {
     expect(get).not.toHaveBeenCalled();
   });
 
-  it("无搜索词时保留 GET 目录兼容入口", () => {
-    listMaintenanceProjectOperations({ page: 2, page_size: 24 });
-
-    expect(get).toHaveBeenCalledOnce();
-    expect(get).toHaveBeenCalledWith("/maintenance/projects/stable/operations", {
-      params: { page: 2, page_size: 24, include_inactive: false },
+  it("无搜索词也把全部筛选放在 POST body，不使用查询串", () => {
+    listMaintenanceProjectOperations({
+      page: 2,
+      page_size: 24,
+      owner_scope: "me",
+      task_type: "项目经理月度更新",
+      task_status: "pending",
+      due_from: "2026-08-01",
+      due_to: "2026-08-31",
     });
-    expect(post).not.toHaveBeenCalled();
+
+    expect(post).toHaveBeenCalledOnce();
+    expect(post).toHaveBeenCalledWith("/maintenance/projects/stable/operations/search", {
+      page: 2,
+      page_size: 24,
+      q: "",
+      include_inactive: false,
+      owner_scope: "me",
+      task_type: "项目经理月度更新",
+      task_status: "pending",
+      due_from: "2026-08-01",
+      due_to: "2026-08-31",
+    });
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("把 AbortSignal 交给 POST 请求，不混入业务 body", () => {
+    const controller = new AbortController();
+
+    listMaintenanceProjectOperations(
+      { q: "项目" },
+      { signal: controller.signal },
+    );
+
+    expect(post).toHaveBeenCalledWith(
+      "/maintenance/projects/stable/operations/search",
+      { q: "项目", include_inactive: false },
+      { signal: controller.signal },
+    );
+  });
+
+  it("负责人候选只用 POST 搜索，映射和归档均带版本与原因", () => {
+    searchMaintenanceManagerAccounts({ q: " 王经理 ", page_size: 30 });
+    assignMaintenanceProjectManager("project/1", {
+      user_id: 9,
+      expected_assignment_id: "assignment-1",
+      expected_assignment_version: 2,
+      reason: "项目交接",
+    });
+    archiveMaintenanceProjectManager("assignment/1", {
+      version: 3,
+      reason: "暂停负责关系",
+    });
+
+    expect(post).toHaveBeenNthCalledWith(
+      1,
+      "/maintenance/project-manager-assignments/search",
+      { q: "王经理", page: 1, page_size: 30 },
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      "/maintenance/projects/stable/project%2F1/manager-assignment",
+      {
+        user_id: 9,
+        expected_assignment_id: "assignment-1",
+        expected_assignment_version: 2,
+        reason: "项目交接",
+      },
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      3,
+      "/maintenance/project-manager-assignments/assignment%2F1/archive",
+      { version: 3, reason: "暂停负责关系" },
+    );
   });
 
   it("按稳定项目 ID 加载一份工作台快照", () => {
@@ -188,7 +257,7 @@ describe("maintenance operations API", () => {
   });
 
   it("在 API 边界把 Decimal 字符串转成有限 number，非法值降级为 null", async () => {
-    get.mockResolvedValueOnce({
+    post.mockResolvedValueOnce({
       data: {
         rows: [{
           project_id: "project-1",
@@ -445,7 +514,7 @@ describe("maintenance operations API", () => {
   });
 
   it("未知或缺失的合同额和成本进度税口径在 API 边界降级为 null", async () => {
-    get.mockResolvedValueOnce({
+    post.mockResolvedValueOnce({
       data: {
         rows: [{
           project_id: "project-guard",
@@ -553,7 +622,7 @@ describe("maintenance operations API", () => {
       reminder_count: 0,
       as_of: "2026-08-09",
     };
-    get.mockResolvedValueOnce({
+    post.mockResolvedValueOnce({
       data: {
         rows: [project], total: 1, page: 1, page_size: 24,
         as_of: "2026-08-09", data_version: "restricted-v1",
@@ -629,7 +698,7 @@ describe("maintenance operations API", () => {
       data_purchase_cost: true,
       data_profit: false,
     }));
-    get.mockResolvedValueOnce({
+    post.mockResolvedValueOnce({
       data: {
         rows: [{
           project_id: "project-cost-only",

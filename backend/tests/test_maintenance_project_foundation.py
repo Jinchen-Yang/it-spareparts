@@ -22,6 +22,7 @@ from app.main import app
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectContract,
+    MaintenanceProjectUserAssignment,
 )
 from app.models.system import SysAccessLog, SysUser
 
@@ -958,7 +959,22 @@ def test_contract_amount_permission_hides_lines_total_and_amount_completeness(db
         ]
     )
     db.commit()
-    token = _token(db, username="maint_project_purchaser", role="purchaser")
+    username = "maint_project_purchaser"
+    token = _token(db, username=username, role="purchaser")
+    user_id = db.scalar(select(SysUser.id).where(SysUser.username == username))
+    assert user_id is not None
+    db.add(
+        MaintenanceProjectUserAssignment(
+            assignment_id="20000000-0000-4000-8000-000000000011",
+            project_id=project.project_id,
+            responsibility_type="primary_manager",
+            user_id=user_id,
+            source_manager_text="合成权限负责人",
+            assigned_by="synthetic-test",
+            assignment_reason="验证显式项目范围内的合同金额脱敏",
+        )
+    )
+    db.commit()
 
     response = _get(
         TestClient(app),

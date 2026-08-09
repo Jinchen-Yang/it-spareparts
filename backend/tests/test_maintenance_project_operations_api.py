@@ -3238,16 +3238,16 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
     state = db.get(MaintenanceProjectWorkbookState, projects[2].project_id)
     state.last_applied_at = datetime(2026, 7, 20, 8, tzinfo=UTC)
     db.commit()
-    completed = client.get(
+    after_legacy_v2_apply = client.get(
         f"/api/maintenance/projects/stable/{projects[2].project_id}/tasks",
         params={"as_of": "2026-07-31"},
     ).json()
-    completed_monthly = next(
+    monthly_after_legacy_v2_apply = next(
         row
-        for row in completed["rows"]
+        for row in after_legacy_v2_apply["rows"]
         if row["rule_key"] == "manager_update:2026-07"
     )
-    assert completed_monthly["status"] == "completed"
+    assert monthly_after_legacy_v2_apply["status"] == "pending"
     assert client.post(
         f"/api/maintenance/projects/stable/{projects[2].project_id}/tasks",
         json={"title": "禁止用户创建"},

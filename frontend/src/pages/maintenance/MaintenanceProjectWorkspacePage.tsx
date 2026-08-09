@@ -260,11 +260,14 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
   }
 
   const { project } = workspace;
+  const managerLabel = project.manager_assignment
+    ? `${project.manager_assignment.display_name || project.manager_assignment.username} · ${project.manager_assignment.username}`
+    : "未映射系统账号";
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <PageHeader
         title={project.display_name}
-        subtitle={`${project.project_code} · 项目经理 ${project.project_manager_id || "待指定"} · 数据截止 ${workspace.as_of}`}
+        subtitle={`${project.project_code} · 项目经理 ${managerLabel} · 数据截止 ${workspace.as_of}`}
         extra={(
           <Space wrap>
             {canManageProject && (
@@ -380,6 +383,7 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
       </Card>
 
       <Card
+        id="project-workbook"
         title="完整项目工作簿"
         extra={<Tag>{`协议 ${workspace.workbook_preview.protocol_version}`}</Tag>}
       >

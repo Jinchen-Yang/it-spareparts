@@ -16,6 +16,7 @@ from app.models.maintenance_project import (
     MaintenanceProjectContract,
 )
 from app.security import UserContext, is_field_hidden
+from app.services import maintenance_project_assignments
 
 
 def _payload_token(payload: dict) -> str:
@@ -48,8 +49,14 @@ def project_directory(
     page_size: int,
     include_inactive: bool,
     as_of: date,
+    user_ctx: UserContext | None = None,
 ) -> dict:
     filters = []
+    if user_ctx is not None and maintenance_project_assignments.resolve_owner_scope(
+        user_ctx,
+        None,
+    ) == "me":
+        filters.append(maintenance_project_assignments.owned_project_condition(user_ctx))
     if not include_inactive:
         filters.append(MaintenanceProject.is_active.is_(True))
     if q_text and (search := q_text.strip()):

@@ -5,6 +5,7 @@ import type { MaintenanceProjectOperationsSummary } from "../../api/maintenanceO
 import ContractPortfolio from "./ContractPortfolio";
 import ProjectFinancialProgress from "./ProjectFinancialProgress";
 import type { ProjectFinancialVisibility } from "./ProjectFinancialProgress";
+import ProjectManagerAssignmentControl from "./ProjectManagerAssignmentControl";
 
 const LIFECYCLE_META: Record<string, { label: string; color?: string }> = {
   ongoing: { label: "进行中", color: "blue" },
@@ -12,12 +13,27 @@ const LIFECYCLE_META: Record<string, { label: string; color?: string }> = {
   missing: { label: "期限缺失", color: "orange" },
 };
 
-export default function MaintenanceProjectCard({ project, visibility }: {
+export default function MaintenanceProjectCard({
+  project,
+  visibility,
+  canManageAssignment = false,
+  onAssignmentChanged,
+}: {
   project: MaintenanceProjectOperationsSummary;
   visibility: ProjectFinancialVisibility;
+  canManageAssignment?: boolean;
+  onAssignmentChanged?: () => void;
 }) {
   const lifecycle = LIFECYCLE_META[project.lifecycle_status]
     ?? { label: "业务期限待确认", color: "orange" };
+  const assignment = project.manager_assignment;
+  const primaryTask = project.task_summary?.primary;
+  const missingLabels = project.missing_data_labels ?? [];
+  const taskRows = project.task_summary?.rows ?? [];
+  const taskCandidates = primaryTask ? [primaryTask, ...taskRows] : taskRows;
+  const hasPendingMonthlyUpload = taskCandidates.some(
+    (task) => task.task_type === "项目经理月度更新" && task.status !== "completed",
+  );
   return (
     <Card
       data-testid={`maintenance-project-card-${project.project_id}`}
@@ -37,14 +53,62 @@ export default function MaintenanceProjectCard({ project, visibility }: {
         <Link key="detail" to={`/maintenance/projects/${encodeURIComponent(project.project_id)}`}>
           查看项目
         </Link>,
+        ...(hasPendingMonthlyUpload ? [
+          <span
+            key="monthly-upload-pending"
+            title="项目经理本人范围的月度全量上传通道待接入"
+          >
+            月度全量上传待接入
+          </span>,
+        ] : []),
+        ...(canManageAssignment ? [
+          <ProjectManagerAssignmentControl
+            key="manager"
+            project={project}
+            canManage
+            onChanged={onAssignmentChanged ?? (() => undefined)}
+          />,
+        ] : []),
       ]}
       styles={{ body: { display: "flex", flexDirection: "column", gap: 14 } }}
     >
-      <div style={{ color: "var(--mb-text-2)", fontSize: 12.5 }}>
-        项目经理：{project.project_manager_id || "待指定"}
-        <span style={{ marginInline: 8 }}>·</span>
-        数据截止：{project.as_of || "—"}
+      <div className="maintenance-project-card-meta">
+        <div>
+          项目经理：
+          {assignment
+            ? `${assignment.display_name || assignment.username} · ${assignment.username}`
+            : "未映射系统账号"}
+          {assignment?.account_status === "inactive" && (
+            <Tag color="red" style={{ marginInlineStart: 6 }}>负责人账号失效</Tag>
+          )}
+        </div>
+        <div>
+          来源负责人原文：{project.project_manager_id || "未提供"}
+          <span style={{ marginInline: 8 }}>·</span>
+          数据截止：{project.as_of || "—"}
+        </div>
       </div>
+      {primaryTask && (
+        <div className={`maintenance-project-task ${primaryTask.is_overdue ? "is-overdue" : ""}`}>
+          <Space wrap size={[6, 6]}>
+            <Tag color={primaryTask.is_overdue ? "red" : primaryTask.severity === "critical" ? "red" : "gold"}>
+              {primaryTask.task_type}
+            </Tag>
+            <Tag>{primaryTask.status === "completed" ? "已完成" : "待处理"}</Tag>
+            {primaryTask.is_overdue && <Tag color="red">已逾期</Tag>}
+          </Space>
+          <div className="maintenance-project-task-title">{primaryTask.title}</div>
+          <div>
+            截止：{primaryTask.due_date || "无固定日期"}
+            <span style={{ marginInline: 8 }}>·</span>
+            待办 {project.task_summary.open_count} 项
+            {project.task_summary.overdue_count > 0
+              ? `，逾期 ${project.task_summary.overdue_count} 项`
+              : ""}
+          </div>
+          <div>完成依据：{primaryTask.close_basis}</div>
+        </div>
+      )}
       <div>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>
           全部关联合同
@@ -53,17 +117,20 @@ export default function MaintenanceProjectCard({ project, visibility }: {
       </div>
       <ProjectFinancialProgress metrics={project.metrics} visibility={visibility} />
       <Space wrap size={[6, 6]}>
+        {missingLabels.map((label) => (
+          <Tag key={label} color="orange">{label}</Tag>
+        ))}
         {project.reminder_count > 0
           ? <Badge count={project.reminder_count}><Tag color="orange">系统提醒</Tag></Badge>
           : <Tag color="green">暂无提醒</Tag>}
-        {!visibility.canViewCost
+        {missingLabels.length === 0 && (!visibility.canViewCost
           ? <Tag>成本不可见</Tag>
           : project.metrics.missing_cost_lines != null
             && project.metrics.missing_cost_lines > 0
             ? <Tag color="orange">成本待补</Tag>
             : project.metrics.cost_complete === null
               ? <Tag>项目总成本状态不可判定</Tag>
-              : null}
+              : null)}
       </Space>
     </Card>
   );

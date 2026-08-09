@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from calendar import monthrange
 from collections import defaultdict
-from datetime import UTC, date, datetime, time
+from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
@@ -34,10 +34,11 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssueLine,
     MaintenanceProjectWorkbookState,
 )
-from app.business_time import BUSINESS_TZ, business_today
+from app.business_time import business_today
 from app import tax_policy
 from app.security import UserContext, is_field_hidden
 from app.services import maintenance_project
+from app.services import maintenance_project_assignments
 from app.services import maintenance_consumption_cost
 
 
@@ -137,6 +138,20 @@ def _reminder_filter_required_fields(reminder: str | None) -> tuple[str, ...]:
         reminder in {"all", "warning", "critical", "completeness", "cost_ratio"}
         or reminder.startswith("cost_ratio:")
     ):
+        return _ALL_FINANCIAL_FILTER_FIELDS
+    return ()
+
+
+def _task_type_filter_required_fields(task_type: str | None) -> tuple[str, ...]:
+    if not task_type:
+        return ()
+    if task_type == "项目经理月度更新":
+        return ()
+    if task_type == "cost":
+        return ("unit_cost",)
+    if task_type == "collection":
+        return ("contract_amount",)
+    if task_type in {"completeness", "cost_ratio"}:
         return _ALL_FINANCIAL_FILTER_FIELDS
     return ()
 
@@ -1810,6 +1825,7 @@ def _task(
     due_date: date | None = None,
     task_status: str = "open",
     owner: str | None = None,
+    close_basis: str = "系统重算后该触发条件不再成立",
 ) -> dict:
     identity = f"{project_id}:{rule_key}:{entity_id or '-'}"
     return {
@@ -1825,7 +1841,76 @@ def _task(
         "status": task_status,
         "owner": owner,
         "generated_by": "system",
+        "close_basis": close_basis,
     }
+
+
+def _task_runtime_view(task: dict, *, as_of: date) -> dict:
+    due = date.fromisoformat(task["due_date"]) if task.get("due_date") else None
+    completed = task.get("status") == "completed"
+    if completed:
+        due_state = "completed"
+    elif due is not None and due < as_of:
+        due_state = "overdue"
+    elif due == as_of:
+        due_state = "due_today"
+    elif due is not None:
+        due_state = "upcoming"
+    else:
+        due_state = "none"
+    return {
+        **task,
+        "due_state": due_state,
+        "is_overdue": due_state == "overdue",
+    }
+
+
+def _task_summary(tasks: list[dict], *, as_of: date) -> dict:
+    rows = [_task_runtime_view(row, as_of=as_of) for row in tasks]
+    severity_rank = {"critical": 0, "warning": 1, "info": 2}
+    open_rows = [row for row in rows if row["status"] != "completed"]
+    open_rows.sort(
+        key=lambda row: (
+            0 if row["is_overdue"] else 1,
+            severity_rank.get(row["severity"], 9),
+            row["due_date"] is None,
+            row["due_date"] or "9999-12-31",
+            row["task_id"],
+        )
+    )
+    return {
+        "primary": open_rows[0] if open_rows else None,
+        "open_count": len(open_rows),
+        "overdue_count": sum(1 for row in open_rows if row["is_overdue"]),
+        "rows": rows,
+    }
+
+
+def _attach_manager_and_missing_labels(card: dict, assignment: dict | None) -> None:
+    card["manager_assignment"] = assignment
+    # The source-text manager is never an account identity. System tasks only
+    # receive an owner after an administrator creates an explicit mapping.
+    task_owner = assignment.get("username") if assignment is not None else None
+    task_summary = card.get("task_summary") or {}
+    for task in task_summary.get("rows") or []:
+        task["owner"] = task_owner
+    if task_summary.get("primary") is not None:
+        task_summary["primary"]["owner"] = task_owner
+    labels: list[str] = []
+    if assignment is None:
+        labels.append("负责人待映射")
+    if card.get("lifecycle_status") == "missing":
+        labels.append("期限待补")
+    metrics = card.get("metrics") or {}
+    if metrics.get("contract_amount_complete") is False:
+        labels.append("合同额待补")
+    if metrics.get("cost_complete") is False:
+        labels.append("成本待补")
+    # Attachment persistence is explicitly outside #205.  Do not fabricate a
+    # missing/present judgment before #206 provides an authoritative model.
+    card["attachment_status"] = "not_integrated"
+    labels.append("附件状态待接入")
+    card["missing_data_labels"] = labels
 
 
 def _system_tasks(
@@ -1839,36 +1924,27 @@ def _system_tasks(
     sales_estimate_lines: int,
     cost_status: str,
     as_of: date,
-    project_manager_id: str | None,
-    last_applied_at: datetime | None,
 ) -> list[dict]:
     tasks: list[dict] = []
     due_date = date(as_of.year, as_of.month, monthrange(as_of.year, as_of.month)[1])
-    applied_date = business_today(last_applied_at) if last_applied_at else None
-    monthly_completed = bool(
-        applied_date
-        and applied_date.year == as_of.year
-        and applied_date.month == as_of.month
-    )
     tasks.append(
         _task(
             project_id=project_id,
             rule_key=f"manager_update:{as_of:%Y-%m}",
-            severity=("info" if monthly_completed or as_of < due_date else "warning"),
-            title=(
-                f"{as_of:%Y年%m月}项目工作簿已回填"
-                if monthly_completed
-                else f"请回填{as_of:%Y年%m月}项目工作簿"
-            ),
+            severity=("info" if as_of < due_date else "warning"),
+            title=f"待上传{as_of:%Y年%m月}月度全量工作簿",
             detail=(
-                f"本月工作簿已于 {applied_date.isoformat()} 应用"
-                if monthly_completed
-                else "下载全量四表，在 01_总览回款表尾追加后上传并应用"
+                "项目经理本人范围的月度全量上传通道待接入；"
+                "当前单项目工作簿不会关闭此任务"
             ),
             task_type="项目经理月度更新",
             due_date=due_date,
-            task_status="completed" if monthly_completed else "pending",
-            owner=project_manager_id,
+            task_status="pending",
+            owner=None,
+            close_basis=(
+                "项目经理本人范围的月度全量工作簿通过校验并成功应用后，"
+                "由全量上传批次自动关闭（通道待接入）"
+            ),
         )
     )
     for issue in completeness.get("issues", []):
@@ -1889,7 +1965,8 @@ def _system_tasks(
                 severity="warning",
                 title=title,
                 detail=detail,
-                owner=project_manager_id,
+                owner=None,
+                close_basis="对应项目经营事实已补全且系统重算通过",
             )
         )
     if not has_confirmed_collection:
@@ -1900,7 +1977,8 @@ def _system_tasks(
                 severity="info",
                 title="补充已确认累计回款",
                 detail="当前没有已确认的累计回款快照",
-                owner=project_manager_id,
+                owner=None,
+                close_basis="已存在有效的已确认累计回款快照",
             )
         )
     elif (
@@ -1915,7 +1993,8 @@ def _system_tasks(
                 severity="info",
                 title="项目回款尚未完成",
                 detail="当前已确认累计回款低于全部合同额",
-                owner=project_manager_id,
+                owner=None,
+                close_basis="已确认累计回款达到全部合同额",
             )
         )
     if cost_gap_count:
@@ -1926,7 +2005,8 @@ def _system_tasks(
                 severity="warning",
                 title="回填现场领用缺价",
                 detail=f"仍有 {cost_gap_count} 条已确认领用缺少成本",
-                owner=project_manager_id,
+                owner=None,
+                close_basis="已确认现场领用均已具备有效成本依据",
             )
         )
     if sales_estimate_lines:
@@ -1940,7 +2020,8 @@ def _system_tasks(
                     f"{sales_estimate_lines} 条已确认现场领用按销售前后 7 天数量加权估算；"
                     "已计入成本进度，但不等于采购或人工确认单价"
                 ),
-                owner=project_manager_id,
+                owner=None,
+                close_basis="销售回退估算已由采购或人工确认证据替换",
             )
         )
     if cost_status in {"yellow", "red"}:
@@ -1960,7 +2041,8 @@ def _system_tasks(
                     if cost_status == "red"
                     else f"已计成本已超过合同额 80%{estimate_note}"
                 ),
-                owner=project_manager_id,
+                owner=None,
+                close_basis="已计成本比例回落至对应预警阈值内",
             )
         )
     return sorted(tasks, key=lambda row: (row["severity"], row["rule_key"], row["task_id"]))
@@ -2231,8 +2313,6 @@ def _project_card_from_facts(
         sales_estimate_lines=sales_estimate_lines,
         cost_status=cost_status,
         as_of=as_of,
-        project_manager_id=base["project"]["project_manager_id"],
-        last_applied_at=state.last_applied_at if state else None,
     )
     reminders, completeness = _visible_tasks(
         reminders,
@@ -2374,7 +2454,8 @@ def _project_card_from_facts(
     project_summary["reminder_count"] = sum(
         1 for row in reminders if row["status"] != "completed"
     )
-    return project_summary, reminders, completeness
+    project_summary["task_summary"] = _task_summary(reminders, as_of=as_of)
+    return project_summary, project_summary["task_summary"]["rows"], completeness
 
 
 def project_workspace(
@@ -2622,6 +2703,13 @@ def project_workspace(
         state=state,
         as_of=as_of,
         user_ctx=user_ctx,
+    )
+    _attach_manager_and_missing_labels(
+        project_summary,
+        maintenance_project_assignments.active_assignment_views(
+            db,
+            project_ids=[project_id],
+        ).get(project_id),
     )
 
     issue_statement = (
@@ -3193,6 +3281,10 @@ def _project_cards_for_ids(
             )
         )
     }
+    manager_assignments = maintenance_project_assignments.active_assignment_views(
+        db,
+        project_ids=project_ids,
+    )
     cards: dict[str, dict] = {}
     for project in projects:
         base = maintenance_project.project_overview_from_facts(
@@ -3242,6 +3334,10 @@ def _project_cards_for_ids(
             as_of=as_of,
             user_ctx=user_ctx,
         )
+        _attach_manager_and_missing_labels(
+            card,
+            manager_assignments.get(project.project_id),
+        )
         cards[project.project_id] = card
     return cards
 
@@ -3251,9 +3347,13 @@ def _directory_reminder_query(
     filters: list,
     as_of: date,
     user_ctx: UserContext,
-    reminder: str,
+    reminder: str | None,
+    task_type: str | None = None,
+    task_status: str | None = None,
+    due_from: date | None = None,
+    due_to: date | None = None,
 ):
-    """Build the exact open-reminder project set as database aggregates."""
+    """Build reminder/task project sets in SQL before applying pagination."""
 
     current_contract = and_(
         MaintenanceProjectContract.effective_from <= as_of,
@@ -3516,7 +3616,6 @@ def _directory_reminder_query(
                 expense_by_project.c.approved_expense, Decimal("0.00")
             ).label("approved_expense"),
             MaintenanceProjectWorkbookState.expense_ready_through,
-            MaintenanceProjectWorkbookState.last_applied_at,
         )
         .select_from(MaintenanceProject)
         .outerjoin(
@@ -3558,18 +3657,10 @@ def _directory_reminder_query(
 
     month_start = as_of.replace(day=1)
     current_business_month = business_today().replace(day=1)
-    next_month = (
-        month_start.replace(year=month_start.year + 1, month=1)
-        if month_start.month == 12
-        else month_start.replace(month=month_start.month + 1)
-    )
-    applied_from = datetime.combine(month_start, time.min, BUSINESS_TZ).astimezone(UTC)
-    applied_to = datetime.combine(next_month, time.min, BUSINESS_TZ).astimezone(UTC)
-    manager_open = or_(
-        facts.c.last_applied_at.is_(None),
-        facts.c.last_applied_at < applied_from,
-        facts.c.last_applied_at >= applied_to,
-    )
+    # #205 has no authoritative project-manager-scope monthly upload batch.
+    # A per-project v2 workbook application must not masquerade as completion.
+    manager_open = literal(True)
+    manager_completed = literal(False)
     profit_visible = not is_field_hidden(user_ctx, "contract_amount")
     cost_visible = not is_field_hidden(user_ctx, "unit_cost")
     expense_visible = not is_field_hidden(user_ctx, "expense_inc")
@@ -3698,8 +3789,10 @@ def _directory_reminder_query(
         "warning": or_(*warning_conditions),
         "critical": red,
     }
-    if reminder == "all":
-        match_condition = or_(
+    if reminder is None:
+        reminder_condition = literal(True)
+    elif reminder == "all":
+        reminder_condition = or_(
             manager_open,
             *completeness_conditions,
             *collection_conditions,
@@ -3709,16 +3802,57 @@ def _directory_reminder_query(
             red,
         )
     else:
-        match_condition = rule_conditions.get(
+        reminder_condition = rule_conditions.get(
             reminder,
             task_type_conditions.get(
                 reminder,
                 severity_conditions.get(reminder, literal(False)),
             ),
         )
+    has_task_filter = bool(task_type or task_status or due_from or due_to)
+    task_condition = literal(True)
+    if has_task_filter:
+        manager_due = date(
+            as_of.year,
+            as_of.month,
+            monthrange(as_of.year, as_of.month)[1],
+        )
+        task_facts: list[tuple[str, str, date | None, object]] = [
+            ("项目经理月度更新", "pending", manager_due, manager_open),
+            (
+                "项目经理月度更新",
+                "completed",
+                manager_due,
+                manager_completed,
+            ),
+        ]
+        task_facts.extend(
+            (rule_key.split(":", 1)[0], "open", None, condition)
+            for rule_key, condition in rule_conditions.items()
+            if not rule_key.startswith("manager_update:")
+        )
+        selected_conditions = []
+        for fact_type, fact_status, fact_due, condition in task_facts:
+            if task_type and fact_type != task_type:
+                continue
+            if task_status == "open" and fact_status == "completed":
+                continue
+            if task_status in {"pending", "completed"} and fact_status != task_status:
+                continue
+            if due_from is not None or due_to is not None:
+                if fact_due is None:
+                    continue
+                if due_from is not None and fact_due < due_from:
+                    continue
+                if due_to is not None and fact_due > due_to:
+                    continue
+            selected_conditions.append(condition)
+        task_condition = (
+            or_(*selected_conditions) if selected_conditions else literal(False)
+        )
     return (
         select(facts.c.project_id, facts.c.project_code)
-        .where(match_condition)
+        .where(and_(reminder_condition, task_condition))
         .order_by(facts.c.project_code, facts.c.project_id)
     )
 
@@ -3734,12 +3868,24 @@ def project_operations(
     include_inactive: bool = False,
     page: int = 1,
     page_size: int = 24,
+    owner_scope: str = "all",
+    task_type: str | None = None,
+    task_status: str | None = None,
+    due_from: date | None = None,
+    due_to: date | None = None,
 ) -> dict:
     required_fields = _reminder_filter_required_fields(reminder)
+    required_fields += _task_type_filter_required_fields(task_type)
     if any(is_field_hidden(user_ctx, field) for field in required_fields):
         raise MaintenanceOperationPermissionError
+    if due_from is not None and due_to is not None and due_from > due_to:
+        raise MaintenanceOperationError("截止日期起点不能晚于终点")
     rows: list[dict] = []
     filters = []
+    if owner_scope == "me":
+        filters.append(
+            maintenance_project_assignments.owned_project_condition(user_ctx)
+        )
     if not include_inactive:
         filters.append(MaintenanceProject.is_active.is_(True))
     if lifecycle != "all":
@@ -3760,7 +3906,8 @@ def project_operations(
             )
         )
     offset = (page - 1) * page_size
-    if reminder is None:
+    has_task_filter = bool(task_type or task_status or due_from or due_to)
+    if reminder is None and not has_task_filter:
         total = int(
             db.scalar(
                 select(func.count()).select_from(MaintenanceProject).where(*filters)
@@ -3784,6 +3931,10 @@ def project_operations(
             as_of=as_of,
             user_ctx=user_ctx,
             reminder=reminder,
+            task_type=task_type,
+            task_status=task_status,
+            due_from=due_from,
+            due_to=due_to,
         )
         total = int(
             db.scalar(select(func.count()).select_from(matching_query.subquery()))
@@ -3809,6 +3960,13 @@ def project_operations(
         "page": page,
         "page_size": page_size,
         "as_of": as_of.isoformat(),
+        "owner_scope": owner_scope,
+        "filters": {
+            "task_type": task_type,
+            "task_status": task_status,
+            "due_from": due_from.isoformat() if due_from else None,
+            "due_to": due_to.isoformat() if due_to else None,
+        },
     }
     payload["data_version"] = _payload_token(payload)
     return payload

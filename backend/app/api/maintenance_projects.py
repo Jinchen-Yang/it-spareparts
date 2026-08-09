@@ -7,14 +7,20 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.maintenance_project_scope import require_maintenance_project_access
 from app.auth import current_identity, current_role
 from app.business_time import business_today
 from app.db import get_db
-from app.security import UserContext, get_current_user_context, record_access_log, require_page
+from app.models.system import SysUser
+from app.security import (
+    UserContext,
+    get_current_user_context,
+    record_access_log,
+    require_action,
+    require_page,
+)
 from app.services import maintenance_project
 from app.services import maintenance_project_catalog as catalog
-from app.models.system import SysUser
-from app.security import require_action
 
 router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
 
@@ -120,6 +126,7 @@ def patch_stable_project(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_profit")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     operated_by = _real_operator(db, ident)
     updates = body.model_dump(
@@ -199,6 +206,7 @@ def archive_stable_project(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_profit")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     return _set_project_active(
         project_id=project_id,
@@ -219,6 +227,7 @@ def restore_stable_project(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_profit")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     return _set_project_active(
         project_id=project_id,
@@ -257,6 +266,7 @@ def _stable_project_directory_response(
         page_size=page_size,
         include_inactive=include_inactive,
         as_of=effective_as_of,
+        user_ctx=ctx,
     )
 
 
@@ -320,6 +330,7 @@ def stable_project_overview(
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     effective_as_of = as_of or business_today()
