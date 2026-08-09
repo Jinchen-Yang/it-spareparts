@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app import config
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder, FProjectExpense
-from app.services import maintenance_cost, maintenance_workbook_renderer
+from app.services import maintenance_cost, maintenance_demands, maintenance_workbook_renderer
 
 
 _INVALID_MEMBER_CHARS = re.compile(r'[\x00-\x1f\x7f/\\:*?"<>|]+')
@@ -122,7 +122,10 @@ def _requested_scope_filters(
     date_from: date | None,
     date_to: date | None,
 ) -> tuple:
-    filters = (FMaintenanceOrder.data_status == config.ACTIVE_STATUS,)
+    filters = (
+        FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+        maintenance_demands.active_demand_condition(),
+    )
     if date_from is not None and date_to is not None:
         filters += (
             FMaintenanceOrder.order_date >= date_from,
@@ -232,6 +235,7 @@ def _preflight_resource_limits(
     part_filters = [
         FMaintenanceOrder.linked_sales_order_no.in_(contracts),
         FMaintenanceOrder.order_date >= config.MAINT_COST_START_DATE,
+        maintenance_demands.active_demand_condition(),
     ]
     if config.ACTIVE_STATUS_ONLY:
         part_filters.append(FMaintenanceOrder.data_status == config.ACTIVE_STATUS)
@@ -472,6 +476,7 @@ def build_contract_workbook_file(
             db.scalar(
                 select(func.count(FMaintenanceOrder.id)).where(
                     FMaintenanceOrder.linked_sales_order_no == contract,
+                    maintenance_demands.active_demand_condition(),
                 )
             )
         )

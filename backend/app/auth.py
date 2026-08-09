@@ -216,6 +216,7 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
     # Shared credentials are not a real SysUser identity and therefore never
     # advertise the high-risk project-master write capability to the client.
     perms["action_maintenance_project_manage"] = False
+    perms["action_maintenance_demand_delete"] = False
     _ev("login_success", role, {"path": "shared_password"})
     token, exp = _make_token(
         role,

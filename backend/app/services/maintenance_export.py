@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app import config
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.security import UserContext, apply_field_visibility, is_field_hidden
-from app.services import maintenance_cost_quality
+from app.services import maintenance_cost_quality, maintenance_demands
 
 
 ORDER_HEADERS = (
@@ -141,7 +141,10 @@ def _cleanup_workbook(workbook: Workbook) -> None:
 
 
 def _date_filters(date_from: date | None, date_to: date | None) -> tuple:
-    filters = (FMaintenanceOrder.data_status == config.ACTIVE_STATUS,)
+    filters = (
+        FMaintenanceOrder.data_status == config.ACTIVE_STATUS,
+        maintenance_demands.active_demand_condition(),
+    )
     if date_from is not None and date_to is not None:
         filters += (
             FMaintenanceOrder.order_date >= date_from,

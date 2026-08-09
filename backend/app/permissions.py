@@ -41,6 +41,8 @@ ACTION_KEYS: list[str] = [
     "action_maintenance_roundtrip_apply",
     # 维护稳定维保项目主档（建档/改展示信息/归档恢复）。
     "action_maintenance_project_manage",
+    # WBDD 整单逻辑删除（跨页复核 + 服务端 7 秒双确认）。
+    "action_maintenance_demand_delete",
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ACTION_KEYS, *ROW_KEYS]
@@ -72,6 +74,7 @@ LABELS: dict[str, str] = {
     "action_data_quality_review": "数据疑点核实（逐条确认/重新打开）",
     "action_maintenance_roundtrip_apply": "维保固定工作簿直接回填",
     "action_maintenance_project_manage": "维保项目主档管理",
+    "action_maintenance_demand_delete": "维保需求单安全删除",
 }
 
 
@@ -92,7 +95,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     # boss 由 _full() 生成会把全部动作打开；账号管理与数据疑点核实必须显式关闭。
     "boss": {**_full(), "page_accounts": False, "action_account_manage": False,
              "action_data_quality_review": False,
-             "action_maintenance_project_manage": False},
+             "action_maintenance_project_manage": False,
+             "action_maintenance_demand_delete": False},
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
     # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
     # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
@@ -104,6 +108,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "action_data_quality_review": False,
                  "action_maintenance_roundtrip_apply": False,
                  "action_maintenance_project_manage": False,
+                 "action_maintenance_demand_delete": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
@@ -127,6 +132,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_data_quality_review": False,
         "action_maintenance_roundtrip_apply": False,
         "action_maintenance_project_manage": False,
+        "action_maintenance_demand_delete": False,
         "own_customers_only": True,
     },
     "purchaser": {
@@ -150,6 +156,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         # 管理员可给同时具备成本+利润可见权限的指定工作人员单独授权。
         "action_maintenance_roundtrip_apply": False,
         "action_maintenance_project_manage": False,
+        "action_maintenance_demand_delete": False,
         "own_customers_only": False,
     },
 }
@@ -200,6 +207,7 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_data_quality_review": "page_governance",
     "action_maintenance_roundtrip_apply": "page_maintenance",
     "action_maintenance_project_manage": "page_maintenance",
+    "action_maintenance_demand_delete": "page_maintenance",
 }
 
 # 数据之间的可推导依赖：营收在经营报表中是公开口径，毛利一旦可见，
@@ -275,6 +283,7 @@ HIGH_RISK_KEYS: set[str] = {
     "action_account_manage",
     "action_maintenance_roundtrip_apply",
     "action_maintenance_project_manage",
+    "action_maintenance_demand_delete",
 }
 
 # 前端矩阵五分组（顺序即展示序）：页面入口 / 数据可见 / 操作能力 / 行级范围 / 高风险管理
@@ -293,6 +302,7 @@ UI_GROUPS: list[dict] = [
          "action_data_quality_review",
          "action_maintenance_roundtrip_apply",
          "action_maintenance_project_manage",
+         "action_maintenance_demand_delete",
      ]},
     {"key": "row", "label": "行级范围",
      "hint": "在能看的数据里进一步收紧范围（限制型开关：勾上=看得更少）。",
@@ -516,6 +526,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "项目数据维护人员（需单独授权）"],
         "sensitivity": "critical",
         "risk": "项目身份会成为回款、领用、费用和待办的关联地基；误建或误归档会影响后续全链路归集。",
+    },
+    "action_maintenance_demand_delete": {
+        "label": "维保需求单安全删除",
+        "summary": "允许把误导入的 WBDD 整单逻辑删除，并从全部有效业务视图中排除。",
+        "can": "跨页选择需求单、查看完整复核清单、填写理由并经两次确认后执行可恢复的逻辑删除。",
+        "cannot": "不能删除单行备件、不能物理删除原始订单或项目归属；恢复必须走独立实名管理员入口。",
+        "typical": ["管理员", "管理员指定的数据维护人员"],
+        "sensitivity": "critical",
+        "risk": "会改变成本、库存推导、项目看板和导出的有效数据范围；系统强制服务端等待与整批原子校验。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {
