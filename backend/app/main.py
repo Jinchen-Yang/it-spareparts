@@ -22,6 +22,7 @@ from app.api import (
     maintenance_project_operations,
     maintenance_project_workbooks,
     maintenance_projects,
+    maintenance_warehouse,
     parts,
     pool_analysis,
     pools,
@@ -75,6 +76,7 @@ app.include_router(maintenance_demands.router, prefix=settings.api_prefix)
 # route so literal paths such as ``/operations`` cannot be captured as an id.
 app.include_router(maintenance_project_operations.router, prefix=settings.api_prefix)
 app.include_router(maintenance_project_workbooks.router, prefix=settings.api_prefix)
+app.include_router(maintenance_warehouse.router, prefix=settings.api_prefix)
 app.include_router(maintenance_projects.router, prefix=settings.api_prefix)
 app.include_router(maintenance_audit.router, prefix=settings.api_prefix)
 app.include_router(dashboard.router, prefix=settings.api_prefix)

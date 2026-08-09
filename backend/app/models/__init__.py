@@ -31,6 +31,14 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
 )
+from app.models.maintenance_warehouse import (
+    MaintenanceWarehouseAmbiguity,
+    MaintenanceWarehouseAuditEvent,
+    MaintenanceWarehouseDocument,
+    MaintenanceWarehouseDocumentLine,
+    MaintenanceWarehouseDocumentLink,
+    MaintenanceWarehouseImportBatch,
+)
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -89,6 +97,12 @@ __all__ = [
     "MaintenanceProjectWorkbookValidation",
     "MaintenanceSiteIssue",
     "MaintenanceSiteIssueLine",
+    "MaintenanceWarehouseImportBatch",
+    "MaintenanceWarehouseDocument",
+    "MaintenanceWarehouseDocumentLine",
+    "MaintenanceWarehouseDocumentLink",
+    "MaintenanceWarehouseAmbiguity",
+    "MaintenanceWarehouseAuditEvent",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",
