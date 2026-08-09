@@ -30,7 +30,7 @@ flowchart LR
 
 | 概念 | 解决什么问题 | 依赖的上游概念 | 被什么下游调用 |
 |---|---|---|---|
-| Capability | 把“工具能做什么、影响什么、谁能用”从提示词变成服务端契约 | 登录身份、RBAC、业务服务 | Plan Validator、Tool Gateway、审计 |
+| Capability | 把“工具能做什么、影响什么、谁能用、数据去哪”从提示词变成服务端契约 | 登录身份、RBAC、业务服务、出境策略 | Plan Validator、Tool Gateway、审计 |
 | Agent Task | 让一次复杂目标拥有稳定身份和生命周期 | 用户目标、Capability | Task Plan、运行账本、前端任务页 |
 | Task Plan | 把模型建议变成可验证的 DAG，阻止无限循环和越权工具 | Agent Task、Capability、预算 | Scheduler、LangGraph adapter |
 | Agent Step | 让每次能力调用可重试、可恢复、可追责 | Task Plan、依赖步骤 | Tool Gateway、Evidence Package |
@@ -72,9 +72,11 @@ ready -> expired
 
 只有 `ready` 可下载。文件先写到同文件系统临时位置，完成二次打开、格式、大小和 SHA-256 校验后原子 rename；元数据发布失败时不能留下可猜测的正式对象。
 
+生成制品还必须保存由服务端计算的 `access_scope`，而不是只保存 owner。它至少覆盖创建时的数据权限、页面范围和行级限制；每次下载/预览都用当前 UserContext 判断当前范围是否仍覆盖该快照。用户降权或从全量范围变成“仅本人”后，旧敏感制品立即不可访问，只能在当前权限下重新生成。用户自己上传的原件与系统生成制品分开分类；缺少 scope 的 legacy 生成件执行显式保守策略，不能默认为 unrestricted。
+
 ## 4. 只读能力策略
 
-允许的效果类型只有：
+允许的效果类型只有；一个复合能力可以声明多个 effect：
 
 | Effect | 含义 | 示例 |
 |---|---|---|
@@ -82,7 +84,7 @@ ready -> expired
 | `file_read` | 读取当前用户拥有的不可变输入 | 表结构检查、分页读取 |
 | `artifact_create` | 提交提案并由确定性服务生成新文件 | Excel 派生件、证据报告 |
 
-`business_write`、Shell、任意 URL fetch、动态代码执行不进入注册表。即使模型伪造工具名或参数，dispatch 也必须重新做身份、效果和资源检查。
+`business_write`、Shell、任意 URL fetch、动态代码执行不进入注册表。例如基于原模板生成新工作簿同时具有 `file_read + artifact_create`，不能用单一标签隐藏其中一个效果。即使模型伪造工具名或参数，dispatch 也必须重新做身份、效果和资源检查。
 
 效果与数据出境是两个正交维度。每个 Capability 还必须声明：
 
@@ -93,6 +95,8 @@ ready -> expired
 | `none` | 能力本身不发起网络出境 | 允许仍取决于 effect/RBAC |
 
 `read_document` 不能因为名字是“读文件”就被视为纯本地操作：图片和扫描 PDF 可能调用 Vision provider。首期将它整体视为外部出境能力；未授权时 provider 必须零调用。后续可以拆成“本地抽取”和“视觉识别”两个更小的 Capability。
+
+Capability 审计同样遵循最小化：只记录 actor、capability、参数键/集合长度/摘要 hash、Artifact ID 与状态。正常、策略拒绝和 handler 异常都不能把 raw args/results、单元格、整行报价、SQL、文件正文、URL 或凭据复制进日志。
 
 这里“AI 只读”的准确含义是：**业务事实和源文件只读；Agent 控制面可以写自己的运行记录、审计和不可变派生制品。**
 
@@ -144,9 +148,9 @@ inspect -> infer schema -> propose mapping -> validate
 硬规则先于模型：
 
 - 无法解析为系统正式 PN：`need_info`。
-- 不在 active 互通池，且近 6 个月采购、销售、维保消耗全为 0：`recommend_reject`。
+- 近 6 个月采购次数为 0 且销售次数为 0：`recommend_reject`。active 互通池或维保消耗证据不能覆盖这条甲方硬规则。
 - 低频、小众 PN 必须带明确项目、设备、故障或合同证据，否则 `need_info`。
-- 高频、通用池或稳定消耗只是正向证据；仍需结合库存、在途和安全库存，不能自动批准。
+- 在通过“半年内有采购或销售”硬门槛后，高频、active 通用池或稳定消耗才作为正向证据；仍需结合库存、在途和安全库存，不能自动批准。
 
 “高频”的阈值必须由甲方确认并版本化；在确认前只能输出候选分布和模拟结果，不能让 LLM 临时定义。
 
@@ -186,11 +190,12 @@ inspect -> infer schema -> propose mapping -> validate
 
 ## 10. 实施依赖
 
-1. #218：Capability Kernel + Artifact Delivery v2。
-2. Durable Task/Step ledger 与计划校验器。
-3. Query Broker 与 Text2SQL。
-4. GPU 私网推理网关。
-5. 维保补库评审图与人工模板清洗图。
-6. 浏览器 E2E、提示注入、权限、故障恢复、大文件和并发压测。
+1. #219：Capability Policy。
+2. #220：Artifact Store；#221：结构化交付；#222：上传/解析边界。
+3. Durable Task/Step ledger 与计划校验器。
+4. Query Broker 与 Text2SQL。
+5. GPU 私网推理网关。
+6. 维保补库评审图与人工模板清洗图。
+7. 浏览器 E2E、提示注入、权限、故障恢复、大文件和并发压测。
 
 每个分片独立 PR、独立审核、独立发布门禁；“可合并”不等于“可生产”。
