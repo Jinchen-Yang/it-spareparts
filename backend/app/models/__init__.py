@@ -41,6 +41,17 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssueLine,
     MaintenanceSiteIssueReturnEvent,
 )
+from app.models.maintenance_manager import (
+    BusinessFile,
+    BusinessFileDownloadAudit,
+    BusinessFileLink,
+    MaintenanceAcceptanceOperation,
+    MaintenanceAcceptanceDeliverable,
+    MaintenanceCollectionMilestone,
+    MaintenanceManagerUploadBatch,
+    MaintenanceManagerUploadBatchProject,
+    MaintenanceServicePeriod,
+)
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -107,6 +118,15 @@ __all__ = [
     "MaintenanceSiteIssueDeliverySource",
     "MaintenanceSiteIssueLine",
     "MaintenanceSiteIssueReturnEvent",
+    "MaintenanceManagerUploadBatch",
+    "MaintenanceManagerUploadBatchProject",
+    "MaintenanceServicePeriod",
+    "MaintenanceCollectionMilestone",
+    "MaintenanceAcceptanceDeliverable",
+    "BusinessFile",
+    "BusinessFileDownloadAudit",
+    "BusinessFileLink",
+    "MaintenanceAcceptanceOperation",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",

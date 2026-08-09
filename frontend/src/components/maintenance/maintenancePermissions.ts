@@ -5,10 +5,13 @@ interface LocalMaintenancePermissions {
   data_profit?: boolean;
   own_customers_only?: boolean;
   action_maintenance_roundtrip_apply?: boolean;
+  action_maintenance_manager_workbook_apply?: boolean;
   action_maintenance_project_manage?: boolean;
   action_maintenance_demand_delete?: boolean;
   action_maintenance_site_issue_manage?: boolean;
   action_maintenance_bad_return_manage?: boolean;
+  action_maintenance_acceptance_submit?: boolean;
+  action_maintenance_acceptance_review?: boolean;
 }
 
 export interface MaintenanceCapabilities {
@@ -23,6 +26,10 @@ export interface MaintenanceCapabilities {
   canDeleteDemand: boolean;
   canManageSiteIssues: boolean;
   canManageBadReturns: boolean;
+  canUseManagerWorkbook: boolean;
+  canApplyManagerWorkbook: boolean;
+  canSubmitAcceptance: boolean;
+  canReviewAcceptance: boolean;
 }
 
 function readLocalPermissions(): LocalMaintenancePermissions {
@@ -121,6 +128,23 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
     canDownloadRoundtrip,
     canApplyRoundtrip: canDownloadRoundtrip && (
       isAdmin || permissions.action_maintenance_roundtrip_apply === true
+    ),
+    canUseManagerWorkbook: canViewContract && (
+      isAdmin || permissions.page_maintenance === true
+    ),
+    canApplyManagerWorkbook: canViewContract && (
+      isAdmin || (
+        permissions.page_maintenance === true
+        && permissions.action_maintenance_manager_workbook_apply === true
+      )
+    ),
+    canSubmitAcceptance: isAdmin || (
+      permissions.page_maintenance === true
+      && permissions.action_maintenance_acceptance_submit === true
+    ),
+    canReviewAcceptance: isAdmin || (
+      permissions.page_maintenance === true
+      && permissions.action_maintenance_acceptance_review === true
     ),
     canManageProject: isAdmin || (
       permissions.page_maintenance === true

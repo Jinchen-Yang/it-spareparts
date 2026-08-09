@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, Card, Empty, Space, Table, Tag } from "antd";
+import { Alert, Button, Card, Descriptions, Empty, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { Link, useParams } from "react-router-dom";
 
@@ -13,6 +13,7 @@ import {
 } from "../../api/maintenanceOperations";
 import ContractPortfolio from "../../components/maintenance/ContractPortfolio";
 import BadReturnPanel from "../../components/maintenance/BadReturnPanel";
+import MaintenanceAcceptancePanel from "../../components/maintenance/MaintenanceAcceptancePanel";
 import ProjectFinancialProgress from "../../components/maintenance/ProjectFinancialProgress";
 import ProjectWorkbookActions from "../../components/maintenance/ProjectWorkbookActions";
 import SiteIssueWorkflowPanel from "../../components/maintenance/SiteIssueWorkflowPanel";
@@ -306,6 +307,47 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
           )}
         </Card>
       </div>
+
+      <Card title="项目跟踪与验收" data-testid="manager-tracking-card">
+        {project.manager_tracking ? (
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <Descriptions bordered size="small" column={{ xs: 1, md: 3 }}>
+              <Descriptions.Item label="维保开始">
+                {project.manager_tracking.service_period.service_start || (
+                  <Typography.Text type="secondary">待补</Typography.Text>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="维保结束">
+                {project.manager_tracking.service_period.service_end || (
+                  <Typography.Text type="secondary">待补</Typography.Text>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="下一回款计划">
+                {project.manager_tracking.next_collection_milestone ? (
+                  <Space wrap size={4}>
+                    <span>
+                      {project.manager_tracking.next_collection_milestone.contract_no || "未标合同"}
+                      {` · 第 ${project.manager_tracking.next_collection_milestone.sequence} 期 · `}
+                      {project.manager_tracking.next_collection_milestone.planned_date || "日期待补"}
+                    </span>
+                    {project.manager_tracking.next_collection_milestone.is_overdue && (
+                      <Tag color="red">
+                        已逾期 {project.manager_tracking.next_collection_milestone.overdue_days} 天
+                      </Tag>
+                    )}
+                  </Space>
+                ) : <Typography.Text type="secondary">计划节点待补</Typography.Text>}
+              </Descriptions.Item>
+            </Descriptions>
+            <MaintenanceAcceptancePanel
+              projectId={project.project_id}
+              onChanged={() => void load(detailPages)}
+            />
+          </Space>
+        ) : (
+          <Alert type="warning" showIcon message="项目跟踪字段尚未生成，请刷新后重试。" />
+        )}
+      </Card>
 
       <Card title="全部关联合同">
         <ContractPortfolio contracts={project.contracts} />

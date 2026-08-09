@@ -44,11 +44,13 @@ function ProjectReturnStatus({ project }: { project: MaintenanceProjectOperation
 export default function MaintenanceProjectCard({
   project,
   visibility,
+  canUseManagerWorkbook = false,
   canManageAssignment = false,
   onAssignmentChanged,
 }: {
   project: MaintenanceProjectOperationsSummary;
   visibility: ProjectFinancialVisibility;
+  canUseManagerWorkbook?: boolean;
   canManageAssignment?: boolean;
   onAssignmentChanged?: () => void;
 }) {
@@ -62,6 +64,7 @@ export default function MaintenanceProjectCard({
   const hasPendingMonthlyUpload = taskCandidates.some(
     (task) => task.task_type === "项目经理月度更新" && task.status !== "completed",
   );
+  const tracking = project.manager_tracking;
   return (
     <Card
       data-testid={`maintenance-project-card-${project.project_id}`}
@@ -81,13 +84,14 @@ export default function MaintenanceProjectCard({
         <Link key="detail" to={`/maintenance/projects/${encodeURIComponent(project.project_id)}`}>
           查看项目
         </Link>,
-        ...(hasPendingMonthlyUpload ? [
-          <span
+        ...(hasPendingMonthlyUpload && canUseManagerWorkbook ? [
+          <Link
             key="monthly-upload-pending"
-            title="项目经理本人范围的月度全量上传通道待接入"
+            to="/maintenance/project-manager/monthly-workbook"
+            title="打开本人范围的月度全量工作簿"
           >
-            月度全量上传待接入
-          </span>,
+            上传月度全量表
+          </Link>,
         ] : []),
         ...(canManageAssignment ? [
           <ProjectManagerAssignmentControl
@@ -145,6 +149,32 @@ export default function MaintenanceProjectCard({
       </div>
       <ProjectFinancialProgress metrics={project.metrics} visibility={visibility} />
       <ProjectReturnStatus project={project} />
+      {tracking && (
+        <div className="maintenance-project-task" data-testid="manager-tracking-summary">
+          <Space wrap size={[6, 6]}>
+            <Tag>
+              维保：{tracking.service_period.service_start || "待补"}
+              {" ～ "}{tracking.service_period.service_end || "待补"}
+            </Tag>
+            {tracking.next_collection_milestone ? (
+              <Tag color={tracking.next_collection_milestone.is_overdue ? "red" : "blue"}>
+                下一回款：{tracking.next_collection_milestone.contract_no || "未标合同"}
+                {` 第 ${tracking.next_collection_milestone.sequence} 期`}
+                {tracking.next_collection_milestone.is_overdue
+                  ? `，逾期 ${tracking.next_collection_milestone.overdue_days} 天`
+                  : ""}
+              </Tag>
+            ) : <Tag color="orange">回款计划待补</Tag>}
+            <Tag color={tracking.acceptance.approval_status === "approved"
+              ? "green"
+              : tracking.acceptance.is_overdue ? "red" : "gold"}
+            >
+              验收：{tracking.acceptance.due_date || "截止日待补"}
+              {tracking.acceptance.is_overdue ? `，逾期 ${tracking.acceptance.overdue_days} 天` : ""}
+            </Tag>
+          </Space>
+        </div>
+      )}
       <Space wrap size={[6, 6]}>
         {missingLabels.map((label) => (
           <Tag key={label} color="orange">{label}</Tag>

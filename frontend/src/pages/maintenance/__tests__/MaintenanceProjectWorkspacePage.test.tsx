@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 
 const {
   getMaintenanceProjectWorkspace,
+  getMaintenanceAcceptance,
   searchMaintenanceBadReturns,
   searchMaintenanceReturnObligations,
   searchSiteIssueCandidates,
@@ -11,6 +12,7 @@ const {
   taxBasisState,
 } = vi.hoisted(() => ({
   getMaintenanceProjectWorkspace: vi.fn(),
+  getMaintenanceAcceptance: vi.fn(),
   searchMaintenanceBadReturns: vi.fn(),
   searchMaintenanceReturnObligations: vi.fn(),
   searchSiteIssueCandidates: vi.fn(),
@@ -25,6 +27,7 @@ vi.mock("../../../api/maintenanceOperations", async () => {
   return {
     ...actual,
     getMaintenanceProjectWorkspace,
+    getMaintenanceAcceptance,
     searchMaintenanceBadReturns,
     searchMaintenanceReturnObligations,
     searchSiteIssueCandidates,
@@ -103,6 +106,34 @@ const workspace = {
     },
     return_rate: workspaceReturnRate,
     reminder_count: 1,
+    manager_tracking: {
+      service_period: {
+        service_start: "2026-01-01",
+        service_end: "2026-12-31",
+        completeness_state: "complete",
+      },
+      next_collection_milestone: {
+        project_contract_id: "pc-1",
+        contract_no: "XSDD-001",
+        sequence: 2,
+        planned_date: "2026-08-01",
+        planned_amount: 200,
+        overdue_days: 7,
+        is_overdue: true,
+      },
+      acceptance: {
+        deliverable_id: "deliverable-1",
+        due_date: "2026-08-31",
+        submission_status: "not_submitted",
+        approval_status: "not_reviewed",
+        configuration_state: "configured",
+        rejection_reason: null,
+        attachment_count: 0,
+        overdue_days: 0,
+        is_overdue: false,
+        version: 1,
+      },
+    },
     as_of: "2026-08-08",
   },
   collection_snapshots: {
@@ -271,6 +302,25 @@ beforeEach(() => {
   searchMaintenanceBadReturns.mockResolvedValue({
     data: { project_id: "project-1", rows: [], total: 0, page: 1, page_size: 20 },
   });
+  getMaintenanceAcceptance.mockResolvedValue({
+    data: {
+      deliverable_id: "deliverable-1",
+      project_id: "project-1",
+      deliverable_type: "acceptance_report",
+      due_date: "2026-08-31",
+      submission_status: "not_submitted",
+      submitted_at: null,
+      submitted_by: null,
+      approval_status: "not_reviewed",
+      approved_at: null,
+      approved_by: null,
+      rejection_reason: null,
+      configuration_state: "configured",
+      version: 1,
+      review_policy: "admin_only_pending_business_role_configuration",
+      attachments: [],
+    },
+  });
 });
 afterEach(() => {
   cleanup();
@@ -334,6 +384,14 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(within(expenses).getByRole("columnheader", { name: "金额（不含税）" }))
       .toBeInTheDocument();
     expect(screen.getByText("存在待补成本")).toBeInTheDocument();
+    const tracking = screen.getByTestId("manager-tracking-card");
+    expect(within(tracking).getByText("2026-01-01")).toBeInTheDocument();
+    expect(within(tracking).getByText("2026-12-31")).toBeInTheDocument();
+    expect(within(tracking).getByText(/XSDD-001 · 第 2 期/)).toBeInTheDocument();
+    expect(within(tracking).getByText("已逾期 7 天")).toBeInTheDocument();
+    expect(within(tracking).getByText("验收审批业务角色尚未配置")).toBeInTheDocument();
+    expect(within(tracking).getByRole("button", { name: /上传验收附件/ }))
+      .toBeInTheDocument();
 
     const preview = screen.getByTestId("workbook-four-sheet-preview");
     for (const sheet of ["01_总览", "02_备件消耗", "03_报销单", "04_项目经理追踪"]) {

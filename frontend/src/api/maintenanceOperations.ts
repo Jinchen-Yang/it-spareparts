@@ -105,8 +105,38 @@ export interface MaintenanceProjectOperationsSummary {
   manager_assignment: MaintenanceManagerAssignment | null;
   task_summary: MaintenanceProjectTaskSummary;
   missing_data_labels: string[];
-  attachment_status: "not_integrated" | "missing" | "available" | string;
+  attachment_status: "missing" | "available" | string;
+  manager_tracking?: MaintenanceManagerTracking;
   as_of: string;
+}
+
+export interface MaintenanceManagerTracking {
+  service_period: {
+    service_start: string | null;
+    service_end: string | null;
+    completeness_state: "complete" | "start_only" | "end_only" | "empty" | string;
+  };
+  next_collection_milestone: {
+    project_contract_id: string;
+    contract_no: string | null;
+    sequence: number;
+    planned_date: string | null;
+    planned_amount: number | null;
+    overdue_days: number;
+    is_overdue: boolean;
+  } | null;
+  acceptance: {
+    deliverable_id: string | null;
+    due_date: string | null;
+    submission_status: "not_submitted" | "submitted" | string;
+    approval_status: "not_reviewed" | "approved" | "rejected" | string;
+    configuration_state: "configured" | "pending_business_configuration" | string;
+    rejection_reason: string | null;
+    attachment_count: number;
+    overdue_days: number;
+    is_overdue: boolean;
+    version: number;
+  };
 }
 
 export interface MaintenanceProjectOperationsDirectory {
@@ -493,6 +523,132 @@ export interface MaintenanceWorkbookApplyResult {
   changed_rows: number;
   data_version: string;
   warnings?: string[];
+}
+
+export interface MaintenanceManagerWorkbookBatchStatus {
+  batch_id: string;
+  status: "valid" | "error" | "applied" | "expired" | string;
+  created_at: string;
+  expires_at: string;
+  applied_at: string | null;
+  result: MaintenanceManagerWorkbookApplyResult | null;
+  scope_matches_current: boolean;
+}
+
+export interface MaintenanceManagerWorkbookStatus {
+  report_month: string;
+  project_count: number;
+  scope_version: string;
+  data_version: string;
+  latest_batch: MaintenanceManagerWorkbookBatchStatus | null;
+  acceptance_configuration: "configured" | "pending_business_configuration" | string;
+  attachment_carrier: "controlled_business_file" | "pending_business_configuration" | string;
+  approval_role: "admin_only_pending_business_configuration" | "pending_business_configuration" | string;
+}
+
+export interface MaintenanceManagerWorkbookIssue {
+  code: string;
+  message: string;
+  sheet: string | null;
+  row: number | null;
+  column: string | null;
+}
+
+export interface MaintenanceManagerWorkbookValidation {
+  validation_token: string;
+  batch_id: string;
+  status: "valid" | "error" | "applied" | "expired" | string;
+  report_month: string;
+  data_version: string;
+  file_sha256: string;
+  changes: {
+    service_periods: number;
+    planned_collection_milestones: number;
+    acceptance_due_dates: number;
+    total: number;
+  };
+  items: MaintenanceManagerWorkbookChangePreview[];
+  warnings: MaintenanceManagerWorkbookIssue[];
+  errors: MaintenanceManagerWorkbookIssue[];
+  unchanged: boolean;
+  can_apply: boolean;
+  already_applied: boolean;
+  expires_at: string;
+}
+
+export interface MaintenanceManagerWorkbookChangePreview {
+  kind: "service_period" | "planned_collection_milestone" | "acceptance_due_date" | string;
+  project_id: string;
+  project_code: string | null;
+  project_name: string | null;
+  project_contract_id?: string | null;
+  contract_no: string | null;
+  sequence: number | null;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+}
+
+export interface MaintenanceManagerWorkbookApplyResult {
+  applied: boolean;
+  replayed: boolean;
+  batch_id: string;
+  changed_rows: number;
+  project_count: number;
+  warnings: number;
+  report_month: string;
+}
+
+export interface MaintenanceAcceptanceAttachment {
+  file_id: string;
+  original_filename: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+  uploaded_by: string;
+  uploaded_at: string;
+}
+
+export interface MaintenanceAcceptanceDeliverable {
+  deliverable_id: string | null;
+  project_id: string;
+  deliverable_type: "acceptance_report";
+  due_date: string | null;
+  submission_status: "not_submitted" | "submitted" | string;
+  submitted_at: string | null;
+  submitted_by: string | null;
+  approval_status: "not_reviewed" | "approved" | "rejected" | string;
+  approved_at: string | null;
+  approved_by: string | null;
+  rejection_reason: string | null;
+  configuration_state: "configured" | "pending_business_configuration" | string;
+  version: number;
+  review_policy: "admin_only_pending_business_role_configuration" | string;
+  attachments: MaintenanceAcceptanceAttachment[];
+}
+
+export interface MaintenanceAcceptanceSearchRow {
+  project_id: string;
+  project_code: string;
+  display_name: string;
+  acceptance: MaintenanceAcceptanceDeliverable;
+}
+
+export interface MaintenanceAcceptanceDirectory {
+  rows: MaintenanceAcceptanceSearchRow[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface MaintenanceAcceptanceMutationResult {
+  replayed: boolean;
+  project_id: string;
+  deliverable_id: string;
+  version: number;
+  submission_status?: string;
+  approval_status?: string;
+  rejection_reason?: string | null;
+  file_id?: string;
 }
 
 export interface MaintenanceCostReference {
@@ -948,6 +1104,106 @@ export const applyMaintenanceProjectWorkbook = (
   `${projectBase(projectId)}/workbook/apply`,
   input,
 );
+
+export const getMaintenanceManagerWorkbookStatus = (reportMonth: string) =>
+  api.get<MaintenanceManagerWorkbookStatus>(
+    "/maintenance/project-manager/workbooks/v3/status",
+    { params: { report_month: reportMonth } },
+  );
+
+export const downloadMaintenanceManagerWorkbook = (reportMonth: string) =>
+  api.get<Blob>("/maintenance/project-manager/workbooks/v3", {
+    params: { report_month: reportMonth },
+    responseType: "blob",
+  });
+
+export const validateMaintenanceManagerWorkbook = (
+  reportMonth: string,
+  file: File,
+) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api.post<MaintenanceManagerWorkbookValidation>(
+    "/maintenance/project-manager/workbooks/v3/validate",
+    form,
+    { params: { report_month: reportMonth }, timeout: 120000 },
+  );
+};
+
+export const applyMaintenanceManagerWorkbook = (
+  input: { validation_token: string; data_version: string },
+) => api.post<MaintenanceManagerWorkbookApplyResult>(
+  "/maintenance/project-manager/workbooks/v3/apply",
+  input,
+);
+
+export const searchMaintenanceAcceptance = (
+  input: {
+    q?: string;
+    submission_status?: "not_submitted" | "submitted" | "not_configured";
+    approval_status?: "not_reviewed" | "approved" | "rejected";
+    page?: number;
+    page_size?: number;
+  } = {},
+) => api.post<MaintenanceAcceptanceDirectory>(
+  "/maintenance/acceptance-deliverables/search",
+  {
+    q: input.q?.trim() || "",
+    submission_status: input.submission_status,
+    approval_status: input.approval_status,
+    page: input.page ?? 1,
+    page_size: input.page_size ?? 24,
+  },
+);
+
+export const getMaintenanceAcceptance = (projectId: string) =>
+  api.get<MaintenanceAcceptanceDeliverable>(`${projectBase(projectId)}/acceptance`);
+
+export const uploadMaintenanceAcceptanceAttachment = (
+  projectId: string,
+  input: { expected_version: number; file: File; idempotencyKey: string },
+) => {
+  const form = new FormData();
+  form.append("expected_version", String(input.expected_version));
+  form.append("file", input.file);
+  return api.post<MaintenanceAcceptanceMutationResult>(
+    `${projectBase(projectId)}/acceptance/attachments`,
+    form,
+    { headers: { "Idempotency-Key": input.idempotencyKey }, timeout: 120000 },
+  );
+};
+
+export const submitMaintenanceAcceptance = (
+  projectId: string,
+  input: { expected_version: number; idempotencyKey: string },
+) => api.post<MaintenanceAcceptanceMutationResult>(
+  `${projectBase(projectId)}/acceptance/submit`,
+  { expected_version: input.expected_version },
+  { headers: { "Idempotency-Key": input.idempotencyKey } },
+);
+
+export const reviewMaintenanceAcceptance = (
+  deliverableId: string,
+  input: {
+    expected_version: number;
+    decision: "approve" | "reject";
+    reason?: string;
+    idempotencyKey: string;
+  },
+) => api.post<MaintenanceAcceptanceMutationResult>(
+  `/maintenance/acceptance-deliverables/${encodeURIComponent(deliverableId)}/review`,
+  {
+    expected_version: input.expected_version,
+    decision: input.decision,
+    reason: input.reason,
+  },
+  { headers: { "Idempotency-Key": input.idempotencyKey } },
+);
+
+export const downloadMaintenanceAcceptanceAttachment = (fileId: string) =>
+  api.get<Blob>(`/maintenance/acceptance-files/${encodeURIComponent(fileId)}`, {
+    responseType: "blob",
+  });
 
 export const listMaintenanceCostGaps = (
   projectId: string,

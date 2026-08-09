@@ -13,6 +13,7 @@ vi.mock("../../api", () => ({
 }));
 
 import {
+  applyMaintenanceManagerWorkbook,
   applyMaintenanceProjectWorkbook,
   archiveMaintenanceProjectManager,
   assignMaintenanceProjectManager,
@@ -20,8 +21,10 @@ import {
   confirmSiteIssue,
   createMaintenanceBadReturnDraft,
   createSiteIssueDraft,
+  downloadMaintenanceManagerWorkbook,
   downloadMaintenanceProjectWorkbook,
   downloadMaintenanceWorkbookValidationErrors,
+  getMaintenanceManagerWorkbookStatus,
   getMaintenanceProjectWorkspace,
   listMaintenanceCostGaps,
   listMaintenanceProjectOperations,
@@ -40,6 +43,7 @@ import {
   validateMaintenanceProjectWorkbook,
   voidMaintenanceBadReturn,
   voidSiteIssue,
+  validateMaintenanceManagerWorkbook,
 } from "../maintenanceOperations";
 
 beforeEach(() => {
@@ -1151,5 +1155,41 @@ describe("maintenance operations API", () => {
       cost_amount_ex_tax: 200,
       cost_amount_inc_tax: 226,
     }));
+  });
+
+  it("项目经理 v3 工作簿固定走本人范围的下载、校验和应用入口", () => {
+    const file = new File(["synthetic"], "manager-v3.xlsx");
+
+    getMaintenanceManagerWorkbookStatus("2026-08");
+    downloadMaintenanceManagerWorkbook("2026-08");
+    validateMaintenanceManagerWorkbook("2026-08", file);
+    applyMaintenanceManagerWorkbook({
+      validation_token: "validation-v3",
+      data_version: "data-v3",
+    });
+
+    expect(get).toHaveBeenNthCalledWith(
+      1,
+      "/maintenance/project-manager/workbooks/v3/status",
+      { params: { report_month: "2026-08" } },
+    );
+    expect(get).toHaveBeenNthCalledWith(
+      2,
+      "/maintenance/project-manager/workbooks/v3",
+      { params: { report_month: "2026-08" }, responseType: "blob" },
+    );
+    expect(post.mock.calls[0][0]).toBe(
+      "/maintenance/project-manager/workbooks/v3/validate",
+    );
+    expect(post.mock.calls[0][1]).toBeInstanceOf(FormData);
+    expect(post.mock.calls[0][2]).toEqual({
+      params: { report_month: "2026-08" },
+      timeout: 120000,
+    });
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      "/maintenance/project-manager/workbooks/v3/apply",
+      { validation_token: "validation-v3", data_version: "data-v3" },
+    );
   });
 });

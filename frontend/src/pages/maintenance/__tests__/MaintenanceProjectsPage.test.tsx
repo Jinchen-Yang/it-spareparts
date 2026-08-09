@@ -129,7 +129,7 @@ const summary = {
     overdue_count: 0,
     rows: [],
   },
-  missing_data_labels: ["合同额待补", "成本待补", "附件状态待接入"],
+  missing_data_labels: ["合同额待补", "成本待补", "验收附件待上传"],
   attachment_status: "not_integrated",
   as_of: "2026-08-08",
 };
@@ -171,9 +171,11 @@ describe("MaintenanceProjectsPage", () => {
     expect(within(card).getByText(/合成项目经理 · manager_account/)).toBeInTheDocument();
     expect(within(card).getByText("待上传2026年08月月度全量工作簿")).toBeInTheDocument();
     expect(within(card).getByText(/完成依据：本人范围的月度全量上传批次/)).toBeInTheDocument();
-    expect(within(card).getByText("月度全量上传待接入")).toBeInTheDocument();
-    expect(within(card).queryByRole("link", { name: "月度全量上传待接入" })).toBeNull();
-    expect(within(card).getByText("附件状态待接入")).toBeInTheDocument();
+    expect(within(card).getByRole("link", { name: "上传月度全量表" })).toHaveAttribute(
+      "href",
+      "/maintenance/project-manager/monthly-workbook",
+    );
+    expect(within(card).getByText("验收附件待上传")).toBeInTheDocument();
     expect(within(card).getByRole("button", { name: "管理负责人" })).toBeInTheDocument();
     const returnStatus = within(card).getByTestId("project-return-status");
     expect(within(returnStatus).getByText("返还率待判定")).toBeInTheDocument();

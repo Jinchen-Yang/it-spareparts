@@ -39,6 +39,8 @@ ACTION_KEYS: list[str] = [
     "action_data_quality_review",  # 逐条核实采购/销售事实疑点
     # 直接应用固定维保回填工作簿（原子写订单/报销/人工成本），不走审批。
     "action_maintenance_roundtrip_apply",
+    # 项目经理本人范围月度全量工作簿：校验可读，应用另行授权。
+    "action_maintenance_manager_workbook_apply",
     # 维护稳定维保项目主档（建档/改展示信息/归档恢复）。
     "action_maintenance_project_manage",
     # WBDD 整单逻辑删除（跨页复核 + 服务端 7 秒双确认）。
@@ -47,6 +49,9 @@ ACTION_KEYS: list[str] = [
     "action_maintenance_site_issue_manage",
     # 登记、提交和仓库确认坏件返还；不直接修改成本或库存。
     "action_maintenance_bad_return_manage",
+    # 验收报告提交与审批严格分权；审批在业务角色未定前默认仅 admin。
+    "action_maintenance_acceptance_submit",
+    "action_maintenance_acceptance_review",
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ACTION_KEYS, *ROW_KEYS]
@@ -77,10 +82,13 @@ LABELS: dict[str, str] = {
     "action_account_manage": "账号与权限管理（建号/改权/批量/模板）",
     "action_data_quality_review": "数据疑点核实（逐条确认/重新打开）",
     "action_maintenance_roundtrip_apply": "维保固定工作簿直接回填",
+    "action_maintenance_manager_workbook_apply": "项目经理月度全量表确认应用",
     "action_maintenance_project_manage": "维保项目主档管理",
     "action_maintenance_demand_delete": "维保需求单安全删除",
     "action_maintenance_site_issue_manage": "现场备件领用管理",
     "action_maintenance_bad_return_manage": "维保坏件返还管理",
+    "action_maintenance_acceptance_submit": "维保验收报告提交与附件上传",
+    "action_maintenance_acceptance_review": "维保验收报告高风险审批",
 }
 
 
@@ -101,10 +109,13 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     # boss 由 _full() 生成会把全部动作打开；账号管理与数据疑点核实必须显式关闭。
     "boss": {**_full(), "page_accounts": False, "action_account_manage": False,
              "action_data_quality_review": False,
-             "action_maintenance_project_manage": False,
-             "action_maintenance_demand_delete": False,
-             "action_maintenance_site_issue_manage": False,
-             "action_maintenance_bad_return_manage": False},
+              "action_maintenance_manager_workbook_apply": False,
+              "action_maintenance_project_manage": False,
+              "action_maintenance_demand_delete": False,
+              "action_maintenance_site_issue_manage": False,
+              "action_maintenance_bad_return_manage": False,
+              "action_maintenance_acceptance_submit": False,
+              "action_maintenance_acceptance_review": False},
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
     # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
     # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
@@ -115,10 +126,13 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "action_pool_manage": False, "action_pool_set_policy": False,
                  "action_data_quality_review": False,
                  "action_maintenance_roundtrip_apply": False,
-                 "action_maintenance_project_manage": False,
-                 "action_maintenance_demand_delete": False,
-                 "action_maintenance_site_issue_manage": False,
-                 "action_maintenance_bad_return_manage": False,
+                  "action_maintenance_manager_workbook_apply": False,
+                  "action_maintenance_project_manage": False,
+                  "action_maintenance_demand_delete": False,
+                  "action_maintenance_site_issue_manage": False,
+                  "action_maintenance_bad_return_manage": False,
+                  "action_maintenance_acceptance_submit": False,
+                  "action_maintenance_acceptance_review": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
@@ -141,10 +155,13 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_pool_manage": False, "action_pool_set_policy": False,
         "action_data_quality_review": False,
         "action_maintenance_roundtrip_apply": False,
+        "action_maintenance_manager_workbook_apply": False,
         "action_maintenance_project_manage": False,
         "action_maintenance_demand_delete": False,
         "action_maintenance_site_issue_manage": False,
         "action_maintenance_bad_return_manage": False,
+        "action_maintenance_acceptance_submit": False,
+        "action_maintenance_acceptance_review": False,
         "own_customers_only": True,
     },
     "purchaser": {
@@ -167,10 +184,13 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         # 采购默认没有利润可见权限，故固定工作簿写入也默认失败关闭；
         # 管理员可给同时具备成本+利润可见权限的指定工作人员单独授权。
         "action_maintenance_roundtrip_apply": False,
+        "action_maintenance_manager_workbook_apply": False,
         "action_maintenance_project_manage": False,
         "action_maintenance_demand_delete": False,
         "action_maintenance_site_issue_manage": False,
         "action_maintenance_bad_return_manage": False,
+        "action_maintenance_acceptance_submit": False,
+        "action_maintenance_acceptance_review": False,
         "own_customers_only": False,
     },
 }
@@ -210,6 +230,7 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     # 逐条确认必须看得到原始价格和规则证据，不能在证据被脱敏时盲判。
     "action_data_quality_review": "data_purchase_cost",
     "action_maintenance_roundtrip_apply": "data_profit",
+    "action_maintenance_manager_workbook_apply": "data_profit",
     "action_maintenance_project_manage": "data_profit",
     "action_maintenance_site_issue_manage": "data_purchase_cost",
 }
@@ -221,10 +242,13 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_account_manage": "page_accounts",
     "action_data_quality_review": "page_governance",
     "action_maintenance_roundtrip_apply": "page_maintenance",
+    "action_maintenance_manager_workbook_apply": "page_maintenance",
     "action_maintenance_project_manage": "page_maintenance",
     "action_maintenance_demand_delete": "page_maintenance",
     "action_maintenance_site_issue_manage": "page_maintenance",
     "action_maintenance_bad_return_manage": "page_maintenance",
+    "action_maintenance_acceptance_submit": "page_maintenance",
+    "action_maintenance_acceptance_review": "page_maintenance",
 }
 
 # 数据之间的可推导依赖：营收在经营报表中是公开口径，毛利一旦可见，
@@ -299,10 +323,12 @@ HIGH_RISK_KEYS: set[str] = {
     "page_accounts",
     "action_account_manage",
     "action_maintenance_roundtrip_apply",
+    "action_maintenance_manager_workbook_apply",
     "action_maintenance_project_manage",
     "action_maintenance_demand_delete",
     "action_maintenance_site_issue_manage",
     "action_maintenance_bad_return_manage",
+    "action_maintenance_acceptance_review",
 }
 
 # 前端矩阵五分组（顺序即展示序）：页面入口 / 数据可见 / 操作能力 / 行级范围 / 高风险管理
@@ -320,10 +346,13 @@ UI_GROUPS: list[dict] = [
          "action_pool_set_policy",
          "action_data_quality_review",
          "action_maintenance_roundtrip_apply",
+         "action_maintenance_manager_workbook_apply",
          "action_maintenance_project_manage",
          "action_maintenance_demand_delete",
          "action_maintenance_site_issue_manage",
          "action_maintenance_bad_return_manage",
+         "action_maintenance_acceptance_submit",
+         "action_maintenance_acceptance_review",
      ]},
     {"key": "row", "label": "行级范围",
      "hint": "在能看的数据里进一步收紧范围（限制型开关：勾上=看得更少）。",
@@ -539,6 +568,15 @@ PERMISSION_META: dict[str, dict] = {
         "sensitivity": "critical",
         "risk": "会直接改写经营事实并触发成本重算；默认仅管理员和老板开启，其他工作人员须由管理员单独授权。",
     },
+    "action_maintenance_manager_workbook_apply": {
+        "label": "项目经理月度全量表确认应用",
+        "summary": "允许把本人项目范围内、已通过整表校验的月度 v3 工作簿原子写入。",
+        "can": "写入维保期限、验收截止日和最多 24 期计划回款节点，并关闭对应月度任务。",
+        "cannot": "不能修改财务确认实收，不能越过实名项目负责人范围，也不能绕过版本冲突。",
+        "typical": ["管理员授权的项目经理"],
+        "sensitivity": "critical",
+        "risk": "会直接写入项目跟踪事实；默认对所有非管理员角色关闭，必须逐账号授权。",
+    },
     "action_maintenance_project_manage": {
         "label": "维保项目主档管理",
         "summary": "允许新建稳定维保项目，并维护展示信息、归档与恢复。",
@@ -574,6 +612,24 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "项目经理或仓库协同人员（需单独授权）"],
         "sensitivity": "critical",
         "risk": "仓库确认会进入正式返还率分子；操作必须实名、幂等并保留追加式审计。",
+    },
+    "action_maintenance_acceptance_submit": {
+        "label": "维保验收报告提交与附件上传",
+        "summary": "允许本人负责项目上传受控附件并提交验收报告。",
+        "can": "上传通过安全校验的 PDF、Word、Excel 或图片，并把验收报告提交审核。",
+        "cannot": "不能审批自己的提交，不能访问非本人项目，也不能上传外部链接或可执行内容。",
+        "typical": ["管理员授权的项目经理"],
+        "sensitivity": "high",
+        "risk": "会形成正式验收提交事实和持久化附件；建议仅授权真实项目负责人。",
+    },
+    "action_maintenance_acceptance_review": {
+        "label": "维保验收报告高风险审批",
+        "summary": "允许批准或驳回已提交的维保验收报告。",
+        "can": "查看受控附件后批准或填写理由驳回；全部操作实名审计。",
+        "cannot": "不能审批本人提交、不能审批未提交或没有有效附件的报告。",
+        "typical": ["管理员（业务审批角色确定前）"],
+        "sensitivity": "critical",
+        "risk": "审批结果是正式业务结论；业务审批角色尚未配置，默认仅 admin 可用。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {
