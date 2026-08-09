@@ -232,6 +232,19 @@
 
 成本率小于 80% 为正常，达到 80% 且不超过 100% 为黄色，超过 100% 为红色报警。总览不使用成本构成扇形图；成本缺失行保持可见并提供带上下文的补录入口。
 
+### 7.5 销售经理补库 Beta 与 WBDD 录入辅助
+
+补库申请是独立、版本化的业务事实，不直接写入库存、采购单、维保需求单或项目成本。每次提交冻结申请版本、目标仓库、逐行 PN/数量/特殊备注、所属池快照、最近六个月采购/销售价量快照和内容摘要；审核结果必须绑定精确版本和摘要，并对每条提交明细恰好返回一次 `approved` 或 `rejected`。
+
+| 数据对象 | 最小字段 | 稳定身份与规则 |
+|---|---|---|
+| 补库申请 | `application_id`、`application_no`、`owner_username`、`status`、`latest_version_no`、`version` | 申请号和实名所有者创建后不可变；非管理员只能读取本人申请 |
+| 申请版本 | `version_id`、`application_id`、`version_no`、`parent_version_id`、`warehouse`、`content_digest`、`submitted_by`、`submitted_at` | 草稿可修改；提交后版本和明细只读；复提只复制上一版被打回行 |
+| 申请明细 | `line_id`、`request_line_id`、`version_id`、`part_id`、`pn_std`、`quantity`、`special_note`、池快照、采购/销售价量快照、`evidence_digest` | 同一版本同一 PN 只出现一次；数量必须为正；无池或无价格仍保留并显式标注 |
+| 审核反馈 | `review_id`、`version_id`、`idempotency_key`、`payload_digest`、`reviewed_by`、逐行结论和理由 | 幂等键绑定完整回传；打回必须有理由；审核和审计历史追加式保存 |
+
+人工审核 Excel 用于销售经理导出给老板在线下审核，不代表系统审批。WBDD 字段子集只能汇总各版本累计已通过且未被后续替代的申请意向，并在文件首行写明“录入辅助，非直接导入”。当前缺少氚云源数据 ID、明细 ID、正式需求单号和 F 字段码，不得伪造这些值，也不得自动回灌。
+
 ## 8. 关联链与影响矩阵
 
 | 对象 | 首选单据主键 | 维保关联键 | 明细汇总键 | 库存影响 | 成本影响 |
