@@ -270,14 +270,17 @@ for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             raise SystemExit(f"invalid quoted .env value: {key}")
         value = parsed[0]
     values[key] = value
-missing = wanted - values.keys()
-if missing:
-    raise SystemExit("missing protected .env keys: " + ",".join(sorted(missing)))
-for key in (
+boolean_keys = {
     "MAINTENANCE_BETA_ENABLED",
     "REPLENISHMENT_BETA_ENABLED",
     "MAINTENANCE_CUTOVER_ENABLED",
-):
+}
+for key in boolean_keys:
+    values.setdefault(key, "false")
+missing = wanted - values.keys()
+if missing:
+    raise SystemExit("missing protected .env keys: " + ",".join(sorted(missing)))
+for key in boolean_keys:
     if values[key].lower() not in {"true", "false"}:
         raise SystemExit(f"invalid boolean .env value: {key}")
 if not values["MAINTENANCE_MANIFEST_ACTIVE_KEY_ID"]:
@@ -290,6 +293,20 @@ values["MAINTENANCE_MANIFEST_HMAC_KEY_FINGERPRINT_SHA256"] = hashlib.sha256(
 ).hexdigest()
 print(json.dumps(values, sort_keys=True, separators=(",", ":")))
 PY
+}
+
+assert_candidate_resolves_flags_false() {
+  env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+    docker compose --project-name it-spareparts --env-file "$ENV_FILE" \
+      -f "$CANDIDATE_COMPOSE" config --format json |
+  python3 -c '
+import json,sys
+data=json.load(sys.stdin)
+environment=data["services"]["app"]["environment"]
+for key in ("MAINTENANCE_BETA_ENABLED","REPLENISHMENT_BETA_ENABLED","MAINTENANCE_CUTOVER_ENABLED"):
+    if str(environment.get(key,"")).lower() != "false":
+        raise SystemExit(f"candidate compose does not resolve {key}=false")
+'
 }
 
 assert_flags() {
@@ -714,6 +731,7 @@ preflight() {
   [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ] || fatal "production .env unsafe"
   [ "$(stat -c '%a' "$ENV_FILE")" = 600 ] || fatal "production .env must be mode 600"
   assert_flags false false false
+  assert_candidate_resolves_flags_false
   verify_hmac_identity
   local db app frontend
   db=$(db_cid)
