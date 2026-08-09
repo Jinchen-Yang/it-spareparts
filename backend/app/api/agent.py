@@ -13,7 +13,6 @@ from app.auth import current_role
 from app.config import get_settings
 from app.db import get_db
 from app.security import (
-    FULL_SCOPE_ROLES,
     UserContext,
     get_current_user_context,
     record_access_log,
@@ -105,14 +104,21 @@ async def upload(
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """上传 xlsx（询价单/型号清单等），返回 file_id 供对话引用。"""
-    record_access_log(ctx, "upload", "agent_file", {"filename": file.filename})
+    """上传受支持的办公文件/文本/图片，返回不可猜测的 Artifact UUID。"""
     content = await file.read()
+    # 文件名常含客户、合同或项目名；审计仅保留非内容型结构信息，禁止写原始文件名。
+    record_access_log(ctx, "upload", "agent_file", {"size_bytes": len(content)})
     try:
         # 归属记真实身份(user_id)而非角色 → 下载/读取按人做越权校验
-        return agent_files.save_upload(content, file.filename or "上传.xlsx", ctx.user_id)
+        owner_sub = agent_files.stable_owner_sub(ctx)
+        return agent_files.save_upload(content, file.filename or "上传.xlsx", owner_sub)
     except agent_files.FileError as exc:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        code = (
+            status.HTTP_403_FORBIDDEN
+            if "实名系统账号" in str(exc)
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(code, str(exc)) from exc
 
 
 @router.get("/files/{file_id}")
@@ -121,24 +127,30 @@ def download(
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> FileResponse:
-    """下载智能体生成/上传的文件（仅本人创建的；admin 例外）。"""
+    """下载智能体生成/上传的文件（普通端点严格仅本人，管理员也不例外）。"""
     record_access_log(ctx, "download", "agent_file", {"file_id": file_id})
     try:
-        owner = agent_files.owner_of(file_id)        # 文件不存在 → FileError → 404
+        agent_files.owner_of(file_id)        # 文件不存在 → FileError → 404
     except agent_files.FileError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
-    # 防越权下载他人上传的报价/合同(IDOR)：全量角色放行，否则需本人创建
-    if ctx.role not in FULL_SCOPE_ROLES and owner != ctx.user_id:
+    # 防越权下载他人上传的报价/合同（IDOR）：普通端点对所有角色都要求本人创建。
+    if not agent_files.access_allowed(file_id, ctx):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该文件（非本人上传/生成）")
     try:
-        path, name = agent_files.get_download(file_id)
+        artifact = agent_files.get_download_info(file_id)
     except agent_files.FileError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     return FileResponse(
-        path, filename=name,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        artifact.path,
+        filename=artifact.filename,
+        media_type=artifact.media_type,
         # 含价格数据：禁止浏览器缓存（否则换人/过期 token 仍能命中缓存拿到文件）
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Cache-Control": "no-store",
+            "ETag": f'"{artifact.sha256}"',
+            "Content-Length": str(artifact.size_bytes),
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -148,13 +160,13 @@ def preview_file(
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """在线预览文件内容（仅本人创建的；admin 例外）——与 download 同一归属校验，防 IDOR。"""
+    """在线预览文件内容（所有角色仅本人）——与 download 同一归属校验，防 IDOR。"""
     record_access_log(ctx, "preview", "agent_file", {"file_id": file_id})
     try:
-        owner = agent_files.owner_of(file_id)
+        agent_files.owner_of(file_id)
     except agent_files.FileError as exc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
-    if ctx.role not in FULL_SCOPE_ROLES and owner != ctx.user_id:
+    if not agent_files.access_allowed(file_id, ctx):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该文件（非本人上传/生成）")
     try:
         return agent_files.preview(file_id)

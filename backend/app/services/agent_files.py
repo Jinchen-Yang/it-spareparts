@@ -9,20 +9,30 @@
 一律产出新 file_id（绝不改写原上传件）；file_id 白名单正则防路径穿越；
 扩展名白名单防可执行文件。
 """
+import hashlib
 import json
+import os
 import re
+import tempfile
+import unicodedata
 import uuid
-from datetime import datetime, timezone
+import zipfile
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Any, Protocol
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 from app.config import get_settings
+from app.db import SessionLocal
+from app.models.agent_artifact import AgentArtifact
 
-_FILE_ID = re.compile(r"^[a-f0-9]{12}$")
+_LEGACY_FILE_ID = re.compile(r"^[a-f0-9]{12}$")
 _MAX_UPLOAD_MB = 20
 _PREVIEW_ROWS = 8
 _PREVIEW_COLS = 12
@@ -35,10 +45,141 @@ _DOC_CHAR_CAP = 60_000          # read_document 文本上限，防超长文件�
 _TEXT_EXT = {"txt", "csv", "md"}
 _IMG_EXT = {"jpg", "jpeg", "png", "webp", "bmp"}
 _ALLOWED_EXT = {"xlsx", "docx", "pdf"} | _TEXT_EXT | _IMG_EXT
+_MIME_BY_EXT = {
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pdf": "application/pdf",
+    "txt": "text/plain; charset=utf-8",
+    "csv": "text/csv; charset=utf-8",
+    "md": "text/markdown; charset=utf-8",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
+    "bmp": "image/bmp",
+}
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
 
 
 class FileError(Exception):
     """文件层业务错误（消息可直接回给模型/用户）。"""
+
+
+@dataclass(frozen=True)
+class StoredObject:
+    path: Path
+    size_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class ArtifactDownload:
+    path: Path
+    filename: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+
+
+class ArtifactStore(Protocol):
+    """Artifact object-store seam; the first implementation is local and atomic."""
+
+    def publish_bytes(
+        self,
+        storage_key: str,
+        content: bytes,
+        *,
+        validator: Callable[[Path], None] | None = None,
+    ) -> StoredObject: ...
+
+    def path_for(self, storage_key: str) -> Path: ...
+
+    def inspect(self, storage_key: str) -> StoredObject: ...
+
+    def remove(self, storage_key: str) -> None: ...
+
+
+class LocalArtifactStore:
+    """Filesystem store with same-directory staging and atomic publication."""
+
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def path_for(self, storage_key: str) -> Path:
+        key = str(storage_key or "")
+        pure = PurePosixPath(key)
+        if not key or pure.is_absolute() or ".." in pure.parts or "\\" in key:
+            raise FileError("文件存储定位无效")
+        root = self.root.resolve()
+        path = (root / Path(*pure.parts)).resolve()
+        if not path.is_relative_to(root):
+            raise FileError("文件存储定位无效")
+        return path
+
+    def publish_bytes(
+        self,
+        storage_key: str,
+        content: bytes,
+        *,
+        validator: Callable[[Path], None] | None = None,
+    ) -> StoredObject:
+        final_path = self.path_for(storage_key)
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_dir = self.root / ".tmp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix="artifact-", suffix=".part", dir=temp_dir)
+        temp_path = Path(temp_name)
+        published = False
+        digest = hashlib.sha256()
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                view = memoryview(content)
+                for offset in range(0, len(view), 1024 * 1024):
+                    chunk = view[offset:offset + 1024 * 1024]
+                    handle.write(chunk)
+                    digest.update(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if validator is not None:
+                validator(temp_path)
+            if final_path.exists():
+                raise FileError("文件发布冲突，请重试")
+            os.replace(temp_path, final_path)
+            published = True
+            dir_fd = os.open(final_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+            return StoredObject(
+                path=final_path,
+                size_bytes=final_path.stat().st_size,
+                sha256=digest.hexdigest(),
+            )
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            if published:
+                final_path.unlink(missing_ok=True)
+            raise
+
+    def inspect(self, storage_key: str) -> StoredObject:
+        path = self.path_for(storage_key)
+        if not path.is_file():
+            raise FileError("文件不存在或已清理")
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    size += len(chunk)
+                    digest.update(chunk)
+        except OSError as exc:
+            raise FileError("文件暂时不可读取") from exc
+        return StoredObject(path=path, size_bytes=size, sha256=digest.hexdigest())
+
+    def remove(self, storage_key: str) -> None:
+        self.path_for(storage_key).unlink(missing_ok=True)
 
 
 def _dir() -> Path:
@@ -58,29 +199,465 @@ def _ext_of(filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
 
+def _safe_filename(filename: str, default: str = "artifact") -> str:
+    """Keep readable Unicode while removing path/header/control ambiguity."""
+    raw = unicodedata.normalize("NFKC", str(filename or default))
+    raw = "".join(" " if unicodedata.category(ch).startswith("C") else ch for ch in raw)
+    raw = re.sub(r"[\\/:*?\"<>|]", "_", raw)
+    raw = re.sub(r"\s+", " ", raw).strip().lstrip(".").strip()
+    if not raw:
+        raw = default
+    if len(raw) > 180:
+        suffix = Path(raw).suffix[:20]
+        raw = f"{raw[:180 - len(suffix)].rstrip()}{suffix}"
+    return raw
+
+
+def _is_legacy_id(file_id: str) -> bool:
+    return bool(_LEGACY_FILE_ID.fullmatch(file_id))
+
+
+def _storage_key(file_id: str, ext: str) -> str:
+    if ext not in _ALLOWED_EXT:
+        raise FileError("文件类型元数据无效")
+    if _is_legacy_id(file_id):
+        raise FileError("新制品标识无效")
+    return f"objects/{file_id}.{ext}"
+
+
+def get_artifact_store() -> ArtifactStore:
+    """Resolve the active store; kept as a seam for object-store replacement/tests."""
+    return LocalArtifactStore(_dir())
+
+
 def _data_path(file_id: str, ext: str) -> Path:
-    return _dir() / f"{file_id}.{ext}"
+    fid = _check_id(file_id)
+    if ext not in _ALLOWED_EXT:
+        raise FileError("文件类型元数据无效")
+    if _is_legacy_id(fid):
+        return _dir() / f"{fid}.{ext}"
+    return get_artifact_store().path_for(_storage_key(fid, ext))
 
 
 def _check_id(file_id: str) -> str:
     fid = str(file_id or "").strip().lower()
-    if not _FILE_ID.match(fid):
-        raise FileError(f"非法 file_id: {file_id!r}")
-    return fid
+    if _is_legacy_id(fid):
+        return fid
+    try:
+        parsed = uuid.UUID(fid)
+    except (ValueError, AttributeError) as exc:
+        raise FileError("非法 file_id") from exc
+    canonical = str(parsed)
+    if canonical != fid:
+        raise FileError("非法 file_id")
+    return canonical
+
+
+def _query_artifact(db, file_id: str) -> AgentArtifact | None:
+    if _is_legacy_id(file_id):
+        return None
+    return db.get(AgentArtifact, file_id)
+
+
+def _find_artifact_meta(file_id: str, *, require_ready: bool) -> dict | None:
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        row = _query_artifact(db, file_id)
+        if row is None:
+            return None
+        if row.expires_at <= now and row.status == "ready":
+            row.status = "expired"
+            db.commit()
+        if require_ready and row.status != "ready":
+            raise FileError("文件不存在或不可下载")
+        extra = dict(row.extra_meta or {})
+        return {
+            **extra,
+            "file_id": row.id,
+            "filename": row.filename,
+            "ext": _ext_of(row.filename),
+            "kind": row.kind,
+            "operated_by": row.owner_sub,
+            "owner_sub": row.owner_sub,
+            "media_type": row.media_type,
+            "size_bytes": row.size_bytes,
+            "sha256": row.sha256,
+            "status": row.status,
+            "storage_key": row.storage_key,
+            "source_ids": list(row.source_ids or []),
+            "access_scope": dict(row.access_scope or {}),
+            "created_at": row.created_at,
+            "expires_at": row.expires_at,
+        }
+
+
+def _artifact_meta(file_id: str, *, require_ready: bool) -> dict:
+    meta = _find_artifact_meta(file_id, require_ready=require_ready)
+    if meta is None:
+        raise FileError("文件不存在或已清理")
+    return meta
+
+
+def _verify_artifact(meta: dict) -> StoredObject:
+    fid = meta["file_id"]
+    ext = meta.get("ext", "")
+    if meta.get("filename") != _safe_filename(meta.get("filename", "")):
+        raise FileError("文件元数据校验失败")
+    if meta.get("media_type") != _MIME_BY_EXT.get(ext):
+        raise FileError("文件元数据校验失败")
+    expected_key = _storage_key(fid, ext)
+    if meta.get("storage_key") != expected_key:
+        raise FileError("文件元数据校验失败")
+    stored = get_artifact_store().inspect(expected_key)
+    if stored.size_bytes != meta.get("size_bytes") or stored.sha256 != meta.get("sha256"):
+        raise FileError("文件完整性校验失败")
+    return stored
 
 
 def _load_meta(file_id: str) -> dict:
-    p = _meta_path(file_id)
+    fid = _check_id(file_id)
+    meta = _find_artifact_meta(fid, require_ready=True)
+    if meta is not None:
+        _verify_artifact(meta)
+        return meta
+    if not _is_legacy_id(fid):
+        raise FileError("文件不存在或已清理")
+    p = _meta_path(fid)
     if not p.exists():
-        raise FileError(f"文件不存在或已清理: {file_id}")
-    meta = json.loads(p.read_text(encoding="utf-8"))
-    if not _data_path(file_id, meta.get("ext", "")).exists():
-        raise FileError(f"文件不存在或已清理: {file_id}")
+        raise FileError("文件不存在或已清理")
+    try:
+        meta = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FileError("文件元数据损坏") from exc
+    ext = str(meta.get("ext", "")).lower()
+    if ext not in _ALLOWED_EXT or not _data_path(fid, ext).is_file():
+        raise FileError("文件不存在或已清理")
+    meta["filename"] = _safe_filename(meta.get("filename", f"{fid}.{ext}"))
+    meta["media_type"] = _MIME_BY_EXT[ext]
     return meta
 
 
 def _save_meta(file_id: str, meta: dict) -> None:
+    """Legacy sidecar writer retained only for old 12-character URL compatibility."""
+    fid = _check_id(file_id)
+    if not _is_legacy_id(fid):
+        raise FileError("新制品必须使用数据库元数据")
     _meta_path(file_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+
+
+def artifact_info(file_id: str) -> dict:
+    """Return structured, non-path metadata for a new Artifact."""
+    fid = _check_id(file_id)
+    db_meta = _find_artifact_meta(fid, require_ready=False)
+    if db_meta is not None:
+        return {
+            key: value.isoformat() if isinstance(value, datetime) else value
+            for key, value in db_meta.items()
+            if key in {
+                "file_id", "filename", "media_type", "size_bytes", "sha256",
+                "status", "source_ids", "created_at", "expires_at", "kind",
+            }
+        }
+    if _is_legacy_id(fid):
+        meta = _load_meta(fid)
+        path = _data_path(fid, meta["ext"])
+        content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        return {
+            "file_id": fid,
+            "filename": meta["filename"],
+            "media_type": meta["media_type"],
+            "size_bytes": path.stat().st_size,
+            "sha256": content_hash,
+            "status": "ready",
+            "source_ids": [],
+            "created_at": meta.get("created_at"),
+            "expires_at": None,
+        }
+    raise FileError("文件不存在或已清理")
+
+
+def _artifact_ref(info: dict) -> dict:
+    """Stable transport shape for tools/SSE/message persistence consumers."""
+    artifact_id = info["file_id"]
+    return {
+        "id": artifact_id,
+        "filename": info["filename"],
+        "mime_type": info["media_type"],
+        "size_bytes": info["size_bytes"],
+        "sha256": info["sha256"],
+        "status": info["status"],
+        "download_url": f"/api/agent/files/{artifact_id}",
+    }
+
+
+def _validate_staged_file(path: Path, ext: str) -> None:
+    if ext == "xlsx":
+        with path.open("rb") as handle:
+            workbook = load_workbook(handle, read_only=True, data_only=True)
+            workbook.close()
+        return
+    if ext == "docx":
+        if not zipfile.is_zipfile(path):
+            raise FileError("无法解析 docx（文件容器损坏）")
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+            if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                raise FileError("无法解析 docx（缺少 Word 文档结构）")
+        return
+    if ext == "pdf":
+        with path.open("rb") as handle:
+            if handle.read(5) != b"%PDF-":
+                raise FileError("无法解析 pdf（文件签名不匹配）")
+        return
+    if ext in _IMG_EXT:
+        from PIL import Image
+
+        expected = "JPEG" if ext in {"jpg", "jpeg"} else ext.upper()
+        with Image.open(path) as image:
+            image.verify()
+            if image.format != expected:
+                raise FileError("图片扩展名与实际格式不一致")
+        return
+    if ext in _TEXT_EXT:
+        data = path.read_bytes()
+        if b"\x00" in data:
+            raise FileError("文本文件包含二进制内容")
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise FileError("文本文件必须使用 UTF-8 编码") from exc
+
+
+def snapshot_access_scope(user_ctx: Any) -> dict:
+    """Capture server-authenticated visibility; never accept this from model arguments."""
+    from app import permissions
+
+    stable_owner_sub(user_ctx)
+    permission_source = (
+        permissions.effective(user_ctx.role, None)
+        if user_ctx.permissions is None
+        else user_ctx.permissions
+    )
+    effective = permissions.runtime_safe(permission_source)
+    data_permissions = {key: bool(effective.get(key, False)) for key in permissions.DATA_GROUPS}
+    page_permissions = {key: bool(effective.get(key, False)) for key in permissions.PAGE_KEYS}
+    visible_field_groups = sorted({
+        group
+        for key, groups in permissions.DATA_GROUPS.items()
+        if data_permissions[key]
+        for group in groups
+    })
+    required = sorted(
+        key for key, enabled in effective.items()
+        if enabled and (key.startswith("data_") or key.startswith("page_"))
+    )
+    return {
+        "version": 1,
+        "policy": "current_scope_dominates",
+        "required_permissions": required,
+        "data_permissions": data_permissions,
+        "page_permissions": page_permissions,
+        "visible_field_groups": visible_field_groups,
+        "row_scope": "own_customers" if effective.get("own_customers_only") else "all",
+    }
+
+
+def _default_access_scope(kind: str) -> dict:
+    if kind == "upload":
+        return {"version": 1, "policy": "owner_only", "required_permissions": []}
+    # Generated output without a server-authenticated snapshot is explicitly unclassified.
+    return {
+        "version": 1,
+        "policy": "unclassified_deny",
+        "required_permissions": [],
+    }
+
+
+def stable_owner_sub(user_ctx: Any) -> str:
+    """Return a non-spoofable owner subject or fail closed for shared/guest identities."""
+    subject = str(getattr(user_ctx, "user_id", None) or "").strip()
+    if (
+        not getattr(user_ctx, "is_authenticated", False)
+        or getattr(user_ctx, "authn", None) != "sys_user"
+        or not getattr(user_ctx, "has_stable_subject", False)
+        or not subject
+    ):
+        raise FileError("创建或访问制品需要实名系统账号")
+    return subject
+
+
+def _canonical_source_id(source_id: str) -> str:
+    checked = _check_id(source_id)
+    meta = _find_artifact_meta(checked, require_ready=True)
+    return meta["file_id"] if meta is not None else checked
+
+
+def _mark_artifact_ready(artifact_id: str) -> None:
+    with SessionLocal.begin() as db:
+        row = db.get(AgentArtifact, artifact_id)
+        if row is None or row.status != "validating":
+            raise FileError("文件发布状态冲突")
+        row.status = "ready"
+
+
+def _mark_artifact_validating(artifact_id: str) -> None:
+    with SessionLocal.begin() as db:
+        row = db.get(AgentArtifact, artifact_id)
+        if row is None or row.status != "prepared":
+            raise FileError("文件发布状态冲突")
+        row.status = "validating"
+
+
+def _mark_artifact_failed(artifact_id: str) -> None:
+    with SessionLocal.begin() as db:
+        row = db.get(AgentArtifact, artifact_id)
+        if row is not None and row.status != "ready":
+            row.status = "failed"
+
+
+def _publish_artifact(
+    content: bytes,
+    filename: str,
+    *,
+    kind: str,
+    operated_by: str | None,
+    source_ids: list[str] | None = None,
+    extra_meta: dict | None = None,
+    access_scope: dict | None = None,
+) -> dict:
+    safe_name = _safe_filename(filename)
+    ext = _ext_of(safe_name)
+    if ext not in _ALLOWED_EXT:
+        raise FileError("文件类型不受支持")
+    artifact_id = str(uuid.uuid4())
+    storage_key = _storage_key(artifact_id, ext)
+    created_at = datetime.now(timezone.utc)
+    expires_at = created_at + timedelta(days=get_settings().agent_artifact_retention_days)
+    expected_hash = hashlib.sha256(content).hexdigest()
+    owner = str(operated_by or "").strip()
+    if not owner:
+        raise FileError("创建制品需要已认证用户")
+    sources = [_canonical_source_id(source_id) for source_id in (source_ids or [])]
+    with SessionLocal.begin() as db:
+        db.add(AgentArtifact(
+            id=artifact_id,
+            owner_sub=owner,
+            filename=safe_name,
+            media_type=_MIME_BY_EXT[ext],
+            size_bytes=len(content),
+            sha256=expected_hash,
+            status="prepared",
+            storage_key=storage_key,
+            kind=kind,
+            source_ids=sources,
+            access_scope=dict(access_scope or _default_access_scope(kind)),
+            extra_meta=dict(extra_meta or {}),
+            created_at=created_at,
+            expires_at=expires_at,
+        ))
+
+    store = get_artifact_store()
+    published = False
+    try:
+        _mark_artifact_validating(artifact_id)
+        stored = store.publish_bytes(
+            storage_key,
+            content,
+            validator=lambda path: _validate_staged_file(path, ext),
+        )
+        published = True
+        if stored.size_bytes != len(content) or stored.sha256 != expected_hash:
+            raise FileError("文件发布完整性校验失败")
+        _mark_artifact_ready(artifact_id)
+    except Exception as exc:  # noqa: BLE001 - internal detail is deliberately hidden
+        if published:
+            try:
+                store.remove(storage_key)
+            except Exception:  # noqa: BLE001 - best-effort orphan cleanup
+                pass
+        try:
+            _mark_artifact_failed(artifact_id)
+        except Exception:  # noqa: BLE001 - preserve the stable public error on DB outage
+            pass
+        raise FileError("文件发布失败，请稍后重试") from exc
+    return artifact_info(artifact_id)
+
+
+def access_allowed(file_id: str, user_ctx: Any) -> bool:
+    """Re-authorize owner and current visibility against the creation snapshot."""
+    from app import config, permissions
+
+    try:
+        subject = stable_owner_sub(user_ctx)
+    except FileError:
+        return False
+    fid = _check_id(file_id)
+    meta = _find_artifact_meta(fid, require_ready=False)
+    if meta is None and _is_legacy_id(fid):
+        meta = _load_meta(fid)
+        owner_ok = meta.get("operated_by") == subject
+        if not owner_ok:
+            return False
+        # Old uploads are classified as immutable user inputs. Old generated files lack a
+        # trustworthy visibility snapshot and therefore fail closed for every role.
+        if meta.get("kind") == "upload":
+            return True
+        return False
+    if meta is None:
+        raise FileError("文件不存在或已清理")
+    owner_ok = meta.get("operated_by") == subject
+    if not owner_ok:
+        return False
+    scope = meta.get("access_scope") or {}
+    policy = scope.get("policy")
+    if meta.get("kind") == "upload":
+        return policy == "owner_only"
+    if policy == "unclassified_deny":
+        return False
+    if policy != "current_scope_dominates" or scope.get("version") != 1:
+        return False
+    if not config.ENABLE_RBAC and user_ctx.role == config.PHASE1_BYPASS_ROLE:
+        return True
+    permission_source = (
+        permissions.effective(user_ctx.role, None)
+        if user_ctx.permissions is None
+        else user_ctx.permissions
+    )
+    current = permissions.runtime_safe(permission_source)
+    required = scope.get("required_permissions")
+    if not isinstance(required, list) or not all(isinstance(key, str) for key in required):
+        return False
+    allowed_keys = set(permissions.DATA_GROUPS) | set(permissions.PAGE_KEYS)
+    if any(key not in allowed_keys or not current.get(key, False) for key in required):
+        return False
+    data_snapshot = scope.get("data_permissions")
+    page_snapshot = scope.get("page_permissions")
+    visible_snapshot = scope.get("visible_field_groups")
+    if not isinstance(data_snapshot, dict) or set(data_snapshot) != set(permissions.DATA_GROUPS):
+        return False
+    if not isinstance(page_snapshot, dict) or set(page_snapshot) != set(permissions.PAGE_KEYS):
+        return False
+    if not isinstance(visible_snapshot, list) or not all(isinstance(group, str) for group in visible_snapshot):
+        return False
+    if any(bool(granted) and not current.get(key, False) for key, granted in data_snapshot.items()):
+        return False
+    if any(bool(granted) and not current.get(key, False) for key, granted in page_snapshot.items()):
+        return False
+    current_visible_groups = {
+        group
+        for key, groups in permissions.DATA_GROUPS.items()
+        if current.get(key, False)
+        for group in groups
+    }
+    if not set(visible_snapshot).issubset(current_visible_groups):
+        return False
+    snapshot_row_scope = scope.get("row_scope")
+    if snapshot_row_scope not in {"all", "own_customers"}:
+        return False
+    # An all-customers result cannot be reopened after the account becomes own-only.
+    if snapshot_row_scope == "all" and current.get("own_customers_only", False):
+        return False
+    return True
 
 
 def _cell_str(v) -> str:
@@ -90,9 +667,17 @@ def _cell_str(v) -> str:
     return s[:_CELL_TRUNC]
 
 
+def _safe_spreadsheet_value(value):
+    """Neutralize formula-like untrusted text while leaving real numbers unchanged."""
+    if isinstance(value, str) and value.lstrip().startswith(_FORMULA_PREFIXES):
+        return f"'{value}"
+    return value
+
+
 def save_upload(content: bytes, filename: str, operated_by: str | None) -> dict:
     """保存上传文件（多格式），返回 file_id + 类型/概览（供注入对话上下文）。"""
-    ext = _ext_of(filename)
+    safe_name = _safe_filename(filename, "上传文件")
+    ext = _ext_of(safe_name)
     if ext == "xls":
         raise FileError("不支持旧版 .xls，请用 Excel 另存为 .xlsx")
     if ext not in _ALLOWED_EXT:
@@ -100,28 +685,42 @@ def save_upload(content: bytes, filename: str, operated_by: str | None) -> dict:
     if len(content) > _MAX_UPLOAD_MB * 1024 * 1024:
         raise FileError(f"文件超过 {_MAX_UPLOAD_MB}MB 上限")
 
-    file_id = uuid.uuid4().hex[:12]
-    meta = {"filename": filename, "ext": ext, "kind": "upload",
-            "operated_by": operated_by,
-            "created_at": datetime.now(timezone.utc).isoformat()}
-
+    extra_meta: dict = {}
     if ext == "xlsx":
         # xlsx 校验可解析并带回 sheet 概览
         try:
             wb = load_workbook(BytesIO(content), read_only=True, data_only=True)
-            meta["sheets"] = [{"name": ws.title, "n_rows": ws.max_row or 0,
-                               "n_cols": ws.max_column or 0} for ws in wb.worksheets]
+            extra_meta["sheets"] = [{"name": ws.title, "n_rows": ws.max_row or 0,
+                                     "n_cols": ws.max_column or 0} for ws in wb.worksheets]
             wb.close()
         except Exception as exc:  # noqa: BLE001
             raise FileError(f"无法解析 xlsx（可能损坏，请用 Excel 重新另存）: {type(exc).__name__}") from exc
+    else:
+        # Validate signatures/encoding before creating a metadata row.
+        check_dir = _dir() / ".tmp"
+        check_dir.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix="upload-check-", suffix=f".{ext}", dir=check_dir)
+        check_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(content)
+            _validate_staged_file(check_path, ext)
+        finally:
+            check_path.unlink(missing_ok=True)
 
-    _data_path(file_id, ext).write_bytes(content)
-    _save_meta(file_id, meta)
-    out = {"file_id": file_id, "filename": filename, "ext": ext,
+    artifact = _publish_artifact(
+        content,
+        safe_name,
+        kind="upload",
+        operated_by=operated_by,
+        extra_meta=extra_meta,
+    )
+    out = {"file_id": artifact["file_id"], "filename": safe_name, "ext": ext,
            "file_kind": ("表格" if ext == "xlsx" else "Word" if ext == "docx"
-                         else "PDF" if ext == "pdf" else "图片" if ext in _IMG_EXT else "文本")}
-    if "sheets" in meta:
-        out["sheets"] = meta["sheets"]
+                         else "PDF" if ext == "pdf" else "图片" if ext in _IMG_EXT else "文本"),
+           "artifact": _artifact_ref(artifact)}
+    if "sheets" in extra_meta:
+        out["sheets"] = extra_meta["sheets"]
     return out
 
 
@@ -305,18 +904,9 @@ def _col_index(col) -> int:
         raise FileError(f"无法识别列: {col!r}（用字母如 'G' 或 1-based 数字）") from exc
 
 
-def _new_file(meta_extra: dict, operated_by: str | None, name: str) -> tuple[str, dict]:
-    file_id = uuid.uuid4().hex[:12]
-    if not name.lower().endswith(".xlsx"):
-        name += ".xlsx"
-    meta = {"filename": name, "ext": "xlsx", "kind": "generated", "operated_by": operated_by,
-            "created_at": datetime.now(timezone.utc).isoformat(), **meta_extra}
-    return file_id, meta
-
-
 def write_excel(base_file_id: str | None, sheet: str | None,
                 cells: list[dict], output_name: str | None,
-                operated_by: str | None) -> dict:
+                operated_by: str | None, *, access_scope: dict | None = None) -> dict:
     """按模型指令写单元格，产出新文件（不动原件）。用于**回填客户模板**（保留原格式）。"""
     if not cells:
         raise FileError("cells 不能为空")
@@ -343,16 +933,28 @@ def write_excel(base_file_id: str | None, sheet: str | None,
             raise FileError(f"cells 项格式错: {c!r}（需 row/col/value）") from exc
         if row < 1 or row > 1_048_576:
             raise FileError(f"行号超界: {row}")
-        ws.cell(row=row, column=col, value=c.get("value"))
+        ws.cell(row=row, column=col, value=_safe_spreadsheet_value(c.get("value")))
         written += 1
 
     name = output_name or (f"回填_{base_name}" if base_name else "结果.xlsx")
-    file_id, meta = _new_file({"base_file_id": base_file_id}, operated_by, name)
-    wb.save(_data_path(file_id, "xlsx"))
+    if not name.lower().endswith(".xlsx"):
+        name += ".xlsx"
+    buffer = BytesIO()
+    wb.save(buffer)
     wb.close()
-    _save_meta(file_id, meta)
-    return {"file_id": file_id, "filename": meta["filename"], "cells_written": written,
-            "download_url": f"/api/agent/files/{file_id}"}
+    artifact = _publish_artifact(
+        buffer.getvalue(),
+        name,
+        kind="generated",
+        operated_by=operated_by,
+        source_ids=[base_file_id] if base_file_id else [],
+        extra_meta={"base_file_id": base_file_id},
+        access_scope=access_scope,
+    )
+    ref = _artifact_ref(artifact)
+    download_url = f"/api/agent/files/{artifact['file_id']}"
+    return {"file_id": artifact["file_id"], "filename": artifact["filename"],
+            "cells_written": written, "download_url": download_url, "artifact": ref}
 
 
 # 美化报表样式常量
@@ -370,7 +972,8 @@ _BAD_KW = ("未找到", "无库存", "不存在", "未匹配")
 
 def write_report(title: str | None, headers: list[str], rows: list[list],
                  output_name: str | None, operated_by: str | None,
-                 money_cols: list[int] | None = None) -> dict:
+                 money_cols: list[int] | None = None, *,
+                 access_scope: dict | None = None) -> dict:
     """生成**美化报表**（BOM/报价单等）：表头配色、边框、自适应列宽、金额格式、
     冻结表头、斑马纹、状态行条件配色。headers=列名；rows=与列对齐的二维数组；
     money_cols=金额列的 0-based 下标（数字格式+右对齐）。"""
@@ -387,7 +990,7 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
     r0 = 1
     if title:
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
-        tc = ws.cell(row=1, column=1, value=title)
+        tc = ws.cell(row=1, column=1, value=_safe_spreadsheet_value(title))
         tc.font = _TITLE_FONT
         tc.alignment = Alignment(horizontal="left", vertical="center")
         ws.row_dimensions[1].height = 26
@@ -395,7 +998,7 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
 
     # 表头
     for j, h in enumerate(headers, start=1):
-        c = ws.cell(row=r0, column=j, value=str(h))
+        c = ws.cell(row=r0, column=j, value=_safe_spreadsheet_value(str(h)))
         c.fill, c.font, c.border = _HEADER_FILL, _HEADER_FONT, _BORDER
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.row_dimensions[r0].height = 22
@@ -409,7 +1012,7 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
         base_fill = _BAD_FILL if hit_bad else _WARN_FILL if hit_warn else (_ZEBRA_FILL if i % 2 else None)
         for j in range(ncol):
             val = row[j] if j < len(row) else None
-            c = ws.cell(row=rr, column=j + 1, value=val)
+            c = ws.cell(row=rr, column=j + 1, value=_safe_spreadsheet_value(val))
             c.border = _BORDER
             if base_fill:
                 c.fill = base_fill
@@ -426,21 +1029,58 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
     ws.freeze_panes = ws.cell(row=r0 + 1, column=1)
 
     name = output_name or (title or "报表")
-    file_id, meta = _new_file({"report": True}, operated_by, name)
-    wb.save(_data_path(file_id, "xlsx"))
+    if not name.lower().endswith(".xlsx"):
+        name += ".xlsx"
+    buffer = BytesIO()
+    wb.save(buffer)
     wb.close()
-    _save_meta(file_id, meta)
-    return {"file_id": file_id, "filename": meta["filename"], "rows_written": len(rows),
-            "download_url": f"/api/agent/files/{file_id}"}
+    artifact = _publish_artifact(
+        buffer.getvalue(),
+        name,
+        kind="generated",
+        operated_by=operated_by,
+        extra_meta={"report": True},
+        access_scope=access_scope,
+    )
+    ref = _artifact_ref(artifact)
+    download_url = f"/api/agent/files/{artifact['file_id']}"
+    return {"file_id": artifact["file_id"], "filename": artifact["filename"],
+            "rows_written": len(rows), "download_url": download_url, "artifact": ref}
 
 
 def owner_of(file_id: str) -> str | None:
-    """文件创建者（save_upload/_new_file 时记的 operated_by）；文件不存在抛 FileError。归属校验用。"""
-    return _load_meta(_check_id(file_id)).get("operated_by")
+    """文件创建者（发布时记录的 operated_by）；文件不存在抛 FileError。归属校验用。"""
+    fid = _check_id(file_id)
+    if _is_legacy_id(fid):
+        return _load_meta(fid).get("operated_by")
+    return _artifact_meta(fid, require_ready=False).get("operated_by")
+
+
+def get_download_info(file_id: str) -> ArtifactDownload:
+    """Resolve and integrity-check a ready Artifact without exposing its storage key."""
+    fid = _check_id(file_id)
+    meta = _load_meta(fid)
+    if _is_legacy_id(fid):
+        path = _data_path(fid, meta.get("ext", ""))
+        content = path.read_bytes()
+        return ArtifactDownload(
+            path=path,
+            filename=_safe_filename(meta.get("filename", f"{fid}.{meta['ext']}")),
+            media_type=_MIME_BY_EXT[meta["ext"]],
+            size_bytes=len(content),
+            sha256=hashlib.sha256(content).hexdigest(),
+        )
+    stored = _verify_artifact(meta)
+    return ArtifactDownload(
+        path=stored.path,
+        filename=meta["filename"],
+        media_type=meta["media_type"],
+        size_bytes=meta["size_bytes"],
+        sha256=meta["sha256"],
+    )
 
 
 def get_download(file_id: str) -> tuple[Path, str]:
     """下载定位：返回 (路径, 文件名)。归属校验在 API 层（见 api/agent.download）。"""
-    fid = _check_id(file_id)
-    meta = _load_meta(fid)
-    return _data_path(fid, meta.get("ext", "xlsx")), meta.get("filename", f"{fid}.xlsx")
+    download = get_download_info(file_id)
+    return download.path, download.filename

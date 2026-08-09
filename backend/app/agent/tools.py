@@ -475,19 +475,15 @@ def _get_profit_ranking(db: Session, args: dict, ctx: security.UserContext) -> d
 
 
 def _owns(ctx: security.UserContext, file_id: str | None) -> bool:
-    """文件归属校验：全量角色(admin/boss/readonly/RBAC关闭的 phase1)放行；
-    否则需创建者==当前用户。防越权读他人上传的报价/合同（主要拦 sales 互看）。"""
+    """文件归属 + 当前可见范围重验；生成件在账号降权后 fail closed。"""
     if not file_id:
         return True
-    if ctx.role in security.FULL_SCOPE_ROLES:
-        return True
     try:
-        owner = agent_files.owner_of(file_id)
+        return agent_files.access_allowed(file_id, ctx)
     except agent_files.FileError:
         # 文件不存在也按"无权"处理（TOOLS-4）：让"不存在"与"非本人"返回不可区分的拒绝，
-        # 堵住用 12 位 file_id 探测他人文件是否存在的 oracle。全量角色已在上面提前放行。
+        # 堵住通过 file_id 探测文件是否存在的 oracle。
         return False
-    return owner == ctx.user_id
 
 
 _NO_ACCESS = {"error": "无权访问该文件（非本人上传/生成）"}
@@ -555,7 +551,8 @@ def _write_excel(db: Session, args: dict, ctx: security.UserContext) -> dict:
         return _NO_ACCESS
     return agent_files.write_excel(
         args.get("base_file_id"), args.get("sheet"),
-        args.get("cells") or [], args.get("output_name"), ctx.user_id)
+        args.get("cells") or [], args.get("output_name"), ctx.user_id,
+        access_scope=agent_files.snapshot_access_scope(ctx))
 
 
 def _read_document(db: Session, args: dict, ctx: security.UserContext) -> dict:
@@ -578,7 +575,8 @@ def _write_report(db: Session, args: dict, ctx: security.UserContext) -> dict:
     return agent_files.write_report(
         args.get("title"), [str(h) for h in headers], rows,
         args.get("output_name"), ctx.user_id,
-        money_cols=args.get("money_cols") if isinstance(args.get("money_cols"), list) else None)
+        money_cols=args.get("money_cols") if isinstance(args.get("money_cols"), list) else None,
+        access_scope=agent_files.snapshot_access_scope(ctx))
 
 
 # ── v1.5.0 新工具：数据层全面接入（采购分析/库存/维保/取消统计）+ 技能剧本 ──

@@ -118,6 +118,7 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    "agent_artifact",
     "chat_message", "chat_session",
     "fact_data_quality_issue",
     "product_data_quality_issues", "product_merge_logs", "product_match_candidates",

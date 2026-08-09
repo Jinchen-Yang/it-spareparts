@@ -33,8 +33,8 @@ def test_owns_denies_nonexistent_file_for_scoped_user():
     sales = security.UserContext(user_id="liu", role="sales")
     # 不存在的 file_id：受限用户拿到的是"无权"（False），与"非本人"不可区分
     assert tools._owns(sales, "deadbeef0001") is False
-    # 全量角色提前放行，不触发 owner_of（admin 仍 True）
-    assert tools._owns(security.UserContext(user_id="a", role="admin"), "deadbeef0001") is True
+    # 普通工具入口 owner-only；admin 也不能拿不存在/他人的 file_id 绕过。
+    assert tools._owns(security.UserContext(user_id="a", role="admin"), "deadbeef0001") is False
 
 
 # ---------- TOOLS-5：工具描述与 clamp 引用同一常量，防文字漂移 ----------

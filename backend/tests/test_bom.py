@@ -19,7 +19,10 @@ def db():
 
 @pytest.fixture()
 def ctx():
-    return security.UserContext(user_id=None, role="phase1_full_access")
+    return security.UserContext(
+        user_id="phase1-test", role="phase1_full_access", is_authenticated=True,
+        authn="sys_user", has_stable_subject=True,
+    )
 
 
 def _docx_bytes(lines: list[str]) -> bytes:
@@ -61,7 +64,7 @@ def test_reject_executable_ext(ctx):
 
 
 def test_read_document_tool(db, ctx):
-    up = af.save_upload(_docx_bytes(["RTX 4090 显卡 x2"]), "x.docx", "admin")
+    up = af.save_upload(_docx_bytes(["RTX 4090 显卡 x2"]), "x.docx", ctx.user_id)
     r = tools.dispatch(db, "read_document", {"file_id": up["file_id"]}, ctx)
     assert "RTX 4090" in r["content"]
 
