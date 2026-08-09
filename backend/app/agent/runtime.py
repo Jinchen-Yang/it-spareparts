@@ -44,6 +44,7 @@ def _agent_loop(db: Session, messages: list[dict], ctx: security.UserContext,
     """
     msgs: list[dict] = [{"role": "system", "content": prompts.system_prompt()}] + messages
     trace: list[dict] = []
+    tool_schemas = tools.tools_for(ctx)
 
     def cancelled() -> bool:
         return cancel is not None and cancel.is_set()
@@ -53,7 +54,7 @@ def _agent_loop(db: Session, messages: list[dict], ctx: security.UserContext,
             yield {"type": "done", "tool_calls": trace, "answer": "", "stopped": True}
             return
         res = None
-        for kind, payload in provider.chat_stream(msgs, tools.TOOLS):
+        for kind, payload in provider.chat_stream(msgs, tool_schemas):
             if kind == "delta":
                 yield {"type": "delta", "text": payload}
             elif kind == "reasoning":
@@ -76,7 +77,7 @@ def _agent_loop(db: Session, messages: list[dict], ctx: security.UserContext,
             yield {"type": "tool", "name": c.name, "args": args}
             result = tools.dispatch(db, c.name, args, ctx)
             trace.append({"name": c.name, "args": args})
-            _log.info("agent tool=%s args=%s", c.name, args)
+            _log.info("agent tool=%s", tools.audit_name(c.name))
             yield {"type": "tool_done", "name": c.name,
                    "ok": not (isinstance(result, dict) and result.get("error"))}
             provider.append_tool_result(msgs, c.id, json.dumps(result, ensure_ascii=False))

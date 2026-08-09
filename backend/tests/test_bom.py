@@ -19,7 +19,12 @@ def db():
 
 @pytest.fixture()
 def ctx():
-    return security.UserContext(user_id=None, role="phase1_full_access")
+    return security.UserContext(
+        user_id="admin",
+        role="phase1_full_access",
+        is_authenticated=True,
+        authn="sys_user",
+    )
 
 
 def _docx_bytes(lines: list[str]) -> bytes:
@@ -46,13 +51,15 @@ def test_upload_txt_and_read(ctx):
     assert "6330" in rd["content"]
 
 
-def test_image_degrades_without_vision(ctx):
+def test_local_image_read_requires_explicit_vision_capability(ctx):
     from PIL import Image
     buf = io.BytesIO()
     Image.new("RGB", (60, 30), "white").save(buf, "PNG")
     up = af.save_upload(buf.getvalue(), "cfg.png", "admin")
     rd = af.read_document(up["file_id"])
-    assert "未配置视觉模型" in rd["content"]  # 无 VISION_API_KEY 时优雅降级
+    assert rd["content"] == ""
+    assert rd["requires_vision"] is True
+    assert rd["vision_used"] is False
 
 
 def test_reject_executable_ext(ctx):

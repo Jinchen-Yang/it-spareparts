@@ -7,6 +7,7 @@
 from datetime import date
 from decimal import Decimal
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -53,6 +54,9 @@ class Settings(BaseSettings):
     llm_max_tokens: int | None = None  # 单次生成长度上限；None=不传（用端点默认）。防长答滚雪球/控成本
     llm_max_retries: int = 2           # 显式化 openai SDK 对 429/5xx 的指数退避重试次数（便于审计调参）
     enable_agent: bool = True
+    # 模型上下文的数据出向必须同时声明目标信任区并由部署者显式开启；未知目标默认无工具数据。
+    llm_trust_zone: Literal["unknown", "private", "approved_external"] = "unknown"
+    agent_model_context_egress_enabled: bool = False
 
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
     # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级
@@ -61,6 +65,9 @@ class Settings(BaseSettings):
     vision_model: str = "qwen-vl-max"
     vision_max_pages: int = 8          # 单次最多送几页图（扫描件 PDF / 多图）
     vision_timeout_seconds: int = 90
+    # 客户文件内容进入任何已批准的外部模型（主 LLM 或独立视觉供应商）前都必须显式同意。
+    # private 模型在本地读取文件不需要此开关；图片/扫描件调用外部视觉服务仍必须开启。
+    agent_external_file_egress_enabled: bool = False
 
     @field_validator("llm_extra_body", mode="before")
     @classmethod

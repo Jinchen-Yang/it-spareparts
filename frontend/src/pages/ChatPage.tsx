@@ -24,6 +24,7 @@ const TOOL_LABEL: Record<string, string> = {
   inspect_file: "查看文件结构",
   read_file_rows: "读取文件数据",
   read_document: "读取文档",
+  read_document_with_vision: "视觉识别文档",
   lookup_prices_bulk: "批量查价",
   write_excel: "生成 Excel",
   write_report: "生成报表",

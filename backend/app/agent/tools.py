@@ -2,17 +2,23 @@
 
 设计原则：
 - 工具结果只来自库内真实数据；异常包成 {"error": ...} 让模型自恢复（换词重搜/向用户澄清）。
-- 所有调用过 record_access_log（开关开启后即审计"谁问了什么、查了哪个型号"）。
+- 所有调用过 record_access_log，但只审计能力名与参数形状，不复制客户/模型提供的参数值。
 - 输出过 apply_field_visibility（RBAC 关闭时原样；将来收紧销售/采购可见字段零改动）。
 """
+import hashlib
 import json
 import logging
+from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import date
+from enum import Enum
 
 from sqlalchemy.orm import Session
 
 from app import security
 from app.agent import skills
+from app.config import get_settings
 from app.services import (agent_files, inventory, maintenance_cost, part_overview,
                           part_resolver, profit, purchase_analysis, purchase_query)
 
@@ -27,7 +33,64 @@ _RECENT_LIMIT_MAX = 50     # list_recent_purchases 返回条数上限
 _RECENT_DAYS_MAX = 365     # list_recent_purchases 时间窗上限（天）
 _READ_ROWS_MAX = agent_files._MAX_READ_ROWS   # read_file_rows 行数上限（真值源在 agent_files）
 
-TOOLS: list[dict] = [
+
+class ToolEffect(str, Enum):
+    """Capability effects allowed in the read-only Agent boundary."""
+
+    BUSINESS_READ = "business_read"
+    FILE_READ = "file_read"
+    ARTIFACT_CREATE = "artifact_create"
+
+
+class EgressEffect(str, Enum):
+    """Highest data boundary a capability may cross."""
+
+    NONE = "none"
+    MODEL_CONTEXT = "model_context"
+    EXTERNAL_PROVIDER = "external_provider"
+
+
+class DataSensitivity(str, Enum):
+    """Highest-sensitivity data a capability can place in a provider context."""
+
+    INTERNAL = "internal"
+    BUSINESS_CONFIDENTIAL = "business_confidential"
+    CUSTOMER_FILE = "customer_file"
+
+
+ALLOWED_TOOL_EFFECTS = frozenset(ToolEffect)
+ALLOWED_EGRESS_EFFECTS = frozenset(EgressEffect)
+ALLOWED_DATA_SENSITIVITIES = frozenset(DataSensitivity)
+STABLE_SUBJECT_EFFECTS = frozenset({ToolEffect.FILE_READ, ToolEffect.ARTIFACT_CREATE})
+ToolHandler = Callable[[Session, dict, security.UserContext], dict]
+ToolPermission = Callable[[security.UserContext], bool]
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    """Single registration unit for one model-visible server capability."""
+
+    schema: dict
+    handler: ToolHandler
+    effects: frozenset[ToolEffect]
+    egress: EgressEffect
+    sensitivity: DataSensitivity
+    permission_id: str
+    permission: ToolPermission
+    enabled: bool
+
+    @property
+    def name(self) -> str:
+        function = self.schema.get("function")
+        if not isinstance(function, dict):
+            return ""
+        name = function.get("name")
+        return name if isinstance(name, str) else ""
+
+
+# OpenAI wire schemas are definitions only. Registration happens once in TOOL_SPECS below;
+# TOOLS and _REGISTRY remain compatibility projections for existing callers/tests.
+_OPENAI_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
@@ -166,10 +229,27 @@ TOOLS: list[dict] = [
         "function": {
             "name": "read_document",
             "description": (
-                "读取上传文件的全部内容（Word/PDF/txt/Excel/图片均可）。整机配置拆解场景用它："
+                "只在本机读取上传文件内容（Word/PDF/txt/Excel/图片均可），不会调用外部视觉服务。"
+                "图片或扫描 PDF 返回 requires_vision=true；只有显式可见的 "
+                "read_document_with_vision 才能做外部视觉识别。整机配置拆解场景先用本工具："
                 "拿到文本后你自己判断里面有哪些设备/部件，按 品牌+型号+规格+数量 拆成清单。"
-                "图片和扫描件 PDF 会自动走视觉识别（需配置视觉模型，未配置时返回提示）。"
                 "Excel 若要按行列精确定位用 inspect_file/read_file_rows，要整体内容用本工具。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"file_id": {"type": "string"}},
+                "required": ["file_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_document_with_vision",
+            "description": (
+                "对 requires_vision=true 的本人图片/扫描 PDF 使用外部视觉供应商识别。"
+                "这是显式客户文件外发能力：只有部署已声明模型信任区并授权外部文件外发时才可见。"
+                "先调用 read_document；普通文字文件不要调用本工具。"
             ),
             "parameters": {
                 "type": "object",
@@ -565,6 +645,17 @@ def _read_document(db: Session, args: dict, ctx: security.UserContext) -> dict:
     return agent_files.read_document(fid)
 
 
+def _read_document_with_vision(
+    db: Session,
+    args: dict,
+    ctx: security.UserContext,
+) -> dict:
+    fid = str(args.get("file_id", ""))
+    if not _owns(ctx, fid):
+        return _NO_ACCESS
+    return agent_files.read_document_with_vision(fid)
+
+
 def _write_report(db: Session, args: dict, ctx: security.UserContext) -> dict:
     # 归属对称性（TOOLS-6）：本工具只新建报表、不读任何既有文件，故无需 _owns 校验
     # （对照 _write_excel：它有 base_file_id 回填 = 变相读他人文件，故必须 _owns）。
@@ -672,26 +763,391 @@ def _get_skill(db: Session, args: dict, ctx: security.UserContext) -> dict:
     return skills.get(str(args.get("skill", "")).strip(), ctx)
 
 
-_REGISTRY = {
-    "search_parts": _search_parts,
-    "get_part_overview": _get_part_overview,
-    "get_profit_ranking": _get_profit_ranking,
-    "list_recent_purchases": _list_recent_purchases,
-    "inspect_file": _inspect_file,
-    "read_file_rows": _read_file_rows,
-    "read_document": _read_document,
-    "lookup_prices_bulk": _lookup_prices_bulk,
-    "write_excel": _write_excel,
-    "write_report": _write_report,
-    "get_purchase_analysis": _get_purchase_analysis,
-    "get_inventory": _get_inventory,
-    "get_maintenance_board": _get_maintenance_board,
-    "get_maintenance_projects": _get_maintenance_projects,
-    "get_maintenance_lines": _get_maintenance_lines,
-    "get_cancellation_stats": _get_cancellation_stats,
-    "list_skills": _list_skills,
-    "get_skill": _get_skill,
-}
+def _allow(_ctx: security.UserContext) -> bool:
+    return True
+
+
+@dataclass(frozen=True)
+class _PagePermission:
+    """Reuse the API page contract when deciding which capabilities a model may see."""
+
+    page_key: str
+    deny_scoped_sales: bool = False
+
+    @property
+    def policy_id(self) -> str:
+        suffix = ":deny_scoped_sales" if self.deny_scoped_sales else ""
+        return f"page:{self.page_key}{suffix}"
+
+    def __call__(self, ctx: security.UserContext) -> bool:
+        if not security.page_allowed(ctx, self.page_key):
+            return False
+        return not (self.deny_scoped_sales and security.is_scoped_sales(ctx))
+
+
+def _permission_policy_id(permission: ToolPermission) -> str | None:
+    if permission is _allow:
+        return "allow"
+    if isinstance(permission, _PagePermission):
+        return permission.policy_id
+    return None
+
+
+def _index_schemas(schemas: list[dict]) -> dict[str, dict]:
+    indexed: dict[str, dict] = {}
+    for schema in schemas:
+        function = schema.get("function")
+        name = function.get("name") if isinstance(function, dict) else None
+        if not isinstance(name, str) or not name or name in indexed:
+            raise RuntimeError("Agent tool schemas must have unique non-empty names")
+        indexed[name] = schema
+    return indexed
+
+
+_SCHEMA_BY_NAME = _index_schemas(_OPENAI_SCHEMAS)
+
+
+def _schema(name: str) -> dict:
+    try:
+        return _SCHEMA_BY_NAME[name]
+    except KeyError as exc:  # import-time wiring defect, never a user-facing error
+        raise RuntimeError(f"Missing Agent tool schema: {name}") from exc
+
+
+def _effects(*effects: ToolEffect) -> frozenset[ToolEffect]:
+    """Build an immutable capability-effect declaration."""
+    return frozenset(effects)
+
+
+# Single registration source. Effects describe facts at the service boundary, not the
+# implementation detail that a read may write an access log or that an Artifact gets a new ID.
+TOOL_SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(_schema("search_parts"), _search_parts, _effects(ToolEffect.BUSINESS_READ),
+             EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+             "page:page_parts", _PagePermission("page_parts"), True),
+    ToolSpec(_schema("get_part_overview"), _get_part_overview,
+             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_parts",
+             _PagePermission("page_parts"), True),
+    ToolSpec(_schema("inspect_file"), _inspect_file, _effects(ToolEffect.FILE_READ),
+             EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow, True),
+    ToolSpec(_schema("read_file_rows"), _read_file_rows, _effects(ToolEffect.FILE_READ),
+             EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow, True),
+    ToolSpec(_schema("lookup_prices_bulk"), _lookup_prices_bulk,
+             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_parts",
+             _PagePermission("page_parts"), True),
+    ToolSpec(_schema("write_excel"), _write_excel,
+             _effects(ToolEffect.FILE_READ, ToolEffect.ARTIFACT_CREATE),
+             EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow, True),
+    ToolSpec(_schema("read_document"), _read_document, _effects(ToolEffect.FILE_READ),
+             EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow, True),
+    ToolSpec(_schema("read_document_with_vision"), _read_document_with_vision,
+             _effects(ToolEffect.FILE_READ), EgressEffect.EXTERNAL_PROVIDER,
+             DataSensitivity.CUSTOMER_FILE, "allow", _allow, True),
+    ToolSpec(_schema("write_report"), _write_report, _effects(ToolEffect.ARTIFACT_CREATE),
+             EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+             "allow", _allow, True),
+    ToolSpec(_schema("list_recent_purchases"), _list_recent_purchases,
+             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_purchases",
+             _PagePermission("page_purchases"), True),
+    ToolSpec(_schema("get_profit_ranking"), _get_profit_ranking,
+             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+             DataSensitivity.BUSINESS_CONFIDENTIAL,
+             "page:page_profit:deny_scoped_sales",
+             _PagePermission("page_profit", deny_scoped_sales=True), True),
+    ToolSpec(_schema("get_purchase_analysis"), _get_purchase_analysis,
+             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_purchases",
+             _PagePermission("page_purchases"), True),
+    ToolSpec(_schema("get_inventory"), _get_inventory, _effects(ToolEffect.BUSINESS_READ),
+             EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+             "page:page_inventory", _PagePermission("page_inventory"), True),
+    ToolSpec(_schema("get_maintenance_board"), _get_maintenance_board,
+             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+             DataSensitivity.BUSINESS_CONFIDENTIAL,
+             "page:page_maintenance:deny_scoped_sales",
+             _PagePermission("page_maintenance", deny_scoped_sales=True), True),
+    ToolSpec(_schema("get_maintenance_projects"), _get_maintenance_projects,
+             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_maintenance",
+             _PagePermission("page_maintenance"), True),
+    ToolSpec(_schema("get_maintenance_lines"), _get_maintenance_lines,
+             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_maintenance",
+             _PagePermission("page_maintenance"), True),
+    ToolSpec(_schema("get_cancellation_stats"), _get_cancellation_stats,
+             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_purchases",
+             _PagePermission("page_purchases"), True),
+    ToolSpec(_schema("list_skills"), _list_skills, _effects(ToolEffect.BUSINESS_READ),
+             EgressEffect.MODEL_CONTEXT, DataSensitivity.INTERNAL, "allow", _allow, True),
+    ToolSpec(_schema("get_skill"), _get_skill, _effects(ToolEffect.BUSINESS_READ),
+             EgressEffect.MODEL_CONTEXT, DataSensitivity.INTERNAL, "allow", _allow, True),
+)
+
+
+def _valid_effects(effects: object) -> bool:
+    return (
+        isinstance(effects, frozenset)
+        and bool(effects)
+        and all(isinstance(effect, ToolEffect) for effect in effects)
+        and effects.issubset(ALLOWED_TOOL_EFFECTS)
+    )
+
+
+def _valid_classification(spec: object) -> bool:
+    return (
+        isinstance(spec, ToolSpec)
+        and _valid_effects(spec.effects)
+        and isinstance(spec.egress, EgressEffect)
+        and spec.egress in ALLOWED_EGRESS_EFFECTS
+        and isinstance(spec.sensitivity, DataSensitivity)
+        and spec.sensitivity in ALLOWED_DATA_SENSITIVITIES
+        and isinstance(spec.permission_id, str)
+        and bool(spec.permission_id)
+        and _permission_policy_id(spec.permission) == spec.permission_id
+    )
+
+
+def _has_stable_subject(spec: ToolSpec, ctx: security.UserContext) -> bool:
+    if not (spec.effects & STABLE_SUBJECT_EFFECTS):
+        return True
+    return ctx.authn == "sys_user" and bool(ctx.user_id)
+
+
+def _index_specs(specs: tuple[ToolSpec, ...]) -> dict[str, ToolSpec]:
+    indexed: dict[str, ToolSpec] = {}
+    for spec in specs:
+        if not spec.name or spec.name in indexed:
+            raise RuntimeError("Agent ToolSpecs must have unique non-empty schema names")
+        if (
+            not _valid_classification(spec)
+            or not isinstance(spec.enabled, bool)
+            or not callable(spec.permission)
+        ):
+            raise RuntimeError(f"Agent ToolSpec has an invalid policy classification: {spec.name}")
+        indexed[spec.name] = spec
+    if set(indexed) != set(_SCHEMA_BY_NAME):
+        raise RuntimeError("Every Agent schema must have exactly one ToolSpec")
+    return indexed
+
+
+_SPEC_BY_NAME = _index_specs(TOOL_SPECS)
+
+CAPABILITY_POLICY_VERSION = "v1"
+
+
+def capability_policy_fingerprint(
+    specs: tuple[ToolSpec, ...] | None = None,
+) -> str:
+    """Hash canonical, non-secret policy metadata for task/audit correlation.
+
+    Descriptions, handlers, argument values and object identities are intentionally excluded.
+    Stable permission IDs and function parameter contracts are included so durable work can be
+    invalidated when authorization or accepted-input semantics change. Registration order is
+    normalized by capability name.
+    """
+    selected = TOOL_SPECS if specs is None else specs
+    names: set[str] = set()
+    entries: list[dict] = []
+    for spec in selected:
+        if (
+            not _valid_classification(spec)
+            or not spec.name
+            or spec.name in names
+            or not isinstance(spec.enabled, bool)
+        ):
+            raise ValueError("Cannot fingerprint invalid Agent capability policy")
+        function = spec.schema.get("function")
+        parameters = function.get("parameters") if isinstance(function, dict) else None
+        if not isinstance(parameters, dict):
+            raise ValueError("Cannot fingerprint Agent capability without parameters")
+        names.add(spec.name)
+        entries.append({
+            "name": spec.name,
+            "parameters": parameters,
+            "effects": sorted(effect.value for effect in spec.effects),
+            "egress": spec.egress.value,
+            "sensitivity": spec.sensitivity.value,
+            "permission_id": spec.permission_id,
+            "enabled": spec.enabled,
+        })
+    canonical = json.dumps(
+        {
+            "version": CAPABILITY_POLICY_VERSION,
+            "capabilities": sorted(entries, key=lambda entry: entry["name"]),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+CAPABILITY_POLICY_FINGERPRINT = capability_policy_fingerprint()
+
+# Backward-compatible projections. New code must use TOOL_SPECS/tools_for/dispatch so an
+# accidentally appended schema or handler cannot bypass effect and permission policy.
+TOOLS: list[dict] = [deepcopy(spec.schema) for spec in TOOL_SPECS]
+_REGISTRY: dict[str, ToolHandler] = {spec.name: spec.handler for spec in TOOL_SPECS}
+
+
+def _allowed(spec: object, ctx: security.UserContext) -> bool:
+    """Evaluate one capability fail closed; permission bugs never widen access."""
+    if not isinstance(spec, ToolSpec):
+        return False
+    if (spec.enabled is not True or not _valid_classification(spec)
+            or not _has_stable_subject(spec, ctx)):
+        return False
+    if not callable(spec.permission):
+        return False
+    try:
+        return bool(spec.permission(ctx))
+    except Exception as exc:  # noqa: BLE001 -- policy failures deny without logging user data
+        _log.error(
+            "agent capability permission failed name=%s exception_type=%s",
+            spec.name,
+            type(exc).__name__,
+        )
+        return False
+
+
+def tools_for(ctx: security.UserContext) -> list[dict]:
+    """Return only schemas the current context may call.
+
+    This is the model-facing half of the policy. ``dispatch`` repeats the same check because
+    tool names and arguments returned by a model are untrusted input.
+    """
+    return [
+        deepcopy(spec.schema)
+        for spec in TOOL_SPECS
+        if _allowed(spec, ctx)
+        and _schema_egress_allowed(spec)
+    ]
+
+
+def _capability_denied() -> dict:
+    # Do not disclose whether a name exists but is disabled/forbidden.
+    return {"error": "未知工具或无权限", "kind": "capability_denied"}
+
+
+def _external_file_egress_enabled() -> bool:
+    return bool(get_settings().agent_external_file_egress_enabled)
+
+
+def _model_context_egress_enabled() -> bool:
+    settings = get_settings()
+    return bool(
+        settings.agent_model_context_egress_enabled
+        and settings.llm_trust_zone in {"private", "approved_external"}
+    )
+
+
+def _sensitivity_egress_allowed(spec: ToolSpec) -> bool:
+    """Enforce the provider-zone data policy for the capability's maximum sensitivity.
+
+    A private model context can receive customer-file content without authorizing an
+    *external* file transfer. An approved external model can receive confidential business
+    data, but customer-file content needs the separate explicit file-egress opt-in.
+    """
+    if spec.egress is EgressEffect.NONE:
+        return True
+    settings = get_settings()
+    if settings.llm_trust_zone == "private":
+        return True
+    if settings.llm_trust_zone == "approved_external":
+        return (
+            spec.sensitivity is not DataSensitivity.CUSTOMER_FILE
+            or _external_file_egress_enabled()
+        )
+    return False
+
+
+def _schema_egress_allowed(spec: ToolSpec) -> bool:
+    if spec.egress is EgressEffect.NONE:
+        return True
+    if not _model_context_egress_enabled():
+        return False
+    if not _sensitivity_egress_allowed(spec):
+        return False
+    if spec.egress is EgressEffect.EXTERNAL_PROVIDER:
+        return _external_file_egress_enabled()
+    return True  # MODEL_CONTEXT
+
+
+def _external_egress_required(spec: ToolSpec) -> bool:
+    return spec.egress is EgressEffect.EXTERNAL_PROVIDER
+
+
+def _external_egress_denied() -> dict:
+    return {
+        "error": "该文件可能需要外部视觉识别，但部署未授权客户文件外发",
+        "kind": "external_egress_denied",
+    }
+
+
+def _model_context_egress_denied() -> dict:
+    return {
+        "error": "模型目标信任区未知或未授权业务/文件数据进入模型上下文",
+        "kind": "model_context_egress_denied",
+    }
+
+
+def _sensitivity_egress_denied() -> dict:
+    return {
+        "error": "当前模型目标未获授权接收客户文件内容",
+        "kind": "sensitivity_egress_denied",
+    }
+
+
+def audit_name(name: str) -> str:
+    """Return a log-safe capability label; never log a model-invented tool name."""
+    spec = _SPEC_BY_NAME.get(name)
+    return spec.name if isinstance(spec, ToolSpec) else "unknown"
+
+
+def audit_summary(name: str, args: object) -> dict:
+    """Describe argument shape without copying customer/model-provided values into logs."""
+    spec = _SPEC_BY_NAME.get(name)
+    summary: dict = {"arg_count": len(args) if isinstance(args, dict) else 0, "arg_keys": []}
+    if not isinstance(spec, ToolSpec) or not isinstance(args, dict):
+        return summary
+    function = spec.schema.get("function")
+    parameters = function.get("parameters") if isinstance(function, dict) else None
+    properties = parameters.get("properties") if isinstance(parameters, dict) else None
+    declared = set(properties) if isinstance(properties, dict) else set()
+    keys = sorted(key for key in args if isinstance(key, str) and key in declared)
+    summary.update({
+        "effects": (
+            sorted(effect.value for effect in spec.effects)
+            if _valid_effects(spec.effects)
+            else ["unclassified"]
+        ),
+        "egress": (spec.egress.value if isinstance(spec.egress, EgressEffect)
+                   else "unclassified"),
+        "sensitivity": (
+            spec.sensitivity.value
+            if isinstance(spec.sensitivity, DataSensitivity)
+            else "unclassified"
+        ),
+        "permission_id": (
+            spec.permission_id
+            if isinstance(spec.permission_id, str) and spec.permission_id
+            else "unclassified"
+        ),
+        "arg_keys": keys,
+    })
+    collection_counts = {
+        key: len(args[key]) for key in keys if isinstance(args[key], (list, dict))
+    }
+    string_lengths = {key: len(args[key]) for key in keys if isinstance(args[key], str)}
+    if collection_counts:
+        summary["collection_counts"] = collection_counts
+    if string_lengths:
+        summary["string_lengths"] = string_lengths
+    return summary
 
 
 def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext) -> dict:
@@ -699,15 +1155,32 @@ def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext) -> d
 
     业务错由各工具显式 return {"error": 文案}（如"型号不存在""query 不能为空"）——这些是给
     模型自恢复的安全文案，原样回灌。这里的 except 只兜底**未预期的内部异常**（如 SQLAlchemyError
-    会把 SQL 语句 + 表/列名带出）：原始 type+消息只 _log 到服务端，回灌给模型/用户的只有固定脱敏
-    文案。否则裸异常经工具结果 → tool 消息 → SSE delta 直达终端用户（信息泄漏，PR-审计 TOOLS-1）。
+    会把 SQL 语句 + 表/列名带出）：服务端日志只保留能力名与异常类型，参数值和异常消息均不落日志；
+    回灌给模型/用户的只有固定脱敏文案。否则裸异常经工具结果 → tool 消息 → SSE delta 直达终端用户。
     """
-    security.record_access_log(ctx, f"agent_tool:{name}", "agent", args)
+    spec = _SPEC_BY_NAME.get(name)
     fn = _REGISTRY.get(name)
-    if fn is None:
-        return {"error": f"未知工具: {name}"}
+    audit = audit_summary(name, args)
+    safe_name = audit_name(name)
+    if not _allowed(spec, ctx) or not callable(fn):
+        security.record_access_log(ctx, f"agent_tool_denied:{safe_name}", "agent", audit)
+        return _capability_denied()
+    if not _model_context_egress_enabled() and spec.egress is not EgressEffect.NONE:
+        security.record_access_log(
+            ctx, f"agent_tool_model_egress_denied:{safe_name}", "agent", audit,
+        )
+        return _model_context_egress_denied()
+    if not _sensitivity_egress_allowed(spec):
+        security.record_access_log(
+            ctx, f"agent_tool_sensitivity_denied:{safe_name}", "agent", audit,
+        )
+        return _sensitivity_egress_denied()
+    if _external_egress_required(spec) and not _external_file_egress_enabled():
+        security.record_access_log(ctx, f"agent_tool_egress_denied:{safe_name}", "agent", audit)
+        return _external_egress_denied()
+    security.record_access_log(ctx, f"agent_tool:{safe_name}", "agent", audit)
     try:
         return _jsonable(fn(db, args, ctx))
-    except Exception:  # noqa: BLE001 —— 内部异常绝不外泄：原始信息只落服务端日志
-        _log.exception("agent tool failed name=%s args=%s", name, args)
+    except Exception as exc:  # noqa: BLE001 —— 异常消息/参数可能含客户数据，日志只留类型
+        _log.error("agent tool failed name=%s exception_type=%s", safe_name, type(exc).__name__)
         return {"error": "工具执行失败，请换个方式或稍后重试", "retriable": True, "kind": "internal"}

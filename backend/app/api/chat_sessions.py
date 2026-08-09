@@ -1,6 +1,7 @@
 """对话会话 API（平台化 P1：服务端持久化，对标扣子/DeepSeek 网页版）。
 
-- 会话/消息归属 token.sub，本人可见；管理员也不能看别人的对话（报价隐私）。
+- 会话/消息只归属 authn=sys_user 的稳定 token.sub；共享口令不能创建持久会话。
+  本人可见，管理员也不能看别人的对话（报价隐私）。
 - /{id}/chat/stream：客户端只发新消息，历史由服务端取（窗口见 chat_store）。
   客户端中断（停止生成/断网）时，已生成的部分照样落库并标 stopped。
 - 旧的无状态 /agent/chat(/stream) 保留不动，供脚本/API 调用方使用。
@@ -15,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.agent import audit as agent_audit
 from app.agent import provider, runtime
 from app.auth import current_identity
 from app.config import get_settings
@@ -51,9 +53,12 @@ def _require_agent_enabled() -> None:
 
 
 def _require_real_identity(ident: dict) -> None:
-    """会话按 token.sub 归属——共享口令回退登录的 sub 是自报的任意字符串，
-    两个人自称同一个名字就会互看对话。这类身份禁用会话功能。"""
-    if ident.get("fb"):
+    """会话按稳定 token.sub 归属；仅数据库实名账号可创建或读取持久会话。
+
+    shared token 的 sub 可能自报（readonly）或固定为 admin，但两者都没有可吊销的账号主体，
+    因此即使历史 token 没有 fb 标记，也必须按 authn=sys_user 失败关闭。
+    """
+    if ident.get("authn") != "sys_user":
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "AI 助手会话需要实名账号（请管理员在系统中为你创建用户）")
@@ -279,8 +284,18 @@ def chat_stream(
     完整答案落库（重新打开会话可见全文）。"""
     _require_agent_enabled()
     s = _owned_or_404(db, ident, session_id)
-    record_access_log(ctx, "chat_stream", "agent",
-                      {"session_id": s.id, "q": req.message[:200]})
+    record_access_log(
+        ctx,
+        "chat_stream",
+        "agent",
+        agent_audit.chat_request_shape(
+            message_count=1,
+            last_message=req.message,
+            endpoint="session_chat_stream",
+            stream=True,
+            session_id=s.id,
+        ),
+    )
 
     hub = acquire_session(s.id)
     if hub is None:
@@ -333,8 +348,12 @@ def chat_stream(
                 msg_id = chat_store.save_assistant_progress(
                     sid, msg_id, content or "(无内容)", trace, stopped)
                 since_ckpt = 0
-            except Exception:  # noqa: BLE001 —— 落库失败不能炸生成
-                _log.exception("checkpoint assistant message failed (session=%s)", sid)
+            except Exception as exc:  # noqa: BLE001 —— 落库失败不能炸生成
+                _log.error(
+                    "checkpoint assistant message failed session=%s exception_type=%s",
+                    sid,
+                    type(exc).__name__,
+                )
 
         wdb = SessionLocal()
         try:
@@ -359,7 +378,7 @@ def chat_stream(
                     _save(stopped=False, final=True)
                 hub.publish(ev)
         except Exception as exc:  # noqa: BLE001 —— 上游 LLM 错误：保留已生成部分
-            _log.error("agent session stream failed: %r", exc)
+            _log.error("agent session stream failed exception_type=%s", type(exc).__name__)
             _save(stopped=True, final=True)
             hub.publish({"type": "error", "message": "AI 服务调用失败，请稍后重试"})
         finally:

@@ -6,6 +6,11 @@ import signal
 import sys
 from pathlib import Path
 
+# The isolated test runtime is an explicitly approved private model zone. Production defaults
+# remain fail closed and are asserted in test_agent_capabilities.py.
+os.environ["LLM_TRUST_ZONE"] = "private"
+os.environ["AGENT_MODEL_CONTEXT_EGRESS_ENABLED"] = "true"
+
 from tests.run_isolation import (
     CONTROLLED_RAW_BASE,
     RunLifecycle,

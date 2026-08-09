@@ -238,21 +238,17 @@ def _read_pdf(path: Path) -> tuple[str, bool]:
 
 
 def _read_image_or_scanned(path: Path, hint: str) -> str:
-    """图片/扫描件 → Qwen-VL 识别（无 key 优雅降级）。"""
+    """图片/扫描件 → 已配置的视觉供应商；授权与未配置降级由上层分别处理。"""
     from app.agent import provider
-    try:
-        return provider.vision_extract([path], hint)
-    except provider.VisionNotConfigured:
-        return ("【未配置视觉模型】该文件是图片/扫描件，需配置 VISION_API_KEY（通义 Qwen-VL）"
-                "后才能识别。文字版 Word/Excel/PDF/txt 不受影响。")
+    return provider.vision_extract([path], hint)
 
 
 def read_document(file_id: str) -> dict:
-    """通用读取：把任意支持格式抽成文本喂给模型（拆件/解析由模型完成）。"""
+    """Local-only extraction; image/scanned content is flagged, never sent to Vision."""
     fid = _check_id(file_id)
     meta = _load_meta(fid)
     ext = meta.get("ext", "")
-    vision_used = False
+    requires_vision = False
     if ext in _TEXT_EXT:
         text = _data_path(fid, ext).read_bytes().decode("utf-8", errors="replace")
     elif ext == "xlsx":
@@ -271,21 +267,50 @@ def read_document(file_id: str) -> dict:
     elif ext == "pdf":
         text, scanned = _read_pdf(_data_path(fid, "pdf"))
         if scanned:
-            vision_used = True
-            text = _read_image_or_scanned(_data_path(fid, "pdf"),
-                                          "这是一份扫描件，请逐字识别其中的全部文本、表格、型号与参数。")
+            requires_vision = True
     elif ext in _IMG_EXT:
-        vision_used = True
-        text = _read_image_or_scanned(
-            _data_path(fid, ext),
-            "请识别图片中的全部文字、表格、设备型号、品牌与参数配置，按原结构输出。")
+        requires_vision = True
+        text = ""
     else:
         raise FileError(f"不支持读取 .{ext}")
 
     truncated = len(text) > _DOC_CHAR_CAP
     return {"file_id": fid, "filename": meta.get("filename"), "ext": ext,
-            "vision_used": vision_used, "truncated": truncated,
+            "vision_used": False, "requires_vision": requires_vision, "truncated": truncated,
             "content": text[:_DOC_CHAR_CAP]}
+
+
+def read_document_with_vision(file_id: str) -> dict:
+    """Explicit external Vision path, gated by Capability Kernel before this function runs."""
+    from app.agent import provider
+
+    local = read_document(file_id)
+    if not local["requires_vision"]:
+        return local
+    fid = local["file_id"]
+    ext = local["ext"]
+    if ext == "pdf":
+        hint = "这是一份扫描件，请逐字识别其中的全部文本、表格、型号与参数。"
+    else:
+        hint = "请识别图片中的全部文字、表格、设备型号、品牌与参数配置，按原结构输出。"
+    try:
+        text = _read_image_or_scanned(_data_path(fid, ext), hint)
+    except provider.VisionNotConfigured:
+        return {
+            **local,
+            "content": (
+                "【未配置视觉模型】该文件是图片/扫描件，需配置 VISION_API_KEY 后才能识别。"
+                "文字版 Word/Excel/PDF/txt 不受影响。"
+            ),
+        }
+    truncated = len(text) > _DOC_CHAR_CAP
+    return {
+        **local,
+        "vision_used": True,
+        "requires_vision": False,
+        "truncated": truncated,
+        "content": text[:_DOC_CHAR_CAP],
+    }
 
 
 # ============================================================

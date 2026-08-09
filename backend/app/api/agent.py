@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.agent import audit as agent_audit
 from app.agent import provider, runtime
 from app.auth import current_role
 from app.config import get_settings
@@ -52,7 +53,17 @@ def chat(
     settings = get_settings()
     if not settings.enable_agent:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "AI 助手未启用")
-    record_access_log(ctx, "chat", "agent", {"q": req.messages[-1].content[:200]})
+    record_access_log(
+        ctx,
+        "chat",
+        "agent",
+        agent_audit.chat_request_shape(
+            message_count=len(req.messages),
+            last_message=req.messages[-1].content,
+            endpoint="chat",
+            stream=False,
+        ),
+    )
     if not provider.is_configured():
         return {"configured": False, "answer": _NOT_CONFIGURED_MSG, "tool_calls": []}
     try:
@@ -60,7 +71,7 @@ def chat(
     except provider.LLMNotConfigured:
         return {"configured": False, "answer": _NOT_CONFIGURED_MSG, "tool_calls": []}
     except Exception as exc:  # noqa: BLE001 —— 上游 LLM 网络/配额错误：不泄露细节
-        _log.error("agent chat failed: %r", exc)
+        _log.error("agent chat failed exception_type=%s", type(exc).__name__)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY,
                             "AI 服务调用失败，请稍后重试（详情见服务端日志）") from exc
     return {"configured": True, **out}
@@ -77,7 +88,17 @@ def chat_stream(
     settings = get_settings()
     if not settings.enable_agent:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "AI 助手未启用")
-    record_access_log(ctx, "chat_stream", "agent", {"q": req.messages[-1].content[:200]})
+    record_access_log(
+        ctx,
+        "chat_stream",
+        "agent",
+        agent_audit.chat_request_shape(
+            message_count=len(req.messages),
+            last_message=req.messages[-1].content,
+            endpoint="chat_stream",
+            stream=True,
+        ),
+    )
 
     def _sse(ev: dict) -> str:
         return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
@@ -91,7 +112,7 @@ def chat_stream(
             for ev in runtime.run_stream(db, [m.model_dump() for m in req.messages], ctx):
                 yield _sse(ev)
         except Exception as exc:  # noqa: BLE001 —— 流中途出错：发 error 事件而非半截断流
-            _log.error("agent stream failed: %r", exc)
+            _log.error("agent stream failed exception_type=%s", type(exc).__name__)
             yield _sse({"type": "error", "message": "AI 服务调用失败，请稍后重试"})
 
     return StreamingResponse(gen(), media_type="text/event-stream",

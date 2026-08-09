@@ -40,7 +40,7 @@ def test_unknown_username_with_admin_password_still_falls_back(db):
     assert r.status_code == 200 and r.json()["role"] == "readonly"
 
 
-def test_shared_admin_keeps_existing_chat_session_access(db):
+def test_shared_admin_cannot_own_persisted_chat_sessions(db):
     login = _login("admin", get_settings().admin_password)
     assert login.status_code == 200
     client = TestClient(app)
@@ -48,4 +48,5 @@ def test_shared_admin_keeps_existing_chat_session_access(db):
         "/api/agent/sessions",
         headers={"Authorization": f"Bearer {login.json()['token']}"},
     )
-    assert response.status_code == 200, response.text
+    assert response.status_code == 403, response.text
+    assert "实名账号" in response.text
