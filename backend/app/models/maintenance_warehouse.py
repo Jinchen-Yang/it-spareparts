@@ -68,7 +68,7 @@ class MaintenanceWarehouseDocument(Base):
     document_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     document_type: Mapped[str] = mapped_column(String(16), nullable=False)
     source_document_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    document_no: Mapped[str | None] = mapped_column(String(128))
+    document_no: Mapped[str] = mapped_column(String(128), nullable=False)
     document_date: Mapped[date | None] = mapped_column(Date)
     raw_status: Mapped[str | None] = mapped_column(String(128))
     normalized_status: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -86,10 +86,10 @@ class MaintenanceWarehouseDocument(Base):
         CheckConstraint("normalized_status IN ('confirmed', 'pending', 'void', 'unknown')", name="ck_maintenance_wh_document_status"),
         CheckConstraint("raw_fingerprint ~ '^[a-f0-9]{64}$'", name="ck_maintenance_wh_document_fingerprint"),
         UniqueConstraint(
-            "document_type", "source_document_id",
-            name="uq_maintenance_wh_document_source",
+            "document_type", "document_no",
+            name="uq_maintenance_wh_document_no",
         ),
-        Index("ix_maintenance_wh_document_no", "document_type", "document_no"),
+        Index("ix_maintenance_wh_document_source", "document_type", "source_document_id"),
         Index("ix_maintenance_wh_document_date", "document_type", "document_date"),
     )
 
@@ -211,6 +211,7 @@ class MaintenanceWarehouseAmbiguity(Base):
     source_row: Mapped[int | None] = mapped_column(Integer)
     value_hash: Mapped[str | None] = mapped_column(String(64))
     candidates_json: Mapped[list] = mapped_column(JSONB, nullable=False)
+    evidence_json: Mapped[dict | None] = mapped_column(JSONB)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")

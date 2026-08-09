@@ -169,6 +169,8 @@ def _service_http_error(exc: Exception) -> HTTPException:
         return HTTPException(code, str(exc))
     if isinstance(exc, maintenance_warehouse.MaintenanceWarehouseConflict):
         return HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    if isinstance(exc, maintenance_warehouse.MaintenanceWarehouseNotFound):
+        return HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
     if isinstance(exc, maintenance_warehouse.MaintenanceWarehouseError):
         return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
     raise exc

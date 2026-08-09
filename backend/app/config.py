@@ -167,6 +167,21 @@ MAINTENANCE_WAREHOUSE_APPROVED_HEADER_CONTRACTS: dict[
     str, tuple[tuple[tuple[str, str], ...], ...]
 ] = {}
 
+# 每个获批双表头还必须有同一批次人工复核的字段策略，键为 adapter version，
+# 次级键为完整双表头 SHA-256。受控附件按获批列位置声明；状态映射和其他枚举
+# 也只来自该正式版本，不能在 adapter 代码里猜。元数据缺失时即使表头被误填入
+# 上方合同，服务端仍失败关闭。
+#
+# 单份元数据结构：
+# {
+#   "controlled_positions": (12,),
+#   "status_values": {"正式来源状态": "confirmed|pending|void"},
+#   "enum_values": {"内部字段编码": ("正式枚举值", ...)},
+# }
+MAINTENANCE_WAREHOUSE_APPROVED_CONTRACT_METADATA: dict[
+    str, dict[str, dict[str, object]]
+] = {}
+
 # 目标毛利率（报价提示/低毛利标记用；整机拆解的"建议售价"=成本×1/(1-此值)）
 TARGET_MARGIN = Decimal("0.20")
 

@@ -103,6 +103,16 @@ export interface WarehouseDocumentSummary {
   raw_status: string | null;
   normalized_status: string;
   line_count: number;
+  eligible_line_count: number;
+  project_link_state:
+    | "ready"
+    | "not_applicable"
+    | "not_confirmed"
+    | "missing_order_link"
+    | "missing_project_link"
+    | "ambiguous_active_links"
+    | "assignment_contract_unavailable"
+    | "assignment_mismatch";
   open_ambiguity_count: number;
   batch: WarehouseBatchEvidence | null;
   links: WarehouseLinkEvidence[];
@@ -112,6 +122,16 @@ export interface WarehouseLinkCandidate {
   target_type: string;
   target_id: string;
   label?: string;
+}
+
+export interface WarehouseConflictEvidence {
+  before_fingerprint: string;
+  after_fingerprint: string;
+  changed_fields: Array<{
+    field_code: string;
+    before: unknown;
+    after: unknown;
+  }>;
 }
 
 export interface WarehouseAmbiguitySummary {
@@ -124,6 +144,7 @@ export interface WarehouseAmbiguitySummary {
   status: "open" | "resolved";
   version: number;
   candidates: WarehouseLinkCandidate[];
+  evidence: WarehouseConflictEvidence | null;
   resolution: Record<string, unknown> | null;
   resolution_reason: string | null;
   resolved_by: string | null;
@@ -193,7 +214,7 @@ export const resolveWarehouseAmbiguity = (
   body: {
     version: number;
     reason: string;
-    decision: "acknowledge" | "link";
+    decision: "acknowledge" | "link" | "retain_existing";
     link_kind?: string;
     target_type?: string;
     target_id?: string;

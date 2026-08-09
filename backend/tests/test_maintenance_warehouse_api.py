@@ -39,6 +39,7 @@ def _content() -> bytes:
         (f"{SHIPMENT_PREFIX}.F0000031", "备件明细.备件PN(必填)"),
         (f"{SHIPMENT_PREFIX}.F0000044", "备件明细.备件SN号(必填)"),
         (f"{SHIPMENT_PREFIX}.F0000011", "备件明细.出库数量"),
+        (f"{SHIPMENT_PREFIX}.F0000150", "备件明细.附件"),
     ]
     workbook = Workbook()
     sheet = workbook.active
@@ -47,6 +48,7 @@ def _content() -> bytes:
     sheet.append([
         "SYN-API-DOC", "SYN-API-SHIP", "2026-08-01", "维保", "备件", "已完成",
         "SYN-API-WBDD", "SYN-API-LINE", "SYN-API-PN", "SYN-API-SN", 1,
+        "SYNTHETIC-CONTROLLED-ATTACHMENT",
     ])
     output = io.BytesIO()
     workbook.save(output)
@@ -63,6 +65,26 @@ def _approve_synthetic_contract(monkeypatch) -> None:
         "MAINTENANCE_WAREHOUSE_APPROVED_HEADER_CONTRACTS",
         {"shipment_v1": (contract,)},
     )
+    controlled_position = next(
+        pair.position for pair in parsed.header_pairs
+        if pair.internal_code == f"{SHIPMENT_PREFIX}.F0000150"
+    )
+    monkeypatch.setattr(
+        config,
+        "MAINTENANCE_WAREHOUSE_APPROVED_CONTRACT_METADATA",
+        {
+            "shipment_v1": {
+                parsed.header_signature: {
+                    "controlled_positions": (controlled_position,),
+                    "status_values": {"已完成": "confirmed"},
+                    "enum_values": {
+                        "F0000032": ("维保",),
+                        "F0000061": ("备件",),
+                    },
+                },
+            },
+        },
+    )
 
 
 def _seed(db) -> None:
@@ -78,6 +100,7 @@ def _seed(db) -> None:
         raw_order_id="SYN-API-WBDD",
         order_no="SYN-API-WBDD",
         order_date=date(2026, 8, 1),
+        data_status=config.ACTIVE_STATUS,
         import_batch_id=source.id,
     ))
     db.add(DimPart(
@@ -135,6 +158,11 @@ def test_preview_apply_post_search_and_resolution_end_to_end(db, monkeypatch):
     assert documents.headers["cache-control"] == "no-store"
     assert documents.json()["total"] == 1
     assert documents.json()["items"][0]["line_count"] == 1
+    assert documents.json()["items"][0]["eligible_line_count"] == 0
+    assert (
+        documents.json()["items"][0]["project_link_state"]
+        == "assignment_contract_unavailable"
+    )
     assert client.get("/api/maintenance/warehouse-documents/search?q=SYN-API").status_code == 405
 
     ambiguities = client.post(
@@ -146,11 +174,25 @@ def test_preview_apply_post_search_and_resolution_end_to_end(db, monkeypatch):
         item for item in ambiguities.json()["items"]
         if item["ambiguity_type"] == "integration_blocker"
     )
-    resolved = client.post(
+    blocked_resolution = client.post(
         f"/api/maintenance/warehouse-ambiguities/{blocker['ambiguity_id']}/resolve",
         json={
             "version": blocker["version"],
-            "reason": "合成审核：确认依赖分支尚未合入",
+            "reason": "合成审核：不能人工关闭依赖阻塞",
+            "decision": "acknowledge",
+        },
+    )
+    assert blocked_resolution.status_code == 409, blocked_resolution.text
+
+    controlled = next(
+        item for item in ambiguities.json()["items"]
+        if item["ambiguity_type"] == "controlled_attachment"
+    )
+    resolved = client.post(
+        f"/api/maintenance/warehouse-ambiguities/{controlled['ambiguity_id']}/resolve",
+        json={
+            "version": controlled["version"],
+            "reason": "合成审核：已在来源系统人工核验受控附件",
             "decision": "acknowledge",
         },
     )
@@ -165,7 +207,7 @@ def test_preview_apply_post_search_and_resolution_end_to_end(db, monkeypatch):
     assert history.status_code == 200, history.text
     item = next(
         row for row in history.json()["items"]
-        if row["ambiguity_id"] == blocker["ambiguity_id"]
+        if row["ambiguity_id"] == controlled["ambiguity_id"]
     )
     assert item["batch"]["source_file_hash"] == plan["source_file_hash"]
     assert item["batch"]["header_diff"]["state"] == "approved_exact"
@@ -232,6 +274,10 @@ def test_project_scoped_account_sees_no_warehouse_rows_without_205_assignment_co
         role="purchaser",
         display_name="合成项目经理",
         password_hash=hash_password("synthetic-password-456"),
+        permissions={
+            "page_maintenance": True,
+            "action_maintenance_warehouse_manage": True,
+        },
     ))
     db.commit()
     scoped = TestClient(app)
@@ -254,3 +300,27 @@ def test_project_scoped_account_sees_no_warehouse_rows_without_205_assignment_co
     assert ambiguities.status_code == 200, ambiguities.text
     assert documents.json()["total"] == 0
     assert ambiguities.json()["total"] == 0
+
+    admin_ambiguities = admin.post(
+        "/api/maintenance/warehouse-ambiguities/search",
+        json={"status": "open", "page": 1, "page_size": 20},
+    ).json()["items"]
+    hidden_id = admin_ambiguities[0]["ambiguity_id"]
+    hidden = scoped.post(
+        f"/api/maintenance/warehouse-ambiguities/{hidden_id}/resolve",
+        json={
+            "version": 1,
+            "reason": "合成越权探测必须与不存在一致",
+            "decision": "acknowledge",
+        },
+    )
+    missing = scoped.post(
+        "/api/maintenance/warehouse-ambiguities/00000000-0000-0000-0000-000000000000/resolve",
+        json={
+            "version": 1,
+            "reason": "合成不存在目标",
+            "decision": "acknowledge",
+        },
+    )
+    assert hidden.status_code == missing.status_code == 404
+    assert hidden.json() == missing.json()

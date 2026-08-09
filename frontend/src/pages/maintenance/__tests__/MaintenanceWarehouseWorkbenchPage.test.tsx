@@ -34,6 +34,8 @@ beforeEach(() => {
         raw_status: "已完成",
         normalized_status: "confirmed",
         line_count: 1,
+        eligible_line_count: 0,
+        project_link_state: "assignment_contract_unavailable",
         open_ambiguity_count: 1,
         batch: {
           import_id: "SYN-IMPORT",
@@ -105,6 +107,8 @@ describe("MaintenanceWarehouseWorkbenchPage", () => {
     expect(screen.getByText("本工作台不会修改库存、成本或返还率")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: "单据事实 1" }));
+    expect(await screen.findByText("项目归属契约未就绪")).toBeInTheDocument();
+    expect(screen.getByText("0/1 行可进入领用/迁移候选")).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "查看证据" }));
     expect(screen.getByText("仓库单据证据")).toBeInTheDocument();
     expect(screen.getByText("synthetic-warehouse.xlsx")).toBeInTheDocument();
@@ -117,11 +121,118 @@ describe("MaintenanceWarehouseWorkbenchPage", () => {
       page_maintenance: true,
       action_maintenance_warehouse_manage: true,
     }));
+    searchWarehouseAmbiguities.mockResolvedValue({
+      data: {
+        items: [{
+          ambiguity_id: "SYN-CONTROLLED-ATTACHMENT",
+          import_id: "SYN-IMPORT",
+          ambiguity_type: "controlled_attachment",
+          field_code: "SYN-CONTROLLED-FIELD",
+          source_row: 3,
+          status: "open",
+          version: 1,
+          candidates: [],
+          evidence: null,
+          resolution: null,
+          resolution_reason: null,
+          resolved_by: null,
+          document: null,
+        }],
+        total: 1,
+        page: 1,
+        page_size: 50,
+      },
+    });
     render(<MaintenanceWarehouseWorkbenchPage />);
 
     expect(await screen.findByText("导入仓库导出文件")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "零写入预览" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "人工裁决" })).toBeInTheDocument();
+  });
+
+  it("keeps integration blockers read-only until their dependency recovers", async () => {
+    localStorage.setItem("role", "admin");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      action_maintenance_warehouse_manage: true,
+    }));
+    searchWarehouseAmbiguities.mockResolvedValue({
+      data: {
+        items: [{
+          ambiguity_id: "SYN-INTEGRATION-BLOCKER",
+          import_id: "SYN-IMPORT",
+          ambiguity_type: "integration_blocker",
+          field_code: "site_issue_id",
+          source_row: 3,
+          status: "open",
+          version: 1,
+          candidates: [],
+          resolution: null,
+          resolution_reason: null,
+          resolved_by: null,
+          document: null,
+        }],
+        total: 1,
+        page: 1,
+        page_size: 50,
+      },
+    });
+
+    render(<MaintenanceWarehouseWorkbenchPage />);
+
+    expect(await screen.findByText("稳定关联依赖尚未就绪")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看证据" }));
+    expect(screen.getByText("集成阻塞证据")).toBeInTheDocument();
+    expect(screen.getByText(/该阻塞不能人工关闭/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("裁决理由")).toBeNull();
+    expect(screen.queryByRole("button", { name: "实名确认裁决" })).toBeNull();
+  });
+
+  it("shows exact before/after evidence and fixes immutable conflicts to retain-existing", async () => {
+    localStorage.setItem("role", "admin");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      action_maintenance_warehouse_manage: true,
+    }));
+    searchWarehouseAmbiguities.mockResolvedValue({
+      data: {
+        items: [{
+          ambiguity_id: "SYN-FACT-CONFLICT",
+          import_id: "SYN-IMPORT",
+          ambiguity_type: "field_conflict",
+          field_code: "document_line",
+          source_row: 3,
+          status: "open",
+          version: 1,
+          candidates: [],
+          evidence: {
+            before_fingerprint: "a".repeat(64),
+            after_fingerprint: "b".repeat(64),
+            changed_fields: [{
+              field_code: "SYN-PN-FIELD",
+              before: "SYN-PN-A",
+              after: "SYN-PN-B",
+            }],
+          },
+          resolution: null,
+          resolution_reason: null,
+          resolved_by: null,
+          document: null,
+        }],
+        total: 1,
+        page: 1,
+        page_size: 50,
+      },
+    });
+
+    render(<MaintenanceWarehouseWorkbenchPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "人工裁决" }));
+
+    expect(screen.getByText("冲突前后证据")).toBeInTheDocument();
+    expect(screen.getByText("a".repeat(64))).toBeInTheDocument();
+    expect(screen.getByText(/新："SYN-PN-B"/)).toBeInTheDocument();
+    expect(screen.getByLabelText("裁决理由")).toBeInTheDocument();
+    expect(screen.queryByLabelText("裁决方式")).toBeNull();
   });
 
   it("ignores an older search generation that finishes after the latest request", async () => {

@@ -64,6 +64,7 @@ class WarehouseAmbiguityFact:
     line_source_id: str | None = None
     value_hash: str | None = None
     candidate_refs: tuple[dict, ...] = ()
+    evidence: dict | None = None
 
 
 @dataclass
@@ -83,7 +84,7 @@ class WarehouseLineFact:
 class WarehouseDocumentFact:
     document_type: str
     source_document_id: str
-    document_no: str | None
+    document_no: str
     document_date: date | None
     raw_status: str | None
     normalized_status: str
@@ -124,8 +125,15 @@ class AdapterSpec:
     self_code: str
     quantity_code: str
     maintenance_order_codes: tuple[str, ...]
+    enum_codes: tuple[str, ...]
     upstream_document_codes: tuple[str, ...] = ()
-    controlled_field_codes: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class ApprovedContractMetadata:
+    controlled_positions: frozenset[int]
+    status_values: dict[str, str]
+    enum_values: dict[str, frozenset[str]]
 
 
 _RETURN_COMMON = frozenset({
@@ -164,8 +172,8 @@ ADAPTERS: tuple[AdapterSpec, ...] = (
         self_code=f"{_RETURN_PREFIX}.F0000043",
         quantity_code=f"{_RETURN_PREFIX}.F0000011",
         maintenance_order_codes=("F0000139", "F0000156"),
+        enum_codes=("F0000032", "F0000061", "F0000192"),
         upstream_document_codes=("F0000166", "F0000165"),
-        controlled_field_codes=frozenset({f"{_RETURN_PREFIX}.F0000150"}),
     ),
     AdapterSpec(
         key="return", version="return_v1", document_type="return",
@@ -177,8 +185,8 @@ ADAPTERS: tuple[AdapterSpec, ...] = (
         self_code=f"{_RETURN_PREFIX}.F0000043",
         quantity_code=f"{_RETURN_PREFIX}.F0000011",
         maintenance_order_codes=("F0000139", "F0000156"),
+        enum_codes=("F0000032", "F0000061", "F0000192"),
         upstream_document_codes=("F0000166", "F0000165"),
-        controlled_field_codes=frozenset({f"{_RETURN_PREFIX}.F0000150"}),
     ),
     AdapterSpec(
         key="shipment", version="shipment_v1", document_type="shipment",
@@ -191,8 +199,8 @@ ADAPTERS: tuple[AdapterSpec, ...] = (
         self_code=f"{_SHIPMENT_PREFIX}.F0000043",
         quantity_code=f"{_SHIPMENT_PREFIX}.F0000011",
         maintenance_order_codes=("F0000151", "F0000192"),
+        enum_codes=("F0000032", "F0000061"),
         upstream_document_codes=("F0000147", f"{_SHIPMENT_PREFIX}.F0000148"),
-        controlled_field_codes=frozenset({f"{_SHIPMENT_PREFIX}.F0000150"}),
     ),
     AdapterSpec(
         key="receipt", version="receipt_v1", document_type="receipt",
@@ -205,26 +213,10 @@ ADAPTERS: tuple[AdapterSpec, ...] = (
         self_code=f"{_RECEIPT_PREFIX}.F0000043",
         quantity_code=f"{_RECEIPT_PREFIX}.F0000011",
         maintenance_order_codes=("F0000142",),
+        enum_codes=("F0000032", "F0000061"),
         upstream_document_codes=("F0000179", "F0000178", "F0000147"),
-        controlled_field_codes=frozenset({f"{_RECEIPT_PREFIX}.F0000150"}),
     ),
 )
-
-_KNOWN_STATUS = {
-    "已完成": "confirmed", "完成": "confirmed", "已审批": "confirmed",
-    "已生效": "confirmed", "有效": "confirmed", "正常": "confirmed",
-    "已结束": "confirmed", "进行中": "pending", "审批中": "pending",
-    "草稿": "pending", "待审批": "pending", "处理中": "pending",
-    "作废": "void", "已作废": "void", "已取消": "void", "取消": "void",
-}
-_KNOWN_DOCUMENT_CATEGORY = {
-    "维保", "维保出库", "维保入库", "销售", "销售出库", "采购", "采购入库",
-    "退货", "退货入库", "退返入库", "返库", "换货", "维修", "其他",
-}
-_KNOWN_ASSET_TYPE = {"备件", "整机", "备件/整机", "备件及整机"}
-_KNOWN_RETURN_TYPE = {
-    "备件", "整机", "好件", "坏件", "好件返库", "坏件返库", "未使用", "现场备件",
-}
 
 
 def _local_name(tag: str) -> str:
@@ -236,6 +228,31 @@ def _canonical_hash(value: object) -> str:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _conflict_evidence(
+    before: dict,
+    after: dict,
+    *,
+    before_fingerprint: str,
+    after_fingerprint: str,
+) -> dict:
+    """Keep a reviewable, attachment-redacted before/after payload."""
+
+    changed_fields = [
+        {
+            "field_code": code,
+            "before": before.get(code),
+            "after": after.get(code),
+        }
+        for code in sorted(before.keys() | after.keys())
+        if before.get(code) != after.get(code)
+    ]
+    return {
+        "before_fingerprint": before_fingerprint,
+        "after_fingerprint": after_fingerprint,
+        "changed_fields": changed_fields,
+    }
 
 
 def _approved_header_contracts(
@@ -265,6 +282,94 @@ def _approved_header_contracts(
             code="invalid_server_contract",
         ) from exc
     return tuple(contracts)
+
+
+def _approved_contract_metadata(
+    adapter: AdapterSpec,
+    *,
+    header_signature: str,
+    contract: tuple[tuple[str, str], ...],
+) -> ApprovedContractMetadata:
+    """Load the separately reviewed field policy for one exact dual header."""
+
+    try:
+        version_metadata = config.MAINTENANCE_WAREHOUSE_APPROVED_CONTRACT_METADATA.get(
+            adapter.version, {}
+        )
+        raw = version_metadata.get(header_signature)
+        if not isinstance(raw, dict) or set(raw) != {
+            "controlled_positions", "status_values", "enum_values",
+        }:
+            raise ValueError
+
+        raw_positions = raw["controlled_positions"]
+        if not isinstance(raw_positions, (tuple, list)):
+            raise ValueError
+        positions = frozenset(raw_positions)
+        if (
+            len(positions) != len(raw_positions)
+            or any(
+                isinstance(position, bool)
+                or not isinstance(position, int)
+                or position < 1
+                or position > len(contract)
+                for position in positions
+            )
+        ):
+            raise ValueError
+        controlled_codes = {contract[position - 1][0] for position in positions}
+        if controlled_codes & _declared_fact_codes(adapter):
+            raise ValueError
+
+        raw_status_values = raw["status_values"]
+        if not isinstance(raw_status_values, dict) or not raw_status_values:
+            raise ValueError
+        status_values = {
+            str(source): str(normalized)
+            for source, normalized in raw_status_values.items()
+        }
+        if (
+            any(not source or len(source) > 128 for source in status_values)
+            or any(
+                normalized not in {"confirmed", "pending", "void"}
+                for normalized in status_values.values()
+            )
+        ):
+            raise ValueError
+
+        contract_codes = {code for code, _label in contract}
+        raw_enum_values = raw["enum_values"]
+        if (
+            not isinstance(raw_enum_values, dict)
+            or {str(code) for code in raw_enum_values} != set(adapter.enum_codes)
+        ):
+            raise ValueError
+        enum_values: dict[str, frozenset[str]] = {}
+        for raw_code, raw_values in raw_enum_values.items():
+            code = str(raw_code)
+            if code not in contract_codes or code == adapter.status_code:
+                raise ValueError
+            if not isinstance(raw_values, (tuple, list, set, frozenset)):
+                raise ValueError
+            values = frozenset(str(value) for value in raw_values)
+            if (
+                not values
+                or any(not value or len(value) > 128 for value in values)
+                or len(values) != len(raw_values)
+            ):
+                raise ValueError
+            enum_values[code] = values
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise WarehouseWorkbookError(
+            "服务端仓库模板字段策略配置无效",
+            code="invalid_server_contract",
+        ) from exc
+
+    return ApprovedContractMetadata(
+        controlled_positions=positions,
+        status_values=status_values,
+        enum_values=enum_values,
+    )
 
 
 def _header_diff(
@@ -764,18 +869,35 @@ def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
             "known" if current_contract in approved_contracts else "unknown_version"
         )
         header_diff = _header_diff(current_contract, approved_contracts)
+        contract_metadata = (
+            _approved_contract_metadata(
+                adapter,
+                header_signature=signature,
+                contract=current_contract,
+            )
+            if version_state == "known"
+            else None
+        )
         ambiguities: list[WarehouseAmbiguityFact] = []
         if version_state == "unknown_version":
             ambiguities.append(WarehouseAmbiguityFact(
                 code="unknown_version", value_hash=signature
             ))
-        controlled_codes = set(adapter.controlled_field_codes)
-        if version_state == "unknown_version":
+        controlled_codes = {
+            pairs[position - 1].internal_code
+            for position in (
+                contract_metadata.controlled_positions if contract_metadata else ()
+            )
+        }
+        if contract_metadata is None:
             declared_codes = _declared_fact_codes(adapter)
             controlled_codes.update(
                 pair.internal_code for pair in pairs
                 if pair.internal_code not in declared_codes
             )
+        # A warehouse header is one business document per document number.
+        # ObjectId remains immutable source evidence, but it is not the header
+        # deduplication key required by Issue #209.
         by_document: dict[str, WarehouseDocumentFact] = {}
         line_index: dict[tuple[str, str], WarehouseLineFact] = {}
         data_row_count = 0
@@ -789,21 +911,38 @@ def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
                 _bounded_text(row.get(adapter.document_id_code), 128, "单据稳定 ID")
                 if adapter.document_id_code else None
             )
+            document_no = (
+                _bounded_text(row.get(adapter.document_no_code), 128, "单号")
+                if adapter.document_no_code else None
+            )
             line_source_id = (
                 _bounded_text(row.get(adapter.line_id_code), 128, "明细稳定 ID")
                 if adapter.line_id_code else None
             )
+            prior_document = by_document.get(document_no or "")
+            evidence_document_source_id = (
+                prior_document.source_document_id
+                if prior_document is not None else document_source_id
+            )
             if document_source_id is None:
                 ambiguities.append(WarehouseAmbiguityFact(
-                    code="missing_document_id", source_row=row_number,
+                    code="missing_document_id", field_code=adapter.document_id_code,
+                    source_row=row_number,
+                    line_source_id=line_source_id,
+                ))
+            if document_no is None:
+                ambiguities.append(WarehouseAmbiguityFact(
+                    code="missing_document_id",
+                    field_code=adapter.document_no_code or "document_no",
+                    source_row=row_number,
+                    document_source_id=document_source_id,
                     line_source_id=line_source_id,
                 ))
             if line_source_id is None:
                 ambiguities.append(WarehouseAmbiguityFact(
                     code="missing_line_id", source_row=row_number,
-                    document_source_id=document_source_id,
+                    document_source_id=evidence_document_source_id,
                 ))
-
             redacted: dict[str, object | None] = {}
             for code, value in row.items():
                 if _clean_text(value) is None:
@@ -812,35 +951,43 @@ def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
                     redacted[code] = {"controlled": True}
                     ambiguities.append(WarehouseAmbiguityFact(
                         code="controlled_attachment", field_code=code,
-                        source_row=row_number, document_source_id=document_source_id,
+                        source_row=row_number,
+                        document_source_id=evidence_document_source_id,
                         line_source_id=line_source_id,
                     ))
                 else:
                     redacted[code] = _raw_json_value(value)
-            if document_source_id is None or line_source_id is None:
+            if (
+                document_source_id is None
+                or document_no is None
+                or line_source_id is None
+            ):
                 continue
 
             raw_status = _bounded_text(row.get(adapter.status_code), 128, "状态")
-            normalized_status = _KNOWN_STATUS.get(raw_status or "", "unknown")
-            if raw_status is None or normalized_status == "unknown":
+            normalized_status = (
+                contract_metadata.status_values.get(raw_status or "", "unknown")
+                if contract_metadata else "unknown"
+            )
+            if contract_metadata and (
+                raw_status is None or normalized_status == "unknown"
+            ):
                 ambiguities.append(WarehouseAmbiguityFact(
                     code="unknown_enum", field_code=adapter.status_code,
-                    source_row=row_number, document_source_id=document_source_id,
+                    source_row=row_number,
+                    document_source_id=evidence_document_source_id,
                     line_source_id=line_source_id,
                     value_hash=_canonical_hash(raw_status or ""),
                 ))
-            enum_rules = [
-                ("F0000032", _KNOWN_DOCUMENT_CATEGORY),
-                ("F0000061", _KNOWN_ASSET_TYPE),
-            ]
-            if adapter.key == "return":
-                enum_rules.append(("F0000192", _KNOWN_RETURN_TYPE))
-            for enum_code, allowed_values in enum_rules:
+            for enum_code, allowed_values in (
+                contract_metadata.enum_values.items() if contract_metadata else ()
+            ):
                 raw_enum = _clean_text(row.get(enum_code))
                 if raw_enum is not None and raw_enum not in allowed_values:
                     ambiguities.append(WarehouseAmbiguityFact(
                         code="unknown_enum", field_code=enum_code,
-                        source_row=row_number, document_source_id=document_source_id,
+                        source_row=row_number,
+                        document_source_id=evidence_document_source_id,
                         line_source_id=line_source_id,
                         value_hash=_canonical_hash(raw_enum),
                     ))
@@ -850,13 +997,15 @@ def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
             if _clean_text(row.get(adapter.document_date_code)) and document_date is None:
                 ambiguities.append(WarehouseAmbiguityFact(
                     code="field_conflict", field_code=adapter.document_date_code,
-                    source_row=row_number, document_source_id=document_source_id,
+                    source_row=row_number,
+                    document_source_id=evidence_document_source_id,
                 ))
             quantity = _typed_decimal(row.get(adapter.quantity_code))
             if _clean_text(row.get(adapter.quantity_code)) and quantity is None:
                 ambiguities.append(WarehouseAmbiguityFact(
                     code="field_conflict", field_code=adapter.quantity_code,
-                    source_row=row_number, document_source_id=document_source_id,
+                    source_row=row_number,
+                    document_source_id=evidence_document_source_id,
                     line_source_id=line_source_id,
                 ))
             raw_header = {
@@ -869,11 +1018,13 @@ def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
             }
             maintenance_order = _first_stable_ref(
                 row, adapter.maintenance_order_codes, source_row=row_number,
-                document_source_id=document_source_id, ambiguities=ambiguities,
+                document_source_id=evidence_document_source_id,
+                ambiguities=ambiguities,
             )
             upstream = _first_stable_ref(
                 row, adapter.upstream_document_codes, source_row=row_number,
-                document_source_id=document_source_id, ambiguities=ambiguities,
+                document_source_id=evidence_document_source_id,
+                ambiguities=ambiguities,
             )
             stable_refs = {}
             if maintenance_order:
@@ -881,15 +1032,12 @@ def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
             if upstream:
                 stable_refs["upstream_document"] = upstream
             header_fingerprint = _canonical_hash(raw_header)
-            existing = by_document.get(document_source_id)
+            existing = by_document.get(document_no)
             if existing is None:
                 existing = WarehouseDocumentFact(
                     document_type=adapter.document_type,
                     source_document_id=document_source_id,
-                    document_no=(
-                        _bounded_text(row.get(adapter.document_no_code), 128, "单号")
-                        if adapter.document_no_code else None
-                    ),
+                    document_no=document_no,
                     document_date=document_date,
                     raw_status=raw_status,
                     normalized_status=normalized_status,
@@ -897,12 +1045,20 @@ def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
                     raw_fields=raw_header,
                     raw_fingerprint=header_fingerprint,
                 )
-                by_document[document_source_id] = existing
+                by_document[document_no] = existing
             elif existing.raw_fingerprint != header_fingerprint:
                 ambiguities.append(WarehouseAmbiguityFact(
                     code="field_conflict", field_code="document_header",
-                    source_row=row_number, document_source_id=document_source_id,
+                    source_row=row_number,
+                    document_source_id=existing.source_document_id,
                     line_source_id=line_source_id,
+                    value_hash=header_fingerprint,
+                    evidence=_conflict_evidence(
+                        existing.raw_fields,
+                        raw_header,
+                        before_fingerprint=existing.raw_fingerprint,
+                        after_fingerprint=header_fingerprint,
+                    ),
                 ))
             line = WarehouseLineFact(
                 source_line_id=line_source_id,
@@ -915,7 +1071,7 @@ def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
                 raw_fields=raw_line,
                 raw_fingerprint=_canonical_hash(raw_line),
             )
-            key = (document_source_id, line_source_id)
+            key = (document_no, line_source_id)
             prior_line = line_index.get(key)
             if prior_line is None:
                 line_index[key] = line
@@ -923,8 +1079,16 @@ def parse_warehouse_workbook(content: bytes) -> ParsedWarehouseWorkbook:
             elif prior_line.raw_fingerprint != line.raw_fingerprint:
                 ambiguities.append(WarehouseAmbiguityFact(
                     code="field_conflict", field_code="document_line",
-                    source_row=row_number, document_source_id=document_source_id,
+                    source_row=row_number,
+                    document_source_id=existing.source_document_id,
                     line_source_id=line_source_id,
+                    value_hash=line.raw_fingerprint,
+                    evidence=_conflict_evidence(
+                        prior_line.raw_fields,
+                        line.raw_fields,
+                        before_fingerprint=prior_line.raw_fingerprint,
+                        after_fingerprint=line.raw_fingerprint,
+                    ),
                 ))
 
         # Formula/external content in hidden option sheets is rejected too.

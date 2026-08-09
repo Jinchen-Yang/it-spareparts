@@ -56,6 +56,18 @@ def test_schema_has_all_fact_tables_and_database_guards(db):
         "WHERE conrelid = 'maintenance_warehouse_document_link'::regclass"
     )))
     assert "ck_maintenance_wh_link_target_matrix" in constraints
+    document_constraints = set(db.scalars(text(
+        "SELECT conname FROM pg_constraint "
+        "WHERE conrelid = 'maintenance_warehouse_document'::regclass"
+    )))
+    assert "uq_maintenance_wh_document_no" in document_constraints
+    assert "uq_maintenance_wh_document_source" not in document_constraints
+    ambiguity_columns = set(db.scalars(text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = current_schema() "
+        "AND table_name = 'maintenance_warehouse_ambiguity'"
+    )))
+    assert "evidence_json" in ambiguity_columns
 
 
 def test_permission_is_high_risk_page_bound_and_default_admin_only():

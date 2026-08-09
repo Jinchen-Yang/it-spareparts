@@ -53,7 +53,7 @@ def upgrade() -> None:
         sa.Column("document_id", sa.String(36), primary_key=True),
         sa.Column("document_type", sa.String(16), nullable=False),
         sa.Column("source_document_id", sa.String(128), nullable=False),
-        sa.Column("document_no", sa.String(128)),
+        sa.Column("document_no", sa.String(128), nullable=False),
         sa.Column("document_date", sa.Date()),
         sa.Column("raw_status", sa.String(128)),
         sa.Column("normalized_status", sa.String(16), nullable=False),
@@ -64,9 +64,9 @@ def upgrade() -> None:
         sa.CheckConstraint("document_type IN ('shipment', 'return', 'receipt')", name="ck_maintenance_wh_document_type"),
         sa.CheckConstraint("normalized_status IN ('confirmed', 'pending', 'void', 'unknown')", name="ck_maintenance_wh_document_status"),
         sa.CheckConstraint("raw_fingerprint ~ '^[a-f0-9]{64}$'", name="ck_maintenance_wh_document_fingerprint"),
-        sa.UniqueConstraint("document_type", "source_document_id", name="uq_maintenance_wh_document_source"),
+        sa.UniqueConstraint("document_type", "document_no", name="uq_maintenance_wh_document_no"),
     )
-    op.create_index("ix_maintenance_wh_document_no", "maintenance_warehouse_document", ["document_type", "document_no"])
+    op.create_index("ix_maintenance_wh_document_source", "maintenance_warehouse_document", ["document_type", "source_document_id"])
     op.create_index("ix_maintenance_wh_document_date", "maintenance_warehouse_document", ["document_type", "document_date"])
 
     op.create_table(
@@ -159,6 +159,7 @@ def upgrade() -> None:
         sa.Column("source_row", sa.Integer()),
         sa.Column("value_hash", sa.String(64)),
         sa.Column("candidates_json", postgresql.JSONB(), nullable=False),
+        sa.Column("evidence_json", postgresql.JSONB()),
         sa.Column("fingerprint", sa.String(64), nullable=False),
         sa.Column("status", sa.String(16), nullable=False),
         sa.Column("version", sa.Integer(), server_default="1", nullable=False),
@@ -276,6 +277,7 @@ def upgrade() -> None:
              OR NEW.source_row IS DISTINCT FROM OLD.source_row
              OR NEW.value_hash IS DISTINCT FROM OLD.value_hash
              OR NEW.candidates_json IS DISTINCT FROM OLD.candidates_json
+             OR NEW.evidence_json IS DISTINCT FROM OLD.evidence_json
              OR NEW.fingerprint IS DISTINCT FROM OLD.fingerprint
              OR NEW.created_at IS DISTINCT FROM OLD.created_at
              OR NEW.status <> 'resolved'

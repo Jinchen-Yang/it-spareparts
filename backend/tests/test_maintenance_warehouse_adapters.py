@@ -72,6 +72,55 @@ def _shipment_row(headers: list[tuple[str, str]], *, attachment: str | None = No
     return [values.get(code) for code, _label in headers]
 
 
+def _synthetic_metadata(parsed, *, controlled_codes: set[str] | None = None) -> dict:
+    controlled_codes = controlled_codes or set()
+    enum_values = {
+        "F0000032": ("维保", "维保入库"),
+        "F0000061": ("备件",),
+    }
+    if parsed.adapter_version.startswith("return_"):
+        enum_values["F0000192"] = ("备件",)
+    return {
+        "controlled_positions": tuple(
+            pair.position for pair in parsed.header_pairs
+            if pair.internal_code in controlled_codes
+        ),
+        "status_values": {
+            "已完成": "confirmed",
+            "已审批": "confirmed",
+        },
+        "enum_values": enum_values,
+    }
+
+
+def _approve_synthetic(
+    monkeypatch,
+    content: bytes,
+    *,
+    controlled_codes: set[str] | None = None,
+):
+    parsed = parse_warehouse_workbook(content)
+    contract = tuple(
+        (pair.internal_code, pair.business_label) for pair in parsed.header_pairs
+    )
+    monkeypatch.setattr(
+        config,
+        "MAINTENANCE_WAREHOUSE_APPROVED_HEADER_CONTRACTS",
+        {parsed.adapter_version: (contract,)},
+    )
+    monkeypatch.setattr(
+        config,
+        "MAINTENANCE_WAREHOUSE_APPROVED_CONTRACT_METADATA",
+        {
+            parsed.adapter_version: {
+                parsed.header_signature: _synthetic_metadata(
+                    parsed, controlled_codes=controlled_codes
+                ),
+            },
+        },
+    )
+
+
 def test_required_signature_matches_when_optional_columns_move_and_marks_unknown_version():
     left_headers = _shipment_headers(optional_first=False)
     right_headers = _shipment_headers(optional_first=True)
@@ -108,7 +157,7 @@ def test_return_wide_wins_by_required_set_specificity_not_column_count():
     assert len(parsed.documents) == 1
 
 
-def test_receipt_structure_has_an_independent_typed_fixture():
+def test_receipt_structure_has_an_independent_typed_fixture(monkeypatch):
     headers = [
         ("ObjectId", "数据ID(不可修改)"),
         ("SeqNo", "入库单号(必填)"),
@@ -128,7 +177,9 @@ def test_receipt_structure_has_an_independent_typed_fixture():
         "SYN-SN", 3,
     ]
 
-    parsed = parse_warehouse_workbook(_xlsx(headers, [row]))
+    content = _xlsx(headers, [row])
+    _approve_synthetic(monkeypatch, content)
+    parsed = parse_warehouse_workbook(content)
 
     assert parsed.adapter_key == "receipt"
     assert parsed.adapter_version == "receipt_v1"
@@ -223,6 +274,49 @@ def test_attachment_redaction_uses_stable_field_code_not_mutable_label():
     }
 
 
+def test_approved_contract_redacts_attachment_by_reviewed_position_when_code_drifts(
+    monkeypatch,
+):
+    attachment_code = "SYNTHETIC-DRIFTED-ATTACHMENT-CODE"
+    headers = _shipment_headers() + [(attachment_code, "新版本受控附件")]
+    row = _shipment_row(headers)
+    secret = "SYNTHETIC-DRIFTED-ATTACHMENT-MUST-NOT-SURVIVE"
+    row[-1] = secret
+    content = _xlsx(headers, [row])
+    _approve_synthetic(
+        monkeypatch,
+        content,
+        controlled_codes={attachment_code},
+    )
+
+    parsed = parse_warehouse_workbook(content)
+
+    assert parsed.version_state == "known"
+    assert secret not in repr(parsed)
+    controlled = [
+        item for item in parsed.ambiguities
+        if item.code == "controlled_attachment"
+    ]
+    assert {item.field_code for item in controlled} == {attachment_code}
+
+
+def test_approved_header_without_reviewed_field_policy_fails_closed(monkeypatch):
+    headers = _shipment_headers()
+    content = _xlsx(headers, [_shipment_row(headers)])
+    parsed = parse_warehouse_workbook(content)
+    contract = tuple(
+        (pair.internal_code, pair.business_label) for pair in parsed.header_pairs
+    )
+    monkeypatch.setattr(
+        config,
+        "MAINTENANCE_WAREHOUSE_APPROVED_HEADER_CONTRACTS",
+        {"shipment_v1": (contract,)},
+    )
+
+    with pytest.raises(WarehouseWorkbookError, match="字段策略配置无效"):
+        parse_warehouse_workbook(content)
+
+
 def test_mac_1904_epoch_is_used_for_numeric_dates():
     headers = _shipment_headers()
     workbook = Workbook()
@@ -278,12 +372,14 @@ def test_partial_wide_return_never_falls_back_to_narrow_adapter():
     assert not any(item.code == "missing_document_id" for item in parsed.ambiguities)
 
 
-def test_unknown_enum_becomes_ambiguity_without_guessing():
+def test_unknown_enum_becomes_ambiguity_without_guessing(monkeypatch):
     headers = _shipment_headers()
     row = _shipment_row(headers)
     status_index = [code for code, _label in headers].index("Status")
     row[status_index] = "SYNTHETIC-UNMAPPED-STATE"
-    parsed = parse_warehouse_workbook(_xlsx(headers, [row]))
+    content = _xlsx(headers, [row])
+    _approve_synthetic(monkeypatch, content)
+    parsed = parse_warehouse_workbook(content)
     assert parsed.documents[0].normalized_status == "unknown"
     assert {item.code for item in parsed.ambiguities} >= {"unknown_enum"}
 
@@ -399,6 +495,7 @@ def test_synthetic_49_and_120_column_contracts_cover_all_four_adapter_signatures
     }
     contents: dict[str, bytes] = {}
     contracts: dict[str, tuple[tuple[tuple[str, str], ...], ...]] = {}
+    metadata: dict[str, dict[str, dict]] = {}
     unknown_signatures: set[str] = set()
     for version, (headers, values) in structures.items():
         row = (
@@ -415,6 +512,9 @@ def test_synthetic_49_and_120_column_contracts_cover_all_four_adapter_signatures
         contracts[version] = (tuple(
             (pair.internal_code, pair.business_label) for pair in parsed.header_pairs
         ),)
+        metadata[version] = {
+            parsed.header_signature: _synthetic_metadata(parsed),
+        }
 
     assert len(unknown_signatures) == 4
     assert len(parse_warehouse_workbook(contents["return_v1"]).header_pairs) == 49
@@ -424,6 +524,11 @@ def test_synthetic_49_and_120_column_contracts_cover_all_four_adapter_signatures
         config,
         "MAINTENANCE_WAREHOUSE_APPROVED_HEADER_CONTRACTS",
         contracts,
+    )
+    monkeypatch.setattr(
+        config,
+        "MAINTENANCE_WAREHOUSE_APPROVED_CONTRACT_METADATA",
+        metadata,
     )
     for version, content in contents.items():
         approved = parse_warehouse_workbook(content)

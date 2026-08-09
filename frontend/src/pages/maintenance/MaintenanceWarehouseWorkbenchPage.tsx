@@ -49,6 +49,35 @@ const documentLabels: Record<string, string> = {
   receipt: "收货/入库",
 };
 
+const projectLinkStateLabels: Record<WarehouseDocumentSummary["project_link_state"], string> = {
+  ready: "项目归属当前有效",
+  not_applicable: "非发货单",
+  not_confirmed: "单据尚未确认",
+  missing_order_link: "缺少维保需求关联",
+  missing_project_link: "缺少项目关联",
+  ambiguous_active_links: "存在多条有效关联",
+  assignment_contract_unavailable: "项目归属契约未就绪",
+  assignment_mismatch: "项目已改派或关联失效",
+};
+
+type ResolutionDecision = "acknowledge" | "link" | "retain_existing";
+
+const acknowledgeableAmbiguities = new Set([
+  "controlled_attachment",
+]);
+
+function allowedDecision(row: WarehouseAmbiguitySummary): ResolutionDecision | null {
+  if (row.status !== "open" || row.ambiguity_type === "integration_blocker") return null;
+  if (row.ambiguity_type === "multiple_candidates") {
+    return row.candidates.length ? "link" : null;
+  }
+  if (row.ambiguity_type === "field_conflict") {
+    if (row.candidates.length) return "link";
+    return row.evidence ? "retain_existing" : null;
+  }
+  return acknowledgeableAmbiguities.has(row.ambiguity_type) ? "acknowledge" : null;
+}
+
 function errorText(error: unknown, fallback: string): string {
   if (!axios.isAxiosError(error)) return fallback;
   const detail = error.response?.data?.detail;
@@ -131,7 +160,7 @@ export default function MaintenanceWarehouseWorkbenchPage() {
   const [loadError, setLoadError] = useState("");
   const [selectedDocument, setSelectedDocument] = useState<WarehouseDocumentSummary | null>(null);
   const [selected, setSelected] = useState<WarehouseAmbiguitySummary | null>(null);
-  const [decision, setDecision] = useState<"acknowledge" | "link">("acknowledge");
+  const [decision, setDecision] = useState<ResolutionDecision>("acknowledge");
   const [candidateIndex, setCandidateIndex] = useState<number | null>(null);
   const [resolutionReason, setResolutionReason] = useState("");
   const [resolutionBusy, setResolutionBusy] = useState(false);
@@ -217,13 +246,18 @@ export default function MaintenanceWarehouseWorkbenchPage() {
 
   const openResolution = (row: WarehouseAmbiguitySummary) => {
     setSelected(row);
-    setDecision(row.status === "open" && row.candidates.length ? "link" : "acknowledge");
+    setDecision(allowedDecision(row) || "acknowledge");
     setCandidateIndex(row.status === "open" && row.candidates.length === 1 ? 0 : null);
     setResolutionReason("");
   };
 
   const resolve = async () => {
-    if (!selected || selected.status !== "open" || !resolutionReason.trim()) return;
+    if (
+      !selected
+      || selected.status !== "open"
+      || allowedDecision(selected) !== decision
+      || !resolutionReason.trim()
+    ) return;
     const candidate = candidateIndex == null ? undefined : selected.candidates[candidateIndex];
     if (decision === "link" && (!candidate || !linkKind(candidate.target_type))) return;
     setResolutionBusy(true);
@@ -281,9 +315,19 @@ export default function MaintenanceWarehouseWorkbenchPage() {
       render: (value: number, row) => (
         <Space direction="vertical" size={2}>
           {value > 0 ? <Tag color="gold">{value} 条待处理</Tag> : <Tag color="green">已明确</Tag>}
+          {row.document_type === "shipment" && (
+            <Tag color={row.project_link_state === "ready" ? "green" : "red"}>
+              {projectLinkStateLabels[row.project_link_state]}
+            </Tag>
+          )}
           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
             {(row.links || []).filter((link) => link.status === "active").length} 条有效关联
           </Typography.Text>
+          {row.document_type === "shipment" && (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {row.eligible_line_count}/{row.line_count} 行可进入领用/迁移候选
+            </Typography.Text>
+          )}
         </Space>
       ),
     },
@@ -332,7 +376,9 @@ export default function MaintenanceWarehouseWorkbenchPage() {
       width: 100,
       render: (_, row) => (
         <Button type="link" onClick={() => openResolution(row)}>
-          {row.status === "open" && canManageWarehouse ? "人工裁决" : "查看证据"}
+          {canManageWarehouse && allowedDecision(row)
+            ? "人工裁决"
+            : "查看证据"}
         </Button>
       ),
     },
@@ -529,15 +575,30 @@ export default function MaintenanceWarehouseWorkbenchPage() {
       </Modal>
 
       <Modal
-        title={selected?.status === "resolved" ? "歧义处理证据" : "人工裁决关联歧义"}
+        title={selected?.ambiguity_type === "integration_blocker"
+          ? "集成阻塞证据"
+          : selected?.status === "resolved"
+            ? "歧义处理证据"
+            : selected && allowedDecision(selected)
+              ? "人工裁决关联歧义"
+              : "歧义证据"}
         open={selected !== null}
         width={860}
         onCancel={() => setSelected(null)}
         onOk={() => void resolve()}
         okText="实名确认裁决"
         confirmLoading={resolutionBusy}
-        okButtonProps={{ disabled: !resolutionReason.trim() || (decision === "link" && candidateIndex == null) }}
-        footer={selected && (selected.status === "resolved" || !canManageWarehouse)
+        okButtonProps={{
+          disabled: !selected
+            || allowedDecision(selected) !== decision
+            || !resolutionReason.trim()
+            || (decision === "link" && candidateIndex == null),
+        }}
+        footer={selected && (
+          selected.status === "resolved"
+          || !allowedDecision(selected)
+          || !canManageWarehouse
+        )
           ? <Button onClick={() => setSelected(null)}>关闭</Button>
           : undefined}
       >
@@ -546,7 +607,11 @@ export default function MaintenanceWarehouseWorkbenchPage() {
             type="warning"
             showIcon
             message={selected ? (ambiguityLabels[selected.ambiguity_type] || selected.ambiguity_type) : ""}
-            description="系统会记录裁决前后关系、版本、实名操作人和理由。"
+            description={selected?.ambiguity_type === "integration_blocker"
+              ? "该阻塞不能人工关闭；依赖恢复并重新核对后，系统才会解除阻塞。"
+              : selected && !allowedDecision(selected) && selected.status === "open"
+                ? "当前证据不足以安全关闭该歧义；补齐稳定证据后再处理。"
+              : "系统会记录裁决前后关系、版本、实名操作人和理由。"}
           />
           {selected && (
             <Descriptions size="small" column={1} bordered>
@@ -573,6 +638,35 @@ export default function MaintenanceWarehouseWorkbenchPage() {
                 {selected.value_hash || "—"}
               </Descriptions.Item>
             </Descriptions>
+          )}
+          {selected?.evidence && (
+            <>
+              <Divider plain>冲突前后证据</Divider>
+              <Descriptions size="small" column={1} bordered>
+                <Descriptions.Item label="原事实 SHA-256">
+                  <Typography.Text copyable style={{ wordBreak: "break-all" }}>
+                    {selected.evidence.before_fingerprint}
+                  </Typography.Text>
+                </Descriptions.Item>
+                <Descriptions.Item label="本次文件 SHA-256">
+                  <Typography.Text copyable style={{ wordBreak: "break-all" }}>
+                    {selected.evidence.after_fingerprint}
+                  </Typography.Text>
+                </Descriptions.Item>
+                {selected.evidence.changed_fields.map((field) => (
+                  <Descriptions.Item key={field.field_code} label={field.field_code}>
+                    <Space direction="vertical" size={0}>
+                      <Typography.Text type="secondary" style={{ wordBreak: "break-all" }}>
+                        原：{JSON.stringify(field.before) ?? "—"}
+                      </Typography.Text>
+                      <Typography.Text style={{ wordBreak: "break-all" }}>
+                        新：{JSON.stringify(field.after) ?? "—"}
+                      </Typography.Text>
+                    </Space>
+                  </Descriptions.Item>
+                ))}
+              </Descriptions>
+            </>
           )}
           <Divider plain>已有与历史关联</Divider>
           {(selected?.links || []).length === 0
@@ -622,19 +716,10 @@ export default function MaintenanceWarehouseWorkbenchPage() {
               ))}
             </>
           )}
-          {selected?.status === "open" && canManageWarehouse && (
-            <Select
-              aria-label="裁决方式"
-              value={decision}
-              style={{ width: "100%" }}
-              onChange={(value) => setDecision(value)}
-              options={[
-                { value: "acknowledge", label: "仅确认问题已人工核实" },
-                { value: "link", label: "选择稳定目标建立关联", disabled: !selected?.candidates.length },
-              ]}
-            />
-          )}
-          {selected?.status === "open" && canManageWarehouse && decision === "link" && (
+          {selected?.status === "open"
+            && allowedDecision(selected) === "link"
+            && canManageWarehouse
+            && decision === "link" && (
             <Select
               aria-label="稳定关联目标"
               value={candidateIndex}
@@ -647,7 +732,9 @@ export default function MaintenanceWarehouseWorkbenchPage() {
               }))}
             />
           )}
-          {selected?.status === "open" && canManageWarehouse && (
+          {selected?.status === "open"
+            && allowedDecision(selected)
+            && canManageWarehouse && (
             <Input.TextArea
               aria-label="裁决理由"
               value={resolutionReason}

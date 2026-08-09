@@ -15,9 +15,6 @@ from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart, PartAlias
 from app.models.maintenance import FMaintenanceOrder
-from app.models.maintenance_project import MaintenanceProject
-from app.models.maintenance_project_operations import MaintenanceSiteIssue
-from app.models.system import SysUser
 from app.models.maintenance_warehouse import (
     MaintenanceWarehouseAmbiguity,
     MaintenanceWarehouseAuditEvent,
@@ -26,12 +23,14 @@ from app.models.maintenance_warehouse import (
     MaintenanceWarehouseDocumentLink,
     MaintenanceWarehouseImportBatch,
 )
+from app.models.system import SysUser
 from app.security import FULL_SCOPE_ROLES, UserContext
 from app.services.maintenance_warehouse_adapters import (
     ParsedWarehouseWorkbook,
     WarehouseAmbiguityFact,
     parse_warehouse_workbook,
 )
+from app.services.query_filters import active_orders
 
 
 class MaintenanceWarehouseError(ValueError):
@@ -39,6 +38,10 @@ class MaintenanceWarehouseError(ValueError):
 
 
 class MaintenanceWarehouseConflict(MaintenanceWarehouseError):
+    pass
+
+
+class MaintenanceWarehouseNotFound(MaintenanceWarehouseError):
     pass
 
 
@@ -50,6 +53,28 @@ def _canonical(value: object) -> bytes:
 
 def _hash(value: object) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
+
+
+def _conflict_evidence(
+    before: dict,
+    after: dict,
+    *,
+    before_fingerprint: str,
+    after_fingerprint: str,
+) -> dict:
+    return {
+        "before_fingerprint": before_fingerprint,
+        "after_fingerprint": after_fingerprint,
+        "changed_fields": [
+            {
+                "field_code": code,
+                "before": before.get(code),
+                "after": after.get(code),
+            }
+            for code in sorted(before.keys() | after.keys())
+            if before.get(code) != after.get(code)
+        ],
+    }
 
 
 def _uuid(label: str) -> str:
@@ -121,7 +146,7 @@ def _lock_business_identities(db: Session, parsed: ParsedWarehouseWorkbook) -> N
     """Serialize different files that carry the same immutable business ID."""
 
     identities = sorted({
-        f"maintenance-warehouse:{document.document_type}:{document.source_document_id}"
+        f"maintenance-warehouse:{document.document_type}:{document.document_no}"
         for document in parsed.documents
     })
     if not identities:
@@ -150,14 +175,12 @@ def _link_id(
     )
 
 
-def _document_id(document_type: str, source_document_id: str) -> str:
-    return _uuid(f"maintenance-warehouse-document:{document_type}:{source_document_id}")
+def _document_id(document_type: str, document_no: str) -> str:
+    return _uuid(f"maintenance-warehouse-document:{document_type}:{document_no}")
 
 
-def _line_id(document_type: str, source_document_id: str, source_line_id: str) -> str:
-    return _uuid(
-        f"maintenance-warehouse-line:{document_type}:{source_document_id}:{source_line_id}"
-    )
+def _line_id(document_id: str, source_line_id: str) -> str:
+    return _uuid(f"maintenance-warehouse-line:{document_id}:{source_line_id}")
 
 
 def _candidate(target_type: str, target_id: str, label: str | None = None) -> dict:
@@ -178,13 +201,14 @@ def _maintenance_order_candidate_map(
 ) -> dict[str, list[dict]]:
     output = {value: [] for value in stable_refs}
     for chunk in _chunks(stable_refs):
+        statement = active_orders(
+            select(FMaintenanceOrder), FMaintenanceOrder
+        ).where(or_(
+            FMaintenanceOrder.raw_order_id.in_(chunk),
+            FMaintenanceOrder.order_no.in_(chunk),
+        )).order_by(FMaintenanceOrder.id)
         rows = db.scalars(
-            select(FMaintenanceOrder)
-            .where(or_(
-                FMaintenanceOrder.raw_order_id.in_(chunk),
-                FMaintenanceOrder.order_no.in_(chunk),
-            ))
-            .order_by(FMaintenanceOrder.id)
+            statement
         ).all()
         for row in rows:
             candidate = _candidate("maintenance_order", row.raw_order_id, row.order_no)
@@ -213,7 +237,7 @@ def _part_candidate_map(db: Session, pns: set[str]) -> dict[str, list[dict]]:
         for alias, part in aliases:
             output[alias.pn_raw][part.id] = _candidate("dim_part", str(part.id), part.pn_std)
     return {
-        pn: [candidates[key] for key in sorted(candidates)][:3]
+        pn: [candidates[key] for key in sorted(candidates)]
         for pn, candidates in output.items()
     }
 
@@ -289,9 +313,10 @@ def _project_candidate_map(
     for source_order_id, project_id, project_code in db.execute(
         statement, {"source_ids": sorted(source_ids)}
     ):
-        assigned.setdefault(str(source_order_id), []).append(
-            _candidate("maintenance_project", str(project_id), project_code)
-        )
+        assigned.setdefault(str(source_order_id), []).append({
+            **_candidate("maintenance_project", str(project_id), project_code),
+            "source_order_id": str(source_order_id),
+        })
     for reference, candidates in maintenance_candidates.items():
         if len(candidates) != 1:
             continue
@@ -300,50 +325,87 @@ def _project_candidate_map(
     return output, True
 
 
-def _site_issue_candidate_map(
+def _current_project_assignment_map(
     db: Session,
-    *,
     source_order_ids: set[str],
-    source_line_ids: set[str],
-) -> tuple[dict[tuple[str, str], list[dict]], bool]:
-    """Consume explicit site issue line source IDs from #207 after integration."""
+) -> tuple[dict[str, list[str]], bool]:
+    """Read #201's current active assignment on every use, never trust a stale link."""
 
-    output: dict[tuple[str, str], list[dict]] = {}
-    required_line = {"source_order_id", "source_line_id", "serial_number", "issue_id"}
-    required_issue = {"issue_id", "issue_no", "project_id", "normalized_status"}
     if not (
-        _table_has_columns(db, "maintenance_site_issue_line", required_line)
-        and _table_has_columns(db, "maintenance_site_issue", required_issue)
+        _table_has_columns(
+            db,
+            "maintenance_source_order_assignment",
+            {"source_order_id", "project_id", "is_active"},
+        )
+        and _table_has_columns(
+            db,
+            "maintenance_project",
+            {"project_id", "is_active"},
+        )
     ):
-        return output, False
-    if not source_order_ids or not source_line_ids:
-        return output, True
+        return {}, False
+    if not source_order_ids:
+        return {}, True
     statement = text(
-        "SELECT line.source_order_id, line.source_line_id, line.serial_number, "
-        "       issue.issue_id, issue.issue_no, issue.project_id "
-        "FROM maintenance_site_issue_line AS line "
-        "JOIN maintenance_site_issue AS issue ON issue.issue_id = line.issue_id "
-        "WHERE line.source_order_id IN :source_order_ids "
-        "  AND line.source_line_id IN :source_line_ids "
-        "  AND issue.normalized_status IN ('confirmed', 'corrected') "
-        "ORDER BY line.source_order_id, line.source_line_id, issue.issue_id"
-    ).bindparams(
-        bindparam("source_order_ids", expanding=True),
-        bindparam("source_line_ids", expanding=True),
-    )
-    for source_order_id, source_line_id, serial_number, issue_id, issue_no, project_id in db.execute(
+        "SELECT assignment.source_order_id, assignment.project_id "
+        "FROM maintenance_source_order_assignment AS assignment "
+        "JOIN maintenance_project AS project "
+        "  ON project.project_id = assignment.project_id "
+        "WHERE assignment.is_active IS TRUE "
+        "  AND project.is_active IS TRUE "
+        "  AND assignment.source_order_id IN :source_ids "
+        "ORDER BY assignment.source_order_id, assignment.project_id"
+    ).bindparams(bindparam("source_ids", expanding=True))
+    output: dict[str, list[str]] = {}
+    for source_order_id, project_id in db.execute(
         statement,
-        {
-            "source_order_ids": sorted(source_order_ids),
-            "source_line_ids": sorted(source_line_ids),
-        },
+        {"source_ids": sorted(source_order_ids)},
     ):
-        output.setdefault((str(source_order_id), str(source_line_id)), []).append({
-            **_candidate("maintenance_site_issue", str(issue_id), issue_no),
-            "project_id": str(project_id),
-            "serial_number": str(serial_number) if serial_number is not None else None,
-        })
+        output.setdefault(str(source_order_id), []).append(str(project_id))
     return output, True
+
+
+def _project_link_state(
+    document: MaintenanceWarehouseDocument,
+    links: list[MaintenanceWarehouseDocumentLink],
+    *,
+    current_assignments: dict[str, list[str]],
+    assignment_contract_available: bool,
+) -> str:
+    """Return fail-closed readiness for #207/#210 shipment-line consumers."""
+
+    if document.document_type != "shipment":
+        return "not_applicable"
+    if document.normalized_status != "confirmed":
+        return "not_confirmed"
+    order_links = [
+        link for link in links
+        if link.status == "active"
+        and link.line_id is None
+        and link.link_kind == "maintenance_order"
+        and link.target_type == "maintenance_order"
+    ]
+    if not order_links:
+        return "missing_order_link"
+    if len(order_links) != 1:
+        return "ambiguous_active_links"
+    if not assignment_contract_available:
+        return "assignment_contract_unavailable"
+    project_links = [
+        link for link in links
+        if link.status == "active"
+        and link.line_id is None
+        and link.link_kind == "project"
+        and link.target_type == "maintenance_project"
+    ]
+    if not project_links:
+        return "missing_project_link"
+    if len(project_links) != 1:
+        return "ambiguous_active_links"
+    current_projects = current_assignments.get(order_links[0].target_id, [])
+    if current_projects != [project_links[0].target_id]:
+        return "assignment_mismatch"
+    return "ready"
 
 
 def _bad_return_candidate_map(
@@ -371,12 +433,12 @@ def _bad_return_candidate_map(
     for return_id, return_no, project_id, warehouse_reference, inbound_reference in db.execute(
         statement, {"references": sorted(references)}
     ):
-        candidate = {
-            **_candidate("maintenance_bad_return", str(return_id), return_no),
-            "project_id": str(project_id),
-        }
         for value in {warehouse_reference, inbound_reference} & references:
-            output[str(value)].append(candidate)
+            output[str(value)].append({
+                **_candidate("maintenance_bad_return", str(return_id), return_no),
+                "project_id": str(project_id),
+                "matched_reference": str(value),
+            })
     return output, True
 
 
@@ -389,6 +451,7 @@ def _ambiguity_fact(
     line_source_id: str | None = None,
     value_hash: str | None = None,
     candidates: list[dict] | tuple[dict, ...] = (),
+    evidence: dict | None = None,
 ) -> WarehouseAmbiguityFact:
     return WarehouseAmbiguityFact(
         code=code,
@@ -398,6 +461,7 @@ def _ambiguity_fact(
         line_source_id=line_source_id,
         value_hash=value_hash,
         candidate_refs=tuple(candidates),
+        evidence=evidence,
     )
 
 
@@ -422,6 +486,7 @@ def _ambiguity_model(
         "line": item.line_source_id,
         "value_hash": item.value_hash,
         "candidates": candidates,
+        "evidence": item.evidence,
     })
     return MaintenanceWarehouseAmbiguity(
         ambiguity_id=_uuid(f"maintenance-warehouse-ambiguity:{import_id}:{fingerprint}"),
@@ -433,6 +498,7 @@ def _ambiguity_model(
         source_row=item.source_row,
         value_hash=item.value_hash,
         candidates_json=candidates,
+        evidence_json=item.evidence,
         fingerprint=fingerprint,
         status="open",
         version=1,
@@ -494,22 +560,28 @@ def apply_import(
 
     existing_documents: dict[tuple[str, str], MaintenanceWarehouseDocument] = {}
     document_types = {document.document_type for document in parsed.documents}
-    document_sources = {document.source_document_id for document in parsed.documents}
-    for chunk in _chunks(document_sources):
+    document_numbers = {
+        document.document_no for document in parsed.documents if document.document_no
+    }
+    for chunk in _chunks(document_numbers):
         rows = db.scalars(
             select(MaintenanceWarehouseDocument).where(
                 MaintenanceWarehouseDocument.document_type.in_(document_types),
-                MaintenanceWarehouseDocument.source_document_id.in_(chunk),
+                MaintenanceWarehouseDocument.document_no.in_(chunk),
             )
         ).all()
         existing_documents.update({
-            (row.document_type, row.source_document_id): row for row in rows
+            (row.document_type, row.document_no): row for row in rows
         })
 
     for document in parsed.documents:
-        deterministic_document_id = _document_id(document.document_type, document.source_document_id)
+        if not document.document_no:
+            raise MaintenanceWarehouseError("仓库单据缺少单号，不能固化事实")
+        deterministic_document_id = _document_id(
+            document.document_type, document.document_no
+        )
         existing_document = existing_documents.get(
-            (document.document_type, document.source_document_id)
+            (document.document_type, document.document_no)
         )
         if existing_document is not None:
             document_ids[document.source_document_id] = existing_document.document_id
@@ -517,6 +589,13 @@ def apply_import(
                 ambiguity_facts.append(_ambiguity_fact(
                     code="field_conflict", field_code="document_header",
                     document_source_id=document.source_document_id,
+                    value_hash=document.raw_fingerprint,
+                    evidence=_conflict_evidence(
+                        existing_document.raw_fields_json,
+                        document.raw_fields,
+                        before_fingerprint=existing_document.raw_fingerprint,
+                        after_fingerprint=document.raw_fingerprint,
+                    ),
                 ))
         else:
             document_ids[document.source_document_id] = deterministic_document_id
@@ -549,10 +628,8 @@ def apply_import(
 
     for document in parsed.documents:
         for line in document.lines:
-            deterministic_line_id = _line_id(
-                document.document_type, document.source_document_id, line.source_line_id
-            )
             doc_id = document_ids[document.source_document_id]
+            deterministic_line_id = _line_id(doc_id, line.source_line_id)
             existing_line = existing_lines.get((doc_id, line.source_line_id))
             if existing_line is not None:
                 line_ids[(document.source_document_id, line.source_line_id)] = existing_line.line_id
@@ -562,6 +639,13 @@ def apply_import(
                         source_row=line.source_row,
                         document_source_id=document.source_document_id,
                         line_source_id=line.source_line_id,
+                        value_hash=line.raw_fingerprint,
+                        evidence=_conflict_evidence(
+                            existing_line.raw_fields_json,
+                            line.raw_fields,
+                            before_fingerprint=existing_line.raw_fingerprint,
+                            after_fingerprint=line.raw_fingerprint,
+                        ),
                     ))
             else:
                 line_ids[(document.source_document_id, line.source_line_id)] = deterministic_line_id
@@ -631,22 +715,6 @@ def apply_import(
     )
     upstream_candidates_from_db = _warehouse_document_candidate_map(db, upstream_refs)
     part_candidates = _part_candidate_map(db, part_refs)
-    stable_order_ids = {
-        str(candidate["target_id"])
-        for candidates in maintenance_candidates.values()
-        for candidate in candidates
-        if candidate.get("target_type") == "maintenance_order"
-    }
-    stable_line_ids = {
-        line.source_line_id
-        for document in parsed.documents
-        for line in document.lines
-    }
-    site_issue_candidates, site_issue_bridge_available = _site_issue_candidate_map(
-        db,
-        source_order_ids=stable_order_ids,
-        source_line_ids=stable_line_ids,
-    )
     warehouse_identity_refs = {
         str(value)
         for document in parsed.documents
@@ -778,17 +846,9 @@ def apply_import(
         exact_project_candidates = (
             project_candidates.get(maintenance_ref, []) if maintenance_ref else []
         )
-        exact_order_candidates = (
-            maintenance_candidates.get(maintenance_ref, []) if maintenance_ref else []
-        )
         project_id = (
             str(exact_project_candidates[0]["target_id"])
             if len(exact_project_candidates) == 1
-            else None
-        )
-        source_order_id = (
-            str(exact_order_candidates[0]["target_id"])
-            if len(exact_order_candidates) == 1
             else None
         )
         upstream_ref = document.stable_refs.get("upstream_document")
@@ -830,50 +890,6 @@ def apply_import(
                     document_source_id=document.source_document_id,
                     line_source_id=line.source_line_id,
                 ))
-            if document.document_type == "shipment":
-                if not site_issue_bridge_available:
-                    ambiguity_facts.append(_ambiguity_fact(
-                        code="integration_blocker",
-                        field_code="site_issue_source_contract",
-                        source_row=line.source_row,
-                        document_source_id=document.source_document_id,
-                        line_source_id=line.source_line_id,
-                    ))
-                elif not source_order_id or not project_id:
-                    ambiguity_facts.append(_ambiguity_fact(
-                        code="integration_blocker",
-                        field_code="site_issue_project_bridge",
-                        source_row=line.source_row,
-                        document_source_id=document.source_document_id,
-                        line_source_id=line.source_line_id,
-                    ))
-                elif not line.sn:
-                    ambiguity_facts.append(_ambiguity_fact(
-                        code="missing_stable_link",
-                        field_code="sn",
-                        source_row=line.source_row,
-                        document_source_id=document.source_document_id,
-                        line_source_id=line.source_line_id,
-                    ))
-                else:
-                    candidates = [
-                        candidate
-                        for candidate in site_issue_candidates.get(
-                            (source_order_id, line.source_line_id), []
-                        )
-                        if candidate.get("project_id") == project_id
-                        and candidate.get("serial_number") == line.sn
-                    ]
-                    plan_link(
-                        document_source_id=document.source_document_id,
-                        line_source_id=line.source_line_id,
-                        link_kind="site_issue",
-                        stable_key_kind="source_order_line_sn_exact",
-                        stable_value=f"{source_order_id}:{line.source_line_id}:{line.sn}",
-                        candidates=candidates,
-                        field_code="site_issue",
-                    )
-
         if document.document_type in {"return", "receipt"}:
             if not bad_return_bridge_available:
                 ambiguity_facts.append(_ambiguity_fact(
@@ -881,7 +897,13 @@ def apply_import(
                     field_code="bad_return_contract",
                     document_source_id=document.source_document_id,
                 ))
-            elif project_id:
+            elif not project_id:
+                ambiguity_facts.append(_ambiguity_fact(
+                    code="integration_blocker",
+                    field_code="bad_return_project_bridge",
+                    document_source_id=document.source_document_id,
+                ))
+            else:
                 candidates_by_identity: dict[tuple[str, str], dict] = {}
                 for reference in {
                     document.source_document_id,
@@ -1032,23 +1054,6 @@ def _document_scope_condition(db: Session, user_ctx: UserContext):
     ).exists()
 
 
-def _can_access_document(
-    db: Session,
-    *,
-    document_id: str,
-    user_ctx: UserContext,
-) -> bool:
-    scope = _document_scope_condition(db, user_ctx)
-    if scope is None:
-        return True
-    return bool(db.scalar(
-        select(MaintenanceWarehouseDocument.document_id).where(
-            MaintenanceWarehouseDocument.document_id == document_id,
-            scope,
-        )
-    ))
-
-
 def _batch_evidence(batch: MaintenanceWarehouseImportBatch | None) -> dict | None:
     if batch is None:
         return None
@@ -1188,6 +1193,62 @@ def search_documents(
             )
         ):
             links_by_document.setdefault(link.document_id, []).append(link)
+    source_order_ids = {
+        link.target_id
+        for links in links_by_document.values()
+        for link in links
+        if link.status == "active"
+        and link.line_id is None
+        and link.link_kind == "maintenance_order"
+        and link.target_type == "maintenance_order"
+    }
+    current_assignments, assignment_contract_available = (
+        _current_project_assignment_map(db, source_order_ids)
+    )
+    project_states = {
+        row.document_id: _project_link_state(
+            row,
+            links_by_document.get(row.document_id, []),
+            current_assignments=current_assignments,
+            assignment_contract_available=assignment_contract_available,
+        )
+        for row, _line_count, _open_count in rows
+    }
+    active_part_ids: set[int] = set()
+    for links in links_by_document.values():
+        for link in links:
+            if not (
+                link.status == "active"
+                and link.line_id is not None
+                and link.link_kind == "part"
+                and link.target_type == "dim_part"
+            ):
+                continue
+            try:
+                active_part_ids.add(int(link.target_id))
+            except (TypeError, ValueError):
+                continue
+    valid_part_ids = set(db.scalars(
+        select(DimPart.id).where(
+            DimPart.id.in_(active_part_ids),
+            DimPart.status == "active",
+        )
+    )) if active_part_ids else set()
+    eligible_line_counts: dict[str, int] = {}
+    for document_id in document_ids:
+        if project_states[document_id] != "ready":
+            eligible_line_counts[document_id] = 0
+            continue
+        eligible_line_counts[document_id] = len({
+            link.line_id
+            for link in links_by_document.get(document_id, [])
+            if link.status == "active"
+            and link.line_id is not None
+            and link.link_kind == "part"
+            and link.target_type == "dim_part"
+            and link.target_id.isdigit()
+            and int(link.target_id) in valid_part_ids
+        })
     items = []
     for row, line_count, open_count in rows:
         items.append({
@@ -1199,6 +1260,8 @@ def search_documents(
             "raw_status": row.raw_status,
             "normalized_status": row.normalized_status,
             "line_count": int(line_count or 0),
+            "eligible_line_count": eligible_line_counts.get(row.document_id, 0),
+            "project_link_state": project_states[row.document_id],
             "open_ambiguity_count": int(open_count or 0),
             "batch": _batch_evidence(batches.get(row.first_import_id)),
             "links": [
@@ -1309,6 +1372,7 @@ def search_ambiguities(
             "status": ambiguity.status,
             "version": ambiguity.version,
             "candidates": ambiguity.candidates_json,
+            "evidence": ambiguity.evidence_json,
             "resolution": ambiguity.resolution_json,
             "resolution_reason": ambiguity.resolution_reason,
             "resolved_by": ambiguity.resolved_by,
@@ -1352,38 +1416,112 @@ _FIELD_LINK_KIND = {
     "upstream_document": "warehouse_document",
 }
 
+_ACKNOWLEDGEABLE_AMBIGUITIES = {
+    "controlled_attachment",
+}
 
-def _target_exists(db: Session, target_type: str, target_id: str) -> bool:
+
+def _target_exists(
+    db: Session,
+    target_type: str,
+    target_id: str,
+    *,
+    candidate: dict,
+) -> bool:
     if target_type == "maintenance_order":
-        return db.scalar(select(FMaintenanceOrder.raw_order_id).where(
-            FMaintenanceOrder.raw_order_id == target_id
-        )) is not None
+        statement = active_orders(
+            select(FMaintenanceOrder.raw_order_id), FMaintenanceOrder
+        ).where(FMaintenanceOrder.raw_order_id == target_id)
+        return db.scalar(statement) is not None
     if target_type == "maintenance_project":
-        return db.scalar(select(MaintenanceProject.project_id).where(
-            MaintenanceProject.project_id == target_id
-        )) is not None
+        if not _table_has_columns(
+            db,
+            "maintenance_source_order_assignment",
+            {"source_order_id", "project_id", "is_active"},
+        ):
+            return False
+        return db.scalar(
+            text(
+                "SELECT project.project_id FROM maintenance_project AS project "
+                "JOIN maintenance_source_order_assignment AS assignment "
+                "  ON assignment.project_id = project.project_id "
+                "WHERE project.project_id = :target_id "
+                "  AND project.is_active IS TRUE "
+                "  AND assignment.is_active IS TRUE "
+                "  AND assignment.source_order_id = :source_order_id "
+                "LIMIT 1"
+            ),
+            {
+                "target_id": target_id,
+                "source_order_id": str(candidate.get("source_order_id") or ""),
+            },
+        ) is not None
     if target_type == "maintenance_site_issue":
-        return db.scalar(select(MaintenanceSiteIssue.issue_id).where(
-            MaintenanceSiteIssue.issue_id == target_id
-        )) is not None
+        if not (
+            _table_has_columns(
+                db,
+                "maintenance_site_issue_line",
+                {"issue_id", "delivery_line_id", "serial_number"},
+            )
+            and _table_has_columns(
+                db,
+                "maintenance_site_issue",
+                {"issue_id", "project_id", "normalized_status"},
+            )
+        ):
+            return False
+        return db.scalar(
+            text(
+                "SELECT issue.issue_id FROM maintenance_site_issue AS issue "
+                "JOIN maintenance_site_issue_line AS line "
+                "  ON line.issue_id = issue.issue_id "
+                "WHERE issue.issue_id = :target_id "
+                "  AND issue.normalized_status IN ('confirmed', 'corrected') "
+                "  AND issue.project_id = :project_id "
+                "  AND line.delivery_line_id = :delivery_line_id "
+                "  AND line.serial_number IS NOT DISTINCT FROM :serial_number "
+                "LIMIT 1"
+            ),
+            {
+                "target_id": target_id,
+                "project_id": str(candidate.get("project_id") or ""),
+                "delivery_line_id": str(candidate.get("delivery_line_id") or ""),
+                "serial_number": candidate.get("serial_number"),
+            },
+        ) is not None
     if target_type == "maintenance_bad_return":
         if not _table_has_columns(
-            db, "maintenance_bad_return", {"return_id"}
+            db,
+            "maintenance_bad_return",
+            {
+                "return_id", "project_id", "status",
+                "warehouse_reference", "inbound_reference",
+            },
         ):
             return False
         return db.scalar(
             text(
                 "SELECT return_id FROM maintenance_bad_return "
-                "WHERE return_id = :target_id"
+                "WHERE return_id = :target_id AND status <> 'void' "
+                "AND project_id = :project_id "
+                "AND (warehouse_reference = :matched_reference "
+                "OR inbound_reference = :matched_reference)"
             ),
-            {"target_id": target_id},
+            {
+                "target_id": target_id,
+                "project_id": str(candidate.get("project_id") or ""),
+                "matched_reference": str(candidate.get("matched_reference") or ""),
+            },
         ) is not None
     if target_type == "dim_part":
         try:
             part_id = int(target_id)
         except ValueError:
             return False
-        return db.scalar(select(DimPart.id).where(DimPart.id == part_id)) is not None
+        return db.scalar(select(DimPart.id).where(
+            DimPart.id == part_id,
+            DimPart.status == "active",
+        )) is not None
     if target_type == "warehouse_document":
         return db.scalar(select(MaintenanceWarehouseDocument.document_id).where(
             MaintenanceWarehouseDocument.document_id == target_id
@@ -1407,35 +1545,56 @@ def resolve_ambiguity(
     reason = (reason or "").strip()
     if not reason or len(reason) > 1000:
         raise MaintenanceWarehouseError("裁决理由无效")
-    if decision not in {"acknowledge", "link"}:
+    if decision not in {"acknowledge", "link", "retain_existing"}:
         raise MaintenanceWarehouseError("裁决类型无效")
     operated_by = (operated_by or "").strip()
     if not operated_by or len(operated_by) > 64:
         raise MaintenanceWarehouseError("实名操作人无效")
-    ambiguity = db.scalar(
-        select(MaintenanceWarehouseAmbiguity)
-        .where(MaintenanceWarehouseAmbiguity.ambiguity_id == ambiguity_id)
-        .with_for_update()
+    scope = _document_scope_condition(db, user_ctx)
+    statement = select(MaintenanceWarehouseAmbiguity).where(
+        MaintenanceWarehouseAmbiguity.ambiguity_id == ambiguity_id
     )
+    if scope is not None:
+        statement = statement.join(
+            MaintenanceWarehouseDocument,
+            MaintenanceWarehouseDocument.document_id
+            == MaintenanceWarehouseAmbiguity.document_id,
+        ).where(
+            MaintenanceWarehouseAmbiguity.document_id.is_not(None),
+            scope,
+        )
+    ambiguity = db.scalar(statement.with_for_update())
     if ambiguity is None:
-        raise MaintenanceWarehouseError("关联歧义不存在")
+        raise MaintenanceWarehouseNotFound("关联歧义不存在或无权访问")
     if ambiguity.status != "open" or ambiguity.version != version:
         raise MaintenanceWarehouseConflict("歧义已被其他人处理，请刷新")
-    if (
-        ambiguity.document_id is None
-        and user_ctx.role not in FULL_SCOPE_ROLES
-    ) or (
-        ambiguity.document_id is not None
-        and not _can_access_document(
-            db, document_id=ambiguity.document_id, user_ctx=user_ctx
+    if ambiguity.ambiguity_type == "integration_blocker":
+        raise MaintenanceWarehouseConflict(
+            "稳定关联依赖尚未恢复，集成阻塞不能人工关闭"
         )
+    if decision == "acknowledge" and (
+        ambiguity.ambiguity_type not in _ACKNOWLEDGEABLE_AMBIGUITIES
     ):
-        raise MaintenanceWarehouseError("无权访问该仓库单据歧义")
+        raise MaintenanceWarehouseConflict("该歧义不能仅确认后关闭")
+    if decision == "retain_existing" and not (
+        ambiguity.ambiguity_type == "field_conflict"
+        and isinstance(ambiguity.evidence_json, dict)
+        and ambiguity.evidence_json.get("before_fingerprint")
+        and ambiguity.evidence_json.get("after_fingerprint")
+    ):
+        raise MaintenanceWarehouseConflict("该歧义没有可保留的原事实证据")
+    if decision == "link" and ambiguity.ambiguity_type not in {
+        "multiple_candidates", "field_conflict",
+    }:
+        raise MaintenanceWarehouseError("该歧义类型不允许建立关联")
+    if decision != "link" and any((link_kind, target_type, target_id)):
+        raise MaintenanceWarehouseError("非关联裁决不能携带目标参数")
     before = {
         "status": ambiguity.status,
         "version": ambiguity.version,
         "ambiguity_type": ambiguity.ambiguity_type,
         "candidates": ambiguity.candidates_json,
+        "evidence": ambiguity.evidence_json,
     }
     resolution: dict = {"decision": decision}
     new_link: MaintenanceWarehouseDocumentLink | None = None
@@ -1444,21 +1603,25 @@ def resolve_ambiguity(
             raise MaintenanceWarehouseError("关联裁决缺少稳定目标")
         if _LINK_TARGET_MATRIX.get(link_kind) != target_type:
             raise MaintenanceWarehouseError("关联类型与目标类型不匹配")
-        if ambiguity.ambiguity_type not in {"multiple_candidates", "field_conflict"}:
-            raise MaintenanceWarehouseError("该歧义类型不允许建立关联")
         if _FIELD_LINK_KIND.get(ambiguity.field_code or "") != link_kind:
             raise MaintenanceWarehouseError("裁决关联与歧义字段不匹配")
-        candidate_targets = {
-            (str(candidate.get("target_type") or ""), str(candidate.get("target_id") or ""))
+        candidates_by_target = {
+            (str(candidate.get("target_type") or ""), str(candidate.get("target_id") or "")): candidate
             for candidate in ambiguity.candidates_json
             if isinstance(candidate, dict)
         }
-        if (target_type, target_id) not in candidate_targets:
+        candidate = candidates_by_target.get((target_type, target_id))
+        if candidate is None:
             raise MaintenanceWarehouseError("稳定目标不属于该歧义的候选集合")
         if ambiguity.document_id is None:
             raise MaintenanceWarehouseError("该歧义没有可关联的单据事实")
-        if not _target_exists(db, target_type, target_id):
-            raise MaintenanceWarehouseError("稳定关联目标不存在")
+        if not _target_exists(
+            db,
+            target_type,
+            target_id,
+            candidate=candidate,
+        ):
+            raise MaintenanceWarehouseConflict("稳定关联目标已失效，请重新生成候选")
         resolution.update({
             "link_kind": link_kind,
             "target_type": target_type,
@@ -1526,6 +1689,11 @@ def resolve_ambiguity(
                 "corrected" if active_link is not None else "created"
             )
             resolution["active_link_id"] = link_id
+    elif decision == "retain_existing":
+        resolution.update({
+            "before_fingerprint": ambiguity.evidence_json["before_fingerprint"],
+            "rejected_fingerprint": ambiguity.evidence_json["after_fingerprint"],
+        })
     now = datetime.now(timezone.utc)
     ambiguity.status = "resolved"
     ambiguity.version += 1
