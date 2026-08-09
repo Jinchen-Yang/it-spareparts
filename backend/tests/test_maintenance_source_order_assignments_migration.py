@@ -25,6 +25,50 @@ def _cfg() -> AlembicConfig:
     return cfg
 
 
+def _seed_assignment_history(db, *, suffix: str) -> None:
+    file_hash = f"source-assignment-{suffix}-hash"
+    source_id = f"WBDD-MIGRATION-{suffix.upper()}"
+    project_id = f"source-assignment-{suffix}-project"
+    assignment_id = f"source-assignment-{suffix}-row"
+    batch_id = db.execute(
+        text(
+            "INSERT INTO sys_import_batch "
+            "(filename, file_type, file_hash, status) VALUES "
+            "(:filename, 'maintenance', :file_hash, 'success') RETURNING id"
+        ),
+        {"filename": f"{suffix}.xlsx", "file_hash": file_hash},
+    ).scalar_one()
+    db.execute(
+        text(
+            "INSERT INTO f_maintenance_order "
+            "(raw_order_id, order_no, project_raw, project_std, import_batch_id) "
+            "VALUES (:source_id, :order_no, '合成原始项目', '合成原始项目', :batch_id)"
+        ),
+        {"source_id": source_id, "order_no": source_id, "batch_id": batch_id},
+    )
+    db.execute(
+        text(
+            "INSERT INTO maintenance_project "
+            "(project_id, project_code, display_name, lifecycle_status) VALUES "
+            "(:project_id, :project_code, '合成稳定项目', 'missing')"
+        ),
+        {"project_id": project_id, "project_code": f"MAINT-{suffix.upper()}"},
+    )
+    db.execute(
+        text(
+            "INSERT INTO maintenance_source_order_assignment "
+            "(assignment_id, source_order_id, project_id, created_by) VALUES "
+            "(:assignment_id, :source_id, :project_id, 'migration-test')"
+        ),
+        {
+            "assignment_id": assignment_id,
+            "source_id": source_id,
+            "project_id": project_id,
+        },
+    )
+    db.commit()
+
+
 def test_source_assignment_schema_has_history_and_active_uniqueness(db):
     inspector = inspect(db.get_bind())
     assert _TABLE in inspector.get_table_names()
@@ -60,6 +104,29 @@ def test_source_assignment_schema_has_history_and_active_uniqueness(db):
     assert "source_order_assignment" in audit_constraint
 
 
+def test_assignment_generation_rejects_mutation_and_delete_at_database_layer(db):
+    _seed_assignment_history(db, suffix="immutable")
+    with pytest.raises(DBAPIError, match="history is immutable"):
+        db.execute(
+            text(
+                "UPDATE maintenance_source_order_assignment "
+                "SET project_id = 'tampered-project' "
+                "WHERE assignment_id = 'source-assignment-immutable-row'"
+            )
+        )
+        db.flush()
+    db.rollback()
+    with pytest.raises(DBAPIError, match="history is immutable"):
+        db.execute(
+            text(
+                "DELETE FROM maintenance_source_order_assignment "
+                "WHERE assignment_id = 'source-assignment-immutable-row'"
+            )
+        )
+        db.flush()
+    db.rollback()
+
+
 def test_empty_source_assignment_schema_downgrades_and_upgrades(db):
     db.close()
     cfg = _cfg()
@@ -82,46 +149,7 @@ def test_empty_source_assignment_schema_downgrades_and_upgrades(db):
 
 
 def test_downgrade_blocks_nonempty_assignment_history(db):
-    db.execute(
-        text(
-            "INSERT INTO sys_import_batch "
-            "(filename, file_type, file_hash, status) VALUES "
-            "('source-assignment-migration.xlsx', 'maintenance', "
-            "'source-assignment-migration-hash', 'success')"
-        )
-    )
-    batch_id = db.execute(
-        text(
-            "SELECT id FROM sys_import_batch "
-            "WHERE file_hash = 'source-assignment-migration-hash'"
-        )
-    ).scalar_one()
-    db.execute(
-        text(
-            "INSERT INTO f_maintenance_order "
-            "(raw_order_id, order_no, project_raw, project_std, import_batch_id) "
-            "VALUES ('WBDD-MIGRATION-SOURCE-001', 'WBDD-MIGRATION-001', "
-            "'迁移保护原始项目', '迁移保护原始项目', :batch_id)"
-        ),
-        {"batch_id": batch_id},
-    )
-    db.execute(
-        text(
-            "INSERT INTO maintenance_project "
-            "(project_id, project_code, display_name, lifecycle_status) VALUES "
-            "('source-assignment-migration-project', 'MAINT-MIGRATION-201', "
-            "'迁移保护稳定项目', 'missing')"
-        )
-    )
-    db.execute(
-        text(
-            "INSERT INTO maintenance_source_order_assignment "
-            "(assignment_id, source_order_id, project_id, created_by) VALUES "
-            "('source-assignment-migration-row', 'WBDD-MIGRATION-SOURCE-001', "
-            "'source-assignment-migration-project', 'migration-test')"
-        )
-    )
-    db.commit()
+    _seed_assignment_history(db, suffix="migration")
     db.close()
 
     cfg = _cfg()

@@ -56,7 +56,8 @@ class MaintenanceSourceOrderAssignment(Base):
         CheckConstraint(
             "(is_active AND archived_at IS NULL AND archived_by IS NULL) OR "
             "(NOT is_active AND archived_at IS NOT NULL "
-            "AND char_length(btrim(archived_by)) > 0)",
+            "AND char_length(btrim(archived_by)) > 0 "
+            "AND archived_at >= created_at)",
             name="ck_maintenance_source_assignment_archive_state",
         ),
         Index(

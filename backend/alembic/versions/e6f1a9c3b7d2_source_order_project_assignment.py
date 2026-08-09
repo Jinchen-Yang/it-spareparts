@@ -67,7 +67,8 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "(is_active AND archived_at IS NULL AND archived_by IS NULL) OR "
             "(NOT is_active AND archived_at IS NOT NULL "
-            "AND char_length(btrim(archived_by)) > 0)",
+            "AND char_length(btrim(archived_by)) > 0 "
+            "AND archived_at >= created_at)",
             name="ck_maintenance_source_assignment_archive_state",
         ),
         sa.ForeignKeyConstraint(
@@ -97,6 +98,45 @@ def upgrade() -> None:
         "maintenance_source_order_assignment",
         ["source_order_id", "created_at", "assignment_id"],
     )
+    op.execute(
+        """
+        CREATE FUNCTION guard_maintenance_source_assignment_history()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $guard$
+        BEGIN
+          IF TG_OP = 'DELETE' THEN
+            RAISE EXCEPTION 'source order assignment history is immutable';
+          END IF;
+          IF OLD.is_active
+             AND NOT NEW.is_active
+             AND NEW.assignment_id = OLD.assignment_id
+             AND NEW.source_order_id = OLD.source_order_id
+             AND NEW.project_id = OLD.project_id
+             AND NEW.created_by = OLD.created_by
+             AND NEW.created_at = OLD.created_at
+             AND NEW.version = OLD.version + 1
+             AND OLD.archived_by IS NULL
+             AND OLD.archived_at IS NULL
+             AND NEW.archived_by IS NOT NULL
+             AND char_length(btrim(NEW.archived_by)) > 0
+             AND NEW.archived_at IS NOT NULL
+          THEN
+            RETURN NEW;
+          END IF;
+          RAISE EXCEPTION 'source order assignment history is immutable';
+        END;
+        $guard$
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_maintenance_source_assignment_history
+        BEFORE UPDATE OR DELETE ON maintenance_source_order_assignment
+        FOR EACH ROW
+        EXECUTE FUNCTION guard_maintenance_source_assignment_history()
+        """
+    )
 
 
 def downgrade() -> None:
@@ -122,6 +162,11 @@ def downgrade() -> None:
         $migration$;
         """
     )
+    op.execute(
+        "DROP TRIGGER trg_maintenance_source_assignment_history "
+        "ON maintenance_source_order_assignment"
+    )
+    op.execute("DROP FUNCTION guard_maintenance_source_assignment_history()")
     op.drop_index(
         "ix_maintenance_source_assignment_order_created",
         table_name="maintenance_source_order_assignment",

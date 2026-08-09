@@ -212,8 +212,19 @@ def assign_source_orders(
             )
         if current_assignment is not None:
             if current_assignment.project_id == project.project_id:
-                raise SourceAssignmentError(
-                    f"来源维保单 {source_id} 已归属于目标项目，不能重复归属"
+                # State-based idempotency: an exact replay of an initial assign
+                # still carries no expectation pair, while a replay loaded from
+                # the current directory carries the current pair. Both return
+                # the existing generation without writing a second audit row.
+                if expected_id is None and expected_version is None:
+                    continue
+                if (
+                    expected_id == current_assignment.assignment_id
+                    and expected_version == current_assignment.version
+                ):
+                    continue
+                raise SourceAssignmentConflict(
+                    f"来源维保单 {source_id} 的项目归属已变化，请刷新后重试"
                 )
             expectation_matches = (
                 expected_id == current_assignment.assignment_id

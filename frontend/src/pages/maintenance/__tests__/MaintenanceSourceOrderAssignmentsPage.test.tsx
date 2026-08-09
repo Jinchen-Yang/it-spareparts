@@ -161,6 +161,8 @@ describe("MaintenanceSourceOrderAssignmentsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "批量归属" }));
 
     const dialog = await screen.findByRole("dialog", { name: "批量归属来源维保单" });
+    expect(within(dialog).getByTestId("source-assignment-selection-review"))
+      .toHaveTextContent("WBDD-SYNTH-001 · 原始项目文字甲 · WBDD-SYNTH-RAW-001");
     fireEvent.mouseDown(within(dialog).getByRole("combobox"));
     fireEvent.click(await screen.findByText("XM-001 · 稳定项目甲"));
     fireEvent.change(within(dialog).getByLabelText("归属原因"), {

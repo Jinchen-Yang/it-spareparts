@@ -444,7 +444,7 @@ def test_current_assignment_can_be_unassigned_without_deleting_source_order(db):
     assert directory["rows"][0]["assigned_project"] is None
 
 
-def test_same_target_assignment_replay_is_rejected_without_new_audit(db):
+def test_same_target_assignment_replay_returns_existing_without_new_audit(db):
     source = _source_order(
         db,
         raw_order_id="WBDD-SYNTH-REPLAY-001",
@@ -474,10 +474,8 @@ def test_same_target_assignment_replay_is_rejected_without_new_audit(db):
     )
 
     assert first.status_code == 200, first.text
-    assert replay.status_code == 400, replay.text
-    assert replay.json()["detail"] == (
-        f"来源维保单 {source.raw_order_id} 已归属于目标项目，不能重复归属"
-    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == first.json()
     audits = list(
         db.scalars(
             select(MaintenanceProjectAuditLog).where(
@@ -491,7 +489,7 @@ def test_same_target_assignment_replay_is_rejected_without_new_audit(db):
     ]
 
 
-def test_same_target_item_rolls_back_entire_mixed_batch_and_audit(db):
+def test_same_target_item_is_idempotent_while_mixed_batch_assigns_new_rows(db):
     assigned_source = _source_order(
         db,
         raw_order_id="WBDD-SYNTH-SAME-TARGET-001",
@@ -522,7 +520,7 @@ def test_same_target_item_rolls_back_entire_mixed_batch_and_audit(db):
     assert first.status_code == 200, first.text
     current = first.json()["assignments"][0]
 
-    rejected = client.post(
+    replayed = client.post(
         "/api/maintenance/project-assignments/orders/assign",
         json={
             "project_id": project.project_id,
@@ -534,15 +532,16 @@ def test_same_target_item_rolls_back_entire_mixed_batch_and_audit(db):
                     "expected_version": current["version"],
                 },
             ],
-            "reason": "同目标项必须使整个批次失败",
+            "reason": "同目标项保持幂等并处理同批新归属",
         },
     )
 
-    assert rejected.status_code == 400, rejected.text
-    assert rejected.json()["detail"] == (
-        f"来源维保单 {assigned_source.raw_order_id} "
-        "已归属于目标项目，不能重复归属"
-    )
+    assert replayed.status_code == 200, replayed.text
+    replayed_rows = {
+        row["source_order_id"]: row for row in replayed.json()["assignments"]
+    }
+    assert replayed_rows[assigned_source.raw_order_id] == current
+    assert replayed_rows[pending_source.raw_order_id]["project_id"] == project.project_id
     directory = client.get(
         "/api/maintenance/project-assignments/orders",
         params=[
@@ -559,7 +558,9 @@ def test_same_target_item_rolls_back_entire_mixed_batch_and_audit(db):
     assert rows[assigned_source.raw_order_id]["assignment_version"] == current[
         "version"
     ]
-    assert rows[pending_source.raw_order_id]["assignment_id"] is None
+    assert rows[pending_source.raw_order_id]["assignment_id"] == replayed_rows[
+        pending_source.raw_order_id
+    ]["assignment_id"]
     audits = list(
         db.scalars(
             select(MaintenanceProjectAuditLog).where(
@@ -569,7 +570,8 @@ def test_same_target_item_rolls_back_entire_mixed_batch_and_audit(db):
         )
     )
     assert [(row.action, row.operated_by) for row in audits] == [
-        ("assign", "same_target_atomic_admin")
+        ("assign", "same_target_atomic_admin"),
+        ("assign", "same_target_atomic_admin"),
     ]
 
 

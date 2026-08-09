@@ -450,6 +450,26 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
           <p>{actionMode === "reassign"
             ? `将替换当前归属：${actionRow?.assigned_project?.project_code || "未知"}；旧记录仍会保留。`
             : `已明确选择 ${selectedRows.length} 张来源维保单；系统不会按名称补选。`}</p>
+          {actionMode === "assign" && selectedRows.length > 0 && (
+            <div
+              data-testid="source-assignment-selection-review"
+              style={{
+                maxHeight: 220,
+                overflowY: "auto",
+                marginBottom: 16,
+                padding: 12,
+                border: "1px solid #d9d9d9",
+                borderRadius: 6,
+              }}
+            >
+              {selectedRows.map((row) => (
+                <div key={row.raw_order_id} style={{ marginBottom: 6 }}>
+                  <strong>{row.order_no}</strong>
+                  {` · ${row.project_raw || "原项目名未提供"} · ${row.raw_order_id}`}
+                </div>
+              ))}
+            </div>
+          )}
           {writeError && (
             <Alert
               type={writeConflict ? "warning" : "error"}
