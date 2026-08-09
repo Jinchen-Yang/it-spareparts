@@ -45,25 +45,46 @@ export default function App() {
       return;
     }
     let current = true;
+    let latestRequest = 0;
     const expectedToken = token;
-    getBetaFeatures()
-      .then(({ data }) => {
-        if (!current || localStorage.getItem("token") !== expectedToken) return;
-        const refreshed = {
-          maintenance: data.maintenance === true,
-          replenishment: data.replenishment === true,
-        };
-        localStorage.setItem("beta_features", JSON.stringify(refreshed));
-        setBetaFeatures(refreshed);
-      })
-      .catch(() => {
-        if (!current || localStorage.getItem("token") !== expectedToken) return;
-        // Capability refresh failures hide Beta only; stable pages remain usable.
-        localStorage.setItem("beta_features", "{}");
-        setBetaFeatures({});
-      });
+    const refreshBetaFeatures = () => {
+      const requestId = ++latestRequest;
+      void getBetaFeatures()
+        .then(({ data }) => {
+          if (
+            !current
+            || requestId !== latestRequest
+            || localStorage.getItem("token") !== expectedToken
+          ) return;
+          const refreshed = {
+            maintenance: data.maintenance === true,
+            replenishment: data.replenishment === true,
+          };
+          localStorage.setItem("beta_features", JSON.stringify(refreshed));
+          setBetaFeatures(refreshed);
+        })
+        .catch(() => {
+          if (
+            !current
+            || requestId !== latestRequest
+            || localStorage.getItem("token") !== expectedToken
+          ) return;
+          // Capability refresh failures hide Beta only; stable pages remain usable.
+          localStorage.setItem("beta_features", "{}");
+          setBetaFeatures({});
+        });
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refreshBetaFeatures();
+    };
+
+    refreshBetaFeatures();
+    window.addEventListener("focus", refreshBetaFeatures);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => {
       current = false;
+      window.removeEventListener("focus", refreshBetaFeatures);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
   }, [token]);
 

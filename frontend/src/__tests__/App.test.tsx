@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const { getBetaFeatures } = vi.hoisted(() => ({
   getBetaFeatures: vi.fn(),
@@ -74,6 +74,7 @@ beforeEach(() => {
   cleanup();
   localStorage.clear();
   window.history.replaceState({}, "", "/parts");
+  getBetaFeatures.mockReset();
   getBetaFeatures.mockImplementation(() => Promise.resolve({
     data: JSON.parse(localStorage.getItem("beta_features") || "{}"),
   }));
@@ -158,4 +159,104 @@ it("登录后服务端关闭总闸会立即撤下旧的 Beta 能力快照", asyn
   await waitFor(() => expect(
     JSON.parse(localStorage.getItem("beta_features") || "{}").maintenance,
   ).toBe(false));
+});
+
+it("窗口重新获得焦点时刷新 Beta capability 并立即撤下已关闭入口", async () => {
+  localStorage.setItem("role", "admin");
+  localStorage.setItem("name", "实名管理员");
+  localStorage.setItem("permissions", JSON.stringify({
+    page_parts: true,
+    page_maintenance_beta: true,
+  }));
+  localStorage.setItem("beta_features", JSON.stringify({ maintenance: true }));
+  localStorage.setItem("token", "token-beta-focus");
+  window.history.replaceState({}, "", "/maintenance/beta/projects");
+  getBetaFeatures
+    .mockResolvedValueOnce({ data: { maintenance: true, replenishment: false } })
+    .mockResolvedValueOnce({ data: { maintenance: false, replenishment: false } });
+
+  render(<App />);
+
+  expect(await screen.findByText("维保 Beta 页面")).toBeInTheDocument();
+  await waitFor(() => expect(getBetaFeatures).toHaveBeenCalledTimes(1));
+
+  window.dispatchEvent(new Event("focus"));
+
+  await waitFor(() => expect(screen.getByText("型号页会话：实名管理员")).toBeInTheDocument());
+  expect(screen.queryByText("维保 Beta 页面")).toBeNull();
+  expect(getBetaFeatures).toHaveBeenCalledTimes(2);
+});
+
+it("页面重新可见时刷新 Beta capability，隐藏状态不请求", async () => {
+  localStorage.setItem("role", "admin");
+  localStorage.setItem("name", "实名管理员");
+  localStorage.setItem("permissions", JSON.stringify({
+    page_parts: true,
+    page_maintenance_beta: true,
+  }));
+  localStorage.setItem("beta_features", JSON.stringify({ maintenance: true }));
+  localStorage.setItem("token", "token-beta-visible");
+  window.history.replaceState({}, "", "/maintenance/beta/projects");
+  getBetaFeatures
+    .mockResolvedValueOnce({ data: { maintenance: true, replenishment: false } })
+    .mockResolvedValueOnce({ data: { maintenance: false, replenishment: false } });
+
+  render(<App />);
+
+  expect(await screen.findByText("维保 Beta 页面")).toBeInTheDocument();
+  await waitFor(() => expect(getBetaFeatures).toHaveBeenCalledTimes(1));
+
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "hidden",
+  });
+  document.dispatchEvent(new Event("visibilitychange"));
+  expect(getBetaFeatures).toHaveBeenCalledTimes(1);
+
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    value: "visible",
+  });
+  document.dispatchEvent(new Event("visibilitychange"));
+
+  await waitFor(() => expect(screen.getByText("型号页会话：实名管理员")).toBeInTheDocument());
+  expect(screen.queryByText("维保 Beta 页面")).toBeNull();
+  expect(getBetaFeatures).toHaveBeenCalledTimes(2);
+});
+
+it("较早的 capability 响应迟到时不会重新点亮已关闭的 Beta", async () => {
+  localStorage.setItem("role", "admin");
+  localStorage.setItem("name", "实名管理员");
+  localStorage.setItem("permissions", JSON.stringify({
+    page_parts: true,
+    page_maintenance_beta: true,
+  }));
+  localStorage.setItem("beta_features", JSON.stringify({ maintenance: true }));
+  localStorage.setItem("token", "token-beta-race");
+  window.history.replaceState({}, "", "/maintenance/beta/projects");
+  let resolveInitial!: (value: {
+    data: { maintenance: boolean; replenishment: boolean };
+  }) => void;
+  getBetaFeatures
+    .mockImplementationOnce(() => new Promise((resolve) => {
+      resolveInitial = resolve;
+    }))
+    .mockResolvedValueOnce({ data: { maintenance: false, replenishment: false } });
+
+  render(<App />);
+
+  expect(await screen.findByText("维保 Beta 页面")).toBeInTheDocument();
+  await waitFor(() => expect(getBetaFeatures).toHaveBeenCalledTimes(1));
+  window.dispatchEvent(new Event("focus"));
+
+  await waitFor(() => expect(screen.getByText("型号页会话：实名管理员")).toBeInTheDocument());
+  expect(screen.queryByText("维保 Beta 页面")).toBeNull();
+
+  await act(async () => {
+    resolveInitial({ data: { maintenance: true, replenishment: false } });
+    await Promise.resolve();
+  });
+
+  expect(screen.queryByText("维保 Beta 页面")).toBeNull();
+  expect(JSON.parse(localStorage.getItem("beta_features") || "{}").maintenance).toBe(false);
 });

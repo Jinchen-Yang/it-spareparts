@@ -1,10 +1,21 @@
 import { Navigate, useLocation } from "react-router-dom";
 
-export function maintenanceBetaCompatTarget(pathname: string): string {
+interface CompatLocation {
+  pathname: string;
+  search: string;
+  hash: string;
+}
+
+export function maintenanceBetaCompatTarget({
+  pathname,
+  search,
+  hash,
+}: CompatLocation): string {
   try {
     const features = JSON.parse(localStorage.getItem("beta_features") || "{}");
     if (features?.maintenance === true) {
-      return pathname.replace(/^\/maintenance(?=\/)/, "/maintenance/beta");
+      const betaPath = pathname.replace(/^\/maintenance(?=\/)/, "/maintenance/beta");
+      return `${betaPath}${search}${hash}`;
     }
   } catch {
     // A damaged local snapshot fails closed to the production-stable page.
@@ -14,5 +25,5 @@ export function maintenanceBetaCompatTarget(pathname: string): string {
 
 export default function MaintenanceBetaCompatRedirect() {
   const location = useLocation();
-  return <Navigate to={maintenanceBetaCompatTarget(location.pathname)} replace />;
+  return <Navigate to={maintenanceBetaCompatTarget(location)} replace />;
 }
