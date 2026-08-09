@@ -87,6 +87,7 @@ other
 Capability 只对同时满足以下实时权限的 active 实名 `sys_user` 可见并可执行：
 
 ```text
+action_agent_replenishment_review
 page_chat
 page_parts
 page_purchases
@@ -95,6 +96,9 @@ page_maintenance
 page_pool_analysis
 own_customers_only = false
 ```
+
+新增专用 action 权限，首版只给 admin 默认开启；其他职位模板默认关闭，由管理员在甲方确认评审职责
+后显式授予。不能仅凭“恰好拥有多个页面”推断某账号获准执行采购评审。
 
 不要求 `data_purchase_cost`，因为本流程不得读取或输出采购价、成本、供应商、客户、利润、
 订单号或 SN。Task 创建、每个节点、Evidence 读取和 Interrupt resolve 前都重新加载实时用户、
@@ -303,8 +307,8 @@ else:
     concrete_need = any(
         verified_project,
         verified_project_contract,
-        device_ref,
-        fault_ref,
+        verified_device,
+        verified_fault,
     )
 
     if not (high_frequency or active_pool or stable_maintenance) and not concrete_need:
@@ -325,6 +329,10 @@ in_transit_unknown
 
 active 池、维保消耗和申请理由即使存在，也必须在 Evidence 中标记为
 `non_overriding_support`，不能改变 `RPL-100`。
+
+当前输入中的 `device_ref/fault_ref` 只是申请方声明，不能自动变成 `verified_device/verified_fault`，
+也不能单独满足 `RPL-400`。系统没有可核验来源时，它们只触发“请补充外部证明”；最终人工可以在
+原业务流程判断，但 Agent Evidence 仍保持 `verified=false`。
 
 ## 11. Threshold Policy 与 Shadow Mode
 
@@ -501,6 +509,7 @@ Human Interrupt resolve 前重新验证 owner、用户状态、权限和 workflo
 - shadow mode 不产生正式高频标签；测试 Policy 在阈值边界上下结果稳定。
 - 历史 Policy 不可覆盖修改。
 - 无项目/设备/故障/合同证据的低频小众 PN 为 `need_info`。
+- 只有申请方填写的 opaque `device_ref/fault_ref` 仍为 `need_info`，不能伪装成已核验具体需求。
 
 ### LLM、权限与恢复
 
