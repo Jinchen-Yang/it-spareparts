@@ -119,6 +119,12 @@ _app_engine = engine
 
 _TABLES = [
     "chat_message", "chat_session",
+    "replenishment_review_line",
+    "replenishment_review",
+    "replenishment_audit_event",
+    "replenishment_application_line",
+    "replenishment_application_version",
+    "replenishment_application",
     "fact_data_quality_issue",
     "maintenance_warehouse_audit_event",
     "maintenance_warehouse_ambiguity",

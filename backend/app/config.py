@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     maintenance_manifest_active_hmac_key: SecretStr = SecretStr(_DEFAULT_MANIFEST_KEY)
     maintenance_manifest_previous_hmac_keys_json: SecretStr = SecretStr("none")
 
+    # 销售经理补库购物车 Beta 服务端总闸。关闭时只保留能力探测，全部业务读写和导出
+    # 失败关闭；既有 Beta 数据与表结构原样保留，重新开启后可继续使用。
+    replenishment_beta_enabled: bool = False
+
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
     # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级
     vision_api_key: str = ""

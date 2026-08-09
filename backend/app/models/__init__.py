@@ -89,6 +89,14 @@ from app.models.system import (
     SysRoleTemplate,
     SysUser,
 )
+from app.models.replenishment import (
+    ReplenishmentApplication,
+    ReplenishmentApplicationLine,
+    ReplenishmentApplicationVersion,
+    ReplenishmentAuditEvent,
+    ReplenishmentReview,
+    ReplenishmentReviewLine,
+)
 
 __all__ = [
     "ChatSession",
@@ -170,4 +178,10 @@ __all__ = [
     "SysBusinessSetting",
     "SysUser",
     "SysRoleTemplate",
+    "ReplenishmentApplication",
+    "ReplenishmentApplicationVersion",
+    "ReplenishmentApplicationLine",
+    "ReplenishmentReview",
+    "ReplenishmentReviewLine",
+    "ReplenishmentAuditEvent",
 ]

@@ -34,6 +34,7 @@ from app.api import (
     pools,
     profit,
     purchases,
+    replenishment,
     role_templates,
     substitutes,
     system_settings,
@@ -82,6 +83,7 @@ app.include_router(data_quality_calibration.router, prefix=settings.api_prefix)
 app.include_router(agent.router, prefix=settings.api_prefix)
 app.include_router(chat_sessions.router, prefix=settings.api_prefix)
 app.include_router(purchases.router, prefix=settings.api_prefix)
+app.include_router(replenishment.router, prefix=settings.api_prefix)
 app.include_router(maintenance.router, prefix=settings.api_prefix)
 app.include_router(maintenance_acceptance.router, prefix=settings.api_prefix)
 app.include_router(maintenance_project_assignments.router, prefix=settings.api_prefix)

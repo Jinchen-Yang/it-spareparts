@@ -391,7 +391,9 @@ def test_permission_registry_wiring(db):
                                    "action_maintenance_acceptance_submit",
                                    "action_maintenance_acceptance_review",
                                    "action_maintenance_warehouse_manage",
-                                   "action_maintenance_migration_review"]
+                                   "action_maintenance_migration_review",
+                                   "action_replenishment_create",
+                                   "action_replenishment_review"]
 
 
 # ---------------------------------------------------------------- 端到端闭环
