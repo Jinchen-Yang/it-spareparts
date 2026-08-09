@@ -299,6 +299,127 @@ def test_correction_deactivates_replaced_obligation_without_double_counting(db):
     assert full_directory["return_rate"]["required_quantity"] == "2.000"
 
 
+def test_confirmed_site_issue_can_be_fully_voided_before_any_return_registration(db):
+    client = _client(db, username="bad_return_source_void_admin")
+    confirmed, obligation = _one_required_obligation(
+        db,
+        client,
+        project_id="project-bad-return-source-void",
+        quantity="3",
+        suffix="source-void",
+    )
+    before = client.get(
+        f"/api/maintenance/projects/stable/{obligation.project_id}/return-rate"
+    ).json()
+    assert before["required_quantity"] == "3.000"
+
+    voided = client.post(
+        f"/api/maintenance/site-issues/{confirmed['issue_id']}/void",
+        json={
+            "project_id": obligation.project_id,
+            "version": confirmed["version"],
+            "idempotency_key": "synthetic-source-full-void",
+            "reason": "整张现场领用误确认且尚未登记返还，原子撤回",
+        },
+    )
+    assert voided.status_code == 200, voided.text
+    assert voided.json()["workflow_status"] == "void"
+    directory = client.post(
+        "/api/maintenance/return-obligations/search",
+        json={"project_id": obligation.project_id, "page": 1, "page_size": 20},
+    ).json()
+    assert directory["rows"] == []
+    assert directory["return_rate"]["status"] == "no_return_required"
+    assert directory["return_rate"]["required_quantity"] == "0.000"
+
+
+def test_confirmed_site_issue_void_fails_closed_after_return_registration(db):
+    client = _client(db, username="bad_return_source_void_blocked_admin")
+    confirmed, obligation = _one_required_obligation(
+        db,
+        client,
+        project_id="proj-return-source-void-blocked",
+        quantity="3",
+        suffix="source-void-blocked",
+    )
+    created = client.post(
+        "/api/maintenance/bad-returns",
+        json={
+            "project_id": obligation.project_id,
+            "idempotency_key": "synthetic-source-void-blocked-create",
+            "lines": [{"obligation_id": obligation.obligation_id, "quantity": "1"}],
+            "reason": "建立不可被上游整单撤回的返还登记",
+        },
+    ).json()
+    submitted = client.post(
+        f"/api/maintenance/bad-returns/{created['return_id']}/submit",
+        json={
+            "project_id": obligation.project_id,
+            "version": created["version"],
+            "idempotency_key": "synthetic-source-void-blocked-submit",
+            "reason": "提交返还登记后锁定上游义务",
+        },
+    )
+    assert submitted.status_code == 200, submitted.text
+
+    rejected = client.post(
+        f"/api/maintenance/site-issues/{confirmed['issue_id']}/void",
+        json={
+            "project_id": obligation.project_id,
+            "version": confirmed["version"],
+            "idempotency_key": "synthetic-source-full-void-blocked",
+            "reason": "已有返还登记时必须拒绝整单撤回",
+        },
+    )
+    assert rejected.status_code == 409, rejected.text
+    assert "已有返还登记" in rejected.json()["detail"]
+    db.expire_all()
+    assert db.get(MaintenanceReturnObligation, obligation.obligation_id).is_active is True
+    rate = client.get(
+        f"/api/maintenance/projects/stable/{obligation.project_id}/return-rate"
+    ).json()
+    assert rate["required_quantity"] == "3.000"
+    assert rate["registered_quantity"] == "1.000"
+
+
+def test_workspace_rate_synchronously_consumes_pending_project_event(db):
+    client = _client(db, username="bad_return_pending_projection_admin")
+    confirmed, obligation = _one_required_obligation(
+        db,
+        client,
+        project_id="proj-return-pending-projection",
+        quantity="2",
+        suffix="pending-projection",
+    )
+    source_event = db.query(MaintenanceSiteIssueReturnEvent).filter_by(
+        issue_id=confirmed["issue_id"],
+        event_type="return_obligation_created",
+    ).one()
+    pending_event = MaintenanceSiteIssueReturnEvent(
+        event_id="00000000-0000-0000-0000-000000000999",
+        project_id=obligation.project_id,
+        issue_id=confirmed["issue_id"],
+        event_type="return_obligation_voided",
+        issue_version=confirmed["version"] + 1,
+        payload=source_event.payload,
+    )
+    db.add(pending_event)
+    db.commit()
+
+    workspace = client.get(
+        f"/api/maintenance/projects/stable/{obligation.project_id}/workspace",
+        params={"as_of": "2026-08-09"},
+    )
+    assert workspace.status_code == 200, workspace.text
+    assert workspace.json()["return_rate"]["status"] == "no_return_required"
+    assert workspace.json()["return_rate"]["required_quantity"] == "0.000"
+    db.expire_all()
+    projected = db.get(MaintenanceSiteIssueReturnEvent, pending_event.event_id)
+    assert projected.downstream_reference.startswith("maintenance-return-obligations:")
+    assert projected.consumed_at is not None
+    assert db.get(MaintenanceReturnObligation, obligation.obligation_id).is_active is False
+
+
 def test_admin_resolves_pending_category_by_linking_standard_category_only(db):
     project = _project(db, project_id="project-bad-return-resolve")
     admin = _client(db, username="bad_return_resolve_admin")
@@ -570,6 +691,267 @@ def test_concurrent_draft_submission_allows_only_one_overlapping_return(db):
     assert rate["registered_quantity"] == "3.000"
 
 
+def test_submitted_return_can_be_voided_and_replaced_without_counting_twice(db):
+    client = _client(db, username="bad_return_void_replace_admin")
+    _confirmed, obligation = _one_required_obligation(
+        db,
+        client,
+        project_id="project-bad-return-void-replace",
+        quantity="5",
+        suffix="void-replace",
+    )
+    created = client.post(
+        "/api/maintenance/bad-returns",
+        json={
+            "project_id": obligation.project_id,
+            "idempotency_key": "synthetic-return-void-create",
+            "lines": [{"obligation_id": obligation.obligation_id, "quantity": "2"}],
+            "reason": "建立待更正返还单",
+        },
+    )
+    assert created.status_code == 201, created.text
+    submitted = client.post(
+        f"/api/maintenance/bad-returns/{created.json()['return_id']}/submit",
+        json={
+            "project_id": obligation.project_id,
+            "version": created.json()["version"],
+            "idempotency_key": "synthetic-return-void-submit",
+            "reason": "提交后发现业务内容有误",
+        },
+    )
+    assert submitted.status_code == 200, submitted.text
+    assert client.get(
+        f"/api/maintenance/projects/stable/{obligation.project_id}/return-rate"
+    ).json()["registered_quantity"] == "2.000"
+
+    voided = client.post(
+        f"/api/maintenance/bad-returns/{created.json()['return_id']}/void",
+        json={
+            "project_id": obligation.project_id,
+            "version": submitted.json()["version"],
+            "idempotency_key": "synthetic-return-void-command",
+            "reason": "原返还单登记错误，追加式作废后重建",
+        },
+    )
+    assert voided.status_code == 200, voided.text
+    assert voided.json()["status"] == "void"
+    assert voided.json()["voided_at"] is not None
+    replayed_void = client.post(
+        f"/api/maintenance/bad-returns/{created.json()['return_id']}/void",
+        json={
+            "project_id": obligation.project_id,
+            "version": submitted.json()["version"],
+            "idempotency_key": "synthetic-return-void-command",
+            "reason": "原返还单登记错误，追加式作废后重建",
+        },
+    )
+    assert replayed_void.status_code == 200, replayed_void.text
+    assert replayed_void.json()["idempotent_replay"] is True
+    assert client.get(
+        f"/api/maintenance/projects/stable/{obligation.project_id}/return-rate"
+    ).json()["registered_quantity"] == "0.000"
+
+    replacement = client.post(
+        "/api/maintenance/bad-returns",
+        json={
+            "project_id": obligation.project_id,
+            "idempotency_key": "synthetic-return-replacement-create",
+            "replaces_return_id": created.json()["return_id"],
+            "lines": [{"obligation_id": obligation.obligation_id, "quantity": "1"}],
+            "reason": "按正确数量建立替代返还单",
+        },
+    )
+    assert replacement.status_code == 201, replacement.text
+    assert replacement.json()["replaces_return_id"] == created.json()["return_id"]
+    assert replacement.json()["status"] == "draft"
+    replacement_submit = client.post(
+        f"/api/maintenance/bad-returns/{replacement.json()['return_id']}/submit",
+        json={
+            "project_id": obligation.project_id,
+            "version": replacement.json()["version"],
+            "idempotency_key": "synthetic-return-replacement-submit",
+            "reason": "提交正确替代返还单",
+        },
+    )
+    assert replacement_submit.status_code == 200, replacement_submit.text
+    assert client.get(
+        f"/api/maintenance/projects/stable/{obligation.project_id}/return-rate"
+    ).json()["registered_quantity"] == "1.000"
+
+    duplicate_replacement = client.post(
+        "/api/maintenance/bad-returns",
+        json={
+            "project_id": obligation.project_id,
+            "idempotency_key": "synthetic-return-replacement-duplicate",
+            "replaces_return_id": created.json()["return_id"],
+            "lines": [{"obligation_id": obligation.obligation_id, "quantity": "1"}],
+            "reason": "同一原单不得存在两个替代单",
+        },
+    )
+    assert duplicate_replacement.status_code == 409, duplicate_replacement.text
+    assert db.query(MaintenanceBadReturnCommand).filter_by(
+        entity_id=created.json()["return_id"],
+        action="void",
+    ).count() == 1
+    assert db.query(MaintenanceProjectOperationAudit).filter_by(
+        entity_type="bad_return",
+        entity_id=created.json()["return_id"],
+        action="void",
+    ).count() == 1
+
+
+def test_draft_and_in_transit_returns_are_voidable_without_rate_residue(db):
+    client = _client(db, username="bad_return_other_void_states_admin")
+    _confirmed, obligation = _one_required_obligation(
+        db,
+        client,
+        project_id="project-return-other-void-states",
+        quantity="5",
+        suffix="other-void-states",
+    )
+
+    def create(*, suffix: str, quantity: str) -> dict:
+        response = client.post(
+            "/api/maintenance/bad-returns",
+            json={
+                "project_id": obligation.project_id,
+                "idempotency_key": f"synthetic-other-void-create-{suffix}",
+                "lines": [
+                    {"obligation_id": obligation.obligation_id, "quantity": quantity}
+                ],
+                "reason": "建立其他状态作废边界测试单",
+            },
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    draft = create(suffix="draft", quantity="1")
+    draft_void = client.post(
+        f"/api/maintenance/bad-returns/{draft['return_id']}/void",
+        json={
+            "project_id": obligation.project_id,
+            "version": draft["version"],
+            "idempotency_key": "synthetic-other-void-draft",
+            "reason": "草稿建立错误",
+        },
+    )
+    assert draft_void.status_code == 200, draft_void.text
+    assert draft_void.json()["status"] == "void"
+
+    transit_source = create(suffix="transit", quantity="2")
+    submitted = client.post(
+        f"/api/maintenance/bad-returns/{transit_source['return_id']}/submit",
+        json={
+            "project_id": obligation.project_id,
+            "version": transit_source["version"],
+            "idempotency_key": "synthetic-other-void-submit",
+            "reason": "提交在途作废边界测试单",
+        },
+    ).json()
+    in_transit = client.post(
+        f"/api/maintenance/bad-returns/{transit_source['return_id']}/in-transit",
+        json={
+            "project_id": obligation.project_id,
+            "version": submitted["version"],
+            "idempotency_key": "synthetic-other-void-transit",
+            "logistics_reference": "SYNTH-VOID-TRANSIT",
+            "reason": "登记测试物流事实",
+        },
+    ).json()
+    transit_void = client.post(
+        f"/api/maintenance/bad-returns/{transit_source['return_id']}/void",
+        json={
+            "project_id": obligation.project_id,
+            "version": in_transit["version"],
+            "idempotency_key": "synthetic-other-void-transit-command",
+            "reason": "物流登记后发现整单错误",
+        },
+    )
+    assert transit_void.status_code == 200, transit_void.text
+    assert transit_void.json()["status"] == "void"
+    assert transit_void.json()["logistics_reference"] == "SYNTH-VOID-TRANSIT"
+    rate = client.get(
+        f"/api/maintenance/projects/stable/{obligation.project_id}/return-rate"
+    ).json()
+    assert rate["registered_quantity"] == "0.000"
+    assert rate["warehouse_confirmed_quantity"] == "0.000"
+
+
+def test_warehouse_confirmed_return_void_requires_no_formal_inbound_link(db):
+    client = _client(db, username="bad_return_warehouse_void_admin")
+    _confirmed, obligation = _one_required_obligation(
+        db,
+        client,
+        project_id="project-bad-return-warehouse-void",
+        quantity="5",
+        suffix="warehouse-void",
+    )
+
+    def warehouse_confirm(*, suffix: str, inbound_reference: str | None) -> dict:
+        created = client.post(
+            "/api/maintenance/bad-returns",
+            json={
+                "project_id": obligation.project_id,
+                "idempotency_key": f"synthetic-warehouse-void-create-{suffix}",
+                "lines": [{"obligation_id": obligation.obligation_id, "quantity": "1"}],
+                "reason": "建立仓库确认边界测试单",
+            },
+        ).json()
+        submitted = client.post(
+            f"/api/maintenance/bad-returns/{created['return_id']}/submit",
+            json={
+                "project_id": obligation.project_id,
+                "version": created["version"],
+                "idempotency_key": f"synthetic-warehouse-void-submit-{suffix}",
+                "reason": "提交仓库确认边界测试单",
+            },
+        ).json()
+        body = {
+            "project_id": obligation.project_id,
+            "version": submitted["version"],
+            "idempotency_key": f"synthetic-warehouse-void-confirm-{suffix}",
+            "warehouse_reference": f"SYNTH-WH-{suffix}",
+            "reason": "确认仓库收件边界",
+        }
+        if inbound_reference is not None:
+            body["inbound_reference"] = inbound_reference
+        response = client.post(
+            f"/api/maintenance/bad-returns/{created['return_id']}/warehouse-confirm",
+            json=body,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    reversible = warehouse_confirm(suffix="NO-INBOUND", inbound_reference=None)
+    voided = client.post(
+        f"/api/maintenance/bad-returns/{reversible['return_id']}/void",
+        json={
+            "project_id": obligation.project_id,
+            "version": reversible["version"],
+            "idempotency_key": "synthetic-warehouse-void-allowed",
+            "reason": "尚未关联正式入库，撤销错误仓库确认",
+        },
+    )
+    assert voided.status_code == 200, voided.text
+    assert voided.json()["status"] == "void"
+
+    protected = warehouse_confirm(
+        suffix="WITH-INBOUND",
+        inbound_reference="SYNTH-INBOUND-PROTECTED",
+    )
+    blocked = client.post(
+        f"/api/maintenance/bad-returns/{protected['return_id']}/void",
+        json={
+            "project_id": obligation.project_id,
+            "version": protected["version"],
+            "idempotency_key": "synthetic-warehouse-void-blocked",
+            "reason": "正式入库关联后不得直接撤销",
+        },
+    )
+    assert blocked.status_code == 409, blocked.text
+    assert "正式入库" in blocked.json()["detail"]
+
+
 def test_return_commands_and_audits_are_append_only_and_permission_hidden(db):
     admin = _client(db, username="bad_return_append_admin")
     _confirmed, obligation = _one_required_obligation(
@@ -637,6 +1019,34 @@ def test_return_commands_and_audits_are_append_only_and_permission_hidden(db):
                     "DELETE FROM maintenance_project_operation_audit WHERE id = :audit_id"
                 ),
                 {"audit_id": audit.id},
+            )
+
+    voided = admin.post(
+        f"/api/maintenance/bad-returns/{created.json()['return_id']}/void",
+        json={
+            "project_id": obligation.project_id,
+            "version": created.json()["version"],
+            "idempotency_key": "synthetic-return-append-void",
+            "reason": "验证新增作废命令同样追加式留痕",
+        },
+    )
+    assert voided.status_code == 200, voided.text
+    void_command = db.query(MaintenanceBadReturnCommand).filter_by(
+        action="void"
+    ).one()
+    assert db.query(MaintenanceProjectOperationAudit).filter_by(
+        entity_type="bad_return",
+        entity_id=created.json()["return_id"],
+        action="void",
+    ).count() == 1
+    with pytest.raises(DBAPIError, match="append-only"):
+        with db.begin_nested():
+            db.execute(
+                text(
+                    "DELETE FROM maintenance_bad_return_command "
+                    "WHERE command_id = :command_id"
+                ),
+                {"command_id": void_command.command_id},
             )
 
 

@@ -304,6 +304,7 @@ def _bad_return_dict(
     return {
         "return_id": row.return_id,
         "return_no": row.return_no,
+        "replaces_return_id": row.replaces_return_id,
         "project_id": row.project_id,
         "status": row.status,
         "logistics_reference": row.logistics_reference,
@@ -318,6 +319,7 @@ def _bad_return_dict(
             if row.warehouse_confirmed_at
             else None
         ),
+        "voided_at": row.voided_at.isoformat() if row.voided_at else None,
         "version": row.version,
         "lines": [_return_line_dict(line) for line in lines],
         "inventory_effect": "none",
@@ -581,10 +583,18 @@ def consume_pending_return_events(
     db: Session,
     *,
     project_id: str | None = None,
+    project_ids: list[str] | set[str] | None = None,
 ) -> int:
+    if project_id is not None and project_ids is not None:
+        raise ValueError("project_id and project_ids are mutually exclusive")
     filters = [MaintenanceSiteIssueReturnEvent.downstream_reference.is_(None)]
     if project_id is not None:
         filters.append(MaintenanceSiteIssueReturnEvent.project_id == project_id)
+    elif project_ids is not None:
+        ids = list(dict.fromkeys(project_ids))
+        if not ids:
+            return 0
+        filters.append(MaintenanceSiteIssueReturnEvent.project_id.in_(ids))
     events = list(
         db.scalars(
             select(MaintenanceSiteIssueReturnEvent)
@@ -593,7 +603,7 @@ def consume_pending_return_events(
                 MaintenanceSiteIssueReturnEvent.created_at,
                 MaintenanceSiteIssueReturnEvent.event_id,
             )
-            .with_for_update(skip_locked=True)
+            .with_for_update()
         )
     )
     for event in events:
@@ -609,6 +619,19 @@ def return_rates_for_projects(
     ids = list(dict.fromkeys(project_ids))
     if not ids:
         return {}
+    # Rates are authoritative operational reads.  Wait for and consume every
+    # pending source event instead of returning a transiently stale percentage.
+    # The same project rows serialize site-issue and return-document writes, so
+    # no new source/return fact can slip in between draining and aggregation.
+    list(
+        db.scalars(
+            select(MaintenanceProject)
+            .where(MaintenanceProject.project_id.in_(ids))
+            .order_by(MaintenanceProject.project_id)
+            .with_for_update()
+        )
+    )
+    consume_pending_return_events(db, project_ids=ids)
     obligation_facts: dict[str, dict[str, Decimal | int]] = defaultdict(
         lambda: {
             "required_quantity": Decimal("0"),
@@ -765,8 +788,14 @@ def search_return_obligations(
     page: int,
     page_size: int,
 ) -> dict | None:
-    if db.get(MaintenanceProject, project_id) is None:
+    project = db.scalar(
+        select(MaintenanceProject)
+        .where(MaintenanceProject.project_id == project_id)
+        .with_for_update()
+    )
+    if project is None:
         return None
+    consume_pending_return_events(db, project_id=project_id)
     filters = [MaintenanceReturnObligation.project_id == project_id]
     if active_only:
         filters.append(MaintenanceReturnObligation.is_active.is_(True))
@@ -841,6 +870,7 @@ def create_bad_return(
     *,
     project_id: str,
     idempotency_key: str,
+    replaces_return_id: str | None,
     lines: list[dict],
     note: str | None,
     reason: str,
@@ -850,6 +880,11 @@ def create_bad_return(
     if len(clean_key) < 8:
         raise BadReturnError("幂等键至少需要 8 个字符")
     clean_reason = _required(reason, "操作原因", 1000)
+    clean_replaces_return_id = (
+        _required(replaces_return_id, "被替代返还单编号", 36)
+        if replaces_return_id is not None
+        else None
+    )
     if not lines or len(lines) > 200:
         raise BadReturnError("坏件返还单需要 1 至 200 条明细")
     normalized: list[dict] = []
@@ -869,6 +904,7 @@ def create_bad_return(
         {
             "action": "create",
             "project_id": project_id,
+            "replaces_return_id": clean_replaces_return_id,
             "lines": [
                 {
                     "obligation_id": row["obligation_id"],
@@ -900,6 +936,19 @@ def create_bad_return(
         return None
     if not project.is_active:
         raise BadReturnError("项目主档已归档")
+    consume_pending_return_events(db, project_id=project_id)
+    if clean_replaces_return_id is not None:
+        replaced = db.scalar(
+            select(MaintenanceBadReturn)
+            .where(MaintenanceBadReturn.return_id == clean_replaces_return_id)
+            .with_for_update()
+        )
+        if replaced is None:
+            raise BadReturnError("被替代的坏件返还单不存在")
+        if replaced.project_id != project_id:
+            raise BadReturnPermissionError("被替代返还单不属于当前稳定项目")
+        if replaced.status != "void":
+            raise BadReturnConflict("只有已作废坏件返还单可以建立替代单")
     obligations = list(
         db.scalars(
             select(MaintenanceReturnObligation)
@@ -926,6 +975,7 @@ def create_bad_return(
     row = MaintenanceBadReturn(
         return_id=return_id,
         return_no=f"BHR-{uuid4().hex[:16].upper()}",
+        replaces_return_id=clean_replaces_return_id,
         project_id=project_id,
         status="draft",
         note=note.strip() if note and note.strip() else None,
@@ -1008,7 +1058,7 @@ def transition_bad_return(
     if len(clean_key) < 8:
         raise BadReturnError("幂等键至少需要 8 个字符")
     clean_reason = _required(reason, "操作原因", 1000)
-    if action not in {"submit", "in_transit", "warehouse_confirm"}:
+    if action not in {"submit", "in_transit", "warehouse_confirm", "void"}:
         raise BadReturnError("坏件返还状态操作无效")
     clean_logistics = (
         _required(logistics_reference, "物流引用", 128)
@@ -1073,9 +1123,12 @@ def transition_bad_return(
         "submit": {"draft"},
         "in_transit": {"submitted"},
         "warehouse_confirm": {"submitted", "in_transit"},
+        "void": {"draft", "submitted", "in_transit", "warehouse_confirmed"},
     }[action]
     if row.status not in expected:
         raise BadReturnConflict("当前坏件返还状态不允许此操作")
+    if action == "void" and row.status == "warehouse_confirmed" and row.inbound_reference:
+        raise BadReturnConflict("已关联正式入库的坏件返还单不能作废")
     lines = _bad_return_lines(db, return_id=return_id)
     if action == "submit":
         obligation_ids = {line.obligation_id for line in lines}
@@ -1115,11 +1168,14 @@ def transition_bad_return(
         row.status = "in_transit"
         row.logistics_reference = clean_logistics
         row.in_transit_at = now
-    else:
+    elif action == "warehouse_confirm":
         row.status = "warehouse_confirmed"
         row.warehouse_reference = clean_warehouse
         row.inbound_reference = clean_inbound
         row.warehouse_confirmed_at = now
+    else:
+        row.status = "void"
+        row.voided_at = now
     row.version += 1
     db.flush()
     response = {

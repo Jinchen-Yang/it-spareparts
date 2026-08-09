@@ -28,7 +28,7 @@ function ProjectReturnStatus({ project }: { project: MaintenanceProjectOperation
       <Tag>已登记 {rate.registered_quantity}</Tag>
       <Tag>仓库确认 {rate.warehouse_confirmed_quantity}</Tag>
       {rate.status !== "no_return_required" && (
-        <Tag>待返 {rate.outstanding_quantity}</Tag>
+        <Tag>待仓库确认 {rate.outstanding_quantity}</Tag>
       )}
       {Number(rate.exempt_quantity) > 0 && (
         <Tag color="green">硬盘免返 {rate.exempt_quantity}</Tag>

@@ -834,7 +834,7 @@ def test_metadata_correction_keeps_line_identity_and_frozen_cost_evidence(db):
     )
 
 
-def test_confirmed_issue_can_be_corrected_but_obligation_blocks_direct_void(db):
+def test_confirmed_issue_can_be_corrected_then_fully_voided_without_registration(db):
     project = _project(db, project_id="project-site-issue-v2-correct-void")
     part = DimPart(pn_std="PN-SYNTH-CORRECT-VOID")
     db.add(part)
@@ -912,28 +912,29 @@ def test_confirmed_issue_can_be_corrected_but_obligation_blocks_direct_void(db):
             "reason": "作废错误现场领用",
         },
     )
-    assert voided_response.status_code == 409, voided_response.text
-    assert "返还义务已生成下游事实" in voided_response.json()["detail"]
+    assert voided_response.status_code == 200, voided_response.text
+    assert voided_response.json()["workflow_status"] == "void"
 
     candidates = client.post(
         f"/api/maintenance/projects/stable/{project.project_id}/issue-candidates/search",
         json={"page": 1, "page_size": 20},
     ).json()
-    assert candidates["rows"][0]["confirmed_quantity"] == "3.000"
-    assert candidates["rows"][0]["available_quantity"] == "2.000"
+    assert candidates["rows"][0]["confirmed_quantity"] == "0.000"
+    assert candidates["rows"][0]["available_quantity"] == "5.000"
     obligation = db.query(MaintenanceReturnObligation).filter_by(
         issue_id=draft["issue_id"]
     ).one()
     assert obligation.obligation_id
     assert obligation.required_quantity == 0  # no standard category: pending
     assert obligation.source_quantity == 3
-    assert obligation.source_issue_version == corrected["version"]
+    assert obligation.is_active is False
+    assert obligation.source_issue_version == voided_response.json()["version"]
     db.expire_all()
     unchanged = db.get(Inventory, inventory.id)
     assert (unchanged.source_qty, unchanged.manual_qty, unchanged.is_qty_overridden) == before_inventory
 
 
-def test_void_is_blocked_after_return_downstream_fact_but_correction_remains_available(db):
+def test_projected_return_obligation_does_not_block_safe_full_void(db):
     project = _project(db, project_id="project-site-issue-v2-downstream")
     delivery = _delivery_source(
         db,
@@ -965,29 +966,22 @@ def test_void_is_blocked_after_return_downstream_fact_but_correction_remains_ava
     assert event.downstream_reference.startswith("maintenance-return-obligations:")
     assert event.consumed_at is not None
 
-    rejected = client.post(
+    voided = client.post(
         f"/api/maintenance/site-issues/{draft['issue_id']}/void",
         json={
             "project_id": project.project_id,
             "version": confirmed["version"],
             "idempotency_key": "synthetic-site-issue-void-downstream",
-            "reason": "不得绕过已生成的返还事实",
+            "reason": "仅生成义务但尚未登记返还，可以整单撤回",
         },
     )
-    assert rejected.status_code == 409, rejected.text
-
-    corrected = client.patch(
-        f"/api/maintenance/site-issues/{draft['issue_id']}",
-        json={
-            "project_id": project.project_id,
-            "version": confirmed["version"],
-            "idempotency_key": "synthetic-site-issue-correct-downstream",
-            "lines": [{"delivery_line_id": delivery.delivery_line_id, "quantity": "2"}],
-            "reason": "通过更正通知下游",
-        },
-    )
-    assert corrected.status_code == 200, corrected.text
-    assert corrected.json()["workflow_status"] == "corrected"
+    assert voided.status_code == 200, voided.text
+    assert voided.json()["workflow_status"] == "void"
+    db.expire_all()
+    obligation = db.query(MaintenanceReturnObligation).filter_by(
+        issue_id=draft["issue_id"]
+    ).one()
+    assert obligation.is_active is False
 
 
 def test_concurrent_confirmations_never_overdraw_one_delivery_balance(db):

@@ -1589,6 +1589,23 @@ def void_site_issue(
     if issue.normalized_status not in {"draft", "confirmed", "corrected"}:
         raise MaintenanceOperationConflict("当前现场领用状态不能作废")
 
+    was_confirmed = issue.normalized_status in {"confirmed", "corrected"}
+    if was_confirmed:
+        # A confirmed issue may have an outbox event that has not yet been
+        # projected. Drain every earlier event for the stable project before
+        # creating the void event so a delayed projector can never resurrect
+        # the withdrawn obligation.
+        try:
+            maintenance_bad_returns.consume_pending_return_events(
+                db,
+                project_id=project_id,
+            )
+        except (
+            maintenance_bad_returns.BadReturnConflict,
+            maintenance_bad_returns.BadReturnError,
+        ) as exc:
+            raise MaintenanceOperationConflict(str(exc)) from exc
+
     return_events = list(
         db.scalars(
             select(MaintenanceSiteIssueReturnEvent)
@@ -1597,14 +1614,19 @@ def void_site_issue(
             .with_for_update()
         )
     )
-    if any(event.downstream_reference for event in return_events):
+    if any(
+        event.downstream_reference
+        and not event.downstream_reference.startswith(
+            "maintenance-return-obligations:"
+        )
+        for event in return_events
+    ):
         raise MaintenanceOperationConflict(
-            "返还义务已生成下游事实，不能直接作废，请走带原因的更正"
+            "返还事件已被未知下游消费，不能直接作废"
         )
 
     lines = _site_issue_lines(db, issue_id=issue_id, lock=True)
     before = site_issue_dict(issue, lines)
-    was_confirmed = issue.normalized_status in {"confirmed", "corrected"}
     issue.raw_status = "void"
     issue.status_mapping_state = "mapped"
     issue.normalized_status = "void"

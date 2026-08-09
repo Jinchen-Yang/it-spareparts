@@ -136,7 +136,7 @@ describe("MaintenanceProjectsPage", () => {
     expect(within(returnStatus).getByText("应返 5.000")).toBeInTheDocument();
     expect(within(returnStatus).getByText("已登记 2.000")).toBeInTheDocument();
     expect(within(returnStatus).getByText("仓库确认 1.000")).toBeInTheDocument();
-    expect(within(returnStatus).getByText("待返 4.000")).toBeInTheDocument();
+    expect(within(returnStatus).getByText("待仓库确认 4.000")).toBeInTheDocument();
     expect(within(returnStatus).getByText("硬盘免返 1.000")).toBeInTheDocument();
     expect(within(returnStatus).getByText("品类待判定 2.000")).toBeInTheDocument();
     expect(returnStatus).not.toHaveTextContent("%");

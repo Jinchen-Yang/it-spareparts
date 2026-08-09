@@ -24,6 +24,7 @@ import {
   searchMaintenanceBadReturns,
   searchMaintenanceReturnObligations,
   submitMaintenanceBadReturn,
+  voidMaintenanceBadReturn,
   type MaintenanceBadReturn,
   type MaintenanceReturnObligation,
   type MaintenanceReturnRate,
@@ -49,6 +50,7 @@ const returnStatusLabel: Record<string, { label: string; color?: string }> = {
   submitted: { label: "已登记", color: "gold" },
   in_transit: { label: "在途", color: "purple" },
   warehouse_confirmed: { label: "仓库已确认", color: "green" },
+  void: { label: "已作废", color: "default" },
 };
 
 export default function BadReturnPanel({
@@ -79,6 +81,7 @@ export default function BadReturnPanel({
   const factsGeneration = useRef(0);
   const activeProject = useRef(projectId);
   const [draftOpen, setDraftOpen] = useState(false);
+  const [replacementFor, setReplacementFor] = useState<MaintenanceBadReturn | null>(null);
   const [selected, setSelected] = useState<Record<string, number>>({});
   const [draftNote, setDraftNote] = useState("");
   const [draftReason, setDraftReason] = useState("");
@@ -99,6 +102,15 @@ export default function BadReturnPanel({
   const [warehouseReason, setWarehouseReason] = useState("");
   const [warehouseError, setWarehouseError] = useState<string | null>(null);
   const [warehouseSaving, setWarehouseSaving] = useState(false);
+  const [voidTarget, setVoidTarget] = useState<MaintenanceBadReturn | null>(null);
+  const [voidReason, setVoidReason] = useState("");
+  const [voidError, setVoidError] = useState<string | null>(null);
+  const [voidSaving, setVoidSaving] = useState(false);
+  const draftCommandKey = useRef<string | null>(null);
+  const submitCommandKey = useRef<string | null>(null);
+  const transitCommandKey = useRef<string | null>(null);
+  const warehouseCommandKey = useRef<string | null>(null);
+  const voidCommandKey = useRef<string | null>(null);
 
   activeProject.current = projectId;
 
@@ -176,9 +188,31 @@ export default function BadReturnPanel({
     setReturns([]);
     setLoadedRate(null);
     setDraftOpen(false);
+    setReplacementFor(null);
+    setDraftReason("");
+    setDraftError(null);
+    setDraftSaving(false);
     setSubmitTarget(null);
+    setSubmitReason("");
+    setSubmitError(null);
+    setSubmitSaving(false);
     setTransitTarget(null);
+    setTransitReason("");
+    setTransitError(null);
+    setTransitSaving(false);
     setWarehouseTarget(null);
+    setWarehouseReason("");
+    setWarehouseError(null);
+    setWarehouseSaving(false);
+    setVoidTarget(null);
+    setVoidReason("");
+    setVoidError(null);
+    setVoidSaving(false);
+    draftCommandKey.current = null;
+    submitCommandKey.current = null;
+    transitCommandKey.current = null;
+    warehouseCommandKey.current = null;
+    voidCommandKey.current = null;
     setSelected({});
     setObligationPage(1);
     setObligationPageSize(50);
@@ -207,12 +241,33 @@ export default function BadReturnPanel({
     && Number(row.remaining_quantity) > 0
   ));
 
-  const openDraft = () => {
-    setSelected({});
-    setDraftNote("");
+  const openDraft = (source: MaintenanceBadReturn | null = null) => {
+    const sourceSelection = source == null ? {} : Object.fromEntries(
+      source.lines.flatMap((line) => {
+        const obligation = eligibleObligations.find(
+          (row) => row.obligation_id === line.obligation_id,
+        );
+        if (!obligation) return [];
+        const maximum = Number(obligation.remaining_quantity);
+        return maximum > 0
+          ? [[line.obligation_id, Math.min(Number(line.quantity), maximum)]]
+          : [];
+      }),
+    );
+    setSelected(sourceSelection);
+    setDraftNote(source == null ? "" : `替代已作废返还单 ${source.return_no}`);
     setDraftReason("");
     setDraftError(null);
+    setReplacementFor(source);
+    draftCommandKey.current = commandKey("bad-return-draft");
     setDraftOpen(true);
+  };
+
+  const closeDraft = () => {
+    if (draftSaving) return;
+    setDraftOpen(false);
+    setReplacementFor(null);
+    draftCommandKey.current = null;
   };
 
   const saveDraft = async () => {
@@ -220,7 +275,8 @@ export default function BadReturnPanel({
       .filter(([, value]) => Number.isFinite(value) && value > 0)
       .map(([obligation_id, value]) => ({ obligation_id, quantity: value }));
     const cleanReason = draftReason.trim();
-    if (lines.length === 0 || !cleanReason) {
+    const idempotencyKey = draftCommandKey.current;
+    if (lines.length === 0 || !cleanReason || !idempotencyKey) {
       setDraftError("请至少选择一条正数量应返义务，并填写建立草稿原因");
       return;
     }
@@ -230,7 +286,8 @@ export default function BadReturnPanel({
     try {
       const { data } = await createMaintenanceBadReturnDraft({
         project_id: requestedProject,
-        idempotency_key: commandKey("bad-return-draft"),
+        idempotency_key: idempotencyKey,
+        ...(replacementFor ? { replaces_return_id: replacementFor.return_id } : {}),
         lines,
         ...(draftNote.trim() ? { note: draftNote.trim() } : {}),
         reason: cleanReason,
@@ -242,6 +299,8 @@ export default function BadReturnPanel({
       ]);
       setReturnTotal((current) => current + 1);
       setDraftOpen(false);
+      setReplacementFor(null);
+      draftCommandKey.current = null;
       message.success("坏件返还草稿已保存");
       onChanged();
     } catch {
@@ -257,11 +316,13 @@ export default function BadReturnPanel({
     setSubmitTarget(item);
     setSubmitReason("");
     setSubmitError(null);
+    submitCommandKey.current = commandKey("bad-return-submit");
   };
 
   const submitReturn = async () => {
     const cleanReason = submitReason.trim();
-    if (!submitTarget || !cleanReason) return;
+    const idempotencyKey = submitCommandKey.current;
+    if (!submitTarget || !cleanReason || !idempotencyKey) return;
     const requestedProject = projectId;
     setSubmitSaving(true);
     setSubmitError(null);
@@ -269,7 +330,7 @@ export default function BadReturnPanel({
       const { data } = await submitMaintenanceBadReturn(submitTarget.return_id, {
         project_id: requestedProject,
         version: submitTarget.version,
-        idempotency_key: commandKey("bad-return-submit"),
+        idempotency_key: idempotencyKey,
         reason: cleanReason,
       });
       if (activeProject.current !== requestedProject) return;
@@ -277,6 +338,7 @@ export default function BadReturnPanel({
         item.return_id === data.return_id ? data : item
       )));
       setSubmitTarget(null);
+      submitCommandKey.current = null;
       message.success("坏件返还已提交登记");
       void refreshObligationFacts();
       onChanged();
@@ -294,12 +356,14 @@ export default function BadReturnPanel({
     setLogisticsReference("");
     setTransitReason("");
     setTransitError(null);
+    transitCommandKey.current = commandKey("bad-return-transit");
   };
 
   const markInTransit = async () => {
     const cleanReference = logisticsReference.trim();
     const cleanReason = transitReason.trim();
-    if (!transitTarget || !cleanReference || !cleanReason) return;
+    const idempotencyKey = transitCommandKey.current;
+    if (!transitTarget || !cleanReference || !cleanReason || !idempotencyKey) return;
     const requestedProject = projectId;
     setTransitSaving(true);
     setTransitError(null);
@@ -307,7 +371,7 @@ export default function BadReturnPanel({
       const { data } = await markMaintenanceBadReturnInTransit(transitTarget.return_id, {
         project_id: requestedProject,
         version: transitTarget.version,
-        idempotency_key: commandKey("bad-return-transit"),
+        idempotency_key: idempotencyKey,
         logistics_reference: cleanReference,
         reason: cleanReason,
       });
@@ -316,6 +380,7 @@ export default function BadReturnPanel({
         item.return_id === data.return_id ? data : item
       )));
       setTransitTarget(null);
+      transitCommandKey.current = null;
       message.success("坏件返还已标记在途");
       onChanged();
     } catch {
@@ -333,13 +398,15 @@ export default function BadReturnPanel({
     setInboundReference("");
     setWarehouseReason("");
     setWarehouseError(null);
+    warehouseCommandKey.current = commandKey("bad-return-warehouse-confirm");
   };
 
   const confirmWarehouse = async () => {
     const cleanWarehouseReference = warehouseReference.trim();
     const cleanInboundReference = inboundReference.trim();
     const cleanReason = warehouseReason.trim();
-    if (!warehouseTarget || !cleanWarehouseReference || !cleanReason) return;
+    const idempotencyKey = warehouseCommandKey.current;
+    if (!warehouseTarget || !cleanWarehouseReference || !cleanReason || !idempotencyKey) return;
     const requestedProject = projectId;
     setWarehouseSaving(true);
     setWarehouseError(null);
@@ -349,7 +416,7 @@ export default function BadReturnPanel({
         {
           project_id: requestedProject,
           version: warehouseTarget.version,
-          idempotency_key: commandKey("bad-return-warehouse-confirm"),
+          idempotency_key: idempotencyKey,
           warehouse_reference: cleanWarehouseReference,
           ...(cleanInboundReference ? { inbound_reference: cleanInboundReference } : {}),
           reason: cleanReason,
@@ -360,6 +427,7 @@ export default function BadReturnPanel({
         item.return_id === data.return_id ? data : item
       )));
       setWarehouseTarget(null);
+      warehouseCommandKey.current = null;
       message.success("仓库已确认坏件返还");
       void refreshObligationFacts();
       onChanged();
@@ -369,6 +437,46 @@ export default function BadReturnPanel({
       }
     } finally {
       if (activeProject.current === requestedProject) setWarehouseSaving(false);
+    }
+  };
+
+  const openVoid = (item: MaintenanceBadReturn) => {
+    setVoidTarget(item);
+    setVoidReason("");
+    setVoidError(null);
+    voidCommandKey.current = commandKey("bad-return-void");
+  };
+
+  const voidReturn = async () => {
+    const cleanReason = voidReason.trim();
+    const idempotencyKey = voidCommandKey.current;
+    if (!voidTarget || !cleanReason || !idempotencyKey) return;
+    const requestedProject = projectId;
+    setVoidSaving(true);
+    setVoidError(null);
+    try {
+      const { data } = await voidMaintenanceBadReturn(voidTarget.return_id, {
+        project_id: requestedProject,
+        version: voidTarget.version,
+        idempotency_key: idempotencyKey,
+        reason: cleanReason,
+      });
+      if (activeProject.current !== requestedProject) return;
+      setReturns((current) => current.map((item) => (
+        item.return_id === data.return_id ? data : item
+      )));
+      await refreshObligationFacts();
+      if (activeProject.current !== requestedProject) return;
+      setVoidTarget(null);
+      voidCommandKey.current = null;
+      message.success("坏件返还单已追加式作废");
+      onChanged();
+    } catch {
+      if (activeProject.current === requestedProject) {
+        setVoidError("作废失败；如已关联正式入库或版本已变化，请刷新后核对");
+      }
+    } finally {
+      if (activeProject.current === requestedProject) setVoidSaving(false);
     }
   };
 
@@ -440,7 +548,11 @@ export default function BadReturnPanel({
       data-testid="bad-return-panel"
       title="坏件返还"
       extra={canManage ? (
-        <Button type="primary" disabled={eligibleObligations.length === 0} onClick={openDraft}>
+        <Button
+          type="primary"
+          disabled={eligibleObligations.length === 0}
+          onClick={() => openDraft()}
+        >
           新建坏件返还单
         </Button>
       ) : null}
@@ -458,7 +570,9 @@ export default function BadReturnPanel({
               <Text data-testid="return-required">应返<strong>{quantity(rate.required_quantity)}</strong></Text>
               <Text data-testid="return-registered">已登记<strong>{quantity(rate.registered_quantity)}</strong></Text>
               <Text data-testid="return-confirmed">仓库确认<strong>{quantity(rate.warehouse_confirmed_quantity)}</strong></Text>
-              <Text data-testid="return-outstanding">待返<strong>{quantity(rate.outstanding_quantity)}</strong></Text>
+              <Text data-testid="return-outstanding">
+                待仓库确认<strong>{quantity(rate.outstanding_quantity)}</strong>
+              </Text>
               <Text data-testid="return-exempt">硬盘免返<strong>{quantity(rate.exempt_quantity)}</strong></Text>
               <Text data-testid="return-pending">品类待判定<strong>{quantity(rate.pending_quantity)}</strong></Text>
             </div>
@@ -508,7 +622,8 @@ export default function BadReturnPanel({
                   </Space>
                   <Text type="secondary">
                     应返 {row.required_quantity} · 已登记 {row.registered_quantity}
-                    {" · "}仓库确认 {row.warehouse_confirmed_quantity} · 待返 {row.remaining_quantity}
+                    {" · "}仓库确认 {row.warehouse_confirmed_quantity}
+                    {" · "}未登记 {row.remaining_quantity}
                   </Text>
                 </Space>
               </List.Item>
@@ -532,6 +647,11 @@ export default function BadReturnPanel({
               dataSource={returns}
               renderItem={(item) => {
                 const state = returnStatusLabel[item.status] ?? { label: item.status };
+                const replacement = returns.find(
+                  (candidate) => candidate.replaces_return_id === item.return_id,
+                );
+                const canVoid = item.status !== "void"
+                  && (item.status !== "warehouse_confirmed" || item.inbound_reference == null);
                 return (
                   <List.Item key={item.return_id}>
                     <Card size="small" data-testid={`bad-return-card-${item.return_id}`}>
@@ -550,10 +670,21 @@ export default function BadReturnPanel({
                         {item.inbound_reference && (
                           <Text type="secondary">正式入库引用：{item.inbound_reference}</Text>
                         )}
+                        {item.replaces_return_id && (
+                          <Text type="secondary">替代原返还单：{item.replaces_return_id}</Text>
+                        )}
+                        {replacement && (
+                          <Text type="secondary">替代单：{replacement.return_no}</Text>
+                        )}
                         {canManage && item.status === "draft" && (
-                          <Button size="small" type="primary" onClick={() => openSubmit(item)}>
-                            提交返还单
-                          </Button>
+                          <Space wrap>
+                            <Button size="small" type="primary" onClick={() => openSubmit(item)}>
+                              提交返还单
+                            </Button>
+                            <Button size="small" danger onClick={() => openVoid(item)}>
+                              作废返还单
+                            </Button>
+                          </Space>
                         )}
                         {canManage && item.status === "submitted" && (
                           <Space wrap>
@@ -563,11 +694,32 @@ export default function BadReturnPanel({
                             <Button size="small" onClick={() => openWarehouseConfirm(item)}>
                               仓库确认
                             </Button>
+                            <Button size="small" danger onClick={() => openVoid(item)}>
+                              作废返还单
+                            </Button>
                           </Space>
                         )}
                         {canManage && item.status === "in_transit" && (
-                          <Button size="small" type="primary" onClick={() => openWarehouseConfirm(item)}>
-                            仓库确认
+                          <Space wrap>
+                            <Button size="small" type="primary" onClick={() => openWarehouseConfirm(item)}>
+                              仓库确认
+                            </Button>
+                            <Button size="small" danger onClick={() => openVoid(item)}>
+                              作废返还单
+                            </Button>
+                          </Space>
+                        )}
+                        {canManage && item.status === "warehouse_confirmed" && canVoid && (
+                          <Button size="small" danger onClick={() => openVoid(item)}>
+                            作废返还单
+                          </Button>
+                        )}
+                        {item.status === "warehouse_confirmed" && !canVoid && (
+                          <Text type="secondary">已关联正式入库，不可直接作废</Text>
+                        )}
+                        {canManage && item.status === "void" && !replacement && (
+                          <Button size="small" type="primary" onClick={() => openDraft(item)}>
+                            建立替代单
                           </Button>
                         )}
                       </Space>
@@ -590,22 +742,24 @@ export default function BadReturnPanel({
       </Space>
 
       <Modal
-        title="新建坏件返还草稿"
+        title={replacementFor ? "建立替代坏件返还草稿" : "新建坏件返还草稿"}
         open={draftOpen}
         width={760}
         okText="保存草稿"
         cancelText="取消"
         confirmLoading={draftSaving}
         onOk={() => void saveDraft()}
-        onCancel={() => setDraftOpen(false)}
+        onCancel={closeDraft}
         destroyOnHidden
       >
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Alert
             type="info"
             showIcon
-            message="仅可选择明确应返且仍有余额的义务"
-            description="系统生成返还单号和行号；这里不填写真实 SN，也不会因登记直接增加库存或冲减成本。"
+            message={replacementFor
+              ? `替代已作废返还单 ${replacementFor.return_no}`
+              : "仅可选择明确应返且仍有余额的义务"}
+            description="系统生成返还单号和行号；替代关系会保留审计，登记不会直接增加库存或冲减成本。"
           />
           {draftError && <Alert type="error" showIcon message={draftError} />}
           {eligibleObligations.map((row) => {
@@ -626,7 +780,7 @@ export default function BadReturnPanel({
                   >
                     <Text strong>{row.pn}</Text>
                   </Checkbox>
-                  <Text type="secondary">来源 {row.issue_no} · 待返 {row.remaining_quantity}</Text>
+                  <Text type="secondary">来源 {row.issue_no} · 未登记 {row.remaining_quantity}</Text>
                   {checked && (
                     <label>
                       返还数量
@@ -679,7 +833,10 @@ export default function BadReturnPanel({
         okButtonProps={{ disabled: !submitReason.trim() }}
         onOk={() => void submitReturn()}
         onCancel={() => {
-          if (!submitSaving) setSubmitTarget(null);
+          if (!submitSaving) {
+            setSubmitTarget(null);
+            submitCommandKey.current = null;
+          }
         }}
         destroyOnHidden
       >
@@ -708,7 +865,10 @@ export default function BadReturnPanel({
         okButtonProps={{ disabled: !logisticsReference.trim() || !transitReason.trim() }}
         onOk={() => void markInTransit()}
         onCancel={() => {
-          if (!transitSaving) setTransitTarget(null);
+          if (!transitSaving) {
+            setTransitTarget(null);
+            transitCommandKey.current = null;
+          }
         }}
         destroyOnHidden
       >
@@ -751,7 +911,10 @@ export default function BadReturnPanel({
         okButtonProps={{ disabled: !warehouseReference.trim() || !warehouseReason.trim() }}
         onOk={() => void confirmWarehouse()}
         onCancel={() => {
-          if (!warehouseSaving) setWarehouseTarget(null);
+          if (!warehouseSaving) {
+            setWarehouseTarget(null);
+            warehouseCommandKey.current = null;
+          }
         }}
         destroyOnHidden
       >
@@ -789,6 +952,46 @@ export default function BadReturnPanel({
               maxLength={1000}
               rows={3}
               onChange={(event) => setWarehouseReason(event.target.value)}
+            />
+          </label>
+        </Space>
+      </Modal>
+
+      <Modal
+        title="作废坏件返还单"
+        open={voidTarget != null}
+        okText="确认追加式作废"
+        cancelText="取消"
+        confirmLoading={voidSaving}
+        okButtonProps={{ danger: true, disabled: !voidReason.trim() }}
+        onOk={() => void voidReturn()}
+        onCancel={() => {
+          if (!voidSaving) {
+            setVoidTarget(null);
+            voidCommandKey.current = null;
+          }
+        }}
+        destroyOnHidden
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Alert
+            type="warning"
+            showIcon
+            message="原单和操作审计都会保留"
+            description="作废单不再计入已登记或仓库确认数量；需要更正时，请在作废后建立替代单。"
+          />
+          {voidTarget && (
+            <Text>待作废：{voidTarget.return_no}（{voidTarget.lines.length} 行）</Text>
+          )}
+          {voidError && <Alert type="error" showIcon message={voidError} />}
+          <label>
+            作废原因
+            <Input.TextArea
+              aria-label="作废原因"
+              value={voidReason}
+              maxLength={1000}
+              rows={3}
+              onChange={(event) => setVoidReason(event.target.value)}
             />
           </label>
         </Space>

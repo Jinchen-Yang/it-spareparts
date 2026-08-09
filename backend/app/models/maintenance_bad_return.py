@@ -110,6 +110,9 @@ class MaintenanceBadReturn(Base):
 
     return_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     return_no: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+    replaces_return_id: Mapped[str | None] = mapped_column(
+        ForeignKey("maintenance_bad_return.return_id"), unique=True
+    )
     project_id: Mapped[str] = mapped_column(
         ForeignKey("maintenance_project.project_id"), nullable=False
     )
@@ -124,6 +127,7 @@ class MaintenanceBadReturn(Base):
     submitted_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     in_transit_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     warehouse_confirmed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    voided_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
     )
@@ -136,27 +140,47 @@ class MaintenanceBadReturn(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('draft', 'submitted', 'in_transit', 'warehouse_confirmed')",
+            "status IN ('draft', 'submitted', 'in_transit', 'warehouse_confirmed', 'void')",
             name="ck_maintenance_bad_return_status",
         ),
         CheckConstraint(
             "(status = 'draft' AND submitted_at IS NULL AND in_transit_at IS NULL "
             "AND warehouse_confirmed_at IS NULL AND logistics_reference IS NULL "
-            "AND warehouse_reference IS NULL AND inbound_reference IS NULL) OR "
+            "AND warehouse_reference IS NULL AND inbound_reference IS NULL "
+            "AND voided_at IS NULL) OR "
             "(status = 'submitted' AND submitted_at IS NOT NULL "
             "AND in_transit_at IS NULL AND warehouse_confirmed_at IS NULL "
             "AND logistics_reference IS NULL AND warehouse_reference IS NULL "
-            "AND inbound_reference IS NULL) OR "
+            "AND inbound_reference IS NULL AND voided_at IS NULL) OR "
             "(status = 'in_transit' AND submitted_at IS NOT NULL "
             "AND in_transit_at IS NOT NULL AND warehouse_confirmed_at IS NULL "
             "AND logistics_reference IS NOT NULL AND warehouse_reference IS NULL "
-            "AND inbound_reference IS NULL) OR "
+            "AND inbound_reference IS NULL AND voided_at IS NULL) OR "
             "(status = 'warehouse_confirmed' AND submitted_at IS NOT NULL "
             "AND warehouse_confirmed_at IS NOT NULL "
             "AND ((in_transit_at IS NULL AND logistics_reference IS NULL) OR "
             "(in_transit_at IS NOT NULL AND logistics_reference IS NOT NULL)) "
-            "AND warehouse_reference IS NOT NULL)",
+            "AND warehouse_reference IS NOT NULL AND voided_at IS NULL) OR "
+            "(status = 'void' AND voided_at IS NOT NULL "
+            "AND inbound_reference IS NULL AND ("
+            "(submitted_at IS NULL AND in_transit_at IS NULL "
+            "AND warehouse_confirmed_at IS NULL AND logistics_reference IS NULL "
+            "AND warehouse_reference IS NULL) OR "
+            "(submitted_at IS NOT NULL AND in_transit_at IS NULL "
+            "AND warehouse_confirmed_at IS NULL AND logistics_reference IS NULL "
+            "AND warehouse_reference IS NULL) OR "
+            "(submitted_at IS NOT NULL AND in_transit_at IS NOT NULL "
+            "AND warehouse_confirmed_at IS NULL AND logistics_reference IS NOT NULL "
+            "AND warehouse_reference IS NULL) OR "
+            "(submitted_at IS NOT NULL AND warehouse_confirmed_at IS NOT NULL "
+            "AND warehouse_reference IS NOT NULL "
+            "AND ((in_transit_at IS NULL AND logistics_reference IS NULL) OR "
+            "(in_transit_at IS NOT NULL AND logistics_reference IS NOT NULL)))))",
             name="ck_maintenance_bad_return_state_evidence",
+        ),
+        CheckConstraint(
+            "replaces_return_id IS NULL OR replaces_return_id <> return_id",
+            name="ck_maintenance_bad_return_replacement_not_self",
         ),
         CheckConstraint("version >= 1", name="ck_maintenance_bad_return_version"),
         Index(
@@ -246,7 +270,7 @@ class MaintenanceBadReturnCommand(Base):
         ),
         CheckConstraint(
             "action IN ('create', 'submit', 'in_transit', "
-            "'warehouse_confirm', 'resolve_category')",
+            "'warehouse_confirm', 'void', 'resolve_category')",
             name="ck_maintenance_bad_return_command_action",
         ),
         Index(

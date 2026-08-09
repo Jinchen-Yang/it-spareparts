@@ -35,6 +35,7 @@ import {
   markMaintenanceBadReturnInTransit,
   updateMaintenanceCostGap,
   validateMaintenanceProjectWorkbook,
+  voidMaintenanceBadReturn,
   voidSiteIssue,
 } from "../maintenanceOperations";
 
@@ -161,6 +162,7 @@ describe("maintenance operations API", () => {
     createMaintenanceBadReturnDraft({
       project_id: "project/1",
       idempotency_key: "return-draft-1",
+      replaces_return_id: "return/original",
       lines: [{ obligation_id: "obligation/1", quantity: 2 }],
       note: "现场集中返件",
       reason: "建立返还草稿",
@@ -185,6 +187,12 @@ describe("maintenance operations API", () => {
       warehouse_reference: "仓库确认-1",
       inbound_reference: "RKD-001",
       reason: "仓库已验收",
+    });
+    voidMaintenanceBadReturn("return/1", {
+      project_id: "project/1",
+      version: 4,
+      idempotency_key: "return-void-1",
+      reason: "追加式作废错误返还单",
     });
     resolveMaintenanceReturnObligationCategory("obligation/1", {
       project_id: "project/1",
@@ -219,7 +227,10 @@ describe("maintenance operations API", () => {
     expect(post).toHaveBeenNthCalledWith(
       3,
       "/maintenance/bad-returns",
-      expect.objectContaining({ idempotency_key: "return-draft-1" }),
+      expect.objectContaining({
+        idempotency_key: "return-draft-1",
+        replaces_return_id: "return/original",
+      }),
     );
     expect(post).toHaveBeenNthCalledWith(
       4,
@@ -238,6 +249,11 @@ describe("maintenance operations API", () => {
     );
     expect(post).toHaveBeenNthCalledWith(
       7,
+      "/maintenance/bad-returns/return%2F1/void",
+      expect.objectContaining({ version: 4, idempotency_key: "return-void-1" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      8,
       "/maintenance/return-obligations/obligation%2F1/resolve-category",
       expect.not.objectContaining({ exempt: expect.anything() }),
     );

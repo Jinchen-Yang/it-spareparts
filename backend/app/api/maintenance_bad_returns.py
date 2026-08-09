@@ -31,6 +31,7 @@ BadReturnStatus = Literal[
     "submitted",
     "in_transit",
     "warehouse_confirmed",
+    "void",
 ]
 
 
@@ -61,6 +62,7 @@ class BadReturnCreate(BaseModel):
 
     project_id: str = Field(min_length=1, max_length=36)
     idempotency_key: str = Field(min_length=8, max_length=128)
+    replaces_return_id: str | None = Field(default=None, min_length=1, max_length=36)
     lines: list[BadReturnLineCreate] = Field(min_length=1, max_length=200)
     note: str | None = Field(default=None, max_length=32767)
     reason: str = Field(min_length=1, max_length=1000)
@@ -76,9 +78,10 @@ class BadReturnSearch(BaseModel):
             "submitted",
             "in_transit",
             "warehouse_confirmed",
+            "void",
         ],
         min_length=1,
-        max_length=4,
+        max_length=5,
     )
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1, le=100)
@@ -146,7 +149,6 @@ def search_return_obligations(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     try:
-        returns.consume_pending_return_events(db, project_id=body.project_id)
         payload = returns.search_return_obligations(
             db,
             **body.model_dump(),
@@ -187,7 +189,6 @@ def get_project_return_rate(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     try:
-        returns.consume_pending_return_events(db, project_id=project_id)
         payload = returns.project_return_rate(db, project_id=project_id)
         if payload is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
@@ -244,7 +245,6 @@ def create_bad_return(
 ) -> dict:
     operator = _real_operator(db, ident)
     try:
-        returns.consume_pending_return_events(db, project_id=body.project_id)
         payload = returns.create_bad_return(
             db,
             **body.model_dump(),
@@ -365,6 +365,24 @@ def warehouse_confirm_bad_return(
         ident=ident,
         warehouse_reference=body.warehouse_reference,
         inbound_reference=body.inbound_reference,
+    )
+
+
+@router.post("/bad-returns/{return_id}/void")
+def void_bad_return(
+    body: BadReturnCommand,
+    return_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
+) -> dict:
+    return _transition(
+        return_id=return_id,
+        body=body,
+        action="void",
+        db=db,
+        ident=ident,
     )
 
 

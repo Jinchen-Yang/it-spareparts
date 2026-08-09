@@ -8,6 +8,7 @@ const api = vi.hoisted(() => ({
   submitMaintenanceBadReturn: vi.fn(),
   markMaintenanceBadReturnInTransit: vi.fn(),
   confirmMaintenanceBadReturnWarehouse: vi.fn(),
+  voidMaintenanceBadReturn: vi.fn(),
 }));
 
 vi.mock("../../../api/maintenanceOperations", async () => {
@@ -112,17 +113,24 @@ const obligations = [{
 const badReturnDraft = {
   return_id: "return-1",
   return_no: "HJFH-20260809-001",
+  replaces_return_id: null,
   project_id: "project-1",
   status: "draft" as const,
   logistics_reference: null,
   warehouse_reference: null,
   inbound_reference: null,
   note: "现场集中返件",
+  created_by: "synthetic-user",
+  submitted_at: null,
+  in_transit_at: null,
+  warehouse_confirmed_at: null,
+  voided_at: null,
   version: 1,
   lines: [{
     return_line_id: "return-line-1",
     line_no: 1,
     obligation_id: "obligation-required",
+    part_id: 1,
     pn: "PN-REQUIRED",
     quantity: "2.000",
   }],
@@ -136,6 +144,12 @@ const badReturnInTransit = {
   status: "in_transit" as const,
   version: 3,
   logistics_reference: "LOG-REF-001",
+};
+const badReturnVoided = {
+  ...badReturnSubmitted,
+  status: "void" as const,
+  version: 3,
+  voided_at: "2026-08-09T10:00:00Z",
 };
 
 beforeEach(() => {
@@ -162,6 +176,7 @@ beforeEach(() => {
       inbound_reference: "RKD-001",
     },
   });
+  api.voidMaintenanceBadReturn.mockResolvedValue({ data: badReturnVoided });
 });
 
 afterEach(cleanup);
@@ -181,13 +196,14 @@ describe("BadReturnPanel", () => {
     expect(within(panel).getByTestId("return-required")).toHaveTextContent("应返5.000");
     expect(within(panel).getByTestId("return-registered")).toHaveTextContent("已登记2.000");
     expect(within(panel).getByTestId("return-confirmed")).toHaveTextContent("仓库确认1.000");
-    expect(within(panel).getByTestId("return-outstanding")).toHaveTextContent("待返4.000");
+    expect(within(panel).getByTestId("return-outstanding")).toHaveTextContent("待仓库确认4.000");
     expect(within(panel).getByTestId("return-exempt")).toHaveTextContent("硬盘免返1.000");
     expect(within(panel).getByTestId("return-pending")).toHaveTextContent("品类待判定2.000");
     expect(within(panel).getByText("返还率暂不可判定")).toBeInTheDocument();
     expect(panel).not.toHaveTextContent("%");
     expect(within(panel).getAllByText("硬盘免返")).toHaveLength(2);
     expect(within(panel).getAllByText("品类待判定")).toHaveLength(2);
+    expect(panel).toHaveTextContent("未登记 4.000");
     expect(within(panel).queryByRole("button", { name: "新建坏件返还单" })).toBeNull();
     expect(api.searchMaintenanceReturnObligations).toHaveBeenCalledWith({
       project_id: "project-1",
@@ -258,7 +274,9 @@ describe("BadReturnPanel", () => {
     );
 
     const panel = await screen.findByTestId("bad-return-panel");
-    fireEvent.click(within(panel).getByRole("button", { name: "新建坏件返还单" }));
+    const createButton = within(panel).getByRole("button", { name: "新建坏件返还单" });
+    await waitFor(() => expect(createButton).toBeEnabled());
+    fireEvent.click(createButton);
     const dialog = await screen.findByRole("dialog", { name: "新建坏件返还草稿" });
     expect(within(dialog).getByText("PN-REQUIRED")).toBeInTheDocument();
     expect(within(dialog).queryByText("PN-DISK")).toBeNull();
@@ -428,7 +446,113 @@ describe("BadReturnPanel", () => {
     expect(await within(card).findByText("仓库已确认")).toBeInTheDocument();
     expect(within(card).getByText("仓库参考：WH-CHECK-001")).toBeInTheDocument();
     expect(within(card).getByText("正式入库引用：RKD-001")).toBeInTheDocument();
+    expect(within(card).getByText("已关联正式入库，不可直接作废")).toBeInTheDocument();
+    expect(within(card).queryByRole("button", { name: "作废返还单" })).toBeNull();
     expect(onChanged).toHaveBeenCalled();
+  });
+
+  it("返还单追加式作废后可从原明细建立带关联的替代单", async () => {
+    api.searchMaintenanceBadReturns.mockResolvedValueOnce({
+      data: {
+        project_id: "project-1",
+        rows: [badReturnSubmitted],
+        total: 1,
+        page: 1,
+        page_size: 20,
+      },
+    });
+    api.createMaintenanceBadReturnDraft.mockResolvedValueOnce({
+      data: {
+        ...badReturnDraft,
+        return_id: "return-2",
+        return_no: "HJFH-20260809-002",
+        replaces_return_id: "return-1",
+      },
+    });
+
+    render(
+      <BadReturnPanel
+        projectId="project-1"
+        returnRate={returnRate}
+        canManage
+        onChanged={vi.fn()}
+      />,
+    );
+
+    const card = await screen.findByTestId("bad-return-card-return-1");
+    fireEvent.click(within(card).getByRole("button", { name: "作废返还单" }));
+    const voidDialog = await screen.findByRole("dialog", { name: "作废坏件返还单" });
+    fireEvent.change(within(voidDialog).getByLabelText("作废原因"), {
+      target: { value: "返还数量登记错误" },
+    });
+    fireEvent.click(within(voidDialog).getByRole("button", { name: "确认追加式作废" }));
+    await waitFor(() => expect(api.voidMaintenanceBadReturn).toHaveBeenCalledWith(
+      "return-1",
+      expect.objectContaining({
+        project_id: "project-1",
+        version: 2,
+        reason: "返还数量登记错误",
+      }),
+    ));
+    expect(await within(card).findByText("已作废")).toBeInTheDocument();
+
+    fireEvent.click(within(card).getByRole("button", { name: "建立替代单" }));
+    const replacementDialog = await screen.findByRole("dialog", {
+      name: "建立替代坏件返还草稿",
+    });
+    expect(within(replacementDialog).getByRole("checkbox", { name: "PN-REQUIRED" }))
+      .toBeChecked();
+    fireEvent.change(within(replacementDialog).getByLabelText("建立草稿原因"), {
+      target: { value: "按正确业务事实重建" },
+    });
+    fireEvent.click(within(replacementDialog).getByRole("button", { name: "保存草稿" }));
+    await waitFor(() => expect(api.createMaintenanceBadReturnDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        project_id: "project-1",
+        replaces_return_id: "return-1",
+        lines: [{ obligation_id: "obligation-required", quantity: 2 }],
+        reason: "按正确业务事实重建",
+      }),
+    ));
+  });
+
+  it("同一次提交失败后重试复用打开弹窗时生成的幂等键", async () => {
+    api.searchMaintenanceBadReturns.mockResolvedValueOnce({
+      data: {
+        project_id: "project-1",
+        rows: [badReturnDraft],
+        total: 1,
+        page: 1,
+        page_size: 20,
+      },
+    });
+    api.submitMaintenanceBadReturn
+      .mockRejectedValueOnce(new Error("synthetic network timeout"))
+      .mockResolvedValueOnce({ data: badReturnSubmitted });
+
+    render(
+      <BadReturnPanel
+        projectId="project-1"
+        returnRate={returnRate}
+        canManage
+        onChanged={vi.fn()}
+      />,
+    );
+
+    const card = await screen.findByTestId("bad-return-card-return-1");
+    fireEvent.click(within(card).getByRole("button", { name: "提交返还单" }));
+    const dialog = await screen.findByRole("dialog", { name: "提交坏件返还单" });
+    fireEvent.change(within(dialog).getByLabelText("操作原因"), {
+      target: { value: "确认数量无误" },
+    });
+    const submitButton = within(dialog).getByRole("button", { name: "确认提交" });
+    fireEvent.click(submitButton);
+    expect(await within(dialog).findByText(/提交失败/)).toBeInTheDocument();
+    const firstKey = api.submitMaintenanceBadReturn.mock.calls[0][1].idempotency_key;
+
+    fireEvent.click(submitButton);
+    await waitFor(() => expect(api.submitMaintenanceBadReturn).toHaveBeenCalledTimes(2));
+    expect(api.submitMaintenanceBadReturn.mock.calls[1][1].idempotency_key).toBe(firstKey);
   });
 
   it("加载失败后给出通用错误和可用重试，不泄露服务端详情", async () => {

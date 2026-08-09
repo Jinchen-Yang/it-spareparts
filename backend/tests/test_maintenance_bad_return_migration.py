@@ -1,10 +1,12 @@
 """Migration safety invariants for bad-part return obligations."""
 
 import os
+from datetime import UTC, datetime
 
 import pytest
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from app import permissions
@@ -13,6 +15,7 @@ from app.models.maintenance_project import MaintenanceProject
 
 
 _PREV = "f4b8d2e6a1c3"
+_BAD_RETURN_BASE = "a8d3c7e5f1b2"
 
 
 def _alembic_cfg() -> AlembicConfig:
@@ -55,7 +58,58 @@ def test_bad_return_business_history_blocks_destructive_downgrade(db):
     )
     db.commit()
 
+    with pytest.raises(
+        DBAPIError,
+        match="ck_maintenance_bad_return_state_evidence",
+    ):
+        with db.begin_nested():
+            db.execute(
+                text(
+                    "UPDATE maintenance_bad_return SET status = 'void' "
+                    "WHERE return_id = 'bad-return-migration-document'"
+                )
+            )
+    with pytest.raises(
+        DBAPIError,
+        match="ck_maintenance_bad_return_replacement_not_self",
+    ):
+        with db.begin_nested():
+            db.execute(
+                text(
+                    "UPDATE maintenance_bad_return "
+                    "SET replaces_return_id = return_id "
+                    "WHERE return_id = 'bad-return-migration-document'"
+                )
+            )
+
     with pytest.raises(DBAPIError, match="downgrade blocked"):
         alembic_command.downgrade(_alembic_cfg(), _PREV)
+
+    db.rollback()
+
+
+def test_void_history_blocks_void_workflow_downgrade(db):
+    project = MaintenanceProject(
+        project_id="bad-return-void-migration-project",
+        project_code="SYNTH-BAD-RETURN-VOID-MIGRATION",
+        display_name="合成坏件返还作废迁移保护项目",
+        lifecycle_status="ongoing",
+    )
+    db.add(project)
+    db.flush()
+    db.add(
+        MaintenanceBadReturn(
+            return_id="bad-return-void-migration-doc",
+            return_no="BHR-SYNTH-VOID-MIGRATION",
+            project_id=project.project_id,
+            status="void",
+            created_by="synthetic-migration-test",
+            voided_at=datetime.now(UTC),
+        )
+    )
+    db.commit()
+
+    with pytest.raises(DBAPIError, match="b6e2d9f4a1c7 downgrade blocked"):
+        alembic_command.downgrade(_alembic_cfg(), _BAD_RETURN_BASE)
 
     db.rollback()

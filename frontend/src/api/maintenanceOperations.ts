@@ -363,7 +363,8 @@ export type MaintenanceBadReturnStatus =
   | "draft"
   | "submitted"
   | "in_transit"
-  | "warehouse_confirmed";
+  | "warehouse_confirmed"
+  | "void";
 
 export interface MaintenanceBadReturnLine {
   return_line_id: string;
@@ -377,6 +378,7 @@ export interface MaintenanceBadReturnLine {
 export interface MaintenanceBadReturn {
   return_id: string;
   return_no: string;
+  replaces_return_id: string | null;
   project_id: string;
   status: MaintenanceBadReturnStatus;
   logistics_reference: string | null;
@@ -387,6 +389,7 @@ export interface MaintenanceBadReturn {
   submitted_at: string | null;
   in_transit_at: string | null;
   warehouse_confirmed_at: string | null;
+  voided_at: string | null;
   version: number;
   lines: MaintenanceBadReturnLine[];
   inventory_effect: "none";
@@ -941,6 +944,7 @@ export const searchMaintenanceBadReturns = (input: {
 export const createMaintenanceBadReturnDraft = (input: {
   project_id: string;
   idempotency_key: string;
+  replaces_return_id?: string;
   lines: { obligation_id: string; quantity: number }[];
   note?: string;
   reason: string;
@@ -966,6 +970,11 @@ export const confirmMaintenanceBadReturnWarehouse = (
     inbound_reference?: string;
   },
 ) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/warehouse-confirm`, input);
+
+export const voidMaintenanceBadReturn = (
+  returnId: string,
+  input: MaintenanceBadReturnCommandInput,
+) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/void`, input);
 
 export const resolveMaintenanceReturnObligationCategory = (
   obligationId: string,

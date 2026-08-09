@@ -1014,7 +1014,9 @@ def stable_project_workspace(
         expense_page_size=expense_page_size,
     )
     if payload is None:
+        db.rollback()
         raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
+    db.commit()
     record_access_log(
         ctx,
         "stable_project_workspace",
@@ -1087,15 +1089,21 @@ def _stable_project_operations_response(
             page_size=page_size,
         )
     except operations.MaintenanceOperationPermissionError as exc:
+        db.rollback()
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
             "当前账号无权使用该提醒筛选",
         ) from exc
     except operations.MaintenanceOperationError as exc:
+        db.rollback()
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             str(exc),
         ) from exc
+    except Exception:
+        db.rollback()
+        raise
+    db.commit()
     record_access_log(
         ctx,
         "stable_project_operations",
