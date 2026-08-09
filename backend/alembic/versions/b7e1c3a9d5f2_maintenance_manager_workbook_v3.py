@@ -141,7 +141,7 @@ def upgrade() -> None:
         sa.Column("project_contract_id", sa.String(36), nullable=False),
         sa.Column("sequence", sa.Integer(), nullable=False),
         sa.Column("planned_date", sa.Date(), nullable=True),
-        sa.Column("planned_amount", sa.Numeric(20, 4), nullable=True),
+        sa.Column("planned_amount", sa.Numeric(14, 2), nullable=True),
         sa.Column("completeness_state", sa.String(16), nullable=False),
         sa.Column("source", sa.String(32), nullable=False),
         sa.Column("source_batch_id", sa.String(64), nullable=True),

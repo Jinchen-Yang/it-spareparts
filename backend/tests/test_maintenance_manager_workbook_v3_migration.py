@@ -21,10 +21,8 @@ TABLES = {
 def test_manager_workbook_v3_schema_has_longitudinal_and_attachment_foundations(db):
     inspector = inspect(db.get_bind())
     assert TABLES <= set(inspector.get_table_names())
-    milestone_columns = {
-        column["name"]
-        for column in inspector.get_columns("maintenance_collection_milestone")
-    }
+    milestone_column_rows = inspector.get_columns("maintenance_collection_milestone")
+    milestone_columns = {column["name"] for column in milestone_column_rows}
     assert {
         "project_contract_id",
         "sequence",
@@ -34,6 +32,13 @@ def test_manager_workbook_v3_schema_has_longitudinal_and_attachment_foundations(
         "source_batch_id",
         "version",
     } <= milestone_columns
+    planned_amount_type = next(
+        column["type"]
+        for column in milestone_column_rows
+        if column["name"] == "planned_amount"
+    )
+    assert planned_amount_type.precision == 14
+    assert planned_amount_type.scale == 2
     deliverable_columns = {
         column["name"]
         for column in inspector.get_columns("maintenance_acceptance_deliverable")
