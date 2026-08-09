@@ -16,7 +16,6 @@ from sqlalchemy.orm import Session
 
 from app import config
 from app.models.dimensions import DimPart, PartAlias
-from app.models.inquiry import FPartInquiry
 from app.models.inventory import Inventory
 from app.models.master_data import (
     Brand,

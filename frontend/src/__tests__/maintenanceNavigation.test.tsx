@@ -11,7 +11,7 @@ import {
 describe("维保管理信息架构", () => {
   beforeEach(() => localStorage.clear());
 
-  it("固定定义项目面板、主档、需求单、仓库单据、经理月报、验收、月度更新和成本回填入口", () => {
+  it("固定定义项目面板、主档、需求单、仓库单据、经理月报、验收、月度更新、成本回填和迁移核对入口", () => {
     const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance");
 
     expect(maintenance?.items.map(({ key, path, label }) => ({
@@ -59,6 +59,11 @@ describe("维保管理信息架构", () => {
         path: "/maintenance/cost-refill",
         label: "成本回填",
       },
+      {
+        key: "maintenance-migration",
+        path: "/maintenance/migration",
+        label: "迁移核对",
+      },
     ]);
   });
 
@@ -69,19 +74,23 @@ describe("维保管理信息架构", () => {
     );
     const updates = maintenance?.items.find((item) => item.key === "maintenance-updates");
     const refill = maintenance?.items.find((item) => item.key === "maintenance-cost-refill");
+    const migration = maintenance?.items.find((item) => item.key === "maintenance-migration");
     localStorage.setItem("role", "readonly");
     localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true }));
     expect(updates?.visibleWhen?.()).toBe(false);
     expect(refill?.visibleWhen?.()).toBe(false);
     expect(managerWorkbook?.visibleWhen?.()).toBe(false);
+    expect(migration?.visibleWhen?.()).toBe(false);
 
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: false,
       data_purchase_cost: true,
       action_maintenance_project_manage: true,
+      action_maintenance_migration_review: true,
     }));
     expect(refill?.visibleWhen?.()).toBe(false);
     expect(managerWorkbook?.visibleWhen?.()).toBe(false);
+    expect(migration?.visibleWhen?.()).toBe(false);
 
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: true,
@@ -90,10 +99,26 @@ describe("维保管理信息架构", () => {
       data_profit: true,
       action_maintenance_roundtrip_apply: true,
       action_maintenance_project_manage: true,
+      action_maintenance_migration_review: true,
     }));
     expect(updates?.visibleWhen?.()).toBe(true);
     expect(refill?.visibleWhen?.()).toBe(true);
     expect(managerWorkbook?.visibleWhen?.()).toBe(true);
+    expect(migration?.visibleWhen?.()).toBe(true);
+  });
+
+  it("共享管理员被显式关闭迁移权限时不显示迁移核对入口", () => {
+    const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance");
+    const migration = maintenance?.items.find((item) => item.key === "maintenance-migration");
+    localStorage.setItem("role", "admin");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: true,
+      data_profit: true,
+      action_maintenance_migration_review: false,
+    }));
+
+    expect(migration?.visibleWhen?.()).toBe(false);
   });
 
   it("旧维保路径继续可访问并进入新的稳定项目流程", () => {

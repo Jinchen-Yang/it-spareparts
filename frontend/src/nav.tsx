@@ -14,6 +14,7 @@ import {
   FileDoneOutlined,
   RobotOutlined,
   SearchOutlined,
+  SafetyCertificateOutlined,
   SettingOutlined,
   ShoppingCartOutlined,
   TeamOutlined,
@@ -75,6 +76,7 @@ const loadMaintenanceProjectUpdates = () => import("./pages/maintenance/Maintena
 const loadMaintenanceManagerWorkbook = () => import("./pages/maintenance/MaintenanceManagerWorkbookPage");
 const loadMaintenanceAcceptance = () => import("./pages/maintenance/MaintenanceAcceptancePage");
 const loadMaintenanceCostRefill = () => import("./pages/maintenance/MaintenanceCostRefillPage");
+const loadMaintenanceMigration = () => import("./pages/maintenance/MaintenanceMigrationPage");
 const loadMaintenanceDownloadsCompat = () => import("./pages/maintenance/MaintenanceDownloadsCompatRedirect");
 const loadMaintenanceRemindersCompat = () => import("./pages/maintenance/MaintenanceRemindersCompatRedirect");
 const loadInventory = () => import("./pages/InventoryPage");
@@ -105,6 +107,7 @@ const MaintenanceProjectUpdatesPage = lazy(loadMaintenanceProjectUpdates);
 const MaintenanceManagerWorkbookPage = lazy(loadMaintenanceManagerWorkbook);
 const MaintenanceAcceptancePage = lazy(loadMaintenanceAcceptance);
 const MaintenanceCostRefillPage = lazy(loadMaintenanceCostRefill);
+const MaintenanceMigrationPage = lazy(loadMaintenanceMigration);
 const MaintenanceDownloadsCompatRedirect = lazy(loadMaintenanceDownloadsCompat);
 const MaintenanceRemindersCompatRedirect = lazy(loadMaintenanceRemindersCompat);
 const InventoryPage = lazy(loadInventory);
@@ -168,6 +171,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { key: "maintenance-acceptance", path: "/maintenance/acceptance", label: "验收报告", icon: <FileDoneOutlined />, perm: "page_maintenance", page: MaintenanceAcceptancePage, load: loadMaintenanceAcceptance },
       { key: "maintenance-updates", path: "/maintenance/updates", label: "月度更新", icon: <CloudUploadOutlined />, visibleWhen: () => readMaintenanceCapabilities().canApplyRoundtrip, page: MaintenanceProjectUpdatesPage, load: loadMaintenanceProjectUpdates },
       { key: "maintenance-cost-refill", path: "/maintenance/cost-refill", label: "成本回填", icon: <DollarOutlined />, visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceCostRefillPage, load: loadMaintenanceCostRefill },
+      { key: "maintenance-migration", path: "/maintenance/migration", label: "迁移核对", icon: <SafetyCertificateOutlined />, visibleWhen: () => readMaintenanceCapabilities().canReviewMigration, page: MaintenanceMigrationPage, load: loadMaintenanceMigration },
     ],
   },
   {

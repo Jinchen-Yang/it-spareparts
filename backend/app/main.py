@@ -23,6 +23,7 @@ from app.api import (
     maintenance_demands,
     maintenance_manager_workbooks,
     maintenance_project_assignments,
+    maintenance_migration,
     maintenance_project_operations,
     maintenance_source_assignments,
     maintenance_project_workbooks,
@@ -39,6 +40,7 @@ from app.api import (
 )
 from app.config import check_security, get_settings
 from app.db import engine
+from app.http_controls import MigrationHttpControlsMiddleware
 
 _log = logging.getLogger("startup")
 settings = get_settings()
@@ -59,6 +61,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+app.add_middleware(
+    MigrationHttpControlsMiddleware,
+    path_prefix=f"{settings.api_prefix}/maintenance/migration-runs",
+    max_body_bytes=settings.maintenance_migration_max_body_bytes,
 )
 
 app.include_router(auth.router, prefix=settings.api_prefix)
@@ -81,6 +88,7 @@ app.include_router(maintenance_project_assignments.router, prefix=settings.api_p
 app.include_router(maintenance_demands.router, prefix=settings.api_prefix)
 app.include_router(maintenance_manager_workbooks.router, prefix=settings.api_prefix)
 app.include_router(maintenance_source_assignments.router, prefix=settings.api_prefix)
+app.include_router(maintenance_migration.router, prefix=settings.api_prefix)
 # The stable operations router must precede the project-master ``/{project_id}``
 # route so literal paths such as ``/operations`` cannot be captured as an id.
 app.include_router(maintenance_project_operations.router, prefix=settings.api_prefix)

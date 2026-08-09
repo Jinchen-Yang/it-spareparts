@@ -61,6 +61,14 @@ from app.models.maintenance_warehouse import (
     MaintenanceWarehouseDocumentLink,
     MaintenanceWarehouseImportBatch,
 )
+from app.models.maintenance_migration import (
+    MaintenanceHistoricalCostBaseline,
+    MaintenanceInventoryOpeningBalance,
+    MaintenanceMigrationDiscrepancy,
+    MaintenanceMigrationEvent,
+    MaintenanceMigrationRun,
+    MaintenanceProjectCutoverPlan,
+)
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -143,6 +151,12 @@ __all__ = [
     "MaintenanceWarehouseDocumentLink",
     "MaintenanceWarehouseAmbiguity",
     "MaintenanceWarehouseAuditEvent",
+    "MaintenanceMigrationRun",
+    "MaintenanceProjectCutoverPlan",
+    "MaintenanceHistoricalCostBaseline",
+    "MaintenanceInventoryOpeningBalance",
+    "MaintenanceMigrationDiscrepancy",
+    "MaintenanceMigrationEvent",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",

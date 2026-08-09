@@ -214,10 +214,11 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
     role = "admin" if req.username == "admin" else "readonly"
     perms = permissions.runtime_safe(permissions.effective(role, None))
     # Shared credentials are not a real SysUser identity and therefore never
-    # advertise the high-risk project-master write capability to the client.
+    # advertise high-risk maintenance identity/approval capabilities to the client.
     perms["action_maintenance_project_manage"] = False
     perms["action_maintenance_demand_delete"] = False
     perms["action_maintenance_warehouse_manage"] = False
+    perms["action_maintenance_migration_review"] = False
     _ev("login_success", role, {"path": "shared_password"})
     token, exp = _make_token(
         role,

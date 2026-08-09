@@ -1,0 +1,147 @@
+.maintenance-migration-gate {
+  margin-bottom: 16px;
+}
+
+.maintenance-migration-project-draft,
+.maintenance-migration-plan {
+  margin-bottom: 16px;
+}
+
+.maintenance-migration-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.maintenance-migration-form-grid label,
+.maintenance-migration-reason {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-weight: 500;
+}
+
+.maintenance-migration-span-two {
+  grid-column: span 2;
+}
+
+.maintenance-migration-opening-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 100px 1.3fr auto;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.maintenance-migration-cost-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.maintenance-migration-cost-grid > div {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.maintenance-migration-cost-grid span,
+.maintenance-migration-cost-grid strong {
+  display: block;
+}
+
+.maintenance-migration-cost-grid span {
+  margin-bottom: 6px;
+  color: rgba(0, 0, 0, 0.55);
+  font-size: 12px;
+}
+
+.maintenance-migration-cost-grid strong {
+  overflow-wrap: anywhere;
+  font-size: 18px;
+}
+
+.maintenance-migration-review-candidate {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  margin-bottom: 12px;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.maintenance-migration-review-candidate > div {
+  min-width: 0;
+}
+
+.maintenance-migration-review-candidate .ant-typography {
+  overflow-wrap: anywhere;
+}
+
+.maintenance-migration-project-signoff {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  margin-top: 12px;
+  border: 1px solid #bae0ff;
+  border-radius: 8px;
+  background: #f0f8ff;
+}
+
+.maintenance-migration-project-signoff label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-weight: 500;
+}
+
+.maintenance-migration-evidence-toggle {
+  padding-left: 0;
+  margin-bottom: 8px;
+}
+
+.maintenance-migration-evidence {
+  padding: 14px;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.maintenance-migration-evidence-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.maintenance-migration-evidence-hint,
+.maintenance-migration-evidence-snapshot {
+  display: block;
+  margin-top: 4px;
+}
+
+@media (max-width: 900px) {
+  .maintenance-migration-form-grid,
+  .maintenance-migration-cost-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .maintenance-migration-span-two {
+    grid-column: span 1;
+  }
+
+  .maintenance-migration-opening-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .maintenance-migration-review-candidate,
+  .maintenance-migration-evidence-toolbar {
+    flex-direction: column;
+  }
+}

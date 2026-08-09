@@ -47,6 +47,9 @@ services:
       RAW_FILE_DIR: /app/data/raw
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-env}
+      MAINTENANCE_MANIFEST_ACTIVE_KEY_ID: ${MAINTENANCE_MANIFEST_ACTIVE_KEY_ID:-dev-v1}
+      MAINTENANCE_MANIFEST_ACTIVE_HMAC_KEY: ${MAINTENANCE_MANIFEST_ACTIVE_HMAC_KEY:-change-me-maintenance-manifest-key-dev-v1}
+      MAINTENANCE_MANIFEST_PREVIOUS_HMAC_KEYS_JSON: ${MAINTENANCE_MANIFEST_PREVIOUS_HMAC_KEYS_JSON:-none}
       APP_PORT: ${APP_PORT:-8000}
       # 默认 prod：忘配 .env 时带默认口令/密钥会「拒启」而非偷偷上线（审计 2026-06-28 S-1）。
       # 本地用 docker 起开发栈时，在 .env 显式设 ENVIRONMENT=dev 即可放行默认弱口令。

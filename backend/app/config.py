@@ -8,12 +8,14 @@ from datetime import date
 from decimal import Decimal
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # DeepSeek v4 为混合思考模型；默认开思考（reasoning_content 流式回前端，灰色可折叠展示）。
 # 要关思考省 token：在 .env 设 LLM_EXTRA_BODY='{"thinking": {"type": "disabled"}}'。
 _DEFAULT_LLM_EXTRA_BODY = '{"thinking": {"type": "enabled"}}'
+_DEFAULT_MANIFEST_KEY_ID = "dev-v1"
+_DEFAULT_MANIFEST_KEY = "change-me-maintenance-manifest-key-dev-v1"
 
 
 class Settings(BaseSettings):
@@ -54,6 +56,13 @@ class Settings(BaseSettings):
     llm_max_retries: int = 2           # 显式化 openai SDK 对 429/5xx 的指数退避重试次数（便于审计调参）
     enable_agent: bool = True
 
+    # 成本/库存切换是独立生产闸门；代码、迁移与审批 manifest 都不会自动启用新口径。
+    maintenance_cutover_enabled: bool = False
+    maintenance_migration_max_body_bytes: int = 2_000_000
+    maintenance_manifest_active_key_id: str = _DEFAULT_MANIFEST_KEY_ID
+    maintenance_manifest_active_hmac_key: SecretStr = SecretStr(_DEFAULT_MANIFEST_KEY)
+    maintenance_manifest_previous_hmac_keys_json: SecretStr = SecretStr("none")
+
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
     # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级
     vision_api_key: str = ""
@@ -87,6 +96,57 @@ class Settings(BaseSettings):
         import json
         return json.loads(self.llm_extra_body) or None
 
+    @model_validator(mode="after")
+    def _manifest_keyring_is_valid(self):
+        key_id = self.maintenance_manifest_active_key_id.strip()
+        if not key_id or len(key_id) > 64:
+            raise ValueError("MAINTENANCE_MANIFEST_ACTIVE_KEY_ID 无效")
+        active_secret = self.maintenance_manifest_active_hmac_key.get_secret_value()
+        if len(active_secret.encode("utf-8")) < 32:
+            raise ValueError("maintenance manifest HMAC 密钥至少需要 32 字节")
+        if active_secret == self.secret_key:
+            raise ValueError("maintenance manifest HMAC 密钥必须独立于 SECRET_KEY")
+        previous_keys = self._maintenance_manifest_previous_keys()
+        if key_id in previous_keys:
+            raise ValueError("active manifest key_id 不能同时出现在 previous keyring")
+        for candidate_id, secret in previous_keys.items():
+            if not candidate_id.strip() or len(candidate_id) > 64:
+                raise ValueError("MAINTENANCE_MANIFEST_PREVIOUS_HMAC_KEYS 包含无效 key_id")
+            if len(secret.encode("utf-8")) < 32:
+                raise ValueError("maintenance manifest HMAC 密钥至少需要 32 字节")
+            if secret == self.secret_key:
+                raise ValueError("maintenance manifest 历史密钥必须独立于 SECRET_KEY")
+        return self
+
+    def _maintenance_manifest_previous_keys(self) -> dict[str, str]:
+        import json
+        raw = self.maintenance_manifest_previous_hmac_keys_json.get_secret_value().strip()
+        if not raw or raw.lower() == "none":
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("MAINTENANCE_MANIFEST_PREVIOUS_HMAC_KEYS_JSON 不是合法 JSON") from exc
+        if not isinstance(parsed, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in parsed.items()
+        ):
+            raise ValueError("MAINTENANCE_MANIFEST_PREVIOUS_HMAC_KEYS_JSON 必须是字符串映射")
+        return parsed
+
+    def maintenance_manifest_signing_material(self) -> tuple[str, bytes]:
+        key_id = self.maintenance_manifest_active_key_id.strip()
+        secret = self.maintenance_manifest_active_hmac_key.get_secret_value()
+        return key_id, secret.encode("utf-8")
+
+    def maintenance_manifest_verification_keys(self) -> dict[str, bytes]:
+        previous = {
+            key_id: secret.encode("utf-8")
+            for key_id, secret in self._maintenance_manifest_previous_keys().items()
+        }
+        active_id, active_key = self.maintenance_manifest_signing_material()
+        return {**previous, active_id: active_key}
+
 
 _DEFAULT_ADMIN_PW = "admin"
 _DEFAULT_SECRET = "change-me-in-env"
@@ -107,6 +167,11 @@ def check_security(settings: "Settings") -> list[str]:
         warns.append("ADMIN_PASSWORD 仍为默认值 'admin'")
     if settings.secret_key == _DEFAULT_SECRET:
         warns.append("SECRET_KEY 仍为默认值（token 可被离线伪造）")
+    if (
+        settings.maintenance_manifest_active_hmac_key.get_secret_value()
+        == _DEFAULT_MANIFEST_KEY
+    ):
+        warns.append("维保 manifest 仍使用默认开发签名密钥")
     if "spareparts:spareparts" in settings.database_url:
         warns.append("数据库使用默认弱口令 spareparts:spareparts")
     return warns
