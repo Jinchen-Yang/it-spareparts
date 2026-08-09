@@ -27,13 +27,20 @@ from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.system import SysAccessLog, SysImportBatch, SysUser
 
 
-def _client(db, *, username: str = "site_issue_v2_admin") -> TestClient:
+def _client(
+    db,
+    *,
+    username: str = "site_issue_v2_admin",
+    role: str = "admin",
+    permissions: dict | None = None,
+) -> TestClient:
     db.add(
         SysUser(
             username=username,
-            role="admin",
+            role=role,
             display_name="合成现场领用管理员",
             password_hash=hash_password("synthetic-password-123"),
+            permissions=permissions,
         )
     )
     db.commit()
@@ -282,6 +289,76 @@ def test_delivery_candidate_search_is_post_only_and_fails_closed_without_adapter
         "mapping_state": "ready",
         "mapping_version": delivery.mapping_version,
     }
+
+
+def test_site_issue_write_requires_dedicated_action_and_purchase_cost_permission(db):
+    project = _project(db, project_id="project-site-issue-v2-permission")
+    delivery = _delivery_source(
+        db,
+        project=project,
+        delivery_line_id="synthetic-delivery-line-permission",
+    )
+    path = f"/api/maintenance/projects/stable/{project.project_id}/site-issues"
+    body = {
+        "idempotency_key": "synthetic-site-issue-permission-denied",
+        "issue_date": "2026-08-09",
+        "receiver": "合成接收人",
+        "issued_by": "合成发出人",
+        "site_location": "合成现场",
+        "lines": [{"delivery_line_id": delivery.delivery_line_id, "quantity": "1"}],
+        "reason": "验证专用权限失败关闭",
+    }
+    denied = _client(
+        db,
+        username="site_issue_v2_permission_denied",
+        role="boss",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "action_maintenance_site_issue_manage": False,
+        },
+    ).post(path, json=body)
+    assert denied.status_code == 403, denied.text
+    assert db.query(MaintenanceSiteIssue).filter_by(project_id=project.project_id).count() == 0
+
+    without_cost = _client(
+        db,
+        username="site_issue_v2_permission_without_cost",
+        role="boss",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": False,
+            "action_maintenance_site_issue_manage": True,
+        },
+    ).post(
+        path,
+        json={
+            **body,
+            "idempotency_key": "synthetic-site-issue-permission-without-cost",
+        },
+    )
+    assert without_cost.status_code == 403, without_cost.text
+    assert db.query(MaintenanceSiteIssue).filter_by(project_id=project.project_id).count() == 0
+
+    allowed = _client(
+        db,
+        username="site_issue_v2_permission_allowed",
+        role="boss",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "action_maintenance_site_issue_manage": True,
+        },
+    ).post(
+        path,
+        json={
+            **body,
+            "idempotency_key": "synthetic-site-issue-permission-allowed",
+            "reason": "明确授权后建立草稿",
+        },
+    )
+    assert allowed.status_code == 201, allowed.text
+    assert allowed.json()["workflow_status"] == "draft"
 
 
 def test_preview_and_confirm_freeze_cost_emit_one_return_event_and_never_touch_inventory(db):

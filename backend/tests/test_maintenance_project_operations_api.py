@@ -184,44 +184,103 @@ def _site_issue_lines(part: DimPart, *, count: int, prefix: str) -> list[dict]:
     ]
 
 
-def test_site_issue_create_api_accepts_200_and_rejects_201_lines(db):
+def _create_legacy_site_issue_fixture(
+    db,
+    *,
+    project_id: str,
+    body: dict,
+    commit: bool = True,
+) -> dict:
+    """Seed one historical/import-style fact without reopening the public v1 API."""
+
+    values = dict(body)
+    raw_issue_date = values.pop("issue_date")
+    payload = operations_service.create_site_issue(
+        db,
+        project_id=project_id,
+        issue_date=(
+            date.fromisoformat(raw_issue_date)
+            if isinstance(raw_issue_date, str)
+            else raw_issue_date
+        ),
+        operated_by="legacy-service-test-fixture",
+        source="direct_api",
+        import_batch_id=None,
+        **values,
+    )
+    assert payload is not None
+    if commit:
+        db.commit()
+    return payload
+
+
+def _count_service_write_queries(db, action) -> tuple[dict, int]:
+    engine = db.get_bind()
+    query_count = 0
+
+    def count_query(*_args) -> None:
+        nonlocal query_count
+        query_count += 1
+
+    event.listen(engine, "before_cursor_execute", count_query)
+    try:
+        payload = action()
+        db.commit()
+    finally:
+        event.remove(engine, "before_cursor_execute", count_query)
+    return payload, query_count
+
+
+def test_public_site_issue_create_rejects_legacy_identity_and_service_keeps_history(db):
     project = _project(db, project_id="project-site-issue-api-limit")
     client = _client(db, username="site_issue_api_limit_admin")
     part = DimPart(pn_std="PN-SITE-ISSUE-API-LIMIT")
     db.add(part)
     db.commit()
 
-    accepted = client.post(
+    old_public_payload = {
+        "issue_no": "ISSUE-API-LIMIT-200",
+        "issue_date": "2026-08-01",
+        "raw_status": "synthetic-confirmed",
+        "status_mapping_state": "mapped",
+        "normalized_status": "confirmed",
+        "status_mapping_version": "synthetic-map-v1",
+        "lines": _site_issue_lines(part, count=200, prefix="issue-api-accepted"),
+        "reason": "验证旧客户端不能再指定稳定身份",
+    }
+    rejected_public = client.post(
         f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
-            "issue_no": "ISSUE-API-LIMIT-200",
-            "issue_date": "2026-08-01",
-            "raw_status": "synthetic-confirmed",
-            "status_mapping_state": "mapped",
-            "normalized_status": "confirmed",
-            "status_mapping_version": "synthetic-map-v1",
-            "lines": _site_issue_lines(part, count=200, prefix="issue-api-accepted"),
-            "reason": "验证现场领用单 API 可接收上限行数",
-        },
+        json=old_public_payload,
     )
-    assert accepted.status_code == 201, accepted.text
-    assert len(accepted.json()["lines"]) == 200
+    assert rejected_public.status_code == 422, rejected_public.text
+    assert db.get(MaintenanceSiteIssueLine, "issue-api-accepted-1") is None
 
-    rejected = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
-            "issue_no": "ISSUE-API-LIMIT-201",
-            "issue_date": "2026-08-01",
-            "raw_status": "synthetic-confirmed",
-            "status_mapping_state": "mapped",
-            "normalized_status": "confirmed",
-            "status_mapping_version": "synthetic-map-v1",
-            "lines": _site_issue_lines(part, count=201, prefix="issue-api-limit"),
-            "reason": "验证现场领用单 API 明细上限",
-        },
+    accepted_history = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body=old_public_payload,
     )
+    assert len(accepted_history["lines"]) == 200
 
-    assert rejected.status_code == 422, rejected.text
+    with pytest.raises(
+        operations_service.MaintenanceOperationError,
+        match="最多允许 200 条明细",
+    ):
+        _create_legacy_site_issue_fixture(
+            db,
+            project_id=project.project_id,
+            body={
+                "issue_no": "ISSUE-API-LIMIT-201",
+                "issue_date": "2026-08-01",
+                "raw_status": "synthetic-confirmed",
+                "status_mapping_state": "mapped",
+                "normalized_status": "confirmed",
+                "status_mapping_version": "synthetic-map-v1",
+                "lines": _site_issue_lines(part, count=201, prefix="issue-api-limit"),
+                "reason": "验证历史服务明细上限",
+            },
+        )
+    db.rollback()
     assert db.get(MaintenanceSiteIssueLine, "issue-api-limit-1") is None
 
 
@@ -254,16 +313,17 @@ def test_site_issue_create_service_rejects_more_than_200_lines(db):
         )
 
 
-def test_direct_site_issue_api_exposes_server_owned_provenance(db):
+def test_legacy_service_site_issue_exposes_history_provenance(db):
     project = _project(db, project_id="project-direct-site-issue-provenance")
     client = _client(db, username="direct_site_issue_provenance_admin")
     part = DimPart(pn_std="PN-DIRECT-SITE-ISSUE-PROVENANCE")
     db.add(part)
     db.commit()
 
-    created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    created = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-DIRECT-PROVENANCE",
             "issue_date": "2026-08-01",
             "raw_status": "synthetic-confirmed",
@@ -279,13 +339,12 @@ def test_direct_site_issue_api_exposes_server_owned_provenance(db):
                     "quantity": "1",
                 }
             ],
-            "reason": "通过受控 API 新增现场领用",
+            "reason": "通过历史兼容服务建立现场领用",
         },
     )
 
-    assert created.status_code == 201, created.text
-    assert created.json()["source"] == "direct_api"
-    assert created.json()["import_batch_id"] is None
+    assert created["source"] == "direct_api"
+    assert created["import_batch_id"] is None
     workspace = client.get(
         f"/api/maintenance/projects/stable/{project.project_id}/workspace",
         params={"as_of": "2026-08-31"},
@@ -346,8 +405,7 @@ def test_create_rejects_mapped_unknown_status_pairs_without_writes(db):
         f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
         json=site_body,
     )
-    assert site.status_code == 400, site.text
-    assert "mapped" in site.json()["detail"]
+    assert site.status_code == 422, site.text
     assert db.scalar(
         select(MaintenanceSiteIssue).where(
             MaintenanceSiteIssue.project_id == project.project_id
@@ -427,7 +485,6 @@ def test_create_rejects_mapped_unknown_status_pairs_without_writes(db):
 
 def test_site_issue_create_query_count_is_bounded_and_all_lines_are_costed(db):
     project = _project(db, project_id="project-site-issue-create-scale")
-    client = _client(db, username="site_issue_create_scale_admin")
     part = DimPart(pn_std="PN-SITE-ISSUE-CREATE-SCALE")
     db.add(part)
     db.flush()
@@ -470,28 +527,31 @@ def test_site_issue_create_query_count_is_bounded_and_all_lines_are_costed(db):
             "reason": "验证现场领用创建批量取价",
         }
 
-    one_response, one_queries = _count_write_queries(
+    one_payload, one_queries = _count_service_write_queries(
         db,
-        client,
-        method="POST",
-        path=f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        payload=create_payload(suffix="ONE", count=1),
+        lambda: _create_legacy_site_issue_fixture(
+            db,
+            project_id=project.project_id,
+            body=create_payload(suffix="ONE", count=1),
+            commit=False,
+        ),
     )
-    many_response, many_queries = _count_write_queries(
+    many_payload, many_queries = _count_service_write_queries(
         db,
-        client,
-        method="POST",
-        path=f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        payload=create_payload(suffix="MANY", count=40),
+        lambda: _create_legacy_site_issue_fixture(
+            db,
+            project_id=project.project_id,
+            body=create_payload(suffix="MANY", count=40),
+            commit=False,
+        ),
     )
 
-    assert one_response.status_code == 201, one_response.text
-    assert many_response.status_code == 201, many_response.text
     assert many_queries <= one_queries + 8, (one_queries, many_queries)
-    assert len(many_response.json()["lines"]) == 40
+    assert len(one_payload["lines"]) == 1
+    assert len(many_payload["lines"]) == 40
     assert {
         (line["cost_source"], line["unit_cost"], line["cost_amount"])
-        for line in many_response.json()["lines"]
+        for line in many_payload["lines"]
     } == {("direct_purchase", "25.00", "50.00")}
 
 
@@ -529,9 +589,10 @@ def test_site_issue_confirm_query_count_is_bounded_and_versions_remain_audited(d
         for line in lines:
             line["quantity"] = "2"
             line["linked_purchase_line_id"] = purchase_line.id
-        response = client.post(
-            f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-            json={
+        return _create_legacy_site_issue_fixture(
+            db,
+            project_id=project.project_id,
+            body={
                 "issue_no": f"ISSUE-CONFIRM-SCALE-{suffix}",
                 "issue_date": "2026-08-01",
                 "raw_status": "synthetic-pending",
@@ -542,8 +603,6 @@ def test_site_issue_confirm_query_count_is_bounded_and_versions_remain_audited(d
                 "reason": "建立待确认批量现场领用",
             },
         )
-        assert response.status_code == 201, response.text
-        return response.json()
 
     one_issue = create_unknown(suffix="ONE", count=1)
     many_issue = create_unknown(suffix="MANY", count=40)
@@ -640,9 +699,10 @@ def test_site_issue_batch_confirm_cost_failure_is_atomic(db):
     db.add_all([valid_purchase, overflow_purchase])
     db.commit()
 
-    created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    created = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-CONFIRM-ATOMIC",
             "issue_date": "2026-08-01",
             "raw_status": "synthetic-pending",
@@ -670,8 +730,7 @@ def test_site_issue_batch_confirm_cost_failure_is_atomic(db):
             "reason": "建立批量确认失败原子性测试领用单",
         },
     )
-    assert created.status_code == 201, created.text
-    issue_id = created.json()["issue_id"]
+    issue_id = created["issue_id"]
 
     failed = client.patch(
         f"/api/maintenance/projects/stable/site-issues/{issue_id}/status",
@@ -779,9 +838,10 @@ def test_money_write_paths_use_half_up_and_reject_rounded_overflow(db):
     part = DimPart(pn_std="PN-MONEY-NORMALIZATION")
     db.add(part)
     db.commit()
-    issue = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-MONEY-NORMALIZATION",
             "issue_date": "2026-01-01",
             "raw_status": "synthetic-confirmed",
@@ -798,7 +858,6 @@ def test_money_write_paths_use_half_up_and_reject_rounded_overflow(db):
             "reason": "建立人工成本金额归一化领用",
         },
     )
-    assert issue.status_code == 201, issue.text
     manual = client.patch(
         f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
         json={
@@ -894,14 +953,14 @@ def test_money_write_paths_use_half_up_and_reject_rounded_overflow(db):
 
 def test_site_issue_quantity_uses_numeric_14_3_boundary_with_controlled_rejection(db):
     project = _project(db, project_id="project-quantity-boundary")
-    client = _client(db, username="quantity_boundary_admin")
     part = DimPart(pn_std="PN-QUANTITY-BOUNDARY")
     db.add(part)
     db.commit()
 
-    maximum = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    maximum = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-QUANTITY-MAXIMUM",
             "issue_date": "2026-08-01",
             "raw_status": "synthetic-confirmed",
@@ -920,53 +979,59 @@ def test_site_issue_quantity_uses_numeric_14_3_boundary_with_controlled_rejectio
             "reason": "验证 Numeric(14,3) 最大合法数量",
         },
     )
-    assert maximum.status_code == 201, maximum.text
-    assert maximum.json()["lines"][0]["quantity"] == "99999999999.999"
+    assert maximum["lines"][0]["quantity"] == "99999999999.999"
 
-    first_illegal = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
-            "issue_no": "ISSUE-QUANTITY-FIRST-ILLEGAL",
-            "issue_date": "2026-08-01",
-            "raw_status": "synthetic-confirmed",
-            "status_mapping_state": "mapped",
-            "normalized_status": "confirmed",
-            "status_mapping_version": "synthetic-map-v1",
-            "lines": [
-                {
-                    "issue_line_id": "issue-line-quantity-first-illegal",
+    with pytest.raises(
+        operations_service.MaintenanceOperationError,
+        match="领用数量超出允许范围",
+    ):
+        _create_legacy_site_issue_fixture(
+            db,
+            project_id=project.project_id,
+            body={
+                "issue_no": "ISSUE-QUANTITY-FIRST-ILLEGAL",
+                "issue_date": "2026-08-01",
+                "raw_status": "synthetic-confirmed",
+                "status_mapping_state": "mapped",
+                "normalized_status": "confirmed",
+                "status_mapping_version": "synthetic-map-v1",
+                "lines": [
+                    {
+                        "issue_line_id": "issue-line-quantity-first-illegal",
+                        "line_no": 1,
+                        "part_id": part.id,
+                        "pn": part.pn_std,
+                        "quantity": "100000000000",
+                    }
+                ],
+                "reason": "验证 Numeric(14,3) 首个非法数量受控拒绝",
+            },
+        )
+    db.rollback()
+    assert db.get(MaintenanceSiteIssueLine, "issue-line-quantity-first-illegal") is None
+
+    with pytest.raises(operations_service.MaintenanceOperationError):
+        _create_legacy_site_issue_fixture(
+            db,
+            project_id=project.project_id,
+            body={
+                "issue_no": "ISSUE-QUANTITY-NON-FINITE",
+                "issue_date": "2026-08-01",
+                "raw_status": "synthetic-confirmed",
+                "status_mapping_state": "mapped",
+                "normalized_status": "confirmed",
+                "status_mapping_version": "synthetic-map-v1",
+                "lines": [{
+                    "issue_line_id": "issue-line-quantity-non-finite",
                     "line_no": 1,
                     "part_id": part.id,
                     "pn": part.pn_std,
-                    "quantity": "100000000000",
-                }
-            ],
-            "reason": "验证 Numeric(14,3) 首个非法数量受控拒绝",
-        },
-    )
-    assert 400 <= first_illegal.status_code < 500, first_illegal.text
-    assert db.get(MaintenanceSiteIssueLine, "issue-line-quantity-first-illegal") is None
-
-    non_finite = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
-            "issue_no": "ISSUE-QUANTITY-NON-FINITE",
-            "issue_date": "2026-08-01",
-            "raw_status": "synthetic-confirmed",
-            "status_mapping_state": "mapped",
-            "normalized_status": "confirmed",
-            "status_mapping_version": "synthetic-map-v1",
-            "lines": [{
-                "issue_line_id": "issue-line-quantity-non-finite",
-                "line_no": 1,
-                "part_id": part.id,
-                "pn": part.pn_std,
-                "quantity": "NaN",
-            }],
-            "reason": "验证非有限数量受控拒绝",
-        },
-    )
-    assert 400 <= non_finite.status_code < 500, non_finite.text
+                    "quantity": "NaN",
+                }],
+                "reason": "验证非有限数量受控拒绝",
+            },
+        )
+    db.rollback()
 
 
 def test_manual_cost_amount_uses_numeric_14_2_boundary_with_controlled_rejection(db):
@@ -975,9 +1040,10 @@ def test_manual_cost_amount_uses_numeric_14_2_boundary_with_controlled_rejection
     part = DimPart(pn_std="PN-COST-AMOUNT-BOUNDARY")
     db.add(part)
     db.commit()
-    created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-COST-AMOUNT-BOUNDARY",
             "issue_date": "2026-08-01",
             "raw_status": "synthetic-confirmed",
@@ -1010,7 +1076,6 @@ def test_manual_cost_amount_uses_numeric_14_2_boundary_with_controlled_rejection
             "reason": "建立成本金额 Numeric(14,2) 边界领用",
         },
     )
-    assert created.status_code == 201, created.text
 
     maximum = client.patch(
         f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
@@ -1134,28 +1199,32 @@ def test_cost_amount_overflow_is_controlled_on_every_resolution_entrypoint(db):
     db.add(create_part)
     db.commit()
     direct = add_overflow_purchase(create_part, "CREATE")
-    created = client.post(
-        f"/api/maintenance/projects/stable/{create_project.project_id}/site-issues",
-        json={
-            "issue_no": "ISSUE-COST-OVERFLOW-CREATE",
-            "issue_date": "2026-08-01",
-            "raw_status": "synthetic-confirmed",
-            "status_mapping_state": "mapped",
-            "normalized_status": "confirmed",
-            "status_mapping_version": "synthetic-map-v1",
-            "lines": [{
-                "issue_line_id": "issue-line-cost-overflow-create",
-                "line_no": 1,
-                "part_id": create_part.id,
-                "pn": create_part.pn_std,
-                "quantity": "2",
-                "linked_purchase_line_id": direct.id,
-            }],
-            "reason": "验证创建路径成本金额溢出受控拒绝",
-        },
-    )
-    assert created.status_code == 400, created.text
-    assert "成本金额" in created.json()["detail"]
+    with pytest.raises(
+        operations_service.MaintenanceOperationError,
+        match="成本金额",
+    ):
+        _create_legacy_site_issue_fixture(
+            db,
+            project_id=create_project.project_id,
+            body={
+                "issue_no": "ISSUE-COST-OVERFLOW-CREATE",
+                "issue_date": "2026-08-01",
+                "raw_status": "synthetic-confirmed",
+                "status_mapping_state": "mapped",
+                "normalized_status": "confirmed",
+                "status_mapping_version": "synthetic-map-v1",
+                "lines": [{
+                    "issue_line_id": "issue-line-cost-overflow-create",
+                    "line_no": 1,
+                    "part_id": create_part.id,
+                    "pn": create_part.pn_std,
+                    "quantity": "2",
+                    "linked_purchase_line_id": direct.id,
+                }],
+                "reason": "验证创建路径成本金额溢出受控拒绝",
+            },
+        )
+    db.rollback()
     assert db.get(MaintenanceSiteIssueLine, "issue-line-cost-overflow-create") is None
 
     status_project = _project(db, project_id="project-cost-overflow-status")
@@ -1163,9 +1232,10 @@ def test_cost_amount_overflow_is_controlled_on_every_resolution_entrypoint(db):
     db.add(status_part)
     db.commit()
     status_purchase = add_overflow_purchase(status_part, "STATUS")
-    pending = client.post(
-        f"/api/maintenance/projects/stable/{status_project.project_id}/site-issues",
-        json={
+    pending = _create_legacy_site_issue_fixture(
+        db,
+        project_id=status_project.project_id,
+        body={
             "issue_no": "ISSUE-COST-OVERFLOW-STATUS",
             "issue_date": "2026-08-01",
             "raw_status": "synthetic-pending",
@@ -1183,9 +1253,8 @@ def test_cost_amount_overflow_is_controlled_on_every_resolution_entrypoint(db):
             "reason": "建立待确认成本金额溢出领用",
         },
     )
-    assert pending.status_code == 201, pending.text
     confirmed = client.patch(
-        f"/api/maintenance/projects/stable/site-issues/{pending.json()['issue_id']}/status",
+        f"/api/maintenance/projects/stable/site-issues/{pending['issue_id']}/status",
         json={
             "version": 1,
             "raw_status": "synthetic-confirmed",
@@ -1205,9 +1274,10 @@ def test_cost_amount_overflow_is_controlled_on_every_resolution_entrypoint(db):
     recompute_part = DimPart(pn_std="PN-COST-OVERFLOW-RECOMPUTE")
     db.add(recompute_part)
     db.commit()
-    gap = client.post(
-        f"/api/maintenance/projects/stable/{recompute_project.project_id}/site-issues",
-        json={
+    _create_legacy_site_issue_fixture(
+        db,
+        project_id=recompute_project.project_id,
+        body={
             "issue_no": "ISSUE-COST-OVERFLOW-RECOMPUTE",
             "issue_date": "2026-08-01",
             "raw_status": "synthetic-confirmed",
@@ -1224,7 +1294,6 @@ def test_cost_amount_overflow_is_controlled_on_every_resolution_entrypoint(db):
             "reason": "建立待重算成本金额溢出领用",
         },
     )
-    assert gap.status_code == 201, gap.text
     add_overflow_purchase(recompute_part, "RECOMPUTE")
     recomputed = client.post(
         f"/api/maintenance/projects/stable/{recompute_project.project_id}/cost-gaps/recompute",
@@ -1798,9 +1867,10 @@ def test_confirmed_site_issue_uses_direct_then_full_purchase_window(db):
     )
     db.commit()
 
-    created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    created = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-SYNTH-001",
             "issue_date": "2026-05-10",
             "raw_status": "synthetic-confirmed",
@@ -1827,8 +1897,7 @@ def test_confirmed_site_issue_uses_direct_then_full_purchase_window(db):
             "reason": "导入已确认现场领用事实",
         },
     )
-    assert created.status_code == 201, created.text
-    lines = {row["issue_line_id"]: row for row in created.json()["lines"]}
+    lines = {row["issue_line_id"]: row for row in created["lines"]}
     assert lines["issue-line-direct"]["cost_source"] == "direct_purchase"
     assert lines["issue-line-direct"]["cost_amount"] == "19.46"
     assert lines["issue-line-direct"]["unit_cost_ex_tax"] == "9.73"
@@ -1914,9 +1983,10 @@ def test_site_issue_status_lifecycle_resolves_cost_and_void_only_stops_counting(
     db.add(purchase_line)
     db.commit()
 
-    created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    issue = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-SYNTH-STATUS",
             "issue_date": "2026-05-10",
             "raw_status": "synthetic-pending",
@@ -1936,8 +2006,6 @@ def test_site_issue_status_lifecycle_resolves_cost_and_void_only_stops_counting(
             "reason": "导入待确认现场领用",
         },
     )
-    assert created.status_code == 201, created.text
-    issue = created.json()
     assert issue["normalized_status"] == "unknown"
     assert issue["lines"][0]["cost_amount"] is None
     assert issue["lines"][0]["version"] == 1
@@ -2097,9 +2165,10 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
     )
     db.commit()
 
-    created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    created = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-SYNTH-SALES-GAP",
             "issue_date": "2026-06-09",
             "raw_status": "synthetic-confirmed",
@@ -2125,8 +2194,7 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
             "reason": "导入销售回退与缺价领用",
         },
     )
-    assert created.status_code == 201, created.text
-    lines = {row["issue_line_id"]: row for row in created.json()["lines"]}
+    lines = {row["issue_line_id"]: row for row in created["lines"]}
     assert lines["issue-line-sales-fallback"]["cost_source"] == "sales_window"
     assert lines["issue-line-sales-fallback"]["unit_cost"] == "133.33"
     assert lines["issue-line-sales-fallback"]["cost_amount"] == "399.99"
@@ -2960,9 +3028,10 @@ def test_archived_project_rejects_site_issue_and_expense_status_changes(db):
     part = DimPart(pn_std="PN-SYNTH-ARCHIVED-STATUS")
     db.add(part)
     db.commit()
-    issue = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    issue = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-SYNTH-ARCHIVED",
             "issue_date": "2026-07-10",
             "raw_status": "synthetic-pending",
@@ -2981,7 +3050,6 @@ def test_archived_project_rejects_site_issue_and_expense_status_changes(db):
             "reason": "建立归档拒绝测试领用",
         },
     )
-    assert issue.status_code == 201, issue.text
     expense = client.post(
         f"/api/maintenance/projects/stable/{project.project_id}/expenses",
         json={
@@ -3005,7 +3073,7 @@ def test_archived_project_rejects_site_issue_and_expense_status_changes(db):
     db.commit()
 
     issue_update = client.patch(
-        f"/api/maintenance/projects/stable/site-issues/{issue.json()['issue_id']}/status",
+        f"/api/maintenance/projects/stable/site-issues/{issue['issue_id']}/status",
         json={
             "version": 1,
             "raw_status": "synthetic-confirmed",
@@ -3719,13 +3787,13 @@ def test_operations_directory_financial_selector_permission_matrix(db):
 
 def test_operations_directory_cost_filters_remain_usable_without_profit_permission(db):
     project = _project(db, project_id="filter-cost-only-visible")
-    admin = _client(db, username="directory_cost_filter_setup_admin")
     part = DimPart(pn_std="PN-DIRECTORY-COST-FILTER")
     db.add(part)
     db.commit()
-    created = admin.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    created = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-DIRECTORY-COST-FILTER",
             "issue_date": "2026-08-15",
             "raw_status": "synthetic-confirmed",
@@ -3742,8 +3810,7 @@ def test_operations_directory_cost_filters_remain_usable_without_profit_permissi
             "reason": "建立仅成本权限可见的缺价提醒",
         },
     )
-    assert created.status_code == 201, created.text
-    assert created.json()["lines"][0]["cost_amount_inc_tax"] is None
+    assert created["lines"][0]["cost_amount_inc_tax"] is None
     cost_only = _permission_client(
         db,
         username="directory_cost_filter_cost_only",
@@ -4383,9 +4450,10 @@ def test_cost_gap_list_query_count_does_not_scale_with_page_size(db):
     part = DimPart(pn_std="PN-COST-GAP-PAGE-SCALE")
     db.add(part)
     db.commit()
-    issue = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-COST-GAP-PAGE-SCALE",
             "issue_date": "2026-08-10",
             "raw_status": "synthetic-confirmed",
@@ -4405,7 +4473,6 @@ def test_cost_gap_list_query_count_does_not_scale_with_page_size(db):
             "reason": "建立缺价分页查询测试领用行",
         },
     )
-    assert issue.status_code == 201, issue.text
     path = f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps"
 
     one, one_queries = _count_get_queries(
