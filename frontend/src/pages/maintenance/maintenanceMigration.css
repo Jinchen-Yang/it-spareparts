@@ -62,6 +62,70 @@
   font-size: 18px;
 }
 
+.maintenance-migration-review-candidate {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  margin-bottom: 12px;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.maintenance-migration-review-candidate > div {
+  min-width: 0;
+}
+
+.maintenance-migration-review-candidate .ant-typography {
+  overflow-wrap: anywhere;
+}
+
+.maintenance-migration-project-signoff {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  margin-top: 12px;
+  border: 1px solid #bae0ff;
+  border-radius: 8px;
+  background: #f0f8ff;
+}
+
+.maintenance-migration-project-signoff label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-weight: 500;
+}
+
+.maintenance-migration-evidence-toggle {
+  padding-left: 0;
+  margin-bottom: 8px;
+}
+
+.maintenance-migration-evidence {
+  padding: 14px;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.maintenance-migration-evidence-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.maintenance-migration-evidence-hint,
+.maintenance-migration-evidence-snapshot {
+  display: block;
+  margin-top: 4px;
+}
+
 @media (max-width: 900px) {
   .maintenance-migration-form-grid,
   .maintenance-migration-cost-grid {
@@ -74,5 +138,10 @@
 
   .maintenance-migration-opening-row {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .maintenance-migration-review-candidate,
+  .maintenance-migration-evidence-toolbar {
+    flex-direction: column;
   }
 }

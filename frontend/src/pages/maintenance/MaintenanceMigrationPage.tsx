@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Descriptions,
   Divider,
   Drawer,
@@ -27,6 +28,7 @@ import {
   reconcileMaintenanceMigrationRun,
   searchMaintenanceMigrationRuns,
   type MigrationProjectInput,
+  type MigrationProjectSignoff,
   type MigrationRunDetail,
   type MigrationRunStatus,
   type MigrationRunSummary,
@@ -35,6 +37,7 @@ import {
   listMaintenanceProjects,
   type MaintenanceProject,
 } from "../../api/maintenanceProjects";
+import MaintenanceMigrationEvidence from "./MaintenanceMigrationEvidence";
 import "./maintenanceMigration.css";
 
 
@@ -57,6 +60,13 @@ type DraftProject = {
 };
 
 type CommandMode = "reconcile" | "approve" | null;
+
+type ProjectReviewDraft = {
+  acknowledged: boolean;
+  reason: string;
+  baselineSelected: boolean;
+  openingBalanceIds: string[];
+};
 
 const PAGE_SIZE = 20;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -194,7 +204,58 @@ export default function MaintenanceMigrationPage() {
   const [commandKey, setCommandKey] = useState<string | null>(null);
   const [commandSaving, setCommandSaving] = useState(false);
   const [commandError, setCommandError] = useState<string | null>(null);
+  const [reviewDrafts, setReviewDrafts] = useState<Record<string, ProjectReviewDraft>>({});
+  const [activeEvidenceProjectId, setActiveEvidenceProjectId] = useState<string | null>(null);
   const loadGeneration = useRef(0);
+
+  const reviewIdentity = useMemo(() => {
+    if (!selected || selected.status !== "previewed") return "";
+    return [
+      selected.run_id,
+      selected.version,
+      ...selected.plans.flatMap((plan) => [
+        plan.project_id,
+        plan.version,
+        plan.historical_baseline?.baseline_id ?? "no-baseline",
+        plan.historical_baseline?.version ?? 0,
+        ...plan.opening_balances.flatMap((row) => [row.opening_balance_id, row.version]),
+      ]),
+    ].join(":");
+  }, [selected]);
+
+  useEffect(() => {
+    if (!selected || !reviewIdentity) {
+      setReviewDrafts({});
+      return;
+    }
+    setReviewDrafts(Object.fromEntries(selected.plans.map((plan) => [
+      plan.project_id,
+      {
+        acknowledged: false,
+        reason: "",
+        baselineSelected: false,
+        openingBalanceIds: [],
+      },
+    ])));
+  }, [reviewIdentity]);
+
+  useEffect(() => {
+    setActiveEvidenceProjectId(selected?.plans[0]?.project_id ?? null);
+  }, [selected?.run_id]);
+
+  const reviewReady = useMemo(() => (
+    Boolean(selected)
+    && selected?.status === "previewed"
+    && selected.plans.length > 0
+    && selected.plans.every((plan) => {
+      const draft = reviewDrafts[plan.project_id];
+      if (!draft?.acknowledged || !draft.reason.trim()) return false;
+      if (plan.historical_baseline && !draft.baselineSelected) return false;
+      return plan.opening_balances.every((row) => (
+        draft.openingBalanceIds.includes(row.opening_balance_id)
+      ));
+    })
+  ), [reviewDrafts, selected]);
 
   const loadRuns = useCallback(async (requestedPage: number, requestedStatuses: MigrationRunStatus[]) => {
     const generation = ++loadGeneration.current;
@@ -318,14 +379,62 @@ export default function MaintenanceMigrationPage() {
   };
 
   const openCommand = (mode: Exclude<CommandMode, null>) => {
+    if (mode === "reconcile" && !reviewReady) return;
     setCommandMode(mode);
     setCommandReason("");
     setCommandKey(operationKey());
     setCommandError(null);
   };
 
+  const updateReviewDraft = (
+    projectId: string,
+    patch: Partial<ProjectReviewDraft>,
+  ) => {
+    setReviewDrafts((current) => {
+      const previous = current[projectId] ?? {
+        acknowledged: false,
+        reason: "",
+        baselineSelected: false,
+        openingBalanceIds: [],
+      };
+      return {
+        ...current,
+        [projectId]: {
+          ...previous,
+          ...patch,
+        },
+      };
+    });
+    setCommandError(null);
+  };
+
+  const projectSignoffs = (): MigrationProjectSignoff[] => {
+    if (!selected) return [];
+    return selected.plans.map((plan) => {
+      const draft = reviewDrafts[plan.project_id];
+      return {
+        project_id: plan.project_id,
+        expected_plan_version: plan.version,
+        reason: draft.reason.trim(),
+        historical_baseline: plan.historical_baseline && draft.baselineSelected
+          ? {
+              baseline_id: plan.historical_baseline.baseline_id,
+              expected_version: plan.historical_baseline.version,
+            }
+          : null,
+        opening_balances: plan.opening_balances
+          .filter((row) => draft.openingBalanceIds.includes(row.opening_balance_id))
+          .map((row) => ({
+            opening_balance_id: row.opening_balance_id,
+            expected_version: row.version,
+          })),
+      };
+    });
+  };
+
   const submitCommand = async () => {
     if (!selected || !commandMode || !commandKey || !commandReason.trim()) return;
+    if (commandMode === "reconcile" && !reviewReady) return;
     setCommandSaving(true);
     setCommandError(null);
     try {
@@ -334,6 +443,7 @@ export default function MaintenanceMigrationPage() {
             expected_version: selected.version,
             operation_key: commandKey,
             reason: commandReason.trim(),
+            project_signoffs: projectSignoffs(),
           })
         : await approveMaintenanceMigrationRun(selected.run_id, {
             expected_version: selected.version,
@@ -359,6 +469,9 @@ export default function MaintenanceMigrationPage() {
 
   const projectName = useMemo(() => new Map(
     projects.map((project) => [project.project_id, `${project.project_code} · ${project.display_name}`]),
+  ), [projects]);
+  const projectCode = useMemo(() => new Map(
+    projects.map((project) => [project.project_id, project.project_code]),
   ), [projects]);
 
   const columns = useMemo<ColumnsType<MigrationRunSummary>>(() => [
@@ -652,7 +765,13 @@ export default function MaintenanceMigrationPage() {
         extra={selected ? (
           <Space>
             {selected.status === "previewed" && (
-              <Button type="primary" onClick={() => openCommand("reconcile")}>实名对账</Button>
+              <Button
+                type="primary"
+                disabled={!reviewReady}
+                onClick={() => openCommand("reconcile")}
+              >
+                实名对账
+              </Button>
             )}
             {selected.status === "reconciled" && (
               <Button type="primary" disabled={!selected.preview.can_approve} onClick={() => openCommand("approve")}>独立审批</Button>
@@ -688,14 +807,27 @@ export default function MaintenanceMigrationPage() {
                   <Typography.Text copyable code>{selected.manifest_hash}</Typography.Text>
                 </Descriptions.Item>
               )}
+              {selected.manifest_key_id && (
+                <Descriptions.Item label="manifest 签名密钥 ID" span={2}>
+                  <Typography.Text copyable code>{selected.manifest_key_id}</Typography.Text>
+                </Descriptions.Item>
+              )}
             </Descriptions>
             {selected.plans.map((plan) => {
               const preview = selected.preview.projects.find((item) => item.project_id === plan.project_id);
+              const label = projectName.get(plan.project_id) || plan.project_id;
+              const code = projectCode.get(plan.project_id) || plan.project_id;
+              const review = reviewDrafts[plan.project_id] ?? {
+                acknowledged: false,
+                reason: "",
+                baselineSelected: false,
+                openingBalanceIds: [],
+              };
               return (
                 <Card
                   key={plan.plan_id}
                   className="maintenance-migration-plan"
-                  title={projectName.get(plan.project_id) || plan.project_id}
+                  title={label}
                   extra={plan.blocker_count ? <Tag color="red">{plan.blocker_count} 个阻塞项</Tag> : <Tag color="green">可复算</Tag>}
                 >
                   <div className="maintenance-migration-cost-grid">
@@ -704,6 +836,128 @@ export default function MaintenanceMigrationPage() {
                     <div><span>已审批报销</span><strong>{money(plan.cost.approved_expense_ex_tax)}</strong></div>
                     <div><span>项目成本合计</span><strong>{money(plan.cost.total_ex_tax)}</strong></div>
                   </div>
+                  <Divider orientation="left">候选成本基线与库存期初</Divider>
+                  {selected.status === "previewed" && (
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="候选默认不批准，必须逐项查看并明确勾选"
+                      description="后端会校验本项目、计划版本和候选版本的精确集合；漏选、多选或来源变化都会整批拒绝。"
+                      style={{ marginBottom: 12 }}
+                    />
+                  )}
+                  {plan.historical_baseline ? (
+                    <div className="maintenance-migration-review-candidate">
+                      <div>
+                        <Typography.Text strong>历史成本基线</Typography.Text>
+                        <div>
+                          未税 {money(plan.historical_baseline.amount_ex_tax)} · 含税 {money(plan.historical_baseline.amount_inc_tax)}
+                        </div>
+                        <Typography.Text type="secondary" copyable code>
+                          {plan.historical_baseline.evidence_hash}
+                        </Typography.Text>
+                      </div>
+                      {selected.status === "previewed" ? (
+                        <Checkbox
+                          aria-label={`确认 ${code} 历史成本基线`}
+                          checked={review.baselineSelected}
+                          onChange={(event) => updateReviewDraft(plan.project_id, {
+                            baselineSelected: event.target.checked,
+                            acknowledged: false,
+                          })}
+                        >
+                          明确批准此基线
+                        </Checkbox>
+                      ) : (
+                        <Tag color={plan.historical_baseline.approval_state === "approved" ? "green" : "orange"}>
+                          {plan.historical_baseline.approval_state === "approved" ? "已批准" : "待批准"}
+                        </Tag>
+                      )}
+                    </div>
+                  ) : (
+                    <Typography.Paragraph type="secondary">本项目不使用历史成本基线候选。</Typography.Paragraph>
+                  )}
+                  <Table
+                    size="small"
+                    rowKey="opening_balance_id"
+                    pagination={false}
+                    dataSource={plan.opening_balances}
+                    locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有库存期初候选" /> }}
+                    columns={[
+                      ...(selected.status === "previewed" ? [{
+                        title: "明确选择",
+                        key: "selection",
+                        width: 120,
+                        render: (_value: unknown, row: MigrationRunDetail["plans"][number]["opening_balances"][number]) => (
+                          <Checkbox
+                            aria-label={`确认 ${code} 库存期初 ${row.pn || row.balance_key}`}
+                            checked={review.openingBalanceIds.includes(row.opening_balance_id)}
+                            onChange={(event) => updateReviewDraft(plan.project_id, {
+                              openingBalanceIds: event.target.checked
+                                ? [...review.openingBalanceIds, row.opening_balance_id]
+                                : review.openingBalanceIds.filter((id) => id !== row.opening_balance_id),
+                              acknowledged: false,
+                            })}
+                          >
+                            批准
+                          </Checkbox>
+                        ),
+                      }] : [{
+                        title: "状态",
+                        dataIndex: "approval_state",
+                        width: 100,
+                        render: (value: string) => (
+                          <Tag color={value === "approved" ? "green" : "orange"}>
+                            {value === "approved" ? "已批准" : "待批准"}
+                          </Tag>
+                        ),
+                      }]),
+                      { title: "库存稳定键", dataIndex: "balance_key" },
+                      { title: "PN", dataIndex: "pn", render: (value: string | null) => value || "—" },
+                      { title: "数量", dataIndex: "quantity", width: 90 },
+                      {
+                        title: "证据 SHA-256",
+                        dataIndex: "evidence_hash",
+                        render: (value: string) => <Typography.Text copyable code>{value}</Typography.Text>,
+                      },
+                    ]}
+                  />
+                  {selected.status === "previewed" ? (
+                    <div className="maintenance-migration-project-signoff">
+                      <label>
+                        <span>本项目对账理由</span>
+                        <Input.TextArea
+                          aria-label={`${code} 项目对账理由`}
+                          rows={2}
+                          value={review.reason}
+                          maxLength={1000}
+                          showCount
+                          placeholder="说明本项目来源、金额、数量和异常项的核对结论"
+                          onChange={(event) => updateReviewDraft(plan.project_id, {
+                            reason: event.target.value,
+                            acknowledged: false,
+                          })}
+                        />
+                      </label>
+                      <Checkbox
+                        aria-label={`已查看 ${code} 全部分页证据并确认候选完整`}
+                        checked={review.acknowledged}
+                        onChange={(event) => updateReviewDraft(plan.project_id, {
+                          acknowledged: event.target.checked,
+                        })}
+                      >
+                        我已查看本项目的分页来源证据，并确认以上候选完整、版本正确
+                      </Checkbox>
+                    </div>
+                  ) : plan.reconciled_by ? (
+                    <Alert
+                      type="success"
+                      showIcon
+                      message={`本项目已由 ${plan.reconciled_by} 实名对账`}
+                      description={plan.reconciliation_reason || undefined}
+                      style={{ marginTop: 12 }}
+                    />
+                  ) : null}
                   <Divider orientation="left">差异与阻塞</Divider>
                   {plan.discrepancies.length ? (
                     <Space direction="vertical" style={{ width: "100%" }}>
@@ -732,6 +986,24 @@ export default function MaintenanceMigrationPage() {
                       { title: "期末", dataIndex: "closing_quantity" },
                     ]}
                   />
+                  <Divider orientation="left">来源证据</Divider>
+                  <Button
+                    type="link"
+                    className="maintenance-migration-evidence-toggle"
+                    onClick={() => setActiveEvidenceProjectId((current) => (
+                      current === plan.project_id ? null : plan.project_id
+                    ))}
+                  >
+                    {activeEvidenceProjectId === plan.project_id ? "收起分页证据" : "查看分页证据"}
+                  </Button>
+                  {activeEvidenceProjectId === plan.project_id && preview && (
+                    <MaintenanceMigrationEvidence
+                      runId={selected.run_id}
+                      projectId={plan.project_id}
+                      projectLabel={label}
+                      preview={preview}
+                    />
+                  )}
                 </Card>
               );
             })}
@@ -772,9 +1044,9 @@ export default function MaintenanceMigrationPage() {
           showIcon
           style={{ marginBottom: 16 }}
           message={commandMode === "reconcile"
-            ? "本操作会实名批准候选成本基线和库存期初"
+            ? "只会批准刚才逐项目、逐候选明确勾选的精确集合"
             : "最终审批人必须不同于创建人与对账人"}
-          description="任何来源变化都会使当前快照失效；本操作仍不会启用生产。"
+          description="任何项目、候选版本或来源快照变化都会使整批操作失败；本操作仍不会启用生产。"
         />
         {commandError && <Alert type="error" showIcon message={commandError} style={{ marginBottom: 16 }} />}
         <Input.TextArea

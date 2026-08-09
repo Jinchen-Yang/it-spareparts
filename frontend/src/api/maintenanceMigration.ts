@@ -39,6 +39,20 @@ export interface MigrationProjectPreview {
   project_id: string;
   cutover_date: string;
   source_snapshot_hash: string;
+  source_coverage: {
+    warehouse_source_ready: boolean;
+    project_version: number;
+    [key: string]: unknown;
+  };
+  evidence_summary: {
+    historical_baseline: number;
+    historical_site_issues: number;
+    post_cutover_site_issues: number;
+    expenses: number;
+    opening_balances: number;
+    inventory_movements: number;
+    [key: string]: number;
+  };
   cost: {
     historical_baseline_ex_tax: string;
     historical_baseline_inc_tax: string;
@@ -69,6 +83,9 @@ export interface MigrationPlanDetail {
   historical_mode: string;
   blocker_count: number;
   status: MigrationRunStatus;
+  reconciled_by: string | null;
+  reconciled_at: string | null;
+  reconciliation_reason: string | null;
   version: number;
   cost: {
     historical_ex_tax: string;
@@ -87,6 +104,9 @@ export interface MigrationPlanDetail {
     evidence_hash: string;
     approval_state: "pending" | "approved";
     approved_by: string | null;
+    approved_at: string | null;
+    approval_reason: string | null;
+    version: number;
   };
   opening_balances: Array<{
     opening_balance_id: string;
@@ -96,6 +116,9 @@ export interface MigrationPlanDetail {
     evidence_hash: string;
     approval_state: "pending" | "approved";
     approved_by: string | null;
+    approved_at: string | null;
+    approval_reason: string | null;
+    version: number;
   }>;
   discrepancies: Array<{
     discrepancy_id: string;
@@ -105,6 +128,41 @@ export interface MigrationPlanDetail {
     status: "open" | "resolved";
     detail: { detail?: string };
     resolved_by: string | null;
+    version: number;
+  }>;
+}
+
+export type MigrationEvidenceSection =
+  | "historical_site_issues"
+  | "post_cutover_site_issues"
+  | "expenses"
+  | "opening_balances"
+  | "inventory_movements";
+
+export type MigrationEvidenceRow = Record<string, unknown>;
+
+export interface MigrationEvidencePage {
+  run_id: string;
+  project_id: string;
+  section: MigrationEvidenceSection;
+  source_snapshot_hash: string;
+  items: MigrationEvidenceRow[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface MigrationProjectSignoff {
+  project_id: string;
+  expected_plan_version: number;
+  reason: string;
+  historical_baseline: null | {
+    baseline_id: string;
+    expected_version: number;
+  };
+  opening_balances: Array<{
+    opening_balance_id: string;
+    expected_version: number;
   }>;
 }
 
@@ -123,6 +181,7 @@ export interface MigrationRunDetail {
   };
   manifest: Record<string, unknown> | null;
   manifest_hash: string | null;
+  manifest_key_id: string | null;
   created_by: string;
   reconciled_by: string | null;
   approved_by: string | null;
@@ -146,6 +205,7 @@ export interface MigrationRunSummary {
   status: MigrationRunStatus;
   rule_version: string;
   source_snapshot_hash: string;
+  manifest_key_id?: string | null;
   blocker_count: number;
   created_by: string;
   reconciled_by: string | null;
@@ -171,9 +231,30 @@ export const searchMaintenanceMigrationRuns = (body: {
 export const getMaintenanceMigrationRun = (runId: string) =>
   api.get<MigrationRunDetail>(`/maintenance/migration-runs/${runId}`);
 
+export const getMaintenanceMigrationEvidence = (
+  runId: string,
+  projectId: string,
+  params: {
+    section: MigrationEvidenceSection;
+    page: number;
+    page_size: number;
+  },
+) => api.get<MigrationEvidencePage>(
+  `/maintenance/migration-runs/${runId}/projects/${projectId}/evidence`,
+  { params },
+);
+
+export const getMaintenanceMigrationManifest = (runId: string) =>
+  api.get<Record<string, unknown>>(`/maintenance/migration-runs/${runId}/manifest`);
+
 export const reconcileMaintenanceMigrationRun = (
   runId: string,
-  body: { expected_version: number; operation_key: string; reason: string },
+  body: {
+    expected_version: number;
+    operation_key: string;
+    reason: string;
+    project_signoffs: MigrationProjectSignoff[];
+  },
 ) => api.post<MigrationRunDetail>(
   `/maintenance/migration-runs/${runId}/reconcile`,
   body,

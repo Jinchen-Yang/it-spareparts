@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   approveMaintenanceMigrationRun: vi.fn(),
+  getMaintenanceMigrationEvidence: vi.fn(),
   getMaintenanceMigrationRun: vi.fn(),
   previewMaintenanceMigration: vi.fn(),
   reconcileMaintenanceMigrationRun: vi.fn(),
@@ -55,6 +56,18 @@ const detail = {
       project_id: "project-1",
       cutover_date: "2026-08-01",
       source_snapshot_hash: "f".repeat(64),
+      source_coverage: {
+        warehouse_source_ready: true,
+        project_version: 1,
+      },
+      evidence_summary: {
+        historical_baseline: 1,
+        historical_site_issues: 0,
+        post_cutover_site_issues: 0,
+        expenses: 0,
+        opening_balances: 1,
+        inventory_movements: 1,
+      },
       cost: {
         historical_baseline_ex_tax: "0.00",
         historical_baseline_inc_tax: "0.00",
@@ -83,6 +96,7 @@ const detail = {
   },
   manifest: null,
   manifest_hash: null,
+  manifest_key_id: null,
   created_by: "creator-user",
   reconciled_by: null,
   approved_by: null,
@@ -95,6 +109,9 @@ const detail = {
     historical_mode: "approved_cost_baseline",
     blocker_count: 2,
     status: "previewed" as const,
+    reconciled_by: null,
+    reconciled_at: null,
+    reconciliation_reason: null,
     version: 1,
     cost: {
       historical_ex_tax: "0.00",
@@ -113,6 +130,9 @@ const detail = {
       evidence_hash: "a".repeat(64),
       approval_state: "pending" as const,
       approved_by: null,
+      approved_at: null,
+      approval_reason: null,
+      version: 1,
     },
     opening_balances: [{
       opening_balance_id: "opening-1",
@@ -122,6 +142,9 @@ const detail = {
       evidence_hash: "b".repeat(64),
       approval_state: "pending" as const,
       approved_by: null,
+      approved_at: null,
+      approval_reason: null,
+      version: 1,
     }],
     discrepancies: [{
       discrepancy_id: "discrepancy-1",
@@ -131,6 +154,7 @@ const detail = {
       status: "open" as const,
       detail: { detail: "历史成本基线尚未实名审批" },
       resolved_by: null,
+      version: 1,
     }],
   }],
   events: [{
@@ -171,6 +195,28 @@ beforeEach(() => {
     },
   });
   mocks.getMaintenanceMigrationRun.mockResolvedValue({ data: detail });
+  mocks.getMaintenanceMigrationEvidence.mockResolvedValue({
+    data: {
+      run_id: "migration-run-1",
+      project_id: "project-1",
+      section: "inventory_movements",
+      source_snapshot_hash: "f".repeat(64),
+      items: [{
+        movement_id: "movement-1",
+        document_id: "document-1",
+        document_no: "FH-001",
+        document_date: "2026-08-03",
+        movement_type: "delivery",
+        balance_key: "project-1:part-1",
+        pn: "PN-001",
+        sn: "SN-001",
+        quantity: "3",
+      }],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    },
+  });
 });
 
 afterEach(() => {
@@ -190,6 +236,13 @@ describe("MaintenanceMigrationPage", () => {
     expect(screen.getByText("切换后现场领用")).toBeInTheDocument();
     expect(screen.getByText("正式可用入库")).toBeInTheDocument();
     expect(screen.getByText("历史成本基线尚未实名审批")).toBeInTheDocument();
+    expect(await screen.findByText("FH-001")).toBeInTheDocument();
+    expect(screen.getByText("SN-001")).toBeInTheDocument();
+    expect(mocks.getMaintenanceMigrationEvidence).toHaveBeenCalledWith(
+      "migration-run-1",
+      "project-1",
+      { section: "inventory_movements", page: 1, page_size: 20 },
+    );
     expect(screen.queryByRole("button", { name: /启用生产/ })).not.toBeInTheDocument();
   });
 
@@ -208,7 +261,18 @@ describe("MaintenanceMigrationPage", () => {
     render(<MaintenanceMigrationPage />);
     await screen.findByText("creator-user / — / —");
     fireEvent.click(screen.getByRole("button", { name: "查看" }));
-    fireEvent.click(await screen.findByRole("button", { name: "实名对账" }));
+    const reconcile = await screen.findByRole("button", { name: "实名对账" });
+    expect(reconcile).toBeDisabled();
+    fireEvent.click(screen.getByRole("checkbox", { name: "确认 MIG-001 历史成本基线" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "确认 MIG-001 库存期初 PN-001" }));
+    fireEvent.change(screen.getByLabelText("MIG-001 项目对账理由"), {
+      target: { value: "逐项核对本项目来源、金额与数量" },
+    });
+    fireEvent.click(screen.getByRole("checkbox", {
+      name: "已查看 MIG-001 全部分页证据并确认候选完整",
+    }));
+    expect(reconcile).toBeEnabled();
+    fireEvent.click(reconcile);
     fireEvent.change(screen.getByPlaceholderText("填写核对依据和结论；必须是可审计的业务理由"), {
       target: { value: "已逐项检查成本基线和库存期初" },
     });
@@ -221,6 +285,52 @@ describe("MaintenanceMigrationPage", () => {
     const secondBody = mocks.reconcileMaintenanceMigrationRun.mock.calls[1][1];
     expect(secondBody.operation_key).toBe(firstBody.operation_key);
     expect(secondBody.expected_version).toBe(1);
+    expect(secondBody.project_signoffs).toEqual([{
+      project_id: "project-1",
+      expected_plan_version: 1,
+      reason: "逐项核对本项目来源、金额与数量",
+      historical_baseline: { baseline_id: "baseline-1", expected_version: 1 },
+      opening_balances: [{ opening_balance_id: "opening-1", expected_version: 1 }],
+    }]);
+  });
+
+  it("证据表按服务端分页读取而不是把全部来源塞进详情", async () => {
+    mocks.getMaintenanceMigrationEvidence.mockImplementation(
+      (_runId: string, _projectId: string, params: { page: number }) => Promise.resolve({
+        data: {
+          run_id: "migration-run-1",
+          project_id: "project-1",
+          section: "inventory_movements",
+          source_snapshot_hash: "f".repeat(64),
+          items: [{
+            movement_id: `movement-${params.page}`,
+            document_id: `document-${params.page}`,
+            document_no: params.page === 1 ? "FH-001" : "FH-021",
+            document_date: "2026-08-03",
+            movement_type: "delivery",
+            balance_key: "project-1:part-1",
+            pn: "PN-001",
+            sn: null,
+            quantity: "3",
+          }],
+          total: 21,
+          page: params.page,
+          page_size: 20,
+        },
+      }),
+    );
+    render(<MaintenanceMigrationPage />);
+    await screen.findByText("creator-user / — / —");
+    fireEvent.click(screen.getByRole("button", { name: "查看" }));
+
+    expect(await screen.findByText("FH-001")).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle("2"));
+    expect(await screen.findByText("FH-021")).toBeInTheDocument();
+    expect(mocks.getMaintenanceMigrationEvidence).toHaveBeenLastCalledWith(
+      "migration-run-1",
+      "project-1",
+      { section: "inventory_movements", page: 2, page_size: 20 },
+    );
   });
 
   it("新建 dry-run 前先阻止缺理由和缺项目的黑盒提交", async () => {
