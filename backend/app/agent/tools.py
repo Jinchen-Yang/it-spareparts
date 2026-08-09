@@ -8,11 +8,14 @@
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
+from types import MappingProxyType
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
@@ -32,6 +35,19 @@ _SEARCH_LIMIT_MAX = 20     # search_parts 返回条数上限
 _RECENT_LIMIT_MAX = 50     # list_recent_purchases 返回条数上限
 _RECENT_DAYS_MAX = 365     # list_recent_purchases 时间窗上限（天）
 _READ_ROWS_MAX = agent_files._MAX_READ_ROWS   # read_file_rows 行数上限（真值源在 agent_files）
+_WRITE_CELLS_MAX = agent_files._MAX_WRITE_CELLS
+_REPORT_ROWS_MAX = agent_files._MAX_REPORT_ROWS
+
+_QUERY_CHARS_MAX = 500
+_PN_CHARS_MAX = 256
+_FILE_ID_CHARS_MAX = 64
+_SHEET_CHARS_MAX = 128
+_OUTPUT_NAME_CHARS_MAX = 255
+_PROJECT_CHARS_MAX = 255
+_FILTER_CHARS_MAX = 500
+_SKILL_ID_CHARS_MAX = 128
+_REPORT_COLUMNS_MAX = 64
+_REPORT_CELL_CHARS_MAX = 2_000
 
 
 class ToolEffect(str, Enum):
@@ -67,6 +83,46 @@ ToolPermission = Callable[[security.UserContext], bool]
 
 
 @dataclass(frozen=True)
+class ToolBudget:
+    """Immutable per-capability argument budget.
+
+    Field-specific limits use tuples instead of dicts so a frozen ``ToolSpec`` cannot retain a
+    mutable policy object. Generic payload/depth/node limits also constrain free-form cell values.
+    """
+
+    max_payload_bytes: int
+    max_depth: int
+    max_nodes: int
+    max_any_string_chars: int
+    max_query_chars: int | None = None
+    max_pn_chars: int | None = None
+    max_limit: int | None = None
+    max_days: int | None = None
+    max_page: int | None = None
+    max_rows: int | None = None
+    max_items: int | None = None
+    max_cells: int | None = None
+    max_sheets: int | None = None
+    max_output_name_chars: int | None = None
+    max_sheet_name_chars: int | None = None
+    max_columns: int | None = None
+    string_limits: tuple[tuple[str, int], ...] = ()
+    integer_ranges: tuple[tuple[str, int, int], ...] = ()
+    collection_limits: tuple[tuple[str, int], ...] = ()
+    collection_string_limits: tuple[tuple[str, int], ...] = ()
+    row_width_limits: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class ToolValidationFailure:
+    code: str
+    message: str
+
+
+ToolArgumentValidator = Callable[[object, dict, ToolBudget], ToolValidationFailure | None]
+
+
+@dataclass(frozen=True)
 class ToolSpec:
     """Single registration unit for one model-visible server capability."""
 
@@ -78,6 +134,9 @@ class ToolSpec:
     permission_id: str
     permission: ToolPermission
     enabled: bool
+    budget: ToolBudget
+    validator: ToolArgumentValidator
+    implementation_version: str
 
     @property
     def name(self) -> str:
@@ -819,72 +878,376 @@ def _effects(*effects: ToolEffect) -> frozenset[ToolEffect]:
     return frozenset(effects)
 
 
+_ARGS_INVALID = ToolValidationFailure(
+    "AGENT_TOOL_ARGS_INVALID",
+    "工具参数不符合安全约束",
+)
+_BUDGET_EXCEEDED = ToolValidationFailure(
+    "AGENT_TOOL_BUDGET_EXCEEDED",
+    "工具参数超过安全预算",
+)
+_VALIDATOR_FAILED = ToolValidationFailure(
+    "AGENT_TOOL_VALIDATOR_FAILED",
+    "工具参数安全校验失败",
+)
+
+
+def _json_shape(value: object, depth: int = 1) -> tuple[int, int]:
+    """Return (maximum depth, node count) for JSON-compatible input."""
+    if isinstance(value, dict):
+        child_shapes = [_json_shape(item, depth + 1) for item in value.values()]
+    elif isinstance(value, list):
+        child_shapes = [_json_shape(item, depth + 1) for item in value]
+    else:
+        child_shapes = []
+    return (
+        max([depth, *(item[0] for item in child_shapes)]),
+        1 + sum(item[1] for item in child_shapes),
+    )
+
+
+def _schema_type_matches(value: object, expected: object) -> bool:
+    expected_types = expected if isinstance(expected, list) else [expected]
+    for item in expected_types:
+        if item == "object" and isinstance(value, dict):
+            return True
+        if item == "array" and isinstance(value, list):
+            return True
+        if item == "string" and isinstance(value, str):
+            return True
+        if item == "integer" and isinstance(value, int) and not isinstance(value, bool):
+            return True
+        if item == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return True
+        if item == "boolean" and isinstance(value, bool):
+            return True
+        if item == "null" and value is None:
+            return True
+    return False
+
+
+def _matches_schema(value: object, schema: object) -> bool:
+    """Small fail-closed validator for the JSON-Schema subset used by Agent tools."""
+    if not isinstance(schema, dict):
+        return False
+    if not schema:  # explicitly unconstrained JSON value, still covered by generic budgets
+        return True
+    expected = schema.get("type")
+    if expected is not None and not _schema_type_matches(value, expected):
+        return False
+    if "enum" in schema and value not in schema["enum"]:
+        return False
+    if isinstance(value, dict) and expected == "object":
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        if not isinstance(properties, dict) or not isinstance(required, list):
+            return False
+        if any(key not in value for key in required):
+            return False
+        # Model output is untrusted: undeclared keys never flow to a handler.
+        if any(not isinstance(key, str) or key not in properties for key in value):
+            return False
+        return all(_matches_schema(item, properties[key]) for key, item in value.items())
+    if isinstance(value, list) and expected == "array":
+        item_schema = schema.get("items")
+        return item_schema is None or all(_matches_schema(item, item_schema) for item in value)
+    return True
+
+
+def _validate_tool_arguments(
+    args: object,
+    parameters: dict,
+    budget: ToolBudget,
+) -> ToolValidationFailure | None:
+    """Validate schema and resource budgets before any handler or file/database operation."""
+    if not isinstance(args, dict) or not _matches_schema(args, parameters):
+        return _ARGS_INVALID
+    try:
+        encoded = json.dumps(
+            args,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        max_depth, nodes = _json_shape(args)
+    except (TypeError, ValueError, RecursionError):
+        return _ARGS_INVALID
+    if (
+        len(encoded) > budget.max_payload_bytes
+        or max_depth > budget.max_depth
+        or nodes > budget.max_nodes
+    ):
+        return _BUDGET_EXCEEDED
+
+    def too_long(value: object, limit: int | None) -> bool:
+        return limit is not None and isinstance(value, str) and len(value) > limit
+
+    def too_large(value: object, limit: int | None) -> bool:
+        return limit is not None and isinstance(value, list) and len(value) > limit
+
+    def over_positive(value: object, limit: int | None) -> bool:
+        return (
+            limit is not None
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and (value < 1 or value > limit)
+        )
+
+    stack = [args]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str) and len(current) > budget.max_any_string_chars:
+            return _BUDGET_EXCEEDED
+        if isinstance(current, dict):
+            if any(not isinstance(key, str) for key in current):
+                return _ARGS_INVALID
+            if any(len(key) > budget.max_any_string_chars for key in current):
+                return _BUDGET_EXCEEDED
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+
+    if any(too_long(args.get(key), budget.max_query_chars) for key in ("query", "q")):
+        return _BUDGET_EXCEEDED
+    if too_long(args.get("pn_std"), budget.max_pn_chars):
+        return _BUDGET_EXCEEDED
+    if any(over_positive(args.get(key), budget.max_limit) for key in ("limit", "top")):
+        return _BUDGET_EXCEEDED
+    if over_positive(args.get("days"), budget.max_days):
+        return _BUDGET_EXCEEDED
+    if over_positive(args.get("page"), budget.max_page):
+        return _BUDGET_EXCEEDED
+    if over_positive(args.get("max_rows"), budget.max_rows):
+        return _BUDGET_EXCEEDED
+    if too_large(args.get("rows"), budget.max_rows):
+        return _BUDGET_EXCEEDED
+    if any(
+        too_large(args.get(key), budget.max_items)
+        for key in ("queries", "headers", "money_cols", "items")
+    ):
+        return _BUDGET_EXCEEDED
+    if too_large(args.get("cells"), budget.max_cells):
+        return _BUDGET_EXCEEDED
+    if too_large(args.get("sheets"), budget.max_sheets):
+        return _BUDGET_EXCEEDED
+    if too_long(args.get("output_name"), budget.max_output_name_chars):
+        return _BUDGET_EXCEEDED
+    if too_long(args.get("sheet"), budget.max_sheet_name_chars):
+        return _BUDGET_EXCEEDED
+    if budget.max_columns is not None:
+        if too_large(args.get("headers"), budget.max_columns):
+            return _BUDGET_EXCEEDED
+        rows = args.get("rows")
+        if isinstance(rows, list) and any(
+            isinstance(row, list) and len(row) > budget.max_columns for row in rows
+        ):
+            return _BUDGET_EXCEEDED
+
+    for key, limit in budget.string_limits:
+        if too_long(args.get(key), limit):
+            return _BUDGET_EXCEEDED
+    for key, minimum, maximum in budget.integer_ranges:
+        value = args.get(key)
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and not minimum <= value <= maximum
+        ):
+            return _BUDGET_EXCEEDED
+    for key, limit in budget.collection_limits:
+        if too_large(args.get(key), limit):
+            return _BUDGET_EXCEEDED
+    for key, limit in budget.collection_string_limits:
+        values = args.get(key)
+        if isinstance(values, list) and any(
+            isinstance(value, str) and len(value) > limit for value in values
+        ):
+            return _BUDGET_EXCEEDED
+    for key, limit in budget.row_width_limits:
+        values = args.get(key)
+        if isinstance(values, list) and any(
+            isinstance(value, list) and len(value) > limit for value in values
+        ):
+            return _BUDGET_EXCEEDED
+    return None
+
+
+def _budget(
+    *,
+    payload: int = 64 * 1024,
+    depth: int = 8,
+    nodes: int = 2_000,
+    string_chars: int = _REPORT_CELL_CHARS_MAX,
+    **kwargs,
+) -> ToolBudget:
+    return ToolBudget(
+        max_payload_bytes=payload,
+        max_depth=depth,
+        max_nodes=nodes,
+        max_any_string_chars=string_chars,
+        **kwargs,
+    )
+
+
+_TOOL_BUDGETS = MappingProxyType({
+    "search_parts": _budget(max_query_chars=_QUERY_CHARS_MAX, max_limit=_SEARCH_LIMIT_MAX),
+    "get_part_overview": _budget(max_pn_chars=_PN_CHARS_MAX),
+    "inspect_file": _budget(
+        string_limits=(("file_id", _FILE_ID_CHARS_MAX),),
+        max_sheets=agent_files._MAX_INSPECT_SHEETS,
+    ),
+    "read_file_rows": _budget(
+        max_rows=_READ_ROWS_MAX,
+        max_sheet_name_chars=_SHEET_CHARS_MAX,
+        string_limits=(("file_id", _FILE_ID_CHARS_MAX),),
+        integer_ranges=(("start_row", 1, 1_048_576),),
+    ),
+    "lookup_prices_bulk": _budget(
+        max_items=_BULK_MAX,
+        collection_string_limits=(("queries", _QUERY_CHARS_MAX),),
+    ),
+    "write_excel": _budget(
+        payload=4 * 1024 * 1024,
+        nodes=25_000,
+        max_cells=_WRITE_CELLS_MAX,
+        max_sheet_name_chars=31,
+        max_output_name_chars=_OUTPUT_NAME_CHARS_MAX,
+        string_limits=(("base_file_id", _FILE_ID_CHARS_MAX),),
+    ),
+    "read_document": _budget(string_limits=(("file_id", _FILE_ID_CHARS_MAX),)),
+    "read_document_with_vision": _budget(
+        string_limits=(("file_id", _FILE_ID_CHARS_MAX),),
+    ),
+    "write_report": _budget(
+        payload=8 * 1024 * 1024,
+        depth=10,
+        nodes=400_000,
+        max_rows=_REPORT_ROWS_MAX,
+        max_items=_REPORT_COLUMNS_MAX,
+        max_output_name_chars=_OUTPUT_NAME_CHARS_MAX,
+        max_columns=_REPORT_COLUMNS_MAX,
+        string_limits=(("title", _OUTPUT_NAME_CHARS_MAX),),
+        collection_string_limits=(("headers", _OUTPUT_NAME_CHARS_MAX),),
+        row_width_limits=(("rows", _REPORT_COLUMNS_MAX),),
+    ),
+    "list_recent_purchases": _budget(
+        max_query_chars=_QUERY_CHARS_MAX,
+        max_limit=_RECENT_LIMIT_MAX,
+        max_days=_RECENT_DAYS_MAX,
+        string_limits=(("supplier", _FILTER_CHARS_MAX),),
+    ),
+    "get_profit_ranking": _budget(
+        string_limits=(("date_from", 10), ("date_to", 10)),
+    ),
+    "get_purchase_analysis": _budget(
+        max_query_chars=_QUERY_CHARS_MAX,
+        max_limit=50,
+        max_days=_RECENT_DAYS_MAX,
+        string_limits=(("supplier", _FILTER_CHARS_MAX),),
+    ),
+    "get_inventory": _budget(max_query_chars=_QUERY_CHARS_MAX, max_limit=50),
+    "get_maintenance_board": _budget(),
+    "get_maintenance_projects": _budget(max_query_chars=_QUERY_CHARS_MAX, max_limit=50),
+    "get_maintenance_lines": _budget(
+        max_page=100_000,
+        string_limits=(("project", _PROJECT_CHARS_MAX), ("month", 7)),
+    ),
+    "get_cancellation_stats": _budget(max_days=3_650),
+    "list_skills": _budget(),
+    "get_skill": _budget(string_limits=(("skill", _SKILL_ID_CHARS_MAX),)),
+})
+
+
+def _spec(
+    name: str,
+    handler: ToolHandler,
+    effects: frozenset[ToolEffect],
+    egress: EgressEffect,
+    sensitivity: DataSensitivity,
+    permission_id: str,
+    permission: ToolPermission,
+    enabled: bool = True,
+    implementation_version: str = "1",
+) -> ToolSpec:
+    return ToolSpec(
+        schema=_schema(name),
+        handler=handler,
+        effects=effects,
+        egress=egress,
+        sensitivity=sensitivity,
+        permission_id=permission_id,
+        permission=permission,
+        enabled=enabled,
+        budget=_TOOL_BUDGETS[name],
+        validator=_validate_tool_arguments,
+        implementation_version=implementation_version,
+    )
+
+
 # Single registration source. Effects describe facts at the service boundary, not the
 # implementation detail that a read may write an access log or that an Artifact gets a new ID.
 TOOL_SPECS: tuple[ToolSpec, ...] = (
-    ToolSpec(_schema("search_parts"), _search_parts, _effects(ToolEffect.BUSINESS_READ),
-             EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
-             "page:page_parts", _PagePermission("page_parts"), True),
-    ToolSpec(_schema("get_part_overview"), _get_part_overview,
-             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
-             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_parts",
-             _PagePermission("page_parts"), True),
-    ToolSpec(_schema("inspect_file"), _inspect_file, _effects(ToolEffect.FILE_READ),
-             EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow, True),
-    ToolSpec(_schema("read_file_rows"), _read_file_rows, _effects(ToolEffect.FILE_READ),
-             EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow, True),
-    ToolSpec(_schema("lookup_prices_bulk"), _lookup_prices_bulk,
-             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
-             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_parts",
-             _PagePermission("page_parts"), True),
-    ToolSpec(_schema("write_excel"), _write_excel,
-             _effects(ToolEffect.FILE_READ, ToolEffect.ARTIFACT_CREATE),
-             EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow, True),
-    ToolSpec(_schema("read_document"), _read_document, _effects(ToolEffect.FILE_READ),
-             EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow, True),
-    ToolSpec(_schema("read_document_with_vision"), _read_document_with_vision,
-             _effects(ToolEffect.FILE_READ), EgressEffect.EXTERNAL_PROVIDER,
-             DataSensitivity.CUSTOMER_FILE, "allow", _allow, True),
-    ToolSpec(_schema("write_report"), _write_report, _effects(ToolEffect.ARTIFACT_CREATE),
-             EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
-             "allow", _allow, True),
-    ToolSpec(_schema("list_recent_purchases"), _list_recent_purchases,
-             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
-             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_purchases",
-             _PagePermission("page_purchases"), True),
-    ToolSpec(_schema("get_profit_ranking"), _get_profit_ranking,
-             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
-             DataSensitivity.BUSINESS_CONFIDENTIAL,
-             "page:page_profit:deny_scoped_sales",
-             _PagePermission("page_profit", deny_scoped_sales=True), True),
-    ToolSpec(_schema("get_purchase_analysis"), _get_purchase_analysis,
-             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
-             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_purchases",
-             _PagePermission("page_purchases"), True),
-    ToolSpec(_schema("get_inventory"), _get_inventory, _effects(ToolEffect.BUSINESS_READ),
-             EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
-             "page:page_inventory", _PagePermission("page_inventory"), True),
-    ToolSpec(_schema("get_maintenance_board"), _get_maintenance_board,
-             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
-             DataSensitivity.BUSINESS_CONFIDENTIAL,
-             "page:page_maintenance:deny_scoped_sales",
-             _PagePermission("page_maintenance", deny_scoped_sales=True), True),
-    ToolSpec(_schema("get_maintenance_projects"), _get_maintenance_projects,
-             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
-             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_maintenance",
-             _PagePermission("page_maintenance"), True),
-    ToolSpec(_schema("get_maintenance_lines"), _get_maintenance_lines,
-             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
-             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_maintenance",
-             _PagePermission("page_maintenance"), True),
-    ToolSpec(_schema("get_cancellation_stats"), _get_cancellation_stats,
-             _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
-             DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_purchases",
-             _PagePermission("page_purchases"), True),
-    ToolSpec(_schema("list_skills"), _list_skills, _effects(ToolEffect.BUSINESS_READ),
-             EgressEffect.MODEL_CONTEXT, DataSensitivity.INTERNAL, "allow", _allow, True),
-    ToolSpec(_schema("get_skill"), _get_skill, _effects(ToolEffect.BUSINESS_READ),
-             EgressEffect.MODEL_CONTEXT, DataSensitivity.INTERNAL, "allow", _allow, True),
+    _spec("search_parts", _search_parts, _effects(ToolEffect.BUSINESS_READ),
+          EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+          "page:page_parts", _PagePermission("page_parts")),
+    _spec("get_part_overview", _get_part_overview, _effects(ToolEffect.BUSINESS_READ),
+          EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+          "page:page_parts", _PagePermission("page_parts")),
+    _spec("inspect_file", _inspect_file, _effects(ToolEffect.FILE_READ),
+          EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow),
+    _spec("read_file_rows", _read_file_rows, _effects(ToolEffect.FILE_READ),
+          EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow),
+    _spec("lookup_prices_bulk", _lookup_prices_bulk, _effects(ToolEffect.BUSINESS_READ),
+          EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+          "page:page_parts", _PagePermission("page_parts")),
+    _spec("write_excel", _write_excel,
+          _effects(ToolEffect.FILE_READ, ToolEffect.ARTIFACT_CREATE),
+          EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow),
+    _spec("read_document", _read_document, _effects(ToolEffect.FILE_READ),
+          EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow),
+    _spec("read_document_with_vision", _read_document_with_vision,
+          _effects(ToolEffect.FILE_READ), EgressEffect.EXTERNAL_PROVIDER,
+          DataSensitivity.CUSTOMER_FILE, "allow", _allow),
+    _spec("write_report", _write_report, _effects(ToolEffect.ARTIFACT_CREATE),
+          EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+          "allow", _allow),
+    _spec("list_recent_purchases", _list_recent_purchases,
+          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_purchases",
+          _PagePermission("page_purchases")),
+    _spec("get_profit_ranking", _get_profit_ranking,
+          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          DataSensitivity.BUSINESS_CONFIDENTIAL,
+          "page:page_profit:deny_scoped_sales",
+          _PagePermission("page_profit", deny_scoped_sales=True)),
+    _spec("get_purchase_analysis", _get_purchase_analysis,
+          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_purchases",
+          _PagePermission("page_purchases")),
+    _spec("get_inventory", _get_inventory, _effects(ToolEffect.BUSINESS_READ),
+          EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+          "page:page_inventory", _PagePermission("page_inventory")),
+    _spec("get_maintenance_board", _get_maintenance_board,
+          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          DataSensitivity.BUSINESS_CONFIDENTIAL,
+          "page:page_maintenance:deny_scoped_sales",
+          _PagePermission("page_maintenance", deny_scoped_sales=True)),
+    _spec("get_maintenance_projects", _get_maintenance_projects,
+          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_maintenance",
+          _PagePermission("page_maintenance")),
+    _spec("get_maintenance_lines", _get_maintenance_lines,
+          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_maintenance",
+          _PagePermission("page_maintenance")),
+    _spec("get_cancellation_stats", _get_cancellation_stats,
+          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_purchases",
+          _PagePermission("page_purchases")),
+    _spec("list_skills", _list_skills, _effects(ToolEffect.BUSINESS_READ),
+          EgressEffect.MODEL_CONTEXT, DataSensitivity.INTERNAL, "allow", _allow),
+    _spec("get_skill", _get_skill, _effects(ToolEffect.BUSINESS_READ),
+          EgressEffect.MODEL_CONTEXT, DataSensitivity.INTERNAL, "allow", _allow),
 )
 
 
@@ -894,6 +1257,71 @@ def _valid_effects(effects: object) -> bool:
         and bool(effects)
         and all(isinstance(effect, ToolEffect) for effect in effects)
         and effects.issubset(ALLOWED_TOOL_EFFECTS)
+    )
+
+
+def _valid_budget(budget: object) -> bool:
+    if not isinstance(budget, ToolBudget):
+        return False
+    positive_required = (
+        budget.max_payload_bytes,
+        budget.max_depth,
+        budget.max_nodes,
+        budget.max_any_string_chars,
+    )
+    optional_limits = (
+        budget.max_query_chars,
+        budget.max_pn_chars,
+        budget.max_limit,
+        budget.max_days,
+        budget.max_page,
+        budget.max_rows,
+        budget.max_items,
+        budget.max_cells,
+        budget.max_sheets,
+        budget.max_output_name_chars,
+        budget.max_sheet_name_chars,
+        budget.max_columns,
+    )
+    if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0
+           for value in positive_required):
+        return False
+    if any(value is not None and (
+        not isinstance(value, int) or isinstance(value, bool) or value <= 0
+    ) for value in optional_limits):
+        return False
+    pairs = (
+        budget.string_limits,
+        budget.collection_limits,
+        budget.collection_string_limits,
+        budget.row_width_limits,
+    )
+    if any(
+        not isinstance(items, tuple)
+        or any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or not item[0]
+            or not isinstance(item[1], int)
+            or isinstance(item[1], bool)
+            or item[1] <= 0
+            for item in items
+        )
+        for items in pairs
+    ):
+        return False
+    return (
+        isinstance(budget.integer_ranges, tuple)
+        and all(
+            isinstance(item, tuple)
+            and len(item) == 3
+            and isinstance(item[0], str)
+            and bool(item[0])
+            and all(isinstance(value, int) and not isinstance(value, bool) for value in item[1:])
+            and item[1] <= item[2]
+            for item in budget.integer_ranges
+        )
     )
 
 
@@ -908,6 +1336,11 @@ def _valid_classification(spec: object) -> bool:
         and isinstance(spec.permission_id, str)
         and bool(spec.permission_id)
         and _permission_policy_id(spec.permission) == spec.permission_id
+        and callable(spec.handler)
+        and _valid_budget(spec.budget)
+        and callable(spec.validator)
+        and isinstance(spec.implementation_version, str)
+        and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", spec.implementation_version))
     )
 
 
@@ -934,9 +1367,43 @@ def _index_specs(specs: tuple[ToolSpec, ...]) -> dict[str, ToolSpec]:
     return indexed
 
 
-_SPEC_BY_NAME = _index_specs(TOOL_SPECS)
+_SPEC_BY_NAME = MappingProxyType(_index_specs(TOOL_SPECS))
 
 CAPABILITY_POLICY_VERSION = "v1"
+
+
+def _callable_id(value: object) -> str:
+    module = getattr(value, "__module__", None)
+    qualname = getattr(value, "__qualname__", None)
+    if not isinstance(module, str) or not module or not isinstance(qualname, str) or not qualname:
+        raise ValueError("Capability policy callable lacks a stable identifier")
+    return f"{module}:{qualname}"
+
+
+def _budget_metadata(budget: ToolBudget) -> dict:
+    return {
+        "max_payload_bytes": budget.max_payload_bytes,
+        "max_depth": budget.max_depth,
+        "max_nodes": budget.max_nodes,
+        "max_any_string_chars": budget.max_any_string_chars,
+        "max_query_chars": budget.max_query_chars,
+        "max_pn_chars": budget.max_pn_chars,
+        "max_limit": budget.max_limit,
+        "max_days": budget.max_days,
+        "max_page": budget.max_page,
+        "max_rows": budget.max_rows,
+        "max_items": budget.max_items,
+        "max_cells": budget.max_cells,
+        "max_sheets": budget.max_sheets,
+        "max_output_name_chars": budget.max_output_name_chars,
+        "max_sheet_name_chars": budget.max_sheet_name_chars,
+        "max_columns": budget.max_columns,
+        "string_limits": budget.string_limits,
+        "integer_ranges": budget.integer_ranges,
+        "collection_limits": budget.collection_limits,
+        "collection_string_limits": budget.collection_string_limits,
+        "row_width_limits": budget.row_width_limits,
+    }
 
 
 def capability_policy_fingerprint(
@@ -944,10 +1411,10 @@ def capability_policy_fingerprint(
 ) -> str:
     """Hash canonical, non-secret policy metadata for task/audit correlation.
 
-    Descriptions, handlers, argument values and object identities are intentionally excluded.
-    Stable permission IDs and function parameter contracts are included so durable work can be
-    invalidated when authorization or accepted-input semantics change. Registration order is
-    normalized by capability name.
+    Descriptions, argument values and object identities are intentionally excluded. Stable
+    callable identifiers, implementation versions, budgets, permission IDs and function
+    parameter contracts are included so durable work can be invalidated when enforcement or
+    accepted-input semantics change. Registration order is normalized by capability name.
     """
     selected = TOOL_SPECS if specs is None else specs
     names: set[str] = set()
@@ -968,6 +1435,10 @@ def capability_policy_fingerprint(
         entries.append({
             "name": spec.name,
             "parameters": parameters,
+            "handler": _callable_id(spec.handler),
+            "validator": _callable_id(spec.validator),
+            "implementation_version": spec.implementation_version,
+            "budget": _budget_metadata(spec.budget),
             "effects": sorted(effect.value for effect in spec.effects),
             "egress": spec.egress.value,
             "sensitivity": spec.sensitivity.value,
@@ -977,6 +1448,7 @@ def capability_policy_fingerprint(
     canonical = json.dumps(
         {
             "version": CAPABILITY_POLICY_VERSION,
+            "stable_subject_effects": sorted(effect.value for effect in STABLE_SUBJECT_EFFECTS),
             "capabilities": sorted(entries, key=lambda entry: entry["name"]),
         },
         ensure_ascii=True,
@@ -991,7 +1463,7 @@ CAPABILITY_POLICY_FINGERPRINT = capability_policy_fingerprint()
 # Backward-compatible projections. New code must use TOOL_SPECS/tools_for/dispatch so an
 # accidentally appended schema or handler cannot bypass effect and permission policy.
 TOOLS: list[dict] = [deepcopy(spec.schema) for spec in TOOL_SPECS]
-_REGISTRY: dict[str, ToolHandler] = {spec.name: spec.handler for spec in TOOL_SPECS}
+_REGISTRY = MappingProxyType({spec.name: spec.handler for spec in TOOL_SPECS})
 
 
 def _allowed(spec: object, ctx: security.UserContext) -> bool:
@@ -1037,12 +1509,107 @@ def _external_file_egress_enabled() -> bool:
     return bool(get_settings().agent_external_file_egress_enabled)
 
 
+def _normalize_provider_origin(value: object, *, allow_path: bool) -> str | None:
+    """Normalize one HTTP(S) origin without ever accepting embedded credentials or secrets."""
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    if not raw or any(char.isspace() for char in raw):
+        return None
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return None
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or (not allow_path and parsed.path not in {"", "/"})
+    ):
+        return None
+    try:
+        hostname = parsed.hostname.encode("idna").decode("ascii").lower()
+    except (UnicodeError, AttributeError):
+        return None
+    if not hostname or any(char in hostname for char in "/?#@"):
+        return None
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    default_port = 80 if scheme == "http" else 443
+    suffix = "" if port is None or port == default_port else f":{port}"
+    return f"{scheme}://{host}{suffix}"
+
+
+def _normalized_private_origins(raw: object) -> tuple[tuple[str, ...], int]:
+    if not isinstance(raw, str) or not raw.strip():
+        return (), 0
+    origins: set[str] = set()
+    invalid = 0
+    for item in re.split(r"[,\s]+", raw.strip()):
+        if not item:
+            continue
+        origin = _normalize_provider_origin(item, allow_path=False)
+        if origin is None:
+            invalid += 1
+        else:
+            origins.add(origin)
+    return tuple(sorted(origins)), invalid
+
+
 def _model_context_egress_enabled() -> bool:
     settings = get_settings()
-    return bool(
-        settings.agent_model_context_egress_enabled
-        and settings.llm_trust_zone in {"private", "approved_external"}
+    if not bool(settings.agent_model_context_egress_enabled):
+        return False
+    provider_origin = _normalize_provider_origin(
+        getattr(settings, "llm_base_url", ""),
+        allow_path=True,
     )
+    if provider_origin is None:
+        return False
+    if settings.llm_trust_zone == "private":
+        private_origins, invalid = _normalized_private_origins(
+            getattr(settings, "llm_private_base_urls", ""),
+        )
+        return invalid == 0 and provider_origin in private_origins
+    return settings.llm_trust_zone == "approved_external"
+
+
+RUNTIME_POLICY_VERSION = "v1"
+
+
+def runtime_policy_fingerprint(settings=None) -> str:
+    """Hash runtime trust decisions without keys, credentials, paths, queries or fragments."""
+    selected = get_settings() if settings is None else settings
+    provider_origin = _normalize_provider_origin(
+        getattr(selected, "llm_base_url", ""),
+        allow_path=True,
+    )
+    private_origins, invalid_private_origins = _normalized_private_origins(
+        getattr(selected, "llm_private_base_urls", ""),
+    )
+    canonical = json.dumps(
+        {
+            "version": RUNTIME_POLICY_VERSION,
+            "trust_zone": getattr(selected, "llm_trust_zone", "unknown"),
+            "model_context_egress_enabled": bool(
+                getattr(selected, "agent_model_context_egress_enabled", False)
+            ),
+            "external_file_egress_enabled": bool(
+                getattr(selected, "agent_external_file_egress_enabled", False)
+            ),
+            "provider_origin": provider_origin or "invalid",
+            "private_provider_origins": private_origins,
+            "invalid_private_origin_count": invalid_private_origins,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _sensitivity_egress_allowed(spec: ToolSpec) -> bool:
@@ -1092,6 +1659,15 @@ def _model_context_egress_denied() -> dict:
     return {
         "error": "模型目标信任区未知或未授权业务/文件数据进入模型上下文",
         "kind": "model_context_egress_denied",
+    }
+
+
+def _argument_validation_denied(failure: ToolValidationFailure) -> dict:
+    return {
+        "error": failure.message,
+        "kind": "validation_error",
+        "code": failure.code,
+        "retriable": False,
     }
 
 
@@ -1159,10 +1735,9 @@ def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext) -> d
     回灌给模型/用户的只有固定脱敏文案。否则裸异常经工具结果 → tool 消息 → SSE delta 直达终端用户。
     """
     spec = _SPEC_BY_NAME.get(name)
-    fn = _REGISTRY.get(name)
     audit = audit_summary(name, args)
     safe_name = audit_name(name)
-    if not _allowed(spec, ctx) or not callable(fn):
+    if not _allowed(spec, ctx):
         security.record_access_log(ctx, f"agent_tool_denied:{safe_name}", "agent", audit)
         return _capability_denied()
     if not _model_context_egress_enabled() and spec.egress is not EgressEffect.NONE:
@@ -1178,9 +1753,35 @@ def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext) -> d
     if _external_egress_required(spec) and not _external_file_egress_enabled():
         security.record_access_log(ctx, f"agent_tool_egress_denied:{safe_name}", "agent", audit)
         return _external_egress_denied()
+    function = spec.schema.get("function")
+    parameters = function.get("parameters") if isinstance(function, dict) else None
+    if not isinstance(parameters, dict):  # import-time checks should make this unreachable
+        failure = _VALIDATOR_FAILED
+    else:
+        try:
+            failure = spec.validator(args, parameters, spec.budget)
+            if failure is not None and not isinstance(failure, ToolValidationFailure):
+                failure = _VALIDATOR_FAILED
+        except Exception as exc:  # noqa: BLE001 -- fail closed and log no argument values
+            _log.error(
+                "agent tool validator failed name=%s exception_type=%s",
+                safe_name,
+                type(exc).__name__,
+            )
+            failure = _VALIDATOR_FAILED
+    if failure is not None:
+        security.record_access_log(
+            ctx,
+            f"agent_tool_args_denied:{safe_name}",
+            "agent",
+            {**audit, "validation_code": failure.code},
+        )
+        return _argument_validation_denied(failure)
     security.record_access_log(ctx, f"agent_tool:{safe_name}", "agent", audit)
     try:
-        return _jsonable(fn(db, args, ctx))
+        # ToolSpec is the immutable execution authority. _REGISTRY is a read-only compatibility
+        # projection and is deliberately never consulted for dispatch.
+        return _jsonable(spec.handler(db, args, ctx))
     except Exception as exc:  # noqa: BLE001 —— 异常消息/参数可能含客户数据，日志只留类型
         _log.error("agent tool failed name=%s exception_type=%s", safe_name, type(exc).__name__)
         return {"error": "工具执行失败，请换个方式或稍后重试", "retriable": True, "kind": "internal"}

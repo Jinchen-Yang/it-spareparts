@@ -28,6 +28,8 @@ _PREVIEW_ROWS = 8
 _PREVIEW_COLS = 12
 _MAX_READ_ROWS = 200
 _MAX_WRITE_CELLS = 3000
+_MAX_REPORT_ROWS = 5000
+_MAX_INSPECT_SHEETS = 5
 _CELL_TRUNC = 60
 _DOC_CHAR_CAP = 60_000          # read_document 文本上限，防超长文件撑爆上下文
 
@@ -56,6 +58,13 @@ def _meta_path(file_id: str) -> Path:
 
 def _ext_of(filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+
+def upload_audit_shape(filename: str | None, size_bytes: int) -> dict:
+    """Return structural upload metadata without retaining a customer-controlled filename."""
+    ext = _ext_of(filename or "")
+    safe_ext = ext if ext in (_ALLOWED_EXT | {"xls"}) else "other" if ext else "none"
+    return {"ext": safe_ext, "size_bytes": max(int(size_bytes), 0)}
 
 
 def _data_path(file_id: str, ext: str) -> Path:
@@ -141,7 +150,7 @@ def inspect_file(file_id: str) -> dict:
     _require_xlsx(fid, meta)
     wb = load_workbook(_data_path(fid, "xlsx"), read_only=True, data_only=True)
     sheets = []
-    for ws in wb.worksheets[:5]:
+    for ws in wb.worksheets[:_MAX_INSPECT_SHEETS]:
         preview = [[_cell_str(c.value) for c in row]
                    for row in ws.iter_rows(min_row=1, max_row=_PREVIEW_ROWS,
                                            max_col=min(ws.max_column or 1, _PREVIEW_COLS))]
@@ -223,17 +232,25 @@ def _read_pdf(path: Path) -> tuple[str, bool]:
     """返回 (文本, 是否疑似扫描件)。文字层为空/极少 → 扫描件，转视觉。"""
     import pdfplumber
     parts: list[str] = []
+    extracted_parts: list[str] = []
     with pdfplumber.open(str(path)) as pdf:
         for pi, page in enumerate(pdf.pages[:30]):
             txt = page.extract_text() or ""
             parts.append(f"[第{pi + 1}页]\n{txt}" if txt.strip() else f"[第{pi + 1}页](无文字层)")
+            if txt.strip():
+                extracted_parts.append(txt)
             for table in page.extract_tables() or []:
                 for row in table:
                     cells = [(c or "").strip() for c in row]
                     if any(cells):
-                        parts.append(" | ".join(cells))
+                        table_text = " | ".join(cells)
+                        parts.append(table_text)
+                        extracted_parts.append(table_text)
     text = "\n".join(parts)
-    scanned = len(re.sub(r"\s", "", text.replace("无文字层", ""))) < 20
+    # Page labels are presentation metadata, not extracted PDF content. Counting labels made a
+    # many-page blank/scanned document look like a valid text PDF and silently skipped Vision.
+    extracted_text = "\n".join(extracted_parts)
+    scanned = len(re.sub(r"\s", "", extracted_text)) < 20
     return text, scanned
 
 
@@ -401,8 +418,8 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
     money_cols=金额列的 0-based 下标（数字格式+右对齐）。"""
     if not headers:
         raise FileError("headers 不能为空")
-    if len(rows) > 5000:
-        raise FileError("报表最多 5000 行")
+    if len(rows) > _MAX_REPORT_ROWS:
+        raise FileError(f"报表最多 {_MAX_REPORT_ROWS} 行")
     money = set(money_cols or [])
     ncol = len(headers)
 

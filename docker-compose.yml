@@ -44,6 +44,8 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
       LLM_MODEL: ${LLM_MODEL:-deepseek-v4-flash}
       LLM_TRUST_ZONE: ${LLM_TRUST_ZONE:-unknown}
+      # private 模型 origin 精确白名单；默认空，因此仅设置 trust_zone=private 仍不会外发数据。
+      LLM_PRIVATE_BASE_URLS: ${LLM_PRIVATE_BASE_URLS:-}
       AGENT_MODEL_CONTEXT_EGRESS_ENABLED: ${AGENT_MODEL_CONTEXT_EGRESS_ENABLED:-false}
       # 留空 = 用应用内默认(关思考)；设 {} = 明确不传额外参数
       LLM_EXTRA_BODY: ${LLM_EXTRA_BODY:-}

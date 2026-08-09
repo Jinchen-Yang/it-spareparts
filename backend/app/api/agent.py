@@ -127,8 +127,13 @@ async def upload(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """上传 xlsx（询价单/型号清单等），返回 file_id 供对话引用。"""
-    record_access_log(ctx, "upload", "agent_file", {"filename": file.filename})
     content = await file.read()
+    record_access_log(
+        ctx,
+        "upload",
+        "agent_file",
+        agent_files.upload_audit_shape(file.filename, len(content)),
+    )
     try:
         # 归属记真实身份(user_id)而非角色 → 下载/读取按人做越权校验
         return agent_files.save_upload(content, file.filename or "上传.xlsx", ctx.user_id)

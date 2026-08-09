@@ -10,6 +10,8 @@ from pathlib import Path
 # remain fail closed and are asserted in test_agent_capabilities.py.
 os.environ["LLM_TRUST_ZONE"] = "private"
 os.environ["AGENT_MODEL_CONTEXT_EGRESS_ENABLED"] = "true"
+os.environ["LLM_BASE_URL"] = "http://agent-private.test:8000/v1"
+os.environ["LLM_PRIVATE_BASE_URLS"] = "http://agent-private.test:8000"
 
 from tests.run_isolation import (
     CONTROLLED_RAW_BASE,

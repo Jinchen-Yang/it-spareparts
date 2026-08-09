@@ -18,10 +18,10 @@ from tests import factories as f
 def test_dispatch_sanitizes_internal_exception(monkeypatch):
     """工具内部抛异常(如 SQLAlchemyError 带 SQL+表名) → dispatch 只回固定脱敏文案，
     原始 SQL/表名/异常类型一律不进回灌结果。"""
-    def boom(db, args, ctx):
+    def boom(db, query, **kwargs):
         raise ProgrammingError("SELECT supplier_name FROM dim_supplier WHERE id=1",
                                {}, Exception("relation dim_supplier leaked"))
-    monkeypatch.setitem(tools._REGISTRY, "search_parts", boom)
+    monkeypatch.setattr(tools.part_resolver, "resolve", boom)
     ctx = security.UserContext(user_id=None, role="phase1_full_access")
     r = tools.dispatch(None, "search_parts", {"query": "x"}, ctx)
 

@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     enable_agent: bool = True
     # 模型上下文的数据出向必须同时声明目标信任区并由部署者显式开启；未知目标默认无工具数据。
     llm_trust_zone: Literal["unknown", "private", "approved_external"] = "unknown"
+    # private 不能只靠标签自证：主 LLM 的规范化 origin 必须精确命中此部署白名单。
+    # 逗号/空白分隔，仅接受无路径、用户信息、query/fragment 的 http(s) origin。
+    llm_private_base_urls: str = ""
     agent_model_context_egress_enabled: bool = False
 
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
