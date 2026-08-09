@@ -246,6 +246,64 @@ export interface MaintenanceWorkbookApplyResult {
   warnings?: string[];
 }
 
+export interface MaintenanceManagerWorkbookBatchStatus {
+  batch_id: string;
+  status: "valid" | "error" | "applied" | "expired" | string;
+  created_at: string;
+  expires_at: string;
+  applied_at: string | null;
+  result: MaintenanceManagerWorkbookApplyResult | null;
+}
+
+export interface MaintenanceManagerWorkbookStatus {
+  report_month: string;
+  project_count: number;
+  scope_version: string;
+  data_version: string;
+  latest_batch: MaintenanceManagerWorkbookBatchStatus | null;
+  acceptance_configuration: "configured" | "pending_business_configuration" | string;
+  attachment_carrier: "pending_business_configuration" | string;
+  approval_role: "pending_business_configuration" | string;
+}
+
+export interface MaintenanceManagerWorkbookIssue {
+  code: string;
+  message: string;
+  sheet: string | null;
+  row: number | null;
+  column: string | null;
+}
+
+export interface MaintenanceManagerWorkbookValidation {
+  validation_token: string;
+  batch_id: string;
+  status: "valid" | "error" | "applied" | "expired" | string;
+  report_month: string;
+  data_version: string;
+  file_sha256: string;
+  changes: {
+    service_periods: number;
+    planned_collection_milestones: number;
+    total: number;
+  };
+  warnings: MaintenanceManagerWorkbookIssue[];
+  errors: MaintenanceManagerWorkbookIssue[];
+  unchanged: boolean;
+  can_apply: boolean;
+  already_applied: boolean;
+  expires_at: string;
+}
+
+export interface MaintenanceManagerWorkbookApplyResult {
+  applied: boolean;
+  replayed: boolean;
+  batch_id: string;
+  changed_rows: number;
+  project_count: number;
+  warnings: number;
+  report_month: string;
+}
+
 export interface MaintenanceCostReference {
   source: "direct_purchase" | "linked_purchase" | "purchase_window" | "sales_window" | "manual" | string;
   document_no: string | null;
@@ -697,6 +755,38 @@ export const applyMaintenanceProjectWorkbook = (
   input: MaintenanceWorkbookApplyInput,
 ) => api.post<MaintenanceWorkbookApplyResult>(
   `${projectBase(projectId)}/workbook/apply`,
+  input,
+);
+
+export const getMaintenanceManagerWorkbookStatus = (reportMonth: string) =>
+  api.get<MaintenanceManagerWorkbookStatus>(
+    "/maintenance/project-manager/workbooks/v3/status",
+    { params: { report_month: reportMonth } },
+  );
+
+export const downloadMaintenanceManagerWorkbook = (reportMonth: string) =>
+  api.get<Blob>("/maintenance/project-manager/workbooks/v3", {
+    params: { report_month: reportMonth },
+    responseType: "blob",
+  });
+
+export const validateMaintenanceManagerWorkbook = (
+  reportMonth: string,
+  file: File,
+) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api.post<MaintenanceManagerWorkbookValidation>(
+    "/maintenance/project-manager/workbooks/v3/validate",
+    form,
+    { params: { report_month: reportMonth }, timeout: 120000 },
+  );
+};
+
+export const applyMaintenanceManagerWorkbook = (
+  input: { validation_token: string; data_version: string },
+) => api.post<MaintenanceManagerWorkbookApplyResult>(
+  "/maintenance/project-manager/workbooks/v3/apply",
   input,
 );
 

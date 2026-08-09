@@ -17,6 +17,7 @@ export interface MaintenanceCapabilities {
   canDownloadRoundtrip: boolean;
   canApplyRoundtrip: boolean;
   canManageProject: boolean;
+  canUseManagerWorkbook: boolean;
 }
 
 function readLocalPermissions(): LocalMaintenancePermissions {
@@ -115,6 +116,9 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
     canDownloadRoundtrip,
     canApplyRoundtrip: canDownloadRoundtrip && (
       isAdmin || permissions.action_maintenance_roundtrip_apply === true
+    ),
+    canUseManagerWorkbook: canViewContract && (
+      isAdmin || permissions.page_maintenance === true
     ),
     canManageProject: isAdmin || (
       permissions.page_maintenance === true

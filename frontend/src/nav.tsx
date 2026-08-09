@@ -67,6 +67,7 @@ const loadMaintenanceProjectMaster = () => import("./pages/MaintenanceProjectMas
 const loadMaintenanceProjects = () => import("./pages/maintenance/MaintenanceProjectsPage");
 const loadMaintenanceProjectWorkspace = () => import("./pages/maintenance/MaintenanceProjectWorkspacePage");
 const loadMaintenanceProjectUpdates = () => import("./pages/maintenance/MaintenanceProjectUpdatesPage");
+const loadMaintenanceManagerWorkbook = () => import("./pages/maintenance/MaintenanceManagerWorkbookPage");
 const loadMaintenanceCostRefill = () => import("./pages/maintenance/MaintenanceCostRefillPage");
 const loadMaintenanceDownloadsCompat = () => import("./pages/maintenance/MaintenanceDownloadsCompatRedirect");
 const loadMaintenanceRemindersCompat = () => import("./pages/maintenance/MaintenanceRemindersCompatRedirect");
@@ -92,6 +93,7 @@ const MaintenanceProjectMasterPage = lazy(loadMaintenanceProjectMaster);
 const MaintenanceProjectsPage = lazy(loadMaintenanceProjects);
 const MaintenanceProjectWorkspacePage = lazy(loadMaintenanceProjectWorkspace);
 const MaintenanceProjectUpdatesPage = lazy(loadMaintenanceProjectUpdates);
+const MaintenanceManagerWorkbookPage = lazy(loadMaintenanceManagerWorkbook);
 const MaintenanceCostRefillPage = lazy(loadMaintenanceCostRefill);
 const MaintenanceDownloadsCompatRedirect = lazy(loadMaintenanceDownloadsCompat);
 const MaintenanceRemindersCompatRedirect = lazy(loadMaintenanceRemindersCompat);
@@ -150,6 +152,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { key: "maintenance-projects", path: "/maintenance/projects", label: "项目面板", icon: <DashboardOutlined />, perm: "page_maintenance", page: MaintenanceProjectsPage, load: loadMaintenanceProjects },
       { key: "maintenance-project-master", path: "/maintenance/project-master", label: "项目主档", icon: <ProfileOutlined />, perm: "page_maintenance", page: MaintenanceProjectMasterPage, load: loadMaintenanceProjectMaster },
+      { key: "maintenance-manager-workbook", path: "/maintenance/project-manager/monthly-workbook", label: "经理月报", icon: <CloudUploadOutlined />, visibleWhen: () => readMaintenanceCapabilities().canUseManagerWorkbook, page: MaintenanceManagerWorkbookPage, load: loadMaintenanceManagerWorkbook },
       { key: "maintenance-updates", path: "/maintenance/updates", label: "月度更新", icon: <CloudUploadOutlined />, visibleWhen: () => readMaintenanceCapabilities().canApplyRoundtrip, page: MaintenanceProjectUpdatesPage, load: loadMaintenanceProjectUpdates },
       { key: "maintenance-cost-refill", path: "/maintenance/cost-refill", label: "成本回填", icon: <DollarOutlined />, visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceCostRefillPage, load: loadMaintenanceCostRefill },
     ],

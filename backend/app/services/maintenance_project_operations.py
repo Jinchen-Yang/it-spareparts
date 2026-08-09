@@ -34,6 +34,11 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssueLine,
     MaintenanceProjectWorkbookState,
 )
+from app.models.maintenance_manager import (
+    MaintenanceManagerUploadBatch,
+    MaintenanceManagerUploadBatchProject,
+)
+from app.models.maintenance_project import MaintenanceProjectUserAssignment
 from app.business_time import business_today
 from app import tax_policy
 from app.security import UserContext, is_field_hidden
@@ -1913,6 +1918,48 @@ def _attach_manager_and_missing_labels(card: dict, assignment: dict | None) -> N
     card["missing_data_labels"] = labels
 
 
+def _manager_update_completed_project_ids(
+    db: Session,
+    *,
+    project_ids: list[str],
+    report_month: date,
+) -> set[str]:
+    """Return projects covered by an applied v3 batch for the current assignment.
+
+    Matching the still-active assignment identity prevents an old manager's
+    historical upload from closing the replacement manager's task.
+    """
+
+    if not project_ids:
+        return set()
+    month_start = report_month.replace(day=1)
+    return set(
+        db.scalars(
+            select(MaintenanceManagerUploadBatchProject.project_id)
+            .join(
+                MaintenanceManagerUploadBatch,
+                MaintenanceManagerUploadBatch.batch_id
+                == MaintenanceManagerUploadBatchProject.batch_id,
+            )
+            .join(
+                MaintenanceProjectUserAssignment,
+                MaintenanceProjectUserAssignment.assignment_id
+                == MaintenanceManagerUploadBatchProject.assignment_id,
+            )
+            .where(
+                MaintenanceManagerUploadBatchProject.project_id.in_(project_ids),
+                MaintenanceManagerUploadBatch.status == "applied",
+                MaintenanceManagerUploadBatch.report_month == month_start,
+                MaintenanceProjectUserAssignment.archived_at.is_(None),
+                MaintenanceProjectUserAssignment.version
+                == MaintenanceManagerUploadBatchProject.assignment_version,
+                MaintenanceProjectUserAssignment.user_id
+                == MaintenanceManagerUploadBatch.owner_user_id,
+            )
+        )
+    )
+
+
 def _system_tasks(
     *,
     project_id: str,
@@ -1924,6 +1971,7 @@ def _system_tasks(
     sales_estimate_lines: int,
     cost_status: str,
     as_of: date,
+    manager_update_completed: bool = False,
 ) -> list[dict]:
     tasks: list[dict] = []
     due_date = date(as_of.year, as_of.month, monthrange(as_of.year, as_of.month)[1])
@@ -1931,19 +1979,28 @@ def _system_tasks(
         _task(
             project_id=project_id,
             rule_key=f"manager_update:{as_of:%Y-%m}",
-            severity=("info" if as_of < due_date else "warning"),
-            title=f"待上传{as_of:%Y年%m月}月度全量工作簿",
+            severity=(
+                "info"
+                if manager_update_completed or as_of < due_date
+                else "warning"
+            ),
+            title=(
+                f"已完成{as_of:%Y年%m月}月度全量工作簿"
+                if manager_update_completed
+                else f"待上传{as_of:%Y年%m月}月度全量工作簿"
+            ),
             detail=(
-                "项目经理本人范围的月度全量上传通道待接入；"
-                "当前单项目工作簿不会关闭此任务"
+                "本人范围的 v3 工作簿已通过校验并原子应用"
+                if manager_update_completed
+                else "请下载本人范围全量表，追加或更新后上传校验"
             ),
             task_type="项目经理月度更新",
             due_date=due_date,
-            task_status="pending",
+            task_status=("completed" if manager_update_completed else "pending"),
             owner=None,
             close_basis=(
-                "项目经理本人范围的月度全量工作簿通过校验并成功应用后，"
-                "由全量上传批次自动关闭（通道待接入）"
+                "项目经理本人范围的 v3 月度全量工作簿通过校验并成功应用后，"
+                "由全量上传批次自动关闭"
             ),
         )
     )
@@ -2154,6 +2211,7 @@ def _project_card_from_facts(
     state: MaintenanceProjectWorkbookState | None,
     as_of: date,
     user_ctx: UserContext,
+    manager_update_completed: bool = False,
 ) -> tuple[dict, list[dict], dict]:
     """Assemble the canonical project card from preloaded summary facts."""
 
@@ -2313,6 +2371,7 @@ def _project_card_from_facts(
         sales_estimate_lines=sales_estimate_lines,
         cost_status=cost_status,
         as_of=as_of,
+        manager_update_completed=manager_update_completed,
     )
     reminders, completeness = _visible_tasks(
         reminders,
@@ -2687,6 +2746,11 @@ def project_workspace(
         or 0
     )
     state = db.get(MaintenanceProjectWorkbookState, project_id)
+    manager_update_completed = project_id in _manager_update_completed_project_ids(
+        db,
+        project_ids=[project_id],
+        report_month=as_of,
+    )
     project_summary, reminders, completeness = _project_card_from_facts(
         base=base,
         latest_confirmed=latest_confirmed,
@@ -2703,6 +2767,7 @@ def project_workspace(
         state=state,
         as_of=as_of,
         user_ctx=user_ctx,
+        manager_update_completed=manager_update_completed,
     )
     _attach_manager_and_missing_labels(
         project_summary,
@@ -3285,6 +3350,11 @@ def _project_cards_for_ids(
         db,
         project_ids=project_ids,
     )
+    manager_update_completed_ids = _manager_update_completed_project_ids(
+        db,
+        project_ids=project_ids,
+        report_month=as_of,
+    )
     cards: dict[str, dict] = {}
     for project in projects:
         base = maintenance_project.project_overview_from_facts(
@@ -3333,6 +3403,9 @@ def _project_cards_for_ids(
             state=state_by_project.get(project.project_id),
             as_of=as_of,
             user_ctx=user_ctx,
+            manager_update_completed=(
+                project.project_id in manager_update_completed_ids
+            ),
         )
         _attach_manager_and_missing_labels(
             card,
@@ -3657,10 +3730,32 @@ def _directory_reminder_query(
 
     month_start = as_of.replace(day=1)
     current_business_month = business_today().replace(day=1)
-    # #205 has no authoritative project-manager-scope monthly upload batch.
-    # A per-project v2 workbook application must not masquerade as completion.
-    manager_open = literal(True)
-    manager_completed = literal(False)
+    manager_completed = (
+        select(literal(1))
+        .select_from(MaintenanceManagerUploadBatchProject)
+        .join(
+            MaintenanceManagerUploadBatch,
+            MaintenanceManagerUploadBatch.batch_id
+            == MaintenanceManagerUploadBatchProject.batch_id,
+        )
+        .join(
+            MaintenanceProjectUserAssignment,
+            MaintenanceProjectUserAssignment.assignment_id
+            == MaintenanceManagerUploadBatchProject.assignment_id,
+        )
+        .where(
+            MaintenanceManagerUploadBatchProject.project_id == facts.c.project_id,
+            MaintenanceManagerUploadBatch.status == "applied",
+            MaintenanceManagerUploadBatch.report_month == month_start,
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+            MaintenanceProjectUserAssignment.version
+            == MaintenanceManagerUploadBatchProject.assignment_version,
+            MaintenanceProjectUserAssignment.user_id
+            == MaintenanceManagerUploadBatch.owner_user_id,
+        )
+        .exists()
+    )
+    manager_open = ~manager_completed
     profit_visible = not is_field_hidden(user_ctx, "contract_amount")
     cost_visible = not is_field_hidden(user_ctx, "unit_cost")
     expense_visible = not is_field_hidden(user_ctx, "expense_inc")

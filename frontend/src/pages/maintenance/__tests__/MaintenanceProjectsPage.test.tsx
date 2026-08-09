@@ -153,8 +153,10 @@ describe("MaintenanceProjectsPage", () => {
     expect(within(card).getByText(/合成项目经理 · manager_account/)).toBeInTheDocument();
     expect(within(card).getByText("待上传2026年08月月度全量工作簿")).toBeInTheDocument();
     expect(within(card).getByText(/完成依据：本人范围的月度全量上传批次/)).toBeInTheDocument();
-    expect(within(card).getByText("月度全量上传待接入")).toBeInTheDocument();
-    expect(within(card).queryByRole("link", { name: "月度全量上传待接入" })).toBeNull();
+    expect(within(card).getByRole("link", { name: "上传月度全量表" })).toHaveAttribute(
+      "href",
+      "/maintenance/project-manager/monthly-workbook",
+    );
     expect(within(card).getByText("附件状态待接入")).toBeInTheDocument();
     expect(within(card).getByRole("button", { name: "管理负责人" })).toBeInTheDocument();
     expect(within(card).getByRole("link", { name: "查看项目" })).toHaveAttribute(

@@ -16,11 +16,13 @@ const LIFECYCLE_META: Record<string, { label: string; color?: string }> = {
 export default function MaintenanceProjectCard({
   project,
   visibility,
+  canUseManagerWorkbook = false,
   canManageAssignment = false,
   onAssignmentChanged,
 }: {
   project: MaintenanceProjectOperationsSummary;
   visibility: ProjectFinancialVisibility;
+  canUseManagerWorkbook?: boolean;
   canManageAssignment?: boolean;
   onAssignmentChanged?: () => void;
 }) {
@@ -53,13 +55,14 @@ export default function MaintenanceProjectCard({
         <Link key="detail" to={`/maintenance/projects/${encodeURIComponent(project.project_id)}`}>
           查看项目
         </Link>,
-        ...(hasPendingMonthlyUpload ? [
-          <span
+        ...(hasPendingMonthlyUpload && canUseManagerWorkbook ? [
+          <Link
             key="monthly-upload-pending"
-            title="项目经理本人范围的月度全量上传通道待接入"
+            to="/maintenance/project-manager/monthly-workbook"
+            title="打开本人范围的月度全量工作簿"
           >
-            月度全量上传待接入
-          </span>,
+            上传月度全量表
+          </Link>,
         ] : []),
         ...(canManageAssignment ? [
           <ProjectManagerAssignmentControl

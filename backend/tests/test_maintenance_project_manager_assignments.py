@@ -429,13 +429,10 @@ def test_task_board_keeps_incomplete_project_and_filters_generated_tasks_in_post
     assert monthly["is_overdue"] is False
     assert monthly["generated_by"] == "system"
     assert monthly["owner"] is None
-    assert monthly["detail"] == (
-        "项目经理本人范围的月度全量上传通道待接入；"
-        "当前单项目工作簿不会关闭此任务"
-    )
+    assert monthly["detail"] == "请下载本人范围全量表，追加或更新后上传校验"
     assert monthly["close_basis"] == (
-        "项目经理本人范围的月度全量工作簿通过校验并成功应用后，"
-        "由全量上传批次自动关闭（通道待接入）"
+        "项目经理本人范围的 v3 月度全量工作簿通过校验并成功应用后，"
+        "由全量上传批次自动关闭"
     )
 
     db.add(

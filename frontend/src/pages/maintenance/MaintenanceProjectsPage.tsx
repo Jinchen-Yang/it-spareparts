@@ -230,6 +230,7 @@ export default function MaintenanceProjectsPage() {
               key={project.project_id}
               project={project}
               visibility={capabilities}
+              canUseManagerWorkbook={capabilities.canUseManagerWorkbook}
               canManageAssignment={role === "admin" && capabilities.canManageProject}
               onAssignmentChanged={() => void load(page, q, lifecycle)}
             />
