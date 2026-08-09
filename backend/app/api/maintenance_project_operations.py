@@ -9,12 +9,29 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.maintenance_project_scope import (
+    enforce_maintenance_project_access,
+    require_maintenance_project_access,
+)
 from app.auth import current_identity, current_role
 from app.business_time import business_today
 from app.db import get_db
+from app.models.maintenance_project import MaintenanceProjectContract
+from app.models.maintenance_project_operations import (
+    MaintenanceCollectionSnapshot,
+    MaintenanceProjectExpenseAttribution,
+    MaintenanceSiteIssue,
+)
 from app.models.system import SysUser
-from app.security import is_field_hidden, record_access_log, require_action, require_page
-from app.security import UserContext, get_current_user_context
+from app.security import (
+    UserContext,
+    get_current_user_context,
+    is_field_hidden,
+    record_access_log,
+    require_action,
+    require_page,
+)
+from app.services import maintenance_project_assignments as assignments
 from app.services import maintenance_project_operations as operations
 
 
@@ -24,7 +41,7 @@ router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
 class ProjectOperationsSearch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    q: str
+    q: str = ""
     as_of: date | None = None
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=24, ge=1, le=200)
@@ -34,6 +51,14 @@ class ProjectOperationsSearch(BaseModel):
     )
     reminder: str | None = None
     include_inactive: bool = False
+    owner_scope: str | None = Field(default=None, pattern="^(me|all)$")
+    task_type: str | None = None
+    task_status: str | None = Field(
+        default=None,
+        pattern="^(open|pending|completed)$",
+    )
+    due_from: date | None = None
+    due_to: date | None = None
 
 
 class ContractCreate(BaseModel):
@@ -212,6 +237,7 @@ def create_project_contract(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_profit")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     operator = _real_operator(db, ident)
     try:
@@ -285,7 +311,15 @@ def patch_project_contract(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_profit")
     ),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    project_id = db.scalar(
+        select(MaintenanceProjectContract.project_id).where(
+            MaintenanceProjectContract.project_contract_id == project_contract_id
+        )
+    )
+    if project_id is not None:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     return _contract_write_result(
         operations.update_contract,
         db=db,
@@ -307,7 +341,15 @@ def archive_project_contract(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_profit")
     ),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    project_id = db.scalar(
+        select(MaintenanceProjectContract.project_id).where(
+            MaintenanceProjectContract.project_contract_id == project_contract_id
+        )
+    )
+    if project_id is not None:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     return _contract_write_result(
         operations.archive_contract,
         db=db,
@@ -329,6 +371,7 @@ def create_project_collection(
     _action: None = Depends(
         require_action("action_maintenance_roundtrip_apply", require_data="data_profit")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     operator = _real_operator(db, ident)
     try:
@@ -369,7 +412,15 @@ def patch_project_collection(
     _action: None = Depends(
         require_action("action_maintenance_roundtrip_apply", require_data="data_profit")
     ),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    project_id = db.scalar(
+        select(MaintenanceCollectionSnapshot.project_id).where(
+            MaintenanceCollectionSnapshot.collection_id == collection_id
+        )
+    )
+    if project_id is not None:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     return _contract_write_result(
         operations.update_collection,
         db=db,
@@ -391,6 +442,7 @@ def create_project_site_issue(
     _action: None = Depends(
         require_action("action_maintenance_roundtrip_apply", require_data="data_purchase_cost")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     operator = _real_operator(db, ident)
     try:
@@ -434,7 +486,15 @@ def patch_project_site_issue_status(
             require_data="data_purchase_cost",
         )
     ),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    project_id = db.scalar(
+        select(MaintenanceSiteIssue.project_id).where(
+            MaintenanceSiteIssue.issue_id == issue_id
+        )
+    )
+    if project_id is not None:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     operator = _real_operator(db, ident)
     try:
         payload = operations.update_site_issue_status(
@@ -474,6 +534,7 @@ def project_cost_gaps(
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     if is_field_hidden(ctx, "unit_cost"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权查看或回填采购成本")
@@ -512,6 +573,7 @@ def recompute_project_cost_gaps(
             require_data="data_purchase_cost",
         )
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     return _contract_write_result(
         operations.recompute_cost_gaps,
@@ -533,6 +595,7 @@ def create_project_expense(
     _action: None = Depends(
         require_action("action_maintenance_roundtrip_apply", require_data="data_profit")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     operator = _real_operator(db, ident)
     try:
@@ -574,6 +637,7 @@ def mark_project_expense_readiness(
             require_data="data_profit",
         )
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     return _contract_write_result(
         operations.mark_expense_readiness,
@@ -601,7 +665,15 @@ def patch_project_expense_status(
             require_data="data_profit",
         )
     ),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    project_id = db.scalar(
+        select(MaintenanceProjectExpenseAttribution.project_id).where(
+            MaintenanceProjectExpenseAttribution.expense_id == expense_id
+        )
+    )
+    if project_id is not None:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     operator = _real_operator(db, ident)
     try:
         payload = operations.update_expense_status(
@@ -642,6 +714,7 @@ def patch_project_cost_gap(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_purchase_cost")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     return _contract_write_result(
         operations.fill_manual_cost,
@@ -669,6 +742,7 @@ def stable_project_workspace(
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     effective_as_of = as_of or business_today()
@@ -708,6 +782,7 @@ def stable_project_tasks(
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     effective_as_of = as_of or business_today()
@@ -741,11 +816,17 @@ def _stable_project_operations_response(
     lifecycle: str,
     reminder: str | None,
     include_inactive: bool,
+    owner_scope: str | None,
+    task_type: str | None,
+    task_status: str | None,
+    due_from: date | None,
+    due_to: date | None,
     db: Session,
     ctx: UserContext,
 ) -> dict:
     effective_as_of = as_of or business_today()
     try:
+        effective_owner_scope = assignments.resolve_owner_scope(ctx, owner_scope)
         payload = operations.project_operations(
             db,
             as_of=effective_as_of,
@@ -756,7 +837,17 @@ def _stable_project_operations_response(
             include_inactive=include_inactive,
             page=page,
             page_size=page_size,
+            owner_scope=effective_owner_scope,
+            task_type=task_type,
+            task_status=task_status,
+            due_from=due_from,
+            due_to=due_to,
         )
+    except assignments.MaintenanceProjectAssignmentPermissionError as exc:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "当前账号只能查看本人负责的维保项目",
+        ) from exc
     except operations.MaintenanceOperationPermissionError as exc:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
@@ -767,19 +858,30 @@ def _stable_project_operations_response(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             str(exc),
         ) from exc
+    log_detail = {
+        "as_of": effective_as_of.isoformat(),
+        "searched": bool(q and q.strip()),
+        "lifecycle": lifecycle,
+        "reminder": reminder,
+        "include_inactive": include_inactive,
+        "page": page,
+        "page_size": page_size,
+    }
+    if task_type or task_status or due_from or due_to:
+        log_detail.update(
+            {
+                # Never persist the free-text task-type selector itself.
+                "task_type_filtered": bool(task_type and task_type.strip()),
+                "task_status": task_status,
+                "due_from": due_from.isoformat() if due_from else None,
+                "due_to": due_to.isoformat() if due_to else None,
+            }
+        )
     record_access_log(
         ctx,
         "stable_project_operations",
         "maintenance",
-        {
-            "as_of": effective_as_of.isoformat(),
-            "searched": bool(q and q.strip()),
-            "lifecycle": lifecycle,
-            "reminder": reminder,
-            "include_inactive": include_inactive,
-            "page": page,
-            "page_size": page_size,
-        },
+        log_detail,
     )
     return payload
 
@@ -795,6 +897,7 @@ def stable_project_operations(
     ),
     reminder: str | None = Query(default=None),
     include_inactive: bool = False,
+    owner_scope: str | None = Query(default=None, pattern="^(me|all)$"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
@@ -813,6 +916,11 @@ def stable_project_operations(
         lifecycle=lifecycle,
         reminder=reminder,
         include_inactive=include_inactive,
+        owner_scope=owner_scope,
+        task_type=None,
+        task_status=None,
+        due_from=None,
+        due_to=None,
         db=db,
         ctx=ctx,
     )
@@ -827,10 +935,15 @@ def search_stable_project_operations(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     q = body.q.strip()
-    if not q or len(q) > 256:
+    if len(q) > 256:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "项目搜索条件无效",
+        )
+    if body.task_type is not None and len(body.task_type.strip()) > 64:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "任务筛选条件无效",
         )
     return _stable_project_operations_response(
         as_of=body.as_of,
@@ -840,6 +953,11 @@ def search_stable_project_operations(
         lifecycle=body.lifecycle,
         reminder=body.reminder,
         include_inactive=body.include_inactive,
+        owner_scope=body.owner_scope,
+        task_type=body.task_type.strip() if body.task_type else None,
+        task_status=body.task_status,
+        due_from=body.due_from,
+        due_to=body.due_to,
         db=db,
         ctx=ctx,
     )

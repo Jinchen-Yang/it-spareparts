@@ -16,6 +16,7 @@ from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAuditLog,
     MaintenanceProjectContract,
+    MaintenanceProjectUserAssignment,
 )
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
@@ -73,6 +74,7 @@ __all__ = [
     "MaintenanceProject",
     "MaintenanceProjectAuditLog",
     "MaintenanceProjectContract",
+    "MaintenanceProjectUserAssignment",
     "MaintenanceCollectionSnapshot",
     "MaintenanceProjectExpenseAttribution",
     "MaintenanceProjectOperationAudit",

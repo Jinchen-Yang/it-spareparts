@@ -76,6 +76,43 @@ const summary = {
     missing_cost_lines: 2,
   },
   reminder_count: 4,
+  manager_assignment: {
+    assignment_id: "assignment-1",
+    project_id: "project-1",
+    responsibility_type: "primary_manager",
+    user_id: 9,
+    username: "manager_account",
+    display_name: "合成项目经理",
+    account_status: "active",
+    source_manager_text: "manager-1",
+    version: 1,
+    assigned_at: "2026-08-01T00:00:00+00:00",
+    archived_at: null,
+  },
+  task_summary: {
+    primary: {
+      task_id: "task-1",
+      project_id: "project-1",
+      rule_key: "manager_update:2026-08",
+      severity: "warning",
+      title: "待上传2026年08月月度全量工作簿",
+      detail: "项目经理本人范围的月度全量上传通道待接入",
+      entity_id: null,
+      task_type: "项目经理月度更新",
+      due_date: "2026-08-31",
+      due_state: "upcoming",
+      is_overdue: false,
+      status: "pending",
+      owner: "manager_account",
+      generated_by: "system",
+      close_basis: "本人范围的月度全量上传批次成功应用后自动关闭（通道待接入）",
+    },
+    open_count: 4,
+    overdue_count: 0,
+    rows: [],
+  },
+  missing_data_labels: ["合同额待补", "成本待补", "附件状态待接入"],
+  attachment_status: "not_integrated",
   as_of: "2026-08-08",
 };
 
@@ -113,6 +150,13 @@ describe("MaintenanceProjectsPage", () => {
     expect(within(card).getByText("金额缺失")).toBeInTheDocument();
     expect(within(card).getByText("状态未映射")).toBeInTheDocument();
     expect(within(card).getByText(/缺 2 行成本/)).toBeInTheDocument();
+    expect(within(card).getByText(/合成项目经理 · manager_account/)).toBeInTheDocument();
+    expect(within(card).getByText("待上传2026年08月月度全量工作簿")).toBeInTheDocument();
+    expect(within(card).getByText(/完成依据：本人范围的月度全量上传批次/)).toBeInTheDocument();
+    expect(within(card).getByText("月度全量上传待接入")).toBeInTheDocument();
+    expect(within(card).queryByRole("link", { name: "月度全量上传待接入" })).toBeNull();
+    expect(within(card).getByText("附件状态待接入")).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "管理负责人" })).toBeInTheDocument();
     expect(within(card).getByRole("link", { name: "查看项目" })).toHaveAttribute(
       "href",
       "/maintenance/projects/project-1",
@@ -131,10 +175,10 @@ describe("MaintenanceProjectsPage", () => {
     fireEvent.keyDown(search, { key: "Enter", code: "Enter" });
 
     await waitFor(() => expect(listMaintenanceProjectOperations).toHaveBeenCalledTimes(2));
-    expect(listMaintenanceProjectOperations).toHaveBeenLastCalledWith(expect.objectContaining({
-      q: "联通",
-      page: 1,
-    }));
+    expect(listMaintenanceProjectOperations).toHaveBeenLastCalledWith(
+      expect.objectContaining({ q: "联通", page: 1 }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 
   it("成本汇总被脱敏时卡片不误标为成本待补", async () => {
@@ -148,6 +192,7 @@ describe("MaintenanceProjectsPage", () => {
       data: {
         rows: [{
           ...summary,
+          missing_data_labels: [],
           metrics: {
             ...summary.metrics,
             site_requisition_known_cost: null,
@@ -190,6 +235,7 @@ describe("MaintenanceProjectsPage", () => {
       data: {
         rows: [{
           ...summary,
+          missing_data_labels: [],
           contracts: summary.contracts.map((contract) => ({
             ...contract,
             contract_amount: null,
@@ -270,6 +316,7 @@ describe("MaintenanceProjectsPage", () => {
     if (allowed) {
       await waitFor(() => expect(listMaintenanceProjectOperations).toHaveBeenCalledWith(
         expect.objectContaining({ reminder }),
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
       ));
       expect(screen.queryByText("当前账号无权使用该提醒筛选")).toBeNull();
     } else {
@@ -321,5 +368,84 @@ describe("MaintenanceProjectsPage", () => {
       "/maintenance/projects/project%2F1?reminder=all#urgent",
     )).toBeInTheDocument();
     expect(listMaintenanceProjectOperations).not.toHaveBeenCalled();
+  });
+
+  it("新筛选请求发出前取消旧请求，并坚持使用 POST body 参数", async () => {
+    render(<MemoryRouter><MaintenanceProjectsPage /></MemoryRouter>);
+    await screen.findByTestId("maintenance-project-card-project-1");
+    const firstSignal = listMaintenanceProjectOperations.mock.calls[0][1].signal as AbortSignal;
+
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索维保项目" }), {
+      target: { value: "二期" },
+    });
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: "搜索维保项目" }), {
+      key: "Enter",
+      code: "Enter",
+    });
+
+    await waitFor(() => expect(listMaintenanceProjectOperations).toHaveBeenCalledTimes(2));
+    expect(firstSignal.aborted).toBe(true);
+    expect(listMaintenanceProjectOperations.mock.calls[1][0]).toEqual(expect.objectContaining({
+      q: "二期",
+      owner_scope: "all",
+    }));
+    expect(listMaintenanceProjectOperations.mock.calls[1][1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("没有项目管理权限时不渲染负责人管理入口", async () => {
+    localStorage.setItem("role", "purchaser");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: true,
+      data_profit: true,
+      action_maintenance_project_manage: false,
+    }));
+
+    render(<MemoryRouter><MaintenanceProjectsPage /></MemoryRouter>);
+
+    const card = await screen.findByTestId("maintenance-project-card-project-1");
+    expect(within(card).queryByRole("button", { name: "管理负责人" })).toBeNull();
+  });
+
+  it("老板可看全量项目，但不显示仅管理员可用的负责人映射入口", async () => {
+    localStorage.setItem("role", "boss");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: true,
+      data_profit: true,
+      action_maintenance_project_manage: true,
+    }));
+
+    render(<MemoryRouter><MaintenanceProjectsPage /></MemoryRouter>);
+
+    const card = await screen.findByTestId("maintenance-project-card-project-1");
+    expect(within(card).queryByRole("button", { name: "管理负责人" })).toBeNull();
+    expect(listMaintenanceProjectOperations.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ owner_scope: "all" }),
+    );
+  });
+
+  it("已映射账号停用时明确标注负责人账号失效", async () => {
+    listMaintenanceProjectOperations.mockResolvedValueOnce({
+      data: {
+        rows: [{
+          ...summary,
+          manager_assignment: {
+            ...summary.manager_assignment,
+            account_status: "inactive",
+          },
+        }],
+        total: 1,
+        page: 1,
+        page_size: 24,
+        as_of: "2026-08-08",
+        data_version: "inactive-manager-v1",
+      },
+    });
+
+    render(<MemoryRouter><MaintenanceProjectsPage /></MemoryRouter>);
+
+    const card = await screen.findByTestId("maintenance-project-card-project-1");
+    expect(within(card).getByText("负责人账号失效")).toBeInTheDocument();
   });
 });

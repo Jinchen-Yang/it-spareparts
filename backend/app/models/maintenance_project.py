@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -176,6 +177,82 @@ class MaintenanceProjectContract(Base):
     )
 
 
+class MaintenanceProjectUserAssignment(Base):
+    """Auditable link from one stable project to its explicit primary manager."""
+
+    __tablename__ = "maintenance_project_user_assignment"
+
+    assignment_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_project.project_id"),
+        nullable=False,
+    )
+    responsibility_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    user_id: Mapped[int] = mapped_column(ForeignKey("sys_user.id"), nullable=False)
+    source_manager_text: Mapped[str | None] = mapped_column(String(64))
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+    assigned_at: Mapped[datetime] = mapped_column(
+        TZDateTime,
+        nullable=False,
+        server_default=func.now(),
+    )
+    assigned_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    assignment_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    archived_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    archived_by: Mapped[str | None] = mapped_column(String(64))
+    archive_reason: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint(
+            "responsibility_type = 'primary_manager'",
+            name="ck_maintenance_project_user_assignment_type",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_maintenance_project_user_assignment_version",
+        ),
+        CheckConstraint(
+            "char_length(btrim(assigned_by)) > 0",
+            name="ck_maintenance_project_user_assignment_assigner",
+        ),
+        CheckConstraint(
+            "char_length(btrim(assignment_reason)) > 0",
+            name="ck_maintenance_project_user_assignment_reason",
+        ),
+        CheckConstraint(
+            "(archived_at IS NULL AND archived_by IS NULL AND archive_reason IS NULL) OR "
+            "(archived_at IS NOT NULL AND archived_by IS NOT NULL AND "
+            "archive_reason IS NOT NULL AND char_length(btrim(archived_by)) > 0 AND "
+            "char_length(btrim(archive_reason)) > 0 AND archived_at >= assigned_at)",
+            name="ck_maintenance_project_user_assignment_archive",
+        ),
+        Index(
+            "ux_maintenance_project_primary_manager_active",
+            "project_id",
+            unique=True,
+            postgresql_where=text(
+                "archived_at IS NULL AND responsibility_type = 'primary_manager'"
+            ),
+        ),
+        Index(
+            "ix_maintenance_project_user_assignment_user_active",
+            "user_id",
+            "archived_at",
+        ),
+        Index(
+            "ix_maintenance_project_user_assignment_project_time",
+            "project_id",
+            "assigned_at",
+            "assignment_id",
+        ),
+    )
+
+
 class MaintenanceProjectAuditLog(Base):
     """Business audit for string-identified maintenance project facts."""
 
@@ -201,7 +278,7 @@ class MaintenanceProjectAuditLog(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "entity_type IN ('project', 'project_contract')",
+            "entity_type IN ('project', 'project_contract', 'manager_assignment')",
             name="ck_maintenance_project_audit_entity_type",
         ),
         CheckConstraint(

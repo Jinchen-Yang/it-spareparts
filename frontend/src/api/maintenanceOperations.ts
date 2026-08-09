@@ -7,6 +7,45 @@ import {
 export type MaintenanceLifecycleStatus = "ongoing" | "ended" | "missing" | string;
 export type ProjectReminderSeverity = "info" | "warning" | "critical";
 
+export interface MaintenanceManagerAssignment {
+  assignment_id: string;
+  project_id: string;
+  responsibility_type: "primary_manager";
+  user_id: number;
+  username: string;
+  display_name: string | null;
+  account_status: "active" | "inactive";
+  source_manager_text: string | null;
+  version: number;
+  assigned_at: string;
+  archived_at: string | null;
+}
+
+export interface MaintenanceProjectTask {
+  task_id: string;
+  project_id: string;
+  rule_key: string;
+  severity: ProjectReminderSeverity;
+  title: string;
+  detail: string | null;
+  entity_id: string | null;
+  task_type: string;
+  due_date: string | null;
+  due_state: "completed" | "overdue" | "due_today" | "upcoming" | "none";
+  is_overdue: boolean;
+  status: "open" | "pending" | "completed" | string;
+  owner: string | null;
+  generated_by: "system";
+  close_basis: string;
+}
+
+export interface MaintenanceProjectTaskSummary {
+  primary: MaintenanceProjectTask | null;
+  open_count: number;
+  overdue_count: number;
+  rows: MaintenanceProjectTask[];
+}
+
 export interface MaintenanceContractSummary {
   project_contract_id: string;
   contract_id: string;
@@ -62,6 +101,10 @@ export interface MaintenanceProjectOperationsSummary {
   contracts: MaintenanceContractSummary[];
   metrics: MaintenanceOperationsMetrics;
   reminder_count: number;
+  manager_assignment: MaintenanceManagerAssignment | null;
+  task_summary: MaintenanceProjectTaskSummary;
+  missing_data_labels: string[];
+  attachment_status: "not_integrated" | "missing" | "available" | string;
   as_of: string;
 }
 
@@ -72,6 +115,13 @@ export interface MaintenanceProjectOperationsDirectory {
   page_size: number;
   as_of: string;
   data_version: string;
+  owner_scope: "me" | "all";
+  filters?: {
+    task_type: string | null;
+    task_status: string | null;
+    due_from: string | null;
+    due_to: string | null;
+  };
 }
 
 export interface MaintenanceSiteRequisitionRow {
@@ -514,37 +564,98 @@ export interface MaintenanceOperationsListParams {
   lifecycle?: string;
   reminder?: string;
   include_inactive?: boolean;
+  owner_scope?: "me" | "all";
+  task_type?: string;
+  task_status?: "open" | "pending" | "completed";
+  due_from?: string;
+  due_to?: string;
 }
 
 export const listMaintenanceProjectOperations = (
   params: MaintenanceOperationsListParams = {},
+  options: { signal?: AbortSignal } = {},
 ) => {
   const request = {
     ...params,
+    q: params.q?.trim() || "",
     include_inactive: params.include_inactive ?? false,
   };
-  const q = params.q?.trim();
-  const response = q
+  const response = options.signal
     ? api.post<MaintenanceProjectOperationsDirectory>(
       "/maintenance/projects/stable/operations/search",
-      { ...request, q },
+      request,
+      { signal: options.signal },
     )
-    : (() => {
-      const safeParams = { ...request };
-      delete safeParams.q;
-      return api.get<MaintenanceProjectOperationsDirectory>(
-        "/maintenance/projects/stable/operations",
-        { params: safeParams },
-      );
-    })();
+    : api.post<MaintenanceProjectOperationsDirectory>(
+      "/maintenance/projects/stable/operations/search",
+      request,
+    );
   return response.then((result) => ({
     ...result,
     data: normalizeOperationsDirectory(result.data),
   }));
 };
 
+export interface MaintenanceManagerAccount {
+  user_id: number;
+  username: string;
+  display_name: string | null;
+  is_active: boolean;
+}
+
+export interface MaintenanceManagerAccountDirectory {
+  rows: MaintenanceManagerAccount[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface MaintenanceManagerAssignmentInput {
+  user_id: number;
+  expected_assignment_id?: string | null;
+  expected_assignment_version?: number | null;
+  reason: string;
+}
+
 const projectBase = (projectId: string) =>
   `/maintenance/projects/stable/${encodeURIComponent(projectId)}`;
+
+export const searchMaintenanceManagerAccounts = (
+  input: { q?: string; page?: number; page_size?: number } = {},
+  options: { signal?: AbortSignal } = {},
+) => {
+  const request = {
+    q: input.q?.trim() || "",
+    page: input.page ?? 1,
+    page_size: input.page_size ?? 20,
+  };
+  return options.signal
+    ? api.post<MaintenanceManagerAccountDirectory>(
+      "/maintenance/project-manager-assignments/search",
+      request,
+      { signal: options.signal },
+    )
+    : api.post<MaintenanceManagerAccountDirectory>(
+      "/maintenance/project-manager-assignments/search",
+      request,
+    );
+};
+
+export const assignMaintenanceProjectManager = (
+  projectId: string,
+  input: MaintenanceManagerAssignmentInput,
+) => api.post<MaintenanceManagerAssignment>(
+  `${projectBase(projectId)}/manager-assignment`,
+  input,
+);
+
+export const archiveMaintenanceProjectManager = (
+  assignmentId: string,
+  input: { version: number; reason: string },
+) => api.post<MaintenanceManagerAssignment>(
+  `/maintenance/project-manager-assignments/${encodeURIComponent(assignmentId)}/archive`,
+  input,
+);
 
 export interface MaintenanceWorkspaceParams {
   collection_page?: number;
