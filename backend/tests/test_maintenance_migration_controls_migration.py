@@ -165,11 +165,38 @@ def test_downgrade_fails_closed_when_control_history_exists(db):
     cfg = _cfg()
     with engine.begin() as connection:
         _insert_preview_run(connection, run_id="downgrade-blocker-run")
+    with engine.connect() as connection:
+        versions_before = set(
+            connection.scalars(text("SELECT version_num FROM alembic_version"))
+        )
+        replenishment_tables_before = {
+            name
+            for name in inspect(connection).get_table_names()
+            if name.startswith("replenishment_")
+        }
+        beta_permission_before = connection.execute(
+            text(
+                "SELECT permissions ->> 'page_maintenance_beta' "
+                "FROM sys_role_template WHERE code = 'admin'"
+            )
+        ).scalar_one()
 
     with pytest.raises(DBAPIError, match="history is not empty"):
         alembic_command.downgrade(cfg, _PREV)
 
     with engine.begin() as connection:
+        assert set(connection.scalars(text("SELECT version_num FROM alembic_version"))) == versions_before
+        assert {
+            name
+            for name in inspect(connection).get_table_names()
+            if name.startswith("replenishment_")
+        } == replenishment_tables_before
+        assert connection.execute(
+            text(
+                "SELECT permissions ->> 'page_maintenance_beta' "
+                "FROM sys_role_template WHERE code = 'admin'"
+            )
+        ).scalar_one() == beta_permission_before
         connection.execute(
             text(
                 "DELETE FROM maintenance_migration_run "

@@ -13,9 +13,13 @@ from sqlalchemy.exc import DBAPIError
 from app.db import engine
 
 
-REVISION = "b2c4e6f8a1d3"
 DOWNGRADE_TARGET = "f5a7c9e1b3d4"
-PARENTS = {"a6d1e9c3b7f2", "e6f1a9c3b7d2", DOWNGRADE_TARGET}
+PARENTS = {
+    "a6d1e9c3b7f2",
+    "c2f7a9d4e6b1",
+    "e6f1a9c3b7d2",
+    DOWNGRADE_TARGET,
+}
 
 
 def _cfg() -> AlembicConfig:
@@ -68,6 +72,8 @@ def test_bridge_schema_has_adapter_audit_union_and_wide_source_identity(db):
 def test_empty_combined_bridge_downgrades_and_reupgrades(db):
     db.close()
     cfg = _cfg()
+    with engine.connect() as connection:
+        versions_before = set(connection.scalars(text("SELECT version_num FROM alembic_version")))
     alembic_command.downgrade(cfg, DOWNGRADE_TARGET)
     try:
         with engine.connect() as connection:
@@ -76,7 +82,7 @@ def test_empty_combined_bridge_downgrades_and_reupgrades(db):
         alembic_command.upgrade(cfg, "head")
         with engine.connect() as connection:
             versions = set(connection.scalars(text("SELECT version_num FROM alembic_version")))
-            assert versions == {REVISION}
+            assert versions == versions_before
     finally:
         alembic_command.upgrade(cfg, "head")
 
@@ -93,9 +99,23 @@ def test_integration_audit_history_blocks_bridge_revision_downgrade(db):
     )
     db.commit()
     db.close()
+    with engine.connect() as connection:
+        versions_before = set(connection.scalars(text("SELECT version_num FROM alembic_version")))
+        tables_before = set(inspect(connection).get_table_names())
+        replenishment_permission_before = connection.execute(
+            text(
+                "SELECT permissions ->> 'page_replenishment_beta' "
+                "FROM sys_role_template WHERE code = 'admin'"
+            )
+        ).scalar_one()
     with pytest.raises(DBAPIError, match="downgrade blocked"):
         alembic_command.downgrade(_cfg(), DOWNGRADE_TARGET)
     with engine.connect() as connection:
-        assert set(connection.scalars(text("SELECT version_num FROM alembic_version"))) == {
-            REVISION
-        }
+        assert set(connection.scalars(text("SELECT version_num FROM alembic_version"))) == versions_before
+        assert set(inspect(connection).get_table_names()) == tables_before
+        assert connection.execute(
+            text(
+                "SELECT permissions ->> 'page_replenishment_beta' "
+                "FROM sys_role_template WHERE code = 'admin'"
+            )
+        ).scalar_one() == replenishment_permission_before

@@ -276,11 +276,11 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
         extra={(
           <Space wrap>
             <Tag>{`已人工归属历史维保单 ${project.manual_source_order_count} 张`}</Tag>
-            <Link to={`/maintenance/project-master/source-orders?project_id=${encodeURIComponent(project.project_id)}`}>
+            <Link to={`/maintenance/beta/project-master/source-orders?project_id=${encodeURIComponent(project.project_id)}`}>
               查看归属明细
             </Link>
             {canManageProject && (
-              <Link to={`/maintenance/cost-refill?project_id=${encodeURIComponent(project.project_id)}`}>
+              <Link to={`/maintenance/beta/cost-refill?project_id=${encodeURIComponent(project.project_id)}`}>
                 去人工回填成本
               </Link>
             )}

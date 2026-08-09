@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     maintenance_manifest_active_hmac_key: SecretStr = SecretStr(_DEFAULT_MANIFEST_KEY)
     maintenance_manifest_previous_hmac_keys_json: SecretStr = SecretStr("none")
 
+    # 维保新工作台 Beta 服务端总闸。默认关闭；打开后仍要求账号同时持有
+    # page_maintenance 与 page_maintenance_beta，稳定版接口不经过此闸。
+    maintenance_beta_enabled: bool = False
+
     # 销售经理补库购物车 Beta 服务端总闸。关闭时只保留能力探测，全部业务读写和导出
     # 失败关闭；既有 Beta 数据与表结构原样保留，重新开启后可继续使用。
     replenishment_beta_enabled: bool = False

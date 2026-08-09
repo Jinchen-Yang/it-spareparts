@@ -252,6 +252,8 @@ def meta(db: Session = Depends(get_db), _: None = Depends(_read_gate)) -> dict:
         "meta": permissions.PERMISSION_META,
         "dependencies": {"action_data": permissions.ACTION_DATA_DEPENDENCIES,
                          "action_page": permissions.ACTION_PAGE_DEPENDENCIES,
+                         "action_additional_page": permissions.ACTION_ADDITIONAL_PAGE_DEPENDENCIES,
+                         "page_page": permissions.PAGE_PAGE_DEPENDENCIES,
                          "data_data": permissions.DATA_DATA_DEPENDENCIES},
         "high_risk_keys": sorted(permissions.HIGH_RISK_KEYS),
         "all_keys": permissions.ALL_KEYS,

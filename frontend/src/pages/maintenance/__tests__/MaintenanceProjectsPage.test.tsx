@@ -173,7 +173,7 @@ describe("MaintenanceProjectsPage", () => {
     expect(within(card).getByText(/完成依据：本人范围的月度全量上传批次/)).toBeInTheDocument();
     expect(within(card).getByRole("link", { name: "上传月度全量表" })).toHaveAttribute(
       "href",
-      "/maintenance/project-manager/monthly-workbook",
+      "/maintenance/beta/project-manager/monthly-workbook",
     );
     expect(within(card).getByText("验收附件待上传")).toBeInTheDocument();
     expect(within(card).getByRole("button", { name: "管理负责人" })).toBeInTheDocument();
@@ -188,7 +188,7 @@ describe("MaintenanceProjectsPage", () => {
     expect(returnStatus).not.toHaveTextContent("%");
     expect(within(card).getByRole("link", { name: "查看项目" })).toHaveAttribute(
       "href",
-      "/maintenance/projects/project-1",
+      "/maintenance/beta/projects/project-1",
     );
     expect(screen.getByTestId("maintenance-project-grid")).toHaveClass(
       "maintenance-project-grid",
@@ -337,7 +337,7 @@ describe("MaintenanceProjectsPage", () => {
     }));
 
     render(
-      <MemoryRouter initialEntries={[`/maintenance/projects?reminder=${reminder}`]}>
+      <MemoryRouter initialEntries={[`/maintenance/beta/projects?reminder=${reminder}`]}>
         <MaintenanceProjectsPage />
       </MemoryRouter>,
     );
@@ -370,7 +370,7 @@ describe("MaintenanceProjectsPage", () => {
     });
 
     render(
-      <MemoryRouter initialEntries={["/maintenance/projects?reminder=warning"]}>
+      <MemoryRouter initialEntries={["/maintenance/beta/projects?reminder=warning"]}>
         <MaintenanceProjectsPage />
       </MemoryRouter>,
     );
@@ -384,17 +384,17 @@ describe("MaintenanceProjectsPage", () => {
   it("带 project_id 的旧提醒深链直接进入稳定项目详情", async () => {
     render(
       <MemoryRouter initialEntries={[
-        "/maintenance/projects?project_id=project%2F1&reminder=all#urgent",
+        "/maintenance/beta/projects?project_id=project%2F1&reminder=all#urgent",
       ]}>
         <Routes>
-          <Route path="/maintenance/projects" element={<MaintenanceProjectsPage />} />
-          <Route path="/maintenance/projects/:projectId" element={<LocationProbe />} />
+          <Route path="/maintenance/beta/projects" element={<MaintenanceProjectsPage />} />
+          <Route path="/maintenance/beta/projects/:projectId" element={<LocationProbe />} />
         </Routes>
       </MemoryRouter>,
     );
 
     expect(await screen.findByText(
-      "/maintenance/projects/project%2F1?reminder=all#urgent",
+      "/maintenance/beta/projects/project%2F1?reminder=all#urgent",
     )).toBeInTheDocument();
     expect(listMaintenanceProjectOperations).not.toHaveBeenCalled();
   });

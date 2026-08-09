@@ -104,6 +104,9 @@ os.environ["PYTEST_DATABASE_BASE_URL"] = _database_run.base_url
 os.environ["DATABASE_URL"] = _database_run.database_url
 os.environ["PYTEST_RAW_FILE_BASE_DIR"] = str(_raw_run.root)
 os.environ["RAW_FILE_DIR"] = str(_raw_run.run_dir)
+# 新维保接口在生产默认关闭；业务测试需显式处于 Beta 已开启环境。
+# 总闸关闭及逐账号白名单边界由 test_maintenance_beta_gate 单独覆盖。
+os.environ.setdefault("MAINTENANCE_BETA_ENABLED", "true")
 
 try:
     import pytest  # noqa: E402

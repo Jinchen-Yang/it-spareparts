@@ -106,7 +106,7 @@ describe("MaintenanceProjectMasterPage", () => {
     await screen.findByText("XM-001");
     expect(screen.getByRole("link", { name: "历史维保单归属" })).toHaveAttribute(
       "href",
-      "/maintenance/project-master/source-orders",
+      "/maintenance/beta/project-master/source-orders",
     );
   });
 

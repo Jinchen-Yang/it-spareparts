@@ -1,5 +1,6 @@
 interface LocalMaintenancePermissions {
   page_maintenance?: boolean;
+  page_maintenance_beta?: boolean;
   data_customer?: boolean;
   data_purchase_cost?: boolean;
   data_profit?: boolean;
@@ -17,6 +18,7 @@ interface LocalMaintenancePermissions {
 }
 
 export interface MaintenanceCapabilities {
+  canUseBeta: boolean;
   canViewCost: boolean;
   canViewContract: boolean;
   canViewExpense: boolean;
@@ -116,6 +118,10 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
   const canViewContract = canViewProfit;
   const canViewExpense = canViewProfit;
   const canViewFinancial = canViewCost && canViewContract && canViewExpense;
+  const canUseBeta = isAdmin || (
+    permissions.page_maintenance === true
+    && permissions.page_maintenance_beta === true
+  );
   const canDownloadRoundtrip = isAdmin || (
     !scopedSales
     && permissions.page_maintenance === true
@@ -124,6 +130,7 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
     && permissions.data_profit === true
   );
   return {
+    canUseBeta,
     canViewCost,
     canViewContract,
     canViewExpense,
@@ -133,47 +140,38 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
     canApplyRoundtrip: canDownloadRoundtrip && (
       isAdmin || permissions.action_maintenance_roundtrip_apply === true
     ),
-    canUseManagerWorkbook: canViewContract && (
-      isAdmin || permissions.page_maintenance === true
-    ),
-    canApplyManagerWorkbook: canViewContract && (
+    canUseManagerWorkbook: canUseBeta && canViewContract,
+    canApplyManagerWorkbook: canUseBeta && canViewContract && (
       isAdmin || (
-        permissions.page_maintenance === true
-        && permissions.action_maintenance_manager_workbook_apply === true
+        permissions.action_maintenance_manager_workbook_apply === true
       )
     ),
-    canSubmitAcceptance: isAdmin || (
-      permissions.page_maintenance === true
-      && permissions.action_maintenance_acceptance_submit === true
+    canSubmitAcceptance: canUseBeta && (
+      isAdmin || permissions.action_maintenance_acceptance_submit === true
     ),
-    canReviewAcceptance: isAdmin || (
-      permissions.page_maintenance === true
-      && permissions.action_maintenance_acceptance_review === true
+    canReviewAcceptance: canUseBeta && (
+      isAdmin || permissions.action_maintenance_acceptance_review === true
     ),
-    canManageProject: isAdmin || (
-      permissions.page_maintenance === true
-      && permissions.data_purchase_cost === true
+    canManageProject: canUseBeta && (isAdmin || (
+      permissions.data_purchase_cost === true
       && permissions.action_maintenance_project_manage === true
-    ),
+    )),
     // This high-risk action is real-account only.  Shared admin credentials
     // deliberately receive an explicit false from the backend, so unlike
     // ordinary admin capabilities the UI must not bypass the permission map.
-    canDeleteDemand: permissions.page_maintenance === true
+    canDeleteDemand: canUseBeta
       && permissions.action_maintenance_demand_delete === true,
-    canManageSiteIssues: isAdmin || (
-      permissions.page_maintenance === true
-      && permissions.data_purchase_cost === true
+    canManageSiteIssues: canUseBeta && (isAdmin || (
+      permissions.data_purchase_cost === true
       && permissions.action_maintenance_site_issue_manage === true
+    )),
+    canManageBadReturns: canUseBeta && (
+      isAdmin || permissions.action_maintenance_bad_return_manage === true
     ),
-    canManageBadReturns: isAdmin || (
-      permissions.page_maintenance === true
-      && permissions.action_maintenance_bad_return_manage === true
-    ),
-    canManageWarehouse: permissions.page_maintenance === true
+    canManageWarehouse: canUseBeta
       && permissions.action_maintenance_warehouse_manage === true,
-    canReviewMigration: (
-      permissions.page_maintenance === true
-      && permissions.data_purchase_cost === true
+    canReviewMigration: canUseBeta && (
+      permissions.data_purchase_cost === true
       && permissions.data_profit === true
       && permissions.action_maintenance_migration_review === true
     ),

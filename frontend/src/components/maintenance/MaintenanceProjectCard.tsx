@@ -81,13 +81,13 @@ export default function MaintenanceProjectCard({
       )}
       extra={<Tag color={lifecycle.color}>{lifecycle.label}</Tag>}
       actions={[
-        <Link key="detail" to={`/maintenance/projects/${encodeURIComponent(project.project_id)}`}>
+        <Link key="detail" to={`/maintenance/beta/projects/${encodeURIComponent(project.project_id)}`}>
           查看项目
         </Link>,
         ...(hasPendingMonthlyUpload && canUseManagerWorkbook ? [
           <Link
             key="monthly-upload-pending"
-            to="/maintenance/project-manager/monthly-workbook"
+            to="/maintenance/beta/project-manager/monthly-workbook"
             title="打开本人范围的月度全量工作簿"
           >
             上传月度全量表

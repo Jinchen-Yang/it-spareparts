@@ -85,7 +85,7 @@ beforeEach(() => {
   searchMaintenanceProjects.mockResolvedValue({
     data: { rows: [], total: 0, page: 1, page_size: 100 },
   });
-  window.history.replaceState({}, "", "/maintenance/project-master/source-orders");
+  window.history.replaceState({}, "", "/maintenance/beta/project-master/source-orders");
 });
 
 afterEach(() => cleanup());
@@ -95,7 +95,7 @@ describe("MaintenanceSourceOrderAssignmentsPage", () => {
     window.history.replaceState(
       {},
       "",
-      `/maintenance/project-master/source-orders?project_id=${ACTIVE_PROJECT.project_id}`,
+      `/maintenance/beta/project-master/source-orders?project_id=${ACTIVE_PROJECT.project_id}`,
     );
     listMaintenanceSourceOrders.mockReturnValue(directory([ASSIGNED_ROW]));
 

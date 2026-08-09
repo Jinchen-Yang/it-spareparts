@@ -340,7 +340,7 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(screen.getByText("已人工归属历史维保单 2 张")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "查看归属明细" })).toHaveAttribute(
       "href",
-      "/maintenance/project-master/source-orders?project_id=project-1",
+      "/maintenance/beta/project-master/source-orders?project_id=project-1",
     );
     expect(screen.getAllByText("XSDD-001").length).toBeGreaterThanOrEqual(3);
     expect(screen.getByText("回款 / 全部合同额（含税）")).toBeInTheDocument();
@@ -477,6 +477,7 @@ describe("MaintenanceProjectWorkspacePage", () => {
     localStorage.setItem("role", "maintenance_operator");
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: true,
+      page_maintenance_beta: true,
       data_purchase_cost: false,
       data_profit: false,
       action_maintenance_project_manage: false,

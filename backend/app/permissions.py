@@ -25,6 +25,9 @@ PAGE_KEYS: list[str] = [
     "page_inventory", "page_chat", "page_import", "page_governance",
     "page_master_data", "page_maintenance", "page_boss_board",
     "page_pool_analysis",
+    # 维保新工作台 Beta：稳定版 page_maintenance 仍是基础权限；本键仅给
+    # 明确进入灰度名单的账号，关闭后不影响原维保页面与接口。
+    "page_maintenance_beta",
     # 销售经理补库购物车 Beta：独立于稳定版库存/维保页面，默认仅管理员可见，
     # 试用账号由权限中心逐个显式授权。
     "page_replenishment_beta",
@@ -84,6 +87,7 @@ LABELS: dict[str, str] = {
     "page_maintenance": "项目成本（维保出库）",
     "page_boss_board": "老板经营看板",
     "page_pool_analysis": "互通池价格分析",
+    "page_maintenance_beta": "维保管理 Beta",
     "data_pool_price_governance": "池价格治理（约束价/越线差额）",
     "action_pool_manage": "互通PN池维护（建池/成员/归档）",
     "action_pool_set_policy": "池约束价设置（采购上限/销售下限）",
@@ -124,6 +128,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     # boss 由 _full() 生成会把全部动作打开；账号管理与数据疑点核实必须显式关闭。
     "boss": {**_full(), "page_accounts": False, "action_account_manage": False,
              "action_data_quality_review": False,
+             "page_maintenance_beta": False,
              "action_maintenance_manager_workbook_apply": False,
              "action_maintenance_project_manage": False,
               "action_maintenance_demand_delete": False,
@@ -142,6 +147,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     # page_pool_analysis / data_pool_price_governance 按规格 §12 全员开（普通员工可看池与约束价）。
     "readonly": {**_full(), "page_import": False, "page_governance": False,
                  "page_master_data": False, "page_maintenance": False,
+                 "page_maintenance_beta": False,
                  "page_boss_board": False,
                  "action_pool_manage": False, "action_pool_set_policy": False,
                  "action_data_quality_review": False,
@@ -171,6 +177,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_inventory": True, "page_chat": True,
         # 项目成本=公司维保项目经营数据，销售不开（同 page_profit 口径）
         "page_maintenance": False,
+        "page_maintenance_beta": False,
         # 老板经营看板=全公司经营/个人排名，销售不开
         "page_boss_board": False,
         # 互通池价格分析全员可见（§12），约束价对全员公开；池维护/约束设置默认不开
@@ -203,6 +210,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_master_data": True,
         # 维保项目成本对采购开放（成本口径本就对采购可见，data_purchase_cost=True）
         "page_maintenance": True,
+        "page_maintenance_beta": False,
         # 老板经营看板=全公司经营/个人排名，采购不开
         "page_boss_board": False,
         # 互通池价格分析全员可见（§12），约束价对全员公开；池维护/约束设置默认不开
@@ -290,6 +298,25 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_replenishment_create": "page_replenishment_beta",
 }
 
+# 新维保动作同时依赖稳定版基础权限和 Beta 白名单。本表是叠加约束，保留
+# ACTION_PAGE_DEPENDENCIES 中既有的 page_maintenance 映射，避免历史权限契约漂移。
+ACTION_ADDITIONAL_PAGE_DEPENDENCIES: dict[str, str] = {
+    "action_maintenance_manager_workbook_apply": "page_maintenance_beta",
+    "action_maintenance_project_manage": "page_maintenance_beta",
+    "action_maintenance_demand_delete": "page_maintenance_beta",
+    "action_maintenance_site_issue_manage": "page_maintenance_beta",
+    "action_maintenance_bad_return_manage": "page_maintenance_beta",
+    "action_maintenance_acceptance_submit": "page_maintenance_beta",
+    "action_maintenance_acceptance_review": "page_maintenance_beta",
+    "action_maintenance_warehouse_manage": "page_maintenance_beta",
+    "action_maintenance_migration_review": "page_maintenance_beta",
+}
+
+# Beta 只是稳定维保能力之上的附加入口，禁止出现“看不到稳定版却能进 Beta”的孤岛权限。
+PAGE_PAGE_DEPENDENCIES: dict[str, str] = {
+    "page_maintenance_beta": "page_maintenance",
+}
+
 # 数据之间的可推导依赖：营收在经营报表中是公开口径，毛利一旦可见，
 # ``营收 - 毛利`` 就能精确反推出采购成本。因此 data_profit 只能在同时持有
 # data_purchase_cost 时开启。反向（看成本、不看利润）合法，采购模板正是此口径。
@@ -314,6 +341,16 @@ def combo_errors(perms: dict[str, bool]) -> list[str]:
                 f"「{LABELS.get(action_key, action_key)}」需要同时开启"
                 f"「{LABELS.get(page_key, page_key)}」——操作发生在该页面里，"
                 f"进不了页面就无法看着现状做修改")
+    for action_key, page_key in ACTION_ADDITIONAL_PAGE_DEPENDENCIES.items():
+        if perms.get(action_key, False) and not perms.get(page_key, False):
+            errors.append(
+                f"「{LABELS.get(action_key, action_key)}」需要同时开启"
+                f"「{LABELS.get(page_key, page_key)}」——该操作仅在灰度页面中开放")
+    for page_key, required_page_key in PAGE_PAGE_DEPENDENCIES.items():
+        if perms.get(page_key, False) and not perms.get(required_page_key, False):
+            errors.append(
+                f"「{LABELS.get(page_key, page_key)}」需要同时开启"
+                f"「{LABELS.get(required_page_key, required_page_key)}」——Beta 是稳定版之上的附加入口")
     for data_key, required_key in DATA_DATA_DEPENDENCIES.items():
         if perms.get(data_key, False) and not perms.get(required_key, False):
             errors.append(
@@ -334,6 +371,9 @@ def runtime_safe(perms: dict | None) -> dict[str, bool]:
     for data_key, required_key in DATA_DATA_DEPENDENCIES.items():
         if safe.get(data_key, False) and not safe.get(required_key, False):
             safe[data_key] = False
+    for page_key, required_page_key in PAGE_PAGE_DEPENDENCIES.items():
+        if safe.get(page_key, False) and not safe.get(required_page_key, False):
+            safe[page_key] = False
     return safe
 
 
@@ -359,6 +399,7 @@ def hidden_groups(perms: dict | None) -> set[str]:
 
 # 高风险键：授予/撤销仅限 admin 角色操作者（防非 admin 的账号管理代理自我提权/互相提权）
 HIGH_RISK_KEYS: set[str] = {
+    "page_maintenance_beta",
     "page_accounts",
     "action_account_manage",
     "action_maintenance_roundtrip_apply",
@@ -575,6 +616,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "受邀试用的销售经理"],
         "sensitivity": "high",
         "risk": "页面、价格数据、申请操作是三把独立钥匙；Beta 总闸关闭时服务端拒绝全部业务请求。",
+    },
+    "page_maintenance_beta": {
+        "label": "维保管理 Beta",
+        "summary": "可进入与稳定版并存的新维保工作台，参加小范围生产试用。",
+        "can": "在稳定版入口不变的前提下，使用项目面板、需求删除、经理月报、现场领用、坏件返还、仓库单据、验收和迁移核对。",
+        "cannot": "不自动获得任何写操作或敏感数据权限；服务端总闸关闭时所有 Beta 接口均不可用。",
+        "typical": ["管理员", "受邀试用的项目经理"],
+        "sensitivity": "critical",
+        "risk": "直接接触同一生产数据库中的新业务流程，必须逐账号白名单开放，并保留稳定版回退入口。",
     },
     # ---- 操作能力 ----
     "action_pool_manage": {

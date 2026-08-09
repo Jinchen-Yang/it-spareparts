@@ -18,6 +18,7 @@ import {
   SettingOutlined,
   ShoppingCartOutlined,
   TeamOutlined,
+  ToolOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
 import { readMaintenanceCapabilities } from "./components/maintenance/maintenancePermissions";
@@ -67,6 +68,8 @@ const loadPurchaseAnalysis = () => import("./pages/purchases/PurchaseAnalysisPag
 const loadPurchaseExceptions = () => import("./pages/purchases/PurchaseExceptionsPage");
 const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage");
 const loadProjectCost = () => import("./pages/ProjectCostPage");
+const loadProjectDownloads = () => import("./pages/ProjectDownloadsPage");
+const loadProjectReminders = () => import("./pages/ProjectRemindersPage");
 const loadMaintenanceProjectMaster = () => import("./pages/MaintenanceProjectMasterPage");
 const loadMaintenanceDemands = () => import("./pages/maintenance/MaintenanceDemandManagementPage");
 const loadMaintenanceWarehouse = () => import("./pages/maintenance/MaintenanceWarehouseWorkbenchPage");
@@ -78,8 +81,6 @@ const loadMaintenanceManagerWorkbook = () => import("./pages/maintenance/Mainten
 const loadMaintenanceAcceptance = () => import("./pages/maintenance/MaintenanceAcceptancePage");
 const loadMaintenanceCostRefill = () => import("./pages/maintenance/MaintenanceCostRefillPage");
 const loadMaintenanceMigration = () => import("./pages/maintenance/MaintenanceMigrationPage");
-const loadMaintenanceDownloadsCompat = () => import("./pages/maintenance/MaintenanceDownloadsCompatRedirect");
-const loadMaintenanceRemindersCompat = () => import("./pages/maintenance/MaintenanceRemindersCompatRedirect");
 const loadInventory = () => import("./pages/InventoryPage");
 const loadImport = () => import("./pages/ImportPage");
 const loadMasterData = () => import("./pages/MasterDataPage");
@@ -99,6 +100,8 @@ const PurchaseAnalysisPage = lazy(loadPurchaseAnalysis);
 const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
 const PurchaseRecordsPage = lazy(loadPurchaseRecords);
 const ProjectCostPage = lazy(loadProjectCost);
+const ProjectDownloadsPage = lazy(loadProjectDownloads);
+const ProjectRemindersPage = lazy(loadProjectReminders);
 const MaintenanceProjectMasterPage = lazy(loadMaintenanceProjectMaster);
 const MaintenanceDemandManagementPage = lazy(loadMaintenanceDemands);
 const MaintenanceWarehouseWorkbenchPage = lazy(loadMaintenanceWarehouse);
@@ -110,8 +113,6 @@ const MaintenanceManagerWorkbookPage = lazy(loadMaintenanceManagerWorkbook);
 const MaintenanceAcceptancePage = lazy(loadMaintenanceAcceptance);
 const MaintenanceCostRefillPage = lazy(loadMaintenanceCostRefill);
 const MaintenanceMigrationPage = lazy(loadMaintenanceMigration);
-const MaintenanceDownloadsCompatRedirect = lazy(loadMaintenanceDownloadsCompat);
-const MaintenanceRemindersCompatRedirect = lazy(loadMaintenanceRemindersCompat);
 const InventoryPage = lazy(loadInventory);
 const ImportPage = lazy(loadImport);
 const MasterDataPage = lazy(loadMasterData);
@@ -166,15 +167,27 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-maintenance",
     label: "维保管理",
     items: [
-      { key: "maintenance-projects", path: "/maintenance/projects", label: "项目面板", icon: <DashboardOutlined />, perm: "page_maintenance", page: MaintenanceProjectsPage, load: loadMaintenanceProjects },
-      { key: "maintenance-project-master", path: "/maintenance/project-master", label: "项目主档", icon: <ProfileOutlined />, perm: "page_maintenance", page: MaintenanceProjectMasterPage, load: loadMaintenanceProjectMaster },
-      { key: "maintenance-demands", path: "/maintenance/demands", label: "需求单管理", icon: <FileSearchOutlined />, perm: "page_maintenance", page: MaintenanceDemandManagementPage, load: loadMaintenanceDemands },
-      { key: "maintenance-warehouse", path: "/maintenance/warehouse", label: "仓库单据", icon: <InboxOutlined />, perm: "page_maintenance", page: MaintenanceWarehouseWorkbenchPage, load: loadMaintenanceWarehouse },
-      { key: "maintenance-manager-workbook", path: "/maintenance/project-manager/monthly-workbook", label: "经理月报", icon: <CloudUploadOutlined />, visibleWhen: () => readMaintenanceCapabilities().canUseManagerWorkbook, page: MaintenanceManagerWorkbookPage, load: loadMaintenanceManagerWorkbook },
-      { key: "maintenance-acceptance", path: "/maintenance/acceptance", label: "验收报告", icon: <FileDoneOutlined />, perm: "page_maintenance", page: MaintenanceAcceptancePage, load: loadMaintenanceAcceptance },
-      { key: "maintenance-updates", path: "/maintenance/updates", label: "月度更新", icon: <CloudUploadOutlined />, visibleWhen: () => readMaintenanceCapabilities().canApplyRoundtrip, page: MaintenanceProjectUpdatesPage, load: loadMaintenanceProjectUpdates },
-      { key: "maintenance-cost-refill", path: "/maintenance/cost-refill", label: "成本回填", icon: <DollarOutlined />, visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceCostRefillPage, load: loadMaintenanceCostRefill },
-      { key: "maintenance-migration", path: "/maintenance/migration", label: "迁移核对", icon: <SafetyCertificateOutlined />, visibleWhen: () => readMaintenanceCapabilities().canReviewMigration, page: MaintenanceMigrationPage, load: loadMaintenanceMigration },
+      { key: "maintenance", path: "/maintenance", label: "项目数据", icon: <ToolOutlined />, perm: "page_maintenance", page: ProjectCostPage, load: loadProjectCost },
+      { key: "maintenance-downloads", path: "/maintenance/downloads", label: "下载中心", icon: <CloudUploadOutlined />, perm: "page_maintenance", page: ProjectDownloadsPage, load: loadProjectDownloads },
+      { key: "maintenance-reminders", path: "/maintenance/reminders", label: "项目提醒", icon: <WarningOutlined />, perm: "page_maintenance", page: ProjectRemindersPage, load: loadProjectReminders },
+    ],
+  },
+  {
+    key: "grp-maintenance-beta",
+    label: "维保管理 Beta",
+    items: [
+      { key: "maintenance-projects", path: "/maintenance/beta/projects", label: "项目面板", icon: <DashboardOutlined />, perm: "page_maintenance_beta", page: MaintenanceProjectsPage, load: loadMaintenanceProjects },
+      { key: "maintenance-project-master", path: "/maintenance/beta/project-master", label: "项目主档", icon: <ProfileOutlined />, perm: "page_maintenance_beta", page: MaintenanceProjectMasterPage, load: loadMaintenanceProjectMaster },
+      { key: "maintenance-demands", path: "/maintenance/beta/demands", label: "需求单管理", icon: <FileSearchOutlined />, perm: "page_maintenance_beta", page: MaintenanceDemandManagementPage, load: loadMaintenanceDemands },
+      { key: "maintenance-warehouse", path: "/maintenance/beta/warehouse", label: "仓库单据", icon: <InboxOutlined />, perm: "page_maintenance_beta", page: MaintenanceWarehouseWorkbenchPage, load: loadMaintenanceWarehouse },
+      { key: "maintenance-manager-workbook", path: "/maintenance/beta/project-manager/monthly-workbook", label: "经理月报", icon: <CloudUploadOutlined />, visibleWhen: () => readMaintenanceCapabilities().canUseManagerWorkbook, page: MaintenanceManagerWorkbookPage, load: loadMaintenanceManagerWorkbook },
+      { key: "maintenance-acceptance", path: "/maintenance/beta/acceptance", label: "验收报告", icon: <FileDoneOutlined />, perm: "page_maintenance_beta", page: MaintenanceAcceptancePage, load: loadMaintenanceAcceptance },
+      { key: "maintenance-updates", path: "/maintenance/beta/updates", label: "月度更新", icon: <CloudUploadOutlined />, visibleWhen: () => {
+        const capabilities = readMaintenanceCapabilities();
+        return capabilities.canUseBeta && capabilities.canApplyRoundtrip;
+      }, page: MaintenanceProjectUpdatesPage, load: loadMaintenanceProjectUpdates },
+      { key: "maintenance-cost-refill", path: "/maintenance/beta/cost-refill", label: "成本回填", icon: <DollarOutlined />, visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceCostRefillPage, load: loadMaintenanceCostRefill },
+      { key: "maintenance-migration", path: "/maintenance/beta/migration", label: "迁移核对", icon: <SafetyCertificateOutlined />, visibleWhen: () => readMaintenanceCapabilities().canReviewMigration, page: MaintenanceMigrationPage, load: loadMaintenanceMigration },
     ],
   },
   {
@@ -233,10 +246,10 @@ export interface DetailRoute {
 export const DETAIL_ROUTES: DetailRoute[] = [
   {
     key: "maintenance-source-order-assignments",
-    path: "/maintenance/project-master/source-orders",
-    pattern: /^\/maintenance\/project-master\/source-orders$/,
+    path: "/maintenance/beta/project-master/source-orders",
+    pattern: /^\/maintenance\/beta\/project-master\/source-orders$/,
     label: "历史维保单归属",
-    perm: "page_maintenance",
+    perm: "page_maintenance_beta",
     menuKey: "maintenance-project-master",
     page: MaintenanceSourceOrderAssignmentsPage,
     load: loadMaintenanceSourceOrderAssignments,
@@ -253,43 +266,13 @@ export const DETAIL_ROUTES: DetailRoute[] = [
   },
   {
     key: "maintenance-project-workspace",
-    path: "/maintenance/projects/:projectId",
-    pattern: /^\/maintenance\/projects\/[^/]+$/,
+    path: "/maintenance/beta/projects/:projectId",
+    pattern: /^\/maintenance\/beta\/projects\/[^/]+$/,
     label: "维保项目详情",
-    perm: "page_maintenance",
+    perm: "page_maintenance_beta",
     menuKey: "maintenance-projects",
     page: MaintenanceProjectWorkspacePage,
     load: loadMaintenanceProjectWorkspace,
-  },
-  {
-    key: "maintenance-downloads-compat",
-    path: "/maintenance/downloads",
-    pattern: /^\/maintenance\/downloads$/,
-    label: "下载中心兼容入口",
-    perm: "page_maintenance",
-    menuKey: "maintenance-updates",
-    page: MaintenanceDownloadsCompatRedirect,
-    load: loadMaintenanceDownloadsCompat,
-  },
-  {
-    key: "maintenance-reminders-compat",
-    path: "/maintenance/reminders",
-    pattern: /^\/maintenance\/reminders$/,
-    label: "项目提醒兼容入口",
-    perm: "page_maintenance",
-    menuKey: "maintenance-projects",
-    page: MaintenanceRemindersCompatRedirect,
-    load: loadMaintenanceRemindersCompat,
-  },
-  {
-    key: "maintenance-legacy",
-    path: "/maintenance/legacy",
-    pattern: /^\/maintenance\/legacy$/,
-    label: "旧维保项目数据",
-    perm: "page_maintenance",
-    menuKey: "maintenance-projects",
-    page: ProjectCostPage,
-    load: loadProjectCost,
   },
 ];
 
@@ -306,8 +289,8 @@ export interface NavRedirect { from: string; to: string; perm?: string }
 export const NAV_REDIRECTS: NavRedirect[] = [
   // 采购拆分：旧 /purchases 收藏跳到默认采购子页（采购分析）
   { from: "/purchases", to: "/purchases/analysis", perm: "page_purchases" },
-  // 旧维保首页继续可访问，统一进入稳定项目方块面板。
-  { from: "/maintenance", to: "/maintenance/projects", perm: "page_maintenance" },
+  // 集成期曾使用 /maintenance/legacy；发布 Beta 后恢复 /maintenance 为稳定版默认入口。
+  { from: "/maintenance/legacy", to: "/maintenance", perm: "page_maintenance" },
 ];
 
 /** 找到 path 对应的导航项（精确匹配；路由也按精确注册，加子路由时两处一起改） */
@@ -320,7 +303,7 @@ export function matchNavItem(pathname: string): NavItem | undefined {
 // 采购从单页拆成三页后，兜底代表项 = 采购分析（默认采购落地页）。
 const LEGACY_ORDER = [
   "import", "parts", "purchases-analysis", "chat", "profit",
-  "maintenance-projects", "inventory", "master", "governance", "accounts",
+  "maintenance", "inventory", "master", "governance", "accounts",
 ];
 
 /** 登录后默认落地页：优先型号查询；否则按旧菜单序取第一个可见项 */

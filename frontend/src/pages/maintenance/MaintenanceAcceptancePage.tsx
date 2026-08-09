@@ -132,7 +132,7 @@ export default function MaintenanceAcceptancePage() {
           {
             title: "操作",
             render: (_, row) => (
-              <Link to={`/maintenance/projects/${encodeURIComponent(row.project_id)}`}>
+              <Link to={`/maintenance/beta/projects/${encodeURIComponent(row.project_id)}`}>
                 <Button type="link">打开项目</Button>
               </Link>
             ),

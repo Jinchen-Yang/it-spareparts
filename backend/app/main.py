@@ -1,7 +1,7 @@
 """FastAPI 入口。"""
 import logging
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
@@ -42,6 +42,7 @@ from app.api import (
 from app.config import check_security, get_settings
 from app.db import engine
 from app.http_controls import MigrationHttpControlsMiddleware
+from app.maintenance_beta import require_maintenance_beta
 
 _log = logging.getLogger("startup")
 settings = get_settings()
@@ -85,23 +86,69 @@ app.include_router(chat_sessions.router, prefix=settings.api_prefix)
 app.include_router(purchases.router, prefix=settings.api_prefix)
 app.include_router(replenishment.router, prefix=settings.api_prefix)
 app.include_router(maintenance.router, prefix=settings.api_prefix)
-app.include_router(maintenance_acceptance.router, prefix=settings.api_prefix)
-app.include_router(maintenance_project_assignments.router, prefix=settings.api_prefix)
-app.include_router(maintenance_demands.router, prefix=settings.api_prefix)
-app.include_router(maintenance_manager_workbooks.router, prefix=settings.api_prefix)
-app.include_router(maintenance_source_assignments.router, prefix=settings.api_prefix)
-app.include_router(maintenance_migration.router, prefix=settings.api_prefix)
+maintenance_beta_dependencies = [Depends(require_maintenance_beta)]
+app.include_router(
+    maintenance_acceptance.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_project_assignments.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_demands.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_manager_workbooks.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_source_assignments.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_migration.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
 # The stable operations router must precede the project-master ``/{project_id}``
 # route so literal paths such as ``/operations`` cannot be captured as an id.
-app.include_router(maintenance_project_operations.router, prefix=settings.api_prefix)
+app.include_router(
+    maintenance_project_operations.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
 app.include_router(
     maintenance_project_operations.site_issue_router,
     prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
 )
-app.include_router(maintenance_bad_returns.router, prefix=settings.api_prefix)
-app.include_router(maintenance_project_workbooks.router, prefix=settings.api_prefix)
-app.include_router(maintenance_warehouse.router, prefix=settings.api_prefix)
-app.include_router(maintenance_projects.router, prefix=settings.api_prefix)
+app.include_router(
+    maintenance_bad_returns.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_project_workbooks.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_warehouse.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_projects.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
 app.include_router(maintenance_audit.router, prefix=settings.api_prefix)
 app.include_router(dashboard.router, prefix=settings.api_prefix)
 app.include_router(pools.router, prefix=settings.api_prefix)

@@ -113,7 +113,7 @@ export default function MaintenanceProjectsPage() {
       <Navigate
         replace
         to={{
-          pathname: `/maintenance/projects/${encodeURIComponent(projectDeepLinkId)}`,
+          pathname: `/maintenance/beta/projects/${encodeURIComponent(projectDeepLinkId)}`,
           search: nextSearch ? `?${nextSearch}` : "",
           hash: location.hash,
         }}

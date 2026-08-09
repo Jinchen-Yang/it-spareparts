@@ -11,64 +11,93 @@ import {
 describe("维保管理信息架构", () => {
   beforeEach(() => localStorage.clear());
 
-  it("固定定义项目面板、主档、需求单、仓库单据、经理月报、验收、月度更新、成本回填和迁移核对入口", () => {
-    const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance");
+  it("稳定版保持原三个入口，新工作台收口到独立 Beta 分组", () => {
+    const stable = NAV_GROUPS.find((group) => group.key === "grp-maintenance");
+    const beta = NAV_GROUPS.find((group) => group.key === "grp-maintenance-beta");
 
-    expect(maintenance?.items.map(({ key, path, label }) => ({
+    expect(stable?.items.map(({ key, path, label }) => ({
       key,
       path,
       label,
     }))).toEqual([
+      { key: "maintenance", path: "/maintenance", label: "项目数据" },
+      {
+        key: "maintenance-downloads",
+        path: "/maintenance/downloads",
+        label: "下载中心",
+      },
+      {
+        key: "maintenance-reminders",
+        path: "/maintenance/reminders",
+        label: "项目提醒",
+      },
+    ]);
+    expect(beta?.label).toBe("维保管理 Beta");
+    expect(beta?.items.map(({ key, path, label, perm }) => ({
+      key,
+      path,
+      label,
+      perm,
+    }))).toEqual([
       {
         key: "maintenance-projects",
-        path: "/maintenance/projects",
+        path: "/maintenance/beta/projects",
         label: "项目面板",
+        perm: "page_maintenance_beta",
       },
       {
         key: "maintenance-project-master",
-        path: "/maintenance/project-master",
+        path: "/maintenance/beta/project-master",
         label: "项目主档",
+        perm: "page_maintenance_beta",
       },
       {
         key: "maintenance-demands",
-        path: "/maintenance/demands",
+        path: "/maintenance/beta/demands",
         label: "需求单管理",
+        perm: "page_maintenance_beta",
       },
       {
         key: "maintenance-warehouse",
-        path: "/maintenance/warehouse",
+        path: "/maintenance/beta/warehouse",
         label: "仓库单据",
+        perm: "page_maintenance_beta",
       },
       {
         key: "maintenance-manager-workbook",
-        path: "/maintenance/project-manager/monthly-workbook",
+        path: "/maintenance/beta/project-manager/monthly-workbook",
         label: "经理月报",
+        perm: undefined,
       },
       {
         key: "maintenance-acceptance",
-        path: "/maintenance/acceptance",
+        path: "/maintenance/beta/acceptance",
         label: "验收报告",
+        perm: "page_maintenance_beta",
       },
       {
         key: "maintenance-updates",
-        path: "/maintenance/updates",
+        path: "/maintenance/beta/updates",
         label: "月度更新",
+        perm: undefined,
       },
       {
         key: "maintenance-cost-refill",
-        path: "/maintenance/cost-refill",
+        path: "/maintenance/beta/cost-refill",
         label: "成本回填",
+        perm: undefined,
       },
       {
         key: "maintenance-migration",
-        path: "/maintenance/migration",
+        path: "/maintenance/beta/migration",
         label: "迁移核对",
+        perm: undefined,
       },
     ]);
   });
 
   it("经理月报按页面和合同额权限显示，高风险单项目写入仍需独立动作权限", () => {
-    const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance");
+    const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance-beta");
     const managerWorkbook = maintenance?.items.find(
       (item) => item.key === "maintenance-manager-workbook",
     );
@@ -76,7 +105,10 @@ describe("维保管理信息架构", () => {
     const refill = maintenance?.items.find((item) => item.key === "maintenance-cost-refill");
     const migration = maintenance?.items.find((item) => item.key === "maintenance-migration");
     localStorage.setItem("role", "readonly");
-    localStorage.setItem("permissions", JSON.stringify({ page_maintenance: true }));
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      page_maintenance_beta: true,
+    }));
     expect(updates?.visibleWhen?.()).toBe(false);
     expect(refill?.visibleWhen?.()).toBe(false);
     expect(managerWorkbook?.visibleWhen?.()).toBe(false);
@@ -84,6 +116,7 @@ describe("维保管理信息架构", () => {
 
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: false,
+      page_maintenance_beta: true,
       data_purchase_cost: true,
       action_maintenance_project_manage: true,
       action_maintenance_migration_review: true,
@@ -94,6 +127,7 @@ describe("维保管理信息架构", () => {
 
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: true,
+      page_maintenance_beta: true,
       data_customer: true,
       data_purchase_cost: true,
       data_profit: true,
@@ -108,7 +142,7 @@ describe("维保管理信息架构", () => {
   });
 
   it("共享管理员被显式关闭迁移权限时不显示迁移核对入口", () => {
-    const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance");
+    const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance-beta");
     const migration = maintenance?.items.find((item) => item.key === "maintenance-migration");
     localStorage.setItem("role", "admin");
     localStorage.setItem("permissions", JSON.stringify({
@@ -121,16 +155,34 @@ describe("维保管理信息架构", () => {
     expect(migration?.visibleWhen?.()).toBe(false);
   });
 
-  it("旧维保路径继续可访问并进入新的稳定项目流程", () => {
-    expect(matchNavItem("/maintenance/projects")?.label).toBe("项目面板");
-    expect(NAV_REDIRECTS).toContainEqual({
+  it("旧维保路径仍是稳定版，Beta 路由与权限独立", () => {
+    expect(matchNavItem("/maintenance")?.label).toBe("项目数据");
+    expect(matchNavItem("/maintenance/downloads")?.label).toBe("下载中心");
+    expect(matchNavItem("/maintenance/reminders")?.label).toBe("项目提醒");
+    expect(matchNavItem("/maintenance/beta/projects")?.label).toBe("项目面板");
+    expect(matchNavItem("/maintenance/beta/projects")?.perm).toBe("page_maintenance_beta");
+    expect(NAV_REDIRECTS).not.toContainEqual({
       from: "/maintenance",
       to: "/maintenance/projects",
       perm: "page_maintenance",
     });
-    expect(DETAIL_ROUTES.some((route) => route.path === "/maintenance/downloads")).toBe(true);
-    expect(DETAIL_ROUTES.some((route) => route.path === "/maintenance/reminders")).toBe(true);
-    expect(DETAIL_ROUTES.some((route) => route.path === "/maintenance/legacy")).toBe(true);
-    expect(NAV_ITEMS.some((item) => item.path === "/maintenance/downloads")).toBe(false);
+    expect(DETAIL_ROUTES.some((route) => route.path === "/maintenance/downloads")).toBe(false);
+    expect(DETAIL_ROUTES.some((route) => route.path === "/maintenance/reminders")).toBe(false);
+    expect(NAV_REDIRECTS).toContainEqual({
+      from: "/maintenance/legacy",
+      to: "/maintenance",
+      perm: "page_maintenance",
+    });
+    expect(NAV_ITEMS.some((item) => item.path === "/maintenance/downloads")).toBe(true);
+    expect(
+      DETAIL_ROUTES
+        .filter((route) => route.path.startsWith("/maintenance/beta/"))
+        .every((route) => route.perm === "page_maintenance_beta"),
+    ).toBe(true);
+    expect(
+      DETAIL_ROUTES
+        .filter((route) => route.perm === "page_maintenance_beta")
+        .every((route) => route.path.startsWith("/maintenance/beta/")),
+    ).toBe(true);
   });
 });

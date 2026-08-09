@@ -296,6 +296,20 @@ export default function AppShell({
         </Header>
 
         <Content style={{ padding: isMobile ? 12 : 24, background: COLORS.page }}>
+          {group?.key === "grp-maintenance-beta" && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="维保管理 Beta · 小范围试用"
+              description="这里与稳定版共用同一套生产数据，但新流程由独立权限和服务端开关保护。需要处理原有业务时，可随时返回稳定版。"
+              action={(
+                <Button size="small" onClick={() => navigate("/maintenance")}>
+                  返回稳定版
+                </Button>
+              )}
+            />
+          )}
           {showWhatsNew && (
             <Alert
               type="success"

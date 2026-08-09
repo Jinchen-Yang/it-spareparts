@@ -343,7 +343,7 @@ export default function MaintenanceProjectMasterPage() {
         subtitle="稳定项目编号是维保项目的长期身份；名称和负责人可审计变更。"
         extra={(
           <Space>
-            <Button href="/maintenance/project-master/source-orders">
+            <Button href="/maintenance/beta/project-master/source-orders">
               历史维保单归属
             </Button>
             {canManage && (

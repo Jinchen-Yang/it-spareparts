@@ -401,7 +401,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
         title="缺失成本人工回填"
         subtitle="只列出系统无法自动取价的现场领用行；先核对关联采购，再看前后 7 天采购和销售加权参考。"
         extra={selectedProjectId ? (
-          <Link to={`/maintenance/projects/${encodeURIComponent(selectedProjectId)}`}>
+          <Link to={`/maintenance/beta/projects/${encodeURIComponent(selectedProjectId)}`}>
             返回项目
           </Link>
         ) : undefined}
