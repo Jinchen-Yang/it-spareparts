@@ -114,6 +114,10 @@ resolve 必须携带 `client_request_id`、Interrupt `version` 和严格响应 s
 state 和自有 Serializer，禁止 `pickle_fallback`。若持久化 checkpoint，使用独立命名空间、大小上限、
 HMAC 完整性和可选加密，但不能把 LangGraph checkpoint 当成 Task 状态真值。
 
+依赖准入下限不得低于已公开修复线：`langgraph-checkpoint>=4.0.0`（默认关闭 pickle fallback）和
+`langgraph>=1.0.10`（修复不安全 msgpack checkpoint loading）；实际合并时仍须重新读取最新 Advisory、
+固定 lock/hash 并对所选完整版本做恶意 checkpoint 回归，最低版本号本身不等于安全证明。
+
 LangGraph 官方说明 checkpointer 可支持 Human-in-the-loop 和故障恢复，也允许显式启用 pickle fallback；
 本项目只采用前者，明确禁用后者：
 
