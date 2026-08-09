@@ -87,10 +87,10 @@ export default function MaintenanceSourceOrderAssignmentsPage() {
   const generation = useRef(0);
   const projectGeneration = useRef(0);
   const excludedTargetProjectIds = useMemo(() => new Set(
-    (actionMode === "reassign" && actionRow ? [actionRow] : selectedRows)
-      .map((row) => row.assigned_project?.project_id)
-      .filter((projectId): projectId is string => projectId !== undefined),
-  ), [actionMode, actionRow, selectedRows]);
+    actionMode === "reassign" && actionRow?.assigned_project?.project_id
+      ? [actionRow.assigned_project.project_id]
+      : [],
+  ), [actionMode, actionRow]);
 
   useEffect(() => {
     if (targetProjectId && excludedTargetProjectIds.has(targetProjectId)) {

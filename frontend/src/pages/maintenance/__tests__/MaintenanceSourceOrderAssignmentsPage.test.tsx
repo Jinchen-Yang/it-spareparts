@@ -276,7 +276,7 @@ describe("MaintenanceSourceOrderAssignmentsPage", () => {
     expect(assignMaintenanceSourceOrders).toHaveBeenCalledTimes(1);
   });
 
-  it("批量冲突刷新后排除每张已选单据的当前项目", async () => {
+  it("批量冲突刷新后保留原目标并允许同目标项幂等重试", async () => {
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: true,
       data_profit: true,
@@ -296,9 +296,9 @@ describe("MaintenanceSourceOrderAssignmentsPage", () => {
         assignment_id: "assignment-current-1",
         assignment_version: 2,
         assigned_project: {
-          project_id: ACTIVE_PROJECT.project_id,
-          project_code: ACTIVE_PROJECT.project_code,
-          display_name: ACTIVE_PROJECT.display_name,
+          project_id: THIRD_PROJECT.project_id,
+          project_code: THIRD_PROJECT.project_code,
+          display_name: THIRD_PROJECT.display_name,
           is_active: true,
         },
       },
@@ -348,9 +348,6 @@ describe("MaintenanceSourceOrderAssignmentsPage", () => {
     await waitFor(() => expect(listMaintenanceSourceOrders).toHaveBeenCalledTimes(2));
     expect(within(dialog).getByDisplayValue("保留批量冲突草稿")).toBeInTheDocument();
     expect(within(dialog).getByText("XM-003 · 稳定项目丙")).toBeInTheDocument();
-    fireEvent.mouseDown(within(dialog).getByRole("combobox"));
-    expect(screen.queryByText("XM-001 · 稳定项目甲")).toBeNull();
-    expect(screen.queryByText("XM-002 · 稳定项目乙")).toBeNull();
     expect(within(dialog).getByRole("button", { name: "确认归属" })).not.toBeDisabled();
   });
 
