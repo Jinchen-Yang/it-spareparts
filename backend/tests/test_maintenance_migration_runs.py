@@ -7,7 +7,8 @@ from app.models.maintenance_project import MaintenanceProject
 from app.services import maintenance_migration_runs as runs
 
 
-_SIGNING_KEY = b"synthetic-migration-signing-key"
+_SIGNING_KEY = b"synthetic-migration-signing-key-v1"
+_SIGNING_KEY_ID = "synthetic-v1"
 
 
 def _seed_project(db, project_id="migration-run-project"):
@@ -169,6 +170,7 @@ def test_full_workflow_is_hash_bound_idempotent_and_never_activates_production(d
         reason="独立审批合成 manifest",
         operated_by="approver-user",
         signing_key=_SIGNING_KEY,
+        signing_key_id=_SIGNING_KEY_ID,
         warehouse_loader=_warehouse_loader,
     )
     db.commit()
@@ -177,12 +179,21 @@ def test_full_workflow_is_hash_bound_idempotent_and_never_activates_production(d
     assert approved["version"] == 3
     assert approved["manifest"]["production_activation_included"] is False
     assert approved["manifest"]["manifest_hash"] == approved["manifest_hash"]
+    assert approved["manifest"]["signing_key_id"] == _SIGNING_KEY_ID
     expected_signature = hmac.new(
         _SIGNING_KEY,
         approved["manifest_hash"].encode("ascii"),
         hashlib.sha256,
     ).hexdigest()
     assert approved["manifest"]["manifest_signature"] == expected_signature
+    signed_manifest = runs.get_signed_manifest(db, run_id=preview["run_id"])
+    assert runs.verify_signed_manifest(
+        signed_manifest, verification_keys={_SIGNING_KEY_ID: _SIGNING_KEY}
+    )
+    assert not runs.verify_signed_manifest(
+        {**signed_manifest, "rule_version": "tampered"},
+        verification_keys={_SIGNING_KEY_ID: _SIGNING_KEY},
+    )
     assert [event["action"] for event in approved["events"]] == [
         "preview",
         "reconcile",
@@ -198,6 +209,7 @@ def test_full_workflow_is_hash_bound_idempotent_and_never_activates_production(d
         reason="独立审批合成 manifest",
         operated_by="approver-user",
         signing_key=_SIGNING_KEY,
+        signing_key_id=_SIGNING_KEY_ID,
         warehouse_loader=_warehouse_loader,
     )
     assert approve_replay["version"] == 3
@@ -217,6 +229,61 @@ def test_idempotency_key_reuse_with_changed_reason_or_operator_is_rejected(db):
             operated_by="another-user",
             warehouse_loader=_warehouse_loader,
         )
+
+
+def test_command_replay_is_bound_to_the_original_named_operator(db):
+    _seed_project(db)
+    preview = _preview(db)
+    reconciled = _reconcile(db, preview)
+
+    with pytest.raises(runs.MaintenanceMigrationRunConflict, match="操作人"):
+        runs.reconcile_run(
+            db,
+            run_id=preview["run_id"],
+            expected_version=preview["version"],
+            operation_key="migration-reconcile-key",
+            reason="已逐项核对成本基线与库存期初",
+            operated_by="different-reconciler",
+            project_signoffs=_project_signoffs(preview),
+            warehouse_loader=_warehouse_loader,
+        )
+
+    approved = runs.approve_run(
+        db,
+        run_id=preview["run_id"],
+        expected_version=reconciled["version"],
+        supplied_fingerprint=reconciled["preview"]["input_fingerprint"],
+        operation_key="actor-bound-approve",
+        reason="独立审批并绑定操作人",
+        operated_by="approver-user",
+        signing_key=_SIGNING_KEY,
+        signing_key_id=_SIGNING_KEY_ID,
+        warehouse_loader=_warehouse_loader,
+    )
+    db.commit()
+    with pytest.raises(runs.MaintenanceMigrationRunConflict, match="操作人"):
+        runs.approve_run(
+            db,
+            run_id=preview["run_id"],
+            expected_version=reconciled["version"],
+            supplied_fingerprint=reconciled["preview"]["input_fingerprint"],
+            operation_key="actor-bound-approve",
+            reason="独立审批并绑定操作人",
+            operated_by="different-approver",
+            signing_key=_SIGNING_KEY,
+            signing_key_id=_SIGNING_KEY_ID,
+            warehouse_loader=_warehouse_loader,
+        )
+    assert approved["approved_by"] == "approver-user"
+
+
+def test_rule_version_change_invalidates_unreconciled_run(db, monkeypatch):
+    _seed_project(db)
+    preview = _preview(db)
+    monkeypatch.setattr(runs.controls, "RULE_VERSION", "maintenance-cutover-v2")
+
+    with pytest.raises(runs.MaintenanceMigrationRunConflict, match="规则版本"):
+        _reconcile(db, preview)
 
 
 def test_reconcile_rejects_omitted_candidate_without_approving_anything(db):
@@ -283,6 +350,7 @@ def test_final_approver_must_be_independent(db):
             reason="不能自审",
             operated_by="reconciler-user",
             signing_key=_SIGNING_KEY,
+            signing_key_id=_SIGNING_KEY_ID,
             warehouse_loader=_warehouse_loader,
         )
 
@@ -306,6 +374,7 @@ def test_source_change_after_reconciliation_invalidates_approval(db):
             reason="来源变化后不能审批",
             operated_by="approver-user",
             signing_key=_SIGNING_KEY,
+            signing_key_id=_SIGNING_KEY_ID,
             warehouse_loader=_warehouse_loader,
         )
 
@@ -338,6 +407,7 @@ def test_unavailable_warehouse_source_cannot_be_approved(db):
             reason="仓库来源未接入时拒绝",
             operated_by="approver-user",
             signing_key=_SIGNING_KEY,
+            signing_key_id=_SIGNING_KEY_ID,
             warehouse_loader=runs.unavailable_warehouse_loader,
         )
 

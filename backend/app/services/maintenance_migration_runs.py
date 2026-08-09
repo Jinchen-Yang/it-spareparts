@@ -249,10 +249,13 @@ def _source_payloads_from_specs(
 
 
 def _wrapper(
-    *, specs: Sequence[Mapping[str, Any]], payloads: Sequence[Mapping[str, Any]]
+    *,
+    rule_version: str,
+    specs: Sequence[Mapping[str, Any]],
+    payloads: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     preview = controls.build_migration_preview(
-        rule_version=controls.RULE_VERSION,
+        rule_version=rule_version,
         projects=payloads,
     )
     return {
@@ -386,6 +389,7 @@ def _event_replay(
     action: str,
     operation_key: str,
     command_fingerprint: str,
+    operated_by: str,
 ) -> dict[str, Any] | None:
     event = db.scalar(
         select(MaintenanceMigrationEvent).where(
@@ -394,6 +398,8 @@ def _event_replay(
     )
     if event is None:
         return None
+    if event.operated_by != operated_by:
+        raise MaintenanceMigrationRunConflict("操作幂等键属于其他实名操作人")
     if (
         event.run_id != run_id
         or event.action != action
@@ -438,7 +444,11 @@ def create_preview_run(
 
     try:
         payloads = _source_payloads_from_specs(db, specs=specs, loader=warehouse_loader)
-        wrapper = _wrapper(specs=specs, payloads=payloads)
+        wrapper = _wrapper(
+            rule_version=controls.RULE_VERSION,
+            specs=specs,
+            payloads=payloads,
+        )
     except (controls.MigrationControlError, MaintenanceMigrationSourceError) as exc:
         raise MaintenanceMigrationRunError(str(exc)) from exc
 
@@ -707,6 +717,10 @@ def _rebuild(
     loader: WarehouseLoader,
     selected_candidate_ids: set[str] | None,
 ) -> dict[str, Any]:
+    if run.rule_version != controls.RULE_VERSION:
+        raise MaintenanceMigrationRunConflict(
+            "迁移规则版本已变化，请生成新的 dry-run 后重新对账"
+        )
     specs = list(run.preview_json["source_specs"])
     approvals = _candidate_approvals(db, run_id=run.run_id)
     if selected_candidate_ids is not None:
@@ -733,7 +747,11 @@ def _rebuild(
             loader=loader,
             approvals=approvals,
         )
-        wrapper = _wrapper(specs=specs, payloads=payloads)
+        wrapper = _wrapper(
+            rule_version=run.rule_version,
+            specs=specs,
+            payloads=payloads,
+        )
     except (controls.MigrationControlError, MaintenanceMigrationSourceError) as exc:
         raise MaintenanceMigrationRunError(str(exc)) from exc
     if wrapper["preview"]["source_snapshot_hash"] != run.source_snapshot_hash:
@@ -842,6 +860,7 @@ def reconcile_run(
             "expected_version": expected_version,
             "reason": clean_reason,
             "project_signoffs": signoffs,
+            "operated_by": operator,
         }
     )
     _advisory_lock(db, event_key)
@@ -851,6 +870,7 @@ def reconcile_run(
         action="reconcile",
         operation_key=event_key,
         command_fingerprint=command_fingerprint,
+        operated_by=operator,
     )
     if replay is not None:
         return replay
@@ -949,10 +969,17 @@ def _signed_manifest(
     approved_by: str,
     approved_at: datetime,
     signing_key: bytes,
+    signing_key_id: str,
 ) -> tuple[dict[str, Any], str]:
-    if not isinstance(signing_key, bytes) or len(signing_key) < 16:
+    if not isinstance(signing_key, bytes) or len(signing_key) < 32:
         raise MaintenanceMigrationRunError("manifest 签名密钥配置无效")
+    key_id = _clean_text(signing_key_id, "manifest 签名 key_id", max_length=64)
     preview = wrapper["preview"]
+    if (
+        run.rule_version != controls.RULE_VERSION
+        or preview.get("rule_version") != run.rule_version
+    ):
+        raise MaintenanceMigrationRunConflict("run、preview 与 manifest 规则版本不一致")
     unsigned = {
         "manifest_version": "maintenance-cutover-manifest-v1",
         "run_id": run.run_id,
@@ -966,6 +993,8 @@ def _signed_manifest(
             "approved_by": approved_by,
             "approved_at": approved_at.isoformat(),
         },
+        "signature_algorithm": "HMAC-SHA256",
+        "signing_key_id": key_id,
         "production_activation_included": False,
     }
     manifest_hash = controls.canonical_hash(unsigned)
@@ -977,9 +1006,33 @@ def _signed_manifest(
     return {
         **unsigned,
         "manifest_hash": manifest_hash,
-        "signature_algorithm": "HMAC-SHA256",
         "manifest_signature": signature,
     }, manifest_hash
+
+
+def verify_signed_manifest(
+    manifest: Mapping[str, Any], *, verification_keys: Mapping[str, bytes]
+) -> bool:
+    if manifest.get("signature_algorithm") != "HMAC-SHA256":
+        return False
+    key_id = str(manifest.get("signing_key_id") or "")
+    key = verification_keys.get(key_id)
+    if not isinstance(key, bytes) or len(key) < 32:
+        return False
+    supplied_hash = str(manifest.get("manifest_hash") or "")
+    supplied_signature = str(manifest.get("manifest_signature") or "")
+    unsigned = {
+        key: value
+        for key, value in manifest.items()
+        if key not in {"manifest_hash", "manifest_signature"}
+    }
+    calculated_hash = controls.canonical_hash(unsigned)
+    if not hmac.compare_digest(supplied_hash, calculated_hash):
+        return False
+    calculated_signature = hmac.new(
+        key, calculated_hash.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(supplied_signature, calculated_signature)
 
 
 def approve_run(
@@ -992,6 +1045,7 @@ def approve_run(
     reason: str,
     operated_by: str,
     signing_key: bytes,
+    signing_key_id: str,
     warehouse_loader: WarehouseLoader = unavailable_warehouse_loader,
 ) -> dict[str, Any]:
     clean_run_id = _clean_text(run_id, "迁移运行编号", max_length=36)
@@ -1005,6 +1059,7 @@ def approve_run(
             "expected_version": expected_version,
             "supplied_fingerprint": fingerprint,
             "reason": clean_reason,
+            "operated_by": operator,
         }
     )
     _advisory_lock(db, event_key)
@@ -1014,6 +1069,7 @@ def approve_run(
         action="approve",
         operation_key=event_key,
         command_fingerprint=command_fingerprint,
+        operated_by=operator,
     )
     if replay is not None:
         return replay
@@ -1068,12 +1124,14 @@ def approve_run(
         approved_by=operator,
         approved_at=now,
         signing_key=signing_key,
+        signing_key_id=signing_key_id,
     )
     _update_plans(db, run_id=run.run_id, wrapper=wrapper, status="approved")
     run.status = "approved"
     run.preview_json = wrapper
     run.manifest_json = manifest
     run.manifest_hash = manifest_hash
+    run.manifest_key_id = signing_key_id
     run.approved_by = operator
     run.approved_at = now
     run.version += 1
@@ -1212,6 +1270,7 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
         "preview": _public_preview(run.preview_json["preview"]),
         "manifest": _public_manifest(run.manifest_json),
         "manifest_hash": run.manifest_hash,
+        "manifest_key_id": run.manifest_key_id,
         "created_by": run.created_by,
         "reconciled_by": run.reconciled_by,
         "reconciled_at": _jsonable(run.reconciled_at),
@@ -1277,6 +1336,15 @@ def get_project_evidence(
     }
 
 
+def get_signed_manifest(db: Session, *, run_id: str) -> dict[str, Any]:
+    run = db.get(MaintenanceMigrationRun, run_id)
+    if run is None:
+        raise MaintenanceMigrationRunNotFound("迁移 dry-run 不存在")
+    if run.status != "approved" or run.manifest_json is None:
+        raise MaintenanceMigrationRunConflict("迁移 manifest 尚未完成独立审批")
+    return _jsonable(run.manifest_json)
+
+
 def search_runs(
     db: Session,
     *,
@@ -1311,6 +1379,7 @@ def search_runs(
                 "status": row.status,
                 "rule_version": row.rule_version,
                 "source_snapshot_hash": row.source_snapshot_hash,
+                "manifest_key_id": row.manifest_key_id,
                 "blocker_count": row.preview_json["preview"]["approval_blocker_count"],
                 "created_by": row.created_by,
                 "reconciled_by": row.reconciled_by,

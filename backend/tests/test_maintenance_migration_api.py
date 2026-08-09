@@ -173,6 +173,15 @@ def test_public_api_supports_preview_search_reconcile_and_independent_approval(
     approved = approved_response.json()
     assert approved["status"] == "approved"
     assert approved["manifest"]["production_activation_included"] is False
+    assert approved["manifest"]["signing_key_id"] == approved["manifest_key_id"]
+    manifest_response = approver.get(
+        f"/api/maintenance/migration-runs/{preview['run_id']}/manifest"
+    )
+    assert manifest_response.status_code == 200, manifest_response.text
+    assert manifest_response.headers["cache-control"] == "no-store"
+    assert manifest_response.json()["projects"][0]["project_id"] == (
+        "migration-api-project"
+    )
 
 
 def test_missing_action_permission_and_shared_admin_both_fail_closed(db, monkeypatch):

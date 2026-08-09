@@ -9,7 +9,7 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import DBAPIError
 
 from app import permissions
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db import engine
 
 
@@ -66,6 +66,7 @@ def test_migration_control_schema_and_permission_are_fail_closed(db):
         "source_snapshot_hash",
         "manifest_json",
         "manifest_hash",
+        "manifest_key_id",
         "created_by",
         "reconciled_by",
         "approved_by",
@@ -91,6 +92,20 @@ def test_migration_control_schema_and_permission_are_fail_closed(db):
     for role in ("boss", "sales", "purchaser", "readonly", "guest"):
         assert permissions.effective(role, None)[key] is False
     assert get_settings().maintenance_cutover_enabled is False
+    signing_key_id, signing_key = get_settings().maintenance_manifest_signing_material()
+    assert signing_key_id
+    assert len(signing_key) >= 32
+    assert signing_key != get_settings().secret_key.encode("utf-8")
+
+    rotated = Settings(
+        _env_file=None,
+        maintenance_manifest_active_key_id="v2",
+        maintenance_manifest_active_hmac_key="a" * 32,
+        maintenance_manifest_previous_hmac_keys_json=(
+            '{"v1":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'
+        ),
+    )
+    assert set(rotated.maintenance_manifest_verification_keys()) == {"v1", "v2"}
 
 
 def test_migration_event_is_database_append_only(db):

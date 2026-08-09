@@ -37,6 +37,7 @@ class MaintenanceMigrationRun(Base):
     preview_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
     manifest_json: Mapped[dict | None] = mapped_column(JSONB)
     manifest_hash: Mapped[str | None] = mapped_column(String(64))
+    manifest_key_id: Mapped[str | None] = mapped_column(String(64))
     created_by: Mapped[str] = mapped_column(String(64), nullable=False)
     reconciled_by: Mapped[str | None] = mapped_column(String(64))
     reconciled_at: Mapped[datetime | None] = mapped_column(TZDateTime)
@@ -70,15 +71,16 @@ class MaintenanceMigrationRun(Base):
         CheckConstraint(
             "(status = 'previewed' AND reconciled_by IS NULL AND reconciled_at IS NULL "
             "AND approved_by IS NULL AND approved_at IS NULL "
-            "AND manifest_json IS NULL AND manifest_hash IS NULL) OR "
+            "AND manifest_json IS NULL AND manifest_hash IS NULL "
+            "AND manifest_key_id IS NULL) OR "
             "(status = 'reconciled' AND reconciled_by IS NOT NULL "
             "AND reconciled_at IS NOT NULL AND approved_by IS NULL "
             "AND approved_at IS NULL AND manifest_json IS NULL "
-            "AND manifest_hash IS NULL) OR "
+            "AND manifest_hash IS NULL AND manifest_key_id IS NULL) OR "
             "(status = 'approved' AND reconciled_by IS NOT NULL "
             "AND reconciled_at IS NOT NULL AND approved_by IS NOT NULL "
             "AND approved_at IS NOT NULL AND manifest_json IS NOT NULL "
-            "AND manifest_hash IS NOT NULL)",
+            "AND manifest_hash IS NOT NULL AND manifest_key_id IS NOT NULL)",
             name="ck_maintenance_migration_run_state_evidence",
         ),
         CheckConstraint(

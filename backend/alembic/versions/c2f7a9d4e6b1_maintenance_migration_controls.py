@@ -75,6 +75,7 @@ def upgrade() -> None:
             "manifest_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True
         ),
         sa.Column("manifest_hash", sa.String(length=64), nullable=True),
+        sa.Column("manifest_key_id", sa.String(length=64), nullable=True),
         sa.Column("created_by", sa.String(length=64), nullable=False),
         sa.Column("reconciled_by", sa.String(length=64), nullable=True),
         sa.Column("reconciled_at", sa.DateTime(timezone=True), nullable=True),
@@ -94,7 +95,7 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint(
-            "(status = 'previewed' AND reconciled_by IS NULL AND reconciled_at IS NULL AND approved_by IS NULL AND approved_at IS NULL AND manifest_json IS NULL AND manifest_hash IS NULL) OR (status = 'reconciled' AND reconciled_by IS NOT NULL AND reconciled_at IS NOT NULL AND approved_by IS NULL AND approved_at IS NULL AND manifest_json IS NULL AND manifest_hash IS NULL) OR (status = 'approved' AND reconciled_by IS NOT NULL AND reconciled_at IS NOT NULL AND approved_by IS NOT NULL AND approved_at IS NOT NULL AND manifest_json IS NOT NULL AND manifest_hash IS NOT NULL)",
+            "(status = 'previewed' AND reconciled_by IS NULL AND reconciled_at IS NULL AND approved_by IS NULL AND approved_at IS NULL AND manifest_json IS NULL AND manifest_hash IS NULL AND manifest_key_id IS NULL) OR (status = 'reconciled' AND reconciled_by IS NOT NULL AND reconciled_at IS NOT NULL AND approved_by IS NULL AND approved_at IS NULL AND manifest_json IS NULL AND manifest_hash IS NULL AND manifest_key_id IS NULL) OR (status = 'approved' AND reconciled_by IS NOT NULL AND reconciled_at IS NOT NULL AND approved_by IS NOT NULL AND approved_at IS NOT NULL AND manifest_json IS NOT NULL AND manifest_hash IS NOT NULL AND manifest_key_id IS NOT NULL)",
             name="ck_maintenance_migration_run_state_evidence",
         ),
         sa.CheckConstraint(

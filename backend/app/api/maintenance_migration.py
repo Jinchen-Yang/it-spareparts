@@ -269,6 +269,18 @@ def get_migration_project_evidence(
         _raise_service_error(exc)
 
 
+@router.get("/{run_id}/manifest")
+def get_migration_manifest(
+    run_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    _operator: str = Depends(_migration_operator),
+) -> dict:
+    try:
+        return runs.get_signed_manifest(db, run_id=run_id)
+    except Exception as exc:
+        _raise_service_error(exc)
+
+
 @router.post("/{run_id}/reconcile")
 def reconcile_migration_run(
     body: MigrationReconcileRequest,
@@ -304,6 +316,9 @@ def approve_migration_run(
     operator: str = Depends(_migration_operator),
 ) -> dict:
     try:
+        signing_key_id, signing_key = (
+            get_settings().maintenance_manifest_signing_material()
+        )
         result = runs.approve_run(
             db,
             run_id=run_id,
@@ -312,7 +327,8 @@ def approve_migration_run(
             operation_key=body.operation_key,
             reason=body.reason,
             operated_by=operator,
-            signing_key=get_settings().secret_key.encode("utf-8"),
+            signing_key=signing_key,
+            signing_key_id=signing_key_id,
             warehouse_loader=load_project_inventory_movements,
         )
         db.commit()
