@@ -25,6 +25,9 @@ PAGE_KEYS: list[str] = [
     "page_inventory", "page_chat", "page_import", "page_governance",
     "page_master_data", "page_maintenance", "page_boss_board",
     "page_pool_analysis",
+    # 销售经理补库购物车 Beta：独立于稳定版库存/维保页面，默认仅管理员可见，
+    # 试用账号由权限中心逐个显式授权。
+    "page_replenishment_beta",
     # 权限中心 v2：账号与权限中心页面（只读查看账号/模板/活动）。critical 级——
     # 内置模板对所有非 admin 角色显式 False，保持"仅管理员可见账号管理"的既有行为。
     "page_accounts",
@@ -54,6 +57,9 @@ ACTION_KEYS: list[str] = [
     "action_maintenance_acceptance_review",
     # 仓库单据落库与关联歧义人工裁决（实名、高风险、默认仅管理员）。
     "action_maintenance_warehouse_manage",
+    # Beta 补库申请的创建/复提与审核结果回写严格分权。审核 Agent 本身不在系统内实现。
+    "action_replenishment_create",
+    "action_replenishment_review",
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ACTION_KEYS, *ROW_KEYS]
@@ -92,6 +98,9 @@ LABELS: dict[str, str] = {
     "action_maintenance_acceptance_submit": "维保验收报告提交与附件上传",
     "action_maintenance_acceptance_review": "维保验收报告高风险审批",
     "action_maintenance_warehouse_manage": "仓库单据导入与歧义裁决",
+    "page_replenishment_beta": "补库申请 Beta",
+    "action_replenishment_create": "补库申请创建与复提",
+    "action_replenishment_review": "补库审核结果回写",
 }
 
 
@@ -119,7 +128,10 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "action_maintenance_bad_return_manage": False,
              "action_maintenance_acceptance_submit": False,
              "action_maintenance_acceptance_review": False,
-             "action_maintenance_warehouse_manage": False},
+             "action_maintenance_warehouse_manage": False,
+             "page_replenishment_beta": False,
+             "action_replenishment_create": False,
+             "action_replenishment_review": False},
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
     # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
     # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
@@ -138,6 +150,9 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "action_maintenance_acceptance_submit": False,
                  "action_maintenance_acceptance_review": False,
                  "action_maintenance_warehouse_manage": False,
+                 "page_replenishment_beta": False,
+                 "action_replenishment_create": False,
+                 "action_replenishment_review": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
@@ -168,6 +183,9 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_acceptance_submit": False,
         "action_maintenance_acceptance_review": False,
         "action_maintenance_warehouse_manage": False,
+        "page_replenishment_beta": False,
+        "action_replenishment_create": False,
+        "action_replenishment_review": False,
         "own_customers_only": True,
     },
     "purchaser": {
@@ -198,6 +216,9 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_acceptance_submit": False,
         "action_maintenance_acceptance_review": False,
         "action_maintenance_warehouse_manage": False,
+        "page_replenishment_beta": False,
+        "action_replenishment_create": False,
+        "action_replenishment_review": False,
         "own_customers_only": False,
     },
 }
@@ -240,6 +261,7 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_manager_workbook_apply": "data_profit",
     "action_maintenance_project_manage": "data_profit",
     "action_maintenance_site_issue_manage": "data_purchase_cost",
+    "action_replenishment_create": "data_pool_price_governance",
 }
 
 # "页面内操作必须能进页面"的动作→页面依赖（权限中心 v2）：改账号权限先要能打开
@@ -257,6 +279,7 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_acceptance_submit": "page_maintenance",
     "action_maintenance_acceptance_review": "page_maintenance",
     "action_maintenance_warehouse_manage": "page_maintenance",
+    "action_replenishment_create": "page_replenishment_beta",
 }
 
 # 数据之间的可推导依赖：营收在经营报表中是公开口径，毛利一旦可见，
@@ -338,6 +361,7 @@ HIGH_RISK_KEYS: set[str] = {
     "action_maintenance_bad_return_manage",
     "action_maintenance_acceptance_review",
     "action_maintenance_warehouse_manage",
+    "action_replenishment_review",
 }
 
 # 前端矩阵五分组（顺序即展示序）：页面入口 / 数据可见 / 操作能力 / 行级范围 / 高风险管理
@@ -363,6 +387,8 @@ UI_GROUPS: list[dict] = [
          "action_maintenance_acceptance_submit",
          "action_maintenance_acceptance_review",
          "action_maintenance_warehouse_manage",
+         "action_replenishment_create",
+         "action_replenishment_review",
      ]},
     {"key": "row", "label": "行级范围",
      "hint": "在能看的数据里进一步收紧范围（限制型开关：勾上=看得更少）。",
@@ -531,6 +557,15 @@ PERMISSION_META: dict[str, dict] = {
         "sensitivity": "critical",
         "risk": "能看到全员权限分布与活动记录，仅管理员可授予本权限。",
     },
+    "page_replenishment_beta": {
+        "label": "补库申请 Beta",
+        "summary": "可打开独立 Beta 页面，用购物车方式准备前置库补库申请。",
+        "can": "打开独立 Beta 页面；同时具备价格数据权限时可只读查看本人申请与历史版本。",
+        "cannot": "搜索价格事实还需「池价格治理」，维护/提交还需「补库申请创建与复提」；不代表可回写审核结果。",
+        "typical": ["管理员", "受邀试用的销售经理"],
+        "sensitivity": "high",
+        "risk": "页面、价格数据、申请操作是三把独立钥匙；Beta 总闸关闭时服务端拒绝全部业务请求。",
+    },
     # ---- 操作能力 ----
     "action_pool_manage": {
         "label": "互通PN池维护",
@@ -649,6 +684,24 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "仓库数据维护人员（需单独授权）"],
         "sensitivity": "critical",
         "risk": "人工裁决会成为后续项目归集的正式关系证据，因此要求实名、乐观锁和前后值审计。",
+    },
+    "action_replenishment_create": {
+        "label": "补库申请创建与复提",
+        "summary": "允许维护本人补库购物车、提交不可变版本并处理被打回条目。",
+        "can": "新增/修改/移除本人草稿行，提交版本，按打回结果建立下一版并导出。",
+        "cannot": "不能查看或修改他人申请，不能审批，不会修改库存或自动生成采购/维保事实。",
+        "typical": ["受邀试用的销售经理"],
+        "sensitivity": "high",
+        "risk": "提交内容会成为留存业务版本；必须同时具备 Beta 页面和池价格查看权限。",
+    },
+    "action_replenishment_review": {
+        "label": "补库审核结果回写",
+        "summary": "允许受控回写外部审核结果，不包含审核 Agent 或审批规则本身。",
+        "can": "按不可变版本摘要逐行回写批准/打回结果，幂等留痕并形成汇总。",
+        "cannot": "不能读取申请目录或历史价格，不能替销售修改内容，也不能自动审批、自动定价或调用外部系统。",
+        "typical": ["管理员", "受控审核集成账号"],
+        "sensitivity": "critical",
+        "risk": "审核结论决定哪些行可进入最终 WBDD 子集导出，仅管理员可授予本权限。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {

@@ -51,6 +51,8 @@ services:
       # 默认 prod：忘配 .env 时带默认口令/密钥会「拒启」而非偷偷上线（审计 2026-06-28 S-1）。
       # 本地用 docker 起开发栈时，在 .env 显式设 ENVIRONMENT=dev 即可放行默认弱口令。
       ENVIRONMENT: ${ENVIRONMENT:-prod}
+      # 独立 Beta 默认关闭；关闭只隐藏入口和拒绝业务请求，不删除历史申请。
+      REPLENISHMENT_BETA_ENABLED: ${REPLENISHMENT_BETA_ENABLED:-false}
       # 二期 AI 助手：不配 LLM_API_KEY 时其余功能照常，chat 接口返回降级提示
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}

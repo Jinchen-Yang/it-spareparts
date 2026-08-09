@@ -1,0 +1,124 @@
+.replenishment-beta-page {
+  padding-bottom: 32px;
+}
+
+.replenishment-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.replenishment-part-card {
+  height: 100%;
+  border-color: #e4e8ef;
+  border-radius: 12px;
+}
+
+.replenishment-part-heading,
+.replenishment-cart-line-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.replenishment-part-desc {
+  margin-top: 3px;
+  color: rgba(0, 0, 0, 0.58);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.replenishment-price-facts {
+  display: grid;
+  gap: 5px;
+  padding: 9px 10px;
+  margin: 9px 0 12px;
+  border-radius: 8px;
+  background: #f6f8fb;
+}
+
+.replenishment-price-facts > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.replenishment-price-facts b {
+  font-weight: 600;
+  text-align: right;
+}
+
+.replenishment-cart-card .ant-card-body,
+.replenishment-cart-meta {
+  display: grid;
+  gap: 10px;
+}
+
+.replenishment-cart-lines {
+  display: grid;
+  gap: 10px;
+  margin: 6px 0;
+}
+
+.replenishment-cart-line {
+  padding: 12px;
+  border: 1px solid #e5e8ee;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.replenishment-cart-line.is-revision {
+  border-color: #ffd591;
+  background: #fffaf2;
+}
+
+.replenishment-cart-line .ant-alert {
+  margin-bottom: 8px;
+}
+
+.replenishment-cart-line > .ant-space {
+  margin-top: 9px;
+}
+
+.replenishment-cart-actions {
+  margin-top: 4px;
+}
+
+.replenishment-version-history,
+.replenishment-history-version {
+  display: grid;
+  gap: 8px;
+}
+
+.replenishment-version-history {
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid #edf0f4;
+}
+
+.replenishment-history-line {
+  padding: 10px;
+  border: 1px solid #edf0f4;
+  border-radius: 8px;
+  background: #fafbfc;
+}
+
+.is-current-application {
+  padding-inline: 10px !important;
+  border-radius: 8px;
+  background: #f0f5ff;
+}
+
+.is-current-application,
+.replenishment-beta-page .ant-list-item {
+  cursor: pointer;
+}
+
+@media (max-width: 900px) {
+  .replenishment-catalog-grid {
+    grid-template-columns: 1fr;
+  }
+}

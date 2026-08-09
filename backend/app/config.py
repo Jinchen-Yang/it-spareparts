@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     llm_max_retries: int = 2           # 显式化 openai SDK 对 429/5xx 的指数退避重试次数（便于审计调参）
     enable_agent: bool = True
 
+    # 销售经理补库购物车 Beta 服务端总闸。关闭时只保留能力探测，全部业务读写和导出
+    # 失败关闭；既有 Beta 数据与表结构原样保留，重新开启后可继续使用。
+    replenishment_beta_enabled: bool = False
+
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
     # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级
     vision_api_key: str = ""

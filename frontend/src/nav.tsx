@@ -61,6 +61,7 @@ const loadPools = () => import("./pages/PoolsPage");
 const loadPoolAnalysis = () => import("./pages/PoolAnalysisPage");
 const loadPartSearch = () => import("./pages/PartSearchPage");
 const loadProfit = () => import("./pages/ProfitPage");
+const loadReplenishmentBeta = () => import("./pages/ReplenishmentBetaPage");
 const loadPurchaseAnalysis = () => import("./pages/purchases/PurchaseAnalysisPage");
 const loadPurchaseExceptions = () => import("./pages/purchases/PurchaseExceptionsPage");
 const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage");
@@ -91,6 +92,7 @@ const PoolsPage = lazy(loadPools);
 const PoolAnalysisPage = lazy(loadPoolAnalysis);
 const PartSearchPage = lazy(loadPartSearch);
 const ProfitPage = lazy(loadProfit);
+const ReplenishmentBetaPage = lazy(loadReplenishmentBeta);
 const PurchaseAnalysisPage = lazy(loadPurchaseAnalysis);
 const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
 const PurchaseRecordsPage = lazy(loadPurchaseRecords);
@@ -145,6 +147,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { key: "parts", path: "/parts", label: "型号查询", icon: <SearchOutlined />, perm: "page_parts", page: PartSearchPage, load: loadPartSearch },
       { key: "profit", path: "/profit", label: "利润分析", icon: <LineChartOutlined />, perm: "page_profit", page: ProfitPage, load: loadProfit },
+      { key: "replenishment-beta", path: "/sales/replenishment-beta", label: "补库申请 Beta", icon: <ShoppingCartOutlined />, perm: "page_replenishment_beta", page: ReplenishmentBetaPage, load: loadReplenishmentBeta },
     ],
   },
   {
