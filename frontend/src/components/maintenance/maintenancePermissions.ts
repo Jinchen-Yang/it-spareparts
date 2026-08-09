@@ -7,6 +7,7 @@ interface LocalMaintenancePermissions {
   action_maintenance_roundtrip_apply?: boolean;
   action_maintenance_project_manage?: boolean;
   action_maintenance_demand_delete?: boolean;
+  action_maintenance_warehouse_manage?: boolean;
 }
 
 export interface MaintenanceCapabilities {
@@ -19,6 +20,7 @@ export interface MaintenanceCapabilities {
   canApplyRoundtrip: boolean;
   canManageProject: boolean;
   canDeleteDemand: boolean;
+  canManageWarehouse: boolean;
 }
 
 function readLocalPermissions(): LocalMaintenancePermissions {
@@ -128,6 +130,8 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
     // ordinary admin capabilities the UI must not bypass the permission map.
     canDeleteDemand: permissions.page_maintenance === true
       && permissions.action_maintenance_demand_delete === true,
+    canManageWarehouse: permissions.page_maintenance === true
+      && permissions.action_maintenance_warehouse_manage === true,
   };
 }
 

@@ -66,6 +66,7 @@ const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage"
 const loadProjectCost = () => import("./pages/ProjectCostPage");
 const loadMaintenanceProjectMaster = () => import("./pages/MaintenanceProjectMasterPage");
 const loadMaintenanceDemands = () => import("./pages/maintenance/MaintenanceDemandManagementPage");
+const loadMaintenanceWarehouse = () => import("./pages/maintenance/MaintenanceWarehouseWorkbenchPage");
 const loadMaintenanceProjects = () => import("./pages/maintenance/MaintenanceProjectsPage");
 const loadMaintenanceProjectWorkspace = () => import("./pages/maintenance/MaintenanceProjectWorkspacePage");
 const loadMaintenanceProjectUpdates = () => import("./pages/maintenance/MaintenanceProjectUpdatesPage");
@@ -92,6 +93,7 @@ const PurchaseRecordsPage = lazy(loadPurchaseRecords);
 const ProjectCostPage = lazy(loadProjectCost);
 const MaintenanceProjectMasterPage = lazy(loadMaintenanceProjectMaster);
 const MaintenanceDemandManagementPage = lazy(loadMaintenanceDemands);
+const MaintenanceWarehouseWorkbenchPage = lazy(loadMaintenanceWarehouse);
 const MaintenanceProjectsPage = lazy(loadMaintenanceProjects);
 const MaintenanceProjectWorkspacePage = lazy(loadMaintenanceProjectWorkspace);
 const MaintenanceProjectUpdatesPage = lazy(loadMaintenanceProjectUpdates);
@@ -154,6 +156,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { key: "maintenance-projects", path: "/maintenance/projects", label: "项目面板", icon: <DashboardOutlined />, perm: "page_maintenance", page: MaintenanceProjectsPage, load: loadMaintenanceProjects },
       { key: "maintenance-project-master", path: "/maintenance/project-master", label: "项目主档", icon: <ProfileOutlined />, perm: "page_maintenance", page: MaintenanceProjectMasterPage, load: loadMaintenanceProjectMaster },
       { key: "maintenance-demands", path: "/maintenance/demands", label: "需求单管理", icon: <FileSearchOutlined />, perm: "page_maintenance", page: MaintenanceDemandManagementPage, load: loadMaintenanceDemands },
+      { key: "maintenance-warehouse", path: "/maintenance/warehouse", label: "仓库单据", icon: <InboxOutlined />, perm: "page_maintenance", page: MaintenanceWarehouseWorkbenchPage, load: loadMaintenanceWarehouse },
       { key: "maintenance-updates", path: "/maintenance/updates", label: "月度更新", icon: <CloudUploadOutlined />, visibleWhen: () => readMaintenanceCapabilities().canApplyRoundtrip, page: MaintenanceProjectUpdatesPage, load: loadMaintenanceProjectUpdates },
       { key: "maintenance-cost-refill", path: "/maintenance/cost-refill", label: "成本回填", icon: <DollarOutlined />, visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceCostRefillPage, load: loadMaintenanceCostRefill },
     ],
