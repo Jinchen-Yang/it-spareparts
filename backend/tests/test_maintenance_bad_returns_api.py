@@ -1,16 +1,20 @@
 """Public workflow tests for maintenance bad-part return obligations."""
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from time import monotonic
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 
 from app import auth
 from app.api import maintenance_bad_returns, maintenance_project_operations
 from app.auth import hash_password
+from app.db import SessionLocal
 from app.models.dimensions import DimPart
 from app.models.inventory import Inventory
 from app.models.maintenance_bad_return import (
@@ -20,11 +24,13 @@ from app.models.maintenance_bad_return import (
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
     MaintenanceProjectOperationAudit,
+    MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
     MaintenanceSiteIssueReturnEvent,
 )
 from app.models.master_data import ProductCategory
 from app.models.system import SysUser
+from app.services import maintenance_bad_returns as bad_return_service
 from tests.test_site_issue_v2_api import _delivery_source, _project
 
 
@@ -299,6 +305,281 @@ def test_correction_deactivates_replaced_obligation_without_double_counting(db):
     assert full_directory["return_rate"]["required_quantity"] == "2.000"
 
 
+def test_correction_drains_legacy_pending_creation_before_newer_projection(db):
+    project = _project(db, project_id="project-bad-return-legacy-pending")
+    client = _client(db, username="bad_return_legacy_pending_admin")
+    category = _category(db, major="服务器配件", minor="电源")
+    delivery = _delivery_source(
+        db,
+        project=project,
+        delivery_line_id="synthetic-return-legacy-pending",
+        quantity="5",
+    )
+    db.get(DimPart, delivery.part_id).category_id = category.id
+    db.commit()
+    created = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "idempotency_key": "synthetic-return-create-legacy-pending",
+            "issue_date": "2026-08-09",
+            "receiver": "合成接收人",
+            "issued_by": "合成发出人",
+            "site_location": "合成现场",
+            "lines": [
+                {"delivery_line_id": delivery.delivery_line_id, "quantity": "3"}
+            ],
+            "reason": "建立升级边界前的现场领用草稿",
+        },
+    )
+    assert created.status_code == 201, created.text
+    draft = created.json()
+
+    # Simulate the supported upgrade boundary without violating #207's
+    # append-only event trigger: confirmation and its pending event already
+    # exist, while #208's obligation projection has not run yet.
+    issue = db.get(MaintenanceSiteIssue, draft["issue_id"])
+    line = db.query(MaintenanceSiteIssueLine).filter_by(issue_id=issue.issue_id).one()
+    issue.raw_status = "confirmed"
+    issue.status_mapping_state = "mapped"
+    issue.normalized_status = "confirmed"
+    issue.status_mapping_version = "site-issue-v2-workflow-v1"
+    issue.confirmed_at = datetime.now(UTC)
+    issue.version += 1
+    source_event = MaintenanceSiteIssueReturnEvent(
+        event_id=str(uuid4()),
+        project_id=project.project_id,
+        issue_id=issue.issue_id,
+        event_type="return_obligation_created",
+        issue_version=issue.version,
+        payload={
+            "schema_version": "maintenance-return-obligation-interface-v1",
+            "project_id": project.project_id,
+            "issue_id": issue.issue_id,
+            "issue_no": issue.issue_no,
+            "issue_date": issue.issue_date.isoformat(),
+            "receiver": issue.receiver,
+            "issued_by": issue.issued_by,
+            "site_location": issue.site_location,
+            "lines": [
+                {
+                    "issue_line_id": line.issue_line_id,
+                    "delivery_line_id": line.delivery_line_id,
+                    "source_order_id": line.source_order_id,
+                    "source_line_id": line.source_line_id,
+                    "part_id": line.part_id,
+                    "pn": line.pn,
+                    "serial_number": line.serial_number,
+                    "quantity": "3.000",
+                }
+            ],
+        },
+    )
+    db.add(source_event)
+    db.commit()
+    confirmed_version = issue.version
+
+    corrected = client.patch(
+        f"/api/maintenance/site-issues/{issue.issue_id}",
+        json={
+            "project_id": project.project_id,
+            "version": confirmed_version,
+            "idempotency_key": "synthetic-return-legacy-pending-correct",
+            "lines": [
+                {"delivery_line_id": delivery.delivery_line_id, "quantity": "2"}
+            ],
+            "reason": "更正旧版本尚未投影的现场领用",
+        },
+    )
+    assert corrected.status_code == 200, corrected.text
+
+    directory = client.post(
+        "/api/maintenance/return-obligations/search",
+        json={"project_id": project.project_id, "page": 1, "page_size": 20},
+    )
+    assert directory.status_code == 200, directory.text
+    row = directory.json()["rows"][0]
+    assert row["source_quantity"] == "2.000"
+    assert row["required_quantity"] == "2.000"
+    assert row["source_issue_version"] == corrected.json()["version"]
+    db.refresh(source_event)
+    assert source_event.downstream_reference.startswith(
+        "maintenance-return-obligations:"
+    )
+    assert source_event.consumed_at is not None
+
+
+def test_late_stale_return_event_is_consumed_without_rolling_back_projection(db):
+    project = _project(db, project_id="project-bad-return-stale-event")
+    client = _client(db, username="bad_return_stale_event_admin")
+    category = _category(db, major="服务器配件", minor="电源")
+    delivery = _delivery_source(
+        db,
+        project=project,
+        delivery_line_id="synthetic-return-stale-event",
+        quantity="5",
+    )
+    db.get(DimPart, delivery.part_id).category_id = category.id
+    db.commit()
+    confirmed = _confirm_issue(
+        client,
+        project_id=project.project_id,
+        lines=[{"delivery_line_id": delivery.delivery_line_id, "quantity": "2"}],
+        suffix="stale-event",
+    )
+    issue = db.get(MaintenanceSiteIssue, confirmed["issue_id"])
+    line = db.query(MaintenanceSiteIssueLine).filter_by(issue_id=issue.issue_id).one()
+
+    # A delayed legacy writer publishes an older source version after the
+    # current confirmation was already projected. It must be acknowledged but
+    # must never rewrite the authoritative v2 quantity back to 4.
+    stale_event = MaintenanceSiteIssueReturnEvent(
+        event_id=str(uuid4()),
+        project_id=project.project_id,
+        issue_id=issue.issue_id,
+        event_type="return_obligation_created",
+        issue_version=1,
+        payload={
+            "schema_version": "maintenance-return-obligation-interface-v1",
+            "project_id": project.project_id,
+            "issue_id": issue.issue_id,
+            "issue_no": issue.issue_no,
+            "issue_date": issue.issue_date.isoformat(),
+            "receiver": issue.receiver,
+            "issued_by": issue.issued_by,
+            "site_location": issue.site_location,
+            "lines": [
+                {
+                    "issue_line_id": line.issue_line_id,
+                    "delivery_line_id": line.delivery_line_id,
+                    "source_order_id": line.source_order_id,
+                    "source_line_id": line.source_line_id,
+                    "part_id": line.part_id,
+                    "pn": line.pn,
+                    "serial_number": line.serial_number,
+                    "quantity": "4.000",
+                }
+            ],
+        },
+    )
+    db.add(stale_event)
+    db.commit()
+
+    directory = client.post(
+        "/api/maintenance/return-obligations/search",
+        json={"project_id": project.project_id, "page": 1, "page_size": 20},
+    )
+    assert directory.status_code == 200, directory.text
+    row = directory.json()["rows"][0]
+    assert row["source_quantity"] == "2.000"
+    assert row["required_quantity"] == "2.000"
+    assert row["source_issue_version"] == confirmed["version"]
+    db.refresh(stale_event)
+    assert stale_event.downstream_reference.startswith(
+        "maintenance-return-obligations:"
+    )
+    assert stale_event.consumed_at is not None
+
+
+def test_stale_creation_cannot_resurrect_empty_newer_void_projection(db):
+    project = _project(db, project_id="project-bad-return-empty-void")
+    client = _client(db, username="bad_return_empty_void_watermark_admin")
+    category = _category(db, major="服务器配件", minor="电源")
+    delivery = _delivery_source(
+        db,
+        project=project,
+        delivery_line_id="synthetic-return-empty-void-watermark",
+        quantity="3",
+    )
+    db.get(DimPart, delivery.part_id).category_id = category.id
+    db.commit()
+    created = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "idempotency_key": "synthetic-return-empty-void-create",
+            "issue_date": "2026-08-09",
+            "receiver": "合成接收人",
+            "issued_by": "合成发出人",
+            "site_location": "合成现场",
+            "lines": [
+                {"delivery_line_id": delivery.delivery_line_id, "quantity": "3"}
+            ],
+            "reason": "建立空投影水位测试草稿",
+        },
+    )
+    assert created.status_code == 201, created.text
+    issue = db.get(MaintenanceSiteIssue, created.json()["issue_id"])
+    line = db.query(MaintenanceSiteIssueLine).filter_by(issue_id=issue.issue_id).one()
+    issue.raw_status = "void"
+    issue.status_mapping_state = "mapped"
+    issue.normalized_status = "void"
+    issue.status_mapping_version = "site-issue-v2-workflow-v1"
+    issue.voided_at = datetime.now(UTC)
+    issue.version = 2
+    payload = {
+        "schema_version": "maintenance-return-obligation-interface-v1",
+        "project_id": project.project_id,
+        "issue_id": issue.issue_id,
+        "issue_no": issue.issue_no,
+        "issue_date": issue.issue_date.isoformat(),
+        "receiver": issue.receiver,
+        "issued_by": issue.issued_by,
+        "site_location": issue.site_location,
+        "lines": [
+            {
+                "issue_line_id": line.issue_line_id,
+                "delivery_line_id": line.delivery_line_id,
+                "source_order_id": line.source_order_id,
+                "source_line_id": line.source_line_id,
+                "part_id": line.part_id,
+                "pn": line.pn,
+                "serial_number": line.serial_number,
+                "quantity": "3.000",
+            }
+        ],
+    }
+    void_event = MaintenanceSiteIssueReturnEvent(
+        event_id=str(uuid4()),
+        project_id=project.project_id,
+        issue_id=issue.issue_id,
+        event_type="return_obligation_voided",
+        issue_version=2,
+        payload=payload,
+    )
+    db.add(void_event)
+    db.commit()
+
+    empty = client.post(
+        "/api/maintenance/return-obligations/search",
+        json={"project_id": project.project_id, "page": 1, "page_size": 20},
+    )
+    assert empty.status_code == 200, empty.text
+    assert empty.json()["total"] == 0
+    db.refresh(void_event)
+    assert void_event.consumed_at is not None
+
+    stale_event = MaintenanceSiteIssueReturnEvent(
+        event_id=str(uuid4()),
+        project_id=project.project_id,
+        issue_id=issue.issue_id,
+        event_type="return_obligation_created",
+        issue_version=1,
+        payload=payload,
+    )
+    db.add(stale_event)
+    db.commit()
+    still_empty = client.post(
+        "/api/maintenance/return-obligations/search",
+        json={"project_id": project.project_id, "page": 1, "page_size": 20},
+    )
+    assert still_empty.status_code == 200, still_empty.text
+    assert still_empty.json()["total"] == 0
+    db.refresh(stale_event)
+    assert stale_event.downstream_reference.startswith(
+        "maintenance-return-obligations:"
+    )
+    assert stale_event.consumed_at is not None
+
+
 def test_confirmed_site_issue_can_be_fully_voided_before_any_return_registration(db):
     client = _client(db, username="bad_return_source_void_admin")
     confirmed, obligation = _one_required_obligation(
@@ -441,6 +722,18 @@ def test_admin_resolves_pending_category_by_linking_standard_category_only(db):
     ).one()
     assert obligation.classification == "pending_category"
 
+    options = admin.get("/api/maintenance/return-categories")
+    assert options.status_code == 200, options.text
+    assert options.json() == {
+        "categories": [
+            {
+                "category_id": category.id,
+                "category_major": "服务器配件",
+                "category_minor": "电源",
+            }
+        ]
+    }
+
     resolved = admin.post(
         f"/api/maintenance/return-obligations/{obligation.obligation_id}/resolve-category",
         json={
@@ -460,7 +753,7 @@ def test_admin_resolves_pending_category_by_linking_standard_category_only(db):
     assert rate["status"] == "available"
     assert rate["official_rate_pct"] == "0.00"
 
-    denied = _client(
+    non_admin = _client(
         db,
         username="bad_return_resolve_non_admin",
         role="boss",
@@ -468,7 +761,9 @@ def test_admin_resolves_pending_category_by_linking_standard_category_only(db):
             "page_maintenance": True,
             "action_maintenance_bad_return_manage": True,
         },
-    ).post(
+    )
+    assert non_admin.get("/api/maintenance/return-categories").status_code == 403
+    denied = non_admin.post(
         f"/api/maintenance/return-obligations/{obligation.obligation_id}/resolve-category",
         json={
             "project_id": project.project_id,
@@ -689,6 +984,59 @@ def test_concurrent_draft_submission_allows_only_one_overlapping_return(db):
         f"/api/maintenance/projects/stable/{obligation.project_id}/return-rate"
     ).json()
     assert rate["registered_quantity"] == "3.000"
+
+
+def test_bad_return_write_lock_wait_is_bounded_and_retryable(db, monkeypatch):
+    client = _client(db, username="bad_return_lock_timeout_admin")
+    _confirmed, obligation = _one_required_obligation(
+        db,
+        client,
+        project_id="project-bad-return-lock-timeout",
+        quantity="5",
+        suffix="lock-timeout",
+    )
+    created = client.post(
+        "/api/maintenance/bad-returns",
+        json={
+            "project_id": obligation.project_id,
+            "idempotency_key": "synthetic-return-lock-timeout-create",
+            "lines": [{"obligation_id": obligation.obligation_id, "quantity": "2"}],
+            "reason": "建立有限锁等待测试草稿",
+        },
+    ).json()
+    body = {
+        "project_id": obligation.project_id,
+        "version": created["version"],
+        "idempotency_key": "synthetic-return-lock-timeout-submit",
+        "reason": "验证锁等待可重试且不会无限挂起",
+    }
+    monkeypatch.setattr(bad_return_service, "_WRITE_LOCK_TIMEOUT", "250ms", raising=False)
+    blocker = SessionLocal()
+    try:
+        blocker.scalar(
+            select(MaintenanceProject)
+            .where(MaintenanceProject.project_id == obligation.project_id)
+            .with_for_update()
+        )
+        started = monotonic()
+        blocked = client.post(
+            f"/api/maintenance/bad-returns/{created['return_id']}/submit",
+            json=body,
+        )
+        elapsed = monotonic() - started
+        assert blocked.status_code == 409, blocked.text
+        assert "正在被其他操作处理" in blocked.json()["detail"]
+        assert elapsed < 2
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    retried = client.post(
+        f"/api/maintenance/bad-returns/{created['return_id']}/submit",
+        json=body,
+    )
+    assert retried.status_code == 200, retried.text
+    assert retried.json()["status"] == "submitted"
 
 
 def test_submitted_return_can_be_voided_and_replaced_without_counting_twice(db):

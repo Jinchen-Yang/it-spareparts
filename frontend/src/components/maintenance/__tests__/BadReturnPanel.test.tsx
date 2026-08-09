@@ -9,6 +9,8 @@ const api = vi.hoisted(() => ({
   markMaintenanceBadReturnInTransit: vi.fn(),
   confirmMaintenanceBadReturnWarehouse: vi.fn(),
   voidMaintenanceBadReturn: vi.fn(),
+  listMaintenanceReturnCategories: vi.fn(),
+  resolveMaintenanceReturnObligationCategory: vi.fn(),
 }));
 
 vi.mock("../../../api/maintenanceOperations", async () => {
@@ -154,6 +156,7 @@ const badReturnVoided = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   api.searchMaintenanceReturnObligations.mockResolvedValue({
     data: { rows: obligations, total: 3, page: 1, page_size: 50, return_rate: returnRate },
   });
@@ -177,6 +180,24 @@ beforeEach(() => {
     },
   });
   api.voidMaintenanceBadReturn.mockResolvedValue({ data: badReturnVoided });
+  api.listMaintenanceReturnCategories.mockResolvedValue({
+    data: {
+      categories: [
+        { category_id: 9, category_major: "硬盘", category_minor: "SAS" },
+        { category_id: 11, category_major: "服务器配件", category_minor: "内存" },
+      ],
+    },
+  });
+  api.resolveMaintenanceReturnObligationCategory.mockResolvedValue({
+    data: {
+      ...obligations[2],
+      classification: "exempt",
+      category_id_snapshot: 9,
+      category_major_snapshot: "硬盘",
+      category_minor_snapshot: "SAS",
+      version: 2,
+    },
+  });
 });
 
 afterEach(cleanup);
@@ -203,8 +224,10 @@ describe("BadReturnPanel", () => {
     expect(panel).not.toHaveTextContent("%");
     expect(within(panel).getAllByText("硬盘免返")).toHaveLength(2);
     expect(within(panel).getAllByText("品类待判定")).toHaveLength(2);
+    expect(panel).toHaveTextContent("管理员关联标准品类后才能判定是否应返");
     expect(panel).toHaveTextContent("未登记 4.000");
     expect(within(panel).queryByRole("button", { name: "新建坏件返还单" })).toBeNull();
+    expect(within(panel).queryByRole("button", { name: "处理品类" })).toBeNull();
     expect(api.searchMaintenanceReturnObligations).toHaveBeenCalledWith({
       project_id: "project-1",
       page: 1,
@@ -215,6 +238,43 @@ describe("BadReturnPanel", () => {
       page: 1,
       page_size: 20,
     });
+  });
+
+  it("管理员可在待判定义务上关联标准品类并填写判定原因", async () => {
+    localStorage.setItem("role", "admin");
+    const onChanged = vi.fn();
+    render(
+      <BadReturnPanel
+        projectId="project-1"
+        returnRate={returnRate}
+        canManage={false}
+        onChanged={onChanged}
+      />,
+    );
+
+    const panel = await screen.findByTestId("bad-return-panel");
+    fireEvent.click(within(panel).getByRole("button", { name: "处理品类" }));
+    const dialog = await screen.findByRole("dialog", { name: "处理品类待判定" });
+    await waitFor(() => expect(api.listMaintenanceReturnCategories).toHaveBeenCalledOnce());
+    fireEvent.mouseDown(within(dialog).getByRole("combobox", { name: "标准品类" }));
+    fireEvent.click(await screen.findByText("硬盘 / SAS"));
+    fireEvent.change(within(dialog).getByLabelText("判定原因"), {
+      target: { value: "核对标准品类主数据后确认" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认关联" }));
+
+    await waitFor(() => expect(
+      api.resolveMaintenanceReturnObligationCategory,
+    ).toHaveBeenCalledWith(
+      "obligation-pending",
+      expect.objectContaining({
+        project_id: "project-1",
+        version: 1,
+        category_id: 9,
+        reason: "核对标准品类主数据后确认",
+      }),
+    ));
+    expect(onChanged).toHaveBeenCalled();
   });
 
   it("没有明确应返项时显示业务状态而不是 100%", async () => {
