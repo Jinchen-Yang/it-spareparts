@@ -1,15 +1,23 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
+import pytest
+
+from app.business_time import business_today
 from app.models.dimensions import DimPart
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
     MaintenanceProjectExpenseAttribution,
+    MaintenanceProjectWorkbookState,
     MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
 )
+from app.services import maintenance_migration_source as migration_source
 from app.services.maintenance_migration_controls import build_project_preview
-from app.services.maintenance_migration_source import build_project_source_payload
+from app.services.maintenance_migration_source import (
+    MaintenanceMigrationSourceError,
+    build_project_source_payload,
+)
 
 
 def _seed_project_facts(db):
@@ -21,9 +29,17 @@ def _seed_project_facts(db):
             lifecycle_status="ongoing",
         )
     )
-    part = DimPart(pn_std="PN-MIGRATION-SOURCE")
+    part = DimPart(id=21003, pn_std="PN-MIGRATION-SOURCE")
     db.add(part)
     db.flush()
+    db.add(
+        MaintenanceProjectWorkbookState(
+            project_id="migration-source-project",
+            revision=0,
+            data_version="migration-source-version-0",
+            expense_ready_through=business_today().replace(day=1),
+        )
+    )
     db.add_all(
         [
             MaintenanceSiteIssue(
@@ -122,7 +138,7 @@ def _build(db, *, historical_mode="approved_cost_baseline", warehouse_ready=True
         },
         opening_balances=[
             {
-                "balance_key": "project:part",
+                "balance_key": "migration-source-project:21003",
                 "pn": "PN-MIGRATION-SOURCE",
                 "quantity": "10",
                 "evidence_hash": "b" * 64,
@@ -131,16 +147,48 @@ def _build(db, *, historical_mode="approved_cost_baseline", warehouse_ready=True
         ],
         inventory_movements=[
             {
-                "movement_id": "shipment-line",
+                "movement_id": "shipment-document:shipment-line",
+                "document_id": "shipment-document",
+                "line_id": "shipment-line",
                 "document_date": "2026-08-02",
                 "movement_type": "delivery",
-                "balance_key": "project:part",
+                "source": "maintenance_warehouse_v1",
+                "source_document_type": "shipment",
+                "source_status": "confirmed",
+                "formal_available": False,
+                "project_id": "migration-source-project",
+                "part_id": 21003,
+                "balance_key": "migration-source-project:21003",
                 "pn": "PN-MIGRATION-SOURCE",
                 "quantity": "3",
             }
         ],
         warehouse_source_ready=warehouse_ready,
     )
+
+
+def test_multi_project_snapshot_locks_every_project_before_shared_linkage(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        migration_source,
+        "lock_project_source_snapshot",
+        lambda _db, *, project_id: events.append(("project", project_id)),
+    )
+    monkeypatch.setattr(
+        migration_source,
+        "lock_optional_linkage_snapshot",
+        lambda _db: events.append(("linkage", None)),
+    )
+
+    migration_source.lock_project_source_snapshots(
+        object(), project_ids=["project-b", "project-a", "project-b"]
+    )
+
+    assert events == [
+        ("project", "project-a"),
+        ("project", "project-b"),
+        ("linkage", None),
+    ]
 
 
 def test_server_snapshot_uses_database_cost_facts_and_never_demand_rows(db):
@@ -192,6 +240,102 @@ def test_source_hash_changes_when_an_operational_fact_changes(db):
     changed = _build(db)["source_snapshot_hash"]
 
     assert first != changed
+
+
+def test_cost_evidence_and_samples_are_visible_and_hash_bound(db):
+    _seed_project_facts(db)
+    first = _build(db)
+
+    line = db.get(MaintenanceSiteIssueLine, "migration-source-current-line")
+    line.reference_sample_ids = ["purchase-line-101"]
+    line.reference_sample_count = 1
+    line.reference_samples = [
+        {
+            "sample_id": "purchase-line-101",
+            "document_no": "CG-101",
+            "document_date": "2026-08-01",
+            "distance_days": 1,
+            "quantity": "2",
+            "unit_price_raw": "20",
+            "unit_price_ex_tax": "20",
+            "tax_conversion": "already_ex_tax",
+            "untrusted_note": "must-not-enter-manifest",
+        }
+    ]
+    line.reference_window_from = date(2026, 7, 26)
+    line.reference_window_to = date(2026, 8, 9)
+    db.commit()
+
+    changed = _build(db)
+    evidence = changed["post_cutover_site_issues"][0]
+
+    assert first["source_snapshot_hash"] != changed["source_snapshot_hash"]
+    assert evidence["cost_evidence_kind"] == "manual_confirmed"
+    assert evidence["cost_is_estimate"] is False
+    assert evidence["reference_sample_count"] == 1
+    assert evidence["reference_samples"][0]["sample_id"] == "purchase-line-101"
+    assert "untrusted_note" not in evidence["reference_samples"][0]
+
+
+def test_missing_expense_completeness_watermark_blocks_approval(db):
+    _seed_project_facts(db)
+    state = db.get(MaintenanceProjectWorkbookState, "migration-source-project")
+    state.expense_ready_through = None
+    db.commit()
+
+    payload = _build(db)
+    preview = build_project_preview(payload)
+
+    assert payload["source_coverage"]["expense_ready_through"] is None
+    assert "expense_readiness_missing" in {
+        row["code"] for row in preview["approval_blockers"]
+    }
+
+
+def test_stale_expense_completeness_watermark_blocks_approval(db):
+    _seed_project_facts(db)
+    state = db.get(MaintenanceProjectWorkbookState, "migration-source-project")
+    current_month = business_today().replace(day=1)
+    state.expense_ready_through = (current_month - timedelta(days=1)).replace(day=1)
+    db.commit()
+
+    preview = build_project_preview(_build(db))
+
+    assert "expense_readiness_missing" in {
+        row["code"] for row in preview["approval_blockers"]
+    }
+
+
+def test_future_expense_completeness_watermark_blocks_approval(db):
+    _seed_project_facts(db)
+    state = db.get(MaintenanceProjectWorkbookState, "migration-source-project")
+    current_month = business_today().replace(day=1)
+    state.expense_ready_through = (current_month + timedelta(days=32)).replace(day=1)
+    db.commit()
+
+    preview = build_project_preview(_build(db))
+
+    assert "expense_readiness_invalid" in {
+        row["code"] for row in preview["approval_blockers"]
+    }
+
+
+def test_archived_project_and_stale_part_identity_fail_closed(db):
+    _seed_project_facts(db)
+    project = db.get(MaintenanceProject, "migration-source-project")
+    project.is_active = False
+    db.commit()
+
+    with pytest.raises(MaintenanceMigrationSourceError, match="已归档"):
+        _build(db)
+
+    project.is_active = True
+    part = db.get(DimPart, 21003)
+    part.pn_std = "PN-MIGRATION-SOURCE-RENAMED"
+    db.commit()
+
+    with pytest.raises(MaintenanceMigrationSourceError, match="PN.*不一致"):
+        _build(db)
 
 
 def test_named_approval_state_does_not_masquerade_as_source_data_change(db):

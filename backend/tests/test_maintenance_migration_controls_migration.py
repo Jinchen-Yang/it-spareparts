@@ -107,6 +107,22 @@ def test_migration_control_schema_and_permission_are_fail_closed(db):
     )
     assert set(rotated.maintenance_manifest_verification_keys()) == {"v1", "v2"}
 
+    shared_secret = "shared-secret-material-that-is-long-enough"
+    with pytest.raises(ValueError, match="独立于 SECRET_KEY"):
+        Settings(
+            _env_file=None,
+            secret_key=shared_secret,
+            maintenance_manifest_active_hmac_key=shared_secret,
+        )
+    with pytest.raises(ValueError, match="历史密钥必须独立"):
+        Settings(
+            _env_file=None,
+            secret_key=shared_secret,
+            maintenance_manifest_previous_hmac_keys_json=(
+                '{"v0":"shared-secret-material-that-is-long-enough"}'
+            ),
+        )
+
 
 def test_migration_event_is_database_append_only(db):
     with engine.begin() as connection:

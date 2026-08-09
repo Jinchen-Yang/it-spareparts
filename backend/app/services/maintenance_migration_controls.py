@@ -29,6 +29,11 @@ _INVENTORY_MOVEMENT_TYPES = {
     "site_issue",
     "return_registration",
 }
+_WAREHOUSE_MOVEMENT_MAP = {
+    "shipment": "delivery",
+    "receipt": "available_receipt",
+    "return": "return_registration",
+}
 
 
 class MigrationControlError(ValueError):
@@ -122,6 +127,67 @@ def _hash(value: Any, label: str) -> str:
     return clean
 
 
+def _part_id_from_balance_key(value: Any, *, project_id: str) -> tuple[str, int]:
+    key = _required_text(value, "库存期初稳定键", max_length=256)
+    prefix, separator, raw_part_id = key.partition(":")
+    try:
+        part_id = int(raw_part_id)
+    except (TypeError, ValueError) as exc:
+        raise MigrationControlError(
+            "库存稳定键必须为 project_id:part_id"
+        ) from exc
+    if (
+        separator != ":"
+        or prefix != project_id
+        or raw_part_id != str(part_id)
+        or part_id <= 0
+        or key != f"{project_id}:{part_id}"
+    ):
+        raise MigrationControlError("库存稳定键必须为 project_id:part_id")
+    return key, part_id
+
+
+def _validate_inventory_movement_identity(
+    row: Mapping[str, Any], *, project_id: str
+) -> tuple[str, str]:
+    document_id = _required_text(row.get("document_id"), "库存变动单据稳定编号")
+    line_id = _required_text(row.get("line_id"), "库存变动明细稳定编号")
+    movement_id = _required_text(row.get("movement_id"), "库存变动稳定编号")
+    if movement_id != f"{document_id}:{line_id}":
+        raise MigrationControlError("库存变动稳定编号必须由 document_id:line_id 生成")
+    key, part_id = _part_id_from_balance_key(
+        row.get("balance_key"), project_id=project_id
+    )
+    try:
+        supplied_part_id = int(row.get("part_id"))
+    except (TypeError, ValueError) as exc:
+        raise MigrationControlError("库存变动 part_id 无效") from exc
+    if supplied_part_id != part_id or str(row.get("project_id") or "") != project_id:
+        raise MigrationControlError("库存变动项目或配件与 balance_key 不一致")
+
+    movement_type = str(row.get("movement_type") or "")
+    source = str(row.get("source") or "")
+    source_type = str(row.get("source_document_type") or "")
+    source_status = str(row.get("source_status") or "")
+    if source == "maintenance_warehouse_v1":
+        expected = _WAREHOUSE_MOVEMENT_MAP.get(source_type)
+        if source_status != "confirmed" or expected != movement_type:
+            raise MigrationControlError("仓库单据状态或库存变动映射无效")
+        expected_formal_available = source_type == "receipt"
+        if row.get("formal_available") is not expected_formal_available:
+            raise MigrationControlError("正式可用标记与仓库单据类型不一致")
+    elif source == "site_issue_v2":
+        if (
+            source_type != "site_issue"
+            or source_status not in _COST_STATUSES
+            or movement_type != "site_issue"
+        ):
+            raise MigrationControlError("现场领用库存证据状态或来源无效")
+    else:
+        raise MigrationControlError("库存变动来源契约无效")
+    return movement_id, key
+
+
 def _blocker(
     blockers: list[dict[str, Any]],
     code: str,
@@ -213,12 +279,7 @@ def _historical_cost(
     total_ex = Decimal("0")
     total_inc = Decimal("0")
     seen: set[str] = set()
-    if not historical_rows:
-        _blocker(
-            blockers,
-            "missing_historical_site_issues",
-            detail="没有可靠历史领用，必须改用已审批成本基线",
-        )
+    counted_rows = 0
     for row in historical_rows:
         row_id = _required_text(row.get("issue_line_id"), "历史领用稳定编号")
         if row_id in seen:
@@ -266,6 +327,13 @@ def _historical_cost(
         if eligible and pair is not None:
             total_ex += pair[0]
             total_inc += pair[1]
+            counted_rows += 1
+    if counted_rows == 0:
+        _blocker(
+            blockers,
+            "missing_historical_site_issues",
+            detail="没有可靠历史领用，必须改用已审批成本基线",
+        )
     return total_ex, total_inc
 
 
@@ -288,6 +356,14 @@ def _post_cutover_cost(
         if workflow_status == "void":
             continue
         eligible = True
+        if row.get("stable_identity") is not True:
+            eligible = False
+            _blocker(
+                blockers,
+                "site_issue_missing_identity",
+                entity_id=row_id,
+                detail="切换后现场领用缺少当前有效的稳定来源归属",
+            )
         if row_date < cutover_date:
             eligible = False
             _blocker(
@@ -363,12 +439,22 @@ def _expense_cost(
 def _inventory_preview(
     payload: Mapping[str, Any],
     *,
+    project_id: str,
     cutover_date: date,
     blockers: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     quantities: dict[str, dict[str, Decimal]] = {}
     for row in payload.get("opening_balances") or []:
-        key = _required_text(row.get("balance_key"), "库存期初稳定键", max_length=256)
+        key, part_id = _part_id_from_balance_key(
+            row.get("balance_key"), project_id=project_id
+        )
+        if row.get("part_id") is not None:
+            try:
+                supplied_part_id = int(row.get("part_id"))
+            except (TypeError, ValueError) as exc:
+                raise MigrationControlError("库存期初 part_id 无效") from exc
+            if supplied_part_id != part_id:
+                raise MigrationControlError("库存期初 part_id 与稳定键不一致")
         if key in quantities:
             raise MigrationControlError("库存期初稳定键重复")
         opening = _qty(row.get("quantity"), "库存期初数量")
@@ -396,11 +482,12 @@ def _inventory_preview(
 
     seen_movement_ids: set[str] = set()
     for row in payload.get("inventory_movements") or []:
-        movement_id = _required_text(row.get("movement_id"), "库存变动稳定编号")
+        movement_id, key = _validate_inventory_movement_identity(
+            row, project_id=project_id
+        )
         if movement_id in seen_movement_ids:
             raise MigrationControlError("库存变动稳定编号重复")
         seen_movement_ids.add(movement_id)
-        key = _required_text(row.get("balance_key"), "库存期初稳定键", max_length=256)
         movement_type = str(row.get("movement_type") or "")
         if movement_type not in _INVENTORY_MOVEMENT_TYPES:
             _blocker(
@@ -501,8 +588,29 @@ def _project_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
         "quantity",
         "workflow_status",
         "stable_identity",
+        "link_state",
+        "delivery_line_id",
+        "source_order_id",
+        "source_line_id",
+        "source_assignment_id",
+        "source_assignment_version",
+        "delivery_mapping_version",
         "cost_amount_ex_tax",
         "cost_amount_inc_tax",
+        "cost_source",
+        "cost_evidence_kind",
+        "cost_is_estimate",
+        "cost_source_label",
+        "price_basis",
+        "linked_purchase_line_id",
+        "manual_evidence",
+        "reference_side",
+        "reference_sample_ids",
+        "reference_sample_count",
+        "reference_samples",
+        "reference_window_from",
+        "reference_window_to",
+        "algorithm_version",
     )
     return {
         "historical_baseline": baseline_evidence,
@@ -531,7 +639,14 @@ def _project_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
         "opening_balances": rows(
             payload.get("opening_balances"),
             identity="balance_key",
-            fields=("balance_key", "pn", "quantity", "evidence_hash", "approved"),
+            fields=(
+                "balance_key",
+                "part_id",
+                "pn",
+                "quantity",
+                "evidence_hash",
+                "approved",
+            ),
         ),
         "inventory_movements": rows(
             payload.get("inventory_movements"),
@@ -539,13 +654,35 @@ def _project_evidence(payload: Mapping[str, Any]) -> dict[str, Any]:
             fields=(
                 "movement_id",
                 "document_id",
+                "line_id",
                 "document_no",
                 "document_date",
                 "movement_type",
+                "source",
+                "source_document_type",
+                "source_status",
+                "formal_available",
+                "project_id",
+                "part_id",
                 "balance_key",
                 "pn",
+                "source_pn",
                 "sn",
                 "quantity",
+                "source_order_id",
+                "source_assignment_id",
+                "source_assignment_version",
+                "project_link_id",
+                "project_link_version",
+                "part_link_id",
+                "part_link_version",
+                "bad_return_id",
+                "bad_return_status",
+                "bad_return_version",
+                "warehouse_import_id",
+                "warehouse_source_file_hash",
+                "warehouse_adapter_version",
+                "warehouse_header_signature",
             ),
         ),
         "source_coverage": _canonical(payload.get("source_coverage") or {}),
@@ -573,6 +710,7 @@ def build_project_preview(payload: Mapping[str, Any]) -> dict[str, Any]:
     expense_ex, expense_inc = _expense_cost(payload, blockers=blockers)
     inventory = _inventory_preview(
         payload,
+        project_id=project_id,
         cutover_date=cutover_date,
         blockers=blockers,
     )

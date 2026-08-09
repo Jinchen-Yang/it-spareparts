@@ -3,7 +3,11 @@ import hmac
 
 import pytest
 
+from app.business_time import business_today
+from app.models.dimensions import DimPart
+from app.models.maintenance_migration import MaintenanceMigrationRun
 from app.models.maintenance_project import MaintenanceProject
+from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
 from app.services import maintenance_migration_runs as runs
 
 
@@ -12,14 +16,21 @@ _SIGNING_KEY_ID = "synthetic-v1"
 
 
 def _seed_project(db, project_id="migration-run-project"):
-    db.add(
+    db.add_all([
         MaintenanceProject(
             project_id=project_id,
             project_code=project_id.upper(),
             display_name="迁移运行合成项目",
             lifecycle_status="ongoing",
-        )
-    )
+        ),
+        DimPart(id=21001, pn_std="PN-MIGRATION-RUN"),
+        MaintenanceProjectWorkbookState(
+            project_id=project_id,
+            revision=0,
+            data_version=f"{project_id}-version-0",
+            expense_ready_through=business_today().replace(day=1),
+        ),
+    ])
     db.commit()
 
 
@@ -35,7 +46,7 @@ def _spec(project_id="migration-run-project"):
         },
         "opening_balances": [
             {
-                "balance_key": f"{project_id}:part-1",
+                "balance_key": f"{project_id}:21001",
                 "pn": "PN-MIGRATION-RUN",
                 "quantity": "10",
                 "evidence_hash": "b" * 64,
@@ -48,12 +59,19 @@ def _warehouse_loader(_db, project_id, _cutover_date):
     return (
         [
             {
-                "movement_id": f"shipment:{project_id}:line-1",
+                "movement_id": "shipment-document-1:shipment-line-1",
                 "document_id": "shipment-document-1",
+                "line_id": "shipment-line-1",
                 "document_no": "FH-MIGRATION-1",
                 "document_date": "2026-08-02",
                 "movement_type": "delivery",
-                "balance_key": f"{project_id}:part-1",
+                "source": "maintenance_warehouse_v1",
+                "source_document_type": "shipment",
+                "source_status": "confirmed",
+                "formal_available": False,
+                "project_id": project_id,
+                "part_id": 21001,
+                "balance_key": f"{project_id}:21001",
                 "pn": "PN-MIGRATION-RUN",
                 "quantity": "3",
             }
@@ -186,13 +204,32 @@ def test_full_workflow_is_hash_bound_idempotent_and_never_activates_production(d
         hashlib.sha256,
     ).hexdigest()
     assert approved["manifest"]["manifest_signature"] == expected_signature
-    signed_manifest = runs.get_signed_manifest(db, run_id=preview["run_id"])
+    signed_manifest = runs.get_signed_manifest(
+        db,
+        run_id=preview["run_id"],
+        verification_keys={_SIGNING_KEY_ID: _SIGNING_KEY},
+        warehouse_loader=_warehouse_loader,
+    )
     assert runs.verify_signed_manifest(
-        signed_manifest, verification_keys={_SIGNING_KEY_ID: _SIGNING_KEY}
+        signed_manifest,
+        verification_keys={_SIGNING_KEY_ID: _SIGNING_KEY},
+        expected_rule_version=runs.controls.RULE_VERSION,
+        expected_source_snapshot_hash=signed_manifest["source_snapshot_hash"],
+        expected_input_fingerprint=signed_manifest["input_fingerprint"],
     )
     assert not runs.verify_signed_manifest(
         {**signed_manifest, "rule_version": "tampered"},
         verification_keys={_SIGNING_KEY_ID: _SIGNING_KEY},
+        expected_rule_version=runs.controls.RULE_VERSION,
+        expected_source_snapshot_hash=signed_manifest["source_snapshot_hash"],
+        expected_input_fingerprint=signed_manifest["input_fingerprint"],
+    )
+    assert not runs.verify_signed_manifest(
+        {**signed_manifest, "manifest_version": "unknown-manifest"},
+        verification_keys={_SIGNING_KEY_ID: _SIGNING_KEY},
+        expected_rule_version=runs.controls.RULE_VERSION,
+        expected_source_snapshot_hash=signed_manifest["source_snapshot_hash"],
+        expected_input_fingerprint=signed_manifest["input_fingerprint"],
     )
     assert [event["action"] for event in approved["events"]] == [
         "preview",
@@ -379,6 +416,71 @@ def test_source_change_after_reconciliation_invalidates_approval(db):
         )
 
 
+def test_source_change_after_approval_invalidates_manifest_download(db):
+    _seed_project(db)
+    preview = _preview(db, key="stale-manifest-preview")
+    reconciled = _reconcile(db, preview, key="stale-manifest-reconcile")
+    runs.approve_run(
+        db,
+        run_id=preview["run_id"],
+        expected_version=reconciled["version"],
+        supplied_fingerprint=reconciled["preview"]["input_fingerprint"],
+        operation_key="stale-manifest-approve",
+        reason="独立审批后验证来源变化",
+        operated_by="approver-user",
+        signing_key=_SIGNING_KEY,
+        signing_key_id=_SIGNING_KEY_ID,
+        warehouse_loader=_warehouse_loader,
+    )
+    db.commit()
+
+    project = db.get(MaintenanceProject, "migration-run-project")
+    project.version += 1
+    db.commit()
+
+    with pytest.raises(runs.MaintenanceMigrationRunConflict, match="来源事实已变化"):
+        runs.get_signed_manifest(
+            db,
+            run_id=preview["run_id"],
+            verification_keys={_SIGNING_KEY_ID: _SIGNING_KEY},
+            warehouse_loader=_warehouse_loader,
+        )
+
+
+def test_manifest_download_rechecks_persisted_signature(db):
+    _seed_project(db)
+    preview = _preview(db, key="tampered-manifest-preview")
+    reconciled = _reconcile(db, preview, key="tampered-manifest-reconcile")
+    runs.approve_run(
+        db,
+        run_id=preview["run_id"],
+        expected_version=reconciled["version"],
+        supplied_fingerprint=reconciled["preview"]["input_fingerprint"],
+        operation_key="tampered-manifest-approve",
+        reason="独立审批后验证签名",
+        operated_by="approver-user",
+        signing_key=_SIGNING_KEY,
+        signing_key_id=_SIGNING_KEY_ID,
+        warehouse_loader=_warehouse_loader,
+    )
+    db.commit()
+
+    run = db.get(MaintenanceMigrationRun, preview["run_id"])
+    run.manifest_json = {
+        **run.manifest_json,
+        "manifest_signature": "0" * 64,
+    }
+    db.commit()
+
+    with pytest.raises(runs.MaintenanceMigrationRunConflict, match="签名或绑定事实无效"):
+        runs.get_signed_manifest(
+            db,
+            run_id=preview["run_id"],
+            verification_keys={_SIGNING_KEY_ID: _SIGNING_KEY},
+            warehouse_loader=_warehouse_loader,
+        )
+
+
 def test_unavailable_warehouse_source_cannot_be_approved(db):
     _seed_project(db)
     preview = _preview(
@@ -419,10 +521,18 @@ def test_warehouse_adapter_rejects_pre_cutover_movement_before_preview(db):
         return (
             [
                 {
-                    "movement_id": f"pre-cutover:{project_id}",
+                    "movement_id": "pre-cutover-document:pre-cutover-line",
+                    "document_id": "pre-cutover-document",
+                    "line_id": "pre-cutover-line",
                     "document_date": "2026-07-31",
                     "movement_type": "delivery",
-                    "balance_key": f"{project_id}:part-1",
+                    "source": "maintenance_warehouse_v1",
+                    "source_document_type": "shipment",
+                    "source_status": "confirmed",
+                    "formal_available": False,
+                    "project_id": project_id,
+                    "part_id": 21001,
+                    "balance_key": f"{project_id}:21001",
                     "quantity": "1",
                 }
             ],

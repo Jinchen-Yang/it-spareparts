@@ -21,6 +21,7 @@ def _project(**overrides):
                 "issue_line_id": "issue-line-1",
                 "issue_date": "2026-08-02",
                 "workflow_status": "confirmed",
+                "stable_identity": True,
                 "cost_amount_ex_tax": "20.00",
                 "cost_amount_inc_tax": "22.60",
             }
@@ -36,7 +37,8 @@ def _project(**overrides):
         ],
         "opening_balances": [
             {
-                "balance_key": "warehouse-1:part-1",
+                "balance_key": "project-1:1",
+                "part_id": 1,
                 "quantity": "10",
                 "evidence_hash": "b" * 64,
                 "approved": True,
@@ -44,32 +46,63 @@ def _project(**overrides):
         ],
         "inventory_movements": [
             {
-                "movement_id": "delivery-1",
+                "movement_id": "shipment-document-1:shipment-line-1",
+                "document_id": "shipment-document-1",
+                "line_id": "shipment-line-1",
                 "document_date": "2026-08-02",
                 "movement_type": "delivery",
+                "source": "maintenance_warehouse_v1",
+                "source_document_type": "shipment",
+                "source_status": "confirmed",
+                "formal_available": False,
+                "project_id": "project-1",
+                "part_id": 1,
                 "quantity": "3",
-                "balance_key": "warehouse-1:part-1",
+                "balance_key": "project-1:1",
             },
             {
-                "movement_id": "receipt-1",
+                "movement_id": "receipt-document-1:receipt-line-1",
+                "document_id": "receipt-document-1",
+                "line_id": "receipt-line-1",
                 "document_date": "2026-08-02",
                 "movement_type": "available_receipt",
+                "source": "maintenance_warehouse_v1",
+                "source_document_type": "receipt",
+                "source_status": "confirmed",
+                "formal_available": True,
+                "project_id": "project-1",
+                "part_id": 1,
                 "quantity": "2",
-                "balance_key": "warehouse-1:part-1",
+                "balance_key": "project-1:1",
             },
             {
-                "movement_id": "site-issue-1",
+                "movement_id": "site-issue-1:site-issue-line-1",
+                "document_id": "site-issue-1",
+                "line_id": "site-issue-line-1",
                 "document_date": "2026-08-02",
                 "movement_type": "site_issue",
+                "source": "site_issue_v2",
+                "source_document_type": "site_issue",
+                "source_status": "confirmed",
+                "project_id": "project-1",
+                "part_id": 1,
                 "quantity": "2",
-                "balance_key": "warehouse-1:part-1",
+                "balance_key": "project-1:1",
             },
             {
-                "movement_id": "return-registration-1",
+                "movement_id": "return-document-1:return-line-1",
+                "document_id": "return-document-1",
+                "line_id": "return-line-1",
                 "document_date": "2026-08-02",
                 "movement_type": "return_registration",
+                "source": "maintenance_warehouse_v1",
+                "source_document_type": "return",
+                "source_status": "confirmed",
+                "formal_available": False,
+                "project_id": "project-1",
+                "part_id": 1,
                 "quantity": "1",
-                "balance_key": "warehouse-1:part-1",
+                "balance_key": "project-1:1",
             },
         ],
         "return_offsets": [{"return_id": "return-1", "amount_ex_tax": "999.00"}],
@@ -123,6 +156,18 @@ def test_only_confirmed_or_corrected_site_issues_enter_cost(status):
         assert "unapproved_site_issue" not in codes
     else:
         assert "unapproved_site_issue" in codes
+
+
+def test_corrected_site_issue_with_stable_identity_enters_cost():
+    payload = _project()
+    payload["post_cutover_site_issues"][0]["workflow_status"] = "corrected"
+
+    preview = controls.build_project_preview(payload)
+
+    assert preview["cost"]["post_cutover_consumption_ex_tax"] == "20.00"
+    assert "unapproved_site_issue" not in {
+        row["code"] for row in preview["approval_blockers"]
+    }
 
 
 @pytest.mark.parametrize("status", ["rejected", "void"])
@@ -219,11 +264,19 @@ def test_inventory_movements_without_post_cutover_date_are_blocked_and_not_count
     payload = _project()
     payload["inventory_movements"] = [
         {
-            "movement_id": "overlap-delivery",
+            "movement_id": "overlap-document:overlap-line",
+            "document_id": "overlap-document",
+            "line_id": "overlap-line",
             "document_date": document_date,
             "movement_type": "delivery",
+            "source": "maintenance_warehouse_v1",
+            "source_document_type": "shipment",
+            "source_status": "confirmed",
+            "formal_available": False,
+            "project_id": "project-1",
+            "part_id": 1,
             "quantity": "3",
-            "balance_key": "warehouse-1:part-1",
+            "balance_key": "project-1:1",
         }
     ]
 
@@ -260,6 +313,68 @@ def test_stable_historical_issue_mode_requires_identity_and_pre_cutover_date():
         "historical_issue_date_overlap",
     } <= codes
     assert preview["cost"]["historical_baseline_ex_tax"] == "0.00"
+
+
+def test_stable_historical_mode_with_only_void_rows_requires_a_baseline():
+    payload = _project(
+        historical_mode="stable_site_issues",
+        historical_baseline=None,
+        historical_site_issues=[
+            {
+                "issue_line_id": "historical-void-1",
+                "issue_date": "2026-07-31",
+                "workflow_status": "void",
+                "cost_amount_ex_tax": "50.00",
+                "cost_amount_inc_tax": "56.50",
+                "stable_identity": True,
+            }
+        ],
+    )
+
+    preview = controls.build_project_preview(payload)
+
+    assert preview["cost"]["historical_baseline_ex_tax"] == "0.00"
+    assert "missing_historical_site_issues" in {
+        row["code"] for row in preview["approval_blockers"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("movement_id", "invented-id", "document_id:line_id"),
+        ("project_id", "another-project", "项目或配件"),
+        ("part_id", 2, "项目或配件"),
+        ("balance_key", "project-1:2", "项目或配件"),
+        ("source", "legacy_warehouse", "来源契约"),
+        ("source_status", "pending", "状态或库存变动映射"),
+        ("source_document_type", "receipt", "状态或库存变动映射"),
+    ],
+)
+def test_inventory_movement_identity_and_source_mapping_fail_closed(
+    field, value, message
+):
+    payload = _project()
+    payload["inventory_movements"][0][field] = value
+
+    with pytest.raises(controls.MigrationControlError, match=message):
+        controls.build_project_preview(payload)
+
+
+def test_receipt_must_be_explicitly_formal_available():
+    payload = _project()
+    payload["inventory_movements"][1]["formal_available"] = False
+
+    with pytest.raises(controls.MigrationControlError, match="正式可用标记"):
+        controls.build_project_preview(payload)
+
+
+def test_opening_part_id_must_be_numeric_and_match_the_stable_key():
+    payload = _project()
+    payload["opening_balances"][0]["part_id"] = "not-an-id"
+
+    with pytest.raises(controls.MigrationControlError, match="part_id 无效"):
+        controls.build_project_preview(payload)
 
 
 def test_snapshot_fingerprint_is_deterministic_and_changes_with_any_input():

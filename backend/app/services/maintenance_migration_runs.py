@@ -25,6 +25,7 @@ from app.services import maintenance_migration_controls as controls
 from app.services.maintenance_migration_source import (
     MaintenanceMigrationSourceError,
     build_project_source_payload,
+    lock_project_source_snapshots,
 )
 from app.services.maintenance_migration_warehouse import (
     MaintenanceMigrationWarehouseError,
@@ -158,6 +159,23 @@ def _normalize_specs(projects: Sequence[Mapping[str, Any]]) -> list[dict[str, An
             balance_key = _clean_text(
                 row.get("balance_key"), "库存期初稳定键", max_length=256
             )
+            prefix, separator, raw_part_id = balance_key.partition(":")
+            try:
+                part_id = int(raw_part_id)
+            except (TypeError, ValueError) as exc:
+                raise MaintenanceMigrationRunError(
+                    "库存期初稳定键必须为 project_id:part_id"
+                ) from exc
+            if (
+                separator != ":"
+                or prefix != project_id
+                or raw_part_id != str(part_id)
+                or part_id <= 0
+                or balance_key != f"{project_id}:{part_id}"
+            ):
+                raise MaintenanceMigrationRunError(
+                    "库存期初稳定键必须为 project_id:part_id"
+                )
             if balance_key in opening_keys:
                 raise MaintenanceMigrationRunError("库存期初稳定键重复")
             opening_keys.add(balance_key)
@@ -199,7 +217,9 @@ def _load_warehouse(
     movements, ready = loader(db, project_id, cutover_date)
     try:
         validated = validate_cutover_inventory_movements(
-            tuple(movements), cutover_date=cutover_date
+            tuple(movements),
+            cutover_date=cutover_date,
+            project_id=project_id,
         )
     except MaintenanceMigrationWarehouseError as exc:
         raise MaintenanceMigrationRunError(str(exc)) from exc
@@ -214,6 +234,13 @@ def _source_payloads_from_specs(
     approvals: Mapping[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
+    # Lock every project in stable order before the first global linkage or
+    # warehouse table lock.  Per-project locking after a global SHARE lock can
+    # deadlock with a concurrent #201 reassignment on a later project.
+    lock_project_source_snapshots(
+        db,
+        project_ids=[str(spec["project_id"]) for spec in specs],
+    )
     for spec in specs:
         project_id = str(spec["project_id"])
         cutover_date = _parse_date(spec["cutover_date"], "切换日期")
@@ -996,6 +1023,7 @@ def _signed_manifest(
         "signature_algorithm": "HMAC-SHA256",
         "signing_key_id": key_id,
         "production_activation_included": False,
+        "activation_requires_live_revalidation": True,
     }
     manifest_hash = controls.canonical_hash(unsigned)
     signature = hmac.new(
@@ -1011,8 +1039,22 @@ def _signed_manifest(
 
 
 def verify_signed_manifest(
-    manifest: Mapping[str, Any], *, verification_keys: Mapping[str, bytes]
+    manifest: Mapping[str, Any],
+    *,
+    verification_keys: Mapping[str, bytes],
+    expected_rule_version: str,
+    expected_source_snapshot_hash: str,
+    expected_input_fingerprint: str,
 ) -> bool:
+    if (
+        manifest.get("manifest_version") != "maintenance-cutover-manifest-v1"
+        or manifest.get("rule_version") != expected_rule_version
+        or manifest.get("source_snapshot_hash") != expected_source_snapshot_hash
+        or manifest.get("input_fingerprint") != expected_input_fingerprint
+        or manifest.get("production_activation_included") is not False
+        or manifest.get("activation_requires_live_revalidation") is not True
+    ):
+        return False
     if manifest.get("signature_algorithm") != "HMAC-SHA256":
         return False
     key_id = str(manifest.get("signing_key_id") or "")
@@ -1336,13 +1378,45 @@ def get_project_evidence(
     }
 
 
-def get_signed_manifest(db: Session, *, run_id: str) -> dict[str, Any]:
+def get_signed_manifest(
+    db: Session,
+    *,
+    run_id: str,
+    verification_keys: Mapping[str, bytes],
+    warehouse_loader: WarehouseLoader = unavailable_warehouse_loader,
+) -> dict[str, Any]:
     run = db.get(MaintenanceMigrationRun, run_id)
     if run is None:
         raise MaintenanceMigrationRunNotFound("迁移 dry-run 不存在")
     if run.status != "approved" or run.manifest_json is None:
         raise MaintenanceMigrationRunConflict("迁移 manifest 尚未完成独立审批")
-    return _jsonable(run.manifest_json)
+    wrapper = _rebuild(
+        db,
+        run=run,
+        loader=warehouse_loader,
+        selected_candidate_ids=None,
+    )
+    current_preview = wrapper["preview"]
+    if (
+        current_preview["input_fingerprint"]
+        != run.manifest_json.get("input_fingerprint")
+        or current_preview["source_snapshot_hash"]
+        != run.manifest_json.get("source_snapshot_hash")
+        or run.rule_version != controls.RULE_VERSION
+    ):
+        raise MaintenanceMigrationRunConflict(
+            "迁移来源或规则已变化，旧 manifest 已失效"
+        )
+    manifest = _jsonable(run.manifest_json)
+    if not verify_signed_manifest(
+        manifest,
+        verification_keys=verification_keys,
+        expected_rule_version=controls.RULE_VERSION,
+        expected_source_snapshot_hash=str(current_preview["source_snapshot_hash"]),
+        expected_input_fingerprint=str(current_preview["input_fingerprint"]),
+    ):
+        raise MaintenanceMigrationRunConflict("迁移 manifest 签名或绑定事实无效")
+    return manifest
 
 
 def search_runs(

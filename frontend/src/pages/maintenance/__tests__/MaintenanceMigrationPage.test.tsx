@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -79,7 +79,7 @@ const detail = {
         total_inc_tax: "33.90",
       },
       inventory: [{
-        balance_key: "project-1:part-1",
+        balance_key: "project-1:1",
         opening_quantity: "10",
         delivery_quantity: "3",
         available_receipt_quantity: "2",
@@ -136,7 +136,7 @@ const detail = {
     },
     opening_balances: [{
       opening_balance_id: "opening-1",
-      balance_key: "project-1:part-1",
+      balance_key: "project-1:1",
       pn: "PN-001",
       quantity: "10",
       evidence_hash: "b".repeat(64),
@@ -202,12 +202,13 @@ beforeEach(() => {
       section: "inventory_movements",
       source_snapshot_hash: "f".repeat(64),
       items: [{
-        movement_id: "movement-1",
+        movement_id: "document-1:line-1",
         document_id: "document-1",
+        line_id: "line-1",
         document_no: "FH-001",
         document_date: "2026-08-03",
         movement_type: "delivery",
-        balance_key: "project-1:part-1",
+        balance_key: "project-1:1",
         pn: "PN-001",
         sn: "SN-001",
         quantity: "3",
@@ -303,12 +304,13 @@ describe("MaintenanceMigrationPage", () => {
           section: "inventory_movements",
           source_snapshot_hash: "f".repeat(64),
           items: [{
-            movement_id: `movement-${params.page}`,
+            movement_id: `document-${params.page}:line-${params.page}`,
             document_id: `document-${params.page}`,
+            line_id: `line-${params.page}`,
             document_no: params.page === 1 ? "FH-001" : "FH-021",
             document_date: "2026-08-03",
             movement_type: "delivery",
-            balance_key: "project-1:part-1",
+            balance_key: "project-1:1",
             pn: "PN-001",
             sn: null,
             quantity: "3",
@@ -331,6 +333,48 @@ describe("MaintenanceMigrationPage", () => {
       "project-1",
       { section: "inventory_movements", page: 2, page_size: 20 },
     );
+  });
+
+  it("快速切换详情时忽略较早请求的迟到响应", async () => {
+    let resolveFirst: ((value: { data: typeof detail }) => void) | undefined;
+    let resolveSecond: ((value: { data: typeof detail }) => void) | undefined;
+    mocks.searchMaintenanceMigrationRuns.mockResolvedValue({
+      data: {
+        items: [
+          summary,
+          { ...summary, run_id: "migration-run-2", created_by: "second-list-owner" },
+        ],
+        total: 2,
+        page: 1,
+        page_size: 20,
+      },
+    });
+    mocks.getMaintenanceMigrationRun
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve; }));
+
+    render(<MaintenanceMigrationPage />);
+    expect(await screen.findByText("second-list-owner / — / —")).toBeInTheDocument();
+    const buttons = screen.getAllByRole("button", { name: "查看" });
+    fireEvent.click(buttons[0]);
+    fireEvent.click(buttons[1]);
+
+    await act(async () => {
+      resolveSecond?.({
+        data: {
+          ...detail,
+          run_id: "migration-run-2",
+          created_by: "second-detail-owner",
+        },
+      });
+    });
+    expect(await screen.findByText("second-detail-owner")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveFirst?.({ data: { ...detail, created_by: "stale-first-owner" } });
+    });
+    expect(screen.queryByText("stale-first-owner")).not.toBeInTheDocument();
+    expect(screen.getByText("second-detail-owner")).toBeInTheDocument();
   });
 
   it("新建 dry-run 前先阻止缺理由和缺项目的黑盒提交", async () => {

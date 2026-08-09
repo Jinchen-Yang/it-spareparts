@@ -104,6 +104,8 @@ class Settings(BaseSettings):
         active_secret = self.maintenance_manifest_active_hmac_key.get_secret_value()
         if len(active_secret.encode("utf-8")) < 32:
             raise ValueError("maintenance manifest HMAC 密钥至少需要 32 字节")
+        if active_secret == self.secret_key:
+            raise ValueError("maintenance manifest HMAC 密钥必须独立于 SECRET_KEY")
         previous_keys = self._maintenance_manifest_previous_keys()
         if key_id in previous_keys:
             raise ValueError("active manifest key_id 不能同时出现在 previous keyring")
@@ -112,6 +114,8 @@ class Settings(BaseSettings):
                 raise ValueError("MAINTENANCE_MANIFEST_PREVIOUS_HMAC_KEYS 包含无效 key_id")
             if len(secret.encode("utf-8")) < 32:
                 raise ValueError("maintenance manifest HMAC 密钥至少需要 32 字节")
+            if secret == self.secret_key:
+                raise ValueError("maintenance manifest 历史密钥必须独立于 SECRET_KEY")
         return self
 
     def _maintenance_manifest_previous_keys(self) -> dict[str, str]:

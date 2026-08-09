@@ -2,9 +2,12 @@ from fastapi.testclient import TestClient
 
 from app.api import maintenance_migration as migration_api
 from app.auth import hash_password
+from app.business_time import business_today
 from app.config import get_settings
 from app.main import app
+from app.models.dimensions import DimPart
 from app.models.maintenance_project import MaintenanceProject
+from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
 from app.models.system import SysUser
 
 
@@ -30,14 +33,21 @@ def _client(db, *, username: str, role: str = "admin", permissions=None):
 
 
 def _seed_project(db):
-    db.add(
+    db.add_all([
         MaintenanceProject(
             project_id="migration-api-project",
             project_code="MIGRATION-API",
             display_name="迁移接口合成项目",
             lifecycle_status="ongoing",
-        )
-    )
+        ),
+        DimPart(id=21002, pn_std="PN-MIGRATION-API"),
+        MaintenanceProjectWorkbookState(
+            project_id="migration-api-project",
+            revision=0,
+            data_version="migration-api-version-0",
+            expense_ready_through=business_today().replace(day=1),
+        ),
+    ])
     db.commit()
 
 
@@ -45,12 +55,19 @@ def _loader(_db, project_id, _cutover_date):
     return (
         [
             {
-                "movement_id": "migration-api-delivery-line",
+                "movement_id": "migration-api-delivery:migration-api-delivery-line",
                 "document_id": "migration-api-delivery",
+                "line_id": "migration-api-delivery-line",
                 "document_no": "FH-MIGRATION-API",
                 "document_date": "2026-08-02",
                 "movement_type": "delivery",
-                "balance_key": f"{project_id}:part-1",
+                "source": "maintenance_warehouse_v1",
+                "source_document_type": "shipment",
+                "source_status": "confirmed",
+                "formal_available": False,
+                "project_id": project_id,
+                "part_id": 21002,
+                "balance_key": f"{project_id}:21002",
                 "pn": "PN-MIGRATION-API",
                 "quantity": "2",
             }
@@ -75,7 +92,7 @@ def _preview_body():
                 },
                 "opening_balances": [
                     {
-                        "balance_key": "migration-api-project:part-1",
+                        "balance_key": "migration-api-project:21002",
                         "pn": "PN-MIGRATION-API",
                         "quantity": "10",
                         "evidence_hash": "b" * 64,

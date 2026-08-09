@@ -177,6 +177,14 @@ function validateDrafts(drafts: DraftProject[], reason: string): string | null {
       if (!SHA256.test(row.evidenceHash.trim().toLowerCase())) {
         return "每条库存期初证据必须填写 64 位 SHA-256。";
       }
+      const expectedPrefix = `${draft.projectId}:`;
+      const partId = row.balanceKey.trim().slice(expectedPrefix.length);
+      if (
+        !row.balanceKey.trim().startsWith(expectedPrefix)
+        || !/^[1-9]\d*$/.test(partId)
+      ) {
+        return "库存稳定键必须使用“项目稳定编号:配件 ID”格式。";
+      }
     }
   }
   return null;
@@ -207,6 +215,7 @@ export default function MaintenanceMigrationPage() {
   const [reviewDrafts, setReviewDrafts] = useState<Record<string, ProjectReviewDraft>>({});
   const [activeEvidenceProjectId, setActiveEvidenceProjectId] = useState<string | null>(null);
   const loadGeneration = useRef(0);
+  const detailGeneration = useRef(0);
 
   const reviewIdentity = useMemo(() => {
     if (!selected || selected.status !== "previewed") return "";
@@ -300,7 +309,10 @@ export default function MaintenanceMigrationPage() {
 
   useEffect(() => {
     void loadRuns(1, statuses);
-    return () => { loadGeneration.current += 1; };
+    return () => {
+      loadGeneration.current += 1;
+      detailGeneration.current += 1;
+    };
   }, [loadRuns, statuses]);
 
   useEffect(() => {
@@ -366,15 +378,22 @@ export default function MaintenanceMigrationPage() {
   };
 
   const openDetail = async (runId: string) => {
+    const generation = ++detailGeneration.current;
+    setSelected(null);
+    setReviewDrafts({});
+    setCommandMode(null);
+    setCommandError(null);
     setDetailLoading(true);
     setDetailError(null);
     try {
       const { data } = await getMaintenanceMigrationRun(runId);
+      if (generation !== detailGeneration.current) return;
       setSelected(data);
     } catch (error) {
+      if (generation !== detailGeneration.current) return;
       setDetailError(errorDetail(error, "迁移详情加载失败，请刷新后重试。"));
     } finally {
-      setDetailLoading(false);
+      if (generation === detailGeneration.current) setDetailLoading(false);
     }
   };
 
@@ -679,14 +698,14 @@ export default function MaintenanceMigrationPage() {
             </div>
             <Divider orientation="left">切换日库存期初</Divider>
             <Typography.Paragraph type="secondary">
-              可以先留空生成“缺少期初”的阻塞项；一旦填写某行，稳定键、数量和证据哈希必须完整。
+              可以先留空生成“缺少期初”的阻塞项；填写时稳定键固定为“项目稳定编号:配件 ID”，并补齐数量和证据哈希。
             </Typography.Paragraph>
             {draft.openings.map((opening, openingIndex) => (
               <div className="maintenance-migration-opening-row" key={`${draft.localId}-${openingIndex}`}>
                 <Input
                   aria-label={`项目 ${draftIndex + 1} 库存稳定键 ${openingIndex + 1}`}
                   value={opening.balanceKey}
-                  placeholder="稳定键（仓库/项目 + 备件稳定身份）"
+                  placeholder={`${draft.projectId || "项目稳定编号"}:配件ID`}
                   onChange={(event) => updateOpening(draft.localId, openingIndex, { balanceKey: event.target.value })}
                 />
                 <Input
@@ -761,7 +780,13 @@ export default function MaintenanceMigrationPage() {
         title="迁移核对详情"
         width={980}
         open={Boolean(selected) || detailLoading || Boolean(detailError)}
-        onClose={() => { setSelected(null); setDetailError(null); }}
+        onClose={() => {
+          detailGeneration.current += 1;
+          setSelected(null);
+          setDetailLoading(false);
+          setDetailError(null);
+          setCommandMode(null);
+        }}
         extra={selected ? (
           <Space>
             {selected.status === "previewed" && (

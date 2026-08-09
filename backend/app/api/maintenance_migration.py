@@ -12,6 +12,7 @@ from app.auth import current_identity
 from app.config import get_settings
 from app.db import get_db
 from app.models.system import SysUser
+from app.security import UserContext, get_current_user_context, record_access_log
 from app.services import maintenance_migration_runs as runs
 from app.services.maintenance_migration_warehouse import (
     load_project_inventory_movements,
@@ -222,14 +223,22 @@ def search_migration_runs(
     body: MigrationSearchRequest,
     db: Session = Depends(get_db),
     _operator: str = Depends(_migration_operator),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     try:
-        return runs.search_runs(
+        result = runs.search_runs(
             db,
             statuses=body.statuses,
             page=body.page,
             page_size=body.page_size,
         )
+        record_access_log(
+            ctx,
+            "migration_runs_search",
+            "maintenance_migration",
+            {"statuses": body.statuses, "page": body.page, "page_size": body.page_size},
+        )
+        return result
     except Exception as exc:
         _raise_service_error(exc)
 
@@ -239,9 +248,14 @@ def get_migration_run(
     run_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _operator: str = Depends(_migration_operator),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     try:
-        return runs.get_run_detail(db, run_id=run_id)
+        result = runs.get_run_detail(db, run_id=run_id)
+        record_access_log(
+            ctx, "migration_run_detail", "maintenance_migration", {"run_id": run_id}
+        )
+        return result
     except Exception as exc:
         _raise_service_error(exc)
 
@@ -255,9 +269,10 @@ def get_migration_project_evidence(
     page_size: int = Query(default=50, ge=1, le=100),
     db: Session = Depends(get_db),
     _operator: str = Depends(_migration_operator),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     try:
-        return runs.get_project_evidence(
+        result = runs.get_project_evidence(
             db,
             run_id=run_id,
             project_id=project_id,
@@ -265,6 +280,19 @@ def get_migration_project_evidence(
             page=page,
             page_size=page_size,
         )
+        record_access_log(
+            ctx,
+            "migration_project_evidence",
+            "maintenance_migration",
+            {
+                "run_id": run_id,
+                "project_id": project_id,
+                "section": section,
+                "page": page,
+                "page_size": page_size,
+            },
+        )
+        return result
     except Exception as exc:
         _raise_service_error(exc)
 
@@ -274,9 +302,19 @@ def get_migration_manifest(
     run_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     _operator: str = Depends(_migration_operator),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     try:
-        return runs.get_signed_manifest(db, run_id=run_id)
+        result = runs.get_signed_manifest(
+            db,
+            run_id=run_id,
+            verification_keys=get_settings().maintenance_manifest_verification_keys(),
+            warehouse_loader=load_project_inventory_movements,
+        )
+        record_access_log(
+            ctx, "migration_manifest", "maintenance_migration", {"run_id": run_id}
+        )
+        return result
     except Exception as exc:
         _raise_service_error(exc)
 
