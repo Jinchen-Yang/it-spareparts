@@ -781,7 +781,7 @@ def test_write_endpoints_fail_closed_for_anonymous_and_shared_password(db):
     assert shared.post("/api/maintenance/demands/delete-intents", json=body).status_code == 403
 
 
-def test_tombstone_excludes_cost_inventory_project_and_export_reads(db):
+def test_beta_tombstone_changes_stable_reads_only_after_explicit_cutover(db, monkeypatch):
     raw_id = _seed_demands(db, count=1, lines_each=1)[0]
     order = db.scalar(
         select(FMaintenanceOrder).where(FMaintenanceOrder.raw_order_id == raw_id)
@@ -817,13 +817,41 @@ def test_tombstone_excludes_cost_inventory_project_and_export_reads(db):
     )
     db.commit()
 
-    assert inventory.dynamic_stock_map(db).get(line.part_id, {}).get("out_maint", 0) == 0
+    # Beta deletion is a shadow fact until the explicit business cutover.  It
+    # disappears from Beta demand/search consumers, but the production-stable
+    # cost, inventory and export paths keep their pre-Beta truth unchanged.
+    assert maintenance_demands.search_demands(
+        db,
+        q=raw_id,
+        page=1,
+        page_size=20,
+    )["total"] == 0
+    assert inventory.dynamic_stock_map(db)[line.part_id]["out_maint"] == 1
+    assert maintenance_cost.projects_aggregate(db)["rows"][0]["order_count"] == 1
+    workbook = maintenance_export.build_workbook(
+        db,
+        UserContext(user_id="demand-delete-admin", role="admin"),
+    )
+    try:
+        workbook.seek(0)
+        assert workbook.read(2) == b"PK"
+    finally:
+        workbook.close()
+
+    settings = maintenance_demands.get_settings()
+    monkeypatch.setattr(settings, "maintenance_cutover_enabled", True)
+    cutover_stock = inventory.dynamic_stock_map(db)
+    assert cutover_stock.get(line.part_id, {}).get("out_maint", Decimal(0)) == 0
     assert maintenance_cost.projects_aggregate(db)["rows"] == []
     with pytest.raises(maintenance_export.ExcelExportEmpty):
         maintenance_export.build_workbook(
             db,
             UserContext(user_id="demand-delete-admin", role="admin"),
         )
+
+    monkeypatch.setattr(settings, "maintenance_cutover_enabled", False)
+    assert inventory.dynamic_stock_map(db)[line.part_id]["out_maint"] == 1
+    assert maintenance_cost.projects_aggregate(db)["rows"][0]["order_count"] == 1
 
 
 def test_api_uses_server_clock_for_exact_seven_second_gate(db, monkeypatch):

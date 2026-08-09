@@ -121,36 +121,57 @@ def col_matches_any(column, variants: list[str]):
 
 
 def active_orders(stmt, order_model):
-    """按"已生效"过滤订单查询（受 config.ACTIVE_STATUS_ONLY 开关控制；关则不过滤）。
+    """按稳定版订单口径过滤；维保墓碑只在正式切换后生效。
 
-    order_model 需有 data_status 列（FPurchaseOrder / FSalesOrder）。仅用于
+    order_model 需有 data_status 列（FPurchaseOrder / FSalesOrder /
+    FMaintenanceOrder）。仅用于
     "无条件按生效过滤"的站点；带 status 入参的条件过滤（如 recent_purchases）不适用。
     """
     if config.ACTIVE_STATUS_ONLY:
         stmt = stmt.where(order_model.data_status == config.ACTIVE_STATUS)
-    # WBDD has an additional business-effective boundary: active logical
-    # tombstones must exclude a whole demand from every derived read.  Keeping
-    # this beside the existing shared order-status filter prevents cost,
-    # inventory and project views from drifting apart.  The ETL loader does not
-    # use this helper, so a repeated raw_order_id can update its archived source
-    # row without reviving it.
-    from sqlalchemy import inspect
+    # Beta 删除先作为同库影子事实存在。只有独立的生产口径切换开关打开后，
+    # 原稳定版成本、库存、项目和导出读模型才统一消费墓碑。
+    if config.get_settings().maintenance_cutover_enabled:
+        from sqlalchemy import inspect
 
-    from app.models.maintenance import (
-        FMaintenanceOrder,
-        MaintenanceDemandTombstone,
-    )
+        from app.models.maintenance import (
+            FMaintenanceOrder,
+            MaintenanceDemandTombstone,
+        )
 
-    inspected = inspect(order_model, raiseerr=False)
-    mapper = getattr(inspected, "mapper", None)
-    if mapper is not None and mapper.class_ is FMaintenanceOrder:
-        stmt = stmt.where(
-            ~exists(
-                select(1).where(
-                    MaintenanceDemandTombstone.source_order_id
-                    == order_model.raw_order_id,
-                    MaintenanceDemandTombstone.restored_at.is_(None),
+        inspected = inspect(order_model, raiseerr=False)
+        mapper = getattr(inspected, "mapper", None)
+        if mapper is not None and mapper.class_ is FMaintenanceOrder:
+            stmt = stmt.where(
+                ~exists(
+                    select(1).where(
+                        MaintenanceDemandTombstone.source_order_id
+                        == order_model.raw_order_id,
+                        MaintenanceDemandTombstone.restored_at.is_(None),
+                    )
                 )
             )
-        )
     return stmt
+
+
+def active_beta_maintenance_orders(stmt, order_model):
+    """Apply the Beta-only WBDD tombstone boundary.
+
+    A Beta deletion is a shadow fact until the explicit maintenance cutover.
+    Stable production cost, inventory and export readers therefore continue to
+    use :func:`active_orders`, while Beta assignment/warehouse/workspace readers
+    opt in here.  This keeps both interfaces on one database without allowing a
+    Beta action to rewrite the stable view.
+    """
+
+    from app.models.maintenance import MaintenanceDemandTombstone
+
+    return active_orders(stmt, order_model).where(
+        ~exists(
+            select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == order_model.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )
+        )
+    )

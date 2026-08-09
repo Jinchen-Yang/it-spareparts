@@ -10,6 +10,7 @@ interface LoginSessionData {
   role: string;
   name?: string | null;
   permissions?: Record<string, boolean> | null;
+  beta_features?: Record<string, boolean> | null;
 }
 
 export function persistLoginSession(data: LoginSessionData) {
@@ -18,6 +19,7 @@ export function persistLoginSession(data: LoginSessionData) {
   localStorage.setItem("role", data.role);
   localStorage.setItem("name", data.name || data.role);
   localStorage.setItem("permissions", JSON.stringify(data.permissions || {}));
+  localStorage.setItem("beta_features", JSON.stringify(data.beta_features || {}));
   // token 是跨标签页的会话提交标志；最后写，确保接收方读取到完整元数据。
   localStorage.setItem("token", data.token);
 }

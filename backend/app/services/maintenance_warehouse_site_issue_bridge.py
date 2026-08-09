@@ -27,7 +27,7 @@ from app.models.maintenance_warehouse import (
     MaintenanceWarehouseDocumentLine,
     MaintenanceWarehouseDocumentLink,
 )
-from app.services.query_filters import active_orders
+from app.services.query_filters import active_beta_maintenance_orders
 
 
 WAREHOUSE_DELIVERY_ADAPTER = "warehouse_shipment_v1"
@@ -241,7 +241,7 @@ def synchronize_delivery_sources(
     }
     effective_order_ids = set(
         db.scalars(
-            active_orders(
+            active_beta_maintenance_orders(
                 select(FMaintenanceOrder.raw_order_id).where(
                     FMaintenanceOrder.raw_order_id.in_(sorted(order_ids))
                 ),

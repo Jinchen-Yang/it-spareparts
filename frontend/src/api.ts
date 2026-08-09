@@ -3,6 +3,14 @@ import { clearSessionScopedPreferences } from "./sessionPreferences";
 
 export const api = axios.create({ baseURL: "/api" });
 
+export interface BetaFeatures {
+  maintenance: boolean;
+  replenishment: boolean;
+}
+
+export const getBetaFeatures = () =>
+  api.get<BetaFeatures>("/auth/beta-features");
+
 api.interceptors.request.use((cfg) => {
   const token = localStorage.getItem("token");
   if (token && !cfg.headers.Authorization) cfg.headers.Authorization = `Bearer ${token}`;

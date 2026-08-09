@@ -83,13 +83,18 @@ def test_server_gate_keeps_stable_page_live_and_beta_closed(db):
     original = settings.maintenance_beta_enabled
     try:
         settings.maintenance_beta_enabled = False
-        stable = client.get("/api/maintenance/projects")
-        assert stable.status_code == 200, stable.text
-        beta = client.get("/api/maintenance/projects/stable")
+        for stable_path in (
+            "/api/maintenance/projects",
+            "/api/maintenance/projects/stable",
+            "/api/maintenance/projects/stable/operations",
+        ):
+            stable = client.get(stable_path)
+            assert stable.status_code == 200, (stable_path, stable.text)
+        beta = client.post("/api/maintenance/demands/search", json={})
         assert beta.status_code == 404, beta.text
 
         settings.maintenance_beta_enabled = True
-        opened = client.get("/api/maintenance/projects/stable")
+        opened = client.post("/api/maintenance/demands/search", json={})
         assert opened.status_code == 200, opened.text
     finally:
         settings.maintenance_beta_enabled = original
@@ -114,12 +119,78 @@ def test_beta_requires_explicit_user_whitelist_even_when_global_gate_is_open(db)
     original = settings.maintenance_beta_enabled
     try:
         settings.maintenance_beta_enabled = True
-        assert TestClient(app).get("/api/maintenance/projects/stable").status_code == 401
+        beta_path = "/api/maintenance/demands/search"
+        assert TestClient(app).post(beta_path, json={}).status_code == 401
         assert stable_only.get("/api/maintenance/projects").status_code == 200
-        assert stable_only.get("/api/maintenance/projects/stable").status_code == 403
-        assert whitelisted.get("/api/maintenance/projects/stable").status_code == 200
+        assert stable_only.post(beta_path, json={}).status_code == 403
+        assert whitelisted.post(beta_path, json={}).status_code == 200
     finally:
         settings.maintenance_beta_enabled = original
+
+
+def test_login_capability_requires_server_gate_and_real_whitelisted_account(db):
+    real = _client(db, username="maintenance-beta-capability", role="admin")
+    settings = get_settings()
+    original_maintenance = settings.maintenance_beta_enabled
+    original_replenishment = settings.replenishment_beta_enabled
+    try:
+        settings.maintenance_beta_enabled = False
+        settings.replenishment_beta_enabled = False
+        closed = real.post(
+            "/api/auth/login",
+            json={
+                "username": "maintenance-beta-capability",
+                "password": _PASSWORD,
+            },
+        )
+        assert closed.status_code == 200, closed.text
+        assert closed.json()["beta_features"] == {
+            "maintenance": False,
+            "replenishment": False,
+        }
+        live_closed = real.get("/api/auth/beta-features")
+        assert live_closed.status_code == 200, live_closed.text
+        assert live_closed.headers["cache-control"] == "no-store"
+        assert live_closed.json() == closed.json()["beta_features"]
+
+        settings.maintenance_beta_enabled = True
+        settings.replenishment_beta_enabled = True
+        opened = real.post(
+            "/api/auth/login",
+            json={
+                "username": "maintenance-beta-capability",
+                "password": _PASSWORD,
+            },
+        )
+        assert opened.status_code == 200, opened.text
+        assert opened.json()["beta_features"] == {
+            "maintenance": True,
+            "replenishment": True,
+        }
+        live_opened = real.get("/api/auth/beta-features")
+        assert live_opened.status_code == 200, live_opened.text
+        assert live_opened.json() == opened.json()["beta_features"]
+
+        shared = TestClient(app).post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "admin"},
+        )
+        assert shared.status_code == 200, shared.text
+        assert shared.json()["beta_features"] == {
+            "maintenance": False,
+            "replenishment": False,
+        }
+        shared_client = TestClient(app)
+        shared_client.headers["Authorization"] = f"Bearer {shared.json()['token']}"
+        assert shared_client.get("/api/auth/beta-features").json() == {
+            "maintenance": False,
+            "replenishment": False,
+        }
+        denied = shared_client.post("/api/maintenance/demands/search", json={})
+        assert denied.status_code == 403, denied.text
+    finally:
+        settings.maintenance_beta_enabled = original_maintenance
+        settings.replenishment_beta_enabled = original_replenishment
 
 
 def test_every_beta_router_fails_closed_before_business_lookup(db):
@@ -128,9 +199,13 @@ def test_every_beta_router_fails_closed_before_business_lookup(db):
     original = settings.maintenance_beta_enabled
     try:
         settings.maintenance_beta_enabled = False
+        for stable_path in (
+            "/api/maintenance/projects/stable",
+            "/api/maintenance/projects/stable/operations",
+        ):
+            response = client.get(stable_path)
+            assert response.status_code == 200, (stable_path, response.text)
         calls = (
-            ("get", "/api/maintenance/projects/stable", None),
-            ("get", "/api/maintenance/projects/stable/operations", None),
             ("get", "/api/maintenance/project-manager/workbooks/v3/status", None),
             ("get", "/api/maintenance/project-assignments/orders", None),
             ("get", "/api/maintenance/return-categories", None),

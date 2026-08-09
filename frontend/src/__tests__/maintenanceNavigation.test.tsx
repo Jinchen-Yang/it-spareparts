@@ -175,6 +175,12 @@ describe("维保管理信息架构", () => {
     });
     expect(NAV_ITEMS.some((item) => item.path === "/maintenance/downloads")).toBe(true);
     expect(
+      DETAIL_ROUTES.some((route) => route.path === "/maintenance/projects/:projectId"),
+    ).toBe(true);
+    expect(
+      DETAIL_ROUTES.some((route) => route.path === "/maintenance/project-master/source-orders"),
+    ).toBe(true);
+    expect(
       DETAIL_ROUTES
         .filter((route) => route.path.startsWith("/maintenance/beta/"))
         .every((route) => route.perm === "page_maintenance_beta"),

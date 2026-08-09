@@ -13,7 +13,7 @@ from app.models.maintenance_project import MaintenanceProject, MaintenanceProjec
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.security import FULL_SCOPE_ROLES, UserContext
 from app.services import maintenance_project_assignments
-from app.services.query_filters import active_orders
+from app.services.query_filters import active_beta_maintenance_orders
 
 
 class SourceAssignmentError(Exception):
@@ -108,7 +108,7 @@ def list_source_orders(
             )
         )
 
-    count_stmt = active_orders(
+    count_stmt = active_beta_maintenance_orders(
         select(func.count())
         .select_from(FMaintenanceOrder)
         .outerjoin(MaintenanceSourceOrderAssignment, active_join)
@@ -137,7 +137,7 @@ def list_source_orders(
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
-    facts = list(db.execute(active_orders(fact_statement, FMaintenanceOrder)).all())
+    facts = list(db.execute(active_beta_maintenance_orders(fact_statement, FMaintenanceOrder)).all())
     rows = []
     for source, assignment, project in facts:
         rows.append(
@@ -213,7 +213,7 @@ def assign_source_orders(
         .order_by(FMaintenanceOrder.raw_order_id)
         .with_for_update()
     )
-    sources = list(db.scalars(active_orders(source_statement, FMaintenanceOrder)))
+    sources = list(db.scalars(active_beta_maintenance_orders(source_statement, FMaintenanceOrder)))
     source_by_id = {source.raw_order_id: source for source in sources}
     missing = sorted(set(source_ids) - set(source_by_id))
     if missing:
@@ -402,7 +402,7 @@ def unassign_source_orders(
         .with_for_update()
     )
     locked_sources = list(
-        db.scalars(active_orders(source_statement, FMaintenanceOrder))
+        db.scalars(active_beta_maintenance_orders(source_statement, FMaintenanceOrder))
     )
     if len(locked_sources) != len(source_ids):
         raise SourceAssignmentConflict(

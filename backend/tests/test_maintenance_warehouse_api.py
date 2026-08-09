@@ -228,15 +228,8 @@ def test_apply_rejects_shared_admin_before_any_write(db, monkeypatch):
         "/api/maintenance/warehouse-imports/preview",
         files={"file": ("synthetic-api.xlsx", content)},
     )
-    assert preview.status_code == 200
-    plan = preview.json()
-
-    response = client.post(
-        f"/api/maintenance/warehouse-imports/{plan['import_id']}/apply",
-        data={"preview_token": plan["preview_token"], "reason": "不应落库"},
-        files={"file": ("synthetic-api.xlsx", content)},
-    )
-    assert response.status_code == 403
+    assert preview.status_code == 403
+    assert "实名系统账号" in preview.json()["detail"]
     assert db.scalar(select(func.count()).select_from(MaintenanceWarehouseDocument)) == 0
 
 

@@ -58,7 +58,7 @@ from app.services import maintenance_consumption_cost
 from app.services import maintenance_project
 from app.services import maintenance_project_assignments
 from app.services import maintenance_warehouse_site_issue_bridge
-from app.services.query_filters import active_orders
+from app.services.query_filters import active_beta_maintenance_orders
 
 
 class MaintenanceOperationError(Exception):
@@ -4721,7 +4721,7 @@ def project_workspace(
         )
     )
     project_summary["manual_source_order_count"] = int(
-        db.scalar(active_orders(manual_count_statement, FMaintenanceOrder)) or 0
+        db.scalar(active_beta_maintenance_orders(manual_count_statement, FMaintenanceOrder)) or 0
     )
 
     issue_statement = (
@@ -5329,7 +5329,7 @@ def _project_cards_for_ids(
     manual_source_order_counts = {
         project_id: int(count)
         for project_id, count in db.execute(
-            active_orders(
+            active_beta_maintenance_orders(
                 manual_source_order_count_statement,
                 FMaintenanceOrder,
             )

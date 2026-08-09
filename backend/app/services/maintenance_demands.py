@@ -15,10 +15,10 @@ from decimal import Decimal
 from typing import Any, Iterable
 from uuid import uuid4
 
-from sqlalchemy import exists, func, or_, select, text
+from sqlalchemy import exists, func, or_, select, text, true
 from sqlalchemy.orm import Session
 
-from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY
+from app.config import DATA_CHANGE_ADVISORY_LOCK_KEY, get_settings
 from app.models.maintenance import (
     FMaintenanceLine,
     FMaintenanceOrder,
@@ -110,8 +110,8 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-def active_demand_condition(order=FMaintenanceOrder):
-    """SQL condition defining the one canonical effective-WBDD boundary."""
+def beta_active_demand_condition(order=FMaintenanceOrder):
+    """SQL condition for the Beta shadow-deletion view of WBDD facts."""
 
     return ~exists(
         select(1).where(
@@ -119,6 +119,20 @@ def active_demand_condition(order=FMaintenanceOrder):
             MaintenanceDemandTombstone.restored_at.is_(None),
         )
     )
+
+
+def active_demand_condition(order=FMaintenanceOrder):
+    """Stable WBDD boundary, switched only by the independent cutover flag.
+
+    Beta tombstones are intentionally invisible to stable cost, inventory and
+    export readers until the separately approved business cutover.  Keeping the
+    switch here lets those readers retain their established contract while the
+    Beta workbench can exercise deletion against the same database.
+    """
+
+    if not get_settings().maintenance_cutover_enabled:
+        return true()
+    return beta_active_demand_condition(order)
 
 
 def _escape_like(value: str) -> str:
@@ -218,7 +232,7 @@ def _load_snapshots(
         FMaintenanceOrder.raw_order_id.in_(source_order_ids)
     )
     if active_only:
-        statement = statement.where(active_demand_condition())
+        statement = statement.where(beta_active_demand_condition())
     if lock:
         statement = statement.with_for_update()
     orders = list(db.scalars(statement))
@@ -269,7 +283,7 @@ def search_demands(
 ) -> dict:
     """Search active WBDD headers; joins never duplicate a header row."""
 
-    predicates = [active_demand_condition()]
+    predicates = [beta_active_demand_condition()]
     term = (q or "").strip()
     if term:
         pattern = f"%{_escape_like(term)}%"

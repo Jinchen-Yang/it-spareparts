@@ -30,7 +30,7 @@ from app.services.maintenance_warehouse_adapters import (
     WarehouseAmbiguityFact,
     parse_warehouse_workbook,
 )
-from app.services.query_filters import active_orders
+from app.services.query_filters import active_beta_maintenance_orders
 
 
 class MaintenanceWarehouseError(ValueError):
@@ -201,7 +201,7 @@ def _maintenance_order_candidate_map(
 ) -> dict[str, list[dict]]:
     output = {value: [] for value in stable_refs}
     for chunk in _chunks(stable_refs):
-        statement = active_orders(
+        statement = active_beta_maintenance_orders(
             select(FMaintenanceOrder), FMaintenanceOrder
         ).where(or_(
             FMaintenanceOrder.raw_order_id.in_(chunk),
@@ -1508,7 +1508,7 @@ def reconcile_project_assignment_links(
     effective_source_order_ids = (
         set(
             db.scalars(
-                active_orders(
+                active_beta_maintenance_orders(
                     select(FMaintenanceOrder.raw_order_id).where(
                         FMaintenanceOrder.raw_order_id.in_(
                             sorted(linked_source_order_ids)
@@ -1735,7 +1735,7 @@ def _target_exists(
     candidate: dict,
 ) -> bool:
     if target_type == "maintenance_order":
-        statement = active_orders(
+        statement = active_beta_maintenance_orders(
             select(FMaintenanceOrder.raw_order_id), FMaintenanceOrder
         ).where(FMaintenanceOrder.raw_order_id == target_id)
         return db.scalar(statement) is not None
