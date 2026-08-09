@@ -77,6 +77,7 @@ class ProjectCutoverInput(BaseModel):
 
     project_id: str = Field(min_length=1, max_length=36)
     cutover_date: date
+    warehouse_ready_through: date | None = None
     historical_mode: str = Field(
         pattern=r"^(approved_cost_baseline|stable_site_issues)$"
     )

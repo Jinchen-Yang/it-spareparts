@@ -25,6 +25,7 @@ export interface MigrationOpeningBalanceInput {
 export interface MigrationProjectInput {
   project_id: string;
   cutover_date: string;
+  warehouse_ready_through: string | null;
   historical_mode: "approved_cost_baseline" | "stable_site_issues";
   historical_baseline?: MigrationHistoricalBaselineInput | null;
   opening_balances: MigrationOpeningBalanceInput[];
@@ -88,6 +89,11 @@ export interface MigrationProjectPreview {
     post_cutover_consumption_inc_tax: string;
     approved_expense_ex_tax: string;
     approved_expense_inc_tax: string;
+    sales_estimate_cost_ex_tax: string;
+    sales_estimate_cost_inc_tax: string;
+    sales_estimate_lines: number;
+    cost_progress_includes_sales_estimate: boolean;
+    cost_progress_label: "priced_cost_including_sales_estimate" | "priced_cost_without_sales_estimate";
     total_ex_tax: string;
     total_inc_tax: string;
   };
@@ -124,6 +130,11 @@ export interface MigrationPlanDetail {
     post_cutover_inc_tax: string;
     approved_expense_ex_tax: string;
     approved_expense_inc_tax: string;
+    sales_estimate_cost_ex_tax: string;
+    sales_estimate_cost_inc_tax: string;
+    sales_estimate_lines: number;
+    cost_progress_includes_sales_estimate: boolean;
+    cost_progress_label: "priced_cost_including_sales_estimate" | "priced_cost_without_sales_estimate";
     total_ex_tax: string;
     total_inc_tax: string;
   };

@@ -233,6 +233,21 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.Column(
+            "sales_estimate_cost_ex_tax",
+            sa.Numeric(precision=14, scale=2),
+            nullable=False,
+        ),
+        sa.Column(
+            "sales_estimate_cost_inc_tax",
+            sa.Numeric(precision=14, scale=2),
+            nullable=False,
+        ),
+        sa.Column("sales_estimate_lines", sa.Integer(), nullable=False),
+        sa.Column(
+            "cost_progress_includes_sales_estimate", sa.Boolean(), nullable=False
+        ),
+        sa.Column("cost_progress_label", sa.String(length=64), nullable=False),
+        sa.Column(
             "total_cost_ex_tax", sa.Numeric(precision=14, scale=2), nullable=False
         ),
         sa.Column(
@@ -277,8 +292,12 @@ def upgrade() -> None:
             name="ck_maintenance_project_cutover_hashes",
         ),
         sa.CheckConstraint(
-            "historical_cost_ex_tax >= 0 AND historical_cost_inc_tax >= 0 AND post_cutover_cost_ex_tax >= 0 AND post_cutover_cost_inc_tax >= 0 AND approved_expense_ex_tax >= 0 AND approved_expense_inc_tax >= 0 AND total_cost_ex_tax >= 0 AND total_cost_inc_tax >= 0",
+            "historical_cost_ex_tax >= 0 AND historical_cost_inc_tax >= 0 AND post_cutover_cost_ex_tax >= 0 AND post_cutover_cost_inc_tax >= 0 AND approved_expense_ex_tax >= 0 AND approved_expense_inc_tax >= 0 AND sales_estimate_cost_ex_tax >= 0 AND sales_estimate_cost_inc_tax >= 0 AND total_cost_ex_tax >= 0 AND total_cost_inc_tax >= 0",
             name="ck_maintenance_project_cutover_amounts",
+        ),
+        sa.CheckConstraint(
+            "sales_estimate_lines >= 0 AND ((sales_estimate_lines = 0 AND cost_progress_includes_sales_estimate IS FALSE AND cost_progress_label = 'priced_cost_without_sales_estimate') OR (sales_estimate_lines > 0 AND cost_progress_includes_sales_estimate IS TRUE AND cost_progress_label = 'priced_cost_including_sales_estimate'))",
+            name="ck_maintenance_project_cutover_estimate_disclosure",
         ),
         sa.ForeignKeyConstraint(
             ["project_id"],

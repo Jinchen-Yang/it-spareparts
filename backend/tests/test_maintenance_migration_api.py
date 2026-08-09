@@ -38,25 +38,27 @@ def _client(db, *, username: str, role: str = "admin", permissions=None):
 
 
 def _seed_project(db):
-    db.add_all([
-        MaintenanceProject(
-            project_id="migration-api-project",
-            project_code="MIGRATION-API",
-            display_name="迁移接口合成项目",
-            lifecycle_status="ongoing",
-        ),
-        DimPart(id=21002, pn_std="PN-MIGRATION-API"),
-        MaintenanceProjectWorkbookState(
-            project_id="migration-api-project",
-            revision=0,
-            data_version="migration-api-version-0",
-            expense_ready_through=business_today().replace(day=1),
-        ),
-    ])
+    db.add_all(
+        [
+            MaintenanceProject(
+                project_id="migration-api-project",
+                project_code="MIGRATION-API",
+                display_name="迁移接口合成项目",
+                lifecycle_status="ongoing",
+            ),
+            DimPart(id=21002, pn_std="PN-MIGRATION-API"),
+            MaintenanceProjectWorkbookState(
+                project_id="migration-api-project",
+                revision=0,
+                data_version="migration-api-version-0",
+                expense_ready_through=business_today().replace(day=1),
+            ),
+        ]
+    )
     db.commit()
 
 
-def _loader(_db, project_id, _cutover_date):
+def _loader(_db, project_id, _cutover_date, _warehouse_ready_through):
     return (
         [
             {
@@ -137,6 +139,7 @@ def _preview_body():
             {
                 "project_id": "migration-api-project",
                 "cutover_date": "2026-08-01",
+                "warehouse_ready_through": business_today().isoformat(),
                 "historical_mode": "approved_cost_baseline",
                 "historical_baseline": baseline,
                 "opening_balances": [

@@ -4,6 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     ForeignKey,
@@ -121,6 +122,13 @@ class MaintenanceProjectCutoverPlan(Base):
     post_cutover_cost_inc_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
     approved_expense_ex_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
     approved_expense_inc_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    sales_estimate_cost_ex_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    sales_estimate_cost_inc_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
+    sales_estimate_lines: Mapped[int] = mapped_column(Integer, nullable=False)
+    cost_progress_includes_sales_estimate: Mapped[bool] = mapped_column(
+        Boolean, nullable=False
+    )
+    cost_progress_label: Mapped[str] = mapped_column(String(64), nullable=False)
     total_cost_ex_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
     total_cost_inc_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
     blocker_count: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -157,8 +165,20 @@ class MaintenanceProjectCutoverPlan(Base):
             "historical_cost_ex_tax >= 0 AND historical_cost_inc_tax >= 0 "
             "AND post_cutover_cost_ex_tax >= 0 AND post_cutover_cost_inc_tax >= 0 "
             "AND approved_expense_ex_tax >= 0 AND approved_expense_inc_tax >= 0 "
+            "AND sales_estimate_cost_ex_tax >= 0 "
+            "AND sales_estimate_cost_inc_tax >= 0 "
             "AND total_cost_ex_tax >= 0 AND total_cost_inc_tax >= 0",
             name="ck_maintenance_project_cutover_amounts",
+        ),
+        CheckConstraint(
+            "sales_estimate_lines >= 0 AND "
+            "((sales_estimate_lines = 0 "
+            "AND cost_progress_includes_sales_estimate IS FALSE "
+            "AND cost_progress_label = 'priced_cost_without_sales_estimate') OR "
+            "(sales_estimate_lines > 0 "
+            "AND cost_progress_includes_sales_estimate IS TRUE "
+            "AND cost_progress_label = 'priced_cost_including_sales_estimate'))",
+            name="ck_maintenance_project_cutover_estimate_disclosure",
         ),
         CheckConstraint(
             "blocker_count >= 0 AND version >= 1",
