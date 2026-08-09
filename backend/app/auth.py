@@ -217,6 +217,7 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
     # advertise the high-risk project-master write capability to the client.
     perms["action_maintenance_project_manage"] = False
     perms["action_maintenance_demand_delete"] = False
+    perms["action_maintenance_warehouse_manage"] = False
     _ev("login_success", role, {"path": "shared_password"})
     token, exp = _make_token(
         role,

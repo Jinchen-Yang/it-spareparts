@@ -120,6 +120,12 @@ _app_engine = engine
 _TABLES = [
     "chat_message", "chat_session",
     "fact_data_quality_issue",
+    "maintenance_warehouse_audit_event",
+    "maintenance_warehouse_ambiguity",
+    "maintenance_warehouse_document_link",
+    "maintenance_warehouse_document_line",
+    "maintenance_warehouse_document",
+    "maintenance_warehouse_import_batch",
     "product_data_quality_issues", "product_merge_logs", "product_match_candidates",
     "product_specs", "product_categories", "brands",
     # 池三表：TRUNCATE 不会重置独立序列 part_pool_group_id_seq（非 owned），

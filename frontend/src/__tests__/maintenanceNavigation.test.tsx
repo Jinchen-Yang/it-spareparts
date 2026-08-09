@@ -11,7 +11,7 @@ import {
 describe("维保管理信息架构", () => {
   beforeEach(() => localStorage.clear());
 
-  it("固定定义项目面板、主档、需求单、经理月报、验收、月度更新和成本回填入口", () => {
+  it("固定定义项目面板、主档、需求单、仓库单据、经理月报、验收、月度更新和成本回填入口", () => {
     const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance");
 
     expect(maintenance?.items.map(({ key, path, label }) => ({
@@ -33,6 +33,11 @@ describe("维保管理信息架构", () => {
         key: "maintenance-demands",
         path: "/maintenance/demands",
         label: "需求单管理",
+      },
+      {
+        key: "maintenance-warehouse",
+        path: "/maintenance/warehouse",
+        label: "仓库单据",
       },
       {
         key: "maintenance-manager-workbook",

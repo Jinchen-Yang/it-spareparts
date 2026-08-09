@@ -12,6 +12,7 @@ interface LocalMaintenancePermissions {
   action_maintenance_bad_return_manage?: boolean;
   action_maintenance_acceptance_submit?: boolean;
   action_maintenance_acceptance_review?: boolean;
+  action_maintenance_warehouse_manage?: boolean;
 }
 
 export interface MaintenanceCapabilities {
@@ -30,6 +31,7 @@ export interface MaintenanceCapabilities {
   canApplyManagerWorkbook: boolean;
   canSubmitAcceptance: boolean;
   canReviewAcceptance: boolean;
+  canManageWarehouse: boolean;
 }
 
 function readLocalPermissions(): LocalMaintenancePermissions {
@@ -165,6 +167,8 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
       permissions.page_maintenance === true
       && permissions.action_maintenance_bad_return_manage === true
     ),
+    canManageWarehouse: permissions.page_maintenance === true
+      && permissions.action_maintenance_warehouse_manage === true,
   };
 }
 

@@ -52,6 +52,14 @@ from app.models.maintenance_manager import (
     MaintenanceManagerUploadBatchProject,
     MaintenanceServicePeriod,
 )
+from app.models.maintenance_warehouse import (
+    MaintenanceWarehouseAmbiguity,
+    MaintenanceWarehouseAuditEvent,
+    MaintenanceWarehouseDocument,
+    MaintenanceWarehouseDocumentLine,
+    MaintenanceWarehouseDocumentLink,
+    MaintenanceWarehouseImportBatch,
+)
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -127,6 +135,12 @@ __all__ = [
     "BusinessFileDownloadAudit",
     "BusinessFileLink",
     "MaintenanceAcceptanceOperation",
+    "MaintenanceWarehouseImportBatch",
+    "MaintenanceWarehouseDocument",
+    "MaintenanceWarehouseDocumentLine",
+    "MaintenanceWarehouseDocumentLink",
+    "MaintenanceWarehouseAmbiguity",
+    "MaintenanceWarehouseAuditEvent",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",
