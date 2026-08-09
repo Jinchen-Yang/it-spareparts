@@ -60,13 +60,21 @@ schema、预算、实现版本和 Capability policy fingerprint。
 
 ## 状态机
 
-在 #223 Task 状态机中增加：
+与 #223 共用且必须保持完全一致的完整 Task 状态矩阵：
 
 ```text
+pending -> planning -> validated -> running
+running -> paused_recoverable -> running
 running -> waiting_human -> running
-waiting_human -> cancelling -> cancelled
+pending | planning | validated | running | paused_recoverable | waiting_human
+  -> cancelling -> cancelled
+running -> succeeded | failed
 waiting_human -> failed  (interrupt expired or authorization revoked)
 ```
+
+`paused_recoverable` 只用于有账本证据、可安全恢复但当前不能继续的技术状态；不能用它绕过 budget、
+撤权或业务规则失败。`cancelling` 是协作式中间态，已真实完成的 Step 必须先如实落账。终态
+`succeeded/failed/cancelled` 均不可 resume；重新执行创建带 `parent_task_id` 的新 Task。
 
 三个时钟独立持久化，不能用一个模糊的“最长自然时间”互相抵扣：
 
@@ -77,7 +85,29 @@ waiting_human -> failed  (interrupt expired or authorization revoked)
 - `interrupt_expires_at`：每次 Interrupt 打开时固定，首版最长 7 天；与上述两个预算无关，重试、读取、
   worker 重启和 Task resume 都不能延长。
 
-终态不可 resume；需要补充资料或改变输入时创建带 `parent_task_id` 的新 Task，不覆盖旧 Plan/Evidence。
+需要补充资料或改变输入时创建子 Task，不覆盖旧 Plan/Evidence。
+
+### 持久化计时字段
+
+`agent_task` 至少保存：
+
+```text
+active_compute_budget_ms / active_compute_elapsed_ms
+autonomous_wall_budget_ms / autonomous_wall_elapsed_ms
+autonomous_segment_started_at nullable
+clock_policy_version
+version
+```
+
+每个 Step attempt 至少保存 `compute_started_at/compute_finished_at/compute_elapsed_ms`；所有 duration 使用
+非负整数毫秒和数据库时钟，不接受客户端/模型时间。进入 planning/validated/running 时开启或延续
+autonomous segment；进入 `paused_recoverable/waiting_human/cancelling/terminal` 时在同一状态事务累计并
+清空 segment start。人工 resolve 后进入 running 只开启新 segment，历史 elapsed 不清零。
+
+Provider/Tool/规则节点开始与结束在 Step attempt 账本记录 active compute；结果与 elapsed 同事务封存。
+worker 在 open compute interval 中崩溃时，lease recovery 按版本化保守规则累计到
+`min(database_now, lease_expires_at)`，不能把崩溃时间丢掉或重置预算。任何预算达到边界都在下一次
+Provider/handler 前拒绝，并使用独立稳定错误码；`interrupt.expires_at` 不存进 Task elapsed 字段。
 
 新增 `agent_task_interrupt`：
 
@@ -93,7 +123,7 @@ response_json (validated and bounded)
 ```
 
 约束：每个 Task 最多一个 open Interrupt；Interrupt 必须属于正在等待的当前 Step；状态、Event 和 lease
-更新在同一事务提交；历史 Interrupt 不可修改或删除。
+更新在同一事务提交；`expires_at` 在 opened 时固化且不允许 UPDATE 延长；历史 Interrupt 不可修改或删除。
 
 ## API 与权限
 
@@ -123,6 +153,12 @@ state 和自有 Serializer，禁止 `pickle_fallback`。若持久化 checkpoint�
 可选加密和总纲统一的 `integrity-envelope/v1`（purpose=`agent.checkpoint`、RFC 8785 +
 HMAC-SHA-256），但不能把 LangGraph checkpoint 当成 Task 状态真值，也不能自定义第二套 HMAC 拼接格式。
 
+Checkpoint 存储必须把 `payload_json` 与 `envelope_json` 相邻分开保存；Envelope 不得嵌回 payload 形成
+自引用。Envelope 固定包含 purpose、payload schema/version、RFC 8785、HMAC-SHA-256、key_id、
+payload_sha256 和 mac。恢复依次验证大小、schema、allowlisted purpose、key 状态、SHA-256 和 constant-time
+MAC；未知/撤销 key、tamper、purpose/schema 漂移均 fail closed。key rotation 使用先加入新 key、再签发、
+旧 key verify-only、最后按保留策略退役；Envelope 提供完整性而非 ACL/加密。
+
 依赖准入下限不得低于已公开修复线：`langgraph-checkpoint>=4.0.0`（默认关闭 pickle fallback）和
 `langgraph>=1.0.10`（修复不安全 msgpack checkpoint loading）；实际合并时仍须重新读取最新 Advisory、
 固定 lock/hash 并对所选完整版本做恶意 checkpoint 回归，最低版本号本身不等于安全证明。
@@ -144,6 +180,11 @@ interrupt.opened
 interrupt.resolved
 interrupt.expired
 task.waiting_human
+task.paused_recoverable
+task.resumed
+task.cancelling
+task.cancelled
+task.clock_budget_exceeded
 ```
 
 Event 和访问日志只记录 task/step/interrupt ID、workflow/version、节点名、状态、计数、耗时和稳定错误码。
@@ -155,11 +196,14 @@ Event 和访问日志只记录 task/step/interrupt ID、workflow/version、节�
 - 模型或上传内容不能改变图、预算、结论字段、Interrupt response schema 或 Capability 集合。
 - `active_compute`、`autonomous_wall` 与 7 天 `interrupt_expires_at` 分别在边界失败；等待、重试、读取、
   resolve 和重启不能错误抵扣或刷新另一个时钟。
+- Task/Step 计时字段使用 DB clock/整数毫秒；状态事务、elapsed、segment start 与 Event 原子一致；
+  open compute crash 按 lease 上界保守累计且重放不重复计时。
 - 正常 pause/resume、7 天过期、取消、终态拒绝、创建新子 Task 全部符合状态矩阵。
 - owner-only、共享身份拒绝、跨用户 404；等待期间停用/撤权后不能恢复执行。
 - resolve 幂等与冲突、optimistic lock、双 worker lease、进程重启恢复和 crash-after-result 不重复执行。
 - Graph/Capability/runtime provider fingerprint 漂移时 fail closed。
-- checkpoint 版本、大小、统一 Envelope/HMAC、key rotation、损坏拒绝、pickle payload 拒绝。
+- checkpoint payload/envelope 分离、版本/大小/RFC 8785/purpose/key rotation/tamper/MAC、损坏拒绝和
+  pickle payload 拒绝。
 - Event/日志不含敏感哨兵串或人类响应正文。
 - 工作流前后业务事实表零写入；migration upgrade/check/downgrade/re-upgrade 和全量测试通过。
 

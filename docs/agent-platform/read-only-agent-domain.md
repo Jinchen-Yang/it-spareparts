@@ -56,8 +56,12 @@ task
 
 ```text
 pending -> planning -> validated -> running
+running -> paused_recoverable -> running
 running -> waiting_human -> running
-running -> succeeded | failed | cancelled
+pending | planning | validated | running | paused_recoverable | waiting_human
+  -> cancelling -> cancelled
+running -> succeeded | failed
+waiting_human -> failed  (interrupt expired or authorization revoked)
 ```
 
 不允许从终态恢复；恢复必须新建 attempt 并保留旧证据。LangGraph checkpoint 是运行实现，不是业务事实源；平台自己的 task/step 账本才是审计真相。
@@ -74,7 +78,30 @@ ready -> expired
 
 生成制品还必须保存由服务端计算的 `access_scope`，而不是只保存 owner。owner 必须是非空、稳定、已认证的 token subject；匿名或共享回退身份不能创建 v2 制品。scope 至少显式包含 `required_positive_permissions`、允许资源集合、可见字段组，以及 `row_subject + predicate_version + row_restriction`，不用一个不可解释的权限 hash 代替。行级范围的创建主体、当前主体和 Task owner 必须一致；谓词版本未知、不可比较或发生语义漂移时 fail closed。当前正向权限必须覆盖 required，资源/字段可见范围必须覆盖制品实际内容，当前行级谓词必须仍覆盖 stored row restriction；当前范围变窄到无法覆盖原内容时拒绝，例如创建时全量、后来变成 `own_customers_only=true`。后来扩权不改写 stored scope。每次下载/预览实时重算。
 
-多输入派生件按固定格运算：所有输入必须同 owner；正向权限要求取 union；允许资源集合和 visible field 集合取 intersection；sensitivity 取最高等级；行级约束取 conjunction/最窄范围。只有被明确分类为 `unscoped_personal_template` 的个人模板才可在资源/字段交集中作为 TOP，缺失或未知 scope 不能当作 TOP。Artifact Set 的聚合 scope 与每个成员都不得比该结果更宽。
+多输入派生件不能把来源权限压成一个看似“更窄”的谓词。每个实际内容来源必须保存独立
+`source_access_snapshot`：source Artifact/hash、owner、required positive keys、实际 contained resources/
+fields、sensitivity、row subject、predicate version、row condition reference 和 classification。所有来源与
+Task 必须同 owner；输出 scope 的静态内容摘要按下面规则计算：
+
+```text
+required_positive_keys      = union(all source + workflow requirements)
+contained_resource_set      = union(resources actually present in output)
+contained_visible_field_set = union(fields actually present in output)
+sensitivity                 = max(all contributing content)
+authorization_condition     = every contributing source snapshot must pass
+```
+
+resource/field union 描述“文件里实际装了什么”，不是拿各来源 allowlist 做 intersection 后隐藏内容。
+每次预览/下载首选逐 source snapshot 重新授权；若实现用聚合证明优化，必须由版本化服务端算法同时证明
+当前 scope 覆盖内容并集，且每个来源的正向权限、owner、row subject、predicate condition 都仍满足。
+不同 predicate version/domain 不可比较、语义未知或 composition 未注册时标记 `unclassified` 并 fail closed，
+不得用 `intersection`、字符串拼接或“narrowest”标签伪装已安全合并。
+
+模板只有在确定性检查证明“不复制/派生模板中的业务数据，仅使用 allowlisted 结构/样式”后，才能标记
+`identity_only`：它对输出访问条件贡献 TOP、对 contained set union 贡献空集，但仍保存 template hash、
+owner、classification/proof version，且 Task 执行时必须有权读取模板。证明缺失、模板示例值进入输出、
+或输出 containment 扫描不一致时，模板按普通内容来源参与 union 和逐来源重授权。Artifact Set 的聚合
+scope 与任何成员都不得漏掉其实际内容来源。
 
 legacy 必须先分类再授权：
 
@@ -83,7 +110,7 @@ legacy 必须先分类再授权：
 | owner-owned upload | 12 hex、sidecar 完整、`kind=upload`、实名 owner 匹配 | owner 实时校验后允许 |
 | generated | 即使 sidecar 有 owner，也缺少可证明的创建时业务 scope | 默认拒绝 |
 | unclassified / sidecar 缺失或损坏 | 无法证明来源、owner 或 kind | 默认拒绝 |
-| v2 | UUID、DB metadata、Store 对象、完整 scope | owner + 实时 scope 交集后允许 |
+| v2 | UUID、DB metadata、Store 对象、完整 scope | owner + 实时逐来源条件全部通过后允许 |
 
 跨 owner 统一 404；同 owner 但撤权、scope 收窄或 legacy 分类不安全时使用稳定拒绝且写最小审计。未来管理员取证只能走独立 break-glass，不得复用普通端点。
 

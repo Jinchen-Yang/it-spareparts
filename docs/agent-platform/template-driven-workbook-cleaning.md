@@ -33,14 +33,26 @@ Source Artifact + Human Template Artifact
 上传件和模板都按不可信数据处理。公式、批注、隐藏行列、隐藏 Sheet、名称、外链、图片文字和“忽略
 规则”等内容不能成为系统指令。首版拒绝 XLSM、ODS、加密工作簿、VBA、外部连接和嵌入对象。
 
-Task 创建、读取、暂停恢复和下载均要求 active 实名 `sys_user`、`page_chat` 与实时 Artifact scope
-交集。能力效果为 `file_read + artifact_create`；不得因为是“编辑表格”而伪装为单一效果。普通 Artifact
-仍 owner-only，不允许管理员或老板跨 owner 兜底读取。
+Task 创建、读取、暂停恢复和下载均要求 active 实名 `sys_user`、`page_chat`，并让每个输入的实时
+Artifact 授权条件全部通过。能力效果为 `file_read + artifact_create`；不得因为是“编辑表格”而伪装为
+单一效果。普通 Artifact 仍 owner-only，不允许管理员或老板跨 owner 兜底读取。
 
 source、template、Task、operation 和全部输出的 `owner_sub` 必须完全相同；任何跨 owner 组合统一 404。
-两份输入还必须都有可比较的 `row_subject/predicate_version`，未知或语义漂移 fail closed。仅被服务端
-明确分类为 `unscoped_personal_template` 的个人模板可在资源/字段限制运算中作为 TOP；缺失 scope、
-legacy generated 或 unclassified 文件不能冒充无限制模板。
+每个输入分别保存可重放的 access snapshot；其 `row_subject/predicate_version/condition` 必须由当前
+authorization registry 识别并可重新求值。若实现不能保留并逐个验证不同 predicate domain/version，
+则跨来源 predicate 不兼容、未知或语义漂移一律标记 `unclassified` 并拒绝，不能先做 intersection 或
+自称“narrowest”。
+
+模板分类只允许：
+
+- `business_content`：模板中的示例值、业务文本或数据会复制/派生进入输出；按普通内容来源保存 scope，
+  进入内容 union 和每次访问重授权。
+- `identity_only`：确定性检查证明输出只使用 allowlisted 表头结构/列顺序/安全样式，不复制或派生模板
+  中的业务数据；对输出的业务 access condition 为 TOP、对 contained resource/field union 为 identity
+  empty，但仍保存 template hash、owner、classification/proof version，Task 执行时仍实时授权读取。
+- `unclassified`：无法证明上述任一类；不得进入模型、dry-run 或发布。
+
+legacy generated、缺失 scope 或证明版本未知的模板固定 `unclassified`，不能冒充 TOP。
 
 ## 3. Human Template 的含义
 
@@ -186,22 +198,28 @@ private Gateway 不可用时 Task 暂停或失败。
 UUID、409 冲突和 crash/reconcile 全部复用 #230；重试同一 `(owner_sub, operation_id)` 且请求相同返回
 同一集合，请求不同则在 writer 前 409。#230 未验收前本 Workflow 不得启用 `artifact_create`。
 
-Artifact Set scope 使用固定格运算，不写“保守合并”后留给实现猜测：
+Artifact Set 保存每个实际内容来源的独立 `source_access_snapshots[]`，不能把多个来源压成一个“更窄”
+row predicate。输出静态内容摘要使用：
 
 ```text
 owner_sub                    = source.owner = template.owner = Task.owner
-required_positive_permissions = union(source, template, workflow requirements)
-allowed_resource_set        = intersection(source, template, workflow visible resources)
-visible_field_set           = intersection(source, template, workflow visible fields)
-sensitivity                 = max(source, template, generated content)
-row_restriction             = conjunction / narrowest(source, template, workflow)
-row_subject                 = the same verified owner/subject
-predicate_version           = versioned comparable predicate contract
+required_positive_keys      = union(all contributing sources + workflow requirements)
+contained_resource_set      = union(resources actually present in each output member)
+contained_visible_field_set = union(fields actually present in each output member)
+sensitivity                 = max(all contributing source and generated content)
+authorization_condition     = every contributing source snapshot must pass
 ```
 
-空/未知 resource、visible 或 predicate 不是 wildcard；交集为空则拒绝发布。集合聚合 scope 和每个成员
-scope 都不得更宽。每次预览/下载按当前权限重验是否仍覆盖 stored scope。用户后续可以把输出文件手工送入
-现有导入预检查，但本工作流不直接调用导入或写业务库。
+resource/field union 由完成后的 workbook/report containment scan 按实际内容生成；它描述“输出装了什么”，
+不能用输入 allowlist intersection 代替。每次 preview/download 必须逐 contributing source snapshot 重授权；
+允许的聚合优化也必须由版本化算法同时证明当前 scope 覆盖 contained union、required positive keys 全满足，
+且所有 source owner/row subject/predicate conditions 分别成立。任一 source 撤权、条件失败、predicate
+未知/不兼容、containment 无法分类时，整个 Set 和相关成员 fail closed。
+
+`identity_only` 模板仍保留 provenance snapshot，但只要 proof version 仍有效且 output containment 未出现
+模板业务数据，它对输出条件贡献 TOP/empty identity；一旦样本值、隐藏业务文本或派生内容进入输出，
+必须重新分类为普通 contributing source。集合聚合 scope 和每个成员都不得漏掉实际内容来源。用户后续
+可以把输出文件手工送入现有导入预检查，但本工作流不直接调用导入或写业务库。
 
 Evidence 保存在 completed Step 中，只保留 Artifact refs、hash、版本、计数、风险/异常摘要、模型 usage
 和稳定错误码，不重复保存整表内容；完整性统一使用总纲 `integrity-envelope/v1`
@@ -219,9 +237,12 @@ Evidence 保存在 completed Step 中，只保留 Artifact refs、hash、版本�
 - crash-before-publish、crash-after-object、metadata 失败、磁盘满、同 operation 重试不产生半成品或重复文件。
 - 同 owner/key 同 fingerprint 返回同一 Set/member UUID；同 key 不同 request 在 writer 前 409；reconciler
   重复运行幂等且不会让部分成员可见。
-- owner-only、scope 收窄拒绝、跨用户统一 404；日志/Event/模型请求不含敏感哨兵值和文件正文。
-- scope 公式的 positive union、resource/visible intersection、sensitivity max、row restriction narrowest、
-  same-owner 和 predicate version 边界均有矩阵测试。
+- owner-only、任一 source 撤权/条件失败拒绝、跨用户统一 404；日志/Event/模型请求不含敏感哨兵值和
+  文件正文。
+- scope 公式的 positive-key union、actual contained resource/field union、sensitivity max、逐来源条件、
+  same-owner 和 predicate version/domain 边界均有矩阵测试；无 intersection/narrowest fallback。
+- 模板 `identity_only/business_content/unclassified` 分类、proof version、隐藏/示例值渗入输出和 containment
+  漂移均 fail closed；identity-only 只有证明成立时才贡献 TOP/empty identity。
 - 1/100/5,000 semantic cell、100,000 行、2,000,000 cell 和并发任务的时延/内存/磁盘压测。
 - 工作流前后业务表和源文件 hash 不变；迁移、全量 pytest、前端测试/build、真实浏览器下载/E2E 通过。
 
