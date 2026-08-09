@@ -11,6 +11,7 @@
 """
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -18,8 +19,9 @@ import unicodedata
 import uuid
 import zipfile
 from collections.abc import Callable
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
@@ -34,6 +36,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.models.agent_artifact import AgentArtifact
 from app.models.system import SysUser
+from app.services import agent_artifact_provenance as artifact_provenance
 
 _LEGACY_FILE_ID = re.compile(r"^[a-f0-9]{12}$")
 _MAX_UPLOAD_MB = 20
@@ -41,6 +44,17 @@ _PREVIEW_ROWS = 8
 _PREVIEW_COLS = 12
 _MAX_READ_ROWS = 200
 _MAX_WRITE_CELLS = 3000
+_MAX_REPORT_ROWS = 5000
+_MAX_REPORT_COLUMNS = 256
+_MAX_REPORT_CELLS = 100_000
+_MAX_MONEY_COLUMNS = 256
+_MAX_RENDER_TEXT_BYTES = 2 * 1024 * 1024
+_MAX_RENDER_VALUE_BYTES = 64 * 1024
+_MAX_PROVENANCE_DERIVATION_DEPTH = 16
+_MAX_PROVENANCE_AUTH_NODES = 256
+_MAX_PROVENANCE_AUTH_WORK = 1024
+_MAX_PROVENANCE_AUTH_MEMO = 256
+_MAX_PROVENANCE_AUTH_PATH = 32
 _CELL_TRUNC = 60
 _DOC_CHAR_CAP = 60_000          # read_document 文本上限，防超长文件撑爆上下文
 
@@ -80,6 +94,18 @@ class ArtifactUnavailable(FileError):
         self.reason_code = reason_code
 
 
+class ProvenanceRequired(FileError):
+    """Generated content cannot be published without opaque server evidence."""
+
+
+class AuthorizationUnavailable(FileError):
+    """Live authorization could not be determined; callers must never treat it as allow."""
+
+
+class ObjectPublicationUncertain(FileError):
+    """The final object key may exist after an atomic-link postcondition failed."""
+
+
 _ARTIFACT_V2_DISABLED_MESSAGE = "Artifact Delivery v2 已停用"
 
 
@@ -93,6 +119,8 @@ def artifact_reason_code(exc: FileError) -> str:
         return "v2_disabled"
     if isinstance(exc, ArtifactUnavailable):
         return exc.reason_code
+    if isinstance(exc, ProvenanceRequired):
+        return "provenance_required"
     return "validation_failed"
 
 
@@ -175,6 +203,7 @@ class LocalArtifactStore:
         fd, temp_name = tempfile.mkstemp(prefix="artifact-", suffix=".part", dir=temp_dir)
         temp_path = Path(temp_name)
         digest = hashlib.sha256()
+        linked = False
         try:
             with os.fdopen(fd, "wb") as handle:
                 view = memoryview(content)
@@ -192,6 +221,7 @@ class LocalArtifactStore:
                 os.link(temp_path, final_path, follow_symlinks=False)
             except FileExistsError as exc:
                 raise FileError("文件发布冲突，请重试")
+            linked = True
             temp_path.unlink()
             dir_fd = os.open(final_path.parent, os.O_RDONLY)
             try:
@@ -203,8 +233,18 @@ class LocalArtifactStore:
                 size_bytes=final_path.stat().st_size,
                 sha256=digest.hexdigest(),
             )
-        except Exception:
-            temp_path.unlink(missing_ok=True)
+        except Exception as exc:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if linked:
+                # Never unlink final_path here.  After the hard link succeeds, any
+                # unlink/fsync/stat failure is an UNKNOWN durable-publication outcome;
+                # the validating row is the only safe reconciliation marker.
+                raise ObjectPublicationUncertain(
+                    "文件对象已原子发布但持久化结果待协调"
+                ) from exc
             raise
 
     def inspect(self, storage_key: str) -> StoredObject:
@@ -527,7 +567,7 @@ def snapshot_access_scope(user_ctx: Any) -> dict:
 
 def _default_access_scope(kind: str) -> dict:
     if kind == "upload":
-        return {"version": 1, "policy": "owner_only", "required_permissions": []}
+        return artifact_provenance.classify_upload_access_scope(b"", "")
     # Generated output without a server-authenticated snapshot is explicitly unclassified.
     return {
         "version": 1,
@@ -538,7 +578,17 @@ def _default_access_scope(kind: str) -> dict:
 
 def _derive_sensitivity(kind: str, access_scope: dict) -> str:
     """Derive classification server-side; callers cannot lower it through tool arguments."""
-    if kind == "upload" or access_scope.get("policy") != "current_scope_dominates":
+    if kind == "upload":
+        return (
+            access_scope.get("sensitivity", "critical")
+            if access_scope.get("schema_version") == artifact_provenance.ACCESS_SCHEMA_VERSION
+            else "critical"
+        )
+    if access_scope.get("schema_version") == artifact_provenance.ACCESS_SCHEMA_VERSION:
+        return artifact_provenance.derive_sensitivity(
+            access_scope.get("required_permissions", [])
+        )
+    if access_scope.get("policy") != "current_scope_dominates":
         return "critical"
     from app import permissions
 
@@ -628,6 +678,16 @@ def _verified_owner_sub(owner: VerifiedArtifactOwner) -> str:
     return stable_owner_sub(_verified_owner_context(owner))
 
 
+def _require_live_owner(owner: VerifiedArtifactOwner) -> str:
+    """Classify unexpected principal lookup failures as retryable uncertainty."""
+    try:
+        return _verified_owner_sub(owner)
+    except FileError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - publisher must preserve retry state
+        raise AuthorizationUnavailable("当前账号状态暂时无法确认") from exc
+
+
 def _generated_scope(owner: VerifiedArtifactOwner) -> dict:
     return snapshot_access_scope(_verified_owner_context(owner))
 
@@ -688,6 +748,7 @@ def _publish_artifact(
     owner: VerifiedArtifactOwner,
     source_ids: list[str] | None = None,
     extra_meta: dict | None = None,
+    provenance_scope: dict | None = None,
 ) -> dict:
     require_artifact_v2_enabled()
     safe_name = _safe_filename(filename)
@@ -699,14 +760,42 @@ def _publish_artifact(
     created_at = datetime.now(timezone.utc)
     expires_at = created_at + timedelta(days=get_settings().agent_artifact_retention_days)
     expected_hash = hashlib.sha256(content).hexdigest()
-    owner_sub = _verified_owner_sub(owner)
-    sources = [_canonical_source_id(source_id, owner) for source_id in (source_ids or [])]
+    owner_sub = _require_live_owner(owner)
+    provided_sources = (
+        [_canonical_source_id(source_id, owner) for source_id in source_ids]
+        if source_ids is not None
+        else None
+    )
     if kind == "upload":
-        resolved_scope = _default_access_scope(kind)
+        resolved_scope = dict(provenance_scope or _default_access_scope(kind))
     elif kind == "generated":
-        resolved_scope = _generated_scope(owner)
+        if provenance_scope is None:
+            raise ProvenanceRequired("生成文件缺少可验证的数据来源，已停止发布")
+        resolved_scope = dict(provenance_scope)
+        try:
+            proven_sources = artifact_provenance.source_artifact_ids(resolved_scope)
+        except artifact_provenance.ProvenanceError as exc:
+            raise ProvenanceRequired("生成文件来源快照无效，已停止发布") from exc
+        if provided_sources is not None and provided_sources != proven_sources:
+            raise ProvenanceRequired("生成文件来源列表与证明不一致，已停止发布")
+        # Renderer work may be long-running.  Treat the signed snapshot as evidence,
+        # not a lease: reload the current principal and every live source before the
+        # prepared row is created.  The state machine repeats this at both object-store
+        # and ready-transition boundaries below.
+        sources = _reauthorize_provenance_scope(owner, resolved_scope)
+        if sources != proven_sources:
+            raise ProvenanceRequired("生成文件来源列表与当前授权不一致，已停止发布")
     else:
         raise FileError("文件类型不受支持")
+    if kind == "upload":
+        if provided_sources:
+            raise FileError("上传件不能伪造派生来源")
+        sources = []
+    persisted_extra_meta = dict(extra_meta or {})
+    # A crash reconciler must reconstruct the exact principal capability that began
+    # publication; owner_sub alone cannot detect logout/revocation via token_version.
+    persisted_extra_meta["_publisher_user_id"] = owner._user_pk
+    persisted_extra_meta["_publisher_token_version"] = owner._token_version
     with SessionLocal.begin() as db:
         db.add(AgentArtifact(
             id=artifact_id,
@@ -721,46 +810,274 @@ def _publish_artifact(
             sensitivity=_derive_sensitivity(kind, resolved_scope),
             source_ids=sources,
             access_scope=resolved_scope,
-            extra_meta=dict(extra_meta or {}),
+            extra_meta=persisted_extra_meta,
             created_at=created_at,
             expires_at=expires_at,
         ))
 
     store = get_artifact_store()
+    object_published = False
     try:
         _mark_artifact_validating(artifact_id)
+        # Uploads also have an external storage side effect.  Revalidate the exact
+        # principal capability for every kind after the visible state transition.
+        _require_live_owner(owner)
+        if kind == "generated":
+            # The prepared/validating transition is observable and may race an account
+            # change.  Recheck after that transition and immediately before delegating
+            # any source-derived bytes to the object store.
+            _reauthorize_provenance_scope(owner, resolved_scope)
         stored = store.publish_bytes(
             storage_key,
             content,
             validator=lambda path: _validate_staged_file(path, ext),
         )
+        object_published = True
         if stored.size_bytes != len(content) or stored.sha256 != expected_hash:
             raise FileError("文件发布完整性校验失败")
-        # Re-read the formal key.  If another process reconciled the row meanwhile,
-        # _mark_artifact_ready accepts only this exact size/hash as idempotent success.
+        _require_live_owner(owner)
+        if kind == "generated":
+            # Object publication is atomic but cannot share a transaction with account
+            # and source rows.  A revocation during the write therefore leaves a
+            # non-ready reconciliation marker; it never authorizes the ready CAS.
+            _reauthorize_provenance_scope(owner, resolved_scope)
+        # Re-read the formal key.  A reconciler may win this CAS only after applying the
+        # same live principal/generated-scope contract; an identical ready row is
+        # idempotent.  DB authorization rows and the filesystem cannot be locked in one
+        # atomic transaction, so every ready/download path remains live-authorized too.
         _mark_artifact_ready(artifact_id, store.inspect(storage_key))
+    except (AuthorizationUnavailable, ObjectPublicationUncertain) as exc:
+        # If bytes are already durable, authorization/DB uncertainty is not a proven
+        # denial.  Keep validating as a non-downloadable retry marker; the tri-state
+        # reconciler can later promote only after object + live authorization recover.
+        raise FileError("文件发布状态待协调，请稍后重试") from exc
     except Exception as exc:  # noqa: BLE001 - internal detail is deliberately hidden
-        # Never delete a formally published object here: after publish, the result of a
-        # DB commit/CAS can be uncertain and deleting could create ready+missing.  The
-        # failed/validating row is the durable reconciliation marker.
-        try:
-            _mark_artifact_failed(artifact_id)
-        except Exception:  # noqa: BLE001 - preserve the stable public error on DB outage
-            pass
+        # Never delete a formally published object here.  A known FileError is a
+        # deterministic rejection and may become failed; an unexpected exception after
+        # publication is UNKNOWN and must remain validating for reconciliation.
+        if isinstance(exc, FileError) or not object_published:
+            try:
+                _mark_artifact_failed(artifact_id)
+            except Exception:  # noqa: BLE001 - preserve the stable public error on DB outage
+                pass
         raise FileError("文件发布失败，请稍后重试") from exc
     return artifact_info(artifact_id)
 
 
-def access_allowed(file_id: str, user_ctx: Any) -> bool:
-    """Re-authorize owner and current visibility against the creation snapshot."""
-    from app import config, permissions
+@dataclass
+class _ProvenanceAuthorizationState:
+    memo: dict[str, bool]
+    verified_sources: dict[str, dict[str, Any]] = field(default_factory=dict)
+    nodes: int = 0
+    work: int = 0
+    exhausted: bool = False
 
+
+def _memoize_access(
+    state: _ProvenanceAuthorizationState,
+    file_id: str,
+    result: bool,
+) -> bool:
+    if file_id not in state.memo:
+        if len(state.memo) >= _MAX_PROVENANCE_AUTH_MEMO:
+            state.exhausted = True
+            return False
+        state.memo[file_id] = result
+    return result
+
+
+def access_allowed(
+    file_id: str,
+    user_ctx: Any,
+    *,
+    _state: _ProvenanceAuthorizationState | None = None,
+    _path: frozenset[str] | None = None,
+    _depth: int = 0,
+) -> bool:
+    """Re-authorize one provenance DAG under global work and cycle budgets."""
     try:
         subject = stable_owner_sub(user_ctx)
     except FileError:
         return False
     fid = _check_id(file_id)
+    state = (
+        _state
+        if isinstance(_state, _ProvenanceAuthorizationState)
+        else _ProvenanceAuthorizationState(memo={})
+    )
+    path = frozenset(_path or ())
+    if state.exhausted:
+        return False
+    # A node currently on this recursion path is a real cycle, even if another
+    # completed branch has a memoized result for the same Artifact.
+    if fid in path:
+        return False
+    if fid in state.memo:
+        return state.memo[fid]
+    if (
+        _depth > _MAX_PROVENANCE_DERIVATION_DEPTH
+        or state.nodes >= _MAX_PROVENANCE_AUTH_NODES
+        or len(path) >= _MAX_PROVENANCE_AUTH_PATH
+    ):
+        state.exhausted = True
+        return False
+    state.nodes += 1
+    current_path = path | {fid}
     meta = _find_artifact_meta(fid, require_ready=False)
+    scope = (meta or {}).get("access_scope") or {}
+    snapshots = scope.get("source_access_snapshots")
+    state.work += 1 + (len(snapshots) if isinstance(snapshots, list) else 0)
+    if state.work > _MAX_PROVENANCE_AUTH_WORK:
+        state.exhausted = True
+        return False
+    result = _evaluate_artifact_access(
+        fid=fid,
+        meta=meta,
+        user_ctx=user_ctx,
+        subject=subject,
+        state=state,
+        path=current_path,
+        depth=_depth,
+    )
+    return _memoize_access(state, fid, result)
+
+
+def _authorize_source_snapshot(
+    payload: dict[str, Any],
+    *,
+    user_ctx: Any,
+    state: _ProvenanceAuthorizationState,
+    path: frozenset[str],
+    depth: int,
+) -> bool:
+    """Re-read and authorize one signed Artifact source under a shared DAG budget."""
+    source_id = payload.get("source_artifact_id")
+    if not isinstance(source_id, str) or state.exhausted:
+        return False
+    source_meta = state.verified_sources.get(source_id)
+    if source_meta is None:
+        if len(state.verified_sources) >= _MAX_PROVENANCE_AUTH_MEMO:
+            state.exhausted = True
+            return False
+        try:
+            source_meta = _artifact_meta(source_id, require_ready=True)
+            _verify_artifact(source_meta)
+        except FileError:
+            return False
+        state.verified_sources[source_id] = source_meta
+    return (
+        source_meta.get("file_id") == source_id
+        and source_meta.get("status") == "ready"
+        and source_meta.get("sha256") == payload.get("source_sha256")
+        and source_meta.get("owner_sub") == payload.get("owner_sub")
+        and artifact_provenance.artifact_snapshot_matches_scope(
+            payload,
+            source_meta.get("access_scope") or {},
+            source_sha256=source_meta.get("sha256") or "",
+        )
+        and access_allowed(
+            source_id,
+            user_ctx,
+            _state=state,
+            _path=path,
+            _depth=depth,
+        )
+    )
+
+
+def _reauthorize_provenance_scope(
+    owner: VerifiedArtifactOwner,
+    scope: dict[str, Any],
+) -> list[str]:
+    """Reload the principal and every Artifact source before read/publish checkpoints."""
+    try:
+        current = _verified_owner_context(owner)
+        owner_sub = stable_owner_sub(current)
+        state = _ProvenanceAuthorizationState(memo={})
+
+        def authorize_source(payload: dict[str, Any]) -> bool:
+            return _authorize_source_snapshot(
+                payload,
+                user_ctx=current,
+                state=state,
+                path=frozenset(),
+                depth=0,
+            )
+
+        allowed = artifact_provenance.current_scope_covers(
+            scope,
+            current,
+            source_artifact_authorizer=authorize_source,
+        )
+        source_ids = artifact_provenance.source_artifact_ids(scope)
+        if (
+            not allowed
+            or state.exhausted
+            or any(
+                (meta := state.verified_sources.get(source_id)) is None
+                or meta.get("owner_sub") != owner_sub
+                for source_id in source_ids
+            )
+        ):
+            raise ProvenanceRequired("生成文件当前来源授权已失效，已停止处理")
+        return source_ids
+    except ProvenanceRequired:
+        raise
+    except (FileError, artifact_provenance.ProvenanceError) as exc:
+        raise ProvenanceRequired("生成文件当前来源授权已失效，已停止处理") from exc
+    except Exception as exc:  # noqa: BLE001 - live path fails closed on uncertainty
+        raise AuthorizationUnavailable("生成文件当前授权暂时无法确认，已停止处理") from exc
+
+
+def _reconcile_ready_authorized(row: AgentArtifact) -> bool:
+    """Apply the publisher's live principal/scope contract before crash recovery."""
+    extra = row.extra_meta if isinstance(row.extra_meta, dict) else {}
+    user_id = extra.get("_publisher_user_id")
+    token_version = extra.get("_publisher_token_version")
+    if (
+        isinstance(user_id, bool)
+        or not isinstance(user_id, int)
+        or isinstance(token_version, bool)
+        or not isinstance(token_version, int)
+    ):
+        return False
+    try:
+        with SessionLocal() as db:
+            user = db.scalar(select(SysUser).where(
+                SysUser.id == user_id,
+                SysUser.username == row.owner_sub,
+            ))
+            if user is None:
+                return False
+            owner = VerifiedArtifactOwner(user.id, row.owner_sub, token_version)
+        _verified_owner_sub(owner)
+        if row.kind == "upload":
+            return not list(row.source_ids or [])
+        if row.kind != "generated":
+            return False
+        source_ids = _reauthorize_provenance_scope(
+            owner,
+            dict(row.access_scope or {}),
+        )
+        return source_ids == list(row.source_ids or [])
+    except AuthorizationUnavailable:
+        raise
+    except FileError:
+        return False
+
+
+def _evaluate_artifact_access(
+    *,
+    fid: str,
+    meta: dict[str, Any] | None,
+    user_ctx: Any,
+    subject: str,
+    state: _ProvenanceAuthorizationState,
+    path: frozenset[str],
+    depth: int,
+) -> bool:
+    from app import config, permissions
+
     if meta is None and _is_legacy_id(fid):
         meta = _load_meta(fid)
         owner_ok = meta.get("operated_by") == subject
@@ -782,6 +1099,21 @@ def access_allowed(file_id: str, user_ctx: Any) -> bool:
         return policy == "owner_only"
     if policy == "unclassified_deny":
         return False
+    if policy == "provenance_guarded":
+        def authorize_source(payload: dict[str, Any]) -> bool:
+            return _authorize_source_snapshot(
+                payload,
+                user_ctx=user_ctx,
+                state=state,
+                path=path,
+                depth=depth + 1,
+            )
+
+        return artifact_provenance.current_scope_covers(
+            scope,
+            user_ctx,
+            source_artifact_authorizer=authorize_source,
+        )
     if policy != "current_scope_dominates" or scope.get("version") != 1:
         return False
     if not config.ENABLE_RBAC and user_ctx.role == config.PHASE1_BYPASS_ROLE:
@@ -891,6 +1223,7 @@ def save_upload(content: bytes, filename: str, owner: VerifiedArtifactOwner) -> 
         raise FileError(f"不支持的文件类型 .{ext}（支持：Excel/Word/PDF/txt/图片）")
     if len(content) > _MAX_UPLOAD_MB * 1024 * 1024:
         raise FileError(f"文件超过 {_MAX_UPLOAD_MB}MB 上限")
+    upload_scope = artifact_provenance.classify_upload_access_scope(content, ext)
 
     extra_meta: dict = {}
     if ext == "xlsx":
@@ -908,6 +1241,7 @@ def save_upload(content: bytes, filename: str, owner: VerifiedArtifactOwner) -> 
         safe_name,
         kind="upload",
         owner=owner,
+        provenance_scope=upload_scope,
         extra_meta=extra_meta,
     )
     out = {"file_id": artifact["file_id"], "filename": safe_name, "ext": ext,
@@ -1100,20 +1434,164 @@ def _col_index(col) -> int:
         raise FileError(f"无法识别列: {col!r}（用字母如 'G' 或 1-based 数字）") from exc
 
 
+def _bounded_render_value_bytes(value: Any) -> int:
+    """Validate one renderer scalar and return its bounded textual byte cost."""
+    if value is None or isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return len(str(value))
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise FileError("生成文件不支持 NaN 或无穷数值")
+        return len(repr(value))
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise FileError("生成文件不支持 NaN 或无穷数值")
+        return len(str(value))
+    if isinstance(value, (date, datetime)):
+        return len(value.isoformat().encode("utf-8"))
+    if isinstance(value, str):
+        size = len(value.encode("utf-8"))
+        if size > _MAX_RENDER_VALUE_BYTES:
+            raise FileError("生成文件单个文本值超过大小预算")
+        return size
+    raise FileError(f"生成文件不支持值类型 {type(value).__name__}")
+
+
+def _bounded_optional_text(value: Any, label: str, *, max_bytes: int) -> int:
+    if value is None:
+        return 0
+    if not isinstance(value, str):
+        raise FileError(f"{label} 必须是字符串")
+    size = len(value.encode("utf-8"))
+    if size > max_bytes:
+        raise FileError(f"{label} 超过大小预算")
+    return size
+
+
+def _validate_excel_write_shape(
+    *,
+    sheet: str | None,
+    cells: list[dict],
+    output_name: str | None,
+) -> None:
+    total_bytes = _bounded_optional_text(
+        output_name, "output_name", max_bytes=1024
+    )
+    if sheet is not None:
+        total_bytes += _bounded_optional_text(sheet, "sheet", max_bytes=128)
+        if not sheet or len(sheet) > 31 or re.search(r"[\\/*?:\[\]]", sheet):
+            raise FileError("sheet 不是有效的 Excel 工作表名称")
+    if not isinstance(cells, list) or not cells:
+        raise FileError("cells 必须是非空数组")
+    if len(cells) > _MAX_WRITE_CELLS:
+        raise FileError(f"单次最多写 {_MAX_WRITE_CELLS} 个单元格")
+    for item in cells:
+        if not isinstance(item, dict) or set(item) != {"row", "col", "value"}:
+            raise FileError("cells 项格式错（只允许 row/col/value）")
+        row = item["row"]
+        if isinstance(row, bool) or not isinstance(row, int):
+            raise FileError("cells.row 必须是整数")
+        if row < 1 or row > 1_048_576:
+            raise FileError(f"行号超界: {row}")
+        if isinstance(item["col"], bool):
+            raise FileError("cells.col 必须是列字母或整数")
+        _col_index(item["col"])
+        total_bytes += _bounded_render_value_bytes(item["value"])
+        if total_bytes > _MAX_RENDER_TEXT_BYTES:
+            raise FileError("生成文件文本总量超过预算")
+
+
+def _validate_report_shape(
+    *,
+    title: str | None,
+    headers: list[str],
+    rows: list[list],
+    output_name: str | None,
+    money_cols: list[int] | None,
+) -> None:
+    total_bytes = _bounded_optional_text(title, "title", max_bytes=4096)
+    total_bytes += _bounded_optional_text(
+        output_name, "output_name", max_bytes=1024
+    )
+    if not isinstance(headers, list) or not headers:
+        raise FileError("headers 必须是非空数组")
+    if len(headers) > _MAX_REPORT_COLUMNS:
+        raise FileError(f"报表最多 {_MAX_REPORT_COLUMNS} 列")
+    for header in headers:
+        if not isinstance(header, str):
+            raise FileError("headers 每项必须是字符串")
+        total_bytes += _bounded_render_value_bytes(header)
+        if total_bytes > _MAX_RENDER_TEXT_BYTES:
+            raise FileError("生成文件文本总量超过预算")
+    if not isinstance(rows, list):
+        raise FileError("rows 必须是二维数组")
+    if len(rows) > _MAX_REPORT_ROWS:
+        raise FileError(f"报表最多 {_MAX_REPORT_ROWS} 行")
+    if len(rows) * len(headers) > _MAX_REPORT_CELLS:
+        raise FileError("报表单元格总量超过预算")
+    for row in rows:
+        if not isinstance(row, list) or len(row) > len(headers):
+            raise FileError("rows 每行必须是数组且不能宽于 headers")
+        for value in row:
+            total_bytes += _bounded_render_value_bytes(value)
+            if total_bytes > _MAX_RENDER_TEXT_BYTES:
+                raise FileError("生成文件文本总量超过预算")
+    if money_cols is not None:
+        if (
+            not isinstance(money_cols, list)
+            or len(money_cols) > _MAX_MONEY_COLUMNS
+            or any(
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or index < 0
+                or index >= len(headers)
+                for index in money_cols
+            )
+            or money_cols != sorted(set(money_cols))
+        ):
+            raise FileError("money_cols 必须是升序、不重复且位于 headers 范围内")
+
+
 def write_excel(base_file_id: str | None, sheet: str | None,
                 cells: list[dict], output_name: str | None,
-                owner: VerifiedArtifactOwner) -> dict:
+                owner: VerifiedArtifactOwner, *,
+                provenance: Any | None = None) -> dict:
     """按模型指令写单元格，产出新文件（不动原件）。用于**回填客户模板**（保留原格式）。"""
     require_artifact_v2_enabled()
-    _verified_owner_sub(owner)
+    owner_sub = _verified_owner_sub(owner)
     # Authorize the source before validating model-supplied edit instructions.  This
     # keeps non-owner/unknown source IDs indistinguishable at the service boundary.
     base = _canonical_source_id(base_file_id, owner) if base_file_id else None
-    if not cells:
-        raise FileError("cells 不能为空")
-    if len(cells) > _MAX_WRITE_CELLS:
-        raise FileError(f"单次最多写 {_MAX_WRITE_CELLS} 个单元格")
-
+    if provenance is None:
+        raise ProvenanceRequired("生成文件缺少可验证的数据来源，已停止发布")
+    _validate_excel_write_shape(
+        sheet=sheet,
+        cells=cells,
+        output_name=output_name,
+    )
+    try:
+        provenance_scope = artifact_provenance.consume_evidence(
+            provenance,
+            owner_sub=owner_sub,
+            expected_fingerprint=artifact_provenance.excel_edit_fingerprint(
+                base_file_id=base,
+                sheet=sheet,
+                cells=cells,
+                output_name=output_name,
+            ),
+        )
+        proven_source_ids = artifact_provenance.source_artifact_ids(provenance_scope)
+    except artifact_provenance.ProvenanceError as exc:
+        raise ProvenanceRequired("生成文件来源证明无效，已停止发布") from exc
+    if base is not None and base not in proven_source_ids:
+        raise ProvenanceRequired("模板来源未包含在生成证明中，已停止发布")
+    if provenance_scope.get("classification") == "identity_only":
+        raise ProvenanceRequired("identity_only 模板不能证明模型写入内容，已停止发布")
+    # This checkpoint is deliberately after evidence consumption and before the
+    # workbook is opened.  Permission, row-scope, status, owner, hash or nested scope
+    # drift therefore cannot expose source bytes to the renderer.
+    _reauthorize_provenance_scope(owner, provenance_scope)
     base_name = ""
     if base:
         bmeta = _load_meta(base)
@@ -1127,12 +1605,7 @@ def write_excel(base_file_id: str | None, sheet: str | None,
 
     written = 0
     for c in cells:
-        try:
-            row, col = int(c["row"]), _col_index(c["col"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise FileError(f"cells 项格式错: {c!r}（需 row/col/value）") from exc
-        if row < 1 or row > 1_048_576:
-            raise FileError(f"行号超界: {row}")
+        row, col = c["row"], _col_index(c["col"])
         ws.cell(row=row, column=col, value=_safe_spreadsheet_value(c.get("value")))
         written += 1
 
@@ -1147,7 +1620,7 @@ def write_excel(base_file_id: str | None, sheet: str | None,
         name,
         kind="generated",
         owner=owner,
-        source_ids=[base_file_id] if base_file_id else [],
+        provenance_scope=provenance_scope,
         extra_meta={"base_file_id": base_file_id},
     )
     ref = _artifact_ref(artifact)
@@ -1171,16 +1644,39 @@ _BAD_KW = ("未找到", "无库存", "不存在", "未匹配")
 
 def write_report(title: str | None, headers: list[str], rows: list[list],
                  output_name: str | None, owner: VerifiedArtifactOwner,
-                 money_cols: list[int] | None = None) -> dict:
+                 money_cols: list[int] | None = None, *,
+                 provenance: Any | None = None) -> dict:
     """生成**美化报表**（BOM/报价单等）：表头配色、边框、自适应列宽、金额格式、
     冻结表头、斑马纹、状态行条件配色。headers=列名；rows=与列对齐的二维数组；
     money_cols=金额列的 0-based 下标（数字格式+右对齐）。"""
     require_artifact_v2_enabled()
-    _verified_owner_sub(owner)
-    if not headers:
-        raise FileError("headers 不能为空")
-    if len(rows) > 5000:
-        raise FileError("报表最多 5000 行")
+    owner_sub = _verified_owner_sub(owner)
+    if provenance is None:
+        raise ProvenanceRequired("生成文件缺少可验证的数据来源，已停止发布")
+    _validate_report_shape(
+        title=title,
+        headers=headers,
+        rows=rows,
+        output_name=output_name,
+        money_cols=money_cols,
+    )
+    expected_fingerprint = artifact_provenance.report_fingerprint(
+        title=title,
+        headers=headers,
+        rows=rows,
+        output_name=output_name,
+        money_cols=money_cols,
+    )
+    try:
+        provenance_scope = artifact_provenance.consume_evidence(
+            provenance,
+            owner_sub=owner_sub,
+            expected_fingerprint=expected_fingerprint,
+        )
+    except artifact_provenance.ProvenanceError as exc:
+        raise ProvenanceRequired("生成文件来源证明无效，已停止发布") from exc
+    if provenance_scope.get("classification") != "business_content":
+        raise ProvenanceRequired("来源只能证明模板身份，不能证明报表业务内容")
     money = set(money_cols or [])
     ncol = len(headers)
 
@@ -1239,12 +1735,121 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
         name,
         kind="generated",
         owner=owner,
+        provenance_scope=provenance_scope,
         extra_meta={"report": True},
     )
     ref = _artifact_ref(artifact)
     download_url = f"/api/agent/files/{artifact['file_id']}"
     return {"file_id": artifact["file_id"], "filename": artifact["filename"],
             "rows_written": len(rows), "download_url": download_url, "artifact": ref}
+
+
+def _mint_report_provenance(
+    owner: VerifiedArtifactOwner,
+    *,
+    title: str | None,
+    headers: list[str],
+    rows: list[list],
+    output_name: str | None,
+    money_cols: list[int] | None,
+    contained_resources: set[str],
+    contained_fields: set[str],
+) -> artifact_provenance.TrustedEvidence:
+    """Trusted Query Broker seam; deliberately absent from tool and HTTP schemas."""
+    _validate_report_shape(
+        title=title,
+        headers=headers,
+        rows=rows,
+        output_name=output_name,
+        money_cols=money_cols,
+    )
+    ctx = _verified_owner_context(owner)
+    owner_sub = stable_owner_sub(ctx)
+    return artifact_provenance.mint_server_evidence(
+        owner_sub=owner_sub,
+        content_fingerprint_value=artifact_provenance.report_fingerprint(
+            title=title,
+            headers=headers,
+            rows=rows,
+            output_name=output_name,
+            money_cols=money_cols,
+        ),
+        contained_resources=contained_resources,
+        contained_fields=contained_fields,
+        row_subject=_canonical_salesperson_subject(ctx.salesperson_name),
+        own_customers_only=bool((ctx.permissions or {}).get("own_customers_only")),
+    )
+
+
+def _mint_report_from_artifacts(
+    owner: VerifiedArtifactOwner,
+    *,
+    source_ids: list[str],
+    title: str | None,
+    headers: list[str],
+    rows: list[list],
+    output_name: str | None,
+    money_cols: list[int] | None,
+) -> artifact_provenance.TrustedEvidence:
+    """Trusted deterministic-transform seam; never exposed to model tool arguments."""
+    _validate_report_shape(
+        title=title,
+        headers=headers,
+        rows=rows,
+        output_name=output_name,
+        money_cols=money_cols,
+    )
+    requested_ids = artifact_provenance.validate_source_artifact_ids(source_ids)
+    ctx = _verified_owner_context(owner)
+    owner_sub = stable_owner_sub(ctx)
+    canonical_ids = [_canonical_source_id(source_id, owner) for source_id in requested_ids]
+    source_metas = [_load_meta(source_id) for source_id in canonical_ids]
+    return artifact_provenance.mint_artifact_evidence(
+        owner_sub=owner_sub,
+        content_fingerprint_value=artifact_provenance.report_fingerprint(
+            title=title,
+            headers=headers,
+            rows=rows,
+            output_name=output_name,
+            money_cols=money_cols,
+        ),
+        source_metas=source_metas,
+    )
+
+
+def _mint_excel_from_artifacts(
+    owner: VerifiedArtifactOwner,
+    *,
+    source_ids: list[str],
+    base_file_id: str | None,
+    sheet: str | None,
+    cells: list[dict],
+    output_name: str | None,
+) -> artifact_provenance.TrustedEvidence:
+    """Trusted Change Plan seam; never exposed to model or request fields."""
+    requested_ids = artifact_provenance.validate_source_artifact_ids(source_ids)
+    ctx = _verified_owner_context(owner)
+    owner_sub = stable_owner_sub(ctx)
+    canonical_ids = [_canonical_source_id(source_id, owner) for source_id in requested_ids]
+    canonical_base = _canonical_source_id(base_file_id, owner) if base_file_id else None
+    if canonical_base is not None and canonical_base not in canonical_ids:
+        raise ProvenanceRequired("模板来源未包含在生成证明中")
+    _validate_excel_write_shape(
+        sheet=sheet,
+        cells=cells,
+        output_name=output_name,
+    )
+    source_metas = [_load_meta(source_id) for source_id in canonical_ids]
+    return artifact_provenance.mint_artifact_evidence(
+        owner_sub=owner_sub,
+        content_fingerprint_value=artifact_provenance.excel_edit_fingerprint(
+            base_file_id=canonical_base,
+            sheet=sheet,
+            cells=cells,
+            output_name=output_name,
+        ),
+        source_metas=source_metas,
+    )
 
 
 def _owner_of_unchecked(file_id: str) -> str | None:

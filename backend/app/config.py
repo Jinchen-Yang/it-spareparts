@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     agent_artifact_v2_enabled: bool = False
     # AI 上传件/生成件的元数据生命周期；对象清理器后续按 expires_at 执行。
     agent_artifact_retention_days: int = Field(default=90, ge=1, le=3650)
+    # Agent Evidence/source snapshot 共用的完整性密钥环。JSON 值格式：
+    # {"key-id":{"key":"base64url-32+-bytes","status":"active|verify_only|revoked"}}
+    # 与登录 SECRET_KEY 分离；空配置时任何需要完整性证明的生成制品 fail closed。
+    agent_integrity_active_key_id: str = ""
+    agent_integrity_keys_json: str = "{}"
 
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
     # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级
@@ -113,6 +118,11 @@ def check_security(settings: "Settings") -> list[str]:
         warns.append("SECRET_KEY 仍为默认值（token 可被离线伪造）")
     if "spareparts:spareparts" in settings.database_url:
         warns.append("数据库使用默认弱口令 spareparts:spareparts")
+    if settings.agent_artifact_v2_enabled and (
+        not settings.agent_integrity_active_key_id
+        or settings.agent_integrity_keys_json.strip() in {"", "{}"}
+    ):
+        warns.append("Artifact v2 已开启但 Agent 完整性密钥环未配置")
     return warns
 
 

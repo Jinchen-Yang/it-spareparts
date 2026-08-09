@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-import os
+import copy
 import json
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from app import permissions, security
 from app.auth import hash_password
@@ -68,6 +71,227 @@ def test_crash_after_atomic_rename_is_dry_run_then_recovered_ready(db):
     assert applied["applied"]["recover_ready"] == 1
     assert db.get(AgentArtifact, artifact.id).status == "ready"
     assert path.read_bytes() == b"durable"
+
+
+def test_crash_recovery_rejects_revoked_publisher_token_version(db):
+    created = agent_files.save_upload(
+        b"revoked durable bytes",
+        "revoked-crash.txt",
+        _owner(db, "revoked-crash-owner"),
+    )
+    artifact = db.get(AgentArtifact, created["file_id"])
+    user = db.query(SysUser).filter_by(username="revoked-crash-owner").one()
+    assert artifact is not None
+    artifact.status = "validating"
+    artifact.created_at = _OLD
+    artifact.expires_at = _NOW + timedelta(days=1)
+    user.token_version = int(user.token_version or 0) + 1
+    db.commit()
+
+    preview = _run()
+    assert preview["planned"]["recover_ready"] == 0
+    assert preview["planned"]["mark_failed"] == 1
+
+    applied = _run(apply=True)
+    db.expire_all()
+    assert applied["applied"]["recover_ready"] == 0
+    assert applied["applied"]["mark_failed"] == 1
+    assert db.get(AgentArtifact, artifact.id).status == "failed"
+
+
+def test_post_store_authorization_unknown_stays_hidden_then_recovers_ready(
+    db, monkeypatch
+):
+    owner = _owner(db, "post-store-unknown-owner")
+    real_require = agent_files._require_live_owner
+    calls = 0
+
+    def unknown_after_store(candidate):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise agent_files.AuthorizationUnavailable("transient auth outage")
+        return real_require(candidate)
+
+    monkeypatch.setattr(agent_files, "_require_live_owner", unknown_after_store)
+    with pytest.raises(agent_files.FileError, match="待协调"):
+        agent_files.save_upload(
+            b"durable but not ready",
+            "post-store-unknown.txt",
+            owner,
+        )
+
+    db.expire_all()
+    artifact = db.query(AgentArtifact).filter_by(
+        filename="post-store-unknown.txt"
+    ).one()
+    assert calls == 3
+    assert artifact.status == "validating"
+    path = agent_files.get_artifact_store().path_for(artifact.storage_key)
+    assert path.read_bytes() == b"durable but not ready"
+    with pytest.raises(agent_files.ArtifactUnavailable):
+        agent_files.get_download_info(artifact.id, owner)
+
+    artifact.created_at = _OLD
+    artifact.expires_at = _NOW + timedelta(days=1)
+    db.commit()
+    monkeypatch.setattr(agent_files, "_require_live_owner", real_require)
+    recovered = _run(apply=True)
+    db.expire_all()
+    assert recovered["applied"]["recover_ready"] == 1
+    assert db.get(AgentArtifact, artifact.id).status == "ready"
+
+
+@pytest.mark.parametrize("fault", ["directory_fsync", "final_stat"])
+def test_post_link_store_fault_preserves_validating_marker_for_recovery(
+    db, monkeypatch, fault
+):
+    owner = _owner(db, f"post-link-{fault}-owner")
+    filename = f"post-link-{fault}.txt"
+
+    with monkeypatch.context() as scoped:
+        if fault == "directory_fsync":
+            real_fsync = agent_files.os.fsync
+            fsync_calls = 0
+
+            def fail_directory_fsync(fd):
+                nonlocal fsync_calls
+                fsync_calls += 1
+                if fsync_calls == 2:
+                    raise OSError("directory fsync unavailable")
+                return real_fsync(fd)
+
+            scoped.setattr(agent_files.os, "fsync", fail_directory_fsync)
+        else:
+            path_type = type(agent_files._dir())
+            real_stat = path_type.stat
+            real_link = agent_files.os.link
+            linked = False
+            failed = False
+
+            def track_link(*args, **kwargs):
+                nonlocal linked
+                result = real_link(*args, **kwargs)
+                linked = True
+                return result
+
+            def fail_final_stat(path, *args, **kwargs):
+                nonlocal failed
+                if linked and not failed:
+                    failed = True
+                    raise OSError("final stat unavailable")
+                return real_stat(path, *args, **kwargs)
+
+            scoped.setattr(agent_files.os, "link", track_link)
+            scoped.setattr(path_type, "stat", fail_final_stat)
+
+        with pytest.raises(agent_files.FileError, match="待协调"):
+            agent_files.save_upload(b"post-link durable", filename, owner)
+
+    db.expire_all()
+    artifact = db.query(AgentArtifact).filter_by(filename=filename).one()
+    assert artifact.status == "validating"
+    path = agent_files.get_artifact_store().path_for(artifact.storage_key)
+    assert path.read_bytes() == b"post-link durable"
+    assert not list((agent_files._dir() / ".tmp").glob("*.part"))
+    with pytest.raises(agent_files.ArtifactUnavailable):
+        agent_files.get_download_info(artifact.id, owner)
+
+    artifact.created_at = _OLD
+    artifact.expires_at = _NOW + timedelta(days=1)
+    db.commit()
+    recovered = _run(apply=True)
+    db.expire_all()
+    assert recovered["applied"]["recover_ready"] == 1
+    assert db.get(AgentArtifact, artifact.id).status == "ready"
+
+
+@pytest.mark.parametrize(
+    "binding_case",
+    [
+        "missing_user_id",
+        "non_int_user_id",
+        "mismatched_user_id",
+        "missing_token_version",
+        "non_int_token_version",
+    ],
+)
+def test_crash_recovery_rejects_invalid_publisher_identity_binding(
+    db, binding_case
+):
+    created = agent_files.save_upload(
+        b"bound durable bytes",
+        "bound-crash.txt",
+        _owner(db, "bound-crash-owner"),
+    )
+    artifact = db.get(AgentArtifact, created["file_id"])
+    assert artifact is not None
+    extra = copy.deepcopy(artifact.extra_meta)
+    if binding_case == "missing_user_id":
+        extra.pop("_publisher_user_id")
+    elif binding_case == "non_int_user_id":
+        extra["_publisher_user_id"] = "1"
+    elif binding_case == "mismatched_user_id":
+        extra["_publisher_user_id"] = -1
+    elif binding_case == "missing_token_version":
+        extra.pop("_publisher_token_version")
+    else:
+        extra["_publisher_token_version"] = "0"
+    artifact.extra_meta = extra
+    artifact.status = "validating"
+    artifact.created_at = _OLD
+    artifact.expires_at = _NOW + timedelta(days=1)
+    db.commit()
+
+    preview = _run()
+    assert preview["planned"]["recover_ready"] == 0
+    assert preview["planned"]["mark_failed"] == 1
+    applied = _run(apply=True)
+    db.expire_all()
+    assert applied["applied"]["mark_failed"] == 1
+    assert db.get(AgentArtifact, artifact.id).status == "failed"
+
+
+def test_recovery_authorization_exception_is_retryable_then_recovers_ready(
+    db, monkeypatch
+):
+    created = agent_files.save_upload(
+        b"unknown authorization",
+        "unknown-auth.txt",
+        _owner(db, "unknown-auth-owner"),
+    )
+    artifact = db.get(AgentArtifact, created["file_id"])
+    assert artifact is not None
+    artifact.status = "validating"
+    artifact.created_at = _OLD
+    artifact.expires_at = _NOW + timedelta(days=1)
+    db.commit()
+
+    real_authorize = agent_files._reconcile_ready_authorized
+    monkeypatch.setattr(
+        agent_files,
+        "_reconcile_ready_authorized",
+        lambda _row: (_ for _ in ()).throw(RuntimeError("auth db unavailable")),
+    )
+    first = _run(apply=True)
+    db.expire_all()
+    assert first["outcome"] == "partial"
+    assert first["errors"] == 1
+    assert first["skipped"] == 1
+    assert first["applied"]["recover_ready"] == 0
+    assert first["applied"]["mark_failed"] == 0
+    assert db.get(AgentArtifact, artifact.id).status == "validating"
+
+    monkeypatch.setattr(
+        agent_files,
+        "_reconcile_ready_authorized",
+        real_authorize,
+    )
+    second = _run(apply=True)
+    db.expire_all()
+    assert second["outcome"] == "applied"
+    assert second["applied"]["recover_ready"] == 1
+    assert db.get(AgentArtifact, artifact.id).status == "ready"
 
 
 def test_orphan_and_temp_cleanup_is_strict_dry_run_first_and_preserves_collateral(db, tmp_path):

@@ -171,6 +171,25 @@ def _conditional_status(
         return changed.rowcount == 1
 
 
+_AUTHORIZED = "authorized"
+_DENIED = "denied"
+_UNKNOWN = "unknown"
+
+
+def _recovery_decision(row: AgentArtifact) -> str:
+    """Tri-state recovery proof: transient uncertainty must preserve retry state."""
+    try:
+        if not _object_matches(row):
+            return _DENIED
+        return (
+            _AUTHORIZED
+            if agent_files._reconcile_ready_authorized(row)
+            else _DENIED
+        )
+    except Exception:  # noqa: BLE001 - unknown is neither allow nor permanent deny
+        return _UNKNOWN
+
+
 def reconcile_agent_artifacts(
     *,
     apply: bool = False,
@@ -202,7 +221,12 @@ def reconcile_agent_artifacts(
     result["rows_scanned"] = len(rows)
     for row in rows:
         if row.status in {"prepared", "validating"} and row.created_at < cutoff:
-            if _object_matches(row):
+            decision = _recovery_decision(row)
+            if decision == _UNKNOWN:
+                result["errors"] += 1
+                result["skipped"] += 1
+                continue
+            if decision == _AUTHORIZED:
                 action = "recover_ready"
                 target = "ready"
             else:
@@ -211,6 +235,23 @@ def reconcile_agent_artifacts(
             result["planned"][action] += 1
             if apply:
                 try:
+                    # Planning and mutation are intentionally separate for dry-run
+                    # visibility.  Repeat both object integrity and the exact publisher
+                    # principal/scope contract immediately before the CAS.  A later
+                    # account change is still enforced by every ready/download read;
+                    # PostgreSQL authorization rows and filesystem objects cannot share
+                    # one atomic lock domain.
+                    if target == "ready":
+                        current_decision = _recovery_decision(row)
+                        if current_decision == _UNKNOWN:
+                            result["errors"] += 1
+                            result["skipped"] += 1
+                            continue
+                        if current_decision == _DENIED:
+                            result["planned"]["recover_ready"] -= 1
+                            result["planned"]["mark_failed"] += 1
+                            action = "mark_failed"
+                            target = "failed"
                     if _conditional_status(
                         session_factory,
                         artifact_id=row.id,

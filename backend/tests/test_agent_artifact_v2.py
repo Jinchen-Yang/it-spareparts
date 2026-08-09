@@ -911,7 +911,7 @@ def test_download_audit_distinguishes_success_expired_and_missing_object(db, mon
     assert "second-secret" not in repr(calls)
 
 
-def test_ready_commit_fault_after_object_write_preserves_reconcilable_object(db, monkeypatch):
+def test_ready_commit_fault_after_object_write_preserves_validating_marker(db, monkeypatch):
     owner = "fault-ready-commit"
     monkeypatch.setattr(
         agent_files,
@@ -924,7 +924,7 @@ def test_ready_commit_fault_after_object_write_preserves_reconcilable_object(db,
 
     db.expire_all()
     artifact = db.query(AgentArtifact).filter(AgentArtifact.owner_sub == owner).one()
-    assert artifact.status == "failed"
+    assert artifact.status == "validating"
     assert not agent_files._meta_path(artifact.id).exists()
     assert agent_files.get_artifact_store().path_for(artifact.storage_key).read_bytes() == b"fault"
 

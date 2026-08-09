@@ -107,6 +107,11 @@ os.environ["RAW_FILE_DIR"] = str(_raw_run.run_dir)
 # Production default is fail-closed. The test suite opts in explicitly so existing Agent
 # behavior tests exercise v2; kill-switch tests toggle the cached setting per test.
 os.environ["AGENT_ARTIFACT_V2_ENABLED"] = "true"
+os.environ["AGENT_INTEGRITY_ACTIVE_KEY_ID"] = "test-v1"
+os.environ["AGENT_INTEGRITY_KEYS_JSON"] = (
+    '{"test-v1":{"key":"dGVzdC1vbmx5LWludGVncml0eS1rZXktbWF0ZXJpYWwtMzItYnl0ZXM",'
+    '"status":"active"}}'
+)
 
 try:
     import pytest  # noqa: E402
