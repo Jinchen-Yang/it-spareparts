@@ -17,7 +17,6 @@ import tempfile
 import unicodedata
 import uuid
 import zipfile
-from copy import deepcopy
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -28,10 +27,13 @@ from typing import Any, Protocol
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import column_index_from_string, get_column_letter
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import SessionLocal
 from app.models.agent_artifact import AgentArtifact
+from app.models.system import SysUser
 
 _LEGACY_FILE_ID = re.compile(r"^[a-f0-9]{12}$")
 _MAX_UPLOAD_MB = 20
@@ -79,7 +81,6 @@ class ArtifactUnavailable(FileError):
 
 
 _ARTIFACT_V2_DISABLED_MESSAGE = "Artifact Delivery v2 已停用"
-_VERIFIED_OWNER_PROOF = object()
 
 
 def require_artifact_v2_enabled() -> None:
@@ -95,21 +96,13 @@ def artifact_reason_code(exc: FileError) -> str:
     return "validation_failed"
 
 
+@dataclass(frozen=True, slots=True)
 class VerifiedArtifactOwner:
-    """Opaque actor derived from a verified ``UserContext``.
+    """DB-bound principal; every sensitive service call revalidates its live user row."""
 
-    Python has no module-private constructors, so construction additionally requires a
-    module-owned sentinel. Besides the owner subject, the actor holds a defensive copy of
-    the server-derived authorization context used for generated scope and source checks.
-    """
-
-    __slots__ = ("_context", "_sub")
-
-    def __init__(self, sub: str, context: Any, proof: object):
-        if proof is not _VERIFIED_OWNER_PROOF:
-            raise TypeError("VerifiedArtifactOwner must come from verified_artifact_owner")
-        self._sub = sub
-        self._context = context
+    _user_pk: int
+    _sub: str
+    _token_version: int
 
     @property
     def sub(self) -> str:
@@ -181,7 +174,6 @@ class LocalArtifactStore:
         temp_dir.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(prefix="artifact-", suffix=".part", dir=temp_dir)
         temp_path = Path(temp_name)
-        published = False
         digest = hashlib.sha256()
         try:
             with os.fdopen(fd, "wb") as handle:
@@ -194,10 +186,13 @@ class LocalArtifactStore:
                 os.fsync(handle.fileno())
             if validator is not None:
                 validator(temp_path)
-            if final_path.exists():
+            # Hard-link publication is atomic and fails if the destination exists.
+            # Unlike exists()+replace it cannot overwrite another concurrent winner.
+            try:
+                os.link(temp_path, final_path, follow_symlinks=False)
+            except FileExistsError as exc:
                 raise FileError("文件发布冲突，请重试")
-            os.replace(temp_path, final_path)
-            published = True
+            temp_path.unlink()
             dir_fd = os.open(final_path.parent, os.O_RDONLY)
             try:
                 os.fsync(dir_fd)
@@ -210,8 +205,6 @@ class LocalArtifactStore:
             )
         except Exception:
             temp_path.unlink(missing_ok=True)
-            if published:
-                final_path.unlink(missing_ok=True)
             raise
 
     def inspect(self, storage_key: str) -> StoredObject:
@@ -574,42 +567,102 @@ def stable_owner_sub(user_ctx: Any) -> str:
     return subject
 
 
-def verified_artifact_owner(user_ctx: Any) -> VerifiedArtifactOwner:
-    """Create the only accepted artifact-write identity from authenticated context."""
-    return VerifiedArtifactOwner(
-        stable_owner_sub(user_ctx),
-        deepcopy(user_ctx),
-        _VERIFIED_OWNER_PROOF,
+def _context_from_user(user: SysUser):
+    from app import permissions
+    from app.security import UserContext
+
+    return UserContext(
+        user_id=user.username,
+        role=user.role,
+        salesperson_name=user.salesperson_name,
+        permissions=permissions.runtime_safe(permissions.effective_for_user(user)),
+        is_authenticated=True,
+        authn="sys_user",
+        has_stable_subject=True,
+        token_version=int(user.token_version or 0),
     )
 
 
-def _verified_owner_sub(owner: VerifiedArtifactOwner) -> str:
+def verified_artifact_owner(db: Session, user_ctx: Any) -> VerifiedArtifactOwner:
+    """Mint a principal only when token claims match the active SysUser row now."""
+    from app import permissions
+
+    subject = stable_owner_sub(user_ctx)
+    user = db.scalar(
+        select(SysUser)
+        .where(SysUser.username == subject, SysUser.is_active.is_(True))
+        .execution_options(populate_existing=True)
+    )
+    if user is None:
+        raise FileError("创建或访问制品需要有效的当前登录状态")
+    current = _context_from_user(user)
+    claimed_permissions = getattr(user_ctx, "permissions", None)
+    claims_match = (
+        getattr(user_ctx, "token_version", None) == current.token_version
+        and getattr(user_ctx, "role", None) == current.role
+        and _canonical_salesperson_subject(getattr(user_ctx, "salesperson_name", None))
+        == _canonical_salesperson_subject(current.salesperson_name)
+        and isinstance(claimed_permissions, dict)
+        and permissions.runtime_safe(claimed_permissions) == current.permissions
+    )
+    if not claims_match:
+        raise FileError("登录声明与当前账号事实不一致")
+    return VerifiedArtifactOwner(user.id, subject, current.token_version or 0)
+
+
+def _verified_owner_context(owner: VerifiedArtifactOwner):
     if not isinstance(owner, VerifiedArtifactOwner):
-        raise FileError("创建制品需要已验证身份")
-    if stable_owner_sub(owner._context) != owner.sub:
-        raise FileError("创建制品需要已验证身份")
-    return owner.sub
+        raise FileError("创建或访问制品需要已验证身份")
+    with SessionLocal() as db:
+        user = db.scalar(select(SysUser).where(
+            SysUser.id == owner._user_pk,
+            SysUser.username == owner.sub,
+            SysUser.is_active.is_(True),
+        ))
+        if user is None or int(user.token_version or 0) != owner._token_version:
+            raise FileError("创建或访问制品需要有效的当前登录状态")
+        return _context_from_user(user)
+
+
+def _verified_owner_sub(owner: VerifiedArtifactOwner) -> str:
+    return stable_owner_sub(_verified_owner_context(owner))
 
 
 def _generated_scope(owner: VerifiedArtifactOwner) -> dict:
-    _verified_owner_sub(owner)
-    return snapshot_access_scope(owner._context)
+    return snapshot_access_scope(_verified_owner_context(owner))
 
 
 def _canonical_source_id(source_id: str, owner: VerifiedArtifactOwner) -> str:
-    checked = _check_id(source_id)
-    if not access_allowed(checked, owner._context):
-        raise FileError("无权引用来源制品")
+    try:
+        checked = _authorized_owner_id(source_id, owner)
+    except ArtifactUnavailable as exc:
+        raise ArtifactUnavailable("无权引用来源制品", exc.reason_code) from exc
     meta = _load_meta(checked)
     return meta.get("file_id", checked)
 
 
-def _mark_artifact_ready(artifact_id: str) -> None:
+def _mark_artifact_ready(artifact_id: str, stored: StoredObject) -> None:
+    """CAS ``validating`` to ``ready``; accept a reconciler's identical result.
+
+    Object publication and the database transition cannot share one transaction.  A
+    reconciler can therefore prove the same object ready after the atomic publish but
+    before this publisher commits.  That is an idempotent success, not a conflict.
+    """
     with SessionLocal.begin() as db:
         row = db.get(AgentArtifact, artifact_id)
-        if row is None or row.status != "validating":
+        if row is None:
             raise FileError("文件发布状态冲突")
-        row.status = "ready"
+        metadata_matches = (
+            row.size_bytes == stored.size_bytes and row.sha256 == stored.sha256
+        )
+        if not metadata_matches:
+            raise FileError("文件发布完整性校验失败")
+        if row.status == "validating":
+            row.status = "ready"
+            return
+        if row.status == "ready":
+            return
+        raise FileError("文件发布状态冲突")
 
 
 def _mark_artifact_validating(artifact_id: str) -> None:
@@ -674,7 +727,6 @@ def _publish_artifact(
         ))
 
     store = get_artifact_store()
-    published = False
     try:
         _mark_artifact_validating(artifact_id)
         stored = store.publish_bytes(
@@ -682,16 +734,15 @@ def _publish_artifact(
             content,
             validator=lambda path: _validate_staged_file(path, ext),
         )
-        published = True
         if stored.size_bytes != len(content) or stored.sha256 != expected_hash:
             raise FileError("文件发布完整性校验失败")
-        _mark_artifact_ready(artifact_id)
+        # Re-read the formal key.  If another process reconciled the row meanwhile,
+        # _mark_artifact_ready accepts only this exact size/hash as idempotent success.
+        _mark_artifact_ready(artifact_id, store.inspect(storage_key))
     except Exception as exc:  # noqa: BLE001 - internal detail is deliberately hidden
-        if published:
-            try:
-                store.remove(storage_key)
-            except Exception:  # noqa: BLE001 - best-effort orphan cleanup
-                pass
+        # Never delete a formally published object here: after publish, the result of a
+        # DB commit/CAS can be uncertain and deleting could create ready+missing.  The
+        # failed/validating row is the durable reconciliation marker.
         try:
             _mark_artifact_failed(artifact_id)
         except Exception:  # noqa: BLE001 - preserve the stable public error on DB outage
@@ -788,6 +839,23 @@ def access_allowed(file_id: str, user_ctx: Any) -> bool:
     return True
 
 
+def _authorized_owner_id(file_id: str, owner: VerifiedArtifactOwner) -> str:
+    """Combine live-principal validation, owner ACL and current-scope recheck."""
+    fid = _check_id(file_id)
+    ctx = _verified_owner_context(owner)
+    try:
+        allowed = access_allowed(fid, ctx)
+    except ArtifactV2Disabled:
+        raise
+    except FileError as exc:
+        raise ArtifactUnavailable(
+            "文件不存在或无权访问", "not_found_or_forbidden"
+        ) from exc
+    if not allowed:
+        raise ArtifactUnavailable("文件不存在或无权访问", "not_found_or_forbidden")
+    return fid
+
+
 def _cell_str(v) -> str:
     if v is None:
         return ""
@@ -834,18 +902,6 @@ def save_upload(content: bytes, filename: str, owner: VerifiedArtifactOwner) -> 
             wb.close()
         except Exception as exc:  # noqa: BLE001
             raise FileError(f"无法解析 xlsx（可能损坏，请用 Excel 重新另存）: {type(exc).__name__}") from exc
-    else:
-        # Validate signatures/encoding before creating a metadata row.
-        check_dir = _dir() / ".tmp"
-        check_dir.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(prefix="upload-check-", suffix=f".{ext}", dir=check_dir)
-        check_path = Path(temp_name)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(content)
-            _validate_staged_file(check_path, ext)
-        finally:
-            check_path.unlink(missing_ok=True)
 
     artifact = _publish_artifact(
         content,
@@ -872,9 +928,9 @@ def _require_xlsx(fid: str, meta: dict):
         raise FileError(f"该文件是 .{meta.get('ext')}，结构化读取仅限 Excel；请用 read_document 读取内容")
 
 
-def inspect_file(file_id: str) -> dict:
+def inspect_file(file_id: str, owner: VerifiedArtifactOwner) -> dict:
     """看 Excel 结构：sheet 列表 + 每 sheet 前几行原样预览。"""
-    fid = _check_id(file_id)
+    fid = _authorized_owner_id(file_id, owner)
     meta = _load_meta(fid)
     _require_xlsx(fid, meta)
     wb = load_workbook(_data_path(fid, "xlsx"), read_only=True, data_only=True)
@@ -890,9 +946,10 @@ def inspect_file(file_id: str) -> dict:
             "note": "preview 为前几行原样数据(1-based 行号)；更多行用 read_file_rows"}
 
 
-def read_rows(file_id: str, sheet: str | None, start_row: int, max_rows: int) -> dict:
+def read_rows(file_id: str, sheet: str | None, start_row: int, max_rows: int,
+              owner: VerifiedArtifactOwner) -> dict:
     """分页读取 Excel 行（1-based）。"""
-    fid = _check_id(file_id)
+    fid = _authorized_owner_id(file_id, owner)
     meta = _load_meta(fid)
     _require_xlsx(fid, meta)
     wb = load_workbook(_data_path(fid, "xlsx"), read_only=True, data_only=True)
@@ -913,11 +970,11 @@ def read_rows(file_id: str, sheet: str | None, start_row: int, max_rows: int) ->
             "rows": rows, "total_rows": total}
 
 
-def preview(file_id: str, max_rows: int = 200) -> dict:
+def preview(file_id: str, owner: VerifiedArtifactOwner, max_rows: int = 200) -> dict:
     """文件预览（前端在线预览用）：xlsx 返回各 sheet 行数据（截断 max_rows×30列）；
     图片返回 kind=image（前端走下载端点取图）；其余 kind=other（仅可下载）。
-    归属校验由 API 层做（与 download 同一把关），本函数只读内容。"""
-    fid = _check_id(file_id)
+    归属与当前权限在服务层统一校验。"""
+    fid = _authorized_owner_id(file_id, owner)
     meta = _load_meta(fid)
     ext = meta.get("ext", "")
     filename = meta.get("filename", f"{fid}.{ext}")
@@ -985,9 +1042,9 @@ def _read_image_or_scanned(path: Path, hint: str) -> str:
                 "后才能识别。文字版 Word/Excel/PDF/txt 不受影响。")
 
 
-def read_document(file_id: str) -> dict:
+def read_document(file_id: str, owner: VerifiedArtifactOwner) -> dict:
     """通用读取：把任意支持格式抽成文本喂给模型（拆件/解析由模型完成）。"""
-    fid = _check_id(file_id)
+    fid = _authorized_owner_id(file_id, owner)
     meta = _load_meta(fid)
     ext = meta.get("ext", "")
     vision_used = False
@@ -1049,14 +1106,16 @@ def write_excel(base_file_id: str | None, sheet: str | None,
     """按模型指令写单元格，产出新文件（不动原件）。用于**回填客户模板**（保留原格式）。"""
     require_artifact_v2_enabled()
     _verified_owner_sub(owner)
+    # Authorize the source before validating model-supplied edit instructions.  This
+    # keeps non-owner/unknown source IDs indistinguishable at the service boundary.
+    base = _canonical_source_id(base_file_id, owner) if base_file_id else None
     if not cells:
         raise FileError("cells 不能为空")
     if len(cells) > _MAX_WRITE_CELLS:
         raise FileError(f"单次最多写 {_MAX_WRITE_CELLS} 个单元格")
 
     base_name = ""
-    if base_file_id:
-        base = _canonical_source_id(base_file_id, owner)
+    if base:
         bmeta = _load_meta(base)
         _require_xlsx(base, bmeta)
         wb = load_workbook(_data_path(base, "xlsx"))  # 保留原格式/公式
@@ -1188,7 +1247,7 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
             "rows_written": len(rows), "download_url": download_url, "artifact": ref}
 
 
-def owner_of(file_id: str) -> str | None:
+def _owner_of_unchecked(file_id: str) -> str | None:
     """文件创建者（发布时记录的 operated_by）；文件不存在抛 FileError。归属校验用。"""
     fid = _check_id(file_id)
     if _is_legacy_id(fid):
@@ -1196,9 +1255,9 @@ def owner_of(file_id: str) -> str | None:
     return _artifact_meta(fid, require_ready=False).get("operated_by")
 
 
-def get_download_info(file_id: str) -> ArtifactDownload:
+def get_download_info(file_id: str, owner: VerifiedArtifactOwner) -> ArtifactDownload:
     """Resolve and integrity-check a ready Artifact without exposing its storage key."""
-    fid = _check_id(file_id)
+    fid = _authorized_owner_id(file_id, owner)
     meta = _load_meta(fid)
     if _is_legacy_id(fid):
         path = _data_path(fid, meta.get("ext", ""))
@@ -1220,7 +1279,7 @@ def get_download_info(file_id: str) -> ArtifactDownload:
     )
 
 
-def get_download(file_id: str) -> tuple[Path, str]:
-    """下载定位：返回 (路径, 文件名)。归属校验在 API 层（见 api/agent.download）。"""
-    download = get_download_info(file_id)
+def get_download(file_id: str, owner: VerifiedArtifactOwner) -> tuple[Path, str]:
+    """下载定位：返回 (路径, 文件名)；调用时再次校验 live owner principal。"""
+    download = get_download_info(file_id, owner)
     return download.path, download.filename

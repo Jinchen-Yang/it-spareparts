@@ -8,22 +8,30 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from app import permissions, security
+from app.auth import hash_password
 from app.db import SessionLocal
 from app.models.agent_artifact import AgentArtifact
+from app.models.system import SysUser
 from app.services import agent_artifact_reconcile, agent_files
 
 _NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
 _OLD = _NOW - timedelta(hours=2)
 
 
-def _owner(username: str):
-    return agent_files.verified_artifact_owner(security.UserContext(
+def _owner(db, username: str):
+    db.add(SysUser(
+        username=username, role="admin", password_hash=hash_password("pw123456"),
+        permissions=permissions.effective("admin", None),
+    ))
+    db.commit()
+    return agent_files.verified_artifact_owner(db, security.UserContext(
         user_id=username,
         role="admin",
         permissions=permissions.effective("admin", None),
         is_authenticated=True,
         authn="sys_user",
         has_stable_subject=True,
+        token_version=0,
     ))
 
 
@@ -38,7 +46,7 @@ def _run(*, apply: bool = False, artifact_root=None):
 
 
 def test_crash_after_atomic_rename_is_dry_run_then_recovered_ready(db):
-    result = agent_files.save_upload(b"durable", "crash.txt", _owner("crash-owner"))
+    result = agent_files.save_upload(b"durable", "crash.txt", _owner(db, "crash-owner"))
     artifact = db.get(AgentArtifact, result["file_id"])
     assert artifact is not None
     artifact.status = "validating"
@@ -99,9 +107,10 @@ def test_orphan_and_temp_cleanup_is_strict_dry_run_first_and_preserves_collatera
 
 
 def test_reconciler_marks_missing_stale_rows_and_reaps_expired_failed_objects(db):
-    missing = agent_files.save_upload(b"missing", "missing.txt", _owner("owner"))
-    failed = agent_files.save_upload(b"failed", "failed.txt", _owner("owner"))
-    expired = agent_files.save_upload(b"expired", "expired.txt", _owner("owner"))
+    owner = _owner(db, "owner")
+    missing = agent_files.save_upload(b"missing", "missing.txt", owner)
+    failed = agent_files.save_upload(b"failed", "failed.txt", owner)
+    expired = agent_files.save_upload(b"expired", "expired.txt", owner)
     missing_row = db.get(AgentArtifact, missing["file_id"])
     failed_row = db.get(AgentArtifact, failed["file_id"])
     expired_row = db.get(AgentArtifact, expired["file_id"])
@@ -144,7 +153,7 @@ def test_reconciler_marks_missing_stale_rows_and_reaps_expired_failed_objects(db
 
 
 def test_expired_object_delete_failure_is_retried_on_next_run(db, monkeypatch):
-    created = agent_files.save_upload(b"retry", "retry.txt", _owner("owner"))
+    created = agent_files.save_upload(b"retry", "retry.txt", _owner(db, "owner"))
     row = db.get(AgentArtifact, created["file_id"])
     assert row is not None
     row.created_at = _OLD

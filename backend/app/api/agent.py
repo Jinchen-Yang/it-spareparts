@@ -83,7 +83,10 @@ def chat(
     settings = get_settings()
     if not settings.enable_agent:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "AI 助手未启用")
-    record_access_log(ctx, "chat", "agent", {"q": req.messages[-1].content[:200]})
+    record_access_log(ctx, "chat", "agent", {
+        "message_count": len(req.messages),
+        "last_message_chars": len(req.messages[-1].content),
+    })
     if not provider.is_configured():
         return {"configured": False, "answer": _NOT_CONFIGURED_MSG, "tool_calls": []}
     try:
@@ -91,7 +94,7 @@ def chat(
     except provider.LLMNotConfigured:
         return {"configured": False, "answer": _NOT_CONFIGURED_MSG, "tool_calls": []}
     except Exception as exc:  # noqa: BLE001 —— 上游 LLM 网络/配额错误：不泄露细节
-        _log.error("agent chat failed: %r", exc)
+        _log.error("agent chat failed exception_type=%s", type(exc).__name__)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY,
                             "AI 服务调用失败，请稍后重试（详情见服务端日志）") from exc
     return {"configured": True, **out}
@@ -108,7 +111,10 @@ def chat_stream(
     settings = get_settings()
     if not settings.enable_agent:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "AI 助手未启用")
-    record_access_log(ctx, "chat_stream", "agent", {"q": req.messages[-1].content[:200]})
+    record_access_log(ctx, "chat_stream", "agent", {
+        "message_count": len(req.messages),
+        "last_message_chars": len(req.messages[-1].content),
+    })
 
     def _sse(ev: dict) -> str:
         return f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
@@ -122,7 +128,7 @@ def chat_stream(
             for ev in runtime.run_stream(db, [m.model_dump() for m in req.messages], ctx):
                 yield _sse(ev)
         except Exception as exc:  # noqa: BLE001 —— 流中途出错：发 error 事件而非半截断流
-            _log.error("agent stream failed: %r", exc)
+            _log.error("agent stream failed exception_type=%s", type(exc).__name__)
             yield _sse({"type": "error", "message": "AI 服务调用失败，请稍后重试"})
 
     return StreamingResponse(gen(), media_type="text/event-stream",
@@ -133,13 +139,14 @@ def chat_stream(
 @router.post("/upload")
 async def upload(
     file: UploadFile = File(...),
+    db: Session = Depends(get_db),
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """上传受支持的办公文件/文本/图片，返回不可猜测的 Artifact UUID。"""
     try:
         # 身份与发布开关必须在读请求体之前失败关闭，避免未授权的大文件消耗内存。
-        owner = agent_files.verified_artifact_owner(ctx)
+        owner = agent_files.verified_artifact_owner(db, ctx)
         agent_files.require_artifact_v2_enabled()
     except agent_files.FileError as exc:
         reason = (
@@ -180,32 +187,22 @@ async def upload(
 @router.get("/files/{file_id}")
 def download(
     file_id: str,
+    db: Session = Depends(get_db),
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> FileResponse:
     """下载智能体生成/上传的文件（普通端点严格仅本人，管理员也不例外）。"""
     try:
-        agent_files.owner_of(file_id)        # 文件不存在 → FileError → 404
+        owner = agent_files.verified_artifact_owner(db, ctx)
+        artifact = agent_files.get_download_info(file_id, owner)
     except agent_files.FileError as exc:
         _audit_artifact_access(
             ctx, "download", "denied", artifact_id=file_id,
             reason_code=agent_files.artifact_reason_code(exc),
         )
-        raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
-    # 防越权下载他人上传的报价/合同（IDOR）：普通端点对所有角色都要求本人创建。
-    if not agent_files.access_allowed(file_id, ctx):
-        _audit_artifact_access(
-            ctx, "download", "denied", artifact_id=file_id, reason_code="forbidden"
-        )
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该文件（非本人上传/生成）")
-    try:
-        artifact = agent_files.get_download_info(file_id)
-    except agent_files.FileError as exc:
-        _audit_artifact_access(
-            ctx, "download", "denied", artifact_id=file_id,
-            reason_code=agent_files.artifact_reason_code(exc),
-        )
-        raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
+        if isinstance(exc, agent_files.ArtifactV2Disabled):
+            raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在或无权访问") from exc
     _audit_artifact_access(ctx, "download", "success", artifact_id=file_id)
     return FileResponse(
         artifact.path,
@@ -224,30 +221,21 @@ def download(
 @router.get("/files/{file_id}/preview")
 def preview_file(
     file_id: str,
+    db: Session = Depends(get_db),
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """在线预览文件内容（所有角色仅本人）——与 download 同一归属校验，防 IDOR。"""
     try:
-        agent_files.owner_of(file_id)
+        owner = agent_files.verified_artifact_owner(db, ctx)
+        result = agent_files.preview(file_id, owner)
     except agent_files.FileError as exc:
         _audit_artifact_access(
             ctx, "preview", "denied", artifact_id=file_id,
             reason_code=agent_files.artifact_reason_code(exc),
         )
-        raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
-    if not agent_files.access_allowed(file_id, ctx):
-        _audit_artifact_access(
-            ctx, "preview", "denied", artifact_id=file_id, reason_code="forbidden"
-        )
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该文件（非本人上传/生成）")
-    try:
-        result = agent_files.preview(file_id)
-    except agent_files.FileError as exc:
-        _audit_artifact_access(
-            ctx, "preview", "denied", artifact_id=file_id,
-            reason_code=agent_files.artifact_reason_code(exc),
-        )
-        raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
+        if isinstance(exc, agent_files.ArtifactV2Disabled):
+            raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在或无权访问") from exc
     _audit_artifact_access(ctx, "preview", "success", artifact_id=file_id)
     return result

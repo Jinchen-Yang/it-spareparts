@@ -4,9 +4,11 @@ import io
 import pytest
 from openpyxl import load_workbook
 
-from app import security
+from app import permissions, security
 from app.agent import tools
+from app.auth import hash_password
 from app.db import SessionLocal
+from app.models.system import SysUser
 from app.services import agent_files as af
 
 
@@ -20,8 +22,10 @@ def db():
 @pytest.fixture()
 def ctx():
     return security.UserContext(
-        user_id="phase1-test", role="phase1_full_access", is_authenticated=True,
+        user_id="bom-admin", role="admin",
+        permissions=permissions.effective("admin", None), is_authenticated=True,
         authn="sys_user", has_stable_subject=True,
+        token_version=0,
     )
 
 
@@ -35,66 +39,80 @@ def _docx_bytes(lines: list[str]) -> bytes:
     return buf.getvalue()
 
 
-def _owner(username: str):
-    return af.verified_artifact_owner(security.UserContext(
+def _owner(db, username: str):
+    user = db.query(SysUser).filter_by(username=username).one_or_none()
+    if user is None:
+        db.add(SysUser(
+            username=username, role="admin", password_hash=hash_password("pw123456"),
+            permissions=permissions.effective("admin", None),
+        ))
+        db.commit()
+    return af.verified_artifact_owner(db, security.UserContext(
         user_id=username,
         role="admin",
+        permissions=permissions.effective("admin", None),
         is_authenticated=True,
         authn="sys_user",
         has_stable_subject=True,
+        token_version=0,
     ))
 
 
-def test_upload_docx_and_read(ctx):
+def test_upload_docx_and_read(db, ctx):
+    owner = _owner(db, "bom-admin")
     up = af.save_upload(_docx_bytes(["1台 Dell R750", "2× Xeon Gold 6330", "8× 32GB DDR4"]),
-                        "整机配置.docx", _owner("admin"))
+                        "整机配置.docx", owner)
     assert up["ext"] == "docx" and up["file_kind"] == "Word"
-    rd = af.read_document(up["file_id"])
+    rd = af.read_document(up["file_id"], owner)
     assert "Xeon Gold 6330" in rd["content"] and rd["vision_used"] is False
 
 
-def test_upload_txt_and_read(ctx):
+def test_upload_txt_and_read(db, ctx):
+    owner = _owner(db, "bom-admin")
     up = af.save_upload(
         "服务器配置:\nCPU x2 6330\n内存 32G x8".encode(),
         "config.txt",
-        _owner("admin"),
+        owner,
     )
-    rd = af.read_document(up["file_id"])
+    rd = af.read_document(up["file_id"], owner)
     assert "6330" in rd["content"]
 
 
-def test_image_degrades_without_vision(ctx):
+def test_image_degrades_without_vision(db, ctx):
     from PIL import Image
     buf = io.BytesIO()
     Image.new("RGB", (60, 30), "white").save(buf, "PNG")
-    up = af.save_upload(buf.getvalue(), "cfg.png", _owner("admin"))
-    rd = af.read_document(up["file_id"])
+    owner = _owner(db, "bom-admin")
+    up = af.save_upload(buf.getvalue(), "cfg.png", owner)
+    rd = af.read_document(up["file_id"], owner)
     assert "未配置视觉模型" in rd["content"]  # 无 VISION_API_KEY 时优雅降级
 
 
-def test_reject_executable_ext(ctx):
+def test_reject_executable_ext(db, ctx):
     with pytest.raises(af.FileError):
-        af.save_upload(b"MZ", "evil.exe", _owner("admin"))
+        af.save_upload(b"MZ", "evil.exe", _owner(db, "bom-admin"))
 
 
 def test_read_document_tool(db, ctx):
+    owner = _owner(db, "bom-admin")
     up = af.save_upload(
         _docx_bytes(["RTX 4090 显卡 x2"]),
         "x.docx",
-        af.verified_artifact_owner(ctx),
+        owner,
     )
     r = tools.dispatch(db, "read_document", {"file_id": up["file_id"]}, ctx)
     assert "RTX 4090" in r["content"]
 
 
 def test_write_report_styled(db, ctx):
+    owner = _owner(db, "bom-admin")
     r = tools.dispatch(db, "write_report", {
         "title": "报价单", "headers": ["部件", "数量", "采购价", "备注"],
         "rows": [["CPU", 2, 3500.0, "ok"], ["内存", 8, 800.0, "规格需确认"], ["X", 1, None, "库内未找到"]],
         "money_cols": [2],
     }, ctx)
     assert "download_url" in r and r["rows_written"] == 3
-    path, _ = af.get_download(r["file_id"])
+    path, _ = af.get_download(r["file_id"], owner)
     ws = load_workbook(path).active
     # 标题行1、表头行2、数据行3-5；表头靛蓝填充
     assert ws.cell(2, 1).fill.fgColor.rgb.endswith("4F46E5")

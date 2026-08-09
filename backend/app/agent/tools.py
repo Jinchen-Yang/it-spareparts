@@ -2,7 +2,7 @@
 
 设计原则：
 - 工具结果只来自库内真实数据；异常包成 {"error": ...} 让模型自恢复（换词重搜/向用户澄清）。
-- 所有调用过 record_access_log（开关开启后即审计"谁问了什么、查了哪个型号"）。
+- 所有调用过 record_access_log；审计仅记录工具名、参数键与数量等无内容结构。
 - 输出过 apply_field_visibility（RBAC 关闭时原样；将来收紧销售/采购可见字段零改动）。
 """
 import json
@@ -474,16 +474,12 @@ def _get_profit_ranking(db: Session, args: dict, ctx: security.UserContext) -> d
     return security.apply_field_visibility(data, ctx)
 
 
-def _owns(ctx: security.UserContext, file_id: str | None) -> bool:
-    """文件归属 + 当前可见范围重验；生成件在账号降权后 fail closed。"""
-    if not file_id:
-        return True
+def _artifact_owner(db: Session, ctx: security.UserContext):
+    """Mint a live DB-derived principal; never trust model args or stale contexts."""
     try:
-        return agent_files.access_allowed(file_id, ctx)
+        return agent_files.verified_artifact_owner(db, ctx)
     except agent_files.FileError:
-        # 文件不存在也按"无权"处理（TOOLS-4）：让"不存在"与"非本人"返回不可区分的拒绝，
-        # 堵住通过 file_id 探测文件是否存在的 oracle。
-        return False
+        return None
 
 
 _NO_ACCESS = {"error": "无权访问该文件（非本人上传/生成）"}
@@ -491,17 +487,25 @@ _NO_ACCESS = {"error": "无权访问该文件（非本人上传/生成）"}
 
 def _inspect_file(db: Session, args: dict, ctx: security.UserContext) -> dict:
     fid = str(args.get("file_id", ""))
-    if not _owns(ctx, fid):
+    owner = _artifact_owner(db, ctx)
+    if owner is None:
         return _NO_ACCESS
-    return agent_files.inspect_file(fid)
+    try:
+        return agent_files.inspect_file(fid, owner)
+    except agent_files.FileError:
+        return _NO_ACCESS
 
 
 def _read_file_rows(db: Session, args: dict, ctx: security.UserContext) -> dict:
-    if not _owns(ctx, str(args.get("file_id", ""))):
+    owner = _artifact_owner(db, ctx)
+    if owner is None:
         return _NO_ACCESS
-    return agent_files.read_rows(
-        str(args.get("file_id", "")), args.get("sheet"),
-        int(args.get("start_row") or 1), int(args.get("max_rows") or 50))
+    try:
+        return agent_files.read_rows(
+            str(args.get("file_id", "")), args.get("sheet"),
+            int(args.get("start_row") or 1), int(args.get("max_rows") or 50), owner)
+    except agent_files.FileError:
+        return _NO_ACCESS
 
 
 def _lookup_prices_bulk(db: Session, args: dict, ctx: security.UserContext) -> dict:
@@ -547,19 +551,26 @@ def _list_recent_purchases(db: Session, args: dict, ctx: security.UserContext) -
 
 
 def _write_excel(db: Session, args: dict, ctx: security.UserContext) -> dict:
-    if not _owns(ctx, args.get("base_file_id")):   # 基于他人文件回填 = 变相读他人文件
+    owner = _artifact_owner(db, ctx)
+    if owner is None:
         return _NO_ACCESS
-    return agent_files.write_excel(
-        args.get("base_file_id"), args.get("sheet"),
-        args.get("cells") or [], args.get("output_name"),
-        agent_files.verified_artifact_owner(ctx))
+    try:
+        return agent_files.write_excel(
+            args.get("base_file_id"), args.get("sheet"),
+            args.get("cells") or [], args.get("output_name"), owner)
+    except agent_files.ArtifactUnavailable:
+        return _NO_ACCESS
 
 
 def _read_document(db: Session, args: dict, ctx: security.UserContext) -> dict:
     fid = str(args.get("file_id", ""))
-    if not _owns(ctx, fid):
+    owner = _artifact_owner(db, ctx)
+    if owner is None:
         return _NO_ACCESS
-    return agent_files.read_document(fid)
+    try:
+        return agent_files.read_document(fid, owner)
+    except agent_files.FileError:
+        return _NO_ACCESS
 
 
 def _write_report(db: Session, args: dict, ctx: security.UserContext) -> dict:
@@ -572,9 +583,12 @@ def _write_report(db: Session, args: dict, ctx: security.UserContext) -> dict:
         return {"error": "headers 需为非空数组"}
     if not isinstance(rows, list):
         return {"error": "rows 需为二维数组"}
+    owner = _artifact_owner(db, ctx)
+    if owner is None:
+        return _NO_ACCESS
     return agent_files.write_report(
         args.get("title"), [str(h) for h in headers], rows,
-        args.get("output_name"), agent_files.verified_artifact_owner(ctx),
+        args.get("output_name"), owner,
         money_cols=args.get("money_cols") if isinstance(args.get("money_cols"), list) else None)
 
 
@@ -691,20 +705,135 @@ _REGISTRY = {
 }
 
 
+def _safe_tool_audit(name: str, args: dict, outcome: str) -> dict:
+    """Schema-derived structure only; never copy argument values or tool results."""
+    schema = next(
+        (item["function"] for item in TOOLS if item["function"]["name"] == name),
+        None,
+    )
+    allowed = set((schema or {}).get("parameters", {}).get("properties", {}))
+    supplied = args if isinstance(args, dict) else {}
+    keys = sorted(key for key in supplied if key in allowed)
+    detail: dict[str, object] = {
+        "outcome": outcome,
+        "arg_count": len(supplied),
+        "arg_keys": keys,
+    }
+    for key, label in (
+        ("cells", "cell_count"),
+        ("rows", "row_count"),
+        ("headers", "column_count"),
+        ("queries", "query_count"),
+    ):
+        value = supplied.get(key)
+        if key in allowed and isinstance(value, list):
+            detail[label] = len(value)
+    artifact_ids = []
+    for key in ("file_id", "base_file_id"):
+        if key not in allowed:
+            continue
+        try:
+            artifact_ids.append(agent_files._check_id(supplied.get(key)))
+        except agent_files.FileError:
+            pass
+    if artifact_ids:
+        detail["artifact_ids"] = artifact_ids
+    return detail
+
+
+_SAFE_AUDIT_OUTCOMES = {
+    "started", "recorded", "success", "error", "business_error",
+    "internal_error", "denied",
+}
+_SAFE_AUDIT_COUNT_FIELDS = ("cell_count", "row_count", "column_count", "query_count")
+
+
+def _sanitize_tool_audit(name: str, detail: object) -> dict:
+    """重新验证已经生成的工具摘要。
+
+    chat checkpoint/list 边界会用它防御调用方误把 raw args 伪装成摘要；
+    只接受固定字段、schema 中已知键名、非负数计数和合法 artifact id。
+    """
+    supplied = detail if isinstance(detail, dict) else {}
+    schema = next(
+        (item["function"] for item in TOOLS if item["function"]["name"] == name),
+        None,
+    )
+    allowed = set((schema or {}).get("parameters", {}).get("properties", {}))
+    outcome = supplied.get("outcome")
+    safe: dict[str, object] = {
+        "outcome": outcome if outcome in _SAFE_AUDIT_OUTCOMES else "recorded",
+        "arg_count": (
+            supplied["arg_count"]
+            if isinstance(supplied.get("arg_count"), int)
+            and not isinstance(supplied.get("arg_count"), bool)
+            and supplied["arg_count"] >= 0
+            else 0
+        ),
+        "arg_keys": sorted({
+            key for key in supplied.get("arg_keys", [])
+            if isinstance(key, str) and key in allowed
+        }) if isinstance(supplied.get("arg_keys"), list) else [],
+    }
+    for field in _SAFE_AUDIT_COUNT_FIELDS:
+        value = supplied.get(field)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            safe[field] = value
+    artifact_ids: list[str] = []
+    values = supplied.get("artifact_ids")
+    if isinstance(values, list):
+        for value in values:
+            try:
+                artifact_id = agent_files._check_id(value)
+            except agent_files.FileError:
+                continue
+            if artifact_id not in artifact_ids:
+                artifact_ids.append(artifact_id)
+    if artifact_ids:
+        safe["artifact_ids"] = artifact_ids
+    return safe
+
+
 def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext) -> dict:
     """执行一次工具调用：审计 → 派发 → 内部异常脱敏后回灌（不让对话崩掉、也不泄实现细节）。
 
     业务错由各工具显式 return {"error": 文案}（如"型号不存在""query 不能为空"）——这些是给
     模型自恢复的安全文案，原样回灌。这里的 except 只兜底**未预期的内部异常**（如 SQLAlchemyError
-    会把 SQL 语句 + 表/列名带出）：原始 type+消息只 _log 到服务端，回灌给模型/用户的只有固定脱敏
-    文案。否则裸异常经工具结果 → tool 消息 → SSE delta 直达终端用户（信息泄漏，PR-审计 TOOLS-1）。
+    会把 SQL 语句 + 表/列名带出）：服务端仅记录已登记工具名与异常类型，不记录参数、结果、异常
+    消息或 traceback；回灌给模型/用户的只有固定脱敏文案。
     """
-    security.record_access_log(ctx, f"agent_tool:{name}", "agent", args)
     fn = _REGISTRY.get(name)
     if fn is None:
+        security.record_access_log(
+            ctx,
+            "agent_tool:unknown",
+            "agent",
+            _safe_tool_audit("", args, "denied"),
+        )
         return {"error": f"未知工具: {name}"}
     try:
-        return _jsonable(fn(db, args, ctx))
-    except Exception:  # noqa: BLE001 —— 内部异常绝不外泄：原始信息只落服务端日志
-        _log.exception("agent tool failed name=%s args=%s", name, args)
+        result = _jsonable(fn(db, args, ctx))
+    except Exception as exc:  # noqa: BLE001 —— raw args/message/traceback 均不得落日志
+        security.record_access_log(
+            ctx,
+            f"agent_tool:{name}",
+            "agent",
+            _safe_tool_audit(name, args, "internal_error"),
+        )
+        _log.error(
+            "agent tool failed name=%s exception_type=%s",
+            name,
+            type(exc).__name__,
+        )
         return {"error": "工具执行失败，请换个方式或稍后重试", "retriable": True, "kind": "internal"}
+    security.record_access_log(
+        ctx,
+        f"agent_tool:{name}",
+        "agent",
+        _safe_tool_audit(
+            name,
+            args,
+            "business_error" if isinstance(result, dict) and "error" in result else "success",
+        ),
+    )
+    return result

@@ -19,6 +19,37 @@ HISTORY_CHAR_CAP = 8000      # 单条消息回灌上限，防超长答复撑爆�
 _FILE_PREFIX = re.compile(r"^\[已上传文件[^\]]*\]\n*")
 
 
+def _content_free_tool_calls(tool_calls: list | None) -> list[dict]:
+    """Normalize tool traces at the persistence/API boundary without values.
+
+    Runtime normally supplies an already-safe summary.  We still sanitize it here so a
+    future caller cannot accidentally persist raw customer queries, workbook cells or
+    report rows.  Legacy rows with raw ``args`` are converted on read as well.
+    """
+    from app.agent import tools as agent_tools
+
+    safe_calls: list[dict] = []
+    for item in tool_calls or []:
+        if not isinstance(item, dict):
+            continue
+        raw_name = item.get("name")
+        name = raw_name if isinstance(raw_name, str) and raw_name in agent_tools._REGISTRY else "unknown"
+        payload = item.get("args")
+        if (
+            isinstance(payload, dict)
+            and {"outcome", "arg_count", "arg_keys"}.issubset(payload)
+        ):
+            summary = agent_tools._sanitize_tool_audit(name, payload)
+        else:
+            summary = agent_tools._safe_tool_audit(
+                name,
+                payload if isinstance(payload, dict) else {},
+                "recorded",
+            )
+        safe_calls.append({"name": name, "args": summary})
+    return safe_calls
+
+
 def list_sessions(db: Session, sub: str) -> list[dict]:
     rows = db.scalars(
         select(ChatSession)
@@ -64,15 +95,17 @@ def list_messages(db: Session, session_id: int) -> list[dict]:
     ).all()
     return [
         {"id": m.id, "role": m.role, "content": m.content,
-         "tools": m.tools or [], "stopped": m.stopped, "created_at": m.created_at}
+         "tools": _content_free_tool_calls(m.tools),
+         "stopped": m.stopped, "created_at": m.created_at}
         for m in rows
     ]
 
 
 def append_message(db: Session, session: ChatSession, role: str, content: str,
                    tools: list | None = None, stopped: bool = False) -> ChatMessage:
+    safe_tools = _content_free_tool_calls(tools)
     m = ChatMessage(session_id=session.id, role=role, content=content,
-                    tools=tools or None, stopped=stopped)
+                    tools=safe_tools or None, stopped=stopped)
     db.add(m)
     # 首条用户消息自动定标题（剥掉文件注入前缀，与旧前端口径一致）
     if role == "user" and session.title == "新对话":
@@ -94,10 +127,11 @@ def save_assistant_progress(session_id: int, msg_id: int | None, content: str,
     """
     from app.db import SessionLocal
 
+    safe_tools = _content_free_tool_calls(tools)
     with SessionLocal() as db:
         if msg_id is None:
             m = ChatMessage(session_id=session_id, role="assistant",
-                            content=content, tools=tools or None, stopped=stopped)
+                            content=content, tools=safe_tools or None, stopped=stopped)
             db.add(m)
             db.flush()
             msg_id = m.id
@@ -105,7 +139,7 @@ def save_assistant_progress(session_id: int, msg_id: int | None, content: str,
             db.execute(
                 ChatMessage.__table__.update()
                 .where(ChatMessage.id == msg_id)
-                .values(content=content, tools=tools or None, stopped=stopped)
+                .values(content=content, tools=safe_tools or None, stopped=stopped)
             )
         db.execute(
             ChatSession.__table__.update()

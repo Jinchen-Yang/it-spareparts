@@ -16,6 +16,7 @@ import type {
 import { artifactIdFromFileUrl, parseUploadedAttachmentMessage } from "../artifactIds";
 import { clearSessionScopedPreferences } from "../sessionPreferences";
 import { COLORS } from "../theme";
+import { summarizeToolAudit } from "../toolAudit";
 
 const TOOL_LABEL: Record<string, string> = {
   search_parts: "型号搜索",
@@ -207,8 +208,6 @@ function mergeConsec(names: string[]): { name: string; count: number }[] {
   return out;
 }
 const label = (n: string) => TOOL_LABEL[n] || n;
-const argOf = (a?: Record<string, unknown>) =>
-  String((a?.query ?? a?.pn_std ?? a?.dimension ?? a?.file_id ?? "") || "");
 
 // 思考链：默认折叠的灰色块，点标题展开，流式时标题显示"思考中…"
 function ThinkBlock({ text, streaming }: { text: string; streaming?: boolean }) {
@@ -251,7 +250,7 @@ function ToolTrace({ tools }: { tools?: AgentToolCall[] }) {
       {open && (
         <div style={{ marginTop: 4, paddingLeft: 14, borderLeft: "2px solid #ECE8E1" }}>
           {tools.map((t, i) => {
-            const a = argOf(t.args);
+            const a = summarizeToolAudit(t.args);
             return (
               <div key={i} style={{ fontSize: 12, color: "var(--mb-text-3)", padding: "2px 0" }}>
                 {label(t.name)}{a ? <span style={{ color: "var(--mb-text-3)" }}>（{a.slice(0, 30)}）</span> : null}

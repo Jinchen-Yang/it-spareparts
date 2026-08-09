@@ -104,6 +104,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Serialize the decision with all writers.  Checking emptiness under the default
+    # ACCESS SHARE lock permits a concurrent INSERT to commit while DROP waits, which
+    # would silently destroy that newly committed row.
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute("LOCK TABLE agent_artifact IN ACCESS EXCLUSIVE MODE")
     op.execute(
         """
         DO $$

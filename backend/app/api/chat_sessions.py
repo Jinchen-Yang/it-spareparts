@@ -280,7 +280,7 @@ def chat_stream(
     _require_agent_enabled()
     s = _owned_or_404(db, ident, session_id)
     record_access_log(ctx, "chat_stream", "agent",
-                      {"session_id": s.id, "q": req.message[:200]})
+                      {"session_id": s.id, "message_chars": len(req.message)})
 
     hub = acquire_session(s.id)
     if hub is None:
@@ -333,8 +333,12 @@ def chat_stream(
                 msg_id = chat_store.save_assistant_progress(
                     sid, msg_id, content or "(无内容)", trace, stopped)
                 since_ckpt = 0
-            except Exception:  # noqa: BLE001 —— 落库失败不能炸生成
-                _log.exception("checkpoint assistant message failed (session=%s)", sid)
+            except Exception as exc:  # noqa: BLE001 —— 落库失败不能炸生成
+                _log.error(
+                    "checkpoint assistant message failed session=%s exception_type=%s",
+                    sid,
+                    type(exc).__name__,
+                )
 
         wdb = SessionLocal()
         try:
@@ -354,12 +358,24 @@ def chat_stream(
                     trace.append({"name": ev.get("name"), "args": ev.get("args")})
                     _save(stopped=True)
                 elif ev.get("type") == "tool_done":
+                    # runtime 发来的 args 是无内容安全摘要；完成后只更新状态，
+                    # 不回填原始参数或工具结果。
+                    for call in reversed(trace):
+                        if call.get("name") != ev.get("name"):
+                            continue
+                        summary = call.get("args")
+                        if isinstance(summary, dict):
+                            call["args"] = {
+                                **summary,
+                                "outcome": "success" if ev.get("ok") else "error",
+                            }
+                        break
                     wdb.rollback()  # 工具均只读：立即把连接还回池，别跨整轮 LLM 往返占着
                 elif ev.get("type") == "done":
                     _save(stopped=False, final=True)
                 hub.publish(ev)
         except Exception as exc:  # noqa: BLE001 —— 上游 LLM 错误：保留已生成部分
-            _log.error("agent session stream failed: %r", exc)
+            _log.error("agent session stream failed exception_type=%s", type(exc).__name__)
             _save(stopped=True, final=True)
             hub.publish({"type": "error", "message": "AI 服务调用失败，请稍后重试"})
         finally:

@@ -50,15 +50,26 @@ export interface PartHit {
 }
 
 // ===== 二期 AI 助手 =====
+export interface AgentToolAudit {
+  outcome: string;
+  arg_count: number;
+  arg_keys: string[];
+  cell_count?: number;
+  row_count?: number;
+  column_count?: number;
+  query_count?: number;
+  artifact_ids?: string[];
+}
 export interface AgentToolCall {
   name: string;
-  args: Record<string, unknown>;
+  /** Content-free server audit summary; never raw model arguments or tool results. */
+  args: AgentToolAudit;
 }
 /** SSE 事件（/agent/chat/stream） */
 export type AgentStreamEvent =
   | { type: "delta"; text: string }
   | { type: "thinking"; text: string }
-  | { type: "tool"; name: string; args: Record<string, unknown> }
+  | { type: "tool"; name: string; args: AgentToolAudit }
   | { type: "tool_done"; name: string; ok: boolean }
   | { type: "done"; tool_calls: AgentToolCall[]; answer?: string; configured?: boolean; stopped?: boolean }
   | { type: "error"; message: string };

@@ -9,7 +9,7 @@ from app import permissions, security
 from app.agent import tools
 from app.auth import hash_password
 from app.main import app
-from app.models.system import SysImportBatch, SysUser
+from app.models.system import SysAccessLog, SysImportBatch, SysUser
 from app.services import part_overview, profit, purchase_query
 from tests import factories as f
 
@@ -37,6 +37,59 @@ def test_dispatch_keeps_business_error(db):
     ctx = security.UserContext(user_id=None, role="phase1_full_access")
     r = tools.dispatch(db, "search_parts", {"query": "   "}, ctx)
     assert r.get("error") and "kind" not in r   # 业务错无 internal 标记
+
+
+def test_tool_audit_and_error_logs_never_store_raw_args_results_or_exception_message(
+    db, monkeypatch, caplog
+):
+    sentinel = "CUSTOMER-SECRET-CELLS-9f7a"
+    ctx = security.UserContext(user_id="audit-user", role="admin")
+    monkeypatch.setattr("app.config.ENABLE_ACCESS_LOG", True)
+    monkeypatch.setattr(tools._log, "disabled", False)
+    monkeypatch.setattr(tools._log, "propagate", True)
+
+    monkeypatch.setitem(
+        tools._REGISTRY,
+        "write_report",
+        lambda _db, _args, _ctx: {"result": sentinel},
+    )
+    tools.dispatch(
+        db,
+        "write_report",
+        {"headers": [sentinel], "rows": [[sentinel]], "output_name": sentinel},
+        ctx,
+    )
+    tools.dispatch(db, sentinel, {"cells": [{"value": sentinel}]}, ctx)
+
+    def boom(_db, _args, _ctx):
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setitem(tools._REGISTRY, "write_report", boom)
+    with caplog.at_level("INFO", logger="agent"):
+        tools.dispatch(
+            db,
+            "write_report",
+            {"headers": [sentinel], "rows": [[sentinel]], "cells": [sentinel]},
+            ctx,
+        )
+
+    db.expire_all()
+    rows = db.query(SysAccessLog).filter(SysAccessLog.username == "audit-user").all()
+    assert len(rows) == 3
+    assert {row.action for row in rows} == {
+        "agent_tool:write_report",
+        "agent_tool:unknown",
+    }
+    assert {row.detail["outcome"] for row in rows} == {
+        "success",
+        "denied",
+        "internal_error",
+    }
+    assert all("arg_keys" in row.detail and "arg_count" in row.detail for row in rows)
+    audit_blob = repr([(row.action, row.resource, row.detail) for row in rows])
+    assert sentinel not in audit_blob
+    assert sentinel not in caplog.text
+    assert "exception_type=RuntimeError" in caplog.text
 
 
 # ---------- HUB-1：page_chat 后端准入 ----------

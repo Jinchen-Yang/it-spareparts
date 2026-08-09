@@ -37,6 +37,9 @@ class UserContext:
     # True only when the token provenance is a currently active SysUser row. Shared-password
     # and legacy/unprovenanced tokens must not own or reopen private Agent artifacts.
     has_stable_subject: bool = False
+    # Authenticated SysUser session generation.  Artifact principals re-check this
+    # against the live row so disabled/changed accounts fail closed at the service seam.
+    token_version: int | None = None
 
 
 # 高敏感角色集合（保留给既有权限判断）。普通 Agent 下载/预览严格 owner-only，
@@ -90,7 +93,8 @@ def get_current_user_context(
                                salesperson_name=data.get("name"),
                                permissions=data.get("perms"), is_authenticated=True,
                                authn=data.get("authn"),
-                               has_stable_subject=has_stable_subject)
+                               has_stable_subject=has_stable_subject,
+                               token_version=int(data.get("tv", 0)))
         except Exception:  # noqa: BLE001
             pass
     return UserContext(user_id=None, role=config.GUEST_ROLE, is_authenticated=False)

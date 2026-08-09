@@ -5,7 +5,8 @@
 - run_stream：流式入口，把循环事件原样转发供 SSE 推送。
 
 事件：{type:"delta",text} 正文增量 / {type:"thinking",text} 思考链增量(开思考时) /
-{type:"tool",name,args} 工具开始 / {type:"tool_done",name,ok} 工具完成 /
+{type:"tool",name,args} 工具开始（args 是无内容的安全摘要，不是原始参数） /
+{type:"tool_done",name,ok} 工具完成 /
 {type:"done",tool_calls,answer,stopped?} 结束。
 
 服务端无状态：对话历史由调用方持有并随请求带上。OpenAI 线格式装配下沉到 provider.append_*
@@ -73,12 +74,26 @@ def _agent_loop(db: Session, messages: list[dict], ctx: security.UserContext,
         provider.append_assistant_turn(msgs, res)
         for c in res.tool_calls:
             args = _parse_args(c.arguments)
-            yield {"type": "tool", "name": c.name, "args": args}
+            registered_name = c.name if c.name in tools._REGISTRY else "unknown"
+            # SSE 是公网传输边界，trace 会被持久化：两者均不得携带
+            # query/cells/rows 等原始值，只暴露 schema-derived 的键名、数量和 artifact id。
+            started_shape = tools._safe_tool_audit(registered_name, args, "started")
+            yield {"type": "tool", "name": registered_name, "args": started_shape}
             result = tools.dispatch(db, c.name, args, ctx)
-            trace.append({"name": c.name, "args": args})
-            _log.info("agent tool=%s args=%s", c.name, args)
-            yield {"type": "tool_done", "name": c.name,
-                   "ok": not (isinstance(result, dict) and result.get("error"))}
+            ok = not (isinstance(result, dict) and result.get("error"))
+            safe_shape = tools._safe_tool_audit(
+                registered_name,
+                args,
+                "success" if ok else "error",
+            )
+            trace.append({"name": registered_name, "args": safe_shape})
+            _log.info(
+                "agent tool=%s arg_count=%s arg_keys=%s",
+                registered_name,
+                safe_shape["arg_count"],
+                safe_shape["arg_keys"],
+            )
+            yield {"type": "tool_done", "name": registered_name, "ok": ok}
             provider.append_tool_result(msgs, c.id, json.dumps(result, ensure_ascii=False))
 
     # 轮数上限：收尾作答仍走流式逐字（RUNTIME-5：不再退化为非流式整段，避免最长对话突兀静默）
