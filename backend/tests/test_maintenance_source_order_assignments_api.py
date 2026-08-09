@@ -489,6 +489,47 @@ def test_same_target_assignment_replay_returns_existing_without_new_audit(db):
     ]
 
 
+def test_same_target_replay_remains_idempotent_after_project_is_archived(db):
+    source = _source_order(
+        db,
+        raw_order_id="WBDD-SYNTH-ARCHIVED-REPLAY-001",
+        order_no="WBDD-ARCHIVED-REPLAY-001",
+        project_raw="归档后重放来源单",
+    )
+    project = _project(
+        db,
+        project_id="00000000-0000-4000-8000-000000000223",
+        project_code="MAINT-SYNTH-201-W",
+        display_name="归档后幂等重放项目",
+    )
+    client = _admin_client(db, "archived_replay_assignment_admin")
+    request = {
+        "project_id": project.project_id,
+        "items": [{"source_order_id": source.raw_order_id}],
+        "reason": "首次确认后发生网络重放",
+    }
+    first = client.post(
+        "/api/maintenance/project-assignments/orders/assign",
+        json=request,
+    )
+    assert first.status_code == 200, first.text
+    project.is_active = False
+    db.commit()
+
+    replay = client.post(
+        "/api/maintenance/project-assignments/orders/assign",
+        json=request,
+    )
+
+    assert replay.status_code == 200, replay.text
+    assert replay.json() == first.json()
+    assert db.scalar(
+        select(func.count())
+        .select_from(MaintenanceProjectAuditLog)
+        .where(MaintenanceProjectAuditLog.entity_type == "source_order_assignment")
+    ) == 1
+
+
 def test_same_target_item_is_idempotent_while_mixed_batch_assigns_new_rows(db):
     assigned_source = _source_order(
         db,

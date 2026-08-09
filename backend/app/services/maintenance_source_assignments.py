@@ -162,8 +162,6 @@ def assign_source_orders(
     )
     if project is None:
         raise SourceAssignmentError("目标项目主档不存在")
-    if not project.is_active:
-        raise SourceAssignmentError("目标项目主档已归档，不能新增项目归属")
 
     normalized_items = [
         {**item, "source_order_id": str(item["source_order_id"]).strip()}
@@ -234,6 +232,14 @@ def assign_source_orders(
                 raise SourceAssignmentConflict(
                     f"来源维保单 {source_id} 的项目归属已变化，请刷新后重试"
                 )
+
+    requires_assignment_change = any(
+        current.get(source_id) is None
+        or current[source_id].project_id != project.project_id
+        for source_id in source_ids
+    )
+    if requires_assignment_change and not project.is_active:
+        raise SourceAssignmentError("目标项目主档已归档，不能新增项目归属")
 
     changed_current: dict[str, MaintenanceSourceOrderAssignment] = {}
     for source_id, current_assignment in current.items():
