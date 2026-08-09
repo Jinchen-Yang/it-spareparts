@@ -75,6 +75,24 @@ const summary = {
     cost_complete: false,
     missing_cost_lines: 2,
   },
+  return_rate: {
+    project_id: "project-1",
+    status: "basis_incomplete",
+    official_basis: "warehouse_confirmed_v1",
+    official_rate_pct: null,
+    registered_rate_pct: null,
+    warehouse_confirmed_rate_pct: null,
+    required_quantity: "5.000",
+    registered_quantity: "2.000",
+    warehouse_confirmed_quantity: "1.000",
+    outstanding_quantity: "4.000",
+    exempt_quantity: "1.000",
+    pending_quantity: "2.000",
+    required_count: 1,
+    exempt_count: 1,
+    pending_count: 1,
+    business_assumption: "官方返还率以仓库确认数量为准",
+  },
   reminder_count: 4,
   as_of: "2026-08-08",
 };
@@ -113,6 +131,15 @@ describe("MaintenanceProjectsPage", () => {
     expect(within(card).getByText("金额缺失")).toBeInTheDocument();
     expect(within(card).getByText("状态未映射")).toBeInTheDocument();
     expect(within(card).getByText(/缺 2 行成本/)).toBeInTheDocument();
+    const returnStatus = within(card).getByTestId("project-return-status");
+    expect(within(returnStatus).getByText("返还率待判定")).toBeInTheDocument();
+    expect(within(returnStatus).getByText("应返 5.000")).toBeInTheDocument();
+    expect(within(returnStatus).getByText("已登记 2.000")).toBeInTheDocument();
+    expect(within(returnStatus).getByText("仓库确认 1.000")).toBeInTheDocument();
+    expect(within(returnStatus).getByText("待返 4.000")).toBeInTheDocument();
+    expect(within(returnStatus).getByText("硬盘免返 1.000")).toBeInTheDocument();
+    expect(within(returnStatus).getByText("品类待判定 2.000")).toBeInTheDocument();
+    expect(returnStatus).not.toHaveTextContent("%");
     expect(within(card).getByRole("link", { name: "查看项目" })).toHaveAttribute(
       "href",
       "/maintenance/projects/project-1",

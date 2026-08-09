@@ -1,7 +1,7 @@
 """Public workflow tests for server-owned site-consumption documents."""
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, date, datetime
+from datetime import date
 
 import pytest
 from fastapi import FastAPI
@@ -14,6 +14,7 @@ from app.api import maintenance_project_operations
 from app.auth import hash_password
 from app.models.dimensions import DimPart
 from app.models.inventory import Inventory
+from app.models.maintenance_bad_return import MaintenanceReturnObligation
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
     MaintenanceProjectOperationAudit,
@@ -833,7 +834,7 @@ def test_metadata_correction_keeps_line_identity_and_frozen_cost_evidence(db):
     )
 
 
-def test_confirmed_issue_can_be_corrected_and_voided_without_inventory_or_cost_offset(db):
+def test_confirmed_issue_can_be_corrected_but_obligation_blocks_direct_void(db):
     project = _project(db, project_id="project-site-issue-v2-correct-void")
     part = DimPart(pn_std="PN-SYNTH-CORRECT-VOID")
     db.add(part)
@@ -911,18 +912,22 @@ def test_confirmed_issue_can_be_corrected_and_voided_without_inventory_or_cost_o
             "reason": "作废错误现场领用",
         },
     )
-    assert voided_response.status_code == 200, voided_response.text
-    voided = voided_response.json()
-    assert voided["workflow_status"] == "void"
-    assert voided["return_obligation_event"]["event_type"] == "return_obligation_voided"
-    assert voided["lines"][0]["cost_amount_ex_tax"] == "60.00"
+    assert voided_response.status_code == 409, voided_response.text
+    assert "返还义务已生成下游事实" in voided_response.json()["detail"]
 
     candidates = client.post(
         f"/api/maintenance/projects/stable/{project.project_id}/issue-candidates/search",
         json={"page": 1, "page_size": 20},
     ).json()
-    assert candidates["rows"][0]["confirmed_quantity"] == "0.000"
-    assert candidates["rows"][0]["available_quantity"] == "5.000"
+    assert candidates["rows"][0]["confirmed_quantity"] == "3.000"
+    assert candidates["rows"][0]["available_quantity"] == "2.000"
+    obligation = db.query(MaintenanceReturnObligation).filter_by(
+        issue_id=draft["issue_id"]
+    ).one()
+    assert obligation.obligation_id
+    assert obligation.required_quantity == 0  # no standard category: pending
+    assert obligation.source_quantity == 3
+    assert obligation.source_issue_version == corrected["version"]
     db.expire_all()
     unchanged = db.get(Inventory, inventory.id)
     assert (unchanged.source_qty, unchanged.manual_qty, unchanged.is_qty_overridden) == before_inventory
@@ -957,9 +962,8 @@ def test_void_is_blocked_after_return_downstream_fact_but_correction_remains_ava
         .filter_by(issue_id=draft["issue_id"], event_type="return_obligation_created")
         .one()
     )
-    event.downstream_reference = "synthetic-return-fact-001"
-    event.consumed_at = datetime.now(UTC)
-    db.commit()
+    assert event.downstream_reference.startswith("maintenance-return-obligations:")
+    assert event.consumed_at is not None
 
     rejected = client.post(
         f"/api/maintenance/site-issues/{draft['issue_id']}/void",
@@ -1154,10 +1158,8 @@ def test_command_receipts_are_append_only_and_return_events_only_allow_one_downs
         .filter_by(issue_id=draft["issue_id"])
         .one()
     )
-
-    event.downstream_reference = "synthetic-downstream-registration"
-    event.consumed_at = datetime.now(UTC)
-    db.commit()
+    assert event.downstream_reference.startswith("maintenance-return-obligations:")
+    assert event.consumed_at is not None
 
     with pytest.raises(DBAPIError, match="append-only"):
         with db.begin_nested():

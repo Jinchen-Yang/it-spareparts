@@ -12,6 +12,7 @@ import {
   type MaintenanceWorkspaceParams,
 } from "../../api/maintenanceOperations";
 import ContractPortfolio from "../../components/maintenance/ContractPortfolio";
+import BadReturnPanel from "../../components/maintenance/BadReturnPanel";
 import ProjectFinancialProgress from "../../components/maintenance/ProjectFinancialProgress";
 import ProjectWorkbookActions from "../../components/maintenance/ProjectWorkbookActions";
 import SiteIssueWorkflowPanel from "../../components/maintenance/SiteIssueWorkflowPanel";
@@ -175,6 +176,7 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
   const generation = useRef(0);
   const [capabilities] = useState(readMaintenanceCapabilities);
   const {
+    canManageBadReturns,
     canManageSiteIssues,
     canManageProject,
     canViewCost,
@@ -309,6 +311,13 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
       <SiteIssueWorkflowPanel
         projectId={project.project_id}
         canManage={canManageSiteIssues}
+        onChanged={() => void load(detailPages)}
+      />
+
+      <BadReturnPanel
+        projectId={project.project_id}
+        returnRate={workspace.return_rate ?? project.return_rate}
+        canManage={canManageBadReturns}
         onChanged={() => void load(detailPages)}
       />
 

@@ -41,8 +41,9 @@ from app.business_time import BUSINESS_TZ, business_today
 from app.config import get_settings
 from app import tax_policy
 from app.security import UserContext, is_field_hidden
-from app.services import maintenance_project
+from app.services import maintenance_bad_returns
 from app.services import maintenance_consumption_cost
+from app.services import maintenance_project
 
 
 class MaintenanceOperationError(Exception):
@@ -855,6 +856,20 @@ def _return_event_dict(row: MaintenanceSiteIssueReturnEvent) -> dict:
     }
 
 
+def _consume_site_issue_return_event(
+    db: Session,
+    event: MaintenanceSiteIssueReturnEvent,
+) -> None:
+    """Synchronously project #207's outbox event into #208 obligations."""
+
+    try:
+        maintenance_bad_returns.consume_return_event(db, event)
+    except maintenance_bad_returns.BadReturnConflict as exc:
+        raise MaintenanceOperationConflict(str(exc)) from exc
+    except maintenance_bad_returns.BadReturnError as exc:
+        raise MaintenanceOperationError(str(exc)) from exc
+
+
 def _site_issue_return_payload(
     issue: MaintenanceSiteIssue,
     lines: list[MaintenanceSiteIssueLine],
@@ -1179,6 +1194,7 @@ def confirm_site_issue(
     )
     db.add(event)
     db.flush()
+    _consume_site_issue_return_event(db, event)
     response = {
         **site_issue_dict(issue, lines),
         "return_obligation_event": _return_event_dict(event),
@@ -1485,6 +1501,8 @@ def patch_site_issue(
             payload=_site_issue_return_payload(issue, replacement_lines),
         )
         db.add(event)
+        db.flush()
+        _consume_site_issue_return_event(db, event)
     db.flush()
     response = {
         **site_issue_dict(issue, replacement_lines),
@@ -1604,6 +1622,8 @@ def void_site_issue(
             payload=_site_issue_return_payload(issue, lines),
         )
         db.add(event)
+        db.flush()
+        _consume_site_issue_return_event(db, event)
     db.flush()
     response = {
         **site_issue_dict(issue, lines),
@@ -3949,6 +3969,10 @@ def project_workspace(
         as_of=as_of,
         user_ctx=user_ctx,
     )
+    project_summary["return_rate"] = maintenance_bad_returns.project_return_rate(
+        db,
+        project_id=project_id,
+    )
 
     issue_statement = (
         select(MaintenanceSiteIssue, MaintenanceSiteIssueLine)
@@ -4176,6 +4200,7 @@ def project_workspace(
             "page_size": expense_page_size or approved_expense_total or 1,
         },
         "reminders": reminder_rows,
+        "return_rate": project_summary["return_rate"],
         "workbook_preview": {
             "protocol_version": "2.0",
             "sheets": [
@@ -4523,6 +4548,10 @@ def _project_cards_for_ids(
         )
     }
     cards: dict[str, dict] = {}
+    return_rates = maintenance_bad_returns.return_rates_for_projects(
+        db,
+        project_ids=project_ids,
+    )
     for project in projects:
         base = maintenance_project.project_overview_from_facts(
             project=project,
@@ -4571,6 +4600,7 @@ def _project_cards_for_ids(
             as_of=as_of,
             user_ctx=user_ctx,
         )
+        card["return_rate"] = return_rates[project.project_id]
         cards[project.project_id] = card
     return cards
 

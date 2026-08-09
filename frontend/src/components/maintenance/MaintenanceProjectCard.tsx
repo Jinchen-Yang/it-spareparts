@@ -12,6 +12,34 @@ const LIFECYCLE_META: Record<string, { label: string; color?: string }> = {
   missing: { label: "期限缺失", color: "orange" },
 };
 
+function ProjectReturnStatus({ project }: { project: MaintenanceProjectOperationsSummary }) {
+  const rate = project.return_rate;
+  if (!rate) return null;
+  return (
+    <Space data-testid="project-return-status" wrap size={[6, 6]}>
+      {rate.status === "available" && rate.official_rate_pct != null ? (
+        <Tag color="blue">返还率 {rate.official_rate_pct}%</Tag>
+      ) : rate.status === "basis_incomplete" ? (
+        <Tag color="orange">返还率待判定</Tag>
+      ) : (
+        <Tag color="green">无应返项</Tag>
+      )}
+      <Tag>应返 {rate.required_quantity}</Tag>
+      <Tag>已登记 {rate.registered_quantity}</Tag>
+      <Tag>仓库确认 {rate.warehouse_confirmed_quantity}</Tag>
+      {rate.status !== "no_return_required" && (
+        <Tag>待返 {rate.outstanding_quantity}</Tag>
+      )}
+      {Number(rate.exempt_quantity) > 0 && (
+        <Tag color="green">硬盘免返 {rate.exempt_quantity}</Tag>
+      )}
+      {rate.pending_count > 0 && (
+        <Tag color="orange">品类待判定 {rate.pending_quantity}</Tag>
+      )}
+    </Space>
+  );
+}
+
 export default function MaintenanceProjectCard({ project, visibility }: {
   project: MaintenanceProjectOperationsSummary;
   visibility: ProjectFinancialVisibility;
@@ -52,6 +80,7 @@ export default function MaintenanceProjectCard({ project, visibility }: {
         <ContractPortfolio contracts={project.contracts} compact />
       </div>
       <ProjectFinancialProgress metrics={project.metrics} visibility={visibility} />
+      <ProjectReturnStatus project={project} />
       <Space wrap size={[6, 6]}>
         {project.reminder_count > 0
           ? <Badge count={project.reminder_count}><Tag color="orange">系统提醒</Tag></Badge>

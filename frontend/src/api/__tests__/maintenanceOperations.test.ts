@@ -14,7 +14,9 @@ vi.mock("../../api", () => ({
 
 import {
   applyMaintenanceProjectWorkbook,
+  confirmMaintenanceBadReturnWarehouse,
   confirmSiteIssue,
+  createMaintenanceBadReturnDraft,
   createSiteIssueDraft,
   downloadMaintenanceProjectWorkbook,
   downloadMaintenanceWorkbookValidationErrors,
@@ -24,8 +26,13 @@ import {
   patchSiteIssue,
   previewSiteIssue,
   recomputeMaintenanceCostGaps,
+  resolveMaintenanceReturnObligationCategory,
+  searchMaintenanceBadReturns,
+  searchMaintenanceReturnObligations,
   searchSiteIssueCandidates,
   searchSiteIssues,
+  submitMaintenanceBadReturn,
+  markMaintenanceBadReturnInTransit,
   updateMaintenanceCostGap,
   validateMaintenanceProjectWorkbook,
   voidSiteIssue,
@@ -136,6 +143,105 @@ describe("maintenance operations API", () => {
       "/maintenance/site-issues/issue%2F1/void",
       expect.objectContaining({ version: 3, idempotency_key: "void-command-001" }),
     );
+  });
+
+  it("坏件返还搜索与状态命令只传稳定 ID、版本、幂等键和业务证据", () => {
+    searchMaintenanceReturnObligations({
+      project_id: "project/1",
+      q: "PN 敏感词",
+      classifications: ["required", "pending_category"],
+      active_only: true,
+      page: 2,
+    });
+    searchMaintenanceBadReturns({
+      project_id: "project/1",
+      statuses: ["draft", "in_transit"],
+      page: 3,
+    });
+    createMaintenanceBadReturnDraft({
+      project_id: "project/1",
+      idempotency_key: "return-draft-1",
+      lines: [{ obligation_id: "obligation/1", quantity: 2 }],
+      note: "现场集中返件",
+      reason: "建立返还草稿",
+    });
+    submitMaintenanceBadReturn("return/1", {
+      project_id: "project/1",
+      version: 1,
+      idempotency_key: "return-submit-1",
+      reason: "核对后提交",
+    });
+    markMaintenanceBadReturnInTransit("return/1", {
+      project_id: "project/1",
+      version: 2,
+      idempotency_key: "return-transit-1",
+      logistics_reference: "人工物流参考-1",
+      reason: "现场已寄出",
+    });
+    confirmMaintenanceBadReturnWarehouse("return/1", {
+      project_id: "project/1",
+      version: 3,
+      idempotency_key: "return-confirm-1",
+      warehouse_reference: "仓库确认-1",
+      inbound_reference: "RKD-001",
+      reason: "仓库已验收",
+    });
+    resolveMaintenanceReturnObligationCategory("obligation/1", {
+      project_id: "project/1",
+      version: 4,
+      category_id: 9,
+      idempotency_key: "category-1",
+      reason: "按标准品类主数据判定",
+    });
+
+    expect(post).toHaveBeenNthCalledWith(
+      1,
+      "/maintenance/return-obligations/search",
+      {
+        project_id: "project/1",
+        q: "PN 敏感词",
+        classifications: ["required", "pending_category"],
+        active_only: true,
+        page: 2,
+        page_size: 50,
+      },
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      "/maintenance/bad-returns/search",
+      {
+        project_id: "project/1",
+        statuses: ["draft", "in_transit"],
+        page: 3,
+        page_size: 20,
+      },
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      3,
+      "/maintenance/bad-returns",
+      expect.objectContaining({ idempotency_key: "return-draft-1" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      4,
+      "/maintenance/bad-returns/return%2F1/submit",
+      expect.objectContaining({ version: 1, idempotency_key: "return-submit-1" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      5,
+      "/maintenance/bad-returns/return%2F1/in-transit",
+      expect.objectContaining({ logistics_reference: "人工物流参考-1" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      6,
+      "/maintenance/bad-returns/return%2F1/warehouse-confirm",
+      expect.objectContaining({ warehouse_reference: "仓库确认-1", inbound_reference: "RKD-001" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      7,
+      "/maintenance/return-obligations/obligation%2F1/resolve-category",
+      expect.not.objectContaining({ exempt: expect.anything() }),
+    );
+    expect(get).not.toHaveBeenCalled();
   });
 
   it("无搜索词时保留 GET 目录兼容入口", () => {
