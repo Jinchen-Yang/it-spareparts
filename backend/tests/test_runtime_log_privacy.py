@@ -22,6 +22,27 @@ NGINX_IMAGE = (
 )
 
 
+def _require_docker_runtime_for_fault_log_gate() -> None:
+    """Skip optional local runs, but never bypass the security gate in CI."""
+
+    if shutil.which("docker") is None:
+        if os.getenv("CI"):
+            pytest.fail("Docker CLI is required for the CI Nginx fault-log gate")
+        pytest.skip("Docker CLI is unavailable for the Nginx fault-log gate")
+
+    docker_ready = subprocess.run(
+        ["docker", "info"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    if docker_ready.returncode != 0:
+        if os.getenv("CI"):
+            pytest.fail("Docker daemon is required for the CI Nginx fault-log gate")
+        pytest.skip("Docker daemon is unavailable for the Nginx fault-log gate")
+
+
 def test_frontend_access_log_keeps_path_status_and_timing_without_query_sources():
     format_config = (ROOT / "frontend" / "nginx-log-format.conf").read_text(
         encoding="utf-8"
@@ -53,18 +74,7 @@ def test_frontend_access_log_keeps_path_status_and_timing_without_query_sources(
 
 
 def test_frontend_api_fault_log_does_not_persist_query_values():
-    if shutil.which("docker") is None:
-        pytest.skip("Docker CLI is unavailable for the Nginx fault-log gate")
-
-    docker_ready = subprocess.run(
-        ["docker", "info"],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=15,
-    )
-    if docker_ready.returncode != 0:
-        pytest.skip("Docker daemon is unavailable for the Nginx fault-log gate")
+    _require_docker_runtime_for_fault_log_gate()
 
     image_ready = subprocess.run(
         ["docker", "image", "inspect", NGINX_IMAGE],
@@ -152,6 +162,27 @@ def test_frontend_api_fault_log_does_not_persist_query_values():
             check=False,
             timeout=15,
         )
+
+
+def test_nginx_fault_log_gate_requires_docker_cli_in_ci(monkeypatch):
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setattr(shutil, "which", lambda _command: None)
+
+    with pytest.raises(pytest.fail.Exception, match="Docker CLI is required"):
+        _require_docker_runtime_for_fault_log_gate()
+
+
+def test_nginx_fault_log_gate_requires_docker_daemon_in_ci(monkeypatch):
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setattr(shutil, "which", lambda _command: "/usr/bin/docker")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1),
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="Docker daemon is required"):
+        _require_docker_runtime_for_fault_log_gate()
 
 
 def test_backend_uvicorn_default_access_log_is_disabled():
