@@ -24,6 +24,7 @@ from app.models.maintenance_project import (
     MaintenanceProjectAuditLog,
     MaintenanceProjectContract,
 )
+from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.dimensions import DimPart
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
@@ -2371,6 +2372,17 @@ def project_workspace(
         as_of=as_of,
         user_ctx=user_ctx,
     )
+    project_summary["manual_source_order_count"] = int(
+        db.scalar(
+            select(func.count())
+            .select_from(MaintenanceSourceOrderAssignment)
+            .where(
+                MaintenanceSourceOrderAssignment.project_id == project_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+        )
+        or 0
+    )
 
     issue_statement = (
         select(MaintenanceSiteIssue, MaintenanceSiteIssueLine)
@@ -2929,6 +2941,20 @@ def _project_cards_for_ids(
             )
         )
     }
+    manual_source_order_counts = {
+        project_id: int(count)
+        for project_id, count in db.execute(
+            select(
+                MaintenanceSourceOrderAssignment.project_id,
+                func.count(),
+            )
+            .where(
+                MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+            .group_by(MaintenanceSourceOrderAssignment.project_id)
+        )
+    }
     cards: dict[str, dict] = {}
     for project in projects:
         base = maintenance_project.project_overview_from_facts(
@@ -2970,6 +2996,10 @@ def _project_cards_for_ids(
             state=state_by_project.get(project.project_id),
             as_of=as_of,
             user_ctx=user_ctx,
+        )
+        card["manual_source_order_count"] = manual_source_order_counts.get(
+            project.project_id,
+            0,
         )
         cards[project.project_id] = card
     return cards

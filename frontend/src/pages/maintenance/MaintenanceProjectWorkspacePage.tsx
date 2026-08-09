@@ -245,6 +245,10 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
         subtitle={`${project.project_code} · 项目经理 ${project.project_manager_id || "待指定"} · 数据截止 ${workspace.as_of}`}
         extra={(
           <Space wrap>
+            <Tag>{`已人工归属历史维保单 ${project.manual_source_order_count} 张`}</Tag>
+            <Link to={`/maintenance/project-master/source-orders?project_id=${encodeURIComponent(project.project_id)}`}>
+              查看归属明细
+            </Link>
             {canManageProject && (
               <Link to={`/maintenance/cost-refill?project_id=${encodeURIComponent(project.project_id)}`}>
                 去人工回填成本

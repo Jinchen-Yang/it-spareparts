@@ -42,7 +42,12 @@ export interface MaintenanceProjectLifecycleInput {
   reason: string;
 }
 
-export const listMaintenanceProjects = (params: { page?: number; page_size?: number } = {}) =>
+export const listMaintenanceProjects = (params: {
+  q?: string;
+  page?: number;
+  page_size?: number;
+  include_inactive?: boolean;
+} = {}) =>
   api.get<MaintenanceProjectDirectory>("/maintenance/projects/stable", {
     params: { include_inactive: true, ...params },
   });

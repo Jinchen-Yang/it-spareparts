@@ -32,6 +32,7 @@ const workspace = {
     lifecycle_status: "ongoing",
     is_active: true,
     version: 3,
+    manual_source_order_count: 2,
     contracts: [{
       project_contract_id: "pc-1",
       contract_id: "c-1",
@@ -220,6 +221,11 @@ describe("MaintenanceProjectWorkspacePage", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "移动维保项目" })).toBeInTheDocument();
+    expect(screen.getByText("已人工归属历史维保单 2 张")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看归属明细" })).toHaveAttribute(
+      "href",
+      "/maintenance/project-master/source-orders?project_id=project-1",
+    );
     expect(screen.getAllByText("XSDD-001").length).toBeGreaterThanOrEqual(3);
     expect(screen.getByText("回款 / 全部合同额（含税）")).toBeInTheDocument();
     expect(screen.getByText("项目实际成本（含税） / 全部合同额（含税）"))

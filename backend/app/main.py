@@ -19,6 +19,7 @@ from app.api import (
     maintenance,
     maintenance_audit,
     maintenance_project_operations,
+    maintenance_source_assignments,
     maintenance_project_workbooks,
     maintenance_projects,
     parts,
@@ -69,6 +70,7 @@ app.include_router(agent.router, prefix=settings.api_prefix)
 app.include_router(chat_sessions.router, prefix=settings.api_prefix)
 app.include_router(purchases.router, prefix=settings.api_prefix)
 app.include_router(maintenance.router, prefix=settings.api_prefix)
+app.include_router(maintenance_source_assignments.router, prefix=settings.api_prefix)
 # The stable operations router must precede the project-master ``/{project_id}``
 # route so literal paths such as ``/operations`` cannot be captured as an id.
 app.include_router(maintenance_project_operations.router, prefix=settings.api_prefix)

@@ -64,6 +64,7 @@ const loadPurchaseExceptions = () => import("./pages/purchases/PurchaseException
 const loadPurchaseRecords = () => import("./pages/purchases/PurchaseRecordsPage");
 const loadProjectCost = () => import("./pages/ProjectCostPage");
 const loadMaintenanceProjectMaster = () => import("./pages/MaintenanceProjectMasterPage");
+const loadMaintenanceSourceOrderAssignments = () => import("./pages/maintenance/MaintenanceSourceOrderAssignmentsPage");
 const loadMaintenanceProjects = () => import("./pages/maintenance/MaintenanceProjectsPage");
 const loadMaintenanceProjectWorkspace = () => import("./pages/maintenance/MaintenanceProjectWorkspacePage");
 const loadMaintenanceProjectUpdates = () => import("./pages/maintenance/MaintenanceProjectUpdatesPage");
@@ -89,6 +90,7 @@ const PurchaseExceptionsPage = lazy(loadPurchaseExceptions);
 const PurchaseRecordsPage = lazy(loadPurchaseRecords);
 const ProjectCostPage = lazy(loadProjectCost);
 const MaintenanceProjectMasterPage = lazy(loadMaintenanceProjectMaster);
+const MaintenanceSourceOrderAssignmentsPage = lazy(loadMaintenanceSourceOrderAssignments);
 const MaintenanceProjectsPage = lazy(loadMaintenanceProjects);
 const MaintenanceProjectWorkspacePage = lazy(loadMaintenanceProjectWorkspace);
 const MaintenanceProjectUpdatesPage = lazy(loadMaintenanceProjectUpdates);
@@ -208,6 +210,16 @@ export interface DetailRoute {
 }
 
 export const DETAIL_ROUTES: DetailRoute[] = [
+  {
+    key: "maintenance-source-order-assignments",
+    path: "/maintenance/project-master/source-orders",
+    pattern: /^\/maintenance\/project-master\/source-orders$/,
+    label: "历史维保单归属",
+    perm: "page_maintenance",
+    menuKey: "maintenance-project-master",
+    page: MaintenanceSourceOrderAssignmentsPage,
+    load: loadMaintenanceSourceOrderAssignments,
+  },
   {
     key: "pool-analysis",
     path: "/pool-analysis/:groupId",
