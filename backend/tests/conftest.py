@@ -104,6 +104,9 @@ os.environ["PYTEST_DATABASE_BASE_URL"] = _database_run.base_url
 os.environ["DATABASE_URL"] = _database_run.database_url
 os.environ["PYTEST_RAW_FILE_BASE_DIR"] = str(_raw_run.root)
 os.environ["RAW_FILE_DIR"] = str(_raw_run.run_dir)
+# Production default is fail-closed. The test suite opts in explicitly so existing Agent
+# behavior tests exercise v2; kill-switch tests toggle the cached setting per test.
+os.environ["AGENT_ARTIFACT_V2_ENABLED"] = "true"
 
 try:
     import pytest  # noqa: E402

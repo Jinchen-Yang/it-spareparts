@@ -551,8 +551,8 @@ def _write_excel(db: Session, args: dict, ctx: security.UserContext) -> dict:
         return _NO_ACCESS
     return agent_files.write_excel(
         args.get("base_file_id"), args.get("sheet"),
-        args.get("cells") or [], args.get("output_name"), ctx.user_id,
-        access_scope=agent_files.snapshot_access_scope(ctx))
+        args.get("cells") or [], args.get("output_name"),
+        agent_files.verified_artifact_owner(ctx))
 
 
 def _read_document(db: Session, args: dict, ctx: security.UserContext) -> dict:
@@ -574,9 +574,8 @@ def _write_report(db: Session, args: dict, ctx: security.UserContext) -> dict:
         return {"error": "rows 需为二维数组"}
     return agent_files.write_report(
         args.get("title"), [str(h) for h in headers], rows,
-        args.get("output_name"), ctx.user_id,
-        money_cols=args.get("money_cols") if isinstance(args.get("money_cols"), list) else None,
-        access_scope=agent_files.snapshot_access_scope(ctx))
+        args.get("output_name"), agent_files.verified_artifact_owner(ctx),
+        money_cols=args.get("money_cols") if isinstance(args.get("money_cols"), list) else None)
 
 
 # ── v1.5.0 新工具：数据层全面接入（采购分析/库存/维保/取消统计）+ 技能剧本 ──

@@ -24,6 +24,7 @@ class AgentArtifact(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     storage_key: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    sensitivity: Mapped[str] = mapped_column(String(16), nullable=False)
     source_ids: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default="[]"
     )
@@ -46,6 +47,10 @@ class AgentArtifact(Base):
         CheckConstraint(
             "kind IN ('upload', 'generated')",
             name="ck_agent_artifact_kind",
+        ),
+        CheckConstraint(
+            "sensitivity IN ('low', 'medium', 'high', 'critical')",
+            name="ck_agent_artifact_sensitivity",
         ),
         CheckConstraint("size_bytes >= 0", name="ck_agent_artifact_size"),
         CheckConstraint("char_length(sha256) = 64", name="ck_agent_artifact_sha256"),

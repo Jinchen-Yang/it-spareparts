@@ -13,6 +13,7 @@ import {
 import type {
   AgentToolCall, AgentUploadResult, ChatSessionMeta, FilePreview, SessionStreamEvent,
 } from "../api";
+import { artifactIdFromFileUrl, parseUploadedAttachmentMessage } from "../artifactIds";
 import { clearSessionScopedPreferences } from "../sessionPreferences";
 import { COLORS } from "../theme";
 
@@ -77,7 +78,7 @@ function nodeText(n: React.ReactNode): string {
 /** 生成/上传的文件卡片：在线预览（Excel 表格 / 图片）+ 下载。
  * 替代裸下载按钮；预览/下载都走带鉴权 fetch，绝不整页刷新打断对话。 */
 function FileCard({ href, label }: { href: string; label?: string }) {
-  const fileId = /\/api\/agent\/files\/([a-z0-9]{6,})/i.exec(href)?.[1] || "";
+  const fileId = artifactIdFromFileUrl(href) || "";
   const [open, setOpen] = useState(false);
   const [pv, setPv] = useState<FilePreview | null>(null);
   const [loading, setLoading] = useState(false);
@@ -286,16 +287,16 @@ function LiveTrace({ runs }: { runs: ToolRun[] }) {
 
 /** 用户消息：把注入的文件前缀折叠成附件标签显示 */
 function UserContent({ text }: { text: string }) {
-  const m = /^\[已上传文件「(.+?)」 file_id=\w+[^\]]*\]\n\n?([\s\S]*)$/.exec(text);
-  if (!m) return <>{text}</>;
+  const attachment = parseUploadedAttachmentMessage(text);
+  if (!attachment) return <>{text}</>;
   return (
     <>
-      <div style={{ marginBottom: m[2] ? 6 : 0 }}>
+      <div style={{ marginBottom: attachment.body ? 6 : 0 }}>
         <Tag color="rgba(255,255,255,0.25)" style={{ color: "#fff", border: "1px solid rgba(255,255,255,0.4)" }}>
-          📎 {m[1]}
+          📎 {attachment.filename}
         </Tag>
       </div>
-      {m[2]}
+      {attachment.body}
     </>
   );
 }

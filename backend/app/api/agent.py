@@ -32,6 +32,38 @@ _NOT_CONFIGURED_MSG = (
 )
 
 
+def _artifact_http_error(exc: agent_files.FileError, default_status: int) -> HTTPException:
+    code = (
+        status.HTTP_503_SERVICE_UNAVAILABLE
+        if isinstance(exc, agent_files.ArtifactV2Disabled)
+        else default_status
+    )
+    return HTTPException(code, str(exc))
+
+
+def _audit_artifact_access(
+    ctx: UserContext,
+    action: str,
+    outcome: str,
+    *,
+    artifact_id: str | None = None,
+    reason_code: str | None = None,
+    size_bytes: int | None = None,
+) -> None:
+    """Emit content-free, stable artifact audit fields only."""
+    detail: dict[str, str | int] = {"outcome": outcome}
+    if artifact_id is not None:
+        try:
+            detail["artifact_id"] = agent_files._check_id(artifact_id)
+        except agent_files.FileError:
+            pass
+    if reason_code is not None:
+        detail["reason_code"] = reason_code
+    if size_bytes is not None:
+        detail["size_bytes"] = size_bytes
+    record_access_log(ctx, action, "agent_file", detail)
+
+
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
     content: str = Field(..., min_length=1, max_length=8000)
@@ -105,20 +137,44 @@ async def upload(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """上传受支持的办公文件/文本/图片，返回不可猜测的 Artifact UUID。"""
-    content = await file.read()
-    # 文件名常含客户、合同或项目名；审计仅保留非内容型结构信息，禁止写原始文件名。
-    record_access_log(ctx, "upload", "agent_file", {"size_bytes": len(content)})
     try:
-        # 归属记真实身份(user_id)而非角色 → 下载/读取按人做越权校验
-        owner_sub = agent_files.stable_owner_sub(ctx)
-        return agent_files.save_upload(content, file.filename or "上传.xlsx", owner_sub)
+        # 身份与发布开关必须在读请求体之前失败关闭，避免未授权的大文件消耗内存。
+        owner = agent_files.verified_artifact_owner(ctx)
+        agent_files.require_artifact_v2_enabled()
     except agent_files.FileError as exc:
-        code = (
+        reason = (
+            "unstable_identity"
+            if "实名系统账号" in str(exc)
+            else agent_files.artifact_reason_code(exc)
+        )
+        _audit_artifact_access(ctx, "upload", "denied", reason_code=reason)
+        default = (
             status.HTTP_403_FORBIDDEN
             if "实名系统账号" in str(exc)
             else status.HTTP_400_BAD_REQUEST
         )
-        raise HTTPException(code, str(exc)) from exc
+        raise _artifact_http_error(exc, default) from exc
+    content = await file.read()
+    try:
+        result = agent_files.save_upload(content, file.filename or "上传.xlsx", owner)
+    except agent_files.FileError as exc:
+        _audit_artifact_access(
+            ctx,
+            "upload",
+            "denied",
+            reason_code=agent_files.artifact_reason_code(exc),
+            size_bytes=len(content),
+        )
+        raise _artifact_http_error(exc, status.HTTP_400_BAD_REQUEST) from exc
+    # 文件名常含客户、合同或项目名；审计仅保留非内容型结构信息。
+    _audit_artifact_access(
+        ctx,
+        "upload",
+        "success",
+        artifact_id=result["file_id"],
+        size_bytes=len(content),
+    )
+    return result
 
 
 @router.get("/files/{file_id}")
@@ -128,18 +184,29 @@ def download(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> FileResponse:
     """下载智能体生成/上传的文件（普通端点严格仅本人，管理员也不例外）。"""
-    record_access_log(ctx, "download", "agent_file", {"file_id": file_id})
     try:
         agent_files.owner_of(file_id)        # 文件不存在 → FileError → 404
     except agent_files.FileError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+        _audit_artifact_access(
+            ctx, "download", "denied", artifact_id=file_id,
+            reason_code=agent_files.artifact_reason_code(exc),
+        )
+        raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
     # 防越权下载他人上传的报价/合同（IDOR）：普通端点对所有角色都要求本人创建。
     if not agent_files.access_allowed(file_id, ctx):
+        _audit_artifact_access(
+            ctx, "download", "denied", artifact_id=file_id, reason_code="forbidden"
+        )
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该文件（非本人上传/生成）")
     try:
         artifact = agent_files.get_download_info(file_id)
     except agent_files.FileError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+        _audit_artifact_access(
+            ctx, "download", "denied", artifact_id=file_id,
+            reason_code=agent_files.artifact_reason_code(exc),
+        )
+        raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
+    _audit_artifact_access(ctx, "download", "success", artifact_id=file_id)
     return FileResponse(
         artifact.path,
         filename=artifact.filename,
@@ -161,14 +228,26 @@ def preview_file(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     """在线预览文件内容（所有角色仅本人）——与 download 同一归属校验，防 IDOR。"""
-    record_access_log(ctx, "preview", "agent_file", {"file_id": file_id})
     try:
         agent_files.owner_of(file_id)
     except agent_files.FileError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+        _audit_artifact_access(
+            ctx, "preview", "denied", artifact_id=file_id,
+            reason_code=agent_files.artifact_reason_code(exc),
+        )
+        raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
     if not agent_files.access_allowed(file_id, ctx):
+        _audit_artifact_access(
+            ctx, "preview", "denied", artifact_id=file_id, reason_code="forbidden"
+        )
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该文件（非本人上传/生成）")
     try:
-        return agent_files.preview(file_id)
+        result = agent_files.preview(file_id)
     except agent_files.FileError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+        _audit_artifact_access(
+            ctx, "preview", "denied", artifact_id=file_id,
+            reason_code=agent_files.artifact_reason_code(exc),
+        )
+        raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
+    _audit_artifact_access(ctx, "preview", "success", artifact_id=file_id)
+    return result

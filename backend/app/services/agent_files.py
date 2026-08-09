@@ -17,6 +17,7 @@ import tempfile
 import unicodedata
 import uuid
 import zipfile
+from copy import deepcopy
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -63,6 +64,56 @@ _FORMULA_PREFIXES = ("=", "+", "-", "@")
 
 class FileError(Exception):
     """文件层业务错误（消息可直接回给模型/用户）。"""
+
+
+class ArtifactV2Disabled(FileError):
+    """Stable fail-closed signal used by HTTP and tool adapters."""
+
+
+class ArtifactUnavailable(FileError):
+    """File cannot be served; ``reason_code`` is safe for structured audit."""
+
+    def __init__(self, message: str, reason_code: str):
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+_ARTIFACT_V2_DISABLED_MESSAGE = "Artifact Delivery v2 已停用"
+_VERIFIED_OWNER_PROOF = object()
+
+
+def require_artifact_v2_enabled() -> None:
+    if not get_settings().agent_artifact_v2_enabled:
+        raise ArtifactV2Disabled(_ARTIFACT_V2_DISABLED_MESSAGE)
+
+
+def artifact_reason_code(exc: FileError) -> str:
+    if isinstance(exc, ArtifactV2Disabled):
+        return "v2_disabled"
+    if isinstance(exc, ArtifactUnavailable):
+        return exc.reason_code
+    return "validation_failed"
+
+
+class VerifiedArtifactOwner:
+    """Opaque actor derived from a verified ``UserContext``.
+
+    Python has no module-private constructors, so construction additionally requires a
+    module-owned sentinel. Besides the owner subject, the actor holds a defensive copy of
+    the server-derived authorization context used for generated scope and source checks.
+    """
+
+    __slots__ = ("_context", "_sub")
+
+    def __init__(self, sub: str, context: Any, proof: object):
+        if proof is not _VERIFIED_OWNER_PROOF:
+            raise TypeError("VerifiedArtifactOwner must come from verified_artifact_owner")
+        self._sub = sub
+        self._context = context
+
+    @property
+    def sub(self) -> str:
+        return self._sub
 
 
 @dataclass(frozen=True)
@@ -260,6 +311,9 @@ def _query_artifact(db, file_id: str) -> AgentArtifact | None:
 
 
 def _find_artifact_meta(file_id: str, *, require_ready: bool) -> dict | None:
+    if _is_legacy_id(file_id):
+        return None
+    require_artifact_v2_enabled()
     now = datetime.now(timezone.utc)
     with SessionLocal() as db:
         row = _query_artifact(db, file_id)
@@ -269,7 +323,8 @@ def _find_artifact_meta(file_id: str, *, require_ready: bool) -> dict | None:
             row.status = "expired"
             db.commit()
         if require_ready and row.status != "ready":
-            raise FileError("文件不存在或不可下载")
+            reason = row.status if row.status in {"expired", "failed"} else "not_ready"
+            raise ArtifactUnavailable("文件不存在或不可下载", reason)
         extra = dict(row.extra_meta or {})
         return {
             **extra,
@@ -277,6 +332,7 @@ def _find_artifact_meta(file_id: str, *, require_ready: bool) -> dict | None:
             "filename": row.filename,
             "ext": _ext_of(row.filename),
             "kind": row.kind,
+            "sensitivity": row.sensitivity,
             "operated_by": row.owner_sub,
             "owner_sub": row.owner_sub,
             "media_type": row.media_type,
@@ -294,7 +350,7 @@ def _find_artifact_meta(file_id: str, *, require_ready: bool) -> dict | None:
 def _artifact_meta(file_id: str, *, require_ready: bool) -> dict:
     meta = _find_artifact_meta(file_id, require_ready=require_ready)
     if meta is None:
-        raise FileError("文件不存在或已清理")
+        raise ArtifactUnavailable("文件不存在或已清理", "not_found")
     return meta
 
 
@@ -308,9 +364,12 @@ def _verify_artifact(meta: dict) -> StoredObject:
     expected_key = _storage_key(fid, ext)
     if meta.get("storage_key") != expected_key:
         raise FileError("文件元数据校验失败")
-    stored = get_artifact_store().inspect(expected_key)
+    try:
+        stored = get_artifact_store().inspect(expected_key)
+    except FileError as exc:
+        raise ArtifactUnavailable("文件对象不存在或已清理", "object_missing") from exc
     if stored.size_bytes != meta.get("size_bytes") or stored.sha256 != meta.get("sha256"):
-        raise FileError("文件完整性校验失败")
+        raise ArtifactUnavailable("文件完整性校验失败", "integrity_failed")
     return stored
 
 
@@ -321,17 +380,17 @@ def _load_meta(file_id: str) -> dict:
         _verify_artifact(meta)
         return meta
     if not _is_legacy_id(fid):
-        raise FileError("文件不存在或已清理")
+        raise ArtifactUnavailable("文件不存在或已清理", "not_found")
     p = _meta_path(fid)
     if not p.exists():
-        raise FileError("文件不存在或已清理")
+        raise ArtifactUnavailable("文件不存在或已清理", "not_found")
     try:
         meta = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise FileError("文件元数据损坏") from exc
     ext = str(meta.get("ext", "")).lower()
     if ext not in _ALLOWED_EXT or not _data_path(fid, ext).is_file():
-        raise FileError("文件不存在或已清理")
+        raise ArtifactUnavailable("文件不存在或已清理", "object_missing")
     meta["filename"] = _safe_filename(meta.get("filename", f"{fid}.{ext}"))
     meta["media_type"] = _MIME_BY_EXT[ext]
     return meta
@@ -356,6 +415,7 @@ def artifact_info(file_id: str) -> dict:
             if key in {
                 "file_id", "filename", "media_type", "size_bytes", "sha256",
                 "status", "source_ids", "created_at", "expires_at", "kind",
+                "sensitivity",
             }
         }
     if _is_legacy_id(fid):
@@ -386,6 +446,7 @@ def _artifact_ref(info: dict) -> dict:
         "size_bytes": info["size_bytes"],
         "sha256": info["sha256"],
         "status": info["status"],
+        "sensitivity": info["sensitivity"],
         "download_url": f"/api/agent/files/{artifact_id}",
     }
 
@@ -451,6 +512,14 @@ def snapshot_access_scope(user_ctx: Any) -> dict:
         key for key, enabled in effective.items()
         if enabled and (key.startswith("data_") or key.startswith("page_"))
     )
+    own_customers = bool(effective.get("own_customers_only"))
+    row_subject = (
+        _canonical_salesperson_subject(user_ctx.salesperson_name)
+        if own_customers
+        else None
+    )
+    if own_customers and not row_subject:
+        raise FileError("本人客户范围制品缺少已绑定的销售主体")
     return {
         "version": 1,
         "policy": "current_scope_dominates",
@@ -458,7 +527,8 @@ def snapshot_access_scope(user_ctx: Any) -> dict:
         "data_permissions": data_permissions,
         "page_permissions": page_permissions,
         "visible_field_groups": visible_field_groups,
-        "row_scope": "own_customers" if effective.get("own_customers_only") else "all",
+        "row_scope": "own_customers" if own_customers else "all",
+        "row_subject": row_subject,
     }
 
 
@@ -471,6 +541,24 @@ def _default_access_scope(kind: str) -> dict:
         "policy": "unclassified_deny",
         "required_permissions": [],
     }
+
+
+def _derive_sensitivity(kind: str, access_scope: dict) -> str:
+    """Derive classification server-side; callers cannot lower it through tool arguments."""
+    if kind == "upload" or access_scope.get("policy") != "current_scope_dominates":
+        return "critical"
+    from app import permissions
+
+    rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    required = access_scope.get("required_permissions")
+    if not isinstance(required, list):
+        return "critical"
+    levels = [
+        permissions.PERMISSION_META.get(key, {}).get("sensitivity")
+        for key in required
+    ]
+    known = [level for level in levels if level in rank]
+    return max(known, key=rank.__getitem__) if known else "high"
 
 
 def stable_owner_sub(user_ctx: Any) -> str:
@@ -486,10 +574,34 @@ def stable_owner_sub(user_ctx: Any) -> str:
     return subject
 
 
-def _canonical_source_id(source_id: str) -> str:
+def verified_artifact_owner(user_ctx: Any) -> VerifiedArtifactOwner:
+    """Create the only accepted artifact-write identity from authenticated context."""
+    return VerifiedArtifactOwner(
+        stable_owner_sub(user_ctx),
+        deepcopy(user_ctx),
+        _VERIFIED_OWNER_PROOF,
+    )
+
+
+def _verified_owner_sub(owner: VerifiedArtifactOwner) -> str:
+    if not isinstance(owner, VerifiedArtifactOwner):
+        raise FileError("创建制品需要已验证身份")
+    if stable_owner_sub(owner._context) != owner.sub:
+        raise FileError("创建制品需要已验证身份")
+    return owner.sub
+
+
+def _generated_scope(owner: VerifiedArtifactOwner) -> dict:
+    _verified_owner_sub(owner)
+    return snapshot_access_scope(owner._context)
+
+
+def _canonical_source_id(source_id: str, owner: VerifiedArtifactOwner) -> str:
     checked = _check_id(source_id)
-    meta = _find_artifact_meta(checked, require_ready=True)
-    return meta["file_id"] if meta is not None else checked
+    if not access_allowed(checked, owner._context):
+        raise FileError("无权引用来源制品")
+    meta = _load_meta(checked)
+    return meta.get("file_id", checked)
 
 
 def _mark_artifact_ready(artifact_id: str) -> None:
@@ -520,11 +632,11 @@ def _publish_artifact(
     filename: str,
     *,
     kind: str,
-    operated_by: str | None,
+    owner: VerifiedArtifactOwner,
     source_ids: list[str] | None = None,
     extra_meta: dict | None = None,
-    access_scope: dict | None = None,
 ) -> dict:
+    require_artifact_v2_enabled()
     safe_name = _safe_filename(filename)
     ext = _ext_of(safe_name)
     if ext not in _ALLOWED_EXT:
@@ -534,14 +646,18 @@ def _publish_artifact(
     created_at = datetime.now(timezone.utc)
     expires_at = created_at + timedelta(days=get_settings().agent_artifact_retention_days)
     expected_hash = hashlib.sha256(content).hexdigest()
-    owner = str(operated_by or "").strip()
-    if not owner:
-        raise FileError("创建制品需要已认证用户")
-    sources = [_canonical_source_id(source_id) for source_id in (source_ids or [])]
+    owner_sub = _verified_owner_sub(owner)
+    sources = [_canonical_source_id(source_id, owner) for source_id in (source_ids or [])]
+    if kind == "upload":
+        resolved_scope = _default_access_scope(kind)
+    elif kind == "generated":
+        resolved_scope = _generated_scope(owner)
+    else:
+        raise FileError("文件类型不受支持")
     with SessionLocal.begin() as db:
         db.add(AgentArtifact(
             id=artifact_id,
-            owner_sub=owner,
+            owner_sub=owner_sub,
             filename=safe_name,
             media_type=_MIME_BY_EXT[ext],
             size_bytes=len(content),
@@ -549,8 +665,9 @@ def _publish_artifact(
             status="prepared",
             storage_key=storage_key,
             kind=kind,
+            sensitivity=_derive_sensitivity(kind, resolved_scope),
             source_ids=sources,
-            access_scope=dict(access_scope or _default_access_scope(kind)),
+            access_scope=resolved_scope,
             extra_meta=dict(extra_meta or {}),
             created_at=created_at,
             expires_at=expires_at,
@@ -654,9 +771,20 @@ def access_allowed(file_id: str, user_ctx: Any) -> bool:
     snapshot_row_scope = scope.get("row_scope")
     if snapshot_row_scope not in {"all", "own_customers"}:
         return False
+    current_is_own = bool(current.get("own_customers_only", False))
     # An all-customers result cannot be reopened after the account becomes own-only.
-    if snapshot_row_scope == "all" and current.get("own_customers_only", False):
+    if snapshot_row_scope == "all" and current_is_own:
         return False
+    if snapshot_row_scope == "own_customers" and current_is_own:
+        snapshot_subject = scope.get("row_subject")
+        current_subject = _canonical_salesperson_subject(user_ctx.salesperson_name)
+        if (
+            not isinstance(snapshot_subject, str)
+            or not snapshot_subject
+            or not current_subject
+            or snapshot_subject != current_subject
+        ):
+            return False
     return True
 
 
@@ -674,8 +802,19 @@ def _safe_spreadsheet_value(value):
     return value
 
 
-def save_upload(content: bytes, filename: str, operated_by: str | None) -> dict:
+def _canonical_salesperson_subject(value: Any) -> str | None:
+    """Canonical identity bound to own-customer row scope (not a display label)."""
+    if value is None:
+        return None
+    normalized = unicodedata.normalize("NFKC", str(value))
+    normalized = re.sub(r"\s+", " ", normalized).strip().casefold()
+    return normalized or None
+
+
+def save_upload(content: bytes, filename: str, owner: VerifiedArtifactOwner) -> dict:
     """保存上传文件（多格式），返回 file_id + 类型/概览（供注入对话上下文）。"""
+    require_artifact_v2_enabled()
+    _verified_owner_sub(owner)
     safe_name = _safe_filename(filename, "上传文件")
     ext = _ext_of(safe_name)
     if ext == "xls":
@@ -712,7 +851,7 @@ def save_upload(content: bytes, filename: str, operated_by: str | None) -> dict:
         content,
         safe_name,
         kind="upload",
-        operated_by=operated_by,
+        owner=owner,
         extra_meta=extra_meta,
     )
     out = {"file_id": artifact["file_id"], "filename": safe_name, "ext": ext,
@@ -906,8 +1045,10 @@ def _col_index(col) -> int:
 
 def write_excel(base_file_id: str | None, sheet: str | None,
                 cells: list[dict], output_name: str | None,
-                operated_by: str | None, *, access_scope: dict | None = None) -> dict:
+                owner: VerifiedArtifactOwner) -> dict:
     """按模型指令写单元格，产出新文件（不动原件）。用于**回填客户模板**（保留原格式）。"""
+    require_artifact_v2_enabled()
+    _verified_owner_sub(owner)
     if not cells:
         raise FileError("cells 不能为空")
     if len(cells) > _MAX_WRITE_CELLS:
@@ -915,7 +1056,7 @@ def write_excel(base_file_id: str | None, sheet: str | None,
 
     base_name = ""
     if base_file_id:
-        base = _check_id(base_file_id)
+        base = _canonical_source_id(base_file_id, owner)
         bmeta = _load_meta(base)
         _require_xlsx(base, bmeta)
         wb = load_workbook(_data_path(base, "xlsx"))  # 保留原格式/公式
@@ -946,10 +1087,9 @@ def write_excel(base_file_id: str | None, sheet: str | None,
         buffer.getvalue(),
         name,
         kind="generated",
-        operated_by=operated_by,
+        owner=owner,
         source_ids=[base_file_id] if base_file_id else [],
         extra_meta={"base_file_id": base_file_id},
-        access_scope=access_scope,
     )
     ref = _artifact_ref(artifact)
     download_url = f"/api/agent/files/{artifact['file_id']}"
@@ -971,12 +1111,13 @@ _BAD_KW = ("未找到", "无库存", "不存在", "未匹配")
 
 
 def write_report(title: str | None, headers: list[str], rows: list[list],
-                 output_name: str | None, operated_by: str | None,
-                 money_cols: list[int] | None = None, *,
-                 access_scope: dict | None = None) -> dict:
+                 output_name: str | None, owner: VerifiedArtifactOwner,
+                 money_cols: list[int] | None = None) -> dict:
     """生成**美化报表**（BOM/报价单等）：表头配色、边框、自适应列宽、金额格式、
     冻结表头、斑马纹、状态行条件配色。headers=列名；rows=与列对齐的二维数组；
     money_cols=金额列的 0-based 下标（数字格式+右对齐）。"""
+    require_artifact_v2_enabled()
+    _verified_owner_sub(owner)
     if not headers:
         raise FileError("headers 不能为空")
     if len(rows) > 5000:
@@ -1038,9 +1179,8 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
         buffer.getvalue(),
         name,
         kind="generated",
-        operated_by=operated_by,
+        owner=owner,
         extra_meta={"report": True},
-        access_scope=access_scope,
     )
     ref = _artifact_ref(artifact)
     download_url = f"/api/agent/files/{artifact['file_id']}"

@@ -8,14 +8,19 @@ def _ctx(user_id, role="sales"):
     return security.UserContext(
         user_id=user_id,
         role=role,
+        salesperson_name=user_id,
         is_authenticated=True,
         authn="sys_user",
         has_stable_subject=True,
     )
 
 
+def _owner(user_id):
+    return agent_files.verified_artifact_owner(_ctx(user_id))
+
+
 def test_upload_records_owner_and_owns_logic(db):
-    up = agent_files.save_upload(b"hello", "a.txt", "alice")
+    up = agent_files.save_upload(b"hello", "a.txt", _owner("alice"))
     fid = up["file_id"]
     assert agent_files.owner_of(fid) == "alice"
     assert tools._owns(_ctx("alice"), fid) is True            # 本人
@@ -25,7 +30,7 @@ def test_upload_records_owner_and_owns_logic(db):
 
 
 def test_read_tools_block_other_users_file(db):
-    fid = agent_files.save_upload(b"secret quote", "q.txt", "alice")["file_id"]
+    fid = agent_files.save_upload(b"secret quote", "q.txt", _owner("alice"))["file_id"]
     # 他人通过读工具访问 → 拒
     assert tools._read_document(db, {"file_id": fid}, _ctx("bob")) == tools._NO_ACCESS
     assert tools._inspect_file(db, {"file_id": fid}, _ctx("bob")) == tools._NO_ACCESS
@@ -38,7 +43,7 @@ def test_read_tools_block_other_users_file(db):
 def test_readonly_cannot_read_others_file(db):
     """收紧（2026-06-15）：readonly 不再是文件全量角色——共享口令回退把非 admin 一律发成
     readonly，若放行会让任何知道 ADMIN_PASSWORD 的人凭 file_id 读他人上传的报价/合同(IDOR)。"""
-    fid = agent_files.save_upload(b"secret quote", "q.txt", "alice")["file_id"]
+    fid = agent_files.save_upload(b"secret quote", "q.txt", _owner("alice"))["file_id"]
     assert tools._owns(_ctx("bob", role="readonly"), fid) is False        # readonly 也需本人
     assert tools._read_document(db, {"file_id": fid}, _ctx("bob", role="readonly")) == tools._NO_ACCESS
     # admin / boss 也不能通过普通端点跨 owner；取证需未来独立 break-glass。

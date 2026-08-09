@@ -30,6 +30,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=16), nullable=False),
         sa.Column("storage_key", sa.String(length=512), nullable=False),
         sa.Column("kind", sa.String(length=16), nullable=False),
+        sa.Column("sensitivity", sa.String(length=16), nullable=False),
         sa.Column(
             "source_ids",
             postgresql.JSONB(astext_type=sa.Text()),
@@ -62,6 +63,10 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "kind IN ('upload', 'generated')",
             name="ck_agent_artifact_kind",
+        ),
+        sa.CheckConstraint(
+            "sensitivity IN ('low', 'medium', 'high', 'critical')",
+            name="ck_agent_artifact_sensitivity",
         ),
         sa.CheckConstraint("size_bytes >= 0", name="ck_agent_artifact_size"),
         sa.CheckConstraint("char_length(sha256) = 64", name="ck_agent_artifact_sha256"),
@@ -99,6 +104,18 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute(
+        """
+        DO $$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM agent_artifact LIMIT 1) THEN
+            RAISE EXCEPTION
+              'ad8f6c2e1b47 downgrade blocked: agent_artifact is not empty; disable v2 routes and use a forward deploy';
+          END IF;
+        END
+        $$;
+        """
+    )
     op.drop_index("ix_agent_artifact_status_expiry", table_name="agent_artifact")
     op.drop_index("ix_agent_artifact_owner_created", table_name="agent_artifact")
     op.drop_table("agent_artifact")

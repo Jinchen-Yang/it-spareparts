@@ -35,16 +35,30 @@ def _docx_bytes(lines: list[str]) -> bytes:
     return buf.getvalue()
 
 
+def _owner(username: str):
+    return af.verified_artifact_owner(security.UserContext(
+        user_id=username,
+        role="admin",
+        is_authenticated=True,
+        authn="sys_user",
+        has_stable_subject=True,
+    ))
+
+
 def test_upload_docx_and_read(ctx):
     up = af.save_upload(_docx_bytes(["1台 Dell R750", "2× Xeon Gold 6330", "8× 32GB DDR4"]),
-                        "整机配置.docx", "admin")
+                        "整机配置.docx", _owner("admin"))
     assert up["ext"] == "docx" and up["file_kind"] == "Word"
     rd = af.read_document(up["file_id"])
     assert "Xeon Gold 6330" in rd["content"] and rd["vision_used"] is False
 
 
 def test_upload_txt_and_read(ctx):
-    up = af.save_upload("服务器配置:\nCPU x2 6330\n内存 32G x8".encode(), "config.txt", "admin")
+    up = af.save_upload(
+        "服务器配置:\nCPU x2 6330\n内存 32G x8".encode(),
+        "config.txt",
+        _owner("admin"),
+    )
     rd = af.read_document(up["file_id"])
     assert "6330" in rd["content"]
 
@@ -53,18 +67,22 @@ def test_image_degrades_without_vision(ctx):
     from PIL import Image
     buf = io.BytesIO()
     Image.new("RGB", (60, 30), "white").save(buf, "PNG")
-    up = af.save_upload(buf.getvalue(), "cfg.png", "admin")
+    up = af.save_upload(buf.getvalue(), "cfg.png", _owner("admin"))
     rd = af.read_document(up["file_id"])
     assert "未配置视觉模型" in rd["content"]  # 无 VISION_API_KEY 时优雅降级
 
 
 def test_reject_executable_ext(ctx):
     with pytest.raises(af.FileError):
-        af.save_upload(b"MZ", "evil.exe", "admin")
+        af.save_upload(b"MZ", "evil.exe", _owner("admin"))
 
 
 def test_read_document_tool(db, ctx):
-    up = af.save_upload(_docx_bytes(["RTX 4090 显卡 x2"]), "x.docx", ctx.user_id)
+    up = af.save_upload(
+        _docx_bytes(["RTX 4090 显卡 x2"]),
+        "x.docx",
+        af.verified_artifact_owner(ctx),
+    )
     r = tools.dispatch(db, "read_document", {"file_id": up["file_id"]}, ctx)
     assert "RTX 4090" in r["content"]
 

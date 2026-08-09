@@ -5,10 +5,22 @@ import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
+from app import permissions, security
 from app.auth import hash_password
 from app.main import app
 from app.models.system import SysUser
 from app.services import agent_files
+
+
+def _owner(username: str):
+    return agent_files.verified_artifact_owner(security.UserContext(
+        user_id=username,
+        role="admin",
+        permissions=permissions.effective("admin", None),
+        is_authenticated=True,
+        authn="sys_user",
+        has_stable_subject=True,
+    ))
 
 
 def _xlsx_bytes() -> bytes:
@@ -18,7 +30,7 @@ def _xlsx_bytes() -> bytes:
 
 
 def test_preview_xlsx_returns_table(db):
-    fid = agent_files.save_upload(_xlsx_bytes(), "报价单.xlsx", "alice")["file_id"]
+    fid = agent_files.save_upload(_xlsx_bytes(), "报价单.xlsx", _owner("alice"))["file_id"]
     pv = agent_files.preview(fid)
     assert pv["kind"] == "table" and pv["filename"] == "报价单.xlsx"
     sh = pv["sheets"][0]
@@ -28,7 +40,7 @@ def test_preview_xlsx_returns_table(db):
 
 
 def test_preview_non_xlsx_kind(db):
-    fid = agent_files.save_upload(b"hi", "note.txt", "alice")["file_id"]
+    fid = agent_files.save_upload(b"hi", "note.txt", _owner("alice"))["file_id"]
     assert agent_files.preview(fid)["kind"] == "other"
 
 
@@ -42,7 +54,7 @@ def test_agent_files_dir_persisted_under_raw():
 
 def test_preview_corrupt_xlsx_raises_fileerror(db):
     # 落盘损坏(绕过上传校验)：preview 须转成 FileError(端点据此返 404)，不能裸冒 500
-    fid = agent_files.save_upload(_xlsx_bytes(), "ok.xlsx", "alice")["file_id"]
+    fid = agent_files.save_upload(_xlsx_bytes(), "ok.xlsx", _owner("alice"))["file_id"]
     agent_files._data_path(fid, "xlsx").write_bytes(b"PK\x03\x04 corrupt not a real xlsx")
     with pytest.raises(agent_files.FileError):
         agent_files.preview(fid)

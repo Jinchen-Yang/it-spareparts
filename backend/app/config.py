@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     llm_max_tokens: int | None = None  # 单次生成长度上限；None=不传（用端点默认）。防长答滚雪球/控成本
     llm_max_retries: int = 2           # 显式化 openai SDK 对 429/5xx 的指数退避重试次数（便于审计调参）
     enable_agent: bool = True
+    # Release kill switch: v2 routes and creation stay fail-closed until explicitly enabled.
+    agent_artifact_v2_enabled: bool = False
     # AI 上传件/生成件的元数据生命周期；对象清理器后续按 expires_at 执行。
     agent_artifact_retention_days: int = Field(default=90, ge=1, le=3650)
 

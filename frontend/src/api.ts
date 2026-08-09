@@ -1,4 +1,5 @@
 import axios from "axios";
+import { artifactIdFromFileUrl } from "./artifactIds";
 import { clearSessionScopedPreferences } from "./sessionPreferences";
 
 export const api = axios.create({ baseURL: "/api" });
@@ -309,9 +310,9 @@ export const agentUpload = (file: File) => {
  * 用 fetch 而非 axios：全局 401 拦截器会 location.reload()，
  * 点下载触发整页刷新会打断对话——下载失败必须就地提示，绝不能刷页面。 */
 export const agentDownload = async (url: string, fallbackName = "下载.xlsx") => {
-  const m = /\/api\/agent\/files\/([a-f0-9]{6,})/.exec(url);
-  if (!m) throw new Error("bad-url");
-  const resp = await fetch(`/api/agent/files/${m[1]}`, {
+  const fileId = artifactIdFromFileUrl(url);
+  if (!fileId) throw new Error("bad-url");
+  const resp = await fetch(`/api/agent/files/${fileId}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
     cache: "no-store",
   });
