@@ -164,7 +164,7 @@ Risk rankings depend most on whether sensitive data may leave production, whethe
 | Path | Why it matters | Related Threat IDs |
 |---|---|---|
 | `backend/app/agent/runtime.py` | Central model/tool loop, cancellation, iteration and future plan boundary | TM-001, TM-006, TM-010 |
-| `backend/app/agent/tools.py` | Tool exposure, RBAC, effect policy and result/error handling | TM-001, TM-002, TM-010 |
+| `backend/app/agent/tools.py` | Tool exposure, RBAC, effect/egress policy and result/error handling | TM-001, TM-002, TM-008, TM-010 |
 | `backend/app/agent/provider.py` | External/private model egress and untrusted model response parsing | TM-001, TM-008 |
 | `backend/app/agent/prompts.py` | Security boundary wording and untrusted-content separation | TM-001 |
 | `backend/app/api/agent.py` | Upload, chat, download, preview and MIME/ACL enforcement | TM-003, TM-004, TM-006, TM-009 |
