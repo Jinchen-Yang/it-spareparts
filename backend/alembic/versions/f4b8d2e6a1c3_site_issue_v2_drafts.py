@@ -336,6 +336,41 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute(
+        "LOCK TABLE maintenance_site_issue_return_event, "
+        "maintenance_site_issue_command, maintenance_site_issue_line, "
+        "maintenance_site_issue, maintenance_site_issue_delivery_source "
+        "IN ACCESS EXCLUSIVE MODE"
+    )
+    op.execute(
+        """
+        DO $migration$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM maintenance_site_issue_return_event)
+             OR EXISTS (SELECT 1 FROM maintenance_site_issue_command)
+             OR EXISTS (SELECT 1 FROM maintenance_site_issue_delivery_source)
+             OR EXISTS (
+                SELECT 1
+                FROM maintenance_site_issue
+                WHERE source = 'site_issue_v2'
+             )
+             OR EXISTS (
+                SELECT 1
+                FROM maintenance_site_issue_line
+                WHERE delivery_line_id IS NOT NULL
+                   OR source_order_id IS NOT NULL
+                   OR source_line_id IS NOT NULL
+                   OR serial_number IS NOT NULL
+             )
+          THEN
+            RAISE EXCEPTION
+              'f4b8d2e6a1c3 downgrade blocked: site issue v2 business history is not empty';
+          END IF;
+        END
+        $migration$;
+        """
+    )
     op.execute(
         """
         DROP TRIGGER trg_maintenance_site_issue_return_event_guard
