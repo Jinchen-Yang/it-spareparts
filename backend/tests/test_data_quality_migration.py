@@ -4,18 +4,24 @@ import os
 import pytest
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 
 from app.db import engine
 
 _PREV = "a9c5e2f7d4b1"
-_HEAD = "f1c8e4a7b2d9"
 
 
 def _cfg():
     cfg = AlembicConfig(os.path.join(os.path.dirname(__file__), "..", "alembic.ini"))
     cfg.set_main_option("script_location", os.path.join(os.path.dirname(__file__), "..", "alembic"))
     return cfg
+
+
+def _current_head() -> str:
+    head = ScriptDirectory.from_config(_cfg()).get_current_head()
+    assert head is not None
+    return head
 
 
 def test_empty_downgrade_upgrade_preserves_existing_facts_and_permission_defaults(db):
@@ -44,7 +50,7 @@ def test_empty_downgrade_upgrade_preserves_existing_facts_and_permission_default
 
         alembic_command.upgrade(cfg, "head")
         with engine.begin() as conn:
-            assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar() == _HEAD
+            assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar() == _current_head()
             assert conn.execute(text("SELECT to_regclass('fact_data_quality_issue')")).scalar()
             values = dict(conn.execute(text(
                 "SELECT code, (permissions->>'action_data_quality_review')::boolean "
@@ -83,5 +89,5 @@ def test_nonempty_issue_table_blocks_downgrade(db):
     finally:
         alembic_command.upgrade(_cfg(), "head")
     with engine.begin() as conn:
-        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar() == _HEAD
+        assert conn.execute(text("SELECT version_num FROM alembic_version")).scalar() == _current_head()
         assert conn.execute(text("SELECT COUNT(*) FROM fact_data_quality_issue")).scalar() == 1
