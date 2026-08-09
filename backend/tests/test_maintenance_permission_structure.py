@@ -553,3 +553,66 @@ def test_new_maintenance_fields_are_registered_without_masking_generic_status():
         for fields in config.FIELD_GROUPS.values()
         for field in fields
     }
+
+
+_ISSUE203_COST_DERIVED_FIELDS = {
+    "site_requisition_priced_cost_ex_tax",
+    "site_requisition_priced_cost_inc_tax",
+    "sales_estimate_cost_ex_tax",
+    "sales_estimate_cost_inc_tax",
+    "sales_estimate_lines",
+    "sales_estimate_count",
+    "cost_progress_includes_sales_estimate",
+    "cost_progress_label",
+    "cost_evidence_kind",
+    "cost_is_estimate",
+    "cost_source_label",
+}
+
+
+def test_issue203_cost_derived_fields_are_centrally_masked_without_cost_permission():
+    """未来任一响应复用这些成本字段时，不依赖业务服务手工清空也不会泄漏。"""
+    payload = {
+        "future_reuse": [
+            {
+                "derived_costs": {
+                    field: f"sensitive-{index}"
+                    for index, field in enumerate(sorted(_ISSUE203_COST_DERIVED_FIELDS))
+                }
+            }
+        ]
+    }
+
+    masked = security.apply_field_visibility(
+        payload,
+        _ctx(cost=False, profit=False),
+    )
+
+    assert _ISSUE203_COST_DERIVED_FIELDS <= set(
+        config.FIELD_GROUPS["purchase_cost"]
+    )
+    assert masked == {
+        "future_reuse": [
+            {
+                "derived_costs": {
+                    field: None for field in sorted(_ISSUE203_COST_DERIVED_FIELDS)
+                }
+            }
+        ]
+    }
+
+
+def test_issue203_cost_derived_fields_remain_visible_with_cost_only_permission():
+    """采购类角色只开成本、不开放利润时，成本证据与估算口径仍应完整保留。"""
+    derived_costs = {
+        field: f"visible-{index}"
+        for index, field in enumerate(sorted(_ISSUE203_COST_DERIVED_FIELDS))
+    }
+    payload = {"future_reuse": [{"derived_costs": derived_costs}]}
+
+    visible = security.apply_field_visibility(
+        payload,
+        _ctx(cost=True, profit=False),
+    )
+
+    assert visible == payload

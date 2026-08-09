@@ -8,6 +8,10 @@ import {
 } from "../../api/maintenanceOperations";
 import MaintenanceProjectCard from "../../components/maintenance/MaintenanceProjectCard";
 import "../../components/maintenance/maintenanceOperations.css";
+import {
+  canUseMaintenanceReminderFilter,
+  readMaintenanceCapabilities,
+} from "../../components/maintenance/maintenancePermissions";
 import PageHeader from "../../components/PageHeader";
 
 const PAGE_SIZE = 24;
@@ -17,6 +21,7 @@ export default function MaintenanceProjectsPage() {
   const location = useLocation();
   const projectDeepLinkId = searchParams.get("project_id")?.trim() || "";
   const reminderFilter = searchParams.get("reminder") || undefined;
+  const reminderFilterAllowed = canUseMaintenanceReminderFilter(reminderFilter);
   const [rows, setRows] = useState<MaintenanceProjectOperationsSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -24,6 +29,8 @@ export default function MaintenanceProjectsPage() {
   const [lifecycle, setLifecycle] = useState(reminderFilter ? "all" : "ongoing");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [permissionDenied, setPermissionDenied] = useState(false);
+  const [capabilities] = useState(readMaintenanceCapabilities);
   const generation = useRef(0);
 
   const load = useCallback(async (
@@ -34,6 +41,7 @@ export default function MaintenanceProjectsPage() {
     const request = ++generation.current;
     setLoading(true);
     setError(false);
+    setPermissionDenied(false);
     try {
       const { data } = await listMaintenanceProjectOperations({
         page: nextPage,
@@ -46,21 +54,25 @@ export default function MaintenanceProjectsPage() {
       setRows(data.rows ?? []);
       setTotal(data.total ?? 0);
       setPage(data.page ?? nextPage);
-    } catch {
+    } catch (reason: unknown) {
       if (request !== generation.current) return;
       setRows([]);
       setTotal(0);
-      setError(true);
+      const responseStatus = (
+        reason as { response?: { status?: unknown } } | null
+      )?.response?.status;
+      if (responseStatus === 403) setPermissionDenied(true);
+      else setError(true);
     } finally {
       if (request === generation.current) setLoading(false);
     }
   }, [reminderFilter]);
 
   useEffect(() => {
-    if (projectDeepLinkId) return undefined;
+    if (projectDeepLinkId || !reminderFilterAllowed) return undefined;
     void load(1, q, lifecycle);
     return () => { generation.current += 1; };
-  }, [lifecycle, load, projectDeepLinkId, q]);
+  }, [lifecycle, load, projectDeepLinkId, q, reminderFilterAllowed]);
 
   if (projectDeepLinkId) {
     const nextParams = new URLSearchParams(searchParams);
@@ -110,7 +122,14 @@ export default function MaintenanceProjectsPage() {
           }}
         />
       </Space>
-      {error ? (
+      {!reminderFilterAllowed || permissionDenied ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="当前账号无权使用该提醒筛选"
+          description="该筛选依赖当前账号不可见的经营字段；移除提醒参数后仍可查看获准的项目事实。"
+        />
+      ) : error ? (
         <Alert
           type="error"
           showIcon
@@ -130,7 +149,11 @@ export default function MaintenanceProjectsPage() {
           aria-busy={loading}
         >
           {rows.map((project) => (
-            <MaintenanceProjectCard key={project.project_id} project={project} />
+            <MaintenanceProjectCard
+              key={project.project_id}
+              project={project}
+              visibility={capabilities}
+            />
           ))}
         </div>
       )}

@@ -150,7 +150,10 @@ const workspace = {
       unit_cost_inc_tax: 113,
       cost_amount_ex_tax: 200,
       cost_amount_inc_tax: 226,
-      cost_source: "manual",
+      cost_source: "sales_window",
+      cost_evidence_kind: "sales_estimate",
+      cost_is_estimate: true,
+      cost_source_label: "估算（销售前后 7 天数量加权）",
       cost_status: "available",
     }],
     total: 3,
@@ -222,7 +225,7 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(await screen.findByRole("heading", { name: "移动维保项目" })).toBeInTheDocument();
     expect(screen.getAllByText("XSDD-001").length).toBeGreaterThanOrEqual(3);
     expect(screen.getByText("回款 / 全部合同额（含税）")).toBeInTheDocument();
-    expect(screen.getByText("项目实际成本（含税） / 全部合同额（含税）"))
+    expect(screen.getByText("项目已计成本（含税） / 全部合同额（含税）"))
       .toBeInTheDocument();
     expect(screen.getAllByText("合同额（含税）").length).toBeGreaterThanOrEqual(1);
 
@@ -244,12 +247,17 @@ describe("MaintenanceProjectWorkspacePage", () => {
     for (const header of [
       "单位成本（含税）",
       "单位成本（不含税）",
-      "已知成本（含税）",
-      "已知成本（不含税）",
+      "已计成本（含税）",
+      "已计成本（不含税）",
     ]) {
       expect(within(requisitions).getByRole("columnheader", { name: header })).toBeInTheDocument();
     }
     expect(within(requisitions).getByText("PN-COSTED")).toBeInTheDocument();
+    expect(within(requisitions).getByRole("columnheader", { name: "取价依据" }))
+      .toBeInTheDocument();
+    expect(within(requisitions).getByText("估算（销售前后 7 天数量加权）"))
+      .toBeInTheDocument();
+    expect(within(requisitions).getByText("已计入（估算）")).toBeInTheDocument();
 
     const expenses = screen.getByTestId("approved-expense-table");
     expect(within(expenses).getByText("审批通过")).toBeInTheDocument();
@@ -289,7 +297,7 @@ describe("MaintenanceProjectWorkspacePage", () => {
     const requisitions = await screen.findByTestId("site-requisition-table");
     expect(within(requisitions).getByRole("columnheader", { name: `单位成本（${shown}）` }))
       .toBeInTheDocument();
-    expect(within(requisitions).getByRole("columnheader", { name: `已知成本（${shown}）` }))
+    expect(within(requisitions).getByRole("columnheader", { name: `已计成本（${shown}）` }))
       .toBeInTheDocument();
     expect(within(requisitions).queryByRole("columnheader", { name: `单位成本（${hidden}）` }))
       .toBeNull();
@@ -376,6 +384,12 @@ describe("MaintenanceProjectWorkspacePage", () => {
   });
 
   it("成本汇总被脱敏时不把未知状态误标为缺价", async () => {
+    localStorage.setItem("role", "readonly");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: false,
+      data_profit: false,
+    }));
     getMaintenanceProjectWorkspace.mockResolvedValueOnce({
       data: {
         ...workspace,
@@ -408,5 +422,87 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(await screen.findByText("成本不可见/无权限")).toBeInTheDocument();
     expect(screen.queryByText(/缺 null 行成本/)).toBeNull();
     expect(screen.getByText("成本明细不可见")).toBeInTheDocument();
+  });
+
+  it("仅成本权限在费用完整度未知时仍展示现场领用成本、估算和取价证据", async () => {
+    localStorage.setItem("role", "purchaser");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: true,
+      data_profit: false,
+    }));
+    getMaintenanceProjectWorkspace.mockResolvedValueOnce({
+      data: {
+        ...workspace,
+        project: {
+          ...workspace.project,
+          contracts: workspace.project.contracts.map((contract) => ({
+            ...contract,
+            contract_amount: null,
+            received_amount: null,
+            amount_status: "restricted",
+          })),
+          metrics: {
+            ...workspace.project.metrics,
+            total_contract_amount: null,
+            known_contract_amount: null,
+            contract_amount_complete: null,
+            received_amount: null,
+            collection_progress_pct: null,
+            site_requisition_known_cost: 226,
+            site_requisition_known_cost_ex_tax: 200,
+            site_requisition_known_cost_inc_tax: 226,
+            site_requisition_priced_cost_ex_tax: 200,
+            site_requisition_priced_cost_inc_tax: 226,
+            sales_estimate_cost_ex_tax: 200,
+            sales_estimate_cost_inc_tax: 226,
+            sales_estimate_lines: 1,
+            cost_progress_includes_sales_estimate: true,
+            cost_progress_label: "priced_cost_including_sales_estimate",
+            approved_expense: null,
+            approved_expense_ex_tax: null,
+            approved_expense_inc_tax: null,
+            actual_project_cost_known: null,
+            actual_project_cost_known_ex_tax: null,
+            actual_project_cost_known_inc_tax: null,
+            cost_rate_lower_bound_pct: null,
+            cost_status: null,
+            cost_complete: null,
+            missing_cost_lines: 0,
+          },
+        },
+        collection_snapshots: {
+          ...workspace.collection_snapshots,
+          rows: [],
+          total: 0,
+        },
+        requisitions: {
+          ...workspace.requisitions,
+          rows: [workspace.requisitions.rows[2]],
+          total: 1,
+        },
+        approved_expenses: {
+          ...workspace.approved_expenses,
+          rows: [],
+          total: 0,
+        },
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <MaintenanceProjectWorkspacePage projectId="project-1" />
+      </MemoryRouter>,
+    );
+
+    const requisitions = await screen.findByTestId("site-requisition-table");
+    expect(within(requisitions).getByText("PN-COSTED")).toBeInTheDocument();
+    expect(within(requisitions).getByText("估算（销售前后 7 天数量加权）"))
+      .toBeInTheDocument();
+    expect(within(requisitions).getByText("已计入（估算）")).toBeInTheDocument();
+    expect(screen.getByText(/销售回退估算（含税）.*¥226/)).toBeInTheDocument();
+    expect(screen.getByText("现场领用成本可见；报销费用不可见")).toBeInTheDocument();
+    expect(screen.queryByText("成本不可见/无权限")).toBeNull();
+    expect(screen.queryByText("成本明细不可见")).toBeNull();
   });
 });

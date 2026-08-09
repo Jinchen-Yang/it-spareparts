@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import zipfile
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from openpyxl import Workbook, load_workbook
@@ -16,6 +18,13 @@ from app.services import maintenance_project_workbook_v2 as workbook_v2
 
 
 HMAC_KEY = b"fixed-test-only-maintenance-workbook-v2-key"
+BASE_V2_FIXTURE = (
+    Path(__file__).with_name("fixtures")
+    / "maintenance_project_workbook_v2_base_7bfe7fc.xlsx"
+)
+BASE_V2_FIXTURE_SHA256 = (
+    "846b31f5dcec7314cd91797da3a32111ee1ab976f46c00cc804513a4469157a9"
+)
 
 
 def _append_collection(
@@ -220,8 +229,44 @@ def _workspace(*, revision: int = 7) -> dict:
 
 
 def test_export_is_four_visible_sheets_and_keeps_missing_cost_as_blank():
+    workspace = _workspace()
+    workspace["consumptions"].append(
+        {
+            "consumption_id": "issue-line-sales-estimate",
+            "issue_no": "CKD-002",
+            "issue_date": date(2026, 7, 23),
+            "part_no": "PN-SALES-ESTIMATE",
+            "part_name": "销售回退估算备件",
+            "quantity": Decimal("2"),
+            "unit_cost": Decimal("100.00"),
+            "cost_amount": Decimal("200.00"),
+            "unit_cost_ex_tax": Decimal("100.00"),
+            "unit_cost_inc_tax": Decimal("113.00"),
+            "cost_amount_ex_tax": Decimal("200.00"),
+            "cost_amount_inc_tax": Decimal("226.00"),
+            "cost_status": "available",
+            "cost_source": "sales_window",
+            "cost_evidence_kind": "sales_estimate",
+            "cost_is_estimate": True,
+            "cost_source_label": "估算（销售前后 7 天数量加权）",
+        }
+    )
+    workspace["tasks"].append(
+        {
+            "task_id": "task-sales-fallback-estimate",
+            "task_type": "cost",
+            "title": "核对项目成本中的销售回退估算",
+            "due_date": None,
+            "status": "open",
+            "owner": "张经理",
+            "detail": (
+                "1 条已确认现场领用按销售前后 7 天数量加权估算；"
+                "已计入成本进度，但不等于采购或人工确认单价"
+            ),
+        }
+    )
     artifact = workbook_v2.build_project_workbook(
-        _workspace(),
+        workspace,
         hmac_key=HMAC_KEY,
         exported_by="tester",
     )
@@ -229,9 +274,9 @@ def test_export_is_four_visible_sheets_and_keeps_missing_cost_as_blank():
     assert artifact.preview == {
         "contracts": 1,
         "collections": 1,
-        "consumptions": 1,
+        "consumptions": 2,
         "expenses": 1,
-        "tasks": 1,
+        "tasks": 2,
         "missing_cost_rows": 1,
     }
     book = load_workbook(io.BytesIO(artifact.content), data_only=False)
@@ -289,6 +334,30 @@ def test_export_is_four_visible_sheets_and_keeps_missing_cost_as_blank():
         assert sheet.cell(2, amount_ex_col).value is None
         assert sheet.cell(2, amount_inc_col).value is None
         assert sheet.cell(2, header_values.index("成本完整性") + 1).value == "缺少价格成本"
+        assert sheet.cell(3, header_values.index("成本完整性") + 1).value == "已计入（销售回退估算）"
+        assert (
+            sheet.cell(3, header_values.index("成本来源") + 1).value
+            == "估算（销售前后 7 天数量加权）"
+        )
+        summary_labels = [
+            sheet_value
+            for sheet_value in (
+                book["01_总览"].cell(row, 1).value
+                for row in range(1, 24)
+            )
+            if sheet_value
+        ]
+        assert "现场领用已计成本（未税，含销售回退估算）" in summary_labels
+        assert "项目已计成本（含税，含销售回退估算）" in summary_labels
+        task_sheet = book["04_项目经理追踪与提醒"]
+        task_headers = [cell.value for cell in task_sheet[1]]
+        assert task_sheet.cell(3, task_headers.index("标题") + 1).value == (
+            "核对项目成本中的销售回退估算"
+        )
+        assert "不等于采购或人工确认单价" in task_sheet.cell(
+            3,
+            task_headers.index("详细说明") + 1,
+        ).value
     finally:
         book.close()
 
@@ -380,8 +449,8 @@ def test_summary_excludes_confirmed_collection_from_historical_or_not_included_c
     ("known_cost", "cost_complete", "canonical_status", "expected"),
     [
         ("79000.00", False, "unknown", "incomplete"),
-        ("80000.00", False, "yellow", "yellow"),
-        ("100001.00", False, "red", "red"),
+        ("80000.00", False, "yellow", "incomplete"),
+        ("100010.00", False, "red", "red"),
         ("79000.00", True, "normal", "green"),
     ],
 )
@@ -503,14 +572,18 @@ def test_summary_fails_closed_when_canonical_tax_basis_is_missing_or_invalid(
 @pytest.mark.parametrize(
     ("cost", "expected"),
     [
-        ("79000.00", "green"),
-        ("80000.00", "yellow"),
-        ("80000.01", "yellow"),
+        ("79990.00", "green"),
+        ("80000.00", "green"),
+        ("80004.00", "green"),
+        ("80005.00", "yellow"),
+        ("80010.00", "yellow"),
         ("100000.00", "yellow"),
-        ("100000.01", "red"),
+        ("100004.00", "yellow"),
+        ("100005.00", "red"),
+        ("100010.00", "red"),
     ],
 )
-def test_cost_alert_thresholds_include_80_and_exclude_only_over_100(cost, expected):
+def test_fallback_cost_alert_uses_displayed_strict_thresholds(cost, expected):
     workspace = _workspace()
     workspace["expenses"] = []
     workspace["consumptions"][0]["unit_cost"] = Decimal(cost)
@@ -520,6 +593,46 @@ def test_cost_alert_thresholds_include_80_and_exclude_only_over_100(cost, expect
     workspace["consumptions"][0]["cost_amount_ex_tax"] = Decimal(cost)
     workspace["consumptions"][0]["cost_amount_inc_tax"] = Decimal(cost)
     summary = workbook_v2.compute_project_summary(workspace)
+    assert summary["cost_alert"] == expected
+
+
+@pytest.mark.parametrize(
+    ("cost_pct", "expected"),
+    [
+        ("79.99", "green"),
+        ("80.00", "green"),
+        ("80.004", "green"),
+        ("80.005", "yellow"),
+        ("80.01", "yellow"),
+        ("100.00", "yellow"),
+        ("100.004", "yellow"),
+        ("100.005", "red"),
+        ("100.01", "red"),
+    ],
+)
+def test_canonical_cost_alert_uses_displayed_strict_thresholds(cost_pct, expected):
+    workspace = _workspace()
+    known_cost = Decimal(cost_pct) * Decimal("1000")
+    workspace["canonical_metrics"] = {
+        "contract_amount_basis": "inc_tax",
+        "cost_progress_basis": "inc_tax",
+        "total_contract_amount": "100000.00",
+        "known_contract_amount": "100000.00",
+        "contract_amount_complete": True,
+        "received_amount": "30000.00",
+        "collection_progress_pct": "30.00",
+        "site_requisition_known_cost": str(known_cost),
+        "approved_expense": "0.00",
+        "actual_project_cost_known": str(known_cost),
+        "cost_rate_lower_bound_pct": cost_pct,
+        "cost_status": "normal",
+        "cost_complete": True,
+        "missing_cost_lines": 0,
+    }
+    workspace["canonical_completeness"] = {"status": "complete", "issues": []}
+
+    summary = workbook_v2.compute_project_summary(workspace)
+
     assert summary["cost_alert"] == expected
 
 
@@ -634,6 +747,23 @@ def test_signed_metadata_and_unchanged_upload_is_noop():
     )
     assert validation.project_id == "project-001"
     assert validation.export_id == artifact.export_id
+    assert validation.expected_revision == 7
+    assert validation.unchanged is True
+    assert validation.creates == ()
+
+
+def test_base_7bfe7fc_workbook_remains_a_valid_unchanged_upload():
+    content = BASE_V2_FIXTURE.read_bytes()
+    assert hashlib.sha256(content).hexdigest() == BASE_V2_FIXTURE_SHA256
+
+    validation = workbook_v2.validate_project_workbook(
+        content,
+        workspace=_workspace(),
+        hmac_key=HMAC_KEY,
+    )
+
+    assert validation.project_id == "project-001"
+    assert validation.export_id == "22222222-2222-4222-8222-222222222222"
     assert validation.expected_revision == 7
     assert validation.unchanged is True
     assert validation.creates == ()

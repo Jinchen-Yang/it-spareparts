@@ -81,6 +81,8 @@ const summary = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
+  localStorage.setItem("role", "admin");
   listMaintenanceProjectOperations.mockResolvedValue({
     data: {
       rows: [summary],
@@ -92,7 +94,10 @@ beforeEach(() => {
     },
   });
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  localStorage.clear();
+});
 
 describe("MaintenanceProjectsPage", () => {
   it("一次批量加载方块卡片，并逐份展示合同与缺成本下限", async () => {
@@ -133,6 +138,12 @@ describe("MaintenanceProjectsPage", () => {
   });
 
   it("成本汇总被脱敏时卡片不误标为成本待补", async () => {
+    localStorage.setItem("role", "readonly");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: false,
+      data_profit: false,
+    }));
     listMaintenanceProjectOperations.mockResolvedValueOnce({
       data: {
         rows: [{
@@ -166,6 +177,132 @@ describe("MaintenanceProjectsPage", () => {
     expect(within(card).getByText("成本不可见/无权限")).toBeInTheDocument();
     expect(within(card).queryByText("成本待补")).toBeNull();
     expect(card).not.toHaveTextContent("缺 null 行成本");
+  });
+
+  it("仅成本权限的卡片保留现场领用成本和估算，不把费用完整度 null 标成成本不可见", async () => {
+    localStorage.setItem("role", "purchaser");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: true,
+      data_profit: false,
+    }));
+    listMaintenanceProjectOperations.mockResolvedValueOnce({
+      data: {
+        rows: [{
+          ...summary,
+          contracts: summary.contracts.map((contract) => ({
+            ...contract,
+            contract_amount: null,
+            received_amount: null,
+            amount_status: "restricted",
+          })),
+          metrics: {
+            ...summary.metrics,
+            total_contract_amount: null,
+            known_contract_amount: null,
+            contract_amount_complete: null,
+            received_amount: null,
+            collection_progress_pct: null,
+            site_requisition_priced_cost_ex_tax: 398.23,
+            site_requisition_priced_cost_inc_tax: 450,
+            sales_estimate_cost_ex_tax: 106.19,
+            sales_estimate_cost_inc_tax: 120,
+            sales_estimate_lines: 2,
+            cost_progress_includes_sales_estimate: true,
+            cost_progress_label: "priced_cost_including_sales_estimate",
+            approved_expense: null,
+            approved_expense_ex_tax: null,
+            approved_expense_inc_tax: null,
+            actual_project_cost_known: null,
+            actual_project_cost_known_ex_tax: null,
+            actual_project_cost_known_inc_tax: null,
+            cost_rate_lower_bound_pct: null,
+            cost_status: null,
+            cost_complete: null,
+            missing_cost_lines: 0,
+          },
+        }],
+        total: 1,
+        page: 1,
+        page_size: 24,
+        as_of: "2026-08-08",
+        data_version: "cost-only-v1",
+      },
+    });
+
+    render(<MemoryRouter><MaintenanceProjectsPage /></MemoryRouter>);
+
+    const card = await screen.findByTestId("maintenance-project-card-project-1");
+    expect(within(card).getByText(/现场领用已计成本（含税） ¥450/)).toBeInTheDocument();
+    expect(within(card).getByText(/销售回退估算（含税） ¥120（2 行）/)).toBeInTheDocument();
+    expect(within(card).getByText("现场领用成本可见；报销费用不可见"))
+      .toBeInTheDocument();
+    expect(within(card).getByText("项目总成本状态不可判定")).toBeInTheDocument();
+    expect(within(card).queryByText("成本不可见/无权限")).toBeNull();
+    expect(within(card).queryByText("成本不可见")).toBeNull();
+  });
+
+  it.each([
+    ["无财务权限拒绝全量提醒", "all", false, false, false],
+    ["无财务权限拒绝成本提醒", "cost:missing_price", false, false, false],
+    ["仅成本权限允许成本提醒", "cost:missing_price", true, false, true],
+    ["仅成本权限允许销售估算提醒", "cost:sales_fallback_estimate", true, false, true],
+    ["仅成本权限允许现场领用缺价提醒", "completeness:missing_consumption_cost", true, false, true],
+    ["仅成本权限拒绝费用完整度提醒", "completeness:expense_data_not_ready", true, false, false],
+    ["仅成本权限拒绝回款提醒", "collection:incomplete", true, false, false],
+    ["完整财务权限允许 severity", "warning", true, true, true],
+    ["无财务权限允许月度更新", "manager_update:2026-08", false, false, true],
+    ["无财务权限拒绝成本率提醒", "cost_ratio:red", false, false, false],
+  ])("%s", async (_label, reminder, dataPurchaseCost, dataProfit, allowed) => {
+    localStorage.setItem("role", "purchaser");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: dataPurchaseCost,
+      data_profit: dataProfit,
+    }));
+
+    render(
+      <MemoryRouter initialEntries={[`/maintenance/projects?reminder=${reminder}`]}>
+        <MaintenanceProjectsPage />
+      </MemoryRouter>,
+    );
+
+    if (allowed) {
+      await waitFor(() => expect(listMaintenanceProjectOperations).toHaveBeenCalledWith(
+        expect.objectContaining({ reminder }),
+      ));
+      expect(screen.queryByText("当前账号无权使用该提醒筛选")).toBeNull();
+    } else {
+      expect(await screen.findByText("当前账号无权使用该提醒筛选")).toBeInTheDocument();
+      expect(listMaintenanceProjectOperations).not.toHaveBeenCalled();
+      expect(screen.queryByText(/红色|80%|100%/)).toBeNull();
+    }
+  });
+
+  it("后端拒绝过期权限快照时展示通用提示且不透传敏感详情", async () => {
+    localStorage.setItem("role", "boss");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: true,
+      data_profit: true,
+    }));
+    listMaintenanceProjectOperations.mockRejectedValueOnce({
+      response: {
+        status: 403,
+        data: { detail: "项目成本已达到 123.45%，真实状态为红色" },
+      },
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/maintenance/projects?reminder=warning"]}>
+        <MaintenanceProjectsPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("当前账号无权使用该提醒筛选")).toBeInTheDocument();
+    expect(listMaintenanceProjectOperations).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/123\.45|真实状态|红色/)).toBeNull();
+    expect(screen.queryByText("项目面板加载失败")).toBeNull();
   });
 
   it("带 project_id 的旧提醒深链直接进入稳定项目详情", async () => {

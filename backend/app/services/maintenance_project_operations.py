@@ -13,6 +13,7 @@ from datetime import UTC, date, datetime, time
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
+import re
 from uuid import uuid4
 
 from sqlalchemy import and_, case, func, literal, or_, select
@@ -48,11 +49,96 @@ class MaintenanceOperationConflict(Exception):
     """Concurrent or duplicate operating-fact request."""
 
 
+class MaintenanceOperationPermissionError(Exception):
+    """Requested operating-fact selector depends on hidden financial facts."""
+
+
 _QUANTITY_QUANTUM = Decimal("0.001")
 _QUANTITY_MAX_EXCLUSIVE = Decimal("100000000000")
 _MONEY_QUANTUM = Decimal("0.01")
 _MONEY_MAX_EXCLUSIVE = Decimal("1000000000000")
 _SITE_ISSUE_LINE_LIMIT = 200
+_ALL_FINANCIAL_FILTER_FIELDS = ("contract_amount", "unit_cost", "expense_inc")
+_CONTRACT_COMPLETENESS_FILTERS = {
+    "completeness:no_effective_contracts",
+    "completeness:duplicate_effective_contract",
+    "completeness:unmapped_contract_status",
+    "completeness:missing_contract_amount",
+    "completeness:cross_project_contract_conflict",
+}
+_COST_COMPLETENESS_FILTERS = {
+    "completeness:missing_consumption_cost",
+    "completeness:unmapped_site_issue_status",
+}
+_EXPENSE_COMPLETENESS_FILTERS = {
+    "completeness:unmapped_expense_status",
+    "completeness:expense_data_not_ready",
+    "completeness:expense_readiness_in_future",
+}
+_EXACT_REMINDER_FILTERS = frozenset(
+    {
+        "项目经理月度更新",
+        "all",
+        "info",
+        "warning",
+        "critical",
+        "completeness",
+        "collection",
+        "cost",
+        "cost_ratio",
+        *_CONTRACT_COMPLETENESS_FILTERS,
+        *_COST_COMPLETENESS_FILTERS,
+        *_EXPENSE_COMPLETENESS_FILTERS,
+        "collection:missing_confirmed",
+        "collection:incomplete",
+        "cost:missing_price",
+        "cost:sales_fallback_estimate",
+        "cost_ratio:yellow",
+        "cost_ratio:red",
+    }
+)
+_MANAGER_UPDATE_FILTER = re.compile(
+    r"manager_update:[0-9]{4}-(?:0[1-9]|1[0-2])\Z",
+    re.ASCII,
+)
+
+
+def _validate_reminder_filter(reminder: str | None) -> None:
+    """Reject undeclared reminder selectors without reflecting their content."""
+
+    if reminder is None:
+        return
+    if reminder in _EXACT_REMINDER_FILTERS:
+        return
+    if _MANAGER_UPDATE_FILTER.fullmatch(reminder):
+        return
+    raise MaintenanceOperationError("不支持的提醒筛选")
+
+
+def _reminder_filter_required_fields(reminder: str | None) -> tuple[str, ...]:
+    """Return hidden fact fields a directory selector would classify by."""
+
+    _validate_reminder_filter(reminder)
+    if reminder is None or reminder == "项目经理月度更新" or reminder.startswith(
+        "manager_update:"
+    ):
+        return ()
+    if reminder in _COST_COMPLETENESS_FILTERS:
+        return ("unit_cost",)
+    if reminder in _CONTRACT_COMPLETENESS_FILTERS:
+        return ("contract_amount",)
+    if reminder in _EXPENSE_COMPLETENESS_FILTERS:
+        return ("contract_amount", "expense_inc")
+    if reminder == "cost" or reminder.startswith("cost:"):
+        return ("unit_cost",)
+    if reminder in {"info", "collection"} or reminder.startswith("collection:"):
+        return ("contract_amount",)
+    if (
+        reminder in {"all", "warning", "critical", "completeness", "cost_ratio"}
+        or reminder.startswith("cost_ratio:")
+    ):
+        return _ALL_FINANCIAL_FILTER_FIELDS
+    return ()
 
 
 def _quantity(value: Decimal | str) -> Decimal:
@@ -346,6 +432,37 @@ def _validate_confirmed_collection_monotonicity(
             )
 
 
+_COST_EVIDENCE_META = {
+    None: ("missing", False, "待补价格"),
+    "direct_purchase": ("purchase_evidence", False, "关联采购单价"),
+    "purchase_window": (
+        "purchase_evidence",
+        False,
+        "采购前后 7 天数量加权",
+    ),
+    "sales_window": (
+        "sales_estimate",
+        True,
+        "估算（销售前后 7 天数量加权）",
+    ),
+    "manual": ("manual_confirmed", False, "人工确认单价"),
+}
+
+
+def cost_evidence_metadata(source: str | None) -> dict:
+    """Return stable business semantics for a resolved cost source."""
+
+    kind, is_estimate, label = _COST_EVIDENCE_META.get(
+        source,
+        ("unknown", True, "未知成本证据"),
+    )
+    return {
+        "cost_evidence_kind": kind,
+        "cost_is_estimate": is_estimate,
+        "cost_source_label": label,
+    }
+
+
 def site_issue_line_dict(row: MaintenanceSiteIssueLine) -> dict:
     return {
         "issue_line_id": row.issue_line_id,
@@ -365,6 +482,7 @@ def site_issue_line_dict(row: MaintenanceSiteIssueLine) -> dict:
         "cost_amount_inc_tax": _money(row.cost_amount_inc_tax),
         "tax_rate_used": _rate(row.tax_rate_used),
         "cost_source": row.cost_source,
+        **cost_evidence_metadata(row.cost_source),
         "price_basis": row.price_basis,
         "reference_side": row.reference_side,
         "reference_sample_ids": row.reference_sample_ids,
@@ -379,6 +497,16 @@ def site_issue_line_dict(row: MaintenanceSiteIssueLine) -> dict:
         "algorithm_version": row.algorithm_version,
         "version": row.version,
     }
+
+
+def _cost_audit_snapshot(
+    row: MaintenanceSiteIssueLine,
+    *,
+    as_of: date,
+) -> dict:
+    """Freeze a cost view and its business cutoff inside an append-only audit row."""
+
+    return {**site_issue_line_dict(row), "as_of": as_of.isoformat()}
 
 
 def site_issue_dict(
@@ -1077,6 +1205,7 @@ def recompute_cost_gaps(
         return None
     if not project.is_active:
         raise MaintenanceOperationError("项目主档已归档")
+    audit_as_of = business_today()
     state = get_or_create_workbook_state(db, project_id=project_id)
     candidate_filters = (
         MaintenanceSiteIssue.project_id == project_id,
@@ -1116,7 +1245,7 @@ def recompute_cost_gaps(
             )
         )
         before_by_line = {
-            line.issue_line_id: site_issue_line_dict(line)
+            line.issue_line_id: _cost_audit_snapshot(line, as_of=audit_as_of)
             for line, _issue in candidates
         }
         prior_by_line = {
@@ -1145,7 +1274,7 @@ def recompute_cost_gaps(
                 _restore_cost_resolution(line, prior_resolution)
                 continue
             line.version += 1
-            after = site_issue_line_dict(line)
+            after = _cost_audit_snapshot(line, as_of=audit_as_of)
             _fact_audit(
                 db,
                 project_id=project_id,
@@ -1220,8 +1349,9 @@ def fill_manual_cost(
         )
     if issue.status_mapping_state != "mapped" or issue.normalized_status != "confirmed":
         raise MaintenanceOperationError("只有已确认且状态已映射的现场领用可以补价")
+    audit_as_of = business_today()
     manual_unit_cost = _money_amount(manual_unit_cost, label="人工未税单价")
-    before = site_issue_line_dict(line)
+    before = _cost_audit_snapshot(line, as_of=audit_as_of)
     if line.cost_source is not None or line.cost_amount is not None:
         raise MaintenanceOperationConflict("该领用行已有成本，人工补价只能处理缺价行")
     previous_manual = line.manual_unit_cost
@@ -1234,7 +1364,7 @@ def fill_manual_cost(
         line.manual_evidence = previous_evidence
         _resolve_site_issue_cost(db, issue_date=issue.issue_date, line=line)
         line.version += 1
-        after = site_issue_line_dict(line)
+        after = _cost_audit_snapshot(line, as_of=audit_as_of)
         _fact_audit(
             db,
             project_id=issue.project_id,
@@ -1249,7 +1379,7 @@ def fill_manual_cost(
         bump_locked_workbook_revision(db, state=state)
         db.flush()
         return {
-            **after,
+            **site_issue_line_dict(line),
             "manual_applied": False,
             "resolution": "automatic_evidence",
         }
@@ -1257,7 +1387,7 @@ def fill_manual_cost(
     line.manual_evidence = _required(evidence, "人工补价证据", 1000)
     _resolve_site_issue_cost(db, issue_date=issue.issue_date, line=line)
     line.version += 1
-    after = site_issue_line_dict(line)
+    after = _cost_audit_snapshot(line, as_of=audit_as_of)
     _fact_audit(
         db,
         project_id=issue.project_id,
@@ -1271,7 +1401,11 @@ def fill_manual_cost(
     )
     bump_locked_workbook_revision(db, state=state)
     db.flush()
-    return {**after, "manual_applied": True, "resolution": "manual"}
+    return {
+        **site_issue_line_dict(line),
+        "manual_applied": True,
+        "resolution": "manual",
+    }
 
 
 def create_contract(
@@ -1702,6 +1836,7 @@ def _system_tasks(
     confirmed_collection: Decimal,
     total_contract_amount: Decimal | None,
     cost_gap_count: int,
+    sales_estimate_lines: int,
     cost_status: str,
     as_of: date,
     project_manager_id: str | None,
@@ -1794,14 +1929,37 @@ def _system_tasks(
                 owner=project_manager_id,
             )
         )
+    if sales_estimate_lines:
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="cost:sales_fallback_estimate",
+                severity="warning",
+                title="核对项目成本中的销售回退估算",
+                detail=(
+                    f"{sales_estimate_lines} 条已确认现场领用按销售前后 7 天数量加权估算；"
+                    "已计入成本进度，但不等于采购或人工确认单价"
+                ),
+                owner=project_manager_id,
+            )
+        )
     if cost_status in {"yellow", "red"}:
+        estimate_note = (
+            f"，其中含 {sales_estimate_lines} 条销售回退估算"
+            if sales_estimate_lines
+            else ""
+        )
         tasks.append(
             _task(
                 project_id=project_id,
                 rule_key=f"cost_ratio:{cost_status}",
                 severity="critical" if cost_status == "red" else "warning",
-                title="项目成本达到预警阈值",
-                detail="成本已超过合同额" if cost_status == "red" else "成本已达到合同额 80%",
+                title="项目已计成本达到预警阈值",
+                detail=(
+                    f"已计成本已超过合同额{estimate_note}"
+                    if cost_status == "red"
+                    else f"已计成本已超过合同额 80%{estimate_note}"
+                ),
                 owner=project_manager_id,
             )
         )
@@ -1890,7 +2048,7 @@ def _cost_rate_and_status(
         return None, "unknown"
     if cost_rate > Decimal("100"):
         return cost_rate, "red"
-    if cost_rate >= Decimal("80"):
+    if cost_rate > Decimal("80"):
         return cost_rate, "yellow"
     if has_incomplete_cost_facts:
         return cost_rate, "unknown"
@@ -1903,6 +2061,9 @@ def _project_card_from_facts(
     latest_confirmed: dict[str, Decimal],
     consumed_known_ex_tax: Decimal,
     consumed_known_inc_tax: Decimal,
+    sales_estimate_cost_ex_tax: Decimal,
+    sales_estimate_cost_inc_tax: Decimal,
+    sales_estimate_lines: int,
     cost_gap_count: int,
     unmapped_issue_count: int,
     approved_expense_ex_tax: Decimal,
@@ -2025,6 +2186,17 @@ def _project_card_from_facts(
             "site_requisition_known_cost": _money(consumed_known_inc_tax),
             "site_requisition_known_cost_ex_tax": _money(consumed_known_ex_tax),
             "site_requisition_known_cost_inc_tax": _money(consumed_known_inc_tax),
+            "site_requisition_priced_cost_ex_tax": _money(consumed_known_ex_tax),
+            "site_requisition_priced_cost_inc_tax": _money(consumed_known_inc_tax),
+            "sales_estimate_cost_ex_tax": _money(sales_estimate_cost_ex_tax),
+            "sales_estimate_cost_inc_tax": _money(sales_estimate_cost_inc_tax),
+            "sales_estimate_lines": sales_estimate_lines,
+            "cost_progress_includes_sales_estimate": sales_estimate_lines > 0,
+            "cost_progress_label": (
+                "priced_cost_including_sales_estimate"
+                if sales_estimate_lines
+                else "priced_cost_without_sales_estimate"
+            ),
             "approved_expense": _money(approved_expense_inc_tax),
             "approved_expense_ex_tax": _money(approved_expense_ex_tax),
             "approved_expense_inc_tax": _money(approved_expense_inc_tax),
@@ -2056,6 +2228,7 @@ def _project_card_from_facts(
         confirmed_collection=confirmed_collection,
         total_contract_amount=(Decimal(total) if total is not None else None),
         cost_gap_count=cost_gap_count,
+        sales_estimate_lines=sales_estimate_lines,
         cost_status=cost_status,
         as_of=as_of,
         project_manager_id=base["project"]["project_manager_id"],
@@ -2100,6 +2273,41 @@ def _project_card_from_facts(
                 None
                 if cost_restricted
                 else project_summary["metrics"]["site_requisition_known_cost_inc_tax"]
+            ),
+            "site_requisition_priced_cost_ex_tax": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["site_requisition_priced_cost_ex_tax"]
+            ),
+            "site_requisition_priced_cost_inc_tax": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["site_requisition_priced_cost_inc_tax"]
+            ),
+            "sales_estimate_cost_ex_tax": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["sales_estimate_cost_ex_tax"]
+            ),
+            "sales_estimate_cost_inc_tax": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["sales_estimate_cost_inc_tax"]
+            ),
+            "sales_estimate_lines": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["sales_estimate_lines"]
+            ),
+            "cost_progress_includes_sales_estimate": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["cost_progress_includes_sales_estimate"]
+            ),
+            "cost_progress_label": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["cost_progress_label"]
             ),
             "approved_expense": (
                 None
@@ -2246,6 +2454,14 @@ def project_workspace(
             func.count()
             .filter(and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None)))
             .label("cost_gap_count"),
+            func.count()
+            .filter(
+                and_(
+                    eligible_issue,
+                    MaintenanceSiteIssueLine.cost_source == "sales_window",
+                )
+            )
+            .label("sales_estimate_lines"),
             func.coalesce(
                 func.sum(
                     case(
@@ -2264,6 +2480,36 @@ def project_workspace(
                 ),
                 Decimal("0.00"),
             ).label("consumed_known_inc_tax"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                eligible_issue,
+                                MaintenanceSiteIssueLine.cost_source == "sales_window",
+                            ),
+                            MaintenanceSiteIssueLine.cost_amount_ex_tax,
+                        ),
+                        else_=Decimal("0.00"),
+                    )
+                ),
+                Decimal("0.00"),
+            ).label("sales_estimate_cost_ex_tax"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                eligible_issue,
+                                MaintenanceSiteIssueLine.cost_source == "sales_window",
+                            ),
+                            MaintenanceSiteIssueLine.cost_amount_inc_tax,
+                        ),
+                        else_=Decimal("0.00"),
+                    )
+                ),
+                Decimal("0.00"),
+            ).label("sales_estimate_cost_inc_tax"),
         )
         .select_from(MaintenanceSiteIssue)
         .join(
@@ -2293,6 +2539,9 @@ def project_workspace(
     )
     consumed_known_ex_tax = Decimal(issue_fact.consumed_known_ex_tax)
     consumed_known_inc_tax = Decimal(issue_fact.consumed_known_inc_tax)
+    sales_estimate_cost_ex_tax = Decimal(issue_fact.sales_estimate_cost_ex_tax)
+    sales_estimate_cost_inc_tax = Decimal(issue_fact.sales_estimate_cost_inc_tax)
+    sales_estimate_lines = int(issue_fact.sales_estimate_lines)
 
     expense_eligible = and_(
         MaintenanceProjectExpenseAttribution.status_mapping_state == "mapped",
@@ -2362,6 +2611,9 @@ def project_workspace(
         latest_confirmed=latest_confirmed,
         consumed_known_ex_tax=consumed_known_ex_tax,
         consumed_known_inc_tax=consumed_known_inc_tax,
+        sales_estimate_cost_ex_tax=sales_estimate_cost_ex_tax,
+        sales_estimate_cost_inc_tax=sales_estimate_cost_inc_tax,
+        sales_estimate_lines=sales_estimate_lines,
         cost_gap_count=cost_gap_count,
         unmapped_issue_count=unmapped_issue_count,
         approved_expense_ex_tax=approved_expense_ex_tax,
@@ -2452,6 +2704,9 @@ def project_workspace(
             "cost_amount_inc_tax",
             "tax_rate_used",
             "cost_source",
+            "cost_evidence_kind",
+            "cost_is_estimate",
+            "cost_source_label",
             "price_basis",
             "reference_side",
             "reference_sample_ids",
@@ -2838,6 +3093,9 @@ def _project_cards_for_ids(
         lambda: {
             "consumed_known_ex_tax": Decimal("0.00"),
             "consumed_known_inc_tax": Decimal("0.00"),
+            "sales_estimate_cost_ex_tax": Decimal("0.00"),
+            "sales_estimate_cost_inc_tax": Decimal("0.00"),
+            "sales_estimate_lines": 0,
             "cost_gap_count": 0,
             "unmapped_issue_count": 0,
         }
@@ -2862,6 +3120,7 @@ def _project_cards_for_ids(
         project_id,
         mapping_state,
         normalized_status,
+        cost_source,
         cost_amount_ex_tax,
         cost_amount_inc_tax,
     ) in db.execute(
@@ -2869,6 +3128,7 @@ def _project_cards_for_ids(
             MaintenanceSiteIssue.project_id,
             MaintenanceSiteIssue.status_mapping_state,
             MaintenanceSiteIssue.normalized_status,
+            MaintenanceSiteIssueLine.cost_source,
             MaintenanceSiteIssueLine.cost_amount_ex_tax,
             MaintenanceSiteIssueLine.cost_amount_inc_tax,
         )
@@ -2888,6 +3148,10 @@ def _project_cards_for_ids(
         elif eligible:
             facts["consumed_known_ex_tax"] += Decimal(cost_amount_ex_tax)
             facts["consumed_known_inc_tax"] += Decimal(cost_amount_inc_tax)
+            if cost_source == "sales_window":
+                facts["sales_estimate_cost_ex_tax"] += Decimal(cost_amount_ex_tax)
+                facts["sales_estimate_cost_inc_tax"] += Decimal(cost_amount_inc_tax)
+                facts["sales_estimate_lines"] += 1
 
     expense_facts: dict[str, dict[str, Decimal | int]] = defaultdict(
         lambda: {
@@ -2956,6 +3220,13 @@ def _project_cards_for_ids(
             consumed_known_inc_tax=Decimal(
                 project_cost_facts["consumed_known_inc_tax"]
             ),
+            sales_estimate_cost_ex_tax=Decimal(
+                project_cost_facts["sales_estimate_cost_ex_tax"]
+            ),
+            sales_estimate_cost_inc_tax=Decimal(
+                project_cost_facts["sales_estimate_cost_inc_tax"]
+            ),
+            sales_estimate_lines=int(project_cost_facts["sales_estimate_lines"]),
             cost_gap_count=int(project_cost_facts["cost_gap_count"]),
             unmapped_issue_count=int(project_cost_facts["unmapped_issue_count"]),
             approved_expense_ex_tax=Decimal(
@@ -3120,6 +3391,14 @@ def _directory_reminder_query(
                 and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None))
             )
             .label("cost_gap_count"),
+            func.count()
+            .filter(
+                and_(
+                    eligible_issue,
+                    MaintenanceSiteIssueLine.cost_source == "sales_window",
+                )
+            )
+            .label("sales_estimate_count"),
             func.coalesce(
                 func.sum(
                     case(
@@ -3220,6 +3499,9 @@ def _directory_reminder_query(
             ).label("confirmed_collection"),
             func.coalesce(issue_by_project.c.cost_gap_count, 0).label(
                 "cost_gap_count"
+            ),
+            func.coalesce(issue_by_project.c.sales_estimate_count, 0).label(
+                "sales_estimate_count"
             ),
             func.coalesce(issue_status_by_project.c.unmapped_issue_count, 0).label(
                 "unmapped_issue_count"
@@ -3324,7 +3606,7 @@ def _directory_reminder_query(
         literal(profit_visible and cost_visible and expense_visible),
         contract_complete,
         facts.c.total_contract_amount > 0,
-        rounded_cost_rate >= Decimal("80"),
+        rounded_cost_rate > Decimal("80"),
         rounded_cost_rate <= Decimal("100"),
     )
     rule_conditions = {
@@ -3345,10 +3627,10 @@ def _directory_reminder_query(
             literal(profit_visible), facts.c.conflict_count > 0
         ),
         "completeness:missing_consumption_cost": and_(
-            literal(profit_visible and cost_visible), facts.c.cost_gap_count > 0
+            literal(cost_visible), facts.c.cost_gap_count > 0
         ),
         "completeness:unmapped_site_issue_status": and_(
-            literal(profit_visible and cost_visible),
+            literal(cost_visible),
             facts.c.unmapped_issue_count > 0,
         ),
         "completeness:unmapped_expense_status": and_(
@@ -3375,6 +3657,9 @@ def _directory_reminder_query(
         "cost:missing_price": and_(
             literal(cost_visible), facts.c.cost_gap_count > 0
         ),
+        "cost:sales_fallback_estimate": and_(
+            literal(cost_visible), facts.c.sales_estimate_count > 0
+        ),
         "cost_ratio:yellow": yellow,
         "cost_ratio:red": red,
     }
@@ -3390,6 +3675,7 @@ def _directory_reminder_query(
     warning_conditions = [
         *completeness_conditions,
         rule_conditions["cost:missing_price"],
+        rule_conditions["cost:sales_fallback_estimate"],
         yellow,
     ]
     if as_of.day == monthrange(as_of.year, as_of.month)[1]:
@@ -3401,7 +3687,10 @@ def _directory_reminder_query(
         "项目经理月度更新": manager_open,
         "completeness": or_(*completeness_conditions),
         "collection": or_(*collection_conditions),
-        "cost": rule_conditions["cost:missing_price"],
+        "cost": or_(
+            rule_conditions["cost:missing_price"],
+            rule_conditions["cost:sales_fallback_estimate"],
+        ),
         "cost_ratio": or_(yellow, red),
     }
     severity_conditions = {
@@ -3415,6 +3704,7 @@ def _directory_reminder_query(
             *completeness_conditions,
             *collection_conditions,
             rule_conditions["cost:missing_price"],
+            rule_conditions["cost:sales_fallback_estimate"],
             yellow,
             red,
         )
@@ -3445,6 +3735,9 @@ def project_operations(
     page: int = 1,
     page_size: int = 24,
 ) -> dict:
+    required_fields = _reminder_filter_required_fields(reminder)
+    if any(is_field_hidden(user_ctx, field) for field in required_fields):
+        raise MaintenanceOperationPermissionError
     rows: list[dict] = []
     filters = []
     if not include_inactive:

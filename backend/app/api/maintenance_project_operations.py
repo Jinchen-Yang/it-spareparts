@@ -21,6 +21,21 @@ from app.services import maintenance_project_operations as operations
 router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
 
 
+class ProjectOperationsSearch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    q: str
+    as_of: date | None = None
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=24, ge=1, le=200)
+    lifecycle: str = Field(
+        default="all",
+        pattern="^(ongoing|ended|missing|all)$",
+    )
+    reminder: str | None = None
+    include_inactive: bool = False
+
+
 class ContractCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -717,48 +732,114 @@ def stable_project_tasks(
     return payload
 
 
-@router.get("/operations")
-def stable_project_operations(
-    as_of: date | None = None,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(24, ge=1, le=200),
-    q: str | None = Query(default=None, max_length=256),
-    lifecycle: str = Query(
-        "all", pattern="^(ongoing|ended|missing|all)$"
-    ),
-    reminder: str | None = Query(default=None, min_length=1, max_length=64),
-    include_inactive: bool = False,
-    db: Session = Depends(get_db),
-    _auth: str = Depends(current_role),
-    _page: None = Depends(require_page("page_maintenance")),
-    ctx: UserContext = Depends(get_current_user_context),
+def _stable_project_operations_response(
+    *,
+    as_of: date | None,
+    page: int,
+    page_size: int,
+    q: str | None,
+    lifecycle: str,
+    reminder: str | None,
+    include_inactive: bool,
+    db: Session,
+    ctx: UserContext,
 ) -> dict:
     effective_as_of = as_of or business_today()
-    payload = operations.project_operations(
-        db,
-        as_of=effective_as_of,
-        user_ctx=ctx,
-        q_text=q,
-        lifecycle=lifecycle,
-        reminder=reminder,
-        include_inactive=include_inactive,
-        page=page,
-        page_size=page_size,
-    )
+    try:
+        payload = operations.project_operations(
+            db,
+            as_of=effective_as_of,
+            user_ctx=ctx,
+            q_text=q,
+            lifecycle=lifecycle,
+            reminder=reminder,
+            include_inactive=include_inactive,
+            page=page,
+            page_size=page_size,
+        )
+    except operations.MaintenanceOperationPermissionError as exc:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "当前账号无权使用该提醒筛选",
+        ) from exc
+    except operations.MaintenanceOperationError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(exc),
+        ) from exc
     record_access_log(
         ctx,
         "stable_project_operations",
         "maintenance",
         {
             "as_of": effective_as_of.isoformat(),
-            "q": q,
+            "searched": bool(q and q.strip()),
             "lifecycle": lifecycle,
             "reminder": reminder,
             "include_inactive": include_inactive,
             "page": page,
             "page_size": page_size,
-            "total": payload["total"],
-            "returned": len(payload["rows"]),
         },
     )
     return payload
+
+
+@router.get("/operations")
+def stable_project_operations(
+    as_of: date | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(24, ge=1, le=200),
+    q: str | None = Query(default=None),
+    lifecycle: str = Query(
+        "all", pattern="^(ongoing|ended|missing|all)$"
+    ),
+    reminder: str | None = Query(default=None),
+    include_inactive: bool = False,
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    if q is not None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "项目搜索请使用安全搜索接口",
+        )
+    return _stable_project_operations_response(
+        as_of=as_of,
+        page=page,
+        page_size=page_size,
+        q=None,
+        lifecycle=lifecycle,
+        reminder=reminder,
+        include_inactive=include_inactive,
+        db=db,
+        ctx=ctx,
+    )
+
+
+@router.post("/operations/search")
+def search_stable_project_operations(
+    body: ProjectOperationsSearch,
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    q = body.q.strip()
+    if not q or len(q) > 256:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "项目搜索条件无效",
+        )
+    return _stable_project_operations_response(
+        as_of=body.as_of,
+        page=body.page,
+        page_size=body.page_size,
+        q=q,
+        lifecycle=body.lifecycle,
+        reminder=body.reminder,
+        include_inactive=body.include_inactive,
+        db=db,
+        ctx=ctx,
+    )

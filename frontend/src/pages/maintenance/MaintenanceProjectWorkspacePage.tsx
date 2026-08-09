@@ -41,13 +41,29 @@ const requisitionStatusColumn: ColumnsType<MaintenanceSiteRequisitionRow>[number
   title: "成本状态",
   dataIndex: "cost_status",
   width: 120,
-  render: (value) => value === "missing"
+  render: (value, row) => value === "missing"
     ? <Tag color="orange">待回填成本</Tag>
     : value === "restricted"
       ? <Tag>成本不可见</Tag>
       : value === "not_counted"
         ? <Tag>未计入成本</Tag>
-        : <Tag color="green">已有成本</Tag>,
+        : row.cost_is_estimate
+          ? <Tag color="gold">已计入（估算）</Tag>
+          : <Tag color="green">已计入成本</Tag>,
+};
+
+const requisitionEvidenceColumn: ColumnsType<MaintenanceSiteRequisitionRow>[number] = {
+  title: "取价依据",
+  dataIndex: "cost_source_label",
+  width: 220,
+  render: (value, row) => {
+    if (row.cost_status === "restricted") return <Tag>不可见</Tag>;
+    if (!value) return <Tag>待补价格</Tag>;
+    if (row.cost_is_estimate) return <Tag color="gold">{value}</Tag>;
+    if (row.cost_evidence_kind === "purchase_evidence") return <Tag color="blue">{value}</Tag>;
+    if (row.cost_evidence_kind === "manual_confirmed") return <Tag color="green">{value}</Tag>;
+    return <Tag>{value}</Tag>;
+  },
 };
 
 function requisitionColumns(basis: TaxBasis): ColumnsType<MaintenanceSiteRequisitionRow> {
@@ -63,13 +79,14 @@ function requisitionColumns(basis: TaxBasis): ColumnsType<MaintenanceSiteRequisi
       render: money,
     })),
     ...sides.map((side) => ({
-      title: `已知成本（${taxSideLabel(side)}）`,
+      title: `已计成本（${taxSideLabel(side)}）`,
       key: `cost_amount_${side}`,
       dataIndex: side === "inc" ? "cost_amount_inc_tax" : "cost_amount_ex_tax",
       width: 130,
       align: "right" as const,
       render: money,
     })),
+    requisitionEvidenceColumn,
     requisitionStatusColumn,
   ];
 }
@@ -155,7 +172,12 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
   const [loadError, setLoadError] = useState(false);
   const [detailPages, setDetailPages] = useState(INITIAL_DETAIL_PAGES);
   const generation = useRef(0);
-  const [{ canManageProject }] = useState(readMaintenanceCapabilities);
+  const [capabilities] = useState(readMaintenanceCapabilities);
+  const {
+    canManageProject,
+    canViewCost,
+    canViewExpense,
+  } = capabilities;
 
   const load = async (
     requestedPages: Required<MaintenanceWorkspaceParams> = detailPages,
@@ -255,8 +277,8 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
       />
 
       <div className="maintenance-workspace-two-column">
-        <Card title="回款与项目实际成本">
-          <ProjectFinancialProgress metrics={project.metrics} />
+        <Card title="回款与项目已计成本">
+          <ProjectFinancialProgress metrics={project.metrics} visibility={capabilities} />
         </Card>
         <Card title="系统提醒">
           {workspace.reminders.length === 0 ? (
@@ -305,11 +327,16 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
 
       <Card
         title="现场领用全量明细"
-        extra={project.metrics.cost_complete === null
+        extra={!canViewCost
           ? <Tag>成本明细不可见</Tag>
-          : project.metrics.cost_complete === false
+          : project.metrics.missing_cost_lines != null
+            && project.metrics.missing_cost_lines > 0
             ? <Tag color="orange">缺 {project.metrics.missing_cost_lines} 行成本，明细仍完整展示</Tag>
-            : <Tag color="green">成本完整</Tag>}
+            : project.metrics.cost_complete === true
+              ? <Tag color="green">成本完整</Tag>
+              : !canViewExpense
+                ? <Tag>现场领用成本可见，报销费用不可见</Tag>
+                : <Tag>项目总成本完整度待确认</Tag>}
       >
         <div data-testid="site-requisition-table">
           <Table
@@ -318,7 +345,7 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
             columns={requisitionColumns(maintenanceBasis)}
             dataSource={workspace.requisitions.rows}
             loading={loading}
-            scroll={{ x: maintenanceBasis === "both" ? 1460 : 1200 }}
+            scroll={{ x: maintenanceBasis === "both" ? 1680 : 1420 }}
             pagination={{
               current: workspace.requisitions.page,
               pageSize: workspace.requisitions.page_size,

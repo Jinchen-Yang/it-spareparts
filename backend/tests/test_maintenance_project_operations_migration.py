@@ -101,6 +101,60 @@ def test_operating_fact_schema_contains_evidence_and_server_validation(db):
     assert "entity_id" in operation_columns
 
 
+def test_operation_audit_rows_are_database_append_only(db):
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO maintenance_project "
+                "(project_id, project_code, display_name, lifecycle_status) "
+                "VALUES ('migration-audit-project', 'MIGRATION-AUDIT', "
+                "'迁移审计项目', 'ongoing')"
+            )
+        )
+        audit_id = connection.execute(
+            text(
+                "INSERT INTO maintenance_project_operation_audit "
+                "(project_id, entity_type, entity_id, action, before_json, "
+                "after_json, reason, operated_by) VALUES "
+                "('migration-audit-project', 'site_issue', 'issue-001', "
+                "'cost_recomputed', NULL, CAST('{\"cost\": 10}' AS jsonb), "
+                "'append-only migration test', 'migration-test') "
+                "RETURNING id"
+            )
+        ).scalar_one()
+
+    with pytest.raises(DBAPIError, match="append-only"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE maintenance_project_operation_audit "
+                    "SET reason = 'rewritten' WHERE id = :audit_id"
+                ),
+                {"audit_id": audit_id},
+            )
+
+    with pytest.raises(DBAPIError, match="append-only"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "DELETE FROM maintenance_project_operation_audit "
+                    "WHERE id = :audit_id"
+                ),
+                {"audit_id": audit_id},
+            )
+
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT reason, after_json FROM "
+                "maintenance_project_operation_audit WHERE id = :audit_id"
+            ),
+            {"audit_id": audit_id},
+        ).one()
+    assert row.reason == "append-only migration test"
+    assert row.after_json == {"cost": 10}
+
+
 def test_provenance_migration_backfills_legacy_facts_and_round_trips(db):
     db.close()
     cfg = _cfg()

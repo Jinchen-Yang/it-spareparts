@@ -44,6 +44,16 @@ class StableProjectLifecycle(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
 
 
+class StableProjectDirectorySearch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    q: str
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=200)
+    include_inactive: bool = False
+    as_of: date | None = None
+
+
 def _real_operator(db: Session, ident: dict) -> str:
     # This high-risk write accepts only tokens explicitly issued from a SysUser login.
     # Missing provenance includes legacy/shared tokens and deliberately requires re-login.
@@ -219,9 +229,40 @@ def restore_stable_project(
     )
 
 
+def _stable_project_directory_response(
+    *,
+    q: str | None,
+    page: int,
+    page_size: int,
+    include_inactive: bool,
+    as_of: date | None,
+    db: Session,
+    ctx: UserContext,
+) -> dict:
+    effective_as_of = as_of or business_today()
+    record_access_log(
+        ctx,
+        "stable_project_directory",
+        "maintenance",
+        {
+            "searched": bool(q and q.strip()),
+            "include_inactive": include_inactive,
+            "as_of": str(effective_as_of),
+        },
+    )
+    return maintenance_project.project_directory(
+        db,
+        q_text=q,
+        page=page,
+        page_size=page_size,
+        include_inactive=include_inactive,
+        as_of=effective_as_of,
+    )
+
+
 @router.get("")
 def stable_project_directory(
-    q: str | None = Query(None, max_length=128),
+    q: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     include_inactive: bool = Query(False),
@@ -231,20 +272,44 @@ def stable_project_directory(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    effective_as_of = as_of or business_today()
-    record_access_log(
-        ctx,
-        "stable_project_directory",
-        "maintenance",
-        {"q": q, "include_inactive": include_inactive, "as_of": str(effective_as_of)},
-    )
-    return maintenance_project.project_directory(
-        db,
-        q_text=q,
+    if q is not None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "项目搜索请使用安全搜索接口",
+        )
+    return _stable_project_directory_response(
+        q=None,
         page=page,
         page_size=page_size,
         include_inactive=include_inactive,
-        as_of=effective_as_of,
+        as_of=as_of,
+        db=db,
+        ctx=ctx,
+    )
+
+
+@router.post("/search")
+def search_stable_project_directory(
+    body: StableProjectDirectorySearch,
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    q = body.q.strip()
+    if not q or len(q) > 128:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "项目搜索条件无效",
+        )
+    return _stable_project_directory_response(
+        q=q,
+        page=body.page,
+        page_size=body.page_size,
+        include_inactive=body.include_inactive,
+        as_of=body.as_of,
+        db=db,
+        ctx=ctx,
     )
 
 

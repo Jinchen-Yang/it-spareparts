@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import type { MaintenanceProjectOperationsSummary } from "../../api/maintenanceOperations";
 import ContractPortfolio from "./ContractPortfolio";
 import ProjectFinancialProgress from "./ProjectFinancialProgress";
+import type { ProjectFinancialVisibility } from "./ProjectFinancialProgress";
 
 const LIFECYCLE_META: Record<string, { label: string; color?: string }> = {
   ongoing: { label: "进行中", color: "blue" },
@@ -11,8 +12,9 @@ const LIFECYCLE_META: Record<string, { label: string; color?: string }> = {
   missing: { label: "期限缺失", color: "orange" },
 };
 
-export default function MaintenanceProjectCard({ project }: {
+export default function MaintenanceProjectCard({ project, visibility }: {
   project: MaintenanceProjectOperationsSummary;
+  visibility: ProjectFinancialVisibility;
 }) {
   const lifecycle = LIFECYCLE_META[project.lifecycle_status]
     ?? { label: "业务期限待确认", color: "orange" };
@@ -49,13 +51,19 @@ export default function MaintenanceProjectCard({ project }: {
         </div>
         <ContractPortfolio contracts={project.contracts} compact />
       </div>
-      <ProjectFinancialProgress metrics={project.metrics} />
+      <ProjectFinancialProgress metrics={project.metrics} visibility={visibility} />
       <Space wrap size={[6, 6]}>
         {project.reminder_count > 0
           ? <Badge count={project.reminder_count}><Tag color="orange">系统提醒</Tag></Badge>
           : <Tag color="green">暂无提醒</Tag>}
-        {project.metrics.cost_complete === false && <Tag color="orange">成本待补</Tag>}
-        {project.metrics.cost_complete === null && <Tag>成本不可见</Tag>}
+        {!visibility.canViewCost
+          ? <Tag>成本不可见</Tag>
+          : project.metrics.missing_cost_lines != null
+            && project.metrics.missing_cost_lines > 0
+            ? <Tag color="orange">成本待补</Tag>
+            : project.metrics.cost_complete === null
+              ? <Tag>项目总成本状态不可判定</Tag>
+              : null}
       </Space>
     </Card>
   );

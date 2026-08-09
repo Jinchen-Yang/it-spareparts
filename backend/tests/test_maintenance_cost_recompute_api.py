@@ -11,6 +11,7 @@ from sqlalchemy import event
 from app import auth, permissions
 from app.api import maintenance_project_operations
 from app.auth import hash_password
+from app.business_time import business_today
 from app.models.dimensions import DimPart
 from app.models.maintenance_project_operations import (
     MaintenanceProjectOperationAudit,
@@ -480,6 +481,15 @@ def test_recompute_upgrades_sales_window_to_purchase_window(db):
         "sales_window",
         "purchase_window",
     ]
+    assert [row.reason for row in audits] == [
+        "先按销售窗口匹配",
+        "后到采购证据优先于销售",
+    ]
+    assert all(
+        row.before_json["as_of"] == business_today().isoformat()
+        and row.after_json["as_of"] == business_today().isoformat()
+        for row in audits
+    )
 
 
 def test_recompute_updates_purchase_weight_when_new_window_sample_arrives(db):

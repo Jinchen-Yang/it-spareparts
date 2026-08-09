@@ -26,18 +26,35 @@ import {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
+  localStorage.setItem("role", "admin");
   get.mockResolvedValue({ data: {} });
+  post.mockResolvedValue({ data: {} });
   patch.mockResolvedValue({ data: { references: [] } });
 });
 
 describe("maintenance operations API", () => {
-  it("项目卡片只请求一次稳定项目批量摘要，不逐项目加载", () => {
+  it("搜索词仅通过 POST body 发送，不进入请求 URL", () => {
     listMaintenanceProjectOperations({ page: 2, page_size: 24, q: "移动" });
+
+    expect(post).toHaveBeenCalledOnce();
+    expect(post).toHaveBeenCalledWith("/maintenance/projects/stable/operations/search", {
+      page: 2,
+      page_size: 24,
+      q: "移动",
+      include_inactive: false,
+    });
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("无搜索词时保留 GET 目录兼容入口", () => {
+    listMaintenanceProjectOperations({ page: 2, page_size: 24 });
 
     expect(get).toHaveBeenCalledOnce();
     expect(get).toHaveBeenCalledWith("/maintenance/projects/stable/operations", {
-      params: { page: 2, page_size: 24, q: "移动", include_inactive: false },
+      params: { page: 2, page_size: 24, include_inactive: false },
     });
+    expect(post).not.toHaveBeenCalled();
   });
 
   it("按稳定项目 ID 加载一份工作台快照", () => {
@@ -203,6 +220,13 @@ describe("maintenance operations API", () => {
             site_requisition_known_cost: "300.10",
             site_requisition_known_cost_ex_tax: "265.58",
             site_requisition_known_cost_inc_tax: "300.10",
+            site_requisition_priced_cost_ex_tax: "265.58",
+            site_requisition_priced_cost_inc_tax: "300.10",
+            sales_estimate_cost_ex_tax: "88.50",
+            sales_estimate_cost_inc_tax: "100.00",
+            sales_estimate_lines: "2",
+            cost_progress_includes_sales_estimate: true,
+            cost_progress_label: "priced_cost_including_sales_estimate",
             approved_expense: "99.90",
             approved_expense_ex_tax: "88.41",
             approved_expense_inc_tax: "99.90",
@@ -232,6 +256,13 @@ describe("maintenance operations API", () => {
     expect(data.rows[0].metrics.site_requisition_known_cost).toBe(300.1);
     expect(data.rows[0].metrics.site_requisition_known_cost_ex_tax).toBe(265.58);
     expect(data.rows[0].metrics.site_requisition_known_cost_inc_tax).toBe(300.1);
+    expect(data.rows[0].metrics.site_requisition_priced_cost_ex_tax).toBe(265.58);
+    expect(data.rows[0].metrics.site_requisition_priced_cost_inc_tax).toBe(300.1);
+    expect(data.rows[0].metrics.sales_estimate_cost_ex_tax).toBe(88.5);
+    expect(data.rows[0].metrics.sales_estimate_cost_inc_tax).toBe(100);
+    expect(data.rows[0].metrics.sales_estimate_lines).toBe(2);
+    expect(data.rows[0].metrics.cost_progress_includes_sales_estimate).toBe(true);
+    expect(data.rows[0].metrics.cost_progress_label).toBe("priced_cost_including_sales_estimate");
     expect(data.rows[0].metrics.approved_expense_ex_tax).toBe(88.41);
     expect(data.rows[0].metrics.approved_expense_inc_tax).toBe(99.9);
     expect(data.rows[0].metrics.actual_project_cost_known_ex_tax).toBe(353.99);
@@ -262,6 +293,13 @@ describe("maintenance operations API", () => {
             site_requisition_known_cost: "33.30",
             site_requisition_known_cost_ex_tax: "29.47",
             site_requisition_known_cost_inc_tax: "33.30",
+            site_requisition_priced_cost_ex_tax: "29.47",
+            site_requisition_priced_cost_inc_tax: "33.30",
+            sales_estimate_cost_ex_tax: "8.41",
+            sales_estimate_cost_inc_tax: "9.50",
+            sales_estimate_lines: "1",
+            cost_progress_includes_sales_estimate: true,
+            cost_progress_label: "priced_cost_including_sales_estimate",
             approved_expense: "8.80",
             approved_expense_ex_tax: "7.79",
             approved_expense_inc_tax: "8.80",
@@ -306,7 +344,10 @@ describe("maintenance operations API", () => {
             unit_cost_inc_tax: "9.50",
             cost_amount_ex_tax: "29.42",
             cost_amount_inc_tax: "33.25",
-            cost_source: "manual",
+            cost_source: "sales_window",
+            cost_evidence_kind: "sales_estimate",
+            cost_is_estimate: true,
+            cost_source_label: "估算（销售前后 7 天数量加权）",
             cost_status: "available",
           }, {
             line_id: "line-restricted",
@@ -322,7 +363,10 @@ describe("maintenance operations API", () => {
             unit_cost_inc_tax: "999",
             cost_amount_ex_tax: "999",
             cost_amount_inc_tax: "999",
-            cost_source: null,
+            cost_source: "sales_window",
+            cost_evidence_kind: "sales_estimate",
+            cost_is_estimate: true,
+            cost_source_label: "不应泄露的销售价格来源",
             cost_status: "restricted",
           }],
           total: 2,
@@ -368,6 +412,10 @@ describe("maintenance operations API", () => {
       unit_cost_inc_tax: 9.5,
       cost_amount_ex_tax: 29.42,
       cost_amount_inc_tax: 33.25,
+      cost_source: "sales_window",
+      cost_evidence_kind: "sales_estimate",
+      cost_is_estimate: true,
+      cost_source_label: "估算（销售前后 7 天数量加权）",
     }));
     expect(data.requisitions.rows[1]).toEqual(expect.objectContaining({
       unit_cost: null,
@@ -376,12 +424,23 @@ describe("maintenance operations API", () => {
       unit_cost_inc_tax: null,
       cost_amount_ex_tax: null,
       cost_amount_inc_tax: null,
+      cost_source: null,
+      cost_evidence_kind: null,
+      cost_is_estimate: null,
+      cost_source_label: null,
     }));
     expect(data.approved_expenses.rows[0].amount).toBe(8.8);
     expect(data.approved_expenses.rows[0].amount_ex_tax).toBe(7.79);
     expect(data.approved_expenses.rows[0].amount_inc_tax).toBe(8.8);
     expect(data.project.metrics.actual_project_cost_known_ex_tax).toBe(37.26);
     expect(data.project.metrics.actual_project_cost_known_inc_tax).toBe(42.1);
+    expect(data.project.metrics.site_requisition_priced_cost_ex_tax).toBe(29.47);
+    expect(data.project.metrics.site_requisition_priced_cost_inc_tax).toBe(33.3);
+    expect(data.project.metrics.sales_estimate_cost_ex_tax).toBe(8.41);
+    expect(data.project.metrics.sales_estimate_cost_inc_tax).toBe(9.5);
+    expect(data.project.metrics.sales_estimate_lines).toBe(1);
+    expect(data.project.metrics.cost_progress_includes_sales_estimate).toBe(true);
+    expect(data.project.metrics.cost_progress_label).toBe("priced_cost_including_sales_estimate");
     expect(data.collection_snapshots.rows[0].cumulative_amount).toBe(18.8);
   });
 
@@ -444,6 +503,337 @@ describe("maintenance operations API", () => {
     expect(data.rows[0].contracts[0].contract_amount_basis).toBeNull();
     expect(data.rows[0].metrics.contract_amount_basis).toBeNull();
     expect(data.rows[0].metrics.cost_progress_basis).toBeNull();
+  });
+
+  it("成本受限时目录和工作台都不会保留销售估算侧信道", async () => {
+    localStorage.setItem("role", "readonly");
+    localStorage.setItem("permissions", JSON.stringify({
+      data_purchase_cost: false,
+      data_profit: false,
+    }));
+    const restrictedMetrics = {
+      total_contract_amount: null,
+      known_contract_amount: null,
+      contract_amount_basis: "inc_tax",
+      contract_amount_complete: null,
+      received_amount: null,
+      collection_progress_pct: null,
+      site_requisition_known_cost: "999",
+      site_requisition_known_cost_ex_tax: "999",
+      site_requisition_known_cost_inc_tax: "999",
+      site_requisition_priced_cost_ex_tax: "999",
+      site_requisition_priced_cost_inc_tax: "999",
+      sales_estimate_cost_ex_tax: "888",
+      sales_estimate_cost_inc_tax: "999",
+      sales_estimate_lines: "7",
+      cost_progress_includes_sales_estimate: true,
+      cost_progress_label: "priced_cost_including_sales_estimate",
+      approved_expense: null,
+      approved_expense_ex_tax: null,
+      approved_expense_inc_tax: null,
+      actual_project_cost_known: "999",
+      actual_project_cost_known_ex_tax: "999",
+      actual_project_cost_known_inc_tax: "999",
+      cost_progress_basis: "inc_tax",
+      cost_rate_lower_bound_pct: "99.9",
+      cost_status: "yellow",
+      cost_complete: null,
+      missing_cost_lines: null,
+    };
+    const project = {
+      project_id: "project-restricted",
+      project_code: "XM-RESTRICTED",
+      display_name: "成本受限项目",
+      project_manager_id: null,
+      lifecycle_status: "ongoing",
+      is_active: true,
+      version: 1,
+      contracts: [],
+      metrics: restrictedMetrics,
+      reminder_count: 0,
+      as_of: "2026-08-09",
+    };
+    get.mockResolvedValueOnce({
+      data: {
+        rows: [project], total: 1, page: 1, page_size: 24,
+        as_of: "2026-08-09", data_version: "restricted-v1",
+      },
+    });
+    get.mockResolvedValueOnce({
+      data: {
+        project,
+        collection_snapshots: { rows: [], total: 0, page: 1, page_size: 20 },
+        requisitions: {
+          rows: [{
+            line_id: "line-raw-cost",
+            order_no: "WBDD-RAW-COST",
+            order_date: "2026-08-01",
+            contract_no: null,
+            pn: "PN-RAW-COST",
+            description: "服务端异常返回的成本字段",
+            quantity: "1",
+            unit_cost: "999",
+            cost_amount: "999",
+            unit_cost_ex_tax: "999",
+            unit_cost_inc_tax: "999",
+            cost_amount_ex_tax: "999",
+            cost_amount_inc_tax: "999",
+            cost_source: "sales_window",
+            cost_evidence_kind: "sales_estimate",
+            cost_is_estimate: true,
+            cost_source_label: "不应保留的销售估算来源",
+            cost_status: "available",
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+        },
+        approved_expenses: { rows: [], total: 0, page: 1, page_size: 20 },
+        reminders: [],
+        workbook_preview: {
+          protocol_version: "2.0", sheets: [], latest_tracking_month: null,
+          last_exported_at: null, data_version: "restricted-v1",
+        },
+        as_of: "2026-08-09",
+        data_version: "restricted-v1",
+      },
+    });
+
+    const directoryMetrics = (await listMaintenanceProjectOperations()).data.rows[0].metrics;
+    const workspaceData = (await getMaintenanceProjectWorkspace("project-restricted")).data;
+    const workspaceMetrics = workspaceData.project.metrics;
+    for (const metrics of [directoryMetrics, workspaceMetrics]) {
+      expect(metrics.site_requisition_priced_cost_ex_tax).toBeNull();
+      expect(metrics.site_requisition_priced_cost_inc_tax).toBeNull();
+      expect(metrics.sales_estimate_cost_ex_tax).toBeNull();
+      expect(metrics.sales_estimate_cost_inc_tax).toBeNull();
+      expect(metrics.sales_estimate_lines).toBeNull();
+      expect(metrics.cost_progress_includes_sales_estimate).toBeNull();
+      expect(metrics.cost_progress_label).toBeNull();
+    }
+    expect(workspaceData.requisitions.rows[0]).toEqual(expect.objectContaining({
+      quantity: 1,
+      unit_cost: null,
+      cost_amount: null,
+      cost_source: null,
+      cost_evidence_kind: null,
+      cost_is_estimate: null,
+      cost_source_label: null,
+      cost_status: "restricted",
+    }));
+  });
+
+  it("仅成本权限不把费用完整度 null 误判为成本不可见", async () => {
+    localStorage.setItem("role", "purchaser");
+    localStorage.setItem("permissions", JSON.stringify({
+      data_purchase_cost: true,
+      data_profit: false,
+    }));
+    get.mockResolvedValueOnce({
+      data: {
+        rows: [{
+          project_id: "project-cost-only",
+          project_code: "XM-COST-ONLY",
+          display_name: "仅成本权限项目",
+          project_manager_id: null,
+          lifecycle_status: "ongoing",
+          is_active: true,
+          version: 1,
+          contracts: [],
+          metrics: {
+            total_contract_amount: null,
+            known_contract_amount: null,
+            contract_amount_basis: "inc_tax",
+            contract_amount_complete: null,
+            received_amount: null,
+            collection_progress_pct: null,
+            site_requisition_known_cost: "113.00",
+            site_requisition_known_cost_ex_tax: "100.00",
+            site_requisition_known_cost_inc_tax: "113.00",
+            site_requisition_priced_cost_ex_tax: "100.00",
+            site_requisition_priced_cost_inc_tax: "113.00",
+            sales_estimate_cost_ex_tax: "25.00",
+            sales_estimate_cost_inc_tax: "28.25",
+            sales_estimate_lines: "2",
+            cost_progress_includes_sales_estimate: true,
+            cost_progress_label: "priced_cost_including_sales_estimate",
+            approved_expense: null,
+            approved_expense_ex_tax: null,
+            approved_expense_inc_tax: null,
+            actual_project_cost_known: null,
+            actual_project_cost_known_ex_tax: null,
+            actual_project_cost_known_inc_tax: null,
+            cost_progress_basis: "inc_tax",
+            cost_rate_lower_bound_pct: null,
+            cost_status: null,
+            cost_complete: null,
+            missing_cost_lines: 1,
+          },
+          reminder_count: 1,
+          as_of: "2026-08-09",
+        }],
+        total: 1,
+        page: 1,
+        page_size: 24,
+        as_of: "2026-08-09",
+        data_version: "cost-only-v1",
+      },
+    });
+
+    const metrics = (await listMaintenanceProjectOperations()).data.rows[0].metrics;
+
+    expect(metrics.site_requisition_known_cost_inc_tax).toBe(113);
+    expect(metrics.site_requisition_priced_cost_ex_tax).toBe(100);
+    expect(metrics.sales_estimate_cost_inc_tax).toBe(28.25);
+    expect(metrics.sales_estimate_lines).toBe(2);
+    expect(metrics.cost_progress_includes_sales_estimate).toBe(true);
+    expect(metrics.cost_progress_label).toBe("priced_cost_including_sales_estimate");
+    expect(metrics.missing_cost_lines).toBe(1);
+    expect(metrics.approved_expense_inc_tax).toBeNull();
+    expect(metrics.actual_project_cost_known_inc_tax).toBeNull();
+  });
+
+  it("仅成本权限在工作台保留现场领用取价证据并继续隐藏费用和回款", async () => {
+    localStorage.setItem("role", "purchaser");
+    localStorage.setItem("permissions", JSON.stringify({
+      data_purchase_cost: true,
+      data_profit: false,
+    }));
+    get.mockResolvedValueOnce({
+      data: {
+        project: {
+          project_id: "project-cost-only",
+          project_code: "XM-COST-ONLY",
+          display_name: "仅成本权限项目",
+          project_manager_id: null,
+          lifecycle_status: "ongoing",
+          is_active: true,
+          version: 1,
+          contracts: [],
+          metrics: {
+            total_contract_amount: null,
+            known_contract_amount: null,
+            contract_amount_basis: "inc_tax",
+            contract_amount_complete: null,
+            received_amount: null,
+            collection_progress_pct: null,
+            site_requisition_known_cost: "113.00",
+            site_requisition_known_cost_ex_tax: "100.00",
+            site_requisition_known_cost_inc_tax: "113.00",
+            site_requisition_priced_cost_ex_tax: "100.00",
+            site_requisition_priced_cost_inc_tax: "113.00",
+            sales_estimate_cost_ex_tax: "25.00",
+            sales_estimate_cost_inc_tax: "28.25",
+            sales_estimate_lines: "2",
+            cost_progress_includes_sales_estimate: true,
+            cost_progress_label: "priced_cost_including_sales_estimate",
+            approved_expense: "999.00",
+            approved_expense_ex_tax: "999.00",
+            approved_expense_inc_tax: "999.00",
+            actual_project_cost_known: "1112.00",
+            actual_project_cost_known_ex_tax: "1099.00",
+            actual_project_cost_known_inc_tax: "1112.00",
+            cost_progress_basis: "inc_tax",
+            cost_rate_lower_bound_pct: "99.90",
+            cost_status: "yellow",
+            cost_complete: null,
+            missing_cost_lines: 0,
+          },
+          reminder_count: 1,
+          as_of: "2026-08-09",
+        },
+        collection_snapshots: {
+          rows: [{
+            collection_id: "collection-hidden",
+            project_contract_id: "pc-hidden",
+            contract_no: null,
+            report_month: "2026-08-01",
+            cumulative_amount: "999.00",
+            receipt_reference: "RECEIPT-HIDDEN",
+            status: "confirmed",
+            remark: "不应保留的回款备注",
+            version: 1,
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+        },
+        requisitions: {
+          rows: [{
+            line_id: "line-sales-estimate",
+            order_no: "WBDD-COST-ONLY",
+            order_date: "2026-08-01",
+            contract_no: null,
+            pn: "PN-COST-ONLY",
+            description: "成本权限可见",
+            quantity: "2",
+            unit_cost: "56.50",
+            cost_amount: "113.00",
+            unit_cost_ex_tax: "50.00",
+            unit_cost_inc_tax: "56.50",
+            cost_amount_ex_tax: "100.00",
+            cost_amount_inc_tax: "113.00",
+            cost_source: "sales_window",
+            cost_evidence_kind: "sales_estimate",
+            cost_is_estimate: true,
+            cost_source_label: "估算（销售前后 7 天数量加权）",
+            cost_status: "available",
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+        },
+        approved_expenses: {
+          rows: [{
+            expense_id: "expense-hidden",
+            expense_date: "2026-08-02",
+            contract_no: null,
+            amount: "999.00",
+            amount_ex_tax: "999.00",
+            amount_inc_tax: "999.00",
+            approval_status: "approved",
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+        },
+        reminders: [],
+        workbook_preview: {
+          protocol_version: "2.0",
+          sheets: [],
+          latest_tracking_month: null,
+          last_exported_at: null,
+          data_version: "cost-only-v1",
+        },
+        as_of: "2026-08-09",
+        data_version: "cost-only-v1",
+      },
+    });
+
+    const { data } = await getMaintenanceProjectWorkspace("project-cost-only");
+
+    expect(data.requisitions.rows[0]).toEqual(expect.objectContaining({
+      quantity: 2,
+      unit_cost_inc_tax: 56.5,
+      cost_amount_inc_tax: 113,
+      cost_source: "sales_window",
+      cost_evidence_kind: "sales_estimate",
+      cost_is_estimate: true,
+      cost_source_label: "估算（销售前后 7 天数量加权）",
+    }));
+    expect(data.project.metrics.site_requisition_known_cost_inc_tax).toBe(113);
+    expect(data.project.metrics.approved_expense).toBeNull();
+    expect(data.project.metrics.approved_expense_inc_tax).toBeNull();
+    expect(data.project.metrics.actual_project_cost_known_inc_tax).toBeNull();
+    expect(data.project.metrics.cost_rate_lower_bound_pct).toBeNull();
+    expect(data.project.metrics.cost_status).toBeNull();
+    expect(data.collection_snapshots.rows[0]).toEqual(expect.objectContaining({
+      cumulative_amount: null,
+      receipt_reference: null,
+      remark: null,
+    }));
+    expect(data.approved_expenses.rows).toEqual([]);
+    expect(data.approved_expenses.total).toBe(0);
   });
 
   it("成本回填成功响应在 API 边界保留并归一化单位成本和金额双值", async () => {

@@ -1,5 +1,7 @@
 """Stable maintenance-project operating facts through their public API."""
 
+import hashlib
+import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -1449,9 +1451,9 @@ def test_confirmed_monthly_collection_snapshot_drives_workspace_progress(db):
         row["rule_key"] for row in payload["reminders"]
     }
     assert payload["workbook_preview"]["sheets"][0]["row_count"] == 3
-    filtered = client.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    filtered = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             "as_of": "2026-02-28",
             "q": project.project_code,
             "reminder": "collection:incomplete",
@@ -2040,7 +2042,7 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
         json={
             "contract_id": "contract-sales-gap-001",
             "contract_no": "XS-SALES-GAP-001",
-            "contract_amount": "1000.00",
+            "contract_amount": "5000.00",
             "contract_status": "synthetic-active",
             "status_mapping_state": "mapped",
             "status_mapping_version": "synthetic-map-v1",
@@ -2134,7 +2136,63 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
         sample["tax_conversion"] == "divide_1.13"
         for sample in lines["issue-line-sales-fallback"]["reference_samples"]
     )
+    assert lines["issue-line-sales-fallback"]["cost_evidence_kind"] == "sales_estimate"
+    assert lines["issue-line-sales-fallback"]["cost_is_estimate"] is True
+    assert (
+        lines["issue-line-sales-fallback"]["cost_source_label"]
+        == "估算（销售前后 7 天数量加权）"
+    )
     assert lines["issue-line-manual-gap"]["cost_source"] is None
+
+    workspace = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-06-30"},
+    )
+    assert workspace.status_code == 200, workspace.text
+    metrics = workspace.json()["project"]["metrics"]
+    assert metrics["sales_estimate_lines"] == 1
+    assert metrics["sales_estimate_cost_ex_tax"] == "399.99"
+    assert metrics["sales_estimate_cost_inc_tax"] == "451.98"
+    assert metrics["cost_progress_includes_sales_estimate"] is True
+    assert metrics["cost_progress_label"] == "priced_cost_including_sales_estimate"
+    assert metrics["cost_status"] == "unknown"
+    estimate_warning = next(
+        row
+        for row in workspace.json()["reminders"]
+        if row["rule_key"] == "cost:sales_fallback_estimate"
+    )
+    assert estimate_warning["title"] == "核对项目成本中的销售回退估算"
+    assert "1 条已确认现场领用" in estimate_warning["detail"]
+    assert "不等于采购或人工确认单价" in estimate_warning["detail"]
+    assert not any(
+        row["rule_key"].startswith("cost_ratio:")
+        for row in workspace.json()["reminders"]
+    )
+
+    directory = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={"as_of": "2026-06-30", "q": project.project_code},
+    )
+    assert directory.status_code == 200, directory.text
+    directory_metrics = directory.json()["rows"][0]["metrics"]
+    assert directory_metrics["sales_estimate_lines"] == 1
+    assert directory_metrics["sales_estimate_cost_ex_tax"] == "399.99"
+    assert directory_metrics["sales_estimate_cost_inc_tax"] == "451.98"
+    assert directory_metrics["cost_progress_includes_sales_estimate"] is True
+    assert directory_metrics["cost_progress_label"] == (
+        "priced_cost_including_sales_estimate"
+    )
+    estimate_filtered = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
+            "as_of": "2026-06-30",
+            "q": project.project_code,
+            "reminder": "cost:sales_fallback_estimate",
+        },
+    )
+    assert estimate_filtered.status_code == 200, estimate_filtered.text
+    assert estimate_filtered.json()["total"] == 1
+    assert estimate_filtered.json()["rows"][0]["project_id"] == project.project_id
 
     gaps = client.get(
         f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps"
@@ -2239,6 +2297,13 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
     assert restricted_metrics["site_requisition_known_cost"] is None
     assert restricted_metrics["site_requisition_known_cost_ex_tax"] is None
     assert restricted_metrics["site_requisition_known_cost_inc_tax"] is None
+    assert restricted_metrics["site_requisition_priced_cost_ex_tax"] is None
+    assert restricted_metrics["site_requisition_priced_cost_inc_tax"] is None
+    assert restricted_metrics["sales_estimate_cost_ex_tax"] is None
+    assert restricted_metrics["sales_estimate_cost_inc_tax"] is None
+    assert restricted_metrics["sales_estimate_lines"] is None
+    assert restricted_metrics["cost_progress_includes_sales_estimate"] is None
+    assert restricted_metrics["cost_progress_label"] is None
     assert restricted_metrics["actual_project_cost_known"] is None
     assert restricted_metrics["actual_project_cost_known_ex_tax"] is None
     assert restricted_metrics["actual_project_cost_known_inc_tax"] is None
@@ -2249,11 +2314,36 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
     assert restricted["requisitions"]["rows"][0]["cost_amount_ex_tax"] is None
     assert restricted["requisitions"]["rows"][0]["cost_amount_inc_tax"] is None
     assert restricted["requisitions"]["rows"][0]["reference_samples"] == []
+    assert restricted["requisitions"]["rows"][0]["cost_source"] is None
+    assert restricted["requisitions"]["rows"][0]["cost_evidence_kind"] is None
+    assert restricted["requisitions"]["rows"][0]["cost_is_estimate"] is None
+    assert restricted["requisitions"]["rows"][0]["cost_source_label"] is None
     assert restricted["requisitions"]["rows"][0]["cost_status"] == "restricted"
     assert not any(
         row["rule_key"].startswith(("collection:", "cost_ratio:"))
         for row in restricted["reminders"]
     )
+    restricted_directory = operations_service.project_operations(
+        db,
+        as_of=date(2026, 6, 30),
+        q_text=project.project_code,
+        user_ctx=UserContext(
+            user_id="restricted-directory-user",
+            role="readonly",
+            permissions={"page_maintenance": True},
+        ),
+    )
+    restricted_directory_metrics = restricted_directory["rows"][0]["metrics"]
+    assert restricted_directory_metrics["site_requisition_priced_cost_ex_tax"] is None
+    assert restricted_directory_metrics["site_requisition_priced_cost_inc_tax"] is None
+    assert restricted_directory_metrics["sales_estimate_cost_ex_tax"] is None
+    assert restricted_directory_metrics["sales_estimate_cost_inc_tax"] is None
+    assert restricted_directory_metrics["sales_estimate_lines"] is None
+    assert (
+        restricted_directory_metrics["cost_progress_includes_sales_estimate"]
+        is None
+    )
+    assert restricted_directory_metrics["cost_progress_label"] is None
 
 
 def test_only_explicitly_mapped_approved_expense_counts(db):
@@ -2574,9 +2664,9 @@ def test_legacy_future_expense_readiness_fails_closed_until_audited_correction(
         "expense_readiness_in_future",
         "expense_data_not_ready",
     }
-    future_filter = client.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    future_filter = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             "as_of": "2026-08-31",
             "q": project.project_code,
             "reminder": "completeness:expense_readiness_in_future",
@@ -2612,29 +2702,32 @@ def test_legacy_future_expense_readiness_fails_closed_until_audited_correction(
         for row in restricted_payload["reminders"]
     )
 
-    restricted_directory = restricted.get(
-        "/api/maintenance/projects/stable/operations",
-        params={"as_of": "2026-08-31", "q": project.project_code},
+    restricted_directory = restricted.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={"as_of": "2026-08-31", "q": project.project_code},
     )
     assert restricted_directory.status_code == 200, restricted_directory.text
     assert restricted_directory.json()["total"] == 1
     restricted_card_metrics = restricted_directory.json()["rows"][0]["metrics"]
     assert restricted_card_metrics["expense_data_ready"] is None
     assert restricted_card_metrics["expense_ready_through"] is None
-    restricted_future_filter = restricted.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    restricted_future_filter = restricted.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             "as_of": "2026-08-31",
             "q": project.project_code,
             "reminder": "completeness:expense_readiness_in_future",
         },
     )
-    assert restricted_future_filter.status_code == 200, restricted_future_filter.text
-    assert restricted_future_filter.json()["total"] == 0
+    assert restricted_future_filter.status_code == 403, restricted_future_filter.text
+    assert restricted_future_filter.json() == {
+        "detail": "当前账号无权使用该提醒筛选"
+    }
+    assert "future" not in restricted_future_filter.text
 
-    filtered = client.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    filtered = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             "as_of": "2026-08-31",
             "q": project.project_code,
             "reminder": "completeness:expense_data_not_ready",
@@ -3112,7 +3205,17 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
             params={"as_of": "2026-07-31"},
         ).json()
         statuses.append(workspace["project"]["metrics"]["cost_status"])
-    assert statuses == ["yellow", "yellow", "red"]
+    assert statuses == ["normal", "yellow", "red"]
+
+    exact_eighty_tasks = client.get(
+        f"/api/maintenance/projects/stable/{projects[0].project_id}/tasks",
+        params={"as_of": "2026-07-31"},
+    )
+    assert exact_eighty_tasks.status_code == 200, exact_eighty_tasks.text
+    assert not any(
+        row["rule_key"].startswith("cost_ratio:")
+        for row in exact_eighty_tasks.json()["rows"]
+    )
 
     first = client.get(
         f"/api/maintenance/projects/stable/{projects[2].project_id}/tasks",
@@ -3160,9 +3263,9 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
     assert operations.json()["page_size"] == 24
     assert operations.json()["rows"][0]["as_of"] == "2026-07-31"
 
-    filtered = client.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    filtered = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             "as_of": "2026-07-31",
             "q": "XS-project-threshold-101",
             "lifecycle": "missing",
@@ -3179,7 +3282,8 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
 def test_directory_reminder_filters_use_the_same_rounded_cost_threshold_as_cards(db):
     client = _client(db, username="rounded_threshold_admin")
     cases = [
-        ("rounded-up-to-80", "300.00", "212.38", "yellow"),
+        ("rounded-up-to-80", "300.00", "212.38", "normal"),
+        ("above-rounded-80", "300.00", "212.41", "yellow"),
         ("rounded-down-to-100", "300.00", "265.49", "yellow"),
         ("half-cent-to-red", "20000.00", "17700.00", "red"),
     ]
@@ -3260,7 +3364,7 @@ def test_directory_reminder_filters_use_the_same_rounded_cost_threshold_as_cards
     )
     assert yellow.status_code == 200, yellow.text
     assert {row["project_id"] for row in yellow.json()["rows"]} == {
-        "project-rounded-up-to-80",
+        "project-above-rounded-80",
         "project-rounded-down-to-100",
     }
 
@@ -3436,9 +3540,9 @@ def test_operations_reminder_predicates_match_canonical_open_tasks(db):
     }
 
     for selector in selectors:
-        response = client.get(
-            "/api/maintenance/projects/stable/operations",
-            params={
+        response = client.post(
+            "/api/maintenance/projects/stable/operations/search",
+            json={
                 **params,
                 "q": project.project_code,
                 "lifecycle": project.lifecycle_status,
@@ -3449,9 +3553,9 @@ def test_operations_reminder_predicates_match_canonical_open_tasks(db):
         assert response.json()["total"] == 1, selector
         assert response.json()["rows"][0]["project_id"] == project.project_id
 
-    unmatched = client.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    unmatched = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             **params,
             "q": project.project_code,
             "lifecycle": project.lifecycle_status,
@@ -3460,6 +3564,211 @@ def test_operations_reminder_predicates_match_canonical_open_tasks(db):
     )
     assert unmatched.status_code == 200, unmatched.text
     assert unmatched.json()["total"] == 0
+
+
+def test_operations_directory_rejects_cost_ratio_filter_without_financial_permissions(db):
+    _project(db, project_id="directory-filter-permission-red")
+    client = _permission_client(
+        db,
+        username="directory_filter_permission_red",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": False,
+            "data_profit": False,
+        },
+    )
+
+    response = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={"as_of": "2026-08-31", "reminder": "cost_ratio:red"},
+    )
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "当前账号无权使用该提醒筛选"}
+    assert "red" not in response.text
+    assert "80" not in response.text
+    assert "100" not in response.text
+
+
+def test_operations_directory_rejects_cost_filter_without_cost_permission(db):
+    _project(db, project_id="directory-filter-permission-cost")
+    client = _permission_client(
+        db,
+        username="directory_filter_permission_cost",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": False,
+            "data_profit": False,
+        },
+    )
+
+    response = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={"as_of": "2026-08-31", "reminder": "cost:missing_price"},
+    )
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "当前账号无权使用该提醒筛选"}
+    assert "cost" not in response.text
+    assert "price" not in response.text
+
+
+def test_operations_directory_rejects_collection_filter_without_profit_permission(db):
+    _project(db, project_id="filter-permission-collection")
+    client = _permission_client(
+        db,
+        username="directory_filter_permission_collection",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "data_profit": False,
+        },
+    )
+
+    response = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={"as_of": "2026-08-31", "reminder": "collection:incomplete"},
+    )
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "当前账号无权使用该提醒筛选"}
+    assert "collection" not in response.text
+    assert "incomplete" not in response.text
+
+
+def test_operations_directory_financial_selector_permission_matrix(db):
+    project = _project(db, project_id="filter-permission-matrix")
+    no_financial = _permission_client(
+        db,
+        username="directory_filter_no_financial",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": False,
+            "data_profit": False,
+        },
+    )
+    cost_only = _permission_client(
+        db,
+        username="directory_filter_cost_only",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "data_profit": False,
+        },
+    )
+    full_financial = _permission_client(
+        db,
+        username="directory_filter_full_financial",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "data_profit": True,
+        },
+    )
+    endpoint = "/api/maintenance/projects/stable/operations"
+    full_financial_selectors = [
+        "all",
+        "info",
+        "warning",
+        "critical",
+        "completeness",
+        "collection",
+        "cost_ratio",
+        "completeness:missing_contract_amount",
+        "completeness:expense_data_not_ready",
+        "collection:missing_confirmed",
+        "cost_ratio:yellow",
+    ]
+    cost_selectors = [
+        "cost",
+        "cost:missing_price",
+        "cost:sales_fallback_estimate",
+        "completeness:missing_consumption_cost",
+        "completeness:unmapped_site_issue_status",
+    ]
+
+    for selector in full_financial_selectors:
+        params = {"as_of": "2026-08-31", "reminder": selector}
+        for client in (no_financial, cost_only):
+            denied = client.get(endpoint, params=params)
+            assert denied.status_code == 403, (selector, denied.text)
+            assert denied.json() == {"detail": "当前账号无权使用该提醒筛选"}
+        allowed = full_financial.get(endpoint, params=params)
+        assert allowed.status_code == 200, (selector, allowed.text)
+
+    for selector in cost_selectors:
+        params = {"as_of": "2026-08-31", "reminder": selector}
+        denied = no_financial.get(endpoint, params=params)
+        assert denied.status_code == 403, (selector, denied.text)
+        assert denied.json() == {"detail": "当前账号无权使用该提醒筛选"}
+        for client in (cost_only, full_financial):
+            allowed = client.get(endpoint, params=params)
+            assert allowed.status_code == 200, (selector, allowed.text)
+
+    for selector in (None, "项目经理月度更新", "manager_update:2026-08"):
+        params = {
+            "as_of": "2026-08-31",
+            "q": project.project_code,
+            "lifecycle": "missing",
+        }
+        if selector is not None:
+            params["reminder"] = selector
+        allowed = no_financial.post(f"{endpoint}/search", json=params)
+        assert allowed.status_code == 200, (selector, allowed.text)
+
+
+def test_operations_directory_cost_filters_remain_usable_without_profit_permission(db):
+    project = _project(db, project_id="filter-cost-only-visible")
+    admin = _client(db, username="directory_cost_filter_setup_admin")
+    part = DimPart(pn_std="PN-DIRECTORY-COST-FILTER")
+    db.add(part)
+    db.commit()
+    created = admin.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-DIRECTORY-COST-FILTER",
+            "issue_date": "2026-08-15",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [{
+                "issue_line_id": "directory-cost-filter-line",
+                "line_no": 1,
+                "part_id": part.id,
+                "pn": part.pn_std,
+                "quantity": "1",
+            }],
+            "reason": "建立仅成本权限可见的缺价提醒",
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["lines"][0]["cost_amount_inc_tax"] is None
+    cost_only = _permission_client(
+        db,
+        username="directory_cost_filter_cost_only",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "data_profit": False,
+        },
+    )
+
+    for selector in (
+        "cost:missing_price",
+        "completeness:missing_consumption_cost",
+    ):
+        response = cost_only.post(
+            "/api/maintenance/projects/stable/operations/search",
+            json={
+                "as_of": "2026-08-31",
+                "q": project.project_code,
+                "reminder": selector,
+            },
+        )
+        assert response.status_code == 200, (selector, response.text)
+        assert response.json()["total"] == 1, selector
+        assert response.json()["rows"][0]["project_id"] == project.project_id
 
 
 def test_sensitive_operations_reads_are_access_logged_with_scope(db):
@@ -3516,8 +3825,242 @@ def test_sensitive_operations_reads_are_access_logged_with_scope(db):
     }
     assert rows[1].detail["project_id"] == project.project_id
     assert rows[1].detail["as_of"] == "2026-08-31"
-    assert rows[3].detail["page_size"] == 24
-    assert rows[3].detail["returned"] == 1
+    assert rows[3].detail == {
+        "as_of": "2026-08-31",
+        "searched": False,
+        "lifecycle": "all",
+        "reminder": None,
+        "include_inactive": False,
+        "page": 1,
+        "page_size": 24,
+    }
+
+
+def test_operations_search_access_log_excludes_query_content_and_derivatives(db):
+    project = _project(db, project_id="project-search-log-privacy")
+    client = _client(db, username="operations_search_log_privacy_admin")
+    contract_no = "XS-隐私合同-2026"
+    contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-search-log-privacy",
+            "contract_no": contract_no,
+            "contract_amount": "1000.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立访问日志搜索隐私回归合同",
+        },
+    )
+    assert contract.status_code == 201, contract.text
+
+    sensitive_queries = [
+        project.project_code,
+        contract_no,
+        project.display_name,
+    ]
+    for query in sensitive_queries:
+        response = client.post(
+            "/api/maintenance/projects/stable/operations/search",
+            json={
+                "as_of": "2026-08-31",
+                "q": query,
+                "lifecycle": "all",
+                "page": 1,
+                "page_size": 24,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["total"] == 1
+
+    db.expire_all()
+    rows = list(
+        db.scalars(
+            select(SysAccessLog)
+            .where(
+                SysAccessLog.username
+                == "operations_search_log_privacy_admin",
+                SysAccessLog.action == "stable_project_operations",
+            )
+            .order_by(SysAccessLog.id)
+        )
+    )
+    assert len(rows) == len(sensitive_queries)
+    expected_detail = {
+        "as_of": "2026-08-31",
+        "searched": True,
+        "lifecycle": "all",
+        "reminder": None,
+        "include_inactive": False,
+        "page": 1,
+        "page_size": 24,
+    }
+    for row, query in zip(rows, sensitive_queries, strict=True):
+        assert row.resource == "maintenance"
+        assert row.detail == expected_detail
+        serialized_log = json.dumps(
+            {
+                "username": row.username,
+                "role": row.role,
+                "action": row.action,
+                "resource": row.resource,
+                "detail": row.detail,
+                "ip_address": row.ip_address,
+                "user_agent": row.user_agent,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        forbidden_derivatives = {
+            query,
+            hashlib.sha256(query.encode()).hexdigest(),
+            query.encode().hex(),
+        }
+        assert all(value not in serialized_log for value in forbidden_derivatives)
+
+
+@pytest.mark.parametrize(
+    "search",
+    [
+        "GET-URL-中不得出现的项目搜索词",
+        "GET-URL-LONG-PRIVATE-SENTINEL-" + "x" * 512,
+    ],
+)
+def test_operations_directory_rejects_get_query_search_without_audit(db, search):
+    client = _client(db, username="operations_get_query_admin")
+
+    response = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={"as_of": "2026-08-31", "q": search},
+    )
+
+    assert response.status_code == 422
+    assert search not in response.text
+    db.expire_all()
+    assert (
+        db.scalar(
+            select(SysAccessLog.id).where(
+                SysAccessLog.username == "operations_get_query_admin",
+                SysAccessLog.action == "stable_project_operations",
+            )
+        )
+        is None
+    )
+
+
+def test_operations_search_rejects_overlong_values_without_reflection_or_audit(db):
+    client = _client(db, username="operations_overlong_search_admin")
+    q_sentinel = "POST-Q-LONG-PRIVATE-SENTINEL-" + "x" * 512
+    reminder_sentinel = "REMINDER-LONG-PRIVATE-SENTINEL-" + "x" * 128
+
+    responses = [
+        client.get(
+            "/api/maintenance/projects/stable/operations",
+            params={"as_of": "2026-08-31", "reminder": reminder_sentinel},
+        ),
+        client.post(
+            "/api/maintenance/projects/stable/operations/search",
+            json={
+                "as_of": "2026-08-31",
+                "q": "safe-search",
+                "reminder": reminder_sentinel,
+            },
+        ),
+        client.post(
+            "/api/maintenance/projects/stable/operations/search",
+            json={"as_of": "2026-08-31", "q": q_sentinel},
+        ),
+    ]
+
+    for response in responses:
+        assert response.status_code == 422
+        assert "PRIVATE-SENTINEL" not in response.text
+        assert q_sentinel not in response.text
+        assert reminder_sentinel not in response.text
+
+    db.expire_all()
+    assert (
+        db.scalar(
+            select(SysAccessLog.id).where(
+                SysAccessLog.username == "operations_overlong_search_admin",
+                SysAccessLog.action == "stable_project_operations",
+            )
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "cost:not-a-rule",
+        "completeness:not-a-rule",
+        "manager_update:2026-13",
+        "totally-unknown",
+    ],
+)
+def test_operations_directory_rejects_unknown_reminder_without_audit(db, selector):
+    client = _client(db, username="operations_unknown_reminder_admin")
+
+    response = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={"as_of": "2026-08-31", "reminder": selector},
+    )
+
+    assert response.status_code == 422
+    assert selector not in response.text
+    db.expire_all()
+    assert (
+        db.scalar(
+            select(SysAccessLog.id).where(
+                SysAccessLog.username == "operations_unknown_reminder_admin",
+                SysAccessLog.action == "stable_project_operations",
+            )
+        )
+        is None
+    )
+
+
+def test_operations_directory_accepts_declared_reminder_selectors(db):
+    client = _client(db, username="operations_known_reminder_admin")
+    selectors = [
+        "项目经理月度更新",
+        "manager_update:2026-08",
+        "all",
+        "info",
+        "warning",
+        "critical",
+        "completeness",
+        "collection",
+        "cost",
+        "cost_ratio",
+        "completeness:no_effective_contracts",
+        "completeness:duplicate_effective_contract",
+        "completeness:unmapped_contract_status",
+        "completeness:missing_contract_amount",
+        "completeness:cross_project_contract_conflict",
+        "completeness:missing_consumption_cost",
+        "completeness:unmapped_site_issue_status",
+        "completeness:unmapped_expense_status",
+        "completeness:expense_data_not_ready",
+        "completeness:expense_readiness_in_future",
+        "collection:missing_confirmed",
+        "collection:incomplete",
+        "cost:missing_price",
+        "cost:sales_fallback_estimate",
+        "cost_ratio:yellow",
+        "cost_ratio:red",
+    ]
+
+    for selector in selectors:
+        response = client.get(
+            "/api/maintenance/projects/stable/operations",
+            params={"as_of": "2026-08-31", "reminder": selector},
+        )
+        assert response.status_code == 200, (selector, response.text)
 
 
 def test_operations_directory_query_count_is_constant_across_page_sizes(db):
@@ -3614,9 +4157,9 @@ def test_operations_directory_card_matches_workspace_summary(db):
         f"/api/maintenance/projects/stable/{project.project_id}/workspace",
         params={"as_of": "2026-08-31"},
     )
-    directory = client.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    directory = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             "as_of": "2026-08-31",
             "q": project.project_code,
             "lifecycle": "ongoing",

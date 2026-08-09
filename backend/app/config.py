@@ -382,6 +382,15 @@ FIELD_GROUPS = {
                       "reference_pool_version", "reference_sample_count",
                       "reference_from_date", "reference_to_date",
                       "reference_latest_date",
+                      # 稳定项目成本证据与销售回退估算（#203）。这些派生金额、行数、
+                      # 估算标记和展示口径均会暴露成本事实；逐字登记，保证未来任一响应
+                      # 复用时也由 apply_field_visibility 统一失败关闭。
+                      "site_requisition_priced_cost_ex_tax",
+                      "site_requisition_priced_cost_inc_tax",
+                      "sales_estimate_cost_ex_tax", "sales_estimate_cost_inc_tax",
+                      "sales_estimate_lines", "sales_estimate_count",
+                      "cost_progress_includes_sales_estimate", "cost_progress_label",
+                      "cost_evidence_kind", "cost_is_estimate", "cost_source_label",
                       # 老板看板（dashboard/pool）派生成本键：采购额、采购价统计容器、
                       # 未税单价、池标杆成本、双端溢价、两级节省——全部反推采购成本，随 data_purchase_cost 遮。
                       # 容器级登记（purchase_price/benchmark/savings）避免与销售侧同名内层键(wavg/median)冲突。
