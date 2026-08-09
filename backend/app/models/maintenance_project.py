@@ -11,9 +11,11 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -61,6 +63,11 @@ class MaintenanceProject(Base):
 
     __table_args__ = (
         CheckConstraint("version >= 1", name="ck_maintenance_project_version"),
+        Index(
+            "ux_maintenance_project_code_ci",
+            func.lower(project_code),
+            unique=True,
+        ),
         Index("ix_maintenance_project_display_name", "display_name"),
         Index("ix_maintenance_project_active_code", "is_active", "project_code"),
         Index(
@@ -165,5 +172,57 @@ class MaintenanceProjectContract(Base):
             "included_in_total",
             "effective_from",
             "effective_to",
+        ),
+    )
+
+
+class MaintenanceProjectAuditLog(Base):
+    """Business audit for string-identified maintenance project facts."""
+
+    __tablename__ = "maintenance_project_audit_log"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_project.project_id"),
+        nullable=False,
+    )
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    before_json: Mapped[dict | None] = mapped_column(JSONB)
+    after_json: Mapped[dict | None] = mapped_column(JSONB)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    operated_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    operated_at: Mapped[datetime] = mapped_column(
+        TZDateTime,
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "entity_type IN ('project', 'project_contract')",
+            name="ck_maintenance_project_audit_entity_type",
+        ),
+        CheckConstraint(
+            "char_length(btrim(reason)) > 0",
+            name="ck_maintenance_project_audit_reason",
+        ),
+        CheckConstraint(
+            "char_length(btrim(operated_by)) > 0",
+            name="ck_maintenance_project_audit_operator",
+        ),
+        Index(
+            "ix_maintenance_project_audit_project_time",
+            "project_id",
+            "operated_at",
+            "id",
+        ),
+        Index(
+            "ix_maintenance_project_audit_entity_time",
+            "entity_type",
+            "entity_id",
+            "operated_at",
+            "id",
         ),
     )

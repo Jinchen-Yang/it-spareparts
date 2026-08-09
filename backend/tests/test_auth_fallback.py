@@ -38,3 +38,14 @@ def test_unknown_username_with_admin_password_still_falls_back(db):
     # sys_user 完全没有的用户名 + 正确共享口令 → 回退成功（兼容旧部署，readonly）
     r = _login("ghost_user_never_seeded", get_settings().admin_password)
     assert r.status_code == 200 and r.json()["role"] == "readonly"
+
+
+def test_shared_admin_keeps_existing_chat_session_access(db):
+    login = _login("admin", get_settings().admin_password)
+    assert login.status_code == 200
+    client = TestClient(app)
+    response = client.get(
+        "/api/agent/sessions",
+        headers={"Authorization": f"Bearer {login.json()['token']}"},
+    )
+    assert response.status_code == 200, response.text
