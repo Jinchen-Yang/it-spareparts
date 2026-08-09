@@ -1,11 +1,13 @@
 """Stable/Beta release boundary for the maintenance workspace."""
 
 from fastapi.testclient import TestClient
+from fastapi.routing import APIRoute
 
 from app import permissions
 from app.auth import hash_password
 from app.config import get_settings
 from app.main import app
+from app.maintenance_beta import require_maintenance_beta
 from app.models.system import SysUser
 
 
@@ -83,19 +85,33 @@ def test_server_gate_keeps_stable_page_live_and_beta_closed(db):
     original = settings.maintenance_beta_enabled
     try:
         settings.maintenance_beta_enabled = False
-        for stable_path in (
-            "/api/maintenance/projects",
-            "/api/maintenance/projects/stable",
-            "/api/maintenance/projects/stable/operations",
-        ):
+        for stable_path in ("/api/maintenance/projects",):
             stable = client.get(stable_path)
             assert stable.status_code == 200, (stable_path, stable.text)
-        beta = client.post("/api/maintenance/demands/search", json={})
-        assert beta.status_code == 404, beta.text
+        for method, path, body in (
+            ("get", "/api/maintenance/projects/stable", None),
+            ("get", "/api/maintenance/projects/stable/operations", None),
+            ("post", "/api/maintenance/demands/search", {}),
+        ):
+            beta = (
+                getattr(client, method)(path, json=body)
+                if body is not None
+                else getattr(client, method)(path)
+            )
+            assert beta.status_code == 404, (method, path, beta.text)
 
         settings.maintenance_beta_enabled = True
-        opened = client.post("/api/maintenance/demands/search", json={})
-        assert opened.status_code == 200, opened.text
+        for method, path, body in (
+            ("get", "/api/maintenance/projects/stable", None),
+            ("get", "/api/maintenance/projects/stable/operations", None),
+            ("post", "/api/maintenance/demands/search", {}),
+        ):
+            opened = (
+                getattr(client, method)(path, json=body)
+                if body is not None
+                else getattr(client, method)(path)
+            )
+            assert opened.status_code == 200, (method, path, opened.text)
     finally:
         settings.maintenance_beta_enabled = original
 
@@ -199,13 +215,9 @@ def test_every_beta_router_fails_closed_before_business_lookup(db):
     original = settings.maintenance_beta_enabled
     try:
         settings.maintenance_beta_enabled = False
-        for stable_path in (
-            "/api/maintenance/projects/stable",
-            "/api/maintenance/projects/stable/operations",
-        ):
-            response = client.get(stable_path)
-            assert response.status_code == 200, (stable_path, response.text)
         calls = (
+            ("get", "/api/maintenance/projects/stable", None),
+            ("get", "/api/maintenance/projects/stable/operations", None),
             ("get", "/api/maintenance/project-manager/workbooks/v3/status", None),
             ("get", "/api/maintenance/project-assignments/orders", None),
             ("get", "/api/maintenance/return-categories", None),
@@ -225,3 +237,38 @@ def test_every_beta_router_fails_closed_before_business_lookup(db):
             assert response.status_code == 404, (method, path, response.text)
     finally:
         settings.maintenance_beta_enabled = original
+
+
+def test_every_registered_beta_route_has_the_server_gate_dependency():
+    """New routes in a Beta module cannot silently bypass the release kill switch."""
+
+    beta_endpoint_modules = {
+        "app.api.maintenance_acceptance",
+        "app.api.maintenance_bad_returns",
+        "app.api.maintenance_demands",
+        "app.api.maintenance_manager_workbooks",
+        "app.api.maintenance_migration",
+        "app.api.maintenance_project_assignments",
+        "app.api.maintenance_project_operations",
+        "app.api.maintenance_project_workbooks",
+        "app.api.maintenance_projects",
+        "app.api.maintenance_source_assignments",
+        "app.api.maintenance_warehouse",
+    }
+    beta_routes = [
+        route
+        for route in app.routes
+        if isinstance(route, APIRoute)
+        and route.endpoint.__module__ in beta_endpoint_modules
+    ]
+    assert beta_routes
+
+    missing = [
+        f"{','.join(sorted(route.methods))} {route.path}"
+        for route in beta_routes
+        if not any(
+            dependency.call is require_maintenance_beta
+            for dependency in route.dependant.dependencies
+        )
+    ]
+    assert missing == []

@@ -102,7 +102,7 @@ def _confirm_issue(
     suffix: str,
 ) -> dict:
     created = client.post(
-        f"/api/maintenance/projects/stable/{project_id}/site-issues",
+        f"/api/maintenance/site-issues/projects/{project_id}",
         json={
             "idempotency_key": f"synthetic-bad-return-create-{suffix}",
             "issue_date": "2026-08-09",
@@ -339,7 +339,7 @@ def test_correction_drains_legacy_pending_creation_before_newer_projection(db):
     db.get(DimPart, delivery.part_id).category_id = category.id
     db.commit()
     created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        f"/api/maintenance/site-issues/projects/{project.project_id}",
         json={
             "idempotency_key": "synthetic-return-create-legacy-pending",
             "issue_date": "2026-08-09",
@@ -522,7 +522,7 @@ def test_stale_creation_cannot_resurrect_empty_newer_void_projection(db):
     db.get(DimPart, delivery.part_id).category_id = category.id
     db.commit()
     created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        f"/api/maintenance/site-issues/projects/{project.project_id}",
         json={
             "idempotency_key": "synthetic-return-empty-void-create",
             "issue_date": "2026-08-09",

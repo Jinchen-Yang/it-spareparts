@@ -129,11 +129,37 @@ class CollectionPatch(BaseModel):
 class SiteIssueLineCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    issue_line_id: str = Field(min_length=1, max_length=64)
+    line_no: int = Field(ge=1)
+    part_id: int = Field(ge=1)
+    pn: str = Field(min_length=1, max_length=128)
+    quantity: Decimal = Field(gt=0)
+    linked_purchase_line_id: int | None = Field(default=None, ge=1)
+
+
+class SiteIssueCreate(BaseModel):
+    """Legacy direct-entry contract kept stable for existing API callers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    issue_no: str = Field(min_length=1, max_length=64)
+    issue_date: date
+    raw_status: str = Field(min_length=1, max_length=64)
+    status_mapping_state: str
+    normalized_status: str
+    status_mapping_version: str = Field(min_length=1, max_length=64)
+    lines: list[SiteIssueLineCreate] = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class SiteIssueDraftLineCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     delivery_line_id: str = Field(min_length=1, max_length=64)
     quantity: Decimal = Field(gt=0)
 
 
-class SiteIssueCreate(BaseModel):
+class SiteIssueDraftCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     idempotency_key: str = Field(min_length=8, max_length=128)
@@ -141,7 +167,7 @@ class SiteIssueCreate(BaseModel):
     receiver: str = Field(min_length=1, max_length=128)
     issued_by: str = Field(min_length=1, max_length=128)
     site_location: str = Field(min_length=1, max_length=256)
-    lines: list[SiteIssueLineCreate] = Field(min_length=1, max_length=200)
+    lines: list[SiteIssueDraftLineCreate] = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=1, max_length=1000)
 
 
@@ -179,7 +205,7 @@ class SiteIssuePatch(BaseModel):
     receiver: str | None = Field(default=None, min_length=1, max_length=128)
     issued_by: str | None = Field(default=None, min_length=1, max_length=128)
     site_location: str | None = Field(default=None, min_length=1, max_length=256)
-    lines: list[SiteIssueLineCreate] | None = Field(
+    lines: list[SiteIssueDraftLineCreate] | None = Field(
         default=None,
         min_length=1,
         max_length=200,
@@ -501,7 +527,7 @@ def patch_project_collection(
     )
 
 
-@router.post("/{project_id}/issue-candidates/search")
+@site_issue_router.post("/projects/{project_id}/candidates/search")
 def search_project_site_issue_candidates(
     body: SiteIssueCandidateSearch,
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -544,6 +570,47 @@ def search_project_site_issue_candidates(
 @router.post("/{project_id}/site-issues", status_code=status.HTTP_201_CREATED)
 def create_project_site_issue(
     body: SiteIssueCreate,
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action("action_maintenance_roundtrip_apply", require_data="data_purchase_cost")
+    ),
+    _scope: None = Depends(require_maintenance_project_access),
+) -> dict:
+    operator = _real_operator(db, ident)
+    try:
+        payload = operations.create_site_issue(
+            db,
+            project_id=project_id,
+            **body.model_dump(exclude={"reason"}),
+            reason=body.reason,
+            operated_by=operator,
+            source="direct_api",
+            import_batch_id=None,
+        )
+        if payload is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
+        db.commit()
+        return payload
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "现场领用单或明细重复") from exc
+    except operations.MaintenanceOperationError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+
+@site_issue_router.post("/projects/{project_id}", status_code=status.HTTP_201_CREATED)
+def create_project_site_issue_draft(
+    body: SiteIssueDraftCreate,
     project_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),

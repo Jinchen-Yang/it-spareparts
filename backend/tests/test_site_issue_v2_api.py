@@ -164,7 +164,7 @@ def _create_draft(
     key: str,
 ) -> dict:
     response = client.post(
-        f"/api/maintenance/projects/stable/{project_id}/site-issues",
+        f"/api/maintenance/site-issues/projects/{project_id}",
         json={
             "idempotency_key": key,
             "issue_date": "2026-08-09",
@@ -201,7 +201,7 @@ def test_create_site_issue_generates_identity_and_only_saves_a_draft(db):
     }
 
     created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        f"/api/maintenance/site-issues/projects/{project.project_id}",
         json=request,
     )
 
@@ -246,7 +246,7 @@ def test_create_site_issue_generates_identity_and_only_saves_a_draft(db):
     assert db.get(MaintenanceSiteIssue, payload["issue_id"]).normalized_status == "draft"
 
     replayed = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        f"/api/maintenance/site-issues/projects/{project.project_id}",
         json=request,
     )
     assert replayed.status_code == 201, replayed.text
@@ -258,8 +258,8 @@ def test_delivery_candidate_search_is_post_only_and_fails_closed_without_adapter
     project = _project(db, project_id="project-site-issue-v2-candidates")
     client = _client(db, username="site_issue_v2_candidates_admin")
     path = (
-        f"/api/maintenance/projects/stable/{project.project_id}"
-        "/issue-candidates/search"
+        f"/api/maintenance/site-issues/projects/{project.project_id}"
+        "/candidates/search"
     )
 
     unavailable = client.post(path, json={"page": 1, "page_size": 50})
@@ -318,7 +318,7 @@ def test_site_issue_write_requires_dedicated_action_and_purchase_cost_permission
         project=project,
         delivery_line_id="synthetic-delivery-line-permission",
     )
-    path = f"/api/maintenance/projects/stable/{project.project_id}/site-issues"
+    path = f"/api/maintenance/site-issues/projects/{project.project_id}"
     body = {
         "idempotency_key": "synthetic-site-issue-permission-denied",
         "issue_date": "2026-08-09",
@@ -416,7 +416,7 @@ def test_preview_and_confirm_freeze_cost_emit_one_return_event_and_never_touch_i
     db.commit()
     client = _client(db, username="site_issue_v2_confirm_admin")
     created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        f"/api/maintenance/site-issues/projects/{project.project_id}",
         json={
             "idempotency_key": "synthetic-site-issue-create-confirm",
             "issue_date": "2026-08-09",
@@ -515,7 +515,7 @@ def test_confirmation_rejects_one_overdrawn_line_atomically_and_keeps_all_costs_
     )
     client = _client(db, username="site_issue_v2_atomic_admin")
     created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        f"/api/maintenance/site-issues/projects/{project.project_id}",
         json={
             "idempotency_key": "synthetic-site-issue-create-atomic",
             "issue_date": "2026-08-09",
@@ -571,7 +571,7 @@ def test_missing_price_confirms_quantity_but_keeps_amount_null_and_opens_cost_ga
     )
     client = _client(db, username="site_issue_v2_missing_price_admin")
     created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        f"/api/maintenance/site-issues/projects/{project.project_id}",
         json={
             "idempotency_key": "synthetic-site-issue-create-missing-price",
             "issue_date": "2026-08-09",
@@ -613,7 +613,7 @@ def test_production_environment_fails_closed_for_synthetic_delivery_confirmation
     )
     client = _client(db, username="site_issue_v2_prod_gate_admin")
     created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        f"/api/maintenance/site-issues/projects/{project.project_id}",
         json={
             "idempotency_key": "synthetic-site-issue-create-prod-gate",
             "issue_date": "2026-08-09",
@@ -742,7 +742,7 @@ def test_draft_patch_replaces_lines_with_server_ids_and_search_is_post_only(db):
     assert client.get("/api/maintenance/site-issues/search").status_code == 405
 
     client_supplied_identity = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        f"/api/maintenance/site-issues/projects/{project.project_id}",
         json={
             "issue_no": "CLIENT-MUST-NOT-CONTROL",
             "idempotency_key": "synthetic-client-identity-rejected",
@@ -935,7 +935,7 @@ def test_confirmed_issue_can_be_corrected_then_fully_voided_without_registration
     assert voided_response.json()["workflow_status"] == "void"
 
     candidates = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/issue-candidates/search",
+        f"/api/maintenance/site-issues/projects/{project.project_id}/candidates/search",
         json={"page": 1, "page_size": 20},
     ).json()
     assert candidates["rows"][0]["confirmed_quantity"] == "0.000"
@@ -1045,7 +1045,7 @@ def test_concurrent_confirmations_never_overdraw_one_delivery_balance(db):
     assert sorted(response.status_code for response in responses) == [200, 409]
 
     candidates = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/issue-candidates/search",
+        f"/api/maintenance/site-issues/projects/{project.project_id}/candidates/search",
         json={"page": 1, "page_size": 20},
     ).json()
     assert candidates["rows"][0]["confirmed_quantity"] == "4.000"
@@ -1184,7 +1184,7 @@ def test_manager_row_scope_covers_site_issue_search_and_entity_routes(db):
     client = _client_for_existing_user(db, username=manager.username)
 
     candidate_search = client.post(
-        f"/api/maintenance/projects/stable/{other.project_id}/issue-candidates/search",
+        f"/api/maintenance/site-issues/projects/{other.project_id}/candidates/search",
         json={"page": 1, "page_size": 20},
     )
     issue_search = client.post(
@@ -1192,7 +1192,7 @@ def test_manager_row_scope_covers_site_issue_search_and_entity_routes(db):
         json={"project_id": other.project_id, "page": 1, "page_size": 20},
     )
     create = client.post(
-        f"/api/maintenance/projects/stable/{other.project_id}/site-issues",
+        f"/api/maintenance/site-issues/projects/{other.project_id}",
         json={
             "idempotency_key": "synthetic-site-issue-manager-scope-create",
             "issue_date": "2026-08-09",

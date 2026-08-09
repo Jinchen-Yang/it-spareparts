@@ -122,6 +122,7 @@ app.include_router(
 app.include_router(
     maintenance_project_operations.router,
     prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
 )
 app.include_router(
     maintenance_project_operations.site_issue_router,
@@ -136,6 +137,7 @@ app.include_router(
 app.include_router(
     maintenance_project_workbooks.router,
     prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
 )
 app.include_router(
     maintenance_warehouse.router,
@@ -145,6 +147,7 @@ app.include_router(
 app.include_router(
     maintenance_projects.router,
     prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
 )
 app.include_router(maintenance_audit.router, prefix=settings.api_prefix)
 app.include_router(dashboard.router, prefix=settings.api_prefix)

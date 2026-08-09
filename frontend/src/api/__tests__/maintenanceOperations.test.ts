@@ -106,7 +106,7 @@ describe("maintenance operations API", () => {
 
     expect(post).toHaveBeenNthCalledWith(
       1,
-      "/maintenance/projects/stable/project%2F%E5%8D%B1%E9%99%A9/issue-candidates/search",
+      "/maintenance/site-issues/projects/project%2F%E5%8D%B1%E9%99%A9/candidates/search",
       { q: "SN 敏感词", page: 2, page_size: 50 },
     );
     expect(post).toHaveBeenNthCalledWith(
@@ -156,7 +156,7 @@ describe("maintenance operations API", () => {
 
     expect(post).toHaveBeenNthCalledWith(
       1,
-      "/maintenance/projects/stable/project%2F1/site-issues",
+      "/maintenance/site-issues/projects/project%2F1",
       expect.objectContaining({ idempotency_key: "draft-command-001" }),
     );
     expect(patch).toHaveBeenCalledWith(

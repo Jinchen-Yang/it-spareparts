@@ -845,7 +845,6 @@ def restore_demand(
         "tombstone_version": tombstone.version,
         "cost_state": cost_state,
         "invalidated_line_count": invalidated_line_count,
-        "cutover_enabled": cutover_enabled,
     }
     _event(
         db,

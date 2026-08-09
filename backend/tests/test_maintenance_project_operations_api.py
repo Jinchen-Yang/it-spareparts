@@ -235,7 +235,7 @@ def _count_service_write_queries(db, action) -> tuple[dict, int]:
     return payload, query_count
 
 
-def test_public_site_issue_create_rejects_legacy_identity_and_service_keeps_history(db):
+def test_public_site_issue_create_preserves_legacy_contract_and_line_limit(db):
     project = _project(db, project_id="project-site-issue-api-limit")
     client = _client(db, username="site_issue_api_limit_admin")
     part = DimPart(pn_std="PN-SITE-ISSUE-API-LIMIT")
@@ -250,21 +250,15 @@ def test_public_site_issue_create_rejects_legacy_identity_and_service_keeps_hist
         "normalized_status": "confirmed",
         "status_mapping_version": "synthetic-map-v1",
         "lines": _site_issue_lines(part, count=200, prefix="issue-api-accepted"),
-        "reason": "验证旧客户端不能再指定稳定身份",
+        "reason": "验证旧客户端契约继续可用",
     }
-    rejected_public = client.post(
+    accepted_public = client.post(
         f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
         json=old_public_payload,
     )
-    assert rejected_public.status_code == 422, rejected_public.text
-    assert db.get(MaintenanceSiteIssueLine, "issue-api-accepted-1") is None
-
-    accepted_history = _create_legacy_site_issue_fixture(
-        db,
-        project_id=project.project_id,
-        body=old_public_payload,
-    )
-    assert len(accepted_history["lines"]) == 200
+    assert accepted_public.status_code == 201, accepted_public.text
+    assert len(accepted_public.json()["lines"]) == 200
+    assert db.get(MaintenanceSiteIssueLine, "issue-api-accepted-1") is not None
 
     with pytest.raises(
         operations_service.MaintenanceOperationError,
@@ -409,7 +403,8 @@ def test_create_rejects_mapped_unknown_status_pairs_without_writes(db):
         f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
         json=site_body,
     )
-    assert site.status_code == 422, site.text
+    assert site.status_code == 400, site.text
+    assert "mapped" in site.json()["detail"]
     assert db.scalar(
         select(MaintenanceSiteIssue).where(
             MaintenanceSiteIssue.project_id == project.project_id

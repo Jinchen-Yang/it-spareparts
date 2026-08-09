@@ -1240,7 +1240,7 @@ export const searchSiteIssueCandidates = (
   projectId: string,
   input: { q?: string; page?: number; page_size?: number } = {},
 ) => api.post<SiteIssueCandidateDirectory>(
-  `${projectBase(projectId)}/issue-candidates/search`,
+  `/maintenance/site-issues/projects/${encodeURIComponent(projectId)}/candidates/search`,
   {
     ...(input.q?.trim() ? { q: input.q.trim() } : {}),
     page: input.page ?? 1,
@@ -1268,7 +1268,10 @@ export const searchSiteIssues = (
 export const createSiteIssueDraft = (
   projectId: string,
   input: SiteIssueDraftInput,
-) => api.post<SiteIssueDocument>(`${projectBase(projectId)}/site-issues`, input);
+) => api.post<SiteIssueDocument>(
+  `/maintenance/site-issues/projects/${encodeURIComponent(projectId)}`,
+  input,
+);
 
 const siteIssueBase = (issueId: string) =>
   `/maintenance/site-issues/${encodeURIComponent(issueId)}`;

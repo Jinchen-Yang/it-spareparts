@@ -603,7 +603,6 @@ def test_restore_stays_shadow_only_and_preserves_stable_cost_project_and_export(
 
     assert restored["cost_state"] == "stable_unchanged"
     assert restored["invalidated_line_count"] == 0
-    assert restored["cutover_enabled"] is False
     db.expire_all()
     source_line = db.scalar(
         select(FMaintenanceLine).where(FMaintenanceLine.order_id == source_order.id)
@@ -766,7 +765,6 @@ def test_tombstone_survives_same_raw_order_reimport_and_controlled_restore(
     assert restored["status"] == "restored"
     assert restored["cost_state"] == "pending_recompute"
     assert restored["invalidated_line_count"] == 1
-    assert restored["cutover_enabled"] is True
     db.expire_all()
     source_line = db.scalar(
         select(FMaintenanceLine).where(FMaintenanceLine.order_id == source_order.id)
