@@ -1,7 +1,8 @@
 """账号与权限中心 v2（建号 / 改密 / 停用 / 权限 / 批量 / 活动）。
 
 权限语义：账号有效权限 = 模板快照(template_perms) ⊕ 稀疏覆盖(perm_overrides)；
-admin 角色恒全开。改密/停用/改权限递增 token_version → 旧 token 立即失效。
+admin 常规权限恒全开，两个生产 Beta 页面按账号白名单。改密/停用/改权限递增
+token_version → 旧 token 立即失效。
 
 准入从 require_admin 放宽为权限键（admin 恒通过，行为对 admin 零变化）：
 - 读（列表/_meta/活动）→ page_accounts
@@ -93,7 +94,10 @@ def _template_map(db: Session) -> dict[str, SysRoleTemplate]:
 
 def _view(u: SysUser, tpl: SysRoleTemplate | None = None) -> dict:
     eff = permissions.effective_for_user(u)
-    combo = permissions.combo_errors(eff)
+    # Admin keeps ordinary actions enabled even while its human Beta pages are
+    # intentionally closed by account allowlist.  That is a valid state, not a
+    # broken action/page combination for the permission-center warning banner.
+    combo = [] if u.role == "admin" else permissions.combo_errors(eff)
     base = permissions.normalize(u.template_perms) if u.template_perms is not None \
         else permissions.effective(u.role, None)
     return {
@@ -260,8 +264,11 @@ def meta(db: Session = Depends(get_db), _: None = Depends(_read_gate)) -> dict:
         "templates": [{
             "code": t.code, "name": t.name, "description": t.description,
             "base_role": t.base_role, "permissions": permissions.normalize(t.permissions),
-            "permission_combo_errors": permissions.combo_errors(
-                permissions.normalize(t.permissions)),
+            "permission_combo_errors": (
+                [] if t.base_role == "admin" else permissions.combo_errors(
+                    permissions.normalize(t.permissions)
+                )
+            ),
             "is_system": t.is_system, "is_active": t.is_active, "version": t.version,
             "usage_count": usage.get(t.code, 0),
             "locked": t.code == "admin",
@@ -301,7 +308,10 @@ def create_account(body: CreateAccount, db: Session = Depends(get_db),
         tpl = db.scalar(select(SysRoleTemplate).where(SysRoleTemplate.code == "admin"))
         u.role = "admin"
         u.template_code, u.template_version = "admin", (tpl.version if tpl else 1)
-        u.template_perms = permissions.normalize(tpl.permissions) if tpl else permissions._full()
+        u.template_perms = (
+            permissions.normalize(tpl.permissions)
+            if tpl else permissions.admin_account_defaults()
+        )
         u.perm_overrides = None
     else:
         code = body.template_code or body.role or "readonly"
@@ -354,7 +364,10 @@ def update_account(username: str, body: UpdateAccount, db: Session = Depends(get
         tpl = db.scalar(select(SysRoleTemplate).where(SysRoleTemplate.code == "admin"))
         u.role = "admin"
         u.template_code, u.template_version = "admin", (tpl.version if tpl else 1)
-        u.template_perms = permissions.normalize(tpl.permissions) if tpl else permissions._full()
+        u.template_perms = (
+            permissions.normalize(tpl.permissions)
+            if tpl else permissions.admin_account_defaults()
+        )
         u.perm_overrides = None
     elif perm_change:
         # 降 admin / 换模板 / 调 overrides：统一走模板语义

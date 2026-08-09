@@ -29,7 +29,7 @@ from app.models.system import SysImportBatch, SysUser
 from app.services import replenishment
 
 
-def test_beta_permissions_are_additive_and_default_admin_only():
+def test_beta_permissions_are_additive_to_the_legacy_role_graph():
     page_key = "page_replenishment_beta"
     create_key = "action_replenishment_create"
     review_key = "action_replenishment_review"
@@ -63,11 +63,17 @@ def _user(db, username: str = "sales_manager") -> SysUser:
 
 
 def test_server_feature_gate_closes_business_api_without_hiding_beta_state(db):
+    base = permissions.effective("admin", None)
+    base["page_replenishment_beta"] = False
     user = SysUser(
         username="beta_gate_admin",
         password_hash=hash_password("safe-test-password"),
         role="admin",
         display_name="Beta Gate Admin",
+        template_code="admin",
+        template_version=1,
+        template_perms=base,
+        perm_overrides={"page_replenishment_beta": True},
         is_active=True,
     )
     db.add(user)
@@ -313,11 +319,17 @@ def test_review_callback_permission_does_not_grant_page_or_price_read(db):
 
 def test_free_text_bounds_do_not_reflect_business_input(db):
     password = "safe-test-password"
+    base = permissions.effective("admin", None)
+    base["page_replenishment_beta"] = False
     user = SysUser(
         username="beta_text_admin",
         password_hash=hash_password(password),
         role="admin",
         display_name="Beta Text Admin",
+        template_code="admin",
+        template_version=1,
+        template_perms=base,
+        perm_overrides={"page_replenishment_beta": True},
         is_active=True,
     )
     db.add(user)

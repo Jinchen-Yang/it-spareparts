@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
+from app import permissions as permission_service
 from app.auth import hash_password
 from app.business_time import business_today
 from app.db import engine
@@ -30,6 +31,15 @@ from app.models.system import SysAccessLog, SysUser
 def _token(
     db, *, username: str, role: str = "admin", permissions: dict | None = None
 ) -> str:
+    account_scope = (
+        {
+            "template_code": "admin",
+            "template_version": 1,
+            "template_perms": permission_service.admin_account_defaults(),
+            "perm_overrides": {"page_maintenance_beta": True},
+        }
+        if role == "admin" else {}
+    )
     db.add(
         SysUser(
             username=username,
@@ -37,6 +47,7 @@ def _token(
             is_active=True,
             password_hash=hash_password("synthetic-password-123"),
             permissions=permissions,
+            **account_scope,
         )
     )
     db.commit()

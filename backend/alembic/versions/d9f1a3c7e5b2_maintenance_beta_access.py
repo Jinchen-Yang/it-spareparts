@@ -19,7 +19,7 @@ _KEY = "page_maintenance_beta"
 
 
 def upgrade() -> None:
-    """管理员默认可见；所有存量非管理员账号必须由管理员逐个加入白名单。"""
+    """包括实名管理员在内，所有存量账号必须逐个加入 Beta 白名单。"""
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.execute(
         sa.text(
@@ -28,7 +28,7 @@ def upgrade() -> None:
             SET permissions = CASE
                   WHEN jsonb_typeof(permissions) = 'object' THEN permissions
                   ELSE '{}'::jsonb
-                END || jsonb_build_object(:key, code = 'admin')
+                END || jsonb_build_object(:key, false)
             """
         ).bindparams(key=_KEY)
     )
@@ -39,7 +39,7 @@ def upgrade() -> None:
             SET template_perms = CASE
                   WHEN jsonb_typeof(template_perms) = 'object' THEN template_perms
                   ELSE '{}'::jsonb
-                END || jsonb_build_object(:key, role = 'admin'),
+                END || jsonb_build_object(:key, false),
                 perm_overrides = CASE
                   WHEN jsonb_typeof(perm_overrides) = 'object' THEN perm_overrides
                   ELSE '{}'::jsonb
@@ -54,7 +54,7 @@ def upgrade() -> None:
             SET permissions = CASE
                   WHEN jsonb_typeof(permissions) = 'object' THEN permissions
                   ELSE '{}'::jsonb
-                END || jsonb_build_object(:key, role = 'admin')
+                END || jsonb_build_object(:key, false)
             WHERE permissions IS NOT NULL
             """
         ).bindparams(key=_KEY)

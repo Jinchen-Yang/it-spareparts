@@ -23,6 +23,10 @@ def _add_permissions() -> None:
         "action_replenishment_create",
         "action_replenishment_review",
     ):
+        # The human Beta page is an account-level production allowlist, not an
+        # admin role capability.  Admin retains create/review actions, but every
+        # existing account starts with the page closed until an audited override.
+        admin_default = key != "page_replenishment_beta"
         op.execute(
             sa.text(
                 """
@@ -30,23 +34,23 @@ def _add_permissions() -> None:
                 SET permissions = CASE
                       WHEN jsonb_typeof(permissions) = 'object' THEN permissions
                       ELSE '{}'::jsonb
-                    END || jsonb_build_object(:key, code = 'admin')
+                    END || jsonb_build_object(:key, code = 'admin' AND :admin_default)
                 """
-            ).bindparams(key=key)
+            ).bindparams(key=key, admin_default=admin_default)
         )
         op.execute(
             sa.text(
                 """
                 UPDATE sys_user
                 SET template_perms = template_perms
-                      || jsonb_build_object(:key, role = 'admin'),
+                      || jsonb_build_object(:key, role = 'admin' AND :admin_default),
                     perm_overrides = CASE
                       WHEN jsonb_typeof(perm_overrides) = 'object' THEN perm_overrides
                       ELSE '{}'::jsonb
                     END - :key
                 WHERE jsonb_typeof(template_perms) = 'object'
                 """
-            ).bindparams(key=key)
+            ).bindparams(key=key, admin_default=admin_default)
         )
         op.execute(
             sa.text(
@@ -55,10 +59,10 @@ def _add_permissions() -> None:
                 SET permissions = CASE
                       WHEN jsonb_typeof(permissions) = 'object' THEN permissions
                       ELSE '{}'::jsonb
-                    END || jsonb_build_object(:key, role = 'admin')
+                    END || jsonb_build_object(:key, role = 'admin' AND :admin_default)
                 WHERE permissions IS NOT NULL
                 """
-            ).bindparams(key=key)
+            ).bindparams(key=key, admin_default=admin_default)
         )
 
 

@@ -1,4 +1,4 @@
-"""维保 Beta 白名单权限迁移：存量账号默认失败关闭，管理员保持可见。"""
+"""维保 Beta 白名单权限迁移：包括管理员在内的存量账号默认失败关闭。"""
 
 import os
 
@@ -26,7 +26,7 @@ def _cfg() -> AlembicConfig:
     return cfg
 
 
-def test_upgrade_backfills_admin_only_and_downgrade_removes_key(db):
+def test_upgrade_backfills_every_account_closed_and_downgrade_removes_key(db):
     for role in ("admin", "readonly"):
         base = permissions.effective(role, None)
         db.add(
@@ -74,7 +74,7 @@ def test_upgrade_backfills_admin_only_and_downgrade_removes_key(db):
                     {"key": _KEY},
                 ).all()
             )
-            assert role_values == {"admin": "true", "readonly": "false"}
+            assert role_values == {"admin": "false", "readonly": "false"}
             user_values = {
                 row.username: row
                 for row in connection.execute(
@@ -86,8 +86,8 @@ def test_upgrade_backfills_admin_only_and_downgrade_removes_key(db):
                     {"key": _KEY},
                 ).mappings()
             }
-            assert user_values["maintenance-beta-migration-admin"].template_enabled == "true"
-            assert user_values["maintenance-beta-migration-admin"].legacy_enabled == "true"
+            assert user_values["maintenance-beta-migration-admin"].template_enabled == "false"
+            assert user_values["maintenance-beta-migration-admin"].legacy_enabled == "false"
             assert user_values["maintenance-beta-migration-readonly"].template_enabled == "false"
             assert user_values["maintenance-beta-migration-readonly"].legacy_enabled == "false"
             assert all(not row.overridden for row in user_values.values())

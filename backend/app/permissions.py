@@ -7,7 +7,8 @@
 - own_customers_only  行级：销售只看自己成交的客户（同事客户名匿名）。
 
 每个账号把自定义存在 sys_user.permissions(JSONB)；为空 → 回退该 role 的模板(ROLE_TEMPLATES)。
-admin 恒为全开（不可被自己/他人锁死）。权限随登录写进 token，改权限后下次登录生效。
+admin 的常规权限恒为全开（不可被自己/他人锁死）；两个生产 Beta 页面例外，必须按实名账号
+的模板快照与稀疏覆盖显式加入白名单。权限随登录写进 token，改权限后旧 token 立即吊销。
 """
 # data 开关 → 对应要隐藏的 config.FIELD_GROUPS 组名
 DATA_GROUPS: dict[str, list[str]] = {
@@ -28,13 +29,19 @@ PAGE_KEYS: list[str] = [
     # 维保新工作台 Beta：稳定版 page_maintenance 仍是基础权限；本键仅给
     # 明确进入灰度名单的账号，关闭后不影响原维保页面与接口。
     "page_maintenance_beta",
-    # 销售经理补库购物车 Beta：独立于稳定版库存/维保页面，默认仅管理员可见，
+    # 销售经理补库购物车 Beta：独立于稳定版库存/维保页面，包括管理员在内，
     # 试用账号由权限中心逐个显式授权。
     "page_replenishment_beta",
     # 权限中心 v2：账号与权限中心页面（只读查看账号/模板/活动）。critical 级——
     # 内置模板对所有非 admin 角色显式 False，保持"仅管理员可见账号管理"的既有行为。
     "page_accounts",
 ]
+# 这两个页面不是角色能力，而是生产灰度名单。即使 role=admin，也必须从实名账号
+# template_perms ⊕ perm_overrides 得到 True；旧 token/共享口令/缺失账号快照一律失败关闭。
+ACCOUNT_SCOPED_BETA_PAGE_KEYS: frozenset[str] = frozenset({
+    "page_maintenance_beta",
+    "page_replenishment_beta",
+})
 # 动作开关：写操作准入（require_action）。各动作按模板失败关闭，可在账号管理页单独授权。
 ACTION_KEYS: list[str] = [
     "action_pool_manage",      # 建池/改名称说明/增删成员/归档恢复
@@ -120,7 +127,16 @@ def _full(own: bool = False) -> dict[str, bool]:
     return d
 
 
-# 角色模板：建号选角色时套用，可逐项微调（admin 例外，恒全开）。
+def admin_account_defaults() -> dict[str, bool]:
+    """Fail-closed snapshot for a named admin when the DB template is unavailable."""
+    graph = _full()
+    for key in ACCOUNT_SCOPED_BETA_PAGE_KEYS:
+        graph[key] = False
+    return graph
+
+
+# 角色模板：建号选角色时套用，可逐项微调。admin 常规权限恒全开；Beta 页面
+# 的生产默认值由各自迁移写成 False，并由 effective_for_user 尊重账号快照/覆盖。
 # 权限中心 v2 起，这份 Python 字典只作三类回退用：guest/匿名兜底、无 perms 的旧 token、
 # 共享口令回退登录。正常账号的权限底座来自 sys_role_template 套用时的快照（sys_user.template_perms）。
 ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
@@ -244,7 +260,11 @@ def template_for(role: str) -> dict[str, bool]:
 
 
 def effective(role: str, custom: dict | None) -> dict[str, bool]:
-    """最终权限：role 模板打底、custom(自定义)逐项覆盖。admin 恒全开，不可自锁。"""
+    """旧角色口径：role 模板打底、custom 逐项覆盖；admin 返回传统全开图。
+
+    实名账号运行时必须使用 ``effective_for_user``。该入口保留传统 admin 全开，供旧 token
+    与历史迁移对账；Beta 页不会再通过 security 的 admin 短路或缺失权限图获得放行。
+    """
     if role == "admin":
         return _full()
     perms = template_for(role)
@@ -400,6 +420,7 @@ def hidden_groups(perms: dict | None) -> set[str]:
 # 高风险键：授予/撤销仅限 admin 角色操作者（防非 admin 的账号管理代理自我提权/互相提权）
 HIGH_RISK_KEYS: set[str] = {
     "page_maintenance_beta",
+    "page_replenishment_beta",
     "page_accounts",
     "action_account_manage",
     "action_maintenance_roundtrip_apply",
@@ -807,10 +828,36 @@ def effective_from_snapshot(template_perms: dict | None, overrides: dict | None)
 
 
 def effective_for_user(user) -> dict[str, bool]:
-    """v2 有效权限（账号级单一真值源）：admin 恒全开；有模板快照走快照⊕覆盖；
-    无快照（迁移前旧行/异常兜底）回退旧口径 effective(role, permissions)。"""
+    """v2 有效权限（账号级单一真值源）。
+
+    admin 的常规权限仍强制全开，防止账号中心把管理员锁死；Beta 页面是灰度名单，
+    唯独尊重该实名账号的 template_perms ⊕ perm_overrides。无快照的旧 admin 只读取
+    legacy permissions 中明确存在的 Beta 位，缺失时默认 False。
+    """
     if user.role == "admin":
-        return _full()
+        result = _full()
+        if getattr(user, "template_perms", None) is not None:
+            stored = effective_from_snapshot(user.template_perms, user.perm_overrides)
+        else:
+            stored = sanitize(getattr(user, "permissions", None))
+        for key in ACCOUNT_SCOPED_BETA_PAGE_KEYS:
+            result[key] = bool(stored.get(key, False))
+        return result
     if getattr(user, "template_perms", None) is not None:
         return effective_from_snapshot(user.template_perms, user.perm_overrides)
     return effective(user.role, user.permissions)
+
+
+def page_permission_allowed(
+    *,
+    role: str,
+    permission_map: dict | None,
+    page_key: str,
+) -> bool:
+    """Resolve a page gate without letting admin bypass account-scoped Beta pages."""
+    if page_key in ACCOUNT_SCOPED_BETA_PAGE_KEYS:
+        return isinstance(permission_map, dict) and bool(permission_map.get(page_key, False))
+    if role == "admin":
+        return True
+    graph = permission_map if isinstance(permission_map, dict) else effective(role, None)
+    return bool(graph.get(page_key, False))

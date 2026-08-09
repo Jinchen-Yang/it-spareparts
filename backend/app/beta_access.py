@@ -12,14 +12,11 @@ def _page_allowed(
     permission_map: dict | None,
     page_key: str,
 ) -> bool:
-    if role == "admin":
-        return True
-    graph = (
-        permission_map
-        if isinstance(permission_map, dict)
-        else permissions.effective(role, None)
+    return permissions.page_permission_allowed(
+        role=role,
+        permission_map=permission_map,
+        page_key=page_key,
     )
-    return bool(graph.get(page_key, False))
 
 
 def maintenance_beta_whitelisted(
@@ -38,6 +35,20 @@ def maintenance_beta_whitelisted(
         role=role,
         permission_map=permission_map,
         page_key="page_maintenance_beta",
+    )
+
+
+def replenishment_beta_whitelisted(
+    *,
+    role: str,
+    permission_map: dict | None,
+    real_identity: bool,
+) -> bool:
+    """The human replenishment workspace requires a named account allowlist bit."""
+    return real_identity and _page_allowed(
+        role=role,
+        permission_map=permission_map,
+        page_key="page_replenishment_beta",
     )
 
 
@@ -62,11 +73,10 @@ def beta_feature_availability(
         ),
         "replenishment": bool(
             current.replenishment_beta_enabled
-            and real_identity
-            and _page_allowed(
+            and replenishment_beta_whitelisted(
                 role=role,
                 permission_map=permission_map,
-                page_key="page_replenishment_beta",
+                real_identity=real_identity,
             )
         ),
     }

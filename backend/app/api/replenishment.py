@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app import permissions
 from app.auth import current_identity
+from app.beta_access import replenishment_beta_whitelisted
 from app.config import get_settings
 from app.db import get_db
 from app.models.system import SysUser
@@ -25,7 +26,6 @@ from app.security import (
     UserContext,
     get_current_user_context,
     require_action,
-    require_page,
 )
 from app.services import replenishment
 
@@ -42,9 +42,30 @@ def _beta_enabled() -> None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "补库申请 Beta 当前未开放")
 
 
+def _beta_page_whitelist(ident: dict = Depends(current_identity)) -> None:
+    """Account allowlist gate independent of the legacy RBAC admin bypass."""
+    real_identity = (
+        ident.get("authn") == "sys_user"
+        and not ident.get("fb")
+        and bool(ident.get("sub"))
+    )
+    if not real_identity:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "补库申请 Beta 必须使用实名系统账号",
+        )
+    if not replenishment_beta_whitelisted(
+        role=str(ident.get("role") or "guest"),
+        permission_map=ident.get("perms"),
+        real_identity=True,
+    ):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "未加入补库申请 Beta 试用名单",
+        )
+
+
 def _allowed(ctx: UserContext, key: str) -> bool:
-    if ctx.role == "admin":
-        return True
     graph = ctx.permissions if isinstance(ctx.permissions, dict) else permissions.effective(ctx.role, None)
     return bool(graph.get(key, False))
 
@@ -134,7 +155,7 @@ def capabilities(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
 ) -> dict:
     _no_store(response)
     _identity(db, ident)
@@ -162,7 +183,7 @@ def catalog(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
 ) -> dict:
     _no_store(response)
     _identity(db, ident)
@@ -181,7 +202,7 @@ def applications(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
 ) -> dict:
     _no_store(response)
     username, role = _identity(db, ident)
@@ -196,7 +217,7 @@ def create_application(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> dict:
     _no_store(response)
@@ -215,7 +236,7 @@ def application_detail(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
 ) -> dict:
     _no_store(response)
     username, role = _identity(db, ident)
@@ -234,7 +255,7 @@ def patch_application(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> dict:
     _no_store(response)
@@ -261,7 +282,7 @@ def add_line(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> dict:
     _no_store(response)
@@ -290,7 +311,7 @@ def patch_line(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> dict:
     _no_store(response)
@@ -320,7 +341,7 @@ def delete_line(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> dict:
     _no_store(response)
@@ -346,7 +367,7 @@ def submit_application(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> dict:
     _no_store(response)
@@ -365,7 +386,7 @@ def create_revision(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_create", require_data="data_pool_price_governance")),
 ) -> dict:
     _no_store(response)
@@ -384,7 +405,11 @@ def review_result(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
-    # Machine/integration review permission intentionally does not imply page or price access.
+    # Deliberate sole exception to the account Beta-page whitelist: this is a write-only
+    # machine/integration callback guarded by a named identity, the global kill switch and
+    # action_replenishment_review.  It cannot list applications, read price facts or export.
+    # Named admins retain this action through the ordinary admin invariant; all human Beta
+    # page/read/create endpoints above and below still require page_replenishment_beta.
     _action: None = Depends(require_action("action_replenishment_review")),
 ) -> dict:
     _no_store(response)
@@ -431,7 +456,7 @@ def export_manual_review(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(
         require_action(
             "action_replenishment_create",
@@ -455,7 +480,7 @@ def export_wbdd_subset(
     ident: dict = Depends(current_identity),
     ctx: UserContext = Depends(get_current_user_context),
     _gate: None = Depends(_beta_enabled),
-    _page: None = Depends(require_page("page_replenishment_beta")),
+    _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(
         require_action(
             "action_replenishment_create",

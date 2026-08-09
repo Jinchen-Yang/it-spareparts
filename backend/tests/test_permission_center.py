@@ -531,8 +531,16 @@ def test_migration_admin_short_circuit():
         template_perms = filled["template_perms"]
         perm_overrides = filled["perm_overrides"]
 
-    # 新旧口径对 admin 都强制全开，自定义锁不住
-    assert permissions.effective_for_user(U()) == permissions.effective("admin", U.permissions)
+    # 常规 admin 权限仍强制全开、自定义锁不住；后续新增的两个生产 Beta 页面
+    # 没有出现在历史快照中，因此按账号白名单失败关闭。
+    effective = permissions.effective_for_user(U())
+    legacy_full = permissions.effective("admin", U.permissions)
+    assert all(
+        effective[key] == legacy_full[key]
+        for key in permissions.ALL_KEYS
+        if key not in permissions.ACCOUNT_SCOPED_BETA_PAGE_KEYS
+    )
+    assert all(effective[key] is False for key in permissions.ACCOUNT_SCOPED_BETA_PAGE_KEYS)
 
 
 def test_frozen_templates_match_current_code():
