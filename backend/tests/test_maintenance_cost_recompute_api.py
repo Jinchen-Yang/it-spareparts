@@ -23,7 +23,12 @@ from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysUser
 from app.services import maintenance_consumption_cost
-from tests.test_maintenance_project_operations_api import _batch, _client, _project
+from tests.test_maintenance_project_operations_api import (
+    _batch,
+    _client,
+    _create_legacy_site_issue_fixture,
+    _project,
+)
 
 
 def _count_recompute_queries(
@@ -87,13 +92,14 @@ def _add_unresolved_lines(db, *, project_id: str, count: int) -> None:
     db.commit()
 
 
-def _create_gap(db, client: TestClient, *, project_id: str, suffix: str) -> DimPart:
+def _create_gap(db, *, project_id: str, suffix: str) -> DimPart:
     part = DimPart(pn_std=f"PN-SYNTH-{suffix}")
     db.add(part)
     db.commit()
-    response = client.post(
-        f"/api/maintenance/projects/stable/{project_id}/site-issues",
-        json={
+    payload = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project_id,
+        body={
             "issue_no": f"ISSUE-SYNTH-{suffix}",
             "issue_date": "2026-06-10",
             "raw_status": "synthetic-confirmed",
@@ -110,8 +116,7 @@ def _create_gap(db, client: TestClient, *, project_id: str, suffix: str) -> DimP
             "reason": "建立合成缺价领用行",
         },
     )
-    assert response.status_code == 201, response.text
-    assert response.json()["lines"][0]["cost_source"] is None
+    assert payload["lines"][0]["cost_source"] is None
     return part
 
 
@@ -284,7 +289,7 @@ def test_sales_fallback_persists_only_valid_samples_when_result_contains_over_li
 def test_recompute_persists_t_plus_three_purchase_once_with_line_audit(db):
     project = _project(db, project_id="project-late-cost-recompute")
     client = _client(db, username="late_cost_recompute_admin")
-    part = _create_gap(db, client, project_id=project.project_id, suffix="LATE-PURCHASE")
+    part = _create_gap(db, project_id=project.project_id, suffix="LATE-PURCHASE")
     state_before = db.get(MaintenanceProjectWorkbookState, project.project_id)
     revision_before = state_before.revision
     data_version_before = state_before.data_version
@@ -353,7 +358,7 @@ def test_recompute_persists_t_plus_three_purchase_once_with_line_audit(db):
 def test_recompute_rejects_archived_project_without_mutation(db):
     project = _project(db, project_id="project-archived-cost-recompute")
     client = _client(db, username="archived_cost_recompute_admin")
-    _create_gap(db, client, project_id=project.project_id, suffix="ARCHIVED-GAP")
+    _create_gap(db, project_id=project.project_id, suffix="ARCHIVED-GAP")
     project.is_active = False
     db.commit()
     state = db.get(MaintenanceProjectWorkbookState, project.project_id)
@@ -395,7 +400,7 @@ def test_recompute_requires_manage_action_and_purchase_cost_visibility(db):
 def test_manual_fill_persists_new_auto_evidence_instead_of_rolling_it_back(db):
     project = _project(db, project_id="project-manual-auto-race")
     client = _client(db, username="manual_auto_race_admin")
-    part = _create_gap(db, client, project_id=project.project_id, suffix="MANUAL-AUTO-RACE")
+    part = _create_gap(db, project_id=project.project_id, suffix="MANUAL-AUTO-RACE")
     listed = client.get(
         f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps"
     )
@@ -445,7 +450,7 @@ def test_manual_fill_persists_new_auto_evidence_instead_of_rolling_it_back(db):
 def test_recompute_upgrades_sales_window_to_purchase_window(db):
     project = _project(db, project_id="project-sales-to-purchase")
     client = _client(db, username="sales_to_purchase_admin")
-    part = _create_gap(db, client, project_id=project.project_id, suffix="SALES-TO-PURCHASE")
+    part = _create_gap(db, project_id=project.project_id, suffix="SALES-TO-PURCHASE")
     path = f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps/recompute"
     _add_late_sale(
         db,
@@ -495,7 +500,7 @@ def test_recompute_upgrades_sales_window_to_purchase_window(db):
 def test_recompute_updates_purchase_weight_when_new_window_sample_arrives(db):
     project = _project(db, project_id="project-purchase-weight-refresh")
     client = _client(db, username="purchase_weight_refresh_admin")
-    part = _create_gap(db, client, project_id=project.project_id, suffix="WEIGHT-REFRESH")
+    part = _create_gap(db, project_id=project.project_id, suffix="WEIGHT-REFRESH")
     path = f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps/recompute"
     _add_late_purchase(db, part=part, suffix="WEIGHT-A", unit_price=20)
     first = client.post(path, json={"reason": "首次采购窗口加权"})
@@ -530,7 +535,7 @@ def test_recompute_updates_purchase_weight_when_new_window_sample_arrives(db):
 def test_recompute_upgrades_manual_cost_to_automatic_purchase(db):
     project = _project(db, project_id="project-manual-to-purchase")
     client = _client(db, username="manual_to_purchase_admin")
-    part = _create_gap(db, client, project_id=project.project_id, suffix="MANUAL-TO-PURCHASE")
+    part = _create_gap(db, project_id=project.project_id, suffix="MANUAL-TO-PURCHASE")
     filled = client.patch(
         f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
         json={
@@ -564,7 +569,7 @@ def test_recompute_upgrades_manual_cost_to_automatic_purchase(db):
 def test_recompute_never_downgrades_purchase_to_sales_when_evidence_disappears(db):
     project = _project(db, project_id="project-no-cost-downgrade")
     client = _client(db, username="no_cost_downgrade_admin")
-    part = _create_gap(db, client, project_id=project.project_id, suffix="NO-DOWNGRADE")
+    part = _create_gap(db, project_id=project.project_id, suffix="NO-DOWNGRADE")
     path = f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps/recompute"
     purchase = _add_late_purchase(db, part=part, suffix="STRONG-PURCHASE", unit_price=60)
     _add_late_sale(db, part=part, suffix="WEAK-SALE", unit_price_inc_tax=113)

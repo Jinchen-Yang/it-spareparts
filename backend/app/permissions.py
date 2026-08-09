@@ -43,6 +43,8 @@ ACTION_KEYS: list[str] = [
     "action_maintenance_project_manage",
     # WBDD 整单逻辑删除（跨页复核 + 服务端 7 秒双确认）。
     "action_maintenance_demand_delete",
+    # 新建、确认、更正和作废现场实际领用单；与库存写入严格隔离。
+    "action_maintenance_site_issue_manage",
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ACTION_KEYS, *ROW_KEYS]
@@ -75,6 +77,7 @@ LABELS: dict[str, str] = {
     "action_maintenance_roundtrip_apply": "维保固定工作簿直接回填",
     "action_maintenance_project_manage": "维保项目主档管理",
     "action_maintenance_demand_delete": "维保需求单安全删除",
+    "action_maintenance_site_issue_manage": "现场备件领用管理",
 }
 
 
@@ -96,7 +99,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     "boss": {**_full(), "page_accounts": False, "action_account_manage": False,
              "action_data_quality_review": False,
              "action_maintenance_project_manage": False,
-             "action_maintenance_demand_delete": False},
+             "action_maintenance_demand_delete": False,
+             "action_maintenance_site_issue_manage": False},
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
     # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
     # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
@@ -109,6 +113,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "action_maintenance_roundtrip_apply": False,
                  "action_maintenance_project_manage": False,
                  "action_maintenance_demand_delete": False,
+                 "action_maintenance_site_issue_manage": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
@@ -133,6 +138,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_roundtrip_apply": False,
         "action_maintenance_project_manage": False,
         "action_maintenance_demand_delete": False,
+        "action_maintenance_site_issue_manage": False,
         "own_customers_only": True,
     },
     "purchaser": {
@@ -157,6 +163,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_roundtrip_apply": False,
         "action_maintenance_project_manage": False,
         "action_maintenance_demand_delete": False,
+        "action_maintenance_site_issue_manage": False,
         "own_customers_only": False,
     },
 }
@@ -197,6 +204,7 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     "action_data_quality_review": "data_purchase_cost",
     "action_maintenance_roundtrip_apply": "data_profit",
     "action_maintenance_project_manage": "data_profit",
+    "action_maintenance_site_issue_manage": "data_purchase_cost",
 }
 
 # "页面内操作必须能进页面"的动作→页面依赖（权限中心 v2）：改账号权限先要能打开
@@ -208,6 +216,7 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_roundtrip_apply": "page_maintenance",
     "action_maintenance_project_manage": "page_maintenance",
     "action_maintenance_demand_delete": "page_maintenance",
+    "action_maintenance_site_issue_manage": "page_maintenance",
 }
 
 # 数据之间的可推导依赖：营收在经营报表中是公开口径，毛利一旦可见，
@@ -284,6 +293,7 @@ HIGH_RISK_KEYS: set[str] = {
     "action_maintenance_roundtrip_apply",
     "action_maintenance_project_manage",
     "action_maintenance_demand_delete",
+    "action_maintenance_site_issue_manage",
 }
 
 # 前端矩阵五分组（顺序即展示序）：页面入口 / 数据可见 / 操作能力 / 行级范围 / 高风险管理
@@ -303,6 +313,7 @@ UI_GROUPS: list[dict] = [
          "action_maintenance_roundtrip_apply",
          "action_maintenance_project_manage",
          "action_maintenance_demand_delete",
+         "action_maintenance_site_issue_manage",
      ]},
     {"key": "row", "label": "行级范围",
      "hint": "在能看的数据里进一步收紧范围（限制型开关：勾上=看得更少）。",
@@ -535,6 +546,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "管理员指定的数据维护人员"],
         "sensitivity": "critical",
         "risk": "会改变成本、库存推导、项目看板和导出的有效数据范围；系统强制服务端等待与整批原子校验。",
+    },
+    "action_maintenance_site_issue_manage": {
+        "label": "现场备件领用管理",
+        "summary": "允许项目经理建立、确认、更正和作废现场实际领用单。",
+        "can": "从稳定发货明细选择备件，保存草稿并确认现场实际消耗；确认后冻结成本证据并生成返还义务接口事件。",
+        "cannot": "不能指定系统单号或实体 ID，不能超发货余额，也不会直接修改公司库、地区库或前置库库存。",
+        "typical": ["管理员", "项目经理（需单独授权）"],
+        "sensitivity": "critical",
+        "risk": "确认结果直接进入项目成本并触发后续返还义务；必须同时具备维保页面和采购成本查看权限。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {

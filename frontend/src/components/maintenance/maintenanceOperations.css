@@ -61,8 +61,30 @@
   gap: 16px;
 }
 
+.site-issue-document-card {
+  height: 100%;
+  border-color: #d9e3f0;
+}
+
+.site-issue-editor-grid,
+.site-issue-candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.site-issue-editor-grid label,
+.site-issue-candidate-grid .ant-card {
+  min-width: 0;
+}
+
 @media (max-width: 991px) {
   .maintenance-workspace-two-column {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .site-issue-editor-grid,
+  .site-issue-candidate-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }

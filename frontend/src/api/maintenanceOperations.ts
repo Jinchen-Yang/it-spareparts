@@ -222,6 +222,129 @@ export interface MaintenanceProjectWorkspace {
   data_version: string;
 }
 
+export type SiteIssueWorkflowStatus = "draft" | "confirmed" | "corrected" | "void";
+
+export interface SiteIssueAdapterState {
+  key: string;
+  state?: "unavailable" | "synthetic_ready" | string;
+  production_ready: boolean;
+  detail?: string;
+}
+
+export interface SiteIssueCandidate {
+  delivery_line_id: string;
+  source_order_id: string;
+  source_line_id: string;
+  delivery_no: string;
+  delivery_date: string;
+  part_id: number;
+  pn: string;
+  serial_number: string | null;
+  delivered_quantity: string;
+  confirmed_quantity: string;
+  available_quantity: string;
+  mapping_state: string;
+  mapping_version: string;
+}
+
+export interface SiteIssueCandidateDirectory {
+  adapter: SiteIssueAdapterState;
+  rows: SiteIssueCandidate[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface SiteIssueLine {
+  issue_line_id: string;
+  line_no: number;
+  part_id: number;
+  pn: string;
+  quantity: string;
+  delivery_line_id: string | null;
+  source_order_id: string | null;
+  source_line_id: string | null;
+  serial_number: string | null;
+  cost_source: string | null;
+  cost_source_label: string | null;
+  cost_is_estimate: boolean;
+  cost_amount_ex_tax: string | null;
+  cost_amount_inc_tax: string | null;
+  available_quantity?: string;
+  requested_quantity?: string;
+  cost_gap?: boolean;
+  version: number;
+}
+
+export interface SiteIssueDocument {
+  issue_id: string;
+  project_id: string;
+  issue_no: string;
+  issue_date: string;
+  workflow_status: SiteIssueWorkflowStatus;
+  receiver: string;
+  issued_by: string;
+  site_location: string;
+  version: number;
+  lines: SiteIssueLine[];
+  inventory_effect?: "none";
+  idempotent_replay?: boolean;
+  return_obligation_event?: {
+    event_id: string;
+    event_type: string;
+    issue_version: number;
+  } | null;
+}
+
+export interface SiteIssuePreview extends SiteIssueDocument {
+  can_confirm: boolean;
+  blockers: string[];
+  inventory_effect: "none";
+}
+
+export interface SiteIssueDirectory {
+  project_id: string;
+  rows: SiteIssueDocument[];
+  total: number;
+  page: number;
+  page_size: number;
+  adapter: SiteIssueAdapterState;
+}
+
+export interface SiteIssueLineInput {
+  delivery_line_id: string;
+  quantity: number;
+}
+
+export interface SiteIssueDraftInput {
+  idempotency_key: string;
+  issue_date: string;
+  receiver: string;
+  issued_by: string;
+  site_location: string;
+  lines: SiteIssueLineInput[];
+  reason: string;
+}
+
+export interface SiteIssuePatchInput {
+  project_id: string;
+  version: number;
+  idempotency_key: string;
+  issue_date?: string;
+  receiver?: string;
+  issued_by?: string;
+  site_location?: string;
+  lines?: SiteIssueLineInput[];
+  reason: string;
+}
+
+export interface SiteIssueCommandInput {
+  project_id: string;
+  version: number;
+  idempotency_key: string;
+  reason: string;
+}
+
 export interface MaintenanceWorkbookValidation {
   validation_token: string;
   project_id: string;
@@ -719,3 +842,60 @@ export const updateMaintenanceCostGap = (
   input: MaintenanceCostGapUpdate,
 ) => api.patch<MaintenanceCostGapUpdateResult>(`${projectBase(projectId)}/cost-gaps`, input)
   .then((response) => ({ ...response, data: normalizeCostGapUpdateResult(response.data) }));
+
+export const searchSiteIssueCandidates = (
+  projectId: string,
+  input: { q?: string; page?: number; page_size?: number } = {},
+) => api.post<SiteIssueCandidateDirectory>(
+  `${projectBase(projectId)}/issue-candidates/search`,
+  {
+    ...(input.q?.trim() ? { q: input.q.trim() } : {}),
+    page: input.page ?? 1,
+    page_size: input.page_size ?? 50,
+  },
+);
+
+export const searchSiteIssues = (
+  input: {
+    project_id: string;
+    q?: string;
+    workflow_statuses?: SiteIssueWorkflowStatus[];
+    page?: number;
+    page_size?: number;
+  },
+) => api.post<SiteIssueDirectory>("/maintenance/site-issues/search", {
+  project_id: input.project_id,
+  ...(input.q?.trim() ? { q: input.q.trim() } : {}),
+  workflow_statuses: input.workflow_statuses
+    ?? ["draft", "confirmed", "corrected", "void"],
+  page: input.page ?? 1,
+  page_size: input.page_size ?? 20,
+});
+
+export const createSiteIssueDraft = (
+  projectId: string,
+  input: SiteIssueDraftInput,
+) => api.post<SiteIssueDocument>(`${projectBase(projectId)}/site-issues`, input);
+
+const siteIssueBase = (issueId: string) =>
+  `/maintenance/site-issues/${encodeURIComponent(issueId)}`;
+
+export const patchSiteIssue = (
+  issueId: string,
+  input: SiteIssuePatchInput,
+) => api.patch<SiteIssueDocument>(siteIssueBase(issueId), input);
+
+export const previewSiteIssue = (
+  issueId: string,
+  input: Pick<SiteIssueCommandInput, "project_id" | "version">,
+) => api.post<SiteIssuePreview>(`${siteIssueBase(issueId)}/preview`, input);
+
+export const confirmSiteIssue = (
+  issueId: string,
+  input: SiteIssueCommandInput,
+) => api.post<SiteIssueDocument>(`${siteIssueBase(issueId)}/confirm`, input);
+
+export const voidSiteIssue = (
+  issueId: string,
+  input: SiteIssueCommandInput,
+) => api.post<SiteIssueDocument>(`${siteIssueBase(issueId)}/void`, input);

@@ -14,6 +14,7 @@ import {
 import ContractPortfolio from "../../components/maintenance/ContractPortfolio";
 import ProjectFinancialProgress from "../../components/maintenance/ProjectFinancialProgress";
 import ProjectWorkbookActions from "../../components/maintenance/ProjectWorkbookActions";
+import SiteIssueWorkflowPanel from "../../components/maintenance/SiteIssueWorkflowPanel";
 import WorkbookFourSheetPreview from "../../components/maintenance/WorkbookFourSheetPreview";
 import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
 import "../../components/maintenance/maintenanceOperations.css";
@@ -174,6 +175,7 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
   const generation = useRef(0);
   const [capabilities] = useState(readMaintenanceCapabilities);
   const {
+    canManageSiteIssues,
     canManageProject,
     canViewCost,
     canViewExpense,
@@ -306,6 +308,12 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
       <Card title="全部关联合同">
         <ContractPortfolio contracts={project.contracts} />
       </Card>
+
+      <SiteIssueWorkflowPanel
+        projectId={project.project_id}
+        canManage={canManageSiteIssues}
+        onChanged={() => void load(detailPages)}
+      />
 
       <Card title="回款明细" extra={<Tag>{`截至 ${workspace.as_of}`}</Tag>}>
         <div data-testid="collection-snapshot-table">

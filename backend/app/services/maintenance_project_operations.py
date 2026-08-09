@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from calendar import monthrange
 from collections import defaultdict
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
@@ -31,10 +31,14 @@ from app.models.maintenance_project_operations import (
     MaintenanceProjectExpenseAttribution,
     MaintenanceProjectOperationAudit,
     MaintenanceSiteIssue,
+    MaintenanceSiteIssueCommand,
+    MaintenanceSiteIssueDeliverySource,
     MaintenanceSiteIssueLine,
+    MaintenanceSiteIssueReturnEvent,
     MaintenanceProjectWorkbookState,
 )
-from app.business_time import business_today
+from app.business_time import BUSINESS_TZ, business_today
+from app.config import get_settings
 from app import tax_policy
 from app.security import UserContext, is_field_hidden
 from app.services import maintenance_project
@@ -485,6 +489,10 @@ def site_issue_line_dict(row: MaintenanceSiteIssueLine) -> dict:
         "part_id": row.part_id,
         "pn": row.pn,
         "quantity": _qty(row.quantity),
+        "delivery_line_id": row.delivery_line_id,
+        "source_order_id": row.source_order_id,
+        "source_line_id": row.source_line_id,
+        "serial_number": row.serial_number,
         "linked_purchase_line_id": row.linked_purchase_line_id,
         "manual_unit_cost": _money(row.manual_unit_cost),
         "manual_unit_cost_inc_tax": _money(row.manual_unit_cost_inc_tax),
@@ -527,20 +535,31 @@ def _cost_audit_snapshot(
 def site_issue_dict(
     row: MaintenanceSiteIssue,
     lines: list[MaintenanceSiteIssueLine],
+    *,
+    idempotent_replay: bool = False,
 ) -> dict:
     return {
         "issue_id": row.issue_id,
         "project_id": row.project_id,
         "issue_no": row.issue_no,
         "issue_date": row.issue_date.isoformat(),
+        "workflow_status": row.normalized_status,
         "raw_status": row.raw_status,
         "status_mapping_state": row.status_mapping_state,
         "normalized_status": row.normalized_status,
         "status_mapping_version": row.status_mapping_version,
         "source": row.source,
         "import_batch_id": row.import_batch_id,
+        "receiver": row.receiver,
+        "issued_by": row.issued_by,
+        "site_location": row.site_location,
+        "created_by": row.created_by,
+        "confirmed_at": row.confirmed_at.isoformat() if row.confirmed_at else None,
+        "corrected_at": row.corrected_at.isoformat() if row.corrected_at else None,
+        "voided_at": row.voided_at.isoformat() if row.voided_at else None,
         "version": row.version,
         "lines": [site_issue_line_dict(line) for line in lines],
+        "idempotent_replay": idempotent_replay,
     }
 
 
@@ -733,6 +752,1306 @@ def mark_expense_readiness(
     }
 
 
+def _site_issue_lines(
+    db: Session,
+    *,
+    issue_id: str,
+    lock: bool = False,
+) -> list[MaintenanceSiteIssueLine]:
+    statement = (
+        select(MaintenanceSiteIssueLine)
+        .where(MaintenanceSiteIssueLine.issue_id == issue_id)
+        .order_by(MaintenanceSiteIssueLine.line_no)
+    )
+    if lock:
+        statement = statement.with_for_update()
+    return list(db.scalars(statement))
+
+
+def _site_issue_request_fingerprint(payload: dict) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _lock_idempotency_key(db: Session, idempotency_key: str) -> None:
+    """Serialize one client command without persisting sensitive request content."""
+
+    db.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtextextended(idempotency_key, 0)
+            )
+        )
+    )
+
+
+def _site_issue_command_fingerprint(
+    *,
+    action: str,
+    issue_id: str,
+    project_id: str,
+    version: int,
+    reason: str,
+) -> str:
+    return _site_issue_request_fingerprint(
+        {
+            "action": action,
+            "issue_id": issue_id,
+            "project_id": project_id,
+            "version": version,
+            "reason": reason,
+        }
+    )
+
+
+def _site_issue_command_replay(
+    db: Session,
+    *,
+    idempotency_key: str,
+    action: str,
+    issue_id: str,
+    project_id: str,
+    request_fingerprint: str,
+) -> dict | None:
+    row = db.scalar(
+        select(MaintenanceSiteIssueCommand).where(
+            MaintenanceSiteIssueCommand.idempotency_key == idempotency_key
+        )
+    )
+    if row is None:
+        return None
+    if (
+        row.action != action
+        or row.issue_id != issue_id
+        or row.project_id != project_id
+        or row.request_fingerprint != request_fingerprint
+    ):
+        raise MaintenanceOperationConflict("幂等键已用于不同的现场领用操作")
+    return {**row.response_json, "idempotent_replay": True}
+
+
+def _record_site_issue_command(
+    db: Session,
+    *,
+    idempotency_key: str,
+    action: str,
+    issue_id: str,
+    project_id: str,
+    request_fingerprint: str,
+    response: dict,
+) -> None:
+    db.add(
+        MaintenanceSiteIssueCommand(
+            command_id=str(uuid4()),
+            idempotency_key=idempotency_key,
+            project_id=project_id,
+            issue_id=issue_id,
+            action=action,
+            request_fingerprint=request_fingerprint,
+            response_json=response,
+        )
+    )
+
+
+def _return_event_dict(row: MaintenanceSiteIssueReturnEvent) -> dict:
+    return {
+        "event_id": row.event_id,
+        "event_type": row.event_type,
+        "project_id": row.project_id,
+        "issue_id": row.issue_id,
+        "issue_version": row.issue_version,
+        "payload": row.payload,
+        "downstream_reference": row.downstream_reference,
+    }
+
+
+def _site_issue_return_payload(
+    issue: MaintenanceSiteIssue,
+    lines: list[MaintenanceSiteIssueLine],
+) -> dict:
+    """Expose only stable return-obligation inputs, never inventory mutations."""
+
+    return {
+        "schema_version": "maintenance-return-obligation-interface-v1",
+        "project_id": issue.project_id,
+        "issue_id": issue.issue_id,
+        "issue_no": issue.issue_no,
+        "issue_date": issue.issue_date.isoformat(),
+        "receiver": issue.receiver,
+        "issued_by": issue.issued_by,
+        "site_location": issue.site_location,
+        "lines": [
+            {
+                "issue_line_id": line.issue_line_id,
+                "delivery_line_id": line.delivery_line_id,
+                "source_order_id": line.source_order_id,
+                "source_line_id": line.source_line_id,
+                "part_id": line.part_id,
+                "pn": line.pn,
+                "serial_number": line.serial_number,
+                "quantity": _qty(line.quantity),
+            }
+            for line in lines
+        ],
+    }
+
+
+def _clone_site_issue_line(line: MaintenanceSiteIssueLine) -> MaintenanceSiteIssueLine:
+    """Make an untracked copy so preview can resolve evidence without saving it."""
+
+    return MaintenanceSiteIssueLine(
+        **{
+            column.key: getattr(line, column.key)
+            for column in MaintenanceSiteIssueLine.__table__.columns
+            if column.key not in {"created_at", "updated_at"}
+        }
+    )
+
+
+def _locked_site_issue_sources(
+    db: Session,
+    *,
+    delivery_line_ids: set[str],
+    lock: bool,
+) -> dict[str, MaintenanceSiteIssueDeliverySource]:
+    statement = (
+        select(MaintenanceSiteIssueDeliverySource)
+        .where(
+            MaintenanceSiteIssueDeliverySource.delivery_line_id.in_(
+                sorted(delivery_line_ids)
+            )
+        )
+        .order_by(MaintenanceSiteIssueDeliverySource.delivery_line_id)
+    )
+    if lock:
+        statement = statement.with_for_update()
+    return {
+        row.delivery_line_id: row
+        for row in db.scalars(statement)
+    }
+
+
+def _confirmed_site_issue_quantities(
+    db: Session,
+    *,
+    delivery_line_ids: set[str],
+    exclude_issue_id: str | None = None,
+) -> dict[str, Decimal]:
+    filters = [
+        MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
+        MaintenanceSiteIssueLine.delivery_line_id.in_(sorted(delivery_line_ids)),
+    ]
+    if exclude_issue_id is not None:
+        filters.append(MaintenanceSiteIssue.issue_id != exclude_issue_id)
+    return {
+        delivery_line_id: Decimal(quantity)
+        for delivery_line_id, quantity in db.execute(
+            select(
+                MaintenanceSiteIssueLine.delivery_line_id,
+                func.sum(MaintenanceSiteIssueLine.quantity),
+            )
+            .join(
+                MaintenanceSiteIssue,
+                MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
+            )
+            .where(*filters)
+            .group_by(MaintenanceSiteIssueLine.delivery_line_id)
+        )
+    }
+
+
+def _validate_site_issue_sources(
+    *,
+    issue: MaintenanceSiteIssue,
+    lines: list[MaintenanceSiteIssueLine],
+    sources: dict[str, MaintenanceSiteIssueDeliverySource],
+    confirmed_quantities: dict[str, Decimal],
+) -> tuple[list[dict], list[str]]:
+    balances: list[dict] = []
+    blockers: list[str] = []
+    if not lines:
+        blockers.append("现场领用单没有明细")
+        return balances, blockers
+    for line in lines:
+        delivery_line_id = str(line.delivery_line_id or "").strip()
+        source = sources.get(delivery_line_id)
+        if not delivery_line_id or source is None:
+            blockers.append(f"第 {line.line_no} 行缺少稳定发货来源")
+            continue
+        if (
+            source.adapter_key != "synthetic_delivery_v1"
+            or source.mapping_state != "ready"
+            or not source.is_active
+        ):
+            blockers.append(f"第 {line.line_no} 行发货来源适配器不可用")
+            continue
+        if source.project_id != issue.project_id:
+            blockers.append(f"第 {line.line_no} 行发货来源不属于当前项目")
+            continue
+        if (
+            source.part_id != line.part_id
+            or not str(source.pn or "").strip()
+            or source.pn != line.pn
+            or source.source_order_id != line.source_order_id
+            or source.source_line_id != line.source_line_id
+        ):
+            blockers.append(f"第 {line.line_no} 行来源身份或 PN 已变化")
+            continue
+        try:
+            requested = _quantity(line.quantity)
+        except MaintenanceOperationError:
+            blockers.append(f"第 {line.line_no} 行领用数量必须为正数")
+            continue
+        confirmed = confirmed_quantities.get(delivery_line_id, Decimal("0"))
+        available = Decimal(source.delivered_quantity) - confirmed
+        balances.append(
+            {
+                "issue_line_id": line.issue_line_id,
+                "delivery_line_id": delivery_line_id,
+                "delivered_quantity": _qty(Decimal(source.delivered_quantity)),
+                "confirmed_quantity": _qty(confirmed),
+                "available_quantity": _qty(max(available, Decimal("0"))),
+                "requested_quantity": _qty(requested),
+            }
+        )
+        if requested > available:
+            blockers.append(f"第 {line.line_no} 行领用数量超过可用发货余额")
+    return balances, blockers
+
+
+def _site_issue_is_production_blocked() -> bool:
+    """Synthetic delivery identity is a development seam, never a prod adapter."""
+
+    return get_settings().environment == "prod"
+
+
+def preview_site_issue(
+    db: Session,
+    *,
+    issue_id: str,
+    project_id: str,
+    version: int,
+) -> dict | None:
+    issue = db.scalar(
+        select(MaintenanceSiteIssue).where(MaintenanceSiteIssue.issue_id == issue_id)
+    )
+    if issue is None:
+        return None
+    if issue.project_id != project_id:
+        raise MaintenanceOperationPermissionError("现场领用单不属于当前稳定项目")
+    if issue.source != "site_issue_v2":
+        raise MaintenanceOperationError("旧版现场领用单不支持此确认流程")
+    if issue.version != version:
+        raise MaintenanceOperationConflict("现场领用单版本已变化，请刷新后重试")
+    if issue.normalized_status != "draft":
+        raise MaintenanceOperationConflict("仅草稿现场领用单可以预览确认影响")
+
+    lines = _site_issue_lines(db, issue_id=issue_id)
+    delivery_ids = {line.delivery_line_id for line in lines if line.delivery_line_id}
+    sources = _locked_site_issue_sources(
+        db,
+        delivery_line_ids=delivery_ids,
+        lock=False,
+    )
+    confirmed = _confirmed_site_issue_quantities(
+        db,
+        delivery_line_ids=delivery_ids,
+    )
+    balances, blockers = _validate_site_issue_sources(
+        issue=issue,
+        lines=lines,
+        sources=sources,
+        confirmed_quantities=confirmed,
+    )
+    if _site_issue_is_production_blocked():
+        blockers.append("真实 WBDD/仓库发货适配器尚未接入，生产确认已失败关闭")
+
+    preview_lines = [_clone_site_issue_line(line) for line in lines]
+    maintenance_consumption_cost.resolve_lines(
+        db,
+        lines=[(issue.issue_date, line) for line in preview_lines],
+    )
+    balance_by_line = {row["issue_line_id"]: row for row in balances}
+    return {
+        **site_issue_dict(issue, preview_lines),
+        "can_confirm": not blockers,
+        "blockers": blockers,
+        "inventory_effect": "none",
+        "lines": [
+            {
+                **site_issue_line_dict(line),
+                **balance_by_line.get(line.issue_line_id, {}),
+                "cost_gap": line.cost_source is None,
+            }
+            for line in preview_lines
+        ],
+    }
+
+
+def confirm_site_issue(
+    db: Session,
+    *,
+    issue_id: str,
+    project_id: str,
+    version: int,
+    idempotency_key: str,
+    reason: str,
+    operated_by: str,
+) -> dict | None:
+    clean_key = _required(idempotency_key, "幂等键", 128)
+    if len(clean_key) < 8:
+        raise MaintenanceOperationError("幂等键至少需要 8 个字符")
+    clean_reason = _required(reason, "操作原因", 1000)
+    fingerprint = _site_issue_command_fingerprint(
+        action="confirm",
+        issue_id=issue_id,
+        project_id=project_id,
+        version=version,
+        reason=clean_reason,
+    )
+    _lock_idempotency_key(db, clean_key)
+    replay = _site_issue_command_replay(
+        db,
+        idempotency_key=clean_key,
+        action="confirm",
+        issue_id=issue_id,
+        project_id=project_id,
+        request_fingerprint=fingerprint,
+    )
+    if replay is not None:
+        return replay
+
+    project = _lock_project_for_fact_write(db, project_id)
+    if project is None:
+        return None
+    issue = db.scalar(
+        select(MaintenanceSiteIssue)
+        .where(MaintenanceSiteIssue.issue_id == issue_id)
+        .with_for_update()
+    )
+    if issue is None:
+        return None
+    if issue.project_id != project_id:
+        raise MaintenanceOperationPermissionError("现场领用单不属于当前稳定项目")
+    if issue.source != "site_issue_v2":
+        raise MaintenanceOperationError("旧版现场领用单不支持此确认流程")
+    if issue.version != version:
+        raise MaintenanceOperationConflict("现场领用单版本已变化，请刷新后重试")
+    if issue.normalized_status != "draft":
+        raise MaintenanceOperationConflict("仅草稿现场领用单可以确认")
+    if _site_issue_is_production_blocked():
+        raise MaintenanceOperationError(
+            "真实 WBDD/仓库发货适配器尚未接入，生产确认已失败关闭"
+        )
+
+    lines = _site_issue_lines(db, issue_id=issue_id, lock=True)
+    delivery_ids = {line.delivery_line_id for line in lines if line.delivery_line_id}
+    sources = _locked_site_issue_sources(
+        db,
+        delivery_line_ids=delivery_ids,
+        lock=True,
+    )
+    confirmed = _confirmed_site_issue_quantities(
+        db,
+        delivery_line_ids=delivery_ids,
+    )
+    _balances, blockers = _validate_site_issue_sources(
+        issue=issue,
+        lines=lines,
+        sources=sources,
+        confirmed_quantities=confirmed,
+    )
+    if blockers:
+        raise MaintenanceOperationConflict("；".join(blockers))
+
+    before = site_issue_dict(issue, lines)
+    maintenance_consumption_cost.resolve_lines(
+        db,
+        lines=[(issue.issue_date, line) for line in lines],
+    )
+    now = datetime.now(UTC)
+    issue.raw_status = "confirmed"
+    issue.status_mapping_state = "mapped"
+    issue.normalized_status = "confirmed"
+    issue.status_mapping_version = "site-issue-v2-workflow-v1"
+    issue.confirmed_at = now
+    issue.version += 1
+    for line in lines:
+        line.version += 1
+
+    event = MaintenanceSiteIssueReturnEvent(
+        event_id=str(uuid4()),
+        project_id=project_id,
+        issue_id=issue_id,
+        event_type="return_obligation_created",
+        issue_version=issue.version,
+        payload=_site_issue_return_payload(issue, lines),
+    )
+    db.add(event)
+    db.flush()
+    response = {
+        **site_issue_dict(issue, lines),
+        "return_obligation_event": _return_event_dict(event),
+        "inventory_effect": "none",
+        "idempotent_replay": False,
+    }
+    _fact_audit(
+        db,
+        project_id=project_id,
+        entity_type="site_issue",
+        entity_id=issue_id,
+        action="confirm",
+        before=before,
+        after=response,
+        reason=clean_reason,
+        operated_by=operated_by,
+    )
+    _record_site_issue_command(
+        db,
+        idempotency_key=clean_key,
+        action="confirm",
+        issue_id=issue_id,
+        project_id=project_id,
+        request_fingerprint=fingerprint,
+        response=response,
+    )
+    bump_workbook_revision(db, project_id=project_id)
+    db.flush()
+    return response
+
+
+def _normalize_site_issue_patch_lines(lines: list[dict]) -> list[dict]:
+    if not lines:
+        raise MaintenanceOperationError("现场领用至少需要一条明细")
+    if len(lines) > _SITE_ISSUE_LINE_LIMIT:
+        raise MaintenanceOperationError("现场领用单最多允许 200 条明细")
+    normalized: list[dict] = []
+    seen: set[str] = set()
+    for raw_line in lines:
+        delivery_line_id = _required(
+            raw_line.get("delivery_line_id"), "发货明细稳定编号"
+        )
+        if delivery_line_id in seen:
+            raise MaintenanceOperationError("同一发货明细不能在一张领用单中重复")
+        seen.add(delivery_line_id)
+        normalized.append(
+            {
+                "delivery_line_id": delivery_line_id,
+                "quantity": _quantity(raw_line["quantity"]),
+            }
+        )
+    return normalized
+
+
+def _build_site_issue_lines(
+    *,
+    issue_id: str,
+    project_id: str,
+    requested_lines: list[dict],
+    sources: dict[str, MaintenanceSiteIssueDeliverySource],
+) -> list[MaintenanceSiteIssueLine]:
+    if len(sources) != len(requested_lines):
+        raise MaintenanceOperationError("发货来源适配器未提供完整稳定身份")
+    result: list[MaintenanceSiteIssueLine] = []
+    for line_no, requested in enumerate(requested_lines, start=1):
+        source = sources.get(requested["delivery_line_id"])
+        if source is None:
+            raise MaintenanceOperationError("发货来源适配器未提供完整稳定身份")
+        if (
+            source.adapter_key != "synthetic_delivery_v1"
+            or source.mapping_state != "ready"
+            or not source.is_active
+        ):
+            raise MaintenanceOperationError("发货来源适配器当前不可用")
+        if source.project_id != project_id:
+            raise MaintenanceOperationPermissionError("发货明细不属于当前稳定项目")
+        result.append(
+            MaintenanceSiteIssueLine(
+                issue_line_id=str(uuid4()),
+                issue_id=issue_id,
+                line_no=line_no,
+                part_id=source.part_id,
+                pn=_required(source.pn, "料号", 128),
+                quantity=requested["quantity"],
+                delivery_line_id=source.delivery_line_id,
+                source_order_id=source.source_order_id,
+                source_line_id=source.source_line_id,
+                serial_number=source.serial_number,
+                linked_purchase_line_id=source.linked_purchase_line_id,
+                manual_unit_cost=None,
+                reference_sample_ids=[],
+                reference_sample_count=0,
+                reference_samples=[],
+                algorithm_version=maintenance_consumption_cost.ALGORITHM_VERSION,
+                version=1,
+            )
+        )
+    return result
+
+
+def patch_site_issue(
+    db: Session,
+    *,
+    issue_id: str,
+    project_id: str,
+    version: int,
+    idempotency_key: str,
+    issue_date: date | None,
+    receiver: str | None,
+    issued_by: str | None,
+    site_location: str | None,
+    lines: list[dict] | None,
+    reason: str,
+    operated_by: str,
+) -> dict | None:
+    if all(
+        value is None
+        for value in (issue_date, receiver, issued_by, site_location, lines)
+    ):
+        raise MaintenanceOperationError("没有可修改的现场领用业务字段")
+    clean_key = _required(idempotency_key, "幂等键", 128)
+    if len(clean_key) < 8:
+        raise MaintenanceOperationError("幂等键至少需要 8 个字符")
+    clean_reason = _required(reason, "操作原因", 1000)
+    normalized_lines = (
+        _normalize_site_issue_patch_lines(lines) if lines is not None else None
+    )
+    request_payload = {
+        "action": "patch",
+        "issue_id": issue_id,
+        "project_id": project_id,
+        "version": version,
+        "issue_date": issue_date.isoformat() if issue_date else None,
+        "receiver": receiver,
+        "issued_by": issued_by,
+        "site_location": site_location,
+        "lines": (
+            [
+                {
+                    "delivery_line_id": line["delivery_line_id"],
+                    "quantity": _qty(line["quantity"]),
+                }
+                for line in normalized_lines
+            ]
+            if normalized_lines is not None
+            else None
+        ),
+        "reason": clean_reason,
+    }
+    fingerprint = _site_issue_request_fingerprint(request_payload)
+    _lock_idempotency_key(db, clean_key)
+
+    # The receipt action differs by state; either one is a valid replay target.
+    existing_command = db.scalar(
+        select(MaintenanceSiteIssueCommand).where(
+            MaintenanceSiteIssueCommand.idempotency_key == clean_key
+        )
+    )
+    if existing_command is not None:
+        if (
+            existing_command.action not in {"update", "correct"}
+            or existing_command.issue_id != issue_id
+            or existing_command.project_id != project_id
+            or existing_command.request_fingerprint != fingerprint
+        ):
+            raise MaintenanceOperationConflict("幂等键已用于不同的现场领用操作")
+        return {**existing_command.response_json, "idempotent_replay": True}
+
+    project = _lock_project_for_fact_write(db, project_id)
+    if project is None:
+        return None
+    issue = db.scalar(
+        select(MaintenanceSiteIssue)
+        .where(MaintenanceSiteIssue.issue_id == issue_id)
+        .with_for_update()
+    )
+    if issue is None:
+        return None
+    if issue.project_id != project_id:
+        raise MaintenanceOperationPermissionError("现场领用单不属于当前稳定项目")
+    if issue.source != "site_issue_v2":
+        raise MaintenanceOperationError("旧版现场领用单不支持此编辑流程")
+    if issue.version != version:
+        raise MaintenanceOperationConflict("现场领用单版本已变化，请刷新后重试")
+    if issue.normalized_status not in {"draft", "confirmed", "corrected"}:
+        raise MaintenanceOperationConflict("已作废现场领用单不能编辑")
+    is_correction = issue.normalized_status in {"confirmed", "corrected"}
+    if is_correction and _site_issue_is_production_blocked():
+        raise MaintenanceOperationError(
+            "真实 WBDD/仓库发货适配器尚未接入，生产更正确认已失败关闭"
+        )
+
+    old_lines = _site_issue_lines(db, issue_id=issue_id, lock=True)
+    requested_ids = {
+        line["delivery_line_id"] for line in (normalized_lines or [])
+    }
+    all_delivery_ids = {
+        line.delivery_line_id for line in old_lines if line.delivery_line_id
+    } | requested_ids
+    sources = _locked_site_issue_sources(
+        db,
+        delivery_line_ids=all_delivery_ids,
+        lock=is_correction,
+    )
+    replacement_lines = (
+        _build_site_issue_lines(
+            issue_id=issue_id,
+            project_id=project_id,
+            requested_lines=normalized_lines,
+            sources={key: sources[key] for key in requested_ids if key in sources},
+        )
+        if normalized_lines is not None
+        else old_lines
+    )
+    candidate_issue_date = issue_date or issue.issue_date
+    candidate_receiver = (
+        _required(receiver, "接收人", 128) if receiver is not None else issue.receiver
+    )
+    candidate_issued_by = (
+        _required(issued_by, "领用发出人", 128)
+        if issued_by is not None
+        else issue.issued_by
+    )
+    candidate_location = (
+        _required(site_location, "现场位置", 256)
+        if site_location is not None
+        else issue.site_location
+    )
+    old_line_signature = [
+        (line.delivery_line_id, _qty(Decimal(line.quantity))) for line in old_lines
+    ]
+    candidate_line_signature = [
+        (line.delivery_line_id, _qty(Decimal(line.quantity)))
+        for line in replacement_lines
+    ]
+    line_inputs_changed = candidate_line_signature != old_line_signature
+    date_changed = candidate_issue_date != issue.issue_date
+    metadata_changed = (
+        candidate_receiver != issue.receiver
+        or candidate_issued_by != issue.issued_by
+        or candidate_location != issue.site_location
+    )
+    if not (line_inputs_changed or date_changed or metadata_changed):
+        raise MaintenanceOperationError("现场领用业务内容没有变化")
+    if normalized_lines is not None and not line_inputs_changed:
+        # A client may resend the visible lines while changing only receiver or
+        # location. Keep the original server-owned line identities and frozen
+        # cost evidence instead of manufacturing replacement lines.
+        replacement_lines = old_lines
+    before = site_issue_dict(issue, old_lines)
+
+    event: MaintenanceSiteIssueReturnEvent | None = None
+    if is_correction:
+        confirmed = _confirmed_site_issue_quantities(
+            db,
+            delivery_line_ids={
+                line.delivery_line_id
+                for line in replacement_lines
+                if line.delivery_line_id
+            },
+            exclude_issue_id=issue_id,
+        )
+        _balances, blockers = _validate_site_issue_sources(
+            issue=issue,
+            lines=replacement_lines,
+            sources=sources,
+            confirmed_quantities=confirmed,
+        )
+        if blockers:
+            raise MaintenanceOperationConflict("；".join(blockers))
+        if line_inputs_changed or date_changed:
+            maintenance_consumption_cost.resolve_lines(
+                db,
+                lines=[(candidate_issue_date, line) for line in replacement_lines],
+            )
+
+    if normalized_lines is not None and line_inputs_changed:
+        for old_line in old_lines:
+            db.delete(old_line)
+        db.flush()
+        db.add_all(replacement_lines)
+    elif is_correction:
+        for line in replacement_lines:
+            line.version += 1
+
+    issue.issue_date = candidate_issue_date
+    issue.receiver = candidate_receiver
+    issue.issued_by = candidate_issued_by
+    issue.site_location = candidate_location
+    issue.version += 1
+    action = "correct" if is_correction else "update"
+    if is_correction:
+        issue.raw_status = "corrected"
+        issue.status_mapping_state = "mapped"
+        issue.normalized_status = "corrected"
+        issue.status_mapping_version = "site-issue-v2-workflow-v1"
+        issue.corrected_at = datetime.now(UTC)
+        event = MaintenanceSiteIssueReturnEvent(
+            event_id=str(uuid4()),
+            project_id=project_id,
+            issue_id=issue_id,
+            event_type="return_obligation_corrected",
+            issue_version=issue.version,
+            payload=_site_issue_return_payload(issue, replacement_lines),
+        )
+        db.add(event)
+    db.flush()
+    response = {
+        **site_issue_dict(issue, replacement_lines),
+        "return_obligation_event": _return_event_dict(event) if event else None,
+        "inventory_effect": "none",
+        "idempotent_replay": False,
+    }
+    _fact_audit(
+        db,
+        project_id=project_id,
+        entity_type="site_issue",
+        entity_id=issue_id,
+        action="correct" if is_correction else "draft_update",
+        before=before,
+        after=response,
+        reason=clean_reason,
+        operated_by=operated_by,
+    )
+    _record_site_issue_command(
+        db,
+        idempotency_key=clean_key,
+        action=action,
+        issue_id=issue_id,
+        project_id=project_id,
+        request_fingerprint=fingerprint,
+        response=response,
+    )
+    bump_workbook_revision(db, project_id=project_id)
+    db.flush()
+    return response
+
+
+def void_site_issue(
+    db: Session,
+    *,
+    issue_id: str,
+    project_id: str,
+    version: int,
+    idempotency_key: str,
+    reason: str,
+    operated_by: str,
+) -> dict | None:
+    clean_key = _required(idempotency_key, "幂等键", 128)
+    if len(clean_key) < 8:
+        raise MaintenanceOperationError("幂等键至少需要 8 个字符")
+    clean_reason = _required(reason, "操作原因", 1000)
+    fingerprint = _site_issue_command_fingerprint(
+        action="void",
+        issue_id=issue_id,
+        project_id=project_id,
+        version=version,
+        reason=clean_reason,
+    )
+    _lock_idempotency_key(db, clean_key)
+    replay = _site_issue_command_replay(
+        db,
+        idempotency_key=clean_key,
+        action="void",
+        issue_id=issue_id,
+        project_id=project_id,
+        request_fingerprint=fingerprint,
+    )
+    if replay is not None:
+        return replay
+
+    project = _lock_project_for_fact_write(db, project_id)
+    if project is None:
+        return None
+    issue = db.scalar(
+        select(MaintenanceSiteIssue)
+        .where(MaintenanceSiteIssue.issue_id == issue_id)
+        .with_for_update()
+    )
+    if issue is None:
+        return None
+    if issue.project_id != project_id:
+        raise MaintenanceOperationPermissionError("现场领用单不属于当前稳定项目")
+    if issue.source != "site_issue_v2":
+        raise MaintenanceOperationError("旧版现场领用单不支持此作废流程")
+    if issue.version != version:
+        raise MaintenanceOperationConflict("现场领用单版本已变化，请刷新后重试")
+    if issue.normalized_status == "void":
+        raise MaintenanceOperationConflict("现场领用单已经作废")
+    if issue.normalized_status not in {"draft", "confirmed", "corrected"}:
+        raise MaintenanceOperationConflict("当前现场领用状态不能作废")
+
+    return_events = list(
+        db.scalars(
+            select(MaintenanceSiteIssueReturnEvent)
+            .where(MaintenanceSiteIssueReturnEvent.issue_id == issue_id)
+            .order_by(MaintenanceSiteIssueReturnEvent.created_at)
+            .with_for_update()
+        )
+    )
+    if any(event.downstream_reference for event in return_events):
+        raise MaintenanceOperationConflict(
+            "返还义务已生成下游事实，不能直接作废，请走带原因的更正"
+        )
+
+    lines = _site_issue_lines(db, issue_id=issue_id, lock=True)
+    before = site_issue_dict(issue, lines)
+    was_confirmed = issue.normalized_status in {"confirmed", "corrected"}
+    issue.raw_status = "void"
+    issue.status_mapping_state = "mapped"
+    issue.normalized_status = "void"
+    issue.status_mapping_version = "site-issue-v2-workflow-v1"
+    issue.voided_at = datetime.now(UTC)
+    issue.version += 1
+    event = None
+    if was_confirmed:
+        event = MaintenanceSiteIssueReturnEvent(
+            event_id=str(uuid4()),
+            project_id=project_id,
+            issue_id=issue_id,
+            event_type="return_obligation_voided",
+            issue_version=issue.version,
+            payload=_site_issue_return_payload(issue, lines),
+        )
+        db.add(event)
+    db.flush()
+    response = {
+        **site_issue_dict(issue, lines),
+        "return_obligation_event": _return_event_dict(event) if event else None,
+        "inventory_effect": "none",
+        "idempotent_replay": False,
+    }
+    _fact_audit(
+        db,
+        project_id=project_id,
+        entity_type="site_issue",
+        entity_id=issue_id,
+        action="void",
+        before=before,
+        after=response,
+        reason=clean_reason,
+        operated_by=operated_by,
+    )
+    _record_site_issue_command(
+        db,
+        idempotency_key=clean_key,
+        action="void",
+        issue_id=issue_id,
+        project_id=project_id,
+        request_fingerprint=fingerprint,
+        response=response,
+    )
+    bump_workbook_revision(db, project_id=project_id)
+    db.flush()
+    return response
+
+
+def search_site_issues(
+    db: Session,
+    *,
+    project_id: str,
+    q_text: str | None,
+    workflow_statuses: list[str],
+    page: int,
+    page_size: int,
+) -> dict | None:
+    project = db.get(MaintenanceProject, project_id)
+    if project is None:
+        return None
+    allowed = {"draft", "confirmed", "corrected", "void"}
+    if not workflow_statuses or any(item not in allowed for item in workflow_statuses):
+        raise MaintenanceOperationError("现场领用状态筛选无效")
+    filters = [
+        MaintenanceSiteIssue.project_id == project_id,
+        MaintenanceSiteIssue.source == "site_issue_v2",
+        MaintenanceSiteIssue.normalized_status.in_(workflow_statuses),
+    ]
+    q = (q_text or "").strip()
+    if len(q) > 256:
+        raise MaintenanceOperationError("现场领用搜索条件无效")
+    if q:
+        filters.append(
+            or_(
+                MaintenanceSiteIssue.issue_no.icontains(q, autoescape=True),
+                MaintenanceSiteIssue.receiver.icontains(q, autoescape=True),
+                MaintenanceSiteIssue.issued_by.icontains(q, autoescape=True),
+                MaintenanceSiteIssue.site_location.icontains(q, autoescape=True),
+            )
+        )
+    total = int(
+        db.scalar(
+            select(func.count())
+            .select_from(MaintenanceSiteIssue)
+            .where(*filters)
+        )
+        or 0
+    )
+    issues = list(
+        db.scalars(
+            select(MaintenanceSiteIssue)
+            .where(*filters)
+            .order_by(
+                MaintenanceSiteIssue.issue_date.desc(),
+                MaintenanceSiteIssue.issue_no.desc(),
+            )
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    line_rows = list(
+        db.scalars(
+            select(MaintenanceSiteIssueLine)
+            .where(
+                MaintenanceSiteIssueLine.issue_id.in_(
+                    [issue.issue_id for issue in issues]
+                )
+            )
+            .order_by(
+                MaintenanceSiteIssueLine.issue_id,
+                MaintenanceSiteIssueLine.line_no,
+            )
+        )
+    ) if issues else []
+    by_issue: dict[str, list[MaintenanceSiteIssueLine]] = defaultdict(list)
+    for line in line_rows:
+        by_issue[line.issue_id].append(line)
+    return {
+        "project_id": project_id,
+        "rows": [site_issue_dict(issue, by_issue[issue.issue_id]) for issue in issues],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "adapter": {
+            "key": "synthetic_delivery_v1",
+            "production_ready": False,
+        },
+    }
+
+
+def search_site_issue_candidates(
+    db: Session,
+    *,
+    project_id: str,
+    q_text: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> dict | None:
+    """List explicit delivery identities; never infer a source from project names."""
+
+    project = db.scalar(
+        select(MaintenanceProject).where(MaintenanceProject.project_id == project_id)
+    )
+    if project is None:
+        return None
+    adapter_available = bool(
+        db.scalar(
+            select(func.count())
+            .select_from(MaintenanceSiteIssueDeliverySource)
+            .where(MaintenanceSiteIssueDeliverySource.project_id == project_id)
+        )
+    )
+    adapter = {
+        "key": "synthetic_delivery_v1",
+        "state": "synthetic_ready" if adapter_available else "unavailable",
+        "production_ready": False,
+        "detail": (
+            "当前仅启用稳定合成发货契约；真实适配器接入前不得用于生产确认"
+            if adapter_available
+            else "真实 WBDD/仓库发货适配器尚未接入，系统不会按项目名猜测"
+        ),
+    }
+    if not adapter_available:
+        return {
+            "adapter": adapter,
+            "rows": [],
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    consumed = (
+        select(
+            MaintenanceSiteIssueLine.delivery_line_id.label("delivery_line_id"),
+            func.coalesce(func.sum(MaintenanceSiteIssueLine.quantity), 0).label(
+                "confirmed_quantity"
+            ),
+        )
+        .join(
+            MaintenanceSiteIssue,
+            MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
+        )
+        .where(
+            MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
+            MaintenanceSiteIssueLine.delivery_line_id.is_not(None),
+        )
+        .group_by(MaintenanceSiteIssueLine.delivery_line_id)
+        .subquery()
+    )
+    confirmed_quantity = func.coalesce(consumed.c.confirmed_quantity, 0)
+    filters = [
+        MaintenanceSiteIssueDeliverySource.project_id == project_id,
+        MaintenanceSiteIssueDeliverySource.adapter_key == "synthetic_delivery_v1",
+        MaintenanceSiteIssueDeliverySource.mapping_state == "ready",
+        MaintenanceSiteIssueDeliverySource.is_active.is_(True),
+    ]
+    q = (q_text or "").strip()
+    if len(q) > 256:
+        raise MaintenanceOperationError("发货候选搜索条件无效")
+    if q:
+        filters.append(
+            or_(
+                MaintenanceSiteIssueDeliverySource.delivery_line_id.icontains(
+                    q, autoescape=True
+                ),
+                MaintenanceSiteIssueDeliverySource.delivery_no.icontains(
+                    q, autoescape=True
+                ),
+                MaintenanceSiteIssueDeliverySource.source_order_id.icontains(
+                    q, autoescape=True
+                ),
+                MaintenanceSiteIssueDeliverySource.pn.icontains(q, autoescape=True),
+                MaintenanceSiteIssueDeliverySource.serial_number.icontains(
+                    q, autoescape=True
+                ),
+            )
+        )
+    total = int(
+        db.scalar(
+            select(func.count())
+            .select_from(MaintenanceSiteIssueDeliverySource)
+            .where(*filters)
+        )
+        or 0
+    )
+    rows = list(
+        db.execute(
+            select(
+                MaintenanceSiteIssueDeliverySource,
+                confirmed_quantity.label("confirmed_quantity"),
+            )
+            .outerjoin(
+                consumed,
+                consumed.c.delivery_line_id
+                == MaintenanceSiteIssueDeliverySource.delivery_line_id,
+            )
+            .where(*filters)
+            .order_by(
+                MaintenanceSiteIssueDeliverySource.delivery_date.desc(),
+                MaintenanceSiteIssueDeliverySource.delivery_line_id,
+            )
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    return {
+        "adapter": adapter,
+        "rows": [
+            {
+                "delivery_line_id": source.delivery_line_id,
+                "source_order_id": source.source_order_id,
+                "source_line_id": source.source_line_id,
+                "delivery_no": source.delivery_no,
+                "delivery_date": source.delivery_date.isoformat(),
+                "part_id": source.part_id,
+                "pn": source.pn,
+                "serial_number": source.serial_number,
+                "delivered_quantity": _qty(source.delivered_quantity),
+                "confirmed_quantity": _qty(Decimal(confirmed_qty)),
+                "available_quantity": _qty(
+                    max(
+                        Decimal(source.delivered_quantity) - Decimal(confirmed_qty),
+                        Decimal("0"),
+                    )
+                ),
+                "mapping_state": source.mapping_state,
+                "mapping_version": source.mapping_version,
+            }
+            for source, confirmed_qty in rows
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+def create_site_issue_draft(
+    db: Session,
+    *,
+    project_id: str,
+    idempotency_key: str,
+    issue_date: date,
+    receiver: str,
+    issued_by: str,
+    site_location: str,
+    lines: list[dict],
+    reason: str,
+    operated_by: str,
+) -> dict | None:
+    """Create one server-owned draft from explicit stable delivery identities."""
+
+    clean_key = _required(idempotency_key, "幂等键", 128)
+    if len(clean_key) < 8:
+        raise MaintenanceOperationError("幂等键至少需要 8 个字符")
+    clean_receiver = _required(receiver, "接收人", 128)
+    clean_issued_by = _required(issued_by, "领用发出人", 128)
+    clean_location = _required(site_location, "现场位置", 256)
+    clean_reason = _required(reason, "操作原因", 1000)
+    if not lines:
+        raise MaintenanceOperationError("现场领用至少需要一条明细")
+    if len(lines) > _SITE_ISSUE_LINE_LIMIT:
+        raise MaintenanceOperationError("现场领用单最多允许 200 条明细")
+
+    normalized_lines: list[dict] = []
+    seen_delivery_ids: set[str] = set()
+    for raw_line in lines:
+        delivery_line_id = _required(
+            raw_line.get("delivery_line_id"), "发货明细稳定编号"
+        )
+        if delivery_line_id in seen_delivery_ids:
+            raise MaintenanceOperationError("同一发货明细不能在一张领用单中重复")
+        seen_delivery_ids.add(delivery_line_id)
+        normalized_lines.append(
+            {
+                "delivery_line_id": delivery_line_id,
+                "quantity": _quantity(raw_line["quantity"]),
+            }
+        )
+
+    fingerprint = _site_issue_request_fingerprint(
+        {
+            "project_id": project_id,
+            "issue_date": issue_date.isoformat(),
+            "receiver": clean_receiver,
+            "issued_by": clean_issued_by,
+            "site_location": clean_location,
+            "lines": [
+                {
+                    "delivery_line_id": line["delivery_line_id"],
+                    "quantity": _qty(line["quantity"]),
+                }
+                for line in normalized_lines
+            ],
+            "reason": clean_reason,
+        }
+    )
+    _lock_idempotency_key(db, clean_key)
+    existing = db.scalar(
+        select(MaintenanceSiteIssue).where(
+            MaintenanceSiteIssue.idempotency_key == clean_key
+        )
+    )
+    if existing is not None:
+        if (
+            existing.project_id != project_id
+            or existing.request_fingerprint != fingerprint
+            or existing.source != "site_issue_v2"
+        ):
+            raise MaintenanceOperationConflict("幂等键已用于不同的现场领用请求")
+        return site_issue_dict(
+            existing,
+            _site_issue_lines(db, issue_id=existing.issue_id),
+            idempotent_replay=True,
+        )
+
+    project = _lock_project_for_fact_write(db, project_id)
+    if project is None:
+        return None
+    if not project.is_active:
+        raise MaintenanceOperationError("项目主档已归档")
+
+    source_rows = list(
+        db.scalars(
+            select(MaintenanceSiteIssueDeliverySource)
+            .where(
+                MaintenanceSiteIssueDeliverySource.delivery_line_id.in_(
+                    sorted(seen_delivery_ids)
+                )
+            )
+            .order_by(MaintenanceSiteIssueDeliverySource.delivery_line_id)
+        )
+    )
+    sources = {row.delivery_line_id: row for row in source_rows}
+    if len(sources) != len(seen_delivery_ids):
+        raise MaintenanceOperationError("发货来源适配器未提供完整稳定身份")
+
+    issue_id = str(uuid4())
+    saved_lines: list[MaintenanceSiteIssueLine] = []
+    for line_no, requested in enumerate(normalized_lines, start=1):
+        source_row = sources[requested["delivery_line_id"]]
+        if (
+            source_row.adapter_key != "synthetic_delivery_v1"
+            or source_row.mapping_state != "ready"
+            or not source_row.is_active
+        ):
+            raise MaintenanceOperationError("发货来源适配器当前不可用")
+        if source_row.project_id != project_id:
+            raise MaintenanceOperationPermissionError("发货明细不属于当前稳定项目")
+        saved_lines.append(
+            MaintenanceSiteIssueLine(
+                issue_line_id=str(uuid4()),
+                issue_id=issue_id,
+                line_no=line_no,
+                part_id=source_row.part_id,
+                pn=_required(source_row.pn, "料号", 128),
+                quantity=requested["quantity"],
+                delivery_line_id=source_row.delivery_line_id,
+                source_order_id=source_row.source_order_id,
+                source_line_id=source_row.source_line_id,
+                serial_number=source_row.serial_number,
+                linked_purchase_line_id=source_row.linked_purchase_line_id,
+                manual_unit_cost=None,
+                reference_sample_ids=[],
+                reference_sample_count=0,
+                reference_samples=[],
+                algorithm_version=maintenance_consumption_cost.ALGORITHM_VERSION,
+                version=1,
+            )
+        )
+
+    row = MaintenanceSiteIssue(
+        issue_id=issue_id,
+        project_id=project_id,
+        issue_no=f"LYD-{issue_date:%Y%m%d}-{uuid4().hex[:12].upper()}",
+        issue_date=issue_date,
+        raw_status="draft",
+        status_mapping_state="mapped",
+        normalized_status="draft",
+        status_mapping_version="site-issue-v2-workflow-v1",
+        source="site_issue_v2",
+        import_batch_id=None,
+        idempotency_key=clean_key,
+        request_fingerprint=fingerprint,
+        receiver=clean_receiver,
+        issued_by=clean_issued_by,
+        site_location=clean_location,
+        created_by=_required(operated_by, "操作人"),
+        version=1,
+    )
+    db.add(row)
+    db.add_all(saved_lines)
+    db.flush()
+    payload = site_issue_dict(row, saved_lines)
+    _fact_audit(
+        db,
+        project_id=project_id,
+        entity_type="site_issue",
+        entity_id=row.issue_id,
+        action="draft_create",
+        before=None,
+        after=payload,
+        reason=clean_reason,
+        operated_by=operated_by,
+    )
+    bump_workbook_revision(db, project_id=project_id)
+    db.flush()
+    return payload
+
+
 def create_site_issue(
     db: Session,
     *,
@@ -889,6 +2208,10 @@ def update_site_issue_status(
     )
     if row is None:
         return None
+    if row.source == "site_issue_v2":
+        raise MaintenanceOperationError(
+            "新版现场领用单必须使用预览、确认、更正或作废命令"
+        )
     lines = list(
         db.scalars(
             select(MaintenanceSiteIssueLine)
@@ -1044,7 +2367,7 @@ def list_cost_gaps(
     gap_filters = (
         MaintenanceSiteIssue.project_id == project_id,
         MaintenanceSiteIssue.status_mapping_state == "mapped",
-        MaintenanceSiteIssue.normalized_status == "confirmed",
+        MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
         MaintenanceSiteIssueLine.cost_amount.is_(None),
     )
     total = int(
@@ -1225,7 +2548,7 @@ def recompute_cost_gaps(
     candidate_filters = (
         MaintenanceSiteIssue.project_id == project_id,
         MaintenanceSiteIssue.status_mapping_state == "mapped",
-        MaintenanceSiteIssue.normalized_status == "confirmed",
+        MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
     )
     candidate_total = int(
         db.scalar(
@@ -1362,7 +2685,10 @@ def fill_manual_cost(
         raise MaintenanceOperationConflict(
             f"领用成本明细已变化（当前版本 {line.version}），请刷新后重试"
         )
-    if issue.status_mapping_state != "mapped" or issue.normalized_status != "confirmed":
+    if (
+        issue.status_mapping_state != "mapped"
+        or issue.normalized_status not in {"confirmed", "corrected"}
+    ):
         raise MaintenanceOperationError("只有已确认且状态已映射的现场领用可以补价")
     audit_as_of = business_today()
     manual_unit_cost = _money_amount(manual_unit_cost, label="人工未税单价")
@@ -2526,7 +3852,7 @@ def project_workspace(
 
     eligible_issue = and_(
         MaintenanceSiteIssue.status_mapping_state == "mapped",
-        MaintenanceSiteIssue.normalized_status == "confirmed",
+        MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
     )
     issue_fact = db.execute(
         select(
@@ -2738,7 +4064,7 @@ def project_workspace(
     for issue, line in issue_rows:
         eligible = (
             issue.status_mapping_state == "mapped"
-            and issue.normalized_status == "confirmed"
+            and issue.normalized_status in {"confirmed", "corrected"}
         )
         requisition_rows.append(
             {
@@ -3230,7 +4556,10 @@ def _project_cards_for_ids(
         )
     ):
         facts = cost_facts[project_id]
-        eligible = mapping_state == "mapped" and normalized_status == "confirmed"
+        eligible = mapping_state == "mapped" and normalized_status in {
+            "confirmed",
+            "corrected",
+        }
         if eligible and cost_amount_inc_tax is None:
             facts["cost_gap_count"] += 1
         elif eligible:
@@ -3481,7 +4810,7 @@ def _directory_reminder_query(
     )
     eligible_issue = and_(
         MaintenanceSiteIssue.status_mapping_state == "mapped",
-        MaintenanceSiteIssue.normalized_status == "confirmed",
+        MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
     )
     issue_by_project = (
         select(
