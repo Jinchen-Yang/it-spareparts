@@ -389,8 +389,9 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(within(tracking).getByText("2026-12-31")).toBeInTheDocument();
     expect(within(tracking).getByText(/XSDD-001 · 第 2 期/)).toBeInTheDocument();
     expect(within(tracking).getByText("已逾期 7 天")).toBeInTheDocument();
-    expect(within(tracking).getByText("验收审批业务角色尚未配置")).toBeInTheDocument();
-    expect(within(tracking).getByRole("button", { name: /上传验收附件/ }))
+    expect(await within(tracking).findByText("验收审批业务角色尚未配置"))
+      .toBeInTheDocument();
+    expect(await within(tracking).findByRole("button", { name: /上传验收附件/ }))
       .toBeInTheDocument();
 
     const preview = screen.getByTestId("workbook-four-sheet-preview");
