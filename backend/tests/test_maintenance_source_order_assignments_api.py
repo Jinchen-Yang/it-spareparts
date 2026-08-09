@@ -700,6 +700,7 @@ def test_directory_and_write_permission_matrix_fail_closed(db):
         username="source_assignment_no_page",
         permissions={
             "page_maintenance": False,
+            "page_maintenance_beta": True,
             "data_profit": True,
             "action_maintenance_project_manage": True,
         },
@@ -712,6 +713,7 @@ def test_directory_and_write_permission_matrix_fail_closed(db):
         username="source_assignment_readonly",
         permissions={
             "page_maintenance": True,
+            "page_maintenance_beta": True,
             "data_profit": False,
             "action_maintenance_project_manage": False,
         },
@@ -735,6 +737,7 @@ def test_directory_and_write_permission_matrix_fail_closed(db):
         username="source_assignment_no_profit",
         permissions={
             "page_maintenance": True,
+            "page_maintenance_beta": True,
             "data_profit": False,
             "action_maintenance_project_manage": True,
         },
@@ -746,6 +749,7 @@ def test_directory_and_write_permission_matrix_fail_closed(db):
         username="source_assignment_no_action",
         permissions={
             "page_maintenance": True,
+            "page_maintenance_beta": True,
             "data_profit": True,
             "action_maintenance_project_manage": False,
         },
@@ -1213,6 +1217,7 @@ def test_project_manager_directory_is_owned_assigned_only_and_writes_need_full_s
         role="purchaser",
         permissions={
             "page_maintenance": True,
+            "page_maintenance_beta": True,
             "data_purchase_cost": True,
             "data_profit": True,
             "action_maintenance_project_manage": True,

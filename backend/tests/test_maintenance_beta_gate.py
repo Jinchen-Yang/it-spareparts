@@ -114,6 +114,7 @@ def test_beta_requires_explicit_user_whitelist_even_when_global_gate_is_open(db)
     original = settings.maintenance_beta_enabled
     try:
         settings.maintenance_beta_enabled = True
+        assert TestClient(app).get("/api/maintenance/projects/stable").status_code == 401
         assert stable_only.get("/api/maintenance/projects").status_code == 200
         assert stable_only.get("/api/maintenance/projects/stable").status_code == 403
         assert whitelisted.get("/api/maintenance/projects/stable").status_code == 200

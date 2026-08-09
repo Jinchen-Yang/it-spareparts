@@ -960,7 +960,12 @@ def test_contract_amount_permission_hides_lines_total_and_amount_completeness(db
     )
     db.commit()
     username = "maint_project_purchaser"
-    token = _token(db, username=username, role="purchaser")
+    token = _token(
+        db,
+        username=username,
+        role="purchaser",
+        permissions={"page_maintenance_beta": True},
+    )
     user_id = db.scalar(select(SysUser.id).where(SysUser.username == username))
     assert user_id is not None
     db.add(
@@ -1428,15 +1433,19 @@ def test_nonempty_stable_project_facts_block_destructive_schema_downgrade(db):
     db.add(project)
     db.commit()
     db.close()
+    with engine.connect() as connection:
+        versions_before = set(
+            connection.scalars(text("SELECT version_num FROM alembic_version"))
+        )
 
     try:
         with pytest.raises(DBAPIError, match="downgrade blocked"):
             alembic_command.downgrade(_alembic_cfg(), "f1c8e4a7b2d9")
 
         with engine.connect() as connection:
-            assert connection.scalar(
-                text("SELECT version_num FROM alembic_version")
-            ) == ("d8a3c7e4f2b1")
+            assert set(
+                connection.scalars(text("SELECT version_num FROM alembic_version"))
+            ) == versions_before
             assert (
                 connection.scalar(
                     text(
@@ -1447,7 +1456,5 @@ def test_nonempty_stable_project_facts_block_destructive_schema_downgrade(db):
                 == 1
             )
     finally:
-        # The multi-revision downgrade intentionally stops at the project-master
-        # guard. Restore the session database so later test files still run at
-        # the declared head.
+        # 幂等恢复；原子迁移已保证保护检查失败时数据库仍停留在完整 head。
         alembic_command.upgrade(_alembic_cfg(), "head")

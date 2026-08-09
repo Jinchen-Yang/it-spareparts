@@ -161,7 +161,7 @@ def test_preview_apply_post_search_and_resolution_end_to_end(db, monkeypatch):
     assert documents.json()["items"][0]["eligible_line_count"] == 0
     assert (
         documents.json()["items"][0]["project_link_state"]
-        == "assignment_contract_unavailable"
+        == "missing_project_link"
     )
     assert client.get("/api/maintenance/warehouse-documents/search?q=SYN-API").status_code == 405
 
@@ -170,15 +170,16 @@ def test_preview_apply_post_search_and_resolution_end_to_end(db, monkeypatch):
         json={"status": "open", "page": 1, "page_size": 20},
     )
     assert ambiguities.status_code == 200, ambiguities.text
-    blocker = next(
+    project_link_gap = next(
         item for item in ambiguities.json()["items"]
-        if item["ambiguity_type"] == "integration_blocker"
+        if item["ambiguity_type"] == "missing_stable_link"
+        and item["field_code"] == "project"
     )
     blocked_resolution = client.post(
-        f"/api/maintenance/warehouse-ambiguities/{blocker['ambiguity_id']}/resolve",
+        f"/api/maintenance/warehouse-ambiguities/{project_link_gap['ambiguity_id']}/resolve",
         json={
-            "version": blocker["version"],
-            "reason": "合成审核：不能人工关闭依赖阻塞",
+            "version": project_link_gap["version"],
+            "reason": "合成审核：缺少项目关联不能仅确认后关闭",
             "decision": "acknowledge",
         },
     )
@@ -276,6 +277,7 @@ def test_project_scoped_account_sees_no_warehouse_rows_without_205_assignment_co
         password_hash=hash_password("synthetic-password-456"),
         permissions={
             "page_maintenance": True,
+            "page_maintenance_beta": True,
             "action_maintenance_warehouse_manage": True,
         },
     ))
