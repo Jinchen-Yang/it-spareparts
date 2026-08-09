@@ -123,7 +123,7 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
       && permissions.data_purchase_cost === true
       && permissions.action_maintenance_project_manage === true
     ),
-    canReviewMigration: isAdmin || (
+    canReviewMigration: (
       permissions.page_maintenance === true
       && permissions.data_purchase_cost === true
       && permissions.data_profit === true

@@ -56,6 +56,7 @@ class Settings(BaseSettings):
 
     # 成本/库存切换是独立生产闸门；代码、迁移与审批 manifest 都不会自动启用新口径。
     maintenance_cutover_enabled: bool = False
+    maintenance_migration_max_body_bytes: int = 2_000_000
 
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
     # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级

@@ -4,7 +4,7 @@ from datetime import date
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -12,7 +12,6 @@ from app.auth import current_identity
 from app.config import get_settings
 from app.db import get_db
 from app.models.system import SysUser
-from app.security import require_action, require_page
 from app.services import maintenance_migration_runs as runs
 from app.services.maintenance_migration_warehouse import (
     load_project_inventory_movements,
@@ -56,7 +55,7 @@ class ProjectCutoverInput(BaseModel):
     )
     historical_baseline: HistoricalBaselineInput | None = None
     opening_balances: list[OpeningBalanceInput] = Field(
-        default_factory=list, max_length=5000
+        default_factory=list, max_length=runs.MAX_OPENINGS_PER_PROJECT
     )
 
 
@@ -65,7 +64,17 @@ class MigrationPreviewRequest(BaseModel):
 
     idempotency_key: str = Field(min_length=1, max_length=96)
     reason: str = Field(min_length=1, max_length=1000)
-    projects: list[ProjectCutoverInput] = Field(min_length=1, max_length=500)
+    projects: list[ProjectCutoverInput] = Field(
+        min_length=1, max_length=runs.MAX_MIGRATION_PROJECTS
+    )
+
+    @model_validator(mode="after")
+    def validate_total_openings(self):
+        if sum(len(project.opening_balances) for project in self.projects) > (
+            runs.MAX_TOTAL_OPENINGS
+        ):
+            raise ValueError("库存期初候选总数超过安全上限")
+        return self
 
 
 class MigrationSearchRequest(BaseModel):
@@ -106,14 +115,22 @@ class ProjectReconcileSignoffInput(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
     historical_baseline: HistoricalBaselineSignoffInput | None = None
     opening_balances: list[OpeningBalanceSignoffInput] = Field(
-        default_factory=list, max_length=500
+        default_factory=list, max_length=runs.MAX_OPENINGS_PER_PROJECT
     )
 
 
 class MigrationReconcileRequest(MigrationCommandRequest):
     project_signoffs: list[ProjectReconcileSignoffInput] = Field(
-        min_length=1, max_length=50
+        min_length=1, max_length=runs.MAX_MIGRATION_PROJECTS
     )
+
+    @model_validator(mode="after")
+    def validate_total_signoffs(self):
+        if sum(len(item.opening_balances) for item in self.project_signoffs) > (
+            runs.MAX_TOTAL_OPENINGS
+        ):
+            raise ValueError("库存期初签字总数超过安全上限")
+        return self
 
 
 class MigrationApproveRequest(MigrationCommandRequest):
@@ -141,6 +158,27 @@ def _real_operator(db: Session, ident: dict) -> str:
     return username
 
 
+def _migration_operator(
+    db: Session = Depends(get_db), ident: dict = Depends(current_identity)
+) -> str:
+    operator = _real_operator(db, ident)
+    permissions = ident.get("perms")
+    required = (
+        "page_maintenance",
+        "data_purchase_cost",
+        "data_profit",
+        "action_maintenance_migration_review",
+    )
+    if not isinstance(permissions, dict) or any(
+        permissions.get(key) is not True for key in required
+    ):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "实名账号缺少维保迁移复核或敏感数据权限",
+        )
+    return operator
+
+
 def _project_payloads(body: MigrationPreviewRequest) -> list[dict]:
     return [
         project.model_dump(mode="json", exclude_none=False) for project in body.projects
@@ -157,23 +195,12 @@ def _raise_service_error(exc: Exception) -> None:
     raise exc
 
 
-_access = [
-    Depends(require_page("page_maintenance")),
-    Depends(
-        require_action(
-            "action_maintenance_migration_review", require_data="data_profit"
-        )
-    ),
-]
-
-
-@router.post("/preview", status_code=status.HTTP_201_CREATED, dependencies=_access)
+@router.post("/preview", status_code=status.HTTP_201_CREATED)
 def create_preview(
     body: MigrationPreviewRequest,
     db: Session = Depends(get_db),
-    ident: dict = Depends(current_identity),
+    operator: str = Depends(_migration_operator),
 ) -> dict:
-    operator = _real_operator(db, ident)
     try:
         result = runs.create_preview_run(
             db,
@@ -190,10 +217,11 @@ def create_preview(
         _raise_service_error(exc)
 
 
-@router.post("/search", dependencies=_access)
+@router.post("/search")
 def search_migration_runs(
     body: MigrationSearchRequest,
     db: Session = Depends(get_db),
+    _operator: str = Depends(_migration_operator),
 ) -> dict:
     try:
         return runs.search_runs(
@@ -206,10 +234,11 @@ def search_migration_runs(
         _raise_service_error(exc)
 
 
-@router.get("/{run_id}", dependencies=_access)
+@router.get("/{run_id}")
 def get_migration_run(
     run_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
+    _operator: str = Depends(_migration_operator),
 ) -> dict:
     try:
         return runs.get_run_detail(db, run_id=run_id)
@@ -217,7 +246,7 @@ def get_migration_run(
         _raise_service_error(exc)
 
 
-@router.get("/{run_id}/projects/{project_id}/evidence", dependencies=_access)
+@router.get("/{run_id}/projects/{project_id}/evidence")
 def get_migration_project_evidence(
     run_id: str = Path(..., min_length=1, max_length=36),
     project_id: str = Path(..., min_length=1, max_length=36),
@@ -225,6 +254,7 @@ def get_migration_project_evidence(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=100),
     db: Session = Depends(get_db),
+    _operator: str = Depends(_migration_operator),
 ) -> dict:
     try:
         return runs.get_project_evidence(
@@ -239,14 +269,13 @@ def get_migration_project_evidence(
         _raise_service_error(exc)
 
 
-@router.post("/{run_id}/reconcile", dependencies=_access)
+@router.post("/{run_id}/reconcile")
 def reconcile_migration_run(
     body: MigrationReconcileRequest,
     run_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
-    ident: dict = Depends(current_identity),
+    operator: str = Depends(_migration_operator),
 ) -> dict:
-    operator = _real_operator(db, ident)
     try:
         result = runs.reconcile_run(
             db,
@@ -267,14 +296,13 @@ def reconcile_migration_run(
         _raise_service_error(exc)
 
 
-@router.post("/{run_id}/approve", dependencies=_access)
+@router.post("/{run_id}/approve")
 def approve_migration_run(
     body: MigrationApproveRequest,
     run_id: str = Path(..., min_length=1, max_length=36),
     db: Session = Depends(get_db),
-    ident: dict = Depends(current_identity),
+    operator: str = Depends(_migration_operator),
 ) -> dict:
-    operator = _real_operator(db, ident)
     try:
         result = runs.approve_run(
             db,

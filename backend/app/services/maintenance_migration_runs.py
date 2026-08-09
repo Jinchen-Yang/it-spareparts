@@ -43,6 +43,9 @@ _EVIDENCE_SECTIONS = {
     "opening_balances",
     "inventory_movements",
 }
+MAX_MIGRATION_PROJECTS = 50
+MAX_OPENINGS_PER_PROJECT = 500
+MAX_TOTAL_OPENINGS = 5000
 
 
 class MaintenanceMigrationRunError(ValueError):
@@ -121,8 +124,11 @@ def _normalize_candidate_baseline(value: Any) -> dict[str, Any] | None:
 def _normalize_specs(projects: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     if not projects:
         raise MaintenanceMigrationRunError("迁移项目清单不能为空")
+    if len(projects) > MAX_MIGRATION_PROJECTS:
+        raise MaintenanceMigrationRunError("迁移项目总数超过安全上限")
     output: list[dict[str, Any]] = []
     seen: set[str] = set()
+    total_openings = 0
     for item in projects:
         project_id = _clean_text(item.get("project_id"), "项目稳定编号", max_length=36)
         if project_id in seen:
@@ -140,7 +146,13 @@ def _normalize_specs(projects: Sequence[Mapping[str, Any]]) -> list[dict[str, An
             raise MaintenanceMigrationRunError("可靠历史领用与成本基线不能同时提交")
         openings: list[dict[str, Any]] = []
         opening_keys: set[str] = set()
-        for row in item.get("opening_balances") or []:
+        raw_openings = item.get("opening_balances") or []
+        if len(raw_openings) > MAX_OPENINGS_PER_PROJECT:
+            raise MaintenanceMigrationRunError("单项目库存期初候选超过安全上限")
+        total_openings += len(raw_openings)
+        if total_openings > MAX_TOTAL_OPENINGS:
+            raise MaintenanceMigrationRunError("库存期初候选总数超过安全上限")
+        for row in raw_openings:
             if not isinstance(row, Mapping):
                 raise MaintenanceMigrationRunError("库存期初项无效")
             balance_key = _clean_text(
@@ -246,7 +258,6 @@ def _wrapper(
     return {
         "preview": _jsonable(preview),
         "source_specs": _jsonable(specs),
-        "source_payloads": _jsonable(payloads),
     }
 
 
@@ -543,8 +554,11 @@ def _normalize_project_signoffs(
 ) -> list[dict[str, Any]]:
     if not project_signoffs:
         raise MaintenanceMigrationRunError("逐项目签字清单不能为空")
+    if len(project_signoffs) > MAX_MIGRATION_PROJECTS:
+        raise MaintenanceMigrationRunError("逐项目签字总数超过安全上限")
     normalized: list[dict[str, Any]] = []
     seen_projects: set[str] = set()
+    total_openings = 0
     for signoff in project_signoffs:
         project_id = _clean_text(
             signoff.get("project_id"), "签字项目稳定编号", max_length=36
@@ -577,7 +591,13 @@ def _normalize_project_signoffs(
             }
         normalized_openings: list[dict[str, Any]] = []
         seen_openings: set[str] = set()
-        for opening in signoff.get("opening_balances") or []:
+        raw_openings = signoff.get("opening_balances") or []
+        if len(raw_openings) > MAX_OPENINGS_PER_PROJECT:
+            raise MaintenanceMigrationRunError("单项目库存期初签字超过安全上限")
+        total_openings += len(raw_openings)
+        if total_openings > MAX_TOTAL_OPENINGS:
+            raise MaintenanceMigrationRunError("库存期初签字总数超过安全上限")
+        for opening in raw_openings:
             if not isinstance(opening, Mapping):
                 raise MaintenanceMigrationRunError("库存期初签字项无效")
             opening_id = _clean_text(

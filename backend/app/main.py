@@ -33,6 +33,7 @@ from app.api import (
 )
 from app.config import check_security, get_settings
 from app.db import engine
+from app.http_controls import MigrationHttpControlsMiddleware
 
 _log = logging.getLogger("startup")
 settings = get_settings()
@@ -53,6 +54,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+app.add_middleware(
+    MigrationHttpControlsMiddleware,
+    path_prefix=f"{settings.api_prefix}/maintenance/migration-runs",
+    max_body_bytes=settings.maintenance_migration_max_body_bytes,
 )
 
 app.include_router(auth.router, prefix=settings.api_prefix)

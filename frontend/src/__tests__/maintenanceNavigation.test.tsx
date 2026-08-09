@@ -81,6 +81,20 @@ describe("维保管理信息架构", () => {
     expect(migration?.visibleWhen?.()).toBe(true);
   });
 
+  it("共享管理员被显式关闭迁移权限时不显示迁移核对入口", () => {
+    const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance");
+    const migration = maintenance?.items.find((item) => item.key === "maintenance-migration");
+    localStorage.setItem("role", "admin");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      data_purchase_cost: true,
+      data_profit: true,
+      action_maintenance_migration_review: false,
+    }));
+
+    expect(migration?.visibleWhen?.()).toBe(false);
+  });
+
   it("旧维保路径继续可访问并进入新的稳定项目流程", () => {
     expect(matchNavItem("/maintenance/projects")?.label).toBe("项目面板");
     expect(NAV_REDIRECTS).toContainEqual({

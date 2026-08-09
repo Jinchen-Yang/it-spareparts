@@ -119,6 +119,7 @@ def test_public_api_supports_preview_search_reconcile_and_independent_approval(
         "/api/maintenance/migration-runs/preview", json=_preview_body()
     )
     assert preview_response.status_code == 201, preview_response.text
+    assert preview_response.headers["cache-control"] == "no-store"
     preview = preview_response.json()
     assert preview["status"] == "previewed"
     assert preview["preview"]["approval_blocker_count"] == 2
@@ -128,10 +129,12 @@ def test_public_api_supports_preview_search_reconcile_and_independent_approval(
         json={"statuses": ["previewed"], "page": 1, "page_size": 20},
     )
     assert searched.status_code == 200, searched.text
+    assert searched.headers["cache-control"] == "no-store"
     assert searched.json()["items"][0]["run_id"] == preview["run_id"]
 
     read_back = creator.get(f"/api/maintenance/migration-runs/{preview['run_id']}")
     assert read_back.status_code == 200, read_back.text
+    assert read_back.headers["cache-control"] == "no-store"
     assert read_back.json()["run_id"] == preview["run_id"]
     evidence = creator.get(
         f"/api/maintenance/migration-runs/{preview['run_id']}"
@@ -139,6 +142,7 @@ def test_public_api_supports_preview_search_reconcile_and_independent_approval(
         params={"section": "inventory_movements", "page": 1, "page_size": 1},
     )
     assert evidence.status_code == 200, evidence.text
+    assert evidence.headers["cache-control"] == "no-store"
     assert evidence.json()["items"][0]["document_no"] == "FH-MIGRATION-API"
 
     reconciled_response = creator.post(
@@ -203,6 +207,18 @@ def test_missing_action_permission_and_shared_admin_both_fail_closed(db, monkeyp
     )
     assert shared_response.status_code == 403
 
+    creator = _client(db, username="migration-api-read-seed")
+    created = creator.post(
+        "/api/maintenance/migration-runs/preview", json=_preview_body()
+    ).json()
+    shared_search = shared.post(
+        "/api/maintenance/migration-runs/search",
+        json={"statuses": [], "page": 1, "page_size": 20},
+    )
+    shared_detail = shared.get(f"/api/maintenance/migration-runs/{created['run_id']}")
+    assert shared_search.status_code == 403
+    assert shared_detail.status_code == 403
+
 
 def test_api_rejects_unknown_fields_and_changed_idempotent_command(db, monkeypatch):
     _seed_project(db)
@@ -222,3 +238,41 @@ def test_api_rejects_unknown_fields_and_changed_idempotent_command(db, monkeypat
     changed["reason"] = "复用幂等键但改变审计理由"
     conflict = client.post("/api/maintenance/migration-runs/preview", json=changed)
     assert conflict.status_code == 409
+
+
+def test_preview_request_limits_reject_oversized_body_and_aggregate_candidates(
+    db, monkeypatch
+):
+    _seed_project(db)
+    monkeypatch.setattr(migration_api, "load_project_inventory_movements", _loader)
+    client = _client(db, username="migration-api-size-limit")
+
+    oversized = client.post(
+        "/api/maintenance/migration-runs/preview",
+        content=b"{" + (b"x" * 2_000_001),
+        headers={"content-type": "application/json"},
+    )
+    assert oversized.status_code == 413
+
+    body = _preview_body()
+    template = body["projects"][0]
+    body["projects"] = []
+    for project_index in range(11):
+        project = {
+            **template,
+            "project_id": f"aggregate-project-{project_index}",
+            "opening_balances": [],
+        }
+        for opening_index in range(500):
+            project["opening_balances"].append(
+                {
+                    "balance_key": f"{project_index}:{opening_index}",
+                    "pn": "PN-LIMIT",
+                    "quantity": "1",
+                    "evidence_hash": "b" * 64,
+                }
+            )
+        body["projects"].append(project)
+    aggregate = client.post("/api/maintenance/migration-runs/preview", json=body)
+    assert aggregate.status_code == 422
+    assert "总数" in aggregate.text
