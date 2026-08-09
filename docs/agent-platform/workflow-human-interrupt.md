@@ -99,8 +99,9 @@ in-flight Step 按真实结果结算；执行结果/副作用未知时不得完�
 
 - `active_compute_elapsed`：只累计 worker 内模型/工具/确定性节点实际执行时间；排队、lease、retry wait、
   `paused_recoverable` 和 `waiting_human` 不计入。
-- `autonomous_wall_elapsed`：累计 Task 处于 planning/validated/running/retry_wait 的自然时间，包括排队、
-  模型、工具和退避；`waiting_human` 不计入，但 resolve 后从原累计值继续，不能刷新预算。
+- `autonomous_wall_elapsed`：累计 Task 处于 planning/validated/running 的自然时间，包括排队、模型、
+  工具和退避；`retry_wait` 是 Step 状态，此时 Task 保持 `running`，退避仍累计；`waiting_human`
+  不计入，但 resolve 后从原累计值继续，不能刷新预算。
 - `interrupt_expires_at`：每次 Interrupt 打开时固定，首版最长 7 天；与上述两个预算无关，重试、读取、
   worker 重启和 Task resume 都不能延长。
 
