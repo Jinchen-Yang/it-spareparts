@@ -27,6 +27,14 @@ from app.models.maintenance_project_operations import (
     MaintenanceSiteIssue,
     MaintenanceSiteIssueLine,
 )
+from app.models.maintenance_migration import (
+    MaintenanceHistoricalCostBaseline,
+    MaintenanceInventoryOpeningBalance,
+    MaintenanceMigrationDiscrepancy,
+    MaintenanceMigrationEvent,
+    MaintenanceMigrationRun,
+    MaintenanceProjectCutoverPlan,
+)
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -81,6 +89,12 @@ __all__ = [
     "MaintenanceProjectWorkbookValidation",
     "MaintenanceSiteIssue",
     "MaintenanceSiteIssueLine",
+    "MaintenanceMigrationRun",
+    "MaintenanceProjectCutoverPlan",
+    "MaintenanceHistoricalCostBaseline",
+    "MaintenanceInventoryOpeningBalance",
+    "MaintenanceMigrationDiscrepancy",
+    "MaintenanceMigrationEvent",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",

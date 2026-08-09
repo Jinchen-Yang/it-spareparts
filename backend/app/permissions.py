@@ -41,6 +41,8 @@ ACTION_KEYS: list[str] = [
     "action_maintenance_roundtrip_apply",
     # 维护稳定维保项目主档（建档/改展示信息/归档恢复）。
     "action_maintenance_project_manage",
+    # 成本/库存切换 dry-run、实名对账与双人审批；不包含生产激活。
+    "action_maintenance_migration_review",
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ACTION_KEYS, *ROW_KEYS]
@@ -72,6 +74,7 @@ LABELS: dict[str, str] = {
     "action_data_quality_review": "数据疑点核实（逐条确认/重新打开）",
     "action_maintenance_roundtrip_apply": "维保固定工作簿直接回填",
     "action_maintenance_project_manage": "维保项目主档管理",
+    "action_maintenance_migration_review": "维保迁移对账与审批",
 }
 
 
@@ -92,7 +95,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     # boss 由 _full() 生成会把全部动作打开；账号管理与数据疑点核实必须显式关闭。
     "boss": {**_full(), "page_accounts": False, "action_account_manage": False,
              "action_data_quality_review": False,
-             "action_maintenance_project_manage": False},
+             "action_maintenance_project_manage": False,
+             "action_maintenance_migration_review": False},
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
     # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
     # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
@@ -104,6 +108,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "action_data_quality_review": False,
                  "action_maintenance_roundtrip_apply": False,
                  "action_maintenance_project_manage": False,
+                 "action_maintenance_migration_review": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
@@ -127,6 +132,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_data_quality_review": False,
         "action_maintenance_roundtrip_apply": False,
         "action_maintenance_project_manage": False,
+        "action_maintenance_migration_review": False,
         "own_customers_only": True,
     },
     "purchaser": {
@@ -150,6 +156,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         # 管理员可给同时具备成本+利润可见权限的指定工作人员单独授权。
         "action_maintenance_roundtrip_apply": False,
         "action_maintenance_project_manage": False,
+        "action_maintenance_migration_review": False,
         "own_customers_only": False,
     },
 }
@@ -190,6 +197,7 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     "action_data_quality_review": "data_purchase_cost",
     "action_maintenance_roundtrip_apply": "data_profit",
     "action_maintenance_project_manage": "data_profit",
+    "action_maintenance_migration_review": "data_profit",
 }
 
 # "页面内操作必须能进页面"的动作→页面依赖（权限中心 v2）：改账号权限先要能打开
@@ -200,6 +208,7 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_data_quality_review": "page_governance",
     "action_maintenance_roundtrip_apply": "page_maintenance",
     "action_maintenance_project_manage": "page_maintenance",
+    "action_maintenance_migration_review": "page_maintenance",
 }
 
 # 数据之间的可推导依赖：营收在经营报表中是公开口径，毛利一旦可见，
@@ -275,6 +284,7 @@ HIGH_RISK_KEYS: set[str] = {
     "action_account_manage",
     "action_maintenance_roundtrip_apply",
     "action_maintenance_project_manage",
+    "action_maintenance_migration_review",
 }
 
 # 前端矩阵五分组（顺序即展示序）：页面入口 / 数据可见 / 操作能力 / 行级范围 / 高风险管理
@@ -299,7 +309,8 @@ UI_GROUPS: list[dict] = [
      "keys": list(ROW_KEYS)},
     {"key": "admin", "label": "高风险管理能力",
      "hint": "接近管理员的能力，只有管理员本人可以授予或撤销，请谨慎开放。",
-     "keys": ["page_accounts", "action_account_manage"]},
+     "keys": ["page_accounts", "action_account_manage",
+              "action_maintenance_migration_review"]},
 ]
 
 # 每个权限键的业务语言八要素（甲方语言，不是开发语言）。
@@ -516,6 +527,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "项目数据维护人员（需单独授权）"],
         "sensitivity": "critical",
         "risk": "项目身份会成为回款、领用、费用和待办的关联地基；误建或误归档会影响后续全链路归集。",
+    },
+    "action_maintenance_migration_review": {
+        "label": "维保迁移对账与审批",
+        "summary": "允许生成成本/库存切换 dry-run、实名对账并审批哈希绑定的 manifest。",
+        "can": "查看逐项目差异，确认历史成本基线与库存期初，并在职责分离后生成审批 manifest。",
+        "cannot": "不能启用生产开关、不能执行生产迁移，也不能用文字理由跳过未解决 blocker。",
+        "typical": ["管理员", "独立复核人（需单独授权）"],
+        "sensitivity": "critical",
+        "risk": "错误审批会把成本和库存切换到错误基线；系统默认仅管理员持有且生产开关仍独立关闭。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {
