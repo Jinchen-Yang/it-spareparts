@@ -32,7 +32,7 @@ flowchart LR
 |---|---|---|---|
 | Capability | 把“工具能做什么、影响什么、谁能用、数据去哪”从提示词变成服务端契约 | 登录身份、RBAC、业务服务、出境策略 | Plan Validator、Tool Gateway、审计 |
 | Agent Task | 让一次复杂目标拥有稳定身份和生命周期 | 用户目标、Capability | Task Plan、运行账本、前端任务页 |
-| Task Plan | 把模型建议变成可验证的 DAG，阻止无限循环和越权工具 | Agent Task、Capability、预算 | Scheduler、LangGraph adapter |
+| Task Plan | 把模型建议变成可验证的有界计划；首版串行，业务图仅允许静态注册 | Agent Task、Capability、预算 | Scheduler、LangGraph adapter |
 | Agent Step | 让每次能力调用可重试、可恢复、可追责 | Task Plan、依赖步骤 | Tool Gateway、Evidence Package |
 | Evidence Package | 让业务建议能回放，不靠模型“说得像” | 只读事实、规则版本、步骤输出 | 补库评审、人工审核、解释生成 |
 | Change Proposal | 把灵活表格处理限制为可审阅的 Patch/Diff | Human Template、输入 Artifact | Validator、Artifact Service |
@@ -81,7 +81,7 @@ pending | planning | validated | running | paused_recoverable | waiting_human | 
 in-flight Step 必须按真实结果结算；若执行结果/副作用仍未知，Task 不得进入终态，应保持
 `cancelling` 或进入 `paused_recoverable` 等待 reconcile。终态 Task 下不得留有
 `planned/running/retry_wait` Step，也不得把未执行伪造成失败/完成，或把已完成伪造成取消。
-不允许从终态恢复；恢复必须新建 attempt 并保留旧证据。
+不允许从终态恢复；终态后重跑必须创建带 `parent_task_id` 的新 Task，并保留旧 Task/Step/Evidence。
 LangGraph checkpoint 是运行实现，不是业务事实源；平台自己的 task/step 账本才是审计真相。
 
 ### 3.2 Artifact 聚合
@@ -142,7 +142,7 @@ legacy 必须先分类再授权：
 
 ## 4. 只读能力策略
 
-允许的效果类型只有；一个复合能力可以声明多个 effect：
+允许的效果类型只有以下三类；一个复合能力可以声明多个 effect：
 
 | Effect | 含义 | 示例 |
 |---|---|---|
