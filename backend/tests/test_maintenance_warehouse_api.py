@@ -115,6 +115,7 @@ def _real_admin(db) -> TestClient:
         role="admin",
         display_name="合成仓库管理员",
         password_hash=hash_password("synthetic-password-123"),
+        permissions={"page_maintenance_beta": True},
     ))
     db.commit()
     client = TestClient(app)
