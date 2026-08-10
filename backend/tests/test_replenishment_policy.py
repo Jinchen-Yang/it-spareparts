@@ -1,3 +1,4 @@
+import json
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -96,13 +97,14 @@ def _review(
     as_of: date = AS_OF,
     policy_version: str = "replenishment-v1-shadow",
     pn_display_snapshot: str | None = "PN-001",
+    requested_qty: Decimal = Decimal("5.000"),
 ) -> ReplenishmentReviewInput:
     return ReplenishmentReviewInput(
         request=ReplenishmentRequest(
             source_application_ref=source_application_ref,
             source_snapshot_fingerprint=source_snapshot_fingerprint,
             pn_display_snapshot=pn_display_snapshot,
-            requested_qty=Decimal("5.000"),
+            requested_qty=requested_qty,
         ),
         canonical_part_id=canonical_part_id,
         server=ServerReviewContext(as_of=as_of),
@@ -197,6 +199,89 @@ def test_request_rejects_quantity_outside_numeric_14_3(quantity: Decimal) -> Non
             pn_display_snapshot="PN-001",
             requested_qty=quantity,
         )
+
+
+def test_quantity_is_canonical_scale_three_in_input_and_sealed_evidence() -> None:
+    serialized = {
+        evaluate_replenishment(
+            _review(requested_qty=quantity)
+        ).evidence.model_dump_json()
+        for quantity in (Decimal("5"), Decimal("5.0"), Decimal("5.000"))
+    }
+
+    assert len(serialized) == 1
+    canonical_json = serialized.pop()
+    assert (
+        ReplenishmentEvidence.model_validate_json(canonical_json).model_dump_json()
+        == canonical_json
+    )
+    evidence = evaluate_replenishment(_review(requested_qty=Decimal("5"))).evidence
+    assert evidence.requested_qty.as_tuple().exponent == -3
+
+
+def test_quantity_rejects_oversized_representation_before_it_can_be_sealed() -> None:
+    oversized = Decimal("5." + ("0" * 100_000))
+    request_payload = {
+        "source_application_ref": "application-v7",
+        "source_snapshot_fingerprint": "f" * 64,
+        "pn_display_snapshot": "PN-001",
+        "requested_qty": oversized,
+    }
+    with pytest.raises(ValidationError, match="representation"):
+        ReplenishmentRequest.model_validate(request_payload)
+
+    evidence_payload = evaluate_replenishment(_review()).evidence.model_dump(
+        mode="python"
+    )
+    evidence_payload["requested_qty"] = oversized
+    with pytest.raises(ValidationError, match="representation"):
+        ReplenishmentEvidence.model_validate(evidence_payload)
+
+    sealed_json_payload = evaluate_replenishment(_review()).evidence.model_dump(
+        mode="json"
+    )
+    sealed_json_payload["requested_qty"] = "5." + ("0" * 100_000)
+    with pytest.raises(ValidationError, match="representation"):
+        ReplenishmentEvidence.model_validate_json(json.dumps(sealed_json_payload))
+
+    raw_json = json.dumps(
+        {
+            **request_payload,
+            "requested_qty": "5." + ("0" * 100_000),
+        }
+    )
+    with pytest.raises(ValidationError, match="representation"):
+        ReplenishmentRequest.model_validate_json(raw_json)
+
+
+def test_canonical_part_id_respects_postgresql_integer_bound() -> None:
+    oversized = 2_147_483_648
+    review_payload = _review().model_dump(mode="python")
+    review_payload["canonical_part_id"] = oversized
+    with pytest.raises(ValidationError):
+        ReplenishmentReviewInput.model_validate(review_payload)
+
+    evidence_payload = evaluate_replenishment(_review()).evidence.model_dump(
+        mode="python"
+    )
+    evidence_payload["canonical_part_id"] = oversized
+    with pytest.raises(ValidationError):
+        ReplenishmentEvidence.model_validate(evidence_payload)
+
+
+def test_order_count_respects_postgresql_bigint_bound() -> None:
+    oversized = 9_223_372_036_854_775_808
+    review_payload = _review().model_dump(mode="python")
+    review_payload["commercial"]["purchase"]["order_count"] = oversized
+    with pytest.raises(ValidationError):
+        ReplenishmentReviewInput.model_validate(review_payload)
+
+    evidence_payload = evaluate_replenishment(_review()).evidence.model_dump(
+        mode="python"
+    )
+    evidence_payload["purchase"]["order_count"] = oversized
+    with pytest.raises(ValidationError):
+        ReplenishmentEvidence.model_validate(evidence_payload)
 
 
 @pytest.mark.parametrize("fingerprint", ["F" * 64, "f" * 63, "z" * 64])
@@ -816,3 +901,38 @@ def test_sealed_payload_rejects_noncanonical_collection_order() -> None:
 
     with pytest.raises(ValidationError, match="canonical"):
         ReplenishmentEvidence.model_validate(payload)
+
+
+def test_sealed_payload_rejects_batch_file_type_from_the_wrong_side() -> None:
+    evidence = evaluate_replenishment(_review()).evidence
+    payload = evidence.model_dump(mode="json")
+    purchase_refs = payload["purchase"]["coverage"]["source_batch_refs"]
+    purchase_refs[0]["file_type"] = CommercialSide.SALES.value
+
+    with pytest.raises(ValidationError, match="file type.*side"):
+        ReplenishmentEvidence.model_validate_json(json.dumps(payload))
+
+
+def test_sealed_payload_rejects_cross_side_batch_identity_reuse() -> None:
+    evidence = evaluate_replenishment(_review()).evidence
+    payload = evidence.model_dump(mode="json")
+    purchase_ref = payload["purchase"]["coverage"]["source_batch_refs"][0]
+    sales_ref = payload["sales"]["coverage"]["source_batch_refs"][0]
+    sales_ref["batch_id"] = purchase_ref["batch_id"]
+    sales_ref["file_sha256"] = purchase_ref["file_sha256"]
+
+    with pytest.raises(ValidationError, match="batch.*identity"):
+        ReplenishmentEvidence.model_validate_json(json.dumps(payload))
+
+
+def test_sealed_payload_rejects_same_side_batch_content_drift() -> None:
+    evidence = evaluate_replenishment(_review()).evidence
+    payload = evidence.model_dump(mode="json")
+    purchase_refs = payload["purchase"]["coverage"]["source_batch_refs"]
+    purchase_refs.append({**purchase_refs[0], "file_sha256": "b" * 64})
+    purchase_refs.sort(
+        key=lambda ref: (ref["file_type"], ref["batch_id"], ref["file_sha256"])
+    )
+
+    with pytest.raises(ValidationError, match="batch.*identity"):
+        ReplenishmentEvidence.model_validate_json(json.dumps(payload))

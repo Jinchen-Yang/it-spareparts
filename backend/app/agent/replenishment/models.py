@@ -1,11 +1,18 @@
 import calendar
 import unicodedata
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 
 class _StrictFrozenModel(BaseModel):
@@ -21,10 +28,15 @@ Numeric14Scale3 = Annotated[
     Decimal,
     Field(gt=0, max_digits=14, decimal_places=3, allow_inf_nan=False),
 ]
+CanonicalPartId = Annotated[int, Field(gt=0, le=2_147_483_647)]
+OrderCount = Annotated[int, Field(ge=0, le=9_223_372_036_854_775_807)]
 BatchManifestRefs = Annotated[tuple["BatchManifest", ...], Field(max_length=32)]
 VerifiedBatchRefs = Annotated[tuple["VerifiedBatchRef", ...], Field(max_length=32)]
 EvidenceRefs = Annotated[tuple["EvidenceRef", ...], Field(max_length=8)]
 SealedEvidenceRefs = Annotated[tuple["EvidenceRef", ...], Field(max_length=24)]
+
+_QUANTITY_QUANTUM = Decimal("0.001")
+_MAX_QUANTITY_REPRESENTATION_LENGTH = 32
 
 
 def _strip_and_reject_control_characters(value: object) -> object:
@@ -39,6 +51,35 @@ def _require_timezone_aware(value: datetime | None) -> datetime | None:
     if value is not None and (value.tzinfo is None or value.utcoffset() is None):
         raise ValueError("last_successful_import_at must be timezone-aware")
     return value
+
+
+def _prepare_quantity(value: object, info: ValidationInfo) -> object:
+    if not isinstance(value, str):
+        return value
+    if len(value) > _MAX_QUANTITY_REPRESENTATION_LENGTH:
+        raise ValueError("quantity representation exceeds the safe length")
+    if info.mode == "json":
+        try:
+            return Decimal(value)
+        except InvalidOperation as exc:
+            raise ValueError("quantity representation is invalid") from exc
+    return value
+
+
+def _canonicalize_quantity(value: Decimal) -> Decimal:
+    decimal_tuple = value.as_tuple()
+    if (
+        len(decimal_tuple.digits) > _MAX_QUANTITY_REPRESENTATION_LENGTH
+        or abs(decimal_tuple.exponent) > _MAX_QUANTITY_REPRESENTATION_LENGTH
+    ):
+        raise ValueError("quantity representation exceeds the safe length")
+    try:
+        canonical = value.quantize(_QUANTITY_QUANTUM)
+    except InvalidOperation as exc:
+        raise ValueError("quantity cannot be represented at scale three") from exc
+    if canonical != value:
+        raise ValueError("quantity has more than three decimal places")
+    return canonical
 
 
 class CommercialWindow(_StrictFrozenModel):
@@ -72,6 +113,12 @@ class ReplenishmentRequest(_StrictFrozenModel):
     _sanitize_text = field_validator(
         "source_application_ref", "pn_display_snapshot", mode="before"
     )(_strip_and_reject_control_characters)
+    _prepare_requested_quantity = field_validator("requested_qty", mode="before")(
+        _prepare_quantity
+    )
+    _canonicalize_requested_quantity = field_validator("requested_qty")(
+        _canonicalize_quantity
+    )
 
 
 class CommercialSide(StrEnum):
@@ -168,8 +215,8 @@ class CommercialCoverage(_StrictFrozenModel):
 
 
 class CommercialSideEvidence(_StrictFrozenModel):
-    canonical_part_id: Annotated[int, Field(gt=0)]
-    order_count: Annotated[int, Field(ge=0)]
+    canonical_part_id: CanonicalPartId
+    order_count: OrderCount
     query_window: CommercialWindow
     coverage: CommercialCoverage
 
@@ -191,7 +238,7 @@ class EvidenceRef(_StrictFrozenModel):
     ref_type: EvidenceRefType
     ref_id: BoundedReference
     version: BoundedReference
-    canonical_part_id: Annotated[int, Field(gt=0)]
+    canonical_part_id: CanonicalPartId
     source_snapshot_fingerprint: Sha256Hex
 
     _sanitize_text = field_validator("ref_id", "version", mode="before")(
@@ -229,7 +276,7 @@ class ShadowPolicy(_StrictFrozenModel):
 
 class ReplenishmentReviewInput(_StrictFrozenModel):
     request: ReplenishmentRequest
-    canonical_part_id: Annotated[int, Field(gt=0)]
+    canonical_part_id: CanonicalPartId
     server: ServerReviewContext
     commercial: CommercialEvidence
     supporting: SupportingContext
@@ -259,7 +306,7 @@ class SealedCommercialCoverage(_StrictFrozenModel):
 
 
 class SealedCommercialSideEvidence(_StrictFrozenModel):
-    order_count: Annotated[int, Field(ge=0)]
+    order_count: OrderCount
     coverage: SealedCommercialCoverage
 
 
@@ -267,7 +314,7 @@ class ReplenishmentEvidence(_StrictFrozenModel):
     schema_version: Literal["replenishment-evidence/v1"] = "replenishment-evidence/v1"
     source_application_ref: BoundedReference
     source_snapshot_fingerprint: Sha256Hex
-    canonical_part_id: Annotated[int, Field(gt=0)]
+    canonical_part_id: CanonicalPartId
     requested_qty: Numeric14Scale3
     as_of: date
     window: CommercialWindow
@@ -286,6 +333,12 @@ class ReplenishmentEvidence(_StrictFrozenModel):
 
     _sanitize_reference = field_validator("source_application_ref", mode="before")(
         _strip_and_reject_control_characters
+    )
+    _prepare_requested_quantity = field_validator("requested_qty", mode="before")(
+        _prepare_quantity
+    )
+    _canonicalize_requested_quantity = field_validator("requested_qty")(
+        _canonicalize_quantity
     )
 
     @model_validator(mode="after")
@@ -312,13 +365,28 @@ class ReplenishmentEvidence(_StrictFrozenModel):
             previous_version = supporting_versions.setdefault(ref_identity, ref.version)
             if previous_version != ref.version:
                 raise ValueError("supporting evidence ref has conflicting versions")
-        for coverage in (self.purchase.coverage, self.sales.coverage):
+        seen_batches: dict[str, tuple[CommercialSide, str]] = {}
+        for expected_side, coverage in (
+            (CommercialSide.PURCHASE, self.purchase.coverage),
+            (CommercialSide.SALES, self.sales.coverage),
+        ):
             batch_keys = [
                 (ref.file_type.value, ref.batch_id, ref.file_sha256)
                 for ref in coverage.source_batch_refs
             ]
             if batch_keys != sorted(set(batch_keys)):
                 raise ValueError("batch refs must be canonical and unique")
+            for ref in coverage.source_batch_refs:
+                if ref.file_type is not expected_side:
+                    raise ValueError(
+                        "batch ref file type does not match sealed evidence side"
+                    )
+                identity = (ref.file_type, ref.file_sha256)
+                previous_identity = seen_batches.setdefault(ref.batch_id, identity)
+                if previous_identity != identity:
+                    raise ValueError(
+                        "batch ref identity conflicts within sealed evidence"
+                    )
         if any(
             ref.canonical_part_id != self.canonical_part_id
             or ref.source_snapshot_fingerprint != self.source_snapshot_fingerprint
