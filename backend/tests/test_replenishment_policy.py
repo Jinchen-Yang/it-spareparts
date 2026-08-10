@@ -1,0 +1,491 @@
+from datetime import date, datetime
+from decimal import Decimal
+from zoneinfo import ZoneInfo
+
+import pytest
+from pydantic import ValidationError
+
+from app.agent.replenishment.models import (
+    BatchManifest,
+    BatchStatus,
+    CommercialCoverage,
+    CommercialEvidence,
+    CommercialSide,
+    CommercialSideEvidence,
+    CommercialWindow,
+    CompletenessStatus,
+    EvidenceRef,
+    EvidenceRefType,
+    PolicyCaveat,
+    ReplenishmentOutcome,
+    ReplenishmentRequest,
+    ReplenishmentReviewInput,
+    ServerReviewContext,
+    ShadowPolicy,
+    SupportingContext,
+    TechnicalFailureCode,
+)
+from app.agent.replenishment.policy import (
+    ReplenishmentTechnicalError,
+    commercial_window,
+    evaluate_replenishment,
+)
+
+
+AS_OF = date(2026, 8, 10)
+OBSERVED_AT = datetime(2026, 8, 10, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+
+def _batch(side: CommercialSide, hash_character: str = "a") -> BatchManifest:
+    file_sha256 = hash_character * 64
+    return BatchManifest(
+        batch_id=f"{side.value}-batch-v1",
+        batch_status=BatchStatus.SUCCESS,
+        file_type=side,
+        import_batch_sha256=file_sha256,
+        raw_file_sha256=file_sha256,
+        archived_file_sha256=file_sha256,
+    )
+
+
+def _side_evidence(
+    side: CommercialSide,
+    *,
+    count: int = 0,
+    completeness: CompletenessStatus = CompletenessStatus.COMPLETE,
+    coverage_through: date = AS_OF,
+    batches: tuple[BatchManifest, ...] | None = None,
+    lineage_verified: bool = True,
+    query_window: CommercialWindow | None = None,
+) -> CommercialSideEvidence:
+    return CommercialSideEvidence(
+        order_count=count,
+        query_window=query_window or commercial_window(AS_OF),
+        coverage=CommercialCoverage(
+            coverage_through=coverage_through,
+            completeness_status=completeness,
+            source_batch_refs=(_batch(side),) if batches is None else batches,
+            lineage_verified=lineage_verified,
+            last_successful_import_at=OBSERVED_AT,
+        ),
+    )
+
+
+def _review(
+    *,
+    purchase: CommercialSideEvidence | None = None,
+    sales: CommercialSideEvidence | None = None,
+    supporting: SupportingContext | None = None,
+) -> ReplenishmentReviewInput:
+    return ReplenishmentReviewInput(
+        request=ReplenishmentRequest(
+            source_application_ref="application-v7",
+            pn="PN-001",
+            requested_qty=Decimal("5.000"),
+        ),
+        server=ServerReviewContext(as_of=AS_OF),
+        commercial=CommercialEvidence(
+            purchase=purchase or _side_evidence(CommercialSide.PURCHASE),
+            sales=sales or _side_evidence(CommercialSide.SALES),
+        ),
+        supporting=supporting or SupportingContext(),
+        policy=ShadowPolicy(),
+    )
+
+
+def test_commercial_window_is_a_closed_six_calendar_month_interval() -> None:
+    window = commercial_window(date(2026, 8, 31))
+
+    assert window.start == date(2026, 2, 28)
+    assert window.end == date(2026, 8, 31)
+    assert window.inclusive is True
+
+
+def test_request_normalizes_bounded_pn_but_never_accepts_client_as_of() -> None:
+    request = ReplenishmentRequest(
+        source_application_ref="application-v7",
+        pn="  PN-001  ",
+        requested_qty=Decimal("5.000"),
+    )
+
+    assert request.pn == "PN-001"
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        ReplenishmentRequest(
+            source_application_ref="application-v7",
+            pn="PN-001",
+            requested_qty=Decimal("5.000"),
+            as_of=date(2026, 8, 10),
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("pn", "PN-\x00-001"),
+        ("pn", "PN-\n001"),
+        ("source_application_ref", "application\u202ev7"),
+        ("pn", "x" * 129),
+        ("source_application_ref", "x" * 129),
+    ],
+)
+def test_request_rejects_control_characters_and_string_overflow(
+    field: str, value: str
+) -> None:
+    payload = {
+        "source_application_ref": "application-v7",
+        "pn": "PN-001",
+        "requested_qty": Decimal("5.000"),
+    }
+    payload[field] = value
+
+    with pytest.raises(ValidationError):
+        ReplenishmentRequest(**payload)
+
+
+@pytest.mark.parametrize(
+    "quantity",
+    [
+        Decimal("0"),
+        Decimal("-0.001"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        Decimal("1.0001"),
+        Decimal("100000000000.000"),
+    ],
+)
+def test_request_rejects_quantity_outside_numeric_14_3(quantity: Decimal) -> None:
+    with pytest.raises(ValidationError):
+        ReplenishmentRequest(
+            source_application_ref="application-v7",
+            pn="PN-001",
+            requested_qty=quantity,
+        )
+
+
+def test_complete_coverage_proves_zero_and_locks_rpl_100_rejection() -> None:
+    decision = evaluate_replenishment(_review())
+
+    assert decision.outcome is ReplenishmentOutcome.RECOMMEND_REJECT
+    assert decision.rule_code == "RPL-100-no-commercial-history"
+    assert decision.overrideable is False
+    assert decision.evidence.purchase.order_count == 0
+    assert decision.evidence.sales.order_count == 0
+
+
+def _evidence_ref(ref_type: EvidenceRefType, suffix: str) -> EvidenceRef:
+    return EvidenceRef(
+        ref_type=ref_type,
+        ref_id=f"{ref_type.value}-{suffix}",
+        version="v1",
+    )
+
+
+def test_rpl_100_cannot_be_overridden_by_pool_maintenance_or_context() -> None:
+    supporting = SupportingContext(
+        active_pool_refs=(
+            _evidence_ref(EvidenceRefType.ACTIVE_POOL, "a"),
+            _evidence_ref(EvidenceRefType.ACTIVE_POOL, "b"),
+        ),
+        maintenance_refs=(_evidence_ref(EvidenceRefType.MAINTENANCE_USAGE, "a"),),
+        business_context_refs=(_evidence_ref(EvidenceRefType.BUSINESS_CONTEXT, "a"),),
+    )
+
+    decision = evaluate_replenishment(_review(supporting=supporting))
+
+    assert decision.outcome is ReplenishmentOutcome.RECOMMEND_REJECT
+    assert decision.overrideable is False
+    assert set(decision.caveats) == {
+        PolicyCaveat.ACTIVE_POOL_NON_OVERRIDING,
+        PolicyCaveat.MULTIPLE_ACTIVE_POOLS,
+        PolicyCaveat.MAINTENANCE_NON_OVERRIDING,
+        PolicyCaveat.BUSINESS_CONTEXT_NON_OVERRIDING,
+    }
+    assert len(decision.evidence.supporting_refs) == 4
+
+
+def test_multiple_active_pools_need_info_only_after_rpl_100_passes() -> None:
+    supporting = SupportingContext(
+        active_pool_refs=(
+            _evidence_ref(EvidenceRefType.ACTIVE_POOL, "a"),
+            _evidence_ref(EvidenceRefType.ACTIVE_POOL, "b"),
+        )
+    )
+    purchase = _side_evidence(CommercialSide.PURCHASE, count=1)
+
+    decision = evaluate_replenishment(_review(purchase=purchase, supporting=supporting))
+
+    assert decision.outcome is ReplenishmentOutcome.NEED_INFO
+    assert decision.rule_code == "RPL-210-multiple-active-pools"
+    assert decision.caveats == (PolicyCaveat.MULTIPLE_ACTIVE_POOLS,)
+
+
+@pytest.mark.parametrize(
+    ("purchase_count", "sales_count"),
+    [(1, 0), (0, 1), (2, 3)],
+)
+def test_shadow_policy_never_scores_or_approves(
+    purchase_count: int,
+    sales_count: int,
+) -> None:
+    decision = evaluate_replenishment(
+        _review(
+            purchase=_side_evidence(
+                CommercialSide.PURCHASE,
+                count=purchase_count,
+            ),
+            sales=_side_evidence(CommercialSide.SALES, count=sales_count),
+        )
+    )
+
+    assert decision.outcome is ReplenishmentOutcome.HUMAN_REVIEW_REQUIRED
+    assert decision.support_class == "unscored"
+    assert decision.rule_code == "RPL-SHADOW-unscored"
+    assert set(ReplenishmentOutcome) == {
+        ReplenishmentOutcome.NEED_INFO,
+        ReplenishmentOutcome.RECOMMEND_REJECT,
+        ReplenishmentOutcome.HUMAN_REVIEW_REQUIRED,
+    }
+    assert set(ShadowPolicy.model_fields) == {"policy_version", "mode"}
+
+
+def test_evidence_is_deeply_immutable_bounded_and_minimized() -> None:
+    supporting = SupportingContext(
+        active_pool_refs=(_evidence_ref(EvidenceRefType.ACTIVE_POOL, "a"),)
+    )
+    decision = evaluate_replenishment(_review(supporting=supporting))
+
+    with pytest.raises(ValidationError, match="Instance is frozen"):
+        decision.evidence.purchase.order_count = 99
+
+    serialized = decision.evidence.model_dump(mode="json")
+    keys: set[str] = set()
+
+    def collect_keys(value: object) -> None:
+        if isinstance(value, dict):
+            keys.update(value)
+            for item in value.values():
+                collect_keys(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect_keys(item)
+
+    collect_keys(serialized)
+    assert not keys.intersection(
+        {
+            "filename",
+            "file_path",
+            "order_id",
+            "customer",
+            "vendor",
+            "price",
+            "sn",
+        }
+    )
+
+
+def test_supporting_evidence_refs_reject_controls_and_overflow() -> None:
+    with pytest.raises(ValidationError):
+        EvidenceRef(
+            ref_type=EvidenceRefType.ACTIVE_POOL,
+            ref_id="pool\x00-a",
+            version="v1",
+        )
+
+    refs = tuple(
+        _evidence_ref(EvidenceRefType.ACTIVE_POOL, str(index)) for index in range(9)
+    )
+    with pytest.raises(ValidationError):
+        SupportingContext(active_pool_refs=refs)
+
+
+@pytest.mark.parametrize(
+    "completeness",
+    [CompletenessStatus.PARTIAL, CompletenessStatus.UNKNOWN],
+)
+def test_incomplete_coverage_is_need_info_and_never_a_zero(
+    completeness: CompletenessStatus,
+) -> None:
+    purchase = _side_evidence(
+        CommercialSide.PURCHASE,
+        completeness=completeness,
+    )
+
+    decision = evaluate_replenishment(_review(purchase=purchase))
+
+    assert decision.outcome is ReplenishmentOutcome.NEED_INFO
+    assert decision.rule_code == "RPL-090-source-coverage-incomplete"
+
+
+@pytest.mark.parametrize(
+    "purchase",
+    [
+        _side_evidence(
+            CommercialSide.PURCHASE,
+            coverage_through=date(2026, 8, 9),
+        ),
+        _side_evidence(CommercialSide.PURCHASE, batches=()),
+        CommercialSideEvidence(
+            order_count=0,
+            query_window=commercial_window(AS_OF),
+            coverage=CommercialCoverage(
+                coverage_through=AS_OF,
+                completeness_status=CompletenessStatus.COMPLETE,
+                source_batch_refs=(_batch(CommercialSide.PURCHASE),),
+                lineage_verified=True,
+                last_successful_import_at=None,
+            ),
+        ),
+    ],
+    ids=["stale", "missing-manifest", "missing-import-marker"],
+)
+def test_self_consistent_but_unproven_coverage_is_need_info(
+    purchase: CommercialSideEvidence,
+) -> None:
+    decision = evaluate_replenishment(_review(purchase=purchase))
+
+    assert decision.outcome is ReplenishmentOutcome.NEED_INFO
+    assert decision.rule_code == "RPL-090-source-coverage-incomplete"
+
+
+def test_coverage_through_after_as_of_is_complete_not_future_contamination() -> None:
+    purchase = _side_evidence(
+        CommercialSide.PURCHASE,
+        coverage_through=date(2026, 8, 11),
+    )
+    sales = _side_evidence(
+        CommercialSide.SALES,
+        coverage_through=date(2026, 8, 11),
+    )
+
+    decision = evaluate_replenishment(_review(purchase=purchase, sales=sales))
+
+    assert decision.outcome is ReplenishmentOutcome.RECOMMEND_REJECT
+    assert decision.window.end == AS_OF
+
+
+@pytest.mark.parametrize(
+    "query_window",
+    [
+        CommercialWindow(
+            start=date(2026, 2, 10),
+            end=date(2026, 8, 11),
+        ),
+        CommercialWindow(
+            start=date(2026, 2, 9),
+            end=AS_OF,
+        ),
+    ],
+    ids=["future-window-end", "wrong-calendar-start"],
+)
+def test_wrong_or_future_query_window_is_a_stable_technical_failure(
+    query_window: CommercialWindow,
+) -> None:
+    purchase = _side_evidence(
+        CommercialSide.PURCHASE,
+        query_window=query_window,
+    )
+
+    with pytest.raises(ReplenishmentTechnicalError) as caught:
+        evaluate_replenishment(_review(purchase=purchase))
+
+    assert caught.value.code is TechnicalFailureCode.QUERY_WINDOW_MISMATCH
+
+
+def _purchase_with_batch(batch: BatchManifest) -> CommercialSideEvidence:
+    return _side_evidence(CommercialSide.PURCHASE, batches=(batch,))
+
+
+@pytest.mark.parametrize(
+    ("purchase", "error_code"),
+    [
+        (
+            _side_evidence(CommercialSide.PURCHASE, lineage_verified=False),
+            TechnicalFailureCode.LINEAGE_UNVERIFIED,
+        ),
+        (
+            _purchase_with_batch(
+                _batch(CommercialSide.PURCHASE).model_copy(
+                    update={"batch_status": BatchStatus.FAILED}
+                )
+            ),
+            TechnicalFailureCode.BATCH_NOT_SUCCESSFUL,
+        ),
+        (
+            _purchase_with_batch(
+                _batch(CommercialSide.PURCHASE).model_copy(
+                    update={"file_type": CommercialSide.SALES}
+                )
+            ),
+            TechnicalFailureCode.BATCH_FILE_TYPE_MISMATCH,
+        ),
+        (
+            _purchase_with_batch(
+                _batch(CommercialSide.PURCHASE).model_copy(
+                    update={"archived_file_sha256": None}
+                )
+            ),
+            TechnicalFailureCode.ARCHIVE_FILE_MISSING,
+        ),
+        (
+            _purchase_with_batch(
+                _batch(CommercialSide.PURCHASE).model_copy(
+                    update={"import_batch_sha256": "z" * 64}
+                )
+            ),
+            TechnicalFailureCode.FILE_HASH_INVALID,
+        ),
+        (
+            _purchase_with_batch(
+                _batch(CommercialSide.PURCHASE).model_copy(
+                    update={"raw_file_sha256": "b" * 64}
+                )
+            ),
+            TechnicalFailureCode.FILE_HASH_MISMATCH,
+        ),
+    ],
+    ids=[
+        "lineage-break",
+        "failed-batch",
+        "wrong-file-type",
+        "missing-archive",
+        "invalid-hash",
+        "hash-mismatch",
+    ],
+)
+def test_source_integrity_failures_raise_stable_technical_errors(
+    purchase: CommercialSideEvidence,
+    error_code: TechnicalFailureCode,
+) -> None:
+    with pytest.raises(ReplenishmentTechnicalError) as caught:
+        evaluate_replenishment(_review(purchase=purchase))
+
+    assert caught.value.code is error_code
+    assert str(caught.value) == error_code.value
+
+
+def test_same_batch_identity_with_changed_content_is_a_technical_failure() -> None:
+    first = _batch(CommercialSide.PURCHASE, "a")
+    drifted = _batch(CommercialSide.PURCHASE, "b").model_copy(
+        update={"batch_id": first.batch_id}
+    )
+    purchase = _side_evidence(
+        CommercialSide.PURCHASE,
+        batches=(first, drifted),
+    )
+
+    with pytest.raises(ReplenishmentTechnicalError) as caught:
+        evaluate_replenishment(_review(purchase=purchase))
+
+    assert caught.value.code is TechnicalFailureCode.BATCH_CONTENT_DRIFT
+
+
+def test_same_batch_and_hash_replay_is_idempotent() -> None:
+    batch = _batch(CommercialSide.PURCHASE)
+    purchase = _side_evidence(
+        CommercialSide.PURCHASE,
+        batches=(batch, batch),
+    )
+
+    decision = evaluate_replenishment(_review(purchase=purchase))
+
+    assert decision.outcome is ReplenishmentOutcome.RECOMMEND_REJECT
