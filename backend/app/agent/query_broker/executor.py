@@ -88,7 +88,7 @@ def _transaction_settings(budget: QueryBudget) -> tuple[str, ...]:
         # Resolve built-ins before any application namespace.  Physical views
         # are still schema-qualified; this removes an avoidable function /
         # aggregate shadowing surface if the schema ACL ever drifts.
-        "SET LOCAL search_path = pg_catalog, agent_semantic",
+        "SET LOCAL search_path = pg_catalog",
         "SET LOCAL row_security = on",
         f"SET LOCAL statement_timeout = '{budget.statement_timeout_ms}ms'",
         f"SET LOCAL lock_timeout = '{budget.lock_timeout_ms}ms'",
@@ -104,8 +104,8 @@ class ExecutionContext(BaseModel):
     execution_id: UUID
     task_ref: str = Field(min_length=1, max_length=128, repr=False)
     step_ref: str = Field(min_length=1, max_length=128, repr=False)
-    planned_authz: AuthorizationSnapshot = Field(repr=False)
-    planned_egress: ProviderEgressSnapshot = Field(repr=False)
+    planned_authz: AuthorizationSnapshot = Field(exclude=True, repr=False)
+    planned_egress: ProviderEgressSnapshot = Field(exclude=True, repr=False)
 
 
 class SealedEvidence(BaseModel):
@@ -159,7 +159,7 @@ class EvidenceSealer(Protocol):
 
 
 class EnvironmentProbe(Protocol):
-    def ensure_ready(self) -> None: ...
+    def ensure_ready(self, connection: Any) -> None: ...
 
 
 AuthorityLoader = Callable[[str], AuthorizationSnapshot | None]
@@ -398,9 +398,6 @@ class QueryExecutor:
         columns_count = len(plan.compiled.output_fields)
         try:
             current, current_egress, _refreshed = self._reload_controls(plan, context)
-            # Revocation is checked against the authoritative identity store
-            # before even the Agent DB posture probe opens a connection.
-            self._environment_probe.ensure_ready()
             validate_compiled_sql(plan.compiled)
             if columns_count > self._budget.max_result_columns:
                 raise QueryBrokerError("QUERY_RESULT_INVALID")
@@ -452,6 +449,7 @@ class QueryExecutor:
                 transaction = connection.begin()
                 for statement in _transaction_settings(self._budget):
                     connection.exec_driver_sql(statement)
+                self._environment_probe.ensure_ready(connection)
                 page_permissions = sorted(
                     permission for permission in current.permissions if permission.startswith("page_")
                 )

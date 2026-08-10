@@ -29,13 +29,13 @@ class CompiledQuery(BaseModel):
     dataset_name: str
     view_schema: str
     view_name: str
-    sql: str = Field(repr=False)
-    params: FrozenDict = Field(repr=False)
+    sql: str = Field(exclude=True, repr=False)
+    params: FrozenDict = Field(exclude=True, repr=False)
     output_fields: tuple[str, ...]
     allowed_columns: tuple[str, ...]
     registry_fingerprint: str
-    authz_fingerprint: str
-    egress_fingerprint: str
+    authz_fingerprint: str = Field(exclude=True, repr=False)
+    egress_fingerprint: str = Field(exclude=True, repr=False)
     compiler_version: str = COMPILER_VERSION
     compiler_fingerprint: str
 

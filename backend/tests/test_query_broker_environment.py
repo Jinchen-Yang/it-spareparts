@@ -33,6 +33,10 @@ def _safe() -> ProbeSnapshot:
     return ProbeSnapshot(
         current_user="agent_reader",
         session_user="agent_reader",
+        transaction_read_only=True,
+        transaction_isolation_repeatable_read=True,
+        row_security_on=True,
+        search_path_pinned=True,
         reader=_role("agent_reader", login=True),
         guard_owner=_role("agent_guard_owner", login=False),
         view_owner=_role("agent_view_owner", login=False),
@@ -75,6 +79,11 @@ def test_safe_probe_snapshot_is_accepted():
     "change",
     [
         {"current_user": "app"},
+        {"session_user": "app"},
+        {"transaction_read_only": False},
+        {"transaction_isolation_repeatable_read": False},
+        {"row_security_on": False},
+        {"search_path_pinned": False},
         {"protected_role_membership_edges": 1},
         {"reader_can_temp": True},
         {"reader_temp_file_limit_zero": False},
@@ -136,14 +145,6 @@ def test_reader_and_both_owners_have_exact_non_privileged_posture(role_field, ch
     assert exc.value.code == "QUERY_BROKER_UNAVAILABLE"
 
 
-class _ProbeTx:
-    def __init__(self):
-        self.rolled_back = False
-
-    def rollback(self):
-        self.rolled_back = True
-
-
 class _ProbeResult:
     def __init__(self, value):
         self.value = value
@@ -166,21 +167,13 @@ class _ProbeResult:
 
 class _ProbeConnection:
     def __init__(self):
-        self.static_sql: list[str] = []
         self.queries: list[str] = []
-        self.tx = _ProbeTx()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return None
 
     def begin(self):
-        return self.tx
+        raise AssertionError("borrowed-connection probe must not begin a transaction")
 
     def exec_driver_sql(self, sql):
-        self.static_sql.append(sql)
+        raise AssertionError(f"borrowed-connection probe must not SET: {sql}")
 
     def execute(self, statement):
         sql = str(statement)
@@ -189,6 +182,10 @@ class _ProbeConnection:
             return _ProbeResult({
                 "current_user": "agent_reader",
                 "session_user": "agent_reader",
+                "transaction_read_only": True,
+                "transaction_isolation_repeatable_read": True,
+                "row_security_on": True,
+                "search_path_pinned": True,
                 "temp_file_limit_zero": True,
             })
         if "FROM pg_catalog.pg_roles" in sql and "WHERE rolname" in sql:
@@ -243,26 +240,13 @@ class _ProbeConnection:
         raise AssertionError(f"unexpected probe SQL: {sql}")
 
 
-class _ProbeEngine:
-    def __init__(self, connection):
-        self.connection = connection
-
-    def connect(self):
-        return self.connection
-
-
-def test_live_probe_pins_search_path_first_and_only_reads_temp_file_limit():
+def test_live_probe_only_reads_borrowed_connection_and_catalog_functions_are_qualified():
     connection = _ProbeConnection()
-    probe = AgentDatabaseProbe(_ProbeEngine(connection))
+    probe = AgentDatabaseProbe()
     with pytest.raises(QueryBrokerError) as exc:
-        probe.ensure_ready()
+        probe.ensure_ready(connection)
     # The semantic catalog contract remains deliberately false in this slice.
     assert exc.value.code == "QUERY_BROKER_UNAVAILABLE"
-    assert connection.static_sql[:2] == [
-        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
-        "SET LOCAL search_path = pg_catalog",
-    ]
-    assert all("temp_file_limit" not in sql for sql in connection.static_sql)
     joined = "\n".join(connection.queries)
     for function in (
         "current_setting(",
@@ -274,4 +258,3 @@ def test_live_probe_pins_search_path_first_and_only_reads_temp_file_limit():
         "count(",
     ):
         assert joined.count(function) == joined.count(f"pg_catalog.{function}")
-    assert connection.tx.rolled_back is True

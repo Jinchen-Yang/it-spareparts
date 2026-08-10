@@ -137,6 +137,7 @@ class _Connection:
         self.static_sql: list[str] = []
         self.executed: list[tuple[str, dict]] = []
         self.tx = _Tx()
+        self.begin_count = 0
         self.closed = False
         self.execution_options_seen: list[dict] = []
         self.data_result = _Result(rows=self.rows)
@@ -148,6 +149,7 @@ class _Connection:
         self.closed = True
 
     def begin(self):
+        self.begin_count += 1
         return self.tx
 
     def exec_driver_sql(self, sql):
@@ -184,9 +186,15 @@ class _Probe:
     def __init__(self, *, ready=True):
         self.ready = ready
         self.calls = 0
+        self.connections: list[object] = []
+        self.static_sql_seen: list[tuple[str, ...]] = []
+        self.executed_sql_seen: list[tuple[str, ...]] = []
 
-    def ensure_ready(self):
+    def ensure_ready(self, connection):
         self.calls += 1
+        self.connections.append(connection)
+        self.static_sql_seen.append(tuple(connection.static_sql))
+        self.executed_sql_seen.append(tuple(sql for sql, _params in connection.executed))
         if not self.ready:
             raise QueryBrokerError("QUERY_BROKER_UNAVAILABLE")
 
@@ -467,6 +475,54 @@ def test_compiled_parameter_mapping_is_immutable_and_repr_hides_filter_canary():
     assert SENTINEL not in repr(plan.compiled)
 
 
+def test_server_only_planning_types_exclude_controls_sql_params_and_filter_values():
+    authz = _authz()
+    egress = _egress(authz)
+    plan = _plan(
+        authz,
+        egress,
+        filters=[{"field": "pn_std", "operator": "eq", "value": SENTINEL}],
+    )
+    context = _context(authz, egress)
+
+    assert plan.authorized.ir.filters[0].value == SENTINEL
+    assert plan.compiled.params["filter_0"] == SENTINEL
+    assert context.planned_authz == authz
+    assert context.planned_egress == egress
+
+    values = (plan, plan.authorized, plan.compiled, context)
+    serialized = "\n".join(
+        representation
+        for value in values
+        for representation in (
+            json.dumps(value.model_dump(mode="json"), ensure_ascii=False),
+            value.model_dump_json(),
+        )
+    )
+    for forbidden in (
+        SENTINEL,
+        "SELECT",
+        "filter_0",
+        "private-gpu/v1",
+        authz.subject,
+        authz.tenant_id,
+        authz.fingerprint(),
+        egress.policy_fingerprint,
+        egress.fingerprint(),
+        '"permissions"',
+        '"sql"',
+        '"params"',
+        '"ir"',
+        '"authz_fingerprint"',
+        '"egress_fingerprint"',
+        '"egress_snapshot"',
+        '"allowed_field_refs"',
+        '"planned_authz"',
+        '"planned_egress"',
+    ):
+        assert forbidden not in serialized
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -488,12 +544,13 @@ def test_scope_or_tenant_change_is_not_reused(change):
 
 def test_read_only_transaction_and_context_are_installed_before_explain_and_query():
     connection = _Connection(rows=[{"day": TODAY, "part_id": 7, "qty": Decimal("2.5")}])
-    executor, sealer = _executor(connection)
+    probe = _Probe()
+    executor, sealer = _executor(connection, probe=probe)
     result = executor.execute(_plan(), _context())
 
     assert connection.static_sql == [
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
-        "SET LOCAL search_path = pg_catalog, agent_semantic",
+        "SET LOCAL search_path = pg_catalog",
         "SET LOCAL row_security = on",
         "SET LOCAL statement_timeout = '2000ms'",
         "SET LOCAL lock_timeout = '200ms'",
@@ -501,6 +558,11 @@ def test_read_only_transaction_and_context_are_installed_before_explain_and_quer
         "SET LOCAL work_mem = '4MB'",
         "SET LOCAL max_parallel_workers_per_gather = 0",
     ]
+    assert executor._engine.connect_count == 1
+    assert connection.begin_count == 1
+    assert probe.connections == [connection]
+    assert probe.static_sql_seen == [tuple(connection.static_sql)]
+    assert probe.executed_sql_seen == [()]
     assert connection.executed[0][0].startswith("SELECT set_config")
     assert connection.executed[1][0].startswith("EXPLAIN")
     assert connection.executed[2][0].startswith("SELECT")
@@ -699,15 +761,31 @@ def test_environment_probe_failure_happens_after_authority_but_before_business_s
 
     connection = _Connection()
     engine = _Engine(connection)
+    probe = _Probe(ready=False)
     executor = QueryExecutor(
         engine=engine,
         authority_loader=authority,
         egress_loader=lambda _profile: _egress(),
-        environment_probe=_Probe(ready=False),
+        environment_probe=probe,
         evidence_sealer=_Sealer(),
     )
     with pytest.raises(QueryBrokerError) as exc:
         executor.execute(_plan(), _context())
     assert exc.value.code == "QUERY_BROKER_UNAVAILABLE"
     assert authority_calls == 1
-    assert engine.connect_count == 0
+    assert engine.connect_count == 1
+    assert connection.begin_count == 1
+    assert probe.connections == [connection]
+    assert probe.executed_sql_seen == [()]
+    assert connection.executed == []
+    assert connection.static_sql == [
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+        "SET LOCAL search_path = pg_catalog",
+        "SET LOCAL row_security = on",
+        "SET LOCAL statement_timeout = '2000ms'",
+        "SET LOCAL lock_timeout = '200ms'",
+        "SET LOCAL idle_in_transaction_session_timeout = '3000ms'",
+        "SET LOCAL work_mem = '4MB'",
+        "SET LOCAL max_parallel_workers_per_gather = 0",
+    ]
+    assert connection.tx.rolled_back is True

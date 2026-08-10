@@ -26,7 +26,7 @@ Typed Query IR
   `business_confidential`/`business_restricted` 敏感度，并贯穿授权、编译指纹、Plan 和密封证据。
   执行前必须实时重载并精确匹配该快照，模型 payload 不包含快照、权限或 Evidence envelope。
 - 数据查询使用独立 Engine、`READ ONLY REPEATABLE READ`、`pg_catalog` 优先的固定
-  `search_path`、事务局部
+  `search_path`；安全探针与后续 context/EXPLAIN/SELECT 复用同一连接和同一事务，再应用事务局部
   timeout/resource 设置、受限 EXPLAIN、server-side cursor 单行 fetch、行/列/JSON 字节预算。
 - 结果列名和 Registry 类型都必须精确匹配；意外列、错类型和超大单元格直接失败，绝不把
   查询错误当作空结果或把业务文本静默截短。

@@ -361,12 +361,12 @@ class AuthorizedQuery(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
 
-    ir: QueryIR = Field(repr=False)
+    ir: QueryIR = Field(exclude=True, repr=False)
     dataset_name: str
-    authz_fingerprint: str
+    authz_fingerprint: str = Field(exclude=True, repr=False)
     registry_fingerprint: str
-    egress_snapshot: ProviderEgressSnapshot = Field(repr=False)
-    egress_fingerprint: str
+    egress_snapshot: ProviderEgressSnapshot = Field(exclude=True, repr=False)
+    egress_fingerprint: str = Field(exclude=True, repr=False)
     k_anonymity_threshold: int | None = None
     caveats: tuple[str, ...]
 

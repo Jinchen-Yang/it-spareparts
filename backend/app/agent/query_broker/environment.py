@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,6 +48,10 @@ class ViewPosture:
 class ProbeSnapshot:
     current_user: str
     session_user: str
+    transaction_read_only: bool
+    transaction_isolation_repeatable_read: bool
+    row_security_on: bool
+    search_path_pinned: bool
     reader: RolePosture
     guard_owner: RolePosture
     view_owner: RolePosture
@@ -136,6 +141,10 @@ def evaluate_probe(snapshot: ProbeSnapshot) -> None:
     reader_safe = (
         snapshot.current_user == EXPECTED_READER
         and snapshot.session_user == EXPECTED_READER
+        and snapshot.transaction_read_only
+        and snapshot.transaction_isolation_repeatable_read
+        and snapshot.row_security_on
+        and snapshot.search_path_pinned
         and snapshot.reader.name == EXPECTED_READER
         and snapshot.reader.can_login
         and not snapshot.reader.inherit
@@ -195,27 +204,22 @@ def _role(row: dict[str, Any]) -> RolePosture:
 
 
 class AgentDatabaseProbe:
-    """Short-lived live probe; every execution rechecks the DB security posture."""
+    """Probe the borrowed business-query connection without owning its transaction."""
 
-    def __init__(self, engine: Engine):
-        self._engine = engine
-
-    def ensure_ready(self) -> None:
-        tx = None
+    def ensure_ready(self, connection: Any) -> None:
+        if connection is None:
+            raise QueryBrokerError("QUERY_BROKER_UNAVAILABLE")
         try:
-            with self._engine.connect() as connection:
-                tx = connection.begin()
-                connection.exec_driver_sql(
-                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
-                )
-                connection.exec_driver_sql("SET LOCAL search_path = pg_catalog")
-                connection.exec_driver_sql("SET LOCAL statement_timeout = '2000ms'")
-                connection.exec_driver_sql("SET LOCAL lock_timeout = '200ms'")
-                connection.exec_driver_sql(
-                    "SET LOCAL idle_in_transaction_session_timeout = '3000ms'"
-                )
+            with nullcontext(connection) as connection:
                 identity = connection.execute(text(
                     "SELECT current_user AS current_user, session_user AS session_user, "
+                    "pg_catalog.current_setting('transaction_read_only') = 'on' "
+                    "AS transaction_read_only, "
+                    "pg_catalog.current_setting('transaction_isolation') = 'repeatable read' "
+                    "AS transaction_isolation_repeatable_read, "
+                    "pg_catalog.current_setting('row_security') = 'on' AS row_security_on, "
+                    "pg_catalog.current_setting('search_path') = 'pg_catalog' "
+                    "AS search_path_pinned, "
                     "pg_catalog.current_setting('temp_file_limit') = '0' "
                     "AS temp_file_limit_zero"
                 )).mappings().one()
@@ -303,6 +307,12 @@ class AgentDatabaseProbe:
                 snapshot = ProbeSnapshot(
                     current_user=identity["current_user"],
                     session_user=identity["session_user"],
+                    transaction_read_only=bool(identity["transaction_read_only"]),
+                    transaction_isolation_repeatable_read=bool(
+                        identity["transaction_isolation_repeatable_read"]
+                    ),
+                    row_security_on=bool(identity["row_security_on"]),
+                    search_path_pinned=bool(identity["search_path_pinned"]),
                     reader=roles[EXPECTED_READER],
                     guard_owner=roles[EXPECTED_GUARD_OWNER],
                     view_owner=roles[EXPECTED_VIEW_OWNER],
@@ -336,13 +346,7 @@ class AgentDatabaseProbe:
                     catalog_contract_verified=False,
                 )
                 evaluate_probe(snapshot)
-                tx.rollback()
-                tx = None
         except QueryBrokerError:
-            if tx is not None:
-                tx.rollback()
             raise
         except (SQLAlchemyError, KeyError, TypeError, ValueError):
-            if tx is not None:
-                tx.rollback()
             raise QueryBrokerError("QUERY_BROKER_UNAVAILABLE") from None

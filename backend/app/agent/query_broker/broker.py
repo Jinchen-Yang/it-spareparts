@@ -22,10 +22,10 @@ class QueryPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     query_ir_ref: str
-    authorized: AuthorizedQuery = Field(repr=False)
-    compiled: CompiledQuery = Field(repr=False)
-    egress_snapshot: ProviderEgressSnapshot = Field(repr=False)
-    egress_fingerprint: str
+    authorized: AuthorizedQuery = Field(exclude=True, repr=False)
+    compiled: CompiledQuery = Field(exclude=True, repr=False)
+    egress_snapshot: ProviderEgressSnapshot = Field(exclude=True, repr=False)
+    egress_fingerprint: str = Field(exclude=True, repr=False)
 
 
 def build_query_plan(
