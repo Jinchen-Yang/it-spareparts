@@ -41,7 +41,8 @@ INITIAL_PILOT_POLICY = {
     "maintenance_cutover_enabled": False,
     "admin_pilots": "excluded",
     "permission_projection": "raw-runtime-effective",
-    "replenishment_writes": "exact-sha-live-canary-only",
+    "replenishment_create": "exact-sha-live-canary-required",
+    "replenishment_review": "deferred",
     "database_schema_migration": "required-prerequisite",
 }
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
@@ -466,6 +467,11 @@ def _parse_allowlist(
                 )
         for action in ("action_replenishment_create", "action_replenishment_review"):
             if replenishment[action]:
+                if action == "action_replenishment_review":
+                    _fail(
+                        "initial pilot defers replenishment review until the external "
+                        f"review integration is production-ready: {username}/{action}"
+                    )
                 if not replenishment_enabled:
                     _fail(f"replenishment write {username}/{action} is enabled without its Beta page")
                 key = (username, action)
@@ -513,7 +519,22 @@ def _parse_allowlist(
             if key.startswith("action_")
         ),
         "admin_pilot_count": sum(row["role"].casefold() == "admin" for row in normalized),
+        "maintenance_read_account_count": sum(
+            row["maintenance"]["page_maintenance_beta"] for row in normalized
+        ),
+        "replenishment_creator_account_count": sum(
+            row["replenishment"]["action_replenishment_create"] for row in normalized
+        ),
+        "replenishment_review_enabled_count": sum(
+            row["replenishment"]["action_replenishment_review"] for row in normalized
+        ),
     }
+    if summary["maintenance_read_account_count"] < 1:
+        _fail("initial pilot requires at least one named Maintenance read account")
+    if summary["replenishment_creator_account_count"] < 1:
+        _fail("initial pilot requires at least one canary-proven replenishment creator")
+    if summary["replenishment_review_enabled_count"] != 0:
+        _fail("initial pilot must keep replenishment review disabled")
     return summary, copied_evidence
 
 
@@ -1269,6 +1290,12 @@ def _verify_package(package: Path) -> dict[str, Any]:
         _fail("initial pilot manifest enables a Maintenance write action")
     if allowlist.get("admin_pilot_count") != 0:
         _fail("initial scoped pilot manifest contains an admin account")
+    if allowlist.get("maintenance_read_account_count", 0) < 1:
+        _fail("initial scoped pilot manifest has no Maintenance reader")
+    if allowlist.get("replenishment_creator_account_count", 0) < 1:
+        _fail("initial scoped pilot manifest has no canary-proven replenishment creator")
+    if allowlist.get("replenishment_review_enabled_count") != 0:
+        _fail("initial scoped pilot manifest enables deferred replenishment review")
     for key in (
         "permission_graph_sha256",
         "maintenance_effective_permissions_sha256",

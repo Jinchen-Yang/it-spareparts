@@ -117,7 +117,9 @@ def main() -> None:
         command in release
         for command in ("backup-restore", "migrate", "pilot-smoke", "observe")
     )
-    assert "allowed pilot exposes Maintenance write actions" in release
+    assert "creator pilot exposes Maintenance write actions" in release
+    assert "review callback is action-gated" not in release
+    assert "not page-gated" not in release
 
     module = load_manifest_module()
     assert module.PILOT_REVIEW_SCOPE == "stable-plus-beta-pilot-cutover-disabled"
@@ -127,6 +129,10 @@ def main() -> None:
     assert module.INITIAL_PILOT_POLICY["maintenance_cutover"] == "deferred"
     assert module.INITIAL_PILOT_POLICY["admin_pilots"] == "excluded"
     assert module.INITIAL_PILOT_POLICY["permission_projection"] == "raw-runtime-effective"
+    assert module.INITIAL_PILOT_POLICY["replenishment_create"] == (
+        "exact-sha-live-canary-required"
+    )
+    assert module.INITIAL_PILOT_POLICY["replenishment_review"] == "deferred"
     assert module.INITIAL_PILOT_POLICY["database_schema_migration"] == "required-prerequisite"
     permission_source = (ROOT / "backend/app/permissions.py").read_text(encoding="utf-8")
     maintenance_permissions = set(
@@ -134,12 +140,25 @@ def main() -> None:
     )
     assert set(module.MAINTENANCE_ACTIONS) == maintenance_permissions
     assert all(action in release for action in module.MAINTENANCE_ACTIONS)
-    smoke_guard_start = release.index('if mode == "allow":\n    maintenance_actions = (')
+    smoke_guard_start = release.index('if mode == "creator":\n    maintenance_actions = (')
     smoke_guard_end = release.index("\nstatus, features=", smoke_guard_start)
     smoke_guard = release[smoke_guard_start:smoke_guard_end]
     assert set(re.findall(r'"(action_maintenance_[a-z_]+)"', smoke_guard)) == set(
         module.MAINTENANCE_ACTIONS
     )
+    for key, value in (
+        ("page_replenishment_beta", "True"),
+        ("data_pool_price_governance", "True"),
+        ("action_replenishment_create", "True"),
+        ("action_replenishment_review", "False"),
+    ):
+        assert f'"{key}": {value}' in smoke_guard
+    assert "credential is not the scoped replenishment creator" in smoke_guard
+    assert 'features.get("replenishment") is not True' in release
+    assert '"can_view_price": True' in release
+    assert '"can_create": True' in release
+    assert '"can_review": False' in release
+    assert "replenishment creator catalog smoke failed" in release
     replenishment_source = (ROOT / "backend/app/api/replenishment.py").read_text(
         encoding="utf-8"
     )
@@ -154,7 +173,7 @@ def main() -> None:
         "\t".join(
             ["named.pilot", "project_manager", "t", "t"]
             + ["f"] * len(module.MAINTENANCE_ACTIONS)
-            + ["f"] * len(module.REPLENISHMENT_KEYS)
+            + ["t", "t", "t", "f"]
         ),
         "full",
     )
@@ -162,6 +181,9 @@ def main() -> None:
     safe_projection_data = json.loads(safe_projection.stdout)
     assert safe_projection_data["maintenance_write_enabled_count"] == 0
     assert safe_projection_data["admin_pilot_count"] == 0
+    assert safe_projection_data["maintenance_read_account_count"] == 1
+    assert safe_projection_data["replenishment_creator_account_count"] == 1
+    assert safe_projection_data["replenishment_review_enabled_count"] == 0
     hidden_maintenance_write = run_live_projection(
         release,
         "\t".join(
@@ -218,10 +240,12 @@ def main() -> None:
         }
         path = folder / "allowlist.json"
         path.write_text(json.dumps(safe), encoding="utf-8")
-        summary, evidence = module._parse_allowlist(
-            path, repository="Example/it-spareparts", target=head
-        )
-        assert summary["account_count"] == 1 and not evidence
+        try:
+            module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
+        except module.ManifestError as exc:
+            assert "requires at least one canary-proven replenishment creator" in str(exc)
+        else:
+            raise AssertionError("pilot without a replenishment creator was accepted")
 
         for admin_role in ("admin", "Admin"):
             admin = json.loads(json.dumps(safe))
@@ -231,8 +255,8 @@ def main() -> None:
                 module._parse_allowlist(
                     path, repository="Example/it-spareparts", target=head
                 )
-            except module.ManifestError:
-                pass
+            except module.ManifestError as exc:
+                assert "admin" in str(exc)
             else:
                 raise AssertionError("Maintenance Beta admin pilot was accepted")
 
@@ -250,8 +274,8 @@ def main() -> None:
         path.write_text(json.dumps(replenishment_only_admin), encoding="utf-8")
         try:
             module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
-        except module.ManifestError:
-            pass
+        except module.ManifestError as exc:
+            assert "admin" in str(exc)
         else:
             raise AssertionError("Replenishment-only admin bypassed the scoped pilot boundary")
 
@@ -263,8 +287,8 @@ def main() -> None:
                 module._parse_allowlist(
                     path, repository="Example/it-spareparts", target=head
                 )
-            except module.ManifestError:
-                pass
+            except module.ManifestError as exc:
+                assert "excludes every Maintenance write action" in str(exc)
             else:
                 raise AssertionError(
                     f"initial pilot accepted Maintenance write: {maintenance_action}"
@@ -342,8 +366,8 @@ def main() -> None:
         path.write_text(json.dumps(allowed_write), encoding="utf-8")
         try:
             module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
-        except module.ManifestError:
-            pass
+        except module.ManifestError as exc:
+            assert "excludes every Maintenance write action" in str(exc)
         else:
             raise AssertionError("Maintenance canary bypassed the scoped pilot write exclusion")
 
@@ -457,7 +481,25 @@ def main() -> None:
         assert summary["canary_evidence_count"] == 1
         assert summary["maintenance_write_enabled_count"] == 0
         assert summary["admin_pilot_count"] == 0
+        assert summary["maintenance_read_account_count"] == 1
+        assert summary["replenishment_creator_account_count"] == 1
+        assert summary["replenishment_review_enabled_count"] == 0
         assert evidence == [replenishment_path]
+
+        creator_without_maintenance = json.loads(json.dumps(replenishment_write))
+        creator_without_maintenance["accounts"][0]["maintenance"][
+            "page_maintenance"
+        ] = False
+        creator_without_maintenance["accounts"][0]["maintenance"][
+            "page_maintenance_beta"
+        ] = False
+        path.write_text(json.dumps(creator_without_maintenance), encoding="utf-8")
+        try:
+            module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
+        except module.ManifestError as exc:
+            assert "requires at least one named Maintenance read account" in str(exc)
+        else:
+            raise AssertionError("pilot without a Maintenance reader was accepted")
 
         create_without_price = json.loads(json.dumps(replenishment_write))
         create_without_price["accounts"][0]["replenishment"][
@@ -466,8 +508,8 @@ def main() -> None:
         path.write_text(json.dumps(create_without_price), encoding="utf-8")
         try:
             module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
-        except module.ManifestError:
-            pass
+        except module.ManifestError as exc:
+            assert "without price permission" in str(exc)
         else:
             raise AssertionError("replenishment create without price permission was accepted")
 
@@ -626,56 +668,12 @@ def main() -> None:
             }
         ]
         path.write_text(json.dumps(replenishment_review), encoding="utf-8")
-        summary, evidence = module._parse_allowlist(
-            path, repository="Example/it-spareparts", target=head
-        )
-        assert summary["canary_evidence_count"] == 1
-        assert evidence == [replenishment_review_path]
-
-        original_fetch_canary = module._fetch_canary_comment
-        module._fetch_canary_comment = lambda **_kwargs: {
-            **captured_replenishment_review,
-            "comment_id": 998,
-        }
-        try:
-            try:
-                module._parse_allowlist(
-                    path,
-                    repository="Example/it-spareparts",
-                    target=head,
-                    verify_live_canaries=True,
-                )
-            except module.ManifestError:
-                pass
-            else:
-                raise AssertionError("GitHub live review canary drift was accepted")
-        finally:
-            module._fetch_canary_comment = original_fetch_canary
-
-        review_missing_canary = json.loads(json.dumps(replenishment_review))
-        review_missing_canary["canary_evidence"] = []
-        path.write_text(json.dumps(review_missing_canary), encoding="utf-8")
         try:
             module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
-        except module.ManifestError:
-            pass
+        except module.ManifestError as exc:
+            assert "defers replenishment review" in str(exc)
         else:
-            raise AssertionError("replenishment review without real canary was accepted")
-
-        review_without_page = json.loads(json.dumps(replenishment_review))
-        review_without_page["accounts"][0]["replenishment"][
-            "page_replenishment_beta"
-        ] = False
-        review_without_page["accounts"][0]["replenishment"][
-            "data_pool_price_governance"
-        ] = False
-        path.write_text(json.dumps(review_without_page), encoding="utf-8")
-        try:
-            module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
-        except module.ManifestError:
-            pass
-        else:
-            raise AssertionError("replenishment review without its Beta page was accepted")
+            raise AssertionError("deferred replenishment review was accepted into the pilot")
 
         review = {
             "format": "github-exact-sha-independent-review-v1",

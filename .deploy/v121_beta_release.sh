@@ -29,8 +29,8 @@ commands:
   migrate
   deploy STABLE_CREDENTIAL_JSON DENIED_CREDENTIAL_JSON
   open-empty-beta DENIED_CREDENTIAL_JSON
-  pilot-smoke DENIED_CREDENTIAL_JSON ALLOWED_CREDENTIAL_JSON
-  observe 0|5|15|30 STABLE_CREDENTIAL_JSON DENIED_CREDENTIAL_JSON ALLOWED_CREDENTIAL_JSON
+  pilot-smoke DENIED_CREDENTIAL_JSON CREATOR_CREDENTIAL_JSON
+  observe 0|5|15|30 STABLE_CREDENTIAL_JSON DENIED_CREDENTIAL_JSON CREATOR_CREDENTIAL_JSON
   contain
   rollback-app
 
@@ -722,10 +722,26 @@ maintenance_write_enabled_count=sum(
     if key.startswith("action_")
 )
 admin_pilot_count=sum(row["role"].casefold() == "admin" for row in rows)
+maintenance_read_account_count=sum(
+    row["maintenance"]["page_maintenance_beta"] for row in rows
+)
+replenishment_creator_account_count=sum(
+    row["replenishment"]["action_replenishment_create"] for row in rows
+)
+replenishment_review_enabled_count=sum(
+    row["replenishment"]["action_replenishment_review"] for row in rows
+)
 if maintenance_write_enabled_count:
     raise SystemExit("initial pilot exposes a raw runtime-effective Maintenance write action")
 if admin_pilot_count:
     raise SystemExit("initial scoped pilot contains an admin account")
+if sys.argv[2] == "full":
+    if maintenance_read_account_count < 1:
+        raise SystemExit("initial pilot has no live Maintenance reader")
+    if replenishment_creator_account_count < 1:
+        raise SystemExit("initial pilot has no live replenishment creator")
+    if replenishment_review_enabled_count:
+        raise SystemExit("initial pilot exposes deferred replenishment review")
 def digest(value):
     if not rows:
         return hashlib.sha256(b"").hexdigest()
@@ -740,6 +756,9 @@ result={
   "replenishment_effective_permissions_sha256":digest(replenishment),
   "maintenance_write_enabled_count":maintenance_write_enabled_count,
   "admin_pilot_count":admin_pilot_count,
+  "maintenance_read_account_count":maintenance_read_account_count,
+  "replenishment_creator_account_count":replenishment_creator_account_count,
+  "replenishment_review_enabled_count":replenishment_review_enabled_count,
 }
 print(json.dumps(result,sort_keys=True,separators=(",",":")))
 PY
@@ -773,6 +792,8 @@ for key in (
     "maintenance_effective_permissions_sha256",
     "replenishment_effective_permissions_sha256",
     "maintenance_write_enabled_count", "admin_pilot_count",
+    "maintenance_read_account_count", "replenishment_creator_account_count",
+    "replenishment_review_enabled_count",
 ):
     if live[key] != expected[key]:
         raise SystemExit(f"live intended Beta permission graph mismatch: {key}")
@@ -817,7 +838,7 @@ status, login=request("/api/auth/login",payload=credential)
 if status != 200 or not isinstance(login,dict) or not login.get("token"):
     raise SystemExit("login smoke failed")
 token=login["token"]
-if mode == "allow":
+if mode == "creator":
     maintenance_actions = (
         "action_maintenance_roundtrip_apply",
         "action_maintenance_manager_workbook_apply",
@@ -832,14 +853,28 @@ if mode == "allow":
     )
     permission_graph=login.get("permissions")
     if not isinstance(permission_graph,dict):
-        raise SystemExit("allowed pilot login lacks a permission graph")
+        raise SystemExit("creator pilot login lacks a permission graph")
     enabled=[key for key in maintenance_actions if permission_graph.get(key) is not False]
     if enabled:
-        raise SystemExit("allowed pilot exposes Maintenance write actions: "+",".join(enabled))
+        raise SystemExit("creator pilot exposes Maintenance write actions: "+",".join(enabled))
+    creator_profile = {
+        "page_replenishment_beta": True,
+        "data_pool_price_governance": True,
+        "action_replenishment_create": True,
+        "action_replenishment_review": False,
+    }
+    drift = [
+        key for key, expected in creator_profile.items()
+        if permission_graph.get(key) is not expected
+    ]
+    if drift:
+        raise SystemExit(
+            "credential is not the scoped replenishment creator: "+",".join(drift)
+        )
 status, features=request("/api/auth/beta-features",token=token)
 if status != 200 or not isinstance(features,dict):
     raise SystemExit("Beta feature snapshot smoke failed")
-if mode != "allow" or (login.get("permissions") or {}).get("page_maintenance"):
+if mode != "creator" or (login.get("permissions") or {}).get("page_maintenance"):
     status, _=request("/api/maintenance/projects?lifecycle=ongoing",token=token)
     if status != 200:
         raise SystemExit(f"stable Maintenance smoke failed: {status}")
@@ -855,35 +890,26 @@ elif mode == "deny":
     status, _=request("/api/replenishment-beta/catalog?page_size=1",token=token)
     if status not in {403,404}:
         raise SystemExit(f"replenishment Beta deny smoke failed: {status}")
-elif mode == "allow":
-    if not features.get("maintenance") and not features.get("replenishment"):
-        raise SystemExit("allowed account has no Beta feature")
+elif mode == "creator":
+    if features.get("replenishment") is not True:
+        raise SystemExit("creator account does not expose Replenishment Beta")
     if features.get("maintenance"):
         status, _=request("/api/maintenance/projects/stable?page_size=1",token=token)
         if status != 200:
             raise SystemExit(f"Maintenance Beta allow smoke failed: {status}")
-    if features.get("replenishment"):
-        status, capabilities=request("/api/replenishment-beta/capabilities",token=token)
-        if status != 200 or not isinstance(capabilities,dict):
-            raise SystemExit(f"replenishment capabilities smoke failed: {status}")
-        expected_price=permission_graph.get("data_pool_price_governance") is True
-        expected_create=(
-            permission_graph.get("action_replenishment_create") is True and expected_price
-        )
-        expected_review=permission_graph.get("action_replenishment_review") is True
-        if (
-            capabilities.get("can_view_price") is not expected_price
-            or capabilities.get("can_create") is not expected_create
-            or capabilities.get("can_review") is not expected_review
-        ):
-            raise SystemExit("replenishment capabilities drift from pilot permissions")
-        status, _=request("/api/replenishment-beta/catalog?page_size=1",token=token)
-        expected_catalog_status=200 if expected_price else 403
-        if status != expected_catalog_status:
-            raise SystemExit(
-                "replenishment catalog smoke failed: "
-                f"expected {expected_catalog_status}, observed {status}"
-            )
+    status, capabilities=request("/api/replenishment-beta/capabilities",token=token)
+    if status != 200 or not isinstance(capabilities,dict):
+        raise SystemExit(f"replenishment creator capabilities smoke failed: {status}")
+    expected_capabilities = {
+        "can_view_price": True,
+        "can_create": True,
+        "can_review": False,
+    }
+    if any(capabilities.get(key) is not value for key, value in expected_capabilities.items()):
+        raise SystemExit("replenishment creator capabilities drift from scoped pilot")
+    status, _=request("/api/replenishment-beta/catalog?page_size=1",token=token)
+    if status != 200:
+        raise SystemExit(f"replenishment creator catalog smoke failed: {status}")
 else:
     raise SystemExit("unknown smoke mode")
 PY
@@ -1253,8 +1279,8 @@ open_empty_beta() {
   [ "$#" -eq 1 ] || usage
   require_phase deployed
   assert_empty_allowlist
-  # Replenishment stays closed here because its review callback is action-gated,
-  # not page-gated. Maintenance alone can prove the empty page-list boundary.
+  # Replenishment includes the scoped creator write path, so its global gate stays
+  # closed until the exact named permission graph and create canary are in place.
   set_flags true false
   recreate_app || contain_failed_open "application failed while opening empty Beta stage"
   assert_flags true false false \
@@ -1304,8 +1330,8 @@ pilot_smoke() {
   fi
   smoke deny "$1" \
     || contain_failed_open "pilot deny smoke failed"
-  smoke allow "$2" \
-    || contain_failed_open "pilot allow smoke failed"
+  smoke creator "$2" \
+    || contain_failed_open "pilot creator smoke failed"
   current_app_cid=$(service_cid app) \
     || contain_failed_open "cannot recheck pilot app container"
   current_frontend_cid=$(service_cid frontend) \
@@ -1328,7 +1354,7 @@ PY
 ) || contain_failed_open "cannot capture pilot identity baseline"
   state_update pilot_open "$pilot_state" \
     || contain_failed_open "cannot persist pilot release state"
-  printf 'named-account pilot smoke passed\n'
+  printf 'named-account creator pilot smoke passed\n'
 }
 
 observe() {
@@ -1387,7 +1413,7 @@ PY
   if ! internal_health \
       || ! smoke stable "$2" \
       || ! smoke deny "$3" \
-      || ! smoke allow "$4" \
+      || ! smoke creator "$4" \
       || ! no_db_pressure \
       || ! db_matches_state \
       || ! candidate_images_running \
@@ -1413,7 +1439,7 @@ print(json.dumps({"format":"v121-observation-1","manifest_sha256":sys.argv[1],
  "database_pressure":json.loads(sys.argv[4]),
  "restart_counts":{"db":int(sys.argv[5]),"app":int(sys.argv[6]),"frontend":int(sys.argv[7])},
  "container_ids":{"app":sys.argv[8],"frontend":sys.argv[9]},
- "stable_smoke":"passed","beta_deny_smoke":"passed","beta_allow_smoke":"passed",
+ "stable_smoke":"passed","beta_deny_smoke":"passed","beta_creator_smoke":"passed",
  "observed_at":dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
  "result":"passed"},sort_keys=True,separators=(",",":")))
 PY
