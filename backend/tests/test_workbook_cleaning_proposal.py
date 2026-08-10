@@ -545,6 +545,11 @@ def test_strict_schema_rejects_float_values_and_unknown_fields() -> None:
         CellValue.model_validate({"kind": "text", "value": "safe", "payload": "ignored?"})
 
 
+def test_kernel_revalidates_instances_constructed_through_unsafe_copy_paths() -> None:
+    unsafe = _request().model_copy(update={"mode": "execute"})
+    _expect_rejected(unsafe, "invalid_request_schema")
+
+
 def test_kernel_has_no_io_or_runtime_registration_surface() -> None:
     package = Path(__file__).parents[1] / "app" / "agent" / "workbook_cleaning"
     source = "\n".join(path.read_text(encoding="utf-8") for path in package.glob("*.py"))

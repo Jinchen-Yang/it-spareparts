@@ -7,6 +7,8 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from pydantic import ValidationError
+
 from .models import (
     CleaningProposalAssessment,
     CleaningProposalRequest,
@@ -221,6 +223,16 @@ def assess_cleaning_proposal(
     business write.  Future workflow code must place it behind a Human Interrupt
     and the authoritative Capability/Task/Artifact gates.
     """
+
+    # Internal callers can bypass Pydantic validation with model_construct/model_copy.
+    # Revalidate the complete frozen tree so that this safety boundary does not
+    # silently trust the caller's construction path.
+    try:
+        request = CleaningProposalRequest.model_validate(
+            request.model_dump(mode="python")
+        )
+    except (AttributeError, ValidationError):
+        raise CleaningProposalRejected("invalid_request_schema") from None
 
     owners = {
         request.task_owner_sub,
