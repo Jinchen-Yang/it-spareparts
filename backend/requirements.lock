@@ -1133,6 +1133,10 @@ sqlalchemy==2.0.49 \
     # via
     #   alembic
     #   spareparts-backend
+sqlglot==30.13.0 \
+    --hash=sha256:08f87ff7b052246d61b731628c8c2db0bc91f2c9e69f5ba68a1d160a9f5b49b1 \
+    --hash=sha256:f0a6eb79de2fd6efe2689f8cf197caa4f08bfe77c7880315616fa4420b8ba2bf
+    # via spareparts-backend
 starlette==1.3.1 \
     --hash=sha256:05d0213193f2fbaae60e2ecb593b4add4262ad4e46536b54abe36f11a71724e0 \
     --hash=sha256:c7372aae11c3c3f26a42df7bd626cec2f47d03483d261d369516a615a53714c6

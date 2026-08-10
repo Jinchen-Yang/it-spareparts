@@ -19,6 +19,9 @@ dependencies = [
     "python-docx>=1.2.0",
     "pdfplumber>=0.11.9",
     "pillow>=12.3.0",
+    # Query Broker AST 二次门禁。精确 pin：编译器输出验证属于安全边界，
+    # 不允许解析语义随宽松版本范围静默漂移。
+    "sqlglot==30.13.0",
 ]
 
 [project.optional-dependencies]

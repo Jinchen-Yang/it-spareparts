@@ -32,6 +32,9 @@ services:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     environment:
       DATABASE_URL: postgresql+psycopg://spareparts:${POSTGRES_PASSWORD:-spareparts}@db:5432/spareparts
+      # #224 默认关闭；独立 reader/semantic views 未部署前不得开启。
+      ENABLE_TEXT2SQL: ${ENABLE_TEXT2SQL:-false}
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
       RAW_FILE_DIR: /app/data/raw
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-env}
