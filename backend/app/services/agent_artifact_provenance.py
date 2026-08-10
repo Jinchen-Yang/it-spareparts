@@ -8,13 +8,14 @@ exact renderer input by a canonical SHA-256 fingerprint.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 import unicodedata
 import uuid
 import zipfile
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from functools import lru_cache
 from io import BytesIO
@@ -35,10 +36,13 @@ SOURCE_SNAPSHOT_SCHEMA_VERSION = "artifact-source-snapshot/v1"
 SOURCE_SNAPSHOT_PURPOSE = "agent.source-snapshot"
 SOURCE_UNION_PROOF_VERSION = "source-union/v1"
 SOURCE_SET_PREDICATE_VERSION = "source-condition-set/v1"
-IDENTITY_CLASSIFIER_VERSION = "identity-template-classifier/v1"
-_IDENTITY_PROFILES = {
-    "pn-replenishment-request/v1": {
-        "申请": ("PN", "数量", "备注"),
+IDENTITY_CLASSIFIER_VERSION = "identity-template-classifier/v2"
+ARTIFACT_BINDING_SCHEMA_VERSION = "artifact-binding/v1"
+ARTIFACT_BINDING_PURPOSE = "agent.artifact-binding"
+_IDENTITY_TEMPLATES = {
+    ("pn-replenishment-request", 1): {
+        "profile_id": "pn-replenishment-request/v1",
+        "sheets": {"申请": ("PN", "数量", "备注")},
     },
 }
 _CORE_TIMESTAMP = re.compile(
@@ -65,7 +69,107 @@ class ProvenanceError(ValueError):
     """The evidence is unknown, mutable, inconsistent, or cannot be evaluated."""
 
 
-@dataclass(frozen=True, slots=True)
+def _binding_datetime(value: Any, label: str) -> str:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ProvenanceError(f"Artifact binding {label} 无效")
+    return (
+        value.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def artifact_binding_payload(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Canonical immutable row identity covered by the aggregate binding MAC."""
+    if not isinstance(metadata, dict):
+        raise ProvenanceError("Artifact binding 元数据无效")
+    access_scope = metadata.get("access_scope")
+    extra_meta = metadata.get("extra_meta")
+    source_ids = metadata.get("source_ids")
+    if (
+        not isinstance(access_scope, dict)
+        or not isinstance(extra_meta, dict)
+        or not isinstance(source_ids, list)
+        or any(not isinstance(source_id, str) for source_id in source_ids)
+    ):
+        raise ProvenanceError("Artifact binding JSON 形状无效")
+    try:
+        scope_bytes = agent_integrity.canonicalize(access_scope)
+        extra_bytes = agent_integrity.canonicalize(extra_meta)
+    except agent_integrity.IntegrityError as exc:
+        raise ProvenanceError("Artifact binding JSON 无法规范化") from exc
+    payload = {
+        "binding_version": ARTIFACT_BINDING_SCHEMA_VERSION,
+        "artifact_id": metadata.get("file_id"),
+        "owner_sub": metadata.get("owner_sub"),
+        "filename": metadata.get("filename"),
+        "media_type": metadata.get("media_type"),
+        "size_bytes": metadata.get("size_bytes"),
+        "sha256": metadata.get("sha256"),
+        "storage_key": metadata.get("storage_key"),
+        "kind": metadata.get("kind"),
+        "status": metadata.get("status"),
+        "sensitivity": metadata.get("sensitivity"),
+        "source_ids": list(source_ids),
+        "access_scope_sha256": hashlib.sha256(scope_bytes).hexdigest(),
+        "extra_meta_sha256": hashlib.sha256(extra_bytes).hexdigest(),
+        "created_at": _binding_datetime(metadata.get("created_at"), "created_at"),
+        "expires_at": _binding_datetime(metadata.get("expires_at"), "expires_at"),
+    }
+    try:
+        agent_integrity.canonicalize(payload)
+    except agent_integrity.IntegrityError as exc:
+        raise ProvenanceError("Artifact binding 字段无效") from exc
+    return payload
+
+
+def seal_artifact_binding(metadata: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return agent_integrity.seal(
+            artifact_binding_payload(metadata),
+            purpose=ARTIFACT_BINDING_PURPOSE,
+            payload_schema_version=ARTIFACT_BINDING_SCHEMA_VERSION,
+            keyring=agent_integrity.configured_keyring(),
+        )
+    except agent_integrity.IntegrityError as exc:
+        raise ProvenanceError("Artifact binding 签发失败") from exc
+
+
+def verify_artifact_binding(
+    envelope: Any,
+    metadata: dict[str, Any],
+) -> None:
+    """Authenticate the aggregate row and require exact ordered source identity."""
+    if not isinstance(envelope, dict):
+        raise ProvenanceError("Artifact binding 缺失")
+    try:
+        payload = agent_integrity.verify(
+            envelope,
+            allowed_purposes={ARTIFACT_BINDING_PURPOSE},
+            allowed_payload_schemas={ARTIFACT_BINDING_SCHEMA_VERSION},
+            keyring=agent_integrity.configured_keyring(),
+        )
+    except agent_integrity.IntegrityError as exc:
+        raise ProvenanceError("Artifact binding 验证失败") from exc
+    if payload != artifact_binding_payload(metadata):
+        raise ProvenanceError("Artifact binding 与当前元数据不匹配")
+
+    source_ids = metadata["source_ids"]
+    if metadata.get("kind") == "upload":
+        if source_ids:
+            raise ProvenanceError("上传 Artifact 不得带派生来源")
+        return
+    if metadata.get("kind") != "generated":
+        raise ProvenanceError("Artifact kind 无效")
+    try:
+        proven_source_ids = source_artifact_ids(metadata["access_scope"])
+    except (KeyError, TypeError, ProvenanceError) as exc:
+        raise ProvenanceError("Artifact scope 来源无法验证") from exc
+    if proven_source_ids != source_ids:
+        raise ProvenanceError("Artifact source_ids 与已验证 scope 不匹配")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class TrustedEvidence:
     """Opaque object capability minted only by a deterministic server adapter."""
 
@@ -73,6 +177,13 @@ class TrustedEvidence:
     content_fingerprint: str
     source_envelopes_json: tuple[str, ...]
     _seal: object
+
+    def __repr__(self) -> str:
+        return (
+            "TrustedEvidence("
+            f"envelope_count={len(self.source_envelopes_json)}"
+            ")"
+        )
 
 
 def _canonical_value(value: Any) -> Any:
@@ -129,48 +240,70 @@ def _unclassified_upload_scope() -> dict[str, Any]:
     }
 
 
-@lru_cache(maxsize=len(_IDENTITY_PROFILES))
-def _canonical_template_members(profile_id: str) -> dict[str, bytes]:
-    profile = _IDENTITY_PROFILES[profile_id]
+@lru_cache(maxsize=len(_IDENTITY_TEMPLATES))
+def canonical_identity_template_bytes(template_id: str, template_version: int) -> bytes:
+    """Return the exact deterministic XLSX bytes issued for one template version."""
+    spec = _IDENTITY_TEMPLATES.get((template_id, template_version))
+    if spec is None:
+        raise ProvenanceError("未知身份模板版本")
     workbook = Workbook()
     first = True
-    for sheet_name, headers in profile.items():
+    for sheet_name, headers in spec["sheets"].items():
         sheet = workbook.active if first else workbook.create_sheet()
         first = False
         sheet.title = sheet_name
         sheet.append(list(headers))
-    buffer = BytesIO()
-    workbook.save(buffer)
+    generated = BytesIO()
+    workbook.save(generated)
     workbook.close()
-    with zipfile.ZipFile(BytesIO(buffer.getvalue())) as archive:
-        return {
-            name: _CORE_TIMESTAMP.sub(rb"\1<TIMESTAMP>\2", archive.read(name))
-            for name in archive.namelist()
-        }
-
-
-def _identity_profile(content: bytes) -> str | None:
-    try:
-        with zipfile.ZipFile(BytesIO(content)) as archive:
-            infos = archive.infolist()
-            if (
-                len(infos) > 32
-                or len({item.filename for item in infos}) != len(infos)
-                or sum(item.file_size for item in infos) > 8 * 1024 * 1024
-                or any(item.file_size > 2 * 1024 * 1024 for item in infos)
-            ):
-                return None
-            actual = {
-                item.filename: _CORE_TIMESTAMP.sub(
-                    rb"\1<TIMESTAMP>\2", archive.read(item.filename)
+    canonical = BytesIO()
+    with zipfile.ZipFile(BytesIO(generated.getvalue())) as source, zipfile.ZipFile(
+        canonical,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    ) as target:
+        for name in sorted(source.namelist()):
+            data = source.read(name)
+            if name == "docProps/core.xml":
+                data = _CORE_TIMESTAMP.sub(
+                    lambda match: (
+                        match.group(1)
+                        + b"2000-01-01T00:00:00Z"
+                        + match.group(2)
+                    ),
+                    data,
                 )
-                for item in infos
-            }
-    except (OSError, zipfile.BadZipFile, RuntimeError):
-        return None
-    for profile_id in _IDENTITY_PROFILES:
-        if actual == _canonical_template_members(profile_id):
-            return profile_id
+            info = zipfile.ZipInfo(name, (2000, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = 0o600 << 16
+            info.extra = b""
+            info.comment = b""
+            target.writestr(
+                info,
+                data,
+                compress_type=zipfile.ZIP_DEFLATED,
+                compresslevel=9,
+            )
+    return canonical.getvalue()
+
+
+@lru_cache(maxsize=len(_IDENTITY_TEMPLATES))
+def canonical_identity_template_sha256(template_id: str, template_version: int) -> str:
+    return hashlib.sha256(
+        canonical_identity_template_bytes(template_id, template_version)
+    ).hexdigest()
+
+
+def _identity_template(content: bytes) -> tuple[str, int, dict[str, Any]] | None:
+    actual = hashlib.sha256(content).hexdigest()
+    for (template_id, template_version), spec in _IDENTITY_TEMPLATES.items():
+        if hmac.compare_digest(
+            actual,
+            canonical_identity_template_sha256(template_id, template_version),
+        ):
+            return template_id, template_version, spec
     return None
 
 
@@ -178,10 +311,12 @@ def classify_upload_access_scope(content: bytes, ext: str) -> dict[str, Any]:
     """Pre-model deterministic template classifier; never upgrades generated output."""
     if ext != "xlsx":
         return _unclassified_upload_scope()
-    profile_id = _identity_profile(content)
-    if profile_id is None:
+    matched = _identity_template(content)
+    if matched is None:
         return _unclassified_upload_scope()
-    profile = _IDENTITY_PROFILES[profile_id]
+    template_id, template_version, spec = matched
+    profile_id = spec["profile_id"]
+    profile = spec["sheets"]
     return {
         "schema_version": ACCESS_SCHEMA_VERSION,
         "policy": "owner_only",
@@ -199,12 +334,14 @@ def classify_upload_access_scope(content: bytes, ext: str) -> dict[str, Any]:
         "template_proof": {
             "classifier_version": IDENTITY_CLASSIFIER_VERSION,
             "profile_id": profile_id,
+            "template_id": template_id,
+            "template_version": template_version,
             "template_sha256": hashlib.sha256(content).hexdigest(),
             "sheet_headers": [
                 {"sheet": sheet, "headers": list(headers)}
                 for sheet, headers in profile.items()
             ],
-            "safe_style_profile": "default-style-only/v1",
+            "safe_style_profile": "canonical-xlsx-bytes/v1",
             "pre_model": True,
         },
     }
@@ -217,19 +354,35 @@ def _identity_scope_matches(scope: Any, source_sha256: str) -> bool:
     proof = scope.get("template_proof")
     if not isinstance(proof, dict):
         return False
-    profile_id = proof.get("profile_id")
-    profile = _IDENTITY_PROFILES.get(profile_id)
-    if profile is None:
+    template_id = proof.get("template_id")
+    template_version = proof.get("template_version")
+    if (
+        not isinstance(template_id, str)
+        or isinstance(template_version, bool)
+        or not isinstance(template_version, int)
+    ):
+        return False
+    spec = _IDENTITY_TEMPLATES.get((template_id, template_version))
+    if spec is None or spec["profile_id"] != proof.get("profile_id"):
+        return False
+    profile_id = spec["profile_id"]
+    profile = spec["sheets"]
+    if not hmac.compare_digest(
+        source_sha256,
+        canonical_identity_template_sha256(template_id, template_version),
+    ):
         return False
     expected_proof = {
         "classifier_version": IDENTITY_CLASSIFIER_VERSION,
         "profile_id": profile_id,
+        "template_id": template_id,
+        "template_version": template_version,
         "template_sha256": source_sha256,
         "sheet_headers": [
             {"sheet": sheet, "headers": list(headers)}
             for sheet, headers in profile.items()
         ],
-        "safe_style_profile": "default-style-only/v1",
+        "safe_style_profile": "canonical-xlsx-bytes/v1",
         "pre_model": True,
     }
     return scope == {

@@ -32,7 +32,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="显式执行修复/清理；省略时为 dry-run",
+        help="显式执行状态迁移与审计记录（不物理删除）；省略时为 dry-run",
     )
     parser.add_argument(
         "--grace-minutes",
@@ -64,8 +64,15 @@ def main(argv: list[str] | None = None) -> int:
         print("artifact reconciliation failed closed", file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    if int(result.get("errors", 0)):
-        print("artifact reconciliation retained uncertain entries", file=sys.stderr)
+    if (
+        int(result.get("errors", 0))
+        or int(result.get("unresolved", 0))
+        or bool(result.get("requires_operator", False))
+    ):
+        print(
+            "artifact reconciliation requires operator attention",
+            file=sys.stderr,
+        )
         return 2
     return 0
 

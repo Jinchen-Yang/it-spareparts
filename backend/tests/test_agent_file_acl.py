@@ -67,9 +67,20 @@ def test_readonly_cannot_read_others_file(db):
 
 
 def test_generated_report_owned_by_creator(db):
-    _owner(db, "carol")
-    out = tools._write_report(db, {"headers": ["型号"], "rows": [["PN-A"]], "title": "报价"},
-                              _ctx("carol"))
+    owner = _owner(db, "carol")
+    evidence = agent_files._mint_report_provenance(
+        owner,
+        title="报价",
+        headers=["型号"],
+        rows=[["PN-A"]],
+        output_name=None,
+        money_cols=None,
+        contained_resources=set(),
+        contained_fields=set(),
+    )
+    out = agent_files.write_report(
+        "报价", ["型号"], [["PN-A"]], None, owner, provenance=evidence
+    )
     fid = out["file_id"]
     assert agent_files._owner_of_unchecked(fid) == "carol"
     assert agent_files.access_allowed(fid, _ctx("carol")) is True

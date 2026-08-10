@@ -11,10 +11,11 @@ import base64
 import hashlib
 import hmac
 import json
-from dataclasses import dataclass
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
-from collections.abc import Mapping
 
 
 ENVELOPE_SCHEMA_VERSION = "integrity-envelope/v1"
@@ -35,6 +36,9 @@ MAX_JSON_DEPTH = 32
 MAX_JSON_NODES = 10_000
 MAX_JSON_STRING_BYTES = 2 * 1024 * 1024
 MAX_JSON_WORK = 100_000
+MAX_HEADER_STRING_BYTES = 128
+_HEX_SHA256 = re.compile(r"[a-f0-9]{64}\Z")
+_B64URL_MAC = re.compile(r"[A-Za-z0-9_-]{43}\Z")
 
 
 class IntegrityError(ValueError):
@@ -72,23 +76,41 @@ class _JsonBudget:
 
 @dataclass(frozen=True, slots=True)
 class IntegrityKey:
-    secret: bytes
+    secret: bytes = field(repr=False)
     status: str
 
     def __post_init__(self) -> None:
-        if len(self.secret) < 32:
+        if not isinstance(self.secret, bytes) or not 32 <= len(self.secret) <= 1024:
             raise IntegrityError("完整性密钥长度不足")
-        if self.status not in _KEY_STATUSES:
+        if not isinstance(self.status, str) or self.status not in _KEY_STATUSES:
             raise IntegrityError("完整性密钥状态未知")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class IntegrityKeyring:
     active_key_id: str
     keys: Mapping[str, IntegrityKey]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "keys", MappingProxyType(dict(self.keys)))
+        if not isinstance(self.active_key_id, str):
+            raise IntegrityError("完整性 active key id 无效")
+        try:
+            copied = dict(self.keys)
+        except (TypeError, ValueError) as exc:
+            raise IntegrityError("完整性密钥映射无效") from exc
+        if any(
+            not isinstance(key_id, str)
+            or not key_id.isascii()
+            or not 0 < len(key_id.encode("ascii")) <= MAX_HEADER_STRING_BYTES
+            or not isinstance(key, IntegrityKey)
+            for key_id, key in copied.items()
+        ):
+            raise IntegrityError("完整性密钥映射无效")
+        object.__setattr__(self, "keys", MappingProxyType(copied))
+
+    def __repr__(self) -> str:
+        """Expose cardinality only; key identifiers and material are log-sensitive."""
+        return f"IntegrityKeyring(key_count={len(self.keys)})"
 
     def signing_key(self) -> tuple[str, IntegrityKey]:
         key_id = str(self.active_key_id or "").strip()
@@ -162,6 +184,17 @@ def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
+def _header_string(header: dict[str, Any], field: str) -> str:
+    value = header.get(field)
+    if (
+        not isinstance(value, str)
+        or not value.isascii()
+        or not 0 < len(value.encode("ascii")) <= MAX_HEADER_STRING_BYTES
+    ):
+        raise IntegrityError("完整性 Envelope header 字段无效")
+    return value
+
+
 def seal(
     payload: dict[str, Any],
     *,
@@ -206,25 +239,44 @@ def verify(
     mac = envelope.get("mac")
     if not isinstance(header, dict) or set(header) != _HEADER_KEYS:
         raise IntegrityError("完整性 Envelope header 无效")
-    if not isinstance(payload, dict) or not isinstance(mac, str):
-        raise IntegrityError("完整性 Envelope payload 或 mac 无效")
     if (
-        header.get("schema_version") != ENVELOPE_SCHEMA_VERSION
-        or header.get("canonicalization") != CANONICALIZATION
-        or header.get("algorithm") != ALGORITHM
-        or header.get("purpose") not in allowed_purposes
-        or header.get("payload_schema_version") not in allowed_payload_schemas
+        not isinstance(payload, dict)
+        or not isinstance(mac, str)
+        or _B64URL_MAC.fullmatch(mac) is None
+    ):
+        raise IntegrityError("完整性 Envelope payload 或 mac 无效")
+    schema_version = _header_string(header, "schema_version")
+    purpose = _header_string(header, "purpose")
+    payload_schema_version = _header_string(header, "payload_schema_version")
+    canonicalization = _header_string(header, "canonicalization")
+    algorithm = _header_string(header, "algorithm")
+    key_id = _header_string(header, "key_id")
+    payload_sha256 = _header_string(header, "payload_sha256")
+    if _HEX_SHA256.fullmatch(payload_sha256) is None:
+        raise IntegrityError("完整性 Envelope payload 摘要字段无效")
+    if (
+        not isinstance(allowed_purposes, (set, frozenset))
+        or not allowed_purposes
+        or not all(isinstance(item, str) for item in allowed_purposes)
+        or not isinstance(allowed_payload_schemas, (set, frozenset))
+        or not allowed_payload_schemas
+        or not all(isinstance(item, str) for item in allowed_payload_schemas)
+    ):
+        raise IntegrityError("完整性 Envelope 允许版本配置无效")
+    if (
+        schema_version != ENVELOPE_SCHEMA_VERSION
+        or canonicalization != CANONICALIZATION
+        or algorithm != ALGORITHM
+        or purpose not in allowed_purposes
+        or payload_schema_version not in allowed_payload_schemas
     ):
         raise IntegrityError("完整性 Envelope purpose 或版本不兼容")
-    key_id = header.get("key_id")
-    if not isinstance(key_id, str):
-        raise IntegrityError("完整性 Envelope key_id 无效")
     key = keyring.verification_key(key_id)
     payload_bytes = canonicalize(payload)
     if len(payload_bytes) > max_payload_bytes:
         raise IntegrityError("完整性载荷超过大小预算")
     digest = hashlib.sha256(payload_bytes).hexdigest()
-    if not hmac.compare_digest(str(header.get("payload_sha256") or ""), digest):
+    if not hmac.compare_digest(payload_sha256, digest):
         raise IntegrityError("完整性载荷摘要不匹配")
     expected = _b64url(
         hmac.new(key.secret, _mac_input(header, payload), hashlib.sha256).digest()
@@ -235,14 +287,25 @@ def verify(
     return json.loads(payload_bytes.decode("utf-8"))
 
 
-def configured_keyring() -> IntegrityKeyring:
-    """Load the process key policy without ever including secret values in errors."""
-    from app.config import get_settings
+def keyring_from_settings(settings: Any) -> IntegrityKeyring:
+    """Parse one settings object without including any secret value in failures."""
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise IntegrityError("Agent 完整性密钥环配置无效")
+            result[key] = value
+        return result
 
-    settings = get_settings()
     try:
-        raw = json.loads(settings.agent_integrity_keys_json)
-    except (TypeError, json.JSONDecodeError) as exc:
+        configured_keys = settings.agent_integrity_keys_json
+        if hasattr(configured_keys, "get_secret_value"):
+            configured_keys = configured_keys.get_secret_value()
+        raw = json.loads(
+            configured_keys,
+            object_pairs_hook=unique_object,
+        )
+    except (TypeError, json.JSONDecodeError, IntegrityError) as exc:
         raise IntegrityError("Agent 完整性密钥环配置无效") from exc
     if not isinstance(raw, dict):
         raise IntegrityError("Agent 完整性密钥环配置无效")
@@ -272,3 +335,10 @@ def configured_keyring() -> IntegrityKeyring:
         active_key_id=settings.agent_integrity_active_key_id,
         keys=keys,
     )
+
+
+def configured_keyring() -> IntegrityKeyring:
+    """Load the process key policy without ever including secret values in errors."""
+    from app.config import get_settings
+
+    return keyring_from_settings(get_settings())

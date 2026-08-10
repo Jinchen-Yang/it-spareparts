@@ -8,7 +8,7 @@ from datetime import date
 from decimal import Decimal
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # DeepSeek v4 为混合思考模型；默认开思考（reasoning_content 流式回前端，灰色可折叠展示）。
@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     # {"key-id":{"key":"base64url-32+-bytes","status":"active|verify_only|revoked"}}
     # 与登录 SECRET_KEY 分离；空配置时任何需要完整性证明的生成制品 fail closed。
     agent_integrity_active_key_id: str = ""
-    agent_integrity_keys_json: str = "{}"
+    agent_integrity_keys_json: SecretStr = SecretStr("{}")
 
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
     # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级
@@ -118,11 +118,16 @@ def check_security(settings: "Settings") -> list[str]:
         warns.append("SECRET_KEY 仍为默认值（token 可被离线伪造）")
     if "spareparts:spareparts" in settings.database_url:
         warns.append("数据库使用默认弱口令 spareparts:spareparts")
-    if settings.agent_artifact_v2_enabled and (
-        not settings.agent_integrity_active_key_id
-        or settings.agent_integrity_keys_json.strip() in {"", "{}"}
-    ):
-        warns.append("Artifact v2 已开启但 Agent 完整性密钥环未配置")
+    if settings.agent_artifact_v2_enabled:
+        from app.services import agent_integrity
+
+        try:
+            agent_integrity.keyring_from_settings(settings).signing_key()
+        except agent_integrity.IntegrityError:
+            # Never include raw configuration or an exception repr: both may contain
+            # signing material.  In prod, main converts this generic warning to a
+            # startup refusal before any Artifact route is served.
+            warns.append("Artifact v2 完整性密钥环配置无效")
     return warns
 
 

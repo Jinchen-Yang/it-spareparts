@@ -3,18 +3,50 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import uuid
+import zipfile
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 
 import pytest
+from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 from sqlalchemy.exc import DBAPIError
 
 from app import permissions, security
 from app.auth import hash_password
-from app.models.agent_artifact import AgentArtifact
+from app.main import app
+from app.models.agent_artifact import AgentArtifact, AgentArtifactAudit
 from app.models.system import SysUser
-from app.services import agent_artifact_provenance, agent_files, agent_integrity
+from app.services import (
+    agent_artifact_provenance,
+    agent_artifact_reconcile,
+    agent_files,
+    agent_integrity,
+)
+from tests.artifact_test_support import force_artifact_state
+
+
+def test_trusted_evidence_repr_never_discloses_opaque_provenance() -> None:
+    owner = "repr-secret-owner"
+    source_id = "repr-secret-source-id"
+    mac = "repr-secret-mac"
+    evidence = agent_artifact_provenance.TrustedEvidence(
+        owner_sub=owner,
+        content_fingerprint="repr-secret-renderer-fingerprint",
+        source_envelopes_json=(
+            f'{{"source_artifact_id":"{source_id}","mac":"{mac}"}}',
+        ),
+        _seal=object(),
+    )
+
+    rendered = repr(evidence)
+
+    assert rendered == "TrustedEvidence(envelope_count=1)"
+    assert owner not in rendered
+    assert source_id not in rendered
+    assert mac not in rendered
 
 
 def _owner(db, username: str = "provenance-owner", role: str = "admin"):
@@ -70,6 +102,50 @@ def _workbook_bytes(
     workbook.save(buffer)
     workbook.close()
     return buffer.getvalue()
+
+
+def _identity_template_bytes() -> bytes:
+    return agent_artifact_provenance.canonical_identity_template_bytes(
+        "pn-replenishment-request", 1
+    )
+
+
+def _rewrite_zip(
+    content: bytes,
+    *,
+    entry_timestamp: bool = False,
+    core_timestamp: bool = False,
+    member_bytes: bool = False,
+) -> bytes:
+    output = BytesIO()
+    with zipfile.ZipFile(BytesIO(content)) as source, zipfile.ZipFile(
+        output, "w", compression=zipfile.ZIP_DEFLATED
+    ) as target:
+        for index, info in enumerate(source.infolist()):
+            data = source.read(info.filename)
+            if core_timestamp and info.filename == "docProps/core.xml":
+                data = data.replace(
+                    b"2000-01-01T00:00:00Z", b"2001-01-01T00:00:00Z"
+                )
+            if member_bytes and info.filename == "xl/worksheets/sheet1.xml":
+                data = data.replace(b">PN<", b">PX<", 1)
+            copied = zipfile.ZipInfo(
+                info.filename,
+                (2002, 1, 1, 0, 0, 0) if entry_timestamp and index == 0
+                else info.date_time,
+            )
+            copied.compress_type = info.compress_type
+            copied.create_system = info.create_system
+            copied.external_attr = info.external_attr
+            target.writestr(copied, data)
+    return output.getvalue()
+
+
+def _zip_with_comment(content: bytes) -> bytes:
+    output = BytesIO(content)
+    with zipfile.ZipFile(output, "a") as archive:
+        archive.comment = b"attacker-controlled-comment"
+    return output.getvalue()
 
 
 def _business_report(owner, name: str = "业务来源") -> dict:
@@ -204,7 +280,7 @@ def test_direct_renderers_enforce_row_cell_text_and_money_column_budgets(monkeyp
 def test_write_excel_consumes_exact_evidence_before_read_and_persists_scope(db):
     owner = _owner(db, role="boss")
     template = agent_files.save_upload(
-        _workbook_bytes(), "补库申请模板.xlsx", owner
+        _identity_template_bytes(), "补库申请模板.xlsx", owner
     )
     business = _business_report(owner)
     cells = [{"row": 2, "col": "A", "value": "PN-1"}]
@@ -232,8 +308,8 @@ def test_write_excel_consumes_exact_evidence_before_read_and_persists_scope(db):
     assert artifact.access_scope["classification"] == "business_content"
     assert artifact.access_scope["contained_resources"] == ["purchases"]
     assert artifact.access_scope["contained_fields"] == ["purchase_cost"]
-    path, _ = agent_files.get_download(result["file_id"], owner)
-    workbook = load_workbook(path, data_only=False)
+    download = agent_files.get_download_info(result["file_id"], owner)
+    workbook = load_workbook(BytesIO(download.content), data_only=False)
     assert workbook["申请"]["A2"].value == "PN-1"
     workbook.close()
 
@@ -243,7 +319,7 @@ def test_write_excel_rejects_renderer_mismatch_before_loading_or_publishing(
 ):
     owner = _owner(db, role="boss")
     template = agent_files.save_upload(
-        _workbook_bytes(), "补库申请模板.xlsx", owner
+        _identity_template_bytes(), "补库申请模板.xlsx", owner
     )
     business = _business_report(owner)
     signed_cells = [{"row": 2, "col": "A", "value": "PN-1"}]
@@ -278,7 +354,7 @@ def test_current_scope_drift_after_evidence_mint_blocks_before_source_read_or_pu
 ):
     owner = _owner(db, role="boss")
     template = agent_files.save_upload(
-        _workbook_bytes(), "补库申请模板.xlsx", owner
+        _identity_template_bytes(), "补库申请模板.xlsx", owner
     )
     business = _business_report(owner)
     cells = [{"row": 2, "col": "A", "value": "PN-1"}]
@@ -390,6 +466,130 @@ def test_revocation_after_validating_blocks_object_store_delegate_and_fails_row(
     assert failed.status == "failed"
 
 
+def test_generated_source_store_outage_stays_unknown_across_publish_and_reconcile(
+    db, monkeypatch
+):
+    from app.db import SessionLocal
+
+    owner = _owner(db, role="boss")
+    source = _business_report(owner, "Store outage source")
+    title, headers, rows = "Outage derived", ["Summary"], [["derived"]]
+
+    def evidence_for(output_name):
+        return agent_files._mint_report_from_artifacts(
+            owner,
+            source_ids=[source["file_id"]],
+            title=title,
+            headers=headers,
+            rows=rows,
+            output_name=output_name,
+            money_cols=None,
+        )
+
+    ready = agent_files.write_report(
+        title,
+        headers,
+        rows,
+        "ready-before-outage.xlsx",
+        owner,
+        provenance=evidence_for("ready-before-outage.xlsx"),
+    )
+    delegate = agent_files.get_artifact_store()
+    source_row = db.get(AgentArtifact, source["file_id"])
+    assert source_row is not None
+
+    class SourceOutageStore:
+        source_unavailable = False
+
+        def read_bytes(self, storage_key, *, max_bytes):
+            if self.source_unavailable and storage_key == source_row.storage_key:
+                raise agent_files.ArtifactStoreUnavailable("source store unavailable")
+            return delegate.read_bytes(storage_key, max_bytes=max_bytes)
+
+        def path_for(self, storage_key):
+            return delegate.path_for(storage_key)
+
+        def inspect(self, storage_key):
+            return delegate.inspect(storage_key)
+
+        def publish_bytes(self, *args, **kwargs):
+            stored = delegate.publish_bytes(*args, **kwargs)
+            self.source_unavailable = True
+            return stored
+
+    store = SourceOutageStore()
+    monkeypatch.setattr(agent_files, "get_artifact_store", lambda: store)
+    store.source_unavailable = True
+    with pytest.raises(agent_files.ArtifactStoreUnavailable):
+        agent_files.get_download_info(ready["file_id"], owner)
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "provenance-owner", "password": "pw123456"},
+    )
+    assert login.status_code == 200
+    response = client.get(
+        f"/api/agent/files/{ready['file_id']}",
+        headers={"Authorization": f"Bearer {login.json()['token']}"},
+    )
+    assert response.status_code == 503
+    db.expire_all()
+    audit = db.query(AgentArtifactAudit).filter_by(
+        artifact_id=ready["file_id"],
+        action="http_download",
+        outcome="denied",
+    ).one()
+    assert audit.detail["reason_code"] == "store_or_authorization_unavailable"
+
+    store.source_unavailable = False
+    with pytest.raises(agent_files.ArtifactStoreUnavailable, match="待协调"):
+        agent_files.write_report(
+            title,
+            headers,
+            rows,
+            "validating-during-outage.xlsx",
+            owner,
+            provenance=evidence_for("validating-during-outage.xlsx"),
+        )
+
+    db.expire_all()
+    pending = db.query(AgentArtifact).filter_by(
+        filename="validating-during-outage.xlsx"
+    ).one()
+    assert pending.status == "validating"
+    now = datetime.now(timezone.utc)
+    pending = force_artifact_state(
+        db,
+        pending,
+        "validating",
+        created_at=now - timedelta(hours=2),
+        expires_at=now + timedelta(days=1),
+    )
+    first = agent_artifact_reconcile.reconcile_agent_artifacts(
+        apply=True,
+        grace_period=timedelta(hours=1),
+        session_factory=SessionLocal,
+        now=now,
+        artifact_root=delegate.root,
+    )
+    db.expire_all()
+    assert first["outcome"] == "partial"
+    assert first["applied"]["mark_failed"] == 0
+    assert db.get(AgentArtifact, pending.id).status == "validating"
+
+    monkeypatch.setattr(agent_files, "get_artifact_store", lambda: delegate)
+    second = agent_artifact_reconcile.reconcile_agent_artifacts(
+        apply=True,
+        grace_period=timedelta(hours=1),
+        session_factory=SessionLocal,
+        now=now,
+        artifact_root=delegate.root,
+    )
+    db.expire_all()
+    assert second["applied"]["report_nonready_without_receipt"] == 1
+    assert db.get(AgentArtifact, pending.id).status == "validating"
+
+
 @pytest.mark.parametrize("source_drift", ["status", "hash", "owner", "scope"])
 def test_source_fact_drift_after_evidence_mint_blocks_publish(
     db, monkeypatch, source_drift
@@ -410,7 +610,7 @@ def test_source_fact_drift_after_evidence_mint_blocks_publish(
     row = db.get(AgentArtifact, source["file_id"])
     assert row is not None
     if source_drift == "status":
-        row.status = "failed"
+        row = force_artifact_state(db, row, "failed")
     elif source_drift == "hash":
         row.sha256 = "f" * 64
     elif source_drift == "owner":
@@ -512,7 +712,7 @@ def test_upload_principal_drift_after_validating_blocks_store_and_ready(
 def test_identity_only_evidence_cannot_authorize_report_or_semantic_edit(db):
     owner = _owner(db)
     template = agent_files.save_upload(
-        _workbook_bytes(), "补库申请模板.xlsx", owner
+        _identity_template_bytes(), "补库申请模板.xlsx", owner
     )
     title, headers, rows = "非法洗白", ["值"], [["业务值"]]
     report_evidence = agent_files._mint_report_from_artifacts(
@@ -683,7 +883,14 @@ def test_multi_source_output_persists_each_artifact_snapshot_and_exact_unions(db
 
 def test_blank_allowlisted_template_is_classified_identity_only_before_model(db):
     owner = _owner(db)
-    content = _workbook_bytes()
+    content = _identity_template_bytes()
+
+    assert content == _identity_template_bytes()
+    assert hashlib.sha256(content).hexdigest() == (
+        agent_artifact_provenance.canonical_identity_template_sha256(
+            "pn-replenishment-request", 1
+        )
+    )
 
     result = agent_files.save_upload(content, "补库申请模板.xlsx", owner)
 
@@ -691,16 +898,18 @@ def test_blank_allowlisted_template_is_classified_identity_only_before_model(db)
     assert artifact is not None
     assert artifact.access_scope["policy"] == "owner_only"
     assert artifact.access_scope["classification"] == "identity_only"
-    assert artifact.access_scope["proof_version"] == "identity-template-classifier/v1"
+    assert artifact.access_scope["proof_version"] == "identity-template-classifier/v2"
     assert artifact.access_scope["contained_resources"] == []
     assert artifact.access_scope["contained_fields"] == []
     assert artifact.access_scope["condition"] == {"op": "top"}
     assert artifact.access_scope["template_proof"] == {
-        "classifier_version": "identity-template-classifier/v1",
+        "classifier_version": "identity-template-classifier/v2",
         "profile_id": "pn-replenishment-request/v1",
+        "template_id": "pn-replenishment-request",
+        "template_version": 1,
         "template_sha256": artifact.sha256,
         "sheet_headers": [{"sheet": "申请", "headers": ["PN", "数量", "备注"]}],
-        "safe_style_profile": "default-style-only/v1",
+        "safe_style_profile": "canonical-xlsx-bytes/v1",
         "pre_model": True,
     }
 
@@ -729,10 +938,35 @@ def test_template_with_business_or_non_allowlisted_content_never_becomes_identit
     assert artifact.access_scope["template_proof"] is None
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda content: b"prefix" + content,
+        lambda content: content + b"suffix",
+        lambda content: _zip_with_comment(content),
+        lambda content: _rewrite_zip(content, entry_timestamp=True),
+        lambda content: _rewrite_zip(content, core_timestamp=True),
+        lambda content: _rewrite_zip(content, member_bytes=True),
+    ],
+    ids=["prefix", "suffix", "zip-comment", "entry-metadata", "core-time", "member-byte"],
+)
+def test_any_canonical_template_byte_or_zip_metadata_drift_is_unclassified(db, mutate):
+    owner = _owner(db)
+    content = mutate(_identity_template_bytes())
+
+    result = agent_files.save_upload(content, "漂移模板.xlsx", owner)
+
+    artifact = db.get(AgentArtifact, result["file_id"])
+    assert artifact is not None
+    assert artifact.access_scope["classification"] == "business_content"
+    assert artifact.access_scope["proof_version"] == "upload-unclassified/v1"
+    assert artifact.access_scope["template_proof"] is None
+
+
 def test_identity_template_contributes_empty_top_but_keeps_hash_owner_and_proof(db):
     owner = _owner(db, role="boss")
     template = agent_files.save_upload(
-        _workbook_bytes(), "补库申请模板.xlsx", owner
+        _identity_template_bytes(), "补库申请模板.xlsx", owner
     )
     source_title = "采购来源"
     source_headers = ["PN", "成本"]
@@ -785,7 +1019,7 @@ def test_identity_template_contributes_empty_top_but_keeps_hash_owner_and_proof(
     assert identity["source_sha256"] == db.get(AgentArtifact, template["file_id"]).sha256
     assert identity["owner_sub"] == "provenance-owner"
     assert identity["classification"] == "identity_only"
-    assert identity["proof_version"] == "identity-template-classifier/v1"
+    assert identity["proof_version"] == "identity-template-classifier/v2"
     assert identity["condition"] == {"op": "top"}
     assert identity["required_positive_keys"] == []
     assert identity["contained_resources"] == []
@@ -813,7 +1047,7 @@ def test_internal_root_evidence_mint_is_unreachable_in_production(db, monkeypatc
 def test_identity_classifier_proof_requires_known_exact_profile(db):
     owner = _owner(db)
     template = agent_files.save_upload(
-        _workbook_bytes(), "补库申请模板.xlsx", owner
+        _identity_template_bytes(), "补库申请模板.xlsx", owner
     )
     artifact = db.get(AgentArtifact, template["file_id"])
     assert artifact is not None
@@ -1051,7 +1285,7 @@ def test_live_source_scope_cannot_be_underdeclared_by_valid_signed_snapshot(db):
 def test_business_upload_cannot_be_laundered_as_identity_source(db):
     owner = _owner(db, role="boss")
     identity = agent_files.save_upload(
-        _workbook_bytes(), "真模板.xlsx", owner
+        _identity_template_bytes(), "真模板.xlsx", owner
     )
     unclassified = agent_files.save_upload(
         _workbook_bytes(

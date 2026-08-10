@@ -126,6 +126,7 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    "agent_artifact_audit",
     "agent_artifact",
     "chat_message", "chat_session",
     "fact_data_quality_issue",
@@ -202,8 +203,21 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.fixture()
 def db(migrated):
+    assert _database_run.name.startswith("spareparts_test_")
     with engine.connect() as conn:
-        conn.execute(text(f"TRUNCATE {', '.join(_TABLES)} RESTART IDENTITY CASCADE"))
+        # Production makes Artifact audit evidence append-only at the database layer.
+        # This owner-only bypass exists solely in the isolated per-pytest database.
+        conn.execute(text(
+            "ALTER TABLE agent_artifact_audit DISABLE TRIGGER USER"
+        ))
+        try:
+            conn.execute(text(
+                f"TRUNCATE {', '.join(_TABLES)} RESTART IDENTITY CASCADE"
+            ))
+        finally:
+            conn.execute(text(
+                "ALTER TABLE agent_artifact_audit ENABLE TRIGGER USER"
+            ))
         _reseed_templates(conn)
         _reseed_business_setting(conn)
         conn.commit()

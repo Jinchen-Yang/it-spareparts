@@ -2,7 +2,15 @@
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, CheckConstraint, Index, String, Uuid, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    Index,
+    String,
+    UniqueConstraint,
+    Uuid,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,6 +42,9 @@ class AgentArtifact(Base):
     extra_meta: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"
     )
+    # NULL is reserved for pre-c2 rows that cannot be cryptographically resealed by
+    # a schema migration. Runtime access treats NULL as fail-closed.
+    binding_envelope: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
     )
@@ -54,6 +65,39 @@ class AgentArtifact(Base):
         ),
         CheckConstraint("size_bytes >= 0", name="ck_agent_artifact_size"),
         CheckConstraint("char_length(sha256) = 64", name="ck_agent_artifact_sha256"),
+        CheckConstraint(
+            "jsonb_typeof(extra_meta) = 'object'",
+            name="ck_agent_artifact_extra_meta_object",
+        ),
+        CheckConstraint(
+            "binding_envelope IS NULL "
+            "OR jsonb_typeof(binding_envelope) = 'object'",
+            name="ck_agent_artifact_binding_object",
+        ),
+        CheckConstraint(
+            """
+            NOT jsonb_path_exists(
+                source_ids, '$[*] ? (@.type() != "string")'
+            )
+            AND NOT jsonb_path_exists(
+                access_scope->'required_permissions',
+                '$[*] ? (@.type() != "string")'
+            )
+            AND NOT jsonb_path_exists(
+                access_scope->'contained_resources',
+                '$[*] ? (@.type() != "string")'
+            )
+            AND NOT jsonb_path_exists(
+                access_scope->'contained_fields',
+                '$[*] ? (@.type() != "string")'
+            )
+            AND NOT jsonb_path_exists(
+                access_scope->'source_access_snapshots',
+                '$[*] ? (@.type() != "object")'
+            )
+            """,
+            name="ck_agent_artifact_json_member_types",
+        ),
         CheckConstraint(
             "char_length(btrim(owner_sub)) > 0",
             name="ck_agent_artifact_owner",
@@ -110,7 +154,7 @@ class AgentArtifact(Base):
                                 'policy', 'owner_only',
                                 'classification', 'identity_only',
                                 'proof_version',
-                                    'identity-template-classifier/v1',
+                                    'identity-template-classifier/v2',
                                 'containment_status', 'classified',
                                 'required_permissions', '[]'::jsonb,
                                 'contained_resources', '[]'::jsonb,
@@ -122,9 +166,12 @@ class AgentArtifact(Base):
                                 'source_access_snapshots', '[]'::jsonb,
                                 'template_proof', jsonb_build_object(
                                     'classifier_version',
-                                        'identity-template-classifier/v1',
+                                        'identity-template-classifier/v2',
                                     'profile_id',
                                         'pn-replenishment-request/v1',
+                                    'template_id',
+                                        'pn-replenishment-request',
+                                    'template_version', 1,
                                     'template_sha256', sha256,
                                     'sheet_headers', jsonb_build_array(
                                         jsonb_build_object(
@@ -135,9 +182,13 @@ class AgentArtifact(Base):
                                         )
                                     ),
                                     'safe_style_profile',
-                                        'default-style-only/v1',
+                                        'canonical-xlsx-bytes/v1',
                                     'pre_model', TRUE
                                 )
+                            )
+                            AND (
+                                access_scope->>'classification' <> 'identity_only'
+                                OR sha256 = '04af664a1ef445eddd3b91b55b352609b7ded62212be21bee51eede3a5400ecd'
                             )
                         )
                     )
@@ -196,4 +247,55 @@ class AgentArtifact(Base):
         ),
         Index("ix_agent_artifact_owner_created", "owner_sub", "created_at"),
         Index("ix_agent_artifact_status_expiry", "status", "expires_at"),
+    )
+
+
+class AgentArtifactAudit(Base):
+    """Append-only durable facts for Artifact lifecycle and delete decisions."""
+
+    __tablename__ = "agent_artifact_audit"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    artifact_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), nullable=True)
+    decision_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    from_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    to_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)
+    detail: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "jsonb_typeof(detail) = 'object'",
+            name="ck_agent_artifact_audit_detail_object",
+        ),
+        CheckConstraint(
+            "char_length(btrim(action)) > 0",
+            name="ck_agent_artifact_audit_action",
+        ),
+        CheckConstraint(
+            "char_length(btrim(outcome)) > 0",
+            name="ck_agent_artifact_audit_outcome",
+        ),
+        CheckConstraint(
+            "char_length(btrim(actor)) > 0",
+            name="ck_agent_artifact_audit_actor",
+        ),
+        CheckConstraint(
+            "decision_key IS NULL OR decision_key ~ '^[0-9a-f]{64}$'",
+            name="ck_agent_artifact_audit_decision_key",
+        ),
+        UniqueConstraint(
+            "decision_key",
+            "outcome",
+            name="uq_agent_artifact_audit_decision_outcome",
+        ),
+        Index("ix_agent_artifact_audit_artifact_time", "artifact_id", "created_at"),
+        Index("ix_agent_artifact_audit_action_time", "action", "created_at"),
     )

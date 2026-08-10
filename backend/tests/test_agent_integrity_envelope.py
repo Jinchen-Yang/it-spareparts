@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 
 from app.services import agent_integrity
+from app.config import Settings, check_security
 
 
 def _keyring(status: str = "active") -> agent_integrity.IntegrityKeyring:
@@ -109,6 +111,36 @@ def test_frozen_keyring_defensively_copies_the_key_mapping():
         keyring.keys["other"] = original["test-v1"]
 
 
+def test_integrity_key_and_keyring_repr_never_disclose_secret_material():
+    secret = b"repr-canary-do-not-leak-0123456789abcdef"
+    key = agent_integrity.IntegrityKey(secret=secret, status="active")
+    keyring = agent_integrity.IntegrityKeyring(
+        active_key_id="repr-test-v1",
+        keys={"repr-test-v1": key},
+    )
+
+    for rendered in (repr(key), repr(keyring)):
+        assert secret.decode("ascii") not in rendered
+        assert repr(secret) not in rendered
+        assert "repr-canary" not in rendered
+
+
+def test_settings_repr_never_discloses_integrity_keyring_json():
+    secret = "settings-repr-secret-integrity-key-material"
+    keys_json = json.dumps({
+        "active": {"key": secret, "status": "active"},
+    })
+
+    settings = Settings(
+        _env_file=None,
+        agent_integrity_active_key_id="active",
+        agent_integrity_keys_json=keys_json,
+    )
+
+    assert secret not in repr(settings)
+    assert keys_json not in repr(settings)
+
+
 def test_verify_returns_a_defensive_canonical_roundtrip_copy():
     envelope = agent_integrity.seal(
         {"nested": {"values": ["original"]}},
@@ -143,6 +175,41 @@ def test_integrity_envelope_rejects_unknown_top_level_or_header_fields(mutation)
         keyring=_keyring(),
     )
     mutation(envelope)
+    with pytest.raises(agent_integrity.IntegrityError):
+        agent_integrity.verify(
+            envelope,
+            allowed_purposes={"agent.source-snapshot"},
+            allowed_payload_schemas={"artifact-source-snapshot/v1"},
+            keyring=_keyring(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("schema_version", []),
+        ("purpose", []),
+        ("payload_schema_version", {}),
+        ("canonicalization", []),
+        ("algorithm", {}),
+        ("key_id", []),
+        ("payload_sha256", {}),
+        ("purpose", "x" * 129),
+        ("key_id", "x" * 129),
+        ("payload_sha256", "a" * 63),
+    ],
+)
+def test_verify_rejects_every_malformed_header_type_or_length_as_integrity_error(
+    field, invalid
+):
+    envelope = agent_integrity.seal(
+        {"source_ref": "opaque-ref"},
+        purpose="agent.source-snapshot",
+        payload_schema_version="artifact-source-snapshot/v1",
+        keyring=_keyring(),
+    )
+    envelope["header"][field] = invalid
+
     with pytest.raises(agent_integrity.IntegrityError):
         agent_integrity.verify(
             envelope,
@@ -261,3 +328,35 @@ def test_digest_and_mac_comparisons_use_constant_time_primitive(monkeypatch):
         keyring=_keyring(),
     )
     assert calls == [(str, str), (str, str)]
+
+
+@pytest.mark.parametrize(
+    "keys_json",
+    [
+        "[]",
+        json.dumps({"active": {"key": "c2hvcnQ", "status": "active"}}),
+        json.dumps({
+            "active": {
+                "key": "eC" * 32,
+                "status": "verify_only",
+            }
+        }),
+    ],
+    ids=["not-object", "short-key", "active-id-not-active"],
+)
+def test_artifact_v2_security_check_fully_parses_keyring_without_secret_errors(keys_json):
+    settings = Settings(
+        _env_file=None,
+        environment="prod",
+        admin_password="non-default",
+        secret_key="non-default-secret",
+        database_url="postgresql+psycopg://user:strong@db/test",
+        agent_artifact_v2_enabled=True,
+        agent_integrity_active_key_id="active",
+        agent_integrity_keys_json=keys_json,
+    )
+
+    warnings = check_security(settings)
+
+    assert "Artifact v2 完整性密钥环配置无效" in warnings
+    assert keys_json not in repr(warnings)

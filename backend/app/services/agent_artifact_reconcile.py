@@ -7,17 +7,19 @@ remain disabled.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import stat
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
-from app.models.agent_artifact import AgentArtifact
+from app.models.agent_artifact import AgentArtifact, AgentArtifactAudit
 from app.services import agent_files
 
 MIN_GRACE = timedelta(minutes=5)
@@ -30,9 +32,33 @@ _OBJECT_KEY = re.compile(rf"objects/(?P<id>{_UUID})\.(?P<ext>{_EXTENSIONS})\Z")
 _TEMP_PART = re.compile(r"artifact-[A-Za-z0-9_-]{6,}\.part\Z")
 
 _ACTIONS = (
-    "recover_ready",
     "mark_failed",
     "expire_ready",
+    "report_ready_binding_invalid",
+    "report_ready_object_missing",
+    "report_ready_object_invalid",
+    "report_ready_integrity_mismatch",
+    "report_nonready_without_receipt",
+    "report_nonready_binding_invalid",
+    "delete_failed_object",
+    "delete_expired_object",
+    "delete_orphan_object",
+    "delete_temp_part",
+)
+
+_DECISION_REASONS = (
+    "authorization_denied",
+    "authorization_unknown",
+    "binding_invalid",
+    "integrity_mismatch",
+    "object_invalid",
+    "object_locator_invalid",
+    "object_missing",
+    "object_oversize",
+    "publisher_completion_receipt_missing",
+    "store_unknown",
+)
+_PHYSICAL_DELETE_ACTIONS = (
     "delete_failed_object",
     "delete_expired_object",
     "delete_orphan_object",
@@ -49,22 +75,37 @@ def _result(*, apply: bool) -> dict:
         "temp_scanned": 0,
         "planned": {action: 0 for action in _ACTIONS},
         "applied": {action: 0 for action in _ACTIONS},
+        "disabled": {action: 0 for action in _ACTIONS},
+        "decisions": {reason: 0 for reason in _DECISION_REASONS},
+        "unresolved": 0,
+        "requires_operator": False,
         "skipped": 0,
         "errors": 0,
     }
 
 
 def _finish(result: dict) -> dict:
+    planned_delete_backlog = sum(
+        int(result["planned"].get(action, 0))
+        for action in _PHYSICAL_DELETE_ACTIONS
+    )
+    result["requires_operator"] = bool(
+        result["errors"]
+        or result["unresolved"]
+        or any(result["disabled"].values())
+        or (result["dry_run"] and planned_delete_backlog)
+    )
     if result["errors"]:
         result["outcome"] = "partial"
+    elif result["dry_run"] and result["requires_operator"]:
+        result["outcome"] = "dry_run_requires_operator"
+    elif result["unresolved"]:
+        result["outcome"] = (
+            "requires_operator"
+        )
+    elif not result["dry_run"] and any(result["disabled"].values()):
+        result["outcome"] = "applied_with_disabled_actions"
     return result
-
-
-def _is_regular_file(path: Path) -> bool:
-    try:
-        return stat.S_ISREG(path.lstat().st_mode)
-    except OSError:
-        return False
 
 
 def _old_regular_state(path: Path, *, cutoff: datetime):
@@ -75,33 +116,6 @@ def _old_regular_state(path: Path, *, cutoff: datetime):
     if not stat.S_ISREG(state.st_mode) or state.st_mtime >= cutoff.timestamp():
         return None
     return state
-
-
-def _same_file_state(left, right) -> bool:
-    return (
-        left.st_dev,
-        left.st_ino,
-        left.st_size,
-        left.st_mtime_ns,
-        left.st_ctime_ns,
-    ) == (
-        right.st_dev,
-        right.st_ino,
-        right.st_size,
-        right.st_mtime_ns,
-        right.st_ctime_ns,
-    )
-
-
-def _unlink_if_unchanged(path: Path, expected) -> bool:
-    try:
-        current = path.lstat()
-        if not stat.S_ISREG(current.st_mode) or not _same_file_state(expected, current):
-            return False
-        path.unlink()
-        return True
-    except OSError:
-        return False
 
 
 def _owned_directory(root: Path, name: str) -> Path | None:
@@ -118,21 +132,36 @@ def _owned_directory(root: Path, name: str) -> Path | None:
     return path
 
 
-def _object_matches(row: AgentArtifact) -> bool:
+_AUTHORIZED = "authorized"
+_DENIED = "denied"
+_UNKNOWN = "unknown"
+
+
+def _object_assessment(row: AgentArtifact) -> tuple[str, str]:
+    """Classify immutable-object evidence without converting outages to denial."""
     matched = _OBJECT_KEY.fullmatch(str(row.storage_key or ""))
     if matched is None or matched.group("id") != str(row.id):
-        return False
+        return _DENIED, "object_locator_invalid"
     if agent_files._ext_of(row.filename) != matched.group("ext"):
-        return False
+        return _DENIED, "object_locator_invalid"
     try:
-        store = agent_files.get_artifact_store()
-        path = store.path_for(row.storage_key)
-        if not _is_regular_file(path):
-            return False
-        stored = store.inspect(row.storage_key)
-    except agent_files.FileError:
-        return False
-    return stored.size_bytes == row.size_bytes and stored.sha256 == row.sha256
+        stored = agent_files.get_artifact_store().read_bytes(
+            row.storage_key,
+            max_bytes=agent_files._MAX_DOWNLOAD_BYTES,
+        )
+    except agent_files.ArtifactObjectInvalid as exc:
+        return _DENIED, exc.reason_code
+    except (agent_files.ArtifactStoreUnavailable, agent_files.FileError):
+        return _UNKNOWN, "store_unknown"
+    except Exception:  # noqa: BLE001 - storage uncertainty cannot prove denial
+        return _UNKNOWN, "store_unknown"
+    if stored.size_bytes != row.size_bytes or stored.sha256 != row.sha256:
+        return _DENIED, "integrity_mismatch"
+    return _AUTHORIZED, "object_verified"
+
+
+def _object_decision(row: AgentArtifact) -> str:
+    return _object_assessment(row)[0]
 
 
 def _row_object_state(row: AgentArtifact, *, cutoff: datetime | None = None):
@@ -155,39 +184,244 @@ def _row_object_state(row: AgentArtifact, *, cutoff: datetime | None = None):
     return path, state
 
 
-def _conditional_status(
+def _locked_current(db: Session, artifact_id: str) -> AgentArtifact | None:
+    return db.scalar(
+        select(AgentArtifact)
+        .where(AgentArtifact.id == artifact_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def _record_disabled_delete(
+    session_factory: Callable[[], Session],
+    *,
+    artifact_id: str | None,
+    action: str,
+    locator: str,
+) -> int:
+    """Idempotently persist delete intent + disabled outcome; never unlink."""
+    locator_sha256 = hashlib.sha256(locator.encode("utf-8")).hexdigest()
+    decision_key = hashlib.sha256(
+        "\x00".join((
+            "artifact-delete-decision/v1",
+            action,
+            artifact_id or "",
+            locator_sha256,
+        )).encode("utf-8")
+    ).hexdigest()
+    detail = {
+        "locator_sha256": locator_sha256,
+        "reason": "storage_conditional_delete_unavailable",
+    }
+    inserted = 0
+    with session_factory.begin() as db:
+        for outcome in ("intent", "disabled"):
+            statement = (
+                pg_insert(AgentArtifactAudit)
+                .values(
+                    artifact_id=artifact_id,
+                    decision_key=decision_key,
+                    action=action,
+                    outcome=outcome,
+                    actor="system:artifact-reconciler",
+                    detail=detail,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=["decision_key", "outcome"]
+                )
+            )
+            inserted += int(db.execute(statement).rowcount or 0)
+    return inserted
+
+
+def _stale_nonready_assessment(row: AgentArtifact) -> tuple[str, str]:
+    """Classify a stale marker; AUTHORIZED is not a completion receipt."""
+    try:
+        agent_files._validated_artifact_metadata(row)
+    except agent_files.FileError:
+        # An invalid aggregate binding cannot safely be re-signed into any state.
+        return _UNKNOWN, "binding_invalid"
+    object_decision, object_reason = _object_assessment(row)
+    if object_decision != _AUTHORIZED:
+        return object_decision, object_reason
+    try:
+        if agent_files._reconcile_ready_authorized(row):
+            return _AUTHORIZED, "publisher_completion_receipt_missing"
+        return _DENIED, "authorization_denied"
+    except Exception:  # noqa: BLE001 - unknown is neither allow nor permanent deny
+        return _UNKNOWN, "authorization_unknown"
+
+
+def _stale_nonready_decision(row: AgentArtifact) -> str:
+    return _stale_nonready_assessment(row)[0]
+
+
+def _apply_stale_nonready(
+    session_factory: Callable[[], Session],
+    *,
+    artifact_id: str,
+    cutoff: datetime,
+) -> tuple[str, str, str, int]:
+    """Re-read all mutable facts under the row lock before any terminal change."""
+    with session_factory.begin() as db:
+        row = _locked_current(db, artifact_id)
+        if (
+            row is None
+            or row.status not in {"prepared", "validating"}
+            or row.created_at >= cutoff
+        ):
+            return "skipped", _UNKNOWN, "not_current", 0
+        decision, reason = _stale_nonready_assessment(row)
+        if reason == "binding_invalid":
+            action = "report_nonready_binding_invalid"
+            inserted = _record_reconcile_observation(
+                db,
+                row=row,
+                action=action,
+                reason=reason,
+            )
+            return action, decision, reason, inserted
+        if decision == _AUTHORIZED:
+            action = "report_nonready_without_receipt"
+            inserted = _record_reconcile_observation(
+                db,
+                row=row,
+                action=action,
+                reason="publisher_completion_receipt_missing",
+            )
+            return action, decision, reason, inserted
+        if decision != _DENIED:
+            return "retained", decision, reason, 0
+        changed = agent_files._transition_locked_bound_status(
+            db,
+            row,
+            expected=row.status,
+            target="failed",
+            actor="system:artifact-reconciler",
+            reason=f"reconcile_{reason}",
+        )
+        return (
+            ("mark_failed" if changed else "skipped"),
+            decision,
+            reason,
+            int(changed),
+        )
+
+
+def _confirmed_terminal_locator(
     session_factory: Callable[[], Session],
     *,
     artifact_id: str,
     expected: str,
-    target: str,
-) -> bool:
+    cutoff: datetime | None = None,
+) -> str | None:
     with session_factory.begin() as db:
-        changed = db.execute(
-            update(AgentArtifact)
-            .where(AgentArtifact.id == artifact_id, AgentArtifact.status == expected)
-            .values(status=target)
-        )
-        return changed.rowcount == 1
+        row = _locked_current(db, artifact_id)
+        if row is None or row.status != expected:
+            return None
+        if cutoff is not None and row.created_at >= cutoff:
+            return None
+        agent_files._validated_artifact_metadata(row)
+        return row.storage_key
 
 
-_AUTHORIZED = "authorized"
-_DENIED = "denied"
-_UNKNOWN = "unknown"
-
-
-def _recovery_decision(row: AgentArtifact) -> str:
-    """Tri-state recovery proof: transient uncertainty must preserve retry state."""
+def _ready_anomaly(row: AgentArtifact) -> tuple[str | None, str]:
     try:
-        if not _object_matches(row):
-            return _DENIED
-        return (
-            _AUTHORIZED
-            if agent_files._reconcile_ready_authorized(row)
-            else _DENIED
+        agent_files._validated_artifact_metadata(row)
+    except agent_files.FileError:
+        return "report_ready_binding_invalid", "binding_invalid"
+    decision, reason = _object_assessment(row)
+    if decision == _AUTHORIZED:
+        return None, reason
+    if decision == _UNKNOWN:
+        return None, reason
+    if reason == "integrity_mismatch":
+        return "report_ready_integrity_mismatch", reason
+    if reason == "object_missing":
+        return "report_ready_object_missing", reason
+    return "report_ready_object_invalid", reason
+
+
+def _record_reconcile_observation(
+    db: Session,
+    *,
+    row: AgentArtifact,
+    action: str,
+    reason: str,
+) -> int:
+    locator_sha256 = hashlib.sha256(
+        str(row.storage_key or "").encode("utf-8")
+    ).hexdigest()
+    decision_key = hashlib.sha256(
+        "\x00".join((
+            "artifact-reconcile-observation/v1",
+            action,
+            str(row.id),
+            str(row.sha256 or ""),
+            locator_sha256,
+        )).encode("utf-8")
+    ).hexdigest()
+    statement = (
+        pg_insert(AgentArtifactAudit)
+        .values(
+            artifact_id=row.id,
+            decision_key=decision_key,
+            action=action,
+            outcome="observed",
+            actor="system:artifact-reconciler",
+            detail={
+                "reason": reason,
+                "locator_sha256": locator_sha256,
+            },
         )
-    except Exception:  # noqa: BLE001 - unknown is neither allow nor permanent deny
-        return _UNKNOWN
+        .on_conflict_do_nothing(
+            index_elements=["decision_key", "outcome"]
+        )
+    )
+    return int(db.execute(statement).rowcount or 0)
+
+
+def _apply_ready_evaluation(
+    session_factory: Callable[[], Session],
+    *,
+    artifact_id: str,
+    effective_now: datetime,
+) -> tuple[str | None, str, int, bool, str | None]:
+    """Assess, audit, and optionally expire one locked current ready row."""
+    with session_factory.begin() as db:
+        row = _locked_current(db, artifact_id)
+        if row is None or row.status != "ready":
+            return None, "not_current", 0, False, None
+        action, reason = _ready_anomaly(row)
+        inserted = 0
+        if action is not None:
+            inserted = _record_reconcile_observation(
+                db,
+                row=row,
+                action=action,
+                reason=reason,
+            )
+        changed = False
+        if (
+            row.expires_at <= effective_now
+            and reason not in {"binding_invalid", "store_unknown"}
+        ):
+            changed = agent_files._transition_locked_bound_status(
+                db,
+                row,
+                expected="ready",
+                target="expired",
+                actor="system:artifact-reconciler",
+                reason="retention_expired",
+            )
+        deletable_locator = (
+            row.storage_key
+            if changed
+            and reason in {"object_verified", "integrity_mismatch", "object_oversize"}
+            else None
+        )
+        return action, reason, inserted, changed, deletable_locator
 
 
 def reconcile_agent_artifacts(
@@ -220,99 +454,182 @@ def reconcile_agent_artifacts(
 
     result["rows_scanned"] = len(rows)
     for row in rows:
-        if row.status in {"prepared", "validating"} and row.created_at < cutoff:
-            decision = _recovery_decision(row)
-            if decision == _UNKNOWN:
-                result["errors"] += 1
-                result["skipped"] += 1
-                continue
-            if decision == _AUTHORIZED:
-                action = "recover_ready"
-                target = "ready"
-            else:
-                action = "mark_failed"
-                target = "failed"
-            result["planned"][action] += 1
+        if row.status == "ready":
+            planned_action, planned_reason = _ready_anomaly(row)
+            if planned_action is not None:
+                result["planned"][planned_action] += 1
+            expiry_actionable = (
+                row.expires_at <= effective_now
+                and planned_reason not in {"binding_invalid", "store_unknown"}
+            )
+            located = _row_object_state(row) if expiry_actionable else None
+            if expiry_actionable:
+                result["planned"]["expire_ready"] += 1
+                if located is not None:
+                    result["planned"]["delete_expired_object"] += 1
             if apply:
                 try:
-                    # Planning and mutation are intentionally separate for dry-run
-                    # visibility.  Repeat both object integrity and the exact publisher
-                    # principal/scope contract immediately before the CAS.  A later
-                    # account change is still enforced by every ready/download read;
-                    # PostgreSQL authorization rows and filesystem objects cannot share
-                    # one atomic lock domain.
-                    if target == "ready":
-                        current_decision = _recovery_decision(row)
-                        if current_decision == _UNKNOWN:
-                            result["errors"] += 1
-                            result["skipped"] += 1
-                            continue
-                        if current_decision == _DENIED:
-                            result["planned"]["recover_ready"] -= 1
-                            result["planned"]["mark_failed"] += 1
-                            action = "mark_failed"
-                            target = "failed"
-                    if _conditional_status(
+                    (
+                        current_action,
+                        current_reason,
+                        inserted,
+                        expired_changed,
+                        current_locator,
+                    ) = _apply_ready_evaluation(
                         session_factory,
                         artifact_id=row.id,
-                        expected=row.status,
-                        target=target,
-                    ):
-                        result["applied"][action] += 1
-                    else:
+                        effective_now=effective_now,
+                    )
+                    if current_action is not None:
+                        if planned_action != current_action:
+                            result["planned"][current_action] += 1
+                        if inserted:
+                            result["applied"][current_action] += 1
+                        else:
+                            result["skipped"] += 1
+                        result["unresolved"] += 1
+                        if current_reason in result["decisions"]:
+                            result["decisions"][current_reason] += 1
+                    elif current_reason == "store_unknown":
+                        result["errors"] += 1
                         result["skipped"] += 1
+                        result["decisions"]["store_unknown"] += 1
+                    elif planned_action is not None or current_reason == "not_current":
+                        # A healthy, unexpired row needs no action and is not a skip.
+                        # Count only a stale plan or a row that changed concurrently.
+                        result["skipped"] += 1
+                    if expired_changed:
+                        if not expiry_actionable:
+                            result["planned"]["expire_ready"] += 1
+                        result["applied"]["expire_ready"] += 1
+                        if current_locator is not None:
+                            if located is None:
+                                result["planned"]["delete_expired_object"] += 1
+                            _record_disabled_delete(
+                                session_factory,
+                                artifact_id=row.id,
+                                action="delete_expired_object",
+                                locator=current_locator,
+                            )
+                            result["disabled"]["delete_expired_object"] += 1
                 except Exception:
                     result["errors"] += 1
+            elif planned_reason == "store_unknown":
+                result["errors"] += 1
+                result["skipped"] += 1
+                result["decisions"]["store_unknown"] += 1
+            elif planned_action is not None:
+                result["unresolved"] += 1
+                if planned_reason in result["decisions"]:
+                    result["decisions"][planned_reason] += 1
+
+        if row.status in {"prepared", "validating"} and row.created_at < cutoff:
+            planned_decision, planned_reason = _stale_nonready_assessment(row)
+            if planned_decision == _DENIED:
+                result["planned"]["mark_failed"] += 1
+            elif planned_decision == _AUTHORIZED:
+                result["planned"]["report_nonready_without_receipt"] += 1
+            elif planned_reason == "binding_invalid":
+                result["planned"]["report_nonready_binding_invalid"] += 1
+            if apply:
+                try:
+                    outcome, current_decision, current_reason, inserted = (
+                        _apply_stale_nonready(
+                            session_factory,
+                            artifact_id=row.id,
+                            cutoff=cutoff,
+                        )
+                    )
+                    if current_reason in result["decisions"]:
+                        result["decisions"][current_reason] += 1
+                    if outcome == "mark_failed":
+                        if planned_decision != _DENIED:
+                            result["planned"]["mark_failed"] += 1
+                        result["applied"]["mark_failed"] += 1
+                    elif outcome == "report_nonready_without_receipt":
+                        if planned_decision != _AUTHORIZED:
+                            result["planned"][outcome] += 1
+                        if inserted:
+                            result["applied"][outcome] += 1
+                        else:
+                            result["skipped"] += 1
+                        result["unresolved"] += 1
+                    elif outcome == "report_nonready_binding_invalid":
+                        if planned_reason != "binding_invalid":
+                            result["planned"][outcome] += 1
+                        if inserted:
+                            result["applied"][outcome] += 1
+                        else:
+                            result["skipped"] += 1
+                        result["unresolved"] += 1
+                    else:
+                        result["skipped"] += 1
+                        if current_decision == _UNKNOWN:
+                            result["errors"] += 1
+                except Exception:
+                    result["errors"] += 1
+            elif planned_reason == "binding_invalid":
+                result["decisions"]["binding_invalid"] += 1
+                result["unresolved"] += 1
+            elif planned_decision == _UNKNOWN:
+                result["errors"] += 1
+                result["skipped"] += 1
+                if planned_reason in result["decisions"]:
+                    result["decisions"][planned_reason] += 1
+            else:
+                result["decisions"][planned_reason] += 1
+                if planned_decision == _AUTHORIZED:
+                    result["unresolved"] += 1
 
         if row.status == "failed" and row.created_at < cutoff:
             located = _row_object_state(row, cutoff=cutoff)
             if located is not None:
                 result["planned"]["delete_failed_object"] += 1
                 if apply:
-                    path, state = located
-                    if _unlink_if_unchanged(path, state):
-                        result["applied"]["delete_failed_object"] += 1
-                    else:
+                    try:
+                        locator = _confirmed_terminal_locator(
+                            session_factory,
+                            artifact_id=row.id,
+                            expected="failed",
+                            cutoff=cutoff,
+                        )
+                        if locator is None:
+                            result["skipped"] += 1
+                        else:
+                            _record_disabled_delete(
+                                session_factory,
+                                artifact_id=row.id,
+                                action="delete_failed_object",
+                                locator=locator,
+                            )
+                            result["disabled"]["delete_failed_object"] += 1
+                    except Exception:
                         result["errors"] += 1
 
-        if row.status == "ready" and row.expires_at <= effective_now:
-            located = _row_object_state(row)
-            result["planned"]["expire_ready"] += 1
-            if located is not None:
-                result["planned"]["delete_expired_object"] += 1
-            if apply:
-                try:
-                    changed = _conditional_status(
-                        session_factory,
-                        artifact_id=row.id,
-                        expected="ready",
-                        target="expired",
-                    )
-                except Exception:
-                    result["errors"] += 1
-                    changed = False
-                if changed:
-                    result["applied"]["expire_ready"] += 1
-                    if located is not None:
-                        path, state = located
-                        if _unlink_if_unchanged(path, state):
-                            result["applied"]["delete_expired_object"] += 1
-                        else:
-                            result["errors"] += 1
-                else:
-                    result["skipped"] += 1
-
-        # The status transition and object deletion cannot be one atomic transaction.
-        # Keep expired rows as durable retry markers when an unlink fails after commit.
+        # Physical deletion is intentionally unavailable. Expired rows remain durable
+        # evidence while the reconciler records an idempotent disabled decision.
         if row.status == "expired":
             located = _row_object_state(row)
             if located is not None:
                 result["planned"]["delete_expired_object"] += 1
                 if apply:
-                    path, state = located
-                    if _unlink_if_unchanged(path, state):
-                        result["applied"]["delete_expired_object"] += 1
-                    else:
+                    try:
+                        locator = _confirmed_terminal_locator(
+                            session_factory,
+                            artifact_id=row.id,
+                            expected="expired",
+                        )
+                        if locator is None:
+                            result["skipped"] += 1
+                        else:
+                            _record_disabled_delete(
+                                session_factory,
+                                artifact_id=row.id,
+                                action="delete_expired_object",
+                                locator=locator,
+                            )
+                            result["disabled"]["delete_expired_object"] += 1
+                    except Exception:
                         result["errors"] += 1
 
     references = {
@@ -338,9 +655,15 @@ def reconcile_agent_artifacts(
                     continue
                 result["planned"]["delete_orphan_object"] += 1
                 if apply:
-                    if _unlink_if_unchanged(path, state):
-                        result["applied"]["delete_orphan_object"] += 1
-                    else:
+                    try:
+                        _record_disabled_delete(
+                            session_factory,
+                            artifact_id=None,
+                            action="delete_orphan_object",
+                            locator=key,
+                        )
+                        result["disabled"]["delete_orphan_object"] += 1
+                    except Exception:
                         result["errors"] += 1
 
         temp_dir = _owned_directory(root, ".tmp")
@@ -356,9 +679,15 @@ def reconcile_agent_artifacts(
                     continue
                 result["planned"]["delete_temp_part"] += 1
                 if apply:
-                    if _unlink_if_unchanged(path, state):
-                        result["applied"]["delete_temp_part"] += 1
-                    else:
+                    try:
+                        _record_disabled_delete(
+                            session_factory,
+                            artifact_id=None,
+                            action="delete_temp_part",
+                            locator=f".tmp/{path.name}",
+                        )
+                        result["disabled"]["delete_temp_part"] += 1
+                    except Exception:
                         result["errors"] += 1
     except (OSError, RuntimeError):
         result["errors"] += 1

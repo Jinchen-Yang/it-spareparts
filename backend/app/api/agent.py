@@ -1,10 +1,12 @@
 """AI 助手 Chat API（二期）。任意有效 token 可用（销售/采购是 readonly 角色）。"""
 import json
 import logging
+import uuid
 from typing import Literal
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -35,7 +37,14 @@ _NOT_CONFIGURED_MSG = (
 def _artifact_http_error(exc: agent_files.FileError, default_status: int) -> HTTPException:
     code = (
         status.HTTP_503_SERVICE_UNAVAILABLE
-        if isinstance(exc, agent_files.ArtifactV2Disabled)
+        if isinstance(
+            exc,
+            (
+                agent_files.ArtifactV2Disabled,
+                agent_files.ArtifactStoreUnavailable,
+                agent_files.AuthorizationUnavailable,
+            ),
+        )
         else default_status
     )
     return HTTPException(code, str(exc))
@@ -47,21 +56,69 @@ def _audit_artifact_access(
     outcome: str,
     *,
     artifact_id: str | None = None,
+    attempted_identifier: str | None = None,
     reason_code: str | None = None,
     size_bytes: int | None = None,
 ) -> None:
     """Emit content-free, stable artifact audit fields only."""
-    detail: dict[str, str | int] = {"outcome": outcome}
-    if artifact_id is not None:
+    detail: dict[str, str | int | bool] = {"outcome": outcome}
+    if outcome == "success" and artifact_id is not None:
         try:
             detail["artifact_id"] = agent_files._check_id(artifact_id)
         except agent_files.FileError:
             pass
+    if outcome == "denied" and attempted_identifier is not None:
+        candidate = str(attempted_identifier or "").strip().lower()
+        detail["identifier_present"] = bool(candidate)
+        if agent_files._LEGACY_FILE_ID.fullmatch(candidate):
+            detail["identifier_format"] = "legacy"
+        else:
+            try:
+                detail["identifier_format"] = (
+                    "uuid" if str(uuid.UUID(candidate)) == candidate else "invalid"
+                )
+            except (ValueError, AttributeError):
+                detail["identifier_format"] = "invalid"
     if reason_code is not None:
         detail["reason_code"] = reason_code
     if size_bytes is not None:
         detail["size_bytes"] = size_bytes
     record_access_log(ctx, action, "agent_file", detail)
+
+
+def _durable_artifact_access(
+    ctx: UserContext,
+    action: str,
+    outcome: str,
+    *,
+    artifact_id: str | None = None,
+    attempted_identifier: str | None = None,
+    reason_code: str | None = None,
+    size_bytes: int | None = None,
+    fail_closed: bool,
+) -> None:
+    """Write the append-only Artifact audit; successful delivery requires commit."""
+    try:
+        agent_files.record_artifact_http_access(
+            action=action,
+            outcome=outcome,
+            actor=str(getattr(ctx, "user_id", "") or ""),
+            artifact_id=artifact_id,
+            attempted_identifier=attempted_identifier,
+            reason_code=reason_code,
+            size_bytes=size_bytes,
+        )
+    except agent_files.ArtifactAuditUnavailable as exc:
+        _log.error(
+            "artifact durable audit failed action=%s outcome=%s",
+            action,
+            outcome,
+        )
+        if fail_closed:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "文件访问审计暂时不可用，请稍后重试",
+            ) from exc
 
 
 class ChatMessage(BaseModel):
@@ -155,6 +212,13 @@ async def upload(
             else agent_files.artifact_reason_code(exc)
         )
         _audit_artifact_access(ctx, "upload", "denied", reason_code=reason)
+        _durable_artifact_access(
+            ctx,
+            "upload",
+            "denied",
+            reason_code=reason,
+            fail_closed=False,
+        )
         default = (
             status.HTTP_403_FORBIDDEN
             if "实名系统账号" in str(exc)
@@ -165,15 +229,34 @@ async def upload(
     try:
         result = agent_files.save_upload(content, file.filename or "上传.xlsx", owner)
     except agent_files.FileError as exc:
+        reason = agent_files.artifact_reason_code(exc)
         _audit_artifact_access(
             ctx,
             "upload",
             "denied",
-            reason_code=agent_files.artifact_reason_code(exc),
+            reason_code=reason,
             size_bytes=len(content),
         )
+        _durable_artifact_access(
+            ctx,
+            "upload",
+            "denied",
+            reason_code=reason,
+            size_bytes=len(content),
+            fail_closed=False,
+        )
         raise _artifact_http_error(exc, status.HTTP_400_BAD_REQUEST) from exc
-    # 文件名常含客户、合同或项目名；审计仅保留非内容型结构信息。
+    # Commit the specialized fact before returning the reference.  An unavailable
+    # audit store leaves the object hidden from this response rather than unlogged.
+    _durable_artifact_access(
+        ctx,
+        "upload",
+        "success",
+        artifact_id=result["file_id"],
+        size_bytes=len(content),
+        fail_closed=True,
+    )
+    # 文件名常含客户、合同或项目名；通用安全日志仅保留非内容型结构信息。
     _audit_artifact_access(
         ctx,
         "upload",
@@ -190,29 +273,54 @@ def download(
     db: Session = Depends(get_db),
     role: str = Depends(current_role),
     ctx: UserContext = Depends(get_current_user_context),
-) -> FileResponse:
+) -> Response:
     """下载智能体生成/上传的文件（普通端点严格仅本人，管理员也不例外）。"""
     try:
         owner = agent_files.verified_artifact_owner(db, ctx)
         artifact = agent_files.get_download_info(file_id, owner)
     except agent_files.FileError as exc:
+        reason = agent_files.artifact_reason_code(exc)
         _audit_artifact_access(
-            ctx, "download", "denied", artifact_id=file_id,
-            reason_code=agent_files.artifact_reason_code(exc),
+            ctx, "download", "denied", attempted_identifier=file_id,
+            reason_code=reason,
+        )
+        _durable_artifact_access(
+            ctx,
+            "download",
+            "denied",
+            attempted_identifier=file_id,
+            reason_code=reason,
+            fail_closed=False,
         )
         if isinstance(exc, agent_files.ArtifactV2Disabled):
             raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
+        if isinstance(
+            exc,
+            (agent_files.ArtifactStoreUnavailable, agent_files.AuthorizationUnavailable),
+        ):
+            raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在或无权访问") from exc
-    _audit_artifact_access(ctx, "download", "success", artifact_id=file_id)
-    return FileResponse(
-        artifact.path,
-        filename=artifact.filename,
+    _durable_artifact_access(
+        ctx,
+        "download",
+        "success",
+        artifact_id=artifact.artifact_id,
+        fail_closed=True,
+    )
+    _audit_artifact_access(
+        ctx, "download", "success", artifact_id=artifact.artifact_id
+    )
+    return Response(
+        content=artifact.content,
         media_type=artifact.media_type,
         # 含价格数据：禁止浏览器缓存（否则换人/过期 token 仍能命中缓存拿到文件）
         headers={
             "Cache-Control": "no-store",
             "ETag": f'"{artifact.sha256}"',
             "Content-Length": str(artifact.size_bytes),
+            "Content-Disposition": (
+                "attachment; filename*=UTF-8''" + quote(artifact.filename, safe="")
+            ),
             "X-Content-Type-Options": "nosniff",
         },
     )
@@ -230,12 +338,35 @@ def preview_file(
         owner = agent_files.verified_artifact_owner(db, ctx)
         result = agent_files.preview(file_id, owner)
     except agent_files.FileError as exc:
+        reason = agent_files.artifact_reason_code(exc)
         _audit_artifact_access(
-            ctx, "preview", "denied", artifact_id=file_id,
-            reason_code=agent_files.artifact_reason_code(exc),
+            ctx, "preview", "denied", attempted_identifier=file_id,
+            reason_code=reason,
+        )
+        _durable_artifact_access(
+            ctx,
+            "preview",
+            "denied",
+            attempted_identifier=file_id,
+            reason_code=reason,
+            fail_closed=False,
         )
         if isinstance(exc, agent_files.ArtifactV2Disabled):
             raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
+        if isinstance(
+            exc,
+            (agent_files.ArtifactStoreUnavailable, agent_files.AuthorizationUnavailable),
+        ):
+            raise _artifact_http_error(exc, status.HTTP_404_NOT_FOUND) from exc
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在或无权访问") from exc
-    _audit_artifact_access(ctx, "preview", "success", artifact_id=file_id)
+    _durable_artifact_access(
+        ctx,
+        "preview",
+        "success",
+        artifact_id=result.get("file_id"),
+        fail_closed=True,
+    )
+    _audit_artifact_access(
+        ctx, "preview", "success", artifact_id=result.get("file_id")
+    )
     return result

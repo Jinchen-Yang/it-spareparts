@@ -106,19 +106,35 @@ def test_read_document_tool(db, ctx):
 
 def test_write_report_styled(db, ctx):
     owner = _owner(db, "bom-admin")
-    r = tools.dispatch(db, "write_report", {
-        "title": "报价单", "headers": ["部件", "数量", "采购价", "备注"],
-        "rows": [["CPU", 2, 3500.0, "ok"], ["内存", 8, 800.0, "规格需确认"], ["X", 1, None, "库内未找到"]],
-        "money_cols": [2],
-    }, ctx)
+    headers = ["部件", "数量", "采购价", "备注"]
+    rows = [
+        ["CPU", 2, 3500.0, "ok"],
+        ["内存", 8, 800.0, "规格需确认"],
+        ["X", 1, None, "库内未找到"],
+    ]
+    evidence = af._mint_report_provenance(
+        owner,
+        title="报价单",
+        headers=headers,
+        rows=rows,
+        output_name=None,
+        money_cols=[2],
+        contained_resources=set(),
+        contained_fields=set(),
+    )
+    r = af.write_report(
+        "报价单", headers, rows, None, owner, money_cols=[2], provenance=evidence
+    )
     assert "download_url" in r and r["rows_written"] == 3
-    path, _ = af.get_download(r["file_id"], owner)
-    ws = load_workbook(path).active
+    download = af.get_download_info(r["file_id"], owner)
+    workbook = load_workbook(io.BytesIO(download.content))
+    ws = workbook.active
     # 标题行1、表头行2、数据行3-5；表头靛蓝填充
     assert ws.cell(2, 1).fill.fgColor.rgb.endswith("4F46E5")
     assert ws.cell(4, 1).fill.fgColor.rgb.endswith("FFF3E0")  # 需确认→橙
     assert ws.cell(5, 1).fill.fgColor.rgb.endswith("FDECEA")  # 未找到→红
     assert ws.cell(3, 3).number_format == "#,##0.00"
+    workbook.close()
 
 
 def test_lookup_prices_bulk_has_15day(db, ctx):

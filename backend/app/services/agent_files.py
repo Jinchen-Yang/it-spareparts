@@ -9,11 +9,13 @@
 一律产出新 file_id（绝不改写原上传件）；file_id 白名单正则防路径穿越；
 扩展名白名单防可执行文件。
 """
+import errno
 import hashlib
 import json
 import math
 import os
 import re
+import stat
 import tempfile
 import unicodedata
 import uuid
@@ -34,12 +36,14 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import SessionLocal
-from app.models.agent_artifact import AgentArtifact
+from app.models.agent_artifact import AgentArtifact, AgentArtifactAudit
 from app.models.system import SysUser
 from app.services import agent_artifact_provenance as artifact_provenance
+from app.services import agent_integrity
 
 _LEGACY_FILE_ID = re.compile(r"^[a-f0-9]{12}$")
 _MAX_UPLOAD_MB = 20
+_MAX_DOWNLOAD_BYTES = _MAX_UPLOAD_MB * 1024 * 1024
 _PREVIEW_ROWS = 8
 _PREVIEW_COLS = 12
 _MAX_READ_ROWS = 200
@@ -50,6 +54,8 @@ _MAX_REPORT_CELLS = 100_000
 _MAX_MONEY_COLUMNS = 256
 _MAX_RENDER_TEXT_BYTES = 2 * 1024 * 1024
 _MAX_RENDER_VALUE_BYTES = 64 * 1024
+_MAX_LEGACY_META_BYTES = 256 * 1024
+_MAX_ARTIFACT_JSON_BYTES = 512 * 1024
 _MAX_PROVENANCE_DERIVATION_DEPTH = 16
 _MAX_PROVENANCE_AUTH_NODES = 256
 _MAX_PROVENANCE_AUTH_WORK = 1024
@@ -106,6 +112,22 @@ class ObjectPublicationUncertain(FileError):
     """The final object key may exist after an atomic-link postcondition failed."""
 
 
+class ArtifactObjectInvalid(FileError):
+    """The addressed object is provably absent or violates immutable-store rules."""
+
+    def __init__(self, message: str, reason_code: str):
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
+class ArtifactStoreUnavailable(FileError):
+    """The object state could not be determined; callers must preserve retry state."""
+
+
+class ArtifactAuditUnavailable(FileError):
+    """A required durable Artifact access fact could not be committed."""
+
+
 _ARTIFACT_V2_DISABLED_MESSAGE = "Artifact Delivery v2 已停用"
 
 
@@ -121,6 +143,8 @@ def artifact_reason_code(exc: FileError) -> str:
         return exc.reason_code
     if isinstance(exc, ProvenanceRequired):
         return "provenance_required"
+    if isinstance(exc, (ArtifactStoreUnavailable, AuthorizationUnavailable)):
+        return "store_or_authorization_unavailable"
     return "validation_failed"
 
 
@@ -145,8 +169,16 @@ class StoredObject:
 
 
 @dataclass(frozen=True)
+class StoredBytes:
+    content: bytes
+    size_bytes: int
+    sha256: str
+
+
+@dataclass(frozen=True)
 class ArtifactDownload:
-    path: Path
+    artifact_id: str
+    content: bytes
     filename: str
     media_type: str
     size_bytes: int
@@ -168,6 +200,8 @@ class ArtifactStore(Protocol):
 
     def inspect(self, storage_key: str) -> StoredObject: ...
 
+    def read_bytes(self, storage_key: str, *, max_bytes: int) -> StoredBytes: ...
+
     def remove(self, storage_key: str) -> None: ...
 
 
@@ -175,19 +209,18 @@ class LocalArtifactStore:
     """Filesystem store with same-directory staging and atomic publication."""
 
     def __init__(self, root: Path):
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        requested = Path(root)
+        requested.mkdir(parents=True, exist_ok=True)
+        self.root = requested.resolve()
 
     def path_for(self, storage_key: str) -> Path:
         key = str(storage_key or "")
         pure = PurePosixPath(key)
         if not key or pure.is_absolute() or ".." in pure.parts or "\\" in key:
             raise FileError("文件存储定位无效")
-        root = self.root.resolve()
-        path = (root / Path(*pure.parts)).resolve()
-        if not path.is_relative_to(root):
+        if any(part in {"", ".", ".."} for part in pure.parts):
             raise FileError("文件存储定位无效")
-        return path
+        return self.root.joinpath(*pure.parts)
 
     def publish_bytes(
         self,
@@ -219,7 +252,7 @@ class LocalArtifactStore:
             # Unlike exists()+replace it cannot overwrite another concurrent winner.
             try:
                 os.link(temp_path, final_path, follow_symlinks=False)
-            except FileExistsError as exc:
+            except FileExistsError:
                 raise FileError("文件发布冲突，请重试")
             linked = True
             temp_path.unlink()
@@ -249,18 +282,105 @@ class LocalArtifactStore:
 
     def inspect(self, storage_key: str) -> StoredObject:
         path = self.path_for(storage_key)
-        if not path.is_file():
-            raise FileError("文件不存在或已清理")
-        digest = hashlib.sha256()
-        size = 0
+        stored = self.read_bytes(storage_key, max_bytes=_MAX_DOWNLOAD_BYTES)
+        return StoredObject(
+            path=path,
+            size_bytes=stored.size_bytes,
+            sha256=stored.sha256,
+        )
+
+    def read_bytes(self, storage_key: str, *, max_bytes: int) -> StoredBytes:
+        """Read/hash from one no-follow regular-file handle under a hard budget."""
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
+            raise FileError("文件读取大小预算无效")
+        self.path_for(storage_key)
+        pure = PurePosixPath(storage_key)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        cloexec = getattr(os, "O_CLOEXEC", 0)
+        directory_fds: list[int] = []
+        file_fd: int | None = None
         try:
-            with path.open("rb") as handle:
+            try:
+                current_fd = os.open(self.root, directory_flags | cloexec)
+            except OSError as exc:
+                raise ArtifactStoreUnavailable(
+                    "文件存储根目录暂时不可读取"
+                ) from exc
+            directory_fds.append(current_fd)
+            for part in pure.parts[:-1]:
+                try:
+                    current_fd = os.open(
+                        part,
+                        directory_flags | nofollow | cloexec,
+                        dir_fd=current_fd,
+                    )
+                except OSError as exc:
+                    # A missing/unmounted parent does not prove that the final
+                    # immutable object is absent.  Preserve reconciliation state.
+                    raise ArtifactStoreUnavailable(
+                        "文件存储目录暂时不可读取"
+                    ) from exc
+                directory_fds.append(current_fd)
+            try:
+                file_fd = os.open(
+                    pure.parts[-1],
+                    os.O_RDONLY | nofollow | cloexec,
+                    dir_fd=current_fd,
+                )
+            except OSError as exc:
+                if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+                    raise ArtifactObjectInvalid(
+                        "文件对象不存在或定位无效",
+                        "object_missing",
+                    ) from exc
+                if exc.errno == errno.ELOOP:
+                    raise ArtifactObjectInvalid(
+                        "文件对象定位违反不可变存储规则",
+                        "object_invalid",
+                    ) from exc
+                raise ArtifactStoreUnavailable("文件暂时不可读取") from exc
+            before = os.fstat(file_fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise ArtifactObjectInvalid("文件对象不是常规文件", "object_invalid")
+            if before.st_size > max_bytes:
+                raise ArtifactObjectInvalid("文件超过下载大小预算", "object_oversize")
+            digest = hashlib.sha256()
+            chunks: list[bytes] = []
+            size = 0
+            with os.fdopen(file_fd, "rb", closefd=True) as handle:
+                file_fd = None
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     size += len(chunk)
+                    if size > max_bytes:
+                        raise ArtifactObjectInvalid(
+                            "文件超过下载大小预算",
+                            "object_oversize",
+                        )
                     digest.update(chunk)
+                    chunks.append(chunk)
+                after = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(after.st_mode)
+                or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+                or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns
+                or before.st_ctime_ns != after.st_ctime_ns
+                or size != after.st_size
+            ):
+                raise ArtifactStoreUnavailable("文件读取期间发生变化")
         except OSError as exc:
-            raise FileError("文件暂时不可读取") from exc
-        return StoredObject(path=path, size_bytes=size, sha256=digest.hexdigest())
+            raise ArtifactStoreUnavailable("文件暂时不可读取") from exc
+        finally:
+            if file_fd is not None:
+                os.close(file_fd)
+            for directory_fd in reversed(directory_fds):
+                os.close(directory_fd)
+        return StoredBytes(
+            content=b"".join(chunks),
+            size_bytes=size,
+            sha256=digest.hexdigest(),
+        )
 
     def remove(self, storage_key: str) -> None:
         self.path_for(storage_key).unlink(missing_ok=True)
@@ -343,6 +463,268 @@ def _query_artifact(db, file_id: str) -> AgentArtifact | None:
     return db.get(AgentArtifact, file_id)
 
 
+def _bounded_json_object(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise FileError(f"{label} 必须是 JSON 对象")
+    try:
+        encoded = agent_integrity.canonicalize(value)
+        if len(encoded) > _MAX_ARTIFACT_JSON_BYTES:
+            raise FileError(f"{label} 超过大小预算")
+        copied = json.loads(encoded.decode("utf-8"))
+    except FileError:
+        raise
+    except (agent_integrity.IntegrityError, UnicodeError, json.JSONDecodeError) as exc:
+        raise FileError(f"{label} 不是有效的有界 JSON 对象") from exc
+    if not isinstance(copied, dict):
+        raise FileError(f"{label} 必须是 JSON 对象")
+    return copied
+
+
+def _add_artifact_audit(
+    db: Session,
+    *,
+    artifact_id: str | None,
+    action: str,
+    outcome: str,
+    actor: str,
+    decision_key: str | None = None,
+    from_status: str | None = None,
+    to_status: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> None:
+    db.add(AgentArtifactAudit(
+        artifact_id=artifact_id,
+        decision_key=decision_key,
+        action=action,
+        outcome=outcome,
+        actor=actor,
+        from_status=from_status,
+        to_status=to_status,
+        detail=_bounded_json_object(detail or {}, "Artifact 审计 detail"),
+    ))
+
+
+def record_artifact_http_access(
+    *,
+    action: str,
+    outcome: str,
+    actor: str,
+    artifact_id: str | None = None,
+    attempted_identifier: str | None = None,
+    reason_code: str | None = None,
+    size_bytes: int | None = None,
+) -> bool:
+    """Commit a specialized HTTP access fact, or decline unknown identifiers.
+
+    Success always requires an existing UUID-backed Artifact.  Denials are durable
+    only when they bind to an existing UUID row or the explicitly recognizable
+    legacy format.  Malformed/unknown identifiers stay in the generic security log.
+    """
+    if action not in {"upload", "download", "preview"}:
+        raise ArtifactAuditUnavailable("Artifact 访问审计动作无效")
+    if outcome not in {"success", "denied"}:
+        raise ArtifactAuditUnavailable("Artifact 访问审计结果无效")
+    checked_actor = str(actor or "").strip()
+    if not checked_actor or len(checked_actor) > 64:
+        checked_actor = "unknown:http-principal"
+    checked_reason = str(reason_code or "").strip().lower()
+    if not re.fullmatch(r"[a-z0-9_]{1,64}", checked_reason):
+        checked_reason = "validation_failed"
+    if (
+        size_bytes is not None
+        and (isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 0)
+    ):
+        raise ArtifactAuditUnavailable("Artifact 访问审计大小无效")
+
+    target_id: str | None = None
+    legacy_denial = False
+    if outcome == "success":
+        try:
+            target_id = _check_id(artifact_id or "")
+        except FileError as exc:
+            raise ArtifactAuditUnavailable("Artifact 成功审计缺少有效绑定") from exc
+        if _is_legacy_id(target_id):
+            raise ArtifactAuditUnavailable("Legacy 文件不能产生成功审计")
+    else:
+        candidate = str(attempted_identifier or "").strip().lower()
+        if _is_legacy_id(candidate):
+            legacy_denial = True
+        else:
+            try:
+                target_id = _check_id(candidate)
+            except FileError:
+                return False
+
+    detail: dict[str, Any] = {}
+    if outcome == "denied":
+        detail["reason_code"] = checked_reason
+        detail["identifier_format"] = "legacy" if legacy_denial else "uuid"
+    if size_bytes is not None:
+        detail["size_bytes"] = size_bytes
+    try:
+        with SessionLocal.begin() as db:
+            if target_id is not None and db.get(AgentArtifact, target_id) is None:
+                if outcome == "success":
+                    raise ArtifactAuditUnavailable(
+                        "Artifact 成功审计无法绑定当前制品"
+                    )
+                return False
+            _add_artifact_audit(
+                db,
+                artifact_id=target_id,
+                action=f"http_{action}",
+                outcome=outcome,
+                actor=checked_actor,
+                detail=detail,
+            )
+    except ArtifactAuditUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 - access delivery must fail closed
+        raise ArtifactAuditUnavailable("Artifact 访问审计暂时不可用") from exc
+    return True
+
+
+def _require_artifact_binding(meta: dict[str, Any]) -> None:
+    try:
+        artifact_provenance.verify_artifact_binding(
+            meta.get("binding_envelope"),
+            meta,
+        )
+    except artifact_provenance.ProvenanceError as exc:
+        raise ArtifactUnavailable(
+            "Artifact 元数据绑定校验失败",
+            "binding_invalid",
+        ) from exc
+
+
+def _binding_metadata_from_row(row: AgentArtifact) -> dict[str, Any]:
+    return {
+        "file_id": row.id,
+        "owner_sub": row.owner_sub,
+        "filename": row.filename,
+        "media_type": row.media_type,
+        "size_bytes": row.size_bytes,
+        "sha256": row.sha256,
+        "storage_key": row.storage_key,
+        "kind": row.kind,
+        "status": row.status,
+        "sensitivity": row.sensitivity,
+        "source_ids": row.source_ids,
+        "access_scope": row.access_scope,
+        "extra_meta": row.extra_meta,
+        "binding_envelope": row.binding_envelope,
+        "created_at": row.created_at,
+        "expires_at": row.expires_at,
+    }
+
+
+def _locked_artifact(db: Session, artifact_id: str) -> AgentArtifact | None:
+    return db.scalar(
+        select(AgentArtifact)
+        .where(AgentArtifact.id == artifact_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+def _transition_locked_bound_status(
+    db: Session,
+    row: AgentArtifact,
+    *,
+    expected: str,
+    target: str,
+    actor: str,
+    reason: str,
+) -> bool:
+    """Transition one locked row with old proof, new proof, and durable audit."""
+    allowed_edges = {
+        ("prepared", "validating"),
+        ("prepared", "failed"),
+        ("validating", "ready"),
+        ("validating", "failed"),
+        ("ready", "expired"),
+    }
+    if (expected, target) not in allowed_edges:
+        raise FileError("Artifact 状态迁移边无效")
+    if row.status != expected:
+        return False
+    _require_artifact_binding(_binding_metadata_from_row(row))
+    row.status = target
+    try:
+        row.binding_envelope = artifact_provenance.seal_artifact_binding(
+            _binding_metadata_from_row(row)
+        )
+    except artifact_provenance.ProvenanceError as exc:
+        row.status = expected
+        raise ArtifactUnavailable(
+            "Artifact 状态绑定签发失败",
+            "binding_resign_failed",
+        ) from exc
+    _add_artifact_audit(
+        db,
+        artifact_id=row.id,
+        action="status_transition",
+        outcome="success",
+        actor=actor,
+        from_status=expected,
+        to_status=target,
+        detail={"reason": reason},
+    )
+    return True
+
+
+def _validated_artifact_metadata(row: AgentArtifact) -> dict[str, Any]:
+    try:
+        extra = _bounded_json_object(row.extra_meta, "Artifact extra_meta")
+        access_scope = _bounded_json_object(
+            row.access_scope,
+            "Artifact access_scope",
+        )
+        binding_envelope = _bounded_json_object(
+            row.binding_envelope,
+            "Artifact binding_envelope",
+        )
+        source_ids = row.source_ids
+        if (
+            not isinstance(source_ids, list)
+            or any(
+                not isinstance(source_id, str)
+                or str(uuid.UUID(source_id)) != source_id
+                for source_id in source_ids
+            )
+            or len(source_ids) != len(set(source_ids))
+        ):
+            raise FileError("Artifact source_ids 类型无效")
+    except (FileError, ValueError, AttributeError) as exc:
+        raise ArtifactUnavailable(
+            "文件元数据校验失败",
+            "metadata_invalid",
+        ) from exc
+    meta = {
+        **extra,
+        "file_id": row.id,
+        "filename": row.filename,
+        "ext": _ext_of(row.filename),
+        "kind": row.kind,
+        "sensitivity": row.sensitivity,
+        "operated_by": row.owner_sub,
+        "owner_sub": row.owner_sub,
+        "media_type": row.media_type,
+        "size_bytes": row.size_bytes,
+        "sha256": row.sha256,
+        "status": row.status,
+        "storage_key": row.storage_key,
+        "source_ids": list(source_ids),
+        "access_scope": access_scope,
+        "extra_meta": extra,
+        "binding_envelope": binding_envelope,
+        "created_at": row.created_at,
+        "expires_at": row.expires_at,
+    }
+    _require_artifact_binding(meta)
+    return meta
+
+
 def _find_artifact_meta(file_id: str, *, require_ready: bool) -> dict | None:
     if _is_legacy_id(file_id):
         return None
@@ -352,32 +734,39 @@ def _find_artifact_meta(file_id: str, *, require_ready: bool) -> dict | None:
         row = _query_artifact(db, file_id)
         if row is None:
             return None
+        meta = _validated_artifact_metadata(row)
         if row.expires_at <= now and row.status == "ready":
-            row.status = "expired"
-            db.commit()
-        if require_ready and row.status != "ready":
-            reason = row.status if row.status in {"expired", "failed"} else "not_ready"
+            # The initial read is only a candidate.  Reload and lock the current row
+            # before mutating so stale ORM state can never authorize a transition.
+            row = _locked_artifact(db, row.id)
+            if row is None:
+                return None
+            meta = _validated_artifact_metadata(row)
+            if row.expires_at <= now and row.status == "ready":
+                _transition_locked_bound_status(
+                    db,
+                    row,
+                    expected="ready",
+                    target="expired",
+                    actor="system:artifact-read-expiry",
+                    reason="retention_expired",
+                )
+            try:
+                db.commit()
+            except Exception as exc:  # noqa: BLE001 - fail closed if audit is not durable
+                db.rollback()
+                raise ArtifactUnavailable(
+                    "文件状态暂时无法确认", "state_audit_failed"
+                ) from exc
+            meta = _validated_artifact_metadata(row)
+        if require_ready and meta["status"] != "ready":
+            reason = (
+                meta["status"]
+                if meta["status"] in {"expired", "failed"}
+                else "not_ready"
+            )
             raise ArtifactUnavailable("文件不存在或不可下载", reason)
-        extra = dict(row.extra_meta or {})
-        return {
-            **extra,
-            "file_id": row.id,
-            "filename": row.filename,
-            "ext": _ext_of(row.filename),
-            "kind": row.kind,
-            "sensitivity": row.sensitivity,
-            "operated_by": row.owner_sub,
-            "owner_sub": row.owner_sub,
-            "media_type": row.media_type,
-            "size_bytes": row.size_bytes,
-            "sha256": row.sha256,
-            "status": row.status,
-            "storage_key": row.storage_key,
-            "source_ids": list(row.source_ids or []),
-            "access_scope": dict(row.access_scope or {}),
-            "created_at": row.created_at,
-            "expires_at": row.expires_at,
-        }
+        return meta
 
 
 def _artifact_meta(file_id: str, *, require_ready: bool) -> dict:
@@ -387,23 +776,140 @@ def _artifact_meta(file_id: str, *, require_ready: bool) -> dict:
     return meta
 
 
-def _verify_artifact(meta: dict) -> StoredObject:
+def _read_verified_artifact(
+    meta: dict[str, Any],
+    *,
+    require_media_type: bool = True,
+) -> StoredBytes:
+    """Return the exact bytes verified against immutable Artifact metadata."""
     fid = meta["file_id"]
     ext = meta.get("ext", "")
     if meta.get("filename") != _safe_filename(meta.get("filename", "")):
         raise FileError("文件元数据校验失败")
-    if meta.get("media_type") != _MIME_BY_EXT.get(ext):
+    if require_media_type and meta.get("media_type") != _MIME_BY_EXT.get(ext):
         raise FileError("文件元数据校验失败")
     expected_key = _storage_key(fid, ext)
     if meta.get("storage_key") != expected_key:
         raise FileError("文件元数据校验失败")
     try:
-        stored = get_artifact_store().inspect(expected_key)
+        stored = get_artifact_store().read_bytes(
+            expected_key,
+            max_bytes=_MAX_DOWNLOAD_BYTES,
+        )
+    except ArtifactStoreUnavailable:
+        raise
+    except ArtifactObjectInvalid as exc:
+        reason = (
+            "size_limit"
+            if exc.reason_code == "object_oversize"
+            else exc.reason_code
+        )
+        message = (
+            "文件超过允许的下载大小"
+            if reason == "size_limit"
+            else "文件对象不存在、不可用或已清理"
+        )
+        raise ArtifactUnavailable(message, reason) from exc
     except FileError as exc:
-        raise ArtifactUnavailable("文件对象不存在或已清理", "object_missing") from exc
+        raise ArtifactStoreUnavailable("文件对象状态暂时无法确认") from exc
     if stored.size_bytes != meta.get("size_bytes") or stored.sha256 != meta.get("sha256"):
         raise ArtifactUnavailable("文件完整性校验失败", "integrity_failed")
     return stored
+
+
+def _verify_artifact(meta: dict[str, Any]) -> None:
+    """Compatibility verifier for authorization/reconciliation paths."""
+    _read_verified_artifact(meta)
+
+
+def _load_verified_artifact(file_id: str) -> tuple[dict[str, Any], StoredBytes]:
+    fid = _check_id(file_id)
+    if _is_legacy_id(fid):
+        raise ArtifactUnavailable("文件不存在或无权访问", "not_found_or_forbidden")
+    meta = _artifact_meta(fid, require_ready=True)
+    return meta, _read_verified_artifact(meta)
+
+
+def _safe_download_media_type(meta: dict[str, Any]) -> str:
+    """Bind an allowlisted MIME to the server-owned storage extension."""
+    ext = _ext_of(meta.get("filename", ""))
+    expected = _MIME_BY_EXT.get(ext)
+    if expected is None or meta.get("media_type") != expected:
+        return "application/octet-stream"
+    return expected
+
+
+def _validate_legacy_meta(value: Any) -> dict[str, Any]:
+    """Validate the complete historical sidecar shape before any projection.
+
+    Sidecars predate authenticated Artifact ownership and remain untrusted.  Parsing
+    them is retained only for conservative offline inspection; no field in this
+    object can mint a current owner capability.
+    """
+    required = {"filename", "ext", "kind", "operated_by", "created_at"}
+    optional = {"sheets", "base_file_id", "report"}
+    if not isinstance(value, dict) or not required <= set(value) <= required | optional:
+        raise FileError("文件元数据损坏")
+    filename = value["filename"]
+    ext = value["ext"]
+    kind = value["kind"]
+    operated_by = value["operated_by"]
+    created_at = value["created_at"]
+    if (
+        not isinstance(filename, str)
+        or not 0 < len(filename.encode("utf-8")) <= 4096
+        or not isinstance(ext, str)
+        or ext not in _ALLOWED_EXT
+        or not isinstance(kind, str)
+        or kind not in {"upload", "generated"}
+        or (operated_by is not None and (
+            not isinstance(operated_by, str)
+            or not 0 < len(operated_by.encode("utf-8")) <= 256
+        ))
+        or not isinstance(created_at, str)
+        or not 0 < len(created_at) <= 64
+    ):
+        raise FileError("文件元数据损坏")
+    try:
+        parsed_created_at = datetime.fromisoformat(created_at)
+    except ValueError as exc:
+        raise FileError("文件元数据损坏") from exc
+    if parsed_created_at.tzinfo is None:
+        raise FileError("文件元数据损坏")
+
+    if "sheets" in value:
+        sheets = value["sheets"]
+        if not isinstance(sheets, list) or len(sheets) > 64:
+            raise FileError("文件元数据损坏")
+        for sheet in sheets:
+            if not isinstance(sheet, dict) or set(sheet) != {"name", "n_rows", "n_cols"}:
+                raise FileError("文件元数据损坏")
+            name = sheet["name"]
+            n_rows = sheet["n_rows"]
+            n_cols = sheet["n_cols"]
+            if (
+                not isinstance(name, str)
+                or not 0 < len(name) <= 31
+                or isinstance(n_rows, bool)
+                or not isinstance(n_rows, int)
+                or not 0 <= n_rows <= 1_048_576
+                or isinstance(n_cols, bool)
+                or not isinstance(n_cols, int)
+                or not 0 <= n_cols <= 16_384
+            ):
+                raise FileError("文件元数据损坏")
+    if "base_file_id" in value:
+        base_file_id = value["base_file_id"]
+        if base_file_id is not None:
+            if not isinstance(base_file_id, str):
+                raise FileError("文件元数据损坏")
+            try:
+                _check_id(base_file_id)
+            except FileError as exc:
+                raise FileError("文件元数据损坏") from exc
+    if "report" in value and not isinstance(value["report"], bool):
+        raise FileError("文件元数据损坏")
+    return dict(value)
 
 
 def _load_meta(file_id: str) -> dict:
@@ -418,10 +924,14 @@ def _load_meta(file_id: str) -> dict:
     if not p.exists():
         raise ArtifactUnavailable("文件不存在或已清理", "not_found")
     try:
-        meta = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        if p.stat().st_size > _MAX_LEGACY_META_BYTES:
+            raise FileError("文件元数据损坏")
+        meta = _validate_legacy_meta(json.loads(p.read_text(encoding="utf-8")))
+    except FileError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise FileError("文件元数据损坏") from exc
-    ext = str(meta.get("ext", "")).lower()
+    ext = meta["ext"]
     if ext not in _ALLOWED_EXT or not _data_path(fid, ext).is_file():
         raise ArtifactUnavailable("文件不存在或已清理", "object_missing")
     meta["filename"] = _safe_filename(meta.get("filename", f"{fid}.{ext}"))
@@ -430,16 +940,15 @@ def _load_meta(file_id: str) -> dict:
 
 
 def _save_meta(file_id: str, meta: dict) -> None:
-    """Legacy sidecar writer retained only for old 12-character URL compatibility."""
-    fid = _check_id(file_id)
-    if not _is_legacy_id(fid):
-        raise FileError("新制品必须使用数据库元数据")
-    _meta_path(file_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    """Legacy writes are permanently disabled; retained only as a deny canary."""
+    raise ArtifactUnavailable("Legacy 文件元数据写入已停用", "legacy_denied")
 
 
 def artifact_info(file_id: str) -> dict:
     """Return structured, non-path metadata for a new Artifact."""
     fid = _check_id(file_id)
+    if _is_legacy_id(fid):
+        raise ArtifactUnavailable("Legacy 文件不可访问", "legacy_denied")
     db_meta = _find_artifact_meta(fid, require_ready=False)
     if db_meta is not None:
         return {
@@ -450,21 +959,6 @@ def artifact_info(file_id: str) -> dict:
                 "status", "source_ids", "created_at", "expires_at", "kind",
                 "sensitivity",
             }
-        }
-    if _is_legacy_id(fid):
-        meta = _load_meta(fid)
-        path = _data_path(fid, meta["ext"])
-        content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        return {
-            "file_id": fid,
-            "filename": meta["filename"],
-            "media_type": meta["media_type"],
-            "size_bytes": path.stat().st_size,
-            "sha256": content_hash,
-            "status": "ready",
-            "source_ids": [],
-            "created_at": meta.get("created_at"),
-            "expires_at": None,
         }
     raise FileError("文件不存在或已清理")
 
@@ -702,42 +1196,69 @@ def _canonical_source_id(source_id: str, owner: VerifiedArtifactOwner) -> str:
 
 
 def _mark_artifact_ready(artifact_id: str, stored: StoredObject) -> None:
-    """CAS ``validating`` to ``ready``; accept a reconciler's identical result.
-
-    Object publication and the database transition cannot share one transaction.  A
-    reconciler can therefore prove the same object ready after the atomic publish but
-    before this publisher commits.  That is an idempotent success, not a conflict.
-    """
+    """Lock, re-prove, and durably transition ``validating`` to ``ready``."""
     with SessionLocal.begin() as db:
-        row = db.get(AgentArtifact, artifact_id)
+        row = _locked_artifact(db, artifact_id)
         if row is None:
             raise FileError("文件发布状态冲突")
+        meta = _validated_artifact_metadata(row)
         metadata_matches = (
             row.size_bytes == stored.size_bytes and row.sha256 == stored.sha256
         )
         if not metadata_matches:
             raise FileError("文件发布完整性校验失败")
-        if row.status == "validating":
-            row.status = "ready"
-            return
         if row.status == "ready":
+            # Idempotency is safe only when the current sealed row and final object
+            # both still match and live authorization still holds.  A concurrent
+            # winner does not let this publication invocation bypass a later revoke.
+            _read_verified_artifact(meta)
+            if not _reconcile_ready_authorized(row):
+                raise FileError("文件发布授权已失效")
             return
-        raise FileError("文件发布状态冲突")
+        if row.status != "validating":
+            raise FileError("文件发布状态冲突")
+        current = _read_verified_artifact(meta)
+        if current.size_bytes != stored.size_bytes or current.sha256 != stored.sha256:
+            raise FileError("文件发布完整性校验失败")
+        if not _reconcile_ready_authorized(row):
+            raise FileError("文件发布授权已失效")
+        _transition_locked_bound_status(
+            db,
+            row,
+            expected="validating",
+            target="ready",
+            actor=row.owner_sub,
+            reason="publisher_verified",
+        )
 
 
 def _mark_artifact_validating(artifact_id: str) -> None:
     with SessionLocal.begin() as db:
-        row = db.get(AgentArtifact, artifact_id)
+        row = _locked_artifact(db, artifact_id)
         if row is None or row.status != "prepared":
             raise FileError("文件发布状态冲突")
-        row.status = "validating"
+        _transition_locked_bound_status(
+            db,
+            row,
+            expected="prepared",
+            target="validating",
+            actor=row.owner_sub,
+            reason="publisher_started",
+        )
 
 
 def _mark_artifact_failed(artifact_id: str) -> None:
     with SessionLocal.begin() as db:
-        row = db.get(AgentArtifact, artifact_id)
-        if row is not None and row.status != "ready":
-            row.status = "failed"
+        row = _locked_artifact(db, artifact_id)
+        if row is not None and row.status in {"prepared", "validating"}:
+            _transition_locked_bound_status(
+                db,
+                row,
+                expected=row.status,
+                target="failed",
+                actor=row.owner_sub,
+                reason="publisher_failed",
+            )
 
 
 def _publish_artifact(
@@ -767,11 +1288,16 @@ def _publish_artifact(
         else None
     )
     if kind == "upload":
-        resolved_scope = dict(provenance_scope or _default_access_scope(kind))
+        resolved_scope = _bounded_json_object(
+            provenance_scope or _default_access_scope(kind),
+            "Artifact access_scope",
+        )
     elif kind == "generated":
         if provenance_scope is None:
             raise ProvenanceRequired("生成文件缺少可验证的数据来源，已停止发布")
-        resolved_scope = dict(provenance_scope)
+        resolved_scope = _bounded_json_object(
+            provenance_scope, "Artifact access_scope"
+        )
         try:
             proven_sources = artifact_provenance.source_artifact_ids(resolved_scope)
         except artifact_provenance.ProvenanceError as exc:
@@ -791,11 +1317,41 @@ def _publish_artifact(
         if provided_sources:
             raise FileError("上传件不能伪造派生来源")
         sources = []
-    persisted_extra_meta = dict(extra_meta or {})
+    if extra_meta is not None and not isinstance(extra_meta, dict):
+        raise FileError("Artifact extra_meta 必须是 JSON 对象")
+    persisted_extra_meta = _bounded_json_object(
+        extra_meta or {}, "Artifact extra_meta"
+    )
     # A crash reconciler must reconstruct the exact principal capability that began
     # publication; owner_sub alone cannot detect logout/revocation via token_version.
     persisted_extra_meta["_publisher_user_id"] = owner._user_pk
     persisted_extra_meta["_publisher_token_version"] = owner._token_version
+    sensitivity = _derive_sensitivity(kind, resolved_scope)
+    binding_metadata = {
+        "file_id": artifact_id,
+        "owner_sub": owner_sub,
+        "filename": safe_name,
+        "media_type": _MIME_BY_EXT[ext],
+        "size_bytes": len(content),
+        "sha256": expected_hash,
+        "storage_key": storage_key,
+        "kind": kind,
+        "status": "prepared",
+        "sensitivity": sensitivity,
+        "source_ids": list(sources),
+        "access_scope": resolved_scope,
+        "extra_meta": persisted_extra_meta,
+        "created_at": created_at,
+        "expires_at": expires_at,
+    }
+    try:
+        binding_envelope = artifact_provenance.seal_artifact_binding(
+            binding_metadata
+        )
+    except artifact_provenance.ProvenanceError as exc:
+        raise ProvenanceRequired(
+            "Artifact 聚合绑定签发失败，已停止发布"
+        ) from exc
     with SessionLocal.begin() as db:
         db.add(AgentArtifact(
             id=artifact_id,
@@ -807,13 +1363,23 @@ def _publish_artifact(
             status="prepared",
             storage_key=storage_key,
             kind=kind,
-            sensitivity=_derive_sensitivity(kind, resolved_scope),
+            sensitivity=sensitivity,
             source_ids=sources,
             access_scope=resolved_scope,
             extra_meta=persisted_extra_meta,
+            binding_envelope=binding_envelope,
             created_at=created_at,
             expires_at=expires_at,
         ))
+        _add_artifact_audit(
+            db,
+            artifact_id=artifact_id,
+            action="artifact_created",
+            outcome="success",
+            actor=owner_sub,
+            to_status="prepared",
+            detail={"kind": kind},
+        )
 
     store = get_artifact_store()
     object_published = False
@@ -846,11 +1412,15 @@ def _publish_artifact(
         # idempotent.  DB authorization rows and the filesystem cannot be locked in one
         # atomic transaction, so every ready/download path remains live-authorized too.
         _mark_artifact_ready(artifact_id, store.inspect(storage_key))
-    except (AuthorizationUnavailable, ObjectPublicationUncertain) as exc:
+    except (
+        ArtifactStoreUnavailable,
+        AuthorizationUnavailable,
+        ObjectPublicationUncertain,
+    ) as exc:
         # If bytes are already durable, authorization/DB uncertainty is not a proven
-        # denial.  Keep validating as a non-downloadable retry marker; the tri-state
-        # reconciler can later promote only after object + live authorization recover.
-        raise FileError("文件发布状态待协调，请稍后重试") from exc
+        # denial. Keep validating as a non-downloadable marker; only the normal
+        # publisher path may ever supply the missing completion receipt.
+        raise ArtifactStoreUnavailable("文件发布状态待协调，请稍后重试") from exc
     except Exception as exc:  # noqa: BLE001 - internal detail is deliberately hidden
         # Never delete a formally published object here.  A known FileError is a
         # deterministic rejection and may become failed; an unexpected exception after
@@ -962,6 +1532,14 @@ def _authorize_source_snapshot(
         try:
             source_meta = _artifact_meta(source_id, require_ready=True)
             _verify_artifact(source_meta)
+        except (ArtifactStoreUnavailable, AuthorizationUnavailable):
+            raise
+        except ArtifactUnavailable as exc:
+            if exc.reason_code in {"state_audit_failed", "binding_resign_failed"}:
+                raise AuthorizationUnavailable(
+                    "来源 Artifact 状态暂时无法确认"
+                ) from exc
+            return False
         except FileError:
             return False
         state.verified_sources[source_id] = source_meta
@@ -1023,6 +1601,10 @@ def _reauthorize_provenance_scope(
         return source_ids
     except ProvenanceRequired:
         raise
+    except (ArtifactStoreUnavailable, AuthorizationUnavailable) as exc:
+        raise AuthorizationUnavailable(
+            "生成文件当前授权暂时无法确认，已停止处理"
+        ) from exc
     except (FileError, artifact_provenance.ProvenanceError) as exc:
         raise ProvenanceRequired("生成文件当前来源授权已失效，已停止处理") from exc
     except Exception as exc:  # noqa: BLE001 - live path fails closed on uncertainty
@@ -1031,6 +1613,10 @@ def _reauthorize_provenance_scope(
 
 def _reconcile_ready_authorized(row: AgentArtifact) -> bool:
     """Apply the publisher's live principal/scope contract before crash recovery."""
+    try:
+        _require_artifact_binding(_binding_metadata_from_row(row))
+    except FileError:
+        return False
     extra = row.extra_meta if isinstance(row.extra_meta, dict) else {}
     user_id = extra.get("_publisher_user_id")
     token_version = extra.get("_publisher_token_version")
@@ -1079,14 +1665,9 @@ def _evaluate_artifact_access(
     from app import config, permissions
 
     if meta is None and _is_legacy_id(fid):
-        meta = _load_meta(fid)
-        owner_ok = meta.get("operated_by") == subject
-        if not owner_ok:
-            return False
-        # Old uploads are classified as immutable user inputs. Old generated files lack a
-        # trustworthy visibility snapshot and therefore fail closed for every role.
-        if meta.get("kind") == "upload":
-            return True
+        # A legacy sidecar is caller-writable storage metadata, not an authenticated
+        # binding to today's SysUser row.  Even an exact same-name account must not
+        # silently adopt it; adoption/break-glass is a separate operator workflow.
         return False
     if meta is None:
         raise FileError("文件不存在或已清理")
@@ -1179,6 +1760,8 @@ def _authorized_owner_id(file_id: str, owner: VerifiedArtifactOwner) -> str:
         allowed = access_allowed(fid, ctx)
     except ArtifactV2Disabled:
         raise
+    except (ArtifactStoreUnavailable, AuthorizationUnavailable):
+        raise
     except FileError as exc:
         raise ArtifactUnavailable(
             "文件不存在或无权访问", "not_found_or_forbidden"
@@ -1265,9 +1848,9 @@ def _require_xlsx(fid: str, meta: dict):
 def inspect_file(file_id: str, owner: VerifiedArtifactOwner) -> dict:
     """看 Excel 结构：sheet 列表 + 每 sheet 前几行原样预览。"""
     fid = _authorized_owner_id(file_id, owner)
-    meta = _load_meta(fid)
+    meta, stored = _load_verified_artifact(fid)
     _require_xlsx(fid, meta)
-    wb = load_workbook(_data_path(fid, "xlsx"), read_only=True, data_only=True)
+    wb = load_workbook(BytesIO(stored.content), read_only=True, data_only=True)
     sheets = []
     for ws in wb.worksheets[:5]:
         preview = [[_cell_str(c.value) for c in row]
@@ -1284,9 +1867,9 @@ def read_rows(file_id: str, sheet: str | None, start_row: int, max_rows: int,
               owner: VerifiedArtifactOwner) -> dict:
     """分页读取 Excel 行（1-based）。"""
     fid = _authorized_owner_id(file_id, owner)
-    meta = _load_meta(fid)
+    meta, stored = _load_verified_artifact(fid)
     _require_xlsx(fid, meta)
-    wb = load_workbook(_data_path(fid, "xlsx"), read_only=True, data_only=True)
+    wb = load_workbook(BytesIO(stored.content), read_only=True, data_only=True)
     try:
         ws = wb[sheet] if sheet else wb.worksheets[0]
     except KeyError:
@@ -1309,7 +1892,7 @@ def preview(file_id: str, owner: VerifiedArtifactOwner, max_rows: int = 200) -> 
     图片返回 kind=image（前端走下载端点取图）；其余 kind=other（仅可下载）。
     归属与当前权限在服务层统一校验。"""
     fid = _authorized_owner_id(file_id, owner)
-    meta = _load_meta(fid)
+    meta, stored = _load_verified_artifact(fid)
     ext = meta.get("ext", "")
     filename = meta.get("filename", f"{fid}.{ext}")
     if ext != "xlsx":
@@ -1318,7 +1901,11 @@ def preview(file_id: str, owner: VerifiedArtifactOwner, max_rows: int = 200) -> 
     # 坏/半损 xlsx 可能通过上传校验(只读维度)却在逐格迭代时抛 ParseError/BadZipFile(非 FileError)，
     # 不裹会让预览端点裸冒 500 → 统一转 FileError，端点据此返干净 404（与 save_upload 一致）
     try:
-        wb = load_workbook(_data_path(fid, "xlsx"), read_only=True, data_only=True)
+        wb = load_workbook(
+            BytesIO(stored.content),
+            read_only=True,
+            data_only=True,
+        )
         sheets = []
         for ws in wb.worksheets[:10]:
             total = ws.max_row or 0
@@ -1335,9 +1922,9 @@ def preview(file_id: str, owner: VerifiedArtifactOwner, max_rows: int = 200) -> 
     return {"file_id": fid, "filename": filename, "kind": "table", "ext": ext, "sheets": sheets}
 
 
-def _read_docx(path: Path) -> str:
+def _read_docx(source: Any) -> str:
     from docx import Document
-    doc = Document(str(path))
+    doc = Document(source)
     parts: list[str] = [p.text for p in doc.paragraphs if p.text.strip()]
     for ti, table in enumerate(doc.tables):
         parts.append(f"[表格{ti + 1}]")
@@ -1348,11 +1935,11 @@ def _read_docx(path: Path) -> str:
     return "\n".join(parts)
 
 
-def _read_pdf(path: Path) -> tuple[str, bool]:
+def _read_pdf(source: Any) -> tuple[str, bool]:
     """返回 (文本, 是否疑似扫描件)。文字层为空/极少 → 扫描件，转视觉。"""
     import pdfplumber
     parts: list[str] = []
-    with pdfplumber.open(str(path)) as pdf:
+    with pdfplumber.open(source) as pdf:
         for pi, page in enumerate(pdf.pages[:30]):
             txt = page.extract_text() or ""
             parts.append(f"[第{pi + 1}页]\n{txt}" if txt.strip() else f"[第{pi + 1}页](无文字层)")
@@ -1376,16 +1963,38 @@ def _read_image_or_scanned(path: Path, hint: str) -> str:
                 "后才能识别。文字版 Word/Excel/PDF/txt 不受影响。")
 
 
+def _read_image_or_scanned_bytes(content: bytes, ext: str, hint: str) -> str:
+    """Bridge immutable verified bytes to the pathname-only Vision adapter."""
+    if ext not in _IMG_EXT | {"pdf"}:
+        raise FileError("视觉文件类型无效")
+    with tempfile.TemporaryDirectory(prefix="agent-artifact-vision-") as directory:
+        path = Path(directory) / f"verified.{ext}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                descriptor = -1
+                handle.write(content)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        return _read_image_or_scanned(path, hint)
+
+
 def read_document(file_id: str, owner: VerifiedArtifactOwner) -> dict:
     """通用读取：把任意支持格式抽成文本喂给模型（拆件/解析由模型完成）。"""
     fid = _authorized_owner_id(file_id, owner)
-    meta = _load_meta(fid)
+    meta, stored = _load_verified_artifact(fid)
     ext = meta.get("ext", "")
     vision_used = False
     if ext in _TEXT_EXT:
-        text = _data_path(fid, ext).read_bytes().decode("utf-8", errors="replace")
+        text = stored.content.decode("utf-8", errors="replace")
     elif ext == "xlsx":
-        wb = load_workbook(_data_path(fid, "xlsx"), read_only=True, data_only=True)
+        wb = load_workbook(
+            BytesIO(stored.content),
+            read_only=True,
+            data_only=True,
+        )
         chunks = []
         for ws in wb.worksheets:
             chunks.append(f"[工作表 {ws.title}]")
@@ -1396,18 +2005,23 @@ def read_document(file_id: str, owner: VerifiedArtifactOwner) -> dict:
         wb.close()
         text = "\n".join(chunks)
     elif ext == "docx":
-        text = _read_docx(_data_path(fid, "docx"))
+        text = _read_docx(BytesIO(stored.content))
     elif ext == "pdf":
-        text, scanned = _read_pdf(_data_path(fid, "pdf"))
+        text, scanned = _read_pdf(BytesIO(stored.content))
         if scanned:
             vision_used = True
-            text = _read_image_or_scanned(_data_path(fid, "pdf"),
-                                          "这是一份扫描件，请逐字识别其中的全部文本、表格、型号与参数。")
+            text = _read_image_or_scanned_bytes(
+                stored.content,
+                "pdf",
+                "这是一份扫描件，请逐字识别其中的全部文本、表格、型号与参数。",
+            )
     elif ext in _IMG_EXT:
         vision_used = True
-        text = _read_image_or_scanned(
-            _data_path(fid, ext),
-            "请识别图片中的全部文字、表格、设备型号、品牌与参数配置，按原结构输出。")
+        text = _read_image_or_scanned_bytes(
+            stored.content,
+            ext,
+            "请识别图片中的全部文字、表格、设备型号、品牌与参数配置，按原结构输出。",
+        )
     else:
         raise FileError(f"不支持读取 .{ext}")
 
@@ -1594,9 +2208,11 @@ def write_excel(base_file_id: str | None, sheet: str | None,
     _reauthorize_provenance_scope(owner, provenance_scope)
     base_name = ""
     if base:
-        bmeta = _load_meta(base)
+        bmeta, stored = _load_verified_artifact(base)
         _require_xlsx(base, bmeta)
-        wb = load_workbook(_data_path(base, "xlsx"))  # 保留原格式/公式
+        # Preserve styles/formulas from the exact bytes verified on one no-follow
+        # handle; never reopen the mutable object path after validation.
+        wb = load_workbook(BytesIO(stored.content))
         base_name = bmeta.get("filename", "")
     else:
         wb = Workbook()
@@ -1856,35 +2472,49 @@ def _owner_of_unchecked(file_id: str) -> str | None:
     """文件创建者（发布时记录的 operated_by）；文件不存在抛 FileError。归属校验用。"""
     fid = _check_id(file_id)
     if _is_legacy_id(fid):
-        return _load_meta(fid).get("operated_by")
+        return None
     return _artifact_meta(fid, require_ready=False).get("operated_by")
 
 
 def get_download_info(file_id: str, owner: VerifiedArtifactOwner) -> ArtifactDownload:
     """Resolve and integrity-check a ready Artifact without exposing its storage key."""
     fid = _authorized_owner_id(file_id, owner)
-    meta = _load_meta(fid)
     if _is_legacy_id(fid):
-        path = _data_path(fid, meta.get("ext", ""))
-        content = path.read_bytes()
-        return ArtifactDownload(
-            path=path,
-            filename=_safe_filename(meta.get("filename", f"{fid}.{meta['ext']}")),
-            media_type=_MIME_BY_EXT[meta["ext"]],
-            size_bytes=len(content),
-            sha256=hashlib.sha256(content).hexdigest(),
+        raise ArtifactUnavailable("文件不存在或无权访问", "not_found_or_forbidden")
+    meta = _artifact_meta(fid, require_ready=True)
+    ext = _ext_of(meta.get("filename", ""))
+    if (
+        meta.get("filename") != _safe_filename(meta.get("filename", ""))
+        or meta.get("storage_key") != _storage_key(fid, ext)
+    ):
+        raise ArtifactUnavailable("文件元数据校验失败", "metadata_invalid")
+    try:
+        stored = get_artifact_store().read_bytes(
+            meta["storage_key"], max_bytes=_MAX_DOWNLOAD_BYTES
         )
-    stored = _verify_artifact(meta)
+    except ArtifactStoreUnavailable:
+        raise
+    except ArtifactObjectInvalid as exc:
+        reason = (
+            "size_limit"
+            if exc.reason_code == "object_oversize"
+            else exc.reason_code
+        )
+        message = (
+            "文件超过允许的下载大小"
+            if reason == "size_limit"
+            else "文件对象不存在、不可用或已清理"
+        )
+        raise ArtifactUnavailable(message, reason) from exc
+    except FileError as exc:
+        raise ArtifactStoreUnavailable("文件对象状态暂时无法确认") from exc
+    if stored.size_bytes != meta.get("size_bytes") or stored.sha256 != meta.get("sha256"):
+        raise ArtifactUnavailable("文件完整性校验失败", "integrity_failed")
     return ArtifactDownload(
-        path=stored.path,
+        artifact_id=fid,
+        content=stored.content,
         filename=meta["filename"],
-        media_type=meta["media_type"],
+        media_type=_safe_download_media_type(meta),
         size_bytes=meta["size_bytes"],
         sha256=meta["sha256"],
     )
-
-
-def get_download(file_id: str, owner: VerifiedArtifactOwner) -> tuple[Path, str]:
-    """下载定位：返回 (路径, 文件名)；调用时再次校验 live owner principal。"""
-    download = get_download_info(file_id, owner)
-    return download.path, download.filename

@@ -71,6 +71,16 @@ def test_schema_registry_consistent():
     assert names == set(tools._REGISTRY)
 
 
+def test_artifact_create_stays_unregistered_until_integration_gates():
+    """#219 地基不能在 #223/#230 接线与安全验收前暴露给模型。"""
+    schema_count = sum(
+        item["function"]["name"] == "artifact_create" for item in tools.TOOLS
+    )
+    handler_count = sum(name == "artifact_create" for name in tools._REGISTRY)
+    assert schema_count == 0
+    assert handler_count == 0
+
+
 def test_new_data_tools_smoke(db, ctx):
     r = tools.dispatch(db, "get_purchase_analysis", {"days": 7, "top": 5}, ctx)
     assert "kpi" in r and "rows" in r
