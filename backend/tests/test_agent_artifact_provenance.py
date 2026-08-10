@@ -426,6 +426,9 @@ def test_revocation_after_validating_blocks_object_store_delegate_and_fails_row(
         def inspect(self, storage_key):
             return delegate.inspect(storage_key)
 
+        def read_bytes(self, storage_key, *, max_bytes):
+            return delegate.read_bytes(storage_key, max_bytes=max_bytes)
+
         def publish_bytes(self, *_args, **_kwargs):
             self.calls += 1
             raise AssertionError("revoked output bytes reached the object store")
@@ -632,6 +635,9 @@ def test_source_fact_drift_after_evidence_mint_blocks_publish(
         def inspect(self, storage_key):
             return delegate.inspect(storage_key)
 
+        def read_bytes(self, storage_key, *, max_bytes):
+            return delegate.read_bytes(storage_key, max_bytes=max_bytes)
+
         def publish_bytes(self, *_args, **_kwargs):
             self.calls += 1
             raise AssertionError("drifted source bytes reached object publication")
@@ -675,6 +681,9 @@ def test_upload_principal_drift_after_validating_blocks_store_and_ready(
 
         def inspect(self, storage_key):
             return delegate.inspect(storage_key)
+
+        def read_bytes(self, storage_key, *, max_bytes):
+            return delegate.read_bytes(storage_key, max_bytes=max_bytes)
 
         def publish_bytes(self, *_args, **_kwargs):
             self.calls += 1

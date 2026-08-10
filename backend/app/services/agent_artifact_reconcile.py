@@ -230,8 +230,9 @@ def _record_disabled_delete(
                 .on_conflict_do_nothing(
                     index_elements=["decision_key", "outcome"]
                 )
+                .returning(AgentArtifactAudit.id)
             )
-            inserted += int(db.execute(statement).rowcount or 0)
+            inserted += int(db.scalar(statement) is not None)
     return inserted
 
 
@@ -378,8 +379,9 @@ def _record_reconcile_observation(
         .on_conflict_do_nothing(
             index_elements=["decision_key", "outcome"]
         )
+        .returning(AgentArtifactAudit.id)
     )
-    return int(db.execute(statement).rowcount or 0)
+    return int(db.scalar(statement) is not None)
 
 
 def _apply_ready_evaluation(

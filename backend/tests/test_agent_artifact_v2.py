@@ -1092,11 +1092,14 @@ def test_lazy_ready_to_expired_transition_resigns_binding_with_audit(db):
     created = agent_files.save_upload(b"expires", "expires.txt", owner)
     row = db.get(AgentArtifact, created["file_id"])
     assert row is not None and row.status == "ready"
-    row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-    row.binding_envelope = agent_artifact_provenance.seal_artifact_binding(
-        agent_files._binding_metadata_from_row(row)
+    expired_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    row = force_artifact_state(
+        db,
+        row,
+        "ready",
+        created_at=expired_at - timedelta(seconds=1),
+        expires_at=expired_at,
     )
-    db.commit()
 
     with pytest.raises(agent_files.ArtifactUnavailable) as caught:
         agent_files.get_download_info(created["file_id"], owner)

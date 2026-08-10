@@ -1493,7 +1493,13 @@ def access_allowed(
         return False
     state.nodes += 1
     current_path = path | {fid}
-    meta = _find_artifact_meta(fid, require_ready=False)
+    try:
+        meta = _find_artifact_meta(fid, require_ready=False)
+    except ArtifactUnavailable:
+        # A malformed or no-longer-verifiable binding is a deterministic deny at
+        # this boolean ACL boundary.  Infrastructure exceptions still propagate
+        # so callers that distinguish UNKNOWN from DENIED can fail separately.
+        return _memoize_access(state, fid, False)
     scope = (meta or {}).get("access_scope") or {}
     snapshots = scope.get("source_access_snapshots")
     state.work += 1 + (len(snapshots) if isinstance(snapshots, list) else 0)
