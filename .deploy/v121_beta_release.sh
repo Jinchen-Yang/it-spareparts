@@ -29,8 +29,8 @@ commands:
   migrate
   deploy STABLE_CREDENTIAL_JSON DENIED_CREDENTIAL_JSON
   open-empty-beta DENIED_CREDENTIAL_JSON
-  pilot-smoke DENIED_CREDENTIAL_JSON CREATOR_CREDENTIAL_JSON
-  observe 0|5|15|30 STABLE_CREDENTIAL_JSON DENIED_CREDENTIAL_JSON CREATOR_CREDENTIAL_JSON
+  pilot-smoke DENIED_CREDENTIAL_JSON READER_CREDENTIAL_JSON CREATOR_CREDENTIAL_JSON
+  observe 0|5|15|30 STABLE_CREDENTIAL_JSON DENIED_CREDENTIAL_JSON READER_CREDENTIAL_JSON CREATOR_CREDENTIAL_JSON
   contain
   rollback-app
 
@@ -838,7 +838,7 @@ status, login=request("/api/auth/login",payload=credential)
 if status != 200 or not isinstance(login,dict) or not login.get("token"):
     raise SystemExit("login smoke failed")
 token=login["token"]
-if mode == "creator":
+if mode in {"reader", "creator"}:
     maintenance_actions = (
         "action_maintenance_roundtrip_apply",
         "action_maintenance_manager_workbook_apply",
@@ -853,11 +853,30 @@ if mode == "creator":
     )
     permission_graph=login.get("permissions")
     if not isinstance(permission_graph,dict):
-        raise SystemExit("creator pilot login lacks a permission graph")
+        raise SystemExit(f"{mode} pilot login lacks a permission graph")
     enabled=[key for key in maintenance_actions if permission_graph.get(key) is not False]
     if enabled:
-        raise SystemExit("creator pilot exposes Maintenance write actions: "+",".join(enabled))
+        raise SystemExit(f"{mode} pilot exposes Maintenance write actions: "+",".join(enabled))
+if mode == "reader":
+    reader_profile = {
+        "page_maintenance": True,
+        "page_maintenance_beta": True,
+        "page_replenishment_beta": False,
+        "data_pool_price_governance": False,
+        "action_replenishment_create": False,
+        "action_replenishment_review": False,
+    }
+    drift = [
+        key for key, expected in reader_profile.items()
+        if permission_graph.get(key) is not expected
+    ]
+    if drift:
+        raise SystemExit(
+            "credential is not the scoped Maintenance reader: "+",".join(drift)
+        )
+if mode == "creator":
     creator_profile = {
+        "page_maintenance_beta": False,
         "page_replenishment_beta": True,
         "data_pool_price_governance": True,
         "action_replenishment_create": True,
@@ -890,13 +909,18 @@ elif mode == "deny":
     status, _=request("/api/replenishment-beta/catalog?page_size=1",token=token)
     if status not in {403,404}:
         raise SystemExit(f"replenishment Beta deny smoke failed: {status}")
+elif mode == "reader":
+    if features.get("maintenance") is not True or features.get("replenishment") is not False:
+        raise SystemExit("reader account Beta features drift from the scoped pilot")
+    status, _=request("/api/maintenance/projects/stable?page_size=1",token=token)
+    if status != 200:
+        raise SystemExit(f"Maintenance Beta reader smoke failed: {status}")
+    status, _=request("/api/replenishment-beta/catalog?page_size=1",token=token)
+    if status not in {403,404}:
+        raise SystemExit(f"Maintenance reader unexpectedly accesses replenishment: {status}")
 elif mode == "creator":
-    if features.get("replenishment") is not True:
-        raise SystemExit("creator account does not expose Replenishment Beta")
-    if features.get("maintenance"):
-        status, _=request("/api/maintenance/projects/stable?page_size=1",token=token)
-        if status != 200:
-            raise SystemExit(f"Maintenance Beta allow smoke failed: {status}")
+    if features.get("replenishment") is not True or features.get("maintenance") is not False:
+        raise SystemExit("creator account Beta features drift from the scoped pilot")
     status, capabilities=request("/api/replenishment-beta/capabilities",token=token)
     if status != 200 or not isinstance(capabilities,dict):
         raise SystemExit(f"replenishment creator capabilities smoke failed: {status}")
@@ -910,6 +934,9 @@ elif mode == "creator":
     status, _=request("/api/replenishment-beta/catalog?page_size=1",token=token)
     if status != 200:
         raise SystemExit(f"replenishment creator catalog smoke failed: {status}")
+    status, _=request("/api/maintenance/projects/stable?page_size=1",token=token)
+    if status not in {403,404}:
+        raise SystemExit(f"replenishment creator unexpectedly accesses Maintenance Beta: {status}")
 else:
     raise SystemExit("unknown smoke mode")
 PY
@@ -1301,7 +1328,7 @@ open_empty_beta() {
 }
 
 pilot_smoke() {
-  [ "$#" -eq 2 ] || usage
+  [ "$#" -eq 3 ] || usage
   local opened app_cid frontend_cid current_app_cid current_frontend_cid
   local app_restarts frontend_restarts pilot_state
   require_phase empty_beta_verified
@@ -1330,7 +1357,9 @@ pilot_smoke() {
   fi
   smoke deny "$1" \
     || contain_failed_open "pilot deny smoke failed"
-  smoke creator "$2" \
+  smoke reader "$2" \
+    || contain_failed_open "pilot Maintenance reader smoke failed"
+  smoke creator "$3" \
     || contain_failed_open "pilot creator smoke failed"
   current_app_cid=$(service_cid app) \
     || contain_failed_open "cannot recheck pilot app container"
@@ -1354,11 +1383,11 @@ PY
 ) || contain_failed_open "cannot capture pilot identity baseline"
   state_update pilot_open "$pilot_state" \
     || contain_failed_open "cannot persist pilot release state"
-  printf 'named-account creator pilot smoke passed\n'
+  printf 'named-account Maintenance reader and creator pilot smoke passed\n'
 }
 
 observe() {
-  [ "$#" -eq 4 ] || usage
+  [ "$#" -eq 5 ] || usage
   local minute=$1
   case "$minute" in 0|5|15|30) ;; *) usage ;; esac
   phase_is pilot_open \
@@ -1413,7 +1442,8 @@ PY
   if ! internal_health \
       || ! smoke stable "$2" \
       || ! smoke deny "$3" \
-      || ! smoke creator "$4" \
+      || ! smoke reader "$4" \
+      || ! smoke creator "$5" \
       || ! no_db_pressure \
       || ! db_matches_state \
       || ! candidate_images_running \
@@ -1439,7 +1469,8 @@ print(json.dumps({"format":"v121-observation-1","manifest_sha256":sys.argv[1],
  "database_pressure":json.loads(sys.argv[4]),
  "restart_counts":{"db":int(sys.argv[5]),"app":int(sys.argv[6]),"frontend":int(sys.argv[7])},
  "container_ids":{"app":sys.argv[8],"frontend":sys.argv[9]},
- "stable_smoke":"passed","beta_deny_smoke":"passed","beta_creator_smoke":"passed",
+ "stable_smoke":"passed","beta_deny_smoke":"passed",
+ "beta_reader_smoke":"passed","beta_creator_smoke":"passed",
  "observed_at":dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
  "result":"passed"},sort_keys=True,separators=(",",":")))
 PY

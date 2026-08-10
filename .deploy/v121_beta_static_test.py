@@ -117,7 +117,7 @@ def main() -> None:
         command in release
         for command in ("backup-restore", "migrate", "pilot-smoke", "observe")
     )
-    assert "creator pilot exposes Maintenance write actions" in release
+    assert 'f"{mode} pilot exposes Maintenance write actions:' in release
     assert "review callback is action-gated" not in release
     assert "not page-gated" not in release
 
@@ -140,7 +140,7 @@ def main() -> None:
     )
     assert set(module.MAINTENANCE_ACTIONS) == maintenance_permissions
     assert all(action in release for action in module.MAINTENANCE_ACTIONS)
-    smoke_guard_start = release.index('if mode == "creator":\n    maintenance_actions = (')
+    smoke_guard_start = release.index('if mode in {"reader", "creator"}:\n    maintenance_actions = (')
     smoke_guard_end = release.index("\nstatus, features=", smoke_guard_start)
     smoke_guard = release[smoke_guard_start:smoke_guard_end]
     assert set(re.findall(r'"(action_maintenance_[a-z_]+)"', smoke_guard)) == set(
@@ -154,7 +154,25 @@ def main() -> None:
     ):
         assert f'"{key}": {value}' in smoke_guard
     assert "credential is not the scoped replenishment creator" in smoke_guard
+    for key, value in (
+        ("page_maintenance", "True"),
+        ("page_maintenance_beta", "True"),
+        ("page_replenishment_beta", "False"),
+        ("data_pool_price_governance", "False"),
+        ("action_replenishment_create", "False"),
+        ("action_replenishment_review", "False"),
+    ):
+        assert f'"{key}": {value}' in smoke_guard
+    assert "credential is not the scoped Maintenance reader" in smoke_guard
+    assert 'smoke reader "$2"' in release
+    assert 'smoke creator "$3"' in release
+    assert '! smoke reader "$4"' in release
+    assert '! smoke creator "$5"' in release
     assert 'features.get("replenishment") is not True' in release
+    assert 'features.get("maintenance") is not True' in release
+    assert "Maintenance Beta reader smoke failed" in release
+    assert "Maintenance reader unexpectedly accesses replenishment" in release
+    assert "replenishment creator unexpectedly accesses Maintenance Beta" in release
     assert '"can_view_price": True' in release
     assert '"can_create": True' in release
     assert '"can_review": False' in release
