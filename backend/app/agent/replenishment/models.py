@@ -102,6 +102,7 @@ class TechnicalFailureCode(StrEnum):
     BATCH_CONTENT_DRIFT = "RPL-TECH-007-batch-content-drift"
     QUERY_WINDOW_MISMATCH = "RPL-TECH-008-query-window-mismatch"
     CANONICAL_PART_MISMATCH = "RPL-TECH-009-canonical-part-mismatch"
+    SUPPORTING_REF_BINDING_MISMATCH = "RPL-TECH-010-supporting-ref-binding-mismatch"
 
 
 class EvidenceRefType(StrEnum):
@@ -175,6 +176,8 @@ class EvidenceRef(_StrictFrozenModel):
     ref_type: EvidenceRefType
     ref_id: BoundedReference
     version: BoundedReference
+    canonical_part_id: Annotated[int, Field(gt=0)]
+    source_snapshot_fingerprint: Sha256Hex
 
     _sanitize_text = field_validator("ref_id", "version", mode="before")(
         _strip_and_reject_control_characters
@@ -252,23 +255,143 @@ class ReplenishmentEvidence(_StrictFrozenModel):
     purchase: SealedCommercialSideEvidence
     sales: SealedCommercialSideEvidence
     supporting_refs: SealedEvidenceRefs = ()
+    outcome: ReplenishmentOutcome
+    rule_code: RuleCode
+    overrideable: bool | None
+    support_class: SupportClass
+    caveats: Annotated[tuple[PolicyCaveat, ...], Field(max_length=8)] = ()
 
     _sanitize_reference = field_validator("source_application_ref", mode="before")(
         _strip_and_reject_control_characters
     )
 
+    @model_validator(mode="after")
+    def _require_deterministic_sealed_decision(self) -> "ReplenishmentEvidence":
+        if self.window.end != self.as_of:
+            raise ValueError("sealed evidence window must end at as_of")
+        supporting_keys = [
+            (
+                ref.ref_type.value,
+                ref.ref_id,
+                ref.version,
+                ref.canonical_part_id,
+                ref.source_snapshot_fingerprint,
+            )
+            for ref in self.supporting_refs
+        ]
+        if supporting_keys != sorted(set(supporting_keys)):
+            raise ValueError("supporting evidence refs must be canonical and unique")
+        for coverage in (self.purchase.coverage, self.sales.coverage):
+            batch_keys = [
+                (ref.file_type.value, ref.batch_id, ref.file_sha256)
+                for ref in coverage.source_batch_refs
+            ]
+            if batch_keys != sorted(set(batch_keys)):
+                raise ValueError("batch refs must be canonical and unique")
+        if any(
+            ref.canonical_part_id != self.canonical_part_id
+            or ref.source_snapshot_fingerprint != self.source_snapshot_fingerprint
+            for ref in self.supporting_refs
+        ):
+            raise ValueError(
+                "supporting evidence binding does not match sealed request"
+            )
+        if not (
+            self.purchase.coverage.lineage_verified
+            and self.sales.coverage.lineage_verified
+        ):
+            raise ValueError(
+                "unverified lineage cannot be sealed as a business outcome"
+            )
+
+        coverage_complete = all(
+            coverage.completeness_status is CompletenessStatus.COMPLETE
+            and coverage.coverage_through >= self.as_of
+            and bool(coverage.source_batch_refs)
+            and coverage.last_successful_import_at is not None
+            for coverage in (
+                self.purchase.coverage,
+                self.sales.coverage,
+            )
+        )
+        pool_ids = {
+            ref.ref_id
+            for ref in self.supporting_refs
+            if ref.ref_type is EvidenceRefType.ACTIVE_POOL
+        }
+        if not coverage_complete:
+            expected = (
+                ReplenishmentOutcome.NEED_INFO,
+                RuleCode.SOURCE_COVERAGE_INCOMPLETE,
+                None,
+                (),
+            )
+        elif self.purchase.order_count == 0 and self.sales.order_count == 0:
+            expected_caveats: list[PolicyCaveat] = []
+            if pool_ids:
+                expected_caveats.append(PolicyCaveat.ACTIVE_POOL_NON_OVERRIDING)
+            if len(pool_ids) > 1:
+                expected_caveats.append(PolicyCaveat.MULTIPLE_ACTIVE_POOLS)
+            if any(
+                ref.ref_type is EvidenceRefType.MAINTENANCE_USAGE
+                for ref in self.supporting_refs
+            ):
+                expected_caveats.append(PolicyCaveat.MAINTENANCE_NON_OVERRIDING)
+            if any(
+                ref.ref_type is EvidenceRefType.BUSINESS_CONTEXT
+                for ref in self.supporting_refs
+            ):
+                expected_caveats.append(PolicyCaveat.BUSINESS_CONTEXT_NON_OVERRIDING)
+            expected = (
+                ReplenishmentOutcome.RECOMMEND_REJECT,
+                RuleCode.NO_COMMERCIAL_HISTORY,
+                False,
+                tuple(expected_caveats),
+            )
+        elif len(pool_ids) > 1:
+            expected = (
+                ReplenishmentOutcome.NEED_INFO,
+                RuleCode.MULTIPLE_ACTIVE_POOLS,
+                None,
+                (PolicyCaveat.MULTIPLE_ACTIVE_POOLS,),
+            )
+        else:
+            expected = (
+                ReplenishmentOutcome.HUMAN_REVIEW_REQUIRED,
+                RuleCode.SHADOW_UNSCORED,
+                None,
+                (),
+            )
+
+        actual = (self.outcome, self.rule_code, self.overrideable, self.caveats)
+        if actual != expected or self.support_class is not SupportClass.UNSCORED:
+            raise ValueError("sealed decision does not match deterministic evidence")
+        return self
+
 
 class ReplenishmentDecision(_StrictFrozenModel):
-    outcome: ReplenishmentOutcome
-    rule_code: RuleCode
-    overrideable: bool | None
-    support_class: SupportClass
-    window: CommercialWindow
     evidence: ReplenishmentEvidence
-    caveats: Annotated[tuple[PolicyCaveat, ...], Field(max_length=8)] = ()
 
-    @model_validator(mode="after")
-    def _require_matching_window(self) -> "ReplenishmentDecision":
-        if self.window != self.evidence.window:
-            raise ValueError("decision window must match sealed evidence window")
-        return self
+    @property
+    def outcome(self) -> ReplenishmentOutcome:
+        return self.evidence.outcome
+
+    @property
+    def rule_code(self) -> RuleCode:
+        return self.evidence.rule_code
+
+    @property
+    def overrideable(self) -> bool | None:
+        return self.evidence.overrideable
+
+    @property
+    def support_class(self) -> SupportClass:
+        return self.evidence.support_class
+
+    @property
+    def window(self) -> CommercialWindow:
+        return self.evidence.window
+
+    @property
+    def caveats(self) -> tuple[PolicyCaveat, ...]:
+        return self.evidence.caveats

@@ -17,11 +17,15 @@ from app.agent.replenishment.models import (
     EvidenceRef,
     EvidenceRefType,
     PolicyCaveat,
+    ReplenishmentDecision,
+    ReplenishmentEvidence,
     ReplenishmentOutcome,
     ReplenishmentRequest,
     ReplenishmentReviewInput,
+    RuleCode,
     ServerReviewContext,
     ShadowPolicy,
+    SupportClass,
     SupportingContext,
     TechnicalFailureCode,
     VerifiedBatchRef,
@@ -38,10 +42,14 @@ OBSERVED_AT = datetime(2026, 8, 10, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
 PART_ID = 101
 
 
-def _batch(side: CommercialSide, hash_character: str = "a") -> BatchManifest:
+def _batch(
+    side: CommercialSide,
+    hash_character: str = "a",
+    suffix: str = "v1",
+) -> BatchManifest:
     file_sha256 = hash_character * 64
     return BatchManifest(
-        batch_id=f"{side.value}-batch-v1",
+        batch_id=f"{side.value}-batch-{suffix}",
         batch_status=BatchStatus.SUCCESS,
         file_type=side,
         import_batch_sha256=file_sha256,
@@ -234,6 +242,41 @@ def test_complete_coverage_proves_zero_and_locks_rpl_100_rejection() -> None:
     assert decision.evidence.purchase.coverage.last_successful_import_at == OBSERVED_AT
 
 
+def test_final_decision_fields_are_inside_the_immutable_sealed_payload() -> None:
+    decision = evaluate_replenishment(_review())
+
+    assert decision.evidence.outcome is ReplenishmentOutcome.RECOMMEND_REJECT
+    assert decision.evidence.rule_code == "RPL-100-no-commercial-history"
+    assert decision.evidence.overrideable is False
+    assert decision.evidence.support_class is SupportClass.UNSCORED
+    assert decision.evidence.caveats == ()
+
+
+def test_rpl_100_evidence_cannot_be_reassembled_as_human_review() -> None:
+    decision = evaluate_replenishment(_review())
+
+    with pytest.raises(ValidationError):
+        ReplenishmentDecision(
+            evidence=decision.evidence,
+            outcome=ReplenishmentOutcome.HUMAN_REVIEW_REQUIRED,
+            rule_code=RuleCode.SHADOW_UNSCORED,
+            overrideable=None,
+            support_class=SupportClass.UNSCORED,
+            window=decision.window,
+            caveats=(),
+        )
+
+    altered_payload = decision.evidence.model_dump(mode="python")
+    altered_payload.update(
+        outcome=ReplenishmentOutcome.HUMAN_REVIEW_REQUIRED,
+        rule_code=RuleCode.SHADOW_UNSCORED,
+        overrideable=None,
+        caveats=(),
+    )
+    with pytest.raises(ValidationError):
+        ReplenishmentEvidence.model_validate(altered_payload)
+
+
 def test_review_requires_resolved_canonical_part_identity() -> None:
     review = _review()
 
@@ -257,11 +300,19 @@ def test_review_requires_resolved_canonical_part_identity() -> None:
         )
 
 
-def _evidence_ref(ref_type: EvidenceRefType, suffix: str) -> EvidenceRef:
+def _evidence_ref(
+    ref_type: EvidenceRefType,
+    suffix: str,
+    *,
+    canonical_part_id: int = PART_ID,
+    source_snapshot_fingerprint: str = "f" * 64,
+) -> EvidenceRef:
     return EvidenceRef(
         ref_type=ref_type,
         ref_id=f"{ref_type.value}-{suffix}",
         version="v1",
+        canonical_part_id=canonical_part_id,
+        source_snapshot_fingerprint=source_snapshot_fingerprint,
     )
 
 
@@ -374,6 +425,8 @@ def test_supporting_evidence_refs_reject_controls_and_overflow() -> None:
             ref_type=EvidenceRefType.ACTIVE_POOL,
             ref_id="pool\x00-a",
             version="v1",
+            canonical_part_id=PART_ID,
+            source_snapshot_fingerprint="f" * 64,
         )
 
     refs = tuple(
@@ -381,6 +434,31 @@ def test_supporting_evidence_refs_reject_controls_and_overflow() -> None:
     )
     with pytest.raises(ValidationError):
         SupportingContext(active_pool_refs=refs)
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        _evidence_ref(
+            EvidenceRefType.ACTIVE_POOL,
+            "wrong-part",
+            canonical_part_id=PART_ID + 1,
+        ),
+        _evidence_ref(
+            EvidenceRefType.ACTIVE_POOL,
+            "wrong-snapshot",
+            source_snapshot_fingerprint="e" * 64,
+        ),
+    ],
+    ids=["cross-part", "cross-snapshot"],
+)
+def test_supporting_ref_binding_mismatch_fails_closed(ref: EvidenceRef) -> None:
+    supporting = SupportingContext(active_pool_refs=(ref,))
+
+    with pytest.raises(ReplenishmentTechnicalError) as caught:
+        evaluate_replenishment(_review(supporting=supporting))
+
+    assert caught.value.code is TechnicalFailureCode.SUPPORTING_REF_BINDING_MISMATCH
 
 
 @pytest.mark.parametrize(
@@ -629,3 +707,70 @@ def test_same_batch_and_hash_replay_is_idempotent() -> None:
     decision = evaluate_replenishment(_review(purchase=purchase))
 
     assert decision.outcome is ReplenishmentOutcome.RECOMMEND_REJECT
+
+
+def test_batch_and_supporting_ref_permutations_seal_identical_json() -> None:
+    first_batch = _batch(CommercialSide.PURCHASE, "a", "a")
+    second_batch = _batch(CommercialSide.PURCHASE, "b", "b")
+    pool_a = _evidence_ref(EvidenceRefType.ACTIVE_POOL, "a")
+    pool_b = _evidence_ref(EvidenceRefType.ACTIVE_POOL, "b")
+    maintenance_a = _evidence_ref(EvidenceRefType.MAINTENANCE_USAGE, "a")
+    maintenance_b = _evidence_ref(EvidenceRefType.MAINTENANCE_USAGE, "b")
+    context = _evidence_ref(EvidenceRefType.BUSINESS_CONTEXT, "a")
+
+    baseline = evaluate_replenishment(
+        _review(
+            purchase=_side_evidence(
+                CommercialSide.PURCHASE,
+                batches=(first_batch, second_batch),
+            ),
+            supporting=SupportingContext(
+                active_pool_refs=(pool_a, pool_b),
+                maintenance_refs=(maintenance_a, maintenance_b),
+                business_context_refs=(context,),
+            ),
+        )
+    ).evidence
+    permuted = evaluate_replenishment(
+        _review(
+            purchase=_side_evidence(
+                CommercialSide.PURCHASE,
+                batches=(second_batch, first_batch, second_batch),
+            ),
+            supporting=SupportingContext(
+                active_pool_refs=(pool_b, pool_a, pool_b),
+                maintenance_refs=(maintenance_b, maintenance_a, maintenance_b),
+                business_context_refs=(context, context),
+            ),
+        )
+    ).evidence
+
+    assert permuted.model_dump_json() == baseline.model_dump_json()
+
+
+def test_sealed_payload_rejects_noncanonical_collection_order() -> None:
+    first_batch = _batch(CommercialSide.PURCHASE, "a", "a")
+    second_batch = _batch(CommercialSide.PURCHASE, "b", "b")
+    evidence = evaluate_replenishment(
+        _review(
+            purchase=_side_evidence(
+                CommercialSide.PURCHASE,
+                batches=(first_batch, second_batch),
+            ),
+            supporting=SupportingContext(
+                active_pool_refs=(
+                    _evidence_ref(EvidenceRefType.ACTIVE_POOL, "a"),
+                    _evidence_ref(EvidenceRefType.ACTIVE_POOL, "b"),
+                )
+            ),
+        )
+    ).evidence
+    payload = evidence.model_dump(mode="python")
+    payload["supporting_refs"] = tuple(reversed(payload["supporting_refs"]))
+    purchase_coverage = payload["purchase"]["coverage"]
+    purchase_coverage["source_batch_refs"] = tuple(
+        reversed(purchase_coverage["source_batch_refs"])
+    )
+
+    with pytest.raises(ValidationError, match="canonical"):
+        ReplenishmentEvidence.model_validate(payload)

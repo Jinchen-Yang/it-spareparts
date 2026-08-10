@@ -37,6 +37,11 @@ state/type, missing archive, hash mismatch/content drift, or query-window drift
 raises `ReplenishmentTechnicalError` with a stable code; callers must route that
 to Task retry/fail and must not seal a business outcome.
 
+Every supporting reference is versioned and bound to the same canonical part
+ID and source snapshot fingerprint as the request. A cross-part or
+cross-snapshot pool, maintenance, or business-context reference is a technical
+failure, not a usable caveat.
+
 The only possible outcomes are `need_info`, `recommend_reject`, and
 `human_review_required`. Complete purchase=0 and sales=0 always locks
 `recommend_reject` with `overrideable=false`; pool, maintenance, and business
@@ -46,12 +51,18 @@ threshold-free `replenishment-v1-shadow`, so all surviving candidates remain
 `human_review_required` with `support_class=unscored`. Approval is not part of
 the type system.
 
-Evidence is deeply immutable and bounded. It binds the application reference,
-source snapshot fingerprint, canonical part ID, requested quantity, `as_of`,
-closed window, Policy version, and rule implementation version. Commercial
-lineage includes coverage/completeness, the last-successful-import marker,
-counts, and verified batch IDs and hashes, plus opaque typed references. It has
-no filename, path, order ID, customer, vendor, price, or SN fields.
+The final outcome, rule code, overrideability, support class, and caveats live
+inside the same deeply immutable, self-validating Evidence payload. The outer
+decision object only projects those sealed values and cannot reassemble the
+same facts with another conclusion. The payload also binds the application
+reference, source snapshot fingerprint, canonical part ID, requested quantity,
+`as_of`, closed window, Policy version, and rule implementation version.
+Commercial lineage includes coverage/completeness, the
+last-successful-import marker, counts, and verified batch IDs and hashes, plus
+opaque typed references. Semantically unordered batch and supporting-reference
+collections are sorted and deduplicated before sealing, so input permutations
+produce byte-identical JSON. Evidence has no filename, path, order ID,
+customer, vendor, price, or SN fields.
 
 ## Activation gate
 

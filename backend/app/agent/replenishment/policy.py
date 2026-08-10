@@ -112,24 +112,38 @@ def _validate_source_integrity(review: ReplenishmentReviewInput) -> None:
                 raise ReplenishmentTechnicalError(
                     TechnicalFailureCode.BATCH_CONTENT_DRIFT
                 )
+    for ref in (
+        *review.supporting.active_pool_refs,
+        *review.supporting.maintenance_refs,
+        *review.supporting.business_context_refs,
+    ):
+        if (
+            ref.canonical_part_id != review.canonical_part_id
+            or ref.source_snapshot_fingerprint
+            != review.request.source_snapshot_fingerprint
+        ):
+            raise ReplenishmentTechnicalError(
+                TechnicalFailureCode.SUPPORTING_REF_BINDING_MISMATCH
+            )
 
 
 def _seal_side(
     evidence: CommercialSideEvidence,
 ) -> SealedCommercialSideEvidence:
-    verified_batches: list[VerifiedBatchRef] = []
-    seen: set[tuple[str, str, CommercialSide]] = set()
+    verified_batches: dict[tuple[str, str, str], VerifiedBatchRef] = {}
     for batch in evidence.coverage.source_batch_refs:
-        identity = (batch.batch_id, batch.import_batch_sha256, batch.file_type)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        verified_batches.append(
+        identity = (
+            batch.file_type.value,
+            batch.batch_id,
+            batch.import_batch_sha256,
+        )
+        verified_batches.setdefault(
+            identity,
             VerifiedBatchRef(
                 batch_id=batch.batch_id,
                 file_sha256=batch.import_batch_sha256,
                 file_type=batch.file_type,
-            )
+            ),
         )
     return SealedCommercialSideEvidence(
         order_count=evidence.order_count,
@@ -138,25 +152,29 @@ def _seal_side(
             completeness_status=evidence.coverage.completeness_status,
             lineage_verified=evidence.coverage.lineage_verified,
             last_successful_import_at=evidence.coverage.last_successful_import_at,
-            source_batch_refs=tuple(verified_batches),
+            source_batch_refs=tuple(
+                verified_batches[identity] for identity in sorted(verified_batches)
+            ),
         ),
     )
 
 
 def _seal_supporting_refs(review: ReplenishmentReviewInput) -> tuple[EvidenceRef, ...]:
-    sealed: list[EvidenceRef] = []
-    seen: set[tuple[str, str, str]] = set()
+    sealed: dict[tuple[str, str, str, int, str], EvidenceRef] = {}
     for ref in (
         *review.supporting.active_pool_refs,
         *review.supporting.maintenance_refs,
         *review.supporting.business_context_refs,
     ):
-        identity = (ref.ref_type.value, ref.ref_id, ref.version)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        sealed.append(ref)
-    return tuple(sealed)
+        identity = (
+            ref.ref_type.value,
+            ref.ref_id,
+            ref.version,
+            ref.canonical_part_id,
+            ref.source_snapshot_fingerprint,
+        )
+        sealed.setdefault(identity, ref)
+    return tuple(sealed[identity] for identity in sorted(sealed))
 
 
 def _hard_gate_caveats(review: ReplenishmentReviewInput) -> tuple[PolicyCaveat, ...]:
@@ -173,12 +191,14 @@ def _hard_gate_caveats(review: ReplenishmentReviewInput) -> tuple[PolicyCaveat, 
     return tuple(caveats)
 
 
-def evaluate_replenishment(
+def _seal_decision(
     review: ReplenishmentReviewInput,
+    *,
+    outcome: ReplenishmentOutcome,
+    rule_code: RuleCode,
+    overrideable: bool | None,
+    caveats: tuple[PolicyCaveat, ...] = (),
 ) -> ReplenishmentDecision:
-    """Evaluate the deterministic dark policy without I/O or business writes."""
-
-    _validate_source_integrity(review)
     evidence = ReplenishmentEvidence(
         source_application_ref=review.request.source_application_ref,
         source_snapshot_fingerprint=review.request.source_snapshot_fingerprint,
@@ -190,50 +210,56 @@ def evaluate_replenishment(
         purchase=_seal_side(review.commercial.purchase),
         sales=_seal_side(review.commercial.sales),
         supporting_refs=_seal_supporting_refs(review),
+        outcome=outcome,
+        rule_code=rule_code,
+        overrideable=overrideable,
+        support_class=SupportClass.UNSCORED,
+        caveats=caveats,
     )
+    return ReplenishmentDecision(evidence=evidence)
+
+
+def evaluate_replenishment(
+    review: ReplenishmentReviewInput,
+) -> ReplenishmentDecision:
+    """Evaluate the deterministic dark policy without I/O or business writes."""
+
+    _validate_source_integrity(review)
     coverage_complete = _coverage_is_complete(
         review.commercial.purchase.coverage, review.server.as_of
     ) and _coverage_is_complete(review.commercial.sales.coverage, review.server.as_of)
     if not coverage_complete:
-        return ReplenishmentDecision(
+        return _seal_decision(
+            review,
             outcome=ReplenishmentOutcome.NEED_INFO,
             rule_code=RuleCode.SOURCE_COVERAGE_INCOMPLETE,
             overrideable=None,
-            support_class=SupportClass.UNSCORED,
-            window=commercial_window(review.server.as_of),
-            evidence=evidence,
         )
 
     if (
         review.commercial.purchase.order_count == 0
         and review.commercial.sales.order_count == 0
     ):
-        return ReplenishmentDecision(
+        return _seal_decision(
+            review,
             outcome=ReplenishmentOutcome.RECOMMEND_REJECT,
             rule_code=RuleCode.NO_COMMERCIAL_HISTORY,
             overrideable=False,
-            support_class=SupportClass.UNSCORED,
-            window=commercial_window(review.server.as_of),
-            evidence=evidence,
             caveats=_hard_gate_caveats(review),
         )
 
     if len({ref.ref_id for ref in review.supporting.active_pool_refs}) > 1:
-        return ReplenishmentDecision(
+        return _seal_decision(
+            review,
             outcome=ReplenishmentOutcome.NEED_INFO,
             rule_code=RuleCode.MULTIPLE_ACTIVE_POOLS,
             overrideable=None,
-            support_class=SupportClass.UNSCORED,
-            window=commercial_window(review.server.as_of),
-            evidence=evidence,
             caveats=(PolicyCaveat.MULTIPLE_ACTIVE_POOLS,),
         )
 
-    return ReplenishmentDecision(
+    return _seal_decision(
+        review,
         outcome=ReplenishmentOutcome.HUMAN_REVIEW_REQUIRED,
         rule_code=RuleCode.SHADOW_UNSCORED,
         overrideable=None,
-        support_class=SupportClass.UNSCORED,
-        window=commercial_window(review.server.as_of),
-        evidence=evidence,
     )
