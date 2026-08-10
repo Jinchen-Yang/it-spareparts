@@ -10,7 +10,9 @@ from openpyxl import load_workbook
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError
 
+from app import permissions
 from app.auth import hash_password
+from app.config import get_settings
 from app.db import SessionLocal
 from app.etl import loader
 from app.main import app
@@ -28,13 +30,25 @@ from app.security import UserContext
 from tests import factories as f
 
 
+@pytest.fixture(autouse=True)
+def _maintenance_beta_enabled(monkeypatch):
+    """This module exercises Beta-only routes with an explicit server gate."""
+
+    monkeypatch.setattr(get_settings(), "maintenance_beta_enabled", True)
+
+
 def _admin_client(db, username: str = "demand-delete-admin") -> TestClient:
+    template_perms = permissions.admin_account_defaults()
     db.add(
         SysUser(
             username=username,
             role="admin",
             display_name="合成实名管理员",
             password_hash=hash_password("synthetic-password-123"),
+            template_code="admin",
+            template_version=1,
+            template_perms=template_perms,
+            perm_overrides={"page_maintenance_beta": True},
         )
     )
     db.commit()
