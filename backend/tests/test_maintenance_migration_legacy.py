@@ -19,14 +19,54 @@ from app.services.maintenance_migration_legacy import load_project_legacy_truth
 
 @pytest.fixture()
 def assignment_table_guard(db):
+    backup_table = "_test_backup_maintenance_source_order_assignment"
     db.rollback()
-    db.execute(text("DROP TABLE IF EXISTS maintenance_source_order_assignment"))
+    formal_exists = bool(
+        db.scalar(
+            text("SELECT to_regclass(:name) IS NOT NULL"),
+            {"name": "maintenance_source_order_assignment"},
+        )
+    )
+    backup_exists = bool(
+        db.scalar(text("SELECT to_regclass(:name) IS NOT NULL"), {"name": backup_table})
+    )
+    if not formal_exists:
+        raise RuntimeError(
+            "正式迁移表 maintenance_source_order_assignment 缺失，无法用临时表隔离测试"
+        )
+    if backup_exists:
+        raise RuntimeError(
+            f"backup 表 {backup_table} 已存在，上一个用例未恢复正式迁移表"
+        )
+    db.execute(
+        text(
+            "ALTER TABLE maintenance_source_order_assignment "
+            "RENAME TO _test_backup_maintenance_source_order_assignment"
+        )
+    )
     db.commit()
     try:
         yield db
     finally:
         db.rollback()
         db.execute(text("DROP TABLE IF EXISTS maintenance_source_order_assignment"))
+        db.commit()
+        if db.scalar(text("SELECT to_regclass(:name)"), {"name": backup_table}) is None:
+            raise RuntimeError("测试结束时 backup 表缺失，无法恢复正式迁移表")
+        if (
+            db.scalar(
+                text("SELECT to_regclass(:name)"),
+                {"name": "maintenance_source_order_assignment"},
+            )
+            is not None
+        ):
+            raise RuntimeError("测试临时表清理失败，拒绝覆盖正式迁移表")
+        db.execute(
+            text(
+                "ALTER TABLE _test_backup_maintenance_source_order_assignment "
+                "RENAME TO maintenance_source_order_assignment"
+            )
+        )
         db.commit()
 
 
@@ -95,7 +135,7 @@ def test_legacy_truth_recomputes_old_formula_excludes_future_and_is_read_only(
         text(
             """
             CREATE TABLE maintenance_source_order_assignment (
-                assignment_id VARCHAR(36) PRIMARY KEY,
+                assignment_id VARCHAR(36) NOT NULL,
                 source_order_id VARCHAR(64) NOT NULL,
                 project_id VARCHAR(36) NOT NULL,
                 is_active BOOLEAN NOT NULL,
@@ -287,7 +327,7 @@ def test_legacy_expense_uses_contract_owner_at_expense_date(assignment_table_gua
         text(
             """
             CREATE TABLE maintenance_source_order_assignment (
-                assignment_id VARCHAR(36) PRIMARY KEY,
+                assignment_id VARCHAR(36) NOT NULL,
                 source_order_id VARCHAR(64) NOT NULL,
                 project_id VARCHAR(36) NOT NULL,
                 is_active BOOLEAN NOT NULL,
@@ -352,7 +392,7 @@ def test_unassigned_approved_expense_is_a_global_fail_closed_blocker(
         text(
             """
             CREATE TABLE maintenance_source_order_assignment (
-                assignment_id VARCHAR(36) PRIMARY KEY,
+                assignment_id VARCHAR(36) NOT NULL,
                 source_order_id VARCHAR(64) NOT NULL,
                 project_id VARCHAR(36) NOT NULL,
                 is_active BOOLEAN NOT NULL,
@@ -414,7 +454,7 @@ def test_unassigned_active_wbdd_is_a_global_fail_closed_blocker(
         text(
             """
             CREATE TABLE maintenance_source_order_assignment (
-                assignment_id VARCHAR(36) PRIMARY KEY,
+                assignment_id VARCHAR(36) NOT NULL,
                 source_order_id VARCHAR(64) NOT NULL,
                 project_id VARCHAR(36) NOT NULL,
                 is_active BOOLEAN NOT NULL,
