@@ -1,4 +1,9 @@
 """对话持久化（平台化 P1）：归属隔离 / 自动标题 / 窗口截取 / 级联删除。"""
+import json
+
+from sqlalchemy import select
+
+from app.models.chat import ChatMessage
 from app.services import chat_store
 
 
@@ -92,3 +97,50 @@ def test_assistant_tools_and_stopped_persisted(db):
     msgs = chat_store.list_messages(db, s.id)
     assert msgs[0]["stopped"] is True
     assert msgs[0]["tools"][0]["name"] == "lookup_prices_bulk"
+
+
+def test_tool_trace_is_content_free_on_write_and_legacy_read(db):
+    """持久化层也是隐私边界：即使调用方误传 raw args，新写入与读出也只有安全摘要。"""
+    sentinel = "CUSTOMER-CHAT-STORE-SECRET-822d"
+    s = chat_store.create_session(db, "u")
+    written = chat_store.append_message(
+        db,
+        s,
+        "assistant",
+        "done",
+        tools=[{
+            "name": "lookup_prices_bulk",
+            "args": {"queries": [sentinel, "B"], sentinel: "hidden"},
+        }],
+    )
+    db.expire_all()
+    raw = db.get(ChatMessage, written.id)
+    assert raw is not None
+    assert sentinel not in json.dumps(raw.tools, ensure_ascii=False)
+    assert raw.tools == [{
+        "name": "lookup_prices_bulk",
+        "args": {
+            "outcome": "recorded",
+            "arg_count": 2,
+            "arg_keys": ["queries"],
+            "query_count": 2,
+        },
+    }]
+
+    # 历史行可能是旧版本写入的 raw args；API 读出时必须实时脱敏。
+    legacy = ChatMessage(
+        session_id=s.id,
+        role="assistant",
+        content="legacy",
+        tools=[{"name": "search_parts", "args": {"query": sentinel}}],
+    )
+    db.add(legacy)
+    db.commit()
+    exposed = chat_store.list_messages(db, s.id)
+    legacy_exposed = next(row for row in exposed if row["id"] == legacy.id)
+    assert sentinel not in json.dumps(legacy_exposed["tools"], ensure_ascii=False)
+    assert legacy_exposed["tools"][0]["args"]["arg_keys"] == ["query"]
+
+    # 证明测试确实造出了旧数据，而不是哨兵未进库导致的假阳性。
+    legacy_raw = db.scalar(select(ChatMessage).where(ChatMessage.id == legacy.id))
+    assert sentinel in json.dumps(legacy_raw.tools, ensure_ascii=False)

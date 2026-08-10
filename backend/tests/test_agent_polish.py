@@ -4,12 +4,16 @@ import pytest
 
 from app import permissions, security
 from app.agent import tools
+from app.auth import hash_password
+from app.models.system import SysUser
 from app.services import profit
 
 
 def _ctx(role: str, uid: str = "u") -> security.UserContext:
     return security.UserContext(user_id=uid, role=role,
-                                permissions=permissions.effective(role, None))
+                                permissions=permissions.effective(role, None),
+                                is_authenticated=True, authn="sys_user",
+                                has_stable_subject=True, token_version=0)
 
 
 # ---------- TOOLS-3：profit.aggregate 数据层兜底 ----------
@@ -29,12 +33,16 @@ def test_aggregate_allows_admin_all_dims(db):
 
 
 # ---------- TOOLS-4：文件不存在按"无权"处理，关存在性 oracle ----------
-def test_owns_denies_nonexistent_file_for_scoped_user():
-    sales = security.UserContext(user_id="liu", role="sales")
-    # 不存在的 file_id：受限用户拿到的是"无权"（False），与"非本人"不可区分
-    assert tools._owns(sales, "deadbeef0001") is False
-    # 全量角色提前放行，不触发 owner_of（admin 仍 True）
-    assert tools._owns(security.UserContext(user_id="a", role="admin"), "deadbeef0001") is True
+def test_read_tool_denies_nonexistent_file_without_oracle(db):
+    db.add_all([
+        SysUser(username="liu", role="sales", password_hash=hash_password("pw123456"),
+                permissions=permissions.effective("sales", None)),
+        SysUser(username="a", role="admin", password_hash=hash_password("pw123456"),
+                permissions=permissions.effective("admin", None)),
+    ])
+    db.commit()
+    assert tools._read_document(db, {"file_id": "deadbeef0001"}, _ctx("sales", "liu")) == tools._NO_ACCESS
+    assert tools._read_document(db, {"file_id": "deadbeef0001"}, _ctx("admin", "a")) == tools._NO_ACCESS
 
 
 # ---------- TOOLS-5：工具描述与 clamp 引用同一常量，防文字漂移 ----------

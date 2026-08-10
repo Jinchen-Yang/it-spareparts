@@ -2,6 +2,7 @@
 韧性配置(RUNTIME-3 max_tokens/max_retries、RUNTIME-6 extra_body 启动期校验)。
 
 用假 provider.chat_stream 驱动，不依赖 LLM key / DB。"""
+import json
 import threading
 
 import pytest
@@ -9,6 +10,8 @@ import pytest
 from app import security
 from app.agent import provider, runtime, tools
 from app.config import Settings
+from app.models.chat import ChatMessage
+from app.services import chat_store
 
 _CTX = security.UserContext(user_id=None, role="phase1_full_access")
 _MSGS = [{"role": "user", "content": "hi"}]
@@ -38,7 +41,14 @@ def test_run_takes_final_answer_only(monkeypatch):
     out = runtime.run(None, _MSGS, _CTX)
     # 非流式只取最终答复，不含中间旁白（与旧实现口径一致）
     assert out["answer"] == "最终答复"
-    assert out["tool_calls"] == [{"name": "search_parts", "args": {"query": "x"}}]
+    assert out["tool_calls"] == [{
+        "name": "search_parts",
+        "args": {
+            "outcome": "success",
+            "arg_count": 1,
+            "arg_keys": ["query"],
+        },
+    }]
 
 
 def test_run_stream_emits_event_sequence(monkeypatch):
@@ -48,8 +58,89 @@ def test_run_stream_emits_event_sequence(monkeypatch):
     assert [e["type"] for e in evs] == ["delta", "delta", "tool", "tool_done", "delta", "done"]
     tool_done = next(e for e in evs if e["type"] == "tool_done")
     assert tool_done["ok"] is True
+    tool_started = next(e for e in evs if e["type"] == "tool")
+    assert tool_started == {
+        "type": "tool",
+        "name": "search_parts",
+        "args": {
+            "outcome": "started",
+            "arg_count": 1,
+            "arg_keys": ["query"],
+        },
+    }
     done = evs[-1]
-    assert done["answer"] == "最终答复" and done["tool_calls"] == [{"name": "search_parts", "args": {"query": "x"}}]
+    assert done["answer"] == "最终答复"
+    assert done["tool_calls"] == [{
+        "name": "search_parts",
+        "args": {
+            "outcome": "success",
+            "arg_count": 1,
+            "arg_keys": ["query"],
+        },
+    }]
+
+
+def test_runtime_sse_trace_checkpoint_and_log_never_contain_argument_values(
+    db, monkeypatch, caplog
+):
+    sentinel = "CUSTOMER-RUNTIME-SECRET-31f2"
+    rounds = {"count": 0}
+
+    def fake(messages, tools_=None):
+        rounds["count"] += 1
+        if rounds["count"] == 1:
+            yield "result", provider.ChatResult(
+                content=None,
+                tool_calls=[provider.ToolCall(
+                    id="c1",
+                    name="search_parts",
+                    arguments=(
+                        '{"query":"' + sentinel + '","' + sentinel + '":"value"}'
+                    ),
+                )],
+            )
+        else:
+            yield "result", provider.ChatResult(content="done", tool_calls=[])
+
+    monkeypatch.setattr(provider, "chat_stream", fake)
+    monkeypatch.setattr(tools, "dispatch", lambda *_args: {"ok": True})
+    monkeypatch.setattr(runtime._log, "disabled", False)
+    monkeypatch.setattr(runtime._log, "propagate", True)
+    with caplog.at_level("INFO", logger="agent"):
+        events = list(runtime.run_stream(None, _MSGS, _CTX))
+
+    # SSE 与 done trace 只携带 schema-derived 结构，不带原始参数值。
+    assert sentinel not in json.dumps(events, ensure_ascii=False)
+    tool_event = next(e for e in events if e["type"] == "tool")
+    assert tool_event["args"] == {
+        "outcome": "started",
+        "arg_count": 2,
+        "arg_keys": ["query"],
+    }
+    trace = events[-1]["tool_calls"]
+    assert trace == [{
+        "name": "search_parts",
+        "args": {
+            "outcome": "success",
+            "arg_count": 2,
+            "arg_keys": ["query"],
+        },
+    }]
+
+    # 模拟 chat checkpoint 全链路：新落库行也不得出现哨兵值。
+    session = chat_store.create_session(db, "runtime-privacy-owner")
+    db.commit()
+    message_id = chat_store.save_assistant_progress(
+        session.id, None, "done", trace, stopped=False,
+    )
+    db.expire_all()
+    stored = db.get(ChatMessage, message_id)
+    assert stored is not None
+    assert sentinel not in json.dumps(stored.tools, ensure_ascii=False)
+
+    assert sentinel not in caplog.text
+    assert "agent tool=search_parts" in caplog.text
+    assert "arg_keys=['query']" in caplog.text
 
 
 def test_run_stream_cancel_stops_promptly(monkeypatch):

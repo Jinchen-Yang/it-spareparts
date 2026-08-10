@@ -13,8 +13,10 @@ import {
 import type {
   AgentToolCall, AgentUploadResult, ChatSessionMeta, FilePreview, SessionStreamEvent,
 } from "../api";
+import { artifactIdFromFileUrl, parseUploadedAttachmentMessage } from "../artifactIds";
 import { clearSessionScopedPreferences } from "../sessionPreferences";
 import { COLORS } from "../theme";
+import { summarizeToolAudit } from "../toolAudit";
 
 const TOOL_LABEL: Record<string, string> = {
   search_parts: "型号搜索",
@@ -77,7 +79,7 @@ function nodeText(n: React.ReactNode): string {
 /** 生成/上传的文件卡片：在线预览（Excel 表格 / 图片）+ 下载。
  * 替代裸下载按钮；预览/下载都走带鉴权 fetch，绝不整页刷新打断对话。 */
 function FileCard({ href, label }: { href: string; label?: string }) {
-  const fileId = /\/api\/agent\/files\/([a-z0-9]{6,})/i.exec(href)?.[1] || "";
+  const fileId = artifactIdFromFileUrl(href) || "";
   const [open, setOpen] = useState(false);
   const [pv, setPv] = useState<FilePreview | null>(null);
   const [loading, setLoading] = useState(false);
@@ -206,8 +208,6 @@ function mergeConsec(names: string[]): { name: string; count: number }[] {
   return out;
 }
 const label = (n: string) => TOOL_LABEL[n] || n;
-const argOf = (a?: Record<string, unknown>) =>
-  String((a?.query ?? a?.pn_std ?? a?.dimension ?? a?.file_id ?? "") || "");
 
 // 思考链：默认折叠的灰色块，点标题展开，流式时标题显示"思考中…"
 function ThinkBlock({ text, streaming }: { text: string; streaming?: boolean }) {
@@ -250,7 +250,7 @@ function ToolTrace({ tools }: { tools?: AgentToolCall[] }) {
       {open && (
         <div style={{ marginTop: 4, paddingLeft: 14, borderLeft: "2px solid #ECE8E1" }}>
           {tools.map((t, i) => {
-            const a = argOf(t.args);
+            const a = summarizeToolAudit(t.args);
             return (
               <div key={i} style={{ fontSize: 12, color: "var(--mb-text-3)", padding: "2px 0" }}>
                 {label(t.name)}{a ? <span style={{ color: "var(--mb-text-3)" }}>（{a.slice(0, 30)}）</span> : null}
@@ -286,16 +286,16 @@ function LiveTrace({ runs }: { runs: ToolRun[] }) {
 
 /** 用户消息：把注入的文件前缀折叠成附件标签显示 */
 function UserContent({ text }: { text: string }) {
-  const m = /^\[已上传文件「(.+?)」 file_id=\w+[^\]]*\]\n\n?([\s\S]*)$/.exec(text);
-  if (!m) return <>{text}</>;
+  const attachment = parseUploadedAttachmentMessage(text);
+  if (!attachment) return <>{text}</>;
   return (
     <>
-      <div style={{ marginBottom: m[2] ? 6 : 0 }}>
+      <div style={{ marginBottom: attachment.body ? 6 : 0 }}>
         <Tag color="rgba(255,255,255,0.25)" style={{ color: "#fff", border: "1px solid rgba(255,255,255,0.4)" }}>
-          📎 {m[1]}
+          📎 {attachment.filename}
         </Tag>
       </div>
-      {m[2]}
+      {attachment.body}
     </>
   );
 }

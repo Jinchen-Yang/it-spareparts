@@ -45,6 +45,10 @@ services:
       LLM_MODEL: ${LLM_MODEL:-deepseek-v4-flash}
       # 留空 = 用应用内默认(关思考)；设 {} = 明确不传额外参数
       LLM_EXTRA_BODY: ${LLM_EXTRA_BODY:-}
+      # 发布 kill switch：未显式开启时 UUID Artifact 创建/读取统一失败关闭。
+      AGENT_ARTIFACT_V2_ENABLED: ${AGENT_ARTIFACT_V2_ENABLED:-false}
+      AGENT_INTEGRITY_ACTIVE_KEY_ID: ${AGENT_INTEGRITY_ACTIVE_KEY_ID:-}
+      AGENT_INTEGRITY_KEYS_JSON: ${AGENT_INTEGRITY_KEYS_JSON:-{}}
       # 三期 视觉识别(图片/扫描件)：不配则图片走降级，文字类文件照常
       VISION_API_KEY: ${VISION_API_KEY:-}
       VISION_BASE_URL: ${VISION_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}

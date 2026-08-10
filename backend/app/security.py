@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import config
@@ -32,12 +33,18 @@ class UserContext:
     department_id: str | None = None
     team_id: str | None = None
     is_authenticated: bool = False
+    authn: str | None = None
+    # True only when the token provenance is a currently active SysUser row. Shared-password
+    # and legacy/unprovenanced tokens must not own or reopen private Agent artifacts.
+    has_stable_subject: bool = False
+    # Authenticated SysUser session generation.  Artifact principals re-check this
+    # against the live row so disabled/changed accounts fail closed at the service seam.
+    token_version: int | None = None
 
 
-# 可访问任意上传文件（不受归属限制）的角色——仅 agent 文件 ACL 用（下载/预览）。
-# readonly 故意不在内：共享口令回退把非 admin 一律发成 readonly，若放行会让任何知道
-# ADMIN_PASSWORD 的人凭 12 位 file_id 读他人上传的报价/合同（IDOR，正是 PR#16 要防的）。
-# 数据字段可见性另由 permissions 控制，与本文件白名单无关。
+# 高敏感角色集合（保留给既有权限判断）。普通 Agent 下载/预览严格 owner-only，
+# 不因角色在此集合而跨 owner；管理员取证若将来需要，必须另建带理由和审计的
+# break-glass 端点。
 FULL_SCOPE_ROLES = {"admin", "boss", config.PHASE1_BYPASS_ROLE}
 
 
@@ -67,10 +74,27 @@ def get_current_user_context(
     if creds is not None:
         try:
             from app.auth import verify_token_db
+            from app.models.system import SysUser
+
             data = verify_token_db(creds.credentials, db)
+            subject = str(data.get("sub") or "").strip()
+            has_stable_subject = bool(
+                subject
+                and data.get("authn") == "sys_user"
+                and not data.get("fb")
+                and db.scalar(
+                    select(SysUser.id).where(
+                        SysUser.username == subject,
+                        SysUser.is_active.is_(True),
+                    )
+                ) is not None
+            )
             return UserContext(user_id=data.get("sub"), role=data.get("role", config.GUEST_ROLE),
                                salesperson_name=data.get("name"),
-                               permissions=data.get("perms"), is_authenticated=True)
+                               permissions=data.get("perms"), is_authenticated=True,
+                               authn=data.get("authn"),
+                               has_stable_subject=has_stable_subject,
+                               token_version=int(data.get("tv", 0)))
         except Exception:  # noqa: BLE001
             pass
     return UserContext(user_id=None, role=config.GUEST_ROLE, is_authenticated=False)

@@ -1,4 +1,5 @@
 import axios from "axios";
+import { artifactIdFromFileUrl } from "./artifactIds";
 import { clearSessionScopedPreferences } from "./sessionPreferences";
 
 export const api = axios.create({ baseURL: "/api" });
@@ -49,15 +50,26 @@ export interface PartHit {
 }
 
 // ===== 二期 AI 助手 =====
+export interface AgentToolAudit {
+  outcome: string;
+  arg_count: number;
+  arg_keys: string[];
+  cell_count?: number;
+  row_count?: number;
+  column_count?: number;
+  query_count?: number;
+  artifact_ids?: string[];
+}
 export interface AgentToolCall {
   name: string;
-  args: Record<string, unknown>;
+  /** Content-free server audit summary; never raw model arguments or tool results. */
+  args: AgentToolAudit;
 }
 /** SSE 事件（/agent/chat/stream） */
 export type AgentStreamEvent =
   | { type: "delta"; text: string }
   | { type: "thinking"; text: string }
-  | { type: "tool"; name: string; args: Record<string, unknown> }
+  | { type: "tool"; name: string; args: AgentToolAudit }
   | { type: "tool_done"; name: string; ok: boolean }
   | { type: "done"; tool_calls: AgentToolCall[]; answer?: string; configured?: boolean; stopped?: boolean }
   | { type: "error"; message: string };
@@ -309,9 +321,9 @@ export const agentUpload = (file: File) => {
  * 用 fetch 而非 axios：全局 401 拦截器会 location.reload()，
  * 点下载触发整页刷新会打断对话——下载失败必须就地提示，绝不能刷页面。 */
 export const agentDownload = async (url: string, fallbackName = "下载.xlsx") => {
-  const m = /\/api\/agent\/files\/([a-f0-9]{6,})/.exec(url);
-  if (!m) throw new Error("bad-url");
-  const resp = await fetch(`/api/agent/files/${m[1]}`, {
+  const fileId = artifactIdFromFileUrl(url);
+  if (!fileId) throw new Error("bad-url");
+  const resp = await fetch(`/api/agent/files/${fileId}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },
     cache: "no-store",
   });

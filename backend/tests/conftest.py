@@ -104,6 +104,14 @@ os.environ["PYTEST_DATABASE_BASE_URL"] = _database_run.base_url
 os.environ["DATABASE_URL"] = _database_run.database_url
 os.environ["PYTEST_RAW_FILE_BASE_DIR"] = str(_raw_run.root)
 os.environ["RAW_FILE_DIR"] = str(_raw_run.run_dir)
+# Production default is fail-closed. The test suite opts in explicitly so existing Agent
+# behavior tests exercise v2; kill-switch tests toggle the cached setting per test.
+os.environ["AGENT_ARTIFACT_V2_ENABLED"] = "true"
+os.environ["AGENT_INTEGRITY_ACTIVE_KEY_ID"] = "test-v1"
+os.environ["AGENT_INTEGRITY_KEYS_JSON"] = (
+    '{"test-v1":{"key":"dGVzdC1vbmx5LWludGVncml0eS1rZXktbWF0ZXJpYWwtMzItYnl0ZXM",'
+    '"status":"active"}}'
+)
 
 try:
     import pytest  # noqa: E402
@@ -118,6 +126,8 @@ except BaseException:
 _app_engine = engine
 
 _TABLES = [
+    "agent_artifact_audit",
+    "agent_artifact",
     "chat_message", "chat_session",
     "fact_data_quality_issue",
     "product_data_quality_issues", "product_merge_logs", "product_match_candidates",
@@ -193,8 +203,21 @@ def pytest_sessionfinish(session, exitstatus):
 
 @pytest.fixture()
 def db(migrated):
+    assert _database_run.name.startswith("spareparts_test_")
     with engine.connect() as conn:
-        conn.execute(text(f"TRUNCATE {', '.join(_TABLES)} RESTART IDENTITY CASCADE"))
+        # Production makes Artifact audit evidence append-only at the database layer.
+        # This owner-only bypass exists solely in the isolated per-pytest database.
+        conn.execute(text(
+            "ALTER TABLE agent_artifact_audit DISABLE TRIGGER USER"
+        ))
+        try:
+            conn.execute(text(
+                f"TRUNCATE {', '.join(_TABLES)} RESTART IDENTITY CASCADE"
+            ))
+        finally:
+            conn.execute(text(
+                "ALTER TABLE agent_artifact_audit ENABLE TRIGGER USER"
+            ))
         _reseed_templates(conn)
         _reseed_business_setting(conn)
         conn.commit()
