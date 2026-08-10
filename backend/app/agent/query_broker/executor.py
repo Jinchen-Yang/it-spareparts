@@ -20,6 +20,7 @@ from sqlalchemy import text
 from app.agent.query_broker.ast_guard import validate_compiled_sql
 from app.agent.query_broker.broker import QueryPlan
 from app.agent.query_broker.compiler import compile_query
+from app.agent.query_broker.egress import ProviderEgressSnapshot
 from app.agent.query_broker.errors import QueryBrokerError
 from app.agent.query_broker.frozen import FrozenDict, deep_thaw
 from app.agent.query_broker.registry import (
@@ -93,7 +94,6 @@ def _transaction_settings(budget: QueryBudget) -> tuple[str, ...]:
         f"SET LOCAL lock_timeout = '{budget.lock_timeout_ms}ms'",
         f"SET LOCAL idle_in_transaction_session_timeout = '{budget.idle_transaction_timeout_ms}ms'",
         "SET LOCAL work_mem = '4MB'",
-        "SET LOCAL temp_file_limit = 0",
         "SET LOCAL max_parallel_workers_per_gather = 0",
     )
 
@@ -104,8 +104,8 @@ class ExecutionContext(BaseModel):
     execution_id: UUID
     task_ref: str = Field(min_length=1, max_length=128, repr=False)
     step_ref: str = Field(min_length=1, max_length=128, repr=False)
-    provider_profile_ref: str = Field(min_length=1, max_length=128, repr=False)
     planned_authz: AuthorizationSnapshot = Field(repr=False)
+    planned_egress: ProviderEgressSnapshot = Field(repr=False)
 
 
 class SealedEvidence(BaseModel):
@@ -163,6 +163,7 @@ class EnvironmentProbe(Protocol):
 
 
 AuthorityLoader = Callable[[str], AuthorizationSnapshot | None]
+EgressLoader = Callable[[str], ProviderEgressSnapshot | None]
 TelemetrySink = Callable[[dict[str, Any]], None]
 
 
@@ -226,8 +227,8 @@ def _check_explain_budget(raw: Any, budget: QueryBudget) -> None:
         nodes += 1
         if nodes > 10_000 or depth > 64:
             raise QueryBrokerError("QUERY_EXECUTION_FAILED")
-        rows = node.get("Plan Rows", 0)
-        width = node.get("Plan Width", 0)
+        rows = node.get("Plan Rows")
+        width = node.get("Plan Width")
         if (
             not isinstance(rows, (int, float))
             or not isinstance(width, (int, float))
@@ -323,6 +324,7 @@ class QueryExecutor:
         *,
         engine: Any,
         authority_loader: AuthorityLoader,
+        egress_loader: EgressLoader,
         environment_probe: EnvironmentProbe,
         evidence_sealer: EvidenceSealer,
         telemetry_sink: TelemetrySink | None = None,
@@ -330,19 +332,30 @@ class QueryExecutor:
     ):
         self._engine = engine
         self._authority_loader = authority_loader
+        self._egress_loader = egress_loader
         self._environment_probe = environment_probe
         self._evidence_sealer = evidence_sealer
         self._telemetry_sink = telemetry_sink
         self._budget = budget or QueryBudget()
 
-    def _reload_authority(
+    def _reload_controls(
         self,
         plan: QueryPlan,
         context: ExecutionContext,
-    ) -> tuple[AuthorizationSnapshot, AuthorizedQuery]:
+    ) -> tuple[AuthorizationSnapshot, ProviderEgressSnapshot, AuthorizedQuery]:
         planned = context.planned_authz
         if planned.fingerprint() != plan.authorized.authz_fingerprint:
             raise QueryBrokerError("AUTHORIZATION_CHANGED")
+        planned_egress = context.planned_egress
+        planned_egress_fingerprint = planned_egress.fingerprint()
+        if (
+            planned_egress != plan.egress_snapshot
+            or planned_egress != plan.authorized.egress_snapshot
+            or planned_egress_fingerprint != plan.egress_fingerprint
+            or planned_egress_fingerprint != plan.authorized.egress_fingerprint
+            or planned_egress_fingerprint != plan.compiled.egress_fingerprint
+        ):
+            raise QueryBrokerError("PROVIDER_EGRESS_CHANGED")
         try:
             current = self._authority_loader(planned.subject)
         except Exception:  # noqa: BLE001 - authority backend details are secret
@@ -351,10 +364,18 @@ class QueryExecutor:
             raise QueryBrokerError("AUTHORIZATION_CHANGED")
         if current.fingerprint() != planned.fingerprint():
             raise QueryBrokerError("AUTHORIZATION_CHANGED")
+        try:
+            current_egress = self._egress_loader(planned_egress.profile_ref)
+        except Exception:  # noqa: BLE001 - policy backend details are secret
+            raise QueryBrokerError("PROVIDER_EGRESS_UNAVAILABLE") from None
+        if current_egress is None or current_egress != planned_egress:
+            raise QueryBrokerError("PROVIDER_EGRESS_CHANGED")
+        if current_egress.authz_fingerprint != current.fingerprint():
+            raise QueryBrokerError("PROVIDER_EGRESS_CHANGED")
 
         # Re-run the full registry and compiler under current authority.  Exact
         # equality prevents Plan-time hidden-field or policy-version drift.
-        refreshed = authorize_query(plan.authorized.ir, current)
+        refreshed = authorize_query(plan.authorized.ir, current, current_egress)
         refreshed_compiled = compile_query(refreshed)
         validate_compiled_sql(refreshed_compiled)
         if refreshed != plan.authorized:
@@ -364,7 +385,7 @@ class QueryExecutor:
         # requires exact in-memory equality with a fresh server compilation.
         if refreshed_compiled != plan.compiled:
             raise QueryBrokerError("AUTHORIZATION_CHANGED")
-        return current, refreshed
+        return current, current_egress, refreshed
 
     def execute(
         self,
@@ -376,14 +397,14 @@ class QueryExecutor:
         rows_count = 0
         columns_count = len(plan.compiled.output_fields)
         try:
-            current, _refreshed = self._reload_authority(plan, context)
+            current, current_egress, _refreshed = self._reload_controls(plan, context)
             # Revocation is checked against the authoritative identity store
             # before even the Agent DB posture probe opens a connection.
             self._environment_probe.ensure_ready()
             validate_compiled_sql(plan.compiled)
             if columns_count > self._budget.max_result_columns:
                 raise QueryBrokerError("QUERY_RESULT_INVALID")
-            result = self._execute_read_only(plan, context, current)
+            result = self._execute_read_only(plan, context, current, current_egress)
             rows_count = result.row_count
             _emit(
                 self._telemetry_sink,
@@ -423,6 +444,7 @@ class QueryExecutor:
         plan: QueryPlan,
         context: ExecutionContext,
         current: AuthorizationSnapshot,
+        current_egress: ProviderEgressSnapshot,
     ) -> QueryExecutionResult:
         transaction = None
         try:
@@ -505,16 +527,19 @@ class QueryExecutor:
             "row_subject": current.row_subject if current.own_customers_only else None,
             "row_predicate_version": "dataset-guard/v1",
             "own_customers_only": current.own_customers_only,
-            "provider_profile_ref": context.provider_profile_ref,
+            "provider_egress": current_egress.evidence_binding(),
             "budget": {
                 "statement_timeout_ms": self._budget.statement_timeout_ms,
                 "lock_timeout_ms": self._budget.lock_timeout_ms,
+                "idle_transaction_timeout_ms": self._budget.idle_transaction_timeout_ms,
                 "max_root_total_cost": self._budget.max_root_total_cost,
                 "max_plan_rows": self._budget.max_plan_rows,
                 "max_estimated_scan_bytes": self._budget.max_estimated_scan_bytes,
+                "max_result_columns": self._budget.max_result_columns,
                 "max_result_rows": self._budget.max_result_rows,
                 "max_result_bytes": self._budget.max_result_bytes,
                 "max_cell_bytes": self._budget.max_cell_bytes,
+                "fetch_batch_rows": self._budget.fetch_batch_rows,
             },
             "result_count": len(rows),
             "truncated": truncated,

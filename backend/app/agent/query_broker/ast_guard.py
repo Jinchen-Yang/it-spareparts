@@ -124,6 +124,7 @@ def _verify_compiler_fingerprint(compiled: CompiledQuery) -> None:
         allowed_columns=compiled.allowed_columns,
         registry_fingerprint=compiled.registry_fingerprint,
         authz_fingerprint=compiled.authz_fingerprint,
+        egress_fingerprint=compiled.egress_fingerprint,
     )
     if not hmac.compare_digest(expected, compiled.compiler_fingerprint):
         _reject()
@@ -143,6 +144,7 @@ def validate_compiled_sql(compiled: CompiledQuery) -> None:
         or compiled.view_name != dataset.view_name
         or compiled.registry_fingerprint != dataset_registry_fingerprint(dataset.name)
         or not _SAFE_HEX.fullmatch(compiled.authz_fingerprint)
+        or not _SAFE_HEX.fullmatch(compiled.egress_fingerprint)
     ):
         _reject()
 

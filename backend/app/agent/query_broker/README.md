@@ -7,6 +7,7 @@
 ```text
 Typed Query IR
  -> 权限化 Semantic Registry
+ -> Provider Egress Snapshot（purpose/字段/敏感度）
  -> 确定性参数化 Compiler
  -> SQLGlot AST 二次门禁
  -> 权限撤销复检
@@ -20,6 +21,10 @@ Typed Query IR
 - SQLGlot 只解析服务端编译产物；它不是模型 SQL sanitizer，也不是数据库权限的替代品。
 - 执行前重新加载权威身份并完整重编译，精确比较权限、口径、SQL 和参数值；撤权或漂移时
   Agent 数据库连接数必须为零。
+- Registry 暴露和结果回传分别要求 `query.registry`、`query.result` purpose；服务端生成的
+  Provider Egress Snapshot 同时绑定 authz fingerprint、逻辑字段白名单与
+  `business_confidential`/`business_restricted` 敏感度，并贯穿授权、编译指纹、Plan 和密封证据。
+  执行前必须实时重载并精确匹配该快照，模型 payload 不包含快照、权限或 Evidence envelope。
 - 数据查询使用独立 Engine、`READ ONLY REPEATABLE READ`、`pg_catalog` 优先的固定
   `search_path`、事务局部
   timeout/resource 设置、受限 EXPLAIN、server-side cursor 单行 fetch、行/列/JSON 字节预算。
@@ -36,6 +41,9 @@ Typed Query IR
    `dataset_guard`、三张 security-barrier view；真实验证无成员链、无 app 身份复用、无基础表/
    sequence/TEMP/CREATE 权限。`agent_semantic` 的 owner/ACL 必须精确锁定，PUBLIC、app、reader
    及非 deploy 角色均无 CREATE。
+   deploy role 还必须执行 `ALTER ROLE agent_reader SET temp_file_limit = 0`；运行期只读探针仅
+   断言当前值为 `0`，执行器不再逐事务 `SET temp_file_limit`，且不得向 `agent_reader` 授予该
+   参数的 `SET` 权限。
 2. 不只检查对象名、owner、`FORCE RLS` 标志和 policy 数量；必须把迁移版本、policy 的
    command/role/using/check 定义和每张 view 定义绑定到受信任发布清单，并核对 schema 内对象
    全集及 routine/aggregate/operator/type/default privilege；额外对象、PUBLIC EXECUTE 或 catalog

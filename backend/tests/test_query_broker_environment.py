@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from app.agent.query_broker.environment import (
+    AgentDatabaseProbe,
     ProbeSnapshot,
     RolePosture,
     ViewPosture,
@@ -37,6 +38,7 @@ def _safe() -> ProbeSnapshot:
         view_owner=_role("agent_view_owner", login=False),
         protected_role_membership_edges=0,
         reader_can_temp=False,
+        reader_temp_file_limit_zero=True,
         reader_can_create_database=False,
         reader_can_create_public=False,
         reader_has_agent_schema_usage=True,
@@ -75,6 +77,7 @@ def test_safe_probe_snapshot_is_accepted():
         {"current_user": "app"},
         {"protected_role_membership_edges": 1},
         {"reader_can_temp": True},
+        {"reader_temp_file_limit_zero": False},
         {"reader_can_create_database": True},
         {"reader_can_create_public": True},
         {"reader_has_agent_schema_usage": False},
@@ -131,3 +134,144 @@ def test_reader_and_both_owners_have_exact_non_privileged_posture(role_field, ch
     with pytest.raises(QueryBrokerError) as exc:
         evaluate_probe(replace(safe, **{role_field: role}))
     assert exc.value.code == "QUERY_BROKER_UNAVAILABLE"
+
+
+class _ProbeTx:
+    def __init__(self):
+        self.rolled_back = False
+
+    def rollback(self):
+        self.rolled_back = True
+
+
+class _ProbeResult:
+    def __init__(self, value):
+        self.value = value
+
+    def mappings(self):
+        return self
+
+    def one(self):
+        return self.value
+
+    def one_or_none(self):
+        return self.value
+
+    def all(self):
+        return self.value
+
+    def scalar_one(self):
+        return self.value
+
+
+class _ProbeConnection:
+    def __init__(self):
+        self.static_sql: list[str] = []
+        self.queries: list[str] = []
+        self.tx = _ProbeTx()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return None
+
+    def begin(self):
+        return self.tx
+
+    def exec_driver_sql(self, sql):
+        self.static_sql.append(sql)
+
+    def execute(self, statement):
+        sql = str(statement)
+        self.queries.append(sql)
+        if "current_setting('temp_file_limit')" in sql:
+            return _ProbeResult({
+                "current_user": "agent_reader",
+                "session_user": "agent_reader",
+                "temp_file_limit_zero": True,
+            })
+        if "FROM pg_catalog.pg_roles" in sql and "WHERE rolname" in sql:
+            return _ProbeResult([
+                {
+                    "rolname": name,
+                    "rolcanlogin": name == "agent_reader",
+                    "rolinherit": False,
+                    "rolsuper": False,
+                    "rolcreatedb": False,
+                    "rolcreaterole": False,
+                    "rolreplication": False,
+                    "rolbypassrls": False,
+                }
+                for name in ("agent_reader", "agent_guard_owner", "agent_view_owner")
+            ])
+        if "pg_auth_members" in sql:
+            return _ProbeResult(0)
+        if "has_database_privilege" in sql:
+            return _ProbeResult({
+                "can_temp": False,
+                "can_create_database": False,
+                "can_create_public": False,
+                "agent_usage": True,
+                "agent_create": False,
+            })
+        if "c.relname='dataset_guard'" in sql and "relrowsecurity" in sql:
+            return _ProbeResult({
+                "owner": "agent_guard_owner",
+                "rls_enabled": True,
+                "rls_forced": True,
+                "reader_select": False,
+            })
+        if "FROM pg_catalog.pg_policy" in sql:
+            return _ProbeResult(1)
+        if "c.relkind='v'" in sql:
+            return _ProbeResult([
+                {
+                    "name": name,
+                    "owner": "agent_view_owner",
+                    "security_barrier": True,
+                    "reader_select": True,
+                }
+                for name in (
+                    "part_catalog_v1",
+                    "purchase_activity_v1",
+                    "sales_market_month_v1",
+                )
+            ])
+        if "c.relkind IN" in sql or "c.relkind='S'" in sql:
+            return _ProbeResult(0)
+        raise AssertionError(f"unexpected probe SQL: {sql}")
+
+
+class _ProbeEngine:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def connect(self):
+        return self.connection
+
+
+def test_live_probe_pins_search_path_first_and_only_reads_temp_file_limit():
+    connection = _ProbeConnection()
+    probe = AgentDatabaseProbe(_ProbeEngine(connection))
+    with pytest.raises(QueryBrokerError) as exc:
+        probe.ensure_ready()
+    # The semantic catalog contract remains deliberately false in this slice.
+    assert exc.value.code == "QUERY_BROKER_UNAVAILABLE"
+    assert connection.static_sql[:2] == [
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+        "SET LOCAL search_path = pg_catalog",
+    ]
+    assert all("temp_file_limit" not in sql for sql in connection.static_sql)
+    joined = "\n".join(connection.queries)
+    for function in (
+        "current_setting(",
+        "current_database(",
+        "has_database_privilege(",
+        "has_schema_privilege(",
+        "has_table_privilege(",
+        "has_sequence_privilege(",
+        "count(",
+    ):
+        assert joined.count(function) == joined.count(f"pg_catalog.{function}")
+    assert connection.tx.rolled_back is True

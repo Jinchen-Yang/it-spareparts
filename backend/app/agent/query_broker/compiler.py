@@ -35,6 +35,7 @@ class CompiledQuery(BaseModel):
     allowed_columns: tuple[str, ...]
     registry_fingerprint: str
     authz_fingerprint: str
+    egress_fingerprint: str
     compiler_version: str = COMPILER_VERSION
     compiler_fingerprint: str
 
@@ -82,6 +83,7 @@ def compiler_fingerprint_payload(
     allowed_columns: tuple[str, ...],
     registry_fingerprint: str,
     authz_fingerprint: str,
+    egress_fingerprint: str,
 ) -> dict[str, Any]:
     """Fingerprint compiler shape without hashing low-entropy filter values."""
 
@@ -95,6 +97,7 @@ def compiler_fingerprint_payload(
         "allowed_columns": list(allowed_columns),
         "registry_fingerprint": registry_fingerprint,
         "authz_fingerprint": authz_fingerprint,
+        "egress_fingerprint": egress_fingerprint,
     }
 
 
@@ -228,6 +231,7 @@ def compile_query(authorized: AuthorizedQuery) -> CompiledQuery:
         "allowed_columns": allowed,
         "registry_fingerprint": authorized.registry_fingerprint,
         "authz_fingerprint": authorized.authz_fingerprint,
+        "egress_fingerprint": authorized.egress_fingerprint,
     }
     return CompiledQuery(
         **fingerprint_args,

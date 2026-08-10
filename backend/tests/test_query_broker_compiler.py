@@ -16,9 +16,10 @@ from app.agent.query_broker.compiler import (
     compile_query,
     compute_compiler_fingerprint,
 )
+from app.agent.query_broker.egress import ProviderEgressSnapshot
 from app.agent.query_broker.errors import QueryBrokerError
 from app.agent.query_broker.ir import QueryIR
-from app.agent.query_broker.registry import AuthorizationSnapshot, authorize_query
+from app.agent.query_broker.registry import DATASETS, AuthorizationSnapshot, authorize_query
 
 TODAY = date(2026, 8, 10)
 
@@ -52,9 +53,34 @@ def _authz(**overrides) -> AuthorizationSnapshot:
     return AuthorizationSnapshot(**values)
 
 
+def _egress(
+    authz: AuthorizationSnapshot,
+    **overrides,
+) -> ProviderEgressSnapshot:
+    values = {
+        "profile_ref": "private-gpu/v1",
+        "policy_version": 3,
+        "policy_fingerprint": "b" * 64,
+        "authz_fingerprint": authz.fingerprint(),
+        "allowed_purposes": frozenset({"query.registry", "query.result"}),
+        "allowed_field_refs": frozenset(
+            f"{dataset.name}.{field.name}"
+            for dataset in DATASETS.values()
+            for field in dataset.fields.values()
+        ),
+        "allowed_sensitivities": frozenset({
+            "business_confidential",
+            "business_restricted",
+        }),
+    }
+    values.update(overrides)
+    return ProviderEgressSnapshot(**values)
+
+
 def _compile(body: dict, authz: AuthorizationSnapshot | None = None):
     ir = QueryIR.model_validate(body)
-    authorized = authorize_query(ir, authz or _authz(), today=TODAY)
+    authority = authz or _authz()
+    authorized = authorize_query(ir, authority, _egress(authority), today=TODAY)
     return compile_query(authorized)
 
 
@@ -74,6 +100,7 @@ def _replace_with_internally_consistent_sql(
         allowed_columns=compiled.allowed_columns,
         registry_fingerprint=compiled.registry_fingerprint,
         authz_fingerprint=compiled.authz_fingerprint,
+        egress_fingerprint=compiled.egress_fingerprint,
     )
     return compiled.model_copy(update={
         "sql": sql,
@@ -136,6 +163,20 @@ def test_compiler_output_is_byte_stable_for_same_authorized_ir():
     assert left.sql == right.sql
     assert left.params == right.params
     assert left.compiler_fingerprint == right.compiler_fingerprint
+
+
+def test_compiler_fingerprint_commits_value_free_egress_snapshot():
+    authz = _authz()
+    ir = QueryIR.model_validate(_purchase_body())
+    first = compile_query(authorize_query(ir, authz, _egress(authz), today=TODAY))
+    changed = compile_query(authorize_query(
+        ir,
+        authz,
+        _egress(authz, policy_version=4, policy_fingerprint="c" * 64),
+        today=TODAY,
+    ))
+    assert first.egress_fingerprint != changed.egress_fingerprint
+    assert first.compiler_fingerprint != changed.compiler_fingerprint
 
 
 def test_multiple_weighted_metrics_receive_unique_bound_zero_parameters():

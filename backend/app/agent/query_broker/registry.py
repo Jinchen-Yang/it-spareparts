@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import calendar
 import hashlib
+import hmac
 import json
 import unicodedata
 from collections.abc import Mapping
@@ -18,6 +19,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.agent.query_broker.egress import (
+    EgressPurpose,
+    ProviderEgressSnapshot,
+    Sensitivity,
+)
 from app.agent.query_broker.errors import QueryBrokerError
 from app.agent.query_broker.ir import QueryFilter, QueryIR
 from app.business_time import business_today
@@ -89,7 +95,7 @@ class FieldSpec:
     required_permission: str | None = None
     aggregate_expression: str | None = None
     required_dimensions: frozenset[str] = frozenset()
-    sensitivity: str = "internal"
+    sensitivity: Sensitivity = "business_confidential"
     caveat: str | None = None
 
 
@@ -107,6 +113,7 @@ class DatasetSpec:
     time_range_required: bool = False
     max_days: int | None = None
     caveats: tuple[str, ...] = ()
+    sensitivity: Sensitivity = "business_confidential"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "required_permissions", frozenset(self.required_permissions))
@@ -124,7 +131,7 @@ def _dimension(
     *,
     operators: tuple[str, ...] = ("eq", "ne", "in"),
     permission: str | None = None,
-    sensitivity: str = "internal",
+    sensitivity: Sensitivity = "business_confidential",
 ) -> FieldSpec:
     return FieldSpec(
         name=name,
@@ -144,6 +151,7 @@ def _metric(
     *,
     permission: str | None = None,
     required_dimensions: tuple[str, ...] = (),
+    sensitivity: Sensitivity = "business_confidential",
     caveat: str | None = None,
 ) -> FieldSpec:
     return FieldSpec(
@@ -154,6 +162,7 @@ def _metric(
         required_permission=permission,
         aggregate_expression=expression,
         required_dimensions=frozenset(required_dimensions),
+        sensitivity=sensitivity,
         caveat=caveat,
     )
 
@@ -184,8 +193,16 @@ _PURCHASE_FIELDS = {
         _dimension("brand"),
         _dimension("category"),
         _dimension("source_type"),
-        _dimension("supplier_name", permission="data_supplier", sensitivity="confidential"),
-        _dimension("source_channel", permission="data_supplier", sensitivity="confidential"),
+        _dimension(
+            "supplier_name",
+            permission="data_supplier",
+            sensitivity="business_restricted",
+        ),
+        _dimension(
+            "source_channel",
+            permission="data_supplier",
+            sensitivity="business_restricted",
+        ),
         _metric(
             "purchase_order_count",
             "integer",
@@ -200,36 +217,42 @@ _PURCHASE_FIELDS = {
             "decimal",
             'SUM("amount_inc_tax")',
             permission="data_purchase_cost",
+            sensitivity="business_restricted",
         ),
         _metric(
             "amount_ex_tax",
             "decimal",
             'SUM("amount_ex_tax")',
             permission="data_purchase_cost",
+            sensitivity="business_restricted",
         ),
         _metric(
             "weighted_unit_price_inc_tax",
             "decimal",
             'SUM("amount_inc_tax") / NULLIF(SUM("qty"), :metric_zero)',
             permission="data_purchase_cost",
+            sensitivity="business_restricted",
         ),
         _metric(
             "weighted_unit_price_ex_tax",
             "decimal",
             'SUM("amount_ex_tax") / NULLIF(SUM("qty"), :metric_zero)',
             permission="data_purchase_cost",
+            sensitivity="business_restricted",
         ),
         _metric(
             "min_unit_price_inc_tax",
             "decimal",
             'MIN("min_unit_price_inc_tax")',
             permission="data_purchase_cost",
+            sensitivity="business_restricted",
         ),
         _metric(
             "max_unit_price_inc_tax",
             "decimal",
             'MAX("max_unit_price_inc_tax")',
             permission="data_purchase_cost",
+            sensitivity="business_restricted",
         ),
         _metric(
             "latest_purchase_date",
@@ -248,10 +271,30 @@ _SALES_FIELDS = {
         _dimension("brand"),
         _dimension("category"),
         _metric("sales_qty", "decimal", '"sales_qty"'),
-        _metric("sales_amount_inc_tax", "decimal", '"sales_amount_inc_tax"'),
-        _metric("sales_amount_ex_tax", "decimal", '"sales_amount_ex_tax"'),
-        _metric("weighted_sale_price_inc_tax", "decimal", '"weighted_sale_price_inc_tax"'),
-        _metric("weighted_sale_price_ex_tax", "decimal", '"weighted_sale_price_ex_tax"'),
+        _metric(
+            "sales_amount_inc_tax",
+            "decimal",
+            '"sales_amount_inc_tax"',
+            sensitivity="business_restricted",
+        ),
+        _metric(
+            "sales_amount_ex_tax",
+            "decimal",
+            '"sales_amount_ex_tax"',
+            sensitivity="business_restricted",
+        ),
+        _metric(
+            "weighted_sale_price_inc_tax",
+            "decimal",
+            '"weighted_sale_price_inc_tax"',
+            sensitivity="business_restricted",
+        ),
+        _metric(
+            "weighted_sale_price_ex_tax",
+            "decimal",
+            '"weighted_sale_price_ex_tax"',
+            sensitivity="business_restricted",
+        ),
         _metric(
             "sales_order_count",
             "integer",
@@ -322,6 +365,8 @@ class AuthorizedQuery(BaseModel):
     dataset_name: str
     authz_fingerprint: str
     registry_fingerprint: str
+    egress_snapshot: ProviderEgressSnapshot = Field(repr=False)
+    egress_fingerprint: str
     k_anonymity_threshold: int | None = None
     caveats: tuple[str, ...]
 
@@ -353,6 +398,7 @@ def _registry_fingerprint(dataset: DatasetSpec) -> str:
         "semantic": dataset.semantic_version,
         "view": [dataset.view_schema, dataset.view_name],
         "mode": dataset.mode,
+        "sensitivity": dataset.sensitivity,
         "permissions": sorted(dataset.required_permissions),
         "time_column": dataset.time_column,
         "time_range_required": dataset.time_range_required,
@@ -385,6 +431,8 @@ def _validate_registry_at_import() -> None:
             raise RuntimeError("invalid Query Broker dataset registry")
         if dataset.view_schema != "agent_semantic" or dataset.view_name != name:
             raise RuntimeError("invalid Query Broker physical view registry")
+        if dataset.sensitivity != "business_confidential":
+            raise RuntimeError("invalid Query Broker dataset sensitivity")
         for field_name, field in dataset.fields.items():
             if (
                 field_name != field.name
@@ -392,6 +440,8 @@ def _validate_registry_at_import() -> None:
                 or not safe_identifier(field.source_column)
                 or (field.kind == "dimension" and field.aggregate_expression is not None)
                 or (field.kind == "metric" and field.aggregate_expression is None)
+                or field.sensitivity
+                not in {"business_confidential", "business_restricted"}
             ):
                 raise RuntimeError("invalid Query Broker field registry")
             expression = field.aggregate_expression or ""
@@ -410,6 +460,40 @@ REGISTRY_POLICY_FINGERPRINT = hashlib.sha256(
 
 def _field_visible(field: FieldSpec, authz: AuthorizationSnapshot) -> bool:
     return field.required_permission is None or field.required_permission in authz.permissions
+
+
+def _validate_egress_identity(
+    authz: AuthorizationSnapshot,
+    egress: ProviderEgressSnapshot,
+    purpose: EgressPurpose,
+) -> None:
+    if not hmac.compare_digest(egress.authz_fingerprint, authz.fingerprint()):
+        raise QueryBrokerError("PROVIDER_EGRESS_CHANGED")
+    if purpose not in egress.allowed_purposes:
+        raise QueryBrokerError("PROVIDER_EGRESS_DENIED")
+    known_field_refs = {
+        f"{dataset.name}.{field.name}"
+        for dataset in DATASETS.values()
+        for field in dataset.fields.values()
+    }
+    if not egress.allowed_field_refs.issubset(known_field_refs):
+        raise QueryBrokerError("PROVIDER_EGRESS_DENIED")
+
+
+def _field_ref(dataset: DatasetSpec, field: FieldSpec) -> str:
+    return f"{dataset.name}.{field.name}"
+
+
+def _egress_allows_field(
+    dataset: DatasetSpec,
+    field: FieldSpec,
+    egress: ProviderEgressSnapshot,
+) -> bool:
+    return (
+        dataset.sensitivity in egress.allowed_sensitivities
+        and field.sensitivity in egress.allowed_sensitivities
+        and _field_ref(dataset, field) in egress.allowed_field_refs
+    )
 
 
 def _validate_time_range(ir: QueryIR, dataset: DatasetSpec, today: date) -> None:
@@ -470,14 +554,18 @@ def _validate_filter(item: QueryFilter, field: FieldSpec) -> None:
 def authorize_query(
     ir: QueryIR,
     authz: AuthorizationSnapshot,
+    egress: ProviderEgressSnapshot,
     *,
     today: date | None = None,
 ) -> AuthorizedQuery:
     """Authorize every field use before compiler or database access."""
 
+    _validate_egress_identity(authz, egress, "query.result")
     dataset = DATASETS[ir.dataset]
     if not dataset.required_permissions.issubset(authz.permissions):
         raise QueryBrokerError("DATASET_NOT_VISIBLE")
+    if dataset.sensitivity not in egress.allowed_sensitivities:
+        raise QueryBrokerError("PROVIDER_EGRESS_DENIED")
     effective_today = today or business_today()
     _validate_time_range(ir, dataset, effective_today)
     if dataset.name == "sales_market_month_v1" and ir.time_range is not None:
@@ -500,12 +588,18 @@ def authorize_query(
     all_uses = list(ir.dimensions) + list(ir.metrics)
     all_uses += [item.field for item in ir.filters]
     all_uses += [item.field for item in ir.order_by]
+    if ir.time_range is not None and dataset.time_column is not None:
+        all_uses.append(dataset.time_column)
+    if dataset.name == "sales_market_month_v1" and authz.own_customers_only:
+        all_uses.append("sales_order_count")
     for name in all_uses:
         field = dataset.fields.get(name)
         if field is None:
             raise QueryBrokerError("UNKNOWN_FIELD")
         if not _field_visible(field, authz):
             raise QueryBrokerError("FIELD_NOT_VISIBLE")
+        if not _egress_allows_field(dataset, field, egress):
+            raise QueryBrokerError("PROVIDER_EGRESS_DENIED")
 
     for name in ir.dimensions:
         if dataset.fields[name].kind != "dimension":
@@ -549,21 +643,42 @@ def authorize_query(
         dataset_name=dataset.name,
         authz_fingerprint=authz.fingerprint(),
         registry_fingerprint=_registry_fingerprint(dataset),
+        egress_snapshot=egress,
+        egress_fingerprint=egress.fingerprint(),
         k_anonymity_threshold=threshold,
         caveats=tuple(caveats),
     )
 
 
-def visible_registry(authz: AuthorizationSnapshot) -> tuple[dict[str, Any], ...]:
+def visible_registry(
+    authz: AuthorizationSnapshot,
+    egress: ProviderEgressSnapshot,
+) -> tuple[dict[str, Any], ...]:
     """Model-safe logical registry projection; never contains physical schema."""
 
+    _validate_egress_identity(authz, egress, "query.registry")
     datasets: list[dict[str, Any]] = []
     for dataset in DATASETS.values():
-        if not dataset.required_permissions.issubset(authz.permissions):
+        if (
+            not dataset.required_permissions.issubset(authz.permissions)
+            or dataset.sensitivity not in egress.allowed_sensitivities
+        ):
             continue
         fields = []
         for field in dataset.fields.values():
             if not _field_visible(field, authz):
+                continue
+            if not _egress_allows_field(dataset, field, egress):
+                continue
+            if any(
+                not _field_visible(dataset.fields[dimension], authz)
+                or not _egress_allows_field(
+                    dataset,
+                    dataset.fields[dimension],
+                    egress,
+                )
+                for dimension in field.required_dimensions
+            ):
                 continue
             fields.append({
                 "name": field.name,
@@ -573,6 +688,8 @@ def visible_registry(authz: AuthorizationSnapshot) -> tuple[dict[str, Any], ...]
                 "required_dimensions": sorted(field.required_dimensions),
                 "caveat": field.caveat,
             })
+        if not fields:
+            continue
         datasets.append({
             "dataset": dataset.name,
             "semantic_version": dataset.semantic_version,

@@ -52,6 +52,7 @@ class ProbeSnapshot:
     view_owner: RolePosture
     protected_role_membership_edges: int
     reader_can_temp: bool
+    reader_temp_file_limit_zero: bool
     reader_can_create_database: bool
     reader_can_create_public: bool
     reader_has_agent_schema_usage: bool
@@ -145,6 +146,7 @@ def evaluate_probe(snapshot: ProbeSnapshot) -> None:
         and not snapshot.reader.bypass_rls
         and snapshot.protected_role_membership_edges == 0
         and not snapshot.reader_can_temp
+        and snapshot.reader_temp_file_limit_zero
         and not snapshot.reader_can_create_database
         and not snapshot.reader_can_create_public
         and snapshot.reader_has_agent_schema_usage
@@ -206,13 +208,16 @@ class AgentDatabaseProbe:
                 connection.exec_driver_sql(
                     "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
                 )
+                connection.exec_driver_sql("SET LOCAL search_path = pg_catalog")
                 connection.exec_driver_sql("SET LOCAL statement_timeout = '2000ms'")
                 connection.exec_driver_sql("SET LOCAL lock_timeout = '200ms'")
                 connection.exec_driver_sql(
                     "SET LOCAL idle_in_transaction_session_timeout = '3000ms'"
                 )
                 identity = connection.execute(text(
-                    "SELECT current_user AS current_user, session_user AS session_user"
+                    "SELECT current_user AS current_user, session_user AS session_user, "
+                    "pg_catalog.current_setting('temp_file_limit') = '0' "
+                    "AS temp_file_limit_zero"
                 )).mappings().one()
                 role_rows = connection.execute(text(
                     "SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreatedb, "
@@ -223,23 +228,30 @@ class AgentDatabaseProbe:
                 if set(roles) != {EXPECTED_READER, EXPECTED_GUARD_OWNER, EXPECTED_VIEW_OWNER}:
                     raise QueryBrokerError("QUERY_BROKER_UNAVAILABLE")
                 membership_edges = connection.execute(text(
-                    "SELECT count(*) FROM pg_catalog.pg_auth_members m "
+                    "SELECT pg_catalog.count(*) FROM pg_catalog.pg_auth_members m "
                     "JOIN pg_catalog.pg_roles member ON member.oid=m.member "
                     "JOIN pg_catalog.pg_roles granted ON granted.oid=m.roleid "
                     "WHERE member.rolname IN ('agent_reader','agent_guard_owner','agent_view_owner') "
                     "OR granted.rolname IN ('agent_reader','agent_guard_owner','agent_view_owner')"
                 )).scalar_one()
                 privileges = connection.execute(text(
-                    "SELECT has_database_privilege(current_user,current_database(),'TEMP') AS can_temp, "
-                    "has_database_privilege(current_user,current_database(),'CREATE') AS can_create_database, "
-                    "has_schema_privilege(current_user,'public','CREATE') AS can_create_public, "
-                    "has_schema_privilege(current_user,'agent_semantic','USAGE') AS agent_usage, "
-                    "has_schema_privilege(current_user,'agent_semantic','CREATE') AS agent_create"
+                    "SELECT pg_catalog.has_database_privilege("
+                    "current_user,pg_catalog.current_database(),'TEMP') AS can_temp, "
+                    "pg_catalog.has_database_privilege("
+                    "current_user,pg_catalog.current_database(),'CREATE') "
+                    "AS can_create_database, "
+                    "pg_catalog.has_schema_privilege("
+                    "current_user,'public','CREATE') AS can_create_public, "
+                    "pg_catalog.has_schema_privilege("
+                    "current_user,'agent_semantic','USAGE') AS agent_usage, "
+                    "pg_catalog.has_schema_privilege("
+                    "current_user,'agent_semantic','CREATE') AS agent_create"
                 )).mappings().one()
                 guard = connection.execute(text(
                     "SELECT owner.rolname AS owner, c.relrowsecurity AS rls_enabled, "
                     "c.relforcerowsecurity AS rls_forced, "
-                    "has_table_privilege(current_user,c.oid,'SELECT') AS reader_select "
+                    "pg_catalog.has_table_privilege("
+                    "current_user,c.oid,'SELECT') AS reader_select "
                     "FROM pg_catalog.pg_class c "
                     "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
                     "JOIN pg_catalog.pg_roles owner ON owner.oid=c.relowner "
@@ -249,7 +261,7 @@ class AgentDatabaseProbe:
                 if guard is None:
                     raise QueryBrokerError("QUERY_BROKER_UNAVAILABLE")
                 guard_policy_count = connection.execute(text(
-                    "SELECT count(*) FROM pg_catalog.pg_policy p "
+                    "SELECT pg_catalog.count(*) FROM pg_catalog.pg_policy p "
                     "JOIN pg_catalog.pg_class c ON c.oid=p.polrelid "
                     "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
                     "WHERE n.nspname='agent_semantic' AND c.relname='dataset_guard'"
@@ -257,34 +269,36 @@ class AgentDatabaseProbe:
                 view_rows = connection.execute(text(
                     "SELECT c.relname AS name, owner.rolname AS owner, "
                     "COALESCE('security_barrier=true'=ANY(c.reloptions),false) AS security_barrier, "
-                    "has_table_privilege(current_user,c.oid,'SELECT') AS reader_select "
+                    "pg_catalog.has_table_privilege("
+                    "current_user,c.oid,'SELECT') AS reader_select "
                     "FROM pg_catalog.pg_class c "
                     "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
                     "JOIN pg_catalog.pg_roles owner ON owner.oid=c.relowner "
                     "WHERE n.nspname='agent_semantic' AND c.relkind='v'"
                 )).mappings().all()
                 forbidden_relations = connection.execute(text(
-                    "SELECT count(*) FROM pg_catalog.pg_class c "
+                    "SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c "
                     "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
                     "WHERE c.relkind IN ('r','p','v','m','f') "
                     "AND n.nspname NOT IN ('pg_catalog','information_schema') "
                     "AND ((NOT (n.nspname='agent_semantic' AND c.relname IN "
                     "('part_catalog_v1','purchase_activity_v1','sales_market_month_v1')) "
-                    "AND has_table_privilege(current_user,c.oid,'SELECT')) "
-                    "OR has_table_privilege(current_user,c.oid,'INSERT') "
-                    "OR has_table_privilege(current_user,c.oid,'UPDATE') "
-                    "OR has_table_privilege(current_user,c.oid,'DELETE') "
-                    "OR has_table_privilege(current_user,c.oid,'TRUNCATE') "
-                    "OR has_table_privilege(current_user,c.oid,'REFERENCES') "
-                    "OR has_table_privilege(current_user,c.oid,'TRIGGER'))"
+                    "AND pg_catalog.has_table_privilege("
+                    "current_user,c.oid,'SELECT')) "
+                    "OR pg_catalog.has_table_privilege(current_user,c.oid,'INSERT') "
+                    "OR pg_catalog.has_table_privilege(current_user,c.oid,'UPDATE') "
+                    "OR pg_catalog.has_table_privilege(current_user,c.oid,'DELETE') "
+                    "OR pg_catalog.has_table_privilege(current_user,c.oid,'TRUNCATE') "
+                    "OR pg_catalog.has_table_privilege(current_user,c.oid,'REFERENCES') "
+                    "OR pg_catalog.has_table_privilege(current_user,c.oid,'TRIGGER'))"
                 )).scalar_one()
                 forbidden_sequences = connection.execute(text(
-                    "SELECT count(*) FROM pg_catalog.pg_class c "
+                    "SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c "
                     "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
                     "WHERE c.relkind='S' AND n.nspname NOT IN ('pg_catalog','information_schema') AND ("
-                    "has_sequence_privilege(current_user,c.oid,'USAGE') "
-                    "OR has_sequence_privilege(current_user,c.oid,'SELECT') "
-                    "OR has_sequence_privilege(current_user,c.oid,'UPDATE'))"
+                    "pg_catalog.has_sequence_privilege(current_user,c.oid,'USAGE') "
+                    "OR pg_catalog.has_sequence_privilege(current_user,c.oid,'SELECT') "
+                    "OR pg_catalog.has_sequence_privilege(current_user,c.oid,'UPDATE'))"
                 )).scalar_one()
                 snapshot = ProbeSnapshot(
                     current_user=identity["current_user"],
@@ -294,6 +308,7 @@ class AgentDatabaseProbe:
                     view_owner=roles[EXPECTED_VIEW_OWNER],
                     protected_role_membership_edges=int(membership_edges),
                     reader_can_temp=bool(privileges["can_temp"]),
+                    reader_temp_file_limit_zero=bool(identity["temp_file_limit_zero"]),
                     reader_can_create_database=bool(privileges["can_create_database"]),
                     reader_can_create_public=bool(privileges["can_create_public"]),
                     reader_has_agent_schema_usage=bool(privileges["agent_usage"]),

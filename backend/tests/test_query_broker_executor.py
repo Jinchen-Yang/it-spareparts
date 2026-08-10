@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.agent.query_broker.broker import build_query_plan
+from app.agent.query_broker.egress import ProviderEgressSnapshot
 from app.agent.query_broker.environment import (
     AgentDatabaseSettings,
     validate_dsn_separation,
@@ -22,7 +23,7 @@ from app.agent.query_broker.executor import (
     SealedEvidence,
 )
 from app.agent.query_broker.ir import QueryIR
-from app.agent.query_broker.registry import AuthorizationSnapshot
+from app.agent.query_broker.registry import DATASETS, AuthorizationSnapshot
 
 TODAY = date(2026, 8, 10)
 SENTINEL = "supplier-secret-canary"
@@ -48,7 +49,36 @@ def _authz(**overrides) -> AuthorizationSnapshot:
     return AuthorizationSnapshot(**values)
 
 
-def _plan(authz: AuthorizationSnapshot | None = None, **ir_overrides):
+def _egress(
+    authz: AuthorizationSnapshot | None = None,
+    **overrides,
+) -> ProviderEgressSnapshot:
+    authority = authz or _authz()
+    values = {
+        "profile_ref": "private-gpu/v1",
+        "policy_version": 3,
+        "policy_fingerprint": "b" * 64,
+        "authz_fingerprint": authority.fingerprint(),
+        "allowed_purposes": frozenset({"query.registry", "query.result"}),
+        "allowed_field_refs": frozenset(
+            f"{dataset.name}.{field.name}"
+            for dataset in DATASETS.values()
+            for field in dataset.fields.values()
+        ),
+        "allowed_sensitivities": frozenset({
+            "business_confidential",
+            "business_restricted",
+        }),
+    }
+    values.update(overrides)
+    return ProviderEgressSnapshot(**values)
+
+
+def _plan(
+    authz: AuthorizationSnapshot | None = None,
+    egress: ProviderEgressSnapshot | None = None,
+    **ir_overrides,
+):
     body = {
         "version": "query-ir/v1",
         "dataset": "purchase_activity_v1",
@@ -60,7 +90,13 @@ def _plan(authz: AuthorizationSnapshot | None = None, **ir_overrides):
         "limit": 50,
     }
     body.update(ir_overrides)
-    return build_query_plan(QueryIR.model_validate(body), authz or _authz(), today=TODAY)
+    authority = authz or _authz()
+    return build_query_plan(
+        QueryIR.model_validate(body),
+        authority,
+        egress or _egress(authority),
+        today=TODAY,
+    )
 
 
 class _Tx:
@@ -169,21 +205,32 @@ class _Sealer:
         )
 
 
-def _context(authz=None) -> ExecutionContext:
+def _context(authz=None, egress=None) -> ExecutionContext:
+    authority = authz or _authz()
     return ExecutionContext(
         execution_id=uuid4(),
         task_ref="task/9ccf",
         step_ref="step/3",
-        provider_profile_ref="private-gpu/v1",
-        planned_authz=authz or _authz(),
+        planned_authz=authority,
+        planned_egress=egress or _egress(authority),
     )
 
 
-def _executor(connection, *, current_authz=None, probe=None, telemetry=None, budget=None):
+def _executor(
+    connection,
+    *,
+    current_authz=None,
+    current_egress=None,
+    probe=None,
+    telemetry=None,
+    budget=None,
+):
     sealer = _Sealer()
     executor = QueryExecutor(
         engine=_Engine(connection),
         authority_loader=lambda subject: current_authz or _authz(subject=subject),
+        egress_loader=lambda _profile: current_egress
+        or _egress(current_authz or _authz()),
         environment_probe=probe or _Probe(),
         evidence_sealer=sealer,
         telemetry_sink=telemetry,
@@ -222,6 +269,9 @@ def test_tighter_timeout_budget_is_the_exact_executed_and_evidenced_value():
     assert "SET LOCAL idle_in_transaction_session_timeout = '800ms'" in connection.static_sql
     assert sealer.payloads[0]["budget"]["statement_timeout_ms"] == 500
     assert sealer.payloads[0]["budget"]["lock_timeout_ms"] == 50
+    assert sealer.payloads[0]["budget"]["idle_transaction_timeout_ms"] == 800
+    assert sealer.payloads[0]["budget"]["max_result_columns"] == 16
+    assert sealer.payloads[0]["budget"]["fetch_batch_rows"] == 1
 
 
 @pytest.mark.parametrize(
@@ -290,6 +340,7 @@ def test_authority_revocation_happens_before_engine_connect_or_sql():
     executor = QueryExecutor(
         engine=engine,
         authority_loader=lambda _subject: current,
+        egress_loader=lambda _profile: _egress(planned),
         environment_probe=_Probe(),
         evidence_sealer=_Sealer(),
     )
@@ -298,6 +349,70 @@ def test_authority_revocation_happens_before_engine_connect_or_sql():
     assert exc.value.code == "AUTHORIZATION_CHANGED"
     assert engine.connect_count == 0
     assert connection.executed == []
+
+
+def test_egress_snapshot_is_frozen_into_authorized_compiler_and_plan():
+    authz = _authz()
+    egress = _egress(authz)
+    plan = _plan(authz, egress)
+    assert plan.egress_snapshot == egress
+    assert plan.authorized.egress_snapshot == egress
+    assert plan.egress_fingerprint == egress.fingerprint()
+    assert plan.authorized.egress_fingerprint == egress.fingerprint()
+    assert plan.compiled.egress_fingerprint == egress.fingerprint()
+
+
+def test_egress_policy_is_reloaded_and_exactly_compared_before_agent_db_connection():
+    authz = _authz()
+    planned = _egress(authz)
+    changed = planned.model_copy(update={
+        "policy_version": planned.policy_version + 1,
+        "policy_fingerprint": "c" * 64,
+    })
+    connection = _Connection()
+    engine = _Engine(connection)
+    probe = _Probe()
+    egress_calls: list[str] = []
+
+    def load_egress(profile_ref):
+        egress_calls.append(profile_ref)
+        return changed
+
+    executor = QueryExecutor(
+        engine=engine,
+        authority_loader=lambda _subject: authz,
+        egress_loader=load_egress,
+        environment_probe=probe,
+        evidence_sealer=_Sealer(),
+    )
+    with pytest.raises(QueryBrokerError) as exc:
+        executor.execute(_plan(authz, planned), _context(authz, planned))
+    assert exc.value.code == "PROVIDER_EGRESS_CHANGED"
+    assert egress_calls == ["private-gpu/v1"]
+    assert probe.calls == 0
+    assert engine.connect_count == 0
+
+
+def test_egress_backend_failure_is_value_free_and_precedes_agent_db_connection():
+    authz = _authz()
+    planned = _egress(authz)
+    engine = _Engine(_Connection())
+
+    def unavailable(_profile_ref):
+        raise RuntimeError(SENTINEL)
+
+    executor = QueryExecutor(
+        engine=engine,
+        authority_loader=lambda _subject: authz,
+        egress_loader=unavailable,
+        environment_probe=_Probe(),
+        evidence_sealer=_Sealer(),
+    )
+    with pytest.raises(QueryBrokerError) as exc:
+        executor.execute(_plan(authz, planned), _context(authz, planned))
+    assert exc.value.code == "PROVIDER_EGRESS_UNAVAILABLE"
+    assert SENTINEL not in str(exc.value)
+    assert engine.connect_count == 0
 
 
 def test_same_type_parameter_substitution_is_denied_before_database_connect():
@@ -313,6 +428,7 @@ def test_same_type_parameter_substitution_is_denied_before_database_connect():
     executor = QueryExecutor(
         engine=engine,
         authority_loader=lambda subject: _authz(subject=subject),
+        egress_loader=lambda _profile: _egress(),
         environment_probe=_Probe(),
         evidence_sealer=_Sealer(),
     )
@@ -333,6 +449,7 @@ def test_stale_or_tampered_authorized_semantics_are_denied_before_database():
     executor = QueryExecutor(
         engine=engine,
         authority_loader=lambda subject: _authz(subject=subject),
+        egress_loader=lambda _profile: _egress(),
         environment_probe=_Probe(),
         evidence_sealer=_Sealer(),
     )
@@ -382,7 +499,6 @@ def test_read_only_transaction_and_context_are_installed_before_explain_and_quer
         "SET LOCAL lock_timeout = '200ms'",
         "SET LOCAL idle_in_transaction_session_timeout = '3000ms'",
         "SET LOCAL work_mem = '4MB'",
-        "SET LOCAL temp_file_limit = 0",
         "SET LOCAL max_parallel_workers_per_gather = 0",
     ]
     assert connection.executed[0][0].startswith("SELECT set_config")
@@ -427,6 +543,8 @@ def test_query_error_is_never_reported_as_empty_or_zero_and_driver_detail_is_hid
         ([{"Plan": {"Total Cost": 50001, "Plan Rows": 1, "Plan Width": 1}}], "QUERY_PLAN_COST_EXCEEDED"),
         ([{"Plan": {"Total Cost": 1, "Plan Rows": 100001, "Plan Width": 1}}], "QUERY_PLAN_ROWS_EXCEEDED"),
         ([{"Plan": {"Total Cost": 1, "Plan Rows": 100000, "Plan Width": 336}}], "QUERY_PLAN_BYTES_EXCEEDED"),
+        ([{"Plan": {"Total Cost": 1, "Plan Width": 1}}], "QUERY_EXECUTION_FAILED"),
+        ([{"Plan": {"Total Cost": 1, "Plan Rows": 1}}], "QUERY_EXECUTION_FAILED"),
     ],
 )
 def test_explain_budget_rejects_before_data_query(plan, code):
@@ -534,10 +652,13 @@ def test_server_side_digest_envelope_and_authz_never_enter_model_payload():
     assert "authz" not in public_text
     assert "tenant-a" not in public_text
     assert "user-17" not in public_text
+    assert "private-gpu" not in public_text
+    assert "business_restricted" not in public_text
     assert "SELECT" not in public_text
     assert result.sealed_evidence.envelope["mac"] == "server-only"
     assert sealer.payloads[0]["result_digest"]
     assert sealer.payloads[0]["query_ir_ref"].startswith("query-ir/")
+    assert sealer.payloads[0]["provider_egress"] == _egress().evidence_binding()
 
 
 def test_result_and_evidence_are_immutable_after_sealing_and_repr_is_redacted():
@@ -581,6 +702,7 @@ def test_environment_probe_failure_happens_after_authority_but_before_business_s
     executor = QueryExecutor(
         engine=engine,
         authority_loader=authority,
+        egress_loader=lambda _profile: _egress(),
         environment_probe=_Probe(ready=False),
         evidence_sealer=_Sealer(),
     )
