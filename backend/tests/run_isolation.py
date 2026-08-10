@@ -41,6 +41,7 @@ _MARKER_BYTES = 64
 _RENAME_NOREPLACE = 1
 MAINTENANCE_LOCK_TIMEOUT_MS = 1000
 MAINTENANCE_STATEMENT_TIMEOUT_MS = 120000
+MAINTENANCE_DROP_STATEMENT_TIMEOUT_MS = 150000
 
 try:
     _LIBC_RENAMEAT2 = ctypes.CDLL(None, use_errno=True).renameat2
@@ -324,6 +325,15 @@ def _set_maintenance_timeouts(conn) -> None:
         text(
             "SET statement_timeout = "
             f"'{MAINTENANCE_STATEMENT_TIMEOUT_MS}ms'"
+        )
+    )
+
+
+def _set_drop_statement_timeout(conn) -> None:
+    conn.execute(
+        text(
+            "SET statement_timeout = "
+            f"'{MAINTENANCE_DROP_STATEMENT_TIMEOUT_MS}ms'"
         )
     )
 
@@ -711,6 +721,7 @@ def cleanup_database_run(
                     raise
                 if not still_owned:
                     raise RuntimeError("pytest database identity mismatch (missing)")
+                _set_drop_statement_timeout(conn)
                 conn.execute(text(f'DROP DATABASE "{handle.name}"'))
                 return True
             finally:
