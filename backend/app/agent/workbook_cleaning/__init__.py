@@ -1,6 +1,10 @@
 """Public types for the dark-mode workbook-cleaning proposal kernel."""
 
-from .kernel import CleaningProposalRejected, assess_cleaning_proposal
+from .kernel import (
+    CleaningProposalRejected,
+    assess_cleaning_proposal,
+    verify_cleaning_assessment,
+)
 from .models import (
     ArtifactSnapshot,
     CellValue,
@@ -47,4 +51,5 @@ __all__ = [
     "TemplateClassification",
     "TemplateSnapshot",
     "assess_cleaning_proposal",
+    "verify_cleaning_assessment",
 ]

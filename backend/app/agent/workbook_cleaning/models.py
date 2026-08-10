@@ -1,7 +1,8 @@
-"""Strict, side-effect-free contracts for workbook-cleaning proposals.
+"""Strict contracts for the dark workbook-cleaning proposal kernel.
 
-These models describe a *proposal*.  They are intentionally not an execution
-plan, file writer, Artifact creator, or business-data mutation API.
+Evidence intentionally contains only upstream-issued opaque UUID references and
+bounded metadata. It contains no sheet names, owners, cell values, value hashes,
+or home-grown integrity claims.
 """
 
 from __future__ import annotations
@@ -12,13 +13,7 @@ from enum import Enum
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    StringConstraints,
-    model_validator,
-)
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -44,15 +39,9 @@ OwnerSubject = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=255),
 ]
-SheetName = Annotated[
-    str,
-    StringConstraints(strip_whitespace=True, min_length=1, max_length=128),
-]
 
 
 class StrictModel(BaseModel):
-    """No coercion, ignored fields, or mutation after validation."""
-
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
@@ -121,6 +110,8 @@ class ManualReviewReason(str, Enum):
 
 
 class ArtifactSnapshot(StrictModel):
+    """Authoritative internal input; its hash is never projected to Evidence."""
+
     artifact_id: UUID
     sha256: Sha256
     owner_sub: OwnerSubject
@@ -129,16 +120,17 @@ class ArtifactSnapshot(StrictModel):
 
 
 class ColumnSnapshot(StrictModel):
-    """Server-generated column identity; display headers are deliberately absent."""
+    """Server-issued opaque identity; display headers stay in the adapter."""
 
-    column_id: Identifier
+    column_ref: UUID
     kind: ColumnKind
 
 
 class TableSnapshot(StrictModel):
+    source_snapshot_ref: UUID
     artifact: ArtifactSnapshot
     projection_implementation_version: Version
-    sheet: SheetName
+    sheet_ref: UUID
     header_row: int = Field(ge=1, le=100_000)
     data_start_row: int = Field(ge=1, le=100_001)
     columns: tuple[ColumnSnapshot, ...] = Field(min_length=1, max_length=256)
@@ -147,25 +139,26 @@ class TableSnapshot(StrictModel):
     def validate_table(self) -> "TableSnapshot":
         if self.data_start_row <= self.header_row:
             raise ValueError("data_start_row must be after header_row")
-        column_ids = [column.column_id for column in self.columns]
-        if len(column_ids) != len(set(column_ids)):
-            raise ValueError("source column_id values must be unique")
+        refs = [column.column_ref for column in self.columns]
+        if len(refs) != len(set(refs)):
+            raise ValueError("source column_ref values must be unique")
         return self
 
 
 class TemplateSnapshot(StrictModel):
+    template_snapshot_ref: UUID
     artifact: ArtifactSnapshot
     template_version: Version
     classification: TemplateClassification
     classifier_proof_version: Version
-    target_sheet: SheetName
+    target_sheet_ref: UUID
     columns: tuple[ColumnSnapshot, ...] = Field(min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def validate_columns(self) -> "TemplateSnapshot":
-        column_ids = [column.column_id for column in self.columns]
-        if len(column_ids) != len(set(column_ids)):
-            raise ValueError("target column_id values must be unique")
+        refs = [column.column_ref for column in self.columns]
+        if len(refs) != len(set(refs)):
+            raise ValueError("target column_ref values must be unique")
         return self
 
 
@@ -175,8 +168,7 @@ class OperationImplementation(StrictModel):
 
 
 class RuleSetSnapshot(StrictModel):
-    """Immutable human rules and their deterministic implementation versions."""
-
+    rule_snapshot_ref: UUID
     rule_set_id: Identifier
     rule_set_version: Version
     rule_set_sha256: Sha256
@@ -196,13 +188,13 @@ class RuleSetSnapshot(StrictModel):
 
 
 class SourceRowRef(StrictModel):
-    source_sha256: Sha256
-    sheet: SheetName
+    source_snapshot_ref: UUID
+    sheet_ref: UUID
     row_number: int = Field(ge=1, le=100_001)
 
 
 class CellValue(StrictModel):
-    """Canonical scalar; floats are forbidden and decimals/dates are strings."""
+    """Canonical scalar with UTF-8 byte budgets; floats are forbidden."""
 
     kind: Literal["null", "text", "integer", "boolean", "date", "decimal"]
     value: str | int | bool | None
@@ -225,8 +217,8 @@ class CellValue(StrictModel):
             return self
         if not isinstance(self.value, str):
             raise ValueError(f"{self.kind} cell requires a string")
-        if len(self.value) > 8_192:
-            raise ValueError("cell text exceeds 8 KiB character budget")
+        if len(self.value.encode("utf-8")) > 8_192:
+            raise ValueError("cell text exceeds 8192 UTF-8 byte budget")
         if self.kind == "date":
             try:
                 parsed = date.fromisoformat(self.value)
@@ -234,44 +226,48 @@ class CellValue(StrictModel):
                 raise ValueError("date must be canonical YYYY-MM-DD") from exc
             if parsed.isoformat() != self.value:
                 raise ValueError("date must be canonical YYYY-MM-DD")
-        if self.kind == "decimal":
-            if len(self.value) > 64 or not re.fullmatch(
-                r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", self.value
-            ):
-                raise ValueError("decimal must be a canonical decimal string")
+        if self.kind == "decimal" and (
+            len(self.value.encode("utf-8")) > 64
+            or not re.fullmatch(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", self.value)
+        ):
+            raise ValueError("decimal must be a canonical decimal string")
+        return self
+
+
+class ObservedFieldSnapshot(StrictModel):
+    """Local authoritative value projected under an immutable opaque reference."""
+
+    observed_field_ref: UUID
+    row_ref: SourceRowRef
+    source_column_refs: tuple[UUID, ...] = Field(max_length=64)
+    target_column_ref: UUID
+    before: CellValue
+
+    @model_validator(mode="after")
+    def validate_source_columns(self) -> "ObservedFieldSnapshot":
+        if len(self.source_column_refs) != len(set(self.source_column_refs)):
+            raise ValueError("source_column_refs must be unique")
         return self
 
 
 class FieldChange(StrictModel):
+    """Untrusted proposal joined to server-issued field/value references."""
+
+    observed_field_ref: UUID
+    proposed_value_ref: UUID
     row_ref: SourceRowRef
-    source_column_ids: tuple[Identifier, ...] = Field(max_length=64)
-    target_column_id: Identifier
+    source_column_refs: tuple[UUID, ...] = Field(max_length=64)
+    target_column_ref: UUID
     operation: Operation
     operation_implementation_version: Version
-    before: CellValue
     proposed_after: CellValue
     reason_code: Identifier
     confidence_basis_points: int = Field(ge=0, le=10_000)
 
     @model_validator(mode="after")
     def validate_source_columns(self) -> "FieldChange":
-        if len(self.source_column_ids) != len(set(self.source_column_ids)):
-            raise ValueError("source_column_ids must be unique")
-        return self
-
-
-class ObservedFieldSnapshot(StrictModel):
-    """Authoritative local projection matched against an untrusted proposal."""
-
-    row_ref: SourceRowRef
-    source_column_ids: tuple[Identifier, ...] = Field(max_length=64)
-    target_column_id: Identifier
-    before: CellValue
-
-    @model_validator(mode="after")
-    def validate_source_columns(self) -> "ObservedFieldSnapshot":
-        if len(self.source_column_ids) != len(set(self.source_column_ids)):
-            raise ValueError("source_column_ids must be unique")
+        if len(self.source_column_refs) != len(set(self.source_column_refs)):
+            raise ValueError("source_column_refs must be unique")
         return self
 
 
@@ -279,14 +275,18 @@ class CleaningChangeProposal(StrictModel):
     schema_version: Literal["workbook-cleaning-change-proposal/v1"] = (
         "workbook-cleaning-change-proposal/v1"
     )
+    proposal_ref: UUID
     origin: ProposalOrigin
+    source_snapshot_ref: UUID
     source_artifact_id: UUID
     source_sha256: Sha256
     source_projection_implementation_version: Version
+    template_snapshot_ref: UUID
     template_artifact_id: UUID
     template_sha256: Sha256
     template_version: Version
     template_classifier_proof_version: Version
+    rule_snapshot_ref: UUID
     rule_set_id: Identifier
     rule_set_version: Version
     rule_set_sha256: Sha256
@@ -310,27 +310,28 @@ class CleaningProposalRequest(StrictModel):
 
 
 class SourceEvidenceBinding(StrictModel):
+    source_snapshot_ref: UUID
     artifact_id: UUID
-    sha256: Sha256
     projection_implementation_version: Version
-    sheet: SheetName
+    sheet_ref: UUID
     header_row: int
     data_start_row: int
+    ordered_column_refs: tuple[UUID, ...]
 
 
 class TemplateEvidenceBinding(StrictModel):
+    template_snapshot_ref: UUID
     artifact_id: UUID
-    sha256: Sha256
     template_version: Version
     classification: TemplateClassification
     classifier_proof_version: Version
-    target_sheet: SheetName
+    target_sheet_ref: UUID
+    ordered_column_refs: tuple[UUID, ...]
 
 
 class RulesEvidenceBinding(StrictModel):
-    rule_set_id: Identifier
+    rule_snapshot_ref: UUID
     rule_set_version: Version
-    rule_set_sha256: Sha256
     policy_implementation_version: Version
     operations: tuple[OperationImplementation, ...]
     maximum_changes: int
@@ -340,13 +341,13 @@ class RulesEvidenceBinding(StrictModel):
 
 
 class FieldDiffEvidence(StrictModel):
+    observed_field_ref: UUID
+    proposed_value_ref: UUID
     row_ref: SourceRowRef
-    source_column_ids: tuple[Identifier, ...]
-    target_column_id: Identifier
+    source_column_refs: tuple[UUID, ...]
+    target_column_ref: UUID
     operation: Operation
     operation_implementation_version: Version
-    before_value_sha256: Sha256
-    after_value_sha256: Sha256
     confidence_basis_points: int
     risk_flags: tuple[RiskFlag, ...]
     requires_human_review: Literal[True] = True
@@ -357,14 +358,14 @@ class CleaningProposalAssessment(StrictModel):
         "workbook-cleaning-proposal-assessment/v1"
     )
     assessment_implementation_version: Literal[
-        "workbook-cleaning-proposal-kernel/1.0.0"
-    ] = "workbook-cleaning-proposal-kernel/1.0.0"
+        "workbook-cleaning-proposal-kernel/1.1.0"
+    ] = "workbook-cleaning-proposal-kernel/1.1.0"
     mode: Literal["dark"] = "dark"
     outcome: Literal["human_review_required"] = "human_review_required"
     executable: Literal[False] = False
     artifact_create_allowed: Literal[False] = False
     business_write_allowed: Literal[False] = False
-    owner_subject_sha256: Sha256
+    proposal_ref: UUID
     source_binding: SourceEvidenceBinding
     template_binding: TemplateEvidenceBinding
     rules_binding: RulesEvidenceBinding
@@ -375,5 +376,3 @@ class CleaningProposalAssessment(StrictModel):
     field_diffs: tuple[FieldDiffEvidence, ...]
     risk_flags: tuple[RiskFlag, ...]
     manual_review_reasons: tuple[ManualReviewReason, ...]
-    proposal_fingerprint: Sha256
-    evidence_payload_fingerprint: Sha256

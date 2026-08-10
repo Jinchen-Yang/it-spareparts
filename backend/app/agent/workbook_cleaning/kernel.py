@@ -1,11 +1,12 @@
-"""Deterministic validation and evidence projection for cleaning proposals."""
+"""Pure validation, bounded Evidence projection, and verification for #228."""
 
 from __future__ import annotations
 
-import hashlib
+import hmac
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
+from uuid import UUID
 
 from pydantic import ValidationError
 
@@ -28,10 +29,11 @@ from .models import (
 _PROTECTED_COLUMNS = {ColumnKind.ROW_IDENTITY, ColumnKind.PART_ID, ColumnKind.PN}
 _TYPED_COLUMNS = {ColumnKind.AMOUNT, ColumnKind.QUANTITY, ColumnKind.DATE}
 _MAX_PROPOSAL_BYTES = 256 * 1024
+_MAX_OBSERVED_PROJECTION_BYTES = 256 * 1024
 
 
 class CleaningProposalRejected(ValueError):
-    """Stable, content-free rejection returned before any future side effect."""
+    """Stable, content-free rejection raised before any future side effect."""
 
     def __init__(self, code: str) -> None:
         self.code = code
@@ -39,8 +41,6 @@ class CleaningProposalRejected(ValueError):
 
 
 def _json_safe(value: Any) -> Any:
-    """Return a deterministic JSON tree and fail closed on unsupported values."""
-
     if value is None or isinstance(value, (str, bool, int)):
         return value
     if isinstance(value, Mapping):
@@ -51,6 +51,8 @@ def _json_safe(value: Any) -> Any:
 
 
 def _canonical_bytes(payload: Any) -> bytes:
+    """Deterministic comparison bytes, not an integrity/signature protocol."""
+
     return json.dumps(
         _json_safe(payload),
         ensure_ascii=False,
@@ -60,41 +62,34 @@ def _canonical_bytes(payload: Any) -> bytes:
     ).encode("utf-8")
 
 
-def _fingerprint(payload: Any) -> str:
-    return hashlib.sha256(_canonical_bytes(payload)).hexdigest()
+def _uuid_key(value: UUID) -> str:
+    return value.hex
+
+
+def _field_key(item: Any) -> tuple[UUID, UUID, int, UUID]:
+    return (
+        item.row_ref.source_snapshot_ref,
+        item.row_ref.sheet_ref,
+        item.row_ref.row_number,
+        item.target_column_ref,
+    )
 
 
 def _change_key(change: FieldChange) -> tuple[Any, ...]:
     return (
-        change.row_ref.source_sha256,
-        change.row_ref.sheet,
+        _uuid_key(change.row_ref.source_snapshot_ref),
+        _uuid_key(change.row_ref.sheet_ref),
         change.row_ref.row_number,
-        change.target_column_id,
+        _uuid_key(change.target_column_ref),
         change.operation.value,
-        change.source_column_ids,
-    )
-
-
-def _field_key(change: Any) -> tuple[str, int, str]:
-    return (
-        change.row_ref.sheet,
-        change.row_ref.row_number,
-        change.target_column_id,
-    )
-
-
-def _observed_sort_key(observed: Any) -> tuple[Any, ...]:
-    return (
-        observed.row_ref.source_sha256,
-        observed.row_ref.sheet,
-        observed.row_ref.row_number,
-        observed.target_column_id,
-        observed.source_column_ids,
+        tuple(_uuid_key(ref) for ref in change.source_column_refs),
+        _uuid_key(change.observed_field_ref),
+        _uuid_key(change.proposed_value_ref),
     )
 
 
 def _operation_arity_valid(change: FieldChange) -> bool:
-    count = len(change.source_column_ids)
+    count = len(change.source_column_refs)
     if change.operation == Operation.CONSTANT_VALUE:
         return count == 0
     if change.operation in {Operation.COALESCE, Operation.COMBINE_COLUMNS}:
@@ -119,7 +114,8 @@ def _validate_target_operation(change: FieldChange, target_kind: ColumnKind) -> 
             raise CleaningProposalRejected("operation_not_allowed_for_column")
         if change.proposed_after.kind != "text":
             raise CleaningProposalRejected("operation_not_allowed_for_column")
-        if isinstance(change.proposed_after.value, str) and len(change.proposed_after.value) > 2_000:
+        value = change.proposed_after.value
+        if isinstance(value, str) and len(value.encode("utf-8")) > 2_000:
             raise CleaningProposalRejected("semantic_value_budget_exceeded")
         return
     if target_kind in _TYPED_COLUMNS:
@@ -163,77 +159,23 @@ def _change_risks(
 
 def _manual_review_reasons(risks: set[RiskFlag]) -> tuple[ManualReviewReason, ...]:
     reasons = {ManualReviewReason.HUMAN_ACCEPT_REQUIRED}
-    for risk in risks:
-        try:
-            reasons.add(ManualReviewReason(risk.value))
-        except ValueError:
-            # Every current risk has a review counterpart.  Fail closed if a future
-            # low-level risk is intentionally evidence-only.
-            reasons.add(ManualReviewReason.HUMAN_ACCEPT_REQUIRED)
+    reasons.update(ManualReviewReason(risk.value) for risk in risks)
     return tuple(sorted(reasons, key=lambda item: item.value))
 
 
-def _normalized_proposal_payload(
-    request: CleaningProposalRequest, ordered_changes: tuple[FieldChange, ...]
-) -> dict[str, Any]:
-    return {
-        "request_schema_version": request.schema_version,
-        "mode": request.mode,
-        "owner_subject_sha256": _fingerprint({"owner_sub": request.task_owner_sub}),
-        "source": {
-            **request.source.model_dump(mode="json", exclude={"artifact": {"owner_sub"}}),
-            "columns": [
-                column.model_dump(mode="json")
-                for column in sorted(request.source.columns, key=lambda item: item.column_id)
-            ],
-        },
-        "observed_fields": [
-            field.model_dump(mode="json")
-            for field in sorted(request.observed_fields, key=_observed_sort_key)
-        ],
-        "template": {
-            **request.template.model_dump(mode="json", exclude={"artifact": {"owner_sub"}}),
-            "columns": [
-                column.model_dump(mode="json")
-                for column in sorted(request.template.columns, key=lambda item: item.column_id)
-            ],
-        },
-        "rules": {
-            **request.rules.model_dump(mode="json", exclude={"operations"}),
-            "operations": [
-                item.model_dump(mode="json")
-                for item in sorted(
-                    request.rules.operations, key=lambda item: item.operation.value
-                )
-            ],
-        },
-        "proposal": {
-            **request.proposal.model_dump(mode="json", exclude={"changes"}),
-            "changes": [change.model_dump(mode="json") for change in ordered_changes],
-        },
-    }
+def _revalidate_request(request: CleaningProposalRequest) -> CleaningProposalRequest:
+    try:
+        return CleaningProposalRequest.model_validate(request.model_dump(mode="python"))
+    except (AttributeError, ValidationError):
+        raise CleaningProposalRejected("invalid_request_schema") from None
 
 
 def assess_cleaning_proposal(
     request: CleaningProposalRequest,
 ) -> CleaningProposalAssessment:
-    """Validate an untrusted proposal and return hash-only review evidence.
+    """Create non-executable dark-mode Evidence from an untrusted proposal."""
 
-    The output deliberately cannot authorize execution, Artifact creation, or a
-    business write.  Future workflow code must place it behind a Human Interrupt
-    and the authoritative Capability/Task/Artifact gates.
-    """
-
-    # Internal callers can bypass Pydantic validation with model_construct/model_copy.
-    # Revalidate the complete frozen tree so that this safety boundary does not
-    # silently trust the caller's construction path.
-    try:
-        request = CleaningProposalRequest.model_validate(
-            request.model_dump(mode="python")
-        )
-    except (AttributeError, ValidationError):
-        raise CleaningProposalRejected("invalid_request_schema") from None
-
+    request = _revalidate_request(request)
     owners = {
         request.task_owner_sub,
         request.source.artifact.owner_sub,
@@ -249,14 +191,16 @@ def assess_cleaning_proposal(
     template = request.template
     rules = request.rules
     if (
-        proposal.source_artifact_id != source.artifact.artifact_id
+        proposal.source_snapshot_ref != source.source_snapshot_ref
+        or proposal.source_artifact_id != source.artifact.artifact_id
         or proposal.source_sha256 != source.artifact.sha256
         or proposal.source_projection_implementation_version
         != source.projection_implementation_version
     ):
         raise CleaningProposalRejected("source_binding_mismatch")
     if (
-        proposal.template_artifact_id != template.artifact.artifact_id
+        proposal.template_snapshot_ref != template.template_snapshot_ref
+        or proposal.template_artifact_id != template.artifact.artifact_id
         or proposal.template_sha256 != template.artifact.sha256
         or proposal.template_version != template.template_version
         or proposal.template_classifier_proof_version
@@ -264,7 +208,8 @@ def assess_cleaning_proposal(
     ):
         raise CleaningProposalRejected("template_binding_mismatch")
     if (
-        proposal.rule_set_id != rules.rule_set_id
+        proposal.rule_snapshot_ref != rules.rule_snapshot_ref
+        or proposal.rule_set_id != rules.rule_set_id
         or proposal.rule_set_version != rules.rule_set_version
         or proposal.rule_set_sha256 != rules.rule_set_sha256
         or proposal.policy_implementation_version != rules.policy_implementation_version
@@ -274,39 +219,45 @@ def assess_cleaning_proposal(
         raise CleaningProposalRejected("change_budget_exceeded")
     if len(_canonical_bytes(proposal.model_dump(mode="json"))) > _MAX_PROPOSAL_BYTES:
         raise CleaningProposalRejected("proposal_payload_budget_exceeded")
+    observed_payload = [field.model_dump(mode="json") for field in request.observed_fields]
+    if len(_canonical_bytes(observed_payload)) > _MAX_OBSERVED_PROJECTION_BYTES:
+        raise CleaningProposalRejected("observed_projection_budget_exceeded")
 
-    source_columns = {column.column_id: column for column in source.columns}
-    target_columns = {column.column_id: column for column in template.columns}
+    source_columns = {column.column_ref: column for column in source.columns}
+    target_columns = {column.column_ref: column for column in template.columns}
     operation_versions = {
         item.operation: item.implementation_version for item in rules.operations
     }
-    ordered_changes = tuple(sorted(proposal.changes, key=_change_key))
-
-    observed_by_target = {}
+    observed_by_ref = {}
+    observed_targets = set()
     for observed in request.observed_fields:
         if (
-            observed.row_ref.source_sha256 != source.artifact.sha256
-            or observed.row_ref.sheet != source.sheet
+            observed.row_ref.source_snapshot_ref != source.source_snapshot_ref
+            or observed.row_ref.sheet_ref != source.sheet_ref
             or observed.row_ref.row_number < source.data_start_row
         ):
             raise CleaningProposalRejected("row_reference_mismatch")
-        if observed.target_column_id not in target_columns:
+        if observed.target_column_ref not in target_columns:
             raise CleaningProposalRejected("unknown_target_column")
-        if any(column_id not in source_columns for column_id in observed.source_column_ids):
+        if any(ref not in source_columns for ref in observed.source_column_refs):
             raise CleaningProposalRejected("unknown_source_column")
-        observed_key = _field_key(observed)
-        if observed_key in observed_by_target:
+        if observed.observed_field_ref in observed_by_ref:
+            raise CleaningProposalRejected("duplicate_observed_field_ref")
+        if _field_key(observed) in observed_targets:
             raise CleaningProposalRejected("duplicate_observed_field")
-        observed_by_target[observed_key] = observed
+        observed_by_ref[observed.observed_field_ref] = observed
+        observed_targets.add(_field_key(observed))
 
-    seen_targets: set[tuple[str, int, str]] = set()
+    ordered_changes = tuple(sorted(proposal.changes, key=_change_key))
+    seen_targets = set()
+    seen_proposed_values = set()
     diffs: list[FieldDiffEvidence] = []
     all_risks: set[RiskFlag] = set()
     semantic_count = 0
     for change in ordered_changes:
         if (
-            change.row_ref.source_sha256 != source.artifact.sha256
-            or change.row_ref.sheet != source.sheet
+            change.row_ref.source_snapshot_ref != source.source_snapshot_ref
+            or change.row_ref.sheet_ref != source.sheet_ref
         ):
             raise CleaningProposalRejected("row_reference_mismatch")
         if change.row_ref.row_number < source.data_start_row:
@@ -315,16 +266,20 @@ def assess_cleaning_proposal(
         if target_key in seen_targets:
             raise CleaningProposalRejected("duplicate_target_field_change")
         seen_targets.add(target_key)
-        if change.target_column_id not in target_columns:
+        if change.proposed_value_ref in seen_proposed_values:
+            raise CleaningProposalRejected("duplicate_proposed_value_ref")
+        seen_proposed_values.add(change.proposed_value_ref)
+        if change.target_column_ref not in target_columns:
             raise CleaningProposalRejected("unknown_target_column")
-        if any(column_id not in source_columns for column_id in change.source_column_ids):
+        if any(ref not in source_columns for ref in change.source_column_refs):
             raise CleaningProposalRejected("unknown_source_column")
-        observed = observed_by_target.get(target_key)
+        observed = observed_by_ref.get(change.observed_field_ref)
         if observed is None:
             raise CleaningProposalRejected("observed_field_missing")
         if (
-            change.source_column_ids != observed.source_column_ids
-            or change.before != observed.before
+            change.row_ref != observed.row_ref
+            or change.source_column_refs != observed.source_column_refs
+            or change.target_column_ref != observed.target_column_ref
         ):
             raise CleaningProposalRejected("observed_field_mismatch")
         if not _operation_arity_valid(change):
@@ -334,9 +289,9 @@ def assess_cleaning_proposal(
             raise CleaningProposalRejected("operation_not_allowlisted")
         if change.operation_implementation_version != implementation_version:
             raise CleaningProposalRejected("operation_implementation_mismatch")
-        if change.before == change.proposed_after:
+        if observed.before == change.proposed_after:
             raise CleaningProposalRejected("noop_change")
-        _validate_target_operation(change, target_columns[change.target_column_id].kind)
+        _validate_target_operation(change, target_columns[change.target_column_ref].kind)
 
         if change.operation == Operation.SEMANTIC_REWRITE:
             semantic_count += 1
@@ -344,15 +299,13 @@ def assess_cleaning_proposal(
         all_risks.update(risks)
         diffs.append(
             FieldDiffEvidence(
+                observed_field_ref=change.observed_field_ref,
+                proposed_value_ref=change.proposed_value_ref,
                 row_ref=change.row_ref,
-                source_column_ids=change.source_column_ids,
-                target_column_id=change.target_column_id,
+                source_column_refs=change.source_column_refs,
+                target_column_ref=change.target_column_ref,
                 operation=change.operation,
                 operation_implementation_version=implementation_version,
-                before_value_sha256=_fingerprint(observed.before.model_dump(mode="json")),
-                after_value_sha256=_fingerprint(
-                    change.proposed_after.model_dump(mode="json")
-                ),
                 confidence_basis_points=change.confidence_basis_points,
                 risk_flags=tuple(sorted(risks, key=lambda item: item.value)),
             )
@@ -364,33 +317,33 @@ def assess_cleaning_proposal(
     if template.classification == TemplateClassification.BUSINESS_CONTENT:
         all_risks.add(RiskFlag.TEMPLATE_BUSINESS_CONTENT)
 
-    sorted_operations = tuple(
-        sorted(rules.operations, key=lambda item: item.operation.value)
-    )
-    base_payload: dict[str, Any] = {
-        "owner_subject_sha256": _fingerprint({"owner_sub": request.task_owner_sub}),
-        "source_binding": SourceEvidenceBinding(
+    return CleaningProposalAssessment(
+        proposal_ref=proposal.proposal_ref,
+        source_binding=SourceEvidenceBinding(
+            source_snapshot_ref=source.source_snapshot_ref,
             artifact_id=source.artifact.artifact_id,
-            sha256=source.artifact.sha256,
             projection_implementation_version=source.projection_implementation_version,
-            sheet=source.sheet,
+            sheet_ref=source.sheet_ref,
             header_row=source.header_row,
             data_start_row=source.data_start_row,
+            ordered_column_refs=tuple(column.column_ref for column in source.columns),
         ),
-        "template_binding": TemplateEvidenceBinding(
+        template_binding=TemplateEvidenceBinding(
+            template_snapshot_ref=template.template_snapshot_ref,
             artifact_id=template.artifact.artifact_id,
-            sha256=template.artifact.sha256,
             template_version=template.template_version,
             classification=template.classification,
             classifier_proof_version=template.classifier_proof_version,
-            target_sheet=template.target_sheet,
+            target_sheet_ref=template.target_sheet_ref,
+            ordered_column_refs=tuple(column.column_ref for column in template.columns),
         ),
-        "rules_binding": RulesEvidenceBinding(
-            rule_set_id=rules.rule_set_id,
+        rules_binding=RulesEvidenceBinding(
+            rule_snapshot_ref=rules.rule_snapshot_ref,
             rule_set_version=rules.rule_set_version,
-            rule_set_sha256=rules.rule_set_sha256,
             policy_implementation_version=rules.policy_implementation_version,
-            operations=sorted_operations,
+            operations=tuple(
+                sorted(rules.operations, key=lambda item: item.operation.value)
+            ),
             maximum_changes=rules.maximum_changes,
             semantic_rewrite_limit=rules.semantic_rewrite_limit,
             low_confidence_threshold_basis_points=(
@@ -398,39 +351,38 @@ def assess_cleaning_proposal(
             ),
             large_change_review_threshold=rules.large_change_review_threshold,
         ),
-        "proposal_schema_version": proposal.schema_version,
-        "proposal_origin": proposal.origin,
-        "change_count": len(diffs),
-        "semantic_rewrite_count": semantic_count,
-        "field_diffs": tuple(diffs),
-        "risk_flags": tuple(sorted(all_risks, key=lambda item: item.value)),
-        "manual_review_reasons": _manual_review_reasons(all_risks),
-        "proposal_fingerprint": _fingerprint(
-            _normalized_proposal_payload(request, ordered_changes)
-        ),
-    }
-    evidence_payload = {
-        "schema_version": "workbook-cleaning-proposal-assessment/v1",
-        "assessment_implementation_version": (
-            "workbook-cleaning-proposal-kernel/1.0.0"
-        ),
-        "mode": "dark",
-        "outcome": "human_review_required",
-        "executable": False,
-        "artifact_create_allowed": False,
-        "business_write_allowed": False,
-        **{
-            key: (
-                value.model_dump(mode="json")
-                if hasattr(value, "model_dump")
-                else [item.model_dump(mode="json") for item in value]
-                if isinstance(value, tuple) and value and hasattr(value[0], "model_dump")
-                else value
-            )
-            for key, value in base_payload.items()
-        },
-    }
-    return CleaningProposalAssessment(
-        **base_payload,
-        evidence_payload_fingerprint=_fingerprint(evidence_payload),
+        proposal_schema_version=proposal.schema_version,
+        proposal_origin=proposal.origin,
+        change_count=len(diffs),
+        semantic_rewrite_count=semantic_count,
+        field_diffs=tuple(diffs),
+        risk_flags=tuple(sorted(all_risks, key=lambda item: item.value)),
+        manual_review_reasons=_manual_review_reasons(all_risks),
     )
+
+
+def verify_cleaning_assessment(
+    request: CleaningProposalRequest,
+    assessment: CleaningProposalAssessment,
+) -> CleaningProposalAssessment:
+    """Only supported consumption boundary for an assessment.
+
+    This detects accidental or adversarial mutation by re-assessing the complete
+    request and comparing the bounded canonical projections in constant time. It
+    is not authenticity, authorization, or `integrity-envelope/v1`; callers must
+    consume only the returned fresh instance.
+    """
+
+    request = _revalidate_request(request)
+    try:
+        supplied = CleaningProposalAssessment.model_validate(
+            assessment.model_dump(mode="python")
+        )
+    except (AttributeError, ValidationError):
+        raise CleaningProposalRejected("invalid_assessment_schema") from None
+    expected = assess_cleaning_proposal(request)
+    expected_bytes = _canonical_bytes(expected.model_dump(mode="json"))
+    supplied_bytes = _canonical_bytes(supplied.model_dump(mode="json"))
+    if not hmac.compare_digest(expected_bytes, supplied_bytes):
+        raise CleaningProposalRejected("assessment_mismatch")
+    return expected
