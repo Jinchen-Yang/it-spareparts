@@ -58,6 +58,16 @@ git checkout codex/maintenance-manager-combined
 cp .env.example .env
 ```
 
+若 GitHub 分支仍因 `workflow` scope 未推送，先解压交接 ZIP，再用其中完整历史 bundle 恢复：
+
+```bash
+unzip it-spareparts-handoff-2026-08-10.zip
+git clone it-spareparts-history.bundle it-spareparts
+cd it-spareparts
+git checkout codex/maintenance-manager-combined
+git remote add origin https://github.com/Jinchen-Yang/it-spareparts.git
+```
+
 把 `.env` 改成仅用于本机的 `ENVIRONMENT=dev` 和本地随机/测试值，再按需启动：
 
 ```bash
