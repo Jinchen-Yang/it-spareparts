@@ -1,7 +1,7 @@
 import calendar
 import unicodedata
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation, localcontext
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -37,6 +37,7 @@ SealedEvidenceRefs = Annotated[tuple["EvidenceRef", ...], Field(max_length=24)]
 
 _QUANTITY_QUANTUM = Decimal("0.001")
 _MAX_QUANTITY_REPRESENTATION_LENGTH = 32
+_QUANTITY_CANONICAL_CONTEXT_PRECISION = 18  # Numeric(14, 3) plus safety headroom.
 
 
 def _strip_and_reject_control_characters(value: object) -> object:
@@ -74,7 +75,13 @@ def _canonicalize_quantity(value: Decimal) -> Decimal:
     ):
         raise ValueError("quantity representation exceeds the safe length")
     try:
-        canonical = value.quantize(_QUANTITY_QUANTUM)
+        with localcontext() as decimal_context:
+            decimal_context.prec = _QUANTITY_CANONICAL_CONTEXT_PRECISION
+            decimal_context.rounding = ROUND_HALF_EVEN
+            canonical = value.quantize(
+                _QUANTITY_QUANTUM,
+                context=decimal_context,
+            )
     except InvalidOperation as exc:
         raise ValueError("quantity cannot be represented at scale three") from exc
     if canonical != value:

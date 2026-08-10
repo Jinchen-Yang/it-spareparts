@@ -1,6 +1,6 @@
 import json
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, Decimal, localcontext
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -217,6 +217,34 @@ def test_quantity_is_canonical_scale_three_in_input_and_sealed_evidence() -> Non
     )
     evidence = evaluate_replenishment(_review(requested_qty=Decimal("5"))).evidence
     assert evidence.requested_qty.as_tuple().exponent == -3
+
+
+@pytest.mark.parametrize(
+    ("precision", "rounding"),
+    [(2, ROUND_CEILING), (10, ROUND_DOWN)],
+)
+def test_quantity_canonicalization_ignores_ambient_decimal_context(
+    precision: int,
+    rounding: str,
+) -> None:
+    maximum = Decimal("99999999999.999")
+
+    with localcontext() as ambient:
+        ambient.prec = precision
+        ambient.rounding = rounding
+        request = ReplenishmentRequest(
+            source_application_ref="application-v7",
+            source_snapshot_fingerprint="f" * 64,
+            pn_display_snapshot="PN-001",
+            requested_qty=maximum,
+        )
+        evidence = evaluate_replenishment(_review(requested_qty=maximum)).evidence
+        with pytest.raises(ValidationError):
+            _review(requested_qty=Decimal("1.0001"))
+
+    assert request.requested_qty == maximum
+    assert request.requested_qty.as_tuple().exponent == -3
+    assert evidence.requested_qty == maximum
 
 
 def test_quantity_rejects_oversized_representation_before_it_can_be_sealed() -> None:
