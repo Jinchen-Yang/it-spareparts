@@ -15,9 +15,7 @@ import json
 import logging
 import math
 import mimetypes
-import os
 import platform
-import re
 import ssl
 import tempfile
 import threading

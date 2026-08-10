@@ -2845,8 +2845,8 @@ def _sanitize_audit_summary(name: str, value: object) -> dict:
     count = value.get("arg_count")
     if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
         safe["arg_count"] = count
-    for field in ("collection_counts", "string_lengths"):
-        raw_counts = value.get(field)
+    for field_name in ("collection_counts", "string_lengths"):
+        raw_counts = value.get(field_name)
         if not isinstance(raw_counts, dict):
             continue
         counts = {}
@@ -2855,7 +2855,7 @@ def _sanitize_audit_summary(name: str, value: object) -> dict:
             if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
                 counts[key] = count
         if counts:
-            safe[field] = counts
+            safe[field_name] = counts
     return safe
 
 
