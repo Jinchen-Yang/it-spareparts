@@ -19,6 +19,31 @@ HISTORY_CHAR_CAP = 8000      # 单条消息回灌上限，防超长答复撑爆�
 _FILE_PREFIX = re.compile(r"^\[已上传文件[^\]]*\]\n*")
 
 
+def _safe_tools(value: object, artifact_authorizer=None) -> list[dict] | None:
+    """Value-free trace projection at the durable-storage boundary.
+
+    This intentionally repeats runtime sanitization: callers, legacy rows and future event
+    producers are untrusted at this seam and must never persist/replay raw tool arguments.
+    """
+    from app.agent import tools as agent_tools
+
+    clean = agent_tools.sanitize_tool_trace(value)
+    for entry in clean:
+        admitted: list[str] = []
+        if artifact_authorizer is not None:
+            for artifact_id in entry.get("artifact_ids", []):
+                try:
+                    if artifact_authorizer(artifact_id):
+                        admitted.append(artifact_id)
+                except Exception:  # noqa: BLE001 -- historical ACL failures fail closed
+                    continue
+        if admitted:
+            entry["artifact_ids"] = admitted
+        else:
+            entry.pop("artifact_ids", None)
+    return clean or None
+
+
 def list_sessions(db: Session, sub: str) -> list[dict]:
     rows = db.scalars(
         select(ChatSession)
@@ -56,7 +81,7 @@ def delete_session(db: Session, session: ChatSession) -> None:
     db.commit()
 
 
-def list_messages(db: Session, session_id: int) -> list[dict]:
+def list_messages(db: Session, session_id: int, artifact_authorizer=None) -> list[dict]:
     rows = db.scalars(
         select(ChatMessage)
         .where(ChatMessage.session_id == session_id)
@@ -64,7 +89,8 @@ def list_messages(db: Session, session_id: int) -> list[dict]:
     ).all()
     return [
         {"id": m.id, "role": m.role, "content": m.content,
-         "tools": m.tools or [], "stopped": m.stopped, "created_at": m.created_at}
+         "tools": _safe_tools(m.tools, artifact_authorizer) or [],
+         "stopped": m.stopped, "created_at": m.created_at}
         for m in rows
     ]
 
@@ -72,7 +98,7 @@ def list_messages(db: Session, session_id: int) -> list[dict]:
 def append_message(db: Session, session: ChatSession, role: str, content: str,
                    tools: list | None = None, stopped: bool = False) -> ChatMessage:
     m = ChatMessage(session_id=session.id, role=role, content=content,
-                    tools=tools or None, stopped=stopped)
+                    tools=_safe_tools(tools), stopped=stopped)
     db.add(m)
     # 首条用户消息自动定标题（剥掉文件注入前缀，与旧前端口径一致）
     if role == "user" and session.title == "新对话":
@@ -85,7 +111,8 @@ def append_message(db: Session, session: ChatSession, role: str, content: str,
 
 
 def save_assistant_progress(session_id: int, msg_id: int | None, content: str,
-                            tools: list | None, stopped: bool) -> int:
+                            tools: list | None, stopped: bool,
+                            artifact_authorizer=None) -> int:
     """流式 checkpoint：首次调用插入 assistant 行，之后按 id 原地更新。
 
     用独立短连接会话——流式响应被客户端中断后，请求级 db 会话的生命周期
@@ -94,10 +121,11 @@ def save_assistant_progress(session_id: int, msg_id: int | None, content: str,
     """
     from app.db import SessionLocal
 
+    safe_tools = _safe_tools(tools, artifact_authorizer)
     with SessionLocal() as db:
         if msg_id is None:
             m = ChatMessage(session_id=session_id, role="assistant",
-                            content=content, tools=tools or None, stopped=stopped)
+                            content=content, tools=safe_tools, stopped=stopped)
             db.add(m)
             db.flush()
             msg_id = m.id
@@ -105,7 +133,7 @@ def save_assistant_progress(session_id: int, msg_id: int | None, content: str,
             db.execute(
                 ChatMessage.__table__.update()
                 .where(ChatMessage.id == msg_id)
-                .values(content=content, tools=tools or None, stopped=stopped)
+                .values(content=content, tools=safe_tools, stopped=stopped)
             )
         db.execute(
             ChatSession.__table__.update()

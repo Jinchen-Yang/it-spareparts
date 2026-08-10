@@ -203,7 +203,7 @@ def test_scoped_sales_shared_contract_projects_never_load_or_return_full_revenue
         params={"lifecycle": "all"},
     )
     ctx = security.UserContext(
-        user_id="sales-a",
+        user_id="maintenance_scoped_sales",
         role="sales",
         salesperson_name="销售A",
         permissions={
@@ -213,6 +213,8 @@ def test_scoped_sales_shared_contract_projects_never_load_or_return_full_revenue
             "data_profit": True,
         },
         is_authenticated=True,
+        authn="sys_user",
+        token_version=0,
     )
     agent_projects = tools.dispatch(
         db,
@@ -248,8 +250,9 @@ def test_scoped_sales_agent_board_rejects_before_service_query(
         raise AssertionError("scoped agent must reject before contract service")
 
     monkeypatch.setattr(maintenance_cost, "board", forbidden_board)
+    _scoped_sales_client(db, salesperson_name="销售A")
     ctx = security.UserContext(
-        user_id="sales-a",
+        user_id="maintenance_scoped_sales",
         role="sales",
         salesperson_name="销售A",
         permissions={
@@ -259,6 +262,8 @@ def test_scoped_sales_agent_board_rejects_before_service_query(
             "data_profit": True,
         },
         is_authenticated=True,
+        authn="sys_user",
+        token_version=0,
     )
 
     response = tools.dispatch(
@@ -268,9 +273,11 @@ def test_scoped_sales_agent_board_rejects_before_service_query(
         ctx,
     )
 
+    # Capability policy rejects before the handler and uses the same non-enumerating response as
+    # an unknown tool; the scoped account must not learn that a contract-level capability exists.
     assert response == {
-        "error": "无权限：受限销售账号不能查看合同级维保数据。"
-        "可以查看本人范围的项目事实。"
+        "error": "未知工具或无权限",
+        "kind": "capability_denied",
     }
     assert calls == []
 

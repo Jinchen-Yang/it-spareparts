@@ -10,8 +10,19 @@ from pathlib import Path
 # remain fail closed and are asserted in test_agent_capabilities.py.
 os.environ["LLM_TRUST_ZONE"] = "private"
 os.environ["AGENT_MODEL_CONTEXT_EGRESS_ENABLED"] = "true"
-os.environ["LLM_BASE_URL"] = "http://agent-private.test:8000/v1"
-os.environ["LLM_PRIVATE_BASE_URLS"] = "http://agent-private.test:8000"
+os.environ["AGENT_ALLOW_UNATTESTED_PRIVATE_FOR_DEVELOPMENT"] = "true"
+os.environ["LLM_BASE_URL"] = "https://agent-private.test:8000/v1"
+os.environ["LLM_PRIVATE_BASE_URLS"] = "https://agent-private.test:8000"
+os.environ["LLM_MODEL"] = "test-primary-model"
+os.environ["LLM_APPROVED_MODELS"] = "test-primary-model"
+os.environ["LLM_API_KEY"] = "test-only-primary-key"
+os.environ["ENABLE_AGENT"] = "true"
+os.environ["VISION_TRUST_ZONE"] = "private"
+os.environ["VISION_BASE_URL"] = "https://vision-private.test:8443/v1"
+os.environ["VISION_PRIVATE_BASE_URLS"] = "https://vision-private.test:8443"
+os.environ["VISION_MODEL"] = "test-vision-model"
+os.environ["VISION_APPROVED_MODELS"] = "test-vision-model"
+os.environ["VISION_API_KEY"] = "test-only-vision-key"
 
 from tests.run_isolation import (
     CONTROLLED_RAW_BASE,

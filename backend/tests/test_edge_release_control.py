@@ -1817,6 +1817,19 @@ def test_public_https_health_paths_proxy_to_backend_without_spa_fallback() -> No
     assert 'payload.get("db") != "reachable"' in edge
 
 
+def test_frontend_csp_keeps_agent_browser_egress_same_origin() -> None:
+    nginx = (ROOT / "frontend" / "nginx.conf").read_text(encoding="utf-8")
+    policy = (
+        "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "
+        "script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; "
+        "font-src 'self' data:; connect-src 'self'; form-action 'self'"
+    )
+
+    # Server default plus locations that declare their own Cache-Control add_header (and therefore
+    # do not inherit server-level add_header values under nginx inheritance rules).
+    assert nginx.count(f'add_header Content-Security-Policy "{policy}" always;') == 3
+
+
 @pytest.mark.parametrize(
     ("mode", "accepted"),
     (

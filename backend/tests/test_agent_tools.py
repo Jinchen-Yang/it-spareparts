@@ -1,9 +1,13 @@
 """智能体工具层单测：不依赖 LLM key，直接验证派发与返回结构（对本地真库）。"""
-import pytest
+import json
 
-from app import permissions, security
+import pytest
+from sqlalchemy import func, select
+
+from app import config, permissions, security
 from app.agent import tools
 from app.db import SessionLocal
+from app.models.system import SysAuditLog
 
 
 @pytest.fixture(scope="module")
@@ -11,6 +15,11 @@ def db():
     s = SessionLocal()
     yield s
     s.close()
+
+
+@pytest.fixture(autouse=True)
+def _explicit_non_rbac_compatibility(monkeypatch):
+    monkeypatch.setattr(config, "ENABLE_RBAC", False)
 
 
 @pytest.fixture()
@@ -58,11 +67,28 @@ def test_empty_query_error(db, ctx):
     assert "error" in r
 
 
+def test_agent_part_lookup_misses_are_read_only_and_never_persist_raw_query(db, ctx):
+    canary = "CUSTOMER-PART-LOOKUP-CANARY-8472-NOT-FOUND"
+    before = db.scalar(select(func.count()).select_from(SysAuditLog))
+
+    tools._search_parts(db, {"query": canary}, ctx)
+    tools._lookup_prices_bulk(db, {"queries": [canary]}, ctx)
+
+    after = db.scalar(select(func.count()).select_from(SysAuditLog))
+    audit_json = json.dumps(
+        [row.after_json for row in db.scalars(select(SysAuditLog)).all()],
+        ensure_ascii=False,
+    )
+    assert after == before
+    assert canary not in audit_json
+
+
 # ── v1.5.0：数据层工具接入 + 技能剧本 ──
 
 def _role_ctx(role, perms=None):
     return security.UserContext(user_id="u1", role=role, permissions=perms,
-                                is_authenticated=True)
+                                is_authenticated=True, authn="sys_user",
+                                token_version=0)
 
 
 def test_schema_registry_consistent():
@@ -81,11 +107,12 @@ def test_new_data_tools_smoke(db, ctx):
     assert "rows" in r and "summary" in r
 
 
-def test_maintenance_tools_page_gate(db):
+def test_maintenance_tools_page_gate(db, monkeypatch):
     """维保成本工具与 API 同口径：无 page_maintenance 权限 → 拒绝；有 → 放行。"""
     import app.config as cfg
     old = cfg.ENABLE_RBAC
     cfg.ENABLE_RBAC = True
+    monkeypatch.setattr(tools, "_reload_dispatch_context", lambda _db, ctx: ctx)
     try:
         sales = _role_ctx("sales", perms={"page_maintenance": False})
         for name, args in (("get_maintenance_board", {}),
@@ -102,11 +129,12 @@ def test_maintenance_tools_page_gate(db):
         cfg.ENABLE_RBAC = old
 
 
-def test_skills_role_filtered(db):
+def test_skills_role_filtered(db, monkeypatch):
     """技能按角色过滤：销售看不到老板速览/维保健康检查；get_skill 越权 → 报错。"""
     import app.config as cfg
     old = cfg.ENABLE_RBAC
     cfg.ENABLE_RBAC = True
+    monkeypatch.setattr(tools, "_reload_dispatch_context", lambda _db, ctx: ctx)
     try:
         sales = _role_ctx("sales", perms={"page_maintenance": False})
         got = {s["skill"] for s in tools.dispatch(db, "list_skills", {}, sales)["skills"]}

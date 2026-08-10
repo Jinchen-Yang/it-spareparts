@@ -5,7 +5,12 @@ from app.services import agent_files
 
 
 def _ctx(user_id, role="sales"):
-    return security.UserContext(user_id=user_id, role=role, is_authenticated=True)
+    return security.UserContext(
+        user_id=user_id,
+        role=role,
+        is_authenticated=True,
+        authn="sys_user",
+    )
 
 
 def test_upload_records_owner_and_owns_logic(db):
@@ -14,7 +19,7 @@ def test_upload_records_owner_and_owns_logic(db):
     assert agent_files.owner_of(fid) == "alice"
     assert tools._owns(_ctx("alice"), fid) is True            # 本人
     assert tools._owns(_ctx("bob"), fid) is False             # 他人
-    assert tools._owns(_ctx("bob", role="admin"), fid) is True  # admin 例外
+    assert tools._owns(_ctx("bob", role="admin"), fid) is False  # admin 也只能本人
     assert tools._owns(_ctx("bob"), None) is True             # 无 file_id 放行
 
 
@@ -35,9 +40,21 @@ def test_readonly_cannot_read_others_file(db):
     fid = agent_files.save_upload(b"secret quote", "q.txt", "alice")["file_id"]
     assert tools._owns(_ctx("bob", role="readonly"), fid) is False        # readonly 也需本人
     assert tools._read_document(db, {"file_id": fid}, _ctx("bob", role="readonly")) == tools._NO_ACCESS
-    # admin / boss 仍可越权读（运维/审计），readonly 不行
-    assert tools._owns(_ctx("bob", role="admin"), fid) is True
-    assert tools._owns(_ctx("bob", role="boss"), fid) is True
+    # 所有普通角色统一 owner-only，避免角色特权形成 IDOR 旁路。
+    assert tools._owns(_ctx("bob", role="admin"), fid) is False
+    assert tools._owns(_ctx("bob", role="boss"), fid) is False
+
+
+def test_unstable_subject_never_owns_named_file(db):
+    fid = agent_files.save_upload(b"secret quote", "q.txt", "alice")["file_id"]
+    shared = security.UserContext(
+        user_id="alice",
+        role="admin",
+        is_authenticated=True,
+        authn="shared",
+    )
+
+    assert tools._owns(shared, fid) is False
 
 
 def test_generated_report_owned_by_creator(db):

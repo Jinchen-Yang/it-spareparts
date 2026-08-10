@@ -1,6 +1,8 @@
 """对话生成中枢 RunHub：缓冲回放 + 多订阅者扇出 + 取消 + 注册表（可重连直播的核心）。"""
 from app.api.chat_sessions import (
+    _MAX_SUBSCRIBERS_PER_RUN,
     _RunHub,
+    _SUBSCRIBER_QUEUE_CAP,
     acquire_session,
     get_run,
     is_generating,
@@ -62,3 +64,34 @@ def test_registry_acquire_release_cancel():
     release_session(sid)
     assert not is_generating(sid)
     assert request_cancel(sid) is False    # 已无生成
+
+
+def test_slow_subscriber_is_bounded_evicted_and_signalled_without_blocking_publish():
+    hub = _RunHub()
+    _, q = hub.subscribe()
+    assert q is not None and q.maxsize == _SUBSCRIBER_QUEUE_CAP
+
+    for index in range(_SUBSCRIBER_QUEUE_CAP + 1):
+        hub.publish({"type": "delta", "text": str(index)})
+
+    assert q.get_nowait() == {"type": "subscriber_evicted", "retry_attach": True}
+    assert q.get_nowait() is None
+    assert q not in hub._subs
+
+
+def test_run_hub_caps_subscriber_fanout_and_finish_handles_full_queues():
+    hub = _RunHub()
+    queues = [hub.subscribe()[1] for _ in range(_MAX_SUBSCRIBERS_PER_RUN)]
+    replay, denied = hub.subscribe()
+    assert replay == [{"type": "subscriber_evicted", "retry_attach": True}]
+    assert denied is None
+
+    for index in range(_SUBSCRIBER_QUEUE_CAP):
+        hub.publish({"type": "delta", "text": str(index)})
+    hub.finish()
+
+    for q in queues:
+        assert q is not None
+        assert q.get_nowait() == {"type": "subscriber_evicted", "retry_attach": True}
+        assert q.get_nowait() is None
+    assert hub._subs == []

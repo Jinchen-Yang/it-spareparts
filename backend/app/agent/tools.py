@@ -6,21 +6,24 @@
 - 输出过 apply_field_visibility（RBAC 关闭时原样；将来收紧销售/采购可见字段零改动）。
 """
 import hashlib
+import ipaddress
 import json
 import logging
+import os
 import re
-from collections.abc import Callable
-from copy import deepcopy
-from dataclasses import dataclass
+import uuid
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 from types import MappingProxyType
 from urllib.parse import urlsplit
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import security
-from app.agent import skills
+from app import config, security
+from app.agent import limits, skills
 from app.config import get_settings
 from app.services import (agent_files, inventory, maintenance_cost, part_overview,
                           part_resolver, profit, purchase_analysis, purchase_query)
@@ -48,6 +51,12 @@ _FILTER_CHARS_MAX = 500
 _SKILL_ID_CHARS_MAX = 128
 _REPORT_COLUMNS_MAX = 64
 _REPORT_CELL_CHARS_MAX = 2_000
+_SCALAR_CELL_SCHEMA = {"type": ["string", "integer", "number", "boolean", "null"]}
+
+# Backward-compatible module projections; the single enforcement source is ``agent.limits``.
+MAX_PUBLIC_TRACE_ENTRIES = limits.MAX_PUBLIC_TRACE_ENTRIES
+MAX_ARTIFACT_IDS_PER_TRACE_ENTRY = limits.MAX_ARTIFACT_IDS_PER_TRACE_ENTRY
+MAX_PUBLIC_ARG_KEYS = limits.MAX_PUBLIC_ARG_KEYS
 
 
 class ToolEffect(str, Enum):
@@ -58,14 +67,6 @@ class ToolEffect(str, Enum):
     ARTIFACT_CREATE = "artifact_create"
 
 
-class EgressEffect(str, Enum):
-    """Highest data boundary a capability may cross."""
-
-    NONE = "none"
-    MODEL_CONTEXT = "model_context"
-    EXTERNAL_PROVIDER = "external_provider"
-
-
 class DataSensitivity(str, Enum):
     """Highest-sensitivity data a capability can place in a provider context."""
 
@@ -74,11 +75,172 @@ class DataSensitivity(str, Enum):
     CUSTOMER_FILE = "customer_file"
 
 
+class EgressSource(str, Enum):
+    """Logical payload source on one declared egress edge."""
+
+    CONVERSATION_CONTEXT = "conversation_context"
+    TOOL_RESULT = "tool_result"
+    CUSTOMER_FILE = "customer_file"
+    VISION_OCR = "vision_ocr"
+
+
+class EgressDestination(str, Enum):
+    """Independently configured provider trust zones."""
+
+    PRIMARY_MODEL = "primary_model"
+    VISION_PROVIDER = "vision_provider"
+
+
+EGRESS_POLICY_VERSION = "egress-v1"
+RETENTION_NO_ADDITIONAL_EGRESS_ARCHIVE = "no_additional_egress_archive_v1"
+ALLOWED_RETENTION_POLICIES = frozenset({RETENTION_NO_ADDITIONAL_EGRESS_ARCHIVE})
+PURPOSE_BUSINESS_ASSISTANCE = "business_assistance"
+PURPOSE_DOCUMENT_ASSISTANCE = "document_assistance"
+PURPOSE_CONVERSATION_ASSISTANCE = "conversation_assistance"
+PROJECTION_TOOL_RESULT_JSON = "tool_result_json_v1"
+PROJECTION_CUSTOMER_FILE_RESULT_JSON = "customer_file_result_json_v1"
+PROJECTION_CONVERSATION_JSON = "conversation_messages_json_v1"
+PROJECTION_VISION_INPUT = "vision_input_binary_v1"
+PROJECTION_VISION_OCR_RESULT = "vision_ocr_result_json_v1"
+BUSINESS_RESULT_MAX_BYTES = limits.BUSINESS_RESULT_MAX_BYTES
+CUSTOMER_FILE_RESULT_MAX_BYTES = limits.CUSTOMER_FILE_RESULT_MAX_BYTES
+CONVERSATION_CONTEXT_MAX_BYTES = limits.CONVERSATION_CONTEXT_MAX_BYTES
+VISION_INPUT_MAX_BYTES = limits.VISION_INPUT_MAX_BYTES
+VISION_OCR_RESULT_MAX_BYTES = limits.VISION_OCR_RESULT_MAX_BYTES
+
+
+@dataclass(frozen=True)
+class EgressEdge:
+    """One immutable data-flow edge evaluated before a capability is exposed or run."""
+
+    source: EgressSource
+    destination: EgressDestination
+    sensitivity: DataSensitivity
+    purpose: str
+    projection_id: str
+    max_bytes: int
+    policy_version: str
+    retention_policy: str
+
+
+EGRESS_EDGE_CONTRACT_REGISTRY = frozenset({
+    # Read-only business/system results returned to the primary assistant model.
+    EgressEdge(
+        source=EgressSource.TOOL_RESULT,
+        destination=EgressDestination.PRIMARY_MODEL,
+        sensitivity=DataSensitivity.INTERNAL,
+        purpose=PURPOSE_BUSINESS_ASSISTANCE,
+        projection_id=PROJECTION_TOOL_RESULT_JSON,
+        max_bytes=BUSINESS_RESULT_MAX_BYTES,
+        policy_version=EGRESS_POLICY_VERSION,
+        retention_policy=RETENTION_NO_ADDITIONAL_EGRESS_ARCHIVE,
+    ),
+    EgressEdge(
+        source=EgressSource.TOOL_RESULT,
+        destination=EgressDestination.PRIMARY_MODEL,
+        sensitivity=DataSensitivity.BUSINESS_CONFIDENTIAL,
+        purpose=PURPOSE_BUSINESS_ASSISTANCE,
+        projection_id=PROJECTION_TOOL_RESULT_JSON,
+        max_bytes=BUSINESS_RESULT_MAX_BYTES,
+        policy_version=EGRESS_POLICY_VERSION,
+        retention_policy=RETENTION_NO_ADDITIONAL_EGRESS_ARCHIVE,
+    ),
+    # Customer-file projections have a distinct purpose, projection and byte ceiling.
+    EgressEdge(
+        source=EgressSource.CUSTOMER_FILE,
+        destination=EgressDestination.PRIMARY_MODEL,
+        sensitivity=DataSensitivity.CUSTOMER_FILE,
+        purpose=PURPOSE_DOCUMENT_ASSISTANCE,
+        projection_id=PROJECTION_CUSTOMER_FILE_RESULT_JSON,
+        max_bytes=CUSTOMER_FILE_RESULT_MAX_BYTES,
+        policy_version=EGRESS_POLICY_VERSION,
+        retention_policy=RETENTION_NO_ADDITIONAL_EGRESS_ARCHIVE,
+    ),
+    # All conversation history is conservatively customer-file sensitive in v1.
+    EgressEdge(
+        source=EgressSource.CONVERSATION_CONTEXT,
+        destination=EgressDestination.PRIMARY_MODEL,
+        sensitivity=DataSensitivity.CUSTOMER_FILE,
+        purpose=PURPOSE_CONVERSATION_ASSISTANCE,
+        projection_id=PROJECTION_CONVERSATION_JSON,
+        max_bytes=CONVERSATION_CONTEXT_MAX_BYTES,
+        policy_version=EGRESS_POLICY_VERSION,
+        retention_policy=RETENTION_NO_ADDITIONAL_EGRESS_ARCHIVE,
+    ),
+    # Vision input and its OCR result are separate, explicitly admitted boundaries.
+    EgressEdge(
+        source=EgressSource.CUSTOMER_FILE,
+        destination=EgressDestination.VISION_PROVIDER,
+        sensitivity=DataSensitivity.CUSTOMER_FILE,
+        purpose=PURPOSE_DOCUMENT_ASSISTANCE,
+        projection_id=PROJECTION_VISION_INPUT,
+        max_bytes=VISION_INPUT_MAX_BYTES,
+        policy_version=EGRESS_POLICY_VERSION,
+        retention_policy=RETENTION_NO_ADDITIONAL_EGRESS_ARCHIVE,
+    ),
+    EgressEdge(
+        source=EgressSource.VISION_OCR,
+        destination=EgressDestination.PRIMARY_MODEL,
+        sensitivity=DataSensitivity.CUSTOMER_FILE,
+        purpose=PURPOSE_DOCUMENT_ASSISTANCE,
+        projection_id=PROJECTION_VISION_OCR_RESULT,
+        max_bytes=VISION_OCR_RESULT_MAX_BYTES,
+        policy_version=EGRESS_POLICY_VERSION,
+        retention_policy=RETENTION_NO_ADDITIONAL_EGRESS_ARCHIVE,
+    ),
+})
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderProfileSnapshot:
+    """Immutable, non-secret request authority captured from one Settings object."""
+
+    destination: EgressDestination
+    adapter: str
+    origin: str
+    base_path: str
+    model: str
+    request_options_json: str
+    timeout_seconds: float
+    max_retries: int
+    max_tokens: int | None
+    max_pages: int | None
+    enabled: bool
+    admitted: bool
+
+    @property
+    def base_url(self) -> str:
+        return f"{self.origin}{self.base_path}"
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimePolicyLease:
+    """One Agent-run policy epoch, including exact primary/Vision profile snapshots.
+
+    API keys are kept only in process memory, excluded from repr/equality/fingerprints, and never
+    copied into telemetry. Capturing them with the profile removes a settings TOCTOU while each
+    guarded HTTP attempt still checks that the live credential has not changed.
+    """
+
+    fingerprint: str
+    primary: ProviderProfileSnapshot
+    vision: ProviderProfileSnapshot
+    max_tool_iters: int
+    primary_api_key: str = field(repr=False, compare=False)
+    vision_api_key: str = field(repr=False, compare=False)
+
+
 ALLOWED_TOOL_EFFECTS = frozenset(ToolEffect)
-ALLOWED_EGRESS_EFFECTS = frozenset(EgressEffect)
+ALLOWED_EGRESS_SOURCES = frozenset(EgressSource)
+ALLOWED_EGRESS_DESTINATIONS = frozenset(EgressDestination)
 ALLOWED_DATA_SENSITIVITIES = frozenset(DataSensitivity)
+_SENSITIVITY_RANK = MappingProxyType({
+    DataSensitivity.INTERNAL: 0,
+    DataSensitivity.BUSINESS_CONFIDENTIAL: 1,
+    DataSensitivity.CUSTOMER_FILE: 2,
+})
 STABLE_SUBJECT_EFFECTS = frozenset({ToolEffect.FILE_READ, ToolEffect.ARTIFACT_CREATE})
-ToolHandler = Callable[[Session, dict, security.UserContext], dict]
+ToolHandler = Callable[..., dict]
 ToolPermission = Callable[[security.UserContext], bool]
 
 
@@ -126,10 +288,10 @@ ToolArgumentValidator = Callable[[object, dict, ToolBudget], ToolValidationFailu
 class ToolSpec:
     """Single registration unit for one model-visible server capability."""
 
-    schema: dict
+    schema: Mapping[str, object]
     handler: ToolHandler
     effects: frozenset[ToolEffect]
-    egress: EgressEffect
+    egress: tuple[EgressEdge, ...]
     sensitivity: DataSensitivity
     permission_id: str
     permission: ToolPermission
@@ -141,7 +303,7 @@ class ToolSpec:
     @property
     def name(self) -> str:
         function = self.schema.get("function")
-        if not isinstance(function, dict):
+        if not isinstance(function, Mapping):
             return ""
         name = function.get("name")
         return name if isinstance(name, str) else ""
@@ -266,15 +428,16 @@ _OPENAI_SCHEMAS: list[dict] = [
                     "sheet": {"type": "string", "description": "sheet 名，省略=第一个；不存在则新建"},
                     "cells": {
                         "type": "array",
+                        "minItems": 1,
                         "description": "[{row:3, col:'G', value:1700}, ...] 最多3000个",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "row": {"type": "integer"},
+                                "row": {"type": "integer", "minimum": 1, "maximum": 1_048_576},
                                 "col": {"type": ["string", "integer"]},
-                                "value": {},
+                                "value": _SCALAR_CELL_SCHEMA,
                             },
-                            "required": ["row", "col"],
+                            "required": ["row", "col", "value"],
                         },
                     },
                     "output_name": {"type": "string", "description": "下载文件名，如 '报价单-XX公司.xlsx'"},
@@ -332,9 +495,11 @@ _OPENAI_SCHEMAS: list[dict] = [
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "报表标题，可省略，如 'XX公司整机配置报价单'"},
-                    "headers": {"type": "array", "items": {"type": "string"},
+                    "headers": {"type": "array", "minItems": 1,
+                                "items": {"type": "string"},
                                 "description": "列名，如 ['序号','部件','品牌','型号','数量','匹配PN','近15天采购均价','库存','近期成交参考价','备注']"},
-                    "rows": {"type": "array", "items": {"type": "array"},
+                    "rows": {"type": "array", "items": {
+                                "type": "array", "items": _SCALAR_CELL_SCHEMA},
                              "description": "数据行，每行一个数组，顺序与 headers 对齐"},
                     "money_cols": {"type": "array", "items": {"type": "integer"},
                                    "description": "金额列的 0 基下标，如 [6,8]"},
@@ -568,16 +733,19 @@ _OPENAI_SCHEMAS: list[dict] = [
 
 def _jsonable(data):
     """date/Decimal 等转 JSON 可序列化（工具结果要回灌给模型）。"""
-    return json.loads(json.dumps(data, ensure_ascii=False, default=str))
+    return json.loads(json.dumps(data, ensure_ascii=False, default=str, allow_nan=False))
 
 
-def _parse_date(v) -> date | None:
-    if not v:
+def _parse_date(value: object) -> date | None:
+    """Parse one optional canonical ISO date without silently broadening a query."""
+    if value is None:
         return None
-    try:
-        return date.fromisoformat(str(v))
-    except ValueError:
-        return None
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise ValueError("invalid ISO date")
+    parsed = date.fromisoformat(value)
+    if parsed.isoformat() != value:
+        raise ValueError("invalid ISO date")
+    return parsed
 
 
 def _search_parts(db: Session, args: dict, ctx: security.UserContext) -> dict:
@@ -585,7 +753,16 @@ def _search_parts(db: Session, args: dict, ctx: security.UserContext) -> dict:
     if not q:
         return {"error": "query 不能为空"}
     limit = min(int(args.get("limit") or 10), _SEARCH_LIMIT_MAX)
-    return part_resolver.resolve(db, q, limit=limit, operated_by=ctx.role)
+    # Agent tools are declared BUSINESS_READ.  Resolver miss telemetry normally persists the
+    # caller's raw query, which would both violate that effect contract and retain model/user
+    # supplied customer text.  Dispatch already emits a value-free, shape-only audit event.
+    return part_resolver.resolve(
+        db,
+        q,
+        limit=limit,
+        operated_by=ctx.role,
+        log_miss=False,
+    )
 
 
 def _get_part_overview(db: Session, args: dict, ctx: security.UserContext) -> dict:
@@ -604,8 +781,11 @@ def _get_profit_ranking(db: Session, args: dict, ctx: security.UserContext) -> d
     dim = args.get("dimension", "part")
     if dim not in ("part", "salesperson", "customer"):
         dim = "part"
-    data = profit.aggregate(db, dim, _parse_date(args.get("date_from")),
-                            _parse_date(args.get("date_to")), False, ctx)
+    date_from = _parse_date(args.get("date_from"))
+    date_to = _parse_date(args.get("date_to"))
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise ValueError("invalid date range")
+    data = profit.aggregate(db, dim, date_from, date_to, False, ctx)
     rows = data.get("rows", [])
     if len(rows) > _RANK_ROWS:
         data = {**data, "rows": rows[:_RANK_ROWS],
@@ -614,19 +794,17 @@ def _get_profit_ranking(db: Session, args: dict, ctx: security.UserContext) -> d
 
 
 def _owns(ctx: security.UserContext, file_id: str | None) -> bool:
-    """文件归属校验：全量角色(admin/boss/readonly/RBAC关闭的 phase1)放行；
-    否则需创建者==当前用户。防越权读他人上传的报价/合同（主要拦 sales 互看）。"""
+    """Named files are owner-only for every role and require a stable authenticated subject."""
     if not file_id:
         return True
-    if ctx.role in security.FULL_SCOPE_ROLES:
-        return True
+    if ctx.authn != "sys_user" or not ctx.user_id:
+        return False
     try:
         owner = agent_files.owner_of(file_id)
     except agent_files.FileError:
-        # 文件不存在也按"无权"处理（TOOLS-4）：让"不存在"与"非本人"返回不可区分的拒绝，
-        # 堵住用 12 位 file_id 探测他人文件是否存在的 oracle。全量角色已在上面提前放行。
+        # Missing and other-owner IDs are intentionally indistinguishable.
         return False
-    return owner == ctx.user_id
+    return bool(owner) and owner == ctx.user_id
 
 
 _NO_ACCESS = {"error": "无权访问该文件（非本人上传/生成）"}
@@ -658,7 +836,13 @@ def _lookup_prices_bulk(db: Session, args: dict, ctx: security.UserContext) -> d
         q = str(raw).strip()
         if not q:
             continue
-        r = part_resolver.resolve(db, q, limit=3, operated_by=ctx.role)
+        r = part_resolver.resolve(
+            db,
+            q,
+            limit=3,
+            operated_by=ctx.role,
+            log_miss=False,
+        )
         cands = [{"pn_std": i["pn_std"], "description": i["description"], "score": i["score"]}
                  for i in r["items"][:3]]
         if not r["items"] or r["low_confidence"]:
@@ -708,11 +892,35 @@ def _read_document_with_vision(
     db: Session,
     args: dict,
     ctx: security.UserContext,
+    *,
+    _policy_lease: RuntimePolicyLease,
 ) -> dict:
     fid = str(args.get("file_id", ""))
     if not _owns(ctx, fid):
         return _NO_ACCESS
-    return agent_files.read_document_with_vision(fid)
+    spec = _SPEC_BY_NAME.get("read_document_with_vision")
+
+    def authorize_vision_attempt() -> bool:
+        """Refresh identity, page, capability and concrete Artifact owner per HTTP attempt."""
+        try:
+            live_ctx = refresh_runtime_context(db, ctx)
+            return bool(
+                live_ctx is not None
+                and live_ctx == ctx
+                and security.page_allowed(live_ctx, "page_chat")
+                and isinstance(spec, ToolSpec)
+                and _allowed(spec, live_ctx)
+                and _schema_egress_allowed(spec)
+                and _owns(live_ctx, fid)
+            )
+        except Exception:  # noqa: BLE001 -- authorization failures always deny without values
+            return False
+
+    return agent_files.read_document_with_vision(
+        fid,
+        policy_lease=_policy_lease,
+        attempt_authorizer=authorize_vision_attempt,
+    )
 
 
 def _write_report(db: Session, args: dict, ctx: security.UserContext) -> dict:
@@ -852,21 +1060,42 @@ def _permission_policy_id(permission: ToolPermission) -> str | None:
     return None
 
 
-def _index_schemas(schemas: list[dict]) -> dict[str, dict]:
-    indexed: dict[str, dict] = {}
+def _freeze_json(value: object) -> object:
+    """Return a recursively immutable canonical JSON value."""
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _thaw_json(value: object) -> object:
+    """Return a fresh mutable JSON projection for SDK/model-facing callers."""
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
+def _index_schemas(schemas: list[dict]) -> dict[str, Mapping[str, object]]:
+    indexed: dict[str, Mapping[str, object]] = {}
     for schema in schemas:
         function = schema.get("function")
         name = function.get("name") if isinstance(function, dict) else None
         if not isinstance(name, str) or not name or name in indexed:
             raise RuntimeError("Agent tool schemas must have unique non-empty names")
-        indexed[name] = schema
+        frozen = _freeze_json(schema)
+        if not isinstance(frozen, Mapping):  # pragma: no cover - input is statically a dict
+            raise RuntimeError("Agent tool schema must be an object")
+        indexed[name] = frozen
     return indexed
 
 
 _SCHEMA_BY_NAME = _index_schemas(_OPENAI_SCHEMAS)
 
 
-def _schema(name: str) -> dict:
+def _schema(name: str) -> Mapping[str, object]:
     try:
         return _SCHEMA_BY_NAME[name]
     except KeyError as exc:  # import-time wiring defect, never a user-facing error
@@ -876,6 +1105,67 @@ def _schema(name: str) -> dict:
 def _effects(*effects: ToolEffect) -> frozenset[ToolEffect]:
     """Build an immutable capability-effect declaration."""
     return frozenset(effects)
+
+
+def _primary_egress(
+    sensitivity: DataSensitivity,
+    source: EgressSource = EgressSource.TOOL_RESULT,
+) -> tuple[EgressEdge, ...]:
+    customer_file = source is EgressSource.CUSTOMER_FILE
+    return (EgressEdge(
+        source=source,
+        destination=EgressDestination.PRIMARY_MODEL,
+        sensitivity=sensitivity,
+        purpose=(PURPOSE_DOCUMENT_ASSISTANCE if customer_file else PURPOSE_BUSINESS_ASSISTANCE),
+        projection_id=(
+            PROJECTION_CUSTOMER_FILE_RESULT_JSON
+            if customer_file
+            else PROJECTION_TOOL_RESULT_JSON
+        ),
+        max_bytes=(CUSTOMER_FILE_RESULT_MAX_BYTES if customer_file else BUSINESS_RESULT_MAX_BYTES),
+        policy_version=EGRESS_POLICY_VERSION,
+        retention_policy=RETENTION_NO_ADDITIONAL_EGRESS_ARCHIVE,
+    ),)
+
+
+def _conversation_context_edge() -> EgressEdge:
+    return EgressEdge(
+        source=EgressSource.CONVERSATION_CONTEXT,
+        destination=EgressDestination.PRIMARY_MODEL,
+        sensitivity=DataSensitivity.CUSTOMER_FILE,
+        purpose=PURPOSE_CONVERSATION_ASSISTANCE,
+        projection_id=PROJECTION_CONVERSATION_JSON,
+        max_bytes=CONVERSATION_CONTEXT_MAX_BYTES,
+        policy_version=EGRESS_POLICY_VERSION,
+        retention_policy=RETENTION_NO_ADDITIONAL_EGRESS_ARCHIVE,
+    )
+
+
+def _vision_egress() -> tuple[EgressEdge, ...]:
+    # The original customer bytes/images go only to Vision. The extracted OCR text then crosses
+    # a separate boundary into the primary model context; both edges must be authorized.
+    return (
+        EgressEdge(
+            source=EgressSource.CUSTOMER_FILE,
+            destination=EgressDestination.VISION_PROVIDER,
+            sensitivity=DataSensitivity.CUSTOMER_FILE,
+            purpose=PURPOSE_DOCUMENT_ASSISTANCE,
+            projection_id=PROJECTION_VISION_INPUT,
+            max_bytes=VISION_INPUT_MAX_BYTES,
+            policy_version=EGRESS_POLICY_VERSION,
+            retention_policy=RETENTION_NO_ADDITIONAL_EGRESS_ARCHIVE,
+        ),
+        EgressEdge(
+            source=EgressSource.VISION_OCR,
+            destination=EgressDestination.PRIMARY_MODEL,
+            sensitivity=DataSensitivity.CUSTOMER_FILE,
+            purpose=PURPOSE_DOCUMENT_ASSISTANCE,
+            projection_id=PROJECTION_VISION_OCR_RESULT,
+            max_bytes=VISION_OCR_RESULT_MAX_BYTES,
+            policy_version=EGRESS_POLICY_VERSION,
+            retention_policy=RETENTION_NO_ADDITIONAL_EGRESS_ARCHIVE,
+        ),
+    )
 
 
 _ARGS_INVALID = ToolValidationFailure(
@@ -907,7 +1197,7 @@ def _json_shape(value: object, depth: int = 1) -> tuple[int, int]:
 
 
 def _schema_type_matches(value: object, expected: object) -> bool:
-    expected_types = expected if isinstance(expected, list) else [expected]
+    expected_types = expected if isinstance(expected, (list, tuple)) else [expected]
     for item in expected_types:
         if item == "object" and isinstance(value, dict):
             return True
@@ -928,7 +1218,7 @@ def _schema_type_matches(value: object, expected: object) -> bool:
 
 def _matches_schema(value: object, schema: object) -> bool:
     """Small fail-closed validator for the JSON-Schema subset used by Agent tools."""
-    if not isinstance(schema, dict):
+    if not isinstance(schema, Mapping):
         return False
     if not schema:  # explicitly unconstrained JSON value, still covered by generic budgets
         return True
@@ -937,10 +1227,17 @@ def _matches_schema(value: object, schema: object) -> bool:
         return False
     if "enum" in schema and value not in schema["enum"]:
         return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        minimum = schema.get("minimum")
+        maximum = schema.get("maximum")
+        if isinstance(minimum, (int, float)) and value < minimum:
+            return False
+        if isinstance(maximum, (int, float)) and value > maximum:
+            return False
     if isinstance(value, dict) and expected == "object":
         properties = schema.get("properties", {})
         required = schema.get("required", [])
-        if not isinstance(properties, dict) or not isinstance(required, list):
+        if not isinstance(properties, Mapping) or not isinstance(required, (list, tuple)):
             return False
         if any(key not in value for key in required):
             return False
@@ -949,9 +1246,43 @@ def _matches_schema(value: object, schema: object) -> bool:
             return False
         return all(_matches_schema(item, properties[key]) for key, item in value.items())
     if isinstance(value, list) and expected == "array":
+        minimum_items = schema.get("minItems")
+        maximum_items = schema.get("maxItems")
+        if isinstance(minimum_items, int) and len(value) < minimum_items:
+            return False
+        if isinstance(maximum_items, int) and len(value) > maximum_items:
+            return False
         item_schema = schema.get("items")
         return item_schema is None or all(_matches_schema(item, item_schema) for item in value)
     return True
+
+
+def _valid_file_reference(value: object) -> bool:
+    if not isinstance(value, str) or value != value.strip():
+        return False
+    if re.fullmatch(r"[a-f0-9]{12}", value):
+        return True
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return False
+    return value.lower() in {str(parsed), parsed.hex}
+
+
+def _valid_excel_column(value: object) -> bool:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return 1 <= value <= 16_384
+    if not isinstance(value, str) or value != value.strip() or not value:
+        return False
+    if value.isdigit():
+        return 1 <= int(value) <= 16_384
+    letters = value.upper()
+    if not re.fullmatch(r"[A-Z]{1,3}", letters):
+        return False
+    number = 0
+    for char in letters:
+        number = number * 26 + ord(char) - ord("A") + 1
+    return 1 <= number <= 16_384
 
 
 def _validate_tool_arguments(
@@ -961,6 +1292,22 @@ def _validate_tool_arguments(
 ) -> ToolValidationFailure | None:
     """Validate schema and resource budgets before any handler or file/database operation."""
     if not isinstance(args, dict) or not _matches_schema(args, parameters):
+        return _ARGS_INVALID
+    try:
+        date_from = _parse_date(args.get("date_from"))
+        date_to = _parse_date(args.get("date_to"))
+    except ValueError:
+        return _ARGS_INVALID
+    if date_from is not None and date_to is not None and date_from > date_to:
+        return _ARGS_INVALID
+    for key in ("file_id", "base_file_id"):
+        if key in args and not _valid_file_reference(args[key]):
+            return _ARGS_INVALID
+    cells = args.get("cells")
+    if isinstance(cells, list) and any(
+        not isinstance(cell, dict) or not _valid_excel_column(cell.get("col"))
+        for cell in cells
+    ):
         return _ARGS_INVALID
     try:
         encoded = json.dumps(
@@ -1162,7 +1509,7 @@ def _spec(
     name: str,
     handler: ToolHandler,
     effects: frozenset[ToolEffect],
-    egress: EgressEffect,
+    egress: tuple[EgressEdge, ...],
     sensitivity: DataSensitivity,
     permission_id: str,
     permission: ToolPermission,
@@ -1188,66 +1535,71 @@ def _spec(
 # implementation detail that a read may write an access log or that an Artifact gets a new ID.
 TOOL_SPECS: tuple[ToolSpec, ...] = (
     _spec("search_parts", _search_parts, _effects(ToolEffect.BUSINESS_READ),
-          EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+          _primary_egress(DataSensitivity.BUSINESS_CONFIDENTIAL), DataSensitivity.BUSINESS_CONFIDENTIAL,
           "page:page_parts", _PagePermission("page_parts")),
     _spec("get_part_overview", _get_part_overview, _effects(ToolEffect.BUSINESS_READ),
-          EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+          _primary_egress(DataSensitivity.BUSINESS_CONFIDENTIAL), DataSensitivity.BUSINESS_CONFIDENTIAL,
           "page:page_parts", _PagePermission("page_parts")),
     _spec("inspect_file", _inspect_file, _effects(ToolEffect.FILE_READ),
-          EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow),
+          _primary_egress(DataSensitivity.CUSTOMER_FILE, EgressSource.CUSTOMER_FILE),
+          DataSensitivity.CUSTOMER_FILE, "allow", _allow),
     _spec("read_file_rows", _read_file_rows, _effects(ToolEffect.FILE_READ),
-          EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow),
+          _primary_egress(DataSensitivity.CUSTOMER_FILE, EgressSource.CUSTOMER_FILE),
+          DataSensitivity.CUSTOMER_FILE, "allow", _allow),
     _spec("lookup_prices_bulk", _lookup_prices_bulk, _effects(ToolEffect.BUSINESS_READ),
-          EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+          _primary_egress(DataSensitivity.BUSINESS_CONFIDENTIAL), DataSensitivity.BUSINESS_CONFIDENTIAL,
           "page:page_parts", _PagePermission("page_parts")),
     _spec("write_excel", _write_excel,
           _effects(ToolEffect.FILE_READ, ToolEffect.ARTIFACT_CREATE),
-          EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow),
+          _primary_egress(DataSensitivity.CUSTOMER_FILE, EgressSource.CUSTOMER_FILE),
+          DataSensitivity.CUSTOMER_FILE, "allow", _allow),
     _spec("read_document", _read_document, _effects(ToolEffect.FILE_READ),
-          EgressEffect.MODEL_CONTEXT, DataSensitivity.CUSTOMER_FILE, "allow", _allow),
+          _primary_egress(DataSensitivity.CUSTOMER_FILE, EgressSource.CUSTOMER_FILE),
+          DataSensitivity.CUSTOMER_FILE, "allow", _allow),
     _spec("read_document_with_vision", _read_document_with_vision,
-          _effects(ToolEffect.FILE_READ), EgressEffect.EXTERNAL_PROVIDER,
+          _effects(ToolEffect.FILE_READ), _vision_egress(),
           DataSensitivity.CUSTOMER_FILE, "allow", _allow),
     _spec("write_report", _write_report, _effects(ToolEffect.ARTIFACT_CREATE),
-          EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+          _primary_egress(DataSensitivity.BUSINESS_CONFIDENTIAL), DataSensitivity.BUSINESS_CONFIDENTIAL,
           "allow", _allow),
     _spec("list_recent_purchases", _list_recent_purchases,
-          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          _effects(ToolEffect.BUSINESS_READ), _primary_egress(DataSensitivity.BUSINESS_CONFIDENTIAL),
           DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_purchases",
           _PagePermission("page_purchases")),
     _spec("get_profit_ranking", _get_profit_ranking,
-          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          _effects(ToolEffect.BUSINESS_READ), _primary_egress(DataSensitivity.BUSINESS_CONFIDENTIAL),
           DataSensitivity.BUSINESS_CONFIDENTIAL,
           "page:page_profit:deny_scoped_sales",
-          _PagePermission("page_profit", deny_scoped_sales=True)),
+          _PagePermission("page_profit", deny_scoped_sales=True),
+          implementation_version="2"),
     _spec("get_purchase_analysis", _get_purchase_analysis,
-          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          _effects(ToolEffect.BUSINESS_READ), _primary_egress(DataSensitivity.BUSINESS_CONFIDENTIAL),
           DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_purchases",
           _PagePermission("page_purchases")),
     _spec("get_inventory", _get_inventory, _effects(ToolEffect.BUSINESS_READ),
-          EgressEffect.MODEL_CONTEXT, DataSensitivity.BUSINESS_CONFIDENTIAL,
+          _primary_egress(DataSensitivity.BUSINESS_CONFIDENTIAL), DataSensitivity.BUSINESS_CONFIDENTIAL,
           "page:page_inventory", _PagePermission("page_inventory")),
     _spec("get_maintenance_board", _get_maintenance_board,
-          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          _effects(ToolEffect.BUSINESS_READ), _primary_egress(DataSensitivity.BUSINESS_CONFIDENTIAL),
           DataSensitivity.BUSINESS_CONFIDENTIAL,
           "page:page_maintenance:deny_scoped_sales",
           _PagePermission("page_maintenance", deny_scoped_sales=True)),
     _spec("get_maintenance_projects", _get_maintenance_projects,
-          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          _effects(ToolEffect.BUSINESS_READ), _primary_egress(DataSensitivity.BUSINESS_CONFIDENTIAL),
           DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_maintenance",
           _PagePermission("page_maintenance")),
     _spec("get_maintenance_lines", _get_maintenance_lines,
-          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          _effects(ToolEffect.BUSINESS_READ), _primary_egress(DataSensitivity.BUSINESS_CONFIDENTIAL),
           DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_maintenance",
           _PagePermission("page_maintenance")),
     _spec("get_cancellation_stats", _get_cancellation_stats,
-          _effects(ToolEffect.BUSINESS_READ), EgressEffect.MODEL_CONTEXT,
+          _effects(ToolEffect.BUSINESS_READ), _primary_egress(DataSensitivity.BUSINESS_CONFIDENTIAL),
           DataSensitivity.BUSINESS_CONFIDENTIAL, "page:page_purchases",
           _PagePermission("page_purchases")),
     _spec("list_skills", _list_skills, _effects(ToolEffect.BUSINESS_READ),
-          EgressEffect.MODEL_CONTEXT, DataSensitivity.INTERNAL, "allow", _allow),
+          _primary_egress(DataSensitivity.INTERNAL), DataSensitivity.INTERNAL, "allow", _allow),
     _spec("get_skill", _get_skill, _effects(ToolEffect.BUSINESS_READ),
-          EgressEffect.MODEL_CONTEXT, DataSensitivity.INTERNAL, "allow", _allow),
+          _primary_egress(DataSensitivity.INTERNAL), DataSensitivity.INTERNAL, "allow", _allow),
 )
 
 
@@ -1257,6 +1609,37 @@ def _valid_effects(effects: object) -> bool:
         and bool(effects)
         and all(isinstance(effect, ToolEffect) for effect in effects)
         and effects.issubset(ALLOWED_TOOL_EFFECTS)
+    )
+
+
+def _valid_egress(edges: object) -> bool:
+    return (
+        isinstance(edges, tuple)
+        and all(
+            isinstance(edge, EgressEdge)
+            and isinstance(edge.source, EgressSource)
+            and edge.source in ALLOWED_EGRESS_SOURCES
+            and isinstance(edge.destination, EgressDestination)
+            and edge.destination in ALLOWED_EGRESS_DESTINATIONS
+            and isinstance(edge.sensitivity, DataSensitivity)
+            and edge.sensitivity in ALLOWED_DATA_SENSITIVITIES
+            and isinstance(edge.purpose, str)
+            and bool(re.fullmatch(r"[a-z][a-z0-9_]{0,63}", edge.purpose))
+            and isinstance(edge.projection_id, str)
+            and bool(re.fullmatch(r"[a-z][a-z0-9_]{0,63}", edge.projection_id))
+            and isinstance(edge.max_bytes, int)
+            and not isinstance(edge.max_bytes, bool)
+            and edge.max_bytes > 0
+            and isinstance(edge.policy_version, str)
+            and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", edge.policy_version))
+            and isinstance(edge.retention_policy, str)
+            and edge.retention_policy in ALLOWED_RETENTION_POLICIES
+            # Metadata is an enforcement contract, not an extensible label. Future purposes,
+            # projections, versions or byte ceilings require an explicit code-review change to
+            # this immutable registry before they can become model-visible.
+            and edge in EGRESS_EDGE_CONTRACT_REGISTRY
+            for edge in edges
+        )
     )
 
 
@@ -1329,10 +1712,25 @@ def _valid_classification(spec: object) -> bool:
     return (
         isinstance(spec, ToolSpec)
         and _valid_effects(spec.effects)
-        and isinstance(spec.egress, EgressEffect)
-        and spec.egress in ALLOWED_EGRESS_EFFECTS
+        and _valid_egress(spec.egress)
+        # Empty is a structurally valid data-flow declaration, but this runtime exposes only
+        # model tools that return through at least one explicitly bounded primary-model edge.
+        and bool(spec.egress)
+        and any(
+            edge.destination is EgressDestination.PRIMARY_MODEL
+            and edge.source in {
+                EgressSource.TOOL_RESULT,
+                EgressSource.CUSTOMER_FILE,
+                EgressSource.VISION_OCR,
+            }
+            for edge in spec.egress
+        )
         and isinstance(spec.sensitivity, DataSensitivity)
         and spec.sensitivity in ALLOWED_DATA_SENSITIVITIES
+        and spec.sensitivity == max(
+            (edge.sensitivity for edge in spec.egress),
+            key=_SENSITIVITY_RANK.__getitem__,
+        )
         and isinstance(spec.permission_id, str)
         and bool(spec.permission_id)
         and _permission_policy_id(spec.permission) == spec.permission_id
@@ -1428,19 +1826,35 @@ def capability_policy_fingerprint(
         ):
             raise ValueError("Cannot fingerprint invalid Agent capability policy")
         function = spec.schema.get("function")
-        parameters = function.get("parameters") if isinstance(function, dict) else None
-        if not isinstance(parameters, dict):
+        parameters = function.get("parameters") if isinstance(function, Mapping) else None
+        if not isinstance(parameters, Mapping):
             raise ValueError("Cannot fingerprint Agent capability without parameters")
         names.add(spec.name)
         entries.append({
             "name": spec.name,
-            "parameters": parameters,
+            "parameters": _thaw_json(parameters),
             "handler": _callable_id(spec.handler),
             "validator": _callable_id(spec.validator),
             "implementation_version": spec.implementation_version,
             "budget": _budget_metadata(spec.budget),
             "effects": sorted(effect.value for effect in spec.effects),
-            "egress": spec.egress.value,
+            "egress": sorted(
+                ({
+                    "source": edge.source.value,
+                    "destination": edge.destination.value,
+                    "sensitivity": edge.sensitivity.value,
+                    "purpose": edge.purpose,
+                    "projection_id": edge.projection_id,
+                    "max_bytes": edge.max_bytes,
+                    "policy_version": edge.policy_version,
+                    "retention_policy": edge.retention_policy,
+                } for edge in spec.egress),
+                key=lambda edge: (
+                    edge["destination"], edge["source"], edge["sensitivity"],
+                    edge["purpose"], edge["projection_id"], edge["policy_version"],
+                    edge["retention_policy"], edge["max_bytes"],
+                ),
+            ),
             "sensitivity": spec.sensitivity.value,
             "permission_id": spec.permission_id,
             "enabled": spec.enabled,
@@ -1454,6 +1868,7 @@ def capability_policy_fingerprint(
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
+        allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
@@ -1462,13 +1877,23 @@ CAPABILITY_POLICY_FINGERPRINT = capability_policy_fingerprint()
 
 # Backward-compatible projections. New code must use TOOL_SPECS/tools_for/dispatch so an
 # accidentally appended schema or handler cannot bypass effect and permission policy.
-TOOLS: list[dict] = [deepcopy(spec.schema) for spec in TOOL_SPECS]
+TOOLS: list[dict] = [_thaw_json(spec.schema) for spec in TOOL_SPECS]
 _REGISTRY = MappingProxyType({spec.name: spec.handler for spec in TOOL_SPECS})
+
+
+def _runtime_subject_allowed(ctx: security.UserContext) -> bool:
+    # In RBAC deployments, shared/legacy credentials are not revocable named principals. They
+    # receive zero business/file capabilities; runtime identity refresh also stops before model
+    # egress, and dispatch always fails closed.
+    return (
+        not config.ENABLE_RBAC
+        or (ctx.authn == "sys_user" and bool(ctx.user_id))
+    )
 
 
 def _allowed(spec: object, ctx: security.UserContext) -> bool:
     """Evaluate one capability fail closed; permission bugs never widen access."""
-    if not isinstance(spec, ToolSpec):
+    if not isinstance(spec, ToolSpec) or not _runtime_subject_allowed(ctx):
         return False
     if (spec.enabled is not True or not _valid_classification(spec)
             or not _has_stable_subject(spec, ctx)):
@@ -1492,8 +1917,10 @@ def tools_for(ctx: security.UserContext) -> list[dict]:
     This is the model-facing half of the policy. ``dispatch`` repeats the same check because
     tool names and arguments returned by a model are untrusted input.
     """
+    if not _runtime_subject_allowed(ctx):
+        return []
     return [
-        deepcopy(spec.schema)
+        _thaw_json(spec.schema)
         for spec in TOOL_SPECS
         if _allowed(spec, ctx)
         and _schema_egress_allowed(spec)
@@ -1505,8 +1932,81 @@ def _capability_denied() -> dict:
     return {"error": "未知工具或无权限", "kind": "capability_denied"}
 
 
-def _external_file_egress_enabled() -> bool:
-    return bool(get_settings().agent_external_file_egress_enabled)
+def _identity_denied() -> dict:
+    return {
+        "error": "身份状态已失效，请重新登录",
+        "kind": "identity_denied",
+        "code": "AGENT_IDENTITY_STALE",
+        "retriable": False,
+    }
+
+
+def _reload_dispatch_context(
+    db: Session,
+    ctx: security.UserContext,
+) -> security.UserContext | None:
+    """Reload the active DB identity for every RBAC-enabled tool execution.
+
+    The request context is only a signed snapshot. A long-running Agent loop must observe a
+    role/permission change, account disable, or token revocation before the next handler runs.
+    """
+    from app import permissions
+    from app.db import SessionLocal
+    from app.models.system import SysUser
+
+    if not config.ENABLE_RBAC:
+        # Legacy deployments can still run business-read tools. Named file/artifact capabilities
+        # remain guarded by stable-subject and owner checks in _allowed/_owns.
+        return ctx
+    if (
+        ctx.authn != "sys_user"
+        or not ctx.user_id
+        or ctx.token_version is None
+    ):
+        return None
+    try:
+        # Never consult the business handler's long-lived transaction/identity map here. A fresh
+        # short session observes disable/role/permission/token-version commits made by another
+        # request before this exact security boundary, then closes immediately.
+        with SessionLocal() as identity_db:
+            user = identity_db.scalar(
+                select(SysUser)
+                .where(SysUser.username == ctx.user_id)
+                .execution_options(populate_existing=True)
+            )
+            if (
+                user is None
+                or not user.is_active
+                or int(user.token_version or 0) != int(ctx.token_version)
+            ):
+                return None
+            current_permissions = permissions.runtime_safe(
+                permissions.effective_for_user(user)
+            )
+            return security.UserContext(
+                user_id=user.username,
+                role=user.role,
+                salesperson_name=user.salesperson_name,
+                permissions=current_permissions,
+                ding_user_id=user.ding_user_id,
+                is_authenticated=True,
+                authn="sys_user",
+                token_version=int(user.token_version or 0),
+            )
+    except Exception as exc:  # noqa: BLE001 -- identity lookup errors fail closed
+        _log.error(
+            "agent identity reload failed exception_type=%s",
+            type(exc).__name__,
+        )
+        return None
+
+
+def refresh_runtime_context(
+    db: Session,
+    ctx: security.UserContext,
+) -> security.UserContext | None:
+    """Public fail-closed identity refresh used before every model call and dispatch."""
+    return _reload_dispatch_context(db, ctx)
 
 
 def _normalize_provider_origin(value: object, *, allow_path: bool) -> str | None:
@@ -1544,7 +2044,7 @@ def _normalize_provider_origin(value: object, *, allow_path: bool) -> str | None
     return f"{scheme}://{host}{suffix}"
 
 
-def _normalized_private_origins(raw: object) -> tuple[tuple[str, ...], int]:
+def _normalized_origins(raw: object) -> tuple[tuple[str, ...], int]:
     if not isinstance(raw, str) or not raw.strip():
         return (), 0
     origins: set[str] = set()
@@ -1560,92 +2060,670 @@ def _normalized_private_origins(raw: object) -> tuple[tuple[str, ...], int]:
     return tuple(sorted(origins)), invalid
 
 
-def _model_context_egress_enabled() -> bool:
-    settings = get_settings()
-    if not bool(settings.agent_model_context_egress_enabled):
+def _is_loopback_origin(origin: str) -> bool:
+    try:
+        hostname = urlsplit(origin).hostname
+        if hostname == "localhost":
+            return True
+        return bool(hostname and ipaddress.ip_address(hostname).is_loopback)
+    except ValueError:
         return False
-    provider_origin = _normalize_provider_origin(
-        getattr(settings, "llm_base_url", ""),
-        allow_path=True,
+
+
+def _transport_allowed(settings, origin: str) -> bool:
+    if origin.startswith("https://"):
+        return True
+    return (
+        origin.startswith("http://")
+        and getattr(settings, "environment", "dev") != "prod"
+        and bool(getattr(settings, "agent_allow_loopback_http", False))
+        and _is_loopback_origin(origin)
     )
-    if provider_origin is None:
-        return False
-    if settings.llm_trust_zone == "private":
-        private_origins, invalid = _normalized_private_origins(
-            getattr(settings, "llm_private_base_urls", ""),
+
+
+_PROVIDER_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,127}")
+_FORBIDDEN_PROVIDER_ENV = (
+    "OPENAI_ORG_ID",
+    "OPENAI_PROJECT_ID",
+    "OPENAI_CUSTOM_HEADERS",
+    "OPENAI_LOG",
+    "SSLKEYLOGFILE",
+)
+
+
+def provider_ambient_environment_clean() -> bool:
+    """Reject SDK/TLS ambient knobs that bypass httpx ``trust_env=False``."""
+    return not any(os.environ.get(name) for name in _FORBIDDEN_PROVIDER_ENV)
+
+
+def _normalize_provider_model(value: object) -> str | None:
+    if not isinstance(value, str) or value != value.strip():
+        return None
+    return value if _PROVIDER_MODEL_RE.fullmatch(value) else None
+
+
+def _normalized_models(raw: object) -> tuple[tuple[str, ...], int]:
+    if not isinstance(raw, str) or not raw.strip():
+        return (), 0
+    models: set[str] = set()
+    invalid = 0
+    for item in re.split(r"[,\s]+", raw.strip()):
+        if not item:
+            continue
+        model = _normalize_provider_model(item)
+        if model is None:
+            invalid += 1
+        else:
+            models.add(model)
+    return tuple(sorted(models)), invalid
+
+
+def _bounded_int_metadata(
+    value: object,
+    *,
+    minimum: int,
+    maximum: int,
+    allow_none: bool = False,
+) -> int | None | str:
+    if allow_none and value is None:
+        return None
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not minimum <= value <= maximum
+    ):
+        return "invalid"
+    return value
+
+
+def _primary_request_options_metadata(settings) -> tuple[str, bool]:
+    try:
+        raw = settings.llm_extra_body_dict()
+        normalized = config.normalize_llm_request_options({} if raw is None else raw)
+        canonical = json.dumps(
+            {} if normalized is None else normalized,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
         )
-        return invalid == 0 and provider_origin in private_origins
-    return settings.llm_trust_zone == "approved_external"
+    except (AttributeError, TypeError, ValueError):
+        return "invalid", False
+    return canonical, True
 
 
-RUNTIME_POLICY_VERSION = "v1"
+def _runtime_config_metadata(settings) -> dict:
+    provider_name = getattr(settings, "llm_provider", None)
+    environment = getattr(settings, "environment", None)
+    return {
+        "environment": (
+            environment if environment in {"dev", "test", "prod"} else "invalid"
+        ),
+        "enable_agent": getattr(settings, "enable_agent", None) is True,
+        "llm_provider": (
+            "openai_compatible" if provider_name == "openai_compatible" else "invalid"
+        ),
+        "llm_timeout_seconds": _bounded_int_metadata(
+            getattr(settings, "llm_timeout_seconds", None), minimum=1, maximum=300
+        ),
+        "llm_max_retries": _bounded_int_metadata(
+            getattr(settings, "llm_max_retries", None), minimum=0, maximum=5
+        ),
+        "llm_max_tokens": _bounded_int_metadata(
+            getattr(settings, "llm_max_tokens", None),
+            minimum=1,
+            maximum=65_536,
+            allow_none=True,
+        ),
+        "llm_max_tool_iters": _bounded_int_metadata(
+            getattr(settings, "llm_max_tool_iters", None), minimum=1, maximum=16
+        ),
+        "vision_timeout_seconds": _bounded_int_metadata(
+            getattr(settings, "vision_timeout_seconds", None), minimum=1, maximum=300
+        ),
+        "vision_max_pages": _bounded_int_metadata(
+            getattr(settings, "vision_max_pages", None), minimum=1, maximum=16
+        ),
+        "ambient_provider_environment_clean": provider_ambient_environment_clean(),
+    }
+
+
+def _runtime_config_allowed(metadata: Mapping[str, object]) -> bool:
+    return (
+        metadata.get("enable_agent") is True
+        and metadata.get("llm_provider") == "openai_compatible"
+        and metadata.get("environment") != "invalid"
+        and metadata.get("ambient_provider_environment_clean") is True
+        and all(
+            metadata.get(field) != "invalid"
+            for field in (
+                "llm_timeout_seconds",
+                "llm_max_retries",
+                "llm_max_tokens",
+                "llm_max_tool_iters",
+                "vision_timeout_seconds",
+                "vision_max_pages",
+            )
+        )
+    )
+
+
+def _destination_attributes(
+    destination: EgressDestination,
+) -> tuple[str, str, str, str, str, str]:
+    if destination is EgressDestination.PRIMARY_MODEL:
+        return (
+            "llm_base_url",
+            "llm_model",
+            "llm_approved_models",
+            "llm_private_base_urls",
+            "llm_approved_external_base_urls",
+            "llm_api_key",
+        )
+    return (
+        "vision_base_url",
+        "vision_model",
+        "vision_approved_models",
+        "vision_private_base_urls",
+        "vision_approved_external_base_urls",
+        "vision_api_key",
+    )
+
+
+def _destination_trust_zone(settings, destination: EgressDestination) -> str:
+    field = (
+        "llm_trust_zone"
+        if destination is EgressDestination.PRIMARY_MODEL
+        else "vision_trust_zone"
+    )
+    return str(getattr(settings, field, "unknown"))
+
+
+def _destination_policy_metadata(settings, destination: EgressDestination) -> dict:
+    (
+        base_field,
+        model_field,
+        approved_models_field,
+        private_field,
+        external_field,
+        api_key_field,
+    ) = _destination_attributes(destination)
+    configured_url = getattr(settings, base_field, "")
+    origin = _normalize_provider_origin(configured_url, allow_path=True)
+    base_path = _provider_base_path(configured_url)
+    model = _normalize_provider_model(getattr(settings, model_field, ""))
+    approved_models, invalid_models = _normalized_models(
+        getattr(settings, approved_models_field, "")
+    )
+    operator_asserted_private_origins, invalid_private = _normalized_origins(
+        getattr(settings, private_field, "")
+    )
+    external_origins, invalid_external = _normalized_origins(
+        getattr(settings, external_field, "")
+    )
+    options_json, options_valid = (
+        _primary_request_options_metadata(settings)
+        if destination is EgressDestination.PRIMARY_MODEL
+        else ("{}", True)
+    )
+    return {
+        "trust_zone": _destination_trust_zone(settings, destination),
+        "origin": origin or "invalid",
+        "base_path": base_path if base_path is not None else "invalid",
+        "model": model or "invalid",
+        "approved_models": approved_models,
+        "invalid_approved_model_count": invalid_models,
+        "request_options_json": options_json,
+        "request_options_valid": options_valid,
+        "api_key_configured": bool(getattr(settings, api_key_field, "")),
+        # v1 verifies syntax and exact origin equality only.  It does not attest the network
+        # route, Tailnet peer, DNS answer or TLS peer identity; production enablement remains
+        # blocked on #225.  Name the weaker trust basis in every policy snapshot/fingerprint so a
+        # durable executor cannot mistake an operator label for endpoint attestation.
+        "private_trust_basis": "operator_assertion_only_v1",
+        "private_endpoint_identity_attested": False,
+        "operator_asserted_private_origins": operator_asserted_private_origins,
+        "approved_external_origins": external_origins,
+        "invalid_private_origin_count": invalid_private,
+        "invalid_approved_external_origin_count": invalid_external,
+    }
+
+
+def _destination_allowed(settings, destination: EgressDestination) -> bool:
+    if (
+        destination is EgressDestination.PRIMARY_MODEL
+        and not bool(getattr(settings, "agent_model_context_egress_enabled", False))
+    ):
+        return False
+    runtime_metadata = _runtime_config_metadata(settings)
+    if not _runtime_config_allowed(runtime_metadata):
+        return False
+    metadata = _destination_policy_metadata(settings, destination)
+    origin = metadata["origin"]
+    if (
+        origin == "invalid"
+        or metadata["base_path"] == "invalid"
+        or metadata["model"] == "invalid"
+        or metadata["invalid_approved_model_count"] != 0
+        or metadata["model"] not in metadata["approved_models"]
+        or metadata["request_options_valid"] is not True
+        or metadata["api_key_configured"] is not True
+        or not _transport_allowed(settings, origin)
+    ):
+        return False
+    trust_zone = metadata["trust_zone"]
+    if trust_zone == "private":
+        return (
+            metadata["invalid_private_origin_count"] == 0
+            and origin in metadata["operator_asserted_private_origins"]
+        )
+    if trust_zone == "approved_external":
+        return (
+            metadata["invalid_approved_external_origin_count"] == 0
+            and origin in metadata["approved_external_origins"]
+        )
+    return False
+
+
+def _unattested_private_development_allowed(settings) -> bool:
+    """Narrow test/dev escape hatch; deliberately impossible in production."""
+    return (
+        getattr(settings, "environment", None) in {"dev", "test"}
+        and getattr(
+            settings,
+            "agent_allow_unattested_private_for_development",
+            False,
+        ) is True
+    )
+
+
+def _model_context_egress_enabled() -> bool:
+    return _destination_allowed(get_settings(), EgressDestination.PRIMARY_MODEL)
+
+
+RUNTIME_POLICY_VERSION = "v5"
 
 
 def runtime_policy_fingerprint(settings=None) -> str:
-    """Hash runtime trust decisions without keys, credentials, paths, queries or fragments."""
+    """Hash canonical provider/run authority without credential or customer values."""
     selected = get_settings() if settings is None else settings
-    provider_origin = _normalize_provider_origin(
-        getattr(selected, "llm_base_url", ""),
-        allow_path=True,
-    )
-    private_origins, invalid_private_origins = _normalized_private_origins(
-        getattr(selected, "llm_private_base_urls", ""),
-    )
+    runtime_metadata = _runtime_config_metadata(selected)
     canonical = json.dumps(
         {
             "version": RUNTIME_POLICY_VERSION,
-            "trust_zone": getattr(selected, "llm_trust_zone", "unknown"),
+            "capability_policy_fingerprint": CAPABILITY_POLICY_FINGERPRINT,
             "model_context_egress_enabled": bool(
                 getattr(selected, "agent_model_context_egress_enabled", False)
             ),
             "external_file_egress_enabled": bool(
                 getattr(selected, "agent_external_file_egress_enabled", False)
             ),
-            "provider_origin": provider_origin or "invalid",
-            "private_provider_origins": private_origins,
-            "invalid_private_origin_count": invalid_private_origins,
+            "allow_loopback_http": bool(
+                getattr(selected, "agent_allow_loopback_http", False)
+            ),
+            "allow_unattested_private_for_development": bool(
+                getattr(
+                    selected,
+                    "agent_allow_unattested_private_for_development",
+                    False,
+                )
+            ),
+            "runtime": runtime_metadata,
+            "destinations": {
+                destination.value: _destination_policy_metadata(selected, destination)
+                for destination in EgressDestination
+            },
+            "edge_policy": {
+                "approved_external_customer_file_mode": "disabled_pending_per_user_consent",
+                "private_customer_file_mode": "attestation_required_or_dev_test_override",
+                "all_declared_edges_must_pass": True,
+                "conversation_context_sensitivity": DataSensitivity.CUSTOMER_FILE.value,
+                "conversation_context_edge": {
+                    "purpose": _conversation_context_edge().purpose,
+                    "projection_id": _conversation_context_edge().projection_id,
+                    "max_bytes": _conversation_context_edge().max_bytes,
+                    "policy_version": _conversation_context_edge().policy_version,
+                    "retention_policy": _conversation_context_edge().retention_policy,
+                },
+                "global_external_file_switch_is_not_user_consent": True,
+                "admitted_contracts": sorted(
+                    ({
+                        "source": edge.source.value,
+                        "destination": edge.destination.value,
+                        "sensitivity": edge.sensitivity.value,
+                        "purpose": edge.purpose,
+                        "projection_id": edge.projection_id,
+                        "max_bytes": edge.max_bytes,
+                        "policy_version": edge.policy_version,
+                        "retention_policy": edge.retention_policy,
+                    } for edge in EGRESS_EDGE_CONTRACT_REGISTRY),
+                    key=lambda edge: (
+                        edge["destination"], edge["source"], edge["sensitivity"],
+                        edge["purpose"], edge["projection_id"], edge["policy_version"],
+                        edge["retention_policy"], edge["max_bytes"],
+                    ),
+                ),
+            },
         },
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
+        allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _sensitivity_egress_allowed(spec: ToolSpec) -> bool:
-    """Enforce the provider-zone data policy for the capability's maximum sensitivity.
+def _provider_profile_snapshot(
+    settings,
+    destination: EgressDestination,
+) -> ProviderProfileSnapshot:
+    runtime_metadata = _runtime_config_metadata(settings)
+    destination_metadata = _destination_policy_metadata(settings, destination)
+    primary = destination is EgressDestination.PRIMARY_MODEL
+    timeout = runtime_metadata[
+        "llm_timeout_seconds" if primary else "vision_timeout_seconds"
+    ]
+    retries = runtime_metadata["llm_max_retries"] if primary else 0
+    max_tokens = runtime_metadata["llm_max_tokens"] if primary else None
+    max_pages = None if primary else runtime_metadata["vision_max_pages"]
+    return ProviderProfileSnapshot(
+        destination=destination,
+        adapter=str(runtime_metadata["llm_provider"]),
+        origin=(
+            str(destination_metadata["origin"])
+            if destination_metadata["origin"] != "invalid"
+            else ""
+        ),
+        base_path=(
+            str(destination_metadata["base_path"])
+            if destination_metadata["base_path"] != "invalid"
+            else ""
+        ),
+        model=(
+            str(destination_metadata["model"])
+            if destination_metadata["model"] != "invalid"
+            else ""
+        ),
+        request_options_json=(
+            str(destination_metadata["request_options_json"])
+            if destination_metadata["request_options_valid"] is True
+            else "invalid"
+        ),
+        timeout_seconds=(float(timeout) if isinstance(timeout, int) else 0.0),
+        max_retries=(int(retries) if isinstance(retries, int) else 0),
+        max_tokens=(
+            int(max_tokens)
+            if isinstance(max_tokens, int) and not isinstance(max_tokens, bool)
+            else None
+        ),
+        max_pages=(
+            int(max_pages)
+            if isinstance(max_pages, int) and not isinstance(max_pages, bool)
+            else None
+        ),
+        enabled=runtime_metadata["enable_agent"] is True,
+        # A profile lease represents the exact edge used by this adapter, not merely a matching
+        # destination. In particular, prod private operator assertions are insufficient for the
+        # customer-file-classified primary prompt and Vision input edges.
+        admitted=(
+            primary_model_call_allowed(settings)
+            if primary
+            else vision_provider_call_allowed(settings)
+        ),
+    )
 
-    A private model context can receive customer-file content without authorizing an
-    *external* file transfer. An approved external model can receive confidential business
-    data, but customer-file content needs the separate explicit file-egress opt-in.
+
+def capture_runtime_policy_lease(settings=None) -> RuntimePolicyLease:
+    """Capture one immutable policy epoch from exactly one Settings object."""
+    selected = get_settings() if settings is None else settings
+    runtime_metadata = _runtime_config_metadata(selected)
+    max_tool_iters = runtime_metadata["llm_max_tool_iters"]
+    return RuntimePolicyLease(
+        fingerprint=runtime_policy_fingerprint(selected),
+        primary=_provider_profile_snapshot(selected, EgressDestination.PRIMARY_MODEL),
+        vision=_provider_profile_snapshot(selected, EgressDestination.VISION_PROVIDER),
+        max_tool_iters=(
+            int(max_tool_iters)
+            if isinstance(max_tool_iters, int) and not isinstance(max_tool_iters, bool)
+            else 0
+        ),
+        primary_api_key=str(getattr(selected, "llm_api_key", "")),
+        vision_api_key=str(getattr(selected, "vision_api_key", "")),
+    )
+
+
+def runtime_policy_lease_current(
+    lease: object,
+    settings=None,
+) -> bool:
+    """Revalidate a run lease without accepting a raw/model-provided fingerprint string."""
+    if type(lease) is not RuntimePolicyLease:
+        return False
+    selected = get_settings() if settings is None else settings
+    return runtime_policy_fingerprint(selected) == lease.fingerprint
+
+
+def _edge_egress_allowed(edge: EgressEdge, settings=None) -> bool:
+    if not _valid_egress((edge,)):
+        return False
+    selected = get_settings() if settings is None else settings
+    if not _destination_allowed(selected, edge.destination):
+        return False
+    if (
+        edge.sensitivity is DataSensitivity.CUSTOMER_FILE
+        and _destination_trust_zone(selected, edge.destination) == "approved_external"
+    ):
+        # A deployment-wide switch cannot represent the current user's informed consent. v1 has
+        # no verifiable per-user grant/revocation record, so approved-external customer-file edges
+        # remain unavailable even if the legacy/global switch is true. Private customer-file edges
+        # have their own attestation/dev-only rule below; exact origin is never sufficient alone.
+        return False
+    if (
+        edge.sensitivity is DataSensitivity.CUSTOMER_FILE
+        and _destination_trust_zone(selected, edge.destination) == "private"
+    ):
+        metadata = _destination_policy_metadata(selected, edge.destination)
+        if metadata.get("private_endpoint_identity_attested") is not True:
+            # Exact origin + operator label is not permission to release customer files.  v1 has
+            # no attestation implementation; only an explicit dev/test harness can exercise the
+            # provider adapter until #225 binds a verifiable private endpoint identity.
+            return _unattested_private_development_allowed(selected)
+    return True
+
+
+def primary_model_call_allowed(settings=None) -> bool:
+    """Authorize a primary-model call containing any current conversation context.
+
+    v1 has no durable per-message provenance. User text may contain pasted customer data and
+    persisted assistant history may contain summaries derived from a prior customer-file tool.
+    Therefore every prompt/history payload is conservatively classified as CUSTOMER_FILE until
+    provenance-aware messages exist. Approved-external prompt egress stays disabled until a
+    verifiable per-user consent/revocation record exists; a global environment switch is not consent.
     """
-    if spec.egress is EgressEffect.NONE:
-        return True
-    settings = get_settings()
-    if settings.llm_trust_zone == "private":
-        return True
-    if settings.llm_trust_zone == "approved_external":
-        return (
-            spec.sensitivity is not DataSensitivity.CUSTOMER_FILE
-            or _external_file_egress_enabled()
+    return _edge_egress_allowed(_conversation_context_edge(), settings=settings)
+
+
+def vision_provider_call_allowed(settings=None) -> bool:
+    """Re-evaluate customer-file authorization directly before Vision network egress."""
+    return _edge_egress_allowed(_vision_egress()[0], settings=settings)
+
+
+def _provider_base_path(value: object) -> str | None:
+    """Return one canonical ASCII base path, or fail closed.
+
+    Provider base URLs are configuration, not arbitrary navigation targets. Percent-encoded,
+    relative, repeated-separator and dot-segment paths are rejected so an SDK request cannot use
+    URL normalization to escape the configured endpoint prefix after the origin check succeeds.
+    The root path is represented as an empty prefix.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlsplit(value.strip())
+    except ValueError:
+        return None
+    path = parsed.path or ""
+    if any(ord(char) < 0x21 or ord(char) > 0x7E for char in path):
+        return None
+    if "%" in path or "\\" in path:
+        return None
+    if path in {"", "/"}:
+        return ""
+    if not path.startswith("/"):
+        return None
+    segments = path.split("/")[1:]
+    if segments and segments[-1] == "":
+        segments.pop()
+    if not segments or any(segment in {"", ".", ".."} for segment in segments):
+        return None
+    return f"/{'/'.join(segments)}"
+
+
+def provider_http_request_allowed(
+    profile: object,
+    request_url: object,
+    settings=None,
+) -> bool:
+    """Authorize one *actual* SDK HTTP attempt against the live provider profile.
+
+    This is intentionally stricter than an origin-only allowlist: the request must target the
+    exact ``chat/completions`` path under the currently configured base URL. The transport calls
+    it for every attempt, including SDK retries, before the guarded delegate/network send.
+    """
+    selected = get_settings() if settings is None else settings
+    if profile == "primary":
+        if not primary_model_call_allowed(selected):
+            return False
+        base_field = "llm_base_url"
+    elif profile == "vision":
+        if not vision_provider_call_allowed(selected):
+            return False
+        base_field = "vision_base_url"
+    else:
+        return False
+
+    configured_url = getattr(selected, base_field, "")
+    configured_origin = _normalize_provider_origin(configured_url, allow_path=True)
+    actual_origin = _normalize_provider_origin(request_url, allow_path=True)
+    configured_path = _provider_base_path(configured_url)
+    actual_path = _provider_base_path(request_url)
+    if (
+        configured_origin is None
+        or actual_origin != configured_origin
+        or configured_path is None
+        or actual_path is None
+    ):
+        return False
+    expected_path = f"{configured_path}/chat/completions"
+    return actual_path == expected_path
+
+
+def _json_projection(value: object) -> tuple[str, int] | None:
+    """Serialize the declared JSON projection once and measure its actual UTF-8 wire bytes."""
+    try:
+        serialized = json.dumps(
+            value,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
         )
-    return False
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return serialized, len(serialized.encode("utf-8"))
+
+
+def primary_model_payload_allowed(messages: object) -> bool:
+    """Enforce the conversation edge's byte ceiling before every primary-model request."""
+    projected = _json_projection(messages)
+    return projected is not None and projected[1] <= _conversation_context_edge().max_bytes
+
+
+def _tool_result_edges(name: object) -> tuple[EgressEdge, ...]:
+    if not isinstance(name, str):
+        return ()
+    spec = _SPEC_BY_NAME.get(name)
+    if not isinstance(spec, ToolSpec) or not _valid_egress(spec.egress):
+        return ()
+    return tuple(
+        edge for edge in spec.egress
+        if edge.destination is EgressDestination.PRIMARY_MODEL
+        and edge.source in {
+            EgressSource.TOOL_RESULT,
+            EgressSource.CUSTOMER_FILE,
+            EgressSource.VISION_OCR,
+        }
+    )
+
+
+def tool_result_egress_allowed(name: object) -> bool:
+    """Live-check every result edge immediately before a tool result can enter model context."""
+    result_edges = _tool_result_edges(name)
+    return bool(result_edges) and all(_edge_egress_allowed(edge) for edge in result_edges)
+
+
+def capability_result_release_allowed(
+    name: object,
+    ctx: security.UserContext,
+) -> bool:
+    """Authorize one result against the latest named principal and every live result edge."""
+    if not isinstance(name, str):
+        return False
+    spec = _SPEC_BY_NAME.get(name)
+    return (
+        isinstance(spec, ToolSpec)
+        and _allowed(spec, ctx)
+        and tool_result_egress_allowed(name)
+    )
+
+
+def serialize_tool_result_for_model(name: object, result: object) -> str | None:
+    """Return a bounded tool-result projection, or ``None`` before it can enter model context."""
+    result_edges = _tool_result_edges(name)
+    if not result_edges or not tool_result_egress_allowed(name):
+        return None
+    projected = _json_projection(result)
+    if projected is None:
+        return None
+    serialized, size_bytes = projected
+    if (
+        any(size_bytes > edge.max_bytes for edge in result_edges)
+        or not tool_result_egress_allowed(name)
+    ):
+        return None
+    return serialized
+
+
+def vision_provider_payload_allowed(size_bytes: object) -> bool:
+    """Cheap raw-size preflight; exact serialized Vision projection is checked separately."""
+    return (
+        isinstance(size_bytes, int)
+        and not isinstance(size_bytes, bool)
+        and 0 <= size_bytes <= _vision_egress()[0].max_bytes
+    )
+
+
+def vision_provider_projection_allowed(payload: object) -> bool:
+    """Enforce the exact app-controlled Vision JSON/data-URL projection byte ceiling."""
+    projected = _json_projection(payload)
+    return projected is not None and projected[1] <= _vision_egress()[0].max_bytes
+
+
+def vision_ocr_payload_allowed(text: object) -> bool:
+    """Bound raw OCR text at the provider seam; wrapped tool-result JSON is checked again later."""
+    return (
+        isinstance(text, str)
+        and len(text.encode("utf-8")) <= _vision_egress()[1].max_bytes
+    )
 
 
 def _schema_egress_allowed(spec: ToolSpec) -> bool:
-    if spec.egress is EgressEffect.NONE:
-        return True
-    if not _model_context_egress_enabled():
-        return False
-    if not _sensitivity_egress_allowed(spec):
-        return False
-    if spec.egress is EgressEffect.EXTERNAL_PROVIDER:
-        return _external_file_egress_enabled()
-    return True  # MODEL_CONTEXT
+    return _valid_egress(spec.egress) and all(
+        _edge_egress_allowed(edge) for edge in spec.egress
+    )
 
 
-def _external_egress_required(spec: ToolSpec) -> bool:
-    return spec.egress is EgressEffect.EXTERNAL_PROVIDER
+def _first_denied_edge(spec: ToolSpec) -> EgressEdge | None:
+    return next((edge for edge in spec.egress if not _edge_egress_allowed(edge)), None)
 
 
 def _external_egress_denied() -> dict:
@@ -1659,6 +2737,8 @@ def _model_context_egress_denied() -> dict:
     return {
         "error": "模型目标信任区未知或未授权业务/文件数据进入模型上下文",
         "kind": "model_context_egress_denied",
+        "code": "AGENT_MODEL_EGRESS_DENIED",
+        "retriable": False,
     }
 
 
@@ -1678,8 +2758,10 @@ def _sensitivity_egress_denied() -> dict:
     }
 
 
-def audit_name(name: str) -> str:
+def audit_name(name: object) -> str:
     """Return a log-safe capability label; never log a model-invented tool name."""
+    if not isinstance(name, str):
+        return "unknown"
     spec = _SPEC_BY_NAME.get(name)
     return spec.name if isinstance(spec, ToolSpec) else "unknown"
 
@@ -1691,18 +2773,34 @@ def audit_summary(name: str, args: object) -> dict:
     if not isinstance(spec, ToolSpec) or not isinstance(args, dict):
         return summary
     function = spec.schema.get("function")
-    parameters = function.get("parameters") if isinstance(function, dict) else None
-    properties = parameters.get("properties") if isinstance(parameters, dict) else None
-    declared = set(properties) if isinstance(properties, dict) else set()
-    keys = sorted(key for key in args if isinstance(key, str) and key in declared)
+    parameters = function.get("parameters") if isinstance(function, Mapping) else None
+    properties = parameters.get("properties") if isinstance(parameters, Mapping) else None
+    declared = set(properties) if isinstance(properties, Mapping) else set()
+    # Iterate the small trusted schema, never an unbounded forged args mapping.
+    keys = sorted(key for key in declared if key in args)[:MAX_PUBLIC_ARG_KEYS]
     summary.update({
         "effects": (
             sorted(effect.value for effect in spec.effects)
             if _valid_effects(spec.effects)
             else ["unclassified"]
         ),
-        "egress": (spec.egress.value if isinstance(spec.egress, EgressEffect)
-                   else "unclassified"),
+        "egress_edges": (
+            [
+                {
+                    "source": edge.source.value,
+                    "destination": edge.destination.value,
+                    "sensitivity": edge.sensitivity.value,
+                    "purpose": edge.purpose,
+                    "projection_id": edge.projection_id,
+                    "max_bytes": edge.max_bytes,
+                    "policy_version": edge.policy_version,
+                    "retention_policy": edge.retention_policy,
+                }
+                for edge in spec.egress
+            ]
+            if _valid_egress(spec.egress)
+            else ["unclassified"]
+        ),
         "sensitivity": (
             spec.sensitivity.value
             if isinstance(spec.sensitivity, DataSensitivity)
@@ -1726,7 +2824,200 @@ def audit_summary(name: str, args: object) -> dict:
     return summary
 
 
-def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext) -> dict:
+def _sanitize_audit_summary(name: str, value: object) -> dict:
+    """Validate an already-shaped summary without trusting caller-provided metadata or values."""
+    safe = audit_summary(name, {})
+    if not isinstance(value, dict):
+        return safe
+    spec = _SPEC_BY_NAME.get(name)
+    if not isinstance(spec, ToolSpec):
+        return safe
+    function = spec.schema.get("function")
+    parameters = function.get("parameters") if isinstance(function, Mapping) else None
+    properties = parameters.get("properties") if isinstance(parameters, Mapping) else None
+    declared = set(properties) if isinstance(properties, Mapping) else set()
+    keys = value.get("arg_keys")
+    if isinstance(keys, list):
+        safe["arg_keys"] = sorted({
+            key for key in keys[:MAX_PUBLIC_ARG_KEYS]
+            if isinstance(key, str) and key in declared
+        })
+    count = value.get("arg_count")
+    if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+        safe["arg_count"] = count
+    for field in ("collection_counts", "string_lengths"):
+        raw_counts = value.get(field)
+        if not isinstance(raw_counts, dict):
+            continue
+        counts = {}
+        for key in safe["arg_keys"]:
+            count = raw_counts.get(key)
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                counts[key] = count
+        if counts:
+            safe[field] = counts
+    return safe
+
+
+def artifact_ids_from_result(result: object) -> list[str]:
+    """Extract only opaque, format-validated artifact identifiers from a tool result."""
+    if not isinstance(result, dict):
+        return []
+    ids: list[str] = []
+    for key in ("artifact_id", "file_id"):
+        value = result.get(key)
+        if _valid_file_reference(value) and value not in ids:
+            ids.append(value)
+    return ids
+
+
+def source_file_ids_from_tool_exchange(args: object, result: object) -> tuple[str, ...]:
+    """Capture the concrete legacy files whose bytes shaped one released tool result.
+
+    This server-only record is never logged, persisted or exposed to the model/SSE stream. Inputs
+    have already passed the capability validator, but canonicalization is repeated so future or
+    alternate dispatchers cannot smuggle an ambiguous reference into a later authorization check.
+    """
+    values: list[object] = []
+    if isinstance(args, dict):
+        values.extend(args.get(key) for key in ("file_id", "base_file_id") if key in args)
+    if isinstance(result, dict):
+        values.extend(result.get(key) for key in ("artifact_id", "file_id") if key in result)
+    source_ids: list[str] = []
+    for value in values:
+        try:
+            canonical = agent_files.canonical_file_id(value)
+        except agent_files.FileError:
+            continue
+        if canonical == value and canonical not in source_ids:
+            source_ids.append(canonical)
+    return tuple(source_ids[:4])
+
+
+def artifact_id_release_allowed(artifact_id: object, ctx: security.UserContext) -> bool:
+    """Authorize a legacy filesystem Artifact ID for one stable named owner.
+
+    This is intentionally narrow.  #220 will replace it with source-scope/current-access
+    provenance; until then shared/fallback identities and missing metadata fail closed.
+    """
+    if (
+        ctx.authn != "sys_user"
+        or not isinstance(ctx.user_id, str)
+        or not ctx.user_id.strip()
+    ):
+        return False
+    try:
+        canonical = agent_files.canonical_file_id(artifact_id)
+        return canonical == artifact_id and agent_files.owner_of(canonical) == ctx.user_id
+    except agent_files.FileError:
+        return False
+
+
+def source_file_ids_release_allowed(
+    source_file_ids: object,
+    ctx: security.UserContext,
+) -> bool:
+    """Fresh owner/existence authorization for every file that shaped a model-visible result."""
+    return bool(
+        isinstance(source_file_ids, tuple)
+        and len(source_file_ids) <= 4
+        and len(source_file_ids) == len(set(source_file_ids))
+        and all(artifact_id_release_allowed(file_id, ctx) for file_id in source_file_ids)
+    ) or source_file_ids == ()
+
+
+def fresh_artifact_authorizer(
+    original_ctx: security.UserContext,
+) -> Callable[[object], bool]:
+    """Build a fail-closed projector guard that refreshes principal state per Artifact ID.
+
+    The request context is only a signed snapshot.  Artifact IDs cross a later, independent
+    disclosure boundary than the tool result itself, so account disable/token revocation/role
+    changes must be observed again at the exact projector/API DTO seam.  In RBAC mode
+    ``refresh_runtime_context`` uses its own short-lived SessionLocal and never trusts a long-lived
+    handler transaction's identity map.
+    """
+    def authorize(artifact_id: object) -> bool:
+        try:
+            live_ctx = refresh_runtime_context(None, original_ctx)
+            return bool(
+                live_ctx is not None
+                and security.page_allowed(live_ctx, "page_chat")
+                and artifact_id_release_allowed(artifact_id, live_ctx)
+            )
+        except Exception as exc:  # noqa: BLE001 -- projector authorization fails closed
+            _log.error(
+                "agent artifact authorization refresh failed exception_type=%s",
+                type(exc).__name__,
+            )
+            return False
+
+    return authorize
+
+
+def authorized_artifact_ids_from_result(
+    result: object,
+    ctx: security.UserContext,
+) -> list[str]:
+    return [
+        artifact_id
+        for artifact_id in artifact_ids_from_result(result)
+        if artifact_id_release_allowed(artifact_id, ctx)
+    ]
+
+
+def safe_tool_trace_entry(
+    name: object,
+    args: object,
+    artifact_ids: object = None,
+    *,
+    args_are_shape: bool = False,
+) -> dict:
+    """Build a value-free trace entry suitable for SSE, checkpoints and durable storage."""
+    safe_name = audit_name(name)
+    shape = (
+        _sanitize_audit_summary(safe_name, args)
+        if args_are_shape
+        else audit_summary(safe_name, args)
+    )
+    # The marker contains no customer value and lets every downstream seam validate an already
+    # shaped record again without degrading it into an empty legacy/raw-argument summary.
+    entry = {"name": safe_name, "args": shape, "args_are_shape": True}
+    if isinstance(artifact_ids, list):
+        safe_ids = [
+            value for value in artifact_ids[:MAX_ARTIFACT_IDS_PER_TRACE_ENTRY]
+            if _valid_file_reference(value)
+        ]
+        if safe_ids:
+            entry["artifact_ids"] = list(dict.fromkeys(safe_ids))
+    return entry
+
+
+def sanitize_tool_trace(trace: object) -> list[dict]:
+    """Fail closed when a legacy/future caller hands persistence a raw tool trace."""
+    if not isinstance(trace, list):
+        return []
+    clean: list[dict] = []
+    for item in trace[:MAX_PUBLIC_TRACE_ENTRIES]:
+        if not isinstance(item, dict):
+            continue
+        clean.append(safe_tool_trace_entry(
+            item.get("name"),
+            item.get("args"),
+            item.get("artifact_ids"),
+            args_are_shape=item.get("args_are_shape") is True,
+        ))
+    return clean
+
+
+def dispatch(
+    db: Session,
+    name: str,
+    args: object,
+    ctx: security.UserContext,
+    *,
+    _policy_lease: object = None,
+) -> dict:
     """执行一次工具调用：审计 → 派发 → 内部异常脱敏后回灌（不让对话崩掉、也不泄实现细节）。
 
     业务错由各工具显式 return {"error": 文案}（如"型号不存在""query 不能为空"）——这些是给
@@ -1737,25 +3028,26 @@ def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext) -> d
     spec = _SPEC_BY_NAME.get(name)
     audit = audit_summary(name, args)
     safe_name = audit_name(name)
-    if not _allowed(spec, ctx):
+    if not isinstance(spec, ToolSpec):
         security.record_access_log(ctx, f"agent_tool_denied:{safe_name}", "agent", audit)
         return _capability_denied()
-    if not _model_context_egress_enabled() and spec.egress is not EgressEffect.NONE:
+    current_ctx = _reload_dispatch_context(db, ctx)
+    if current_ctx is None:
         security.record_access_log(
-            ctx, f"agent_tool_model_egress_denied:{safe_name}", "agent", audit,
+            ctx,
+            f"agent_tool_identity_denied:{safe_name}",
+            "agent",
+            audit,
         )
-        return _model_context_egress_denied()
-    if not _sensitivity_egress_allowed(spec):
+        return _identity_denied()
+    if not _allowed(spec, current_ctx):
         security.record_access_log(
-            ctx, f"agent_tool_sensitivity_denied:{safe_name}", "agent", audit,
+            current_ctx, f"agent_tool_denied:{safe_name}", "agent", audit
         )
-        return _sensitivity_egress_denied()
-    if _external_egress_required(spec) and not _external_file_egress_enabled():
-        security.record_access_log(ctx, f"agent_tool_egress_denied:{safe_name}", "agent", audit)
-        return _external_egress_denied()
+        return _capability_denied()
     function = spec.schema.get("function")
-    parameters = function.get("parameters") if isinstance(function, dict) else None
-    if not isinstance(parameters, dict):  # import-time checks should make this unreachable
+    parameters = function.get("parameters") if isinstance(function, Mapping) else None
+    if not isinstance(parameters, Mapping):  # import-time checks should make this unreachable
         failure = _VALIDATOR_FAILED
     else:
         try:
@@ -1771,17 +3063,67 @@ def dispatch(db: Session, name: str, args: dict, ctx: security.UserContext) -> d
             failure = _VALIDATOR_FAILED
     if failure is not None:
         security.record_access_log(
-            ctx,
+            current_ctx,
             f"agent_tool_args_denied:{safe_name}",
             "agent",
             {**audit, "validation_code": failure.code},
         )
         return _argument_validation_denied(failure)
-    security.record_access_log(ctx, f"agent_tool:{safe_name}", "agent", audit)
+    denied_edge = _first_denied_edge(spec)
+    if denied_edge is not None:
+        if denied_edge.destination is EgressDestination.VISION_PROVIDER:
+            action = "agent_tool_vision_egress_denied"
+            response = _external_egress_denied()
+        elif (
+            denied_edge.sensitivity is DataSensitivity.CUSTOMER_FILE
+            and _destination_trust_zone(get_settings(), denied_edge.destination)
+            == "approved_external"
+        ):
+            action = "agent_tool_sensitivity_denied"
+            response = _sensitivity_egress_denied()
+        else:
+            action = "agent_tool_model_egress_denied"
+            response = _model_context_egress_denied()
+        security.record_access_log(current_ctx, f"{action}:{safe_name}", "agent", audit)
+        return response
+    requires_provider_lease = any(
+        edge.destination is EgressDestination.VISION_PROVIDER for edge in spec.egress
+    )
+    if requires_provider_lease and (
+        type(_policy_lease) is not RuntimePolicyLease
+        or not runtime_policy_lease_current(_policy_lease)
+    ):
+        security.record_access_log(
+            current_ctx,
+            f"agent_tool_vision_egress_denied:{safe_name}",
+            "agent",
+            audit,
+        )
+        return _external_egress_denied()
+    security.record_access_log(current_ctx, f"agent_tool:{safe_name}", "agent", audit)
     try:
         # ToolSpec is the immutable execution authority. _REGISTRY is a read-only compatibility
         # projection and is deliberately never consulted for dispatch.
-        return _jsonable(spec.handler(db, args, ctx))
+        if requires_provider_lease:
+            return _jsonable(
+                spec.handler(
+                    db,
+                    args,
+                    current_ctx,
+                    _policy_lease=_policy_lease,
+                )
+            )
+        return _jsonable(spec.handler(db, args, current_ctx))
+    except agent_files.FileError:
+        # FileError text often embeds model/customer-controlled IDs, sheet names or cells.
+        # Return a fixed, non-retriable contract and never copy the exception message.
+        _log.info("agent file operation rejected name=%s", safe_name)
+        return {
+            "error": "文件参数、格式或状态不符合要求",
+            "kind": "file_error",
+            "code": "AGENT_FILE_REJECTED",
+            "retriable": False,
+        }
     except Exception as exc:  # noqa: BLE001 —— 异常消息/参数可能含客户数据，日志只留类型
         _log.error("agent tool failed name=%s exception_type=%s", safe_name, type(exc).__name__)
         return {"error": "工具执行失败，请换个方式或稍后重试", "retriable": True, "kind": "internal"}

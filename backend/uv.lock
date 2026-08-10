@@ -1451,7 +1451,9 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "certifi" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "openai" },
     { name = "openpyxl" },
     { name = "pandas" },
@@ -1469,16 +1471,16 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
+    { name = "certifi", specifier = ">=2025.11.12" },
     { name = "fastapi", specifier = "==0.136.1" },
-    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
-    { name = "openai", specifier = ">=1.0" },
+    { name = "httpx", specifier = "==0.28.1" },
+    { name = "openai", specifier = "==2.41.1" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pdfplumber", specifier = ">=0.11.9" },

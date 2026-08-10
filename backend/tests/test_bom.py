@@ -4,7 +4,7 @@ import io
 import pytest
 from openpyxl import load_workbook
 
-from app import security
+from app import config, security
 from app.agent import tools
 from app.db import SessionLocal
 from app.services import agent_files as af
@@ -15,6 +15,11 @@ def db():
     s = SessionLocal()
     yield s
     s.close()
+
+
+@pytest.fixture(autouse=True)
+def _explicit_non_rbac_compatibility(monkeypatch):
+    monkeypatch.setattr(config, "ENABLE_RBAC", False)
 
 
 @pytest.fixture()

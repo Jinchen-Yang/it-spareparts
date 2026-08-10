@@ -16,11 +16,30 @@ def db():
 
 
 def _sales_ctx(name):
-    return security.UserContext(user_id=name, role="sales", salesperson_name=name)
+    return security.UserContext(
+        user_id=name,
+        role="sales",
+        salesperson_name=name,
+        is_authenticated=True,
+        authn="sys_user",
+        token_version=0,
+    )
 
 
 def _admin_ctx():
-    return security.UserContext(user_id="admin", role="admin")
+    return security.UserContext(
+        user_id="admin",
+        role="admin",
+        is_authenticated=True,
+        authn="sys_user",
+        token_version=0,
+    )
+
+
+@pytest.fixture()
+def business_policy_context(monkeypatch):
+    """Isolate legacy business-visibility assertions from live identity lifecycle tests."""
+    monkeypatch.setattr(tools, "_reload_dispatch_context", lambda _db, ctx: ctx)
 
 
 def test_password_hash_roundtrip():
@@ -56,17 +75,17 @@ def test_overview_sales_recent_hidden_for_sales(db):
         assert "purchases_recent" in ov                       # 采购明细仍给
 
 
-def test_profit_ranking_blocked_for_sales(db):
+def test_profit_ranking_blocked_for_sales(db, business_policy_context):
     r = tools.dispatch(db, "get_profit_ranking", {"dimension": "customer"}, _sales_ctx("刘青青"))
     assert "error" in r and "无权限" in r["error"]
 
 
-def test_profit_ranking_ok_for_admin(db):
+def test_profit_ranking_ok_for_admin(db, business_policy_context):
     r = tools.dispatch(db, "get_profit_ranking", {"dimension": "salesperson"}, _admin_ctx())
     assert "rows" in r  # admin 正常
 
 
-def test_purchase_visible_to_sales(db):
+def test_purchase_visible_to_sales(db, business_policy_context):
     """整机拆解需要：销售能看到采购价（防恶性竞争只限同事报价，不限成本）。"""
     r = tools.dispatch(db, "lookup_prices_bulk", {"queries": ["ST8000NM000A"]}, _sales_ctx("刘青青"))
     item = r["results"][0]

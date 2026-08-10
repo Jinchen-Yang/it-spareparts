@@ -1,4 +1,6 @@
 """对话持久化（平台化 P1）：归属隔离 / 自动标题 / 窗口截取 / 级联删除。"""
+import json
+
 from app.services import chat_store
 
 
@@ -84,6 +86,33 @@ def test_save_assistant_progress_insert_then_update(db):
     assert msgs[0]["tools"][0]["name"] == "search_parts"
 
 
+def test_checkpoint_trace_never_persists_raw_tool_values(db):
+    sentinel = "CUSTOMER-CHECKPOINT-SENTINEL-8472"
+    artifact_id = "b" * 12
+    s = chat_store.create_session(db, "u")
+    db.commit()
+
+    chat_store.save_assistant_progress(
+        s.id,
+        None,
+        "已处理",
+        [{
+            "name": "search_parts",
+            "args": {"query": sentinel},
+            "artifact_ids": [artifact_id, sentinel],
+        }],
+        stopped=False,
+    )
+
+    db.expire_all()
+    tools = chat_store.list_messages(db, s.id)[0]["tools"]
+    serialized = json.dumps(tools, ensure_ascii=False)
+    assert sentinel not in serialized
+    assert tools[0]["args"]["arg_keys"] == ["query"]
+    assert tools[0]["args"]["string_lengths"] == {"query": len(sentinel)}
+    assert "artifact_ids" not in tools[0]
+
+
 def test_assistant_tools_and_stopped_persisted(db):
     s = chat_store.create_session(db, "u")
     chat_store.append_message(db, s, "assistant", "部分回答",
@@ -92,3 +121,4 @@ def test_assistant_tools_and_stopped_persisted(db):
     msgs = chat_store.list_messages(db, s.id)
     assert msgs[0]["stopped"] is True
     assert msgs[0]["tools"][0]["name"] == "lookup_prices_bulk"
+    assert "A" not in json.dumps(msgs[0]["tools"], ensure_ascii=False)

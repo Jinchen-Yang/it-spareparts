@@ -78,6 +78,11 @@ def _check_id(file_id: str) -> str:
     return fid
 
 
+def canonical_file_id(file_id: object) -> str:
+    """Return the only audit/storage-safe Artifact ID representation."""
+    return _check_id(str(file_id or ""))
+
+
 def _load_meta(file_id: str) -> dict:
     p = _meta_path(file_id)
     if not p.exists():
@@ -89,7 +94,10 @@ def _load_meta(file_id: str) -> dict:
 
 
 def _save_meta(file_id: str, meta: dict) -> None:
-    _meta_path(file_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    _meta_path(file_id).write_text(
+        json.dumps(meta, ensure_ascii=False, allow_nan=False),
+        encoding="utf-8",
+    )
 
 
 def _cell_str(v) -> str:
@@ -97,6 +105,14 @@ def _cell_str(v) -> str:
         return ""
     s = v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else str(v)
     return s[:_CELL_TRUNC]
+
+
+def _set_literal_cell(cell, value):
+    """Write strings as literal text (including =,+,-,@ prefixes); keep numeric types numeric."""
+    cell.value = value
+    if isinstance(value, str):
+        cell.data_type = "s"
+    return cell
 
 
 def save_upload(content: bytes, filename: str, operated_by: str | None) -> dict:
@@ -254,10 +270,21 @@ def _read_pdf(path: Path) -> tuple[str, bool]:
     return text, scanned
 
 
-def _read_image_or_scanned(path: Path, hint: str) -> str:
+def _read_image_or_scanned(
+    path: Path,
+    hint: str,
+    *,
+    policy_lease: object,
+    attempt_authorizer,
+) -> str:
     """图片/扫描件 → 已配置的视觉供应商；授权与未配置降级由上层分别处理。"""
     from app.agent import provider
-    return provider.vision_extract([path], hint)
+    return provider.vision_extract(
+        [path],
+        hint,
+        _policy_lease=policy_lease,
+        _attempt_authorizer=attempt_authorizer,
+    )
 
 
 def read_document(file_id: str) -> dict:
@@ -297,9 +324,29 @@ def read_document(file_id: str) -> dict:
             "content": text[:_DOC_CHAR_CAP]}
 
 
-def read_document_with_vision(file_id: str) -> dict:
+def read_document_with_vision(
+    file_id: str,
+    *,
+    policy_lease: object,
+    attempt_authorizer,
+) -> dict:
     """Explicit external Vision path, gated by Capability Kernel before this function runs."""
     from app.agent import provider
+
+    # Dispatch authorization can be revoked while a queued tool waits. Recheck before even local
+    # parsing/rendering, then the guarded provider transport repeats the same server-only check at
+    # every actual send attempt.
+    try:
+        entry_allowed = callable(attempt_authorizer) and attempt_authorizer() is True
+    except Exception:  # noqa: BLE001 -- authorization failures always deny without values
+        entry_allowed = False
+    if not entry_allowed:
+        return {
+            "error": "当前视觉模型数据出境策略未授权",
+            "kind": "vision_egress_denied",
+            "code": "AGENT_VISION_EGRESS_DENIED",
+            "retriable": False,
+        }
 
     local = read_document(file_id)
     if not local["requires_vision"]:
@@ -311,7 +358,12 @@ def read_document_with_vision(file_id: str) -> dict:
     else:
         hint = "请识别图片中的全部文字、表格、设备型号、品牌与参数配置，按原结构输出。"
     try:
-        text = _read_image_or_scanned(_data_path(fid, ext), hint)
+        text = _read_image_or_scanned(
+            _data_path(fid, ext),
+            hint,
+            policy_lease=policy_lease,
+            attempt_authorizer=attempt_authorizer,
+        )
     except provider.VisionNotConfigured:
         return {
             **local,
@@ -319,6 +371,22 @@ def read_document_with_vision(file_id: str) -> dict:
                 "【未配置视觉模型】该文件是图片/扫描件，需配置 VISION_API_KEY 后才能识别。"
                 "文字版 Word/Excel/PDF/txt 不受影响。"
             ),
+        }
+    except provider.VisionEgressDenied:
+        # A live policy change between capability dispatch and provider use is not an internal
+        # retryable failure. Never copy the exception text or customer path into the result.
+        return {
+            "error": "当前视觉模型数据出境策略未授权",
+            "kind": "vision_egress_denied",
+            "code": "AGENT_VISION_EGRESS_DENIED",
+            "retriable": False,
+        }
+    except provider.VisionPayloadBudgetExceeded:
+        return {
+            "error": "视觉输入或识别结果超过安全预算",
+            "kind": "vision_payload_budget_exceeded",
+            "code": "AGENT_VISION_PAYLOAD_BUDGET_EXCEEDED",
+            "retriable": False,
         }
     truncated = len(text) > _DOC_CHAR_CAP
     return {
@@ -385,7 +453,7 @@ def write_excel(base_file_id: str | None, sheet: str | None,
             raise FileError(f"cells 项格式错: {c!r}（需 row/col/value）") from exc
         if row < 1 or row > 1_048_576:
             raise FileError(f"行号超界: {row}")
-        ws.cell(row=row, column=col, value=c.get("value"))
+        _set_literal_cell(ws.cell(row=row, column=col), c.get("value"))
         written += 1
 
     name = output_name or (f"回填_{base_name}" if base_name else "结果.xlsx")
@@ -429,7 +497,7 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
     r0 = 1
     if title:
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
-        tc = ws.cell(row=1, column=1, value=title)
+        tc = _set_literal_cell(ws.cell(row=1, column=1), title)
         tc.font = _TITLE_FONT
         tc.alignment = Alignment(horizontal="left", vertical="center")
         ws.row_dimensions[1].height = 26
@@ -437,7 +505,7 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
 
     # 表头
     for j, h in enumerate(headers, start=1):
-        c = ws.cell(row=r0, column=j, value=str(h))
+        c = _set_literal_cell(ws.cell(row=r0, column=j), str(h))
         c.fill, c.font, c.border = _HEADER_FILL, _HEADER_FONT, _BORDER
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.row_dimensions[r0].height = 22
@@ -451,7 +519,7 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
         base_fill = _BAD_FILL if hit_bad else _WARN_FILL if hit_warn else (_ZEBRA_FILL if i % 2 else None)
         for j in range(ncol):
             val = row[j] if j < len(row) else None
-            c = ws.cell(row=rr, column=j + 1, value=val)
+            c = _set_literal_cell(ws.cell(row=rr, column=j + 1), val)
             c.border = _BORDER
             if base_fill:
                 c.fill = base_fill

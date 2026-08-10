@@ -91,14 +91,35 @@ def _limited_client(db, username: str, *, cost: bool, profit: bool) -> TestClien
     return client
 
 
-def _ctx(*, cost: bool, profit: bool) -> security.UserContext:
-    perms = permissions.effective("readonly", {
+def _ctx(db, *, cost: bool, profit: bool) -> security.UserContext:
+    base = permissions.effective("readonly", None)
+    overrides = {
         "page_maintenance": True,
         "data_purchase_cost": cost,
         "data_profit": profit,
-    })
+    }
+    perms = permissions.effective_from_snapshot(base, overrides)
+    username = f"maintenance-agent-cost-{int(cost)}-profit-{int(profit)}"
+    if db.scalar(select(SysUser).where(SysUser.username == username)) is None:
+        db.add(SysUser(
+            username=username,
+            role="readonly",
+            password_hash=hash_password("pw123456"),
+            is_active=True,
+            template_code="readonly",
+            template_version=1,
+            template_perms=base,
+            perm_overrides=overrides,
+            permissions=perms,
+        ))
+        db.commit()
     return security.UserContext(
-        user_id="limited", role="readonly", permissions=perms, is_authenticated=True,
+        user_id=username,
+        role="readonly",
+        permissions=perms,
+        is_authenticated=True,
+        authn="sys_user",
+        token_version=0,
     )
 
 
@@ -177,7 +198,7 @@ def test_api_cost_blind_projects_use_neutral_sort_before_any_consumer_truncation
 def test_agent_uses_same_board_collapse_and_neutral_project_truncation(
     db, maintenance_permission_data,
 ):
-    profit_blind_ctx = _ctx(cost=True, profit=False)
+    profit_blind_ctx = _ctx(db, cost=True, profit=False)
     profit_blind = tools.dispatch(
         db, "get_maintenance_board", {"status": "red"},
         profit_blind_ctx,
@@ -212,7 +233,7 @@ def test_agent_uses_same_board_collapse_and_neutral_project_truncation(
 
     cost_blind = tools.dispatch(
         db, "get_maintenance_projects", {"top": 2},
-        _ctx(cost=False, profit=False),
+        _ctx(db, cost=False, profit=False),
     )
     assert cost_blind["ranking_restricted"] is True
     assert cost_blind["effective_sort"] == "project"
@@ -222,7 +243,7 @@ def test_agent_uses_same_board_collapse_and_neutral_project_truncation(
 
     cost_blind_board = tools.dispatch(
         db, "get_maintenance_board", {"status": "red"},
-        _ctx(cost=False, profit=False),
+        _ctx(db, cost=False, profit=False),
     )
     assert cost_blind_board["ranking_restricted"] is True
     assert cost_blind_board["status_filter_applied"] is False
@@ -268,7 +289,17 @@ def test_default_purchaser_template_keeps_cost_facts_but_hides_budget_decisions(
         role="purchaser",
         permissions=purchaser_permissions,
         is_authenticated=True,
+        authn="sys_user",
+        token_version=0,
     )
+    db.add(SysUser(
+        username="default-purchaser",
+        role="purchaser",
+        password_hash=hash_password("pw123456"),
+        is_active=True,
+        permissions=purchaser_permissions,
+    ))
+    db.commit()
 
     projects = maintenance_cost.projects_aggregate(db, user_ctx=ctx)
     assert all(row["known_cost_total"] is not None for row in projects["rows"])
@@ -384,6 +415,8 @@ def test_boss_sees_same_incomplete_cost_gate_across_api_agent_and_workbook(
         role="boss",
         permissions=boss_permissions,
         is_authenticated=True,
+        authn="sys_user",
+        token_version=0,
     )
     agent_board = tools.dispatch(
         db,
@@ -418,7 +451,7 @@ def test_boss_sees_same_incomplete_cost_gate_across_api_agent_and_workbook(
         workbook.close()
 
 
-def test_agent_board_reuses_service_decision_without_recomputing(monkeypatch):
+def test_agent_board_reuses_service_decision_without_recomputing(db, monkeypatch):
     captured = {}
     service_result = {
         "rows": [{
@@ -453,16 +486,17 @@ def test_agent_board_reuses_service_decision_without_recomputing(monkeypatch):
 
     monkeypatch.setattr(maintenance_cost, "board", fake_board)
 
-    ctx = _ctx(cost=True, profit=True)
+    ctx = _ctx(db, cost=True, profit=True)
     result = tools.dispatch(
-        None,
+        db,
         "get_maintenance_board",
         {"status": "incomplete_cost"},
         ctx,
     )
 
     assert captured["status"] == "incomplete_cost"
-    assert captured["user_ctx"] is ctx
+    assert captured["user_ctx"].user_id == ctx.user_id
+    assert captured["user_ctx"].authn == "sys_user"
     assert result["rows"][0]["decision_status"] == "incomplete_cost"
     assert result["rows"][0]["remaining"] is None
     assert result["rows"][0]["remaining_pct"] is None
