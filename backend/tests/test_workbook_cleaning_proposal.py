@@ -209,7 +209,9 @@ def _expect_rejected(request: CleaningProposalRequest, code: str) -> None:
     assert caught.value.code == code
 
 
-def test_dark_evidence_is_opaque_proposal_only_and_contains_no_raw_or_hash_oracle() -> None:
+def test_dark_evidence_is_opaque_proposal_only_and_contains_no_raw_or_hash_oracle() -> (
+    None
+):
     result = assess_cleaning_proposal(_request())
 
     assert result.mode == "dark"
@@ -289,7 +291,9 @@ def test_same_input_is_deterministic_and_change_order_is_not_semantic() -> None:
         ),
     ),
 )
-def test_proposal_binds_authoritative_snapshots(field: str, value: object, code: str) -> None:
+def test_proposal_binds_authoritative_snapshots(
+    field: str, value: object, code: str
+) -> None:
     request = _request()
     proposal = request.proposal.model_copy(update={field: value})
     _expect_rejected(request.model_copy(update={"proposal": proposal}), code)
@@ -299,10 +303,14 @@ def test_owner_and_template_classification_fail_closed() -> None:
     request = _request()
     foreign_template = request.template.model_copy(
         update={
-            "artifact": request.template.artifact.model_copy(update={"owner_sub": "worker-002"})
+            "artifact": request.template.artifact.model_copy(
+                update={"owner_sub": "worker-002"}
+            )
         }
     )
-    _expect_rejected(request.model_copy(update={"template": foreign_template}), "owner_mismatch")
+    _expect_rejected(
+        request.model_copy(update={"template": foreign_template}), "owner_mismatch"
+    )
     _expect_rejected(
         _request(template_classification=TemplateClassification.UNCLASSIFIED),
         "template_unclassified",
@@ -317,17 +325,25 @@ def test_duplicate_target_observed_and_proposed_refs_fail_closed() -> None:
     request = _request()
     change = request.proposal.changes[0]
     duplicate_change_request = request.model_copy(
-        update={"proposal": request.proposal.model_copy(update={"changes": (change, change)})}
+        update={
+            "proposal": request.proposal.model_copy(
+                update={"changes": (change, change)}
+            )
+        }
     )
     _expect_rejected(duplicate_change_request, "duplicate_target_field_change")
 
-    second = _pair(row=3, observed_field_ref=request.observed_fields[0].observed_field_ref)
+    second = _pair(
+        row=3, observed_field_ref=request.observed_fields[0].observed_field_ref
+    )
     _expect_rejected(
         _request(pairs=(_pair(), second)),
         "duplicate_observed_field_ref",
     )
     reused_value = _pair(row=3, proposed_value_ref=change.proposed_value_ref)
-    _expect_rejected(_request(pairs=(_pair(), reused_value)), "duplicate_proposed_value_ref")
+    _expect_rejected(
+        _request(pairs=(_pair(), reused_value)), "duplicate_proposed_value_ref"
+    )
 
 
 def test_row_and_observed_field_bindings_cannot_be_retargeted() -> None:
@@ -335,19 +351,29 @@ def test_row_and_observed_field_bindings_cannot_be_retargeted() -> None:
     change = request.proposal.changes[0]
     wrong_snapshot = change.model_copy(
         update={
-            "row_ref": change.row_ref.model_copy(update={"source_snapshot_ref": _u(700)})
+            "row_ref": change.row_ref.model_copy(
+                update={"source_snapshot_ref": _u(700)}
+            )
         }
     )
     _expect_rejected(
         request.model_copy(
-            update={"proposal": request.proposal.model_copy(update={"changes": (wrong_snapshot,)})}
+            update={
+                "proposal": request.proposal.model_copy(
+                    update={"changes": (wrong_snapshot,)}
+                )
+            }
         ),
         "row_reference_mismatch",
     )
     retargeted = change.model_copy(update={"source_column_refs": (SRC_NAME,)})
     _expect_rejected(
         request.model_copy(
-            update={"proposal": request.proposal.model_copy(update={"changes": (retargeted,)})}
+            update={
+                "proposal": request.proposal.model_copy(
+                    update={"changes": (retargeted,)}
+                )
+            }
         ),
         "observed_field_mismatch",
     )
@@ -431,14 +457,18 @@ def test_operation_allowlist_version_formula_noop_and_arity_gates() -> None:
             )
         }
     )
-    _expect_rejected(request.model_copy(update={"rules": rules}), "operation_not_allowlisted")
+    _expect_rejected(
+        request.model_copy(update={"rules": rules}), "operation_not_allowlisted"
+    )
 
     change = request.proposal.changes[0].model_copy(
         update={"operation_implementation_version": "operation/other"}
     )
     _expect_rejected(
         request.model_copy(
-            update={"proposal": request.proposal.model_copy(update={"changes": (change,)})}
+            update={
+                "proposal": request.proposal.model_copy(update={"changes": (change,)})
+            }
         ),
         "operation_implementation_mismatch",
     )
@@ -447,7 +477,7 @@ def test_operation_allowlist_version_formula_noop_and_arity_gates() -> None:
         target_column_ref=DST_NAME,
         operation=Operation.CONSTANT_VALUE,
         before=CellValue(kind="null", value=None),
-        after=CellValue(kind="text", value=" =HYPERLINK(\"x\")"),
+        after=CellValue(kind="text", value=' =HYPERLINK("x")'),
     )
     formula_result = assess_cleaning_proposal(_request(pairs=(formula,)))
     assert RiskFlag.FORMULA_LIKE_TEXT in formula_result.risk_flags
@@ -470,9 +500,13 @@ def test_change_semantic_proposal_and_observed_budgets_are_independent() -> None
     second = _pair(row=3)
     request = _request(pairs=(first, second))
     rules = request.rules.model_copy(update={"maximum_changes": 1})
-    _expect_rejected(request.model_copy(update={"rules": rules}), "change_budget_exceeded")
+    _expect_rejected(
+        request.model_copy(update={"rules": rules}), "change_budget_exceeded"
+    )
     rules = request.rules.model_copy(update={"semantic_rewrite_limit": 1})
-    _expect_rejected(request.model_copy(update={"rules": rules}), "semantic_budget_exceeded")
+    _expect_rejected(
+        request.model_copy(update={"rules": rules}), "semantic_budget_exceeded"
+    )
 
     large_proposal = tuple(
         _pair(
@@ -523,7 +557,9 @@ def test_low_confidence_and_version_changes_remain_explicit_review_evidence() ->
     request = _request()
     baseline = assess_cleaning_proposal(request)
     rules = request.rules.model_copy(update={"rule_set_version": "rules/2026-08-10.2"})
-    proposal = request.proposal.model_copy(update={"rule_set_version": rules.rule_set_version})
+    proposal = request.proposal.model_copy(
+        update={"rule_set_version": rules.rule_set_version}
+    )
     changed = assess_cleaning_proposal(
         request.model_copy(update={"rules": rules, "proposal": proposal})
     )
@@ -599,7 +635,9 @@ def test_strict_schema_and_kernel_revalidation_fail_closed() -> None:
 
 def test_kernel_has_no_io_runtime_registration_or_homegrown_integrity_surface() -> None:
     package = Path(__file__).parents[1] / "app" / "agent" / "workbook_cleaning"
-    source = "\n".join(path.read_text(encoding="utf-8") for path in package.glob("*.py"))
+    source = "\n".join(
+        path.read_text(encoding="utf-8") for path in package.glob("*.py")
+    )
     forbidden = (
         "sqlalchemy",
         "openpyxl",

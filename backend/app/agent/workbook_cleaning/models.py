@@ -173,7 +173,9 @@ class RuleSetSnapshot(StrictModel):
     rule_set_version: Version
     rule_set_sha256: Sha256
     policy_implementation_version: Version
-    operations: tuple[OperationImplementation, ...] = Field(min_length=1, max_length=256)
+    operations: tuple[OperationImplementation, ...] = Field(
+        min_length=1, max_length=256
+    )
     maximum_changes: int = Field(ge=0, le=200)
     semantic_rewrite_limit: int = Field(ge=0, le=100)
     low_confidence_threshold_basis_points: int = Field(ge=0, le=10_000)

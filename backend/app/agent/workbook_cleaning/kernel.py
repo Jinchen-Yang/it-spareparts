@@ -219,7 +219,9 @@ def assess_cleaning_proposal(
         raise CleaningProposalRejected("change_budget_exceeded")
     if len(_canonical_bytes(proposal.model_dump(mode="json"))) > _MAX_PROPOSAL_BYTES:
         raise CleaningProposalRejected("proposal_payload_budget_exceeded")
-    observed_payload = [field.model_dump(mode="json") for field in request.observed_fields]
+    observed_payload = [
+        field.model_dump(mode="json") for field in request.observed_fields
+    ]
     if len(_canonical_bytes(observed_payload)) > _MAX_OBSERVED_PROJECTION_BYTES:
         raise CleaningProposalRejected("observed_projection_budget_exceeded")
 
@@ -291,7 +293,9 @@ def assess_cleaning_proposal(
             raise CleaningProposalRejected("operation_implementation_mismatch")
         if observed.before == change.proposed_after:
             raise CleaningProposalRejected("noop_change")
-        _validate_target_operation(change, target_columns[change.target_column_ref].kind)
+        _validate_target_operation(
+            change, target_columns[change.target_column_ref].kind
+        )
 
         if change.operation == Operation.SEMANTIC_REWRITE:
             semantic_count += 1
