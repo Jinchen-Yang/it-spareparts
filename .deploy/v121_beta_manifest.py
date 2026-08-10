@@ -474,8 +474,6 @@ def _parse_allowlist(
                 used_evidence.add(key)
         if replenishment["action_replenishment_create"] and not replenishment["data_pool_price_governance"]:
             _fail(f"allowlist account {username} can create replenishment without price permission")
-        if replenishment_enabled and not replenishment["data_pool_price_governance"]:
-            _fail(f"allowlist account {username} cannot use replenishment without price permission")
         normalized.append(
             {
                 "username": username,

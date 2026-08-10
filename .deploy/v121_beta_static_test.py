@@ -459,6 +459,20 @@ def main() -> None:
         assert summary["admin_pilot_count"] == 0
         assert evidence == [replenishment_path]
 
+        create_without_price = json.loads(json.dumps(replenishment_write))
+        create_without_price["accounts"][0]["replenishment"][
+            "data_pool_price_governance"
+        ] = False
+        path.write_text(json.dumps(create_without_price), encoding="utf-8")
+        try:
+            module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
+        except module.ManifestError:
+            pass
+        else:
+            raise AssertionError("replenishment create without price permission was accepted")
+
+        path.write_text(json.dumps(replenishment_write), encoding="utf-8")
+
         original_fetch_canary = module._fetch_canary_comment
         module._fetch_canary_comment = lambda **_kwargs: {
             **captured_replenishment,
@@ -539,6 +553,55 @@ def main() -> None:
             repository="Example/it-spareparts",
             target=head,
         )
+        review_canary_failures = []
+        review_wrong_route = json.loads(json.dumps(replenishment_review_body))
+        review_wrong_route["request"]["path"] = "/api/replenishment-beta/catalog"
+        review_canary_failures.append(("wrong route", review_wrong_route, {}))
+        review_wrong_method = json.loads(json.dumps(replenishment_review_body))
+        review_wrong_method["request"]["method"] = "PATCH"
+        review_canary_failures.append(("wrong method", review_wrong_method, {}))
+        review_wrong_sha = json.loads(json.dumps(replenishment_review_body))
+        review_wrong_sha["target_sha"] = "0" * 40
+        review_canary_failures.append(("wrong SHA", review_wrong_sha, {}))
+        review_canary_failures.append(
+            (
+                "edited comment",
+                replenishment_review_body,
+                {"updated_at": "2026-08-10T12:01:00Z"},
+            )
+        )
+        review_canary_failures.append(
+            (
+                "non-collaborator",
+                replenishment_review_body,
+                {"author_association": "NONE"},
+            )
+        )
+        for label, body, overrides in review_canary_failures:
+            payload = {
+                "body": json.dumps(body),
+                "user": {"login": "reviewer.one", "type": "User"},
+                "author_association": "COLLABORATOR",
+                "commit_id": head,
+                "created_at": "2026-08-10T12:00:00Z",
+                "updated_at": "2026-08-10T12:00:00Z",
+                "id": 225,
+                "html_url": (
+                    f"https://github.com/Example/it-spareparts/commit/{head}"
+                    "#commitcomment-225"
+                ),
+                **overrides,
+            }
+            try:
+                module._canary_comment_evidence(
+                    payload,
+                    repository="Example/it-spareparts",
+                    target=head,
+                )
+            except module.ManifestError:
+                pass
+            else:
+                raise AssertionError(f"review canary accepted {label}")
         replenishment_review_path = folder / "replenishment-review-canary.json"
         replenishment_review_path.write_text(
             json.dumps(captured_replenishment_review), encoding="utf-8"
@@ -547,6 +610,9 @@ def main() -> None:
         replenishment_review["accounts"][0]["replenishment"][
             "action_replenishment_review"
         ] = True
+        replenishment_review["accounts"][0]["replenishment"][
+            "data_pool_price_governance"
+        ] = False
         replenishment_review["canary_evidence"] = [
             {
                 "username": "named.pilot",
@@ -565,6 +631,36 @@ def main() -> None:
         )
         assert summary["canary_evidence_count"] == 1
         assert evidence == [replenishment_review_path]
+
+        original_fetch_canary = module._fetch_canary_comment
+        module._fetch_canary_comment = lambda **_kwargs: {
+            **captured_replenishment_review,
+            "comment_id": 998,
+        }
+        try:
+            try:
+                module._parse_allowlist(
+                    path,
+                    repository="Example/it-spareparts",
+                    target=head,
+                    verify_live_canaries=True,
+                )
+            except module.ManifestError:
+                pass
+            else:
+                raise AssertionError("GitHub live review canary drift was accepted")
+        finally:
+            module._fetch_canary_comment = original_fetch_canary
+
+        review_missing_canary = json.loads(json.dumps(replenishment_review))
+        review_missing_canary["canary_evidence"] = []
+        path.write_text(json.dumps(review_missing_canary), encoding="utf-8")
+        try:
+            module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
+        except module.ManifestError:
+            pass
+        else:
+            raise AssertionError("replenishment review without real canary was accepted")
 
         review_without_page = json.loads(json.dumps(replenishment_review))
         review_without_page["accounts"][0]["replenishment"][

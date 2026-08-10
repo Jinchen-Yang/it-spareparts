@@ -863,9 +863,27 @@ elif mode == "allow":
         if status != 200:
             raise SystemExit(f"Maintenance Beta allow smoke failed: {status}")
     if features.get("replenishment"):
+        status, capabilities=request("/api/replenishment-beta/capabilities",token=token)
+        if status != 200 or not isinstance(capabilities,dict):
+            raise SystemExit(f"replenishment capabilities smoke failed: {status}")
+        expected_price=permission_graph.get("data_pool_price_governance") is True
+        expected_create=(
+            permission_graph.get("action_replenishment_create") is True and expected_price
+        )
+        expected_review=permission_graph.get("action_replenishment_review") is True
+        if (
+            capabilities.get("can_view_price") is not expected_price
+            or capabilities.get("can_create") is not expected_create
+            or capabilities.get("can_review") is not expected_review
+        ):
+            raise SystemExit("replenishment capabilities drift from pilot permissions")
         status, _=request("/api/replenishment-beta/catalog?page_size=1",token=token)
-        if status != 200:
-            raise SystemExit(f"replenishment Beta allow smoke failed: {status}")
+        expected_catalog_status=200 if expected_price else 403
+        if status != expected_catalog_status:
+            raise SystemExit(
+                "replenishment catalog smoke failed: "
+                f"expected {expected_catalog_status}, observed {status}"
+            )
 else:
     raise SystemExit("unknown smoke mode")
 PY
