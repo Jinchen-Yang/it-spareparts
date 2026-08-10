@@ -69,6 +69,10 @@ def _validate_source_integrity(review: ReplenishmentReviewInput) -> None:
         (CommercialSide.PURCHASE, review.commercial.purchase),
         (CommercialSide.SALES, review.commercial.sales),
     ):
+        if evidence.canonical_part_id != review.canonical_part_id:
+            raise ReplenishmentTechnicalError(
+                TechnicalFailureCode.CANONICAL_PART_MISMATCH
+            )
         if evidence.query_window != expected_window:
             raise ReplenishmentTechnicalError(
                 TechnicalFailureCode.QUERY_WINDOW_MISMATCH
@@ -133,6 +137,7 @@ def _seal_side(
             coverage_through=evidence.coverage.coverage_through,
             completeness_status=evidence.coverage.completeness_status,
             lineage_verified=evidence.coverage.lineage_verified,
+            last_successful_import_at=evidence.coverage.last_successful_import_at,
             source_batch_refs=tuple(verified_batches),
         ),
     )
@@ -175,6 +180,13 @@ def evaluate_replenishment(
 
     _validate_source_integrity(review)
     evidence = ReplenishmentEvidence(
+        source_application_ref=review.request.source_application_ref,
+        source_snapshot_fingerprint=review.request.source_snapshot_fingerprint,
+        canonical_part_id=review.canonical_part_id,
+        requested_qty=review.request.requested_qty,
+        as_of=review.server.as_of,
+        window=commercial_window(review.server.as_of),
+        policy_version=review.policy.policy_version,
         purchase=_seal_side(review.commercial.purchase),
         sales=_seal_side(review.commercial.sales),
         supporting_refs=_seal_supporting_refs(review),

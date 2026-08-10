@@ -8,10 +8,14 @@ cannot write business data.
 ## Contract
 
 `evaluate_replenishment()` accepts frozen, strict Pydantic models and returns a
-frozen decision/evidence projection. `ReplenishmentRequest` intentionally has
-no `as_of` field. The durable Task layer must derive and freeze
-`ServerReviewContext.as_of` in `Asia/Shanghai` when the Task is created; retries
-and resumes must reuse that value.
+frozen decision/evidence projection. Its input is post-resolution: the
+canonical `dim_part.id` is mandatory and both commercial projections must bind
+to that same ID. PN text is only an optional display snapshot and is never an
+identity key. `ReplenishmentRequest` intentionally has no `as_of` field. The
+durable Task layer must derive and freeze `ServerReviewContext.as_of` in
+`Asia/Shanghai` when the Task is created; retries and resumes must reuse that
+value. The source adapter must also provide a bounded application reference and
+lower-hex SHA-256 source snapshot fingerprint.
 
 The commercial query interval is the closed range
 `[as_of - 6 calendar months, as_of]`. Each purchase and sales projection must
@@ -42,9 +46,12 @@ threshold-free `replenishment-v1-shadow`, so all surviving candidates remain
 `human_review_required` with `support_class=unscored`. Approval is not part of
 the type system.
 
-Evidence is deeply immutable and bounded. It contains coverage/completeness,
-counts, verified batch IDs and hashes, plus opaque typed references. It has no
-filename, path, order ID, customer, vendor, price, or SN fields.
+Evidence is deeply immutable and bounded. It binds the application reference,
+source snapshot fingerprint, canonical part ID, requested quantity, `as_of`,
+closed window, Policy version, and rule implementation version. Commercial
+lineage includes coverage/completeness, the last-successful-import marker,
+counts, and verified batch IDs and hashes, plus opaque typed references. It has
+no filename, path, order ID, customer, vendor, price, or SN fields.
 
 ## Activation gate
 

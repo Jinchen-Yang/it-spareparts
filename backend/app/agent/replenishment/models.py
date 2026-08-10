@@ -12,6 +12,10 @@ class _StrictFrozenModel(BaseModel):
 
 
 BoundedReference = Annotated[str, Field(min_length=1, max_length=128)]
+Sha256Hex = Annotated[
+    str,
+    Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"),
+]
 Numeric14Scale3 = Annotated[
     Decimal,
     Field(gt=0, max_digits=14, decimal_places=3, allow_inf_nan=False),
@@ -25,10 +29,9 @@ SealedEvidenceRefs = Annotated[tuple["EvidenceRef", ...], Field(max_length=24)]
 def _strip_and_reject_control_characters(value: object) -> object:
     if not isinstance(value, str):
         return value
-    normalized = value.strip()
-    if any(unicodedata.category(character).startswith("C") for character in normalized):
+    if any(unicodedata.category(character).startswith("C") for character in value):
         raise ValueError("control characters are not permitted")
-    return normalized
+    return value.strip()
 
 
 class CommercialWindow(_StrictFrozenModel):
@@ -40,15 +43,18 @@ class CommercialWindow(_StrictFrozenModel):
 
 
 class ReplenishmentRequest(_StrictFrozenModel):
-    """Minimal trusted request projection; ``as_of`` is intentionally absent."""
+    """Resolved evaluation request; PN is an optional display snapshot only."""
 
     source_application_ref: BoundedReference
-    pn: Annotated[str, Field(min_length=1, max_length=128)]
+    source_snapshot_fingerprint: Sha256Hex
+    pn_display_snapshot: Annotated[str, Field(min_length=1, max_length=128)] | None = (
+        None
+    )
     requested_qty: Numeric14Scale3
 
-    _sanitize_text = field_validator("source_application_ref", "pn", mode="before")(
-        _strip_and_reject_control_characters
-    )
+    _sanitize_text = field_validator(
+        "source_application_ref", "pn_display_snapshot", mode="before"
+    )(_strip_and_reject_control_characters)
 
 
 class CommercialSide(StrEnum):
@@ -95,6 +101,7 @@ class TechnicalFailureCode(StrEnum):
     FILE_HASH_MISMATCH = "RPL-TECH-006-file-hash-mismatch"
     BATCH_CONTENT_DRIFT = "RPL-TECH-007-batch-content-drift"
     QUERY_WINDOW_MISMATCH = "RPL-TECH-008-query-window-mismatch"
+    CANONICAL_PART_MISMATCH = "RPL-TECH-009-canonical-part-mismatch"
 
 
 class EvidenceRefType(StrEnum):
@@ -145,6 +152,7 @@ class CommercialCoverage(_StrictFrozenModel):
 
 
 class CommercialSideEvidence(_StrictFrozenModel):
+    canonical_part_id: Annotated[int, Field(gt=0)]
     order_count: Annotated[int, Field(ge=0)]
     query_window: CommercialWindow
     coverage: CommercialCoverage
@@ -203,6 +211,7 @@ class ShadowPolicy(_StrictFrozenModel):
 
 class ReplenishmentReviewInput(_StrictFrozenModel):
     request: ReplenishmentRequest
+    canonical_part_id: Annotated[int, Field(gt=0)]
     server: ServerReviewContext
     commercial: CommercialEvidence
     supporting: SupportingContext
@@ -211,7 +220,7 @@ class ReplenishmentReviewInput(_StrictFrozenModel):
 
 class VerifiedBatchRef(_StrictFrozenModel):
     batch_id: BoundedReference
-    file_sha256: Annotated[str, Field(min_length=64, max_length=64)]
+    file_sha256: Sha256Hex
     file_type: CommercialSide
 
 
@@ -219,6 +228,7 @@ class SealedCommercialCoverage(_StrictFrozenModel):
     coverage_through: date
     completeness_status: CompletenessStatus
     lineage_verified: bool
+    last_successful_import_at: datetime | None
     source_batch_refs: VerifiedBatchRefs = ()
 
 
@@ -228,9 +238,24 @@ class SealedCommercialSideEvidence(_StrictFrozenModel):
 
 
 class ReplenishmentEvidence(_StrictFrozenModel):
+    schema_version: Literal["replenishment-evidence/v1"] = "replenishment-evidence/v1"
+    source_application_ref: BoundedReference
+    source_snapshot_fingerprint: Sha256Hex
+    canonical_part_id: Annotated[int, Field(gt=0)]
+    requested_qty: Numeric14Scale3
+    as_of: date
+    window: CommercialWindow
+    policy_version: Literal["replenishment-v1-shadow"]
+    rule_implementation_version: Literal["replenishment-policy-kernel/v1"] = (
+        "replenishment-policy-kernel/v1"
+    )
     purchase: SealedCommercialSideEvidence
     sales: SealedCommercialSideEvidence
     supporting_refs: SealedEvidenceRefs = ()
+
+    _sanitize_reference = field_validator("source_application_ref", mode="before")(
+        _strip_and_reject_control_characters
+    )
 
 
 class ReplenishmentDecision(_StrictFrozenModel):
@@ -241,3 +266,9 @@ class ReplenishmentDecision(_StrictFrozenModel):
     window: CommercialWindow
     evidence: ReplenishmentEvidence
     caveats: Annotated[tuple[PolicyCaveat, ...], Field(max_length=8)] = ()
+
+    @model_validator(mode="after")
+    def _require_matching_window(self) -> "ReplenishmentDecision":
+        if self.window != self.evidence.window:
+            raise ValueError("decision window must match sealed evidence window")
+        return self
