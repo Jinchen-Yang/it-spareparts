@@ -239,24 +239,34 @@ def test_replenishment_allowlist_cannot_be_bypassed_by_legacy_rbac_switch(
     original = settings.replenishment_beta_enabled
     try:
         settings.replenishment_beta_enabled = True
-        monkeypatch.setattr(config, "ENABLE_RBAC", False)
         assert client.get("/api/replenishment-beta/capabilities").status_code == 403
         assert client.get("/api/replenishment-beta/catalog").status_code == 403
+        callback_body = {
+            "version_id": "00000000-0000-0000-0000-000000000000",
+            "content_digest": "0" * 64,
+            "idempotency_key": "admin-allowlist-bypass-regression",
+            "decisions": [
+                {
+                    "line_id": "00000000-0000-0000-0000-000000000000",
+                    "decision": "approved",
+                }
+            ],
+        }
+        for rbac_enabled in (True, False):
+            monkeypatch.setattr(config, "ENABLE_RBAC", rbac_enabled)
+            callback = client.post(
+                "/api/replenishment-beta/applications/not-real/review-results",
+                json=callback_body,
+            )
+            assert callback.status_code == 403
+            assert "未加入补库申请 Beta 试用名单" in callback.text
     finally:
         settings.replenishment_beta_enabled = original
 
 
-def test_every_human_replenishment_route_has_account_allowlist_dependency():
-    exceptions: list[APIRoute] = []
+def test_every_replenishment_route_has_account_allowlist_dependency():
     for route in replenishment_router.routes:
         if not isinstance(route, APIRoute):
             continue
         dependencies = {dependency.call for dependency in route.dependant.dependencies}
-        if route.path.endswith("/review-results"):
-            exceptions.append(route)
-            assert _beta_page_whitelist not in dependencies
-        else:
-            assert _beta_page_whitelist in dependencies, route.path
-
-    assert len(exceptions) == 1
-    assert exceptions[0].methods == {"POST"}
+        assert _beta_page_whitelist in dependencies, route.path

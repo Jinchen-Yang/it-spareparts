@@ -405,11 +405,11 @@ def review_result(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _gate: None = Depends(_beta_enabled),
-    # Deliberate sole exception to the account Beta-page whitelist: this is a write-only
-    # machine/integration callback guarded by a named identity, the global kill switch and
-    # action_replenishment_review.  It cannot list applications, read price facts or export.
-    # Named admins retain this action through the ordinary admin invariant; all human Beta
-    # page/read/create endpoints above and below still require page_replenishment_beta.
+    # The current endpoint is authenticated as a human system account.  Keep it behind the
+    # same account-scoped Beta allowlist as every other route so the legacy admin action
+    # bypass cannot turn the global feature flag into an implicit all-admin write grant.
+    # A future machine callback needs a separate signed integration-auth contract.
+    _page: None = Depends(_beta_page_whitelist),
     _action: None = Depends(require_action("action_replenishment_review")),
 ) -> dict:
     _no_store(response)

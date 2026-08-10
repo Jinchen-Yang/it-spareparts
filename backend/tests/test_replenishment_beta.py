@@ -242,7 +242,7 @@ def test_price_facts_require_data_permission_even_when_page_is_granted(db):
         settings.replenishment_beta_enabled = original
 
 
-def test_review_callback_permission_does_not_grant_page_or_price_read(db):
+def test_review_callback_requires_page_allowlist_and_action(db):
     owner = _user(db, "review_callback_owner")
     part = DimPart(pn_std="REVIEW-CALLBACK-PN", status="active")
     reviewer_password = "safe-review-password"
@@ -297,6 +297,39 @@ def test_review_callback_permission_does_not_grant_page_or_price_read(db):
     try:
         settings.replenishment_beta_enabled = True
         assert client.get("/api/replenishment-beta/capabilities").status_code == 403
+        response = client.post(
+            f"/api/replenishment-beta/applications/{created['application_id']}/review-results",
+            json={
+                "version_id": version["version_id"],
+                "content_digest": version["content_digest"],
+                "idempotency_key": "controlled-review-callback",
+                "decisions": [
+                    {
+                        "line_id": version["lines"][0]["line_id"],
+                        "decision": "approved",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 403, response.text
+        assert "未加入补库申请 Beta 试用名单" in response.text
+
+        # Explicitly adding the Beta page bit admits this named reviewer to the
+        # callback without granting access to governed price facts.
+        reviewer.permissions = {
+            **reviewer_perms,
+            "page_replenishment_beta": True,
+        }
+        reviewer.token_version = (reviewer.token_version or 0) + 1
+        db.commit()
+        login = client.post(
+            "/api/auth/login",
+            json={"username": reviewer.username, "password": reviewer_password},
+        )
+        assert login.status_code == 200
+        client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+        assert client.get("/api/replenishment-beta/capabilities").status_code == 200
+        assert client.get("/api/replenishment-beta/catalog").status_code == 403
         response = client.post(
             f"/api/replenishment-beta/applications/{created['application_id']}/review-results",
             json={
