@@ -20,14 +20,16 @@ lower-hex SHA-256 source snapshot fingerprint.
 The commercial query interval is the closed range
 `[as_of - 6 calendar months, as_of]`. Each purchase and sales projection must
 declare that exact query window independently. A different or future query
-window is a technical contract failure.
+window is a technical contract failure. Query validation and sealed-payload
+validation call the same calendar-month derivation, so neither the start nor
+the end can drift during replay.
 
 Zero counts are eligible for `RPL-100` only when both sides have all of the
 following:
 
 - `completeness_status=complete`;
 - `coverage_through >= as_of`;
-- verified lineage and a last-successful-import marker;
+- verified lineage and a timezone-aware last-successful-import marker;
 - at least one successful, correctly typed batch manifest;
 - matching import-batch, raw-file, and archived-file SHA-256 values.
 
@@ -40,7 +42,8 @@ to Task retry/fail and must not seal a business outcome.
 Every supporting reference is versioned and bound to the same canonical part
 ID and source snapshot fingerprint as the request. A cross-part or
 cross-snapshot pool, maintenance, or business-context reference is a technical
-failure, not a usable caveat.
+failure, not a usable caveat. The same typed reference ID cannot claim two
+versions in one review.
 
 The only possible outcomes are `need_info`, `recommend_reject`, and
 `human_review_required`. Complete purchase=0 and sales=0 always locks

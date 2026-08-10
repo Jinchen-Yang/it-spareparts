@@ -1,3 +1,4 @@
+import calendar
 import unicodedata
 from datetime import date, datetime
 from decimal import Decimal
@@ -34,12 +35,28 @@ def _strip_and_reject_control_characters(value: object) -> object:
     return value.strip()
 
 
+def _require_timezone_aware(value: datetime | None) -> datetime | None:
+    if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+        raise ValueError("last_successful_import_at must be timezone-aware")
+    return value
+
+
 class CommercialWindow(_StrictFrozenModel):
     """Closed business-date interval used by the commercial-history gate."""
 
     start: date
     end: date
     inclusive: Literal[True] = True
+
+
+def canonical_commercial_window(as_of: date) -> CommercialWindow:
+    """Single canonical derivation for the closed six-calendar-month window."""
+
+    absolute_month = as_of.year * 12 + as_of.month - 1 - 6
+    year, zero_based_month = divmod(absolute_month, 12)
+    month = zero_based_month + 1
+    day = min(as_of.day, calendar.monthrange(year, month)[1])
+    return CommercialWindow(start=date(year, month, day), end=as_of)
 
 
 class ReplenishmentRequest(_StrictFrozenModel):
@@ -103,6 +120,7 @@ class TechnicalFailureCode(StrEnum):
     QUERY_WINDOW_MISMATCH = "RPL-TECH-008-query-window-mismatch"
     CANONICAL_PART_MISMATCH = "RPL-TECH-009-canonical-part-mismatch"
     SUPPORTING_REF_BINDING_MISMATCH = "RPL-TECH-010-supporting-ref-binding-mismatch"
+    SUPPORTING_REF_VERSION_DRIFT = "RPL-TECH-011-supporting-ref-version-drift"
 
 
 class EvidenceRefType(StrEnum):
@@ -144,12 +162,9 @@ class CommercialCoverage(_StrictFrozenModel):
     lineage_verified: bool
     last_successful_import_at: datetime | None = None
 
-    @field_validator("last_successful_import_at")
-    @classmethod
-    def _require_timezone(cls, value: datetime | None) -> datetime | None:
-        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
-            raise ValueError("last_successful_import_at must be timezone-aware")
-        return value
+    _validate_last_import = field_validator("last_successful_import_at")(
+        _require_timezone_aware
+    )
 
 
 class CommercialSideEvidence(_StrictFrozenModel):
@@ -226,6 +241,10 @@ class VerifiedBatchRef(_StrictFrozenModel):
     file_sha256: Sha256Hex
     file_type: CommercialSide
 
+    _sanitize_batch_id = field_validator("batch_id", mode="before")(
+        _strip_and_reject_control_characters
+    )
+
 
 class SealedCommercialCoverage(_StrictFrozenModel):
     coverage_through: date
@@ -233,6 +252,10 @@ class SealedCommercialCoverage(_StrictFrozenModel):
     lineage_verified: bool
     last_successful_import_at: datetime | None
     source_batch_refs: VerifiedBatchRefs = ()
+
+    _validate_last_import = field_validator("last_successful_import_at")(
+        _require_timezone_aware
+    )
 
 
 class SealedCommercialSideEvidence(_StrictFrozenModel):
@@ -267,8 +290,10 @@ class ReplenishmentEvidence(_StrictFrozenModel):
 
     @model_validator(mode="after")
     def _require_deterministic_sealed_decision(self) -> "ReplenishmentEvidence":
-        if self.window.end != self.as_of:
-            raise ValueError("sealed evidence window must end at as_of")
+        if self.window != canonical_commercial_window(self.as_of):
+            raise ValueError(
+                "sealed evidence must use the canonical six-calendar-month window"
+            )
         supporting_keys = [
             (
                 ref.ref_type.value,
@@ -281,6 +306,12 @@ class ReplenishmentEvidence(_StrictFrozenModel):
         ]
         if supporting_keys != sorted(set(supporting_keys)):
             raise ValueError("supporting evidence refs must be canonical and unique")
+        supporting_versions: dict[tuple[str, str], str] = {}
+        for ref in self.supporting_refs:
+            ref_identity = (ref.ref_type.value, ref.ref_id)
+            previous_version = supporting_versions.setdefault(ref_identity, ref.version)
+            if previous_version != ref.version:
+                raise ValueError("supporting evidence ref has conflicting versions")
         for coverage in (self.purchase.coverage, self.sales.coverage):
             batch_keys = [
                 (ref.file_type.value, ref.batch_id, ref.file_sha256)

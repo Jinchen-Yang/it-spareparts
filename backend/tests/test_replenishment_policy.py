@@ -221,6 +221,15 @@ def test_verified_batch_ref_requires_lower_hex_sha256(file_sha256: str) -> None:
         )
 
 
+def test_verified_batch_ref_rejects_control_characters_on_reconstruction() -> None:
+    with pytest.raises(ValidationError, match="control characters"):
+        VerifiedBatchRef(
+            batch_id="purchase-batch\n-v1",
+            file_sha256="a" * 64,
+            file_type=CommercialSide.PURCHASE,
+        )
+
+
 def test_complete_coverage_proves_zero_and_locks_rpl_100_rejection() -> None:
     decision = evaluate_replenishment(_review())
 
@@ -275,6 +284,28 @@ def test_rpl_100_evidence_cannot_be_reassembled_as_human_review() -> None:
     )
     with pytest.raises(ValidationError):
         ReplenishmentEvidence.model_validate(altered_payload)
+
+
+def test_sealed_payload_rejects_tampered_window_start() -> None:
+    payload = evaluate_replenishment(_review()).evidence.model_dump(mode="python")
+    payload["window"]["start"] = date(2020, 1, 1)
+
+    with pytest.raises(ValidationError, match="canonical six-calendar-month"):
+        ReplenishmentEvidence.model_validate(payload)
+
+
+def test_sealed_payload_rejects_naive_last_import_timestamp() -> None:
+    payload = evaluate_replenishment(_review()).evidence.model_dump(mode="python")
+    payload["purchase"]["coverage"]["last_successful_import_at"] = datetime(
+        2026,
+        8,
+        10,
+        9,
+        0,
+    )
+
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        ReplenishmentEvidence.model_validate(payload)
 
 
 def test_review_requires_resolved_canonical_part_identity() -> None:
@@ -459,6 +490,17 @@ def test_supporting_ref_binding_mismatch_fails_closed(ref: EvidenceRef) -> None:
         evaluate_replenishment(_review(supporting=supporting))
 
     assert caught.value.code is TechnicalFailureCode.SUPPORTING_REF_BINDING_MISMATCH
+
+
+def test_same_supporting_ref_with_conflicting_versions_fails_closed() -> None:
+    first = _evidence_ref(EvidenceRefType.ACTIVE_POOL, "same")
+    changed = first.model_copy(update={"version": "v2"})
+    supporting = SupportingContext(active_pool_refs=(first, changed))
+
+    with pytest.raises(ReplenishmentTechnicalError) as caught:
+        evaluate_replenishment(_review(supporting=supporting))
+
+    assert caught.value.code is TechnicalFailureCode.SUPPORTING_REF_VERSION_DRIFT
 
 
 @pytest.mark.parametrize(

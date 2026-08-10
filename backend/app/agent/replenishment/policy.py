@@ -1,9 +1,9 @@
-import calendar
 import re
 from datetime import date
 
 from .models import (
     BatchStatus,
+    canonical_commercial_window,
     CommercialCoverage,
     CommercialSide,
     CommercialSideEvidence,
@@ -35,21 +35,10 @@ class ReplenishmentTechnicalError(RuntimeError):
         super().__init__(code.value)
 
 
-def _subtract_calendar_months(value: date, months: int) -> date:
-    absolute_month = value.year * 12 + value.month - 1 - months
-    year, zero_based_month = divmod(absolute_month, 12)
-    month = zero_based_month + 1
-    day = min(value.day, calendar.monthrange(year, month)[1])
-    return date(year, month, day)
-
-
 def commercial_window(as_of: date) -> CommercialWindow:
     """Return the closed six-calendar-month interval anchored at ``as_of``."""
 
-    return CommercialWindow(
-        start=_subtract_calendar_months(as_of, 6),
-        end=as_of,
-    )
+    return canonical_commercial_window(as_of)
 
 
 def _coverage_is_complete(coverage: CommercialCoverage, as_of: date) -> bool:
@@ -112,6 +101,7 @@ def _validate_source_integrity(review: ReplenishmentReviewInput) -> None:
                 raise ReplenishmentTechnicalError(
                     TechnicalFailureCode.BATCH_CONTENT_DRIFT
                 )
+    supporting_versions: dict[tuple[str, str], str] = {}
     for ref in (
         *review.supporting.active_pool_refs,
         *review.supporting.maintenance_refs,
@@ -124,6 +114,12 @@ def _validate_source_integrity(review: ReplenishmentReviewInput) -> None:
         ):
             raise ReplenishmentTechnicalError(
                 TechnicalFailureCode.SUPPORTING_REF_BINDING_MISMATCH
+            )
+        ref_identity = (ref.ref_type.value, ref.ref_id)
+        previous_version = supporting_versions.setdefault(ref_identity, ref.version)
+        if previous_version != ref.version:
+            raise ReplenishmentTechnicalError(
+                TechnicalFailureCode.SUPPORTING_REF_VERSION_DRIFT
             )
 
 
