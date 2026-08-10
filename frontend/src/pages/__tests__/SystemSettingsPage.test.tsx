@@ -97,7 +97,9 @@ describe("管理员统一税口径展示策略", () => {
     expect(inc).toBeDisabled();
     fireEvent.click(inc);
     expect(screen.getByText(/已被其他管理员修改/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "保存设置" })).toBeDisabled();
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "保存设置" }),
+    ).toBeDisabled());
     expect(updateSystemSettings).toHaveBeenCalledTimes(1);
   });
 
