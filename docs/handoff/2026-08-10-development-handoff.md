@@ -6,6 +6,13 @@
 - 交接分支：`codex/maintenance-manager-combined`；以 GitHub 上该分支最新 HEAD 为唯一代码基线。
 - 稳定版与 Beta 仍共用数据库基础设施，但业务表、API、页面、权限和总闸隔离；默认关闭 Beta，不得把集成候选称为已上线。
 - 本次没有部署、没有改生产数据库、没有写入真实业务数据，也没有开启成本/库存切换闸门。
+- GitHub 交接记录：[Issue #240](https://github.com/Jinchen-Yang/it-spareparts/issues/240)。
+
+## GitHub 发布状态
+
+- 本地交接提交已完成，但当前 GitHub CLI OAuth token 缺少 `workflow` scope，无法推送这条包含 CI 工作流历史的分支。
+- 在有仓库管理员权限的电脑执行 `gh auth refresh -h github.com -s workflow` 后，再运行 `git push -u origin codex/maintenance-manager-combined`。
+- 在推送成功前，GitHub `main` 不是本交接分支的完整代码基线；本 ZIP 和当前本地 Git 提交可作为临时搬迁来源。
 
 ## 已开发并在集成候选中的能力
 
