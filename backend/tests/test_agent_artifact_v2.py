@@ -180,6 +180,54 @@ def test_store_read_during_change_is_retryable_unknown(tmp_path, monkeypatch):
         store.read_bytes(key, max_bytes=1024)
 
 
+@pytest.mark.parametrize("directory", [".tmp", "objects"])
+def test_store_publish_rejects_symlinked_internal_directory_without_escape(
+    tmp_path, directory
+):
+    root = tmp_path / "artifact-root"
+    store = agent_files.LocalArtifactStore(root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / directory).symlink_to(outside, target_is_directory=True)
+    key = f"objects/{uuid.uuid4()}.txt"
+
+    with pytest.raises(agent_files.ArtifactStoreUnavailable):
+        store.publish_bytes(key, b"must stay inside")
+
+    assert list(outside.iterdir()) == []
+    assert not list(tmp_path.rglob("artifact-*.part"))
+
+
+@pytest.mark.parametrize("replaced", ["root", ".tmp", "objects"])
+def test_store_publish_parent_replacement_never_writes_through_symlink(
+    tmp_path, replaced
+):
+    root = tmp_path / "artifact-root"
+    store = agent_files.LocalArtifactStore(root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    key = f"objects/{uuid.uuid4()}.txt"
+
+    def replace_parent(_staged_path):
+        target = root if replaced == "root" else root / replaced
+        displaced = tmp_path / f"displaced-{replaced.lstrip('.')}"
+        target.rename(displaced)
+        target.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(agent_files.ArtifactStoreUnavailable):
+        store.publish_bytes(key, b"pinned", validator=replace_parent)
+
+    assert list(outside.iterdir()) == []
+    assert not list(tmp_path.rglob("artifact-*.part"))
+
+
+def test_local_store_physical_delete_is_disabled(tmp_path):
+    store = agent_files.LocalArtifactStore(tmp_path / "artifact-root")
+
+    with pytest.raises(agent_files.ArtifactStoreUnavailable, match="条件物理删除"):
+        store.remove(f"objects/{uuid.uuid4()}.txt")
+
+
 def _marker_docx_bytes(marker: str) -> bytes:
     from docx import Document
 
@@ -214,8 +262,15 @@ def _write_test_report(
     money_cols: list[int] | None = None,
     contained_resources: set[str] | None = None,
     contained_fields: set[str] | None = None,
+    required_positive_keys: set[str] | None = None,
 ):
     """Mint the non-production Query Broker evidence required by the v2 renderer."""
+    resources = contained_resources or set()
+    fields = contained_fields or set()
+    required = required_positive_keys or {
+        *(agent_artifact_provenance._RESOURCE_PERMISSION[item] for item in resources),
+        *(agent_artifact_provenance._FIELD_PERMISSION[item] for item in fields),
+    }
     evidence = agent_files._mint_report_provenance(
         owner,
         title=title,
@@ -223,8 +278,9 @@ def _write_test_report(
         rows=rows,
         output_name=output_name,
         money_cols=money_cols,
-        contained_resources=contained_resources or set(),
-        contained_fields=contained_fields or set(),
+        contained_resources=resources,
+        contained_fields=fields,
+        required_positive_keys=required,
     )
     return agent_files.write_report(
         title,
@@ -516,6 +572,74 @@ def test_failed_atomic_publish_is_not_downloadable_and_cleans_temp(db, tmp_path,
     assert not list(tmp_path.glob("*.txt"))
 
 
+def test_store_permission_error_preserves_non_ready_unknown_marker(
+    db, monkeypatch
+):
+    owner = _verified_owner(db, "store-permission-owner")
+
+    def deny_link(*_args, **_kwargs):
+        raise PermissionError("object directory is temporarily unavailable")
+
+    monkeypatch.setattr(agent_files.os, "link", deny_link)
+    with pytest.raises(agent_files.ArtifactStoreUnavailable, match="待协调"):
+        agent_files.save_upload(
+            b"permission uncertain",
+            "permission-uncertain.txt",
+            owner,
+        )
+
+    db.expire_all()
+    artifact = db.query(AgentArtifact).filter_by(
+        owner_sub="store-permission-owner"
+    ).one()
+    assert artifact.status == "validating"
+    assert not agent_files.get_artifact_store().path_for(
+        artifact.storage_key
+    ).exists()
+
+
+def test_post_link_parent_replacement_is_uncertain_and_never_ready(
+    db, tmp_path, monkeypatch
+):
+    root = tmp_path / "artifact-root"
+    store = agent_files.LocalArtifactStore(root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    displaced = tmp_path / "displaced-objects"
+    real_link = agent_files.os.link
+    replaced = False
+
+    def link_then_replace(*args, **kwargs):
+        nonlocal replaced
+        result = real_link(*args, **kwargs)
+        if not replaced:
+            replaced = True
+            (root / "objects").rename(displaced)
+            (root / "objects").symlink_to(outside, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(agent_files, "get_artifact_store", lambda: store)
+    monkeypatch.setattr(agent_files.os, "link", link_then_replace)
+    owner = _verified_owner(db, "post-link-parent-owner")
+
+    with pytest.raises(agent_files.ArtifactStoreUnavailable, match="待协调"):
+        agent_files.save_upload(
+            b"linked only inside pinned parent",
+            "post-link-parent.txt",
+            owner,
+        )
+
+    db.expire_all()
+    artifact = db.query(AgentArtifact).filter_by(
+        owner_sub="post-link-parent-owner"
+    ).one()
+    assert artifact.status == "validating"
+    assert list(outside.iterdir()) == []
+    assert (displaced / Path(artifact.storage_key).name).read_bytes() == (
+        b"linked only inside pinned parent"
+    )
+
+
 def test_local_store_concurrent_publish_never_overwrites_existing_key(tmp_path, monkeypatch):
     store = agent_files.LocalArtifactStore(tmp_path)
     storage_key = "objects/11111111-1111-4111-8111-111111111111.txt"
@@ -549,21 +673,20 @@ def test_local_store_concurrent_publish_never_overwrites_existing_key(tmp_path, 
 
 
 def test_non_xlsx_upload_validates_only_store_tracked_part(db, monkeypatch):
-    seen_names = []
+    seen_paths = []
     real_validate = agent_files._validate_staged_file
 
     def capture(path, ext):
-        seen_names.append(path.name)
+        seen_paths.append(path)
         return real_validate(path, ext)
 
     monkeypatch.setattr(agent_files, "_validate_staged_file", capture)
 
     agent_files.save_upload(b"tracked", "tracked.txt", _verified_owner(db, "tracked-owner"))
 
-    assert len(seen_names) == 1
-    assert seen_names[0].startswith("artifact-")
-    assert seen_names[0].endswith(".part")
-    assert "upload-check" not in seen_names[0]
+    assert len(seen_paths) == 1
+    assert seen_paths[0].parent == Path("/proc/self/fd")
+    assert seen_paths[0].name.isdigit()
 
 
 def test_non_ready_expired_and_integrity_mismatch_are_denied(db):

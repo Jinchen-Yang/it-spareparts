@@ -121,6 +121,7 @@ def test_write_report_styled(db, ctx):
         money_cols=[2],
         contained_resources=set(),
         contained_fields=set(),
+        required_positive_keys=set(),
     )
     r = af.write_report(
         "报价单", headers, rows, None, owner, money_cols=[2], provenance=evidence

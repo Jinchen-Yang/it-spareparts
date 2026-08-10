@@ -469,6 +469,7 @@ def test_postgres_constraint_rejects_missing_null_and_fake_v2_scopes(db):
         money_cols=[1],
         contained_resources={"purchases"},
         contained_fields={"purchase_cost"},
+        required_positive_keys={"page_purchases", "data_purchase_cost"},
     )
     generated = agent_files.write_report(
         "采购来源",

@@ -442,7 +442,9 @@ def excel_edit_fingerprint(
 
 
 def _positive_permissions(
-    resources: Iterable[str], fields: Iterable[str]
+    resources: Iterable[str],
+    fields: Iterable[str],
+    required_positive_keys: Iterable[str],
 ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     def checked(values: Iterable[str], label: str) -> set[str]:
         if isinstance(values, (str, bytes, dict)):
@@ -464,15 +466,25 @@ def _positive_permissions(
 
     resource_set = checked(resources, "contained_resources")
     field_set = checked(fields, "contained_fields")
+    required_set = checked(required_positive_keys, "required_positive_keys")
     if any(item not in _RESOURCE_PERMISSION for item in resource_set):
         raise ProvenanceError("制品包含未知业务资源")
     if any(item not in _FIELD_PERMISSION for item in field_set):
         raise ProvenanceError("制品包含未知字段组")
-    required = {
+    known_positive = set(permissions.ALL_KEYS) - set(permissions.ROW_KEYS)
+    if any(item not in known_positive for item in required_set):
+        raise ProvenanceError("来源快照包含未知或限制型权限键")
+    containment_required = {
         *(_RESOURCE_PERMISSION[item] for item in resource_set),
         *(_FIELD_PERMISSION[item] for item in field_set),
     }
-    return tuple(sorted(resource_set)), tuple(sorted(field_set)), tuple(sorted(required))
+    if not containment_required.issubset(required_set):
+        raise ProvenanceError("来源快照遗漏 containment 所需权限")
+    return (
+        tuple(sorted(resource_set)),
+        tuple(sorted(field_set)),
+        tuple(sorted(required_set)),
+    )
 
 
 def derive_sensitivity(required_permissions: Iterable[str]) -> str:
@@ -510,6 +522,7 @@ def mint_server_evidence(
     content_fingerprint_value: str,
     contained_resources: Iterable[str],
     contained_fields: Iterable[str],
+    required_positive_keys: Iterable[str],
     row_subject: str | None,
     own_customers_only: bool,
 ) -> TrustedEvidence:
@@ -528,7 +541,9 @@ def mint_server_evidence(
     if len(content_fingerprint_value) != 64:
         raise ProvenanceError("来源内容指纹无效")
     resources, fields, required = _positive_permissions(
-        contained_resources, contained_fields
+        contained_resources,
+        contained_fields,
+        required_positive_keys,
     )
     if own_customers_only:
         if not row_subject:
@@ -750,18 +765,10 @@ def _verify_snapshot(envelope: Any) -> dict[str, Any]:
     elif payload["source_artifact_id"] is not None:
         raise ProvenanceError("非 Artifact 来源不能伪造 Artifact 标识")
     resources, fields, required = _positive_permissions(
-        payload["contained_resources"], payload["contained_fields"]
+        payload["contained_resources"],
+        payload["contained_fields"],
+        payload["required_positive_keys"],
     )
-    positive = payload["required_positive_keys"]
-    if (
-        not isinstance(positive, list)
-        or len(positive) > MAX_SCOPE_ITEMS * 2
-        or not all(
-            isinstance(key, str) and 0 < len(key) <= MAX_SCOPE_STRING
-            for key in positive
-        )
-    ):
-        raise ProvenanceError("来源快照 positive key 类型或数量无效")
     if (
         payload["contained_resources"] != list(resources)
         or payload["contained_fields"] != list(fields)

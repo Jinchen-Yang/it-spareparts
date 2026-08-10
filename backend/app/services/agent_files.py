@@ -209,9 +209,118 @@ class LocalArtifactStore:
     """Filesystem store with same-directory staging and atomic publication."""
 
     def __init__(self, root: Path):
-        requested = Path(root)
+        requested = Path(os.path.abspath(os.fspath(root)))
         requested.mkdir(parents=True, exist_ok=True)
-        self.root = requested.resolve()
+        try:
+            state = requested.lstat()
+        except OSError as exc:
+            raise ArtifactStoreUnavailable("文件存储根目录暂时不可用") from exc
+        if (
+            not stat.S_ISDIR(state.st_mode)
+            or state.st_uid != os.geteuid()
+            or stat.S_IMODE(state.st_mode) & 0o022
+        ):
+            raise ArtifactStoreUnavailable("文件存储根目录权限或身份无效")
+        self.root = requested
+        self._root_identity = (state.st_dev, state.st_ino)
+
+    @staticmethod
+    def _directory_flags() -> int:
+        return (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+
+    def _open_root_fd(self) -> int:
+        if not getattr(os, "O_NOFOLLOW", 0):
+            raise ArtifactStoreUnavailable("当前平台不支持安全文件存储")
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(self.root, self._directory_flags())
+            state = os.fstat(descriptor)
+        except OSError as exc:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise ArtifactStoreUnavailable("文件存储根目录暂时不可读取") from exc
+        if (
+            not stat.S_ISDIR(state.st_mode)
+            or (state.st_dev, state.st_ino) != self._root_identity
+            or state.st_uid != os.geteuid()
+            or stat.S_IMODE(state.st_mode) & 0o022
+        ):
+            os.close(descriptor)
+            raise ArtifactStoreUnavailable("文件存储根目录身份已变化")
+        return descriptor
+
+    def _root_path_is_current(self) -> bool:
+        try:
+            state = self.root.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(state.st_mode)
+            and (state.st_dev, state.st_ino) == self._root_identity
+            and state.st_uid == os.geteuid()
+            and not stat.S_IMODE(state.st_mode) & 0o022
+        )
+
+    def _open_owned_directory(self, parent_fd: int, name: str) -> tuple[int, bool]:
+        created = False
+        descriptor: int | None = None
+        try:
+            try:
+                os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+                created = True
+            except FileExistsError:
+                pass
+            descriptor = os.open(name, self._directory_flags(), dir_fd=parent_fd)
+            state = os.fstat(descriptor)
+        except OSError as exc:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise ArtifactStoreUnavailable("文件存储目录暂时不可用") from exc
+        if not stat.S_ISDIR(state.st_mode) or state.st_uid != os.geteuid():
+            os.close(descriptor)
+            raise ArtifactStoreUnavailable("文件存储目录权限或身份无效")
+        try:
+            os.fchmod(descriptor, 0o700)
+            state = os.fstat(descriptor)
+        except OSError as exc:
+            os.close(descriptor)
+            raise ArtifactStoreUnavailable("文件存储目录权限无法收紧") from exc
+        if stat.S_IMODE(state.st_mode) != 0o700:
+            os.close(descriptor)
+            raise ArtifactStoreUnavailable("文件存储目录权限无效")
+        if created:
+            try:
+                os.fsync(parent_fd)
+            except OSError as exc:
+                os.close(descriptor)
+                raise ArtifactStoreUnavailable("文件存储目录无法持久化") from exc
+        return descriptor, created
+
+    @staticmethod
+    def _directory_entry_is_current(parent_fd: int, name: str, child_fd: int) -> bool:
+        try:
+            entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            opened = os.fstat(child_fd)
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(entry.st_mode)
+            and (entry.st_dev, entry.st_ino) == (opened.st_dev, opened.st_ino)
+        )
+
+    def _require_current_directories(
+        self, bindings: list[tuple[int, str, int]]
+    ) -> None:
+        if not self._root_path_is_current() or any(
+            not self._directory_entry_is_current(parent, name, child)
+            for parent, name, child in bindings
+        ):
+            raise ArtifactStoreUnavailable("文件存储目录在发布期间发生变化")
 
     def path_for(self, storage_key: str) -> Path:
         key = str(storage_key or "")
@@ -230,15 +339,49 @@ class LocalArtifactStore:
         validator: Callable[[Path], None] | None = None,
     ) -> StoredObject:
         final_path = self.path_for(storage_key)
-        final_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_dir = self.root / ".tmp"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(prefix="artifact-", suffix=".part", dir=temp_dir)
-        temp_path = Path(temp_name)
-        digest = hashlib.sha256()
+        pure = PurePosixPath(storage_key)
+        directory_fds: list[int] = []
+        bindings: list[tuple[int, str, int]] = []
+        temp_dir_fd: int | None = None
+        final_parent_fd: int | None = None
+        temp_fd: int | None = None
+        temp_name: str | None = None
+        temp_identity: tuple[int, int] | None = None
         linked = False
         try:
-            with os.fdopen(fd, "wb") as handle:
+            root_fd = self._open_root_fd()
+            directory_fds.append(root_fd)
+            temp_dir_fd, _ = self._open_owned_directory(root_fd, ".tmp")
+            directory_fds.append(temp_dir_fd)
+            bindings.append((root_fd, ".tmp", temp_dir_fd))
+
+            current_fd = root_fd
+            for part in pure.parts[:-1]:
+                child_fd, _ = self._open_owned_directory(current_fd, part)
+                directory_fds.append(child_fd)
+                bindings.append((current_fd, part, child_fd))
+                current_fd = child_fd
+            final_parent_fd = current_fd
+
+            temp_name = f"artifact-{uuid.uuid4().hex}.part"
+            temp_fd = os.open(
+                temp_name,
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=temp_dir_fd,
+            )
+            os.fchmod(temp_fd, 0o600)
+            initial_temp_state = os.fstat(temp_fd)
+            temp_identity = (
+                initial_temp_state.st_dev,
+                initial_temp_state.st_ino,
+            )
+            digest = hashlib.sha256()
+            with os.fdopen(temp_fd, "wb", closefd=False) as handle:
                 view = memoryview(content)
                 for offset in range(0, len(view), 1024 * 1024):
                     chunk = view[offset:offset + 1024 * 1024]
@@ -247,30 +390,108 @@ class LocalArtifactStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             if validator is not None:
-                validator(temp_path)
+                try:
+                    validator(Path("/proc/self/fd") / str(temp_fd))
+                except FileError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - trusted format validator
+                    raise FileError("文件格式校验失败") from exc
+
+            temp_state = os.fstat(temp_fd)
+            if (
+                not stat.S_ISREG(temp_state.st_mode)
+                or stat.S_IMODE(temp_state.st_mode) != 0o600
+                or temp_state.st_size != len(content)
+            ):
+                raise ArtifactStoreUnavailable("文件暂存对象在校验期间发生变化")
+            os.lseek(temp_fd, 0, os.SEEK_SET)
+            verified_digest = hashlib.sha256()
+            verified_size = 0
+            while chunk := os.read(temp_fd, 1024 * 1024):
+                verified_size += len(chunk)
+                verified_digest.update(chunk)
+            if (
+                verified_size != len(content)
+                or verified_digest.digest() != digest.digest()
+            ):
+                raise ArtifactStoreUnavailable("文件暂存对象完整性校验失败")
+            os.fsync(temp_fd)
+
+            temp_entry = os.stat(
+                temp_name,
+                dir_fd=temp_dir_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(temp_entry.st_mode)
+                or (temp_entry.st_dev, temp_entry.st_ino)
+                != (temp_state.st_dev, temp_state.st_ino)
+            ):
+                raise ArtifactStoreUnavailable("文件暂存对象身份已变化")
+            self._require_current_directories(bindings)
+
             # Hard-link publication is atomic and fails if the destination exists.
             # Unlike exists()+replace it cannot overwrite another concurrent winner.
             try:
-                os.link(temp_path, final_path, follow_symlinks=False)
+                os.link(
+                    temp_name,
+                    pure.parts[-1],
+                    src_dir_fd=temp_dir_fd,
+                    dst_dir_fd=final_parent_fd,
+                    follow_symlinks=False,
+                )
             except FileExistsError:
                 raise FileError("文件发布冲突，请重试")
             linked = True
-            temp_path.unlink()
-            dir_fd = os.open(final_path.parent, os.O_RDONLY)
+            final_fd = os.open(
+                pure.parts[-1],
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=final_parent_fd,
+            )
             try:
-                os.fsync(dir_fd)
+                final_state = os.fstat(final_fd)
             finally:
-                os.close(dir_fd)
+                os.close(final_fd)
+            if (
+                not stat.S_ISREG(final_state.st_mode)
+                or (final_state.st_dev, final_state.st_ino)
+                != (temp_state.st_dev, temp_state.st_ino)
+                or final_state.st_size != len(content)
+            ):
+                raise ObjectPublicationUncertain(
+                    "文件对象发布身份无法确认"
+                )
+            os.fsync(final_parent_fd)
+            current_temp_entry = os.stat(
+                temp_name,
+                dir_fd=temp_dir_fd,
+                follow_symlinks=False,
+            )
+            if (
+                temp_identity is None
+                or (current_temp_entry.st_dev, current_temp_entry.st_ino)
+                != temp_identity
+            ):
+                raise ObjectPublicationUncertain("文件暂存对象名称已变化")
+            os.unlink(temp_name, dir_fd=temp_dir_fd)
+            temp_name = None
+            if temp_dir_fd != final_parent_fd:
+                os.fsync(temp_dir_fd)
+            self._require_current_directories(bindings)
             return StoredObject(
                 path=final_path,
-                size_bytes=final_path.stat().st_size,
+                size_bytes=final_state.st_size,
                 sha256=digest.hexdigest(),
             )
+        except OSError as exc:
+            if linked:
+                raise ObjectPublicationUncertain(
+                    "文件对象已原子发布但持久化结果待协调"
+                ) from exc
+            raise ArtifactStoreUnavailable("文件暂时无法安全发布") from exc
         except Exception as exc:
-            try:
-                temp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
             if linked:
                 # Never unlink final_path here.  After the hard link succeeds, any
                 # unlink/fsync/stat failure is an UNKNOWN durable-publication outcome;
@@ -279,6 +500,24 @@ class LocalArtifactStore:
                     "文件对象已原子发布但持久化结果待协调"
                 ) from exc
             raise
+        finally:
+            if temp_name is not None and temp_dir_fd is not None:
+                try:
+                    entry = os.stat(
+                        temp_name,
+                        dir_fd=temp_dir_fd,
+                        follow_symlinks=False,
+                    )
+                    if temp_identity is not None and (
+                        entry.st_dev, entry.st_ino
+                    ) == temp_identity:
+                        os.unlink(temp_name, dir_fd=temp_dir_fd)
+                except OSError:
+                    pass
+            if temp_fd is not None:
+                os.close(temp_fd)
+            for directory_fd in reversed(directory_fds):
+                os.close(directory_fd)
 
     def inspect(self, storage_key: str) -> StoredObject:
         path = self.path_for(storage_key)
@@ -302,7 +541,7 @@ class LocalArtifactStore:
         file_fd: int | None = None
         try:
             try:
-                current_fd = os.open(self.root, directory_flags | cloexec)
+                current_fd = self._open_root_fd()
             except OSError as exc:
                 raise ArtifactStoreUnavailable(
                     "文件存储根目录暂时不可读取"
@@ -383,7 +622,10 @@ class LocalArtifactStore:
         )
 
     def remove(self, storage_key: str) -> None:
-        self.path_for(storage_key).unlink(missing_ok=True)
+        self.path_for(storage_key)
+        raise ArtifactStoreUnavailable(
+            "本地 Artifact Store 未启用条件物理删除"
+        )
 
 
 def _dir() -> Path:
@@ -1647,6 +1889,10 @@ def _reconcile_ready_authorized(row: AgentArtifact) -> bool:
             return not list(row.source_ids or [])
         if row.kind != "generated":
             return False
+        if not get_settings().agent_artifact_v2_enabled:
+            raise AuthorizationUnavailable(
+                "Artifact v2 暂停期间无法确认生成制品来源授权"
+            )
         source_ids = _reauthorize_provenance_scope(
             owner,
             dict(row.access_scope or {}),
@@ -2376,6 +2622,7 @@ def _mint_report_provenance(
     money_cols: list[int] | None,
     contained_resources: set[str],
     contained_fields: set[str],
+    required_positive_keys: set[str],
 ) -> artifact_provenance.TrustedEvidence:
     """Trusted Query Broker seam; deliberately absent from tool and HTTP schemas."""
     _validate_report_shape(
@@ -2398,6 +2645,7 @@ def _mint_report_provenance(
         ),
         contained_resources=contained_resources,
         contained_fields=contained_fields,
+        required_positive_keys=required_positive_keys,
         row_subject=_canonical_salesperson_subject(ctx.salesperson_name),
         own_customers_only=bool((ctx.permissions or {}).get("own_customers_only")),
     )

@@ -16,7 +16,10 @@ from app.auth import hash_password
 from app.db import SessionLocal
 from app.models.agent_artifact import AgentArtifact, AgentArtifactAudit
 from app.models.system import SysUser
-from app.services import agent_artifact_reconcile, agent_files
+from app.services import (
+    agent_artifact_reconcile,
+    agent_files,
+)
 from tests.artifact_test_support import force_artifact_state
 
 _NOW = datetime(2030, 1, 1, tzinfo=timezone.utc)
@@ -180,7 +183,7 @@ def test_post_store_authorization_unknown_stays_hidden_after_auth_recovers(
     assert db.get(AgentArtifact, artifact.id).status == "validating"
 
 
-@pytest.mark.parametrize("fault", ["directory_fsync", "final_stat"])
+@pytest.mark.parametrize("fault", ["directory_fsync", "final_fstat"])
 def test_post_link_store_fault_preserves_validating_marker_without_auto_ready(
     db, monkeypatch, fault
 ):
@@ -188,40 +191,40 @@ def test_post_link_store_fault_preserves_validating_marker_without_auto_ready(
     filename = f"post-link-{fault}.txt"
 
     with monkeypatch.context() as scoped:
+        real_link = agent_files.os.link
+        linked = False
+
+        def track_link(*args, **kwargs):
+            nonlocal linked
+            result = real_link(*args, **kwargs)
+            linked = True
+            return result
+
+        scoped.setattr(agent_files.os, "link", track_link)
         if fault == "directory_fsync":
             real_fsync = agent_files.os.fsync
-            fsync_calls = 0
+            failed = False
 
             def fail_directory_fsync(fd):
-                nonlocal fsync_calls
-                fsync_calls += 1
-                if fsync_calls == 2:
+                nonlocal failed
+                if linked and not failed:
+                    failed = True
                     raise OSError("directory fsync unavailable")
                 return real_fsync(fd)
 
             scoped.setattr(agent_files.os, "fsync", fail_directory_fsync)
         else:
-            path_type = type(agent_files._dir())
-            real_stat = path_type.stat
-            real_link = agent_files.os.link
-            linked = False
+            real_fstat = agent_files.os.fstat
             failed = False
 
-            def track_link(*args, **kwargs):
-                nonlocal linked
-                result = real_link(*args, **kwargs)
-                linked = True
-                return result
-
-            def fail_final_stat(path, *args, **kwargs):
+            def fail_final_fstat(fd):
                 nonlocal failed
                 if linked and not failed:
                     failed = True
-                    raise OSError("final stat unavailable")
-                return real_stat(path, *args, **kwargs)
+                    raise OSError("final fstat unavailable")
+                return real_fstat(fd)
 
-            scoped.setattr(agent_files.os, "link", track_link)
-            scoped.setattr(path_type, "stat", fail_final_stat)
+            scoped.setattr(agent_files.os, "fstat", fail_final_fstat)
 
         with pytest.raises(agent_files.FileError, match="待协调"):
             agent_files.save_upload(b"post-link durable", filename, owner)
@@ -385,6 +388,72 @@ def test_recovery_authorization_exception_is_retryable_without_auto_ready(
     assert second["applied"]["mark_failed"] == 0
     assert db.get(AgentArtifact, artifact.id).status == "validating"
 
+
+def test_generated_stale_marker_stays_unknown_while_public_v2_is_disabled(
+    db, monkeypatch
+):
+    owner = _owner(db, "disabled-v2-reconcile-owner")
+    source_evidence = agent_files._mint_report_provenance(
+        owner,
+        title="采购来源",
+        headers=["PN", "成本"],
+        rows=[["PN-1", 100]],
+        output_name="采购来源.xlsx",
+        money_cols=[1],
+        contained_resources={"purchases"},
+        contained_fields={"purchase_cost"},
+        required_positive_keys={"page_purchases", "data_purchase_cost"},
+    )
+    source = agent_files.write_report(
+        "采购来源",
+        ["PN", "成本"],
+        [["PN-1", 100]],
+        "采购来源.xlsx",
+        owner,
+        money_cols=[1],
+        provenance=source_evidence,
+    )
+    evidence = agent_files._mint_report_from_artifacts(
+        owner,
+        source_ids=[source["file_id"]],
+        title="待协调",
+        headers=["PN"],
+        rows=[["PN-1"]],
+        output_name="待协调.xlsx",
+        money_cols=None,
+    )
+    created = agent_files.write_report(
+        "待协调",
+        ["PN"],
+        [["PN-1"]],
+        "待协调.xlsx",
+        owner,
+        provenance=evidence,
+    )
+    row = db.get(AgentArtifact, created["file_id"])
+    assert row is not None
+    row = force_artifact_state(
+        db,
+        row,
+        "validating",
+        created_at=_OLD,
+        expires_at=_NOW + timedelta(days=1),
+    )
+
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "agent_artifact_v2_enabled", False)
+    result = _run(apply=True)
+
+    db.expire_all()
+    assert result["applied"]["mark_failed"] == 0
+    assert result["decisions"]["authorization_unknown"] == 1
+    assert result["unresolved"] == 0
+    assert result["errors"] == 1
+    assert result["skipped"] == 1
+    assert result["requires_operator"] is True
+    assert result["outcome"] == "partial"
+    assert db.get(AgentArtifact, row.id).status == "validating"
 
 def test_orphan_and_temp_delete_intents_are_audited_but_physical_delete_is_disabled(
     db, tmp_path

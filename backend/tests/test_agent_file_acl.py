@@ -77,6 +77,7 @@ def test_generated_report_owned_by_creator(db):
         money_cols=None,
         contained_resources=set(),
         contained_fields=set(),
+        required_positive_keys=set(),
     )
     out = agent_files.write_report(
         "报价", ["型号"], [["PN-A"]], None, owner, provenance=evidence

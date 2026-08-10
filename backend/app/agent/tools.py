@@ -129,41 +129,6 @@ TOOLS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "write_excel",
-            "description": (
-                "写 Excel 并生成下载文件（绝不改写原上传件，总是产出新 file_id）。"
-                "两种用法：①回填客户模板：传 base_file_id，在其副本上写（如在右侧空列追加"
-                "'最近采购价/库存/备注'列头和数据，原格式保留）；②新建报价单：不传 base_file_id，"
-                "自己规划表头和数据行。cells 用 1-based 行号 + 列字母(如 'G')或数字。"
-                "完成后把返回的 download_url 告诉用户。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "base_file_id": {"type": "string", "description": "基于哪个上传文件回填，可省略"},
-                    "sheet": {"type": "string", "description": "sheet 名，省略=第一个；不存在则新建"},
-                    "cells": {
-                        "type": "array",
-                        "description": "[{row:3, col:'G', value:1700}, ...] 最多3000个",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "row": {"type": "integer"},
-                                "col": {"type": ["string", "integer"]},
-                                "value": {},
-                            },
-                            "required": ["row", "col"],
-                        },
-                    },
-                    "output_name": {"type": "string", "description": "下载文件名，如 '报价单-XX公司.xlsx'"},
-                },
-                "required": ["cells"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "read_document",
             "description": (
                 "读取上传文件的全部内容（Word/PDF/txt/Excel/图片均可）。整机配置拆解场景用它："
@@ -175,33 +140,6 @@ TOOLS: list[dict] = [
                 "type": "object",
                 "properties": {"file_id": {"type": "string"}},
                 "required": ["file_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_report",
-            "description": (
-                "生成**美化** Excel 报表并返回下载链接（表头配色、边框、自适应列宽、金额格式、"
-                "冻结表头、斑马纹；备注含'需确认'/'未找到'的行自动标橙/红）。"
-                "整机拆解报价单、批量查价结果等用它（比 write_excel 好看）。"
-                "headers=列名数组；rows=与列对齐的二维数组（每行一个数组）；money_cols=金额列的"
-                "0基下标数组（会按千分位+两位小数格式化）。完成后把 download_url 告诉用户。"
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "description": "报表标题，可省略，如 'XX公司整机配置报价单'"},
-                    "headers": {"type": "array", "items": {"type": "string"},
-                                "description": "列名，如 ['序号','部件','品牌','型号','数量','匹配PN','近15天采购均价','库存','近期成交参考价','备注']"},
-                    "rows": {"type": "array", "items": {"type": "array"},
-                             "description": "数据行，每行一个数组，顺序与 headers 对齐"},
-                    "money_cols": {"type": "array", "items": {"type": "integer"},
-                                   "description": "金额列的 0 基下标，如 [6,8]"},
-                    "output_name": {"type": "string", "description": "下载文件名"},
-                },
-                "required": ["headers", "rows"],
             },
         },
     },
@@ -692,8 +630,6 @@ _REGISTRY = {
     "read_file_rows": _read_file_rows,
     "read_document": _read_document,
     "lookup_prices_bulk": _lookup_prices_bulk,
-    "write_excel": _write_excel,
-    "write_report": _write_report,
     "get_purchase_analysis": _get_purchase_analysis,
     "get_inventory": _get_inventory,
     "get_maintenance_board": _get_maintenance_board,

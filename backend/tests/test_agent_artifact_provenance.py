@@ -160,6 +160,7 @@ def _business_report(owner, name: str = "业务来源") -> dict:
         money_cols=[1],
         contained_resources={"purchases"},
         contained_fields={"purchase_cost"},
+        required_positive_keys={"page_purchases", "data_purchase_cost"},
     )
     return agent_files.write_report(
         name,
@@ -777,6 +778,9 @@ def test_opaque_server_evidence_persists_actual_containment_and_positive_keys(db
         money_cols=[1],
         contained_resources={"purchases"},
         contained_fields={"purchase_cost"},
+        required_positive_keys={
+            "page_chat", "page_purchases", "data_purchase_cost"
+        },
     )
 
     result = agent_files.write_report(
@@ -799,7 +803,9 @@ def test_opaque_server_evidence_persists_actual_containment_and_positive_keys(db
         "policy": "provenance_guarded",
         "classification": "business_content",
         "proof_version": "source-union/v1",
-        "required_permissions": ["data_purchase_cost", "page_purchases"],
+        "required_permissions": [
+            "data_purchase_cost", "page_chat", "page_purchases"
+        ],
         "contained_resources": ["purchases"],
         "contained_fields": ["purchase_cost"],
         "sensitivity": "high",
@@ -813,18 +819,30 @@ def test_opaque_server_evidence_persists_actual_containment_and_positive_keys(db
     assert snapshot["payload"]["source_kind"] == "internal_test"
     assert snapshot["payload"]["owner_sub"] == "provenance-owner"
     assert snapshot["payload"]["required_positive_keys"] == [
-        "data_purchase_cost", "page_purchases"
+        "data_purchase_cost", "page_chat", "page_purchases"
     ]
     assert snapshot["payload"]["condition"] == {"op": "all_rows"}
     assert snapshot["payload"]["classification"] == "business_content"
     assert artifact.sensitivity == "high"
     assert agent_files.get_download_info(result["file_id"], owner).sha256 == artifact.sha256
+    revoked_chat = security.UserContext(
+        user_id="provenance-owner",
+        role="boss",
+        permissions={
+            **permissions.effective("boss", None),
+            "page_chat": False,
+        },
+        is_authenticated=True,
+        authn="sys_user",
+        has_stable_subject=True,
+    )
+    assert agent_files.access_allowed(result["file_id"], revoked_chat) is False
 
 
 def test_multi_source_output_persists_each_artifact_snapshot_and_exact_unions(db):
     owner = _owner(db, role="boss")
 
-    def root(name, resources, fields):
+    def root(name, resources, fields, required):
         headers = ["值"]
         rows = [[name]]
         evidence = agent_files._mint_report_provenance(
@@ -836,6 +854,7 @@ def test_multi_source_output_persists_each_artifact_snapshot_and_exact_unions(db
             money_cols=None,
             contained_resources=set(resources),
             contained_fields=set(fields),
+            required_positive_keys=set(required),
         )
         return agent_files.write_report(
             name,
@@ -846,8 +865,18 @@ def test_multi_source_output_persists_each_artifact_snapshot_and_exact_unions(db
             provenance=evidence,
         )
 
-    purchase = root("采购", {"purchases"}, {"purchase_cost"})
-    profit = root("利润", {"profit"}, {"profit_amount"})
+    purchase = root(
+        "采购",
+        {"purchases"},
+        {"purchase_cost"},
+        {"page_purchases", "data_purchase_cost"},
+    )
+    profit = root(
+        "利润",
+        {"profit"},
+        {"profit_amount"},
+        {"page_profit", "data_profit"},
+    )
     title = "合并"
     headers = ["摘要"]
     rows = [["服务端确定性合并"]]
@@ -989,6 +1018,7 @@ def test_identity_template_contributes_empty_top_but_keeps_hash_owner_and_proof(
         money_cols=[1],
         contained_resources={"purchases"},
         contained_fields={"purchase_cost"},
+        required_positive_keys={"page_purchases", "data_purchase_cost"},
     )
     business = agent_files.write_report(
         source_title,
@@ -1050,6 +1080,7 @@ def test_internal_root_evidence_mint_is_unreachable_in_production(db, monkeypatc
             money_cols=None,
             contained_resources={"purchases"},
             contained_fields=set(),
+            required_positive_keys={"page_purchases"},
         )
 
 
@@ -1107,12 +1138,22 @@ def _snapshot_payload() -> dict:
         lambda payload: payload.update({"condition": {"op": "narrowest"}}),
         lambda payload: payload.update({"contained_resources": [["purchases"]]}),
         lambda payload: payload.update({"required_positive_keys": [{}]}),
+        lambda payload: payload.update({"required_positive_keys": []}),
+        lambda payload: payload.update({
+            "required_positive_keys": ["page_purchases", "unknown_permission"]
+        }),
+        lambda payload: payload.update({
+            "required_positive_keys": ["own_customers_only", "page_purchases"]
+        }),
     ],
     ids=[
         "subject-mismatch",
         "unknown-condition",
         "unhashable-containment",
         "non-string-positive-key",
+        "underdeclared-containment-permission",
+        "unknown-positive-key",
+        "negative-permission-key",
     ],
 )
 def test_authenticated_but_malformed_source_snapshot_fails_closed_without_500(mutate):

@@ -2,7 +2,7 @@
 import pytest
 
 from app import permissions, security
-from app.agent import tools
+from app.agent import prompts, tools
 from app.db import SessionLocal
 
 
@@ -71,14 +71,18 @@ def test_schema_registry_consistent():
     assert names == set(tools._REGISTRY)
 
 
-def test_artifact_create_stays_unregistered_until_integration_gates():
+def test_artifact_creation_tools_stay_unregistered_until_integration_gates():
     """#219 地基不能在 #223/#230 接线与安全验收前暴露给模型。"""
-    schema_count = sum(
-        item["function"]["name"] == "artifact_create" for item in tools.TOOLS
-    )
-    handler_count = sum(name == "artifact_create" for name in tools._REGISTRY)
-    assert schema_count == 0
-    assert handler_count == 0
+    blocked = {"artifact_create", "write_excel", "write_report"}
+    schema_names = [item["function"]["name"] for item in tools.TOOLS]
+    registry_names = list(tools._REGISTRY)
+    for name in blocked:
+        assert schema_names.count(name) == 0
+        assert registry_names.count(name) == 0
+
+    prompt = prompts.system_prompt()
+    assert all(name not in prompt for name in blocked)
+    assert "当前只能进行只读分析，不能生成或修改文件，不得承诺下载链接" in prompt
 
 
 def test_new_data_tools_smoke(db, ctx):
