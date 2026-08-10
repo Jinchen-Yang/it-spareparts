@@ -6,6 +6,13 @@ export interface MigrationHistoricalBaselineInput {
   amount_ex_tax: string;
   amount_inc_tax: string;
   evidence_hash: string;
+  coverage_from: string;
+  coverage_through: string;
+  scope: "site_issue_parts_only";
+  excludes_expenses: true;
+  source_artifact_locator: string;
+  source_row_count: number;
+  aggregation_fingerprint: string;
 }
 
 export interface MigrationOpeningBalanceInput {
@@ -35,9 +42,27 @@ export interface MigrationBlocker {
   detail: string;
 }
 
+export interface MigrationTruthAmounts {
+  parts_cost_ex_tax: string;
+  parts_cost_inc_tax: string;
+  approved_expense_ex_tax: string;
+  approved_expense_inc_tax: string;
+  total_ex_tax: string;
+  total_inc_tax: string;
+}
+
+export interface MigrationTruthComparison {
+  before: MigrationTruthAmounts;
+  after: MigrationTruthAmounts;
+  delta: MigrationTruthAmounts;
+  after_candidate_values_applied: true;
+  truth_comparison_hash: string;
+}
+
 export interface MigrationProjectPreview {
   project_id: string;
   cutover_date: string;
+  as_of: string;
   source_snapshot_hash: string;
   source_coverage: {
     warehouse_source_ready: boolean;
@@ -46,6 +71,9 @@ export interface MigrationProjectPreview {
   };
   evidence_summary: {
     historical_baseline: number;
+    legacy_cost_lines: number;
+    legacy_expenses: number;
+    truth_quantity_differences: number;
     historical_site_issues: number;
     post_cutover_site_issues: number;
     expenses: number;
@@ -72,6 +100,7 @@ export interface MigrationProjectPreview {
     ignored_site_issue_quantity: string;
     ignored_return_registration_quantity: string;
   }>;
+  truth_comparison: MigrationTruthComparison;
   approval_blockers: MigrationBlocker[];
   can_approve: boolean;
 }
@@ -80,6 +109,7 @@ export interface MigrationPlanDetail {
   plan_id: string;
   project_id: string;
   cutover_date: string;
+  as_of: string;
   historical_mode: string;
   blocker_count: number;
   status: MigrationRunStatus;
@@ -97,11 +127,19 @@ export interface MigrationPlanDetail {
     total_ex_tax: string;
     total_inc_tax: string;
   };
+  truth_comparison: MigrationTruthComparison;
   historical_baseline: null | {
     baseline_id: string;
     amount_ex_tax: string;
     amount_inc_tax: string;
     evidence_hash: string;
+    coverage_from: string;
+    coverage_through: string;
+    scope: "site_issue_parts_only";
+    excludes_expenses: true;
+    source_artifact_locator: string;
+    source_row_count: number;
+    aggregation_fingerprint: string;
     approval_state: "pending" | "approved";
     approved_by: string | null;
     approved_at: string | null;
@@ -133,6 +171,10 @@ export interface MigrationPlanDetail {
 }
 
 export type MigrationEvidenceSection =
+  | "warehouse_ambiguities"
+  | "legacy_cost_lines"
+  | "legacy_expenses"
+  | "truth_quantity_differences"
   | "historical_site_issues"
   | "post_cutover_site_issues"
   | "expenses"
@@ -155,6 +197,7 @@ export interface MigrationEvidencePage {
 export interface MigrationProjectSignoff {
   project_id: string;
   expected_plan_version: number;
+  expected_truth_comparison_hash: string;
   reason: string;
   historical_baseline: null | {
     baseline_id: string;
@@ -172,6 +215,7 @@ export interface MigrationRunDetail {
   rule_version: string;
   request_fingerprint: string;
   source_snapshot_hash: string;
+  as_of: string;
   preview: {
     input_fingerprint: string;
     approval_blocker_count: number;
@@ -205,6 +249,7 @@ export interface MigrationRunSummary {
   status: MigrationRunStatus;
   rule_version: string;
   source_snapshot_hash: string;
+  as_of: string;
   manifest_key_id?: string | null;
   blocker_count: number;
   created_by: string;

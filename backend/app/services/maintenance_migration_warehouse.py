@@ -29,6 +29,7 @@ _WAREHOUSE_MOVEMENT_MAP = {
 _MAX_WAREHOUSE_DOCUMENTS_PER_PROJECT = 50_000
 _MAX_WAREHOUSE_LINES_PER_PROJECT = 200_000
 _MAX_WAREHOUSE_LINKS_PER_PROJECT = 1_000_000
+_MAX_OPEN_AMBIGUITIES = 200_000
 _REQUIRED_CONTRACTS = {
     "maintenance_warehouse_import_batch": {
         "import_id",
@@ -64,10 +65,18 @@ _REQUIRED_CONTRACTS = {
         "version",
     },
     "maintenance_warehouse_ambiguity": {
+        "ambiguity_id",
+        "import_id",
         "document_id",
         "line_id",
+        "ambiguity_type",
+        "field_code",
+        "source_row",
+        "value_hash",
         "candidates_json",
+        "fingerprint",
         "status",
+        "version",
     },
     "maintenance_source_order_assignment": {
         "assignment_id",
@@ -189,14 +198,14 @@ def validate_cutover_inventory_movements(
             )
         expected_formal_available = source_type == "receipt"
         if row.get("formal_available") is not expected_formal_available:
-            raise MaintenanceMigrationWarehouseError(
-                "正式可用标记与仓库单据类型不一致"
-            )
+            raise MaintenanceMigrationWarehouseError("正式可用标记与仓库单据类型不一致")
 
         raw_date = row.get("document_date")
         try:
             document_date = (
-                raw_date if isinstance(raw_date, date) else date.fromisoformat(str(raw_date))
+                raw_date
+                if isinstance(raw_date, date)
+                else date.fromisoformat(str(raw_date))
             )
         except (TypeError, ValueError) as exc:
             raise MaintenanceMigrationWarehouseError(
@@ -264,6 +273,185 @@ def _candidate_document_ids(db: Session, *, project_id: str) -> list[str]:
     return sorted({str(value) for value in [*rows, *ambiguity_rows]})
 
 
+def _open_ambiguities_for_project(
+    db: Session,
+    *,
+    project_id: str,
+    cutover_date: date,
+    warehouse_ready_through: date | None,
+    project_document_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Return project-scoped or unscoped open ambiguity evidence.
+
+    An ambiguity that can be proven to reference only another project is excluded.
+    Empty, malformed, or unassigned candidates are global blockers because their
+    project scope cannot be established without inference.
+    """
+
+    rows = list(
+        db.execute(
+            text(
+                "SELECT ambiguity.ambiguity_id, ambiguity.import_id, "
+                "ambiguity.document_id, ambiguity.line_id, "
+                "ambiguity.ambiguity_type, ambiguity.field_code, "
+                "ambiguity.source_row, ambiguity.value_hash, "
+                "ambiguity.candidates_json, ambiguity.fingerprint, "
+                "ambiguity.status, ambiguity.version, "
+                "document.document_no, document.document_date "
+                "FROM maintenance_warehouse_ambiguity AS ambiguity "
+                "LEFT JOIN maintenance_warehouse_document AS document "
+                "  ON document.document_id = ambiguity.document_id "
+                "WHERE ambiguity.status = 'open' "
+                "  AND (document.document_date IS NULL "
+                "       OR document.document_date >= :cutover_date) "
+                "  AND (:ready_through IS NULL "
+                "       OR document.document_date IS NULL "
+                "       OR document.document_date <= :ready_through) "
+                "ORDER BY ambiguity.ambiguity_id LIMIT :ambiguity_limit"
+            ),
+            {
+                "cutover_date": cutover_date,
+                "ready_through": warehouse_ready_through,
+                "ambiguity_limit": _MAX_OPEN_AMBIGUITIES + 1,
+            },
+        ).mappings()
+    )
+    if len(rows) > _MAX_OPEN_AMBIGUITIES:
+        raise MaintenanceMigrationWarehouseError("仓库未决歧义超过迁移安全上限")
+
+    order_ids: set[str] = set()
+    candidate_project_ids: set[str] = set()
+    for row in rows:
+        candidates = row["candidates_json"]
+        if not isinstance(candidates, list):
+            continue
+        for candidate in candidates:
+            if (
+                isinstance(candidate, Mapping)
+                and candidate.get("target_type") == "maintenance_order"
+                and str(candidate.get("target_id") or "").strip()
+            ):
+                order_ids.add(str(candidate["target_id"]).strip())
+            if (
+                isinstance(candidate, Mapping)
+                and candidate.get("target_type") == "maintenance_project"
+                and str(candidate.get("target_id") or "").strip()
+            ):
+                candidate_project_ids.add(str(candidate["target_id"]).strip())
+    active_candidate_projects: set[str] = set()
+    if candidate_project_ids:
+        project_statement = text(
+            "SELECT project_id FROM maintenance_project "
+            "WHERE is_active IS TRUE AND project_id IN :project_ids "
+            "ORDER BY project_id"
+        ).bindparams(bindparam("project_ids", expanding=True))
+        active_candidate_projects = {
+            str(value)
+            for value in db.scalars(
+                project_statement, {"project_ids": sorted(candidate_project_ids)}
+            )
+        }
+    assignment_projects: dict[str, set[str]] = defaultdict(set)
+    if order_ids:
+        statement = text(
+            "SELECT assignment.source_order_id, assignment.project_id "
+            "FROM maintenance_source_order_assignment AS assignment "
+            "JOIN maintenance_project AS project "
+            "  ON project.project_id = assignment.project_id "
+            "WHERE assignment.is_active IS TRUE AND project.is_active IS TRUE "
+            "  AND assignment.source_order_id IN :source_order_ids "
+            "ORDER BY assignment.source_order_id, assignment.assignment_id"
+        ).bindparams(bindparam("source_order_ids", expanding=True))
+        for assignment in db.execute(
+            statement, {"source_order_ids": sorted(order_ids)}
+        ).mappings():
+            assignment_projects[str(assignment["source_order_id"])].add(
+                str(assignment["project_id"])
+            )
+
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        raw_candidates = row["candidates_json"]
+        candidates = raw_candidates if isinstance(raw_candidates, list) else []
+        candidate_evidence: list[dict[str, str]] = []
+        scope_projects: set[str] = set()
+        scope_unknown = not candidates
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                scope_unknown = True
+                continue
+            target_type = str(candidate.get("target_type") or "").strip()
+            target_id = str(candidate.get("target_id") or "").strip()
+            if not target_type or not target_id:
+                scope_unknown = True
+                continue
+            item = {"target_type": target_type, "target_id": target_id}
+            label = str(candidate.get("label") or "").strip()
+            if label:
+                item["label"] = label[:256]
+            candidate_evidence.append(item)
+            if target_type == "maintenance_project":
+                if target_id in active_candidate_projects:
+                    scope_projects.add(target_id)
+                else:
+                    scope_unknown = True
+            elif target_type == "maintenance_order":
+                assigned_projects = assignment_projects.get(target_id, set())
+                if assigned_projects:
+                    scope_projects.update(assigned_projects)
+                else:
+                    scope_unknown = True
+            else:
+                # Part, bad-return, and future target types do not by themselves
+                # prove a unique project owner.  They remain globally blocking.
+                scope_unknown = True
+
+        document_id = str(row["document_id"] or "").strip() or None
+        directly_scoped = document_id in project_document_ids if document_id else False
+        if directly_scoped:
+            scope_projects.add(project_id)
+        if (
+            not directly_scoped
+            and project_id not in scope_projects
+            and not scope_unknown
+        ):
+            continue
+        if directly_scoped:
+            scope_reason = "document_has_stable_project_chain"
+        elif project_id in scope_projects:
+            scope_reason = "candidate_resolves_to_current_active_project"
+        else:
+            scope_reason = "candidate_does_not_prove_unique_active_project"
+        output.append(
+            {
+                "ambiguity_id": str(row["ambiguity_id"]),
+                "import_id": str(row["import_id"]),
+                "document_id": document_id,
+                "line_id": str(row["line_id"] or "").strip() or None,
+                "document_no": str(row["document_no"] or "").strip() or None,
+                "document_date": (
+                    row["document_date"].isoformat()
+                    if isinstance(row["document_date"], date)
+                    else None
+                ),
+                "ambiguity_type": str(row["ambiguity_type"]),
+                "field_code": str(row["field_code"] or "").strip() or None,
+                "source_row": row["source_row"],
+                "value_hash": str(row["value_hash"] or "").strip() or None,
+                "candidates": candidate_evidence,
+                "fingerprint": str(row["fingerprint"]),
+                "status": str(row["status"]),
+                "version": int(row["version"]),
+                "scope": "project"
+                if directly_scoped or project_id in scope_projects
+                else "global_unresolved",
+                "scope_project_ids": sorted(scope_projects),
+                "scope_reason": scope_reason,
+            }
+        )
+    return output
+
+
 def _rows_for_documents(
     db: Session, *, document_ids: list[str]
 ) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]], list[Mapping[str, Any]]]:
@@ -322,13 +510,16 @@ def _rows_for_documents(
 
 
 def load_project_inventory_movements(
-    db: Session, project_id: str, cutover_date: date
-) -> tuple[Sequence[Mapping[str, Any]], bool]:
+    db: Session,
+    project_id: str,
+    cutover_date: date,
+    warehouse_ready_through: date | None = None,
+) -> tuple[Sequence[Mapping[str, Any]], bool, Sequence[Mapping[str, Any]]]:
     """Load only exact, current, confirmed #209 facts for one active project."""
 
     clean_project_id = _required_text(project_id, "项目稳定编号", max_length=36)
     if not _contracts_available(db):
-        return (), False
+        return (), False, ()
     _lock_warehouse_snapshot(db)
     active_project = db.scalar(
         text(
@@ -338,20 +529,31 @@ def load_project_inventory_movements(
         {"project_id": clean_project_id},
     )
     if active_project is None:
-        return (), False
+        return (), False, ()
 
     document_ids = _candidate_document_ids(db, project_id=clean_project_id)
     if len(document_ids) > _MAX_WAREHOUSE_DOCUMENTS_PER_PROJECT:
-        return (), False
+        return (), False, ()
+    ambiguities = _open_ambiguities_for_project(
+        db,
+        project_id=clean_project_id,
+        cutover_date=cutover_date,
+        warehouse_ready_through=warehouse_ready_through,
+        project_document_ids=set(document_ids),
+    )
+    if ambiguities:
+        return (), False, ambiguities
     if not document_ids:
-        return (), True
+        # An empty relation is only a verified zero movement set when a named
+        # migration request supplied an explicit completeness watermark.
+        return (), warehouse_ready_through is not None, ()
     documents, lines, links = _rows_for_documents(db, document_ids=document_ids)
     if (
         len(documents) > _MAX_WAREHOUSE_DOCUMENTS_PER_PROJECT
         or len(lines) > _MAX_WAREHOUSE_LINES_PER_PROJECT
         or len(links) > _MAX_WAREHOUSE_LINKS_PER_PROJECT
     ):
-        return (), False
+        return (), False, ()
     lines_by_document: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     links_by_document: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     links_by_line: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
@@ -389,8 +591,11 @@ def load_project_inventory_movements(
             try:
                 part_ids.add(int(row["target_id"]))
             except (InvalidOperation, TypeError, ValueError):
-                return (), False
-        if row["link_kind"] == "bad_return" and row["target_type"] == "maintenance_bad_return":
+                return (), False, ()
+        if (
+            row["link_kind"] == "bad_return"
+            and row["target_type"] == "maintenance_bad_return"
+        ):
             bad_return_ids.add(str(row["target_id"]))
 
     active_parts: dict[int, str] = {}
@@ -417,15 +622,6 @@ def load_project_inventory_movements(
             ).mappings()
         }
 
-    open_ambiguities = set(
-        db.scalars(
-            text(
-                "SELECT DISTINCT document_id FROM maintenance_warehouse_ambiguity "
-                "WHERE status = 'open' AND document_id IN :document_ids"
-            ).bindparams(bindparam("document_ids", expanding=True)),
-            {"document_ids": document_ids},
-        )
-    )
     movements: list[dict[str, Any]] = []
     for document in documents:
         document_id = str(document["document_id"])
@@ -434,13 +630,16 @@ def load_project_inventory_movements(
         if status == "void":
             continue
         if document_date is None:
-            return (), False
+            return (), False, ()
         if document_date < cutover_date:
             continue
-        if document_id in open_ambiguities or status != "confirmed":
-            return (), False
-        if document["version_state"] != "known" or document["batch_status"] != "applied":
-            return (), False
+        if status != "confirmed":
+            return (), False, ()
+        if (
+            document["version_state"] != "known"
+            or document["batch_status"] != "applied"
+        ):
+            return (), False, ()
 
         document_links = links_by_document[document_id]
         order_links = [
@@ -458,7 +657,7 @@ def load_project_inventory_movements(
             and row["target_type"] == "maintenance_project"
         ]
         if len(order_links) != 1 or len(project_links) != 1:
-            return (), False
+            return (), False, ()
         order_id = str(order_links[0]["target_id"])
         assignment_rows = assignments.get(order_id, [])
         if (
@@ -466,13 +665,13 @@ def load_project_inventory_movements(
             or str(assignment_rows[0]["project_id"]) != clean_project_id
             or str(project_links[0]["target_id"]) != clean_project_id
         ):
-            return (), False
+            return (), False, ()
         assignment = assignment_rows[0]
 
         document_type = str(document["document_type"])
         movement_type = _WAREHOUSE_MOVEMENT_MAP.get(document_type)
         if movement_type is None:
-            return (), False
+            return (), False, ()
         bad_return_link: Mapping[str, Any] | None = None
         bad_return: Mapping[str, Any] | None = None
         if document_type in {"receipt", "return"}:
@@ -484,7 +683,7 @@ def load_project_inventory_movements(
                 and row["target_type"] == "maintenance_bad_return"
             ]
             if len(bad_return_links) != 1:
-                return (), False
+                return (), False, ()
             bad_return_link = bad_return_links[0]
             bad_return = bad_returns.get(str(bad_return_link["target_id"]))
             if (
@@ -496,11 +695,11 @@ def load_project_inventory_movements(
                     and str(bad_return["status"]) != "warehouse_confirmed"
                 )
             ):
-                return (), False
+                return (), False, ()
 
         document_lines = lines_by_document.get(document_id, [])
         if not document_lines:
-            return (), False
+            return (), False, ()
         for line in document_lines:
             line_id = str(line["line_id"])
             part_links = [
@@ -509,14 +708,14 @@ def load_project_inventory_movements(
                 if row["link_kind"] == "part" and row["target_type"] == "dim_part"
             ]
             if len(part_links) != 1 or line["quantity"] is None:
-                return (), False
+                return (), False, ()
             try:
                 part_id = int(part_links[0]["target_id"])
                 quantity = Decimal(line["quantity"])
             except (InvalidOperation, TypeError, ValueError):
-                return (), False
+                return (), False, ()
             if part_id not in active_parts or not quantity.is_finite() or quantity < 0:
-                return (), False
+                return (), False, ()
             movements.append(
                 {
                     "movement_id": f"{document_id}:{line_id}",
@@ -561,8 +760,12 @@ def load_project_inventory_movements(
                 }
             )
     ordered = sorted(movements, key=lambda row: str(row["movement_id"]))
-    return validate_cutover_inventory_movements(
-        ordered,
-        cutover_date=cutover_date,
-        project_id=clean_project_id,
-    ), True
+    return (
+        validate_cutover_inventory_movements(
+            ordered,
+            cutover_date=cutover_date,
+            project_id=clean_project_id,
+        ),
+        True,
+        (),
+    )

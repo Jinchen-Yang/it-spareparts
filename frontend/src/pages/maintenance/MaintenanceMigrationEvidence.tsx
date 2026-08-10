@@ -15,6 +15,10 @@ const SECTIONS: Array<{
   value: MigrationEvidenceSection;
   label: string;
 }> = [
+  { value: "warehouse_ambiguities", label: "仓库未决歧义" },
+  { value: "truth_quantity_differences", label: "新旧数量差异" },
+  { value: "legacy_cost_lines", label: "旧口径备件成本" },
+  { value: "legacy_expenses", label: "旧口径已审批报销" },
   { value: "inventory_movements", label: "仓库出入库" },
   { value: "post_cutover_site_issues", label: "切换后现场领用" },
   { value: "historical_site_issues", label: "历史现场领用" },
@@ -53,6 +57,70 @@ function column(
 }
 
 function evidenceColumns(section: MigrationEvidenceSection): ColumnsType<MigrationEvidenceRow> {
+  if (section === "warehouse_ambiguities") {
+    return [
+      column("歧义类型", "ambiguity_type", 150),
+      column("单据号", "document_no", 140),
+      column("单据日期", "document_date", 115),
+      column("明细稳定 ID", "line_id", 180),
+      column("字段", "field_code", 150),
+      column("来源行", "source_row", 90),
+      column("候选", "candidates", 280),
+      column("影响范围", "scope", 150),
+      column("候选项目", "scope_project_ids", 220),
+      column("歧义稳定 ID", "ambiguity_id", 220),
+      column("证据指纹", "fingerprint", 300),
+    ];
+  }
+  if (section === "legacy_cost_lines") {
+    return [
+      column("旧需求单稳定 ID", "source_order_id", 180),
+      column("旧需求明细稳定 ID", "source_line_id", 190),
+      column("需求单号", "order_no", 140),
+      column("需求日期", "order_date", 115),
+      column("PN", "pn", 130),
+      column("SN", "sn", 130),
+      column("需求数量", "demand_quantity", 100),
+      column("退货数量", "return_quantity", 100),
+      column("旧口径有效数量", "effective_quantity", 130),
+      column("单位成本（未税）", "unit_cost_ex_tax", 130),
+      column("单位成本（含税）", "unit_cost_inc_tax", 130),
+      column("税价基准", "cost_tax_basis", 100),
+      column("旧口径成本（未税）", "cost_amount_ex_tax", 140),
+      column("旧口径成本（含税）", "cost_amount_inc_tax", 140),
+    ];
+  }
+  if (section === "legacy_expenses") {
+    return [
+      column("报销单号", "expense_ref", 150),
+      column("报销日期", "expense_date", 115),
+      column("审批状态", "normalized_status", 110),
+      column("旧流程状态", "raw_status", 110),
+      column("归属合同号", "contract_no", 150),
+      column("项目合同关系 ID", "project_contract_id", 190),
+      column("合同关系版本", "contract_relation_version", 120),
+      column("归属生效起", "contract_effective_from", 115),
+      column("归属生效止", "contract_effective_to", 115),
+      column("税价基准", "tax_basis", 100),
+      column("未税金额", "amount_ex_tax", 120),
+      column("含税金额", "amount_inc_tax", 120),
+      column("报销稳定 ID", "expense_id", 180),
+      column("导入批次", "import_batch_id", 110),
+    ];
+  }
+  if (section === "truth_quantity_differences") {
+    return [
+      column("单据号", "document_no", 150),
+      column("PN", "pn", 130),
+      column("SN", "sn", 130),
+      column("旧口径数量", "before_quantity", 120),
+      column("现场领用数量", "after_quantity", 120),
+      column("数量差额", "delta_quantity", 110),
+      column("旧需求单稳定 ID", "source_order_id", 180),
+      column("旧需求明细稳定 ID", "source_line_id", 190),
+      column("对比稳定键", "comparison_key", 250),
+    ];
+  }
   if (section === "inventory_movements") {
     return [
       column("单据号", "document_no", 140),
@@ -111,8 +179,13 @@ function evidenceColumns(section: MigrationEvidenceSection): ColumnsType<Migrati
 
 function rowKey(row: MigrationEvidenceRow): string {
   const stableValue = row.movement_id
+    ?? row.ambiguity_id
+    ?? row.comparison_key
+    ?? row.source_line_id
     ?? row.issue_line_id
     ?? row.expense_id
+    ?? row.source_expense_id
+    ?? row.expense_ref
     ?? row.balance_key
     ?? row.document_id;
   return String(stableValue ?? JSON.stringify(row));

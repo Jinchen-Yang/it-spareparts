@@ -33,6 +33,7 @@ class MaintenanceMigrationRun(Base):
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     rule_version: Mapped[str] = mapped_column(String(64), nullable=False)
     source_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    business_as_of: Mapped[date] = mapped_column(Date, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     preview_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
     manifest_json: Mapped[dict | None] = mapped_column(JSONB)
@@ -84,6 +85,10 @@ class MaintenanceMigrationRun(Base):
             name="ck_maintenance_migration_run_state_evidence",
         ),
         CheckConstraint(
+            "reconciled_by IS NULL OR reconciled_by <> created_by",
+            name="ck_maintenance_migration_run_independent_reconciliation",
+        ),
+        CheckConstraint(
             "approved_by IS NULL OR "
             "(approved_by <> created_by AND approved_by <> reconciled_by)",
             name="ck_maintenance_migration_run_independent_approval",
@@ -105,9 +110,11 @@ class MaintenanceProjectCutoverPlan(Base):
         ForeignKey("maintenance_project.project_id"), nullable=False
     )
     cutover_date: Mapped[date] = mapped_column(Date, nullable=False)
+    business_as_of: Mapped[date] = mapped_column(Date, nullable=False)
     historical_mode: Mapped[str] = mapped_column(String(32), nullable=False)
     source_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    truth_comparison_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     historical_cost_ex_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
     historical_cost_inc_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
     post_cutover_cost_ex_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
@@ -142,7 +149,8 @@ class MaintenanceProjectCutoverPlan(Base):
         ),
         CheckConstraint(
             "char_length(source_snapshot_hash) = 64 "
-            "AND char_length(input_fingerprint) = 64",
+            "AND char_length(input_fingerprint) = 64 "
+            "AND char_length(truth_comparison_hash) = 64",
             name="ck_maintenance_project_cutover_hashes",
         ),
         CheckConstraint(
@@ -192,6 +200,13 @@ class MaintenanceHistoricalCostBaseline(Base):
     amount_ex_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
     amount_inc_tax: Mapped[Decimal] = mapped_column(Money, nullable=False)
     evidence_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    coverage_from: Mapped[date] = mapped_column(Date, nullable=False)
+    coverage_through: Mapped[date] = mapped_column(Date, nullable=False)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    excludes_expenses: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    source_artifact_locator: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    aggregation_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     approval_state: Mapped[str] = mapped_column(String(16), nullable=False)
     approved_by: Mapped[str | None] = mapped_column(String(64))
     approved_at: Mapped[datetime | None] = mapped_column(TZDateTime)
@@ -205,11 +220,21 @@ class MaintenanceHistoricalCostBaseline(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "amount_ex_tax >= 0 AND amount_inc_tax >= 0",
+            "amount_ex_tax >= 0 AND amount_inc_tax >= 0 "
+            "AND amount_inc_tax = round(amount_ex_tax * NUMERIC '1.13', 2)",
             name="ck_maintenance_historical_baseline_amounts",
         ),
         CheckConstraint(
-            "char_length(evidence_hash) = 64 AND version >= 1",
+            "coverage_from <= coverage_through "
+            "AND scope = 'site_issue_parts_only' "
+            "AND excludes_expenses IS TRUE "
+            "AND char_length(btrim(source_artifact_locator)) > 0 "
+            "AND source_row_count >= 0 AND source_row_count <= 10000000",
+            name="ck_maintenance_historical_baseline_coverage",
+        ),
+        CheckConstraint(
+            "char_length(evidence_hash) = 64 "
+            "AND char_length(aggregation_fingerprint) = 64 AND version >= 1",
             name="ck_maintenance_historical_baseline_identity",
         ),
         CheckConstraint(

@@ -1,6 +1,7 @@
 """Schema, permission, and downgrade safety for maintenance cutover controls."""
 
 import os
+from pathlib import Path
 
 import pytest
 from alembic import command as alembic_command
@@ -14,6 +15,7 @@ from app.db import engine
 
 
 _PREV = "e6a9c3f1b2d4"
+_ROOT = Path(__file__).resolve().parents[2]
 _TABLES = {
     "maintenance_migration_run",
     "maintenance_project_cutover_plan",
@@ -38,10 +40,12 @@ def _insert_preview_run(connection, *, run_id: str) -> None:
             """
             INSERT INTO maintenance_migration_run
                 (run_id, idempotency_key, request_fingerprint, rule_version,
-                 source_snapshot_hash, status, preview_json, created_by)
+                 source_snapshot_hash, business_as_of, status, preview_json,
+                 created_by)
             VALUES
                 (:run_id, :idempotency_key, :fingerprint,
-                 'maintenance-cutover-v1', :snapshot_hash, 'previewed',
+                 'maintenance-cutover-v1', :snapshot_hash, DATE '2026-08-10',
+                 'previewed',
                  CAST('{"can_approve": true}' AS jsonb), 'migration-test')
             """
         ),
@@ -51,6 +55,94 @@ def _insert_preview_run(connection, *, run_id: str) -> None:
             "fingerprint": "a" * 64,
             "snapshot_hash": "b" * 64,
         },
+    )
+
+
+def _insert_project_plan(
+    connection, *, run_id: str, project_id: str, plan_id: str
+) -> None:
+    _insert_preview_run(connection, run_id=run_id)
+    connection.execute(
+        text(
+            """
+            INSERT INTO maintenance_project
+                (project_id, project_code, display_name, lifecycle_status)
+            VALUES
+                (:project_id, :project_code, '迁移约束合成项目', 'ongoing')
+            """
+        ),
+        {"project_id": project_id, "project_code": project_id.upper()},
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO maintenance_project_cutover_plan
+                (plan_id, run_id, project_id, cutover_date, business_as_of,
+                 historical_mode, source_snapshot_hash, input_fingerprint,
+                 truth_comparison_hash, historical_cost_ex_tax,
+                 historical_cost_inc_tax, post_cutover_cost_ex_tax,
+                 post_cutover_cost_inc_tax, approved_expense_ex_tax,
+                 approved_expense_inc_tax, sales_estimate_cost_ex_tax,
+                 sales_estimate_cost_inc_tax, sales_estimate_lines,
+                 cost_progress_includes_sales_estimate, cost_progress_label,
+                 total_cost_ex_tax, total_cost_inc_tax, blocker_count, status)
+            VALUES
+                (:plan_id, :run_id, :project_id, DATE '2026-08-01',
+                 DATE '2026-08-10', 'approved_cost_baseline', :source_hash,
+                 :input_hash, :truth_hash, 100.00, 113.00, 0.00, 0.00,
+                 0.00, 0.00, 0.00, 0.00, 0, FALSE,
+                 'priced_cost_without_sales_estimate', 100.00, 113.00, 0,
+                 'previewed')
+            """
+        ),
+        {
+            "plan_id": plan_id,
+            "run_id": run_id,
+            "project_id": project_id,
+            "source_hash": "c" * 64,
+            "input_hash": "d" * 64,
+            "truth_hash": "e" * 64,
+        },
+    )
+
+
+def _insert_baseline(
+    connection, *, baseline_id: str, plan_id: str, project_id: str, **overrides
+) -> None:
+    values = {
+        "baseline_id": baseline_id,
+        "plan_id": plan_id,
+        "project_id": project_id,
+        "amount_ex_tax": "100.00",
+        "amount_inc_tax": "113.00",
+        "evidence_hash": "a" * 64,
+        "coverage_from": "2025-01-01",
+        "coverage_through": "2026-07-31",
+        "scope": "site_issue_parts_only",
+        "excludes_expenses": True,
+        "source_artifact_locator": "artifact://migration/schema/history.xlsx",
+        "source_row_count": 10,
+        "aggregation_fingerprint": "f" * 64,
+    }
+    values.update(overrides)
+    connection.execute(
+        text(
+            """
+            INSERT INTO maintenance_historical_cost_baseline
+                (baseline_id, plan_id, project_id, amount_ex_tax,
+                 amount_inc_tax, evidence_hash, coverage_from,
+                 coverage_through, scope, excludes_expenses,
+                 source_artifact_locator, source_row_count,
+                 aggregation_fingerprint, approval_state)
+            VALUES
+                (:baseline_id, :plan_id, :project_id, :amount_ex_tax,
+                 :amount_inc_tax, :evidence_hash, :coverage_from,
+                 :coverage_through, :scope, :excludes_expenses,
+                 :source_artifact_locator, :source_row_count,
+                 :aggregation_fingerprint, 'pending')
+            """
+        ),
+        values,
     )
 
 
@@ -64,6 +156,7 @@ def test_migration_control_schema_and_permission_are_fail_closed(db):
     assert {
         "request_fingerprint",
         "source_snapshot_hash",
+        "business_as_of",
         "manifest_json",
         "manifest_hash",
         "manifest_key_id",
@@ -72,6 +165,11 @@ def test_migration_control_schema_and_permission_are_fail_closed(db):
         "approved_by",
         "version",
     } <= run_columns
+    run_checks = {
+        constraint["name"]: constraint["sqltext"]
+        for constraint in inspector.get_check_constraints("maintenance_migration_run")
+    }
+    assert "ck_maintenance_migration_run_independent_reconciliation" in run_checks
     plan_uniques = {
         constraint["name"]: constraint["column_names"]
         for constraint in inspector.get_unique_constraints(
@@ -82,6 +180,43 @@ def test_migration_control_schema_and_permission_are_fail_closed(db):
         "run_id",
         "project_id",
     ]
+    plan_columns = {
+        column["name"]
+        for column in inspector.get_columns("maintenance_project_cutover_plan")
+    }
+    assert {
+        "business_as_of",
+        "truth_comparison_hash",
+        "sales_estimate_cost_ex_tax",
+        "sales_estimate_cost_inc_tax",
+        "sales_estimate_lines",
+        "cost_progress_includes_sales_estimate",
+        "cost_progress_label",
+    } <= plan_columns
+    baseline_columns = {
+        column["name"]
+        for column in inspector.get_columns("maintenance_historical_cost_baseline")
+    }
+    assert {
+        "coverage_from",
+        "coverage_through",
+        "scope",
+        "excludes_expenses",
+        "source_artifact_locator",
+        "source_row_count",
+        "aggregation_fingerprint",
+    } <= baseline_columns
+    baseline_checks = {
+        constraint["name"]: constraint["sqltext"]
+        for constraint in inspector.get_check_constraints(
+            "maintenance_historical_cost_baseline"
+        )
+    }
+    assert {
+        "ck_maintenance_historical_baseline_amounts",
+        "ck_maintenance_historical_baseline_coverage",
+        "ck_maintenance_historical_baseline_identity",
+    } <= set(baseline_checks)
 
     key = "action_maintenance_migration_review"
     assert key in permissions.ACTION_KEYS
@@ -122,6 +257,104 @@ def test_migration_control_schema_and_permission_are_fail_closed(db):
                 '{"v0":"shared-secret-material-that-is-long-enough"}'
             ),
         )
+
+
+def test_cutover_gate_is_explicitly_wired_and_defaults_off():
+    root_env = (_ROOT / ".env.example").read_text(encoding="utf-8")
+    backend_env = (_ROOT / "backend" / ".env.example").read_text(encoding="utf-8")
+    compose = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+
+    assert "MAINTENANCE_CUTOVER_ENABLED=false" in root_env
+    assert "MAINTENANCE_CUTOVER_ENABLED=false" in backend_env
+    assert (
+        "MAINTENANCE_CUTOVER_ENABLED: ${MAINTENANCE_CUTOVER_ENABLED:-false}"
+    ) in compose
+    assert get_settings().maintenance_cutover_enabled is False
+
+
+def test_database_rejects_creator_as_reconciler(db):
+    with engine.begin() as connection:
+        _insert_preview_run(connection, run_id="self-reconcile-run")
+
+    with pytest.raises(DBAPIError, match="independent_reconciliation"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE maintenance_migration_run "
+                    "SET status = 'reconciled', reconciled_by = created_by, "
+                    "reconciled_at = now() "
+                    "WHERE run_id = 'self-reconcile-run'"
+                )
+            )
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "DELETE FROM maintenance_migration_run "
+                "WHERE run_id = 'self-reconcile-run'"
+            )
+        )
+
+
+def test_database_rejects_invalid_historical_baseline_contract(db):
+    run_id = "baseline-constraint-run"
+    project_id = "baseline-constraint-project"
+    plan_id = "baseline-constraint-plan"
+    with engine.begin() as connection:
+        _insert_project_plan(
+            connection,
+            run_id=run_id,
+            project_id=project_id,
+            plan_id=plan_id,
+        )
+
+    invalid_cases = [
+        (
+            "bad-tax",
+            "ck_maintenance_historical_baseline_amounts",
+            {"amount_inc_tax": "114.00"},
+        ),
+        (
+            "empty-range",
+            "ck_maintenance_historical_baseline_coverage",
+            {"coverage_from": "2026-08-01"},
+        ),
+        (
+            "wrong-scope",
+            "ck_maintenance_historical_baseline_coverage",
+            {"scope": "all_project_costs"},
+        ),
+        (
+            "includes-expenses",
+            "ck_maintenance_historical_baseline_coverage",
+            {"excludes_expenses": False},
+        ),
+        (
+            "blank-artifact",
+            "ck_maintenance_historical_baseline_coverage",
+            {"source_artifact_locator": " "},
+        ),
+        (
+            "too-many-rows",
+            "ck_maintenance_historical_baseline_coverage",
+            {"source_row_count": 10_000_001},
+        ),
+        (
+            "short-fingerprint",
+            "ck_maintenance_historical_baseline_identity",
+            {"aggregation_fingerprint": "short"},
+        ),
+    ]
+    for case_id, constraint_name, overrides in invalid_cases:
+        with pytest.raises(DBAPIError, match=constraint_name):
+            with engine.begin() as connection:
+                _insert_baseline(
+                    connection,
+                    baseline_id=f"baseline-{case_id}",
+                    plan_id=plan_id,
+                    project_id=project_id,
+                    **overrides,
+                )
 
 
 def test_migration_event_is_database_append_only(db):
@@ -185,7 +418,9 @@ def test_downgrade_fails_closed_when_control_history_exists(db):
         alembic_command.downgrade(cfg, _PREV)
 
     with engine.begin() as connection:
-        assert set(connection.scalars(text("SELECT version_num FROM alembic_version"))) == versions_before
+        assert set(
+            connection.scalars(text("SELECT version_num FROM alembic_version"))
+        ) == versions_before
         assert {
             name
             for name in inspect(connection).get_table_names()

@@ -1,4 +1,8 @@
+from copy import deepcopy
+
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.api import maintenance_migration as migration_api
 from app.auth import hash_password
@@ -9,6 +13,7 @@ from app.models.dimensions import DimPart
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import MaintenanceProjectWorkbookState
 from app.models.system import SysUser
+from app.services import maintenance_migration_controls as controls
 
 
 def _client(db, *, username: str, role: str = "admin", permissions=None):
@@ -76,7 +81,55 @@ def _loader(_db, project_id, _cutover_date):
     )
 
 
+def _legacy_loader(_db, project_id, as_of):
+    evidence = {
+        "cost_lines": [
+            {
+                "source_order_id": f"{project_id}-legacy-order",
+                "source_line_id": f"{project_id}-legacy-line",
+                "order_no": "WBDD-MIGRATION-API-LEGACY",
+                "order_date": "2026-07-31",
+                "pn": "PN-MIGRATION-API",
+                "sn": None,
+                "demand_quantity": "1",
+                "return_quantity": "0",
+                "effective_quantity": "1",
+                "unit_cost_ex_tax": "100.00",
+                "unit_cost_inc_tax": "113.00",
+                "cost_tax_basis": "ex",
+                "cost_amount_ex_tax": "100.00",
+                "cost_amount_inc_tax": "113.00",
+            }
+        ],
+        "expenses": [],
+        "source_coverage": {
+            "legacy_truth_version": "test-v1",
+            "business_as_of": as_of.isoformat(),
+        },
+    }
+    return {
+        **evidence,
+        "source_hash": controls.canonical_hash(evidence),
+        "source_ready": True,
+        "blockers": [],
+    }
+
+
 def _preview_body():
+    baseline = {
+        "amount_ex_tax": "100.00",
+        "amount_inc_tax": "113.00",
+        "evidence_hash": "a" * 64,
+        "coverage_from": "2025-01-01",
+        "coverage_through": "2026-07-31",
+        "scope": "site_issue_parts_only",
+        "excludes_expenses": True,
+        "source_artifact_locator": "artifact://migration/api-project/history.xlsx",
+        "source_row_count": 10,
+    }
+    baseline["aggregation_fingerprint"] = (
+        controls.historical_baseline_aggregation_fingerprint(baseline)
+    )
     return {
         "idempotency_key": "migration-api-preview-key",
         "reason": "建立接口合成 dry-run",
@@ -85,11 +138,7 @@ def _preview_body():
                 "project_id": "migration-api-project",
                 "cutover_date": "2026-08-01",
                 "historical_mode": "approved_cost_baseline",
-                "historical_baseline": {
-                    "amount_ex_tax": "100.00",
-                    "amount_inc_tax": "113.00",
-                    "evidence_hash": "a" * 64,
-                },
+                "historical_baseline": baseline,
                 "opening_balances": [
                     {
                         "balance_key": "migration-api-project:21002",
@@ -109,6 +158,9 @@ def _project_signoffs(preview):
         {
             "project_id": plan["project_id"],
             "expected_plan_version": plan["version"],
+            "expected_truth_comparison_hash": plan["truth_comparison"][
+                "truth_comparison_hash"
+            ],
             "reason": "逐项核对接口项目候选",
             "historical_baseline": {
                 "baseline_id": plan["historical_baseline"]["baseline_id"],
@@ -125,11 +177,50 @@ def _project_signoffs(preview):
     ]
 
 
+def test_historical_baseline_request_contract_is_exact_and_half_up():
+    project = deepcopy(_preview_body()["projects"][0])
+    baseline = project["historical_baseline"]
+    baseline["amount_ex_tax"] = "0.50"
+    baseline["amount_inc_tax"] = "0.57"
+    baseline["aggregation_fingerprint"] = (
+        controls.historical_baseline_aggregation_fingerprint(baseline)
+    )
+    validated = migration_api.ProjectCutoverInput.model_validate(project)
+    assert validated.historical_baseline is not None
+    assert str(validated.historical_baseline.amount_inc_tax) == "0.57"
+
+    forged = deepcopy(project)
+    forged["historical_baseline"]["aggregation_fingerprint"] = "f" * 64
+    with pytest.raises(ValidationError, match="聚合指纹"):
+        migration_api.ProjectCutoverInput.model_validate(forged)
+
+    wrong_boundary = deepcopy(project)
+    wrong_boundary["historical_baseline"]["coverage_through"] = "2026-07-30"
+    wrong_boundary["historical_baseline"]["aggregation_fingerprint"] = (
+        controls.historical_baseline_aggregation_fingerprint(
+            wrong_boundary["historical_baseline"]
+        )
+    )
+    with pytest.raises(ValidationError, match="切换日前一日"):
+        migration_api.ProjectCutoverInput.model_validate(wrong_boundary)
+
+    empty_interval = deepcopy(project)
+    empty_interval["historical_baseline"]["coverage_from"] = "2026-08-01"
+    empty_interval["historical_baseline"]["aggregation_fingerprint"] = (
+        controls.historical_baseline_aggregation_fingerprint(
+            empty_interval["historical_baseline"]
+        )
+    )
+    with pytest.raises(ValidationError, match="不能为空或倒置"):
+        migration_api.ProjectCutoverInput.model_validate(empty_interval)
+
+
 def test_public_api_supports_preview_search_reconcile_and_independent_approval(
     db, monkeypatch
 ):
     _seed_project(db)
     monkeypatch.setattr(migration_api, "load_project_inventory_movements", _loader)
+    monkeypatch.setattr(migration_api, "load_project_legacy_truth", _legacy_loader)
     creator = _client(db, username="migration-api-creator")
 
     preview_response = creator.post(
@@ -148,6 +239,7 @@ def test_public_api_supports_preview_search_reconcile_and_independent_approval(
     assert searched.status_code == 200, searched.text
     assert searched.headers["cache-control"] == "no-store"
     assert searched.json()["items"][0]["run_id"] == preview["run_id"]
+    assert searched.json()["items"][0]["as_of"] == preview["as_of"]
 
     read_back = creator.get(f"/api/maintenance/migration-runs/{preview['run_id']}")
     assert read_back.status_code == 200, read_back.text
@@ -162,7 +254,20 @@ def test_public_api_supports_preview_search_reconcile_and_independent_approval(
     assert evidence.headers["cache-control"] == "no-store"
     assert evidence.json()["items"][0]["document_no"] == "FH-MIGRATION-API"
 
-    reconciled_response = creator.post(
+    creator_reconcile = creator.post(
+        f"/api/maintenance/migration-runs/{preview['run_id']}/reconcile",
+        json={
+            "expected_version": preview["version"],
+            "operation_key": "migration-api-creator-reconcile-key",
+            "reason": "创建人不得兼任实名对账人",
+            "project_signoffs": _project_signoffs(preview),
+        },
+    )
+    assert creator_reconcile.status_code == 409, creator_reconcile.text
+    assert "独立" in creator_reconcile.json()["detail"]
+
+    reconciler = _client(db, username="migration-api-reconciler")
+    reconciled_response = reconciler.post(
         f"/api/maintenance/migration-runs/{preview['run_id']}/reconcile",
         json={
             "expected_version": preview["version"],
@@ -191,6 +296,11 @@ def test_public_api_supports_preview_search_reconcile_and_independent_approval(
     assert approved["status"] == "approved"
     assert approved["manifest"]["production_activation_included"] is False
     assert approved["manifest"]["signing_key_id"] == approved["manifest_key_id"]
+    assert set(approved["manifest"]["approval_chain"].values()) >= {
+        "migration-api-creator",
+        "migration-api-reconciler",
+        "migration-api-approver",
+    }
     manifest_response = approver.get(
         f"/api/maintenance/migration-runs/{preview['run_id']}/manifest"
     )
@@ -204,6 +314,7 @@ def test_public_api_supports_preview_search_reconcile_and_independent_approval(
 def test_missing_action_permission_and_shared_admin_both_fail_closed(db, monkeypatch):
     _seed_project(db)
     monkeypatch.setattr(migration_api, "load_project_inventory_movements", _loader)
+    monkeypatch.setattr(migration_api, "load_project_legacy_truth", _legacy_loader)
     denied = _client(
         db,
         username="migration-api-denied",
@@ -249,6 +360,7 @@ def test_missing_action_permission_and_shared_admin_both_fail_closed(db, monkeyp
 def test_api_rejects_unknown_fields_and_changed_idempotent_command(db, monkeypatch):
     _seed_project(db)
     monkeypatch.setattr(migration_api, "load_project_inventory_movements", _loader)
+    monkeypatch.setattr(migration_api, "load_project_legacy_truth", _legacy_loader)
     client = _client(db, username="migration-api-validation")
 
     invalid = _preview_body()
@@ -271,6 +383,7 @@ def test_preview_request_limits_reject_oversized_body_and_aggregate_candidates(
 ):
     _seed_project(db)
     monkeypatch.setattr(migration_api, "load_project_inventory_movements", _loader)
+    monkeypatch.setattr(migration_api, "load_project_legacy_truth", _legacy_loader)
     client = _client(db, username="migration-api-size-limit")
 
     oversized = client.post(

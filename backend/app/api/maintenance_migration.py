@@ -1,7 +1,7 @@
 """Admin-only maintenance cutover dry-run and approval endpoints."""
 
-from datetime import date
-from decimal import Decimal
+from datetime import date, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -14,9 +14,11 @@ from app.db import get_db
 from app.models.system import SysUser
 from app.security import UserContext, get_current_user_context, record_access_log
 from app.services import maintenance_migration_runs as runs
+from app.services import maintenance_migration_controls as controls
 from app.services.maintenance_migration_warehouse import (
     load_project_inventory_movements,
 )
+from app.services.maintenance_migration_legacy import load_project_legacy_truth
 
 
 router = APIRouter(prefix="/maintenance/migration-runs", tags=["maintenance"])
@@ -35,6 +37,30 @@ class HistoricalBaselineInput(BaseModel):
         ge=0, lt=_MONEY_LIMIT, max_digits=14, decimal_places=2
     )
     evidence_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    coverage_from: date
+    coverage_through: date
+    scope: str = Field(pattern=r"^site_issue_parts_only$")
+    excludes_expenses: bool
+    source_artifact_locator: str = Field(min_length=1, max_length=512)
+    source_row_count: int = Field(ge=0, le=10_000_000)
+    aggregation_fingerprint: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def validate_machine_contract(self):
+        if self.amount_inc_tax != (self.amount_ex_tax * Decimal("1.13")).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        ):
+            raise ValueError("历史基线含税金额必须按固定 13% 由未税金额复算")
+        if self.coverage_from > self.coverage_through:
+            raise ValueError("历史基线覆盖区间不能为空或倒置")
+        if self.excludes_expenses is not True:
+            raise ValueError("历史基线必须明确排除报销费用")
+        expected = controls.historical_baseline_aggregation_fingerprint(
+            self.model_dump(mode="json", exclude={"aggregation_fingerprint"})
+        )
+        if self.aggregation_fingerprint != expected:
+            raise ValueError("历史基线聚合指纹与金额及覆盖范围不一致")
+        return self
 
 
 class OpeningBalanceInput(BaseModel):
@@ -58,6 +84,15 @@ class ProjectCutoverInput(BaseModel):
     opening_balances: list[OpeningBalanceInput] = Field(
         default_factory=list, max_length=runs.MAX_OPENINGS_PER_PROJECT
     )
+
+    @model_validator(mode="after")
+    def validate_baseline_boundary(self):
+        if self.historical_baseline is not None and (
+            self.historical_baseline.coverage_through
+            != self.cutover_date - timedelta(days=1)
+        ):
+            raise ValueError("历史基线覆盖截止日必须精确为切换日前一日")
+        return self
 
 
 class MigrationPreviewRequest(BaseModel):
@@ -113,6 +148,7 @@ class ProjectReconcileSignoffInput(BaseModel):
 
     project_id: str = Field(min_length=1, max_length=36)
     expected_plan_version: int = Field(ge=1)
+    expected_truth_comparison_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     reason: str = Field(min_length=1, max_length=1000)
     historical_baseline: HistoricalBaselineSignoffInput | None = None
     opening_balances: list[OpeningBalanceSignoffInput] = Field(
@@ -210,6 +246,7 @@ def create_preview(
             reason=body.reason,
             operated_by=operator,
             warehouse_loader=load_project_inventory_movements,
+            legacy_loader=load_project_legacy_truth,
         )
         db.commit()
         return result
@@ -310,6 +347,7 @@ def get_migration_manifest(
             run_id=run_id,
             verification_keys=get_settings().maintenance_manifest_verification_keys(),
             warehouse_loader=load_project_inventory_movements,
+            legacy_loader=load_project_legacy_truth,
         )
         record_access_log(
             ctx, "migration_manifest", "maintenance_migration", {"run_id": run_id}
@@ -338,6 +376,7 @@ def reconcile_migration_run(
                 signoff.model_dump(mode="json") for signoff in body.project_signoffs
             ],
             warehouse_loader=load_project_inventory_movements,
+            legacy_loader=load_project_legacy_truth,
         )
         db.commit()
         return result
@@ -368,6 +407,7 @@ def approve_migration_run(
             signing_key=signing_key,
             signing_key_id=signing_key_id,
             warehouse_loader=load_project_inventory_movements,
+            legacy_loader=load_project_legacy_truth,
         )
         db.commit()
         return result

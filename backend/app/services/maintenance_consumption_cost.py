@@ -65,8 +65,14 @@ def _valid(qty: Decimal | None, unit_price: Decimal | None) -> bool:
 
 
 def _weighted(samples: list[dict]) -> Decimal | None:
-    valid = [sample for sample in samples if _valid(sample["quantity"], sample["unit_price_ex_tax"])]
-    total_qty = sum((Decimal(sample["quantity"]) for sample in valid), start=Decimal("0"))
+    valid = [
+        sample
+        for sample in samples
+        if _valid(sample["quantity"], sample["unit_price_ex_tax"])
+    ]
+    total_qty = sum(
+        (Decimal(sample["quantity"]) for sample in valid), start=Decimal("0")
+    )
     if total_qty <= 0:
         return None
     return _amount(
@@ -102,7 +108,11 @@ def _direct_purchase(
             FPurchaseOrder.data_status == config.ACTIVE_STATUS,
         )
     ).one_or_none()
-    if sample is None or sample.part_id != line.part_id or not _valid(sample.qty, sample.unit_price):
+    if (
+        sample is None
+        or sample.part_id != line.part_id
+        or not _valid(sample.qty, sample.unit_price)
+    ):
         return None
     unit_ex = (
         tax_policy.ex_from_inc(sample.unit_price)
@@ -113,14 +123,20 @@ def _direct_purchase(
         {
             "sample_id": f"purchase:{sample.id}",
             "document_no": sample.order_no,
-            "document_date": sample.order_date.isoformat() if sample.order_date else None,
+            "document_date": sample.order_date.isoformat()
+            if sample.order_date
+            else None,
             "distance_days": (
-                abs((sample.order_date - issue_date).days) if sample.order_date else None
+                abs((sample.order_date - issue_date).days)
+                if sample.order_date
+                else None
             ),
             "quantity": format(sample.qty, "f"),
             "unit_price_raw": format(sample.unit_price, "f"),
             "unit_price_ex_tax": format(unit_ex, "f"),
-            "tax_conversion": "divide_1.13" if sample.is_tax_inclusive is True else "none",
+            "tax_conversion": "divide_1.13"
+            if sample.is_tax_inclusive is True
+            else "none",
         }
     ]
 
@@ -327,8 +343,14 @@ def resolve_lines(
     db: Session,
     *,
     lines: Iterable[tuple[date, MaintenanceSiteIssueLine]],
+    as_of: date | None = None,
 ) -> list[MaintenanceSiteIssueLine]:
-    """Resolve one bounded batch with three evidence reads, never per-line SQL."""
+    """Resolve one bounded batch with three evidence reads, never per-line SQL.
+
+    ``as_of`` freezes the evidence horizon for reproducible migration snapshots.
+    Normal operating callers omit it and retain the full before/after-seven-day
+    waterfall.
+    """
 
     entries = list(lines)
     if not entries:
@@ -341,6 +363,8 @@ def resolve_lines(
     }
     from_date = min(issue_date for issue_date, _line in entries) - timedelta(days=7)
     to_date = max(issue_date for issue_date, _line in entries) + timedelta(days=7)
+    if as_of is not None:
+        to_date = min(to_date, as_of)
 
     direct_by_id = {}
     if linked_ids:
@@ -360,6 +384,11 @@ def resolve_lines(
                 .where(
                     FPurchaseLine.id.in_(linked_ids),
                     FPurchaseOrder.data_status == config.ACTIVE_STATUS,
+                    *(
+                        (FPurchaseOrder.order_date <= as_of,)
+                        if as_of is not None
+                        else ()
+                    ),
                 )
             )
         }

@@ -52,10 +52,16 @@ type DraftProject = {
   localId: string;
   projectId: string;
   cutoverDate: string;
+  warehouseReadyThrough: string;
   historicalMode: "approved_cost_baseline" | "stable_site_issues";
   baselineExTax: string;
   baselineIncTax: string;
   baselineEvidenceHash: string;
+  baselineCoverageFrom: string;
+  baselineCoverageThrough: string;
+  baselineSourceArtifactLocator: string;
+  baselineSourceRowCount: string;
+  baselineAggregationFingerprint: string;
   openings: DraftOpening[];
 };
 
@@ -70,6 +76,7 @@ type ProjectReviewDraft = {
 
 const PAGE_SIZE = 20;
 const SHA256 = /^[a-f0-9]{64}$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 function operationKey(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
@@ -78,8 +85,34 @@ function operationKey(): string {
   return `migration-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function today(): string {
-  return new Date().toISOString().slice(0, 10);
+export function businessDate(value = new Date()): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const part = (type: "year" | "month" | "day") => (
+    parts.find((item) => item.type === type)?.value ?? ""
+  );
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function validIsoDate(value: string): boolean {
+  if (!ISO_DATE.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === day;
+}
+
+function previousIsoDate(value: string): string {
+  if (!validIsoDate(value)) return "";
+  const [year, month, day] = value.split("-").map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  parsed.setUTCDate(parsed.getUTCDate() - 1);
+  return parsed.toISOString().slice(0, 10);
 }
 
 function newOpening(): DraftOpening {
@@ -87,14 +120,21 @@ function newOpening(): DraftOpening {
 }
 
 function newDraftProject(): DraftProject {
+  const currentBusinessDate = businessDate();
   return {
     localId: operationKey(),
     projectId: "",
-    cutoverDate: today(),
+    cutoverDate: currentBusinessDate,
+    warehouseReadyThrough: currentBusinessDate,
     historicalMode: "approved_cost_baseline",
     baselineExTax: "",
     baselineIncTax: "",
     baselineEvidenceHash: "",
+    baselineCoverageFrom: "",
+    baselineCoverageThrough: previousIsoDate(currentBusinessDate),
+    baselineSourceArtifactLocator: "",
+    baselineSourceRowCount: "",
+    baselineAggregationFingerprint: "",
     openings: [newOpening()],
   };
 }
@@ -140,12 +180,20 @@ function projectInput(draft: DraftProject): MigrationProjectInput {
   return {
     project_id: draft.projectId,
     cutover_date: draft.cutoverDate,
+    warehouse_ready_through: draft.warehouseReadyThrough || null,
     historical_mode: draft.historicalMode,
     historical_baseline: draft.historicalMode === "approved_cost_baseline"
       ? {
           amount_ex_tax: draft.baselineExTax.trim(),
           amount_inc_tax: draft.baselineIncTax.trim(),
           evidence_hash: draft.baselineEvidenceHash.trim().toLowerCase(),
+          coverage_from: draft.baselineCoverageFrom,
+          coverage_through: draft.baselineCoverageThrough,
+          scope: "site_issue_parts_only",
+          excludes_expenses: true,
+          source_artifact_locator: draft.baselineSourceArtifactLocator.trim(),
+          source_row_count: Number(draft.baselineSourceRowCount.trim()),
+          aggregation_fingerprint: draft.baselineAggregationFingerprint.trim().toLowerCase(),
         }
       : null,
     opening_balances: openings,
@@ -158,13 +206,43 @@ function validateDrafts(drafts: DraftProject[], reason: string): string | null {
   if (projectIds.length !== drafts.length) return "每张卡片都必须选择稳定项目。";
   if (new Set(projectIds).size !== projectIds.length) return "同一项目不能重复加入一次 dry-run。";
   for (const draft of drafts) {
-    if (!draft.cutoverDate) return "每个项目都必须填写切换日期。";
+    if (!validIsoDate(draft.cutoverDate)) return "每个项目都必须填写有效的切换日期。";
+    if (!validIsoDate(draft.warehouseReadyThrough)) {
+      return "每个项目都必须实名确认仓库单据完整水位。";
+    }
     if (draft.historicalMode === "approved_cost_baseline") {
       if (!draft.baselineExTax.trim() || !draft.baselineIncTax.trim()) {
         return "成本基线模式必须填写未税和含税金额；零金额请明确填 0。";
       }
       if (!SHA256.test(draft.baselineEvidenceHash.trim().toLowerCase())) {
         return "成本基线证据必须填写 64 位 SHA-256。";
+      }
+      if (
+        !validIsoDate(draft.baselineCoverageFrom)
+        || !validIsoDate(draft.baselineCoverageThrough)
+      ) {
+        return "历史基线必须填写有效的覆盖起止日期。";
+      }
+      if (draft.baselineCoverageFrom > draft.baselineCoverageThrough) {
+        return "历史基线覆盖起点不能晚于覆盖截止日。";
+      }
+      if (draft.baselineCoverageThrough !== previousIsoDate(draft.cutoverDate)) {
+        return "历史基线覆盖截止日必须精确为切换日前一日。";
+      }
+      if (
+        !draft.baselineSourceArtifactLocator.trim()
+        || draft.baselineSourceArtifactLocator.trim().length > 512
+      ) {
+        return "历史基线必须填写可审计的来源工件定位。";
+      }
+      if (
+        !/^\d+$/.test(draft.baselineSourceRowCount.trim())
+        || Number(draft.baselineSourceRowCount) > 10_000_000
+      ) {
+        return "历史基线来源行数必须是 0 到 10000000 的整数。";
+      }
+      if (!SHA256.test(draft.baselineAggregationFingerprint.trim().toLowerCase())) {
+        return "历史基线聚合指纹必须填写 64 位 SHA-256。";
       }
     }
     const nonEmptyOpenings = draft.openings.filter((row) => (
@@ -225,6 +303,7 @@ export default function MaintenanceMigrationPage() {
       ...selected.plans.flatMap((plan) => [
         plan.project_id,
         plan.version,
+        plan.truth_comparison.truth_comparison_hash,
         plan.historical_baseline?.baseline_id ?? "no-baseline",
         plan.historical_baseline?.version ?? 0,
         ...plan.opening_balances.flatMap((row) => [row.opening_balance_id, row.version]),
@@ -258,6 +337,12 @@ export default function MaintenanceMigrationPage() {
     && selected.plans.length > 0
     && selected.plans.every((plan) => {
       const draft = reviewDrafts[plan.project_id];
+      const preview = selected.preview.projects.find((item) => item.project_id === plan.project_id);
+      if (
+        !SHA256.test(plan.truth_comparison.truth_comparison_hash)
+        || preview?.truth_comparison.truth_comparison_hash
+          !== plan.truth_comparison.truth_comparison_hash
+      ) return false;
       if (!draft?.acknowledged || !draft.reason.trim()) return false;
       if (plan.historical_baseline && !draft.baselineSelected) return false;
       return plan.opening_balances.every((row) => (
@@ -434,6 +519,7 @@ export default function MaintenanceMigrationPage() {
       return {
         project_id: plan.project_id,
         expected_plan_version: plan.version,
+        expected_truth_comparison_hash: plan.truth_comparison.truth_comparison_hash,
         reason: draft.reason.trim(),
         historical_baseline: plan.historical_baseline && draft.baselineSelected
           ? {
@@ -505,6 +591,11 @@ export default function MaintenanceMigrationPage() {
       dataIndex: "created_at",
       width: 180,
       render: (value: string) => new Date(value).toLocaleString("zh-CN"),
+    },
+    {
+      title: "业务截止日",
+      dataIndex: "as_of",
+      width: 120,
     },
     {
       title: "创建 / 对账 / 审批",
@@ -634,6 +725,7 @@ export default function MaintenanceMigrationPage() {
               <label>
                 <span>稳定项目</span>
                 <Select
+                  aria-label={`项目 ${draftIndex + 1} 稳定项目`}
                   showSearch
                   value={draft.projectId || undefined}
                   placeholder="按项目编号或名称搜索"
@@ -648,10 +740,28 @@ export default function MaintenanceMigrationPage() {
               <label>
                 <span>切换日期</span>
                 <Input
+                  aria-label={`项目 ${draftIndex + 1} 切换日期`}
                   type="date"
                   value={draft.cutoverDate}
-                  onChange={(event) => updateDraft(draft.localId, { cutoverDate: event.target.value })}
+                  onChange={(event) => updateDraft(draft.localId, {
+                    cutoverDate: event.target.value,
+                    baselineCoverageThrough: previousIsoDate(event.target.value),
+                  })}
                 />
+              </label>
+              <label className="maintenance-migration-span-two">
+                <span>仓库单据已完整至</span>
+                <Input
+                  aria-label={`项目 ${draftIndex + 1} 仓库单据完整水位`}
+                  type="date"
+                  value={draft.warehouseReadyThrough}
+                  onChange={(event) => updateDraft(draft.localId, {
+                    warehouseReadyThrough: event.target.value,
+                  })}
+                />
+                <Typography.Text type="secondary">
+                  这是实名完整性声明；即使本期零流水也必须填写，并由后续对账与独立审批共同签名。
+                </Typography.Text>
               </label>
               <label className="maintenance-migration-span-two">
                 <span>历史成本方式</span>
@@ -669,6 +779,7 @@ export default function MaintenanceMigrationPage() {
                   <label>
                     <span>历史基线（未税）</span>
                     <Input
+                      aria-label={`项目 ${draftIndex + 1} 历史基线未税金额`}
                       inputMode="decimal"
                       value={draft.baselineExTax}
                       placeholder="0.00"
@@ -678,6 +789,7 @@ export default function MaintenanceMigrationPage() {
                   <label>
                     <span>历史基线（含税）</span>
                     <Input
+                      aria-label={`项目 ${draftIndex + 1} 历史基线含税金额`}
                       inputMode="decimal"
                       value={draft.baselineIncTax}
                       placeholder="0.00"
@@ -687,10 +799,77 @@ export default function MaintenanceMigrationPage() {
                   <label className="maintenance-migration-span-two">
                     <span>基线证据 SHA-256</span>
                     <Input
+                      aria-label={`项目 ${draftIndex + 1} 基线证据哈希`}
                       value={draft.baselineEvidenceHash}
                       maxLength={64}
                       placeholder="归档证据文件的 64 位 SHA-256"
                       onChange={(event) => updateDraft(draft.localId, { baselineEvidenceHash: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    <span>基线覆盖起点</span>
+                    <Input
+                      aria-label={`项目 ${draftIndex + 1} 基线覆盖起点`}
+                      type="date"
+                      value={draft.baselineCoverageFrom}
+                      onChange={(event) => updateDraft(draft.localId, {
+                        baselineCoverageFrom: event.target.value,
+                      })}
+                    />
+                  </label>
+                  <label>
+                    <span>基线覆盖截止日</span>
+                    <Input
+                      aria-label={`项目 ${draftIndex + 1} 基线覆盖截止日`}
+                      type="date"
+                      value={draft.baselineCoverageThrough}
+                      onChange={(event) => updateDraft(draft.localId, {
+                        baselineCoverageThrough: event.target.value,
+                      })}
+                    />
+                    <Typography.Text type="secondary">必须精确为切换日前一日。</Typography.Text>
+                  </label>
+                  <label className="maintenance-migration-span-two">
+                    <span>来源工件定位</span>
+                    <Input
+                      aria-label={`项目 ${draftIndex + 1} 来源工件定位`}
+                      value={draft.baselineSourceArtifactLocator}
+                      maxLength={512}
+                      placeholder="例如：归档系统中的对象 ID 或只读路径"
+                      onChange={(event) => updateDraft(draft.localId, {
+                        baselineSourceArtifactLocator: event.target.value,
+                      })}
+                    />
+                  </label>
+                  <label>
+                    <span>来源明细行数</span>
+                    <Input
+                      aria-label={`项目 ${draftIndex + 1} 来源明细行数`}
+                      inputMode="numeric"
+                      value={draft.baselineSourceRowCount}
+                      placeholder="0"
+                      onChange={(event) => updateDraft(draft.localId, {
+                        baselineSourceRowCount: event.target.value,
+                      })}
+                    />
+                  </label>
+                  <label>
+                    <span>固定范围契约</span>
+                    <Space wrap>
+                      <Tag color="blue">scope=site_issue_parts_only（仅现场领用备件成本）</Tag>
+                      <Tag color="green">excludes_expenses=true（明确排除报销费用）</Tag>
+                    </Space>
+                  </label>
+                  <label className="maintenance-migration-span-two">
+                    <span>聚合指纹 SHA-256</span>
+                    <Input
+                      aria-label={`项目 ${draftIndex + 1} 聚合指纹`}
+                      value={draft.baselineAggregationFingerprint}
+                      maxLength={64}
+                      placeholder="绑定金额、覆盖范围、来源定位与行数的 64 位 SHA-256"
+                      onChange={(event) => updateDraft(draft.localId, {
+                        baselineAggregationFingerprint: event.target.value,
+                      })}
                     />
                   </label>
                 </>
@@ -856,11 +1035,75 @@ export default function MaintenanceMigrationPage() {
                   extra={plan.blocker_count ? <Tag color="red">{plan.blocker_count} 个阻塞项</Tag> : <Tag color="green">可复算</Tag>}
                 >
                   <div className="maintenance-migration-cost-grid">
-                    <div><span>历史成本</span><strong>{money(plan.cost.historical_ex_tax)}</strong></div>
-                    <div><span>切换后现场领用</span><strong>{money(plan.cost.post_cutover_ex_tax)}</strong></div>
-                    <div><span>已审批报销</span><strong>{money(plan.cost.approved_expense_ex_tax)}</strong></div>
-                    <div><span>项目成本合计</span><strong>{money(plan.cost.total_ex_tax)}</strong></div>
+                    <div><span>历史成本（未税）</span><strong>{money(plan.cost.historical_ex_tax)}</strong></div>
+                    <div><span>切换后现场领用（未税）</span><strong>{money(plan.cost.post_cutover_ex_tax)}</strong></div>
+                    <div><span>已审批报销（未税）</span><strong>{money(plan.cost.approved_expense_ex_tax)}</strong></div>
+                    <div><span>项目已计成本（未税）</span><strong>{money(plan.cost.total_ex_tax)}</strong></div>
+                    <div>
+                      <span>销售回退估算（未税）</span>
+                      <strong>{money(plan.cost.sales_estimate_cost_ex_tax)}</strong>
+                      <Typography.Text type="secondary">
+                        {plan.cost.sales_estimate_lines} 条
+                      </Typography.Text>
+                    </div>
                   </div>
+                  {plan.cost.cost_progress_includes_sales_estimate && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message="项目已计成本包含销售回退估算"
+                      description={`销售回退估算未税 ${money(plan.cost.sales_estimate_cost_ex_tax)}、含税 ${money(plan.cost.sales_estimate_cost_inc_tax)}，共 ${plan.cost.sales_estimate_lines} 条。`}
+                      style={{ marginTop: 12 }}
+                    />
+                  )}
+                  <Typography.Paragraph type="secondary" style={{ marginTop: 8 }}>
+                    迁移业务截止日：{preview?.as_of || "—"}
+                    {" · "}仓库完整水位：{String(preview?.source_coverage.warehouse_ready_through || "未确认")}
+                    {" · "}要求覆盖至：{String(preview?.source_coverage.warehouse_required_through || "—")}
+                  </Typography.Paragraph>
+                  <Divider orientation="left">新旧业务真值对比</Divider>
+                  {preview?.truth_comparison.truth_comparison_hash
+                    !== plan.truth_comparison.truth_comparison_hash && (
+                    <Alert
+                      type="error"
+                      showIcon
+                      message="预览与计划的真值对比指纹不一致，禁止对账"
+                      style={{ marginBottom: 12 }}
+                    />
+                  )}
+                  <Table
+                    size="small"
+                    rowKey="key"
+                    pagination={false}
+                    dataSource={[
+                      { key: "before", label: "旧口径（before）", ...plan.truth_comparison.before },
+                      {
+                        key: "after",
+                        label: "新口径（after，候选应用后）",
+                        ...plan.truth_comparison.after,
+                      },
+                      { key: "delta", label: "差额（after - before）", ...plan.truth_comparison.delta },
+                    ]}
+                    columns={[
+                      { title: "口径", dataIndex: "label", fixed: "left", width: 180 },
+                      { title: "备件成本未税", dataIndex: "parts_cost_ex_tax", render: money },
+                      { title: "备件成本含税", dataIndex: "parts_cost_inc_tax", render: money },
+                      { title: "已审批报销未税", dataIndex: "approved_expense_ex_tax", render: money },
+                      { title: "已审批报销含税", dataIndex: "approved_expense_inc_tax", render: money },
+                      { title: "合计未税", dataIndex: "total_ex_tax", render: money },
+                      { title: "合计含税", dataIndex: "total_inc_tax", render: money },
+                    ]}
+                    scroll={{ x: "max-content" }}
+                  />
+                  <Typography.Paragraph type="secondary" style={{ marginTop: 8 }}>
+                    after 已按本次必须完整勾选的候选基线与库存期初计算；
+                    签字后系统会再次重算并要求指纹完全一致。
+                    <br />
+                    对账将精确签署此真值对比指纹：
+                    <Typography.Text copyable code>
+                      {plan.truth_comparison.truth_comparison_hash}
+                    </Typography.Text>
+                  </Typography.Paragraph>
                   <Divider orientation="left">候选成本基线与库存期初</Divider>
                   {selected.status === "previewed" && (
                     <Alert
@@ -878,9 +1121,22 @@ export default function MaintenanceMigrationPage() {
                         <div>
                           未税 {money(plan.historical_baseline.amount_ex_tax)} · 含税 {money(plan.historical_baseline.amount_inc_tax)}
                         </div>
-                        <Typography.Text type="secondary" copyable code>
-                          {plan.historical_baseline.evidence_hash}
-                        </Typography.Text>
+                        <Typography.Paragraph type="secondary">
+                          覆盖 {plan.historical_baseline.coverage_from} 至 {plan.historical_baseline.coverage_through}
+                          {" · "}scope={plan.historical_baseline.scope}（仅现场领用备件成本）
+                          {" · "}excludes_expenses={String(plan.historical_baseline.excludes_expenses)}
+                          （{plan.historical_baseline.excludes_expenses ? "已排除报销费用" : "未排除报销费用"}）
+                          {" · "}来源 {plan.historical_baseline.source_artifact_locator}
+                          {" · "}{plan.historical_baseline.source_row_count} 行
+                        </Typography.Paragraph>
+                        <div>
+                          <Typography.Text type="secondary">证据：</Typography.Text>
+                          <Typography.Text copyable code>{plan.historical_baseline.evidence_hash}</Typography.Text>
+                        </div>
+                        <div>
+                          <Typography.Text type="secondary">聚合指纹：</Typography.Text>
+                          <Typography.Text copyable code>{plan.historical_baseline.aggregation_fingerprint}</Typography.Text>
+                        </div>
                       </div>
                       {selected.status === "previewed" ? (
                         <Checkbox
@@ -1069,7 +1325,7 @@ export default function MaintenanceMigrationPage() {
           showIcon
           style={{ marginBottom: 16 }}
           message={commandMode === "reconcile"
-            ? "只会批准刚才逐项目、逐候选明确勾选的精确集合"
+            ? "对账人必须不同于创建人；只会批准逐项目、逐候选明确勾选的精确集合"
             : "最终审批人必须不同于创建人与对账人"}
           description="任何项目、候选版本或来源快照变化都会使整批操作失败；本操作仍不会启用生产。"
         />

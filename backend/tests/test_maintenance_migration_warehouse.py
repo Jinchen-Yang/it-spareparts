@@ -98,9 +98,36 @@ class _WarehouseSession:
         *,
         open_ambiguities=(),
         bad_return_status="warehouse_confirmed",
+        active_candidate_projects=("project-1",),
     ):
         self.open_ambiguities = list(open_ambiguities)
+        self.ambiguity_rows = [
+            {
+                "ambiguity_id": f"ambiguity-{index}",
+                "import_id": "import-1",
+                "document_id": document_id,
+                "line_id": f"line-{document_id.rsplit('-', 1)[-1]}",
+                "ambiguity_type": "field_conflict",
+                "field_code": "maintenance_order",
+                "source_row": 3,
+                "value_hash": "c" * 64,
+                "candidates_json": [
+                    {
+                        "target_type": "maintenance_project",
+                        "target_id": "project-1",
+                        "label": "合成候选项目",
+                    }
+                ],
+                "fingerprint": f"{index:064x}",
+                "status": "open",
+                "version": 1,
+                "document_no": f"WH-{document_id.rsplit('-', 1)[-1]}",
+                "document_date": date(2026, 8, 2),
+            }
+            for index, document_id in enumerate(self.open_ambiguities, start=1)
+        ]
         self.bad_return_status = bad_return_status
+        self.active_candidate_projects = set(active_candidate_projects)
         self.documents = [
             {
                 "document_id": f"document-{index}",
@@ -188,14 +215,26 @@ class _WarehouseSession:
 
     def scalars(self, statement, params=None):
         sql = str(statement)
+        if "WHERE is_active IS TRUE AND project_id IN" in sql:
+            return _Result(
+                sorted(set(params["project_ids"]) & self.active_candidate_projects)
+            )
         if "SELECT DISTINCT document.document_id" in sql:
             return _Result([row["document_id"] for row in self.documents])
         if "maintenance_warehouse_ambiguity" in sql:
-            return _Result(self.open_ambiguities)
+            return _Result(
+                [
+                    row["document_id"]
+                    for row in self.ambiguity_rows
+                    if row["document_id"] is not None
+                ]
+            )
         raise AssertionError(f"unexpected scalars query: {sql}")
 
     def execute(self, statement, params=None):
         sql = str(statement)
+        if "FROM maintenance_warehouse_ambiguity AS ambiguity" in sql:
+            return _Result(self.ambiguity_rows)
         if "FROM maintenance_warehouse_document AS document" in sql:
             return _Result(self.documents)
         if "FROM maintenance_warehouse_document_line" in sql:
@@ -234,11 +273,12 @@ def test_formal_bridge_maps_201_and_209_evidence_without_inference(monkeypatch):
     monkeypatch.setattr(warehouse, "_contracts_available", lambda _db: True)
     monkeypatch.setattr(warehouse, "_lock_warehouse_snapshot", lambda _db: None)
 
-    movements, ready = warehouse.load_project_inventory_movements(
-        db, "project-1", date(2026, 8, 1)
+    movements, ready, ambiguities = warehouse.load_project_inventory_movements(
+        db, "project-1", date(2026, 8, 1), date(2026, 8, 10)
     )
 
     assert ready is True
+    assert ambiguities == ()
     assert [row["movement_type"] for row in movements] == [
         "delivery",
         "available_receipt",
@@ -258,12 +298,122 @@ def test_formal_bridge_fails_closed_on_open_warehouse_ambiguity(monkeypatch):
     monkeypatch.setattr(warehouse, "_contracts_available", lambda _db: True)
     monkeypatch.setattr(warehouse, "_lock_warehouse_snapshot", lambda _db: None)
 
-    movements, ready = warehouse.load_project_inventory_movements(
-        db, "project-1", date(2026, 8, 1)
+    movements, ready, ambiguities = warehouse.load_project_inventory_movements(
+        db, "project-1", date(2026, 8, 1), date(2026, 8, 10)
     )
 
     assert movements == ()
     assert ready is False
+    assert ambiguities[0]["ambiguity_id"] == "ambiguity-1"
+    assert ambiguities[0]["document_id"] == "document-1"
+    assert ambiguities[0]["ambiguity_type"] == "field_conflict"
+    assert ambiguities[0]["fingerprint"] == f"{1:064x}"
+
+
+def test_unassigned_open_ambiguity_is_a_global_explainable_blocker(monkeypatch):
+    db = _WarehouseSession()
+    db.ambiguity_rows = [
+        {
+            "ambiguity_id": "ambiguity-global",
+            "import_id": "import-1",
+            "document_id": None,
+            "line_id": None,
+            "ambiguity_type": "missing_stable_link",
+            "field_code": "maintenance_order",
+            "source_row": 3,
+            "value_hash": "d" * 64,
+            "candidates_json": [],
+            "fingerprint": "e" * 64,
+            "status": "open",
+            "version": 1,
+            "document_no": None,
+            "document_date": None,
+        }
+    ]
+    monkeypatch.setattr(warehouse, "_contracts_available", lambda _db: True)
+    monkeypatch.setattr(warehouse, "_lock_warehouse_snapshot", lambda _db: None)
+
+    movements, ready, ambiguities = warehouse.load_project_inventory_movements(
+        db, "project-1", date(2026, 8, 1), date(2026, 8, 10)
+    )
+
+    assert movements == ()
+    assert ready is False
+    assert ambiguities == [
+        {
+            "ambiguity_id": "ambiguity-global",
+            "import_id": "import-1",
+            "document_id": None,
+            "line_id": None,
+            "document_no": None,
+            "document_date": None,
+            "ambiguity_type": "missing_stable_link",
+            "field_code": "maintenance_order",
+            "source_row": 3,
+            "value_hash": "d" * 64,
+            "candidates": [],
+            "fingerprint": "e" * 64,
+            "status": "open",
+            "version": 1,
+            "scope": "global_unresolved",
+            "scope_project_ids": [],
+            "scope_reason": "candidate_does_not_prove_unique_active_project",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("candidate", "active_projects"),
+    [
+        ({"target_type": "dim_part", "target_id": "1"}, ("project-1",)),
+        (
+            {"target_type": "maintenance_bad_return", "target_id": "return-1"},
+            ("project-1",),
+        ),
+        ({"target_type": "future_target", "target_id": "future-1"}, ("project-1",)),
+        (
+            {"target_type": "maintenance_project", "target_id": "inactive-project"},
+            ("project-1",),
+        ),
+    ],
+)
+def test_non_project_or_inactive_candidate_remains_globally_blocking(
+    monkeypatch, candidate, active_projects
+):
+    db = _WarehouseSession(active_candidate_projects=active_projects)
+    db.ambiguity_rows = [
+        {
+            "ambiguity_id": "ambiguity-unscoped-candidate",
+            "import_id": "import-1",
+            "document_id": None,
+            "line_id": "line-unassigned",
+            "ambiguity_type": "missing_stable_link",
+            "field_code": "project",
+            "source_row": 3,
+            "value_hash": "d" * 64,
+            "candidates_json": [candidate],
+            "fingerprint": "f" * 64,
+            "status": "open",
+            "version": 1,
+            "document_no": "WH-UNASSIGNED",
+            "document_date": date(2026, 8, 2),
+        }
+    ]
+    monkeypatch.setattr(warehouse, "_contracts_available", lambda _db: True)
+    monkeypatch.setattr(warehouse, "_lock_warehouse_snapshot", lambda _db: None)
+
+    movements, ready, ambiguities = warehouse.load_project_inventory_movements(
+        db, "project-1", date(2026, 8, 1), date(2026, 8, 10)
+    )
+
+    assert movements == ()
+    assert ready is False
+    assert ambiguities[0]["ambiguity_id"] == "ambiguity-unscoped-candidate"
+    assert ambiguities[0]["candidates"][0]["target_type"] == candidate["target_type"]
+    assert ambiguities[0]["scope"] == "global_unresolved"
+    assert ambiguities[0]["scope_reason"] == (
+        "candidate_does_not_prove_unique_active_project"
+    )
 
 
 def test_receipt_is_not_available_before_bad_return_is_warehouse_confirmed(
@@ -273,9 +423,37 @@ def test_receipt_is_not_available_before_bad_return_is_warehouse_confirmed(
     monkeypatch.setattr(warehouse, "_contracts_available", lambda _db: True)
     monkeypatch.setattr(warehouse, "_lock_warehouse_snapshot", lambda _db: None)
 
-    movements, ready = warehouse.load_project_inventory_movements(
-        db, "project-1", date(2026, 8, 1)
+    movements, ready, ambiguities = warehouse.load_project_inventory_movements(
+        db, "project-1", date(2026, 8, 1), date(2026, 8, 10)
     )
 
     assert movements == ()
     assert ready is False
+    assert ambiguities == ()
+
+
+def test_empty_warehouse_relation_requires_explicit_completeness_watermark(
+    monkeypatch,
+):
+    db = _WarehouseSession()
+    db.documents = []
+    db.lines = []
+    db.links = []
+    monkeypatch.setattr(warehouse, "_contracts_available", lambda _db: True)
+    monkeypatch.setattr(warehouse, "_lock_warehouse_snapshot", lambda _db: None)
+
+    movements, ready, ambiguities = warehouse.load_project_inventory_movements(
+        db, "project-1", date(2026, 8, 1)
+    )
+    confirmed_movements, confirmed_ready, confirmed_ambiguities = (
+        warehouse.load_project_inventory_movements(
+            db, "project-1", date(2026, 8, 1), date(2026, 8, 10)
+        )
+    )
+
+    assert movements == ()
+    assert ready is False
+    assert ambiguities == ()
+    assert confirmed_movements == ()
+    assert confirmed_ready is True
+    assert confirmed_ambiguities == ()

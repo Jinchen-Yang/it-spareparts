@@ -7,12 +7,14 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 import hashlib
 import hmac
+import json
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from app.business_time import business_today
 from app.models.maintenance_migration import (
     MaintenanceHistoricalCostBaseline,
     MaintenanceInventoryOpeningBalance,
@@ -33,9 +35,16 @@ from app.services.maintenance_migration_warehouse import (
 )
 
 
-WarehouseLoader = Callable[
-    [Session, str, date], tuple[Sequence[Mapping[str, Any]], bool]
-]
+WarehouseLoaderResult = (
+    tuple[Sequence[Mapping[str, Any]], bool]
+    | tuple[
+        Sequence[Mapping[str, Any]],
+        bool,
+        Sequence[Mapping[str, Any]],
+    ]
+)
+WarehouseLoader = Callable[[Session, str, date, date | None], WarehouseLoaderResult]
+LegacyTruthLoader = Callable[[Session, str, date], Mapping[str, Any]]
 
 _EVIDENCE_SECTIONS = {
     "historical_site_issues",
@@ -43,10 +52,17 @@ _EVIDENCE_SECTIONS = {
     "expenses",
     "opening_balances",
     "inventory_movements",
+    "warehouse_ambiguities",
+    "legacy_cost_lines",
+    "legacy_expenses",
+    "truth_quantity_differences",
 }
 MAX_MIGRATION_PROJECTS = 50
 MAX_OPENINGS_PER_PROJECT = 500
 MAX_TOTAL_OPENINGS = 5000
+MAX_MIGRATION_FACT_ROWS = 300_000
+MAX_MIGRATION_REFERENCE_SAMPLES = 500_000
+MAX_MIGRATION_SNAPSHOT_BYTES = 64 * 1024 * 1024
 
 
 class MaintenanceMigrationRunError(ValueError):
@@ -62,9 +78,36 @@ class MaintenanceMigrationRunNotFound(MaintenanceMigrationRunError):
 
 
 def unavailable_warehouse_loader(
-    _db: Session, _project_id: str, _cutover_date: date
+    _db: Session,
+    _project_id: str,
+    _cutover_date: date,
+    _warehouse_ready_through: date | None,
 ) -> tuple[Sequence[Mapping[str, Any]], bool]:
     return (), False
+
+
+def unavailable_legacy_truth_loader(
+    _db: Session, _project_id: str, as_of: date
+) -> Mapping[str, Any]:
+    evidence = {
+        "cost_lines": [],
+        "expenses": [],
+        "source_coverage": {
+            "business_as_of": as_of.isoformat(),
+            "legacy_truth_version": "unavailable",
+        },
+    }
+    return {
+        **evidence,
+        "source_hash": controls.canonical_hash(evidence),
+        "source_ready": False,
+        "blockers": [
+            {
+                "code": "legacy_truth_source_not_ready",
+                "detail": "旧 WBDD/BXD 双真值读取器未接入",
+            }
+        ],
+    }
 
 
 def _clean_text(value: Any, label: str, *, max_length: int) -> str:
@@ -107,19 +150,48 @@ def _operation_key(action: str, value: Any) -> str:
 def _advisory_lock(db: Session, key: str) -> None:
     raw = hashlib.sha256(key.encode("utf-8")).digest()[:8]
     lock_id = int.from_bytes(raw, byteorder="big", signed=True)
-    db.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": lock_id})
+    acquired = db.scalar(
+        text("SELECT pg_try_advisory_xact_lock(:lock_id)"),
+        {"lock_id": lock_id},
+    )
+    if acquired is not True:
+        raise MaintenanceMigrationRunConflict("同一迁移操作正在处理中，请稍后重试")
 
 
-def _normalize_candidate_baseline(value: Any) -> dict[str, Any] | None:
+def _normalize_candidate_baseline(
+    value: Any, *, cutover_date: date
+) -> dict[str, Any] | None:
     if value is None:
         return None
     if not isinstance(value, Mapping):
         raise MaintenanceMigrationRunError("历史成本基线无效")
-    return {
+    normalized = {
         "amount_ex_tax": str(value.get("amount_ex_tax", "")).strip(),
         "amount_inc_tax": str(value.get("amount_inc_tax", "")).strip(),
         "evidence_hash": str(value.get("evidence_hash", "")).strip().lower(),
+        "coverage_from": _parse_date(
+            value.get("coverage_from"), "历史基线覆盖起点"
+        ).isoformat(),
+        "coverage_through": _parse_date(
+            value.get("coverage_through"), "历史基线覆盖截止日"
+        ).isoformat(),
+        "scope": str(value.get("scope") or "").strip(),
+        "excludes_expenses": value.get("excludes_expenses") is True,
+        "source_artifact_locator": str(
+            value.get("source_artifact_locator") or ""
+        ).strip(),
+        "source_row_count": value.get("source_row_count"),
+        "aggregation_fingerprint": str(value.get("aggregation_fingerprint") or "")
+        .strip()
+        .lower(),
     }
+    try:
+        validated = controls.validate_historical_baseline_contract(
+            normalized, cutover_date=cutover_date
+        )
+    except controls.MigrationControlError as exc:
+        raise MaintenanceMigrationRunError(str(exc)) from exc
+    return validated
 
 
 def _normalize_specs(projects: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -138,7 +210,10 @@ def _normalize_specs(projects: Sequence[Mapping[str, Any]]) -> list[dict[str, An
         mode = str(item.get("historical_mode") or "")
         if mode not in {"approved_cost_baseline", "stable_site_issues"}:
             raise MaintenanceMigrationRunError("历史成本模式无效")
-        baseline = _normalize_candidate_baseline(item.get("historical_baseline"))
+        cutover_date = _parse_date(item.get("cutover_date"), "切换日期")
+        baseline = _normalize_candidate_baseline(
+            item.get("historical_baseline"), cutover_date=cutover_date
+        )
         if mode == "approved_cost_baseline" and baseline is None:
             # The pure calculator records the missing baseline as a blocker.  Keeping
             # it absent here is intentional: dry-run remains inspectable but unsafe.
@@ -194,10 +269,15 @@ def _normalize_specs(projects: Sequence[Mapping[str, Any]]) -> list[dict[str, An
         output.append(
             {
                 "project_id": project_id,
-                "cutover_date": _parse_date(
-                    item.get("cutover_date"), "切换日期"
-                ).isoformat(),
+                "cutover_date": cutover_date.isoformat(),
                 "historical_mode": mode,
+                "warehouse_ready_through": (
+                    _parse_date(
+                        item.get("warehouse_ready_through"), "仓库完整水位"
+                    ).isoformat()
+                    if item.get("warehouse_ready_through") is not None
+                    else None
+                ),
                 "historical_baseline": baseline,
                 "opening_balances": sorted(
                     openings, key=lambda row: row["balance_key"]
@@ -213,8 +293,14 @@ def _load_warehouse(
     *,
     project_id: str,
     cutover_date: date,
-) -> tuple[Sequence[Mapping[str, Any]], bool]:
-    movements, ready = loader(db, project_id, cutover_date)
+    warehouse_ready_through: date | None,
+) -> tuple[Sequence[Mapping[str, Any]], bool, Sequence[Mapping[str, Any]]]:
+    result = loader(db, project_id, cutover_date, warehouse_ready_through)
+    if len(result) == 2:
+        movements, ready = result
+        ambiguities: Sequence[Mapping[str, Any]] = ()
+    else:
+        movements, ready, ambiguities = result
     try:
         validated = validate_cutover_inventory_movements(
             tuple(movements),
@@ -223,7 +309,7 @@ def _load_warehouse(
         )
     except MaintenanceMigrationWarehouseError as exc:
         raise MaintenanceMigrationRunError(str(exc)) from exc
-    return validated, bool(ready)
+    return validated, bool(ready) and not ambiguities, tuple(ambiguities)
 
 
 def _source_payloads_from_specs(
@@ -231,9 +317,14 @@ def _source_payloads_from_specs(
     *,
     specs: Sequence[Mapping[str, Any]],
     loader: WarehouseLoader,
+    legacy_loader: LegacyTruthLoader,
+    as_of: date,
     approvals: Mapping[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
+    total_fact_rows = 0
+    total_reference_samples = 0
+    total_snapshot_bytes = 0
     # Lock every project in stable order before the first global linkage or
     # warehouse table lock.  Per-project locking after a global SHARE lock can
     # deadlock with a concurrent #201 reassignment on a later project.
@@ -244,6 +335,14 @@ def _source_payloads_from_specs(
     for spec in specs:
         project_id = str(spec["project_id"])
         cutover_date = _parse_date(spec["cutover_date"], "切换日期")
+        spec_as_of = _parse_date(spec.get("as_of"), "迁移业务截止日")
+        if spec_as_of != as_of:
+            raise MaintenanceMigrationRunError("同一迁移运行的业务截止日不一致")
+        warehouse_ready_through = (
+            _parse_date(spec["warehouse_ready_through"], "仓库完整水位")
+            if spec.get("warehouse_ready_through") is not None
+            else None
+        )
         candidate_state = (approvals or {}).get(project_id, {})
         baseline = candidate_state.get("historical_baseline")
         if baseline is None and spec.get("historical_baseline") is not None:
@@ -254,24 +353,64 @@ def _source_payloads_from_specs(
                 {**dict(row), "approved": False}
                 for row in spec.get("opening_balances") or []
             ]
-        movements, ready = _load_warehouse(
+        movements, ready, warehouse_ambiguities = _load_warehouse(
             loader,
             db,
             project_id=project_id,
             cutover_date=cutover_date,
+            warehouse_ready_through=warehouse_ready_through,
         )
-        payloads.append(
-            build_project_source_payload(
-                db,
-                project_id=project_id,
-                cutover_date=cutover_date,
-                historical_mode=str(spec["historical_mode"]),
-                historical_baseline=baseline,
-                opening_balances=openings,
-                inventory_movements=movements,
-                warehouse_source_ready=ready,
+        legacy_truth = legacy_loader(db, project_id, as_of)
+        if not isinstance(legacy_truth, Mapping):
+            raise MaintenanceMigrationRunError("旧口径双真值读取结果无效")
+        payload = build_project_source_payload(
+            db,
+            project_id=project_id,
+            cutover_date=cutover_date,
+            historical_mode=str(spec["historical_mode"]),
+            historical_baseline=baseline,
+            opening_balances=openings,
+            inventory_movements=movements,
+            warehouse_ambiguities=warehouse_ambiguities,
+            warehouse_source_ready=ready,
+            warehouse_ready_through=warehouse_ready_through,
+            as_of=as_of,
+            legacy_truth=legacy_truth,
+        )
+        total_fact_rows += sum(
+            len(payload.get(section) or [])
+            for section in (
+                "historical_site_issues",
+                "post_cutover_site_issues",
+                "approved_expenses",
+                "opening_balances",
+                "inventory_movements",
+                "warehouse_ambiguities",
+                "legacy_cost_lines",
+                "legacy_expenses",
             )
         )
+        total_reference_samples += sum(
+            int(row.get("reference_sample_count") or 0)
+            for section in ("historical_site_issues", "post_cutover_site_issues")
+            for row in (payload.get(section) or [])
+        )
+        total_snapshot_bytes += len(
+            json.dumps(
+                _jsonable(payload),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        )
+        if total_fact_rows > MAX_MIGRATION_FACT_ROWS:
+            raise MaintenanceMigrationRunError("迁移来源事实总行数超过安全上限")
+        if total_reference_samples > MAX_MIGRATION_REFERENCE_SAMPLES:
+            raise MaintenanceMigrationRunError("迁移成本参考样本总数超过安全上限")
+        if total_snapshot_bytes > MAX_MIGRATION_SNAPSHOT_BYTES:
+            raise MaintenanceMigrationRunError("迁移来源快照序列化体积超过安全上限")
+        payloads.append(payload)
     return payloads
 
 
@@ -343,15 +482,26 @@ def _persist_initial_rows(
             run_id=run.run_id,
             project_id=project_id,
             cutover_date=_parse_date(spec["cutover_date"], "切换日期"),
+            business_as_of=_parse_date(spec["as_of"], "迁移业务截止日"),
             historical_mode=str(spec["historical_mode"]),
             source_snapshot_hash=str(preview["source_snapshot_hash"]),
             input_fingerprint=str(preview["project_input_fingerprint"]),
+            truth_comparison_hash=str(
+                preview["truth_comparison"]["truth_comparison_hash"]
+            ),
             historical_cost_ex_tax=Decimal(cost["historical_baseline_ex_tax"]),
             historical_cost_inc_tax=Decimal(cost["historical_baseline_inc_tax"]),
             post_cutover_cost_ex_tax=Decimal(cost["post_cutover_consumption_ex_tax"]),
             post_cutover_cost_inc_tax=Decimal(cost["post_cutover_consumption_inc_tax"]),
             approved_expense_ex_tax=Decimal(cost["approved_expense_ex_tax"]),
             approved_expense_inc_tax=Decimal(cost["approved_expense_inc_tax"]),
+            sales_estimate_cost_ex_tax=Decimal(cost["sales_estimate_cost_ex_tax"]),
+            sales_estimate_cost_inc_tax=Decimal(cost["sales_estimate_cost_inc_tax"]),
+            sales_estimate_lines=int(cost["sales_estimate_lines"]),
+            cost_progress_includes_sales_estimate=bool(
+                cost["cost_progress_includes_sales_estimate"]
+            ),
+            cost_progress_label=str(cost["cost_progress_label"]),
             total_cost_ex_tax=Decimal(cost["total_ex_tax"]),
             total_cost_inc_tax=Decimal(cost["total_inc_tax"]),
             blocker_count=len(preview["approval_blockers"]),
@@ -369,6 +519,17 @@ def _persist_initial_rows(
                     amount_ex_tax=Decimal(str(baseline["amount_ex_tax"])),
                     amount_inc_tax=Decimal(str(baseline["amount_inc_tax"])),
                     evidence_hash=str(baseline["evidence_hash"]),
+                    coverage_from=_parse_date(
+                        baseline["coverage_from"], "历史基线覆盖起点"
+                    ),
+                    coverage_through=_parse_date(
+                        baseline["coverage_through"], "历史基线覆盖截止日"
+                    ),
+                    scope=str(baseline["scope"]),
+                    excludes_expenses=bool(baseline["excludes_expenses"]),
+                    source_artifact_locator=str(baseline["source_artifact_locator"]),
+                    source_row_count=int(baseline["source_row_count"]),
+                    aggregation_fingerprint=str(baseline["aggregation_fingerprint"]),
                     approval_state="pending",
                 )
             )
@@ -444,6 +605,7 @@ def create_preview_run(
     reason: str,
     operated_by: str,
     warehouse_loader: WarehouseLoader = unavailable_warehouse_loader,
+    legacy_loader: LegacyTruthLoader = unavailable_legacy_truth_loader,
 ) -> dict[str, Any]:
     clean_key = _clean_text(idempotency_key, "请求幂等键", max_length=96)
     clean_reason = _clean_text(reason, "生成 dry-run 理由", max_length=1000)
@@ -469,11 +631,19 @@ def create_preview_run(
             raise MaintenanceMigrationRunConflict("请求幂等键已用于不同迁移清单")
         return get_run_detail(db, run_id=existing.run_id)
 
+    run_as_of = business_today()
+    frozen_specs = [{**spec, "as_of": run_as_of.isoformat()} for spec in specs]
     try:
-        payloads = _source_payloads_from_specs(db, specs=specs, loader=warehouse_loader)
+        payloads = _source_payloads_from_specs(
+            db,
+            specs=frozen_specs,
+            loader=warehouse_loader,
+            legacy_loader=legacy_loader,
+            as_of=run_as_of,
+        )
         wrapper = _wrapper(
             rule_version=controls.RULE_VERSION,
-            specs=specs,
+            specs=frozen_specs,
             payloads=payloads,
         )
     except (controls.MigrationControlError, MaintenanceMigrationSourceError) as exc:
@@ -486,6 +656,7 @@ def create_preview_run(
         request_fingerprint=request_fingerprint,
         rule_version=controls.RULE_VERSION,
         source_snapshot_hash=str(preview["source_snapshot_hash"]),
+        business_as_of=run_as_of,
         status="previewed",
         preview_json=wrapper,
         created_by=operator,
@@ -570,6 +741,13 @@ def _candidate_approvals(db: Session, *, run_id: str) -> dict[str, dict[str, Any
                 "amount_ex_tax": format(baseline.amount_ex_tax, "f"),
                 "amount_inc_tax": format(baseline.amount_inc_tax, "f"),
                 "evidence_hash": baseline.evidence_hash,
+                "coverage_from": baseline.coverage_from.isoformat(),
+                "coverage_through": baseline.coverage_through.isoformat(),
+                "scope": baseline.scope,
+                "excludes_expenses": baseline.excludes_expenses,
+                "source_artifact_locator": baseline.source_artifact_locator,
+                "source_row_count": baseline.source_row_count,
+                "aggregation_fingerprint": baseline.aggregation_fingerprint,
                 "approved": baseline.approval_state == "approved",
             },
             "opening_balances": [
@@ -609,6 +787,15 @@ def _normalize_project_signoffs(
             raise MaintenanceMigrationRunError("签字项目版本无效") from exc
         if expected_plan_version < 1:
             raise MaintenanceMigrationRunError("签字项目版本无效")
+        expected_truth_comparison_hash = _clean_text(
+            signoff.get("expected_truth_comparison_hash"),
+            "新旧口径对比哈希",
+            max_length=64,
+        ).lower()
+        if len(expected_truth_comparison_hash) != 64 or any(
+            char not in "0123456789abcdef" for char in expected_truth_comparison_hash
+        ):
+            raise MaintenanceMigrationRunError("新旧口径对比哈希无效")
         baseline = signoff.get("historical_baseline")
         normalized_baseline = None
         if baseline is not None:
@@ -661,6 +848,7 @@ def _normalize_project_signoffs(
             {
                 "project_id": project_id,
                 "expected_plan_version": expected_plan_version,
+                "expected_truth_comparison_hash": expected_truth_comparison_hash,
                 "reason": _clean_text(
                     signoff.get("reason"), "逐项目签字理由", max_length=1000
                 ),
@@ -695,6 +883,10 @@ def _validate_project_signoffs(
         if plan.version != signoff["expected_plan_version"]:
             raise MaintenanceMigrationRunConflict(
                 f"项目 {project_id} 版本已变化，请刷新后重新签字"
+            )
+        if plan.truth_comparison_hash != signoff["expected_truth_comparison_hash"]:
+            raise MaintenanceMigrationRunConflict(
+                f"项目 {project_id} 的新旧口径差异已变化，请重新核对签字"
             )
         baseline = baselines_by_plan.get(plan.plan_id)
         baseline_signoff = signoff.get("historical_baseline")
@@ -742,6 +934,7 @@ def _rebuild(
     *,
     run: MaintenanceMigrationRun,
     loader: WarehouseLoader,
+    legacy_loader: LegacyTruthLoader,
     selected_candidate_ids: set[str] | None,
 ) -> dict[str, Any]:
     if run.rule_version != controls.RULE_VERSION:
@@ -772,6 +965,8 @@ def _rebuild(
             db,
             specs=specs,
             loader=loader,
+            legacy_loader=legacy_loader,
+            as_of=run.business_as_of,
             approvals=approvals,
         )
         wrapper = _wrapper(
@@ -806,6 +1001,9 @@ def _update_plans(
         preview = previews[plan.project_id]
         cost = preview["cost"]
         plan.input_fingerprint = str(preview["project_input_fingerprint"])
+        plan.truth_comparison_hash = str(
+            preview["truth_comparison"]["truth_comparison_hash"]
+        )
         plan.historical_cost_ex_tax = Decimal(cost["historical_baseline_ex_tax"])
         plan.historical_cost_inc_tax = Decimal(cost["historical_baseline_inc_tax"])
         plan.post_cutover_cost_ex_tax = Decimal(cost["post_cutover_consumption_ex_tax"])
@@ -814,6 +1012,13 @@ def _update_plans(
         )
         plan.approved_expense_ex_tax = Decimal(cost["approved_expense_ex_tax"])
         plan.approved_expense_inc_tax = Decimal(cost["approved_expense_inc_tax"])
+        plan.sales_estimate_cost_ex_tax = Decimal(cost["sales_estimate_cost_ex_tax"])
+        plan.sales_estimate_cost_inc_tax = Decimal(cost["sales_estimate_cost_inc_tax"])
+        plan.sales_estimate_lines = int(cost["sales_estimate_lines"])
+        plan.cost_progress_includes_sales_estimate = bool(
+            cost["cost_progress_includes_sales_estimate"]
+        )
+        plan.cost_progress_label = str(cost["cost_progress_label"])
         plan.total_cost_ex_tax = Decimal(cost["total_ex_tax"])
         plan.total_cost_inc_tax = Decimal(cost["total_inc_tax"])
         plan.blocker_count = len(preview["approval_blockers"])
@@ -875,6 +1080,7 @@ def reconcile_run(
     operated_by: str,
     project_signoffs: Sequence[Mapping[str, Any]],
     warehouse_loader: WarehouseLoader = unavailable_warehouse_loader,
+    legacy_loader: LegacyTruthLoader = unavailable_legacy_truth_loader,
 ) -> dict[str, Any]:
     clean_run_id = _clean_text(run_id, "迁移运行编号", max_length=36)
     clean_reason = _clean_text(reason, "对账理由", max_length=1000)
@@ -891,6 +1097,15 @@ def reconcile_run(
         }
     )
     _advisory_lock(db, event_key)
+    run = db.scalar(
+        select(MaintenanceMigrationRun)
+        .where(MaintenanceMigrationRun.run_id == clean_run_id)
+        .with_for_update()
+    )
+    if run is None:
+        raise MaintenanceMigrationRunNotFound("迁移 dry-run 不存在")
+    if operator == run.created_by:
+        raise MaintenanceMigrationRunConflict("对账人必须独立于 dry-run 创建人")
     replay = _event_replay(
         db,
         run_id=clean_run_id,
@@ -901,13 +1116,6 @@ def reconcile_run(
     )
     if replay is not None:
         return replay
-    run = db.scalar(
-        select(MaintenanceMigrationRun)
-        .where(MaintenanceMigrationRun.run_id == clean_run_id)
-        .with_for_update()
-    )
-    if run is None:
-        raise MaintenanceMigrationRunNotFound("迁移 dry-run 不存在")
     if run.version != expected_version:
         raise MaintenanceMigrationRunConflict("迁移运行版本已变化，请刷新后重试")
     if run.status != "previewed":
@@ -925,8 +1133,18 @@ def reconcile_run(
         db,
         run=run,
         loader=warehouse_loader,
+        legacy_loader=legacy_loader,
         selected_candidate_ids=selected_candidate_ids,
     )
+    rebuilt_previews = _project_preview_map(wrapper)
+    for project_id, signoff in signoffs_by_project.items():
+        rebuilt_truth_hash = str(
+            rebuilt_previews[project_id]["truth_comparison"]["truth_comparison_hash"]
+        )
+        if rebuilt_truth_hash != signoff["expected_truth_comparison_hash"]:
+            raise MaintenanceMigrationRunConflict(
+                f"项目 {project_id} 的候选应用后新旧口径差异已变化，请重新核对签字"
+            )
     now = datetime.now(timezone.utc)
     for row in [*baselines, *openings]:
         if (
@@ -980,6 +1198,12 @@ def reconcile_run(
                 "command_fingerprint": command_fingerprint,
                 "input_fingerprint": wrapper["preview"]["input_fingerprint"],
                 "remaining_blocker_count": wrapper["preview"]["approval_blocker_count"],
+                "truth_comparison_hashes": {
+                    project_id: rebuilt_previews[project_id]["truth_comparison"][
+                        "truth_comparison_hash"
+                    ]
+                    for project_id in sorted(rebuilt_previews)
+                },
             },
             reason=clean_reason,
             operated_by=operator,
@@ -1042,12 +1266,14 @@ def verify_signed_manifest(
     manifest: Mapping[str, Any],
     *,
     verification_keys: Mapping[str, bytes],
+    expected_run_id: str,
     expected_rule_version: str,
     expected_source_snapshot_hash: str,
     expected_input_fingerprint: str,
 ) -> bool:
     if (
         manifest.get("manifest_version") != "maintenance-cutover-manifest-v1"
+        or manifest.get("run_id") != expected_run_id
         or manifest.get("rule_version") != expected_rule_version
         or manifest.get("source_snapshot_hash") != expected_source_snapshot_hash
         or manifest.get("input_fingerprint") != expected_input_fingerprint
@@ -1089,6 +1315,7 @@ def approve_run(
     signing_key: bytes,
     signing_key_id: str,
     warehouse_loader: WarehouseLoader = unavailable_warehouse_loader,
+    legacy_loader: LegacyTruthLoader = unavailable_legacy_truth_loader,
 ) -> dict[str, Any]:
     clean_run_id = _clean_text(run_id, "迁移运行编号", max_length=36)
     clean_reason = _clean_text(reason, "审批理由", max_length=1000)
@@ -1133,6 +1360,7 @@ def approve_run(
         db,
         run=run,
         loader=warehouse_loader,
+        legacy_loader=legacy_loader,
         selected_candidate_ids=None,
     )
     current_fingerprint = str(wrapper["preview"]["input_fingerprint"])
@@ -1203,6 +1431,7 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
     if run is None:
         raise MaintenanceMigrationRunNotFound("迁移 dry-run 不存在")
     plans, baselines, openings = _candidate_rows(db, run_id=run.run_id)
+    preview_by_project = _project_preview_map(run.preview_json)
     baseline_by_plan = {row.plan_id: row for row in baselines}
     openings_by_plan: dict[str, list[MaintenanceInventoryOpeningBalance]] = {}
     for row in openings:
@@ -1228,9 +1457,13 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
                 "plan_id": plan.plan_id,
                 "project_id": plan.project_id,
                 "cutover_date": plan.cutover_date.isoformat(),
+                "as_of": plan.business_as_of.isoformat(),
                 "historical_mode": plan.historical_mode,
                 "source_snapshot_hash": plan.source_snapshot_hash,
                 "input_fingerprint": plan.input_fingerprint,
+                "truth_comparison": _jsonable(
+                    preview_by_project[plan.project_id]["truth_comparison"]
+                ),
                 "cost": {
                     "historical_ex_tax": format(plan.historical_cost_ex_tax, "f"),
                     "historical_inc_tax": format(plan.historical_cost_inc_tax, "f"),
@@ -1242,6 +1475,17 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
                     "approved_expense_inc_tax": format(
                         plan.approved_expense_inc_tax, "f"
                     ),
+                    "sales_estimate_cost_ex_tax": format(
+                        plan.sales_estimate_cost_ex_tax, "f"
+                    ),
+                    "sales_estimate_cost_inc_tax": format(
+                        plan.sales_estimate_cost_inc_tax, "f"
+                    ),
+                    "sales_estimate_lines": plan.sales_estimate_lines,
+                    "cost_progress_includes_sales_estimate": (
+                        plan.cost_progress_includes_sales_estimate
+                    ),
+                    "cost_progress_label": plan.cost_progress_label,
                     "total_ex_tax": format(plan.total_cost_ex_tax, "f"),
                     "total_inc_tax": format(plan.total_cost_inc_tax, "f"),
                 },
@@ -1258,6 +1502,13 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
                     "amount_ex_tax": format(baseline.amount_ex_tax, "f"),
                     "amount_inc_tax": format(baseline.amount_inc_tax, "f"),
                     "evidence_hash": baseline.evidence_hash,
+                    "coverage_from": baseline.coverage_from.isoformat(),
+                    "coverage_through": baseline.coverage_through.isoformat(),
+                    "scope": baseline.scope,
+                    "excludes_expenses": baseline.excludes_expenses,
+                    "source_artifact_locator": baseline.source_artifact_locator,
+                    "source_row_count": baseline.source_row_count,
+                    "aggregation_fingerprint": baseline.aggregation_fingerprint,
                     "approval_state": baseline.approval_state,
                     "approved_by": baseline.approved_by,
                     "approved_at": _jsonable(baseline.approved_at),
@@ -1309,6 +1560,7 @@ def get_run_detail(db: Session, *, run_id: str) -> dict[str, Any]:
         "rule_version": run.rule_version,
         "request_fingerprint": run.request_fingerprint,
         "source_snapshot_hash": run.source_snapshot_hash,
+        "as_of": run.business_as_of.isoformat(),
         "preview": _public_preview(run.preview_json["preview"]),
         "manifest": _public_manifest(run.manifest_json),
         "manifest_hash": run.manifest_hash,
@@ -1384,6 +1636,7 @@ def get_signed_manifest(
     run_id: str,
     verification_keys: Mapping[str, bytes],
     warehouse_loader: WarehouseLoader = unavailable_warehouse_loader,
+    legacy_loader: LegacyTruthLoader = unavailable_legacy_truth_loader,
 ) -> dict[str, Any]:
     run = db.get(MaintenanceMigrationRun, run_id)
     if run is None:
@@ -1394,6 +1647,7 @@ def get_signed_manifest(
         db,
         run=run,
         loader=warehouse_loader,
+        legacy_loader=legacy_loader,
         selected_candidate_ids=None,
     )
     current_preview = wrapper["preview"]
@@ -1408,9 +1662,23 @@ def get_signed_manifest(
             "迁移来源或规则已变化，旧 manifest 已失效"
         )
     manifest = _jsonable(run.manifest_json)
+    expected_approval_chain = {
+        "created_by": run.created_by,
+        "reconciled_by": run.reconciled_by,
+        "approved_by": run.approved_by,
+        "approved_at": run.approved_at.isoformat() if run.approved_at else None,
+    }
+    if (
+        manifest.get("run_id") != run.run_id
+        or manifest.get("manifest_hash") != run.manifest_hash
+        or manifest.get("signing_key_id") != run.manifest_key_id
+        or manifest.get("approval_chain") != expected_approval_chain
+    ):
+        raise MaintenanceMigrationRunConflict("迁移 manifest 与持久化审批事实不一致")
     if not verify_signed_manifest(
         manifest,
         verification_keys=verification_keys,
+        expected_run_id=run.run_id,
         expected_rule_version=controls.RULE_VERSION,
         expected_source_snapshot_hash=str(current_preview["source_snapshot_hash"]),
         expected_input_fingerprint=str(current_preview["input_fingerprint"]),
@@ -1453,6 +1721,7 @@ def search_runs(
                 "status": row.status,
                 "rule_version": row.rule_version,
                 "source_snapshot_hash": row.source_snapshot_hash,
+                "as_of": row.business_as_of.isoformat(),
                 "manifest_key_id": row.manifest_key_id,
                 "blocker_count": row.preview_json["preview"]["approval_blocker_count"],
                 "created_by": row.created_by,

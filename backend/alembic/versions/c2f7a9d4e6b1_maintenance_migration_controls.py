@@ -67,6 +67,7 @@ def upgrade() -> None:
         sa.Column("request_fingerprint", sa.String(length=64), nullable=False),
         sa.Column("rule_version", sa.String(length=64), nullable=False),
         sa.Column("source_snapshot_hash", sa.String(length=64), nullable=False),
+        sa.Column("business_as_of", sa.Date(), nullable=False),
         sa.Column("status", sa.String(length=16), nullable=False),
         sa.Column(
             "preview_json", postgresql.JSONB(astext_type=sa.Text()), nullable=False
@@ -101,6 +102,10 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "status IN ('previewed', 'reconciled', 'approved')",
             name="ck_maintenance_migration_run_status",
+        ),
+        sa.CheckConstraint(
+            "reconciled_by IS NULL OR reconciled_by <> created_by",
+            name="ck_maintenance_migration_run_independent_reconciliation",
         ),
         sa.CheckConstraint(
             "approved_by IS NULL OR (approved_by <> created_by AND approved_by <> reconciled_by)",
@@ -198,9 +203,11 @@ def upgrade() -> None:
         sa.Column("run_id", sa.String(length=36), nullable=False),
         sa.Column("project_id", sa.String(length=36), nullable=False),
         sa.Column("cutover_date", sa.Date(), nullable=False),
+        sa.Column("business_as_of", sa.Date(), nullable=False),
         sa.Column("historical_mode", sa.String(length=32), nullable=False),
         sa.Column("source_snapshot_hash", sa.String(length=64), nullable=False),
         sa.Column("input_fingerprint", sa.String(length=64), nullable=False),
+        sa.Column("truth_comparison_hash", sa.String(length=64), nullable=False),
         sa.Column(
             "historical_cost_ex_tax", sa.Numeric(precision=14, scale=2), nullable=False
         ),
@@ -266,7 +273,7 @@ def upgrade() -> None:
             name="ck_maintenance_project_cutover_reconciliation",
         ),
         sa.CheckConstraint(
-            "char_length(source_snapshot_hash) = 64 AND char_length(input_fingerprint) = 64",
+            "char_length(source_snapshot_hash) = 64 AND char_length(input_fingerprint) = 64 AND char_length(truth_comparison_hash) = 64",
             name="ck_maintenance_project_cutover_hashes",
         ),
         sa.CheckConstraint(
@@ -300,6 +307,13 @@ def upgrade() -> None:
         sa.Column("amount_ex_tax", sa.Numeric(precision=14, scale=2), nullable=False),
         sa.Column("amount_inc_tax", sa.Numeric(precision=14, scale=2), nullable=False),
         sa.Column("evidence_hash", sa.String(length=64), nullable=False),
+        sa.Column("coverage_from", sa.Date(), nullable=False),
+        sa.Column("coverage_through", sa.Date(), nullable=False),
+        sa.Column("scope", sa.String(length=32), nullable=False),
+        sa.Column("excludes_expenses", sa.Boolean(), nullable=False),
+        sa.Column("source_artifact_locator", sa.String(length=512), nullable=False),
+        sa.Column("source_row_count", sa.Integer(), nullable=False),
+        sa.Column("aggregation_fingerprint", sa.String(length=64), nullable=False),
         sa.Column("approval_state", sa.String(length=16), nullable=False),
         sa.Column("approved_by", sa.String(length=64), nullable=True),
         sa.Column("approved_at", sa.DateTime(timezone=True), nullable=True),
@@ -316,11 +330,15 @@ def upgrade() -> None:
             name="ck_maintenance_historical_baseline_approval",
         ),
         sa.CheckConstraint(
-            "amount_ex_tax >= 0 AND amount_inc_tax >= 0",
+            "amount_ex_tax >= 0 AND amount_inc_tax >= 0 AND amount_inc_tax = round(amount_ex_tax * NUMERIC '1.13', 2)",
             name="ck_maintenance_historical_baseline_amounts",
         ),
         sa.CheckConstraint(
-            "char_length(evidence_hash) = 64 AND version >= 1",
+            "coverage_from <= coverage_through AND scope = 'site_issue_parts_only' AND excludes_expenses IS TRUE AND char_length(btrim(source_artifact_locator)) > 0 AND source_row_count >= 0 AND source_row_count <= 10000000",
+            name="ck_maintenance_historical_baseline_coverage",
+        ),
+        sa.CheckConstraint(
+            "char_length(evidence_hash) = 64 AND char_length(aggregation_fingerprint) = 64 AND version >= 1",
             name="ck_maintenance_historical_baseline_identity",
         ),
         sa.ForeignKeyConstraint(
