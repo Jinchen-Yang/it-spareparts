@@ -863,6 +863,11 @@ def test_dev15_downgrade_rejects_non_object_permission_payloads(db):
     db.commit()
     db.close()
     cfg = _cfg()
+    with engine.connect() as connection:
+        starting_version = connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+    assert starting_version == _current_head()
 
     try:
         with pytest.raises(DBAPIError, match="downgrade blocked"):
@@ -871,7 +876,7 @@ def test_dev15_downgrade_rejects_non_object_permission_payloads(db):
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == _DEV15_HEAD
+            ).scalar_one() == starting_version
             assert connection.execute(
                 text(
                     """
@@ -1040,6 +1045,11 @@ def test_dev15_downgrade_guard_preserves_each_new_business_fact(
     engine = db.get_bind()
     db.close()
     cfg = _cfg()
+    with engine.connect() as connection:
+        starting_version = connection.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one()
+    assert starting_version == _current_head()
     try:
         with pytest.raises(DBAPIError, match="downgrade blocked"):
             alembic_command.downgrade(cfg, _PREV)
@@ -1047,7 +1057,7 @@ def test_dev15_downgrade_guard_preserves_each_new_business_fact(
         with engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == _DEV15_HEAD
+            ).scalar_one() == starting_version
             assert connection.execute(text(preservation_sql)).scalar_one() == 1
     finally:
         # A rejected PostgreSQL transactional migration stays at head. Keep the
