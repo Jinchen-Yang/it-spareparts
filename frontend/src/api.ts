@@ -56,7 +56,6 @@ export interface AgentToolCall {
 /** SSE 事件（/agent/chat/stream） */
 export type AgentStreamEvent =
   | { type: "delta"; text: string }
-  | { type: "thinking"; text: string }
   | { type: "tool"; name: string; args: Record<string, unknown> }
   | { type: "tool_done"; name: string; ok: boolean }
   | { type: "done"; tool_calls: AgentToolCall[]; answer?: string; configured?: boolean; stopped?: boolean }
@@ -101,7 +100,8 @@ export const cancelChatStream = (id: number) =>
 export type SessionStreamEvent =
   | AgentStreamEvent
   | { type: "title"; title: string }
-  | { type: "no_active" };   // attach：该会话当前没有进行中的生成
+  | { type: "no_active" }   // attach：该会话当前没有进行中的生成
+  | { type: "subscriber_evicted"; retry_attach: true }; // 慢连接/订阅过多：后台仍继续生成
 
 async function _consumeSSE(
   resp: Response,
@@ -309,7 +309,7 @@ export const agentUpload = (file: File) => {
  * 用 fetch 而非 axios：全局 401 拦截器会 location.reload()，
  * 点下载触发整页刷新会打断对话——下载失败必须就地提示，绝不能刷页面。 */
 export const agentDownload = async (url: string, fallbackName = "下载.xlsx") => {
-  const m = /\/api\/agent\/files\/([a-f0-9]{6,})/.exec(url);
+  const m = /^\/api\/agent\/files\/([a-f0-9]{12})$/.exec(url);
   if (!m) throw new Error("bad-url");
   const resp = await fetch(`/api/agent/files/${m[1]}`, {
     headers: { Authorization: `Bearer ${localStorage.getItem("token") || ""}` },

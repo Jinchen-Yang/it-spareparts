@@ -48,8 +48,8 @@ def test_preview_corrupt_xlsx_raises_fileerror(db):
         agent_files.preview(fid)
 
 
-def _mk_login(db, c, username):
-    db.add(SysUser(username=username, role="sales", password_hash=hash_password("pw123456")))
+def _mk_login(db, c, username, role="sales"):
+    db.add(SysUser(username=username, role=role, password_hash=hash_password("pw123456")))
     db.commit()
     return c.post("/api/auth/login", json={"username": username, "password": "pw123456"}).json()["token"]
 
@@ -64,4 +64,30 @@ def test_preview_endpoint_owner_acl(db):
     assert up.status_code == 200, up.text
     base = f"/api/agent/files/{up.json()['file_id']}/preview"
     assert c.get(base, headers={"Authorization": f"Bearer {alice}"}).status_code == 200   # 本人可预览
-    assert c.get(base, headers={"Authorization": f"Bearer {bob}"}).status_code == 403      # 他人 403
+    assert c.get(base, headers={"Authorization": f"Bearer {bob}"}).status_code == 404
+
+
+def test_preview_endpoint_admin_is_still_owner_only_and_denial_is_indistinguishable(db):
+    c = TestClient(app)
+    alice = _mk_login(db, c, "alice_admin_acl")
+    admin = _mk_login(db, c, "admin_acl", role="admin")
+    up = c.post(
+        "/api/agent/upload",
+        headers={"Authorization": f"Bearer {alice}"},
+        files={
+            "file": (
+                "q.xlsx",
+                _xlsx_bytes(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert up.status_code == 200, up.text
+    owned_by_alice = f"/api/agent/files/{up.json()['file_id']}/preview"
+    missing = "/api/agent/files/000000000000/preview"
+
+    other = c.get(owned_by_alice, headers={"Authorization": f"Bearer {admin}"})
+    absent = c.get(missing, headers={"Authorization": f"Bearer {admin}"})
+
+    assert other.status_code == absent.status_code == 404
+    assert other.json() == absent.json()

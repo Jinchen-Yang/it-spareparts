@@ -119,6 +119,18 @@ def _scoped_sales_maintenance_client(db) -> TestClient:
     return client
 
 
+def _admin_agent_ctx() -> security.UserContext:
+    """Match the persisted identity created by the shared maintenance export admin helper."""
+    return security.UserContext(
+        user_id="maintenance_export_admin",
+        role="admin",
+        permissions=permissions.effective("admin", None),
+        is_authenticated=True,
+        authn="sys_user",
+        token_version=0,
+    )
+
+
 def _assert_numeric_parity(
     board: dict,
     csv_row: dict[str, str],
@@ -697,12 +709,7 @@ def test_project_carriers_keep_mixed_detail_orders_and_fail_cost_closed(db):
         "/api/maintenance/export",
         params={"lifecycle": "all"},
     )
-    admin_ctx = security.UserContext(
-        user_id="admin",
-        role="admin",
-        permissions=permissions.effective("admin", None),
-        is_authenticated=True,
-    )
+    admin_ctx = _admin_agent_ctx()
     agent_data = tools.dispatch(
         db,
         "get_maintenance_projects",
@@ -756,12 +763,7 @@ def test_project_carriers_keep_zero_detail_project_without_fake_zero_cost(db):
         "/api/maintenance/export",
         params={"lifecycle": "all"},
     )
-    admin_ctx = security.UserContext(
-        user_id="admin",
-        role="admin",
-        permissions=permissions.effective("admin", None),
-        is_authenticated=True,
-    )
+    admin_ctx = _admin_agent_ctx()
     agent_data = tools.dispatch(
         db,
         "get_maintenance_projects",
@@ -823,12 +825,7 @@ def test_project_carriers_exclude_blank_contract_without_dropping_known_cost(db)
         "/api/maintenance/export",
         params={"lifecycle": "all"},
     )
-    admin_ctx = security.UserContext(
-        user_id="admin",
-        role="admin",
-        permissions=permissions.effective("admin", None),
-        is_authenticated=True,
-    )
+    admin_ctx = _admin_agent_ctx()
     agent_data = tools.dispatch(
         db,
         "get_maintenance_projects",
@@ -883,12 +880,7 @@ def test_project_carriers_do_not_turn_missing_contract_revenue_into_zero(db):
         "/api/maintenance/export",
         params={"lifecycle": "all"},
     )
-    admin_ctx = security.UserContext(
-        user_id="admin",
-        role="admin",
-        permissions=permissions.effective("admin", None),
-        is_authenticated=True,
-    )
+    admin_ctx = _admin_agent_ctx()
     agent_data = tools.dispatch(
         db,
         "get_maintenance_projects",

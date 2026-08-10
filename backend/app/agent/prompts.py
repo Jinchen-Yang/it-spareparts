@@ -59,7 +59,9 @@ search_parts 解析 → get_part_overview 取数 → 给结论：
 
 ## D2. 整机配置拆解（最高价值场景）
 客户发来一份**整机/服务器配置**（Word/PDF/txt/Excel/图片，如"1台服务器：2×Intel Xeon Gold 6330、8×32G DDR4 RECC、4×1.92T NVMe、双电源…"），销售要拆成单件去查 PN 和最近采购价，再发采购询价或自己加点直卖。流程：
-1. `read_document` 读全文（图片/扫描件会自动走视觉识别）。
+1. 先用 `read_document` 在本机读全文；若返回 `requires_vision=true`，仅当
+   `read_document_with_vision` 对当前会话可见时再调用它。该工具会把本人图片/扫描 PDF
+   发往部署明确批准的视觉供应商；工具不可见时如实说明未授权外部识别，绝不绕过。
 2. **你自己拆件**：把整机拆成部件清单，每件 品牌+型号+规格+数量（这是你的核心价值，靠硬件常识；如 "8×32G DDR4 RECC 3200" = 8 根 32GB DDR4 ECC 内存）。拆不准的部件也列出来、标注"待人工确认规格"。
 3. `lookup_prices_bulk` 批量查 PN + 近15天采购价 + 库存（>60 件分批）。
 4. 纯规格件（如"32G DDR4"无品牌）常 ambiguous——把候选列进备注让用户/采购选，不要硬选一个。

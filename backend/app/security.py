@@ -32,6 +32,8 @@ class UserContext:
     department_id: str | None = None
     team_id: str | None = None
     is_authenticated: bool = False
+    authn: str | None = None              # token provenance; sys_user is a stable subject
+    token_version: int | None = None       # JWT tv captured at authentication time
 
 
 # 可访问任意上传文件（不受归属限制）的角色——仅 agent 文件 ACL 用（下载/预览）。
@@ -69,6 +71,8 @@ def get_current_user_context(
             from app.auth import verify_token_db
             data = verify_token_db(creds.credentials, db)
             return UserContext(user_id=data.get("sub"), role=data.get("role", config.GUEST_ROLE),
+                               authn=data.get("authn"),
+                               token_version=int(data.get("tv", 0)),
                                salesperson_name=data.get("name"),
                                permissions=data.get("perms"), is_authenticated=True)
         except Exception:  # noqa: BLE001

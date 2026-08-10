@@ -43,12 +43,30 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
       LLM_MODEL: ${LLM_MODEL:-deepseek-v4-flash}
-      # 留空 = 用应用内默认(关思考)；设 {} = 明确不传额外参数
+      LLM_APPROVED_MODELS: ${LLM_APPROVED_MODELS:-}
+      ENABLE_AGENT: ${ENABLE_AGENT:-false}
+      LLM_TRUST_ZONE: ${LLM_TRUST_ZONE:-unknown}
+      # private / approved_external 都需精确 origin 白名单；生产目标只接受 HTTPS。
+      LLM_PRIVATE_BASE_URLS: ${LLM_PRIVATE_BASE_URLS:-}
+      LLM_APPROVED_EXTERNAL_BASE_URLS: ${LLM_APPROVED_EXTERNAL_BASE_URLS:-}
+      AGENT_MODEL_CONTEXT_EGRESS_ENABLED: ${AGENT_MODEL_CONTEXT_EGRESS_ENABLED:-false}
+      # 仅 dev/test harness；prod 代码无条件忽略，不能替代 #225 private identity attestation。
+      AGENT_ALLOW_UNATTESTED_PRIVATE_FOR_DEVELOPMENT: ${AGENT_ALLOW_UNATTESTED_PRIVATE_FOR_DEVELOPMENT:-false}
+      # 仅 dev + loopback 可显式放行 HTTP；prod 即使设 true 也拒绝。
+      AGENT_ALLOW_LOOPBACK_HTTP: ${AGENT_ALLOW_LOOPBACK_HTTP:-false}
+      # 只允许固定关思考 profile / enable_thinking=false / {}；其它 key/value 拒绝出网。
+      # {} 仅表示不传额外参数，不保证供应商关闭隐藏思考。
       LLM_EXTRA_BODY: ${LLM_EXTRA_BODY:-}
       # 三期 视觉识别(图片/扫描件)：不配则图片走降级，文字类文件照常
       VISION_API_KEY: ${VISION_API_KEY:-}
       VISION_BASE_URL: ${VISION_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       VISION_MODEL: ${VISION_MODEL:-qwen-vl-max}
+      VISION_APPROVED_MODELS: ${VISION_APPROVED_MODELS:-}
+      VISION_TRUST_ZONE: ${VISION_TRUST_ZONE:-unknown}
+      VISION_PRIVATE_BASE_URLS: ${VISION_PRIVATE_BASE_URLS:-}
+      VISION_APPROVED_EXTERNAL_BASE_URLS: ${VISION_APPROVED_EXTERNAL_BASE_URLS:-}
+      # approved_external 客户文件开关预留；private 生产外发仍需 #225 identity attestation。
+      AGENT_EXTERNAL_FILE_EGRESS_ENABLED: ${AGENT_EXTERNAL_FILE_EGRESS_ENABLED:-false}
     depends_on:
       db:
         condition: service_healthy

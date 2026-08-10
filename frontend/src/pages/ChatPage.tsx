@@ -24,6 +24,7 @@ const TOOL_LABEL: Record<string, string> = {
   inspect_file: "查看文件结构",
   read_file_rows: "读取文件数据",
   read_document: "读取文档",
+  read_document_with_vision: "视觉识别文档",
   lookup_prices_bulk: "批量查价",
   write_excel: "生成 Excel",
   write_report: "生成报表",
@@ -40,7 +41,6 @@ interface Turn {
   role: "user" | "assistant";
   content: string;
   tools?: AgentToolCall[];
-  reasoning?: string;     // 思考链（仅本轮活会话内保留，刷新不持久——与 Claude 一致）
   stopped?: boolean;
 }
 interface ToolRun {
@@ -76,8 +76,10 @@ function nodeText(n: React.ReactNode): string {
 
 /** 生成/上传的文件卡片：在线预览（Excel 表格 / 图片）+ 下载。
  * 替代裸下载按钮；预览/下载都走带鉴权 fetch，绝不整页刷新打断对话。 */
+const AGENT_ARTIFACT_HREF = /^\/api\/agent\/files\/([a-f0-9]{12})$/;
+
 function FileCard({ href, label }: { href: string; label?: string }) {
-  const fileId = /\/api\/agent\/files\/([a-z0-9]{6,})/i.exec(href)?.[1] || "";
+  const fileId = AGENT_ARTIFACT_HREF.exec(href)?.[1] || "";
   const [open, setOpen] = useState(false);
   const [pv, setPv] = useState<FilePreview | null>(null);
   const [loading, setLoading] = useState(false);
@@ -181,15 +183,39 @@ function FileCard({ href, label }: { href: string; label?: string }) {
 /** markdown 里的文件链接渲染成文件卡片（预览+下载）；其余链接走普通 <a>。 */
 function MdLink(props: { href?: string; children?: React.ReactNode }) {
   const href = props.href || "";
-  if (href.includes("/api/agent/files/")) {
+  if (AGENT_ARTIFACT_HREF.test(href)) {
     return <FileCard href={href} label={nodeText(props.children)} />;
   }
-  return <a href={href} target="_blank" rel="noreferrer">{props.children}</a>;
+  const safeHref = (() => {
+    if (/^\/(?!\/)/.test(href) || href.startsWith("#") || /^mailto:/i.test(href)) return href;
+    if (!/^https?:\/\//i.test(href)) return null;
+    try {
+      const parsed = new URL(href);
+      return parsed.username || parsed.password ? null : href;
+    } catch {
+      return null;
+    }
+  })();
+  if (!safeHref) return <span>{props.children}</span>;
+  return (
+    <a href={safeHref} target="_blank" rel="noopener noreferrer nofollow"
+      referrerPolicy="no-referrer">{props.children}</a>
+  );
 }
 
-function Md({ text }: { text: string }) {
+/** Model/persisted Markdown images are always inert. Trusted images use FileCard's authenticated
+ * owner-authorized blob preview and can never be upgraded from an arbitrary Markdown src. */
+function MdImage(props: { alt?: string }) {
   return (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MdLink }}>
+    <span role="note" data-markdown-image-blocked="true" style={{ color: COLORS.text3 }}>
+      〔图片已阻止{props.alt ? `：${props.alt}` : ""}〕
+    </span>
+  );
+}
+
+export function Md({ text }: { text: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: MdLink, img: MdImage }}>
       {text}
     </ReactMarkdown>
   );
@@ -208,29 +234,6 @@ function mergeConsec(names: string[]): { name: string; count: number }[] {
 const label = (n: string) => TOOL_LABEL[n] || n;
 const argOf = (a?: Record<string, unknown>) =>
   String((a?.query ?? a?.pn_std ?? a?.dimension ?? a?.file_id ?? "") || "");
-
-// 思考链：默认折叠的灰色块，点标题展开，流式时标题显示"思考中…"
-function ThinkBlock({ text, streaming }: { text: string; streaming?: boolean }) {
-  const [open, setOpen] = useState(false);
-  if (!text) return null;
-  return (
-    <div style={{ marginBottom: 8 }}>
-      <div onClick={() => setOpen((o) => !o)}
-        style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer",
-                 fontSize: 12.5, color: "var(--mb-text-3)", userSelect: "none" }}>
-        <span style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform .15s", fontSize: 10 }}>▶</span>
-        <span>💭 {streaming ? "思考中…" : "已思考"}</span>
-      </div>
-      {open && (
-        <div style={{ marginTop: 4, padding: "8px 12px", background: "#F6F3EE", borderRadius: 8,
-                      borderLeft: "2px solid #E9E5DE", fontSize: 12.5, color: "var(--mb-text-3)",
-                      whiteSpace: "pre-wrap", lineHeight: 1.7, maxHeight: 320, overflow: "auto" }}>
-          {text}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // 完成态工具轨迹：合并同类，默认折叠成一行标题，点开看每次调用
 function ToolTrace({ tools }: { tools?: AgentToolCall[] }) {
@@ -310,14 +313,12 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);          // 当前会话视图正在流式（send 或 attach）
   const [streamText, setStreamText] = useState("");
-  const [thinkText, setThinkText] = useState("");
   const [toolRuns, setToolRuns] = useState<ToolRun[]>([]);
   const [pendingFile, setPendingFile] = useState<AgentUploadResult | null>(null);
   const [uploading, setUploading] = useState(false);
   const [generatingIds, setGeneratingIds] = useState<Set<number>>(new Set());  // 后台仍在生成的会话
 
   const streamBufRef = useRef("");
-  const thinkBufRef = useRef("");
   const flushTimerRef = useRef<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -335,7 +336,7 @@ export default function ChatPage() {
     });
 
   const switchTo = (id: number | null) => { activeIdRef.current = id; setActiveId(id); };
-  const flushStream = () => { setStreamText(streamBufRef.current); setThinkText(thinkBufRef.current); };
+  const flushStream = () => { setStreamText(streamBufRef.current); };
   const clearFlush = () => {
     if (flushTimerRef.current) { window.clearInterval(flushTimerRef.current); flushTimerRef.current = null; }
   };
@@ -378,9 +379,7 @@ export default function ChatPage() {
     markGenerating(sessionId, true);
     stickToBottomRef.current = true;
     streamBufRef.current = "";
-    thinkBufRef.current = "";
     setStreamText("");
-    setThinkText("");
     setToolRuns([]);
     clearFlush();
     flushTimerRef.current = window.setInterval(flushStream, 80);
@@ -392,16 +391,13 @@ export default function ChatPage() {
         clearFlush();
         streamBufRef.current = "";
         setStreamText("");
-        setThinkText("");
         setToolRuns([]);
         setBusy(false);
       }
       markGenerating(sessionId, false);
-      const reasoning = thinkBufRef.current || undefined;   // 先取值：setTurns 的回调是异步执行的，
-      thinkBufRef.current = "";                              // 不能在回调里读会被同步清空的 ref
       if ((content || ctl.trace.length) && activeIdRef.current === sessionId) {
         setTurns((prev) => [...prev, {
-          role: "assistant", content: content || "(无内容)", tools: [...ctl.trace], reasoning, stopped,
+          role: "assistant", content: content || "(无内容)", tools: [...ctl.trace], stopped,
         }]);
       }
       bumpTop(sessionId);
@@ -424,7 +420,6 @@ export default function ChatPage() {
     const onEvent = (ev: SessionStreamEvent) => {
       if (ctl.settled || !isCurrent()) return;     // 已切走/停止：忽略后续事件
       if (ev.type === "delta") streamBufRef.current += ev.text;
-      else if (ev.type === "thinking") thinkBufRef.current += ev.text;
       else if (ev.type === "title")
         setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, title: ev.title } : s)));
       else if (ev.type === "tool") {
@@ -442,8 +437,17 @@ export default function ChatPage() {
       else if (ev.type === "no_active") {
         // attach 时该会话已生成完：之前为防重复去掉了末尾 in-progress 气泡，这里重载补回最终消息
         ctl.settled = true;
-        if (isCurrent()) { clearFlush(); setStreamText(""); setThinkText(""); setToolRuns([]); setBusy(false); thinkBufRef.current = ""; }
+        if (isCurrent()) { clearFlush(); setStreamText(""); setToolRuns([]); setBusy(false); }
         markGenerating(sessionId, false);
+        if (activeIdRef.current === sessionId) reload(sessionId);
+        ctl.resolveDone();
+      } else if (ev.type === "subscriber_evicted") {
+        // 这不是生成完成。服务端仅驱逐了过慢/超额的实时订阅，worker 仍在后台运行；
+        // 保留 generating 标记并从持久化历史恢复，避免把半截正文误标为完整回答。
+        ctl.settled = true;
+        if (isCurrent()) { clearFlush(); setStreamText(""); setToolRuns([]); setBusy(false); }
+        markGenerating(sessionId, true);
+        message.warning("实时连接负载较高，回答仍在后台生成；稍后重新进入会话可继续查看");
         if (activeIdRef.current === sessionId) reload(sessionId);
         ctl.resolveDone();
       }
@@ -496,9 +500,7 @@ export default function ChatPage() {
     clearFlush();
     const partial = streamBufRef.current;
     const sid = ctl.sessionId;
-    thinkBufRef.current = "";
     setStreamText("");
-    setThinkText("");
     setToolRuns([]);
     setBusy(false);
     ctlRef.current = null;
@@ -568,7 +570,7 @@ export default function ChatPage() {
   const scrollToBottom = () => {
     if (stickToBottomRef.current) bottomRef.current?.scrollIntoView({ block: "end" });
   };
-  useEffect(scrollToBottom, [streamText, thinkText, toolRuns, turns]);
+  useEffect(scrollToBottom, [streamText, toolRuns, turns]);
 
   const onScroll = () => {
     const el = scrollBoxRef.current;
@@ -777,7 +779,6 @@ export default function ChatPage() {
                     <RobotOutlined style={{ color: "#fff", fontSize: 15 }} />
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    {t.reasoning && <ThinkBlock text={t.reasoning} />}
                     <div className="chat-md" style={{ fontSize: 14 }}>
                       <Md text={t.content} />
                     </div>
@@ -804,11 +805,10 @@ export default function ChatPage() {
                   <RobotOutlined style={{ color: "#fff", fontSize: 15 }} />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  {thinkText && <ThinkBlock text={thinkText} streaming />}
                   <LiveTrace runs={toolRuns} />
                   <div className="chat-md" style={{ fontSize: 14 }}>
                     {streamText ? <Md text={streamText} />
-                      : (!runningTool && !thinkText) && <span style={{ color: "var(--mb-text-3)" }}>思考中…</span>}
+                      : !runningTool && <span style={{ color: "var(--mb-text-3)" }}>正在生成…</span>}
                     <span className="cursor" />
                   </div>
                 </div>

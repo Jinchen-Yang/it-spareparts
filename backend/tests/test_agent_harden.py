@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.exc import ProgrammingError
 
-from app import permissions, security
+from app import config, permissions, security
 from app.agent import tools
 from app.auth import hash_password
 from app.main import app
@@ -18,10 +18,11 @@ from tests import factories as f
 def test_dispatch_sanitizes_internal_exception(monkeypatch):
     """工具内部抛异常(如 SQLAlchemyError 带 SQL+表名) → dispatch 只回固定脱敏文案，
     原始 SQL/表名/异常类型一律不进回灌结果。"""
-    def boom(db, args, ctx):
+    monkeypatch.setattr(config, "ENABLE_RBAC", False)
+    def boom(db, query, **kwargs):
         raise ProgrammingError("SELECT supplier_name FROM dim_supplier WHERE id=1",
                                {}, Exception("relation dim_supplier leaked"))
-    monkeypatch.setitem(tools._REGISTRY, "search_parts", boom)
+    monkeypatch.setattr(tools.part_resolver, "resolve", boom)
     ctx = security.UserContext(user_id=None, role="phase1_full_access")
     r = tools.dispatch(None, "search_parts", {"query": "x"}, ctx)
 
@@ -32,8 +33,9 @@ def test_dispatch_sanitizes_internal_exception(monkeypatch):
         assert leak not in blob, f"内部细节泄漏: {leak}"
 
 
-def test_dispatch_keeps_business_error(db):
+def test_dispatch_keeps_business_error(db, monkeypatch):
     """业务错(工具显式 return error 文案)原样回灌——模型据此自恢复，不被脱敏吞掉。"""
+    monkeypatch.setattr(config, "ENABLE_RBAC", False)
     ctx = security.UserContext(user_id=None, role="phase1_full_access")
     r = tools.dispatch(db, "search_parts", {"query": "   "}, ctx)
     assert r.get("error") and "kind" not in r   # 业务错无 internal 标记

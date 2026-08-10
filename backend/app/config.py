@@ -4,16 +4,52 @@
 1. Settings —— 运行环境配置（数据库连接、上传目录、登录密钥等），由环境变量驱动。
 2. 业务规则开关（§8）—— 待客户确认的口径集中在此，确认后改这里即可，不动逻辑。
 """
+import json
+import os
+from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# DeepSeek v4 为混合思考模型；默认开思考（reasoning_content 流式回前端，灰色可折叠展示）。
-# 要关思考省 token：在 .env 设 LLM_EXTRA_BODY='{"thinking": {"type": "disabled"}}'。
-_DEFAULT_LLM_EXTRA_BODY = '{"thinking": {"type": "enabled"}}'
+# 默认关闭供应商 thinking，减少不必要的敏感 telemetry 与 token 开销。
+# 安全边界不依赖供应商遵守：provider/runtime 仍会强制消费并丢弃 reasoning_content。
+_DEFAULT_LLM_EXTRA_BODY = '{"thinking": {"type": "disabled"}}'
+_APPROVED_LLM_REQUEST_OPTIONS = frozenset({
+    "{}",
+    '{"enable_thinking":false}',
+    '{"thinking":{"type":"disabled"}}',
+})
+
+
+def normalize_llm_request_options(value: object) -> dict | None:
+    """Return one exact, non-routing request-options profile or reject it.
+
+    OpenAI-compatible ``extra_body`` is merged after explicit request fields and can otherwise
+    overwrite model/messages/tools/stream. Only the two currently required vendor spellings for
+    disabling hidden reasoning (plus an explicit empty object) are admitted.
+    """
+    if not isinstance(value, Mapping):
+        raise ValueError("LLM_EXTRA_BODY 必须是 JSON 对象")
+    try:
+        canonical = json.dumps(
+            dict(value),
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("LLM_EXTRA_BODY 只能包含受控 JSON 值") from exc
+    if canonical not in _APPROVED_LLM_REQUEST_OPTIONS:
+        raise ValueError(
+            "LLM_EXTRA_BODY 仅允许 {}、关闭 thinking 或 enable_thinking=false；"
+            "禁止覆盖 model/messages/tools/stream 等请求字段"
+        )
+    return None if canonical == "{}" else json.loads(canonical)
 
 
 class Settings(BaseSettings):
@@ -22,7 +58,8 @@ class Settings(BaseSettings):
     app_name: str = "IT 备件智能管理系统"
     api_prefix: str = "/api"
     app_port: int = 8000
-    environment: str = "dev"   # dev | prod；prod 下禁止使用默认口令/密钥
+    # Closed vocabulary: an unknown/case-drifted deployment mode must never inherit dev policy.
+    environment: Literal["dev", "test", "prod"] = "dev"
 
     # 数据库：默认指向 docker-compose 中的 db 服务；本地裸跑可用 .env 覆盖
     database_url: str = "postgresql+psycopg://spareparts:spareparts@db:5432/spareparts"
@@ -44,23 +81,51 @@ class Settings(BaseSettings):
     llm_provider: str = "openai_compatible"
     llm_base_url: str = "https://api.deepseek.com"
     llm_model: str = "deepseek-v4-flash"
+    # 当前模型必须精确命中独立准入表；仅配置 model 字符串不会获得出网权限。
+    llm_approved_models: str = ""
     llm_api_key: str = ""              # 空 = 未配置，chat 接口返回降级提示
-    # 随请求透传的额外参数(JSON)。换 Qwen 等端点时改成对应参数(如 {"enable_thinking": false})；
-    # 设 {} = 明确不传；留空/不设 = 用默认(开思考)
+    # 受控请求选项 profile：仅允许固定关闭 thinking 的两种供应商拼法或空对象；
+    # 设 {} = 明确不传（不代表供应商一定关闭思考）；留空/不设 = 固定默认关思考。
     llm_extra_body: str = _DEFAULT_LLM_EXTRA_BODY
     llm_max_tool_iters: int = 8        # 一次问答最多工具往返轮数（文件流程需 4-6 轮）
     llm_timeout_seconds: int = 60
     llm_max_tokens: int | None = None  # 单次生成长度上限；None=不传（用端点默认）。防长答滚雪球/控成本
     llm_max_retries: int = 2           # 显式化 openai SDK 对 429/5xx 的指数退避重试次数（便于审计调参）
-    enable_agent: bool = True
+    enable_agent: bool = False
+    # 模型上下文的数据出向必须同时声明目标信任区并由部署者显式开启；未知目标默认无工具数据。
+    llm_trust_zone: Literal["unknown", "private", "approved_external"] = "unknown"
+    # v1 里的 private 表仅是 operator assertion：规范化 origin 必须精确命中，但这不
+    # 证明实际网络路由/Tailscale peer/DNS/TLS 身份。生产必须保持 ENABLE_AGENT=false，
+    # 直到 #225 增加可验证的 private endpoint identity 与每连接 fail-closed 约束。
+    # approved_external 同样必须精确命中独立白名单，不能只靠标签放行。
+    # 逗号/空白分隔，仅接受无路径、用户信息、query/fragment 的 origin。
+    llm_private_base_urls: str = ""
+    llm_approved_external_base_urls: str = ""
+    agent_model_context_egress_enabled: bool = False
+    # Unattested private origins are permitted only in an explicit dev/test harness. This flag is
+    # ignored in prod; it is not an attestation and must never become a production release grant.
+    agent_allow_unattested_private_for_development: bool = False
+    # HTTP 只允许开发环境显式开启且目标是 loopback；private/外部生产目标均强制 HTTPS。
+    agent_allow_loopback_http: bool = False
 
     # ---- 三期 视觉识别（图片/扫描件 → 文本）----
     # 独立 key/端点，默认 通义 Qwen-VL（DashScope OpenAI 兼容）。空 = 未配置，图片走降级
     vision_api_key: str = ""
     vision_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     vision_model: str = "qwen-vl-max"
+    vision_approved_models: str = ""
+    # Vision 是独立信任区；不能继承主模型的标签或 allowlist。private 表同样只代表
+    # operator assertion，不是经过验证的网络/节点身份。
+    vision_trust_zone: Literal["unknown", "private", "approved_external"] = "unknown"
+    vision_private_base_urls: str = ""
+    vision_approved_external_base_urls: str = ""
     vision_max_pages: int = 8          # 单次最多送几页图（扫描件 PDF / 多图）
     vision_timeout_seconds: int = 90
+    # 部署级客户文件外发 kill-switch；它不等于当前用户同意。v1 暂无可验证的逐用户
+    # 同意/撤销记录，所以 approved_external + customer_file 即使此项为 true 也一律拒绝。
+    # private operator assertion 当前不触发 external consent；因此生产 Agent 必须保持
+    # 禁用，直至 #225 让 private 身份可验证，避免把公网端点误标 private 绕过同意门。
+    agent_external_file_egress_enabled: bool = False
 
     @field_validator("llm_extra_body", mode="before")
     @classmethod
@@ -73,19 +138,18 @@ class Settings(BaseSettings):
     def _extra_body_valid_json(cls, v: str) -> str:
         # 启动期就校验合法性：非法 JSON 直接拒启（loud），不再每请求解析失败静默回退成
         # None——那会悄悄丢掉关思考标志、变慢变贵，与本配置反复声明的意图相悖（RUNTIME-6）。
-        import json
         try:
             parsed = json.loads(v)
         except json.JSONDecodeError as exc:
             raise ValueError(f"LLM_EXTRA_BODY 不是合法 JSON：{exc}；设为 '{{}}' 表示不传额外参数") from exc
         if not isinstance(parsed, dict):
             raise ValueError("LLM_EXTRA_BODY 必须是 JSON 对象，如 '{\"thinking\": {\"type\": \"disabled\"}}'")
+        normalize_llm_request_options(parsed)
         return v
 
     def llm_extra_body_dict(self) -> dict | None:
         """解析 LLM_EXTRA_BODY（构造期已校验合法）→ dict；空对象 {} 返回 None（不透传）。"""
-        import json
-        return json.loads(self.llm_extra_body) or None
+        return normalize_llm_request_options(json.loads(self.llm_extra_body))
 
 
 _DEFAULT_ADMIN_PW = "admin"
@@ -109,6 +173,20 @@ def check_security(settings: "Settings") -> list[str]:
         warns.append("SECRET_KEY 仍为默认值（token 可被离线伪造）")
     if "spareparts:spareparts" in settings.database_url:
         warns.append("数据库使用默认弱口令 spareparts:spareparts")
+    if settings.environment == "prod" and settings.enable_agent:
+        # This immutable release gate is intentionally stronger than deployment defaults. The
+        # current slice still lacks parser isolation/private endpoint attestation/message-body
+        # provenance (#222/#225/#233); no environment assertion may waive those code blockers.
+        warns.append("当前版本未通过 Agent 生产门禁，生产环境必须保持 ENABLE_AGENT=false")
+    for name in (
+        "OPENAI_ORG_ID",
+        "OPENAI_PROJECT_ID",
+        "OPENAI_CUSTOM_HEADERS",
+        "OPENAI_LOG",
+        "SSLKEYLOGFILE",
+    ):
+        if os.environ.get(name):
+            warns.append(f"禁止的 Provider ambient 环境变量已设置：{name}")
     return warns
 
 

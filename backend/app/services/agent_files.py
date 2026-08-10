@@ -28,6 +28,8 @@ _PREVIEW_ROWS = 8
 _PREVIEW_COLS = 12
 _MAX_READ_ROWS = 200
 _MAX_WRITE_CELLS = 3000
+_MAX_REPORT_ROWS = 5000
+_MAX_INSPECT_SHEETS = 5
 _CELL_TRUNC = 60
 _DOC_CHAR_CAP = 60_000          # read_document 文本上限，防超长文件撑爆上下文
 
@@ -58,6 +60,13 @@ def _ext_of(filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
 
+def upload_audit_shape(filename: str | None, size_bytes: int) -> dict:
+    """Return structural upload metadata without retaining a customer-controlled filename."""
+    ext = _ext_of(filename or "")
+    safe_ext = ext if ext in (_ALLOWED_EXT | {"xls"}) else "other" if ext else "none"
+    return {"ext": safe_ext, "size_bytes": max(int(size_bytes), 0)}
+
+
 def _data_path(file_id: str, ext: str) -> Path:
     return _dir() / f"{file_id}.{ext}"
 
@@ -67,6 +76,11 @@ def _check_id(file_id: str) -> str:
     if not _FILE_ID.match(fid):
         raise FileError(f"非法 file_id: {file_id!r}")
     return fid
+
+
+def canonical_file_id(file_id: object) -> str:
+    """Return the only audit/storage-safe Artifact ID representation."""
+    return _check_id(str(file_id or ""))
 
 
 def _load_meta(file_id: str) -> dict:
@@ -80,7 +94,10 @@ def _load_meta(file_id: str) -> dict:
 
 
 def _save_meta(file_id: str, meta: dict) -> None:
-    _meta_path(file_id).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    _meta_path(file_id).write_text(
+        json.dumps(meta, ensure_ascii=False, allow_nan=False),
+        encoding="utf-8",
+    )
 
 
 def _cell_str(v) -> str:
@@ -88,6 +105,14 @@ def _cell_str(v) -> str:
         return ""
     s = v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else str(v)
     return s[:_CELL_TRUNC]
+
+
+def _set_literal_cell(cell, value):
+    """Write strings as literal text (including =,+,-,@ prefixes); keep numeric types numeric."""
+    cell.value = value
+    if isinstance(value, str):
+        cell.data_type = "s"
+    return cell
 
 
 def save_upload(content: bytes, filename: str, operated_by: str | None) -> dict:
@@ -141,7 +166,7 @@ def inspect_file(file_id: str) -> dict:
     _require_xlsx(fid, meta)
     wb = load_workbook(_data_path(fid, "xlsx"), read_only=True, data_only=True)
     sheets = []
-    for ws in wb.worksheets[:5]:
+    for ws in wb.worksheets[:_MAX_INSPECT_SHEETS]:
         preview = [[_cell_str(c.value) for c in row]
                    for row in ws.iter_rows(min_row=1, max_row=_PREVIEW_ROWS,
                                            max_col=min(ws.max_column or 1, _PREVIEW_COLS))]
@@ -223,36 +248,51 @@ def _read_pdf(path: Path) -> tuple[str, bool]:
     """返回 (文本, 是否疑似扫描件)。文字层为空/极少 → 扫描件，转视觉。"""
     import pdfplumber
     parts: list[str] = []
+    extracted_parts: list[str] = []
     with pdfplumber.open(str(path)) as pdf:
         for pi, page in enumerate(pdf.pages[:30]):
             txt = page.extract_text() or ""
             parts.append(f"[第{pi + 1}页]\n{txt}" if txt.strip() else f"[第{pi + 1}页](无文字层)")
+            if txt.strip():
+                extracted_parts.append(txt)
             for table in page.extract_tables() or []:
                 for row in table:
                     cells = [(c or "").strip() for c in row]
                     if any(cells):
-                        parts.append(" | ".join(cells))
+                        table_text = " | ".join(cells)
+                        parts.append(table_text)
+                        extracted_parts.append(table_text)
     text = "\n".join(parts)
-    scanned = len(re.sub(r"\s", "", text.replace("无文字层", ""))) < 20
+    # Page labels are presentation metadata, not extracted PDF content. Counting labels made a
+    # many-page blank/scanned document look like a valid text PDF and silently skipped Vision.
+    extracted_text = "\n".join(extracted_parts)
+    scanned = len(re.sub(r"\s", "", extracted_text)) < 20
     return text, scanned
 
 
-def _read_image_or_scanned(path: Path, hint: str) -> str:
-    """图片/扫描件 → Qwen-VL 识别（无 key 优雅降级）。"""
+def _read_image_or_scanned(
+    path: Path,
+    hint: str,
+    *,
+    policy_lease: object,
+    attempt_authorizer,
+) -> str:
+    """图片/扫描件 → 已配置的视觉供应商；授权与未配置降级由上层分别处理。"""
     from app.agent import provider
-    try:
-        return provider.vision_extract([path], hint)
-    except provider.VisionNotConfigured:
-        return ("【未配置视觉模型】该文件是图片/扫描件，需配置 VISION_API_KEY（通义 Qwen-VL）"
-                "后才能识别。文字版 Word/Excel/PDF/txt 不受影响。")
+    return provider.vision_extract(
+        [path],
+        hint,
+        _policy_lease=policy_lease,
+        _attempt_authorizer=attempt_authorizer,
+    )
 
 
 def read_document(file_id: str) -> dict:
-    """通用读取：把任意支持格式抽成文本喂给模型（拆件/解析由模型完成）。"""
+    """Local-only extraction; image/scanned content is flagged, never sent to Vision."""
     fid = _check_id(file_id)
     meta = _load_meta(fid)
     ext = meta.get("ext", "")
-    vision_used = False
+    requires_vision = False
     if ext in _TEXT_EXT:
         text = _data_path(fid, ext).read_bytes().decode("utf-8", errors="replace")
     elif ext == "xlsx":
@@ -271,21 +311,91 @@ def read_document(file_id: str) -> dict:
     elif ext == "pdf":
         text, scanned = _read_pdf(_data_path(fid, "pdf"))
         if scanned:
-            vision_used = True
-            text = _read_image_or_scanned(_data_path(fid, "pdf"),
-                                          "这是一份扫描件，请逐字识别其中的全部文本、表格、型号与参数。")
+            requires_vision = True
     elif ext in _IMG_EXT:
-        vision_used = True
-        text = _read_image_or_scanned(
-            _data_path(fid, ext),
-            "请识别图片中的全部文字、表格、设备型号、品牌与参数配置，按原结构输出。")
+        requires_vision = True
+        text = ""
     else:
         raise FileError(f"不支持读取 .{ext}")
 
     truncated = len(text) > _DOC_CHAR_CAP
     return {"file_id": fid, "filename": meta.get("filename"), "ext": ext,
-            "vision_used": vision_used, "truncated": truncated,
+            "vision_used": False, "requires_vision": requires_vision, "truncated": truncated,
             "content": text[:_DOC_CHAR_CAP]}
+
+
+def read_document_with_vision(
+    file_id: str,
+    *,
+    policy_lease: object,
+    attempt_authorizer,
+) -> dict:
+    """Explicit external Vision path, gated by Capability Kernel before this function runs."""
+    from app.agent import provider
+
+    # Dispatch authorization can be revoked while a queued tool waits. Recheck before even local
+    # parsing/rendering, then the guarded provider transport repeats the same server-only check at
+    # every actual send attempt.
+    try:
+        entry_allowed = callable(attempt_authorizer) and attempt_authorizer() is True
+    except Exception:  # noqa: BLE001 -- authorization failures always deny without values
+        entry_allowed = False
+    if not entry_allowed:
+        return {
+            "error": "当前视觉模型数据出境策略未授权",
+            "kind": "vision_egress_denied",
+            "code": "AGENT_VISION_EGRESS_DENIED",
+            "retriable": False,
+        }
+
+    local = read_document(file_id)
+    if not local["requires_vision"]:
+        return local
+    fid = local["file_id"]
+    ext = local["ext"]
+    if ext == "pdf":
+        hint = "这是一份扫描件，请逐字识别其中的全部文本、表格、型号与参数。"
+    else:
+        hint = "请识别图片中的全部文字、表格、设备型号、品牌与参数配置，按原结构输出。"
+    try:
+        text = _read_image_or_scanned(
+            _data_path(fid, ext),
+            hint,
+            policy_lease=policy_lease,
+            attempt_authorizer=attempt_authorizer,
+        )
+    except provider.VisionNotConfigured:
+        return {
+            **local,
+            "content": (
+                "【未配置视觉模型】该文件是图片/扫描件，需配置 VISION_API_KEY 后才能识别。"
+                "文字版 Word/Excel/PDF/txt 不受影响。"
+            ),
+        }
+    except provider.VisionEgressDenied:
+        # A live policy change between capability dispatch and provider use is not an internal
+        # retryable failure. Never copy the exception text or customer path into the result.
+        return {
+            "error": "当前视觉模型数据出境策略未授权",
+            "kind": "vision_egress_denied",
+            "code": "AGENT_VISION_EGRESS_DENIED",
+            "retriable": False,
+        }
+    except provider.VisionPayloadBudgetExceeded:
+        return {
+            "error": "视觉输入或识别结果超过安全预算",
+            "kind": "vision_payload_budget_exceeded",
+            "code": "AGENT_VISION_PAYLOAD_BUDGET_EXCEEDED",
+            "retriable": False,
+        }
+    truncated = len(text) > _DOC_CHAR_CAP
+    return {
+        **local,
+        "vision_used": True,
+        "requires_vision": False,
+        "truncated": truncated,
+        "content": text[:_DOC_CHAR_CAP],
+    }
 
 
 # ============================================================
@@ -343,7 +453,7 @@ def write_excel(base_file_id: str | None, sheet: str | None,
             raise FileError(f"cells 项格式错: {c!r}（需 row/col/value）") from exc
         if row < 1 or row > 1_048_576:
             raise FileError(f"行号超界: {row}")
-        ws.cell(row=row, column=col, value=c.get("value"))
+        _set_literal_cell(ws.cell(row=row, column=col), c.get("value"))
         written += 1
 
     name = output_name or (f"回填_{base_name}" if base_name else "结果.xlsx")
@@ -376,8 +486,8 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
     money_cols=金额列的 0-based 下标（数字格式+右对齐）。"""
     if not headers:
         raise FileError("headers 不能为空")
-    if len(rows) > 5000:
-        raise FileError("报表最多 5000 行")
+    if len(rows) > _MAX_REPORT_ROWS:
+        raise FileError(f"报表最多 {_MAX_REPORT_ROWS} 行")
     money = set(money_cols or [])
     ncol = len(headers)
 
@@ -387,7 +497,7 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
     r0 = 1
     if title:
         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncol)
-        tc = ws.cell(row=1, column=1, value=title)
+        tc = _set_literal_cell(ws.cell(row=1, column=1), title)
         tc.font = _TITLE_FONT
         tc.alignment = Alignment(horizontal="left", vertical="center")
         ws.row_dimensions[1].height = 26
@@ -395,7 +505,7 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
 
     # 表头
     for j, h in enumerate(headers, start=1):
-        c = ws.cell(row=r0, column=j, value=str(h))
+        c = _set_literal_cell(ws.cell(row=r0, column=j), str(h))
         c.fill, c.font, c.border = _HEADER_FILL, _HEADER_FONT, _BORDER
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.row_dimensions[r0].height = 22
@@ -409,7 +519,7 @@ def write_report(title: str | None, headers: list[str], rows: list[list],
         base_fill = _BAD_FILL if hit_bad else _WARN_FILL if hit_warn else (_ZEBRA_FILL if i % 2 else None)
         for j in range(ncol):
             val = row[j] if j < len(row) else None
-            c = ws.cell(row=rr, column=j + 1, value=val)
+            c = _set_literal_cell(ws.cell(row=rr, column=j + 1), val)
             c.border = _BORDER
             if base_fill:
                 c.fill = base_fill

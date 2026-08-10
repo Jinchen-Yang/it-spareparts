@@ -8,9 +8,10 @@ from sqlalchemy import and_, event, func, select, text
 
 from app import permissions, security
 from app.agent import tools
+from app.auth import hash_password
 from app.etl import loader
 from app.models.maintenance import FMaintenanceLine
-from app.models.system import SysImportBatch
+from app.models.system import SysImportBatch, SysUser
 from app.services import maintenance_cost, maintenance_workbook_renderer
 from app.services import maintenance_cost_quality
 from app.services.maintenance_cost import COSTED_SOURCES
@@ -579,6 +580,19 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
     assert detail_rows["PN-ZERO"]["unit_cost"] == 0.0
     assert detail_rows["PN-ZERO"]["cost_amount"] == 0.0
 
+    quality_permissions = permissions.effective("readonly", {
+        "page_maintenance": True,
+        "data_purchase_cost": True,
+        "data_profit": True,
+    })
+    db.add(SysUser(
+        username="quality",
+        role="readonly",
+        password_hash=hash_password("pw123456"),
+        is_active=True,
+        permissions=quality_permissions,
+    ))
+    db.commit()
     agent_rows = {
         item["pn_std"]: item
         for item in tools.dispatch(
@@ -588,11 +602,10 @@ def test_projects_aggregate_exposes_one_source_of_cost_quality_truth(db):
             security.UserContext(
                 user_id="quality",
                 role="readonly",
-                permissions=permissions.effective("readonly", {
-                    "page_maintenance": True,
-                    "data_purchase_cost": True,
-                    "data_profit": True,
-                }),
+                permissions=quality_permissions,
+                is_authenticated=True,
+                authn="sys_user",
+                token_version=0,
             ),
         )["rows"]
     }

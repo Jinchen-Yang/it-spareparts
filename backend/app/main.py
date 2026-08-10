@@ -40,7 +40,7 @@ settings = get_settings()
 _sec_warns = check_security(settings)
 if _sec_warns:
     if settings.environment == "prod":
-        raise RuntimeError("生产环境禁止使用默认口令/密钥：" + "；".join(_sec_warns))
+        raise RuntimeError("生产环境安全自检失败：" + "；".join(_sec_warns))
     for w in _sec_warns:
         _log.warning("[安全告警] %s（部署到生产前务必在 .env 覆盖，并设 ENVIRONMENT=prod）", w)
 
