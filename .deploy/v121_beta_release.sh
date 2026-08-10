@@ -706,11 +706,6 @@ for line in sys.argv[1].splitlines():
         continue
     maintenance=dict(maintenance_raw)
     replenishment=dict(replenishment_raw)
-    replenishment["action_replenishment_create"] = (
-        replenishment_raw["page_replenishment_beta"]
-        and replenishment_raw["data_pool_price_governance"]
-        and replenishment_raw["action_replenishment_create"]
-    )
     rows.append({"username":fields[0],"role":fields[1],
                  "maintenance":dict(sorted(maintenance.items())),
                  "replenishment":dict(sorted(replenishment.items()))})
@@ -731,17 +726,48 @@ replenishment_creator_account_count=sum(
 replenishment_review_enabled_count=sum(
     row["replenishment"]["action_replenishment_review"] for row in rows
 )
+cross_domain_account_count=sum(
+    row["maintenance"]["page_maintenance_beta"]
+    and row["replenishment"]["page_replenishment_beta"]
+    for row in rows
+)
+replenishment_noncreator_account_count=sum(
+    row["replenishment"]["page_replenishment_beta"]
+    and not row["replenishment"]["action_replenishment_create"]
+    for row in rows
+)
+reader_replenishment_action_enabled_count=sum(
+    row["maintenance"]["page_maintenance_beta"]
+    and (
+        row["replenishment"]["action_replenishment_create"]
+        or row["replenishment"]["action_replenishment_review"]
+    )
+    for row in rows
+)
+replenishment_creator_missing_price_count=sum(
+    row["replenishment"]["page_replenishment_beta"]
+    and not row["replenishment"]["data_pool_price_governance"]
+    for row in rows
+)
 if maintenance_write_enabled_count:
     raise SystemExit("initial pilot exposes a raw runtime-effective Maintenance write action")
 if admin_pilot_count:
     raise SystemExit("initial scoped pilot contains an admin account")
 if sys.argv[2] == "full":
+    if replenishment_review_enabled_count:
+        raise SystemExit("initial pilot exposes deferred replenishment review")
+    if cross_domain_account_count:
+        raise SystemExit("initial pilot contains a cross-domain Beta account")
+    if replenishment_noncreator_account_count:
+        raise SystemExit("initial pilot contains an un-smoked Replenishment profile")
+    if reader_replenishment_action_enabled_count:
+        raise SystemExit("initial pilot reader contains a Replenishment action")
+    if replenishment_creator_missing_price_count:
+        raise SystemExit("initial pilot creator lacks the required price permission")
     if maintenance_read_account_count < 1:
         raise SystemExit("initial pilot has no live Maintenance reader")
     if replenishment_creator_account_count < 1:
         raise SystemExit("initial pilot has no live replenishment creator")
-    if replenishment_review_enabled_count:
-        raise SystemExit("initial pilot exposes deferred replenishment review")
 def digest(value):
     if not rows:
         return hashlib.sha256(b"").hexdigest()
@@ -759,6 +785,10 @@ result={
   "maintenance_read_account_count":maintenance_read_account_count,
   "replenishment_creator_account_count":replenishment_creator_account_count,
   "replenishment_review_enabled_count":replenishment_review_enabled_count,
+  "cross_domain_account_count":cross_domain_account_count,
+  "replenishment_noncreator_account_count":replenishment_noncreator_account_count,
+  "reader_replenishment_action_enabled_count":reader_replenishment_action_enabled_count,
+  "replenishment_creator_missing_price_count":replenishment_creator_missing_price_count,
 }
 print(json.dumps(result,sort_keys=True,separators=(",",":")))
 PY
@@ -794,6 +824,9 @@ for key in (
     "maintenance_write_enabled_count", "admin_pilot_count",
     "maintenance_read_account_count", "replenishment_creator_account_count",
     "replenishment_review_enabled_count",
+    "cross_domain_account_count", "replenishment_noncreator_account_count",
+    "reader_replenishment_action_enabled_count",
+    "replenishment_creator_missing_price_count",
 ):
     if live[key] != expected[key]:
         raise SystemExit(f"live intended Beta permission graph mismatch: {key}")
@@ -862,7 +895,6 @@ if mode == "reader":
         "page_maintenance": True,
         "page_maintenance_beta": True,
         "page_replenishment_beta": False,
-        "data_pool_price_governance": False,
         "action_replenishment_create": False,
         "action_replenishment_review": False,
     }

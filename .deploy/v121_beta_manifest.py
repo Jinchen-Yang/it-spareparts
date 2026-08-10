@@ -480,6 +480,16 @@ def _parse_allowlist(
                 used_evidence.add(key)
         if replenishment["action_replenishment_create"] and not replenishment["data_pool_price_governance"]:
             _fail(f"allowlist account {username} can create replenishment without price permission")
+        if maintenance_enabled and replenishment_enabled:
+            _fail(
+                f"allowlist account {username} crosses the Maintenance reader and "
+                "replenishment creator pilot profiles"
+            )
+        if replenishment_enabled and not replenishment["action_replenishment_create"]:
+            _fail(
+                f"allowlist account {username} opens Replenishment Beta without the "
+                "scoped creator action"
+            )
         normalized.append(
             {
                 "username": username,
@@ -528,6 +538,29 @@ def _parse_allowlist(
         "replenishment_review_enabled_count": sum(
             row["replenishment"]["action_replenishment_review"] for row in normalized
         ),
+        "cross_domain_account_count": sum(
+            row["maintenance"]["page_maintenance_beta"]
+            and row["replenishment"]["page_replenishment_beta"]
+            for row in normalized
+        ),
+        "replenishment_noncreator_account_count": sum(
+            row["replenishment"]["page_replenishment_beta"]
+            and not row["replenishment"]["action_replenishment_create"]
+            for row in normalized
+        ),
+        "reader_replenishment_action_enabled_count": sum(
+            row["maintenance"]["page_maintenance_beta"]
+            and (
+                row["replenishment"]["action_replenishment_create"]
+                or row["replenishment"]["action_replenishment_review"]
+            )
+            for row in normalized
+        ),
+        "replenishment_creator_missing_price_count": sum(
+            row["replenishment"]["page_replenishment_beta"]
+            and not row["replenishment"]["data_pool_price_governance"]
+            for row in normalized
+        ),
     }
     if summary["maintenance_read_account_count"] < 1:
         _fail("initial pilot requires at least one named Maintenance read account")
@@ -535,6 +568,14 @@ def _parse_allowlist(
         _fail("initial pilot requires at least one canary-proven replenishment creator")
     if summary["replenishment_review_enabled_count"] != 0:
         _fail("initial pilot must keep replenishment review disabled")
+    if summary["cross_domain_account_count"] != 0:
+        _fail("initial pilot must keep Maintenance reader and creator profiles separate")
+    if summary["replenishment_noncreator_account_count"] != 0:
+        _fail("initial pilot contains an un-smoked Replenishment profile")
+    if summary["reader_replenishment_action_enabled_count"] != 0:
+        _fail("initial pilot reader contains a Replenishment action")
+    if summary["replenishment_creator_missing_price_count"] != 0:
+        _fail("initial pilot creator lacks the required price permission")
     return summary, copied_evidence
 
 
@@ -1296,6 +1337,14 @@ def _verify_package(package: Path) -> dict[str, Any]:
         _fail("initial scoped pilot manifest has no canary-proven replenishment creator")
     if allowlist.get("replenishment_review_enabled_count") != 0:
         _fail("initial scoped pilot manifest enables deferred replenishment review")
+    if allowlist.get("cross_domain_account_count") != 0:
+        _fail("initial scoped pilot manifest contains a cross-domain Beta account")
+    if allowlist.get("replenishment_noncreator_account_count") != 0:
+        _fail("initial scoped pilot manifest contains an un-smoked Replenishment profile")
+    if allowlist.get("reader_replenishment_action_enabled_count") != 0:
+        _fail("initial scoped pilot manifest gives a reader a Replenishment action")
+    if allowlist.get("replenishment_creator_missing_price_count") != 0:
+        _fail("initial scoped pilot manifest contains a creator without price permission")
     for key in (
         "permission_graph_sha256",
         "maintenance_effective_permissions_sha256",

@@ -158,7 +158,6 @@ def main() -> None:
         ("page_maintenance", "True"),
         ("page_maintenance_beta", "True"),
         ("page_replenishment_beta", "False"),
-        ("data_pool_price_governance", "False"),
         ("action_replenishment_create", "False"),
         ("action_replenishment_review", "False"),
     ):
@@ -186,13 +185,19 @@ def main() -> None:
     review_end = replenishment_source.index("\n@router.", review_start + 1)
     review_route = replenishment_source[review_start:review_end]
     assert "_page: None = Depends(_beta_page_whitelist)" in review_route
+    reader_projection_row = "\t".join(
+        ["named.reader", "project_manager", "t", "t"]
+        + ["f"] * len(module.MAINTENANCE_ACTIONS)
+        + ["f", "t", "f", "f"]
+    )
+    creator_projection_row = "\t".join(
+        ["named.pilot", "purchaser", "f", "f"]
+        + ["f"] * len(module.MAINTENANCE_ACTIONS)
+        + ["t", "t", "t", "f"]
+    )
     safe_projection = run_live_projection(
         release,
-        "\t".join(
-            ["named.pilot", "project_manager", "t", "t"]
-            + ["f"] * len(module.MAINTENANCE_ACTIONS)
-            + ["t", "t", "t", "f"]
-        ),
+        "\n".join((reader_projection_row, creator_projection_row)),
         "full",
     )
     assert safe_projection.returncode == 0, safe_projection.stderr
@@ -202,6 +207,54 @@ def main() -> None:
     assert safe_projection_data["maintenance_read_account_count"] == 1
     assert safe_projection_data["replenishment_creator_account_count"] == 1
     assert safe_projection_data["replenishment_review_enabled_count"] == 0
+    assert safe_projection_data["cross_domain_account_count"] == 0
+    assert safe_projection_data["replenishment_noncreator_account_count"] == 0
+    assert safe_projection_data["reader_replenishment_action_enabled_count"] == 0
+    assert safe_projection_data["replenishment_creator_missing_price_count"] == 0
+    cross_domain_projection = run_live_projection(
+        release,
+        "\n".join(
+            (
+                reader_projection_row,
+                creator_projection_row.replace("\tf\tf\t", "\tt\tt\t", 1),
+            )
+        ),
+        "full",
+    )
+    assert cross_domain_projection.returncode != 0
+    assert "cross-domain Beta account" in cross_domain_projection.stderr
+    noncreator_projection = run_live_projection(
+        release,
+        "\n".join(
+            (
+                reader_projection_row,
+                creator_projection_row.rsplit("\t", 2)[0] + "\tf\tf",
+            )
+        ),
+        "full",
+    )
+    assert noncreator_projection.returncode != 0
+    assert "un-smoked Replenishment profile" in noncreator_projection.stderr
+    reader_action_fields = reader_projection_row.split("\t")
+    reader_action_fields[-2] = "t"
+    reader_action_projection = run_live_projection(
+        release,
+        "\n".join(("\t".join(reader_action_fields), creator_projection_row)),
+        "full",
+    )
+    assert reader_action_projection.returncode != 0
+    assert "reader contains a Replenishment action" in reader_action_projection.stderr
+    creator_without_price_fields = creator_projection_row.split("\t")
+    creator_without_price_fields[-3] = "f"
+    creator_without_price_projection = run_live_projection(
+        release,
+        "\n".join((reader_projection_row, "\t".join(creator_without_price_fields))),
+        "full",
+    )
+    assert creator_without_price_projection.returncode != 0
+    assert "creator lacks the required price permission" in (
+        creator_without_price_projection.stderr
+    )
     hidden_maintenance_write = run_live_projection(
         release,
         "\t".join(
@@ -249,19 +302,25 @@ def main() -> None:
             "format": "v121-beta-allowlist-v1",
             "accounts": [
                 {
+                    "username": "named.reader",
+                    "role": "project_manager",
+                    **permissions(maintenance=True, replenishment=False),
+                },
+                {
                     "username": "named.pilot",
                     "role": "purchaser",
-                    **permissions(maintenance=True, replenishment=True),
-                }
+                    **permissions(maintenance=False, replenishment=True),
+                },
             ],
             "canary_evidence": [],
         }
+        safe["accounts"][0]["replenishment"]["data_pool_price_governance"] = True
         path = folder / "allowlist.json"
         path.write_text(json.dumps(safe), encoding="utf-8")
         try:
             module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
         except module.ManifestError as exc:
-            assert "requires at least one canary-proven replenishment creator" in str(exc)
+            assert "opens Replenishment Beta without the scoped creator action" in str(exc)
         else:
             raise AssertionError("pilot without a replenishment creator was accepted")
 
@@ -316,7 +375,7 @@ def main() -> None:
             "format": "v121-action-canary-v1",
             "source": "github-commit-comment-api",
             "repository": "Example/it-spareparts",
-            "username": "named.pilot",
+            "username": "named.reader",
             "action": "action_maintenance_site_issue_manage",
             "target_sha": head,
             "environment": "isolated",
@@ -479,7 +538,7 @@ def main() -> None:
             json.dumps(captured_replenishment), encoding="utf-8"
         )
         replenishment_write = json.loads(json.dumps(safe))
-        replenishment_write["accounts"][0]["replenishment"][
+        replenishment_write["accounts"][1]["replenishment"][
             "action_replenishment_create"
         ] = True
         replenishment_write["canary_evidence"] = [
@@ -502,15 +561,74 @@ def main() -> None:
         assert summary["maintenance_read_account_count"] == 1
         assert summary["replenishment_creator_account_count"] == 1
         assert summary["replenishment_review_enabled_count"] == 0
+        assert summary["cross_domain_account_count"] == 0
+        assert summary["replenishment_noncreator_account_count"] == 0
+        assert summary["reader_replenishment_action_enabled_count"] == 0
+        assert summary["replenishment_creator_missing_price_count"] == 0
+        assert replenishment_write["accounts"][0]["replenishment"][
+            "data_pool_price_governance"
+        ] is True
         assert evidence == [replenishment_path]
 
+        cross_domain = json.loads(json.dumps(replenishment_write))
+        cross_domain["accounts"][1]["maintenance"]["page_maintenance"] = True
+        cross_domain["accounts"][1]["maintenance"]["page_maintenance_beta"] = True
+        path.write_text(json.dumps(cross_domain), encoding="utf-8")
+        try:
+            module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
+        except module.ManifestError as exc:
+            assert "crosses the Maintenance reader and replenishment creator" in str(exc)
+        else:
+            raise AssertionError("cross-domain Beta account was accepted")
+
+        replenishment_without_create = json.loads(json.dumps(replenishment_write))
+        replenishment_without_create["accounts"][1]["replenishment"][
+            "action_replenishment_create"
+        ] = False
+        path.write_text(json.dumps(replenishment_without_create), encoding="utf-8")
+        try:
+            module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
+        except module.ManifestError as exc:
+            assert "opens Replenishment Beta without the scoped creator action" in str(exc)
+        else:
+            raise AssertionError("un-smoked Replenishment profile was accepted")
+
+        for action in ("action_replenishment_create", "action_replenishment_review"):
+            reader_with_replenishment_action = json.loads(json.dumps(replenishment_write))
+            reader_with_replenishment_action["accounts"][0]["replenishment"][action] = True
+            path.write_text(json.dumps(reader_with_replenishment_action), encoding="utf-8")
+            try:
+                module._parse_allowlist(
+                    path, repository="Example/it-spareparts", target=head
+                )
+            except module.ManifestError as exc:
+                if action == "action_replenishment_review":
+                    assert "defers replenishment review" in str(exc)
+                else:
+                    assert "enabled without its Beta page" in str(exc)
+            else:
+                raise AssertionError(f"Maintenance reader accepted {action}")
+
+        account_without_beta = json.loads(json.dumps(replenishment_write))
+        account_without_beta["accounts"].append(
+            {
+                "username": "named.stable",
+                "role": "readonly",
+                **permissions(maintenance=False, replenishment=False),
+            }
+        )
+        path.write_text(json.dumps(account_without_beta), encoding="utf-8")
+        try:
+            module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
+        except module.ManifestError as exc:
+            assert "has no effective Beta access" in str(exc)
+        else:
+            raise AssertionError("account with both Beta pages false was accepted")
+
         creator_without_maintenance = json.loads(json.dumps(replenishment_write))
-        creator_without_maintenance["accounts"][0]["maintenance"][
-            "page_maintenance"
-        ] = False
-        creator_without_maintenance["accounts"][0]["maintenance"][
-            "page_maintenance_beta"
-        ] = False
+        creator_without_maintenance["accounts"] = [
+            creator_without_maintenance["accounts"][1]
+        ]
         path.write_text(json.dumps(creator_without_maintenance), encoding="utf-8")
         try:
             module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
@@ -520,7 +638,7 @@ def main() -> None:
             raise AssertionError("pilot without a Maintenance reader was accepted")
 
         create_without_price = json.loads(json.dumps(replenishment_write))
-        create_without_price["accounts"][0]["replenishment"][
+        create_without_price["accounts"][1]["replenishment"][
             "data_pool_price_governance"
         ] = False
         path.write_text(json.dumps(create_without_price), encoding="utf-8")
@@ -667,10 +785,10 @@ def main() -> None:
             json.dumps(captured_replenishment_review), encoding="utf-8"
         )
         replenishment_review = json.loads(json.dumps(safe))
-        replenishment_review["accounts"][0]["replenishment"][
+        replenishment_review["accounts"][1]["replenishment"][
             "action_replenishment_review"
         ] = True
-        replenishment_review["accounts"][0]["replenishment"][
+        replenishment_review["accounts"][1]["replenishment"][
             "data_pool_price_governance"
         ] = False
         replenishment_review["canary_evidence"] = [
