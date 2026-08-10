@@ -29,7 +29,6 @@ from app.models.master_data import ProductCategory
 
 
 RETURN_RULE_VERSION = "maintenance-bad-return-category-v1"
-OFFICIAL_RETURN_RATE_BASIS = "warehouse_confirmed_v1"
 _OBLIGATION_NAMESPACE = UUID("4f8cf18a-a83f-4fb1-9425-5057ec86f45d")
 _QUANTITY_MAX_EXCLUSIVE = Decimal("100000000000")
 _ACTIVE_RETURN_STATUSES = ("submitted", "in_transit", "warehouse_confirmed")
@@ -94,7 +93,7 @@ def calculate_return_rate(
     registered_quantity: Decimal,
     warehouse_confirmed_quantity: Decimal,
 ) -> dict:
-    """Return both operational rates while failing closed on an unsafe basis."""
+    """Return operational rates while the official numerator remains undecided."""
 
     payload = {
         "required_quantity": required_quantity,
@@ -106,7 +105,7 @@ def calculate_return_rate(
             required_quantity - warehouse_confirmed_quantity,
             Decimal("0"),
         ),
-        "official_basis": OFFICIAL_RETURN_RATE_BASIS,
+        "official_basis": None,
         "registered_rate_pct": None,
         "warehouse_confirmed_rate_pct": None,
         "official_rate_pct": None,
@@ -122,7 +121,6 @@ def calculate_return_rate(
         "status": "available",
         "registered_rate_pct": registered_rate,
         "warehouse_confirmed_rate_pct": confirmed_rate,
-        "official_rate_pct": confirmed_rate,
     }
 
 
@@ -796,7 +794,8 @@ def return_rates_for_projects(
             "exempt_count": int(facts["exempt_count"]),
             "pending_count": int(facts["pending_count"]),
             "business_assumption": (
-                "正式展示按仓库确认数量统计；返库登记仅表示已登记或在途。"
+                "仓库确认量仅作试算；官方返还率分子待业务确认。"
+                "返库登记仅表示已登记或在途。"
             ),
         }
     return result

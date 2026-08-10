@@ -660,7 +660,7 @@ export default function BadReturnPanel({
           type="info"
           showIcon
           message="返还登记不冲减项目成本，也不直接增加库存"
-          description="官方返还率只按仓库确认量统计；正式库存变化由后续稳定入库事实负责。"
+          description="当前按仓库确认量试算，最终官方口径待业务确认；正式库存变化由后续稳定入库事实负责。"
         />
         {rate && (
           <>
@@ -674,10 +674,10 @@ export default function BadReturnPanel({
               <Text data-testid="return-exempt">硬盘免返<strong>{quantity(rate.exempt_quantity)}</strong></Text>
               <Text data-testid="return-pending">品类待判定<strong>{quantity(rate.pending_quantity)}</strong></Text>
             </div>
-            {rate.status === "available" && rate.official_rate_pct != null ? (
+            {rate.status === "available" && rate.warehouse_confirmed_rate_pct != null ? (
               <div>
-                <Text strong>仓库确认返还率</Text>
-                <Progress percent={Number(rate.official_rate_pct)} />
+                <Text strong>仓库确认返还率（试算）</Text>
+                <Progress percent={Number(rate.warehouse_confirmed_rate_pct)} />
               </div>
             ) : rate.status === "basis_incomplete" ? (
               <Alert
@@ -1090,8 +1090,8 @@ export default function BadReturnPanel({
           <Alert
             type="info"
             showIcon
-            message="仓库确认才进入官方返还率分子"
-            description="外部入库引用可以留空；即使填写，本模块也只建立稳定关联，不直接写库存。"
+            message="仓库确认只更新试算返还率"
+            description="当前操作不形成官方返还率口径；外部入库引用可以留空，即使填写也只建立稳定关联，不直接写库存。"
           />
           {warehouseError && <Alert type="error" showIcon message={warehouseError} />}
           <label>

@@ -737,7 +737,7 @@ PERMISSION_META: dict[str, dict] = {
         "cannot": "不能人工点选豁免，不能超出应返数量，也不会冲减项目成本或直接增加库存。",
         "typical": ["管理员", "项目经理或仓库协同人员（需单独授权）"],
         "sensitivity": "critical",
-        "risk": "仓库确认会进入正式返还率分子；操作必须实名、幂等并保留追加式审计。",
+        "risk": "仓库确认量仅作返还率试算；官方返还率分子待业务确认。操作必须实名、幂等并保留追加式审计。",
     },
     "action_maintenance_acceptance_submit": {
         "label": "维保验收报告提交与附件上传",

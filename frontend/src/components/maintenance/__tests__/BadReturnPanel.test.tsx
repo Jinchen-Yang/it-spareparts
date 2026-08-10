@@ -31,7 +31,7 @@ function deferred<T>() {
 const returnRate = {
   project_id: "project-1",
   status: "basis_incomplete" as const,
-  official_basis: "warehouse_confirmed_v1" as const,
+  official_basis: null,
   official_rate_pct: null,
   registered_rate_pct: null,
   warehouse_confirmed_rate_pct: null,
@@ -44,7 +44,7 @@ const returnRate = {
   required_count: 1,
   exempt_count: 1,
   pending_count: 1,
-  business_assumption: "官方返还率以仓库确认数量为准",
+  business_assumption: "仓库确认量仅作试算；官方返还率分子待业务确认。",
 };
 
 const obligations = [{
@@ -313,7 +313,7 @@ describe("BadReturnPanel", () => {
     const availableRate = {
       ...returnRate,
       status: "available" as const,
-      official_rate_pct: "20.00",
+      official_rate_pct: null,
       registered_rate_pct: "40.00",
       warehouse_confirmed_rate_pct: "20.00",
       pending_quantity: "0.000",
@@ -334,6 +334,9 @@ describe("BadReturnPanel", () => {
     );
 
     const panel = await screen.findByTestId("bad-return-panel");
+    expect(within(panel).getByText("仓库确认返还率（试算）")).toBeInTheDocument();
+    expect(panel).toHaveTextContent("20%");
+    expect(panel).not.toHaveTextContent("官方返还率");
     const createButton = within(panel).getByRole("button", { name: "新建坏件返还单" });
     await waitFor(() => expect(createButton).toBeEnabled());
     fireEvent.click(createButton);
@@ -480,6 +483,8 @@ describe("BadReturnPanel", () => {
     const card = await screen.findByTestId("bad-return-card-return-1");
     fireEvent.click(within(card).getByRole("button", { name: "仓库确认" }));
     const dialog = await screen.findByRole("dialog", { name: "仓库确认坏件返还" });
+    expect(within(dialog).getByText("仓库确认只更新试算返还率")).toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent("官方返还率分子");
     fireEvent.change(within(dialog).getByLabelText("仓库确认参考"), {
       target: { value: "WH-CHECK-001" },
     });

@@ -213,6 +213,7 @@ def test_confirm_projects_exact_category_evidence_and_incomplete_rate(db):
     assert rows[pending.delivery_line_id]["classification"] == "pending_category"
     assert rows[pending.delivery_line_id]["category_id_snapshot"] is None
     assert payload["return_rate"]["status"] == "basis_incomplete"
+    assert payload["return_rate"]["official_basis"] is None
     assert payload["return_rate"]["official_rate_pct"] is None
     assert payload["return_rate"]["required_quantity"] == "3.000"
     assert payload["return_rate"]["exempt_quantity"] == "2.000"
@@ -842,7 +843,9 @@ def test_admin_resolves_pending_category_by_linking_standard_category_only(db):
         f"/api/maintenance/projects/stable/{project.project_id}/return-rate"
     ).json()
     assert rate["status"] == "available"
-    assert rate["official_rate_pct"] == "0.00"
+    assert rate["warehouse_confirmed_rate_pct"] == "0.00"
+    assert rate["official_basis"] is None
+    assert rate["official_rate_pct"] is None
 
     non_admin = _client(
         db,
@@ -941,7 +944,9 @@ def test_partial_return_lifecycle_is_recoverable_and_never_mutates_cost_or_inven
     assert registered_rate["registered_quantity"] == "2.000"
     assert registered_rate["registered_rate_pct"] == "40.00"
     assert registered_rate["warehouse_confirmed_quantity"] == "0.000"
-    assert registered_rate["official_rate_pct"] == "0.00"
+    assert registered_rate["warehouse_confirmed_rate_pct"] == "0.00"
+    assert registered_rate["official_basis"] is None
+    assert registered_rate["official_rate_pct"] is None
 
     in_transit = client.post(
         f"/api/maintenance/bad-returns/{draft['return_id']}/in-transit",
@@ -955,6 +960,12 @@ def test_partial_return_lifecycle_is_recoverable_and_never_mutates_cost_or_inven
     )
     assert in_transit.status_code == 200, in_transit.text
     assert in_transit.json()["status"] == "in_transit"
+    in_transit_rate = client.get(
+        f"/api/maintenance/projects/stable/{obligation.project_id}/return-rate"
+    ).json()
+    assert in_transit_rate["warehouse_confirmed_rate_pct"] == "0.00"
+    assert in_transit_rate["official_basis"] is None
+    assert in_transit_rate["official_rate_pct"] is None
 
     confirmed_return = client.post(
         f"/api/maintenance/bad-returns/{draft['return_id']}/warehouse-confirm",
@@ -970,12 +981,13 @@ def test_partial_return_lifecycle_is_recoverable_and_never_mutates_cost_or_inven
     assert confirmed_return.status_code == 200, confirmed_return.text
     assert confirmed_return.json()["status"] == "warehouse_confirmed"
     assert confirmed_return.json()["inbound_reference"] == "SYNTH-INBOUND-001"
-    official = client.get(
+    confirmed_rate = client.get(
         f"/api/maintenance/projects/stable/{obligation.project_id}/return-rate"
     ).json()
-    assert official["warehouse_confirmed_quantity"] == "2.000"
-    assert official["official_basis"] == "warehouse_confirmed_v1"
-    assert official["official_rate_pct"] == "40.00"
+    assert confirmed_rate["warehouse_confirmed_quantity"] == "2.000"
+    assert confirmed_rate["warehouse_confirmed_rate_pct"] == "40.00"
+    assert confirmed_rate["official_basis"] is None
+    assert confirmed_rate["official_rate_pct"] is None
 
     project = db.get(MaintenanceProject, obligation.project_id)
     assert project is not None
@@ -986,8 +998,8 @@ def test_partial_return_lifecycle_is_recoverable_and_never_mutates_cost_or_inven
         params={"as_of": "2026-08-09"},
     )
     assert workspace.status_code == 200, workspace.text
-    assert workspace.json()["return_rate"] == official
-    assert workspace.json()["project"]["return_rate"] == official
+    assert workspace.json()["return_rate"] == confirmed_rate
+    assert workspace.json()["project"]["return_rate"] == confirmed_rate
     directory = client.post(
         "/api/maintenance/projects/stable/operations/search",
         json={
@@ -997,7 +1009,7 @@ def test_partial_return_lifecycle_is_recoverable_and_never_mutates_cost_or_inven
         },
     )
     assert directory.status_code == 200, directory.text
-    assert directory.json()["rows"][0]["return_rate"] == official
+    assert directory.json()["rows"][0]["return_rate"] == confirmed_rate
 
     recovered = client.post(
         "/api/maintenance/bad-returns/search",
@@ -1513,6 +1525,7 @@ def test_all_hard_drive_obligations_report_no_return_required_not_one_hundred(db
     assert rate["status"] == "no_return_required"
     assert rate["required_quantity"] == "0.000"
     assert rate["exempt_quantity"] == "2.000"
+    assert rate["official_basis"] is None
     assert rate["official_rate_pct"] is None
 
 

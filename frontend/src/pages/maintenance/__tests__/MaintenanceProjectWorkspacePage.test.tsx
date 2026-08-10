@@ -47,8 +47,8 @@ import MaintenanceProjectWorkspacePage from "../MaintenanceProjectWorkspacePage"
 const workspaceReturnRate = {
   project_id: "project-1",
   status: "available" as const,
-  official_basis: "warehouse_confirmed_v1" as const,
-  official_rate_pct: "20.00",
+  official_basis: null,
+  official_rate_pct: null,
   registered_rate_pct: "40.00",
   warehouse_confirmed_rate_pct: "20.00",
   required_quantity: "5.000",
@@ -60,7 +60,7 @@ const workspaceReturnRate = {
   required_count: 1,
   exempt_count: 1,
   pending_count: 0,
-  business_assumption: "官方返还率以仓库确认数量为准",
+  business_assumption: "仓库确认量仅作试算；官方返还率分子待业务确认。",
 };
 
 const workspace = {
@@ -412,7 +412,8 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(screen.getByRole("button", { name: "新建领用单" })).toBeInTheDocument();
     expect(screen.getByTestId("bad-return-panel")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "新建坏件返还单" })).toBeInTheDocument();
-    expect(screen.getByText("仓库确认返还率")).toBeInTheDocument();
+    expect(screen.getByText("仓库确认返还率（试算）")).toBeInTheDocument();
+    expect(screen.queryByText("官方返还率")).toBeNull();
     expect(screen.queryByText(/扇形图|饼图/)).toBeNull();
   });
 

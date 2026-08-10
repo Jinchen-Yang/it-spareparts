@@ -386,7 +386,7 @@ export type MaintenanceReturnRateStatus =
 export interface MaintenanceReturnRate {
   project_id: string;
   status: MaintenanceReturnRateStatus;
-  official_basis: "warehouse_confirmed_v1";
+  official_basis: "warehouse_confirmed_v1" | null;
   official_rate_pct: string | null;
   registered_rate_pct: string | null;
   warehouse_confirmed_rate_pct: string | null;

@@ -44,12 +44,15 @@ INITIAL_PILOT_POLICY = {
     "replenishment_create": "exact-sha-live-canary-required",
     "replenishment_review": "deferred",
     "database_schema_migration": "required-prerequisite",
+    "maintenance_reader_eligibility": "active-primary-manager-assignment-required",
+    "replenishment_creator_role": "sales-required",
 }
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 SAFE_ACCOUNT = re.compile(r"[A-Za-z0-9_.@+-]{2,128}\Z")
 GENERIC_ACCOUNTS = frozenset({"admin", "administrator", "guest", "root", "shared", "test"})
+SYS_USER_ROLES = frozenset({"admin", "boss", "sales", "purchaser", "readonly"})
 MAINTENANCE_ACTIONS = (
     "action_maintenance_roundtrip_apply",
     "action_maintenance_manager_workbook_apply",
@@ -432,9 +435,9 @@ def _parse_allowlist(
             _fail("the Beta pilot must not contain generic/shared accounts")
         if username in seen:
             _fail(f"duplicate allowlist account: {username}")
-        if not isinstance(role, str) or not role or len(role) > 64:
+        if not isinstance(role, str) or role not in SYS_USER_ROLES:
             _fail(f"allowlist account {username} has an invalid role")
-        if role.casefold() == "admin":
+        if role == "admin":
             _fail(
                 "initial scoped pilot cannot contain admin because runtime Maintenance "
                 "write actions bypass ordinary action bits"
@@ -480,6 +483,10 @@ def _parse_allowlist(
                 used_evidence.add(key)
         if replenishment["action_replenishment_create"] and not replenishment["data_pool_price_governance"]:
             _fail(f"allowlist account {username} can create replenishment without price permission")
+        if replenishment["action_replenishment_create"] and role != "sales":
+            _fail(
+                f"allowlist account {username} replenishment creator must use role sales"
+            )
         if maintenance_enabled and replenishment_enabled:
             _fail(
                 f"allowlist account {username} crosses the Maintenance reader and "
@@ -511,6 +518,19 @@ def _parse_allowlist(
         {"username": row["username"], "role": row["role"], **row["replenishment"]}
         for row in normalized
     ]
+    eligibility_projection = [
+        {
+            "username": row["username"],
+            "has_active_primary_manager_assignment": bool(
+                row["maintenance"]["page_maintenance_beta"]
+            ),
+            "replenishment_creator_role_is_sales": (
+                not row["replenishment"]["action_replenishment_create"]
+                or row["role"] == "sales"
+            ),
+        }
+        for row in normalized
+    ]
     summary = {
         "account_count": len(normalized),
         "permission_graph_sha256": _sha256_bytes(_json_bytes(normalized)),
@@ -519,6 +539,9 @@ def _parse_allowlist(
         ),
         "replenishment_effective_permissions_sha256": _sha256_bytes(
             _json_bytes(replenishment_projection)
+        ),
+        "pilot_eligibility_sha256": _sha256_bytes(
+            _json_bytes(eligibility_projection)
         ),
         "canary_evidence_count": len(used_evidence),
         "empty_stage_sha256": _sha256_bytes(b""),
@@ -561,6 +584,12 @@ def _parse_allowlist(
             and not row["replenishment"]["data_pool_price_governance"]
             for row in normalized
         ),
+        "maintenance_reader_without_active_assignment_count": 0,
+        "replenishment_creator_non_sales_count": sum(
+            row["replenishment"]["action_replenishment_create"]
+            and row["role"] != "sales"
+            for row in normalized
+        ),
     }
     if summary["maintenance_read_account_count"] < 1:
         _fail("initial pilot requires at least one named Maintenance read account")
@@ -576,6 +605,8 @@ def _parse_allowlist(
         _fail("initial pilot reader contains a Replenishment action")
     if summary["replenishment_creator_missing_price_count"] != 0:
         _fail("initial pilot creator lacks the required price permission")
+    if summary["replenishment_creator_non_sales_count"] != 0:
+        _fail("initial pilot replenishment creator is not a sales account")
     return summary, copied_evidence
 
 
@@ -1345,10 +1376,15 @@ def _verify_package(package: Path) -> dict[str, Any]:
         _fail("initial scoped pilot manifest gives a reader a Replenishment action")
     if allowlist.get("replenishment_creator_missing_price_count") != 0:
         _fail("initial scoped pilot manifest contains a creator without price permission")
+    if allowlist.get("maintenance_reader_without_active_assignment_count") != 0:
+        _fail("initial scoped pilot manifest contains an unassigned Maintenance reader")
+    if allowlist.get("replenishment_creator_non_sales_count") != 0:
+        _fail("initial scoped pilot manifest contains a non-sales replenishment creator")
     for key in (
         "permission_graph_sha256",
         "maintenance_effective_permissions_sha256",
         "replenishment_effective_permissions_sha256",
+        "pilot_eligibility_sha256",
         "empty_stage_sha256",
     ):
         if not SHA256.fullmatch(str(allowlist.get(key, ""))):

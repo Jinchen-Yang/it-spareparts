@@ -32,12 +32,23 @@ def load_manifest_module():
     return module
 
 
-def run_live_projection(release: str, raw: str, mode: str) -> subprocess.CompletedProcess[str]:
-    marker = '  python3 - "$raw" "$mode" <<\'PY\'\n'
+def run_live_projection(
+    release: str,
+    raw: str,
+    mode: str,
+    assignment_raw: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    marker = '  python3 - "$raw" "$mode" "$assignment_raw" <<\'PY\'\n'
     start = release.index(marker) + len(marker)
     end = release.index("\nPY\n}", start)
+    if assignment_raw is None:
+        assignment_raw = "\n".join(
+            f"{line.split(chr(9), 1)[0]}\tt"
+            for line in raw.splitlines()
+            if line
+        )
     return subprocess.run(
-        ("python3", "-", raw, mode),
+        ("python3", "-", raw, mode, assignment_raw),
         cwd=ROOT,
         input=release[start:end],
         text=True,
@@ -134,6 +145,13 @@ def main() -> None:
     )
     assert module.INITIAL_PILOT_POLICY["replenishment_review"] == "deferred"
     assert module.INITIAL_PILOT_POLICY["database_schema_migration"] == "required-prerequisite"
+    assert module.INITIAL_PILOT_POLICY["maintenance_reader_eligibility"] == (
+        "active-primary-manager-assignment-required"
+    )
+    assert module.INITIAL_PILOT_POLICY["replenishment_creator_role"] == "sales-required"
+    assert module.SYS_USER_ROLES == frozenset(
+        {"admin", "boss", "sales", "purchaser", "readonly"}
+    )
     permission_source = (ROOT / "backend/app/permissions.py").read_text(encoding="utf-8")
     maintenance_permissions = set(
         re.findall(r'"(action_maintenance_[a-z_]+)"', permission_source)
@@ -176,6 +194,16 @@ def main() -> None:
     assert '"can_create": True' in release
     assert '"can_review": False' in release
     assert "replenishment creator catalog smoke failed" in release
+    assert 'login.get("role") != "sales"' in release
+    assert "replenishment creator must use a sales account" in release
+    assert "owner_scope=me&include_inactive=true&lifecycle=all&page_size=1" in release
+    assert "Maintenance reader has no active project assignment" in release
+    second_allowlist_check = release.index(
+        "pilot eligibility drifted during smoke"
+    )
+    smoke_creator_check = release.index('  smoke creator "$3" \\')
+    pilot_state_write = release.index("  state_update pilot_open")
+    assert smoke_creator_check < second_allowlist_check < pilot_state_write
     replenishment_source = (ROOT / "backend/app/api/replenishment.py").read_text(
         encoding="utf-8"
     )
@@ -186,12 +214,12 @@ def main() -> None:
     review_route = replenishment_source[review_start:review_end]
     assert "_page: None = Depends(_beta_page_whitelist)" in review_route
     reader_projection_row = "\t".join(
-        ["named.reader", "project_manager", "t", "t"]
+        ["named.reader", "purchaser", "t", "t"]
         + ["f"] * len(module.MAINTENANCE_ACTIONS)
         + ["f", "t", "f", "f"]
     )
     creator_projection_row = "\t".join(
-        ["named.pilot", "purchaser", "f", "f"]
+        ["named.pilot", "sales", "f", "f"]
         + ["f"] * len(module.MAINTENANCE_ACTIONS)
         + ["t", "t", "t", "f"]
     )
@@ -211,6 +239,54 @@ def main() -> None:
     assert safe_projection_data["replenishment_noncreator_account_count"] == 0
     assert safe_projection_data["reader_replenishment_action_enabled_count"] == 0
     assert safe_projection_data["replenishment_creator_missing_price_count"] == 0
+    assert safe_projection_data["maintenance_reader_without_active_assignment_count"] == 0
+    assert safe_projection_data["replenishment_creator_non_sales_count"] == 0
+    assert re.fullmatch(
+        r"[0-9a-f]{64}", safe_projection_data["pilot_eligibility_sha256"]
+    )
+    pages_projection = run_live_projection(
+        release,
+        creator_projection_row,
+        "pages",
+        "",
+    )
+    assert pages_projection.returncode == 0, pages_projection.stderr
+    assert json.loads(pages_projection.stdout)["account_count"] == 1
+    missing_assignment_projection = run_live_projection(
+        release,
+        "\n".join((reader_projection_row, creator_projection_row)),
+        "full",
+        "named.reader\tf\nnamed.pilot\tf",
+    )
+    assert missing_assignment_projection.returncode != 0
+    assert "no active primary-manager assignment" in missing_assignment_projection.stderr
+    missing_assignment_evidence = run_live_projection(
+        release,
+        "\n".join((reader_projection_row, creator_projection_row)),
+        "full",
+        "named.pilot\tf",
+    )
+    assert missing_assignment_evidence.returncode != 0
+    assert "assignment evidence is missing" in missing_assignment_evidence.stderr
+    malformed_assignment_evidence = run_live_projection(
+        release,
+        "\n".join((reader_projection_row, creator_projection_row)),
+        "full",
+        "named.reader\tunknown",
+    )
+    assert malformed_assignment_evidence.returncode != 0
+    assert "malformed live project-manager assignment" in (
+        malformed_assignment_evidence.stderr
+    )
+    non_sales_creator_fields = creator_projection_row.split("\t")
+    non_sales_creator_fields[1] = "purchaser"
+    non_sales_creator_projection = run_live_projection(
+        release,
+        "\n".join((reader_projection_row, "\t".join(non_sales_creator_fields))),
+        "full",
+    )
+    assert non_sales_creator_projection.returncode != 0
+    assert "not a sales account" in non_sales_creator_projection.stderr
     cross_domain_projection = run_live_projection(
         release,
         "\n".join(
@@ -303,12 +379,12 @@ def main() -> None:
             "accounts": [
                 {
                     "username": "named.reader",
-                    "role": "project_manager",
+                    "role": "purchaser",
                     **permissions(maintenance=True, replenishment=False),
                 },
                 {
                     "username": "named.pilot",
-                    "role": "purchaser",
+                    "role": "sales",
                     **permissions(maintenance=False, replenishment=True),
                 },
             ],
@@ -324,18 +400,30 @@ def main() -> None:
         else:
             raise AssertionError("pilot without a replenishment creator was accepted")
 
-        for admin_role in ("admin", "Admin"):
-            admin = json.loads(json.dumps(safe))
-            admin["accounts"][0]["role"] = admin_role
-            path.write_text(json.dumps(admin), encoding="utf-8")
+        admin = json.loads(json.dumps(safe))
+        admin["accounts"][0]["role"] = "admin"
+        path.write_text(json.dumps(admin), encoding="utf-8")
+        try:
+            module._parse_allowlist(
+                path, repository="Example/it-spareparts", target=head
+            )
+        except module.ManifestError as exc:
+            assert "admin" in str(exc)
+        else:
+            raise AssertionError("Maintenance Beta admin pilot was accepted")
+
+        for invalid_role in ("project_manager", "Sales", "Admin"):
+            invalid = json.loads(json.dumps(safe))
+            invalid["accounts"][0]["role"] = invalid_role
+            path.write_text(json.dumps(invalid), encoding="utf-8")
             try:
                 module._parse_allowlist(
                     path, repository="Example/it-spareparts", target=head
                 )
             except module.ManifestError as exc:
-                assert "admin" in str(exc)
+                assert "invalid role" in str(exc)
             else:
-                raise AssertionError("Maintenance Beta admin pilot was accepted")
+                raise AssertionError(f"invalid pilot role was accepted: {invalid_role}")
 
         replenishment_only_admin = {
             "format": "v121-beta-allowlist-v1",
@@ -565,10 +653,28 @@ def main() -> None:
         assert summary["replenishment_noncreator_account_count"] == 0
         assert summary["reader_replenishment_action_enabled_count"] == 0
         assert summary["replenishment_creator_missing_price_count"] == 0
+        assert summary["maintenance_reader_without_active_assignment_count"] == 0
+        assert summary["replenishment_creator_non_sales_count"] == 0
+        assert re.fullmatch(r"[0-9a-f]{64}", summary["pilot_eligibility_sha256"])
         assert replenishment_write["accounts"][0]["replenishment"][
             "data_pool_price_governance"
         ] is True
         assert evidence == [replenishment_path]
+
+        for non_sales_role in ("purchaser", "boss", "readonly"):
+            non_sales_creator = json.loads(json.dumps(replenishment_write))
+            non_sales_creator["accounts"][1]["role"] = non_sales_role
+            path.write_text(json.dumps(non_sales_creator), encoding="utf-8")
+            try:
+                module._parse_allowlist(
+                    path, repository="Example/it-spareparts", target=head
+                )
+            except module.ManifestError as exc:
+                assert "creator must use role sales" in str(exc)
+            else:
+                raise AssertionError(
+                    f"non-sales replenishment creator was accepted: {non_sales_role}"
+                )
 
         cross_domain = json.loads(json.dumps(replenishment_write))
         cross_domain["accounts"][1]["maintenance"]["page_maintenance"] = True

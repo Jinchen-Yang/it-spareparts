@@ -78,7 +78,7 @@ const summary = {
   return_rate: {
     project_id: "project-1",
     status: "basis_incomplete",
-    official_basis: "warehouse_confirmed_v1",
+    official_basis: null,
     official_rate_pct: null,
     registered_rate_pct: null,
     warehouse_confirmed_rate_pct: null,
@@ -91,7 +91,7 @@ const summary = {
     required_count: 1,
     exempt_count: 1,
     pending_count: 1,
-    business_assumption: "官方返还率以仓库确认数量为准",
+    business_assumption: "仓库确认量仅作试算；官方返还率分子待业务确认。",
   },
   reminder_count: 4,
   manager_assignment: {
@@ -193,6 +193,36 @@ describe("MaintenanceProjectsPage", () => {
     expect(screen.getByTestId("maintenance-project-grid")).toHaveClass(
       "maintenance-project-grid",
     );
+  });
+
+  it("官方口径未确认时只展示仓库确认试算值", async () => {
+    listMaintenanceProjectOperations.mockResolvedValueOnce({
+      data: {
+        rows: [{
+          ...summary,
+          return_rate: {
+            ...summary.return_rate,
+            status: "available",
+            official_basis: null,
+            official_rate_pct: null,
+            warehouse_confirmed_rate_pct: "20.00",
+            pending_quantity: "0.000",
+            pending_count: 0,
+          },
+        }],
+        total: 1,
+        page: 1,
+        page_size: 24,
+        as_of: "2026-08-08",
+        data_version: "v1",
+      },
+    });
+
+    render(<MemoryRouter><MaintenanceProjectsPage /></MemoryRouter>);
+
+    const returnStatus = await screen.findByTestId("project-return-status");
+    expect(within(returnStatus).getByText("返还率试算 20.00%")).toBeInTheDocument();
+    expect(returnStatus).not.toHaveTextContent("官方返还率");
   });
 
   it("搜索一次只产生一个新的批量摘要请求", async () => {

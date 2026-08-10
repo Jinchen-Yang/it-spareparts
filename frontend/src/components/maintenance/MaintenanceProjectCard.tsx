@@ -18,8 +18,8 @@ function ProjectReturnStatus({ project }: { project: MaintenanceProjectOperation
   if (!rate) return null;
   return (
     <Space data-testid="project-return-status" wrap size={[6, 6]}>
-      {rate.status === "available" && rate.official_rate_pct != null ? (
-        <Tag color="blue">返还率 {rate.official_rate_pct}%</Tag>
+      {rate.status === "available" && rate.warehouse_confirmed_rate_pct != null ? (
+        <Tag color="blue">返还率试算 {rate.warehouse_confirmed_rate_pct}%</Tag>
       ) : rate.status === "basis_incomplete" ? (
         <Tag color="orange">返还率待判定</Tag>
       ) : (

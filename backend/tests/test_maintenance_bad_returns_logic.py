@@ -33,7 +33,7 @@ def test_only_standard_hard_drive_category_is_exempt() -> None:
     )["classification"] == "pending_category"
 
 
-def test_return_rate_never_fabricates_a_percentage_for_incomplete_or_empty_basis() -> None:
+def test_return_rate_never_fabricates_an_official_percentage() -> None:
     incomplete = calculate_return_rate(
         required_quantity=Decimal("10"),
         exempt_quantity=Decimal("2"),
@@ -44,6 +44,8 @@ def test_return_rate_never_fabricates_a_percentage_for_incomplete_or_empty_basis
     assert incomplete["status"] == "basis_incomplete"
     assert incomplete["registered_rate_pct"] is None
     assert incomplete["warehouse_confirmed_rate_pct"] is None
+    assert incomplete["official_basis"] is None
+    assert incomplete["official_rate_pct"] is None
 
     empty = calculate_return_rate(
         required_quantity=Decimal("0"),
@@ -53,6 +55,7 @@ def test_return_rate_never_fabricates_a_percentage_for_incomplete_or_empty_basis
         warehouse_confirmed_quantity=Decimal("0"),
     )
     assert empty["status"] == "no_return_required"
+    assert empty["official_basis"] is None
     assert empty["official_rate_pct"] is None
 
     available = calculate_return_rate(
@@ -65,5 +68,5 @@ def test_return_rate_never_fabricates_a_percentage_for_incomplete_or_empty_basis
     assert available["status"] == "available"
     assert available["registered_rate_pct"] == "75.00"
     assert available["warehouse_confirmed_rate_pct"] == "50.00"
-    assert available["official_basis"] == "warehouse_confirmed_v1"
-    assert available["official_rate_pct"] == "50.00"
+    assert available["official_basis"] is None
+    assert available["official_rate_pct"] is None

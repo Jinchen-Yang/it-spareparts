@@ -584,7 +584,7 @@ PY
 
 live_allowlist_json() {
   local mode=${1:-full}
-  local raw snapshot_issues
+  local raw snapshot_issues assignment_raw=
   snapshot_issues=$(compose exec -T db psql -X -U spareparts -d spareparts -At <<'SQL'
 SELECT count(*)
 FROM sys_user
@@ -659,7 +659,26 @@ FROM effective
 ORDER BY username;
 SQL
   ) || return 1
-  python3 - "$raw" "$mode" <<'PY'
+  if [ "$mode" = full ]; then
+    assignment_raw=$(compose exec -T db psql -X -U spareparts -d spareparts -At -F $'\t' <<'SQL'
+SELECT u.username,
+       EXISTS (
+         SELECT 1
+         FROM maintenance_project_user_assignment AS a
+         WHERE a.user_id = u.id
+           AND a.responsibility_type = 'primary_manager'
+           AND a.archived_at IS NULL
+       )
+FROM sys_user AS u
+WHERE u.is_active IS TRUE
+ORDER BY u.username;
+SQL
+    ) || return 1
+  elif [ "$mode" != pages ]; then
+    printf 'unknown allowlist projection mode\n' >&2
+    return 1
+  fi
+  python3 - "$raw" "$mode" "$assignment_raw" <<'PY'
 import hashlib
 import json
 import sys
@@ -677,11 +696,23 @@ replenishment_keys = (
     "page_replenishment_beta", "data_pool_price_governance",
     "action_replenishment_create", "action_replenishment_review",
 )
+sys_user_roles={"admin","boss","sales","purchaser","readonly"}
+assignment_by_username={}
+if sys.argv[2] == "full":
+    for line in sys.argv[3].splitlines():
+        fields=line.split("\t")
+        if len(fields) != 2 or not fields[0] or fields[1] not in {"t","f"}:
+            raise SystemExit("malformed live project-manager assignment row")
+        if fields[0] in assignment_by_username:
+            raise SystemExit("duplicate live project-manager assignment row")
+        assignment_by_username[fields[0]]=fields[1] == "t"
 rows=[]
 for line in sys.argv[1].splitlines():
     fields=line.split("\t")
     if len(fields) != 2 + len(maintenance_keys) + len(replenishment_keys):
         raise SystemExit("malformed live allowlist row")
+    if fields[1] not in sys_user_roles:
+        raise SystemExit("initial pilot contains an invalid sys_user role")
     values=[value == "t" for value in fields[2:]]
     if any(value not in {"t","f"} for value in fields[2:]):
         raise SystemExit("malformed live allowlist boolean")
@@ -710,6 +741,24 @@ for line in sys.argv[1].splitlines():
                  "maintenance":dict(sorted(maintenance.items())),
                  "replenishment":dict(sorted(replenishment.items()))})
 rows.sort(key=lambda row: row["username"])
+eligibility=[]
+for row in rows:
+    is_reader=row["maintenance"]["page_maintenance_beta"]
+    if sys.argv[2] == "full" and is_reader and row["username"] not in assignment_by_username:
+        raise SystemExit("Maintenance reader assignment evidence is missing")
+    has_assignment=(
+        assignment_by_username.get(row["username"],False)
+        if sys.argv[2] == "full" and is_reader
+        else False
+    )
+    eligibility.append({
+        "username":row["username"],
+        "has_active_primary_manager_assignment":has_assignment,
+        "replenishment_creator_role_is_sales":(
+            not row["replenishment"]["action_replenishment_create"]
+            or row["role"] == "sales"
+        ),
+    })
 maintenance_write_enabled_count=sum(
     value
     for row in rows
@@ -749,6 +798,16 @@ replenishment_creator_missing_price_count=sum(
     and not row["replenishment"]["data_pool_price_governance"]
     for row in rows
 )
+maintenance_reader_without_active_assignment_count=sum(
+    row["maintenance"]["page_maintenance_beta"]
+    and not eligibility[index]["has_active_primary_manager_assignment"]
+    for index,row in enumerate(rows)
+)
+replenishment_creator_non_sales_count=sum(
+    row["replenishment"]["action_replenishment_create"]
+    and row["role"] != "sales"
+    for row in rows
+)
 if maintenance_write_enabled_count:
     raise SystemExit("initial pilot exposes a raw runtime-effective Maintenance write action")
 if admin_pilot_count:
@@ -764,6 +823,10 @@ if sys.argv[2] == "full":
         raise SystemExit("initial pilot reader contains a Replenishment action")
     if replenishment_creator_missing_price_count:
         raise SystemExit("initial pilot creator lacks the required price permission")
+    if maintenance_reader_without_active_assignment_count:
+        raise SystemExit("Maintenance reader has no active primary-manager assignment")
+    if replenishment_creator_non_sales_count:
+        raise SystemExit("initial pilot replenishment creator is not a sales account")
     if maintenance_read_account_count < 1:
         raise SystemExit("initial pilot has no live Maintenance reader")
     if replenishment_creator_account_count < 1:
@@ -780,6 +843,7 @@ result={
   "permission_graph_sha256":digest(rows),
   "maintenance_effective_permissions_sha256":digest(maintenance),
   "replenishment_effective_permissions_sha256":digest(replenishment),
+  "pilot_eligibility_sha256":digest(eligibility),
   "maintenance_write_enabled_count":maintenance_write_enabled_count,
   "admin_pilot_count":admin_pilot_count,
   "maintenance_read_account_count":maintenance_read_account_count,
@@ -789,6 +853,8 @@ result={
   "replenishment_noncreator_account_count":replenishment_noncreator_account_count,
   "reader_replenishment_action_enabled_count":reader_replenishment_action_enabled_count,
   "replenishment_creator_missing_price_count":replenishment_creator_missing_price_count,
+  "maintenance_reader_without_active_assignment_count":maintenance_reader_without_active_assignment_count,
+  "replenishment_creator_non_sales_count":replenishment_creator_non_sales_count,
 }
 print(json.dumps(result,sort_keys=True,separators=(",",":")))
 PY
@@ -827,6 +893,9 @@ for key in (
     "cross_domain_account_count", "replenishment_noncreator_account_count",
     "reader_replenishment_action_enabled_count",
     "replenishment_creator_missing_price_count",
+    "pilot_eligibility_sha256",
+    "maintenance_reader_without_active_assignment_count",
+    "replenishment_creator_non_sales_count",
 ):
     if live[key] != expected[key]:
         raise SystemExit(f"live intended Beta permission graph mismatch: {key}")
@@ -907,6 +976,8 @@ if mode == "reader":
             "credential is not the scoped Maintenance reader: "+",".join(drift)
         )
 if mode == "creator":
+    if login.get("role") != "sales":
+        raise SystemExit("replenishment creator must use a sales account")
     creator_profile = {
         "page_maintenance_beta": False,
         "page_replenishment_beta": True,
@@ -947,6 +1018,20 @@ elif mode == "reader":
     status, _=request("/api/maintenance/projects/stable?page_size=1",token=token)
     if status != 200:
         raise SystemExit(f"Maintenance Beta reader smoke failed: {status}")
+    status, assigned=request(
+        "/api/maintenance/projects/stable/operations?owner_scope=me&include_inactive=true&lifecycle=all&page_size=1",
+        token=token,
+    )
+    if (
+        status != 200
+        or not isinstance(assigned,dict)
+        or assigned.get("owner_scope") != "me"
+        or not isinstance(assigned.get("total"),int)
+        or assigned["total"] < 1
+        or not isinstance(assigned.get("rows"),list)
+        or not assigned["rows"]
+    ):
+        raise SystemExit("Maintenance reader has no active project assignment")
     status, _=request("/api/replenishment-beta/catalog?page_size=1",token=token)
     if status not in {403,404}:
         raise SystemExit(f"Maintenance reader unexpectedly accesses replenishment: {status}")
@@ -1393,6 +1478,8 @@ pilot_smoke() {
     || contain_failed_open "pilot Maintenance reader smoke failed"
   smoke creator "$3" \
     || contain_failed_open "pilot creator smoke failed"
+  assert_intended_allowlist \
+    || contain_failed_open "pilot eligibility drifted during smoke"
   current_app_cid=$(service_cid app) \
     || contain_failed_open "cannot recheck pilot app container"
   current_frontend_cid=$(service_cid frontend) \
