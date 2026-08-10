@@ -31,6 +31,7 @@ def _admin_client(db, username: str = "source_assignment_admin") -> TestClient:
             role="admin",
             display_name="合成维保归属管理员",
             password_hash=hash_password("synthetic-password-123"),
+            permissions={"page_maintenance_beta": True},
         )
     )
     db.commit()
