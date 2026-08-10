@@ -152,6 +152,17 @@ def main() -> None:
     assert module.SYS_USER_ROLES == frozenset(
         {"admin", "boss", "sales", "purchaser", "readonly"}
     )
+    runbook = (
+        ROOT / "docs/releases/v1.21-maintenance-beta-runbook.md"
+    ).read_text(encoding="utf-8")
+    for required_runbook_contract in (
+        "active `primary_manager`",
+        "`sales` 角色",
+        "`pilot_eligibility_sha256`",
+        "`maintenance_reader_without_active_assignment_count=0`",
+        "`replenishment_creator_non_sales_count=0`",
+    ):
+        assert required_runbook_contract in runbook
     permission_source = (ROOT / "backend/app/permissions.py").read_text(encoding="utf-8")
     maintenance_permissions = set(
         re.findall(r'"(action_maintenance_[a-z_]+)"', permission_source)
