@@ -32,6 +32,21 @@ def load_manifest_module():
     return module
 
 
+def run_live_projection(release: str, raw: str, mode: str) -> subprocess.CompletedProcess[str]:
+    marker = '  python3 - "$raw" "$mode" <<\'PY\'\n'
+    start = release.index(marker) + len(marker)
+    end = release.index("\nPY\n}", start)
+    return subprocess.run(
+        ("python3", "-", raw, mode),
+        cwd=ROOT,
+        input=release[start:end],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
 def permissions(*, maintenance: bool, replenishment: bool) -> dict:
     module = load_manifest_module()
     maintenance_graph = {
@@ -87,8 +102,88 @@ def main() -> None:
     assert "stopped before package verification" in release
     assert "pilot app/frontend restarted before the observation baseline" in release
     assert "completed outside its two-minute window" in release
+    assert '"MAINTENANCE_CUTOVER_ENABLED": "true"' not in release
+    assert "MAINTENANCE_CUTOVER_ENABLED=true" not in release
+    assert release.count('"MAINTENANCE_CUTOVER_ENABLED": "false"') == 1
+    assert not re.search(r"\bset_flags\s+(?:true|false)\s+(?:true|false)\s+(?:true|false)", release)
+    flag_assertions = re.findall(
+        r"\bassert_flags\s+(true|false)\s+(true|false)\s+(true|false)", release
+    )
+    assert flag_assertions and all(cutover == "false" for _, _, cutover in flag_assertions)
+    assert "cutover)" not in release
+    assert "EXPECTED_FROM=f1c8e4a7b2d9" in release
+    assert "EXPECTED_TO=d9f1a3c7e5b2" in release
+    assert all(
+        command in release
+        for command in ("backup-restore", "migrate", "pilot-smoke", "observe")
+    )
+    assert "allowed pilot exposes Maintenance write actions" in release
 
     module = load_manifest_module()
+    assert module.PILOT_REVIEW_SCOPE == "stable-plus-beta-pilot-cutover-disabled"
+    assert module.INITIAL_PILOT_POLICY["maintenance_cutover_enabled"] is False
+    assert module.INITIAL_PILOT_POLICY["maintenance_write_actions"] == "excluded"
+    assert module.INITIAL_PILOT_POLICY["maintenance_business_data_migration"] == "deferred"
+    assert module.INITIAL_PILOT_POLICY["maintenance_cutover"] == "deferred"
+    assert module.INITIAL_PILOT_POLICY["admin_pilots"] == "excluded"
+    assert module.INITIAL_PILOT_POLICY["permission_projection"] == "raw-runtime-effective"
+    assert module.INITIAL_PILOT_POLICY["database_schema_migration"] == "required-prerequisite"
+    permission_source = (ROOT / "backend/app/permissions.py").read_text(encoding="utf-8")
+    maintenance_permissions = set(
+        re.findall(r'"(action_maintenance_[a-z_]+)"', permission_source)
+    )
+    assert set(module.MAINTENANCE_ACTIONS) == maintenance_permissions
+    assert all(action in release for action in module.MAINTENANCE_ACTIONS)
+    smoke_guard_start = release.index('if mode == "allow":\n    maintenance_actions = (')
+    smoke_guard_end = release.index("\nstatus, features=", smoke_guard_start)
+    smoke_guard = release[smoke_guard_start:smoke_guard_end]
+    assert set(re.findall(r'"(action_maintenance_[a-z_]+)"', smoke_guard)) == set(
+        module.MAINTENANCE_ACTIONS
+    )
+    replenishment_source = (ROOT / "backend/app/api/replenishment.py").read_text(
+        encoding="utf-8"
+    )
+    review_start = replenishment_source.index(
+        '@router.post("/applications/{application_id}/review-results")'
+    )
+    review_end = replenishment_source.index("\n@router.", review_start + 1)
+    review_route = replenishment_source[review_start:review_end]
+    assert "_page: None = Depends(_beta_page_whitelist)" in review_route
+    safe_projection = run_live_projection(
+        release,
+        "\t".join(
+            ["named.pilot", "project_manager", "t", "t"]
+            + ["f"] * len(module.MAINTENANCE_ACTIONS)
+            + ["f"] * len(module.REPLENISHMENT_KEYS)
+        ),
+        "full",
+    )
+    assert safe_projection.returncode == 0, safe_projection.stderr
+    safe_projection_data = json.loads(safe_projection.stdout)
+    assert safe_projection_data["maintenance_write_enabled_count"] == 0
+    assert safe_projection_data["admin_pilot_count"] == 0
+    hidden_maintenance_write = run_live_projection(
+        release,
+        "\t".join(
+            ["replenishment.pilot", "sales", "t", "f", "t"]
+            + ["f"] * (len(module.MAINTENANCE_ACTIONS) - 1)
+            + ["t", "t", "f", "f"]
+        ),
+        "full",
+    )
+    assert hidden_maintenance_write.returncode != 0
+    assert "raw runtime-effective Maintenance write" in hidden_maintenance_write.stderr
+    admin_callback = run_live_projection(
+        release,
+        "\t".join(
+            ["named.admin", "admin"]
+            + ["f"] * (2 + len(module.MAINTENANCE_ACTIONS))
+            + ["t", "f", "f", "f"]
+        ),
+        "full",
+    )
+    assert admin_callback.returncode != 0
+    assert "raw runtime-effective Maintenance write" in admin_callback.stderr
     assert set(module.ACTION_CANARY_ROUTES) == {
         *module.MAINTENANCE_ACTIONS,
         "action_replenishment_create",
@@ -128,15 +223,52 @@ def main() -> None:
         )
         assert summary["account_count"] == 1 and not evidence
 
-        admin = json.loads(json.dumps(safe))
-        admin["accounts"][0]["role"] = "admin"
-        path.write_text(json.dumps(admin), encoding="utf-8")
+        for admin_role in ("admin", "Admin"):
+            admin = json.loads(json.dumps(safe))
+            admin["accounts"][0]["role"] = admin_role
+            path.write_text(json.dumps(admin), encoding="utf-8")
+            try:
+                module._parse_allowlist(
+                    path, repository="Example/it-spareparts", target=head
+                )
+            except module.ManifestError:
+                pass
+            else:
+                raise AssertionError("Maintenance Beta admin pilot was accepted")
+
+        replenishment_only_admin = {
+            "format": "v121-beta-allowlist-v1",
+            "accounts": [
+                {
+                    "username": "named.admin",
+                    "role": "admin",
+                    **permissions(maintenance=False, replenishment=True),
+                }
+            ],
+            "canary_evidence": [],
+        }
+        path.write_text(json.dumps(replenishment_only_admin), encoding="utf-8")
         try:
             module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
         except module.ManifestError:
             pass
         else:
-            raise AssertionError("Maintenance Beta admin pilot was accepted")
+            raise AssertionError("Replenishment-only admin bypassed the scoped pilot boundary")
+
+        for maintenance_action in module.MAINTENANCE_ACTIONS:
+            maintenance_write = json.loads(json.dumps(safe))
+            maintenance_write["accounts"][0]["maintenance"][maintenance_action] = True
+            path.write_text(json.dumps(maintenance_write), encoding="utf-8")
+            try:
+                module._parse_allowlist(
+                    path, repository="Example/it-spareparts", target=head
+                )
+            except module.ManifestError:
+                pass
+            else:
+                raise AssertionError(
+                    f"initial pilot accepted Maintenance write: {maintenance_action}"
+                )
 
         canary = {
             "format": "v121-action-canary-v1",
@@ -165,8 +297,6 @@ def main() -> None:
             },
             "conclusion": "passed",
         }
-        canary_path = folder / "site-issue-canary.json"
-        canary_path.write_text(json.dumps(canary), encoding="utf-8")
         canary_body = {
             key: canary[key]
             for key in (
@@ -195,6 +325,8 @@ def main() -> None:
             target=head,
         )
         assert captured_canary["executor_id"] == "reviewer.one"
+        canary_path = folder / "site-issue-canary.json"
+        canary_path.write_text(json.dumps(captured_canary), encoding="utf-8")
         allowed_write = json.loads(json.dumps(safe))
         allowed_write["accounts"][0]["maintenance"][canary["action"]] = True
         allowed_write["canary_evidence"] = [
@@ -208,45 +340,253 @@ def main() -> None:
             }
         ]
         path.write_text(json.dumps(allowed_write), encoding="utf-8")
+        try:
+            module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
+        except module.ManifestError:
+            pass
+        else:
+            raise AssertionError("Maintenance canary bypassed the scoped pilot write exclusion")
+
+        replenishment_body = {
+            "format": "v121-action-canary-v1",
+            "username": "named.pilot",
+            "action": "action_replenishment_create",
+            "target_sha": head,
+            "environment": "isolated",
+            "request": {
+                "method": "POST",
+                "route_template": "/api/replenishment-beta/applications",
+                "path": "/api/replenishment-beta/applications",
+                "payload_sha256": "3" * 64,
+            },
+            "result": {
+                "expected_status": 201,
+                "observed_status": 201,
+                "response_sha256": "4" * 64,
+            },
+            "conclusion": "passed",
+        }
+        captured_replenishment = module._canary_comment_evidence(
+            {
+                "body": json.dumps(replenishment_body),
+                "user": {"login": "reviewer.one", "type": "User"},
+                "author_association": "COLLABORATOR",
+                "commit_id": head,
+                "created_at": "2026-08-10T12:00:00Z",
+                "updated_at": "2026-08-10T12:00:00Z",
+                "id": 124,
+                "html_url": (
+                    f"https://github.com/Example/it-spareparts/commit/{head}"
+                    "#commitcomment-124"
+                ),
+            },
+            repository="Example/it-spareparts",
+            target=head,
+        )
+        canary_failures = []
+        wrong_route_body = json.loads(json.dumps(replenishment_body))
+        wrong_route_body["request"]["path"] = "/api/replenishment-beta/catalog"
+        canary_failures.append(("wrong route", wrong_route_body, {}))
+        wrong_method_body = json.loads(json.dumps(replenishment_body))
+        wrong_method_body["request"]["method"] = "PUT"
+        canary_failures.append(("wrong method", wrong_method_body, {}))
+        wrong_sha_body = json.loads(json.dumps(replenishment_body))
+        wrong_sha_body["target_sha"] = "0" * 40
+        canary_failures.append(("wrong SHA", wrong_sha_body, {}))
+        canary_failures.append(
+            (
+                "edited comment",
+                replenishment_body,
+                {"updated_at": "2026-08-10T12:01:00Z"},
+            )
+        )
+        canary_failures.append(
+            (
+                "non-collaborator",
+                replenishment_body,
+                {"author_association": "NONE"},
+            )
+        )
+        for label, body, overrides in canary_failures:
+            payload = {
+                "body": json.dumps(body),
+                "user": {"login": "reviewer.one", "type": "User"},
+                "author_association": "COLLABORATOR",
+                "commit_id": head,
+                "created_at": "2026-08-10T12:00:00Z",
+                "updated_at": "2026-08-10T12:00:00Z",
+                "id": 224,
+                "html_url": (
+                    f"https://github.com/Example/it-spareparts/commit/{head}"
+                    "#commitcomment-224"
+                ),
+                **overrides,
+            }
+            try:
+                module._canary_comment_evidence(
+                    payload,
+                    repository="Example/it-spareparts",
+                    target=head,
+                )
+            except module.ManifestError:
+                pass
+            else:
+                raise AssertionError(f"canary accepted {label}")
+        replenishment_path = folder / "replenishment-create-canary.json"
+        replenishment_path.write_text(
+            json.dumps(captured_replenishment), encoding="utf-8"
+        )
+        replenishment_write = json.loads(json.dumps(safe))
+        replenishment_write["accounts"][0]["replenishment"][
+            "action_replenishment_create"
+        ] = True
+        replenishment_write["canary_evidence"] = [
+            {
+                "username": "named.pilot",
+                "action": "action_replenishment_create",
+                "target_sha": head,
+                "conclusion": "passed",
+                "path": replenishment_path.name,
+                "sha256": hashlib.sha256(replenishment_path.read_bytes()).hexdigest(),
+            }
+        ]
+        path.write_text(json.dumps(replenishment_write), encoding="utf-8")
         summary, evidence = module._parse_allowlist(
             path, repository="Example/it-spareparts", target=head
         )
-        assert summary["canary_evidence_count"] == 1 and evidence == [canary_path]
+        assert summary["canary_evidence_count"] == 1
+        assert summary["maintenance_write_enabled_count"] == 0
+        assert summary["admin_pilot_count"] == 0
+        assert evidence == [replenishment_path]
 
-        wrong_route_canary = json.loads(json.dumps(canary))
-        wrong_route_canary["request"]["path"] = "/api/maintenance/bad-returns"
-        canary_path.write_text(json.dumps(wrong_route_canary), encoding="utf-8")
-        allowed_write["canary_evidence"][0]["sha256"] = hashlib.sha256(
-            canary_path.read_bytes()
-        ).hexdigest()
-        path.write_text(json.dumps(allowed_write), encoding="utf-8")
+        original_fetch_canary = module._fetch_canary_comment
+        module._fetch_canary_comment = lambda **_kwargs: {
+            **captured_replenishment,
+            "comment_id": 999,
+        }
+        try:
+            try:
+                module._parse_allowlist(
+                    path,
+                    repository="Example/it-spareparts",
+                    target=head,
+                    verify_live_canaries=True,
+                )
+            except module.ManifestError:
+                pass
+            else:
+                raise AssertionError("GitHub live canary drift was accepted")
+        finally:
+            module._fetch_canary_comment = original_fetch_canary
+
+        unused_maintenance_canary = json.loads(json.dumps(safe))
+        unused_maintenance_canary["canary_evidence"] = [
+            {
+                "username": canary["username"],
+                "action": canary["action"],
+                "target_sha": head,
+                "conclusion": "passed",
+                "path": canary_path.name,
+                "sha256": hashlib.sha256(canary_path.read_bytes()).hexdigest(),
+            }
+        ]
+        path.write_text(json.dumps(unused_maintenance_canary), encoding="utf-8")
         try:
             module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
         except module.ManifestError:
             pass
         else:
-            raise AssertionError("canary for a different API route was accepted")
+            raise AssertionError("unused Maintenance canary was accepted")
 
-        malformed_canary = json.loads(json.dumps(canary))
-        malformed_canary["result"]["observed_status"] = 500
-        canary_path.write_text(json.dumps(malformed_canary), encoding="utf-8")
-        allowed_write["canary_evidence"][0]["sha256"] = hashlib.sha256(
-            canary_path.read_bytes()
-        ).hexdigest()
-        path.write_text(json.dumps(allowed_write), encoding="utf-8")
+        missing_canary = json.loads(json.dumps(replenishment_write))
+        missing_canary["canary_evidence"] = []
+        path.write_text(json.dumps(missing_canary), encoding="utf-8")
         try:
             module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
         except module.ManifestError:
             pass
         else:
-            raise AssertionError("failed write canary was accepted")
+            raise AssertionError("replenishment write without real canary was accepted")
+
+        replenishment_review_body = json.loads(json.dumps(replenishment_body))
+        replenishment_review_body["action"] = "action_replenishment_review"
+        replenishment_review_body["request"].update(
+            {
+                "route_template": (
+                    "/api/replenishment-beta/applications/{application_id}/review-results"
+                ),
+                "path": (
+                    "/api/replenishment-beta/applications/application-1/review-results"
+                ),
+                "payload_sha256": "5" * 64,
+            }
+        )
+        replenishment_review_body["result"]["response_sha256"] = "6" * 64
+        captured_replenishment_review = module._canary_comment_evidence(
+            {
+                "body": json.dumps(replenishment_review_body),
+                "user": {"login": "reviewer.one", "type": "User"},
+                "author_association": "COLLABORATOR",
+                "commit_id": head,
+                "created_at": "2026-08-10T12:00:00Z",
+                "updated_at": "2026-08-10T12:00:00Z",
+                "id": 125,
+                "html_url": (
+                    f"https://github.com/Example/it-spareparts/commit/{head}"
+                    "#commitcomment-125"
+                ),
+            },
+            repository="Example/it-spareparts",
+            target=head,
+        )
+        replenishment_review_path = folder / "replenishment-review-canary.json"
+        replenishment_review_path.write_text(
+            json.dumps(captured_replenishment_review), encoding="utf-8"
+        )
+        replenishment_review = json.loads(json.dumps(safe))
+        replenishment_review["accounts"][0]["replenishment"][
+            "action_replenishment_review"
+        ] = True
+        replenishment_review["canary_evidence"] = [
+            {
+                "username": "named.pilot",
+                "action": "action_replenishment_review",
+                "target_sha": head,
+                "conclusion": "passed",
+                "path": replenishment_review_path.name,
+                "sha256": hashlib.sha256(
+                    replenishment_review_path.read_bytes()
+                ).hexdigest(),
+            }
+        ]
+        path.write_text(json.dumps(replenishment_review), encoding="utf-8")
+        summary, evidence = module._parse_allowlist(
+            path, repository="Example/it-spareparts", target=head
+        )
+        assert summary["canary_evidence_count"] == 1
+        assert evidence == [replenishment_review_path]
+
+        review_without_page = json.loads(json.dumps(replenishment_review))
+        review_without_page["accounts"][0]["replenishment"][
+            "page_replenishment_beta"
+        ] = False
+        review_without_page["accounts"][0]["replenishment"][
+            "data_pool_price_governance"
+        ] = False
+        path.write_text(json.dumps(review_without_page), encoding="utf-8")
+        try:
+            module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
+        except module.ManifestError:
+            pass
+        else:
+            raise AssertionError("replenishment review without its Beta page was accepted")
 
         review = {
             "format": "github-exact-sha-independent-review-v1",
             "source": "github-commit-comment-api",
             "repository": "Example/it-spareparts",
             "target_sha": head,
-            "scope": "full-release-candidate",
+            "scope": module.PILOT_REVIEW_SCOPE,
             "reviewer_id": "reviewer.two",
             "completed_at": "2026-08-10T12:00:00Z",
             "p0_count": 0,
@@ -261,7 +601,7 @@ def main() -> None:
         review_body = {
             "format": "v121-independent-review-attestation-v1",
             "target_sha": head,
-            "scope": "full-release-candidate",
+            "scope": module.PILOT_REVIEW_SCOPE,
             "p0_count": 0,
             "p1_count": 0,
             "conclusion": "approved",
@@ -286,6 +626,16 @@ def main() -> None:
         assert module._validate_review_evidence(
             review, repository="Example/it-spareparts", target=head
         ) == ("reviewer.two", 123)
+        misleading_review = json.loads(json.dumps(review))
+        misleading_review["scope"] = "full-release-candidate"
+        try:
+            module._validate_review_evidence(
+                misleading_review, repository="Example/it-spareparts", target=head
+            )
+        except module.ManifestError:
+            pass
+        else:
+            raise AssertionError("misleading full-release review scope was accepted")
         review["p1_count"] = 1
         try:
             module._validate_review_evidence(

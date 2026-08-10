@@ -30,6 +30,20 @@ REQUIRED_FLAGS = (
     "REPLENISHMENT_BETA_ENABLED",
     "MAINTENANCE_CUTOVER_ENABLED",
 )
+PILOT_REVIEW_SCOPE = "stable-plus-beta-pilot-cutover-disabled"
+INITIAL_PILOT_POLICY = {
+    "scope": PILOT_REVIEW_SCOPE,
+    "stable_surface": "included",
+    "maintenance_beta_read": "included",
+    "maintenance_write_actions": "excluded",
+    "maintenance_business_data_migration": "deferred",
+    "maintenance_cutover": "deferred",
+    "maintenance_cutover_enabled": False,
+    "admin_pilots": "excluded",
+    "permission_projection": "raw-runtime-effective",
+    "replenishment_writes": "exact-sha-live-canary-only",
+    "database_schema_migration": "required-prerequisite",
+}
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -419,6 +433,11 @@ def _parse_allowlist(
             _fail(f"duplicate allowlist account: {username}")
         if not isinstance(role, str) or not role or len(role) > 64:
             _fail(f"allowlist account {username} has an invalid role")
+        if role.casefold() == "admin":
+            _fail(
+                "initial scoped pilot cannot contain admin because runtime Maintenance "
+                "write actions bypass ordinary action bits"
+            )
         seen.add(username)
 
         maintenance = account.get("maintenance")
@@ -435,25 +454,19 @@ def _parse_allowlist(
         if not all(isinstance(value, bool) for value in replenishment.values()):
             _fail(f"allowlist account {username} has a non-boolean replenishment permission")
         maintenance_enabled = maintenance["page_maintenance_beta"]
-        if role == "admin" and maintenance_enabled:
-            _fail("the first Maintenance Beta pilot must not contain an admin account")
         if maintenance_enabled and not maintenance["page_maintenance"]:
             _fail(f"allowlist account {username} enables Maintenance Beta without stable Maintenance")
         replenishment_enabled = replenishment["page_replenishment_beta"]
-        review_callback_enabled = replenishment["action_replenishment_review"]
-        if not maintenance_enabled and not replenishment_enabled and not review_callback_enabled:
+        if not maintenance_enabled and not replenishment_enabled:
             _fail(f"allowlist account {username} has no effective Beta access")
         for action in MAINTENANCE_ACTIONS:
             if maintenance[action]:
-                if not maintenance_enabled:
-                    _fail(f"Maintenance write {username}/{action} is enabled without its Beta page")
-                key = (username, action)
-                if key not in evidence:
-                    _fail(f"Maintenance write {username}/{action} lacks exact-SHA canary evidence")
-                used_evidence.add(key)
+                _fail(
+                    f"initial pilot excludes every Maintenance write action: {username}/{action}"
+                )
         for action in ("action_replenishment_create", "action_replenishment_review"):
             if replenishment[action]:
-                if action == "action_replenishment_create" and not replenishment_enabled:
+                if not replenishment_enabled:
                     _fail(f"replenishment write {username}/{action} is enabled without its Beta page")
                 key = (username, action)
                 if key not in evidence:
@@ -495,6 +508,13 @@ def _parse_allowlist(
         ),
         "canary_evidence_count": len(used_evidence),
         "empty_stage_sha256": _sha256_bytes(b""),
+        "maintenance_write_enabled_count": sum(
+            value
+            for row in normalized
+            for key, value in row["maintenance"].items()
+            if key.startswith("action_")
+        ),
+        "admin_pilot_count": sum(row["role"].casefold() == "admin" for row in normalized),
     }
     return summary, copied_evidence
 
@@ -703,7 +723,7 @@ def _review_comment_evidence(
     expected_body = {
         "format": "v121-independent-review-attestation-v1",
         "target_sha": target,
-        "scope": "full-release-candidate",
+        "scope": PILOT_REVIEW_SCOPE,
         "p0_count": 0,
         "p1_count": 0,
         "conclusion": "approved",
@@ -767,7 +787,7 @@ def _validate_review_evidence(data: Any, *, repository: str, target: str) -> tup
         "source": "github-commit-comment-api",
         "repository": repository,
         "target_sha": target,
-        "scope": "full-release-candidate",
+        "scope": PILOT_REVIEW_SCOPE,
         "p0_count": 0,
         "p1_count": 0,
         "conclusion": "approved",
@@ -1128,6 +1148,7 @@ def _generate(args: argparse.Namespace) -> None:
                 "path": relative,
                 "sha256": _sha256_file(destination),
                 "reviewer_id_sha256": _sha256_bytes(review_data["reviewer_id"].encode()),
+                "scope": review_data["scope"],
             }
         )
 
@@ -1138,6 +1159,7 @@ def _generate(args: argparse.Namespace) -> None:
         "target_sha": args.target_sha,
         "parent_production_sha": args.parent_production_sha,
         "generated_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
+        "initial_pilot_policy": INITIAL_PILOT_POLICY,
         "database": {
             "from_revision": DB_FROM,
             "to_revision": DB_TO,
@@ -1215,6 +1237,8 @@ def _verify_package(package: Path) -> dict[str, Any]:
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     if data.get("format") != FORMAT or data.get("release") != "1.21.0-beta":
         _fail("manifest format/release mismatch")
+    if data.get("initial_pilot_policy") != INITIAL_PILOT_POLICY:
+        _fail("manifest initial pilot policy is absent or drifted")
     if not SHA40.fullmatch(str(data.get("target_sha", ""))) or not SHA40.fullmatch(
         str(data.get("parent_production_sha", ""))
     ):
@@ -1243,6 +1267,10 @@ def _verify_package(package: Path) -> dict[str, Any]:
     allowlist = data.get("intended_beta_allowlist") or {}
     if not isinstance(allowlist.get("account_count"), int) or allowlist["account_count"] < 1:
         _fail("manifest has no intended named Beta accounts")
+    if allowlist.get("maintenance_write_enabled_count") != 0:
+        _fail("initial pilot manifest enables a Maintenance write action")
+    if allowlist.get("admin_pilot_count") != 0:
+        _fail("initial scoped pilot manifest contains an admin account")
     for key in (
         "permission_graph_sha256",
         "maintenance_effective_permissions_sha256",
@@ -1328,6 +1356,8 @@ def _verify_package(package: Path) -> dict[str, Any]:
             _fail("manifest independent review evidence is absent or unsafe")
         if _sha256_file(artifact) != row.get("sha256"):
             _fail("manifest independent review evidence drifted")
+        if row.get("scope") != PILOT_REVIEW_SCOPE:
+            _fail("manifest independent review scope drifted")
         reviewer, comment_id = _validate_review_evidence(
             json.loads(artifact.read_text(encoding="utf-8")),
             repository=data["repository"],

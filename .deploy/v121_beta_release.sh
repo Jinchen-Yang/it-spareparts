@@ -688,8 +688,9 @@ for line in sys.argv[1].splitlines():
     maintenance_raw=dict(zip(maintenance_keys, values[:len(maintenance_keys)]))
     replenishment_raw=dict(zip(replenishment_keys, values[len(maintenance_keys):]))
     # effective_for_user/require_action keep ordinary admin permissions open while
-    # only the two Beta page bits remain account-scoped. Model that runtime graph
-    # explicitly so an admin review callback can never disappear from the digest.
+    # only the two Beta page bits remain account-scoped. Model those raw runtime
+    # actions without masking them behind a page bit; admitted admins therefore
+    # fail the scoped pilot's zero-Maintenance-write invariant.
     if fields[1] == "admin":
         maintenance_raw["page_maintenance"] = True
         for key in maintenance_keys:
@@ -699,16 +700,11 @@ for line in sys.argv[1].splitlines():
         replenishment_raw["action_replenishment_create"] = True
         replenishment_raw["action_replenishment_review"] = True
     include = maintenance_raw["page_maintenance_beta"] or replenishment_raw["page_replenishment_beta"]
-    if sys.argv[2] == "full":
-        include = include or replenishment_raw["action_replenishment_review"]
-    elif sys.argv[2] != "pages":
+    if sys.argv[2] not in {"full", "pages"}:
         raise SystemExit("unknown allowlist projection mode")
     if not include:
         continue
     maintenance=dict(maintenance_raw)
-    for key in maintenance_keys:
-        if key.startswith("action_"):
-            maintenance[key] = maintenance_raw["page_maintenance_beta"] and maintenance_raw[key]
     replenishment=dict(replenishment_raw)
     replenishment["action_replenishment_create"] = (
         replenishment_raw["page_replenishment_beta"]
@@ -719,6 +715,17 @@ for line in sys.argv[1].splitlines():
                  "maintenance":dict(sorted(maintenance.items())),
                  "replenishment":dict(sorted(replenishment.items()))})
 rows.sort(key=lambda row: row["username"])
+maintenance_write_enabled_count=sum(
+    value
+    for row in rows
+    for key,value in row["maintenance"].items()
+    if key.startswith("action_")
+)
+admin_pilot_count=sum(row["role"].casefold() == "admin" for row in rows)
+if maintenance_write_enabled_count:
+    raise SystemExit("initial pilot exposes a raw runtime-effective Maintenance write action")
+if admin_pilot_count:
+    raise SystemExit("initial scoped pilot contains an admin account")
 def digest(value):
     if not rows:
         return hashlib.sha256(b"").hexdigest()
@@ -731,6 +738,8 @@ result={
   "permission_graph_sha256":digest(rows),
   "maintenance_effective_permissions_sha256":digest(maintenance),
   "replenishment_effective_permissions_sha256":digest(replenishment),
+  "maintenance_write_enabled_count":maintenance_write_enabled_count,
+  "admin_pilot_count":admin_pilot_count,
 }
 print(json.dumps(result,sort_keys=True,separators=(",",":")))
 PY
@@ -763,6 +772,7 @@ for key in (
     "account_count", "permission_graph_sha256",
     "maintenance_effective_permissions_sha256",
     "replenishment_effective_permissions_sha256",
+    "maintenance_write_enabled_count", "admin_pilot_count",
 ):
     if live[key] != expected[key]:
         raise SystemExit(f"live intended Beta permission graph mismatch: {key}")
@@ -807,6 +817,25 @@ status, login=request("/api/auth/login",payload=credential)
 if status != 200 or not isinstance(login,dict) or not login.get("token"):
     raise SystemExit("login smoke failed")
 token=login["token"]
+if mode == "allow":
+    maintenance_actions = (
+        "action_maintenance_roundtrip_apply",
+        "action_maintenance_manager_workbook_apply",
+        "action_maintenance_project_manage",
+        "action_maintenance_demand_delete",
+        "action_maintenance_site_issue_manage",
+        "action_maintenance_bad_return_manage",
+        "action_maintenance_acceptance_submit",
+        "action_maintenance_acceptance_review",
+        "action_maintenance_warehouse_manage",
+        "action_maintenance_migration_review",
+    )
+    permission_graph=login.get("permissions")
+    if not isinstance(permission_graph,dict):
+        raise SystemExit("allowed pilot login lacks a permission graph")
+    enabled=[key for key in maintenance_actions if permission_graph.get(key) is not False]
+    if enabled:
+        raise SystemExit("allowed pilot exposes Maintenance write actions: "+",".join(enabled))
 status, features=request("/api/auth/beta-features",token=token)
 if status != 200 or not isinstance(features,dict):
     raise SystemExit("Beta feature snapshot smoke failed")
