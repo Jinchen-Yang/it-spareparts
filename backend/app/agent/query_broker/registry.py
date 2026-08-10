@@ -375,9 +375,11 @@ def dataset_registry_fingerprint(dataset_name: str) -> str:
 
 
 def _validate_registry_at_import() -> None:
-    safe_identifier = lambda value: bool(value) and len(value) <= 64 and all(
-        "a" <= char <= "z" or "0" <= char <= "9" or char == "_" for char in value
-    )
+    def safe_identifier(value: str) -> bool:
+        return bool(value) and len(value) <= 64 and all(
+            "a" <= char <= "z" or "0" <= char <= "9" or char == "_" for char in value
+        )
+
     for name, dataset in DATASETS.items():
         if name != dataset.name or not safe_identifier(name):
             raise RuntimeError("invalid Query Broker dataset registry")
@@ -481,7 +483,12 @@ def authorize_query(
         start = ir.time_range.start
         end = ir.time_range.end
         end_of_month = calendar.monthrange(end.year, end.month)[1]
-        if start.day != 1 or end.day != end_of_month:
+        current_month_start = date(today.year, today.month, 1)
+        if (
+            start.day != 1
+            or end.day != end_of_month
+            or end >= current_month_start
+        ):
             raise QueryBrokerError("TIME_RANGE_INVALID")
         calendar_months = (end.year - start.year) * 12 + end.month - start.month + 1
         if calendar_months > 12:

@@ -298,6 +298,17 @@ def test_sales_month_dataset_requires_complete_calendar_months_and_max_twelve():
         authorize_query(QueryIR.model_validate(body), authz, today=TODAY)
     assert current_partial_month.value.code == "TIME_RANGE_INVALID"
 
+    # Date-only business clocks must not treat the current month as completed
+    # during the final calendar day.  It becomes queryable on the next day.
+    last_day = date(TODAY.year, TODAY.month, 31)
+    body["time_range"] = {
+        "start": last_day.replace(day=1),
+        "end": last_day,
+    }
+    with pytest.raises(QueryBrokerError) as current_month_on_last_day:
+        authorize_query(QueryIR.model_validate(body), authz, today=last_day)
+    assert current_month_on_last_day.value.code == "TIME_RANGE_INVALID"
+
 
 def test_ir_shape_budgets_are_enforced_before_registry_or_db():
     body = _purchase_ir().model_dump(mode="python")

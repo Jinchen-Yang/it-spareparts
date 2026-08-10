@@ -121,16 +121,17 @@ def create_agent_engine(settings: AgentDatabaseSettings, main_database_url: str)
 def evaluate_probe(snapshot: ProbeSnapshot) -> None:
     """Evaluate a value-only posture snapshot without exposing probe SQL details."""
 
-    safe_non_login_owner = lambda role, expected: (
-        role.name == expected
-        and not role.can_login
-        and not role.inherit
-        and not role.superuser
-        and not role.create_db
-        and not role.create_role
-        and not role.replication
-        and not role.bypass_rls
-    )
+    def safe_non_login_owner(role: RolePosture, expected: str) -> bool:
+        return (
+            role.name == expected
+            and not role.can_login
+            and not role.inherit
+            and not role.superuser
+            and not role.create_db
+            and not role.create_role
+            and not role.replication
+            and not role.bypass_rls
+        )
     reader_safe = (
         snapshot.current_user == EXPECTED_READER
         and snapshot.session_user == EXPECTED_READER
