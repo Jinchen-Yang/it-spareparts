@@ -665,9 +665,11 @@ SELECT u.username,
        EXISTS (
          SELECT 1
          FROM maintenance_project_user_assignment AS a
+         JOIN maintenance_project AS p ON p.project_id = a.project_id
          WHERE a.user_id = u.id
            AND a.responsibility_type = 'primary_manager'
            AND a.archived_at IS NULL
+           AND p.is_active IS TRUE
        )
 FROM sys_user AS u
 WHERE u.is_active IS TRUE
@@ -1019,7 +1021,7 @@ elif mode == "reader":
     if status != 200:
         raise SystemExit(f"Maintenance Beta reader smoke failed: {status}")
     status, assigned=request(
-        "/api/maintenance/projects/stable/operations?owner_scope=me&include_inactive=true&lifecycle=all&page_size=1",
+        "/api/maintenance/projects/stable/operations?owner_scope=me&include_inactive=false&lifecycle=all&page_size=1",
         token=token,
     )
     if (

@@ -146,7 +146,7 @@ def main() -> None:
     assert module.INITIAL_PILOT_POLICY["replenishment_review"] == "deferred"
     assert module.INITIAL_PILOT_POLICY["database_schema_migration"] == "required-prerequisite"
     assert module.INITIAL_PILOT_POLICY["maintenance_reader_eligibility"] == (
-        "active-primary-manager-assignment-required"
+        "active-project-primary-manager-assignment-required"
     )
     assert module.INITIAL_PILOT_POLICY["replenishment_creator_role"] == "sales-required"
     assert module.SYS_USER_ROLES == frozenset(
@@ -156,7 +156,7 @@ def main() -> None:
         ROOT / "docs/releases/v1.21-maintenance-beta-runbook.md"
     ).read_text(encoding="utf-8")
     for required_runbook_contract in (
-        "active `primary_manager`",
+        "active project + active `primary_manager`",
         "`sales` 角色",
         "`pilot_eligibility_sha256`",
         "`maintenance_reader_without_active_assignment_count=0`",
@@ -207,7 +207,9 @@ def main() -> None:
     assert "replenishment creator catalog smoke failed" in release
     assert 'login.get("role") != "sales"' in release
     assert "replenishment creator must use a sales account" in release
-    assert "owner_scope=me&include_inactive=true&lifecycle=all&page_size=1" in release
+    assert "JOIN maintenance_project AS p ON p.project_id = a.project_id" in release
+    assert "p.is_active IS TRUE" in release
+    assert "owner_scope=me&include_inactive=false&lifecycle=all&page_size=1" in release
     assert "Maintenance reader has no active project assignment" in release
     second_allowlist_check = release.index(
         "pilot eligibility drifted during smoke"

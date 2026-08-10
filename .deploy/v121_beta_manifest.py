@@ -44,7 +44,7 @@ INITIAL_PILOT_POLICY = {
     "replenishment_create": "exact-sha-live-canary-required",
     "replenishment_review": "deferred",
     "database_schema_migration": "required-prerequisite",
-    "maintenance_reader_eligibility": "active-primary-manager-assignment-required",
+    "maintenance_reader_eligibility": "active-project-primary-manager-assignment-required",
     "replenishment_creator_role": "sales-required",
 }
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
