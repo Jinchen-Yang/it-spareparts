@@ -20,7 +20,8 @@ Typed Query IR
 - SQLGlot 只解析服务端编译产物；它不是模型 SQL sanitizer，也不是数据库权限的替代品。
 - 执行前重新加载权威身份并完整重编译，精确比较权限、口径、SQL 和参数值；撤权或漂移时
   Agent 数据库连接数必须为零。
-- 数据查询使用独立 Engine、`READ ONLY REPEATABLE READ`、固定 `search_path`、事务局部
+- 数据查询使用独立 Engine、`READ ONLY REPEATABLE READ`、`pg_catalog` 优先的固定
+  `search_path`、事务局部
   timeout/resource 设置、受限 EXPLAIN、server-side cursor 单行 fetch、行/列/JSON 字节预算。
 - 结果列名和 Registry 类型都必须精确匹配；意外列、错类型和超大单元格直接失败，绝不把
   查询错误当作空结果或把业务文本静默截短。
@@ -33,9 +34,12 @@ Typed Query IR
 
 1. 由独立 deploy role 创建 `agent_guard_owner`、`agent_view_owner`、`agent_reader`，以及
    `dataset_guard`、三张 security-barrier view；真实验证无成员链、无 app 身份复用、无基础表/
-   sequence/TEMP/CREATE 权限。
+   sequence/TEMP/CREATE 权限。`agent_semantic` 的 owner/ACL 必须精确锁定，PUBLIC、app、reader
+   及非 deploy 角色均无 CREATE。
 2. 不只检查对象名、owner、`FORCE RLS` 标志和 policy 数量；必须把迁移版本、policy 的
-   command/role/using/check 定义和每张 view 定义绑定到受信任发布清单，catalog 被篡改即不可用。
+   command/role/using/check 定义和每张 view 定义绑定到受信任发布清单，并核对 schema 内对象
+   全集及 routine/aggregate/operator/type/default privilege；额外对象、PUBLIC EXECUTE 或 catalog
+   定义漂移时一律不可用。
 3. 用真实 PostgreSQL 证明三张 view 的每条路径必经 guard，缺/非法 GUC 零行、`row_security=off`
    与换 `search_path` 无法绕过，own-only 的 month×part_id 固定 `k>=3`。
 4. 接入 #223 Durable Task：每 Step 前使用独立短生命周期主库 Session 重载 active SysUser；

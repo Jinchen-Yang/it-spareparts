@@ -376,7 +376,7 @@ def test_read_only_transaction_and_context_are_installed_before_explain_and_quer
 
     assert connection.static_sql == [
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
-        "SET LOCAL search_path = agent_semantic, pg_catalog",
+        "SET LOCAL search_path = pg_catalog, agent_semantic",
         "SET LOCAL row_security = on",
         "SET LOCAL statement_timeout = '2000ms'",
         "SET LOCAL lock_timeout = '200ms'",

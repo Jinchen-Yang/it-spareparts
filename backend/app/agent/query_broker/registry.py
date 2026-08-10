@@ -478,12 +478,13 @@ def authorize_query(
     dataset = DATASETS[ir.dataset]
     if not dataset.required_permissions.issubset(authz.permissions):
         raise QueryBrokerError("DATASET_NOT_VISIBLE")
-    _validate_time_range(ir, dataset, today or business_today())
+    effective_today = today or business_today()
+    _validate_time_range(ir, dataset, effective_today)
     if dataset.name == "sales_market_month_v1" and ir.time_range is not None:
         start = ir.time_range.start
         end = ir.time_range.end
         end_of_month = calendar.monthrange(end.year, end.month)[1]
-        current_month_start = date(today.year, today.month, 1)
+        current_month_start = date(effective_today.year, effective_today.month, 1)
         if (
             start.day != 1
             or end.day != end_of_month

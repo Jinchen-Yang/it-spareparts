@@ -84,7 +84,10 @@ def _transaction_settings(budget: QueryBudget) -> tuple[str, ...]:
 
     return (
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
-        "SET LOCAL search_path = agent_semantic, pg_catalog",
+        # Resolve built-ins before any application namespace.  Physical views
+        # are still schema-qualified; this removes an avoidable function /
+        # aggregate shadowing surface if the schema ACL ever drifts.
+        "SET LOCAL search_path = pg_catalog, agent_semantic",
         "SET LOCAL row_security = on",
         f"SET LOCAL statement_timeout = '{budget.statement_timeout_ms}ms'",
         f"SET LOCAL lock_timeout = '{budget.lock_timeout_ms}ms'",

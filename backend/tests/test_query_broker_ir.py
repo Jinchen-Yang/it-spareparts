@@ -310,6 +310,28 @@ def test_sales_month_dataset_requires_complete_calendar_months_and_max_twelve():
     assert current_month_on_last_day.value.code == "TIME_RANGE_INVALID"
 
 
+def test_sales_month_default_business_clock_is_used_consistently(monkeypatch):
+    monkeypatch.setattr(
+        "app.agent.query_broker.registry.business_today",
+        lambda: TODAY,
+    )
+    body = {
+        "version": "query-ir/v1",
+        "dataset": "sales_market_month_v1",
+        "time_range": _full_month_range(3),
+        "dimensions": ["month", "part_id"],
+        "metrics": ["sales_qty"],
+        "filters": [],
+        "order_by": [],
+        "limit": 50,
+    }
+    authz = _authz(permissions=frozenset({"page_chat", "page_parts"}))
+
+    authorized = authorize_query(QueryIR.model_validate(body), authz)
+
+    assert authorized.dataset_name == "sales_market_month_v1"
+
+
 def test_ir_shape_budgets_are_enforced_before_registry_or_db():
     body = _purchase_ir().model_dump(mode="python")
     body["filters"] = [
