@@ -17,13 +17,19 @@ from app.services import maintenance_migration_controls as controls
 
 
 def _client(db, *, username: str, role: str = "admin", permissions=None):
+    # Migration routes are mounted behind the account-scoped Maintenance Beta
+    # allowlist.  Tests that exercise the route contract must opt their named
+    # synthetic account in explicitly; merge any supplied graph so denial tests
+    # still reach the action/data permission they intend to cover.
+    effective_permissions = dict(permissions or {})
+    effective_permissions["page_maintenance_beta"] = True
     db.add(
         SysUser(
             username=username,
             role=role,
             display_name="迁移合成账号",
             password_hash=hash_password("synthetic-password-123"),
-            permissions=permissions,
+            permissions=effective_permissions,
         )
     )
     db.commit()
