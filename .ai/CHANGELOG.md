@@ -40,7 +40,7 @@
 
 **Tests:** 无代码变更，纯规范文档
 
-**Notes:** 规范生效后，任何无 CHANGELOG/ADR 记录的变更视为未完成，Code Review 打回
+**Notes:** 规范生效后，任何无 CHANGELOG/ADR 记录的变更视为未完成，Code Review 打回。commit `4e5ae474`
 
 ---
 
