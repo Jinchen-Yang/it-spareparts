@@ -57,20 +57,23 @@
 - [ ] 成本取价链是否保持 append-only？
 - [ ] 权限判断是否正确？
 
-## Documentation
+## Documentation & Traceability（留痕硬性要求，任一不满足即打回）
 
+- [ ] 开工前是否在 `.ai/CURRENT_TASK.md` 登记了"改动前状态 / 预期改动 / 原因 / 是否架构变动"？
+- [ ] `.ai/CHANGELOG.md` 是否已追加记录，且包含 before（改动前状态）/ after / 原因(Issue#) / 验证结果 / **commit SHA**？
+- [ ] 架构变动是否写了 ADR（原有→新→原因→影响）并同步 `.ai/ARCHITECTURE.md`？
 - [ ] API 变更是否更新了 `.ai/API_DESIGN.md`？
-- [ ] 架构变更是否写了 ADR（`.ai/DECISIONS.md`）？
 - [ ] 新模块是否更新了 `.ai/ARCHITECTURE.md`？
 - [ ] 业务规则变更是否更新了 `.ai/BUSINESS_RULES.md`？
-- [ ] 是否追加了 `.ai/CHANGELOG.md`？
+- [ ] 能否讲清"改动前是什么、改成了什么、为什么改、是否架构变动"？（讲不清 = 未完成）
 
 ## Git
 
-- [ ] Commit message 是否符合规范（type: 中文描述）？
+- [ ] Commit message 是否符合规范（type(scope): 中文描述 (#issue)）且独立说明"改了什么、为什么"？
 - [ ] 是否只改了相关文件？
 - [ ] 是否有未跟踪的文件需要提交？
 - [ ] 是否需要先 rebase main？
+- [ ] 提交后 commit SHA 是否已回填到 `.ai/CHANGELOG.md`？
 
 ---
 

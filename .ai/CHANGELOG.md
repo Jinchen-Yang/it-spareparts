@@ -27,6 +27,23 @@
 
 ---
 
+## 2026-08-11
+
+**Agent:** OpenCode (WSL Ubuntu 26.04)
+**Session:** 制定开发留痕协议（Traceability 硬性要求）
+
+**Changed:**
+- `.ai/DEVELOPMENT_RULES.md` — 新增第 0 章"开发留痕协议"：4 类痕迹（任务/变更/提交/架构）、可回溯判定标准、0.3 收尾自答检查（原有状态/变成什么/为什么/是否架构变动/影响面）、禁止项清单
+- `.ai/AI_WORKFLOW.md` — Phase 0 Step 4 增加"原有状态登记"；Phase 2 更新文档步骤改为硬性留痕（CHANGELOG 必须含 before/after/原因/验证/commit SHA）；Handoff 协议增加"留痕缺失先补齐"条款
+- `.ai/AI_REVIEW_CHECKLIST.md` — "Documentation" 拆分为 "Documentation & Traceability"（7 项硬性检查）；Git 部分增加 commit SHA 回填检查
+- `CLAUDE.md` — 新增 "Traceability (hard requirement)" 章节（5 条），所有 AI Agent 在 After Coding 前必读
+
+**Tests:** 无代码变更，纯规范文档
+
+**Notes:** 规范生效后，任何无 CHANGELOG/ADR 记录的变更视为未完成，Code Review 打回
+
+---
+
 ## 2026-08-10
 
 **Agent:** Claude Code (VSCode Extension, Windows)

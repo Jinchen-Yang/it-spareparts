@@ -47,6 +47,15 @@ Read: .ai/CURRENT_TASK.md       → 了解当前正在做什么
 - [ ] Step C: 验证
 ```
 
+**同时必须登记"原有状态"**（写入 `.ai/CURRENT_TASK.md` 任务描述，供完成后对照）：
+
+```
+- 改动前：<被改模块/行为的现有状态，一句话>
+- 改动后：<预期变成什么>
+- 原因：<Issue/需求来源>
+- 是否架构变动：<是/否>（是则计划中必须含 ADR 步骤）
+```
+
 **禁止直接修改代码直到用户确认计划。**（用户体验改进 / 明显的 bug 修复 / 用户明确说"直接做"除外）
 
 ---
@@ -88,18 +97,20 @@ Read: .ai/CURRENT_TASK.md       → 了解当前正在做什么
 
 3. **检查 lint**（如配置了的话）
 
-4. **更新文档**
+4. **更新文档（留痕协议，硬性要求）**
    - 修改了 API → 更新 `.ai/API_DESIGN.md`
-   - 修改了架构 → 更新 `.ai/ARCHITECTURE.md` + 写 ADR
+   - 修改了架构 → 更新 `.ai/ARCHITECTURE.md` + 写 ADR（`.ai/DECISIONS.md`，含"原有→新→原因→影响"）
    - 修改了业务规则 → 更新 `.ai/BUSINESS_RULES.md`
    - 完成了任务 → 更新 `.ai/CURRENT_TASK.md`
-   - 任何变更 → 追加 `.ai/CHANGELOG.md`
+   - **任何变更** → 追加 `.ai/CHANGELOG.md`，**必须含**：before（改动前状态）/after（改动内容）/原因（Issue 编号）/验证结果/**commit SHA**
+   - 收尾自答 0.3 检查清单（原有状态？变成什么？为什么？是否架构变动？影响面？）
 
 5. **Git 提交**
    ```bash
    git add <changed files>
-   git commit -m "type: 中文描述"
+   git commit -m "type(scope): 中文描述 (#issue)"
    ```
+   commit message 必须独立说明"改了什么、为什么"；提交后把 **commit SHA 回填到 CHANGELOG 记录**（同一次会话内完成，不留空）
 
 ---
 
@@ -153,3 +164,4 @@ Read: .ai/CURRENT_TASK.md       → 了解当前正在做什么
 3. 读取 `.ai/DECISIONS.md` 了解最近的架构决策
 4. 运行 `git log --oneline -20` 查看最近提交
 5. **不要基于"我认为"做假设**——代码和文档是唯一真相
+6. 如果某个变更**找不到** CHANGELOG 记录或 ADR，视为留痕缺失，先补齐再继续，不得跳过

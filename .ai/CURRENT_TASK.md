@@ -42,7 +42,11 @@
 ## Changed Files (本次会话 2026-08-11)
 
 - `.ai/CURRENT_TASK.md` — 更新任务状态
-- `.ai/CHANGELOG.md` — 记录 2026-08-11 会话
+- `.ai/CHANGELOG.md` — 记录 2026-08-11 会话（#227/#228 完成 + 留痕协议制定）
+- `.ai/DEVELOPMENT_RULES.md` — 新增第 0 章"开发留痕协议"（硬性要求）
+- `.ai/AI_WORKFLOW.md` — 各阶段嵌入留痕步骤
+- `.ai/AI_REVIEW_CHECKLIST.md` — 新增 Traceability 检查项
+- `CLAUDE.md` — 新增 Traceability (hard requirement) 章节
 - `backend/app/agent/workbook_cleaning/{models,kernel,__init__}.py` — #228 两个 P1 修复
 - `backend/tests/test_workbook_cleaning_proposal.py` — +3 回归测试
 - `~/.bashrc`、git 全局配置 — mihomo 7897 代理持久化
