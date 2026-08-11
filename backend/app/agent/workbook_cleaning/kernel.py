@@ -225,6 +225,17 @@ def assess_cleaning_proposal(
     if len(_canonical_bytes(observed_payload)) > _MAX_OBSERVED_PROJECTION_BYTES:
         raise CleaningProposalRejected("observed_projection_budget_exceeded")
 
+    proposed_values = {
+        item.proposed_value_ref: item for item in request.proposed_values
+    }
+    used_value_refs = {change.proposed_value_ref for change in proposal.changes}
+    if len(used_value_refs) != len(proposal.changes):
+        raise CleaningProposalRejected("duplicate_proposed_value_ref")
+    if any(ref not in proposed_values for ref in used_value_refs):
+        raise CleaningProposalRejected("unbound_proposed_value_ref")
+    if len(proposed_values) != len(used_value_refs):
+        raise CleaningProposalRejected("extra_proposed_value_snapshot")
+
     source_columns = {column.column_ref: column for column in source.columns}
     target_columns = {column.column_ref: column for column in template.columns}
     operation_versions = {
@@ -291,6 +302,9 @@ def assess_cleaning_proposal(
             raise CleaningProposalRejected("operation_not_allowlisted")
         if change.operation_implementation_version != implementation_version:
             raise CleaningProposalRejected("operation_implementation_mismatch")
+        snapshot = proposed_values[change.proposed_value_ref]
+        if snapshot.value != change.proposed_after:
+            raise CleaningProposalRejected("proposed_value_mismatch")
         if observed.before == change.proposed_after:
             raise CleaningProposalRejected("noop_change")
         _validate_target_operation(

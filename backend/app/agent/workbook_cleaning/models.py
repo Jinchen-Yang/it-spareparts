@@ -252,6 +252,17 @@ class ObservedFieldSnapshot(StrictModel):
         return self
 
 
+class ProposedValueSnapshot(StrictModel):
+    """Immutable trusted binding between an opaque ref and its canonical value.
+
+    Issued by a trusted adapter only; the untrusted proposal and the Evidence
+    projection must not carry or infer this binding themselves.
+    """
+
+    proposed_value_ref: UUID
+    value: CellValue
+
+
 class FieldChange(StrictModel):
     """Untrusted proposal joined to server-issued field/value references."""
 
@@ -308,7 +319,17 @@ class CleaningProposalRequest(StrictModel):
     observed_fields: tuple[ObservedFieldSnapshot, ...] = Field(
         min_length=1, max_length=200
     )
+    proposed_values: tuple[ProposedValueSnapshot, ...] = Field(
+        min_length=1, max_length=200
+    )
     proposal: CleaningChangeProposal
+
+    @model_validator(mode="after")
+    def validate_proposed_values(self) -> "CleaningProposalRequest":
+        refs = [item.proposed_value_ref for item in self.proposed_values]
+        if len(refs) != len(set(refs)):
+            raise ValueError("proposed_value_ref values must be unique")
+        return self
 
 
 class SourceEvidenceBinding(StrictModel):
@@ -318,7 +339,13 @@ class SourceEvidenceBinding(StrictModel):
     sheet_ref: UUID
     header_row: int
     data_start_row: int
-    ordered_column_refs: tuple[UUID, ...]
+    ordered_column_refs: tuple[UUID, ...] = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_refs(self) -> "SourceEvidenceBinding":
+        if len(self.ordered_column_refs) != len(set(self.ordered_column_refs)):
+            raise ValueError("ordered_column_refs must be unique")
+        return self
 
 
 class TemplateEvidenceBinding(StrictModel):
@@ -328,31 +355,54 @@ class TemplateEvidenceBinding(StrictModel):
     classification: TemplateClassification
     classifier_proof_version: Version
     target_sheet_ref: UUID
-    ordered_column_refs: tuple[UUID, ...]
+    ordered_column_refs: tuple[UUID, ...] = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_refs(self) -> "TemplateEvidenceBinding":
+        if len(self.ordered_column_refs) != len(set(self.ordered_column_refs)):
+            raise ValueError("ordered_column_refs must be unique")
+        return self
 
 
 class RulesEvidenceBinding(StrictModel):
     rule_snapshot_ref: UUID
     rule_set_version: Version
     policy_implementation_version: Version
-    operations: tuple[OperationImplementation, ...]
+    operations: tuple[OperationImplementation, ...] = Field(
+        min_length=1, max_length=256
+    )
     maximum_changes: int
     semantic_rewrite_limit: int
     low_confidence_threshold_basis_points: int
     large_change_review_threshold: int
+
+    @model_validator(mode="after")
+    def validate_operations(self) -> "RulesEvidenceBinding":
+        names = [item.operation for item in self.operations]
+        if len(names) != len(set(names)):
+            raise ValueError("operation implementations must be unique")
+        return self
 
 
 class FieldDiffEvidence(StrictModel):
     observed_field_ref: UUID
     proposed_value_ref: UUID
     row_ref: SourceRowRef
-    source_column_refs: tuple[UUID, ...]
+    source_column_refs: tuple[UUID, ...] = Field(max_length=64)
     target_column_ref: UUID
     operation: Operation
     operation_implementation_version: Version
-    confidence_basis_points: int
-    risk_flags: tuple[RiskFlag, ...]
+    confidence_basis_points: int = Field(ge=0, le=10_000)
+    risk_flags: tuple[RiskFlag, ...] = Field(max_length=32)
     requires_human_review: Literal[True] = True
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> "FieldDiffEvidence":
+        if len(self.source_column_refs) != len(set(self.source_column_refs)):
+            raise ValueError("source_column_refs must be unique")
+        if len(self.risk_flags) != len(set(self.risk_flags)):
+            raise ValueError("risk_flags must be unique")
+        return self
 
 
 class CleaningProposalAssessment(StrictModel):
@@ -373,8 +423,24 @@ class CleaningProposalAssessment(StrictModel):
     rules_binding: RulesEvidenceBinding
     proposal_schema_version: Literal["workbook-cleaning-change-proposal/v1"]
     proposal_origin: ProposalOrigin
-    change_count: int
-    semantic_rewrite_count: int
-    field_diffs: tuple[FieldDiffEvidence, ...]
-    risk_flags: tuple[RiskFlag, ...]
-    manual_review_reasons: tuple[ManualReviewReason, ...]
+    change_count: int = Field(ge=1, le=200)
+    semantic_rewrite_count: int = Field(ge=0, le=100)
+    field_diffs: tuple[FieldDiffEvidence, ...] = Field(min_length=1, max_length=200)
+    risk_flags: tuple[RiskFlag, ...] = Field(max_length=32)
+    manual_review_reasons: tuple[ManualReviewReason, ...] = Field(max_length=32)
+
+    @model_validator(mode="after")
+    def validate_assessment(self) -> "CleaningProposalAssessment":
+        if self.change_count != len(self.field_diffs):
+            raise ValueError("change_count must equal field_diffs length")
+        if len(self.risk_flags) != len(set(self.risk_flags)):
+            raise ValueError("risk_flags must be unique")
+        if len(self.manual_review_reasons) != len(set(self.manual_review_reasons)):
+            raise ValueError("manual_review_reasons must be unique")
+        observed_refs = [diff.observed_field_ref for diff in self.field_diffs]
+        if len(observed_refs) != len(set(observed_refs)):
+            raise ValueError("observed_field_ref values must be unique")
+        value_refs = [diff.proposed_value_ref for diff in self.field_diffs]
+        if len(value_refs) != len(set(value_refs)):
+            raise ValueError("proposed_value_ref values must be unique")
+        return self

@@ -13,17 +13,21 @@ from app.agent.workbook_cleaning import (
     ArtifactSnapshot,
     CellValue,
     CleaningChangeProposal,
+    CleaningProposalAssessment,
     CleaningProposalRequest,
     ColumnKind,
     ColumnSnapshot,
     FieldChange,
+    FieldDiffEvidence,
     ManualReviewReason,
     ObservedFieldSnapshot,
     Operation,
     OperationImplementation,
     ProposalOrigin,
+    ProposedValueSnapshot,
     RiskFlag,
     RuleSetSnapshot,
+    SourceEvidenceBinding,
     SourceRowRef,
     TableSnapshot,
     TemplateClassification,
@@ -199,6 +203,13 @@ def _request(
         template=template,
         rules=rules,
         observed_fields=tuple(pair[1] for pair in pairs),
+        proposed_values=tuple(
+            ProposedValueSnapshot(
+                proposed_value_ref=pair[0].proposed_value_ref,
+                value=pair[0].proposed_after,
+            )
+            for pair in pairs
+        ),
         proposal=proposal,
     )
 
@@ -331,7 +342,7 @@ def test_duplicate_target_observed_and_proposed_refs_fail_closed() -> None:
             )
         }
     )
-    _expect_rejected(duplicate_change_request, "duplicate_target_field_change")
+    _expect_rejected(duplicate_change_request, "duplicate_proposed_value_ref")
 
     second = _pair(
         row=3, observed_field_ref=request.observed_fields[0].observed_field_ref
@@ -341,9 +352,8 @@ def test_duplicate_target_observed_and_proposed_refs_fail_closed() -> None:
         "duplicate_observed_field_ref",
     )
     reused_value = _pair(row=3, proposed_value_ref=change.proposed_value_ref)
-    _expect_rejected(
-        _request(pairs=(_pair(), reused_value)), "duplicate_proposed_value_ref"
-    )
+    with pytest.raises(ValidationError):
+        _request(pairs=(_pair(), reused_value))
 
 
 def test_row_and_observed_field_bindings_cannot_be_retargeted() -> None:
@@ -621,7 +631,7 @@ def test_verify_binds_a_new_upstream_value_ref_without_hashing_value() -> None:
     )
     with pytest.raises(CleaningProposalRejected) as caught:
         verify_cleaning_assessment(changed_request, assessment)
-    assert caught.value.code == "assessment_mismatch"
+    assert caught.value.code == "unbound_proposed_value_ref"
 
 
 def test_strict_schema_and_kernel_revalidation_fail_closed() -> None:
@@ -662,3 +672,140 @@ def test_kernel_has_no_io_runtime_registration_or_homegrown_integrity_surface() 
         Path(__file__).parents[1] / "app" / "agent" / "tools.py",
     ):
         assert "workbook_cleaning" not in consumer.read_text(encoding="utf-8")
+
+
+def test_proposed_value_ref_is_bound_to_trusted_immutable_snapshot() -> None:
+    request = _request()
+    change = request.proposal.changes[0]
+
+    swapped = request.model_copy(
+        update={
+            "proposed_values": tuple(
+                ProposedValueSnapshot(
+                    proposed_value_ref=item.proposed_value_ref,
+                    value=CellValue(kind="text", value="另一个提案")
+                    if item.proposed_value_ref == change.proposed_value_ref
+                    else item.value,
+                )
+                for item in request.proposed_values
+            )
+        }
+    )
+    _expect_rejected(swapped, "proposed_value_mismatch")
+
+    tampered_change = change.model_copy(
+        update={"proposed_after": CellValue(kind="text", value="绕过快照")}
+    )
+    _expect_rejected(
+        request.model_copy(
+            update={
+                "proposal": request.proposal.model_copy(
+                    update={"changes": (tampered_change,)}
+                )
+            }
+        ),
+        "proposed_value_mismatch",
+    )
+
+
+def test_proposal_requires_bound_and_fully_covered_value_snapshots() -> None:
+    request = _request()
+    change = request.proposal.changes[0]
+    other = _pair(row=3)
+
+    missing = request.model_copy(
+        update={
+            "observed_fields": request.observed_fields + (other[1],),
+            "proposal": request.proposal.model_copy(
+                update={"changes": request.proposal.changes + (other[0],)}
+            ),
+            "proposed_values": tuple(
+                item
+                for item in request.proposed_values
+                if item.proposed_value_ref != change.proposed_value_ref
+            )
+            + (
+                ProposedValueSnapshot(
+                    proposed_value_ref=other[0].proposed_value_ref,
+                    value=other[0].proposed_after,
+                ),
+            ),
+        }
+    )
+    _expect_rejected(missing, "unbound_proposed_value_ref")
+
+    extra = request.model_copy(
+        update={
+            "proposed_values": request.proposed_values
+            + (
+                ProposedValueSnapshot(
+                    proposed_value_ref=_u(500_001),
+                    value=CellValue(kind="text", value="多余快照"),
+                ),
+            )
+        }
+    )
+    _expect_rejected(extra, "extra_proposed_value_snapshot")
+
+    with pytest.raises(ValidationError):
+        CleaningProposalRequest.model_validate(
+            request.model_copy(
+                update={
+                    "proposed_values": (
+                        request.proposed_values[0],
+                        request.proposed_values[0],
+                    )
+                }
+            ).model_dump(mode="python")
+        )
+
+
+def test_assessment_containers_mirror_request_limits_and_cardinality() -> None:
+    request = _request()
+    assessment = assess_cleaning_proposal(request)
+
+    too_many_diffs = assessment.model_copy(
+        update={"field_diffs": assessment.field_diffs * 201}
+    )
+    with pytest.raises(ValidationError):
+        CleaningProposalAssessment.model_validate(
+            too_many_diffs.model_dump(mode="python")
+        )
+
+    count_mismatch = assessment.model_copy(update={"change_count": 99})
+    with pytest.raises(ValidationError):
+        CleaningProposalAssessment.model_validate(
+            count_mismatch.model_dump(mode="python")
+        )
+
+    duplicate_diff = assessment.model_copy(
+        update={"field_diffs": assessment.field_diffs + assessment.field_diffs[:1]}
+    )
+    with pytest.raises(ValidationError):
+        CleaningProposalAssessment.model_validate(
+            duplicate_diff.model_dump(mode="python")
+        )
+
+    duplicate_risk = assessment.model_copy(
+        update={"risk_flags": assessment.risk_flags + assessment.risk_flags[:1]}
+    )
+    with pytest.raises(ValidationError):
+        CleaningProposalAssessment.model_validate(
+            duplicate_risk.model_dump(mode="python")
+        )
+
+    diff = assessment.field_diffs[0].model_copy(
+        update={"source_column_refs": diff_source_columns()}
+    )
+    with pytest.raises(ValidationError):
+        FieldDiffEvidence.model_validate(diff.model_dump(mode="python"))
+
+    binding = assessment.source_binding.model_copy(
+        update={"ordered_column_refs": (SRC_ROW, SRC_ROW)}
+    )
+    with pytest.raises(ValidationError):
+        SourceEvidenceBinding.model_validate(binding.model_dump(mode="python"))
+
+
+def diff_source_columns() -> tuple[UUID, ...]:
+    return (SRC_ROW, SRC_ROW)
