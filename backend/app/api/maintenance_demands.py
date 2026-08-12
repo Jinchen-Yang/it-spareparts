@@ -15,6 +15,7 @@ from app.security import (
     require_action,
     require_page,
 )
+from app.api.maintenance_project_scope import require_project_scope
 from app.services import maintenance_demands
 
 
@@ -112,26 +113,29 @@ def search_demands(
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    allowed_project_ids: set[str] | None = Depends(require_project_scope),
 ) -> dict:
     if body.q is not None and len(body.q) > 128:
-        # Keep the rejection generic and perform it before access auditing so
-        # neither the raw term nor any derivative is persisted.
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "维保需求单搜索条件无效",
         )
-    # Deliberately audit only the presence of a search, never its user-entered text.
     record_access_log(
         ctx,
         "maintenance_demand_search",
         "maintenance_demands",
-        {"searched": bool(body.q and body.q.strip()), "page": body.page},
+        {
+            "searched": bool(body.q and body.q.strip()),
+            "page": body.page,
+            "scope": "admin" if allowed_project_ids is None else "scoped",
+        },
     )
     return maintenance_demands.search_demands(
         db,
         q=body.q,
         page=body.page,
         page_size=body.page_size,
+        allowed_project_ids=allowed_project_ids,
     )
 
 

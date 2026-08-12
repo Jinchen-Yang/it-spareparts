@@ -1,0 +1,1143 @@
+<title>维保管理系统 · 字段业务化改造方案</title>
+
+<style>
+  :root {
+    --page-bg: #f8f7f4;
+    --surface: #ffffff;
+    --surface-alt: #f3f2ee;
+    --border: #e5e3dc;
+    --text: #2d2b27;
+    --text-secondary: #6b6860;
+    --text-muted: #949087;
+    --accent: #3b6e8f;
+    --accent-light: #e8f0f5;
+    --warning: #b5732b;
+    --warning-light: #fef5eb;
+    --danger: #b54a3a;
+    --danger-light: #fef0ee;
+    --success: #4a7c59;
+    --success-light: #edf5ef;
+    --highlight: #f2efe5;
+    --heading-serif: Georgia, "Noto Serif SC", "Source Han Serif SC", serif;
+    --body-sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page-bg: #1e1d1a;
+      --surface: #272622;
+      --surface-alt: #2e2d28;
+      --border: #3d3b34;
+      --text: #e8e5de;
+      --text-secondary: #aaa69d;
+      --text-muted: #7d7a72;
+      --accent: #6fa7c1;
+      --accent-light: #253640;
+      --warning: #d4a05b;
+      --warning-light: #352a1c;
+      --danger: #d48273;
+      --danger-light: #352422;
+      --success: #7aad89;
+      --success-light: #232f26;
+      --highlight: #302e28;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page-bg: #1e1d1a;
+    --surface: #272622;
+    --surface-alt: #2e2d28;
+    --border: #3d3b34;
+    --text: #e8e5de;
+    --text-secondary: #aaa69d;
+    --text-muted: #7d7a72;
+    --accent: #6fa7c1;
+    --accent-light: #253640;
+    --warning: #d4a05b;
+    --warning-light: #352a1c;
+    --danger: #d48273;
+    --danger-light: #352422;
+    --success: #7aad89;
+    --success-light: #232f26;
+    --highlight: #302e28;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--page-bg);
+    color: var(--text);
+    font-family: var(--body-sans);
+    line-height: 1.6;
+    font-size: 15px;
+  }
+
+  .page {
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 48px 24px 80px;
+  }
+
+  /* Hero */
+  .hero {
+    margin-bottom: 56px;
+    padding-bottom: 40px;
+    border-bottom: 1px solid var(--border);
+  }
+  .hero h1 {
+    font-family: var(--heading-serif);
+    font-size: 36px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    line-height: 1.25;
+    margin-bottom: 12px;
+    color: var(--text);
+  }
+  .hero .subtitle {
+    font-size: 16px;
+    color: var(--text-secondary);
+    max-width: 640px;
+    line-height: 1.65;
+  }
+  .hero .meta-row {
+    display: flex;
+    gap: 24px;
+    margin-top: 20px;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .hero .meta-row span { display: flex; align-items: center; gap: 6px; }
+
+  /* Section headings */
+  .section {
+    margin-bottom: 48px;
+  }
+  .section-title {
+    font-family: var(--heading-serif);
+    font-size: 22px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    color: var(--text);
+    padding-bottom: 8px;
+    border-bottom: 2px solid var(--accent);
+  }
+  .section-desc {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-bottom: 24px;
+    line-height: 1.6;
+  }
+
+  /* Card */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 28px;
+  }
+  .card-header {
+    padding: 16px 20px;
+    background: var(--surface-alt);
+    border-bottom: 1px solid var(--border);
+  }
+  .card-header h3 {
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .card-header .path {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+  .card-body { padding: 0; }
+
+  /* Tables */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  thead th {
+    text-align: left;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    padding: 12px 16px;
+    background: var(--surface-alt);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+    vertical-align: top;
+    line-height: 1.5;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover td { background: var(--highlight); }
+
+  .field-current {
+    font-family: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+    font-size: 13px;
+    color: var(--text-secondary);
+    background: var(--surface-alt);
+    padding: 2px 8px;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  .field-new {
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .field-desc {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 3px;
+    line-height: 1.5;
+  }
+
+  /* Badge */
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    padding: 2px 10px;
+    border-radius: 100px;
+  }
+  .badge-menu { background: var(--accent-light); color: var(--accent); }
+  .badge-page { background: var(--warning-light); color: var(--warning); }
+  .badge-fix { background: var(--danger-light); color: var(--danger); }
+  .badge-ok { background: var(--success-light); color: var(--success); }
+
+  /* Alert box */
+  .callout {
+    padding: 16px 20px;
+    border-radius: 8px;
+    margin-bottom: 28px;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  .callout-info {
+    background: var(--accent-light);
+    border-left: 4px solid var(--accent);
+    color: var(--accent);
+  }
+
+  /* Progress toc */
+  .toc {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 36px;
+  }
+  .toc-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    text-decoration: none;
+    color: var(--text);
+    transition: box-shadow 0.15s;
+  }
+  .toc-card:hover { box-shadow: 0 2px 10px rgba(0,0,0,0.06); }
+  .toc-card .num {
+    font-family: var(--heading-serif);
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--accent);
+    line-height: 1;
+    margin-bottom: 6px;
+  }
+  .toc-card h4 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  .toc-card p { font-size: 13px; color: var(--text-muted); }
+
+  /* summary boxes in body */
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 10px;
+    margin: 16px 0;
+  }
+  .summary-box {
+    background: var(--surface-alt);
+    border-radius: 8px;
+    padding: 14px 16px;
+    text-align: center;
+  }
+  .summary-box .num { font-family: var(--heading-serif); font-size: 26px; font-weight: 700; color: var(--accent); }
+  .summary-box .label { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+  @media (max-width: 700px) {
+    .page { padding: 24px 16px 48px; }
+    .hero h1 { font-size: 26px; }
+    table thead { display: none; }
+    table tbody td {
+      display: block;
+      padding: 8px 12px;
+    }
+    table tbody td::before {
+      content: attr(data-label);
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 2px;
+    }
+  }
+</style>
+
+<div class="page">
+
+<div class="hero">
+  <h1>维保管理 — 字段业务化改造方案</h1>
+  <p class="subtitle">
+    当前维保管理模块（项目面板、项目主档、月度更新、成本回填、项目工作台）中的字段名称、按钮文案和提示语大量使用了数据库列名和技术术语，甲方运维/项目经理阅读困难。本方案逐页列出每个字段的当前名称、业务含义、以及建议的业务化新名称，供逐项确认后实施修改。
+  </p>
+  <div class="meta-row">
+    <span>📋 影响范围：维保管理 5 个页面 + 项目工作台详情</span>
+    <span>📅 2026-08-12</span>
+    <span>🔖 基于 codex/maintenance-manager-combined</span>
+  </div>
+</div>
+
+<div class="callout callout-info">
+  <strong>关于"技术化"问题的核心诊断</strong><br><br>
+  问题不在于用了英文缩写（PN、WBDD 等），而在于三件事：<br>
+  ① <strong>数据库物理列名直接暴露给用户</strong>——例如 <code>project_code</code>、<code>display_name</code>、<code>lifecycle_status</code>、<code>project_manager_id</code>，它们不是中文世界里任何甲方人员会用的词汇；<br>
+  ② <strong>状态值和技术标签直接用作界面文案</strong>——例如 <code>mapped / unmapped</code>、<code>inc_tax</code>、<code>missing</code>、<code>restricted</code>，业务人员看不懂这些词；<br>
+  ③ <strong>菜单项和按钮命名偏开发视角</strong>——例如"项目面板"（实际是项目方块总览）、"项目主档"（实际是项目身份注册表）、"成本回填"（实际是缺失成本人工补充）。
+</div>
+
+<!-- TOC -->
+<div class="toc">
+  <a href="#s1" class="toc-card">
+    <div class="num">01</div>
+    <h4>项目面板</h4>
+    <p>/maintenance/projects · 项目卡片列表</p>
+  </a>
+  <a href="#s2" class="toc-card">
+    <div class="num">02</div>
+    <h4>项目主档</h4>
+    <p>/maintenance/project-master · 项目身份管理</p>
+  </a>
+  <a href="#s3" class="toc-card">
+    <div class="num">03</div>
+    <h4>项目工作台</h4>
+    <p>/maintenance/projects/:id · 单个项目全貌</p>
+  </a>
+  <a href="#s4" class="toc-card">
+    <div class="num">04</div>
+    <h4>月度更新</h4>
+    <p>/maintenance/updates · 工作簿下载与回传</p>
+  </a>
+  <a href="#s5" class="toc-card">
+    <div class="num">05</div>
+    <h4>成本回填</h4>
+    <p>/maintenance/cost-refill · 缺失成本人工补充</p>
+  </a>
+  <a href="#s6" class="toc-card">
+    <div class="num">06</div>
+    <h4>菜单与全局文案</h4>
+    <p>侧栏菜单、提示语、标签</p>
+  </a>
+</div>
+
+<!-- ====== Section 1: 项目面板 ====== -->
+<div class="section" id="s1">
+  <div class="section-title">01 · 项目面板 &nbsp;<span class="badge badge-menu">菜单项</span></div>
+  <div class="section-desc">
+    当前菜单名"项目面板"——甲方人员看到这个词的第一反应是"什么面板？面板是什么？"<br>
+    这个页面的实际功能是：<strong>列出所有维保项目的卡片总览，每张卡片显示合同、回款进度、成本占比和系统提醒。</strong>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h3>🔧 菜单与页面标题</h3>
+      <div class="path">nav.tsx → NAV_GROUPS["grp-maintenance"] · MaintenanceProjectsPage.tsx</div>
+    </div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">位置</th><th style="width:22%">当前名称</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>侧栏菜单</td>
+            <td><span class="field-current">项目面板</span></td>
+            <td><span class="field-new">维保项目总览</span></td>
+            <td class="field-desc">甲方熟悉"项目总览"而非"面板"；加上"维保"前缀与其他模块区分</td>
+          </tr>
+          <tr>
+            <td>页面主标题</td>
+            <td><span class="field-current">维保项目</span></td>
+            <td><span class="field-new">维保项目总览</span></td>
+            <td class="field-desc">与菜单名一致</td>
+          </tr>
+          <tr>
+            <td>页面副标题</td>
+            <td><span class="field-current">按稳定项目查看全部合同、回款、现场领用、审批通过报销和系统提醒。缺失成本不会隐藏项目事实。</span></td>
+            <td><span class="field-new">按项目查看所有合同、回款进度、现场备件消耗、已报销费用和系统待办提醒。成本数据不完整时不会隐藏项目。</span></td>
+            <td class="field-desc">去掉"稳定项目""隐藏项目事实"等工程师用语</td>
+          </tr>
+          <tr>
+            <td>筛选项"进行中"</td>
+            <td><span class="field-current">进行中</span></td>
+            <td><span class="field-new">服务中</span></td>
+            <td class="field-desc">甲方日常用语："这个项目还在服务中"</td>
+          </tr>
+          <tr>
+            <td>筛选项"已结束"</td>
+            <td><span class="field-current">已结束</span></td>
+            <td><span class="field-new">已结项</span></td>
+            <td class="field-desc">甲方日常用语："这个项目已结项"</td>
+          </tr>
+          <tr>
+            <td>筛选项"期限缺失"</td>
+            <td><span class="field-current">期限缺失</span></td>
+            <td><span class="field-new">服务期限未填写</span></td>
+            <td class="field-desc">比"期限缺失"更完整、更友好</td>
+          </tr>
+          <tr>
+            <td>搜索框占位符</td>
+            <td><span class="field-current">搜索项目编号或名称</span></td>
+            <td><span class="field-new">输入项目编号或名称搜索</span></td>
+            <td class="field-desc">"搜索"改成"输入……搜索"更自然</td>
+          </tr>
+          <tr>
+            <td>空状态提示</td>
+            <td><span class="field-current">当前筛选暂无项目</span></td>
+            <td><span class="field-new">当前筛选条件下没有项目</span></td>
+            <td class="field-desc">更完整的句子</td>
+          </tr>
+          <tr>
+            <td>加载错误提示</td>
+            <td><span class="field-current">项目面板加载失败</span></td>
+            <td><span class="field-new">项目列表加载失败，请检查网络后重试</span></td>
+            <td class="field-desc">给出明确的操作提示</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h3>📋 项目卡片字段</h3>
+      <div class="path">MaintenanceProjectCard.tsx · MaintenanceOperationsMetrics</div>
+    </div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:14%">显示位置</th><th style="width:22%">当前名称</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>卡片上方小字</td>
+            <td><span class="field-current">项目编号 (project_code)</span></td>
+            <td class="field-new">不变，但可在卡片上加标签说明"项目唯一编号"</td>
+            <td class="field-desc">project_code 是系统内部索引键，不是合同号；大多数甲方人员分不清 project_code 和 contract_no</td>
+          </tr>
+          <tr>
+            <td>卡片主标题</td>
+            <td><span class="field-current">项目名称 (display_name)</span></td>
+            <td class="field-new">保持不变</td>
+            <td class="field-desc">已经是业务名称，OK</td>
+          </tr>
+          <tr>
+            <td>生命周期标签</td>
+            <td><span class="field-current">进行中 / 已结束 / 期限缺失</span></td>
+            <td><span class="field-new">服务中 / 已结项 / 期限待确认</span></td>
+            <td class="field-desc">与筛选器保持一致</td>
+          </tr>
+          <tr>
+            <td>卡片副标题</td>
+            <td><span class="field-current">项目经理：xxx · 数据截止：2026-08-01</span></td>
+            <td><span class="field-new">负责人：xxx · 数据更新至 2026-08-01</span></td>
+            <td class="field-desc">"项目经理"→"负责人"更通用；"数据截止"→"数据更新至"更友好</td>
+          </tr>
+          <tr>
+            <td>卡片统计区标题</td>
+            <td><span class="field-current">全部关联合同</span></td>
+            <td><span class="field-new">关联合同</span></td>
+            <td class="field-desc">"全部关联"冗余</td>
+          </tr>
+          <tr>
+            <td>卡片合同行</td>
+            <td><span class="field-current">合同额（含税）</span></td>
+            <td class="field-new">保持不变</td>
+            <td class="field-desc">已可理解</td>
+          </tr>
+          <tr>
+            <td>卡片合同行</td>
+            <td><span class="field-current">合同额税口径不可确认</span></td>
+            <td><span class="field-new">合同额（含税/未税未确认）</span></td>
+            <td class="field-desc">甲方理解"含税还是未税不确定"，不理解"税口径"</td>
+          </tr>
+          <tr>
+            <td>卡片合同标签</td>
+            <td><span class="field-current">计入合同总额</span></td>
+            <td class="field-new">有效合同</td>
+            <td class="field-desc">"计入合同总额"是会计口径用语，甲方看不懂</td>
+          </tr>
+          <tr>
+            <td>卡片合同标签</td>
+            <td><span class="field-current">不计入合同总额</span></td>
+            <td class="field-new">历史合同（已失效）</td>
+            <td class="field-desc">更直白</td>
+          </tr>
+          <tr>
+            <td>卡片合同标签</td>
+            <td><span class="field-current">非当前有效</span></td>
+            <td class="field-new">已过期</td>
+            <td class="field-desc">"非当前有效"太绕</td>
+          </tr>
+          <tr>
+            <td>卡片合同标签</td>
+            <td><span class="field-current">状态未映射 / unmapped</span></td>
+            <td class="field-new">合同状态待确认</td>
+            <td class="field-desc">"映射"是技术动词</td>
+          </tr>
+          <tr>
+            <td>卡片合同标签</td>
+            <td><span class="field-current">金额缺失</span></td>
+            <td class="field-new">合同金额未填写</td>
+            <td class="field-desc">更明确的提示</td>
+          </tr>
+          <tr>
+            <td>卡片合同标签</td>
+            <td><span class="field-current">金额不可见</span></td>
+            <td class="field-new">金额无权限查看</td>
+            <td class="field-desc">"不可见"→"无权限查看"，让用户知道是权限问题</td>
+          </tr>
+          <tr>
+            <td>卡片进度条标题</td>
+            <td><span class="field-current">回款 / 全部合同额（含税）</span></td>
+            <td class="field-new">已回款 ÷ 合同总额（含税）</td>
+            <td class="field-desc">"分母/分子"比"回款/全部合同额"更清晰</td>
+          </tr>
+          <tr>
+            <td>卡片进度条标题</td>
+            <td><span class="field-current">项目实际成本（含税） / 全部合同额（含税）</span></td>
+            <td class="field-new">已消耗成本 ÷ 合同总额（含税）</td>
+            <td class="field-desc">甲方习惯"消耗了多少成本"而非"实际成本"</td>
+          </tr>
+          <tr>
+            <td>成本水位线标签</td>
+            <td><span class="field-current">低于 80% / 80%–100% / 超过 100%</span></td>
+            <td class="field-new">成本正常 / 成本偏高 / 已超合同额</td>
+            <td class="field-desc">用自然语言描述，不要用百分比区间作为标签</td>
+          </tr>
+          <tr>
+            <td>成本水位线标签</td>
+            <td><span class="field-current">成本未完整，当前为下限</span></td>
+            <td class="field-new">部分成本待补充，当前数值为最低估计</td>
+            <td class="field-desc">"下限"是统计术语</td>
+          </tr>
+          <tr>
+            <td>成本水位线标签</td>
+            <td><span class="field-current">成本不可见/无权限</span></td>
+            <td class="field-new">暂无成本查看权限</td>
+            <td class="field-desc">明确告知是权限问题</td>
+          </tr>
+          <tr>
+            <td>成本水位线标签</td>
+            <td><span class="field-current">合同额不可见/无权限</span></td>
+            <td class="field-new">暂无合同金额查看权限</td>
+            <td class="field-desc">同上</td>
+          </tr>
+          <tr>
+            <td>卡片底部标签</td>
+            <td><span class="field-current">系统提醒</span></td>
+            <td class="field-new">有待办</td>
+            <td class="field-desc">"提醒"过于抽象；有数字时显示"3 项待办"</td>
+          </tr>
+          <tr>
+            <td>卡片底部标签</td>
+            <td><span class="field-current">暂无提醒</span></td>
+            <td class="field-new">无待办</td>
+            <td class="field-desc">更短更清晰</td>
+          </tr>
+          <tr>
+            <td>卡片底部标签</td>
+            <td><span class="field-current">成本待补</span></td>
+            <td class="field-new">部分领用缺成本</td>
+            <td class="field-desc">说明是"领用没有成本"这个具体问题</td>
+          </tr>
+          <tr>
+            <td>卡片操作按钮</td>
+            <td><span class="field-current">查看项目</span></td>
+            <td class="field-new">进入项目</td>
+            <td class="field-desc">"查看"是被动的，"进入"是主动操作</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ====== Section 2: 项目主档 ====== -->
+<div class="section" id="s2">
+  <div class="section-title">02 · 项目主档 &nbsp;<span class="badge badge-menu">菜单项</span></div>
+  <div class="section-desc">
+    当前菜单名"项目主档"——这是数据库建模术语（Master Data），甲方人员完全听不懂。<br>
+    这个页面的实际功能是：<strong>注册和管理维保项目的基本身份信息（编号、名称、负责人、状态），是其他所有维保功能的数据基础。</strong>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h3>🔧 菜单与页面标题</h3>
+      <div class="path">nav.tsx · MaintenanceProjectMasterPage.tsx</div>
+    </div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">位置</th><th style="width:22%">当前名称</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>侧栏菜单</td>
+            <td><span class="field-current">项目主档</span></td>
+            <td><span class="field-new">项目管理</span></td>
+            <td class="field-desc">甲方人员立刻理解这是管项目的地方。或"项目注册"——但"管理"涵盖更全（含归档/恢复）</td>
+          </tr>
+          <tr>
+            <td>页面主标题</td>
+            <td><span class="field-current">项目主档</span></td>
+            <td><span class="field-new">项目管理</span></td>
+            <td class="field-desc">与菜单一致</td>
+          </tr>
+          <tr>
+            <td>页面副标题</td>
+            <td><span class="field-current">稳定项目编号是维保项目的长期身份；名称和负责人可审计变更。</span></td>
+            <td><span class="field-new">每个项目有一个唯一编号作为长期身份标识；名称和负责人可修改，所有变更留痕。</span></td>
+            <td class="field-desc">去掉"稳定""可审计变更"等工程师用语</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <h3>📋 表格列</h3>
+    </div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">当前列名</th><th style="width:22%">建议改为</th><th>业务解释 / 为什么甲方看不懂</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="field-current">稳定项目编号</span></td>
+            <td><span class="field-new">项目编号</span></td>
+            <td class="field-desc">"稳定"是相对于 WBDD 数据源"项目名漂移"的技术概念，甲方不关心</td>
+          </tr>
+          <tr>
+            <td><span class="field-current">项目名称</span></td>
+            <td class="field-new">保持不变</td>
+            <td class="field-desc">OK</td>
+          </tr>
+          <tr>
+            <td><span class="field-current">项目经理标识</span></td>
+            <td><span class="field-new">负责人</span></td>
+            <td class="field-desc">"标识"是技术用语；实际存的是人员姓名/账号。甲方说"负责人"</td>
+          </tr>
+          <tr>
+            <td><span class="field-current">业务期限</span></td>
+            <td><span class="field-new">服务状态</span></td>
+            <td class="field-desc">"期限"暗示有起止日期但这个字段存的是"待确认"标签</td>
+          </tr>
+          <tr>
+            <td><span class="field-current">主档状态</span></td>
+            <td><span class="field-new">启用状态</span></td>
+            <td class="field-desc">"主档"是建模术语；这个字段只有"有效/已归档"两个值，就是"启用/停用"</td>
+          </tr>
+          <tr>
+            <td><span class="field-current">版本</span></td>
+            <td class="field-new">变更次数</td>
+            <td class="field-desc">"版本"是乐观锁实现细节；甲方理解"改了多少次"</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>🔘 按钮与表单字段</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">当前名称</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="field-current">新建项目</span></td>
+            <td class="field-new">保持不变</td>
+            <td class="field-desc">OK</td>
+          </tr>
+          <tr>
+            <td><span class="field-current">保存建档</span></td>
+            <td><span class="field-new">保存</span></td>
+            <td class="field-desc">"建档"是档案管理术语</td>
+          </tr>
+          <tr>
+            <td><span class="field-current">保存修改</span></td>
+            <td><span class="field-new">保存</span></td>
+            <td class="field-desc">统一用"保存"，不分"建档/修改"</td>
+          </tr>
+          <tr>
+            <td><span class="field-current">归档</span> / <span class="field-current">恢复</span></td>
+            <td class="field-new">停用</span> / <span class="field-new">重新启用</span></td>
+            <td class="field-desc">甲方理解"这个项目不用了就停掉"，不理解"归档"</td>
+          </tr>
+          <tr>
+            <td>表单字段</td>
+            <td><span class="field-current">稳定项目编号</span> → <span class="field-new">项目编号</span></td>
+            <td class="field-desc">同表格列</td>
+          </tr>
+          <tr>
+            <td>表单字段</td>
+            <td><span class="field-current">项目经理标识</span> → <span class="field-new">负责人</span></td>
+            <td class="field-desc">同表格列</td>
+          </tr>
+          <tr>
+            <td>表单字段占位符</td>
+            <td><span class="field-current">可留空；编辑时清空会显式解除负责人</span></td>
+            <td><span class="field-new">可留空；清空即取消当前负责人指派</span></td>
+            <td class="field-desc">"显式解除"太技术</td>
+          </tr>
+          <tr>
+            <td><span class="field-current">操作原因</span></td>
+            <td class="field-new">变更说明</td>
+            <td class="field-desc">"操作原因"像系统日志用词；"变更说明"是业务人员填写的自然语言</td>
+          </tr>
+          <tr>
+            <td>二次确认弹窗标题</td>
+            <td><span class="field-current">二次确认归档项目 / 二次确认恢复项目</span></td>
+            <td><span class="field-new">确认停用项目 / 确认重新启用项目</span></td>
+            <td class="field-desc">直接用"停用/启用"</td>
+          </tr>
+          <tr>
+            <td>空状态文本</td>
+            <td><span class="field-current">暂无项目主档，可新建项目。 / 暂无项目主档。</span></td>
+            <td><span class="field-new">暂无项目，可新建。 / 暂无项目。</span></td>
+            <td class="field-desc">去掉"主档"</td>
+          </tr>
+          <tr>
+            <td>冲突提示</td>
+            <td><span class="field-current">存在并发修改，当前草稿尚未丢失</span></td>
+            <td><span class="field-new">该项目已被他人修改，你的填写内容已保留，请核对最新信息后重新保存</span></td>
+            <td class="field-desc">"并发修改""草稿尚未丢失"是程序员用语</td>
+          </tr>
+          <tr>
+            <td>冲突刷新按钮</td>
+            <td><span class="field-current">刷新项目列表并保留草稿</span></td>
+            <td><span class="field-new">获取最新信息并保留填写内容</span></td>
+            <td class="field-desc">"刷新""草稿"都是技术用语</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ====== Section 3: 项目工作台 ====== -->
+<div class="section" id="s3">
+  <div class="section-title">03 · 项目工作台（详情页）&nbsp;<span class="badge badge-page">详情页</span></div>
+  <div class="section-desc">
+    从项目总览点"进入项目"后到达的页面，展示单个项目的完整信息：合同、回款、领用、报销、工作簿下载。
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>📋 页面区域与字段</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">当前名称</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="field-current">维保项目详情</span>（面包屑/路由标题）</td>
+            <td><span class="field-new">项目详情</span></td>
+            <td class="field-desc">简洁即可；"维保"上下文中多余</td>
+          </tr>
+          <tr>
+            <td>页面副标题</td>
+            <td><span class="field-current">数据截止 2026-08-01</span></td>
+            <td><span class="field-new">数据更新至 2026-08-01</span></td>
+            <td class="field-desc">"截止"暗示停留，"更新至"是进展</td>
+          </tr>
+          <tr>
+            <td>卡片标题</td>
+            <td><span class="field-current">回款与项目实际成本</span></td>
+            <td><span class="field-new">回款进度与成本消耗</span></td>
+            <td class="field-desc">"实际成本"给人感觉还有"虚假成本"</td>
+          </tr>
+          <tr>
+            <td>卡片标题</td>
+            <td><span class="field-current">系统提醒</span></td>
+            <td><span class="field-new">待办事项</span></td>
+            <td class="field-desc">"提醒"主语不明确；"待办"是甲方日常用语</td>
+          </tr>
+          <tr>
+            <td>卡片标题</td>
+            <td><span class="field-current">全部关联合同</span></td>
+            <td><span class="field-new">关联合同</span></td>
+            <td class="field-desc">精简</td>
+          </tr>
+          <tr>
+            <td>卡片标题</td>
+            <td><span class="field-current">回款明细</span></td>
+            <td class="field-new">回款记录</td>
+            <td class="field-desc">"明细"是财务软件用语，甲方说"记录"即可</td>
+          </tr>
+          <tr>
+            <td>卡片标题</td>
+            <td><span class="field-current">现场领用全量明细</span></td>
+            <td><span class="field-new">备件领用记录</span></td>
+            <td class="field-desc">"现场领用全量明细"七字不如四字；"备件"比"现场"更具体</td>
+          </tr>
+          <tr>
+            <td>卡片标题</td>
+            <td><span class="field-current">审批通过报销</span></td>
+            <td><span class="field-new">已报销费用</span></td>
+            <td class="field-desc">"审批通过"是系统状态，"已报销"是业务结果</td>
+          </tr>
+          <tr>
+            <td>卡片标题</td>
+            <td><span class="field-current">完整项目工作簿</span></td>
+            <td><span class="field-new">项目工作簿（四表下载）</span></td>
+            <td class="field-desc">"完整"不增加信息量；补充"四表下载"说明用途</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>📋 回款明细表列</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">当前列名</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr><td><span class="field-current">报告月</span></td><td class="field-new">回款月份</td><td class="field-desc">"报告月"是系统概念</td></tr>
+          <tr><td><span class="field-current">合同编号</span></td><td class="field-new">对应合同</td><td class="field-desc">同一张表里合同号对应的就是合同</td></tr>
+          <tr><td><span class="field-current">累计回款</span></td><td class="field-new">回款金额（累计）</td><td class="field-desc">补充"累计"说明是叠加值</td></tr>
+          <tr><td><span class="field-current">凭证</span></td><td class="field-new">回款凭证</td><td class="field-desc">单说"凭证"太泛</td></tr>
+          <tr><td><span class="field-current">状态</span>（值：已确认/待确认/已作废）</td><td class="field-new">保持不变</td><td class="field-desc">已可理解</td></tr>
+          <tr><td><span class="field-current">备注</span></td><td class="field-new">保持不变</td><td class="field-desc">OK</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>📋 备件领用记录表列</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">当前列名</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr><td><span class="field-current">领用日期</span></td><td class="field-new">保持不变</td><td class="field-desc">OK</td></tr>
+          <tr><td><span class="field-current">现场领用单</span></td><td><span class="field-new">领用单号</span></td><td class="field-desc">"现场"不增加信息量</td></tr>
+          <tr><td><span class="field-current">合同</span></td><td class="field-new">保持不变</td><td class="field-desc">OK</td></tr>
+          <tr><td><span class="field-current">PN</span></td><td><span class="field-new">备件型号</span></td><td class="field-desc">甲方不知道 PN 是什么；加上"备件"说明属性</td></tr>
+          <tr><td><span class="field-current">描述</span></td><td class="field-new">备件描述</td><td class="field-desc">与 PN 列配合更清晰</td></tr>
+          <tr><td><span class="field-current">数量</span></td><td class="field-new">保持不变</td><td class="field-desc">OK</td></tr>
+          <tr><td><span class="field-current">单位成本（含税）/ 单位成本（不含税）</span></td><td><span class="field-new">单价（含税）/ 单价（未税）</span></td><td class="field-desc">"单位成本"是会计术语；甲方日常说"单价"</td></tr>
+          <tr><td><span class="field-current">已知成本（含税）/ 已知成本（不含税）</span></td><td><span class="field-new">金额（含税）/ 金额（未税）</span></td><td class="field-desc">"已知成本"→直接"金额"；"不含税"→"未税"是甲方习惯表达</td></tr>
+          <tr><td>成本状态列</td><td><span class="field-current">待回填成本 / 成本不可见 / 未计入成本 / 已有成本</span></td><td class="field-desc">
+            <span class="field-new">缺成本 / 无权限查看 / 未纳入核算 / 已核算</span><br>
+            这四个标签是当前最让甲方困惑的——"回填"是系统操作、"不可见"不知道原因、"未计入"是会计术语
+          </td></tr>
+          <tr>
+            <td>卡片副标题（成本完整/不完整）</td>
+            <td><span class="field-current">缺 N 行成本，明细仍完整展示</span></td>
+            <td><span class="field-new">有 N 条领用暂缺成本，清单仍可查看</span></td>
+            <td class="field-desc">"明细"→"清单"，去掉"仍完整展示"的优越感</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>📋 已报销费用表列</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">当前列名</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr><td><span class="field-current">报销单号</span></td><td class="field-new">保持不变</td><td class="field-desc">OK</td></tr>
+          <tr><td><span class="field-current">报销日期</span></td><td class="field-new">保持不变</td><td class="field-desc">OK</td></tr>
+          <tr><td><span class="field-current">合同</span></td><td class="field-new">保持不变</td><td class="field-desc">OK</td></tr>
+          <tr><td><span class="field-current">申请人</span></td><td class="field-new">报销人</td><td class="field-desc">与"报销单"呼应更自然</td></tr>
+          <tr><td><span class="field-current">费用分类</span></td><td class="field-new">保持不变</td><td class="field-desc">OK</td></tr>
+          <tr><td><span class="field-current">支出事由</span></td><td class="field-new">费用说明</td><td class="field-desc">"支出事由"像审计用语</td></tr>
+          <tr><td><span class="field-current">金额（含税）/ 金额（不含税）</span></td><td><span class="field-new">金额（含税）/ 金额（未税）</span></td><td class="field-desc">统一"不含税"→"未税"</td></tr>
+          <tr><td><span class="field-current">审批状态</span></td><td><span class="field-new">保持不变</span></td><td class="field-desc">OK</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>📋 工作簿四表名称（WorkbookFourSheetPreview）</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">当前名称</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr><td><span class="field-current">01_总览</span></td><td><span class="field-new">01_项目总览（合同与回款）</span></td><td class="field-desc">补充说明内容</td></tr>
+          <tr><td><span class="field-current">02_备件消耗</span></td><td><span class="field-new">02_备件领用明细</span></td><td class="field-desc">"消耗"是系统视角，"领用"是业务视角</td></tr>
+          <tr><td><span class="field-current">03_报销单</span></td><td><span class="field-new">03_费用报销明细</span></td><td class="field-desc">"报销单"过于简略</td></tr>
+          <tr><td><span class="field-current">04_项目经理追踪与提醒</span></td><td><span class="field-new">04_项目待办与追踪</span></td><td class="field-desc">去掉"经理"（不一定是经理在看）</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ====== Section 4: 月度更新 ====== -->
+<div class="section" id="s4">
+  <div class="section-title">04 · 月度更新 &nbsp;<span class="badge badge-menu">菜单项</span></div>
+  <div class="section-desc">
+    这个页面的实际功能是：<strong>下载项目工作簿 Excel，在外部填写回款数据后上传回系统校验和应用。</strong><br>
+    当前名称"月度更新"模糊而技术化——甲方不知道"更新什么"、"谁更新"。
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>🔧 菜单与页面</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">位置</th><th style="width:22%">当前名称</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>侧栏菜单</td>
+            <td><span class="field-current">月度更新</span></td>
+            <td><span class="field-new">工作簿上传</span></td>
+            <td class="field-desc">直接说明操作：上传工作簿。或"回款数据上传"——但工作簿不只是回款</td>
+          </tr>
+          <tr>
+            <td>页面主标题</td>
+            <td><span class="field-current">维保项目月度更新</span></td>
+            <td><span class="field-new">项目工作簿上传</span></td>
+            <td class="field-desc">明确"上传"动作</td>
+          </tr>
+          <tr>
+            <td>页面副标题</td>
+            <td><span class="field-current">先在页面看清四张表的内容和写入边界，再下载全量表、追加回款记录并回传校验。</span></td>
+            <td><span class="field-new">下载项目工作簿，在回款表尾追加当月数据后上传，系统自动校验并更新。</span></td>
+            <td class="field-desc">去掉"写入边界""回传校验"等术语</td>
+          </tr>
+          <tr>
+            <td>信息提示</td>
+            <td><span class="field-current">01_总览仅允许在回款表尾追加新记录；备件消耗、报销单、项目经理追踪与提醒均由系统生成，上传时会校验是否被改动。</span></td>
+            <td><span class="field-new">只有回款表可以新增行；备件领用、费用报销、待办追踪三张表由系统自动生成，上传时如果被改动会提示错误。</span></td>
+            <td class="field-desc">业务化改写</td>
+          </tr>
+          <tr>
+            <td>选择项目占位符</td>
+            <td><span class="field-current">按项目编号或名称选择</span></td>
+            <td class="field-new">选择要上传工作簿的项目</span></td>
+            <td class="field-desc">更明确</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ====== Section 5: 成本回填 ====== -->
+<div class="section" id="s5">
+  <div class="section-title">05 · 成本回填 &nbsp;<span class="badge badge-menu">菜单项</span></div>
+  <div class="section-desc">
+    这个页面的实际功能是：<strong>列出系统无法自动算出成本的领用记录，由人工录入采购/销售价格作为成本证据。</strong><br>
+    "成本回填"是工程师视角的动词——"回"暗示"原本该有但没有"，"填"是数据库操作。
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>🔧 菜单与页面</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">位置</th><th style="width:22%">当前名称</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>侧栏菜单</td>
+            <td><span class="field-current">成本回填</span></td>
+            <td><span class="field-new">缺价补录</span></td>
+            <td class="field-desc">"缺价"是业务事实，"补录"是操作。也可考虑"领用成本补录"</td>
+          </tr>
+          <tr>
+            <td>页面主标题</td>
+            <td><span class="field-current">缺失成本人工回填</span></td>
+            <td><span class="field-new">领用缺价补录</span></td>
+            <td class="field-desc">六个字，"缺失成本"→"缺价"，"人工回填"→"补录"</td>
+          </tr>
+          <tr>
+            <td>页面副标题</td>
+            <td><span class="field-current">只列出系统无法自动取价的现场领用行；先核对关联采购，再看前后 7 天采购和销售加权参考。</span></td>
+            <td><span class="field-new">以下领用记录的系统自动取价未成功。核对关联采购记录，或参考前后 7 天的采购价和销售价，为每条领用补录未税单价。</span></td>
+            <td class="field-desc">去掉"取价""行""加权"</td>
+          </tr>
+          <tr>
+            <td>顶部提示</td>
+            <td><span class="field-current">采购或销售数据可能晚于领用到达；可先重新匹配系统价格，仍无可靠证据的行再人工回填。</span></td>
+            <td><span class="field-new">新到的采购或销售数据可能尚未自动匹配；可先点击"重新匹配"，匹配后仍缺价的记录再手动补录。</span></td>
+            <td class="field-desc">"晚于领用到达""行再人工回填"→日常用语</td>
+          </tr>
+          <tr>
+            <td>按钮</td>
+            <td><span class="field-current">重新匹配系统价格</span></td>
+            <td><span class="field-new">自动匹配最新价格</span></td>
+            <td class="field-desc">"系统"是内部视角</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>📋 表格列</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">当前列名</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr><td><span class="field-current">领用日期</span></td><td class="field-new">保持不变</td><td class="field-desc">OK</td></tr>
+          <tr><td><span class="field-current">现场领用单</span></td><td><span class="field-new">领用单号</span></td><td class="field-desc">同前</td></tr>
+          <tr><td><span class="field-current">合同</span></td><td class="field-new">保持不变</td><td class="field-desc">OK</td></tr>
+          <tr><td><span class="field-current">PN</span></td><td><span class="field-new">备件型号</span></td><td class="field-desc">同前</td></tr>
+          <tr><td><span class="field-current">描述</span></td><td class="field-new">备件描述</td><td class="field-desc">同前</td></tr>
+          <tr><td><span class="field-current">数量</span></td><td class="field-new">保持不变</td><td class="field-desc">OK</td></tr>
+          <tr>
+            <td><span class="field-current">可核对价格证据</span></td>
+            <td><span class="field-new">可用参考价格</span></td>
+            <td class="field-desc">"证据"是审计用语；这里是给用户选参考价，不是呈堂证供</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>📋 价格参考标签</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">当前标签</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr><td><span class="field-current">关联采购</span></td><td><span class="field-new">关联采购记录</span></td><td class="field-desc">补全为短语</td></tr>
+          <tr><td><span class="field-current">采购 ±7 天加权</span></td><td><span class="field-new">前后 7 天采购价</span></td><td class="field-desc">"加权"是统计术语，"±7 天"是程序员写法</td></tr>
+          <tr><td><span class="field-current">销售 ±7 天加权</span></td><td><span class="field-new">前后 7 天销售价</span></td><td class="field-desc">同上</td></tr>
+          <tr><td><span class="field-current">人工回填</span></td><td><span class="field-new">手动录入</span></td><td class="field-desc">"回填"→"录入"</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>🔘 弹窗与按钮</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">当前名称</th><th style="width:22%">建议改为</th><th>业务解释</th></tr></thead>
+        <tbody>
+          <tr><td>操作按钮</td><td><span class="field-current">回填</span></td><td><span class="field-new">补录价格</span></td><td class="field-desc">"回填"是技术动词，"补录价格"说明操作</td></tr>
+          <tr><td>弹窗标题</td><td><span class="field-current">回填成本</span></td><td><span class="field-new">补录领用单价</span></td><td class="field-desc">明确是"单价"不是总价</td></tr>
+          <tr><td>弹窗字段</td><td><span class="field-current">未税单位成本</span></td><td><span class="field-new">未税单价</span></td><td class="field-desc">甲方说"单价"</td></tr>
+          <tr><td>弹窗字段</td><td><span class="field-current">价格证据</span></td><td><span class="field-new">价格来源说明</span></td><td class="field-desc">"证据"太法律化</td></tr>
+          <tr><td>弹窗字段</td><td><span class="field-current">回填原因</span></td><td><span class="field-new">补录说明</span></td><td class="field-desc">与"补录"动词一致</td></tr>
+          <tr><td>弹窗预览</td><td><span class="field-current">按 13% 增值税和 HALF_UP 换算，含税单位成本预览：¥123.45</span></td><td><span class="field-new">含税单价（按 13% 增值税换算）：¥123.45</span></td><td class="field-desc">"HALF_UP"是 Java 舍入模式名，甲方不可能懂</td></tr>
+          <tr><td>保存按钮</td><td><span class="field-current">保存成本</span></td><td><span class="field-new">确认保存</span></td><td class="field-desc">简洁</td></tr>
+          <tr><td>参考价格操作</td><td><span class="field-current">采用该参考</span></td><td><span class="field-new">使用此价格</span></td><td class="field-desc">"采用该参考"像学术论文</td></tr>
+          <tr><td>空状态</td><td><span class="field-current">当前项目没有待回填成本 / 暂无项目主档</span></td><td><span class="field-new">当前项目所有领用成本已齐全 / 暂无项目</span></td><td class="field-desc">正面表述</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ====== Section 6: 菜单与全局 ====== -->
+<div class="section" id="s6">
+  <div class="section-title">06 · 菜单与全局文案 &nbsp;<span class="badge badge-fix">高优先级</span></div>
+  <div class="section-desc">
+    以下变更影响侧栏导航和全局标签，是与甲方日常使用最直接相关的一批修改。
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>🔧 侧栏菜单组名与项名</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:18%">位置</th><th style="width:22%">当前名称</th><th style="width:22%">建议改为</th><th>理由</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>菜单组</td>
+            <td><span class="field-current">维保管理</span></td>
+            <td class="field-new">保持不变</td>
+            <td class="field-desc">"维保"是甲方熟悉的业务术语，OK</td>
+          </tr>
+          <tr>
+            <td>菜单项</td>
+            <td><span class="field-current">项目面板</span></td>
+            <td><span class="field-new">项目总览</span></td>
+            <td class="field-desc">或"维保项目"——简单直观</td>
+          </tr>
+          <tr>
+            <td>菜单项</td>
+            <td><span class="field-current">项目主档</span></td>
+            <td><span class="field-new">项目管理</span></td>
+            <td class="field-desc">甲方理解"管理"</td>
+          </tr>
+          <tr>
+            <td>菜单项</td>
+            <td><span class="field-current">月度更新</span></td>
+            <td><span class="field-new">工作簿上传</span></td>
+            <td class="field-desc">直接说明操作</td>
+          </tr>
+          <tr>
+            <td>菜单项</td>
+            <td><span class="field-current">成本回填</span></td>
+            <td><span class="field-new">缺价补录</span></td>
+            <td class="field-desc">说明"缺什么""做什么"</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h3>🏷️ 全局通用术语替换表</h3></div>
+    <div class="card-body">
+      <table>
+        <thead><tr><th style="width:22%">当前</th><th style="width:22%">替换为</th><th>适用范围</th></tr></thead>
+        <tbody>
+          <tr><td><span class="field-current">不含税</span></td><td class="field-new">未税</td><td class="field-desc">全局——甲方习惯说"未税价""含税价"，从不说"不含税价"</td></tr>
+          <tr><td><span class="field-current">单位成本</span></td><td class="field-new">单价</td><td class="field-desc">所有表格列</td></tr>
+          <tr><td><span class="field-current">PN</span></td><td class="field-new">备件型号 / 型号</td><td class="field-desc">上下文决定——领用表写"备件型号"，型号查询页可保留"型号"</td></tr>
+          <tr><td><span class="field-current">项目经理标识</span></td><td class="field-new">负责人</td><td class="field-desc">所有页面</td></tr>
+          <tr><td><span class="field-current">稳定项目编号</span></td><td class="field-new">项目编号</td><td class="field-desc">所有页面</td></tr>
+          <tr><td><span class="field-current">明细</span></td><td class="field-new">记录 / 清单</td><td class="field-desc">"明细"偏财务软件用语</td></tr>
+          <tr><td><span class="field-current">回填</span></td><td class="field-new">补录</td><td class="field-desc">所有页面</td></tr>
+          <tr><td><span class="field-current">取价</span></td><td class="field-new">匹配价格 / 获取价格</td><td class="field-desc">提示语</td></tr>
+          <tr><td><span class="field-current">映射 (mapped/unmapped)</span></td><td class="field-new">已确认 / 待确认</td><td class="field-desc">状态标签</td></tr>
+          <tr><td><span class="field-current">不可见</span></td><td class="field-new">无查看权限</td><td class="field-desc">让用户知道是权限问题</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Summary -->
+<div class="section">
+  <div class="section-title">改造统计</div>
+  <div class="summary-grid">
+    <div class="summary-box"><div class="num">4</div><div class="label">菜单项改名</div></div>
+    <div class="summary-box"><div class="num">5</div><div class="label">页面标题改名</div></div>
+    <div class="summary-box"><div class="num">12</div><div class="label">表格列改名</div></div>
+    <div class="summary-box"><div class="num">10</div><div class="label">全局术语替换</div></div>
+    <div class="summary-box"><div class="num">15+</div><div class="label">标签/按钮文案</div></div>
+    <div class="summary-box"><div class="num">8+</div><div class="label">提示语改写</div></div>
+  </div>
+  <p style="margin-top: 20px; color: var(--text-secondary); font-size: 14px; line-height: 1.7;">
+    <strong>改造原则：</strong>每次修改只改前端展示文案（nav.tsx 的 label、各页面组件的 title/subtitle/columns.title/placeholder/Button 文本），
+    不改后端 API 字段名、不改数据库列名、不改路由路径。这是纯前端文案层的业务化翻译，风险极低，可分批实施。
+  </p>
+  <p style="margin-top: 12px; color: var(--text-muted); font-size: 13px;">
+    建议分批：先改菜单和全局术语（影响最大），再逐页改表格列和提示语。每批改完后让甲方人员试用反馈，根据实际使用习惯微调。
+  </p>
+</div>
+
+</div>

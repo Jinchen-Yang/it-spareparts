@@ -280,10 +280,32 @@ def search_demands(
     q: str | None,
     page: int,
     page_size: int,
+    allowed_project_ids: set[str] | None = None,
 ) -> dict:
-    """Search active WBDD headers; joins never duplicate a header row."""
+    """Search active WBDD headers; joins never duplicate a header row.
+
+    When *allowed_project_ids* is a non-empty set, only orders whose
+    ``project_std`` matches a display_name from an allowed project are
+    returned.  None (admin) = unrestricted.
+    """
 
     predicates = [beta_active_demand_condition()]
+
+    if allowed_project_ids is not None:
+        if not allowed_project_ids:
+            return {"items": [], "page": page, "page_size": page_size, "total": 0}
+        from app.models.maintenance_project import MaintenanceProject
+        allowed_names = set(
+            db.scalars(
+                select(MaintenanceProject.display_name).where(
+                    MaintenanceProject.project_id.in_(allowed_project_ids)
+                )
+            ).all()
+        )
+        if not allowed_names:
+            return {"items": [], "page": page, "page_size": page_size, "total": 0}
+        predicates.append(FMaintenanceOrder.project_std.in_(allowed_names))
+
     term = (q or "").strip()
     if term:
         pattern = f"%{_escape_like(term)}%"

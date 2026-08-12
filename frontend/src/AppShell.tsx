@@ -83,6 +83,12 @@ export default function AppShell({
   const [showWhatsNew, setShowWhatsNew] = useState(
     () => localStorage.getItem("seen_version") !== APP_VERSION,
   );
+  const [openKeys, setOpenKeys] = useState<string[]>(() => {
+    try {
+      const stored = localStorage.getItem("sidebar_open_keys");
+      return stored ? JSON.parse(stored) : [];
+    } catch { return []; }
+  });
   const dismissWhatsNew = () => {
     localStorage.setItem("seen_version", APP_VERSION);
     setShowWhatsNew(false);
@@ -126,7 +132,7 @@ export default function AppShell({
     return () => (window.cancelIdleCallback || window.clearTimeout)(id);
   }, [allowed]);
 
-  // 分组菜单：只渲染当前用户可见的项；空组整组隐藏
+  // 分组菜单：group 自动变为可折叠 SubMenu；空组整组隐藏
   const allowedKeys = useMemo(() => new Set(allowed.map((it) => it.key)), [allowed]);
   const menuItems: MenuProps["items"] = useMemo(() => {
     const out: NonNullable<MenuProps["items"]> = [];
@@ -136,10 +142,33 @@ export default function AppShell({
         .map((it) => ({ key: it.key, icon: it.icon, label: it.label }));
       if (!items.length) continue;
       if (g.label === null) out.push(...items);
-      else out.push({ type: "group" as const, key: g.key, label: g.label, children: items });
+      else out.push({
+        key: g.key,
+        label: g.label,
+        icon: null,
+        children: items,
+      });
     }
     return out;
   }, [allowedKeys]);
+
+  // 当前路由所属组自动展开；手动展开/折叠写入 localStorage
+  const activeGroupKeys = useMemo(() => {
+    if (!active) return [];
+    const group = NAV_GROUPS.find((g) => g.items.some((it) => it.key === active.key));
+    return group && group.label !== null ? [group.key] : [];
+  }, [active]);
+
+  const resolvedOpenKeys = useMemo(() => {
+    const merged = new Set(openKeys);
+    for (const k of activeGroupKeys) merged.add(k);
+    return Array.from(merged);
+  }, [openKeys, activeGroupKeys]);
+
+  const onOpenChange = (keys: string[]) => {
+    setOpenKeys(keys);
+    try { localStorage.setItem("sidebar_open_keys", JSON.stringify(keys)); } catch {}
+  };
 
   const onMenuClick: MenuProps["onClick"] = (e) => {
     const target = allowed.find((it) => it.key === e.key);
@@ -151,6 +180,8 @@ export default function AppShell({
     <Menu
       mode="inline"
       selectedKeys={active ? [active.key] : []}
+      openKeys={resolvedOpenKeys}
+      onOpenChange={onOpenChange}
       onClick={onMenuClick}
       items={menuItems}
       style={{ borderInlineEnd: "none", background: "transparent", padding: "8px 8px 16px" }}
