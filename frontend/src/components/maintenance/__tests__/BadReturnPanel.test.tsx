@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { message } from "antd";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const api = vi.hoisted(() => ({
@@ -200,7 +201,13 @@ beforeEach(() => {
   });
 });
 
-afterEach(cleanup);
+afterEach(async () => {
+  cleanup();
+  message.destroy();
+  await waitFor(() => {
+    expect(document.querySelectorAll(".ant-message-notice")).toHaveLength(0);
+  });
+});
 
 describe("BadReturnPanel", () => {
   it("只读账号看到完整返还事实，品类待判定时不显示虚假百分比", async () => {
