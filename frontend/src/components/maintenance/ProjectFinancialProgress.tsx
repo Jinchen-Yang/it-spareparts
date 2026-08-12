@@ -60,15 +60,15 @@ export function classifyCostWaterline({
 }
 
 const STATUS_META: Record<CostWaterlineStatus, { label: string; color: string; tag?: string }> = {
-  normal: { label: "低于 80%", color: "var(--mb-success)", tag: "green" },
-  yellow: { label: "80%–100%", color: "var(--mb-warning)", tag: "gold" },
-  red: { label: "超过 100%", color: "var(--mb-danger)", tag: "red" },
-  unknown: { label: "成本未完整，当前为下限", color: "var(--mb-text-3)", tag: "default" },
-  restricted: { label: "成本不可见/无权限", color: "var(--mb-text-3)", tag: "default" },
-  contract_restricted: { label: "合同额不可见/无权限", color: "var(--mb-text-3)", tag: "default" },
-  no_contract: { label: "合同额不足，无法计算", color: "var(--mb-text-3)", tag: "default" },
-  cost_basis_unknown: { label: "成本税口径不可确认", color: "var(--mb-text-3)", tag: "default" },
-  contract_basis_unknown: { label: "合同额税口径不可确认", color: "var(--mb-text-3)", tag: "default" },
+  normal: { label: "成本正常（低于 80%）", color: "var(--mb-success)", tag: "green" },
+  yellow: { label: "成本偏高（80%–100%）", color: "var(--mb-warning)", tag: "gold" },
+  red: { label: "已超合同额（超过 100%）", color: "var(--mb-danger)", tag: "red" },
+  unknown: { label: "部分成本待补充，当前为最低估计", color: "var(--mb-text-3)", tag: "default" },
+  restricted: { label: "暂无成本查看权限", color: "var(--mb-text-3)", tag: "default" },
+  contract_restricted: { label: "暂无合同金额查看权限", color: "var(--mb-text-3)", tag: "default" },
+  no_contract: { label: "合同金额不足，无法计算", color: "var(--mb-text-3)", tag: "default" },
+  cost_basis_unknown: { label: "成本税类型未确认", color: "var(--mb-text-3)", tag: "default" },
+  contract_basis_unknown: { label: "合同额税类型未确认", color: "var(--mb-text-3)", tag: "default" },
 };
 
 function numericPercent(numerator: number | null, denominator: number | null): number | null {
@@ -178,7 +178,7 @@ export default function ProjectFinancialProgress({ metrics }: {
   return (
     <Space direction="vertical" size={14} style={{ width: "100%" }}>
       <MetricProgress
-        label="回款 / 全部合同额（含税）"
+        label="已回款 ÷ 合同总额（含税）"
         numerator={metrics.received_amount}
         denominator={contractBasisConfirmed ? metrics.total_contract_amount : null}
         percent={collectionPercent}
@@ -186,15 +186,15 @@ export default function ProjectFinancialProgress({ metrics }: {
         testId="collection-progress"
       >
         {!contractBasisConfirmed ? (
-          <div>合同额税口径不可确认，暂不计算比例。</div>
+          <div>合同额税类型未确认，暂不计算比例。</div>
         ) : metrics.contract_amount_complete === null ? (
-          <div>合同额不可见，暂不计算比例。</div>
+          <div>暂无合同金额查看权限，暂不计算比例。</div>
         ) : metrics.contract_amount_complete === false && (
-          <div>合同额证据不完整，暂不计算比例。</div>
+          <div>合同金额数据不完整，暂不计算比例。</div>
         )}
       </MetricProgress>
       <MetricProgress
-        label="项目实际成本（含税） / 全部合同额（含税）"
+        label="已消耗成本 ÷ 合同总额（含税）"
         numerator={costBasisConfirmed ? metrics.actual_project_cost_known_inc_tax : null}
         denominator={contractBasisConfirmed ? metrics.total_contract_amount : null}
         percent={costWaterline.percent}
@@ -203,33 +203,33 @@ export default function ProjectFinancialProgress({ metrics }: {
         testId="project-cost-progress"
       >
         <div>
-          现场领用已知成本（含税） {money(
+          备件领用成本（含税） {money(
             costBasisConfirmed ? metrics.site_requisition_known_cost_inc_tax : null,
           )}
-          {" · "}审批通过报销（含税） {money(
+          {" · "}已报销费用（含税） {money(
             costBasisConfirmed ? metrics.approved_expense_inc_tax : null,
           )}
         </div>
-        <div>现场领用成本（含税）占合同额（含税） {percentLabel(sitePercent)}</div>
+        <div>领用成本（含税）占合同总额（含税） {percentLabel(sitePercent)}</div>
         {!contractBasisConfirmed ? (
-          <div>合同额税口径不可确认，暂不计算比例。</div>
+          <div>合同额税类型未确认，暂不计算比例。</div>
         ) : !costBasisConfirmed ? (
-          <div>成本税口径不可确认，暂不计算比例。</div>
+          <div>成本税类型未确认，暂不计算比例。</div>
         ) : metrics.cost_complete === null || metrics.contract_amount_complete === null
           ? null : metrics.contract_amount_complete === false ? (
           <>
-            <div>合同额证据不完整，暂不计算比例。</div>
+            <div>合同金额数据不完整，暂不计算比例。</div>
             {metrics.cost_complete === false && (
               <div style={{ color: "var(--mb-warning)" }}>
-                缺 {metrics.missing_cost_lines} 行成本；合同额完整后再显示已知下限。
+                缺 {metrics.missing_cost_lines} 条成本；合同金额完整后再显示下限。
               </div>
             )}
           </>
         ) : metrics.cost_complete === false && (
           <div style={{ color: "var(--mb-warning)" }}>
             {knownCostLowerBound
-              ? `缺 ${metrics.missing_cost_lines} 行成本；${knownCostLowerBound}，补齐后只会更高。`
-              : `缺 ${metrics.missing_cost_lines} 行成本；当前无可计算合同额，暂不显示下限。`}
+              ? `缺 ${metrics.missing_cost_lines} 条成本；${knownCostLowerBound}，补全后只会更高。`
+              : `缺 ${metrics.missing_cost_lines} 条成本；当前无合同金额数据，暂不显示下限。`}
           </div>
         )}
         <Tag color={STATUS_META[costWaterline.status].tag} style={{ marginTop: 4 }}>
