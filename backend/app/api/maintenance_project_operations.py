@@ -33,6 +33,7 @@ from app.security import (
 )
 from app.services import maintenance_project_assignments as assignments
 from app.services import maintenance_project_operations as operations
+from app.services import maintenance_project_procurement as procurement
 
 
 router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
@@ -1233,6 +1234,25 @@ def stable_project_tasks(
         },
     )
     return payload
+
+
+@router.get("/{project_id}/purchases")
+def stable_project_purchases(
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    _scope: None = Depends(require_maintenance_project_access),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    rows = procurement.get_project_procurement_chain(db, project_id)
+    record_access_log(
+        ctx,
+        "stable_project_purchases",
+        "maintenance_project",
+        {"project_id": project_id, "result_count": len(rows)},
+    )
+    return {"project_id": project_id, "purchases": rows}
 
 
 def _stable_project_operations_response(

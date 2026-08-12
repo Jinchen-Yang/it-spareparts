@@ -47,6 +47,10 @@ class MaintenanceDemandNotFound(MaintenanceDemandError):
     pass
 
 
+class MaintenanceDemandForbidden(MaintenanceDemandError):
+    pass
+
+
 class DeleteIntentConflict(MaintenanceDemandError):
     pass
 
@@ -284,28 +288,27 @@ def search_demands(
 ) -> dict:
     """Search active WBDD headers; joins never duplicate a header row.
 
-    When *allowed_project_ids* is a non-empty set, only orders whose
-    ``project_std`` matches a display_name from an allowed project are
-    returned.  None (admin) = unrestricted.
+    When *allowed_project_ids* is a set (non-admin), only demands with an
+    active assignment to one of those projects are returned.  Unassigned
+    demands are visible only in full scope (admin).
     """
 
     predicates = [beta_active_demand_condition()]
-
     if allowed_project_ids is not None:
         if not allowed_project_ids:
             return {"items": [], "page": page, "page_size": page_size, "total": 0}
-        from app.models.maintenance_project import MaintenanceProject
-        allowed_names = set(
-            db.scalars(
-                select(MaintenanceProject.display_name).where(
-                    MaintenanceProject.project_id.in_(allowed_project_ids)
+        predicates.append(
+            exists(
+                select(1).where(
+                    MaintenanceSourceOrderAssignment.source_order_id
+                    == FMaintenanceOrder.raw_order_id,
+                    MaintenanceSourceOrderAssignment.project_id.in_(
+                        allowed_project_ids
+                    ),
+                    MaintenanceSourceOrderAssignment.is_active.is_(True),
                 )
-            ).all()
+            )
         )
-        if not allowed_names:
-            return {"items": [], "page": page, "page_size": page_size, "total": 0}
-        predicates.append(FMaintenanceOrder.project_std.in_(allowed_names))
-
     term = (q or "").strip()
     if term:
         pattern = f"%{_escape_like(term)}%"
@@ -426,6 +429,7 @@ def create_delete_intent(
     reason: str,
     idempotency_key: str,
     operated_by: str,
+    allowed_project_ids: set[str] | None = None,
     now: datetime | None = None,
 ) -> dict:
     now = now or _utc_now()
@@ -470,6 +474,14 @@ def create_delete_intent(
     if set(snapshots) != set(source_order_ids):
         raise DeleteIntentConflict("所选 WBDD 已不存在、已删除或状态发生变化")
     items = [snapshots[source_id] for source_id in source_order_ids]
+    if allowed_project_ids is not None:
+        for item in items:
+            assignment = item.get("active_project_assignment")
+            project_id = assignment.get("project_id") if assignment else None
+            if project_id is None or project_id not in allowed_project_ids:
+                raise MaintenanceDemandForbidden(
+                    "只能删除本人负责项目下的维保需求单"
+                )
     line_count = sum(int(item["line_count"]) for item in items)
     if line_count > MAX_DELETE_LINES:
         raise DeleteIntentConflict(f"一次最多涉及 {MAX_DELETE_LINES} 行备件")

@@ -15,7 +15,7 @@ from app.security import (
     require_action,
     require_page,
 )
-from app.api.maintenance_project_scope import require_project_scope
+from app.api.maintenance_project_scope import resolve_visible_project_ids as scope_resolve
 from app.services import maintenance_demands
 
 
@@ -87,6 +87,8 @@ def _real_operator(db: Session, ident: dict) -> str:
 
 
 def _raise_service_error(exc: Exception) -> None:
+    if isinstance(exc, maintenance_demands.MaintenanceDemandForbidden):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     if isinstance(exc, maintenance_demands.DeleteIntentTooEarly):
         raise HTTPException(
             425,
@@ -113,13 +115,16 @@ def search_demands(
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
-    allowed_project_ids: set[str] | None = Depends(require_project_scope),
 ) -> dict:
     if body.q is not None and len(body.q) > 128:
+        # Keep the rejection generic and perform it before access auditing so
+        # neither the raw term nor any derivative is persisted.
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "维保需求单搜索条件无效",
         )
+    allowed_project_ids = scope_resolve(db, ctx)
+    # Deliberately audit only the presence of a search, never its user-entered text.
     record_access_log(
         ctx,
         "maintenance_demand_search",
@@ -127,7 +132,7 @@ def search_demands(
         {
             "searched": bool(body.q and body.q.strip()),
             "page": body.page,
-            "scope": "admin" if allowed_project_ids is None else "scoped",
+            "scope": "full" if allowed_project_ids is None else "owned",
         },
     )
     return maintenance_demands.search_demands(
@@ -147,8 +152,10 @@ def create_delete_intent(
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action("action_maintenance_demand_delete")),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     operated_by = _real_operator(db, ident)
+    allowed_project_ids = scope_resolve(db, ctx)
     try:
         result = maintenance_demands.create_delete_intent(
             db,
@@ -156,6 +163,7 @@ def create_delete_intent(
             reason=body.reason,
             idempotency_key=body.idempotency_key,
             operated_by=operated_by,
+            allowed_project_ids=allowed_project_ids,
         )
         db.commit()
         return result
