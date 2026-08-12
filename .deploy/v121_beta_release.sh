@@ -277,12 +277,6 @@ db_head() {
     -c 'SELECT version_num FROM alembic_version;'
 }
 
-require_real_file_600() {
-  local path=$1
-  [ -f "$path" ] && [ ! -L "$path" ] || fatal "unsafe credential file: $path"
-  [ "$(stat -c '%a' "$path")" = 600 ] || fatal "credential file must be mode 600: $path"
-}
-
 write_json_atomic() {
   local destination=$1
   local payload=$2
@@ -361,6 +355,11 @@ try:
         os.fsync(stream.fileno())
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
+    directory_fd = os.open(path.parent, os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 finally:
     if os.path.exists(temporary):
         os.unlink(temporary)
@@ -603,59 +602,11 @@ SQL
     return 1
   }
   raw=$(compose exec -T db psql -X -U spareparts -d spareparts -At -F $'\t' <<'SQL'
-WITH effective AS (
-  SELECT username,
-         role,
-         COALESCE((perm_overrides->>'page_maintenance')::boolean,
-                  (template_perms->>'page_maintenance')::boolean, false) AS page_maintenance,
-         COALESCE((perm_overrides->>'page_maintenance_beta')::boolean,
-                  (template_perms->>'page_maintenance_beta')::boolean, false) AS page_maintenance_beta,
-         COALESCE((perm_overrides->>'action_maintenance_roundtrip_apply')::boolean,
-                  (template_perms->>'action_maintenance_roundtrip_apply')::boolean, false) AS action_maintenance_roundtrip_apply,
-         COALESCE((perm_overrides->>'action_maintenance_manager_workbook_apply')::boolean,
-                  (template_perms->>'action_maintenance_manager_workbook_apply')::boolean, false) AS action_maintenance_manager_workbook_apply,
-         COALESCE((perm_overrides->>'action_maintenance_project_manage')::boolean,
-                  (template_perms->>'action_maintenance_project_manage')::boolean, false) AS action_maintenance_project_manage,
-         COALESCE((perm_overrides->>'action_maintenance_demand_delete')::boolean,
-                  (template_perms->>'action_maintenance_demand_delete')::boolean, false) AS action_maintenance_demand_delete,
-         COALESCE((perm_overrides->>'action_maintenance_site_issue_manage')::boolean,
-                  (template_perms->>'action_maintenance_site_issue_manage')::boolean, false) AS action_maintenance_site_issue_manage,
-         COALESCE((perm_overrides->>'action_maintenance_bad_return_manage')::boolean,
-                  (template_perms->>'action_maintenance_bad_return_manage')::boolean, false) AS action_maintenance_bad_return_manage,
-         COALESCE((perm_overrides->>'action_maintenance_acceptance_submit')::boolean,
-                  (template_perms->>'action_maintenance_acceptance_submit')::boolean, false) AS action_maintenance_acceptance_submit,
-         COALESCE((perm_overrides->>'action_maintenance_acceptance_review')::boolean,
-                  (template_perms->>'action_maintenance_acceptance_review')::boolean, false) AS action_maintenance_acceptance_review,
-         COALESCE((perm_overrides->>'action_maintenance_warehouse_manage')::boolean,
-                  (template_perms->>'action_maintenance_warehouse_manage')::boolean, false) AS action_maintenance_warehouse_manage,
-         COALESCE((perm_overrides->>'action_maintenance_migration_review')::boolean,
-                  (template_perms->>'action_maintenance_migration_review')::boolean, false) AS action_maintenance_migration_review,
-         COALESCE((perm_overrides->>'page_replenishment_beta')::boolean,
-                  (template_perms->>'page_replenishment_beta')::boolean, false) AS page_replenishment_beta,
-         COALESCE((perm_overrides->>'data_pool_price_governance')::boolean,
-                  (template_perms->>'data_pool_price_governance')::boolean, false) AS data_pool_price_governance,
-         COALESCE((perm_overrides->>'action_replenishment_create')::boolean,
-                  (template_perms->>'action_replenishment_create')::boolean, false) AS action_replenishment_create,
-         COALESCE((perm_overrides->>'action_replenishment_review')::boolean,
-                  (template_perms->>'action_replenishment_review')::boolean, false) AS action_replenishment_review
-  FROM sys_user
-  WHERE is_active IS TRUE
-)
-SELECT username, role,
-       page_maintenance, page_maintenance_beta,
-       action_maintenance_roundtrip_apply,
-       action_maintenance_manager_workbook_apply,
-       action_maintenance_project_manage,
-       action_maintenance_demand_delete,
-       action_maintenance_site_issue_manage,
-       action_maintenance_bad_return_manage,
-       action_maintenance_acceptance_submit,
-       action_maintenance_acceptance_review,
-       action_maintenance_warehouse_manage,
-       action_maintenance_migration_review,
-       page_replenishment_beta, data_pool_price_governance,
-       action_replenishment_create, action_replenishment_review
-FROM effective
+SELECT username,
+       role,
+       (template_perms || COALESCE(perm_overrides, '{}'::jsonb))::text
+FROM sys_user
+WHERE is_active IS TRUE
 ORDER BY username;
 SQL
   ) || return 1
@@ -685,6 +636,23 @@ import hashlib
 import json
 import sys
 
+runtime_permission_keys = (
+    "data_supplier", "data_customer", "data_purchase_cost", "data_profit",
+    "data_pool_price_governance", "page_parts", "page_purchases", "page_profit",
+    "page_inventory", "page_chat", "page_import", "page_governance",
+    "page_master_data", "page_maintenance", "page_boss_board",
+    "page_pool_analysis", "page_maintenance_beta", "page_replenishment_beta",
+    "page_accounts", "action_pool_manage", "action_pool_set_policy",
+    "action_account_manage", "action_data_quality_review",
+    "action_maintenance_roundtrip_apply",
+    "action_maintenance_manager_workbook_apply",
+    "action_maintenance_project_manage", "action_maintenance_demand_delete",
+    "action_maintenance_site_issue_manage", "action_maintenance_bad_return_manage",
+    "action_maintenance_acceptance_submit", "action_maintenance_acceptance_review",
+    "action_maintenance_warehouse_manage", "action_maintenance_migration_review",
+    "action_replenishment_create", "action_replenishment_review",
+    "own_customers_only",
+)
 maintenance_keys = (
     "page_maintenance", "page_maintenance_beta",
     "action_maintenance_roundtrip_apply",
@@ -711,27 +679,31 @@ if sys.argv[2] == "full":
 rows=[]
 for line in sys.argv[1].splitlines():
     fields=line.split("\t")
-    if len(fields) != 2 + len(maintenance_keys) + len(replenishment_keys):
+    if len(fields) != 3:
         raise SystemExit("malformed live allowlist row")
     if fields[1] not in sys_user_roles:
         raise SystemExit("initial pilot contains an invalid sys_user role")
-    values=[value == "t" for value in fields[2:]]
-    if any(value not in {"t","f"} for value in fields[2:]):
-        raise SystemExit("malformed live allowlist boolean")
-    maintenance_raw=dict(zip(maintenance_keys, values[:len(maintenance_keys)]))
-    replenishment_raw=dict(zip(replenishment_keys, values[len(maintenance_keys):]))
+    try:
+        stored_permissions=json.loads(fields[2])
+    except json.JSONDecodeError as exc:
+        raise SystemExit("malformed live runtime permission JSON") from exc
+    if not isinstance(stored_permissions,dict) or set(stored_permissions) != set(runtime_permission_keys):
+        raise SystemExit("live account does not enumerate every runtime permission")
+    if any(not isinstance(stored_permissions[key],bool) for key in runtime_permission_keys):
+        raise SystemExit("malformed live runtime permission boolean")
+    runtime_permissions={key:stored_permissions[key] for key in runtime_permission_keys}
     # effective_for_user/require_action keep ordinary admin permissions open while
     # only the two Beta page bits remain account-scoped. Model those raw runtime
     # actions without masking them behind a page bit; admitted admins therefore
     # fail the scoped pilot's zero-Maintenance-write invariant.
     if fields[1] == "admin":
-        maintenance_raw["page_maintenance"] = True
-        for key in maintenance_keys:
-            if key.startswith("action_"):
-                maintenance_raw[key] = True
-        replenishment_raw["data_pool_price_governance"] = True
-        replenishment_raw["action_replenishment_create"] = True
-        replenishment_raw["action_replenishment_review"] = True
+        beta_pages={key:runtime_permissions[key] for key in (
+            "page_maintenance_beta", "page_replenishment_beta"
+        )}
+        runtime_permissions={key:key != "own_customers_only" for key in runtime_permission_keys}
+        runtime_permissions.update(beta_pages)
+    maintenance_raw={key:runtime_permissions[key] for key in maintenance_keys}
+    replenishment_raw={key:runtime_permissions[key] for key in replenishment_keys}
     include = maintenance_raw["page_maintenance_beta"] or replenishment_raw["page_replenishment_beta"]
     if sys.argv[2] not in {"full", "pages"}:
         raise SystemExit("unknown allowlist projection mode")
@@ -740,6 +712,7 @@ for line in sys.argv[1].splitlines():
     maintenance=dict(maintenance_raw)
     replenishment=dict(replenishment_raw)
     rows.append({"username":fields[0],"role":fields[1],
+                 "runtime_permissions":dict(sorted(runtime_permissions.items())),
                  "maintenance":dict(sorted(maintenance.items())),
                  "replenishment":dict(sorted(replenishment.items()))})
 rows.sort(key=lambda row: row["username"])
@@ -840,9 +813,11 @@ def digest(value):
     return hashlib.sha256(raw).hexdigest()
 maintenance=[{"username":row["username"],"role":row["role"],**row["maintenance"]} for row in rows]
 replenishment=[{"username":row["username"],"role":row["role"],**row["replenishment"]} for row in rows]
+runtime=[{"username":row["username"],"role":row["role"],**row["runtime_permissions"]} for row in rows]
 result={
   "account_count":len(rows),
   "permission_graph_sha256":digest(rows),
+  "runtime_effective_permissions_sha256":digest(runtime),
   "maintenance_effective_permissions_sha256":digest(maintenance),
   "replenishment_effective_permissions_sha256":digest(replenishment),
   "pilot_eligibility_sha256":digest(eligibility),
@@ -887,6 +862,7 @@ live=json.loads(sys.argv[1])
 expected=json.load(open(sys.argv[2],encoding="utf-8"))["intended_beta_allowlist"]
 for key in (
     "account_count", "permission_graph_sha256",
+    "runtime_effective_permissions_sha256",
     "maintenance_effective_permissions_sha256",
     "replenishment_effective_permissions_sha256",
     "maintenance_write_enabled_count", "admin_pilot_count",
@@ -907,16 +883,40 @@ PY
 smoke() {
   local mode=$1
   local credential=$2
-  require_real_file_600 "$credential"
   python3 - "$mode" "$credential" "https://$HOST_NAME" <<'PY'
 import json
+import os
 import ssl
+import stat
 import sys
 import urllib.error
 import urllib.request
 
 mode, credential_path, origin = sys.argv[1:]
-credential=json.load(open(credential_path,encoding="utf-8"))
+flags=os.O_RDONLY | os.O_CLOEXEC
+if not hasattr(os,"O_NOFOLLOW"):
+    raise SystemExit("credential validation requires O_NOFOLLOW")
+try:
+    credential_fd=os.open(credential_path,flags | os.O_NOFOLLOW)
+except OSError as exc:
+    raise SystemExit("credential file cannot be opened without following links") from exc
+try:
+    credential_stat=os.fstat(credential_fd)
+    if (
+        not stat.S_ISREG(credential_stat.st_mode)
+        or stat.S_IMODE(credential_stat.st_mode) != 0o600
+        or credential_stat.st_uid != 0
+        or credential_stat.st_gid != 0
+        or credential_stat.st_nlink != 1
+        or not 0 < credential_stat.st_size <= 4096
+    ):
+        raise SystemExit("credential file must be a root:root mode-600 single-link regular file")
+    with os.fdopen(credential_fd,"r",encoding="utf-8") as stream:
+        credential_fd=-1
+        credential=json.load(stream)
+finally:
+    if credential_fd >= 0:
+        os.close(credential_fd)
 if set(credential) != {"username","password"} or not all(isinstance(v,str) and v for v in credential.values()):
     raise SystemExit("credential JSON must contain only non-empty username/password")
 context=ssl.create_default_context()
@@ -1108,17 +1108,166 @@ recreate_candidate_public_surface() {
     && internal_health
 }
 
-contain_failed_open() {
+contain_failed_deploy() {
   local reason=$1
   if ! set_flags false false; then
-    fail_closed "$reason; flags could not be persisted false"
+    fail_closed "$reason; deploy containment could not persist all protected flags false"
   fi
-  if ! recreate_app; then
-    fail_closed "$reason; flags are false but application recovery failed"
+  if ! emergency_stop_public_surface; then
+    fail_closed "$reason; deploy containment could not stop the public surface"
   fi
-  state_update contained_after_failed_open \
-    '{"beta_contained":true,"pilot_open_failed":true}'
+  assert_flags false false false \
+    || fail_closed "$reason; deploy containment could not prove all flags false"
+  state_update contained_after_failed_deploy \
+    '{"beta_contained":true,"deploy_failed":true,"public_surface_stopped":true}' \
+    || fail_closed "$reason; deploy containment state could not be persisted"
+  fatal "$reason; all flags are false and app/frontend are stopped"
+}
+
+OPEN_TRANSACTION_ACTIVE=false
+OPEN_TRANSACTION_REASON=
+
+disarm_open_transaction() {
+  OPEN_TRANSACTION_ACTIVE=false
+  OPEN_TRANSACTION_REASON=
+  trap - ERR EXIT HUP INT TERM
+}
+
+contain_open_transaction() {
+  local reason=${1:-${OPEN_TRANSACTION_REASON:-pilot opening was interrupted}}
+  local recovery
+  [ "$OPEN_TRANSACTION_ACTIVE" = true ] || return 0
+  disarm_open_transaction
+  if ! set_flags false false; then
+    emergency_stop_public_surface || true
+    state_update containment_uncertain \
+      '{"beta_contained":false,"pilot_open_failed":true,"public_surface_stopped":true}' \
+      || true
+    return 1
+  fi
+  if recreate_app; then
+    recovery=stable_surface_recovered
+  elif emergency_stop_public_surface; then
+    recovery=public_surface_stopped
+  else
+    return 1
+  fi
+  assert_flags false false false || {
+    emergency_stop_public_surface || true
+    return 1
+  }
+  state_update contained_after_failed_open "$(python3 - "$recovery" <<'PY'
+import json,sys
+print(json.dumps({"beta_contained":True,"pilot_open_failed":True,
+                  "containment_result":sys.argv[1]},separators=(",",":")))
+PY
+)" || {
+    emergency_stop_public_surface || true
+    return 1
+  }
+  printf 'pilot opening contained: %s (%s)\n' "$reason" "$recovery" >&2
+}
+
+open_transaction_trap() {
+  local event=$1
+  local status=${2:-1}
+  local reason=${OPEN_TRANSACTION_REASON:-pilot opening was interrupted}
+  contain_open_transaction "$reason during $event" || {
+    printf 'CRITICAL: pilot opening containment could not be proven after %s\n' "$event" >&2
+  }
+  case "$event" in
+    EXIT) return 0 ;;
+    ERR) return "$status" ;;
+    HUP) exit 129 ;;
+    INT) exit 130 ;;
+    TERM) exit 143 ;;
+  esac
+}
+
+arm_open_transaction() {
+  OPEN_TRANSACTION_REASON=$1
+  OPEN_TRANSACTION_ACTIVE=true
+  trap 'open_transaction_trap ERR $?' ERR
+  trap 'open_transaction_trap EXIT $?' EXIT
+  trap 'open_transaction_trap HUP 129' HUP
+  trap 'open_transaction_trap INT 130' INT
+  trap 'open_transaction_trap TERM 143' TERM
+}
+
+contain_failed_open() {
+  local reason=$1
+  contain_open_transaction "$reason" \
+    || fail_closed "$reason; failed-open containment could not be proven"
   fatal "$reason; both Beta gates were closed"
+}
+
+MIGRATION_TRANSACTION_ACTIVE=false
+MIGRATION_TRANSACTION_REASON=
+MIGRATION_SAMPLER_PID=
+MIGRATION_SAMPLER_STOP=
+
+disarm_migration_transaction() {
+  MIGRATION_TRANSACTION_ACTIVE=false
+  MIGRATION_TRANSACTION_REASON=
+  trap - ERR EXIT HUP INT TERM
+}
+
+contain_uncertain_migration() {
+  local reason=${1:-${MIGRATION_TRANSACTION_REASON:-migration outcome is uncertain}}
+  local current_head=unknown flags_closed=false surface_stopped=false
+  [ "$MIGRATION_TRANSACTION_ACTIVE" = true ] || return 0
+  disarm_migration_transaction
+  if [ -n "$MIGRATION_SAMPLER_STOP" ]; then
+    install -m 600 /dev/null "$MIGRATION_SAMPLER_STOP" 2>/dev/null || true
+  fi
+  if [ -n "$MIGRATION_SAMPLER_PID" ]; then
+    kill "$MIGRATION_SAMPLER_PID" 2>/dev/null || true
+    wait "$MIGRATION_SAMPLER_PID" 2>/dev/null || true
+  fi
+  if set_flags false false && assert_flags false false false; then
+    flags_closed=true
+  fi
+  if emergency_stop_public_surface; then
+    surface_stopped=true
+  fi
+  current_head=$(db_head 2>/dev/null) || current_head=unknown
+  state_update migration_uncertain "$(python3 - "$current_head" "$flags_closed" \
+    "$surface_stopped" "$reason" <<'PY'
+import json,sys
+print(json.dumps({"beta_contained":sys.argv[2] == "true" and sys.argv[3] == "true",
+                  "database_restore_forbidden":True,"migration_in_progress":False,
+                  "migration_uncertain":True,"database_revision":sys.argv[1],
+                  "public_surface_stopped":sys.argv[3] == "true",
+                  "uncertainty_reason":sys.argv[4]},separators=(",",":")))
+PY
+)" || return 1
+  [ "$flags_closed" = true ] && [ "$surface_stopped" = true ]
+}
+
+migration_transaction_trap() {
+  local event=$1
+  local status=${2:-1}
+  local reason=${MIGRATION_TRANSACTION_REASON:-migration outcome is uncertain}
+  contain_uncertain_migration "$reason during $event" || {
+    printf 'CRITICAL: migration containment could not be proven after %s\n' "$event" >&2
+  }
+  case "$event" in
+    EXIT) return 0 ;;
+    ERR) return "$status" ;;
+    HUP) exit 129 ;;
+    INT) exit 130 ;;
+    TERM) exit 143 ;;
+  esac
+}
+
+arm_migration_transaction() {
+  MIGRATION_TRANSACTION_REASON=$1
+  MIGRATION_TRANSACTION_ACTIVE=true
+  trap 'migration_transaction_trap ERR $?' ERR
+  trap 'migration_transaction_trap EXIT $?' EXIT
+  trap 'migration_transaction_trap HUP 129' HUP
+  trap 'migration_transaction_trap INT 130' INT
+  trap 'migration_transaction_trap TERM 143' TERM
 }
 
 install_candidate_compose() {
@@ -1300,12 +1449,16 @@ migrate() {
   [ -z "$(compose ps -q app)" ] && [ -z "$(compose ps -q frontend)" ] \
     || fatal "old business containers did not stop"
   assert_db_unchanged
+  assert_no_db_pressure
   local samples="$EVIDENCE_DIR/migration-db-pressure.jsonl"
   local sampler_stop="$EVIDENCE_DIR/.migration-sampler-stop"
   : >"$samples"
   chmod 600 "$samples"
   [ ! -e "$sampler_stop" ] && [ ! -L "$sampler_stop" ] \
     || fatal "migration sampler stop marker already exists"
+  arm_migration_transaction "production schema migration became uncertain"
+  state_update migration_in_progress \
+    '{"beta_contained":true,"database_restore_forbidden":true,"migration_in_progress":true,"migration_uncertain":false,"public_surface_stopped":true}'
   local started_ns ended_ns status sampler_status
   started_ns=$(date +%s%N)
   (
@@ -1317,6 +1470,8 @@ migrate() {
     done
   ) &
   local sampler_pid=$!
+  MIGRATION_SAMPLER_PID=$sampler_pid
+  MIGRATION_SAMPLER_STOP=$sampler_stop
   set +e
   compose run --rm --no-deps \
     -e "PGOPTIONS=-c statement_timeout=120000 -c lock_timeout=5000" \
@@ -1330,16 +1485,15 @@ migrate() {
   sampler_status=$?
   set -e
   rm -- "$sampler_stop"
+  MIGRATION_SAMPLER_PID=
+  MIGRATION_SAMPLER_STOP=
   if [ "$status" -ne 0 ]; then
-    state_update migration_failed '{"beta_contained":true,"database_restore_forbidden":true}'
     fatal "migration failed; Beta remains off, do not downgrade or restore DB; forward fix required"
   fi
   if [ "$sampler_status" -ne 0 ]; then
-    state_update migration_failed '{"beta_contained":true,"database_restore_forbidden":true}'
     fatal "migration pressure sampler exited early; forward verification required"
   fi
   [ -s "$samples" ] || {
-    state_update migration_failed '{"beta_contained":true,"database_restore_forbidden":true}'
     fatal "migration pressure sampler produced no evidence; forward verification required"
   }
   if ! python3 - "$samples" "$started_ns" "$ended_ns" <<'PY'
@@ -1359,6 +1513,8 @@ for row in rows:
         raise SystemExit("malformed migration pressure row")
     if any(not isinstance(value,int) or value < 0 for value in pressure.values()):
         raise SystemExit("malformed migration pressure value")
+    if pressure["blocked_sessions"] or pressure["long_transactions"] or pressure["waiting_locks"]:
+        raise SystemExit("database pressure became non-zero during migration")
     times.append(row["captured_at_epoch_ms"])
 if times != sorted(times) or any(right-left > 2500 for left,right in zip(times,times[1:])):
     raise SystemExit("migration pressure sampling has a gap")
@@ -1368,11 +1524,11 @@ if times[0] > started+2000 or times[-1] < ended-2000:
     raise SystemExit("migration pressure sampling does not cover the migration")
 PY
   then
-    state_update migration_failed '{"beta_contained":true,"database_restore_forbidden":true}'
     fatal "migration pressure evidence is malformed; forward verification required"
   fi
   [ "$(db_head)" = "$EXPECTED_TO" ] || fatal "migration completed without expected d9 head"
   assert_db_unchanged
+  assert_no_db_pressure
   write_json_atomic "$EVIDENCE_DIR/migration.json" "$(python3 - \
     "$MANIFEST_SHA" "$EXPECTED_FROM" "$EXPECTED_TO" "$started_ns" "$ended_ns" \
     "$(sha256_file "$samples")" "$(database_pressure_json)" <<'PY'
@@ -1389,28 +1545,44 @@ PY
   state_update migrated "$(python3 - "$EVIDENCE_DIR/migration.json" <<'PY'
 import hashlib,json,sys
 print(json.dumps({"migration_evidence_sha256":hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest(),
-                  "database_restore_forbidden":True},separators=(",",":")))
+                  "database_restore_forbidden":True,"migration_in_progress":False,
+                  "migration_uncertain":False},separators=(",",":")))
 PY
 )"
+  disarm_migration_transaction
   printf 'database migrated to d9; only forward fix or rehearsed old-image app rollback is allowed\n'
 }
 
 deploy() {
   [ "$#" -eq 2 ] || usage
+  local app_cid frontend_cid
   require_phase migrated
   assert_flags false false false
   assert_db_unchanged
   [ "$(db_head)" = "$EXPECTED_TO" ] || fatal "DB is not at d9"
+  assert_no_db_pressure
   tag_candidate_images
-  compose up --no-deps --no-build --force-recreate -d app frontend
-  assert_db_unchanged
-  [ "$(container_image_id "$(service_cid app)")" = "$NEW_APP_IMAGE_ID" ] \
-    || fatal "new app image did not start"
-  [ "$(container_image_id "$(service_cid frontend)")" = "$NEW_FRONTEND_IMAGE_ID" ] \
-    || fatal "new frontend image did not start"
-  internal_health || fatal "new stable surface did not become healthy"
-  smoke stable "$1"
-  smoke deny "$2"
+  compose up --no-deps --no-build --force-recreate -d app frontend \
+    || contain_failed_deploy "candidate Compose recreate failed"
+  db_matches_state \
+    || contain_failed_deploy "database identity changed during candidate deploy"
+  app_cid=$(service_cid app) \
+    || contain_failed_deploy "cannot resolve deployed app container"
+  frontend_cid=$(service_cid frontend) \
+    || contain_failed_deploy "cannot resolve deployed frontend container"
+  [ -n "$app_cid" ] && [ "$(container_image_id "$app_cid")" = "$NEW_APP_IMAGE_ID" ] \
+    || contain_failed_deploy "new app image did not start"
+  [ -n "$frontend_cid" ] \
+    && [ "$(container_image_id "$frontend_cid")" = "$NEW_FRONTEND_IMAGE_ID" ] \
+    || contain_failed_deploy "new frontend image did not start"
+  candidate_images_running \
+    || contain_failed_deploy "candidate containers are not both running"
+  internal_health \
+    || contain_failed_deploy "new stable surface did not become healthy"
+  smoke stable "$1" \
+    || contain_failed_deploy "stable login/read smoke failed after candidate deploy"
+  smoke deny "$2" \
+    || contain_failed_deploy "Beta deny smoke failed after candidate deploy"
   local deployed_at
   deployed_at=$(date +%s)
   state_update deployed "$(python3 - "$deployed_at" <<'PY'
@@ -1427,6 +1599,7 @@ open_empty_beta() {
   assert_empty_allowlist
   # Replenishment includes the scoped creator write path, so its global gate stays
   # closed until the exact named permission graph and create canary are in place.
+  arm_open_transaction "empty Beta stage failed"
   set_flags true false
   recreate_app || contain_failed_open "application failed while opening empty Beta stage"
   assert_flags true false false \
@@ -1435,14 +1608,14 @@ open_empty_beta() {
     || contain_failed_open "Beta allowlist changed during empty-stage opening"
   smoke deny "$1" \
     || contain_failed_open "empty-stage deny smoke failed"
-  if ! set_flags false false; then
-    fail_closed "empty-stage passed but flags could not be persisted false"
-  fi
-  if ! recreate_app; then
-    fail_closed "empty-stage flags are false but application recovery failed"
-  fi
+  set_flags false false \
+    || contain_failed_open "empty-stage passed but flags could not be persisted false"
+  recreate_app \
+    || contain_failed_open "empty-stage flags are false but application recovery failed"
   state_update empty_beta_verified \
-    '{"beta_contained":true,"empty_allowlist_stage_passed":true}'
+    '{"beta_contained":true,"empty_allowlist_stage_passed":true}' \
+    || contain_failed_open "empty-stage release state could not be persisted"
+  disarm_open_transaction
   printf 'empty-list Maintenance gate passed; both Beta gates are closed for allowlist setup\n'
 }
 
@@ -1454,6 +1627,7 @@ pilot_smoke() {
   assert_flags false false false
   assert_intended_allowlist \
     || contain_failed_open "live Beta permission graph does not match manifest"
+  arm_open_transaction "named pilot opening failed"
   set_flags true true
   recreate_app || contain_failed_open "application failed while opening named pilot"
   assert_flags true true false \
@@ -1504,6 +1678,7 @@ PY
 ) || contain_failed_open "cannot capture pilot identity baseline"
   state_update pilot_open "$pilot_state" \
     || contain_failed_open "cannot persist pilot release state"
+  disarm_open_transaction
   printf 'named-account Maintenance reader and creator pilot smoke passed\n'
 }
 
@@ -1612,13 +1787,39 @@ contain() {
   fi
   [ -f "$STATE" ] && [ ! -L "$STATE" ] \
     || fail_closed "release state is missing or unsafe after flags were persisted false"
-  local state_manifest phase
+  local state_manifest phase current_head
   state_manifest=$(state_get manifest_sha256) \
     || fail_closed "release state manifest is unreadable after flags were persisted false"
   [ "$state_manifest" = "$MANIFEST_SHA" ] \
     || fail_closed "release state belongs to another manifest after flags were persisted false"
   phase=$(state_get phase) \
     || fail_closed "release phase is unreadable after flags were persisted false"
+  current_head=$(db_head) \
+    || fail_closed "database revision is unreadable while the public surface is stopped"
+  if [ "$current_head" != "$EXPECTED_FROM" ] && [ "$current_head" != "$EXPECTED_TO" ]; then
+    state_update migration_uncertain "$(python3 - "$current_head" <<'PY'
+import json,sys
+print(json.dumps({"beta_contained":True,"database_restore_forbidden":True,
+                  "migration_in_progress":False,"migration_uncertain":True,
+                  "database_revision":sys.argv[1],"public_surface_stopped":True},
+                 separators=(",",":")))
+PY
+)" || fail_closed "intermediate database revision containment state could not be persisted"
+    fatal "intermediate database revision detected; app/frontend remain stopped for forward verification"
+  fi
+  case "$phase" in
+    migration_in_progress|migration_uncertain|migration_failed)
+      state_update migration_uncertain "$(python3 - "$current_head" <<'PY'
+import json,sys
+print(json.dumps({"beta_contained":True,"database_restore_forbidden":True,
+                  "migration_in_progress":False,"migration_uncertain":True,
+                  "database_revision":sys.argv[1],"public_surface_stopped":True},
+                 separators=(",",":")))
+PY
+)" || fail_closed "uncertain migration containment state could not be persisted"
+      fatal "migration state is uncertain; app/frontend remain stopped for forward verification"
+      ;;
+  esac
   if [ "$phase" = old_images_on_d9 ]; then
     if ! docker image tag "$OLD_APP_IMAGE_ID" "$APP_IMAGE_REF" \
         || ! docker image tag "$OLD_FRONTEND_IMAGE_ID" "$FRONTEND_IMAGE_REF" \

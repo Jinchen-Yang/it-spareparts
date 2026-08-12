@@ -18,6 +18,7 @@ MANIFEST_PATH = ROOT / ".deploy" / "v121_beta_manifest.py"
 RELEASE_PATH = ROOT / ".deploy" / "v121_beta_release.sh"
 BUILD_PATH = ROOT / ".deploy" / "v121_beta_build.sh"
 REHEARSE_PATH = ROOT / ".deploy" / "v121_beta_rehearse.sh"
+CI_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def run(*args: str) -> None:
@@ -26,6 +27,15 @@ def run(*args: str) -> None:
 
 def load_manifest_module():
     spec = importlib.util.spec_from_file_location("v121_beta_manifest", MANIFEST_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_permissions_module():
+    path = ROOT / "backend" / "app" / "permissions.py"
+    spec = importlib.util.spec_from_file_location("v121_backend_permissions", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -71,7 +81,24 @@ def permissions(*, maintenance: bool, replenishment: bool) -> dict:
         "action_replenishment_create": False,
         "action_replenishment_review": False,
     }
-    return {"maintenance": maintenance_graph, "replenishment": replenishment_graph}
+    runtime_permissions = {key: False for key in module.RUNTIME_PERMISSION_KEYS}
+    runtime_permissions.update(maintenance_graph)
+    runtime_permissions.update(replenishment_graph)
+    return {
+        "runtime_permissions": runtime_permissions,
+        "maintenance": maintenance_graph,
+        "replenishment": replenishment_graph,
+    }
+
+
+def live_projection_row(username: str, role: str, runtime_permissions: dict) -> str:
+    return "\t".join(
+        (
+            username,
+            role,
+            json.dumps(runtime_permissions, sort_keys=True, separators=(",", ":")),
+        )
+    )
 
 
 def main() -> None:
@@ -83,6 +110,7 @@ def main() -> None:
         run("shellcheck", "-x", str(BUILD_PATH))
         run("shellcheck", "-x", str(REHEARSE_PATH))
     release = RELEASE_PATH.read_text(encoding="utf-8")
+    rehearse = REHEARSE_PATH.read_text(encoding="utf-8")
     forbidden = (
         r"\balembic\s+downgrade\b",
         r"\bdocker\s+compose\s+down\b",
@@ -107,6 +135,60 @@ def main() -> None:
     assert "emergency_stop_public_surface" in release and "fail_closed" in release
     assert "app/frontend stop could not be proven" in release
     assert "release package artifact has unsafe owner, mode or link count" in release
+    assert "contain_failed_deploy" in release
+    deploy_start = release.index("deploy() {")
+    deploy_end = release.index("\nopen_empty_beta() {", deploy_start)
+    deploy_body = release[deploy_start:deploy_end]
+    assert "compose up" in deploy_body
+    assert deploy_body.count("contain_failed_deploy") >= 7
+    assert "deploy_failed" in deploy_body and "contained_after_failed_deploy" in deploy_body
+    assert "assert_no_db_pressure" in deploy_body
+    assert deploy_body.index("assert_no_db_pressure") < deploy_body.index("compose up")
+    assert "OPEN_TRANSACTION_ACTIVE" in release
+    assert "arm_open_transaction" in release and "disarm_open_transaction" in release
+    assert "trap 'open_transaction_trap ERR" in release
+    assert "trap 'open_transaction_trap EXIT" in release
+    for signal in ("HUP", "INT", "TERM"):
+        assert f"open_transaction_trap {signal}" in release
+    open_empty_start = release.index("open_empty_beta() {")
+    pilot_start = release.index("\npilot_smoke() {", open_empty_start)
+    open_empty_body = release[open_empty_start:pilot_start]
+    pilot_end = release.index("\nobserve() {", pilot_start)
+    pilot_body = release[pilot_start:pilot_end]
+    assert open_empty_body.index("arm_open_transaction") < open_empty_body.index(
+        "set_flags true false"
+    )
+    assert pilot_body.index("arm_open_transaction") < pilot_body.index("set_flags true true")
+    assert pilot_body.index("state_update pilot_open") < pilot_body.index(
+        "disarm_open_transaction"
+    )
+    assert "migration_in_progress" in release and "migration_uncertain" in release
+    migrate_start = release.index("migrate() {")
+    migrate_end = release.index("\ndeploy() {", migrate_start)
+    migrate_body = release[migrate_start:migrate_end]
+    assert migrate_body.index("state_update migration_in_progress") < migrate_body.index(
+        "alembic upgrade"
+    )
+    assert '"database_restore_forbidden":true' in migrate_body
+    assert "arm_migration_transaction" in migrate_body
+    assert migrate_body.count("assert_no_db_pressure") >= 2
+    contain_start = release.index("contain() {")
+    contain_end = release.index("\nrollback_app() {", contain_start)
+    contain_body = release[contain_start:contain_end]
+    assert "intermediate database revision" in contain_body
+    assert contain_body.index("intermediate database revision") < contain_body.index("compose up")
+    assert "os.O_NOFOLLOW" in release and "os.fstat" in release
+    assert "stat.S_ISREG" in release and "st_nlink != 1" in release
+    assert "st_uid != 0" in release and "st_gid != 0" in release
+    assert "credential=json.load(stream)" in release
+    assert "credential=json.load(open(credential_path" not in release
+    assert "os.O_NOFOLLOW" in rehearse and "os.fstat" in rehearse
+    assert "info.st_uid != os.geteuid()" in rehearse
+    assert "info.st_gid != os.getegid()" in rehearse
+    assert "isolated migration pressure is non-zero" in rehearse
+    assert rehearse.index("isolated migration pressure is non-zero") < rehearse.index(
+        'alembic upgrade "$TO_REV"'
+    )
     preclose_call = release.index("    preclose_beta_surface\n")
     package_verify = release.index('python3 "$MANIFEST_TOOL" verify')
     assert preclose_call < package_verify
@@ -133,13 +215,20 @@ def main() -> None:
     assert "not page-gated" not in release
 
     module = load_manifest_module()
+    permissions_module = load_permissions_module()
+    assert tuple(module.RUNTIME_PERMISSION_KEYS) == tuple(permissions_module.ALL_KEYS)
+    assert module.INITIAL_PILOT_POLICY["permission_projection"] == (
+        "all-runtime-effective-keys"
+    )
     assert module.PILOT_REVIEW_SCOPE == "stable-plus-beta-pilot-cutover-disabled"
     assert module.INITIAL_PILOT_POLICY["maintenance_cutover_enabled"] is False
     assert module.INITIAL_PILOT_POLICY["maintenance_write_actions"] == "excluded"
     assert module.INITIAL_PILOT_POLICY["maintenance_business_data_migration"] == "deferred"
     assert module.INITIAL_PILOT_POLICY["maintenance_cutover"] == "deferred"
     assert module.INITIAL_PILOT_POLICY["admin_pilots"] == "excluded"
-    assert module.INITIAL_PILOT_POLICY["permission_projection"] == "raw-runtime-effective"
+    assert module.INITIAL_PILOT_POLICY["permission_projection"] == (
+        "all-runtime-effective-keys"
+    )
     assert module.INITIAL_PILOT_POLICY["replenishment_create"] == (
         "exact-sha-live-canary-required"
     )
@@ -161,8 +250,19 @@ def main() -> None:
         "`pilot_eligibility_sha256`",
         "`maintenance_reader_without_active_assignment_count=0`",
         "`replenishment_creator_non_sales_count=0`",
+        "`runtime_permissions`",
+        "`runtime_effective_permissions_sha256`",
+        "业务事实只读",
+        "validation batch",
+        "migration_in_progress",
+        "migration_uncertain",
     ):
         assert required_runbook_contract in runbook
+    ci = CI_PATH.read_text(encoding="utf-8")
+    assert "python3 .deploy/v121_beta_static_test.py" in ci
+    assert ci.index("python3 .deploy/v121_beta_static_test.py") < ci.index(
+        "uv run --extra dev pytest -q"
+    )
     permission_source = (ROOT / "backend/app/permissions.py").read_text(encoding="utf-8")
     maintenance_permissions = set(
         re.findall(r'"(action_maintenance_[a-z_]+)"', permission_source)
@@ -226,15 +326,19 @@ def main() -> None:
     review_end = replenishment_source.index("\n@router.", review_start + 1)
     review_route = replenishment_source[review_start:review_end]
     assert "_page: None = Depends(_beta_page_whitelist)" in review_route
-    reader_projection_row = "\t".join(
-        ["named.reader", "purchaser", "t", "t"]
-        + ["f"] * len(module.MAINTENANCE_ACTIONS)
-        + ["f", "t", "f", "f"]
+    reader_permissions = permissions(maintenance=True, replenishment=False)[
+        "runtime_permissions"
+    ]
+    reader_permissions["data_pool_price_governance"] = True
+    creator_permissions = permissions(maintenance=False, replenishment=True)[
+        "runtime_permissions"
+    ]
+    creator_permissions["action_replenishment_create"] = True
+    reader_projection_row = live_projection_row(
+        "named.reader", "purchaser", reader_permissions
     )
-    creator_projection_row = "\t".join(
-        ["named.pilot", "sales", "f", "f"]
-        + ["f"] * len(module.MAINTENANCE_ACTIONS)
-        + ["t", "t", "t", "f"]
+    creator_projection_row = live_projection_row(
+        "named.pilot", "sales", creator_permissions
     )
     safe_projection = run_live_projection(
         release,
@@ -254,6 +358,10 @@ def main() -> None:
     assert safe_projection_data["replenishment_creator_missing_price_count"] == 0
     assert safe_projection_data["maintenance_reader_without_active_assignment_count"] == 0
     assert safe_projection_data["replenishment_creator_non_sales_count"] == 0
+    assert re.fullmatch(
+        r"[0-9a-f]{64}",
+        safe_projection_data["runtime_effective_permissions_sha256"],
+    )
     assert re.fullmatch(
         r"[0-9a-f]{64}", safe_projection_data["pilot_eligibility_sha256"]
     )
@@ -300,68 +408,83 @@ def main() -> None:
     )
     assert non_sales_creator_projection.returncode != 0
     assert "not a sales account" in non_sales_creator_projection.stderr
+    cross_domain_permissions = dict(creator_permissions)
+    cross_domain_permissions["page_maintenance"] = True
+    cross_domain_permissions["page_maintenance_beta"] = True
     cross_domain_projection = run_live_projection(
         release,
         "\n".join(
             (
                 reader_projection_row,
-                creator_projection_row.replace("\tf\tf\t", "\tt\tt\t", 1),
+                live_projection_row("named.pilot", "sales", cross_domain_permissions),
             )
         ),
         "full",
     )
     assert cross_domain_projection.returncode != 0
     assert "cross-domain Beta account" in cross_domain_projection.stderr
+    noncreator_permissions = dict(creator_permissions)
+    noncreator_permissions["action_replenishment_create"] = False
     noncreator_projection = run_live_projection(
         release,
         "\n".join(
             (
                 reader_projection_row,
-                creator_projection_row.rsplit("\t", 2)[0] + "\tf\tf",
+                live_projection_row("named.pilot", "sales", noncreator_permissions),
             )
         ),
         "full",
     )
     assert noncreator_projection.returncode != 0
     assert "un-smoked Replenishment profile" in noncreator_projection.stderr
-    reader_action_fields = reader_projection_row.split("\t")
-    reader_action_fields[-2] = "t"
+    reader_action_permissions = dict(reader_permissions)
+    reader_action_permissions["action_replenishment_create"] = True
     reader_action_projection = run_live_projection(
         release,
-        "\n".join(("\t".join(reader_action_fields), creator_projection_row)),
+        "\n".join(
+            (
+                live_projection_row(
+                    "named.reader", "purchaser", reader_action_permissions
+                ),
+                creator_projection_row,
+            )
+        ),
         "full",
     )
     assert reader_action_projection.returncode != 0
     assert "reader contains a Replenishment action" in reader_action_projection.stderr
-    creator_without_price_fields = creator_projection_row.split("\t")
-    creator_without_price_fields[-3] = "f"
+    creator_without_price_permissions = dict(creator_permissions)
+    creator_without_price_permissions["data_pool_price_governance"] = False
     creator_without_price_projection = run_live_projection(
         release,
-        "\n".join((reader_projection_row, "\t".join(creator_without_price_fields))),
+        "\n".join(
+            (
+                reader_projection_row,
+                live_projection_row(
+                    "named.pilot", "sales", creator_without_price_permissions
+                ),
+            )
+        ),
         "full",
     )
     assert creator_without_price_projection.returncode != 0
     assert "creator lacks the required price permission" in (
         creator_without_price_projection.stderr
     )
+    hidden_write_permissions = dict(creator_permissions)
+    hidden_write_permissions[module.MAINTENANCE_ACTIONS[0]] = True
     hidden_maintenance_write = run_live_projection(
         release,
-        "\t".join(
-            ["replenishment.pilot", "sales", "t", "f", "t"]
-            + ["f"] * (len(module.MAINTENANCE_ACTIONS) - 1)
-            + ["t", "t", "f", "f"]
-        ),
+        live_projection_row("replenishment.pilot", "sales", hidden_write_permissions),
         "full",
     )
     assert hidden_maintenance_write.returncode != 0
     assert "raw runtime-effective Maintenance write" in hidden_maintenance_write.stderr
+    admin_permissions = dict(creator_permissions)
+    admin_permissions["action_replenishment_create"] = False
     admin_callback = run_live_projection(
         release,
-        "\t".join(
-            ["named.admin", "admin"]
-            + ["f"] * (2 + len(module.MAINTENANCE_ACTIONS))
-            + ["t", "f", "f", "f"]
-        ),
+        live_projection_row("named.admin", "admin", admin_permissions),
         "full",
     )
     assert admin_callback.returncode != 0
@@ -404,6 +527,7 @@ def main() -> None:
             "canary_evidence": [],
         }
         safe["accounts"][0]["replenishment"]["data_pool_price_governance"] = True
+        safe["accounts"][0]["runtime_permissions"]["data_pool_price_governance"] = True
         path = folder / "allowlist.json"
         path.write_text(json.dumps(safe), encoding="utf-8")
         try:
@@ -412,6 +536,32 @@ def main() -> None:
             assert "opens Replenishment Beta without the scoped creator action" in str(exc)
         else:
             raise AssertionError("pilot without a replenishment creator was accepted")
+
+        missing_runtime_key = json.loads(json.dumps(safe))
+        del missing_runtime_key["accounts"][0]["runtime_permissions"]["data_customer"]
+        path.write_text(json.dumps(missing_runtime_key), encoding="utf-8")
+        try:
+            module._parse_allowlist(
+                path, repository="Example/it-spareparts", target=head
+            )
+        except module.ManifestError as exc:
+            assert "runtime permission" in str(exc)
+        else:
+            raise AssertionError("allowlist omitted an ALL_KEYS runtime permission")
+
+        divergent_projection = json.loads(json.dumps(safe))
+        divergent_projection["accounts"][0]["runtime_permissions"][
+            "page_maintenance_beta"
+        ] = False
+        path.write_text(json.dumps(divergent_projection), encoding="utf-8")
+        try:
+            module._parse_allowlist(
+                path, repository="Example/it-spareparts", target=head
+            )
+        except module.ManifestError as exc:
+            assert "runtime permission projection" in str(exc)
+        else:
+            raise AssertionError("allowlist nested projection diverged from runtime permissions")
 
         admin = json.loads(json.dumps(safe))
         admin["accounts"][0]["role"] = "admin"
@@ -460,6 +610,7 @@ def main() -> None:
         for maintenance_action in module.MAINTENANCE_ACTIONS:
             maintenance_write = json.loads(json.dumps(safe))
             maintenance_write["accounts"][0]["maintenance"][maintenance_action] = True
+            maintenance_write["accounts"][0]["runtime_permissions"][maintenance_action] = True
             path.write_text(json.dumps(maintenance_write), encoding="utf-8")
             try:
                 module._parse_allowlist(
@@ -531,6 +682,7 @@ def main() -> None:
         canary_path.write_text(json.dumps(captured_canary), encoding="utf-8")
         allowed_write = json.loads(json.dumps(safe))
         allowed_write["accounts"][0]["maintenance"][canary["action"]] = True
+        allowed_write["accounts"][0]["runtime_permissions"][canary["action"]] = True
         allowed_write["canary_evidence"] = [
             {
                 "username": canary["username"],
@@ -642,6 +794,9 @@ def main() -> None:
         replenishment_write["accounts"][1]["replenishment"][
             "action_replenishment_create"
         ] = True
+        replenishment_write["accounts"][1]["runtime_permissions"][
+            "action_replenishment_create"
+        ] = True
         replenishment_write["canary_evidence"] = [
             {
                 "username": "named.pilot",
@@ -669,10 +824,30 @@ def main() -> None:
         assert summary["maintenance_reader_without_active_assignment_count"] == 0
         assert summary["replenishment_creator_non_sales_count"] == 0
         assert re.fullmatch(r"[0-9a-f]{64}", summary["pilot_eligibility_sha256"])
+        original_runtime_digest = summary["runtime_effective_permissions_sha256"]
         assert replenishment_write["accounts"][0]["replenishment"][
             "data_pool_price_governance"
         ] is True
         assert evidence == [replenishment_path]
+
+        data_scope_drift = json.loads(json.dumps(replenishment_write))
+        data_scope_drift["accounts"][0]["runtime_permissions"]["data_customer"] = True
+        path.write_text(json.dumps(data_scope_drift), encoding="utf-8")
+        drift_summary, _ = module._parse_allowlist(
+            path, repository="Example/it-spareparts", target=head
+        )
+        assert (
+            drift_summary["runtime_effective_permissions_sha256"]
+            != original_runtime_digest
+        )
+        assert (
+            drift_summary["maintenance_effective_permissions_sha256"]
+            == summary["maintenance_effective_permissions_sha256"]
+        )
+        assert (
+            drift_summary["replenishment_effective_permissions_sha256"]
+            == summary["replenishment_effective_permissions_sha256"]
+        )
 
         for non_sales_role in ("purchaser", "boss", "readonly"):
             non_sales_creator = json.loads(json.dumps(replenishment_write))
@@ -692,6 +867,8 @@ def main() -> None:
         cross_domain = json.loads(json.dumps(replenishment_write))
         cross_domain["accounts"][1]["maintenance"]["page_maintenance"] = True
         cross_domain["accounts"][1]["maintenance"]["page_maintenance_beta"] = True
+        cross_domain["accounts"][1]["runtime_permissions"]["page_maintenance"] = True
+        cross_domain["accounts"][1]["runtime_permissions"]["page_maintenance_beta"] = True
         path.write_text(json.dumps(cross_domain), encoding="utf-8")
         try:
             module._parse_allowlist(path, repository="Example/it-spareparts", target=head)
@@ -702,6 +879,9 @@ def main() -> None:
 
         replenishment_without_create = json.loads(json.dumps(replenishment_write))
         replenishment_without_create["accounts"][1]["replenishment"][
+            "action_replenishment_create"
+        ] = False
+        replenishment_without_create["accounts"][1]["runtime_permissions"][
             "action_replenishment_create"
         ] = False
         path.write_text(json.dumps(replenishment_without_create), encoding="utf-8")
@@ -715,6 +895,7 @@ def main() -> None:
         for action in ("action_replenishment_create", "action_replenishment_review"):
             reader_with_replenishment_action = json.loads(json.dumps(replenishment_write))
             reader_with_replenishment_action["accounts"][0]["replenishment"][action] = True
+            reader_with_replenishment_action["accounts"][0]["runtime_permissions"][action] = True
             path.write_text(json.dumps(reader_with_replenishment_action), encoding="utf-8")
             try:
                 module._parse_allowlist(
@@ -758,6 +939,9 @@ def main() -> None:
 
         create_without_price = json.loads(json.dumps(replenishment_write))
         create_without_price["accounts"][1]["replenishment"][
+            "data_pool_price_governance"
+        ] = False
+        create_without_price["accounts"][1]["runtime_permissions"][
             "data_pool_price_governance"
         ] = False
         path.write_text(json.dumps(create_without_price), encoding="utf-8")
@@ -907,7 +1091,13 @@ def main() -> None:
         replenishment_review["accounts"][1]["replenishment"][
             "action_replenishment_review"
         ] = True
+        replenishment_review["accounts"][1]["runtime_permissions"][
+            "action_replenishment_review"
+        ] = True
         replenishment_review["accounts"][1]["replenishment"][
+            "data_pool_price_governance"
+        ] = False
+        replenishment_review["accounts"][1]["runtime_permissions"][
             "data_pool_price_governance"
         ] = False
         replenishment_review["canary_evidence"] = [

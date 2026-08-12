@@ -40,7 +40,7 @@ INITIAL_PILOT_POLICY = {
     "maintenance_cutover": "deferred",
     "maintenance_cutover_enabled": False,
     "admin_pilots": "excluded",
-    "permission_projection": "raw-runtime-effective",
+    "permission_projection": "all-runtime-effective-keys",
     "replenishment_create": "exact-sha-live-canary-required",
     "replenishment_review": "deferred",
     "database_schema_migration": "required-prerequisite",
@@ -53,6 +53,44 @@ IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
 SAFE_ACCOUNT = re.compile(r"[A-Za-z0-9_.@+-]{2,128}\Z")
 GENERIC_ACCOUNTS = frozenset({"admin", "administrator", "guest", "root", "shared", "test"})
 SYS_USER_ROLES = frozenset({"admin", "boss", "sales", "purchaser", "readonly"})
+RUNTIME_PERMISSION_KEYS = (
+    "data_supplier",
+    "data_customer",
+    "data_purchase_cost",
+    "data_profit",
+    "data_pool_price_governance",
+    "page_parts",
+    "page_purchases",
+    "page_profit",
+    "page_inventory",
+    "page_chat",
+    "page_import",
+    "page_governance",
+    "page_master_data",
+    "page_maintenance",
+    "page_boss_board",
+    "page_pool_analysis",
+    "page_maintenance_beta",
+    "page_replenishment_beta",
+    "page_accounts",
+    "action_pool_manage",
+    "action_pool_set_policy",
+    "action_account_manage",
+    "action_data_quality_review",
+    "action_maintenance_roundtrip_apply",
+    "action_maintenance_manager_workbook_apply",
+    "action_maintenance_project_manage",
+    "action_maintenance_demand_delete",
+    "action_maintenance_site_issue_manage",
+    "action_maintenance_bad_return_manage",
+    "action_maintenance_acceptance_submit",
+    "action_maintenance_acceptance_review",
+    "action_maintenance_warehouse_manage",
+    "action_maintenance_migration_review",
+    "action_replenishment_create",
+    "action_replenishment_review",
+    "own_customers_only",
+)
 MAINTENANCE_ACTIONS = (
     "action_maintenance_roundtrip_apply",
     "action_maintenance_manager_workbook_apply",
@@ -444,8 +482,17 @@ def _parse_allowlist(
             )
         seen.add(username)
 
+        runtime_permissions = account.get("runtime_permissions")
         maintenance = account.get("maintenance")
         replenishment = account.get("replenishment")
+        if not isinstance(runtime_permissions, dict):
+            _fail(f"allowlist account {username} must include its runtime permission graph")
+        if set(runtime_permissions) != set(RUNTIME_PERMISSION_KEYS):
+            _fail(
+                f"allowlist account {username} does not enumerate every runtime permission"
+            )
+        if not all(isinstance(value, bool) for value in runtime_permissions.values()):
+            _fail(f"allowlist account {username} has a non-boolean runtime permission")
         if not isinstance(maintenance, dict) or not isinstance(replenishment, dict):
             _fail(f"allowlist account {username} must include both permission domains")
         expected_maintenance = {"page_maintenance", "page_maintenance_beta", *MAINTENANCE_ACTIONS}
@@ -457,6 +504,12 @@ def _parse_allowlist(
             _fail(f"allowlist account {username} has a non-boolean Maintenance permission")
         if not all(isinstance(value, bool) for value in replenishment.values()):
             _fail(f"allowlist account {username} has a non-boolean replenishment permission")
+        for key, value in {**maintenance, **replenishment}.items():
+            if runtime_permissions[key] is not value:
+                _fail(
+                    f"allowlist account {username} runtime permission projection "
+                    f"differs for {key}"
+                )
         maintenance_enabled = maintenance["page_maintenance_beta"]
         if maintenance_enabled and not maintenance["page_maintenance"]:
             _fail(f"allowlist account {username} enables Maintenance Beta without stable Maintenance")
@@ -501,6 +554,9 @@ def _parse_allowlist(
             {
                 "username": username,
                 "role": role,
+                "runtime_permissions": {
+                    key: runtime_permissions[key] for key in sorted(runtime_permissions)
+                },
                 "maintenance": {key: maintenance[key] for key in sorted(maintenance)},
                 "replenishment": {key: replenishment[key] for key in sorted(replenishment)},
             }
@@ -516,6 +572,10 @@ def _parse_allowlist(
     ]
     replenishment_projection = [
         {"username": row["username"], "role": row["role"], **row["replenishment"]}
+        for row in normalized
+    ]
+    runtime_projection = [
+        {"username": row["username"], "role": row["role"], **row["runtime_permissions"]}
         for row in normalized
     ]
     eligibility_projection = [
@@ -534,6 +594,9 @@ def _parse_allowlist(
     summary = {
         "account_count": len(normalized),
         "permission_graph_sha256": _sha256_bytes(_json_bytes(normalized)),
+        "runtime_effective_permissions_sha256": _sha256_bytes(
+            _json_bytes(runtime_projection)
+        ),
         "maintenance_effective_permissions_sha256": _sha256_bytes(
             _json_bytes(maintenance_projection)
         ),
@@ -1382,6 +1445,7 @@ def _verify_package(package: Path) -> dict[str, Any]:
         _fail("initial scoped pilot manifest contains a non-sales replenishment creator")
     for key in (
         "permission_graph_sha256",
+        "runtime_effective_permissions_sha256",
         "maintenance_effective_permissions_sha256",
         "replenishment_effective_permissions_sha256",
         "pilot_eligibility_sha256",

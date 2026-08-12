@@ -27,7 +27,7 @@ NEW_APP_IMAGE_ID=$5
 OLD_APP_IMAGE_ID=$6
 OLD_FRONTEND_IMAGE_ID=$7
 CANDIDATE_COMPOSE=$(realpath -e -- "$8")
-CREDENTIAL=$(realpath -e -- "$9")
+CREDENTIAL=$9
 MODE=${10}
 OUTPUT_DIR=$(realpath -m -- "${11}")
 readonly DUMP TARGET_SHA PARENT_SHA DB_IMAGE_ID NEW_APP_IMAGE_ID
@@ -43,8 +43,41 @@ done
 [ -f "$DUMP" ] && [ ! -L "$DUMP" ] && [ -s "$DUMP" ] || fatal "unsafe/empty dump"
 [ -f "$CANDIDATE_COMPOSE" ] && [ ! -L "$CANDIDATE_COMPOSE" ] \
   || fatal "candidate Compose is unsafe"
-[ -f "$CREDENTIAL" ] && [ ! -L "$CREDENTIAL" ] \
-  && [ "$(stat -c '%a' "$CREDENTIAL")" = 600 ] || fatal "credential must be a real mode-600 file"
+CREDENTIAL_JSON=$(python3 - "$CREDENTIAL" <<'PY'
+import json
+import os
+import stat
+import sys
+
+flags=os.O_RDONLY | os.O_CLOEXEC
+if not hasattr(os,"O_NOFOLLOW"):
+    raise SystemExit("credential validation requires O_NOFOLLOW")
+fd=os.open(sys.argv[1],flags | os.O_NOFOLLOW)
+try:
+    info=os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_uid != os.geteuid()
+        or info.st_gid != os.getegid()
+        or info.st_nlink != 1
+        or not 0 < info.st_size <= 4096
+    ):
+        raise SystemExit("credential must be caller-owned mode-600 single-link regular file")
+    with os.fdopen(fd,"r",encoding="utf-8") as stream:
+        fd=-1
+        credential=json.load(stream)
+finally:
+    if fd >= 0:
+        os.close(fd)
+if set(credential) != {"username","password"} or not all(
+    isinstance(value,str) and value for value in credential.values()
+):
+    raise SystemExit("credential JSON must contain only non-empty username/password")
+print(json.dumps(credential,separators=(",",":")))
+PY
+) || fatal "credential is unsafe or malformed"
+readonly CREDENTIAL_JSON
 [ ! -e "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] || fatal "output already exists"
 
 WORK=$(mktemp -d -t v121-rehearsal.XXXXXXXX)
@@ -86,6 +119,31 @@ docker exec "$DB_NAME" pg_restore -U spareparts -d spareparts \
 BEFORE_HEAD=$(docker exec "$DB_NAME" psql -X -U spareparts -d spareparts -At \
   -c 'SELECT version_num FROM alembic_version;')
 [ "$BEFORE_HEAD" = "$FROM_REV" ] || fatal "production-copy dump is not at f1"
+
+ISOLATED_PRESSURE=$(docker exec "$DB_NAME" psql -X -U spareparts -d spareparts -At -F '|' <<'SQL'
+WITH a AS (
+  SELECT COALESCE(array_length(pg_blocking_pids(pid), 1), 0) blocked_by,
+         EXTRACT(EPOCH FROM (clock_timestamp() - xact_start))::bigint xact_seconds
+  FROM pg_stat_activity
+  WHERE datname=current_database() AND pid<>pg_backend_pid() AND xact_start IS NOT NULL
+), l AS (
+  SELECT count(*) FILTER (WHERE NOT granted) waiting
+  FROM pg_locks WHERE database=(SELECT oid FROM pg_database WHERE datname=current_database())
+)
+SELECT COALESCE((SELECT count(*) FROM a WHERE blocked_by>0),0),
+       COALESCE((SELECT count(*) FROM a WHERE xact_seconds>=60),0),
+       COALESCE((SELECT waiting FROM l),0);
+SQL
+) || fatal "cannot inspect isolated migration pressure"
+python3 - "$ISOLATED_PRESSURE" <<'PY' \
+  || fatal "isolated migration pressure is non-zero"
+import sys
+values=sys.argv[1].split("|")
+if len(values) != 3 or any(not value.isdigit() for value in values):
+    raise SystemExit("malformed isolated migration pressure")
+if any(int(value) != 0 for value in values):
+    raise SystemExit("unsafe isolated migration pressure")
+PY
 
 PRESSURE="$WORK/output/migration-pressure.jsonl"
 SAMPLER_STOP="$WORK/migration-sampler.stop"
@@ -146,6 +204,8 @@ times=[]
 for row in rows:
     if any(not isinstance(row[key],int) or row[key] < 0 for key in required-{"captured_at"}):
         raise SystemExit("malformed migration pressure value")
+    if row["blocked_sessions"] or row["long_transactions"] or row["waiting_locks"]:
+        raise SystemExit("isolated migration pressure became non-zero")
     times.append(row["captured_at_epoch_ms"])
 if times != sorted(times) or any(right-left > 2500 for left,right in zip(times,times[1:])):
     raise SystemExit("migration pressure sampling has a gap")
@@ -239,7 +299,7 @@ status,login=request("/api/auth/login",credential)
 assert status == 200 and login.get("token")
 status,_=request("/api/maintenance/projects?lifecycle=ongoing",token=login["token"])
 assert status == 200
-' <"$CREDENTIAL" >/dev/null 2>&1
+' <<<"$CREDENTIAL_JSON" >/dev/null 2>&1
     then
       break
     fi
