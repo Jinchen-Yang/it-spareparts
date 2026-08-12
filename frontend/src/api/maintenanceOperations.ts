@@ -1,7 +1,50 @@
 import { api } from "../api";
+import {
+  readMaintenanceCapabilities,
+  type MaintenanceCapabilities,
+} from "../components/maintenance/maintenancePermissions";
 
 export type MaintenanceLifecycleStatus = "ongoing" | "ended" | "missing" | string;
 export type ProjectReminderSeverity = "info" | "warning" | "critical";
+
+export interface MaintenanceManagerAssignment {
+  assignment_id: string;
+  project_id: string;
+  responsibility_type: "primary_manager";
+  user_id: number;
+  username: string;
+  display_name: string | null;
+  account_status: "active" | "inactive";
+  source_manager_text: string | null;
+  version: number;
+  assigned_at: string;
+  archived_at: string | null;
+}
+
+export interface MaintenanceProjectTask {
+  task_id: string;
+  project_id: string;
+  rule_key: string;
+  severity: ProjectReminderSeverity;
+  title: string;
+  detail: string | null;
+  entity_id: string | null;
+  task_type: string;
+  due_date: string | null;
+  due_state: "completed" | "overdue" | "due_today" | "upcoming" | "none";
+  is_overdue: boolean;
+  status: "open" | "pending" | "completed" | string;
+  owner: string | null;
+  generated_by: "system";
+  close_basis: string;
+}
+
+export interface MaintenanceProjectTaskSummary {
+  primary: MaintenanceProjectTask | null;
+  open_count: number;
+  overdue_count: number;
+  rows: MaintenanceProjectTask[];
+}
 
 export interface MaintenanceContractSummary {
   project_contract_id: string;
@@ -27,6 +70,13 @@ export interface MaintenanceOperationsMetrics {
   site_requisition_known_cost: number | null;
   site_requisition_known_cost_ex_tax: number | null;
   site_requisition_known_cost_inc_tax: number | null;
+  site_requisition_priced_cost_ex_tax?: number | null;
+  site_requisition_priced_cost_inc_tax?: number | null;
+  sales_estimate_cost_ex_tax?: number | null;
+  sales_estimate_cost_inc_tax?: number | null;
+  sales_estimate_lines?: number | null;
+  cost_progress_includes_sales_estimate?: boolean | null;
+  cost_progress_label?: "priced_cost_including_sales_estimate" | "priced_cost_without_sales_estimate" | string | null;
   approved_expense: number | null;
   approved_expense_ex_tax: number | null;
   approved_expense_inc_tax: number | null;
@@ -48,10 +98,46 @@ export interface MaintenanceProjectOperationsSummary {
   lifecycle_status: MaintenanceLifecycleStatus;
   is_active: boolean;
   version: number;
+  manual_source_order_count: number;
   contracts: MaintenanceContractSummary[];
   metrics: MaintenanceOperationsMetrics;
+  return_rate?: MaintenanceReturnRate | null;
   reminder_count: number;
+  manager_assignment: MaintenanceManagerAssignment | null;
+  task_summary: MaintenanceProjectTaskSummary;
+  missing_data_labels: string[];
+  attachment_status: "missing" | "available" | string;
+  manager_tracking?: MaintenanceManagerTracking;
   as_of: string;
+}
+
+export interface MaintenanceManagerTracking {
+  service_period: {
+    service_start: string | null;
+    service_end: string | null;
+    completeness_state: "complete" | "start_only" | "end_only" | "empty" | string;
+  };
+  next_collection_milestone: {
+    project_contract_id: string;
+    contract_no: string | null;
+    sequence: number;
+    planned_date: string | null;
+    planned_amount: number | null;
+    overdue_days: number;
+    is_overdue: boolean;
+  } | null;
+  acceptance: {
+    deliverable_id: string | null;
+    due_date: string | null;
+    submission_status: "not_submitted" | "submitted" | string;
+    approval_status: "not_reviewed" | "approved" | "rejected" | string;
+    configuration_state: "configured" | "pending_business_configuration" | string;
+    rejection_reason: string | null;
+    attachment_count: number;
+    overdue_days: number;
+    is_overdue: boolean;
+    version: number;
+  };
 }
 
 export interface MaintenanceProjectOperationsDirectory {
@@ -61,6 +147,13 @@ export interface MaintenanceProjectOperationsDirectory {
   page_size: number;
   as_of: string;
   data_version: string;
+  owner_scope: "me" | "all";
+  filters?: {
+    task_type: string | null;
+    task_status: string | null;
+    due_from: string | null;
+    due_to: string | null;
+  };
 }
 
 export interface MaintenanceSiteRequisitionRow {
@@ -78,6 +171,9 @@ export interface MaintenanceSiteRequisitionRow {
   cost_amount_ex_tax: number | null;
   cost_amount_inc_tax: number | null;
   cost_source: string | null;
+  cost_evidence_kind?: "purchase_evidence" | "sales_estimate" | "manual_confirmed" | "missing" | string | null;
+  cost_is_estimate?: boolean | null;
+  cost_source_label?: string | null;
   cost_status: "available" | "missing" | "restricted" | "not_counted" | string;
 }
 
@@ -154,8 +250,262 @@ export interface MaintenanceProjectWorkspace {
   };
   reminders: MaintenanceProjectReminder[];
   workbook_preview: MaintenanceWorkbookPreview;
+  return_rate?: MaintenanceReturnRate | null;
   as_of: string;
   data_version: string;
+}
+
+export type SiteIssueWorkflowStatus = "draft" | "confirmed" | "corrected" | "void";
+
+export interface SiteIssueAdapterState {
+  key: string;
+  state?: "unavailable" | "synthetic_ready" | string;
+  production_ready: boolean;
+  detail?: string;
+}
+
+export interface SiteIssueCandidate {
+  delivery_line_id: string;
+  source_order_id: string;
+  source_line_id: string;
+  delivery_no: string;
+  delivery_date: string;
+  part_id: number;
+  pn: string;
+  serial_number: string | null;
+  delivered_quantity: string;
+  confirmed_quantity: string;
+  available_quantity: string;
+  mapping_state: string;
+  mapping_version: string;
+}
+
+export interface SiteIssueCandidateDirectory {
+  adapter: SiteIssueAdapterState;
+  rows: SiteIssueCandidate[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface SiteIssueLine {
+  issue_line_id: string;
+  line_no: number;
+  part_id: number;
+  pn: string;
+  quantity: string;
+  delivery_line_id: string | null;
+  source_order_id: string | null;
+  source_line_id: string | null;
+  serial_number: string | null;
+  cost_source: string | null;
+  cost_source_label: string | null;
+  cost_is_estimate: boolean;
+  cost_amount_ex_tax: string | null;
+  cost_amount_inc_tax: string | null;
+  available_quantity?: string;
+  requested_quantity?: string;
+  cost_gap?: boolean;
+  version: number;
+}
+
+export interface SiteIssueDocument {
+  issue_id: string;
+  project_id: string;
+  issue_no: string;
+  issue_date: string;
+  workflow_status: SiteIssueWorkflowStatus;
+  receiver: string;
+  issued_by: string;
+  site_location: string;
+  version: number;
+  lines: SiteIssueLine[];
+  inventory_effect?: "none";
+  idempotent_replay?: boolean;
+  return_obligation_event?: {
+    event_id: string;
+    event_type: string;
+    issue_version: number;
+  } | null;
+}
+
+export interface SiteIssuePreview extends SiteIssueDocument {
+  can_confirm: boolean;
+  blockers: string[];
+  inventory_effect: "none";
+}
+
+export interface SiteIssueDirectory {
+  project_id: string;
+  rows: SiteIssueDocument[];
+  total: number;
+  page: number;
+  page_size: number;
+  adapter: SiteIssueAdapterState;
+}
+
+export interface SiteIssueLineInput {
+  delivery_line_id: string;
+  quantity: number;
+}
+
+export interface SiteIssueDraftInput {
+  idempotency_key: string;
+  issue_date: string;
+  receiver: string;
+  issued_by: string;
+  site_location: string;
+  lines: SiteIssueLineInput[];
+  reason: string;
+}
+
+export interface SiteIssuePatchInput {
+  project_id: string;
+  version: number;
+  idempotency_key: string;
+  issue_date?: string;
+  receiver?: string;
+  issued_by?: string;
+  site_location?: string;
+  lines?: SiteIssueLineInput[];
+  reason: string;
+}
+
+export interface SiteIssueCommandInput {
+  project_id: string;
+  version: number;
+  idempotency_key: string;
+  reason: string;
+}
+
+export type MaintenanceReturnRateStatus =
+  | "available"
+  | "basis_incomplete"
+  | "no_return_required";
+
+export interface MaintenanceReturnRate {
+  project_id: string;
+  status: MaintenanceReturnRateStatus;
+  official_basis: "warehouse_confirmed_v1" | null;
+  official_rate_pct: string | null;
+  registered_rate_pct: string | null;
+  warehouse_confirmed_rate_pct: string | null;
+  required_quantity: string;
+  registered_quantity: string;
+  warehouse_confirmed_quantity: string;
+  outstanding_quantity: string;
+  exempt_quantity: string;
+  pending_quantity: string;
+  required_count: number;
+  exempt_count: number;
+  pending_count: number;
+  business_assumption: string;
+}
+
+export type MaintenanceReturnObligationClassification =
+  | "required"
+  | "exempt"
+  | "pending_category";
+
+export interface MaintenanceReturnObligation {
+  obligation_id: string;
+  project_id: string;
+  issue_id: string;
+  issue_no: string | null;
+  issue_line_id: string;
+  delivery_line_id: string;
+  part_id: number;
+  pn: string;
+  source_quantity: string;
+  required_quantity: string;
+  classification: MaintenanceReturnObligationClassification;
+  category_id_snapshot: number | null;
+  category_major_snapshot: string | null;
+  category_minor_snapshot: string | null;
+  rule_version: string;
+  source_issue_version: number;
+  registered_quantity: string;
+  warehouse_confirmed_quantity: string;
+  remaining_quantity: string;
+  is_active: boolean;
+  version: number;
+}
+
+export interface MaintenanceReturnObligationDirectory {
+  project_id: string;
+  rows: MaintenanceReturnObligation[];
+  total: number;
+  page: number;
+  page_size: number;
+  return_rate: MaintenanceReturnRate;
+}
+
+export interface MaintenanceReturnCategory {
+  category_id: number;
+  category_major: string;
+  category_minor: string | null;
+}
+
+export type MaintenanceBadReturnStatus =
+  | "draft"
+  | "submitted"
+  | "in_transit"
+  | "warehouse_confirmed"
+  | "void";
+
+export interface MaintenanceBadReturnLine {
+  return_line_id: string;
+  line_no: number;
+  obligation_id: string;
+  part_id: number;
+  pn: string;
+  quantity: string;
+}
+
+export interface MaintenanceBadReturn {
+  return_id: string;
+  return_no: string;
+  replaces_return_id: string | null;
+  project_id: string;
+  status: MaintenanceBadReturnStatus;
+  logistics_reference: string | null;
+  warehouse_reference: string | null;
+  inbound_reference: string | null;
+  note: string | null;
+  created_by: string;
+  submitted_at: string | null;
+  in_transit_at: string | null;
+  warehouse_confirmed_at: string | null;
+  voided_at: string | null;
+  version: number;
+  lines: MaintenanceBadReturnLine[];
+  inventory_effect: "none";
+  cost_effect: "none";
+  idempotent_replay?: boolean;
+}
+
+export interface MaintenanceBadReturnDirectory {
+  project_id: string;
+  rows: MaintenanceBadReturn[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface MaintenanceBadReturnCommandInput {
+  project_id: string;
+  version: number;
+  idempotency_key: string;
+  reason: string;
+}
+
+export interface MaintenanceReturnObligationSearchInput {
+  project_id: string;
+  q?: string;
+  classifications?: MaintenanceReturnObligationClassification[];
+  active_only?: boolean;
+  page?: number;
+  page_size?: number;
 }
 
 export interface MaintenanceWorkbookValidation {
@@ -180,6 +530,132 @@ export interface MaintenanceWorkbookApplyResult {
   changed_rows: number;
   data_version: string;
   warnings?: string[];
+}
+
+export interface MaintenanceManagerWorkbookBatchStatus {
+  batch_id: string;
+  status: "valid" | "error" | "applied" | "expired" | string;
+  created_at: string;
+  expires_at: string;
+  applied_at: string | null;
+  result: MaintenanceManagerWorkbookApplyResult | null;
+  scope_matches_current: boolean;
+}
+
+export interface MaintenanceManagerWorkbookStatus {
+  report_month: string;
+  project_count: number;
+  scope_version: string;
+  data_version: string;
+  latest_batch: MaintenanceManagerWorkbookBatchStatus | null;
+  acceptance_configuration: "configured" | "pending_business_configuration" | string;
+  attachment_carrier: "controlled_business_file" | "pending_business_configuration" | string;
+  approval_role: "admin_only_pending_business_configuration" | "pending_business_configuration" | string;
+}
+
+export interface MaintenanceManagerWorkbookIssue {
+  code: string;
+  message: string;
+  sheet: string | null;
+  row: number | null;
+  column: string | null;
+}
+
+export interface MaintenanceManagerWorkbookValidation {
+  validation_token: string;
+  batch_id: string;
+  status: "valid" | "error" | "applied" | "expired" | string;
+  report_month: string;
+  data_version: string;
+  file_sha256: string;
+  changes: {
+    service_periods: number;
+    planned_collection_milestones: number;
+    acceptance_due_dates: number;
+    total: number;
+  };
+  items: MaintenanceManagerWorkbookChangePreview[];
+  warnings: MaintenanceManagerWorkbookIssue[];
+  errors: MaintenanceManagerWorkbookIssue[];
+  unchanged: boolean;
+  can_apply: boolean;
+  already_applied: boolean;
+  expires_at: string;
+}
+
+export interface MaintenanceManagerWorkbookChangePreview {
+  kind: "service_period" | "planned_collection_milestone" | "acceptance_due_date" | string;
+  project_id: string;
+  project_code: string | null;
+  project_name: string | null;
+  project_contract_id?: string | null;
+  contract_no: string | null;
+  sequence: number | null;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+}
+
+export interface MaintenanceManagerWorkbookApplyResult {
+  applied: boolean;
+  replayed: boolean;
+  batch_id: string;
+  changed_rows: number;
+  project_count: number;
+  warnings: number;
+  report_month: string;
+}
+
+export interface MaintenanceAcceptanceAttachment {
+  file_id: string;
+  original_filename: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+  uploaded_by: string;
+  uploaded_at: string;
+}
+
+export interface MaintenanceAcceptanceDeliverable {
+  deliverable_id: string | null;
+  project_id: string;
+  deliverable_type: "acceptance_report";
+  due_date: string | null;
+  submission_status: "not_submitted" | "submitted" | string;
+  submitted_at: string | null;
+  submitted_by: string | null;
+  approval_status: "not_reviewed" | "approved" | "rejected" | string;
+  approved_at: string | null;
+  approved_by: string | null;
+  rejection_reason: string | null;
+  configuration_state: "configured" | "pending_business_configuration" | string;
+  version: number;
+  review_policy: "admin_only_pending_business_role_configuration" | string;
+  attachments: MaintenanceAcceptanceAttachment[];
+}
+
+export interface MaintenanceAcceptanceSearchRow {
+  project_id: string;
+  project_code: string;
+  display_name: string;
+  acceptance: MaintenanceAcceptanceDeliverable;
+}
+
+export interface MaintenanceAcceptanceDirectory {
+  rows: MaintenanceAcceptanceSearchRow[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface MaintenanceAcceptanceMutationResult {
+  replayed: boolean;
+  project_id: string;
+  deliverable_id: string;
+  version: number;
+  submission_status?: string;
+  approval_status?: string;
+  rejection_reason?: string | null;
+  file_id?: string;
 }
 
 export interface MaintenanceCostReference {
@@ -280,19 +756,29 @@ function incTaxBasisOrNull(value: unknown): "inc_tax" | null {
 
 function normalizeContract(
   contract: MaintenanceContractSummary,
+  visibility: MaintenanceCapabilities,
 ): MaintenanceContractSummary {
-  const amountRestricted = contract.amount_status === "restricted";
+  const amountRestricted = !visibility.canViewContract
+    || contract.amount_status === "restricted";
   return {
     ...contract,
     contract_amount: amountRestricted ? null : finiteNumberOrNull(contract.contract_amount),
     contract_amount_basis: incTaxBasisOrNull(contract.contract_amount_basis),
-    received_amount: finiteNumberOrNull(contract.received_amount),
+    received_amount: amountRestricted ? null : finiteNumberOrNull(contract.received_amount),
   };
 }
 
-function normalizeMetrics(metrics: MaintenanceOperationsMetrics): MaintenanceOperationsMetrics {
-  const contractRestricted = metrics.contract_amount_complete === null;
-  const costRestricted = metrics.cost_complete === null;
+function normalizeMetrics(
+  metrics: MaintenanceOperationsMetrics,
+  visibility: MaintenanceCapabilities,
+): MaintenanceOperationsMetrics {
+  // Completeness is a business fact, not an authorization signal.  In particular,
+  // cost_complete is null when expense facts are hidden even though site-issue cost
+  // and its evidence remain legitimately visible to a cost-only account.
+  const contractRestricted = !visibility.canViewContract;
+  const costRestricted = !visibility.canViewCost;
+  const expenseRestricted = !visibility.canViewExpense;
+  const aggregateCostRestricted = costRestricted || expenseRestricted;
   return {
     ...metrics,
     total_contract_amount: contractRestricted
@@ -309,32 +795,62 @@ function normalizeMetrics(metrics: MaintenanceOperationsMetrics): MaintenanceOpe
       ? null : finiteNumberOrNull(metrics.site_requisition_known_cost_ex_tax),
     site_requisition_known_cost_inc_tax: costRestricted
       ? null : finiteNumberOrNull(metrics.site_requisition_known_cost_inc_tax),
-    approved_expense: costRestricted
+    site_requisition_priced_cost_ex_tax: costRestricted
+      ? null : finiteNumberOrNull(metrics.site_requisition_priced_cost_ex_tax),
+    site_requisition_priced_cost_inc_tax: costRestricted
+      ? null : finiteNumberOrNull(metrics.site_requisition_priced_cost_inc_tax),
+    sales_estimate_cost_ex_tax: costRestricted
+      ? null : finiteNumberOrNull(metrics.sales_estimate_cost_ex_tax),
+    sales_estimate_cost_inc_tax: costRestricted
+      ? null : finiteNumberOrNull(metrics.sales_estimate_cost_inc_tax),
+    sales_estimate_lines: costRestricted
+      ? null : finiteNumberOrNull(metrics.sales_estimate_lines),
+    cost_progress_includes_sales_estimate: costRestricted
+      ? null
+      : typeof metrics.cost_progress_includes_sales_estimate === "boolean"
+        ? metrics.cost_progress_includes_sales_estimate
+        : null,
+    cost_progress_label: costRestricted
+      ? null
+      : typeof metrics.cost_progress_label === "string"
+        ? metrics.cost_progress_label
+        : null,
+    approved_expense: expenseRestricted
       ? null : finiteNumberOrNull(metrics.approved_expense),
-    approved_expense_ex_tax: costRestricted
+    approved_expense_ex_tax: expenseRestricted
       ? null : finiteNumberOrNull(metrics.approved_expense_ex_tax),
-    approved_expense_inc_tax: costRestricted
+    approved_expense_inc_tax: expenseRestricted
       ? null : finiteNumberOrNull(metrics.approved_expense_inc_tax),
-    actual_project_cost_known: costRestricted
+    actual_project_cost_known: aggregateCostRestricted
       ? null : finiteNumberOrNull(metrics.actual_project_cost_known),
-    actual_project_cost_known_ex_tax: costRestricted
+    actual_project_cost_known_ex_tax: aggregateCostRestricted
       ? null : finiteNumberOrNull(metrics.actual_project_cost_known_ex_tax),
-    actual_project_cost_known_inc_tax: costRestricted
+    actual_project_cost_known_inc_tax: aggregateCostRestricted
       ? null : finiteNumberOrNull(metrics.actual_project_cost_known_inc_tax),
     cost_progress_basis: incTaxBasisOrNull(metrics.cost_progress_basis),
-    cost_rate_lower_bound_pct: costRestricted
+    cost_rate_lower_bound_pct: !visibility.canViewFinancial
       ? null : finiteNumberOrNull(metrics.cost_rate_lower_bound_pct),
-    cost_status: costRestricted ? null : metrics.cost_status,
+    cost_status: visibility.canViewFinancial ? metrics.cost_status : null,
+    cost_complete: aggregateCostRestricted ? null : metrics.cost_complete,
+    missing_cost_lines: costRestricted
+      ? null : finiteNumberOrNull(metrics.missing_cost_lines),
   };
 }
 
 function normalizeProjectSummary(
   project: MaintenanceProjectOperationsSummary,
+  visibility: MaintenanceCapabilities,
 ): MaintenanceProjectOperationsSummary {
   return {
     ...project,
-    contracts: Array.isArray(project.contracts) ? project.contracts.map(normalizeContract) : [],
-    metrics: normalizeMetrics(project.metrics),
+    manual_source_order_count: Number.isInteger(project.manual_source_order_count)
+      && project.manual_source_order_count >= 0
+      ? project.manual_source_order_count
+      : 0,
+    contracts: Array.isArray(project.contracts)
+      ? project.contracts.map((contract) => normalizeContract(contract, visibility))
+      : [],
+    metrics: normalizeMetrics(project.metrics, visibility),
   };
 }
 
@@ -342,13 +858,20 @@ function normalizeOperationsDirectory(
   data: MaintenanceProjectOperationsDirectory,
 ): MaintenanceProjectOperationsDirectory {
   if (!data || !Array.isArray(data.rows)) return data;
-  return { ...data, rows: data.rows.map(normalizeProjectSummary) };
+  const visibility = readMaintenanceCapabilities();
+  return {
+    ...data,
+    rows: data.rows.map((project) => normalizeProjectSummary(project, visibility)),
+  };
 }
 
 function normalizeWorkspace(data: MaintenanceProjectWorkspace): MaintenanceProjectWorkspace {
   if (!data?.project) return data;
-  const project = normalizeProjectSummary(data.project);
-  const costRestricted = project.metrics.cost_complete === null;
+  const visibility = readMaintenanceCapabilities();
+  const project = normalizeProjectSummary(data.project, visibility);
+  const costRestricted = !visibility.canViewCost;
+  const contractRestricted = !visibility.canViewContract;
+  const expenseRestricted = !visibility.canViewExpense;
   return {
     ...data,
     project,
@@ -357,7 +880,10 @@ function normalizeWorkspace(data: MaintenanceProjectWorkspace): MaintenanceProje
       rows: Array.isArray(data.collection_snapshots?.rows)
         ? data.collection_snapshots.rows.map((row) => ({
           ...row,
-          cumulative_amount: finiteNumberOrNull(row.cumulative_amount),
+          cumulative_amount: contractRestricted
+            ? null : finiteNumberOrNull(row.cumulative_amount),
+          receipt_reference: contractRestricted ? null : row.receipt_reference,
+          remark: contractRestricted ? null : row.remark,
         }))
         : [],
     },
@@ -379,21 +905,34 @@ function normalizeWorkspace(data: MaintenanceProjectWorkspace): MaintenanceProje
               ? null : finiteNumberOrNull(row.cost_amount_ex_tax),
             cost_amount_inc_tax: rowCostRestricted
               ? null : finiteNumberOrNull(row.cost_amount_inc_tax),
+            cost_source: rowCostRestricted ? null : row.cost_source,
+            cost_evidence_kind: rowCostRestricted
+              ? null : (row.cost_evidence_kind ?? null),
+            cost_is_estimate: rowCostRestricted
+              ? null
+              : typeof row.cost_is_estimate === "boolean"
+                ? row.cost_is_estimate
+                : null,
+            cost_source_label: rowCostRestricted
+              ? null : (row.cost_source_label ?? null),
+            cost_status: rowCostRestricted ? "restricted" : row.cost_status,
           };
         })
         : [],
     },
-    approved_expenses: {
-      ...data.approved_expenses,
-      rows: Array.isArray(data.approved_expenses?.rows)
-        ? data.approved_expenses.rows.map((row) => ({
-          ...row,
-          amount: costRestricted ? null : finiteNumberOrNull(row.amount),
-          amount_ex_tax: costRestricted ? null : finiteNumberOrNull(row.amount_ex_tax),
-          amount_inc_tax: costRestricted ? null : finiteNumberOrNull(row.amount_inc_tax),
-        }))
-        : [],
-    },
+    approved_expenses: expenseRestricted
+      ? { ...data.approved_expenses, rows: [], total: 0 }
+      : {
+        ...data.approved_expenses,
+        rows: Array.isArray(data.approved_expenses?.rows)
+          ? data.approved_expenses.rows.map((row) => ({
+            ...row,
+            amount: finiteNumberOrNull(row.amount),
+            amount_ex_tax: finiteNumberOrNull(row.amount_ex_tax),
+            amount_inc_tax: finiteNumberOrNull(row.amount_inc_tax),
+          }))
+          : [],
+      },
   };
 }
 
@@ -441,16 +980,98 @@ export interface MaintenanceOperationsListParams {
   lifecycle?: string;
   reminder?: string;
   include_inactive?: boolean;
+  owner_scope?: "me" | "all";
+  task_type?: string;
+  task_status?: "open" | "pending" | "completed";
+  due_from?: string;
+  due_to?: string;
 }
 
 export const listMaintenanceProjectOperations = (
   params: MaintenanceOperationsListParams = {},
-) => api.get<MaintenanceProjectOperationsDirectory>("/maintenance/projects/stable/operations", {
-  params: { ...params, include_inactive: params.include_inactive ?? false },
-}).then((response) => ({ ...response, data: normalizeOperationsDirectory(response.data) }));
+  options: { signal?: AbortSignal } = {},
+) => {
+  const request = {
+    ...params,
+    q: params.q?.trim() || "",
+    include_inactive: params.include_inactive ?? false,
+  };
+  const response = options.signal
+    ? api.post<MaintenanceProjectOperationsDirectory>(
+      "/maintenance/projects/stable/operations/search",
+      request,
+      { signal: options.signal },
+    )
+    : api.post<MaintenanceProjectOperationsDirectory>(
+      "/maintenance/projects/stable/operations/search",
+      request,
+    );
+  return response.then((result) => ({
+    ...result,
+    data: normalizeOperationsDirectory(result.data),
+  }));
+};
+
+export interface MaintenanceManagerAccount {
+  user_id: number;
+  username: string;
+  display_name: string | null;
+  is_active: boolean;
+}
+
+export interface MaintenanceManagerAccountDirectory {
+  rows: MaintenanceManagerAccount[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface MaintenanceManagerAssignmentInput {
+  user_id: number;
+  expected_assignment_id?: string | null;
+  expected_assignment_version?: number | null;
+  reason: string;
+}
 
 const projectBase = (projectId: string) =>
   `/maintenance/projects/stable/${encodeURIComponent(projectId)}`;
+
+export const searchMaintenanceManagerAccounts = (
+  input: { q?: string; page?: number; page_size?: number } = {},
+  options: { signal?: AbortSignal } = {},
+) => {
+  const request = {
+    q: input.q?.trim() || "",
+    page: input.page ?? 1,
+    page_size: input.page_size ?? 20,
+  };
+  return options.signal
+    ? api.post<MaintenanceManagerAccountDirectory>(
+      "/maintenance/project-manager-assignments/search",
+      request,
+      { signal: options.signal },
+    )
+    : api.post<MaintenanceManagerAccountDirectory>(
+      "/maintenance/project-manager-assignments/search",
+      request,
+    );
+};
+
+export const assignMaintenanceProjectManager = (
+  projectId: string,
+  input: MaintenanceManagerAssignmentInput,
+) => api.post<MaintenanceManagerAssignment>(
+  `${projectBase(projectId)}/manager-assignment`,
+  input,
+);
+
+export const archiveMaintenanceProjectManager = (
+  assignmentId: string,
+  input: { version: number; reason: string },
+) => api.post<MaintenanceManagerAssignment>(
+  `/maintenance/project-manager-assignments/${encodeURIComponent(assignmentId)}/archive`,
+  input,
+);
 
 export interface MaintenanceWorkspaceParams {
   collection_page?: number;
@@ -495,6 +1116,106 @@ export const applyMaintenanceProjectWorkbook = (
   input,
 );
 
+export const getMaintenanceManagerWorkbookStatus = (reportMonth: string) =>
+  api.get<MaintenanceManagerWorkbookStatus>(
+    "/maintenance/project-manager/workbooks/v3/status",
+    { params: { report_month: reportMonth } },
+  );
+
+export const downloadMaintenanceManagerWorkbook = (reportMonth: string) =>
+  api.get<Blob>("/maintenance/project-manager/workbooks/v3", {
+    params: { report_month: reportMonth },
+    responseType: "blob",
+  });
+
+export const validateMaintenanceManagerWorkbook = (
+  reportMonth: string,
+  file: File,
+) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api.post<MaintenanceManagerWorkbookValidation>(
+    "/maintenance/project-manager/workbooks/v3/validate",
+    form,
+    { params: { report_month: reportMonth }, timeout: 120000 },
+  );
+};
+
+export const applyMaintenanceManagerWorkbook = (
+  input: { validation_token: string; data_version: string },
+) => api.post<MaintenanceManagerWorkbookApplyResult>(
+  "/maintenance/project-manager/workbooks/v3/apply",
+  input,
+);
+
+export const searchMaintenanceAcceptance = (
+  input: {
+    q?: string;
+    submission_status?: "not_submitted" | "submitted" | "not_configured";
+    approval_status?: "not_reviewed" | "approved" | "rejected";
+    page?: number;
+    page_size?: number;
+  } = {},
+) => api.post<MaintenanceAcceptanceDirectory>(
+  "/maintenance/acceptance-deliverables/search",
+  {
+    q: input.q?.trim() || "",
+    submission_status: input.submission_status,
+    approval_status: input.approval_status,
+    page: input.page ?? 1,
+    page_size: input.page_size ?? 24,
+  },
+);
+
+export const getMaintenanceAcceptance = (projectId: string) =>
+  api.get<MaintenanceAcceptanceDeliverable>(`${projectBase(projectId)}/acceptance`);
+
+export const uploadMaintenanceAcceptanceAttachment = (
+  projectId: string,
+  input: { expected_version: number; file: File; idempotencyKey: string },
+) => {
+  const form = new FormData();
+  form.append("expected_version", String(input.expected_version));
+  form.append("file", input.file);
+  return api.post<MaintenanceAcceptanceMutationResult>(
+    `${projectBase(projectId)}/acceptance/attachments`,
+    form,
+    { headers: { "Idempotency-Key": input.idempotencyKey }, timeout: 120000 },
+  );
+};
+
+export const submitMaintenanceAcceptance = (
+  projectId: string,
+  input: { expected_version: number; idempotencyKey: string },
+) => api.post<MaintenanceAcceptanceMutationResult>(
+  `${projectBase(projectId)}/acceptance/submit`,
+  { expected_version: input.expected_version },
+  { headers: { "Idempotency-Key": input.idempotencyKey } },
+);
+
+export const reviewMaintenanceAcceptance = (
+  deliverableId: string,
+  input: {
+    expected_version: number;
+    decision: "approve" | "reject";
+    reason?: string;
+    idempotencyKey: string;
+  },
+) => api.post<MaintenanceAcceptanceMutationResult>(
+  `/maintenance/acceptance-deliverables/${encodeURIComponent(deliverableId)}/review`,
+  {
+    expected_version: input.expected_version,
+    decision: input.decision,
+    reason: input.reason,
+  },
+  { headers: { "Idempotency-Key": input.idempotencyKey } },
+);
+
+export const downloadMaintenanceAcceptanceAttachment = (fileId: string) =>
+  api.get<Blob>(`/maintenance/acceptance-files/${encodeURIComponent(fileId)}`, {
+    responseType: "blob",
+  });
+
 export const listMaintenanceCostGaps = (
   projectId: string,
   params: { page?: number; page_size?: number } = {},
@@ -514,3 +1235,142 @@ export const updateMaintenanceCostGap = (
   input: MaintenanceCostGapUpdate,
 ) => api.patch<MaintenanceCostGapUpdateResult>(`${projectBase(projectId)}/cost-gaps`, input)
   .then((response) => ({ ...response, data: normalizeCostGapUpdateResult(response.data) }));
+
+export const searchSiteIssueCandidates = (
+  projectId: string,
+  input: { q?: string; page?: number; page_size?: number } = {},
+) => api.post<SiteIssueCandidateDirectory>(
+  `/maintenance/site-issues/projects/${encodeURIComponent(projectId)}/candidates/search`,
+  {
+    ...(input.q?.trim() ? { q: input.q.trim() } : {}),
+    page: input.page ?? 1,
+    page_size: input.page_size ?? 50,
+  },
+);
+
+export const searchSiteIssues = (
+  input: {
+    project_id: string;
+    q?: string;
+    workflow_statuses?: SiteIssueWorkflowStatus[];
+    page?: number;
+    page_size?: number;
+  },
+) => api.post<SiteIssueDirectory>("/maintenance/site-issues/search", {
+  project_id: input.project_id,
+  ...(input.q?.trim() ? { q: input.q.trim() } : {}),
+  workflow_statuses: input.workflow_statuses
+    ?? ["draft", "confirmed", "corrected", "void"],
+  page: input.page ?? 1,
+  page_size: input.page_size ?? 20,
+});
+
+export const createSiteIssueDraft = (
+  projectId: string,
+  input: SiteIssueDraftInput,
+) => api.post<SiteIssueDocument>(
+  `/maintenance/site-issues/projects/${encodeURIComponent(projectId)}`,
+  input,
+);
+
+const siteIssueBase = (issueId: string) =>
+  `/maintenance/site-issues/${encodeURIComponent(issueId)}`;
+
+export const patchSiteIssue = (
+  issueId: string,
+  input: SiteIssuePatchInput,
+) => api.patch<SiteIssueDocument>(siteIssueBase(issueId), input);
+
+export const previewSiteIssue = (
+  issueId: string,
+  input: Pick<SiteIssueCommandInput, "project_id" | "version">,
+) => api.post<SiteIssuePreview>(`${siteIssueBase(issueId)}/preview`, input);
+
+export const confirmSiteIssue = (
+  issueId: string,
+  input: SiteIssueCommandInput,
+) => api.post<SiteIssueDocument>(`${siteIssueBase(issueId)}/confirm`, input);
+
+export const voidSiteIssue = (
+  issueId: string,
+  input: SiteIssueCommandInput,
+) => api.post<SiteIssueDocument>(`${siteIssueBase(issueId)}/void`, input);
+
+export const searchMaintenanceReturnObligations = (
+  input: MaintenanceReturnObligationSearchInput,
+) => api.post<MaintenanceReturnObligationDirectory>(
+  "/maintenance/return-obligations/search",
+  {
+    project_id: input.project_id,
+    ...(input.q?.trim() ? { q: input.q.trim() } : {}),
+    ...(input.classifications ? { classifications: input.classifications } : {}),
+    ...(input.active_only == null ? {} : { active_only: input.active_only }),
+    page: input.page ?? 1,
+    page_size: input.page_size ?? 50,
+  },
+);
+
+export const searchMaintenanceBadReturns = (input: {
+  project_id: string;
+  statuses?: MaintenanceBadReturnStatus[];
+  page?: number;
+  page_size?: number;
+}) => api.post<MaintenanceBadReturnDirectory>("/maintenance/bad-returns/search", {
+  project_id: input.project_id,
+  ...(input.statuses ? { statuses: input.statuses } : {}),
+  page: input.page ?? 1,
+  page_size: input.page_size ?? 20,
+});
+
+export const createMaintenanceBadReturnDraft = (input: {
+  project_id: string;
+  idempotency_key: string;
+  replaces_return_id?: string;
+  lines: { obligation_id: string; quantity: number }[];
+  note?: string;
+  reason: string;
+}) => api.post<MaintenanceBadReturn>("/maintenance/bad-returns", input);
+
+const badReturnBase = (returnId: string) =>
+  `/maintenance/bad-returns/${encodeURIComponent(returnId)}`;
+
+export const submitMaintenanceBadReturn = (
+  returnId: string,
+  input: MaintenanceBadReturnCommandInput,
+) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/submit`, input);
+
+export const markMaintenanceBadReturnInTransit = (
+  returnId: string,
+  input: MaintenanceBadReturnCommandInput & { logistics_reference: string },
+) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/in-transit`, input);
+
+export const confirmMaintenanceBadReturnWarehouse = (
+  returnId: string,
+  input: MaintenanceBadReturnCommandInput & {
+    warehouse_reference: string;
+    inbound_reference?: string;
+  },
+) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/warehouse-confirm`, input);
+
+export const voidMaintenanceBadReturn = (
+  returnId: string,
+  input: MaintenanceBadReturnCommandInput,
+) => api.post<MaintenanceBadReturn>(`${badReturnBase(returnId)}/void`, input);
+
+export const listMaintenanceReturnCategories = () => api.get<{
+  categories: MaintenanceReturnCategory[];
+}>("/maintenance/return-categories");
+
+export const resolveMaintenanceReturnObligationCategory = (
+  obligationId: string,
+  input: {
+    project_id: string;
+    version: number;
+    category_id: number;
+    idempotency_key: string;
+    reason: string;
+  },
+) => api.post<MaintenanceReturnObligation>(
+  `/maintenance/return-obligations/${encodeURIComponent(obligationId)}/resolve-category`,
+  input,
+);

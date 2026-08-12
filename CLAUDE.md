@@ -28,6 +28,16 @@ Issues and PRDs live as **GitHub issues** (`Jinchen-Yang/it-spareparts`), driven
 
 ---
 
+## Plan-First Protocol（强制门禁）
+
+> **所有非 trivial 变更必须先写计划 → 开发者批准 → 再实施。**
+>
+> 完整协议见 `.claude/skills/plan-first/SKILL.md`（Claude Code）、
+> `.opencode/PLAN_FIRST.md`（OpenCode）、`.codex/PLAN_FIRST.md`（Codex）。
+>
+> **触发**：涉及 >1 文件、新增功能/API/页面、Bug 修复、重构、数据模型变更。
+> **例外**：单行 typo、格式化、用户说"直接做"。
+
 ## AI Coding Rules
 
 > 所有 AI Agent（Claude Code、OpenCode、Cursor 等）在本仓库开发时必须遵守。
@@ -37,7 +47,7 @@ Issues and PRDs live as **GitHub issues** (`Jinchen-Yang/it-spareparts`), driven
 1. **Read `.ai/` documents** — `PROJECT_CONTEXT.md` → `ARCHITECTURE.md` → `TECH_STACK.md` → `DEVELOPMENT_RULES.md` → `BUSINESS_RULES.md` → `CURRENT_TASK.md`
 2. **Understand architecture** — 分层规则：API → Service → Model，禁止跨层调用
 3. **Check current state** — `git status`, `git log --oneline -10`, `.ai/CURRENT_TASK.md`
-4. **Make a plan** — 用 TodoWrite 列出步骤，确认用户意图后再动手
+4. **Write a plan** — 按 `plan-first` skill 输出结构化计划（问题/目标/路径/验收/风险），**等开发者批准后再动手**（trivial 变更除外）
 
 ### During Coding
 

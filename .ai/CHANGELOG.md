@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-08-12
+
+**Agent:** Claude Code (WSL Ubuntu 26.04)
+**Session:** Plan-First 协议 + .ai/ 体系补全
+
+**Changed:**
+- `.claude/skills/plan-first/SKILL.md` — 新建 Plan-First 开发协议 skill（Claude Code 版）：问题/目标/路径/验收/风险 五段式计划模板 + 审批门禁 + 留痕闭环
+- `.opencode/PLAN_FIRST.md` — OpenCode 版 Plan-First 协议
+- `.codex/PLAN_FIRST.md` — Codex 版 Plan-First 协议
+- `CLAUDE.md` — 新增 Plan-First Protocol 强制门禁段，引用 skill 文件
+- `.ai/AI_WORKFLOW.md` — Phase 0 Step 4 改为五段式计划模板，引用 plan-first skill
+- `docs/维保管理字段业务化改造方案.html` — 全量字段业务化改造方案（5 页面 + 全局术语）
+- `.ai/CHANGELOG.md` — 本次变更记录
+
+**Notes:**
+- 三个 skill 文件为三平台独立副本，核心逻辑相同，格式适配各平台
+- Plan-First 协议触发条件：>1 文件、新功能、Bug 修复、重构；例外：单行 typo、格式化、用户说"直接做"
+- 同步完成架构文档审计：现有 .ai/ARCHITECTURE.md + DATABASE_DESIGN.md 中所有数字均与实际代码不符，需后续全量修复
+
+---
+
 ## 2026-08-11
 
 **Agent:** OpenCode (WSL Ubuntu 26.04)
