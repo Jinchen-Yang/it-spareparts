@@ -13,9 +13,11 @@ from app.auth import current_identity, current_role
 from app.business_time import business_today
 from app.db import get_db
 from app.models.system import SysUser
+from app.api.maintenance_project_scope import require_project_scope
 from app.security import is_field_hidden, record_access_log, require_action, require_page
 from app.security import UserContext, get_current_user_context
 from app.services import maintenance_project_operations as operations
+from app.services import maintenance_project_procurement as procurement
 
 
 router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
@@ -715,6 +717,27 @@ def stable_project_tasks(
         },
     )
     return payload
+
+
+@router.get("/{project_id}/purchases")
+def stable_project_purchases(
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+    allowed_project_ids: set[str] | None = Depends(require_project_scope),
+) -> dict:
+    if allowed_project_ids is not None and project_id not in allowed_project_ids:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该项目的采购数据")
+    rows = procurement.get_project_procurement_chain(db, project_id)
+    record_access_log(
+        ctx,
+        "stable_project_purchases",
+        "maintenance_project",
+        {"project_id": project_id, "result_count": len(rows)},
+    )
+    return {"project_id": project_id, "purchases": rows}
 
 
 @router.get("/operations")
