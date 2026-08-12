@@ -464,7 +464,7 @@ export default function ReplenishmentBetaPage() {
     if (!current) return;
     Modal.confirm({
       title: `提交 ${current.application_no} v${latest?.version_no}？`,
-      content: "提交后本版本及半年价格快照将不可修改，审核 Agent 会针对这个精确版本反馈。",
+      content: "提交后本版本及半年价格快照将不可修改，审核方会针对这个精确版本反馈。",
       okText: "确认提交",
       cancelText: "继续检查",
       onOk: () => run(
@@ -658,7 +658,7 @@ export default function ReplenishmentBetaPage() {
                 </div>
 
                 {current.status === "submitted" && (
-                  <Alert showIcon type="info" message="已提交，等待审核 Agent 回传逐条结果" />
+                  <Alert showIcon type="info" message="已提交，等待审核方回传逐条结果" />
                 )}
                 {current.status === "needs_revision" && (
                   <Alert
@@ -681,7 +681,7 @@ export default function ReplenishmentBetaPage() {
                 <Space wrap className="replenishment-cart-actions">
                   {editable && capabilities.can_create && (
                     <Button type="primary" disabled={!latest?.lines.length || !warehouse.trim()} onClick={submitCart}>
-                      提交给审核 Agent
+                      提交审核
                     </Button>
                   )}
                   {current.status === "needs_revision" && capabilities.can_create && (

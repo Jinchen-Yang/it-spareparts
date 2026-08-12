@@ -104,6 +104,56 @@ describe("ReplenishmentBetaPage", () => {
     expect(listApplications).not.toHaveBeenCalled();
   });
 
+  it("正式版把当前人工审核链准确描述为审核方而非未实现的审核 Agent", async () => {
+    const application = {
+      application_id: "app-submitted",
+      application_no: "BL202608120001",
+      owner_username: "sales_manager",
+      owner_display_name: "销售经理",
+      salesperson_name_snapshot: "销售经理",
+      status: "submitted",
+      version: 2,
+      latest_version_no: 1,
+      created_at: "2026-08-12T00:00:00Z",
+      updated_at: "2026-08-12T01:00:00Z",
+      versions: [{
+        version_id: "version-submitted",
+        version_no: 1,
+        parent_version_id: null,
+        status: "submitted",
+        warehouse: "北京前置库",
+        request_note: null,
+        content_digest: "1".repeat(64),
+        submitted_by: "sales_manager",
+        submitted_at: "2026-08-12T01:00:00Z",
+        lines: [],
+        review: null,
+      }],
+    };
+    listApplications.mockResolvedValueOnce({
+      data: {
+        total: 1,
+        page: 1,
+        page_size: 20,
+        items: [{
+          application_id: application.application_id,
+          application_no: application.application_no,
+          owner_display_name: application.owner_display_name,
+          status: application.status,
+          version: application.version,
+          latest_version_no: application.latest_version_no,
+          updated_at: application.updated_at,
+        }],
+      },
+    });
+    getApplication.mockResolvedValue({ data: application });
+
+    render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
+
+    expect(await screen.findByText("已提交，等待审核方回传逐条结果")).toBeInTheDocument();
+    expect(screen.queryByText(/审核 Agent/)).toBeNull();
+  });
+
   it("第二轮打回只展示当前版本结果，不累计上一轮打回数", async () => {
     const priceWindow = {
       date_from: "2026-02-12",
