@@ -138,7 +138,9 @@ def test_beta_requires_explicit_user_whitelist_even_when_global_gate_is_open(db)
         beta_path = "/api/maintenance/demands/search"
         assert TestClient(app).post(beta_path, json={}).status_code == 401
         assert stable_only.get("/api/maintenance/projects").status_code == 200
-        assert stable_only.post(beta_path, json={}).status_code == 403
+        denied = stable_only.post(beta_path, json={})
+        assert denied.status_code == 403
+        assert "未获得维保管理页面权限" in denied.text
         assert whitelisted.post(beta_path, json={}).status_code == 200
     finally:
         settings.maintenance_beta_enabled = original

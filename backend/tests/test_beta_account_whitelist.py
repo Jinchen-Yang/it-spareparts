@@ -259,7 +259,7 @@ def test_replenishment_allowlist_cannot_be_bypassed_by_legacy_rbac_switch(
                 json=callback_body,
             )
             assert callback.status_code == 403
-            assert "未加入补库申请 Beta 试用名单" in callback.text
+            assert "未获得补库申请页面权限" in callback.text
     finally:
         settings.replenishment_beta_enabled = original
 

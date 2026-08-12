@@ -39,7 +39,7 @@ def _no_store(response: Response) -> None:
 
 def _beta_enabled() -> None:
     if not get_settings().replenishment_beta_enabled:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "补库申请 Beta 当前未开放")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "补库申请当前未开放")
 
 
 def _beta_page_whitelist(ident: dict = Depends(current_identity)) -> None:
@@ -52,7 +52,7 @@ def _beta_page_whitelist(ident: dict = Depends(current_identity)) -> None:
     if not real_identity:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "补库申请 Beta 必须使用实名系统账号",
+            "补库申请必须使用实名系统账号",
         )
     if not replenishment_beta_whitelisted(
         role=str(ident.get("role") or "guest"),
@@ -61,7 +61,7 @@ def _beta_page_whitelist(ident: dict = Depends(current_identity)) -> None:
     ):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "未加入补库申请 Beta 试用名单",
+            "未获得补库申请页面权限",
         )
 
 
@@ -83,7 +83,7 @@ def _identity(db: Session, ident: dict) -> tuple[str, str]:
     if ident.get("authn") != "sys_user" or ident.get("fb"):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "补库申请 Beta 必须使用实名系统账号",
+            "补库申请必须使用实名系统账号",
         )
     username = str(ident.get("sub") or "").strip()
     user = db.scalar(
@@ -95,7 +95,7 @@ def _identity(db: Session, ident: dict) -> tuple[str, str]:
     if not username or user is None:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "补库申请 Beta 必须使用实名系统账号",
+            "补库申请必须使用实名系统账号",
         )
     return username, user.role
 

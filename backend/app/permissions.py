@@ -94,7 +94,7 @@ LABELS: dict[str, str] = {
     "page_maintenance": "项目成本（维保出库）",
     "page_boss_board": "老板经营看板",
     "page_pool_analysis": "互通池价格分析",
-    "page_maintenance_beta": "维保管理 Beta",
+    "page_maintenance_beta": "维保管理",
     "data_pool_price_governance": "池价格治理（约束价/越线差额）",
     "action_pool_manage": "互通PN池维护（建池/成员/归档）",
     "action_pool_set_policy": "池约束价设置（采购上限/销售下限）",
@@ -112,7 +112,7 @@ LABELS: dict[str, str] = {
     "action_maintenance_acceptance_review": "维保验收报告高风险审批",
     "action_maintenance_warehouse_manage": "仓库单据导入与歧义裁决",
     "action_maintenance_migration_review": "维保迁移对账与审批",
-    "page_replenishment_beta": "补库申请 Beta",
+    "page_replenishment_beta": "补库申请",
     "action_replenishment_create": "补库申请创建与复提",
     "action_replenishment_review": "补库审核结果回写",
 }
@@ -370,7 +370,7 @@ def combo_errors(perms: dict[str, bool]) -> list[str]:
         if perms.get(page_key, False) and not perms.get(required_page_key, False):
             errors.append(
                 f"「{LABELS.get(page_key, page_key)}」需要同时开启"
-                f"「{LABELS.get(required_page_key, required_page_key)}」——Beta 是稳定版之上的附加入口")
+                f"「{LABELS.get(required_page_key, required_page_key)}」——正式工作台沿用基础页面的数据边界")
     for data_key, required_key in DATA_DATA_DEPENDENCIES.items():
         if perms.get(data_key, False) and not perms.get(required_key, False):
             errors.append(
@@ -630,20 +630,20 @@ PERMISSION_META: dict[str, dict] = {
         "risk": "能看到全员权限分布与活动记录，仅管理员可授予本权限。",
     },
     "page_replenishment_beta": {
-        "label": "补库申请 Beta",
-        "summary": "可打开独立 Beta 页面，用购物车方式准备前置库补库申请。",
-        "can": "打开独立 Beta 页面；同时具备价格数据权限时可只读查看本人申请与历史版本。",
+        "label": "补库申请",
+        "summary": "可打开补库申请页面，用购物车方式准备前置库补库申请。",
+        "can": "打开补库申请页面；同时具备价格数据权限时可只读查看本人申请与历史版本。",
         "cannot": "搜索价格事实还需「池价格治理」，维护/提交还需「补库申请创建与复提」；不代表可回写审核结果。",
-        "typical": ["管理员", "受邀试用的销售经理"],
+        "typical": ["管理员", "已授权的销售经理"],
         "sensitivity": "high",
-        "risk": "页面、价格数据、申请操作是三把独立钥匙；Beta 总闸关闭时服务端拒绝全部业务请求。",
+        "risk": "页面、价格数据、申请操作是三把独立钥匙；服务端功能开关关闭时拒绝全部业务请求。",
     },
     "page_maintenance_beta": {
-        "label": "维保管理 Beta",
-        "summary": "可进入与稳定版并存的新维保工作台，参加小范围生产试用。",
+        "label": "维保管理",
+        "summary": "可进入维保管理正式工作台，并继续使用兼容入口。",
         "can": "在稳定版入口不变的前提下，使用项目面板、需求删除、经理月报、现场领用、坏件返还、仓库单据、验收和迁移核对。",
-        "cannot": "不自动获得任何写操作或敏感数据权限；服务端总闸关闭时所有 Beta 接口均不可用。",
-        "typical": ["管理员", "受邀试用的项目经理"],
+        "cannot": "不自动获得任何写操作或敏感数据权限；服务端功能开关关闭时所有新工作台接口均不可用。",
+        "typical": ["管理员", "已授权的项目经理"],
         "sensitivity": "critical",
         "risk": "直接接触同一生产数据库中的新业务流程，必须逐账号白名单开放，并保留稳定版回退入口。",
     },
@@ -780,9 +780,9 @@ PERMISSION_META: dict[str, dict] = {
         "summary": "允许维护本人补库购物车、提交不可变版本并处理被打回条目。",
         "can": "新增/修改/移除本人草稿行，提交版本，按打回结果建立下一版并导出。",
         "cannot": "不能查看或修改他人申请，不能审批，不会修改库存或自动生成采购/维保事实。",
-        "typical": ["受邀试用的销售经理"],
+        "typical": ["已授权的销售经理"],
         "sensitivity": "high",
-        "risk": "提交内容会成为留存业务版本；必须同时具备 Beta 页面和池价格查看权限。",
+        "risk": "提交内容会成为留存业务版本；必须同时具备补库申请页面和池价格查看权限。",
     },
     "action_replenishment_review": {
         "label": "补库审核结果回写",

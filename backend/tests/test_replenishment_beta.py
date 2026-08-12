@@ -314,7 +314,7 @@ def test_review_callback_requires_page_allowlist_and_action(db):
             },
         )
         assert response.status_code == 403, response.text
-        assert "未加入补库申请 Beta 试用名单" in response.text
+        assert "未获得补库申请页面权限" in response.text
 
         # Explicitly adding the Beta page bit admits this named reviewer to the
         # callback without granting access to governed price facts.

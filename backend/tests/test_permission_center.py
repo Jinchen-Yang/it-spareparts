@@ -584,4 +584,13 @@ def test_meta_has_business_language(db, admin_client):
     )
     assert m["dependencies"]["page_page"]["page_maintenance_beta"] == "page_maintenance"
     assert m["dependencies"]["data_data"]["data_profit"] == "data_purchase_cost"
+    assert m["meta"]["page_maintenance_beta"]["label"] == "维保管理"
+    assert m["meta"]["page_replenishment_beta"]["label"] == "补库申请"
+    for key in ("page_maintenance_beta", "page_replenishment_beta"):
+        visible_copy = " ".join(
+            str(m["meta"][key][field])
+            for field in ("label", "summary", "can", "cannot", "typical", "risk")
+        )
+        assert "Beta" not in visible_copy
+        assert "试用" not in visible_copy
     assert {t["code"] for t in m["templates"]} >= {"admin", "boss", "sales", "purchaser", "readonly"}

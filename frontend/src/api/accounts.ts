@@ -186,7 +186,7 @@ export function comboErrors(perms: Perms, meta: AccountsMeta): string[] {
   }
   for (const [page, required] of Object.entries(meta.dependencies.page_page || {})) {
     if (perms[page] && !perms[required]) {
-      errs.push(`「${name(page)}」需要同时开启「${name(required)}」——Beta 是稳定版之上的附加入口`);
+      errs.push(`「${name(page)}」需要同时开启「${name(required)}」——正式工作台沿用基础页面的数据边界`);
     }
   }
   for (const [data, required] of Object.entries(meta.dependencies.data_data)) {

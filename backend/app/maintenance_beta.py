@@ -21,11 +21,11 @@ def require_maintenance_beta(
     if not real_identity:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
-            "维保管理 Beta 仅对实名系统账号白名单开放",
+            "维保管理仅对实名系统账号开放",
         )
     if not maintenance_beta_whitelisted(
         role=str(ident.get("role") or "guest"),
         permission_map=ident.get("perms"),
         real_identity=True,
     ):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "未加入维保 Beta 试用名单")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "未获得维保管理页面权限")
