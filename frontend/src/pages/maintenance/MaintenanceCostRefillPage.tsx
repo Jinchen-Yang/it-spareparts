@@ -30,11 +30,11 @@ import { readMaintenanceCapabilities } from "../../components/maintenance/mainte
 import { money, moneyExact, splitFixed } from "../../utils/format";
 
 const SOURCE_LABELS: Record<string, string> = {
-  direct_purchase: "关联采购",
-  linked_purchase: "关联采购",
-  purchase_window: "采购 ±7 天加权",
-  sales_window: "销售 ±7 天加权",
-  manual: "人工回填",
+  direct_purchase: "关联采购记录",
+  linked_purchase: "关联采购记录",
+  purchase_window: "前后 7 天采购价",
+  sales_window: "前后 7 天销售价",
+  manual: "手动录入",
 };
 
 function referenceLabel(reference: MaintenanceCostReference): string {
@@ -58,7 +58,7 @@ function ReferenceList({ references, selectable, onSelect }: {
   selectable?: boolean;
   onSelect?: (reference: MaintenanceCostReference) => void;
 }) {
-  if (references.length === 0) return <Tag color="orange">无可用参考，需人工核实后留痕</Tag>;
+  if (references.length === 0) return <Tag color="orange">暂无可用参考价格，请人工核实后补录</Tag>;
   return (
     <Space direction="vertical" size={5} style={{ width: "100%" }}>
       {references.map((reference, index) => (
@@ -77,10 +77,10 @@ function ReferenceList({ references, selectable, onSelect }: {
             {selectable && reference.weighted_unit_price !== null && (
               <Button
                 size="small"
-                aria-label={`采用${referenceLabel(reference)}参考`}
+                aria-label={`使用${referenceLabel(reference)}价格`}
                 onClick={() => onSelect?.(reference)}
               >
-                采用该参考
+                使用此价格
               </Button>
             )}
           </Space>
@@ -190,11 +190,11 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
   if (!canManageProject) {
     return (
       <Space direction="vertical" size="large" style={{ width: "100%" }}>
-        <PageHeader title="缺失成本人工回填" />
+        <PageHeader title="领用缺价补录" />
         <Alert
           showIcon
           type="warning"
-          message="无人工成本回填权限"
+          message="无补录权限，请联系管理员授予维保项目管理权限"
           description="请联系管理员授予维保项目管理权限。"
         />
       </Space>
@@ -247,7 +247,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
       setTotal(data.total);
       const latestGap = data.rows.find((row) => row.line_id === staleGap.line_id);
       if (!latestGap) {
-        setFormError("该行已不在待回填清单中；草稿已保留，请返回项目核对最新状态。");
+        setFormError("该记录已补录完成或不再需要补录；草稿已保留，请返回项目核对最新状态。");
         return false;
       }
       editingRef.current = latestGap;
@@ -267,7 +267,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
 
   const save = async () => {
     if (!editing || unitCost === null || unitCost < 0 || !evidence.trim() || !reason.trim()) {
-      setFormError("请填写有效未税单位成本、证据和回填原因。成本不会由系统猜测。");
+      setFormError("请填写有效未税单价、证据和补录说明。成本不会由系统猜测。");
       return;
     }
     setSaving(true);
@@ -286,7 +286,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
       setConflictBlocked(false);
       setSuccess(data.resolution === "automatic_evidence"
         ? "保存时发现新的系统价格，已采用系统证据并刷新清单。"
-        : "成本已回填");
+        : "价格已补录");
       await load();
     } catch (error) {
       if ((error as { response?: { status?: number } }).response?.status === 409) {
@@ -309,7 +309,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
     let result: MaintenanceCostGapRecomputeResult;
     try {
       const response = await recomputeMaintenanceCostGaps(targetProjectId, {
-        reason: "重新匹配后到采购或销售价格证据",
+        reason: "重新匹配后到采购或销售价格来源说明",
       });
       result = response.data;
     } catch {
@@ -356,7 +356,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
     { title: "描述", dataIndex: "description", width: 170, render: (value) => value || "—" },
     { title: "数量", dataIndex: "quantity", width: 80, align: "right" },
     {
-      title: "可核对价格证据",
+      title: "可用参考价格",
       dataIndex: "references",
       width: 360,
       render: (references: MaintenanceCostReference[]) => <ReferenceList references={references} />,
@@ -398,8 +398,8 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <PageHeader
-        title="缺失成本人工回填"
-        subtitle="只列出系统无法自动取价的现场领用行；先核对关联采购，再看前后 7 天采购和销售加权参考。"
+        title="领用缺价补录"
+        subtitle="以下领用记录的系统自动取价未成功。核对关联采购记录，或参考前后 7 天的采购价和销售价，为每条领用补录未税单价。"
         extra={selectedProjectId ? (
           <Link to={`/maintenance/projects/${encodeURIComponent(selectedProjectId)}`}>
             返回项目
@@ -444,7 +444,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
           <Alert
             showIcon
             type="info"
-            message="采购或销售数据可能晚于领用到达；可先重新匹配系统价格，仍无可靠证据的行再人工回填。"
+            message="采购或销售数据可能晚于领用到达；可先自动匹配最新价格，仍无可靠证据的行再人工回填。"
           />
           <Button
             style={{ alignSelf: "flex-start" }}
@@ -452,7 +452,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
             disabled={!selectedProjectId || loading}
             onClick={() => void recompute()}
           >
-            重新匹配系统价格
+            自动匹配最新价格
           </Button>
           {success && <Alert showIcon closable type="success" message={success} />}
           {recomputeError && <Alert showIcon type="error" message={recomputeError} />}
@@ -460,7 +460,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
             <Alert
               showIcon
               type="error"
-              message="缺失成本清单加载失败"
+              message="缺价清单加载失败"
               action={<Button size="small" danger onClick={() => void load()}>重试</Button>}
             />
           )}
@@ -473,7 +473,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
               columns={columns}
               dataSource={rows}
               scroll={{ x: 1240 }}
-              locale={{ emptyText: "当前项目没有待回填成本" }}
+              locale={{ emptyText: "当前项目所有领用成本已齐全" }}
               pagination={{
                 current: page,
                 pageSize: 20,
@@ -487,7 +487,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
       </Card>
 
       <Modal
-        title="回填成本"
+        title="补录领用单价"
         open={Boolean(editing)}
         onCancel={() => !saving && closeRefill()}
         footer={null}
@@ -502,9 +502,9 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
             />
             <ReferenceList references={editing.references} selectable onSelect={chooseReference} />
             <label>
-              未税单位成本
+              未税单价
               <InputNumber
-                aria-label="未税单位成本"
+                aria-label="未税单价"
                 min={0}
                 precision={6}
                 style={{ width: "100%", marginTop: 5 }}
@@ -522,12 +522,12 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
                 fontSize: 12.5,
               }}
             >
-              {`按 13% 增值税和 HALF_UP 换算，含税单位成本预览：${incTaxUnitCostPreviewText}`}
+              {`含税单价（按 13% 增值税换算）：${incTaxUnitCostPreviewText}`}
             </div>
             <label>
-              价格证据
+              价格来源说明
               <Input.TextArea
-                aria-label="价格证据"
+                aria-label="价格来源说明"
                 rows={2}
                 style={{ marginTop: 5 }}
                 value={evidence}
@@ -535,9 +535,9 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
               />
             </label>
             <label>
-              回填原因
+              补录说明
               <Input.TextArea
-                aria-label="回填原因"
+                aria-label="补录说明"
                 rows={2}
                 style={{ marginTop: 5 }}
                 value={reason}
@@ -552,7 +552,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
                 disabled={conflictBlocked}
                 onClick={() => void save()}
               >
-                保存成本
+                确认保存
               </Button>
               {conflictBlocked && (
                 <Button
