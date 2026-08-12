@@ -223,7 +223,7 @@ PY
     || fatal "old frontend image identity drifted in Compose rehearsal"
   for attempt in $(seq 1 60); do
     if docker exec "$OLD_FRONTEND_CID" wget -qO- http://127.0.0.1/ >/dev/null 2>&1 \
-      && docker exec "$OLD_FRONTEND_CID" wget -qO- http://127.0.0.1/api/health >/dev/null 2>&1 \
+      && docker exec "$OLD_FRONTEND_CID" wget -qO- http://127.0.0.1/health >/dev/null 2>&1 \
       && docker exec -i "$OLD_APP_CID" python -c '
 import json,sys,urllib.request
 credential=json.load(sys.stdin)

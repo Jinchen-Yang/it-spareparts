@@ -884,6 +884,7 @@ def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
         decisions=decisions,
     )
     assert replay["idempotent"] is True
+    assert replay["application_status"] == review["application_status"] == "needs_revision"
 
     # Review-line provenance is also enforced at the database boundary: an
     # append-only row may not point at a line from another application/version.

@@ -889,7 +889,13 @@ def record_review(
     if existing is not None:
         if existing.payload_digest != payload_digest:
             raise ReplenishmentError("相同幂等键对应了不同审核内容", code="idempotency_conflict", status_code=409)
-        return {"review_id": existing.review_id, "idempotent": True, "approved_count": existing.approved_count, "rejected_count": existing.rejected_count}
+        return {
+            "review_id": existing.review_id,
+            "idempotent": True,
+            "approved_count": existing.approved_count,
+            "rejected_count": existing.rejected_count,
+            "application_status": app.status,
+        }
     if app.status != "submitted":
         raise ReplenishmentError("该版本不在待审核状态", code="stale_review", status_code=409)
     if db.scalar(select(ReplenishmentReview.review_id).where(ReplenishmentReview.version_id == version_id)):

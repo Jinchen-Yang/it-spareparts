@@ -1062,14 +1062,16 @@ PY
 }
 
 internal_health() {
-  local attempt
+  local attempt db_health
   for attempt in $(seq 1 30); do
     if curl --noproxy '*' --fail --silent --show-error --max-time 5 \
         http://127.0.0.1:8080/ >/dev/null 2>&1 \
       && curl --noproxy '*' --proto '=https' --tlsv1.2 --fail --silent \
         --show-error --max-time 8 "https://$HOST_NAME/health" >/dev/null 2>&1 \
-      && curl --noproxy '*' --proto '=https' --tlsv1.2 --fail --silent \
-        --show-error --max-time 8 "https://$HOST_NAME/health/db" >/dev/null 2>&1; then
+      && db_health=$(curl --noproxy '*' --proto '=https' --tlsv1.2 --fail --silent \
+        --show-error --max-time 8 "https://$HOST_NAME/health/db") \
+      && python3 -c 'import json,sys; data=json.load(sys.stdin); raise SystemExit(0 if data.get("db") == "reachable" else 1)' \
+        <<<"$db_health"; then
       return 0
     fi
     sleep 1
