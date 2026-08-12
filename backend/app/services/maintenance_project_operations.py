@@ -2239,6 +2239,10 @@ def create_site_issue(
     source: str = "direct_api",
     import_batch_id: str | None = None,
 ) -> dict | None:
+    if source == "direct_api" and _site_issue_is_production_blocked():
+        raise MaintenanceOperationError(
+            "生产现场领用必须使用已确认仓库发货明细的新版受控流程"
+        )
     project = _lock_project_for_fact_write(db, project_id)
     if project is None:
         return None
@@ -2382,6 +2386,10 @@ def update_site_issue_status(
     if row.source == "site_issue_v2":
         raise MaintenanceOperationError(
             "新版现场领用单必须使用预览、确认、更正或作废命令"
+        )
+    if normalized_status == "confirmed" and _site_issue_is_production_blocked():
+        raise MaintenanceOperationError(
+            "生产现场领用必须使用已确认仓库发货明细的新版受控流程"
         )
     lines = list(
         db.scalars(

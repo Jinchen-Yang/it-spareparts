@@ -3209,6 +3209,308 @@ def test_new_fact_commands_fail_closed_by_action_and_data_permissions(db):
     assert db.get(MaintenanceProjectWorkbookState, project.project_id) is None
 
 
+def test_legacy_site_issue_create_uses_dedicated_action_not_roundtrip_apply(db):
+    project = _project(db, project_id="project-site-issue-create-action")
+    part = DimPart(pn_std="PN-SITE-ISSUE-CREATE-ACTION")
+    db.add(part)
+    db.commit()
+    path = f"/api/maintenance/projects/stable/{project.project_id}/site-issues"
+    body = {
+        "issue_no": "ISSUE-CREATE-ACTION-DENIED",
+        "issue_date": "2026-08-01",
+        "raw_status": "synthetic-confirmed",
+        "status_mapping_state": "mapped",
+        "normalized_status": "confirmed",
+        "status_mapping_version": "synthetic-map-v1",
+        "lines": [
+            {
+                "issue_line_id": "issue-line-create-action-denied",
+                "line_no": 1,
+                "part_id": part.id,
+                "pn": part.pn_std,
+                "quantity": "1",
+            }
+        ],
+        "reason": "固定工作簿权限不得代替现场领用专用权限",
+    }
+    roundtrip_only = _permission_client(
+        db,
+        username="site_issue_create_roundtrip_only",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "action_maintenance_roundtrip_apply": True,
+            "action_maintenance_site_issue_manage": False,
+        },
+    )
+
+    denied = roundtrip_only.post(path, json=body)
+
+    assert denied.status_code == 403, denied.text
+    assert db.scalar(
+        select(MaintenanceSiteIssue).where(
+            MaintenanceSiteIssue.project_id == project.project_id
+        )
+    ) is None
+
+    site_issue_only = _permission_client(
+        db,
+        username="site_issue_create_dedicated_action",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "action_maintenance_roundtrip_apply": False,
+            "action_maintenance_site_issue_manage": True,
+        },
+    )
+    allowed = site_issue_only.post(
+        path,
+        json={
+            **body,
+            "issue_no": "ISSUE-CREATE-ACTION-ALLOWED",
+            "lines": [
+                {
+                    **body["lines"][0],
+                    "issue_line_id": "issue-line-create-action-allowed",
+                }
+            ],
+            "reason": "专用权限保留 legacy 客户端兼容",
+        },
+    )
+
+    assert allowed.status_code == 201, allowed.text
+    assert allowed.json()["normalized_status"] == "confirmed"
+
+
+def test_legacy_site_issue_status_uses_dedicated_action_for_confirm_and_void(db):
+    project = _project(db, project_id="project-site-issue-status-action")
+    part = DimPart(pn_std="PN-SITE-ISSUE-STATUS-ACTION")
+    db.add(part)
+    db.commit()
+    issue = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
+            "issue_no": "ISSUE-STATUS-ACTION",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-pending",
+            "status_mapping_state": "unmapped",
+            "normalized_status": "unknown",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-status-action",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                }
+            ],
+            "reason": "建立专用权限状态迁移测试",
+        },
+    )
+    path = (
+        "/api/maintenance/projects/stable/site-issues/"
+        f"{issue['issue_id']}/status"
+    )
+    roundtrip_only = _permission_client(
+        db,
+        username="site_issue_status_roundtrip_only",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "action_maintenance_roundtrip_apply": True,
+            "action_maintenance_site_issue_manage": False,
+        },
+    )
+    site_issue_only = _permission_client(
+        db,
+        username="site_issue_status_dedicated_action",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "action_maintenance_roundtrip_apply": False,
+            "action_maintenance_site_issue_manage": True,
+        },
+    )
+    confirm_body = {
+        "version": 1,
+        "raw_status": "synthetic-confirmed",
+        "normalized_status": "confirmed",
+        "status_mapping_version": "synthetic-map-v2",
+        "reason": "固定工作簿权限不能确认现场领用",
+    }
+
+    denied_confirm = roundtrip_only.patch(path, json=confirm_body)
+
+    assert denied_confirm.status_code == 403, denied_confirm.text
+    db.expire_all()
+    assert db.get(MaintenanceSiteIssue, issue["issue_id"]).normalized_status == "unknown"
+
+    allowed_confirm = site_issue_only.patch(
+        path,
+        json={**confirm_body, "reason": "专用权限确认 legacy 现场领用"},
+    )
+    assert allowed_confirm.status_code == 200, allowed_confirm.text
+    assert allowed_confirm.json()["normalized_status"] == "confirmed"
+
+    void_body = {
+        "version": allowed_confirm.json()["version"],
+        "raw_status": "synthetic-void",
+        "normalized_status": "void",
+        "status_mapping_version": "synthetic-map-v3",
+        "reason": "固定工作簿权限不能作废现场领用",
+    }
+    denied_void = roundtrip_only.patch(path, json=void_body)
+
+    assert denied_void.status_code == 403, denied_void.text
+    db.expire_all()
+    assert db.get(MaintenanceSiteIssue, issue["issue_id"]).normalized_status == "confirmed"
+
+    allowed_void = site_issue_only.patch(
+        path,
+        json={**void_body, "reason": "专用权限作废 legacy 现场领用"},
+    )
+    assert allowed_void.status_code == 200, allowed_void.text
+    assert allowed_void.json()["normalized_status"] == "void"
+
+
+def test_production_legacy_site_issue_writes_fail_closed_without_canonical_source(
+    db,
+    monkeypatch,
+):
+    project = _project(db, project_id="project-site-issue-prod-legacy-gate")
+    part = DimPart(pn_std="PN-SITE-ISSUE-PROD-LEGACY-GATE")
+    db.add(part)
+    db.commit()
+    pending = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
+            "issue_no": "ISSUE-PROD-LEGACY-PENDING",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-pending",
+            "status_mapping_state": "unmapped",
+            "normalized_status": "unknown",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-prod-legacy-pending",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                }
+            ],
+            "reason": "建立生产 legacy 闸门测试前置事实",
+        },
+    )
+    client = _client(db, username="site_issue_prod_legacy_gate_admin")
+    monkeypatch.setattr(
+        operations_service,
+        "_site_issue_is_production_blocked",
+        lambda: True,
+    )
+
+    direct_confirm = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-PROD-LEGACY-DIRECT",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-prod-legacy-direct",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                }
+            ],
+            "reason": "生产不能绕过仓库发货稳定身份直接确认",
+        },
+    )
+    legacy_status_confirm = client.patch(
+        "/api/maintenance/projects/stable/site-issues/"
+        f"{pending['issue_id']}/status",
+        json={
+            "version": pending["version"],
+            "raw_status": "synthetic-confirmed",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v2",
+            "reason": "生产不能通过 legacy 状态入口确认",
+        },
+    )
+
+    assert direct_confirm.status_code == 400, direct_confirm.text
+    assert "仓库发货" in direct_confirm.json()["detail"]
+    assert legacy_status_confirm.status_code == 400, legacy_status_confirm.text
+    assert "仓库发货" in legacy_status_confirm.json()["detail"]
+    db.expire_all()
+    assert db.get(MaintenanceSiteIssue, pending["issue_id"]).normalized_status == "unknown"
+    assert db.scalar(
+        select(MaintenanceSiteIssue).where(
+            MaintenanceSiteIssue.issue_no == "ISSUE-PROD-LEGACY-DIRECT"
+        )
+    ) is None
+
+
+def test_production_legacy_site_issue_void_remains_available_for_fact_retirement(
+    db,
+    monkeypatch,
+):
+    project = _project(db, project_id="project-site-issue-prod-legacy-void")
+    part = DimPart(pn_std="PN-SITE-ISSUE-PROD-LEGACY-VOID")
+    db.add(part)
+    db.commit()
+    confirmed = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
+            "issue_no": "ISSUE-PROD-LEGACY-VOID",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-prod-legacy-void",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                }
+            ],
+            "reason": "建立需要在生产退役的历史现场领用事实",
+        },
+    )
+    client = _client(db, username="site_issue_prod_legacy_void_admin")
+    monkeypatch.setattr(
+        operations_service,
+        "_site_issue_is_production_blocked",
+        lambda: True,
+    )
+
+    retired = client.patch(
+        "/api/maintenance/projects/stable/site-issues/"
+        f"{confirmed['issue_id']}/status",
+        json={
+            "version": confirmed["version"],
+            "raw_status": "synthetic-void",
+            "normalized_status": "void",
+            "status_mapping_version": "synthetic-map-v2",
+            "reason": "保留作废历史错误事实的兼容能力",
+        },
+    )
+
+    assert retired.status_code == 200, retired.text
+    assert retired.json()["normalized_status"] == "void"
+
+
 def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
     projects = [
         _project(db, project_id="project-threshold-80"),

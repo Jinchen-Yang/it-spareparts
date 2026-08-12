@@ -575,7 +575,10 @@ def create_project_site_issue(
     ident: dict = Depends(current_identity),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_roundtrip_apply", require_data="data_purchase_cost")
+        require_action(
+            "action_maintenance_site_issue_manage",
+            require_data="data_purchase_cost",
+        )
     ),
     _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
@@ -905,7 +908,7 @@ def patch_project_site_issue_status(
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(
         require_action(
-            "action_maintenance_roundtrip_apply",
+            "action_maintenance_site_issue_manage",
             require_data="data_purchase_cost",
         )
     ),
