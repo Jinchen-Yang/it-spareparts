@@ -1,5 +1,11 @@
 """Stable maintenance-project operating facts through their public API."""
 
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    TimeoutError as FutureTimeoutError,
+)
+import hashlib
+import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -182,44 +188,97 @@ def _site_issue_lines(part: DimPart, *, count: int, prefix: str) -> list[dict]:
     ]
 
 
-def test_site_issue_create_api_accepts_200_and_rejects_201_lines(db):
+def _create_legacy_site_issue_fixture(
+    db,
+    *,
+    project_id: str,
+    body: dict,
+    commit: bool = True,
+) -> dict:
+    """Seed one historical/import-style fact without reopening the public v1 API."""
+
+    values = dict(body)
+    raw_issue_date = values.pop("issue_date")
+    payload = operations_service.create_site_issue(
+        db,
+        project_id=project_id,
+        issue_date=(
+            date.fromisoformat(raw_issue_date)
+            if isinstance(raw_issue_date, str)
+            else raw_issue_date
+        ),
+        operated_by="legacy-service-test-fixture",
+        source="direct_api",
+        import_batch_id=None,
+        **values,
+    )
+    assert payload is not None
+    if commit:
+        db.commit()
+    return payload
+
+
+def _count_service_write_queries(db, action) -> tuple[dict, int]:
+    engine = db.get_bind()
+    query_count = 0
+
+    def count_query(*_args) -> None:
+        nonlocal query_count
+        query_count += 1
+
+    event.listen(engine, "before_cursor_execute", count_query)
+    try:
+        payload = action()
+        db.commit()
+    finally:
+        event.remove(engine, "before_cursor_execute", count_query)
+    return payload, query_count
+
+
+def test_public_site_issue_create_preserves_legacy_contract_and_line_limit(db):
     project = _project(db, project_id="project-site-issue-api-limit")
     client = _client(db, username="site_issue_api_limit_admin")
     part = DimPart(pn_std="PN-SITE-ISSUE-API-LIMIT")
     db.add(part)
     db.commit()
 
-    accepted = client.post(
+    old_public_payload = {
+        "issue_no": "ISSUE-API-LIMIT-200",
+        "issue_date": "2026-08-01",
+        "raw_status": "synthetic-confirmed",
+        "status_mapping_state": "mapped",
+        "normalized_status": "confirmed",
+        "status_mapping_version": "synthetic-map-v1",
+        "lines": _site_issue_lines(part, count=200, prefix="issue-api-accepted"),
+        "reason": "验证旧客户端契约继续可用",
+    }
+    accepted_public = client.post(
         f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
-            "issue_no": "ISSUE-API-LIMIT-200",
-            "issue_date": "2026-08-01",
-            "raw_status": "synthetic-confirmed",
-            "status_mapping_state": "mapped",
-            "normalized_status": "confirmed",
-            "status_mapping_version": "synthetic-map-v1",
-            "lines": _site_issue_lines(part, count=200, prefix="issue-api-accepted"),
-            "reason": "验证现场领用单 API 可接收上限行数",
-        },
+        json=old_public_payload,
     )
-    assert accepted.status_code == 201, accepted.text
-    assert len(accepted.json()["lines"]) == 200
+    assert accepted_public.status_code == 201, accepted_public.text
+    assert len(accepted_public.json()["lines"]) == 200
+    assert db.get(MaintenanceSiteIssueLine, "issue-api-accepted-1") is not None
 
-    rejected = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
-            "issue_no": "ISSUE-API-LIMIT-201",
-            "issue_date": "2026-08-01",
-            "raw_status": "synthetic-confirmed",
-            "status_mapping_state": "mapped",
-            "normalized_status": "confirmed",
-            "status_mapping_version": "synthetic-map-v1",
-            "lines": _site_issue_lines(part, count=201, prefix="issue-api-limit"),
-            "reason": "验证现场领用单 API 明细上限",
-        },
-    )
-
-    assert rejected.status_code == 422, rejected.text
+    with pytest.raises(
+        operations_service.MaintenanceOperationError,
+        match="最多允许 200 条明细",
+    ):
+        _create_legacy_site_issue_fixture(
+            db,
+            project_id=project.project_id,
+            body={
+                "issue_no": "ISSUE-API-LIMIT-201",
+                "issue_date": "2026-08-01",
+                "raw_status": "synthetic-confirmed",
+                "status_mapping_state": "mapped",
+                "normalized_status": "confirmed",
+                "status_mapping_version": "synthetic-map-v1",
+                "lines": _site_issue_lines(part, count=201, prefix="issue-api-limit"),
+                "reason": "验证历史服务明细上限",
+            },
+        )
+    db.rollback()
     assert db.get(MaintenanceSiteIssueLine, "issue-api-limit-1") is None
 
 
@@ -252,16 +311,17 @@ def test_site_issue_create_service_rejects_more_than_200_lines(db):
         )
 
 
-def test_direct_site_issue_api_exposes_server_owned_provenance(db):
+def test_legacy_service_site_issue_exposes_history_provenance(db):
     project = _project(db, project_id="project-direct-site-issue-provenance")
     client = _client(db, username="direct_site_issue_provenance_admin")
     part = DimPart(pn_std="PN-DIRECT-SITE-ISSUE-PROVENANCE")
     db.add(part)
     db.commit()
 
-    created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    created = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-DIRECT-PROVENANCE",
             "issue_date": "2026-08-01",
             "raw_status": "synthetic-confirmed",
@@ -277,13 +337,12 @@ def test_direct_site_issue_api_exposes_server_owned_provenance(db):
                     "quantity": "1",
                 }
             ],
-            "reason": "通过受控 API 新增现场领用",
+            "reason": "通过历史兼容服务建立现场领用",
         },
     )
 
-    assert created.status_code == 201, created.text
-    assert created.json()["source"] == "direct_api"
-    assert created.json()["import_batch_id"] is None
+    assert created["source"] == "direct_api"
+    assert created["import_batch_id"] is None
     workspace = client.get(
         f"/api/maintenance/projects/stable/{project.project_id}/workspace",
         params={"as_of": "2026-08-31"},
@@ -425,7 +484,6 @@ def test_create_rejects_mapped_unknown_status_pairs_without_writes(db):
 
 def test_site_issue_create_query_count_is_bounded_and_all_lines_are_costed(db):
     project = _project(db, project_id="project-site-issue-create-scale")
-    client = _client(db, username="site_issue_create_scale_admin")
     part = DimPart(pn_std="PN-SITE-ISSUE-CREATE-SCALE")
     db.add(part)
     db.flush()
@@ -468,28 +526,31 @@ def test_site_issue_create_query_count_is_bounded_and_all_lines_are_costed(db):
             "reason": "验证现场领用创建批量取价",
         }
 
-    one_response, one_queries = _count_write_queries(
+    one_payload, one_queries = _count_service_write_queries(
         db,
-        client,
-        method="POST",
-        path=f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        payload=create_payload(suffix="ONE", count=1),
+        lambda: _create_legacy_site_issue_fixture(
+            db,
+            project_id=project.project_id,
+            body=create_payload(suffix="ONE", count=1),
+            commit=False,
+        ),
     )
-    many_response, many_queries = _count_write_queries(
+    many_payload, many_queries = _count_service_write_queries(
         db,
-        client,
-        method="POST",
-        path=f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        payload=create_payload(suffix="MANY", count=40),
+        lambda: _create_legacy_site_issue_fixture(
+            db,
+            project_id=project.project_id,
+            body=create_payload(suffix="MANY", count=40),
+            commit=False,
+        ),
     )
 
-    assert one_response.status_code == 201, one_response.text
-    assert many_response.status_code == 201, many_response.text
     assert many_queries <= one_queries + 8, (one_queries, many_queries)
-    assert len(many_response.json()["lines"]) == 40
+    assert len(one_payload["lines"]) == 1
+    assert len(many_payload["lines"]) == 40
     assert {
         (line["cost_source"], line["unit_cost"], line["cost_amount"])
-        for line in many_response.json()["lines"]
+        for line in many_payload["lines"]
     } == {("direct_purchase", "25.00", "50.00")}
 
 
@@ -527,9 +588,10 @@ def test_site_issue_confirm_query_count_is_bounded_and_versions_remain_audited(d
         for line in lines:
             line["quantity"] = "2"
             line["linked_purchase_line_id"] = purchase_line.id
-        response = client.post(
-            f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-            json={
+        return _create_legacy_site_issue_fixture(
+            db,
+            project_id=project.project_id,
+            body={
                 "issue_no": f"ISSUE-CONFIRM-SCALE-{suffix}",
                 "issue_date": "2026-08-01",
                 "raw_status": "synthetic-pending",
@@ -540,8 +602,6 @@ def test_site_issue_confirm_query_count_is_bounded_and_versions_remain_audited(d
                 "reason": "建立待确认批量现场领用",
             },
         )
-        assert response.status_code == 201, response.text
-        return response.json()
 
     one_issue = create_unknown(suffix="ONE", count=1)
     many_issue = create_unknown(suffix="MANY", count=40)
@@ -638,9 +698,10 @@ def test_site_issue_batch_confirm_cost_failure_is_atomic(db):
     db.add_all([valid_purchase, overflow_purchase])
     db.commit()
 
-    created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    created = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-CONFIRM-ATOMIC",
             "issue_date": "2026-08-01",
             "raw_status": "synthetic-pending",
@@ -668,8 +729,7 @@ def test_site_issue_batch_confirm_cost_failure_is_atomic(db):
             "reason": "建立批量确认失败原子性测试领用单",
         },
     )
-    assert created.status_code == 201, created.text
-    issue_id = created.json()["issue_id"]
+    issue_id = created["issue_id"]
 
     failed = client.patch(
         f"/api/maintenance/projects/stable/site-issues/{issue_id}/status",
@@ -777,9 +837,10 @@ def test_money_write_paths_use_half_up_and_reject_rounded_overflow(db):
     part = DimPart(pn_std="PN-MONEY-NORMALIZATION")
     db.add(part)
     db.commit()
-    issue = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-MONEY-NORMALIZATION",
             "issue_date": "2026-01-01",
             "raw_status": "synthetic-confirmed",
@@ -796,7 +857,6 @@ def test_money_write_paths_use_half_up_and_reject_rounded_overflow(db):
             "reason": "建立人工成本金额归一化领用",
         },
     )
-    assert issue.status_code == 201, issue.text
     manual = client.patch(
         f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
         json={
@@ -892,14 +952,14 @@ def test_money_write_paths_use_half_up_and_reject_rounded_overflow(db):
 
 def test_site_issue_quantity_uses_numeric_14_3_boundary_with_controlled_rejection(db):
     project = _project(db, project_id="project-quantity-boundary")
-    client = _client(db, username="quantity_boundary_admin")
     part = DimPart(pn_std="PN-QUANTITY-BOUNDARY")
     db.add(part)
     db.commit()
 
-    maximum = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    maximum = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-QUANTITY-MAXIMUM",
             "issue_date": "2026-08-01",
             "raw_status": "synthetic-confirmed",
@@ -918,53 +978,59 @@ def test_site_issue_quantity_uses_numeric_14_3_boundary_with_controlled_rejectio
             "reason": "验证 Numeric(14,3) 最大合法数量",
         },
     )
-    assert maximum.status_code == 201, maximum.text
-    assert maximum.json()["lines"][0]["quantity"] == "99999999999.999"
+    assert maximum["lines"][0]["quantity"] == "99999999999.999"
 
-    first_illegal = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
-            "issue_no": "ISSUE-QUANTITY-FIRST-ILLEGAL",
-            "issue_date": "2026-08-01",
-            "raw_status": "synthetic-confirmed",
-            "status_mapping_state": "mapped",
-            "normalized_status": "confirmed",
-            "status_mapping_version": "synthetic-map-v1",
-            "lines": [
-                {
-                    "issue_line_id": "issue-line-quantity-first-illegal",
+    with pytest.raises(
+        operations_service.MaintenanceOperationError,
+        match="领用数量超出允许范围",
+    ):
+        _create_legacy_site_issue_fixture(
+            db,
+            project_id=project.project_id,
+            body={
+                "issue_no": "ISSUE-QUANTITY-FIRST-ILLEGAL",
+                "issue_date": "2026-08-01",
+                "raw_status": "synthetic-confirmed",
+                "status_mapping_state": "mapped",
+                "normalized_status": "confirmed",
+                "status_mapping_version": "synthetic-map-v1",
+                "lines": [
+                    {
+                        "issue_line_id": "issue-line-quantity-first-illegal",
+                        "line_no": 1,
+                        "part_id": part.id,
+                        "pn": part.pn_std,
+                        "quantity": "100000000000",
+                    }
+                ],
+                "reason": "验证 Numeric(14,3) 首个非法数量受控拒绝",
+            },
+        )
+    db.rollback()
+    assert db.get(MaintenanceSiteIssueLine, "issue-line-quantity-first-illegal") is None
+
+    with pytest.raises(operations_service.MaintenanceOperationError):
+        _create_legacy_site_issue_fixture(
+            db,
+            project_id=project.project_id,
+            body={
+                "issue_no": "ISSUE-QUANTITY-NON-FINITE",
+                "issue_date": "2026-08-01",
+                "raw_status": "synthetic-confirmed",
+                "status_mapping_state": "mapped",
+                "normalized_status": "confirmed",
+                "status_mapping_version": "synthetic-map-v1",
+                "lines": [{
+                    "issue_line_id": "issue-line-quantity-non-finite",
                     "line_no": 1,
                     "part_id": part.id,
                     "pn": part.pn_std,
-                    "quantity": "100000000000",
-                }
-            ],
-            "reason": "验证 Numeric(14,3) 首个非法数量受控拒绝",
-        },
-    )
-    assert 400 <= first_illegal.status_code < 500, first_illegal.text
-    assert db.get(MaintenanceSiteIssueLine, "issue-line-quantity-first-illegal") is None
-
-    non_finite = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
-            "issue_no": "ISSUE-QUANTITY-NON-FINITE",
-            "issue_date": "2026-08-01",
-            "raw_status": "synthetic-confirmed",
-            "status_mapping_state": "mapped",
-            "normalized_status": "confirmed",
-            "status_mapping_version": "synthetic-map-v1",
-            "lines": [{
-                "issue_line_id": "issue-line-quantity-non-finite",
-                "line_no": 1,
-                "part_id": part.id,
-                "pn": part.pn_std,
-                "quantity": "NaN",
-            }],
-            "reason": "验证非有限数量受控拒绝",
-        },
-    )
-    assert 400 <= non_finite.status_code < 500, non_finite.text
+                    "quantity": "NaN",
+                }],
+                "reason": "验证非有限数量受控拒绝",
+            },
+        )
+    db.rollback()
 
 
 def test_manual_cost_amount_uses_numeric_14_2_boundary_with_controlled_rejection(db):
@@ -973,9 +1039,10 @@ def test_manual_cost_amount_uses_numeric_14_2_boundary_with_controlled_rejection
     part = DimPart(pn_std="PN-COST-AMOUNT-BOUNDARY")
     db.add(part)
     db.commit()
-    created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-COST-AMOUNT-BOUNDARY",
             "issue_date": "2026-08-01",
             "raw_status": "synthetic-confirmed",
@@ -1008,7 +1075,6 @@ def test_manual_cost_amount_uses_numeric_14_2_boundary_with_controlled_rejection
             "reason": "建立成本金额 Numeric(14,2) 边界领用",
         },
     )
-    assert created.status_code == 201, created.text
 
     maximum = client.patch(
         f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps",
@@ -1132,28 +1198,32 @@ def test_cost_amount_overflow_is_controlled_on_every_resolution_entrypoint(db):
     db.add(create_part)
     db.commit()
     direct = add_overflow_purchase(create_part, "CREATE")
-    created = client.post(
-        f"/api/maintenance/projects/stable/{create_project.project_id}/site-issues",
-        json={
-            "issue_no": "ISSUE-COST-OVERFLOW-CREATE",
-            "issue_date": "2026-08-01",
-            "raw_status": "synthetic-confirmed",
-            "status_mapping_state": "mapped",
-            "normalized_status": "confirmed",
-            "status_mapping_version": "synthetic-map-v1",
-            "lines": [{
-                "issue_line_id": "issue-line-cost-overflow-create",
-                "line_no": 1,
-                "part_id": create_part.id,
-                "pn": create_part.pn_std,
-                "quantity": "2",
-                "linked_purchase_line_id": direct.id,
-            }],
-            "reason": "验证创建路径成本金额溢出受控拒绝",
-        },
-    )
-    assert created.status_code == 400, created.text
-    assert "成本金额" in created.json()["detail"]
+    with pytest.raises(
+        operations_service.MaintenanceOperationError,
+        match="成本金额",
+    ):
+        _create_legacy_site_issue_fixture(
+            db,
+            project_id=create_project.project_id,
+            body={
+                "issue_no": "ISSUE-COST-OVERFLOW-CREATE",
+                "issue_date": "2026-08-01",
+                "raw_status": "synthetic-confirmed",
+                "status_mapping_state": "mapped",
+                "normalized_status": "confirmed",
+                "status_mapping_version": "synthetic-map-v1",
+                "lines": [{
+                    "issue_line_id": "issue-line-cost-overflow-create",
+                    "line_no": 1,
+                    "part_id": create_part.id,
+                    "pn": create_part.pn_std,
+                    "quantity": "2",
+                    "linked_purchase_line_id": direct.id,
+                }],
+                "reason": "验证创建路径成本金额溢出受控拒绝",
+            },
+        )
+    db.rollback()
     assert db.get(MaintenanceSiteIssueLine, "issue-line-cost-overflow-create") is None
 
     status_project = _project(db, project_id="project-cost-overflow-status")
@@ -1161,9 +1231,10 @@ def test_cost_amount_overflow_is_controlled_on_every_resolution_entrypoint(db):
     db.add(status_part)
     db.commit()
     status_purchase = add_overflow_purchase(status_part, "STATUS")
-    pending = client.post(
-        f"/api/maintenance/projects/stable/{status_project.project_id}/site-issues",
-        json={
+    pending = _create_legacy_site_issue_fixture(
+        db,
+        project_id=status_project.project_id,
+        body={
             "issue_no": "ISSUE-COST-OVERFLOW-STATUS",
             "issue_date": "2026-08-01",
             "raw_status": "synthetic-pending",
@@ -1181,9 +1252,8 @@ def test_cost_amount_overflow_is_controlled_on_every_resolution_entrypoint(db):
             "reason": "建立待确认成本金额溢出领用",
         },
     )
-    assert pending.status_code == 201, pending.text
     confirmed = client.patch(
-        f"/api/maintenance/projects/stable/site-issues/{pending.json()['issue_id']}/status",
+        f"/api/maintenance/projects/stable/site-issues/{pending['issue_id']}/status",
         json={
             "version": 1,
             "raw_status": "synthetic-confirmed",
@@ -1203,9 +1273,10 @@ def test_cost_amount_overflow_is_controlled_on_every_resolution_entrypoint(db):
     recompute_part = DimPart(pn_std="PN-COST-OVERFLOW-RECOMPUTE")
     db.add(recompute_part)
     db.commit()
-    gap = client.post(
-        f"/api/maintenance/projects/stable/{recompute_project.project_id}/site-issues",
-        json={
+    _create_legacy_site_issue_fixture(
+        db,
+        project_id=recompute_project.project_id,
+        body={
             "issue_no": "ISSUE-COST-OVERFLOW-RECOMPUTE",
             "issue_date": "2026-08-01",
             "raw_status": "synthetic-confirmed",
@@ -1222,7 +1293,6 @@ def test_cost_amount_overflow_is_controlled_on_every_resolution_entrypoint(db):
             "reason": "建立待重算成本金额溢出领用",
         },
     )
-    assert gap.status_code == 201, gap.text
     add_overflow_purchase(recompute_part, "RECOMPUTE")
     recomputed = client.post(
         f"/api/maintenance/projects/stable/{recompute_project.project_id}/cost-gaps/recompute",
@@ -1449,9 +1519,9 @@ def test_confirmed_monthly_collection_snapshot_drives_workspace_progress(db):
         row["rule_key"] for row in payload["reminders"]
     }
     assert payload["workbook_preview"]["sheets"][0]["row_count"] == 3
-    filtered = client.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    filtered = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             "as_of": "2026-02-28",
             "q": project.project_code,
             "reminder": "collection:incomplete",
@@ -1796,9 +1866,10 @@ def test_confirmed_site_issue_uses_direct_then_full_purchase_window(db):
     )
     db.commit()
 
-    created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    created = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-SYNTH-001",
             "issue_date": "2026-05-10",
             "raw_status": "synthetic-confirmed",
@@ -1825,8 +1896,7 @@ def test_confirmed_site_issue_uses_direct_then_full_purchase_window(db):
             "reason": "导入已确认现场领用事实",
         },
     )
-    assert created.status_code == 201, created.text
-    lines = {row["issue_line_id"]: row for row in created.json()["lines"]}
+    lines = {row["issue_line_id"]: row for row in created["lines"]}
     assert lines["issue-line-direct"]["cost_source"] == "direct_purchase"
     assert lines["issue-line-direct"]["cost_amount"] == "19.46"
     assert lines["issue-line-direct"]["unit_cost_ex_tax"] == "9.73"
@@ -1912,9 +1982,10 @@ def test_site_issue_status_lifecycle_resolves_cost_and_void_only_stops_counting(
     db.add(purchase_line)
     db.commit()
 
-    created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    issue = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-SYNTH-STATUS",
             "issue_date": "2026-05-10",
             "raw_status": "synthetic-pending",
@@ -1934,8 +2005,6 @@ def test_site_issue_status_lifecycle_resolves_cost_and_void_only_stops_counting(
             "reason": "导入待确认现场领用",
         },
     )
-    assert created.status_code == 201, created.text
-    issue = created.json()
     assert issue["normalized_status"] == "unknown"
     assert issue["lines"][0]["cost_amount"] is None
     assert issue["lines"][0]["version"] == 1
@@ -2040,7 +2109,7 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
         json={
             "contract_id": "contract-sales-gap-001",
             "contract_no": "XS-SALES-GAP-001",
-            "contract_amount": "1000.00",
+            "contract_amount": "5000.00",
             "contract_status": "synthetic-active",
             "status_mapping_state": "mapped",
             "status_mapping_version": "synthetic-map-v1",
@@ -2095,9 +2164,10 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
     )
     db.commit()
 
-    created = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    created = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-SYNTH-SALES-GAP",
             "issue_date": "2026-06-09",
             "raw_status": "synthetic-confirmed",
@@ -2123,8 +2193,7 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
             "reason": "导入销售回退与缺价领用",
         },
     )
-    assert created.status_code == 201, created.text
-    lines = {row["issue_line_id"]: row for row in created.json()["lines"]}
+    lines = {row["issue_line_id"]: row for row in created["lines"]}
     assert lines["issue-line-sales-fallback"]["cost_source"] == "sales_window"
     assert lines["issue-line-sales-fallback"]["unit_cost"] == "133.33"
     assert lines["issue-line-sales-fallback"]["cost_amount"] == "399.99"
@@ -2134,7 +2203,63 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
         sample["tax_conversion"] == "divide_1.13"
         for sample in lines["issue-line-sales-fallback"]["reference_samples"]
     )
+    assert lines["issue-line-sales-fallback"]["cost_evidence_kind"] == "sales_estimate"
+    assert lines["issue-line-sales-fallback"]["cost_is_estimate"] is True
+    assert (
+        lines["issue-line-sales-fallback"]["cost_source_label"]
+        == "估算（销售前后 7 天数量加权）"
+    )
     assert lines["issue-line-manual-gap"]["cost_source"] is None
+
+    workspace = client.get(
+        f"/api/maintenance/projects/stable/{project.project_id}/workspace",
+        params={"as_of": "2026-06-30"},
+    )
+    assert workspace.status_code == 200, workspace.text
+    metrics = workspace.json()["project"]["metrics"]
+    assert metrics["sales_estimate_lines"] == 1
+    assert metrics["sales_estimate_cost_ex_tax"] == "399.99"
+    assert metrics["sales_estimate_cost_inc_tax"] == "451.98"
+    assert metrics["cost_progress_includes_sales_estimate"] is True
+    assert metrics["cost_progress_label"] == "priced_cost_including_sales_estimate"
+    assert metrics["cost_status"] == "unknown"
+    estimate_warning = next(
+        row
+        for row in workspace.json()["reminders"]
+        if row["rule_key"] == "cost:sales_fallback_estimate"
+    )
+    assert estimate_warning["title"] == "核对项目成本中的销售回退估算"
+    assert "1 条已确认现场领用" in estimate_warning["detail"]
+    assert "不等于采购或人工确认单价" in estimate_warning["detail"]
+    assert not any(
+        row["rule_key"].startswith("cost_ratio:")
+        for row in workspace.json()["reminders"]
+    )
+
+    directory = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={"as_of": "2026-06-30", "q": project.project_code},
+    )
+    assert directory.status_code == 200, directory.text
+    directory_metrics = directory.json()["rows"][0]["metrics"]
+    assert directory_metrics["sales_estimate_lines"] == 1
+    assert directory_metrics["sales_estimate_cost_ex_tax"] == "399.99"
+    assert directory_metrics["sales_estimate_cost_inc_tax"] == "451.98"
+    assert directory_metrics["cost_progress_includes_sales_estimate"] is True
+    assert directory_metrics["cost_progress_label"] == (
+        "priced_cost_including_sales_estimate"
+    )
+    estimate_filtered = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
+            "as_of": "2026-06-30",
+            "q": project.project_code,
+            "reminder": "cost:sales_fallback_estimate",
+        },
+    )
+    assert estimate_filtered.status_code == 200, estimate_filtered.text
+    assert estimate_filtered.json()["total"] == 1
+    assert estimate_filtered.json()["rows"][0]["project_id"] == project.project_id
 
     gaps = client.get(
         f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps"
@@ -2239,6 +2364,13 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
     assert restricted_metrics["site_requisition_known_cost"] is None
     assert restricted_metrics["site_requisition_known_cost_ex_tax"] is None
     assert restricted_metrics["site_requisition_known_cost_inc_tax"] is None
+    assert restricted_metrics["site_requisition_priced_cost_ex_tax"] is None
+    assert restricted_metrics["site_requisition_priced_cost_inc_tax"] is None
+    assert restricted_metrics["sales_estimate_cost_ex_tax"] is None
+    assert restricted_metrics["sales_estimate_cost_inc_tax"] is None
+    assert restricted_metrics["sales_estimate_lines"] is None
+    assert restricted_metrics["cost_progress_includes_sales_estimate"] is None
+    assert restricted_metrics["cost_progress_label"] is None
     assert restricted_metrics["actual_project_cost_known"] is None
     assert restricted_metrics["actual_project_cost_known_ex_tax"] is None
     assert restricted_metrics["actual_project_cost_known_inc_tax"] is None
@@ -2249,11 +2381,36 @@ def test_sales_fallback_is_ex_tax_and_manual_fill_only_resolves_a_gap(db):
     assert restricted["requisitions"]["rows"][0]["cost_amount_ex_tax"] is None
     assert restricted["requisitions"]["rows"][0]["cost_amount_inc_tax"] is None
     assert restricted["requisitions"]["rows"][0]["reference_samples"] == []
+    assert restricted["requisitions"]["rows"][0]["cost_source"] is None
+    assert restricted["requisitions"]["rows"][0]["cost_evidence_kind"] is None
+    assert restricted["requisitions"]["rows"][0]["cost_is_estimate"] is None
+    assert restricted["requisitions"]["rows"][0]["cost_source_label"] is None
     assert restricted["requisitions"]["rows"][0]["cost_status"] == "restricted"
     assert not any(
         row["rule_key"].startswith(("collection:", "cost_ratio:"))
         for row in restricted["reminders"]
     )
+    restricted_directory = operations_service.project_operations(
+        db,
+        as_of=date(2026, 6, 30),
+        q_text=project.project_code,
+        user_ctx=UserContext(
+            user_id="restricted-directory-user",
+            role="readonly",
+            permissions={"page_maintenance": True},
+        ),
+    )
+    restricted_directory_metrics = restricted_directory["rows"][0]["metrics"]
+    assert restricted_directory_metrics["site_requisition_priced_cost_ex_tax"] is None
+    assert restricted_directory_metrics["site_requisition_priced_cost_inc_tax"] is None
+    assert restricted_directory_metrics["sales_estimate_cost_ex_tax"] is None
+    assert restricted_directory_metrics["sales_estimate_cost_inc_tax"] is None
+    assert restricted_directory_metrics["sales_estimate_lines"] is None
+    assert (
+        restricted_directory_metrics["cost_progress_includes_sales_estimate"]
+        is None
+    )
+    assert restricted_directory_metrics["cost_progress_label"] is None
 
 
 def test_only_explicitly_mapped_approved_expense_counts(db):
@@ -2574,9 +2731,9 @@ def test_legacy_future_expense_readiness_fails_closed_until_audited_correction(
         "expense_readiness_in_future",
         "expense_data_not_ready",
     }
-    future_filter = client.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    future_filter = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             "as_of": "2026-08-31",
             "q": project.project_code,
             "reminder": "completeness:expense_readiness_in_future",
@@ -2612,29 +2769,32 @@ def test_legacy_future_expense_readiness_fails_closed_until_audited_correction(
         for row in restricted_payload["reminders"]
     )
 
-    restricted_directory = restricted.get(
-        "/api/maintenance/projects/stable/operations",
-        params={"as_of": "2026-08-31", "q": project.project_code},
+    restricted_directory = restricted.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={"as_of": "2026-08-31", "q": project.project_code},
     )
     assert restricted_directory.status_code == 200, restricted_directory.text
     assert restricted_directory.json()["total"] == 1
     restricted_card_metrics = restricted_directory.json()["rows"][0]["metrics"]
     assert restricted_card_metrics["expense_data_ready"] is None
     assert restricted_card_metrics["expense_ready_through"] is None
-    restricted_future_filter = restricted.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    restricted_future_filter = restricted.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             "as_of": "2026-08-31",
             "q": project.project_code,
             "reminder": "completeness:expense_readiness_in_future",
         },
     )
-    assert restricted_future_filter.status_code == 200, restricted_future_filter.text
-    assert restricted_future_filter.json()["total"] == 0
+    assert restricted_future_filter.status_code == 403, restricted_future_filter.text
+    assert restricted_future_filter.json() == {
+        "detail": "当前账号无权使用该提醒筛选"
+    }
+    assert "future" not in restricted_future_filter.text
 
-    filtered = client.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    filtered = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             "as_of": "2026-08-31",
             "q": project.project_code,
             "reminder": "completeness:expense_data_not_ready",
@@ -2867,9 +3027,10 @@ def test_archived_project_rejects_site_issue_and_expense_status_changes(db):
     part = DimPart(pn_std="PN-SYNTH-ARCHIVED-STATUS")
     db.add(part)
     db.commit()
-    issue = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    issue = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-SYNTH-ARCHIVED",
             "issue_date": "2026-07-10",
             "raw_status": "synthetic-pending",
@@ -2888,7 +3049,6 @@ def test_archived_project_rejects_site_issue_and_expense_status_changes(db):
             "reason": "建立归档拒绝测试领用",
         },
     )
-    assert issue.status_code == 201, issue.text
     expense = client.post(
         f"/api/maintenance/projects/stable/{project.project_id}/expenses",
         json={
@@ -2912,7 +3072,7 @@ def test_archived_project_rejects_site_issue_and_expense_status_changes(db):
     db.commit()
 
     issue_update = client.patch(
-        f"/api/maintenance/projects/stable/site-issues/{issue.json()['issue_id']}/status",
+        f"/api/maintenance/projects/stable/site-issues/{issue['issue_id']}/status",
         json={
             "version": 1,
             "raw_status": "synthetic-confirmed",
@@ -3049,6 +3209,308 @@ def test_new_fact_commands_fail_closed_by_action_and_data_permissions(db):
     assert db.get(MaintenanceProjectWorkbookState, project.project_id) is None
 
 
+def test_legacy_site_issue_create_uses_dedicated_action_not_roundtrip_apply(db):
+    project = _project(db, project_id="project-site-issue-create-action")
+    part = DimPart(pn_std="PN-SITE-ISSUE-CREATE-ACTION")
+    db.add(part)
+    db.commit()
+    path = f"/api/maintenance/projects/stable/{project.project_id}/site-issues"
+    body = {
+        "issue_no": "ISSUE-CREATE-ACTION-DENIED",
+        "issue_date": "2026-08-01",
+        "raw_status": "synthetic-confirmed",
+        "status_mapping_state": "mapped",
+        "normalized_status": "confirmed",
+        "status_mapping_version": "synthetic-map-v1",
+        "lines": [
+            {
+                "issue_line_id": "issue-line-create-action-denied",
+                "line_no": 1,
+                "part_id": part.id,
+                "pn": part.pn_std,
+                "quantity": "1",
+            }
+        ],
+        "reason": "固定工作簿权限不得代替现场领用专用权限",
+    }
+    roundtrip_only = _permission_client(
+        db,
+        username="site_issue_create_roundtrip_only",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "action_maintenance_roundtrip_apply": True,
+            "action_maintenance_site_issue_manage": False,
+        },
+    )
+
+    denied = roundtrip_only.post(path, json=body)
+
+    assert denied.status_code == 403, denied.text
+    assert db.scalar(
+        select(MaintenanceSiteIssue).where(
+            MaintenanceSiteIssue.project_id == project.project_id
+        )
+    ) is None
+
+    site_issue_only = _permission_client(
+        db,
+        username="site_issue_create_dedicated_action",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "action_maintenance_roundtrip_apply": False,
+            "action_maintenance_site_issue_manage": True,
+        },
+    )
+    allowed = site_issue_only.post(
+        path,
+        json={
+            **body,
+            "issue_no": "ISSUE-CREATE-ACTION-ALLOWED",
+            "lines": [
+                {
+                    **body["lines"][0],
+                    "issue_line_id": "issue-line-create-action-allowed",
+                }
+            ],
+            "reason": "专用权限保留 legacy 客户端兼容",
+        },
+    )
+
+    assert allowed.status_code == 201, allowed.text
+    assert allowed.json()["normalized_status"] == "confirmed"
+
+
+def test_legacy_site_issue_status_uses_dedicated_action_for_confirm_and_void(db):
+    project = _project(db, project_id="project-site-issue-status-action")
+    part = DimPart(pn_std="PN-SITE-ISSUE-STATUS-ACTION")
+    db.add(part)
+    db.commit()
+    issue = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
+            "issue_no": "ISSUE-STATUS-ACTION",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-pending",
+            "status_mapping_state": "unmapped",
+            "normalized_status": "unknown",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-status-action",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                }
+            ],
+            "reason": "建立专用权限状态迁移测试",
+        },
+    )
+    path = (
+        "/api/maintenance/projects/stable/site-issues/"
+        f"{issue['issue_id']}/status"
+    )
+    roundtrip_only = _permission_client(
+        db,
+        username="site_issue_status_roundtrip_only",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "action_maintenance_roundtrip_apply": True,
+            "action_maintenance_site_issue_manage": False,
+        },
+    )
+    site_issue_only = _permission_client(
+        db,
+        username="site_issue_status_dedicated_action",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "action_maintenance_roundtrip_apply": False,
+            "action_maintenance_site_issue_manage": True,
+        },
+    )
+    confirm_body = {
+        "version": 1,
+        "raw_status": "synthetic-confirmed",
+        "normalized_status": "confirmed",
+        "status_mapping_version": "synthetic-map-v2",
+        "reason": "固定工作簿权限不能确认现场领用",
+    }
+
+    denied_confirm = roundtrip_only.patch(path, json=confirm_body)
+
+    assert denied_confirm.status_code == 403, denied_confirm.text
+    db.expire_all()
+    assert db.get(MaintenanceSiteIssue, issue["issue_id"]).normalized_status == "unknown"
+
+    allowed_confirm = site_issue_only.patch(
+        path,
+        json={**confirm_body, "reason": "专用权限确认 legacy 现场领用"},
+    )
+    assert allowed_confirm.status_code == 200, allowed_confirm.text
+    assert allowed_confirm.json()["normalized_status"] == "confirmed"
+
+    void_body = {
+        "version": allowed_confirm.json()["version"],
+        "raw_status": "synthetic-void",
+        "normalized_status": "void",
+        "status_mapping_version": "synthetic-map-v3",
+        "reason": "固定工作簿权限不能作废现场领用",
+    }
+    denied_void = roundtrip_only.patch(path, json=void_body)
+
+    assert denied_void.status_code == 403, denied_void.text
+    db.expire_all()
+    assert db.get(MaintenanceSiteIssue, issue["issue_id"]).normalized_status == "confirmed"
+
+    allowed_void = site_issue_only.patch(
+        path,
+        json={**void_body, "reason": "专用权限作废 legacy 现场领用"},
+    )
+    assert allowed_void.status_code == 200, allowed_void.text
+    assert allowed_void.json()["normalized_status"] == "void"
+
+
+def test_production_legacy_site_issue_writes_fail_closed_without_canonical_source(
+    db,
+    monkeypatch,
+):
+    project = _project(db, project_id="project-site-issue-prod-legacy-gate")
+    part = DimPart(pn_std="PN-SITE-ISSUE-PROD-LEGACY-GATE")
+    db.add(part)
+    db.commit()
+    pending = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
+            "issue_no": "ISSUE-PROD-LEGACY-PENDING",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-pending",
+            "status_mapping_state": "unmapped",
+            "normalized_status": "unknown",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-prod-legacy-pending",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                }
+            ],
+            "reason": "建立生产 legacy 闸门测试前置事实",
+        },
+    )
+    client = _client(db, username="site_issue_prod_legacy_gate_admin")
+    monkeypatch.setattr(
+        operations_service,
+        "_site_issue_is_production_blocked",
+        lambda: True,
+    )
+
+    direct_confirm = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
+        json={
+            "issue_no": "ISSUE-PROD-LEGACY-DIRECT",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-prod-legacy-direct",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                }
+            ],
+            "reason": "生产不能绕过仓库发货稳定身份直接确认",
+        },
+    )
+    legacy_status_confirm = client.patch(
+        "/api/maintenance/projects/stable/site-issues/"
+        f"{pending['issue_id']}/status",
+        json={
+            "version": pending["version"],
+            "raw_status": "synthetic-confirmed",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v2",
+            "reason": "生产不能通过 legacy 状态入口确认",
+        },
+    )
+
+    assert direct_confirm.status_code == 400, direct_confirm.text
+    assert "仓库发货" in direct_confirm.json()["detail"]
+    assert legacy_status_confirm.status_code == 400, legacy_status_confirm.text
+    assert "仓库发货" in legacy_status_confirm.json()["detail"]
+    db.expire_all()
+    assert db.get(MaintenanceSiteIssue, pending["issue_id"]).normalized_status == "unknown"
+    assert db.scalar(
+        select(MaintenanceSiteIssue).where(
+            MaintenanceSiteIssue.issue_no == "ISSUE-PROD-LEGACY-DIRECT"
+        )
+    ) is None
+
+
+def test_production_legacy_site_issue_void_remains_available_for_fact_retirement(
+    db,
+    monkeypatch,
+):
+    project = _project(db, project_id="project-site-issue-prod-legacy-void")
+    part = DimPart(pn_std="PN-SITE-ISSUE-PROD-LEGACY-VOID")
+    db.add(part)
+    db.commit()
+    confirmed = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
+            "issue_no": "ISSUE-PROD-LEGACY-VOID",
+            "issue_date": "2026-08-01",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [
+                {
+                    "issue_line_id": "issue-line-prod-legacy-void",
+                    "line_no": 1,
+                    "part_id": part.id,
+                    "pn": part.pn_std,
+                    "quantity": "1",
+                }
+            ],
+            "reason": "建立需要在生产退役的历史现场领用事实",
+        },
+    )
+    client = _client(db, username="site_issue_prod_legacy_void_admin")
+    monkeypatch.setattr(
+        operations_service,
+        "_site_issue_is_production_blocked",
+        lambda: True,
+    )
+
+    retired = client.patch(
+        "/api/maintenance/projects/stable/site-issues/"
+        f"{confirmed['issue_id']}/status",
+        json={
+            "version": confirmed["version"],
+            "raw_status": "synthetic-void",
+            "normalized_status": "void",
+            "status_mapping_version": "synthetic-map-v2",
+            "reason": "保留作废历史错误事实的兼容能力",
+        },
+    )
+
+    assert retired.status_code == 200, retired.text
+    assert retired.json()["normalized_status"] == "void"
+
+
 def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
     projects = [
         _project(db, project_id="project-threshold-80"),
@@ -3112,7 +3574,17 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
             params={"as_of": "2026-07-31"},
         ).json()
         statuses.append(workspace["project"]["metrics"]["cost_status"])
-    assert statuses == ["yellow", "yellow", "red"]
+    assert statuses == ["normal", "yellow", "red"]
+
+    exact_eighty_tasks = client.get(
+        f"/api/maintenance/projects/stable/{projects[0].project_id}/tasks",
+        params={"as_of": "2026-07-31"},
+    )
+    assert exact_eighty_tasks.status_code == 200, exact_eighty_tasks.text
+    assert not any(
+        row["rule_key"].startswith("cost_ratio:")
+        for row in exact_eighty_tasks.json()["rows"]
+    )
 
     first = client.get(
         f"/api/maintenance/projects/stable/{projects[2].project_id}/tasks",
@@ -3135,16 +3607,16 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
     state = db.get(MaintenanceProjectWorkbookState, projects[2].project_id)
     state.last_applied_at = datetime(2026, 7, 20, 8, tzinfo=UTC)
     db.commit()
-    completed = client.get(
+    after_legacy_v2_apply = client.get(
         f"/api/maintenance/projects/stable/{projects[2].project_id}/tasks",
         params={"as_of": "2026-07-31"},
     ).json()
-    completed_monthly = next(
+    monthly_after_legacy_v2_apply = next(
         row
-        for row in completed["rows"]
+        for row in after_legacy_v2_apply["rows"]
         if row["rule_key"] == "manager_update:2026-07"
     )
-    assert completed_monthly["status"] == "completed"
+    assert monthly_after_legacy_v2_apply["status"] == "pending"
     assert client.post(
         f"/api/maintenance/projects/stable/{projects[2].project_id}/tasks",
         json={"title": "禁止用户创建"},
@@ -3160,9 +3632,9 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
     assert operations.json()["page_size"] == 24
     assert operations.json()["rows"][0]["as_of"] == "2026-07-31"
 
-    filtered = client.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    filtered = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             "as_of": "2026-07-31",
             "q": "XS-project-threshold-101",
             "lifecycle": "missing",
@@ -3179,7 +3651,8 @@ def test_cost_thresholds_and_generated_tasks_are_deterministic(db):
 def test_directory_reminder_filters_use_the_same_rounded_cost_threshold_as_cards(db):
     client = _client(db, username="rounded_threshold_admin")
     cases = [
-        ("rounded-up-to-80", "300.00", "212.38", "yellow"),
+        ("rounded-up-to-80", "300.00", "212.38", "normal"),
+        ("above-rounded-80", "300.00", "212.41", "yellow"),
         ("rounded-down-to-100", "300.00", "265.49", "yellow"),
         ("half-cent-to-red", "20000.00", "17700.00", "red"),
     ]
@@ -3260,7 +3733,7 @@ def test_directory_reminder_filters_use_the_same_rounded_cost_threshold_as_cards
     )
     assert yellow.status_code == 200, yellow.text
     assert {row["project_id"] for row in yellow.json()["rows"]} == {
-        "project-rounded-up-to-80",
+        "project-above-rounded-80",
         "project-rounded-down-to-100",
     }
 
@@ -3436,9 +3909,9 @@ def test_operations_reminder_predicates_match_canonical_open_tasks(db):
     }
 
     for selector in selectors:
-        response = client.get(
-            "/api/maintenance/projects/stable/operations",
-            params={
+        response = client.post(
+            "/api/maintenance/projects/stable/operations/search",
+            json={
                 **params,
                 "q": project.project_code,
                 "lifecycle": project.lifecycle_status,
@@ -3449,9 +3922,9 @@ def test_operations_reminder_predicates_match_canonical_open_tasks(db):
         assert response.json()["total"] == 1, selector
         assert response.json()["rows"][0]["project_id"] == project.project_id
 
-    unmatched = client.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    unmatched = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             **params,
             "q": project.project_code,
             "lifecycle": project.lifecycle_status,
@@ -3460,6 +3933,210 @@ def test_operations_reminder_predicates_match_canonical_open_tasks(db):
     )
     assert unmatched.status_code == 200, unmatched.text
     assert unmatched.json()["total"] == 0
+
+
+def test_operations_directory_rejects_cost_ratio_filter_without_financial_permissions(db):
+    _project(db, project_id="directory-filter-permission-red")
+    client = _permission_client(
+        db,
+        username="directory_filter_permission_red",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": False,
+            "data_profit": False,
+        },
+    )
+
+    response = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={"as_of": "2026-08-31", "reminder": "cost_ratio:red"},
+    )
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "当前账号无权使用该提醒筛选"}
+    assert "red" not in response.text
+    assert "80" not in response.text
+    assert "100" not in response.text
+
+
+def test_operations_directory_rejects_cost_filter_without_cost_permission(db):
+    _project(db, project_id="directory-filter-permission-cost")
+    client = _permission_client(
+        db,
+        username="directory_filter_permission_cost",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": False,
+            "data_profit": False,
+        },
+    )
+
+    response = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={"as_of": "2026-08-31", "reminder": "cost:missing_price"},
+    )
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "当前账号无权使用该提醒筛选"}
+    assert "cost" not in response.text
+    assert "price" not in response.text
+
+
+def test_operations_directory_rejects_collection_filter_without_profit_permission(db):
+    _project(db, project_id="filter-permission-collection")
+    client = _permission_client(
+        db,
+        username="directory_filter_permission_collection",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "data_profit": False,
+        },
+    )
+
+    response = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={"as_of": "2026-08-31", "reminder": "collection:incomplete"},
+    )
+
+    assert response.status_code == 403, response.text
+    assert response.json() == {"detail": "当前账号无权使用该提醒筛选"}
+    assert "collection" not in response.text
+    assert "incomplete" not in response.text
+
+
+def test_operations_directory_financial_selector_permission_matrix(db):
+    project = _project(db, project_id="filter-permission-matrix")
+    no_financial = _permission_client(
+        db,
+        username="directory_filter_no_financial",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": False,
+            "data_profit": False,
+        },
+    )
+    cost_only = _permission_client(
+        db,
+        username="directory_filter_cost_only",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "data_profit": False,
+        },
+    )
+    full_financial = _permission_client(
+        db,
+        username="directory_filter_full_financial",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "data_profit": True,
+        },
+    )
+    endpoint = "/api/maintenance/projects/stable/operations"
+    full_financial_selectors = [
+        "all",
+        "info",
+        "warning",
+        "critical",
+        "completeness",
+        "collection",
+        "cost_ratio",
+        "completeness:missing_contract_amount",
+        "completeness:expense_data_not_ready",
+        "collection:missing_confirmed",
+        "cost_ratio:yellow",
+    ]
+    cost_selectors = [
+        "cost",
+        "cost:missing_price",
+        "cost:sales_fallback_estimate",
+        "completeness:missing_consumption_cost",
+        "completeness:unmapped_site_issue_status",
+    ]
+
+    for selector in full_financial_selectors:
+        params = {"as_of": "2026-08-31", "reminder": selector}
+        for client in (no_financial, cost_only):
+            denied = client.get(endpoint, params=params)
+            assert denied.status_code == 403, (selector, denied.text)
+            assert denied.json() == {"detail": "当前账号无权使用该提醒筛选"}
+        allowed = full_financial.get(endpoint, params=params)
+        assert allowed.status_code == 200, (selector, allowed.text)
+
+    for selector in cost_selectors:
+        params = {"as_of": "2026-08-31", "reminder": selector}
+        denied = no_financial.get(endpoint, params=params)
+        assert denied.status_code == 403, (selector, denied.text)
+        assert denied.json() == {"detail": "当前账号无权使用该提醒筛选"}
+        for client in (cost_only, full_financial):
+            allowed = client.get(endpoint, params=params)
+            assert allowed.status_code == 200, (selector, allowed.text)
+
+    for selector in (None, "项目经理月度更新", "manager_update:2026-08"):
+        params = {
+            "as_of": "2026-08-31",
+            "q": project.project_code,
+            "lifecycle": "missing",
+        }
+        if selector is not None:
+            params["reminder"] = selector
+        allowed = no_financial.post(f"{endpoint}/search", json=params)
+        assert allowed.status_code == 200, (selector, allowed.text)
+
+
+def test_operations_directory_cost_filters_remain_usable_without_profit_permission(db):
+    project = _project(db, project_id="filter-cost-only-visible")
+    part = DimPart(pn_std="PN-DIRECTORY-COST-FILTER")
+    db.add(part)
+    db.commit()
+    created = _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
+            "issue_no": "ISSUE-DIRECTORY-COST-FILTER",
+            "issue_date": "2026-08-15",
+            "raw_status": "synthetic-confirmed",
+            "status_mapping_state": "mapped",
+            "normalized_status": "confirmed",
+            "status_mapping_version": "synthetic-map-v1",
+            "lines": [{
+                "issue_line_id": "directory-cost-filter-line",
+                "line_no": 1,
+                "part_id": part.id,
+                "pn": part.pn_std,
+                "quantity": "1",
+            }],
+            "reason": "建立仅成本权限可见的缺价提醒",
+        },
+    )
+    assert created["lines"][0]["cost_amount_inc_tax"] is None
+    cost_only = _permission_client(
+        db,
+        username="directory_cost_filter_cost_only",
+        permissions={
+            "page_maintenance": True,
+            "data_purchase_cost": True,
+            "data_profit": False,
+        },
+    )
+
+    for selector in (
+        "cost:missing_price",
+        "completeness:missing_consumption_cost",
+    ):
+        response = cost_only.post(
+            "/api/maintenance/projects/stable/operations/search",
+            json={
+                "as_of": "2026-08-31",
+                "q": project.project_code,
+                "reminder": selector,
+            },
+        )
+        assert response.status_code == 200, (selector, response.text)
+        assert response.json()["total"] == 1, selector
+        assert response.json()["rows"][0]["project_id"] == project.project_id
 
 
 def test_sensitive_operations_reads_are_access_logged_with_scope(db):
@@ -3516,8 +4193,242 @@ def test_sensitive_operations_reads_are_access_logged_with_scope(db):
     }
     assert rows[1].detail["project_id"] == project.project_id
     assert rows[1].detail["as_of"] == "2026-08-31"
-    assert rows[3].detail["page_size"] == 24
-    assert rows[3].detail["returned"] == 1
+    assert rows[3].detail == {
+        "as_of": "2026-08-31",
+        "searched": False,
+        "lifecycle": "all",
+        "reminder": None,
+        "include_inactive": False,
+        "page": 1,
+        "page_size": 24,
+    }
+
+
+def test_operations_search_access_log_excludes_query_content_and_derivatives(db):
+    project = _project(db, project_id="project-search-log-privacy")
+    client = _client(db, username="operations_search_log_privacy_admin")
+    contract_no = "XS-隐私合同-2026"
+    contract = client.post(
+        f"/api/maintenance/projects/stable/{project.project_id}/contracts",
+        json={
+            "contract_id": "contract-search-log-privacy",
+            "contract_no": contract_no,
+            "contract_amount": "1000.00",
+            "contract_status": "synthetic-active",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "synthetic-map-v1",
+            "included_in_total": True,
+            "effective_from": "2026-01-01",
+            "source": "synthetic-test",
+            "reason": "建立访问日志搜索隐私回归合同",
+        },
+    )
+    assert contract.status_code == 201, contract.text
+
+    sensitive_queries = [
+        project.project_code,
+        contract_no,
+        project.display_name,
+    ]
+    for query in sensitive_queries:
+        response = client.post(
+            "/api/maintenance/projects/stable/operations/search",
+            json={
+                "as_of": "2026-08-31",
+                "q": query,
+                "lifecycle": "all",
+                "page": 1,
+                "page_size": 24,
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["total"] == 1
+
+    db.expire_all()
+    rows = list(
+        db.scalars(
+            select(SysAccessLog)
+            .where(
+                SysAccessLog.username
+                == "operations_search_log_privacy_admin",
+                SysAccessLog.action == "stable_project_operations",
+            )
+            .order_by(SysAccessLog.id)
+        )
+    )
+    assert len(rows) == len(sensitive_queries)
+    expected_detail = {
+        "as_of": "2026-08-31",
+        "searched": True,
+        "lifecycle": "all",
+        "reminder": None,
+        "include_inactive": False,
+        "page": 1,
+        "page_size": 24,
+    }
+    for row, query in zip(rows, sensitive_queries, strict=True):
+        assert row.resource == "maintenance"
+        assert row.detail == expected_detail
+        serialized_log = json.dumps(
+            {
+                "username": row.username,
+                "role": row.role,
+                "action": row.action,
+                "resource": row.resource,
+                "detail": row.detail,
+                "ip_address": row.ip_address,
+                "user_agent": row.user_agent,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        forbidden_derivatives = {
+            query,
+            hashlib.sha256(query.encode()).hexdigest(),
+            query.encode().hex(),
+        }
+        assert all(value not in serialized_log for value in forbidden_derivatives)
+
+
+@pytest.mark.parametrize(
+    "search",
+    [
+        "GET-URL-中不得出现的项目搜索词",
+        "GET-URL-LONG-PRIVATE-SENTINEL-" + "x" * 512,
+    ],
+)
+def test_operations_directory_rejects_get_query_search_without_audit(db, search):
+    client = _client(db, username="operations_get_query_admin")
+
+    response = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={"as_of": "2026-08-31", "q": search},
+    )
+
+    assert response.status_code == 422
+    assert search not in response.text
+    db.expire_all()
+    assert (
+        db.scalar(
+            select(SysAccessLog.id).where(
+                SysAccessLog.username == "operations_get_query_admin",
+                SysAccessLog.action == "stable_project_operations",
+            )
+        )
+        is None
+    )
+
+
+def test_operations_search_rejects_overlong_values_without_reflection_or_audit(db):
+    client = _client(db, username="operations_overlong_search_admin")
+    q_sentinel = "POST-Q-LONG-PRIVATE-SENTINEL-" + "x" * 512
+    reminder_sentinel = "REMINDER-LONG-PRIVATE-SENTINEL-" + "x" * 128
+
+    responses = [
+        client.get(
+            "/api/maintenance/projects/stable/operations",
+            params={"as_of": "2026-08-31", "reminder": reminder_sentinel},
+        ),
+        client.post(
+            "/api/maintenance/projects/stable/operations/search",
+            json={
+                "as_of": "2026-08-31",
+                "q": "safe-search",
+                "reminder": reminder_sentinel,
+            },
+        ),
+        client.post(
+            "/api/maintenance/projects/stable/operations/search",
+            json={"as_of": "2026-08-31", "q": q_sentinel},
+        ),
+    ]
+
+    for response in responses:
+        assert response.status_code == 422
+        assert "PRIVATE-SENTINEL" not in response.text
+        assert q_sentinel not in response.text
+        assert reminder_sentinel not in response.text
+
+    db.expire_all()
+    assert (
+        db.scalar(
+            select(SysAccessLog.id).where(
+                SysAccessLog.username == "operations_overlong_search_admin",
+                SysAccessLog.action == "stable_project_operations",
+            )
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        "cost:not-a-rule",
+        "completeness:not-a-rule",
+        "manager_update:2026-13",
+        "totally-unknown",
+    ],
+)
+def test_operations_directory_rejects_unknown_reminder_without_audit(db, selector):
+    client = _client(db, username="operations_unknown_reminder_admin")
+
+    response = client.get(
+        "/api/maintenance/projects/stable/operations",
+        params={"as_of": "2026-08-31", "reminder": selector},
+    )
+
+    assert response.status_code == 422
+    assert selector not in response.text
+    db.expire_all()
+    assert (
+        db.scalar(
+            select(SysAccessLog.id).where(
+                SysAccessLog.username == "operations_unknown_reminder_admin",
+                SysAccessLog.action == "stable_project_operations",
+            )
+        )
+        is None
+    )
+
+
+def test_operations_directory_accepts_declared_reminder_selectors(db):
+    client = _client(db, username="operations_known_reminder_admin")
+    selectors = [
+        "项目经理月度更新",
+        "manager_update:2026-08",
+        "all",
+        "info",
+        "warning",
+        "critical",
+        "completeness",
+        "collection",
+        "cost",
+        "cost_ratio",
+        "completeness:no_effective_contracts",
+        "completeness:duplicate_effective_contract",
+        "completeness:unmapped_contract_status",
+        "completeness:missing_contract_amount",
+        "completeness:cross_project_contract_conflict",
+        "completeness:missing_consumption_cost",
+        "completeness:unmapped_site_issue_status",
+        "completeness:unmapped_expense_status",
+        "completeness:expense_data_not_ready",
+        "completeness:expense_readiness_in_future",
+        "collection:missing_confirmed",
+        "collection:incomplete",
+        "cost:missing_price",
+        "cost:sales_fallback_estimate",
+        "cost_ratio:yellow",
+        "cost_ratio:red",
+    ]
+
+    for selector in selectors:
+        response = client.get(
+            "/api/maintenance/projects/stable/operations",
+            params={"as_of": "2026-08-31", "reminder": selector},
+        )
+        assert response.status_code == 200, (selector, response.text)
 
 
 def test_operations_directory_query_count_is_constant_across_page_sizes(db):
@@ -3614,9 +4525,9 @@ def test_operations_directory_card_matches_workspace_summary(db):
         f"/api/maintenance/projects/stable/{project.project_id}/workspace",
         params={"as_of": "2026-08-31"},
     )
-    directory = client.get(
-        "/api/maintenance/projects/stable/operations",
-        params={
+    directory = client.post(
+        "/api/maintenance/projects/stable/operations/search",
+        json={
             "as_of": "2026-08-31",
             "q": project.project_code,
             "lifecycle": "ongoing",
@@ -3818,6 +4729,48 @@ def test_workspace_details_are_independently_paged_without_truncating_totals_or_
     assert all_rows_queries == one_row_queries
 
 
+def test_workbook_read_transaction_does_not_block_followup_workspace_read(db):
+    project = _project(db, project_id="project-workspace-read-lock-free")
+    client = _client(db, username="workspace_read_lock_free_admin")
+    path = f"/api/maintenance/projects/stable/{project.project_id}/workspace"
+
+    # The workbook adapter deliberately keeps this caller-owned transaction open.
+    # A read-only snapshot must not retain a project-row lock that stalls another
+    # user's workspace read until this transaction happens to end.
+    snapshot = operations_service.project_workbook_workspace(
+        db,
+        project_id=project.project_id,
+        as_of=date(2026, 8, 10),
+        user_ctx=UserContext(
+            user_id="workspace-read-lock-free",
+            role="admin",
+            permissions=None,
+        ),
+    )
+    assert snapshot is not None
+
+    timed_out = False
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            client.get,
+            path,
+            params={"as_of": "2026-08-10"},
+        )
+        try:
+            response = future.result(timeout=1)
+        except FutureTimeoutError:
+            timed_out = True
+            # Always release the old implementation's lock so a red test fails
+            # promptly instead of hanging the whole suite.
+            db.rollback()
+            response = future.result(timeout=2)
+        finally:
+            db.rollback()
+
+    assert not timed_out, "只读工作簿事务持有了项目行锁，阻塞了后续只读请求"
+    assert response.status_code == 200, response.text
+
+
 def test_cost_gap_list_query_count_does_not_scale_with_page_size(db):
     project = _project(db, project_id="project-cost-gap-page-scale")
     client = _client(db, username="cost_gap_page_scale_admin")
@@ -3840,9 +4793,10 @@ def test_cost_gap_list_query_count_does_not_scale_with_page_size(db):
     part = DimPart(pn_std="PN-COST-GAP-PAGE-SCALE")
     db.add(part)
     db.commit()
-    issue = client.post(
-        f"/api/maintenance/projects/stable/{project.project_id}/site-issues",
-        json={
+    _create_legacy_site_issue_fixture(
+        db,
+        project_id=project.project_id,
+        body={
             "issue_no": "ISSUE-COST-GAP-PAGE-SCALE",
             "issue_date": "2026-08-10",
             "raw_status": "synthetic-confirmed",
@@ -3862,7 +4816,6 @@ def test_cost_gap_list_query_count_does_not_scale_with_page_size(db):
             "reason": "建立缺价分页查询测试领用行",
         },
     )
-    assert issue.status_code == 201, issue.text
     path = f"/api/maintenance/projects/stable/{project.project_id}/cost-gaps"
 
     one, one_queries = _count_get_queries(

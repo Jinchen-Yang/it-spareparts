@@ -50,6 +50,8 @@ export interface AccountsMeta {
   dependencies: {
     action_data: Record<string, string>;
     action_page: Record<string, string>;
+    action_additional_page?: Record<string, string>;
+    page_page?: Record<string, string>;
     data_data: Record<string, string>;
   };
   high_risk_keys: string[];
@@ -177,6 +179,16 @@ export function comboErrors(perms: Perms, meta: AccountsMeta): string[] {
       errs.push(`「${name(action)}」需要同时开启「${name(page)}」——操作发生在该页面里`);
     }
   }
+  for (const [action, page] of Object.entries(meta.dependencies.action_additional_page || {})) {
+    if (perms[action] && !perms[page]) {
+      errs.push(`「${name(action)}」需要同时开启「${name(page)}」——该操作仅在灰度页面中开放`);
+    }
+  }
+  for (const [page, required] of Object.entries(meta.dependencies.page_page || {})) {
+    if (perms[page] && !perms[required]) {
+      errs.push(`「${name(page)}」需要同时开启「${name(required)}」——正式工作台沿用基础页面的数据边界`);
+    }
+  }
   for (const [data, required] of Object.entries(meta.dependencies.data_data)) {
     if (perms[data] && !perms[required]) {
       errs.push(`「${name(data)}」需要同时开启「${name(required)}」——营收减毛利可反推出采购成本`);
@@ -191,9 +203,13 @@ export function missingDeps(key: string, perms: Perms, meta: AccountsMeta): stri
   const d1 = meta.dependencies.action_data[key];
   const d2 = meta.dependencies.action_page[key];
   const d3 = meta.dependencies.data_data[key];
+  const d4 = meta.dependencies.action_additional_page?.[key];
+  const d5 = meta.dependencies.page_page?.[key];
   if (d1 && !perms[d1]) need.push(d1);
   if (d2 && !perms[d2]) need.push(d2);
   if (d3 && !perms[d3]) need.push(d3);
+  if (d4 && !perms[d4]) need.push(d4);
+  if (d5 && !perms[d5]) need.push(d5);
   return need;
 }
 
@@ -205,6 +221,12 @@ export function dependentActions(key: string, perms: Perms, meta: AccountsMeta):
   }
   for (const [action, dep] of Object.entries(meta.dependencies.action_page)) {
     if (dep === key && perms[action]) out.push(action);
+  }
+  for (const [action, dep] of Object.entries(meta.dependencies.action_additional_page || {})) {
+    if (dep === key && perms[action]) out.push(action);
+  }
+  for (const [page, dep] of Object.entries(meta.dependencies.page_page || {})) {
+    if (dep === key && perms[page]) out.push(page);
   }
   for (const [data, dep] of Object.entries(meta.dependencies.data_data)) {
     if (dep === key && perms[data]) out.push(data);

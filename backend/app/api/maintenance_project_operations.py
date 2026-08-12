@@ -9,16 +9,57 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.maintenance_project_scope import (
+    enforce_maintenance_project_access,
+    require_maintenance_project_access,
+)
 from app.auth import current_identity, current_role
 from app.business_time import business_today
 from app.db import get_db
+from app.models.maintenance_project import MaintenanceProjectContract
+from app.models.maintenance_project_operations import (
+    MaintenanceCollectionSnapshot,
+    MaintenanceProjectExpenseAttribution,
+    MaintenanceSiteIssue,
+)
 from app.models.system import SysUser
-from app.security import is_field_hidden, record_access_log, require_action, require_page
-from app.security import UserContext, get_current_user_context
+from app.security import (
+    UserContext,
+    get_current_user_context,
+    is_field_hidden,
+    record_access_log,
+    require_action,
+    require_page,
+)
+from app.services import maintenance_project_assignments as assignments
 from app.services import maintenance_project_operations as operations
 
 
 router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
+site_issue_router = APIRouter(prefix="/maintenance/site-issues", tags=["maintenance"])
+
+
+class ProjectOperationsSearch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    q: str = ""
+    as_of: date | None = None
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=24, ge=1, le=200)
+    lifecycle: str = Field(
+        default="all",
+        pattern="^(ongoing|ended|missing|all)$",
+    )
+    reminder: str | None = None
+    include_inactive: bool = False
+    owner_scope: str | None = Field(default=None, pattern="^(me|all)$")
+    task_type: str | None = None
+    task_status: str | None = Field(
+        default=None,
+        pattern="^(open|pending|completed)$",
+    )
+    due_from: date | None = None
+    due_to: date | None = None
 
 
 class ContractCreate(BaseModel):
@@ -97,6 +138,8 @@ class SiteIssueLineCreate(BaseModel):
 
 
 class SiteIssueCreate(BaseModel):
+    """Legacy direct-entry contract kept stable for existing API callers."""
+
     model_config = ConfigDict(extra="forbid")
 
     issue_no: str = Field(min_length=1, max_length=64)
@@ -107,6 +150,81 @@ class SiteIssueCreate(BaseModel):
     status_mapping_version: str = Field(min_length=1, max_length=64)
     lines: list[SiteIssueLineCreate] = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=1, max_length=1000)
+
+
+class SiteIssueDraftLineCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    delivery_line_id: str = Field(min_length=1, max_length=64)
+    quantity: Decimal = Field(gt=0)
+
+
+class SiteIssueDraftCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idempotency_key: str = Field(min_length=8, max_length=128)
+    issue_date: date
+    receiver: str = Field(min_length=1, max_length=128)
+    issued_by: str = Field(min_length=1, max_length=128)
+    site_location: str = Field(min_length=1, max_length=256)
+    lines: list[SiteIssueDraftLineCreate] = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class SiteIssueCandidateSearch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    q: str | None = None
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=200)
+
+
+class SiteIssuePreview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=36)
+    version: int = Field(ge=1)
+
+
+class SiteIssueCommand(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=36)
+    version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class SiteIssuePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=36)
+    version: int = Field(ge=1)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+    issue_date: date | None = None
+    receiver: str | None = Field(default=None, min_length=1, max_length=128)
+    issued_by: str | None = Field(default=None, min_length=1, max_length=128)
+    site_location: str | None = Field(default=None, min_length=1, max_length=256)
+    lines: list[SiteIssueDraftLineCreate] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class SiteIssueSearch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(min_length=1, max_length=36)
+    q: str | None = None
+    workflow_statuses: list[str] = Field(
+        default_factory=lambda: ["draft", "confirmed", "corrected", "void"],
+        min_length=1,
+        max_length=4,
+    )
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1, le=100)
 
 
 class SiteIssueStatusPatch(BaseModel):
@@ -187,6 +305,23 @@ def _real_operator(db: Session, ident: dict) -> str:
     return username
 
 
+def _enforce_site_issue_access(
+    db: Session,
+    *,
+    issue_id: str,
+    ctx: UserContext,
+) -> None:
+    """Apply manager row scope to entity-id routes before reading or writing."""
+
+    project_id = db.scalar(
+        select(MaintenanceSiteIssue.project_id).where(
+            MaintenanceSiteIssue.issue_id == issue_id
+        )
+    )
+    if project_id is not None:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
+
+
 @router.post("/{project_id}/contracts", status_code=status.HTTP_201_CREATED)
 def create_project_contract(
     body: ContractCreate,
@@ -197,6 +332,7 @@ def create_project_contract(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_profit")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     operator = _real_operator(db, ident)
     try:
@@ -270,7 +406,15 @@ def patch_project_contract(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_profit")
     ),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    project_id = db.scalar(
+        select(MaintenanceProjectContract.project_id).where(
+            MaintenanceProjectContract.project_contract_id == project_contract_id
+        )
+    )
+    if project_id is not None:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     return _contract_write_result(
         operations.update_contract,
         db=db,
@@ -292,7 +436,15 @@ def archive_project_contract(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_profit")
     ),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    project_id = db.scalar(
+        select(MaintenanceProjectContract.project_id).where(
+            MaintenanceProjectContract.project_contract_id == project_contract_id
+        )
+    )
+    if project_id is not None:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     return _contract_write_result(
         operations.archive_contract,
         db=db,
@@ -314,6 +466,7 @@ def create_project_collection(
     _action: None = Depends(
         require_action("action_maintenance_roundtrip_apply", require_data="data_profit")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     operator = _real_operator(db, ident)
     try:
@@ -354,7 +507,15 @@ def patch_project_collection(
     _action: None = Depends(
         require_action("action_maintenance_roundtrip_apply", require_data="data_profit")
     ),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    project_id = db.scalar(
+        select(MaintenanceCollectionSnapshot.project_id).where(
+            MaintenanceCollectionSnapshot.collection_id == collection_id
+        )
+    )
+    if project_id is not None:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     return _contract_write_result(
         operations.update_collection,
         db=db,
@@ -366,6 +527,46 @@ def patch_project_collection(
     )
 
 
+@site_issue_router.post("/projects/{project_id}/candidates/search")
+def search_project_site_issue_candidates(
+    body: SiteIssueCandidateSearch,
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
+    try:
+        payload = operations.search_site_issue_candidates(
+            db,
+            project_id=project_id,
+            q_text=body.q,
+            page=body.page,
+            page_size=body.page_size,
+        )
+        if payload is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
+    except HTTPException:
+        raise
+    except operations.MaintenanceOperationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    record_access_log(
+        ctx,
+        "site_issue_delivery_candidates",
+        "maintenance_project",
+        {
+            "project_id": project_id,
+            "searched": bool(body.q and body.q.strip()),
+            "adapter_state": payload["adapter"]["state"],
+            "page": body.page,
+            "page_size": body.page_size,
+            "total": payload["total"],
+        },
+    )
+    return payload
+
+
 @router.post("/{project_id}/site-issues", status_code=status.HTTP_201_CREATED)
 def create_project_site_issue(
     body: SiteIssueCreate,
@@ -374,8 +575,12 @@ def create_project_site_issue(
     ident: dict = Depends(current_identity),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(
-        require_action("action_maintenance_roundtrip_apply", require_data="data_purchase_cost")
+        require_action(
+            "action_maintenance_site_issue_manage",
+            require_data="data_purchase_cost",
+        )
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     operator = _real_operator(db, ident)
     try:
@@ -406,6 +611,294 @@ def create_project_site_issue(
         raise
 
 
+@site_issue_router.post("/projects/{project_id}", status_code=status.HTTP_201_CREATED)
+def create_project_site_issue_draft(
+    body: SiteIssueDraftCreate,
+    project_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_site_issue_manage",
+            require_data="data_purchase_cost",
+        )
+    ),
+    _scope: None = Depends(require_maintenance_project_access),
+) -> dict:
+    operator = _real_operator(db, ident)
+    try:
+        payload = operations.create_site_issue_draft(
+            db,
+            project_id=project_id,
+            **body.model_dump(exclude={"reason"}),
+            reason=body.reason,
+            operated_by=operator,
+        )
+        if payload is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
+        db.commit()
+        return payload
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "现场领用单或明细重复") from exc
+    except operations.MaintenanceOperationConflict as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except operations.MaintenanceOperationPermissionError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    except operations.MaintenanceOperationError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+
+@site_issue_router.post("/{issue_id}/preview")
+def preview_project_site_issue(
+    body: SiteIssuePreview,
+    issue_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_site_issue_manage",
+            require_data="data_purchase_cost",
+        )
+    ),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    _enforce_site_issue_access(db, issue_id=issue_id, ctx=ctx)
+    try:
+        payload = operations.preview_site_issue(
+            db,
+            issue_id=issue_id,
+            project_id=body.project_id,
+            version=body.version,
+        )
+        if payload is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "现场领用单不存在")
+        return payload
+    except HTTPException:
+        raise
+    except operations.MaintenanceOperationConflict as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except operations.MaintenanceOperationPermissionError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    except operations.MaintenanceOperationError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+
+@site_issue_router.post("/{issue_id}/confirm")
+def confirm_project_site_issue(
+    body: SiteIssueCommand,
+    issue_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_site_issue_manage",
+            require_data="data_purchase_cost",
+        )
+    ),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    _enforce_site_issue_access(db, issue_id=issue_id, ctx=ctx)
+    operator = _real_operator(db, ident)
+    try:
+        payload = operations.confirm_site_issue(
+            db,
+            issue_id=issue_id,
+            project_id=body.project_id,
+            version=body.version,
+            idempotency_key=body.idempotency_key,
+            reason=body.reason,
+            operated_by=operator,
+        )
+        if payload is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "现场领用单或项目不存在")
+        db.commit()
+        return payload
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "现场领用确认发生并发冲突") from exc
+    except operations.MaintenanceOperationConflict as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except operations.MaintenanceOperationPermissionError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    except operations.MaintenanceOperationError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+
+@site_issue_router.patch("/{issue_id}")
+def patch_project_site_issue_v2(
+    body: SiteIssuePatch,
+    issue_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_site_issue_manage",
+            require_data="data_purchase_cost",
+        )
+    ),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    _enforce_site_issue_access(db, issue_id=issue_id, ctx=ctx)
+    operator = _real_operator(db, ident)
+    try:
+        payload = operations.patch_site_issue(
+            db,
+            issue_id=issue_id,
+            project_id=body.project_id,
+            version=body.version,
+            idempotency_key=body.idempotency_key,
+            issue_date=body.issue_date,
+            receiver=body.receiver,
+            issued_by=body.issued_by,
+            site_location=body.site_location,
+            lines=(
+                [line.model_dump() for line in body.lines]
+                if body.lines is not None
+                else None
+            ),
+            reason=body.reason,
+            operated_by=operator,
+        )
+        if payload is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "现场领用单或项目不存在")
+        db.commit()
+        return payload
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "现场领用编辑发生并发冲突") from exc
+    except operations.MaintenanceOperationConflict as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except operations.MaintenanceOperationPermissionError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    except operations.MaintenanceOperationError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+
+@site_issue_router.post("/{issue_id}/void")
+def void_project_site_issue(
+    body: SiteIssueCommand,
+    issue_id: str = Path(..., min_length=1, max_length=36),
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
+    _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_site_issue_manage",
+            require_data="data_purchase_cost",
+        )
+    ),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    _enforce_site_issue_access(db, issue_id=issue_id, ctx=ctx)
+    operator = _real_operator(db, ident)
+    try:
+        payload = operations.void_site_issue(
+            db,
+            issue_id=issue_id,
+            project_id=body.project_id,
+            version=body.version,
+            idempotency_key=body.idempotency_key,
+            reason=body.reason,
+            operated_by=operator,
+        )
+        if payload is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "现场领用单或项目不存在")
+        db.commit()
+        return payload
+    except HTTPException:
+        db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "现场领用作废发生并发冲突") from exc
+    except operations.MaintenanceOperationConflict as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except operations.MaintenanceOperationPermissionError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    except operations.MaintenanceOperationError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+
+@site_issue_router.post("/search")
+def search_project_site_issues(
+    body: SiteIssueSearch,
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    if is_field_hidden(ctx, "unit_cost"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权查看现场领用成本")
+    enforce_maintenance_project_access(db, project_id=body.project_id, ctx=ctx)
+    try:
+        payload = operations.search_site_issues(
+            db,
+            project_id=body.project_id,
+            q_text=body.q,
+            workflow_statuses=body.workflow_statuses,
+            page=body.page,
+            page_size=body.page_size,
+        )
+        if payload is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
+    except HTTPException:
+        raise
+    except operations.MaintenanceOperationError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    record_access_log(
+        ctx,
+        "site_issue_search",
+        "maintenance_project",
+        {
+            "project_id": body.project_id,
+            "searched": bool(body.q and body.q.strip()),
+            "workflow_statuses": body.workflow_statuses,
+            "page": body.page,
+            "page_size": body.page_size,
+            "total": payload["total"],
+        },
+    )
+    return payload
+
+
 @router.patch("/site-issues/{issue_id}/status")
 def patch_project_site_issue_status(
     body: SiteIssueStatusPatch,
@@ -415,11 +908,19 @@ def patch_project_site_issue_status(
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(
         require_action(
-            "action_maintenance_roundtrip_apply",
+            "action_maintenance_site_issue_manage",
             require_data="data_purchase_cost",
         )
     ),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    project_id = db.scalar(
+        select(MaintenanceSiteIssue.project_id).where(
+            MaintenanceSiteIssue.issue_id == issue_id
+        )
+    )
+    if project_id is not None:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     operator = _real_operator(db, ident)
     try:
         payload = operations.update_site_issue_status(
@@ -459,6 +960,7 @@ def project_cost_gaps(
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     if is_field_hidden(ctx, "unit_cost"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权查看或回填采购成本")
@@ -497,6 +999,7 @@ def recompute_project_cost_gaps(
             require_data="data_purchase_cost",
         )
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     return _contract_write_result(
         operations.recompute_cost_gaps,
@@ -518,6 +1021,7 @@ def create_project_expense(
     _action: None = Depends(
         require_action("action_maintenance_roundtrip_apply", require_data="data_profit")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     operator = _real_operator(db, ident)
     try:
@@ -559,6 +1063,7 @@ def mark_project_expense_readiness(
             require_data="data_profit",
         )
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     return _contract_write_result(
         operations.mark_expense_readiness,
@@ -586,7 +1091,15 @@ def patch_project_expense_status(
             require_data="data_profit",
         )
     ),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    project_id = db.scalar(
+        select(MaintenanceProjectExpenseAttribution.project_id).where(
+            MaintenanceProjectExpenseAttribution.expense_id == expense_id
+        )
+    )
+    if project_id is not None:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     operator = _real_operator(db, ident)
     try:
         payload = operations.update_expense_status(
@@ -627,6 +1140,7 @@ def patch_project_cost_gap(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_purchase_cost")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     return _contract_write_result(
         operations.fill_manual_cost,
@@ -654,6 +1168,7 @@ def stable_project_workspace(
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     effective_as_of = as_of or business_today()
@@ -670,7 +1185,9 @@ def stable_project_workspace(
         expense_page_size=expense_page_size,
     )
     if payload is None:
+        db.rollback()
         raise HTTPException(status.HTTP_404_NOT_FOUND, "维保项目不存在")
+    db.commit()
     record_access_log(
         ctx,
         "stable_project_workspace",
@@ -693,6 +1210,7 @@ def stable_project_tasks(
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     effective_as_of = as_of or business_today()
@@ -717,48 +1235,164 @@ def stable_project_tasks(
     return payload
 
 
+def _stable_project_operations_response(
+    *,
+    as_of: date | None,
+    page: int,
+    page_size: int,
+    q: str | None,
+    lifecycle: str,
+    reminder: str | None,
+    include_inactive: bool,
+    owner_scope: str | None,
+    task_type: str | None,
+    task_status: str | None,
+    due_from: date | None,
+    due_to: date | None,
+    db: Session,
+    ctx: UserContext,
+) -> dict:
+    effective_as_of = as_of or business_today()
+    try:
+        effective_owner_scope = assignments.resolve_owner_scope(ctx, owner_scope)
+        payload = operations.project_operations(
+            db,
+            as_of=effective_as_of,
+            user_ctx=ctx,
+            q_text=q,
+            lifecycle=lifecycle,
+            reminder=reminder,
+            include_inactive=include_inactive,
+            page=page,
+            page_size=page_size,
+            owner_scope=effective_owner_scope,
+            task_type=task_type,
+            task_status=task_status,
+            due_from=due_from,
+            due_to=due_to,
+        )
+    except assignments.MaintenanceProjectAssignmentPermissionError as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "当前账号只能查看本人负责的维保项目",
+        ) from exc
+    except operations.MaintenanceOperationPermissionError as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "当前账号无权使用该提醒筛选",
+        ) from exc
+    except operations.MaintenanceOperationError as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(exc),
+        ) from exc
+    except Exception:
+        db.rollback()
+        raise
+    db.commit()
+    log_detail = {
+        "as_of": effective_as_of.isoformat(),
+        "searched": bool(q and q.strip()),
+        "lifecycle": lifecycle,
+        "reminder": reminder,
+        "include_inactive": include_inactive,
+        "page": page,
+        "page_size": page_size,
+    }
+    if task_type or task_status or due_from or due_to:
+        log_detail.update(
+            {
+                # Never persist the free-text task-type selector itself.
+                "task_type_filtered": bool(task_type and task_type.strip()),
+                "task_status": task_status,
+                "due_from": due_from.isoformat() if due_from else None,
+                "due_to": due_to.isoformat() if due_to else None,
+            }
+        )
+    record_access_log(
+        ctx,
+        "stable_project_operations",
+        "maintenance",
+        log_detail,
+    )
+    return payload
+
+
 @router.get("/operations")
 def stable_project_operations(
     as_of: date | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(24, ge=1, le=200),
-    q: str | None = Query(default=None, max_length=256),
+    q: str | None = Query(default=None),
     lifecycle: str = Query(
         "all", pattern="^(ongoing|ended|missing|all)$"
     ),
-    reminder: str | None = Query(default=None, min_length=1, max_length=64),
+    reminder: str | None = Query(default=None),
     include_inactive: bool = False,
+    owner_scope: str | None = Query(default=None, pattern="^(me|all)$"),
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    effective_as_of = as_of or business_today()
-    payload = operations.project_operations(
-        db,
-        as_of=effective_as_of,
-        user_ctx=ctx,
-        q_text=q,
+    if q is not None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "项目搜索请使用安全搜索接口",
+        )
+    return _stable_project_operations_response(
+        as_of=as_of,
+        page=page,
+        page_size=page_size,
+        q=None,
         lifecycle=lifecycle,
         reminder=reminder,
         include_inactive=include_inactive,
-        page=page,
-        page_size=page_size,
+        owner_scope=owner_scope,
+        task_type=None,
+        task_status=None,
+        due_from=None,
+        due_to=None,
+        db=db,
+        ctx=ctx,
     )
-    record_access_log(
-        ctx,
-        "stable_project_operations",
-        "maintenance",
-        {
-            "as_of": effective_as_of.isoformat(),
-            "q": q,
-            "lifecycle": lifecycle,
-            "reminder": reminder,
-            "include_inactive": include_inactive,
-            "page": page,
-            "page_size": page_size,
-            "total": payload["total"],
-            "returned": len(payload["rows"]),
-        },
+
+
+@router.post("/operations/search")
+def search_stable_project_operations(
+    body: ProjectOperationsSearch,
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    q = body.q.strip()
+    if len(q) > 256:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "项目搜索条件无效",
+        )
+    if body.task_type is not None and len(body.task_type.strip()) > 64:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "任务筛选条件无效",
+        )
+    return _stable_project_operations_response(
+        as_of=body.as_of,
+        page=body.page,
+        page_size=body.page_size,
+        q=q,
+        lifecycle=body.lifecycle,
+        reminder=body.reminder,
+        include_inactive=body.include_inactive,
+        owner_scope=body.owner_scope,
+        task_type=body.task_type.strip() if body.task_type else None,
+        task_status=body.task_status,
+        due_from=body.due_from,
+        due_to=body.due_to,
+        db=db,
+        ctx=ctx,
     )
-    return payload

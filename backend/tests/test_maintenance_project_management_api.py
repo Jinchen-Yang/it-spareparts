@@ -3,6 +3,7 @@
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app import permissions
 from app.auth import _make_token, hash_password
 from app.config import get_settings
 from app.main import app
@@ -18,6 +19,10 @@ def _admin_client(db, username: str = "project_master_admin") -> TestClient:
             role="admin",
             display_name="合成管理员",
             password_hash=hash_password("synthetic-password-123"),
+            template_code="admin",
+            template_version=1,
+            template_perms=permissions.admin_account_defaults(),
+            perm_overrides={"page_maintenance_beta": True},
         )
     )
     db.commit()
@@ -240,6 +245,7 @@ def test_project_management_permission_matrix_fails_closed(db):
         username="project_master_no_page",
         permissions={
             "page_maintenance": False,
+            "page_maintenance_beta": True,
             "data_purchase_cost": True,
             "data_profit": True,
             "action_maintenance_project_manage": True,
@@ -252,6 +258,7 @@ def test_project_management_permission_matrix_fails_closed(db):
         username="project_master_no_action",
         permissions={
             "page_maintenance": True,
+            "page_maintenance_beta": True,
             "data_purchase_cost": True,
             "data_profit": True,
             "action_maintenance_project_manage": False,
@@ -264,6 +271,7 @@ def test_project_management_permission_matrix_fails_closed(db):
         username="project_master_no_profit",
         permissions={
             "page_maintenance": True,
+            "page_maintenance_beta": True,
             "data_purchase_cost": True,
             "data_profit": False,
             "action_maintenance_project_manage": True,
@@ -276,6 +284,7 @@ def test_project_management_permission_matrix_fails_closed(db):
         username="project_master_allowed",
         permissions={
             "page_maintenance": True,
+            "page_maintenance_beta": True,
             "data_purchase_cost": True,
             "data_profit": True,
             "action_maintenance_project_manage": True,

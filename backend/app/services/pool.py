@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app import config, security
 from app.models.dimensions import DimCustomer, DimPart, DimSupplier
-from app.models.inventory import PartPool, PartPoolMember, PartSubstitute
+from app.models.inventory import PartPool, PartPoolMember
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.services import pool_metrics

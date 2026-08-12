@@ -18,6 +18,7 @@ import {
   getMaintenanceProject,
   listMaintenanceProjects,
   restoreMaintenanceProject,
+  searchMaintenanceProjects,
   updateMaintenanceProject,
 } from "../maintenanceProjects";
 
@@ -38,6 +39,19 @@ describe("maintenance project master API", () => {
     expect(get).toHaveBeenCalledWith("/maintenance/projects/stable", {
       params: { include_inactive: true, page: 2, page_size: 50 },
     });
+  });
+
+  it("sends project search terms in a POST body", () => {
+    searchMaintenanceProjects({ q: "稳定项目甲", page: 1, page_size: 20 });
+    expect(post).toHaveBeenCalledWith(
+      "/maintenance/projects/stable/search",
+      {
+        q: "稳定项目甲",
+        page: 1,
+        page_size: 20,
+        include_inactive: true,
+      },
+    );
   });
 
   it("loads one project exactly when recovering from a version conflict", () => {

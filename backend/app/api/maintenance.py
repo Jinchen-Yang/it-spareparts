@@ -27,7 +27,8 @@ from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
-from app.auth import current_role, require_admin
+from app.api.maintenance_project_operations import _real_operator
+from app.auth import current_identity, current_role, require_admin
 from app.business_time import business_today
 from app.db import SessionLocal, get_db
 from app.security import (
@@ -145,9 +146,11 @@ def _release_db_before_stream(db: Session, resource) -> None:
 
 @router.post("/recompute")
 def recompute(db: Session = Depends(get_db),
+              ident: dict = Depends(current_identity),
               _auth: str = Depends(require_admin),   # 全表重算(~1min 写库)：限管理员，与导入触发方口径一致
               ctx: UserContext = Depends(get_current_user_context)) -> dict:
-    record_access_log(ctx, "recompute", "maintenance")
+    operator = _real_operator(db, ident)
+    record_access_log(ctx, "recompute", "maintenance", {"operated_by": operator})
     try:
         return maintenance_cost.recompute(db)
     except maintenance_cost.MaintenanceCostRecomputeBusy as exc:
@@ -1260,6 +1263,8 @@ async def _wait_for_roundtrip_import_worker(
 @router.post("/roundtrip-import")
 async def roundtrip_import(
     request: Request,
+    db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action(
@@ -1273,9 +1278,8 @@ async def roundtrip_import(
     路由签名不声明 ``UploadFile``，避免 FastAPI 在依赖执行前消费 multipart。身份、页面、
     显式写动作和数据可见依赖全部通过后，才进入限并发、限总字节的解析路径。
     """
-    if not ctx.is_authenticated or not ctx.user_id:
-        raise HTTPException(status_code=401, detail="维保回填必须使用实名登录账号")
     _require_roundtrip_permissions(ctx)
+    operator = _real_operator(db, ident)
     if not _ROUNDTRIP_IMPORT_PARSE_LOCK.acquire(blocking=False):
         raise HTTPException(
             status_code=429,
@@ -1289,7 +1293,7 @@ async def roundtrip_import(
             return await _wait_for_roundtrip_import_worker(
                 path,
                 original_name,
-                ctx.user_id,
+                operator,
                 ctx,
             )
         except maintenance_roundtrip.RoundtripWorkbookError as exc:

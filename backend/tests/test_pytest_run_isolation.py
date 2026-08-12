@@ -192,11 +192,15 @@ def _snapshot_worktree_raw() -> set[Path]:
     return set(root.rglob("*")) if root.exists() else set()
 
 
-def test_contract_subprocess_timeout_exceeds_maintenance_statement_timeout():
+def test_contract_subprocess_timeout_exceeds_database_maintenance_timeouts():
     assert SUBPROCESS_TIMEOUT_SECONDS == 180
     assert (
         SUBPROCESS_TIMEOUT_SECONDS
-        > run_isolation.MAINTENANCE_STATEMENT_TIMEOUT_MS / 1000
+        > max(
+            run_isolation.MAINTENANCE_STATEMENT_TIMEOUT_MS,
+            run_isolation.MAINTENANCE_DROP_STATEMENT_TIMEOUT_MS,
+        )
+        / 1000
     )
     source = Path(__file__).read_text(encoding="utf-8")
     assert ("timeout=" + "90") not in source
@@ -1318,7 +1322,7 @@ def test_database_cleanup_rechecks_oid_after_before_drop_swap():
             cleanup_database_run(replacement_handle)
 
 
-def test_database_cleanup_sets_120_second_statement_timeout(monkeypatch):
+def test_database_cleanup_sets_bounded_statement_timeouts(monkeypatch):
     base = make_url(os.environ["PYTEST_DATABASE_BASE_URL"])
     handle = create_database_run(_render(base))
     statements = []
@@ -1341,14 +1345,38 @@ def test_database_cleanup_sets_120_second_statement_timeout(monkeypatch):
     cleanup_database_run(handle)
     assert run_isolation.MAINTENANCE_LOCK_TIMEOUT_MS == 1000
     assert run_isolation.MAINTENANCE_STATEMENT_TIMEOUT_MS == 120000
-    assert (
+    assert run_isolation.MAINTENANCE_DROP_STATEMENT_TIMEOUT_MS == 150000
+    lock_timeout = (
         f"SET lock_timeout = '{run_isolation.MAINTENANCE_LOCK_TIMEOUT_MS}ms'"
-        in statements
     )
-    assert (
+    statement_timeout = (
         "SET statement_timeout = "
-        f"'{run_isolation.MAINTENANCE_STATEMENT_TIMEOUT_MS}ms'" in statements
+        f"'{run_isolation.MAINTENANCE_STATEMENT_TIMEOUT_MS}ms'"
     )
+    drop_statement_timeout = (
+        "SET statement_timeout = "
+        f"'{run_isolation.MAINTENANCE_DROP_STATEMENT_TIMEOUT_MS}ms'"
+    )
+    lock_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if "pg_advisory_lock" in statement
+    )
+    identity_indices = [
+        index
+        for index, statement in enumerate(statements)
+        if "FROM pg_database d JOIN pg_roles" in statement
+    ]
+    drop_timeout_index = statements.index(drop_statement_timeout)
+    drop_index = next(
+        index
+        for index, statement in enumerate(statements)
+        if statement.startswith("DROP DATABASE")
+    )
+    assert statements.index(lock_timeout) < lock_index
+    assert statements.index(statement_timeout) < lock_index
+    assert len(identity_indices) == 2
+    assert identity_indices[-1] < drop_timeout_index < drop_index
 
 
 def test_database_cleanup_redacts_connect_and_before_drop_dbapi_errors(monkeypatch):

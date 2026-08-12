@@ -81,6 +81,58 @@ def test_readonly_forbidden_admin_ok(db):
     assert r3.status_code == 200
 
 
+def test_recompute_rejects_shared_password_admin_before_write(db, monkeypatch):
+    called = False
+
+    def fail_if_recomputed(_db):
+        nonlocal called
+        called = True
+        return {"status": "unexpected"}
+
+    monkeypatch.setattr(maintenance_cost, "recompute", fail_if_recomputed)
+    shared_token, shared_role = _token("admin", get_settings().admin_password)
+    assert shared_role == "admin"
+
+    response = TestClient(app).post(
+        "/api/maintenance/recompute",
+        headers={"Authorization": f"Bearer {shared_token}"},
+    )
+
+    assert response.status_code == 403
+    assert called is False
+
+
+def test_recompute_allows_active_real_sys_user(db, monkeypatch):
+    username = "mc_recompute_real_admin"
+    db.add(
+        SysUser(
+            username=username,
+            role="admin",
+            is_active=True,
+            password_hash=hash_password("pw_admin_123456"),
+        )
+    )
+    db.commit()
+    token, role = _token(username, "pw_admin_123456")
+    assert role == "admin"
+    observed: dict[str, object] = {}
+
+    def successful_recompute(_db):
+        observed["called"] = True
+        return {"status": "success"}
+
+    monkeypatch.setattr(maintenance_cost, "recompute", successful_recompute)
+
+    response = TestClient(app).post(
+        "/api/maintenance/recompute",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "success"}
+    assert observed == {"called": True}
+
+
 def test_recompute_fails_fast_while_import_lock_is_held(db):
     db.add(SysUser(
         username="mc_recompute_busy_admin",

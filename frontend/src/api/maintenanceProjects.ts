@@ -42,10 +42,24 @@ export interface MaintenanceProjectLifecycleInput {
   reason: string;
 }
 
-export const listMaintenanceProjects = (params: { page?: number; page_size?: number } = {}) =>
+export const listMaintenanceProjects = (params: {
+  page?: number;
+  page_size?: number;
+  include_inactive?: boolean;
+} = {}) =>
   api.get<MaintenanceProjectDirectory>("/maintenance/projects/stable", {
     params: { include_inactive: true, ...params },
   });
+
+export const searchMaintenanceProjects = (body: {
+  q: string;
+  page?: number;
+  page_size?: number;
+  include_inactive?: boolean;
+}) => api.post<MaintenanceProjectDirectory>(
+  "/maintenance/projects/stable/search",
+  { include_inactive: true, ...body },
+);
 
 export const getMaintenanceProject = (projectId: string) =>
   api.get<MaintenanceProjectOverview>(`/maintenance/projects/stable/${projectId}`);

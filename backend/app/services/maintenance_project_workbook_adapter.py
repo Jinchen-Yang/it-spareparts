@@ -406,7 +406,9 @@ class MaintenanceProjectWorkbookAdapter:
                     MaintenanceSiteIssue.project_id == project_id,
                     MaintenanceSiteIssue.issue_date <= self.as_of,
                     MaintenanceSiteIssue.status_mapping_state == "mapped",
-                    MaintenanceSiteIssue.normalized_status == "confirmed",
+                    MaintenanceSiteIssue.normalized_status.in_(
+                        ("confirmed", "corrected")
+                    ),
                 )
                 .scalar_subquery()
                 .label("consumptions"),
@@ -533,9 +535,14 @@ class MaintenanceProjectWorkbookAdapter:
                 "cost_status": (
                     "缺少价格成本"
                     if item["unit_cost"] is None or item["cost_amount"] is None
-                    else "成本完整"
+                    else "已计入（销售回退估算）"
+                    if item.get("cost_is_estimate") is True
+                    else "已计入（采购或人工确认）"
                 ),
                 "cost_source": item["cost_source"],
+                "cost_evidence_kind": item.get("cost_evidence_kind"),
+                "cost_is_estimate": item.get("cost_is_estimate"),
+                "cost_source_label": item.get("cost_source_label"),
             }
             for item in raw["confirmed_site_consumptions"]
         ]

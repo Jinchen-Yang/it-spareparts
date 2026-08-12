@@ -216,7 +216,7 @@ describe("MaintenanceCostRefillPage", () => {
     expect(await screen.findByText("PN-MISSING")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "返回项目" })).toHaveAttribute(
       "href",
-      "/maintenance/projects/project-1",
+      "/maintenance/beta/projects/project-1",
     );
     expect(screen.getByText("关联采购")).toBeInTheDocument();
     expect(screen.getByText("采购 ±7 天加权")).toBeInTheDocument();
@@ -419,7 +419,7 @@ describe("MaintenanceCostRefillPage", () => {
     updateMaintenanceCostGap.mockRejectedValueOnce({ response: { status: 409 } });
 
     render(
-      <MemoryRouter initialEntries={["/maintenance/cost-refill?project_id=project-1"]}>
+      <MemoryRouter initialEntries={["/maintenance/beta/cost-refill?project_id=project-1"]}>
         <MaintenanceCostRefillPage />
       </MemoryRouter>,
     );

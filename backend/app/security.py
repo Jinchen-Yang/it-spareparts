@@ -78,16 +78,18 @@ def get_current_user_context(
 
 def require_page(page_key: str):
     """页面级准入依赖：该用户 page_* 权限为 False → 403。
-    admin 恒放行；RBAC 关或旧 token（无 perms）按角色模板回退，避免破坏旧会话。
+    admin 的常规页面恒放行；两个生产 Beta 页面必须逐实名账号显式授权，admin、旧 token
+    与共享口令都不能短路。RBAC 关时保持一期兼容放行。
     page_* 既驱动前端菜单显示，也在此做后端准入（前端藏菜单 ≠ 后端拦接口）。"""
     def _dep(ctx: UserContext = Depends(get_current_user_context)) -> None:
-        if not config.ENABLE_RBAC or ctx.role == "admin":
+        if not config.ENABLE_RBAC:
             return
-        perms = ctx.permissions
-        if perms is None:
-            from app import permissions as _perm
-            perms = _perm.effective(ctx.role, None)
-        if not perms.get(page_key, False):
+        from app import permissions as _perm
+        if not _perm.page_permission_allowed(
+            role=ctx.role,
+            permission_map=ctx.permissions,
+            page_key=page_key,
+        ):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该页面")
     return _dep
 
@@ -130,13 +132,14 @@ def require_login(ctx: UserContext = Depends(get_current_user_context)) -> UserC
 
 def page_allowed(ctx: UserContext, page_key: str) -> bool:
     """页面权限的纯函数版（agent 工具层等非 FastAPI 依赖处用；与 require_page 同一逻辑）。"""
-    if not config.ENABLE_RBAC or ctx.role == "admin":
+    if not config.ENABLE_RBAC:
         return True
-    perms = ctx.permissions
-    if perms is None:
-        from app import permissions as _perm
-        perms = _perm.effective(ctx.role, None)
-    return bool(perms.get(page_key, False))
+    from app import permissions as _perm
+    return _perm.page_permission_allowed(
+        role=ctx.role,
+        permission_map=ctx.permissions,
+        page_key=page_key,
+    )
 
 
 def apply_data_scope(query, user_ctx: UserContext):

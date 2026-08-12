@@ -13,31 +13,342 @@ vi.mock("../../api", () => ({
 }));
 
 import {
+  applyMaintenanceManagerWorkbook,
   applyMaintenanceProjectWorkbook,
+  archiveMaintenanceProjectManager,
+  assignMaintenanceProjectManager,
+  confirmMaintenanceBadReturnWarehouse,
+  confirmSiteIssue,
+  createMaintenanceBadReturnDraft,
+  createSiteIssueDraft,
+  downloadMaintenanceManagerWorkbook,
   downloadMaintenanceProjectWorkbook,
   downloadMaintenanceWorkbookValidationErrors,
+  getMaintenanceManagerWorkbookStatus,
   getMaintenanceProjectWorkspace,
+  listMaintenanceReturnCategories,
   listMaintenanceCostGaps,
   listMaintenanceProjectOperations,
+  patchSiteIssue,
+  previewSiteIssue,
   recomputeMaintenanceCostGaps,
+  searchMaintenanceManagerAccounts,
+  resolveMaintenanceReturnObligationCategory,
+  searchMaintenanceBadReturns,
+  searchMaintenanceReturnObligations,
+  searchSiteIssueCandidates,
+  searchSiteIssues,
+  submitMaintenanceBadReturn,
+  markMaintenanceBadReturnInTransit,
   updateMaintenanceCostGap,
   validateMaintenanceProjectWorkbook,
+  voidMaintenanceBadReturn,
+  voidSiteIssue,
+  validateMaintenanceManagerWorkbook,
 } from "../maintenanceOperations";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
+  localStorage.setItem("role", "admin");
   get.mockResolvedValue({ data: {} });
+  post.mockResolvedValue({ data: {} });
   patch.mockResolvedValue({ data: { references: [] } });
 });
 
 describe("maintenance operations API", () => {
-  it("项目卡片只请求一次稳定项目批量摘要，不逐项目加载", () => {
+  it("搜索词仅通过 POST body 发送，不进入请求 URL", () => {
     listMaintenanceProjectOperations({ page: 2, page_size: 24, q: "移动" });
 
-    expect(get).toHaveBeenCalledOnce();
-    expect(get).toHaveBeenCalledWith("/maintenance/projects/stable/operations", {
-      params: { page: 2, page_size: 24, q: "移动", include_inactive: false },
+    expect(post).toHaveBeenCalledOnce();
+    expect(post).toHaveBeenCalledWith("/maintenance/projects/stable/operations/search", {
+      page: 2,
+      page_size: 24,
+      q: "移动",
+      include_inactive: false,
     });
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("无搜索词也把全部筛选放在 POST body，不使用查询串", () => {
+    listMaintenanceProjectOperations({
+      page: 2,
+      page_size: 24,
+      owner_scope: "me",
+      task_type: "项目经理月度更新",
+      task_status: "pending",
+      due_from: "2026-08-01",
+      due_to: "2026-08-31",
+    });
+
+    expect(post).toHaveBeenCalledOnce();
+    expect(post).toHaveBeenCalledWith("/maintenance/projects/stable/operations/search", {
+      page: 2,
+      page_size: 24,
+      q: "",
+      include_inactive: false,
+      owner_scope: "me",
+      task_type: "项目经理月度更新",
+      task_status: "pending",
+      due_from: "2026-08-01",
+      due_to: "2026-08-31",
+    });
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("现场领用候选与单据搜索只通过 POST body，稳定 ID 做 URL 编码", () => {
+    searchSiteIssueCandidates("project/危险", { q: "SN 敏感词", page: 2 });
+    searchSiteIssues({
+      project_id: "project/危险",
+      q: "领用单 敏感词",
+      workflow_statuses: ["draft", "confirmed"],
+    });
+
+    expect(post).toHaveBeenNthCalledWith(
+      1,
+      "/maintenance/site-issues/projects/project%2F%E5%8D%B1%E9%99%A9/candidates/search",
+      { q: "SN 敏感词", page: 2, page_size: 50 },
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      "/maintenance/site-issues/search",
+      {
+        project_id: "project/危险",
+        q: "领用单 敏感词",
+        workflow_statuses: ["draft", "confirmed"],
+        page: 1,
+        page_size: 20,
+      },
+    );
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("现场领用完整动作使用系统单据 ID，并把版本和幂等键放在 body", () => {
+    createSiteIssueDraft("project/1", {
+      idempotency_key: "draft-command-001",
+      issue_date: "2026-08-09",
+      receiver: "接收人",
+      issued_by: "发出人",
+      site_location: "现场 A",
+      lines: [{ delivery_line_id: "delivery-1", quantity: 2 }],
+      reason: "保存草稿",
+    });
+    patchSiteIssue("issue/1", {
+      project_id: "project/1",
+      version: 1,
+      idempotency_key: "patch-command-001",
+      receiver: "新接收人",
+      reason: "修改草稿",
+    });
+    previewSiteIssue("issue/1", { project_id: "project/1", version: 2 });
+    confirmSiteIssue("issue/1", {
+      project_id: "project/1",
+      version: 2,
+      idempotency_key: "confirm-command-001",
+      reason: "确认领用",
+    });
+    voidSiteIssue("issue/1", {
+      project_id: "project/1",
+      version: 3,
+      idempotency_key: "void-command-001",
+      reason: "作废领用",
+    });
+
+    expect(post).toHaveBeenNthCalledWith(
+      1,
+      "/maintenance/site-issues/projects/project%2F1",
+      expect.objectContaining({ idempotency_key: "draft-command-001" }),
+    );
+    expect(patch).toHaveBeenCalledWith(
+      "/maintenance/site-issues/issue%2F1",
+      expect.objectContaining({ version: 1, idempotency_key: "patch-command-001" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      "/maintenance/site-issues/issue%2F1/preview",
+      { project_id: "project/1", version: 2 },
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      3,
+      "/maintenance/site-issues/issue%2F1/confirm",
+      expect.objectContaining({ version: 2, idempotency_key: "confirm-command-001" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      4,
+      "/maintenance/site-issues/issue%2F1/void",
+      expect.objectContaining({ version: 3, idempotency_key: "void-command-001" }),
+    );
+  });
+
+  it("坏件返还搜索与状态命令只传稳定 ID、版本、幂等键和业务证据", () => {
+    searchMaintenanceReturnObligations({
+      project_id: "project/1",
+      q: "PN 敏感词",
+      classifications: ["required", "pending_category"],
+      active_only: true,
+      page: 2,
+    });
+    searchMaintenanceBadReturns({
+      project_id: "project/1",
+      statuses: ["draft", "in_transit"],
+      page: 3,
+    });
+    createMaintenanceBadReturnDraft({
+      project_id: "project/1",
+      idempotency_key: "return-draft-1",
+      replaces_return_id: "return/original",
+      lines: [{ obligation_id: "obligation/1", quantity: 2 }],
+      note: "现场集中返件",
+      reason: "建立返还草稿",
+    });
+    submitMaintenanceBadReturn("return/1", {
+      project_id: "project/1",
+      version: 1,
+      idempotency_key: "return-submit-1",
+      reason: "核对后提交",
+    });
+    markMaintenanceBadReturnInTransit("return/1", {
+      project_id: "project/1",
+      version: 2,
+      idempotency_key: "return-transit-1",
+      logistics_reference: "人工物流参考-1",
+      reason: "现场已寄出",
+    });
+    confirmMaintenanceBadReturnWarehouse("return/1", {
+      project_id: "project/1",
+      version: 3,
+      idempotency_key: "return-confirm-1",
+      warehouse_reference: "仓库确认-1",
+      inbound_reference: "RKD-001",
+      reason: "仓库已验收",
+    });
+    voidMaintenanceBadReturn("return/1", {
+      project_id: "project/1",
+      version: 4,
+      idempotency_key: "return-void-1",
+      reason: "追加式作废错误返还单",
+    });
+    resolveMaintenanceReturnObligationCategory("obligation/1", {
+      project_id: "project/1",
+      version: 4,
+      category_id: 9,
+      idempotency_key: "category-1",
+      reason: "按标准品类主数据判定",
+    });
+
+    expect(post).toHaveBeenNthCalledWith(
+      1,
+      "/maintenance/return-obligations/search",
+      {
+        project_id: "project/1",
+        q: "PN 敏感词",
+        classifications: ["required", "pending_category"],
+        active_only: true,
+        page: 2,
+        page_size: 50,
+      },
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      "/maintenance/bad-returns/search",
+      {
+        project_id: "project/1",
+        statuses: ["draft", "in_transit"],
+        page: 3,
+        page_size: 20,
+      },
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      3,
+      "/maintenance/bad-returns",
+      expect.objectContaining({
+        idempotency_key: "return-draft-1",
+        replaces_return_id: "return/original",
+      }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      4,
+      "/maintenance/bad-returns/return%2F1/submit",
+      expect.objectContaining({ version: 1, idempotency_key: "return-submit-1" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      5,
+      "/maintenance/bad-returns/return%2F1/in-transit",
+      expect.objectContaining({ logistics_reference: "人工物流参考-1" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      6,
+      "/maintenance/bad-returns/return%2F1/warehouse-confirm",
+      expect.objectContaining({ warehouse_reference: "仓库确认-1", inbound_reference: "RKD-001" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      7,
+      "/maintenance/bad-returns/return%2F1/void",
+      expect.objectContaining({ version: 4, idempotency_key: "return-void-1" }),
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      8,
+      "/maintenance/return-obligations/obligation%2F1/resolve-category",
+      expect.not.objectContaining({ exempt: expect.anything() }),
+    );
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("管理员品类处理入口读取标准品类稳定编号", () => {
+    listMaintenanceReturnCategories();
+
+    expect(get).toHaveBeenCalledOnce();
+    expect(get).toHaveBeenCalledWith("/maintenance/return-categories");
+  });
+
+  it("把 AbortSignal 交给 POST 请求，不混入业务 body", () => {
+    const controller = new AbortController();
+
+    listMaintenanceProjectOperations(
+      { q: "项目" },
+      { signal: controller.signal },
+    );
+
+    expect(post).toHaveBeenCalledWith(
+      "/maintenance/projects/stable/operations/search",
+      { q: "项目", include_inactive: false },
+      { signal: controller.signal },
+    );
+  });
+
+  it("负责人候选只用 POST 搜索，映射和归档均带版本与原因", () => {
+    searchMaintenanceManagerAccounts({ q: " 王经理 ", page_size: 30 });
+    assignMaintenanceProjectManager("project/1", {
+      user_id: 9,
+      expected_assignment_id: "assignment-1",
+      expected_assignment_version: 2,
+      reason: "项目交接",
+    });
+    archiveMaintenanceProjectManager("assignment/1", {
+      version: 3,
+      reason: "暂停负责关系",
+    });
+
+    expect(post).toHaveBeenNthCalledWith(
+      1,
+      "/maintenance/project-manager-assignments/search",
+      { q: "王经理", page: 1, page_size: 30 },
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      "/maintenance/projects/stable/project%2F1/manager-assignment",
+      {
+        user_id: 9,
+        expected_assignment_id: "assignment-1",
+        expected_assignment_version: 2,
+        reason: "项目交接",
+      },
+    );
+    expect(post).toHaveBeenNthCalledWith(
+      3,
+      "/maintenance/project-manager-assignments/assignment%2F1/archive",
+      { version: 3, reason: "暂停负责关系" },
+    );
   });
 
   it("按稳定项目 ID 加载一份工作台快照", () => {
@@ -171,7 +482,7 @@ describe("maintenance operations API", () => {
   });
 
   it("在 API 边界把 Decimal 字符串转成有限 number，非法值降级为 null", async () => {
-    get.mockResolvedValueOnce({
+    post.mockResolvedValueOnce({
       data: {
         rows: [{
           project_id: "project-1",
@@ -203,6 +514,13 @@ describe("maintenance operations API", () => {
             site_requisition_known_cost: "300.10",
             site_requisition_known_cost_ex_tax: "265.58",
             site_requisition_known_cost_inc_tax: "300.10",
+            site_requisition_priced_cost_ex_tax: "265.58",
+            site_requisition_priced_cost_inc_tax: "300.10",
+            sales_estimate_cost_ex_tax: "88.50",
+            sales_estimate_cost_inc_tax: "100.00",
+            sales_estimate_lines: "2",
+            cost_progress_includes_sales_estimate: true,
+            cost_progress_label: "priced_cost_including_sales_estimate",
             approved_expense: "99.90",
             approved_expense_ex_tax: "88.41",
             approved_expense_inc_tax: "99.90",
@@ -232,6 +550,13 @@ describe("maintenance operations API", () => {
     expect(data.rows[0].metrics.site_requisition_known_cost).toBe(300.1);
     expect(data.rows[0].metrics.site_requisition_known_cost_ex_tax).toBe(265.58);
     expect(data.rows[0].metrics.site_requisition_known_cost_inc_tax).toBe(300.1);
+    expect(data.rows[0].metrics.site_requisition_priced_cost_ex_tax).toBe(265.58);
+    expect(data.rows[0].metrics.site_requisition_priced_cost_inc_tax).toBe(300.1);
+    expect(data.rows[0].metrics.sales_estimate_cost_ex_tax).toBe(88.5);
+    expect(data.rows[0].metrics.sales_estimate_cost_inc_tax).toBe(100);
+    expect(data.rows[0].metrics.sales_estimate_lines).toBe(2);
+    expect(data.rows[0].metrics.cost_progress_includes_sales_estimate).toBe(true);
+    expect(data.rows[0].metrics.cost_progress_label).toBe("priced_cost_including_sales_estimate");
     expect(data.rows[0].metrics.approved_expense_ex_tax).toBe(88.41);
     expect(data.rows[0].metrics.approved_expense_inc_tax).toBe(99.9);
     expect(data.rows[0].metrics.actual_project_cost_known_ex_tax).toBe(353.99);
@@ -262,6 +587,13 @@ describe("maintenance operations API", () => {
             site_requisition_known_cost: "33.30",
             site_requisition_known_cost_ex_tax: "29.47",
             site_requisition_known_cost_inc_tax: "33.30",
+            site_requisition_priced_cost_ex_tax: "29.47",
+            site_requisition_priced_cost_inc_tax: "33.30",
+            sales_estimate_cost_ex_tax: "8.41",
+            sales_estimate_cost_inc_tax: "9.50",
+            sales_estimate_lines: "1",
+            cost_progress_includes_sales_estimate: true,
+            cost_progress_label: "priced_cost_including_sales_estimate",
             approved_expense: "8.80",
             approved_expense_ex_tax: "7.79",
             approved_expense_inc_tax: "8.80",
@@ -306,7 +638,10 @@ describe("maintenance operations API", () => {
             unit_cost_inc_tax: "9.50",
             cost_amount_ex_tax: "29.42",
             cost_amount_inc_tax: "33.25",
-            cost_source: "manual",
+            cost_source: "sales_window",
+            cost_evidence_kind: "sales_estimate",
+            cost_is_estimate: true,
+            cost_source_label: "估算（销售前后 7 天数量加权）",
             cost_status: "available",
           }, {
             line_id: "line-restricted",
@@ -322,7 +657,10 @@ describe("maintenance operations API", () => {
             unit_cost_inc_tax: "999",
             cost_amount_ex_tax: "999",
             cost_amount_inc_tax: "999",
-            cost_source: null,
+            cost_source: "sales_window",
+            cost_evidence_kind: "sales_estimate",
+            cost_is_estimate: true,
+            cost_source_label: "不应泄露的销售价格来源",
             cost_status: "restricted",
           }],
           total: 2,
@@ -368,6 +706,10 @@ describe("maintenance operations API", () => {
       unit_cost_inc_tax: 9.5,
       cost_amount_ex_tax: 29.42,
       cost_amount_inc_tax: 33.25,
+      cost_source: "sales_window",
+      cost_evidence_kind: "sales_estimate",
+      cost_is_estimate: true,
+      cost_source_label: "估算（销售前后 7 天数量加权）",
     }));
     expect(data.requisitions.rows[1]).toEqual(expect.objectContaining({
       unit_cost: null,
@@ -376,17 +718,28 @@ describe("maintenance operations API", () => {
       unit_cost_inc_tax: null,
       cost_amount_ex_tax: null,
       cost_amount_inc_tax: null,
+      cost_source: null,
+      cost_evidence_kind: null,
+      cost_is_estimate: null,
+      cost_source_label: null,
     }));
     expect(data.approved_expenses.rows[0].amount).toBe(8.8);
     expect(data.approved_expenses.rows[0].amount_ex_tax).toBe(7.79);
     expect(data.approved_expenses.rows[0].amount_inc_tax).toBe(8.8);
     expect(data.project.metrics.actual_project_cost_known_ex_tax).toBe(37.26);
     expect(data.project.metrics.actual_project_cost_known_inc_tax).toBe(42.1);
+    expect(data.project.metrics.site_requisition_priced_cost_ex_tax).toBe(29.47);
+    expect(data.project.metrics.site_requisition_priced_cost_inc_tax).toBe(33.3);
+    expect(data.project.metrics.sales_estimate_cost_ex_tax).toBe(8.41);
+    expect(data.project.metrics.sales_estimate_cost_inc_tax).toBe(9.5);
+    expect(data.project.metrics.sales_estimate_lines).toBe(1);
+    expect(data.project.metrics.cost_progress_includes_sales_estimate).toBe(true);
+    expect(data.project.metrics.cost_progress_label).toBe("priced_cost_including_sales_estimate");
     expect(data.collection_snapshots.rows[0].cumulative_amount).toBe(18.8);
   });
 
   it("未知或缺失的合同额和成本进度税口径在 API 边界降级为 null", async () => {
-    get.mockResolvedValueOnce({
+    post.mockResolvedValueOnce({
       data: {
         rows: [{
           project_id: "project-guard",
@@ -446,6 +799,337 @@ describe("maintenance operations API", () => {
     expect(data.rows[0].metrics.cost_progress_basis).toBeNull();
   });
 
+  it("成本受限时目录和工作台都不会保留销售估算侧信道", async () => {
+    localStorage.setItem("role", "readonly");
+    localStorage.setItem("permissions", JSON.stringify({
+      data_purchase_cost: false,
+      data_profit: false,
+    }));
+    const restrictedMetrics = {
+      total_contract_amount: null,
+      known_contract_amount: null,
+      contract_amount_basis: "inc_tax",
+      contract_amount_complete: null,
+      received_amount: null,
+      collection_progress_pct: null,
+      site_requisition_known_cost: "999",
+      site_requisition_known_cost_ex_tax: "999",
+      site_requisition_known_cost_inc_tax: "999",
+      site_requisition_priced_cost_ex_tax: "999",
+      site_requisition_priced_cost_inc_tax: "999",
+      sales_estimate_cost_ex_tax: "888",
+      sales_estimate_cost_inc_tax: "999",
+      sales_estimate_lines: "7",
+      cost_progress_includes_sales_estimate: true,
+      cost_progress_label: "priced_cost_including_sales_estimate",
+      approved_expense: null,
+      approved_expense_ex_tax: null,
+      approved_expense_inc_tax: null,
+      actual_project_cost_known: "999",
+      actual_project_cost_known_ex_tax: "999",
+      actual_project_cost_known_inc_tax: "999",
+      cost_progress_basis: "inc_tax",
+      cost_rate_lower_bound_pct: "99.9",
+      cost_status: "yellow",
+      cost_complete: null,
+      missing_cost_lines: null,
+    };
+    const project = {
+      project_id: "project-restricted",
+      project_code: "XM-RESTRICTED",
+      display_name: "成本受限项目",
+      project_manager_id: null,
+      lifecycle_status: "ongoing",
+      is_active: true,
+      version: 1,
+      contracts: [],
+      metrics: restrictedMetrics,
+      reminder_count: 0,
+      as_of: "2026-08-09",
+    };
+    post.mockResolvedValueOnce({
+      data: {
+        rows: [project], total: 1, page: 1, page_size: 24,
+        as_of: "2026-08-09", data_version: "restricted-v1",
+      },
+    });
+    get.mockResolvedValueOnce({
+      data: {
+        project,
+        collection_snapshots: { rows: [], total: 0, page: 1, page_size: 20 },
+        requisitions: {
+          rows: [{
+            line_id: "line-raw-cost",
+            order_no: "WBDD-RAW-COST",
+            order_date: "2026-08-01",
+            contract_no: null,
+            pn: "PN-RAW-COST",
+            description: "服务端异常返回的成本字段",
+            quantity: "1",
+            unit_cost: "999",
+            cost_amount: "999",
+            unit_cost_ex_tax: "999",
+            unit_cost_inc_tax: "999",
+            cost_amount_ex_tax: "999",
+            cost_amount_inc_tax: "999",
+            cost_source: "sales_window",
+            cost_evidence_kind: "sales_estimate",
+            cost_is_estimate: true,
+            cost_source_label: "不应保留的销售估算来源",
+            cost_status: "available",
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+        },
+        approved_expenses: { rows: [], total: 0, page: 1, page_size: 20 },
+        reminders: [],
+        workbook_preview: {
+          protocol_version: "2.0", sheets: [], latest_tracking_month: null,
+          last_exported_at: null, data_version: "restricted-v1",
+        },
+        as_of: "2026-08-09",
+        data_version: "restricted-v1",
+      },
+    });
+
+    const directoryMetrics = (await listMaintenanceProjectOperations()).data.rows[0].metrics;
+    const workspaceData = (await getMaintenanceProjectWorkspace("project-restricted")).data;
+    const workspaceMetrics = workspaceData.project.metrics;
+    for (const metrics of [directoryMetrics, workspaceMetrics]) {
+      expect(metrics.site_requisition_priced_cost_ex_tax).toBeNull();
+      expect(metrics.site_requisition_priced_cost_inc_tax).toBeNull();
+      expect(metrics.sales_estimate_cost_ex_tax).toBeNull();
+      expect(metrics.sales_estimate_cost_inc_tax).toBeNull();
+      expect(metrics.sales_estimate_lines).toBeNull();
+      expect(metrics.cost_progress_includes_sales_estimate).toBeNull();
+      expect(metrics.cost_progress_label).toBeNull();
+    }
+    expect(workspaceData.requisitions.rows[0]).toEqual(expect.objectContaining({
+      quantity: 1,
+      unit_cost: null,
+      cost_amount: null,
+      cost_source: null,
+      cost_evidence_kind: null,
+      cost_is_estimate: null,
+      cost_source_label: null,
+      cost_status: "restricted",
+    }));
+  });
+
+  it("仅成本权限不把费用完整度 null 误判为成本不可见", async () => {
+    localStorage.setItem("role", "purchaser");
+    localStorage.setItem("permissions", JSON.stringify({
+      data_purchase_cost: true,
+      data_profit: false,
+    }));
+    post.mockResolvedValueOnce({
+      data: {
+        rows: [{
+          project_id: "project-cost-only",
+          project_code: "XM-COST-ONLY",
+          display_name: "仅成本权限项目",
+          project_manager_id: null,
+          lifecycle_status: "ongoing",
+          is_active: true,
+          version: 1,
+          contracts: [],
+          metrics: {
+            total_contract_amount: null,
+            known_contract_amount: null,
+            contract_amount_basis: "inc_tax",
+            contract_amount_complete: null,
+            received_amount: null,
+            collection_progress_pct: null,
+            site_requisition_known_cost: "113.00",
+            site_requisition_known_cost_ex_tax: "100.00",
+            site_requisition_known_cost_inc_tax: "113.00",
+            site_requisition_priced_cost_ex_tax: "100.00",
+            site_requisition_priced_cost_inc_tax: "113.00",
+            sales_estimate_cost_ex_tax: "25.00",
+            sales_estimate_cost_inc_tax: "28.25",
+            sales_estimate_lines: "2",
+            cost_progress_includes_sales_estimate: true,
+            cost_progress_label: "priced_cost_including_sales_estimate",
+            approved_expense: null,
+            approved_expense_ex_tax: null,
+            approved_expense_inc_tax: null,
+            actual_project_cost_known: null,
+            actual_project_cost_known_ex_tax: null,
+            actual_project_cost_known_inc_tax: null,
+            cost_progress_basis: "inc_tax",
+            cost_rate_lower_bound_pct: null,
+            cost_status: null,
+            cost_complete: null,
+            missing_cost_lines: 1,
+          },
+          reminder_count: 1,
+          as_of: "2026-08-09",
+        }],
+        total: 1,
+        page: 1,
+        page_size: 24,
+        as_of: "2026-08-09",
+        data_version: "cost-only-v1",
+      },
+    });
+
+    const metrics = (await listMaintenanceProjectOperations()).data.rows[0].metrics;
+
+    expect(metrics.site_requisition_known_cost_inc_tax).toBe(113);
+    expect(metrics.site_requisition_priced_cost_ex_tax).toBe(100);
+    expect(metrics.sales_estimate_cost_inc_tax).toBe(28.25);
+    expect(metrics.sales_estimate_lines).toBe(2);
+    expect(metrics.cost_progress_includes_sales_estimate).toBe(true);
+    expect(metrics.cost_progress_label).toBe("priced_cost_including_sales_estimate");
+    expect(metrics.missing_cost_lines).toBe(1);
+    expect(metrics.approved_expense_inc_tax).toBeNull();
+    expect(metrics.actual_project_cost_known_inc_tax).toBeNull();
+  });
+
+  it("仅成本权限在工作台保留现场领用取价证据并继续隐藏费用和回款", async () => {
+    localStorage.setItem("role", "purchaser");
+    localStorage.setItem("permissions", JSON.stringify({
+      data_purchase_cost: true,
+      data_profit: false,
+    }));
+    get.mockResolvedValueOnce({
+      data: {
+        project: {
+          project_id: "project-cost-only",
+          project_code: "XM-COST-ONLY",
+          display_name: "仅成本权限项目",
+          project_manager_id: null,
+          lifecycle_status: "ongoing",
+          is_active: true,
+          version: 1,
+          contracts: [],
+          metrics: {
+            total_contract_amount: null,
+            known_contract_amount: null,
+            contract_amount_basis: "inc_tax",
+            contract_amount_complete: null,
+            received_amount: null,
+            collection_progress_pct: null,
+            site_requisition_known_cost: "113.00",
+            site_requisition_known_cost_ex_tax: "100.00",
+            site_requisition_known_cost_inc_tax: "113.00",
+            site_requisition_priced_cost_ex_tax: "100.00",
+            site_requisition_priced_cost_inc_tax: "113.00",
+            sales_estimate_cost_ex_tax: "25.00",
+            sales_estimate_cost_inc_tax: "28.25",
+            sales_estimate_lines: "2",
+            cost_progress_includes_sales_estimate: true,
+            cost_progress_label: "priced_cost_including_sales_estimate",
+            approved_expense: "999.00",
+            approved_expense_ex_tax: "999.00",
+            approved_expense_inc_tax: "999.00",
+            actual_project_cost_known: "1112.00",
+            actual_project_cost_known_ex_tax: "1099.00",
+            actual_project_cost_known_inc_tax: "1112.00",
+            cost_progress_basis: "inc_tax",
+            cost_rate_lower_bound_pct: "99.90",
+            cost_status: "yellow",
+            cost_complete: null,
+            missing_cost_lines: 0,
+          },
+          reminder_count: 1,
+          as_of: "2026-08-09",
+        },
+        collection_snapshots: {
+          rows: [{
+            collection_id: "collection-hidden",
+            project_contract_id: "pc-hidden",
+            contract_no: null,
+            report_month: "2026-08-01",
+            cumulative_amount: "999.00",
+            receipt_reference: "RECEIPT-HIDDEN",
+            status: "confirmed",
+            remark: "不应保留的回款备注",
+            version: 1,
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+        },
+        requisitions: {
+          rows: [{
+            line_id: "line-sales-estimate",
+            order_no: "WBDD-COST-ONLY",
+            order_date: "2026-08-01",
+            contract_no: null,
+            pn: "PN-COST-ONLY",
+            description: "成本权限可见",
+            quantity: "2",
+            unit_cost: "56.50",
+            cost_amount: "113.00",
+            unit_cost_ex_tax: "50.00",
+            unit_cost_inc_tax: "56.50",
+            cost_amount_ex_tax: "100.00",
+            cost_amount_inc_tax: "113.00",
+            cost_source: "sales_window",
+            cost_evidence_kind: "sales_estimate",
+            cost_is_estimate: true,
+            cost_source_label: "估算（销售前后 7 天数量加权）",
+            cost_status: "available",
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+        },
+        approved_expenses: {
+          rows: [{
+            expense_id: "expense-hidden",
+            expense_date: "2026-08-02",
+            contract_no: null,
+            amount: "999.00",
+            amount_ex_tax: "999.00",
+            amount_inc_tax: "999.00",
+            approval_status: "approved",
+          }],
+          total: 1,
+          page: 1,
+          page_size: 20,
+        },
+        reminders: [],
+        workbook_preview: {
+          protocol_version: "2.0",
+          sheets: [],
+          latest_tracking_month: null,
+          last_exported_at: null,
+          data_version: "cost-only-v1",
+        },
+        as_of: "2026-08-09",
+        data_version: "cost-only-v1",
+      },
+    });
+
+    const { data } = await getMaintenanceProjectWorkspace("project-cost-only");
+
+    expect(data.requisitions.rows[0]).toEqual(expect.objectContaining({
+      quantity: 2,
+      unit_cost_inc_tax: 56.5,
+      cost_amount_inc_tax: 113,
+      cost_source: "sales_window",
+      cost_evidence_kind: "sales_estimate",
+      cost_is_estimate: true,
+      cost_source_label: "估算（销售前后 7 天数量加权）",
+    }));
+    expect(data.project.metrics.site_requisition_known_cost_inc_tax).toBe(113);
+    expect(data.project.metrics.approved_expense).toBeNull();
+    expect(data.project.metrics.approved_expense_inc_tax).toBeNull();
+    expect(data.project.metrics.actual_project_cost_known_inc_tax).toBeNull();
+    expect(data.project.metrics.cost_rate_lower_bound_pct).toBeNull();
+    expect(data.project.metrics.cost_status).toBeNull();
+    expect(data.collection_snapshots.rows[0]).toEqual(expect.objectContaining({
+      cumulative_amount: null,
+      receipt_reference: null,
+      remark: null,
+    }));
+    expect(data.approved_expenses.rows).toEqual([]);
+    expect(data.approved_expenses.total).toBe(0);
+  });
+
   it("成本回填成功响应在 API 边界保留并归一化单位成本和金额双值", async () => {
     patch.mockResolvedValueOnce({
       data: {
@@ -479,5 +1163,41 @@ describe("maintenance operations API", () => {
       cost_amount_ex_tax: 200,
       cost_amount_inc_tax: 226,
     }));
+  });
+
+  it("项目经理 v3 工作簿固定走本人范围的下载、校验和应用入口", () => {
+    const file = new File(["synthetic"], "manager-v3.xlsx");
+
+    getMaintenanceManagerWorkbookStatus("2026-08");
+    downloadMaintenanceManagerWorkbook("2026-08");
+    validateMaintenanceManagerWorkbook("2026-08", file);
+    applyMaintenanceManagerWorkbook({
+      validation_token: "validation-v3",
+      data_version: "data-v3",
+    });
+
+    expect(get).toHaveBeenNthCalledWith(
+      1,
+      "/maintenance/project-manager/workbooks/v3/status",
+      { params: { report_month: "2026-08" } },
+    );
+    expect(get).toHaveBeenNthCalledWith(
+      2,
+      "/maintenance/project-manager/workbooks/v3",
+      { params: { report_month: "2026-08" }, responseType: "blob" },
+    );
+    expect(post.mock.calls[0][0]).toBe(
+      "/maintenance/project-manager/workbooks/v3/validate",
+    );
+    expect(post.mock.calls[0][1]).toBeInstanceOf(FormData);
+    expect(post.mock.calls[0][2]).toEqual({
+      params: { report_month: "2026-08" },
+      timeout: 120000,
+    });
+    expect(post).toHaveBeenNthCalledWith(
+      2,
+      "/maintenance/project-manager/workbooks/v3/apply",
+      { validation_token: "validation-v3", data_version: "data-v3" },
+    );
   });
 });

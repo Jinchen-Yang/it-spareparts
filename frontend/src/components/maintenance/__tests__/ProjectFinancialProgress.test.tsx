@@ -23,11 +23,31 @@ const explicitTaxMetrics = (
   cost_progress_basis: "inc_tax" as const,
 });
 
+const fullVisibility = {
+  canViewCost: true,
+  canViewContract: true,
+  canViewExpense: true,
+  canViewFinancial: true,
+};
+
+const noCostVisibility = {
+  ...fullVisibility,
+  canViewCost: false,
+  canViewFinancial: false,
+};
+
+const noContractVisibility = {
+  ...fullVisibility,
+  canViewContract: false,
+  canViewFinancial: false,
+};
+
 describe("项目双进度", () => {
   it.each([
     [799, "normal"],
-    [799.99, "yellow"],
-    [800, "yellow"],
+    [799.99, "normal"],
+    [800, "normal"],
+    [800.1, "yellow"],
     [1000, "yellow"],
     [1000.01, "yellow"],
     [1000.04, "yellow"],
@@ -48,8 +68,16 @@ describe("项目双进度", () => {
     })).toMatchObject({ status: "unknown", percent: 50 });
   });
 
+  it("完整度 null 只表示项目总成本状态未知，不再充当权限判据", () => {
+    expect(classifyCostWaterline({
+      totalContractAmount: 1000,
+      actualProjectCostKnown: null,
+      costComplete: null,
+    })).toEqual({ status: "completeness_unknown", percent: null });
+  });
+
   it("直接使用服务端 Decimal HALF_UP 的成本率与红黄状态", () => {
-    render(<ProjectFinancialProgress metrics={{
+    render(<ProjectFinancialProgress visibility={fullVisibility} metrics={{
       total_contract_amount: 200,
       contract_amount_complete: true,
       received_amount: 200.01,
@@ -71,7 +99,7 @@ describe("项目双进度", () => {
   });
 
   it("合同额证据不完整时两条进度都不计算百分比", () => {
-    render(<ProjectFinancialProgress metrics={{
+    render(<ProjectFinancialProgress visibility={fullVisibility} metrics={{
       total_contract_amount: 1000,
       contract_amount_complete: false,
       received_amount: 300,
@@ -91,7 +119,7 @@ describe("项目双进度", () => {
   });
 
   it("成本字段被脱敏时只说明不可见，不推断缺价或成本比例", () => {
-    render(<ProjectFinancialProgress metrics={{
+    render(<ProjectFinancialProgress visibility={noCostVisibility} metrics={{
       total_contract_amount: 1000,
       contract_amount_complete: true,
       received_amount: 300,
@@ -111,7 +139,7 @@ describe("项目双进度", () => {
   });
 
   it("合同额权限受限时不冒充证据不完整，也不展示百分比", () => {
-    render(<ProjectFinancialProgress metrics={{
+    render(<ProjectFinancialProgress visibility={noContractVisibility} metrics={{
       total_contract_amount: null,
       contract_amount_complete: null,
       received_amount: null,
@@ -129,7 +157,7 @@ describe("项目双进度", () => {
   });
 
   it("没有可计算合同额时仍展示缺价事实，但不拼接空的下限文案", () => {
-    render(<ProjectFinancialProgress metrics={{
+    render(<ProjectFinancialProgress visibility={fullVisibility} metrics={{
       total_contract_amount: null,
       contract_amount_complete: true,
       received_amount: 0,
@@ -146,8 +174,8 @@ describe("项目双进度", () => {
     expect(cost).not.toHaveTextContent("；，");
   });
 
-  it("展示回款、项目实际成本两条进度，并拆分现场领用与审批通过报销", () => {
-    render(<ProjectFinancialProgress metrics={{
+  it("把销售回退估算显式披露为项目已计成本的一部分", () => {
+    render(<ProjectFinancialProgress visibility={fullVisibility} metrics={{
       total_contract_amount: 1000,
       contract_amount_complete: true,
       received_amount: 600,
@@ -155,26 +183,33 @@ describe("项目双进度", () => {
       approved_expense: 3.5,
       actual_project_cost_known: 8,
       ...explicitTaxMetrics(450, 350, 800),
+      sales_estimate_cost_ex_tax: 106.19,
+      sales_estimate_cost_inc_tax: 120,
+      sales_estimate_lines: 2,
+      cost_progress_includes_sales_estimate: true,
+      cost_progress_label: "priced_cost_including_sales_estimate" as const,
       cost_complete: false,
       missing_cost_lines: 3,
     }} />);
 
     expect(screen.getByText("回款 / 全部合同额（含税）")).toBeInTheDocument();
     const cost = screen.getByTestId("project-cost-progress");
-    expect(within(cost).getByText("项目实际成本（含税） / 全部合同额（含税）"))
+    expect(within(cost).getByText("项目已计成本（含税） / 全部合同额（含税）"))
       .toBeInTheDocument();
-    expect(within(cost).getByText(/现场领用已知成本（含税） ¥450/)).toBeInTheDocument();
+    expect(within(cost).getByText(/现场领用已计成本（含税） ¥450/)).toBeInTheDocument();
     expect(within(cost).getByText(/审批通过报销（含税） ¥350/)).toBeInTheDocument();
+    expect(within(cost).getByText(/销售回退估算（含税） ¥120（2 行）/)).toBeInTheDocument();
+    expect(cost).toHaveTextContent("已计入进度，但不等于采购或人工确认单价");
     expect(cost).not.toHaveTextContent("¥4.5");
     expect(within(cost).getByText(/缺 3 行成本/)).toBeInTheDocument();
     expect(within(cost).getAllByText("已知下限 ≥80%").length).toBeGreaterThanOrEqual(1);
-    expect(within(cost).getByText(/现场领用成本（含税）占合同额（含税） 45%/))
+    expect(within(cost).getByText(/现场领用已计成本（含税）占合同额（含税） 45%/))
       .toBeInTheDocument();
     expect(within(cost).queryByText("低于 80%")).toBeNull();
   });
 
   it("成本税口径缺失时失败关闭，不消费服务端 canonical 百分比和红黄状态", () => {
-    render(<ProjectFinancialProgress metrics={{
+    render(<ProjectFinancialProgress visibility={fullVisibility} metrics={{
       total_contract_amount: 1000,
       contract_amount_complete: true,
       received_amount: 600,
@@ -198,7 +233,7 @@ describe("项目双进度", () => {
   });
 
   it("合同额税口径缺失时两条进度都失败关闭", () => {
-    render(<ProjectFinancialProgress metrics={{
+    render(<ProjectFinancialProgress visibility={fullVisibility} metrics={{
       total_contract_amount: 1000,
       contract_amount_complete: true,
       received_amount: 600,

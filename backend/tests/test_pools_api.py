@@ -383,7 +383,17 @@ def test_permission_registry_wiring(db):
     assert meta["action_keys"] == ["action_pool_manage", "action_pool_set_policy",
                                    "action_account_manage", "action_data_quality_review",
                                    "action_maintenance_roundtrip_apply",
-                                   "action_maintenance_project_manage"]
+                                   "action_maintenance_manager_workbook_apply",
+                                   "action_maintenance_project_manage",
+                                   "action_maintenance_demand_delete",
+                                   "action_maintenance_site_issue_manage",
+                                   "action_maintenance_bad_return_manage",
+                                   "action_maintenance_acceptance_submit",
+                                   "action_maintenance_acceptance_review",
+                                   "action_maintenance_warehouse_manage",
+                                   "action_maintenance_migration_review",
+                                   "action_replenishment_create",
+                                   "action_replenishment_review"]
 
 
 # ---------------------------------------------------------------- 端到端闭环

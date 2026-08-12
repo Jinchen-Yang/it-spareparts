@@ -70,9 +70,10 @@ def run_migrations_online() -> None:
     with connectable.connect() as connection:
         context.configure(
             connection=connection, target_metadata=target_metadata,
-            # 每个迁移单独提交：避免长链升级（如生产从 876dad34e9c5 直跳 head）
-            # 把 ACCESS EXCLUSIVE 锁持有到整链结束
-            transaction_per_migration=True,
+            # 整个命令共用一个事务：任一 revision 的保护检查失败时，前面已经执行的
+            # upgrade/downgrade 也必须全部回滚，绝不允许数据库停在“部分升级/部分降级”状态。
+            # 生产迁移在维护窗口执行；锁持有时间由发布前副本演练与 lock_timeout 控制。
+            transaction_per_migration=False,
         )
 
         with context.begin_transaction():

@@ -14,13 +14,14 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import permissions, security
+from app.beta_access import beta_feature_availability
 from app.config import get_settings
 from app.db import get_db
 from app.models.system import SysAuditLog, SysUser
@@ -69,6 +70,7 @@ class LoginResponse(BaseModel):
     name: str | None = None
     expires_at: int
     permissions: dict | None = None   # 该用户最终权限，前端据此控菜单
+    beta_features: dict[str, bool]    # 服务端总闸 + 实名白名单导航快照
 
 
 def _sign(payload: bytes) -> str:
@@ -198,9 +200,18 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
         token, exp = _make_token(user.role, user.username, user.salesperson_name,
                                  perms=perms, token_version=user.token_version or 0,
                                  authn="sys_user")
-        return LoginResponse(token=token, role=user.role,
-                             name=user.display_name or user.salesperson_name,
-                             expires_at=exp, permissions=perms)
+        return LoginResponse(
+            token=token,
+            role=user.role,
+            name=user.display_name or user.salesperson_name,
+            expires_at=exp,
+            permissions=perms,
+            beta_features=beta_feature_availability(
+                role=user.role,
+                permission_map=perms,
+                real_identity=True,
+            ),
+        )
 
     # 回退：兼容既有部署的共享口令登录（sys_user 无此账号时）。
     # admin 的 sub 固定为 'admin'（无冒充空间）；其余用户名是自报的。
@@ -214,8 +225,11 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
     role = "admin" if req.username == "admin" else "readonly"
     perms = permissions.runtime_safe(permissions.effective(role, None))
     # Shared credentials are not a real SysUser identity and therefore never
-    # advertise the high-risk project-master write capability to the client.
+    # advertise high-risk maintenance identity/approval capabilities to the client.
     perms["action_maintenance_project_manage"] = False
+    perms["action_maintenance_demand_delete"] = False
+    perms["action_maintenance_warehouse_manage"] = False
+    perms["action_maintenance_migration_review"] = False
     _ev("login_success", role, {"path": "shared_password"})
     token, exp = _make_token(
         role,
@@ -225,7 +239,18 @@ def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)) ->
         perms=perms,
         authn="shared",
     )
-    return LoginResponse(token=token, role=role, name=req.username, expires_at=exp, permissions=perms)
+    return LoginResponse(
+        token=token,
+        role=role,
+        name=req.username,
+        expires_at=exp,
+        permissions=perms,
+        beta_features=beta_feature_availability(
+            role=role,
+            permission_map=perms,
+            real_identity=False,
+        ),
+    )
 
 
 # ---------- 依赖 ----------
@@ -234,6 +259,26 @@ def current_identity(creds: HTTPAuthorizationCredentials | None = Depends(_beare
     if creds is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "缺少凭证")
     return verify_token_db(creds.credentials, db)
+
+
+@router.get("/beta-features", response_model=dict[str, bool])
+def beta_features(
+    response: Response,
+    ident: dict = Depends(current_identity),
+) -> dict[str, bool]:
+    """Refresh kill-switch and whitelist state for an already logged-in client."""
+
+    response.headers["Cache-Control"] = "no-store"
+    real_identity = (
+        ident.get("authn") == "sys_user"
+        and not ident.get("fb")
+        and bool(ident.get("sub"))
+    )
+    return beta_feature_availability(
+        role=str(ident.get("role") or "guest"),
+        permission_map=ident.get("perms"),
+        real_identity=real_identity,
+    )
 
 
 # ---------- 自助改密 ----------

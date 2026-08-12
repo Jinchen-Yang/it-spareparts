@@ -9,6 +9,18 @@ services:
   db:
     image: postgres:15
     logging: *default-logging
+    # 保留慢查询时长和 SQL 结构用于诊断，但永不把 bind 参数写入普通或错误日志。
+    # 命令行配置优先于数据卷里可能遗留的 postgresql.auto.conf。
+    command:
+      - postgres
+      - -c
+      - log_min_duration_statement=1000
+      - -c
+      - log_parameter_max_length=0
+      - -c
+      - log_parameter_max_length_on_error=0
+      - -c
+      - log_statement=none
     environment:
       POSTGRES_USER: spareparts
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-spareparts}
@@ -35,10 +47,18 @@ services:
       RAW_FILE_DIR: /app/data/raw
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-env}
+      MAINTENANCE_MANIFEST_ACTIVE_KEY_ID: ${MAINTENANCE_MANIFEST_ACTIVE_KEY_ID:-dev-v1}
+      MAINTENANCE_MANIFEST_ACTIVE_HMAC_KEY: ${MAINTENANCE_MANIFEST_ACTIVE_HMAC_KEY:-change-me-maintenance-manifest-key-dev-v1}
+      MAINTENANCE_MANIFEST_PREVIOUS_HMAC_KEYS_JSON: ${MAINTENANCE_MANIFEST_PREVIOUS_HMAC_KEYS_JSON:-none}
+      # Beta 删除墓碑及新成本/库存口径的独立生产闸门；manifest 审批不会自动打开。
+      MAINTENANCE_CUTOVER_ENABLED: ${MAINTENANCE_CUTOVER_ENABLED:-false}
       APP_PORT: ${APP_PORT:-8000}
       # 默认 prod：忘配 .env 时带默认口令/密钥会「拒启」而非偷偷上线（审计 2026-06-28 S-1）。
       # 本地用 docker 起开发栈时，在 .env 显式设 ENVIRONMENT=dev 即可放行默认弱口令。
       ENVIRONMENT: ${ENVIRONMENT:-prod}
+      # 独立 Beta 默认关闭；关闭只隐藏入口和拒绝业务请求，不删除历史数据。
+      MAINTENANCE_BETA_ENABLED: ${MAINTENANCE_BETA_ENABLED:-false}
+      REPLENISHMENT_BETA_ENABLED: ${REPLENISHMENT_BETA_ENABLED:-false}
       # 二期 AI 助手：不配 LLM_API_KEY 时其余功能照常，chat 接口返回降级提示
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}

@@ -7,14 +7,20 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.api.maintenance_project_scope import require_maintenance_project_access
 from app.auth import current_identity, current_role
 from app.business_time import business_today
 from app.db import get_db
-from app.security import UserContext, get_current_user_context, record_access_log, require_page
+from app.models.system import SysUser
+from app.security import (
+    UserContext,
+    get_current_user_context,
+    record_access_log,
+    require_action,
+    require_page,
+)
 from app.services import maintenance_project
 from app.services import maintenance_project_catalog as catalog
-from app.models.system import SysUser
-from app.security import require_action
 
 router = APIRouter(prefix="/maintenance/projects/stable", tags=["maintenance"])
 
@@ -42,6 +48,16 @@ class StableProjectLifecycle(BaseModel):
 
     version: int = Field(ge=1)
     reason: str = Field(min_length=1, max_length=1000)
+
+
+class StableProjectDirectorySearch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    q: str
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=200)
+    include_inactive: bool = False
+    as_of: date | None = None
 
 
 def _real_operator(db: Session, ident: dict) -> str:
@@ -110,6 +126,7 @@ def patch_stable_project(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_profit")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     operated_by = _real_operator(db, ident)
     updates = body.model_dump(
@@ -189,6 +206,7 @@ def archive_stable_project(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_profit")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     return _set_project_active(
         project_id=project_id,
@@ -209,6 +227,7 @@ def restore_stable_project(
     _action: None = Depends(
         require_action("action_maintenance_project_manage", require_data="data_profit")
     ),
+    _scope: None = Depends(require_maintenance_project_access),
 ) -> dict:
     return _set_project_active(
         project_id=project_id,
@@ -219,9 +238,41 @@ def restore_stable_project(
     )
 
 
+def _stable_project_directory_response(
+    *,
+    q: str | None,
+    page: int,
+    page_size: int,
+    include_inactive: bool,
+    as_of: date | None,
+    db: Session,
+    ctx: UserContext,
+) -> dict:
+    effective_as_of = as_of or business_today()
+    record_access_log(
+        ctx,
+        "stable_project_directory",
+        "maintenance",
+        {
+            "searched": bool(q and q.strip()),
+            "include_inactive": include_inactive,
+            "as_of": str(effective_as_of),
+        },
+    )
+    return maintenance_project.project_directory(
+        db,
+        q_text=q,
+        page=page,
+        page_size=page_size,
+        include_inactive=include_inactive,
+        as_of=effective_as_of,
+        user_ctx=ctx,
+    )
+
+
 @router.get("")
 def stable_project_directory(
-    q: str | None = Query(None, max_length=128),
+    q: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     include_inactive: bool = Query(False),
@@ -231,20 +282,44 @@ def stable_project_directory(
     _page: None = Depends(require_page("page_maintenance")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    effective_as_of = as_of or business_today()
-    record_access_log(
-        ctx,
-        "stable_project_directory",
-        "maintenance",
-        {"q": q, "include_inactive": include_inactive, "as_of": str(effective_as_of)},
-    )
-    return maintenance_project.project_directory(
-        db,
-        q_text=q,
+    if q is not None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "项目搜索请使用安全搜索接口",
+        )
+    return _stable_project_directory_response(
+        q=None,
         page=page,
         page_size=page_size,
         include_inactive=include_inactive,
-        as_of=effective_as_of,
+        as_of=as_of,
+        db=db,
+        ctx=ctx,
+    )
+
+
+@router.post("/search")
+def search_stable_project_directory(
+    body: StableProjectDirectorySearch,
+    db: Session = Depends(get_db),
+    _auth: str = Depends(current_role),
+    _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
+) -> dict:
+    q = body.q.strip()
+    if not q or len(q) > 128:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "项目搜索条件无效",
+        )
+    return _stable_project_directory_response(
+        q=q,
+        page=body.page,
+        page_size=body.page_size,
+        include_inactive=body.include_inactive,
+        as_of=body.as_of,
+        db=db,
+        ctx=ctx,
     )
 
 
@@ -255,6 +330,7 @@ def stable_project_overview(
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     effective_as_of = as_of or business_today()

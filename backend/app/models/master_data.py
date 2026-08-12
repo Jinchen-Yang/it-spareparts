@@ -21,7 +21,6 @@ from sqlalchemy import (
     CheckConstraint,
     ForeignKey,
     Index,
-    Integer,
     Numeric,
     String,
     Text,

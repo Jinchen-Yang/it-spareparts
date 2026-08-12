@@ -104,6 +104,9 @@ os.environ["PYTEST_DATABASE_BASE_URL"] = _database_run.base_url
 os.environ["DATABASE_URL"] = _database_run.database_url
 os.environ["PYTEST_RAW_FILE_BASE_DIR"] = str(_raw_run.root)
 os.environ["RAW_FILE_DIR"] = str(_raw_run.run_dir)
+# 新维保接口在生产默认关闭；业务测试需显式处于 Beta 已开启环境。
+# 总闸关闭及逐账号白名单边界由 test_maintenance_beta_gate 单独覆盖。
+os.environ.setdefault("MAINTENANCE_BETA_ENABLED", "true")
 
 try:
     import pytest  # noqa: E402
@@ -119,7 +122,19 @@ _app_engine = engine
 
 _TABLES = [
     "chat_message", "chat_session",
+    "replenishment_review_line",
+    "replenishment_review",
+    "replenishment_audit_event",
+    "replenishment_application_line",
+    "replenishment_application_version",
+    "replenishment_application",
     "fact_data_quality_issue",
+    "maintenance_warehouse_audit_event",
+    "maintenance_warehouse_ambiguity",
+    "maintenance_warehouse_document_link",
+    "maintenance_warehouse_document_line",
+    "maintenance_warehouse_document",
+    "maintenance_warehouse_import_batch",
     "product_data_quality_issues", "product_merge_logs", "product_match_candidates",
     "product_specs", "product_categories", "brands",
     # 池三表：TRUNCATE 不会重置独立序列 part_pool_group_id_seq（非 owned），
@@ -128,12 +143,28 @@ _TABLES = [
     "f_part_inquiry", "part_substitute", "inventory",
     "maintenance_manual_cost_override",
     "maintenance_roundtrip_operation",
+    "maintenance_demand_delete_event",
+    "maintenance_demand_tombstone",
+    "maintenance_demand_delete_intent_item",
+    "maintenance_demand_delete_intent",
     "f_project_expense",
+    "maintenance_source_order_assignment",
     "f_maintenance_line", "f_maintenance_order",
     "f_sales_line", "f_sales_order", "f_purchase_line", "f_purchase_order",
     "part_alias", "dim_part", "dim_supplier", "dim_customer",
     "maintenance_contract_workbook_state",
+    "maintenance_migration_event",
+    "maintenance_migration_discrepancy",
+    "maintenance_inventory_opening_balance",
+    "maintenance_historical_cost_baseline",
+    "maintenance_project_cutover_plan",
+    "maintenance_migration_run",
     "maintenance_project_audit_log",
+    "business_file_download_audit", "maintenance_acceptance_operation",
+    "business_file_link", "business_file", "maintenance_acceptance_deliverable",
+    "maintenance_collection_milestone", "maintenance_service_period",
+    "maintenance_manager_upload_batch_project", "maintenance_manager_upload_batch",
+    "maintenance_project_user_assignment",
     "maintenance_project_contract", "maintenance_project",
     "sys_audit_log", "sys_access_log", "sys_raw_file", "sys_import_error", "sys_import_batch",
     "sys_import_job", "sys_user",

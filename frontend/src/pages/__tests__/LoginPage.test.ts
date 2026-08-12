@@ -20,6 +20,7 @@ it("登录会话最后发布 token，使其它标签页只看到完整权限快�
     "role",
     "name",
     "permissions",
+    "beta_features",
     "token",
   ]);
   expect(localStorage.getItem("token")).toBe("signed-token");

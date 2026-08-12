@@ -6,6 +6,7 @@ import AppShell from "./AppShell";
 import { DETAIL_ROUTES, NAV_ITEMS, NAV_REDIRECTS, defaultPath } from "./nav";
 import { clearSessionScopedPreferences } from "./sessionPreferences";
 import { TaxBasisProvider } from "./context/TaxBasis";
+import { getBetaFeatures } from "./api";
 
 /** 安全读取本地权限快照：localStorage 被写坏时回退为空而非抛错致整页白屏（审计 U-1）。 */
 function readPerms(): Record<string, boolean> {
@@ -16,8 +17,17 @@ function readPerms(): Record<string, boolean> {
   }
 }
 
+function readBetaFeatures(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem("beta_features") || "{}");
+  } catch {
+    return {};
+  }
+}
+
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
+  const [betaFeatures, setBetaFeatures] = useState<Record<string, boolean>>(readBetaFeatures);
 
   useEffect(() => {
     const syncCrossTabSession = (event: StorageEvent) => {
@@ -29,6 +39,55 @@ export default function App() {
     return () => window.removeEventListener("storage", syncCrossTabSession);
   }, []);
 
+  useEffect(() => {
+    if (!token) {
+      setBetaFeatures({});
+      return;
+    }
+    let current = true;
+    let latestRequest = 0;
+    const expectedToken = token;
+    const refreshBetaFeatures = () => {
+      const requestId = ++latestRequest;
+      void getBetaFeatures()
+        .then(({ data }) => {
+          if (
+            !current
+            || requestId !== latestRequest
+            || localStorage.getItem("token") !== expectedToken
+          ) return;
+          const refreshed = {
+            maintenance: data.maintenance === true,
+            replenishment: data.replenishment === true,
+          };
+          localStorage.setItem("beta_features", JSON.stringify(refreshed));
+          setBetaFeatures(refreshed);
+        })
+        .catch(() => {
+          if (
+            !current
+            || requestId !== latestRequest
+            || localStorage.getItem("token") !== expectedToken
+          ) return;
+          // Capability refresh failures hide Beta only; stable pages remain usable.
+          localStorage.setItem("beta_features", "{}");
+          setBetaFeatures({});
+        });
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refreshBetaFeatures();
+    };
+
+    refreshBetaFeatures();
+    window.addEventListener("focus", refreshBetaFeatures);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      current = false;
+      window.removeEventListener("focus", refreshBetaFeatures);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [token]);
+
   // 权限快照随登录周期固定：只在 token 变化（登录/登出/改密）时重算，
   // 让 AppShell 收到的 allowed 引用稳定、下游 useMemo 可依赖
   const allowed = useMemo(() => {
@@ -37,20 +96,24 @@ export default function App() {
     const isAdmin = role === "admin";
     const perms = readPerms();
     // admin 全通；组合能力入口优先按完整能力判断；其余沿用单权限/任一权限规则。
-    return NAV_ITEMS.filter((it) => isAdmin
+    return NAV_ITEMS.filter((it) => (
+      !it.betaFeature || betaFeatures[it.betaFeature] === true
+    ) && (isAdmin
       || (it.visibleWhen ? it.visibleWhen()
         : it.perm ? !!perms[it.perm]
         : it.anyPerm ? it.anyPerm.some((p) => !!perms[p])
-          : false));
-  }, [token]);
+          : false)));
+  }, [token, betaFeatures]);
 
   // 带参详情路由（如 /pool-analysis/:groupId）：与母页共用同一权限门，无权限则不注册
   const allowedDetails = useMemo(() => {
     if (!token) return [];
     const isAdmin = (localStorage.getItem("role") || "") === "admin";
     const perms = readPerms();
-    return DETAIL_ROUTES.filter((r) => isAdmin || !!perms[r.perm]);
-  }, [token]);
+    return DETAIL_ROUTES.filter((r) => (
+      !r.betaFeature || betaFeatures[r.betaFeature] === true
+    ) && (isAdmin || !!perms[r.perm]));
+  }, [token, betaFeatures]);
 
   // 未登录时任何路径都先登录；登录后停留在原地址（支持深链接直达）
   if (!token) return <LoginPage onLogin={setToken} />;
@@ -61,6 +124,8 @@ export default function App() {
     localStorage.removeItem("role");
     localStorage.removeItem("name");
     localStorage.removeItem("permissions");
+    localStorage.removeItem("beta_features");
+    setBetaFeatures({});
     setToken(null);
   };
 

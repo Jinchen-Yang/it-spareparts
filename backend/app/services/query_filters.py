@@ -6,7 +6,7 @@
 """
 import re
 
-from sqlalchemy import or_
+from sqlalchemy import exists, or_, select
 
 from app import config
 
@@ -121,11 +121,57 @@ def col_matches_any(column, variants: list[str]):
 
 
 def active_orders(stmt, order_model):
-    """按"已生效"过滤订单查询（受 config.ACTIVE_STATUS_ONLY 开关控制；关则不过滤）。
+    """按稳定版订单口径过滤；维保墓碑只在正式切换后生效。
 
-    order_model 需有 data_status 列（FPurchaseOrder / FSalesOrder）。仅用于
+    order_model 需有 data_status 列（FPurchaseOrder / FSalesOrder /
+    FMaintenanceOrder）。仅用于
     "无条件按生效过滤"的站点；带 status 入参的条件过滤（如 recent_purchases）不适用。
     """
     if config.ACTIVE_STATUS_ONLY:
-        return stmt.where(order_model.data_status == config.ACTIVE_STATUS)
+        stmt = stmt.where(order_model.data_status == config.ACTIVE_STATUS)
+    # Beta 删除先作为同库影子事实存在。只有独立的生产口径切换开关打开后，
+    # 原稳定版成本、库存、项目和导出读模型才统一消费墓碑。
+    if config.get_settings().maintenance_cutover_enabled:
+        from sqlalchemy import inspect
+
+        from app.models.maintenance import (
+            FMaintenanceOrder,
+            MaintenanceDemandTombstone,
+        )
+
+        inspected = inspect(order_model, raiseerr=False)
+        mapper = getattr(inspected, "mapper", None)
+        if mapper is not None and mapper.class_ is FMaintenanceOrder:
+            stmt = stmt.where(
+                ~exists(
+                    select(1).where(
+                        MaintenanceDemandTombstone.source_order_id
+                        == order_model.raw_order_id,
+                        MaintenanceDemandTombstone.restored_at.is_(None),
+                    )
+                )
+            )
     return stmt
+
+
+def active_beta_maintenance_orders(stmt, order_model):
+    """Apply the Beta-only WBDD tombstone boundary.
+
+    A Beta deletion is a shadow fact until the explicit maintenance cutover.
+    Stable production cost, inventory and export readers therefore continue to
+    use :func:`active_orders`, while Beta assignment/warehouse/workspace readers
+    opt in here.  This keeps both interfaces on one database without allowing a
+    Beta action to rewrite the stable view.
+    """
+
+    from app.models.maintenance import MaintenanceDemandTombstone
+
+    return active_orders(stmt, order_model).where(
+        ~exists(
+            select(1).where(
+                MaintenanceDemandTombstone.source_order_id
+                == order_model.raw_order_id,
+                MaintenanceDemandTombstone.restored_at.is_(None),
+            )
+        )
+    )

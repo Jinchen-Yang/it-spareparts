@@ -531,8 +531,16 @@ def test_migration_admin_short_circuit():
         template_perms = filled["template_perms"]
         perm_overrides = filled["perm_overrides"]
 
-    # 新旧口径对 admin 都强制全开，自定义锁不住
-    assert permissions.effective_for_user(U()) == permissions.effective("admin", U.permissions)
+    # 常规 admin 权限仍强制全开、自定义锁不住；后续新增的两个生产 Beta 页面
+    # 没有出现在历史快照中，因此按账号白名单失败关闭。
+    effective = permissions.effective_for_user(U())
+    legacy_full = permissions.effective("admin", U.permissions)
+    assert all(
+        effective[key] == legacy_full[key]
+        for key in permissions.ALL_KEYS
+        if key not in permissions.ACCOUNT_SCOPED_BETA_PAGE_KEYS
+    )
+    assert all(effective[key] is False for key in permissions.ACCOUNT_SCOPED_BETA_PAGE_KEYS)
 
 
 def test_frozen_templates_match_current_code():
@@ -570,5 +578,19 @@ def test_meta_has_business_language(db, admin_client):
             assert meta.get(field), f"{k} 缺业务语言字段 {field}"
     assert m["dependencies"]["action_data"]["action_pool_set_policy"] == "data_pool_price_governance"
     assert m["dependencies"]["action_page"]["action_account_manage"] == "page_accounts"
+    assert (
+        m["dependencies"]["action_additional_page"]["action_maintenance_project_manage"]
+        == "page_maintenance_beta"
+    )
+    assert m["dependencies"]["page_page"]["page_maintenance_beta"] == "page_maintenance"
     assert m["dependencies"]["data_data"]["data_profit"] == "data_purchase_cost"
+    assert m["meta"]["page_maintenance_beta"]["label"] == "维保管理"
+    assert m["meta"]["page_replenishment_beta"]["label"] == "补库申请"
+    for key in ("page_maintenance_beta", "page_replenishment_beta"):
+        visible_copy = " ".join(
+            str(m["meta"][key][field])
+            for field in ("label", "summary", "can", "cannot", "typical", "risk")
+        )
+        assert "Beta" not in visible_copy
+        assert "试用" not in visible_copy
     assert {t["code"] for t in m["templates"]} >= {"admin", "boss", "sales", "purchaser", "readonly"}

@@ -9,35 +9,56 @@ from __future__ import annotations
 
 from calendar import monthrange
 from collections import defaultdict
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
+import re
 from uuid import uuid4
 
 from sqlalchemy import and_, case, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectAuditLog,
     MaintenanceProjectContract,
+    MaintenanceProjectUserAssignment,
 )
+from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.dimensions import DimPart
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
     MaintenanceProjectExpenseAttribution,
     MaintenanceProjectOperationAudit,
     MaintenanceSiteIssue,
+    MaintenanceSiteIssueCommand,
+    MaintenanceSiteIssueDeliverySource,
     MaintenanceSiteIssueLine,
+    MaintenanceSiteIssueReturnEvent,
     MaintenanceProjectWorkbookState,
 )
-from app.business_time import BUSINESS_TZ, business_today
+from app.models.maintenance_manager import (
+    BusinessFile,
+    BusinessFileLink,
+    MaintenanceAcceptanceDeliverable,
+    MaintenanceCollectionMilestone,
+    MaintenanceManagerUploadBatch,
+    MaintenanceManagerUploadBatchProject,
+    MaintenanceServicePeriod,
+)
+from app.business_time import business_today
+from app.config import get_settings
 from app import tax_policy
 from app.security import UserContext, is_field_hidden
-from app.services import maintenance_project
+from app.services import maintenance_bad_returns
 from app.services import maintenance_consumption_cost
+from app.services import maintenance_project
+from app.services import maintenance_project_assignments
+from app.services import maintenance_warehouse_site_issue_bridge
+from app.services.query_filters import active_beta_maintenance_orders
 
 
 class MaintenanceOperationError(Exception):
@@ -48,11 +69,129 @@ class MaintenanceOperationConflict(Exception):
     """Concurrent or duplicate operating-fact request."""
 
 
+class MaintenanceOperationPermissionError(Exception):
+    """Requested operating-fact selector depends on hidden financial facts."""
+
+
 _QUANTITY_QUANTUM = Decimal("0.001")
 _QUANTITY_MAX_EXCLUSIVE = Decimal("100000000000")
 _MONEY_QUANTUM = Decimal("0.01")
 _MONEY_MAX_EXCLUSIVE = Decimal("1000000000000")
 _SITE_ISSUE_LINE_LIMIT = 200
+_ALL_FINANCIAL_FILTER_FIELDS = ("contract_amount", "unit_cost", "expense_inc")
+_CONTRACT_COMPLETENESS_FILTERS = {
+    "completeness:no_effective_contracts",
+    "completeness:duplicate_effective_contract",
+    "completeness:unmapped_contract_status",
+    "completeness:missing_contract_amount",
+    "completeness:cross_project_contract_conflict",
+}
+_COST_COMPLETENESS_FILTERS = {
+    "completeness:missing_consumption_cost",
+    "completeness:unmapped_site_issue_status",
+}
+_EXPENSE_COMPLETENESS_FILTERS = {
+    "completeness:unmapped_expense_status",
+    "completeness:expense_data_not_ready",
+    "completeness:expense_readiness_in_future",
+}
+_EXACT_REMINDER_FILTERS = frozenset(
+    {
+        "项目经理月度更新",
+        "all",
+        "info",
+        "warning",
+        "critical",
+        "completeness",
+        "collection",
+        "cost",
+        "cost_ratio",
+        *_CONTRACT_COMPLETENESS_FILTERS,
+        *_COST_COMPLETENESS_FILTERS,
+        *_EXPENSE_COMPLETENESS_FILTERS,
+        "collection:missing_confirmed",
+        "collection:incomplete",
+        "cost:missing_price",
+        "cost:sales_fallback_estimate",
+        "cost_ratio:yellow",
+        "cost_ratio:red",
+        "维保期限",
+        "计划回款",
+        "验收报告",
+        "验收审批",
+        "service_period:empty",
+        "service_period:start_only",
+        "service_period:end_only",
+        "collection_plan:missing",
+        "acceptance:missing_due",
+        "acceptance:missing_attachment",
+        "acceptance:report_due",
+        "acceptance:pending_review",
+        "acceptance:rejected",
+    }
+)
+_MANAGER_UPDATE_FILTER = re.compile(
+    r"manager_update:[0-9]{4}-(?:0[1-9]|1[0-2])\Z",
+    re.ASCII,
+)
+_COLLECTION_PLAN_FILTER = re.compile(
+    r"collection_plan:([A-Za-z0-9_-]{1,36}):([1-9]|1[0-9]|2[0-4])\Z",
+    re.ASCII,
+)
+
+
+def _validate_reminder_filter(reminder: str | None) -> None:
+    """Reject undeclared reminder selectors without reflecting their content."""
+
+    if reminder is None:
+        return
+    if reminder in _EXACT_REMINDER_FILTERS:
+        return
+    if _MANAGER_UPDATE_FILTER.fullmatch(reminder):
+        return
+    if _COLLECTION_PLAN_FILTER.fullmatch(reminder):
+        return
+    raise MaintenanceOperationError("不支持的提醒筛选")
+
+
+def _reminder_filter_required_fields(reminder: str | None) -> tuple[str, ...]:
+    """Return hidden fact fields a directory selector would classify by."""
+
+    _validate_reminder_filter(reminder)
+    if reminder is None or reminder == "项目经理月度更新" or reminder.startswith(
+        "manager_update:"
+    ):
+        return ()
+    if reminder in _COST_COMPLETENESS_FILTERS:
+        return ("unit_cost",)
+    if reminder in _CONTRACT_COMPLETENESS_FILTERS:
+        return ("contract_amount",)
+    if reminder in _EXPENSE_COMPLETENESS_FILTERS:
+        return ("contract_amount", "expense_inc")
+    if reminder == "cost" or reminder.startswith("cost:"):
+        return ("unit_cost",)
+    if reminder in {"info", "collection"} or reminder.startswith("collection:"):
+        return ("contract_amount",)
+    if (
+        reminder in {"all", "warning", "critical", "completeness", "cost_ratio"}
+        or reminder.startswith("cost_ratio:")
+    ):
+        return _ALL_FINANCIAL_FILTER_FIELDS
+    return ()
+
+
+def _task_type_filter_required_fields(task_type: str | None) -> tuple[str, ...]:
+    if not task_type:
+        return ()
+    if task_type == "项目经理月度更新":
+        return ()
+    if task_type == "cost":
+        return ("unit_cost",)
+    if task_type == "collection":
+        return ("contract_amount",)
+    if task_type in {"completeness", "cost_ratio"}:
+        return _ALL_FINANCIAL_FILTER_FIELDS
+    return ()
 
 
 def _quantity(value: Decimal | str) -> Decimal:
@@ -346,6 +485,37 @@ def _validate_confirmed_collection_monotonicity(
             )
 
 
+_COST_EVIDENCE_META = {
+    None: ("missing", False, "待补价格"),
+    "direct_purchase": ("purchase_evidence", False, "关联采购单价"),
+    "purchase_window": (
+        "purchase_evidence",
+        False,
+        "采购前后 7 天数量加权",
+    ),
+    "sales_window": (
+        "sales_estimate",
+        True,
+        "估算（销售前后 7 天数量加权）",
+    ),
+    "manual": ("manual_confirmed", False, "人工确认单价"),
+}
+
+
+def cost_evidence_metadata(source: str | None) -> dict:
+    """Return stable business semantics for a resolved cost source."""
+
+    kind, is_estimate, label = _COST_EVIDENCE_META.get(
+        source,
+        ("unknown", True, "未知成本证据"),
+    )
+    return {
+        "cost_evidence_kind": kind,
+        "cost_is_estimate": is_estimate,
+        "cost_source_label": label,
+    }
+
+
 def site_issue_line_dict(row: MaintenanceSiteIssueLine) -> dict:
     return {
         "issue_line_id": row.issue_line_id,
@@ -353,6 +523,10 @@ def site_issue_line_dict(row: MaintenanceSiteIssueLine) -> dict:
         "part_id": row.part_id,
         "pn": row.pn,
         "quantity": _qty(row.quantity),
+        "delivery_line_id": row.delivery_line_id,
+        "source_order_id": row.source_order_id,
+        "source_line_id": row.source_line_id,
+        "serial_number": row.serial_number,
         "linked_purchase_line_id": row.linked_purchase_line_id,
         "manual_unit_cost": _money(row.manual_unit_cost),
         "manual_unit_cost_inc_tax": _money(row.manual_unit_cost_inc_tax),
@@ -365,6 +539,7 @@ def site_issue_line_dict(row: MaintenanceSiteIssueLine) -> dict:
         "cost_amount_inc_tax": _money(row.cost_amount_inc_tax),
         "tax_rate_used": _rate(row.tax_rate_used),
         "cost_source": row.cost_source,
+        **cost_evidence_metadata(row.cost_source),
         "price_basis": row.price_basis,
         "reference_side": row.reference_side,
         "reference_sample_ids": row.reference_sample_ids,
@@ -381,23 +556,44 @@ def site_issue_line_dict(row: MaintenanceSiteIssueLine) -> dict:
     }
 
 
+def _cost_audit_snapshot(
+    row: MaintenanceSiteIssueLine,
+    *,
+    as_of: date,
+) -> dict:
+    """Freeze a cost view and its business cutoff inside an append-only audit row."""
+
+    return {**site_issue_line_dict(row), "as_of": as_of.isoformat()}
+
+
 def site_issue_dict(
     row: MaintenanceSiteIssue,
     lines: list[MaintenanceSiteIssueLine],
+    *,
+    idempotent_replay: bool = False,
 ) -> dict:
     return {
         "issue_id": row.issue_id,
         "project_id": row.project_id,
         "issue_no": row.issue_no,
         "issue_date": row.issue_date.isoformat(),
+        "workflow_status": row.normalized_status,
         "raw_status": row.raw_status,
         "status_mapping_state": row.status_mapping_state,
         "normalized_status": row.normalized_status,
         "status_mapping_version": row.status_mapping_version,
         "source": row.source,
         "import_batch_id": row.import_batch_id,
+        "receiver": row.receiver,
+        "issued_by": row.issued_by,
+        "site_location": row.site_location,
+        "created_by": row.created_by,
+        "confirmed_at": row.confirmed_at.isoformat() if row.confirmed_at else None,
+        "corrected_at": row.corrected_at.isoformat() if row.corrected_at else None,
+        "voided_at": row.voided_at.isoformat() if row.voided_at else None,
         "version": row.version,
         "lines": [site_issue_line_dict(line) for line in lines],
+        "idempotent_replay": idempotent_replay,
     }
 
 
@@ -590,6 +786,1443 @@ def mark_expense_readiness(
     }
 
 
+def _site_issue_lines(
+    db: Session,
+    *,
+    issue_id: str,
+    lock: bool = False,
+) -> list[MaintenanceSiteIssueLine]:
+    statement = (
+        select(MaintenanceSiteIssueLine)
+        .where(MaintenanceSiteIssueLine.issue_id == issue_id)
+        .order_by(MaintenanceSiteIssueLine.line_no)
+    )
+    if lock:
+        statement = statement.with_for_update()
+    return list(db.scalars(statement))
+
+
+def _site_issue_request_fingerprint(payload: dict) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _lock_idempotency_key(db: Session, idempotency_key: str) -> None:
+    """Serialize one client command without persisting sensitive request content."""
+
+    db.execute(
+        select(
+            func.pg_advisory_xact_lock(
+                func.hashtextextended(idempotency_key, 0)
+            )
+        )
+    )
+
+
+def _site_issue_command_fingerprint(
+    *,
+    action: str,
+    issue_id: str,
+    project_id: str,
+    version: int,
+    reason: str,
+) -> str:
+    return _site_issue_request_fingerprint(
+        {
+            "action": action,
+            "issue_id": issue_id,
+            "project_id": project_id,
+            "version": version,
+            "reason": reason,
+        }
+    )
+
+
+def _site_issue_command_replay(
+    db: Session,
+    *,
+    idempotency_key: str,
+    action: str,
+    issue_id: str,
+    project_id: str,
+    request_fingerprint: str,
+) -> dict | None:
+    row = db.scalar(
+        select(MaintenanceSiteIssueCommand).where(
+            MaintenanceSiteIssueCommand.idempotency_key == idempotency_key
+        )
+    )
+    if row is None:
+        return None
+    if (
+        row.action != action
+        or row.issue_id != issue_id
+        or row.project_id != project_id
+        or row.request_fingerprint != request_fingerprint
+    ):
+        raise MaintenanceOperationConflict("幂等键已用于不同的现场领用操作")
+    return {**row.response_json, "idempotent_replay": True}
+
+
+def _record_site_issue_command(
+    db: Session,
+    *,
+    idempotency_key: str,
+    action: str,
+    issue_id: str,
+    project_id: str,
+    request_fingerprint: str,
+    response: dict,
+) -> None:
+    db.add(
+        MaintenanceSiteIssueCommand(
+            command_id=str(uuid4()),
+            idempotency_key=idempotency_key,
+            project_id=project_id,
+            issue_id=issue_id,
+            action=action,
+            request_fingerprint=request_fingerprint,
+            response_json=response,
+        )
+    )
+
+
+def _return_event_dict(row: MaintenanceSiteIssueReturnEvent) -> dict:
+    return {
+        "event_id": row.event_id,
+        "event_type": row.event_type,
+        "project_id": row.project_id,
+        "issue_id": row.issue_id,
+        "issue_version": row.issue_version,
+        "payload": row.payload,
+        "downstream_reference": row.downstream_reference,
+    }
+
+
+def _consume_site_issue_return_event(
+    db: Session,
+    event: MaintenanceSiteIssueReturnEvent,
+) -> None:
+    """Synchronously project #207's outbox event into #208 obligations."""
+
+    try:
+        maintenance_bad_returns.consume_return_event(db, event)
+    except maintenance_bad_returns.BadReturnConflict as exc:
+        raise MaintenanceOperationConflict(str(exc)) from exc
+    except maintenance_bad_returns.BadReturnError as exc:
+        raise MaintenanceOperationError(str(exc)) from exc
+
+
+def _site_issue_return_payload(
+    issue: MaintenanceSiteIssue,
+    lines: list[MaintenanceSiteIssueLine],
+) -> dict:
+    """Expose only stable return-obligation inputs, never inventory mutations."""
+
+    return {
+        "schema_version": "maintenance-return-obligation-interface-v1",
+        "project_id": issue.project_id,
+        "issue_id": issue.issue_id,
+        "issue_no": issue.issue_no,
+        "issue_date": issue.issue_date.isoformat(),
+        "receiver": issue.receiver,
+        "issued_by": issue.issued_by,
+        "site_location": issue.site_location,
+        "lines": [
+            {
+                "issue_line_id": line.issue_line_id,
+                "delivery_line_id": line.delivery_line_id,
+                "source_order_id": line.source_order_id,
+                "source_line_id": line.source_line_id,
+                "part_id": line.part_id,
+                "pn": line.pn,
+                "serial_number": line.serial_number,
+                "quantity": _qty(line.quantity),
+            }
+            for line in lines
+        ],
+    }
+
+
+def _clone_site_issue_line(line: MaintenanceSiteIssueLine) -> MaintenanceSiteIssueLine:
+    """Make an untracked copy so preview can resolve evidence without saving it."""
+
+    return MaintenanceSiteIssueLine(
+        **{
+            column.key: getattr(line, column.key)
+            for column in MaintenanceSiteIssueLine.__table__.columns
+            if column.key not in {"created_at", "updated_at"}
+        }
+    )
+
+
+def _locked_site_issue_sources(
+    db: Session,
+    *,
+    delivery_line_ids: set[str],
+    lock: bool,
+) -> dict[str, MaintenanceSiteIssueDeliverySource]:
+    statement = (
+        select(MaintenanceSiteIssueDeliverySource)
+        .where(
+            MaintenanceSiteIssueDeliverySource.delivery_line_id.in_(
+                sorted(delivery_line_ids)
+            )
+        )
+        .order_by(MaintenanceSiteIssueDeliverySource.delivery_line_id)
+    )
+    if lock:
+        statement = statement.with_for_update()
+    return {
+        row.delivery_line_id: row
+        for row in db.scalars(statement)
+    }
+
+
+def _confirmed_site_issue_quantities(
+    db: Session,
+    *,
+    delivery_line_ids: set[str],
+    exclude_issue_id: str | None = None,
+) -> dict[str, Decimal]:
+    filters = [
+        MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
+        MaintenanceSiteIssueLine.delivery_line_id.in_(sorted(delivery_line_ids)),
+    ]
+    if exclude_issue_id is not None:
+        filters.append(MaintenanceSiteIssue.issue_id != exclude_issue_id)
+    return {
+        delivery_line_id: Decimal(quantity)
+        for delivery_line_id, quantity in db.execute(
+            select(
+                MaintenanceSiteIssueLine.delivery_line_id,
+                func.sum(MaintenanceSiteIssueLine.quantity),
+            )
+            .join(
+                MaintenanceSiteIssue,
+                MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
+            )
+            .where(*filters)
+            .group_by(MaintenanceSiteIssueLine.delivery_line_id)
+        )
+    }
+
+
+def _validate_site_issue_sources(
+    *,
+    issue: MaintenanceSiteIssue,
+    lines: list[MaintenanceSiteIssueLine],
+    sources: dict[str, MaintenanceSiteIssueDeliverySource],
+    confirmed_quantities: dict[str, Decimal],
+) -> tuple[list[dict], list[str]]:
+    balances: list[dict] = []
+    blockers: list[str] = []
+    if not lines:
+        blockers.append("现场领用单没有明细")
+        return balances, blockers
+    for line in lines:
+        delivery_line_id = str(line.delivery_line_id or "").strip()
+        source = sources.get(delivery_line_id)
+        if not delivery_line_id or source is None:
+            blockers.append(f"第 {line.line_no} 行缺少稳定发货来源")
+            continue
+        if (
+            source.adapter_key
+            not in maintenance_warehouse_site_issue_bridge.SUPPORTED_DELIVERY_ADAPTERS
+            or source.mapping_state != "ready"
+            or not source.is_active
+        ):
+            blockers.append(f"第 {line.line_no} 行发货来源适配器不可用")
+            continue
+        if source.project_id != issue.project_id:
+            blockers.append(f"第 {line.line_no} 行发货来源不属于当前项目")
+            continue
+        if (
+            source.part_id != line.part_id
+            or not str(source.pn or "").strip()
+            or source.pn != line.pn
+            or source.source_order_id != line.source_order_id
+            or source.source_line_id != line.source_line_id
+        ):
+            blockers.append(f"第 {line.line_no} 行来源身份或 PN 已变化")
+            continue
+        try:
+            requested = _quantity(line.quantity)
+        except MaintenanceOperationError:
+            blockers.append(f"第 {line.line_no} 行领用数量必须为正数")
+            continue
+        confirmed = confirmed_quantities.get(delivery_line_id, Decimal("0"))
+        available = Decimal(source.delivered_quantity) - confirmed
+        balances.append(
+            {
+                "issue_line_id": line.issue_line_id,
+                "delivery_line_id": delivery_line_id,
+                "delivered_quantity": _qty(Decimal(source.delivered_quantity)),
+                "confirmed_quantity": _qty(confirmed),
+                "available_quantity": _qty(max(available, Decimal("0"))),
+                "requested_quantity": _qty(requested),
+            }
+        )
+        if requested > available:
+            blockers.append(f"第 {line.line_no} 行领用数量超过可用发货余额")
+    return balances, blockers
+
+
+def _site_issue_is_production_blocked() -> bool:
+    return get_settings().environment == "prod"
+
+
+def _site_issue_sources_are_production_ready(
+    sources: dict[str, MaintenanceSiteIssueDeliverySource],
+) -> bool:
+    return bool(sources) and all(
+        source.adapter_key
+        == maintenance_warehouse_site_issue_bridge.WAREHOUSE_DELIVERY_ADAPTER
+        for source in sources.values()
+    )
+
+
+def _site_issue_adapter_profile(
+    db: Session,
+    *,
+    project_id: str,
+) -> tuple[dict, tuple[str, ...]]:
+    counts = {
+        adapter_key: int(count)
+        for adapter_key, count in db.execute(
+            select(
+                MaintenanceSiteIssueDeliverySource.adapter_key,
+                func.count(),
+            )
+            .where(
+                MaintenanceSiteIssueDeliverySource.project_id == project_id,
+                MaintenanceSiteIssueDeliverySource.mapping_state == "ready",
+                MaintenanceSiteIssueDeliverySource.is_active.is_(True),
+            )
+            .group_by(MaintenanceSiteIssueDeliverySource.adapter_key)
+        )
+    }
+    warehouse_key = maintenance_warehouse_site_issue_bridge.WAREHOUSE_DELIVERY_ADAPTER
+    synthetic_key = "synthetic_delivery_v1"
+    if counts.get(warehouse_key, 0) > 0:
+        return (
+            {
+                "key": warehouse_key,
+                "state": "warehouse_ready",
+                "production_ready": True,
+                "detail": "仅展示已确认且稳定关联到当前项目的仓库发货明细",
+            },
+            (warehouse_key,),
+        )
+    if get_settings().environment != "prod" and counts.get(synthetic_key, 0) > 0:
+        return (
+            {
+                "key": synthetic_key,
+                "state": "synthetic_ready",
+                "production_ready": False,
+                "detail": "当前仅启用稳定合成发货契约；真实适配器接入前不得用于生产确认",
+            },
+            (synthetic_key,),
+        )
+    if get_settings().environment != "prod":
+        return (
+            {
+                "key": synthetic_key,
+                "state": "unavailable",
+                "production_ready": False,
+                "detail": "真实 WBDD/仓库发货适配器尚未接入，系统不会按项目名猜测",
+            },
+            (),
+        )
+    return (
+        {
+            "key": warehouse_key,
+            "state": "unavailable",
+            "production_ready": False,
+            "detail": "尚无已确认并完成 WBDD、项目和 PN 稳定关联的仓库发货明细",
+        },
+        (),
+    )
+
+
+def preview_site_issue(
+    db: Session,
+    *,
+    issue_id: str,
+    project_id: str,
+    version: int,
+) -> dict | None:
+    issue = db.scalar(
+        select(MaintenanceSiteIssue).where(MaintenanceSiteIssue.issue_id == issue_id)
+    )
+    if issue is None:
+        return None
+    if issue.project_id != project_id:
+        raise MaintenanceOperationPermissionError("现场领用单不属于当前稳定项目")
+    if issue.source != "site_issue_v2":
+        raise MaintenanceOperationError("旧版现场领用单不支持此确认流程")
+    if issue.version != version:
+        raise MaintenanceOperationConflict("现场领用单版本已变化，请刷新后重试")
+    if issue.normalized_status != "draft":
+        raise MaintenanceOperationConflict("仅草稿现场领用单可以预览确认影响")
+
+    lines = _site_issue_lines(db, issue_id=issue_id)
+    delivery_ids = {line.delivery_line_id for line in lines if line.delivery_line_id}
+    sources = _locked_site_issue_sources(
+        db,
+        delivery_line_ids=delivery_ids,
+        lock=False,
+    )
+    confirmed = _confirmed_site_issue_quantities(
+        db,
+        delivery_line_ids=delivery_ids,
+    )
+    balances, blockers = _validate_site_issue_sources(
+        issue=issue,
+        lines=lines,
+        sources=sources,
+        confirmed_quantities=confirmed,
+    )
+    if _site_issue_is_production_blocked() and not (
+        _site_issue_sources_are_production_ready(sources)
+    ):
+        blockers.append("生产确认只接受已确认仓库发货明细，合成来源已失败关闭")
+
+    preview_lines = [_clone_site_issue_line(line) for line in lines]
+    maintenance_consumption_cost.resolve_lines(
+        db,
+        lines=[(issue.issue_date, line) for line in preview_lines],
+    )
+    balance_by_line = {row["issue_line_id"]: row for row in balances}
+    return {
+        **site_issue_dict(issue, preview_lines),
+        "can_confirm": not blockers,
+        "blockers": blockers,
+        "inventory_effect": "none",
+        "lines": [
+            {
+                **site_issue_line_dict(line),
+                **balance_by_line.get(line.issue_line_id, {}),
+                "cost_gap": line.cost_source is None,
+            }
+            for line in preview_lines
+        ],
+    }
+
+
+def confirm_site_issue(
+    db: Session,
+    *,
+    issue_id: str,
+    project_id: str,
+    version: int,
+    idempotency_key: str,
+    reason: str,
+    operated_by: str,
+) -> dict | None:
+    clean_key = _required(idempotency_key, "幂等键", 128)
+    if len(clean_key) < 8:
+        raise MaintenanceOperationError("幂等键至少需要 8 个字符")
+    clean_reason = _required(reason, "操作原因", 1000)
+    fingerprint = _site_issue_command_fingerprint(
+        action="confirm",
+        issue_id=issue_id,
+        project_id=project_id,
+        version=version,
+        reason=clean_reason,
+    )
+    _lock_idempotency_key(db, clean_key)
+    replay = _site_issue_command_replay(
+        db,
+        idempotency_key=clean_key,
+        action="confirm",
+        issue_id=issue_id,
+        project_id=project_id,
+        request_fingerprint=fingerprint,
+    )
+    if replay is not None:
+        return replay
+
+    project = _lock_project_for_fact_write(db, project_id)
+    if project is None:
+        return None
+    issue = db.scalar(
+        select(MaintenanceSiteIssue)
+        .where(MaintenanceSiteIssue.issue_id == issue_id)
+        .with_for_update()
+    )
+    if issue is None:
+        return None
+    if issue.project_id != project_id:
+        raise MaintenanceOperationPermissionError("现场领用单不属于当前稳定项目")
+    if issue.source != "site_issue_v2":
+        raise MaintenanceOperationError("旧版现场领用单不支持此确认流程")
+    if issue.version != version:
+        raise MaintenanceOperationConflict("现场领用单版本已变化，请刷新后重试")
+    if issue.normalized_status != "draft":
+        raise MaintenanceOperationConflict("仅草稿现场领用单可以确认")
+
+    lines = _site_issue_lines(db, issue_id=issue_id, lock=True)
+    delivery_ids = {line.delivery_line_id for line in lines if line.delivery_line_id}
+    maintenance_warehouse_site_issue_bridge.synchronize_delivery_sources(
+        db,
+        delivery_line_ids=delivery_ids,
+    )
+    sources = _locked_site_issue_sources(
+        db,
+        delivery_line_ids=delivery_ids,
+        lock=True,
+    )
+    confirmed = _confirmed_site_issue_quantities(
+        db,
+        delivery_line_ids=delivery_ids,
+    )
+    _balances, blockers = _validate_site_issue_sources(
+        issue=issue,
+        lines=lines,
+        sources=sources,
+        confirmed_quantities=confirmed,
+    )
+    if _site_issue_is_production_blocked() and not (
+        _site_issue_sources_are_production_ready(sources)
+    ):
+        raise MaintenanceOperationError(
+            "生产确认只接受已确认仓库发货明细，合成来源已失败关闭"
+        )
+    if blockers:
+        raise MaintenanceOperationConflict("；".join(blockers))
+
+    before = site_issue_dict(issue, lines)
+    maintenance_consumption_cost.resolve_lines(
+        db,
+        lines=[(issue.issue_date, line) for line in lines],
+    )
+    now = datetime.now(UTC)
+    issue.raw_status = "confirmed"
+    issue.status_mapping_state = "mapped"
+    issue.normalized_status = "confirmed"
+    issue.status_mapping_version = "site-issue-v2-workflow-v1"
+    issue.confirmed_at = now
+    issue.version += 1
+    for line in lines:
+        line.version += 1
+
+    event = MaintenanceSiteIssueReturnEvent(
+        event_id=str(uuid4()),
+        project_id=project_id,
+        issue_id=issue_id,
+        event_type="return_obligation_created",
+        issue_version=issue.version,
+        payload=_site_issue_return_payload(issue, lines),
+    )
+    db.add(event)
+    db.flush()
+    _consume_site_issue_return_event(db, event)
+    response = {
+        **site_issue_dict(issue, lines),
+        "return_obligation_event": _return_event_dict(event),
+        "inventory_effect": "none",
+        "idempotent_replay": False,
+    }
+    _fact_audit(
+        db,
+        project_id=project_id,
+        entity_type="site_issue",
+        entity_id=issue_id,
+        action="confirm",
+        before=before,
+        after=response,
+        reason=clean_reason,
+        operated_by=operated_by,
+    )
+    _record_site_issue_command(
+        db,
+        idempotency_key=clean_key,
+        action="confirm",
+        issue_id=issue_id,
+        project_id=project_id,
+        request_fingerprint=fingerprint,
+        response=response,
+    )
+    bump_workbook_revision(db, project_id=project_id)
+    db.flush()
+    return response
+
+
+def _normalize_site_issue_patch_lines(lines: list[dict]) -> list[dict]:
+    if not lines:
+        raise MaintenanceOperationError("现场领用至少需要一条明细")
+    if len(lines) > _SITE_ISSUE_LINE_LIMIT:
+        raise MaintenanceOperationError("现场领用单最多允许 200 条明细")
+    normalized: list[dict] = []
+    seen: set[str] = set()
+    for raw_line in lines:
+        delivery_line_id = _required(
+            raw_line.get("delivery_line_id"), "发货明细稳定编号"
+        )
+        if delivery_line_id in seen:
+            raise MaintenanceOperationError("同一发货明细不能在一张领用单中重复")
+        seen.add(delivery_line_id)
+        normalized.append(
+            {
+                "delivery_line_id": delivery_line_id,
+                "quantity": _quantity(raw_line["quantity"]),
+            }
+        )
+    return normalized
+
+
+def _build_site_issue_lines(
+    *,
+    issue_id: str,
+    project_id: str,
+    requested_lines: list[dict],
+    sources: dict[str, MaintenanceSiteIssueDeliverySource],
+) -> list[MaintenanceSiteIssueLine]:
+    if len(sources) != len(requested_lines):
+        raise MaintenanceOperationError("发货来源适配器未提供完整稳定身份")
+    result: list[MaintenanceSiteIssueLine] = []
+    for line_no, requested in enumerate(requested_lines, start=1):
+        source = sources.get(requested["delivery_line_id"])
+        if source is None:
+            raise MaintenanceOperationError("发货来源适配器未提供完整稳定身份")
+        if (
+            source.adapter_key
+            not in maintenance_warehouse_site_issue_bridge.SUPPORTED_DELIVERY_ADAPTERS
+            or source.mapping_state != "ready"
+            or not source.is_active
+        ):
+            raise MaintenanceOperationError("发货来源适配器当前不可用")
+        if source.project_id != project_id:
+            raise MaintenanceOperationPermissionError("发货明细不属于当前稳定项目")
+        result.append(
+            MaintenanceSiteIssueLine(
+                issue_line_id=str(uuid4()),
+                issue_id=issue_id,
+                line_no=line_no,
+                part_id=source.part_id,
+                pn=_required(source.pn, "料号", 128),
+                quantity=requested["quantity"],
+                delivery_line_id=source.delivery_line_id,
+                source_order_id=source.source_order_id,
+                source_line_id=source.source_line_id,
+                serial_number=source.serial_number,
+                linked_purchase_line_id=source.linked_purchase_line_id,
+                manual_unit_cost=None,
+                reference_sample_ids=[],
+                reference_sample_count=0,
+                reference_samples=[],
+                algorithm_version=maintenance_consumption_cost.ALGORITHM_VERSION,
+                version=1,
+            )
+        )
+    return result
+
+
+def patch_site_issue(
+    db: Session,
+    *,
+    issue_id: str,
+    project_id: str,
+    version: int,
+    idempotency_key: str,
+    issue_date: date | None,
+    receiver: str | None,
+    issued_by: str | None,
+    site_location: str | None,
+    lines: list[dict] | None,
+    reason: str,
+    operated_by: str,
+) -> dict | None:
+    if all(
+        value is None
+        for value in (issue_date, receiver, issued_by, site_location, lines)
+    ):
+        raise MaintenanceOperationError("没有可修改的现场领用业务字段")
+    clean_key = _required(idempotency_key, "幂等键", 128)
+    if len(clean_key) < 8:
+        raise MaintenanceOperationError("幂等键至少需要 8 个字符")
+    clean_reason = _required(reason, "操作原因", 1000)
+    normalized_lines = (
+        _normalize_site_issue_patch_lines(lines) if lines is not None else None
+    )
+    request_payload = {
+        "action": "patch",
+        "issue_id": issue_id,
+        "project_id": project_id,
+        "version": version,
+        "issue_date": issue_date.isoformat() if issue_date else None,
+        "receiver": receiver,
+        "issued_by": issued_by,
+        "site_location": site_location,
+        "lines": (
+            [
+                {
+                    "delivery_line_id": line["delivery_line_id"],
+                    "quantity": _qty(line["quantity"]),
+                }
+                for line in normalized_lines
+            ]
+            if normalized_lines is not None
+            else None
+        ),
+        "reason": clean_reason,
+    }
+    fingerprint = _site_issue_request_fingerprint(request_payload)
+    _lock_idempotency_key(db, clean_key)
+
+    # The receipt action differs by state; either one is a valid replay target.
+    existing_command = db.scalar(
+        select(MaintenanceSiteIssueCommand).where(
+            MaintenanceSiteIssueCommand.idempotency_key == clean_key
+        )
+    )
+    if existing_command is not None:
+        if (
+            existing_command.action not in {"update", "correct"}
+            or existing_command.issue_id != issue_id
+            or existing_command.project_id != project_id
+            or existing_command.request_fingerprint != fingerprint
+        ):
+            raise MaintenanceOperationConflict("幂等键已用于不同的现场领用操作")
+        return {**existing_command.response_json, "idempotent_replay": True}
+
+    project = _lock_project_for_fact_write(db, project_id)
+    if project is None:
+        return None
+    issue = db.scalar(
+        select(MaintenanceSiteIssue)
+        .where(MaintenanceSiteIssue.issue_id == issue_id)
+        .with_for_update()
+    )
+    if issue is None:
+        return None
+    if issue.project_id != project_id:
+        raise MaintenanceOperationPermissionError("现场领用单不属于当前稳定项目")
+    if issue.source != "site_issue_v2":
+        raise MaintenanceOperationError("旧版现场领用单不支持此编辑流程")
+    if issue.version != version:
+        raise MaintenanceOperationConflict("现场领用单版本已变化，请刷新后重试")
+    if issue.normalized_status not in {"draft", "confirmed", "corrected"}:
+        raise MaintenanceOperationConflict("已作废现场领用单不能编辑")
+    is_correction = issue.normalized_status in {"confirmed", "corrected"}
+    if is_correction:
+        # A pre-#208 confirmation event may still be waiting for projection.
+        # Drain older project events before writing the newer correction so a
+        # later read cannot replay stale quantities over the corrected facts.
+        try:
+            maintenance_bad_returns.consume_pending_return_events(
+                db,
+                project_id=project_id,
+            )
+        except (
+            maintenance_bad_returns.BadReturnConflict,
+            maintenance_bad_returns.BadReturnError,
+        ) as exc:
+            raise MaintenanceOperationConflict(str(exc)) from exc
+
+    old_lines = _site_issue_lines(db, issue_id=issue_id, lock=True)
+    requested_ids = {
+        line["delivery_line_id"] for line in (normalized_lines or [])
+    }
+    all_delivery_ids = {
+        line.delivery_line_id for line in old_lines if line.delivery_line_id
+    } | requested_ids
+    maintenance_warehouse_site_issue_bridge.synchronize_delivery_sources(
+        db,
+        delivery_line_ids=all_delivery_ids,
+    )
+    sources = _locked_site_issue_sources(
+        db,
+        delivery_line_ids=all_delivery_ids,
+        lock=is_correction,
+    )
+    replacement_lines = (
+        _build_site_issue_lines(
+            issue_id=issue_id,
+            project_id=project_id,
+            requested_lines=normalized_lines,
+            sources={key: sources[key] for key in requested_ids if key in sources},
+        )
+        if normalized_lines is not None
+        else old_lines
+    )
+    if (
+        is_correction
+        and _site_issue_is_production_blocked()
+        and not _site_issue_sources_are_production_ready(sources)
+    ):
+        raise MaintenanceOperationError(
+            "生产更正确认只接受已确认仓库发货明细，合成来源已失败关闭"
+        )
+    candidate_issue_date = issue_date or issue.issue_date
+    candidate_receiver = (
+        _required(receiver, "接收人", 128) if receiver is not None else issue.receiver
+    )
+    candidate_issued_by = (
+        _required(issued_by, "领用发出人", 128)
+        if issued_by is not None
+        else issue.issued_by
+    )
+    candidate_location = (
+        _required(site_location, "现场位置", 256)
+        if site_location is not None
+        else issue.site_location
+    )
+    old_line_signature = [
+        (line.delivery_line_id, _qty(Decimal(line.quantity))) for line in old_lines
+    ]
+    candidate_line_signature = [
+        (line.delivery_line_id, _qty(Decimal(line.quantity)))
+        for line in replacement_lines
+    ]
+    line_inputs_changed = candidate_line_signature != old_line_signature
+    date_changed = candidate_issue_date != issue.issue_date
+    metadata_changed = (
+        candidate_receiver != issue.receiver
+        or candidate_issued_by != issue.issued_by
+        or candidate_location != issue.site_location
+    )
+    if not (line_inputs_changed or date_changed or metadata_changed):
+        raise MaintenanceOperationError("现场领用业务内容没有变化")
+    if normalized_lines is not None and not line_inputs_changed:
+        # A client may resend the visible lines while changing only receiver or
+        # location. Keep the original server-owned line identities and frozen
+        # cost evidence instead of manufacturing replacement lines.
+        replacement_lines = old_lines
+    before = site_issue_dict(issue, old_lines)
+
+    event: MaintenanceSiteIssueReturnEvent | None = None
+    if is_correction:
+        confirmed = _confirmed_site_issue_quantities(
+            db,
+            delivery_line_ids={
+                line.delivery_line_id
+                for line in replacement_lines
+                if line.delivery_line_id
+            },
+            exclude_issue_id=issue_id,
+        )
+        _balances, blockers = _validate_site_issue_sources(
+            issue=issue,
+            lines=replacement_lines,
+            sources=sources,
+            confirmed_quantities=confirmed,
+        )
+        if blockers:
+            raise MaintenanceOperationConflict("；".join(blockers))
+        if line_inputs_changed or date_changed:
+            maintenance_consumption_cost.resolve_lines(
+                db,
+                lines=[(candidate_issue_date, line) for line in replacement_lines],
+            )
+
+    if normalized_lines is not None and line_inputs_changed:
+        for old_line in old_lines:
+            db.delete(old_line)
+        db.flush()
+        db.add_all(replacement_lines)
+    elif is_correction:
+        for line in replacement_lines:
+            line.version += 1
+
+    issue.issue_date = candidate_issue_date
+    issue.receiver = candidate_receiver
+    issue.issued_by = candidate_issued_by
+    issue.site_location = candidate_location
+    issue.version += 1
+    action = "correct" if is_correction else "update"
+    if is_correction:
+        issue.raw_status = "corrected"
+        issue.status_mapping_state = "mapped"
+        issue.normalized_status = "corrected"
+        issue.status_mapping_version = "site-issue-v2-workflow-v1"
+        issue.corrected_at = datetime.now(UTC)
+        event = MaintenanceSiteIssueReturnEvent(
+            event_id=str(uuid4()),
+            project_id=project_id,
+            issue_id=issue_id,
+            event_type="return_obligation_corrected",
+            issue_version=issue.version,
+            payload=_site_issue_return_payload(issue, replacement_lines),
+        )
+        db.add(event)
+        db.flush()
+        _consume_site_issue_return_event(db, event)
+    db.flush()
+    response = {
+        **site_issue_dict(issue, replacement_lines),
+        "return_obligation_event": _return_event_dict(event) if event else None,
+        "inventory_effect": "none",
+        "idempotent_replay": False,
+    }
+    _fact_audit(
+        db,
+        project_id=project_id,
+        entity_type="site_issue",
+        entity_id=issue_id,
+        action="correct" if is_correction else "draft_update",
+        before=before,
+        after=response,
+        reason=clean_reason,
+        operated_by=operated_by,
+    )
+    _record_site_issue_command(
+        db,
+        idempotency_key=clean_key,
+        action=action,
+        issue_id=issue_id,
+        project_id=project_id,
+        request_fingerprint=fingerprint,
+        response=response,
+    )
+    bump_workbook_revision(db, project_id=project_id)
+    db.flush()
+    return response
+
+
+def void_site_issue(
+    db: Session,
+    *,
+    issue_id: str,
+    project_id: str,
+    version: int,
+    idempotency_key: str,
+    reason: str,
+    operated_by: str,
+) -> dict | None:
+    clean_key = _required(idempotency_key, "幂等键", 128)
+    if len(clean_key) < 8:
+        raise MaintenanceOperationError("幂等键至少需要 8 个字符")
+    clean_reason = _required(reason, "操作原因", 1000)
+    fingerprint = _site_issue_command_fingerprint(
+        action="void",
+        issue_id=issue_id,
+        project_id=project_id,
+        version=version,
+        reason=clean_reason,
+    )
+    _lock_idempotency_key(db, clean_key)
+    replay = _site_issue_command_replay(
+        db,
+        idempotency_key=clean_key,
+        action="void",
+        issue_id=issue_id,
+        project_id=project_id,
+        request_fingerprint=fingerprint,
+    )
+    if replay is not None:
+        return replay
+
+    project = _lock_project_for_fact_write(db, project_id)
+    if project is None:
+        return None
+    issue = db.scalar(
+        select(MaintenanceSiteIssue)
+        .where(MaintenanceSiteIssue.issue_id == issue_id)
+        .with_for_update()
+    )
+    if issue is None:
+        return None
+    if issue.project_id != project_id:
+        raise MaintenanceOperationPermissionError("现场领用单不属于当前稳定项目")
+    if issue.source != "site_issue_v2":
+        raise MaintenanceOperationError("旧版现场领用单不支持此作废流程")
+    if issue.version != version:
+        raise MaintenanceOperationConflict("现场领用单版本已变化，请刷新后重试")
+    if issue.normalized_status == "void":
+        raise MaintenanceOperationConflict("现场领用单已经作废")
+    if issue.normalized_status not in {"draft", "confirmed", "corrected"}:
+        raise MaintenanceOperationConflict("当前现场领用状态不能作废")
+
+    was_confirmed = issue.normalized_status in {"confirmed", "corrected"}
+    if was_confirmed:
+        # A confirmed issue may have an outbox event that has not yet been
+        # projected. Drain every earlier event for the stable project before
+        # creating the void event so a delayed projector can never resurrect
+        # the withdrawn obligation.
+        try:
+            maintenance_bad_returns.consume_pending_return_events(
+                db,
+                project_id=project_id,
+            )
+        except (
+            maintenance_bad_returns.BadReturnConflict,
+            maintenance_bad_returns.BadReturnError,
+        ) as exc:
+            raise MaintenanceOperationConflict(str(exc)) from exc
+
+    return_events = list(
+        db.scalars(
+            select(MaintenanceSiteIssueReturnEvent)
+            .where(MaintenanceSiteIssueReturnEvent.issue_id == issue_id)
+            .order_by(MaintenanceSiteIssueReturnEvent.created_at)
+            .with_for_update()
+        )
+    )
+    if any(
+        event.downstream_reference
+        and not event.downstream_reference.startswith(
+            "maintenance-return-obligations:"
+        )
+        for event in return_events
+    ):
+        raise MaintenanceOperationConflict(
+            "返还事件已被未知下游消费，不能直接作废"
+        )
+
+    lines = _site_issue_lines(db, issue_id=issue_id, lock=True)
+    before = site_issue_dict(issue, lines)
+    issue.raw_status = "void"
+    issue.status_mapping_state = "mapped"
+    issue.normalized_status = "void"
+    issue.status_mapping_version = "site-issue-v2-workflow-v1"
+    issue.voided_at = datetime.now(UTC)
+    issue.version += 1
+    event = None
+    if was_confirmed:
+        event = MaintenanceSiteIssueReturnEvent(
+            event_id=str(uuid4()),
+            project_id=project_id,
+            issue_id=issue_id,
+            event_type="return_obligation_voided",
+            issue_version=issue.version,
+            payload=_site_issue_return_payload(issue, lines),
+        )
+        db.add(event)
+        db.flush()
+        _consume_site_issue_return_event(db, event)
+    db.flush()
+    response = {
+        **site_issue_dict(issue, lines),
+        "return_obligation_event": _return_event_dict(event) if event else None,
+        "inventory_effect": "none",
+        "idempotent_replay": False,
+    }
+    _fact_audit(
+        db,
+        project_id=project_id,
+        entity_type="site_issue",
+        entity_id=issue_id,
+        action="void",
+        before=before,
+        after=response,
+        reason=clean_reason,
+        operated_by=operated_by,
+    )
+    _record_site_issue_command(
+        db,
+        idempotency_key=clean_key,
+        action="void",
+        issue_id=issue_id,
+        project_id=project_id,
+        request_fingerprint=fingerprint,
+        response=response,
+    )
+    bump_workbook_revision(db, project_id=project_id)
+    db.flush()
+    return response
+
+
+def search_site_issues(
+    db: Session,
+    *,
+    project_id: str,
+    q_text: str | None,
+    workflow_statuses: list[str],
+    page: int,
+    page_size: int,
+) -> dict | None:
+    project = db.get(MaintenanceProject, project_id)
+    if project is None:
+        return None
+    allowed = {"draft", "confirmed", "corrected", "void"}
+    if not workflow_statuses or any(item not in allowed for item in workflow_statuses):
+        raise MaintenanceOperationError("现场领用状态筛选无效")
+    filters = [
+        MaintenanceSiteIssue.project_id == project_id,
+        MaintenanceSiteIssue.source == "site_issue_v2",
+        MaintenanceSiteIssue.normalized_status.in_(workflow_statuses),
+    ]
+    q = (q_text or "").strip()
+    if len(q) > 256:
+        raise MaintenanceOperationError("现场领用搜索条件无效")
+    if q:
+        filters.append(
+            or_(
+                MaintenanceSiteIssue.issue_no.icontains(q, autoescape=True),
+                MaintenanceSiteIssue.receiver.icontains(q, autoescape=True),
+                MaintenanceSiteIssue.issued_by.icontains(q, autoescape=True),
+                MaintenanceSiteIssue.site_location.icontains(q, autoescape=True),
+            )
+        )
+    total = int(
+        db.scalar(
+            select(func.count())
+            .select_from(MaintenanceSiteIssue)
+            .where(*filters)
+        )
+        or 0
+    )
+    issues = list(
+        db.scalars(
+            select(MaintenanceSiteIssue)
+            .where(*filters)
+            .order_by(
+                MaintenanceSiteIssue.issue_date.desc(),
+                MaintenanceSiteIssue.issue_no.desc(),
+            )
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    line_rows = list(
+        db.scalars(
+            select(MaintenanceSiteIssueLine)
+            .where(
+                MaintenanceSiteIssueLine.issue_id.in_(
+                    [issue.issue_id for issue in issues]
+                )
+            )
+            .order_by(
+                MaintenanceSiteIssueLine.issue_id,
+                MaintenanceSiteIssueLine.line_no,
+            )
+        )
+    ) if issues else []
+    by_issue: dict[str, list[MaintenanceSiteIssueLine]] = defaultdict(list)
+    for line in line_rows:
+        by_issue[line.issue_id].append(line)
+    adapter, _candidate_adapters = _site_issue_adapter_profile(
+        db,
+        project_id=project_id,
+    )
+    return {
+        "project_id": project_id,
+        "rows": [site_issue_dict(issue, by_issue[issue.issue_id]) for issue in issues],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "adapter": adapter,
+    }
+
+
+def search_site_issue_candidates(
+    db: Session,
+    *,
+    project_id: str,
+    q_text: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> dict | None:
+    """List explicit delivery identities; never infer a source from project names."""
+
+    project = db.scalar(
+        select(MaintenanceProject).where(MaintenanceProject.project_id == project_id)
+    )
+    if project is None:
+        return None
+    adapter, candidate_adapters = _site_issue_adapter_profile(
+        db,
+        project_id=project_id,
+    )
+    if not candidate_adapters:
+        return {
+            "adapter": adapter,
+            "rows": [],
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    consumed = (
+        select(
+            MaintenanceSiteIssueLine.delivery_line_id.label("delivery_line_id"),
+            func.coalesce(func.sum(MaintenanceSiteIssueLine.quantity), 0).label(
+                "confirmed_quantity"
+            ),
+        )
+        .join(
+            MaintenanceSiteIssue,
+            MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
+        )
+        .where(
+            MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
+            MaintenanceSiteIssueLine.delivery_line_id.is_not(None),
+        )
+        .group_by(MaintenanceSiteIssueLine.delivery_line_id)
+        .subquery()
+    )
+    confirmed_quantity = func.coalesce(consumed.c.confirmed_quantity, 0)
+    filters = [
+        MaintenanceSiteIssueDeliverySource.project_id == project_id,
+        MaintenanceSiteIssueDeliverySource.adapter_key.in_(candidate_adapters),
+        MaintenanceSiteIssueDeliverySource.mapping_state == "ready",
+        MaintenanceSiteIssueDeliverySource.is_active.is_(True),
+    ]
+    q = (q_text or "").strip()
+    if len(q) > 256:
+        raise MaintenanceOperationError("发货候选搜索条件无效")
+    if q:
+        filters.append(
+            or_(
+                MaintenanceSiteIssueDeliverySource.delivery_line_id.icontains(
+                    q, autoescape=True
+                ),
+                MaintenanceSiteIssueDeliverySource.delivery_no.icontains(
+                    q, autoescape=True
+                ),
+                MaintenanceSiteIssueDeliverySource.source_order_id.icontains(
+                    q, autoescape=True
+                ),
+                MaintenanceSiteIssueDeliverySource.pn.icontains(q, autoescape=True),
+                MaintenanceSiteIssueDeliverySource.serial_number.icontains(
+                    q, autoescape=True
+                ),
+            )
+        )
+    total = int(
+        db.scalar(
+            select(func.count())
+            .select_from(MaintenanceSiteIssueDeliverySource)
+            .where(*filters)
+        )
+        or 0
+    )
+    rows = list(
+        db.execute(
+            select(
+                MaintenanceSiteIssueDeliverySource,
+                confirmed_quantity.label("confirmed_quantity"),
+            )
+            .outerjoin(
+                consumed,
+                consumed.c.delivery_line_id
+                == MaintenanceSiteIssueDeliverySource.delivery_line_id,
+            )
+            .where(*filters)
+            .order_by(
+                MaintenanceSiteIssueDeliverySource.delivery_date.desc(),
+                MaintenanceSiteIssueDeliverySource.delivery_line_id,
+            )
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    return {
+        "adapter": adapter,
+        "rows": [
+            {
+                "delivery_line_id": source.delivery_line_id,
+                "source_order_id": source.source_order_id,
+                "source_line_id": source.source_line_id,
+                "delivery_no": source.delivery_no,
+                "delivery_date": source.delivery_date.isoformat(),
+                "part_id": source.part_id,
+                "pn": source.pn,
+                "serial_number": source.serial_number,
+                "delivered_quantity": _qty(source.delivered_quantity),
+                "confirmed_quantity": _qty(Decimal(confirmed_qty)),
+                "available_quantity": _qty(
+                    max(
+                        Decimal(source.delivered_quantity) - Decimal(confirmed_qty),
+                        Decimal("0"),
+                    )
+                ),
+                "mapping_state": source.mapping_state,
+                "mapping_version": source.mapping_version,
+            }
+            for source, confirmed_qty in rows
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+def create_site_issue_draft(
+    db: Session,
+    *,
+    project_id: str,
+    idempotency_key: str,
+    issue_date: date,
+    receiver: str,
+    issued_by: str,
+    site_location: str,
+    lines: list[dict],
+    reason: str,
+    operated_by: str,
+) -> dict | None:
+    """Create one server-owned draft from explicit stable delivery identities."""
+
+    clean_key = _required(idempotency_key, "幂等键", 128)
+    if len(clean_key) < 8:
+        raise MaintenanceOperationError("幂等键至少需要 8 个字符")
+    clean_receiver = _required(receiver, "接收人", 128)
+    clean_issued_by = _required(issued_by, "领用发出人", 128)
+    clean_location = _required(site_location, "现场位置", 256)
+    clean_reason = _required(reason, "操作原因", 1000)
+    if not lines:
+        raise MaintenanceOperationError("现场领用至少需要一条明细")
+    if len(lines) > _SITE_ISSUE_LINE_LIMIT:
+        raise MaintenanceOperationError("现场领用单最多允许 200 条明细")
+
+    normalized_lines: list[dict] = []
+    seen_delivery_ids: set[str] = set()
+    for raw_line in lines:
+        delivery_line_id = _required(
+            raw_line.get("delivery_line_id"), "发货明细稳定编号"
+        )
+        if delivery_line_id in seen_delivery_ids:
+            raise MaintenanceOperationError("同一发货明细不能在一张领用单中重复")
+        seen_delivery_ids.add(delivery_line_id)
+        normalized_lines.append(
+            {
+                "delivery_line_id": delivery_line_id,
+                "quantity": _quantity(raw_line["quantity"]),
+            }
+        )
+
+    fingerprint = _site_issue_request_fingerprint(
+        {
+            "project_id": project_id,
+            "issue_date": issue_date.isoformat(),
+            "receiver": clean_receiver,
+            "issued_by": clean_issued_by,
+            "site_location": clean_location,
+            "lines": [
+                {
+                    "delivery_line_id": line["delivery_line_id"],
+                    "quantity": _qty(line["quantity"]),
+                }
+                for line in normalized_lines
+            ],
+            "reason": clean_reason,
+        }
+    )
+    _lock_idempotency_key(db, clean_key)
+    existing = db.scalar(
+        select(MaintenanceSiteIssue).where(
+            MaintenanceSiteIssue.idempotency_key == clean_key
+        )
+    )
+    if existing is not None:
+        if (
+            existing.project_id != project_id
+            or existing.request_fingerprint != fingerprint
+            or existing.source != "site_issue_v2"
+        ):
+            raise MaintenanceOperationConflict("幂等键已用于不同的现场领用请求")
+        return site_issue_dict(
+            existing,
+            _site_issue_lines(db, issue_id=existing.issue_id),
+            idempotent_replay=True,
+        )
+
+    project = _lock_project_for_fact_write(db, project_id)
+    if project is None:
+        return None
+    if not project.is_active:
+        raise MaintenanceOperationError("项目主档已归档")
+
+    maintenance_warehouse_site_issue_bridge.synchronize_delivery_sources(
+        db,
+        delivery_line_ids=seen_delivery_ids,
+    )
+    source_rows = list(
+        db.scalars(
+            select(MaintenanceSiteIssueDeliverySource)
+            .where(
+                MaintenanceSiteIssueDeliverySource.delivery_line_id.in_(
+                    sorted(seen_delivery_ids)
+                )
+            )
+            .order_by(MaintenanceSiteIssueDeliverySource.delivery_line_id)
+        )
+    )
+    sources = {row.delivery_line_id: row for row in source_rows}
+    if len(sources) != len(seen_delivery_ids):
+        raise MaintenanceOperationError("发货来源适配器未提供完整稳定身份")
+
+    issue_id = str(uuid4())
+    saved_lines: list[MaintenanceSiteIssueLine] = []
+    for line_no, requested in enumerate(normalized_lines, start=1):
+        source_row = sources[requested["delivery_line_id"]]
+        if (
+            source_row.adapter_key
+            not in maintenance_warehouse_site_issue_bridge.SUPPORTED_DELIVERY_ADAPTERS
+            or source_row.mapping_state != "ready"
+            or not source_row.is_active
+        ):
+            raise MaintenanceOperationError("发货来源适配器当前不可用")
+        if source_row.project_id != project_id:
+            raise MaintenanceOperationPermissionError("发货明细不属于当前稳定项目")
+        saved_lines.append(
+            MaintenanceSiteIssueLine(
+                issue_line_id=str(uuid4()),
+                issue_id=issue_id,
+                line_no=line_no,
+                part_id=source_row.part_id,
+                pn=_required(source_row.pn, "料号", 128),
+                quantity=requested["quantity"],
+                delivery_line_id=source_row.delivery_line_id,
+                source_order_id=source_row.source_order_id,
+                source_line_id=source_row.source_line_id,
+                serial_number=source_row.serial_number,
+                linked_purchase_line_id=source_row.linked_purchase_line_id,
+                manual_unit_cost=None,
+                reference_sample_ids=[],
+                reference_sample_count=0,
+                reference_samples=[],
+                algorithm_version=maintenance_consumption_cost.ALGORITHM_VERSION,
+                version=1,
+            )
+        )
+
+    row = MaintenanceSiteIssue(
+        issue_id=issue_id,
+        project_id=project_id,
+        issue_no=f"LYD-{issue_date:%Y%m%d}-{uuid4().hex[:12].upper()}",
+        issue_date=issue_date,
+        raw_status="draft",
+        status_mapping_state="mapped",
+        normalized_status="draft",
+        status_mapping_version="site-issue-v2-workflow-v1",
+        source="site_issue_v2",
+        import_batch_id=None,
+        idempotency_key=clean_key,
+        request_fingerprint=fingerprint,
+        receiver=clean_receiver,
+        issued_by=clean_issued_by,
+        site_location=clean_location,
+        created_by=_required(operated_by, "操作人"),
+        version=1,
+    )
+    db.add(row)
+    db.add_all(saved_lines)
+    db.flush()
+    payload = site_issue_dict(row, saved_lines)
+    _fact_audit(
+        db,
+        project_id=project_id,
+        entity_type="site_issue",
+        entity_id=row.issue_id,
+        action="draft_create",
+        before=None,
+        after=payload,
+        reason=clean_reason,
+        operated_by=operated_by,
+    )
+    bump_workbook_revision(db, project_id=project_id)
+    db.flush()
+    return payload
+
+
 def create_site_issue(
     db: Session,
     *,
@@ -606,6 +2239,10 @@ def create_site_issue(
     source: str = "direct_api",
     import_batch_id: str | None = None,
 ) -> dict | None:
+    if source == "direct_api" and _site_issue_is_production_blocked():
+        raise MaintenanceOperationError(
+            "生产现场领用必须使用已确认仓库发货明细的新版受控流程"
+        )
     project = _lock_project_for_fact_write(db, project_id)
     if project is None:
         return None
@@ -746,6 +2383,14 @@ def update_site_issue_status(
     )
     if row is None:
         return None
+    if row.source == "site_issue_v2":
+        raise MaintenanceOperationError(
+            "新版现场领用单必须使用预览、确认、更正或作废命令"
+        )
+    if normalized_status == "confirmed" and _site_issue_is_production_blocked():
+        raise MaintenanceOperationError(
+            "生产现场领用必须使用已确认仓库发货明细的新版受控流程"
+        )
     lines = list(
         db.scalars(
             select(MaintenanceSiteIssueLine)
@@ -901,7 +2546,7 @@ def list_cost_gaps(
     gap_filters = (
         MaintenanceSiteIssue.project_id == project_id,
         MaintenanceSiteIssue.status_mapping_state == "mapped",
-        MaintenanceSiteIssue.normalized_status == "confirmed",
+        MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
         MaintenanceSiteIssueLine.cost_amount.is_(None),
     )
     total = int(
@@ -1077,11 +2722,12 @@ def recompute_cost_gaps(
         return None
     if not project.is_active:
         raise MaintenanceOperationError("项目主档已归档")
+    audit_as_of = business_today()
     state = get_or_create_workbook_state(db, project_id=project_id)
     candidate_filters = (
         MaintenanceSiteIssue.project_id == project_id,
         MaintenanceSiteIssue.status_mapping_state == "mapped",
-        MaintenanceSiteIssue.normalized_status == "confirmed",
+        MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
     )
     candidate_total = int(
         db.scalar(
@@ -1116,7 +2762,7 @@ def recompute_cost_gaps(
             )
         )
         before_by_line = {
-            line.issue_line_id: site_issue_line_dict(line)
+            line.issue_line_id: _cost_audit_snapshot(line, as_of=audit_as_of)
             for line, _issue in candidates
         }
         prior_by_line = {
@@ -1145,7 +2791,7 @@ def recompute_cost_gaps(
                 _restore_cost_resolution(line, prior_resolution)
                 continue
             line.version += 1
-            after = site_issue_line_dict(line)
+            after = _cost_audit_snapshot(line, as_of=audit_as_of)
             _fact_audit(
                 db,
                 project_id=project_id,
@@ -1218,10 +2864,14 @@ def fill_manual_cost(
         raise MaintenanceOperationConflict(
             f"领用成本明细已变化（当前版本 {line.version}），请刷新后重试"
         )
-    if issue.status_mapping_state != "mapped" or issue.normalized_status != "confirmed":
+    if (
+        issue.status_mapping_state != "mapped"
+        or issue.normalized_status not in {"confirmed", "corrected"}
+    ):
         raise MaintenanceOperationError("只有已确认且状态已映射的现场领用可以补价")
+    audit_as_of = business_today()
     manual_unit_cost = _money_amount(manual_unit_cost, label="人工未税单价")
-    before = site_issue_line_dict(line)
+    before = _cost_audit_snapshot(line, as_of=audit_as_of)
     if line.cost_source is not None or line.cost_amount is not None:
         raise MaintenanceOperationConflict("该领用行已有成本，人工补价只能处理缺价行")
     previous_manual = line.manual_unit_cost
@@ -1234,7 +2884,7 @@ def fill_manual_cost(
         line.manual_evidence = previous_evidence
         _resolve_site_issue_cost(db, issue_date=issue.issue_date, line=line)
         line.version += 1
-        after = site_issue_line_dict(line)
+        after = _cost_audit_snapshot(line, as_of=audit_as_of)
         _fact_audit(
             db,
             project_id=issue.project_id,
@@ -1249,7 +2899,7 @@ def fill_manual_cost(
         bump_locked_workbook_revision(db, state=state)
         db.flush()
         return {
-            **after,
+            **site_issue_line_dict(line),
             "manual_applied": False,
             "resolution": "automatic_evidence",
         }
@@ -1257,7 +2907,7 @@ def fill_manual_cost(
     line.manual_evidence = _required(evidence, "人工补价证据", 1000)
     _resolve_site_issue_cost(db, issue_date=issue.issue_date, line=line)
     line.version += 1
-    after = site_issue_line_dict(line)
+    after = _cost_audit_snapshot(line, as_of=audit_as_of)
     _fact_audit(
         db,
         project_id=issue.project_id,
@@ -1271,7 +2921,11 @@ def fill_manual_cost(
     )
     bump_locked_workbook_revision(db, state=state)
     db.flush()
-    return {**after, "manual_applied": True, "resolution": "manual"}
+    return {
+        **site_issue_line_dict(line),
+        "manual_applied": True,
+        "resolution": "manual",
+    }
 
 
 def create_contract(
@@ -1676,6 +3330,7 @@ def _task(
     due_date: date | None = None,
     task_status: str = "open",
     owner: str | None = None,
+    close_basis: str = "系统重算后该触发条件不再成立",
 ) -> dict:
     identity = f"{project_id}:{rule_key}:{entity_id or '-'}"
     return {
@@ -1691,7 +3346,377 @@ def _task(
         "status": task_status,
         "owner": owner,
         "generated_by": "system",
+        "close_basis": close_basis,
     }
+
+
+def _task_runtime_view(task: dict, *, as_of: date) -> dict:
+    due = date.fromisoformat(task["due_date"]) if task.get("due_date") else None
+    completed = task.get("status") == "completed"
+    if completed:
+        due_state = "completed"
+    elif due is not None and due < as_of:
+        due_state = "overdue"
+    elif due == as_of:
+        due_state = "due_today"
+    elif due is not None:
+        due_state = "upcoming"
+    else:
+        due_state = "none"
+    return {
+        **task,
+        "due_state": due_state,
+        "is_overdue": due_state == "overdue",
+    }
+
+
+def _task_summary(tasks: list[dict], *, as_of: date) -> dict:
+    rows = [_task_runtime_view(row, as_of=as_of) for row in tasks]
+    severity_rank = {"critical": 0, "warning": 1, "info": 2}
+    open_rows = [row for row in rows if row["status"] != "completed"]
+    open_rows.sort(
+        key=lambda row: (
+            0 if row["is_overdue"] else 1,
+            severity_rank.get(row["severity"], 9),
+            row["due_date"] is None,
+            row["due_date"] or "9999-12-31",
+            row["task_id"],
+        )
+    )
+    return {
+        "primary": open_rows[0] if open_rows else None,
+        "open_count": len(open_rows),
+        "overdue_count": sum(1 for row in open_rows if row["is_overdue"]),
+        "rows": rows,
+    }
+
+
+def _manager_tracking_facts(
+    db: Session,
+    *,
+    project_ids: list[str],
+) -> dict[str, dict]:
+    """Load manager-entered tracking facts in a fixed number of queries."""
+
+    facts: dict[str, dict] = {
+        project_id: {
+            "service_period": None,
+            "milestones": [],
+            "acceptance": None,
+        }
+        for project_id in project_ids
+    }
+    if not project_ids:
+        return facts
+    for period in db.scalars(
+        select(MaintenanceServicePeriod).where(
+            MaintenanceServicePeriod.project_id.in_(project_ids)
+        )
+    ):
+        facts[period.project_id]["service_period"] = period
+    for milestone in db.scalars(
+        select(MaintenanceCollectionMilestone)
+        .where(MaintenanceCollectionMilestone.project_id.in_(project_ids))
+        .order_by(
+            MaintenanceCollectionMilestone.project_id,
+            MaintenanceCollectionMilestone.project_contract_id,
+            MaintenanceCollectionMilestone.sequence,
+        )
+    ):
+        facts[milestone.project_id]["milestones"].append(milestone)
+    deliverables = list(
+        db.scalars(
+            select(MaintenanceAcceptanceDeliverable).where(
+                MaintenanceAcceptanceDeliverable.project_id.in_(project_ids),
+                MaintenanceAcceptanceDeliverable.deliverable_type
+                == "acceptance_report",
+            )
+        )
+    )
+    attachment_counts: dict[str, int] = defaultdict(int)
+    deliverable_ids = [row.deliverable_id for row in deliverables]
+    if deliverable_ids:
+        for deliverable_id, count in db.execute(
+            select(BusinessFileLink.entity_id, func.count(BusinessFileLink.link_id))
+            .join(BusinessFile, BusinessFile.file_id == BusinessFileLink.file_id)
+            .where(
+                BusinessFileLink.entity_type
+                == "maintenance_acceptance_deliverable",
+                BusinessFileLink.entity_id.in_(deliverable_ids),
+                BusinessFileLink.archived_at.is_(None),
+                BusinessFile.security_state == "active",
+            )
+            .group_by(BusinessFileLink.entity_id)
+        ):
+            attachment_counts[deliverable_id] = int(count)
+    for deliverable in deliverables:
+        facts[deliverable.project_id]["acceptance"] = (
+            deliverable,
+            attachment_counts[deliverable.deliverable_id],
+        )
+    return facts
+
+
+def _manager_tracking_payload(
+    *,
+    base: dict,
+    facts: dict | None,
+    latest_confirmed: dict[str, Decimal],
+    as_of: date,
+    hide_financial: bool,
+) -> dict:
+    facts = facts or {}
+    period: MaintenanceServicePeriod | None = facts.get("service_period")
+    service_period = {
+        "service_start": period.service_start.isoformat() if period and period.service_start else None,
+        "service_end": period.service_end.isoformat() if period and period.service_end else None,
+        "completeness_state": period.completeness_state if period else "empty",
+    }
+    contract_numbers = {
+        row["project_contract_id"]: row.get("contract_no")
+        for row in base.get("contracts") or []
+    }
+    cumulative_by_contract: dict[str, Decimal] = defaultdict(lambda: Decimal("0.00"))
+    outstanding: list[dict] = []
+    milestone_count = 0
+    for milestone in facts.get("milestones") or []:
+        milestone_count += 1
+        relation_id = milestone.project_contract_id
+        if milestone.planned_amount is not None:
+            cumulative_by_contract[relation_id] += Decimal(milestone.planned_amount)
+        target = cumulative_by_contract[relation_id]
+        actual = Decimal(latest_confirmed.get(relation_id, Decimal("0.00")))
+        complete = (
+            milestone.completeness_state == "complete"
+            and target > 0
+            and actual >= target
+        )
+        if complete:
+            continue
+        due = milestone.planned_date
+        overdue_days = max((as_of - due).days, 0) if due else 0
+        outstanding.append(
+            {
+                "project_contract_id": relation_id,
+                "contract_no": contract_numbers.get(relation_id),
+                "sequence": milestone.sequence,
+                "planned_date": due.isoformat() if due else None,
+                "planned_amount": (
+                    None if hide_financial or milestone.planned_amount is None
+                    else _money(milestone.planned_amount)
+                ),
+                "completeness_state": milestone.completeness_state,
+                "overdue_days": overdue_days,
+                "is_overdue": overdue_days > 0,
+            }
+        )
+    outstanding.sort(
+        key=lambda row: (
+            row["planned_date"] is None,
+            row["planned_date"] or "9999-12-31",
+            row["contract_no"] or "",
+            row["sequence"],
+        )
+    )
+    acceptance_pair = facts.get("acceptance")
+    deliverable = acceptance_pair[0] if acceptance_pair else None
+    attachment_count = int(acceptance_pair[1]) if acceptance_pair else 0
+    due_date = deliverable.due_date if deliverable else None
+    submission_status = deliverable.submission_status if deliverable else "not_submitted"
+    approval_status = deliverable.approval_status if deliverable else "not_reviewed"
+    acceptance_overdue = (
+        max((as_of - due_date).days, 0)
+        if due_date and submission_status != "submitted" and approval_status != "approved"
+        else 0
+    )
+    return {
+        "service_period": service_period,
+        "next_collection_milestone": outstanding[0] if outstanding else None,
+        "outstanding_collection_milestones": len(outstanding),
+        "configured_collection_milestones": milestone_count,
+        "acceptance": {
+            "deliverable_id": deliverable.deliverable_id if deliverable else None,
+            "due_date": due_date.isoformat() if due_date else None,
+            "submission_status": submission_status,
+            "submitted_at": (
+                deliverable.submitted_at.isoformat()
+                if deliverable and deliverable.submitted_at
+                else None
+            ),
+            "approval_status": approval_status,
+            "approved_at": (
+                deliverable.approved_at.isoformat()
+                if deliverable and deliverable.approved_at
+                else None
+            ),
+            "rejection_reason": deliverable.rejection_reason if deliverable else None,
+            "configuration_state": (
+                deliverable.configuration_state
+                if deliverable
+                else "pending_business_configuration"
+            ),
+            "attachment_count": attachment_count,
+            "overdue_days": acceptance_overdue,
+            "is_overdue": acceptance_overdue > 0,
+        },
+    }
+
+
+def _attach_manager_and_missing_labels(card: dict, assignment: dict | None) -> None:
+    card["manager_assignment"] = assignment
+    # The source-text manager is never an account identity. System tasks only
+    # receive an owner after an administrator creates an explicit mapping.
+    task_owner = assignment.get("username") if assignment is not None else None
+    task_summary = card.get("task_summary") or {}
+    for task in task_summary.get("rows") or []:
+        task["owner"] = task_owner
+    if task_summary.get("primary") is not None:
+        task_summary["primary"]["owner"] = task_owner
+    labels: list[str] = []
+    if assignment is None:
+        labels.append("负责人待映射")
+    tracking = card.get("manager_tracking") or {}
+    service_period = tracking.get("service_period") or {}
+    if service_period.get("completeness_state") == "empty":
+        labels.append("维保期限待补")
+    elif service_period.get("completeness_state") in {"start_only", "end_only"}:
+        labels.append("维保期限不完整")
+    metrics = card.get("metrics") or {}
+    if metrics.get("contract_amount_complete") is False:
+        labels.append("合同额待补")
+    if metrics.get("cost_complete") is False:
+        labels.append("成本待补")
+    acceptance = tracking.get("acceptance") or {}
+    attachment_count = int(acceptance.get("attachment_count") or 0)
+    card["attachment_status"] = "available" if attachment_count else "missing"
+    if not acceptance.get("due_date"):
+        labels.append("验收截止日待补")
+    if attachment_count == 0:
+        labels.append("验收附件待上传")
+    if acceptance.get("configuration_state") != "configured":
+        labels.append("验收业务配置待确认")
+    card["missing_data_labels"] = labels
+
+
+def _manager_update_completed_project_ids(
+    db: Session,
+    *,
+    project_ids: list[str],
+    report_month: date,
+) -> set[str]:
+    """Return projects covered by an applied v3 batch for the current assignment.
+
+    Matching the still-active assignment identity prevents an old manager's
+    historical upload from closing the replacement manager's task.
+    """
+
+    if not project_ids:
+        return set()
+    month_start = report_month.replace(day=1)
+    valid_batch_ids = _manager_batches_matching_current_scope(
+        db,
+        report_month=month_start,
+    )
+    if not valid_batch_ids:
+        return set()
+    return set(
+        db.scalars(
+            select(MaintenanceManagerUploadBatchProject.project_id)
+            .join(
+                MaintenanceManagerUploadBatch,
+                MaintenanceManagerUploadBatch.batch_id
+                == MaintenanceManagerUploadBatchProject.batch_id,
+            )
+            .join(
+                MaintenanceProjectUserAssignment,
+                MaintenanceProjectUserAssignment.assignment_id
+                == MaintenanceManagerUploadBatchProject.assignment_id,
+            )
+            .where(
+                MaintenanceManagerUploadBatchProject.project_id.in_(project_ids),
+                MaintenanceManagerUploadBatch.status == "applied",
+                MaintenanceManagerUploadBatch.batch_id.in_(valid_batch_ids),
+                MaintenanceManagerUploadBatch.report_month == month_start,
+                MaintenanceProjectUserAssignment.archived_at.is_(None),
+                MaintenanceProjectUserAssignment.version
+                == MaintenanceManagerUploadBatchProject.assignment_version,
+                MaintenanceProjectUserAssignment.user_id
+                == MaintenanceManagerUploadBatch.owner_user_id,
+            )
+        )
+    )
+
+
+def _manager_batches_matching_current_scope(
+    db: Session,
+    *,
+    report_month: date,
+) -> set[str]:
+    """Applied monthly batches are complete only while their full owner scope matches.
+
+    A newly assigned, archived, restored, or version-changed project invalidates the
+    old whole-month completion signal. This mirrors the workbook status endpoint and
+    prevents an old partial scope from closing project-manager tasks.
+    """
+
+    batches = list(
+        db.scalars(
+            select(MaintenanceManagerUploadBatch).where(
+                MaintenanceManagerUploadBatch.status == "applied",
+                MaintenanceManagerUploadBatch.report_month
+                == report_month.replace(day=1),
+            )
+        )
+    )
+    if not batches:
+        return set()
+    owner_ids = {batch.owner_user_id for batch in batches}
+    current_scope: dict[int, list[dict]] = defaultdict(list)
+    for assignment, project in db.execute(
+        select(MaintenanceProjectUserAssignment, MaintenanceProject)
+        .join(
+            MaintenanceProject,
+            MaintenanceProject.project_id
+            == MaintenanceProjectUserAssignment.project_id,
+        )
+        .where(
+            MaintenanceProjectUserAssignment.user_id.in_(owner_ids),
+            MaintenanceProjectUserAssignment.responsibility_type == "primary_manager",
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+            MaintenanceProject.is_active.is_(True),
+        )
+        .order_by(
+            MaintenanceProjectUserAssignment.user_id,
+            MaintenanceProject.project_id,
+            MaintenanceProjectUserAssignment.assignment_id,
+        )
+    ):
+        current_scope[assignment.user_id].append(
+            {
+                "project_id": project.project_id,
+                "project_version": project.version,
+                "assignment_id": assignment.assignment_id,
+                "assignment_version": assignment.version,
+            }
+        )
+
+    valid: set[str] = set()
+    for batch in batches:
+        persisted = sorted(
+            [
+                {
+                    "project_id": str(row.get("project_id") or ""),
+                    "project_version": int(row.get("project_version") or 0),
+                    "assignment_id": str(row.get("assignment_id") or ""),
+                    "assignment_version": int(row.get("assignment_version") or 0),
+                }
+                for row in (batch.plan_json or {}).get("project_scope") or []
+            ],
+            key=lambda row: (row["project_id"], row["assignment_id"]),
+        )
+        if persisted and persisted == current_scope.get(batch.owner_user_id, []):
+            valid.add(batch.batch_id)
+    return valid
 
 
 def _system_tasks(
@@ -1702,40 +3727,203 @@ def _system_tasks(
     confirmed_collection: Decimal,
     total_contract_amount: Decimal | None,
     cost_gap_count: int,
+    sales_estimate_lines: int,
     cost_status: str,
     as_of: date,
-    project_manager_id: str | None,
-    last_applied_at: datetime | None,
+    manager_update_completed: bool = False,
+    manager_tracking: dict | None = None,
 ) -> list[dict]:
     tasks: list[dict] = []
     due_date = date(as_of.year, as_of.month, monthrange(as_of.year, as_of.month)[1])
-    applied_date = business_today(last_applied_at) if last_applied_at else None
-    monthly_completed = bool(
-        applied_date
-        and applied_date.year == as_of.year
-        and applied_date.month == as_of.month
-    )
     tasks.append(
         _task(
             project_id=project_id,
             rule_key=f"manager_update:{as_of:%Y-%m}",
-            severity=("info" if monthly_completed or as_of < due_date else "warning"),
+            severity=(
+                "info"
+                if manager_update_completed or as_of < due_date
+                else "warning"
+            ),
             title=(
-                f"{as_of:%Y年%m月}项目工作簿已回填"
-                if monthly_completed
-                else f"请回填{as_of:%Y年%m月}项目工作簿"
+                f"已完成{as_of:%Y年%m月}月度全量工作簿"
+                if manager_update_completed
+                else f"待上传{as_of:%Y年%m月}月度全量工作簿"
             ),
             detail=(
-                f"本月工作簿已于 {applied_date.isoformat()} 应用"
-                if monthly_completed
-                else "下载全量四表，在 01_总览回款表尾追加后上传并应用"
+                "本人范围的 v3 工作簿已通过校验并原子应用"
+                if manager_update_completed
+                else "请下载本人范围全量表，追加或更新后上传校验"
             ),
             task_type="项目经理月度更新",
             due_date=due_date,
-            task_status="completed" if monthly_completed else "pending",
-            owner=project_manager_id,
+            task_status=("completed" if manager_update_completed else "pending"),
+            owner=None,
+            close_basis=(
+                "项目经理本人范围的 v3 月度全量工作簿通过校验并成功应用后，"
+                "由全量上传批次自动关闭"
+            ),
         )
     )
+    tracking = manager_tracking or {}
+    service_period = tracking.get("service_period") or {}
+    service_state = service_period.get("completeness_state") or "empty"
+    if service_state != "complete":
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key=f"service_period:{service_state}",
+                severity="warning",
+                title=(
+                    "补全维保开始和结束日期"
+                    if service_state == "empty"
+                    else "补全维保期限缺失的一端"
+                ),
+                detail="维保期限会直接显示在项目卡片，并用于项目期限提醒",
+                task_type="维保期限",
+                owner=None,
+                close_basis="维保开始日期和结束日期均已填写且结束日不早于开始日",
+            )
+        )
+    milestone = tracking.get("next_collection_milestone")
+    if milestone:
+        due = (
+            date.fromisoformat(milestone["planned_date"])
+            if milestone.get("planned_date")
+            else None
+        )
+        amount = milestone.get("planned_amount")
+        overdue_days = int(milestone.get("overdue_days") or 0)
+        detail_parts = [
+            f"合同 {milestone.get('contract_no') or '未提供'}",
+            f"第 {milestone.get('sequence')} 期",
+        ]
+        if amount is not None:
+            detail_parts.append(f"计划金额 {amount}")
+        if overdue_days:
+            detail_parts.append(f"已逾期 {overdue_days} 天")
+        elif due is None:
+            detail_parts.append("计划日期待补")
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key=(
+                    "collection_plan:"
+                    f"{milestone.get('project_contract_id')}:{milestone.get('sequence')}"
+                ),
+                severity="critical" if overdue_days else "info",
+                title=(
+                    "计划回款节点已逾期"
+                    if overdue_days
+                    else "跟进最近计划回款节点"
+                ),
+                detail=" · ".join(detail_parts),
+                entity_id=(
+                    f"{milestone.get('project_contract_id')}:{milestone.get('sequence')}"
+                ),
+                task_type="计划回款",
+                due_date=due,
+                owner=None,
+                close_basis="财务确认累计实收达到该节点累计计划金额，或月度全量表调整该计划",
+            )
+        )
+    elif int(tracking.get("configured_collection_milestones") or 0) == 0:
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="collection_plan:missing",
+                severity="warning",
+                title="补充计划回款节点",
+                detail="当前项目尚未设置任何计划回款日期或金额",
+                task_type="计划回款",
+                owner=None,
+                close_basis="至少存在一条计划回款节点",
+            )
+        )
+    acceptance = tracking.get("acceptance") or {}
+    acceptance_due = (
+        date.fromisoformat(acceptance["due_date"])
+        if acceptance.get("due_date")
+        else None
+    )
+    if acceptance_due is None:
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="acceptance:missing_due",
+                severity="warning",
+                title="补充验收报告截止日",
+                detail="截止日缺失不会隐藏项目，但无法生成到期提醒",
+                task_type="验收报告",
+                owner=None,
+                close_basis="验收报告截止日已配置",
+            )
+        )
+    if int(acceptance.get("attachment_count") or 0) == 0:
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="acceptance:missing_attachment",
+                severity="warning",
+                title="上传验收报告附件",
+                detail="尚无通过安全校验的有效验收附件",
+                task_type="验收报告",
+                due_date=acceptance_due,
+                owner=None,
+                close_basis="至少存在一个有效、未归档的受控验收附件",
+            )
+        )
+    submission_status = acceptance.get("submission_status") or "not_submitted"
+    approval_status = acceptance.get("approval_status") or "not_reviewed"
+    if submission_status != "submitted":
+        overdue_days = int(acceptance.get("overdue_days") or 0)
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="acceptance:report_due",
+                severity="critical" if overdue_days else "warning",
+                title=(
+                    "验收报告提交已逾期"
+                    if overdue_days
+                    else "按期提交验收报告"
+                ),
+                detail=(
+                    f"已逾期 {overdue_days} 天"
+                    if overdue_days
+                    else "提交必须包含至少一个有效附件"
+                ),
+                task_type="验收报告",
+                due_date=acceptance_due,
+                owner=None,
+                close_basis="验收报告已实名提交",
+            )
+        )
+    elif approval_status == "not_reviewed":
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="acceptance:pending_review",
+                severity="info",
+                title="验收报告待独立审批",
+                detail="提交人与审批人必须不同；业务审批角色未配置时仅 admin 可审批",
+                task_type="验收审批",
+                owner=None,
+                close_basis="验收报告已批准或已驳回",
+            )
+        )
+    elif approval_status == "rejected":
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="acceptance:rejected",
+                severity="warning",
+                title="验收报告被驳回，需修订后重新提交",
+                detail=str(acceptance.get("rejection_reason") or "审批人未填写可见原因"),
+                task_type="验收报告",
+                due_date=acceptance_due,
+                owner=None,
+                close_basis="修订附件并重新提交后进入待审批状态",
+            )
+        )
     for issue in completeness.get("issues", []):
         code = str(issue.get("code") or "incomplete")
         if code == "expense_data_not_ready":
@@ -1754,7 +3942,8 @@ def _system_tasks(
                 severity="warning",
                 title=title,
                 detail=detail,
-                owner=project_manager_id,
+                owner=None,
+                close_basis="对应项目经营事实已补全且系统重算通过",
             )
         )
     if not has_confirmed_collection:
@@ -1765,7 +3954,8 @@ def _system_tasks(
                 severity="info",
                 title="补充已确认累计回款",
                 detail="当前没有已确认的累计回款快照",
-                owner=project_manager_id,
+                owner=None,
+                close_basis="已存在有效的已确认累计回款快照",
             )
         )
     elif (
@@ -1780,7 +3970,8 @@ def _system_tasks(
                 severity="info",
                 title="项目回款尚未完成",
                 detail="当前已确认累计回款低于全部合同额",
-                owner=project_manager_id,
+                owner=None,
+                close_basis="已确认累计回款达到全部合同额",
             )
         )
     if cost_gap_count:
@@ -1791,18 +3982,44 @@ def _system_tasks(
                 severity="warning",
                 title="回填现场领用缺价",
                 detail=f"仍有 {cost_gap_count} 条已确认领用缺少成本",
-                owner=project_manager_id,
+                owner=None,
+                close_basis="已确认现场领用均已具备有效成本依据",
+            )
+        )
+    if sales_estimate_lines:
+        tasks.append(
+            _task(
+                project_id=project_id,
+                rule_key="cost:sales_fallback_estimate",
+                severity="warning",
+                title="核对项目成本中的销售回退估算",
+                detail=(
+                    f"{sales_estimate_lines} 条已确认现场领用按销售前后 7 天数量加权估算；"
+                    "已计入成本进度，但不等于采购或人工确认单价"
+                ),
+                owner=None,
+                close_basis="销售回退估算已由采购或人工确认证据替换",
             )
         )
     if cost_status in {"yellow", "red"}:
+        estimate_note = (
+            f"，其中含 {sales_estimate_lines} 条销售回退估算"
+            if sales_estimate_lines
+            else ""
+        )
         tasks.append(
             _task(
                 project_id=project_id,
                 rule_key=f"cost_ratio:{cost_status}",
                 severity="critical" if cost_status == "red" else "warning",
-                title="项目成本达到预警阈值",
-                detail="成本已超过合同额" if cost_status == "red" else "成本已达到合同额 80%",
-                owner=project_manager_id,
+                title="项目已计成本达到预警阈值",
+                detail=(
+                    f"已计成本已超过合同额{estimate_note}"
+                    if cost_status == "red"
+                    else f"已计成本已超过合同额 80%{estimate_note}"
+                ),
+                owner=None,
+                close_basis="已计成本比例回落至对应预警阈值内",
             )
         )
     return sorted(tasks, key=lambda row: (row["severity"], row["rule_key"], row["task_id"]))
@@ -1890,7 +4107,7 @@ def _cost_rate_and_status(
         return None, "unknown"
     if cost_rate > Decimal("100"):
         return cost_rate, "red"
-    if cost_rate >= Decimal("80"):
+    if cost_rate > Decimal("80"):
         return cost_rate, "yellow"
     if has_incomplete_cost_facts:
         return cost_rate, "unknown"
@@ -1903,6 +4120,9 @@ def _project_card_from_facts(
     latest_confirmed: dict[str, Decimal],
     consumed_known_ex_tax: Decimal,
     consumed_known_inc_tax: Decimal,
+    sales_estimate_cost_ex_tax: Decimal,
+    sales_estimate_cost_inc_tax: Decimal,
+    sales_estimate_lines: int,
     cost_gap_count: int,
     unmapped_issue_count: int,
     approved_expense_ex_tax: Decimal,
@@ -1911,6 +4131,8 @@ def _project_card_from_facts(
     state: MaintenanceProjectWorkbookState | None,
     as_of: date,
     user_ctx: UserContext,
+    manager_update_completed: bool = False,
+    manager_tracking_facts: dict | None = None,
 ) -> tuple[dict, list[dict], dict]:
     """Assemble the canonical project card from preloaded summary facts."""
 
@@ -2012,6 +4234,13 @@ def _project_card_from_facts(
         }
         for row in base["contracts"]
     ]
+    manager_tracking = _manager_tracking_payload(
+        base=base,
+        facts=manager_tracking_facts,
+        latest_confirmed=latest_confirmed,
+        as_of=as_of,
+        hide_financial=profit_restricted,
+    )
     project_summary = {
         **base["project"],
         "contracts": contract_rows,
@@ -2025,6 +4254,17 @@ def _project_card_from_facts(
             "site_requisition_known_cost": _money(consumed_known_inc_tax),
             "site_requisition_known_cost_ex_tax": _money(consumed_known_ex_tax),
             "site_requisition_known_cost_inc_tax": _money(consumed_known_inc_tax),
+            "site_requisition_priced_cost_ex_tax": _money(consumed_known_ex_tax),
+            "site_requisition_priced_cost_inc_tax": _money(consumed_known_inc_tax),
+            "sales_estimate_cost_ex_tax": _money(sales_estimate_cost_ex_tax),
+            "sales_estimate_cost_inc_tax": _money(sales_estimate_cost_inc_tax),
+            "sales_estimate_lines": sales_estimate_lines,
+            "cost_progress_includes_sales_estimate": sales_estimate_lines > 0,
+            "cost_progress_label": (
+                "priced_cost_including_sales_estimate"
+                if sales_estimate_lines
+                else "priced_cost_without_sales_estimate"
+            ),
             "approved_expense": _money(approved_expense_inc_tax),
             "approved_expense_ex_tax": _money(approved_expense_ex_tax),
             "approved_expense_inc_tax": _money(approved_expense_inc_tax),
@@ -2047,6 +4287,7 @@ def _project_card_from_facts(
             ),
         },
         "reminder_count": 0,
+        "manager_tracking": manager_tracking,
         "as_of": as_of.isoformat(),
     }
     reminders = _system_tasks(
@@ -2056,10 +4297,11 @@ def _project_card_from_facts(
         confirmed_collection=confirmed_collection,
         total_contract_amount=(Decimal(total) if total is not None else None),
         cost_gap_count=cost_gap_count,
+        sales_estimate_lines=sales_estimate_lines,
         cost_status=cost_status,
         as_of=as_of,
-        project_manager_id=base["project"]["project_manager_id"],
-        last_applied_at=state.last_applied_at if state else None,
+        manager_update_completed=manager_update_completed,
+        manager_tracking=manager_tracking,
     )
     reminders, completeness = _visible_tasks(
         reminders,
@@ -2100,6 +4342,41 @@ def _project_card_from_facts(
                 None
                 if cost_restricted
                 else project_summary["metrics"]["site_requisition_known_cost_inc_tax"]
+            ),
+            "site_requisition_priced_cost_ex_tax": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["site_requisition_priced_cost_ex_tax"]
+            ),
+            "site_requisition_priced_cost_inc_tax": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["site_requisition_priced_cost_inc_tax"]
+            ),
+            "sales_estimate_cost_ex_tax": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["sales_estimate_cost_ex_tax"]
+            ),
+            "sales_estimate_cost_inc_tax": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["sales_estimate_cost_inc_tax"]
+            ),
+            "sales_estimate_lines": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["sales_estimate_lines"]
+            ),
+            "cost_progress_includes_sales_estimate": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["cost_progress_includes_sales_estimate"]
+            ),
+            "cost_progress_label": (
+                None
+                if cost_restricted
+                else project_summary["metrics"]["cost_progress_label"]
             ),
             "approved_expense": (
                 None
@@ -2166,7 +4443,8 @@ def _project_card_from_facts(
     project_summary["reminder_count"] = sum(
         1 for row in reminders if row["status"] != "completed"
     )
-    return project_summary, reminders, completeness
+    project_summary["task_summary"] = _task_summary(reminders, as_of=as_of)
+    return project_summary, project_summary["task_summary"]["rows"], completeness
 
 
 def project_workspace(
@@ -2237,7 +4515,7 @@ def project_workspace(
 
     eligible_issue = and_(
         MaintenanceSiteIssue.status_mapping_state == "mapped",
-        MaintenanceSiteIssue.normalized_status == "confirmed",
+        MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
     )
     issue_fact = db.execute(
         select(
@@ -2246,6 +4524,14 @@ def project_workspace(
             func.count()
             .filter(and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None)))
             .label("cost_gap_count"),
+            func.count()
+            .filter(
+                and_(
+                    eligible_issue,
+                    MaintenanceSiteIssueLine.cost_source == "sales_window",
+                )
+            )
+            .label("sales_estimate_lines"),
             func.coalesce(
                 func.sum(
                     case(
@@ -2264,6 +4550,36 @@ def project_workspace(
                 ),
                 Decimal("0.00"),
             ).label("consumed_known_inc_tax"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                eligible_issue,
+                                MaintenanceSiteIssueLine.cost_source == "sales_window",
+                            ),
+                            MaintenanceSiteIssueLine.cost_amount_ex_tax,
+                        ),
+                        else_=Decimal("0.00"),
+                    )
+                ),
+                Decimal("0.00"),
+            ).label("sales_estimate_cost_ex_tax"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                eligible_issue,
+                                MaintenanceSiteIssueLine.cost_source == "sales_window",
+                            ),
+                            MaintenanceSiteIssueLine.cost_amount_inc_tax,
+                        ),
+                        else_=Decimal("0.00"),
+                    )
+                ),
+                Decimal("0.00"),
+            ).label("sales_estimate_cost_inc_tax"),
         )
         .select_from(MaintenanceSiteIssue)
         .join(
@@ -2293,6 +4609,9 @@ def project_workspace(
     )
     consumed_known_ex_tax = Decimal(issue_fact.consumed_known_ex_tax)
     consumed_known_inc_tax = Decimal(issue_fact.consumed_known_inc_tax)
+    sales_estimate_cost_ex_tax = Decimal(issue_fact.sales_estimate_cost_ex_tax)
+    sales_estimate_cost_inc_tax = Decimal(issue_fact.sales_estimate_cost_inc_tax)
+    sales_estimate_lines = int(issue_fact.sales_estimate_lines)
 
     expense_eligible = and_(
         MaintenanceProjectExpenseAttribution.status_mapping_state == "mapped",
@@ -2357,11 +4676,23 @@ def project_workspace(
         or 0
     )
     state = db.get(MaintenanceProjectWorkbookState, project_id)
+    manager_update_completed = project_id in _manager_update_completed_project_ids(
+        db,
+        project_ids=[project_id],
+        report_month=as_of,
+    )
+    manager_tracking = _manager_tracking_facts(
+        db,
+        project_ids=[project_id],
+    ).get(project_id)
     project_summary, reminders, completeness = _project_card_from_facts(
         base=base,
         latest_confirmed=latest_confirmed,
         consumed_known_ex_tax=consumed_known_ex_tax,
         consumed_known_inc_tax=consumed_known_inc_tax,
+        sales_estimate_cost_ex_tax=sales_estimate_cost_ex_tax,
+        sales_estimate_cost_inc_tax=sales_estimate_cost_inc_tax,
+        sales_estimate_lines=sales_estimate_lines,
         cost_gap_count=cost_gap_count,
         unmapped_issue_count=unmapped_issue_count,
         approved_expense_ex_tax=approved_expense_ex_tax,
@@ -2370,6 +4701,35 @@ def project_workspace(
         state=state,
         as_of=as_of,
         user_ctx=user_ctx,
+        manager_update_completed=manager_update_completed,
+        manager_tracking_facts=manager_tracking,
+    )
+    _attach_manager_and_missing_labels(
+        project_summary,
+        maintenance_project_assignments.active_assignment_views(
+            db,
+            project_ids=[project_id],
+        ).get(project_id),
+    )
+    project_summary["return_rate"] = maintenance_bad_returns.project_return_rate(
+        db,
+        project_id=project_id,
+    )
+    manual_count_statement = (
+        select(func.count())
+        .select_from(MaintenanceSourceOrderAssignment)
+        .join(
+            FMaintenanceOrder,
+            FMaintenanceOrder.raw_order_id
+            == MaintenanceSourceOrderAssignment.source_order_id,
+        )
+        .where(
+            MaintenanceSourceOrderAssignment.project_id == project_id,
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    )
+    project_summary["manual_source_order_count"] = int(
+        db.scalar(active_beta_maintenance_orders(manual_count_statement, FMaintenanceOrder)) or 0
     )
 
     issue_statement = (
@@ -2398,7 +4758,7 @@ def project_workspace(
     for issue, line in issue_rows:
         eligible = (
             issue.status_mapping_state == "mapped"
-            and issue.normalized_status == "confirmed"
+            and issue.normalized_status in {"confirmed", "corrected"}
         )
         requisition_rows.append(
             {
@@ -2452,6 +4812,9 @@ def project_workspace(
             "cost_amount_inc_tax",
             "tax_rate_used",
             "cost_source",
+            "cost_evidence_kind",
+            "cost_is_estimate",
+            "cost_source_label",
             "price_basis",
             "reference_side",
             "reference_sample_ids",
@@ -2595,6 +4958,7 @@ def project_workspace(
             "page_size": expense_page_size or approved_expense_total or 1,
         },
         "reminders": reminder_rows,
+        "return_rate": project_summary["return_rate"],
         "workbook_preview": {
             "protocol_version": "2.0",
             "sheets": [
@@ -2838,6 +5202,9 @@ def _project_cards_for_ids(
         lambda: {
             "consumed_known_ex_tax": Decimal("0.00"),
             "consumed_known_inc_tax": Decimal("0.00"),
+            "sales_estimate_cost_ex_tax": Decimal("0.00"),
+            "sales_estimate_cost_inc_tax": Decimal("0.00"),
+            "sales_estimate_lines": 0,
             "cost_gap_count": 0,
             "unmapped_issue_count": 0,
         }
@@ -2862,6 +5229,7 @@ def _project_cards_for_ids(
         project_id,
         mapping_state,
         normalized_status,
+        cost_source,
         cost_amount_ex_tax,
         cost_amount_inc_tax,
     ) in db.execute(
@@ -2869,6 +5237,7 @@ def _project_cards_for_ids(
             MaintenanceSiteIssue.project_id,
             MaintenanceSiteIssue.status_mapping_state,
             MaintenanceSiteIssue.normalized_status,
+            MaintenanceSiteIssueLine.cost_source,
             MaintenanceSiteIssueLine.cost_amount_ex_tax,
             MaintenanceSiteIssueLine.cost_amount_inc_tax,
         )
@@ -2882,12 +5251,19 @@ def _project_cards_for_ids(
         )
     ):
         facts = cost_facts[project_id]
-        eligible = mapping_state == "mapped" and normalized_status == "confirmed"
+        eligible = mapping_state == "mapped" and normalized_status in {
+            "confirmed",
+            "corrected",
+        }
         if eligible and cost_amount_inc_tax is None:
             facts["cost_gap_count"] += 1
         elif eligible:
             facts["consumed_known_ex_tax"] += Decimal(cost_amount_ex_tax)
             facts["consumed_known_inc_tax"] += Decimal(cost_amount_inc_tax)
+            if cost_source == "sales_window":
+                facts["sales_estimate_cost_ex_tax"] += Decimal(cost_amount_ex_tax)
+                facts["sales_estimate_cost_inc_tax"] += Decimal(cost_amount_inc_tax)
+                facts["sales_estimate_lines"] += 1
 
     expense_facts: dict[str, dict[str, Decimal | int]] = defaultdict(
         lambda: {
@@ -2929,7 +5305,49 @@ def _project_cards_for_ids(
             )
         )
     }
+    manager_assignments = maintenance_project_assignments.active_assignment_views(
+        db,
+        project_ids=project_ids,
+    )
+    manager_update_completed_ids = _manager_update_completed_project_ids(
+        db,
+        project_ids=project_ids,
+        report_month=as_of,
+    )
+    manager_tracking_by_project = _manager_tracking_facts(
+        db,
+        project_ids=project_ids,
+    )
+    manual_source_order_count_statement = (
+        select(
+            MaintenanceSourceOrderAssignment.project_id,
+            func.count(),
+        )
+        .join(
+            FMaintenanceOrder,
+            FMaintenanceOrder.raw_order_id
+            == MaintenanceSourceOrderAssignment.source_order_id,
+        )
+        .where(
+            MaintenanceSourceOrderAssignment.project_id.in_(project_ids),
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+        .group_by(MaintenanceSourceOrderAssignment.project_id)
+    )
+    manual_source_order_counts = {
+        project_id: int(count)
+        for project_id, count in db.execute(
+            active_beta_maintenance_orders(
+                manual_source_order_count_statement,
+                FMaintenanceOrder,
+            )
+        )
+    }
     cards: dict[str, dict] = {}
+    return_rates = maintenance_bad_returns.return_rates_for_projects(
+        db,
+        project_ids=project_ids,
+    )
     for project in projects:
         base = maintenance_project.project_overview_from_facts(
             project=project,
@@ -2956,6 +5374,13 @@ def _project_cards_for_ids(
             consumed_known_inc_tax=Decimal(
                 project_cost_facts["consumed_known_inc_tax"]
             ),
+            sales_estimate_cost_ex_tax=Decimal(
+                project_cost_facts["sales_estimate_cost_ex_tax"]
+            ),
+            sales_estimate_cost_inc_tax=Decimal(
+                project_cost_facts["sales_estimate_cost_inc_tax"]
+            ),
+            sales_estimate_lines=int(project_cost_facts["sales_estimate_lines"]),
             cost_gap_count=int(project_cost_facts["cost_gap_count"]),
             unmapped_issue_count=int(project_cost_facts["unmapped_issue_count"]),
             approved_expense_ex_tax=Decimal(
@@ -2970,6 +5395,19 @@ def _project_cards_for_ids(
             state=state_by_project.get(project.project_id),
             as_of=as_of,
             user_ctx=user_ctx,
+            manager_update_completed=(
+                project.project_id in manager_update_completed_ids
+            ),
+            manager_tracking_facts=manager_tracking_by_project.get(project.project_id),
+        )
+        _attach_manager_and_missing_labels(
+            card,
+            manager_assignments.get(project.project_id),
+        )
+        card["return_rate"] = return_rates[project.project_id]
+        card["manual_source_order_count"] = manual_source_order_counts.get(
+            project.project_id,
+            0,
         )
         cards[project.project_id] = card
     return cards
@@ -2977,12 +5415,17 @@ def _project_cards_for_ids(
 
 def _directory_reminder_query(
     *,
+    db: Session,
     filters: list,
     as_of: date,
     user_ctx: UserContext,
-    reminder: str,
+    reminder: str | None,
+    task_type: str | None = None,
+    task_status: str | None = None,
+    due_from: date | None = None,
+    due_to: date | None = None,
 ):
-    """Build the exact open-reminder project set as database aggregates."""
+    """Build reminder/task project sets in SQL before applying pagination."""
 
     current_contract = and_(
         MaintenanceProjectContract.effective_from <= as_of,
@@ -3110,7 +5553,7 @@ def _directory_reminder_query(
     )
     eligible_issue = and_(
         MaintenanceSiteIssue.status_mapping_state == "mapped",
-        MaintenanceSiteIssue.normalized_status == "confirmed",
+        MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
     )
     issue_by_project = (
         select(
@@ -3120,6 +5563,14 @@ def _directory_reminder_query(
                 and_(eligible_issue, MaintenanceSiteIssueLine.cost_amount_inc_tax.is_(None))
             )
             .label("cost_gap_count"),
+            func.count()
+            .filter(
+                and_(
+                    eligible_issue,
+                    MaintenanceSiteIssueLine.cost_source == "sales_window",
+                )
+            )
+            .label("sales_estimate_count"),
             func.coalesce(
                 func.sum(
                     case(
@@ -3190,6 +5641,123 @@ def _directory_reminder_query(
         .group_by(MaintenanceProjectExpenseAttribution.project_id)
         .cte("directory_expense_fact")
     )
+    milestone_progress = (
+        select(
+            MaintenanceCollectionMilestone.project_id,
+            MaintenanceCollectionMilestone.project_contract_id,
+            MaintenanceCollectionMilestone.sequence,
+            MaintenanceCollectionMilestone.planned_date,
+            MaintenanceCollectionMilestone.completeness_state,
+            MaintenanceProjectContract.contract_no,
+            func.sum(
+                func.coalesce(
+                    MaintenanceCollectionMilestone.planned_amount,
+                    Decimal("0.00"),
+                )
+            )
+            .over(
+                partition_by=MaintenanceCollectionMilestone.project_contract_id,
+                order_by=MaintenanceCollectionMilestone.sequence,
+                rows=(None, 0),
+            )
+            .label("cumulative_target"),
+            func.coalesce(
+                ranked_collection.c.cumulative_amount,
+                Decimal("0.00"),
+            ).label("confirmed_collection"),
+        )
+        .join(
+            MaintenanceProjectContract,
+            MaintenanceProjectContract.project_contract_id
+            == MaintenanceCollectionMilestone.project_contract_id,
+        )
+        .outerjoin(
+            ranked_collection,
+            and_(
+                ranked_collection.c.project_contract_id
+                == MaintenanceCollectionMilestone.project_contract_id,
+                ranked_collection.c.row_number == 1,
+            ),
+        )
+        .cte("directory_milestone_progress")
+    )
+    outstanding_milestone = (
+        select(milestone_progress)
+        .where(
+            or_(
+                milestone_progress.c.completeness_state != "complete",
+                milestone_progress.c.cumulative_target <= Decimal("0.00"),
+                milestone_progress.c.confirmed_collection
+                < milestone_progress.c.cumulative_target,
+            )
+        )
+        .cte("directory_outstanding_milestone")
+    )
+    ranked_outstanding_milestone = (
+        select(
+            outstanding_milestone,
+            func.row_number()
+            .over(
+                partition_by=outstanding_milestone.c.project_id,
+                order_by=(
+                    case(
+                        (outstanding_milestone.c.planned_date.is_(None), 1),
+                        else_=0,
+                    ),
+                    outstanding_milestone.c.planned_date,
+                    outstanding_milestone.c.contract_no,
+                    outstanding_milestone.c.sequence,
+                ),
+            )
+            .label("project_row_number"),
+        )
+        .cte("directory_ranked_outstanding_milestone")
+    )
+    milestone_by_project = (
+        select(
+            MaintenanceCollectionMilestone.project_id,
+            func.count().label("milestone_count"),
+        )
+        .group_by(MaintenanceCollectionMilestone.project_id)
+        .cte("directory_milestone_fact")
+    )
+    acceptance_attachment_by_deliverable = (
+        select(
+            BusinessFileLink.entity_id.label("deliverable_id"),
+            func.count().label("attachment_count"),
+        )
+        .join(BusinessFile, BusinessFile.file_id == BusinessFileLink.file_id)
+        .where(
+            BusinessFileLink.entity_type
+            == "maintenance_acceptance_deliverable",
+            BusinessFileLink.archived_at.is_(None),
+            BusinessFile.security_state == "active",
+        )
+        .group_by(BusinessFileLink.entity_id)
+        .cte("directory_acceptance_attachment_fact")
+    )
+    acceptance_by_project = (
+        select(
+            MaintenanceAcceptanceDeliverable.project_id,
+            MaintenanceAcceptanceDeliverable.due_date,
+            MaintenanceAcceptanceDeliverable.submission_status,
+            MaintenanceAcceptanceDeliverable.approval_status,
+            func.coalesce(
+                acceptance_attachment_by_deliverable.c.attachment_count,
+                0,
+            ).label("attachment_count"),
+        )
+        .outerjoin(
+            acceptance_attachment_by_deliverable,
+            acceptance_attachment_by_deliverable.c.deliverable_id
+            == MaintenanceAcceptanceDeliverable.deliverable_id,
+        )
+        .where(
+            MaintenanceAcceptanceDeliverable.deliverable_type
+            == "acceptance_report"
+        )
+        .cte("directory_acceptance_fact")
+    )
     facts = (
         select(
             MaintenanceProject.project_id,
@@ -3221,6 +5789,9 @@ def _directory_reminder_query(
             func.coalesce(issue_by_project.c.cost_gap_count, 0).label(
                 "cost_gap_count"
             ),
+            func.coalesce(issue_by_project.c.sales_estimate_count, 0).label(
+                "sales_estimate_count"
+            ),
             func.coalesce(issue_status_by_project.c.unmapped_issue_count, 0).label(
                 "unmapped_issue_count"
             ),
@@ -3234,7 +5805,35 @@ def _directory_reminder_query(
                 expense_by_project.c.approved_expense, Decimal("0.00")
             ).label("approved_expense"),
             MaintenanceProjectWorkbookState.expense_ready_through,
-            MaintenanceProjectWorkbookState.last_applied_at,
+            func.coalesce(
+                MaintenanceServicePeriod.completeness_state,
+                "empty",
+            ).label("service_period_state"),
+            func.coalesce(milestone_by_project.c.milestone_count, 0).label(
+                "milestone_count"
+            ),
+            ranked_outstanding_milestone.c.project_contract_id.label(
+                "next_milestone_contract_id"
+            ),
+            ranked_outstanding_milestone.c.sequence.label(
+                "next_milestone_sequence"
+            ),
+            ranked_outstanding_milestone.c.planned_date.label(
+                "next_milestone_date"
+            ),
+            acceptance_by_project.c.due_date.label("acceptance_due_date"),
+            func.coalesce(
+                acceptance_by_project.c.submission_status,
+                "not_submitted",
+            ).label("acceptance_submission_status"),
+            func.coalesce(
+                acceptance_by_project.c.approval_status,
+                "not_reviewed",
+            ).label("acceptance_approval_status"),
+            func.coalesce(
+                acceptance_by_project.c.attachment_count,
+                0,
+            ).label("acceptance_attachment_count"),
         )
         .select_from(MaintenanceProject)
         .outerjoin(
@@ -3270,24 +5869,63 @@ def _directory_reminder_query(
             MaintenanceProjectWorkbookState.project_id
             == MaintenanceProject.project_id,
         )
+        .outerjoin(
+            MaintenanceServicePeriod,
+            MaintenanceServicePeriod.project_id == MaintenanceProject.project_id,
+        )
+        .outerjoin(
+            milestone_by_project,
+            milestone_by_project.c.project_id == MaintenanceProject.project_id,
+        )
+        .outerjoin(
+            ranked_outstanding_milestone,
+            and_(
+                ranked_outstanding_milestone.c.project_id
+                == MaintenanceProject.project_id,
+                ranked_outstanding_milestone.c.project_row_number == 1,
+            ),
+        )
+        .outerjoin(
+            acceptance_by_project,
+            acceptance_by_project.c.project_id == MaintenanceProject.project_id,
+        )
         .where(*filters)
         .cte("directory_reminder_fact")
     )
 
     month_start = as_of.replace(day=1)
     current_business_month = business_today().replace(day=1)
-    next_month = (
-        month_start.replace(year=month_start.year + 1, month=1)
-        if month_start.month == 12
-        else month_start.replace(month=month_start.month + 1)
+    valid_manager_batch_ids = _manager_batches_matching_current_scope(
+        db,
+        report_month=month_start,
     )
-    applied_from = datetime.combine(month_start, time.min, BUSINESS_TZ).astimezone(UTC)
-    applied_to = datetime.combine(next_month, time.min, BUSINESS_TZ).astimezone(UTC)
-    manager_open = or_(
-        facts.c.last_applied_at.is_(None),
-        facts.c.last_applied_at < applied_from,
-        facts.c.last_applied_at >= applied_to,
+    manager_completed = (
+        select(literal(1))
+        .select_from(MaintenanceManagerUploadBatchProject)
+        .join(
+            MaintenanceManagerUploadBatch,
+            MaintenanceManagerUploadBatch.batch_id
+            == MaintenanceManagerUploadBatchProject.batch_id,
+        )
+        .join(
+            MaintenanceProjectUserAssignment,
+            MaintenanceProjectUserAssignment.assignment_id
+            == MaintenanceManagerUploadBatchProject.assignment_id,
+        )
+        .where(
+            MaintenanceManagerUploadBatchProject.project_id == facts.c.project_id,
+            MaintenanceManagerUploadBatch.status == "applied",
+            MaintenanceManagerUploadBatch.batch_id.in_(valid_manager_batch_ids),
+            MaintenanceManagerUploadBatch.report_month == month_start,
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+            MaintenanceProjectUserAssignment.version
+            == MaintenanceManagerUploadBatchProject.assignment_version,
+            MaintenanceProjectUserAssignment.user_id
+            == MaintenanceManagerUploadBatch.owner_user_id,
+        )
+        .exists()
     )
+    manager_open = ~manager_completed
     profit_visible = not is_field_hidden(user_ctx, "contract_amount")
     cost_visible = not is_field_hidden(user_ctx, "unit_cost")
     expense_visible = not is_field_hidden(user_ctx, "expense_inc")
@@ -3324,9 +5962,51 @@ def _directory_reminder_query(
         literal(profit_visible and cost_visible and expense_visible),
         contract_complete,
         facts.c.total_contract_amount > 0,
-        rounded_cost_rate >= Decimal("80"),
+        rounded_cost_rate > Decimal("80"),
         rounded_cost_rate <= Decimal("100"),
     )
+    service_empty = facts.c.service_period_state == "empty"
+    service_start_only = facts.c.service_period_state == "start_only"
+    service_end_only = facts.c.service_period_state == "end_only"
+    service_incomplete = or_(
+        service_empty,
+        service_start_only,
+        service_end_only,
+    )
+    collection_plan_missing = facts.c.milestone_count == 0
+    collection_plan_next = facts.c.next_milestone_contract_id.is_not(None)
+    collection_plan_overdue = and_(
+        collection_plan_next,
+        facts.c.next_milestone_date.is_not(None),
+        facts.c.next_milestone_date < as_of,
+    )
+    collection_plan_info = and_(
+        collection_plan_next,
+        or_(
+            facts.c.next_milestone_date.is_(None),
+            facts.c.next_milestone_date >= as_of,
+        ),
+    )
+    acceptance_missing_due = facts.c.acceptance_due_date.is_(None)
+    acceptance_missing_attachment = facts.c.acceptance_attachment_count == 0
+    acceptance_report_due = facts.c.acceptance_submission_status != "submitted"
+    acceptance_report_overdue = and_(
+        acceptance_report_due,
+        facts.c.acceptance_due_date.is_not(None),
+        facts.c.acceptance_due_date < as_of,
+    )
+    acceptance_report_warning = and_(
+        acceptance_report_due,
+        or_(
+            facts.c.acceptance_due_date.is_(None),
+            facts.c.acceptance_due_date >= as_of,
+        ),
+    )
+    acceptance_pending_review = and_(
+        facts.c.acceptance_submission_status == "submitted",
+        facts.c.acceptance_approval_status == "not_reviewed",
+    )
+    acceptance_rejected = facts.c.acceptance_approval_status == "rejected"
     rule_conditions = {
         f"manager_update:{as_of:%Y-%m}": manager_open,
         "completeness:no_effective_contracts": and_(
@@ -3345,10 +6025,10 @@ def _directory_reminder_query(
             literal(profit_visible), facts.c.conflict_count > 0
         ),
         "completeness:missing_consumption_cost": and_(
-            literal(profit_visible and cost_visible), facts.c.cost_gap_count > 0
+            literal(cost_visible), facts.c.cost_gap_count > 0
         ),
         "completeness:unmapped_site_issue_status": and_(
-            literal(profit_visible and cost_visible),
+            literal(cost_visible),
             facts.c.unmapped_issue_count > 0,
         ),
         "completeness:unmapped_expense_status": and_(
@@ -3375,9 +6055,28 @@ def _directory_reminder_query(
         "cost:missing_price": and_(
             literal(cost_visible), facts.c.cost_gap_count > 0
         ),
+        "cost:sales_fallback_estimate": and_(
+            literal(cost_visible), facts.c.sales_estimate_count > 0
+        ),
         "cost_ratio:yellow": yellow,
         "cost_ratio:red": red,
+        "service_period:empty": service_empty,
+        "service_period:start_only": service_start_only,
+        "service_period:end_only": service_end_only,
+        "collection_plan:missing": collection_plan_missing,
+        "acceptance:missing_due": acceptance_missing_due,
+        "acceptance:missing_attachment": acceptance_missing_attachment,
+        "acceptance:report_due": acceptance_report_due,
+        "acceptance:pending_review": acceptance_pending_review,
+        "acceptance:rejected": acceptance_rejected,
     }
+    collection_plan_match = _COLLECTION_PLAN_FILTER.fullmatch(reminder or "")
+    if collection_plan_match is not None:
+        rule_conditions[reminder] = and_(
+            collection_plan_next,
+            facts.c.next_milestone_contract_id == collection_plan_match.group(1),
+            facts.c.next_milestone_sequence == int(collection_plan_match.group(2)),
+        )
     completeness_conditions = [
         condition
         for key, condition in rule_conditions.items()
@@ -3390,7 +6089,14 @@ def _directory_reminder_query(
     warning_conditions = [
         *completeness_conditions,
         rule_conditions["cost:missing_price"],
+        rule_conditions["cost:sales_fallback_estimate"],
         yellow,
+        service_incomplete,
+        collection_plan_missing,
+        acceptance_missing_due,
+        acceptance_missing_attachment,
+        acceptance_report_warning,
+        acceptance_rejected,
     ]
     if as_of.day == monthrange(as_of.year, as_of.month)[1]:
         warning_conditions.append(manager_open)
@@ -3401,34 +6107,148 @@ def _directory_reminder_query(
         "项目经理月度更新": manager_open,
         "completeness": or_(*completeness_conditions),
         "collection": or_(*collection_conditions),
-        "cost": rule_conditions["cost:missing_price"],
+        "cost": or_(
+            rule_conditions["cost:missing_price"],
+            rule_conditions["cost:sales_fallback_estimate"],
+        ),
         "cost_ratio": or_(yellow, red),
+        "维保期限": service_incomplete,
+        "计划回款": or_(collection_plan_missing, collection_plan_next),
+        "验收报告": or_(
+            acceptance_missing_due,
+            acceptance_missing_attachment,
+            acceptance_report_due,
+            acceptance_rejected,
+        ),
+        "验收审批": acceptance_pending_review,
     }
     severity_conditions = {
-        "info": or_(manager_info, *collection_conditions),
+        "info": or_(
+            manager_info,
+            *collection_conditions,
+            collection_plan_info,
+            acceptance_pending_review,
+        ),
         "warning": or_(*warning_conditions),
-        "critical": red,
+        "critical": or_(
+            red,
+            collection_plan_overdue,
+            acceptance_report_overdue,
+        ),
     }
-    if reminder == "all":
-        match_condition = or_(
+    if reminder is None:
+        reminder_condition = literal(True)
+    elif reminder == "all":
+        reminder_condition = or_(
             manager_open,
             *completeness_conditions,
             *collection_conditions,
             rule_conditions["cost:missing_price"],
+            rule_conditions["cost:sales_fallback_estimate"],
             yellow,
             red,
+            service_incomplete,
+            collection_plan_missing,
+            collection_plan_next,
+            acceptance_missing_due,
+            acceptance_missing_attachment,
+            acceptance_report_due,
+            acceptance_pending_review,
+            acceptance_rejected,
         )
     else:
-        match_condition = rule_conditions.get(
+        reminder_condition = rule_conditions.get(
             reminder,
             task_type_conditions.get(
                 reminder,
                 severity_conditions.get(reminder, literal(False)),
             ),
         )
+    has_task_filter = bool(task_type or task_status or due_from or due_to)
+    task_condition = literal(True)
+    if has_task_filter:
+        manager_due = date(
+            as_of.year,
+            as_of.month,
+            monthrange(as_of.year, as_of.month)[1],
+        )
+        task_facts: list[tuple[str, str, object | None, object]] = [
+            ("项目经理月度更新", "pending", manager_due, manager_open),
+            (
+                "项目经理月度更新",
+                "completed",
+                manager_due,
+                manager_completed,
+            ),
+        ]
+        task_facts.extend(
+            (rule_key.split(":", 1)[0], "open", None, condition)
+            for rule_key, condition in rule_conditions.items()
+            if rule_key.startswith(
+                ("completeness:", "collection:", "cost:", "cost_ratio:")
+            )
+        )
+        task_facts.extend(
+            [
+                ("维保期限", "open", None, service_incomplete),
+                ("计划回款", "open", None, collection_plan_missing),
+                (
+                    "计划回款",
+                    "open",
+                    facts.c.next_milestone_date,
+                    collection_plan_next,
+                ),
+                ("验收报告", "open", None, acceptance_missing_due),
+                (
+                    "验收报告",
+                    "open",
+                    facts.c.acceptance_due_date,
+                    acceptance_missing_attachment,
+                ),
+                (
+                    "验收报告",
+                    "open",
+                    facts.c.acceptance_due_date,
+                    acceptance_report_due,
+                ),
+                ("验收审批", "open", None, acceptance_pending_review),
+                (
+                    "验收报告",
+                    "open",
+                    facts.c.acceptance_due_date,
+                    acceptance_rejected,
+                ),
+            ]
+        )
+        selected_conditions = []
+        for fact_type, fact_status, fact_due, condition in task_facts:
+            if task_type and fact_type != task_type:
+                continue
+            if task_status == "open" and fact_status == "completed":
+                continue
+            if task_status in {"pending", "completed"} and fact_status != task_status:
+                continue
+            if due_from is not None or due_to is not None:
+                if fact_due is None:
+                    continue
+                if isinstance(fact_due, date):
+                    if due_from is not None and fact_due < due_from:
+                        continue
+                    if due_to is not None and fact_due > due_to:
+                        continue
+                else:
+                    condition = and_(condition, fact_due.is_not(None))
+                    if due_from is not None:
+                        condition = and_(condition, fact_due >= due_from)
+                    if due_to is not None:
+                        condition = and_(condition, fact_due <= due_to)
+            selected_conditions.append(condition)
+        task_condition = (
+            or_(*selected_conditions) if selected_conditions else literal(False)
+        )
     return (
         select(facts.c.project_id, facts.c.project_code)
-        .where(match_condition)
+        .where(and_(reminder_condition, task_condition))
         .order_by(facts.c.project_code, facts.c.project_id)
     )
 
@@ -3444,9 +6264,24 @@ def project_operations(
     include_inactive: bool = False,
     page: int = 1,
     page_size: int = 24,
+    owner_scope: str = "all",
+    task_type: str | None = None,
+    task_status: str | None = None,
+    due_from: date | None = None,
+    due_to: date | None = None,
 ) -> dict:
+    required_fields = _reminder_filter_required_fields(reminder)
+    required_fields += _task_type_filter_required_fields(task_type)
+    if any(is_field_hidden(user_ctx, field) for field in required_fields):
+        raise MaintenanceOperationPermissionError
+    if due_from is not None and due_to is not None and due_from > due_to:
+        raise MaintenanceOperationError("截止日期起点不能晚于终点")
     rows: list[dict] = []
     filters = []
+    if owner_scope == "me":
+        filters.append(
+            maintenance_project_assignments.owned_project_condition(user_ctx)
+        )
     if not include_inactive:
         filters.append(MaintenanceProject.is_active.is_(True))
     if lifecycle != "all":
@@ -3467,7 +6302,8 @@ def project_operations(
             )
         )
     offset = (page - 1) * page_size
-    if reminder is None:
+    has_task_filter = bool(task_type or task_status or due_from or due_to)
+    if reminder is None and not has_task_filter:
         total = int(
             db.scalar(
                 select(func.count()).select_from(MaintenanceProject).where(*filters)
@@ -3487,10 +6323,15 @@ def project_operations(
         )
     else:
         matching_query = _directory_reminder_query(
+            db=db,
             filters=filters,
             as_of=as_of,
             user_ctx=user_ctx,
             reminder=reminder,
+            task_type=task_type,
+            task_status=task_status,
+            due_from=due_from,
+            due_to=due_to,
         )
         total = int(
             db.scalar(select(func.count()).select_from(matching_query.subquery()))
@@ -3516,6 +6357,13 @@ def project_operations(
         "page": page,
         "page_size": page_size,
         "as_of": as_of.isoformat(),
+        "owner_scope": owner_scope,
+        "filters": {
+            "task_type": task_type,
+            "task_status": task_status,
+            "due_from": due_from.isoformat() if due_from else None,
+            "due_to": due_to.isoformat() if due_to else None,
+        },
     }
     payload["data_version"] = _payload_token(payload)
     return payload

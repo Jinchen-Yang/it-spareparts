@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Alert, Button, Card, Empty, Space, Table, Tag } from "antd";
+import { Alert, Button, Card, Descriptions, Empty, Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { Link, useParams } from "react-router-dom";
 
@@ -12,8 +12,11 @@ import {
   type MaintenanceWorkspaceParams,
 } from "../../api/maintenanceOperations";
 import ContractPortfolio from "../../components/maintenance/ContractPortfolio";
+import BadReturnPanel from "../../components/maintenance/BadReturnPanel";
+import MaintenanceAcceptancePanel from "../../components/maintenance/MaintenanceAcceptancePanel";
 import ProjectFinancialProgress from "../../components/maintenance/ProjectFinancialProgress";
 import ProjectWorkbookActions from "../../components/maintenance/ProjectWorkbookActions";
+import SiteIssueWorkflowPanel from "../../components/maintenance/SiteIssueWorkflowPanel";
 import WorkbookFourSheetPreview from "../../components/maintenance/WorkbookFourSheetPreview";
 import { readMaintenanceCapabilities } from "../../components/maintenance/maintenancePermissions";
 import "../../components/maintenance/maintenanceOperations.css";
@@ -41,13 +44,29 @@ const requisitionStatusColumn: ColumnsType<MaintenanceSiteRequisitionRow>[number
   title: "成本状态",
   dataIndex: "cost_status",
   width: 120,
-  render: (value) => value === "missing"
+  render: (value, row) => value === "missing"
     ? <Tag color="orange">待回填成本</Tag>
     : value === "restricted"
       ? <Tag>成本不可见</Tag>
       : value === "not_counted"
         ? <Tag>未计入成本</Tag>
-        : <Tag color="green">已有成本</Tag>,
+        : row.cost_is_estimate
+          ? <Tag color="gold">已计入（估算）</Tag>
+          : <Tag color="green">已计入成本</Tag>,
+};
+
+const requisitionEvidenceColumn: ColumnsType<MaintenanceSiteRequisitionRow>[number] = {
+  title: "取价依据",
+  dataIndex: "cost_source_label",
+  width: 220,
+  render: (value, row) => {
+    if (row.cost_status === "restricted") return <Tag>不可见</Tag>;
+    if (!value) return <Tag>待补价格</Tag>;
+    if (row.cost_is_estimate) return <Tag color="gold">{value}</Tag>;
+    if (row.cost_evidence_kind === "purchase_evidence") return <Tag color="blue">{value}</Tag>;
+    if (row.cost_evidence_kind === "manual_confirmed") return <Tag color="green">{value}</Tag>;
+    return <Tag>{value}</Tag>;
+  },
 };
 
 function requisitionColumns(basis: TaxBasis): ColumnsType<MaintenanceSiteRequisitionRow> {
@@ -63,13 +82,14 @@ function requisitionColumns(basis: TaxBasis): ColumnsType<MaintenanceSiteRequisi
       render: money,
     })),
     ...sides.map((side) => ({
-      title: `已知成本（${taxSideLabel(side)}）`,
+      title: `已计成本（${taxSideLabel(side)}）`,
       key: `cost_amount_${side}`,
       dataIndex: side === "inc" ? "cost_amount_inc_tax" : "cost_amount_ex_tax",
       width: 130,
       align: "right" as const,
       render: money,
     })),
+    requisitionEvidenceColumn,
     requisitionStatusColumn,
   ];
 }
@@ -155,7 +175,14 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
   const [loadError, setLoadError] = useState(false);
   const [detailPages, setDetailPages] = useState(INITIAL_DETAIL_PAGES);
   const generation = useRef(0);
-  const [{ canManageProject }] = useState(readMaintenanceCapabilities);
+  const [capabilities] = useState(readMaintenanceCapabilities);
+  const {
+    canManageBadReturns,
+    canManageSiteIssues,
+    canManageProject,
+    canViewCost,
+    canViewExpense,
+  } = capabilities;
 
   const load = async (
     requestedPages: Required<MaintenanceWorkspaceParams> = detailPages,
@@ -238,15 +265,22 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
   }
 
   const { project } = workspace;
+  const managerLabel = project.manager_assignment
+    ? `${project.manager_assignment.display_name || project.manager_assignment.username} · ${project.manager_assignment.username}`
+    : "未映射系统账号";
   return (
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <PageHeader
         title={project.display_name}
-        subtitle={`${project.project_code} · 项目经理 ${project.project_manager_id || "待指定"} · 数据截止 ${workspace.as_of}`}
+        subtitle={`${project.project_code} · 项目经理 ${managerLabel} · 数据截止 ${workspace.as_of}`}
         extra={(
           <Space wrap>
+            <Tag>{`已人工归属历史维保单 ${project.manual_source_order_count} 张`}</Tag>
+            <Link to={`/maintenance/beta/project-master/source-orders?project_id=${encodeURIComponent(project.project_id)}`}>
+              查看归属明细
+            </Link>
             {canManageProject && (
-              <Link to={`/maintenance/cost-refill?project_id=${encodeURIComponent(project.project_id)}`}>
+              <Link to={`/maintenance/beta/cost-refill?project_id=${encodeURIComponent(project.project_id)}`}>
                 去人工回填成本
               </Link>
             )}
@@ -255,8 +289,8 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
       />
 
       <div className="maintenance-workspace-two-column">
-        <Card title="回款与项目实际成本">
-          <ProjectFinancialProgress metrics={project.metrics} />
+        <Card title="回款与项目已计成本">
+          <ProjectFinancialProgress metrics={project.metrics} visibility={capabilities} />
         </Card>
         <Card title="系统提醒">
           {workspace.reminders.length === 0 ? (
@@ -278,9 +312,63 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
         </Card>
       </div>
 
+      <Card title="项目跟踪与验收" data-testid="manager-tracking-card">
+        {project.manager_tracking ? (
+          <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <Descriptions bordered size="small" column={{ xs: 1, md: 3 }}>
+              <Descriptions.Item label="维保开始">
+                {project.manager_tracking.service_period.service_start || (
+                  <Typography.Text type="secondary">待补</Typography.Text>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="维保结束">
+                {project.manager_tracking.service_period.service_end || (
+                  <Typography.Text type="secondary">待补</Typography.Text>
+                )}
+              </Descriptions.Item>
+              <Descriptions.Item label="下一回款计划">
+                {project.manager_tracking.next_collection_milestone ? (
+                  <Space wrap size={4}>
+                    <span>
+                      {project.manager_tracking.next_collection_milestone.contract_no || "未标合同"}
+                      {` · 第 ${project.manager_tracking.next_collection_milestone.sequence} 期 · `}
+                      {project.manager_tracking.next_collection_milestone.planned_date || "日期待补"}
+                    </span>
+                    {project.manager_tracking.next_collection_milestone.is_overdue && (
+                      <Tag color="red">
+                        已逾期 {project.manager_tracking.next_collection_milestone.overdue_days} 天
+                      </Tag>
+                    )}
+                  </Space>
+                ) : <Typography.Text type="secondary">计划节点待补</Typography.Text>}
+              </Descriptions.Item>
+            </Descriptions>
+            <MaintenanceAcceptancePanel
+              projectId={project.project_id}
+              onChanged={() => void load(detailPages)}
+            />
+          </Space>
+        ) : (
+          <Alert type="warning" showIcon message="项目跟踪字段尚未生成，请刷新后重试。" />
+        )}
+      </Card>
+
       <Card title="全部关联合同">
         <ContractPortfolio contracts={project.contracts} />
       </Card>
+
+      <SiteIssueWorkflowPanel
+        projectId={project.project_id}
+        canManage={canManageSiteIssues}
+        onChanged={() => void load(detailPages)}
+      />
+
+      <BadReturnPanel
+        projectId={project.project_id}
+        returnRate={workspace.return_rate ?? project.return_rate}
+        canManage={canManageBadReturns}
+        onChanged={() => void load(detailPages)}
+      />
 
       <Card title="回款明细" extra={<Tag>{`截至 ${workspace.as_of}`}</Tag>}>
         <div data-testid="collection-snapshot-table">
@@ -305,11 +393,16 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
 
       <Card
         title="现场领用全量明细"
-        extra={project.metrics.cost_complete === null
+        extra={!canViewCost
           ? <Tag>成本明细不可见</Tag>
-          : project.metrics.cost_complete === false
+          : project.metrics.missing_cost_lines != null
+            && project.metrics.missing_cost_lines > 0
             ? <Tag color="orange">缺 {project.metrics.missing_cost_lines} 行成本，明细仍完整展示</Tag>
-            : <Tag color="green">成本完整</Tag>}
+            : project.metrics.cost_complete === true
+              ? <Tag color="green">成本完整</Tag>
+              : !canViewExpense
+                ? <Tag>现场领用成本可见，报销费用不可见</Tag>
+                : <Tag>项目总成本完整度待确认</Tag>}
       >
         <div data-testid="site-requisition-table">
           <Table
@@ -318,7 +411,7 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
             columns={requisitionColumns(maintenanceBasis)}
             dataSource={workspace.requisitions.rows}
             loading={loading}
-            scroll={{ x: maintenanceBasis === "both" ? 1460 : 1200 }}
+            scroll={{ x: maintenanceBasis === "both" ? 1680 : 1420 }}
             pagination={{
               current: workspace.requisitions.page,
               pageSize: workspace.requisitions.page_size,
@@ -353,6 +446,7 @@ export default function MaintenanceProjectWorkspacePage({ projectId }: {
       </Card>
 
       <Card
+        id="project-workbook"
         title="完整项目工作簿"
         extra={<Tag>{`协议 ${workspace.workbook_preview.protocol_version}`}</Tag>}
       >

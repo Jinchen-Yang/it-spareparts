@@ -11,6 +11,7 @@ import threading
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -22,10 +23,15 @@ from app.api.maintenance import (
     _wait_for_roundtrip_task_terminal,
 )
 from app.api.maintenance_project_operations import _real_operator
+from app.api.maintenance_project_scope import (
+    enforce_maintenance_project_access,
+    require_maintenance_project_access,
+)
 from app.auth import current_identity, current_role
 from app.business_time import business_today
 from app.config import get_settings
 from app.db import SessionLocal, get_db
+from app.models.maintenance_project_operations import MaintenanceProjectWorkbookValidation
 from app.security import (
     UserContext,
     get_current_user_context,
@@ -207,6 +213,7 @@ def export_project_workbook(
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> Response:
     _require_roundtrip_permissions(ctx)
@@ -258,6 +265,7 @@ async def validate_project_workbook_upload(
             require_data="data_profit",
         )
     ),
+    _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     _no_store(response)
@@ -308,6 +316,7 @@ def apply_project_workbook_plan(
             require_data="data_profit",
         )
     ),
+    _scope: None = Depends(require_maintenance_project_access),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     _no_store(response)
@@ -364,6 +373,13 @@ def download_project_workbook_errors(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> Response:
     _require_roundtrip_permissions(ctx)
+    project_id = db.scalar(
+        select(MaintenanceProjectWorkbookValidation.project_id).where(
+            MaintenanceProjectWorkbookValidation.validation_id == validation_id
+        )
+    )
+    if project_id is not None:
+        enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     operator = _real_operator(db, ident)
     _run_validation_retention_cleanup(db)
     adapter = MaintenanceProjectWorkbookAdapter(

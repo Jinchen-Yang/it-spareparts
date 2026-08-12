@@ -7,7 +7,8 @@
 - own_customers_only  行级：销售只看自己成交的客户（同事客户名匿名）。
 
 每个账号把自定义存在 sys_user.permissions(JSONB)；为空 → 回退该 role 的模板(ROLE_TEMPLATES)。
-admin 恒为全开（不可被自己/他人锁死）。权限随登录写进 token，改权限后下次登录生效。
+admin 的常规权限恒为全开（不可被自己/他人锁死）；两个生产 Beta 页面例外，必须按实名账号
+的模板快照与稀疏覆盖显式加入白名单。权限随登录写进 token，改权限后旧 token 立即吊销。
 """
 # data 开关 → 对应要隐藏的 config.FIELD_GROUPS 组名
 DATA_GROUPS: dict[str, list[str]] = {
@@ -25,10 +26,22 @@ PAGE_KEYS: list[str] = [
     "page_inventory", "page_chat", "page_import", "page_governance",
     "page_master_data", "page_maintenance", "page_boss_board",
     "page_pool_analysis",
+    # 维保新工作台 Beta：稳定版 page_maintenance 仍是基础权限；本键仅给
+    # 明确进入灰度名单的账号，关闭后不影响原维保页面与接口。
+    "page_maintenance_beta",
+    # 销售经理补库购物车 Beta：独立于稳定版库存/维保页面，包括管理员在内，
+    # 试用账号由权限中心逐个显式授权。
+    "page_replenishment_beta",
     # 权限中心 v2：账号与权限中心页面（只读查看账号/模板/活动）。critical 级——
     # 内置模板对所有非 admin 角色显式 False，保持"仅管理员可见账号管理"的既有行为。
     "page_accounts",
 ]
+# 这两个页面不是角色能力，而是生产灰度名单。即使 role=admin，也必须从实名账号
+# template_perms ⊕ perm_overrides 得到 True；旧 token/共享口令/缺失账号快照一律失败关闭。
+ACCOUNT_SCOPED_BETA_PAGE_KEYS: frozenset[str] = frozenset({
+    "page_maintenance_beta",
+    "page_replenishment_beta",
+})
 # 动作开关：写操作准入（require_action）。各动作按模板失败关闭，可在账号管理页单独授权。
 ACTION_KEYS: list[str] = [
     "action_pool_manage",      # 建池/改名称说明/增删成员/归档恢复
@@ -39,8 +52,26 @@ ACTION_KEYS: list[str] = [
     "action_data_quality_review",  # 逐条核实采购/销售事实疑点
     # 直接应用固定维保回填工作簿（原子写订单/报销/人工成本），不走审批。
     "action_maintenance_roundtrip_apply",
+    # 项目经理本人范围月度全量工作簿：校验可读，应用另行授权。
+    "action_maintenance_manager_workbook_apply",
     # 维护稳定维保项目主档（建档/改展示信息/归档恢复）。
     "action_maintenance_project_manage",
+    # WBDD 整单逻辑删除（跨页复核 + 服务端 7 秒双确认）。
+    "action_maintenance_demand_delete",
+    # 新建、确认、更正和作废现场实际领用单；与库存写入严格隔离。
+    "action_maintenance_site_issue_manage",
+    # 登记、提交和仓库确认坏件返还；不直接修改成本或库存。
+    "action_maintenance_bad_return_manage",
+    # 验收报告提交与审批严格分权；审批在业务角色未定前默认仅 admin。
+    "action_maintenance_acceptance_submit",
+    "action_maintenance_acceptance_review",
+    # 仓库单据落库与关联歧义人工裁决（实名、高风险、默认仅管理员）。
+    "action_maintenance_warehouse_manage",
+    # 成本/库存切换 dry-run、实名对账与双人审批；不包含生产激活。
+    "action_maintenance_migration_review",
+    # Beta 补库申请的创建/复提与审核结果回写严格分权。审核 Agent 本身不在系统内实现。
+    "action_replenishment_create",
+    "action_replenishment_review",
 ]
 ROW_KEYS: list[str] = ["own_customers_only"]
 ALL_KEYS: list[str] = [*DATA_GROUPS, *PAGE_KEYS, *ACTION_KEYS, *ROW_KEYS]
@@ -63,6 +94,7 @@ LABELS: dict[str, str] = {
     "page_maintenance": "项目成本（维保出库）",
     "page_boss_board": "老板经营看板",
     "page_pool_analysis": "互通池价格分析",
+    "page_maintenance_beta": "维保管理",
     "data_pool_price_governance": "池价格治理（约束价/越线差额）",
     "action_pool_manage": "互通PN池维护（建池/成员/归档）",
     "action_pool_set_policy": "池约束价设置（采购上限/销售下限）",
@@ -71,7 +103,18 @@ LABELS: dict[str, str] = {
     "action_account_manage": "账号与权限管理（建号/改权/批量/模板）",
     "action_data_quality_review": "数据疑点核实（逐条确认/重新打开）",
     "action_maintenance_roundtrip_apply": "维保固定工作簿直接回填",
+    "action_maintenance_manager_workbook_apply": "项目经理月度全量表确认应用",
     "action_maintenance_project_manage": "维保项目主档管理",
+    "action_maintenance_demand_delete": "维保需求单安全删除",
+    "action_maintenance_site_issue_manage": "现场备件领用管理",
+    "action_maintenance_bad_return_manage": "维保坏件返还管理",
+    "action_maintenance_acceptance_submit": "维保验收报告提交与附件上传",
+    "action_maintenance_acceptance_review": "维保验收报告高风险审批",
+    "action_maintenance_warehouse_manage": "仓库单据导入与歧义裁决",
+    "action_maintenance_migration_review": "维保迁移对账与审批",
+    "page_replenishment_beta": "补库申请",
+    "action_replenishment_create": "补库申请创建与复提",
+    "action_replenishment_review": "补库审核结果回写",
 }
 
 
@@ -84,7 +127,16 @@ def _full(own: bool = False) -> dict[str, bool]:
     return d
 
 
-# 角色模板：建号选角色时套用，可逐项微调（admin 例外，恒全开）。
+def admin_account_defaults() -> dict[str, bool]:
+    """Fail-closed snapshot for a named admin when the DB template is unavailable."""
+    graph = _full()
+    for key in ACCOUNT_SCOPED_BETA_PAGE_KEYS:
+        graph[key] = False
+    return graph
+
+
+# 角色模板：建号选角色时套用，可逐项微调。admin 常规权限恒全开；Beta 页面
+# 的生产默认值由各自迁移写成 False，并由 effective_for_user 尊重账号快照/覆盖。
 # 权限中心 v2 起，这份 Python 字典只作三类回退用：guest/匿名兜底、无 perms 的旧 token、
 # 共享口令回退登录。正常账号的权限底座来自 sys_role_template 套用时的快照（sys_user.template_perms）。
 ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
@@ -92,18 +144,42 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
     # boss 由 _full() 生成会把全部动作打开；账号管理与数据疑点核实必须显式关闭。
     "boss": {**_full(), "page_accounts": False, "action_account_manage": False,
              "action_data_quality_review": False,
-             "action_maintenance_project_manage": False},
+             "page_maintenance_beta": False,
+             "action_maintenance_manager_workbook_apply": False,
+             "action_maintenance_project_manage": False,
+              "action_maintenance_demand_delete": False,
+              "action_maintenance_site_issue_manage": False,
+             "action_maintenance_bad_return_manage": False,
+             "action_maintenance_acceptance_submit": False,
+             "action_maintenance_acceptance_review": False,
+             "action_maintenance_warehouse_manage": False,
+             "action_maintenance_migration_review": False,
+             "page_replenishment_beta": False,
+             "action_replenishment_create": False,
+             "action_replenishment_review": False},
     # readonly 也是 _DEFAULT + 未认证 guest 的兜底模板：page_maintenance/page_boss_board 必须显式关，
     # 否则未知/匿名角色继承 _full() 里的 True，凭 require_page 即可读（方案 §5）。
     # 池写权限（action_pool_*）同理必须显式关——匿名 guest 决不能建池/改约束价；
     # page_pool_analysis / data_pool_price_governance 按规格 §12 全员开（普通员工可看池与约束价）。
     "readonly": {**_full(), "page_import": False, "page_governance": False,
                  "page_master_data": False, "page_maintenance": False,
+                 "page_maintenance_beta": False,
                  "page_boss_board": False,
                  "action_pool_manage": False, "action_pool_set_policy": False,
                  "action_data_quality_review": False,
                  "action_maintenance_roundtrip_apply": False,
+                 "action_maintenance_manager_workbook_apply": False,
                  "action_maintenance_project_manage": False,
+                  "action_maintenance_demand_delete": False,
+                  "action_maintenance_site_issue_manage": False,
+                 "action_maintenance_bad_return_manage": False,
+                 "action_maintenance_acceptance_submit": False,
+                 "action_maintenance_acceptance_review": False,
+                 "action_maintenance_warehouse_manage": False,
+                 "action_maintenance_migration_review": False,
+                 "page_replenishment_beta": False,
+                 "action_replenishment_create": False,
+                 "action_replenishment_review": False,
                  # 账号管理两键必须显式关（同 boss 注释；guest 兜底模板决不能看/管账号）
                  "page_accounts": False, "action_account_manage": False},
     "sales": {
@@ -115,9 +191,9 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         # page_profit=False：销售默认不开放利润分析；管理员可按账号显式授予页面权限。
         "page_parts": True, "page_purchases": True, "page_profit": False,
         "page_inventory": True, "page_chat": True,
-        "page_import": False, "page_governance": False,
         # 项目成本=公司维保项目经营数据，销售不开（同 page_profit 口径）
         "page_maintenance": False,
+        "page_maintenance_beta": False,
         # 老板经营看板=全公司经营/个人排名，销售不开
         "page_boss_board": False,
         # 互通池价格分析全员可见（§12），约束价对全员公开；池维护/约束设置默认不开
@@ -126,7 +202,18 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_pool_manage": False, "action_pool_set_policy": False,
         "action_data_quality_review": False,
         "action_maintenance_roundtrip_apply": False,
+        "action_maintenance_manager_workbook_apply": False,
         "action_maintenance_project_manage": False,
+        "action_maintenance_demand_delete": False,
+        "action_maintenance_site_issue_manage": False,
+        "action_maintenance_bad_return_manage": False,
+        "action_maintenance_acceptance_submit": False,
+        "action_maintenance_acceptance_review": False,
+        "action_maintenance_warehouse_manage": False,
+        "action_maintenance_migration_review": False,
+        "page_replenishment_beta": False,
+        "action_replenishment_create": False,
+        "action_replenishment_review": False,
         "own_customers_only": True,
     },
     "purchaser": {
@@ -139,6 +226,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "page_master_data": True,
         # 维保项目成本对采购开放（成本口径本就对采购可见，data_purchase_cost=True）
         "page_maintenance": True,
+        "page_maintenance_beta": False,
         # 老板经营看板=全公司经营/个人排名，采购不开
         "page_boss_board": False,
         # 互通池价格分析全员可见（§12），约束价对全员公开；池维护/约束设置默认不开
@@ -149,7 +237,18 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         # 采购默认没有利润可见权限，故固定工作簿写入也默认失败关闭；
         # 管理员可给同时具备成本+利润可见权限的指定工作人员单独授权。
         "action_maintenance_roundtrip_apply": False,
+        "action_maintenance_manager_workbook_apply": False,
         "action_maintenance_project_manage": False,
+        "action_maintenance_demand_delete": False,
+        "action_maintenance_site_issue_manage": False,
+        "action_maintenance_bad_return_manage": False,
+        "action_maintenance_acceptance_submit": False,
+        "action_maintenance_acceptance_review": False,
+        "action_maintenance_warehouse_manage": False,
+        "action_maintenance_migration_review": False,
+        "page_replenishment_beta": False,
+        "action_replenishment_create": False,
+        "action_replenishment_review": False,
         "own_customers_only": False,
     },
 }
@@ -161,7 +260,11 @@ def template_for(role: str) -> dict[str, bool]:
 
 
 def effective(role: str, custom: dict | None) -> dict[str, bool]:
-    """最终权限：role 模板打底、custom(自定义)逐项覆盖。admin 恒全开，不可自锁。"""
+    """旧角色口径：role 模板打底、custom 逐项覆盖；admin 返回传统全开图。
+
+    实名账号运行时必须使用 ``effective_for_user``。该入口保留传统 admin 全开，供旧 token
+    与历史迁移对账；Beta 页不会再通过 security 的 admin 短路或缺失权限图获得放行。
+    """
     if role == "admin":
         return _full()
     perms = template_for(role)
@@ -189,7 +292,11 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     # 逐条确认必须看得到原始价格和规则证据，不能在证据被脱敏时盲判。
     "action_data_quality_review": "data_purchase_cost",
     "action_maintenance_roundtrip_apply": "data_profit",
+    "action_maintenance_manager_workbook_apply": "data_profit",
     "action_maintenance_project_manage": "data_profit",
+    "action_maintenance_site_issue_manage": "data_purchase_cost",
+    "action_maintenance_migration_review": "data_profit",
+    "action_replenishment_create": "data_pool_price_governance",
 }
 
 # "页面内操作必须能进页面"的动作→页面依赖（权限中心 v2）：改账号权限先要能打开
@@ -199,7 +306,35 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_account_manage": "page_accounts",
     "action_data_quality_review": "page_governance",
     "action_maintenance_roundtrip_apply": "page_maintenance",
+    "action_maintenance_manager_workbook_apply": "page_maintenance",
     "action_maintenance_project_manage": "page_maintenance",
+    "action_maintenance_demand_delete": "page_maintenance",
+    "action_maintenance_site_issue_manage": "page_maintenance",
+    "action_maintenance_bad_return_manage": "page_maintenance",
+    "action_maintenance_acceptance_submit": "page_maintenance",
+    "action_maintenance_acceptance_review": "page_maintenance",
+    "action_maintenance_warehouse_manage": "page_maintenance",
+    "action_maintenance_migration_review": "page_maintenance",
+    "action_replenishment_create": "page_replenishment_beta",
+}
+
+# 新维保动作同时依赖稳定版基础权限和 Beta 白名单。本表是叠加约束，保留
+# ACTION_PAGE_DEPENDENCIES 中既有的 page_maintenance 映射，避免历史权限契约漂移。
+ACTION_ADDITIONAL_PAGE_DEPENDENCIES: dict[str, str] = {
+    "action_maintenance_manager_workbook_apply": "page_maintenance_beta",
+    "action_maintenance_project_manage": "page_maintenance_beta",
+    "action_maintenance_demand_delete": "page_maintenance_beta",
+    "action_maintenance_site_issue_manage": "page_maintenance_beta",
+    "action_maintenance_bad_return_manage": "page_maintenance_beta",
+    "action_maintenance_acceptance_submit": "page_maintenance_beta",
+    "action_maintenance_acceptance_review": "page_maintenance_beta",
+    "action_maintenance_warehouse_manage": "page_maintenance_beta",
+    "action_maintenance_migration_review": "page_maintenance_beta",
+}
+
+# Beta 只是稳定维保能力之上的附加入口，禁止出现“看不到稳定版却能进 Beta”的孤岛权限。
+PAGE_PAGE_DEPENDENCIES: dict[str, str] = {
+    "page_maintenance_beta": "page_maintenance",
 }
 
 # 数据之间的可推导依赖：营收在经营报表中是公开口径，毛利一旦可见，
@@ -226,6 +361,16 @@ def combo_errors(perms: dict[str, bool]) -> list[str]:
                 f"「{LABELS.get(action_key, action_key)}」需要同时开启"
                 f"「{LABELS.get(page_key, page_key)}」——操作发生在该页面里，"
                 f"进不了页面就无法看着现状做修改")
+    for action_key, page_key in ACTION_ADDITIONAL_PAGE_DEPENDENCIES.items():
+        if perms.get(action_key, False) and not perms.get(page_key, False):
+            errors.append(
+                f"「{LABELS.get(action_key, action_key)}」需要同时开启"
+                f"「{LABELS.get(page_key, page_key)}」——该操作仅在灰度页面中开放")
+    for page_key, required_page_key in PAGE_PAGE_DEPENDENCIES.items():
+        if perms.get(page_key, False) and not perms.get(required_page_key, False):
+            errors.append(
+                f"「{LABELS.get(page_key, page_key)}」需要同时开启"
+                f"「{LABELS.get(required_page_key, required_page_key)}」——正式工作台沿用基础页面的数据边界")
     for data_key, required_key in DATA_DATA_DEPENDENCIES.items():
         if perms.get(data_key, False) and not perms.get(required_key, False):
             errors.append(
@@ -246,6 +391,9 @@ def runtime_safe(perms: dict | None) -> dict[str, bool]:
     for data_key, required_key in DATA_DATA_DEPENDENCIES.items():
         if safe.get(data_key, False) and not safe.get(required_key, False):
             safe[data_key] = False
+    for page_key, required_page_key in PAGE_PAGE_DEPENDENCIES.items():
+        if safe.get(page_key, False) and not safe.get(required_page_key, False):
+            safe[page_key] = False
     return safe
 
 
@@ -271,10 +419,20 @@ def hidden_groups(perms: dict | None) -> set[str]:
 
 # 高风险键：授予/撤销仅限 admin 角色操作者（防非 admin 的账号管理代理自我提权/互相提权）
 HIGH_RISK_KEYS: set[str] = {
+    "page_maintenance_beta",
+    "page_replenishment_beta",
     "page_accounts",
     "action_account_manage",
     "action_maintenance_roundtrip_apply",
+    "action_maintenance_manager_workbook_apply",
     "action_maintenance_project_manage",
+    "action_maintenance_demand_delete",
+    "action_maintenance_site_issue_manage",
+    "action_maintenance_bad_return_manage",
+    "action_maintenance_acceptance_review",
+    "action_maintenance_warehouse_manage",
+    "action_maintenance_migration_review",
+    "action_replenishment_review",
 }
 
 # 前端矩阵五分组（顺序即展示序）：页面入口 / 数据可见 / 操作能力 / 行级范围 / 高风险管理
@@ -292,14 +450,24 @@ UI_GROUPS: list[dict] = [
          "action_pool_set_policy",
          "action_data_quality_review",
          "action_maintenance_roundtrip_apply",
+         "action_maintenance_manager_workbook_apply",
          "action_maintenance_project_manage",
+         "action_maintenance_demand_delete",
+         "action_maintenance_site_issue_manage",
+         "action_maintenance_bad_return_manage",
+         "action_maintenance_acceptance_submit",
+         "action_maintenance_acceptance_review",
+         "action_maintenance_warehouse_manage",
+         "action_replenishment_create",
+         "action_replenishment_review",
      ]},
     {"key": "row", "label": "行级范围",
      "hint": "在能看的数据里进一步收紧范围（限制型开关：勾上=看得更少）。",
      "keys": list(ROW_KEYS)},
     {"key": "admin", "label": "高风险管理能力",
      "hint": "接近管理员的能力，只有管理员本人可以授予或撤销，请谨慎开放。",
-     "keys": ["page_accounts", "action_account_manage"]},
+     "keys": ["page_accounts", "action_account_manage",
+              "action_maintenance_migration_review"]},
 ]
 
 # 每个权限键的业务语言八要素（甲方语言，不是开发语言）。
@@ -461,6 +629,24 @@ PERMISSION_META: dict[str, dict] = {
         "sensitivity": "critical",
         "risk": "能看到全员权限分布与活动记录，仅管理员可授予本权限。",
     },
+    "page_replenishment_beta": {
+        "label": "补库申请",
+        "summary": "可打开补库申请页面，用购物车方式准备前置库补库申请。",
+        "can": "打开补库申请页面；同时具备价格数据权限时可只读查看本人申请与历史版本。",
+        "cannot": "搜索价格事实还需「池价格治理」，维护/提交还需「补库申请创建与复提」；不代表可回写审核结果。",
+        "typical": ["管理员", "已授权的销售经理"],
+        "sensitivity": "high",
+        "risk": "页面、价格数据、申请操作是三把独立钥匙；服务端功能开关关闭时拒绝全部业务请求。",
+    },
+    "page_maintenance_beta": {
+        "label": "维保管理",
+        "summary": "可进入维保管理正式工作台，并继续使用兼容入口。",
+        "can": "在稳定版入口不变的前提下，使用项目面板、需求删除、经理月报、现场领用、坏件返还、仓库单据、验收和迁移核对。",
+        "cannot": "不自动获得任何写操作或敏感数据权限；服务端功能开关关闭时所有新工作台接口均不可用。",
+        "typical": ["管理员", "已授权的项目经理"],
+        "sensitivity": "critical",
+        "risk": "直接接触同一生产数据库中的新业务流程，必须逐账号白名单开放，并保留稳定版回退入口。",
+    },
     # ---- 操作能力 ----
     "action_pool_manage": {
         "label": "互通PN池维护",
@@ -508,6 +694,15 @@ PERMISSION_META: dict[str, dict] = {
         "sensitivity": "critical",
         "risk": "会直接改写经营事实并触发成本重算；默认仅管理员和老板开启，其他工作人员须由管理员单独授权。",
     },
+    "action_maintenance_manager_workbook_apply": {
+        "label": "项目经理月度全量表确认应用",
+        "summary": "允许把本人项目范围内、已通过整表校验的月度 v3 工作簿原子写入。",
+        "can": "写入维保期限、验收截止日和最多 24 期计划回款节点，并关闭对应月度任务。",
+        "cannot": "不能修改财务确认实收，不能越过实名项目负责人范围，也不能绕过版本冲突。",
+        "typical": ["管理员授权的项目经理"],
+        "sensitivity": "critical",
+        "risk": "会直接写入项目跟踪事实；默认对所有非管理员角色关闭，必须逐账号授权。",
+    },
     "action_maintenance_project_manage": {
         "label": "维保项目主档管理",
         "summary": "允许新建稳定维保项目，并维护展示信息、归档与恢复。",
@@ -516,6 +711,87 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "项目数据维护人员（需单独授权）"],
         "sensitivity": "critical",
         "risk": "项目身份会成为回款、领用、费用和待办的关联地基；误建或误归档会影响后续全链路归集。",
+    },
+    "action_maintenance_demand_delete": {
+        "label": "维保需求单安全删除",
+        "summary": "允许把误导入的 WBDD 整单逻辑删除，并从全部有效业务视图中排除。",
+        "can": "跨页选择需求单、查看完整复核清单、填写理由并经两次确认后执行可恢复的逻辑删除。",
+        "cannot": "不能删除单行备件、不能物理删除原始订单或项目归属；恢复必须走独立实名管理员入口。",
+        "typical": ["管理员", "管理员指定的数据维护人员"],
+        "sensitivity": "critical",
+        "risk": "会改变成本、库存推导、项目看板和导出的有效数据范围；系统强制服务端等待与整批原子校验。",
+    },
+    "action_maintenance_site_issue_manage": {
+        "label": "现场备件领用管理",
+        "summary": "允许项目经理建立、确认、更正和作废现场实际领用单。",
+        "can": "从稳定发货明细选择备件，保存草稿并确认现场实际消耗；确认后冻结成本证据并生成返还义务接口事件。",
+        "cannot": "不能指定系统单号或实体 ID，不能超发货余额，也不会直接修改公司库、地区库或前置库库存。",
+        "typical": ["管理员", "项目经理（需单独授权）"],
+        "sensitivity": "critical",
+        "risk": "确认结果直接进入项目成本并触发后续返还义务；必须同时具备维保页面和采购成本查看权限。",
+    },
+    "action_maintenance_bad_return_manage": {
+        "label": "维保坏件返还管理",
+        "summary": "允许按已确认现场领用义务登记、提交并确认坏件返还。",
+        "can": "建立返还草稿、登记在途、仓库确认，并保存正式入库的外部稳定引用。",
+        "cannot": "不能人工点选豁免，不能超出应返数量，也不会冲减项目成本或直接增加库存。",
+        "typical": ["管理员", "项目经理或仓库协同人员（需单独授权）"],
+        "sensitivity": "critical",
+        "risk": "仓库确认量仅作返还率试算；官方返还率分子待业务确认。操作必须实名、幂等并保留追加式审计。",
+    },
+    "action_maintenance_acceptance_submit": {
+        "label": "维保验收报告提交与附件上传",
+        "summary": "允许本人负责项目上传受控附件并提交验收报告。",
+        "can": "上传通过安全校验的 PDF、Word、Excel 或图片，并把验收报告提交审核。",
+        "cannot": "不能审批自己的提交，不能访问非本人项目，也不能上传外部链接或可执行内容。",
+        "typical": ["管理员授权的项目经理"],
+        "sensitivity": "high",
+        "risk": "会形成正式验收提交事实和持久化附件；建议仅授权真实项目负责人。",
+    },
+    "action_maintenance_acceptance_review": {
+        "label": "维保验收报告高风险审批",
+        "summary": "允许批准或驳回已提交的维保验收报告。",
+        "can": "查看受控附件后批准或填写理由驳回；全部操作实名审计。",
+        "cannot": "不能审批本人提交、不能审批未提交或没有有效附件的报告。",
+        "typical": ["管理员（业务审批角色确定前）"],
+        "sensitivity": "critical",
+        "risk": "审批结果是正式业务结论；业务审批角色尚未配置，默认仅 admin 可用。",
+    },
+    "action_maintenance_warehouse_manage": {
+        "label": "仓库单据导入与歧义裁决",
+        "summary": "允许把仓库导出单据固化为只读事实，并实名处理无法自动关联的歧义。",
+        "can": "先零写预览，再按稳定 ID 原子落库；对多候选、未知版本和字段冲突填写理由后裁决。",
+        "cannot": "不能按项目名、日期加 PN 或列数猜关联；不会修改库存、成本或返还率，附件内容也不进入事实库。",
+        "typical": ["管理员", "仓库数据维护人员（需单独授权）"],
+        "sensitivity": "critical",
+        "risk": "人工裁决会成为后续项目归集的正式关系证据，因此要求实名、乐观锁和前后值审计。",
+    },
+    "action_maintenance_migration_review": {
+        "label": "维保迁移对账与审批",
+        "summary": "允许生成成本/库存切换 dry-run、实名对账并审批哈希绑定的 manifest。",
+        "can": "查看逐项目差异，确认历史成本基线与库存期初，并在职责分离后生成审批 manifest。",
+        "cannot": "不能启用生产开关、不能执行生产迁移，也不能用文字理由跳过未解决 blocker。",
+        "typical": ["管理员", "独立复核人（需单独授权）"],
+        "sensitivity": "critical",
+        "risk": "错误审批会把成本和库存切换到错误基线；系统默认仅管理员持有且生产开关仍独立关闭。",
+    },
+    "action_replenishment_create": {
+        "label": "补库申请创建与复提",
+        "summary": "允许维护本人补库购物车、提交不可变版本并处理被打回条目。",
+        "can": "新增/修改/移除本人草稿行，提交版本，按打回结果建立下一版并导出。",
+        "cannot": "不能查看或修改他人申请，不能审批，不会修改库存或自动生成采购/维保事实。",
+        "typical": ["已授权的销售经理"],
+        "sensitivity": "high",
+        "risk": "提交内容会成为留存业务版本；必须同时具备补库申请页面和池价格查看权限。",
+    },
+    "action_replenishment_review": {
+        "label": "补库审核结果回写",
+        "summary": "允许受控回写外部审核结果，不包含审核 Agent 或审批规则本身。",
+        "can": "按不可变版本摘要逐行回写批准/打回结果，幂等留痕并形成汇总。",
+        "cannot": "不能读取申请目录或历史价格，不能替销售修改内容，也不能自动审批、自动定价或调用外部系统。",
+        "typical": ["管理员", "受控审核集成账号"],
+        "sensitivity": "critical",
+        "risk": "审核结论决定哪些行可进入最终 WBDD 子集导出，仅管理员可授予本权限。",
     },
     # ---- 行级范围 ----
     "own_customers_only": {
@@ -552,10 +828,36 @@ def effective_from_snapshot(template_perms: dict | None, overrides: dict | None)
 
 
 def effective_for_user(user) -> dict[str, bool]:
-    """v2 有效权限（账号级单一真值源）：admin 恒全开；有模板快照走快照⊕覆盖；
-    无快照（迁移前旧行/异常兜底）回退旧口径 effective(role, permissions)。"""
+    """v2 有效权限（账号级单一真值源）。
+
+    admin 的常规权限仍强制全开，防止账号中心把管理员锁死；Beta 页面是灰度名单，
+    唯独尊重该实名账号的 template_perms ⊕ perm_overrides。无快照的旧 admin 只读取
+    legacy permissions 中明确存在的 Beta 位，缺失时默认 False。
+    """
     if user.role == "admin":
-        return _full()
+        result = _full()
+        if getattr(user, "template_perms", None) is not None:
+            stored = effective_from_snapshot(user.template_perms, user.perm_overrides)
+        else:
+            stored = sanitize(getattr(user, "permissions", None))
+        for key in ACCOUNT_SCOPED_BETA_PAGE_KEYS:
+            result[key] = bool(stored.get(key, False))
+        return result
     if getattr(user, "template_perms", None) is not None:
         return effective_from_snapshot(user.template_perms, user.perm_overrides)
     return effective(user.role, user.permissions)
+
+
+def page_permission_allowed(
+    *,
+    role: str,
+    permission_map: dict | None,
+    page_key: str,
+) -> bool:
+    """Resolve a page gate without letting admin bypass account-scoped Beta pages."""
+    if page_key in ACCOUNT_SCOPED_BETA_PAGE_KEYS:
+        return isinstance(permission_map, dict) and bool(permission_map.get(page_key, False))
+    if role == "admin":
+        return True
+    graph = permission_map if isinstance(permission_map, dict) else effective(role, None)
+    return bool(graph.get(page_key, False))

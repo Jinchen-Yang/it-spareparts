@@ -465,12 +465,27 @@ cat "$APP_DIR/monitor.status"   # 看最近一次巡检结果
 4. 用 `sudo -n journalctl -u cron --since '15 minutes ago' --no-pager` 核对这两个周期，
    不得出现脚本不存在、权限拒绝、sudo 交互或超时堆积。
 
-**Postgres 慢查询日志**（免重启、写进数据卷持久化，零风险）：
+**Postgres 慢查询日志**（免重启、写进数据卷持久化）：
 ```bash
 sudo docker compose exec -T db psql -U spareparts -d spareparts \
-  -c "ALTER SYSTEM SET log_min_duration_statement = 1000;" -c "SELECT pg_reload_conf();"
-# 之后 >1s 的慢查询会进 db 容器日志：sudo docker compose logs db | grep duration
+  -c "ALTER SYSTEM SET log_min_duration_statement = 1000;" \
+  -c "ALTER SYSTEM SET log_parameter_max_length = 0;" \
+  -c "ALTER SYSTEM SET log_parameter_max_length_on_error = 0;" \
+  -c "ALTER SYSTEM SET log_statement = 'none';" \
+  -c "SELECT pg_reload_conf();" \
+  -c "SHOW log_min_duration_statement;" \
+  -c "SHOW log_parameter_max_length;" \
+  -c "SHOW log_parameter_max_length_on_error;" \
+  -c "SHOW log_statement;"
+# 之后 >1s 的慢查询会记录时长和带占位符的 SQL，但不得记录 bind 参数值：
+# sudo docker compose logs db | grep duration
 ```
+
+`log_parameter_max_length=0` 和 `log_parameter_max_length_on_error=0` 是日志隐私
+门禁，不得为了排查问题临时改为正数或 `-1`。应用 SQLAlchemy engine 同时启用
+`hide_parameters=True`，异常字符串也不得展开参数。生产验收必须用合成搜索哨兵触发
+正常搜索和受控失败，再确认 app/db/frontend/Caddy 日志均没有该哨兵；不得使用真实项目、
+合同或客户内容做日志测试。
 
 ---
 

@@ -100,6 +100,16 @@ describe("MaintenanceProjectMasterPage", () => {
     expect(screen.queryByLabelText("生命周期状态")).toBeNull();
   });
 
+  it("项目主档始终提供历史维保单归属目录入口", async () => {
+    render(<MaintenanceProjectMasterPage />);
+
+    await screen.findByText("XM-001");
+    expect(screen.getByRole("link", { name: "历史维保单归属" })).toHaveAttribute(
+      "href",
+      "/maintenance/beta/project-master/source-orders",
+    );
+  });
+
   it("按服务端总数翻页，不会只展示默认前 50 个项目", async () => {
     listMaintenanceProjects.mockImplementation((params: { page: number }) => (
       params.page === 2

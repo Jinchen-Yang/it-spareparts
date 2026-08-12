@@ -179,6 +179,53 @@ def _price_map_aggregate(db: Session, *, side: str, part_ids: list[int],
     return _price_map_stats(db.execute(stmt).one())
 
 
+def aggregate_part_price_facts(
+    db: Session,
+    part_ids: list[int],
+    *,
+    date_from: date,
+    date_to: date,
+) -> dict[int, dict]:
+    """Return privacy-safe purchase/sales aggregates for each requested PN.
+
+    This is the public read contract used by the replenishment Beta.  Pool
+    membership is deliberately irrelevant: a PN without a pool still keeps its
+    own purchase and sales history.  The underlying formal price-map aggregate
+    excludes confirmed source errors and applies the established active-order,
+    positive quantity/price and ex-tax rules.
+    """
+    ids = list(dict.fromkeys(int(value) for value in part_ids))
+    if not ids:
+        return {}
+    purchase = _price_map_aggregate(
+        db,
+        side="purchase",
+        part_ids=ids,
+        lower=date_from,
+        upper=date_to,
+        purchase_type=None,
+        employee=None,
+        by_part=True,
+    )
+    sales = _price_map_aggregate(
+        db,
+        side="sales",
+        part_ids=ids,
+        lower=date_from,
+        upper=date_to,
+        purchase_type=None,
+        employee=None,
+        by_part=True,
+    )
+    return {
+        part_id: {
+            "purchase": purchase.get(part_id),
+            "sales": sales.get(part_id),
+        }
+        for part_id in ids
+    }
+
+
 def _price_map_latest_raw(db: Session, *, side: str, part_ids: list[int],
                           lower: date | None, upper: date,
                           purchase_type: str | None, employee: str | None) -> dict[int, dict]:

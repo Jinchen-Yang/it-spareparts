@@ -378,6 +378,14 @@ def preview_project_workbook(workspace: Mapping[str, Any]) -> dict[str, int]:
     }
 
 
+def _display_cost_rate(cost_rate: Decimal | None) -> Decimal | None:
+    """Round to the 0.01 percentage-point precision shown in the workbook."""
+
+    if cost_rate is None:
+        return None
+    return cost_rate.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
 def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
     """Use the project workspace KPI contract, with a pure fallback for callers.
 
@@ -464,6 +472,7 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
             )
             else None
         )
+        displayed_cost_rate = _display_cost_rate(cost_rate)
         try:
             missing_cost_rows = int(canonical.get("missing_cost_lines") or 0)
         except (TypeError, ValueError) as exc:
@@ -474,9 +483,15 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
             cost_alert = "basis_unknown"
         elif not contract_amount_complete:
             cost_alert = "no_contract_amount"
-        elif cost_rate is not None and cost_rate > Decimal("1"):
+        elif (
+            displayed_cost_rate is not None
+            and displayed_cost_rate > Decimal("1")
+        ):
             cost_alert = "red"
-        elif cost_rate is not None and cost_rate >= Decimal("0.8"):
+        elif (
+            displayed_cost_rate is not None
+            and displayed_cost_rate > Decimal("0.8")
+        ):
             cost_alert = "yellow"
         elif (
             canonical.get("cost_complete") is not True
@@ -612,11 +627,12 @@ def compute_project_summary(workspace: Mapping[str, Any]) -> dict[str, Any]:
         if total_contract_amount is not None and total_contract_amount > 0
         else None
     )
-    if cost_rate is None:
+    displayed_cost_rate = _display_cost_rate(cost_rate)
+    if displayed_cost_rate is None:
         cost_alert = "no_contract_amount"
-    elif cost_rate > Decimal("1"):
+    elif displayed_cost_rate > Decimal("1"):
         cost_alert = "red"
-    elif cost_rate >= Decimal("0.8"):
+    elif displayed_cost_rate > Decimal("0.8"):
         cost_alert = "yellow"
     elif missing_cost_rows:
         cost_alert = "incomplete"
@@ -742,6 +758,30 @@ def _project_rows(workspace: Mapping[str, Any], hmac_key: bytes, export_id: str)
     return contracts, collections
 
 
+_COST_SOURCE_LABELS = {
+    "direct_purchase": "关联采购单价",
+    "purchase_window": "采购前后 7 天数量加权",
+    "sales_window": "估算（销售前后 7 天数量加权）",
+    "manual": "人工确认单价",
+}
+
+
+def _consumption_cost_status(row: Mapping[str, Any]) -> str:
+    if row.get("unit_cost") is None or row.get("cost_amount") is None:
+        return "缺少价格成本"
+    if row.get("cost_is_estimate") is True or row.get("cost_source") == "sales_window":
+        return "已计入（销售回退估算）"
+    return "已计入（采购或人工确认）"
+
+
+def _consumption_cost_source_label(row: Mapping[str, Any]) -> str:
+    explicit = str(row.get("cost_source_label") or "").strip()
+    if explicit:
+        return explicit
+    source = row.get("cost_source")
+    return _COST_SOURCE_LABELS.get(str(source), "待补价格" if not source else str(source))
+
+
 def _consumption_rows(workspace: Mapping[str, Any]):
     return [(
         row.get("consumption_id"),
@@ -754,12 +794,8 @@ def _consumption_rows(workspace: Mapping[str, Any]):
         _number(row.get("unit_cost_inc_tax")),
         _number(row.get("cost_amount_ex_tax", row.get("cost_amount"))),
         _number(row.get("cost_amount_inc_tax")),
-        row.get("cost_status") or (
-            "缺少价格成本"
-            if row.get("unit_cost") is None or row.get("cost_amount") is None
-            else "成本完整"
-        ),
-        row.get("cost_source"),
+        _consumption_cost_status(row),
+        _consumption_cost_source_label(row),
     ) for row in workspace.get("consumptions") or []]
 
 
@@ -800,17 +836,17 @@ def _summary_rows(workspace: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
         ("数据截至", workspace.get("as_of")),
         (
             "口径",
-            "合同额与回款均为含税；成本同时展示未税/含税；预警按含税成本÷含税合同额；实际消耗为现场领用单",
+            "合同额与回款均为含税；实际领用数量只来自已确认现场领用；已计成本允许包含显式标注的销售回退估算；预警按含税已计成本÷含税合同额",
         ),
         ("全部合同额（含税，当前计入口径）", _number(metrics["total_contract_amount"])),
         ("已确认累计回款（含税）", _number(metrics["confirmed_cumulative_collection_amount"])),
         ("回款进度", _number(metrics["collection_rate"])),
-        ("已知实际消耗（未税）", _number(metrics["known_consumption_cost_ex_tax"])),
-        ("已知实际消耗（含税）", _number(metrics["known_consumption_cost_inc_tax"])),
+        ("现场领用已计成本（未税，含销售回退估算）", _number(metrics["known_consumption_cost_ex_tax"])),
+        ("现场领用已计成本（含税，含销售回退估算）", _number(metrics["known_consumption_cost_inc_tax"])),
         ("已审批报销（未税）", _number(metrics["approved_expense_ex_tax"])),
         ("已审批报销（含税）", _number(metrics["approved_expense_inc_tax"])),
-        ("项目实际成本（未税，已知）", _number(metrics["known_project_cost_ex_tax"])),
-        ("项目实际成本（含税，已知）", _number(metrics["known_project_cost_inc_tax"])),
+        ("项目已计成本（未税，含销售回退估算）", _number(metrics["known_project_cost_ex_tax"])),
+        ("项目已计成本（含税，含销售回退估算）", _number(metrics["known_project_cost_inc_tax"])),
         ("缺少价格成本行", metrics["missing_cost_rows"]),
         ("项目成本（含税）/合同额（含税，已知下界）", _number(metrics["cost_rate_lower_bound"])),
         ("成本预警", metrics["cost_alert"]),
@@ -832,12 +868,12 @@ def _summary_sheet(sheet, workspace, contracts, collections):
     money_labels = {
         "全部合同额（含税，当前计入口径）",
         "已确认累计回款（含税）",
-        "已知实际消耗（未税）",
-        "已知实际消耗（含税）",
+        "现场领用已计成本（未税，含销售回退估算）",
+        "现场领用已计成本（含税，含销售回退估算）",
         "已审批报销（未税）",
         "已审批报销（含税）",
-        "项目实际成本（未税，已知）",
-        "项目实际成本（含税，已知）",
+        "项目已计成本（未税，含销售回退估算）",
+        "项目已计成本（含税，含销售回退估算）",
     }
     for row_index, (label, _value) in enumerate(summary, 1):
         if label in money_labels:

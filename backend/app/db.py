@@ -12,7 +12,7 @@ _settings = get_settings()
 # 池显式配置：AI 对话流式期间存在 worker 线程并行连接（见 api/chat_sessions），
 # 默认 5+10 在多路对话下会被打满、拖垮其他端点。
 engine = create_engine(_settings.database_url, pool_pre_ping=True, future=True,
-                       pool_size=10, max_overflow=20)
+                       pool_size=10, max_overflow=20, hide_parameters=True)
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 

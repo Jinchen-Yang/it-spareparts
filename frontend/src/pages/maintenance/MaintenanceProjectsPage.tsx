@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Button, Empty, Input, Pagination, Segmented, Space } from "antd";
+import {
+  Alert,
+  Button,
+  DatePicker,
+  Empty,
+  Input,
+  Pagination,
+  Segmented,
+  Select,
+  Space,
+} from "antd";
 import { Navigate, useLocation, useSearchParams } from "react-router-dom";
 
 import {
@@ -8,6 +18,10 @@ import {
 } from "../../api/maintenanceOperations";
 import MaintenanceProjectCard from "../../components/maintenance/MaintenanceProjectCard";
 import "../../components/maintenance/maintenanceOperations.css";
+import {
+  canUseMaintenanceReminderFilter,
+  readMaintenanceCapabilities,
+} from "../../components/maintenance/maintenancePermissions";
 import PageHeader from "../../components/PageHeader";
 
 const PAGE_SIZE = 24;
@@ -17,23 +31,39 @@ export default function MaintenanceProjectsPage() {
   const location = useLocation();
   const projectDeepLinkId = searchParams.get("project_id")?.trim() || "";
   const reminderFilter = searchParams.get("reminder") || undefined;
+  const reminderFilterAllowed = canUseMaintenanceReminderFilter(reminderFilter);
   const [rows, setRows] = useState<MaintenanceProjectOperationsSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [q, setQ] = useState("");
   const [lifecycle, setLifecycle] = useState(reminderFilter ? "all" : "ongoing");
+  const role = localStorage.getItem("role") || "";
+  const hasFullProjectScope = role === "admin" || role === "boss";
+  const [ownerScope, setOwnerScope] = useState<"me" | "all">(
+    hasFullProjectScope ? "all" : "me",
+  );
+  const [taskType, setTaskType] = useState<string>();
+  const [taskStatus, setTaskStatus] = useState<"open" | "pending" | "completed">();
+  const [dueRange, setDueRange] = useState<[string, string]>(["", ""]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [permissionDenied, setPermissionDenied] = useState(false);
+  const [capabilities] = useState(readMaintenanceCapabilities);
   const generation = useRef(0);
+  const requestController = useRef<AbortController | null>(null);
 
   const load = useCallback(async (
     nextPage: number,
     query: string,
     nextLifecycle: string,
   ) => {
+    requestController.current?.abort();
+    const controller = new AbortController();
+    requestController.current = controller;
     const request = ++generation.current;
     setLoading(true);
     setError(false);
+    setPermissionDenied(false);
     try {
       const { data } = await listMaintenanceProjectOperations({
         page: nextPage,
@@ -41,26 +71,39 @@ export default function MaintenanceProjectsPage() {
         q: query || undefined,
         lifecycle: nextLifecycle,
         reminder: reminderFilter,
-      });
+        owner_scope: ownerScope,
+        task_type: taskType,
+        task_status: taskStatus,
+        due_from: dueRange[0] || undefined,
+        due_to: dueRange[1] || undefined,
+      }, { signal: controller.signal });
       if (request !== generation.current) return;
       setRows(data.rows ?? []);
       setTotal(data.total ?? 0);
       setPage(data.page ?? nextPage);
-    } catch {
+    } catch (reason: unknown) {
+      if (controller.signal.aborted) return;
       if (request !== generation.current) return;
       setRows([]);
       setTotal(0);
-      setError(true);
+      const responseStatus = (
+        reason as { response?: { status?: unknown } } | null
+      )?.response?.status;
+      if (responseStatus === 403) setPermissionDenied(true);
+      else setError(true);
     } finally {
       if (request === generation.current) setLoading(false);
     }
-  }, [reminderFilter]);
+  }, [dueRange, ownerScope, reminderFilter, taskStatus, taskType]);
 
   useEffect(() => {
-    if (projectDeepLinkId) return undefined;
+    if (projectDeepLinkId || !reminderFilterAllowed) return undefined;
     void load(1, q, lifecycle);
-    return () => { generation.current += 1; };
-  }, [lifecycle, load, projectDeepLinkId, q]);
+    return () => {
+      generation.current += 1;
+      requestController.current?.abort();
+    };
+  }, [lifecycle, load, projectDeepLinkId, q, reminderFilterAllowed]);
 
   if (projectDeepLinkId) {
     const nextParams = new URLSearchParams(searchParams);
@@ -70,7 +113,7 @@ export default function MaintenanceProjectsPage() {
       <Navigate
         replace
         to={{
-          pathname: `/maintenance/projects/${encodeURIComponent(projectDeepLinkId)}`,
+          pathname: `/maintenance/beta/projects/${encodeURIComponent(projectDeepLinkId)}`,
           search: nextSearch ? `?${nextSearch}` : "",
           hash: location.hash,
         }}
@@ -109,8 +152,65 @@ export default function MaintenanceProjectsPage() {
             setLifecycle(next);
           }}
         />
+        {hasFullProjectScope && (
+          <Segmented
+            aria-label="项目负责范围"
+            value={ownerScope}
+            options={[
+              { label: "全部项目", value: "all" },
+              { label: "我负责的", value: "me" },
+            ]}
+            onChange={(value) => setOwnerScope(value === "me" ? "me" : "all")}
+          />
+        )}
+        <Select
+          aria-label="任务类型筛选"
+          allowClear
+          placeholder="任务类型"
+          style={{ minWidth: 190 }}
+          value={taskType}
+          options={[
+            { label: "项目经理月度更新", value: "项目经理月度更新" },
+            { label: "维保期限", value: "维保期限" },
+            { label: "计划回款", value: "计划回款" },
+            { label: "验收报告", value: "验收报告" },
+            { label: "验收审批", value: "验收审批" },
+            { label: "数据完整性", value: "completeness" },
+            { label: "回款", value: "collection" },
+            { label: "成本", value: "cost" },
+            { label: "成本比例", value: "cost_ratio" },
+          ]}
+          onChange={(value) => setTaskType(value)}
+        />
+        <Select
+          aria-label="任务状态筛选"
+          allowClear
+          placeholder="任务状态"
+          style={{ minWidth: 130 }}
+          value={taskStatus}
+          options={[
+            { label: "未完成", value: "open" },
+            { label: "待处理", value: "pending" },
+            { label: "已完成", value: "completed" },
+          ]}
+          onChange={(value) => setTaskStatus(value)}
+        />
+        <DatePicker.RangePicker
+          aria-label="任务截止日期范围"
+          placeholder={["截止日起", "截止日止"]}
+          onChange={(_dates, dateStrings) => {
+            setDueRange([dateStrings[0] || "", dateStrings[1] || ""]);
+          }}
+        />
       </Space>
-      {error ? (
+      {!reminderFilterAllowed || permissionDenied ? (
+        <Alert
+          type="warning"
+          showIcon
+          message="当前账号无权使用该提醒筛选"
+          description="该筛选依赖当前账号不可见的经营字段；移除提醒参数后仍可查看获准的项目事实。"
+        />
+      ) : error ? (
         <Alert
           type="error"
           showIcon
@@ -130,7 +230,14 @@ export default function MaintenanceProjectsPage() {
           aria-busy={loading}
         >
           {rows.map((project) => (
-            <MaintenanceProjectCard key={project.project_id} project={project} />
+            <MaintenanceProjectCard
+              key={project.project_id}
+              project={project}
+              visibility={capabilities}
+              canUseManagerWorkbook={capabilities.canUseManagerWorkbook}
+              canManageAssignment={role === "admin" && capabilities.canManageProject}
+              onAssignmentChanged={() => void load(page, q, lifecycle)}
+            />
           ))}
         </div>
       )}

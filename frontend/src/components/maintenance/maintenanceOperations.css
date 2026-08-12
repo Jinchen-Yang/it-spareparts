@@ -14,6 +14,35 @@
   min-width: 0;
 }
 
+.maintenance-project-card-meta {
+  color: var(--mb-text-2);
+  display: grid;
+  font-size: 12.5px;
+  gap: 4px;
+}
+
+.maintenance-project-task {
+  background: color-mix(in srgb, var(--mb-warning, #d48806) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mb-warning, #d48806) 28%, transparent);
+  border-radius: 8px;
+  color: var(--mb-text-2);
+  display: grid;
+  font-size: 12px;
+  gap: 6px;
+  padding: 10px;
+}
+
+.maintenance-project-task.is-overdue {
+  background: color-mix(in srgb, #cf1322 7%, transparent);
+  border-color: color-mix(in srgb, #cf1322 30%, transparent);
+}
+
+.maintenance-project-task-title {
+  color: var(--mb-text-1);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 @media (max-width: 1199px) {
   .maintenance-project-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -32,8 +61,54 @@
   gap: 16px;
 }
 
+.bad-return-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bad-return-metric-grid > * {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.site-issue-document-card {
+  height: 100%;
+  border-color: #d9e3f0;
+}
+
+.site-issue-editor-grid,
+.site-issue-candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.site-issue-editor-grid label,
+.site-issue-candidate-grid .ant-card {
+  min-width: 0;
+}
+
 @media (max-width: 991px) {
   .maintenance-workspace-two-column {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .site-issue-editor-grid,
+  .site-issue-candidate-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 767px) {
+  .bad-return-metric-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }

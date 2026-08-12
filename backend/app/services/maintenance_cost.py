@@ -39,8 +39,10 @@ from app.models.maintenance import (
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.sales import FSalesLine, FSalesOrder
 from app.services import (
+    maintenance_cost_invalidation,
     maintenance_cost_quality,
     maintenance_cost_reference,
+    maintenance_demands,
     maintenance_margin,
     maintenance_margin_evidence,
 )
@@ -53,7 +55,7 @@ _ZERO = Decimal("0")
 # Money 列为 Numeric(14,2)：绝对值上限 10^12（含）会溢出，回填前守卫
 _MONEY_MAX = Decimal(10) ** 12
 # 导入期写入的行级 flag（recompute 重建 flags 时保留；成本派生 flag 每轮重算重挂）
-_IMPORT_FLAGS = frozenset({"future_date"})
+_IMPORT_FLAGS = maintenance_cost_invalidation.IMPORT_ANOMALY_FLAGS
 _COST_DERIVED_FLAGS = maintenance_cost_quality.COST_DERIVED_ANOMALY_FLAGS
 COSTED_SOURCES = (
     "direct",
@@ -332,11 +334,6 @@ def _resolve_legacy_cost(
     return _LegacyCostSelection()
 
 
-# 清零成本字段并把 anomaly_flags 收敛到仅导入期 flag（no_cost/has_return/cost_overflow 每轮重挂）。
-# 用 SQL 覆盖全表（含 active_orders 过滤掉的已取消行），避免这些行残留上一轮的成本派生 flag。
-_KEEP_FLAGS_SQL = "ARRAY(SELECT f FROM unnest(anomaly_flags) AS f WHERE f = ANY(:keep_flags))"
-
-
 class MaintenanceCostRecomputeBusy(RuntimeError):
     """导入或另一轮重算正在持有数据变更锁。"""
 
@@ -366,20 +363,17 @@ def recompute(db: Session, *, commit: bool = True) -> dict:
         daily_samples,
         monthly_samples,
     ) = _purchase_pools(db)
-    db.execute(
-        update(FMaintenanceLine).values(
-            unit_cost=None, cost_amount=None, cost_source=None, cost_tax_basis=None,
-            unit_cost_inc_tax=None, unit_cost_ex_tax=None,
-            cost_amount_inc_tax=None, cost_amount_ex_tax=None,
-            price_month=None, trace_months=None, linked_purchase_order_no=None,
-            price_distance_days=None, confidence=None,
-            reference_side=None, reference_pool_group_id=None,
-            reference_pool_version=None, reference_sample_count=None,
-            reference_from_date=None, reference_to_date=None,
-            reference_latest_date=None,
-            anomaly_flags=text(_KEEP_FLAGS_SQL),
-        ).execution_options(synchronize_session=False),
-        {"keep_flags": list(_IMPORT_FLAGS)},
+    # 清零未删除来源单的成本字段并把 anomaly_flags 收敛到仅导入期
+    # flag（no_cost/has_return/cost_overflow 每轮重挂）。已逻辑删除行保留为
+    # 历史快照；恢复事务会先单独清空并标记 pending，绝不会直接重新生效旧价。
+    maintenance_cost_invalidation.invalidate_line_costs(
+        db,
+        condition=FMaintenanceLine.order_id.in_(
+            select(FMaintenanceOrder.id).where(
+                maintenance_demands.active_demand_condition()
+            )
+        ),
+        pending_recompute=False,
     )
 
     q = (
@@ -1072,6 +1066,7 @@ def project_exists(
         order.project_std == project
         if project != "(未填项目)"
         else order.project_std.is_(None),
+        maintenance_demands.active_demand_condition(order),
     )
     if security.is_scoped_sales(user_ctx):
         if user_ctx and user_ctx.salesperson_name:

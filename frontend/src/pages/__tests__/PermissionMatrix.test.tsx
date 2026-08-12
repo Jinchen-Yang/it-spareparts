@@ -18,6 +18,8 @@ const META: AccountsMeta = {
   dependencies: {
     action_data: { action_pool_set_policy: "data_pool_price_governance" },
     action_page: { action_account_manage: "page_accounts" },
+    action_additional_page: {},
+    page_page: {},
     data_data: { data_profit: "data_purchase_cost" },
   },
   groups: [

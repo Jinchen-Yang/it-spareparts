@@ -19,7 +19,7 @@ part_alias 在此从"只写不读"变为活数据：人工修订别名即刻影�
 import re
 
 from sqlalchemy import Text as SAText
-from sqlalchemy import bindparam, or_, select, text
+from sqlalchemy import bindparam, select, text
 from sqlalchemy import case as sa_case
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Session

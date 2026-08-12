@@ -1,5 +1,7 @@
 """Stable maintenance project master and contract aggregation API (#195)."""
 
+import hashlib
+import json
 import os
 from datetime import date
 from decimal import Decimal
@@ -13,12 +15,15 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
+from app import permissions as permission_service
 from app.auth import hash_password
+from app.business_time import business_today
 from app.db import engine
 from app.main import app
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectContract,
+    MaintenanceProjectUserAssignment,
 )
 from app.models.system import SysAccessLog, SysUser
 
@@ -26,6 +31,15 @@ from app.models.system import SysAccessLog, SysUser
 def _token(
     db, *, username: str, role: str = "admin", permissions: dict | None = None
 ) -> str:
+    account_scope = (
+        {
+            "template_code": "admin",
+            "template_version": 1,
+            "template_perms": permission_service.admin_account_defaults(),
+            "perm_overrides": {"page_maintenance_beta": True},
+        }
+        if role == "admin" else {}
+    )
     db.add(
         SysUser(
             username=username,
@@ -33,6 +47,7 @@ def _token(
             is_active=True,
             password_hash=hash_password("synthetic-password-123"),
             permissions=permissions,
+            **account_scope,
         )
     )
     db.commit()
@@ -48,6 +63,14 @@ def _get(client: TestClient, path: str, token: str, **params):
     return client.get(
         path,
         params=params,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def _search_projects(client: TestClient, token: str, **body):
+    return client.post(
+        "/api/maintenance/projects/stable/search",
+        json=body,
         headers={"Authorization": f"Bearer {token}"},
     )
 
@@ -794,9 +817,8 @@ def test_same_display_name_projects_stay_independent_and_rename_keeps_relationsh
     token = _token(db, username="maint_project_identity_admin")
     client = TestClient(app)
 
-    directory = _get(
+    directory = _search_projects(
         client,
-        "/api/maintenance/projects/stable",
         token,
         q="相同展示名称",
         as_of="2026-08-08",
@@ -806,9 +828,8 @@ def test_same_display_name_projects_stay_independent_and_rename_keeps_relationsh
         first.project_id,
         second.project_id,
     }
-    code_search = _get(
+    code_search = _search_projects(
         client,
-        "/api/maintenance/projects/stable",
         token,
         q="maint-synth-same-a",
         as_of="2026-08-08",
@@ -866,18 +887,16 @@ def test_directory_contains_search_uses_trigram_indexes_without_changing_semanti
 
     event.listen(engine, "before_cursor_execute", capture_directory_sql)
     try:
-        code_search = _get(
+        code_search = _search_projects(
             client,
-            "/api/maintenance/projects/stable",
             token,
             q="needle",
-            include_inactive="true",
+            include_inactive=True,
         )
     finally:
         event.remove(engine, "before_cursor_execute", capture_directory_sql)
-    name_search = _get(
+    name_search = _search_projects(
         client,
-        "/api/maintenance/projects/stable",
         token,
         q="索引中文",
     )
@@ -951,7 +970,27 @@ def test_contract_amount_permission_hides_lines_total_and_amount_completeness(db
         ]
     )
     db.commit()
-    token = _token(db, username="maint_project_purchaser", role="purchaser")
+    username = "maint_project_purchaser"
+    token = _token(
+        db,
+        username=username,
+        role="purchaser",
+        permissions={"page_maintenance_beta": True},
+    )
+    user_id = db.scalar(select(SysUser.id).where(SysUser.username == username))
+    assert user_id is not None
+    db.add(
+        MaintenanceProjectUserAssignment(
+            assignment_id="20000000-0000-4000-8000-000000000011",
+            project_id=project.project_id,
+            responsibility_type="primary_manager",
+            user_id=user_id,
+            source_manager_text="合成权限负责人",
+            assigned_by="synthetic-test",
+            assignment_reason="验证显式项目范围内的合同金额脱敏",
+        )
+    )
+    db.commit()
 
     response = _get(
         TestClient(app),
@@ -1071,7 +1110,18 @@ def test_stable_project_directory_and_overview_reads_are_access_logged(db):
     token = _token(db, username="maint_project_audit_admin")
     client = TestClient(app)
 
-    assert _get(client, "/api/maintenance/projects/stable", token).status_code == 200
+    search = project.display_name
+    searched = client.post(
+        "/api/maintenance/projects/stable/search",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "q": search,
+            "page": 1,
+            "page_size": 50,
+            "include_inactive": False,
+        },
+    )
+    assert searched.status_code == 200, searched.text
     assert (
         _get(
             client,
@@ -1082,9 +1132,9 @@ def test_stable_project_directory_and_overview_reads_are_access_logged(db):
     )
 
     db.expire_all()
-    actions = list(
-        db.execute(
-            select(SysAccessLog.action)
+    rows = list(
+        db.scalars(
+            select(SysAccessLog)
             .where(SysAccessLog.username == "maint_project_audit_admin")
             .where(
                 SysAccessLog.action.in_(
@@ -1092,9 +1142,84 @@ def test_stable_project_directory_and_overview_reads_are_access_logged(db):
                 )
             )
             .order_by(SysAccessLog.id)
-        ).scalars()
+        )
     )
-    assert actions == ["stable_project_directory", "stable_project_overview"]
+    assert [row.action for row in rows] == [
+        "stable_project_directory",
+        "stable_project_overview",
+    ]
+    assert rows[0].detail == {
+        "searched": True,
+        "include_inactive": False,
+        "as_of": str(business_today()),
+    }
+    serialized = json.dumps(rows[0].detail, ensure_ascii=False, sort_keys=True)
+    assert search not in serialized
+    assert hashlib.sha256(search.encode()).hexdigest() not in serialized
+    assert search.encode().hex() not in serialized
+
+
+@pytest.mark.parametrize(
+    "search",
+    [
+        "GET-URL-稳定项目搜索敏感词",
+        "GET-URL-LONG-PRIVATE-SENTINEL-" + "x" * 256,
+    ],
+)
+def test_stable_project_directory_rejects_get_query_search_without_audit(db, search):
+    token = _token(db, username="maint_project_get_query_admin")
+    client = TestClient(app)
+
+    response = _get(
+        client,
+        "/api/maintenance/projects/stable",
+        token,
+        q=search,
+    )
+
+    assert response.status_code == 422
+    assert search not in response.text
+    db.expire_all()
+    assert (
+        db.scalar(
+            select(SysAccessLog.id).where(
+                SysAccessLog.username == "maint_project_get_query_admin",
+                SysAccessLog.action == "stable_project_directory",
+            )
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "search",
+    [
+        "",
+        "POST-BODY-LONG-PRIVATE-SENTINEL-" + "x" * 128,
+    ],
+)
+def test_stable_project_directory_rejects_invalid_post_search_without_reflection(
+    db, search
+):
+    token = _token(db, username="maint_project_invalid_post_search_admin")
+    client = TestClient(app)
+
+    response = _search_projects(client, token, q=search)
+
+    assert response.status_code == 422
+    if search:
+        assert search not in response.text
+        assert "POST-BODY-LONG-PRIVATE-SENTINEL" not in response.text
+    db.expire_all()
+    assert (
+        db.scalar(
+            select(SysAccessLog.id).where(
+                SysAccessLog.username == "maint_project_invalid_post_search_admin",
+                SysAccessLog.action == "stable_project_directory",
+            )
+        )
+        is None
+    )
 
 
 def test_stable_project_queries_do_not_grow_with_contract_count(db):
@@ -1319,15 +1444,19 @@ def test_nonempty_stable_project_facts_block_destructive_schema_downgrade(db):
     db.add(project)
     db.commit()
     db.close()
+    with engine.connect() as connection:
+        versions_before = set(
+            connection.scalars(text("SELECT version_num FROM alembic_version"))
+        )
 
     try:
         with pytest.raises(DBAPIError, match="downgrade blocked"):
             alembic_command.downgrade(_alembic_cfg(), "f1c8e4a7b2d9")
 
         with engine.connect() as connection:
-            assert connection.scalar(
-                text("SELECT version_num FROM alembic_version")
-            ) == ("d8a3c7e4f2b1")
+            assert set(
+                connection.scalars(text("SELECT version_num FROM alembic_version"))
+            ) == versions_before
             assert (
                 connection.scalar(
                     text(
@@ -1338,7 +1467,5 @@ def test_nonempty_stable_project_facts_block_destructive_schema_downgrade(db):
                 == 1
             )
     finally:
-        # The multi-revision downgrade intentionally stops at the project-master
-        # guard. Restore the session database so later test files still run at
-        # the declared head.
+        # 幂等恢复；原子迁移已保证保护检查失败时数据库仍停留在完整 head。
         alembic_command.upgrade(_alembic_cfg(), "head")

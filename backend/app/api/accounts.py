@@ -1,7 +1,8 @@
 """账号与权限中心 v2（建号 / 改密 / 停用 / 权限 / 批量 / 活动）。
 
 权限语义：账号有效权限 = 模板快照(template_perms) ⊕ 稀疏覆盖(perm_overrides)；
-admin 角色恒全开。改密/停用/改权限递增 token_version → 旧 token 立即失效。
+admin 常规权限恒全开，两个生产 Beta 页面按账号白名单。改密/停用/改权限递增
+token_version → 旧 token 立即失效。
 
 准入从 require_admin 放宽为权限键（admin 恒通过，行为对 admin 零变化）：
 - 读（列表/_meta/活动）→ page_accounts
@@ -93,7 +94,10 @@ def _template_map(db: Session) -> dict[str, SysRoleTemplate]:
 
 def _view(u: SysUser, tpl: SysRoleTemplate | None = None) -> dict:
     eff = permissions.effective_for_user(u)
-    combo = permissions.combo_errors(eff)
+    # Admin keeps ordinary actions enabled even while its human Beta pages are
+    # intentionally closed by account allowlist.  That is a valid state, not a
+    # broken action/page combination for the permission-center warning banner.
+    combo = [] if u.role == "admin" else permissions.combo_errors(eff)
     base = permissions.normalize(u.template_perms) if u.template_perms is not None \
         else permissions.effective(u.role, None)
     return {
@@ -181,8 +185,10 @@ def _guard_touch(ident: dict, u: SysUser) -> None:
 
 
 def _guard_high_risk_change(ident: dict, before_eff: dict, after_eff: dict, who: str) -> None:
-    """高风险键（账号管理两键）的授予/撤销仅限 admin 操作者；
-    且操作者不能撤销**自己**的高风险键（防自锁，谁来都不行）。"""
+    """高风险键的授予/撤销仅限 admin 操作者。
+
+    Beta 页面键代表生产灰度白名单，管理员不能给自己加入或移出；
+    其他高风险键仍禁止撤销自身权限，避免自锁。"""
     changed = {k for k in permissions.HIGH_RISK_KEYS
                if bool(before_eff.get(k)) != bool(after_eff.get(k))}
     if not changed:
@@ -192,6 +198,9 @@ def _guard_high_risk_change(ident: dict, before_eff: dict, after_eff: dict, who:
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             f"「{labels}」属高风险权限，仅管理员本人可授予或撤销")
     if ident.get("sub") == who:
+        beta_changed = changed & permissions.ACCOUNT_SCOPED_BETA_PAGE_KEYS
+        if beta_changed:
+            raise HTTPException(400, "不能更改当前登录账号自己的 Beta 白名单，请由另一位实名管理员操作")
         revoked = {k for k in changed if bool(before_eff.get(k)) and not bool(after_eff.get(k))}
         if revoked:
             raise HTTPException(400, "不能撤销当前登录账号自己的账号管理权限，请由另一位管理员操作")
@@ -252,14 +261,19 @@ def meta(db: Session = Depends(get_db), _: None = Depends(_read_gate)) -> dict:
         "meta": permissions.PERMISSION_META,
         "dependencies": {"action_data": permissions.ACTION_DATA_DEPENDENCIES,
                          "action_page": permissions.ACTION_PAGE_DEPENDENCIES,
+                         "action_additional_page": permissions.ACTION_ADDITIONAL_PAGE_DEPENDENCIES,
+                         "page_page": permissions.PAGE_PAGE_DEPENDENCIES,
                          "data_data": permissions.DATA_DATA_DEPENDENCIES},
         "high_risk_keys": sorted(permissions.HIGH_RISK_KEYS),
         "all_keys": permissions.ALL_KEYS,
         "templates": [{
             "code": t.code, "name": t.name, "description": t.description,
             "base_role": t.base_role, "permissions": permissions.normalize(t.permissions),
-            "permission_combo_errors": permissions.combo_errors(
-                permissions.normalize(t.permissions)),
+            "permission_combo_errors": (
+                [] if t.base_role == "admin" else permissions.combo_errors(
+                    permissions.normalize(t.permissions)
+                )
+            ),
             "is_system": t.is_system, "is_active": t.is_active, "version": t.version,
             "usage_count": usage.get(t.code, 0),
             "locked": t.code == "admin",
@@ -299,7 +313,10 @@ def create_account(body: CreateAccount, db: Session = Depends(get_db),
         tpl = db.scalar(select(SysRoleTemplate).where(SysRoleTemplate.code == "admin"))
         u.role = "admin"
         u.template_code, u.template_version = "admin", (tpl.version if tpl else 1)
-        u.template_perms = permissions.normalize(tpl.permissions) if tpl else permissions._full()
+        u.template_perms = (
+            permissions.normalize(tpl.permissions)
+            if tpl else permissions.admin_account_defaults()
+        )
         u.perm_overrides = None
     else:
         code = body.template_code or body.role or "readonly"
@@ -352,7 +369,10 @@ def update_account(username: str, body: UpdateAccount, db: Session = Depends(get
         tpl = db.scalar(select(SysRoleTemplate).where(SysRoleTemplate.code == "admin"))
         u.role = "admin"
         u.template_code, u.template_version = "admin", (tpl.version if tpl else 1)
-        u.template_perms = permissions.normalize(tpl.permissions) if tpl else permissions._full()
+        u.template_perms = (
+            permissions.normalize(tpl.permissions)
+            if tpl else permissions.admin_account_defaults()
+        )
         u.perm_overrides = None
     elif perm_change:
         # 降 admin / 换模板 / 调 overrides：统一走模板语义
