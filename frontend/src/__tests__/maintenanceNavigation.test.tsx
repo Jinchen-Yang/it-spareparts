@@ -11,7 +11,7 @@ import {
 describe("维保管理信息架构", () => {
   beforeEach(() => localStorage.clear());
 
-  it("稳定版保持原三个入口，新工作台收口到独立 Beta 分组", () => {
+  it("原三个入口保持兼容，新工作台收口到正式维保管理分组", () => {
     const stable = NAV_GROUPS.find((group) => group.key === "grp-maintenance");
     const beta = NAV_GROUPS.find((group) => group.key === "grp-maintenance-beta");
 
@@ -32,7 +32,7 @@ describe("维保管理信息架构", () => {
         label: "项目提醒",
       },
     ]);
-    expect(beta?.label).toBe("维保管理 Beta");
+    expect(beta?.label).toBe("维保管理");
     expect(beta?.items.map(({ key, path, label, perm }) => ({
       key,
       path,

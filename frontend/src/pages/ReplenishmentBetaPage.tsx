@@ -504,15 +504,15 @@ export default function ReplenishmentBetaPage() {
     [latest],
   );
 
-  if (loading) return <Spin fullscreen tip="正在打开补库申请 Beta…" />;
-  if (!capabilities) return <Result status="error" title="无法读取 Beta 状态" />;
+  if (loading) return <Spin fullscreen tip="正在打开补库申请…" />;
+  if (!capabilities) return <Result status="error" title="无法读取补库申请状态" />;
   if (!capabilities.enabled) {
     return (
       <Result
         status="info"
-        title={<Space>补库申请 <Tag color="purple">Beta</Tag> 当前未开放</Space>}
-        subTitle="服务端总闸已关闭，历史申请仍安全保留。稳定版库存与原业务流程不受影响。"
-        extra={<Button type="primary" icon={<ArrowLeftOutlined />} onClick={() => navigate(STABLE_INVENTORY_PATH)}>返回稳定版库存页</Button>}
+        title="补库申请当前未开放"
+        subTitle="服务端功能开关已关闭，历史申请仍安全保留，库存与原业务流程不受影响。"
+        extra={<Button type="primary" icon={<ArrowLeftOutlined />} onClick={() => navigate(STABLE_INVENTORY_PATH)}>返回库存页</Button>}
       />
     );
   }
@@ -520,9 +520,9 @@ export default function ReplenishmentBetaPage() {
     return (
       <Result
         status="403"
-        title={<Space>补库申请 <Tag color="purple">Beta</Tag> 暂不可用</Space>}
-        subTitle="当前账号没有半年采购/销售价格事实的查看权限，请联系管理员按试用名单授权。"
-        extra={<Button type="primary" icon={<ArrowLeftOutlined />} onClick={() => navigate(STABLE_INVENTORY_PATH)}>返回稳定版库存页</Button>}
+        title="补库申请暂不可用"
+        subTitle="当前账号没有半年采购/销售价格事实的查看权限，请联系管理员授权。"
+        extra={<Button type="primary" icon={<ArrowLeftOutlined />} onClick={() => navigate(STABLE_INVENTORY_PATH)}>返回库存页</Button>}
       />
     );
   }
@@ -530,11 +530,11 @@ export default function ReplenishmentBetaPage() {
   return (
     <div className="replenishment-beta-page">
       <PageHeader
-        title={<Space>销售补库申请 <Tag color="purple">Beta</Tag></Space>}
+        title="销售补库申请"
         subtitle="搜索 PN、查看近半年采购/销售事实并加入补库单；提交和审核只记录申请，不会自动定价或改变库存。"
         extra={(
           <Space wrap>
-            <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(STABLE_INVENTORY_PATH)}>返回稳定版</Button>
+            <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(STABLE_INVENTORY_PATH)}>返回库存</Button>
             <Button icon={<ReloadOutlined />} onClick={() => void refreshList()}>刷新审核结果</Button>
             {capabilities.can_create && <Button type="primary" icon={<ShoppingCartOutlined />} onClick={() => void createCart()}>新建补库单</Button>}
           </Space>

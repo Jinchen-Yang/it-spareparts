@@ -155,7 +155,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { key: "parts", path: "/parts", label: "型号查询", icon: <SearchOutlined />, perm: "page_parts", page: PartSearchPage, load: loadPartSearch },
       { key: "profit", path: "/profit", label: "利润分析", icon: <LineChartOutlined />, perm: "page_profit", page: ProfitPage, load: loadProfit },
-      { key: "replenishment-beta", path: "/sales/replenishment-beta", label: "补库申请 Beta", icon: <ShoppingCartOutlined />, perm: "page_replenishment_beta", betaFeature: "replenishment", page: ReplenishmentBetaPage, load: loadReplenishmentBeta },
+      { key: "replenishment-beta", path: "/sales/replenishment-beta", label: "补库申请", icon: <ShoppingCartOutlined />, perm: "page_replenishment_beta", betaFeature: "replenishment", page: ReplenishmentBetaPage, load: loadReplenishmentBeta },
     ],
   },
   {
@@ -178,7 +178,7 @@ export const NAV_GROUPS: NavGroup[] = [
   },
   {
     key: "grp-maintenance-beta",
-    label: "维保管理 Beta",
+    label: "维保管理",
     items: [
       { key: "maintenance-projects", path: "/maintenance/beta/projects", label: "项目面板", icon: <DashboardOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceProjectsPage, load: loadMaintenanceProjects },
       { key: "maintenance-project-master", path: "/maintenance/beta/project-master", label: "项目主档", icon: <ProfileOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceProjectMasterPage, load: loadMaintenanceProjectMaster },

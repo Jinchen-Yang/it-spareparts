@@ -71,12 +71,13 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("ReplenishmentBetaPage", () => {
-  it("关闭服务端总闸时显示明确 Beta 状态和稳定版返回入口", async () => {
+  it("关闭服务端总闸时显示明确正式功能状态和兼容库存入口", async () => {
     getCapabilities.mockResolvedValueOnce({ data: { ...capabilities, enabled: false } });
     render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
 
     expect(await screen.findByText(/当前未开放/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /返回稳定版库存页/ })).toBeInTheDocument();
+    expect(screen.queryByText(/Beta/)).toBeNull();
+    expect(screen.getByRole("button", { name: /返回库存页/ })).toBeInTheDocument();
     expect(searchCatalog).not.toHaveBeenCalled();
     expect(listApplications).not.toHaveBeenCalled();
   });
@@ -85,6 +86,7 @@ describe("ReplenishmentBetaPage", () => {
     render(<MemoryRouter><ReplenishmentBetaPage /></MemoryRouter>);
 
     expect(await screen.findByText("NO-POOL-001")).toBeInTheDocument();
+    expect(screen.queryByText(/Beta/)).toBeNull();
     expect(screen.getByText("未加入互通池")).toBeInTheDocument();
     expect(screen.getAllByText("半年内无有效样本")).toHaveLength(2);
     expect(screen.getByText(/不会自动定价或改变库存/)).toBeInTheDocument();
