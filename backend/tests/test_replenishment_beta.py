@@ -21,8 +21,10 @@ from app.models.dimensions import DimPart
 from app.models.inventory import Inventory
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 from app.models.replenishment import (
+    ReplenishmentApplication,
     ReplenishmentApplicationLine,
     ReplenishmentApplicationVersion,
+    ReplenishmentReview,
 )
 from app.models.sales import FSalesLine, FSalesOrder
 from app.models.system import SysImportBatch, SysUser
@@ -350,6 +352,165 @@ def test_review_callback_requires_page_allowlist_and_action(db):
         settings.replenishment_beta_enabled = original
 
 
+def test_review_callback_blocks_submitter_even_when_named_admin_has_all_permissions(db):
+    password = "safe-sod-admin-password"
+    reviewer_password = "safe-sod-reviewer-password"
+    submitter = SysUser(
+        username="replenishment_sod_admin",
+        password_hash=hash_password(password),
+        role="admin",
+        display_name="补库提交管理员",
+        permissions=permissions.effective("admin", None),
+        is_active=True,
+    )
+    reviewer_permissions = permissions.effective("readonly", None)
+    reviewer_permissions.update(
+        {
+            "page_replenishment_beta": True,
+            "action_replenishment_review": True,
+        }
+    )
+    reviewer = SysUser(
+        username="replenishment_sod_reviewer",
+        password_hash=hash_password(reviewer_password),
+        role="readonly",
+        display_name="补库独立审核人",
+        permissions=reviewer_permissions,
+        is_active=True,
+    )
+    part = DimPart(pn_std="REPLENISHMENT-SOD-PN", status="active")
+    db.add_all([submitter, reviewer, part])
+    db.commit()
+    created = replenishment.create_application(
+        db,
+        username=submitter.username,
+        warehouse="北京前置库",
+        request_note=None,
+    )
+    created = replenishment.add_line(
+        db,
+        created["application_id"],
+        username=submitter.username,
+        role=submitter.role,
+        expected_version=created["version"],
+        part_id=part.id,
+        quantity=1,
+    )
+    submitted = replenishment.submit(
+        db,
+        created["application_id"],
+        username=submitter.username,
+        role=submitter.role,
+        expected_version=created["version"],
+    )
+    version = submitted["versions"][0]
+    assert version["submitted_by"] == submitter.username
+
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": submitter.username, "password": password},
+    )
+    assert login.status_code == 200
+    client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+
+    settings = get_settings()
+    original = settings.replenishment_beta_enabled
+    try:
+        settings.replenishment_beta_enabled = True
+        response = client.post(
+            f"/api/replenishment-beta/applications/{created['application_id']}/review-results",
+            json={
+                "version_id": version["version_id"],
+                "content_digest": version["content_digest"],
+                "idempotency_key": "same-admin-self-review",
+                "decisions": [
+                    {
+                        "line_id": version["lines"][0]["line_id"],
+                        "decision": "approved",
+                    }
+                ],
+            },
+        )
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "separation_of_duties"
+        assert "提交人与审核人不能是同一账号" in response.text
+    finally:
+        settings.replenishment_beta_enabled = original
+
+    db.expire_all()
+    persisted_application = db.get(
+        ReplenishmentApplication,
+        created["application_id"],
+    )
+    persisted_version = db.get(
+        ReplenishmentApplicationVersion,
+        version["version_id"],
+    )
+    assert persisted_application.status == "submitted"
+    assert persisted_version.status == "submitted"
+    assert persisted_version.submitted_by == submitter.username
+    assert db.scalar(select(func.count()).select_from(ReplenishmentReview)) == 0
+
+    login = client.post(
+        "/api/auth/login",
+        json={"username": reviewer.username, "password": reviewer_password},
+    )
+    assert login.status_code == 200
+    client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+    settings.replenishment_beta_enabled = True
+    try:
+        distinct_review = client.post(
+            f"/api/replenishment-beta/applications/{created['application_id']}/review-results",
+            json={
+                "version_id": version["version_id"],
+                "content_digest": version["content_digest"],
+                "idempotency_key": "distinct-reviewer-result",
+                "decisions": [
+                    {
+                        "line_id": version["lines"][0]["line_id"],
+                        "decision": "approved",
+                    }
+                ],
+            },
+        )
+        assert distinct_review.status_code == 200, distinct_review.text
+        assert distinct_review.json()["application_status"] == "approved"
+
+        login = client.post(
+            "/api/auth/login",
+            json={"username": submitter.username, "password": password},
+        )
+        assert login.status_code == 200
+        client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+        self_replay = client.post(
+            f"/api/replenishment-beta/applications/{created['application_id']}/review-results",
+            json={
+                "version_id": version["version_id"],
+                "content_digest": version["content_digest"],
+                "idempotency_key": "distinct-reviewer-result",
+                "decisions": [
+                    {
+                        "line_id": version["lines"][0]["line_id"],
+                        "decision": "approved",
+                    }
+                ],
+            },
+        )
+        assert self_replay.status_code == 409, self_replay.text
+        assert self_replay.json()["detail"]["code"] == "separation_of_duties"
+    finally:
+        settings.replenishment_beta_enabled = original
+
+    db.expire_all()
+    review = db.scalar(
+        select(ReplenishmentReview).where(
+            ReplenishmentReview.version_id == version["version_id"]
+        )
+    )
+    assert review.reviewed_by == reviewer.username
+
+
 def test_free_text_bounds_do_not_reflect_business_input(db):
     password = "safe-test-password"
     base = permissions.effective("admin", None)
@@ -540,6 +701,7 @@ def test_removing_first_draft_line_compacts_numbers_without_unique_collision(db)
 
 def test_concurrent_review_retry_is_idempotent(db):
     user = _user(db, "concurrent_review_user")
+    reviewer = _user(db, "concurrent_review_reviewer")
     part = DimPart(pn_std="CONCURRENT-REVIEW-PN", status="active")
     db.add(part)
     db.commit()
@@ -571,7 +733,7 @@ def test_concurrent_review_retry_is_idempotent(db):
             return replenishment.record_review(
                 session,
                 submitted["application_id"],
-                reviewer=user.username,
+                reviewer=reviewer.username,
                 version_id=version["version_id"],
                 content_digest=version["content_digest"],
                 idempotency_key="same-concurrent-review-key",
@@ -595,6 +757,7 @@ def test_concurrent_review_retry_is_idempotent(db):
 
 def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
     user = _user(db)
+    reviewer = _user(db, "replenishment_reviewer")
     part_a = DimPart(pn_std="PN-A", description="\ufffe   =formula-like-description", unit="件", status="active")
     part_b = DimPart(pn_std="PN-B", description="正常描述", unit="件", status="active")
     db.add_all([part_a, part_b])
@@ -700,7 +863,7 @@ def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
     review = replenishment.record_review(
         db,
         submitted["application_id"],
-        reviewer=user.username,
+        reviewer=reviewer.username,
         version_id=version_one["version_id"],
         content_digest=version_one["content_digest"],
         idempotency_key="review-v1-fixed",
@@ -712,7 +875,7 @@ def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
     replay = replenishment.record_review(
         db,
         submitted["application_id"],
-        reviewer=user.username,
+        reviewer=reviewer.username,
         version_id=version_one["version_id"],
         content_digest=version_one["content_digest"],
         idempotency_key="review-v1-fixed",
@@ -808,7 +971,7 @@ def test_replenishment_version_review_revision_and_exports_are_closed_loop(db):
     approved = replenishment.record_review(
         db,
         submitted_two["application_id"],
-        reviewer=user.username,
+        reviewer=reviewer.username,
         version_id=version_two["version_id"],
         content_digest=version_two["content_digest"],
         idempotency_key="review-v2-fixed",

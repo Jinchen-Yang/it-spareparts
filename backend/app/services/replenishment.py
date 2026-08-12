@@ -858,12 +858,6 @@ def record_review(
             )
         )
     )
-    existing = db.scalar(select(ReplenishmentReview).where(ReplenishmentReview.idempotency_key == key))
-    if existing is not None:
-        if existing.payload_digest != payload_digest:
-            raise ReplenishmentError("相同幂等键对应了不同审核内容", code="idempotency_conflict", status_code=409)
-        return {"review_id": existing.review_id, "idempotent": True, "approved_count": existing.approved_count, "rejected_count": existing.rejected_count}
-
     app = db.scalar(
         select(ReplenishmentApplication)
         .where(ReplenishmentApplication.application_id == application_id)
@@ -879,10 +873,25 @@ def record_review(
         )
         .with_for_update()
     )
-    if version is None or version.status != "submitted" or app.status != "submitted":
+    if version is None or version.status != "submitted":
         raise ReplenishmentError("该版本不在待审核状态", code="stale_review", status_code=409)
     if version.content_digest != content_digest:
         raise ReplenishmentError("提交摘要不匹配，请重新获取版本", code="digest_mismatch", status_code=409)
+    if not (version.submitted_by or "").strip():
+        raise ReplenishmentError("提交人信息缺失，不能审核", code="corrupt", status_code=409)
+    if version.submitted_by == reviewer:
+        raise ReplenishmentError(
+            "提交人与审核人不能是同一账号",
+            code="separation_of_duties",
+            status_code=409,
+        )
+    existing = db.scalar(select(ReplenishmentReview).where(ReplenishmentReview.idempotency_key == key))
+    if existing is not None:
+        if existing.payload_digest != payload_digest:
+            raise ReplenishmentError("相同幂等键对应了不同审核内容", code="idempotency_conflict", status_code=409)
+        return {"review_id": existing.review_id, "idempotent": True, "approved_count": existing.approved_count, "rejected_count": existing.rejected_count}
+    if app.status != "submitted":
+        raise ReplenishmentError("该版本不在待审核状态", code="stale_review", status_code=409)
     if db.scalar(select(ReplenishmentReview.review_id).where(ReplenishmentReview.version_id == version_id)):
         raise ReplenishmentError("该版本已有审核结果", code="already_reviewed", status_code=409)
     lines = list(
