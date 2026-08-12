@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     # 数据库：默认指向 docker-compose 中的 db 服务；本地裸跑可用 .env 覆盖
     database_url: str = "postgresql+psycopg://spareparts:spareparts@db:5432/spareparts"
 
+    # ---- 只读 Query Broker（#224，默认关闭）----
+    # 必须是独立 agent_reader 身份；启动/dispatch 还需通过三角色、FORCE-RLS、
+    # security-barrier view 和最小授权的 live self-check，缺一项均不可见。
+    enable_text2sql: bool = False
+    agent_database_url: str = ""
+
     # 原始上传文件归档目录
     raw_file_dir: str = "./data/raw"
 

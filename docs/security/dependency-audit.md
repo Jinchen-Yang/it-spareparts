@@ -9,6 +9,16 @@
 
 开发依赖不进入生产镜像，按独立维护批次升级；生产依赖的新漏洞必须阻断合并。
 
+## SQLGlot（Query Broker AST 二次门禁）
+
+- 精确固定 `sqlglot==30.13.0`；`pyproject.toml`、`uv.lock`、`requirements.lock` 和 CycloneDX
+  SBOM 必须同步，防止解析语义随宽松版本范围漂移。
+- 30.13.0 的定位仅为本次 selected/audited/pinned version（2026-07-20 发布），不对其相对于
+  上游其他版本的新旧状态作判断；2026-08-10 核验时官方 GitHub Security 页面没有已发布
+  advisory。该结论只是本次准入快照，CI 的 `pip-audit` 仍是每次合并的动态门禁。
+- SQLGlot 只检查服务端 deterministic compiler 的产物，不接收或“修复”模型/用户 SQL；
+  PostgreSQL 独立角色、security-barrier views 与 FORCE RLS 才是最终数据边界。
+
 ## React Router RSC 例外
 
 `GHSA-qwww-vcr4-c8h2` 只影响 React Router 的实验性 RSC Mode。本项目是浏览器端
