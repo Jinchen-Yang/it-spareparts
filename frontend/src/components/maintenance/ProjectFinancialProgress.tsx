@@ -2,14 +2,7 @@ import { Progress, Space, Tag } from "antd";
 
 import { money } from "../../utils/format";
 
-export type CostWaterlineStatus = "normal" | "yellow" | "red" | "unknown" | "restricted" | "contract_restricted" | "expense_restricted" | "completeness_unknown" | "no_contract" | "cost_basis_unknown" | "contract_basis_unknown";
-
-export interface ProjectFinancialVisibility {
-  canViewCost: boolean;
-  canViewContract: boolean;
-  canViewExpense: boolean;
-  canViewFinancial: boolean;
-}
+export type CostWaterlineStatus = "normal" | "yellow" | "red" | "unknown" | "restricted" | "contract_restricted" | "no_contract" | "cost_basis_unknown" | "contract_basis_unknown";
 
 export interface ProjectFinancialMetrics {
   total_contract_amount: number | null;
@@ -20,13 +13,6 @@ export interface ProjectFinancialMetrics {
   site_requisition_known_cost: number | null;
   site_requisition_known_cost_ex_tax: number | null;
   site_requisition_known_cost_inc_tax: number | null;
-  site_requisition_priced_cost_ex_tax?: number | null;
-  site_requisition_priced_cost_inc_tax?: number | null;
-  sales_estimate_cost_ex_tax?: number | null;
-  sales_estimate_cost_inc_tax?: number | null;
-  sales_estimate_lines?: number | null;
-  cost_progress_includes_sales_estimate?: boolean | null;
-  cost_progress_label?: "priced_cost_including_sales_estimate" | "priced_cost_without_sales_estimate" | string | null;
   approved_expense: number | null;
   approved_expense_ex_tax: number | null;
   approved_expense_inc_tax: number | null;
@@ -51,9 +37,7 @@ export function classifyCostWaterline({
   costComplete: boolean | null;
   contractAmountComplete?: boolean | null;
 }): { status: CostWaterlineStatus; percent: number | null } {
-  // Callers supply authorization separately; null here only means the aggregate
-  // completeness fact cannot be established from the visible business data.
-  if (costComplete === null) return { status: "completeness_unknown", percent: null };
+  if (costComplete === null) return { status: "restricted", percent: null };
   if (contractAmountComplete === null) {
     return { status: "contract_restricted", percent: null };
   }
@@ -70,23 +54,21 @@ export function classifyCostWaterline({
   const rawPercent = (actualProjectCostKnown / totalContractAmount) * 100;
   const percent = Number(rawPercent.toFixed(2));
   if (percent > 100) return { status: "red", percent };
-  if (percent > 80) return { status: "yellow", percent };
+  if (percent >= 80) return { status: "yellow", percent };
   if (costComplete === false) return { status: "unknown", percent };
   return { status: "normal", percent };
 }
 
 const STATUS_META: Record<CostWaterlineStatus, { label: string; color: string; tag?: string }> = {
-  normal: { label: "不超过 80%", color: "var(--mb-success)", tag: "green" },
-  yellow: { label: "超过 80%–100%", color: "var(--mb-warning)", tag: "gold" },
-  red: { label: "超过 100%", color: "var(--mb-danger)", tag: "red" },
-  unknown: { label: "成本未完整，当前为下限", color: "var(--mb-text-3)", tag: "default" },
-  restricted: { label: "成本不可见/无权限", color: "var(--mb-text-3)", tag: "default" },
-  contract_restricted: { label: "合同额不可见/无权限", color: "var(--mb-text-3)", tag: "default" },
-  expense_restricted: { label: "报销费用不可见，项目总成本无法合计", color: "var(--mb-text-3)", tag: "default" },
-  completeness_unknown: { label: "项目总成本完整度未知", color: "var(--mb-text-3)", tag: "default" },
-  no_contract: { label: "合同额不足，无法计算", color: "var(--mb-text-3)", tag: "default" },
-  cost_basis_unknown: { label: "成本税口径不可确认", color: "var(--mb-text-3)", tag: "default" },
-  contract_basis_unknown: { label: "合同额税口径不可确认", color: "var(--mb-text-3)", tag: "default" },
+  normal: { label: "成本正常（低于 80%）", color: "var(--mb-success)", tag: "green" },
+  yellow: { label: "成本偏高（80%–100%）", color: "var(--mb-warning)", tag: "gold" },
+  red: { label: "已超合同额（超过 100%）", color: "var(--mb-danger)", tag: "red" },
+  unknown: { label: "部分成本待补充，当前为最低估计", color: "var(--mb-text-3)", tag: "default" },
+  restricted: { label: "暂无成本查看权限", color: "var(--mb-text-3)", tag: "default" },
+  contract_restricted: { label: "暂无合同金额查看权限", color: "var(--mb-text-3)", tag: "default" },
+  no_contract: { label: "合同金额不足，无法计算", color: "var(--mb-text-3)", tag: "default" },
+  cost_basis_unknown: { label: "成本税类型未确认", color: "var(--mb-text-3)", tag: "default" },
+  contract_basis_unknown: { label: "合同额税类型未确认", color: "var(--mb-text-3)", tag: "default" },
 };
 
 function numericPercent(numerator: number | null, denominator: number | null): number | null {
@@ -147,24 +129,17 @@ function MetricProgress({
   );
 }
 
-export default function ProjectFinancialProgress({ metrics, visibility }: {
+export default function ProjectFinancialProgress({ metrics }: {
   metrics: ProjectFinancialMetrics;
-  visibility: ProjectFinancialVisibility;
 }) {
   const contractBasisConfirmed = metrics.contract_amount_basis === "inc_tax";
   const costBasisConfirmed = metrics.cost_progress_basis === "inc_tax";
   const canonicalStatus = metrics.cost_status;
-  const costWaterline = !visibility.canViewCost
-    ? { status: "restricted" as const, percent: null }
-    : !visibility.canViewContract
-      ? { status: "contract_restricted" as const, percent: null }
-      : !visibility.canViewExpense
-        ? { status: "expense_restricted" as const, percent: null }
-        : !contractBasisConfirmed
+  const costWaterline = !contractBasisConfirmed
     ? { status: "contract_basis_unknown" as const, percent: null }
     : !costBasisConfirmed
       ? { status: "cost_basis_unknown" as const, percent: null }
-      : visibility.canViewFinancial && canonicalStatus != null
+      : canonicalStatus != null
         ? {
           status: canonicalStatus,
           percent: metrics.cost_rate_lower_bound_pct ?? null,
@@ -175,9 +150,7 @@ export default function ProjectFinancialProgress({ metrics, visibility }: {
           costComplete: metrics.cost_complete,
           contractAmountComplete: metrics.contract_amount_complete,
         });
-  const sitePercent = visibility.canViewCost
-    && visibility.canViewContract
-    && contractBasisConfirmed
+  const sitePercent = contractBasisConfirmed
     && costBasisConfirmed
     && metrics.contract_amount_complete
     ? numericPercent(
@@ -185,9 +158,7 @@ export default function ProjectFinancialProgress({ metrics, visibility }: {
       metrics.total_contract_amount,
     )
     : null;
-  const collectionPercent = !visibility.canViewContract
-    ? null
-    : !contractBasisConfirmed
+  const collectionPercent = !contractBasisConfirmed
     ? null
     : metrics.collection_progress_pct !== undefined
       ? metrics.collection_progress_pct
@@ -196,91 +167,69 @@ export default function ProjectFinancialProgress({ metrics, visibility }: {
         : null;
   const collectionColor = collectionPercent != null && collectionPercent > 100
     ? "var(--mb-warning)" : "var(--mb-accent)";
-  const knownCostLowerBound = visibility.canViewFinancial
-    && contractBasisConfirmed
+  const knownCostLowerBound = contractBasisConfirmed
     && costBasisConfirmed
     && metrics.contract_amount_complete
     && metrics.cost_complete === false
     && costWaterline.percent != null
     ? `已知下限 ≥${percentLabel(costWaterline.percent)}`
     : null;
-  const salesEstimateLines = metrics.sales_estimate_lines ?? 0;
-  const salesEstimateCost = visibility.canViewCost && costBasisConfirmed
-    ? metrics.sales_estimate_cost_inc_tax ?? null
-    : null;
 
   return (
     <Space direction="vertical" size={14} style={{ width: "100%" }}>
       <MetricProgress
-        label="回款 / 全部合同额（含税）"
-        numerator={visibility.canViewContract ? metrics.received_amount : null}
-        denominator={visibility.canViewContract && contractBasisConfirmed
-          ? metrics.total_contract_amount : null}
+        label="已回款 ÷ 合同总额（含税）"
+        numerator={metrics.received_amount}
+        denominator={contractBasisConfirmed ? metrics.total_contract_amount : null}
         percent={collectionPercent}
         color={collectionColor}
         testId="collection-progress"
       >
-        {!visibility.canViewContract ? (
-          <div>合同额不可见，暂不计算比例。</div>
-        ) : !contractBasisConfirmed ? (
-          <div>合同额税口径不可确认，暂不计算比例。</div>
+        {!contractBasisConfirmed ? (
+          <div>合同额税类型未确认，暂不计算比例。</div>
         ) : metrics.contract_amount_complete === null ? (
-          <div>合同额不可见，暂不计算比例。</div>
+          <div>暂无合同金额查看权限，暂不计算比例。</div>
         ) : metrics.contract_amount_complete === false && (
-          <div>合同额证据不完整，暂不计算比例。</div>
+          <div>合同金额数据不完整，暂不计算比例。</div>
         )}
       </MetricProgress>
       <MetricProgress
-        label="项目已计成本（含税） / 全部合同额（含税）"
-        numerator={visibility.canViewCost && visibility.canViewExpense && costBasisConfirmed
-          ? metrics.actual_project_cost_known_inc_tax : null}
-        denominator={visibility.canViewContract && contractBasisConfirmed
-          ? metrics.total_contract_amount : null}
+        label="已消耗成本 ÷ 合同总额（含税）"
+        numerator={costBasisConfirmed ? metrics.actual_project_cost_known_inc_tax : null}
+        denominator={contractBasisConfirmed ? metrics.total_contract_amount : null}
         percent={costWaterline.percent}
         percentText={knownCostLowerBound || undefined}
         color={STATUS_META[costWaterline.status].color}
         testId="project-cost-progress"
       >
         <div>
-          现场领用已计成本（含税） {visibility.canViewCost
-            ? money(costBasisConfirmed ? metrics.site_requisition_known_cost_inc_tax : null)
-            : "无权限查看"}
-          {" · "}审批通过报销（含税） {visibility.canViewExpense
-            ? money(costBasisConfirmed ? metrics.approved_expense_inc_tax : null)
-            : "无权限查看"}
+          备件领用成本（含税） {money(
+            costBasisConfirmed ? metrics.site_requisition_known_cost_inc_tax : null,
+          )}
+          {" · "}已报销费用（含税） {money(
+            costBasisConfirmed ? metrics.approved_expense_inc_tax : null,
+          )}
         </div>
-        <div>现场领用已计成本（含税）占合同额（含税） {percentLabel(sitePercent)}</div>
-        {visibility.canViewCost && salesEstimateLines > 0 && salesEstimateCost != null && (
-          <div style={{ color: "var(--mb-warning)" }}>
-            销售回退估算（含税） {money(salesEstimateCost)}（{salesEstimateLines} 行）；
-            已计入进度，但不等于采购或人工确认单价。
-          </div>
-        )}
-        {visibility.canViewCost && !visibility.canViewExpense && (
-          <div>现场领用成本可见；报销费用不可见</div>
-        )}
-        {!visibility.canViewCost ? null : !visibility.canViewContract ? (
-          <div>合同额不可见，暂不计算项目成本比例。</div>
-        ) : !contractBasisConfirmed ? (
-          <div>合同额税口径不可确认，暂不计算比例。</div>
+        <div>领用成本（含税）占合同总额（含税） {percentLabel(sitePercent)}</div>
+        {!contractBasisConfirmed ? (
+          <div>合同额税类型未确认，暂不计算比例。</div>
         ) : !costBasisConfirmed ? (
-          <div>成本税口径不可确认，暂不计算比例。</div>
-        ) : metrics.cost_complete === null ? (
-          <div>项目总成本完整度未知，暂不判断成本水位。</div>
-        ) : metrics.contract_amount_complete === null ? null : metrics.contract_amount_complete === false ? (
+          <div>成本税类型未确认，暂不计算比例。</div>
+        ) : metrics.cost_complete === null || metrics.contract_amount_complete === null
+          ? null : metrics.contract_amount_complete === false ? (
           <>
-            <div>合同额证据不完整，暂不计算比例。</div>
+            <div>合同金额数据不完整，暂不计算比例。</div>
             {metrics.cost_complete === false && (
               <div style={{ color: "var(--mb-warning)" }}>
-                缺 {metrics.missing_cost_lines} 行成本；合同额完整后再显示已知下限。
+                缺 {metrics.missing_cost_lines} 条成本；合同金额完整后再显示下限。
               </div>
             )}
           </>
         ) : metrics.cost_complete === false && (
           <div style={{ color: "var(--mb-warning)" }}>
             {knownCostLowerBound
-              ? `缺 ${metrics.missing_cost_lines} 行成本；${knownCostLowerBound}，补齐后只会更高。`
-              : `缺 ${metrics.missing_cost_lines} 行成本；当前无可计算合同额，暂不显示下限。`}
+              ? `缺 ${metrics.missing_cost_lines} 条成本；${knownCostLowerBound}，补全后只会更高。`
+              : `缺 ${metrics.missing_cost_lines} 条成本；当前无合同金额数据，暂不显示下限。`}
           </div>
         )}
         <Tag color={STATUS_META[costWaterline.status].tag} style={{ marginTop: 4 }}>
