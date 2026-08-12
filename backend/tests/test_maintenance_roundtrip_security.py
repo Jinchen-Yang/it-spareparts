@@ -25,6 +25,7 @@ from starlette.formparsers import MultiPartParser as StarletteMultiPartParser
 from app import permissions
 from app.api import maintenance as maintenance_api
 from app.auth import hash_password
+from app.config import get_settings
 from app.db import SessionLocal
 from app.main import app
 from app.etl import pipeline, reader
@@ -1883,6 +1884,65 @@ def test_roundtrip_import_anonymous_401_does_not_read_multipart_body(db):
     assert consumed == 0
 
 
+def test_roundtrip_import_shared_password_admin_403_does_not_read_body(db):
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": get_settings().admin_password},
+    )
+    assert login.status_code == 200, login.text
+    body, boundary = _multipart_upload_body(2 * 1024 * 1024)
+
+    status, consumed, _headers = _asgi_roundtrip_import_with_receive_meter(
+        body,
+        boundary,
+        token=login.json()["token"],
+    )
+
+    assert status == 403
+    assert consumed == 0
+
+
+def test_roundtrip_import_real_sys_user_preserves_operator_identity(
+    db,
+    monkeypatch,
+):
+    client = _admin_client(db)
+    observed: dict[str, object] = {}
+
+    async def successful_import(path, original_name, operated_by, ctx):
+        observed.update(
+            {
+                "path": path,
+                "original_name": original_name,
+                "operated_by": operated_by,
+                "ctx_user_id": ctx.user_id,
+            }
+        )
+        return {"status": "success", "no_op": True}
+
+    monkeypatch.setattr(
+        maintenance_api,
+        "_wait_for_roundtrip_import_worker",
+        successful_import,
+    )
+
+    response = client.post(
+        "/api/maintenance/roundtrip-import",
+        files={
+            "file": (
+                "maintenance_roundtrip.xlsx",
+                b"valid-authentication-gate-envelope",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert observed["operated_by"] == "maintenance_export_admin"
+    assert observed["ctx_user_id"] == "maintenance_export_admin"
+
+
 def test_roundtrip_import_customer_blind_403_does_not_read_multipart_body(db):
     base = permissions.effective("boss", None)
     overrides = {"data_customer": False}
@@ -2424,6 +2484,7 @@ def test_roundtrip_import_repeated_cancel_during_save_waits_and_unlinks_owned_te
 
 
 def test_roundtrip_import_cleanup_os_error_does_not_replace_cancellation(
+    db,
     monkeypatch,
     tmp_path,
 ):
@@ -2460,12 +2521,23 @@ def test_roundtrip_import_cleanup_os_error_does_not_replace_cancellation(
         role="admin",
         permissions=None,
     )
+    db.add(
+        SysUser(
+            username="reviewer",
+            role="admin",
+            password_hash=hash_password("roundtrip-password"),
+            is_active=True,
+        )
+    )
+    db.commit()
 
     try:
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(
                 maintenance_api.roundtrip_import(
                     SimpleNamespace(),
+                    db=db,
+                    ident={"authn": "sys_user", "sub": "reviewer"},
                     ctx=ctx,
                 )
             )
