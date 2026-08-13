@@ -17,6 +17,10 @@ from app.models.maintenance_project import (
     MaintenanceProjectAuditLog,
     MaintenanceProjectContract,
 )
+from app.models.maintenance_project_import import (
+    MaintenanceProjectImportBatch,
+    MaintenanceProjectSourceLink,
+)
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
     MaintenanceProjectExpenseAttribution,

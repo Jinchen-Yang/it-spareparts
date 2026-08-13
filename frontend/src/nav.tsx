@@ -72,6 +72,7 @@ const loadMaintenanceDemands = () => import("./pages/maintenance/MaintenanceDema
 const loadMaintenanceWarehouse = () => import("./pages/maintenance/MaintenanceWarehouseWorkbenchPage");
 const loadMaintenanceSourceOrders = () => import("./pages/maintenance/MaintenanceSourceOrderAssignmentsPage");
 const loadMaintenanceMigration = () => import("./pages/maintenance/MaintenanceMigrationPage");
+const loadMaintenanceProjectImport = () => import("./pages/maintenance/MaintenanceProjectImportPage");
 const loadMaintenanceDownloadsCompat = () => import("./pages/maintenance/MaintenanceDownloadsCompatRedirect");
 const loadMaintenanceRemindersCompat = () => import("./pages/maintenance/MaintenanceRemindersCompatRedirect");
 const loadInventory = () => import("./pages/InventoryPage");
@@ -102,6 +103,7 @@ const MaintenanceDemandManagementPage = lazy(loadMaintenanceDemands);
 const MaintenanceWarehouseWorkbenchPage = lazy(loadMaintenanceWarehouse);
 const MaintenanceSourceOrderAssignmentsPage = lazy(loadMaintenanceSourceOrders);
 const MaintenanceMigrationPage = lazy(loadMaintenanceMigration);
+const MaintenanceProjectImportPage = lazy(loadMaintenanceProjectImport);
 const MaintenanceDownloadsCompatRedirect = lazy(loadMaintenanceDownloadsCompat);
 const MaintenanceRemindersCompatRedirect = lazy(loadMaintenanceRemindersCompat);
 const InventoryPage = lazy(loadInventory);
@@ -166,7 +168,8 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-maintenance-admin",
     label: "维保数据维护",
     items: [
-      { key: "maintenance-project-master", path: "/maintenance/admin/project-master", label: "项目资料同步", icon: <ProfileOutlined />, visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceProjectMasterPage, load: loadMaintenanceProjectMaster },
+      { key: "maintenance-project-import", path: "/maintenance/admin/project-import", label: "项目资料同步", icon: <CloudUploadOutlined />, visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceProjectImportPage, load: loadMaintenanceProjectImport },
+      { key: "maintenance-project-master", path: "/maintenance/admin/project-master", label: "项目主档维护", icon: <ProfileOutlined />, visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceProjectMasterPage, load: loadMaintenanceProjectMaster },
       { key: "maintenance-demands", path: "/maintenance/admin/demands", label: "异常维保单处理", icon: <FileSearchOutlined />, visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceDemandManagementPage, load: loadMaintenanceDemands },
       { key: "maintenance-warehouse", path: "/maintenance/admin/warehouse", label: "仓库单据核对", icon: <InboxOutlined />, visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceWarehouseWorkbenchPage, load: loadMaintenanceWarehouse },
       { key: "maintenance-source-orders", path: "/maintenance/admin/source-orders", label: "历史单据归属", icon: <ToolOutlined />, visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceSourceOrderAssignmentsPage, load: loadMaintenanceSourceOrders },
