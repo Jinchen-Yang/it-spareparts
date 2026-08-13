@@ -6,10 +6,11 @@
 - 删除意图只能覆盖本人项目需求单，越界返回 403
 """
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 from fastapi.testclient import TestClient
 
 from app import permissions
@@ -264,3 +265,168 @@ def test_admin_delete_intent_on_unassigned_demand_is_allowed(db, seeded):
         },
     )
     assert response.status_code == 201, response.text
+
+
+# ── TOCTOU：执行时重新鉴权（PR2 审查修复）──────────────────────────────
+
+def _create_armed_intent(client, source_order_ids: list[str], idempotency: str) -> tuple[str, str]:
+    """Create + arm a delete intent; returns (intent_id, selection_digest)."""
+    created = client.post(
+        "/api/maintenance/demands/delete-intents",
+        json={
+            "source_order_ids": source_order_ids,
+            "reason": "合成 TOCTOU 测试删除",
+            "idempotency_key": idempotency,
+        },
+    )
+    assert created.status_code == 201, created.text
+    intent_id = created.json()["intent_id"]
+    digest = created.json()["selection_digest"]
+    armed = client.post(
+        f"/api/maintenance/demands/delete-intents/{intent_id}/arm",
+        json={"digest": digest},
+    )
+    assert armed.status_code == 200, armed.text
+    return intent_id, digest
+
+
+def test_execute_after_revocation_is_forbidden_with_zero_tombstones(db, seeded):
+    """创建意图后被撤权：execute 时重新鉴权返回 403，且不产生任何 tombstone。"""
+    from app.models.maintenance import MaintenanceDemandTombstone
+    from app.models.maintenance_project import MaintenanceProjectUserAssignment
+    from app.services import maintenance_project_assignments as assignments
+
+    from app.services import maintenance_demands as svc
+
+    now = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+    intent = svc.create_delete_intent(
+        db,
+        source_order_ids=["RAW-OWN-001"],
+        reason="合成 TOCTOU 撤权删除",
+        idempotency_key="toctou-revoke-delete",
+        operated_by="scope_manager",
+        now=now,
+    )
+    db.commit()
+    svc.arm_delete_intent(
+        db,
+        intent_id=intent["intent_id"],
+        digest=intent["selection_digest"],
+        operated_by="scope_manager",
+        now=now,
+    )
+    db.commit()
+
+    # 撤权：经服务层归档负责人指派（模拟管理员改派）
+    assignment = db.scalar(
+        select(MaintenanceProjectUserAssignment).where(
+            MaintenanceProjectUserAssignment.project_id == seeded["own"].project_id,
+            MaintenanceProjectUserAssignment.archived_at.is_(None),
+        )
+    )
+    assert assignment is not None
+    assignments.archive_primary_manager(
+        db,
+        assignment_id=assignment.assignment_id,
+        version=assignment.version,
+        reason="TOCTOU 测试撤权",
+        operated_by="scope_admin",
+    )
+    db.commit()
+
+    from app.services.maintenance_demands import MaintenanceDemandForbidden
+    try:
+        svc.execute_delete_intent(
+            db,
+            intent_id=intent["intent_id"],
+            digest=intent["selection_digest"],
+            operated_by="scope_manager",
+            allowed_project_ids=set(),
+            now=now + timedelta(seconds=7),
+        )
+        raise AssertionError("撤权后 execute 应被拒绝")
+    except MaintenanceDemandForbidden:
+        db.rollback()
+
+    tombstones = list(
+        db.scalars(
+            select(MaintenanceDemandTombstone).where(
+                MaintenanceDemandTombstone.source_order_id == "RAW-OWN-001"
+            )
+        ).all()
+    )
+    assert tombstones == []
+
+
+def test_execute_after_reassignment_is_conflict_with_zero_tombstones(db, seeded):
+    """创建意图后需求单被改派到他人项目：digest 变化 → 409 conflicted 且零删除。"""
+    from app.models.maintenance import MaintenanceDemandTombstone
+    from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
+
+    from app.services import maintenance_demands as svc
+
+    now = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+    intent = svc.create_delete_intent(
+        db,
+        source_order_ids=["RAW-OWN-001"],
+        reason="合成 TOCTOU 改派删除",
+        idempotency_key="toctou-reassign-delete",
+        operated_by="scope_manager",
+        now=now,
+    )
+    db.commit()
+    svc.arm_delete_intent(
+        db,
+        intent_id=intent["intent_id"],
+        digest=intent["selection_digest"],
+        operated_by="scope_manager",
+        now=now,
+    )
+    db.commit()
+
+    # 改派：admin 经 assign API 把 RAW-OWN-001 归属切到他人项目（服务层归档+新建）
+    old_link = db.scalar(
+        select(MaintenanceSourceOrderAssignment).where(
+            MaintenanceSourceOrderAssignment.source_order_id == "RAW-OWN-001",
+            MaintenanceSourceOrderAssignment.is_active.is_(True),
+        )
+    )
+    assert old_link is not None
+    reassigned = seeded["admin_client"].post(
+        "/api/maintenance/project-assignments/orders/assign",
+        json={
+            "project_id": seeded["other"].project_id,
+            "items": [
+                {
+                    "source_order_id": "RAW-OWN-001",
+                    "expected_assignment_id": old_link.assignment_id,
+                    "expected_version": old_link.version,
+                }
+            ],
+            "reason": "TOCTOU 测试改派",
+        },
+    )
+    assert reassigned.status_code == 200, reassigned.text
+
+    from app.services.maintenance_demands import DeleteIntentConflict
+    try:
+        svc.execute_delete_intent(
+            db,
+            intent_id=intent["intent_id"],
+            digest=intent["selection_digest"],
+            operated_by="scope_manager",
+            allowed_project_ids=None,
+            now=now + timedelta(seconds=7),
+        )
+        raise AssertionError("改派后 execute 应产生 digest 冲突")
+    except DeleteIntentConflict:
+        db.rollback()
+
+    tombstones = list(
+        db.scalars(
+            select(MaintenanceDemandTombstone).where(
+                MaintenanceDemandTombstone.source_order_id == "RAW-OWN-001"
+            )
+        ).all()
+    )
+    assert tombstones == []

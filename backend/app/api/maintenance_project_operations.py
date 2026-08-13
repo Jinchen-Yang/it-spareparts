@@ -1246,11 +1246,21 @@ def stable_project_purchases(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     rows = procurement.get_project_procurement_chain(db, project_id)
+    # 采购成本字段脱敏：无 data_purchase_cost 权限时单价结构性置空，
+    # 与同文件 unit_cost 遮罩（is_field_hidden "unit_cost"）同一口径。
+    if is_field_hidden(ctx, "unit_price"):
+        for order in rows:
+            for line in order.get("lines", []):
+                line["unit_price"] = None
     record_access_log(
         ctx,
         "stable_project_purchases",
         "maintenance_project",
-        {"project_id": project_id, "result_count": len(rows)},
+        {
+            "project_id": project_id,
+            "result_count": len(rows),
+            "cost_masked": is_field_hidden(ctx, "unit_price"),
+        },
     )
     return {"project_id": project_id, "purchases": rows}
 
