@@ -1,7 +1,7 @@
 """add tritium project import batch and source link
 
-Revision ID: e6f1a9c3b7d2
-Revises: c4e8a1d7f2b6
+Revision ID: f9b2d4e7c1a6
+Revises: d9f1a3c7e5b2
 Create Date: 2026-08-12 18:15:00.000000
 """
 from typing import Sequence, Union
@@ -10,8 +10,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision: str = "e6f1a9c3b7d2"
-down_revision: Union[str, None] = "c4e8a1d7f2b6"
+revision: str = "f9b2d4e7c1a6"
+down_revision: Union[str, None] = "d9f1a3c7e5b2"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
