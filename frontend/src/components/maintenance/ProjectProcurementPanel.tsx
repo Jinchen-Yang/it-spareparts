@@ -98,7 +98,7 @@ export default function ProjectProcurementPanel({
       <Alert
         type="warning"
         showIcon
-        message="采购链数据加载失败"
+        message="采购订单关联数据加载失败"
         description="采购订单关联数据暂时不可用，请稍后重试。"
       />
     );

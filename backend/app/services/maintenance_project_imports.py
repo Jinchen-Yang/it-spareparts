@@ -1,21 +1,29 @@
-"""Tritium project table import: preview diff and atomic apply."""
+"""Tritium project table import: preview diff and atomic, idempotent apply."""
 
 import hashlib
 import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from io import BytesIO
 from typing import Any
 
 import xlrd
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.business_time import business_today
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_import import (
     MaintenanceProjectImportBatch,
     MaintenanceProjectSourceLink,
 )
+
+
+class ImportApplyConflict(ValueError):
+    """Raised when applying would violate a uniqueness constraint."""
+
+
+MAX_FILENAME_LENGTH = 256
 
 
 def _hash_file(content: bytes) -> str:
@@ -41,6 +49,33 @@ def _parse_chinese_month(text: str) -> str | None:
     return f"{m.group(1)}-{int(m.group(2)):02d}"
 
 
+def _safe_decimal(value) -> Decimal | None:
+    """Strict decimal parse; thousands separators and out-of-range → None."""
+    if isinstance(value, (int, float)):
+        raw = str(value)
+    elif isinstance(value, str):
+        raw = value.replace(",", "").replace("¥", "").strip()
+        if raw in {"", "/"}:
+            return None
+    else:
+        return None
+    try:
+        d = Decimal(raw)
+    except Exception:
+        return None
+    if d < 0 or d >= 1_000_000_000_000:
+        return None
+    return d
+
+
+def _lifecycle(start: date | None, end: date | None, today: date) -> str:
+    if end is None and start is None:
+        return "missing"
+    if end is not None and end < today:
+        return "ended"
+    return "ongoing"
+
+
 def _parse_project_rows(ws) -> list[dict[str, Any]]:
     """Parse 维保项目清单 sheet rows (skip header row)."""
     rows = []
@@ -48,30 +83,25 @@ def _parse_project_rows(ws) -> list[dict[str, Any]]:
         xsd = str(ws.cell_value(r, 0)).strip()
         if not xsd or xsd == "/":
             continue
-        order_date_serial = ws.cell_value(r, 1)
-        order_date = _excel_serial_to_date(order_date_serial) if isinstance(order_date_serial, (int, float)) else None
+        start = _excel_serial_to_date(ws.cell_value(r, 5)) if ws.cell_value(r, 5) else None
+        end = _excel_serial_to_date(ws.cell_value(r, 6)) if ws.cell_value(r, 6) else None
+        amount_cell = ws.cell_value(r, 9)
+        amount = _safe_decimal(amount_cell)
         rows.append({
             "source_id": xsd,
             "salesperson": str(ws.cell_value(r, 2)).strip() or None,
             "business_type": str(ws.cell_value(r, 3)).strip() or None,
             "project_name": str(ws.cell_value(r, 4)).strip(),
-            "maintenance_start": _excel_serial_to_date(ws.cell_value(r, 5)) if ws.cell_value(r, 5) else None,
-            "maintenance_end": _excel_serial_to_date(ws.cell_value(r, 6)) if ws.cell_value(r, 6) else None,
+            "maintenance_start": start.isoformat() if start else None,
+            "maintenance_end": end.isoformat() if end else None,
             "manager_name": str(ws.cell_value(r, 8)).strip() if ws.cell_value(r, 8) and str(ws.cell_value(r, 8)).strip() != "/" else None,
-            "order_amount": _safe_decimal(ws.cell_value(r, 9)),
+            "order_amount": float(amount) if amount is not None else None,
+            "amount_unparsable": amount is None
+                and amount_cell not in (None, "")
+                and str(amount_cell).strip() not in {"", "/"},
             "collections": _parse_collections(ws, r),
         })
     return rows
-
-
-def _safe_decimal(value) -> Decimal | None:
-    try:
-        d = Decimal(str(value))
-        if d < 0 or d >= 1_000_000_000_000:
-            return None
-        return d
-    except Exception:
-        return None
 
 
 def _parse_collections(ws, row: int) -> list[dict]:
@@ -96,9 +126,20 @@ def preview_import(
     filename: str,
     operated_by: str,
 ) -> dict:
-    """Parse file, compute diff, store preview batch.  Zero writes to projects."""
+    """Parse file, compute diff, store preview batch.  Zero writes to projects.
+
+    ``preview_json`` stores the FULL parsed row sets so apply can be atomic
+    and idempotent; the HTTP response truncates the row lists for the UI.
+    """
     file_hash = _hash_file(file_content)
-    wb = xlrd.open_workbook(file_contents=file_content)
+    safe_filename = filename[:MAX_FILENAME_LENGTH]
+    try:
+        wb = xlrd.open_workbook(file_contents=file_content)
+    except xlrd.XLRDError:
+        return {
+            "status": "error",
+            "errors": ["文件无法解析，请确认是氚云导出的 .xls 文件"],
+        }
 
     if "维保项目清单" not in wb.sheet_names():
         return {"status": "error", "errors": ["未找到'维保项目清单'工作表"]}
@@ -115,12 +156,12 @@ def preview_import(
         seen.add(sid)
         if not row["project_name"]:
             errors.append(f"项目名称为空: {sid}")
-        if row["order_amount"] is not None and row["order_amount"] >= 1_000_000_000_000:
-            errors.append(f"订单金额超出范围: {sid}")
+        if row.get("amount_unparsable"):
+            errors.append(f"订单金额无法解析: {sid}")
 
     if errors:
         batch = MaintenanceProjectImportBatch(
-            filename=filename,
+            filename=safe_filename,
             file_hash=file_hash,
             status="error",
             preview_json={"errors": errors, "row_count": len(rows)},
@@ -135,7 +176,6 @@ def preview_import(
             "row_count": len(rows),
         }
 
-    # Build diff: new projects, updated projects
     existing = {
         link.source_id: link.project_id
         for link in db.scalars(select(MaintenanceProjectSourceLink)).all()
@@ -155,13 +195,13 @@ def preview_import(
     preview = {
         "new_count": len(new),
         "updated_count": len(updated),
-        "new_projects": new[:50],  # Limit preview size
-        "updated_projects": updated[:50],
+        "new_projects": new,
+        "updated_projects": updated,
         "row_count": len(rows),
     }
 
     batch = MaintenanceProjectImportBatch(
-        filename=filename,
+        filename=safe_filename,
         file_hash=file_hash,
         status="preview",
         preview_json=preview,
@@ -173,7 +213,12 @@ def preview_import(
     return {
         "import_id": batch.id,
         "status": "preview",
-        **preview,
+        "new_count": len(new),
+        "updated_count": len(updated),
+        "row_count": len(rows),
+        # UI preview truncates; full rows live in preview_json for apply.
+        "new_projects": new[:50],
+        "updated_projects": updated[:50],
     }
 
 
@@ -182,10 +227,10 @@ def apply_import(
     import_id: int,
     operated_by: str,
 ) -> dict:
-    """Atomically apply a previewed import batch.
+    """Atomically apply a previewed import batch; re-resolution makes it idempotent.
 
-    Creates new MaintenanceProject rows for new XSDDs.  Updates
-    display_name for existing ones.  Never touches project_manager_id.
+    Source links are re-queried at apply time: rows whose XSDD gained a link
+    since preview are applied as updates rather than new inserts.
     """
     batch = db.get(MaintenanceProjectImportBatch, import_id)
     if batch is None:
@@ -199,42 +244,67 @@ def apply_import(
     new_rows = preview.get("new_projects", [])
     updated_rows = preview.get("updated_projects", [])
 
+    links = {
+        link.source_id: link
+        for link in db.scalars(select(MaintenanceProjectSourceLink)).all()
+    }
+
     created = 0
+    updated = 0
+    today = business_today()
     for row in new_rows:
+        existing_link = links.get(row["source_id"])
+        if existing_link is not None:
+            project = db.get(MaintenanceProject, existing_link.project_id)
+            if project is not None:
+                project.display_name = row["project_name"]
+                existing_link.latest_batch_id = batch.id
+                updated += 1
+                continue
         project = MaintenanceProject(
             project_id=str(uuid.uuid4()),
             project_code=row["source_id"],
             display_name=row["project_name"],
+            # 来源负责人原文只进入 project_manager_id（主档惯例：实名绑定
+            # 由管理员在项目工作台显式指派，导入绝不自动绑定系统账号）。
             project_manager_id=row.get("manager_name"),
-            lifecycle_status="missing",
+            lifecycle_status=_lifecycle(
+                date.fromisoformat(row["maintenance_start"]) if row.get("maintenance_start") else None,
+                date.fromisoformat(row["maintenance_end"]) if row.get("maintenance_end") else None,
+                today,
+            ),
         )
         db.add(project)
         db.flush()
 
-        link = MaintenanceProjectSourceLink(
-            source_id=row["source_id"],
-            project_id=project.project_id,
-            first_batch_id=batch.id,
-            latest_batch_id=batch.id,
+        db.add(
+            MaintenanceProjectSourceLink(
+                source_id=row["source_id"],
+                project_id=project.project_id,
+                first_batch_id=batch.id,
+                latest_batch_id=batch.id,
+            )
         )
-        db.add(link)
         created += 1
 
     for row in updated_rows:
-        project = db.get(MaintenanceProject, row["project_id"])
-        if project:
+        link = links.get(row["source_id"])
+        if link is None:
+            continue
+        project = db.get(MaintenanceProject, link.project_id)
+        if project is not None:
             project.display_name = row["project_name"]
-            link = db.scalar(
-                select(MaintenanceProjectSourceLink).where(
-                    MaintenanceProjectSourceLink.source_id == row["source_id"]
-                )
-            )
-            if link:
-                link.latest_batch_id = batch.id
-                link.source_version = batch.source_version
+            link.latest_batch_id = batch.id
+            updated += 1
 
     batch.status = "applied"
     batch.applied_at = datetime.now(timezone.utc)
 
-    db.commit()
-    return {"created": created, "updated": len(updated_rows)}
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ImportApplyConflict(
+            "导入冲突：部分订单编号已被其他批次创建，请重新上传后预览"
+        ) from exc
+    return {"created": created, "updated": updated}

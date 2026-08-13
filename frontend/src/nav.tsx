@@ -195,7 +195,9 @@ export const NAV_GROUPS: NavGroup[] = [
     key: "grp-maintenance-admin",
     label: "维保数据维护",
     items: [
-      { key: "maintenance-project-import", path: "/maintenance/beta/project-import", label: "项目资料同步", icon: <CloudUploadOutlined />, betaFeature: "maintenance", visibleWhen: () => readMaintenanceCapabilities().canManageProject, page: MaintenanceProjectImportPage, load: loadMaintenanceProjectImport },
+      // 后端 require_admin：无 perm + 无 visibleWhen → 仅 admin 可见入口
+      // （App 层过滤：admin 恒短路通过，非 admin 无权限键则为 false）
+      { key: "maintenance-project-import", path: "/maintenance/beta/project-import", label: "项目资料同步", icon: <CloudUploadOutlined />, betaFeature: "maintenance", page: MaintenanceProjectImportPage, load: loadMaintenanceProjectImport },
       { key: "maintenance-project-master", path: "/maintenance/beta/project-master", label: "项目主档维护", icon: <ProfileOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceProjectMasterPage, load: loadMaintenanceProjectMaster },
       { key: "maintenance-demands", path: "/maintenance/beta/demands", label: "异常维保单处理", icon: <FileSearchOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceDemandManagementPage, load: loadMaintenanceDemands },
       { key: "maintenance-warehouse", path: "/maintenance/beta/warehouse", label: "仓库单据核对", icon: <InboxOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceWarehouseWorkbenchPage, load: loadMaintenanceWarehouse },

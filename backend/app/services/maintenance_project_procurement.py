@@ -1,29 +1,62 @@
 """Read-only projection: purchase orders linked to a maintenance project.
 
-Linkage path:
+Linkage path (stable first, name-based fallback only when unambiguous):
     采购订单 (FPurchaseOrder.linked_maintenance_order_no)
     → 维保需求单 (FMaintenanceOrder.raw_order_id)
-    → 项目 (FMaintenanceOrder.project_std = MaintenanceProject.display_name)
+    → 项目 (MaintenanceSourceOrderAssignment, is_active)
+    → 兜底：需求单 project_std 恰好唯一命中项目 display_name
 """
 
 from collections import defaultdict
-from datetime import date
-from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
+from app.models.maintenance import FMaintenanceOrder
 from app.models.maintenance_project import MaintenanceProject
+from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 
 
-def _project_display_name(db: Session, project_id: str) -> str | None:
-    return db.scalar(
+def _money(value) -> str | None:
+    """Fixed-point serialization; frontend money() already handles strings."""
+    if value is None:
+        return None
+    return format(value, "f")
+
+
+def _demand_ids_by_assignment(db: Session, project_id: str) -> set[str]:
+    return set(
+        db.scalars(
+            select(MaintenanceSourceOrderAssignment.source_order_id).where(
+                MaintenanceSourceOrderAssignment.project_id == project_id,
+                MaintenanceSourceOrderAssignment.is_active.is_(True),
+            )
+        ).all()
+    )
+
+
+def _demand_ids_by_unique_name(db: Session, project_id: str) -> set[str]:
+    """Name fallback: only when the project's display_name maps to exactly
+    one demand order's project_std.  Duplicate names yield an empty set —
+    never cross-project leakage."""
+    display_name = db.scalar(
         select(MaintenanceProject.display_name).where(
             MaintenanceProject.project_id == project_id
         )
     )
+    if not display_name:
+        return set()
+    matches = list(
+        db.scalars(
+            select(FMaintenanceOrder.raw_order_id).where(
+                FMaintenanceOrder.project_std == display_name,
+            )
+        ).all()
+    )
+    if len(matches) != 1:
+        return set()
+    return set(matches)
 
 
 def get_project_procurement_chain(
@@ -32,85 +65,76 @@ def get_project_procurement_chain(
 ) -> list[dict]:
     """Return purchase orders → demand orders for *project_id*.
 
-    Only orders with a stable maintenance linkage are included.  Orders
-    that appear in multiple projects, have no project_std match, or are
-    cancelled are silently excluded (the UI labels them as "not found").
+    Only demand orders stably linked via an active source assignment are
+    included; a unique display-name match is a fallback.  Anything
+    ambiguous (no assignment, duplicate names, cancelled orders) is
+    excluded and must be surfaced by the admin reconciliation queue.
     """
-    display_name = _project_display_name(db, project_id)
-    if not display_name:
+    demand_ids = _demand_ids_by_assignment(db, project_id)
+    if not demand_ids:
+        demand_ids = _demand_ids_by_unique_name(db, project_id)
+    if not demand_ids:
         return []
 
-    # Find all demand orders for this project
-    demand_order_ids = list(
-        db.scalars(
-            select(FMaintenanceOrder.raw_order_id).where(
-                FMaintenanceOrder.project_std == display_name,
-            )
-        ).all()
-    )
-    if not demand_order_ids:
-        return []
-
-    # Find purchase orders linked to those demand orders
-    purchase_orders = (
+    purchase_rows = (
         db.execute(
             select(
-                FPurchaseOrder.raw_order_id,
+                FPurchaseOrder.id,
                 FPurchaseOrder.order_no,
                 FPurchaseOrder.order_date,
                 FPurchaseOrder.purchaser,
                 FPurchaseOrder.linked_maintenance_order_no,
+                FPurchaseOrder.data_status,
             ).where(
-                FPurchaseOrder.linked_maintenance_order_no.in_(demand_order_ids),
+                FPurchaseOrder.linked_maintenance_order_no.in_(demand_ids),
             )
         )
         .mappings()
         .all()
     )
-
-    if not purchase_orders:
+    if not purchase_rows:
         return []
 
-    po_raw_ids = [po.raw_order_id for po in purchase_orders]
-    po_lines = (
+    # Established active-status filter（config.ACTIVE_STATUS = 已生效）：
+    # 已作废/未生效订单不是业务证据，不进入项目采购面板。
+    from app import config
+    purchase_rows = [
+        row for row in purchase_rows
+        if row.data_status == config.ACTIVE_STATUS
+    ]
+    if not purchase_rows:
+        return []
+
+    order_ids = [row.id for row in purchase_rows]
+    line_rows = (
         db.execute(
             select(
-                FPurchaseLine.raw_line_id,
                 FPurchaseLine.order_id,
                 FPurchaseLine.pn_std,
                 FPurchaseLine.description,
                 FPurchaseLine.qty,
                 FPurchaseLine.unit_price,
-            ).where(
-                FPurchaseLine.order_id.in_(
-                    select(FPurchaseOrder.id).where(
-                        FPurchaseOrder.raw_order_id.in_(po_raw_ids)
-                    )
-                ),
-            )
+            ).where(FPurchaseLine.order_id.in_(order_ids))
         )
         .mappings()
         .all()
     )
-
-    # Group lines by order
-    lines_by_order: dict[str, list[dict]] = defaultdict(list)
-    for line in po_lines:
+    lines_by_order: dict[int, list[dict]] = defaultdict(list)
+    for line in line_rows:
         lines_by_order[line.order_id].append({
             "pn": line.pn_std,
             "description": line.description,
-            "qty": float(line.qty) if line.qty is not None else None,
-            "unit_price": float(line.unit_price) if line.unit_price is not None else None,
+            "qty": _money(line.qty),
+            "unit_price": _money(line.unit_price),
         })
 
-    # Get the FMaintenanceOrder info for the linked demand
     demand_info: dict[str, dict] = {}
     demand_rows = db.execute(
         select(
             FMaintenanceOrder.raw_order_id,
             FMaintenanceOrder.order_no,
             FMaintenanceOrder.order_date,
-        ).where(FMaintenanceOrder.raw_order_id.in_(demand_order_ids))
+        ).where(FMaintenanceOrder.raw_order_id.in_(demand_ids))
     ).mappings().all()
     for d in demand_rows:
         demand_info[d.raw_order_id] = {
@@ -119,12 +143,7 @@ def get_project_procurement_chain(
         }
 
     result = []
-    for po in purchase_orders:
-        po_id = db.scalar(
-            select(FPurchaseOrder.id).where(
-                FPurchaseOrder.raw_order_id == po.raw_order_id
-            )
-        )
+    for po in purchase_rows:
         linked_demand = demand_info.get(po.linked_maintenance_order_no, {})
         result.append({
             "purchase_order_no": po.order_no,
@@ -132,8 +151,8 @@ def get_project_procurement_chain(
             "purchaser": po.purchaser,
             "demand_order_no": linked_demand.get("order_no"),
             "demand_date": linked_demand.get("order_date"),
-            "line_count": len(lines_by_order.get(po_id, [])),
-            "lines": lines_by_order.get(po_id, []),
+            "line_count": len(lines_by_order.get(po.id, [])),
+            "lines": lines_by_order.get(po.id, []),
         })
 
     return result

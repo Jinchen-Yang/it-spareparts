@@ -1465,13 +1465,13 @@ dependencies = [
     { name = "sqlalchemy" },
     { name = "starlette" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "xlrd" },
 ]
 
 [package.optional-dependencies]
 dev = [
     { name = "httpx" },
     { name = "pytest" },
-    { name = "xlrd" },
 ]
 
 [package.metadata]
@@ -1493,7 +1493,7 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "starlette", specifier = ">=1.3.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
-    { name = "xlrd", marker = "extra == 'dev'", specifier = ">=2.0.2" },
+    { name = "xlrd", specifier = ">=2.0.2" },
 ]
 provides-extras = ["dev"]
 

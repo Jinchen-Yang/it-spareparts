@@ -1,4 +1,4 @@
-"""Tritium project table import: preview and apply."""
+"""Tritium project table import: preview and apply (admin-only)."""
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
@@ -10,17 +10,42 @@ from app.services import maintenance_project_imports as imports
 
 router = APIRouter(prefix="/maintenance/project-imports", tags=["maintenance"])
 
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+_READ_CHUNK = 64 * 1024
+
 
 def _real_operator(db: Session, ident: dict) -> str:
+    """High-risk project-creating writes reject shared/fallback tokens,
+    mirroring the demand-deletion operator gate."""
     from app.models.system import SysUser
     from sqlalchemy import select
-    if ident.get("authn") != "sys_user":
+    if ident.get("authn") != "sys_user" or ident.get("fb"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "请使用实名系统账号")
     username = str(ident.get("sub") or "").strip()
-    user = db.scalar(select(SysUser).where(SysUser.username == username, SysUser.is_active.is_(True)))
+    user = db.scalar(
+        select(SysUser).where(SysUser.username == username, SysUser.is_active.is_(True))
+    )
     if not username or user is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "请使用实名系统账号")
     return username
+
+
+async def _read_capped(file: UploadFile) -> bytes:
+    """Stream-read with a hard cap so oversized uploads never buffer fully."""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_READ_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                "文件大小不能超过 10 MB",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @router.post("/preview")
@@ -32,11 +57,16 @@ async def preview_project_import(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     operated_by = _real_operator(db, ident)
-    content = await file.read()
-    if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "文件大小不能超过 10 MB")
-    result = imports.preview_import(db, content, file.filename or "unknown.xls", operated_by)
-    record_access_log(ctx, "tritium_import_preview", "maintenance", {"filename": file.filename, "status": result["status"]})
+    content = await _read_capped(file)
+    result = imports.preview_import(
+        db, content, file.filename or "unknown.xls", operated_by
+    )
+    record_access_log(
+        ctx,
+        "tritium_import_preview",
+        "maintenance",
+        {"filename": (file.filename or "")[:256], "status": result["status"]},
+    )
     return result
 
 
@@ -72,7 +102,14 @@ def apply_project_import(
     operated_by = _real_operator(db, ident)
     try:
         result = imports.apply_import(db, import_id, operated_by)
-        record_access_log(ctx, "tritium_import_apply", "maintenance", {"import_id": import_id, **result})
-        return result
+    except imports.ImportApplyConflict as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    record_access_log(
+        ctx,
+        "tritium_import_apply",
+        "maintenance",
+        {"import_id": import_id, **result},
+    )
+    return result

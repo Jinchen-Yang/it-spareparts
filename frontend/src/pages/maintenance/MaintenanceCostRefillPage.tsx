@@ -371,7 +371,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
           aria-label={`补录 ${gap.pn || gap.order_no}`}
           onClick={() => openRefill(gap)}
         >
-          回填
+          补录价格
         </Button>
       ),
     },
@@ -444,7 +444,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
           <Alert
             showIcon
             type="info"
-            message="采购或销售数据可能晚于领用到达；可先自动匹配最新价格，仍无可靠证据的行再人工回填。"
+            message="新到的采购或销售数据可能尚未自动匹配；可先自动匹配最新价格，仍缺价的记录再手动补录。"
           />
           <Button
             style={{ alignSelf: "flex-start" }}

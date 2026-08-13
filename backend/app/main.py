@@ -150,6 +150,11 @@ app.include_router(
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )
+app.include_router(
+    maintenance_project_imports.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
 app.include_router(maintenance_audit.router, prefix=settings.api_prefix)
 app.include_router(dashboard.router, prefix=settings.api_prefix)
 app.include_router(pools.router, prefix=settings.api_prefix)

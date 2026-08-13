@@ -219,7 +219,7 @@ const detail = {
     action: "preview" as const,
     from_status: null,
     to_status: "previewed" as const,
-    reason: "生成合成 dry-run",
+    reason: "生成合成预检",
     operated_by: "creator-user",
     operated_at: "2026-08-09T12:00:00+00:00",
   }],
@@ -600,13 +600,13 @@ describe("MaintenanceMigrationPage", () => {
     expect(screen.getByText("second-detail-owner")).toBeInTheDocument();
   });
 
-  it("新建 dry-run 前先阻止缺理由和缺项目的黑盒提交", async () => {
+  it("新建预检 前先阻止缺理由和缺项目的黑盒提交", async () => {
     render(<MaintenanceMigrationPage />);
     await screen.findByText("creator-user / — / —");
-    fireEvent.click(screen.getByRole("button", { name: "新建 dry-run" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建预检" }));
     fireEvent.click(screen.getByRole("button", { name: "生成核对清单" }));
 
-    expect(await screen.findByText("请填写生成本次 dry-run 的业务理由。")).toBeInTheDocument();
+    expect(await screen.findByText("请填写生成本次预检的业务理由。")).toBeInTheDocument();
     expect(mocks.previewMaintenanceMigration).not.toHaveBeenCalled();
   });
 
@@ -614,7 +614,7 @@ describe("MaintenanceMigrationPage", () => {
     mocks.previewMaintenanceMigration.mockResolvedValue({ data: detail });
     render(<MaintenanceMigrationPage />);
     await screen.findByText("creator-user / — / —");
-    fireEvent.click(screen.getByRole("button", { name: "新建 dry-run" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建预检" }));
 
     const projectSelect = screen.getByRole("combobox", { name: "项目 1 稳定项目" });
     fireEvent.mouseDown(projectSelect);

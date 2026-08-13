@@ -201,10 +201,10 @@ function projectInput(draft: DraftProject): MigrationProjectInput {
 }
 
 function validateDrafts(drafts: DraftProject[], reason: string): string | null {
-  if (!reason.trim()) return "请填写生成本次 dry-run 的业务理由。";
+  if (!reason.trim()) return "请填写生成本次预检的业务理由。";
   const projectIds = drafts.map((draft) => draft.projectId).filter(Boolean);
   if (projectIds.length !== drafts.length) return "每张卡片都必须选择稳定项目。";
-  if (new Set(projectIds).size !== projectIds.length) return "同一项目不能重复加入一次 dry-run。";
+  if (new Set(projectIds).size !== projectIds.length) return "同一项目不能重复加入一次预检。";
   for (const draft of drafts) {
     if (!validIsoDate(draft.cutoverDate)) return "每个项目都必须填写有效的切换日期。";
     if (!validIsoDate(draft.warehouseReadyThrough)) {
@@ -453,10 +453,10 @@ export default function MaintenanceMigrationPage() {
       setDrafts([newDraftProject()]);
       setPreviewReason("");
       setPreviewKey(null);
-      message.success("dry-run 已生成；当前没有执行任何生产切换");
+      message.success("预检已生成；当前没有执行任何生产切换");
       await loadRuns(1, statuses);
     } catch (error) {
-      setPreviewError(errorDetail(error, "dry-run 生成失败；当前草稿和幂等键已保留，可安全重试。"));
+      setPreviewError(errorDetail(error, "预检生成失败；当前草稿已保留，可安全重试。"));
     } finally {
       setPreviewSaving(false);
     }
@@ -560,12 +560,12 @@ export default function MaintenanceMigrationPage() {
       setCommandMode(null);
       setCommandReason("");
       setCommandKey(null);
-      message.success(commandMode === "reconcile" ? "实名对账已记录" : "独立审批 manifest 已生成");
+      message.success(commandMode === "reconcile" ? "实名对账已记录" : "独立审批技术依据已生成");
       await loadRuns(page, statuses);
     } catch (error) {
       setCommandError(errorDetail(
         error,
-        "操作失败；理由和幂等键已保留。来源变化时请关闭后重新生成 dry-run。",
+        "操作失败；理由已保留。来源变化时请关闭后重新生成预检。",
       ));
     } finally {
       setCommandSaving(false);
@@ -629,8 +629,8 @@ export default function MaintenanceMigrationPage() {
     <>
       <PageHeader
         title="成本与库存迁移核对"
-        subtitle="先生成可复算 dry-run，再实名对账、独立审批；审批只生成 manifest，不会切换生产口径。"
-        extra={<Button type="primary" onClick={() => setCreateOpen(true)}>新建 dry-run</Button>}
+        subtitle="先生成可复算预检，再实名对账、独立审批；审批只生成技术依据，不会切换生产口径。"
+        extra={<Button type="primary" onClick={() => setCreateOpen(true)}>新建预检</Button>}
       />
       <Alert
         type="warning"
@@ -678,12 +678,12 @@ export default function MaintenanceMigrationPage() {
             showSizeChanger: false,
             onChange: (nextPage) => { setPage(nextPage); void loadRuns(nextPage, statuses); },
           }}
-          locale={{ emptyText: <Empty description="还没有迁移 dry-run" /> }}
+          locale={{ emptyText: <Empty description="还没有迁移预检" /> }}
         />
       </Card>
 
       <Drawer
-        title="新建迁移 dry-run"
+        title="新建迁移预检"
         width={860}
         open={createOpen}
         destroyOnClose={false}
@@ -701,7 +701,7 @@ export default function MaintenanceMigrationPage() {
           type="info"
           showIcon
           message="这里填写的是待核对候选，不是直接写入生产的结果"
-          description="成本基线和库存期初在首次 dry-run 中均标记为待审批；后续实名对账才会计入结果。"
+          description="成本基线和库存期初在首次预检中均标记为待审批；后续实名对账才会计入结果。"
           style={{ marginBottom: 16 }}
         />
         {previewError && <Alert type="error" showIcon message={previewError} style={{ marginBottom: 16 }} />}
@@ -1007,12 +1007,12 @@ export default function MaintenanceMigrationPage() {
                 <Typography.Text copyable code>{selected.source_snapshot_hash}</Typography.Text>
               </Descriptions.Item>
               {selected.manifest_hash && (
-                <Descriptions.Item label="manifest 哈希" span={2}>
+                <Descriptions.Item label="技术依据哈希" span={2}>
                   <Typography.Text copyable code>{selected.manifest_hash}</Typography.Text>
                 </Descriptions.Item>
               )}
               {selected.manifest_key_id && (
-                <Descriptions.Item label="manifest 签名密钥 ID" span={2}>
+                <Descriptions.Item label="技术依据签名密钥 ID" span={2}>
                   <Typography.Text copyable code>{selected.manifest_key_id}</Typography.Text>
                 </Descriptions.Item>
               )}
@@ -1294,7 +1294,7 @@ export default function MaintenanceMigrationPage() {
                 color: event.action === "approve" ? "green" : event.action === "reconcile" ? "blue" : "gray",
                 children: (
                   <div>
-                    <strong>{event.action === "preview" ? "生成 dry-run" : event.action === "reconcile" ? "实名对账" : "独立审批"}</strong>
+                    <strong>{event.action === "preview" ? "生成预检" : event.action === "reconcile" ? "实名对账" : "独立审批"}</strong>
                     <div>{event.operated_by} · {new Date(event.operated_at).toLocaleString("zh-CN")}</div>
                     <Typography.Text type="secondary">{event.reason}</Typography.Text>
                   </div>
@@ -1309,7 +1309,7 @@ export default function MaintenanceMigrationPage() {
         title={commandMode === "reconcile" ? "确认实名对账" : "确认独立审批"}
         open={Boolean(commandMode)}
         confirmLoading={commandSaving}
-        okText={commandMode === "reconcile" ? "记录对账" : "生成签名 manifest"}
+        okText={commandMode === "reconcile" ? "记录对账" : "生成签名技术依据"}
         okButtonProps={{ disabled: !commandReason.trim() }}
         onOk={() => void submitCommand()}
         onCancel={() => {

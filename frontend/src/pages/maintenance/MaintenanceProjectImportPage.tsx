@@ -73,7 +73,7 @@ export default function MaintenanceProjectImportPage() {
 
         {step === "upload" && (
           <Upload.Dragger
-            accept=".xls,.xlsx"
+            accept=".xls"
             maxCount={1}
             beforeUpload={handleUpload}
             showUploadList={false}
@@ -81,7 +81,7 @@ export default function MaintenanceProjectImportPage() {
           >
             <p className="ant-upload-drag-icon"><CloudUploadOutlined /></p>
             <p className="ant-upload-text">点击或拖拽氚云项目表到此处上传</p>
-            <p className="ant-upload-hint">支持 .xls 格式（WPS Office 导出）</p>
+            <p className="ant-upload-hint">仅支持氚云导出的 .xls 格式（WPS Office）</p>
           </Upload.Dragger>
         )}
 
@@ -106,7 +106,7 @@ export default function MaintenanceProjectImportPage() {
               <Descriptions.Item label="更新项目">
                 <Tag color="blue">{preview.updated_count} 个</Tag>
               </Descriptions.Item>
-              <Descriptions.Item label="状态">{preview.status}</Descriptions.Item>
+              <Descriptions.Item label="状态">{preview.status === "preview" ? "待确认" : preview.status}</Descriptions.Item>
             </Descriptions>
 
             {preview.errors && preview.errors.length > 0 && (
