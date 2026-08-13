@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-08-13
+
+**Agent:** Claude Code (WSL Ubuntu 26.04)
+**Session:** 维保业务工作台重构 → 生产审查修复（分支 `codex/maint-workbench-refactor`，基线 `origin/main@caf4a973`）
+
+**Changed（11 commits，58 files，+8751/−259）:**
+- 导航重构：两个同名"维保管理"拆为"维保项目（旧版）/ 维保工作台 / 维保数据维护"三组，业务化标签；betaFeature 白名单门控原样保留
+- 需求单项目范围隔离（PR2）：复用 main 的 `owned_project_ids`/`MaintenanceSourceOrderAssignment`，搜索 + 删除意图双重范围校验，越界 403
+- 业务文案（PR3/PR6）：maintenanceLanguage 模块 + 卡片/进度条/成本回填/迁移页面业务化；`dry-run→预检`、`manifest→技术依据`、`回填→补录`
+- 采购链只读面板（PR4）：稳定归属表优先、唯一名称兜底、ACTIVE_STATUS 过滤、定点金额序列化
+- 氚云项目导入（PR5A/5B）：真实脱敏样表字段契约 + preview/apply API + 前端四步向导；全量行存储、幂等 apply、409 冲突、流式 10MB 上限
+- 独立审查 23 项发现全部修复：router 未注册、xlrd 生产依赖、迁移 revision 冲突（f9b2d4e7c1a6）、预览截断、apply 幂等、display_name 泄露、无界读取、fb token、N+1、作废单过滤
+- `.deploy/v122_release.sh` + `v122_manifest.py`：发布/回滚控制（FROM d9f1a3c7e5b2 → TO f9b2d4e7c1a6），rollback-app 保留回滚排练门
+
+**验证：**
+- 前端 790/790 tests 绿、tsc + vite build 绿
+- 后端 pytest 全量（等结果）+ 新增 11 个专项测试（范围隔离 7 + 导入契约 4）
+- 迁移单 head：f9b2d4e7c1a6
+
+**Notes:**
+- 生产发布门：合并后需以 exact-SHA 建发布候选，执行 v122 preflight → backup-restore → migrate → deploy → observe，回滚走 rollback-app（旧镜像需先在 f9b2 上排练）
+- 遗留：#128 待办页/验收矩阵完整版（PR6 余项）随真实账号验收推进
+
+---
+
 ## 2026-08-12
 
 **Agent:** Claude Code (WSL Ubuntu 26.04)
