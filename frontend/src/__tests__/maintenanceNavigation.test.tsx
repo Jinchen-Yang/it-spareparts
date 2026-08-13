@@ -11,10 +11,18 @@ import {
 describe("维保管理信息架构", () => {
   beforeEach(() => localStorage.clear());
 
-  it("原三个入口保持兼容，新工作台收口到正式维保管理分组", () => {
+  it("旧版入口与工作台分组命名区分，不再出现两个同名维保管理", () => {
     const stable = NAV_GROUPS.find((group) => group.key === "grp-maintenance");
-    const beta = NAV_GROUPS.find((group) => group.key === "grp-maintenance-beta");
+    const workbench = NAV_GROUPS.find((group) => group.key === "grp-maintenance-beta");
+    const admin = NAV_GROUPS.find((group) => group.key === "grp-maintenance-admin");
 
+    // 所有带 label 的组名互不相同
+    const labels = NAV_GROUPS
+      .map((group) => group.label)
+      .filter((label): label is string => label !== null);
+    expect(new Set(labels).size).toBe(labels.length);
+
+    expect(stable?.label).toBe("维保项目（旧版）");
     expect(stable?.items.map(({ key, path, label }) => ({
       key,
       path,
@@ -32,8 +40,9 @@ describe("维保管理信息架构", () => {
         label: "项目提醒",
       },
     ]);
-    expect(beta?.label).toBe("维保管理");
-    expect(beta?.items.map(({ key, path, label, perm }) => ({
+
+    expect(workbench?.label).toBe("维保工作台");
+    expect(workbench?.items.map(({ key, path, label, perm }) => ({
       key,
       path,
       label,
@@ -42,26 +51,14 @@ describe("维保管理信息架构", () => {
       {
         key: "maintenance-projects",
         path: "/maintenance/beta/projects",
-        label: "项目面板",
+        label: "项目总览",
         perm: "page_maintenance_beta",
       },
       {
-        key: "maintenance-project-master",
-        path: "/maintenance/beta/project-master",
-        label: "项目主档",
-        perm: "page_maintenance_beta",
-      },
-      {
-        key: "maintenance-demands",
-        path: "/maintenance/beta/demands",
-        label: "需求单管理",
-        perm: "page_maintenance_beta",
-      },
-      {
-        key: "maintenance-warehouse",
-        path: "/maintenance/beta/warehouse",
-        label: "仓库单据",
-        perm: "page_maintenance_beta",
+        key: "maintenance-updates",
+        path: "/maintenance/beta/updates",
+        label: "月度项目更新",
+        perm: undefined,
       },
       {
         key: "maintenance-manager-workbook",
@@ -72,38 +69,66 @@ describe("维保管理信息架构", () => {
       {
         key: "maintenance-acceptance",
         path: "/maintenance/beta/acceptance",
-        label: "验收报告",
+        label: "验收与结项",
+        perm: "page_maintenance_beta",
+      },
+    ]);
+
+    expect(admin?.label).toBe("维保数据维护");
+    expect(admin?.items.map(({ key, path, label, perm }) => ({
+      key,
+      path,
+      label,
+      perm,
+    }))).toEqual([
+      {
+        key: "maintenance-project-import",
+        path: "/maintenance/beta/project-import",
+        label: "项目资料同步",
+        perm: undefined,
+      },
+      {
+        key: "maintenance-project-master",
+        path: "/maintenance/beta/project-master",
+        label: "项目主档维护",
         perm: "page_maintenance_beta",
       },
       {
-        key: "maintenance-updates",
-        path: "/maintenance/beta/updates",
-        label: "月度更新",
-        perm: undefined,
+        key: "maintenance-demands",
+        path: "/maintenance/beta/demands",
+        label: "异常维保单处理",
+        perm: "page_maintenance_beta",
+      },
+      {
+        key: "maintenance-warehouse",
+        path: "/maintenance/beta/warehouse",
+        label: "仓库单据核对",
+        perm: "page_maintenance_beta",
       },
       {
         key: "maintenance-cost-refill",
         path: "/maintenance/beta/cost-refill",
-        label: "成本回填",
+        label: "领用缺价补录",
         perm: undefined,
       },
       {
         key: "maintenance-migration",
         path: "/maintenance/beta/migration",
-        label: "迁移核对",
+        label: "历史数据迁移核对",
         perm: undefined,
       },
     ]);
   });
 
   it("经理月报按页面和合同额权限显示，高风险单项目写入仍需独立动作权限", () => {
-    const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance-beta");
-    const managerWorkbook = maintenance?.items.find(
+    const workbench = NAV_GROUPS.find((group) => group.key === "grp-maintenance-beta");
+    const admin = NAV_GROUPS.find((group) => group.key === "grp-maintenance-admin");
+    const managerWorkbook = workbench?.items.find(
       (item) => item.key === "maintenance-manager-workbook",
     );
-    const updates = maintenance?.items.find((item) => item.key === "maintenance-updates");
-    const refill = maintenance?.items.find((item) => item.key === "maintenance-cost-refill");
-    const migration = maintenance?.items.find((item) => item.key === "maintenance-migration");
+    const updates = workbench?.items.find((item) => item.key === "maintenance-updates");
+    const refill = admin?.items.find((item) => item.key === "maintenance-cost-refill");
+    const migration = admin?.items.find((item) => item.key === "maintenance-migration");
     localStorage.setItem("role", "readonly");
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: true,
@@ -142,8 +167,8 @@ describe("维保管理信息架构", () => {
   });
 
   it("共享管理员被显式关闭迁移权限时不显示迁移核对入口", () => {
-    const maintenance = NAV_GROUPS.find((group) => group.key === "grp-maintenance-beta");
-    const migration = maintenance?.items.find((item) => item.key === "maintenance-migration");
+    const admin = NAV_GROUPS.find((group) => group.key === "grp-maintenance-admin");
+    const migration = admin?.items.find((item) => item.key === "maintenance-migration");
     localStorage.setItem("role", "admin");
     localStorage.setItem("permissions", JSON.stringify({
       page_maintenance: true,
@@ -159,7 +184,7 @@ describe("维保管理信息架构", () => {
     expect(matchNavItem("/maintenance")?.label).toBe("项目数据");
     expect(matchNavItem("/maintenance/downloads")?.label).toBe("下载中心");
     expect(matchNavItem("/maintenance/reminders")?.label).toBe("项目提醒");
-    expect(matchNavItem("/maintenance/beta/projects")?.label).toBe("项目面板");
+    expect(matchNavItem("/maintenance/beta/projects")?.label).toBe("项目总览");
     expect(matchNavItem("/maintenance/beta/projects")?.perm).toBe("page_maintenance_beta");
     expect(NAV_REDIRECTS).not.toContainEqual({
       from: "/maintenance",

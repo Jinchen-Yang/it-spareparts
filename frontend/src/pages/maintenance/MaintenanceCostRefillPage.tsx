@@ -77,7 +77,7 @@ function ReferenceList({ references, selectable, onSelect }: {
             {selectable && reference.weighted_unit_price !== null && (
               <Button
                 size="small"
-                aria-label={`使用${referenceLabel(reference)}价格`}
+                aria-label={`使用${referenceLabel(reference)}`}
                 onClick={() => onSelect?.(reference)}
               >
                 使用此价格
@@ -267,7 +267,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
 
   const save = async () => {
     if (!editing || unitCost === null || unitCost < 0 || !evidence.trim() || !reason.trim()) {
-      setFormError("请填写有效未税单价、证据和补录说明。成本不会由系统猜测。");
+      setFormError("请填写有效的未税单价、价格来源和补录说明。");
       return;
     }
     setSaving(true);
@@ -309,7 +309,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
     let result: MaintenanceCostGapRecomputeResult;
     try {
       const response = await recomputeMaintenanceCostGaps(targetProjectId, {
-        reason: "重新匹配后到采购或销售价格来源说明",
+        reason: "匹配新到的采购或销售价格数据",
       });
       result = response.data;
     } catch {
@@ -368,7 +368,7 @@ export default function MaintenanceCostRefillPage({ projectId }: { projectId?: s
       render: (_, gap) => (
         <Button
           type="link"
-          aria-label={`回填 ${gap.pn || gap.order_no}`}
+          aria-label={`补录 ${gap.pn || gap.order_no}`}
           onClick={() => openRefill(gap)}
         >
           回填

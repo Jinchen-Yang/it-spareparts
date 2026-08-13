@@ -95,7 +95,7 @@ describe("项目双进度", () => {
     expect(screen.getByTestId("collection-progress")).toHaveTextContent("100.01%");
     const cost = screen.getByTestId("project-cost-progress");
     expect(cost).toHaveTextContent("100.01%");
-    expect(within(cost).getByText("超过 100%")).toBeInTheDocument();
+    expect(within(cost).getByText("已超合同额（超过 100%）")).toBeInTheDocument();
   });
 
   it("合同额证据不完整时两条进度都不计算百分比", () => {
@@ -132,7 +132,7 @@ describe("项目双进度", () => {
     }} />);
 
     const cost = screen.getByTestId("project-cost-progress");
-    expect(within(cost).getByText("成本不可见/无权限")).toBeInTheDocument();
+    expect(within(cost).getByText("暂无成本查看权限")).toBeInTheDocument();
     expect(cost).not.toHaveTextContent("缺 null 行成本");
     expect(cost).not.toHaveTextContent("成本待补");
     expect(cost).not.toHaveTextContent("已知下限");
@@ -152,7 +152,7 @@ describe("项目双进度", () => {
     }} />);
 
     expect(screen.getByText("合同额不可见，暂不计算比例。")).toBeInTheDocument();
-    expect(screen.getByText("合同额不可见/无权限")).toBeInTheDocument();
+    expect(screen.getByText("暂无合同金额查看权限")).toBeInTheDocument();
     expect(screen.queryByText("合同额证据不完整，暂不计算比例。")).toBeNull();
   });
 
@@ -192,9 +192,9 @@ describe("项目双进度", () => {
       missing_cost_lines: 3,
     }} />);
 
-    expect(screen.getByText("回款 / 全部合同额（含税）")).toBeInTheDocument();
+    expect(screen.getByText("已回款 ÷ 合同总额（含税）")).toBeInTheDocument();
     const cost = screen.getByTestId("project-cost-progress");
-    expect(within(cost).getByText("项目已计成本（含税） / 全部合同额（含税）"))
+    expect(within(cost).getByText("已消耗成本 ÷ 合同总额（含税）"))
       .toBeInTheDocument();
     expect(within(cost).getByText(/现场领用已计成本（含税） ¥450/)).toBeInTheDocument();
     expect(within(cost).getByText(/审批通过报销（含税） ¥350/)).toBeInTheDocument();
@@ -226,9 +226,9 @@ describe("项目双进度", () => {
     }} />);
 
     const cost = screen.getByTestId("project-cost-progress");
-    expect(within(cost).getAllByText(/成本税口径不可确认/).length).toBeGreaterThanOrEqual(1);
+    expect(within(cost).getAllByText(/成本税类型未确认/).length).toBeGreaterThanOrEqual(1);
     expect(cost).not.toHaveTextContent("110%");
-    expect(cost).not.toHaveTextContent("超过 100%");
+    expect(cost).not.toHaveTextContent("已超合同额（超过 100%）");
     expect(cost).not.toHaveTextContent("¥1,100");
   });
 
@@ -249,7 +249,7 @@ describe("项目双进度", () => {
       missing_cost_lines: 0,
     }} />);
 
-    expect(screen.getAllByText(/合同额税口径不可确认/).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText(/合同额税类型未确认/).length).toBeGreaterThanOrEqual(2);
     expect(screen.getByTestId("collection-progress")).not.toHaveTextContent("60%");
     expect(screen.getByTestId("project-cost-progress")).not.toHaveTextContent("80%");
   });

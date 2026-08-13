@@ -186,7 +186,7 @@ describe("MaintenanceProjectsPage", () => {
     expect(within(returnStatus).getByText("硬盘免返 1.000")).toBeInTheDocument();
     expect(within(returnStatus).getByText("品类待判定 2.000")).toBeInTheDocument();
     expect(returnStatus).not.toHaveTextContent("%");
-    expect(within(card).getByRole("link", { name: "查看项目" })).toHaveAttribute(
+    expect(within(card).getByRole("link", { name: "进入项目" })).toHaveAttribute(
       "href",
       "/maintenance/beta/projects/project-1",
     );
@@ -278,7 +278,7 @@ describe("MaintenanceProjectsPage", () => {
     render(<MemoryRouter><MaintenanceProjectsPage /></MemoryRouter>);
 
     const card = await screen.findByTestId("maintenance-project-card-project-1");
-    expect(within(card).getByText("成本不可见/无权限")).toBeInTheDocument();
+    expect(within(card).getByText("无权限查看")).toBeInTheDocument();
     expect(within(card).queryByText("成本待补")).toBeNull();
     expect(card).not.toHaveTextContent("缺 null 行成本");
   });
@@ -343,7 +343,7 @@ describe("MaintenanceProjectsPage", () => {
     expect(within(card).getByText("现场领用成本可见；报销费用不可见"))
       .toBeInTheDocument();
     expect(within(card).getByText("项目总成本状态不可判定")).toBeInTheDocument();
-    expect(within(card).queryByText("成本不可见/无权限")).toBeNull();
+    expect(within(card).queryByText("无权限查看")).toBeNull();
     expect(within(card).queryByText("成本不可见")).toBeNull();
   });
 

@@ -1,4 +1,3 @@
-// @ts-nocheck — restored from production baseline caf4a973, strict errors pre-existing
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,

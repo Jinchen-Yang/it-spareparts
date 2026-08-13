@@ -135,16 +135,16 @@ describe("MaintenanceCostRefillPage", () => {
     );
 
     await screen.findByText("PN-MISSING");
-    fireEvent.click(screen.getByRole("button", { name: "重新匹配系统价格" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动匹配最新价格" }));
 
     await waitFor(() => expect(recomputeMaintenanceCostGaps).toHaveBeenCalledWith(
       "project-1",
-      { reason: "重新匹配后到采购或销售价格证据" },
+      { reason: "匹配新到的采购或销售价格数据" },
     ));
     expect(await screen.findByText("已更新 1 行系统价格，仍有 0 行缺价。"))
       .toBeInTheDocument();
     await waitFor(() => expect(listMaintenanceCostGaps).toHaveBeenCalledTimes(2));
-    expect(screen.getByText("当前项目没有待回填成本")).toBeInTheDocument();
+    expect(screen.getByText("当前项目所有领用成本已齐全")).toBeInTheDocument();
   });
 
   it("系统价格更新成功但清单刷新失败时保留成功事实并单独提示刷新错误", async () => {
@@ -163,7 +163,7 @@ describe("MaintenanceCostRefillPage", () => {
     );
 
     await screen.findByText("PN-MISSING");
-    fireEvent.click(screen.getByRole("button", { name: "重新匹配系统价格" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动匹配最新价格" }));
 
     expect(await screen.findByText("已更新 1 行系统价格，仍有 0 行缺价。"))
       .toBeInTheDocument();
@@ -196,17 +196,17 @@ describe("MaintenanceCostRefillPage", () => {
     await screen.findByText("PN-MISSING");
     fireEvent.click(screen.getByTitle("2"));
     await screen.findByText("PN-PAGE-2");
-    fireEvent.click(screen.getByRole("button", { name: "重新匹配系统价格" }));
+    fireEvent.click(screen.getByRole("button", { name: "自动匹配最新价格" }));
 
     await waitFor(() => expect(listMaintenanceCostGaps).toHaveBeenLastCalledWith(
       "project-1",
       { page: 1, page_size: 20 },
     ));
-    expect(await screen.findByText("当前项目没有待回填成本")).toBeInTheDocument();
+    expect(await screen.findByText("当前项目所有领用成本已齐全")).toBeInTheDocument();
     expect(screen.queryByTitle("2")).toBeNull();
   });
 
-  it("展示关联采购和前后 7 天加权证据，人工确认后按版本回填", async () => {
+  it("展示关联采购记录和前后 7 天价格参考，人工确认后按版本补录", async () => {
     render(
       <MemoryRouter>
         <MaintenanceCostRefillPage projectId="project-1" />
@@ -218,19 +218,19 @@ describe("MaintenanceCostRefillPage", () => {
       "href",
       "/maintenance/beta/projects/project-1",
     );
-    expect(screen.getByText("关联采购")).toBeInTheDocument();
-    expect(screen.getByText("采购 ±7 天加权")).toBeInTheDocument();
-    expect(screen.getByText("销售 ±7 天加权")).toBeInTheDocument();
+    expect(screen.getByText("关联采购记录")).toBeInTheDocument();
+    expect(screen.getByText("前后 7 天采购价")).toBeInTheDocument();
+    expect(screen.getByText("前后 7 天销售价")).toBeInTheDocument();
     expect(screen.getByText("PO-7")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
-    const dialog = await screen.findByRole("dialog", { name: "回填成本" });
-    fireEvent.click(within(dialog).getByRole("button", { name: "采用采购 ±7 天加权参考" }));
+    fireEvent.click(screen.getByRole("button", { name: "补录 PN-MISSING" }));
+    const dialog = await screen.findByRole("dialog", { name: "补录领用单价" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "使用前后 7 天采购价" }));
     expect(within(dialog).getByTestId("inc-tax-unit-cost-preview")).toHaveTextContent("¥103.96");
-    fireEvent.change(within(dialog).getByLabelText("回填原因"), {
+    fireEvent.change(within(dialog).getByLabelText("补录说明"), {
       target: { value: "已核对采购发票" },
     });
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认保存" }));
 
     await waitFor(() => expect(updateMaintenanceCostGap).toHaveBeenCalledWith(
       "project-1",
@@ -242,10 +242,10 @@ describe("MaintenanceCostRefillPage", () => {
         evidence: expect.stringContaining("PO-7"),
       }),
     ));
-    expect(await screen.findByText("成本已回填")).toBeInTheDocument();
+    expect(await screen.findByText("价格已补录")).toBeInTheDocument();
   });
 
-  it("未税输入变化时按 13% 和 HALF_UP 实时预览含税单位成本", async () => {
+  it("未税输入变化时按 13% 实时预览含税单价", async () => {
     render(
       <MemoryRouter>
         <MaintenanceCostRefillPage projectId="project-1" />
@@ -253,15 +253,14 @@ describe("MaintenanceCostRefillPage", () => {
     );
 
     await screen.findByText("PN-MISSING");
-    fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
-    const dialog = await screen.findByRole("dialog", { name: "回填成本" });
-    const input = within(dialog).getByLabelText("未税单位成本");
+    fireEvent.click(screen.getByRole("button", { name: "补录 PN-MISSING" }));
+    const dialog = await screen.findByRole("dialog", { name: "补录领用单价" });
+    const input = within(dialog).getByLabelText("未税单价");
     fireEvent.change(input, { target: { value: "100.5" } });
 
     expect(within(dialog).getByTestId("inc-tax-unit-cost-preview"))
       .toHaveTextContent("¥113.57");
     expect(within(dialog).getByText(/13%/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/HALF_UP/)).toBeInTheDocument();
   });
 
   it("允许有证据的零元更换并保留 0.00 含税预览和保存值", async () => {
@@ -272,21 +271,21 @@ describe("MaintenanceCostRefillPage", () => {
     );
 
     await screen.findByText("PN-MISSING");
-    fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
-    const dialog = await screen.findByRole("dialog", { name: "回填成本" });
-    fireEvent.change(within(dialog).getByLabelText("未税单位成本"), {
+    fireEvent.click(screen.getByRole("button", { name: "补录 PN-MISSING" }));
+    const dialog = await screen.findByRole("dialog", { name: "补录领用单价" });
+    fireEvent.change(within(dialog).getByLabelText("未税单价"), {
       target: { value: "0" },
     });
-    fireEvent.change(within(dialog).getByLabelText("价格证据"), {
+    fireEvent.change(within(dialog).getByLabelText("价格来源说明"), {
       target: { value: "厂家免费更换确认单 FREE-001" },
     });
-    fireEvent.change(within(dialog).getByLabelText("回填原因"), {
+    fireEvent.change(within(dialog).getByLabelText("补录说明"), {
       target: { value: "有证据的免费更换" },
     });
 
     expect(within(dialog).getByTestId("inc-tax-unit-cost-preview"))
       .toHaveTextContent("¥0.00");
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认保存" }));
 
     await waitFor(() => expect(updateMaintenanceCostGap).toHaveBeenCalledWith(
       "project-1",
@@ -308,20 +307,20 @@ describe("MaintenanceCostRefillPage", () => {
     );
 
     await screen.findByText("PN-MISSING");
-    fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
-    const dialog = await screen.findByRole("dialog", { name: "回填成本" });
-    fireEvent.change(within(dialog).getByLabelText("未税单位成本"), {
+    fireEvent.click(screen.getByRole("button", { name: "补录 PN-MISSING" }));
+    const dialog = await screen.findByRole("dialog", { name: "补录领用单价" });
+    fireEvent.change(within(dialog).getByLabelText("未税单价"), {
       target: { value: "-0.01" },
     });
-    fireEvent.change(within(dialog).getByLabelText("价格证据"), {
+    fireEvent.change(within(dialog).getByLabelText("价格来源说明"), {
       target: { value: "异常负价证据" },
     });
-    fireEvent.change(within(dialog).getByLabelText("回填原因"), {
+    fireEvent.change(within(dialog).getByLabelText("补录说明"), {
       target: { value: "验证负数拦截" },
     });
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认保存" }));
 
-    expect(await within(dialog).findByText(/请填写有效未税单位成本/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/请填写有效的未税单价、价格来源和补录说明/)).toBeInTheDocument();
     expect(updateMaintenanceCostGap).not.toHaveBeenCalled();
   });
 
@@ -348,13 +347,13 @@ describe("MaintenanceCostRefillPage", () => {
     );
 
     await screen.findByText("PN-MISSING");
-    fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
-    const dialog = await screen.findByRole("dialog", { name: "回填成本" });
-    fireEvent.click(within(dialog).getByRole("button", { name: "采用采购 ±7 天加权参考" }));
-    fireEvent.change(within(dialog).getByLabelText("回填原因"), {
+    fireEvent.click(screen.getByRole("button", { name: "补录 PN-MISSING" }));
+    const dialog = await screen.findByRole("dialog", { name: "补录领用单价" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "使用前后 7 天采购价" }));
+    fireEvent.change(within(dialog).getByLabelText("补录说明"), {
       target: { value: "保存前再次核对" },
     });
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认保存" }));
 
     expect(await screen.findByText("保存时发现新的系统价格，已采用系统证据并刷新清单。"))
       .toBeInTheDocument();
@@ -377,20 +376,20 @@ describe("MaintenanceCostRefillPage", () => {
     );
 
     await screen.findByText("PN-MISSING");
-    fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
-    const dialog = await screen.findByRole("dialog", { name: "回填成本" });
-    fireEvent.click(within(dialog).getByRole("button", { name: "采用采购 ±7 天加权参考" }));
-    fireEvent.change(within(dialog).getByLabelText("回填原因"), {
+    fireEvent.click(screen.getByRole("button", { name: "补录 PN-MISSING" }));
+    const dialog = await screen.findByRole("dialog", { name: "补录领用单价" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "使用前后 7 天采购价" }));
+    fireEvent.change(within(dialog).getByLabelText("补录说明"), {
       target: { value: "冲突时不能丢掉" },
     });
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认保存" }));
 
     expect(await within(dialog).findByText("已刷新到最新版本；当前草稿已保留，请核对后重新保存。"))
       .toBeInTheDocument();
     await waitFor(() => expect(listMaintenanceCostGaps).toHaveBeenCalledTimes(2));
-    expect(within(dialog).getByLabelText("回填原因")).toHaveValue("冲突时不能丢掉");
+    expect(within(dialog).getByLabelText("补录说明")).toHaveValue("冲突时不能丢掉");
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认保存" }));
     await waitFor(() => expect(updateMaintenanceCostGap).toHaveBeenLastCalledWith(
       "project-1",
       expect.objectContaining({ version: 8, reason: "冲突时不能丢掉" }),
@@ -425,13 +424,13 @@ describe("MaintenanceCostRefillPage", () => {
     );
 
     await screen.findByText("PN-MISSING");
-    fireEvent.click(screen.getByRole("button", { name: "回填 PN-MISSING" }));
-    const dialog = await screen.findByRole("dialog", { name: "回填成本" });
-    fireEvent.click(within(dialog).getByRole("button", { name: "采用采购 ±7 天加权参考" }));
-    fireEvent.change(within(dialog).getByLabelText("回填原因"), {
+    fireEvent.click(screen.getByRole("button", { name: "补录 PN-MISSING" }));
+    const dialog = await screen.findByRole("dialog", { name: "补录领用单价" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "使用前后 7 天采购价" }));
+    fireEvent.change(within(dialog).getByLabelText("补录说明"), {
       target: { value: "旧项目草稿" },
     });
-    fireEvent.click(within(dialog).getByRole("button", { name: "保存成本" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认保存" }));
     await waitFor(() => expect(listMaintenanceCostGaps).toHaveBeenCalledTimes(2));
 
     fireEvent.mouseDown(screen.getByRole("combobox"));
@@ -447,7 +446,7 @@ describe("MaintenanceCostRefillPage", () => {
       });
       await pendingConflict;
     });
-    expect(screen.queryByRole("dialog", { name: "回填成本" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "补录领用单价" })).toBeNull();
     expect(updateMaintenanceCostGap).toHaveBeenCalledTimes(1);
   });
 
@@ -463,8 +462,8 @@ describe("MaintenanceCostRefillPage", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText("无人工成本回填权限")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "保存成本" })).toBeNull();
+    expect(screen.getByText("无补录权限，请联系管理员授予维保项目管理权限")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "确认保存" })).toBeNull();
     await waitFor(() => expect(listMaintenanceCostGaps).not.toHaveBeenCalled());
   });
 
@@ -481,7 +480,7 @@ describe("MaintenanceCostRefillPage", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText("无人工成本回填权限")).toBeInTheDocument();
+    expect(screen.getByText("无补录权限，请联系管理员授予维保项目管理权限")).toBeInTheDocument();
     await waitFor(() => expect(listMaintenanceCostGaps).not.toHaveBeenCalled());
   });
 });
