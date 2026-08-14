@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Button, Card, ConfigProvider, Input, Modal, Select, Space, Steps } from "antd";
 
 import {
@@ -69,21 +69,48 @@ export default function CollectionPlanImportModal({
   const [applyResult, setApplyResult] = useState<CollectionApplyResponse | null>(null);
   const previewKeyRef = useRef<string | null>(null);
   const bindingSearchControllerRef = useRef<AbortController | null>(null);
+  const sessionGenerationRef = useRef(0);
+
+  const resetImportSession = useCallback(() => {
+    sessionGenerationRef.current += 1;
+    bindingSearchControllerRef.current?.abort();
+    bindingSearchControllerRef.current = null;
+    previewKeyRef.current = null;
+    setFile(null);
+    setPreview(null);
+    setPreviewing(false);
+    setPreviewError(null);
+    setCurrentStep(0);
+    setBindings({});
+    setBindingOptions({});
+    setReassignmentReason("");
+    setApplying(false);
+    setApplyError(null);
+    setApplyResult(null);
+  }, []);
+
+  useEffect(() => {
+    if (!open) resetImportSession();
+  }, [open, resetImportSession]);
 
   const pendingRows = preview?.rows.filter((row) => row.binding.status === "pending_review") ?? [];
   const hasReassignment = pendingRows.some((row) => row.binding.existing_binding_version != null);
 
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setFile(event.target.files?.[0] ?? null);
+    const nextFile = event.target.files?.[0] ?? null;
+    resetImportSession();
+    setFile(nextFile);
   };
 
   const runPreview = async () => {
     if (!file || previewing) return;
+    const sessionGeneration = sessionGenerationRef.current;
     if (!previewKeyRef.current) previewKeyRef.current = newPreviewKey();
     setPreviewing(true);
     setPreviewError(null);
     try {
       const { data } = await previewCollectionPlan(file, previewKeyRef.current);
+      if (sessionGeneration !== sessionGenerationRef.current) return;
       setPreview(data);
       setBindings({});
       setBindingOptions({});
@@ -92,6 +119,7 @@ export default function CollectionPlanImportModal({
       setApplyResult(null);
       setCurrentStep(1);
     } catch (reason_) {
+      if (sessionGeneration !== sessionGenerationRef.current) return;
       const status = errorStatus(reason_);
       setPreviewError(
         status === 409
@@ -101,7 +129,7 @@ export default function CollectionPlanImportModal({
             : errorDetailMessage(reason_) || COLLECTION_IMPORT.previewFailed,
       );
     } finally {
-      setPreviewing(false);
+      if (sessionGeneration === sessionGenerationRef.current) setPreviewing(false);
     }
   };
 
@@ -155,6 +183,7 @@ export default function CollectionPlanImportModal({
 
   const handleApply = async () => {
     if (!preview || !canGoToApply || applying) return;
+    const sessionGeneration = sessionGenerationRef.current;
     const body: CollectionApplyRequest = {
       expected_batch_version: preview.batch_version,
       expected_data_version: preview.data_version,
@@ -181,8 +210,10 @@ export default function CollectionPlanImportModal({
     setApplyError(null);
     try {
       const { data } = await applyCollectionPlan(preview.batch_id, body);
+      if (sessionGeneration !== sessionGenerationRef.current) return;
       setApplyResult(data);
     } catch (reason_) {
+      if (sessionGeneration !== sessionGenerationRef.current) return;
       const status = errorStatus(reason_);
       setApplyError(
         status === 409
@@ -192,7 +223,7 @@ export default function CollectionPlanImportModal({
             : errorDetailMessage(reason_) || COLLECTION_IMPORT.applyFailed,
       );
     } finally {
-      setApplying(false);
+      if (sessionGeneration === sessionGenerationRef.current) setApplying(false);
     }
   };
 

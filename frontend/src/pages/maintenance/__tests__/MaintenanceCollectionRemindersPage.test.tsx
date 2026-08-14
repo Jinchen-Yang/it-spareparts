@@ -348,6 +348,38 @@ describe("MaintenanceCollectionRemindersPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("详情响应的 project_id 与请求不一致时不进入当前详情", async () => {
+    getCollectionMilestones
+      .mockResolvedValueOnce({
+        data: makeDetail([], {
+          project: makeProject("project-a", "XM-001", "一号项目"),
+        }),
+      })
+      .mockResolvedValueOnce({
+        data: makeDetail([], {
+          project: makeProject("project-c", "XM-003", "三号项目"),
+        }),
+      });
+    renderPage();
+    expect(await screen.findByText("一号项目")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("mcr-row-project-b"));
+    await waitFor(() => expect(getCollectionMilestones).toHaveBeenLastCalledWith(
+      "project-b",
+      { signal: expect.any(AbortSignal) },
+    ));
+    await waitFor(() => expect(
+      within(screen.getByTestId("mcr-detail-pane")).getByText(COLLECTION_PAGE.detailLoadFailed),
+    ).toBeInTheDocument());
+    expect(within(screen.getByTestId("mcr-detail-pane")).queryByText("一号项目")).toBeNull();
+    expect(within(screen.getByTestId("mcr-detail-pane")).queryByText("三号项目")).toBeNull();
+    expect(getCollectionMilestones).toHaveBeenNthCalledWith(
+      1,
+      "project-a",
+      { signal: expect.any(AbortSignal) },
+    );
+  });
+
   it("全部项目控件由 allowed_owner_scopes 决定，不按角色推断", async () => {
     localStorage.setItem("role", "admin");
     searchCollectionReminders.mockResolvedValue({

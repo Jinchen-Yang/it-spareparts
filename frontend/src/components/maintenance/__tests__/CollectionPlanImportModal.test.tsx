@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -406,5 +406,96 @@ describe("CollectionPlanImportModal", () => {
     fireEvent.click(screen.getByRole("button", { name: COLLECTION_IMPORT.complete }));
     expect(onApplied).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("关闭后重新打开从新会话开始，不沿用旧批次与幂等键", async () => {
+    const onClose = vi.fn();
+    const onApplied = vi.fn();
+    const { rerender } = render(
+      <CollectionPlanImportModal open onClose={onClose} onApplied={onApplied} />,
+    );
+    fireEvent.change(screen.getByLabelText(COLLECTION_IMPORT.filePickLabel), {
+      target: { files: [pickXls()] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: COLLECTION_IMPORT.previewAction }));
+    await screen.findByText(COLLECTION_IMPORT.previewZeroWriteHint);
+    const firstKey = previewCollectionPlan.mock.calls[0][1];
+
+    rerender(<CollectionPlanImportModal open={false} onClose={onClose} onApplied={onApplied} />);
+    rerender(<CollectionPlanImportModal open onClose={onClose} onApplied={onApplied} />);
+
+    expect(screen.getByLabelText(COLLECTION_IMPORT.filePickLabel)).toBeInTheDocument();
+    expect(screen.queryByText("ORDER-001")).toBeNull();
+    expect(screen.getByRole("button", { name: COLLECTION_IMPORT.previewAction })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(COLLECTION_IMPORT.filePickLabel), {
+      target: { files: [new File(["new-xls"], "新回款计划.xls", { type: "application/vnd.ms-excel" })] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: COLLECTION_IMPORT.previewAction }));
+    await waitFor(() => expect(previewCollectionPlan).toHaveBeenCalledTimes(2));
+    expect(previewCollectionPlan.mock.calls[1][1]).not.toBe(firstKey);
+  });
+
+  it("关闭后丢弃旧会话晚到的预览结果", async () => {
+    let resolvePreview!: (value: { data: CollectionPreviewResponse }) => void;
+    previewCollectionPlan.mockImplementationOnce(() => new Promise((resolve) => {
+      resolvePreview = resolve;
+    }));
+    const onClose = vi.fn();
+    const onApplied = vi.fn();
+    const { rerender } = render(
+      <CollectionPlanImportModal open onClose={onClose} onApplied={onApplied} />,
+    );
+    fireEvent.change(screen.getByLabelText(COLLECTION_IMPORT.filePickLabel), {
+      target: { files: [pickXls()] },
+    });
+    fireEvent.click(screen.getByRole("button", { name: COLLECTION_IMPORT.previewAction }));
+    await waitFor(() => expect(previewCollectionPlan).toHaveBeenCalledTimes(1));
+
+    rerender(<CollectionPlanImportModal open={false} onClose={onClose} onApplied={onApplied} />);
+    rerender(<CollectionPlanImportModal open onClose={onClose} onApplied={onApplied} />);
+    await act(async () => resolvePreview({ data: previewResponse() }));
+
+    expect(screen.getByLabelText(COLLECTION_IMPORT.filePickLabel)).toBeInTheDocument();
+    expect(screen.queryByText("ORDER-001")).toBeNull();
+    expect(screen.getByRole("button", { name: COLLECTION_IMPORT.previewAction })).toBeDisabled();
+  });
+
+  it("关闭后丢弃旧会话晚到的应用结果", async () => {
+    const { rerender, onClose, onApplied } = await renderAndReachStep(3);
+    let resolveApply!: (value: {
+      data: {
+        batch_id: string;
+        batch_version: number;
+        data_version: string;
+        status: "applied";
+        counts: { created: number; updated: number; unchanged: number; source_missing: number; needs_review: number };
+        idempotent_replay: boolean;
+        applied_at: string;
+      };
+    }) => void;
+    applyCollectionPlan.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveApply = resolve;
+    }));
+    fireEvent.click(screen.getByRole("button", { name: COLLECTION_IMPORT.apply }));
+    await waitFor(() => expect(applyCollectionPlan).toHaveBeenCalledTimes(1));
+
+    rerender(<CollectionPlanImportModal open={false} onClose={onClose} onApplied={onApplied} />);
+    rerender(<CollectionPlanImportModal open onClose={onClose} onApplied={onApplied} />);
+    await act(async () => resolveApply({
+      data: {
+        batch_id: "batch-1",
+        batch_version: 2,
+        data_version: "dv-late",
+        status: "applied",
+        counts: { created: 99, updated: 0, unchanged: 0, source_missing: 0, needs_review: 0 },
+        idempotent_replay: false,
+        applied_at: "2026-08-14T10:00:00Z",
+      },
+    }));
+
+    expect(screen.getByLabelText(COLLECTION_IMPORT.filePickLabel)).toBeInTheDocument();
+    expect(screen.queryByText(COLLECTION_IMPORT.applyResultTitle)).toBeNull();
+    expect(screen.queryByText(`${COLLECTION_IMPORT.countCreated} 99`)).toBeNull();
   });
 });

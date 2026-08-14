@@ -129,9 +129,15 @@ export default function MaintenanceCollectionRemindersPage() {
     const controller = new AbortController();
     detailControllerRef.current = controller;
     setLoadingDetail(true);
+    setDetail(null);
     setDetailError(false);
     void getCollectionMilestones(projectId, { signal: controller.signal }).then(({ data }) => {
-      if (request === detailGeneration.current) setDetail(data);
+      if (request !== detailGeneration.current) return;
+      if (data.project.project_id !== projectId) {
+        setDetailError(true);
+        return;
+      }
+      setDetail(data);
     }).catch(() => {
       if (controller.signal.aborted || request !== detailGeneration.current) return;
       setDetail(null);
