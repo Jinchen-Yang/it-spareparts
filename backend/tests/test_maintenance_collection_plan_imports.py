@@ -761,6 +761,79 @@ def test_apply_milestone_version_drift_409_zero_writes(db, monkeypatch):
     assert _count(db, MaintenanceCollectionMilestone) == 1
 
 
+def test_apply_create_drift_409_zero_writes_when_node_appears_after_preview(db, monkeypatch):
+    """预览期缺失的 (合同, 序号) 在 apply 期被他人创建 → 整批 409，零领域写入。
+
+    覆盖 P1-apply-create-drift：expected_milestone_version=None 的 create 前提
+    在 apply 期已不成立（同合同同序号已存在），必须失败关闭，绝不无版本前提
+    覆盖并发写入的节点。
+    """
+    _settings(monkeypatch)
+    user = _plan_admin(db)
+    project_id, pc_id = _project(db, suffix="createdrift")
+    _binding(db, order_no="ORD-CD-1", project_id=project_id, pc_id=pc_id, user=user, binding_id="bind-cd-1")
+    content = _workbook(_row("ORD-CD-1", "项目 C", months=["2026年9月"], amounts=[100.0]))
+    preview = _preview_service(db, user, content)
+    db.commit()
+    assert preview["rows"][0]["milestone_diffs"][0]["expected_milestone_version"] is None
+    assert preview["rows"][0]["milestone_diffs"][0]["change"] == "create"
+    # 预览后他人创建了同一合同的同序号节点 → create 前提漂移，必须整批 409。
+    db.expire_all()
+    _milestone(
+        db, project_id=project_id, pc_id=pc_id, sequence=1, milestone_id="m-cd-concurrent",
+        planned_date=date(2026, 9, 1), planned_amount=Decimal("100.00"),
+    )
+    bindings = _bindings_payload(preview, {row["row_key"]: (project_id, pc_id) for row in preview["rows"]})
+    with pytest.raises(imports.CollectionPlanImportConflict):
+        _apply_service(db, user, batch_id=preview["batch_id"], preview=preview, bindings=bindings)
+    db.rollback()
+    db.expire_all()
+    batch = db.get(MaintenanceCollectionPlanImportBatch, preview["batch_id"])
+    assert batch.status == "valid"
+    assert _count(db, MaintenanceCollectionPlanSourceBinding) == 1  # 预览前既有绑定，无新增
+    assert _count(db, MaintenanceCollectionMilestone) == 1
+    concurrent = db.get(MaintenanceCollectionMilestone, "m-cd-concurrent")
+    assert concurrent.planned_date == date(2026, 9, 1)
+    assert concurrent.planned_amount == Decimal("100.00")
+    assert concurrent.version == 1
+
+
+def test_apply_duplicate_target_in_same_batch_409_zero_writes(db, monkeypatch):
+    """同批两个订单不得无版本前提地覆盖同一合同、同一序号节点。"""
+    _settings(monkeypatch)
+    user = _plan_admin(db)
+    project_id, pc_id = _project(db, suffix="duplicate-target")
+    content = _workbook(
+        _row("ORD-DT-1", "项目 D1", months=["2026年9月"], amounts=[100.0]),
+        _row("ORD-DT-2", "项目 D2", months=["2026年10月"], amounts=[200.0]),
+    )
+    preview = _preview_service(db, user, content)
+    db.commit()
+    bindings = _bindings_payload(
+        preview,
+        {
+            row["row_key"]: (project_id, pc_id)
+            for row in preview["rows"]
+        },
+    )
+
+    with pytest.raises(imports.CollectionPlanImportConflict):
+        _apply_service(
+            db,
+            user,
+            batch_id=preview["batch_id"],
+            preview=preview,
+            bindings=bindings,
+        )
+
+    db.rollback()
+    db.expire_all()
+    batch = db.get(MaintenanceCollectionPlanImportBatch, preview["batch_id"])
+    assert batch.status == "valid"
+    assert _count(db, MaintenanceCollectionPlanSourceBinding) == 0
+    assert _count(db, MaintenanceCollectionMilestone) == 0
+
+
 def test_apply_fails_closed_when_apply_flag_disabled(db, monkeypatch):
     _settings(monkeypatch, maintenance_collection_plan_apply_enabled=False)
     user = _plan_admin(db)

@@ -921,6 +921,21 @@ def apply_collection_plan_import(
             current_data_version=batch.data_version,
         )
 
+    # 在任何领域写入前冻结目标集合。同批两个订单若指向同一合同、同一序号，
+    # 第二行没有独立的 expected_milestone_version 前提，必须整批失败关闭。
+    milestone_targets: set[tuple[str, int]] = set()
+    for binding in effective_bindings:
+        order = plan_orders[binding.row_key]
+        for node in order["nodes"]:
+            target = (binding.project_contract_id, node["sequence"])
+            if target in milestone_targets:
+                raise CollectionPlanImportConflict(
+                    "多个订单指向同一计划节点，请重新审核绑定",
+                    current_version=batch.version,
+                    current_data_version=batch.data_version,
+                )
+            milestone_targets.add(target)
+
     if settings.maintenance_collection_canary_project_id:
         for binding in effective_bindings:
             if binding.project_id != settings.maintenance_collection_canary_project_id:
@@ -1080,6 +1095,14 @@ def apply_collection_plan_import(
             if reassigning and current is not None:
                 raise CollectionPlanImportConflict(
                     "目标合同已有同序号计划节点，请重新预览后处理",
+                    current_version=batch.version,
+                    current_data_version=batch.data_version,
+                )
+            # 预览期该 (合同, 序号) 缺失（expected=None，change=create）而 apply
+            # 期已存在 → create 前提漂移：整批 409，绝不无版本前提覆盖并发写入。
+            if expected is None and not reassigning and current is not None:
+                raise CollectionPlanImportConflict(
+                    "计划节点已存在，请重新预览",
                     current_version=batch.version,
                     current_data_version=batch.data_version,
                 )
