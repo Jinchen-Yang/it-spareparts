@@ -309,6 +309,7 @@ expected_codes = {
     "cross_project_negative": "canary_scope_denied",
     "permission_negative": "permission_denied",
 }
+
 expected = expected_codes.get(case_name)
 if expected is None:
     raise SystemExit(0)
@@ -334,6 +335,179 @@ payload = {
     "response_sha256": hashlib.sha256(response.read_bytes()).hexdigest(),
 }
 pathlib.Path(sys.argv[1]).write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+
+run_canary_import_preview() {
+  local spec=$1
+  local workspace=$2
+  local metadata status expected
+  metadata=$(python3 - "$spec" "$workspace" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import sys
+
+spec = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+work = pathlib.Path(sys.argv[2])
+case = spec["import_preview_positive"]
+account = case["account"]
+token_path = work / "tokens" / f"{account}.token"
+token = token_path.read_text(encoding="utf-8").strip()
+workbook = pathlib.Path(case["workbook_path"])
+header = work / "import_preview_positive.header"
+meta = work / "import_preview_positive.meta.json"
+header.write_text(f"Authorization: Bearer {token}\n", encoding="utf-8")
+os.chmod(header, 0o600)
+payload = {
+    "url": spec["base_url"].rstrip("/") + case["path"],
+    "header": str(header),
+    "workbook": str(workbook),
+    "idempotency_key": case["idempotency_key"],
+    "expected_status": case["expected_status"],
+}
+meta.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+os.chmod(meta, 0o600)
+print(meta)
+PY
+)
+  expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["expected_status"])' "$metadata")
+  status=$(curl --silent --show-error \
+    --output "$workspace/import_preview_positive.response" \
+    --write-out '%{http_code}' --request POST \
+    --header "@$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["header"])' "$metadata")" \
+    --header "Idempotency-Key: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["idempotency_key"])' "$metadata")" \
+    --form "file=@$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workbook"])' "$metadata");type=application/vnd.ms-excel" \
+    "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$metadata")") \
+    || fatal "canary HTTP transport failed for import_preview_positive"
+  [ "$status" = "$expected" ] \
+    || fatal "canary HTTP status mismatch for import_preview_positive"
+  python3 - "$spec" "$workspace/import_preview_positive.response" \
+    "$workspace/apply-state.json" "$CANARY_PROJECT_ID" <<'PY'
+import json
+import os
+import pathlib
+import re
+import sys
+
+spec = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+preview = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+output = pathlib.Path(sys.argv[3])
+canary_project_id = sys.argv[4]
+if preview.get("status") != "valid":
+    raise SystemExit("canary import preview is not valid")
+batch_id = preview.get("batch_id")
+if not isinstance(batch_id, str) or re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", batch_id) is None:
+    raise SystemExit("canary import preview returned an invalid batch id")
+batch_version = preview.get("batch_version")
+data_version = preview.get("data_version")
+rows = preview.get("rows")
+if not isinstance(batch_version, int) or batch_version < 1 or not isinstance(data_version, str) or not data_version:
+    raise SystemExit("canary import preview lacks versions")
+if not isinstance(rows, list) or not rows:
+    raise SystemExit("canary import preview has no rows")
+row_keys = {}
+for row in rows:
+    if not isinstance(row, dict):
+        raise SystemExit("canary import preview row is invalid")
+    external = row.get("external_order_no")
+    row_key = row.get("row_key")
+    if not isinstance(external, str) or not external or not isinstance(row_key, str) or not row_key:
+        raise SystemExit("canary import preview row lacks stable keys")
+    if external in row_keys:
+        raise SystemExit("canary import preview has duplicate external order")
+    row_keys[external] = row_key
+bindings = spec["import_preview_positive"]["bindings"]
+provided = {binding["external_order_no"] for binding in bindings}
+if provided != set(row_keys):
+    raise SystemExit("canary bindings do not exactly cover preview rows")
+resolved = []
+for binding in bindings:
+    if binding["project_id"] != canary_project_id:
+        raise SystemExit("canary binding targets a non-canary project")
+    resolved.append({**binding, "row_key": row_keys[binding["external_order_no"]]})
+payload = {
+    "batch_id": batch_id,
+    "body": {
+        "expected_batch_version": batch_version,
+        "expected_data_version": data_version,
+        "bindings": resolved,
+    },
+}
+output.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+os.chmod(output, 0o600)
+PY
+  python3 - "$workspace/import_preview_positive.outcome.json" "$status" \
+    "$workspace/import_preview_positive.response" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+response = pathlib.Path(sys.argv[3])
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "case": "import_preview_positive",
+    "http_status": int(sys.argv[2]),
+    "response_sha256": hashlib.sha256(response.read_bytes()).hexdigest(),
+}, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+
+run_canary_apply_last() {
+  local spec=$1
+  local workspace=$2
+  local metadata status expected
+  metadata=$(python3 - "$spec" "$workspace" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+spec = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+work = pathlib.Path(sys.argv[2])
+case = spec["apply_last"]
+state = json.loads((work / "apply-state.json").read_text(encoding="utf-8"))
+token = (work / "tokens" / f"{case['account']}.token").read_text(encoding="utf-8").strip()
+header = work / "apply_last.header"
+payload = work / "apply_last.json"
+meta = work / "apply_last.meta.json"
+header.write_text(f"Authorization: Bearer {token}\n", encoding="utf-8")
+payload.write_text(json.dumps(state["body"], separators=(",", ":")), encoding="utf-8")
+for path in (header, payload):
+    os.chmod(path, 0o600)
+url_path = case["path"].replace("{batch_id}", state["batch_id"])
+value = {
+    "url": spec["base_url"].rstrip("/") + url_path,
+    "header": str(header),
+    "payload": str(payload),
+    "expected_status": case["expected_status"],
+}
+meta.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
+os.chmod(meta, 0o600)
+print(meta)
+PY
+)
+  expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["expected_status"])' "$metadata")
+  status=$(curl --silent --show-error --output "$workspace/apply_last.response" \
+    --write-out '%{http_code}' --request POST \
+    --header "@$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["header"])' "$metadata")" \
+    --header 'Content-Type: application/json' \
+    --data-binary "@$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["payload"])' "$metadata")" \
+    "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$metadata")") \
+    || fatal "canary HTTP transport failed for apply_last"
+  [ "$status" = "$expected" ] || fatal "canary HTTP status mismatch for apply_last"
+  python3 - "$workspace/apply_last.outcome.json" "$status" \
+    "$workspace/apply_last.response" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+response = pathlib.Path(sys.argv[3])
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "case": "apply_last",
+    "http_status": int(sys.argv[2]),
+    "response_sha256": hashlib.sha256(response.read_bytes()).hexdigest(),
+}, sort_keys=True, separators=(",", ":")) + "\n")
 PY
 }
 
@@ -396,13 +570,47 @@ if denied_account.get("expected_role") != "admin":
     raise SystemExit("permission-negative account must be admin to prove no admin bypass")
 if "action_maintenance_collection_plan_import" not in (denied_account.get("forbidden_permissions") or []):
     raise SystemExit("permission-negative admin must explicitly lack import action")
+preview = value["import_preview_positive"]
+if preview.get("method") != "POST" or preview.get("path") != "/api/maintenance/collection-plan-imports/preview" or preview.get("expected_status") != 200:
+    raise SystemExit("import preview canary must call the real multipart endpoint")
+workbook = pathlib.Path(preview.get("workbook_path", ""))
+if not workbook.is_absolute() or not workbook.is_file() or workbook.is_symlink() or (workbook.stat().st_mode & 0o777) != 0o600:
+    raise SystemExit("canary workbook must be an absolute mode-600 regular file")
+import hashlib
+digest = hashlib.sha256(workbook.read_bytes()).hexdigest()
+if preview.get("workbook_sha256") != digest:
+    raise SystemExit("canary workbook SHA mismatch")
+idempotency_key = preview.get("idempotency_key")
+if not isinstance(idempotency_key, str) or not 8 <= len(idempotency_key) <= 128 or "\n" in idempotency_key:
+    raise SystemExit("canary preview idempotency key is invalid")
+bindings = preview.get("bindings")
+required_binding_keys = {"external_order_no","project_id","project_version","project_contract_id","project_contract_version","existing_binding_version","reason"}
+if not isinstance(bindings, list) or not bindings:
+    raise SystemExit("canary preview needs explicit bindings")
+seen_orders = set()
+for binding in bindings:
+    if not isinstance(binding, dict) or set(binding) != required_binding_keys:
+        raise SystemExit("canary binding keys mismatch")
+    external = binding.get("external_order_no")
+    if not isinstance(external, str) or not external or external in seen_orders:
+        raise SystemExit("canary binding external order is invalid or duplicate")
+    seen_orders.add(external)
+    if binding.get("project_id") != sys.argv[2]:
+        raise SystemExit("canary binding must target the manifest canary project")
+    if not isinstance(binding.get("project_version"), int) or binding["project_version"] < 1:
+        raise SystemExit("canary binding project version is invalid")
+    if not isinstance(binding.get("project_contract_id"), str) or not binding["project_contract_id"]:
+        raise SystemExit("canary binding contract is invalid")
+    if not isinstance(binding.get("project_contract_version"), int) or binding["project_contract_version"] < 1:
+        raise SystemExit("canary binding contract version is invalid")
+apply_case = value["apply_last"]
+if apply_case.get("method") != "POST" or apply_case.get("path") != "/api/maintenance/collection-plan-imports/{batch_id}/apply" or apply_case.get("expected_status", 0) // 100 != 2:
+    raise SystemExit("apply_last must use the dynamic collection-plan apply endpoint")
 for name in ("action_grant","action_verify_granted","action_restore","action_verify_restored"):
     if not isinstance(value[name].get("token"),str) or not value[name]["token"]:
         raise SystemExit("action control cases require sealed control token")
 if value["cross_project_negative"]["expected_status"] != 403 or value["permission_negative"]["expected_status"] != 403:
     raise SystemExit("negative canary cases must expect 403")
-if not value["apply_last"]["path"].endswith("/apply") or value["apply_last"]["expected_status"] // 100 != 2:
-    raise SystemExit("apply_last contract mismatch")
 PY
 }
 
@@ -929,13 +1137,13 @@ $CANARY_PROJECT_ID" ] || fatal "running canary configuration readback mismatch"
     run_sealed_canary_case "$CANARY_SPEC" permission_negative "$CANARY_WORK"
     [ "$(collection_domain_fingerprint)" = "$DOMAIN_BEFORE" ] \
       || fatal "permission-negative canary changed collection domain state"
-    run_sealed_canary_case "$CANARY_SPEC" import_preview_positive "$CANARY_WORK"
+    run_canary_import_preview "$CANARY_SPEC" "$CANARY_WORK"
     update_env_key MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED true
     compose up --no-deps --no-build --force-recreate -d app
     RUNNING_FLAGS=$(compose exec -T app sh -ceu 'printf "%s\n%s\n" "$MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED" "$MAINTENANCE_COLLECTION_CANARY_PROJECT_ID"')
     [ "$RUNNING_FLAGS" = "true
 $CANARY_PROJECT_ID" ] || fatal "running apply canary configuration readback mismatch"
-    if ! (run_sealed_canary_case "$CANARY_SPEC" apply_last "$CANARY_WORK"); then
+    if ! (run_canary_apply_last "$CANARY_SPEC" "$CANARY_WORK"); then
       fatal "apply canary failed; collection apply flag was closed"
     fi
     python3 - "$CANARY_WORK" "$EVIDENCE_DIR/canary-evidence.json" <<'PY'

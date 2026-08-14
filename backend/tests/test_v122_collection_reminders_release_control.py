@@ -1034,6 +1034,7 @@ def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_e
     """
     env, evidence, calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
     curl_calls = tmp_path / "curl-calls"
+    workbook = _write(tmp_path / "canary.xls", b"one-row-canary-workbook")
     curl_stub = Path(env["PATH"].split(":", 1)[0]) / "curl"
     _write(
         curl_stub,
@@ -1056,6 +1057,8 @@ def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_e
             printf '%s' '{{"token":"denied-token","role":"admin","permissions":{{"action_maintenance_collection_plan_import":false}}}}' >"$out"; status=200 ;;
           *cross_project_negative.response) printf '%s' '{{"detail":{{"code":"canary_scope_denied"}}}}' >"$out"; status=403 ;;
           *permission_negative.response) printf '%s' '{{"detail":{{"code":"permission_denied"}}}}' >"$out"; status=403 ;;
+          *import_preview_positive.response)
+            printf '%s' '{{"batch_id":"batch-canary","batch_version":7,"data_version":"data-v7","status":"valid","rows":[{{"external_order_no":"ORDER-1","row_key":"row-live"}}]}}' >"$out"; status=200 ;;
           *apply_last.response) printf '{{}}' >"$out"; status=500 ;;
           *) printf '{{}}' >"$out"; status=200 ;;
         esac
@@ -1078,8 +1081,30 @@ def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_e
         "follow_up_positive": {"method": "POST", "account": "follower", "path": "/api/follow-up", "expected_status": 200, "body": {}},
         "cross_project_negative": {"method": "POST", "account": "follower", "path": "/api/cross-project", "expected_status": 403, "body": {}},
         "permission_negative": {"method": "POST", "account": "denied", "path": "/api/permission", "expected_status": 403, "body": {}},
-        "import_preview_positive": {"method": "POST", "account": "importer", "path": "/api/preview", "expected_status": 200, "body": {}},
-        "apply_last": {"method": "POST", "account": "importer", "path": "/api/import/apply", "expected_status": 200, "body": {}},
+        "import_preview_positive": {
+            "method": "POST",
+            "account": "importer",
+            "path": "/api/maintenance/collection-plan-imports/preview",
+            "expected_status": 200,
+            "workbook_path": str(workbook),
+            "workbook_sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
+            "idempotency_key": "canary-preview-0001",
+            "bindings": [{
+                "external_order_no": "ORDER-1",
+                "project_id": CANARY_PROJECT_ID,
+                "project_version": 4,
+                "project_contract_id": "contract-live",
+                "project_contract_version": 3,
+                "existing_binding_version": None,
+                "reason": None,
+            }],
+        },
+        "apply_last": {
+            "method": "POST",
+            "account": "importer",
+            "path": "/api/maintenance/collection-plan-imports/{batch_id}/apply",
+            "expected_status": 200,
+        },
     }
     spec_file = _json_artifact(tmp_path / "canary.json", spec)
     _write_release_state(evidence, package, phase="deployed")
@@ -1111,6 +1136,7 @@ def test_canary_rejects_scope_code_mismatch_and_admin_positive_account(tmp_path:
     exit 97
     """
     env, evidence, _calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
+    workbook = _write(tmp_path / "canary.xls", b"one-row-canary-workbook")
     curl_stub = Path(env["PATH"].split(":", 1)[0]) / "curl"
     _write(
         curl_stub,
@@ -1168,8 +1194,30 @@ def test_canary_rejects_scope_code_mismatch_and_admin_positive_account(tmp_path:
         "follow_up_positive": {"method": "POST", "account": "importer", "path": "/api/follow-up", "expected_status": 200, "body": {}},
         "cross_project_negative": {"method": "POST", "account": "importer", "path": "/api/cross-project", "expected_status": 403, "body": {}},
         "permission_negative": {"method": "POST", "account": "denied", "path": "/api/permission", "expected_status": 403, "body": {}},
-        "import_preview_positive": {"method": "POST", "account": "importer", "path": "/api/preview", "expected_status": 200, "body": {}},
-        "apply_last": {"method": "POST", "account": "importer", "path": "/api/import/apply", "expected_status": 200, "body": {}},
+        "import_preview_positive": {
+            "method": "POST",
+            "account": "importer",
+            "path": "/api/maintenance/collection-plan-imports/preview",
+            "expected_status": 200,
+            "workbook_path": str(workbook),
+            "workbook_sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
+            "idempotency_key": "canary-preview-0001",
+            "bindings": [{
+                "external_order_no": "ORDER-1",
+                "project_id": CANARY_PROJECT_ID,
+                "project_version": 4,
+                "project_contract_id": "contract-live",
+                "project_contract_version": 3,
+                "existing_binding_version": None,
+                "reason": None,
+            }],
+        },
+        "apply_last": {
+            "method": "POST",
+            "account": "importer",
+            "path": "/api/maintenance/collection-plan-imports/{batch_id}/apply",
+            "expected_status": 200,
+        },
     }
     spec_file = _json_artifact(tmp_path / "canary.json", spec)
     _write_release_state(evidence, package, phase="deployed")
@@ -1201,6 +1249,8 @@ def test_canary_state_write_failure_closes_apply_and_restores_actions(tmp_path: 
     """
     env, evidence, _calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
     curl_calls = tmp_path / "curl-calls"
+    applied_payload = tmp_path / "applied-payload.json"
+    workbook = _write(tmp_path / "canary.xls", b"one-row-canary-workbook")
     state_path = evidence / "release-state.json"
     curl_stub = Path(env["PATH"].split(":", 1)[0]) / "curl"
     _write(
@@ -1209,11 +1259,14 @@ def test_canary_state_write_failure_closes_apply_and_restores_actions(tmp_path: 
         #!/usr/bin/env bash
         printf '%s\n' "$*" >> {curl_calls}
         out=''
+        data=''
         previous=''
         for arg in "$@"; do
           if [ "$previous" = output ]; then out=$arg; fi
+          if [ "$previous" = data ]; then data="${{arg#@}}"; fi
           previous=''
           [ "$arg" = --output ] && previous=output
+          [ "$arg" = --data-binary ] && previous=data
         done
         case "$out" in
           *login-follower.response.json)
@@ -1226,7 +1279,10 @@ def test_canary_state_write_failure_closes_apply_and_restores_actions(tmp_path: 
             printf '%s' '{{"detail":{{"code":"canary_scope_denied"}}}}' >"$out"; status=403 ;;
           *permission_negative.response)
             printf '%s' '{{"detail":{{"code":"permission_denied"}}}}' >"$out"; status=403 ;;
+          *import_preview_positive.response)
+            printf '%s' '{{"batch_id":"batch-canary","batch_version":7,"data_version":"data-v7","status":"valid","rows":[{{"external_order_no":"ORDER-1","row_key":"row-live"}}]}}' >"$out"; status=200 ;;
           *apply_last.response)
+            cp -- "$data" {applied_payload}
             rm -f {state_path}
             mkdir {state_path}
             printf '{{}}' >"$out"; status=200 ;;
@@ -1251,8 +1307,30 @@ def test_canary_state_write_failure_closes_apply_and_restores_actions(tmp_path: 
         "follow_up_positive": {"method": "POST", "account": "follower", "path": "/api/follow-up", "expected_status": 200, "body": {}},
         "cross_project_negative": {"method": "POST", "account": "follower", "path": "/api/cross-project", "expected_status": 403, "body": {}},
         "permission_negative": {"method": "POST", "account": "denied", "path": "/api/permission", "expected_status": 403, "body": {}},
-        "import_preview_positive": {"method": "POST", "account": "importer", "path": "/api/preview", "expected_status": 200, "body": {}},
-        "apply_last": {"method": "POST", "account": "importer", "path": "/api/import/apply", "expected_status": 200, "body": {}},
+        "import_preview_positive": {
+            "method": "POST",
+            "account": "importer",
+            "path": "/api/maintenance/collection-plan-imports/preview",
+            "expected_status": 200,
+            "workbook_path": str(workbook),
+            "workbook_sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
+            "idempotency_key": "canary-preview-0001",
+            "bindings": [{
+                "external_order_no": "ORDER-1",
+                "project_id": CANARY_PROJECT_ID,
+                "project_version": 4,
+                "project_contract_id": "contract-live",
+                "project_contract_version": 3,
+                "existing_binding_version": None,
+                "reason": None,
+            }],
+        },
+        "apply_last": {
+            "method": "POST",
+            "account": "importer",
+            "path": "/api/maintenance/collection-plan-imports/{batch_id}/apply",
+            "expected_status": 200,
+        },
     }
     spec_file = _json_artifact(tmp_path / "canary.json", spec)
     _write_release_state(evidence, package, phase="deployed")
@@ -1268,6 +1346,94 @@ def test_canary_state_write_failure_closes_apply_and_restores_actions(tmp_path: 
     assert "MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=false" in (Path(env["V122_APP_DIR"]) / ".env").read_text()
     curl_text = curl_calls.read_text()
     assert "action_restore" in curl_text and "action_verify_restored" in curl_text
+    assert "--form" in curl_text and "canary.xls" in curl_text
+    assert "/api/maintenance/collection-plan-imports/batch-canary/apply" in curl_text
+    assert json.loads(applied_payload.read_text()) == {
+        "expected_batch_version": 7,
+        "expected_data_version": "data-v7",
+        "bindings": [{
+            "row_key": "row-live",
+            "external_order_no": "ORDER-1",
+            "project_id": CANARY_PROJECT_ID,
+            "project_version": 4,
+            "project_contract_id": "contract-live",
+            "project_contract_version": 3,
+            "existing_binding_version": None,
+            "reason": None,
+        }],
+    }
+
+
+@pytest.mark.parametrize("invalid_input", ["workbook_sha", "binding_project"])
+def test_canary_rejects_invalid_workbook_or_binding_before_runtime_changes(
+    tmp_path: Path, invalid_input: str,
+):
+    package = _production_package(tmp_path / "pkg")
+    env, evidence, calls, _backup_root = _release_test_env(
+        tmp_path / "runtime", package, docker_body="exit 97",
+    )
+    workbook = _write(tmp_path / "canary.xls", b"one-row-canary-workbook")
+    base_case = {
+        "method": "POST",
+        "token": "control-token",
+        "expected_status": 200,
+        "body": {},
+    }
+    binding = {
+        "external_order_no": "ORDER-1",
+        "project_id": CANARY_PROJECT_ID,
+        "project_version": 4,
+        "project_contract_id": "contract-live",
+        "project_contract_version": 3,
+        "existing_binding_version": None,
+        "reason": None,
+    }
+    preview = {
+        "method": "POST",
+        "account": "importer",
+        "path": "/api/maintenance/collection-plan-imports/preview",
+        "expected_status": 200,
+        "workbook_path": str(workbook),
+        "workbook_sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
+        "idempotency_key": "canary-preview-0001",
+        "bindings": [binding],
+    }
+    if invalid_input == "workbook_sha":
+        preview["workbook_sha256"] = "0" * 64
+    else:
+        binding["project_id"] = "123e4567-e89b-12d3-a456-426614174099"
+    spec = {
+        "base_url": "https://canary.invalid",
+        "named_accounts": {
+            "follower": {"username": "follower", "password": "one", "expected_role": "user", "required_permissions": ["action_maintenance_collection_follow_up"]},
+            "importer": {"username": "importer", "password": "two", "expected_role": "admin", "required_permissions": ["action_maintenance_collection_plan_import"]},
+            "denied": {"username": "denied", "password": "three", "expected_role": "admin", "forbidden_permissions": ["action_maintenance_collection_plan_import"]},
+        },
+        "action_grant": {**base_case, "path": "/api/accounts/grant"},
+        "action_verify_granted": {**base_case, "path": "/api/accounts/verify-granted"},
+        "action_restore": {**base_case, "path": "/api/accounts/restore"},
+        "action_verify_restored": {**base_case, "path": "/api/accounts/verify-restored"},
+        "follow_up_positive": {"method": "POST", "account": "follower", "path": "/api/follow-up", "expected_status": 200},
+        "cross_project_negative": {"method": "POST", "account": "follower", "path": "/api/cross-project", "expected_status": 403},
+        "permission_negative": {"method": "POST", "account": "denied", "path": "/api/permission", "expected_status": 403},
+        "import_preview_positive": preview,
+        "apply_last": {"method": "POST", "account": "importer", "path": "/api/maintenance/collection-plan-imports/{batch_id}/apply", "expected_status": 200},
+    }
+    spec_file = _json_artifact(tmp_path / "canary.json", spec)
+    _write_release_state(evidence, package, phase="deployed")
+    env_file = Path(env["V122_APP_DIR"]) / ".env"
+    before = env_file.read_bytes()
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "canary", CANARY_PROJECT_ID, str(spec_file)],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert env_file.read_bytes() == before
+    assert not calls.exists() or calls.read_text() == ""
 
 
 @pytest.mark.parametrize("kind", ["directory", "file", "symlink"])
