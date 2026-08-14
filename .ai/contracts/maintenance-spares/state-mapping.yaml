@@ -1,0 +1,77 @@
+contract_version: maintenance-spares-state-v1
+timezone: Asia/Shanghai
+gate_state: failed_closed
+
+generic_sources:
+  S02_purchase:
+    raw_field: f_purchase_order.data_status
+    mappings:
+      已生效: active
+      已取消: inactive
+      进行中: inactive
+      草稿: inactive
+    unknown: unknown_blocked
+  S03_sales:
+    raw_field: f_sales_order.data_status
+    mappings:
+      已生效: active
+      已取消: inactive
+      进行中: inactive
+      草稿: inactive
+    unknown: unknown_blocked
+  S04_inventory:
+    state: blocked
+    reason: source_status_is_not_persisted_and_source_as_of_is_missing
+  S05_maintenance_demand:
+    raw_field: f_maintenance_order.data_status
+    mappings:
+      已生效: active
+      已取消: inactive
+      进行中: inactive
+      草稿: inactive
+    unknown: unknown_blocked
+
+warehouse_sources:
+  normalized_allowed: [confirmed, pending, void, unknown]
+  S07_shipment:
+    observed_values: [已生效, 草稿]
+    candidate_mapping:
+      已生效: confirmed
+      草稿: pending
+      已取消: void
+    approved_mapping: {}
+    observed: {已生效: 19570, 草稿: 2}
+    unknown: unknown_blocked
+    authority: root_product_candidate_pending_g1a_and_source_owner_review
+    action: local_contract_tests_only_zero_production_write
+  S08_return:
+    observed_values_return_v2: [已生效, 已取消, 草稿]
+    candidate_mapping:
+      已生效: confirmed
+      草稿: pending
+      已取消: void
+    approved_mapping: {}
+    observed_return_v2: {已生效: 2996, 已取消: 9, 草稿: 14}
+    observed_return_v1: {已生效: 10}
+    unknown: unknown_blocked
+    authority: root_product_candidate_pending_optional_adapter_review
+    action: optional_external_reconciliation_disabled
+  S09_receipt:
+    observed_values: [已生效, 草稿, 已取消]
+    candidate_mapping:
+      已生效: confirmed
+      草稿: pending
+      已取消: void
+    approved_mapping: {}
+    observed: {已生效: 10107, 草稿: 5, 已取消: 65}
+    unknown: unknown_blocked
+    authority: root_product_candidate_pending_g1a_and_source_owner_review
+    action: local_contract_tests_only_zero_production_write
+  correction_rule:
+    source_revision_semantics: unproven
+    target_it_data_model: immutable_supersession_or_correction_event
+    production_apply: blocked_until_source_revision_contract_is_proven
+
+native_forms:
+  S10_site_receipt: [draft, confirmed, reversed]
+  S11_site_issue: [draft, confirmed, corrected, void]

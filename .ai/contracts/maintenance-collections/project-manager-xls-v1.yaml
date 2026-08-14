@@ -1,0 +1,173 @@
+contract_version: project-manager-xls-v1
+contract_state: candidate_for_implementation
+production_apply_allowed: false
+sample:
+  sha256: a783af09fa108d366a26e10fe188be52d20a9ce1fe02121bfd683d96356c8c18
+  workbook_format: xls_biff
+  observed_sheet_count: 3
+  fact_sheet_observed_name: 维保项目清单
+privacy:
+  contains_business_rows: false
+  contains_person_or_customer_values: false
+  contains_source_attachment_path: false
+  contains_exact_header_labels: true
+
+sheet_selector:
+  workbook_index_zero_based: 0
+  match_sheet_name: false
+  header_row_one_based: 1
+  data_start_row_one_based: 2
+  expected_column_count: 64
+  other_sheets_policy: ignore_facts_but_apply_resource_budget
+
+resource_budget:
+  max_file_size_bytes: 8388608
+  max_sheet_count: 8
+  max_rows_per_sheet: 2001
+  max_columns_per_sheet: 128
+  max_total_physical_cells: 250000
+  max_string_chars: 2048
+  max_fact_rows: 2000
+  max_plan_nodes: 48000
+
+row_contract:
+  fully_empty_rows: ignore_and_preserve_source_row_number
+  nonempty_unknown_or_total_rows: fail_closed
+  required_text_positions_one_based: [1, 5]
+  external_order_no:
+    cell_type: text
+    max_chars: 128
+    normalization: trim_outer_whitespace_only_case_sensitive
+    empty_after_normalization: blocked
+  plan_month:
+    cell_type: text
+    regex: '^(20[0-9]{2})年(1[0-2]|[1-9])月$'
+    min_year: 2000
+    max_year: 2099
+    canonical_storage: first_day_of_month
+  plan_amount:
+    accepted_cell_types: [number, text_decimal]
+    text_regex: '^[0-9]+(?:\.[0-9]{1,2})?$'
+    numeric_conversion: decimal_from_python_str_immediately
+    max_scale: 2
+    min_exclusive: '0'
+    max_exclusive: '1000000000000'
+    silent_rounding_allowed: false
+  formula_provenance:
+    detectable_by_xlrd: false
+    evaluate_formula: false
+    accepted_representation: saved_cached_text_or_number
+    requires_human_preview_confirmation: true
+
+header_signature:
+  algorithm: sha256
+  serialization: json_array_utf8_ensure_ascii_false_compact
+  value: eee2d1f5f67644d18ae3c2dadada6f9f2422a8545bc316bff9e01998e3b9c13e
+  ordered_headers:
+    - 订单编号
+    - 订单日期
+    - 销售人员
+    - 业务类型
+    - 项目名称
+    - 维保起始日期
+    - 维保终止日期
+    - CMO
+    - 项目经理
+    - 订单金额
+    - 已收尾款
+    - 待收尾款
+    - 验收材料
+    - 验收材料是否完成及上传附件
+    - 巡检时间
+    - 巡检是否完成及上传附件
+    - 回款时间1
+    - 回款金额
+    - 回款时间2
+    - 回款金额
+    - 回款时间3
+    - 回款金额
+    - 回款时间4
+    - 回款金额
+    - 回款时间5
+    - 回款金额
+    - 回款时间6
+    - 回款金额
+    - 回款时间7
+    - 回款金额
+    - 回款时间8
+    - 回款金额
+    - 回款时间9
+    - 回款金额
+    - 回款时间10
+    - 回款金额
+    - 回款时间11
+    - 回款金额
+    - 回款时间12
+    - 回款金额
+    - 回款时间13
+    - 回款金额
+    - 回款时间14
+    - 回款金额
+    - 回款时间15
+    - 回款金额
+    - 回款时间16
+    - 回款金额
+    - 回款时间17
+    - 回款金额
+    - 回款时间18
+    - 回款金额
+    - 回款时间19
+    - 回款金额
+    - 回款时间20
+    - 回款金额
+    - 回款时间21
+    - 回款金额
+    - 回款时间22
+    - 回款金额
+    - 回款时间23
+    - 回款金额
+    - 回款时间24
+    - 回款金额
+
+field_contract:
+  relation_key:
+    external_order_no_position_one_based: 1
+    normalization: trim_outer_whitespace_only_case_sensitive
+    required: true
+  evidence_only_positions_one_based:
+    order_date: 2
+    sales_person: 3
+    business_type: 4
+    project_name: 5
+    service_start: 6
+    service_end: 7
+    cmo: 8
+    project_manager: 9
+    acceptance_material: 13
+    acceptance_completion: 14
+    inspection_time: 15
+    inspection_completion: 16
+  validation_only_positions_one_based:
+    order_amount: 10
+    reported_received_balance: 11
+    reported_pending_balance: 12
+  payment_slots:
+    count: 24
+    first_date_position_one_based: 17
+    first_amount_position_one_based: 18
+    stride: 2
+    date_precision: month
+    amount_type: decimal
+    require_date_amount_pair: true
+    require_positive_amount: true
+
+business_semantics:
+  domain_fact: planned_collection_milestone
+  actual_receipt_allowed: false
+  reported_received_closes_reminder: false
+  reported_pending_is_receivable_fact: false
+  order_amount_usage: preview_total_warning_only
+  project_name_auto_match_allowed: false
+  project_manager_auto_assignment_allowed: false
+  color_is_business_data: false
+  missing_source_slot_deletes_existing_milestone: false

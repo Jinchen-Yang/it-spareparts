@@ -1,0 +1,456 @@
+schema_version: 1
+contract_type: maintenance_warehouse_ordered_dual_header
+candidate_only: true
+owner_state: pending_formal_source_owner_confirmation
+production_apply_allowed: false
+header_contract:
+  header_rows:
+  - 1
+  - 2
+  pair_shape:
+  - internal_code
+  - business_label
+  position_base: 1
+  signature:
+    algorithm: sha256
+    implementation_reference: app.services.maintenance_warehouse_adapters._canonical_hash
+    canonical_input: ordered_list_of_two_item_lists
+    serialization:
+      implementation: json.dumps
+      ensure_ascii: false
+      sort_keys: true
+      separators:
+      - ','
+      - ':'
+      default: str
+    encoding: utf-8
+  fact_sheet_selector:
+    workbook_order: 1
+    require_exact_header_signature: true
+    sheet_name_is_identity: false
+    other_sheets:
+      produce_facts: false
+      count_toward_workbook_budgets: true
+      safety_scan_required: true
+      formula_action: fail_closed
+    merge_inheritance_scope: fact_sheet_only
+formula_policy:
+  scope: exact_internal_code_and_1_based_position_only
+  evaluate_formula: false
+  trust_cached_value: false
+  typed_fact_formula_allowed: false
+  undeclared_formula_action: fail_closed
+contracts:
+  S07:
+    adapter_key: shipment
+    adapter_version: shipment_v1
+    candidate_only: true
+    owner_state: pending_formal_source_owner_confirmation
+    production_apply_allowed: false
+    column_count: 166
+    header_signature: fcc90f0fd21a1c6d51c3c34a08bc63a2489c121a9217a6111bec181dec5cd924
+    required_codes:
+    - ObjectId
+    - SeqNo
+    - F0000001
+    - F0000032
+    - F0000061
+    - F0000151
+    - Status
+    - D107407Fvxu6voev32rlg4pkdu6nvdc83.ObjectId
+    - D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000031
+    - D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000044
+    - D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000011
+    typed_codes:
+    - ObjectId
+    - SeqNo
+    - F0000001
+    - F0000032
+    - F0000061
+    - F0000151
+    - F0000192
+    - F0000147
+    - Status
+    - D107407Fvxu6voev32rlg4pkdu6nvdc83.ObjectId
+    - D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000043
+    - D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000031
+    - D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000044
+    - D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000011
+    - D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000148
+    controlled_formula_fields:
+    - internal_code: F0000028
+      position: 107
+      classification: optional_image
+    - internal_code: F0000029
+      position: 108
+      classification: optional_attachment
+    ordered_headers:
+    - [ObjectId, 数据ID(不可修改)]
+    - [Name, 数据标题]
+    - [CreatedBy, 创建人(必填)]
+    - [OwnerId, 拥有者(必填)]
+    - [OwnerDeptId, 所属部门(必填)]
+    - [CreatedTime, 创建时间(必填)]
+    - [ModifiedTime, 修改时间(必填)]
+    - [SeqNo, 出库单号(必填)]
+    - [F0000001, 出库日期(必填)]
+    - [F0000003, 拣货人员(必填)]
+    - [F0000032, 出库类别(必填)]
+    - [F0000061, 出库备件/整机(必填)]
+    - [F0000203, 关联采购退货通知单]
+    - [F0000204, 采购退货通知单]
+    - [F0000177, 出库仓库(必填)]
+    - [F0000178, 仓储中心]
+    - [F0000185, 维保人员]
+    - [F0000179, 仓库管理员]
+    - [F0000180, 测试主管]
+    - [F0000099, 出库类别码]
+    - [F0000033, 销售订单(备件)(必填)]
+    - [F0000201, 关联订单]
+    - [F0000151, 维保需求单(备件)(必填)]
+    - [F0000166, 采购订单(委外)(必填)]
+    - [F0000209, 委外整机]
+    - [F0000132, 采购订单(备件)(必填)]
+    - [F0000154, 采购订单(必填)]
+    - [F0000133, 采购产品(必填)]
+    - [F0000134, 供应商]
+    - [F0000002, 客户名称]
+    - [F0000110, 销售业务类型]
+    - [F0000064, 销售订单(必填)]
+    - [F0000062, 销售整机(必填)]
+    - [F0000079, 待发货数量]
+    - [F0000192, 维保需求单]
+    - [F0000193, 需求整机]
+    - [F0000182, 销售人员]
+    - [F0000059, 公司名称(必填)]
+    - [F0000135, 明细库退货整机(必填)]
+    - [F0000186, 协同销售人员]
+    - [F0000187, 项目经理]
+    - [F0000188, 维保需求人]
+    - [F0000109, 整机库产品]
+    - [F0000063, 整机名称]
+    - [F0000115, 整机明细库产品]
+    - [F0000065, 整机自贴码]
+    - [F0000067, 整机PN]
+    - [F0000066, 整机SN]
+    - [F0000068, 整机描述]
+    - [F0000069, 可适用设备]
+    - [F0000106, 整机所在仓库]
+    - [F0000107, 整机所在库位]
+    - [F0000118, 整机库存数]
+    - [F0000073, 整机出库数]
+    - [F0000092, 拣货绩效标准分]
+    - [F0000093, 整机拣货分]
+    - [F0000125, 整机大类]
+    - [F0000126, 整机小类]
+    - [F0000131, 整机品牌]
+    - [F0000072, 整机单位]
+    - [F0000087, 产品ObjectID]
+    - [F0000088, 大类ObjectID]
+    - [F0000089, 小类ObjectID]
+    - [F0000090, 品牌ObjectID]
+    - [F0000075, 整机库ObjectID]
+    - [F0000116, 整机明细库ObjectID]
+    - [F0000104, 整机仓库ObjectID]
+    - [F0000108, 整机库位ObjectID]
+    - [F0000216, 整机所属库存Objectid]
+    - [F0000007, 备注]
+    - [F0000136, 测试人员]
+    - [F0000137, 测试方案]
+    - [F0000138, 测试绩效标准分]
+    - [F0000139, 测试绩效得分]
+    - [F0000211, 测试数量]
+    - [F0000141, 整机测试合格(必填)]
+    - [F0000142, 故障现象(必填)]
+    - [F0000147, 关联收货入库单]
+    - [F0000140, 测试报告]
+    - [F0000183, 无需快递]
+    - [F0000158, 收货人]
+    - [F0000159, 收货人电话(必填)]
+    - [F0000165, 选择收货地址]
+    - [F0000160, 收货地址]
+    - [F0000202, 收货信息]
+    - [F0000181, 快递方式(必填)]
+    - [F0000189, 输入快递单号(必填)]
+    - [F0000161, 发货日期]
+    - [F0000208, 快递费用]
+    - [F0000156, 快递单号]
+    - [F0000157, 快递备注]
+    - [F0000155, 快递方式#]
+    - [F0000171, 手机后四位]
+    - [F0000173, 物流代码]
+    - [F0000218, 入库单备件明细]
+    - [F0000191, 备件SN]
+    - [F0000121, 备件数量]
+    - [F0000016, 拣货数量]
+    - [F0000096, 拣货绩效分]
+    - [F0000164, 备件数据联动校验]
+    - [F0000058, 备件库存校验]
+    - [F0000184, 单据类型]
+    - [F0000210, 测试完成]
+    - [F0000217, 测试完成日期]
+    - [F0000190, 流程结束]
+    - [F0000214, 备件所属整机校验]
+    - [F0000028, 图片]
+    - [F0000029, 附件]
+    - [Status, 数据状态]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.ObjectId, 备件明细.数据ID(不可修改)]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.ParentIndex, 备件明细.序号]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.Name, 备件明细.数据标题]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000034, 备件明细.销售产品(必填)]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000153, 备件明细.采购退货产品(必填)]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000152, 备件明细.维保备件(必填)]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000168, 备件明细.委外备件(必填)]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000195, 备件明细.委外发货备件]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000199, 备件明细.产品*]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000100, 备件明细.库存产品]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000008, 备件明细.产品名称]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000043, 备件明细.备件自贴码(必填)]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000031, 备件明细.备件PN(必填)]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000044, 备件明细.备件SN号(必填)]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000039, 备件明细.备件描述]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000162, 备件明细.数据联动(勿改动)(必填)]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000113, 备件明细.所在仓库]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000114, 备件明细.所在库位]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000124, 备件明细.所属整机]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000127, 备件明细.通用产品]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000128, 备件明细.产品大类]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000129, 备件明细.产品小类]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000130, 备件明细.品牌]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000014, 备件明细.整机/备件]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000009, 备件明细.可适用设备]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000010, 备件明细.单位]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000038, 备件明细.已出数量]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000037, 备件明细.待出数量]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000117, 备件明细.库存数量]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000011, 备件明细.出库数量]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000012, 备件明细.成本单价(必填)]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000013, 备件明细.成本金额]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000149, 备件明细.备注]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000150, 备件明细.图片/附件]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000143, 备件明细.备件测试合格(必填)]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000144, 备件明细.故障现象(必填)]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000148, 备件明细.关联入库单明细]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000145, 备件明细.测试报告]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000094, 备件明细.拣货绩效标准分]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000095, 备件明细.拣货绩效得分]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000081, 备件明细.通用产品#]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000057, 备件明细.校验]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000082, 备件明细.产品ObjectID]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000083, 备件明细.大类ObjectID]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000084, 备件明细.小类ObjectID]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000085, 备件明细.品牌ObjectID]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000086, 备件明细.通用ObjectID]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000101, 备件明细.明细库ObjectID]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000111, 备件明细.仓库ObjectID]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000112, 备件明细.库位ObjectID]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000215, 备件明细.所属库存ObjectID]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000123, 备件明细.整机库ObjectID]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000163, 备件明细.数据联动校验]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000205, 备件明细.订货PN]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000207, 备件明细.订货规格]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000206, 备件明细.打印PN]
+    - [D107407Fvxu6voev32rlg4pkdu6nvdc83.F0000213, 备件明细.整机备件校验]
+  S09:
+    adapter_key: receipt
+    adapter_version: receipt_v1
+    candidate_only: true
+    owner_state: pending_formal_source_owner_confirmation
+    production_apply_allowed: false
+    column_count: 155
+    header_signature: 26354f5b3d8e08a263e2bbb0f4205cfeea145d98c555fa36eea19b727a586042
+    required_codes:
+    - F0000061
+    - F0000032
+    - D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000031
+    - D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000044
+    - D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000011
+    - D107407Fh8tgyrcma4r2qm9qk8sgk3v92.ObjectId
+    - F0000001
+    - Status
+    - ObjectId
+    - SeqNo
+    - F0000142
+    typed_codes:
+    - F0000061
+    - F0000032
+    - D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000031
+    - D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000043
+    - D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000044
+    - D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000011
+    - D107407Fh8tgyrcma4r2qm9qk8sgk3v92.ObjectId
+    - F0000001
+    - Status
+    - ObjectId
+    - SeqNo
+    - F0000178
+    - F0000179
+    - F0000142
+    - F0000147
+    - F0000192
+    controlled_formula_fields:
+    - internal_code: D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000141
+      position: 21
+      classification: line_image_or_attachment
+    - internal_code: F0000139
+      position: 137
+      classification: test_report
+    - internal_code: F0000029
+      position: 155
+      classification: attachment
+    ordered_headers:
+    - [F0000061, 入库备件/整机(必填)]
+    - [F0000032, 入库类别(必填)]
+    - [F0000003, 拣货人员(必填)]
+    - [ModifiedTime, 修改时间(必填)]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000031, 备件明细.备件PN(必填)]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000043, 备件明细.备件自贴码(必填)]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000044, 备件明细.备件SN(必填)]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000217, 备件明细.在库备件sn]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000117, 备件明细.测试结果(必填)]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000123, 备件明细.入库库位]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000039, 备件明细.备件描述]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000199, 备件明细.销售单价]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000200, 备件明细.销售金额]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000116, 备件明细.测试报告]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000118, 备件明细.故障现象(必填)]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000014, 备件明细.整机/备件]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000009, 备件明细.可适用设备]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000010, 备件明细.单位]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000011, 备件明细.入库数量]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000140, 备件明细.备注]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000141, 备件明细.图片/附件]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000129, 备件明细.入库仓库名]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000132, 备件明细.库位名]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.ObjectId, 备件明细.数据ID(不可修改)]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.ParentIndex, 备件明细.序号]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.Name, 备件明细.数据标题]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000198, 备件明细.销售退货产品(必填)]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000034, 备件明细.采购产品(必填)]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000143, 备件明细.维保返件(必填)]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000156, 备件明细.换购/维修件]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000037, 备件明细.待入数量]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000008, 备件明细.产品名称]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000012, 备件明细.采购单价(必填)]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000013, 备件明细.金额]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000152, 备件明细.数据联动(勿改动)]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000112, 备件明细.通用产品]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000038, 备件明细.已入数量]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000094, 备件明细.拣货绩效标准分]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000095, 备件明细.拣货绩效得分]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000171, 备件明细.大写自贴码]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000188, 备件明细.小写自贴码]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000045, 备件明细.大写自贴码检索]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000189, 备件明细.小写自贴码检索]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000131, 备件明细.仓库自动编号]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000108, 备件明细.产品自动编号]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000082, 备件明细.产品ObjectID]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000083, 备件明细.大类ObjectID]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000084, 备件明细.小类ObjectID]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000085, 备件明细.品牌ObjectID]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000086, 备件明细.通用ObjectID]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000130, 备件明细.仓库ObjectID]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000159, 备件明细.库位ObjectID]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000105, 备件明细.所属库存ObjectID]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000151, 备件明细.采购产品ObjectID]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000153, 备件明细.数据联动校验]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000157, 备件明细.自贴码校验]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000218, 备件明细.备件sn校验]
+    - [D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000183, 备件明细.行数]
+    - [F0000063, 整机产品]
+    - [F0000001, 入库日期(必填)]
+    - [F0000007, 备注]
+    - [Status, 数据状态]
+    - [F0000064, 采购订单(必填)]
+    - [F0000144, 销售订单(必填)]
+    - [F0000231, 退货类型]
+    - [F0000120, 仓储中心(必填)]
+    - [F0000133, 测试人员]
+    - [F0000155, 销售订单(换购/维修)]
+    - [F0000175, 快递单号]
+    - [F0000187, 销售人员]
+    - [F0000194, 填价人员]
+    - [F0000196, 退货销售订单(必填)]
+    - [F0000205, 采购关联销售订单]
+    - [F0000216, 是否需测试]
+    - [F0000229, 采购类别]
+    - [F0000230, 测试完成日期]
+    - [F0000233, 入库单流程结束]
+    - [ObjectId, 数据ID(不可修改)]
+    - [Name, 数据标题]
+    - [CreatedBy, 创建人(必填)]
+    - [OwnerId, 拥有者(必填)]
+    - [OwnerDeptId, 所属部门(必填)]
+    - [CreatedTime, 创建时间(必填)]
+    - [SeqNo, 入库单号(必填)]
+    - [F0000178, 关联退返通知单]
+    - [F0000179, 退返入库通知单(必填)]
+    - [F0000099, 入库类别码]
+    - [F0000195, 退货销售订单(备件)(必填)]
+    - [F0000197, 退货销售整机(必填)]
+    - [F0000201, 销售单价]
+    - [F0000142, 维保需求单(必填)]
+    - [F0000184, 项目名称]
+    - [F0000185, 维保需求人]
+    - [F0000186, 项目经理]
+    - [F0000033, 采购订单(备件)(必填)]
+    - [F0000002, 供应商]
+    - [F0000147, 备件采购单号]
+    - [F0000191, 快递费用]
+    - [F0000160, 本仓测试人员]
+    - [F0000172, 仓库收货人员]
+    - [F0000161, 仓库管理员]
+    - [F0000062, 采购整机(必填)]
+    - [F0000079, 采购数量]
+    - [F0000067, 整机PN(必填)]
+    - [F0000066, 整机SN(必填)]
+    - [F0000065, 整机自贴码(必填)]
+    - [F0000068, 整机描述]
+    - [F0000069, 可适用设备]
+    - [F0000073, 整机数量]
+    - [F0000078, 整机价格(必填)]
+    - [F0000103, 整机金额]
+    - [F0000092, 拣货绩效标准分]
+    - [F0000093, 整机拣货分]
+    - [F0000072, 整机单位]
+    - [F0000100, 仓库名#]
+    - [F0000101, 库位名#]
+    - [F0000106, 仓库自动编号#]
+    - [F0000107, 产品自动编号#]
+    - [F0000087, 产品ObjectID]
+    - [F0000088, 大类ObjectID]
+    - [F0000089, 小类ObjectID]
+    - [F0000090, 品牌ObjectID]
+    - [F0000075, 整机库ObjectID]
+    - [F0000104, 整机所属库存ObjectID]
+    - [F0000127, 仓库ObjectID]
+    - [F0000148, 仓储中心ObjectID]
+    - [F0000149, 库位ObjectID]
+    - [F0000080, 整机自贴码检索]
+    - [F0000134, 测试方案]
+    - [F0000135, 测试绩效标准分]
+    - [F0000136, 测试绩效得分]
+    - [F0000204, 测试数量]
+    - [F0000124, 整机测试结果(必填)]
+    - [F0000125, 整机入库仓库]
+    - [F0000091, 整机入库库位]
+    - [F0000138, 故障现象(必填)]
+    - [F0000139, 测试报告]
+    - [F0000162, 批量填入备件库位]
+    - [F0000164, 批量填入备件名称]
+    - [F0000163, 备件仓库名]
+    - [F0000168, 已占用自贴码或SN]
+    - [F0000021, 备件金额]
+    - [F0000166, 批量填入备件名]
+    - [F0000167, 明细备件名]
+    - [F0000102, 备件数量]
+    - [F0000192, 无价备件数]
+    - [F0000016, 拣货数量]
+    - [F0000096, 拣货绩效分]
+    - [F0000202, 退货备件金额]
+    - [F0000190, 测试完成]
+    - [F0000193, 填价完成]
+    - [F0000219, sn重复校验]
+    - [F0000203, 销售退货金额]
+    - [F0000232, 已生成返库子流程]
+    - [F0000029, 附件]
