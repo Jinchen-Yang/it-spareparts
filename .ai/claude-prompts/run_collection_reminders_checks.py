@@ -4,16 +4,34 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 from typing import Final
+from urllib.parse import unquote, urlsplit
 
 
 ROOT: Final = Path(__file__).resolve().parents[2]
 BACKEND: Final = ROOT / "backend"
 FRONTEND: Final = ROOT / "frontend"
+LOCAL_DATABASE_CHECK_IDS: Final[frozenset[str]] = frozenset(
+    {
+        "k0-migration",
+        "k0-focused",
+        "k0-alembic-rehearsal",
+        "reminder-backend",
+        "xls-import",
+        "integration-backend",
+        "integration-backend-full",
+    }
+)
+LOCAL_TEST_DATABASE_RE: Final = re.compile(
+    r"spareparts_test(?:_[A-Za-z0-9_]+)?\Z"
+)
+REHEARSAL_CHILD_ENV: Final = "COLLECTION_REMINDERS_REHEARSAL_CHILD"
 
 
 COMMANDS: Final[dict[str, tuple[Path, list[str]]]] = {
@@ -41,10 +59,6 @@ COMMANDS: Final[dict[str, tuple[Path, list[str]]]] = {
     "k0-alembic-heads": (
         BACKEND,
         ["uv", "run", "--frozen", "--no-sync", "--extra", "dev", "alembic", "heads"],
-    ),
-    "k0-alembic-check": (
-        BACKEND,
-        ["uv", "run", "--frozen", "--no-sync", "--extra", "dev", "alembic", "check"],
     ),
     "reminder-backend": (
         BACKEND,
@@ -117,16 +131,98 @@ COMMANDS: Final[dict[str, tuple[Path, list[str]]]] = {
 }
 
 
-def run(command: list[str], *, cwd: Path, stdout=None) -> None:
+def run(command: list[str], *, cwd: Path, stdout=None, env=None) -> None:
     completed = subprocess.run(
         command,
         cwd=cwd,
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=stdout,
         check=False,
     )
     if completed.returncode:
         raise SystemExit(completed.returncode)
+
+
+def require_local_test_database_url() -> None:
+    raw = os.environ.get("DATABASE_URL")
+    if not raw:
+        raise SystemExit("DATABASE_URL must explicitly name a local test database")
+    parsed = urlsplit(raw)
+    database_name = unquote(parsed.path.removeprefix("/"))
+    if (
+        parsed.scheme != "postgresql+psycopg"
+        or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or not LOCAL_TEST_DATABASE_RE.fullmatch(database_name)
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise SystemExit(
+            "DATABASE_URL must use postgresql+psycopg on a local host with a "
+            "spareparts_test[_suffix] database and no query overrides"
+        )
+
+
+def rehearse_migrations() -> None:
+    """Prove d9 -> head in an owned disposable local PostgreSQL database."""
+    require_local_test_database_url()
+    if os.environ.get(REHEARSAL_CHILD_ENV) != "1":
+        child_env = os.environ.copy()
+        child_env[REHEARSAL_CHILD_ENV] = "1"
+        run(
+            [
+                "uv", "run", "--frozen", "--no-sync", "--extra", "dev",
+                "python", str(Path(__file__).resolve()),
+                "k0-alembic-rehearsal",
+            ],
+            cwd=BACKEND,
+            env=child_env,
+        )
+        return
+
+    sys.path.insert(0, str(BACKEND))
+    try:
+        from tests.run_isolation import (  # noqa: PLC0415
+            cleanup_database_run,
+            create_database_run,
+        )
+    finally:
+        sys.path.pop(0)
+
+    handle = None
+
+    def record_owned_database(owned) -> None:
+        nonlocal handle
+        handle = owned
+
+    try:
+        created = create_database_run(
+            os.environ["DATABASE_URL"],
+            on_owned=record_owned_database,
+        )
+        if handle is None or created != handle:
+            raise RuntimeError("migration rehearsal database handoff mismatch")
+        child_env = os.environ.copy()
+        child_env["DATABASE_URL"] = handle.database_url
+        prefix = ["uv", "run", "--frozen", "--no-sync", "--extra", "dev"]
+        run(
+            [*prefix, "alembic", "upgrade", "d9f1a3c7e5b2"],
+            cwd=BACKEND,
+            env=child_env,
+        )
+        run(
+            [*prefix, "alembic", "upgrade", "head"],
+            cwd=BACKEND,
+            env=child_env,
+        )
+        run(
+            [*prefix, "alembic", "check"],
+            cwd=BACKEND,
+            env=child_env,
+        )
+    finally:
+        if handle is not None:
+            cleanup_database_run(handle)
 
 
 def sync_dependencies() -> None:
@@ -169,13 +265,23 @@ def sync_dependencies() -> None:
 
 def main() -> int:
     choices = sorted(
-        [*COMMANDS, "k0-sync-dependencies", "final-sync-package-metadata"]
+        [
+            *COMMANDS,
+            "k0-alembic-rehearsal",
+            "k0-sync-dependencies",
+            "final-sync-package-metadata",
+        ]
     )
     parser = argparse.ArgumentParser()
     parser.add_argument("check_id", choices=choices)
     args = parser.parse_args()
 
-    if args.check_id == "k0-sync-dependencies":
+    if args.check_id in LOCAL_DATABASE_CHECK_IDS:
+        require_local_test_database_url()
+
+    if args.check_id == "k0-alembic-rehearsal":
+        rehearse_migrations()
+    elif args.check_id == "k0-sync-dependencies":
         sync_dependencies()
     elif args.check_id == "final-sync-package-metadata":
         run(["uv", "sync", "--frozen", "--extra", "dev"], cwd=BACKEND)

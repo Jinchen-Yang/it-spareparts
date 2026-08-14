@@ -19,8 +19,16 @@ The only executable checks permitted in this wave are these exact fixed-runner c
 - `python3 .ai/claude-prompts/run_collection_reminders_checks.py k0-sync-dependencies`
 - `python3 .ai/claude-prompts/run_collection_reminders_checks.py k0-focused`
 - `python3 .ai/claude-prompts/run_collection_reminders_checks.py k0-alembic-heads`
-- `python3 .ai/claude-prompts/run_collection_reminders_checks.py k0-alembic-check`
+- `python3 .ai/claude-prompts/run_collection_reminders_checks.py k0-alembic-rehearsal`
 - `python3 .ai/claude-prompts/run_collection_reminders_checks.py sbom-check`
 - `python3 .ai/claude-prompts/run_collection_reminders_checks.py git-diff-check`
+
+After the migration and focused tests are green, run `k0-alembic-heads` and then
+`k0-alembic-rehearsal`. The rehearsal creates and owns a disposable local
+`spareparts_test_<pid>_<token>` database, upgrades it first to `d9f1a3c7e5b2`
+and then to the new head, runs `alembic check`, and verifies ownership again
+before cleanup. The outer process supplies only an explicit local test database
+credential base; never fall back to application defaults or reuse that base as
+the rehearsal target.
 
 Never wrap, concatenate, redirect, or append shell syntax to these calls. File inspection uses Read/Glob/Grep, not Bash.

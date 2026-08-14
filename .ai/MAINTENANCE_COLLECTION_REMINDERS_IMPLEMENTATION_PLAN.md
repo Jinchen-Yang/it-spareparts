@@ -322,9 +322,9 @@ uv run --frozen --extra dev pytest -q \
   tests/test_maintenance_manager_workbook_v3_adapter.py \
   tests/test_maintenance_manager_workbook_v3_migration.py \
   tests/test_permission_center.py
-uv run --frozen --extra dev alembic heads
-uv run --frozen --extra dev alembic check
 cd ..
+python3 .ai/claude-prompts/run_collection_reminders_checks.py k0-alembic-heads
+python3 .ai/claude-prompts/run_collection_reminders_checks.py k0-alembic-rehearsal
 python3 .deploy/generate_dependency_sbom.py --check .
 ```
 
@@ -793,9 +793,9 @@ Claude reviewer 只能读取合同和冻结包，不能运行命令或修改文�
 ### Step 7.2: 后端完整门
 
 ```bash
+python3 .ai/claude-prompts/run_collection_reminders_checks.py k0-alembic-heads
+python3 .ai/claude-prompts/run_collection_reminders_checks.py k0-alembic-rehearsal
 cd backend
-uv run --frozen --extra dev alembic heads
-uv run --frozen --extra dev alembic check
 uv run --frozen --extra dev pytest -q \
   tests/test_maintenance_collection_reminders_migration.py \
   tests/test_maintenance_collection_milestones.py \
