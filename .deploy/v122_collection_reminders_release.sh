@@ -371,6 +371,8 @@ if not isinstance(contract_id, str) or not contract_id:
     raise SystemExit("canary setup contract did not return project_contract_id")
 if not isinstance(version, int) or version < 1:
     raise SystemExit("canary setup contract did not return a valid version")
+if "included_in_total" in response and response["included_in_total"] is not False:
+    raise SystemExit("canary setup contract must not be included in business totals")
 project_version = spec["import_preview_positive"].get("project_version")
 if not isinstance(project_version, int) or project_version < 1:
     raise SystemExit("canary import preview must declare current canary project_version")
@@ -730,8 +732,18 @@ if setup_account.get("expected_role") != "admin" or setup_contract.get("account"
     raise SystemExit("canary setup_contract must use the import admin account")
 if setup_contract.get("method") != "POST" or setup_contract.get("path") != "/api/maintenance/projects/stable/" + sys.argv[2] + "/contracts" or setup_contract.get("expected_status") != 201:
     raise SystemExit("canary setup_contract must create a contract under the manifest canary project")
-if not isinstance(setup_contract.get("body"), dict):
+setup_body = setup_contract.get("body")
+if not isinstance(setup_body, dict):
     raise SystemExit("canary setup_contract body is invalid")
+if setup_body.get("included_in_total") is not False:
+    raise SystemExit("canary setup_contract must not be included in business totals")
+for key, expected in {
+    "contract_id": "canary-contract-source",
+    "contract_no": "CANARY-CONTRACT-001",
+    "source": "release_canary",
+}.items():
+    if setup_body.get(key) != expected:
+        raise SystemExit("canary setup_contract " + key + " is invalid")
 
 denied_account = account_for("permission_negative")
 if denied_account.get("expected_role") != "admin":

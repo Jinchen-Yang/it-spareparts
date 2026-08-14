@@ -1077,7 +1077,15 @@ def test_release_wrong_canary_fails_before_env_or_docker(tmp_path: Path):
     assert not calls.exists()
 
 
-def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_evidence(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("returned_included_in_total", "reaches_import"),
+    [(None, True), (True, False)],
+)
+def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_evidence(
+    tmp_path: Path,
+    returned_included_in_total: bool | None,
+    reaches_import: bool,
+):
     package = _production_package(tmp_path / "pkg")
     docker = """
     if [[ "$*" == *"compose"* && "$*" == *"ps -q db"* ]]; then echo db-cid; exit 0; fi
@@ -1115,7 +1123,7 @@ def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_e
           *login-denied.response.json)
             printf '%s' '{{"token":"denied-token","role":"admin","permissions":{{"action_maintenance_collection_plan_import":false}}}}' >"$out"; status=200 ;;
           *setup_contract.response)
-            printf '%s' '{{"project_id":"{CANARY_PROJECT_ID}","project_contract_id":"contract-live","version":3}}' >"$out"; status=201 ;;
+            printf '%s' '{{"project_id":"{CANARY_PROJECT_ID}","project_contract_id":"contract-live","version":3{',"included_in_total":true' if returned_included_in_total is True else ''}}}' >"$out"; status=201 ;;
           *cross_project_negative.response) printf '%s' '{{"detail":{{"code":"canary_scope_denied"}}}}' >"$out"; status=403 ;;
           *permission_negative.response) printf '%s' '{{"detail":{{"code":"permission_denied"}}}}' >"$out"; status=403 ;;
           *import_preview_positive.response)
@@ -1181,7 +1189,10 @@ def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_e
     curl_text = curl_calls.read_text()
     assert "action_restore" in curl_text and "action_verify_restored" in curl_text
     assert "super-secret-control-token" not in curl_text
-    assert calls.read_text().count("maintenance_collection_milestone") >= 4
+    if reaches_import:
+        assert calls.read_text().count("maintenance_collection_milestone") >= 4
+    else:
+        assert "import_preview_positive" not in curl_text
     assert not (evidence / "canary-evidence.json").exists()
 
 
@@ -1454,9 +1465,13 @@ def test_canary_state_write_failure_closes_apply_and_restores_actions(tmp_path: 
         "fake_follow_path",
         "different_apply_account",
         "admin_follow_up",
+        "setup_contract_included_in_total",
+        "setup_contract_source",
+        "setup_contract_id",
+        "setup_contract_no",
     ],
 )
-def test_canary_rejects_invalid_workbook_or_binding_before_runtime_changes(
+def test_canary_rejects_invalid_spec_before_runtime_changes(
     tmp_path: Path, invalid_input: str,
 ):
     package = _production_package(tmp_path / "pkg")
@@ -1519,6 +1534,14 @@ def test_canary_rejects_invalid_workbook_or_binding_before_runtime_changes(
         spec["apply_last"]["account"] = "importer2"
     elif invalid_input == "admin_follow_up":
         spec["named_accounts"]["follower"]["expected_role"] = "admin"
+    elif invalid_input == "setup_contract_included_in_total":
+        spec["setup_contract"]["body"]["included_in_total"] = True
+    elif invalid_input == "setup_contract_source":
+        spec["setup_contract"]["body"]["source"] = "manual"
+    elif invalid_input == "setup_contract_id":
+        spec["setup_contract"]["body"]["contract_id"] = "business-contract-source"
+    elif invalid_input == "setup_contract_no":
+        spec["setup_contract"]["body"]["contract_no"] = "BUSINESS-CONTRACT-001"
     spec_file = _json_artifact(tmp_path / "canary.json", spec)
     _write_release_state(evidence, package, phase="deployed")
     env_file = Path(env["V122_APP_DIR"]) / ".env"
