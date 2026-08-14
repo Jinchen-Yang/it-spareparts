@@ -523,6 +523,7 @@ validate_canary_spec() {
   python3 - "$1" "$2" <<'PY'
 import json
 import pathlib
+import re
 import sys
 value=json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 if value.get("canary_project_id", sys.argv[2]) != sys.argv[2]:
@@ -570,6 +571,51 @@ if denied_account.get("expected_role") != "admin":
     raise SystemExit("permission-negative account must be admin to prove no admin bypass")
 if "action_maintenance_collection_plan_import" not in (denied_account.get("forbidden_permissions") or []):
     raise SystemExit("permission-negative admin must explicitly lack import action")
+if "action_maintenance_collection_follow_up" not in (denied_account.get("forbidden_permissions") or []):
+    raise SystemExit("permission-negative admin must explicitly lack follow-up action")
+
+follow_path = re.compile(
+    r"^/api/maintenance/collection-milestones/([A-Za-z0-9][A-Za-z0-9_-]{0,35})/follow-ups$"
+)
+def validate_follow_up_case(name, *, successful):
+    case = value[name]
+    match = follow_path.fullmatch(case.get("path", ""))
+    if case.get("method") != "POST" or match is None:
+        raise SystemExit(name + " must call the real collection milestone follow-up endpoint")
+    if successful and case.get("expected_status", 0) // 100 != 2:
+        raise SystemExit(name + " must expect a successful response")
+    body = case.get("body")
+    allowed = {"expected_version", "idempotency_key", "action", "planned_month", "note", "reason"}
+    if not isinstance(body, dict) or not {"expected_version", "idempotency_key", "action"} <= set(body) or not set(body) <= allowed:
+        raise SystemExit(name + " must use the real follow-up request shape")
+    if not isinstance(body["expected_version"], int) or body["expected_version"] < 1:
+        raise SystemExit(name + " expected_version is invalid")
+    key = body["idempotency_key"]
+    if not isinstance(key, str) or not 8 <= len(key) <= 128 or "\n" in key:
+        raise SystemExit(name + " idempotency_key is invalid")
+    action = body["action"]
+    if action == "handle":
+        if body.get("planned_month") is not None or body.get("reason") is not None:
+            raise SystemExit(name + " handle payload is invalid")
+    elif action == "reschedule":
+        if not isinstance(body.get("planned_month"), str) or not isinstance(body.get("reason"), str) or not body["reason"].strip() or body.get("note") is not None:
+            raise SystemExit(name + " reschedule payload is invalid")
+    elif action == "reopen":
+        if not isinstance(body.get("reason"), str) or not body["reason"].strip() or body.get("planned_month") is not None or body.get("note") is not None:
+            raise SystemExit(name + " reopen payload is invalid")
+    else:
+        raise SystemExit(name + " follow-up action is invalid")
+    return match.group(1)
+
+positive_milestone = validate_follow_up_case("follow_up_positive", successful=True)
+cross_milestone = validate_follow_up_case("cross_project_negative", successful=False)
+permission_milestone = validate_follow_up_case("permission_negative", successful=False)
+if value["cross_project_negative"].get("account") != value["follow_up_positive"].get("account"):
+    raise SystemExit("cross-project negative must use the follow-up positive account")
+if cross_milestone == positive_milestone:
+    raise SystemExit("cross-project negative must target a different milestone")
+if permission_milestone != positive_milestone:
+    raise SystemExit("permission negative must target the canary milestone")
 preview = value["import_preview_positive"]
 if preview.get("method") != "POST" or preview.get("path") != "/api/maintenance/collection-plan-imports/preview" or preview.get("expected_status") != 200:
     raise SystemExit("import preview canary must call the real multipart endpoint")
@@ -606,6 +652,8 @@ for binding in bindings:
 apply_case = value["apply_last"]
 if apply_case.get("method") != "POST" or apply_case.get("path") != "/api/maintenance/collection-plan-imports/{batch_id}/apply" or apply_case.get("expected_status", 0) // 100 != 2:
     raise SystemExit("apply_last must use the dynamic collection-plan apply endpoint")
+if apply_case.get("account") != preview.get("account"):
+    raise SystemExit("preview and apply must use the same named batch owner")
 for name in ("action_grant","action_verify_granted","action_restore","action_verify_restored"):
     if not isinstance(value[name].get("token"),str) or not value[name]["token"]:
         raise SystemExit("action control cases require sealed control token")

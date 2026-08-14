@@ -42,7 +42,26 @@ FRONTEND_IMAGE_ID = "sha256:" + "d" * 64
 DB_IMAGE_ID = "sha256:" + "e" * 64
 SBOM_SHA = "f" * 64
 CANARY_PROJECT_ID = "123e4567-e89b-12d3-a456-426614174000"
+CANARY_MILESTONE_ID = "milestone-canary-0001"
+NON_CANARY_MILESTONE_ID = "milestone-other-0001"
 REAL_SAMPLE_SHA256 = "a783af09fa108d366a26e10fe188be52d20a9ce1fe02121bfd683d96356c8c18"
+
+
+def _follow_up_case(
+    *, account: str, milestone_id: str, expected_status: int, key: str,
+) -> dict:
+    return {
+        "method": "POST",
+        "account": account,
+        "path": f"/api/maintenance/collection-milestones/{milestone_id}/follow-ups",
+        "expected_status": expected_status,
+        "body": {
+            "expected_version": 1,
+            "idempotency_key": key,
+            "action": "handle",
+            "note": "release canary",
+        },
+    }
 
 
 def _load_manifest_module():
@@ -1072,15 +1091,15 @@ def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_e
         "named_accounts": {
             "follower": {"username": "follower", "password": "secret-zero", "expected_role": "user", "required_permissions": ["action_maintenance_collection_follow_up"]},
             "importer": {"username": "importer", "password": "secret-one", "expected_role": "admin", "required_permissions": ["action_maintenance_collection_plan_import"]},
-            "denied": {"username": "denied", "password": "secret-two", "expected_role": "admin", "forbidden_permissions": ["action_maintenance_collection_plan_import"]},
+            "denied": {"username": "denied", "password": "secret-two", "expected_role": "admin", "forbidden_permissions": ["action_maintenance_collection_plan_import", "action_maintenance_collection_follow_up"]},
         },
         "action_grant": {**base_case, "path": "/api/accounts/grant"},
         "action_verify_granted": {**base_case, "path": "/api/accounts/verify-granted"},
         "action_restore": {**base_case, "path": "/api/accounts/restore"},
         "action_verify_restored": {**base_case, "path": "/api/accounts/verify-restored"},
-        "follow_up_positive": {"method": "POST", "account": "follower", "path": "/api/follow-up", "expected_status": 200, "body": {}},
-        "cross_project_negative": {"method": "POST", "account": "follower", "path": "/api/cross-project", "expected_status": 403, "body": {}},
-        "permission_negative": {"method": "POST", "account": "denied", "path": "/api/permission", "expected_status": 403, "body": {}},
+        "follow_up_positive": _follow_up_case(account="follower", milestone_id=CANARY_MILESTONE_ID, expected_status=200, key="follow-positive-0001"),
+        "cross_project_negative": _follow_up_case(account="follower", milestone_id=NON_CANARY_MILESTONE_ID, expected_status=403, key="follow-cross-0001"),
+        "permission_negative": _follow_up_case(account="denied", milestone_id=CANARY_MILESTONE_ID, expected_status=403, key="follow-denied-0001"),
         "import_preview_positive": {
             "method": "POST",
             "account": "importer",
@@ -1122,7 +1141,7 @@ def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_e
     assert not (evidence / "canary-evidence.json").exists()
 
 
-def test_canary_rejects_scope_code_mismatch_and_admin_positive_account(tmp_path: Path):
+def test_canary_rejects_scope_code_mismatch_from_real_follow_up_endpoint(tmp_path: Path):
     package = _production_package(tmp_path / "pkg")
     docker = """
     if [[ "$*" == *"compose"* && "$*" == *"ps -q db"* ]]; then echo db-cid; exit 0; fi
@@ -1150,8 +1169,10 @@ def test_canary_rejects_scope_code_mismatch_and_admin_positive_account(tmp_path:
           [ "$arg" = --output ] && previous=output
         done
         case "$out" in
+          *login-follower.response.json)
+            printf '%s' '{"token":"follower-token","role":"user","permissions":{"action_maintenance_collection_follow_up":true}}' >"$out"; status=200 ;;
           *login-importer.response.json)
-            printf '%s' '{"token":"importer-token","role":"admin","permissions":{"action_maintenance_collection_plan_import":true,"action_maintenance_collection_follow_up":true}}' >"$out"; status=200 ;;
+            printf '%s' '{"token":"importer-token","role":"admin","permissions":{"action_maintenance_collection_plan_import":true}}' >"$out"; status=200 ;;
           *login-denied.response.json)
             printf '%s' '{"token":"denied-token","role":"admin","permissions":{"action_maintenance_collection_plan_import":false,"action_maintenance_collection_follow_up":false}}' >"$out"; status=200 ;;
           *cross_project_negative.response)
@@ -1168,13 +1189,18 @@ def test_canary_rejects_scope_code_mismatch_and_admin_positive_account(tmp_path:
     spec = {
         "base_url": "https://canary.invalid",
         "named_accounts": {
+            "follower": {
+                "username": "follower",
+                "password": "secret-zero",
+                "expected_role": "user",
+                "required_permissions": ["action_maintenance_collection_follow_up"],
+            },
             "importer": {
                 "username": "importer",
                 "password": "secret-one",
                 "expected_role": "admin",
                 "required_permissions": [
                     "action_maintenance_collection_plan_import",
-                    "action_maintenance_collection_follow_up",
                 ],
             },
             "denied": {
@@ -1191,9 +1217,9 @@ def test_canary_rejects_scope_code_mismatch_and_admin_positive_account(tmp_path:
         "action_verify_granted": {**base_case, "path": "/api/accounts/verify-granted"},
         "action_restore": {**base_case, "path": "/api/accounts/restore"},
         "action_verify_restored": {**base_case, "path": "/api/accounts/verify-restored"},
-        "follow_up_positive": {"method": "POST", "account": "importer", "path": "/api/follow-up", "expected_status": 200, "body": {}},
-        "cross_project_negative": {"method": "POST", "account": "importer", "path": "/api/cross-project", "expected_status": 403, "body": {}},
-        "permission_negative": {"method": "POST", "account": "denied", "path": "/api/permission", "expected_status": 403, "body": {}},
+        "follow_up_positive": _follow_up_case(account="follower", milestone_id=CANARY_MILESTONE_ID, expected_status=200, key="follow-positive-0001"),
+        "cross_project_negative": _follow_up_case(account="follower", milestone_id=NON_CANARY_MILESTONE_ID, expected_status=403, key="follow-cross-0001"),
+        "permission_negative": _follow_up_case(account="denied", milestone_id=CANARY_MILESTONE_ID, expected_status=403, key="follow-denied-0001"),
         "import_preview_positive": {
             "method": "POST",
             "account": "importer",
@@ -1230,7 +1256,7 @@ def test_canary_rejects_scope_code_mismatch_and_admin_positive_account(tmp_path:
     )
 
     assert completed.returncode != 0
-    assert "admin" in completed.stderr or "canary_scope_denied" in completed.stderr
+    assert "canary_scope_denied" in completed.stderr
     assert not (evidence / "canary-evidence.json").exists()
 
 
@@ -1304,9 +1330,9 @@ def test_canary_state_write_failure_closes_apply_and_restores_actions(tmp_path: 
         "action_verify_granted": {**base_case, "path": "/api/accounts/verify-granted"},
         "action_restore": {**base_case, "path": "/api/accounts/restore"},
         "action_verify_restored": {**base_case, "path": "/api/accounts/verify-restored"},
-        "follow_up_positive": {"method": "POST", "account": "follower", "path": "/api/follow-up", "expected_status": 200, "body": {}},
-        "cross_project_negative": {"method": "POST", "account": "follower", "path": "/api/cross-project", "expected_status": 403, "body": {}},
-        "permission_negative": {"method": "POST", "account": "denied", "path": "/api/permission", "expected_status": 403, "body": {}},
+        "follow_up_positive": _follow_up_case(account="follower", milestone_id=CANARY_MILESTONE_ID, expected_status=200, key="follow-positive-0001"),
+        "cross_project_negative": _follow_up_case(account="follower", milestone_id=NON_CANARY_MILESTONE_ID, expected_status=403, key="follow-cross-0001"),
+        "permission_negative": _follow_up_case(account="denied", milestone_id=CANARY_MILESTONE_ID, expected_status=403, key="follow-denied-0001"),
         "import_preview_positive": {
             "method": "POST",
             "account": "importer",
@@ -1364,7 +1390,16 @@ def test_canary_state_write_failure_closes_apply_and_restores_actions(tmp_path: 
     }
 
 
-@pytest.mark.parametrize("invalid_input", ["workbook_sha", "binding_project"])
+@pytest.mark.parametrize(
+    "invalid_input",
+    [
+        "workbook_sha",
+        "binding_project",
+        "fake_follow_path",
+        "different_apply_account",
+        "admin_follow_up",
+    ],
+)
 def test_canary_rejects_invalid_workbook_or_binding_before_runtime_changes(
     tmp_path: Path, invalid_input: str,
 ):
@@ -1400,25 +1435,32 @@ def test_canary_rejects_invalid_workbook_or_binding_before_runtime_changes(
     }
     if invalid_input == "workbook_sha":
         preview["workbook_sha256"] = "0" * 64
-    else:
+    elif invalid_input == "binding_project":
         binding["project_id"] = "123e4567-e89b-12d3-a456-426614174099"
     spec = {
         "base_url": "https://canary.invalid",
         "named_accounts": {
             "follower": {"username": "follower", "password": "one", "expected_role": "user", "required_permissions": ["action_maintenance_collection_follow_up"]},
             "importer": {"username": "importer", "password": "two", "expected_role": "admin", "required_permissions": ["action_maintenance_collection_plan_import"]},
-            "denied": {"username": "denied", "password": "three", "expected_role": "admin", "forbidden_permissions": ["action_maintenance_collection_plan_import"]},
+            "importer2": {"username": "importer2", "password": "four", "expected_role": "admin", "required_permissions": ["action_maintenance_collection_plan_import"]},
+            "denied": {"username": "denied", "password": "three", "expected_role": "admin", "forbidden_permissions": ["action_maintenance_collection_plan_import", "action_maintenance_collection_follow_up"]},
         },
         "action_grant": {**base_case, "path": "/api/accounts/grant"},
         "action_verify_granted": {**base_case, "path": "/api/accounts/verify-granted"},
         "action_restore": {**base_case, "path": "/api/accounts/restore"},
         "action_verify_restored": {**base_case, "path": "/api/accounts/verify-restored"},
-        "follow_up_positive": {"method": "POST", "account": "follower", "path": "/api/follow-up", "expected_status": 200},
-        "cross_project_negative": {"method": "POST", "account": "follower", "path": "/api/cross-project", "expected_status": 403},
-        "permission_negative": {"method": "POST", "account": "denied", "path": "/api/permission", "expected_status": 403},
+        "follow_up_positive": _follow_up_case(account="follower", milestone_id=CANARY_MILESTONE_ID, expected_status=200, key="follow-positive-0001"),
+        "cross_project_negative": _follow_up_case(account="follower", milestone_id=NON_CANARY_MILESTONE_ID, expected_status=403, key="follow-cross-0001"),
+        "permission_negative": _follow_up_case(account="denied", milestone_id=CANARY_MILESTONE_ID, expected_status=403, key="follow-denied-0001"),
         "import_preview_positive": preview,
         "apply_last": {"method": "POST", "account": "importer", "path": "/api/maintenance/collection-plan-imports/{batch_id}/apply", "expected_status": 200},
     }
+    if invalid_input == "fake_follow_path":
+        spec["follow_up_positive"]["path"] = "/api/follow-up"
+    elif invalid_input == "different_apply_account":
+        spec["apply_last"]["account"] = "importer2"
+    elif invalid_input == "admin_follow_up":
+        spec["named_accounts"]["follower"]["expected_role"] = "admin"
     spec_file = _json_artifact(tmp_path / "canary.json", spec)
     _write_release_state(evidence, package, phase="deployed")
     env_file = Path(env["V122_APP_DIR"]) / ".env"
