@@ -1,0 +1,599 @@
+contract_id: maintenance_collection_reminders_api_v1
+status: approved_for_implementation
+approved_on: "2026-08-14"
+base_path: /api
+frontend_base_path: /api
+semantics:
+  domain: reminder_only
+  forbidden_financial_facts:
+    - actual_receipt
+    - received_amount
+    - receivable_amount
+    - collection_rate
+    - receipt_reference
+  amount_encoding: decimal_string_or_null
+  server_owned_as_of: true
+
+enums:
+  date_precision: [day, month]
+  follow_up_status: [pending, handled]
+  reminder_state:
+    - needs_review
+    - handled
+    - incomplete
+    - overdue
+    - due_this_month
+    - upcoming
+  follow_up_action: [handle, reschedule, reopen]
+  owner_scope: [me, all]
+  amount_visibility: [visible, restricted]
+  batch_status: [valid, error, applied, expired]
+  binding_status: [reviewed]
+  preview_binding_status: [reviewed, pending_review]
+  milestone_change: [create, update, unchanged, source_missing]
+  issue_severity: [warning, blocker]
+
+schemas:
+  manager_assignment:
+    required: [username, display_name]
+    fields:
+      username: {type: [string, "null"]}
+      display_name: {type: [string, "null"]}
+
+  service_period:
+    required: [service_start, service_end, completeness_state]
+    fields:
+      service_start: {type: [date, "null"]}
+      service_end: {type: [date, "null"]}
+      completeness_state: {type: string}
+
+  contract_ref:
+    required:
+      - project_contract_id
+      - contract_no
+      - relation_status
+      - lifecycle_status
+      - version
+    fields:
+      project_contract_id: {type: string}
+      contract_no: {type: [string, "null"]}
+      relation_status: {type: string}
+      lifecycle_status: {type: string}
+      version: {type: integer, minimum: 1}
+
+  project_ref:
+    required:
+      - project_id
+      - project_code
+      - display_name
+      - lifecycle_status
+      - version
+      - manager_assignment
+      - service_period
+      - contracts
+    fields:
+      project_id: {type: string}
+      project_code: {type: string}
+      display_name: {type: string}
+      lifecycle_status: {type: string}
+      version: {type: integer, minimum: 1}
+      manager_assignment: {$ref: manager_assignment}
+      service_period: {$ref: service_period}
+      contracts: {type: array, items: {$ref: contract_ref}}
+
+  reminder_counts:
+    required:
+      - total
+      - needs_review
+      - handled
+      - incomplete
+      - overdue
+      - due_this_month
+      - upcoming
+    fields:
+      total: {type: integer, minimum: 0}
+      needs_review: {type: integer, minimum: 0}
+      handled: {type: integer, minimum: 0}
+      incomplete: {type: integer, minimum: 0}
+      overdue: {type: integer, minimum: 0}
+      due_this_month: {type: integer, minimum: 0}
+      upcoming: {type: integer, minimum: 0}
+
+  actionable_milestone:
+    required:
+      - milestone_id
+      - project_contract_id
+      - contract_no
+      - sequence
+      - planned_month
+      - planned_amount
+      - reminder_state
+      - version
+    fields:
+      milestone_id: {type: string}
+      project_contract_id: {type: string}
+      contract_no: {type: [string, "null"]}
+      sequence: {type: integer, minimum: 1, maximum: 24}
+      planned_month: {type: [year_month, "null"]}
+      planned_amount: {type: [decimal_string, "null"]}
+      reminder_state: {$enum: reminder_state}
+      version: {type: integer, minimum: 1}
+
+  directory_row:
+    required: [project, reminder_counts, next_actionable_milestone]
+    fields:
+      project: {$ref: project_ref}
+      reminder_counts: {$ref: reminder_counts}
+      next_actionable_milestone: {one_of: [{$ref: actionable_milestone}, {type: "null"}]}
+
+  directory_response:
+    required:
+      - rows
+      - total
+      - page
+      - page_size
+      - owner_scope
+      - allowed_owner_scopes
+      - as_of
+      - data_version
+      - amount_visibility
+    fields:
+      rows: {type: array, items: {$ref: directory_row}}
+      total: {type: integer, minimum: 0}
+      page: {type: integer, minimum: 1}
+      page_size: {type: integer, minimum: 1, maximum: 200}
+      owner_scope: {$enum: owner_scope}
+      allowed_owner_scopes: {type: array, items: {$enum: owner_scope}, unique: true}
+      as_of: {type: date}
+      data_version: {type: string}
+      amount_visibility: {$enum: amount_visibility}
+
+  milestone_operation:
+    required:
+      - operation_id
+      - action
+      - reason
+      - actor_display_name
+      - created_at
+      - result_version
+    fields:
+      operation_id: {type: string}
+      action: {$enum: follow_up_action}
+      reason: {type: [string, "null"]}
+      actor_display_name: {type: string}
+      created_at: {type: datetime}
+      result_version: {type: integer, minimum: 1}
+
+  milestone_row:
+    required:
+      - milestone_id
+      - project_contract_id
+      - contract_no
+      - sequence
+      - planned_date
+      - date_precision
+      - planned_month
+      - planned_amount
+      - completeness_state
+      - follow_up_status
+      - reminder_state
+      - follow_up_review_required
+      - followed_up_by
+      - followed_up_at
+      - follow_up_note
+      - last_operation
+      - version
+    fields:
+      milestone_id: {type: string}
+      project_contract_id: {type: string}
+      contract_no: {type: [string, "null"]}
+      sequence: {type: integer, minimum: 1, maximum: 24}
+      planned_date: {type: [date, "null"]}
+      date_precision: {$enum: date_precision}
+      planned_month: {type: [year_month, "null"]}
+      planned_amount: {type: [decimal_string, "null"]}
+      completeness_state: {type: string}
+      follow_up_status: {$enum: follow_up_status}
+      reminder_state: {$enum: reminder_state}
+      follow_up_review_required: {type: boolean}
+      followed_up_by: {type: [string, "null"]}
+      followed_up_at: {type: [datetime, "null"]}
+      follow_up_note: {type: [string, "null"]}
+      last_operation: {one_of: [{$ref: milestone_operation}, {type: "null"}]}
+      version: {type: integer, minimum: 1}
+
+  project_detail_response:
+    required: [project, summary, rows, as_of, data_version, amount_visibility]
+    fields:
+      project: {$ref: project_ref}
+      summary: {$ref: reminder_counts}
+      rows: {type: array, items: {$ref: milestone_row}}
+      as_of: {type: date}
+      data_version: {type: string}
+      amount_visibility: {$enum: amount_visibility}
+
+  follow_up_request:
+    required: [expected_version, idempotency_key, action]
+    additional_properties: false
+    fields:
+      expected_version: {type: integer, minimum: 1}
+      idempotency_key: {type: string, min_length: 8, max_length: 128}
+      action: {$enum: follow_up_action}
+      planned_month: {type: [year_month, "null"], default: null}
+      note: {type: [string, "null"], max_length: 1000, default: null}
+      reason: {type: [string, "null"], max_length: 1000, default: null}
+    discriminated_rules:
+      handle:
+        allowed_non_null: [note]
+      reschedule:
+        required_non_null: [planned_month, reason]
+        forbidden_non_null: [note]
+      reopen:
+        required_non_null: [reason]
+        forbidden_non_null: [planned_month, note]
+
+  follow_up_response:
+    required: [row, data_version, idempotent_replay]
+    fields:
+      row: {$ref: milestone_row}
+      data_version: {type: string}
+      idempotent_replay: {type: boolean}
+
+  import_issue:
+    required: [code, severity, row_key, sequence, message]
+    fields:
+      code: {type: string}
+      severity: {$enum: issue_severity}
+      row_key: {type: [string, "null"]}
+      sequence: {type: [integer, "null"], minimum: 1, maximum: 24}
+      message: {type: string}
+
+  milestone_diff:
+    required:
+      - sequence
+      - planned_month
+      - planned_amount
+      - change
+      - expected_milestone_version
+    fields:
+      sequence: {type: integer, minimum: 1, maximum: 24}
+      planned_month: {type: [year_month, "null"]}
+      planned_amount: {type: [decimal_string, "null"]}
+      change: {$enum: milestone_change}
+      expected_milestone_version: {type: [integer, "null"], minimum: 1}
+
+  preview_binding:
+    required:
+      - status
+      - project_id
+      - project_version
+      - project_contract_id
+      - project_contract_version
+      - existing_binding_version
+    fields:
+      status: {$enum: preview_binding_status}
+      project_id: {type: [string, "null"]}
+      project_version: {type: [integer, "null"], minimum: 1}
+      project_contract_id: {type: [string, "null"]}
+      project_contract_version: {type: [integer, "null"], minimum: 1}
+      existing_binding_version: {type: [integer, "null"], minimum: 1}
+
+  preview_order:
+    required:
+      - row_key
+      - external_order_no
+      - source_project_name
+      - binding
+      - milestone_diffs
+      - warning_codes
+      - blocker_codes
+    fields:
+      row_key: {type: string}
+      external_order_no: {type: string}
+      source_project_name: {type: [string, "null"]}
+      binding: {$ref: preview_binding}
+      milestone_diffs: {type: array, items: {$ref: milestone_diff}}
+      warning_codes: {type: array, items: {type: string}}
+      blocker_codes: {type: array, items: {type: string}}
+
+  preview_counts:
+    required:
+      - projects
+      - milestones
+      - bound
+      - pending_binding
+      - blockers
+      - warnings
+      - create
+      - update
+      - unchanged
+      - source_missing
+    fields:
+      projects: {type: integer, minimum: 0}
+      milestones: {type: integer, minimum: 0}
+      bound: {type: integer, minimum: 0}
+      pending_binding: {type: integer, minimum: 0}
+      blockers: {type: integer, minimum: 0}
+      warnings: {type: integer, minimum: 0}
+      create: {type: integer, minimum: 0}
+      update: {type: integer, minimum: 0}
+      unchanged: {type: integer, minimum: 0}
+      source_missing: {type: integer, minimum: 0}
+
+  preview_response:
+    required:
+      - batch_id
+      - batch_version
+      - data_version
+      - status
+      - contract_version
+      - file_sha256
+      - counts
+      - rows
+      - issues
+      - can_apply
+      - expires_at
+    fields:
+      batch_id: {type: string}
+      batch_version: {type: integer, minimum: 1}
+      data_version: {type: string}
+      status: {$enum: batch_status}
+      contract_version: {type: string}
+      file_sha256: {type: string, pattern: "^[0-9a-f]{64}$"}
+      counts: {$ref: preview_counts}
+      rows: {type: array, items: {$ref: preview_order}}
+      issues: {type: array, items: {$ref: import_issue}}
+      can_apply: {type: boolean}
+      expires_at: {type: datetime}
+
+  binding_option_contract:
+    required:
+      - project_contract_id
+      - contract_no
+      - relation_status
+      - lifecycle_status
+      - version
+    fields:
+      project_contract_id: {type: string}
+      contract_no: {type: [string, "null"]}
+      relation_status: {type: string}
+      lifecycle_status: {type: string}
+      version: {type: integer, minimum: 1}
+
+  binding_option_project:
+    required: [project_id, project_code, display_name, version, contracts]
+    fields:
+      project_id: {type: string}
+      project_code: {type: string}
+      display_name: {type: string}
+      version: {type: integer, minimum: 1}
+      contracts: {type: array, items: {$ref: binding_option_contract}}
+
+  binding_options_response:
+    required: [batch_id, rows, total, page, page_size, q]
+    fields:
+      batch_id: {type: string}
+      rows: {type: array, items: {$ref: binding_option_project}}
+      total: {type: integer, minimum: 0}
+      page: {type: integer, minimum: 1}
+      page_size: {type: integer, minimum: 1, maximum: 50}
+      q: {type: string}
+
+  apply_binding:
+    required:
+      - row_key
+      - external_order_no
+      - project_id
+      - project_version
+      - project_contract_id
+      - project_contract_version
+      - existing_binding_version
+      - reason
+    fields:
+      row_key: {type: string}
+      external_order_no: {type: string}
+      project_id: {type: string}
+      project_version: {type: integer, minimum: 1}
+      project_contract_id: {type: string}
+      project_contract_version: {type: integer, minimum: 1}
+      existing_binding_version: {type: [integer, "null"], minimum: 1}
+      reason: {type: [string, "null"], max_length: 1000}
+    rules:
+      new_binding: existing_binding_version_is_null
+      reassignment: existing_binding_version_non_null_requires_nonempty_reason
+
+  apply_request:
+    required: [expected_batch_version, expected_data_version, bindings]
+    additional_properties: false
+    fields:
+      expected_batch_version: {type: integer, minimum: 1}
+      expected_data_version: {type: string}
+      bindings: {type: array, items: {$ref: apply_binding}}
+
+  apply_counts:
+    required: [created, updated, unchanged, source_missing, needs_review]
+    fields:
+      created: {type: integer, minimum: 0}
+      updated: {type: integer, minimum: 0}
+      unchanged: {type: integer, minimum: 0}
+      source_missing: {type: integer, minimum: 0}
+      needs_review: {type: integer, minimum: 0}
+
+  apply_response:
+    required:
+      - batch_id
+      - batch_version
+      - data_version
+      - status
+      - counts
+      - idempotent_replay
+      - applied_at
+    fields:
+      batch_id: {type: string}
+      batch_version: {type: integer, minimum: 1}
+      data_version: {type: string}
+      status: {$enum: batch_status}
+      counts: {$ref: apply_counts}
+      idempotent_replay: {type: boolean}
+      applied_at: {type: datetime}
+
+  domain_error:
+    required: [detail]
+    fields:
+      detail:
+        required: [code, message]
+        fields:
+          code: {type: string}
+          message: {type: string}
+          current_version: {type: [integer, "null"]}
+          current_data_version: {type: [string, "null"]}
+          issues: {type: array, items: {$ref: import_issue}}
+
+  validation_error_item:
+    required: [loc, msg, type]
+    fields:
+      loc: {type: array, items: {type: [string, integer]}}
+      msg: {type: string}
+      type: {type: string}
+
+  request_validation_error:
+    required: [detail]
+    fields:
+      detail: {type: array, items: {$ref: validation_error_item}}
+
+endpoints:
+  search:
+    method: POST
+    path: /maintenance/collection-reminders/search
+    request:
+      required: []
+      fields:
+        q: {type: string, max_length: 256, default: ""}
+        owner_scope: {$enum: owner_scope, default: me}
+        reminder_state: {one_of: [{$enum: reminder_state}, {type: "null"}], default: null}
+        page: {type: integer, minimum: 1, default: 1}
+        page_size: {type: integer, minimum: 1, maximum: 200, default: 24}
+    success: {status: 200, schema: {$ref: directory_response}}
+
+  detail:
+    method: GET
+    path: /maintenance/projects/stable/{project_id}/collection-milestones
+    success: {status: 200, schema: {$ref: project_detail_response}}
+
+  follow_up:
+    method: POST
+    path: /maintenance/collection-milestones/{milestone_id}/follow-ups
+    request: {$ref: follow_up_request}
+    idempotency_scope:
+      payload_hash_fields:
+        - authenticated_actor_user_id
+        - path_milestone_id
+        - expected_version
+        - action
+        - planned_month
+        - note
+        - reason
+      global_key_reuse_for_different_actor_or_milestone: conflict_409
+    success: {status: 200, schema: {$ref: follow_up_response}}
+
+  preview:
+    method: POST
+    path: /maintenance/collection-plan-imports/preview
+    content_type: multipart/form-data
+    headers:
+      Idempotency-Key:
+        required: true
+        type: string
+        min_length: 8
+        max_length: 128
+        semantics: same_key_is_network_retry_new_key_is_explicit_repreview
+    request: {file: {type: binary, extension: .xls, max_bytes: 8388608}}
+    success: {status: 200, schema: {$ref: preview_response}}
+
+  binding_options:
+    method: GET
+    path: /maintenance/collection-plan-imports/{batch_id}/binding-options
+    query:
+      q: {type: string, min_length_after_trim: 2, max_length: 256, required: true}
+      page: {type: integer, minimum: 1, default: 1}
+      page_size: {type: integer, minimum: 1, maximum: 50, default: 20}
+    success: {status: 200, schema: {$ref: binding_options_response}}
+
+  apply:
+    method: POST
+    path: /maintenance/collection-plan-imports/{batch_id}/apply
+    request: {$ref: apply_request}
+    success: {status: 200, schema: {$ref: apply_response}}
+
+  source_file:
+    method: GET
+    path: /maintenance/collection-plan-imports/{batch_id}/source-file
+    success:
+      status: 200
+      content_type: application/vnd.ms-excel
+      headers:
+        Content-Disposition: attachment
+        Cache-Control: no-store
+
+error_contract:
+  domain_response_schema: {$ref: domain_error}
+  request_validation_response_schema: {$ref: request_validation_error}
+  statuses:
+    403:
+      example:
+        detail:
+          code: permission_denied
+          message: 无权执行此操作
+          current_version: null
+          current_data_version: null
+          issues: []
+    409:
+      example:
+        detail:
+          code: version_conflict
+          message: 数据已变化，请刷新后重试
+          current_version: 2
+          current_data_version: synthetic-version-2
+          issues: []
+    404:
+      example:
+        detail:
+          code: not_found
+          message: 资源不存在或不可见
+          current_version: null
+          current_data_version: null
+          issues: []
+    422:
+      domain_example:
+        detail:
+          code: invalid_request
+          message: 请求字段或工作簿不符合合同
+          current_version: null
+          current_data_version: null
+          issues:
+            - code: synthetic_contract_error
+              severity: blocker
+              row_key: null
+              sequence: null
+              message: 合成示例，不含业务值
+      request_validation_example:
+        detail:
+          - loc: [body, expected_version]
+            msg: Input should be greater than or equal to 1
+            type: greater_than_equal
+    413:
+      example:
+        detail:
+          code: upload_too_large
+          message: 工作簿超过上传安全上限
+          current_version: null
+          current_data_version: null
+          issues: []
+    415:
+      example:
+        detail:
+          code: unsupported_media_type
+          message: 只接受 multipart/form-data 的 .xls 文件
+          current_version: null
+          current_data_version: null
+          issues: []

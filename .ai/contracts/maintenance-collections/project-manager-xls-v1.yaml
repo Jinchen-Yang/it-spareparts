@@ -1,6 +1,21 @@
 contract_version: project-manager-xls-v1
-contract_state: candidate_for_implementation
+contract_state: approved_for_implementation
 production_apply_allowed: false
+approval:
+  business_semantics_confirmed_by_user: true
+  business_semantics_confirmed_on: "2026-08-14"
+  current_scope: parser_preview_and_isolated_apply_tests
+  production_promotion_required: true
+production_promotion_gates:
+  - exact_candidate_sha_frozen
+  - focused_and_full_ci_green
+  - real_sample_read_only_preview_matches_3_projects_19_nodes
+  - independent_spec_code_security_data_reviews_no_open_p0_p1
+  - source_owner_confirms_exact_export_contract
+  - production_apply_contract_changed_in_reviewed_git_commit
+  - fresh_db_and_uploads_backup_restored_in_isolation
+  - d9f1a3c7e5b2_to_c8e2a4f6b1d3_rehearsal_passed
+  - named_account_and_project_canary_approved
 sample:
   sha256: a783af09fa108d366a26e10fe188be52d20a9ce1fe02121bfd683d96356c8c18
   workbook_format: xls_biff
