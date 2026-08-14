@@ -21,6 +21,52 @@ safe_file() {
     || fatal "$2 must be a non-empty regular file"
 }
 
+snapshot_sealed_canary_spec() {
+  local source=$1
+  local workspace=$2
+  local snapshot="$workspace/sealed-canary-spec.json"
+  [ -d "$workspace" ] && [ ! -L "$workspace" ] \
+    && [ "$(stat -c '%a' "$workspace")" = 700 ] || return 1
+  python3 - "$source" "$snapshot" <<'PY' || return 1
+import os
+import stat
+import sys
+
+source, snapshot = sys.argv[1:3]
+source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    source_stat = os.fstat(source_fd)
+    if not stat.S_ISREG(source_stat.st_mode):
+        raise SystemExit("canary spec snapshot source is not regular")
+    with os.fdopen(source_fd, "rb", closefd=False) as stream:
+        payload = stream.read()
+finally:
+    os.close(source_fd)
+
+destination_fd = os.open(
+    snapshot,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+    0o600,
+)
+try:
+    with os.fdopen(destination_fd, "wb", closefd=False) as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.fchmod(destination_fd, 0o600)
+finally:
+    os.close(destination_fd)
+directory_fd = os.open(os.path.dirname(snapshot), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+  [ -f "$snapshot" ] && [ ! -L "$snapshot" ] \
+    && [ "$(stat -c '%a' "$snapshot")" = 600 ] || return 1
+  printf '%s\n' "$snapshot"
+}
+
 usage() {
   cat >&2 <<'EOF'
 usage: v122_collection_reminders_release.sh PACKAGE_DIR EVIDENCE_DIR preflight|freeze-writes|backup|restore-check|migrate|deploy|canary|observe|rollback-images [ARGS]
@@ -232,7 +278,7 @@ run_sealed_canary_case() {
   local spec=$1
   local case_name=$2
   local workspace=$3
-  local metadata status expected
+  local metadata status expected method header payload url
   metadata=$(python3 - "$spec" "$case_name" "$workspace" <<'PY'
 import json
 import os
@@ -300,16 +346,26 @@ meta.write_text(json.dumps({"method": case["method"], "url": base.rstrip("/") + 
 os.chmod(meta, 0o600)
 print(meta)
 PY
-)
-	  expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["expected_status"])' "$metadata")
+) || return 1
+	  expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["expected_status"])' "$metadata") || return 1
+	  method=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["method"])' "$metadata") || return 1
+	  header=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["header"])' "$metadata") || return 1
+	  payload=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["payload"])' "$metadata") || return 1
+	  url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$metadata") || return 1
 	  status=$(curl --silent --show-error --output "$workspace/$case_name.response" \
-    --write-out '%{http_code}' --request "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["method"])' "$metadata")" \
-    --header "@$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["header"])' "$metadata")" \
+    --write-out '%{http_code}' --request "$method" \
+    --header "@$header" \
     --header 'Content-Type: application/json' \
-    --data-binary "@$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["payload"])' "$metadata")" \
-	    "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$metadata")") || fatal "canary HTTP transport failed for $case_name"
-	  [ "$status" = "$expected" ] || fatal "canary HTTP status mismatch for $case_name"
-	  python3 - "$workspace/$case_name.response" "$case_name" <<'PY'
+    --data-binary "@$payload" \
+	    "$url") || {
+	    printf 'canary HTTP transport failed for %s\n' "$case_name" >&2
+	    return 1
+	  }
+	  [ "$status" = "$expected" ] || {
+	    printf 'canary HTTP status mismatch for %s\n' "$case_name" >&2
+	    return 1
+	  }
+	  python3 - "$workspace/$case_name.response" "$case_name" <<'PY' || return 1
 import json
 import pathlib
 import sys
@@ -334,7 +390,7 @@ if code != expected:
     raise SystemExit(f"{case_name} must return {expected}")
 PY
 	  python3 - "$workspace/$case_name.outcome.json" "$case_name" "$status" \
-    "$workspace/$case_name.response" <<'PY'
+    "$workspace/$case_name.response" <<'PY' || return 1
 import hashlib
 import json
 import pathlib
@@ -346,6 +402,181 @@ payload = {
     "response_sha256": hashlib.sha256(response.read_bytes()).hexdigest(),
 }
 pathlib.Path(sys.argv[1]).write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+
+run_sealed_action_cases() {
+  local spec=$1
+  local list_name=$2
+  local workspace=$3
+  local metadata_files metadata expected status failed=false
+  metadata_files=$(python3 - "$spec" "$list_name" "$workspace" <<'PY'
+import json
+import os
+import pathlib
+import re
+import sys
+
+spec = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+list_name = sys.argv[2]
+work = pathlib.Path(sys.argv[3])
+base = spec.get("base_url")
+cases = spec.get(list_name)
+username_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+if not isinstance(base, str) or not base.startswith(("http://", "https://")) or "\n" in base:
+    raise SystemExit("canary base_url is invalid")
+if list_name not in {"action_grant", "action_restore"} or not isinstance(cases, list) or not cases:
+    raise SystemExit("action control cases must be a non-empty list")
+for index, case in enumerate(cases):
+    if not isinstance(case, dict):
+        raise SystemExit("action control case must be an object")
+    path = case.get("path")
+    match = re.fullmatch(r"/api/accounts/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})", path or "")
+    body = case.get("body")
+    overrides = body.get("overrides") if isinstance(body, dict) else None
+    token = case.get("token")
+    if (
+        case.get("method") != "PUT"
+        or match is None
+        or username_pattern.fullmatch(match.group(1)) is None
+        or case.get("expected_status") != 200
+        or not isinstance(token, str)
+        or not token
+        or not isinstance(body, dict)
+        or set(body) != {"overrides"}
+        or not isinstance(overrides, dict)
+    ):
+        raise SystemExit("invalid sealed account action case")
+    name = f"{list_name}-{index:03d}"
+    header = work / f"{name}.header"
+    payload = work / f"{name}.json"
+    response = work / f"{name}.response"
+    outcome = work / f"{name}.outcome.json"
+    metadata = work / f"{name}.meta.json"
+    header.write_text(f"Authorization: Bearer {token}\n", encoding="utf-8")
+    payload.write_text(json.dumps(body, separators=(",", ":")), encoding="utf-8")
+    for sealed in (header, payload):
+        os.chmod(sealed, 0o600)
+    metadata.write_text(
+        json.dumps(
+            {
+                "case": f"{list_name}[{index}]",
+                "url": base.rstrip("/") + path,
+                "header": str(header),
+                "payload": str(payload),
+                "response": str(response),
+                "outcome": str(outcome),
+                "expected_status": 200,
+                "target": match.group(1),
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(metadata, 0o600)
+    print(metadata)
+PY
+) || return 1
+  [ -n "$metadata_files" ] || return 1
+  while IFS= read -r metadata; do
+    expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["expected_status"])' "$metadata")
+    if ! status=$(curl --silent --show-error \
+      --output "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["response"])' "$metadata")" \
+      --write-out '%{http_code}' --request PUT \
+      --header "@$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["header"])' "$metadata")" \
+      --header 'Content-Type: application/json' \
+      --data-binary "@$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["payload"])' "$metadata")" \
+      "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$metadata")"); then
+      printf 'action account update transport failed: %s\n' "$list_name" >&2
+      failed=true
+      continue
+    fi
+    if [ "$status" != "$expected" ]; then
+      printf 'action account update status mismatch: %s\n' "$list_name" >&2
+      failed=true
+      continue
+    fi
+    if ! python3 - "$metadata" "$status" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+metadata = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+request = json.loads(pathlib.Path(metadata["payload"]).read_text(encoding="utf-8"))
+response_path = pathlib.Path(metadata["response"])
+try:
+    response = json.loads(response_path.read_text(encoding="utf-8"))
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"action account response is not JSON: {exc}")
+if not isinstance(response, dict):
+    raise SystemExit("action account response must be an object")
+if response.get("username") != metadata["target"]:
+    raise SystemExit("action account response username mismatch")
+if response.get("overrides") != request["overrides"]:
+    raise SystemExit("action account response overrides mismatch")
+outcome = {
+    "case": metadata["case"],
+    "http_status": int(sys.argv[2]),
+    "response_sha256": hashlib.sha256(response_path.read_bytes()).hexdigest(),
+    "target_username_sha256": hashlib.sha256(metadata["target"].encode()).hexdigest(),
+}
+pathlib.Path(metadata["outcome"]).write_text(
+    json.dumps(outcome, sort_keys=True, separators=(",", ":")) + "\n",
+    encoding="utf-8",
+)
+PY
+    then
+      failed=true
+    fi
+  done <<<"$metadata_files"
+  [ "$failed" = false ]
+}
+
+verify_action_account_state() {
+  local spec=$1
+  local verify_case=$2
+  local expected_list=$3
+  local workspace=$4
+  run_sealed_canary_case "$spec" "$verify_case" "$workspace" || return 1
+  python3 - "$spec" "$expected_list" "$workspace/$verify_case.response" <<'PY' || return 1
+import json
+import pathlib
+import re
+import sys
+
+spec = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+cases = spec.get(sys.argv[2])
+try:
+    rows = json.loads(pathlib.Path(sys.argv[3]).read_text(encoding="utf-8"))
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"account overrides state mismatch: response is not JSON: {exc}")
+if not isinstance(cases, list) or not cases or not isinstance(rows, list):
+    raise SystemExit("account overrides state mismatch: invalid expected or actual account list")
+expected = {}
+for case in cases:
+    match = re.fullmatch(
+        r"/api/accounts/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})",
+        case.get("path", "") if isinstance(case, dict) else "",
+    )
+    body = case.get("body") if isinstance(case, dict) else None
+    if match is None or not isinstance(body, dict) or not isinstance(body.get("overrides"), dict):
+        raise SystemExit("account overrides state mismatch: invalid expected account case")
+    expected[match.group(1)] = body["overrides"]
+actual = {}
+for row in rows:
+    if not isinstance(row, dict):
+        continue
+    username = row.get("username")
+    if username not in expected:
+        continue
+    if username in actual or not isinstance(row.get("overrides"), dict):
+        raise SystemExit("account overrides state mismatch: duplicate or invalid target account")
+    actual[username] = row["overrides"]
+if set(actual) != set(expected):
+    raise SystemExit("account overrides state mismatch: target account set differs")
+if any(actual[username] != overrides for username, overrides in expected.items()):
+    raise SystemExit("account overrides state mismatch: exact overrides differ")
 PY
 }
 
@@ -690,16 +921,24 @@ if value.get("canary_project_id", sys.argv[2]) != sys.argv[2]:
 accounts=value.get("named_accounts")
 if not isinstance(accounts,dict) or len(accounts) < 2:
     raise SystemExit("canary spec needs named positive and denied accounts")
-required=("action_grant","action_verify_granted","action_restore","action_verify_restored","setup_contract","follow_up_positive","cross_project_negative","permission_negative","import_preview_positive","apply_last")
+required=("action_verify_granted","action_verify_restored","setup_contract","follow_up_positive","cross_project_negative","permission_negative","import_preview_positive","apply_last")
 for name in required:
     case=value.get(name)
     if not isinstance(case,dict): raise SystemExit("canary spec lacks case: "+name)
     if case.get("method") not in {"GET","POST"}: raise SystemExit("invalid canary method: "+name)
     if not isinstance(case.get("path"),str) or not case["path"].startswith("/"): raise SystemExit("invalid canary path: "+name)
     if not isinstance(case.get("expected_status"),int): raise SystemExit("invalid expected status: "+name)
+username_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+seen_usernames = set()
 for account_key, account in accounts.items():
     if not isinstance(account, dict):
         raise SystemExit("canary named account must be an object: "+str(account_key))
+    username = account.get("username")
+    if not isinstance(username, str) or username_pattern.fullmatch(username) is None:
+        raise SystemExit("canary named account username is unsafe: "+str(account_key))
+    if username in seen_usernames:
+        raise SystemExit("canary named account username is duplicate")
+    seen_usernames.add(username)
     role = account.get("expected_role")
     if not isinstance(role, str) or not role or "\n" in role:
         raise SystemExit("canary named account must declare expected_role: "+str(account_key))
@@ -752,6 +991,68 @@ if "action_maintenance_collection_plan_import" not in (denied_account.get("forbi
     raise SystemExit("permission-negative admin must explicitly lack import action")
 if "action_maintenance_collection_follow_up" not in (denied_account.get("forbidden_permissions") or []):
     raise SystemExit("permission-negative admin must explicitly lack follow-up action")
+
+for name in ("action_verify_granted", "action_verify_restored"):
+    case = value[name]
+    if case.get("method") != "GET" or case.get("path") != "/api/accounts" or case.get("expected_status") != 200:
+        raise SystemExit(name + " must GET the real account list endpoint")
+    if not isinstance(case.get("token"), str) or not case["token"]:
+        raise SystemExit("action verification cases require sealed control token")
+
+def validate_action_list(name):
+    cases = value.get(name)
+    if not isinstance(cases, list) or not cases:
+        raise SystemExit(name + " must be a non-empty PUT case array")
+    targets = []
+    overrides_by_target = {}
+    for case in cases:
+        if not isinstance(case, dict):
+            raise SystemExit(name + " entries must be objects")
+        path = case.get("path")
+        match = re.fullmatch(r"/api/accounts/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})", path or "")
+        if case.get("method") != "PUT" or match is None or case.get("expected_status") != 200:
+            raise SystemExit(name + " must use real single-account PUT endpoints")
+        if not isinstance(case.get("token"), str) or not case["token"]:
+            raise SystemExit(name + " entries require sealed control token")
+        body = case.get("body")
+        if not isinstance(body, dict) or set(body) != {"overrides"} or not isinstance(body["overrides"], dict):
+            raise SystemExit(name + " bodies must contain only a complete overrides object")
+        if not all(isinstance(key, str) and key and "\n" not in key and isinstance(enabled, bool)
+                   for key, enabled in body["overrides"].items()):
+            raise SystemExit(name + " overrides must be boolean permission entries")
+        target = match.group(1)
+        targets.append(target)
+        overrides_by_target[target] = body["overrides"]
+    if len(targets) != len(set(targets)):
+        raise SystemExit(name + " target usernames must be unique")
+    return targets, overrides_by_target
+
+grant_targets, grant_overrides = validate_action_list("action_grant")
+restore_targets, restore_overrides = validate_action_list("action_restore")
+expected_targets = {
+    account_for("import_preview_positive")["username"],
+    account_for("follow_up_positive")["username"],
+    account_for("permission_negative")["username"],
+}
+if len(expected_targets) != 3 or set(grant_targets) != expected_targets:
+    raise SystemExit("action grant targets must exactly match the three named canary accounts")
+if restore_targets != list(reversed(grant_targets)):
+    raise SystemExit("action restore targets must reverse the grant order")
+mutable_during_canary = {
+    "page_maintenance",
+    "page_maintenance_beta",
+    "action_maintenance_collection_plan_import",
+    "action_maintenance_collection_follow_up",
+}
+missing = object()
+for target in grant_targets:
+    original = restore_overrides[target]
+    granted = grant_overrides[target]
+    if not set(original) <= set(granted):
+        raise SystemExit("action grant must not delete original override keys")
+    for key in set(original) | set(granted):
+        if key not in mutable_during_canary and original.get(key, missing) != granted.get(key, missing):
+            raise SystemExit("action grant may not add or change unrelated overrides")
 
 follow_path = re.compile(
     r"^/api/maintenance/collection-milestones/([A-Za-z0-9][A-Za-z0-9_-]{0,35}|\{canary_milestone_id\})/follow-ups$"
@@ -846,9 +1147,6 @@ if apply_case.get("method") != "POST" or apply_case.get("path") != "/api/mainten
     raise SystemExit("apply_last must use the dynamic collection-plan apply endpoint")
 if apply_case.get("account") != preview.get("account"):
     raise SystemExit("preview and apply must use the same named batch owner")
-for name in ("action_grant","action_verify_granted","action_restore","action_verify_restored"):
-    if not isinstance(value[name].get("token"),str) or not value[name]["token"]:
-        raise SystemExit("action control cases require sealed control token")
 if value["cross_project_negative"]["expected_status"] != 403 or value["permission_negative"]["expected_status"] != 403:
     raise SystemExit("negative canary cases must expect 403")
 PY
@@ -1067,26 +1365,93 @@ case "$COMMAND" in
     [ "$#" -eq 2 ] || usage
     require_production_ready
     CANARY_PROJECT_ID=$1
-    CANARY_SPEC=$(realpath -e -- "$2")
+    CANARY_SPEC_INPUT=$(realpath -e -- "$2")
     [ "$CANARY_PROJECT_ID" = "$(manifest_get runtime_flags.maintenance_collection_canary_project_id)" ] \
       || fatal "canary project id does not match manifest"
-    [ -f "$CANARY_SPEC" ] && [ ! -L "$CANARY_SPEC" ] \
-      && [ "$(stat -c '%a' "$CANARY_SPEC")" = 600 ] \
+    [ -f "$CANARY_SPEC_INPUT" ] && [ ! -L "$CANARY_SPEC_INPUT" ] \
+      && [ "$(stat -c '%a' "$CANARY_SPEC_INPUT")" = 600 ] \
       || fatal "canary spec must be a mode-600 regular file"
-    validate_canary_spec "$CANARY_SPEC" "$CANARY_PROJECT_ID"
+    validate_canary_spec "$CANARY_SPEC_INPUT" "$CANARY_PROJECT_ID"
+    CANARY_SPEC_PREHASH=$(sha256sum "$CANARY_SPEC_INPUT" | awk '{print $1}') \
+      || fatal "canary spec SHA-256 could not be read"
+    [[ "$CANARY_SPEC_PREHASH" =~ ^[0-9a-f]{64}$ ]] \
+      || fatal "canary spec SHA-256 is invalid"
     require_phase deployed
+    CANARY_WORK=$(mktemp -d -t v122-canary.XXXXXXXX) \
+      || fatal "canary private workspace could not be created"
+    chmod 700 "$CANARY_WORK" || {
+      rm -rf -- "$CANARY_WORK"
+      fatal "canary private workspace could not be secured"
+    }
+    CANARY_SPEC=$(snapshot_sealed_canary_spec "$CANARY_SPEC_INPUT" "$CANARY_WORK") || {
+      rm -rf -- "$CANARY_WORK"
+      fatal "canary spec snapshot could not be created"
+    }
+    CANARY_SPEC_SHA256=$(sha256sum "$CANARY_SPEC" | awk '{print $1}') || {
+      rm -rf -- "$CANARY_WORK"
+      fatal "canary spec snapshot SHA-256 could not be read"
+    }
+    if [[ ! "$CANARY_SPEC_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+      || [ "$CANARY_SPEC_SHA256" != "$CANARY_SPEC_PREHASH" ]; then
+      rm -rf -- "$CANARY_WORK"
+      fatal "canary spec snapshot does not match the validated input"
+    fi
+    if ! validate_canary_spec "$CANARY_SPEC" "$CANARY_PROJECT_ID"; then
+      rm -rf -- "$CANARY_WORK"
+      fatal "canary spec snapshot validation failed"
+    fi
     ;;
   observe) require_production_ready; [ "$#" -eq 1 ] || usage; case "$1" in 0|5|15|30) ;; *) fatal "observe point must be 0, 5, 15, or 30";; esac ;;
   rollback-images)
     [ "$#" -le 1 ] || usage
     require_phase_in preflight frozen backup restore_checked migrated deployed canary observe_0 observe_5 observe_15 observed
-    STATE_ACTIONS_GRANTED=$(python3 -c 'import json,sys; print("true" if json.load(open(sys.argv[1])).get("actions_granted") else "false")' "$STATE_FILE")
+    STATE_ACTIONS_GRANTED=$(python3 -c 'import json,sys; print("true" if json.load(open(sys.argv[1])).get("actions_granted") else "false")' "$STATE_FILE") \
+      || fatal "rollback action state is unreadable"
     if [ "$STATE_ACTIONS_GRANTED" = true ]; then
       [ "$#" -eq 1 ] || fatal "mode-600 canary spec is required to restore action permissions"
-      ROLLBACK_SPEC=$(realpath -e -- "$1")
-      [ -f "$ROLLBACK_SPEC" ] && [ ! -L "$ROLLBACK_SPEC" ] \
-        && [ "$(stat -c '%a' "$ROLLBACK_SPEC")" = 600 ] \
+      ROLLBACK_SPEC_INPUT=$(realpath -e -- "$1")
+      [ -f "$ROLLBACK_SPEC_INPUT" ] && [ ! -L "$ROLLBACK_SPEC_INPUT" ] \
+        && [ "$(stat -c '%a' "$ROLLBACK_SPEC_INPUT")" = 600 ] \
         || fatal "rollback canary spec must be a mode-600 regular file"
+      validate_canary_spec "$ROLLBACK_SPEC_INPUT" \
+        "$(manifest_get runtime_flags.maintenance_collection_canary_project_id)"
+      ROLLBACK_SPEC_PREHASH=$(sha256sum "$ROLLBACK_SPEC_INPUT" | awk '{print $1}') \
+        || fatal "rollback canary spec SHA-256 could not be read"
+      [[ "$ROLLBACK_SPEC_PREHASH" =~ ^[0-9a-f]{64}$ ]] \
+        || fatal "rollback canary spec SHA-256 is invalid"
+      STATE_CANARY_SPEC_SHA256=$(state_get canary_spec_sha256) \
+        || fatal "rollback state lacks the sealed canary spec SHA-256"
+      [[ "$STATE_CANARY_SPEC_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+        || fatal "rollback state has an invalid canary spec SHA-256"
+      ROLLBACK_WORK=$(mktemp -d -t v122-rollback.XXXXXXXX) \
+        || fatal "rollback private workspace could not be created"
+      chmod 700 "$ROLLBACK_WORK" || {
+        rm -rf -- "$ROLLBACK_WORK"
+        fatal "rollback private workspace could not be secured"
+      }
+      ROLLBACK_SPEC=$(snapshot_sealed_canary_spec "$ROLLBACK_SPEC_INPUT" "$ROLLBACK_WORK") || {
+        rm -rf -- "$ROLLBACK_WORK"
+        fatal "rollback canary spec snapshot could not be created"
+      }
+      ROLLBACK_SPEC_SHA256=$(sha256sum "$ROLLBACK_SPEC" | awk '{print $1}') \
+        || {
+          rm -rf -- "$ROLLBACK_WORK"
+          fatal "rollback canary spec snapshot SHA-256 could not be read"
+        }
+      if [[ ! "$ROLLBACK_SPEC_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+        || [ "$ROLLBACK_SPEC_SHA256" != "$ROLLBACK_SPEC_PREHASH" ]; then
+        rm -rf -- "$ROLLBACK_WORK"
+        fatal "rollback canary spec snapshot does not match the validated input"
+      fi
+      if [ "$ROLLBACK_SPEC_SHA256" != "$STATE_CANARY_SPEC_SHA256" ]; then
+        rm -rf -- "$ROLLBACK_WORK"
+        fatal "rollback canary spec snapshot does not match the successful canary"
+      fi
+      if ! validate_canary_spec "$ROLLBACK_SPEC" \
+        "$(manifest_get runtime_flags.maintenance_collection_canary_project_id)"; then
+        rm -rf -- "$ROLLBACK_WORK"
+        fatal "rollback canary spec snapshot validation failed"
+      fi
     else
       [ "$#" -eq 0 ] || usage
     fi
@@ -1120,10 +1485,23 @@ case "$COMMAND" in
 	    [ -z "$(app_cid)" ] || freeze_abort "app container did not stop"
 	    DBC=$(db_cid) || freeze_abort "db container is not running"
 	    [ -n "$DBC" ] || freeze_abort "db container is not running"
-	    PROCESSING=$(docker exec "$DBC" psql -X -U spareparts -d spareparts -At -c \
-	      "SELECT count(*) FROM maintenance_collection_plan_import_batch WHERE status = 'processing';") \
+	    IMPORT_TABLE_EXISTS=$(docker exec "$DBC" psql -X -U spareparts -d spareparts -At \
+	      -v ON_ERROR_STOP=1 -c \
+	      "SELECT to_regclass('public.maintenance_collection_plan_import_batch') IS NOT NULL;") \
 	      || freeze_abort "could not check collection import processing"
-	    [ "$PROCESSING" = 0 ] || freeze_abort "collection import batches are still processing"
+	    case "$IMPORT_TABLE_EXISTS" in
+	      f) PROCESSING=0 ;;
+	      t)
+	        PROCESSING=$(docker exec "$DBC" psql -X -U spareparts -d spareparts -At \
+	          -v ON_ERROR_STOP=1 -c \
+	          "SELECT count(*) FROM maintenance_collection_plan_import_batch WHERE status = 'processing';") \
+	          || freeze_abort "could not check collection import processing"
+	        [[ "$PROCESSING" =~ ^[0-9]+$ ]] \
+	          || freeze_abort "could not check collection import processing"
+	        ;;
+	      *) freeze_abort "could not check collection import processing" ;;
+	    esac
+	    [ "$PROCESSING" -eq 0 ] || freeze_abort "collection import batches are still processing"
 	    advance_phase frozen processing_batches 0 writes_closed true \
 	      || freeze_abort "could not persist frozen phase"
 	    trap - HUP INT TERM
@@ -1325,6 +1703,8 @@ PY
     ;;
   canary)
     shift 2
+    cleanup_canary_work() { rm -rf -- "$CANARY_WORK"; }
+    trap cleanup_canary_work EXIT
     update_env_key MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED false
     update_env_key MAINTENANCE_COLLECTION_CANARY_PROJECT_ID "$CANARY_PROJECT_ID"
     compose up --no-deps --no-build --force-recreate -d app
@@ -1332,20 +1712,35 @@ PY
     RUNNING_FLAGS=$(compose exec -T app sh -ceu 'printf "%s\n%s\n" "$MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED" "$MAINTENANCE_COLLECTION_CANARY_PROJECT_ID"')
     [ "$RUNNING_FLAGS" = "false
 $CANARY_PROJECT_ID" ] || fatal "running canary configuration readback mismatch"
-    CANARY_WORK=$(mktemp -d -t v122-canary.XXXXXXXX)
-    cleanup_canary_work() { rm -rf -- "$CANARY_WORK"; }
     APPLY_OPEN=false
     ACTIONS_GRANTED=false
     emergency_close_canary() {
       local original_status=${1:-$?}
+      local cleanup_failed=false
+      local running_flags=''
       trap - ERR HUP INT TERM
-      update_env_key MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED false || true
-      if [ "$ACTIONS_GRANTED" = true ]; then
-        run_sealed_canary_case "$CANARY_SPEC" action_restore "$CANARY_WORK" || true
-        run_sealed_canary_case "$CANARY_SPEC" action_verify_restored "$CANARY_WORK" || true
+      update_env_key MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED false \
+        || cleanup_failed=true
+      compose up --no-deps --no-build --force-recreate -d app >/dev/null 2>&1 \
+        || cleanup_failed=true
+      running_flags=$(compose exec -T app sh -ceu \
+        'printf "%s\n%s\n" "$MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED" "$MAINTENANCE_COLLECTION_CANARY_PROJECT_ID"') \
+        || cleanup_failed=true
+      if [ "$running_flags" != "false
+$CANARY_PROJECT_ID" ]; then
+        printf 'running canary cleanup configuration readback mismatch\n' >&2
+        cleanup_failed=true
       fi
-      compose up --no-deps --no-build --force-recreate -d app >/dev/null 2>&1 || true
-      return "$original_status"
+      if [ "$ACTIONS_GRANTED" = true ]; then
+        run_sealed_action_cases "$CANARY_SPEC" action_restore "$CANARY_WORK" \
+          || cleanup_failed=true
+        verify_action_account_state "$CANARY_SPEC" action_verify_restored \
+          action_restore "$CANARY_WORK" || cleanup_failed=true
+      fi
+      if [ "$original_status" -ne 0 ]; then
+        return "$original_status"
+      fi
+      [ "$cleanup_failed" = false ]
     }
     canary_exit_guard() {
       local original_status=$?
@@ -1360,9 +1755,12 @@ $CANARY_PROJECT_ID" ] || fatal "running canary configuration readback mismatch"
     trap 'exit 130' HUP INT TERM
     # Explicit action grants are part of the sealed release input.  A failed
     # grant or verification triggers the emergency restore path above.
-    run_sealed_canary_case "$CANARY_SPEC" action_grant "$CANARY_WORK"
+    verify_action_account_state "$CANARY_SPEC" action_verify_restored \
+      action_restore "$CANARY_WORK"
     ACTIONS_GRANTED=true
-    run_sealed_canary_case "$CANARY_SPEC" action_verify_granted "$CANARY_WORK"
+    run_sealed_action_cases "$CANARY_SPEC" action_grant "$CANARY_WORK"
+    verify_action_account_state "$CANARY_SPEC" action_verify_granted \
+      action_grant "$CANARY_WORK"
     login_named_canary_accounts "$CANARY_SPEC" "$CANARY_WORK"
     # The request sequence is deliberately fixed for first deployment: create a
     # real canary contract, preview the real workbook with writes closed, prove
@@ -1388,7 +1786,12 @@ $CANARY_PROJECT_ID" ] || fatal "running apply canary configuration readback mism
     run_sealed_canary_case "$CANARY_SPEC" permission_negative "$CANARY_WORK"
     [ "$(collection_domain_fingerprint)" = "$DOMAIN_BEFORE" ] \
       || fatal "permission-negative canary changed collection domain state"
-    python3 - "$CANARY_WORK" "$EVIDENCE_DIR/canary-evidence.json" <<'PY'
+    FINAL_CANARY_SPEC_SHA256=$(sha256sum "$CANARY_SPEC" | awk '{print $1}') \
+      || fatal "sealed canary spec snapshot SHA-256 could not be read"
+    [ "$FINAL_CANARY_SPEC_SHA256" = "$CANARY_SPEC_SHA256" ] \
+      || fatal "sealed canary spec snapshot changed during execution"
+    python3 - "$CANARY_WORK" "$EVIDENCE_DIR/canary-evidence.json" \
+      "$CANARY_SPEC_SHA256" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -1405,6 +1808,7 @@ account = work / "named-account-readback.json"
 payload = {
     "format": "v122-canary-evidence-v1",
     "cases": outcomes,
+    "canary_spec_sha256": sys.argv[3],
     "named_account_readback_sha256": hashlib.sha256(account.read_bytes()).hexdigest(),
     "contains_secrets": False,
 }
@@ -1413,6 +1817,7 @@ PY
 	    advance_phase canary \
 	      canary_project_id "$CANARY_PROJECT_ID" \
 	      apply_enabled true actions_granted true \
+	      canary_spec_sha256 "$CANARY_SPEC_SHA256" \
 	      canary_evidence_sha256 "$(sha256sum "$EVIDENCE_DIR/canary-evidence.json" | awk '{print $1}')"
 	    trap - EXIT ERR HUP INT TERM
 	    rm -rf -- "$CANARY_WORK"
@@ -1503,15 +1908,33 @@ PY
 	      observe_uploads_total_bytes "$UPLOADS_BYTES"
 	    ;;
   rollback-images)
+    if [ "${STATE_ACTIONS_GRANTED:-false}" = true ]; then
+      cleanup_rollback_work() {
+        [ -z "${ROLLBACK_WORK:-}" ] || rm -rf -- "$ROLLBACK_WORK"
+      }
+      trap cleanup_rollback_work EXIT
+    fi
     close_collection_writes
     if [ "${STATE_ACTIONS_GRANTED:-false}" = true ]; then
-      ROLLBACK_WORK=$(mktemp -d -t v122-rollback.XXXXXXXX)
-      if ! run_sealed_canary_case "$ROLLBACK_SPEC" action_restore "$ROLLBACK_WORK" \
-        || ! run_sealed_canary_case "$ROLLBACK_SPEC" action_verify_restored "$ROLLBACK_WORK"; then
-        rm -rf -- "$ROLLBACK_WORK"
+      CURRENT_ROLLBACK_SPEC_SHA256=$(sha256sum "$ROLLBACK_SPEC" | awk '{print $1}') \
+        || fatal "rollback canary spec snapshot SHA-256 could not be read"
+      [ "$CURRENT_ROLLBACK_SPEC_SHA256" = "$ROLLBACK_SPEC_SHA256" ] \
+        || fatal "rollback canary spec snapshot changed before execution"
+      if ! verify_action_account_state "$ROLLBACK_SPEC" action_verify_granted \
+        action_grant "$ROLLBACK_WORK"; then
+        cleanup_rollback_work
+        fatal "live action permissions differ from the successful canary; images were not changed"
+      fi
+      RESTORE_OK=true
+      run_sealed_action_cases "$ROLLBACK_SPEC" action_restore "$ROLLBACK_WORK" \
+        || RESTORE_OK=false
+      verify_action_account_state "$ROLLBACK_SPEC" action_verify_restored \
+        action_restore "$ROLLBACK_WORK" || RESTORE_OK=false
+      if [ "$RESTORE_OK" != true ]; then
+        cleanup_rollback_work
         fatal "action permission restore failed; images were not changed"
       fi
-      python3 - "$ROLLBACK_WORK" "$EVIDENCE_DIR/action-restore-evidence.json" <<'PY'
+      if ! python3 - "$ROLLBACK_WORK" "$EVIDENCE_DIR/action-restore-evidence.json" <<'PY'
 import json
 import pathlib
 import sys
@@ -1519,15 +1942,42 @@ work = pathlib.Path(sys.argv[1])
 cases = [json.loads(path.read_text()) for path in sorted(work.glob("*.outcome.json"))]
 pathlib.Path(sys.argv[2]).write_text(json.dumps({"format":"v122-action-restore-evidence-v1","outcomes":cases,"contains_secrets":False}, sort_keys=True, separators=(",", ":")) + "\n")
 PY
-      rm -rf -- "$ROLLBACK_WORK"
+      then
+        cleanup_rollback_work
+        fatal "action permission restore evidence write failed; images were not changed"
+      fi
+      ACTION_RESTORE_EVIDENCE_SHA256=$(sha256sum \
+        "$EVIDENCE_DIR/action-restore-evidence.json" | awk '{print $1}') \
+        || fatal "action permission restore evidence SHA-256 could not be read"
+      [[ "$ACTION_RESTORE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+        || fatal "action permission restore evidence SHA-256 is invalid"
+      CURRENT_ROLLBACK_SPEC_SHA256=$(sha256sum "$ROLLBACK_SPEC" | awk '{print $1}') \
+        || fatal "rollback canary spec snapshot SHA-256 could not be read"
+      [ "$CURRENT_ROLLBACK_SPEC_SHA256" = "$ROLLBACK_SPEC_SHA256" ] \
+        || fatal "rollback canary spec snapshot changed during execution"
+      cleanup_rollback_work
+      ROLLBACK_WORK=''
+      trap - EXIT
     fi
     printf 'rollback-images requested; additive schema is retained; no automatic downgrade; restore DB/uploads only after incident approval\n'
     retag_and_start_exact_images \
       "$(manifest_get previous_images.app_image_id)" \
       "$(manifest_get previous_images.frontend_image_id)"
-    advance_phase rolled_back \
-      actions_granted false apply_enabled false \
-      rollback_note 'images-actions-and-flags-only; no downgrade/delete/automatic restore'
+    if [ "${STATE_ACTIONS_GRANTED:-false}" = true ]; then
+      CURRENT_ACTION_RESTORE_EVIDENCE_SHA256=$(sha256sum \
+        "$EVIDENCE_DIR/action-restore-evidence.json" | awk '{print $1}') \
+        || fatal "action permission restore evidence SHA-256 could not be read"
+      [ "$CURRENT_ACTION_RESTORE_EVIDENCE_SHA256" = "$ACTION_RESTORE_EVIDENCE_SHA256" ] \
+        || fatal "action permission restore evidence changed before state binding"
+      advance_phase rolled_back \
+        actions_granted false apply_enabled false \
+        action_restore_evidence_sha256 "$ACTION_RESTORE_EVIDENCE_SHA256" \
+        rollback_note 'images-actions-and-flags-only; no downgrade/delete/automatic restore'
+    else
+      advance_phase rolled_back \
+        actions_granted false apply_enabled false \
+        rollback_note 'images-actions-and-flags-only; no downgrade/delete/automatic restore'
+    fi
     ;;
   *)
     usage
