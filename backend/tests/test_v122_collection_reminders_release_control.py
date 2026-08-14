@@ -650,6 +650,24 @@ def test_release_phase_order_rejects_skip_repeat_and_regression_without_docker(t
     assert not calls.exists()
 
 
+def test_release_preflight_uses_defined_safe_file_and_records_state(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    docker = """
+    if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"config -q\"* ]]; then exit 0; fi
+    exit 97
+    """
+    env, evidence, calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "preflight"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "config -q" in calls.read_text()
+    assert json.loads((evidence / "release-state.json").read_text())["phase"] == "preflight"
+
+
 def test_release_freeze_closes_apply_stops_app_and_persists_frozen_state(tmp_path: Path):
     package = _production_package(tmp_path / "pkg")
     docker = """
@@ -667,6 +685,39 @@ def test_release_freeze_closes_apply_stops_app_and_persists_frozen_state(tmp_pat
     assert "MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=false" in (Path(env["V122_APP_DIR"]) / ".env").read_text()
     assert "stop app" in calls.read_text()
     assert json.loads((evidence / "release-state.json").read_text())["phase"] == "frozen"
+
+
+def test_release_migrate_uses_exact_target_app_image_without_build_and_verifies_head(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    migrated_flag = tmp_path / "migrated-flag"
+    docker = f"""
+    if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"ps -q db\"* ]]; then echo db-cid; exit 0; fi
+    if [[ \"$*\" == *\"image inspect\"* ]]; then echo \"${{!#}}\"; exit 0; fi
+    if [[ \"$*\" == *\"exec db-cid psql\"* && \"$*\" == *\"SELECT version_num FROM alembic_version\"* ]]; then
+      if [ -f {migrated_flag} ]; then echo c8e2a4f6b1d3; else echo d9f1a3c7e5b2; fi
+      exit 0
+    fi
+    if [[ \"$*\" == *\"tag {IMAGE_ID} it-spareparts-app:latest\"* ]]; then exit 0; fi
+    if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"run --rm --no-deps --no-build\"* && \"$*\" == *\"alembic upgrade c8e2a4f6b1d3\"* ]]; then touch {migrated_flag}; exit 0; fi
+    exit 97
+    """
+    env, evidence, calls, _backup_root = _release_test_env(
+        tmp_path / "runtime",
+        package,
+        docker_body=docker,
+    )
+    _write_release_state(evidence, package, phase="restore_checked")
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "migrate"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    assert completed.returncode == 0, completed.stderr
+    call_text = calls.read_text()
+    assert f"tag {IMAGE_ID} it-spareparts-app:latest" in call_text
+    assert "run --rm --no-deps --no-build" in call_text
+    assert json.loads((evidence / "release-state.json").read_text())["phase"] == "migrated"
 
 
 def test_release_deploy_and_rollback_retag_exact_image_ids_without_build(tmp_path: Path):

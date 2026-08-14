@@ -16,6 +16,11 @@ fatal() {
   exit 1
 }
 
+safe_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] && [ -s "$1" ] \
+    || fatal "$2 must be a non-empty regular file"
+}
+
 usage() {
   cat >&2 <<'EOF'
 usage: v122_collection_reminders_release.sh PACKAGE_DIR EVIDENCE_DIR preflight|freeze-writes|backup|restore-check|migrate|deploy|canary|observe|rollback-images [ARGS]
@@ -161,13 +166,19 @@ require_exact_image() {
     || fatal "exact Docker image is not available: $image_id"
 }
 
+retag_exact_app_image() {
+  local app_image=$1
+  require_exact_image "$app_image"
+  docker tag "$app_image" it-spareparts-app:latest
+}
+
 retag_and_start_exact_images() {
   local app_image=$1
   local frontend_image=$2
   local app_container frontend_container
   require_exact_image "$app_image"
   require_exact_image "$frontend_image"
-  docker tag "$app_image" it-spareparts-app:latest
+  retag_exact_app_image "$app_image"
   docker tag "$frontend_image" it-spareparts-frontend:latest
   compose up --no-deps --no-build --force-recreate -d app frontend
   app_container=$(app_cid)
@@ -576,7 +587,13 @@ PY
     [ -n "$DBC" ] || fatal "db container is not running"
     CURRENT=$(docker exec "$DBC" psql -X -U spareparts -d spareparts -At -c 'SELECT version_num FROM alembic_version;')
     [ "$CURRENT" = "$FROM_REV" ] || fatal "production DB is not at d9 before migrate"
-    compose run --rm -e MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=false app alembic upgrade "$TO_REV"
+    close_collection_writes
+    retag_exact_app_image "$(manifest_get images.app_image_id)"
+    compose run --rm --no-deps --no-build \
+      -e MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=false \
+      app alembic upgrade "$TO_REV"
+    CURRENT=$(docker exec "$DBC" psql -X -U spareparts -d spareparts -At -c 'SELECT version_num FROM alembic_version;')
+    [ "$CURRENT" = "$TO_REV" ] || fatal "production DB did not reach c8 after migrate"
     advance_phase migrated
     ;;
   deploy)

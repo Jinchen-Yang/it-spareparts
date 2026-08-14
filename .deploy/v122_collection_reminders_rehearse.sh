@@ -255,6 +255,7 @@ for path in files:
         str(path.stat().st_uid).encode(),
         str(path.stat().st_gid).encode(),
         str(path.stat().st_size).encode(),
+        str(path.stat().st_mtime_ns).encode(),
         hashlib.sha256(path.read_bytes()).hexdigest().encode(),
     ])
     digest.update(row + b"\n")
@@ -273,14 +274,18 @@ for attempt in $(seq 1 60); do
 done
 docker exec -i "$DB_NAME" psql -X -v ON_ERROR_STOP=1 -U restore_admin -d postgres <"$GLOBALS_FILE"
 docker exec "$DB_NAME" createdb -U restore_admin -O spareparts spareparts
-docker exec -i "$DB_NAME" pg_restore -U restore_admin -d spareparts \
+docker exec -i "$DB_NAME" pg_restore -U spareparts -d spareparts \
   --exit-on-error --no-owner --no-acl <"$DB_DUMP"
 BEFORE_HEAD=$(docker exec "$DB_NAME" psql -X -U restore_admin -d spareparts -At \
   -c 'SELECT version_num FROM alembic_version;')
 [ "$BEFORE_HEAD" = "$FROM_REV" ] || fatal "restored backup is not at d9"
+SPAREPARTS_ROLE=$(docker exec "$DB_NAME" psql -X -U spareparts -d spareparts -At \
+  -c "SELECT current_user || ':' || current_database();")
+[ "$SPAREPARTS_ROLE" = "spareparts:spareparts" ] \
+  || fatal "restored spareparts application role cannot connect"
 
 docker run --rm --pull=never --network "$NETWORK_NAME" \
-  -e DATABASE_URL=postgresql+psycopg://restore_admin@db:5432/spareparts \
+  -e DATABASE_URL=postgresql+psycopg://spareparts@db:5432/spareparts \
   -e ENVIRONMENT=dev \
   -e MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=false \
   -e MAINTENANCE_COLLECTION_CANARY_PROJECT_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["runtime_flags"]["maintenance_collection_canary_project_id"])' "$PACKAGE_MANIFEST")" \
@@ -387,7 +392,7 @@ start_app() {
   docker rm -f "$APP_NAME" >/dev/null 2>&1 || true
   docker run -d --pull=never --name "$APP_NAME" --network "$NETWORK_NAME" --network-alias app \
     -v "$UPLOADS_DIR:/app/data/raw:rw" \
-    -e DATABASE_URL=postgresql+psycopg://restore_admin@db:5432/spareparts \
+    -e DATABASE_URL=postgresql+psycopg://spareparts@db:5432/spareparts \
     -e ENVIRONMENT=dev -e SECRET_KEY=v122-rehearsal-secret-only \
     -e ADMIN_PASSWORD=v122-rehearsal-admin-disabled \
     -e MAINTENANCE_BETA_ENABLED=true \
@@ -402,7 +407,35 @@ start_app() {
     sleep 1
   done
 }
+SPEC_USERNAME=$(python3 - "$APPLY_SPEC" <<'PY'
+import json
+import pathlib
+import sys
+
+spec = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+username = spec.get("username")
+if not isinstance(username, str) or not username or "\n" in username:
+    raise SystemExit("rehearsal apply spec lacks a safe named username")
+print(username)
+PY
+)
+GRANT_PERMS_JSON='{"page_maintenance":true,"page_maintenance_beta":true,"data_purchase_cost":true,"data_profit":true,"action_maintenance_collection_follow_up":true,"action_maintenance_collection_plan_import":true}'
+UPDATED_NAMED_ACCOUNT=$(docker exec "$DB_NAME" psql -X -U spareparts -d spareparts -At \
+  -v username="$SPEC_USERNAME" -v perms="$GRANT_PERMS_JSON" <<'SQL'
+UPDATE sys_user
+SET template_perms = COALESCE(template_perms, '{}'::jsonb) || :'perms'::jsonb,
+    perm_overrides = COALESCE(perm_overrides, '{}'::jsonb) || :'perms'::jsonb,
+    permissions = COALESCE(permissions, '{}'::jsonb) || :'perms'::jsonb,
+    token_version = token_version + 1
+WHERE username = :'username' AND is_active IS TRUE
+RETURNING 1;
+SQL
+)
+[ "$UPDATED_NAMED_ACCOUNT" = "1" ] \
+  || fatal "named rehearsal account not found or inactive in restored DB"
 start_app false
+HTTP_PREVIEW_DOMAIN_BEFORE=$(docker exec "$DB_NAME" psql -X -U spareparts -d spareparts -At -c \
+  "SELECT (SELECT count(*) FROM maintenance_collection_milestone)::text || ':' || (SELECT count(*) FROM maintenance_collection_plan_source_binding)::text || ':' || (SELECT count(*) FROM maintenance_collection_milestone_operation)::text;")
 docker run --rm --pull=never --network "$NETWORK_NAME" \
   -v "$SAMPLE_FILE:/sample.xls:ro" -v "$APPLY_SPEC:/spec.json:ro" \
   -v "$WORK:/evidence:rw" --entrypoint python "$APP_IMAGE_ID" - preview \
@@ -466,8 +499,12 @@ status, denied = request(
 if status != 403 or denied.get("detail", {}).get("code") != "permission_denied":
     raise SystemExit("apply=false did not fail closed")
 pathlib.Path("/evidence/apply-request.json").write_text(json.dumps({"batch_id": preview["batch_id"], "token": token, "body": apply_body}))
-print(json.dumps({"preview_http_status": status if False else 200, "apply_false_http_status": 403, "domain_write_count": 0}, sort_keys=True))
+print(json.dumps({"preview_http_status": 200, "apply_false_http_status": 403}, sort_keys=True))
 PY
+HTTP_PREVIEW_DOMAIN_AFTER=$(docker exec "$DB_NAME" psql -X -U spareparts -d spareparts -At -c \
+  "SELECT (SELECT count(*) FROM maintenance_collection_milestone)::text || ':' || (SELECT count(*) FROM maintenance_collection_plan_source_binding)::text || ':' || (SELECT count(*) FROM maintenance_collection_milestone_operation)::text;")
+[ "$HTTP_PREVIEW_DOMAIN_BEFORE" = "$HTTP_PREVIEW_DOMAIN_AFTER" ] \
+  || fatal "actual HTTP preview changed domain tables"
 start_app true
 docker run --rm --pull=never --network "$NETWORK_NAME" \
   -v "$WORK:/evidence:rw" --entrypoint python "$APP_IMAGE_ID" - \
@@ -507,7 +544,7 @@ python3 - "$WORK/output/rehearsal-evidence.json" "$REHEARSAL_STAGE" "$TARGET_SHA
   "$PARENT_SHA" "$BEFORE_HEAD" "$AFTER_HEAD" "$DB_DUMP" "$GLOBALS_FILE" \
   "$UPLOADS_ARCHIVE" "$CANDIDATE_COMPOSE" "$CONTRACT_FILE" "$PACKAGE_MANIFEST" \
   "$APP_IMAGE_ID" "$FRONTEND_IMAGE_ID" "$DB_IMAGE_ID" "$DOMAIN_BEFORE" "$DOMAIN_AFTER" \
-  "$APPLIED_ROWS" "$AUDIT_ROWS" <<'PY'
+  "$HTTP_PREVIEW_DOMAIN_BEFORE" "$HTTP_PREVIEW_DOMAIN_AFTER" "$APPLIED_ROWS" "$AUDIT_ROWS" <<'PY'
 import datetime as dt
 import hashlib
 import json
@@ -518,11 +555,11 @@ import sys
 out = pathlib.Path(sys.argv[1])
 stage, target, parent, before, after = sys.argv[2:7]
 db_dump, globals_file, uploads, compose, contract, manifest = map(pathlib.Path, sys.argv[7:13])
-app_image, frontend_image, db_image, domain_before, domain_after, applied, audit = sys.argv[13:20]
+app_image, frontend_image, db_image, parser_before, parser_after, http_preview_before, http_preview_after, applied, audit = sys.argv[13:22]
 payload = {
     "format": "v122-collection-reminders-rehearsal-v2",
     "stage": stage,
-    "success": before == "d9f1a3c7e5b2" and after == "c8e2a4f6b1d3" and domain_before == domain_after and int(applied) > 0 and int(audit) > 0,
+    "success": before == "d9f1a3c7e5b2" and after == "c8e2a4f6b1d3" and parser_before == parser_after and http_preview_before == http_preview_after and int(applied) > 0 and int(audit) > 0,
     "target_sha": target,
     "parent_production_sha": parent,
     "from_revision": before,
@@ -540,7 +577,8 @@ payload = {
     "globals_restore": True,
     "uploads_restore_verified": True,
     "db_uploads_references_complete": True,
-    "preview_zero_domain_write": domain_before == domain_after,
+    "parser_zero_domain_write": parser_before == parser_after,
+    "preview_zero_domain_write": http_preview_before == http_preview_after,
     "synthetic_apply_verified": int(applied) > 0 and int(audit) > 0,
     "completed_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
 }
