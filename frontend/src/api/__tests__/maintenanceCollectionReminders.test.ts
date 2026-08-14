@@ -369,6 +369,19 @@ describe("collection reminder capabilities", () => {
       page_maintenance_beta: false,
     }));
     expect(readMaintenanceCapabilities().canViewCollectionReminders).toBe(false);
+
+    // The Beta allowlist bit remains mandatory for a local admin session.
+    localStorage.setItem("role", "admin");
+    localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance: true,
+      page_maintenance_beta: false,
+      data_profit: true,
+      action_maintenance_collection_follow_up: true,
+      action_maintenance_collection_plan_import: true,
+    }));
+    expect(readMaintenanceCapabilities().canViewCollectionReminders).toBe(false);
+    expect(readMaintenanceCapabilities().canFollowUpCollection).toBe(false);
+    expect(readMaintenanceCapabilities().canImportCollectionPlan).toBe(false);
   });
 
   it("follow-up requires the explicit action with no admin short-circuit", () => {
@@ -403,7 +416,7 @@ describe("collection reminder capabilities", () => {
     localStorage.setItem("permissions", JSON.stringify({
       action_maintenance_collection_plan_import: true,
     }));
-    expect(readMaintenanceCapabilities().canImportCollectionPlan).toBe(true);
+    expect(readMaintenanceCapabilities().canImportCollectionPlan).toBe(false);
 
     // Non-admin with the explicit action but no data_profit cannot import.
     localStorage.setItem("role", "readonly");
@@ -428,6 +441,7 @@ describe("collection reminder capabilities", () => {
     // Admin with data_profit and the explicit action can import.
     localStorage.setItem("role", "admin");
     localStorage.setItem("permissions", JSON.stringify({
+      page_maintenance_beta: true,
       data_purchase_cost: true,
       data_profit: true,
       action_maintenance_collection_plan_import: true,

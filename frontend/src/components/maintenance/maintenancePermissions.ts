@@ -123,9 +123,11 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
   const canViewContract = canViewProfit;
   const canViewExpense = canViewProfit;
   const canViewFinancial = canViewCost && canViewContract && canViewExpense;
-  const canUseBeta = isAdmin || (
-    permissions.page_maintenance === true
-    && permissions.page_maintenance_beta === true
+  // page_maintenance_beta is account-scoped even for admins.  The server
+  // allows admin's stable maintenance page through the role, but never lets
+  // it bypass this explicit Beta allowlist bit.
+  const canUseBeta = permissions.page_maintenance_beta === true && (
+    isAdmin || permissions.page_maintenance === true
   );
   const canDownloadRoundtrip = isAdmin || (
     !scopedSales
