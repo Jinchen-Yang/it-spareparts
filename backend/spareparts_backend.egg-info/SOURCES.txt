@@ -82,6 +82,7 @@ app/models/replenishment.py
 app/models/sales.py
 app/models/system.py
 app/schemas/__init__.py
+app/schemas/maintenance_collection_reminders.py
 app/services/__init__.py
 app/services/agent_files.py
 app/services/batch_normalize.py
@@ -96,6 +97,7 @@ app/services/governance.py
 app/services/inventory.py
 app/services/maintenance_acceptance.py
 app/services/maintenance_bad_returns.py
+app/services/maintenance_collection_milestones.py
 app/services/maintenance_consumption_cost.py
 app/services/maintenance_cost.py
 app/services/maintenance_cost_invalidation.py
@@ -221,6 +223,9 @@ tests/test_maintenance_bad_returns_api.py
 tests/test_maintenance_bad_returns_logic.py
 tests/test_maintenance_beta_access_migration.py
 tests/test_maintenance_beta_gate.py
+tests/test_maintenance_collection_milestones.py
+tests/test_maintenance_collection_reminder_schemas.py
+tests/test_maintenance_collection_reminders_migration.py
 tests/test_maintenance_cost.py
 tests/test_maintenance_cost_bucket_migration.py
 tests/test_maintenance_cost_quality.py
@@ -262,6 +267,7 @@ tests/test_maintenance_project_manager_assignment_migration.py
 tests/test_maintenance_project_manager_assignments.py
 tests/test_maintenance_project_operations_api.py
 tests/test_maintenance_project_operations_migration.py
+tests/test_maintenance_project_procurement.py
 tests/test_maintenance_project_workbook_v2.py
 tests/test_maintenance_project_workbooks_api.py
 tests/test_maintenance_roundtrip.py

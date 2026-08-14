@@ -42,6 +42,13 @@ ACCOUNT_SCOPED_BETA_PAGE_KEYS: frozenset[str] = frozenset({
     "page_maintenance_beta",
     "page_replenishment_beta",
 })
+# 回款提醒两个写动作同为实名白名单能力（设计 §9）：不进入 admin 常规全开图，
+# require_action 的 admin 短路不适用；必须由 security.require_explicit_account_action
+# 读取实名账号快照⊕覆盖后显式放行。迁移把存量模板与账号中的这两个键强制回填 false。
+ACCOUNT_SCOPED_ACTION_KEYS: frozenset[str] = frozenset({
+    "action_maintenance_collection_follow_up",
+    "action_maintenance_collection_plan_import",
+})
 # 动作开关：写操作准入（require_action）。各动作按模板失败关闭，可在账号管理页单独授权。
 ACTION_KEYS: list[str] = [
     "action_pool_manage",      # 建池/改名称说明/增删成员/归档恢复
@@ -69,6 +76,12 @@ ACTION_KEYS: list[str] = [
     "action_maintenance_warehouse_manage",
     # 成本/库存切换 dry-run、实名对账与双人审批；不包含生产激活。
     "action_maintenance_migration_review",
+    # 回款提醒（设计 §9）：标记已处理/改期/重新打开；以及 XLS 回款计划
+    # 导入的预览/绑定候选查询/应用。两者都是实名白名单能力：admin 也不得
+    # 通过 require_action 短路，必须由 security.require_explicit_account_action
+    # 读取账号快照⊕覆盖后显式放行（ACCOUNT_SCOPED_ACTION_KEYS）。
+    "action_maintenance_collection_follow_up",
+    "action_maintenance_collection_plan_import",
     # Beta 补库申请的创建/复提与审核结果回写严格分权。审核 Agent 本身不在系统内实现。
     "action_replenishment_create",
     "action_replenishment_review",
@@ -112,6 +125,8 @@ LABELS: dict[str, str] = {
     "action_maintenance_acceptance_review": "维保验收报告高风险审批",
     "action_maintenance_warehouse_manage": "仓库单据导入与歧义裁决",
     "action_maintenance_migration_review": "维保迁移对账与审批",
+    "action_maintenance_collection_follow_up": "回款提醒跟进（标记已处理/改期/重新打开）",
+    "action_maintenance_collection_plan_import": "回款计划导入（预览/绑定/应用）",
     "page_replenishment_beta": "补库申请",
     "action_replenishment_create": "补库申请创建与复提",
     "action_replenishment_review": "补库审核结果回写",
@@ -119,10 +134,16 @@ LABELS: dict[str, str] = {
 
 
 def _full(own: bool = False) -> dict[str, bool]:
-    """全部数据 + 全部页面 + 全部动作打开；own_customers_only 单独给。"""
+    """全部数据 + 全部页面 + 全部动作打开；own_customers_only 单独给。
+
+    回款提醒两个动作是实名白名单能力，即使 role=admin 也不在常规全开图中：
+    必须由账号快照⊕覆盖显式授权（ACCOUNT_SCOPED_ACTION_KEYS）。
+    """
     d = {k: True for k in DATA_GROUPS}
     d.update({k: True for k in PAGE_KEYS})
     d.update({k: True for k in ACTION_KEYS})
+    for key in ACCOUNT_SCOPED_ACTION_KEYS:
+        d[key] = False
     d["own_customers_only"] = own
     return d
 
@@ -211,6 +232,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_acceptance_review": False,
         "action_maintenance_warehouse_manage": False,
         "action_maintenance_migration_review": False,
+        "action_maintenance_collection_follow_up": False,
+        "action_maintenance_collection_plan_import": False,
         "page_replenishment_beta": False,
         "action_replenishment_create": False,
         "action_replenishment_review": False,
@@ -246,6 +269,8 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_acceptance_review": False,
         "action_maintenance_warehouse_manage": False,
         "action_maintenance_migration_review": False,
+        "action_maintenance_collection_follow_up": False,
+        "action_maintenance_collection_plan_import": False,
         "page_replenishment_beta": False,
         "action_replenishment_create": False,
         "action_replenishment_review": False,
@@ -296,6 +321,8 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_project_manage": "data_profit",
     "action_maintenance_site_issue_manage": "data_purchase_cost",
     "action_maintenance_migration_review": "data_profit",
+    # 回款计划导入能看到计划金额与合同额：能改必须能看（follow-up 不需金额可见性）。
+    "action_maintenance_collection_plan_import": "data_profit",
     "action_replenishment_create": "data_pool_price_governance",
 }
 
@@ -315,6 +342,8 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_acceptance_review": "page_maintenance",
     "action_maintenance_warehouse_manage": "page_maintenance",
     "action_maintenance_migration_review": "page_maintenance",
+    "action_maintenance_collection_follow_up": "page_maintenance",
+    "action_maintenance_collection_plan_import": "page_maintenance",
     "action_replenishment_create": "page_replenishment_beta",
 }
 
@@ -330,6 +359,8 @@ ACTION_ADDITIONAL_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_acceptance_review": "page_maintenance_beta",
     "action_maintenance_warehouse_manage": "page_maintenance_beta",
     "action_maintenance_migration_review": "page_maintenance_beta",
+    "action_maintenance_collection_follow_up": "page_maintenance_beta",
+    "action_maintenance_collection_plan_import": "page_maintenance_beta",
 }
 
 # Beta 只是稳定维保能力之上的附加入口，禁止出现“看不到稳定版却能进 Beta”的孤岛权限。
@@ -432,6 +463,8 @@ HIGH_RISK_KEYS: set[str] = {
     "action_maintenance_acceptance_review",
     "action_maintenance_warehouse_manage",
     "action_maintenance_migration_review",
+    "action_maintenance_collection_follow_up",
+    "action_maintenance_collection_plan_import",
     "action_replenishment_review",
 }
 
@@ -458,6 +491,8 @@ UI_GROUPS: list[dict] = [
          "action_maintenance_acceptance_submit",
          "action_maintenance_acceptance_review",
          "action_maintenance_warehouse_manage",
+         "action_maintenance_collection_follow_up",
+         "action_maintenance_collection_plan_import",
          "action_replenishment_create",
          "action_replenishment_review",
      ]},
@@ -775,6 +810,24 @@ PERMISSION_META: dict[str, dict] = {
         "sensitivity": "critical",
         "risk": "错误审批会把成本和库存切换到错误基线；系统默认仅管理员持有且生产开关仍独立关闭。",
     },
+    "action_maintenance_collection_follow_up": {
+        "label": "回款提醒跟进",
+        "summary": "允许把本人可见项目的计划回款提醒标记为已处理、改期或重新打开。",
+        "can": "对待办计划节点标记已处理（可留备注），把待处理节点改到新的计划月份，或把误处理节点重新打开。",
+        "cannot": "不能确认到账或产生任何实收事实；已处理只表示本次提醒跟进完毕；需要稳定版维保页与维保管理灰度页同时可见。",
+        "typical": ["已授权的维保负责人"],
+        "sensitivity": "high",
+        "risk": "写入口会留下不可变操作账本；管理员没有显式授权时即使 role=admin 也失败关闭。",
+    },
+    "action_maintenance_collection_plan_import": {
+        "label": "回款计划导入",
+        "summary": "允许上传项目经理 XLS 回款排期，预览差异、人工绑定订单并原子应用计划节点。",
+        "can": "上传 .xls 零写入预览，为待绑定订单选择项目和合同，确认后原子应用或幂等重放。",
+        "cannot": "不能删除来源缺失节点、不能覆盖人工跟进状态（只标记计划有变更）；必须同时持有利润可见与两个维保页面权限，且首期仅实名 admin。",
+        "typical": ["实名管理员（首期）"],
+        "sensitivity": "critical",
+        "risk": "会批量改写计划节点并留下导入批次证据；admin 没有显式授权时仍失败关闭，apply 还受独立生产开关门禁。",
+    },
     "action_replenishment_create": {
         "label": "补库申请创建与复提",
         "summary": "允许维护本人补库购物车、提交不可变版本并处理被打回条目。",
@@ -841,6 +894,9 @@ def effective_for_user(user) -> dict[str, bool]:
         else:
             stored = sanitize(getattr(user, "permissions", None))
         for key in ACCOUNT_SCOPED_BETA_PAGE_KEYS:
+            result[key] = bool(stored.get(key, False))
+        # 回款提醒两个写动作同样只认实名账号快照⊕覆盖，admin 无显式授权保持 false。
+        for key in ACCOUNT_SCOPED_ACTION_KEYS:
             result[key] = bool(stored.get(key, False))
         return result
     if getattr(user, "template_perms", None) is not None:

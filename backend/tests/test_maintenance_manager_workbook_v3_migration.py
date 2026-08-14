@@ -270,6 +270,102 @@ def test_acceptance_downgrade_blocks_when_append_only_history_exists(db):
     assert current == _current_head()
 
 
+def test_v3_milestone_orm_exposes_new_follow_up_columns():
+    """回款提醒迁移后，ORM 模型必须映射七列新增字段（设计 §4.1）。"""
+    from app.models.maintenance_manager import MaintenanceCollectionMilestone
+
+    mapped = {column.name for column in MaintenanceCollectionMilestone.__table__.columns}
+    for column in (
+        "date_precision",
+        "collection_plan_import_batch_id",
+        "follow_up_status",
+        "follow_up_review_required",
+        "follow_up_note",
+        "followed_up_by",
+        "followed_up_at",
+    ):
+        assert column in mapped, f"MaintenanceCollectionMilestone 缺少映射列 {column}"
+
+
+def test_existing_manager_workbook_v3_rows_backfill_new_columns(db):
+    """新 revision 之后，存量 manager_workbook_v3 节点回填 day/pending/false。"""
+    db.close()
+    config = _cfg()
+    alembic_command.downgrade(config, "d9f1a3c7e5b2")
+    try:
+        with engine.begin() as connection:
+            user_id = connection.execute(
+                text(
+                    "INSERT INTO sys_user (username, password_hash, role) "
+                    "VALUES ('v3-backfill-user', 'unused', 'readonly') RETURNING id"
+                )
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_project "
+                    "(project_id, project_code, display_name, lifecycle_status) VALUES "
+                    "('v3-backfill-project', 'V3-BACKFILL-PROJECT', '合成v3回填项目', 'ongoing')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_project_contract "
+                    "(project_contract_id, project_id, contract_id, contract_no, "
+                    " contract_amount, contract_status, status_mapping_state, "
+                    " status_mapping_version, included_in_total, effective_from, "
+                    " source, version) "
+                    "VALUES ('v3-backfill-contract', 'v3-backfill-project', "
+                    " 'v3-backfill-contract-id', 'XS-V3-BACKFILL', 100000, 'active', "
+                    " 'mapped', 'synthetic-v1', true, '2026-01-01', "
+                    " 'synthetic-test', 1)"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_manager_upload_batch "
+                    "(batch_id, owner_user_id, report_month, protocol_version, "
+                    " template_version, export_id, file_sha256, file_size, "
+                    " operation_key, semantic_hash, scope_version, data_version, "
+                    " status, plan_json, issues_json, created_by, created_at, expires_at) "
+                    "VALUES ('v3-backfill-batch', :user_id, '2026-08-01', 'v3', 'tpl', "
+                    " 'export-1', repeat('a', 64), 100, 'v3-backfill-op-key', "
+                    " repeat('b', 64), repeat('c', 64), repeat('d', 64), 'valid', "
+                    " '{}'::jsonb, '[]'::jsonb, 'synthetic-test', now(), "
+                    " now() + interval '24 hours')"
+                ),
+                {"user_id": user_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO maintenance_collection_milestone "
+                    "(milestone_id, project_id, project_contract_id, sequence, "
+                    " planned_date, planned_amount, completeness_state, source, "
+                    " source_batch_id, version) "
+                    "VALUES ('v3-backfill-milestone', 'v3-backfill-project', "
+                    " 'v3-backfill-contract', 1, '2026-09-01', 25000.00, 'complete', "
+                    " 'manager_workbook_v3', 'v3-backfill-batch', 1)"
+                )
+            )
+        alembic_command.upgrade(config, "head")
+        with engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT date_precision, follow_up_status, follow_up_review_required, "
+                    "followed_up_by, followed_up_at, collection_plan_import_batch_id "
+                    "FROM maintenance_collection_milestone "
+                    "WHERE milestone_id = 'v3-backfill-milestone'"
+                )
+            ).one()
+        assert row.date_precision == "day"
+        assert row.follow_up_status == "pending"
+        assert row.follow_up_review_required is False
+        assert row.followed_up_by is None
+        assert row.followed_up_at is None
+        assert row.collection_plan_import_batch_id is None
+    finally:
+        alembic_command.upgrade(config, "head")
+
+
 def test_combined_downgrade_keeps_both_branches_when_assignment_history_exists(db):
     user_id = db.execute(
         text(

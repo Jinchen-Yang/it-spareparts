@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     # page_maintenance 与 page_maintenance_beta，稳定版接口不经过此闸。
     maintenance_beta_enabled: bool = False
 
+    # 回款计划导入的生产总闸（XLS 合同未晋级前默认关闭）。preview 在 false 时
+    # 仍可用；apply 在 false 时必须 fail-closed。canary 项目 ID 非空时，
+    # follow-up 的节点项目以及 apply 整批 bindings 中任何项目不等于该 ID，
+    # 都返回 HTTP 403 / canary_scope_denied 且零写入。
+    maintenance_collection_plan_apply_enabled: bool = False
+    maintenance_collection_canary_project_id: str | None = None
+
     # 销售经理补库购物车 Beta 服务端总闸。关闭时只保留能力探测，全部业务读写和导出
     # 失败关闭；既有 Beta 数据与表结构原样保留，重新开启后可继续使用。
     replenishment_beta_enabled: bool = False

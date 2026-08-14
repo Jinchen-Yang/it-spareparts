@@ -6,6 +6,7 @@ import importlib.util
 import os
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import permissions, security
@@ -594,3 +595,162 @@ def test_meta_has_business_language(db, admin_client):
         assert "Beta" not in visible_copy
         assert "试用" not in visible_copy
     assert {t["code"] for t in m["templates"]} >= {"admin", "boss", "sales", "purchaser", "readonly"}
+
+
+# ---------- 13. 回款提醒新动作：全部模板默认 false + 显式账号门禁 ----------
+_FOLLOW_UP_KEY = "action_maintenance_collection_follow_up"
+_IMPORT_KEY = "action_maintenance_collection_plan_import"
+
+
+def test_collection_reminder_actions_exist_and_default_closed_in_all_templates():
+    """设计 §9：两个新 action 在所有权限模板中默认 false。"""
+    for key in (_FOLLOW_UP_KEY, _IMPORT_KEY):
+        assert key in permissions.ACTION_KEYS
+        assert key in permissions.LABELS
+        assert key in permissions.HIGH_RISK_KEYS
+        # 依赖稳定版维保页 + Beta 白名单页
+        assert permissions.ACTION_PAGE_DEPENDENCIES[key] == "page_maintenance"
+        assert key in permissions.ACTION_ADDITIONAL_PAGE_DEPENDENCIES
+        assert permissions.ACTION_ADDITIONAL_PAGE_DEPENDENCIES[key] == "page_maintenance_beta"
+        # 所有角色模板（含 admin）默认 false
+        for role, template in permissions.ROLE_TEMPLATES.items():
+            assert template[key] is False, f"{role} 模板的 {key} 必须默认 false"
+        for role in ("boss", "sales", "purchaser", "readonly", "guest"):
+            assert permissions.effective(role, None)[key] is False
+        meta = permissions.PERMISSION_META[key]
+        for field in ("label", "summary", "can", "cannot", "typical", "sensitivity", "risk"):
+            assert meta.get(field), f"{key} 缺业务语言字段 {field}"
+    # 导入额外依赖 data_profit（能改必须能看）；follow-up 不需要金额可见性
+    assert permissions.ACTION_DATA_DEPENDENCIES[_IMPORT_KEY] == "data_profit"
+    assert _FOLLOW_UP_KEY not in permissions.ACTION_DATA_DEPENDENCIES
+
+
+def test_collection_reminder_actions_false_in_database_templates_and_snapshots(db, admin_client):
+    """sys_role_template 行与 sys_user.permissions 快照中两个新键必须为 false。"""
+    c = admin_client
+    _mk_account(c, "cr-sales", template="sales")
+    _mk_account(c, "cr-purchaser", template="purchaser")
+    _mk_account(c, "cr-readonly", template="readonly")
+
+    templates = {
+        template["code"]: template["permissions"]
+        for template in c.get("/api/role-templates").json()
+    }
+    accounts = {
+        account["username"]: account["permissions"]
+        for account in c.get("/api/accounts").json()
+    }
+    for key in (_FOLLOW_UP_KEY, _IMPORT_KEY):
+        for code in ("admin", "boss", "sales", "purchaser", "readonly"):
+            assert templates[code][key] is False, f"sys_role_template {code} 的 {key} 必须 false"
+        for username in ("cr-sales", "cr-purchaser", "cr-readonly"):
+            assert accounts[username][key] is False, f"{username} 快照的 {key} 必须 false"
+
+
+# ---------- 14. 显式账号动作门禁修复靶（P1-1：RBAC 关短路 / 构造期不校验 key） ----------
+def test_require_explicit_account_action_always_enforced_when_rbac_disabled(db, monkeypatch):
+    """RBAC 总闸关闭也不能短路实名白名单写门（设计 §9 失败关闭）。
+
+    当前 ``security.require_explicit_account_action`` 在 ``config.ENABLE_RBAC``
+    为 False 时提前 return，本测试当前红。
+    """
+    monkeypatch.setattr(security.config, "ENABLE_RBAC", False)
+    db.add(SysUser(username="rbac-off-user", role="sales", display_name="RBAC 关闭账号",
+                   password_hash=hash_password("pw123456")))
+    db.commit()
+    ctx = security.UserContext(
+        user_id="rbac-off-user", role="sales", is_authenticated=True,
+    )
+    dep = security.require_explicit_account_action("action_maintenance_collection_follow_up")
+    with pytest.raises(HTTPException) as exc_info:
+        dep(ctx=ctx, db=db)
+    assert exc_info.value.status_code == 403
+
+
+def test_require_explicit_account_action_rejects_anonymous_and_missing_user_id(db):
+    """未登录或 user_id 缺失一律 401（守卫）。"""
+    dep = security.require_explicit_account_action("action_maintenance_collection_follow_up")
+    with pytest.raises(HTTPException) as exc_info:
+        dep(ctx=security.UserContext(user_id=None, role="guest", is_authenticated=False), db=db)
+    assert exc_info.value.status_code == 401
+    with pytest.raises(HTTPException) as exc_info:
+        dep(ctx=security.UserContext(user_id=None, role="admin", is_authenticated=True), db=db)
+    assert exc_info.value.status_code == 401
+
+
+def test_require_explicit_account_action_rejects_disabled_and_missing_account(db):
+    """账号不存在或已停用一律 403（守卫）。"""
+    dep = security.require_explicit_account_action("action_maintenance_collection_follow_up")
+    with pytest.raises(HTTPException) as exc_info:
+        dep(ctx=security.UserContext(user_id="ghost-account", role="sales",
+                                     is_authenticated=True), db=db)
+    assert exc_info.value.status_code == 403
+    db.add(SysUser(username="inactive-account", role="sales", is_active=False,
+                   password_hash=hash_password("pw123456")))
+    db.commit()
+    with pytest.raises(HTTPException) as exc_info:
+        dep(ctx=security.UserContext(user_id="inactive-account", role="sales",
+                                     is_authenticated=True), db=db)
+    assert exc_info.value.status_code == 403
+
+
+def test_require_explicit_account_action_admin_without_explicit_action_denied(db):
+    """admin 角色没有显式授权同样 403，不得走常规全开短路（守卫）。"""
+    db.add(SysUser(username="admin-no-grant", role="admin", display_name="未授权管理员",
+                   password_hash=hash_password("pw123456"),
+                   template_perms={"sentinel": True}, perm_overrides={}))
+    db.commit()
+    dep = security.require_explicit_account_action("action_maintenance_collection_follow_up")
+    with pytest.raises(HTTPException) as exc_info:
+        dep(ctx=security.UserContext(user_id="admin-no-grant", role="admin",
+                                     is_authenticated=True), db=db)
+    assert exc_info.value.status_code == 403
+
+
+def test_require_explicit_account_action_admin_with_explicit_action_allowed(db):
+    """快照⊕覆盖显式授权后放行；无快照的旧账号回退 legacy permissions 图（守卫）。"""
+    db.add(SysUser(username="admin-granted", role="admin", display_name="已授权管理员",
+                   password_hash=hash_password("pw123456"),
+                   template_perms={"action_maintenance_collection_follow_up": True},
+                   perm_overrides={}))
+    db.add(SysUser(username="legacy-granted", role="sales", display_name="旧图授权账号",
+                   password_hash=hash_password("pw123456"),
+                   permissions={"action_maintenance_collection_follow_up": True}))
+    db.commit()
+    dep = security.require_explicit_account_action("action_maintenance_collection_follow_up")
+    dep(ctx=security.UserContext(user_id="admin-granted", role="admin",
+                                 is_authenticated=True), db=db)
+    dep(ctx=security.UserContext(user_id="legacy-granted", role="sales",
+                                 is_authenticated=True), db=db)
+    granted = db.query(SysUser).filter_by(username="admin-granted").one()
+    assert (
+        security.explicit_account_action_allowed(
+            granted, "action_maintenance_collection_follow_up"
+        )
+        is True
+    )
+
+
+def test_require_explicit_account_action_only_constructed_for_account_scoped_keys(db):
+    """构造期必须校验 key 属于 ACCOUNT_SCOPED_ACTION_KEYS（P1-1）。
+
+    当前实现不校验任意字符串，本测试当前红；实现后非白名单 key 必须 ValueError。
+    """
+    db.add(SysUser(username="key-validation-user", role="sales",
+                   password_hash=hash_password("pw123456")))
+    db.commit()
+    user = db.query(SysUser).filter_by(username="key-validation-user").one()
+    with pytest.raises(ValueError):
+        security.require_explicit_account_action("page_maintenance")
+    with pytest.raises(ValueError):
+        security.explicit_account_action_allowed(user, "page_maintenance")
+
+
+def test_require_action_rejects_account_scoped_key_ordinary_bypass(db, monkeypatch):
+    """普通动作门不得放行实名白名单动作：admin 与 RBAC 关闭都不能短路（守卫）。"""
+    for enabled in (True, False):
+        monkeypatch.setattr(security.config, "ENABLE_RBAC", enabled)
+        dep = security.require_action("action_maintenance_collection_follow_up")
+        with pytest.raises(HTTPException) as exc_info:
+            dep(ctx=security.UserContext(user_id="admin", role="admin", is_authenticated=True))
+        assert exc_info.value.status_code == 403
