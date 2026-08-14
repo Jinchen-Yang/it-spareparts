@@ -72,6 +72,8 @@ def test_maintenance_beta_permission_is_additive_and_fail_closed():
         "action_maintenance_acceptance_review",
         "action_maintenance_warehouse_manage",
         "action_maintenance_migration_review",
+        "action_maintenance_collection_follow_up",
+        "action_maintenance_collection_plan_import",
     ):
         assert (
             permissions.ACTION_ADDITIONAL_PAGE_DEPENDENCIES[action]
@@ -226,6 +228,9 @@ def test_every_beta_router_fails_closed_before_business_lookup(db):
             ("get", "/api/maintenance/projects/stable/not-real/workbook", None),
             ("post", "/api/maintenance/demands/search", {}),
             ("post", "/api/maintenance/warehouse-documents/search", {}),
+            ("post", "/api/maintenance/collection-reminders/search", {}),
+            ("get", "/api/maintenance/projects/stable/not-real/collection-milestones", None),
+            ("get", "/api/maintenance/collection-plan-imports/not-real/source-file", None),
             ("post", "/api/maintenance/acceptance-deliverables/search", {}),
             ("post", "/api/maintenance/migration-runs/search", {}),
             ("post", "/api/maintenance/project-manager-assignments/search", {}),
@@ -247,6 +252,8 @@ def test_every_registered_beta_route_has_the_server_gate_dependency():
     beta_endpoint_modules = {
         "app.api.maintenance_acceptance",
         "app.api.maintenance_bad_returns",
+        "app.api.maintenance_collection_plan_imports",
+        "app.api.maintenance_collection_reminders",
         "app.api.maintenance_demands",
         "app.api.maintenance_manager_workbooks",
         "app.api.maintenance_migration",
