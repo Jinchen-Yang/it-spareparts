@@ -622,7 +622,13 @@ describe("BadReturnPanel", () => {
     expect(await within(dialog).findByText(/提交失败/)).toBeInTheDocument();
     const firstKey = api.submitMaintenanceBadReturn.mock.calls[0][1].idempotency_key;
 
-    fireEvent.click(submitButton);
+    const retryButton = await waitFor(() => {
+      const button = within(dialog).getByRole("button", { name: "确认提交" });
+      expect(button).toBeEnabled();
+      expect(button).not.toHaveClass("ant-btn-loading");
+      return button;
+    });
+    fireEvent.click(retryButton);
     await waitFor(() => expect(api.submitMaintenanceBadReturn).toHaveBeenCalledTimes(2));
     expect(api.submitMaintenanceBadReturn.mock.calls[1][1].idempotency_key).toBe(firstKey);
   });
