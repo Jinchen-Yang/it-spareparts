@@ -49,6 +49,7 @@ K0_PREFIXES: Final = (
     "backend/tests/test_maintenance_manager_workbook_v3_adapter.py",
     "backend/tests/test_maintenance_manager_workbook_v3_migration.py",
     "backend/tests/test_permission_center.py",
+    "backend/tests/test_pools_api.py",
     "backend/uv.lock",
 )
 REMINDER_BACKEND_PREFIXES: Final = (
