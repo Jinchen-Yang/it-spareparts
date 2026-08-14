@@ -44,6 +44,9 @@ SBOM_SHA = "f" * 64
 CANARY_PROJECT_ID = "123e4567-e89b-12d3-a456-426614174000"
 CANARY_MILESTONE_ID = "milestone-canary-0001"
 NON_CANARY_MILESTONE_ID = "milestone-other-0001"
+DYNAMIC_CANARY_MILESTONE_ID = "{canary_milestone_id}"
+CROSS_PROJECT_ID = "123e4567-e89b-12d3-a456-426614174099"
+CROSS_PROJECT_CONTRACT_ID = "contract-other"
 REAL_SAMPLE_SHA256 = "a783af09fa108d366a26e10fe188be52d20a9ce1fe02121bfd683d96356c8c18"
 
 
@@ -60,6 +63,42 @@ def _follow_up_case(
             "idempotency_key": key,
             "action": "handle",
             "note": "release canary",
+        },
+    }
+
+
+def _setup_contract_case() -> dict:
+    return {
+        "method": "POST",
+        "account": "importer",
+        "path": f"/api/maintenance/projects/stable/{CANARY_PROJECT_ID}/contracts",
+        "expected_status": 201,
+        "body": {
+            "contract_id": "canary-contract-source",
+            "contract_no": "CANARY-CONTRACT-001",
+            "contract_amount": "1000.00",
+            "contract_status": "canary",
+            "status_mapping_state": "mapped",
+            "status_mapping_version": "release-canary-v1",
+            "included_in_total": False,
+            "effective_from": "2026-01-01",
+            "source": "release_canary",
+            "reason": "v122 release canary setup",
+        },
+    }
+
+
+def _cross_project_apply_case() -> dict:
+    return {
+        "method": "POST",
+        "account": "importer",
+        "path": "/api/maintenance/collection-plan-imports/{batch_id}/apply",
+        "expected_status": 403,
+        "body": {
+            "project_id": CROSS_PROJECT_ID,
+            "project_version": 1,
+            "project_contract_id": CROSS_PROJECT_CONTRACT_ID,
+            "project_contract_version": 1,
         },
     }
 
@@ -1042,6 +1081,7 @@ def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_e
     package = _production_package(tmp_path / "pkg")
     docker = """
     if [[ "$*" == *"compose"* && "$*" == *"ps -q db"* ]]; then echo db-cid; exit 0; fi
+    if [[ "$*" == *"SELECT milestone_id"* ]]; then echo milestone-canary-0001; exit 0; fi
     if [[ "$*" == *"maintenance_collection_milestone"* ]]; then echo '0:0:0:0'; exit 0; fi
     if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then
       apply=$(sed -n 's/^MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=//p' "$V122_APP_DIR/.env")
@@ -1074,6 +1114,8 @@ def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_e
             printf '%s' '{{"token":"importer-token","role":"admin","permissions":{{"action_maintenance_collection_plan_import":true}}}}' >"$out"; status=200 ;;
           *login-denied.response.json)
             printf '%s' '{{"token":"denied-token","role":"admin","permissions":{{"action_maintenance_collection_plan_import":false}}}}' >"$out"; status=200 ;;
+          *setup_contract.response)
+            printf '%s' '{{"project_id":"{CANARY_PROJECT_ID}","project_contract_id":"contract-live","version":3}}' >"$out"; status=201 ;;
           *cross_project_negative.response) printf '%s' '{{"detail":{{"code":"canary_scope_denied"}}}}' >"$out"; status=403 ;;
           *permission_negative.response) printf '%s' '{{"detail":{{"code":"permission_denied"}}}}' >"$out"; status=403 ;;
           *import_preview_positive.response)
@@ -1097,14 +1139,16 @@ def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_e
         "action_verify_granted": {**base_case, "path": "/api/accounts/verify-granted"},
         "action_restore": {**base_case, "path": "/api/accounts/restore"},
         "action_verify_restored": {**base_case, "path": "/api/accounts/verify-restored"},
-        "follow_up_positive": _follow_up_case(account="follower", milestone_id=CANARY_MILESTONE_ID, expected_status=200, key="follow-positive-0001"),
-        "cross_project_negative": _follow_up_case(account="follower", milestone_id=NON_CANARY_MILESTONE_ID, expected_status=403, key="follow-cross-0001"),
-        "permission_negative": _follow_up_case(account="denied", milestone_id=CANARY_MILESTONE_ID, expected_status=403, key="follow-denied-0001"),
+        "setup_contract": _setup_contract_case(),
+        "follow_up_positive": _follow_up_case(account="follower", milestone_id=DYNAMIC_CANARY_MILESTONE_ID, expected_status=200, key="follow-positive-0001"),
+        "cross_project_negative": _cross_project_apply_case(),
+        "permission_negative": _follow_up_case(account="denied", milestone_id=DYNAMIC_CANARY_MILESTONE_ID, expected_status=403, key="follow-denied-0001"),
         "import_preview_positive": {
             "method": "POST",
             "account": "importer",
             "path": "/api/maintenance/collection-plan-imports/preview",
             "expected_status": 200,
+            "project_version": 4,
             "workbook_path": str(workbook),
             "workbook_sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
             "idempotency_key": "canary-preview-0001",
@@ -1112,8 +1156,8 @@ def test_canary_failure_closes_apply_restores_actions_and_keeps_secrets_out_of_e
                 "external_order_no": "ORDER-1",
                 "project_id": CANARY_PROJECT_ID,
                 "project_version": 4,
-                "project_contract_id": "contract-live",
-                "project_contract_version": 3,
+                "project_contract_id": "{setup_contract.project_contract_id}",
+                "project_contract_version": "{setup_contract.version}",
                 "existing_binding_version": None,
                 "reason": None,
             }],
@@ -1145,6 +1189,7 @@ def test_canary_rejects_scope_code_mismatch_from_real_follow_up_endpoint(tmp_pat
     package = _production_package(tmp_path / "pkg")
     docker = """
     if [[ "$*" == *"compose"* && "$*" == *"ps -q db"* ]]; then echo db-cid; exit 0; fi
+    if [[ "$*" == *"SELECT milestone_id"* ]]; then echo milestone-canary-0001; exit 0; fi
     if [[ "$*" == *"maintenance_collection_milestone"* ]]; then echo '0:0:0:0'; exit 0; fi
     if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then
       apply=$(sed -n 's/^MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=//p' "$V122_APP_DIR/.env")
@@ -1175,6 +1220,10 @@ def test_canary_rejects_scope_code_mismatch_from_real_follow_up_endpoint(tmp_pat
             printf '%s' '{"token":"importer-token","role":"admin","permissions":{"action_maintenance_collection_plan_import":true}}' >"$out"; status=200 ;;
           *login-denied.response.json)
             printf '%s' '{"token":"denied-token","role":"admin","permissions":{"action_maintenance_collection_plan_import":false,"action_maintenance_collection_follow_up":false}}' >"$out"; status=200 ;;
+          *setup_contract.response)
+            printf '%s' '{"project_id":"123e4567-e89b-12d3-a456-426614174000","project_contract_id":"contract-live","version":3}' >"$out"; status=201 ;;
+          *import_preview_positive.response)
+            printf '%s' '{"batch_id":"batch-canary","batch_version":7,"data_version":"data-v7","status":"valid","rows":[{"external_order_no":"ORDER-1","row_key":"row-live"}]}' >"$out"; status=200 ;;
           *cross_project_negative.response)
             printf '%s' '{"detail":{"code":"permission_denied"}}' >"$out"; status=403 ;;
           *permission_negative.response)
@@ -1217,14 +1266,16 @@ def test_canary_rejects_scope_code_mismatch_from_real_follow_up_endpoint(tmp_pat
         "action_verify_granted": {**base_case, "path": "/api/accounts/verify-granted"},
         "action_restore": {**base_case, "path": "/api/accounts/restore"},
         "action_verify_restored": {**base_case, "path": "/api/accounts/verify-restored"},
-        "follow_up_positive": _follow_up_case(account="follower", milestone_id=CANARY_MILESTONE_ID, expected_status=200, key="follow-positive-0001"),
-        "cross_project_negative": _follow_up_case(account="follower", milestone_id=NON_CANARY_MILESTONE_ID, expected_status=403, key="follow-cross-0001"),
-        "permission_negative": _follow_up_case(account="denied", milestone_id=CANARY_MILESTONE_ID, expected_status=403, key="follow-denied-0001"),
+        "setup_contract": _setup_contract_case(),
+        "follow_up_positive": _follow_up_case(account="follower", milestone_id=DYNAMIC_CANARY_MILESTONE_ID, expected_status=200, key="follow-positive-0001"),
+        "cross_project_negative": _cross_project_apply_case(),
+        "permission_negative": _follow_up_case(account="denied", milestone_id=DYNAMIC_CANARY_MILESTONE_ID, expected_status=403, key="follow-denied-0001"),
         "import_preview_positive": {
             "method": "POST",
             "account": "importer",
             "path": "/api/maintenance/collection-plan-imports/preview",
             "expected_status": 200,
+            "project_version": 4,
             "workbook_path": str(workbook),
             "workbook_sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
             "idempotency_key": "canary-preview-0001",
@@ -1232,8 +1283,8 @@ def test_canary_rejects_scope_code_mismatch_from_real_follow_up_endpoint(tmp_pat
                 "external_order_no": "ORDER-1",
                 "project_id": CANARY_PROJECT_ID,
                 "project_version": 4,
-                "project_contract_id": "contract-live",
-                "project_contract_version": 3,
+                "project_contract_id": "{setup_contract.project_contract_id}",
+                "project_contract_version": "{setup_contract.version}",
                 "existing_binding_version": None,
                 "reason": None,
             }],
@@ -1264,6 +1315,7 @@ def test_canary_state_write_failure_closes_apply_and_restores_actions(tmp_path: 
     package = _production_package(tmp_path / "pkg")
     docker = """
     if [[ "$*" == *"compose"* && "$*" == *"ps -q db"* ]]; then echo db-cid; exit 0; fi
+    if [[ "$*" == *"SELECT milestone_id"* ]]; then echo milestone-canary-0001; exit 0; fi
     if [[ "$*" == *"maintenance_collection_milestone"* ]]; then echo '0:0:0:0'; exit 0; fi
     if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then
       apply=$(sed -n 's/^MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=//p' "$V122_APP_DIR/.env")
@@ -1301,6 +1353,8 @@ def test_canary_state_write_failure_closes_apply_and_restores_actions(tmp_path: 
             printf '%s' '{{"token":"importer-token","role":"admin","permissions":{{"action_maintenance_collection_plan_import":true}}}}' >"$out"; status=200 ;;
           *login-denied.response.json)
             printf '%s' '{{"token":"denied-token","role":"admin","permissions":{{"action_maintenance_collection_plan_import":false,"action_maintenance_collection_follow_up":false}}}}' >"$out"; status=200 ;;
+          *setup_contract.response)
+            printf '%s' '{{"project_id":"{CANARY_PROJECT_ID}","project_contract_id":"contract-live","version":3}}' >"$out"; status=201 ;;
           *cross_project_negative.response)
             printf '%s' '{{"detail":{{"code":"canary_scope_denied"}}}}' >"$out"; status=403 ;;
           *permission_negative.response)
@@ -1330,14 +1384,16 @@ def test_canary_state_write_failure_closes_apply_and_restores_actions(tmp_path: 
         "action_verify_granted": {**base_case, "path": "/api/accounts/verify-granted"},
         "action_restore": {**base_case, "path": "/api/accounts/restore"},
         "action_verify_restored": {**base_case, "path": "/api/accounts/verify-restored"},
-        "follow_up_positive": _follow_up_case(account="follower", milestone_id=CANARY_MILESTONE_ID, expected_status=200, key="follow-positive-0001"),
-        "cross_project_negative": _follow_up_case(account="follower", milestone_id=NON_CANARY_MILESTONE_ID, expected_status=403, key="follow-cross-0001"),
-        "permission_negative": _follow_up_case(account="denied", milestone_id=CANARY_MILESTONE_ID, expected_status=403, key="follow-denied-0001"),
+        "setup_contract": _setup_contract_case(),
+        "follow_up_positive": _follow_up_case(account="follower", milestone_id=DYNAMIC_CANARY_MILESTONE_ID, expected_status=200, key="follow-positive-0001"),
+        "cross_project_negative": _cross_project_apply_case(),
+        "permission_negative": _follow_up_case(account="denied", milestone_id=DYNAMIC_CANARY_MILESTONE_ID, expected_status=403, key="follow-denied-0001"),
         "import_preview_positive": {
             "method": "POST",
             "account": "importer",
             "path": "/api/maintenance/collection-plan-imports/preview",
             "expected_status": 200,
+            "project_version": 4,
             "workbook_path": str(workbook),
             "workbook_sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
             "idempotency_key": "canary-preview-0001",
@@ -1345,8 +1401,8 @@ def test_canary_state_write_failure_closes_apply_and_restores_actions(tmp_path: 
                 "external_order_no": "ORDER-1",
                 "project_id": CANARY_PROJECT_ID,
                 "project_version": 4,
-                "project_contract_id": "contract-live",
-                "project_contract_version": 3,
+                "project_contract_id": "{setup_contract.project_contract_id}",
+                "project_contract_version": "{setup_contract.version}",
                 "existing_binding_version": None,
                 "reason": None,
             }],
@@ -1418,8 +1474,8 @@ def test_canary_rejects_invalid_workbook_or_binding_before_runtime_changes(
         "external_order_no": "ORDER-1",
         "project_id": CANARY_PROJECT_ID,
         "project_version": 4,
-        "project_contract_id": "contract-live",
-        "project_contract_version": 3,
+        "project_contract_id": "{setup_contract.project_contract_id}",
+        "project_contract_version": "{setup_contract.version}",
         "existing_binding_version": None,
         "reason": None,
     }
@@ -1428,6 +1484,7 @@ def test_canary_rejects_invalid_workbook_or_binding_before_runtime_changes(
         "account": "importer",
         "path": "/api/maintenance/collection-plan-imports/preview",
         "expected_status": 200,
+        "project_version": 4,
         "workbook_path": str(workbook),
         "workbook_sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
         "idempotency_key": "canary-preview-0001",
@@ -1449,9 +1506,10 @@ def test_canary_rejects_invalid_workbook_or_binding_before_runtime_changes(
         "action_verify_granted": {**base_case, "path": "/api/accounts/verify-granted"},
         "action_restore": {**base_case, "path": "/api/accounts/restore"},
         "action_verify_restored": {**base_case, "path": "/api/accounts/verify-restored"},
-        "follow_up_positive": _follow_up_case(account="follower", milestone_id=CANARY_MILESTONE_ID, expected_status=200, key="follow-positive-0001"),
-        "cross_project_negative": _follow_up_case(account="follower", milestone_id=NON_CANARY_MILESTONE_ID, expected_status=403, key="follow-cross-0001"),
-        "permission_negative": _follow_up_case(account="denied", milestone_id=CANARY_MILESTONE_ID, expected_status=403, key="follow-denied-0001"),
+        "setup_contract": _setup_contract_case(),
+        "follow_up_positive": _follow_up_case(account="follower", milestone_id=DYNAMIC_CANARY_MILESTONE_ID, expected_status=200, key="follow-positive-0001"),
+        "cross_project_negative": _cross_project_apply_case(),
+        "permission_negative": _follow_up_case(account="denied", milestone_id=DYNAMIC_CANARY_MILESTONE_ID, expected_status=403, key="follow-denied-0001"),
         "import_preview_positive": preview,
         "apply_last": {"method": "POST", "account": "importer", "path": "/api/maintenance/collection-plan-imports/{batch_id}/apply", "expected_status": 200},
     }

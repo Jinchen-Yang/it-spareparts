@@ -267,11 +267,22 @@ if not isinstance(case["expected_status"], int):
     raise SystemExit("canary expected_status must be an integer")
 if case_name in {"cross_project_negative", "permission_negative"} and case["expected_status"] != 403:
     raise SystemExit("negative canary cases must explicitly expect HTTP 403")
+if "{canary_milestone_id}" in case["path"]:
+    state_path = work / "milestone-state.json"
+    if not state_path.is_file() or state_path.is_symlink():
+        raise SystemExit("dynamic canary milestone is not resolved")
+    milestone_id = json.loads(state_path.read_text(encoding="utf-8")).get("milestone_id")
+    if not isinstance(milestone_id, str) or not milestone_id:
+        raise SystemExit("dynamic canary milestone is invalid")
+    case["path"] = case["path"].replace("{canary_milestone_id}", milestone_id)
 if case_name == "apply_last":
     if not case["path"].endswith("/apply") or case["expected_status"] // 100 != 2:
         raise SystemExit("apply_last must be the sole successful /apply request")
+elif case_name == "cross_project_negative":
+    if not case["path"].endswith("/apply") or case["expected_status"] != 403:
+        raise SystemExit("cross_project_negative must be a forbidden /apply request")
 elif case["path"].endswith("/apply"):
-    raise SystemExit("only apply_last may target /apply")
+    raise SystemExit("only apply_last and cross_project_negative may target /apply")
 base = spec.get("base_url")
 if not isinstance(base, str) or not base.startswith(("http://", "https://")) or "\n" in base:
     raise SystemExit("canary base_url is invalid")
@@ -338,6 +349,41 @@ pathlib.Path(sys.argv[1]).write_text(json.dumps(payload, sort_keys=True, separat
 PY
 }
 
+run_canary_setup_contract() {
+  local spec=$1
+  local workspace=$2
+  run_sealed_canary_case "$spec" setup_contract "$workspace"
+  python3 - "$spec" "$workspace/setup_contract.response" "$workspace/contract-state.json" "$CANARY_PROJECT_ID" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+spec = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+response = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8") or "{}")
+output = pathlib.Path(sys.argv[3])
+canary_project_id = sys.argv[4]
+contract_id = response.get("project_contract_id")
+version = response.get("version")
+if response.get("project_id") != canary_project_id:
+    raise SystemExit("canary setup contract returned a non-canary project")
+if not isinstance(contract_id, str) or not contract_id:
+    raise SystemExit("canary setup contract did not return project_contract_id")
+if not isinstance(version, int) or version < 1:
+    raise SystemExit("canary setup contract did not return a valid version")
+project_version = spec["import_preview_positive"].get("project_version")
+if not isinstance(project_version, int) or project_version < 1:
+    raise SystemExit("canary import preview must declare current canary project_version")
+payload = {
+    "project_contract_id": contract_id,
+    "project_contract_version": version,
+    "project_version": project_version,
+}
+output.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+os.chmod(output, 0o600)
+PY
+}
+
 run_canary_import_preview() {
   local spec=$1
   local workspace=$2
@@ -384,7 +430,7 @@ PY
   [ "$status" = "$expected" ] \
     || fatal "canary HTTP status mismatch for import_preview_positive"
   python3 - "$spec" "$workspace/import_preview_positive.response" \
-    "$workspace/apply-state.json" "$CANARY_PROJECT_ID" <<'PY'
+    "$workspace/apply-state.json" "$CANARY_PROJECT_ID" "$workspace/contract-state.json" <<'PY'
 import json
 import os
 import pathlib
@@ -395,6 +441,7 @@ spec = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 preview = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
 output = pathlib.Path(sys.argv[3])
 canary_project_id = sys.argv[4]
+contract_state = json.loads(pathlib.Path(sys.argv[5]).read_text(encoding="utf-8"))
 if preview.get("status") != "valid":
     raise SystemExit("canary import preview is not valid")
 batch_id = preview.get("batch_id")
@@ -426,6 +473,10 @@ resolved = []
 for binding in bindings:
     if binding["project_id"] != canary_project_id:
         raise SystemExit("canary binding targets a non-canary project")
+    if binding["project_contract_id"] == "{setup_contract.project_contract_id}":
+        binding = {**binding, "project_contract_id": contract_state["project_contract_id"]}
+    if binding["project_contract_version"] == "{setup_contract.version}":
+        binding = {**binding, "project_contract_version": contract_state["project_contract_version"]}
     resolved.append({**binding, "row_key": row_keys[binding["external_order_no"]]})
 payload = {
     "batch_id": batch_id,
@@ -447,6 +498,88 @@ import sys
 response = pathlib.Path(sys.argv[3])
 pathlib.Path(sys.argv[1]).write_text(json.dumps({
     "case": "import_preview_positive",
+    "http_status": int(sys.argv[2]),
+    "response_sha256": hashlib.sha256(response.read_bytes()).hexdigest(),
+}, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+}
+
+run_canary_cross_project_negative() {
+  local spec=$1
+  local workspace=$2
+  local metadata expected status
+  metadata=$(python3 - "$spec" "$workspace" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+spec = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+work = pathlib.Path(sys.argv[2])
+case = spec["cross_project_negative"]
+state = json.loads((work / "apply-state.json").read_text(encoding="utf-8"))
+account = case["account"]
+token = (work / "tokens" / f"{account}.token").read_text(encoding="utf-8").strip()
+body = state["body"]
+cross_project_id = case["body"]["project_id"]
+if cross_project_id == spec.get("canary_project_id"):
+    raise SystemExit("cross-project negative must target a non-canary project")
+bindings = []
+for binding in body["bindings"]:
+    bindings.append({
+        **binding,
+        "project_id": cross_project_id,
+        "project_version": case["body"]["project_version"],
+        "project_contract_id": case["body"]["project_contract_id"],
+        "project_contract_version": case["body"]["project_contract_version"],
+    })
+body = {**body, "bindings": bindings}
+header = work / "cross_project_negative.header"
+payload = work / "cross_project_negative.json"
+meta = work / "cross_project_negative.meta.json"
+header.write_text(f"Authorization: Bearer {token}\n", encoding="utf-8")
+payload.write_text(json.dumps(body, separators=(",", ":")), encoding="utf-8")
+for path in (header, payload):
+    os.chmod(path, 0o600)
+url_path = case["path"].replace("{batch_id}", state["batch_id"])
+meta.write_text(json.dumps({
+    "url": spec["base_url"].rstrip("/") + url_path,
+    "header": str(header),
+    "payload": str(payload),
+    "expected_status": case["expected_status"],
+}), encoding="utf-8")
+os.chmod(meta, 0o600)
+print(meta)
+PY
+)
+  expected=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["expected_status"])' "$metadata")
+  status=$(curl --silent --show-error --output "$workspace/cross_project_negative.response" \
+    --write-out '%{http_code}' --request POST \
+    --header "@$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["header"])' "$metadata")" \
+    --header 'Content-Type: application/json' \
+    --data-binary "@$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["payload"])' "$metadata")" \
+    "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["url"])' "$metadata")") \
+    || fatal "canary HTTP transport failed for cross_project_negative"
+  [ "$status" = "$expected" ] || fatal "canary HTTP status mismatch for cross_project_negative"
+  python3 - "$workspace/cross_project_negative.response" <<'PY'
+import json
+import pathlib
+import sys
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8") or "{}")
+detail = payload.get("detail")
+code = detail.get("code") if isinstance(detail, dict) else None
+if code != "canary_scope_denied":
+    raise SystemExit("cross_project_negative must return canary_scope_denied")
+PY
+  python3 - "$workspace/cross_project_negative.outcome.json" "$status" \
+    "$workspace/cross_project_negative.response" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+response = pathlib.Path(sys.argv[3])
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "case": "cross_project_negative",
     "http_status": int(sys.argv[2]),
     "response_sha256": hashlib.sha256(response.read_bytes()).hexdigest(),
 }, sort_keys=True, separators=(",", ":")) + "\n")
@@ -511,6 +644,30 @@ pathlib.Path(sys.argv[1]).write_text(json.dumps({
 PY
 }
 
+resolve_canary_milestone() {
+  local workspace=$1
+  local dbc batch_id milestone_id
+  dbc=$(db_cid)
+  [ -n "$dbc" ] || fatal "db container is not running for canary milestone resolution"
+  batch_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["batch_id"])' "$workspace/apply-state.json")
+  milestone_id=$(docker exec "$dbc" psql -X -U spareparts -d spareparts -At -v ON_ERROR_STOP=1 -c \
+    "SELECT milestone_id FROM maintenance_collection_milestone WHERE project_id='${CANARY_PROJECT_ID}' AND collection_plan_import_batch_id='${batch_id}' ORDER BY sequence, milestone_id LIMIT 1;")
+  [ -n "$milestone_id" ] || fatal "canary apply did not create a resolvable milestone"
+  python3 - "$workspace/milestone-state.json" "$milestone_id" <<'PY'
+import json
+import os
+import pathlib
+import re
+import sys
+path = pathlib.Path(sys.argv[1])
+milestone_id = sys.argv[2]
+if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,35}", milestone_id) is None:
+    raise SystemExit("resolved canary milestone id is invalid")
+path.write_text(json.dumps({"milestone_id": milestone_id}, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+os.chmod(path, 0o600)
+PY
+}
+
 collection_domain_fingerprint() {
   local dbc
   dbc=$(db_cid)
@@ -531,7 +688,7 @@ if value.get("canary_project_id", sys.argv[2]) != sys.argv[2]:
 accounts=value.get("named_accounts")
 if not isinstance(accounts,dict) or len(accounts) < 2:
     raise SystemExit("canary spec needs named positive and denied accounts")
-required=("action_grant","action_verify_granted","action_restore","action_verify_restored","follow_up_positive","cross_project_negative","permission_negative","import_preview_positive","apply_last")
+required=("action_grant","action_verify_granted","action_restore","action_verify_restored","setup_contract","follow_up_positive","cross_project_negative","permission_negative","import_preview_positive","apply_last")
 for name in required:
     case=value.get(name)
     if not isinstance(case,dict): raise SystemExit("canary spec lacks case: "+name)
@@ -559,12 +716,22 @@ if "action_maintenance_collection_follow_up" not in (follow_account.get("require
 
 # The real import API intentionally requires a named admin in addition to the
 # explicit high-risk action.  Admin still does not bypass the action check.
+preview = value["import_preview_positive"]
+preview_account_key = preview.get("account")
 for name in ("import_preview_positive", "apply_last"):
     account = account_for(name)
     if account.get("expected_role") != "admin":
         raise SystemExit("collection-plan import positive account must be admin: "+name)
     if "action_maintenance_collection_plan_import" not in (account.get("required_permissions") or []):
         raise SystemExit("collection-plan import positive account lacks explicit import action: "+name)
+setup_contract = value["setup_contract"]
+setup_account = account_for("setup_contract")
+if setup_account.get("expected_role") != "admin" or setup_contract.get("account") != preview_account_key:
+    raise SystemExit("canary setup_contract must use the import admin account")
+if setup_contract.get("method") != "POST" or setup_contract.get("path") != "/api/maintenance/projects/stable/" + sys.argv[2] + "/contracts" or setup_contract.get("expected_status") != 201:
+    raise SystemExit("canary setup_contract must create a contract under the manifest canary project")
+if not isinstance(setup_contract.get("body"), dict):
+    raise SystemExit("canary setup_contract body is invalid")
 
 denied_account = account_for("permission_negative")
 if denied_account.get("expected_role") != "admin":
@@ -575,7 +742,7 @@ if "action_maintenance_collection_follow_up" not in (denied_account.get("forbidd
     raise SystemExit("permission-negative admin must explicitly lack follow-up action")
 
 follow_path = re.compile(
-    r"^/api/maintenance/collection-milestones/([A-Za-z0-9][A-Za-z0-9_-]{0,35})/follow-ups$"
+    r"^/api/maintenance/collection-milestones/([A-Za-z0-9][A-Za-z0-9_-]{0,35}|\{canary_milestone_id\})/follow-ups$"
 )
 def validate_follow_up_case(name, *, successful):
     case = value[name]
@@ -608,15 +775,23 @@ def validate_follow_up_case(name, *, successful):
     return match.group(1)
 
 positive_milestone = validate_follow_up_case("follow_up_positive", successful=True)
-cross_milestone = validate_follow_up_case("cross_project_negative", successful=False)
 permission_milestone = validate_follow_up_case("permission_negative", successful=False)
-if value["cross_project_negative"].get("account") != value["follow_up_positive"].get("account"):
-    raise SystemExit("cross-project negative must use the follow-up positive account")
-if cross_milestone == positive_milestone:
-    raise SystemExit("cross-project negative must target a different milestone")
 if permission_milestone != positive_milestone:
     raise SystemExit("permission negative must target the canary milestone")
-preview = value["import_preview_positive"]
+cross_case = value["cross_project_negative"]
+if cross_case.get("method") != "POST" or cross_case.get("path") != "/api/maintenance/collection-plan-imports/{batch_id}/apply" or cross_case.get("expected_status") != 403:
+    raise SystemExit("cross-project negative must use the dynamic collection-plan apply endpoint")
+if cross_case.get("account") != preview.get("account"):
+    raise SystemExit("cross-project negative must use the import/apply account")
+cross_body = cross_case.get("body")
+if not isinstance(cross_body, dict) or cross_body.get("project_id") == sys.argv[2]:
+    raise SystemExit("cross-project negative must declare a non-canary project binding")
+for key in ("project_id", "project_contract_id"):
+    if not isinstance(cross_body.get(key), str) or not cross_body[key]:
+        raise SystemExit("cross-project negative binding is invalid")
+for key in ("project_version", "project_contract_version"):
+    if not isinstance(cross_body.get(key), int) or cross_body[key] < 1:
+        raise SystemExit("cross-project negative binding version is invalid")
 if preview.get("method") != "POST" or preview.get("path") != "/api/maintenance/collection-plan-imports/preview" or preview.get("expected_status") != 200:
     raise SystemExit("import preview canary must call the real multipart endpoint")
 workbook = pathlib.Path(preview.get("workbook_path", ""))
@@ -630,6 +805,8 @@ idempotency_key = preview.get("idempotency_key")
 if not isinstance(idempotency_key, str) or not 8 <= len(idempotency_key) <= 128 or "\n" in idempotency_key:
     raise SystemExit("canary preview idempotency key is invalid")
 bindings = preview.get("bindings")
+if not isinstance(preview.get("project_version"), int) or preview["project_version"] < 1:
+    raise SystemExit("canary preview must declare current project_version for dynamic setup contract")
 required_binding_keys = {"external_order_no","project_id","project_version","project_contract_id","project_contract_version","existing_binding_version","reason"}
 if not isinstance(bindings, list) or not bindings:
     raise SystemExit("canary preview needs explicit bindings")
@@ -647,7 +824,10 @@ for binding in bindings:
         raise SystemExit("canary binding project version is invalid")
     if not isinstance(binding.get("project_contract_id"), str) or not binding["project_contract_id"]:
         raise SystemExit("canary binding contract is invalid")
-    if not isinstance(binding.get("project_contract_version"), int) or binding["project_contract_version"] < 1:
+    if binding["project_contract_id"] == "{setup_contract.project_contract_id}":
+        if binding.get("project_contract_version") != "{setup_contract.version}":
+            raise SystemExit("dynamic setup contract binding must use the dynamic version token")
+    elif not isinstance(binding.get("project_contract_version"), int) or binding["project_contract_version"] < 1:
         raise SystemExit("canary binding contract version is invalid")
 apply_case = value["apply_last"]
 if apply_case.get("method") != "POST" or apply_case.get("path") != "/api/maintenance/collection-plan-imports/{batch_id}/apply" or apply_case.get("expected_status", 0) // 100 != 2:
@@ -1172,28 +1352,30 @@ $CANARY_PROJECT_ID" ] || fatal "running canary configuration readback mismatch"
     ACTIONS_GRANTED=true
     run_sealed_canary_case "$CANARY_SPEC" action_verify_granted "$CANARY_WORK"
     login_named_canary_accounts "$CANARY_SPEC" "$CANARY_WORK"
-    # The request sequence is deliberately fixed.  Both negative cases and
-    # preview must succeed while apply is false.  The canary apply flag is
-    # opened only for the single manifest-named project, and only for the last
-    # request; if that request fails, the script closes the flag again.
-    run_sealed_canary_case "$CANARY_SPEC" follow_up_positive "$CANARY_WORK"
-    DOMAIN_BEFORE=$(collection_domain_fingerprint)
-    run_sealed_canary_case "$CANARY_SPEC" cross_project_negative "$CANARY_WORK"
-    [ "$(collection_domain_fingerprint)" = "$DOMAIN_BEFORE" ] \
-      || fatal "cross-project negative canary changed collection domain state"
-    DOMAIN_BEFORE=$(collection_domain_fingerprint)
-    run_sealed_canary_case "$CANARY_SPEC" permission_negative "$CANARY_WORK"
-    [ "$(collection_domain_fingerprint)" = "$DOMAIN_BEFORE" ] \
-      || fatal "permission-negative canary changed collection domain state"
+    # The request sequence is deliberately fixed for first deployment: create a
+    # real canary contract, preview the real workbook with writes closed, prove
+    # canary-scope denial with apply open, apply the canary project only, then
+    # follow up the milestone that was just created.
+    run_canary_setup_contract "$CANARY_SPEC" "$CANARY_WORK"
     run_canary_import_preview "$CANARY_SPEC" "$CANARY_WORK"
     update_env_key MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED true
     compose up --no-deps --no-build --force-recreate -d app
     RUNNING_FLAGS=$(compose exec -T app sh -ceu 'printf "%s\n%s\n" "$MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED" "$MAINTENANCE_COLLECTION_CANARY_PROJECT_ID"')
     [ "$RUNNING_FLAGS" = "true
 $CANARY_PROJECT_ID" ] || fatal "running apply canary configuration readback mismatch"
+    DOMAIN_BEFORE=$(collection_domain_fingerprint)
+    run_canary_cross_project_negative "$CANARY_SPEC" "$CANARY_WORK"
+    [ "$(collection_domain_fingerprint)" = "$DOMAIN_BEFORE" ] \
+      || fatal "cross-project negative canary changed collection domain state"
     if ! (run_canary_apply_last "$CANARY_SPEC" "$CANARY_WORK"); then
       fatal "apply canary failed; collection apply flag was closed"
     fi
+    resolve_canary_milestone "$CANARY_WORK"
+    run_sealed_canary_case "$CANARY_SPEC" follow_up_positive "$CANARY_WORK"
+    DOMAIN_BEFORE=$(collection_domain_fingerprint)
+    run_sealed_canary_case "$CANARY_SPEC" permission_negative "$CANARY_WORK"
+    [ "$(collection_domain_fingerprint)" = "$DOMAIN_BEFORE" ] \
+      || fatal "permission-negative canary changed collection domain state"
     python3 - "$CANARY_WORK" "$EVIDENCE_DIR/canary-evidence.json" <<'PY'
 import hashlib
 import json
