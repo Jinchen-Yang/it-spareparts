@@ -5,6 +5,7 @@ umask 077
 
 readonly FROM_REV=d9f1a3c7e5b2
 readonly TO_REV=c8e2a4f6b1d3
+readonly REAL_SAMPLE_SHA256=a783af09fa108d366a26e10fe188be52d20a9ce1fe02121bfd683d96356c8c18
 RESTORE_TMPFS_SIZE=${V122_RESTORE_TMPFS_SIZE:-6g}
 
 fatal() {
@@ -199,6 +200,9 @@ for secret_file in "$SAMPLE_FILE" "$APPLY_SPEC"; do
   [ "$(stat -c '%a' "$secret_file")" = "600" ] \
     || fatal "rehearsal sample/spec must be mode 600"
 done
+SAMPLE_SHA=$(sha256sum "$SAMPLE_FILE" | awk '{print $1}')
+[ "$SAMPLE_SHA" = "$REAL_SAMPLE_SHA256" ] \
+  || fatal "rehearsal sample XLS SHA mismatch"
 
 WORK=$(mktemp -d -t v122-rehearsal.XXXXXXXX)
 RUN_TOKEN=$(basename -- "$WORK" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
@@ -376,8 +380,17 @@ from app.services.maintenance_collection_plan_xls import parse_project_manager_c
 payload = parse_project_manager_collection_xls(pathlib.Path(sys.argv[1]).read_bytes(), filename="sample.xls")
 print(json.dumps({"project_count": len(payload.rows), "milestone_count": sum(len(row.nodes) for row in payload.rows)}, sort_keys=True))
 PY
-python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["project_count"]>0 and p["milestone_count"]>0' "$WORK/parser-result.json" \
-  || fatal "real-sample parser produced no plan facts"
+PARSER_COUNTS=$(python3 - "$WORK/parser-result.json" <<'PY'
+import json
+import sys
+p = json.load(open(sys.argv[1], encoding="utf-8"))
+print(f"{p.get('project_count')}:{p.get('milestone_count')}")
+PY
+)
+[ "$PARSER_COUNTS" = "3:19" ] \
+  || fatal "real-sample parser count mismatch"
+PARSER_PROJECT_COUNT=${PARSER_COUNTS%%:*}
+PARSER_MILESTONE_COUNT=${PARSER_COUNTS##*:}
 DOMAIN_AFTER=$(docker exec "$DB_NAME" psql -X -U restore_admin -d spareparts -At -c \
   "SELECT (SELECT count(*) FROM maintenance_collection_milestone)::text || ':' || (SELECT count(*) FROM maintenance_collection_plan_source_binding)::text || ':' || (SELECT count(*) FROM maintenance_collection_milestone_operation)::text;")
 [ "$DOMAIN_BEFORE" = "$DOMAIN_AFTER" ] || fatal "real-sample parser changed domain tables"
@@ -498,7 +511,7 @@ status, denied = request(
 )
 if status != 403 or denied.get("detail", {}).get("code") != "permission_denied":
     raise SystemExit("apply=false did not fail closed")
-pathlib.Path("/evidence/apply-request.json").write_text(json.dumps({"batch_id": preview["batch_id"], "token": token, "body": apply_body}))
+pathlib.Path("/evidence/apply-request.json").write_text(json.dumps({"batch_id": preview["batch_id"], "body": apply_body}))
 print(json.dumps({"preview_http_status": 200, "apply_false_http_status": 403}, sort_keys=True))
 PY
 HTTP_PREVIEW_DOMAIN_AFTER=$(docker exec "$DB_NAME" psql -X -U spareparts -d spareparts -At -c \
@@ -507,7 +520,7 @@ HTTP_PREVIEW_DOMAIN_AFTER=$(docker exec "$DB_NAME" psql -X -U spareparts -d spar
   || fatal "actual HTTP preview changed domain tables"
 start_app true
 docker run --rm --pull=never --network "$NETWORK_NAME" \
-  -v "$WORK:/evidence:rw" --entrypoint python "$APP_IMAGE_ID" - \
+  -v "$WORK:/evidence:rw" -v "$APPLY_SPEC:/spec.json:ro" --entrypoint python "$APP_IMAGE_ID" - \
   >"$WORK/http-apply-summary.json" <<'PY'
 import json
 import pathlib
@@ -515,10 +528,25 @@ import urllib.error
 import urllib.request
 
 state = json.loads(pathlib.Path("/evidence/apply-request.json").read_text())
+spec = json.loads(pathlib.Path("/spec.json").read_text())
+def request(path, body, *, token=None):
+    data = json.dumps(body).encode()
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(f"http://app:8000/api{path}", data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.load(exc)
+status, login = request("/auth/login", {"username": spec["username"], "password": spec["password"]})
+if status != 200 or not login.get("token"):
+    raise SystemExit("named rehearsal re-login failed before apply")
 request = urllib.request.Request(
     f"http://app:8000/api/maintenance/collection-plan-imports/{state['batch_id']}/apply",
     data=json.dumps(state["body"]).encode(),
-    headers={"Content-Type": "application/json", "Authorization": f"Bearer {state['token']}"},
+    headers={"Content-Type": "application/json", "Authorization": f"Bearer {login['token']}"},
     method="POST",
 )
 try:
@@ -540,11 +568,19 @@ AUDIT_ROWS=$(docker exec "$DB_NAME" psql -X -U restore_admin -d spareparts -At -
 [ "$APPLIED_ROWS" -ge 1 ] && [ "$AUDIT_ROWS" -ge 1 ] \
   || fatal "synthetic apply lacks persisted batch/audit evidence"
 
+cp -- "$WORK/invariants.txt" "$WORK/output/invariants.txt"
+cp -- "$WORK/parser-result.json" "$WORK/output/parser-result.json"
+cp -- "$WORK/http-preview-summary.json" "$WORK/output/http-preview-summary.json"
+cp -- "$WORK/http-apply-summary.json" "$WORK/output/http-apply-summary.json"
 python3 - "$WORK/output/rehearsal-evidence.json" "$REHEARSAL_STAGE" "$TARGET_SHA" \
   "$PARENT_SHA" "$BEFORE_HEAD" "$AFTER_HEAD" "$DB_DUMP" "$GLOBALS_FILE" \
   "$UPLOADS_ARCHIVE" "$CANDIDATE_COMPOSE" "$CONTRACT_FILE" "$PACKAGE_MANIFEST" \
   "$APP_IMAGE_ID" "$FRONTEND_IMAGE_ID" "$DB_IMAGE_ID" "$DOMAIN_BEFORE" "$DOMAIN_AFTER" \
-  "$HTTP_PREVIEW_DOMAIN_BEFORE" "$HTTP_PREVIEW_DOMAIN_AFTER" "$APPLIED_ROWS" "$AUDIT_ROWS" <<'PY'
+  "$HTTP_PREVIEW_DOMAIN_BEFORE" "$HTTP_PREVIEW_DOMAIN_AFTER" "$APPLIED_ROWS" "$AUDIT_ROWS" \
+  "$SAMPLE_SHA" "$PARSER_PROJECT_COUNT" "$PARSER_MILESTONE_COUNT" "$BACKUP_MANIFEST" "$CHECKSUM_FILE" \
+  "$WORK/output/uploads-restore.json" "$WORK/output/db-uploads-consistency.json" \
+  "$WORK/output/invariants.txt" "$WORK/output/parser-result.json" \
+  "$WORK/output/http-preview-summary.json" "$WORK/output/http-apply-summary.json" <<'PY'
 import datetime as dt
 import hashlib
 import json
@@ -556,6 +592,17 @@ out = pathlib.Path(sys.argv[1])
 stage, target, parent, before, after = sys.argv[2:7]
 db_dump, globals_file, uploads, compose, contract, manifest = map(pathlib.Path, sys.argv[7:13])
 app_image, frontend_image, db_image, parser_before, parser_after, http_preview_before, http_preview_after, applied, audit = sys.argv[13:22]
+sample_sha, project_count, milestone_count = sys.argv[22:25]
+(
+    backup_manifest,
+    backup_checksums,
+    uploads_restore,
+    db_uploads,
+    invariants,
+    parser_result,
+    http_preview,
+    http_apply,
+) = map(pathlib.Path, sys.argv[25:33])
 payload = {
     "format": "v122-collection-reminders-rehearsal-v2",
     "stage": stage,
@@ -570,9 +617,20 @@ payload = {
     "db_dump_sha256": hashlib.sha256(db_dump.read_bytes()).hexdigest(),
     "globals_sha256": hashlib.sha256(globals_file.read_bytes()).hexdigest(),
     "uploads_archive_sha256": hashlib.sha256(uploads.read_bytes()).hexdigest(),
+    "backup_manifest_sha256": hashlib.sha256(backup_manifest.read_bytes()).hexdigest(),
+    "backup_checksums_sha256": hashlib.sha256(backup_checksums.read_bytes()).hexdigest(),
+    "uploads_restore_sha256": hashlib.sha256(uploads_restore.read_bytes()).hexdigest(),
+    "db_uploads_consistency_sha256": hashlib.sha256(db_uploads.read_bytes()).hexdigest(),
+    "invariants_sha256": hashlib.sha256(invariants.read_bytes()).hexdigest(),
+    "parser_result_sha256": hashlib.sha256(parser_result.read_bytes()).hexdigest(),
+    "http_preview_summary_sha256": hashlib.sha256(http_preview.read_bytes()).hexdigest(),
+    "http_apply_summary_sha256": hashlib.sha256(http_apply.read_bytes()).hexdigest(),
     "candidate_compose_sha256": hashlib.sha256(compose.read_bytes()).hexdigest(),
     "contract_sha256": hashlib.sha256(contract.read_bytes()).hexdigest(),
     "package_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+    "sample_xls_sha256": sample_sha,
+    "parser_project_count": int(project_count),
+    "parser_milestone_count": int(milestone_count),
     "db_restore": True,
     "globals_restore": True,
     "uploads_restore_verified": True,
@@ -582,7 +640,12 @@ payload = {
     "synthetic_apply_verified": int(applied) > 0 and int(audit) > 0,
     "completed_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
 }
-if not payload["success"]:
+if (
+    not payload["success"]
+    or payload["sample_xls_sha256"] != "a783af09fa108d366a26e10fe188be52d20a9ce1fe02121bfd683d96356c8c18"
+    or payload["parser_project_count"] != 3
+    or payload["parser_milestone_count"] != 19
+):
     raise SystemExit("rehearsal success predicates were not all derived true")
 with out.open("x", encoding="utf-8") as stream:
     json.dump(payload, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -591,7 +654,6 @@ with out.open("x", encoding="utf-8") as stream:
     os.fsync(stream.fileno())
 os.chmod(out, 0o600)
 PY
-cp -- "$WORK/invariants.txt" "$WORK/output/invariants.txt"
-(cd "$WORK/output" && sha256sum db-uploads-consistency.json invariants.txt rehearsal-evidence.json uploads-restore.json >sha256sums)
+(cd "$WORK/output" && sha256sum db-uploads-consistency.json http-apply-summary.json http-preview-summary.json invariants.txt parser-result.json rehearsal-evidence.json uploads-restore.json >sha256sums)
 chmod 600 "$WORK/output"/*
 mv -T -- "$WORK/output" "$OUTPUT_DIR"

@@ -46,6 +46,20 @@ BACKUP_REQUIRED_ASSETS = [
     "file_counts_and_bytes",
     "sha256sums",
 ]
+REAL_SAMPLE_SHA256 = "a783af09fa108d366a26e10fe188be52d20a9ce1fe02121bfd683d96356c8c18"
+REHEARSAL_HASH_FIELDS = (
+    "db_dump_sha256",
+    "globals_sha256",
+    "uploads_archive_sha256",
+    "backup_manifest_sha256",
+    "backup_checksums_sha256",
+    "uploads_restore_sha256",
+    "db_uploads_consistency_sha256",
+    "invariants_sha256",
+    "parser_result_sha256",
+    "http_preview_summary_sha256",
+    "http_apply_summary_sha256",
+)
 PACKAGE_TOOLS = (
     "v122_collection_reminders_manifest.py",
     "v122_collection_reminders_build.sh",
@@ -233,6 +247,7 @@ def _validate_rehearsal(
     stage: str,
     target_sha: str,
     parent_sha: str,
+    binding: dict[str, str],
 ) -> dict[str, Any]:
     value = _load_json(path, f"{stage} rehearsal evidence")
     expected = {
@@ -243,6 +258,15 @@ def _validate_rehearsal(
         "parent_production_sha": parent_sha,
         "from_revision": DB_FROM,
         "to_revision": DB_TO,
+        "database_image_id": binding["database_image_id"],
+        "app_image_id": binding["app_image_id"],
+        "frontend_image_id": binding["frontend_image_id"],
+        "package_manifest_sha256": binding["package_manifest_sha256"],
+        "contract_sha256": binding["contract_sha256"],
+        "candidate_compose_sha256": binding["candidate_compose_sha256"],
+        "sample_xls_sha256": REAL_SAMPLE_SHA256,
+        "parser_project_count": 3,
+        "parser_milestone_count": 19,
         "db_restore": True,
         "globals_restore": True,
         "uploads_restore_verified": True,
@@ -253,7 +277,75 @@ def _validate_rehearsal(
     for key, wanted in expected.items():
         if value.get(key) != wanted:
             _fail(f"{stage} rehearsal evidence mismatch: {key}")
+    for key in REHEARSAL_HASH_FIELDS:
+        _validated(
+            str(value.get(key, "")),
+            SHA256,
+            f"{stage} rehearsal evidence {key}",
+        )
     return value
+
+
+def _rehearsal_binding(package: Path, payload: dict[str, Any]) -> dict[str, str]:
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, dict):
+        _fail("package lacks artifacts for rehearsal binding")
+    return {
+        "package_manifest_sha256": _sha256_file(package / "manifest.json"),
+        "contract_sha256": str(payload["contract"]["sha256"]),
+        "candidate_compose_sha256": str(artifacts["compose"]["sha256"]),
+        "database_image_id": str(payload["database"]["image_id"]),
+        "app_image_id": str(payload["images"]["app_image_id"]),
+        "frontend_image_id": str(payload["images"]["frontend_image_id"]),
+    }
+
+
+def _binding_from_manifest(value: Any, label: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        _fail(f"production-ready package lacks {label} binding")
+    expected_keys = {
+        "target_sha",
+        "manifest_sha256",
+        "contract_sha256",
+        "candidate_compose_sha256",
+        "database_image_id",
+        "app_image_id",
+        "frontend_image_id",
+    }
+    if set(value) != expected_keys:
+        _fail(f"{label} binding keys mismatch")
+    return {
+        "package_manifest_sha256": _validated(
+            str(value["manifest_sha256"]),
+            SHA256,
+            f"{label} manifest SHA",
+        ),
+        "contract_sha256": _validated(
+            str(value["contract_sha256"]),
+            SHA256,
+            f"{label} contract SHA",
+        ),
+        "candidate_compose_sha256": _validated(
+            str(value["candidate_compose_sha256"]),
+            SHA256,
+            f"{label} compose SHA",
+        ),
+        "database_image_id": _validated(
+            str(value["database_image_id"]),
+            IMAGE_ID,
+            f"{label} DB image id",
+        ),
+        "app_image_id": _validated(
+            str(value["app_image_id"]),
+            IMAGE_ID,
+            f"{label} app image id",
+        ),
+        "frontend_image_id": _validated(
+            str(value["frontend_image_id"]),
+            IMAGE_ID,
+            f"{label} frontend image id",
+        ),
+    }
 
 
 def _copy_artifact(source: Path, target: Path, *, executable: bool = False) -> None:
@@ -525,23 +617,38 @@ def _verify_package(path_value: str) -> tuple[Path, dict[str, Any]]:
         if contract["state"] != "approved_for_production_candidate" or contract["production_apply_allowed"] is not True:
             _fail("production-ready package needs promoted true contract")
         preliminary = payload.get("preliminary_candidate")
-        if not isinstance(preliminary, dict):
-            _fail("production-ready package lacks preliminary binding")
-        _validated(str(preliminary.get("target_sha", "")), SHA40, "preliminary target SHA")
-        _validated(str(preliminary.get("manifest_sha256", "")), SHA256, "preliminary manifest SHA")
+        final_candidate = payload.get("final_candidate")
+        if not isinstance(preliminary, dict) or not isinstance(final_candidate, dict):
+            _fail("production-ready package lacks preliminary/final binding")
+        preliminary_target = _validated(
+            str(preliminary.get("target_sha", "")),
+            SHA40,
+            "preliminary target SHA",
+        )
+        final_target = _validated(
+            str(final_candidate.get("target_sha", "")),
+            SHA40,
+            "final candidate target SHA",
+        )
+        if final_target != target:
+            _fail("final candidate target SHA mismatch")
+        preliminary_binding = _binding_from_manifest(preliminary, "preliminary")
+        final_binding = _binding_from_manifest(final_candidate, "final candidate")
         prelim_path = package / artifacts.get("preliminary_rehearsal", {}).get("path", "")
         final_path = package / artifacts.get("final_rehearsal", {}).get("path", "")
         _validate_rehearsal(
             prelim_path,
             stage="preliminary",
-            target_sha=preliminary["target_sha"],
+            target_sha=preliminary_target,
             parent_sha=parent,
+            binding=preliminary_binding,
         )
         _validate_rehearsal(
             final_path,
             stage="final",
             target_sha=target,
             parent_sha=parent,
+            binding=final_binding,
         )
     return package, payload
 
@@ -573,17 +680,21 @@ def finalize(args: argparse.Namespace) -> int:
         _fail("contract promotion must produce a distinct final target SHA")
     if preliminary_payload["parent_production_sha"] != candidate_payload["parent_production_sha"]:
         _fail("preliminary/final parent production SHA mismatch")
+    preliminary_binding = _rehearsal_binding(preliminary, preliminary_payload)
+    candidate_binding = _rehearsal_binding(candidate, candidate_payload)
     _validate_rehearsal(
         Path(args.preliminary_rehearsal),
         stage="preliminary",
         target_sha=preliminary_payload["target_sha"],
         parent_sha=candidate_payload["parent_production_sha"],
+        binding=preliminary_binding,
     )
     _validate_rehearsal(
         Path(args.final_rehearsal),
         stage="final",
         target_sha=candidate_payload["target_sha"],
         parent_sha=candidate_payload["parent_production_sha"],
+        binding=candidate_binding,
     )
     output = Path(args.output).absolute()
     staging = _new_staging(output)
@@ -609,8 +720,21 @@ def finalize(args: argparse.Namespace) -> int:
         payload["artifacts"] = artifacts
         payload["preliminary_candidate"] = {
             "target_sha": preliminary_payload["target_sha"],
-            "manifest_sha256": _sha256_file(preliminary / "manifest.json"),
-            "contract_sha256": preliminary_payload["contract"]["sha256"],
+            "manifest_sha256": preliminary_binding["package_manifest_sha256"],
+            "contract_sha256": preliminary_binding["contract_sha256"],
+            "candidate_compose_sha256": preliminary_binding["candidate_compose_sha256"],
+            "database_image_id": preliminary_binding["database_image_id"],
+            "app_image_id": preliminary_binding["app_image_id"],
+            "frontend_image_id": preliminary_binding["frontend_image_id"],
+        }
+        payload["final_candidate"] = {
+            "target_sha": candidate_payload["target_sha"],
+            "manifest_sha256": candidate_binding["package_manifest_sha256"],
+            "contract_sha256": candidate_binding["contract_sha256"],
+            "candidate_compose_sha256": candidate_binding["candidate_compose_sha256"],
+            "database_image_id": candidate_binding["database_image_id"],
+            "app_image_id": candidate_binding["app_image_id"],
+            "frontend_image_id": candidate_binding["frontend_image_id"],
         }
         payload["production_ready"] = True
         _write_manifest(staging, payload)

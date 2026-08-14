@@ -1,6 +1,7 @@
 """长寿命 PostgreSQL 测试库的 dropped-column 寿命守卫。"""
 import os
 import re
+import time
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -14,6 +15,8 @@ DROPPED_COLS_REBUILD_THRESHOLD = 800
 _TEST_DATABASE_NAME = re.compile(r"^spareparts_test(?:_[A-Za-z0-9_]+)?$")
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 _REMOTE_OPT_IN = "ALLOW_REMOTE_TEST_DB_REBUILD"
+_PROBE_SESSION_SETTLE_ATTEMPTS = 3
+_PROBE_SESSION_SETTLE_DELAY_SECONDS = 0.05
 # psycopg/libpq 会让 query 参数覆盖 URL authority。只校验 ``url.host`` /
 # ``url.database`` 会被 ``?host=...``、``?hostaddr=...``、``?dbname=...`` 绕过。
 # 目标必须只在 authority/path 中声明；TLS 等非目标参数仍可正常放 query。
@@ -65,6 +68,26 @@ def _assert_recreate_privileges(conn, test_db: str, *, exists: bool) -> None:
             f"CREATE_DATABASE={can_create}, DROP_DATABASE={can_drop}；"
             "为避免先删后建失败，未执行任何破坏动作"
         )
+
+
+def _wait_for_closed_probe_sessions(conn, test_db: str) -> int:
+    """有界等待刚释放的 NullPool probe 从 pg_stat_activity 消失。
+
+    这里只处理 probe.dispose() 后 PostgreSQL 短暂可见的旧 backend；连续三次
+    仍有 client 时一律返回非零，由调用者拒绝重建，绝不终止任何会话。
+    """
+    sessions = 0
+    for attempt in range(_PROBE_SESSION_SETTLE_ATTEMPTS):
+        sessions = int(conn.execute(text(
+            "SELECT COUNT(*) FROM pg_stat_activity"
+            " WHERE datname = :db AND pid <> pg_backend_pid()"
+            "   AND backend_type = 'client backend'"
+        ), {"db": test_db}).scalar() or 0)
+        if not sessions:
+            return 0
+        if attempt < _PROBE_SESSION_SETTLE_ATTEMPTS - 1:
+            time.sleep(_PROBE_SESSION_SETTLE_DELAY_SECONDS)
+    return sessions
 
 
 def ensure_test_database(
@@ -120,11 +143,7 @@ def ensure_test_database(
 
                     # 绝不使用 WITH (FORCE)：另一个 pytest 即便没拿本守卫的 advisory
                     # lock，只要仍连着目标库就拒绝重建，不能杀掉它的会话。
-                    sessions = int(conn.execute(text(
-                        "SELECT COUNT(*) FROM pg_stat_activity"
-                        " WHERE datname = :db AND pid <> pg_backend_pid()"
-                        "   AND backend_type = 'client backend'"
-                    ), {"db": test_db}).scalar() or 0)
+                    sessions = _wait_for_closed_probe_sessions(conn, test_db)
                     if sessions:
                         raise RuntimeError(
                             f"测试数据库 {test_db!r} 仍有 {sessions} 个其他客户端连接；"

@@ -123,10 +123,14 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
   const canViewContract = canViewProfit;
   const canViewExpense = canViewProfit;
   const canViewFinancial = canViewCost && canViewContract && canViewExpense;
-  // page_maintenance_beta is account-scoped even for admins.  The server
-  // allows admin's stable maintenance page through the role, but never lets
-  // it bypass this explicit Beta allowlist bit.
-  const canUseBeta = permissions.page_maintenance_beta === true && (
+  const canUseBeta = isAdmin || (
+    permissions.page_maintenance === true
+    && permissions.page_maintenance_beta === true
+  );
+  // Collection reminders are a separately allowlisted Beta workflow.  Keep
+  // that explicit account gate separate from stable maintenance permissions,
+  // whose admin bypass is part of the existing server/UI contract.
+  const canUseCollectionReminders = permissions.page_maintenance_beta === true && (
     isAdmin || permissions.page_maintenance === true
   );
   const canDownloadRoundtrip = isAdmin || (
@@ -182,14 +186,14 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
       && permissions.data_profit === true
       && permissions.action_maintenance_migration_review === true
     ),
-    canViewCollectionReminders: canUseBeta,
+    canViewCollectionReminders: canUseCollectionReminders,
     // 回款提醒写操作是显式账号权限：admin 没有显式 action 仍然 403，
     // 不沿用 require_action() 的 admin 短路。
-    canFollowUpCollection: canUseBeta
+    canFollowUpCollection: canUseCollectionReminders
       && permissions.action_maintenance_collection_follow_up === true,
     // 导入回款计划：Beta + 实名 realm 角色 admin + 显式 import action +
     // 合同金额可见（data_profit），禁止 isAdmin || action 的普通短路。
-    canImportCollectionPlan: canUseBeta
+    canImportCollectionPlan: canUseCollectionReminders
       && role === "admin"
       && permissions.action_maintenance_collection_plan_import === true
       && canViewContract,
