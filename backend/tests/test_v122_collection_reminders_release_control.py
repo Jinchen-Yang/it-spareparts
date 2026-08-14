@@ -152,6 +152,114 @@ def _action_account_rows(controls: dict, list_name: str) -> list[dict]:
     ]
 
 
+def _rollback_action_spec(spec: dict, *, token_prefix: str = "fresh-rollback") -> dict:
+    rollback = {
+        "base_url": spec["base_url"],
+        **{
+            name: copy.deepcopy(spec[name])
+            for name in (
+                "action_grant",
+                "action_restore",
+                "action_verify_granted",
+                "action_verify_restored",
+            )
+        },
+    }
+    for name in ("action_grant", "action_restore"):
+        for index, case in enumerate(rollback[name]):
+            case["token"] = f"{token_prefix}-{name}-{index}"
+    for name in ("action_verify_granted", "action_verify_restored"):
+        rollback[name]["token"] = f"{token_prefix}-{name}"
+    return rollback
+
+
+def _action_plan_sha256(spec: dict) -> str:
+    def project_verify(case: dict) -> dict:
+        return {
+            key: copy.deepcopy(case[key])
+            for key in ("method", "path", "expected_status")
+        }
+
+    def project_update(case: dict) -> dict:
+        return {
+            "method": case["method"],
+            "path": case["path"],
+            "target_username": case["path"].rsplit("/", 1)[-1],
+            "expected_status": case["expected_status"],
+            "overrides": copy.deepcopy(case["body"]["overrides"]),
+        }
+
+    payload = {
+        "format": "v122-rollback-action-plan-v1",
+        "base_url": spec["base_url"].rstrip("/"),
+        "canary_project_id": CANARY_PROJECT_ID,
+        "action_grant": [project_update(case) for case in spec["action_grant"]],
+        "action_restore": [project_update(case) for case in spec["action_restore"]],
+        "action_verify_granted": project_verify(spec["action_verify_granted"]),
+        "action_verify_restored": project_verify(spec["action_verify_restored"]),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _rollback_docker_body(
+    event_log: Path,
+    *,
+    reload_failure: str | None = None,
+) -> str:
+    if reload_failure not in {None, "recreate", "readback_transport", "readback_true"}:
+        raise AssertionError(f"unsupported rollback reload failure: {reload_failure}")
+    recreate = (
+        "printf 'recreate-failed\\n' >> \"$V122_TEST_ROLLBACK_EVENTS\"; exit 97"
+        if reload_failure == "recreate"
+        else "printf 'recreate\\n' >> \"$V122_TEST_ROLLBACK_EVENTS\"; exit 0"
+    )
+    if reload_failure == "readback_transport":
+        readback = "printf 'readback-transport-failed\\n' >> \"$V122_TEST_ROLLBACK_EVENTS\"; exit 97"
+    elif reload_failure == "readback_true":
+        readback = (
+            "printf 'readback:true\\n' >> \"$V122_TEST_ROLLBACK_EVENTS\"; "
+            f"printf 'true\\n{CANARY_PROJECT_ID}\\n'; exit 0"
+        )
+    else:
+        readback = """
+        apply=$(sed -n 's/^MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=//p' "$V122_APP_DIR/.env")
+        project=$(sed -n 's/^MAINTENANCE_COLLECTION_CANARY_PROJECT_ID=//p' "$V122_APP_DIR/.env")
+        printf 'readback:%s\n' "$apply" >> "$V122_TEST_ROLLBACK_EVENTS"
+        printf '%s\n%s\n' "$apply" "$project"; exit 0
+        """
+    return f"""
+    if [[ "$*" == *"compose"* && "$*" == *"up --no-deps --no-build --force-recreate -d app frontend"* ]]; then
+      printf 'retag-start\\n' >> "$V122_TEST_ROLLBACK_EVENTS"; exit 0
+    fi
+    if [[ "$*" == *"compose"* && "$*" == *"up --no-deps --no-build --force-recreate -d app"* ]]; then
+      {recreate}
+    fi
+    if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then
+      {readback}
+    fi
+    if [[ "$*" == *"image inspect --format"* ]]; then echo "${{!#}}"; exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q app"* ]]; then echo app-cid; exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then echo frontend-cid; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"app-cid"* ]]; then echo "$V122_TEST_APP_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"frontend-cid"* ]]; then echo "$V122_TEST_FRONTEND_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"tag "* ]]; then exit 0; fi
+    exit 97
+    """
+
+
+def _set_runtime_collection_apply(env: dict[str, str], *, enabled: bool) -> Path:
+    env_file = Path(env["V122_APP_DIR"]) / ".env"
+    value = "true" if enabled else "false"
+    content = re.sub(
+        r"(?m)^MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=(?:true|false)$",
+        f"MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED={value}",
+        env_file.read_text(),
+    )
+    env_file.write_text(content)
+    return env_file
+
+
 def _full_canary_docker_body(event_log: Path) -> str:
     return f"""
     if [[ "$*" == *"compose"* && "$*" == *"ps -q db"* ]]; then echo db-cid; exit 0; fi
@@ -285,6 +393,8 @@ def _write_rollback_curl_stub(
     restore_verify_failure: str | None = None,
     replace_spec: tuple[Path, Path] | None = None,
     snapshot_audit: Path | None = None,
+    event_log: Path | None = None,
+    expected_token_prefix: str | None = None,
 ) -> Path:
     granted = json.dumps(
         granted_rows or _action_account_rows(spec, "action_grant"),
@@ -328,6 +438,15 @@ def _write_rollback_curl_stub(
         printf '%s %s %s\n' "$(stat -c %a "$work" 2>/dev/null)" \
           "$(stat -c %a "$snapshot" 2>/dev/null)" "$kind" > "{snapshot_audit}"
         """
+    log_event = ""
+    if event_log is not None:
+        log_event = f"printf 'curl:%s\\n' \"${{out##*/}}\" >> {event_log}"
+    assert_fresh_token = ""
+    if expected_token_prefix is not None:
+        assert_fresh_token = f"""
+        [ -n "$auth_header" ] || exit 86
+        grep -q '^Authorization: Bearer {expected_token_prefix}' "$auth_header" || exit 87
+        """
     return _write(
         path,
         f"""
@@ -335,15 +454,20 @@ def _write_rollback_curl_stub(
         printf '%s\n' "$*" >> {curl_calls}
         out=''
         data=''
+        auth_header=''
         previous=''
         for arg in "$@"; do
           if [ "$previous" = output ]; then out=$arg; fi
           if [ "$previous" = data ]; then data="${{arg#@}}"; fi
+          if [ "$previous" = header ] && [[ "$arg" == @* ]]; then auth_header="${{arg#@}}"; fi
           previous=''
           [ "$arg" = --output ] && previous=output
           [ "$arg" = --data-binary ] && previous=data
+          [ "$arg" = --header ] && previous=header
         done
         url=${{!#}}
+        {log_event}
+        {assert_fresh_token}
         {audit_snapshot}
         {replace_once}
         case "$out" in
@@ -1502,6 +1626,11 @@ def test_release_migrate_uses_exact_target_app_image_without_build_and_verifies_
 def test_release_deploy_and_rollback_retag_exact_image_ids_without_build(tmp_path: Path):
     package = _production_package(tmp_path / "pkg")
     docker = """
+    if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then
+      apply=$(sed -n 's/^MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=//p' "$V122_APP_DIR/.env")
+      project=$(sed -n 's/^MAINTENANCE_COLLECTION_CANARY_PROJECT_ID=//p' "$V122_APP_DIR/.env")
+      printf '%s\n%s\n' "$apply" "$project"; exit 0
+    fi
     if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"ps -q app\"* ]]; then echo app-cid; exit 0; fi
     if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"ps -q frontend\"* ]]; then echo frontend-cid; exit 0; fi
     if [[ \"$*\" == *\"image inspect\"* ]]; then
@@ -1638,6 +1767,7 @@ def test_successful_canary_persists_exact_sealed_spec_sha256(tmp_path: Path):
     spec = _standard_canary_spec(workbook)
     spec_file = _json_artifact(tmp_path / "canary.json", spec)
     expected_snapshot_sha = hashlib.sha256(spec_file.read_bytes()).hexdigest()
+    expected_action_plan_sha = _action_plan_sha256(spec)
     replacement_spec = copy.deepcopy(spec)
     for list_name in ("action_grant", "action_restore"):
         for case in replacement_spec[list_name]:
@@ -1674,8 +1804,10 @@ def test_successful_canary_persists_exact_sealed_spec_sha256(tmp_path: Path):
     state = json.loads((evidence / "release-state.json").read_text())
     assert state["phase"] == "canary"
     assert state["canary_spec_sha256"] == expected_snapshot_sha
+    assert state["action_plan_sha256"] == expected_action_plan_sha
     canary_evidence = json.loads((evidence / "canary-evidence.json").read_text())
     assert canary_evidence["canary_spec_sha256"] == expected_snapshot_sha
+    assert canary_evidence["action_plan_sha256"] == expected_action_plan_sha
     assert hashlib.sha256(spec_file.read_bytes()).hexdigest() != expected_snapshot_sha
     assert snapshot_audit.read_text().strip() == "700 600 regular"
 
@@ -1810,13 +1942,289 @@ def test_canary_grant_get_mismatch_triggers_full_restore(tmp_path: Path):
     assert len([line for line in call_lines if "action_restore-" in line]) == 3
 
 
+def test_rollback_accepts_fresh_tokens_and_action_only_spec_after_workbook_archival(
+    tmp_path: Path,
+):
+    package = _production_package(tmp_path / "pkg")
+    event_log = tmp_path / "rollback-events"
+    env, evidence, calls, _backup_root = _release_test_env(
+        tmp_path / "runtime",
+        package,
+        docker_body=_rollback_docker_body(event_log),
+    )
+    env["V122_TEST_ROLLBACK_EVENTS"] = str(event_log)
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    rollback_tmp = tmp_path / "rollback-tmp"
+    rollback_tmp.mkdir()
+    env["TMPDIR"] = str(rollback_tmp)
+    workbook = _write(tmp_path / "canary.xls", b"one-row-canary-workbook")
+    canary_spec = _standard_canary_spec(workbook, token="expired-canary-token")
+    canary_file = _json_artifact(tmp_path / "original-canary.json", canary_spec)
+    rollback_spec = _rollback_action_spec(canary_spec, token_prefix="fresh-rollback")
+    rollback_spec["base_url"] += "///"
+    rollback_file = _json_artifact(tmp_path / "rollback-actions.json", rollback_spec)
+    workbook.unlink()
+    curl_calls = tmp_path / "curl-calls"
+    snapshot_audit = tmp_path / "rollback-snapshot-audit"
+    _write_rollback_curl_stub(
+        Path(env["PATH"].split(":", 1)[0]) / "curl",
+        spec=rollback_spec,
+        curl_calls=curl_calls,
+        event_log=event_log,
+        expected_token_prefix="fresh-rollback",
+        snapshot_audit=snapshot_audit,
+    )
+    expected_plan_sha = _action_plan_sha256(canary_spec)
+    expected_full_sha = hashlib.sha256(canary_file.read_bytes()).hexdigest()
+    _write_release_state(
+        evidence,
+        package,
+        phase="canary",
+        actions_granted=True,
+        canary_spec_sha256=expected_full_sha,
+        action_plan_sha256=expected_plan_sha,
+    )
+    env_file = Path(env["V122_APP_DIR"]) / ".env"
+    env_file.write_text(
+        env_file.read_text().replace(
+            "MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=false",
+            "MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=true",
+        )
+    )
+
+    completed = subprocess.run(
+        [
+            str(package / "v122_collection_reminders_release.sh"),
+            str(package),
+            str(evidence),
+            "rollback-images",
+            str(rollback_file),
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    events = event_log.read_text().splitlines()
+    assert events.index("recreate") < events.index("readback:false")
+    assert events.index("readback:false") < events.index("curl:action_verify_granted.response")
+    curl_text = curl_calls.read_text()
+    assert curl_text.count("--request PUT") == 3
+    assert "login-" not in curl_text
+    assert "tag sha256:" + "8" * 64 + " it-spareparts-app:latest" in calls.read_text()
+    assert not workbook.exists()
+    state = json.loads((evidence / "release-state.json").read_text())
+    assert state["phase"] == "rolled_back"
+    assert state["canary_spec_sha256"] == expected_full_sha
+    assert state["action_plan_sha256"] == expected_plan_sha
+    assert snapshot_audit.read_text().strip() == "700 600 regular"
+    assert list(rollback_tmp.iterdir()) == []
+
+
+@pytest.mark.parametrize("mutation", ["base_url", "path", "overrides", "order"])
+def test_rollback_rejects_changed_action_plan_after_runtime_close_before_accounts(
+    tmp_path: Path,
+    mutation: str,
+):
+    package = _production_package(tmp_path / "pkg")
+    event_log = tmp_path / "rollback-events"
+    env, evidence, calls, _backup_root = _release_test_env(
+        tmp_path / "runtime",
+        package,
+        docker_body=_rollback_docker_body(event_log),
+    )
+    env["V122_TEST_ROLLBACK_EVENTS"] = str(event_log)
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    _set_runtime_collection_apply(env, enabled=True)
+    workbook = _write(tmp_path / "canary.xls", b"one-row-canary-workbook")
+    canary_spec = _standard_canary_spec(workbook)
+    rollback_spec = _rollback_action_spec(canary_spec)
+    if mutation == "base_url":
+        rollback_spec["base_url"] = "https://changed.invalid"
+    elif mutation == "path":
+        rollback_spec["action_grant"][0]["path"] = "/api/accounts/other-importer"
+        rollback_spec["action_restore"][2]["path"] = "/api/accounts/other-importer"
+    elif mutation == "overrides":
+        rollback_spec["action_grant"][0]["body"]["overrides"]["page_maintenance"] = False
+    else:
+        rollback_spec["action_grant"][0], rollback_spec["action_grant"][1] = (
+            rollback_spec["action_grant"][1],
+            rollback_spec["action_grant"][0],
+        )
+        rollback_spec["action_restore"][1], rollback_spec["action_restore"][2] = (
+            rollback_spec["action_restore"][2],
+            rollback_spec["action_restore"][1],
+        )
+    rollback_file = _json_artifact(tmp_path / "changed-rollback-actions.json", rollback_spec)
+    curl_calls = tmp_path / "curl-calls"
+    _write_rollback_curl_stub(
+        Path(env["PATH"].split(":", 1)[0]) / "curl",
+        spec=rollback_spec,
+        curl_calls=curl_calls,
+    )
+    _write_release_state(
+        evidence,
+        package,
+        phase="canary",
+        actions_granted=True,
+        canary_spec_sha256="a" * 64,
+        action_plan_sha256=_action_plan_sha256(canary_spec),
+    )
+    before_state = (evidence / "release-state.json").read_bytes()
+
+    completed = subprocess.run(
+        [
+            str(package / "v122_collection_reminders_release.sh"),
+            str(package),
+            str(evidence),
+            "rollback-images",
+            str(rollback_file),
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert event_log.read_text().splitlines() == ["recreate", "readback:false"]
+    assert not curl_calls.exists()
+    docker_text = calls.read_text()
+    assert "tag " not in docker_text
+    assert "app frontend" not in docker_text
+    assert (evidence / "release-state.json").read_bytes() == before_state
+
+
+@pytest.mark.parametrize("reload_failure", ["recreate", "readback_transport", "readback_true"])
+def test_rollback_runtime_close_failure_precedes_any_spec_or_account_read(
+    tmp_path: Path,
+    reload_failure: str,
+):
+    package = _production_package(tmp_path / "pkg")
+    event_log = tmp_path / "rollback-events"
+    env, evidence, calls, _backup_root = _release_test_env(
+        tmp_path / "runtime",
+        package,
+        docker_body=_rollback_docker_body(event_log, reload_failure=reload_failure),
+    )
+    env["V122_TEST_ROLLBACK_EVENTS"] = str(event_log)
+    _set_runtime_collection_apply(env, enabled=True)
+    _write_release_state(
+        evidence,
+        package,
+        phase="canary",
+        actions_granted=True,
+        canary_spec_sha256="a" * 64,
+        action_plan_sha256="b" * 64,
+    )
+    before_state = (evidence / "release-state.json").read_bytes()
+    missing_spec = tmp_path / "must-not-be-read.json"
+    curl_calls = tmp_path / "curl-calls"
+
+    completed = subprocess.run(
+        [
+            str(package / "v122_collection_reminders_release.sh"),
+            str(package),
+            str(evidence),
+            "rollback-images",
+            str(missing_spec),
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    expected_events = {
+        "recreate": ["recreate-failed"],
+        "readback_transport": ["recreate", "readback-transport-failed"],
+        "readback_true": ["recreate", "readback:true"],
+    }
+    assert event_log.read_text().splitlines() == expected_events[reload_failure]
+    assert not curl_calls.exists()
+    docker_text = calls.read_text()
+    assert "tag " not in docker_text
+    assert "app frontend" not in docker_text
+    assert (evidence / "release-state.json").read_bytes() == before_state
+    assert "MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=false" in (
+        Path(env["V122_APP_DIR"]) / ".env"
+    ).read_text()
+
+
+def test_invalid_rollback_action_subset_is_rejected_only_after_runtime_close(
+    tmp_path: Path,
+):
+    package = _production_package(tmp_path / "pkg")
+    event_log = tmp_path / "rollback-events"
+    env, evidence, calls, _backup_root = _release_test_env(
+        tmp_path / "runtime",
+        package,
+        docker_body=_rollback_docker_body(event_log),
+    )
+    env["V122_TEST_ROLLBACK_EVENTS"] = str(event_log)
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    _set_runtime_collection_apply(env, enabled=True)
+    workbook = _write(tmp_path / "canary.xls", b"one-row-canary-workbook")
+    canary_spec = _standard_canary_spec(workbook)
+    rollback_spec = _rollback_action_spec(canary_spec)
+    del rollback_spec["action_restore"]
+    rollback_file = _json_artifact(tmp_path / "invalid-rollback-actions.json", rollback_spec)
+    curl_calls = tmp_path / "curl-calls"
+    _write(
+        Path(env["PATH"].split(":", 1)[0]) / "curl",
+        f"""
+        #!/usr/bin/env bash
+        printf '%s\n' "$*" >> {curl_calls}
+        exit 97
+        """,
+        mode=0o700,
+    )
+    _write_release_state(
+        evidence,
+        package,
+        phase="canary",
+        actions_granted=True,
+        canary_spec_sha256="a" * 64,
+        action_plan_sha256=_action_plan_sha256(canary_spec),
+    )
+    before_state = (evidence / "release-state.json").read_bytes()
+
+    completed = subprocess.run(
+        [
+            str(package / "v122_collection_reminders_release.sh"),
+            str(package),
+            str(evidence),
+            "rollback-images",
+            str(rollback_file),
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert "validation" in completed.stderr
+    assert event_log.read_text().splitlines() == ["recreate", "readback:false"]
+    assert not curl_calls.exists()
+    assert "tag " not in calls.read_text()
+    assert (evidence / "release-state.json").read_bytes() == before_state
+
+
 def test_rollback_rejects_different_valid_spec_before_account_put_or_image_change(
     tmp_path: Path,
 ):
     package = _production_package(tmp_path / "pkg")
+    event_log = tmp_path / "rollback-events"
     env, evidence, calls, _backup_root = _release_test_env(
-        tmp_path / "runtime", package, docker_body="exit 97",
+        tmp_path / "runtime", package, docker_body=_rollback_docker_body(event_log),
     )
+    env["V122_TEST_ROLLBACK_EVENTS"] = str(event_log)
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    _set_runtime_collection_apply(env, enabled=True)
     workbook = _write(tmp_path / "canary.xls", b"one-row-canary-workbook")
     original_spec = _standard_canary_spec(workbook)
     original_file = _json_artifact(tmp_path / "original-canary.json", original_spec)
@@ -1838,6 +2246,7 @@ def test_rollback_rejects_different_valid_spec_before_account_put_or_image_chang
         phase="canary",
         actions_granted=True,
         canary_spec_sha256=hashlib.sha256(original_file.read_bytes()).hexdigest(),
+        action_plan_sha256=_action_plan_sha256(original_spec),
     )
     before_state = (evidence / "release-state.json").read_bytes()
 
@@ -1856,7 +2265,9 @@ def test_rollback_rejects_different_valid_spec_before_account_put_or_image_chang
 
     assert completed.returncode != 0
     assert not curl_calls.exists()
-    assert not calls.exists()
+    assert event_log.read_text().splitlines() == ["recreate", "readback:false"]
+    assert "tag " not in calls.read_text()
+    assert "app frontend" not in calls.read_text()
     assert (evidence / "release-state.json").read_bytes() == before_state
 
 
@@ -1864,19 +2275,14 @@ def test_rollback_uses_private_snapshot_when_original_spec_is_replaced_during_ge
     tmp_path: Path,
 ):
     package = _production_package(tmp_path / "pkg")
-    docker = """
-    if [[ "$*" == *"image inspect --format"* ]]; then echo "${!#}"; exit 0; fi
-    if [[ "$*" == *"compose"* && "$*" == *"ps -q app"* ]]; then echo app-cid; exit 0; fi
-    if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then echo frontend-cid; exit 0; fi
-    if [[ "$*" == *"inspect"* && "$*" == *"app-cid"* ]]; then echo "$V122_TEST_APP_CONTAINER_IMAGE"; exit 0; fi
-    if [[ "$*" == *"inspect"* && "$*" == *"frontend-cid"* ]]; then echo "$V122_TEST_FRONTEND_CONTAINER_IMAGE"; exit 0; fi
-    exit 0
-    """
+    event_log = tmp_path / "rollback-events"
     env, evidence, calls, _backup_root = _release_test_env(
-        tmp_path / "runtime", package, docker_body=docker,
+        tmp_path / "runtime", package, docker_body=_rollback_docker_body(event_log),
     )
+    env["V122_TEST_ROLLBACK_EVENTS"] = str(event_log)
     env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
     env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    _set_runtime_collection_apply(env, enabled=True)
     rollback_tmp = tmp_path / "rollback-tmp"
     rollback_tmp.mkdir()
     env["TMPDIR"] = str(rollback_tmp)
@@ -1898,6 +2304,7 @@ def test_rollback_uses_private_snapshot_when_original_spec_is_replaced_during_ge
         curl_calls=curl_calls,
         replace_spec=(spec_file, replacement_file),
         snapshot_audit=snapshot_audit,
+        event_log=event_log,
     )
     _write_release_state(
         evidence,
@@ -1905,6 +2312,7 @@ def test_rollback_uses_private_snapshot_when_original_spec_is_replaced_during_ge
         phase="canary",
         actions_granted=True,
         canary_spec_sha256=expected_snapshot_sha,
+        action_plan_sha256=_action_plan_sha256(spec),
     )
 
     completed = subprocess.run(
@@ -1929,6 +2337,7 @@ def test_rollback_uses_private_snapshot_when_original_spec_is_replaced_during_ge
     state = json.loads((evidence / "release-state.json").read_text())
     assert state["phase"] == "rolled_back"
     assert state["canary_spec_sha256"] == expected_snapshot_sha
+    assert state["action_plan_sha256"] == _action_plan_sha256(spec)
     restore_evidence = evidence / "action-restore-evidence.json"
     bound_restore_sha = hashlib.sha256(restore_evidence.read_bytes()).hexdigest()
     assert state["action_restore_evidence_sha256"] == bound_restore_sha
@@ -1939,13 +2348,17 @@ def test_rollback_uses_private_snapshot_when_original_spec_is_replaced_during_ge
     assert list(rollback_tmp.iterdir()) == []
 
 
-def test_rollback_snapshot_hash_inconsistency_fails_before_any_runtime_action(
+def test_rollback_snapshot_hash_inconsistency_fails_after_runtime_close_before_accounts(
     tmp_path: Path,
 ):
     package = _production_package(tmp_path / "pkg")
+    event_log = tmp_path / "rollback-events"
     env, evidence, calls, _backup_root = _release_test_env(
-        tmp_path / "runtime", package, docker_body="exit 97",
+        tmp_path / "runtime", package, docker_body=_rollback_docker_body(event_log),
     )
+    env["V122_TEST_ROLLBACK_EVENTS"] = str(event_log)
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
     workbook = _write(tmp_path / "canary.xls", b"one-row-canary-workbook")
     spec = _standard_canary_spec(workbook)
     spec_file = _json_artifact(tmp_path / "canary.json", spec)
@@ -1984,6 +2397,7 @@ def test_rollback_snapshot_hash_inconsistency_fails_before_any_runtime_action(
         phase="canary",
         actions_granted=True,
         canary_spec_sha256=original_sha,
+        action_plan_sha256=_action_plan_sha256(spec),
     )
     env_file = Path(env["V122_APP_DIR"]) / ".env"
     env_file.write_text(
@@ -2011,16 +2425,23 @@ def test_rollback_snapshot_hash_inconsistency_fails_before_any_runtime_action(
     assert completed.returncode != 0
     assert "snapshot" in completed.stderr.lower()
     assert not curl_calls.exists()
-    assert not calls.exists()
-    assert env_file.read_bytes() == before_env
+    assert event_log.read_text().splitlines() == ["recreate", "readback:false"]
+    assert "tag " not in calls.read_text()
+    assert env_file.read_bytes() != before_env
+    assert b"MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=false" in env_file.read_bytes()
     assert (evidence / "release-state.json").read_bytes() == before_state
 
 
-def test_rollback_legacy_granted_state_without_spec_sha_fails_closed(tmp_path: Path):
+def test_rollback_legacy_granted_state_without_action_plan_sha_fails_closed(tmp_path: Path):
     package = _production_package(tmp_path / "pkg")
+    event_log = tmp_path / "rollback-events"
     env, evidence, calls, _backup_root = _release_test_env(
-        tmp_path / "runtime", package, docker_body="exit 97",
+        tmp_path / "runtime", package, docker_body=_rollback_docker_body(event_log),
     )
+    env["V122_TEST_ROLLBACK_EVENTS"] = str(event_log)
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    _set_runtime_collection_apply(env, enabled=True)
     workbook = _write(tmp_path / "canary.xls", b"one-row-canary-workbook")
     spec = _standard_canary_spec(workbook)
     spec_file = _json_artifact(tmp_path / "canary.json", spec)
@@ -2047,9 +2468,10 @@ def test_rollback_legacy_granted_state_without_spec_sha_fails_closed(tmp_path: P
     )
 
     assert completed.returncode != 0
-    assert "canary spec SHA-256" in completed.stderr
+    assert "action plan SHA-256" in completed.stderr
     assert not curl_calls.exists()
-    assert not calls.exists()
+    assert event_log.read_text().splitlines() == ["recreate", "readback:false"]
+    assert "tag " not in calls.read_text()
     assert (evidence / "release-state.json").read_bytes() == before_state
 
 
@@ -2057,9 +2479,14 @@ def test_rollback_live_grant_mismatch_fails_before_restore_put_or_image_change(
     tmp_path: Path,
 ):
     package = _production_package(tmp_path / "pkg")
+    event_log = tmp_path / "rollback-events"
     env, evidence, calls, _backup_root = _release_test_env(
-        tmp_path / "runtime", package, docker_body="exit 97",
+        tmp_path / "runtime", package, docker_body=_rollback_docker_body(event_log),
     )
+    env["V122_TEST_ROLLBACK_EVENTS"] = str(event_log)
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    _set_runtime_collection_apply(env, enabled=True)
     rollback_tmp = tmp_path / "rollback-tmp"
     rollback_tmp.mkdir()
     env["TMPDIR"] = str(rollback_tmp)
@@ -2077,6 +2504,7 @@ def test_rollback_live_grant_mismatch_fails_before_restore_put_or_image_change(
         spec=spec,
         curl_calls=curl_calls,
         granted_rows=mismatched_grant,
+        event_log=event_log,
     )
     _write_release_state(
         evidence,
@@ -2084,6 +2512,7 @@ def test_rollback_live_grant_mismatch_fails_before_restore_put_or_image_change(
         phase="canary",
         actions_granted=True,
         canary_spec_sha256=hashlib.sha256(spec_file.read_bytes()).hexdigest(),
+        action_plan_sha256=_action_plan_sha256(spec),
     )
     before_state = (evidence / "release-state.json").read_bytes()
 
@@ -2104,7 +2533,11 @@ def test_rollback_live_grant_mismatch_fails_before_restore_put_or_image_change(
     assert "account overrides state mismatch" in completed.stderr
     assert "action_verify_granted" in curl_calls.read_text()
     assert "--request PUT" not in curl_calls.read_text()
-    assert not calls.exists()
+    events = event_log.read_text().splitlines()
+    assert events.index("recreate") < events.index("readback:false")
+    assert events.index("readback:false") < events.index("curl:action_verify_granted.response")
+    assert "tag " not in calls.read_text()
+    assert "app frontend" not in calls.read_text()
     assert (evidence / "release-state.json").read_bytes() == before_state
     assert list(rollback_tmp.iterdir()) == []
 
@@ -2118,9 +2551,14 @@ def test_rollback_restore_verification_failure_never_switches_images(
     restore_verify_failure: str,
 ):
     package = _production_package(tmp_path / "pkg")
+    event_log = tmp_path / "rollback-events"
     env, evidence, calls, _backup_root = _release_test_env(
-        tmp_path / "runtime", package, docker_body="exit 97",
+        tmp_path / "runtime", package, docker_body=_rollback_docker_body(event_log),
     )
+    env["V122_TEST_ROLLBACK_EVENTS"] = str(event_log)
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    _set_runtime_collection_apply(env, enabled=True)
     rollback_tmp = tmp_path / "rollback-tmp"
     rollback_tmp.mkdir()
     env["TMPDIR"] = str(rollback_tmp)
@@ -2147,6 +2585,7 @@ def test_rollback_restore_verification_failure_never_switches_images(
         phase="canary",
         actions_granted=True,
         canary_spec_sha256=hashlib.sha256(spec_file.read_bytes()).hexdigest(),
+        action_plan_sha256=_action_plan_sha256(spec),
     )
     before_state = (evidence / "release-state.json").read_bytes()
 
@@ -2167,7 +2606,8 @@ def test_rollback_restore_verification_failure_never_switches_images(
     curl_text = curl_calls.read_text()
     assert "action_verify_granted" in curl_text
     assert curl_text.count("--request PUT") == 3
-    assert not calls.exists()
+    assert "tag " not in calls.read_text()
+    assert "app frontend" not in calls.read_text()
     assert (evidence / "release-state.json").read_bytes() == before_state
     assert list(rollback_tmp.iterdir()) == []
 
@@ -2939,6 +3379,11 @@ def test_resume_previous_images_is_available_from_predeploy_and_canary_phases(tm
     old_app = "sha256:" + "8" * 64
     old_frontend = "sha256:" + "9" * 64
     docker = """
+    if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then
+      apply=$(sed -n 's/^MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=//p' "$V122_APP_DIR/.env")
+      project=$(sed -n 's/^MAINTENANCE_COLLECTION_CANARY_PROJECT_ID=//p' "$V122_APP_DIR/.env")
+      printf '%s\n%s\n' "$apply" "$project"; exit 0
+    fi
     if [[ "$*" == *"image inspect"* ]]; then echo "${!#}"; exit 0; fi
     if [[ "$*" == *"compose"* && "$*" == *"ps -q app"* ]]; then echo app-cid; exit 0; fi
     if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then echo frontend-cid; exit 0; fi
@@ -2964,6 +3409,11 @@ def test_preliminary_backup_can_resume_previous_images(tmp_path: Path):
     old_app = "sha256:" + "8" * 64
     old_frontend = "sha256:" + "9" * 64
     docker = """
+    if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then
+      apply=$(sed -n 's/^MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=//p' "$V122_APP_DIR/.env")
+      project=$(sed -n 's/^MAINTENANCE_COLLECTION_CANARY_PROJECT_ID=//p' "$V122_APP_DIR/.env")
+      printf '%s\n%s\n' "$apply" "$project"; exit 0
+    fi
     if [[ "$*" == *"image inspect"* ]]; then echo "${!#}"; exit 0; fi
     if [[ "$*" == *"compose"* && "$*" == *"ps -q app"* ]]; then echo app-cid; exit 0; fi
     if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then echo frontend-cid; exit 0; fi

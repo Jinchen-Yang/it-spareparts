@@ -1152,6 +1152,155 @@ if value["cross_project_negative"]["expected_status"] != 403 or value["permissio
 PY
 }
 
+validate_rollback_action_spec() {
+  python3 - "$1" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+if not isinstance(value, dict):
+    raise SystemExit("rollback action spec must be a JSON object")
+base_url = value.get("base_url")
+if (
+    not isinstance(base_url, str)
+    or not base_url.startswith(("http://", "https://"))
+    or "\n" in base_url
+    or not base_url.rstrip("/").startswith(("http://", "https://"))
+):
+    raise SystemExit("rollback action spec base_url is invalid")
+
+for name in ("action_verify_granted", "action_verify_restored"):
+    case = value.get(name)
+    if not isinstance(case, dict) or set(case) != {
+        "method", "path", "token", "expected_status",
+    }:
+        raise SystemExit(name + " must contain only the sealed account-list GET case")
+    if (
+        case.get("method") != "GET"
+        or case.get("path") != "/api/accounts"
+        or case.get("expected_status") != 200
+        or not isinstance(case.get("token"), str)
+        or not case["token"]
+    ):
+        raise SystemExit(name + " must GET the real account list with a control token")
+
+username_pattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+def validate_action_list(name):
+    cases = value.get(name)
+    if not isinstance(cases, list) or len(cases) != 3:
+        raise SystemExit(name + " must contain exactly three PUT cases")
+    targets = []
+    overrides_by_target = {}
+    for case in cases:
+        if not isinstance(case, dict) or set(case) != {
+            "method", "path", "token", "expected_status", "body",
+        }:
+            raise SystemExit(name + " entries must contain only the sealed PUT case fields")
+        path = case.get("path")
+        match = re.fullmatch(
+            r"/api/accounts/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})",
+            path or "",
+        )
+        body = case.get("body")
+        overrides = body.get("overrides") if isinstance(body, dict) else None
+        if (
+            case.get("method") != "PUT"
+            or match is None
+            or username_pattern.fullmatch(match.group(1)) is None
+            or case.get("expected_status") != 200
+            or not isinstance(case.get("token"), str)
+            or not case["token"]
+            or not isinstance(body, dict)
+            or set(body) != {"overrides"}
+            or not isinstance(overrides, dict)
+            or not all(
+                isinstance(key, str)
+                and key
+                and "\n" not in key
+                and isinstance(enabled, bool)
+                for key, enabled in overrides.items()
+            )
+        ):
+            raise SystemExit(name + " contains an invalid account PUT case")
+        target = match.group(1)
+        targets.append(target)
+        overrides_by_target[target] = overrides
+    if len(set(targets)) != 3:
+        raise SystemExit(name + " target usernames must be unique")
+    return targets, overrides_by_target
+
+grant_targets, grant_overrides = validate_action_list("action_grant")
+restore_targets, restore_overrides = validate_action_list("action_restore")
+if restore_targets != list(reversed(grant_targets)):
+    raise SystemExit("action restore targets must reverse the grant order")
+mutable_during_canary = {
+    "page_maintenance",
+    "page_maintenance_beta",
+    "action_maintenance_collection_plan_import",
+    "action_maintenance_collection_follow_up",
+}
+missing = object()
+for target in grant_targets:
+    original = restore_overrides[target]
+    granted = grant_overrides[target]
+    if not set(original) <= set(granted):
+        raise SystemExit("action grant must not delete original override keys")
+    for key in set(original) | set(granted):
+        if key not in mutable_during_canary and original.get(key, missing) != granted.get(key, missing):
+            raise SystemExit("action grant may not add or change unrelated overrides")
+PY
+}
+
+action_plan_sha256() {
+  python3 - "$1" "$2" <<'PY'
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+project_id = sys.argv[2]
+
+def project_verify(case):
+    return {
+        "method": case["method"],
+        "path": case["path"],
+        "expected_status": case["expected_status"],
+    }
+
+def project_update(case):
+    match = re.fullmatch(
+        r"/api/accounts/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})",
+        case["path"],
+    )
+    if match is None:
+        raise SystemExit("action plan account path is invalid")
+    return {
+        "method": case["method"],
+        "path": case["path"],
+        "target_username": match.group(1),
+        "expected_status": case["expected_status"],
+        "overrides": case["body"]["overrides"],
+    }
+
+plan = {
+    "format": "v122-rollback-action-plan-v1",
+    "base_url": value["base_url"].rstrip("/"),
+    "canary_project_id": project_id,
+    "action_grant": [project_update(case) for case in value["action_grant"]],
+    "action_restore": [project_update(case) for case in value["action_restore"]],
+    "action_verify_granted": project_verify(value["action_verify_granted"]),
+    "action_verify_restored": project_verify(value["action_verify_restored"]),
+}
+canonical = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+print(hashlib.sha256(canonical).hexdigest())
+PY
+}
+
 login_named_canary_accounts() {
   local spec=$1
   local workspace=$2
@@ -1345,7 +1494,8 @@ BACKUP_GENERATION=${V122_BACKUP_GENERATION:-}
 ROOT_RELEASE_STATE=${V122_ROOT_RELEASE_STATE:-$APP_DIR/release-state.json}
 readonly BACKUP_ROOT BACKUP_GENERATION
 
-# Ordering and zero-side-effect argument gates run before any Docker/env write.
+# Command shape and phase gates run before Docker/env writes.  Rollback action
+# spec reads are intentionally deferred until the running app is proven closed.
 case "$COMMAND" in
   preflight) [ "$#" -eq 0 ] || usage; require_no_state ;;
   freeze-writes) [ "$#" -eq 0 ] || usage; require_phase preflight ;;
@@ -1400,6 +1550,15 @@ case "$COMMAND" in
       rm -rf -- "$CANARY_WORK"
       fatal "canary spec snapshot validation failed"
     fi
+    CANARY_ACTION_PLAN_SHA256=$(action_plan_sha256 \
+      "$CANARY_SPEC" "$CANARY_PROJECT_ID") || {
+      rm -rf -- "$CANARY_WORK"
+      fatal "canary action plan SHA-256 could not be calculated"
+    }
+    if [[ ! "$CANARY_ACTION_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+      rm -rf -- "$CANARY_WORK"
+      fatal "canary action plan SHA-256 is invalid"
+    fi
     ;;
   observe) require_production_ready; [ "$#" -eq 1 ] || usage; case "$1" in 0|5|15|30) ;; *) fatal "observe point must be 0, 5, 15, or 30";; esac ;;
   rollback-images)
@@ -1409,49 +1568,6 @@ case "$COMMAND" in
       || fatal "rollback action state is unreadable"
     if [ "$STATE_ACTIONS_GRANTED" = true ]; then
       [ "$#" -eq 1 ] || fatal "mode-600 canary spec is required to restore action permissions"
-      ROLLBACK_SPEC_INPUT=$(realpath -e -- "$1")
-      [ -f "$ROLLBACK_SPEC_INPUT" ] && [ ! -L "$ROLLBACK_SPEC_INPUT" ] \
-        && [ "$(stat -c '%a' "$ROLLBACK_SPEC_INPUT")" = 600 ] \
-        || fatal "rollback canary spec must be a mode-600 regular file"
-      validate_canary_spec "$ROLLBACK_SPEC_INPUT" \
-        "$(manifest_get runtime_flags.maintenance_collection_canary_project_id)"
-      ROLLBACK_SPEC_PREHASH=$(sha256sum "$ROLLBACK_SPEC_INPUT" | awk '{print $1}') \
-        || fatal "rollback canary spec SHA-256 could not be read"
-      [[ "$ROLLBACK_SPEC_PREHASH" =~ ^[0-9a-f]{64}$ ]] \
-        || fatal "rollback canary spec SHA-256 is invalid"
-      STATE_CANARY_SPEC_SHA256=$(state_get canary_spec_sha256) \
-        || fatal "rollback state lacks the sealed canary spec SHA-256"
-      [[ "$STATE_CANARY_SPEC_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-        || fatal "rollback state has an invalid canary spec SHA-256"
-      ROLLBACK_WORK=$(mktemp -d -t v122-rollback.XXXXXXXX) \
-        || fatal "rollback private workspace could not be created"
-      chmod 700 "$ROLLBACK_WORK" || {
-        rm -rf -- "$ROLLBACK_WORK"
-        fatal "rollback private workspace could not be secured"
-      }
-      ROLLBACK_SPEC=$(snapshot_sealed_canary_spec "$ROLLBACK_SPEC_INPUT" "$ROLLBACK_WORK") || {
-        rm -rf -- "$ROLLBACK_WORK"
-        fatal "rollback canary spec snapshot could not be created"
-      }
-      ROLLBACK_SPEC_SHA256=$(sha256sum "$ROLLBACK_SPEC" | awk '{print $1}') \
-        || {
-          rm -rf -- "$ROLLBACK_WORK"
-          fatal "rollback canary spec snapshot SHA-256 could not be read"
-        }
-      if [[ ! "$ROLLBACK_SPEC_SHA256" =~ ^[0-9a-f]{64}$ ]] \
-        || [ "$ROLLBACK_SPEC_SHA256" != "$ROLLBACK_SPEC_PREHASH" ]; then
-        rm -rf -- "$ROLLBACK_WORK"
-        fatal "rollback canary spec snapshot does not match the validated input"
-      fi
-      if [ "$ROLLBACK_SPEC_SHA256" != "$STATE_CANARY_SPEC_SHA256" ]; then
-        rm -rf -- "$ROLLBACK_WORK"
-        fatal "rollback canary spec snapshot does not match the successful canary"
-      fi
-      if ! validate_canary_spec "$ROLLBACK_SPEC" \
-        "$(manifest_get runtime_flags.maintenance_collection_canary_project_id)"; then
-        rm -rf -- "$ROLLBACK_WORK"
-        fatal "rollback canary spec snapshot validation failed"
-      fi
     else
       [ "$#" -eq 0 ] || usage
     fi
@@ -1791,7 +1907,7 @@ $CANARY_PROJECT_ID" ] || fatal "running apply canary configuration readback mism
     [ "$FINAL_CANARY_SPEC_SHA256" = "$CANARY_SPEC_SHA256" ] \
       || fatal "sealed canary spec snapshot changed during execution"
     python3 - "$CANARY_WORK" "$EVIDENCE_DIR/canary-evidence.json" \
-      "$CANARY_SPEC_SHA256" <<'PY'
+      "$CANARY_SPEC_SHA256" "$CANARY_ACTION_PLAN_SHA256" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -1809,6 +1925,7 @@ payload = {
     "format": "v122-canary-evidence-v1",
     "cases": outcomes,
     "canary_spec_sha256": sys.argv[3],
+    "action_plan_sha256": sys.argv[4],
     "named_account_readback_sha256": hashlib.sha256(account.read_bytes()).hexdigest(),
     "contains_secrets": False,
 }
@@ -1818,6 +1935,7 @@ PY
 	      canary_project_id "$CANARY_PROJECT_ID" \
 	      apply_enabled true actions_granted true \
 	      canary_spec_sha256 "$CANARY_SPEC_SHA256" \
+	      action_plan_sha256 "$CANARY_ACTION_PLAN_SHA256" \
 	      canary_evidence_sha256 "$(sha256sum "$EVIDENCE_DIR/canary-evidence.json" | awk '{print $1}')"
 	    trap - EXIT ERR HUP INT TERM
 	    rm -rf -- "$CANARY_WORK"
@@ -1915,14 +2033,63 @@ PY
       trap cleanup_rollback_work EXIT
     fi
     close_collection_writes
+    compose up --no-deps --no-build --force-recreate -d app \
+      || fatal "rollback could not restart the app with collection writes closed"
+    ROLLBACK_CANARY_PROJECT_ID=$(manifest_get \
+      runtime_flags.maintenance_collection_canary_project_id) \
+      || fatal "rollback canary project id could not be read"
+    ROLLBACK_RUNNING_FLAGS=$(compose exec -T app sh -ceu \
+      'printf "%s\n%s\n" "$MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED" "$MAINTENANCE_COLLECTION_CANARY_PROJECT_ID"') \
+      || fatal "rollback running configuration readback failed"
+    [ "$ROLLBACK_RUNNING_FLAGS" = "false
+$ROLLBACK_CANARY_PROJECT_ID" ] \
+      || fatal "rollback running configuration readback mismatch"
     if [ "${STATE_ACTIONS_GRANTED:-false}" = true ]; then
+      ROLLBACK_SPEC_INPUT=$(realpath -e -- "$1") \
+        || fatal "rollback action spec could not be resolved"
+      [ -f "$ROLLBACK_SPEC_INPUT" ] && [ ! -L "$ROLLBACK_SPEC_INPUT" ] \
+        && [ "$(stat -c '%a' "$ROLLBACK_SPEC_INPUT")" = 600 ] \
+        || fatal "rollback action spec must be a mode-600 regular file"
+      if ! validate_rollback_action_spec "$ROLLBACK_SPEC_INPUT"; then
+        fatal "rollback action spec validation failed"
+      fi
+      ROLLBACK_SPEC_PREHASH=$(sha256sum "$ROLLBACK_SPEC_INPUT" | awk '{print $1}') \
+        || fatal "rollback action spec SHA-256 could not be read"
+      [[ "$ROLLBACK_SPEC_PREHASH" =~ ^[0-9a-f]{64}$ ]] \
+        || fatal "rollback action spec SHA-256 is invalid"
+      STATE_ACTION_PLAN_SHA256=$(state_get action_plan_sha256) \
+        || fatal "rollback state lacks the sealed action plan SHA-256"
+      [[ "$STATE_ACTION_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+        || fatal "rollback state has an invalid action plan SHA-256"
+      ROLLBACK_WORK=$(mktemp -d -t v122-rollback.XXXXXXXX) \
+        || fatal "rollback private workspace could not be created"
+      chmod 700 "$ROLLBACK_WORK" \
+        || fatal "rollback private workspace could not be secured"
+      ROLLBACK_SPEC=$(snapshot_sealed_canary_spec \
+        "$ROLLBACK_SPEC_INPUT" "$ROLLBACK_WORK") \
+        || fatal "rollback action spec snapshot could not be created"
+      ROLLBACK_SPEC_SHA256=$(sha256sum "$ROLLBACK_SPEC" | awk '{print $1}') \
+        || fatal "rollback action spec snapshot SHA-256 could not be read"
+      if [[ ! "$ROLLBACK_SPEC_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+        || [ "$ROLLBACK_SPEC_SHA256" != "$ROLLBACK_SPEC_PREHASH" ]; then
+        fatal "rollback action spec snapshot does not match the validated input"
+      fi
+      if ! validate_rollback_action_spec "$ROLLBACK_SPEC"; then
+        fatal "rollback action spec snapshot validation failed"
+      fi
+      ROLLBACK_ACTION_PLAN_SHA256=$(action_plan_sha256 \
+        "$ROLLBACK_SPEC" "$ROLLBACK_CANARY_PROJECT_ID") \
+        || fatal "rollback action plan SHA-256 could not be calculated"
+      [[ "$ROLLBACK_ACTION_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+        || fatal "rollback action plan SHA-256 is invalid"
+      [ "$ROLLBACK_ACTION_PLAN_SHA256" = "$STATE_ACTION_PLAN_SHA256" ] \
+        || fatal "rollback action plan does not match the successful canary"
       CURRENT_ROLLBACK_SPEC_SHA256=$(sha256sum "$ROLLBACK_SPEC" | awk '{print $1}') \
-        || fatal "rollback canary spec snapshot SHA-256 could not be read"
+        || fatal "rollback action spec snapshot SHA-256 could not be read"
       [ "$CURRENT_ROLLBACK_SPEC_SHA256" = "$ROLLBACK_SPEC_SHA256" ] \
-        || fatal "rollback canary spec snapshot changed before execution"
+        || fatal "rollback action spec snapshot changed before execution"
       if ! verify_action_account_state "$ROLLBACK_SPEC" action_verify_granted \
         action_grant "$ROLLBACK_WORK"; then
-        cleanup_rollback_work
         fatal "live action permissions differ from the successful canary; images were not changed"
       fi
       RESTORE_OK=true
@@ -1931,7 +2098,6 @@ PY
       verify_action_account_state "$ROLLBACK_SPEC" action_verify_restored \
         action_restore "$ROLLBACK_WORK" || RESTORE_OK=false
       if [ "$RESTORE_OK" != true ]; then
-        cleanup_rollback_work
         fatal "action permission restore failed; images were not changed"
       fi
       if ! python3 - "$ROLLBACK_WORK" "$EVIDENCE_DIR/action-restore-evidence.json" <<'PY'
@@ -1943,7 +2109,6 @@ cases = [json.loads(path.read_text()) for path in sorted(work.glob("*.outcome.js
 pathlib.Path(sys.argv[2]).write_text(json.dumps({"format":"v122-action-restore-evidence-v1","outcomes":cases,"contains_secrets":False}, sort_keys=True, separators=(",", ":")) + "\n")
 PY
       then
-        cleanup_rollback_work
         fatal "action permission restore evidence write failed; images were not changed"
       fi
       ACTION_RESTORE_EVIDENCE_SHA256=$(sha256sum \
@@ -1952,9 +2117,9 @@ PY
       [[ "$ACTION_RESTORE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
         || fatal "action permission restore evidence SHA-256 is invalid"
       CURRENT_ROLLBACK_SPEC_SHA256=$(sha256sum "$ROLLBACK_SPEC" | awk '{print $1}') \
-        || fatal "rollback canary spec snapshot SHA-256 could not be read"
+        || fatal "rollback action spec snapshot SHA-256 could not be read"
       [ "$CURRENT_ROLLBACK_SPEC_SHA256" = "$ROLLBACK_SPEC_SHA256" ] \
-        || fatal "rollback canary spec snapshot changed during execution"
+        || fatal "rollback action spec snapshot changed during execution"
       cleanup_rollback_work
       ROLLBACK_WORK=''
       trap - EXIT
