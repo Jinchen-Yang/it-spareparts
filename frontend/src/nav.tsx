@@ -13,6 +13,7 @@ import {
   ProfileOutlined,
   FileDoneOutlined,
   RobotOutlined,
+  ScheduleOutlined,
   SearchOutlined,
   SafetyCertificateOutlined,
   SettingOutlined,
@@ -83,6 +84,7 @@ const loadMaintenanceManagerWorkbook = () => import("./pages/maintenance/Mainten
 const loadMaintenanceAcceptance = () => import("./pages/maintenance/MaintenanceAcceptancePage");
 const loadMaintenanceCostRefill = () => import("./pages/maintenance/MaintenanceCostRefillPage");
 const loadMaintenanceMigration = () => import("./pages/maintenance/MaintenanceMigrationPage");
+const loadMaintenanceCollectionReminders = () => import("./pages/maintenance/MaintenanceCollectionRemindersPage");
 const loadMaintenanceBetaCompat = () => import("./pages/maintenance/MaintenanceBetaCompatRedirect");
 const loadInventory = () => import("./pages/InventoryPage");
 const loadImport = () => import("./pages/ImportPage");
@@ -116,6 +118,7 @@ const MaintenanceManagerWorkbookPage = lazy(loadMaintenanceManagerWorkbook);
 const MaintenanceAcceptancePage = lazy(loadMaintenanceAcceptance);
 const MaintenanceCostRefillPage = lazy(loadMaintenanceCostRefill);
 const MaintenanceMigrationPage = lazy(loadMaintenanceMigration);
+const MaintenanceCollectionRemindersPage = lazy(loadMaintenanceCollectionReminders);
 const MaintenanceBetaCompatRedirect = lazy(loadMaintenanceBetaCompat);
 const InventoryPage = lazy(loadInventory);
 const ImportPage = lazy(loadImport);
@@ -187,6 +190,7 @@ export const NAV_GROUPS: NavGroup[] = [
       }, page: MaintenanceProjectUpdatesPage, load: loadMaintenanceProjectUpdates },
       { key: "maintenance-manager-workbook", path: "/maintenance/beta/project-manager/monthly-workbook", label: "经理月报", icon: <CloudUploadOutlined />, betaFeature: "maintenance", visibleWhen: () => readMaintenanceCapabilities().canUseManagerWorkbook, page: MaintenanceManagerWorkbookPage, load: loadMaintenanceManagerWorkbook },
       { key: "maintenance-acceptance", path: "/maintenance/beta/acceptance", label: "验收与结项", icon: <FileDoneOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceAcceptancePage, load: loadMaintenanceAcceptance },
+      { key: "maintenance-collection-reminders", path: "/maintenance/beta/collection-reminders", label: "回款提醒", icon: <ScheduleOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceCollectionRemindersPage, load: loadMaintenanceCollectionReminders },
     ],
   },
   {

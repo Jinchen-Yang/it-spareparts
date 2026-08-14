@@ -72,7 +72,17 @@ describe("维保管理信息架构", () => {
         label: "验收与结项",
         perm: "page_maintenance_beta",
       },
+      {
+        key: "maintenance-collection-reminders",
+        path: "/maintenance/beta/collection-reminders",
+        label: "回款提醒",
+        perm: "page_maintenance_beta",
+      },
     ]);
+    expect(
+      workbench?.items.find((item) => item.key === "maintenance-collection-reminders")
+        ?.betaFeature,
+    ).toBe("maintenance");
 
     expect(admin?.label).toBe("维保数据维护");
     expect(admin?.items.map(({ key, path, label, perm }) => ({
@@ -180,6 +190,9 @@ describe("维保管理信息架构", () => {
     expect(matchNavItem("/maintenance/reminders")?.label).toBe("项目提醒");
     expect(matchNavItem("/maintenance/beta/projects")?.label).toBe("项目总览");
     expect(matchNavItem("/maintenance/beta/projects")?.perm).toBe("page_maintenance_beta");
+    expect(matchNavItem("/maintenance/beta/collection-reminders")?.label).toBe("回款提醒");
+    expect(matchNavItem("/maintenance/beta/collection-reminders")?.perm)
+      .toBe("page_maintenance_beta");
     expect(NAV_REDIRECTS).not.toContainEqual({
       from: "/maintenance",
       to: "/maintenance/projects",

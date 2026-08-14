@@ -1,0 +1,79 @@
+/* 回款计划提醒主从页面（设计 §8：38/62 桌面分栏、42/58 平板、移动端全高抽屉）。
+ * 断点/列宽由页面内联样式驱动以便测试与运行时一致；本文件承载外观样式。 */
+
+.collection-reminders-page {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.mcr-master-detail {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.mcr-pane {
+  min-width: 0;
+}
+
+.mcr-directory-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.mcr-directory-row {
+  height: auto;
+  text-align: left;
+  padding: 10px 12px;
+  white-space: normal;
+  min-width: 0;
+}
+
+.mcr-directory-row-main {
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.mcr-directory-row-sub {
+  color: var(--mb-text-2);
+  font-size: 12.5px;
+  line-height: 1.5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.mcr-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mcr-metric {
+  border: 1px solid var(--mb-border, #e5e5e5);
+  border-radius: 8px;
+  padding: 8px 12px;
+  min-width: 84px;
+}
+
+.mcr-metric.is-emphasized {
+  border-color: #722ed1;
+  background: color-mix(in srgb, #722ed1 6%, transparent);
+}
+
+.mcr-metric-value {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.mcr-metric-label {
+  color: var(--mb-text-2);
+  font-size: 12px;
+}
+
+.mcr-detail-pane {
+  min-width: 0;
+}
