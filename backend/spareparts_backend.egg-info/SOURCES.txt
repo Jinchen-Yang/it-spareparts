@@ -36,7 +36,6 @@ app/api/maintenance_demands.py
 app/api/maintenance_manager_workbooks.py
 app/api/maintenance_migration.py
 app/api/maintenance_project_assignments.py
-app/api/maintenance_project_imports.py
 app/api/maintenance_project_operations.py
 app/api/maintenance_project_scope.py
 app/api/maintenance_project_workbooks.py
@@ -74,7 +73,6 @@ app/models/maintenance_bad_return.py
 app/models/maintenance_manager.py
 app/models/maintenance_migration.py
 app/models/maintenance_project.py
-app/models/maintenance_project_import.py
 app/models/maintenance_project_operations.py
 app/models/maintenance_source_assignment.py
 app/models/maintenance_warehouse.py
@@ -119,7 +117,6 @@ app/services/maintenance_migration_warehouse.py
 app/services/maintenance_project.py
 app/services/maintenance_project_assignments.py
 app/services/maintenance_project_catalog.py
-app/services/maintenance_project_imports.py
 app/services/maintenance_project_operations.py
 app/services/maintenance_project_procurement.py
 app/services/maintenance_project_workbook_adapter.py

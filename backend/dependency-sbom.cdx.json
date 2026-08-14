@@ -5330,23 +5330,6 @@
       "purl": "pkg:pypi/websockets@16.0",
       "type": "library",
       "version": "16.0"
-    },
-    {
-      "bom-ref": "pkg:pypi/xlrd@2.0.2",
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "08b5e25de58f21ce71dc7db3b3b8106c1fa776f3024c54e45b45b374e89234c9"
-        },
-        {
-          "alg": "SHA-256",
-          "content": "ea762c3d29f4cca48d82df517b6d89fbce4db3107f9d78713e48cd321d5c9aa9"
-        }
-      ],
-      "name": "xlrd",
-      "purl": "pkg:pypi/xlrd@2.0.2",
-      "type": "library",
-      "version": "2.0.2"
     }
   ],
   "metadata": {

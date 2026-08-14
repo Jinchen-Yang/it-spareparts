@@ -24,7 +24,6 @@ from app.api import (
     maintenance_manager_workbooks,
     maintenance_project_assignments,
     maintenance_migration,
-    maintenance_project_imports,
     maintenance_project_operations,
     maintenance_source_assignments,
     maintenance_project_workbooks,
@@ -147,11 +146,6 @@ app.include_router(
 )
 app.include_router(
     maintenance_projects.router,
-    prefix=settings.api_prefix,
-    dependencies=maintenance_beta_dependencies,
-)
-app.include_router(
-    maintenance_project_imports.router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )

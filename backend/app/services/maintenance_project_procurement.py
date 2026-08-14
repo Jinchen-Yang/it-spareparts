@@ -1,10 +1,9 @@
 """Read-only projection: purchase orders linked to a maintenance project.
 
-Linkage path (stable first, name-based fallback only when unambiguous):
+Linkage path (stable assignment only — never name-based guessing):
     采购订单 (FPurchaseOrder.linked_maintenance_order_no)
     → 维保需求单 (FMaintenanceOrder.raw_order_id)
     → 项目 (MaintenanceSourceOrderAssignment, is_active)
-    → 兜底：需求单 project_std 恰好唯一命中项目 display_name
 """
 
 from collections import defaultdict
@@ -13,7 +12,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.maintenance import FMaintenanceOrder
-from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.models.purchase import FPurchaseLine, FPurchaseOrder
 
@@ -36,29 +34,6 @@ def _demand_ids_by_assignment(db: Session, project_id: str) -> set[str]:
     )
 
 
-def _demand_ids_by_unique_name(db: Session, project_id: str) -> set[str]:
-    """Name fallback: only when the project's display_name maps to exactly
-    one demand order's project_std.  Duplicate names yield an empty set —
-    never cross-project leakage."""
-    display_name = db.scalar(
-        select(MaintenanceProject.display_name).where(
-            MaintenanceProject.project_id == project_id
-        )
-    )
-    if not display_name:
-        return set()
-    matches = list(
-        db.scalars(
-            select(FMaintenanceOrder.raw_order_id).where(
-                FMaintenanceOrder.project_std == display_name,
-            )
-        ).all()
-    )
-    if len(matches) != 1:
-        return set()
-    return set(matches)
-
-
 def get_project_procurement_chain(
     db: Session,
     project_id: str,
@@ -66,13 +41,11 @@ def get_project_procurement_chain(
     """Return purchase orders → demand orders for *project_id*.
 
     Only demand orders stably linked via an active source assignment are
-    included; a unique display-name match is a fallback.  Anything
-    ambiguous (no assignment, duplicate names, cancelled orders) is
-    excluded and must be surfaced by the admin reconciliation queue.
+    included.  Anything unassigned, ambiguous or cancelled is excluded and
+    must be surfaced by the admin reconciliation queue — the panel never
+    guesses by project name.
     """
     demand_ids = _demand_ids_by_assignment(db, project_id)
-    if not demand_ids:
-        demand_ids = _demand_ids_by_unique_name(db, project_id)
     if not demand_ids:
         return []
 

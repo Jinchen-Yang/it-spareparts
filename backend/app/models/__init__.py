@@ -29,10 +29,6 @@ from app.models.maintenance_bad_return import (
     MaintenanceReturnObligation,
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
-from app.models.maintenance_project_import import (
-    MaintenanceProjectImportBatch,
-    MaintenanceProjectSourceLink,
-)
 from app.models.maintenance_project_operations import (
     MaintenanceCollectionSnapshot,
     MaintenanceProjectExpenseAttribution,
@@ -147,8 +143,6 @@ __all__ = [
     "MaintenanceSiteIssueCommand",
     "MaintenanceSiteIssueDeliverySource",
     "MaintenanceSiteIssueLine",
-    "MaintenanceProjectImportBatch",
-    "MaintenanceProjectSourceLink",
     "MaintenanceSiteIssueReturnEvent",
     "MaintenanceManagerUploadBatch",
     "MaintenanceManagerUploadBatchProject",

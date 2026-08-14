@@ -678,6 +678,7 @@ def execute_delete_intent(
     intent_id: str,
     digest: str,
     operated_by: str,
+    allowed_project_ids: set[str] | None = None,
     now: datetime | None = None,
 ) -> dict:
     now = now or _utc_now()
@@ -722,6 +723,18 @@ def execute_delete_intent(
             cause=conflict_cause,
         )
         raise DeleteIntentConflict("复核后有 WBDD 数据发生变化，整批未删除")
+
+    # TOCTOU 防护：digest 校验之后、tombstone 物化之前，在当前加锁快照上
+    # 重新核验操作者项目范围。admin/全量范围（None）跳过；任一需求单当前
+    # 归属不在本人范围内（含未归属）→ 整批 403 零删除。
+    if allowed_project_ids is not None:
+        for source_id in source_order_ids:
+            assignment = current[source_id].get("active_project_assignment")
+            project_id = assignment.get("project_id") if assignment else None
+            if project_id is None or project_id not in allowed_project_ids:
+                raise MaintenanceDemandForbidden(
+                    "执行时项目范围已变化，整批删除已取消"
+                )
 
     for item in expected_items:
         tombstone = db.get(MaintenanceDemandTombstone, item.source_order_id)

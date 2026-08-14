@@ -82,12 +82,6 @@ describe("维保管理信息架构", () => {
       perm,
     }))).toEqual([
       {
-        key: "maintenance-project-import",
-        path: "/maintenance/beta/project-import",
-        label: "项目资料同步",
-        perm: undefined,
-      },
-      {
         key: "maintenance-project-master",
         path: "/maintenance/beta/project-master",
         label: "项目主档维护",

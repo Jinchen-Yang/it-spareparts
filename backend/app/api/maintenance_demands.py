@@ -202,6 +202,7 @@ def _intent_action(
     body: DeleteIntentActionRequest,
     db: Session,
     ident: dict,
+    allowed_project_ids: set[str] | None,
 ) -> dict:
     operated_by = _real_operator(db, ident)
     operation = {
@@ -209,13 +210,15 @@ def _intent_action(
         "execute": maintenance_demands.execute_delete_intent,
         "cancel": maintenance_demands.cancel_delete_intent,
     }[action]
+    kwargs = {
+        "intent_id": intent_id,
+        "digest": body.digest,
+        "operated_by": operated_by,
+    }
+    if action == "execute":
+        kwargs["allowed_project_ids"] = allowed_project_ids
     try:
-        result = operation(
-            db,
-            intent_id=intent_id,
-            digest=body.digest,
-            operated_by=operated_by,
-        )
+        result = operation(db, **kwargs)
         db.commit()
         return result
     except maintenance_demands.DeleteIntentTooEarly as exc:
@@ -246,7 +249,12 @@ def arm_delete_intent(
     _action: None = Depends(require_action("action_maintenance_demand_delete")),
 ) -> dict:
     return _intent_action(
-        action="arm", intent_id=intent_id, body=body, db=db, ident=ident
+        action="arm",
+        intent_id=intent_id,
+        body=body,
+        db=db,
+        ident=ident,
+        allowed_project_ids=None,
     )
 
 
@@ -259,9 +267,17 @@ def execute_delete_intent(
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action("action_maintenance_demand_delete")),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    # 执行时重新鉴权（TOCTOU）：创建意图时的范围可能已失效（改派/撤权）。
+    allowed_project_ids = scope_resolve(db, ctx)
     return _intent_action(
-        action="execute", intent_id=intent_id, body=body, db=db, ident=ident
+        action="execute",
+        intent_id=intent_id,
+        body=body,
+        db=db,
+        ident=ident,
+        allowed_project_ids=allowed_project_ids,
     )
 
 
@@ -276,7 +292,12 @@ def cancel_delete_intent(
     _action: None = Depends(require_action("action_maintenance_demand_delete")),
 ) -> dict:
     return _intent_action(
-        action="cancel", intent_id=intent_id, body=body, db=db, ident=ident
+        action="cancel",
+        intent_id=intent_id,
+        body=body,
+        db=db,
+        ident=ident,
+        allowed_project_ids=None,
     )
 
 

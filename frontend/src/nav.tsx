@@ -83,7 +83,6 @@ const loadMaintenanceManagerWorkbook = () => import("./pages/maintenance/Mainten
 const loadMaintenanceAcceptance = () => import("./pages/maintenance/MaintenanceAcceptancePage");
 const loadMaintenanceCostRefill = () => import("./pages/maintenance/MaintenanceCostRefillPage");
 const loadMaintenanceMigration = () => import("./pages/maintenance/MaintenanceMigrationPage");
-const loadMaintenanceProjectImport = () => import("./pages/maintenance/MaintenanceProjectImportPage");
 const loadMaintenanceBetaCompat = () => import("./pages/maintenance/MaintenanceBetaCompatRedirect");
 const loadInventory = () => import("./pages/InventoryPage");
 const loadImport = () => import("./pages/ImportPage");
@@ -117,7 +116,6 @@ const MaintenanceManagerWorkbookPage = lazy(loadMaintenanceManagerWorkbook);
 const MaintenanceAcceptancePage = lazy(loadMaintenanceAcceptance);
 const MaintenanceCostRefillPage = lazy(loadMaintenanceCostRefill);
 const MaintenanceMigrationPage = lazy(loadMaintenanceMigration);
-const MaintenanceProjectImportPage = lazy(loadMaintenanceProjectImport);
 const MaintenanceBetaCompatRedirect = lazy(loadMaintenanceBetaCompat);
 const InventoryPage = lazy(loadInventory);
 const ImportPage = lazy(loadImport);
@@ -197,7 +195,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       // 后端 require_admin：无 perm + 无 visibleWhen → 仅 admin 可见入口
       // （App 层过滤：admin 恒短路通过，非 admin 无权限键则为 false）
-      { key: "maintenance-project-import", path: "/maintenance/beta/project-import", label: "项目资料同步", icon: <CloudUploadOutlined />, betaFeature: "maintenance", page: MaintenanceProjectImportPage, load: loadMaintenanceProjectImport },
+
       { key: "maintenance-project-master", path: "/maintenance/beta/project-master", label: "项目主档维护", icon: <ProfileOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceProjectMasterPage, load: loadMaintenanceProjectMaster },
       { key: "maintenance-demands", path: "/maintenance/beta/demands", label: "异常维保单处理", icon: <FileSearchOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceDemandManagementPage, load: loadMaintenanceDemands },
       { key: "maintenance-warehouse", path: "/maintenance/beta/warehouse", label: "仓库单据核对", icon: <InboxOutlined />, perm: "page_maintenance_beta", betaFeature: "maintenance", page: MaintenanceWarehouseWorkbenchPage, load: loadMaintenanceWarehouse },
