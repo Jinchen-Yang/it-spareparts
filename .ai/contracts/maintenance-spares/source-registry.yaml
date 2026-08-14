@@ -1,0 +1,578 @@
+contract_version: maintenance-spares-g0-v1
+source_evidence_cutoff_at: "2026-08-14T13:00:02+08:00"
+registry_updated_at: "2026-08-14T13:57:35+08:00"
+parser_baseline_git_sha: c431656bd2615102f053199801554191b2d88791
+contract_bundle_git_sha: 27dc6b842c67f190284af88398fef0941f834f1d
+contract_bundle_git_scope: first_tracked_candidate_bundle_pointer_update_excluded
+production_alembic_head: d9f1a3c7e5b2
+gate_state: failed_closed
+g1a_parser_sandbox_acceptance:
+  evidence_state: local_frozen_file_sha_passed
+  worktree_branch: codex/maint-spares-g1a
+  base_git_sha: c431656bd2615102f053199801554191b2d88791
+  adapter_sha256: 146df4dd95d7741fa072a44c453810b5d86048428fc080ce8a21c3302dad3665
+  contract_test_sha256: e9d8baeb5495d59f4a87d65b7aad09c854d4243ff3ea4e87dcafb6627ca1c748
+  focused_tests_passed: 240
+  focused_tests_failed: 0
+  py_compile_passed: true
+  diff_check_passed: true
+  six_file_sha_stable_before_after: true
+  independent_review_p0: 0
+  independent_review_p1: 0
+  counts_as_parser_sandbox_acceptance: true
+  counts_as_contract_bundle_freeze: true
+  counts_as_parser_code_git_provenance: false
+  counts_as_source_contract_approval: false
+  counts_as_production_apply_approval: false
+privacy:
+  selected_contract_fields_read_locally: true
+  raw_business_rows_printed_or_recorded: false
+  raw_workbooks_copied_into_repo: false
+  filenames_recorded: false
+  customer_pn_sn_amounts_recorded: false
+  source_status_raw_values_recorded_outside_state_mapping: false
+
+sources:
+  S02:
+    name: 采购订单
+    state: candidate_only
+    ingestion_namespace: generic_excel
+    file_type: purchase
+    owner: pending_business_confirmation
+    export_view: pending_business_confirmation
+    physical_files: pending_business_confirmation
+    sheet_names: pending_business_confirmation
+    header_rows: 2
+    candidate:
+      import_batch_id: 159
+      raw_file_metadata_id: 150
+      sha256: ddd43e2a0f99e4e8a71050a6182d3cbb787adae11484ae335222eedfd04d774c
+      imported_at_utc: "2026-08-12T10:24:36.084191+00:00"
+    orm:
+      header: f_purchase_order
+      line: f_purchase_line
+      batch: sys_import_batch
+      raw_file_metadata: sys_raw_file
+    stable_ids:
+      header: f_purchase_order.raw_order_id
+      line: f_purchase_line.raw_line_id
+      header_source_label: 数据ID(不可修改)
+      line_source_label: 明细.数据ID(不可修改)
+      production_null_or_duplicate: 0
+    business_date: f_purchase_order.order_date
+    status_field: f_purchase_order.data_status
+    status_storage: raw_value
+    purchase_type:
+      raw_field: f_purchase_order.source_type_raw
+      normalized_field: f_purchase_order.source_type
+      observed_normalized_values: [销售订单, 维保需求, 指定采购, 其他采购, 批量采购, 委外维修, 回收, 采购申请]
+      approved_inclusion_allowlist: [销售订单, 维保需求, 指定采购, 其他采购, 批量采购, 委外维修, 回收]
+      approved_exclusion_allowlist: [采购申请]
+      unknown: fail_closed_and_review
+    coverage:
+      load_mode: missing
+      coverage_from: missing
+      coverage_to: missing
+      source_as_of: missing
+      latest_complete_business_date: missing
+      export_frequency: missing
+      freshness_sla: missing
+      missing_batch_state: unproven
+      coverage_state: unavailable
+    mapping_version: generic-etl-c431656b
+    downstream: [replenishment_history, price_evidence, provisional_cost]
+
+  S03:
+    name: 销售订单
+    state: candidate_only
+    ingestion_namespace: generic_excel
+    file_type: sales
+    owner: pending_business_confirmation
+    export_view: pending_business_confirmation
+    physical_files: pending_business_confirmation
+    sheet_names: pending_business_confirmation
+    header_rows: 2
+    candidate:
+      import_batch_id: 160
+      raw_file_metadata_id: 151
+      sha256: 4ea6ebe1011d25b774b49583290272a9436e4e957ce479f02b60f20e8198ca1e
+      imported_at_utc: "2026-08-12T10:24:37.267567+00:00"
+    orm:
+      header: f_sales_order
+      line: f_sales_line
+      batch: sys_import_batch
+      raw_file_metadata: sys_raw_file
+    stable_ids:
+      header: f_sales_order.raw_order_id
+      line: f_sales_line.raw_line_id
+      header_source_label: 数据ID(不可修改)
+      line_source_label: 订单明细.数据ID(不可修改)
+      production_null_or_duplicate: 0
+    business_date: f_sales_order.order_date
+    status_field: f_sales_order.data_status
+    status_storage: raw_value
+    coverage:
+      load_mode: missing
+      coverage_from: missing
+      coverage_to: missing
+      source_as_of: missing
+      latest_complete_business_date: missing
+      export_frequency: missing
+      freshness_sla: missing
+      missing_batch_state: unproven
+      coverage_state: unavailable
+    mapping_version: generic-etl-c431656b
+    downstream: [replenishment_history, price_evidence, project_candidate_evidence]
+
+  S04:
+    name: 产品库存快照
+    state: candidate_only_with_contract_gaps
+    ingestion_namespace: generic_excel
+    file_type: inventory
+    owner: pending_business_confirmation
+    export_view: pending_business_confirmation
+    physical_files: pending_business_confirmation
+    sheet_names: pending_business_confirmation
+    header_rows: 2
+    candidate:
+      import_batch_id: 5
+      raw_file_metadata_id: 5
+      sha256: 43208a9f54039ae97b56d7e8b34a0b9aa5e99e9c5f436f6513d2e120a801694a
+      imported_at_utc: "2026-05-25T00:15:30.468034+00:00"
+    orm:
+      fact: inventory
+      batch: sys_import_batch
+      raw_file_metadata: sys_raw_file
+    source_id:
+      field: inventory.raw_inventory_id
+      source_label: 产品库存ID
+      production_null_or_duplicate: 0
+      authority_across_snapshots: unproven
+    physical_upsert_key: [pn_std, warehouse]
+    warehouse_identity:
+      stable_warehouse_id: missing
+      warehouse_type: missing
+      project_region_relation: missing
+      current_value: display_label_only
+      production_distinct_labels: 9
+    snapshot_time:
+      source_as_of_field: missing
+      current_value: upload_date
+    status:
+      source_column_read_by_transform: true
+      persisted_in_fact: false
+      authority_state: missing
+    mapping_version: generic-etl-c431656b
+    downstream: [inventory_candidate_evidence_only]
+
+  S05:
+    name: 维保备件需求单
+    state: candidate_only
+    ingestion_namespace: generic_excel
+    file_type: maintenance
+    owner: pending_business_confirmation
+    export_view: pending_business_confirmation
+    physical_files: pending_business_confirmation
+    sheet_names: pending_business_confirmation
+    header_rows: 2
+    candidate:
+      import_batch_id: 162
+      raw_file_metadata_id: 153
+      sha256: 66de12d84b5844a363b03f836429215db6e2edcd0c4c276d1d8eaebf4c87854e
+      imported_at_utc: "2026-08-13T10:24:29.071933+00:00"
+    orm:
+      header: f_maintenance_order
+      line: f_maintenance_line
+      project_assignment: maintenance_source_order_assignment
+      batch: sys_import_batch
+      raw_file_metadata: sys_raw_file
+    stable_ids:
+      header: f_maintenance_order.raw_order_id
+      line: f_maintenance_line.raw_line_id
+      header_source_label: 数据ID(不可修改)
+      line_source_label: 需求明细.数据ID(不可修改)
+      production_null_or_duplicate: 0
+    project_relation:
+      authority: maintenance_source_order_assignment
+      active_wbdd: 18626
+      assigned: 18526
+      unassigned_fail_closed: 100
+      project_name_match_allowed: false
+    business_date: f_maintenance_order.order_date
+    status_field: f_maintenance_order.data_status
+    status_storage: raw_value
+    mapping_version: generic-etl-c431656b
+    downstream: [project_demand, warehouse_delivery_candidate]
+
+  S06:
+    name: 费用报销支付单
+    state: real_sample_observed_missing_contract
+    m1_required: false
+    ingestion_namespace: maintenance_expense_candidate
+    owner: pending_formal_source_owner_confirmation
+    export_view: pending_formal_source_owner_confirmation
+    sample_origin: user_supplied_real_export_candidate
+    sample:
+      sha256: 02d956ea9cac2d19ecd96b11d020360cecd28dacde9871a14d4b87fadee53517
+      size_bytes: 25889
+      worksheets: 1
+      visible_worksheets: 1
+      header_rows: 2
+      header_columns: 43
+      document_rows: 15
+      line_rows: 97
+      business_date_min: "2026-02-14"
+      business_date_max: "2026-07-31"
+      document_dates_missing: 1
+      formula_cells: 0
+      merge_ranges: 0
+      sensitive_business_rows_profiled: false
+    contract_state: observed_structure_missing_business_contract
+    approved_contract: false
+    production_apply_allowed: false
+    stable_ids:
+      header_present_null_or_duplicate: 0
+      document_no_present_null_or_duplicate: 0
+      line_present_null_or_duplicate: 0
+      exact_internal_codes: pending_field_contract_freeze
+    status_observed_hashed:
+      hash_d79b1d0e5c61: 14
+      hash_dc9591e56d50: 1
+    approved_mapping: {}
+    blockers:
+      - formal_source_owner_and_export_view
+      - approved_header_and_line_identity_codes
+      - approved_financial_status_semantics
+      - amount_tax_currency_basis
+      - expense_occurrence_and_payment_date_semantics
+      - stable_project_and_contract_relation
+      - non_merged_continuation_ownership_rule
+    prohibited_paths:
+      - generic_import_upload
+      - legacy_f_project_expense_apply
+      - delete_then_reinsert_expenses
+    intended_downstream: [non_spare_project_expense]
+    decision: pure_preview_first_then_append_only_expense_allocation_post_m1
+
+  S07:
+    name: 发货出库单
+    state: real_sample_candidate_parser_passed_zero_write
+    ingestion_namespace: maintenance_warehouse
+    adapter_key: shipment
+    adapter_version: shipment_v1
+    document_type: shipment
+    owner: pending_formal_source_owner_confirmation
+    export_view: pending_formal_source_owner_confirmation
+    sample_origin: user_supplied_huyun_full_export_candidate
+    real_sample:
+      sha256: 993ce190b1572528585417be58a60be096d395fac340bf8eef62954b6b0042b8
+      size_bytes: 57289738
+      worksheets: 9
+      visible_worksheets: 1
+      very_hidden_worksheets: 8
+      header_rows: 2
+      header_columns: 166
+      header_signature: fcc90f0fd21a1c6d51c3c34a08bc63a2489c121a9217a6111bec181dec5cd924
+      data_rows: 69298
+      document_rows: 19572
+      line_rows: 69298
+      business_date_min: "2026-01-01"
+      business_date_max: "2026-08-06"
+    contract_state: candidate_signature_frozen_for_parser_tdd
+    approved_contract: false
+    production_apply_allowed: false
+    parser_blockers:
+      formula_cells: 2
+      formula_field_codes: [F0000028, F0000029]
+      formula_fields_are_optional_attachments: true
+      declared_dimension_cell_slots: 11503800
+      actual_cell_nodes: 11503800
+      current_cell_limit: 5000000
+      merged_header_continuation_lines: 49726
+      complete_stream_scan_2026_08_14:
+        actual_cell_nodes: 11503800
+        elapsed_approx_seconds: 18
+        business_values_output: false
+    status_observed_hashed:
+      hash_8d544e154955: 19570
+      hash_2a2fd29bd27a: 2
+    candidate_normalized_counts: {confirmed: 19570, pending: 2, void: 0}
+    candidate_mapping_ref: state-mapping.yaml#warehouse_sources.S07_shipment
+    approved_mapping: {}
+    correction_identity:
+      explicit_source_revision: missing
+      model_required: stable_id_plus_canonical_digest_and_immutable_supersession
+    stable_ids:
+      header: ObjectId
+      document_no: SeqNo
+      line: D107407Fvxu6voev32rlg4pkdu6nvdc83.ObjectId
+      header_present_distinct: 19572
+      document_no_present_distinct: 19572
+      line_present_distinct: 69298
+      id_number_conflicts: 0
+      line_null_or_duplicate: 0
+      physical_header_cells_are_vertically_merged: true
+    line_number:
+      source_code: D107407Fvxu6voev32rlg4pkdu6nvdc83.ParentIndex
+      integer_rows: 69298
+      null_rows: 0
+      min: 1
+      max: 163
+      documents_exact_1_to_n: 19572
+      documents_not_exact: 0
+      physical_row_fallback_allowed: false
+    full_parser_benchmark:
+      outcome: parsed
+      adapter_matches: true
+      header_signature_matches: true
+      source_hash_matches: true
+      outward_version_state: unknown_version
+      data_rows: 69298
+      documents: 19572
+      lines: 69298
+      ambiguities: 1144
+      ambiguity_counts:
+        dual_upstream_reference_conflict: 1142
+        pn_field_conflict: 1
+        unknown_version: 1
+      elapsed_seconds: 146.673
+      process_wall_seconds: 147.03
+      baseline_rss_kib: 62392
+      peak_rss_kib: 241396
+      peak_rss_delta_kib: 179004
+      wall_limit_seconds: 180
+      hard_timeout_seconds: 240
+      rss_delta_limit_kib: 786432
+      zero_database_writes: true
+      counts_as_parser_sandbox_acceptance: true
+      counts_as_source_contract_approval: false
+    production_rows: {batches: 0, headers: 0, lines: 0}
+    mapping_version: shipment-v1-fcc90f0f-candidate
+    downstream: [in_transit, site_receipt_candidate]
+
+  S08:
+    name: 退货返库单
+    state: optional_real_samples_received_parser_fail_closed
+    m1_required: false
+    ingestion_namespace: maintenance_warehouse
+    adapter_key: return
+    preferred_adapter_version: return_v2
+    recognized_adapter_versions: [return_v2, return_v1]
+    owner: pending_formal_source_owner_confirmation
+    export_view: pending_formal_source_owner_confirmation
+    sample_origin: user_supplied_huyun_wide_and_narrow_export_candidates
+    real_samples:
+      return_v2:
+        sha256: 7485f5848a4c08fc6844645ff2854c4eac9c38f41fe099aa4d8c06f04987351b
+        size_bytes: 4186312
+        worksheets: 11
+        header_columns: 120
+        header_signature: f4b7875cd8cefb6bb2468e9d8931d5e173123ef1699cfa7c9da4decd43d0e24e
+        data_rows: 7104
+        stable_document_ids: 3019
+        stable_line_ids: 7102
+        missing_line_ids: 2
+        formula_cells: 95
+        parser_state: formula_fail_closed
+      return_v1:
+        sha256: 0e49cd36ff047d9dcfce6263c7996d50572d96fa76177462fb27fb2ba372319f
+        size_bytes: 18402
+        worksheets: 9
+        header_columns: 49
+        header_signature: b179ff9df3bfa42621f74620d85148bc1153cbc577fdcbc4a0c79292b844c2e7
+        data_rows: 27
+        stable_identity: missing_non_authoritative
+        parser_state: unknown_version_zero_documents
+    contract_state: local_structure_evidence_only
+    production_apply_allowed: false
+    status_observed_hashed:
+      return_v2: {hash_8d544e154955: 2996, hash_a37778f17c5f: 9, hash_2a2fd29bd27a: 14}
+      return_v1: {hash_8d544e154955: 10}
+    candidate_normalized_counts:
+      return_v2: {confirmed: 2996, pending: 14, void: 9}
+      return_v1: {confirmed: 10, pending: 0, void: 0}
+    candidate_mapping_ref: state-mapping.yaml#warehouse_sources.S08_return
+    approved_mapping: {}
+    correction_identity:
+      explicit_source_revision: missing
+      cross_file_revision_proof: unavailable
+    stable_ids:
+      return_v2:
+        header: ObjectId
+        document_no: SeqNo
+        line: D107407Fd8lreq33f21ltnq5ukwjwaxb4.ObjectId
+        line_number_code: D107407Fd8lreq33f21ltnq5ukwjwaxb4.ParentIndex
+        line_number_integer_rows: 7102
+        line_number_null_rows: 2
+        line_number_min: 1
+        line_number_max: 74
+        documents_exact_1_to_n: 3017
+        documents_not_exact_due_null: 2
+        physical_row_fallback_allowed: false
+      return_v1:
+        header: missing
+        document_no: missing
+        line: missing
+        authority_state: non_authoritative
+    production_rows: {batches: 0, headers: 0, lines: 0}
+    mapping_version: optional-return-v2-f4b7875c-candidate
+    downstream: [return_in_transit, warehouse_handoff]
+
+  S09:
+    name: 入库单
+    state: real_sample_candidate_parser_passed_zero_write
+    ingestion_namespace: maintenance_warehouse
+    adapter_key: receipt
+    adapter_version: receipt_v1
+    document_type: receipt
+    owner: pending_formal_source_owner_confirmation
+    export_view: pending_formal_source_owner_confirmation
+    sample_origin: user_supplied_huyun_full_export_candidate
+    real_sample:
+      sha256: d11538c7a23ba3f6ae8bcca339a37a1a64aa9eabf61955c7e1f16d152c000032
+      size_bytes: 51476026
+      worksheets: 12
+      header_rows: 2
+      header_columns: 155
+      header_signature: 26354f5b3d8e08a263e2bbb0f4205cfeea145d98c555fa36eea19b727a586042
+      data_rows: 82911
+      document_rows: 10177
+      line_rows_with_stable_id: 82910
+      business_date_min: "2026-01-01"
+      business_date_max: "2026-08-06"
+    contract_state: candidate_signature_frozen_for_parser_tdd
+    approved_contract: false
+    production_apply_allowed: false
+    parser_blockers:
+      formula_cells: 270
+      formula_field_codes:
+        - F0000029
+        - D107407Fh8tgyrcma4r2qm9qk8sgk3v92.F0000141
+        - F0000139
+      formula_fields_are_attachment_or_report_evidence: true
+      actual_cell_nodes: 12851515
+      actual_cell_nodes_greater_than_current_limit: true
+      current_cell_limit: 5000000
+      merged_header_continuation_lines: 72734
+      benchmark_2026_08_14:
+        main_sheet_xml_bytes: 501666456
+        actual_cell_nodes: 12851515
+        merge_ranges: 641350
+        inherited_span: 7346134
+        formula_nodes: 270
+        elapsed_seconds: 13.10
+        peak_rss_kib: 77872
+        business_values_output: false
+    status_observed_hashed:
+      hash_8d544e154955: 10107
+      hash_2a2fd29bd27a: 5
+      hash_a37778f17c5f: 65
+    candidate_normalized_counts: {confirmed: 10107, pending: 5, void: 65}
+    candidate_mapping_ref: state-mapping.yaml#warehouse_sources.S09_receipt
+    approved_mapping: {}
+    correction_identity:
+      explicit_source_revision: missing
+      model_required: stable_id_plus_canonical_digest_and_immutable_supersession
+    receipt_origin_contract:
+      state: missing_owner_approval
+      raw_field: F0000032
+      raw_business_label: 入库类别(必填)
+      normalized_field: receipt_origin_kind
+      approved_raw_to_normalized_mapping: {}
+      hash_algorithm: sha256
+      hash_domain_utf8: "it-data:maintenance-spares:raw-enum:v1:S09:receipt_v1:F0000032"
+      hash_domain_terminator_hex: "00"
+      hash_input_order: domain_utf8_then_terminator_then_canonical_utf8
+      digest_encoding: lowercase_hex
+      bucket_prefix: hash_
+      bucket_digest_prefix_hex_chars: 12
+      canonicalization: excel_rich_text_order_xml_entity_decode_utf8_unicode_nfkc_trim_and_collapse_unicode_whitespace_no_casefold
+      canonical_empty_policy: null_without_hash
+      document_raw_hash_buckets:
+        hash_020f4c198e68: {total: 5790, "010": 13, "011": 5777}
+        hash_451224b2ffc1: {total: 3778, "010": 3777, "011": 1}
+        hash_51d2fcc79d09: {total: 12, "010": 12, "011": 0}
+        hash_7e5f048e25c5: {total: 212, "010": 212, "011": 0}
+        hash_88908a54171a: {total: 385, "010": 385, "011": 0}
+      document_missing: 0
+      document_internal_bucket_conflicts: 0
+      return_notice_ref: F0000179
+      related_notice_ref: F0000178
+      purchase_order_ref: F0000147
+      authoritative_fallback_allowed: false
+      observed_presence_bits_order: [F0000179, F0000178, F0000147]
+      observed_document_combinations: {"010": 4399, "011": 5778}
+      observed_line_combinations: {"010": 12381, "011": 70530}
+      uncovered_combinations_fail_closed: true
+      good_return_eligible_requires: [current_activation, confirmed_status, approved_inspection_result, maintenance_good_return_origin, exact_return_relation]
+    stable_ids:
+      header: ObjectId
+      document_no: SeqNo
+      line: D107407Fh8tgyrcma4r2qm9qk8sgk3v92.ObjectId
+      header_present_distinct: 10177
+      document_no_present_distinct: 10177
+      line_present_distinct: 82910
+      id_number_conflicts: 0
+      missing_line_ids: 1
+      physical_header_cells_are_vertically_merged: true
+    line_number:
+      source_code: D107407Fh8tgyrcma4r2qm9qk8sgk3v92.ParentIndex
+      integer_rows: 82910
+      null_rows: 1
+      min: 1
+      max: 160
+      documents_exact_1_to_n: 10176
+      documents_not_exact_due_null: 1
+      physical_row_fallback_allowed: false
+    full_parser_benchmark:
+      outcome: parsed
+      adapter_matches: true
+      header_signature_matches: true
+      source_hash_matches: true
+      outward_version_state: unknown_version
+      data_rows: 82911
+      documents: 10176
+      lines: 82910
+      ambiguities: 38
+      ambiguity_counts:
+        pn_field_conflict: 31
+        quantity_field_conflict: 4
+        parent_index_field_conflict: 1
+        missing_line_id: 1
+        unknown_version: 1
+      elapsed_seconds: 157.602
+      process_wall_seconds: 157.90
+      baseline_rss_kib: 62544
+      peak_rss_kib: 250312
+      peak_rss_delta_kib: 187768
+      wall_limit_seconds: 180
+      hard_timeout_seconds: 240
+      rss_delta_limit_kib: 786432
+      zero_database_writes: true
+      counts_as_parser_sandbox_acceptance: true
+      counts_as_source_contract_approval: false
+    production_rows: {batches: 0, headers: 0, lines: 0}
+    mapping_version: receipt-v1-26354f5b-candidate
+    downstream: [formal_inbound_evidence, good_return_allocation]
+
+  S10:
+    name: 项目现场收货确认
+    state: product_decision_locked_implementation_missing
+    carrier: it_data_native_named_account_form
+    stable_id: receipt_confirmation_id
+    required_link: S07.delivery_line_id
+    source_owner: IT_data_named_account
+    required_fields: [project_id, front_warehouse_id, delivery_source_version_id, delivery_line_version_id, part_id, quantity, serial_number_when_present, received_by_user_id, confirmed_at, evidence_digest, idempotency_key]
+    statuses: [draft, confirmed, reversed]
+    inventory_effect: front_stock_increase_after_confirm
+
+  S11:
+    name: 现场领用单
+    state: product_decision_locked_implementation_missing
+    carrier: it_data_native_named_account_form
+    stable_id: site_issue_line_id
+    required_link: S10.receipt_and_S07.delivery_line
+    source_owner: IT_data_named_account
+    required_fields: [project_id, front_warehouse_id, delivery_line_version_id, operation_type, new_part_id, new_serial_number_when_present, removed_part_id_when_replacement, removed_serial_number_when_present, quantity, device_or_location_evidence, consumed_by_user_id, confirmed_at, idempotency_key]
+    statuses: [draft, confirmed, corrected, void]
+    inventory_effect: front_stock_decrease_after_confirm

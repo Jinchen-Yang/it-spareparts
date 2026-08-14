@@ -59,6 +59,10 @@ services:
       # 独立 Beta 默认关闭；关闭只隐藏入口和拒绝业务请求，不删除历史数据。
       MAINTENANCE_BETA_ENABLED: ${MAINTENANCE_BETA_ENABLED:-false}
       REPLENISHMENT_BETA_ENABLED: ${REPLENISHMENT_BETA_ENABLED:-false}
+      # 回款计划导入保持写入关闭；仅完成具名项目 canary 验收后才显式打开。
+      MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED: ${MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED:-false}
+      # 留空即不限制项目（仅用于正式扩围）；首次授权 action 前必须设置唯一已审核项目 UUID。
+      MAINTENANCE_COLLECTION_CANARY_PROJECT_ID: ${MAINTENANCE_COLLECTION_CANARY_PROJECT_ID:-}
       # 二期 AI 助手：不配 LLM_API_KEY 时其余功能照常，chat 接口返回降级提示
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}

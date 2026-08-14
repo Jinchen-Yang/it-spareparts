@@ -76,17 +76,17 @@ export function classifyCostWaterline({
 }
 
 const STATUS_META: Record<CostWaterlineStatus, { label: string; color: string; tag?: string }> = {
-  normal: { label: "不超过 80%", color: "var(--mb-success)", tag: "green" },
-  yellow: { label: "超过 80%–100%", color: "var(--mb-warning)", tag: "gold" },
-  red: { label: "超过 100%", color: "var(--mb-danger)", tag: "red" },
-  unknown: { label: "成本未完整，当前为下限", color: "var(--mb-text-3)", tag: "default" },
-  restricted: { label: "成本不可见/无权限", color: "var(--mb-text-3)", tag: "default" },
-  contract_restricted: { label: "合同额不可见/无权限", color: "var(--mb-text-3)", tag: "default" },
-  expense_restricted: { label: "报销费用不可见，项目总成本无法合计", color: "var(--mb-text-3)", tag: "default" },
+  normal: { label: "成本正常（不超过 80%）", color: "var(--mb-success)", tag: "green" },
+  yellow: { label: "成本偏高（80%–100%）", color: "var(--mb-warning)", tag: "gold" },
+  red: { label: "已超合同额（超过 100%）", color: "var(--mb-danger)", tag: "red" },
+  unknown: { label: "部分成本待补充，当前为最低估计", color: "var(--mb-text-3)", tag: "default" },
+  restricted: { label: "暂无成本查看权限", color: "var(--mb-text-3)", tag: "default" },
+  contract_restricted: { label: "暂无合同金额查看权限", color: "var(--mb-text-3)", tag: "default" },
+  expense_restricted: { label: "暂无费用查看权限，项目总成本无法合计", color: "var(--mb-text-3)", tag: "default" },
   completeness_unknown: { label: "项目总成本完整度未知", color: "var(--mb-text-3)", tag: "default" },
-  no_contract: { label: "合同额不足，无法计算", color: "var(--mb-text-3)", tag: "default" },
-  cost_basis_unknown: { label: "成本税口径不可确认", color: "var(--mb-text-3)", tag: "default" },
-  contract_basis_unknown: { label: "合同额税口径不可确认", color: "var(--mb-text-3)", tag: "default" },
+  no_contract: { label: "合同金额不足，无法计算", color: "var(--mb-text-3)", tag: "default" },
+  cost_basis_unknown: { label: "成本税类型未确认", color: "var(--mb-text-3)", tag: "default" },
+  contract_basis_unknown: { label: "合同额税类型未确认", color: "var(--mb-text-3)", tag: "default" },
 };
 
 function numericPercent(numerator: number | null, denominator: number | null): number | null {
@@ -212,7 +212,7 @@ export default function ProjectFinancialProgress({ metrics, visibility }: {
   return (
     <Space direction="vertical" size={14} style={{ width: "100%" }}>
       <MetricProgress
-        label="回款 / 全部合同额（含税）"
+        label="已回款 ÷ 合同总额（含税）"
         numerator={visibility.canViewContract ? metrics.received_amount : null}
         denominator={visibility.canViewContract && contractBasisConfirmed
           ? metrics.total_contract_amount : null}
@@ -223,7 +223,7 @@ export default function ProjectFinancialProgress({ metrics, visibility }: {
         {!visibility.canViewContract ? (
           <div>合同额不可见，暂不计算比例。</div>
         ) : !contractBasisConfirmed ? (
-          <div>合同额税口径不可确认，暂不计算比例。</div>
+          <div>合同额税类型未确认，暂不计算比例。</div>
         ) : metrics.contract_amount_complete === null ? (
           <div>合同额不可见，暂不计算比例。</div>
         ) : metrics.contract_amount_complete === false && (
@@ -231,7 +231,7 @@ export default function ProjectFinancialProgress({ metrics, visibility }: {
         )}
       </MetricProgress>
       <MetricProgress
-        label="项目已计成本（含税） / 全部合同额（含税）"
+        label="已消耗成本 ÷ 合同总额（含税）"
         numerator={visibility.canViewCost && visibility.canViewExpense && costBasisConfirmed
           ? metrics.actual_project_cost_known_inc_tax : null}
         denominator={visibility.canViewContract && contractBasisConfirmed
@@ -262,9 +262,9 @@ export default function ProjectFinancialProgress({ metrics, visibility }: {
         {!visibility.canViewCost ? null : !visibility.canViewContract ? (
           <div>合同额不可见，暂不计算项目成本比例。</div>
         ) : !contractBasisConfirmed ? (
-          <div>合同额税口径不可确认，暂不计算比例。</div>
+          <div>合同额税类型未确认，暂不计算比例。</div>
         ) : !costBasisConfirmed ? (
-          <div>成本税口径不可确认，暂不计算比例。</div>
+          <div>成本税类型未确认，暂不计算比例。</div>
         ) : metrics.cost_complete === null ? (
           <div>项目总成本完整度未知，暂不判断成本水位。</div>
         ) : metrics.contract_amount_complete === null ? null : metrics.contract_amount_complete === false ? (

@@ -260,7 +260,7 @@ describe("BadReturnPanel", () => {
     );
 
     const panel = await screen.findByTestId("bad-return-panel");
-    fireEvent.click(within(panel).getByRole("button", { name: "处理品类" }));
+    fireEvent.click(await within(panel).findByRole("button", { name: "处理品类" }));
     const dialog = await screen.findByRole("dialog", { name: "处理品类待判定" });
     await waitFor(() => expect(api.listMaintenanceReturnCategories).toHaveBeenCalledOnce());
     fireEvent.mouseDown(within(dialog).getByRole("combobox", { name: "标准品类" }));

@@ -4,7 +4,7 @@ from fastapi import Depends, HTTPException, Path, status
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.security import UserContext, get_current_user_context
+from app.security import FULL_SCOPE_ROLES, UserContext, get_current_user_context
 from app.services import maintenance_project_assignments as assignments
 
 
@@ -37,3 +37,20 @@ def require_maintenance_project_access(
         project_id=project_id,
         ctx=ctx,
     )
+
+
+def resolve_visible_project_ids(
+    db: Session,
+    ctx: UserContext,
+) -> set[str] | None:
+    """Directory-level scope: None = full scope (admin), otherwise owned ids.
+
+    Callers that need to filter a listing by project must treat None as
+    "no filter" and an empty set as "no visible rows".
+    """
+    if ctx.role in FULL_SCOPE_ROLES:
+        return None
+    return set(
+        db.scalars(assignments.owned_project_ids(ctx)).all()
+    )
+

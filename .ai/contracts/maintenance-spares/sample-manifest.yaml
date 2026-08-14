@@ -1,0 +1,73 @@
+manifest_version: maintenance-spares-samples-v1
+generated_at: "2026-08-14T01:09:15+08:00"
+baseline_git_sha: c431656bd2615102f053199801554191b2d88791
+gate_state: failed_closed
+privacy:
+  contains_source_attachment_paths: false
+  contains_repo_artifact_paths: true
+  contains_business_rows: false
+  contains_customer_pn_sn_amounts: false
+
+samples:
+  S02_purchase_candidate:
+    sha256: ddd43e2a0f99e4e8a71050a6182d3cbb787adae11484ae335222eedfd04d774c
+    evidence_origin: production_import_metadata
+    metadata_ref: {import_batch_id: 159, raw_file_metadata_id: 150}
+    contract_state: candidate_only
+  S03_sales_candidate:
+    sha256: 4ea6ebe1011d25b774b49583290272a9436e4e957ce479f02b60f20e8198ca1e
+    evidence_origin: production_import_metadata
+    metadata_ref: {import_batch_id: 160, raw_file_metadata_id: 151}
+    contract_state: candidate_only
+  S04_inventory_candidate:
+    sha256: 43208a9f54039ae97b56d7e8b34a0b9aa5e99e9c5f436f6513d2e120a801694a
+    evidence_origin: production_import_metadata
+    metadata_ref: {import_batch_id: 5, raw_file_metadata_id: 5}
+    contract_state: candidate_only_with_contract_gaps
+  S05_maintenance_candidate:
+    sha256: 66de12d84b5844a363b03f836429215db6e2edcd0c4c276d1d8eaebf4c87854e
+    evidence_origin: production_import_metadata
+    metadata_ref: {import_batch_id: 162, raw_file_metadata_id: 153}
+    contract_state: candidate_only
+  S06_expense_deferred:
+    sha256: 02d956ea9cac2d19ecd96b11d020360cecd28dacde9871a14d4b87fadee53517
+    size_bytes: 25889
+    evidence_origin: user_supplied_read_only_attachment
+    contract_state: deferred_non_spare_scope
+  S07_shipment_candidate:
+    sha256: 993ce190b1572528585417be58a60be096d395fac340bf8eef62954b6b0042b8
+    size_bytes: 57289738
+    header_signature: fcc90f0fd21a1c6d51c3c34a08bc63a2489c121a9217a6111bec181dec5cd924
+    evidence_origin: user_supplied_read_only_attachment
+    contract_state: candidate_signature_frozen_for_parser_tdd
+    production_apply_allowed: false
+  S08_return_v2_optional_candidate:
+    sha256: 7485f5848a4c08fc6844645ff2854c4eac9c38f41fe099aa4d8c06f04987351b
+    size_bytes: 4186312
+    header_signature: f4b7875cd8cefb6bb2468e9d8931d5e173123ef1699cfa7c9da4decd43d0e24e
+    evidence_origin: user_supplied_read_only_attachment
+    contract_state: optional_candidate_signature
+    production_apply_allowed: false
+  S08_return_v1_non_authoritative:
+    sha256: 0e49cd36ff047d9dcfce6263c7996d50572d96fa76177462fb27fb2ba372319f
+    size_bytes: 18402
+    header_signature: b179ff9df3bfa42621f74620d85148bc1153cbc577fdcbc4a0c79292b844c2e7
+    evidence_origin: user_supplied_read_only_attachment
+    contract_state: non_authoritative
+    production_apply_allowed: false
+  S09_receipt_candidate:
+    sha256: d11538c7a23ba3f6ae8bcca339a37a1a64aa9eabf61955c7e1f16d152c000032
+    size_bytes: 51476026
+    header_signature: 26354f5b3d8e08a263e2bbb0f4205cfeea145d98c555fa36eea19b727a586042
+    evidence_origin: user_supplied_read_only_attachment
+    contract_state: candidate_signature_frozen_for_parser_tdd
+    production_apply_allowed: false
+
+verification:
+  checksum_replay: use_repo_external_controlled_paths
+  header_contract_bundle:
+    path: .ai/contracts/maintenance-spares/warehouse-header-contracts-v1.yaml
+    sha256: 43576ecb0cad5173ff86b0da48e38baebfa31e9b8ca4b0252f06014dcdea37be
+    state: candidate_only
+    production_apply_allowed: false
+  production_approval: false

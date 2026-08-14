@@ -15,6 +15,7 @@ from app.security import (
     require_action,
     require_page,
 )
+from app.api.maintenance_project_scope import resolve_visible_project_ids as scope_resolve
 from app.services import maintenance_demands
 
 
@@ -86,6 +87,8 @@ def _real_operator(db: Session, ident: dict) -> str:
 
 
 def _raise_service_error(exc: Exception) -> None:
+    if isinstance(exc, maintenance_demands.MaintenanceDemandForbidden):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     if isinstance(exc, maintenance_demands.DeleteIntentTooEarly):
         raise HTTPException(
             425,
@@ -120,18 +123,24 @@ def search_demands(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "维保需求单搜索条件无效",
         )
+    allowed_project_ids = scope_resolve(db, ctx)
     # Deliberately audit only the presence of a search, never its user-entered text.
     record_access_log(
         ctx,
         "maintenance_demand_search",
         "maintenance_demands",
-        {"searched": bool(body.q and body.q.strip()), "page": body.page},
+        {
+            "searched": bool(body.q and body.q.strip()),
+            "page": body.page,
+            "scope": "full" if allowed_project_ids is None else "owned",
+        },
     )
     return maintenance_demands.search_demands(
         db,
         q=body.q,
         page=body.page,
         page_size=body.page_size,
+        allowed_project_ids=allowed_project_ids,
     )
 
 
@@ -143,8 +152,10 @@ def create_delete_intent(
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action("action_maintenance_demand_delete")),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     operated_by = _real_operator(db, ident)
+    allowed_project_ids = scope_resolve(db, ctx)
     try:
         result = maintenance_demands.create_delete_intent(
             db,
@@ -152,6 +163,7 @@ def create_delete_intent(
             reason=body.reason,
             idempotency_key=body.idempotency_key,
             operated_by=operated_by,
+            allowed_project_ids=allowed_project_ids,
         )
         db.commit()
         return result
@@ -190,6 +202,7 @@ def _intent_action(
     body: DeleteIntentActionRequest,
     db: Session,
     ident: dict,
+    allowed_project_ids: set[str] | None,
 ) -> dict:
     operated_by = _real_operator(db, ident)
     operation = {
@@ -197,13 +210,15 @@ def _intent_action(
         "execute": maintenance_demands.execute_delete_intent,
         "cancel": maintenance_demands.cancel_delete_intent,
     }[action]
+    kwargs = {
+        "intent_id": intent_id,
+        "digest": body.digest,
+        "operated_by": operated_by,
+    }
+    if action == "execute":
+        kwargs["allowed_project_ids"] = allowed_project_ids
     try:
-        result = operation(
-            db,
-            intent_id=intent_id,
-            digest=body.digest,
-            operated_by=operated_by,
-        )
+        result = operation(db, **kwargs)
         db.commit()
         return result
     except maintenance_demands.DeleteIntentTooEarly as exc:
@@ -234,7 +249,12 @@ def arm_delete_intent(
     _action: None = Depends(require_action("action_maintenance_demand_delete")),
 ) -> dict:
     return _intent_action(
-        action="arm", intent_id=intent_id, body=body, db=db, ident=ident
+        action="arm",
+        intent_id=intent_id,
+        body=body,
+        db=db,
+        ident=ident,
+        allowed_project_ids=None,
     )
 
 
@@ -247,9 +267,17 @@ def execute_delete_intent(
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action("action_maintenance_demand_delete")),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    # 执行时重新鉴权（TOCTOU）：创建意图时的范围可能已失效（改派/撤权）。
+    allowed_project_ids = scope_resolve(db, ctx)
     return _intent_action(
-        action="execute", intent_id=intent_id, body=body, db=db, ident=ident
+        action="execute",
+        intent_id=intent_id,
+        body=body,
+        db=db,
+        ident=ident,
+        allowed_project_ids=allowed_project_ids,
     )
 
 
@@ -264,7 +292,12 @@ def cancel_delete_intent(
     _action: None = Depends(require_action("action_maintenance_demand_delete")),
 ) -> dict:
     return _intent_action(
-        action="cancel", intent_id=intent_id, body=body, db=db, ident=ident
+        action="cancel",
+        intent_id=intent_id,
+        body=body,
+        db=db,
+        ident=ident,
+        allowed_project_ids=None,
     )
 
 

@@ -1,6 +1,7 @@
 """测试库寿命守卫：边界、重建后迁移链，以及三类破坏性安全门。"""
 import os
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from alembic import command as alembic_command
@@ -11,6 +12,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.pool import NullPool
 
 from app.config import get_settings
+import tests.db_guard as db_guard
 from tests.db_guard import ensure_test_database
 
 
@@ -186,6 +188,100 @@ def test_guard_refuses_rebuild_while_another_client_is_connected():
             blocker.dispose()
         _drop_database(maint, name)
         maint.dispose()
+
+
+class _GuardResult:
+    def __init__(self, *, scalar=None, row=None):
+        self._scalar = scalar
+        self._row = row
+
+    def scalar(self):
+        return self._scalar
+
+    def one(self):
+        return self._row
+
+
+class _GuardConnection:
+    def __init__(self, session_counts=()):
+        self._session_counts = iter(session_counts)
+        self.session_checks = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, statement, _params=None):
+        query = str(statement)
+        if "pg_try_advisory_lock" in query:
+            return _GuardResult(scalar=True)
+        if "SELECT 1 FROM pg_database WHERE datname" in query:
+            return _GuardResult(scalar=True)
+        if "MAX(n)" in query:
+            return _GuardResult(scalar=801)
+        if "pg_stat_activity" in query:
+            self.session_checks += 1
+            return _GuardResult(scalar=next(self._session_counts))
+        if "FROM pg_roles r LEFT JOIN pg_database d" in query:
+            return _GuardResult(row=SimpleNamespace(
+                rolsuper=True, rolcreatedb=True, owns_db=True,
+            ))
+        if "pg_advisory_unlock" in query or query.startswith("DROP DATABASE") \
+                or query.startswith("CREATE DATABASE"):
+            return _GuardResult()
+        pytest.fail(f"unexpected guard query: {query}")
+
+
+class _GuardEngine:
+    def __init__(self, connection):
+        self._connection = connection
+
+    def connect(self):
+        return self._connection
+
+    def dispose(self):
+        pass
+
+
+def _mock_rebuild_guard(monkeypatch, session_counts):
+    maintenance = _GuardConnection(session_counts)
+    probe = _GuardConnection()
+    engines = iter((_GuardEngine(maintenance), _GuardEngine(probe)))
+    monkeypatch.setattr(db_guard, "create_engine", lambda *_args, **_kwargs: next(engines))
+    return maintenance
+
+
+def _mock_rebuild_url() -> str:
+    return _render(make_url(os.environ["DATABASE_URL"]).set(
+        database="spareparts_test_guard_settle",
+    ))
+
+
+def test_guard_rechecks_a_transient_just_closed_probe_connection(monkeypatch):
+    maintenance = _mock_rebuild_guard(monkeypatch, (1, 0))
+    sleeps = []
+    monkeypatch.setattr(
+        db_guard, "time", SimpleNamespace(sleep=sleeps.append), raising=False,
+    )
+
+    assert ensure_test_database(_mock_rebuild_url()) == "recreated"
+    assert maintenance.session_checks == 2
+    assert sleeps == [0.05]
+
+
+def test_guard_still_refuses_a_client_that_remains_connected(monkeypatch):
+    maintenance = _mock_rebuild_guard(monkeypatch, (1, 1, 1))
+    sleeps = []
+    monkeypatch.setattr(
+        db_guard, "time", SimpleNamespace(sleep=sleeps.append), raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="仍有 1 个其他客户端连接"):
+        ensure_test_database(_mock_rebuild_url())
+    assert maintenance.session_checks == 3
+    assert sleeps == [0.05, 0.05]
 
 
 def test_guard_refuses_when_another_maintenance_session_holds_guard_lock():

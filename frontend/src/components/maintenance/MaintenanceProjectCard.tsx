@@ -8,9 +8,9 @@ import type { ProjectFinancialVisibility } from "./ProjectFinancialProgress";
 import ProjectManagerAssignmentControl from "./ProjectManagerAssignmentControl";
 
 const LIFECYCLE_META: Record<string, { label: string; color?: string }> = {
-  ongoing: { label: "进行中", color: "blue" },
-  ended: { label: "已结束" },
-  missing: { label: "期限缺失", color: "orange" },
+  ongoing: { label: "服务中", color: "blue" },
+  ended: { label: "已结项" },
+  missing: { label: "期限待确认", color: "orange" },
 };
 
 function ProjectReturnStatus({ project }: { project: MaintenanceProjectOperationsSummary }) {
@@ -55,7 +55,7 @@ export default function MaintenanceProjectCard({
   onAssignmentChanged?: () => void;
 }) {
   const lifecycle = LIFECYCLE_META[project.lifecycle_status]
-    ?? { label: "业务期限待确认", color: "orange" };
+    ?? { label: "期限待确认", color: "orange" };
   const assignment = project.manager_assignment;
   const primaryTask = project.task_summary?.primary;
   const missingLabels = project.missing_data_labels ?? [];
@@ -82,7 +82,7 @@ export default function MaintenanceProjectCard({
       extra={<Tag color={lifecycle.color}>{lifecycle.label}</Tag>}
       actions={[
         <Link key="detail" to={`/maintenance/beta/projects/${encodeURIComponent(project.project_id)}`}>
-          查看项目
+          进入项目
         </Link>,
         ...(hasPendingMonthlyUpload && canUseManagerWorkbook ? [
           <Link
@@ -106,7 +106,7 @@ export default function MaintenanceProjectCard({
     >
       <div className="maintenance-project-card-meta">
         <div>
-          项目经理：
+          维保负责人：
           {assignment
             ? `${assignment.display_name || assignment.username} · ${assignment.username}`
             : "未映射系统账号"}
@@ -117,7 +117,7 @@ export default function MaintenanceProjectCard({
         <div>
           来源负责人原文：{project.project_manager_id || "未提供"}
           <span style={{ marginInline: 8 }}>·</span>
-          数据截止：{project.as_of || "—"}
+          数据更新至：{project.as_of || "—"}
         </div>
       </div>
       {primaryTask && (
@@ -143,7 +143,7 @@ export default function MaintenanceProjectCard({
       )}
       <div>
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 7 }}>
-          全部关联合同
+          关联合同
         </div>
         <ContractPortfolio contracts={project.contracts} compact />
       </div>
@@ -180,13 +180,13 @@ export default function MaintenanceProjectCard({
           <Tag key={label} color="orange">{label}</Tag>
         ))}
         {project.reminder_count > 0
-          ? <Badge count={project.reminder_count}><Tag color="orange">系统提醒</Tag></Badge>
-          : <Tag color="green">暂无提醒</Tag>}
+          ? <Badge count={project.reminder_count}><Tag color="orange">待办</Tag></Badge>
+          : <Tag color="green">无待办</Tag>}
         {missingLabels.length === 0 && (!visibility.canViewCost
-          ? <Tag>成本不可见</Tag>
+          ? <Tag>无权限查看</Tag>
           : project.metrics.missing_cost_lines != null
             && project.metrics.missing_cost_lines > 0
-            ? <Tag color="orange">成本待补</Tag>
+            ? <Tag color="orange">部分领用缺成本</Tag>
             : project.metrics.cost_complete === null
               ? <Tag>项目总成本状态不可判定</Tag>
               : null)}

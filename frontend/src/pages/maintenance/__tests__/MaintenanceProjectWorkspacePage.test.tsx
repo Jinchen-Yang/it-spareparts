@@ -343,8 +343,8 @@ describe("MaintenanceProjectWorkspacePage", () => {
       "/maintenance/beta/project-master/source-orders?project_id=project-1",
     );
     expect(screen.getAllByText("XSDD-001").length).toBeGreaterThanOrEqual(3);
-    expect(screen.getByText("回款 / 全部合同额（含税）")).toBeInTheDocument();
-    expect(screen.getByText("项目已计成本（含税） / 全部合同额（含税）"))
+    expect(screen.getByText("已回款 ÷ 合同总额（含税）")).toBeInTheDocument();
+    expect(screen.getByText("已消耗成本 ÷ 合同总额（含税）"))
       .toBeInTheDocument();
     expect(screen.getAllByText("合同额（含税）").length).toBeGreaterThanOrEqual(1);
 
@@ -584,7 +584,7 @@ describe("MaintenanceProjectWorkspacePage", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("成本不可见/无权限")).toBeInTheDocument();
+    expect(await screen.findByText("暂无成本查看权限")).toBeInTheDocument();
     expect(screen.queryByText(/缺 null 行成本/)).toBeNull();
     expect(screen.getByText("成本明细不可见")).toBeInTheDocument();
   });
@@ -667,7 +667,7 @@ describe("MaintenanceProjectWorkspacePage", () => {
     expect(within(requisitions).getByText("已计入（估算）")).toBeInTheDocument();
     expect(screen.getByText(/销售回退估算（含税）.*¥226/)).toBeInTheDocument();
     expect(screen.getByText("现场领用成本可见；报销费用不可见")).toBeInTheDocument();
-    expect(screen.queryByText("成本不可见/无权限")).toBeNull();
+    expect(screen.queryByText("无权限查看")).toBeNull();
     expect(screen.queryByText("成本明细不可见")).toBeNull();
   });
 });

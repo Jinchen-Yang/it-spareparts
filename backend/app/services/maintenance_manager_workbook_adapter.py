@@ -34,6 +34,7 @@ from app.models.maintenance_project_operations import (
 )
 from app.models.system import SysUser
 from app.security import UserContext, is_field_hidden
+from app.services.maintenance_collection_milestones import write_collection_milestone
 from app.services.maintenance_manager_workbook_v3 import (
     SCHEMA_VERSION,
     TEMPLATE_VERSION,
@@ -887,8 +888,8 @@ class MaintenanceManagerWorkbookAdapter:
                 if current is not None:
                     raise ManagerWorkbookConflict("计划回款节点已被其他操作创建")
                 before = None
-                current = MaintenanceCollectionMilestone(
-                    milestone_id=str(uuid4()),
+                current = write_collection_milestone(
+                    self.db,
                     project_id=change.project_id,
                     project_contract_id=change.project_contract_id,
                     sequence=change.sequence,
@@ -897,9 +898,9 @@ class MaintenanceManagerWorkbookAdapter:
                     completeness_state=change.completeness_state,
                     source="manager_workbook_v3",
                     source_batch_id=batch.batch_id,
-                    version=1,
+                    date_precision="day",
+                    operator=self.operator,
                 )
-                self.db.add(current)
             else:
                 if current is None or current.version != change.expected_version:
                     raise ManagerWorkbookConflict("计划回款节点版本已变化")
@@ -909,12 +910,19 @@ class MaintenanceManagerWorkbookAdapter:
                     "completeness_state": current.completeness_state,
                     "version": current.version,
                 }
-                current.planned_date = change.planned_date
-                current.planned_amount = change.planned_amount
-                current.completeness_state = change.completeness_state
-                current.source = "manager_workbook_v3"
-                current.source_batch_id = batch.batch_id
-                current.version += 1
+                current = write_collection_milestone(
+                    self.db,
+                    project_id=change.project_id,
+                    project_contract_id=change.project_contract_id,
+                    sequence=change.sequence,
+                    planned_date=change.planned_date,
+                    planned_amount=change.planned_amount,
+                    completeness_state=change.completeness_state,
+                    source="manager_workbook_v3",
+                    source_batch_id=batch.batch_id,
+                    date_precision="day",
+                    operator=self.operator,
+                )
             after = {
                 "planned_date": change.planned_date,
                 "planned_amount": change.planned_amount,

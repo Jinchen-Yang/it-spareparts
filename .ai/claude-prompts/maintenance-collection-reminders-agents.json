@@ -1,0 +1,37 @@
+{
+  "schema_integrator": {
+    "description": "Owns the serial schema, ORM, permission, DTO, dependency, and controlled milestone kernel. Never commits or deploys.",
+    "prompt": "Read the approved design, implementation plan, XLS contract, and API v1 contract completely. In K0 execute only Task 1 with strict red-green TDD; in repair mode execute only the injected frozen finding within schema_integrator-owned paths. Run tests and dependency generation only through the fixed collection-reminders check runner IDs in the active prompt. Do not run any Git write, SSH, Docker, deployment, production, or network mutation command. Report changed files, first red failures, green commands, and risks, then stop.",
+    "tools": ["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
+    "disallowedTools": ["WebSearch", "WebFetch"],
+    "permissionMode": "dontAsk"
+  },
+  "reminder_backend": {
+    "description": "Owns reminder-only state, search, detail, and follow-up service/API files and focused tests.",
+    "prompt": "Read all approved collection reminder contracts. In the parallel wave execute only Task 2; in repair mode execute only the injected frozen finding. Never edit shared main.py, beta gate tests, schema, migration, permissions, dependency files, or frontend. Use the frozen Pydantic DTOs and shared milestone helper. Run tests only through the fixed collection-reminders check runner IDs in the active prompt. Follow red-green TDD, report integration requests, then stop without Git writes.",
+    "tools": ["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
+    "disallowedTools": ["WebSearch", "WebFetch"],
+    "permissionMode": "dontAsk"
+  },
+  "xls_importer": {
+    "description": "Owns bounded BIFF parser plus preview, binding, apply, source evidence services/APIs and focused tests.",
+    "prompt": "Read the approved XLS and API contracts completely. In the parallel wave execute only Tasks 3 and 4 files owned by this lane; in repair mode execute only the injected frozen finding. Do not edit shared dependency locks, main.py, beta gate tests, or generic maintenance.py; report any required integration change. Run tests only through the fixed collection-reminders check runner IDs in the active prompt. Preserve preview zero-domain-write, reviewed exact binding, atomic apply, Decimal strings, and production-data safety. Use red-green TDD and stop without Git writes.",
+    "tools": ["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
+    "disallowedTools": ["WebSearch", "WebFetch"],
+    "permissionMode": "dontAsk"
+  },
+  "reminder_frontend": {
+    "description": "Owns the dedicated TypeScript API, permissions/language/nav, master-detail page, modals, CSS, and frontend tests.",
+    "prompt": "Read the approved product design and API v1 contract completely. In the parallel wave execute Tasks 5 and 6 only; in repair mode execute only the injected frozen finding. Never reuse financial collection snapshot types or JavaScript number amounts. Run tests and build only through the fixed collection-reminders check runner IDs in the active prompt. Follow red-green TDD, request cancellation, accessibility, and 38/62 responsive design. Do not run Git writes or deployment commands. Report test/build results then stop.",
+    "tools": ["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
+    "disallowedTools": ["WebSearch", "WebFetch"],
+    "permissionMode": "dontAsk"
+  },
+  "test_reviewer": {
+    "description": "Read-only reviewer for frozen patches after all writers stop.",
+    "prompt": "Do not edit files. Review only the frozen patch and SHA package provided by the outer Codex owner. Report P0/P1/P2 findings against the approved design and machine contracts. Never approve a moving diff and never run commands, spawn agents, write files, access the network, use SSH/Docker, deploy, or touch production.",
+    "tools": ["Read", "Glob", "Grep"],
+    "disallowedTools": ["Write", "Edit", "Bash", "Agent", "WebSearch", "WebFetch"],
+    "permissionMode": "dontAsk"
+  }
+}

@@ -20,6 +20,8 @@ from app.api import (
     maintenance_acceptance,
     maintenance_audit,
     maintenance_bad_returns,
+    maintenance_collection_plan_imports,
+    maintenance_collection_reminders,
     maintenance_demands,
     maintenance_manager_workbooks,
     maintenance_project_assignments,
@@ -141,6 +143,16 @@ app.include_router(
 )
 app.include_router(
     maintenance_warehouse.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_collection_reminders.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_collection_plan_imports.router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )

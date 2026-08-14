@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Date,
     ForeignKey,
@@ -182,6 +183,20 @@ class MaintenanceCollectionMilestone(Base):
     updated_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now(), onupdate=func.now()
     )
+    # 回款提醒扩展（设计 §4.1）：月份精度与人工跟进状态。默认值由 Python 侧
+    # default 提供（迁移已回填存量并移除 server default），直接构造节点的
+    # 既有测试无需传新字段。
+    date_precision: Mapped[str] = mapped_column(String(8), nullable=False, default="day")
+    collection_plan_import_batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("maintenance_collection_plan_import_batch.batch_id")
+    )
+    follow_up_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    follow_up_review_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    follow_up_note: Mapped[str | None] = mapped_column(Text)
+    followed_up_by: Mapped[int | None] = mapped_column(ForeignKey("sys_user.id"))
+    followed_up_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
     __table_args__ = (
         CheckConstraint(
@@ -203,12 +218,35 @@ class MaintenanceCollectionMilestone(Base):
             name="ck_maintenance_collection_milestone_state_fields",
         ),
         CheckConstraint(
-            "source IN ('direct_api', 'manager_workbook_v3')",
+            "date_precision IN ('day', 'month')",
+            name="ck_maintenance_collection_milestone_date_precision",
+        ),
+        CheckConstraint(
+            "follow_up_status IN ('pending', 'handled')",
+            name="ck_maintenance_collection_milestone_follow_up_status",
+        ),
+        CheckConstraint(
+            "(follow_up_status = 'handled' AND followed_up_by IS NOT NULL "
+            "AND followed_up_at IS NOT NULL) OR "
+            "(follow_up_status = 'pending' AND followed_up_by IS NULL "
+            "AND followed_up_at IS NULL)",
+            name="ck_maintenance_collection_milestone_follow_up_state",
+        ),
+        CheckConstraint(
+            "follow_up_review_required = false OR follow_up_status = 'handled'",
+            name="ck_maintenance_collection_milestone_follow_up_review_required",
+        ),
+        CheckConstraint(
+            "source IN ('direct_api', 'manager_workbook_v3', 'project_manager_xls_v1')",
             name="ck_maintenance_collection_milestone_source",
         ),
         CheckConstraint(
-            "(source = 'manager_workbook_v3' AND source_batch_id IS NOT NULL) OR "
-            "(source = 'direct_api' AND source_batch_id IS NULL)",
+            "(source = 'manager_workbook_v3' AND source_batch_id IS NOT NULL "
+            "AND collection_plan_import_batch_id IS NULL) OR "
+            "(source = 'project_manager_xls_v1' AND collection_plan_import_batch_id IS NOT NULL "
+            "AND source_batch_id IS NULL) OR "
+            "(source = 'direct_api' AND source_batch_id IS NULL "
+            "AND collection_plan_import_batch_id IS NULL)",
             name="ck_maintenance_collection_milestone_batch_source",
         ),
         CheckConstraint("version >= 1", name="ck_maintenance_collection_milestone_version"),
@@ -220,6 +258,13 @@ class MaintenanceCollectionMilestone(Base):
         Index(
             "ix_maintenance_collection_milestone_project_date",
             "project_id",
+            "planned_date",
+            "sequence",
+        ),
+        Index(
+            "ix_maintenance_collection_milestone_follow_up_status",
+            "project_id",
+            "follow_up_status",
             "planned_date",
             "sequence",
         ),
@@ -538,5 +583,183 @@ class MaintenanceManagerUploadBatchProject(Base):
             "ix_maintenance_manager_batch_project_monthly_task",
             "project_id",
             "applied_at",
+        ),
+    )
+
+
+class MaintenanceCollectionPlanImportBatch(Base):
+    """XLS 回款计划导入批次：预览与应用共用的不可变证据（设计 §4.4）。
+
+    不复用会执行通用 loader 的 sys_import_batch；storage_key 全局唯一，
+    (owner_user_id, operation_key) 唯一用于并发相同预览收敛到同一批次。
+    """
+
+    __tablename__ = "maintenance_collection_plan_import_batch"
+
+    batch_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    owner_user_id: Mapped[int] = mapped_column(ForeignKey("sys_user.id"), nullable=False)
+    contract_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    file_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    operation_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    data_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    apply_payload_hash: Mapped[str | None] = mapped_column(String(64))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    plan_json: Mapped[dict | None] = mapped_column(JSONB)
+    issues_json: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    result_json: Mapped[dict | None] = mapped_column(JSONB)
+    created_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    applied_by: Mapped[str | None] = mapped_column(String(64))
+    applied_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('valid', 'error', 'applied', 'expired')",
+            name="ck_maintenance_collection_plan_import_batch_status",
+        ),
+        CheckConstraint(
+            "file_size > 0",
+            name="ck_maintenance_collection_plan_import_batch_file_size",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_maintenance_collection_plan_import_batch_version",
+        ),
+        # 应用证据（P1-5）：applied 必须四证据齐备，非 applied 一律不得携带证据。
+        # 文本与迁移 c8e2a4f6b1d3 逐字节一致（alembic check 防漂移）。
+        CheckConstraint(
+            "(status = 'applied' AND apply_payload_hash IS NOT NULL AND result_json IS NOT NULL "
+            "AND applied_by IS NOT NULL AND applied_at IS NOT NULL) OR "
+            "(status <> 'applied' AND apply_payload_hash IS NULL AND result_json IS NULL "
+            "AND applied_by IS NULL AND applied_at IS NULL)",
+            name="ck_maintenance_collection_plan_import_batch_applied_evidence",
+        ),
+        UniqueConstraint(
+            "owner_user_id",
+            "operation_key",
+            name="uq_maintenance_collection_plan_import_batch_owner_operation",
+        ),
+        UniqueConstraint(
+            "storage_key",
+            name="uq_maintenance_collection_plan_import_batch_storage_key",
+        ),
+    )
+
+
+class MaintenanceCollectionPlanSourceBinding(Base):
+    """人工确认的外部订单 → 项目/合同稳定绑定（设计 §5）。
+
+    source_system / binding_status 固定值由 CHECK 强制；订单号只做首尾
+    trim 的规范化精确值，项目名/负责人名/相似度不得自动建立关系。
+    """
+
+    __tablename__ = "maintenance_collection_plan_source_binding"
+
+    binding_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    source_system: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_order_no: Mapped[str] = mapped_column(String(128), nullable=False)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_project.project_id"), nullable=False
+    )
+    project_contract_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_project_contract.project_contract_id"), nullable=False
+    )
+    binding_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    reviewed_by: Mapped[int] = mapped_column(ForeignKey("sys_user.id"), nullable=False)
+    reviewed_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "source_system = 'project_manager_xls_v1'",
+            name="ck_maintenance_collection_plan_source_binding_source_system",
+        ),
+        CheckConstraint(
+            "binding_status = 'reviewed'",
+            name="ck_maintenance_collection_plan_source_binding_status",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_maintenance_collection_plan_source_binding_version",
+        ),
+        UniqueConstraint(
+            "source_system",
+            "external_order_no",
+            name="uq_maintenance_collection_plan_source_binding_pair",
+        ),
+    )
+
+
+class MaintenanceCollectionMilestoneOperation(Base):
+    """回款提醒操作账本：不可变、幂等（设计 §4.2）。
+
+    数据库 trigger 拒绝 UPDATE/DELETE；本模型刻意不声明任何 onupdate 或
+    级联行为，避免与 append-only 语义冲突。before/after/result 只保存
+    受控字段，不保存整行 Excel 或客户/负责人原值。
+    """
+
+    __tablename__ = "maintenance_collection_milestone_operation"
+
+    operation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    milestone_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_collection_milestone.milestone_id"), nullable=False
+    )
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    expected_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    result_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    before_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    after_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    result_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    actor_user_id: Mapped[int] = mapped_column(ForeignKey("sys_user.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('handle', 'reschedule', 'reopen')",
+            name="ck_maintenance_collection_milestone_operation_action",
+        ),
+        CheckConstraint(
+            "expected_version >= 1 AND result_version >= 1",
+            name="ck_maintenance_collection_milestone_operation_versions",
+        ),
+        CheckConstraint(
+            "(action IN ('reschedule', 'reopen') AND reason IS NOT NULL "
+            "AND char_length(btrim(reason)) > 0) OR (action = 'handle')",
+            name="ck_maintenance_collection_milestone_operation_reason",
+        ),
+        CheckConstraint(
+            "payload_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_maintenance_collection_milestone_operation_payload_hash",
+        ),
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_maintenance_collection_milestone_operation_idempotency",
+        ),
+        # 按节点+时间索引（P1-5）：回放操作历史与幂等重放查询。
+        Index(
+            "ix_maintenance_collection_milestone_operation_milestone_created",
+            "milestone_id",
+            "created_at",
         ),
     )

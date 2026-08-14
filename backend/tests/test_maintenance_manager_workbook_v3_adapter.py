@@ -116,6 +116,15 @@ def _ctx(user: SysUser) -> UserContext:
 
 
 def _set_plan(content: bytes, relation_id: str) -> bytes:
+    return _set_plan_values(content, relation_id, date(2026, 9, 15), 25000)
+
+
+def _set_plan_values(
+    content: bytes,
+    relation_id: str,
+    planned_date: date,
+    planned_amount: int,
+) -> bytes:
     book = load_workbook(io.BytesIO(content), data_only=False)
     try:
         sheet = book[PLAN_SHEET]
@@ -128,8 +137,8 @@ def _set_plan(content: bytes, relation_id: str) -> bytes:
             if sheet.cell(row, headers.index("项目合同关系ID") + 1).value == relation_id
             and sheet.cell(row, headers.index("计划期次") + 1).value == 1
         )
-        sheet.cell(target, headers.index("计划回款日期") + 1, date(2026, 9, 15))
-        sheet.cell(target, headers.index("计划回款金额（含税）") + 1, 25000)
+        sheet.cell(target, headers.index("计划回款日期") + 1, planned_date)
+        sheet.cell(target, headers.index("计划回款金额（含税）") + 1, planned_amount)
         output = io.BytesIO()
         book.save(output)
         return output.getvalue()
@@ -266,6 +275,87 @@ def test_apply_creates_configured_acceptance_due_date_and_preview(db):
     assert deliverable.due_date == date(2026, 10, 31)
     assert deliverable.configuration_state == "configured"
     assert deliverable.version == 1
+
+
+def test_adapter_writes_day_precision_and_pending_state_for_new_nodes(db):
+    """manager workbook 写路径统一写 date_precision=day，新节点 pending/false（设计 §4.1）。"""
+    user, _project_id, relation_id = _seed(db, username="day_precision_manager")
+    adapter = _adapter(db, user)
+    artifact, _snapshot = adapter.export(date(2026, 8, 1), hmac_key=HMAC_KEY)
+    _validation, batch = adapter.validate(
+        date(2026, 8, 1),
+        _set_plan(artifact.content, relation_id),
+        hmac_key=HMAC_KEY,
+    )
+    db.commit()
+    adapter.apply(batch.batch_id)
+    db.commit()
+    milestone = db.scalar(
+        select(MaintenanceCollectionMilestone).where(
+            MaintenanceCollectionMilestone.project_contract_id == relation_id,
+            MaintenanceCollectionMilestone.sequence == 1,
+        )
+    )
+    assert milestone.date_precision == "day"
+    assert milestone.follow_up_status == "pending"
+    assert milestone.follow_up_review_required is False
+    assert milestone.followed_up_by is None
+    assert milestone.followed_up_at is None
+
+
+def test_adapter_keeps_handled_state_and_marks_review_when_planned_facts_change(db):
+    """已处理节点被新批次改日期/金额：保留 handled 与处理人/时间，置 review_required=true。"""
+    user, _project_id, relation_id = _seed(db, username="handled_plan_manager")
+    adapter = _adapter(db, user)
+    artifact, _snapshot = adapter.export(date(2026, 8, 1), hmac_key=HMAC_KEY)
+    _validation, batch = adapter.validate(
+        date(2026, 8, 1),
+        _set_plan(artifact.content, relation_id),
+        hmac_key=HMAC_KEY,
+    )
+    db.commit()
+    adapter.apply(batch.batch_id)
+    db.commit()
+    milestone = db.scalar(
+        select(MaintenanceCollectionMilestone).where(
+            MaintenanceCollectionMilestone.project_contract_id == relation_id,
+            MaintenanceCollectionMilestone.sequence == 1,
+        )
+    )
+    assert milestone.version == 1
+    followed_up_at = datetime(2026, 8, 10, 9, 30, tzinfo=UTC)
+    milestone.follow_up_status = "handled"
+    milestone.followed_up_by = user.id
+    milestone.followed_up_at = followed_up_at
+    milestone.follow_up_note = "合成已跟进备注"
+    db.commit()
+
+    artifact, _snapshot = adapter.export(date(2026, 8, 1), hmac_key=HMAC_KEY)
+    changed = _set_plan_values(artifact.content, relation_id, date(2026, 10, 15), 30000)
+    _validation, second_batch = adapter.validate(
+        date(2026, 8, 1),
+        changed,
+        hmac_key=HMAC_KEY,
+    )
+    db.commit()
+    adapter.apply(second_batch.batch_id)
+    db.commit()
+
+    db.expire_all()
+    milestone = db.scalar(
+        select(MaintenanceCollectionMilestone).where(
+            MaintenanceCollectionMilestone.project_contract_id == relation_id,
+            MaintenanceCollectionMilestone.sequence == 1,
+        )
+    )
+    assert milestone.follow_up_status == "handled"
+    assert milestone.followed_up_by == user.id
+    assert milestone.followed_up_at == followed_up_at
+    assert milestone.follow_up_note == "合成已跟进备注"
+    assert milestone.follow_up_review_required is True
+    assert milestone.planned_date == date(2026, 10, 15)
+    assert milestone.planned_amount == 30000
+    assert milestone.version == 2
 
 
 def test_scope_change_after_validation_fails_before_any_write(db):

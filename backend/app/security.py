@@ -10,6 +10,7 @@ from typing import Any
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import config
@@ -105,13 +106,20 @@ def require_action(action_key: str, *, require_data: str | None = None):
     （data_pool_price_governance），否则用户会在看不见现值的情况下改写/清空它。
     账号管理保存时也拒绝该非法组合（permissions.combo_errors），这里是后端兜底防线。"""
     def _dep(ctx: UserContext = Depends(get_current_user_context)) -> None:
+        from app import permissions as _perm
+        if action_key in _perm.ACCOUNT_SCOPED_ACTION_KEYS:
+            # 回款提醒写动作是实名白名单能力：本依赖的 admin 短路不适用，
+            # 必须由 require_explicit_account_action 读取账号快照⊕覆盖后显式放行。
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "该操作必须使用显式账号权限门",
+            )
         if not config.ENABLE_RBAC or ctx.role == "admin":
             return
         if not ctx.is_authenticated:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "请先登录")
         perms = ctx.permissions
         if perms is None:
-            from app import permissions as _perm
             perms = _perm.effective(ctx.role, None)
         if not perms.get(action_key, False):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "无此操作权限")
@@ -120,6 +128,58 @@ def require_action(action_key: str, *, require_data: str | None = None):
                 status.HTTP_403_FORBIDDEN,
                 "该操作需要同时具备对应数据的查看权限（看不见的数据不能修改），"
                 "请联系管理员调整账号权限")
+    return _dep
+
+
+def explicit_account_action_allowed(user, action_key: str) -> bool:
+    """显式账号 action 门禁（纯函数）：只认实名账号快照⊕覆盖。
+
+    回款提醒两个写动作（ACCOUNT_SCOPED_ACTION_KEYS）是实名白名单能力：
+    与 require_action 的 admin 短路不同，本函数直接读取账号的
+    ``template_perms ⊕ perm_overrides``（无快照的旧账号回退 legacy
+    ``permissions`` 图），admin 没有显式授权仍返回 False——迁移已把
+    存量模板与账号中的这两个键强制回填 false，因此默认失败关闭。
+    非白名单键一律拒绝（P1-1：防止用普通页面/动作键绕过实名门）。
+    """
+    from app import permissions as _perm
+    if action_key not in _perm.ACCOUNT_SCOPED_ACTION_KEYS:
+        raise ValueError(f"{action_key} 不是实名白名单动作键，必须使用显式账号权限门")
+    if getattr(user, "template_perms", None) is not None:
+        graph = _perm.effective_from_snapshot(user.template_perms, user.perm_overrides)
+    else:
+        graph = _perm.sanitize(getattr(user, "permissions", None))
+    return bool(graph.get(action_key, False))
+
+
+def require_explicit_account_action(action_key: str):
+    """回款提醒写门依赖：admin 不得短路，必须实名账号快照⊕覆盖显式持有该 action。
+
+    写操作执行前重新读取数据库中的账号（避免旧 token/撤权后的 TOCTOU），
+    账号不存在或停用、或未显式授权一律 403；未登录返回 401。
+    构造期校验 key 属于 ACCOUNT_SCOPED_ACTION_KEYS（P1-1：非白名单键拒绝），
+    且总闸 RBAC 关闭也不能短路本门（实名白名单能力始终失败关闭）。
+    """
+    from app import permissions as _perm
+    if action_key not in _perm.ACCOUNT_SCOPED_ACTION_KEYS:
+        raise ValueError(f"{action_key} 不是实名白名单动作键，必须使用显式账号权限门")
+
+    def _dep(
+        ctx: UserContext = Depends(get_current_user_context),
+        db: Session = Depends(get_db),
+    ) -> None:
+        if not ctx.is_authenticated or not ctx.user_id:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "请先登录")
+        from app.models.system import SysUser
+        user = db.scalar(
+            select(SysUser).where(
+                SysUser.username == ctx.user_id,
+                SysUser.is_active.is_(True),
+            )
+        )
+        if user is None:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "账号不存在或已停用")
+        if not explicit_account_action_allowed(user, action_key):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "无此操作权限")
     return _dep
 
 

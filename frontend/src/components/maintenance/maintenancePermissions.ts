@@ -15,6 +15,8 @@ interface LocalMaintenancePermissions {
   action_maintenance_acceptance_review?: boolean;
   action_maintenance_warehouse_manage?: boolean;
   action_maintenance_migration_review?: boolean;
+  action_maintenance_collection_follow_up?: boolean;
+  action_maintenance_collection_plan_import?: boolean;
 }
 
 export interface MaintenanceCapabilities {
@@ -36,6 +38,9 @@ export interface MaintenanceCapabilities {
   canReviewAcceptance: boolean;
   canManageWarehouse: boolean;
   canReviewMigration: boolean;
+  canViewCollectionReminders: boolean;
+  canFollowUpCollection: boolean;
+  canImportCollectionPlan: boolean;
 }
 
 function readLocalPermissions(): LocalMaintenancePermissions {
@@ -122,6 +127,12 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
     permissions.page_maintenance === true
     && permissions.page_maintenance_beta === true
   );
+  // Collection reminders are a separately allowlisted Beta workflow.  Keep
+  // that explicit account gate separate from stable maintenance permissions,
+  // whose admin bypass is part of the existing server/UI contract.
+  const canUseCollectionReminders = permissions.page_maintenance_beta === true && (
+    isAdmin || permissions.page_maintenance === true
+  );
   const canDownloadRoundtrip = isAdmin || (
     !scopedSales
     && permissions.page_maintenance === true
@@ -175,6 +186,17 @@ export function readMaintenanceCapabilities(): MaintenanceCapabilities {
       && permissions.data_profit === true
       && permissions.action_maintenance_migration_review === true
     ),
+    canViewCollectionReminders: canUseCollectionReminders,
+    // 回款提醒写操作是显式账号权限：admin 没有显式 action 仍然 403，
+    // 不沿用 require_action() 的 admin 短路。
+    canFollowUpCollection: canUseCollectionReminders
+      && permissions.action_maintenance_collection_follow_up === true,
+    // 导入回款计划：Beta + 实名 realm 角色 admin + 显式 import action +
+    // 合同金额可见（data_profit），禁止 isAdmin || action 的普通短路。
+    canImportCollectionPlan: canUseCollectionReminders
+      && role === "admin"
+      && permissions.action_maintenance_collection_plan_import === true
+      && canViewContract,
   };
 }
 
