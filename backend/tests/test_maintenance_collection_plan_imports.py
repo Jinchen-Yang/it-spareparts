@@ -819,6 +819,111 @@ def test_apply_unbound_order_without_binding_422(db, monkeypatch):
     assert _count(db, MaintenanceCollectionMilestone) == 0
 
 
+def test_apply_reviewed_binding_with_empty_client_bindings_creates_milestone(db, monkeypatch):
+    """已有 reviewed binding 且客户端 bindings=[] 也可 apply 创建 milestone（设计 §6.4/§8.4）。
+
+    reviewed 行沿用冻结 plan_json 里的项目/合同/版本前提，不要求浏览器重复提交。
+    """
+    _settings(monkeypatch)
+    user = _plan_admin(db)
+    project_id, pc_id = _project(db, suffix="reviewed-empty")
+    _binding(db, order_no="ORD-RE-1", project_id=project_id, pc_id=pc_id, user=user, binding_id="bind-re-1")
+    content = _workbook(_row("ORD-RE-1", "项目 R", months=["2026年9月"], amounts=[100.0]))
+    preview = _preview_service(db, user, content)
+    db.commit()
+    assert preview["counts"]["bound"] == 1
+    assert preview["counts"]["pending_binding"] == 0
+    assert preview["rows"][0]["binding"]["status"] == "reviewed"
+    assert preview["rows"][0]["binding"]["existing_binding_version"] == 1
+
+    result = _apply_service(db, user, batch_id=preview["batch_id"], preview=preview, bindings=[])
+    db.commit()
+    assert result["status"] == "applied"
+    assert result["idempotent_replay"] is False
+    assert result["counts"]["created"] == 1
+
+    db.expire_all()
+    binding = db.scalar(select(MaintenanceCollectionPlanSourceBinding))
+    assert binding.external_order_no == "ORD-RE-1"
+    assert binding.project_id == project_id
+    assert binding.project_contract_id == pc_id
+    assert binding.version == 1  # 沿用既有 reviewed 绑定：不重建、不 bump、不写改派审计
+    assert _count(db, MaintenanceProjectOperationAudit) == 0
+    milestone = db.scalar(select(MaintenanceCollectionMilestone))
+    assert milestone is not None
+    assert milestone.project_contract_id == pc_id
+    assert milestone.planned_date == date(2026, 9, 1)
+    assert milestone.planned_amount == Decimal("100.0")
+    assert milestone.collection_plan_import_batch_id == preview["batch_id"]
+    batch = db.get(MaintenanceCollectionPlanImportBatch, preview["batch_id"])
+    assert batch.status == "applied"
+    assert batch.version == 2
+
+
+def test_apply_mixed_reviewed_and_pending_submits_only_pending_row(db, monkeypatch):
+    """混合 reviewed + pending 时只提交 pending 行选择也可 apply。
+
+    reviewed 行缺省沿用冻结 plan_json 绑定，pending 行必须人工选择后才可应用。
+    """
+    _settings(monkeypatch)
+    user = _plan_admin(db)
+    project_a, pc_a = _project(db, suffix="mixed-a")
+    project_b, pc_b = _project(db, suffix="mixed-b")
+    _binding(db, order_no="ORD-MX-1", project_id=project_a, pc_id=pc_a, user=user, binding_id="bind-mx-1")
+    content = _workbook(
+        _row("ORD-MX-1", "项目 A", months=["2026年9月"], amounts=[100.0]),
+        _row("ORD-MX-2", "项目 B", months=["2026年10月"], amounts=[200.0]),
+    )
+    preview = _preview_service(db, user, content)
+    db.commit()
+    assert preview["counts"]["bound"] == 1
+    assert preview["counts"]["pending_binding"] == 1
+    reviewed = next(row for row in preview["rows"] if row["binding"]["status"] == "reviewed")
+    pending = next(row for row in preview["rows"] if row["binding"]["status"] == "pending_review")
+    assert reviewed["external_order_no"] == "ORD-MX-1"
+    assert pending["external_order_no"] == "ORD-MX-2"
+
+    bindings = [
+        {
+            "row_key": pending["row_key"],
+            "external_order_no": pending["external_order_no"],
+            "project_id": project_b,
+            "project_version": 1,
+            "project_contract_id": pc_b,
+            "project_contract_version": 1,
+            "existing_binding_version": None,
+            "reason": None,
+        }
+    ]
+    result = _apply_service(db, user, batch_id=preview["batch_id"], preview=preview, bindings=bindings)
+    db.commit()
+    assert result["status"] == "applied"
+    assert result["counts"]["created"] == 2
+    assert result["counts"]["updated"] == 0
+    assert result["counts"]["needs_review"] == 0
+
+    db.expire_all()
+    rows = db.scalars(
+        select(MaintenanceCollectionPlanSourceBinding).order_by(
+            MaintenanceCollectionPlanSourceBinding.external_order_no
+        )
+    ).all()
+    assert len(rows) == 2
+    by_order = {row.external_order_no: row for row in rows}
+    assert by_order["ORD-MX-1"].project_contract_id == pc_a
+    assert by_order["ORD-MX-1"].version == 1
+    assert by_order["ORD-MX-2"].project_contract_id == pc_b
+    assert by_order["ORD-MX-2"].version == 1
+    milestones = db.scalars(
+        select(MaintenanceCollectionMilestone).order_by(MaintenanceCollectionMilestone.sequence)
+    ).all()
+    assert len(milestones) == 2
+    assert {m.project_contract_id for m in milestones} == {pc_a, pc_b}
+    assert {m.planned_amount for m in milestones} == {Decimal("100.0"), Decimal("200.0")}
+    # reviewed 行沿用冻结绑定 → 不产生改派审计。
+    assert _count(db, MaintenanceProjectOperationAudit) == 0
+
+
 def test_apply_handled_milestone_update_keeps_handled_and_sets_review_required(db, monkeypatch):
     _settings(monkeypatch)
     user = _plan_admin(db)

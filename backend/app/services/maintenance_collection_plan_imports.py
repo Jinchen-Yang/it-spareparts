@@ -14,7 +14,9 @@ DTO 依据冻结的 ``collection-reminders-api-v1.yaml``（K0 已实现）。
   清理自己未被任何 DB 行引用的文件，绝不删除已有 uploads。
 - binding options 只向批次所有者或同权限管理员返回最小字段；q trim 后 ≥2 字符、
   page_size ≤50、绝不返回全量项目；不按项目名自动匹配。
-- apply 只读批次冻结 ``plan_json``（绝不重新解析上传文件）；稳定锁顺序
+- apply 只读批次冻结 ``plan_json``（绝不重新解析上传文件）；客户端
+  ``bindings[]`` 可只提交待审核行，reviewed 行缺省沿用冻结 plan_json 的项目/
+  合同/版本前提（显式改派仍要求非空理由）；稳定锁顺序
   batch → projects → contracts → bindings → milestones；任一 expected version
   漂移整批 409 且零领域写入；同 payload 重放首次 ``result_json``，不同 409；
   两个并发 apply 最多一个产生领域写入；``(project_contract_id, sequence)``
@@ -181,17 +183,44 @@ def _operation_key(owner_user_id: int, idempotency_key: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+@dataclass(frozen=True)
+class _EffectiveApplyBinding:
+    """apply 主循环最终绑定：客户端 bindings[] 项或冻结 plan_json 的 reviewed 沿用项。
+
+    沿用项由服务端从批次冻结绑定构造（项目/合同/版本前提不变），reason 恒为
+    None；显式改派只可能来自客户端提交项（改派必须携带非空 reason）。
+    """
+
+    row_key: str
+    external_order_no: str
+    project_id: str
+    project_version: int | None
+    project_contract_id: str
+    project_contract_version: int | None
+    existing_binding_version: int | None
+    reason: str | None
+
+
 def _apply_payload_hash(
     expected_batch_version: int,
     expected_data_version: str,
-    bindings: list[ApplyBinding],
+    bindings: list[_EffectiveApplyBinding],
 ) -> str:
-    """apply payload hash：expected_batch_version + expected_data_version + sorted(bindings)。"""
+    """apply payload hash：expected_batch_version + expected_data_version + sorted(effective bindings)。"""
     payload = {
         "expected_batch_version": expected_batch_version,
         "expected_data_version": expected_data_version,
         "bindings": [
-            binding.model_dump(mode="json")
+            {
+                "row_key": binding.row_key,
+                "external_order_no": binding.external_order_no,
+                "project_id": binding.project_id,
+                "project_version": binding.project_version,
+                "project_contract_id": binding.project_contract_id,
+                "project_contract_version": binding.project_contract_version,
+                "existing_binding_version": binding.existing_binding_version,
+                "reason": binding.reason,
+            }
             for binding in sorted(bindings, key=lambda item: item.row_key)
         ],
     }
@@ -811,8 +840,63 @@ def apply_collection_plan_import(
             current_data_version=batch.data_version,
         )
 
+    plan = batch.plan_json or {"orders": []}
+    plan_orders = {order["row_key"]: order for order in plan["orders"]}
+    if any(order.get("blocker_codes") for order in plan["orders"]):
+        raise CollectionPlanImportInvalid("计划存在阻断项，不能应用")
+
+    # bindings[] 允许只提交待审核行；reviewed 行缺省沿用冻结 plan_json 绑定
+    # （设计 §6.4/§8.4：每个待绑定订单都有本次人工选择，reviewed 前提不要求
+    # 浏览器重复提交）。禁止把 pending 行按项目名自动匹配。
+    client_bindings: dict[str, ApplyBinding] = {}
+    for binding in bindings:
+        if binding.row_key in client_bindings:
+            raise CollectionPlanImportInvalid("存在重复的绑定行")
+        order = plan_orders.get(binding.row_key)
+        if order is None:
+            raise CollectionPlanImportInvalid("存在未在计划中的绑定行")
+        if order["external_order_no"] != binding.external_order_no:
+            raise CollectionPlanImportInvalid("绑定订单编号与计划不一致")
+        client_bindings[binding.row_key] = binding
+
+    bindable_orders = [
+        order for order in plan["orders"] if not order.get("blocker_codes")
+    ]
+    effective_bindings: list[_EffectiveApplyBinding] = []
+    for order in bindable_orders:
+        client = client_bindings.get(order["row_key"])
+        if client is not None:
+            effective_bindings.append(
+                _EffectiveApplyBinding(
+                    row_key=client.row_key,
+                    external_order_no=client.external_order_no,
+                    project_id=client.project_id,
+                    project_version=client.project_version,
+                    project_contract_id=client.project_contract_id,
+                    project_contract_version=client.project_contract_version,
+                    existing_binding_version=client.existing_binding_version,
+                    reason=client.reason,
+                )
+            )
+            continue
+        plan_binding = order.get("binding") or {}
+        if plan_binding.get("status") != "reviewed":
+            raise CollectionPlanImportInvalid("待绑定订单必须完成审核")
+        effective_bindings.append(
+            _EffectiveApplyBinding(
+                row_key=order["row_key"],
+                external_order_no=order["external_order_no"],
+                project_id=plan_binding["project_id"],
+                project_version=plan_binding.get("project_version"),
+                project_contract_id=plan_binding["project_contract_id"],
+                project_contract_version=plan_binding.get("project_contract_version"),
+                existing_binding_version=plan_binding.get("existing_binding_version"),
+                reason=None,
+            )
+        )
+
     payload_hash = _apply_payload_hash(
-        expected_batch_version, expected_data_version, bindings
+        expected_batch_version, expected_data_version, effective_bindings
     )
     if batch.status == "applied":
         if batch.apply_payload_hash == payload_hash:
@@ -837,32 +921,16 @@ def apply_collection_plan_import(
             current_data_version=batch.data_version,
         )
 
-    plan = batch.plan_json or {"orders": []}
     if settings.maintenance_collection_canary_project_id:
-        for binding in bindings:
+        for binding in effective_bindings:
             if binding.project_id != settings.maintenance_collection_canary_project_id:
                 raise CollectionPlanImportCanaryDenied(
                     "灰度期间仅允许 canary 项目应用回款计划"
                 )
 
-    plan_orders = {order["row_key"]: order for order in plan["orders"]}
-    bindable_orders = [
-        order for order in plan["orders"] if not order.get("blocker_codes")
-    ]
-    if any(order.get("blocker_codes") for order in plan["orders"]):
-        raise CollectionPlanImportInvalid("计划存在阻断项，不能应用")
-    if len(bindings) != len(bindable_orders):
-        raise CollectionPlanImportInvalid("绑定数量与待绑定订单不一致")
-    for binding in bindings:
-        order = plan_orders.get(binding.row_key)
-        if order is None:
-            raise CollectionPlanImportInvalid("存在未在计划中的绑定行")
-        if order["external_order_no"] != binding.external_order_no:
-            raise CollectionPlanImportInvalid("绑定订单编号与计划不一致")
-
     # 稳定锁顺序：batch（已锁）→ projects → contracts → bindings → milestones。
-    project_ids = {binding.project_id for binding in bindings}
-    contract_ids = {binding.project_contract_id for binding in bindings}
+    project_ids = {binding.project_id for binding in effective_bindings}
+    contract_ids = {binding.project_contract_id for binding in effective_bindings}
     projects = {
         project.project_id: project
         for project in db.scalars(
@@ -886,7 +954,7 @@ def apply_collection_plan_import(
             .where(
                 MaintenanceCollectionPlanSourceBinding.source_system == _SOURCE_SYSTEM,
                 MaintenanceCollectionPlanSourceBinding.external_order_no.in_(
-                    {binding.external_order_no for binding in bindings}
+                    {binding.external_order_no for binding in effective_bindings}
                 ),
             )
             .with_for_update()
@@ -911,7 +979,7 @@ def apply_collection_plan_import(
         "needs_review": 0,
     }
     now = datetime.now(UTC)
-    for binding in bindings:
+    for binding in effective_bindings:
         order = plan_orders[binding.row_key]
         project = projects.get(binding.project_id)
         if project is None or not project.is_active:
