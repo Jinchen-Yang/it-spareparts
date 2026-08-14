@@ -110,6 +110,6 @@ S09 三个上游引用的 presence bit 顺序为 `F0000179/F0000178/F0000147`：
 - `approved source contract`：0。
 - `authoritative business source`：0。
 - 生产写入：0。
-- `G1a-PARSER-SANDBOX`：本地冻结文件、真实性能和独立代码复审通过；尚无 commit/CI/contract bundle Git provenance。
+- `G1a-PARSER-SANDBOX`：本地冻结文件、真实性能和独立代码复审通过；`.ai` candidate contract bundle 已由 Git commit `27dc6b842c67f190284af88398fef0941f834f1d` 跟踪，但 parser 代码仍无 commit/CI provenance。
 
 **总体：完整五来源 authoritative 数据链仍不可合并；独立 G1a-P 代码切片已达到“可进入 commit/CI，仍不可生产”。**

@@ -40,6 +40,7 @@
 - 授权范围已收紧为 `config + adapter + parser tests`；零 service/API/bridge/schema/production apply。生产 approved contracts/metadata 保持空。
 - 当前仍无 Git commit；本地冻结 adapter SHA-256=`146df4dd95d7741fa072a44c453810b5d86048428fc080ce8a21c3302dad3665`，240 项 focused tests 全绿，真实 S07/S09 资源门通过，独立审查 `P0=0/P1=0`。它只具备进入独立提交和 CI 的条件，不开放 apply。
 - `APPROVED_*` 和生产 candidate 配置仍为空；outward 保持 `unknown_version`、`can_apply=false`、业务写入 0。
+- `.ai` 候选合同 bundle 已由 Git commit `27dc6b842c67f190284af88398fef0941f834f1d` 首次跟踪；该 SHA 冻结文档/合同证据，不包含 G1a parser 代码提交，也不等于 source owner 或 production apply 批准。
 
 ## 独立审查结论
 
@@ -100,7 +101,7 @@
 
 ## 下一动作
 
-1. 将 V2 plan、ledger 与 contracts 作为候选 `.ai` 资产纳入独立可审查 Git 提交，登记 bundle 证据；这不开放 apply。
+1. 独立复审 `.ai` candidate bundle commit `27dc6b842c67f190284af88398fef0941f834f1d`；这不开放 apply。
 2. 将冻结 G1a-P 代码作为独立候选提交，复跑 focused/full CI 和双 Reviewer；生产配置继续为空。
 3. 补齐 S02/S03 coverage、S04 稳定仓库、S05→S07 关系、S07/S09 source owner/revision/检测枚举，复审完整 G0。
 4. 完整 G0 后执行 G1a-R relation/delivery；通过后才串行 G2/G1b，再从 reviewed `KERNEL_SHA` 同时启动 Lane A/B/C。

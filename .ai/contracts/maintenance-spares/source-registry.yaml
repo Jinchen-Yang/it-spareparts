@@ -2,7 +2,8 @@ contract_version: maintenance-spares-g0-v1
 source_evidence_cutoff_at: "2026-08-14T13:00:02+08:00"
 registry_updated_at: "2026-08-14T13:57:35+08:00"
 parser_baseline_git_sha: c431656bd2615102f053199801554191b2d88791
-contract_bundle_git_sha: pending_untracked_review
+contract_bundle_git_sha: 27dc6b842c67f190284af88398fef0941f834f1d
+contract_bundle_git_scope: first_tracked_candidate_bundle_pointer_update_excluded
 production_alembic_head: d9f1a3c7e5b2
 gate_state: failed_closed
 g1a_parser_sandbox_acceptance:
@@ -19,7 +20,8 @@ g1a_parser_sandbox_acceptance:
   independent_review_p0: 0
   independent_review_p1: 0
   counts_as_parser_sandbox_acceptance: true
-  counts_as_contract_bundle_freeze: false
+  counts_as_contract_bundle_freeze: true
+  counts_as_parser_code_git_provenance: false
   counts_as_source_contract_approval: false
   counts_as_production_apply_approval: false
 privacy:
