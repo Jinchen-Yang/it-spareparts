@@ -106,7 +106,8 @@ def parse_ckd_workbook(data: bytes, filename: str) -> dict:
     if len(data) > MAX_PREVIEW_BYTES:
         raise CkdParseError("发货单文件超过大小上限")
     try:
-        workbook = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+        # 氚云导出的 sheet dimension 不可靠，read_only 模式会截断行——用普通模式。
+        workbook = load_workbook(io.BytesIO(data), data_only=True, read_only=False)
     except Exception as exc:  # noqa: BLE001
         raise CkdParseError(f"无法读取 Excel 文件：{type(exc).__name__}") from exc
     try:

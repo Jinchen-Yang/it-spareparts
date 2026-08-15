@@ -87,6 +87,11 @@ from app.models.maintenance_ckd_import import (
     MaintenanceCkdImportBatch,
     MaintenanceCkdLineRow,
 )
+from app.models.maintenance_doc_import import (
+    MaintenanceDocHeadRow,
+    MaintenanceDocImportBatch,
+    MaintenanceDocLineRow,
+)
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -195,6 +200,9 @@ __all__ = [
     "MaintenanceCkdImportBatch",
     "MaintenanceCkdHeadRow",
     "MaintenanceCkdLineRow",
+    "MaintenanceDocImportBatch",
+    "MaintenanceDocHeadRow",
+    "MaintenanceDocLineRow",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",
