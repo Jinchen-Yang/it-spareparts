@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import datetime as dt
 import importlib.util
 import hashlib
 import io
@@ -49,6 +50,7 @@ DYNAMIC_CANARY_MILESTONE_ID = "{canary_milestone_id}"
 CROSS_PROJECT_ID = "123e4567-e89b-12d3-a456-426614174099"
 CROSS_PROJECT_CONTRACT_ID = "contract-other"
 REAL_SAMPLE_SHA256 = "a783af09fa108d366a26e10fe188be52d20a9ce1fe02121bfd683d96356c8c18"
+HISTORICAL_GAP_FORMAT = "v122-historical-upload-gap-approval-v1"
 
 
 def _follow_up_case(
@@ -654,6 +656,103 @@ def _json_artifact(path: Path, payload: dict) -> Path:
     return _write(path, json.dumps(payload, sort_keys=True) + "\n")
 
 
+def _historical_gap_ref(raw_file_id: int, file_hash: str) -> dict:
+    return {
+        "raw_file_id": raw_file_id,
+        "file_hash": file_hash,
+        "storage_path": f"/app/data/raw/{file_hash}.xlsx",
+    }
+
+
+def _raw_reference_row(ref: dict) -> str:
+    return "\t".join(
+        ["raw", str(ref["raw_file_id"]), ref["file_hash"], ref["storage_path"], ""]
+    )
+
+
+def _collection_reference_row(batch_id: str, content: bytes, storage_key: str) -> str:
+    return "\t".join(
+        [
+            "collection",
+            batch_id,
+            hashlib.sha256(content).hexdigest(),
+            storage_key,
+            str(len(content)),
+        ]
+    )
+
+
+def _historical_gap_approval(
+    path: Path,
+    refs: list[dict],
+    *,
+    parent_sha: str = PARENT_SHA,
+    expires_delta: dt.timedelta = dt.timedelta(days=1),
+) -> Path:
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    return _json_artifact(
+        path,
+        {
+            "format": HISTORICAL_GAP_FORMAT,
+            "release_family": "v122-collection-reminders",
+            "parent_production_sha": parent_sha,
+            "raw_only": True,
+            "reason": "legacy_archive_loss",
+            "recorded_by": "release-recorder@example.invalid",
+            "approved_by": "release-approver@example.invalid",
+            "recorded_at": (now - dt.timedelta(hours=2)).isoformat(),
+            "approved_at": (now - dt.timedelta(hours=1)).isoformat(),
+            "expires_at": (now + expires_delta).isoformat(),
+            "recovery_search_evidence_sha256": hashlib.sha256(
+                b"exhaustive-volume-backup-local-continuity-search"
+            ).hexdigest(),
+            "approved_missing_refs": refs,
+        },
+    )
+
+
+def _run_upload_reference_audit(
+    tmp_path: Path,
+    *,
+    rows: list[str],
+    approval: Path | None = None,
+    files: dict[str, bytes] | None = None,
+    symlinks: dict[str, Path] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    uploads_root = tmp_path / "uploads"
+    uploads_root.mkdir(parents=True)
+    for name, content in (files or {}).items():
+        _write(uploads_root / name, content)
+    for name, target in (symlinks or {}).items():
+        link = uploads_root / name
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
+    references = _write(tmp_path / "db-references.tsv", "\n".join(rows) + "\n")
+    output = tmp_path / "db-uploads-consistency.json"
+    command = [
+        "python3",
+        str(MANIFEST),
+        "audit-upload-references",
+        "--uploads-root",
+        str(uploads_root),
+        "--references",
+        str(references),
+        "--parent-production-sha",
+        PARENT_SHA,
+        "--output",
+        str(output),
+    ]
+    if approval is not None:
+        command.extend(["--historical-upload-gap-approval", str(approval)])
+    completed = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    return completed, uploads_root, output
+
+
 def _package_inputs(
     tmp_path: Path,
     *,
@@ -883,8 +982,14 @@ def _rehearsal(
     package: Path,
     target_sha: str = TARGET_SHA,
     stage: str,
+    historical_gap_approval_sha256: str | None = None,
+    approved_missing_count: int = 0,
+    historical_gap_set_sha256: str | None = None,
+    recovery_search_evidence_sha256: str | None = None,
 ) -> Path:
     payload = json.loads((package / "manifest.json").read_text())
+    has_approved_gaps = historical_gap_approval_sha256 is not None
+    gap_set_sha = historical_gap_set_sha256 or hashlib.sha256(b"[]\n").hexdigest()
     return _json_artifact(
         path,
         {
@@ -918,7 +1023,18 @@ def _rehearsal(
             "db_restore": True,
             "globals_restore": True,
             "uploads_restore_verified": True,
-            "db_uploads_references_complete": True,
+            "db_uploads_reference_state": (
+                "complete_with_approved_historical_gaps" if has_approved_gaps else "complete"
+            ),
+            "db_uploads_references_complete": not has_approved_gaps,
+            "approved_missing_count": approved_missing_count,
+            "unexpected_missing_count": 0,
+            "historical_upload_gap_set_sha256": gap_set_sha,
+            "historical_upload_gap_approval_sha256": historical_gap_approval_sha256,
+            "recovery_search_evidence_sha256": (
+                recovery_search_evidence_sha256
+                or (_fake_sha("recovery-search-evidence") if has_approved_gaps else None)
+            ),
             "preview_zero_domain_write": True,
             "synthetic_apply_verified": True,
         },
@@ -1011,6 +1127,235 @@ def test_finalize_requires_promoted_contract_and_two_bound_rehearsals(tmp_path: 
         "http_apply_summary_sha256",
     ):
         assert re.fullmatch(r"[0-9a-f]{64}", final_rehearsal[key])
+
+
+def test_finalize_accepts_two_rehearsals_bound_to_the_same_approved_gap_set(
+    tmp_path: Path,
+):
+    preliminary = _build_package(tmp_path / "preliminary")
+    final_candidate = _build_package(
+        tmp_path / "candidate",
+        final_contract=True,
+        target_sha=FINAL_TARGET_SHA,
+    )
+    approval_sha = _fake_sha("external-gap-approval")
+    gap_set_sha = _fake_sha("exact-twelve-gap-set")
+    prelim_rehearsal = _rehearsal(
+        tmp_path / "preliminary-rehearsal.json",
+        package=preliminary,
+        stage="preliminary",
+        historical_gap_approval_sha256=approval_sha,
+        approved_missing_count=12,
+        historical_gap_set_sha256=gap_set_sha,
+    )
+    final_rehearsal = _rehearsal(
+        tmp_path / "final-rehearsal.json",
+        package=final_candidate,
+        target_sha=FINAL_TARGET_SHA,
+        stage="final",
+        historical_gap_approval_sha256=approval_sha,
+        approved_missing_count=12,
+        historical_gap_set_sha256=gap_set_sha,
+    )
+    final_package = tmp_path / "final-package"
+
+    completed = subprocess.run(
+        [
+            "python3",
+            str(MANIFEST),
+            "finalize",
+            str(preliminary),
+            str(final_candidate),
+            "--preliminary-rehearsal",
+            str(prelim_rehearsal),
+            "--final-rehearsal",
+            str(final_rehearsal),
+            "--output",
+            str(final_package),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    _verify_package(final_package)
+    packaged = json.loads((final_package / "final-rehearsal.json").read_text())
+    assert packaged["db_uploads_reference_state"] == "complete_with_approved_historical_gaps"
+    assert packaged["db_uploads_references_complete"] is False
+    assert packaged["approved_missing_count"] == 12
+    assert packaged["historical_upload_gap_set_sha256"] == gap_set_sha
+    assert packaged["historical_upload_gap_approval_sha256"] == approval_sha
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value"),
+    [
+        ("approved_missing_count", 11),
+        ("historical_gap_set_sha256", "1" * 64),
+        ("historical_gap_approval_sha256", "2" * 64),
+    ],
+)
+def test_finalize_rejects_preliminary_final_historical_gap_binding_mismatch(
+    tmp_path: Path,
+    changed_field: str,
+    changed_value: int | str,
+):
+    preliminary = _build_package(tmp_path / "preliminary")
+    final_candidate = _build_package(
+        tmp_path / "candidate",
+        final_contract=True,
+        target_sha=FINAL_TARGET_SHA,
+    )
+    approval_sha = _fake_sha("external-gap-approval")
+    gap_set_sha = _fake_sha("exact-twelve-gap-set")
+    prelim_rehearsal = _rehearsal(
+        tmp_path / "preliminary-rehearsal.json",
+        package=preliminary,
+        stage="preliminary",
+        historical_gap_approval_sha256=approval_sha,
+        approved_missing_count=12,
+        historical_gap_set_sha256=gap_set_sha,
+    )
+    kwargs = {
+        "historical_gap_approval_sha256": approval_sha,
+        "approved_missing_count": 12,
+        "historical_gap_set_sha256": gap_set_sha,
+    }
+    kwargs[changed_field] = changed_value
+    final_rehearsal = _rehearsal(
+        tmp_path / "final-rehearsal.json",
+        package=final_candidate,
+        target_sha=FINAL_TARGET_SHA,
+        stage="final",
+        **kwargs,
+    )
+    completed = subprocess.run(
+        [
+            "python3",
+            str(MANIFEST),
+            "finalize",
+            str(preliminary),
+            str(final_candidate),
+            "--preliminary-rehearsal",
+            str(prelim_rehearsal),
+            "--final-rehearsal",
+            str(final_rehearsal),
+            "--output",
+            str(tmp_path / "final-package"),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode != 0
+    assert "gap" in completed.stderr.lower() or "reference" in completed.stderr.lower()
+
+
+def test_finalize_rejects_tampered_reference_state_even_when_both_rehearsals_match(
+    tmp_path: Path,
+):
+    preliminary = _build_package(tmp_path / "preliminary")
+    final_candidate = _build_package(
+        tmp_path / "candidate",
+        final_contract=True,
+        target_sha=FINAL_TARGET_SHA,
+    )
+    prelim_rehearsal = _rehearsal(
+        tmp_path / "preliminary-rehearsal.json",
+        package=preliminary,
+        stage="preliminary",
+    )
+    final_rehearsal = _rehearsal(
+        tmp_path / "final-rehearsal.json",
+        package=final_candidate,
+        target_sha=FINAL_TARGET_SHA,
+        stage="final",
+    )
+    for path in (prelim_rehearsal, final_rehearsal):
+        value = json.loads(path.read_text())
+        value["db_uploads_reference_state"] = "complete_with_approved_historical_gaps"
+        _json_artifact(path, value)
+
+    completed = subprocess.run(
+        [
+            "python3",
+            str(MANIFEST),
+            "finalize",
+            str(preliminary),
+            str(final_candidate),
+            "--preliminary-rehearsal",
+            str(prelim_rehearsal),
+            "--final-rehearsal",
+            str(final_rehearsal),
+            "--output",
+            str(tmp_path / "final-package"),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode != 0
+    assert "reference" in completed.stderr.lower() or "gap" in completed.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"approved_missing_count": 1},
+        {
+            "db_uploads_references_complete": True,
+            "approved_missing_count": 1,
+            "historical_upload_gap_approval_sha256": "a" * 64,
+        },
+        {"unexpected_missing_count": 1},
+    ],
+)
+def test_finalize_rejects_illegal_upload_reference_evidence_combinations(
+    tmp_path: Path,
+    changes: dict[str, object],
+):
+    preliminary = _build_package(tmp_path / "preliminary")
+    final_candidate = _build_package(
+        tmp_path / "candidate",
+        final_contract=True,
+        target_sha=FINAL_TARGET_SHA,
+    )
+    prelim_rehearsal = _rehearsal(
+        tmp_path / "preliminary-rehearsal.json",
+        package=preliminary,
+        stage="preliminary",
+    )
+    final_rehearsal = _rehearsal(
+        tmp_path / "final-rehearsal.json",
+        package=final_candidate,
+        target_sha=FINAL_TARGET_SHA,
+        stage="final",
+    )
+    for path in (prelim_rehearsal, final_rehearsal):
+        value = json.loads(path.read_text())
+        value.update(changes)
+        _json_artifact(path, value)
+    completed = subprocess.run(
+        [
+            "python3",
+            str(MANIFEST),
+            "finalize",
+            str(preliminary),
+            str(final_candidate),
+            "--preliminary-rehearsal",
+            str(prelim_rehearsal),
+            "--final-rehearsal",
+            str(final_rehearsal),
+            "--output",
+            str(tmp_path / "final-package"),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode != 0
+    assert "reference" in completed.stderr.lower() or "gap" in completed.stderr.lower()
 
 
 def test_finalize_rejects_false_contract_and_wrong_sha_rehearsal(tmp_path: Path):
@@ -1175,6 +1520,467 @@ def test_rehearsal_rejects_unsafe_tar_before_docker(
     assert not calls.exists()
 
 
+def test_upload_reference_audit_defaults_strict_but_accepts_exact_raw_only_approval(
+    tmp_path: Path,
+):
+    missing_hash = hashlib.sha256(b"irrecoverable-history").hexdigest()
+    missing_ref = _historical_gap_ref(17, missing_hash)
+
+    strict, _strict_root, strict_output = _run_upload_reference_audit(
+        tmp_path / "strict",
+        rows=[_raw_reference_row(missing_ref)],
+    )
+    assert strict.returncode != 0
+    assert "missing" in strict.stderr.lower()
+    assert not strict_output.exists()
+
+    approval = _historical_gap_approval(
+        tmp_path / "approved" / "approval.json",
+        [missing_ref],
+    )
+    approved, _approved_root, approved_output = _run_upload_reference_audit(
+        tmp_path / "approved",
+        rows=[_raw_reference_row(missing_ref)],
+        approval=approval,
+    )
+    assert approved.returncode == 0, approved.stderr
+    evidence = json.loads(approved_output.read_text())
+    expected_gap_sha = hashlib.sha256(
+        (json.dumps([missing_ref], sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    assert evidence["reference_state"] == "complete_with_approved_historical_gaps"
+    assert evidence["references_complete"] is False
+    assert evidence["approved_missing_count"] == 1
+    assert evidence["unexpected_missing_count"] == 0
+    assert evidence["historical_upload_gap_set_sha256"] == expected_gap_sha
+    assert evidence["historical_upload_gap_approval_sha256"] == hashlib.sha256(
+        approval.read_bytes()
+    ).hexdigest()
+    assert evidence["recovery_search_evidence_sha256"] == hashlib.sha256(
+        b"exhaustive-volume-backup-local-continuity-search"
+    ).hexdigest()
+    serialized = approved_output.read_text()
+    assert missing_ref["storage_path"] not in serialized
+    assert missing_ref["file_hash"] not in serialized
+
+
+def test_upload_reference_audit_strict_complete_verifies_existing_raw_bytes(
+    tmp_path: Path,
+):
+    content = b"existing-raw-upload"
+    file_hash = hashlib.sha256(content).hexdigest()
+    ref = _historical_gap_ref(18, file_hash)
+    completed, _root, output = _run_upload_reference_audit(
+        tmp_path,
+        rows=[_raw_reference_row(ref)],
+        files={f"{file_hash}.xlsx": content},
+    )
+    assert completed.returncode == 0, completed.stderr
+    evidence = json.loads(output.read_text())
+    assert evidence["reference_state"] == "complete"
+    assert evidence["references_complete"] is True
+    assert evidence["approved_missing_count"] == 0
+    assert evidence["unexpected_missing_count"] == 0
+    assert evidence["historical_upload_gap_approval_sha256"] is None
+
+
+def test_upload_reference_audit_rejects_approval_for_a_db_ref_that_was_recovered(
+    tmp_path: Path,
+):
+    content = b"recovered-legacy-upload"
+    file_hash = hashlib.sha256(content).hexdigest()
+    ref = _historical_gap_ref(19, file_hash)
+    approval = _historical_gap_approval(tmp_path / "approval.json", [ref])
+    completed, _root, output = _run_upload_reference_audit(
+        tmp_path,
+        rows=[_raw_reference_row(ref)],
+        approval=approval,
+        files={f"{file_hash}.xlsx": content},
+    )
+    assert completed.returncode != 0
+    assert "approved" in completed.stderr.lower() or "recovered" in completed.stderr.lower()
+    assert not output.exists()
+
+
+def test_upload_reference_audit_uses_one_five_column_contract_for_collection_rows(
+    tmp_path: Path,
+):
+    content = b"collection"
+    valid, _root, output = _run_upload_reference_audit(
+        tmp_path / "valid",
+        rows=[_collection_reference_row("batch-7", content, "batch-7/source.xlsx")],
+        files={"maintenance-collection-plans/batch-7/source.xlsx": content},
+    )
+    assert valid.returncode == 0, valid.stderr
+    assert json.loads(output.read_text())["references_complete"] is True
+
+    malformed, _root, malformed_output = _run_upload_reference_audit(
+        tmp_path / "malformed",
+        rows=["collection\tbatch-7/source.xlsx"],
+    )
+    assert malformed.returncode != 0
+    assert "column" in malformed.stderr.lower() or "reference" in malformed.stderr.lower()
+    assert not malformed_output.exists()
+
+
+def test_upload_reference_audit_rejects_collection_hash_size_and_symlink_drift(
+    tmp_path: Path,
+):
+    expected = b"collection-bytes"
+    storage_key = "batch-8/source.xlsx"
+    row = _collection_reference_row("batch-8", expected, storage_key)
+
+    hash_drift, _root, _output = _run_upload_reference_audit(
+        tmp_path / "hash",
+        rows=[row],
+        files={"maintenance-collection-plans/batch-8/source.xlsx": b"collection-byteZ"},
+    )
+    assert hash_drift.returncode != 0
+    assert "hash" in hash_drift.stderr.lower()
+
+    columns = row.split("\t")
+    columns[4] = str(len(expected) + 1)
+    size_drift, _root, _output = _run_upload_reference_audit(
+        tmp_path / "size",
+        rows=["\t".join(columns)],
+        files={"maintenance-collection-plans/batch-8/source.xlsx": expected},
+    )
+    assert size_drift.returncode != 0
+    assert "size" in size_drift.stderr.lower()
+
+    outside = _write(tmp_path / "outside-collection.xlsx", expected)
+    symlink, _root, _output = _run_upload_reference_audit(
+        tmp_path / "symlink",
+        rows=[row],
+        symlinks={"maintenance-collection-plans/batch-8/source.xlsx": outside},
+    )
+    assert symlink.returncode != 0
+    assert "symlink" in symlink.stderr.lower() or "regular" in symlink.stderr.lower()
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "raw\t91\t\t/app/data/raw/missing.xlsx\t",
+        f"raw\t92\t{'a' * 64}\t\t",
+        f"raw\t93\t{'b' * 64}\t/app/data/raw/{'b' * 64}.xlsx\t1",
+    ],
+)
+def test_upload_reference_audit_rejects_null_raw_hash_path_and_nonempty_size(
+    tmp_path: Path,
+    row: str,
+):
+    completed, _root, output = _run_upload_reference_audit(tmp_path, rows=[row])
+    assert completed.returncode != 0
+    assert "raw" in completed.stderr.lower()
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("actual_ids", "approved_ids"),
+    [
+        ([21], [21, 22]),
+        ([21, 22], [21]),
+        ([], [21]),
+    ],
+)
+def test_upload_reference_audit_rejects_extra_new_or_recovered_approved_gap(
+    tmp_path: Path,
+    actual_ids: list[int],
+    approved_ids: list[int],
+):
+    refs = {
+        raw_id: _historical_gap_ref(raw_id, hashlib.sha256(f"raw-{raw_id}".encode()).hexdigest())
+        for raw_id in {21, 22}
+    }
+    approval = _historical_gap_approval(
+        tmp_path / "approval.json",
+        [refs[raw_id] for raw_id in approved_ids],
+    )
+    completed, _root, output = _run_upload_reference_audit(
+        tmp_path,
+        rows=[_raw_reference_row(refs[raw_id]) for raw_id in actual_ids],
+        approval=approval,
+    )
+    assert completed.returncode != 0
+    assert "approved" in completed.stderr.lower() or "missing" in completed.stderr.lower()
+    assert not output.exists()
+
+
+def test_upload_reference_audit_rejects_tampered_or_expired_approval(tmp_path: Path):
+    file_hash = hashlib.sha256(b"missing-raw").hexdigest()
+    ref = _historical_gap_ref(31, file_hash)
+    tampered_ref = {**ref, "file_hash": hashlib.sha256(b"other").hexdigest()}
+    tampered_ref["storage_path"] = f"/app/data/raw/{tampered_ref['file_hash']}.xlsx"
+    tampered = _historical_gap_approval(tmp_path / "tampered" / "approval.json", [tampered_ref])
+    tampered_result, _root, _output = _run_upload_reference_audit(
+        tmp_path / "tampered",
+        rows=[_raw_reference_row(ref)],
+        approval=tampered,
+    )
+    assert tampered_result.returncode != 0
+
+    expired = _historical_gap_approval(
+        tmp_path / "expired" / "approval.json",
+        [ref],
+        expires_delta=dt.timedelta(seconds=-1),
+    )
+    expired_result, _root, _output = _run_upload_reference_audit(
+        tmp_path / "expired",
+        rows=[_raw_reference_row(ref)],
+        approval=expired,
+    )
+    assert expired_result.returncode != 0
+    assert "expired" in expired_result.stderr.lower()
+
+
+def test_upload_reference_audit_never_approves_missing_collection_reference(
+    tmp_path: Path,
+):
+    file_hash = hashlib.sha256(b"missing-raw").hexdigest()
+    ref = _historical_gap_ref(41, file_hash)
+    approval = _historical_gap_approval(tmp_path / "approval.json", [ref])
+    completed, _root, output = _run_upload_reference_audit(
+        tmp_path,
+        rows=[
+            _raw_reference_row(ref),
+            _collection_reference_row(
+                "missing-batch", b"missing-collection", "missing/collection-plan.xlsx"
+            ),
+        ],
+        approval=approval,
+    )
+    assert completed.returncode != 0
+    assert "collection" in completed.stderr.lower()
+    assert not output.exists()
+
+
+def test_upload_reference_audit_rejects_raw_hash_mismatch_symlink_and_path_escape(
+    tmp_path: Path,
+):
+    expected_hash = hashlib.sha256(b"expected").hexdigest()
+    ref = _historical_gap_ref(51, expected_hash)
+    mismatch, _root, _output = _run_upload_reference_audit(
+        tmp_path / "mismatch",
+        rows=[_raw_reference_row(ref)],
+        files={f"{expected_hash}.xlsx": b"wrong-bytes"},
+    )
+    assert mismatch.returncode != 0
+    assert "hash" in mismatch.stderr.lower()
+
+    outside = _write(tmp_path / "outside.xlsx", b"expected")
+    symlink, _root, _output = _run_upload_reference_audit(
+        tmp_path / "symlink",
+        rows=[_raw_reference_row(ref)],
+        symlinks={f"{expected_hash}.xlsx": outside},
+    )
+    assert symlink.returncode != 0
+    assert "symlink" in symlink.stderr.lower() or "regular" in symlink.stderr.lower()
+
+    escaped = {**ref, "storage_path": "/app/data/raw/../../outside.xlsx"}
+    escape, _root, _output = _run_upload_reference_audit(
+        tmp_path / "escape",
+        rows=[_raw_reference_row(escaped)],
+    )
+    assert escape.returncode != 0
+    assert "path" in escape.stderr.lower()
+
+
+def test_historical_gap_approval_requires_unique_sorted_refs_and_mode_600(tmp_path: Path):
+    first = _historical_gap_ref(61, hashlib.sha256(b"first").hexdigest())
+    second = _historical_gap_ref(62, hashlib.sha256(b"second").hexdigest())
+    unsorted = _historical_gap_approval(tmp_path / "unsorted.json", [second, first])
+    unsorted_result = subprocess.run(
+        [
+            "python3",
+            str(MANIFEST),
+            "validate-historical-upload-gap",
+            str(unsorted),
+            "--parent-production-sha",
+            PARENT_SHA,
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert unsorted_result.returncode != 0
+
+    duplicate = _historical_gap_approval(tmp_path / "duplicate.json", [first, first])
+    duplicate_result = subprocess.run(
+        [
+            "python3",
+            str(MANIFEST),
+            "validate-historical-upload-gap",
+            str(duplicate),
+            "--parent-production-sha",
+            PARENT_SHA,
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert duplicate_result.returncode != 0
+
+    insecure = _historical_gap_approval(tmp_path / "insecure.json", [first])
+    insecure.chmod(0o644)
+    insecure_result = subprocess.run(
+        [
+            "python3",
+            str(MANIFEST),
+            "validate-historical-upload-gap",
+            str(insecure),
+            "--parent-production-sha",
+            PARENT_SHA,
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert insecure_result.returncode != 0
+    assert "600" in insecure_result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("release_family", "v121-other"),
+        ("raw_only", False),
+        ("recorded_at", "2026-08-15T01:02:03"),
+        ("approved_at", "not-a-time"),
+        ("recovery_search_evidence_sha256", "f" * 63),
+    ],
+)
+def test_historical_gap_approval_rejects_wrong_schema_or_unzoned_timestamps(
+    tmp_path: Path,
+    field: str,
+    value: object,
+):
+    ref = _historical_gap_ref(63, hashlib.sha256(b"schema").hexdigest())
+    approval = _historical_gap_approval(tmp_path / f"{field}.json", [ref])
+    payload = json.loads(approval.read_text())
+    payload[field] = value
+    _json_artifact(approval, payload)
+    completed = subprocess.run(
+        [
+            "python3",
+            str(MANIFEST),
+            "validate-historical-upload-gap",
+            str(approval),
+            "--parent-production-sha",
+            PARENT_SHA,
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode != 0
+
+
+def test_historical_gap_approval_binds_parent_and_hash_derived_canonical_path(
+    tmp_path: Path,
+):
+    ref = _historical_gap_ref(64, hashlib.sha256(b"canonical-path").hexdigest())
+    wrong_parent = _historical_gap_approval(
+        tmp_path / "wrong-parent.json",
+        [ref],
+        parent_sha="a" * 40,
+    )
+    parent_result = subprocess.run(
+        [
+            "python3",
+            str(MANIFEST),
+            "validate-historical-upload-gap",
+            str(wrong_parent),
+            "--parent-production-sha",
+            PARENT_SHA,
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert parent_result.returncode != 0
+    assert "parent" in parent_result.stderr.lower()
+
+    bad_path_ref = {**ref, "storage_path": "/app/data/raw/not-the-hash.xlsx"}
+    bad_path = _historical_gap_approval(tmp_path / "bad-path.json", [bad_path_ref])
+    path_result = subprocess.run(
+        [
+            "python3",
+            str(MANIFEST),
+            "validate-historical-upload-gap",
+            str(bad_path),
+            "--parent-production-sha",
+            PARENT_SHA,
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert path_result.returncode != 0
+    assert "storage" in path_result.stderr.lower() or "path" in path_result.stderr.lower()
+
+
+def test_historical_gap_approval_enforces_canonical_distinct_actors_reason_and_clock_skew(
+    tmp_path: Path,
+):
+    ref = _historical_gap_ref(65, hashlib.sha256(b"actor-time").hexdigest())
+    base_path = _historical_gap_approval(tmp_path / "base.json", [ref])
+    base = json.loads(base_path.read_text())
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+
+    within_skew = {
+        **base,
+        "recorded_at": (now + dt.timedelta(minutes=3)).isoformat(),
+        "approved_at": (now + dt.timedelta(minutes=4)).isoformat(),
+    }
+    within_path = _json_artifact(tmp_path / "within-skew.json", within_skew)
+    accepted = subprocess.run(
+        [
+            "python3",
+            str(MANIFEST),
+            "validate-historical-upload-gap",
+            str(within_path),
+            "--parent-production-sha",
+            PARENT_SHA,
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+
+    invalid_payloads = [
+        {**base, "reason": "operator-says-ignore"},
+        {**base, "recorded_by": " release-recorder@example.invalid"},
+        {**base, "approved_by": "release-approver@example.invalid "},
+        {
+            **base,
+            "recorded_by": "Release-Actor@example.invalid",
+            "approved_by": "release-actor@example.invalid",
+        },
+        {
+            **base,
+            "approved_at": (now + dt.timedelta(minutes=6)).isoformat(),
+        },
+    ]
+    for index, payload in enumerate(invalid_payloads):
+        path = _json_artifact(tmp_path / f"invalid-actor-time-{index}.json", payload)
+        rejected = subprocess.run(
+            [
+                "python3",
+                str(MANIFEST),
+                "validate-historical-upload-gap",
+                str(path),
+                "--parent-production-sha",
+                PARENT_SHA,
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert rejected.returncode != 0, (index, rejected.stdout)
+
+
 def test_rehearsal_preview_zero_write_is_derived_from_actual_http_preview():
     script = _script(REHEARSE)
 
@@ -1199,7 +2005,27 @@ def test_rehearsal_apply_request_never_persists_login_token():
     assert "/spec.json" in script
 
 
-def _production_package(tmp_path: Path) -> Path:
+def _production_package(
+    tmp_path: Path,
+    *,
+    historical_gap_approval: Path | None = None,
+) -> Path:
+    rehearsal_gap_kwargs: dict[str, object] = {}
+    if historical_gap_approval is not None:
+        approval = json.loads(historical_gap_approval.read_text())
+        refs = approval["approved_missing_refs"]
+        rehearsal_gap_kwargs = {
+            "historical_gap_approval_sha256": hashlib.sha256(
+                historical_gap_approval.read_bytes()
+            ).hexdigest(),
+            "approved_missing_count": len(refs),
+            "historical_gap_set_sha256": hashlib.sha256(
+                (json.dumps(refs, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            ).hexdigest(),
+            "recovery_search_evidence_sha256": approval[
+                "recovery_search_evidence_sha256"
+            ],
+        }
     preliminary = _build_package(tmp_path / "preliminary")
     candidate = _build_package(
         tmp_path / "candidate",
@@ -1211,12 +2037,14 @@ def _production_package(tmp_path: Path) -> Path:
         package=preliminary,
         target_sha=TARGET_SHA,
         stage="preliminary",
+        **rehearsal_gap_kwargs,
     )
     final_rehearsal = _rehearsal(
         tmp_path / "final-rehearsal.json",
         package=candidate,
         target_sha=FINAL_TARGET_SHA,
         stage="final",
+        **rehearsal_gap_kwargs,
     )
     package = tmp_path / "production-package"
     completed = subprocess.run(
@@ -1232,6 +2060,21 @@ def _production_package(tmp_path: Path) -> Path:
     )
     assert completed.returncode == 0, completed.stderr
     return package
+
+
+def _replace_packaged_tool(package: Path, name: str, content: str) -> None:
+    tool = _write(package / name, content, mode=0o700)
+    manifest_path = package / "manifest.json"
+    payload = json.loads(manifest_path.read_text())
+    rows = [row for row in payload["artifacts"].values() if row.get("path") == name]
+    assert len(rows) == 1
+    rows[0]["sha256"] = hashlib.sha256(tool.read_bytes()).hexdigest()
+    rows[0]["size"] = tool.stat().st_size
+    _json_artifact(manifest_path, payload)
+    _write(
+        package / "manifest.sha256",
+        f"{hashlib.sha256(manifest_path.read_bytes()).hexdigest()}  manifest.json\n",
+    )
 
 
 def _release_test_env(
@@ -3392,6 +4235,187 @@ def test_restore_check_rejects_assets_outside_state_bound_backup(tmp_path: Path)
     assert completed.returncode != 0
     assert "state-bound backup" in completed.stderr
     assert not calls.exists()
+
+
+def test_restore_check_rejects_invalid_gap_approval_before_any_docker_side_effect(
+    tmp_path: Path,
+):
+    package = _production_package(tmp_path / "pkg")
+    env, evidence, calls, backup_root = _release_test_env(tmp_path / "runtime", package)
+    bound = backup_root / env["V122_BACKUP_GENERATION"]
+    bound.mkdir()
+    dump = _write(bound / "postgres_custom.dump", b"dump")
+    uploads = _write(bound / "uploads.tar", b"uploads")
+    backup_manifest = _json_artifact(
+        bound / "backup-manifest.json",
+        {"format": "v122-collection-reminders-full-backup-v2"},
+    )
+    checksums = _write(
+        bound / "sha256sums",
+        "".join(
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+            for path in (dump, uploads, backup_manifest)
+        ),
+    )
+    _write_release_state(
+        evidence,
+        package,
+        phase="backup",
+        backup_dir=str(bound),
+        backup_manifest_sha256=hashlib.sha256(backup_manifest.read_bytes()).hexdigest(),
+        backup_checksums_sha256=hashlib.sha256(checksums.read_bytes()).hexdigest(),
+    )
+    gap_ref = _historical_gap_ref(71, hashlib.sha256(b"old-missing").hexdigest())
+    expired = _historical_gap_approval(
+        tmp_path / "expired-approval.json",
+        [gap_ref],
+        expires_delta=dt.timedelta(seconds=-1),
+    )
+    before_state = (evidence / "release-state.json").read_bytes()
+
+    completed = subprocess.run(
+        [
+            str(package / "v122_collection_reminders_release.sh"),
+            str(package),
+            str(evidence),
+            "restore-check",
+            str(dump),
+            str(uploads),
+            str(expired),
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert "expired" in completed.stderr.lower()
+    assert not calls.exists()
+    assert (evidence / "release-state.json").read_bytes() == before_state
+
+
+@pytest.mark.parametrize("scenario", ["match", "approval_sha_drift", "strict_to_gap"])
+def test_restore_check_binds_runtime_reference_state_to_packaged_final_rehearsal(
+    tmp_path: Path,
+    scenario: str,
+):
+    refs = [
+        _historical_gap_ref(80 + index, hashlib.sha256(f"legacy-{index}".encode()).hexdigest())
+        for index in range(2)
+    ]
+    packaged_approval = _historical_gap_approval(
+        tmp_path / "packaged-approval.json", refs
+    )
+    package = _production_package(
+        tmp_path / "pkg",
+        historical_gap_approval=(None if scenario == "strict_to_gap" else packaged_approval),
+    )
+    _replace_packaged_tool(
+        package,
+        "v122_collection_reminders_rehearse.sh",
+        r"""
+        #!/usr/bin/env bash
+        set -Eeuo pipefail
+        [ "$#" -eq 10 ]
+        printf '%s\n' "$@" >"$V122_TEST_REHEARSAL_ARGS"
+        mkdir -m 700 -- "$9"
+        python3 - "${10}" "$9/rehearsal-evidence.json" <<'PY'
+        import hashlib
+        import json
+        import pathlib
+        import sys
+        approval_path, output = map(pathlib.Path, sys.argv[1:])
+        approval = json.loads(approval_path.read_text())
+        refs = approval["approved_missing_refs"]
+        canonical = (json.dumps(refs, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        payload = {
+            "db_uploads_reference_state": "complete_with_approved_historical_gaps",
+            "db_uploads_references_complete": False,
+            "approved_missing_count": len(refs),
+            "unexpected_missing_count": 0,
+            "historical_upload_gap_set_sha256": hashlib.sha256(canonical).hexdigest(),
+            "historical_upload_gap_approval_sha256": hashlib.sha256(approval_path.read_bytes()).hexdigest(),
+            "recovery_search_evidence_sha256": approval["recovery_search_evidence_sha256"],
+        }
+        output.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+        output.chmod(0o600)
+        PY
+        """,
+    )
+    env, evidence, calls, backup_root = _release_test_env(tmp_path / "runtime", package)
+    args_log = tmp_path / "rehearsal-args"
+    env["V122_TEST_REHEARSAL_ARGS"] = str(args_log)
+    env["V122_EXPECTED_MANIFEST_SHA256"] = hashlib.sha256(
+        (package / "manifest.json").read_bytes()
+    ).hexdigest()
+    bound = backup_root / env["V122_BACKUP_GENERATION"]
+    bound.mkdir()
+    dump = _write(bound / "postgres_custom.dump", b"dump")
+    uploads = _write(bound / "uploads.tar", b"uploads")
+    backup_manifest = _json_artifact(
+        bound / "backup-manifest.json",
+        {"format": "v122-collection-reminders-full-backup-v2"},
+    )
+    checksums = _write(
+        bound / "sha256sums",
+        "".join(
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+            for path in (dump, uploads, backup_manifest)
+        ),
+    )
+    _write_release_state(
+        evidence,
+        package,
+        phase="backup",
+        backup_dir=str(bound),
+        backup_manifest_sha256=hashlib.sha256(backup_manifest.read_bytes()).hexdigest(),
+        backup_checksums_sha256=hashlib.sha256(checksums.read_bytes()).hexdigest(),
+    )
+    approval = packaged_approval
+    if scenario == "approval_sha_drift":
+        changed = json.loads(packaged_approval.read_text())
+        changed["reason"] = "backup_exhausted"
+        approval = _json_artifact(tmp_path / "runtime-approval.json", changed)
+
+    completed = subprocess.run(
+        [
+            str(package / "v122_collection_reminders_release.sh"),
+            str(package),
+            str(evidence),
+            "restore-check",
+            str(dump),
+            str(uploads),
+            str(approval),
+        ],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    if scenario != "match":
+        assert completed.returncode != 0
+        assert "packaged" in completed.stderr.lower() or "final rehearsal" in completed.stderr.lower()
+        assert json.loads((evidence / "release-state.json").read_text())["phase"] == "backup"
+        assert not calls.exists()
+        return
+
+    assert completed.returncode == 0, completed.stderr
+    assert not calls.exists()
+    passed_approval = Path(args_log.read_text().splitlines()[-1])
+    assert passed_approval != approval
+    expected_approval_sha = hashlib.sha256(approval.read_bytes()).hexdigest()
+    expected_gap_sha = hashlib.sha256(
+        (json.dumps(refs, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ).hexdigest()
+    rehearsal = json.loads(
+        (evidence / "restore-check" / "rehearsal-evidence.json").read_text()
+    )
+    state = json.loads((evidence / "release-state.json").read_text())
+    for value in (rehearsal, state):
+        assert value["approved_missing_count"] == 2
+        assert value["historical_upload_gap_set_sha256"] == expected_gap_sha
+        assert value["historical_upload_gap_approval_sha256"] == expected_approval_sha
+    assert state["phase"] == "restore_checked"
 
 
 @pytest.mark.parametrize("phase", ["backup", "restore_checked", "canary", "observe_0", "observe_15", "observed"])

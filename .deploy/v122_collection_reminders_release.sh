@@ -67,6 +67,52 @@ PY
   printf '%s\n' "$snapshot"
 }
 
+snapshot_historical_gap_approval() {
+  local source=$1
+  local workspace=$2
+  local snapshot="$workspace/historical-upload-gap-approval.json"
+  [ -d "$workspace" ] && [ ! -L "$workspace" ] \
+    && [ "$(stat -c '%a' "$workspace")" = 700 ] || return 1
+  python3 - "$source" "$snapshot" <<'PY' || return 1
+import os
+import stat
+import sys
+
+source, snapshot = sys.argv[1:3]
+source_fd = os.open(source, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    source_stat = os.fstat(source_fd)
+    if not stat.S_ISREG(source_stat.st_mode):
+        raise SystemExit("historical gap approval snapshot source is not regular")
+    with os.fdopen(source_fd, "rb", closefd=False) as stream:
+        payload = stream.read()
+finally:
+    os.close(source_fd)
+
+destination_fd = os.open(
+    snapshot,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+    0o600,
+)
+try:
+    with os.fdopen(destination_fd, "wb", closefd=False) as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.fchmod(destination_fd, 0o600)
+finally:
+    os.close(destination_fd)
+directory_fd = os.open(os.path.dirname(snapshot), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+  [ -f "$snapshot" ] && [ ! -L "$snapshot" ] \
+    && [ "$(stat -c '%a' "$snapshot")" = 600 ] || return 1
+  printf '%s\n' "$snapshot"
+}
+
 usage() {
   cat >&2 <<'EOF'
 usage: v122_collection_reminders_release.sh PACKAGE_DIR EVIDENCE_DIR preflight|freeze-writes|backup|restore-check|migrate|deploy|canary|observe|rollback-images [ARGS]
@@ -75,7 +121,7 @@ commands:
   preflight
   freeze-writes
   backup
-  restore-check DB_DUMP UPLOADS_ARCHIVE
+  restore-check DB_DUMP UPLOADS_ARCHIVE [MODE600_HISTORICAL_UPLOAD_GAP_APPROVAL]
   migrate
   deploy
   canary CANARY_PROJECT_ID MODE600_CANARY_SPEC
@@ -1468,7 +1514,15 @@ payload.update({
 })
 for index in range(0, len(extra), 2):
     raw = extra[index + 1]
-    payload[extra[index]] = True if raw == "true" else False if raw == "false" else raw
+    key = extra[index]
+    if raw == "true":
+        payload[key] = True
+    elif raw == "false":
+        payload[key] = False
+    elif key in {"approved_missing_count", "unexpected_missing_count"}:
+        payload[key] = int(raw)
+    else:
+        payload[key] = raw
 fd, temporary = tempfile.mkstemp(prefix=".release-state-", dir=path.parent)
 try:
     with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -1508,7 +1562,10 @@ case "$COMMAND" in
     [ ! -e "$BACKUP_DIR" ] && [ ! -L "$BACKUP_DIR" ] \
       || fatal "fresh backup generation already exists"
     ;;
-  restore-check) require_phase backup ;;
+  restore-check)
+    { [ "$#" -eq 2 ] || [ "$#" -eq 3 ]; } || usage
+    require_phase backup
+    ;;
   migrate) [ "$#" -eq 0 ] || usage; require_production_ready; require_phase restore_checked ;;
   deploy) [ "$#" -eq 0 ] || usage; require_production_ready; require_phase migrated ;;
   canary)
@@ -1769,7 +1826,6 @@ PY
 	      service_restored true
 	    ;;
   restore-check)
-    [ "$#" -eq 2 ] || usage
     DB_DUMP=$(realpath -e -- "$1")
     UPLOADS_ARCHIVE=$(realpath -e -- "$2")
     BACKUP_DIR=$(realpath -e -- "$(state_get backup_dir)")
@@ -1782,15 +1838,172 @@ PY
       || fatal "state-bound backup checksum hash mismatch"
     (cd "$BACKUP_DIR" && sha256sum -c sha256sums >/dev/null) \
       || fatal "state-bound backup checksums are stale"
+    HISTORICAL_GAP_APPROVAL=
+    HISTORICAL_GAP_WORK=
+    HISTORICAL_GAP_SUMMARY=
+    if [ "$#" -eq 3 ]; then
+      [ -f "$3" ] && [ ! -L "$3" ] \
+        || fatal "historical upload gap approval must be a regular non-symlink file"
+      HISTORICAL_GAP_INPUT=$(realpath -e -- "$3") \
+        || fatal "historical upload gap approval is missing"
+      [ "$(stat -c '%a' "$HISTORICAL_GAP_INPUT")" = 600 ] \
+        || fatal "historical upload gap approval must be mode 600"
+      python3 "$MANIFEST_TOOL" validate-historical-upload-gap \
+        "$HISTORICAL_GAP_INPUT" \
+        --parent-production-sha "$(manifest_get parent_production_sha)" >/dev/null \
+        || fatal "historical upload gap approval validation failed"
+      HISTORICAL_GAP_PREHASH=$(sha256sum "$HISTORICAL_GAP_INPUT" | awk '{print $1}') \
+        || fatal "historical upload gap approval SHA-256 could not be read"
+      [[ "$HISTORICAL_GAP_PREHASH" =~ ^[0-9a-f]{64}$ ]] \
+        || fatal "historical upload gap approval SHA-256 is invalid"
+      HISTORICAL_GAP_WORK=$(mktemp -d -t v122-historical-gap.XXXXXXXX) \
+        || fatal "historical upload gap private workspace could not be created"
+      chmod 700 "$HISTORICAL_GAP_WORK" || {
+        rm -rf -- "$HISTORICAL_GAP_WORK"
+        fatal "historical upload gap private workspace could not be secured"
+      }
+      cleanup_historical_gap_work() {
+        rm -rf -- "$HISTORICAL_GAP_WORK"
+      }
+      trap cleanup_historical_gap_work EXIT
+      HISTORICAL_GAP_APPROVAL=$(snapshot_historical_gap_approval \
+        "$HISTORICAL_GAP_INPUT" "$HISTORICAL_GAP_WORK") \
+        || fatal "historical upload gap approval snapshot could not be created"
+      HISTORICAL_GAP_SNAPSHOT_SHA=$(sha256sum "$HISTORICAL_GAP_APPROVAL" | awk '{print $1}') \
+        || fatal "historical upload gap approval snapshot SHA-256 could not be read"
+      [ "$HISTORICAL_GAP_SNAPSHOT_SHA" = "$HISTORICAL_GAP_PREHASH" ] \
+        || fatal "historical upload gap approval changed during snapshot"
+      HISTORICAL_GAP_SUMMARY="$HISTORICAL_GAP_WORK/validated-summary.json"
+      python3 "$MANIFEST_TOOL" validate-historical-upload-gap \
+        "$HISTORICAL_GAP_APPROVAL" \
+        --parent-production-sha "$(manifest_get parent_production_sha)" \
+        >"$HISTORICAL_GAP_SUMMARY" \
+        || fatal "historical upload gap approval snapshot validation failed"
+      chmod 600 "$HISTORICAL_GAP_SUMMARY"
+    fi
     if [ "$PACKAGE_PRODUCTION_READY" = true ]; then REHEARSAL_STAGE=final; else REHEARSAL_STAGE=preliminary; fi
-    V122_REHEARSAL_STAGE="$REHEARSAL_STAGE" \
-    V122_EXPECTED_MANIFEST_SHA256="$EXPECTED_MANIFEST_SHA256" \
-    "$SCRIPT_DIR/v122_collection_reminders_rehearse.sh" "$DB_DUMP" "$UPLOADS_ARCHIVE" \
+    REHEARSAL_ARGUMENTS=(
+      "$DB_DUMP" "$UPLOADS_ARCHIVE" \
       "$(manifest_get target_sha)" "$(manifest_get parent_production_sha)" \
       "$(manifest_get database.image_id)" "$(manifest_get images.app_image_id)" \
       "$(manifest_get images.frontend_image_id)" "$PACKAGE_DIR/candidate-compose.yml" \
       "$EVIDENCE_DIR/restore-check"
-    advance_phase restore_checked
+    )
+    if [ -n "$HISTORICAL_GAP_APPROVAL" ]; then
+      REHEARSAL_ARGUMENTS+=("$HISTORICAL_GAP_APPROVAL")
+    fi
+    V122_REHEARSAL_STAGE="$REHEARSAL_STAGE" \
+    V122_EXPECTED_MANIFEST_SHA256="$EXPECTED_MANIFEST_SHA256" \
+    "$SCRIPT_DIR/v122_collection_reminders_rehearse.sh" "${REHEARSAL_ARGUMENTS[@]}"
+    REHEARSAL_EVIDENCE="$EVIDENCE_DIR/restore-check/rehearsal-evidence.json"
+    safe_file "$REHEARSAL_EVIDENCE" "restore-check rehearsal evidence"
+    REFERENCE_BINDING=$(python3 - "$REHEARSAL_EVIDENCE" \
+      "${HISTORICAL_GAP_SUMMARY:-}" <<'PY'
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+evidence = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+summary = (
+    json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+    if sys.argv[2]
+    else None
+)
+empty_set_sha = hashlib.sha256(b"[]\n").hexdigest()
+if summary is None:
+    expected = {
+        "db_uploads_reference_state": "complete",
+        "db_uploads_references_complete": True,
+        "approved_missing_count": 0,
+        "unexpected_missing_count": 0,
+        "historical_upload_gap_set_sha256": empty_set_sha,
+        "historical_upload_gap_approval_sha256": None,
+        "recovery_search_evidence_sha256": None,
+    }
+else:
+    expected = {
+        "db_uploads_reference_state": "complete_with_approved_historical_gaps",
+        "db_uploads_references_complete": False,
+        "approved_missing_count": summary["approved_missing_count"],
+        "unexpected_missing_count": 0,
+        "historical_upload_gap_set_sha256": summary["historical_upload_gap_set_sha256"],
+        "historical_upload_gap_approval_sha256": summary["historical_upload_gap_approval_sha256"],
+        "recovery_search_evidence_sha256": summary["recovery_search_evidence_sha256"],
+    }
+for key, value in expected.items():
+    if evidence.get(key) != value:
+        raise SystemExit("restore-check rehearsal historical upload gap binding mismatch: " + key)
+for key in ("historical_upload_gap_set_sha256",):
+    if re.fullmatch(r"[0-9a-f]{64}", str(expected[key])) is None:
+        raise SystemExit("restore-check rehearsal historical upload gap SHA is invalid")
+for key in (
+    "db_uploads_reference_state",
+    "approved_missing_count",
+    "unexpected_missing_count",
+    "historical_upload_gap_set_sha256",
+    "historical_upload_gap_approval_sha256",
+    "recovery_search_evidence_sha256",
+):
+    value = expected[key]
+    print("null" if value is None else value)
+print("true" if expected["db_uploads_references_complete"] else "false")
+PY
+    ) || fatal "restore-check rehearsal historical upload gap evidence is invalid"
+    mapfile -t REFERENCE_VALUES <<<"$REFERENCE_BINDING"
+    [ "${#REFERENCE_VALUES[@]}" -eq 7 ] \
+      || fatal "restore-check rehearsal historical upload gap binding is incomplete"
+    if [ "$PACKAGE_PRODUCTION_READY" = true ]; then
+      PACKAGED_FINAL_REHEARSAL="$PACKAGE_DIR/final-rehearsal.json"
+      safe_file "$PACKAGED_FINAL_REHEARSAL" "packaged final rehearsal evidence"
+      PACKAGED_REFERENCE_BINDING=$(python3 - "$PACKAGED_FINAL_REHEARSAL" <<'PY'
+import json
+import pathlib
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+for key in (
+    "db_uploads_reference_state",
+    "approved_missing_count",
+    "unexpected_missing_count",
+    "historical_upload_gap_set_sha256",
+    "historical_upload_gap_approval_sha256",
+    "recovery_search_evidence_sha256",
+):
+    item = value[key]
+    print("null" if item is None else item)
+print("true" if value["db_uploads_references_complete"] else "false")
+PY
+      ) || fatal "packaged final rehearsal reference binding is unreadable"
+      [ "$REFERENCE_BINDING" = "$PACKAGED_REFERENCE_BINDING" ] \
+        || fatal "runtime restore-check reference binding differs from packaged final rehearsal"
+    fi
+    REHEARSAL_EVIDENCE_SHA256=$(sha256sum "$REHEARSAL_EVIDENCE" | awk '{print $1}')
+    if [ -n "$HISTORICAL_GAP_WORK" ]; then
+      cleanup_historical_gap_work
+      HISTORICAL_GAP_WORK=
+      trap - EXIT
+    fi
+    if [ "${REFERENCE_VALUES[0]}" = complete ]; then
+      advance_phase restore_checked \
+        db_uploads_reference_state "${REFERENCE_VALUES[0]}" \
+        db_uploads_references_complete "${REFERENCE_VALUES[6]}" \
+        approved_missing_count "${REFERENCE_VALUES[1]}" \
+        unexpected_missing_count "${REFERENCE_VALUES[2]}" \
+        historical_upload_gap_set_sha256 "${REFERENCE_VALUES[3]}" \
+        restore_check_rehearsal_evidence_sha256 "$REHEARSAL_EVIDENCE_SHA256"
+    else
+      advance_phase restore_checked \
+        db_uploads_reference_state "${REFERENCE_VALUES[0]}" \
+        db_uploads_references_complete "${REFERENCE_VALUES[6]}" \
+        approved_missing_count "${REFERENCE_VALUES[1]}" \
+        unexpected_missing_count "${REFERENCE_VALUES[2]}" \
+        historical_upload_gap_set_sha256 "${REFERENCE_VALUES[3]}" \
+        historical_upload_gap_approval_sha256 "${REFERENCE_VALUES[4]}" \
+        recovery_search_evidence_sha256 "${REFERENCE_VALUES[5]}" \
+        restore_check_rehearsal_evidence_sha256 "$REHEARSAL_EVIDENCE_SHA256"
+    fi
     ;;
 	  migrate)
 	    [ "$#" -eq 0 ] || usage

@@ -97,6 +97,10 @@ def main() -> None:
     assert module.DB_FROM == "d9f1a3c7e5b2"
     assert module.DB_TO == "c8e2a4f6b1d3"
     assert module.FORMAT == "v122-collection-reminders-2"
+    assert module.HISTORICAL_GAP_APPROVAL_FORMAT == (
+        "v122-historical-upload-gap-approval-v1"
+    )
+    assert module.HISTORICAL_GAP_RELEASE_FAMILY == "v122-collection-reminders"
     if PACKAGED:
         subprocess.run(
             [sys.executable, str(MANIFEST), "verify", str(HERE)],
@@ -108,7 +112,18 @@ def main() -> None:
         assert ("f9b2" + "d4e7c1a6") not in text
         assert ("v121" + "_beta") not in text
     _validate_migration_graph()
+    rehearse = REHEARSE.read_text(encoding="utf-8")
     release = RELEASE.read_text(encoding="utf-8")
+    manifest = MANIFEST.read_text(encoding="utf-8")
+    assert "SELECT 'raw', id::text, file_hash, storage_path, '' FROM sys_raw_file" in rehearse
+    assert "SELECT 'collection', batch_id, file_sha256, storage_key, file_size::text" in rehearse
+    assert "audit-upload-references" in rehearse
+    assert '"db_uploads_references_complete": True' not in rehearse
+    assert "snapshot_historical_gap_approval" in release
+    assert "validate-historical-upload-gap" in release
+    assert "historical_upload_gap_approval_sha256" in release
+    assert "complete_with_approved_historical_gaps" in manifest
+    assert "recovery_search_evidence_sha256" in manifest
     for forbidden in (
         r"\balembic\s+downgrade\b",
         r"\bdocker\s+compose\s+down\b",
