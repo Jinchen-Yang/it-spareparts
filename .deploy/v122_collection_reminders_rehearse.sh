@@ -424,7 +424,7 @@ print(username)
 PY
 )
 GRANT_PERMS_JSON='{"page_maintenance":true,"page_maintenance_beta":true,"data_purchase_cost":true,"data_profit":true,"action_maintenance_collection_follow_up":true,"action_maintenance_collection_plan_import":true}'
-UPDATED_NAMED_ACCOUNT=$(docker exec -i "$DB_NAME" psql -X -U spareparts -d spareparts -At \
+UPDATED_NAMED_ACCOUNT=$(docker exec -i "$DB_NAME" psql -X -qAt -U spareparts -d spareparts \
   -v username="$SPEC_USERNAME" -v perms="$GRANT_PERMS_JSON" <<'SQL'
 UPDATE sys_user
 SET template_perms = COALESCE(template_perms, '{}'::jsonb) || :'perms'::jsonb,

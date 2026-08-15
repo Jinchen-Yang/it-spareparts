@@ -1152,6 +1152,18 @@ def test_rehearsal_psql_heredocs_keep_stdin_open():
     assert all(re.search(r"docker exec\s+-i(\s|$)", command) for command in heredoc_psql_invocations)
 
 
+def test_rehearsal_named_account_update_suppresses_psql_status_line():
+    """The captured scalar must not include psql's trailing ``UPDATE 1`` status."""
+
+    text = REHEARSE.read_text(encoding="utf-8")
+
+    assert re.search(
+        r'UPDATED_NAMED_ACCOUNT=\$\(docker exec -i "\$DB_NAME" '
+        r'psql -X -qAt -U spareparts',
+        text,
+    )
+
+
 def test_rehearsal_python_heredocs_keep_stdin_open():
     """docker run must use -i when Python source is supplied by a host heredoc."""
 
