@@ -601,6 +601,13 @@ def test_v122_release_artifacts_are_versioned_executable_and_syntax_checked():
     subprocess.run(["python3", "-m", "py_compile", str(MANIFEST), str(STATIC_TEST)], check=True)
 
 
+def test_named_canary_login_uses_the_real_production_api_route():
+    release = RELEASE.read_text(encoding="utf-8")
+
+    assert '["base_url"]+"/api/auth/login"' in release
+    assert '["base_url"]+"/auth/login"' not in release
+
+
 def test_manifest_contract_is_d9_to_c8_collection_reminders_not_old_v121_or_f9():
     module = _load_manifest_module()
 
@@ -1143,6 +1150,32 @@ def test_rehearsal_psql_heredocs_keep_stdin_open():
 
     assert heredoc_psql_invocations
     assert all(re.search(r"docker exec\s+-i(\s|$)", command) for command in heredoc_psql_invocations)
+
+
+def test_rehearsal_python_heredocs_keep_stdin_open():
+    """docker run must use -i when Python source is supplied by a host heredoc."""
+
+    text = REHEARSE.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    heredoc_python_invocations = []
+    for index, line in enumerate(lines):
+        if "docker run" not in line:
+            continue
+        command = line
+        lookahead = index
+        while "<<'PY'" not in command and lookahead + 1 < len(lines):
+            lookahead += 1
+            command += "\n" + lines[lookahead]
+            if lookahead - index > 12:
+                break
+        if "--entrypoint python" in command and "<<'PY'" in command:
+            heredoc_python_invocations.append(command)
+
+    assert len(heredoc_python_invocations) == 3
+    assert all(
+        re.search(r"docker run\s+.*(?:^|\s)-i(?:\s|$)", command, re.DOTALL)
+        for command in heredoc_python_invocations
+    )
 
 
 @pytest.mark.parametrize("artifact", [
