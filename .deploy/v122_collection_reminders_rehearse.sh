@@ -360,7 +360,7 @@ python3 "$PACKAGE_TOOL" "${AUDIT_ARGUMENTS[@]}"
 # from the parser process, while domain-table counts prove zero domain writes.
 DOMAIN_BEFORE=$(docker exec "$DB_NAME" psql -X -U restore_admin -d spareparts -At -c \
   "SELECT (SELECT count(*) FROM maintenance_collection_milestone)::text || ':' || (SELECT count(*) FROM maintenance_collection_plan_source_binding)::text || ':' || (SELECT count(*) FROM maintenance_collection_milestone_operation)::text;")
-docker run --rm --pull=never --network none --read-only \
+docker run --rm -i --pull=never --network none --read-only \
   -v "$SAMPLE_FILE:/sample.xls:ro" --entrypoint python "$APP_IMAGE_ID" - /sample.xls \
   >"$WORK/parser-result.json" <<'PY'
 import json
@@ -440,7 +440,7 @@ SQL
 start_app false
 HTTP_PREVIEW_DOMAIN_BEFORE=$(docker exec "$DB_NAME" psql -X -U spareparts -d spareparts -At -c \
   "SELECT (SELECT count(*) FROM maintenance_collection_milestone)::text || ':' || (SELECT count(*) FROM maintenance_collection_plan_source_binding)::text || ':' || (SELECT count(*) FROM maintenance_collection_milestone_operation)::text;")
-docker run --rm --pull=never --network "$NETWORK_NAME" \
+docker run --rm -i --pull=never --network "$NETWORK_NAME" \
   -v "$SAMPLE_FILE:/sample.xls:ro" -v "$APPLY_SPEC:/spec.json:ro" \
   -v "$WORK:/evidence:rw" --entrypoint python "$APP_IMAGE_ID" - preview \
   >"$WORK/http-preview-summary.json" <<'PY'
@@ -510,7 +510,7 @@ HTTP_PREVIEW_DOMAIN_AFTER=$(docker exec "$DB_NAME" psql -X -U spareparts -d spar
 [ "$HTTP_PREVIEW_DOMAIN_BEFORE" = "$HTTP_PREVIEW_DOMAIN_AFTER" ] \
   || fatal "actual HTTP preview changed domain tables"
 start_app true
-docker run --rm --pull=never --network "$NETWORK_NAME" \
+docker run --rm -i --pull=never --network "$NETWORK_NAME" \
   -v "$WORK:/evidence:rw" -v "$APPLY_SPEC:/spec.json:ro" --entrypoint python "$APP_IMAGE_ID" - \
   >"$WORK/http-apply-summary.json" <<'PY'
 import json
