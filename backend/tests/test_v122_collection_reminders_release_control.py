@@ -51,6 +51,9 @@ CROSS_PROJECT_ID = "123e4567-e89b-12d3-a456-426614174099"
 CROSS_PROJECT_CONTRACT_ID = "contract-other"
 REAL_SAMPLE_SHA256 = "a783af09fa108d366a26e10fe188be52d20a9ce1fe02121bfd683d96356c8c18"
 HISTORICAL_GAP_FORMAT = "v122-historical-upload-gap-approval-v1"
+SOURCE_CONTRACT_PATH = (
+    "source/.ai/contracts/maintenance-collections/project-manager-xls-v1.yaml"
+)
 
 
 def _follow_up_case(
@@ -761,10 +764,53 @@ def _run_upload_reference_audit(
     return completed, uploads_root, output
 
 
+def _write_source_archive(
+    path: Path,
+    *,
+    target_sha: str,
+    contract_members: list[tuple[str, bytes, str]],
+) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(
+        path,
+        "w",
+        format=tarfile.PAX_FORMAT,
+        pax_headers={"comment": target_sha},
+    ) as archive:
+        for tool in (MANIFEST, BUILD, REHEARSE, RELEASE, STATIC_TEST):
+            content = tool.read_bytes()
+            info = tarfile.TarInfo(f"source/.deploy/{tool.name}")
+            info.mode = 0o700
+            info.size = len(content)
+            archive.addfile(info, io.BytesIO(content))
+        for name, content, member_type in contract_members:
+            info = tarfile.TarInfo(name)
+            info.mode = 0o600
+            if member_type == "regular":
+                info.size = len(content)
+                archive.addfile(info, io.BytesIO(content))
+            elif member_type == "directory":
+                info.type = tarfile.DIRTYPE
+                archive.addfile(info)
+            else:
+                raise AssertionError(f"unsupported fixture member type: {member_type}")
+    path.chmod(0o600)
+    return path
+
+
+def _refresh_source_build_evidence(artifacts: dict[str, Path]) -> None:
+    payload = json.loads(artifacts["build"].read_text(encoding="utf-8"))
+    payload["source_tar_sha256"] = hashlib.sha256(
+        artifacts["source"].read_bytes()
+    ).hexdigest()
+    _json_artifact(artifacts["build"], payload)
+
+
 def _package_inputs(
     tmp_path: Path,
     *,
     final_contract: bool = False,
+    source_contract_final: bool | None = None,
     target_sha: str = TARGET_SHA,
 ) -> dict[str, Path]:
     compose = _write(
@@ -782,20 +828,19 @@ def _package_inputs(
             image: postgres:15
         """,
     )
-    source = tmp_path / "source.tar"
-    with tarfile.open(
-        source,
-        "w",
-        format=tarfile.PAX_FORMAT,
-        pax_headers={"comment": target_sha},
-    ) as archive:
-        for tool in (MANIFEST, BUILD, REHEARSE, RELEASE, STATIC_TEST):
-            content = tool.read_bytes()
-            info = tarfile.TarInfo(f"source/.deploy/{tool.name}")
-            info.mode = 0o700
-            info.size = len(content)
-            archive.addfile(info, io.BytesIO(content))
-    source.chmod(0o600)
+    contract = _contract(tmp_path / "contract.yaml", final=final_contract)
+    source_contract = (
+        contract
+        if source_contract_final is None or source_contract_final == final_contract
+        else _contract(tmp_path / "source-contract.yaml", final=source_contract_final)
+    )
+    source = _write_source_archive(
+        tmp_path / "source.tar",
+        target_sha=target_sha,
+        contract_members=[
+            (SOURCE_CONTRACT_PATH, source_contract.read_bytes(), "regular")
+        ],
+    )
     images = _write(tmp_path / "images.tar", b"image-bundle")
     sbom = _json_artifact(
         tmp_path / "dependency-sbom.cdx.json",
@@ -827,7 +872,7 @@ def _package_inputs(
     )
     return {
         "compose": compose,
-        "contract": _contract(tmp_path / "contract.yaml", final=final_contract),
+        "contract": contract,
         "sbom": sbom,
         "build": build,
         "source": source,
@@ -872,6 +917,56 @@ def _build_package(
     return package
 
 
+def _run_manifest_build(
+    artifacts: dict[str, Path],
+    *,
+    output: Path,
+    target_sha: str = TARGET_SHA,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "python3",
+            str(MANIFEST),
+            "build",
+            "--target-sha",
+            target_sha,
+            "--parent-production-sha",
+            PARENT_SHA,
+            "--app-image-id",
+            IMAGE_ID,
+            "--frontend-image-id",
+            FRONTEND_IMAGE_ID,
+            "--database-image-id",
+            DB_IMAGE_ID,
+            "--previous-app-image-id",
+            "sha256:" + "8" * 64,
+            "--previous-frontend-image-id",
+            "sha256:" + "9" * 64,
+            "--candidate-compose",
+            str(artifacts["compose"]),
+            "--contract",
+            str(artifacts["contract"]),
+            "--sbom",
+            str(artifacts["sbom"]),
+            "--build-evidence",
+            str(artifacts["build"]),
+            "--source-bundle",
+            str(artifacts["source"]),
+            "--image-bundle",
+            str(artifacts["images"]),
+            "--ci-evidence",
+            str(artifacts["ci"]),
+            "--canary-project-id",
+            CANARY_PROJECT_ID,
+            "--output",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+
 def _verify_package(package: Path, *, expected_ok: bool = True) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         ["python3", str(MANIFEST), "verify", str(package)],
@@ -908,6 +1003,122 @@ def test_manifest_builds_flat_portable_self_verifying_preliminary_package(tmp_pa
     assert payload["contract"]["state"] == "approved_for_implementation"
     assert all("/" not in entry["path"] for entry in payload["artifacts"].values())
     _verify_package(package)
+
+
+@pytest.mark.parametrize(
+    ("case", "contract_members"),
+    [
+        ("missing", []),
+        (
+            "duplicate",
+            [
+                (SOURCE_CONTRACT_PATH, b"first", "regular"),
+                (SOURCE_CONTRACT_PATH, b"second", "regular"),
+            ],
+        ),
+        ("wrong_type", [(SOURCE_CONTRACT_PATH, b"", "directory")]),
+        (
+            "exact_path_drift",
+            [
+                (
+                    "source/.ai/contracts/maintenance-collections/project-manager-xls-v01.yaml",
+                    b"drift",
+                    "regular",
+                )
+            ],
+        ),
+    ],
+)
+def test_manifest_build_requires_exact_unique_regular_contract_in_source_archive(
+    tmp_path: Path,
+    case: str,
+    contract_members: list[tuple[str, bytes, str]],
+):
+    artifacts = _package_inputs(tmp_path / "inputs")
+    _write_source_archive(
+        artifacts["source"],
+        target_sha=TARGET_SHA,
+        contract_members=contract_members,
+    )
+    _refresh_source_build_evidence(artifacts)
+
+    completed = _run_manifest_build(
+        artifacts,
+        output=tmp_path / f"package-{case}",
+    )
+
+    assert completed.returncode != 0
+    assert "source archive contract" in completed.stderr.lower()
+    assert not (tmp_path / f"package-{case}").exists()
+
+
+@pytest.mark.parametrize(
+    ("external_final", "source_final", "expected_ok"),
+    [
+        (False, False, True),
+        (True, True, True),
+        (True, False, False),
+        (False, True, False),
+    ],
+)
+def test_manifest_build_binds_contract_bytes_to_target_source_archive(
+    tmp_path: Path,
+    external_final: bool,
+    source_final: bool,
+    expected_ok: bool,
+):
+    artifacts = _package_inputs(
+        tmp_path / "inputs",
+        final_contract=external_final,
+        source_contract_final=source_final,
+    )
+    output = tmp_path / "package"
+
+    completed = _run_manifest_build(artifacts, output=output)
+
+    assert (completed.returncode == 0) is expected_ok, completed.stderr
+    assert output.exists() is expected_ok
+    if not expected_ok:
+        assert "contract" in completed.stderr.lower()
+        assert "source archive" in completed.stderr.lower()
+
+
+def test_manifest_verify_rejects_resigned_source_contract_relation_mismatch(
+    tmp_path: Path,
+):
+    package = _build_package(tmp_path / "original")
+    promoted_contract = _contract(tmp_path / "promoted.yaml", final=True)
+    source = package / "source.tar"
+    _write_source_archive(
+        source,
+        target_sha=TARGET_SHA,
+        contract_members=[
+            (SOURCE_CONTRACT_PATH, promoted_contract.read_bytes(), "regular")
+        ],
+    )
+    build_evidence_path = package / "build-evidence.json"
+    build_evidence = json.loads(build_evidence_path.read_text(encoding="utf-8"))
+    build_evidence["source_tar_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    _json_artifact(build_evidence_path, build_evidence)
+
+    manifest_path = package / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for key, path in (
+        ("source_bundle", source),
+        ("build_evidence", build_evidence_path),
+    ):
+        manifest["artifacts"][key]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        manifest["artifacts"][key]["size"] = path.stat().st_size
+    _json_artifact(manifest_path, manifest)
+    _write(
+        package / "manifest.sha256",
+        f"{hashlib.sha256(manifest_path.read_bytes()).hexdigest()}  manifest.json\n",
+    )
+
+    completed = _verify_package(package, expected_ok=False)
+
+    assert "contract" in completed.stderr.lower()
+    assert "source archive" in completed.stderr.lower()
 
 
 def test_rehearsal_psql_heredocs_keep_stdin_open():
@@ -956,6 +1167,14 @@ def test_manifest_verify_rejects_missing_or_tampered_artifacts(tmp_path: Path, a
 def test_manifest_rejects_duplicate_contract_keys(tmp_path: Path):
     artifacts = _package_inputs(tmp_path / "inputs")
     _contract(artifacts["contract"], duplicate=True)
+    _write_source_archive(
+        artifacts["source"],
+        target_sha=TARGET_SHA,
+        contract_members=[
+            (SOURCE_CONTRACT_PATH, artifacts["contract"].read_bytes(), "regular")
+        ],
+    )
+    _refresh_source_build_evidence(artifacts)
     command = [
         "python3", str(MANIFEST), "build",
         "--target-sha", TARGET_SHA,

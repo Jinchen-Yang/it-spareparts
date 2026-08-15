@@ -69,6 +69,9 @@ PACKAGE_TOOLS = (
     "v122_collection_reminders_release.sh",
     "v122_collection_reminders_static_test.py",
 )
+SOURCE_CONTRACT_PATH = (
+    "source/.ai/contracts/maintenance-collections/project-manager-xls-v1.yaml"
+)
 REQUIRED_CI_CHECKS = (
     "后端测试（pytest + 迁移链验证）",
     "前端类型检查 + 构建",
@@ -764,6 +767,35 @@ def _source_tool_bytes(source_bundle: Path, target_sha: str) -> dict[str, bytes]
         _fail(f"invalid source archive: {exc}")
 
 
+def _source_contract_bytes(source_bundle: Path, target_sha: str) -> bytes:
+    """Read the one reviewed contract from the target commit archive."""
+
+    _require_file(source_bundle, "source bundle")
+    try:
+        with tarfile.open(source_bundle, "r:*") as archive:
+            if archive.pax_headers.get("comment") != target_sha:
+                _fail("source archive is not bound to target SHA")
+            members = [
+                member
+                for member in archive.getmembers()
+                if member.name == SOURCE_CONTRACT_PATH
+            ]
+            if len(members) != 1:
+                _fail(
+                    "source archive contract must appear exactly once at "
+                    f"{SOURCE_CONTRACT_PATH}"
+                )
+            member = members[0]
+            if not member.isfile():
+                _fail("source archive contract must be a regular file")
+            stream = archive.extractfile(member)
+            if stream is None:
+                _fail("source archive contract cannot be read")
+            return stream.read()
+    except (tarfile.TarError, OSError) as exc:
+        _fail(f"invalid source archive: {exc}")
+
+
 def _artifact_row(path: Path) -> dict[str, Any]:
     return {
         "path": path.name,
@@ -809,6 +841,13 @@ def _new_staging(output: Path) -> Path:
 
 
 def _copy_candidate_artifacts(args: argparse.Namespace, staging: Path) -> dict[str, dict[str, Any]]:
+    source_contract = _source_contract_bytes(
+        Path(args.source_bundle),
+        args.target_sha,
+    )
+    external_contract = _require_file(Path(args.contract), "contract").read_bytes()
+    if source_contract != external_contract:
+        _fail("contract bytes differ from target source archive contract")
     sources = {
         "compose": (Path(args.candidate_compose), "candidate-compose.yml", False),
         "contract": (Path(args.contract), "contract.yaml", False),
@@ -978,6 +1017,9 @@ def _verify_package(path_value: str) -> tuple[Path, dict[str, Any]]:
     contract = _contract_values(contract_path)
     if payload.get("contract") != contract:
         _fail("contract metadata/hash mismatch")
+    source_path = package / artifacts.get("source_bundle", {}).get("path", "")
+    if _source_contract_bytes(source_path, target) != contract_path.read_bytes():
+        _fail("packaged contract bytes differ from target source archive contract")
     _validate_sbom(package / artifacts.get("sbom", {}).get("path", ""))
     _validate_ci(package / artifacts.get("ci_evidence", {}).get("path", ""), target)
     _validate_build_evidence(
