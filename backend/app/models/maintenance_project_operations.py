@@ -285,6 +285,8 @@ class MaintenanceSiteIssueLine(Base):
     source_order_id: Mapped[str | None] = mapped_column(String(64))
     source_line_id: Mapped[str | None] = mapped_column(String(128))
     serial_number: Mapped[str | None] = mapped_column(Text)
+    # 行级不返还覆盖：True=不返还 / False=必须返还 / None=继承项目默认
+    no_return: Mapped[bool | None] = mapped_column(Boolean)
     linked_purchase_line_id: Mapped[int | None] = mapped_column(
         ForeignKey("f_purchase_line.id")
     )

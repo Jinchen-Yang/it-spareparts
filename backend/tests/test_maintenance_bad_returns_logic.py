@@ -19,6 +19,7 @@ def test_only_standard_hard_drive_category_is_exempt() -> None:
         "category_id_snapshot": 17,
         "category_major_snapshot": "硬盘",
         "category_minor_snapshot": "SAS-HDD",
+        "exemption_source": "category_disk",
         "rule_version": RETURN_RULE_VERSION,
     }
     assert classify_return_obligation(

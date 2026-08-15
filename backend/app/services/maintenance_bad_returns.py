@@ -52,19 +52,48 @@ def classify_return_obligation(
     category_id: int | None,
     category_major: str | None,
     category_minor: str | None,
+    no_return_line: bool | None = None,
+    project_no_return_default: bool = False,
 ) -> dict:
-    """Freeze the standard-category evidence used by the return rule.
+    """Freeze the evidence used by the return rule (B3 行级默认口径).
+
+    判定顺序（系统自动审批，无需人工逐行审批）：
+    1. 行级 no_return=True → 不返还；False → 必须返还（覆盖项目默认）；
+    2. 行级未填 → 项目级默认：项目默认不返还 → 不返还；否则按品类规则；
+    3. 品类规则：标准大类「硬盘」不返还，其余必须返还；
+    4. 无标准品类证据 → pending_category（不形成应返数量）。
 
     A textual category without a standard ``category_id`` is deliberately not
-    evidence.  Only the exact standard major category ``硬盘`` is exempt.
+    evidence.
     """
 
+    exemption_source = "none"
     if category_id is None:
         classification = "pending_category"
         major_snapshot = None
         minor_snapshot = None
+        exemption_source = None
+    elif no_return_line is True:
+        classification = "exempt"
+        major_snapshot = category_major
+        minor_snapshot = category_minor
+        exemption_source = "line_no_return"
+    elif no_return_line is False:
+        classification = "required"
+        major_snapshot = category_major
+        minor_snapshot = category_minor
+    elif project_no_return_default:
+        classification = "exempt"
+        major_snapshot = category_major
+        minor_snapshot = category_minor
+        exemption_source = "project_default_no_return"
+    elif category_major == "硬盘":
+        classification = "exempt"
+        major_snapshot = category_major
+        minor_snapshot = category_minor
+        exemption_source = "category_disk"
     else:
-        classification = "exempt" if category_major == "硬盘" else "required"
+        classification = "required"
         major_snapshot = category_major
         minor_snapshot = category_minor
     return {
@@ -72,8 +101,18 @@ def classify_return_obligation(
         "category_id_snapshot": category_id,
         "category_major_snapshot": major_snapshot,
         "category_minor_snapshot": minor_snapshot,
+        "exemption_source": exemption_source,
         "rule_version": RETURN_RULE_VERSION,
     }
+
+
+def _no_return_flag(raw_line: dict) -> bool | None:
+    value = raw_line.get("no_return")
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    raise BadReturnError("现场领用返还事件 no_return 标记无效")
 
 
 def _rate(numerator: Decimal, denominator: Decimal) -> str:
@@ -276,6 +315,7 @@ def _obligation_dict(
         "source_quantity": _qty(Decimal(row.source_quantity)),
         "required_quantity": _qty(Decimal(row.required_quantity)),
         "classification": row.classification,
+        "exemption_source": row.exemption_source,
         "category_id_snapshot": row.category_id_snapshot,
         "category_major_snapshot": row.category_major_snapshot,
         "category_minor_snapshot": row.category_minor_snapshot,
@@ -518,6 +558,13 @@ def consume_return_event(
         if delivery_id not in existing_by_delivery
     }
     categories = _category_evidence(db, new_part_ids)
+    project_no_return_default = bool(
+        db.scalar(
+            select(MaintenanceProject.no_return_default).where(
+                MaintenanceProject.project_id == event.project_id
+            )
+        )
+    )
     projected: list[MaintenanceReturnObligation] = []
     for delivery_line_id, raw_line in now_lines.items():
         issue_line_id = _required(raw_line.get("issue_line_id"), "领用明细编号", 64)
@@ -533,6 +580,8 @@ def consume_return_event(
                 category_id=category_id,
                 category_major=category_major,
                 category_minor=category_minor,
+                no_return_line=_no_return_flag(raw_line),
+                project_no_return_default=project_no_return_default,
             )
             required_quantity = (
                 source_quantity
@@ -550,6 +599,7 @@ def consume_return_event(
                 source_quantity=source_quantity,
                 required_quantity=required_quantity,
                 classification=classification["classification"],
+                exemption_source=classification["exemption_source"],
                 category_id_snapshot=classification["category_id_snapshot"],
                 category_major_snapshot=classification["category_major_snapshot"],
                 category_minor_snapshot=classification["category_minor_snapshot"],
@@ -575,8 +625,27 @@ def consume_return_event(
         else:
             if row.part_id != part_id or row.pn != pn:
                 raise BadReturnConflict("同一稳定发货明细的 PN 身份不能更改")
+            # 更正路径沿用行内冻结的品类证据（新分类仅用于新行；老行不因
+            # 本轮 categories 未重新加载而退化到 pending）
+            category_id, category_major, category_minor = categories.get(
+                part_id,
+                (
+                    row.category_id_snapshot,
+                    row.category_major_snapshot,
+                    row.category_minor_snapshot,
+                ),
+            )
+            classification = classify_return_obligation(
+                category_id=category_id,
+                category_major=category_major,
+                category_minor=category_minor,
+                no_return_line=_no_return_flag(raw_line),
+                project_no_return_default=project_no_return_default,
+            )
             required_quantity = (
-                source_quantity if row.classification == "required" else Decimal("0")
+                source_quantity
+                if classification["classification"] == "required"
+                else Decimal("0")
             )
             registered = quantities.get(
                 row.obligation_id,
@@ -588,6 +657,12 @@ def consume_return_event(
             row.issue_line_id = issue_line_id
             row.source_quantity = source_quantity
             row.required_quantity = required_quantity
+            row.classification = classification["classification"]
+            row.exemption_source = classification["exemption_source"]
+            row.category_id_snapshot = classification["category_id_snapshot"]
+            row.category_major_snapshot = classification["category_major_snapshot"]
+            row.category_minor_snapshot = classification["category_minor_snapshot"]
+            row.rule_version = classification["rule_version"]
             row.source_issue_version = event.issue_version
             row.last_source_event_id = event.event_id
             row.is_active = True
