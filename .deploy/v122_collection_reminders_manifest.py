@@ -165,6 +165,13 @@ def _timezone_datetime(value: Any, label: str) -> dt.datetime:
     return parsed
 
 
+def _allowed_raw_storage_paths(file_hash: str) -> tuple[str, str]:
+    return (
+        f"/app/data/raw/{file_hash}.xlsx",
+        f"./data/raw/{file_hash}.xlsx",
+    )
+
+
 def _validate_historical_gap_approval(
     path: Path,
     *,
@@ -255,9 +262,8 @@ def _validate_historical_gap_approval(
             f"historical upload gap reference {index} file hash",
         )
         storage_path = row.get("storage_path")
-        canonical_path = f"/app/data/raw/{file_hash}.xlsx"
-        if storage_path != canonical_path:
-            _fail(f"historical upload gap reference {index} storage path is not canonical")
+        if storage_path not in _allowed_raw_storage_paths(file_hash):
+            _fail(f"historical upload gap reference {index} storage path is invalid")
         if raw_id in seen_ids:
             _fail("historical upload gap raw_file_id values must be unique")
         seen_ids.add(raw_id)
@@ -265,7 +271,7 @@ def _validate_historical_gap_approval(
             {
                 "raw_file_id": raw_id,
                 "file_hash": file_hash,
-                "storage_path": canonical_path,
+                "storage_path": storage_path,
             }
         )
     if normalized != sorted(
@@ -368,9 +374,8 @@ def _audit_upload_references(
                 SHA256,
                 f"raw upload reference row {line_number} file hash",
             )
-            canonical_path = f"/app/data/raw/{file_hash}.xlsx"
-            if storage_path != canonical_path:
-                _fail(f"raw upload reference row {line_number} storage path is not canonical")
+            if storage_path not in _allowed_raw_storage_paths(file_hash):
+                _fail(f"raw upload reference row {line_number} storage path is invalid")
             candidate = root / f"{file_hash}.xlsx"
             referenced_paths.add(candidate)
             try:
@@ -380,7 +385,7 @@ def _audit_upload_references(
                     {
                         "raw_file_id": raw_id,
                         "file_hash": file_hash,
-                        "storage_path": canonical_path,
+                        "storage_path": storage_path,
                     }
                 )
                 continue

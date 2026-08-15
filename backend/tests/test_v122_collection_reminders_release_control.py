@@ -664,6 +664,14 @@ def _historical_gap_ref(raw_file_id: int, file_hash: str) -> dict:
     }
 
 
+def _legacy_historical_gap_ref(raw_file_id: int, file_hash: str) -> dict:
+    return {
+        "raw_file_id": raw_file_id,
+        "file_hash": file_hash,
+        "storage_path": f"./data/raw/{file_hash}.xlsx",
+    }
+
+
 def _raw_reference_row(ref: dict) -> str:
     return "\t".join(
         ["raw", str(ref["raw_file_id"]), ref["file_hash"], ref["storage_path"], ""]
@@ -1582,6 +1590,75 @@ def test_upload_reference_audit_strict_complete_verifies_existing_raw_bytes(
     assert evidence["approved_missing_count"] == 0
     assert evidence["unexpected_missing_count"] == 0
     assert evidence["historical_upload_gap_approval_sha256"] is None
+
+
+def test_upload_reference_audit_accepts_exact_legacy_production_path_gap(
+    tmp_path: Path,
+):
+    file_hash = hashlib.sha256(b"legacy-production-missing").hexdigest()
+    ref = _legacy_historical_gap_ref(181, file_hash)
+    approval = _historical_gap_approval(tmp_path / "approval.json", [ref])
+    completed, _root, output = _run_upload_reference_audit(
+        tmp_path,
+        rows=[_raw_reference_row(ref)],
+        approval=approval,
+    )
+    assert completed.returncode == 0, completed.stderr
+    evidence = json.loads(output.read_text())
+    assert evidence["reference_state"] == "complete_with_approved_historical_gaps"
+    assert evidence["approved_missing_count"] == 1
+
+
+def test_upload_reference_audit_requires_exact_legacy_or_current_db_path_in_gap_set(
+    tmp_path: Path,
+):
+    file_hash = hashlib.sha256(b"legacy-path-binding").hexdigest()
+    legacy_ref = _legacy_historical_gap_ref(182, file_hash)
+    current_ref = _historical_gap_ref(182, file_hash)
+    approval = _historical_gap_approval(tmp_path / "approval.json", [current_ref])
+    mismatch, _root, output = _run_upload_reference_audit(
+        tmp_path,
+        rows=[_raw_reference_row(legacy_ref)],
+        approval=approval,
+    )
+    assert mismatch.returncode != 0
+    assert "exactly match" in mismatch.stderr.lower() or "approved" in mismatch.stderr.lower()
+    assert not output.exists()
+
+
+def test_upload_reference_audit_rejects_arbitrary_relative_raw_path(
+    tmp_path: Path,
+):
+    file_hash = hashlib.sha256(b"arbitrary-relative").hexdigest()
+    ref = {
+        **_historical_gap_ref(183, file_hash),
+        "storage_path": f"data/raw/{file_hash}.xlsx",
+    }
+    completed, _root, output = _run_upload_reference_audit(
+        tmp_path,
+        rows=[_raw_reference_row(ref)],
+    )
+    assert completed.returncode != 0
+    assert "storage path" in completed.stderr.lower()
+    assert not output.exists()
+
+
+def test_upload_reference_audit_rejects_legacy_approval_after_file_recovery(
+    tmp_path: Path,
+):
+    content = b"recovered-legacy-production-file"
+    file_hash = hashlib.sha256(content).hexdigest()
+    ref = _legacy_historical_gap_ref(184, file_hash)
+    approval = _historical_gap_approval(tmp_path / "approval.json", [ref])
+    completed, _root, output = _run_upload_reference_audit(
+        tmp_path,
+        rows=[_raw_reference_row(ref)],
+        approval=approval,
+        files={f"{file_hash}.xlsx": content},
+    )
+    assert completed.returncode != 0
+    assert "approved" in completed.stderr.lower() or "match" in completed.stderr.lower()
+    assert not output.exists()
 
 
 def test_upload_reference_audit_rejects_approval_for_a_db_ref_that_was_recovered(
