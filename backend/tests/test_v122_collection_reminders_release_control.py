@@ -2578,6 +2578,9 @@ def test_cutover_red_install_compose_cas_installs_candidate_only_after_bound_bac
     env, evidence, _calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
     active = Path(env["V122_APP_DIR"]) / "docker-compose.yml"
     old_bytes = active.read_bytes()
+    # A process killed after fsync but before rename may leave the legacy
+    # fixed-name temporary behind.  A retry must not be permanently wedged.
+    (active.parent / ".v122-compose.next").write_text("stale pre-rename temporary")
     backup_dir = _bind_cutover_backup(package, env)
     backup_manifest = backup_dir / "backup-manifest.json"
     _write_release_state(
@@ -2770,6 +2773,7 @@ def test_cutover_red_commit_release_cas_updates_root_state_and_crash_resumes(tmp
     root_state = json.loads(root.read_text())
     assert root_state == {
         "format": "it-spareparts-production-state-v1",
+        "adopted_for": "v122-collection-reminders",
         "production_sha": FINAL_TARGET_SHA,
         "compose_sha256": hashlib.sha256((package / "candidate-compose.yml").read_bytes()).hexdigest(),
         "app_image_id": IMAGE_ID,
@@ -2817,6 +2821,114 @@ def test_cutover_red_commit_release_cas_updates_root_state_and_crash_resumes(tmp
     assert json.loads((evidence / "release-state.json").read_text())["phase"] == "observe_30_passed"
 
 
+def test_cutover_red_rollback_after_install_rename_crash_restores_old_compose(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    docker = """
+    if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then
+      apply=$(sed -n 's/^MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=//p' "$V122_APP_DIR/.env")
+      project=$(sed -n 's/^MAINTENANCE_COLLECTION_CANARY_PROJECT_ID=//p' "$V122_APP_DIR/.env")
+      printf '%s\n%s\n' "$apply" "$project"; exit 0
+    fi
+    if [[ "$*" == *"compose"* && "$*" == *"config -q"* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *" up "* ]]; then exit 0; fi
+    if [[ "$*" == *"image inspect --format"* ]]; then echo "${!#}"; exit 0; fi
+    if [[ "$*" == *"tag "* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q app"* ]]; then
+      grep -q 'it-spareparts-old:stable' "$V122_APP_DIR/docker-compose.yml" && echo app-cid
+      exit 0
+    fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then
+      grep -q 'it-spareparts-old:stable' "$V122_APP_DIR/docker-compose.yml" && echo frontend-cid
+      exit 0
+    fi
+    if [[ "$*" == *"inspect"* && "$*" == *"app-cid"* ]]; then echo "$V122_TEST_APP_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"frontend-cid"* ]]; then echo "$V122_TEST_FRONTEND_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"exec app-cid python"* && "$*" == *"127.0.0.1:8000/health"* ]]; then echo 200; exit 0; fi
+    exit 97
+    """
+    env, evidence, _calls, _backup_root = _release_test_env(
+        tmp_path / "runtime", package, docker_body=docker
+    )
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    active = Path(env["V122_APP_DIR"]) / "docker-compose.yml"
+    root = Path(env["V122_ROOT_RELEASE_STATE"])
+    old_root = root.read_bytes()
+    old_compose = active.read_bytes()
+    backup_dir = _bind_cutover_backup(package, env)
+    backup_manifest = backup_dir / "backup-manifest.json"
+    # Simulate a process death after the durable Compose rename but before the
+    # evidence phase advances from restore_checked to compose_installed.
+    active.write_bytes((package / "candidate-compose.yml").read_bytes())
+    _write_release_state(
+        evidence,
+        package,
+        phase="restore_checked",
+        backup_dir=str(backup_dir),
+        backup_manifest_sha256=hashlib.sha256(backup_manifest.read_bytes()).hexdigest(),
+    )
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "rollback-images"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert active.read_bytes() == old_compose
+    assert root.read_bytes() == old_root
+    state = json.loads((evidence / "release-state.json").read_text())
+    assert state["phase"] == "rolled_back"
+    assert state["restored_compose_sha256"] == hashlib.sha256(old_compose).hexdigest()
+
+
+def test_cutover_red_rollback_resumes_after_old_compose_rename_before_state_commit(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    docker = """
+    if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then exit 97; fi
+    if [[ "$*" == *"compose"* && "$*" == *"config -q"* ]]; then exit 0; fi
+    if [[ "$*" == *"image inspect --format"* ]]; then echo "${!#}"; exit 0; fi
+    if [[ "$*" == *"tag "* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"up --no-deps --no-build --force-recreate -d app frontend"* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q app"* ]]; then echo app-cid; exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then echo frontend-cid; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"app-cid"* ]]; then echo "$V122_TEST_APP_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"frontend-cid"* ]]; then echo "$V122_TEST_FRONTEND_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"exec app-cid python"* && "$*" == *"127.0.0.1:8000/health"* ]]; then echo 200; exit 0; fi
+    exit 97
+    """
+    env, evidence, calls, _backup_root = _release_test_env(
+        tmp_path / "runtime", package, docker_body=docker
+    )
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    active = Path(env["V122_APP_DIR"]) / "docker-compose.yml"
+    root = Path(env["V122_ROOT_RELEASE_STATE"])
+    old_root = root.read_bytes()
+    _write_release_state(evidence, package, phase="deployed")
+    state_before = json.loads((evidence / "release-state.json").read_text())
+    backup_compose = Path(state_before["backup_dir"]) / "docker-compose.yml"
+    # Simulate a process death after rollback durably restored the parent
+    # Compose bytes but before the release evidence advanced to rolled_back.
+    active.write_bytes(backup_compose.read_bytes())
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "rollback-images"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert active.read_bytes() == backup_compose.read_bytes()
+    assert root.read_bytes() == old_root
+    assert "exec -T app" not in calls.read_text()
+    state = json.loads((evidence / "release-state.json").read_text())
+    assert state["phase"] == "rolled_back"
+    assert state["restored_compose_sha256"] == hashlib.sha256(active.read_bytes()).hexdigest()
+
+
 def test_cutover_red_post_install_rollback_restores_previous_compose_and_keeps_root_state(tmp_path: Path):
     package = _production_package(tmp_path / "pkg")
     docker = """
@@ -2827,6 +2939,7 @@ def test_cutover_red_post_install_rollback_restores_previous_compose_and_keeps_r
       printf '%s\n%s\n' "$apply" "$project"; exit 0
     fi
     if [[ "$*" == *"compose"* && "$*" == *"config -q"* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"up --no-deps --no-build --force-recreate -d app frontend"* ]]; then exit 0; fi
     if [[ "$*" == *"compose"* && "$*" == *"up --no-deps --no-build --force-recreate -d app"* ]]; then exit 0; fi
     if [[ "$*" == *"image inspect --format"* ]]; then echo "${!#}"; exit 0; fi
     if [[ "$*" == *"tag "* ]]; then exit 0; fi
@@ -2909,6 +3022,93 @@ def test_cutover_red_post_install_rollback_readback_failpoint_preserves_candidat
     assert root.read_bytes() == old_root
     assert " tag " not in f" {calls.read_text()} "
     assert json.loads((evidence / "release-state.json").read_text())["phase"] == phase
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_active"),
+    [
+        ("previous-image", "candidate"),
+        ("backup-compose", "candidate"),
+        ("root-state", "candidate"),
+        ("compose-cas", "drift"),
+        ("old-recreate", "parent"),
+        ("health", "parent"),
+    ],
+)
+def test_cutover_red_post_install_rollback_failpoints_never_claim_success(
+    tmp_path: Path,
+    failure: str,
+    expected_active: str,
+):
+    package = _production_package(tmp_path / "pkg")
+    docker = f"""
+    if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then
+      printf 'false\n{CANARY_PROJECT_ID}\n'; exit 0
+    fi
+    if [[ "$*" == *"compose"* && "$*" == *"config -q"* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"up --no-deps --no-build --force-recreate -d app frontend"* ]]; then
+      [ "{failure}" != old-recreate ]
+      exit $?
+    fi
+    if [[ "$*" == *"compose"* && "$*" == *"up --no-deps --no-build --force-recreate -d app"* ]]; then exit 0; fi
+    if [[ "$*" == *"image inspect --format"* ]]; then
+      if [ "{failure}" = previous-image ]; then echo sha256:wrong-image; else echo "${{!#}}"; fi
+      exit 0
+    fi
+    if [[ "$*" == *"tag "* ]]; then
+      if [ "{failure}" = compose-cas ]; then
+        printf 'services:\n  app:\n    image: unexpected-drift\n' > "$V122_APP_DIR/docker-compose.yml"
+      fi
+      exit 0
+    fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q app"* ]]; then echo app-cid; exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then echo frontend-cid; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"app-cid"* ]]; then echo "$V122_TEST_APP_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"frontend-cid"* ]]; then echo "$V122_TEST_FRONTEND_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"exec app-cid python"* && "$*" == *"127.0.0.1:8000/health"* ]]; then
+      if [ "{failure}" = health ]; then exit 97; else echo 200; fi
+      exit 0
+    fi
+    exit 97
+    """
+    env, evidence, _calls, _backup_root = _release_test_env(
+        tmp_path / "runtime", package, docker_body=docker
+    )
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    active = Path(env["V122_APP_DIR"]) / "docker-compose.yml"
+    root = Path(env["V122_ROOT_RELEASE_STATE"])
+    _write_release_state(evidence, package, phase="deployed")
+    state_before = json.loads((evidence / "release-state.json").read_text())
+    backup_compose = Path(state_before["backup_dir"]) / "docker-compose.yml"
+    parent_bytes = backup_compose.read_bytes()
+    candidate_bytes = (package / "candidate-compose.yml").read_bytes()
+    root_before = root.read_bytes()
+    if failure == "backup-compose":
+        backup_compose.write_text("services:\n  app:\n    image: corrupt-backup\n")
+    elif failure == "root-state":
+        root.write_text('{"unexpected":"root-drift"}\n')
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "rollback-images"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert json.loads((evidence / "release-state.json").read_text())["phase"] == "deployed"
+    assert "rolled_back" not in completed.stdout
+    if expected_active == "candidate":
+        assert active.read_bytes() == candidate_bytes
+    elif expected_active == "parent":
+        assert active.read_bytes() == parent_bytes
+    else:
+        assert b"unexpected-drift" in active.read_bytes()
+    if failure == "root-state":
+        assert root.read_text() == '{"unexpected":"root-drift"}\n'
+    else:
+        assert root.read_bytes() == root_before
 
 
 def test_cutover_red_preinstall_rollback_does_not_require_candidate_runtime_readback(tmp_path: Path):
@@ -3628,8 +3828,10 @@ def test_canary_grant_get_mismatch_triggers_full_restore(tmp_path: Path):
     assert len([line for line in call_lines if "action_restore-" in line]) == 3
 
 
+@pytest.mark.parametrize("account_state", ["granted", "mixed-after-partial-restore"])
 def test_rollback_accepts_fresh_tokens_and_action_only_spec_after_workbook_archival(
     tmp_path: Path,
+    account_state: str,
 ):
     package = _production_package(tmp_path / "pkg")
     event_log = tmp_path / "rollback-events"
@@ -3653,10 +3855,16 @@ def test_rollback_accepts_fresh_tokens_and_action_only_spec_after_workbook_archi
     workbook.unlink()
     curl_calls = tmp_path / "curl-calls"
     snapshot_audit = tmp_path / "rollback-snapshot-audit"
+    live_rows = _action_account_rows(rollback_spec, "action_grant")
+    if account_state == "mixed-after-partial-restore":
+        restored = _action_account_rows(rollback_spec, "action_restore")
+        restore_by_username = {row["username"]: row for row in restored}
+        live_rows[0] = copy.deepcopy(restore_by_username[live_rows[0]["username"]])
     _write_rollback_curl_stub(
         Path(env["PATH"].split(":", 1)[0]) / "curl",
         spec=rollback_spec,
         curl_calls=curl_calls,
+        granted_rows=live_rows,
         event_log=event_log,
         expected_token_prefix="fresh-rollback",
         snapshot_audit=snapshot_audit,
@@ -3666,7 +3874,7 @@ def test_rollback_accepts_fresh_tokens_and_action_only_spec_after_workbook_archi
     _write_release_state(
         evidence,
         package,
-        phase="canary",
+        phase="deployed" if account_state == "mixed-after-partial-restore" else "canary",
         actions_granted=True,
         canary_spec_sha256=expected_full_sha,
         action_plan_sha256=expected_plan_sha,
@@ -4216,7 +4424,7 @@ def test_rollback_live_grant_mismatch_fails_before_restore_put_or_image_change(
     )
 
     assert completed.returncode != 0
-    assert "account overrides state mismatch" in completed.stderr
+    assert "account transition state mismatch" in completed.stderr
     assert "action_verify_granted" in curl_calls.read_text()
     assert "--request PUT" not in curl_calls.read_text()
     events = event_log.read_text().splitlines()
@@ -4385,6 +4593,10 @@ def test_canary_partial_grant_failure_attempts_all_puts_then_restores_in_reverse
     assert restore_urls == list(reversed(grant_urls))
     assert all("--request PUT" in line for line in call_lines if "action_" in line and "-00" in line)
     assert "sealed-partial-grant-token" not in curl_calls.read_text()
+    state = json.loads((evidence / "release-state.json").read_text())
+    assert state["phase"] == "deployed"
+    assert state["actions_granted"] is True
+    assert state["action_plan_sha256"] == _action_plan_sha256(spec)
 
 
 @pytest.mark.parametrize(
