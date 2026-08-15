@@ -37,6 +37,7 @@ from app.api import (
     maintenance_project_operations,
     maintenance_source_assignments,
     maintenance_project_workbooks,
+    maintenance_project_workbook_v3,
     maintenance_projects,
     maintenance_recovery,
     maintenance_warehouse,
@@ -147,6 +148,11 @@ app.include_router(
 )
 app.include_router(
     maintenance_project_workbooks.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_project_workbook_v3.router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )
