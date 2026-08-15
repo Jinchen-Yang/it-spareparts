@@ -67,26 +67,35 @@ def classify_return_obligation(
     evidence.
     """
 
+    # 判定顺序（B3 口径）：行级 → 项目默认 → 品类 → pending。
+    # 行级 True 无需品类证据即可豁免；行级 False 必须有品类证据才能要求返还，
+    # 无品类证据时按 pending 待判定（不形成应返数量）。
     exemption_source = "none"
-    if category_id is None:
-        classification = "pending_category"
-        major_snapshot = None
-        minor_snapshot = None
-        exemption_source = None
-    elif no_return_line is True:
+    if no_return_line is True:
         classification = "exempt"
         major_snapshot = category_major
         minor_snapshot = category_minor
         exemption_source = "line_no_return"
     elif no_return_line is False:
-        classification = "required"
-        major_snapshot = category_major
-        minor_snapshot = category_minor
+        if category_id is None:
+            classification = "pending_category"
+            major_snapshot = None
+            minor_snapshot = None
+            exemption_source = None
+        else:
+            classification = "required"
+            major_snapshot = category_major
+            minor_snapshot = category_minor
     elif project_no_return_default:
         classification = "exempt"
         major_snapshot = category_major
         minor_snapshot = category_minor
         exemption_source = "project_default_no_return"
+    elif category_id is None:
+        classification = "pending_category"
+        major_snapshot = None
+        minor_snapshot = None
+        exemption_source = None
     elif category_major == "硬盘":
         classification = "exempt"
         major_snapshot = category_major
@@ -1435,6 +1444,7 @@ def resolve_obligation_category(
     row.category_major_snapshot = classification["category_major_snapshot"]
     row.category_minor_snapshot = classification["category_minor_snapshot"]
     row.classification = classification["classification"]
+    row.exemption_source = classification["exemption_source"]
     row.rule_version = classification["rule_version"]
     row.required_quantity = (
         Decimal(row.source_quantity)

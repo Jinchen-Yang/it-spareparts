@@ -30,8 +30,16 @@ from app.models._types import Money, Qty, TZDateTime
 
 # 流水类型（入库为正、出库为负）
 MOVEMENT_KINDS = ("shipment_in", "purchase_in", "return_out", "salvage_out")
-# 来源类型：FMaintenanceOrder=WBDD 发货明细 / warehouse=仓库单据 / salvage=变卖登记
-SOURCE_TYPES = ("f_maintenance_line", "warehouse_document_line", "salvage", "manual")
+# 来源类型：ckd_shipment_line=氚云发货单明细 / return_order_line=氚云返库单明细 /
+# f_maintenance_line=WBDD 需求明细 / warehouse_document_line=仓库单据 / salvage=变卖登记
+SOURCE_TYPES = (
+    "ckd_shipment_line",
+    "return_order_line",
+    "f_maintenance_line",
+    "warehouse_document_line",
+    "salvage",
+    "manual",
+)
 
 
 class MaintenanceFrontStock(Base):
@@ -103,6 +111,10 @@ class MaintenanceFrontStockLedger(Base):
     # 有符号数量：入为正、出为负；qty_after 为该笔之后的结存快照。
     qty_change: Mapped[Decimal] = mapped_column(Qty, nullable=False)
     qty_after: Mapped[Decimal] = mapped_column(Qty, nullable=False)
+    # 同来源重放校验：payload 摘要一致才算幂等重放，不一致失败关闭。
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 业务发生时间（发货日期等）；库龄以此为准，imported_at 用 created_at。
+    occurred_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     unit_cost_ex_tax: Mapped[Decimal | None] = mapped_column(Money)
     unit_cost_inc_tax: Mapped[Decimal | None] = mapped_column(Money)
     reason: Mapped[str | None] = mapped_column(Text)
@@ -117,8 +129,8 @@ class MaintenanceFrontStockLedger(Base):
             name="ck_maintenance_front_stock_ledger_kind",
         ),
         CheckConstraint(
-            "source_type IN ('f_maintenance_line', 'warehouse_document_line',"
-            " 'salvage', 'manual')",
+            "source_type IN ('ckd_shipment_line', 'return_order_line',"
+            " 'f_maintenance_line', 'warehouse_document_line', 'salvage', 'manual')",
             name="ck_maintenance_front_stock_ledger_source_type",
         ),
         CheckConstraint(
@@ -131,12 +143,10 @@ class MaintenanceFrontStockLedger(Base):
             "char_length(btrim(operated_by)) > 0",
             name="ck_maintenance_front_stock_ledger_operator",
         ),
-        # 幂等：同一来源同一条明细行只入账一次。
+        # 幂等：同一来源事件只入账一次；kind/part/qty 变化由 payload_hash 校验拒绝。
         UniqueConstraint(
-            "kind",
             "source_type",
             "source_ref",
-            "part_id",
             name="uq_maintenance_front_stock_ledger_source",
         ),
         Index("ix_maintenance_front_stock_ledger_project", "project_id", "created_at"),

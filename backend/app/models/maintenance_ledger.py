@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import (
+from sqlalchemy import (UniqueConstraint, 
     ARRAY,
     Boolean,
     CheckConstraint,
@@ -43,6 +43,7 @@ class MaintenanceLedgerImportBatch(Base):
     batch_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     source_kind: Mapped[str] = mapped_column(String(32), nullable=False)
     uploaded_by: Mapped[str] = mapped_column(String(64), nullable=False)
     uploaded_at: Mapped[datetime] = mapped_column(
@@ -79,6 +80,11 @@ class MaintenanceLedgerImportBatch(Base):
         CheckConstraint(
             "(status = 'applied') = (applied_at IS NOT NULL AND applied_by IS NOT NULL)",
             name="ck_maintenance_ledger_import_applied",
+        ),
+        UniqueConstraint(
+            "uploaded_by",
+            "idempotency_key",
+            name="uq_maintenance_ledger_import_idempotency",
         ),
         Index("ix_maintenance_ledger_import_hash", "file_hash"),
         Index("ix_maintenance_ledger_import_uploaded", "uploaded_at"),
@@ -155,8 +161,9 @@ class MaintenanceLedgerPlanRow(Base):
     issues: Mapped[list[str] | None] = mapped_column(ARRAY(String(128)), nullable=True, default=list)
 
     __table_args__ = (
+        # 0 表示原始期次非法（仅 raw 保留），apply 忽略；与迁移一致。
         CheckConstraint(
-            "sequence BETWEEN 1 AND 24",
+            "sequence BETWEEN 0 AND 24",
             name="ck_maintenance_ledger_plan_seq",
         ),
         Index("ix_maintenance_ledger_plan_batch", "batch_id"),

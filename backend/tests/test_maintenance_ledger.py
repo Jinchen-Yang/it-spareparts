@@ -1,6 +1,8 @@
 """维保台账工作簿解析与 apply 测试（B2）。"""
 
 import io
+
+import pytest
 from datetime import date
 
 from openpyxl import Workbook
@@ -150,7 +152,7 @@ def test_parse_rejects_unknown_structure():
 
 def test_store_preview_then_apply(db):
     parsed = ledger.parse_ledger_workbook(_old_ledger_workbook_bytes(), "维保台账.xlsx")
-    batch_id = ledger.store_preview(db, parsed, "合成管理员")
+    batch_id = ledger.store_preview(db, parsed, "合成管理员", idempotency_key="ledger-test-key-0001")
 
     batch = db.get(MaintenanceLedgerImportBatch, batch_id)
     assert batch.status == "pending"
@@ -210,7 +212,7 @@ def test_apply_syncs_canonical_tables(db):
     )
     db.commit()
     parsed = ledger.parse_ledger_workbook(_old_ledger_workbook_bytes(), "维保台账.xlsx")
-    batch_id = ledger.store_preview(db, parsed, "合成管理员")
+    batch_id = ledger.store_preview(db, parsed, "合成管理员", idempotency_key="ledger-test-key-0001")
     summary = ledger.apply_batch(db, batch_id, "合成管理员")
 
     assert summary["projects_created"] == 2
@@ -261,13 +263,13 @@ def test_apply_syncs_canonical_tables(db):
 
 def test_apply_idempotent_and_version_bump(db):
     parsed = ledger.parse_ledger_workbook(_old_ledger_workbook_bytes(), "维保台账.xlsx")
-    batch_id = ledger.store_preview(db, parsed, "合成管理员")
+    batch_id = ledger.store_preview(db, parsed, "合成管理员", idempotency_key="ledger-test-key-0001")
     first = ledger.apply_batch(db, batch_id, "合成管理员")
     assert first["contracts_created"] == 2
 
     # 同一文件再次导入：新批次，同值不重复写（无 updated/created 增量）
     parsed2 = ledger.parse_ledger_workbook(_old_ledger_workbook_bytes(), "维保台账.xlsx")
-    batch_id2 = ledger.store_preview(db, parsed2, "合成管理员")
+    batch_id2 = ledger.store_preview(db, parsed2, "合成管理员", idempotency_key="ledger-test-key-0002")
     second = ledger.apply_batch(db, batch_id2, "合成管理员")
     assert second["contracts_created"] == 0
     assert second["contracts_updated"] == 0
@@ -291,7 +293,7 @@ def test_apply_idempotent_and_version_bump(db):
     buffer = io.BytesIO()
     wb2.save(buffer)
     parsed3 = ledger.parse_ledger_workbook(buffer.getvalue(), "维保台账.xlsx")
-    batch_id3 = ledger.store_preview(db, parsed3, "合成管理员")
+    batch_id3 = ledger.store_preview(db, parsed3, "合成管理员", idempotency_key="ledger-test-key-0003")
     third = ledger.apply_batch(db, batch_id3, "合成管理员")
     assert third["contracts_updated"] == 1
 
@@ -306,7 +308,7 @@ def test_apply_idempotent_and_version_bump(db):
 
 def test_apply_rejects_duplicate_apply(db):
     parsed = ledger.parse_ledger_workbook(_old_ledger_workbook_bytes(), "维保台账.xlsx")
-    batch_id = ledger.store_preview(db, parsed, "合成管理员")
+    batch_id = ledger.store_preview(db, parsed, "合成管理员", idempotency_key="ledger-test-key-0001")
     ledger.apply_batch(db, batch_id, "合成管理员")
     try:
         ledger.apply_batch(db, batch_id, "合成管理员")
@@ -331,15 +333,10 @@ def test_apply_skips_missing_period(db):
     buffer = io.BytesIO()
     wb.save(buffer)
     parsed = ledger.parse_ledger_workbook(buffer.getvalue(), "维保台账.xlsx")
-    batch_id = ledger.store_preview(db, parsed, "合成管理员")
-    summary = ledger.apply_batch(db, batch_id, "合成管理员")
-    # 缺期限也缺订单日期 → 合同行跳过；项目仍创建（缺期限但 identity 存在）
-    assert summary["contracts_created"] == 0
-    assert summary["projects_created"] == 1
-    assert summary["skipped_rows"] == 1
-    project = db.execute(
-        select(MaintenanceProject).where(
-            MaintenanceProject.project_code == "无期限项目"
-        )
-    ).scalar_one()
-    assert project.lifecycle_status == "missing"
+    batch_id = ledger.store_preview(db, parsed, "合成管理员", idempotency_key="ledger-test-key-0001")
+    # 缺期限行 → 关键异常 → 整批失败关闭：project/contract/milestone 零写入
+    with pytest.raises(ledger.LedgerBatchError):
+        ledger.apply_batch(db, batch_id, "合成管理员")
+    batch = db.get(MaintenanceLedgerImportBatch, batch_id)
+    assert batch.status == "failed"
+    assert db.execute(select(MaintenanceProject)).scalars().all() == []

@@ -18,7 +18,7 @@ from datetime import date, datetime, timezone
 from uuid import uuid4
 
 from openpyxl import load_workbook
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.business_time import business_today
@@ -50,7 +50,7 @@ _CONTRACT_HEADERS = [
     "订单编号", "订单日期", "销售人员", "业务类型", "项目名称",
     "维保起始日期", "维保终止日期", "CMO", "项目经理", "订单金额",
     "已收尾款", "待收尾款", "验收材料", "验收材料是否完成及上传附件",
-    "巡检时间", "巡检是否完成及上传附件",
+    "验收附件", "巡检时间", "巡检是否完成及上传附件",
 ]
 _EXPENSE_HEADERS = [
     "费用单号", "报销人员", "报销类别", "支出事由", "维保销售订单",
@@ -95,8 +95,14 @@ class ExpenseRowData:
 
 
 def _header_index(headers: list, name: str) -> int | None:
+    variants = {
+        name,
+        f"{name}(必填)",
+        f"{name}(不可修改)",
+        f"{name}(含税)",
+    }
     for idx, value in enumerate(headers, 1):
-        if value == name:
+        if value in variants:
             return idx
     return None
 
@@ -306,12 +312,33 @@ def parse_ledger_workbook(data: bytes, filename: str) -> dict:
     }
 
 
-def store_preview(db: Session, parsed: dict, operated_by: str) -> str:
-    """落 raw 行并返回 batch_id。零 canonical 写入。"""
+def store_preview(
+    db: Session,
+    parsed: dict,
+    operated_by: str,
+    *,
+    idempotency_key: str,
+) -> str:
+    """落 raw 行并返回 batch_id。零 canonical 写入。
+
+    Idempotency-Key 生效：(uploaded_by, idempotency_key) 唯一；
+    同 key 同 hash 返回既有批次（重放），同 key 异 hash 拒绝。
+    """
+    existing = db.execute(
+        select(MaintenanceLedgerImportBatch).where(
+            MaintenanceLedgerImportBatch.uploaded_by == operated_by,
+            MaintenanceLedgerImportBatch.idempotency_key == idempotency_key,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        if existing.file_hash != parsed["file_hash"]:
+            raise LedgerBatchError("同一 Idempotency-Key 对应不同文件内容，拒绝重放")
+        return existing.batch_id
     batch = MaintenanceLedgerImportBatch(
         batch_id=str(uuid4()),
         file_hash=parsed["file_hash"],
         filename=parsed["filename"][:255],
+        idempotency_key=idempotency_key,
         source_kind=parsed["source_kind"],
         uploaded_by=operated_by,
         contract_rows=len(parsed["contract_rows"]),
@@ -360,6 +387,7 @@ def store_preview(db: Session, parsed: dict, operated_by: str) -> str:
                 receivable_raw=data.values["待收尾款"],
                 acceptance_material_raw=data.values["验收材料"],
                 acceptance_done_raw=data.values["验收材料是否完成及上传附件"],
+                acceptance_attachment_raw=data.values["验收附件"],
                 inspection_time_raw=data.values["巡检时间"],
                 inspection_done_raw=data.values["巡检是否完成及上传附件"],
                 order_no=_clean_order_no(data.values["订单编号"]),
@@ -452,6 +480,7 @@ def _upsert_project(
     operated_by: str,
     summary: dict,
     today: date,
+    ledger_batch_id: str,
 ) -> MaintenanceProject:
     code = (row.project_name or row.project_name_raw or "未命名项目")[:MAX_PROJECT_CODE_LEN]
     project = db.execute(
@@ -494,15 +523,20 @@ def _upsert_project(
         "business_type": project.business_type,
         "cmo_name": project.cmo_name,
         "salesperson": project.salesperson,
+        "project_manager_id": project.project_manager_id,
     }
     after = dict(before)
     if project.display_name != display_name:
         project.display_name = display_name
         after["display_name"] = display_name
         changed = True
-    if project.lifecycle_status == "missing" and lifecycle != "missing":
+    if project.lifecycle_status != lifecycle:
         project.lifecycle_status = lifecycle
         after["lifecycle_status"] = lifecycle
+        changed = True
+    if row.manager and project.project_manager_id != row.manager[:64]:
+        project.project_manager_id = row.manager[:64]
+        after["project_manager_id"] = row.manager[:64]
         changed = True
     if row.business_type and project.business_type != row.business_type:
         project.business_type = row.business_type
@@ -531,7 +565,58 @@ def _upsert_project(
             )
         )
         summary["projects_updated"] += 1
+    _upsert_service_period(
+        db,
+        project_id=project.project_id,
+        period_from=row.project_period_from,
+        period_to=row.project_period_to,
+        ledger_batch_id=ledger_batch_id,
+    )
     return project
+
+
+def _upsert_service_period(
+    db: Session,
+    *,
+    project_id: str,
+    period_from: date | None,
+    period_to: date | None,
+    ledger_batch_id: str | None,
+) -> None:
+    from app.models.maintenance_manager import MaintenanceServicePeriod
+
+    if period_from is None and period_to is None:
+        return
+    completeness = "complete"
+    if period_from is None:
+        completeness = "end_only"
+    elif period_to is None:
+        completeness = "start_only"
+    period = db.get(MaintenanceServicePeriod, project_id)
+    if period is None:
+        db.add(
+            MaintenanceServicePeriod(
+                project_id=project_id,
+                service_start=period_from,
+                service_end=period_to,
+                completeness_state=completeness,
+                source=LEDGER_SOURCE,
+                ledger_batch_id=ledger_batch_id,
+                version=1,
+            )
+        )
+        return
+    if (
+        period.service_start != period_from
+        or period.service_end != period_to
+        or period.completeness_state != completeness
+    ):
+        period.service_start = period_from
+        period.service_end = period_to
+        period.completeness_state = completeness
+        period.source = LEDGER_SOURCE
+        period.ledger_batch_id = ledger_batch_id
+        period.version += 1
 
 
 def _upsert_contract(
@@ -617,13 +702,9 @@ def _upsert_milestone(
     ledger_batch_id: str,
     summary: dict,
 ) -> None:
-    milestone = db.execute(
-        select(MaintenanceCollectionMilestone).where(
-            MaintenanceCollectionMilestone.project_contract_id
-            == contract.project_contract_id,
-            MaintenanceCollectionMilestone.sequence == row.sequence,
-        )
-    ).scalar_one_or_none()
+    """回款计划节点走唯一受控 helper（保留已跟进待复核语义）。"""
+    from app.services import maintenance_collection_milestones as milestone_svc
+
     if row.planned_date is None and row.planned_amount is None:
         return
     completeness = "complete"
@@ -631,51 +712,69 @@ def _upsert_milestone(
         completeness = "amount_only"
     elif row.planned_amount is None:
         completeness = "date_only"
-    precision = row.date_precision if row.date_precision in ("day", "month") else "day"
-    if milestone is None:
-        db.add(
-            MaintenanceCollectionMilestone(
-                milestone_id=str(uuid4()),
-                project_id=contract.project_id,
-                project_contract_id=contract.project_contract_id,
-                sequence=row.sequence,
-                planned_date=row.planned_date,
-                planned_amount=row.planned_amount,
-                completeness_state=completeness,
-                source=LEDGER_SOURCE,
-                ledger_batch_id=ledger_batch_id,
-                date_precision=precision,
-                follow_up_status="pending",
-                follow_up_review_required=False,
-            )
+    existing = db.execute(
+        select(MaintenanceCollectionMilestone).where(
+            MaintenanceCollectionMilestone.project_contract_id
+            == contract.project_contract_id,
+            MaintenanceCollectionMilestone.sequence == row.sequence,
         )
+    ).scalar_one_or_none()
+    # 台账来源默认精度为 month；由 helper 按来源派生并校验。
+    milestone_svc.write_collection_milestone(
+        db,
+        project_id=contract.project_id,
+        project_contract_id=contract.project_contract_id,
+        sequence=row.sequence,
+        planned_date=row.planned_date,
+        planned_amount=row.planned_amount,
+        completeness_state=completeness,
+        source=LEDGER_SOURCE,
+        ledger_batch_id=ledger_batch_id,
+        date_precision=None,
+    )
+    if existing is None:
         summary["milestones_created"] += 1
-        return
-    changed = False
-    if milestone.planned_date != row.planned_date:
-        milestone.planned_date = row.planned_date
-        changed = True
-    if milestone.planned_amount != row.planned_amount:
-        milestone.planned_amount = row.planned_amount
-        changed = True
-    if milestone.completeness_state != completeness:
-        milestone.completeness_state = completeness
-        changed = True
-    if milestone.date_precision != precision:
-        milestone.date_precision = precision
-        changed = True
-    if changed:
-        milestone.version += 1
+    else:
         summary["milestones_updated"] += 1
 
 
 def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
-    """把 raw 行同步进 canonical 表。幂等：同值不重复写；变更字段更新并升版本。"""
+    """把 raw 行同步进 canonical 表。失败关闭：任何关键异常行都整批零写。"""
     batch = db.get(MaintenanceLedgerImportBatch, batch_id)
     if batch is None:
         raise LedgerBatchError("台账批次不存在")
     if batch.status == "applied":
         raise LedgerBatchError("台账批次已应用，不能重复应用")
+    if batch.status == "failed":
+        raise LedgerBatchError("台账批次已因异常被拒绝，需重新上传")
+    issue_rows = (
+        db.execute(
+            select(MaintenanceLedgerContractRow).where(
+                MaintenanceLedgerContractRow.batch_id == batch_id,
+                func.cardinality(MaintenanceLedgerContractRow.issues) > 0,
+            )
+        ).scalars().all()
+    )
+    issue_plan_rows = (
+        db.execute(
+            select(MaintenanceLedgerPlanRow).where(
+                MaintenanceLedgerPlanRow.batch_id == batch_id,
+                func.cardinality(MaintenanceLedgerPlanRow.issues) > 0,
+            )
+        ).scalars().all()
+    )
+    if issue_rows or issue_plan_rows:
+        batch.status = "failed"
+        batch.report_json = {
+            **(batch.report_json or {}),
+            "rejected_rows": len(issue_rows) + len(issue_plan_rows),
+            "rejection_reason": "台账批次存在关键异常行，整批拒绝应用",
+        }
+        db.commit()
+        raise LedgerBatchError(
+            f"台账批次存在 {len(issue_rows) + len(issue_plan_rows)} 行关键异常，"
+            "整批拒绝应用（raw 已保留）"
+        )
     today = business_today()
     summary = {
         "projects_created": 0,
@@ -709,7 +808,9 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
         if row.order_no is None:
             summary["skipped_rows"] += 1
             continue
-        project = _upsert_project(db, row, operated_by, summary, today)
+        project = _upsert_project(
+            db, row, operated_by, summary, today, ledger_batch_id=batch_id
+        )
         contract = _upsert_contract(db, row, project, operated_by, summary)
         if contract is not None:
             contract_by_order[row.order_no] = contract

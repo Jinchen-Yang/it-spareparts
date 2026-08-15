@@ -165,6 +165,11 @@ class MaintenanceProjectContract(Base):
             name="ck_maintenance_project_contract_amount",
         ),
         CheckConstraint(
+            "amount_inc_tax IS NULL OR "
+            "(amount_inc_tax >= 0 AND amount_inc_tax < 1000000000000)",
+            name="ck_maintenance_project_contract_amount_inc_tax",
+        ),
+        CheckConstraint(
             "version >= 1",
             name="ck_maintenance_project_contract_version",
         ),

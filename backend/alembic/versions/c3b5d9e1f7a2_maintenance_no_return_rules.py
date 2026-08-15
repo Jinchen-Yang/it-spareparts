@@ -74,6 +74,24 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute(
+        """
+        DO $guard$
+        BEGIN
+          IF EXISTS (
+                SELECT 1 FROM maintenance_return_obligation
+                WHERE exemption_source IN ('line_no_return', 'project_default_no_return')
+             )
+             OR EXISTS (SELECT 1 FROM maintenance_site_issue_line WHERE no_return IS NOT NULL)
+             OR EXISTS (SELECT 1 FROM maintenance_project WHERE no_return_default)
+          THEN
+            RAISE EXCEPTION
+              'c3b5d9e1f7a2 downgrade blocked: no-return facts exist';
+          END IF;
+        END
+        $guard$;
+        """
+    )
     op.drop_constraint(
         "ck_maintenance_return_obligation_rule_result",
         "maintenance_return_obligation",

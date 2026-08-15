@@ -393,6 +393,7 @@ def test_permission_registry_wiring(db):
                                    "action_maintenance_warehouse_manage",
                                    "action_maintenance_migration_review",
                                    "action_maintenance_ledger_import",
+                                   "action_maintenance_doc_import",
                                    "action_maintenance_collection_follow_up",
                                    "action_maintenance_collection_plan_import",
                                    "action_replenishment_create",

@@ -12,16 +12,17 @@ import hashlib
 import io
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from uuid import uuid4
 
 from openpyxl import load_workbook
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart
 from app.models.maintenance import FMaintenanceOrder
+from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_ckd_import import (
     MaintenanceCkdHeadRow,
     MaintenanceCkdImportBatch,
@@ -58,6 +59,10 @@ class CkdBatchError(RuntimeError):
     """发货单批次状态错误。"""
 
 
+class CkdScopeDenied(RuntimeError):
+    """批次包含操作者项目范围之外的项目：整批拒绝。"""
+
+
 @dataclass
 class CkdHeadData:
     row_no: int
@@ -74,10 +79,11 @@ class CkdLineData:
 
 
 def _header_index(headers: list[str], name: str) -> int | None:
-    for idx, value in enumerate(headers, 1):
-        if value == name:
-            return idx
-    return None
+    variants = {name, f"{name}(必填)", f"{name}(不可修改)"}
+    matches = [idx for idx, value in enumerate(headers, 1) if value in variants]
+    if len(matches) > 1:
+        raise CkdParseError(f"列「{name}」存在重复映射，拒绝解析")
+    return matches[0] if matches else None
 
 
 def _cell(row: tuple, index: int | None) -> str | None:
@@ -168,12 +174,25 @@ def parse_ckd_workbook(data: bytes, filename: str) -> dict:
     }
 
 
-def store_preview(db: Session, parsed: dict, operated_by: str) -> str:
-    """落 raw 行并返回 batch_id。零业务写入。"""
+def store_preview(
+    db: Session, parsed: dict, operated_by: str, *, idempotency_key: str
+) -> str:
+    """落 raw 行并返回 batch_id。零业务写入；Idempotency-Key 重放收敛。"""
+    existing = db.execute(
+        select(MaintenanceCkdImportBatch).where(
+            MaintenanceCkdImportBatch.uploaded_by == operated_by,
+            MaintenanceCkdImportBatch.idempotency_key == idempotency_key,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        if existing.file_hash != parsed["file_hash"]:
+            raise CkdBatchError("同一 Idempotency-Key 对应不同文件内容，拒绝重放")
+        return existing.batch_id
     batch = MaintenanceCkdImportBatch(
         batch_id=str(uuid4()),
         file_hash=parsed["file_hash"],
         filename=parsed["filename"][:255],
+        idempotency_key=idempotency_key,
         uploaded_by=operated_by,
         head_rows=len(parsed["heads"]),
         line_rows=parsed["line_count"],
@@ -229,6 +248,8 @@ def store_preview(db: Session, parsed: dict, operated_by: str) -> str:
             qty = parse_amount_loose(line_values["备件明细.出库数量"])
             if pn and qty is None:
                 line.issues.append("出库数量无法解析")
+            if not line_values["备件明细.数据ID(不可修改)"]:
+                line.issues.append("明细缺少稳定数据ID，无法安全入账")
             db.add(
                 MaintenanceCkdLineRow(
                     row_id=str(uuid4()),
@@ -292,6 +313,11 @@ def _resolve_project_id(db: Session, wbdd_no: str) -> str | None:
     return assignment.project_id if assignment is not None else None
 
 
+def _project_warehouse(db: Session, project_id: str) -> str:
+    project = db.get(MaintenanceProject, project_id)
+    return project.project_code if project is not None else project_id
+
+
 def _resolve_part_id(db: Session, pn: str) -> int | None:
     part = db.execute(
         select(DimPart).where(DimPart.pn_std == pn)
@@ -299,13 +325,49 @@ def _resolve_part_id(db: Session, pn: str) -> int | None:
     return part.id if part is not None else None
 
 
-def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
-    """把「维保供货」明细入前置库账本；幂等。"""
+def apply_batch(
+    db: Session,
+    batch_id: str,
+    operated_by: str,
+    *,
+    allowed_project_ids: set[str] | None = None,
+) -> dict:
+    """把「维保供货」明细入前置库账本。失败关闭：任何关键异常整批零写。
+
+    allowed_project_ids=None 表示全范围（admin/boss）；非 None 时批次解析出的
+    任何项目超出范围即整批拒绝（CkdScopeDenied）。
+    """
     batch = db.get(MaintenanceCkdImportBatch, batch_id)
     if batch is None:
         raise CkdBatchError("发货单批次不存在")
     if batch.status == "applied":
         raise CkdBatchError("发货单批次已应用，不能重复应用")
+    if batch.status == "failed":
+        raise CkdBatchError("发货单批次已因异常被拒绝，需重新上传")
+    bad_head_rows = db.execute(
+        select(MaintenanceCkdHeadRow).where(
+            MaintenanceCkdHeadRow.batch_id == batch_id,
+            func.cardinality(MaintenanceCkdHeadRow.issues) > 0,
+        )
+    ).scalars().all()
+    bad_line_rows = db.execute(
+        select(MaintenanceCkdLineRow).where(
+            MaintenanceCkdLineRow.batch_id == batch_id,
+            func.cardinality(MaintenanceCkdLineRow.issues) > 0,
+        )
+    ).scalars().all()
+    if bad_head_rows or bad_line_rows:
+        batch.status = "failed"
+        batch.report_json = {
+            **(batch.report_json or {}),
+            "rejected_rows": len(bad_head_rows) + len(bad_line_rows),
+            "rejection_reason": "发货单批次存在关键异常行，整批拒绝应用",
+        }
+        db.commit()
+        raise CkdBatchError(
+            f"发货单批次存在 {len(bad_head_rows) + len(bad_line_rows)} 行关键异常，"
+            "整批拒绝应用（raw 已保留）"
+        )
     summary = {
         "maintenance_heads": 0,
         "applied_lines": 0,
@@ -325,6 +387,10 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
         if head.category != "维保供货":
             summary["ignored_heads"] += 1
             continue
+        if head.data_status_raw and head.data_status_raw != "已生效":
+            # 作废/草稿/未知状态不入账（不按事实处理）
+            summary["ignored_heads"] += 1
+            continue
         summary["maintenance_heads"] += 1
         if head.wbdd_no is None:
             summary["skipped_lines"] += 1
@@ -333,6 +399,11 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
         if project_id is None:
             summary["skipped_lines"] += 1
             continue
+        if allowed_project_ids is not None and project_id not in allowed_project_ids:
+            raise CkdScopeDenied(
+                f"发货单批次包含无权项目（{head.wbdd_no}），整批拒绝"
+            )
+        warehouse_name = _project_warehouse(db, project_id)
         lines = (
             db.execute(
                 select(MaintenanceCkdLineRow)
@@ -356,11 +427,15 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
                     project_id=project_id,
                     part_id=part_id,
                     kind="shipment_in",
-                    source_type="f_maintenance_line",
-                    source_ref=f"ckd:{head.order_no}:"
-                    f"{line.data_id_raw or line.seq_raw or line.row_no}",
+                    source_type="ckd_shipment_line",
+                    source_ref=f"ckd:{head.order_no}:{line.data_id_raw}",
                     qty=line.out_qty,
-                    warehouse_name="",
+                    warehouse_name=warehouse_name,
+                    occurred_at=datetime.combine(
+                        head.order_date, datetime.min.time()
+                    ).replace(tzinfo=timezone.utc)
+                    if head.order_date
+                    else None,
                     reason=f"发货单 {head.order_no} 维保供货入前置库",
                     operated_by=operated_by,
                 )

@@ -60,6 +60,8 @@ def upgrade() -> None:
         sa.Column("source_ref", sa.String(length=128), nullable=False),
         sa.Column("qty_change", sa.Numeric(14, 3), nullable=False),
         sa.Column("qty_after", sa.Numeric(14, 3), nullable=False),
+        sa.Column("payload_hash", sa.String(length=64), nullable=False),
+        sa.Column("occurred_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("unit_cost_ex_tax", sa.Numeric(14, 2), nullable=True),
         sa.Column("unit_cost_inc_tax", sa.Numeric(14, 2), nullable=True),
         sa.Column("reason", sa.Text(), nullable=True),
@@ -72,8 +74,8 @@ def upgrade() -> None:
             name="ck_maintenance_front_stock_ledger_kind",
         ),
         sa.CheckConstraint(
-            "source_type IN ('f_maintenance_line', 'warehouse_document_line',"
-            " 'salvage', 'manual')",
+            "source_type IN ('ckd_shipment_line', 'return_order_line',"
+            " 'f_maintenance_line', 'warehouse_document_line', 'salvage', 'manual')",
             name="ck_maintenance_front_stock_ledger_source_type",
         ),
         sa.CheckConstraint(
@@ -91,7 +93,7 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["part_id"], ["dim_part.id"]),
         sa.PrimaryKeyConstraint("ledger_id"),
         sa.UniqueConstraint(
-            "kind", "source_type", "source_ref", "part_id",
+            "source_type", "source_ref",
             name="uq_maintenance_front_stock_ledger_source",
         ),
     )
@@ -113,6 +115,20 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute(
+        """
+        DO $guard$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM maintenance_front_stock_ledger)
+             OR EXISTS (SELECT 1 FROM maintenance_front_stock)
+          THEN
+            RAISE EXCEPTION
+              'b1e3f7d9c2a5 downgrade blocked: front-stock facts exist';
+          END IF;
+        END
+        $guard$;
+        """
+    )
     op.drop_index(
         "ix_maintenance_front_stock_ledger_source",
         table_name="maintenance_front_stock_ledger",

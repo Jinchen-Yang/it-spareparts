@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import (
+from sqlalchemy import (UniqueConstraint, 
     ARRAY,
     Boolean,
     CheckConstraint,
@@ -37,6 +37,7 @@ class MaintenanceCkdImportBatch(Base):
     batch_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     uploaded_by: Mapped[str] = mapped_column(String(64), nullable=False)
     uploaded_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
@@ -65,6 +66,11 @@ class MaintenanceCkdImportBatch(Base):
         CheckConstraint(
             "(status = 'applied') = (applied_at IS NOT NULL AND applied_by IS NOT NULL)",
             name="ck_maintenance_ckd_import_applied",
+        ),
+        UniqueConstraint(
+            "uploaded_by",
+            "idempotency_key",
+            name="uq_maintenance_ckd_import_idempotency",
         ),
         Index("ix_maintenance_ckd_import_hash", "file_hash"),
         Index("ix_maintenance_ckd_import_uploaded", "uploaded_at"),

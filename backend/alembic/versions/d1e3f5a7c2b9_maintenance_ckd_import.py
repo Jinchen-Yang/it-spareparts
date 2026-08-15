@@ -20,6 +20,7 @@ def upgrade() -> None:
         sa.Column("batch_id", sa.String(length=36), nullable=False),
         sa.Column("file_hash", sa.String(length=64), nullable=False),
         sa.Column("filename", sa.String(length=255), nullable=False),
+        sa.Column("idempotency_key", sa.String(length=128), nullable=False),
         sa.Column("uploaded_by", sa.String(length=64), nullable=False),
         sa.Column(
             "uploaded_at",
@@ -45,6 +46,10 @@ def upgrade() -> None:
             name="ck_maintenance_ckd_import_applied",
         ),
         sa.PrimaryKeyConstraint("batch_id"),
+        sa.UniqueConstraint(
+            "uploaded_by", "idempotency_key",
+            name="uq_maintenance_ckd_import_idempotency",
+        ),
     )
     op.create_index(
         "ix_maintenance_ckd_import_hash", "maintenance_ckd_import_batch", ["file_hash"]
@@ -127,6 +132,21 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute(
+        """
+        DO $guard$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM maintenance_ckd_import_batch)
+             OR EXISTS (SELECT 1 FROM maintenance_ckd_head_row)
+             OR EXISTS (SELECT 1 FROM maintenance_ckd_line_row)
+          THEN
+            RAISE EXCEPTION
+              'd1e3f5a7c2b9 downgrade blocked: CKD facts exist';
+          END IF;
+        END
+        $guard$;
+        """
+    )
     op.drop_index("ix_maintenance_ckd_line_head", table_name="maintenance_ckd_line_row")
     op.drop_index("ix_maintenance_ckd_line_batch", table_name="maintenance_ckd_line_row")
     op.drop_table("maintenance_ckd_line_row")

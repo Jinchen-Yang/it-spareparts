@@ -26,6 +26,7 @@ from app.security import (
     require_action,
     require_page,
 )
+from app.services import import_safety
 from app.services import maintenance_ledger as ledger
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
@@ -131,16 +132,31 @@ async def preview_ledger_import(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {"code": "invalid_request", "message": "Idempotency-Key 必填且长度必须在 8–128 字符之间"},
         )
-    data = await file.read()
-    if len(data) > MAX_PREVIEW_BYTES:
+    try:
+        data = await import_safety.read_limited(file, MAX_PREVIEW_BYTES)
+    except import_safety.UploadSafetyError as exc:
         raise HTTPException(
             status.HTTP_413_CONTENT_TOO_LARGE,
-            {"code": "upload_too_large", "message": "台账工作簿超过上传安全上限"},
+            {"code": "upload_too_large", "message": str(exc)},
         )
     try:
-        parsed = ledger.parse_ledger_workbook(data, filename)
-        batch_id = ledger.store_preview(db, parsed, _real_operator(db, ident))
+        import_safety.validate_xlsx_zip(data, max_bytes=MAX_PREVIEW_BYTES)
+    except import_safety.UploadSafetyError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "invalid_ledger", "message": str(exc)},
+        )
+    try:
+        parsed = await import_safety.parse_in_threadpool(
+            ledger.parse_ledger_workbook, data, filename
+        )
+        batch_id = ledger.store_preview(
+            db, parsed, _real_operator(db, ident), idempotency_key=idempotency_key
+        )
     except ledger.LedgerParseError as exc:
+        _raise_http(exc)
+    except ledger.LedgerBatchError as exc:
+        db.rollback()
         _raise_http(exc)
     return {
         "batch_id": batch_id,
@@ -163,8 +179,15 @@ def apply_ledger_import(
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     _require_data_profit(ctx, db)
+    operator = _real_operator(db, ident)
+    batch = db.get(MaintenanceLedgerImportBatch, batch_id)
+    if batch is not None and batch.uploaded_by != operator and ctx.role not in ("admin", "boss"):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {"code": "permission_denied", "message": "只能应用本人上传的台账批次"},
+        )
     try:
-        summary = ledger.apply_batch(db, batch_id, _real_operator(db, ident))
+        summary = ledger.apply_batch(db, batch_id, operator)
     except ledger.LedgerBatchError as exc:
         db.rollback()
         _raise_http(exc)
@@ -174,15 +197,27 @@ def apply_ledger_import(
 @router.get("/ledger-imports/{batch_id}")
 def get_ledger_import(
     batch_id: str = Path(..., min_length=36, max_length=36),
+    response: Response = None,
     db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action(_ACTION_KEY)),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    """批次元数据读取与导入 action/所有者/全范围绑定；403/404 不泄漏存在性。"""
+    response.headers["Cache-Control"] = "no-store"
+    operator = _real_operator(db, ident)
     batch = db.get(MaintenanceLedgerImportBatch, batch_id)
     if batch is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             {"code": "not_found", "message": "台账批次不存在"},
+        )
+    if batch.uploaded_by != operator and ctx.role not in ("admin", "boss"):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {"code": "permission_denied", "message": "无权读取该台账批次"},
         )
     return {
         "batch_id": batch.batch_id,

@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import (
+from sqlalchemy import (UniqueConstraint, 
     ARRAY,
     CheckConstraint,
     Date,
@@ -38,6 +38,7 @@ class MaintenanceDocImportBatch(Base):
     doc_type: Mapped[str] = mapped_column(String(16), nullable=False)
     file_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     uploaded_by: Mapped[str] = mapped_column(String(64), nullable=False)
     uploaded_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, server_default=func.now()
@@ -70,6 +71,11 @@ class MaintenanceDocImportBatch(Base):
         CheckConstraint(
             "(status = 'applied') = (applied_at IS NOT NULL AND applied_by IS NOT NULL)",
             name="ck_maintenance_doc_import_applied",
+        ),
+        UniqueConstraint(
+            "uploaded_by",
+            "idempotency_key",
+            name="uq_maintenance_doc_import_idempotency",
         ),
         Index("ix_maintenance_doc_import_hash", "file_hash"),
         Index("ix_maintenance_doc_import_type_uploaded", "doc_type", "uploaded_at"),

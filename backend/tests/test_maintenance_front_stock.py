@@ -166,16 +166,19 @@ def test_invalid_kind_rejected(db, parts, project):
 def test_zero_or_negative_qty_rejected(db, parts, project):
     with pytest.raises(front_stock.FrontStockInvalidMovement):
         _move(db, part_id=parts["a"], kind="shipment_in", source_ref="X-1", qty="0")
+    with pytest.raises(front_stock.FrontStockInvalidMovement):
+        _move(db, part_id=parts["a"], kind="shipment_in", source_ref="X-2", qty="-3")
 
 
-def test_same_source_ref_can_move_other_part(db, parts, project):
-    """同一条单据明细含多个 PN 时，幂等键包含 part_id 不互相冲突。"""
+def test_same_source_ref_different_payload_rejected(db, parts, project):
+    """同一来源事件以不同内容（PN/数量）重放 → payload 冲突失败关闭。"""
     _move(db, part_id=parts["a"], kind="shipment_in", source_ref="ORDER-LINE-9", qty="2")
-    _move(db, part_id=parts["b"], kind="shipment_in", source_ref="ORDER-LINE-9", qty="7")
     db.commit()
+    with pytest.raises(front_stock.FrontStockPayloadConflict):
+        _move(db, part_id=parts["b"], kind="shipment_in", source_ref="ORDER-LINE-9", qty="7")
+    db.rollback()
     rows = front_stock.balance_rows(db, "fs-project-1")
-    by_pn = {r["pn"]: r["qty"] for r in rows}
-    assert by_pn == {"FS-A-001": 2.0, "FS-B-001": 7.0}
+    assert {r["pn"]: r["qty"] for r in rows} == {"FS-A-001": 2.0}
 
 
 def test_version_bumps_on_each_movement(db, parts, project):

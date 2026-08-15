@@ -8,15 +8,17 @@ from app.auth import current_identity, current_role
 from app.db import get_db
 from app.models.maintenance_doc_import import MaintenanceDocImportBatch
 from app.security import (
+    UserContext,
     get_current_user_context,
     require_action,
     require_page,
 )
+from app.services import import_safety
 from app.services import maintenance_doc_import as docs
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 MAX_PREVIEW_BYTES = docs.MAX_PREVIEW_BYTES
-_ACTION_KEY = "action_maintenance_warehouse_manage"
+_ACTION_KEY = "action_maintenance_doc_import"
 _DOC_LABELS = {
     "rkd_inbound": "入库单",
     "return_order": "退货返库单",
@@ -87,19 +89,37 @@ async def preview_doc_import(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {"code": "invalid_request", "message": "Idempotency-Key 必填且长度必须在 8–128 字符之间"},
         )
-    data = await file.read()
-    if len(data) > MAX_PREVIEW_BYTES:
+    try:
+        data = await import_safety.read_limited(file, MAX_PREVIEW_BYTES)
+    except import_safety.UploadSafetyError as exc:
         raise HTTPException(
             status.HTTP_413_CONTENT_TOO_LARGE,
-            {"code": "upload_too_large", "message": "单据超过上传安全上限"},
+            {"code": "upload_too_large", "message": str(exc)},
         )
     try:
-        parsed = docs.parse_doc_workbook(doc_type, data, filename)
-        batch_id = docs.store_preview(db, parsed, _real_operator(ident))
+        import_safety.validate_xlsx_zip(data, max_bytes=MAX_PREVIEW_BYTES)
+    except import_safety.UploadSafetyError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "invalid_doc", "message": str(exc)},
+        )
+    try:
+        parsed = await import_safety.parse_in_threadpool(
+            docs.parse_doc_workbook, doc_type, data, filename
+        )
+        batch_id = docs.store_preview(
+            db, parsed, _real_operator(ident), idempotency_key=idempotency_key
+        )
     except docs.DocParseError as exc:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {"code": "invalid_doc", "message": str(exc)},
+        )
+    except docs.DocBatchError as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            {"code": "batch_conflict", "message": str(exc)},
         )
     return {
         "batch_id": batch_id,
@@ -117,10 +137,17 @@ def apply_doc_import(
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
     _action: None = Depends(require_action(_ACTION_KEY)),
-    _ctx=Depends(get_current_user_context),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    operator = _real_operator(ident)
+    batch = db.get(MaintenanceDocImportBatch, batch_id)
+    if batch is not None and batch.uploaded_by != operator and ctx.role not in ("admin", "boss"):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {"code": "permission_denied", "message": "只能应用本人上传的单据批次"},
+        )
     try:
-        summary = docs.apply_batch(db, batch_id, _real_operator(ident))
+        summary = docs.apply_batch(db, batch_id, operator)
     except docs.DocBatchError as exc:
         db.rollback()
         raise HTTPException(
@@ -133,15 +160,26 @@ def apply_doc_import(
 @router.get("/doc-imports/{batch_id}")
 def get_doc_import(
     batch_id: str = Path(..., min_length=36, max_length=36),
+    response: Response = None,
     db: Session = Depends(get_db),
+    ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    _action: None = Depends(require_action(_ACTION_KEY)),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+    operator = _real_operator(ident)
     batch = db.get(MaintenanceDocImportBatch, batch_id)
     if batch is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
             {"code": "not_found", "message": "单据批次不存在"},
+        )
+    if batch.uploaded_by != operator and ctx.role not in ("admin", "boss"):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {"code": "permission_denied", "message": "无权读取该单据批次"},
         )
     return {
         "batch_id": batch.batch_id,

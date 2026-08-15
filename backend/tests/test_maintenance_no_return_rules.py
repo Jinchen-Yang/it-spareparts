@@ -55,7 +55,8 @@ def test_classify_other_category_required(memory_category):
     assert result["exemption_source"] == "none"
 
 
-def test_classify_line_override_true_beats_category(disk_category):
+def test_classify_line_override_false_beats_disk_category(disk_category):
+    """行级 False 覆盖品类硬盘免返规则。"""
     result = classify_return_obligation(
         category_id=disk_category,
         category_major="硬盘",
@@ -66,7 +67,8 @@ def test_classify_line_override_true_beats_category(disk_category):
     assert result["exemption_source"] == "none"
 
 
-def test_classify_line_override_false_on_required_category(memory_category):
+def test_classify_line_override_true_on_required_category(memory_category):
+    """行级 True 使非免返品类豁免。"""
     result = classify_return_obligation(
         category_id=memory_category,
         category_major="内存",
@@ -100,12 +102,23 @@ def test_classify_line_false_overrides_project_default(memory_category):
     assert result["exemption_source"] == "none"
 
 
-def test_classify_without_category_stays_pending():
+def test_classify_project_default_without_category_is_exempt():
+    """项目默认不返还在无品类证据时仍生效（行级→项目默认→品类→pending）。"""
     result = classify_return_obligation(
         category_id=None,
         category_major=None,
         category_minor=None,
         project_no_return_default=True,
+    )
+    assert result["classification"] == "exempt"
+    assert result["exemption_source"] == "project_default_no_return"
+
+
+def test_classify_without_category_and_flags_stays_pending():
+    result = classify_return_obligation(
+        category_id=None,
+        category_major=None,
+        category_minor=None,
     )
     assert result["classification"] == "pending_category"
     assert result["exemption_source"] is None

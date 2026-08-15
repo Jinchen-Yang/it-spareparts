@@ -126,6 +126,7 @@ def _seed_front_stock(db, *, part_id, qty):
         source_type="f_maintenance_line",
         source_ref=f"seed-{qty}",
         qty=qty,
+        warehouse_name="DOC测试项目",
         operated_by="合成测试员",
     )
     db.commit()
@@ -149,7 +150,7 @@ def test_parse_return_order(db, front_stock_seed):
     parsed = docs.parse_doc_workbook("return_order", data, "退货返库单.xlsx")
     assert len(parsed["heads"]) == 1
     assert parsed["line_count"] == 2
-    batch_id = docs.store_preview(db, parsed, "合成管理员")
+    batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
     heads = db.execute(
         select(MaintenanceDocHeadRow).where(MaintenanceDocHeadRow.batch_id == batch_id)
     ).scalars().all()
@@ -181,7 +182,7 @@ def test_apply_return_order_reduces_front_stock(db, front_stock_seed):
         }],
     )
     parsed = docs.parse_doc_workbook("return_order", data, "退货返库单.xlsx")
-    batch_id = docs.store_preview(db, parsed, "合成管理员")
+    batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
     summary = docs.apply_batch(db, batch_id, "合成管理员")
     assert summary["applied_lines"] == 1
     assert summary["canonical_effect"] == "front_stock_return_out"
@@ -210,7 +211,7 @@ def test_apply_return_order_negative_balance_skipped(db, front_stock_seed):
         }],
     )
     parsed = docs.parse_doc_workbook("return_order", data, "退货返库单.xlsx")
-    batch_id = docs.store_preview(db, parsed, "合成管理员")
+    batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
     summary = docs.apply_batch(db, batch_id, "合成管理员")
     assert summary["applied_lines"] == 0
     assert summary["skipped_lines"] == 1
@@ -239,7 +240,7 @@ def test_parse_rkd_inbound(db, front_stock_seed):
     )
     parsed = docs.parse_doc_workbook("rkd_inbound", data, "入库单.xlsx")
     assert parsed["line_count"] == 1
-    batch_id = docs.store_preview(db, parsed, "合成管理员")
+    batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
     head = db.execute(
         select(MaintenanceDocHeadRow).where(MaintenanceDocHeadRow.batch_id == batch_id)
     ).scalar_one()
@@ -266,7 +267,7 @@ def test_apply_rkd_is_raw_only(db, front_stock_seed):
         }],
     )
     parsed = docs.parse_doc_workbook("rkd_inbound", data, "入库单.xlsx")
-    batch_id = docs.store_preview(db, parsed, "合成管理员")
+    batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
     summary = docs.apply_batch(db, batch_id, "合成管理员")
     assert summary["canonical_effect"] == "pending_f3_return_facts"
     batch = db.get(MaintenanceDocImportBatch, batch_id)
@@ -289,7 +290,7 @@ def test_parse_bxd_expense(db, front_stock_seed):
     )
     parsed = docs.parse_doc_workbook("bxd_expense", data, "费用报销支付单.xlsx")
     assert parsed["line_count"] == 1
-    batch_id = docs.store_preview(db, parsed, "合成管理员")
+    batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
     head = db.execute(
         select(MaintenanceDocHeadRow).where(MaintenanceDocHeadRow.batch_id == batch_id)
     ).scalar_one()
@@ -314,7 +315,7 @@ def test_apply_bxd_is_raw_only(db, front_stock_seed):
         }],
     )
     parsed = docs.parse_doc_workbook("bxd_expense", data, "费用报销支付单.xlsx")
-    batch_id = docs.store_preview(db, parsed, "合成管理员")
+    batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
     summary = docs.apply_batch(db, batch_id, "合成管理员")
     assert summary["canonical_effect"] == "pending_c4_expense_reconcile"
 

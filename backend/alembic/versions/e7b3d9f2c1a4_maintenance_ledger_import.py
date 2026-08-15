@@ -54,6 +54,7 @@ def upgrade() -> None:
         sa.Column("batch_id", sa.String(length=36), nullable=False),
         sa.Column("file_hash", sa.String(length=64), nullable=False),
         sa.Column("filename", sa.String(length=255), nullable=False),
+        sa.Column("idempotency_key", sa.String(length=128), nullable=False),
         sa.Column("source_kind", sa.String(length=32), nullable=False),
         sa.Column("uploaded_by", sa.String(length=64), nullable=False),
         sa.Column(
@@ -83,6 +84,10 @@ def upgrade() -> None:
             name="ck_maintenance_ledger_import_applied",
         ),
         sa.PrimaryKeyConstraint("batch_id"),
+        sa.UniqueConstraint(
+            "uploaded_by", "idempotency_key",
+            name="uq_maintenance_ledger_import_idempotency",
+        ),
     )
     op.create_index(
         "ix_maintenance_ledger_import_hash",
@@ -207,6 +212,43 @@ def upgrade() -> None:
         "ix_maintenance_ledger_expense_bxd", "maintenance_ledger_expense_row", ["bxd_no"]
     )
 
+    # ---- service period 台账来源（批次表已存在）----
+    op.add_column(
+        "maintenance_service_period",
+        sa.Column("ledger_batch_id", sa.String(length=36), nullable=True),
+    )
+    op.create_foreign_key(
+        "fk_maintenance_service_period_ledger_batch",
+        "maintenance_service_period",
+        "maintenance_ledger_import_batch",
+        ["ledger_batch_id"],
+        ["batch_id"],
+    )
+    op.drop_constraint(
+        "ck_maintenance_service_period_source",
+        "maintenance_service_period",
+        type_="check",
+    )
+    op.drop_constraint(
+        "ck_maintenance_service_period_batch_source",
+        "maintenance_service_period",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "ck_maintenance_service_period_source",
+        "maintenance_service_period",
+        "source IN ('direct_api', 'manager_workbook_v3', 'project_manager_xls_v1')",
+    )
+    op.create_check_constraint(
+        "ck_maintenance_service_period_batch_source",
+        "maintenance_service_period",
+        "(source = 'manager_workbook_v3' AND source_batch_id IS NOT NULL "
+        "AND ledger_batch_id IS NULL) OR "
+        "(source = 'project_manager_xls_v1' AND ledger_batch_id IS NOT NULL "
+        "AND source_batch_id IS NULL) OR "
+        "(source = 'direct_api' AND source_batch_id IS NULL AND ledger_batch_id IS NULL)",
+    )
+
     # ---- milestone 引用台账批次（批次表已存在）----
     op.add_column(
         "maintenance_collection_milestone",
@@ -243,7 +285,7 @@ def upgrade() -> None:
             END
             || jsonb_build_object(
                 'action_maintenance_ledger_import',
-                code IN ('admin', 'boss')
+                code = 'admin'
             )
         """
     )
@@ -252,7 +294,7 @@ def upgrade() -> None:
         UPDATE sys_user
         SET template_perms = template_perms || jsonb_build_object(
                 'action_maintenance_ledger_import',
-                COALESCE(template_code, role) IN ('admin', 'boss')
+                COALESCE(template_code, role) = 'admin'
             ),
             perm_overrides = CASE
                     WHEN jsonb_typeof(perm_overrides) = 'object'
@@ -272,7 +314,7 @@ def upgrade() -> None:
             END
             || jsonb_build_object(
                 'action_maintenance_ledger_import',
-                role IN ('admin', 'boss')
+                role = 'admin'
             )
         WHERE permissions IS NOT NULL
         """
@@ -280,6 +322,22 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute(
+        """
+        DO $guard$
+        BEGIN
+          IF EXISTS (SELECT 1 FROM maintenance_ledger_contract_row)
+             OR EXISTS (SELECT 1 FROM maintenance_ledger_plan_row)
+             OR EXISTS (SELECT 1 FROM maintenance_ledger_expense_row)
+             OR EXISTS (SELECT 1 FROM maintenance_ledger_import_batch)
+          THEN
+            RAISE EXCEPTION
+              'e7b3d9f2c1a4 downgrade blocked: ledger facts exist';
+          END IF;
+        END
+        $guard$;
+        """
+    )
     op.execute(
         """
         UPDATE sys_role_template
@@ -316,6 +374,33 @@ def downgrade() -> None:
         "maintenance_collection_milestone",
         type_="foreignkey",
     )
+    op.drop_constraint(
+        "ck_maintenance_service_period_batch_source",
+        "maintenance_service_period",
+        type_="check",
+    )
+    op.drop_constraint(
+        "ck_maintenance_service_period_source",
+        "maintenance_service_period",
+        type_="check",
+    )
+    op.create_check_constraint(
+        "ck_maintenance_service_period_source",
+        "maintenance_service_period",
+        "source IN ('direct_api', 'manager_workbook_v3')",
+    )
+    op.create_check_constraint(
+        "ck_maintenance_service_period_batch_source",
+        "maintenance_service_period",
+        "(source = 'manager_workbook_v3' AND source_batch_id IS NOT NULL) OR "
+        "(source = 'direct_api' AND source_batch_id IS NULL)",
+    )
+    op.drop_constraint(
+        "fk_maintenance_service_period_ledger_batch",
+        "maintenance_service_period",
+        type_="foreignkey",
+    )
+    op.drop_column("maintenance_service_period", "ledger_batch_id")
     op.drop_column("maintenance_collection_milestone", "ledger_batch_id")
     op.create_check_constraint(
         "ck_maintenance_collection_milestone_batch_source",

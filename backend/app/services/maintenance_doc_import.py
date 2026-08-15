@@ -15,7 +15,7 @@ import hashlib
 import io
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -272,13 +272,26 @@ def _head_no(doc_type: str, values: dict[str, str], spec: dict) -> str | None:
     return values.get("数据ID(不可修改)")
 
 
-def store_preview(db: Session, parsed: dict, operated_by: str) -> str:
+def store_preview(
+    db: Session, parsed: dict, operated_by: str, *, idempotency_key: str
+) -> str:
     spec = _SPECS[parsed["doc_type"]]
+    existing = db.execute(
+        select(MaintenanceDocImportBatch).where(
+            MaintenanceDocImportBatch.uploaded_by == operated_by,
+            MaintenanceDocImportBatch.idempotency_key == idempotency_key,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        if existing.file_hash != parsed["file_hash"]:
+            raise DocBatchError("同一 Idempotency-Key 对应不同文件内容，拒绝重放")
+        return existing.batch_id
     batch = MaintenanceDocImportBatch(
         batch_id=str(uuid4()),
         doc_type=parsed["doc_type"],
         file_hash=parsed["file_hash"],
         filename=parsed["filename"][:255],
+        idempotency_key=idempotency_key,
         uploaded_by=operated_by,
         head_rows=len(parsed["heads"]),
         line_rows=parsed["line_count"],
@@ -402,6 +415,8 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
         raise DocBatchError("单据批次不存在")
     if batch.status == "applied":
         raise DocBatchError("单据批次已应用，不能重复应用")
+    if batch.status == "failed":
+        raise DocBatchError("单据批次已因异常被拒绝，需重新上传")
     summary = {
         "doc_type": batch.doc_type,
         "applied_lines": 0,
@@ -432,6 +447,8 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
             if project_id is None:
                 summary["skipped_lines"] += 1
                 continue
+            project = db.get(MaintenanceProject, project_id)
+            warehouse_name = project.project_code if project is not None else project_id
             lines = (
                 db.execute(
                     select(MaintenanceDocLineRow)
@@ -460,10 +477,15 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
                         project_id=project_id,
                         part_id=part_id.id,
                         kind="return_out",
-                        source_type="warehouse_document_line",
+                        source_type="return_order_line",
                         source_ref=f"return:{head.head_no}:{line.line_key}",
                         qty=line.qty,
-                        warehouse_name="",
+                        warehouse_name=warehouse_name,
+                        occurred_at=datetime.combine(
+                            head.head_date, datetime.min.time()
+                        ).replace(tzinfo=timezone.utc)
+                        if head.head_date
+                        else None,
                         reason=f"返库单 {head.head_no} 未用件收回",
                         operated_by=operated_by,
                     )

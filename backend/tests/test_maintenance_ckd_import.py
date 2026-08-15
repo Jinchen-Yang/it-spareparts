@@ -138,7 +138,7 @@ def test_store_preview_normalizes(db, wbdd_project):
             ["LID-1", "1", "02311AYV", "内存", "B1", "02311AYV", "SN1", "", "", "", "", "", "", "", "2", "100", "200", "是"]]}]
     )
     parsed = ckd.parse_ckd_workbook(data, "发货单.xlsx")
-    batch_id = ckd.store_preview(db, parsed, "合成管理员")
+    batch_id = ckd.store_preview(db, parsed, "合成管理员", idempotency_key="ckd-test-key-0001")
     head = db.execute(
         select(MaintenanceCkdHeadRow).where(MaintenanceCkdHeadRow.batch_id == batch_id)
     ).scalar_one()
@@ -165,7 +165,7 @@ def test_apply_wires_front_stock(db, wbdd_project):
         ]
     )
     parsed = ckd.parse_ckd_workbook(data, "发货单.xlsx")
-    batch_id = ckd.store_preview(db, parsed, "合成管理员")
+    batch_id = ckd.store_preview(db, parsed, "合成管理员", idempotency_key="ckd-test-key-0001")
     summary = ckd.apply_batch(db, batch_id, "合成管理员")
 
     assert summary["maintenance_heads"] == 1
@@ -186,7 +186,7 @@ def test_apply_wires_front_stock(db, wbdd_project):
     ).scalars().all()
     assert len(ledgers) == 2
     assert all(l.kind == "shipment_in" for l in ledgers)
-    assert all(l.source_type == "f_maintenance_line" for l in ledgers)
+    assert all(l.source_type == "ckd_shipment_line" for l in ledgers)
 
     batch = db.get(MaintenanceCkdImportBatch, batch_id)
     assert batch.status == "applied"
@@ -198,12 +198,12 @@ def test_apply_idempotent_across_reimport(db, wbdd_project):
             ["LID-1", "1", "02311AYV", "内存", "B1", "02311AYV", "SN1", "", "", "", "", "", "", "", "2", "100", "200", "是"]]}]
     )
     parsed = ckd.parse_ckd_workbook(data, "发货单.xlsx")
-    batch_id = ckd.store_preview(db, parsed, "合成管理员")
+    batch_id = ckd.store_preview(db, parsed, "合成管理员", idempotency_key="ckd-test-key-0001")
     ckd.apply_batch(db, batch_id, "合成管理员")
 
     # 同文件再次导入 → 新批次 → 流水幂等（同一明细 ID 不重复入账）
     parsed2 = ckd.parse_ckd_workbook(data, "发货单.xlsx")
-    batch_id2 = ckd.store_preview(db, parsed2, "合成管理员")
+    batch_id2 = ckd.store_preview(db, parsed2, "合成管理员", idempotency_key="ckd-test-key-0002")
     summary2 = ckd.apply_batch(db, batch_id2, "合成管理员")
     assert summary2["applied_lines"] == 1
     stock = db.execute(
@@ -224,7 +224,7 @@ def test_apply_skips_unassigned_wbdd(db, wbdd_project):
         }]
     )
     parsed = ckd.parse_ckd_workbook(data, "发货单.xlsx")
-    batch_id = ckd.store_preview(db, parsed, "合成管理员")
+    batch_id = ckd.store_preview(db, parsed, "合成管理员", idempotency_key="ckd-test-key-0001")
     summary = ckd.apply_batch(db, batch_id, "合成管理员")
     assert summary["applied_lines"] == 0
     assert summary["skipped_lines"] == 1
@@ -242,7 +242,7 @@ def test_apply_skips_unknown_pn(db, wbdd_project):
             ["LID-1", "1", "", "", "", "NOPE-999", "", "", "", "", "", "", "", "", "4", "", "", ""]]}]
     )
     parsed = ckd.parse_ckd_workbook(data, "发货单.xlsx")
-    batch_id = ckd.store_preview(db, parsed, "合成管理员")
+    batch_id = ckd.store_preview(db, parsed, "合成管理员", idempotency_key="ckd-test-key-0001")
     summary = ckd.apply_batch(db, batch_id, "合成管理员")
     assert summary["applied_lines"] == 0
     assert summary["skipped_lines"] == 1
@@ -254,7 +254,7 @@ def test_apply_rejects_duplicate_apply(db, wbdd_project):
             ["1", "02311AYV", "", "", "02311AYV", "", "", "", "", "", "", "", "", "2", "", "", ""]]}]
     )
     parsed = ckd.parse_ckd_workbook(data, "发货单.xlsx")
-    batch_id = ckd.store_preview(db, parsed, "合成管理员")
+    batch_id = ckd.store_preview(db, parsed, "合成管理员", idempotency_key="ckd-test-key-0001")
     ckd.apply_batch(db, batch_id, "合成管理员")
     with pytest.raises(ckd.CkdBatchError):
         ckd.apply_batch(db, batch_id, "合成管理员")
