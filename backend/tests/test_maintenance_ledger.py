@@ -91,6 +91,28 @@ def _new_ledger_workbook_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def test_parse_expense_sheet_accepts_detail_prefix():
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "维保项目清单"
+    ws.append(["订单编号"])
+    ws.append(["XSDD-20260731-0086"])
+    cost = wb.create_sheet("项目成本")
+    cost.append(
+        ["费用单号", "报销人员", "报销类别", "支出事由", "维保销售订单", "项目名称",
+         "销售订单", "销售人员", "报销明细.费用分类", "报销明细.报销金额", "备注"]
+    )
+    cost.append(
+        ["BXD-20260425-0002", "董学晶", "维保费用", "巡检",
+         "XSDD-20251028-0016", "某项目", "XSDD-20251028-0016", "余俊", "差旅费", 1068.5, ""]
+    )
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    parsed = ledger.parse_ledger_workbook(buffer.getvalue(), "台账.xlsx")
+    assert parsed["expense_rows"][0].values["费用分类"] == "差旅费"
+    assert parsed["expense_rows"][0].values["报销金额"] == "1068.5"
+
+
 def test_parse_old_ledger_structure():
     parsed = ledger.parse_ledger_workbook(
         _old_ledger_workbook_bytes(), "维保台账.xlsx"

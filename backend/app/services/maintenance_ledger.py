@@ -192,7 +192,13 @@ def _parse_expense_sheet(sheet) -> list[ExpenseRowData]:
     if not rows:
         return []
     headers = [str(v).strip() if v is not None else "" for v in rows[0]]
-    indexes = {name: _header_index(headers, name) for name in _EXPENSE_HEADERS}
+    indexes: dict[str, int | None] = {}
+    for name in _EXPENSE_HEADERS:
+        index = _header_index(headers, name)
+        if index is None:
+            # 兼容「报销明细.报销金额」「报销明细.费用分类」前缀变体
+            index = _header_index(headers, f"报销明细.{name}")
+        indexes[name] = index
     result: list[ExpenseRowData] = []
     for row_no, row in enumerate(rows[1:], 2):
         if not _non_empty_row(row):
