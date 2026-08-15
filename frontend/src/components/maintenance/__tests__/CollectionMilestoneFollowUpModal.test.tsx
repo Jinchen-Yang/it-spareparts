@@ -184,7 +184,13 @@ describe("CollectionMilestoneFollowUpModal", () => {
     expect(secondKey).toMatch(/^handle-/);
 
     // 表单未再变化时继续复用第二个键
-    fireEvent.click(screen.getByRole("button", { name: COLLECTION_FOLLOW_UP.submit }));
+    const retryButton = await waitFor(() => {
+      const button = screen.getByRole("button", { name: COLLECTION_FOLLOW_UP.submit });
+      expect(button).toBeEnabled();
+      expect(button).not.toHaveClass("ant-btn-loading");
+      return button;
+    });
+    fireEvent.click(retryButton);
     await waitFor(() => expect(followUpCollectionMilestone).toHaveBeenCalledTimes(4));
     expect(followUpCollectionMilestone.mock.calls[3][1].idempotency_key).toBe(secondKey);
     expect(onSubmitted).toHaveBeenCalledTimes(2);
