@@ -485,7 +485,7 @@ if not path.is_file() or path.is_symlink():
     raise SystemExit("unsafe root release state")
 current = path.read_bytes()
 expected = {
-    "format": "it-spareparts-production-state-v1",
+    "format": "it-spareparts-root-release-state-v1",
     "adopted_for": "v122-collection-reminders",
     "production_sha": target,
     "compose_sha256": compose,
@@ -2422,10 +2422,13 @@ PY
 	    DBC=$(db_cid)
 	    [ -n "$DBC" ] || fatal "db container is not running"
 	    CURRENT=$(docker exec "$DBC" psql -X -U spareparts -d spareparts -At -c 'SELECT version_num FROM alembic_version;')
-	    [ "$CURRENT" = "$FROM_REV" ] || fatal "production DB is not at d9 before migrate"
-    compose run --rm --no-deps --no-build \
-      -e MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=false \
-      app alembic upgrade "$TO_REV"
+    if [ "$CURRENT" = "$FROM_REV" ]; then
+      compose run --rm --no-deps --no-build \
+        -e MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=false \
+        app alembic upgrade "$TO_REV"
+    elif [ "$CURRENT" != "$TO_REV" ]; then
+      fatal "production DB is neither d9 nor the exact c8 target before migrate"
+    fi
     CURRENT=$(docker exec "$DBC" psql -X -U spareparts -d spareparts -At -c 'SELECT version_num FROM alembic_version;')
     [ "$CURRENT" = "$TO_REV" ] || fatal "production DB did not reach c8 after migrate"
     advance_phase migrated

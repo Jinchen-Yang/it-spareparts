@@ -2416,7 +2416,7 @@ def _release_test_env(
     root_state = _json_artifact(
         tmp_path / "root-release-state.json",
         {
-            "format": "it-spareparts-production-state-v1",
+            "format": "it-spareparts-root-release-state-v1",
             "production_sha": PARENT_SHA,
             "compose_sha256": hashlib.sha256((app_dir / "docker-compose.yml").read_bytes()).hexdigest(),
             "app_image_id": "sha256:" + "8" * 64,
@@ -2772,7 +2772,7 @@ def test_cutover_red_commit_release_cas_updates_root_state_and_crash_resumes(tmp
     assert completed.returncode == 0, completed.stderr
     root_state = json.loads(root.read_text())
     assert root_state == {
-        "format": "it-spareparts-production-state-v1",
+        "format": "it-spareparts-root-release-state-v1",
         "adopted_for": "v122-collection-reminders",
         "production_sha": FINAL_TARGET_SHA,
         "compose_sha256": hashlib.sha256((package / "candidate-compose.yml").read_bytes()).hexdigest(),
@@ -3503,6 +3503,22 @@ def test_release_migrate_uses_exact_target_app_image_without_build_and_verifies_
     assert "stop app" in call_text
     assert f"tag {IMAGE_ID} it-spareparts-app:latest" in call_text
     assert "run --rm --no-deps --no-build" in call_text
+    assert json.loads((evidence / "release-state.json").read_text())["phase"] == "migrated"
+
+    # A process can exit after Alembic commits c8 but before the release phase
+    # is durably advanced.  Retrying from the bound compose_installed state
+    # must recognize the exact target revision and close the state transition
+    # without executing Alembic a second time.
+    _write_release_state(evidence, package, phase="compose_installed")
+    resumed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "migrate"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    resumed_calls = calls.read_text()
+    assert resumed_calls.count("alembic upgrade c8e2a4f6b1d3") == 1
     assert json.loads((evidence / "release-state.json").read_text())["phase"] == "migrated"
 
 
