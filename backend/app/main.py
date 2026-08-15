@@ -23,6 +23,7 @@ from app.api import (
     maintenance_collection_plan_imports,
     maintenance_collection_reminders,
     maintenance_demands,
+    maintenance_front_stock,
     maintenance_ledger,
     maintenance_manager_workbooks,
     maintenance_project_assignments,
@@ -159,6 +160,11 @@ app.include_router(
 )
 app.include_router(
     maintenance_ledger.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_front_stock.router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )
