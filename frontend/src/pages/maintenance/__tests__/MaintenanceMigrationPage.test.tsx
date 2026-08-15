@@ -350,7 +350,7 @@ describe("MaintenanceMigrationPage", () => {
 
     expect(await screen.findByText("模拟响应丢失")).toBeInTheDocument();
     const firstBody = mocks.reconcileMaintenanceMigrationRun.mock.calls[0][1];
-    fireEvent.click(screen.getByRole("button", { name: "记录对账" }));
+    fireEvent.click(await screen.findByRole("button", { name: "记录对账" }));
     await waitFor(() => expect(mocks.reconcileMaintenanceMigrationRun).toHaveBeenCalledTimes(2));
     const secondBody = mocks.reconcileMaintenanceMigrationRun.mock.calls[1][1];
     expect(secondBody.operation_key).toBe(firstBody.operation_key);

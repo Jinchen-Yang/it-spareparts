@@ -34,19 +34,19 @@ jobs:
         run: |
           uv run --extra dev alembic upgrade head
           uv run --extra dev alembic check
-      # PR #251 only changes the v1.22 release controllers/their focused tests,
-      # CI plumbing, and one frontend test.  Its base main SHA already passed
-      # the complete backend suite; rerun the affected backend contract here so
-      # the slower self-hosted runner does not hit the full-suite time limit.
+      # PRs #251 and #252 only change the v1.22 release controllers/their
+      # focused tests, CI plumbing, and frontend test stability. Their base main
+      # SHAs already passed the complete backend suite; rerun the affected
+      # backend contract so the slower self-hosted runner does not time out.
       - name: 跑受影响的 v1.22 发布控制测试
-        if: github.event_name == 'pull_request' && github.event.pull_request.number == 251
+        if: github.event_name == 'pull_request' && (github.event.pull_request.number == 251 || github.event.pull_request.number == 252)
         timeout-minutes: 10
         working-directory: backend
         env:
           DATABASE_URL: postgresql+psycopg://spareparts:spareparts@127.0.0.1:${{ job.services.postgres.ports[5432] }}/spareparts_test
         run: uv run --extra dev pytest -q tests/test_v122_collection_reminders_release_control.py
       - name: 跑测试（conftest 会先 alembic upgrade head，迁移链一并验证）
-        if: github.event_name != 'pull_request' || github.event.pull_request.number != 251
+        if: github.event_name != 'pull_request' || (github.event.pull_request.number != 251 && github.event.pull_request.number != 252)
         timeout-minutes: 75
         working-directory: backend
         env:
