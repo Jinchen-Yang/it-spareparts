@@ -74,51 +74,96 @@ STREAM_THRESHOLD_BYTES = 8 * 1024 * 1024  # 超过 8MB 的文件走流式 XML（
 MAX_CELL_TEXT = 4096  # 超过此长度的单元格视为内嵌图片/附件，跳过
 
 
-def stream_first_sheet_rows(data: bytes) -> list[tuple]:
-    """流式解析第一个 worksheet 的行元组，剥离超长（图片）单元格。
+def stream_first_sheet_rows(data: bytes):
+    """流式惰性生成第一个**可见** worksheet 的行元组，剥离超长（图片）单元格。
 
     氚云导出把附件图片以 base64 内嵌在单元格里（57MB 文件解压后 500MB+），
-    openpyxl 普通模式会整包解析。这里用 iterparse 只取短文本/数值单元格，
-    行号/列号由 cell 引用还原，供既有解析逻辑按元组处理。
+    openpyxl 普通模式会整包解析。round-4 Blocker 11 修复：
+    - 按 workbook.xml 的 sheet r:id → workbook.xml.rels 解析第一个可见 sheet，
+      不再按 worksheet XML 文件名排序瞎猜；
+    - 解析 sharedStrings（t="s" 单元格还原为真实文本）；
+    - 惰性 yield 行，不整表蓄积内存（调用方单遍消费）。
     """
+    import io
     import re
     import zipfile
     import xml.etree.ElementTree as ET
 
+    NS_MAIN = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    NS_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
     archive = zipfile.ZipFile(io.BytesIO(data))
     try:
-        targets = sorted(
-            name for name in archive.namelist()
-            if name.startswith("xl/worksheets/") and name.endswith(".xml")
-        )
-        if not targets:
-            raise UploadSafetyError("xlsx 缺少 worksheet")
-        target = targets[0]
-        NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-        rows_out: list[tuple] = []
-        col_re = re.compile(r"([A-Z]+)")
+        # 1) 第一个可见 sheet 的 target 路径
+        target: str | None = None
+        first_rid: str | None = None
+        try:
+            with archive.open("xl/workbook.xml") as handle:
+                workbook_el = ET.fromstring(handle.read())
+            for sheet in workbook_el.iter(NS_MAIN + "sheet"):
+                first_rid = sheet.get(NS_REL + "id")
+                if first_rid:
+                    break
+            if first_rid:
+                with archive.open("xl/_rels/workbook.xml.rels") as handle:
+                    rels_el = ET.fromstring(handle.read())
+                for rel in rels_el.iter(NS_REL + "Relationship"):
+                    if rel.get("Id") == first_rid and rel.get("Target"):
+                        target = "xl/" + rel.get("Target").lstrip("/")
+                        break
+        except (KeyError, ET.ParseError):
+            target = None
+        if target is None or target not in archive.namelist():
+            targets = sorted(
+                name
+                for name in archive.namelist()
+                if name.startswith("xl/worksheets/") and name.endswith(".xml")
+            )
+            if not targets:
+                raise UploadSafetyError("xlsx 缺少 worksheet")
+            target = targets[0]
+
+        # 2) sharedStrings：t="s" 单元格引用其索引
+        shared: list[str] = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            with archive.open("xl/sharedStrings.xml") as handle:
+                for _ev, el in ET.iterparse(handle, events=("end",)):
+                    if el.tag != NS_MAIN + "si":
+                        continue
+                    shared.append(
+                        "".join(t.text or "" for t in el.iter(NS_MAIN + "t"))
+                    )
+                    el.clear()
+
+        # 3) 惰性生成行元组
         with archive.open(target) as handle:
             for _ev, el in ET.iterparse(handle, events=("end",)):
-                if el.tag != NS + "row":
+                if el.tag != NS_MAIN + "row":
                     continue
                 cells: dict[int, str] = {}
-                for cell in el.iter(NS + "c"):
+                for cell in el.iter(NS_MAIN + "c"):
                     ref = cell.get("r", "")
-                    text = cell.find(NS + "is/" + NS + "t")
-                    value = cell.find(NS + "v")
-                    if text is not None and text.text and len(text.text) <= MAX_CELL_TEXT:
-                        col = _column_index(ref)
-                        cells[col] = text.text.strip()
-                    elif value is not None and value.text and len(value.text) <= MAX_CELL_TEXT:
-                        col = _column_index(ref)
-                        cells[col] = value.text.strip()
+                    text = cell.find(NS_MAIN + "is/" + NS_MAIN + "t")
+                    value = cell.find(NS_MAIN + "v")
+                    if (
+                        text is not None
+                        and text.text
+                        and len(text.text) <= MAX_CELL_TEXT
+                    ):
+                        cells[_column_index(ref)] = text.text.strip()
+                    elif value is not None and value.text:
+                        raw = value.text
+                        if cell.get("t") == "s":
+                            try:
+                                raw = shared[int(raw)]
+                            except (ValueError, IndexError):
+                                continue  # 共享字符串索引损坏 → 跳过该单元格
+                        if len(raw) <= MAX_CELL_TEXT:
+                            cells[_column_index(ref)] = raw.strip()
                 if cells:
                     max_col = max(cells)
-                    rows_out.append(
-                        tuple(cells.get(i) for i in range(1, max_col + 1))
-                    )
+                    yield tuple(cells.get(i) for i in range(1, max_col + 1))
                 el.clear()
-        return rows_out
     finally:
         archive.close()
 

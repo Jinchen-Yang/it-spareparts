@@ -444,3 +444,53 @@ def test_apply_bxd_is_raw_only(db, front_stock_seed):
 def test_parse_rejects_unknown_type():
     with pytest.raises(docs.DocParseError):
         docs.parse_doc_workbook("other_type", b"", "x.xlsx")
+
+
+def test_stream_rows_resolve_shared_strings_and_visible_sheet():
+    """流式解析还原 sharedStrings 文本并按 workbook 关系取第一个可见 sheet。"""
+    from io import BytesIO
+
+    from app.services import import_safety
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws.append(["入库单号", "项目名称"])
+    ws.append(["RKD-20260806-0010", "DOC测试项目"])
+    ws.append(["RKD-20260806-0011", "DOC测试项目"])  # 重复字符串 → sharedStrings
+    buffer = BytesIO()
+    wb.save(buffer)
+    rows = list(import_safety.stream_first_sheet_rows(buffer.getvalue()))
+    assert rows[0][:2] == ("入库单号", "项目名称")
+    assert rows[1][:2] == ("RKD-20260806-0010", "DOC测试项目")
+    assert rows[2][:2] == ("RKD-20260806-0011", "DOC测试项目")
+
+
+def test_parse_doc_streaming_branch_matches_normal_parse(db, monkeypatch):
+    """超过阈值的文件走流式分支，结果与普通模式一致（C5 大文件路径）。"""
+    from app.services import import_safety
+
+    data = _doc_workbook(
+        sheet_title="Sheet1",
+        head_headers=_RETURN_HEAD,
+        line_headers=_RETURN_LINE,
+        rows=[{
+            "head": ["维保返件", "其他退回", "备件", "2026-08-03", "新华三集团",
+                     "DOC测试项目", "XSDD-20260203-0029", "WBDD-20260702-0014", "",
+                     "广州仓", "已生效", "", "RKN-001", "HEAD-1"],
+            "lines": [
+                ["", "02311AYV", "", "成品", "", "", "2", "LID-1", "1", ""],
+            ],
+        }],
+    )
+    normal = docs.parse_doc_workbook("return_order", data, "退货返库单.xlsx")
+    monkeypatch.setattr(import_safety, "STREAM_THRESHOLD_BYTES", 10)
+    streamed = docs.parse_doc_workbook("return_order", data, "退货返库单.xlsx")
+    assert streamed["file_hash"] == normal["file_hash"]
+    assert streamed["line_count"] == normal["line_count"]
+    normal_head = normal["heads"][0]
+    streamed_head = streamed["heads"][0]
+    assert streamed_head.values == normal_head.values
+    assert [line.values for line in streamed_head.lines] == [
+        line.values for line in normal_head.lines
+    ]

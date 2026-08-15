@@ -198,6 +198,26 @@ def parse_doc_workbook(
     spec = _SPECS[doc_type]
     if len(data) > MAX_PREVIEW_BYTES:
         raise DocParseError("单据文件超过大小上限")
+    from app.services import import_safety
+
+    if len(data) > import_safety.STREAM_THRESHOLD_BYTES:
+        # 大文件流式解析：51MB 入库单普通模式需 ~8 分钟（内嵌图片），流式 ~30s
+        try:
+            result = _parse_doc_rows(
+                import_safety.stream_first_sheet_rows(data),
+                doc_type,
+                spec,
+                column_aliases,
+            )
+        except DocParseError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise DocParseError(f"流式解析失败：{type(exc).__name__}") from exc
+        return {
+            **result,
+            "file_hash": hashlib.sha256(data).hexdigest(),
+            "filename": filename,
+        }
     try:
         # 氚云导出的 sheet dimension 不可靠，read_only 模式会截断行——用普通模式。
         workbook = load_workbook(io.BytesIO(data), data_only=True, read_only=False)
