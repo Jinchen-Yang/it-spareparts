@@ -185,7 +185,13 @@ def _clean(raw: str | None, pattern: re.Pattern) -> str | None:
     return match.group(1) if match else None
 
 
-def parse_doc_workbook(doc_type: str, data: bytes, filename: str) -> dict:
+def parse_doc_workbook(
+    doc_type: str,
+    data: bytes,
+    filename: str,
+    *,
+    column_aliases: dict | None = None,
+) -> dict:
     if doc_type not in _SPECS:
         raise DocParseError(f"未知单据类型：{doc_type}")
     spec = _SPECS[doc_type]
@@ -216,6 +222,8 @@ def parse_doc_workbook(doc_type: str, data: bytes, filename: str) -> dict:
         if len(header_rows) < 2:
             raise DocParseError("单据缺少字段码/字段名双表头")
         headers = [str(v).strip() if v is not None else "" for v in header_rows[-1]]
+        if column_aliases:
+            headers = [column_aliases.get(h, h) for h in headers]
         head_indexes = {name: _header_index(headers, name) for name in spec["head"]}
         line_indexes = {name: _header_index(headers, name) for name in spec["line"]}
         if all(head_indexes[a] is None for a in spec["anchor"]):

@@ -136,7 +136,7 @@ def _non_empty_row(row: tuple) -> bool:
     return bool(row) and any(v is not None and str(v).strip() != "" for v in row)
 
 
-def _parse_old_ledger(workbook):
+def _parse_old_ledger(workbook, column_aliases: dict | None = None):
     try:
         contract_sheet = workbook["维保项目清单"]
     except KeyError as exc:
@@ -146,6 +146,8 @@ def _parse_old_ledger(workbook):
     if not rows:
         raise LedgerParseError("「维保项目清单」为空")
     headers = [str(v).strip() if v is not None else "" for v in rows[0]]
+    if column_aliases:
+        headers = [column_aliases.get(h, h) for h in headers]
     indexes = {name: _header_index(headers, name) for name in _CONTRACT_HEADERS}
     if indexes["订单编号"] is None:
         raise LedgerParseError("「维保项目清单」缺少「订单编号」列")
@@ -218,7 +220,7 @@ def _parse_expense_sheet(sheet) -> list[ExpenseRowData]:
     return result
 
 
-def _parse_new_ledger(workbook):
+def _parse_new_ledger(workbook, column_aliases: dict | None = None):
     try:
         contract_sheet = workbook["01_项目与合同"]
     except KeyError as exc:
@@ -281,7 +283,9 @@ def _parse_new_ledger(workbook):
     return contract_rows, plan_rows, expense_rows
 
 
-def parse_ledger_workbook(data: bytes, filename: str) -> dict:
+def parse_ledger_workbook(
+    data: bytes, filename: str, *, column_aliases: dict | None = None
+) -> dict:
     """解析台账工作簿字节流。返回 {source_kind, file_hash, contract_rows, plan_rows, expense_rows}。"""
     if len(data) > MAX_PREVIEW_BYTES:
         raise LedgerParseError("台账文件超过大小上限")
@@ -293,10 +297,14 @@ def parse_ledger_workbook(data: bytes, filename: str) -> dict:
         sheet_names = set(workbook.sheetnames)
         if "维保项目清单" in sheet_names:
             source_kind = LEDGER_SOURCE
-            contract_rows, plan_rows, expense_rows = _parse_old_ledger(workbook)
+            contract_rows, plan_rows, expense_rows = _parse_old_ledger(
+                workbook, column_aliases
+            )
         elif "01_项目与合同" in sheet_names:
             source_kind = LEDGER_TEMPLATE_SOURCE
-            contract_rows, plan_rows, expense_rows = _parse_new_ledger(workbook)
+            contract_rows, plan_rows, expense_rows = _parse_new_ledger(
+                workbook, column_aliases
+            )
         else:
             raise LedgerParseError(
                 "无法识别台账结构：需要「维保项目清单」或「01_项目与合同」Sheet"

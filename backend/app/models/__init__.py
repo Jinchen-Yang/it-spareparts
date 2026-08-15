@@ -92,6 +92,7 @@ from app.models.maintenance_doc_import import (
     MaintenanceDocImportBatch,
     MaintenanceDocLineRow,
 )
+from app.models.maintenance_ai_fallback import MaintenanceAiMappingProposal
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -203,6 +204,7 @@ __all__ = [
     "MaintenanceDocImportBatch",
     "MaintenanceDocHeadRow",
     "MaintenanceDocLineRow",
+    "MaintenanceAiMappingProposal",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",

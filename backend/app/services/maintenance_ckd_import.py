@@ -107,7 +107,9 @@ def _non_empty(row: tuple) -> bool:
     )
 
 
-def parse_ckd_workbook(data: bytes, filename: str) -> dict:
+def parse_ckd_workbook(
+    data: bytes, filename: str, *, column_aliases: dict | None = None
+) -> dict:
     """解析发货单工作簿。返回 {source_kind, file_hash, heads: [CkdHeadData], line_count}。"""
     if len(data) > MAX_PREVIEW_BYTES:
         raise CkdParseError("发货单文件超过大小上限")
@@ -132,6 +134,8 @@ def parse_ckd_workbook(data: bytes, filename: str) -> dict:
         headers = [
             str(v).strip() if v is not None else "" for v in header_rows[-1]
         ]
+        if column_aliases:
+            headers = [column_aliases.get(h, h) for h in headers]
         head_indexes = {name: _header_index(headers, name) for name in _HEAD_COLUMNS}
         line_indexes = {name: _header_index(headers, name) for name in _LINE_COLUMNS}
         if head_indexes["出库单号"] is None:
