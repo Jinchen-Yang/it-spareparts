@@ -4,6 +4,7 @@ import io
 
 import pytest
 from openpyxl import Workbook
+from sqlalchemy import text
 
 from app.services import maintenance_ai_fallback as ai
 from app.services import maintenance_doc_import as docs
@@ -26,6 +27,13 @@ def _variant_return_workbook() -> bytes:
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_proposals(db):
+    yield
+    db.execute(text("DELETE FROM maintenance_ai_mapping_proposal"))
+    db.commit()
 
 
 def _fake_llm(prompt: str) -> str:
