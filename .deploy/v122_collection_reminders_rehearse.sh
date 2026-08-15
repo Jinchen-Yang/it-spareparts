@@ -298,7 +298,7 @@ AFTER_HEAD=$(docker exec "$DB_NAME" psql -X -U restore_admin -d spareparts -At \
   -c 'SELECT version_num FROM alembic_version;')
 [ "$AFTER_HEAD" = "$TO_REV" ] || fatal "isolated migration did not reach c8"
 
-docker exec "$DB_NAME" psql -X -v ON_ERROR_STOP=1 -U restore_admin -d spareparts -At <<'SQL' >"$WORK/invariants.txt"
+docker exec -i "$DB_NAME" psql -X -v ON_ERROR_STOP=1 -U restore_admin -d spareparts -At <<'SQL' >"$WORK/invariants.txt"
 SELECT 'batch_table', to_regclass('maintenance_collection_plan_import_batch') IS NOT NULL;
 SELECT 'binding_table', to_regclass('maintenance_collection_plan_source_binding') IS NOT NULL;
 SELECT 'operation_table', to_regclass('maintenance_collection_milestone_operation') IS NOT NULL;
@@ -323,7 +323,7 @@ SQL
 
 # Resolve every DB file reference against the restored root without persisting
 # business filenames.  Orphans are counted and hashed only; nothing is removed.
-docker exec "$DB_NAME" psql -X -U restore_admin -d spareparts -At -F $'\t' \
+docker exec -i "$DB_NAME" psql -X -U restore_admin -d spareparts -At -F $'\t' \
   >"$WORK/db-references.tsv" <<'SQL'
 SELECT 'raw', storage_path FROM sys_raw_file WHERE storage_path IS NOT NULL
 UNION ALL
@@ -433,7 +433,7 @@ print(username)
 PY
 )
 GRANT_PERMS_JSON='{"page_maintenance":true,"page_maintenance_beta":true,"data_purchase_cost":true,"data_profit":true,"action_maintenance_collection_follow_up":true,"action_maintenance_collection_plan_import":true}'
-UPDATED_NAMED_ACCOUNT=$(docker exec "$DB_NAME" psql -X -U spareparts -d spareparts -At \
+UPDATED_NAMED_ACCOUNT=$(docker exec -i "$DB_NAME" psql -X -U spareparts -d spareparts -At \
   -v username="$SPEC_USERNAME" -v perms="$GRANT_PERMS_JSON" <<'SQL'
 UPDATE sys_user
 SET template_perms = COALESCE(template_perms, '{}'::jsonb) || :'perms'::jsonb,

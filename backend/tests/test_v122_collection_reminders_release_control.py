@@ -803,6 +803,27 @@ def test_manifest_builds_flat_portable_self_verifying_preliminary_package(tmp_pa
     _verify_package(package)
 
 
+def test_rehearsal_psql_heredocs_keep_stdin_open():
+    """docker exec must use -i when psql consumes a heredoc from the host."""
+
+    text = REHEARSE.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    heredoc_psql_invocations = []
+    for index, line in enumerate(lines):
+        if "docker exec" not in line or '"$DB_NAME"' not in line or "psql" not in line:
+            continue
+        command = line
+        lookahead = index
+        while command.rstrip().endswith("\\") and lookahead + 1 < len(lines):
+            lookahead += 1
+            command += "\n" + lines[lookahead]
+        if "<<'SQL'" in command:
+            heredoc_psql_invocations.append(command)
+
+    assert heredoc_psql_invocations
+    assert all(re.search(r"docker exec\s+-i(\s|$)", command) for command in heredoc_psql_invocations)
+
+
 @pytest.mark.parametrize("artifact", [
     "candidate-compose.yml",
     "contract.yaml",
