@@ -4371,7 +4371,16 @@ def test_restore_check_rejects_invalid_gap_approval_before_any_docker_side_effec
     assert (evidence / "release-state.json").read_bytes() == before_state
 
 
-@pytest.mark.parametrize("scenario", ["match", "approval_sha_drift", "strict_to_gap"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "match",
+        "approval_sha_drift",
+        "required_approval_missing",
+        "strict_to_gap",
+        "preexisting_output",
+    ],
+)
 def test_restore_check_binds_runtime_reference_state_to_packaged_final_rehearsal(
     tmp_path: Path,
     scenario: str,
@@ -4393,27 +4402,40 @@ def test_restore_check_binds_runtime_reference_state_to_packaged_final_rehearsal
         r"""
         #!/usr/bin/env bash
         set -Eeuo pipefail
-        [ "$#" -eq 10 ]
+        { [ "$#" -eq 9 ] || [ "$#" -eq 10 ]; }
         printf '%s\n' "$@" >"$V122_TEST_REHEARSAL_ARGS"
         mkdir -m 700 -- "$9"
-        python3 - "${10}" "$9/rehearsal-evidence.json" <<'PY'
+        python3 - "${10:-}" "$9/rehearsal-evidence.json" <<'PY'
         import hashlib
         import json
         import pathlib
         import sys
-        approval_path, output = map(pathlib.Path, sys.argv[1:])
-        approval = json.loads(approval_path.read_text())
-        refs = approval["approved_missing_refs"]
-        canonical = (json.dumps(refs, sort_keys=True, separators=(",", ":")) + "\n").encode()
-        payload = {
-            "db_uploads_reference_state": "complete_with_approved_historical_gaps",
-            "db_uploads_references_complete": False,
-            "approved_missing_count": len(refs),
-            "unexpected_missing_count": 0,
-            "historical_upload_gap_set_sha256": hashlib.sha256(canonical).hexdigest(),
-            "historical_upload_gap_approval_sha256": hashlib.sha256(approval_path.read_bytes()).hexdigest(),
-            "recovery_search_evidence_sha256": approval["recovery_search_evidence_sha256"],
-        }
+        approval_arg, output_arg = sys.argv[1:]
+        output = pathlib.Path(output_arg)
+        if approval_arg:
+            approval_path = pathlib.Path(approval_arg)
+            approval = json.loads(approval_path.read_text())
+            refs = approval["approved_missing_refs"]
+            canonical = (json.dumps(refs, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            payload = {
+                "db_uploads_reference_state": "complete_with_approved_historical_gaps",
+                "db_uploads_references_complete": False,
+                "approved_missing_count": len(refs),
+                "unexpected_missing_count": 0,
+                "historical_upload_gap_set_sha256": hashlib.sha256(canonical).hexdigest(),
+                "historical_upload_gap_approval_sha256": hashlib.sha256(approval_path.read_bytes()).hexdigest(),
+                "recovery_search_evidence_sha256": approval["recovery_search_evidence_sha256"],
+            }
+        else:
+            payload = {
+                "db_uploads_reference_state": "complete",
+                "db_uploads_references_complete": True,
+                "approved_missing_count": 0,
+                "unexpected_missing_count": 0,
+                "historical_upload_gap_set_sha256": hashlib.sha256(b"[]\n").hexdigest(),
+                "historical_upload_gap_approval_sha256": None,
+                "recovery_search_evidence_sha256": None,
+            }
         output.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
         output.chmod(0o600)
         PY
@@ -4448,22 +4470,33 @@ def test_restore_check_binds_runtime_reference_state_to_packaged_final_rehearsal
         backup_manifest_sha256=hashlib.sha256(backup_manifest.read_bytes()).hexdigest(),
         backup_checksums_sha256=hashlib.sha256(checksums.read_bytes()).hexdigest(),
     )
-    approval = packaged_approval
+    approval: Path | None = packaged_approval
     if scenario == "approval_sha_drift":
         changed = json.loads(packaged_approval.read_text())
         changed["reason"] = "backup_exhausted"
         approval = _json_artifact(tmp_path / "runtime-approval.json", changed)
+    elif scenario == "required_approval_missing":
+        approval = None
+    elif scenario == "preexisting_output":
+        changed = json.loads(packaged_approval.read_text())
+        changed["reason"] = "backup_exhausted"
+        approval = _json_artifact(tmp_path / "runtime-approval.json", changed)
+        output = evidence / "restore-check"
+        output.mkdir()
+        _write(output / "preexisting-evidence", b"preserve")
 
+    command = [
+        str(package / "v122_collection_reminders_release.sh"),
+        str(package),
+        str(evidence),
+        "restore-check",
+        str(dump),
+        str(uploads),
+    ]
+    if approval is not None:
+        command.append(str(approval))
     completed = subprocess.run(
-        [
-            str(package / "v122_collection_reminders_release.sh"),
-            str(package),
-            str(evidence),
-            "restore-check",
-            str(dump),
-            str(uploads),
-            str(approval),
-        ],
+        command,
         text=True,
         capture_output=True,
         env=env,
@@ -4474,6 +4507,31 @@ def test_restore_check_binds_runtime_reference_state_to_packaged_final_rehearsal
         assert "packaged" in completed.stderr.lower() or "final rehearsal" in completed.stderr.lower()
         assert json.loads((evidence / "release-state.json").read_text())["phase"] == "backup"
         assert not calls.exists()
+        assert not args_log.exists()
+        if scenario == "preexisting_output":
+            assert (evidence / "restore-check" / "preexisting-evidence").read_bytes() == b"preserve"
+            return
+        assert not (evidence / "restore-check").exists()
+
+        retry_approval = None if scenario == "strict_to_gap" else packaged_approval
+        retry_command = [
+            str(package / "v122_collection_reminders_release.sh"),
+            str(package),
+            str(evidence),
+            "restore-check",
+            str(dump),
+            str(uploads),
+        ]
+        if retry_approval is not None:
+            retry_command.append(str(retry_approval))
+        retried = subprocess.run(
+            retry_command,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        assert retried.returncode == 0, retried.stderr
+        assert (evidence / "restore-check" / "rehearsal-evidence.json").is_file()
         return
 
     assert completed.returncode == 0, completed.stderr

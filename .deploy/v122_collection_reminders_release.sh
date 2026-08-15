@@ -1881,6 +1881,79 @@ PY
         || fatal "historical upload gap approval snapshot validation failed"
       chmod 600 "$HISTORICAL_GAP_SUMMARY"
     fi
+    PRE_REHEARSAL_REFERENCE_BINDING=$(python3 - "${HISTORICAL_GAP_SUMMARY:-}" <<'PY'
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+summary = (
+    json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+    if sys.argv[1]
+    else None
+)
+empty_set_sha = hashlib.sha256(b"[]\n").hexdigest()
+if summary is None:
+    expected = {
+        "db_uploads_reference_state": "complete",
+        "db_uploads_references_complete": True,
+        "approved_missing_count": 0,
+        "unexpected_missing_count": 0,
+        "historical_upload_gap_set_sha256": empty_set_sha,
+        "historical_upload_gap_approval_sha256": None,
+        "recovery_search_evidence_sha256": None,
+    }
+else:
+    expected = {
+        "db_uploads_reference_state": "complete_with_approved_historical_gaps",
+        "db_uploads_references_complete": False,
+        "approved_missing_count": summary["approved_missing_count"],
+        "unexpected_missing_count": 0,
+        "historical_upload_gap_set_sha256": summary["historical_upload_gap_set_sha256"],
+        "historical_upload_gap_approval_sha256": summary["historical_upload_gap_approval_sha256"],
+        "recovery_search_evidence_sha256": summary["recovery_search_evidence_sha256"],
+    }
+if re.fullmatch(r"[0-9a-f]{64}", str(expected["historical_upload_gap_set_sha256"])) is None:
+    raise SystemExit("restore-check historical upload gap SHA is invalid")
+for key in (
+    "db_uploads_reference_state",
+    "approved_missing_count",
+    "unexpected_missing_count",
+    "historical_upload_gap_set_sha256",
+    "historical_upload_gap_approval_sha256",
+    "recovery_search_evidence_sha256",
+):
+    value = expected[key]
+    print("null" if value is None else value)
+print("true" if expected["db_uploads_references_complete"] else "false")
+PY
+    ) || fatal "restore-check historical upload gap reference binding is invalid"
+    if [ "$PACKAGE_PRODUCTION_READY" = true ]; then
+      PACKAGED_FINAL_REHEARSAL="$PACKAGE_DIR/final-rehearsal.json"
+      safe_file "$PACKAGED_FINAL_REHEARSAL" "packaged final rehearsal evidence"
+      PACKAGED_REFERENCE_BINDING=$(python3 - "$PACKAGED_FINAL_REHEARSAL" <<'PY'
+import json
+import pathlib
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+for key in (
+    "db_uploads_reference_state",
+    "approved_missing_count",
+    "unexpected_missing_count",
+    "historical_upload_gap_set_sha256",
+    "historical_upload_gap_approval_sha256",
+    "recovery_search_evidence_sha256",
+):
+    item = value[key]
+    print("null" if item is None else item)
+print("true" if value["db_uploads_references_complete"] else "false")
+PY
+      ) || fatal "packaged final rehearsal reference binding is unreadable"
+      [ "$PRE_REHEARSAL_REFERENCE_BINDING" = "$PACKAGED_REFERENCE_BINDING" ] \
+        || fatal "runtime restore-check reference binding differs from packaged final rehearsal"
+    fi
     if [ "$PACKAGE_PRODUCTION_READY" = true ]; then REHEARSAL_STAGE=final; else REHEARSAL_STAGE=preliminary; fi
     REHEARSAL_ARGUMENTS=(
       "$DB_DUMP" "$UPLOADS_ARCHIVE" \
@@ -1954,31 +2027,8 @@ PY
     mapfile -t REFERENCE_VALUES <<<"$REFERENCE_BINDING"
     [ "${#REFERENCE_VALUES[@]}" -eq 7 ] \
       || fatal "restore-check rehearsal historical upload gap binding is incomplete"
-    if [ "$PACKAGE_PRODUCTION_READY" = true ]; then
-      PACKAGED_FINAL_REHEARSAL="$PACKAGE_DIR/final-rehearsal.json"
-      safe_file "$PACKAGED_FINAL_REHEARSAL" "packaged final rehearsal evidence"
-      PACKAGED_REFERENCE_BINDING=$(python3 - "$PACKAGED_FINAL_REHEARSAL" <<'PY'
-import json
-import pathlib
-import sys
-
-value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-for key in (
-    "db_uploads_reference_state",
-    "approved_missing_count",
-    "unexpected_missing_count",
-    "historical_upload_gap_set_sha256",
-    "historical_upload_gap_approval_sha256",
-    "recovery_search_evidence_sha256",
-):
-    item = value[key]
-    print("null" if item is None else item)
-print("true" if value["db_uploads_references_complete"] else "false")
-PY
-      ) || fatal "packaged final rehearsal reference binding is unreadable"
-      [ "$REFERENCE_BINDING" = "$PACKAGED_REFERENCE_BINDING" ] \
-        || fatal "runtime restore-check reference binding differs from packaged final rehearsal"
-    fi
+    [ "$REFERENCE_BINDING" = "$PRE_REHEARSAL_REFERENCE_BINDING" ] \
+      || fatal "restore-check rehearsal reference binding differs from preflight binding"
     REHEARSAL_EVIDENCE_SHA256=$(sha256sum "$REHEARSAL_EVIDENCE" | awk '{print $1}')
     if [ -n "$HISTORICAL_GAP_WORK" ]; then
       cleanup_historical_gap_work
