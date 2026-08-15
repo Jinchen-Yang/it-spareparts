@@ -20,6 +20,7 @@ from app.api import (
     maintenance_acceptance,
     maintenance_audit,
     maintenance_bad_returns,
+    maintenance_ckd_import,
     maintenance_collection_plan_imports,
     maintenance_collection_reminders,
     maintenance_demands,
@@ -165,6 +166,11 @@ app.include_router(
 )
 app.include_router(
     maintenance_front_stock.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_ckd_import.router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )

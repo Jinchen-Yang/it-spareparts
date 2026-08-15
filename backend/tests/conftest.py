@@ -167,6 +167,7 @@ _TABLES = [
     "maintenance_ledger_expense_row", "maintenance_ledger_plan_row",
     "maintenance_ledger_contract_row", "maintenance_ledger_import_batch",
     "maintenance_front_stock_ledger", "maintenance_front_stock",
+    "maintenance_ckd_line_row", "maintenance_ckd_head_row", "maintenance_ckd_import_batch",
     "maintenance_service_period",
     "maintenance_manager_upload_batch_project", "maintenance_manager_upload_batch",
     "maintenance_project_user_assignment",
