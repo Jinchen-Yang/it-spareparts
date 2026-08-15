@@ -1,5 +1,6 @@
 """维保前置库账本服务测试（B1）。"""
 
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -277,7 +278,7 @@ def test_balance_rows_stale_90d_marks_unconsumed(db, parts, project):
     row_b = rows["FS-B-001"]
     assert row_b["last_consumed_at"] is None
     assert row_b["days_since_last_consumption"] is None
-    assert row_b["stale_90d"] is True  # 从未领用
+    assert row_b["stale_90d"] is False  # 新入库未领用不算超期（round-5 Blocker 3）
 
 
 def test_long_source_ref_preserved_full_length_and_replayed(db, parts, project):
@@ -378,4 +379,130 @@ def test_front_stock_api_reports_incomplete_on_single_side_cost(db, parts, proje
     assert payload["value_completeness"] == "incomplete"
     assert payload["total_value_ex_tax"] is None
     assert payload["total_value_inc_tax"] is None
-    assert payload["stale_90d_count"] == 1
+    assert payload["stale_90d_count"] == 0  # 新入库未领用不算超期
+
+
+def test_concurrent_same_source_two_sessions_single_ledger(db, parts, project):
+    """两个真实 Session 并发写同来源：恰好一条流水、结存只入一次（round-5 Blocker 9）。"""
+    from threading import Barrier, Thread
+
+    from app.db import SessionLocal
+
+    db.commit()  # 让并发 Session 可见项目/备件种子行（主 Session 此前仅 flush）
+    errors: list[Exception] = []
+    barrier = Barrier(2)
+
+    def worker() -> None:
+        session = SessionLocal()
+        try:
+            barrier.wait()
+            front_stock.apply_movement(
+                session,
+                project_id="fs-project-1",
+                part_id=parts["a"],
+                kind="shipment_in",
+                source_type="f_maintenance_line",
+                source_ref="CONCURRENT-SRC-1",
+                qty=Decimal("3"),
+                warehouse_name="",
+                operated_by="并发测试员",
+            )
+            session.commit()
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            errors.append(exc)
+        finally:
+            session.close()
+
+    threads = [Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors, [str(e) for e in errors]
+
+    ledgers = db.execute(
+        select(MaintenanceFrontStockLedger).where(
+            MaintenanceFrontStockLedger.source_ref == "CONCURRENT-SRC-1"
+        )
+    ).scalars().all()
+    assert len(ledgers) == 1
+    db.expire_all()
+    stock = db.execute(
+        select(MaintenanceFrontStock).where(
+            MaintenanceFrontStock.project_id == "fs-project-1"
+        )
+    ).scalar_one()
+    assert float(stock.qty) == 3.0
+
+
+def test_concurrent_stock_creation_two_sessions_single_row(db, parts, project):
+    """两个 Session 并发创建同一 (project, part, warehouse) 结存行：恰一行。"""
+    from threading import Barrier, Thread
+
+    from app.db import SessionLocal
+
+    db.commit()  # 让并发 Session 可见项目/备件种子行（主 Session 此前仅 flush）
+    errors: list[Exception] = []
+    barrier = Barrier(2)
+
+    def worker() -> None:
+        session = SessionLocal()
+        try:
+            barrier.wait()
+            front_stock.apply_movement(
+                session,
+                project_id="fs-project-1",
+                part_id=parts["b"],
+                kind="shipment_in",
+                source_type="f_maintenance_line",
+                source_ref=f"NEW-STOCK-{id(barrier)}",
+                qty=Decimal("1"),
+                warehouse_name="",
+                operated_by="并发测试员",
+            )
+            session.commit()
+        except Exception as exc:  # noqa: BLE001
+            session.rollback()
+            errors.append(exc)
+        finally:
+            session.close()
+
+    threads = [Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not errors, [str(e) for e in errors]
+    stocks = db.execute(
+        select(MaintenanceFrontStock).where(
+            MaintenanceFrontStock.project_id == "fs-project-1",
+            MaintenanceFrontStock.part_id == parts["b"],
+        )
+    ).scalars().all()
+    assert len(stocks) == 1
+
+
+def test_stale_90d_only_after_inbound_age_exceeds_window(db, parts, project):
+    """入库超过 90 天且从未领用 → 超期；入库未满 90 天 → 不超期。"""
+    from datetime import timedelta
+
+    from app.services.maintenance_front_stock import apply_movement
+
+    old = datetime.now(timezone.utc) - timedelta(days=120)
+    apply_movement(
+        db,
+        project_id="fs-project-1",
+        part_id=parts["b"],
+        kind="shipment_in",
+        source_type="f_maintenance_line",
+        source_ref="STALE-OLD-1",
+        qty=Decimal("1"),
+        warehouse_name="",
+        occurred_at=old,
+        operated_by="合成测试员",
+    )
+    db.commit()
+    rows = {r["pn"]: r for r in front_stock.balance_rows(db, "fs-project-1")}
+    assert rows["FS-B-001"]["stale_90d"] is True
+    assert rows["FS-B-001"]["age_days"] >= 90

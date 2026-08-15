@@ -104,6 +104,10 @@ class MaintenanceDocHeadRow(Base):
     xsdd_no: Mapped[str | None] = mapped_column(String(64))
     project_name: Mapped[str | None] = mapped_column(String(256))
     data_status: Mapped[str | None] = mapped_column(String(64))
+    # apply 时解析出的项目归属（rkd_inbound/return_order）；返还率就绪判定依据
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("maintenance_project.project_id")
+    )
     issues: Mapped[list[str] | None] = mapped_column(
         ARRAY(String(128)), nullable=True, default=list
     )
@@ -112,6 +116,7 @@ class MaintenanceDocHeadRow(Base):
         CheckConstraint("row_no >= 1", name="ck_maintenance_doc_head_row_no"),
         Index("ix_maintenance_doc_head_batch", "batch_id"),
         Index("ix_maintenance_doc_head_no", "head_no"),
+        Index("ix_maintenance_doc_head_project", "project_id"),
     )
 
 

@@ -82,6 +82,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # 变卖登记是回收监控事实；已有事实时禁止回滚。
+    op.execute("LOCK TABLE maintenance_bad_salvage IN ACCESS EXCLUSIVE MODE")
+
     op.execute(
         """
         DO $guard$

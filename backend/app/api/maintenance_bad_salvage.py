@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import permissions as _perm
 from app.api.maintenance_project_scope import enforce_maintenance_project_access
 from app.auth import current_identity, current_role
 from app.db import get_db
@@ -45,6 +46,26 @@ class SalvageVoid(BaseModel):
     project_id: str = Field(min_length=1, max_length=36)
     version: int = Field(ge=1)
     reason: str = Field(min_length=1, max_length=1000)
+
+
+def _require_profit_data(db: Session, ctx: UserContext) -> None:
+    """变卖登记含成本基准与毛利：读端需要独立利润数据组（round-5 Blocker 2）。"""
+    if not ctx.is_authenticated:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "请先登录")
+    user = db.scalar(
+        select(SysUser).where(
+            SysUser.username == ctx.user_id,
+            SysUser.is_active.is_(True),
+        )
+    )
+    if user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "请先登录")
+    graph = _perm.effective_for_user(user)
+    if not _perm.runtime_safe(graph).get("data_profit", False):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "坏件变卖清单包含成本与毛利，要求利润数据可见权限",
+        )
 
 
 def _real_operator(db: Session, ident: dict) -> str:
@@ -88,6 +109,7 @@ def list_salvages(
             {"code": "not_found", "message": "项目不存在"},
         )
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
+    _require_profit_data(db, ctx)
     return salvage.list_salvage(db, project_id)
 
 
@@ -100,10 +122,15 @@ def register_salvage(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_bad_return_manage",
+            require_data="data_profit",
+        )
+    ),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """登记一笔坏件变卖（独立事实，不伪造采购/销售单）。"""
+    """登记一笔坏件变卖（独立事实 + 同事务 salvage_out，不伪造采购/销售单）。"""
     enforce_maintenance_project_access(db, project_id=project_id, ctx=ctx)
     operator = _real_operator(db, ident)
     try:
@@ -136,10 +163,15 @@ def void_salvage(
     db: Session = Depends(get_db),
     ident: dict = Depends(current_identity),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action("action_maintenance_bad_return_manage")),
+    _action: None = Depends(
+        require_action(
+            "action_maintenance_bad_return_manage",
+            require_data="data_profit",
+        )
+    ),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
-    """作废一笔坏件变卖登记（软作废，事实保留）。"""
+    """作废一笔坏件变卖登记（软作废 + salvage_in 回冲，事实保留）。"""
     row = db.get(MaintenanceBadSalvage, salvage_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "变卖登记不存在")

@@ -65,6 +65,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # 返还事实是返还率唯一分子来源；已有事实时禁止回滚（防历史口径塌陷）。
+    op.execute("LOCK TABLE maintenance_rkd_return_line IN ACCESS EXCLUSIVE MODE")
+
     op.execute(
         """
         DO $guard$

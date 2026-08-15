@@ -20,6 +20,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -74,5 +75,13 @@ class MaintenanceCollectionEvidence(Base):
             "ix_maintenance_collection_evidence_milestone",
             "milestone_id",
             "is_active",
+        ),
+        # 同一节点同一内容仅一份生效凭证（并发去重由 DB 兜底）
+        Index(
+            "uq_maintenance_collection_evidence_milestone_md5",
+            "milestone_id",
+            "md5",
+            unique=True,
+            postgresql_where=text("is_active"),
         ),
     )

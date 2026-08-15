@@ -78,14 +78,16 @@ def _read_headers_and_samples(data: bytes, doc_type: str) -> tuple[list[str], li
     workbook = load_workbook(io.BytesIO(data), data_only=True, read_only=False)
     try:
         if doc_type == "ledger":
-            # 台账表头在业务 sheet 的第 1 行（新旧模板同）；绝不能把
-            # 订单号/人员/项目名/金额等业务数据行当表头原文外发（round-4 Blocker 4）
+            # 台账表头在业务 sheet 的第 1 行（新旧模板同）；识别不出业务 sheet
+            # 就拒绝（绝不能把订单号/人员/项目名/金额等业务数据行当表头外发）
             if "01_项目与合同" in workbook.sheetnames:
                 sheet = workbook["01_项目与合同"]
             elif "维保项目清单" in workbook.sheetnames:
                 sheet = workbook["维保项目清单"]
             else:
-                sheet = workbook.worksheets[0]
+                raise ValueError(
+                    "无法识别台账结构：需要「维保项目清单」或「01_项目与合同」Sheet"
+                )
             header_row_index = 0
         else:
             # 氚云双表头：字段名行是第二个表头行，字段码行跳过
@@ -171,6 +173,12 @@ async def propose_ai_mapping(
             headers=headers,
             samples=samples,
             operated_by=_real_operator(ident),
+        )
+    except ValueError as exc:
+        # 识别不出业务 sheet 的台账等：不得外发数据行当表头（round-5 Blocker 10）
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {"code": "invalid_file", "message": str(exc)},
         )
     except ai.AIUnavailable as exc:
         raise HTTPException(

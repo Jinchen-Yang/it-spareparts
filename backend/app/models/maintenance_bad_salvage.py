@@ -46,6 +46,14 @@ class MaintenanceBadSalvage(Base):
     reason: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str | None] = mapped_column(String(128))
     payload_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 登记时冻结的成本证据（登记后事实变化不改写历史毛利）
+    cost_basis_inc_tax: Mapped[Decimal | None] = mapped_column(Money)
+    cost_source_ref: Mapped[str | None] = mapped_column(String(64))
+    cost_algorithm_version: Mapped[str | None] = mapped_column(String(64))
+    # 登记时是否已对前置库做 salvage_out（好件/未用件在库才扣账）
+    stock_deducted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
     operated_by: Mapped[str] = mapped_column(String(64), nullable=False)
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
@@ -77,6 +85,13 @@ class MaintenanceBadSalvage(Base):
             name="ck_maintenance_bad_salvage_payload_digest",
         ),
         CheckConstraint("version >= 1", name="ck_maintenance_bad_salvage_version"),
+        CheckConstraint(
+            "(cost_basis_inc_tax IS NULL AND cost_source_ref IS NULL "
+            "AND cost_algorithm_version IS NULL) OR "
+            "(cost_basis_inc_tax IS NOT NULL AND cost_source_ref IS NOT NULL "
+            "AND cost_algorithm_version IS NOT NULL)",
+            name="ck_maintenance_bad_salvage_cost_pair",
+        ),
         CheckConstraint(
             "(is_active AND voided_at IS NULL AND voided_by IS NULL) OR "
             "(NOT is_active AND voided_at IS NOT NULL AND voided_by IS NOT NULL)",

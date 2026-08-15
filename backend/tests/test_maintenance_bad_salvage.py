@@ -173,3 +173,156 @@ def test_salvage_api_register_requires_scope_and_permission(db, salvage_project)
         },
     )
     assert missing.status_code == 404
+
+
+def test_salvage_deducts_front_stock_and_void_reverses(db, salvage_project):
+    """变卖同事务 salvage_out 减账本；作废 salvage_in 回冲（round-5 Blocker 4）。"""
+    from app.services import maintenance_front_stock as front_stock
+
+    front_stock.apply_movement(
+        db,
+        project_id="salvage-project-1",
+        part_id=salvage_project["part_id"],
+        kind="shipment_in",
+        source_type="f_maintenance_line",
+        source_ref="SV-SHIP-1",
+        qty=Decimal("5"),
+        warehouse_name="",
+        operated_by="合成测试员",
+    )
+    db.commit()
+    payload = _register(db, part_id=salvage_project["part_id"], qty="2")
+    db.commit()
+    assert payload["stock_deducted"] is True
+    balance = front_stock.balance_rows(db, "salvage-project-1")
+    assert balance[0]["qty"] == 3.0
+
+    voided = salvage.void_salvage(
+        db,
+        salvage_id=payload["salvage_id"],
+        operated_by="合成作废人",
+        version=payload["version"],
+    )
+    db.commit()
+    assert voided["is_active"] is False
+    balance = front_stock.balance_rows(db, "salvage-project-1")
+    assert balance[0]["qty"] == 5.0
+    kinds = [e["kind"] for e in front_stock.ledger_entries(db, "salvage-project-1")]
+    assert "salvage_out" in kinds
+    assert "salvage_in" in kinds
+
+
+def test_salvage_rejects_partial_stock_and_pn_mismatch(db, salvage_project):
+    from app.services import maintenance_front_stock as front_stock
+
+    # 部分在库：无法判定 → 失败关闭
+    front_stock.apply_movement(
+        db,
+        project_id="salvage-project-1",
+        part_id=salvage_project["part_id"],
+        kind="shipment_in",
+        source_type="f_maintenance_line",
+        source_ref="SV-SHIP-PART",
+        qty=Decimal("1"),
+        operated_by="合成测试员",
+    )
+    db.commit()
+    with pytest.raises(salvage.SalvageError, match="无法判定"):
+        _register(db, part_id=salvage_project["part_id"], qty="2", key="salvage-part-1")
+    db.rollback()
+
+    # part_id 与 pn 不一致 → 拒绝
+    other = DimPart(pn_std="SV-OTHER-001", description="另一件")
+    db.add(other)
+    db.commit()
+    with pytest.raises(salvage.SalvageError, match="不一致"):
+        _register(db, part_id=other.id, pn="SV-A-001", key="salvage-mismatch-1")
+    db.rollback()
+
+
+def test_salvage_margin_frozen_at_register(db, salvage_project):
+    """毛利按登记时冻结的成本证据，后续领用成本变化不改写历史（round-5 Blocker 4）。"""
+    from datetime import date
+
+    from app.models.maintenance_project_operations import (
+        MaintenanceSiteIssue,
+        MaintenanceSiteIssueLine,
+    )
+
+    issue = MaintenanceSiteIssue(
+        issue_id="sv-issue-1",
+        project_id="salvage-project-1",
+        issue_no="SV-ISSUE-0001",
+        issue_date=date(2026, 8, 1),
+        raw_status="已确认",
+        status_mapping_state="mapped",
+        normalized_status="confirmed",
+        status_mapping_version="synthetic-map-v1",
+        source="direct_api",
+        version=1,
+    )
+    db.add(issue)
+    db.flush()
+    db.add(
+        MaintenanceSiteIssueLine(
+            issue_line_id="sv-issue-line-1",
+            issue_id="sv-issue-1",
+            line_no=1,
+            part_id=salvage_project["part_id"],
+            pn="SV-A-001",
+            quantity=Decimal("1"),
+            unit_cost_inc_tax=Decimal("113"),
+            cost_amount_inc_tax=Decimal("113"),
+            unit_cost_ex_tax=Decimal("100"),
+            cost_amount_ex_tax=Decimal("100"),
+            unit_cost=Decimal("100"),
+            cost_amount=Decimal("100"),
+            cost_source="manual",
+            algorithm_version="synthetic-algo-v1",
+        )
+    )
+    db.commit()
+    payload = _register(db, part_id=salvage_project["part_id"], qty="2", revenue="500.00")
+    db.commit()
+    assert payload["cost_basis_inc_tax"] == 113.0
+    assert payload["margin"] == 274.0  # 500 − 113×2
+    assert payload["cost_algorithm_version"]
+
+    # 后续新领用成本 200 → 历史毛利不变（冻结）
+    issue2 = MaintenanceSiteIssue(
+        issue_id="sv-issue-2",
+        project_id="salvage-project-1",
+        issue_no="SV-ISSUE-0002",
+        issue_date=date(2026, 8, 10),
+        raw_status="已确认",
+        status_mapping_state="mapped",
+        normalized_status="confirmed",
+        status_mapping_version="synthetic-map-v1",
+        source="direct_api",
+        version=1,
+    )
+    db.add(issue2)
+    db.flush()
+    db.add(
+        MaintenanceSiteIssueLine(
+            issue_line_id="sv-issue-line-2",
+            issue_id="sv-issue-2",
+            line_no=1,
+            part_id=salvage_project["part_id"],
+            pn="SV-A-001",
+            quantity=Decimal("1"),
+            unit_cost_inc_tax=Decimal("226"),
+            cost_amount_inc_tax=Decimal("226"),
+            unit_cost_ex_tax=Decimal("200"),
+            cost_amount_ex_tax=Decimal("200"),
+            unit_cost=Decimal("200"),
+            cost_amount=Decimal("200"),
+            cost_source="manual",
+            algorithm_version="synthetic-algo-v1",
+        )
+    )
+    db.commit()
+    listing = salvage.list_salvage(db, "salvage-project-1")
+    row = listing["rows"][0]
+    assert row["cost_basis_inc_tax"] == 113.0
+    assert row["margin"] == 274.0

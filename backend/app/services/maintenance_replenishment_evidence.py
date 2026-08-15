@@ -26,6 +26,7 @@ from app.models.dimensions import DimPart
 from app.models.inventory import PartPool, PartPoolMember
 from app.models.maintenance import FMaintenanceLine, FMaintenanceOrder
 from app.models.maintenance_ckd_import import (
+    MaintenanceCkdHeadRow,
     MaintenanceCkdImportBatch,
     MaintenanceCkdLineRow,
 )
@@ -76,6 +77,7 @@ def line_evidence(db: Session, line: ReplenishmentApplicationLine) -> dict:
             FPurchaseLine.part_id == part.id,
             FPurchaseOrder.data_status == ACTIVE_STATUS,
             FPurchaseOrder.order_date <= today,
+            FPurchaseLine.qty > 0,
         )
     )
     last_sales = db.scalar(
@@ -85,6 +87,7 @@ def line_evidence(db: Session, line: ReplenishmentApplicationLine) -> dict:
             FSalesLine.part_id == part.id,
             FSalesOrder.data_status == ACTIVE_STATUS,
             FSalesOrder.order_date <= today,
+            FSalesLine.qty > 0,
         )
     )
     inactive_days = None
@@ -134,6 +137,7 @@ def line_evidence(db: Session, line: ReplenishmentApplicationLine) -> dict:
             FMaintenanceOrder.data_status == ACTIVE_STATUS,
             FMaintenanceOrder.order_date >= today - timedelta(days=INACTIVE_WINDOW_DAYS),
             FMaintenanceOrder.order_date <= today,
+            FMaintenanceLine.qty > 0,
         )
     )
     is_high_frequency = bool(
@@ -155,10 +159,21 @@ def line_evidence(db: Session, line: ReplenishmentApplicationLine) -> dict:
             MaintenanceCkdImportBatch,
             MaintenanceCkdImportBatch.batch_id == MaintenanceCkdLineRow.batch_id,
         )
+        .join(
+            MaintenanceCkdHeadRow,
+            MaintenanceCkdHeadRow.row_id == MaintenanceCkdLineRow.head_row_id,
+        )
         .where(
             DimPart.id == part.id,
             MaintenanceCkdLineRow.unit_cost.is_not(None),
+            MaintenanceCkdLineRow.out_qty > 0,
             MaintenanceCkdImportBatch.status == "applied",
+            # 有效头门：维保供货、已生效、有日期、无 issue（round-5 Blocker 12）
+            MaintenanceCkdHeadRow.category == "维保供货",
+            MaintenanceCkdHeadRow.data_status_raw == ACTIVE_STATUS,
+            MaintenanceCkdHeadRow.order_date.is_not(None),
+            MaintenanceCkdHeadRow.order_date <= today,
+            func.cardinality(MaintenanceCkdHeadRow.issues) == 0,
         )
     ).scalars().all()
 

@@ -155,7 +155,7 @@ def _formal_row(
 
 
 def test_reconcile_aggregates_lines_before_compare(db):
-    """BXD 明细 400+600 聚合后 vs 台账/正式 1000 → matched（旧实现取首行 400 会错报 mismatch）。"""
+    """BXD 明细 400+600 聚合后 vs 台账/正式 1000 → 证据对齐（旧实现取首行 400 会错报）。"""
     _ledger_batch(db, batch_id="rc-ledger-1")
     _bxd_batch(db, batch_id="rc-bxd-1")
     _ledger_row(db, row_id="rc-ler-1", batch_id="rc-ledger-1",
@@ -167,7 +167,9 @@ def test_reconcile_aggregates_lines_before_compare(db):
     db.commit()
     rows = reconcile.expense_reconcile_rows(db)
     row = {r["bxd_no"]: r for r in rows}["BXD-20260425-0001"]
-    assert row["status"] == "matched"
+    assert row["status"] == "unresolved"
+    assert row["amounts_aligned"] is True
+    assert row["unresolved_basis"]
     assert row["bxd_amount"] == 1000.0  # 400+600 聚合
     assert row["bxd_line_count"] == 2
     assert row["ledger_amount"] == 1000.0
@@ -187,7 +189,8 @@ def test_reconcile_detects_over_summed_bxd(db):
     db.commit()
     rows = reconcile.expense_reconcile_rows(db)
     row = {r["bxd_no"]: r for r in rows}["BXD-20260425-0002"]
-    assert row["status"] == "mismatch"
+    assert row["status"] == "unresolved"
+    assert row["amounts_aligned"] is False
     assert row["bxd_amount"] == 1500.0
 
 
@@ -203,7 +206,8 @@ def test_reconcile_three_way_matched(db):
     db.commit()
     rows = reconcile.expense_reconcile_rows(db)
     row = {r["bxd_no"]: r for r in rows}["BXD-20260425-0003"]
-    assert row["status"] == "matched"
+    assert row["status"] == "unresolved"
+    assert row["amounts_aligned"] is True
 
 
 def test_reconcile_union_includes_formal_only_and_bxd_formal(db):
@@ -218,7 +222,8 @@ def test_reconcile_union_includes_formal_only_and_bxd_formal(db):
     db.commit()
     rows = {r["bxd_no"]: r for r in reconcile.expense_reconcile_rows(db)}
     assert rows["BXD-20260425-0004"]["status"] == "formal_only"
-    assert rows["BXD-20260425-0005"]["status"] == "partial_match"
+    assert rows["BXD-20260425-0005"]["status"] == "unresolved"
+    assert rows["BXD-20260425-0005"]["amounts_aligned"] is True
     assert rows["BXD-20260425-0005"]["ledger_amount"] is None
 
 
@@ -308,3 +313,22 @@ def test_reconcile_http_permission_matrix(db):
     assert sales.get("/api/maintenance/reconcile/expenses").status_code == 403
     assert no_profit.get("/api/maintenance/reconcile/expenses").status_code == 403
     assert anonymous.get("/api/maintenance/reconcile/expenses").status_code == 401
+
+
+def test_reconcile_limit_offset_pagination(db):
+    """limit/offset 在服务端分页（round-5 Blocker 10）。"""
+    _ledger_batch(db, batch_id="rc-ledger-page")
+    for index in range(3):
+        _ledger_row(
+            db,
+            row_id=f"rc-ler-page-{index}",
+            batch_id="rc-ledger-page",
+            bxd_no=f"BXD-20260425-1{index:03d}",
+            amount="100.00",
+        )
+    db.commit()
+    page = reconcile.expense_reconcile_rows(db, limit=2, offset=1)
+    assert [row["bxd_no"] for row in page] == [
+        "BXD-20260425-1001",
+        "BXD-20260425-1002",
+    ]

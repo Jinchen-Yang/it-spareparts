@@ -29,7 +29,7 @@ from app.db import Base
 from app.models._types import Money, Qty, TZDateTime
 
 # 流水类型（入库为正、出库为负）
-MOVEMENT_KINDS = ("shipment_in", "purchase_in", "return_out", "salvage_out")
+MOVEMENT_KINDS = ("shipment_in", "purchase_in", "return_out", "salvage_out", "salvage_in")
 # 来源类型：ckd_shipment_line=氚云发货单明细 / return_order_line=氚云返库单明细 /
 # f_maintenance_line=WBDD 需求明细 / warehouse_document_line=仓库单据 / salvage=变卖登记
 SOURCE_TYPES = (
@@ -125,7 +125,8 @@ class MaintenanceFrontStockLedger(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('shipment_in', 'purchase_in', 'return_out', 'salvage_out')",
+            "kind IN ('shipment_in', 'purchase_in', 'return_out', 'salvage_out',"
+            " 'salvage_in')",
             name="ck_maintenance_front_stock_ledger_kind",
         ),
         CheckConstraint(

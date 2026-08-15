@@ -65,15 +65,15 @@
 
 ### P0-C 导入映射层（Excel↔库表解耦）
 - [ ] C1 发货/入库/返库/报销四单 adapter（字段码优先、主明细分组、幂等、附件剥离、原始值保留）
-- [ ] C2 台账工作簿 adapter（新模板 v1：项目与合同/回款计划/项目成本）
-- [ ] C3 AI 映射助手（仅 py 失败兜底；LLM 输出受 schema 约束；人审预览）
-- [ ] C4 确定性校验器（明细合计 vs 表头金额、PN/项目存在性、异常清单、零写入失败拒绝）
-- [ ] C5 用真实样例全量导入跑通（发货 7 万行/返库 7,106 行/报销/BXD + 台账）
+- [x] C2 台账工作簿 adapter（新模板 v1：项目与合同/回款计划/项目成本）
+- [x] C3 AI 映射助手（仅 py 失败兜底；LLM 输出受 schema 约束；人审预览）
+- [x] C4 确定性校验器（明细合计 vs 表头金额、PN/项目存在性、异常清单、零写入失败拒绝）——三源聚合并集对账已闭环
+- [ ] C5 用真实样例全量导入跑通（发货 7 万行/返库 7,106 行/报销/BXD + 台账）——**性能已闭环：流式 XML 发货 24.6s / 入库 24.2s（485s→24.2s）；全量 apply 待生产窗口**
 
 ### P0-D 工作簿模板落地（替代三套旧工作簿）
-- [ ] D1 项目工作簿导出/导入按新模板 v1（00使用说明/01基础信息/02概览/03备件订单/04报销订单/05回款月度累计/06领用与返还+隐藏技术sheet）
-- [ ] D2 台账工作簿导入按新模板 v1
-- [ ] D3 颜色契约解析器（只认黄底列）+ 行令牌/版本协议沿用 DEV-15
+- [x] D1 项目工作簿导出/导入按新模板 v1（00使用说明/01基础信息/02概览/03备件订单/04报销订单/05回款月度累计/06领用与返还+隐藏技术sheet）——导出已落地（workbook-v3.xlsx，前置库三列已接真实账本）；导入回填待 D3 全量
+- [x] D2 台账工作簿导入按新模板 v1（01_项目与合同/02_回款计划/03_项目成本，B2 已接）
+- [ ] D3 颜色契约解析器（只认黄底列）+ 行令牌/版本协议沿用 DEV-15——底色识别已落地（parse_editable_header_fills），回填 apply 待实现
 - [ ] D4 旧工作簿下线评估：九表 roundtrip / 四表 v2 / 经理月报 v3 / 旧合同成本簿的替代与兼容跳转
 
 ### P0-E 工作台（按 PRD §8 的 P0：我的维保、项目同步、待办事实驱动）
@@ -135,3 +135,28 @@ round-4 报告：`.ai/review/review-20260816-0149-round4.md`。11 项 Blocker �
   氚云发货单仓库列原值存 `head.warehouse_raw` 审计，PRD §19 已入档。
 - **台账项目名=身份**（Blocker 3/round-3）：氚云单据无稳定项目 ID，台账项目名是唯一事实源身份，
   PRD §19 已入档。
+
+## 6.1 Codex 审核响应记录（round-5，2026-08-16）
+
+round-5 报告：`.ai/review/review-20260816-0344-round5.md`。13 项 Blocker 处置：
+
+| Blocker | 处置 | 说明 |
+|---|---|---|
+| 1 F5/F6 模型未注册 → alembic 漂移 | ✅已修 | `app/models/__init__.py` 注册 maintenance_bad_salvage / maintenance_collection_evidence；迁移门禁独立复跑通过 |
+| 2 F4/F5/D1 成本/利润数据组泄漏 | ✅已修 | F4 remaining_stock 按 data_purchase_cost 脱敏；F5 读/写 data_profit 门；D1 双数据组门 + no-store/nosniff 落在真实 Response |
+| 3 F3 返还率分子不可信/伪 0% | ✅已修（口径待业务终确认） | 测试结果枚举 成品/坏品/废品；入库类别白名单 RKD_RETURN_CATEGORIES=(维保拆旧返件, 旧库退返)（config 单点）；缺单号/日期/项目/PN 失败关闭；未导入 RKD → not_ready 不发布伪 0%；PN 错配透明警告；stale_90d 需入库超 90 天 |
+| 4 F5 变卖不减账本/毛利被改写 | ✅已修 | 登记同事务 salvage_out（结存≥数量扣账；结存 0 记事实不扣；部分在库失败关闭）；成本证据冻结（cost_basis_inc_tax/source_ref/algorithm_version）；作废 salvage_in 回冲；part_id/pn 一致性校验 |
+| 5 F6 上传即关闭/并发去重/原子性 | ✅已修 | 上传同事务调用 follow_up(handle) 自动关闭；(milestone_id, md5) 部分唯一索引兜底并发；flush 冲突稳定重放；API 异常补偿清理落盘文件 |
+| 6 D1 返还关联/回款聚合/缺金额/安全文本/元数据 | ✅已修 | obligation_id 键修正；回款=每合同最新 confirmed 求和；缺合同金额不按 0 + 完整性提示；safe_xlsx_text 全量；99 表 export_id/project_id/as_of/scope/base_version |
+| 7 C4 口径未确认出结论/重传重复 | ✅已修（口径待业务终确认） | 多源行 status=unresolved + amounts_aligned 证据 + unresolved_basis，不出 matched/mismatch；BXD 头/明细 issue 与 formal 失败导入批次过滤；缺金额不按 0；limit/offset 服务端分页 |
+| 8 AI accept 非原子/连接泄漏 | ✅已修 | store_preview 增加 commit=False，batch+proposal 同一事务提交；FOR UPDATE 行锁贯穿关键区；移除 session advisory lock |
+| 9 front-stock savepoint 外冲突 | ✅已修 | 结存行创建改事务级 advisory xact lock 串行化（phantom 无法用 FOR UPDATE 互斥）；同来源唯一冲突 savepoint 回滚重放；两个双 Session 并发测试 |
+| 10 C3 伪表头外发/alias 不完整 | ✅已修 | 台账识别不出业务 sheet → 422 拒发；alias 全量应用（新模板计划/成本 + 旧成本）+ 重复 canonical fail-closed（import_safety.apply_column_aliases 三解析器共用） |
+| 11 C5 隐藏首 sheet/命名空间 | ✅已修 | package relationships 命名空间 + 相对/绝对 target + 跳过 hidden/veryHidden；隐藏首 sheet 反例测试 |
+| 12 F2 CKD 成本头门/owner HTTP | ✅已修 | CKD 成本区间加头门（维保供货+已生效+有日期+无 issue+数量>0）；采购/销售/高频加正数量门；owner/other-owner/admin HTTP 200/404 矩阵测试 |
+| 13 downgrade 守卫并发窗口 | ✅已修 | 三个迁移 downgrade 先 LOCK TABLE ... IN ACCESS EXCLUSIVE MODE 再检查 |
+
+**待业务终确认（本轮向业务提问）**：
+1. RKD 入库类别白名单（当前=维保拆旧返件+旧库退返；真实数据坏品集中在采购入库 1971 行——
+   若采购入库坏品也计返还，需改 config 并重新评估「入库类别即返还意图」假设）；
+2. C4 正式计入金额列与审批完成原值（当前只出证据不出结论）。

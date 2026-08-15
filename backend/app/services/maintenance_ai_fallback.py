@@ -15,7 +15,7 @@ import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agent import provider as llm_provider
@@ -285,58 +285,43 @@ def accept_proposal(
 ) -> str:
     """人工确认提案后，用同一确定性解析器走标准 store_preview。
 
-    并发正确性（round-4 Blocker 5）：store_preview 内部自行 commit，行锁
-    会在关键区中途释放。改用 **session 级 advisory lock**（跨 commit 存活）
-    串行化同一提案的 accept：第二个请求等锁后重读 status，已接受则稳定
-    重放既有 batch，绝不产生第二个可 apply 的孤儿 batch。
+    原子性（round-5 Blocker 8）：store_preview 以 commit=False 执行，
+    batch 落库与 proposal 状态更新在**同一个事务**提交——proposal 行锁
+    （FOR UPDATE）贯穿整个关键区，不会出现「batch 已提交、proposal 未更新」
+    的孤儿 batch；并发 accept 在行锁处排队，重读后稳定重放既有 batch。
     """
-    lock_key = int(
-        hashlib.sha256(f"ai-accept:{proposal_id}".encode("utf-8")).hexdigest()[:15],
-        16,
-    )
-    db.execute(select(func.pg_advisory_lock(lock_key)))
-    try:
-        row = db.execute(
-            select(MaintenanceAiMappingProposal)
-            .where(MaintenanceAiMappingProposal.proposal_id == proposal_id)
-            .with_for_update()
-        ).scalar_one_or_none()
-        if row is None:
-            raise AIProposalError("提案不存在")
-        if row.status == "accepted":
-            if row.accepted_batch_id is None:
-                raise AIProposalError("提案状态异常")
-            return row.accepted_batch_id
-        if hashlib.sha256(data).hexdigest() != row.file_hash:
-            raise AIProposalError("上传文件与提案不匹配")
-        parsed = _parse_with_mapping(row.doc_type, data, filename, row.proposal)
-        if row.doc_type == "ledger":
-            batch_id = ledger.store_preview(
-                db, parsed, operated_by, idempotency_key=idempotency_key
-            )
-        elif row.doc_type == "ckd_shipment":
-            batch_id = ckd.store_preview(
-                db, parsed, operated_by, idempotency_key=idempotency_key
-            )
-        else:
-            batch_id = docs.store_preview(
-                db, parsed, operated_by, idempotency_key=idempotency_key
-            )
-        # store_preview 已 commit：重新加载并原子校验仍是 pending（advisory
-        # lock 保证期间无并发 accept），再落 accepted 状态
-        row = db.get(MaintenanceAiMappingProposal, proposal_id)
-        if row is None or row.status != "pending":
-            raise AIProposalError("提案状态已变化，请刷新后重试")
-        row.status = "accepted"
-        row.accepted_batch_id = batch_id
-        row.accepted_by = operated_by
-        row.accepted_at = datetime.now(timezone.utc)
-        db.commit()
-        return batch_id
-    finally:
-        # session 级锁显式释放；异常路径同样释放（进程退出由 PG 兜底清理）
-        db.execute(select(func.pg_advisory_unlock(lock_key)))
-        db.commit()
+    row = db.execute(
+        select(MaintenanceAiMappingProposal)
+        .where(MaintenanceAiMappingProposal.proposal_id == proposal_id)
+        .with_for_update()
+    ).scalar_one_or_none()
+    if row is None:
+        raise AIProposalError("提案不存在")
+    if row.status == "accepted":
+        if row.accepted_batch_id is None:
+            raise AIProposalError("提案状态异常")
+        return row.accepted_batch_id
+    if hashlib.sha256(data).hexdigest() != row.file_hash:
+        raise AIProposalError("上传文件与提案不匹配")
+    parsed = _parse_with_mapping(row.doc_type, data, filename, row.proposal)
+    if row.doc_type == "ledger":
+        batch_id = ledger.store_preview(
+            db, parsed, operated_by, idempotency_key=idempotency_key, commit=False
+        )
+    elif row.doc_type == "ckd_shipment":
+        batch_id = ckd.store_preview(
+            db, parsed, operated_by, idempotency_key=idempotency_key, commit=False
+        )
+    else:
+        batch_id = docs.store_preview(
+            db, parsed, operated_by, idempotency_key=idempotency_key, commit=False
+        )
+    row.status = "accepted"
+    row.accepted_batch_id = batch_id
+    row.accepted_by = operated_by
+    row.accepted_at = datetime.now(timezone.utc)
+    db.commit()
+    return batch_id
 
 
 def parser_accepts_file(

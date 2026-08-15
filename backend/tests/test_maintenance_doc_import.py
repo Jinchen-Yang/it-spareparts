@@ -291,7 +291,7 @@ def test_apply_rkd_bad_part_creates_return_fact(db, front_stock_seed):
         head_headers=_RKD_HEAD,
         line_headers=_RKD_LINE,
         rows=[{
-            "head": ["RKD-20260806-0010", "2026-08-06", "其他入库", "备件", "已生效",
+            "head": ["RKD-20260806-0010", "2026-08-06", "维保拆旧返件", "备件", "已生效",
                      "北京仓", "", "WBDD-20260702-0014", "", "", "", "否", ""],
             "lines": [
                 ["02311AYV", "", "", "坏品", "", "", "1", "", "", "", "", "RKD-LID-1", "1"],
@@ -343,32 +343,68 @@ def test_apply_rkd_good_part_is_not_a_return_fact(db, front_stock_seed):
     assert db.scalar(select(func.count()).select_from(MaintenanceRkdReturnLine)) == 0
 
 
-def test_apply_rkd_unknown_pn_keeps_quantity_fact(db, front_stock_seed):
-    # 未知 PN 不影响返还率分子数量：事实保留 pn 文本，part_id 置空待治理
+def test_apply_rkd_missing_pn_fail_closed(db, front_stock_seed):
+    # 坏件明细缺 PN 是身份异常：整批失败关闭，不静默生成占位事实（round-5 Blocker 3）
     data = _doc_workbook(
         sheet_title="Sheet1",
         head_headers=_RKD_HEAD,
         line_headers=_RKD_LINE,
         rows=[{
-            "head": ["RKD-20260806-0012", "2026-08-06", "其他入库", "备件", "已生效",
+            "head": ["RKD-20260806-0012", "2026-08-06", "维保拆旧返件", "备件", "已生效",
                      "北京仓", "", "WBDD-20260702-0014", "", "", "", "否", ""],
             "lines": [
-                ["ZZZ-UNKNOWN", "", "", "故障", "", "", "3", "", "", "", "", "RKD-LID-1", "1"],
+                ["", "", "", "故障", "", "", "3", "", "", "", "", "RKD-LID-1", "1"],
+            ],
+        }],
+    )
+    parsed = docs.parse_doc_workbook("rkd_inbound", data, "入库单.xlsx")
+    batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
+    with pytest.raises(docs.DocBatchError):
+        docs.apply_batch(db, batch_id, "合成管理员")
+    assert db.get(MaintenanceDocImportBatch, batch_id).status == "failed"
+    assert db.scalar(select(func.count()).select_from(MaintenanceRkdReturnLine)) == 0
+
+
+def test_apply_rkd_non_return_category_not_counted(db, front_stock_seed):
+    # 采购入库/其他入库/销售退货的坏品不进入返还分子（round-5 Blocker 3）
+    data = _doc_workbook(
+        sheet_title="Sheet1",
+        head_headers=_RKD_HEAD,
+        line_headers=_RKD_LINE,
+        rows=[{
+            "head": ["RKD-20260806-0015", "2026-08-06", "采购入库", "备件", "已生效",
+                     "北京仓", "", "WBDD-20260702-0014", "", "", "", "否", ""],
+            "lines": [
+                ["02311AYV", "", "", "坏品", "", "", "5", "", "", "", "", "RKD-LID-1", "1"],
             ],
         }],
     )
     parsed = docs.parse_doc_workbook("rkd_inbound", data, "入库单.xlsx")
     batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
     summary = docs.apply_batch(db, batch_id, "合成管理员")
-    assert summary["applied_lines"] == 1
-    fact = db.execute(
-        select(MaintenanceRkdReturnLine).where(
-            MaintenanceRkdReturnLine.batch_id == batch_id
-        )
-    ).scalar_one()
-    assert fact.pn == "ZZZ-UNKNOWN"
-    assert fact.part_id is None
-    assert float(fact.qty) == 3.0
+    assert summary["applied_lines"] == 0
+    assert db.scalar(select(func.count()).select_from(MaintenanceRkdReturnLine)) == 0
+
+
+def test_apply_rkd_missing_date_fail_closed(db, front_stock_seed):
+    # 返还类主表缺入库日期：失败关闭（round-5 Blocker 3）
+    data = _doc_workbook(
+        sheet_title="Sheet1",
+        head_headers=_RKD_HEAD,
+        line_headers=_RKD_LINE,
+        rows=[{
+            "head": ["RKD-20260806-0016", "", "维保拆旧返件", "备件", "已生效",
+                     "北京仓", "", "WBDD-20260702-0014", "", "", "", "否", ""],
+            "lines": [
+                ["02311AYV", "", "", "废品", "", "", "1", "", "", "", "", "RKD-LID-1", "1"],
+            ],
+        }],
+    )
+    parsed = docs.parse_doc_workbook("rkd_inbound", data, "入库单.xlsx")
+    batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
+    with pytest.raises(docs.DocBatchError):
+        docs.apply_batch(db, batch_id, "合成管理员")
+    assert db.get(MaintenanceDocImportBatch, batch_id).status == "failed"
 
 
 def test_apply_rkd_duplicate_source_conflict_fail_closed(db, front_stock_seed):
@@ -377,7 +413,7 @@ def test_apply_rkd_duplicate_source_conflict_fail_closed(db, front_stock_seed):
         head_headers=_RKD_HEAD,
         line_headers=_RKD_LINE,
         rows=[{
-            "head": ["RKD-20260806-0013", "2026-08-06", "其他入库", "备件", "已生效",
+            "head": ["RKD-20260806-0013", "2026-08-06", "维保拆旧返件", "备件", "已生效",
                      "北京仓", "", "WBDD-20260702-0014", "", "", "", "否", ""],
             "lines": [
                 ["02311AYV", "", "", "坏品", "", "", "1", "", "", "", "", "RKD-LID-1", "1"],
@@ -494,3 +530,22 @@ def test_parse_doc_streaming_branch_matches_normal_parse(db, monkeypatch):
     assert [line.values for line in streamed_head.lines] == [
         line.values for line in normal_head.lines
     ]
+
+
+def test_stream_rows_skips_hidden_first_sheet():
+    """第一个 sheet 隐藏、第二个可见 → 流式必须选可见 sheet（round-5 Blocker 11）。"""
+    from io import BytesIO
+
+    from app.services import import_safety
+
+    wb = Workbook()
+    hidden = wb.active
+    hidden.title = "Secret"
+    hidden.sheet_state = "hidden"
+    hidden.append(["SECRET-HIDDEN"])
+    visible = wb.create_sheet("Visible")
+    visible.append(["VISIBLE-FIRST"])
+    buffer = BytesIO()
+    wb.save(buffer)
+    rows = list(import_safety.stream_first_sheet_rows(buffer.getvalue()))
+    assert rows[0][0] == "VISIBLE-FIRST"

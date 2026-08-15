@@ -90,26 +90,37 @@ def stream_first_sheet_rows(data: bytes):
     import xml.etree.ElementTree as ET
 
     NS_MAIN = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
-    NS_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+    # workbook.xml 内 sheet 的 r:id 在 officeDocument relationships 命名空间；
+    # workbook.xml.rels 的 Relationship 元素在 package relationships 命名空间。
+    NS_OFFICE_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+    NS_PACKAGE_REL = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 
     archive = zipfile.ZipFile(io.BytesIO(data))
     try:
-        # 1) 第一个可见 sheet 的 target 路径
+        # 1) 第一个**可见** sheet 的 target 路径（跳过 hidden/veryHidden）
         target: str | None = None
         first_rid: str | None = None
         try:
             with archive.open("xl/workbook.xml") as handle:
                 workbook_el = ET.fromstring(handle.read())
             for sheet in workbook_el.iter(NS_MAIN + "sheet"):
-                first_rid = sheet.get(NS_REL + "id")
+                if sheet.get("state") in ("hidden", "veryHidden"):
+                    continue
+                first_rid = sheet.get(NS_OFFICE_REL + "id")
                 if first_rid:
                     break
             if first_rid:
                 with archive.open("xl/_rels/workbook.xml.rels") as handle:
                     rels_el = ET.fromstring(handle.read())
-                for rel in rels_el.iter(NS_REL + "Relationship"):
+                for rel in rels_el.iter(NS_PACKAGE_REL + "Relationship"):
                     if rel.get("Id") == first_rid and rel.get("Target"):
-                        target = "xl/" + rel.get("Target").lstrip("/")
+                        raw_target = rel.get("Target")
+                        # Target 可为相对（worksheets/sheet1.xml）或绝对（/xl/...）
+                        target = (
+                            raw_target.lstrip("/")
+                            if raw_target.startswith("/")
+                            else "xl/" + raw_target
+                        )
                         break
         except (KeyError, ET.ParseError):
             target = None
@@ -179,3 +190,18 @@ def _column_index(ref: str) -> int:
     for ch in letters:
         index = index * 26 + (ord(ch) - ord("A") + 1)
     return index
+
+
+def apply_column_aliases(headers: list, column_aliases: dict | None) -> list:
+    """应用列别名映射；两个源列映射同一目标列时 fail-closed（round-5 Blocker 10）。"""
+    if not column_aliases:
+        return headers
+    mapped = [column_aliases.get(h, h) for h in headers]
+    seen: dict[str, str] = {}
+    for source, target in zip(headers, mapped):
+        if target in seen and seen[target] != source:
+            raise UploadSafetyError(
+                f"多个源列映射同一目标列：{target}（{seen[target]} / {source}）"
+            )
+        seen.setdefault(target, source)
+    return mapped

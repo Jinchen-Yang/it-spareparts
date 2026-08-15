@@ -25,6 +25,7 @@ from app.models.maintenance_manager import (
     MaintenanceCollectionMilestone,
 )
 from app.services.maintenance_acceptance import validate_attachment
+from sqlalchemy.exc import IntegrityError
 
 
 class CollectionEvidenceError(RuntimeError):
@@ -184,7 +185,29 @@ def save_evidence(
     db.add(file_row)
     db.flush()
     db.add(evidence_row)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # 并发同 md5：DB 部分唯一索引兜底，回滚本笔后稳定重放既有凭证（round-5 Blocker 5）
+        db.rollback()
+        existing = db.execute(
+            select(MaintenanceCollectionEvidence)
+            .where(
+                MaintenanceCollectionEvidence.milestone_id == milestone_id,
+                MaintenanceCollectionEvidence.md5 == md5_digest,
+                MaintenanceCollectionEvidence.is_active.is_(True),
+            )
+        ).scalars().first()
+        if existing is None:
+            raise
+        return {
+            "evidence_id": existing.evidence_id,
+            "file_id": existing.file_id,
+            "milestone_id": milestone_id,
+            "md5": md5_digest,
+            "replayed": True,
+        }
+    # 落盘在 DB 行 flush 之后、API 最终 commit 之前：API 异常路径负责补偿清理
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor, temp_name = tempfile.mkstemp(prefix=".upload-", dir=path.parent)
     try:
@@ -200,24 +223,32 @@ def save_evidence(
         except FileNotFoundError:
             pass
         raise
-    _write_meta_sidecar(
-        file_id,
-        {
-            "file_id": file_id,
-            "milestone_id": milestone_id,
-            "original_filename": safe_name,
-            "mime_type": safe_mime,
-            "size_bytes": len(content),
-            "md5": md5_digest,
-            "sha256": sha256_digest,
-            "uploaded_by": operator,
-            "uploaded_at": datetime.now(timezone.utc).isoformat(),
-            "storage": "local",
-        },
-    )
+    try:
+        _write_meta_sidecar(
+            file_id,
+            {
+                "file_id": file_id,
+                "milestone_id": milestone_id,
+                "original_filename": safe_name,
+                "mime_type": safe_mime,
+                "size_bytes": len(content),
+                "md5": md5_digest,
+                "sha256": sha256_digest,
+                "uploaded_by": operator,
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                "storage": "local",
+            },
+        )
+    except BaseException:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        raise
     return {
         "evidence_id": evidence_row.evidence_id,
         "file_id": file_id,
+        "object_key": object_key,
         "milestone_id": milestone_id,
         "md5": md5_digest,
         "sha256": sha256_digest,
@@ -226,3 +257,50 @@ def save_evidence(
         "mime_type": safe_mime,
         "replayed": False,
     }
+
+
+def evidence_paths(file_id: str, object_key: str) -> tuple[Path, Path]:
+    """凭证数据文件与 yml sidecar 的落盘路径（异常补偿清理用）。"""
+    data_path = _resolved_path(object_key)
+    meta_path = _root() / file_id[:2] / f"{file_id}.yml"
+    return data_path, meta_path
+
+
+def try_close_milestone_after_upload(
+    db: Session,
+    *,
+    milestone_id: str,
+    evidence_id: str,
+    operator: str,
+    user_ctx,
+    as_of,
+) -> dict:
+    """上传凭证 = 回款提醒关闭（§2.1）：上传成功后同事务标记 handled。
+
+    与 follow_up 写路径共用全部门（canary/实名/项目范围/状态机/幂等账本）；
+    节点状态不允许关闭（incomplete/needs_review/已处理）时只报告不抛错。
+    """
+    from app.services import maintenance_collection_reminders as reminders
+
+    milestone = db.get(MaintenanceCollectionMilestone, milestone_id)
+    if milestone is None:
+        return {"closed": False, "reason": "节点不存在"}
+    try:
+        payload = reminders.follow_up_collection_milestone(
+            db,
+            milestone_id=milestone_id,
+            expected_version=milestone.version,
+            idempotency_key=f"evidence-close:{evidence_id}",
+            action="handle",
+            planned_month=None,
+            note="上传凭证自动关闭",
+            reason=None,
+            operator=operator,
+            user_ctx=user_ctx,
+            as_of=as_of,
+        )
+    except reminders.CollectionReminderInvalid as exc:
+        return {"closed": False, "reason": str(exc)}
+    if payload is None:
+        return {"closed": False, "reason": "节点不存在"}
+    return {"closed": True, "follow_up_row": payload["row"]}

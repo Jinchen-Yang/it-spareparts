@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 from datetime import datetime, timezone
+from uuid import uuid4
 from decimal import Decimal
 
 from openpyxl import Workbook
@@ -34,8 +35,10 @@ from app.models.maintenance_project_operations import (
 )
 from app.models.maintenance_source_assignment import MaintenanceSourceOrderAssignment
 from app.services import maintenance_front_stock as front_stock
+from app.services import maintenance_project_operations as operations
+from app.services.maintenance_workbook_export import safe_xlsx_text
 
-WORKBOOK_PROTOCOL_VERSION = "maintenance-project-workbook-v3.1"
+WORKBOOK_PROTOCOL_VERSION = "maintenance-project-workbook-v3.2"
 GRAY = PatternFill("solid", fgColor="D9D9D9")  # 只读/系统生成
 YELLOW = PatternFill("solid", fgColor="FFF2CC")  # 可编辑
 TITLE_FONT = Font(bold=True, size=13)
@@ -171,7 +174,9 @@ def _site_issue_rows(db: Session, project_id: str) -> list[dict]:
         .order_by(MaintenanceSiteIssue.issue_date, MaintenanceSiteIssueLine.line_no)
     ).all()
     obligations = _obligation_map(db, project_id)
-    bad_returns = _bad_return_map(db, list(obligations.keys()))
+    bad_returns = _bad_return_map(
+        db, [obligation.obligation_id for obligation in obligations.values()]
+    )
     rows: list[dict] = []
     for issue, line in issue_lines:
         obligation = obligations.get(line.issue_line_id)
@@ -210,6 +215,11 @@ def _site_issue_rows(db: Session, project_id: str) -> list[dict]:
     return rows
 
 
+def _append_safe(ws, values: list) -> None:
+    """动态文本统一 safe_xlsx_text：公式/控制字符不外泄成 Excel 可执行内容。"""
+    ws.append([safe_xlsx_text(value) if isinstance(value, str) else value for value in values])
+
+
 def parse_editable_header_fills(ws) -> list[str]:
     """D3 颜色契约：按表头单元格底色识别可回填列。
 
@@ -242,10 +252,17 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     collections = list(
         db.execute(
             select(MaintenanceCollectionSnapshot)
-            .where(MaintenanceCollectionSnapshot.project_id == project_id)
+            .where(
+                MaintenanceCollectionSnapshot.project_id == project_id,
+                MaintenanceCollectionSnapshot.status == "confirmed",
+            )
             .order_by(MaintenanceCollectionSnapshot.report_month)
         ).scalars()
     )
+    # 每份合同取最新 confirmed 快照（月份升序覆盖），再跨合同求和（round-5 Blocker 6）
+    latest_by_contract: dict[str, MaintenanceCollectionSnapshot] = {}
+    for snapshot in collections:
+        latest_by_contract[snapshot.project_contract_id] = snapshot
     site_issues = _site_issue_rows(db, project_id)
     balance = front_stock.balance_rows(db, project_id)
 
@@ -273,7 +290,7 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     primary = contracts[0] if contracts else None
     values_inc = [row["value_inc_tax"] for row in balance]
     complete_inc = all(v is not None for v in values_inc) if values_inc else True
-    ws.append([
+    _append_safe(ws, [
         project.project_code,
         project.display_name,
         project.business_type or "",
@@ -299,7 +316,7 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
                  "生效日期", "失效日期", "金额完整性"]
     _style_header(ws, c_headers, [_READONLY] * len(c_headers), row=2)
     for contract in contracts:
-        ws.append([
+        _append_safe(ws, [
             contract.contract_no,
             float(contract.amount_inc_tax) if contract.amount_inc_tax is not None else "",
             contract.contract_status or "",
@@ -313,26 +330,68 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     first_metric_row = ws.max_row + 2
     ws.cell(row=first_metric_row, column=1, value="二、关键指标（只读）").font = TITLE_FONT
     total_inc = sum(
-        (c.amount_inc_tax or Decimal("0")) for c in contracts if c.included_in_total
+        c.amount_inc_tax
+        for c in contracts
+        if c.included_in_total and c.amount_inc_tax is not None
     )
+    missing_amount_nos = [
+        c.contract_no for c in contracts if c.amount_inc_tax is None
+    ]
     cumulative = (
-        collections[-1].cumulative_amount if collections else None
+        sum(v.cumulative_amount for v in latest_by_contract.values())
+        if latest_by_contract
+        else None
     )
-    cost_rows = [row for row in balance]
+    site_cost = db.scalar(
+        select(func.coalesce(func.sum(MaintenanceSiteIssueLine.cost_amount_inc_tax), 0))
+        .join(MaintenanceSiteIssue, MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
+        .where(
+            MaintenanceSiteIssue.project_id == project_id,
+            MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
+        )
+    ) or Decimal("0")
+    expense_cost = sum(
+        (expense.amount_inc_tax or Decimal("0")) for expense in expenses
+    )
+    cost_total = site_cost + expense_cost
+    missing_cost_lines = int(
+        db.scalar(
+            select(func.count())
+            .select_from(MaintenanceSiteIssueLine)
+            .join(MaintenanceSiteIssue, MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id)
+            .where(
+                MaintenanceSiteIssue.project_id == project_id,
+                MaintenanceSiteIssue.normalized_status.in_(("confirmed", "corrected")),
+                MaintenanceSiteIssueLine.unit_cost_inc_tax.is_(None),
+            )
+        )
+        or 0
+    )
+    completeness_notes = []
+    if missing_amount_nos:
+        completeness_notes.append(f"{len(missing_amount_nos)} 份合同缺含税金额")
+    if not values_inc or not complete_inc:
+        completeness_notes.append("前置库存在缺成本件")
+    if missing_cost_lines:
+        completeness_notes.append(f"{missing_cost_lines} 行领用缺成本")
     metrics = [
-        ("合同总额(含税)", round(float(total_inc), 2)),
+        ("合同总额(含税)", round(float(total_inc), 2) if total_inc else ""),
         ("累计回款(含税)", float(cumulative) if cumulative is not None else ""),
         ("回款进度", (
             f"{float(cumulative) / float(total_inc) * 100:.1f}%"
             if cumulative is not None and total_inc > 0
             else ""
         )),
-        ("项目已计成本(含税)", ""),
-        ("成本率", ""),
-        ("缺失成本行数", sum(1 for row in cost_rows if row["unit_cost_inc_tax"] is None)),
+        ("项目已计成本(含税)", round(float(cost_total), 2)),
+        ("成本率", (
+            f"{float(cost_total) / float(total_inc) * 100:.1f}%"
+            if total_inc > 0
+            else ""
+        )),
+        ("缺失成本行数", missing_cost_lines),
         ("前置库存金额(含税)", round(sum(v for v in values_inc if v is not None), 2) if complete_inc else ""),
         ("超90天未领用备件行数", sum(1 for row in balance if row["stale_90d"])),
-        ("数据完整性提示", ""),
+        ("数据完整性提示", "；".join(completeness_notes) or "数据完整"),
     ]
     for idx, (key, value) in enumerate(metrics, first_metric_row + 1):
         ws.cell(row=idx, column=1, value=key).font = BODY_FONT
@@ -347,7 +406,7 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     colors = [_READONLY] * 13 + [_EDITABLE, _READONLY, _EDITABLE]
     _style_header(ws, headers, colors)
     for order, line in wbdd:
-        ws.append([
+        _append_safe(ws, [
             order.order_no,
             order.order_date.isoformat() if order.order_date else "",
             order.demand_type or "",
@@ -375,7 +434,7 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     colors = [_READONLY] * 7 + [_EDITABLE, _READONLY, _READONLY, _EDITABLE]
     _style_header(ws, headers, colors)
     for expense in expenses:
-        ws.append([
+        _append_safe(ws, [
             expense.bxd_no or "",
             expense.expense_date.isoformat() if expense.expense_date else "",
             expense.person or "",
@@ -397,8 +456,8 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     colors = [_EDITABLE, _READONLY, _EDITABLE, _EDITABLE, _EDITABLE, _READONLY, _EDITABLE]
     _style_header(ws, headers, colors)
     contract_no_by_id = {c.project_contract_id: c.contract_no for c in contracts}
-    for snapshot in collections:
-        ws.append([
+    for snapshot in latest_by_contract.values():
+        _append_safe(ws, [
             "",
             contract_no_by_id.get(snapshot.project_contract_id, ""),
             snapshot.report_month.strftime("%Y-%m"),
@@ -417,7 +476,7 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
     colors = [_READONLY] * 5 + [_EDITABLE] + [_READONLY] * 3 + [_EDITABLE]
     _style_header(ws, headers, colors)
     for row in site_issues:
-        ws.append([row[h] for h in headers])
+        _append_safe(ws, [row[h] for h in headers])
     _add_blank_rows(ws, len(headers), 10, ws.max_row + 1)
     _set_widths(ws, [17, 11, 14, 15, 9, 15, 12, 14, 17, 16])
 
@@ -430,9 +489,15 @@ def build_project_workbook(db: Session, project_id: str) -> bytes | None:
         ws_dict.append([line])
     ws_dict.sheet_state = "hidden"
     ws_meta = wb.create_sheet("99_元数据")
+    state = operations.get_or_create_workbook_state(db, project_id=project_id)
     ws_meta.append(["协议版本", WORKBOOK_PROTOCOL_VERSION])
-    ws_meta.append(["生成时间", datetime.now(timezone.utc).isoformat()])
+    ws_meta.append(["导出ID", str(uuid4())])
     ws_meta.append(["项目编号", project.project_code])
+    ws_meta.append(["项目ID", project_id])
+    ws_meta.append(["范围", "project"])
+    ws_meta.append(["业务日", business_today().isoformat()])
+    ws_meta.append(["生成时间", datetime.now(timezone.utc).isoformat()])
+    ws_meta.append(["基线版本", state.data_version])
     ws_meta.sheet_state = "hidden"
 
     buffer = io.BytesIO()

@@ -95,6 +95,15 @@ class ExpenseRowData:
     issues: list[str] = field(default_factory=list)
 
 
+def _aliased_headers(headers: list, column_aliases: dict | None) -> list:
+    from app.services import import_safety
+
+    try:
+        return import_safety.apply_column_aliases(headers, column_aliases)
+    except import_safety.UploadSafetyError as exc:
+        raise LedgerParseError(str(exc)) from exc
+
+
 def _header_index(headers: list, name: str) -> int | None:
     variants = {
         name,
@@ -145,9 +154,9 @@ def _parse_old_ledger(workbook, column_aliases: dict | None = None):
     rows = list(contract_sheet.iter_rows(values_only=True))
     if not rows:
         raise LedgerParseError("「维保项目清单」为空")
-    headers = [str(v).strip() if v is not None else "" for v in rows[0]]
-    if column_aliases:
-        headers = [column_aliases.get(h, h) for h in headers]
+    headers = _aliased_headers(
+        [str(v).strip() if v is not None else "" for v in rows[0]], column_aliases
+    )
     indexes = {name: _header_index(headers, name) for name in _CONTRACT_HEADERS}
     if indexes["订单编号"] is None:
         raise LedgerParseError("「维保项目清单」缺少「订单编号」列")
@@ -192,15 +201,17 @@ def _parse_old_ledger(workbook, column_aliases: dict | None = None):
 
     expense_rows: list[ExpenseRowData] = []
     if "项目成本" in workbook.sheetnames:
-        expense_rows.extend(_parse_expense_sheet(workbook["项目成本"]))
+        expense_rows.extend(_parse_expense_sheet(workbook["项目成本"], column_aliases))
     return contract_rows, plan_rows, expense_rows
 
 
-def _parse_expense_sheet(sheet) -> list[ExpenseRowData]:
+def _parse_expense_sheet(sheet, column_aliases: dict | None = None) -> list[ExpenseRowData]:
     rows = list(sheet.iter_rows(values_only=True))
     if not rows:
         return []
-    headers = [str(v).strip() if v is not None else "" for v in rows[0]]
+    headers = _aliased_headers(
+        [str(v).strip() if v is not None else "" for v in rows[0]], column_aliases
+    )
     indexes: dict[str, int | None] = {}
     for name in _EXPENSE_HEADERS:
         index = _header_index(headers, name)
@@ -229,7 +240,9 @@ def _parse_new_ledger(workbook, column_aliases: dict | None = None):
     rows = list(contract_sheet.iter_rows(values_only=True))
     if not rows:
         raise LedgerParseError("「01_项目与合同」为空")
-    headers = [str(v).strip() if v is not None else "" for v in rows[0]]
+    headers = _aliased_headers(
+        [str(v).strip() if v is not None else "" for v in rows[0]], column_aliases
+    )
     indexes = {name: _header_index(headers, name) for name in _CONTRACT_HEADERS}
     if indexes["订单编号"] is None:
         raise LedgerParseError("「01_项目与合同」缺少「订单编号」列")
@@ -248,7 +261,10 @@ def _parse_new_ledger(workbook, column_aliases: dict | None = None):
     if "02_回款计划" in workbook.sheetnames:
         plan_data = list(workbook["02_回款计划"].iter_rows(values_only=True))
         if plan_data:
-            plan_headers = [str(v).strip() if v is not None else "" for v in plan_data[0]]
+            plan_headers = _aliased_headers(
+                [str(v).strip() if v is not None else "" for v in plan_data[0]],
+                column_aliases,
+            )
             plan_indexes = {name: _header_index(plan_headers, name) for name in _PLAN_HEADERS}
             for row_no, row in enumerate(plan_data[1:], 2):
                 if not _non_empty_row(row):
@@ -279,7 +295,7 @@ def _parse_new_ledger(workbook, column_aliases: dict | None = None):
 
     expense_rows: list[ExpenseRowData] = []
     if "03_项目成本" in workbook.sheetnames:
-        expense_rows.extend(_parse_expense_sheet(workbook["03_项目成本"]))
+        expense_rows.extend(_parse_expense_sheet(workbook["03_项目成本"], column_aliases))
     return contract_rows, plan_rows, expense_rows
 
 
@@ -327,6 +343,7 @@ def store_preview(
     operated_by: str,
     *,
     idempotency_key: str,
+    commit: bool = True,
 ) -> str:
     """落 raw 行并返回 batch_id。零 canonical 写入。
 
@@ -476,7 +493,8 @@ def store_preview(
         "expense_rows": batch.expense_rows,
         "issue_rows": issue_rows,
     }
-    db.commit()
+    if commit:
+        db.commit()
     return batch.batch_id
 
 

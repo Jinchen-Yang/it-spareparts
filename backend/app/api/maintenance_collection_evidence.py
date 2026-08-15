@@ -12,6 +12,7 @@ from app.api.maintenance_collection_reminders import (
 )
 from app.api.maintenance_project_scope import enforce_maintenance_project_access
 from app.auth import current_identity, current_role
+from app.business_time import business_today
 from app.db import get_db
 from app.models.maintenance_manager import MaintenanceCollectionMilestone
 from app.security import UserContext, get_current_user_context, require_page
@@ -89,6 +90,7 @@ async def upload_milestone_evidence(
             code="file_too_large",
             message="凭证文件过大",
         )
+    payload: dict | None = None
     try:
         payload = collection_evidence.save_evidence(
             db,
@@ -103,6 +105,22 @@ async def upload_milestone_evidence(
                 status.HTTP_404_NOT_FOUND,
                 code="not_found",
                 message="资源不存在或不可见",
+            )
+        if payload.get("replayed"):
+            payload["closed"] = False  # 重放不重复关闭
+        else:
+            # 上传凭证 = 回款提醒关闭（同事务；节点状态不允许时仅报告）
+            closed = collection_evidence.try_close_milestone_after_upload(
+                db,
+                milestone_id=milestone_id,
+                evidence_id=payload["evidence_id"],
+                operator=operator,
+                user_ctx=ctx,
+                as_of=business_today(),
+            )
+            payload["closed"] = bool(closed["closed"])
+            payload["close_reason"] = (
+                None if closed["closed"] else closed.get("reason")
             )
         db.commit()
         return payload
@@ -125,4 +143,22 @@ async def upload_milestone_evidence(
         raise
     except Exception as exc:
         db.rollback()
+        _compensate_orphan_files(payload)
         _raise_http(exc)
+
+
+def _compensate_orphan_files(payload: dict | None) -> None:
+    """DB 事务失败时补偿清理已落盘的凭证文件（round-5 Blocker 5）。"""
+    if not payload or payload.get("replayed"):
+        return
+    try:
+        data_path, meta_path = collection_evidence.evidence_paths(
+            payload["file_id"], payload["object_key"]
+        )
+        for path in (data_path, meta_path):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+    except Exception:  # noqa: BLE001
+        pass

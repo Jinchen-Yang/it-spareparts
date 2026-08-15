@@ -19,7 +19,11 @@ from app.models.maintenance_bad_return import (
     MaintenanceBadReturnLine,
     MaintenanceReturnObligation,
 )
-from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
+from app.models.maintenance_doc_import import (
+    MaintenanceDocHeadRow,
+    MaintenanceDocImportBatch,
+    MaintenanceRkdReturnLine,
+)
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
     MaintenanceProjectOperationAudit,
@@ -871,7 +875,7 @@ def return_rates_for_projects(
     ):
         return_facts[project_id] = (Decimal(registered), Decimal(confirmed))
 
-    # 官方返还率分子（Q8）：氚云收货入库单 RKD 的坏品/坏件/故障明细件数。
+    # 官方返还率分子（Q8）：氚云收货入库单 RKD 的坏品/坏件/故障/废品明细件数。
     rkd_facts: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     for project_id, official_qty in db.execute(
         select(
@@ -885,30 +889,93 @@ def return_rates_for_projects(
     ):
         rkd_facts[project_id] = Decimal(official_qty)
 
+    # 项目是否已导入过 RKD（已应用批次的头已解析归属）→ 未导入不得发布伪 0%
+    rkd_imported_projects: set[str] = set(
+        db.execute(
+            select(MaintenanceDocHeadRow.project_id)
+            .join(
+                MaintenanceDocImportBatch,
+                MaintenanceDocImportBatch.batch_id == MaintenanceDocHeadRow.batch_id,
+            )
+            .where(
+                MaintenanceDocImportBatch.doc_type == "rkd_inbound",
+                MaintenanceDocImportBatch.status == "applied",
+                MaintenanceDocHeadRow.project_id.in_(ids),
+            )
+            .distinct()
+        ).scalars()
+    )
+
+    # 项目级口径（Q8 无 SN/不按行匹配）：逐 PN 错配仅作透明警告，不改公式
+    rkd_pns: dict[str, set[str]] = defaultdict(set)
+    for project_id, pn in db.execute(
+        select(
+            MaintenanceRkdReturnLine.project_id,
+            MaintenanceRkdReturnLine.pn,
+        ).where(MaintenanceRkdReturnLine.project_id.in_(ids))
+    ):
+        rkd_pns[project_id].add(pn)
+    obligation_pns: dict[str, set[str]] = defaultdict(set)
+    for project_id, pn in db.execute(
+        select(
+            MaintenanceReturnObligation.project_id,
+            MaintenanceReturnObligation.pn,
+        ).where(
+            MaintenanceReturnObligation.project_id.in_(ids),
+            MaintenanceReturnObligation.is_active.is_(True),
+        )
+    ):
+        obligation_pns[project_id].add(pn)
+
     result: dict[str, dict] = {}
     for project_id in ids:
         facts = obligation_facts[project_id]
         registered, confirmed = return_facts[project_id]
+        imported = project_id in rkd_imported_projects
         calculated = calculate_return_rate(
             required_quantity=Decimal(facts["required_quantity"]),
             exempt_quantity=Decimal(facts["exempt_quantity"]),
             pending_quantity=Decimal(facts["pending_quantity"]),
             registered_quantity=registered,
             warehouse_confirmed_quantity=confirmed,
-            official_returned_quantity=rkd_facts[project_id],
+            official_returned_quantity=(
+                rkd_facts[project_id] if imported else None
+            ),
         )
+        payload = {
+            key: _qty(value) if isinstance(value, Decimal) else value
+            for key, value in calculated.items()
+        }
+        if not imported:
+            # 未导入 RKD：不发布伪 0%（round-5 Blocker 3）；无应返义务除外
+            if calculated["status"] in ("available", "basis_incomplete"):
+                payload["official_basis"] = "rkd_not_imported"
+                payload["official_rate_pct"] = None
+                if calculated["status"] == "available":
+                    payload["status"] = "not_ready"
+        pn_mismatch = sorted(rkd_pns[project_id] - obligation_pns[project_id])
         result[project_id] = {
             "project_id": project_id,
-            **{
-                key: _qty(value) if isinstance(value, Decimal) else value
-                for key, value in calculated.items()
-            },
+            **payload,
             "required_count": int(facts["required_count"]),
             "exempt_count": int(facts["exempt_count"]),
             "pending_count": int(facts["pending_count"]),
+            "rkd_imported": imported,
+            "pn_mismatch_warning": pn_mismatch[:20],
             "business_assumption": (
                 "官方返还率=入库单坏件数/(领用−不返还)；"
                 "返库登记/仓库确认量仅作过程参考。"
+                + (
+                    "该项目尚未导入收货入库单(RKD)，返还率暂不发布。"
+                    if not imported
+                    else ""
+                )
+                + (
+                    f"存在返还 PN 不在领用清单中（{', '.join(pn_mismatch[:5])}），"
+                    "项目级口径下请人工复核。"
+                    if pn_mismatch
+                    else ""
+                )
             ),
         }
     return result

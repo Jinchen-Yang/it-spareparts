@@ -161,8 +161,12 @@ def _parse_ckd_rows(rows, column_aliases: dict | None) -> dict:
         headers = [
             str(v).strip() if v is not None else "" for v in header_rows[-1]
         ]
-        if column_aliases:
-            headers = [column_aliases.get(h, h) for h in headers]
+        try:
+            from app.services import import_safety as _safety
+
+            headers = _safety.apply_column_aliases(headers, column_aliases)
+        except _safety.UploadSafetyError as exc:
+            raise CkdParseError(str(exc)) from exc
         head_indexes = {name: _header_index(headers, name) for name in _HEAD_COLUMNS}
         line_indexes = {name: _header_index(headers, name) for name in _LINE_COLUMNS}
         if head_indexes["出库单号"] is None:
@@ -204,9 +208,14 @@ def _parse_ckd_rows(rows, column_aliases: dict | None) -> dict:
 
 
 def store_preview(
-    db: Session, parsed: dict, operated_by: str, *, idempotency_key: str
+    db: Session, parsed: dict, operated_by: str, *, idempotency_key: str, commit: bool = True
 ) -> str:
-    """落 raw 行并返回 batch_id。零业务写入；Idempotency-Key 重放收敛。"""
+    """落 raw 行并返回 batch_id。零业务写入；Idempotency-Key 重放收敛。
+
+    commit=False 供 AI accept 使用：把 batch 落库与 proposal 状态更新放进
+    同一个事务（round-5 Blocker 8），避免「batch 已提交、proposal 未更新」
+    的孤儿窗口。
+    """
     existing = db.execute(
         select(MaintenanceCkdImportBatch).where(
             MaintenanceCkdImportBatch.uploaded_by == operated_by,
@@ -323,7 +332,8 @@ def store_preview(
         "line_rows": batch.line_rows,
         "issue_rows": issue_rows,
     }
-    db.commit()
+    if commit:
+        db.commit()
     return batch.batch_id
 
 

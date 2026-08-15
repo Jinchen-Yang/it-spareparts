@@ -130,9 +130,10 @@ def test_save_evidence_replays_same_md5(db, seeded_milestone, tmp_path, monkeypa
     assert len(evidence_service.list_evidence(db, seeded_milestone["milestone_id"])) == 1
 
 
-def test_handle_requires_evidence_then_succeeds(db, seeded_milestone, tmp_path, monkeypatch):
+def test_upload_closes_reminder_and_replay_stays_idempotent(db, seeded_milestone, tmp_path, monkeypatch):
     monkeypatch.setattr(get_settings(), "raw_file_dir", str(tmp_path))
     client = _evidence_client(db, username="evidence_api")
+    # 无凭证仍不可手工关闭（凭证是关闭依据）
     denied = client.post(
         f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/follow-ups",
         json={
@@ -146,24 +147,42 @@ def test_handle_requires_evidence_then_succeeds(db, seeded_milestone, tmp_path, 
     assert "凭证" in denied.json()["detail"]["message"]
 
     content = _png_bytes()
+    # 上传即关闭（round-5 Blocker 5）
     upload = client.post(
         f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence",
         files={"file": ("巡检报告.png", content, "image/png")},
     )
     assert upload.status_code == 201, upload.text
     assert upload.json()["md5"] == hashlib.md5(content).hexdigest()
+    assert upload.json()["closed"] is True
 
+    from app.models.maintenance_manager import MaintenanceCollectionMilestone
+
+    milestone = db.get(
+        MaintenanceCollectionMilestone, seeded_milestone["milestone_id"]
+    )
+    assert milestone.follow_up_status == "handled"
+
+    # 已关闭后再次手工 handle → 422
     handled = client.post(
         f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/follow-ups",
         json={
-            "expected_version": 1,
+            "expected_version": 2,
             "idempotency_key": "evidence-handle-ok",
             "action": "handle",
             "note": "凭证已上传",
         },
     )
-    assert handled.status_code == 200, handled.text
-    assert handled.json()["row"]["follow_up_status"] == "handled"
+    assert handled.status_code == 422, handled.text
+
+    # 同 md5 重放：幂等返回既有凭证，不重复关闭
+    replay = client.post(
+        f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence",
+        files={"file": ("巡检报告-副本.png", content, "image/png")},
+    )
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["replayed"] is True
+    assert replay.json()["closed"] is False
 
     listing = client.get(
         f"/api/maintenance/collection-milestones/{seeded_milestone['milestone_id']}/evidence"

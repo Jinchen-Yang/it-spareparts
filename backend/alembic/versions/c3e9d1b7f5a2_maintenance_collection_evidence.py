@@ -68,6 +68,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # 凭证是回款提醒关闭依据；已有凭证时禁止回滚。
+    op.execute("LOCK TABLE maintenance_collection_evidence IN ACCESS EXCLUSIVE MODE")
+
     op.execute(
         """
         DO $guard$

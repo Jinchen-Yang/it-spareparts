@@ -364,9 +364,38 @@ def test_evidence_uses_effective_facts_only(db, owner_user):
             batch_id="ev-ckd-batch",
             row_no=1,
             order_no="CKD-20260801-0001",
+            category="维保供货",
+            data_status_raw="已生效",
+            order_date=today,
+            issues=[],
         )
     )
     db.flush()
+    # 销售出库头（已生效但非维保供货）→ 成本不进区间（round-5 Blocker 12 反例）
+    db.add(
+        MaintenanceCkdHeadRow(
+            row_id="ev-ckd-head-sales",
+            batch_id="ev-ckd-batch",
+            row_no=2,
+            order_no="CKD-20260801-0099",
+            category="销售出库",
+            data_status_raw="已生效",
+            order_date=today,
+            issues=[],
+        )
+    )
+    db.flush()
+    db.add(
+        MaintenanceCkdLineRow(
+            row_id="ev-ckd-line-sales",
+            batch_id="ev-ckd-batch",
+            head_row_id="ev-ckd-head-sales",
+            row_no=3,
+            pn="PN-C-001",
+            out_qty=Decimal("1"),
+            unit_cost=Decimal("300"),
+        )
+    )
     for index, cost in enumerate(("90", "110")):
         db.add(
             MaintenanceCkdLineRow(
@@ -415,3 +444,84 @@ def test_evidence_uses_effective_facts_only(db, owner_user):
     assert 300.0 not in (float(row["ckd_unit_cost_min"]), float(row["ckd_unit_cost_max"]))
     # 排除件不得成为替代建议
     assert all(alt["pn_std"] != "PN-ALT-001" for alt in row["pool_alternatives"])
+
+
+def test_evidence_and_export_owner_scope_http(db, approved_two_version):
+    """F2 两端点 owner/other-owner/admin 的 HTTP 200/404 矩阵（round-5 Blocker 1/12）。"""
+    from fastapi.testclient import TestClient
+
+    from app import permissions
+    from app.auth import hash_password
+    from app.config import get_settings
+    from app.main import app
+    from app.models.system import SysUser
+
+    password = "safe-test-password"
+    custom = permissions.effective("readonly", None)
+    custom.update(
+        {
+            "page_replenishment_beta": True,
+            "action_replenishment_create": True,
+            "data_pool_price_governance": True,
+        }
+    )
+    owner_user = db.query(SysUser).filter_by(username=OWNER).one()
+    owner_user.password_hash = hash_password(password)
+    owner_user.permissions = custom
+    owner_user.is_active = True
+    db.add_all(
+        [
+            SysUser(
+                username="other-sales-http",
+                role="sales",
+                display_name="其他销售",
+                password_hash=hash_password(password),
+                permissions=custom,
+                is_active=True,
+            ),
+            SysUser(
+                username="evidence_admin_http",
+                role="admin",
+                display_name="管理员",
+                password_hash=hash_password(password),
+                permissions=custom,
+                is_active=True,
+            ),
+        ]
+    )
+    db.commit()
+
+    def client_for(username: str) -> TestClient:
+        client = TestClient(app)
+        login = client.post(
+            "/api/auth/login", json={"username": username, "password": password}
+        )
+        assert login.status_code == 200, login.text
+        client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+        return client
+
+    settings = get_settings()
+    original = settings.replenishment_beta_enabled
+    try:
+        settings.replenishment_beta_enabled = True
+        evidence_path = "/api/replenishment-beta/applications/evidence-app-1/evidence"
+        export_path = (
+            "/api/replenishment-beta/applications/evidence-app-1/"
+            "exports/purchase-list.xlsx"
+        )
+        owner = client_for(OWNER)
+        other = client_for("other-sales-http")
+        admin = client_for("evidence_admin_http")
+        assert owner.get(evidence_path).status_code == 200
+        assert owner.get(export_path).status_code == 200
+        # 非 owner 与不存在同 404
+        assert other.get(evidence_path).status_code == 404
+        assert other.get(export_path).status_code == 404
+        assert admin.get(evidence_path).status_code == 200
+        assert admin.get(export_path).status_code == 200
+        missing = owner.get(
+            "/api/replenishment-beta/applications/no-such-app/evidence"
+        )
+        assert missing.status_code == 404
+    finally:
+        settings.replenishment_beta_enabled = original

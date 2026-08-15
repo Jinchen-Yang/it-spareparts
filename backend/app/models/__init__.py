@@ -91,6 +91,11 @@ from app.models.maintenance_doc_import import (
     MaintenanceDocHeadRow,
     MaintenanceDocImportBatch,
     MaintenanceDocLineRow,
+    MaintenanceRkdReturnLine,
+)
+from app.models.maintenance_bad_salvage import MaintenanceBadSalvage
+from app.models.maintenance_collection_evidence import (
+    MaintenanceCollectionEvidence,
 )
 from app.models.maintenance_ai_fallback import MaintenanceAiMappingProposal
 from app.models.master_data import (

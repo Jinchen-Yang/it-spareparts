@@ -32,6 +32,7 @@ KIND_SIGNS = {
     "purchase_in": Decimal(1),
     "return_out": Decimal(-1),
     "salvage_out": Decimal(-1),
+    "salvage_in": Decimal(1),
 }
 
 
@@ -93,6 +94,17 @@ def _get_or_create_stock(
     part_id: int,
     warehouse_name: str,
 ) -> MaintenanceFrontStock:
+    # 用事务级 advisory lock 串行化同一 (project, part, warehouse) 的结存行
+    # 创建：SELECT ... FOR UPDATE 对“不存在的行”无法互斥（phantom），
+    # 两个会话可同时 INSERT 竞态；advisory xact lock 在 commit 时释放，
+    # 后到者等锁后必然读到已提交的行（round-5 Blocker 9）。
+    lock_key = int(
+        hashlib.sha256(
+            f"front-stock:{project_id}:{part_id}:{warehouse_name}".encode("utf-8")
+        ).hexdigest()[:15],
+        16,
+    )
+    db.execute(select(func.pg_advisory_xact_lock(lock_key)))
     stock = db.execute(
         select(MaintenanceFrontStock)
         .where(
@@ -113,21 +125,7 @@ def _get_or_create_stock(
         version=1,
     )
     db.add(stock)
-    savepoint = db.begin_nested()
-    try:
-        db.flush()
-    except IntegrityError:
-        # 并发创建竞态：savepoint 先于 flush 开启，回滚仅撤销本笔 INSERT
-        savepoint.rollback()
-        stock = db.execute(
-            select(MaintenanceFrontStock)
-            .where(
-                MaintenanceFrontStock.project_id == project_id,
-                MaintenanceFrontStock.part_id == part_id,
-                MaintenanceFrontStock.warehouse_name == warehouse_name,
-            )
-            .with_for_update()
-        ).scalar_one()
+    db.flush()
     return stock
 
 
@@ -315,8 +313,12 @@ def balance_rows(db: Session, project_id: str) -> list[dict]:
             if last_consumed_at is not None
             else None
         )
+        # 超 90 天未领用：入库已超 90 天且（从未领用或领用也已超 90 天）。
+        # 新入库未领用件不算超期（round-5 Blocker 3）。
         stale_90d = bool(
             stock.qty > 0
+            and age_days is not None
+            and age_days > 90
             and (days_since_consumption is None or days_since_consumption > 90)
         )
         result.append(
