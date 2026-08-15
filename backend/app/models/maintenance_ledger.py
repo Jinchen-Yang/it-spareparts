@@ -125,7 +125,7 @@ class MaintenanceLedgerContractRow(Base):
     amount_inc_tax: Mapped[Decimal | None] = mapped_column(Money)
     collected_amount: Mapped[Decimal | None] = mapped_column(Money)
     receivable_amount: Mapped[Decimal | None] = mapped_column(Money)
-    issues: Mapped[list[str]] = mapped_column(ARRAY(String(128)), default=list)
+    issues: Mapped[list[str] | None] = mapped_column(ARRAY(String(128)), nullable=True, default=list)
 
     __table_args__ = (
         CheckConstraint("row_no >= 1", name="ck_maintenance_ledger_contract_row_no"),
@@ -152,7 +152,7 @@ class MaintenanceLedgerPlanRow(Base):
     planned_date: Mapped[date | None] = mapped_column(Date)
     date_precision: Mapped[str | None] = mapped_column(String(8))
     planned_amount: Mapped[Decimal | None] = mapped_column(Money)
-    issues: Mapped[list[str]] = mapped_column(ARRAY(String(128)), default=list)
+    issues: Mapped[list[str] | None] = mapped_column(ARRAY(String(128)), nullable=True, default=list)
 
     __table_args__ = (
         CheckConstraint(
@@ -188,7 +188,7 @@ class MaintenanceLedgerExpenseRow(Base):
     bxd_no: Mapped[str | None] = mapped_column(String(64))
     sales_order: Mapped[str | None] = mapped_column(String(64))
     amount: Mapped[Decimal | None] = mapped_column(Money)
-    issues: Mapped[list[str]] = mapped_column(ARRAY(String(128)), default=list)
+    issues: Mapped[list[str] | None] = mapped_column(ARRAY(String(128)), nullable=True, default=list)
 
     __table_args__ = (
         CheckConstraint("row_no >= 1", name="ck_maintenance_ledger_expense_row_no"),

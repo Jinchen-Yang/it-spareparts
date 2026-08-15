@@ -328,6 +328,8 @@ ACTION_DATA_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_project_manage": "data_profit",
     "action_maintenance_site_issue_manage": "data_purchase_cost",
     "action_maintenance_migration_review": "data_profit",
+    # 台账导入能看到合同额与计划金额：能改必须能看（follow-up 不需金额可见性）。
+    "action_maintenance_ledger_import": "data_profit",
     # 回款计划导入能看到计划金额与合同额：能改必须能看（follow-up 不需金额可见性）。
     "action_maintenance_collection_plan_import": "data_profit",
     "action_replenishment_create": "data_pool_price_governance",
@@ -349,6 +351,7 @@ ACTION_PAGE_DEPENDENCIES: dict[str, str] = {
     "action_maintenance_acceptance_review": "page_maintenance",
     "action_maintenance_warehouse_manage": "page_maintenance",
     "action_maintenance_migration_review": "page_maintenance",
+    "action_maintenance_ledger_import": "page_maintenance",
     "action_maintenance_collection_follow_up": "page_maintenance",
     "action_maintenance_collection_plan_import": "page_maintenance",
     "action_replenishment_create": "page_replenishment_beta",
@@ -509,7 +512,8 @@ UI_GROUPS: list[dict] = [
     {"key": "admin", "label": "高风险管理能力",
      "hint": "接近管理员的能力，只有管理员本人可以授予或撤销，请谨慎开放。",
      "keys": ["page_accounts", "action_account_manage",
-              "action_maintenance_migration_review"]},
+              "action_maintenance_migration_review",
+               "action_maintenance_ledger_import"]},
 ]
 
 # 每个权限键的业务语言八要素（甲方语言，不是开发语言）。
@@ -816,6 +820,15 @@ PERMISSION_META: dict[str, dict] = {
         "typical": ["管理员", "独立复核人（需单独授权）"],
         "sensitivity": "critical",
         "risk": "错误审批会把成本和库存切换到错误基线；系统默认仅管理员持有且生产开关仍独立关闭。",
+    },
+    "action_maintenance_ledger_import": {
+        "label": "台账工作簿导入应用",
+        "summary": "允许上传维保台账工作簿（项目/合同/期限/回款计划），预览后同步为正式项目与合同事实。",
+        "can": "上传台账 Excel 零写入预览，核对行数与异常清单后应用；项目、合同与回款计划以台账为唯一事实源。",
+        "cannot": "不能删除台账中没有的历史事实；报销归集行只保留原始记录，待与氚云报销逐条对账后才进入正式统计。",
+        "typical": ["管理员", "维保台账维护人员（需单独授权）"],
+        "sensitivity": "critical",
+        "risk": "应用会批量创建或更新项目与合同事实；金额口径（台账含税额）与销售单未税额自动对账，异常进入清单不静默。",
     },
     "action_maintenance_collection_follow_up": {
         "label": "回款提醒跟进",

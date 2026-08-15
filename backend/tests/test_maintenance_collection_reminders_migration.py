@@ -53,6 +53,11 @@ def _current_head() -> str:
     return ScriptDirectory.from_config(_cfg()).get_current_head()
 
 
+def _db_version() -> str:
+    with engine.connect() as connection:
+        return connection.scalar(text("SELECT version_num FROM alembic_version"))
+
+
 # ---------- 种子辅助 ----------
 def _seed_parents(db, *, prefix: str) -> int:
     """项目/合同/账号最小父数据；返回 sys_user.id。"""
@@ -225,7 +230,14 @@ def test_new_revision_is_additive_child_of_frozen_baseline_and_single_head():
     revisions = {revision.revision: revision for revision in script.walk_revisions()}
     assert REVISION in revisions, "新 revision c8e2a4f6b1d3 尚未创建"
     assert revisions[REVISION].down_revision == PREVIOUS
-    assert set(script.get_heads()) == {REVISION}, "必须只有一个 head"
+    heads = set(script.get_heads())
+    assert len(heads) == 1, "必须只有一个 head"
+    # 冻结基线必须仍在新 head 的祖先链上（后续加法迁移不得重写历史）
+    ancestor_revisions = {
+        revision.revision
+        for revision in script.walk_revisions(base="base", head=heads.pop())
+    }
+    assert REVISION in ancestor_revisions, "冻结基线 c8e2a4f6b1d3 必须仍是新 head 的祖先"
 
 
 # ---------- 2. milestone 加法列 / FK / 索引 ----------
@@ -1011,7 +1023,7 @@ def test_downgrade_removes_only_new_objects_and_keeps_existing_milestones(db):
             ) == date(2026, 9, 1)
     finally:
         alembic_command.upgrade(cfg, "head")
-    assert _current_head() == REVISION
+    assert _db_version() == _current_head()
 
 
 # ---------- 11. 修复靶 P1-5：批次应用证据 CHECK / 操作账本索引 / 硬化 ----------
@@ -1374,7 +1386,7 @@ def test_downgrade_blocked_by_import_batch_preview(db):
         with engine.connect() as connection:
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == REVISION
+                == _current_head()
             ), "downgrade 失败后数据库必须仍在 c8e2a4f6b1d3"
             assert (
                 connection.scalar(
@@ -1390,7 +1402,7 @@ def test_downgrade_blocked_by_import_batch_preview(db):
         # 无论 pytest.raises 是否按预期失败（当前实现红：downgrade 成功），
         # 都必须把数据库恢复到 head，避免污染后续用例。
         alembic_command.upgrade(cfg, "head")
-    assert _current_head() == REVISION
+    assert _db_version() == _current_head()
 
 
 def test_downgrade_blocked_by_source_binding(db):
@@ -1418,7 +1430,7 @@ def test_downgrade_blocked_by_source_binding(db):
         with engine.connect() as connection:
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == REVISION
+                == _current_head()
             ), "downgrade 失败后数据库必须仍在 c8e2a4f6b1d3"
             assert (
                 connection.scalar(
@@ -1434,7 +1446,7 @@ def test_downgrade_blocked_by_source_binding(db):
         # 无论 pytest.raises 是否按预期失败（当前实现红：downgrade 成功），
         # 都必须把数据库恢复到 head，避免污染后续用例。
         alembic_command.upgrade(cfg, "head")
-    assert _current_head() == REVISION
+    assert _db_version() == _current_head()
 
 
 def test_downgrade_blocked_by_xls_milestone_and_operation(db):
@@ -1474,7 +1486,7 @@ def test_downgrade_blocked_by_xls_milestone_and_operation(db):
         with engine.connect() as connection:
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == REVISION
+                == _current_head()
             ), "downgrade 失败后数据库必须仍在 c8e2a4f6b1d3"
             assert (
                 connection.scalar(
@@ -1500,7 +1512,7 @@ def test_downgrade_blocked_by_xls_milestone_and_operation(db):
         # 无论 pytest.raises 是否按预期失败（当前实现红：downgrade 成功），
         # 都必须把数据库恢复到 head，避免污染后续用例。
         alembic_command.upgrade(cfg, "head")
-    assert _current_head() == REVISION
+    assert _db_version() == _current_head()
 
 
 def test_downgrade_blocked_by_non_default_follow_up_state(db):
@@ -1538,7 +1550,7 @@ def test_downgrade_blocked_by_non_default_follow_up_state(db):
         with engine.connect() as connection:
             assert (
                 connection.scalar(text("SELECT version_num FROM alembic_version"))
-                == REVISION
+                == _current_head()
             ), "downgrade 失败后数据库必须仍在 c8e2a4f6b1d3"
             row = connection.execute(
                 text(
@@ -1557,4 +1569,4 @@ def test_downgrade_blocked_by_non_default_follow_up_state(db):
         # 无论 pytest.raises 是否按预期失败（当前实现红：downgrade 成功），
         # 都必须把数据库恢复到 head，避免污染后续用例。
         alembic_command.upgrade(cfg, "head")
-    assert _current_head() == REVISION
+    assert _db_version() == _current_head()
