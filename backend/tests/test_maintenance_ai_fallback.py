@@ -188,3 +188,190 @@ def test_ai_unavailable_when_not_configured(monkeypatch):
     monkeypatch.setattr("app.services.maintenance_ai_fallback.llm_provider.is_configured", fake_configured)
     with pytest.raises(ai.AIUnavailable):
         ai.call_llm_for_mapping("return_order", ["料号"], [["A"]])
+
+
+def test_validate_proposal_rejects_duplicate_canonical():
+    """两个源列映射同一 canonical 字段必须 fail-closed（round-4 Blocker 4）。"""
+    with pytest.raises(ai.AIProposalInvalid, match="同一目标字段"):
+        ai._validate_proposal(
+            "return_order",
+            {
+                "column_mapping": {
+                    "料号": "备件明细.备件PN",
+                    "PN列": "备件明细.备件PN",
+                }
+            },
+        )
+
+
+def test_parser_accepts_file_gate():
+    from tests.test_maintenance_doc_import import (
+        _RETURN_HEAD,
+        _RETURN_LINE,
+        _doc_workbook,
+    )
+
+    # 漂移表头 → 主解析器失败 → 允许走 AI
+    ok, error = ai.parser_accepts_file(
+        "return_order", _variant_return_workbook(), "返库单.xlsx"
+    )
+    assert ok is False
+    assert error
+
+    # 标准表头 → 主解析器成功 → 不允许走 AI
+    standard = _doc_workbook(
+        sheet_title="Sheet1",
+        head_headers=_RETURN_HEAD,
+        line_headers=_RETURN_LINE,
+        rows=[{
+            "head": ["维保返件", "其他退回", "备件", "2026-08-03", "新华三集团",
+                     "AI项目", "XSDD-20260203-0029", "WBDD-20260203-0026", "",
+                     "广州仓", "已生效", "", "RKN-001", "HEAD-1"],
+            "lines": [
+                ["", "02311AYV", "", "成品", "", "", "2", "LID-1", "1", ""],
+            ],
+        }],
+    )
+    ok, _ = ai.parser_accepts_file("return_order", standard, "返库单.xlsx")
+    assert ok is True
+
+
+def test_proposal_list_scoped_to_creator_for_non_admin(db):
+    data = _variant_return_workbook()
+    headers = ["返库类别", "退回日期", "项目"]
+    samples = [["其他返库", "2026-08-03", "AI项目"]]
+    ai.propose(
+        db,
+        doc_type="return_order",
+        data=data,
+        filename="返库单.xlsx",
+        headers=headers,
+        samples=samples,
+        operated_by="alice",
+        llm_call=_fake_llm,
+    )
+    ai.propose(
+        db,
+        doc_type="return_order",
+        data=data,
+        filename="返库单.xlsx",
+        headers=headers,
+        samples=samples,
+        operated_by="bob",
+        llm_call=_fake_llm,
+    )
+    alice_view = ai.list_proposals(db, username="alice", role="sales")
+    assert {row["created_by"] for row in alice_view} == {"alice"}
+    admin_view = ai.list_proposals(db, username="admin", role="admin")
+    assert {row["created_by"] for row in admin_view} == {"alice", "bob"}
+
+
+def test_propose_api_rejects_file_the_parser_handles(db):
+    """主解析器可解析的文件不允许走 AI 提案（round-4 Blocker 4 反例）。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app import auth
+    from app.api import maintenance_ai_fallback
+    from app.auth import hash_password
+    from app.models.system import SysUser
+    from tests.test_maintenance_doc_import import (
+        _RETURN_HEAD,
+        _RETURN_LINE,
+        _doc_workbook,
+    )
+
+    db.add(
+        SysUser(
+            username="ai_gate_admin",
+            role="admin",
+            display_name="AI门禁管理员",
+            password_hash=hash_password("synthetic-password-123"),
+        )
+    )
+    db.commit()
+    app = FastAPI()
+    app.include_router(auth.router, prefix="/api")
+    app.include_router(maintenance_ai_fallback.router, prefix="/api")
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "ai_gate_admin", "password": "synthetic-password-123"},
+    )
+    assert login.status_code == 200, login.text
+    client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+
+    standard = _doc_workbook(
+        sheet_title="Sheet1",
+        head_headers=_RETURN_HEAD,
+        line_headers=_RETURN_LINE,
+        rows=[{
+            "head": ["维保返件", "其他退回", "备件", "2026-08-03", "新华三集团",
+                     "AI项目", "XSDD-20260203-0029", "WBDD-20260203-0026", "",
+                     "广州仓", "已生效", "", "RKN-001", "HEAD-1"],
+            "lines": [
+                ["", "02311AYV", "", "成品", "", "", "2", "LID-1", "1", ""],
+            ],
+        }],
+    )
+    rejected = client.post(
+        "/api/maintenance/ai-fallback/propose?doc_type=return_order",
+        files={"file": ("返库单.xlsx", standard, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert rejected.status_code == 422, rejected.text
+    assert rejected.json()["detail"]["code"] == "parser_already_succeeds"
+
+    # 漂移表头文件允许通过门禁；LLM 未配置 → 优雅降级 503
+    drifted = client.post(
+        "/api/maintenance/ai-fallback/propose?doc_type=return_order",
+        files={"file": ("返库单.xlsx", _variant_return_workbook(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert drifted.status_code == 503, drifted.text
+    assert drifted.json()["detail"]["code"] == "ai_not_configured"
+
+
+def test_accept_second_call_replays_same_batch(db):
+    """同一提案第二次 accept（不同幂等键）稳定重放既有 batch，不产生孤儿 batch。"""
+    data = _variant_return_workbook()
+    headers = ["返库类别", "退回日期", "项目", "销售合同号", "需求单", "状态",
+               "自贴码", "料号", "SN", "检测结果", "库位", "数量", "行号"]
+    samples = [["其他返库", "2026-08-03", "AI项目", "XSDD-20260203-0029", "", "已生效",
+                "", "02311AYV", "", "成品", "", "2", "L-1"]]
+    result = ai.propose(
+        db,
+        doc_type="return_order",
+        data=data,
+        filename="变体返库单.xlsx",
+        headers=headers,
+        samples=samples,
+        operated_by="合成管理员",
+        llm_call=_fake_llm,
+    )
+    first = ai.accept_proposal(
+        db,
+        proposal_id=result["proposal_id"],
+        data=data,
+        filename="变体返库单.xlsx",
+        operated_by="合成管理员",
+        idempotency_key="ai-accept-replay-key-0001",
+    )
+    second = ai.accept_proposal(
+        db,
+        proposal_id=result["proposal_id"],
+        data=data,
+        filename="变体返库单.xlsx",
+        operated_by="合成管理员",
+        idempotency_key="ai-accept-replay-key-0002",
+    )
+    assert second == first
+    from app.models.maintenance_doc_import import (
+        MaintenanceDocHeadRow,
+        MaintenanceDocImportBatch,
+    )
+
+    batches = db.execute(
+        text("SELECT count(*) FROM maintenance_doc_import_batch")
+    ).scalar_one()
+    assert batches == 1  # 无孤儿批次
+    head = db.query(MaintenanceDocHeadRow).filter_by(batch_id=first).one()
+    assert head.wbdd_no == "WBDD-20260203-0026"

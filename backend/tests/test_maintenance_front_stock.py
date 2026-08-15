@@ -230,3 +230,152 @@ def test_unknown_cost_inbound_clears_stale_cost(db, parts, project):
     assert rows[0]["qty"] == 5.0
     assert rows[0]["unit_cost_ex_tax"] is None
     assert rows[0]["value_ex_tax"] is None
+
+
+def test_balance_rows_stale_90d_marks_unconsumed(db, parts, project):
+    """超 90 天未领用：有结存但近 90 天无现场领用记录（已确认领用单）。"""
+    from datetime import date, timedelta
+
+    from app.models.maintenance_project_operations import (
+        MaintenanceSiteIssue,
+        MaintenanceSiteIssueLine,
+    )
+
+    _move(db, part_id=parts["a"], kind="shipment_in", source_ref="L-1", qty="3")
+    _move(db, part_id=parts["b"], kind="shipment_in", source_ref="L-2", qty="1")
+    issue = MaintenanceSiteIssue(
+        issue_id="fs-issue-1",
+        project_id="fs-project-1",
+        issue_no="FS-ISSUE-0001",
+        issue_date=date.today(),
+        raw_status="已确认",
+        status_mapping_state="mapped",
+        normalized_status="confirmed",
+        status_mapping_version="synthetic-map-v1",
+        source="direct_api",
+        version=1,
+    )
+    db.add(issue)
+    db.flush()
+    db.add(
+        MaintenanceSiteIssueLine(
+            issue_line_id="fs-issue-line-1",
+            issue_id="fs-issue-1",
+            line_no=1,
+            part_id=parts["a"],
+            pn="FS-A-001",
+            quantity=Decimal("2"),
+            algorithm_version="synthetic-algo-v1",
+        )
+    )
+    db.commit()
+    rows = {r["pn"]: r for r in front_stock.balance_rows(db, "fs-project-1")}
+    row_a = rows["FS-A-001"]
+    assert row_a["last_consumed_at"] is not None
+    assert row_a["days_since_last_consumption"] is not None
+    assert row_a["stale_90d"] is False
+    row_b = rows["FS-B-001"]
+    assert row_b["last_consumed_at"] is None
+    assert row_b["days_since_last_consumption"] is None
+    assert row_b["stale_90d"] is True  # 从未领用
+
+
+def test_long_source_ref_preserved_full_length_and_replayed(db, parts, project):
+    """129–256 字符引用不再截断：全长存储 + 同长重放幂等（round-4 Blocker 6）。"""
+    long_ref = "WBDD-LINE-" + "x" * 240
+    assert 128 < len(long_ref) <= 256
+    first = _move(db, part_id=parts["a"], kind="shipment_in", source_ref=long_ref, qty="2")
+    db.commit()
+    replay = _move(db, part_id=parts["a"], kind="shipment_in", source_ref=long_ref, qty="2")
+    assert first.ledger_id == replay.ledger_id
+    db.commit()
+    row = db.execute(
+        select(MaintenanceFrontStockLedger).where(
+            MaintenanceFrontStockLedger.source_ref == long_ref
+        )
+    ).scalar_one()
+    assert row.source_ref == long_ref
+    assert float(row.qty_change) == 2.0
+    stock = db.execute(
+        select(MaintenanceFrontStock).where(
+            MaintenanceFrontStock.project_id == "fs-project-1"
+        )
+    ).scalar_one()
+    assert float(stock.qty) == 2.0  # 重放不重复入账
+
+
+def test_long_source_refs_sharing_prefix_do_not_collide(db, parts, project):
+    """共享前 128 字符的不同引用互相独立（round-4 Blocker 6 反例）。"""
+    ref_a = "p" * 128 + "-AAA"
+    ref_b = "p" * 128 + "-BBB"
+    _move(db, part_id=parts["a"], kind="shipment_in", source_ref=ref_a, qty="1")
+    _move(db, part_id=parts["a"], kind="shipment_in", source_ref=ref_b, qty="1")
+    db.commit()
+    rows = db.execute(
+        select(MaintenanceFrontStockLedger).where(
+            MaintenanceFrontStockLedger.source_ref.in_([ref_a, ref_b])
+        )
+    ).scalars().all()
+    assert {row.source_ref for row in rows} == {ref_a, ref_b}
+    stock = db.execute(
+        select(MaintenanceFrontStock).where(
+            MaintenanceFrontStock.project_id == "fs-project-1"
+        )
+    ).scalar_one()
+    assert float(stock.qty) == 2.0
+
+
+
+def test_single_side_cost_inbound_clears_both_sides(db, parts, project):
+    """ex-only / inc-only 入账必须整行置 unknown（缺成本不按 0，round-4 Blocker 12）。"""
+    _move(db, part_id=parts["a"], kind="shipment_in", source_ref="BOTH-1", qty="1",
+          unit_cost_ex_tax=Decimal("100.00"), unit_cost_inc_tax=Decimal("113.00"))
+    _move(db, part_id=parts["a"], kind="shipment_in", source_ref="EX-ONLY-1", qty="1",
+          unit_cost_ex_tax=Decimal("90.00"), unit_cost_inc_tax=None)
+    db.commit()
+    row = front_stock.balance_rows(db, "fs-project-1")[0]
+    assert row["unit_cost_ex_tax"] is None
+    assert row["unit_cost_inc_tax"] is None
+    assert row["value_ex_tax"] is None
+    assert row["value_inc_tax"] is None
+
+
+def test_front_stock_api_reports_incomplete_on_single_side_cost(db, parts, project):
+    """ex-only 经 service→API 展示为 value_completeness=incomplete。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app import auth
+    from app.api import maintenance_front_stock
+    from app.auth import hash_password
+    from app.models.system import SysUser
+
+    _move(db, part_id=parts["a"], kind="shipment_in", source_ref="API-EX-1", qty="1",
+          unit_cost_ex_tax=Decimal("90.00"), unit_cost_inc_tax=None)
+    db.commit()
+    db.add(
+        SysUser(
+            username="front_stock_api_admin",
+            role="admin",
+            display_name="前置库API管理员",
+            password_hash=hash_password("synthetic-password-123"),
+        )
+    )
+    db.commit()
+    app = FastAPI()
+    app.include_router(auth.router, prefix="/api")
+    app.include_router(maintenance_front_stock.router, prefix="/api")
+    client = TestClient(app)
+    login = client.post(
+        "/api/auth/login",
+        json={"username": "front_stock_api_admin", "password": "synthetic-password-123"},
+    )
+    assert login.status_code == 200, login.text
+    client.headers["Authorization"] = f"Bearer {login.json()['token']}"
+    payload = client.get(
+        "/api/maintenance/projects/stable/fs-project-1/front-stock"
+    ).json()
+    assert payload["value_completeness"] == "incomplete"
+    assert payload["total_value_ex_tax"] is None
+    assert payload["total_value_inc_tax"] is None
+    assert payload["stale_90d_count"] == 1

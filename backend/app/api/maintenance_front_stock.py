@@ -100,6 +100,7 @@ def get_front_stock(
         "total_value_inc_tax": total_inc,
         "value_completeness": completeness,
         "cost_visible": can_view_cost,
+        "stale_90d_count": sum(1 for row in rows if row["stale_90d"]),
     }
     if include_ledger:
         result["ledger"] = front_stock.ledger_entries(db, project_id)

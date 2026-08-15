@@ -20,6 +20,7 @@ router = APIRouter(prefix="/maintenance", tags=["maintenance"])
 
 @router.get("/reconcile/expenses")
 def get_expense_reconcile(
+    limit: int = Query(500, ge=1, le=2000),
     response: Response = None,
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
@@ -46,11 +47,12 @@ def get_expense_reconcile(
             status_code=403,
             detail="报销对账要求同时具备利润数据可见权限",
         )
-    rows = reconcile.expense_reconcile_rows(db)
+    rows = reconcile.expense_reconcile_rows(db)[:limit]
     return {
         "rows": rows,
         "matched": sum(1 for row in rows if row["status"] == "matched"),
         "mismatch": sum(1 for row in rows if row["status"] in ("mismatch", "partial_match")),
         "ledger_only": sum(1 for row in rows if row["status"] == "ledger_only"),
         "bxd_only": sum(1 for row in rows if row["status"] == "bxd_only"),
+        "formal_only": sum(1 for row in rows if row["status"] == "formal_only"),
     }

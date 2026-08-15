@@ -295,3 +295,19 @@ def test_apply_rejects_cross_batch_lines(db, wbdd_project):
     db.commit()
     with pytest.raises(ckd.CkdBatchError):
         ckd.apply_batch(db, batch_id, "合成管理员")
+
+
+def test_store_preview_flags_missing_date(db, wbdd_project):
+    """空出库日期 fail-closed：preview 出 issue，不允许回退当前时间（round-4 Blocker 7）。"""
+    head = _HEAD_MAINT.copy()
+    head[1] = ""  # 出库日期清空
+    data = _ckd_workbook_bytes(
+        rows=[{"head": head, "lines": [
+            ["LID-1", "1", "02311AYV", "内存", "B1", "02311AYV", "SN1", "", "", "", "", "", "", "", "2", "100", "200", "是"]]}]
+    )
+    parsed = ckd.parse_ckd_workbook(data, "发货单.xlsx")
+    batch_id = ckd.store_preview(db, parsed, "合成管理员", idempotency_key="ckd-test-key-empty-date")
+    head_row = db.execute(
+        select(MaintenanceCkdHeadRow).where(MaintenanceCkdHeadRow.batch_id == batch_id)
+    ).scalar_one()
+    assert "出库日期缺失" in (head_row.issues or [])

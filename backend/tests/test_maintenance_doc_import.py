@@ -5,7 +5,7 @@ from datetime import date
 
 import pytest
 from openpyxl import Workbook
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models.dimensions import DimPart
 from app.models.maintenance import FMaintenanceOrder
@@ -13,6 +13,7 @@ from app.models.maintenance_doc_import import (
     MaintenanceDocHeadRow,
     MaintenanceDocImportBatch,
     MaintenanceDocLineRow,
+    MaintenanceRkdReturnLine,
 )
 from app.models.maintenance_front_stock import MaintenanceFrontStock
 from app.models.maintenance_project import MaintenanceProject
@@ -284,7 +285,7 @@ def test_parse_rkd_inbound(db, front_stock_seed):
     assert float(line.amount) == 1000.0
 
 
-def test_apply_rkd_is_raw_only(db, front_stock_seed):
+def test_apply_rkd_bad_part_creates_return_fact(db, front_stock_seed):
     data = _doc_workbook(
         sheet_title="Sheet1",
         head_headers=_RKD_HEAD,
@@ -300,9 +301,98 @@ def test_apply_rkd_is_raw_only(db, front_stock_seed):
     parsed = docs.parse_doc_workbook("rkd_inbound", data, "入库单.xlsx")
     batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
     summary = docs.apply_batch(db, batch_id, "合成管理员")
-    assert summary["canonical_effect"] == "pending_f3_return_facts"
+    assert summary["canonical_effect"] == "rkd_return_facts"
+    assert summary["applied_lines"] == 1
     batch = db.get(MaintenanceDocImportBatch, batch_id)
     assert batch.status == "applied"
+    facts = db.execute(
+        select(MaintenanceRkdReturnLine).where(
+            MaintenanceRkdReturnLine.batch_id == batch_id
+        )
+    ).scalars().all()
+    assert len(facts) == 1
+    fact = facts[0]
+    assert fact.project_id == "doc-project-1"
+    assert fact.head_no == "RKD-20260806-0010"
+    assert fact.pn == "02311AYV"
+    assert fact.part_id == front_stock_seed["part_id"]
+    assert float(fact.qty) == 1.0
+    assert fact.test_result == "坏品"
+    assert fact.occurred_at is not None
+
+
+def test_apply_rkd_good_part_is_not_a_return_fact(db, front_stock_seed):
+    # 成品/好件入库不是坏件返还事实，也不进前置库账本（RKD 只记坏件返还）
+    data = _doc_workbook(
+        sheet_title="Sheet1",
+        head_headers=_RKD_HEAD,
+        line_headers=_RKD_LINE,
+        rows=[{
+            "head": ["RKD-20260806-0011", "2026-08-06", "其他入库", "备件", "已生效",
+                     "北京仓", "", "WBDD-20260702-0014", "", "", "", "否", ""],
+            "lines": [
+                ["02311AYV", "", "", "成品", "", "", "2", "", "", "", "", "RKD-LID-1", "1"],
+            ],
+        }],
+    )
+    parsed = docs.parse_doc_workbook("rkd_inbound", data, "入库单.xlsx")
+    batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
+    summary = docs.apply_batch(db, batch_id, "合成管理员")
+    assert summary["canonical_effect"] == "rkd_return_facts"
+    assert summary["applied_lines"] == 0
+    assert db.scalar(select(func.count()).select_from(MaintenanceRkdReturnLine)) == 0
+
+
+def test_apply_rkd_unknown_pn_keeps_quantity_fact(db, front_stock_seed):
+    # 未知 PN 不影响返还率分子数量：事实保留 pn 文本，part_id 置空待治理
+    data = _doc_workbook(
+        sheet_title="Sheet1",
+        head_headers=_RKD_HEAD,
+        line_headers=_RKD_LINE,
+        rows=[{
+            "head": ["RKD-20260806-0012", "2026-08-06", "其他入库", "备件", "已生效",
+                     "北京仓", "", "WBDD-20260702-0014", "", "", "", "否", ""],
+            "lines": [
+                ["ZZZ-UNKNOWN", "", "", "故障", "", "", "3", "", "", "", "", "RKD-LID-1", "1"],
+            ],
+        }],
+    )
+    parsed = docs.parse_doc_workbook("rkd_inbound", data, "入库单.xlsx")
+    batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
+    summary = docs.apply_batch(db, batch_id, "合成管理员")
+    assert summary["applied_lines"] == 1
+    fact = db.execute(
+        select(MaintenanceRkdReturnLine).where(
+            MaintenanceRkdReturnLine.batch_id == batch_id
+        )
+    ).scalar_one()
+    assert fact.pn == "ZZZ-UNKNOWN"
+    assert fact.part_id is None
+    assert float(fact.qty) == 3.0
+
+
+def test_apply_rkd_duplicate_source_conflict_fail_closed(db, front_stock_seed):
+    workbook = _doc_workbook(
+        sheet_title="Sheet1",
+        head_headers=_RKD_HEAD,
+        line_headers=_RKD_LINE,
+        rows=[{
+            "head": ["RKD-20260806-0013", "2026-08-06", "其他入库", "备件", "已生效",
+                     "北京仓", "", "WBDD-20260702-0014", "", "", "", "否", ""],
+            "lines": [
+                ["02311AYV", "", "", "坏品", "", "", "1", "", "", "", "", "RKD-LID-1", "1"],
+            ],
+        }],
+    )
+    parsed = docs.parse_doc_workbook("rkd_inbound", workbook, "入库单.xlsx")
+    first = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
+    docs.apply_batch(db, first, "合成管理员")
+    # 同一文件换 Idempotency-Key 重传：明细键与已入账事实冲突 → 整批失败关闭
+    second = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0002")
+    with pytest.raises(docs.DocBatchError):
+        docs.apply_batch(db, second, "合成管理员")
+    assert db.get(MaintenanceDocImportBatch, second).status == "failed"
+    assert db.scalar(select(func.count()).select_from(MaintenanceRkdReturnLine)) == 1
 
 
 def test_parse_bxd_expense(db, front_stock_seed):

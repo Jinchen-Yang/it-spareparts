@@ -77,10 +77,22 @@ def _read_headers_and_samples(data: bytes, doc_type: str) -> tuple[list[str], li
 
     workbook = load_workbook(io.BytesIO(data), data_only=True, read_only=False)
     try:
-        sheet = workbook.worksheets[0]
+        if doc_type == "ledger":
+            # 台账表头在业务 sheet 的第 1 行（新旧模板同）；绝不能把
+            # 订单号/人员/项目名/金额等业务数据行当表头原文外发（round-4 Blocker 4）
+            if "01_项目与合同" in workbook.sheetnames:
+                sheet = workbook["01_项目与合同"]
+            elif "维保项目清单" in workbook.sheetnames:
+                sheet = workbook["维保项目清单"]
+            else:
+                sheet = workbook.worksheets[0]
+            header_row_index = 0
+        else:
+            # 氚云双表头：字段名行是第二个表头行，字段码行跳过
+            sheet = workbook.worksheets[0]
+            rows = list(sheet.iter_rows(values_only=True))
+            header_row_index = 1 if len(rows) >= 2 else 0
         rows = list(sheet.iter_rows(values_only=True))
-        # 与各解析器一致：字段名行是第二个表头行（氚云双表头），字段码行跳过
-        header_row_index = 1 if len(rows) >= 2 else 0
         headers = [
             str(v).strip() if v is not None else ""
             for v in (rows[header_row_index] if rows else [])
@@ -134,6 +146,18 @@ async def propose_ai_mapping(
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             {"code": "invalid_file", "message": str(exc)},
+        )
+    # AI 只做容错层：主解析器能解析的文件不允许走 AI 提案（round-4 Blocker 4）
+    accepted, _parser_error = await import_safety.parse_in_threadpool(
+        ai.parser_accepts_file, doc_type, data, filename
+    )
+    if accepted:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            {
+                "code": "parser_already_succeeds",
+                "message": "确定性解析器已能解析该文件，无需 AI 兜底",
+            },
         )
     try:
         headers, samples = await import_safety.parse_in_threadpool(
@@ -234,6 +258,15 @@ def list_ai_proposals(
     db: Session = Depends(get_db),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
+    ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    return {"rows": ai.list_proposals(db, doc_type=doc_type)}
+    # 非 admin 只能看到自己创建的提案（元数据含 filename/hash/creator）
+    return {
+        "rows": ai.list_proposals(
+            db,
+            doc_type=doc_type,
+            username=ctx.user_id,
+            role=ctx.role,
+        )
+    }

@@ -513,15 +513,21 @@ def application_evidence(
         )
     ),
 ) -> dict:
-    """补库行增强证据：365 天无记录提醒 / 通用池替代 / 高频件 / 成本区间。"""
+    """补库行增强证据：365 天无记录提醒 / 通用池替代 / 高频件 / 成本区间。
+
+    仅 owner/admin 可见（非 owner 与不存在同 404）；仅 approved 状态（否则 409）。
+    """
     _no_store(response)
     _require_price_data(ctx)
     from app.services import maintenance_replenishment_evidence as evidence
 
     username, role = _identity(db, ident)
-    result = evidence.application_evidence(db, application_id)
-    if "error" in result:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, result["error"])
+    try:
+        result = evidence.application_evidence(
+            db, application_id, username=username, role=role
+        )
+    except replenishment.ReplenishmentError as exc:
+        _raise_domain(exc)
     return result
 
 
@@ -540,12 +546,18 @@ def export_purchase_list(
         )
     ),
 ) -> StreamingResponse:
-    """审核通过后的四列导出：PN / 数量 / 采购金额(参考) / 销售金额(参考)。"""
+    """审核通过后的四列导出：PN / 数量 / 采购金额(参考) / 销售金额(参考)。
+
+    仅 owner/admin 可见（非 owner 与不存在同 404）；仅 approved 状态（否则 409）。
+    """
     from app.services import maintenance_replenishment_evidence as evidence
 
     _require_price_data(ctx)
+    username, role = _identity(db, ident)
     try:
-        data = evidence.export_purchase_list(db, application_id)
-    except ValueError as exc:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
+        data = evidence.export_purchase_list(
+            db, application_id, username=username, role=role
+        )
+    except replenishment.ReplenishmentError as exc:
+        _raise_domain(exc)
     return _excel_response(data, f"补库采购清单_{application_id}.xlsx")

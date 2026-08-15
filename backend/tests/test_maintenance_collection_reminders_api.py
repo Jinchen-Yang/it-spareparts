@@ -25,7 +25,11 @@ from app import auth
 from app import permissions as _perms
 from app.api import maintenance_collection_reminders
 from app.auth import hash_password
+from app.models.maintenance_collection_evidence import (
+    MaintenanceCollectionEvidence,
+)
 from app.models.maintenance_manager import (
+    BusinessFile,
     MaintenanceCollectionMilestone,
     MaintenanceCollectionMilestoneOperation,
     MaintenanceServicePeriod,
@@ -577,6 +581,41 @@ def _follow_up_url(milestone_id: str) -> str:
     return f"/api/maintenance/collection-milestones/{milestone_id}/follow-ups"
 
 
+_seed_evidence_counter = 0
+
+
+def _seed_evidence(db, *, milestone_id: str) -> MaintenanceCollectionEvidence:
+    """F6：为 handle 成功用例预置一条已上传凭证（business_file + 证据链接）。"""
+    global _seed_evidence_counter
+    _seed_evidence_counter += 1
+    suffix = str(_seed_evidence_counter)
+    file_id = f"evidence-file-{suffix}"
+    db.add(
+        BusinessFile(
+            file_id=file_id,
+            storage_provider="local",
+            object_key=f"collection_evidence/{file_id[:2]}/{file_id}.png",
+            original_filename=f"巡检报告-{suffix}.png",
+            mime_type="image/png",
+            size_bytes=1234,
+            sha256="a" * 64,
+            security_state="active",
+            uploaded_by="合成上传人",
+        )
+    )
+    db.flush()
+    evidence = MaintenanceCollectionEvidence(
+        evidence_id=f"evidence-{suffix}",
+        milestone_id=milestone_id,
+        file_id=file_id,
+        md5="d" * 32,
+        uploaded_by="合成上传人",
+    )
+    db.add(evidence)
+    db.flush()
+    return evidence
+
+
 def test_follow_up_handle_success(db):
     admin = _sys_user(
         db,
@@ -592,6 +631,7 @@ def test_follow_up_handle_success(db):
         milestone_id="rem-m-handle",
         planned_date=date(2026, 8, 20),
     )
+    _seed_evidence(db, milestone_id=milestone.milestone_id)
     client, _ = _client(
         db,
         username="reminder_writer_api",
@@ -644,6 +684,7 @@ def test_follow_up_handle_on_handled_node_422(db):
         milestone_id="rem-m-handle-twice",
         planned_date=date(2026, 8, 20),
     )
+    _seed_evidence(db, milestone_id=milestone.milestone_id)
     client, _ = _client(
         db,
         username="reminder_writer_api2",
@@ -961,6 +1002,7 @@ def test_follow_up_idempotent_replay_same_key_same_body(db):
         milestone_id="rem-m-idem",
         planned_date=date(2026, 8, 20),
     )
+    _seed_evidence(db, milestone_id=milestone.milestone_id)
     client, _ = _client(
         db,
         username="reminder_writer_api9",
@@ -1001,6 +1043,7 @@ def test_follow_up_idempotency_conflict_same_key_different_body(db):
         milestone_id="rem-m-idem-conflict",
         planned_date=date(2026, 8, 20),
     )
+    _seed_evidence(db, milestone_id=milestone.milestone_id)
     client, _ = _client(
         db,
         username="reminder_writer_api10",
@@ -1045,6 +1088,7 @@ def test_follow_up_idempotency_conflict_same_key_different_actor(db):
         milestone_id="rem-m-idem-actor",
         planned_date=date(2026, 8, 20),
     )
+    _seed_evidence(db, milestone_id=milestone.milestone_id)
     client_a, _ = _client(
         db,
         username="reminder_writer_api11a",
@@ -1093,6 +1137,7 @@ def test_follow_up_idempotency_conflict_same_key_different_milestone(db):
         sequence=2,
         planned_date=date(2026, 9, 20),
     )
+    _seed_evidence(db, milestone_id=first_m.milestone_id)
     client, _ = _client(
         db,
         username="reminder_writer_api12",
@@ -1258,6 +1303,7 @@ def test_follow_up_canary_scope_denied_for_other_projects(
         milestone_id="rem-m-canary",
         planned_date=date(2026, 8, 20),
     )
+    _seed_evidence(db, milestone_id=canary_m.milestone_id)
     # 其他项目固定 403
     other_project, other_pc = _project(db, suffix="other", manager=admin)
     other_m = _milestone(
@@ -1313,6 +1359,7 @@ def test_operation_ledger_rejects_update_and_delete(db):
         milestone_id="rem-m-append-only",
         planned_date=date(2026, 8, 20),
     )
+    _seed_evidence(db, milestone_id=milestone.milestone_id)
     client, _ = _client(
         db,
         username="reminder_writer_api16",

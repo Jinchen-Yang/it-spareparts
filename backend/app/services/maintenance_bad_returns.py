@@ -19,6 +19,7 @@ from app.models.maintenance_bad_return import (
     MaintenanceBadReturnLine,
     MaintenanceReturnObligation,
 )
+from app.models.maintenance_doc_import import MaintenanceRkdReturnLine
 from app.models.maintenance_project import MaintenanceProject
 from app.models.maintenance_project_operations import (
     MaintenanceProjectOperationAudit,
@@ -140,8 +141,9 @@ def calculate_return_rate(
     pending_quantity: Decimal,
     registered_quantity: Decimal,
     warehouse_confirmed_quantity: Decimal,
+    official_returned_quantity: Decimal | None = None,
 ) -> dict:
-    """Return operational rates while the official numerator remains undecided."""
+    """Return rates. The official numerator is the RKD inbound quantity (Q8)."""
 
     payload = {
         "required_quantity": required_quantity,
@@ -149,11 +151,17 @@ def calculate_return_rate(
         "pending_quantity": pending_quantity,
         "registered_quantity": registered_quantity,
         "warehouse_confirmed_quantity": warehouse_confirmed_quantity,
+        "official_returned_quantity": official_returned_quantity,
         "outstanding_quantity": max(
             required_quantity - warehouse_confirmed_quantity,
             Decimal("0"),
         ),
-        "official_basis": None,
+        # 无应返义务时不成立官方口径（required_quantity = 0 → no_return_required）
+        "official_basis": (
+            "rkd_inbound"
+            if official_returned_quantity is not None and required_quantity > 0
+            else None
+        ),
         "registered_rate_pct": None,
         "warehouse_confirmed_rate_pct": None,
         "official_rate_pct": None,
@@ -164,11 +172,17 @@ def calculate_return_rate(
         return {**payload, "status": "no_return_required"}
     registered_rate = _rate(registered_quantity, required_quantity)
     confirmed_rate = _rate(warehouse_confirmed_quantity, required_quantity)
+    official_rate = (
+        _rate(official_returned_quantity, required_quantity)
+        if official_returned_quantity is not None
+        else None
+    )
     return {
         **payload,
         "status": "available",
         "registered_rate_pct": registered_rate,
         "warehouse_confirmed_rate_pct": confirmed_rate,
+        "official_rate_pct": official_rate,
     }
 
 
@@ -857,6 +871,20 @@ def return_rates_for_projects(
     ):
         return_facts[project_id] = (Decimal(registered), Decimal(confirmed))
 
+    # 官方返还率分子（Q8）：氚云收货入库单 RKD 的坏品/坏件/故障明细件数。
+    rkd_facts: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for project_id, official_qty in db.execute(
+        select(
+            MaintenanceRkdReturnLine.project_id,
+            func.coalesce(
+                func.sum(MaintenanceRkdReturnLine.qty), Decimal("0")
+            ),
+        )
+        .where(MaintenanceRkdReturnLine.project_id.in_(ids))
+        .group_by(MaintenanceRkdReturnLine.project_id)
+    ):
+        rkd_facts[project_id] = Decimal(official_qty)
+
     result: dict[str, dict] = {}
     for project_id in ids:
         facts = obligation_facts[project_id]
@@ -867,6 +895,7 @@ def return_rates_for_projects(
             pending_quantity=Decimal(facts["pending_quantity"]),
             registered_quantity=registered,
             warehouse_confirmed_quantity=confirmed,
+            official_returned_quantity=rkd_facts[project_id],
         )
         result[project_id] = {
             "project_id": project_id,
@@ -878,8 +907,8 @@ def return_rates_for_projects(
             "exempt_count": int(facts["exempt_count"]),
             "pending_count": int(facts["pending_count"]),
             "business_assumption": (
-                "仓库确认量仅作试算；官方返还率分子待业务确认。"
-                "返库登记仅表示已登记或在途。"
+                "官方返还率=入库单坏件数/(领用−不返还)；"
+                "返库登记/仓库确认量仅作过程参考。"
             ),
         }
     return result

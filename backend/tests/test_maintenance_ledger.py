@@ -394,3 +394,46 @@ def test_apply_reconcile_mismatch_fail_closed(db):
     # 零 canonical 写入
     assert db.execute(select(MaintenanceProject)).scalars().all() == []
     assert db.execute(select(MaintenanceProjectContract)).scalars().all() == []
+
+
+def test_apply_orphan_plan_row_fail_closed(db):
+    """回款计划孤儿行（无对应合同行）→ 整批拒绝，不静默丢弃（round-4 Blocker 7）。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "01_项目与合同"
+    ws.append(
+        ["订单编号", "订单日期", "销售人员", "业务类型", "项目名称", "维保起始日期",
+         "维保终止日期", "CMO", "项目经理", "订单金额", "已收尾款", "待收尾款", "验收材料",
+         "验收材料是否完成及上传附件", "验收附件", "巡检时间", "巡检是否完成及上传附件"]
+    )
+    ws.append(
+        ["XSDD-20260731-0086", "2026-07-31", "李呈辉", "整体维保",
+         "阿里专有云20260608-20291205", "2026-06-08", "2029-12-05", "廖晓娟", "任鑫明",
+         44756, 0, 44756, "服务总结报告", "否", "", "2026-10", "否"]
+    )
+    plan = wb.create_sheet("02_回款计划")
+    plan.append(["订单编号", "计划期次", "计划回款时间", "计划回款金额"])
+    plan.append(["XSDD-20260731-0086", 1, "2026-10", 2986.57])
+    plan.append(["XSDD-99999999-9999", 1, "2026-11", 5000])  # 孤儿：批次内无此合同
+    cost = wb.create_sheet("03_项目成本")
+    cost.append(
+        ["费用单号", "报销人员", "报销类别", "支出事由", "维保销售订单", "项目名称",
+         "销售订单", "销售人员", "费用分类", "报销金额", "备注"]
+    )
+    cost.append(
+        ["BXD-20260425-0002", "董学晶", "维保费用", "巡检",
+         "XSDD-20251028-0016", "国税总局项目", "XSDD-20251028-0016", "余俊", "差旅费", 1068.5, ""]
+    )
+    buffer = io.BytesIO()
+    wb.save(buffer)
+
+    parsed = ledger.parse_ledger_workbook(buffer.getvalue(), "台账.xlsx")
+    batch_id = ledger.store_preview(db, parsed, "合成管理员", idempotency_key="ledger-test-key-orphan")
+    with pytest.raises(ledger.LedgerBatchError):
+        ledger.apply_batch(db, batch_id, "合成管理员")
+    batch = db.get(MaintenanceLedgerImportBatch, batch_id)
+    assert batch.status == "failed"
+    assert "孤儿" in batch.report_json["rejection_reason"]
+    # 零 canonical 写入
+    assert db.execute(select(MaintenanceProject)).scalars().first() is None
+    assert db.execute(select(MaintenanceCollectionMilestone)).scalars().first() is None

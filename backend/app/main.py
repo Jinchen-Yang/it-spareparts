@@ -21,9 +21,11 @@ from app.api import (
     maintenance_audit,
     maintenance_ai_fallback,
     maintenance_bad_returns,
+    maintenance_bad_salvage,
     maintenance_ckd_import,
     maintenance_collection_plan_imports,
     maintenance_collection_reminders,
+    maintenance_collection_evidence,
     maintenance_demands,
     maintenance_doc_import,
     maintenance_expense_reconcile,
@@ -36,6 +38,7 @@ from app.api import (
     maintenance_source_assignments,
     maintenance_project_workbooks,
     maintenance_projects,
+    maintenance_recovery,
     maintenance_warehouse,
     parts,
     pool_analysis,
@@ -153,6 +156,11 @@ app.include_router(
     dependencies=maintenance_beta_dependencies,
 )
 app.include_router(
+    maintenance_collection_evidence.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
     maintenance_collection_reminders.router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
@@ -169,6 +177,16 @@ app.include_router(
 )
 app.include_router(
     maintenance_front_stock.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_recovery.router,
+    prefix=settings.api_prefix,
+    dependencies=maintenance_beta_dependencies,
+)
+app.include_router(
+    maintenance_bad_salvage.router,
     prefix=settings.api_prefix,
     dependencies=maintenance_beta_dependencies,
 )

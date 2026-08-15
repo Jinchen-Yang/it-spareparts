@@ -29,6 +29,7 @@ from app.models.maintenance_doc_import import (
     MaintenanceDocHeadRow,
     MaintenanceDocImportBatch,
     MaintenanceDocLineRow,
+    MaintenanceRkdReturnLine,
 )
 from app.models.maintenance_project import (
     MaintenanceProject,
@@ -431,6 +432,19 @@ def _resolve_project_id(db: Session, head: MaintenanceDocHeadRow) -> str | None:
     return None
 
 
+def _fail_batch(db: Session, batch_id: str, failures: list[str]) -> None:
+    """失败关闭：回滚本批全部 canonical 写入并标记 failed。"""
+    db.rollback()
+    batch = db.get(MaintenanceDocImportBatch, batch_id)
+    batch.status = "failed"
+    batch.report_json = {
+        **(batch.report_json or {}),
+        "rejection_reason": "单据批次存在应用异常，整批零写入",
+        "failures": failures[:20],
+    }
+    db.commit()
+
+
 def apply_batch(
     db: Session,
     batch_id: str,
@@ -560,13 +574,96 @@ def apply_batch(
                 raise DocBatchError(
                     f"单据批次应用失败 {len(failures)} 行，整批拒绝（已回滚全部写入）"
                 )
+    elif batch.doc_type == "rkd_inbound":
+        summary["canonical_effect"] = "rkd_return_facts"
+        for head in head_rows:
+            if head.data_status and head.data_status != "已生效":
+                summary["ignored_heads"] += 1
+                continue
+            if head.head_no is None:
+                summary["skipped_lines"] += 1
+                continue
+            project_id = _resolve_project_id(db, head)
+            if project_id is None:
+                summary["skipped_lines"] += 1
+                continue
+            if allowed_project_ids is not None and project_id not in allowed_project_ids:
+                raise DocScopeDenied(
+                    f"单据批次包含无权项目（{head.head_no}），整批拒绝"
+                )
+            lines = (
+                db.execute(
+                    select(MaintenanceDocLineRow)
+                    .where(MaintenanceDocLineRow.head_row_id == head.row_id)
+                    .order_by(MaintenanceDocLineRow.row_no)
+                )
+                .scalars()
+                .all()
+            )
+            failures: list[str] = []
+            pending_facts: list[tuple[str, MaintenanceDocLineRow]] = []
+            for line in lines:
+                # 只有坏品/坏件/故障是消耗返还事实（Q8：坏件返还=氚云收货入库单）
+                if line.test_result not in ("坏品", "坏件", "故障"):
+                    continue
+                if line.qty is None or line.qty <= 0:
+                    failures.append(f"{head.head_no}: 坏件明细缺少合法数量")
+                    continue
+                source_ref = "rkd:" + hashlib.sha1(
+                    f"{head.head_no}:{line.line_key or line.row_no}".encode("utf-8")
+                ).hexdigest()
+                pending_facts.append((source_ref, line))
+            if failures:
+                _fail_batch(db, batch_id, failures)
+                raise DocBatchError(
+                    f"单据批次应用失败 {len(failures)} 行，整批拒绝（已回滚全部写入）"
+                )
+            # 幂等预检：同一 (单号, 明细键) 已入账 → 冲突失败关闭（防跨批次重复计数）
+            refs = [ref for ref, _ in pending_facts]
+            if refs:
+                existing = db.execute(
+                    select(MaintenanceRkdReturnLine.source_ref).where(
+                        MaintenanceRkdReturnLine.source_ref.in_(refs)
+                    )
+                ).scalars().all()
+                if existing:
+                    _fail_batch(
+                        db, batch_id, [f"入库单坏件明细已入账：{', '.join(existing[:5])}"]
+                    )
+                    raise DocBatchError("入库单坏件明细与已入账事实冲突，整批拒绝")
+            for source_ref, line in pending_facts:
+                pn = (line.pn or "").strip() or "(无PN)"
+                # 未知 PN 只影响回收监控的 PN 维度，不影响返还率分子数量 → part_id 置空
+                part_id = (
+                    db.scalar(select(DimPart.id).where(DimPart.pn_std == line.pn))
+                    if line.pn
+                    else None
+                )
+                db.add(
+                    MaintenanceRkdReturnLine(
+                        rkd_line_id=str(uuid4()),
+                        batch_id=batch.batch_id,
+                        head_row_id=head.row_id,
+                        project_id=project_id,
+                        head_no=head.head_no,
+                        source_ref=source_ref,
+                        part_id=part_id,
+                        pn=pn,
+                        qty=line.qty,
+                        test_result=line.test_result,
+                        occurred_at=(
+                            datetime.combine(
+                                head.head_date, datetime.min.time()
+                            ).replace(tzinfo=timezone.utc)
+                            if head.head_date
+                            else None
+                        ),
+                    )
+                )
+                summary["applied_lines"] += 1
     else:
-        # rkd_inbound / bxd_expense：本切片只落 raw；F3/C4 接线
-        summary["canonical_effect"] = (
-            "pending_f3_return_facts"
-            if batch.doc_type == "rkd_inbound"
-            else "pending_c4_expense_reconcile"
-        )
+        # bxd_expense：本切片只落 raw；C4 接线
+        summary["canonical_effect"] = "pending_c4_expense_reconcile"
     batch.status = "applied"
     batch.applied_by = operated_by
     batch.applied_at = datetime.now(timezone.utc)

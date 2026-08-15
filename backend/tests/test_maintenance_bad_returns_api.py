@@ -22,6 +22,11 @@ from app.models.maintenance_bad_return import (
     MaintenanceBadReturnCommand,
     MaintenanceReturnObligation,
 )
+from app.models.maintenance_doc_import import (
+    MaintenanceDocHeadRow,
+    MaintenanceDocImportBatch,
+    MaintenanceRkdReturnLine,
+)
 from app.models.maintenance_project import (
     MaintenanceProject,
     MaintenanceProjectUserAssignment,
@@ -213,7 +218,7 @@ def test_confirm_projects_exact_category_evidence_and_incomplete_rate(db):
     assert rows[pending.delivery_line_id]["classification"] == "pending_category"
     assert rows[pending.delivery_line_id]["category_id_snapshot"] is None
     assert payload["return_rate"]["status"] == "basis_incomplete"
-    assert payload["return_rate"]["official_basis"] is None
+    assert payload["return_rate"]["official_basis"] == "rkd_inbound"
     assert payload["return_rate"]["official_rate_pct"] is None
     assert payload["return_rate"]["required_quantity"] == "3.000"
     assert payload["return_rate"]["exempt_quantity"] == "2.000"
@@ -844,8 +849,8 @@ def test_admin_resolves_pending_category_by_linking_standard_category_only(db):
     ).json()
     assert rate["status"] == "available"
     assert rate["warehouse_confirmed_rate_pct"] == "0.00"
-    assert rate["official_basis"] is None
-    assert rate["official_rate_pct"] is None
+    assert rate["official_basis"] == "rkd_inbound"
+    assert rate["official_rate_pct"] == "0.00"
 
     non_admin = _client(
         db,
@@ -945,8 +950,8 @@ def test_partial_return_lifecycle_is_recoverable_and_never_mutates_cost_or_inven
     assert registered_rate["registered_rate_pct"] == "40.00"
     assert registered_rate["warehouse_confirmed_quantity"] == "0.000"
     assert registered_rate["warehouse_confirmed_rate_pct"] == "0.00"
-    assert registered_rate["official_basis"] is None
-    assert registered_rate["official_rate_pct"] is None
+    assert registered_rate["official_basis"] == "rkd_inbound"
+    assert registered_rate["official_rate_pct"] == "0.00"
 
     in_transit = client.post(
         f"/api/maintenance/bad-returns/{draft['return_id']}/in-transit",
@@ -964,8 +969,8 @@ def test_partial_return_lifecycle_is_recoverable_and_never_mutates_cost_or_inven
         f"/api/maintenance/projects/stable/{obligation.project_id}/return-rate"
     ).json()
     assert in_transit_rate["warehouse_confirmed_rate_pct"] == "0.00"
-    assert in_transit_rate["official_basis"] is None
-    assert in_transit_rate["official_rate_pct"] is None
+    assert in_transit_rate["official_basis"] == "rkd_inbound"
+    assert in_transit_rate["official_rate_pct"] == "0.00"
 
     confirmed_return = client.post(
         f"/api/maintenance/bad-returns/{draft['return_id']}/warehouse-confirm",
@@ -986,8 +991,8 @@ def test_partial_return_lifecycle_is_recoverable_and_never_mutates_cost_or_inven
     ).json()
     assert confirmed_rate["warehouse_confirmed_quantity"] == "2.000"
     assert confirmed_rate["warehouse_confirmed_rate_pct"] == "40.00"
-    assert confirmed_rate["official_basis"] is None
-    assert confirmed_rate["official_rate_pct"] is None
+    assert confirmed_rate["official_basis"] == "rkd_inbound"
+    assert confirmed_rate["official_rate_pct"] == "0.00"
 
     project = db.get(MaintenanceProject, obligation.project_id)
     assert project is not None
@@ -1638,3 +1643,61 @@ def test_manager_row_scope_covers_bad_return_search_and_entity_commands(db):
     ] == [403] * 8
     db.expire_all()
     assert db.get(MaintenanceBadReturn, return_row["return_id"]).status == "draft"
+
+
+def test_return_rate_official_numerator_is_rkd_inbound(db):
+    """Q8：官方返还率 = 入库单坏件件数 / (领用 − 不返还)。"""
+    from decimal import Decimal
+
+    client = _client(db, username="rkd_official_rate_admin")
+    _one_required_obligation(
+        db,
+        client,
+        project_id="project-rkd-official-rate",
+        quantity="4",
+        suffix="rkd-rate",
+    )
+    # 等价于 RKD 入库单导入 apply 后的坏件返还事实（3 件）
+    batch = MaintenanceDocImportBatch(
+        batch_id="rkd-rate-batch-1",
+        doc_type="rkd_inbound",
+        file_hash="h-rkd-rate",
+        filename="入库单.xlsx",
+        idempotency_key="rkd-rate-key-1",
+        uploaded_by="rkd_official_rate_admin",
+    )
+    db.add(batch)
+    db.flush()
+    head = MaintenanceDocHeadRow(
+        row_id="rkd-rate-head-1",
+        batch_id="rkd-rate-batch-1",
+        row_no=1,
+        raw_json={},
+        head_no="RKD-20260810-0001",
+    )
+    db.add(head)
+    db.flush()
+    db.add(
+        MaintenanceRkdReturnLine(
+            rkd_line_id="rkd-rate-line-1",
+            batch_id="rkd-rate-batch-1",
+            head_row_id="rkd-rate-head-1",
+            project_id="project-rkd-official-rate",
+            head_no="RKD-20260810-0001",
+            source_ref="rkd:rate-ref-1",
+            pn="PN-rate-1",
+            qty=Decimal("3"),
+            test_result="坏品",
+        )
+    )
+    db.commit()
+
+    rate = client.get(
+        "/api/maintenance/projects/stable/project-rkd-official-rate/return-rate"
+    ).json()
+    assert rate["status"] == "available"
+    assert rate["official_basis"] == "rkd_inbound"
+    assert rate["official_returned_quantity"] == "3.000"
+    assert rate["official_rate_pct"] == "75.00"
+    assert rate["required_quantity"] == "4.000"
+    assert "入库单坏件数" in rate["business_assumption"]

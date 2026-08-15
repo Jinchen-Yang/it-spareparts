@@ -146,3 +146,52 @@ class MaintenanceDocLineRow(Base):
         Index("ix_maintenance_doc_line_batch", "batch_id"),
         Index("ix_maintenance_doc_line_head", "head_row_id"),
     )
+
+
+class MaintenanceRkdReturnLine(Base):
+    """RKD 入库单坏件返还 canonical 事实（F3 返还率分子，Q8 口径）。
+
+    apply 时从 raw 明细行投影：test_result ∈ 坏品/坏件/故障 的行 = 已返还事实。
+    不扣前置库账本（坏件是消耗返还，不走 front_stock）；领用→不返还 义务在
+    maintenance_return_obligation，本表只记「入库单确认收到」的数量。
+    """
+
+    __tablename__ = "maintenance_rkd_return_line"
+
+    rkd_line_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_doc_import_batch.batch_id"), nullable=False
+    )
+    head_row_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_doc_head_row.row_id"), nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("maintenance_project.project_id"), nullable=False
+    )
+    head_no: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_ref: Mapped[str] = mapped_column(String(96), nullable=False)
+    part_id: Mapped[int | None] = mapped_column(ForeignKey("dim_part.id"))
+    pn: Mapped[str] = mapped_column(String(128), nullable=False)
+    qty: Mapped[Decimal] = mapped_column(Qty, nullable=False)
+    test_result: Mapped[str | None] = mapped_column(String(64))
+    occurred_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    created_at: Mapped[datetime] = mapped_column(
+        TZDateTime, nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("qty > 0", name="ck_maintenance_rkd_return_qty"),
+        CheckConstraint(
+            "char_length(btrim(pn)) > 0",
+            name="ck_maintenance_rkd_return_pn",
+        ),
+        UniqueConstraint(
+            "source_ref", name="uq_maintenance_rkd_return_source_ref"
+        ),
+        Index(
+            "ix_maintenance_rkd_return_project",
+            "project_id",
+            "part_id",
+            "occurred_at",
+        ),
+    )

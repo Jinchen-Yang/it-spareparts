@@ -241,6 +241,9 @@ def store_preview(
             head.issues.append("维保供货缺少维保需求单关联")
         if values["出库日期"] and order_date is None:
             head.issues.append("出库日期无法解析")
+        if not values["出库日期"] and order_date is None:
+            # 空日期 fail-closed：不允许回退当前时间冒充业务发生时间（round-4 Blocker 7）
+            head.issues.append("出库日期缺失")
         if values["出库类别"] == "维保供货" and not values["数据状态"]:
             head.issues.append("维保供货缺少数据状态")
         if head.issues:

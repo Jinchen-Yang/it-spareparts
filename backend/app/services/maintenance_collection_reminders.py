@@ -40,6 +40,7 @@ from app.models.maintenance_project import (
 )
 from app.models.system import SysUser
 from app.security import FULL_SCOPE_ROLES, UserContext
+from app.services import maintenance_collection_evidence as collection_evidence
 from app.services import maintenance_project_assignments as assignments
 from app.services import maintenance_project_operations as operations
 
@@ -815,6 +816,11 @@ def follow_up_collection_milestone(
     if action == "handle":
         if current_state not in ("overdue", "due_this_month", "upcoming"):
             raise CollectionReminderInvalid("只有待处理且完整的节点可以标记已处理")
+        # F6：回款提醒关闭 = 已上传凭证（巡检报告/图片/PDF）。
+        if collection_evidence.active_evidence_count(db, milestone_id) == 0:
+            raise CollectionReminderInvalid(
+                "关闭回款提醒前必须上传凭证（巡检报告/图片/PDF）"
+            )
     elif action == "reschedule":
         if current_state not in ("overdue", "due_this_month", "upcoming"):
             raise CollectionReminderInvalid("只有待处理且完整的节点可以改期")

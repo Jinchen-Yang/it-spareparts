@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -113,12 +113,12 @@ def _get_or_create_stock(
         version=1,
     )
     db.add(stock)
+    savepoint = db.begin_nested()
     try:
         db.flush()
     except IntegrityError:
-        # 并发创建竞态：用 savepoint 回滚本笔，不抹掉调用方事务内此前成功行
-        db.begin_nested().__enter__()
-        db.rollback()
+        # 并发创建竞态：savepoint 先于 flush 开启，回滚仅撤销本笔 INSERT
+        savepoint.rollback()
         stock = db.execute(
             select(MaintenanceFrontStock)
             .where(
@@ -191,49 +191,83 @@ def apply_movement(
     stock = _get_or_create_stock(
         db, project_id=project_id, part_id=part_id, warehouse_name=warehouse_name
     )
-    new_qty = stock.qty + signed
-    if new_qty < 0:
-        raise FrontStockNegativeBalance(
-            f"前置库结存不足：{stock.qty} < 出账 {qty}（{kind}）"
-        )
-    stock.qty = new_qty
-    if signed > 0:
-        stock.last_inbound_at = occurred_at or datetime.now(timezone.utc)
-        if unit_cost_ex_tax is not None and unit_cost_inc_tax is not None:
-            stock.unit_cost_ex_tax = unit_cost_ex_tax
-            stock.unit_cost_inc_tax = unit_cost_inc_tax
-        else:
-            # 单侧成本或全缺：整体置 unknown，禁止单侧值冒充双口径完整估值
-            # 未知成本批次：整体置 unknown，禁止旧单价冒充新批成本
-            stock.unit_cost_ex_tax = None
-            stock.unit_cost_inc_tax = None
-    stock.version += 1
+    # 关键区（结存变更 + 流水插入）用 savepoint 包裹：
+    # 并发同来源唯一冲突时回滚本笔全部变更，再回读重放/409；
+    # 负结存/其他失败不留下半写入的结存或幽灵结存行。
+    savepoint = db.begin_nested()
+    try:
+        new_qty = stock.qty + signed
+        if new_qty < 0:
+            raise FrontStockNegativeBalance(
+                f"前置库结存不足：{stock.qty} < 出账 {qty}（{kind}）"
+            )
+        stock.qty = new_qty
+        if signed > 0:
+            stock.last_inbound_at = occurred_at or datetime.now(timezone.utc)
+            if unit_cost_ex_tax is not None and unit_cost_inc_tax is not None:
+                stock.unit_cost_ex_tax = unit_cost_ex_tax
+                stock.unit_cost_inc_tax = unit_cost_inc_tax
+            else:
+                # 单侧成本或全缺：整体置 unknown，禁止单侧值冒充双口径完整估值
+                # 未知成本批次：整体置 unknown，禁止旧单价冒充新批成本
+                stock.unit_cost_ex_tax = None
+                stock.unit_cost_inc_tax = None
+        stock.version += 1
 
-    ledger = MaintenanceFrontStockLedger(
-        ledger_id=str(uuid4()),
-        stock_id=stock.stock_id,
-        project_id=project_id,
-        part_id=part_id,
-        kind=kind,
-        source_type=source_type,
-        source_ref=source_ref[:128],
-        qty_change=signed,
-        qty_after=new_qty,
-        payload_hash=payload_hash,
-        occurred_at=occurred_at,
-        unit_cost_ex_tax=unit_cost_ex_tax,
-        unit_cost_inc_tax=unit_cost_inc_tax,
-        reason=reason,
-        operated_by=operated_by[:64],
-    )
-    db.add(ledger)
-    db.flush()
+        ledger = MaintenanceFrontStockLedger(
+            ledger_id=str(uuid4()),
+            stock_id=stock.stock_id,
+            project_id=project_id,
+            part_id=part_id,
+            kind=kind,
+            source_type=source_type,
+            source_ref=source_ref,
+            qty_change=signed,
+            qty_after=new_qty,
+            payload_hash=payload_hash,
+            occurred_at=occurred_at,
+            unit_cost_ex_tax=unit_cost_ex_tax,
+            unit_cost_inc_tax=unit_cost_inc_tax,
+            reason=reason,
+            operated_by=operated_by[:64],
+        )
+        db.add(ledger)
+        db.flush()
+    except FrontStockNegativeBalance:
+        savepoint.rollback()
+        raise
+    except IntegrityError:
+        # 并发同来源：另一事务先写入同一 (source_type, source_ref)。
+        # 回滚本笔结存变更，回读既有流水做稳定重放/409。
+        savepoint.rollback()
+        concurrent = db.execute(
+            select(MaintenanceFrontStockLedger)
+            .where(
+                MaintenanceFrontStockLedger.source_type == source_type,
+                MaintenanceFrontStockLedger.source_ref == source_ref,
+            )
+        ).scalar_one_or_none()
+        if concurrent is None:
+            raise
+        if concurrent.payload_hash != payload_hash:
+            raise FrontStockPayloadConflict(
+                f"来源事件 {source_ref} 以不同内容重放，拒绝入账"
+            )
+        return concurrent
     return ledger
 
 
 def balance_rows(db: Session, project_id: str) -> list[dict]:
-    """项目前置库结存（含库龄天数与金额估值；缺成本不按 0）。"""
+    """项目前置库结存（含库龄天数与金额估值；缺成本不按 0）。
+
+    附加 F3 字段：该 PN 在本项目最近领用日期与「超 90 天未领用」标记
+    （领用事实=已确认/已更正的现场领用单明细，不写前置库账本）。
+    """
     from app.models.dimensions import DimPart
+    from app.models.maintenance_project_operations import (
+        MaintenanceSiteIssue,
+        MaintenanceSiteIssueLine,
+    )
 
     rows = db.execute(
         select(
@@ -245,12 +279,46 @@ def balance_rows(db: Session, project_id: str) -> list[dict]:
         .where(MaintenanceFrontStock.project_id == project_id)
         .order_by(MaintenanceFrontStock.warehouse_name, DimPart.pn_std)
     ).all()
+    consumption: dict[int, datetime] = {}
+    if rows:
+        part_ids = [stock.part_id for stock, _, _ in rows]
+        for part_id, last_date in db.execute(
+            select(
+                MaintenanceSiteIssueLine.part_id,
+                func.max(MaintenanceSiteIssue.issue_date),
+            )
+            .join(
+                MaintenanceSiteIssue,
+                MaintenanceSiteIssue.issue_id == MaintenanceSiteIssueLine.issue_id,
+            )
+            .where(
+                MaintenanceSiteIssue.project_id == project_id,
+                MaintenanceSiteIssueLine.part_id.in_(part_ids),
+                MaintenanceSiteIssue.normalized_status.in_(
+                    ("confirmed", "corrected")
+                ),
+            )
+            .group_by(MaintenanceSiteIssueLine.part_id)
+        ):
+            consumption[part_id] = datetime.combine(
+                last_date, time.min
+            ).replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
     result = []
     for stock, pn, description in rows:
         age_days = None
         if stock.last_inbound_at is not None:
             age_days = max(0, (now - stock.last_inbound_at).days)
+        last_consumed_at = consumption.get(stock.part_id)
+        days_since_consumption = (
+            max(0, (now - last_consumed_at).days)
+            if last_consumed_at is not None
+            else None
+        )
+        stale_90d = bool(
+            stock.qty > 0
+            and (days_since_consumption is None or days_since_consumption > 90)
+        )
         result.append(
             {
                 "stock_id": stock.stock_id,
@@ -285,6 +353,13 @@ def balance_rows(db: Session, project_id: str) -> list[dict]:
                     else None
                 ),
                 "age_days": age_days,
+                "last_consumed_at": (
+                    last_consumed_at.isoformat()
+                    if last_consumed_at is not None
+                    else None
+                ),
+                "days_since_last_consumption": days_since_consumption,
+                "stale_90d": stale_90d,
             }
         )
     return result

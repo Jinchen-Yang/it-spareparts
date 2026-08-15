@@ -846,6 +846,37 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
             f"台账批次存在 {len(issue_rows) + len(issue_plan_rows)} 行关键异常，"
             "整批拒绝应用（raw 已保留）"
         )
+    # 孤儿回款计划行（无对应合同行）fail-closed：不静默丢弃（round-4 Blocker 7）
+    contract_order_nos = {
+        order_no
+        for order_no in db.execute(
+            select(MaintenanceLedgerContractRow.order_no).where(
+                MaintenanceLedgerContractRow.batch_id == batch_id
+            )
+        ).scalars()
+        if order_no is not None
+    }
+    orphan_plan_rows = [
+        row
+        for row in db.execute(
+            select(MaintenanceLedgerPlanRow).where(
+                MaintenanceLedgerPlanRow.batch_id == batch_id
+            )
+        ).scalars()
+        if row.order_no not in contract_order_nos
+    ]
+    if orphan_plan_rows:
+        batch.status = "failed"
+        batch.report_json = {
+            **(batch.report_json or {}),
+            "rejected_rows": len(orphan_plan_rows),
+            "rejection_reason": "台账批次回款计划存在无对应合同的孤儿行，整批拒绝应用",
+        }
+        db.commit()
+        raise LedgerBatchError(
+            f"台账批次存在 {len(orphan_plan_rows)} 行无对应合同的回款计划，"
+            "整批拒绝应用（raw 已保留）"
+        )
     today = business_today()
     summary = {
         "projects_created": 0,
