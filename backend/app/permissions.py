@@ -76,6 +76,8 @@ ACTION_KEYS: list[str] = [
     "action_maintenance_warehouse_manage",
     # 成本/库存切换 dry-run、实名对账与双人审批；不包含生产激活。
     "action_maintenance_migration_review",
+    # 台账工作簿导入应用：项目/合同/期限/回款计划唯一事实源同步（admin/boss 默认）。
+    "action_maintenance_ledger_import",
     # 回款提醒（设计 §9）：标记已处理/改期/重新打开；以及 XLS 回款计划
     # 导入的预览/绑定候选查询/应用。两者都是实名白名单能力：admin 也不得
     # 通过 require_action 短路，必须由 security.require_explicit_account_action
@@ -125,6 +127,7 @@ LABELS: dict[str, str] = {
     "action_maintenance_acceptance_review": "维保验收报告高风险审批",
     "action_maintenance_warehouse_manage": "仓库单据导入与歧义裁决",
     "action_maintenance_migration_review": "维保迁移对账与审批",
+    "action_maintenance_ledger_import": "台账工作簿导入应用（项目/合同/回款计划同步）",
     "action_maintenance_collection_follow_up": "回款提醒跟进（标记已处理/改期/重新打开）",
     "action_maintenance_collection_plan_import": "回款计划导入（预览/绑定/应用）",
     "page_replenishment_beta": "补库申请",
@@ -175,6 +178,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
              "action_maintenance_acceptance_review": False,
              "action_maintenance_warehouse_manage": False,
              "action_maintenance_migration_review": False,
+             "action_maintenance_ledger_import": False,
              "page_replenishment_beta": False,
              "action_replenishment_create": False,
              "action_replenishment_review": False},
@@ -198,6 +202,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
                  "action_maintenance_acceptance_review": False,
                  "action_maintenance_warehouse_manage": False,
                  "action_maintenance_migration_review": False,
+             "action_maintenance_ledger_import": False,
                  "page_replenishment_beta": False,
                  "action_replenishment_create": False,
                  "action_replenishment_review": False,
@@ -232,6 +237,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_acceptance_review": False,
         "action_maintenance_warehouse_manage": False,
         "action_maintenance_migration_review": False,
+             "action_maintenance_ledger_import": False,
         "action_maintenance_collection_follow_up": False,
         "action_maintenance_collection_plan_import": False,
         "page_replenishment_beta": False,
@@ -269,6 +275,7 @@ ROLE_TEMPLATES: dict[str, dict[str, bool]] = {
         "action_maintenance_acceptance_review": False,
         "action_maintenance_warehouse_manage": False,
         "action_maintenance_migration_review": False,
+             "action_maintenance_ledger_import": False,
         "action_maintenance_collection_follow_up": False,
         "action_maintenance_collection_plan_import": False,
         "page_replenishment_beta": False,

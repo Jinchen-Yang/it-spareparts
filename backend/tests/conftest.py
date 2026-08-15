@@ -164,6 +164,8 @@ _TABLES = [
     "business_file_link", "business_file", "maintenance_acceptance_deliverable",
     "maintenance_collection_milestone", "maintenance_collection_milestone_operation",
     "maintenance_collection_plan_import_batch", "maintenance_collection_plan_source_binding",
+    "maintenance_ledger_expense_row", "maintenance_ledger_plan_row",
+    "maintenance_ledger_contract_row", "maintenance_ledger_import_batch",
     "maintenance_service_period",
     "maintenance_manager_upload_batch_project", "maintenance_manager_upload_batch",
     "maintenance_project_user_assignment",

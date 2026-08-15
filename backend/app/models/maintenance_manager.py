@@ -190,6 +190,10 @@ class MaintenanceCollectionMilestone(Base):
     collection_plan_import_batch_id: Mapped[str | None] = mapped_column(
         ForeignKey("maintenance_collection_plan_import_batch.batch_id")
     )
+    # 台账工作簿导入批次（B2）：source=project_manager_xls_v1 时二选一必填。
+    ledger_batch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("maintenance_ledger_import_batch.batch_id")
+    )
     follow_up_status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     follow_up_review_required: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
@@ -242,11 +246,14 @@ class MaintenanceCollectionMilestone(Base):
         ),
         CheckConstraint(
             "(source = 'manager_workbook_v3' AND source_batch_id IS NOT NULL "
-            "AND collection_plan_import_batch_id IS NULL) OR "
-            "(source = 'project_manager_xls_v1' AND collection_plan_import_batch_id IS NOT NULL "
-            "AND source_batch_id IS NULL) OR "
+            "AND collection_plan_import_batch_id IS NULL AND ledger_batch_id IS NULL) OR "
+            "(source = 'project_manager_xls_v1' AND ("
+            "(collection_plan_import_batch_id IS NOT NULL AND source_batch_id IS NULL "
+            "AND ledger_batch_id IS NULL) OR "
+            "(ledger_batch_id IS NOT NULL AND collection_plan_import_batch_id IS NULL "
+            "AND source_batch_id IS NULL))) OR "
             "(source = 'direct_api' AND source_batch_id IS NULL "
-            "AND collection_plan_import_batch_id IS NULL)",
+            "AND collection_plan_import_batch_id IS NULL AND ledger_batch_id IS NULL)",
             name="ck_maintenance_collection_milestone_batch_source",
         ),
         CheckConstraint("version >= 1", name="ck_maintenance_collection_milestone_version"),

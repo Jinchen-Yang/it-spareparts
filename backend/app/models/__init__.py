@@ -72,6 +72,12 @@ from app.models.maintenance_migration import (
     MaintenanceMigrationRun,
     MaintenanceProjectCutoverPlan,
 )
+from app.models.maintenance_ledger import (
+    MaintenanceLedgerContractRow,
+    MaintenanceLedgerExpenseRow,
+    MaintenanceLedgerImportBatch,
+    MaintenanceLedgerPlanRow,
+)
 from app.models.master_data import (
     Brand,
     ProductCategory,
@@ -171,6 +177,10 @@ __all__ = [
     "MaintenanceInventoryOpeningBalance",
     "MaintenanceMigrationDiscrepancy",
     "MaintenanceMigrationEvent",
+    "MaintenanceLedgerImportBatch",
+    "MaintenanceLedgerContractRow",
+    "MaintenanceLedgerPlanRow",
+    "MaintenanceLedgerExpenseRow",
     "FSalesOrder",
     "FSalesLine",
     "Inventory",
