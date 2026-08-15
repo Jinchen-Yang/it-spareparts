@@ -116,7 +116,8 @@ def _get_or_create_stock(
     try:
         db.flush()
     except IntegrityError:
-        # 并发创建竞态：唯一约束命中后改取已存在行
+        # 并发创建竞态：用 savepoint 回滚本笔，不抹掉调用方事务内此前成功行
+        db.begin_nested().__enter__()
         db.rollback()
         stock = db.execute(
             select(MaintenanceFrontStock)
@@ -155,6 +156,8 @@ def apply_movement(
         raise FrontStockInvalidMovement(f"未知来源类型：{source_type}")
     if not source_ref or not source_ref.strip():
         raise FrontStockInvalidMovement("来源引用不可为空")
+    if len(source_ref) > 256:
+        raise FrontStockInvalidMovement("来源引用超过 256 字符上限")
     if not operated_by or not operated_by.strip():
         raise FrontStockInvalidMovement("操作人不可为空")
     qty = Decimal(qty)
@@ -174,7 +177,7 @@ def apply_movement(
         select(MaintenanceFrontStockLedger)
         .where(
             MaintenanceFrontStockLedger.source_type == source_type,
-            MaintenanceFrontStockLedger.source_ref == source_ref[:128],
+            MaintenanceFrontStockLedger.source_ref == source_ref,
         )
         .with_for_update()
     ).scalar_one_or_none()
@@ -196,13 +199,11 @@ def apply_movement(
     stock.qty = new_qty
     if signed > 0:
         stock.last_inbound_at = occurred_at or datetime.now(timezone.utc)
-        if unit_cost_ex_tax is not None or unit_cost_inc_tax is not None:
-            # 已知成本批次：更新单价（含税缺失但未税存在时保留未税）
-            if unit_cost_ex_tax is not None:
-                stock.unit_cost_ex_tax = unit_cost_ex_tax
-            if unit_cost_inc_tax is not None:
-                stock.unit_cost_inc_tax = unit_cost_inc_tax
+        if unit_cost_ex_tax is not None and unit_cost_inc_tax is not None:
+            stock.unit_cost_ex_tax = unit_cost_ex_tax
+            stock.unit_cost_inc_tax = unit_cost_inc_tax
         else:
+            # 单侧成本或全缺：整体置 unknown，禁止单侧值冒充双口径完整估值
             # 未知成本批次：整体置 unknown，禁止旧单价冒充新批成本
             stock.unit_cost_ex_tax = None
             stock.unit_cost_inc_tax = None

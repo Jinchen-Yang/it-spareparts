@@ -107,7 +107,7 @@ class MaintenanceFrontStockLedger(Base):
     part_id: Mapped[int] = mapped_column(ForeignKey("dim_part.id"), nullable=False)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    source_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_ref: Mapped[str] = mapped_column(String(256), nullable=False)
     # 有符号数量：入为正、出为负；qty_after 为该笔之后的结存快照。
     qty_change: Mapped[Decimal] = mapped_column(Qty, nullable=False)
     qty_after: Mapped[Decimal] = mapped_column(Qty, nullable=False)

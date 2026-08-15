@@ -211,6 +211,18 @@ def parse_doc_workbook(
         if sheet is None:
             sheet = workbook.worksheets[0]
         rows = sheet.iter_rows(values_only=True)
+        result = _parse_doc_rows(rows, doc_type, spec, column_aliases)
+    finally:
+        workbook.close()
+    return {
+        **result,
+        "file_hash": hashlib.sha256(data).hexdigest(),
+        "filename": filename,
+    }
+
+
+def _parse_doc_rows(rows, doc_type: str, spec: dict, column_aliases: dict | None) -> dict:
+    try:
         header_rows: list[tuple] = []
         for row in rows:
             if header_rows or any(
@@ -261,12 +273,10 @@ def parse_doc_workbook(
                     raise DocParseError("明细行出现在主表行之前")
                 current.lines.append(DocLineData(row_no=row_no, values=line_values))
             row_no += 1
-    finally:
-        workbook.close()
+    except DocParseError:
+        raise
     return {
         "doc_type": doc_type,
-        "file_hash": hashlib.sha256(data).hexdigest(),
-        "filename": filename,
         "heads": heads,
         "line_count": sum(len(h.lines) for h in heads),
     }

@@ -57,7 +57,7 @@ def upgrade() -> None:
         sa.Column("part_id", sa.Integer(), nullable=False),
         sa.Column("kind", sa.String(length=16), nullable=False),
         sa.Column("source_type", sa.String(length=32), nullable=False),
-        sa.Column("source_ref", sa.String(length=128), nullable=False),
+        sa.Column("source_ref", sa.String(length=256), nullable=False),
         sa.Column("qty_change", sa.Numeric(14, 3), nullable=False),
         sa.Column("qty_after", sa.Numeric(14, 3), nullable=False),
         sa.Column("payload_hash", sa.String(length=64), nullable=False),

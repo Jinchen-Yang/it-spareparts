@@ -71,6 +71,14 @@ def parse_date_loose(value) -> tuple[date | None, str | None]:
             return date(year, month, 1), "month"
         except ValueError:
             return None, None
+    # Excel 日期序列号（流式解析只拿到 <v> 数字串，无样式信息）：5 位纯数字按序列号
+    if text.isdigit() and len(text) == 5:
+        serial = int(text)
+        if 20000 < serial < 80000:
+            try:
+                return (EXCEL_EPOCH + timedelta(days=serial)).date(), "day"
+            except (OverflowError, ValueError):
+                return None, None
     compact = _COMPACT_RE.match(text)
     if compact:
         try:

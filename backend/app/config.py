@@ -53,7 +53,9 @@ class Settings(BaseSettings):
     llm_max_tool_iters: int = 8        # 一次问答最多工具往返轮数（文件流程需 4-6 轮）
     llm_timeout_seconds: int = 60
     llm_max_tokens: int | None = None  # 单次生成长度上限；None=不传（用端点默认）。防长答滚雪球/控成本
-    llm_max_retries: int = 2           # 显式化 openai SDK 对 429/5xx 的指数退避重试次数（便于审计调参）
+    llm_max_retries: int = 2
+    # AI 兜底列映射是否允许把表头+脱敏样本发给外部 LLM；默认关闭（需显式开通）
+    llm_mapping_external_enabled: bool = False           # 显式化 openai SDK 对 429/5xx 的指数退避重试次数（便于审计调参）
     enable_agent: bool = True
 
     # 成本/库存切换是独立生产闸门；代码、迁移与审批 manifest 都不会自动启用新口径。

@@ -67,3 +67,70 @@ def validate_xlsx_zip(data: bytes, *, max_bytes: int) -> None:
 async def parse_in_threadpool(fn, *args, **kwargs):
     """把同步 openpyxl 解析移出 async event-loop。"""
     return await run_in_threadpool(fn, *args, **kwargs)
+
+
+# ---------------------------------------------------------------- 流式解析
+STREAM_THRESHOLD_BYTES = 8 * 1024 * 1024  # 超过 8MB 的文件走流式 XML（图片剥离）
+MAX_CELL_TEXT = 4096  # 超过此长度的单元格视为内嵌图片/附件，跳过
+
+
+def stream_first_sheet_rows(data: bytes) -> list[tuple]:
+    """流式解析第一个 worksheet 的行元组，剥离超长（图片）单元格。
+
+    氚云导出把附件图片以 base64 内嵌在单元格里（57MB 文件解压后 500MB+），
+    openpyxl 普通模式会整包解析。这里用 iterparse 只取短文本/数值单元格，
+    行号/列号由 cell 引用还原，供既有解析逻辑按元组处理。
+    """
+    import re
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    archive = zipfile.ZipFile(io.BytesIO(data))
+    try:
+        targets = sorted(
+            name for name in archive.namelist()
+            if name.startswith("xl/worksheets/") and name.endswith(".xml")
+        )
+        if not targets:
+            raise UploadSafetyError("xlsx 缺少 worksheet")
+        target = targets[0]
+        NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+        rows_out: list[tuple] = []
+        col_re = re.compile(r"([A-Z]+)")
+        with archive.open(target) as handle:
+            for _ev, el in ET.iterparse(handle, events=("end",)):
+                if el.tag != NS + "row":
+                    continue
+                cells: dict[int, str] = {}
+                for cell in el.iter(NS + "c"):
+                    ref = cell.get("r", "")
+                    text = cell.find(NS + "is/" + NS + "t")
+                    value = cell.find(NS + "v")
+                    if text is not None and text.text and len(text.text) <= MAX_CELL_TEXT:
+                        col = _column_index(ref)
+                        cells[col] = text.text.strip()
+                    elif value is not None and value.text and len(value.text) <= MAX_CELL_TEXT:
+                        col = _column_index(ref)
+                        cells[col] = value.text.strip()
+                if cells:
+                    max_col = max(cells)
+                    rows_out.append(
+                        tuple(cells.get(i) for i in range(1, max_col + 1))
+                    )
+                el.clear()
+        return rows_out
+    finally:
+        archive.close()
+
+
+def _column_index(ref: str) -> int:
+    letters = ""
+    for ch in ref:
+        if ch.isalpha():
+            letters += ch
+        else:
+            break
+    index = 0
+    for ch in letters:
+        index = index * 26 + (ord(ch) - ord("A") + 1)
+    return index

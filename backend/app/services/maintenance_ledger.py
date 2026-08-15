@@ -815,6 +815,25 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
         raise LedgerBatchError(
             f"台账批次金额对账失败 {len(reconcile_failures)} 行，整批拒绝应用"
         )
+    issue_expense_rows = (
+        db.execute(
+            select(MaintenanceLedgerExpenseRow).where(
+                MaintenanceLedgerExpenseRow.batch_id == batch_id,
+                func.cardinality(MaintenanceLedgerExpenseRow.issues) > 0,
+            )
+        ).scalars().all()
+    )
+    if issue_expense_rows:
+        batch.status = "failed"
+        batch.report_json = {
+            **(batch.report_json or {}),
+            "rejected_rows": len(issue_expense_rows),
+            "rejection_reason": "台账批次报销归集存在关键异常行，整批拒绝应用",
+        }
+        db.commit()
+        raise LedgerBatchError(
+            f"台账批次存在 {len(issue_expense_rows)} 行报销归集异常，整批拒绝应用"
+        )
     if issue_rows or issue_plan_rows:
         batch.status = "failed"
         batch.report_json = {

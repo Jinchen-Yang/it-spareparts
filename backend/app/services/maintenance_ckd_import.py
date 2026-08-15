@@ -113,6 +113,16 @@ def parse_ckd_workbook(
     """解析发货单工作簿。返回 {source_kind, file_hash, heads: [CkdHeadData], line_count}。"""
     if len(data) > MAX_PREVIEW_BYTES:
         raise CkdParseError("发货单文件超过大小上限")
+    from app.services import import_safety
+
+    if len(data) > import_safety.STREAM_THRESHOLD_BYTES:
+        # 大文件：流式 XML 解析，剥离内嵌图片单元格（54MB 文件普通模式需 7.5 分钟）
+        rows = iter(import_safety.stream_first_sheet_rows(data))
+        try:
+            result = _parse_ckd_rows(rows, column_aliases)
+        except Exception as exc:  # noqa: BLE001
+            raise CkdParseError(f"流式解析失败：{type(exc).__name__}") from exc
+        return _with_file_meta(result, data, filename)
     try:
         # 氚云导出的 sheet dimension 不可靠，read_only 模式会截断行——用普通模式。
         workbook = load_workbook(io.BytesIO(data), data_only=True, read_only=False)
@@ -121,6 +131,23 @@ def parse_ckd_workbook(
     try:
         sheet = workbook["Sheet1"] if "Sheet1" in workbook.sheetnames else workbook.worksheets[0]
         rows = sheet.iter_rows(values_only=True)
+        result = _parse_ckd_rows(rows, column_aliases)
+    finally:
+        workbook.close()
+    return _with_file_meta(result, data, filename)
+
+
+def _with_file_meta(result: dict, data: bytes, filename: str) -> dict:
+    return {
+        **result,
+        "file_hash": hashlib.sha256(data).hexdigest(),
+        "filename": filename,
+    }
+
+
+def _parse_ckd_rows(rows, column_aliases: dict | None) -> dict:
+    """在行元组迭代器上执行表头识别与主明细分组（openpyxl 与流式共用）。"""
+    try:
         header_rows: list[tuple] = []
         for row in rows:
             if header_rows or any(
@@ -167,12 +194,10 @@ def parse_ckd_workbook(
                     raise CkdParseError("明细行出现在主表行之前")
                 current.lines.append(line)
             row_no += 1
-    finally:
-        workbook.close()
+    except CkdParseError:
+        raise
     return {
         "source_kind": "ckd_shipment_v1",
-        "file_hash": hashlib.sha256(data).hexdigest(),
-        "filename": filename,
         "heads": heads,
         "line_count": sum(len(h.lines) for h in heads),
     }
@@ -214,6 +239,10 @@ def store_preview(
         wbdd = _clean(values["维保需求单(备件)"] or values["维保需求单"], _WBDD_RE)
         if values["出库类别"] == "维保供货" and not wbdd:
             head.issues.append("维保供货缺少维保需求单关联")
+        if values["出库日期"] and order_date is None:
+            head.issues.append("出库日期无法解析")
+        if values["出库类别"] == "维保供货" and not values["数据状态"]:
+            head.issues.append("维保供货缺少数据状态")
         if head.issues:
             issue_rows += 1
         head_row = MaintenanceCkdHeadRow(

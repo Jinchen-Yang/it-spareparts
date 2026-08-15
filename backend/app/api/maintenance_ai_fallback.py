@@ -79,11 +79,14 @@ def _read_headers_and_samples(data: bytes, doc_type: str) -> tuple[list[str], li
     try:
         sheet = workbook.worksheets[0]
         rows = list(sheet.iter_rows(values_only=True))
+        # 与各解析器一致：字段名行是第二个表头行（氚云双表头），字段码行跳过
+        header_row_index = 1 if len(rows) >= 2 else 0
         headers = [
-            str(v).strip() if v is not None else "" for v in (rows[0] if rows else [])
+            str(v).strip() if v is not None else ""
+            for v in (rows[header_row_index] if rows else [])
         ]
         samples: list[list] = []
-        for row in rows[1:6]:
+        for row in rows[header_row_index + 1 : header_row_index + 6]:
             samples.append([str(v)[:40] if v is not None else "" for v in row])
         return headers, samples
     finally:

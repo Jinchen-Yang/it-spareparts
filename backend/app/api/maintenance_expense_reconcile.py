@@ -30,6 +30,11 @@ def get_expense_reconcile(
     response.headers["Cache-Control"] = "no-store"
     if not ctx.is_authenticated:
         raise HTTPException(status_code=401, detail="请先登录")
+    if ctx.role not in ("admin", "boss"):
+        raise HTTPException(
+            status_code=403,
+            detail="全库报销对账仅限管理员（跨项目财务数据）",
+        )
     user = db.scalar(
         select(SysUser).where(
             SysUser.username == ctx.user_id, SysUser.is_active.is_(True)

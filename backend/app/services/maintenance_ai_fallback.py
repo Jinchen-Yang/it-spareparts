@@ -60,15 +60,37 @@ def canonical_catalog(doc_type: str) -> set[str]:
     return set(spec["head"]) | set(spec["line"])
 
 
+def _mask_sample_value(value: str) -> str:
+    """脱敏样本值：只保留类型与长度特征，绝不外发原始金额/单号/人名。"""
+    text = value or ""
+    if not text:
+        return "<空>"
+    if re.fullmatch(r"[A-Z]+-\d{8}-\d{4}", text):
+        return "<单号>"
+    if re.fullmatch(r"[\d,，.¥￥ ]+", text):
+        return "<数字>"
+    if re.fullmatch(r"\d{4}[-/年.]\d{1,2}[-/月.]?\d{0,2}[日]?", text):
+        return "<日期>"
+    if len(text) <= 4:
+        return "<短文本>"
+    return f"<文本{len(text)}字>"
+
+
 def build_prompt(doc_type: str, headers: list[str], samples: list[list]) -> tuple[str, str]:
-    """确定性构造提案 prompt；返回 (prompt, prompt_hash)。"""
+    """确定性构造提案 prompt；样本一律脱敏（N1）。返回 (prompt, prompt_hash)。"""
     catalog = sorted(canonical_catalog(doc_type))
     sample_lines = []
     for row in samples[:5]:
         sample_lines.append(
             json.dumps(
-                {headers[i]: (str(row[i])[:40] if i < len(row) and row[i] is not None else "")
-                 for i in range(len(headers))},
+                {
+                    headers[i]: (
+                        _mask_sample_value(str(row[i]))
+                        if i < len(row) and row[i] is not None
+                        else "<空>"
+                    )
+                    for i in range(len(headers))
+                },
                 ensure_ascii=False,
             )
         )
@@ -76,7 +98,7 @@ def build_prompt(doc_type: str, headers: list[str], samples: list[list]) -> tupl
         f"你是 Excel 列映射助手。单据类型：{doc_type}。\n"
         f"可选目标字段（封闭目录，只能从中选择）：{json.dumps(catalog, ensure_ascii=False)}\n"
         f"表头：{json.dumps(headers, ensure_ascii=False)}\n"
-        f"样本行：\n" + "\n".join(sample_lines) + "\n"
+        f"样本行（值已脱敏为类型特征）：\n" + "\n".join(sample_lines) + "\n"
         "只输出 JSON：{\"column_mapping\": {\"<表头>\": \"<目标字段>\"}, \"notes\": [\"说明\"]}。"
         "未匹配的表头不要出现在 column_mapping 里；禁止发明目录外的字段；"
         "禁止计算金额、日期或任何派生值。"
@@ -115,6 +137,12 @@ def call_llm_for_mapping(
     返回 (proposal, metadata)；未配置 LLM 时抛 AIUnavailable。
     """
     if llm_call is None:
+        settings = get_settings()
+        if not settings.llm_mapping_external_enabled:
+            raise AIUnavailable(
+                "AI 兜底外部调用未开通（LLM_MAPPING_EXTERNAL_ENABLED=false）；"
+                "可改用人工列映射模板"
+            )
         if not llm_provider.is_configured():
             raise AIUnavailable("未配置 LLM_API_KEY，AI 兜底不可用")
         settings = get_settings()
@@ -210,7 +238,13 @@ def propose(
         file_hash=hashlib.sha256(data).hexdigest(),
         filename=filename[:255],
         header_snapshot=headers,
-        sample_rows=samples[:5],
+        sample_rows=[
+            [
+                _mask_sample_value(str(cell)) if cell is not None else ""
+                for cell in row
+            ]
+            for row in samples[:5]
+        ],
         proposal=proposal,
         provider=meta["provider"],
         model=meta["model"],
@@ -242,7 +276,11 @@ def accept_proposal(
     idempotency_key: str,
 ) -> str:
     """人工确认提案后，用同一确定性解析器走标准 store_preview。"""
-    row = db.get(MaintenanceAiMappingProposal, proposal_id)
+    row = db.execute(
+        select(MaintenanceAiMappingProposal)
+        .where(MaintenanceAiMappingProposal.proposal_id == proposal_id)
+        .with_for_update()
+    ).scalar_one_or_none()
     if row is None:
         raise AIProposalError("提案不存在")
     if row.status == "accepted":
