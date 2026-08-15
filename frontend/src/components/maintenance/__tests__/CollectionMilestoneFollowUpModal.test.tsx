@@ -184,8 +184,9 @@ describe("CollectionMilestoneFollowUpModal", () => {
     expect(secondKey).toMatch(/^handle-/);
 
     // 表单未再变化时继续复用第二个键
+    await waitFor(() => expect(onSubmitted).toHaveBeenCalledTimes(2));
     const retryButton = await waitFor(() => {
-      const button = screen.getByRole("button", { name: COLLECTION_FOLLOW_UP.submit });
+      const button = screen.getByRole("button", { name: /确认$/ });
       expect(button).toBeEnabled();
       expect(button).not.toHaveClass("ant-btn-loading");
       return button;

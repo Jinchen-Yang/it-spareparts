@@ -601,6 +601,13 @@ def test_v122_release_artifacts_are_versioned_executable_and_syntax_checked():
     subprocess.run(["python3", "-m", "py_compile", str(MANIFEST), str(STATIC_TEST)], check=True)
 
 
+def test_named_canary_login_uses_the_real_production_api_route():
+    release = RELEASE.read_text(encoding="utf-8")
+
+    assert '["base_url"]+"/api/auth/login"' in release
+    assert '["base_url"]+"/auth/login"' not in release
+
+
 def test_manifest_contract_is_d9_to_c8_collection_reminders_not_old_v121_or_f9():
     module = _load_manifest_module()
 

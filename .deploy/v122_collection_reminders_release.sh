@@ -1702,7 +1702,7 @@ PY
       --output "$workspace/login-$name.response.json" --write-out '%{http_code}' \
       --request POST --header 'Content-Type: application/json' \
       --data-binary "@$workspace/login-$name.request.json" \
-      "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_url"]+"/auth/login")' "$workspace/login-$name.expectation.json")") \
+      "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_url"]+"/api/auth/login")' "$workspace/login-$name.expectation.json")") \
       || fatal "named canary account login transport failed"
     [ "$status" = 200 ] || fatal "named canary account login status mismatch"
     python3 - "$name" "$workspace" <<'PY'
