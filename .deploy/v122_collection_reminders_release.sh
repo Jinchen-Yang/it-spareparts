@@ -115,17 +115,19 @@ PY
 
 usage() {
   cat >&2 <<'EOF'
-usage: v122_collection_reminders_release.sh PACKAGE_DIR EVIDENCE_DIR preflight|freeze-writes|backup|restore-check|migrate|deploy|canary|observe|rollback-images [ARGS]
+usage: v122_collection_reminders_release.sh PACKAGE_DIR EVIDENCE_DIR preflight|freeze-writes|backup|restore-check|install-compose|migrate|deploy|canary|observe|commit-release|rollback-images [ARGS]
 
 commands:
   preflight
   freeze-writes
   backup
   restore-check DB_DUMP UPLOADS_ARCHIVE [MODE600_HISTORICAL_UPLOAD_GAP_APPROVAL]
+  install-compose
   migrate
   deploy
   canary CANARY_PROJECT_ID MODE600_CANARY_SPEC
   observe 0|5|15|30
+  commit-release
   rollback-images
 
 Rollback note: additive schema is retained; no automatic downgrade; no blind DB/uploads restore.
@@ -314,10 +316,254 @@ retag_and_start_exact_images() {
 	    || fatal "frontend is not running the exact requested image"
 }
 
+retag_exact_images_without_recreate() {
+  local app_image=$1
+  local frontend_image=$2
+  require_exact_image "$app_image"
+  require_exact_image "$frontend_image"
+  docker tag "$app_image" it-spareparts-app:latest
+  docker tag "$frontend_image" it-spareparts-frontend:latest
+}
+
+require_app_health_and_readiness() {
+  local app_container health readiness
+  app_container=$(app_cid)
+  [ -n "$app_container" ] || fatal "app is not running for health/readiness verification"
+  health=$(docker exec "$app_container" python -c \
+    'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=5).status)')
+  readiness=$(docker exec "$app_container" python -c \
+    'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/health/db", timeout=5).status)')
+  [ "$health" = 200 ] && [ "$readiness" = 200 ] \
+    || fatal "health/readiness verification failed"
+}
+
 restore_previous_exact_images() {
   retag_and_start_exact_images \
     "$(manifest_get previous_images.app_image_id)" \
     "$(manifest_get previous_images.frontend_image_id)"
+}
+
+sha256_file() {
+  [ -f "$1" ] && [ ! -L "$1" ] || fatal "unsafe regular file: $1"
+  sha256sum "$1" | awk '{print $1}'
+}
+
+atomic_replace_file() {
+  # Preserve the destination's inode ownership/mode contract while making the
+  # content change durable.  Source and destination are always narrow files.
+  python3 - "$1" "$2" "$3" <<'PY'
+import hashlib
+import os
+import pathlib
+import shutil
+import stat
+import sys
+import tempfile
+
+source, destination = map(pathlib.Path, sys.argv[1:3])
+expected_destination_sha = sys.argv[3]
+if not source.is_file() or source.is_symlink():
+    raise SystemExit("source is not a safe regular file")
+if not destination.is_file() or destination.is_symlink():
+    raise SystemExit("destination is not a safe regular file")
+if source.parent.resolve() == destination.parent.resolve() and source.resolve() == destination.resolve():
+    raise SystemExit("source and destination must differ")
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+if digest(destination) != expected_destination_sha:
+    raise SystemExit("destination hash compare-and-swap mismatch before atomic replace")
+before = destination.stat(follow_symlinks=False)
+fd, temporary_name = tempfile.mkstemp(
+    prefix=".v122-compose.next.", dir=destination.parent
+)
+temporary = pathlib.Path(temporary_name)
+try:
+    os.fchown(fd, before.st_uid, before.st_gid)
+    os.fchmod(fd, stat.S_IMODE(before.st_mode))
+    with os.fdopen(fd, "wb") as out, source.open("rb") as inp:
+        fd = -1
+        shutil.copyfileobj(inp, out)
+        out.flush()
+        # This fsync follows both content and metadata changes.
+        os.fsync(out.fileno())
+    # Validate again immediately before rename.  The controller's global lock
+    # serializes release invocations; this catches any external file mutation
+    # between binding validation and the durable replacement.
+    if digest(destination) != expected_destination_sha:
+        raise SystemExit("destination hash compare-and-swap mismatch before rename")
+    os.replace(temporary, destination)
+    directory_fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    if fd >= 0:
+        os.close(fd)
+    if temporary.exists():
+        temporary.unlink()
+PY
+}
+
+install_compose_binding_values() {
+  local backup_dir backup_manifest expected_manifest_sha
+  backup_dir=$(realpath -e -- "$(state_get backup_dir)") \
+    || fatal "install-compose requires a state-bound backup directory"
+  backup_manifest="$backup_dir/backup-manifest.json"
+  expected_manifest_sha=$(state_get backup_manifest_sha256) \
+    || fatal "install-compose requires a state-bound backup manifest"
+  [ "$(sha256_file "$backup_manifest")" = "$expected_manifest_sha" ] \
+    || fatal "state-bound backup manifest hash mismatch"
+  python3 - "$backup_manifest" "$COMPOSE_FILE" "$PACKAGE_DIR/candidate-compose.yml" \
+    "$ROOT_RELEASE_STATE" "$backup_dir/docker-compose.yml" "$backup_dir" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+manifest_path, active, candidate, root, backup_compose = map(pathlib.Path, sys.argv[1:6])
+backup_dir = pathlib.Path(sys.argv[6])
+for path in (manifest_path, active, candidate, root, backup_compose):
+    if not path.is_file() or path.is_symlink():
+        raise SystemExit("unsafe cutover binding file")
+value = json.loads(manifest_path.read_text(encoding="utf-8"))
+if not isinstance(value, dict):
+    raise SystemExit("backup manifest is not an object")
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+previous_sha = value.get("active_compose_sha256")
+candidate_sha = value.get("candidate_compose_sha256")
+root_sha = value.get("root_release_state_sha256")
+if digest(candidate) != candidate_sha:
+    raise SystemExit("cutover backup binding mismatch: candidate_compose_sha256")
+if digest(root) != root_sha:
+    raise SystemExit("cutover backup binding mismatch: root_release_state_sha256")
+if digest(backup_compose) != previous_sha:
+    raise SystemExit("cutover backup binding mismatch: backup docker-compose.yml")
+active_sha = digest(active)
+if active_sha == previous_sha:
+    mode = "pre"
+elif active_sha == candidate_sha:
+    mode = "installed"
+else:
+    raise SystemExit("cutover backup binding mismatch: active_compose_sha256")
+print(mode)
+print(backup_dir)
+print(manifest_path)
+print(previous_sha)
+print(candidate_sha)
+print(root_sha)
+PY
+}
+
+require_runtime_closed_on_candidate() {
+  local expected flags
+  expected=$(manifest_get runtime_flags.maintenance_collection_canary_project_id)
+  flags=$(compose exec -T app sh -ceu \
+    'printf "%s\n%s\n" "$MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED" "$MAINTENANCE_COLLECTION_CANARY_PROJECT_ID"') \
+    || fatal "candidate running configuration readback failed"
+  [ "$flags" = "false
+$expected" ] || fatal "candidate running configuration must keep apply disabled and canary bound"
+}
+
+commit_root_release_state() {
+  python3 - "$ROOT_RELEASE_STATE" "$(state_get pre_cutover_root_state_sha256)" \
+    "$(manifest_get target_sha)" "$(manifest_get images.app_image_id)" \
+    "$(manifest_get images.frontend_image_id)" "$(manifest_get database.image_id)" \
+    "$(state_get candidate_compose_sha256)" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import sys
+import tempfile
+
+path = pathlib.Path(sys.argv[1])
+before_sha, target, app, frontend, database, compose = sys.argv[2:]
+if not path.is_file() or path.is_symlink():
+    raise SystemExit("unsafe root release state")
+current = path.read_bytes()
+expected = {
+    "format": "it-spareparts-root-release-state-v1",
+    "adopted_for": "v122-collection-reminders",
+    "production_sha": target,
+    "compose_sha256": compose,
+    "app_image_id": app,
+    "frontend_image_id": frontend,
+    "database_image_id": database,
+}
+encoded = (json.dumps(expected, sort_keys=True, separators=(",", ":")) + "\n").encode()
+if current == encoded:
+    print(hashlib.sha256(encoded).hexdigest())
+    raise SystemExit(0)
+if hashlib.sha256(current).hexdigest() != before_sha:
+    raise SystemExit("root release state compare-and-swap mismatch")
+meta = path.stat(follow_symlinks=False)
+fd, temporary_name = tempfile.mkstemp(prefix=".root-release-state-", dir=path.parent)
+try:
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(encoded)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chown(temporary_name, meta.st_uid, meta.st_gid)
+    os.chmod(temporary_name, stat.S_IMODE(meta.st_mode))
+    os.replace(temporary_name, path)
+    directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    if os.path.exists(temporary_name):
+        os.unlink(temporary_name)
+print(hashlib.sha256(encoded).hexdigest())
+PY
+}
+
+phase_requires_candidate_compose() {
+  case "$1" in
+    compose_installed|migrated|deployed|canary|observe_0|observe_5|observe_15|observe_30_passed)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+restore_pre_cutover_compose_from_backup() {
+  local backup_dir backup_compose previous_sha root_sha candidate_sha active_sha
+  if [ "$#" -eq 4 ]; then
+    backup_dir=$1
+    previous_sha=$2
+    root_sha=$3
+    candidate_sha=$4
+  else
+    backup_dir=$(realpath -e -- "$(state_get backup_dir)") \
+      || fatal "rollback requires a state-bound backup directory"
+    previous_sha=$(state_get previous_compose_sha256) \
+      || fatal "rollback requires previous compose hash"
+    root_sha=$(state_get pre_cutover_root_state_sha256) \
+      || fatal "rollback requires pre-cutover root hash"
+    candidate_sha=$(state_get candidate_compose_sha256) \
+      || fatal "rollback requires candidate compose hash"
+  fi
+  backup_compose="$backup_dir/docker-compose.yml"
+  [ "$(sha256_file "$backup_compose")" = "$previous_sha" ] \
+    || fatal "rollback backup compose hash mismatch"
+  [ "$(sha256_file "$ROOT_RELEASE_STATE")" = "$root_sha" ] \
+    || fatal "rollback root release state drift"
+  active_sha=$(sha256_file "$COMPOSE_FILE")
+  if [ "$active_sha" = "$candidate_sha" ]; then
+    atomic_replace_file "$backup_compose" "$COMPOSE_FILE" "$candidate_sha" \
+      || fatal "atomic previous compose restore failed"
+  elif [ "$active_sha" != "$previous_sha" ]; then
+    fatal "rollback active compose is neither the candidate nor the restored parent"
+  fi
+  [ "$(sha256_file "$COMPOSE_FILE")" = "$previous_sha" ] \
+    || fatal "previous compose hash mismatch after rollback"
+  compose config -q || fatal "restored previous compose config validation failed"
 }
 
 run_sealed_canary_case() {
@@ -623,6 +869,69 @@ if set(actual) != set(expected):
     raise SystemExit("account overrides state mismatch: target account set differs")
 if any(actual[username] != overrides for username, overrides in expected.items()):
     raise SystemExit("account overrides state mismatch: exact overrides differ")
+PY
+}
+
+verify_action_account_transition_state() {
+  local spec=$1
+  local verify_case=$2
+  local first_list=$3
+  local second_list=$4
+  local workspace=$5
+  run_sealed_canary_case "$spec" "$verify_case" "$workspace" || return 1
+  python3 - "$spec" "$first_list" "$second_list" \
+    "$workspace/$verify_case.response" <<'PY' || return 1
+import json
+import pathlib
+import re
+import sys
+
+spec = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+try:
+    rows = json.loads(pathlib.Path(sys.argv[4]).read_text(encoding="utf-8"))
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"account transition state mismatch: response is not JSON: {exc}")
+
+def expected_for(list_name):
+    cases = spec.get(list_name)
+    if not isinstance(cases, list) or not cases:
+        raise SystemExit("account transition state mismatch: invalid expected account list")
+    expected = {}
+    for case in cases:
+        match = re.fullmatch(
+            r"/api/accounts/([A-Za-z0-9][A-Za-z0-9_.-]{0,63})",
+            case.get("path", "") if isinstance(case, dict) else "",
+        )
+        body = case.get("body") if isinstance(case, dict) else None
+        overrides = body.get("overrides") if isinstance(body, dict) else None
+        if match is None or not isinstance(overrides, dict):
+            raise SystemExit("account transition state mismatch: invalid expected account case")
+        if match.group(1) in expected:
+            raise SystemExit("account transition state mismatch: duplicate expected account")
+        expected[match.group(1)] = overrides
+    return expected
+
+first = expected_for(sys.argv[2])
+second = expected_for(sys.argv[3])
+if set(first) != set(second):
+    raise SystemExit("account transition state mismatch: expected account sets differ")
+if not isinstance(rows, list):
+    raise SystemExit("account transition state mismatch: actual account list is invalid")
+actual = {}
+for row in rows:
+    if not isinstance(row, dict):
+        continue
+    username = row.get("username")
+    if username not in first:
+        continue
+    if username in actual or not isinstance(row.get("overrides"), dict):
+        raise SystemExit("account transition state mismatch: duplicate or invalid target account")
+    actual[username] = row["overrides"]
+if set(actual) != set(first):
+    raise SystemExit("account transition state mismatch: target account set differs")
+for username, overrides in actual.items():
+    if overrides != first[username] and overrides != second[username]:
+        raise SystemExit("account transition state mismatch: unrelated overrides drift")
 PY
 }
 
@@ -1566,7 +1875,8 @@ case "$COMMAND" in
     { [ "$#" -eq 2 ] || [ "$#" -eq 3 ]; } || usage
     require_phase backup
     ;;
-  migrate) [ "$#" -eq 0 ] || usage; require_production_ready; require_phase restore_checked ;;
+  install-compose) [ "$#" -eq 0 ] || usage; require_production_ready; require_phase restore_checked ;;
+  migrate) [ "$#" -eq 0 ] || usage; require_production_ready; require_phase compose_installed ;;
   deploy) [ "$#" -eq 0 ] || usage; require_production_ready; require_phase migrated ;;
   canary)
     [ "$#" -eq 2 ] || usage
@@ -1618,9 +1928,10 @@ case "$COMMAND" in
     fi
     ;;
   observe) require_production_ready; [ "$#" -eq 1 ] || usage; case "$1" in 0|5|15|30) ;; *) fatal "observe point must be 0, 5, 15, or 30";; esac ;;
+  commit-release) [ "$#" -eq 0 ] || usage; require_production_ready; require_phase observe_30_passed ;;
   rollback-images)
     [ "$#" -le 1 ] || usage
-    require_phase_in preflight frozen backup restore_checked migrated deployed canary observe_0 observe_5 observe_15 observed
+    require_phase_in preflight frozen backup restore_checked compose_installed migrated deployed canary observe_0 observe_5 observe_15 observe_30_passed
     STATE_ACTIONS_GRANTED=$(python3 -c 'import json,sys; print("true" if json.load(open(sys.argv[1])).get("actions_granted") else "false")' "$STATE_FILE") \
       || fatal "rollback action state is unreadable"
     if [ "$STATE_ACTIONS_GRANTED" = true ]; then
@@ -2055,19 +2366,69 @@ PY
         restore_check_rehearsal_evidence_sha256 "$REHEARSAL_EVIDENCE_SHA256"
     fi
     ;;
+  install-compose)
+    # Re-run the manifest's production gate immediately before the first
+    # active-file mutation; a verified flat package alone is not enough.
+    python3 "$MANIFEST_TOOL" preflight "$PACKAGE_DIR" >/dev/null \
+      || fatal "production-ready package preflight failed before compose install"
+    INSTALL_BINDING_TEXT=$(install_compose_binding_values) \
+      || fatal "install-compose binding validation failed"
+    mapfile -t INSTALL_BINDING <<<"$INSTALL_BINDING_TEXT"
+    [ "${#INSTALL_BINDING[@]}" -eq 6 ] \
+      || fatal "install-compose binding validation is incomplete"
+    INSTALL_COMPOSE_BINDING=${INSTALL_BINDING[0]}
+    BACKUP_DIR=${INSTALL_BINDING[1]}
+    BACKUP_MANIFEST=${INSTALL_BINDING[2]}
+    PREVIOUS_COMPOSE_SHA=${INSTALL_BINDING[3]}
+    CANDIDATE_COMPOSE_SHA=${INSTALL_BINDING[4]}
+    PRE_CUTOVER_ROOT_SHA=${INSTALL_BINDING[5]}
+    env -u COMPOSE_FILE -u COMPOSE_PROJECT_NAME -u COMPOSE_PROFILES \
+      docker compose --project-name it-spareparts --env-file "$ENV_FILE" \
+      -f "$PACKAGE_DIR/candidate-compose.yml" config -q \
+      || fatal "candidate compose config validation failed"
+    close_collection_writes
+    if [ "$INSTALL_COMPOSE_BINDING" = pre ]; then
+      compose stop app >/dev/null || fatal "candidate cutover could not stop old app"
+      [ -z "$(app_cid)" ] || fatal "old app did not stop before compose cutover"
+      INSTALL_BINDING_TEXT=$(install_compose_binding_values) \
+        || fatal "install-compose active compose compare-and-swap failed"
+      mapfile -t INSTALL_BINDING <<<"$INSTALL_BINDING_TEXT"
+      [ "${INSTALL_BINDING[0]}" = pre ] \
+        || fatal "install-compose active compose changed before atomic install"
+      atomic_replace_file "$PACKAGE_DIR/candidate-compose.yml" "$COMPOSE_FILE" "$PREVIOUS_COMPOSE_SHA" \
+        || fatal "atomic candidate compose install compare-and-swap failed"
+    elif [ "$INSTALL_COMPOSE_BINDING" != installed ]; then
+      fatal "install-compose binding mode is invalid"
+    fi
+    [ "$(sha256_file "$COMPOSE_FILE")" = "$CANDIDATE_COMPOSE_SHA" ] \
+      || fatal "candidate compose hash mismatch after atomic install"
+    compose config -q || fatal "installed candidate compose config validation failed"
+    advance_phase compose_installed \
+      backup_dir "$BACKUP_DIR" \
+      backup_manifest_sha256 "$(sha256_file "$BACKUP_MANIFEST")" \
+      previous_compose_sha256 "$PREVIOUS_COMPOSE_SHA" \
+      candidate_compose_sha256 "$CANDIDATE_COMPOSE_SHA" \
+      pre_cutover_root_state_sha256 "$PRE_CUTOVER_ROOT_SHA" \
+      writes_closed true
+    ;;
 	  migrate)
 	    [ "$#" -eq 0 ] || usage
 	    close_collection_writes
+	    retag_exact_app_image "$(manifest_get images.app_image_id)"
+	    compose up --no-deps --no-build --force-recreate -d app
+	    require_runtime_closed_on_candidate
 	    compose stop app >/dev/null
 	    [ -z "$(app_cid)" ] || fatal "app container did not stop before migrate"
 	    DBC=$(db_cid)
 	    [ -n "$DBC" ] || fatal "db container is not running"
 	    CURRENT=$(docker exec "$DBC" psql -X -U spareparts -d spareparts -At -c 'SELECT version_num FROM alembic_version;')
-	    [ "$CURRENT" = "$FROM_REV" ] || fatal "production DB is not at d9 before migrate"
-	    retag_exact_app_image "$(manifest_get images.app_image_id)"
-    compose run --rm --no-deps --no-build \
-      -e MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=false \
-      app alembic upgrade "$TO_REV"
+    if [ "$CURRENT" = "$FROM_REV" ]; then
+      compose run --rm --no-deps --no-build \
+        -e MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=false \
+        app alembic upgrade "$TO_REV"
+    elif [ "$CURRENT" != "$TO_REV" ]; then
+      fatal "production DB is neither d9 nor the exact c8 target before migrate"
+    fi
     CURRENT=$(docker exec "$DBC" psql -X -U spareparts -d spareparts -At -c 'SELECT version_num FROM alembic_version;')
     [ "$CURRENT" = "$TO_REV" ] || fatal "production DB did not reach c8 after migrate"
     advance_phase migrated
@@ -2137,6 +2498,14 @@ $CANARY_PROJECT_ID" ]; then
     verify_action_account_state "$CANARY_SPEC" action_verify_restored \
       action_restore "$CANARY_WORK"
     ACTIONS_GRANTED=true
+    # Persist recovery intent before the first external PUT.  A kill or partial
+    # network failure can then only leave a state that requires the same sealed
+    # action plan for an idempotent restore.
+    advance_phase deployed \
+      canary_project_id "$CANARY_PROJECT_ID" \
+      apply_enabled false actions_granted true \
+      canary_spec_sha256 "$CANARY_SPEC_SHA256" \
+      action_plan_sha256 "$CANARY_ACTION_PLAN_SHA256"
     run_sealed_action_cases "$CANARY_SPEC" action_grant "$CANARY_WORK"
     verify_action_account_state "$CANARY_SPEC" action_verify_granted \
       action_grant "$CANARY_WORK"
@@ -2208,7 +2577,7 @@ PY
       0) require_phase canary; NEXT_PHASE=observe_0 ;;
       5) require_phase observe_0; NEXT_PHASE=observe_5 ;;
       15) require_phase observe_5; NEXT_PHASE=observe_15 ;;
-      30) require_phase observe_15; NEXT_PHASE=observed ;;
+      30) require_phase observe_15; NEXT_PHASE=observe_30_passed ;;
     esac
     APP_CID=$(app_cid); DBC=$(db_cid); FRONTEND_CID=$(frontend_cid)
     [ -n "$APP_CID" ] && [ -n "$DBC" ] && [ -n "$FRONTEND_CID" ] \
@@ -2285,10 +2654,105 @@ PY
 	    advance_phase "$NEXT_PHASE" \
 	      observe_minutes "$1" \
 	      observation_sha256 "$(sha256sum "$EVIDENCE_DIR/observe-$1.json" | awk '{print $1}')" \
+	      "observe_${1}_sha256" "$(sha256sum "$EVIDENCE_DIR/observe-$1.json" | awk '{print $1}')" \
 	      observe_uploads_file_count "$UPLOADS_COUNT" \
 	      observe_uploads_total_bytes "$UPLOADS_BYTES"
 	    ;;
+  commit-release)
+    [ "$(sha256_file "$COMPOSE_FILE")" = "$(state_get candidate_compose_sha256)" ] \
+      || fatal "commit-release candidate compose drifted"
+    compose config -q || fatal "commit-release candidate compose config validation failed"
+    APP_CID=$(app_cid); FRONTEND_CID=$(frontend_cid); DBC=$(db_cid)
+    [ -n "$APP_CID" ] && [ -n "$FRONTEND_CID" ] && [ -n "$DBC" ] \
+      || fatal "commit-release requires running app/frontend/db"
+    [ "$(docker inspect --format '{{.Image}}' "$APP_CID")" = "$(manifest_get images.app_image_id)" ] \
+      || fatal "commit-release app image mismatch"
+    [ "$(docker inspect --format '{{.Image}}' "$FRONTEND_CID")" = "$(manifest_get images.frontend_image_id)" ] \
+      || fatal "commit-release frontend image mismatch"
+    [ "$(docker inspect --format '{{.Image}}' "$DBC")" = "$(manifest_get database.image_id)" ] \
+      || fatal "commit-release database image mismatch"
+    [ "$(docker image inspect --format '{{.Id}}' "$(manifest_get database.image_id)")" = "$(manifest_get database.image_id)" ] \
+      || fatal "commit-release database image is unavailable"
+    CURRENT=$(docker exec "$DBC" psql -X -U spareparts -d spareparts -At -c 'SELECT version_num FROM alembic_version;')
+    [ "$CURRENT" = "$TO_REV" ] || fatal "commit-release database revision is not c8"
+    HEALTH_STATUS=$(docker exec "$APP_CID" python -c \
+      'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=5).status)')
+    READINESS_STATUS=$(docker exec "$APP_CID" python -c \
+      'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8000/health/db", timeout=5).status)')
+    [ "$HEALTH_STATUS" = 200 ] && [ "$READINESS_STATUS" = 200 ] \
+      || fatal "commit-release health/readiness failed"
+    for minute in 0 5 15 30; do
+      [ -f "$EVIDENCE_DIR/observe-$minute.json" ] \
+        && [ "$(sha256_file "$EVIDENCE_DIR/observe-$minute.json")" = "$(state_get "observe_${minute}_sha256")" ] \
+        || fatal "commit-release observation evidence drifted: $minute"
+    done
+    ROOT_RELEASE_STATE_SHA=$(commit_root_release_state) \
+      || fatal "commit-release root state compare-and-swap failed"
+    advance_phase observed \
+      root_release_state_sha256 "$ROOT_RELEASE_STATE_SHA" \
+      adopted_for v122-collection-reminders
+    ;;
   rollback-images)
+    ROLLBACK_PHASE=$(state_get phase)
+    ROLLBACK_CANARY_PROJECT_ID=$(manifest_get \
+      runtime_flags.maintenance_collection_canary_project_id) \
+      || fatal "rollback canary project id could not be read"
+    POST_COMPOSE_INSTALL=false
+    ROLLBACK_COMPOSE_ALREADY_RESTORED=false
+    ROLLBACK_BACKUP_DIR=
+    ROLLBACK_PREVIOUS_COMPOSE_SHA=
+    ROLLBACK_CANDIDATE_COMPOSE_SHA=
+    ROLLBACK_PRE_CUTOVER_ROOT_SHA=
+    if phase_requires_candidate_compose "$ROLLBACK_PHASE"; then
+      state_get candidate_compose_sha256 >/dev/null 2>&1 \
+        || fatal "post-install rollback state lacks compose cutover binding"
+      state_get previous_compose_sha256 >/dev/null 2>&1 \
+        || fatal "post-install rollback state lacks previous compose binding"
+      state_get pre_cutover_root_state_sha256 >/dev/null 2>&1 \
+        || fatal "post-install rollback state lacks root CAS binding"
+      ROLLBACK_BACKUP_DIR=$(realpath -e -- "$(state_get backup_dir)") \
+        || fatal "post-install rollback state lacks backup directory"
+      ROLLBACK_PREVIOUS_COMPOSE_SHA=$(state_get previous_compose_sha256)
+      ROLLBACK_CANDIDATE_COMPOSE_SHA=$(state_get candidate_compose_sha256)
+      ROLLBACK_PRE_CUTOVER_ROOT_SHA=$(state_get pre_cutover_root_state_sha256)
+      ROLLBACK_ACTIVE_COMPOSE_SHA=$(sha256_file "$COMPOSE_FILE")
+      if [ "$ROLLBACK_ACTIVE_COMPOSE_SHA" = "$ROLLBACK_PREVIOUS_COMPOSE_SHA" ]; then
+        ROLLBACK_COMPOSE_ALREADY_RESTORED=true
+      elif [ "$ROLLBACK_ACTIVE_COMPOSE_SHA" != "$ROLLBACK_CANDIDATE_COMPOSE_SHA" ]; then
+        fatal "post-install rollback active compose is neither candidate nor parent"
+      fi
+      POST_COMPOSE_INSTALL=true
+    elif [ "$ROLLBACK_PHASE" = restore_checked ]; then
+      ROLLBACK_ACTIVE_COMPOSE_SHA=$(sha256_file "$COMPOSE_FILE")
+      ROLLBACK_CANDIDATE_COMPOSE_SHA=$(sha256_file "$PACKAGE_DIR/candidate-compose.yml")
+      ROLLBACK_ROOT_COMPOSE_SHA=$(python3 - "$ROOT_RELEASE_STATE" <<'PY'
+import json
+import pathlib
+import sys
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+compose = value.get("compose_sha256")
+if not isinstance(compose, str) or len(compose) != 64:
+    raise SystemExit("root release state lacks compose SHA-256")
+print(compose)
+PY
+      ) || fatal "restore-checked rollback root compose binding is invalid"
+      if [ "$ROLLBACK_ACTIVE_COMPOSE_SHA" = "$ROLLBACK_CANDIDATE_COMPOSE_SHA" ]; then
+        ROLLBACK_BINDING_TEXT=$(install_compose_binding_values) \
+          || fatal "restore-checked rollback compose binding failed"
+        mapfile -t ROLLBACK_BINDING <<<"$ROLLBACK_BINDING_TEXT"
+        [ "${#ROLLBACK_BINDING[@]}" -eq 6 ] \
+          || fatal "restore-checked rollback compose binding is incomplete"
+        [ "${ROLLBACK_BINDING[0]}" = installed ] \
+          || fatal "restore-checked rollback candidate binding is inconsistent"
+        ROLLBACK_BACKUP_DIR=${ROLLBACK_BINDING[1]}
+        ROLLBACK_PREVIOUS_COMPOSE_SHA=${ROLLBACK_BINDING[3]}
+        ROLLBACK_CANDIDATE_COMPOSE_SHA=${ROLLBACK_BINDING[4]}
+        ROLLBACK_PRE_CUTOVER_ROOT_SHA=${ROLLBACK_BINDING[5]}
+        POST_COMPOSE_INSTALL=true
+      elif [ "$ROLLBACK_ACTIVE_COMPOSE_SHA" != "$ROLLBACK_ROOT_COMPOSE_SHA" ]; then
+        fatal "restore-checked rollback active compose is neither the parent nor the candidate"
+      fi
+    fi
     if [ "${STATE_ACTIONS_GRANTED:-false}" = true ]; then
       cleanup_rollback_work() {
         [ -z "${ROLLBACK_WORK:-}" ] || rm -rf -- "$ROLLBACK_WORK"
@@ -2296,17 +2760,14 @@ PY
       trap cleanup_rollback_work EXIT
     fi
     close_collection_writes
-    compose up --no-deps --no-build --force-recreate -d app \
-      || fatal "rollback could not restart the app with collection writes closed"
-    ROLLBACK_CANARY_PROJECT_ID=$(manifest_get \
-      runtime_flags.maintenance_collection_canary_project_id) \
-      || fatal "rollback canary project id could not be read"
-    ROLLBACK_RUNNING_FLAGS=$(compose exec -T app sh -ceu \
-      'printf "%s\n%s\n" "$MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED" "$MAINTENANCE_COLLECTION_CANARY_PROJECT_ID"') \
-      || fatal "rollback running configuration readback failed"
-    [ "$ROLLBACK_RUNNING_FLAGS" = "false
-$ROLLBACK_CANARY_PROJECT_ID" ] \
-      || fatal "rollback running configuration readback mismatch"
+    if [ "$POST_COMPOSE_INSTALL" = true ] \
+      && [ "$ROLLBACK_COMPOSE_ALREADY_RESTORED" = false ]; then
+      [ "$(sha256_file "$COMPOSE_FILE")" = "$ROLLBACK_CANDIDATE_COMPOSE_SHA" ] \
+        || fatal "post-install rollback active compose drifted"
+      compose up --no-deps --no-build --force-recreate -d app \
+        || fatal "rollback could not restart candidate app with collection writes closed"
+      require_runtime_closed_on_candidate
+    fi
     if [ "${STATE_ACTIONS_GRANTED:-false}" = true ]; then
       ROLLBACK_SPEC_INPUT=$(realpath -e -- "$1") \
         || fatal "rollback action spec could not be resolved"
@@ -2351,9 +2812,9 @@ $ROLLBACK_CANARY_PROJECT_ID" ] \
         || fatal "rollback action spec snapshot SHA-256 could not be read"
       [ "$CURRENT_ROLLBACK_SPEC_SHA256" = "$ROLLBACK_SPEC_SHA256" ] \
         || fatal "rollback action spec snapshot changed before execution"
-      if ! verify_action_account_state "$ROLLBACK_SPEC" action_verify_granted \
-        action_grant "$ROLLBACK_WORK"; then
-        fatal "live action permissions differ from the successful canary; images were not changed"
+      if ! verify_action_account_transition_state "$ROLLBACK_SPEC" \
+        action_verify_granted action_grant action_restore "$ROLLBACK_WORK"; then
+        fatal "live action permissions are outside the sealed grant/restore transition; images were not changed"
       fi
       RESTORE_OK=true
       run_sealed_action_cases "$ROLLBACK_SPEC" action_restore "$ROLLBACK_WORK" \
@@ -2388,9 +2849,26 @@ PY
       trap - EXIT
     fi
     printf 'rollback-images requested; additive schema is retained; no automatic downgrade; restore DB/uploads only after incident approval\n'
-    retag_and_start_exact_images \
-      "$(manifest_get previous_images.app_image_id)" \
-      "$(manifest_get previous_images.frontend_image_id)"
+    if [ "$POST_COMPOSE_INSTALL" = true ]; then
+      retag_exact_images_without_recreate \
+        "$(manifest_get previous_images.app_image_id)" \
+        "$(manifest_get previous_images.frontend_image_id)"
+      restore_pre_cutover_compose_from_backup \
+        "$ROLLBACK_BACKUP_DIR" \
+        "$ROLLBACK_PREVIOUS_COMPOSE_SHA" \
+        "$ROLLBACK_PRE_CUTOVER_ROOT_SHA" \
+        "$ROLLBACK_CANDIDATE_COMPOSE_SHA"
+      retag_and_start_exact_images \
+        "$(manifest_get previous_images.app_image_id)" \
+        "$(manifest_get previous_images.frontend_image_id)"
+      require_app_health_and_readiness
+      [ "$(sha256_file "$ROOT_RELEASE_STATE")" = "$ROLLBACK_PRE_CUTOVER_ROOT_SHA" ] \
+        || fatal "post-install rollback root release state drifted"
+    else
+      retag_and_start_exact_images \
+        "$(manifest_get previous_images.app_image_id)" \
+        "$(manifest_get previous_images.frontend_image_id)"
+    fi
     if [ "${STATE_ACTIONS_GRANTED:-false}" = true ]; then
       CURRENT_ACTION_RESTORE_EVIDENCE_SHA256=$(sha256sum \
         "$EVIDENCE_DIR/action-restore-evidence.json" | awk '{print $1}') \
@@ -2400,10 +2878,12 @@ PY
       advance_phase rolled_back \
         actions_granted false apply_enabled false \
         action_restore_evidence_sha256 "$ACTION_RESTORE_EVIDENCE_SHA256" \
+        restored_compose_sha256 "$(sha256_file "$COMPOSE_FILE")" \
         rollback_note 'images-actions-and-flags-only; no downgrade/delete/automatic restore'
     else
       advance_phase rolled_back \
         actions_granted false apply_enabled false \
+        restored_compose_sha256 "$(sha256_file "$COMPOSE_FILE")" \
         rollback_note 'images-actions-and-flags-only; no downgrade/delete/automatic restore'
     fi
     ;;
