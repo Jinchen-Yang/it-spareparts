@@ -18,8 +18,8 @@ safe_file() {
     || fatal "$2 must be a non-empty regular file"
 }
 
-[ "$#" -eq 9 ] \
-  || fatal "usage: v122_collection_reminders_rehearse.sh DB_DUMP UPLOADS_ARCHIVE TARGET_SHA PARENT_PROD_SHA DB_IMAGE_ID APP_IMAGE_ID FRONTEND_IMAGE_ID CANDIDATE_COMPOSE OUTPUT_DIR"
+[ "$#" -eq 9 ] || [ "$#" -eq 10 ] \
+  || fatal "usage: v122_collection_reminders_rehearse.sh DB_DUMP UPLOADS_ARCHIVE TARGET_SHA PARENT_PROD_SHA DB_IMAGE_ID APP_IMAGE_ID FRONTEND_IMAGE_ID CANDIDATE_COMPOSE OUTPUT_DIR [MODE600_HISTORICAL_UPLOAD_GAP_APPROVAL]"
 [[ "$RESTORE_TMPFS_SIZE" =~ ^[1-9][0-9]*(m|g)$ ]] \
   || fatal "V122_RESTORE_TMPFS_SIZE must be a positive m/g size"
 DB_DUMP=$(realpath -e -- "$1")
@@ -31,7 +31,12 @@ APP_IMAGE_ID=$6
 FRONTEND_IMAGE_ID=$7
 CANDIDATE_COMPOSE=$(realpath -e -- "$8")
 OUTPUT_DIR=$(realpath -m -- "$9")
-readonly DB_DUMP UPLOADS_ARCHIVE TARGET_SHA PARENT_SHA DB_IMAGE_ID APP_IMAGE_ID FRONTEND_IMAGE_ID CANDIDATE_COMPOSE OUTPUT_DIR
+HISTORICAL_GAP_APPROVAL=
+if [ "$#" -eq 10 ]; then
+  HISTORICAL_GAP_APPROVAL=$(realpath -e -- "${10}") \
+    || fatal "historical upload gap approval is missing"
+fi
+readonly DB_DUMP UPLOADS_ARCHIVE TARGET_SHA PARENT_SHA DB_IMAGE_ID APP_IMAGE_ID FRONTEND_IMAGE_ID CANDIDATE_COMPOSE OUTPUT_DIR HISTORICAL_GAP_APPROVAL
 
 [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]] || fatal "invalid target SHA"
 [[ "$PARENT_SHA" =~ ^[0-9a-f]{40}$ ]] || fatal "invalid parent production SHA"
@@ -123,6 +128,14 @@ EXPECTED_MANIFEST_SHA256=${V122_EXPECTED_MANIFEST_SHA256:-}
   || fatal "package manifest differs from external trust anchor"
 python3 "$PACKAGE_TOOL" verify "$PACKAGE_DIR" >/dev/null \
   || fatal "flat package verification failed"
+if [ -n "$HISTORICAL_GAP_APPROVAL" ]; then
+  safe_file "$HISTORICAL_GAP_APPROVAL" "historical upload gap approval"
+  [ "$(stat -c '%a' "$HISTORICAL_GAP_APPROVAL")" = 600 ] \
+    || fatal "historical upload gap approval must be mode 600"
+  python3 "$PACKAGE_TOOL" validate-historical-upload-gap \
+    "$HISTORICAL_GAP_APPROVAL" --parent-production-sha "$PARENT_SHA" >/dev/null \
+    || fatal "historical upload gap approval validation failed"
+fi
 
 REHEARSAL_STAGE=${V122_REHEARSAL_STAGE:-}
 case "$REHEARSAL_STAGE" in preliminary|final) ;; *) fatal "V122_REHEARSAL_STAGE must be preliminary or final";; esac
@@ -325,45 +338,23 @@ SQL
 # business filenames.  Orphans are counted and hashed only; nothing is removed.
 docker exec -i "$DB_NAME" psql -X -U restore_admin -d spareparts -At -F $'\t' \
   >"$WORK/db-references.tsv" <<'SQL'
-SELECT 'raw', storage_path FROM sys_raw_file WHERE storage_path IS NOT NULL
+SELECT 'raw', id::text, file_hash, storage_path, '' FROM sys_raw_file
 UNION ALL
-SELECT 'collection', storage_key FROM maintenance_collection_plan_import_batch;
+SELECT 'collection', batch_id, file_sha256, storage_key, file_size::text
+FROM maintenance_collection_plan_import_batch
+ORDER BY 1, 2, 3, 4, 5;
 SQL
-python3 - "$UPLOADS_DIR" "$WORK/output/db-uploads-consistency.json" \
-  "$WORK/db-references.tsv" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-
-root, output, references = map(pathlib.Path, sys.argv[1:])
-root = root.resolve()
-referenced = set()
-missing = 0
-for raw in references.read_text(encoding="utf-8").splitlines():
-    kind, value = raw.split("\t", 1)
-    if kind == "raw" and value.startswith("/app/data/raw/"):
-        relative = value.removeprefix("/app/data/raw/")
-    elif kind == "collection":
-        relative = f"maintenance-collection-plans/{value}"
-    else:
-        relative = value
-    path = pathlib.PurePosixPath(relative)
-    if path.is_absolute() or ".." in path.parts:
-        raise SystemExit("DB upload reference escapes restored root")
-    candidate = root.joinpath(*path.parts).resolve()
-    if root not in (candidate, *candidate.parents):
-        raise SystemExit("DB upload reference escapes restored root")
-    referenced.add(candidate)
-    if not candidate.is_file() or candidate.is_symlink():
-        missing += 1
-if missing:
-    raise SystemExit("DB upload reference is missing from restored archive")
-physical = {path.resolve() for path in root.rglob("*") if path.is_file() and not path.is_symlink()}
-orphans = sorted(path.relative_to(root).as_posix() for path in physical - referenced)
-digest = hashlib.sha256("\n".join(orphans).encode()).hexdigest()
-output.write_text(json.dumps({"reference_count": len(referenced), "missing_count": 0, "orphan_count": len(orphans), "orphan_set_sha256": digest, "orphan_action": "reported_not_deleted"}, sort_keys=True) + "\n")
-PY
+AUDIT_ARGUMENTS=(
+  audit-upload-references
+  --uploads-root "$UPLOADS_DIR"
+  --references "$WORK/db-references.tsv"
+  --parent-production-sha "$PARENT_SHA"
+  --output "$WORK/output/db-uploads-consistency.json"
+)
+if [ -n "$HISTORICAL_GAP_APPROVAL" ]; then
+  AUDIT_ARGUMENTS+=(--historical-upload-gap-approval "$HISTORICAL_GAP_APPROVAL")
+fi
+python3 "$PACKAGE_TOOL" "${AUDIT_ARGUMENTS[@]}"
 
 # Real parser acceptance runs with no network and no DB.  Its result is derived
 # from the parser process, while domain-table counts prove zero domain writes.
@@ -603,10 +594,24 @@ sample_sha, project_count, milestone_count = sys.argv[22:25]
     http_preview,
     http_apply,
 ) = map(pathlib.Path, sys.argv[25:33])
+upload_consistency = json.loads(db_uploads.read_text(encoding="utf-8"))
+reference_state = upload_consistency.get("reference_state")
+reference_state_valid = (
+    reference_state == "complete"
+    and upload_consistency.get("references_complete") is True
+    and upload_consistency.get("approved_missing_count") == 0
+    and upload_consistency.get("unexpected_missing_count") == 0
+) or (
+    reference_state == "complete_with_approved_historical_gaps"
+    and upload_consistency.get("references_complete") is False
+    and isinstance(upload_consistency.get("approved_missing_count"), int)
+    and upload_consistency["approved_missing_count"] > 0
+    and upload_consistency.get("unexpected_missing_count") == 0
+)
 payload = {
     "format": "v122-collection-reminders-rehearsal-v2",
     "stage": stage,
-    "success": before == "d9f1a3c7e5b2" and after == "c8e2a4f6b1d3" and parser_before == parser_after and http_preview_before == http_preview_after and int(applied) > 0 and int(audit) > 0,
+    "success": before == "d9f1a3c7e5b2" and after == "c8e2a4f6b1d3" and parser_before == parser_after and http_preview_before == http_preview_after and int(applied) > 0 and int(audit) > 0 and reference_state_valid,
     "target_sha": target,
     "parent_production_sha": parent,
     "from_revision": before,
@@ -634,7 +639,13 @@ payload = {
     "db_restore": True,
     "globals_restore": True,
     "uploads_restore_verified": True,
-    "db_uploads_references_complete": True,
+    "db_uploads_reference_state": reference_state,
+    "db_uploads_references_complete": upload_consistency.get("references_complete"),
+    "approved_missing_count": upload_consistency.get("approved_missing_count"),
+    "unexpected_missing_count": upload_consistency.get("unexpected_missing_count"),
+    "historical_upload_gap_set_sha256": upload_consistency.get("historical_upload_gap_set_sha256"),
+    "historical_upload_gap_approval_sha256": upload_consistency.get("historical_upload_gap_approval_sha256"),
+    "recovery_search_evidence_sha256": upload_consistency.get("recovery_search_evidence_sha256"),
     "parser_zero_domain_write": parser_before == parser_after,
     "preview_zero_domain_write": http_preview_before == http_preview_after,
     "synthetic_apply_verified": int(applied) > 0 and int(audit) > 0,

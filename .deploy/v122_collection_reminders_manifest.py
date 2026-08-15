@@ -25,6 +25,8 @@ from typing import Any
 
 
 FORMAT = "v122-collection-reminders-2"
+HISTORICAL_GAP_APPROVAL_FORMAT = "v122-historical-upload-gap-approval-v1"
+HISTORICAL_GAP_RELEASE_FAMILY = "v122-collection-reminders"
 DB_FROM = "d9f1a3c7e5b2"
 DB_TO = "c8e2a4f6b1d3"
 REQUIRED_RUNTIME_FLAGS = (
@@ -67,6 +69,9 @@ PACKAGE_TOOLS = (
     "v122_collection_reminders_release.sh",
     "v122_collection_reminders_static_test.py",
 )
+SOURCE_CONTRACT_PATH = (
+    "source/.ai/contracts/maintenance-collections/project-manager-xls-v1.yaml"
+)
 REQUIRED_CI_CHECKS = (
     "后端测试（pytest + 迁移链验证）",
     "前端类型检查 + 构建",
@@ -99,6 +104,9 @@ def _canonical_bytes(value: Any) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+EMPTY_GAP_SET_SHA256 = hashlib.sha256(_canonical_bytes([])).hexdigest()
 
 
 def _sha256_file(path: Path) -> str:
@@ -146,6 +154,333 @@ def _load_json(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         _fail(f"{label} must be a JSON object")
     return value
+
+
+def _timezone_datetime(value: Any, label: str) -> dt.datetime:
+    if not isinstance(value, str) or not value:
+        _fail(f"historical gap approval {label} must be a timezone timestamp")
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError:
+        _fail(f"historical gap approval {label} must be a timezone timestamp")
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        _fail(f"historical gap approval {label} must be a timezone timestamp")
+    return parsed
+
+
+def _allowed_raw_storage_paths(file_hash: str) -> tuple[str, str]:
+    return (
+        f"/app/data/raw/{file_hash}.xlsx",
+        f"./data/raw/{file_hash}.xlsx",
+    )
+
+
+def _validate_historical_gap_approval(
+    path: Path,
+    *,
+    parent_production_sha: str,
+) -> dict[str, Any]:
+    approval_path = _require_file(path, "historical upload gap approval")
+    if stat.S_IMODE(approval_path.lstat().st_mode) != 0o600:
+        _fail("historical upload gap approval must be mode 600")
+    value = _load_json(approval_path, "historical upload gap approval")
+    expected_keys = {
+        "format",
+        "release_family",
+        "parent_production_sha",
+        "raw_only",
+        "reason",
+        "recorded_by",
+        "approved_by",
+        "recorded_at",
+        "approved_at",
+        "expires_at",
+        "recovery_search_evidence_sha256",
+        "approved_missing_refs",
+    }
+    if set(value) != expected_keys:
+        _fail("historical upload gap approval keys mismatch")
+    if value.get("format") != HISTORICAL_GAP_APPROVAL_FORMAT:
+        _fail("unexpected historical upload gap approval format")
+    if value.get("release_family") != HISTORICAL_GAP_RELEASE_FAMILY:
+        _fail("historical upload gap approval release family mismatch")
+    expected_parent = _validated(
+        parent_production_sha,
+        SHA40,
+        "historical gap parent production SHA",
+    )
+    if value.get("parent_production_sha") != expected_parent:
+        _fail("historical upload gap approval parent production SHA mismatch")
+    if value.get("raw_only") is not True:
+        _fail("historical upload gap approval must be raw-only")
+    if value.get("reason") not in {"legacy_archive_loss", "backup_exhausted"}:
+        _fail("historical upload gap approval reason is invalid")
+    for key in ("recorded_by", "approved_by"):
+        item = value.get(key)
+        if (
+            not isinstance(item, str)
+            or not item
+            or item != item.strip()
+            or "\n" in item
+            or "\r" in item
+        ):
+            _fail(f"historical upload gap approval {key} is invalid")
+    if value["recorded_by"].casefold() == value["approved_by"].casefold():
+        _fail("historical upload gap approval requires distinct recorder and approver")
+    recorded_at = _timezone_datetime(value.get("recorded_at"), "recorded_at")
+    approved_at = _timezone_datetime(value.get("approved_at"), "approved_at")
+    expires_at = _timezone_datetime(value.get("expires_at"), "expires_at")
+    now = dt.datetime.now(dt.timezone.utc)
+    if recorded_at > approved_at or approved_at >= expires_at:
+        _fail("historical upload gap approval timestamps are out of order")
+    if recorded_at > now + dt.timedelta(minutes=5) or approved_at > now + dt.timedelta(
+        minutes=5
+    ):
+        _fail("historical upload gap approval actor timestamp exceeds clock skew")
+    if expires_at <= now:
+        _fail("historical upload gap approval is expired")
+    recovery_sha = _validated(
+        str(value.get("recovery_search_evidence_sha256", "")),
+        SHA256,
+        "historical gap recovery search evidence SHA",
+    )
+    refs = value.get("approved_missing_refs")
+    if not isinstance(refs, list) or not refs:
+        _fail("historical upload gap approval must contain missing raw references")
+    normalized: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for index, row in enumerate(refs):
+        if not isinstance(row, dict) or set(row) != {
+            "raw_file_id",
+            "file_hash",
+            "storage_path",
+        }:
+            _fail(f"historical upload gap reference {index} keys mismatch")
+        raw_id = row.get("raw_file_id")
+        if isinstance(raw_id, bool) or not isinstance(raw_id, int) or raw_id <= 0:
+            _fail(f"historical upload gap reference {index} raw_file_id is invalid")
+        file_hash = _validated(
+            str(row.get("file_hash", "")),
+            SHA256,
+            f"historical upload gap reference {index} file hash",
+        )
+        storage_path = row.get("storage_path")
+        if storage_path not in _allowed_raw_storage_paths(file_hash):
+            _fail(f"historical upload gap reference {index} storage path is invalid")
+        if raw_id in seen_ids:
+            _fail("historical upload gap raw_file_id values must be unique")
+        seen_ids.add(raw_id)
+        normalized.append(
+            {
+                "raw_file_id": raw_id,
+                "file_hash": file_hash,
+                "storage_path": storage_path,
+            }
+        )
+    if normalized != sorted(
+        normalized,
+        key=lambda row: (row["raw_file_id"], row["file_hash"], row["storage_path"]),
+    ):
+        _fail("historical upload gap references must be sorted")
+    return {
+        "value": value,
+        "approved_missing_refs": normalized,
+        "approved_missing_count": len(normalized),
+        "gap_set_sha256": hashlib.sha256(_canonical_bytes(normalized)).hexdigest(),
+        "approval_sha256": _sha256_file(approval_path),
+        "recovery_search_evidence_sha256": recovery_sha,
+    }
+
+
+def _stable_regular_file(path: Path, label: str) -> tuple[str, int]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        _fail(f"{label} cannot be read safely: {exc}")
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            _fail(f"{label} must be a regular non-symlink file")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ):
+            _fail(f"{label} changed while hashing")
+        return digest.hexdigest(), after.st_size
+    finally:
+        os.close(descriptor)
+
+
+def _safe_collection_relative(value: str) -> Path:
+    if not value or "\\" in value or "\x00" in value:
+        _fail("collection upload reference path is invalid")
+    pure = Path(value)
+    if pure.is_absolute() or ".." in pure.parts or pure.as_posix() != value:
+        _fail("collection upload reference path escapes restored root")
+    return pure
+
+
+def _audit_upload_references(
+    *,
+    uploads_root: Path,
+    references_path: Path,
+    parent_production_sha: str,
+    approval_path: Path | None,
+) -> dict[str, Any]:
+    root = uploads_root.absolute()
+    try:
+        root_mode = root.lstat().st_mode
+    except FileNotFoundError:
+        _fail("restored uploads root is missing")
+    if stat.S_ISLNK(root_mode) or not stat.S_ISDIR(root_mode):
+        _fail("restored uploads root must be a real directory")
+    root = root.resolve(strict=True)
+    references = _require_file(references_path, "DB upload references")
+    try:
+        lines = references.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError:
+        _fail("DB upload references must be UTF-8")
+    referenced_paths: set[Path] = set()
+    actual_missing: list[dict[str, Any]] = []
+    seen_raw_ids: set[int] = set()
+    for line_number, raw in enumerate(lines, 1):
+        columns = raw.split("\t")
+        if len(columns) != 5:
+            _fail(f"DB upload reference row {line_number} must contain five columns")
+        kind, raw_id_text, file_hash_text, storage_path, file_size_text = columns
+        if kind == "raw":
+            if file_size_text:
+                _fail(f"raw upload reference row {line_number} size column must be empty")
+            if not raw_id_text.isascii() or not raw_id_text.isdecimal():
+                _fail(f"raw upload reference row {line_number} id is invalid")
+            raw_id = int(raw_id_text)
+            if raw_id <= 0 or raw_id in seen_raw_ids:
+                _fail("raw upload reference ids must be unique positive integers")
+            seen_raw_ids.add(raw_id)
+            file_hash = _validated(
+                file_hash_text,
+                SHA256,
+                f"raw upload reference row {line_number} file hash",
+            )
+            if storage_path not in _allowed_raw_storage_paths(file_hash):
+                _fail(f"raw upload reference row {line_number} storage path is invalid")
+            candidate = root / f"{file_hash}.xlsx"
+            referenced_paths.add(candidate)
+            try:
+                candidate_mode = candidate.lstat().st_mode
+            except FileNotFoundError:
+                actual_missing.append(
+                    {
+                        "raw_file_id": raw_id,
+                        "file_hash": file_hash,
+                        "storage_path": storage_path,
+                    }
+                )
+                continue
+            if stat.S_ISLNK(candidate_mode) or not stat.S_ISREG(candidate_mode):
+                _fail("referenced raw upload must be a regular non-symlink file")
+            actual_hash, _actual_size = _stable_regular_file(
+                candidate, "referenced raw upload"
+            )
+            if actual_hash != file_hash:
+                _fail("referenced raw upload hash mismatch")
+        elif kind == "collection":
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", raw_id_text) is None:
+                _fail("collection upload reference batch id is invalid")
+            expected_hash = _validated(
+                file_hash_text,
+                SHA256,
+                f"collection upload reference row {line_number} file hash",
+            )
+            if (
+                not file_size_text.isascii()
+                or not file_size_text.isdecimal()
+                or str(int(file_size_text)) != file_size_text
+            ):
+                _fail("collection upload reference file size is invalid")
+            expected_size = int(file_size_text)
+            relative = _safe_collection_relative(storage_path)
+            candidate = root / "maintenance-collection-plans" / relative
+            referenced_paths.add(candidate)
+            try:
+                candidate_mode = candidate.lstat().st_mode
+            except FileNotFoundError:
+                _fail("collection upload reference is missing from restored archive")
+            if stat.S_ISLNK(candidate_mode) or not stat.S_ISREG(candidate_mode):
+                _fail("collection upload reference must be a regular non-symlink file")
+            actual_hash, actual_size = _stable_regular_file(
+                candidate, "collection upload reference"
+            )
+            if actual_size != expected_size:
+                _fail("collection upload reference size mismatch")
+            if actual_hash != expected_hash:
+                _fail("collection upload reference hash mismatch")
+        else:
+            _fail(f"DB upload reference row {line_number} has unknown kind")
+    actual_missing.sort(
+        key=lambda row: (row["raw_file_id"], row["file_hash"], row["storage_path"])
+    )
+    approval = None
+    if approval_path is not None:
+        approval = _validate_historical_gap_approval(
+            approval_path,
+            parent_production_sha=parent_production_sha,
+        )
+        if actual_missing != approval["approved_missing_refs"]:
+            _fail("actual missing raw references do not exactly match approved historical gaps")
+    elif actual_missing:
+        _fail("DB raw upload reference is missing from restored archive")
+    physical: set[Path] = set()
+    for path in root.rglob("*"):
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            _fail("restored uploads tree changed during audit")
+        if stat.S_ISREG(mode):
+            physical.add(path)
+    orphan_count = len(physical - referenced_paths)
+    if approval is None:
+        return {
+            "reference_state": "complete",
+            "references_complete": True,
+            "reference_count": len(lines),
+            "approved_missing_count": 0,
+            "unexpected_missing_count": 0,
+            "historical_upload_gap_set_sha256": EMPTY_GAP_SET_SHA256,
+            "historical_upload_gap_approval_sha256": None,
+            "recovery_search_evidence_sha256": None,
+            "orphan_count": orphan_count,
+            "orphan_action": "reported_not_deleted",
+        }
+    return {
+        "reference_state": "complete_with_approved_historical_gaps",
+        "references_complete": False,
+        "reference_count": len(lines),
+        "approved_missing_count": approval["approved_missing_count"],
+        "unexpected_missing_count": 0,
+        "historical_upload_gap_set_sha256": approval["gap_set_sha256"],
+        "historical_upload_gap_approval_sha256": approval["approval_sha256"],
+        "recovery_search_evidence_sha256": approval[
+            "recovery_search_evidence_sha256"
+        ],
+        "orphan_count": orphan_count,
+        "orphan_action": "reported_not_deleted",
+    }
 
 
 def _contract_values(path: Path) -> dict[str, Any]:
@@ -270,13 +605,52 @@ def _validate_rehearsal(
         "db_restore": True,
         "globals_restore": True,
         "uploads_restore_verified": True,
-        "db_uploads_references_complete": True,
         "preview_zero_domain_write": True,
         "synthetic_apply_verified": True,
     }
     for key, wanted in expected.items():
         if value.get(key) != wanted:
             _fail(f"{stage} rehearsal evidence mismatch: {key}")
+    state = value.get("db_uploads_reference_state")
+    references_complete = value.get("db_uploads_references_complete")
+    approved_count = value.get("approved_missing_count")
+    unexpected_count = value.get("unexpected_missing_count")
+    gap_set_sha = str(value.get("historical_upload_gap_set_sha256", ""))
+    approval_sha = value.get("historical_upload_gap_approval_sha256")
+    recovery_sha = value.get("recovery_search_evidence_sha256")
+    if isinstance(approved_count, bool) or not isinstance(approved_count, int):
+        _fail(f"{stage} rehearsal upload reference approved count is invalid")
+    if (
+        isinstance(unexpected_count, bool)
+        or not isinstance(unexpected_count, int)
+        or unexpected_count != 0
+    ):
+        _fail(f"{stage} rehearsal upload references include unexpected missing files")
+    _validated(gap_set_sha, SHA256, f"{stage} rehearsal historical gap set SHA")
+    if state == "complete":
+        if (
+            references_complete is not True
+            or approved_count != 0
+            or gap_set_sha != EMPTY_GAP_SET_SHA256
+            or approval_sha is not None
+            or recovery_sha is not None
+        ):
+            _fail(f"{stage} rehearsal complete upload reference state is inconsistent")
+    elif state == "complete_with_approved_historical_gaps":
+        if references_complete is not False or approved_count <= 0:
+            _fail(f"{stage} rehearsal approved historical gap state is inconsistent")
+        _validated(
+            str(approval_sha or ""),
+            SHA256,
+            f"{stage} rehearsal historical gap approval SHA",
+        )
+        _validated(
+            str(recovery_sha or ""),
+            SHA256,
+            f"{stage} rehearsal recovery search evidence SHA",
+        )
+    else:
+        _fail(f"{stage} rehearsal upload reference state is invalid")
     for key in REHEARSAL_HASH_FIELDS:
         _validated(
             str(value.get(key, "")),
@@ -284,6 +658,18 @@ def _validate_rehearsal(
             f"{stage} rehearsal evidence {key}",
         )
     return value
+
+
+def _upload_reference_binding(value: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        value["db_uploads_reference_state"],
+        value["db_uploads_references_complete"],
+        value["approved_missing_count"],
+        value["unexpected_missing_count"],
+        value["historical_upload_gap_set_sha256"],
+        value["historical_upload_gap_approval_sha256"],
+        value["recovery_search_evidence_sha256"],
+    )
 
 
 def _rehearsal_binding(package: Path, payload: dict[str, Any]) -> dict[str, str]:
@@ -381,6 +767,35 @@ def _source_tool_bytes(source_bundle: Path, target_sha: str) -> dict[str, bytes]
         _fail(f"invalid source archive: {exc}")
 
 
+def _source_contract_bytes(source_bundle: Path, target_sha: str) -> bytes:
+    """Read the one reviewed contract from the target commit archive."""
+
+    _require_file(source_bundle, "source bundle")
+    try:
+        with tarfile.open(source_bundle, "r:*") as archive:
+            if archive.pax_headers.get("comment") != target_sha:
+                _fail("source archive is not bound to target SHA")
+            members = [
+                member
+                for member in archive.getmembers()
+                if member.name == SOURCE_CONTRACT_PATH
+            ]
+            if len(members) != 1:
+                _fail(
+                    "source archive contract must appear exactly once at "
+                    f"{SOURCE_CONTRACT_PATH}"
+                )
+            member = members[0]
+            if not member.isfile():
+                _fail("source archive contract must be a regular file")
+            stream = archive.extractfile(member)
+            if stream is None:
+                _fail("source archive contract cannot be read")
+            return stream.read()
+    except (tarfile.TarError, OSError) as exc:
+        _fail(f"invalid source archive: {exc}")
+
+
 def _artifact_row(path: Path) -> dict[str, Any]:
     return {
         "path": path.name,
@@ -426,6 +841,13 @@ def _new_staging(output: Path) -> Path:
 
 
 def _copy_candidate_artifacts(args: argparse.Namespace, staging: Path) -> dict[str, dict[str, Any]]:
+    source_contract = _source_contract_bytes(
+        Path(args.source_bundle),
+        args.target_sha,
+    )
+    external_contract = _require_file(Path(args.contract), "contract").read_bytes()
+    if source_contract != external_contract:
+        _fail("contract bytes differ from target source archive contract")
     sources = {
         "compose": (Path(args.candidate_compose), "candidate-compose.yml", False),
         "contract": (Path(args.contract), "contract.yaml", False),
@@ -595,6 +1017,9 @@ def _verify_package(path_value: str) -> tuple[Path, dict[str, Any]]:
     contract = _contract_values(contract_path)
     if payload.get("contract") != contract:
         _fail("contract metadata/hash mismatch")
+    source_path = package / artifacts.get("source_bundle", {}).get("path", "")
+    if _source_contract_bytes(source_path, target) != contract_path.read_bytes():
+        _fail("packaged contract bytes differ from target source archive contract")
     _validate_sbom(package / artifacts.get("sbom", {}).get("path", ""))
     _validate_ci(package / artifacts.get("ci_evidence", {}).get("path", ""), target)
     _validate_build_evidence(
@@ -636,20 +1061,24 @@ def _verify_package(path_value: str) -> tuple[Path, dict[str, Any]]:
         final_binding = _binding_from_manifest(final_candidate, "final candidate")
         prelim_path = package / artifacts.get("preliminary_rehearsal", {}).get("path", "")
         final_path = package / artifacts.get("final_rehearsal", {}).get("path", "")
-        _validate_rehearsal(
+        preliminary_rehearsal = _validate_rehearsal(
             prelim_path,
             stage="preliminary",
             target_sha=preliminary_target,
             parent_sha=parent,
             binding=preliminary_binding,
         )
-        _validate_rehearsal(
+        final_rehearsal = _validate_rehearsal(
             final_path,
             stage="final",
             target_sha=target,
             parent_sha=parent,
             binding=final_binding,
         )
+        if _upload_reference_binding(preliminary_rehearsal) != _upload_reference_binding(
+            final_rehearsal
+        ):
+            _fail("preliminary/final historical upload gap binding mismatch")
     return package, payload
 
 
@@ -662,6 +1091,53 @@ def preflight(args: argparse.Namespace) -> int:
     _package, payload = _verify_package(args.package)
     if payload.get("production_ready") is not True:
         _fail("package is verified but not production-ready")
+    return 0
+
+
+def validate_historical_upload_gap(args: argparse.Namespace) -> int:
+    approval = _validate_historical_gap_approval(
+        Path(args.approval),
+        parent_production_sha=args.parent_production_sha,
+    )
+    print(
+        json.dumps(
+            {
+                "format": HISTORICAL_GAP_APPROVAL_FORMAT,
+                "approved_missing_count": approval["approved_missing_count"],
+                "historical_upload_gap_set_sha256": approval["gap_set_sha256"],
+                "historical_upload_gap_approval_sha256": approval["approval_sha256"],
+                "recovery_search_evidence_sha256": approval[
+                    "recovery_search_evidence_sha256"
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return 0
+
+
+def audit_upload_references(args: argparse.Namespace) -> int:
+    approval = (
+        Path(args.historical_upload_gap_approval)
+        if args.historical_upload_gap_approval is not None
+        else None
+    )
+    payload = _audit_upload_references(
+        uploads_root=Path(args.uploads_root),
+        references_path=Path(args.references),
+        parent_production_sha=args.parent_production_sha,
+        approval_path=approval,
+    )
+    output = Path(args.output).absolute()
+    if output.exists() or output.is_symlink():
+        _fail("upload reference audit output already exists")
+    output.parent.resolve(strict=True)
+    with output.open("x", encoding="utf-8") as stream:
+        stream.write(_canonical_bytes(payload).decode("utf-8"))
+        stream.flush()
+        os.fsync(stream.fileno())
+    output.chmod(0o600)
     return 0
 
 
@@ -682,20 +1158,24 @@ def finalize(args: argparse.Namespace) -> int:
         _fail("preliminary/final parent production SHA mismatch")
     preliminary_binding = _rehearsal_binding(preliminary, preliminary_payload)
     candidate_binding = _rehearsal_binding(candidate, candidate_payload)
-    _validate_rehearsal(
+    preliminary_rehearsal = _validate_rehearsal(
         Path(args.preliminary_rehearsal),
         stage="preliminary",
         target_sha=preliminary_payload["target_sha"],
         parent_sha=candidate_payload["parent_production_sha"],
         binding=preliminary_binding,
     )
-    _validate_rehearsal(
+    final_rehearsal = _validate_rehearsal(
         Path(args.final_rehearsal),
         stage="final",
         target_sha=candidate_payload["target_sha"],
         parent_sha=candidate_payload["parent_production_sha"],
         binding=candidate_binding,
     )
+    if _upload_reference_binding(preliminary_rehearsal) != _upload_reference_binding(
+        final_rehearsal
+    ):
+        _fail("preliminary/final historical upload gap binding mismatch")
     output = Path(args.output).absolute()
     staging = _new_staging(output)
     try:
@@ -781,6 +1261,17 @@ def parser() -> argparse.ArgumentParser:
     finalize_parser.add_argument("--final-rehearsal", required=True)
     finalize_parser.add_argument("--output", required=True)
     finalize_parser.set_defaults(func=finalize)
+    approval_parser = commands.add_parser("validate-historical-upload-gap")
+    approval_parser.add_argument("approval")
+    approval_parser.add_argument("--parent-production-sha", required=True)
+    approval_parser.set_defaults(func=validate_historical_upload_gap)
+    audit_parser = commands.add_parser("audit-upload-references")
+    audit_parser.add_argument("--uploads-root", required=True)
+    audit_parser.add_argument("--references", required=True)
+    audit_parser.add_argument("--parent-production-sha", required=True)
+    audit_parser.add_argument("--historical-upload-gap-approval")
+    audit_parser.add_argument("--output", required=True)
+    audit_parser.set_defaults(func=audit_upload_references)
     return root
 
 
