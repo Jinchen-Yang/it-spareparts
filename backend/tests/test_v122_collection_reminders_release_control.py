@@ -234,6 +234,7 @@ def _rollback_docker_body(
         printf '%s\n%s\n' "$apply" "$project"; exit 0
         """
     return f"""
+    if [[ "$*" == *"compose"* && "$*" == *"config -q"* ]]; then exit 0; fi
     if [[ "$*" == *"compose"* && "$*" == *"up --no-deps --no-build --force-recreate -d app frontend"* ]]; then
       printf 'retag-start\\n' >> "$V122_TEST_ROLLBACK_EVENTS"; exit 0
     fi
@@ -248,6 +249,8 @@ def _rollback_docker_body(
     if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then echo frontend-cid; exit 0; fi
     if [[ "$*" == *"inspect"* && "$*" == *"app-cid"* ]]; then echo "$V122_TEST_APP_CONTAINER_IMAGE"; exit 0; fi
     if [[ "$*" == *"inspect"* && "$*" == *"frontend-cid"* ]]; then echo "$V122_TEST_FRONTEND_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"db-cid"* ]]; then echo "$V122_TEST_DB_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"exec app-cid python"* && "$*" == *"127.0.0.1:8000/health"* ]]; then echo 200; exit 0; fi
     if [[ "$*" == *"tag "* ]]; then exit 0; fi
     exit 97
     """
@@ -2373,6 +2376,18 @@ def _replace_packaged_tool(package: Path, name: str, content: str) -> None:
     )
 
 
+POST_COMPOSE_INSTALL_PHASES = {
+    "compose_installed",
+    "migrated",
+    "deployed",
+    "canary",
+    "observe_0",
+    "observe_5",
+    "observe_15",
+    "observe_30_passed",
+}
+
+
 def _release_test_env(
     tmp_path: Path,
     package: Path,
@@ -2381,7 +2396,14 @@ def _release_test_env(
 ) -> tuple[dict[str, str], Path, Path, Path]:
     app_dir = tmp_path / "app"
     app_dir.mkdir(parents=True)
-    shutil.copy2(package / "candidate-compose.yml", app_dir / "docker-compose.yml")
+    # Lifecycle tests must begin on the currently deployed Compose generation,
+    # never with the candidate preinstalled.  The cutover controller is what
+    # atomically replaces these deliberately different bytes.
+    _write(
+        app_dir / "docker-compose.yml",
+        "services:\n  app:\n    image: it-spareparts-old:stable\n",
+        mode=0o600,
+    )
     (app_dir / "docker-compose.yml").chmod(0o600)
     _write(
         app_dir / ".env",
@@ -2431,7 +2453,56 @@ def _release_test_env(
     return env, evidence, calls, backup_root
 
 
+def _stage_cutover_fixture_if_needed(
+    evidence: Path,
+    package: Path,
+    phase: str,
+    extra: dict,
+) -> None:
+    if phase not in POST_COMPOSE_INSTALL_PHASES:
+        return
+    app_dir = evidence.parent / "app"
+    root_state = evidence.parent / "root-release-state.json"
+    active = app_dir / "docker-compose.yml"
+    candidate = package / "candidate-compose.yml"
+    if not (active.is_file() and root_state.is_file() and candidate.is_file()):
+        return
+    backup_dir = evidence.parent / "backups" / "20260815T010203Z-test"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_compose = backup_dir / "docker-compose.yml"
+    if backup_compose.exists():
+        old_bytes = backup_compose.read_bytes()
+    else:
+        old_bytes = active.read_bytes()
+        backup_compose.write_bytes(old_bytes)
+        backup_compose.chmod(0o600)
+    manifest = {
+        "format": "v122-collection-reminders-full-backup-v2",
+        "active_compose_sha256": hashlib.sha256(old_bytes).hexdigest(),
+        "candidate_compose_sha256": hashlib.sha256(candidate.read_bytes()).hexdigest(),
+        "root_release_state_sha256": hashlib.sha256(root_state.read_bytes()).hexdigest(),
+    }
+    backup_manifest = _json_artifact(backup_dir / "backup-manifest.json", manifest)
+    active.write_bytes(candidate.read_bytes())
+    active.chmod(0o600)
+    extra.setdefault("backup_dir", str(backup_dir))
+    extra.setdefault(
+        "backup_manifest_sha256",
+        hashlib.sha256(backup_manifest.read_bytes()).hexdigest(),
+    )
+    extra.setdefault("previous_compose_sha256", hashlib.sha256(old_bytes).hexdigest())
+    extra.setdefault(
+        "candidate_compose_sha256",
+        hashlib.sha256(candidate.read_bytes()).hexdigest(),
+    )
+    extra.setdefault(
+        "pre_cutover_root_state_sha256",
+        hashlib.sha256(root_state.read_bytes()).hexdigest(),
+    )
+
+
 def _write_release_state(evidence: Path, package: Path, *, phase: str, generation: int = 1, **extra):
+    _stage_cutover_fixture_if_needed(evidence, package, phase, extra)
     evidence.mkdir(parents=True, exist_ok=True)
     manifest_sha = hashlib.sha256((package / "manifest.json").read_bytes()).hexdigest()
     payload = {
@@ -2445,6 +2516,448 @@ def _write_release_state(evidence: Path, package: Path, *, phase: str, generatio
         **extra,
     }
     _json_artifact(evidence / "release-state.json", payload)
+
+
+def test_cutover_red_migrate_requires_compose_installed_and_keeps_old_compose(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    env, evidence, _calls, _backup_root = _release_test_env(tmp_path / "runtime", package)
+    active_compose = Path(env["V122_APP_DIR"]) / "docker-compose.yml"
+    old_bytes = active_compose.read_bytes()
+    _write_release_state(evidence, package, phase="restore_checked")
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "migrate"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert "phase" in completed.stderr.lower()
+    assert active_compose.read_bytes() == old_bytes
+
+
+def test_cutover_red_exposes_install_and_commit_commands_and_observe_30_intermediate_phase():
+    script = _script(RELEASE)
+
+    assert "install-compose" in script
+    assert "commit-release" in script
+    observe = script.rsplit("  observe)", 1)[1].split("  rollback-images)", 1)[0]
+    assert "30) require_phase observe_15; NEXT_PHASE=observe_30_passed" in observe
+
+
+def _bind_cutover_backup(package: Path, env: dict[str, str]) -> Path:
+    """Create only the immutable hashes that install-compose is allowed to use."""
+    app_dir = Path(env["V122_APP_DIR"])
+    root_state = Path(env["V122_ROOT_RELEASE_STATE"])
+    backup_dir = Path(env["V122_BACKUP_ROOT"]) / env["V122_BACKUP_GENERATION"]
+    backup_dir.mkdir()
+    active = app_dir / "docker-compose.yml"
+    backup_compose = backup_dir / "docker-compose.yml"
+    backup_compose.write_bytes(active.read_bytes())
+    backup_compose.chmod(0o600)
+    shutil.copy2(active, backup_dir / "docker-compose.yml")
+    manifest = {
+        "format": "v122-collection-reminders-full-backup-v2",
+        "active_compose_sha256": hashlib.sha256(active.read_bytes()).hexdigest(),
+        "candidate_compose_sha256": hashlib.sha256((package / "candidate-compose.yml").read_bytes()).hexdigest(),
+        "root_release_state_sha256": hashlib.sha256(root_state.read_bytes()).hexdigest(),
+    }
+    _json_artifact(backup_dir / "backup-manifest.json", manifest)
+    return backup_dir
+
+
+def test_cutover_red_install_compose_cas_installs_candidate_only_after_bound_backup(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    docker = """
+    if [[ "$*" == *"compose"* && "$*" == *"config -q"* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"stop app"* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q app"* ]]; then exit 0; fi
+    exit 97
+    """
+    env, evidence, _calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
+    active = Path(env["V122_APP_DIR"]) / "docker-compose.yml"
+    old_bytes = active.read_bytes()
+    backup_dir = _bind_cutover_backup(package, env)
+    backup_manifest = backup_dir / "backup-manifest.json"
+    _write_release_state(
+        evidence,
+        package,
+        phase="restore_checked",
+        backup_dir=str(backup_dir),
+        backup_manifest_sha256=hashlib.sha256(backup_manifest.read_bytes()).hexdigest(),
+    )
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "install-compose"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert active.read_bytes() != old_bytes
+    assert active.read_bytes() == (package / "candidate-compose.yml").read_bytes()
+    state = json.loads((evidence / "release-state.json").read_text())
+    assert state["phase"] == "compose_installed"
+    assert state["previous_compose_sha256"] == hashlib.sha256(old_bytes).hexdigest()
+    assert state["candidate_compose_sha256"] == hashlib.sha256(active.read_bytes()).hexdigest()
+
+
+def test_cutover_red_install_compose_rejects_root_cas_drift_without_mutation(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    env, evidence, _calls, _backup_root = _release_test_env(
+        tmp_path / "runtime",
+        package,
+        docker_body='if [[ "$*" == *"compose"* && "$*" == *"config -q"* ]]; then exit 0; fi\nexit 97',
+    )
+    active = Path(env["V122_APP_DIR"]) / "docker-compose.yml"
+    old_bytes = active.read_bytes()
+    backup_dir = _bind_cutover_backup(package, env)
+    backup_manifest = backup_dir / "backup-manifest.json"
+    root = Path(env["V122_ROOT_RELEASE_STATE"])
+    root.write_text(root.read_text() + "\n")
+    _write_release_state(
+        evidence,
+        package,
+        phase="restore_checked",
+        backup_dir=str(backup_dir),
+        backup_manifest_sha256=hashlib.sha256(backup_manifest.read_bytes()).hexdigest(),
+    )
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "install-compose"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert "root" in completed.stderr.lower()
+    assert active.read_bytes() == old_bytes
+    assert json.loads((evidence / "release-state.json").read_text())["phase"] == "restore_checked"
+
+
+def test_cutover_red_install_compose_crash_resume_accepts_exact_candidate_only(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    docker = """
+    if [[ "$*" == *"compose"* && "$*" == *"config -q"* ]]; then exit 0; fi
+    exit 97
+    """
+    env, evidence, calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
+    active = Path(env["V122_APP_DIR"]) / "docker-compose.yml"
+    root = Path(env["V122_ROOT_RELEASE_STATE"])
+    old_root = root.read_bytes()
+    backup_dir = _bind_cutover_backup(package, env)
+    backup_manifest = backup_dir / "backup-manifest.json"
+    active.write_bytes((package / "candidate-compose.yml").read_bytes())
+    _write_release_state(
+        evidence,
+        package,
+        phase="restore_checked",
+        backup_dir=str(backup_dir),
+        backup_manifest_sha256=hashlib.sha256(backup_manifest.read_bytes()).hexdigest(),
+    )
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "install-compose"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert active.read_bytes() == (package / "candidate-compose.yml").read_bytes()
+    assert root.read_bytes() == old_root
+    assert "stop app" not in calls.read_text()
+    assert json.loads((evidence / "release-state.json").read_text())["phase"] == "compose_installed"
+
+
+def test_cutover_red_install_compose_rechecks_active_hash_after_validation_before_rename(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    docker = """
+    if [[ "$*" == *"compose"* && "$*" == *"config -q"* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"stop app"* ]]; then
+      printf 'services:\\n  app:\\n    image: unexpected-drift\\n' > "$V122_APP_DIR/docker-compose.yml"
+      exit 0
+    fi
+    exit 97
+    """
+    env, evidence, calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
+    active = Path(env["V122_APP_DIR"]) / "docker-compose.yml"
+    root = Path(env["V122_ROOT_RELEASE_STATE"])
+    old_root = root.read_bytes()
+    backup_dir = _bind_cutover_backup(package, env)
+    backup_manifest = backup_dir / "backup-manifest.json"
+    _write_release_state(
+        evidence,
+        package,
+        phase="restore_checked",
+        backup_dir=str(backup_dir),
+        backup_manifest_sha256=hashlib.sha256(backup_manifest.read_bytes()).hexdigest(),
+    )
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "install-compose"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert "active compose compare-and-swap" in completed.stderr
+    assert b"unexpected-drift" in active.read_bytes()
+    assert root.read_bytes() == old_root
+    assert " tag " not in f" {calls.read_text()} "
+    assert json.loads((evidence / "release-state.json").read_text())["phase"] == "restore_checked"
+
+
+def _observation_hashes(evidence: Path) -> dict[str, str]:
+    values = {}
+    for minute in (0, 5, 15, 30):
+        path = _json_artifact(
+            evidence / f"observe-{minute}.json",
+            {
+                "format": "v122-observation-v1",
+                "minute": minute,
+                "health_status": 200,
+                "readiness_status": 200,
+                "http_5xx_count": 0,
+                "blocking_lock_count": 0,
+                "slow_query_count": 0,
+                "restart_count": 0,
+                "uploads_file_count": 1,
+                "uploads_total_bytes": 3,
+                "audit_count": 0,
+            },
+        )
+        values[f"observe_{minute}_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return values
+
+
+def test_cutover_red_commit_release_cas_updates_root_state_and_crash_resumes(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    docker = """
+    if [[ "$*" == *"compose"* && "$*" == *"config -q"* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q app"* ]]; then echo app-cid; exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then echo frontend-cid; exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q db"* ]]; then echo db-cid; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"app-cid"* ]]; then echo "$V122_TEST_APP_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"frontend-cid"* ]]; then echo "$V122_TEST_FRONTEND_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"db-cid"* ]]; then echo "$V122_TEST_DB_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"image inspect --format"* ]]; then echo "${!#}"; exit 0; fi
+    if [[ "$*" == *"exec db-cid psql"* && "$*" == *"SELECT version_num FROM alembic_version"* ]]; then echo c8e2a4f6b1d3; exit 0; fi
+    if [[ "$*" == *"exec app-cid python"* && "$*" == *"127.0.0.1:8000/health"* ]]; then echo 200; exit 0; fi
+    exit 97
+    """
+    env, evidence, _calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = IMAGE_ID
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = FRONTEND_IMAGE_ID
+    env["V122_TEST_DB_CONTAINER_IMAGE"] = DB_IMAGE_ID
+    root = Path(env["V122_ROOT_RELEASE_STATE"])
+    old_root_sha = hashlib.sha256(root.read_bytes()).hexdigest()
+    observe_hashes = _observation_hashes(evidence)
+    _write_release_state(evidence, package, phase="observe_30_passed", **observe_hashes)
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "commit-release"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    root_state = json.loads(root.read_text())
+    assert root_state == {
+        "format": "it-spareparts-production-state-v1",
+        "production_sha": FINAL_TARGET_SHA,
+        "compose_sha256": hashlib.sha256((package / "candidate-compose.yml").read_bytes()).hexdigest(),
+        "app_image_id": IMAGE_ID,
+        "frontend_image_id": FRONTEND_IMAGE_ID,
+        "database_image_id": DB_IMAGE_ID,
+    }
+    state = json.loads((evidence / "release-state.json").read_text())
+    assert state["phase"] == "observed"
+    assert state["root_release_state_sha256"] == hashlib.sha256(root.read_bytes()).hexdigest()
+
+    _write_release_state(
+        evidence,
+        package,
+        phase="observe_30_passed",
+        pre_cutover_root_state_sha256=old_root_sha,
+        **observe_hashes,
+    )
+    resumed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "commit-release"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert json.loads((evidence / "release-state.json").read_text())["phase"] == "observed"
+
+    root.write_text('{"unexpected":"third-root-generation"}\n')
+    third_root = root.read_bytes()
+    _write_release_state(
+        evidence,
+        package,
+        phase="observe_30_passed",
+        pre_cutover_root_state_sha256=old_root_sha,
+        **observe_hashes,
+    )
+    rejected = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "commit-release"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+    assert rejected.returncode != 0
+    assert "compare-and-swap" in rejected.stderr
+    assert root.read_bytes() == third_root
+    assert json.loads((evidence / "release-state.json").read_text())["phase"] == "observe_30_passed"
+
+
+def test_cutover_red_post_install_rollback_restores_previous_compose_and_keeps_root_state(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    docker = """
+    if [[ "$*" == *"compose"* && "$*" == *" up "* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then
+      apply=$(sed -n 's/^MAINTENANCE_COLLECTION_PLAN_APPLY_ENABLED=//p' "$V122_APP_DIR/.env")
+      project=$(sed -n 's/^MAINTENANCE_COLLECTION_CANARY_PROJECT_ID=//p' "$V122_APP_DIR/.env")
+      printf '%s\n%s\n' "$apply" "$project"; exit 0
+    fi
+    if [[ "$*" == *"compose"* && "$*" == *"config -q"* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"up --no-deps --no-build --force-recreate -d app"* ]]; then exit 0; fi
+    if [[ "$*" == *"image inspect --format"* ]]; then echo "${!#}"; exit 0; fi
+    if [[ "$*" == *"tag "* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q app"* ]]; then
+      grep -q 'it-spareparts-old:stable' "$V122_APP_DIR/docker-compose.yml" && echo app-cid
+      exit 0
+    fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then
+      grep -q 'it-spareparts-old:stable' "$V122_APP_DIR/docker-compose.yml" && echo frontend-cid
+      exit 0
+    fi
+    if [[ "$*" == *"inspect"* && "$*" == *"app-cid"* ]]; then echo "$V122_TEST_APP_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"frontend-cid"* ]]; then echo "$V122_TEST_FRONTEND_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"exec app-cid python"* && "$*" == *"127.0.0.1:8000/health"* ]]; then echo 200; exit 0; fi
+    exit 97
+    """
+    env, evidence, calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    active = Path(env["V122_APP_DIR"]) / "docker-compose.yml"
+    root = Path(env["V122_ROOT_RELEASE_STATE"])
+    old_root = root.read_bytes()
+    _write_release_state(evidence, package, phase="deployed")
+    backup_compose = Path(json.loads((evidence / "release-state.json").read_text())["backup_dir"]) / "docker-compose.yml"
+    assert active.read_bytes() == (package / "candidate-compose.yml").read_bytes()
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "rollback-images"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert active.read_bytes() == backup_compose.read_bytes()
+    assert root.read_bytes() == old_root
+    call_text = calls.read_text()
+    assert call_text.count("up --no-deps --no-build --force-recreate -d app frontend") == 1
+    assert call_text.index("tag sha256:") < call_text.index("config -q")
+    state = json.loads((evidence / "release-state.json").read_text())
+    assert state["phase"] == "rolled_back"
+    assert state["restored_compose_sha256"] == hashlib.sha256(backup_compose.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["compose_installed", "migrated", "deployed", "canary", "observe_0", "observe_5", "observe_15", "observe_30_passed"],
+)
+def test_cutover_red_post_install_rollback_readback_failpoint_preserves_candidate_root_images_and_phase(
+    tmp_path: Path,
+    phase: str,
+):
+    package = _production_package(tmp_path / "pkg")
+    docker = """
+    if [[ "$*" == *"compose"* && "$*" == *"up --no-deps --no-build --force-recreate -d app"* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then
+      printf 'true\\ninvalid-project\\n'; exit 0
+    fi
+    exit 97
+    """
+    env, evidence, calls, _backup_root = _release_test_env(
+        tmp_path / "runtime", package, docker_body=docker,
+    )
+    active = Path(env["V122_APP_DIR"]) / "docker-compose.yml"
+    root = Path(env["V122_ROOT_RELEASE_STATE"])
+    candidate = (package / "candidate-compose.yml").read_bytes()
+    old_root = root.read_bytes()
+    _write_release_state(evidence, package, phase=phase)
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "rollback-images"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert "candidate running configuration" in completed.stderr
+    assert active.read_bytes() == candidate
+    assert root.read_bytes() == old_root
+    assert " tag " not in f" {calls.read_text()} "
+    assert json.loads((evidence / "release-state.json").read_text())["phase"] == phase
+
+
+def test_cutover_red_preinstall_rollback_does_not_require_candidate_runtime_readback(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    docker = """
+    if [[ "$*" == *"compose"* && "$*" == *"exec -T app"* ]]; then exit 97; fi
+    if [[ "$*" == *"image inspect --format"* ]]; then echo "${!#}"; exit 0; fi
+    if [[ "$*" == *"tag "* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q app"* ]]; then echo app-cid; exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then echo frontend-cid; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"app-cid"* ]]; then echo "$V122_TEST_APP_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"inspect"* && "$*" == *"frontend-cid"* ]]; then echo "$V122_TEST_FRONTEND_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"up --no-deps --no-build --force-recreate -d app frontend"* ]]; then exit 0; fi
+    exit 97
+    """
+    env, evidence, calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
+    env["V122_TEST_APP_CONTAINER_IMAGE"] = "sha256:" + "8" * 64
+    env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = "sha256:" + "9" * 64
+    active = Path(env["V122_APP_DIR"]) / "docker-compose.yml"
+    old_compose = active.read_bytes()
+    _write_release_state(evidence, package, phase="restore_checked")
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "rollback-images"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert active.read_bytes() == old_compose
+    assert "exec -T app" not in calls.read_text()
+
+
+def test_cutover_red_observed_phase_rejects_current_package_rollback_before_docker(tmp_path: Path):
+    package = _production_package(tmp_path / "pkg")
+    env, evidence, calls, _backup_root = _release_test_env(tmp_path / "runtime", package)
+    _write_release_state(evidence, package, phase="observed")
+
+    completed = subprocess.run(
+        [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "rollback-images"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert completed.returncode != 0
+    assert "does not permit" in completed.stderr
+    assert not calls.exists()
 
 
 def test_release_phase_order_rejects_skip_repeat_and_regression_without_docker(tmp_path: Path):
@@ -2560,6 +3073,11 @@ def test_release_freeze_closes_apply_stops_app_and_persists_frozen_state(tmp_pat
     if [[ \"$*\" == *\"maintenance_collection_plan_import_batch\"* && \"$*\" == *\"status = 'processing'\"* ]]; then echo 0; exit 0; fi
     if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"stop app\"* ]]; then exit 0; fi
     if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"ps -q app\"* ]]; then exit 0; fi
+    if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"up --no-deps --no-build --force-recreate -d app\"* ]]; then exit 0; fi
+    if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"exec -T app\"* ]]; then
+      project=$(sed -n 's/^MAINTENANCE_COLLECTION_CANARY_PROJECT_ID=//p' \"$V122_APP_DIR/.env\")
+      printf 'false\\n%s\\n' \"$project\"; exit 0
+    fi
     exit 0
     """
     env, evidence, calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
@@ -2754,6 +3272,11 @@ def test_release_migrate_uses_exact_target_app_image_without_build_and_verifies_
     if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"ps -q db\"* ]]; then echo db-cid; exit 0; fi
     if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"stop app\"* ]]; then exit 0; fi
     if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"ps -q app\"* ]]; then exit 0; fi
+    if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"up --no-deps --no-build --force-recreate -d app\"* ]]; then exit 0; fi
+    if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"exec -T app\"* ]]; then
+      project=$(sed -n 's/^MAINTENANCE_COLLECTION_CANARY_PROJECT_ID=//p' "$V122_APP_DIR/.env")
+      printf 'false\\n%s\\n' "$project"; exit 0
+    fi
     if [[ \"$*\" == *\"image inspect\"* ]]; then echo \"${{!#}}\"; exit 0; fi
     if [[ \"$*\" == *\"exec db-cid psql\"* && \"$*\" == *\"SELECT version_num FROM alembic_version\"* ]]; then
       if [ -f {migrated_flag} ]; then echo c8e2a4f6b1d3; else echo d9f1a3c7e5b2; fi
@@ -2768,7 +3291,7 @@ def test_release_migrate_uses_exact_target_app_image_without_build_and_verifies_
         package,
         docker_body=docker,
     )
-    _write_release_state(evidence, package, phase="restore_checked")
+    _write_release_state(evidence, package, phase="compose_installed")
     completed = subprocess.run(
         [str(package / "v122_collection_reminders_release.sh"), str(package), str(evidence), "migrate"],
         text=True,
@@ -2791,19 +3314,22 @@ def test_release_deploy_and_rollback_retag_exact_image_ids_without_build(tmp_pat
       project=$(sed -n 's/^MAINTENANCE_COLLECTION_CANARY_PROJECT_ID=//p' "$V122_APP_DIR/.env")
       printf '%s\n%s\n' "$apply" "$project"; exit 0
     fi
-    if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"ps -q app\"* ]]; then echo app-cid; exit 0; fi
-    if [[ \"$*\" == *\"compose\"* && \"$*\" == *\"ps -q frontend\"* ]]; then echo frontend-cid; exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"up --no-deps --no-build --force-recreate -d app frontend"* ]]; then exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q app"* ]]; then echo app-cid; exit 0; fi
+    if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then echo frontend-cid; exit 0; fi
     if [[ \"$*\" == *\"image inspect\"* ]]; then
       echo \"${!#}\"
       exit 0
     fi
     if [[ \"$*\" == *\"inspect\"* && \"$*\" == *\"app-cid\"* ]]; then echo \"$V122_TEST_APP_CONTAINER_IMAGE\"; exit 0; fi
     if [[ \"$*\" == *\"inspect\"* && \"$*\" == *\"frontend-cid\"* ]]; then echo \"$V122_TEST_FRONTEND_CONTAINER_IMAGE\"; exit 0; fi
+    if [[ \"$*\" == *\"exec app-cid python\"* && \"$*\" == *\"127.0.0.1:8000/health\"* ]]; then echo 200; exit 0; fi
     exit 0
     """
     env, evidence, calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
     env["V122_TEST_APP_CONTAINER_IMAGE"] = IMAGE_ID
     env["V122_TEST_FRONTEND_CONTAINER_IMAGE"] = FRONTEND_IMAGE_ID
+    env["V122_TEST_ROLLBACK_STOP_FILE"] = str(tmp_path / "rollback-stopped")
     _write_release_state(evidence, package, phase="migrated")
     release = package / "v122_collection_reminders_release.sh"
     deployed = subprocess.run([str(release), str(package), str(evidence), "deploy"], text=True, capture_output=True, env=env)
@@ -4772,7 +5298,7 @@ def test_restore_check_binds_runtime_reference_state_to_packaged_final_rehearsal
     assert state["phase"] == "restore_checked"
 
 
-@pytest.mark.parametrize("phase", ["backup", "restore_checked", "canary", "observe_0", "observe_15", "observed"])
+@pytest.mark.parametrize("phase", ["backup", "restore_checked", "canary", "observe_0", "observe_15", "observe_30_passed"])
 def test_resume_previous_images_is_available_from_predeploy_and_canary_phases(tmp_path: Path, phase: str):
     package = _production_package(tmp_path / "pkg")
     old_app = "sha256:" + "8" * 64
@@ -4788,6 +5314,7 @@ def test_resume_previous_images_is_available_from_predeploy_and_canary_phases(tm
     if [[ "$*" == *"compose"* && "$*" == *"ps -q frontend"* ]]; then echo frontend-cid; exit 0; fi
     if [[ "$*" == *"inspect"* && "$*" == *"app-cid"* ]]; then echo "$V122_TEST_APP_CONTAINER_IMAGE"; exit 0; fi
     if [[ "$*" == *"inspect"* && "$*" == *"frontend-cid"* ]]; then echo "$V122_TEST_FRONTEND_CONTAINER_IMAGE"; exit 0; fi
+    if [[ "$*" == *"exec app-cid python"* && "$*" == *"127.0.0.1:8000/health"* ]]; then echo 200; exit 0; fi
     exit 0
     """
     env, evidence, calls, _backup_root = _release_test_env(tmp_path / "runtime", package, docker_body=docker)
@@ -4870,7 +5397,7 @@ def test_release_observation_is_a_persisted_0_5_15_30_sequence(tmp_path: Path):
         text=True, capture_output=True, env=env,
     )
     assert skipped.returncode != 0
-    for minute, phase in (("0", "observe_0"), ("5", "observe_5"), ("15", "observe_15"), ("30", "observed")):
+    for minute, phase in (("0", "observe_0"), ("5", "observe_5"), ("15", "observe_15"), ("30", "observe_30_passed")):
         completed = subprocess.run(
             [str(release), str(package), str(evidence), "observe", minute],
             text=True, capture_output=True, env=env,
