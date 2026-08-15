@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import (UniqueConstraint, 
+from sqlalchemy import (UniqueConstraint,
     ARRAY,
     Boolean,
     CheckConstraint,
@@ -59,6 +59,9 @@ class MaintenanceCkdImportBatch(Base):
     applied_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
     __table_args__ = (
+        CheckConstraint("issue_rows >= 0", name="ck_maintenance_ckd_import_batch_issue_rows"),
+        CheckConstraint("line_rows >= 0", name="ck_maintenance_ckd_import_batch_line_rows"),
+        CheckConstraint("head_rows >= 0", name="ck_maintenance_ckd_import_batch_head_rows"),
         CheckConstraint(
             "status IN ('pending', 'applied', 'failed')",
             name="ck_maintenance_ckd_import_status",

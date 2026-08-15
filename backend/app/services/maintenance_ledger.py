@@ -15,6 +15,7 @@ import io
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from uuid import uuid4
 
 from openpyxl import load_workbook
@@ -362,8 +363,15 @@ def store_preview(
             data.issues.append("项目名称缺失")
         if data.values["维保起始日期"] and start is None:
             data.issues.append("维保起始日期无法解析")
-        if data.values["订单金额"] and parse_amount_loose(data.values["订单金额"]) is None:
+        if data.values["维保终止日期"] and end is None:
+            data.issues.append("维保终止日期无法解析")
+        if data.values["订单日期"] and order_date is None:
+            data.issues.append("订单日期无法解析")
+        amount = parse_amount_loose(data.values["订单金额"])
+        if data.values["订单金额"] and amount is None:
             data.issues.append("订单金额无法解析")
+        elif not data.values["订单金额"]:
+            data.issues.append("订单金额缺失")
         if start is None and end is None:
             data.issues.append("维保期限缺失（台账日期与项目名称内均未找到）")
         if data.issues:
@@ -405,11 +413,13 @@ def store_preview(
             )
         )
     for data in parsed["plan_rows"]:
-        if data.issues:
-            issue_rows += 1
         planned_date, precision = parse_date_loose(data.time_raw)
         if data.time_raw and planned_date is None:
             data.issues.append("计划回款时间无法解析")
+        if data.amount_raw and parse_amount_loose(data.amount_raw) is None:
+            data.issues.append("计划回款金额无法解析")
+        if data.issues:
+            issue_rows += 1
         db.add(
             MaintenanceLedgerPlanRow(
                 row_id=str(uuid4()),
@@ -763,6 +773,40 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
             )
         ).scalars().all()
     )
+    # 对账预检：销售单存在时，台账含税额必须与未税额×(1+税率) 一致，否则整批拒绝。
+    reconcile_failures: list[str] = []
+    for row in db.execute(
+        select(MaintenanceLedgerContractRow).where(
+            MaintenanceLedgerContractRow.batch_id == batch_id
+        )
+    ).scalars():
+        if row.order_no is None or row.amount_inc_tax is None:
+            continue
+        sales_order = db.execute(
+            select(FSalesOrder).where(FSalesOrder.order_no == row.order_no)
+        ).scalar_one_or_none()
+        if sales_order is None or sales_order.amount_ex_tax is None:
+            continue
+        rate = sales_order.tax_rate or Decimal("0.13")
+        expected_inc = (
+            Decimal(sales_order.amount_ex_tax) * (Decimal("1") + Decimal(rate))
+        ).quantize(Decimal("0.01"))
+        if row.amount_inc_tax != expected_inc:
+            reconcile_failures.append(
+                f"{row.order_no}: 台账含税 {row.amount_inc_tax} ≠ "
+                f"销售未税 {sales_order.amount_ex_tax}×(1+{rate}) = {expected_inc}"
+            )
+    if reconcile_failures:
+        batch.status = "failed"
+        batch.report_json = {
+            **(batch.report_json or {}),
+            "rejection_reason": "合同金额对账失败",
+            "reconcile_failures": reconcile_failures[:20],
+        }
+        db.commit()
+        raise LedgerBatchError(
+            f"台账批次金额对账失败 {len(reconcile_failures)} 行，整批拒绝应用"
+        )
     if issue_rows or issue_plan_rows:
         batch.status = "failed"
         batch.report_json = {
@@ -816,7 +860,10 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
             contract_by_order[row.order_no] = contract
     for row in plan_rows:
         contract = contract_by_order.get(row.order_no)
-        if contract is None or not 1 <= row.sequence <= 24:
+        if contract is None:
+            summary["skipped_rows"] += 1
+            continue
+        if not 1 <= row.sequence <= 24:
             summary["skipped_rows"] += 1
             continue
         _upsert_milestone(db, row, contract, batch_id, summary)

@@ -194,8 +194,8 @@ def test_apply_return_order_reduces_front_stock(db, front_stock_seed):
     assert float(stock.qty) == 3.0
 
 
-def test_apply_return_order_negative_balance_skipped(db, front_stock_seed):
-    # 已消耗件不在账本：出账超结存 → 失败关闭并跳过（好件坏件天然分流）
+def test_apply_return_order_bad_part_not_deducted(db, front_stock_seed):
+    # 坏品是消耗返还（F3 分子），不扣前置库；批次仍可 applied（非异常）
     _seed_front_stock(db, part_id=front_stock_seed["part_id"], qty=1)
     data = _doc_workbook(
         sheet_title="Sheet1",
@@ -214,7 +214,38 @@ def test_apply_return_order_negative_balance_skipped(db, front_stock_seed):
     batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0001")
     summary = docs.apply_batch(db, batch_id, "合成管理员")
     assert summary["applied_lines"] == 0
-    assert summary["skipped_lines"] == 1
+    stock = db.execute(
+        select(MaintenanceFrontStock).where(
+            MaintenanceFrontStock.project_id == "doc-project-1"
+        )
+    ).scalar_one()
+    assert float(stock.qty) == 1.0
+    batch = db.get(MaintenanceDocImportBatch, batch_id)
+    assert batch.status == "applied"
+
+
+def test_apply_return_order_negative_balance_fail_closed(db, front_stock_seed):
+    # 已消耗件不在账本：出账超结存 → 应用失败关闭，整批零写入
+    _seed_front_stock(db, part_id=front_stock_seed["part_id"], qty=1)
+    data = _doc_workbook(
+        sheet_title="Sheet1",
+        head_headers=_RETURN_HEAD,
+        line_headers=_RETURN_LINE,
+        rows=[{
+            "head": ["维保返件", "其他退回", "备件", "2026-08-03", "新华三集团",
+                     "DOC测试项目", "", "WBDD-20260702-0014", "",
+                     "广州仓", "已生效", "", "RKN-003", "HEAD-3"],
+            "lines": [
+                ["", "02311AYV", "", "成品", "", "", "5", "LID-1", "1", ""],
+            ],
+        }],
+    )
+    parsed = docs.parse_doc_workbook("return_order", data, "退货返库单.xlsx")
+    batch_id = docs.store_preview(db, parsed, "合成管理员", idempotency_key="doc-test-key-0002")
+    with pytest.raises(docs.DocBatchError):
+        docs.apply_batch(db, batch_id, "合成管理员")
+    batch = db.get(MaintenanceDocImportBatch, batch_id)
+    assert batch.status == "failed"
     stock = db.execute(
         select(MaintenanceFrontStock).where(
             MaintenanceFrontStock.project_id == "doc-project-1"

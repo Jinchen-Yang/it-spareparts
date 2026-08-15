@@ -215,7 +215,7 @@ def test_apply_idempotent_across_reimport(db, wbdd_project):
 
 
 def test_apply_skips_unassigned_wbdd(db, wbdd_project):
-    # 未归属 WBDD → 跳过且不猜
+    # 未归属 WBDD → 应用失败关闭，整批零写入
     data = _ckd_workbook_bytes(
         rows=[{
             "head": ["CKD-20260806-0100", "2026-08-06", "维保供货", "备件", "北京成品仓", "北京仓",
@@ -225,9 +225,10 @@ def test_apply_skips_unassigned_wbdd(db, wbdd_project):
     )
     parsed = ckd.parse_ckd_workbook(data, "发货单.xlsx")
     batch_id = ckd.store_preview(db, parsed, "合成管理员", idempotency_key="ckd-test-key-0001")
-    summary = ckd.apply_batch(db, batch_id, "合成管理员")
-    assert summary["applied_lines"] == 0
-    assert summary["skipped_lines"] == 1
+    with pytest.raises(ckd.CkdBatchError):
+        ckd.apply_batch(db, batch_id, "合成管理员")
+    batch = db.get(MaintenanceCkdImportBatch, batch_id)
+    assert batch.status == "failed"
     stocks = db.execute(
         select(MaintenanceFrontStock).where(
             MaintenanceFrontStock.project_id == "ckd-project-1"
@@ -237,15 +238,17 @@ def test_apply_skips_unassigned_wbdd(db, wbdd_project):
 
 
 def test_apply_skips_unknown_pn(db, wbdd_project):
+    # 未知 PN → 应用失败关闭，整批零写入
     data = _ckd_workbook_bytes(
         rows=[{"head": _HEAD_MAINT, "lines": [
             ["LID-1", "1", "", "", "", "NOPE-999", "", "", "", "", "", "", "", "", "4", "", "", ""]]}]
     )
     parsed = ckd.parse_ckd_workbook(data, "发货单.xlsx")
     batch_id = ckd.store_preview(db, parsed, "合成管理员", idempotency_key="ckd-test-key-0001")
-    summary = ckd.apply_batch(db, batch_id, "合成管理员")
-    assert summary["applied_lines"] == 0
-    assert summary["skipped_lines"] == 1
+    with pytest.raises(ckd.CkdBatchError):
+        ckd.apply_batch(db, batch_id, "合成管理员")
+    batch = db.get(MaintenanceCkdImportBatch, batch_id)
+    assert batch.status == "failed"
 
 
 def test_apply_rejects_duplicate_apply(db, wbdd_project):
@@ -270,3 +273,25 @@ def test_parse_rejects_missing_columns():
     wb.save(buffer)
     with pytest.raises(ckd.CkdParseError):
         ckd.parse_ckd_workbook(buffer.getvalue(), "x.xlsx")
+
+
+def test_apply_rejects_cross_batch_lines(db, wbdd_project):
+    """跨批明细（line.batch_id ≠ head.batch_id）→ 拒绝应用。"""
+    data = _ckd_workbook_bytes(
+        rows=[{"head": _HEAD_MAINT, "lines": [
+            ["LID-1", "1", "02311AYV", "内存", "B1", "02311AYV", "SN1", "", "", "", "", "", "", "", "2", "100", "200", "是"]]}]
+    )
+    parsed = ckd.parse_ckd_workbook(data, "发货单.xlsx")
+    batch_id = ckd.store_preview(db, parsed, "合成管理员", idempotency_key="ckd-test-key-xb1")
+    # 人为构造跨批：把明细行挪到另一批次
+    other_batch_id = ckd.store_preview(db, parsed, "合成管理员", idempotency_key="ckd-test-key-xb2")
+    from sqlalchemy import update
+
+    db.execute(
+        update(MaintenanceCkdLineRow)
+        .where(MaintenanceCkdLineRow.batch_id == batch_id)
+        .values(batch_id=other_batch_id)
+    )
+    db.commit()
+    with pytest.raises(ckd.CkdBatchError):
+        ckd.apply_batch(db, batch_id, "合成管理员")

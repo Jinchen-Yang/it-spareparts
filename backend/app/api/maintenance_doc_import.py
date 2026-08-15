@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.auth import current_identity, current_role
 from app.db import get_db
 from app.models.maintenance_doc_import import MaintenanceDocImportBatch
+from app.api.maintenance_project_scope import resolve_visible_project_ids
 from app.security import (
     UserContext,
     get_current_user_context,
@@ -54,7 +55,7 @@ async def preview_doc_import(
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
+    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_purchase_cost")),
     _preflight: None = Depends(_preflight),
     _ctx=Depends(get_current_user_context),
 ) -> dict:
@@ -136,7 +137,7 @@ def apply_doc_import(
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
+    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_purchase_cost")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     operator = _real_operator(ident)
@@ -146,13 +147,22 @@ def apply_doc_import(
             status.HTTP_403_FORBIDDEN,
             {"code": "permission_denied", "message": "只能应用本人上传的单据批次"},
         )
+    allowed = resolve_visible_project_ids(db, ctx)
     try:
-        summary = docs.apply_batch(db, batch_id, operator)
+        summary = docs.apply_batch(
+            db, batch_id, operator, allowed_project_ids=allowed
+        )
     except docs.DocBatchError as exc:
         db.rollback()
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             {"code": "batch_conflict", "message": str(exc)},
+        )
+    except docs.DocScopeDenied as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            {"code": "permission_denied", "message": str(exc)},
         )
     return {"batch_id": batch_id, **summary}
 
@@ -165,7 +175,7 @@ def get_doc_import(
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
+    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_purchase_cost")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"

@@ -1472,6 +1472,7 @@ def patch_site_issue(
                 {
                     "delivery_line_id": line["delivery_line_id"],
                     "quantity": _qty(line["quantity"]),
+                    "no_return": line.get("no_return"),
                 }
                 for line in normalized_lines
             ]
@@ -2186,6 +2187,7 @@ def create_site_issue_draft(
                 source_order_id=source_row.source_order_id,
                 source_line_id=source_row.source_line_id,
                 serial_number=source_row.serial_number,
+                no_return=requested.get("no_return"),
                 linked_purchase_line_id=source_row.linked_purchase_line_id,
                 manual_unit_cost=None,
                 reference_sample_ids=[],
@@ -2291,6 +2293,7 @@ def create_site_issue(
                 part_id=int(raw_line["part_id"]),
                 pn=_required(raw_line.get("pn"), "料号", 128),
                 quantity=_quantity(raw_line["quantity"]),
+                no_return=raw_line.get("no_return"),
                 linked_purchase_line_id=raw_line.get("linked_purchase_line_id"),
                 manual_unit_cost=None,
                 reference_sample_ids=[],
@@ -5509,14 +5512,18 @@ def _directory_reminder_query(
             .filter(
                 and_(
                     effective_contract,
+                    MaintenanceProjectContract.amount_inc_tax.is_(None),
                     MaintenanceProjectContract.contract_amount.is_(None),
                 )
             )
             .label("missing_amount_count"),
             func.coalesce(
-                func.sum(MaintenanceProjectContract.contract_amount).filter(
-                    effective_contract
-                ),
+                func.sum(
+                    func.coalesce(
+                        MaintenanceProjectContract.amount_inc_tax,
+                        MaintenanceProjectContract.contract_amount,
+                    )
+                ).filter(effective_contract),
                 Decimal("0.00"),
             ).label("total_contract_amount"),
         )

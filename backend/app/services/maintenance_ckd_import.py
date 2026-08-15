@@ -383,21 +383,40 @@ def apply_batch(
         .scalars()
         .all()
     )
+    # 跨批完整性：line.batch_id 与 head.batch_id 必须一致（防跨批行绕过筛查）
+    cross_batch = db.execute(
+        select(MaintenanceCkdLineRow)
+        .join(
+            MaintenanceCkdHeadRow,
+            MaintenanceCkdHeadRow.row_id == MaintenanceCkdLineRow.head_row_id,
+        )
+        .where(
+            MaintenanceCkdHeadRow.batch_id == batch_id,
+            MaintenanceCkdLineRow.batch_id != batch_id,
+        )
+        .limit(1)
+    ).first()
+    if cross_batch is not None:
+        raise CkdBatchError("发货单批次存在跨批明细，拒绝应用")
+    failures: list[str] = []
     for head in head_rows:
         if head.category != "维保供货":
             summary["ignored_heads"] += 1
             continue
         if head.data_status_raw and head.data_status_raw != "已生效":
-            # 作废/草稿/未知状态不入账（不按事实处理）
-            summary["ignored_heads"] += 1
+            # 作废/草稿不入账；未知状态视为异常（失败关闭）
+            if head.data_status_raw not in ("已取消", "草稿", "作废"):
+                failures.append(f"{head.order_no}: 未知数据状态 {head.data_status_raw}")
+            else:
+                summary["ignored_heads"] += 1
             continue
         summary["maintenance_heads"] += 1
         if head.wbdd_no is None:
-            summary["skipped_lines"] += 1
+            failures.append(f"{head.order_no}: 维保供货缺少维保需求单关联")
             continue
         project_id = _resolve_project_id(db, head.wbdd_no)
         if project_id is None:
-            summary["skipped_lines"] += 1
+            failures.append(f"{head.wbdd_no}: 无法解析到稳定项目归属")
             continue
         if allowed_project_ids is not None and project_id not in allowed_project_ids:
             raise CkdScopeDenied(
@@ -415,11 +434,11 @@ def apply_batch(
         )
         for line in lines:
             if line.pn is None or line.out_qty is None or line.out_qty <= 0:
-                summary["skipped_lines"] += 1
+                failures.append(f"{head.order_no}: 明细缺少 PN 或数量非法")
                 continue
             part_id = _resolve_part_id(db, line.pn)
             if part_id is None:
-                summary["skipped_lines"] += 1
+                failures.append(f"{head.order_no}: 未知 PN {line.pn}")
                 continue
             try:
                 front_stock.apply_movement(
@@ -440,8 +459,24 @@ def apply_batch(
                     operated_by=operated_by,
                 )
                 summary["applied_lines"] += 1
-            except front_stock.FrontStockError:
-                summary["skipped_lines"] += 1
+            except front_stock.FrontStockPayloadConflict:
+                raise
+            except front_stock.FrontStockError as exc:
+                failures.append(f"{head.order_no}: {exc}")
+    if failures:
+        # 失败关闭：回滚全部已写入流水，批次标记 failed
+        db.rollback()
+        batch = db.get(MaintenanceCkdImportBatch, batch_id)
+        batch.status = "failed"
+        batch.report_json = {
+            **(batch.report_json or {}),
+            "rejection_reason": "发货单批次存在应用异常，整批零写入",
+            "failures": failures[:20],
+        }
+        db.commit()
+        raise CkdBatchError(
+            f"发货单批次应用失败 {len(failures)} 行，整批拒绝（已回滚全部写入）"
+        )
     batch.status = "applied"
     batch.applied_by = operated_by
     batch.applied_at = datetime.now(timezone.utc)

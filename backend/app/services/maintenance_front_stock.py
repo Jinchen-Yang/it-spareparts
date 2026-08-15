@@ -54,19 +54,23 @@ class FrontStockPayloadConflict(FrontStockError):
 def movement_payload_hash(
     *,
     kind: str,
+    project_id: str,
     part_id: int,
     qty: Decimal,
     warehouse_name: str,
     unit_cost_ex_tax: Decimal | None,
     unit_cost_inc_tax: Decimal | None,
+    occurred_at: datetime | None,
 ) -> str:
     payload = {
         "kind": kind,
+        "project_id": project_id,
         "part_id": part_id,
         "qty": str(qty),
         "warehouse_name": warehouse_name,
         "unit_cost_ex_tax": str(unit_cost_ex_tax) if unit_cost_ex_tax is not None else None,
         "unit_cost_inc_tax": str(unit_cost_inc_tax) if unit_cost_inc_tax is not None else None,
+        "occurred_at": occurred_at.isoformat() if occurred_at is not None else None,
     }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -157,11 +161,13 @@ def apply_movement(
     signed = _signed(kind, qty)
     payload_hash = movement_payload_hash(
         kind=kind,
+        project_id=project_id,
         part_id=part_id,
         qty=qty,
         warehouse_name=warehouse_name,
         unit_cost_ex_tax=unit_cost_ex_tax,
         unit_cost_inc_tax=unit_cost_inc_tax,
+        occurred_at=occurred_at,
     )
 
     existing = db.execute(
@@ -190,10 +196,16 @@ def apply_movement(
     stock.qty = new_qty
     if signed > 0:
         stock.last_inbound_at = occurred_at or datetime.now(timezone.utc)
-        if unit_cost_ex_tax is not None:
-            stock.unit_cost_ex_tax = unit_cost_ex_tax
-        if unit_cost_inc_tax is not None:
-            stock.unit_cost_inc_tax = unit_cost_inc_tax
+        if unit_cost_ex_tax is not None or unit_cost_inc_tax is not None:
+            # 已知成本批次：更新单价（含税缺失但未税存在时保留未税）
+            if unit_cost_ex_tax is not None:
+                stock.unit_cost_ex_tax = unit_cost_ex_tax
+            if unit_cost_inc_tax is not None:
+                stock.unit_cost_inc_tax = unit_cost_inc_tax
+        else:
+            # 未知成本批次：整体置 unknown，禁止旧单价冒充新批成本
+            stock.unit_cost_ex_tax = None
+            stock.unit_cost_inc_tax = None
     stock.version += 1
 
     ledger = MaintenanceFrontStockLedger(

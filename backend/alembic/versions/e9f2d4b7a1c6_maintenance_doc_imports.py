@@ -65,6 +65,51 @@ def upgrade() -> None:
         ["doc_type", "uploaded_at"],
     )
 
+    # ---- 权限：氚云单据导入（admin 默认开启，其余失败关闭）----
+    op.execute(
+        """
+        UPDATE sys_role_template
+        SET permissions = CASE
+                WHEN jsonb_typeof(permissions) = 'object' THEN permissions
+                ELSE '{}'::jsonb
+            END
+            || jsonb_build_object(
+                'action_maintenance_doc_import',
+                code = 'admin'
+            )
+        """
+    )
+    op.execute(
+        """
+        UPDATE sys_user
+        SET template_perms = template_perms || jsonb_build_object(
+                'action_maintenance_doc_import',
+                COALESCE(template_code, role) = 'admin'
+            ),
+            perm_overrides = CASE
+                    WHEN jsonb_typeof(perm_overrides) = 'object'
+                    THEN perm_overrides
+                    ELSE '{}'::jsonb
+                END
+                - 'action_maintenance_doc_import'
+        WHERE jsonb_typeof(template_perms) = 'object'
+        """
+    )
+    op.execute(
+        """
+        UPDATE sys_user
+        SET permissions = CASE
+                WHEN jsonb_typeof(permissions) = 'object' THEN permissions
+                ELSE '{}'::jsonb
+            END
+            || jsonb_build_object(
+                'action_maintenance_doc_import',
+                role = 'admin'
+            )
+        WHERE permissions IS NOT NULL
+        """
+    )
+
     op.create_table(
         "maintenance_doc_head_row",
         sa.Column("row_id", sa.String(length=36), nullable=False),
@@ -111,6 +156,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("LOCK TABLE maintenance_doc_import_batch, maintenance_doc_head_row, maintenance_doc_line_row, maintenance_front_stock_ledger IN ACCESS EXCLUSIVE MODE")
     op.execute(
         """
         DO $guard$
@@ -118,6 +164,8 @@ def downgrade() -> None:
           IF EXISTS (SELECT 1 FROM maintenance_doc_import_batch)
              OR EXISTS (SELECT 1 FROM maintenance_doc_head_row)
              OR EXISTS (SELECT 1 FROM maintenance_doc_line_row)
+             OR EXISTS (SELECT 1 FROM maintenance_front_stock_ledger
+                        WHERE source_type = 'return_order_line')
           THEN
             RAISE EXCEPTION
               'e9f2d4b7a1c6 downgrade blocked: doc import facts exist';

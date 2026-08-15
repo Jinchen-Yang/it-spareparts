@@ -115,9 +115,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("LOCK TABLE maintenance_front_stock_ledger, maintenance_front_stock IN ACCESS EXCLUSIVE MODE")
     op.execute(
         """
-        DO $guard$
+DO $guard$
         BEGIN
           IF EXISTS (SELECT 1 FROM maintenance_front_stock_ledger)
              OR EXISTS (SELECT 1 FROM maintenance_front_stock)

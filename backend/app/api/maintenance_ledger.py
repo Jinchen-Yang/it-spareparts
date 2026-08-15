@@ -71,10 +71,8 @@ def _require_data_profit(ctx: UserContext, db: Session) -> None:
 
 
 def _real_operator(db: Session, ident: dict) -> str:
+    # 稳定身份：用 username（display_name 变更不影响批次所有者比对）
     value = ident.get("username") or ident.get("sub") or "unknown"
-    user = db.scalar(select(SysUser).where(SysUser.username == value))
-    if user is not None and user.display_name:
-        return f"{user.display_name}（{value}）"
     return str(value)
 
 

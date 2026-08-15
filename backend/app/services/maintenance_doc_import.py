@@ -20,7 +20,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from openpyxl import load_workbook
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.dimensions import DimPart
@@ -130,6 +130,10 @@ class DocParseError(RuntimeError):
 
 class DocBatchError(RuntimeError):
     """三单批次状态错误。"""
+
+
+class DocScopeDenied(RuntimeError):
+    """批次包含操作者项目范围之外的项目：整批拒绝。"""
 
 
 @dataclass
@@ -409,7 +413,13 @@ def _resolve_project_id(db: Session, head: MaintenanceDocHeadRow) -> str | None:
     return None
 
 
-def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
+def apply_batch(
+    db: Session,
+    batch_id: str,
+    operated_by: str,
+    *,
+    allowed_project_ids: set[str] | None = None,
+) -> dict:
     batch = db.get(MaintenanceDocImportBatch, batch_id)
     if batch is None:
         raise DocBatchError("单据批次不存在")
@@ -417,6 +427,22 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
         raise DocBatchError("单据批次已应用，不能重复应用")
     if batch.status == "failed":
         raise DocBatchError("单据批次已因异常被拒绝，需重新上传")
+    # preview 异常行 → 整批失败关闭（raw 保留）
+    bad_rows = db.execute(
+        select(MaintenanceDocHeadRow).where(
+            MaintenanceDocHeadRow.batch_id == batch_id,
+            func.cardinality(MaintenanceDocHeadRow.issues) > 0,
+        )
+    ).scalars().all()
+    if bad_rows:
+        batch.status = "failed"
+        batch.report_json = {
+            **(batch.report_json or {}),
+            "rejected_rows": len(bad_rows),
+            "rejection_reason": "单据批次存在关键异常行，整批拒绝应用",
+        }
+        db.commit()
+        raise DocBatchError(f"单据批次存在 {len(bad_rows)} 行关键异常，整批拒绝应用")
     summary = {
         "doc_type": batch.doc_type,
         "applied_lines": 0,
@@ -447,6 +473,10 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
             if project_id is None:
                 summary["skipped_lines"] += 1
                 continue
+            if allowed_project_ids is not None and project_id not in allowed_project_ids:
+                raise DocScopeDenied(
+                    f"单据批次包含无权项目（{head.head_no}），整批拒绝"
+                )
             project = db.get(MaintenanceProject, project_id)
             warehouse_name = project.project_code if project is not None else project_id
             lines = (
@@ -458,18 +488,22 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
                 .scalars()
                 .all()
             )
+            failures: list[str] = []
             for line in lines:
+                # 坏品/故障件是消耗返还（F3 分子），不扣前置库账本
+                if line.test_result in ("坏品", "坏件", "故障"):
+                    continue
                 if line.line_key is None:
-                    summary["skipped_lines"] += 1
+                    failures.append(f"{head.head_no}: 明细缺少稳定键")
                     continue
                 if line.pn is None or line.qty is None or line.qty <= 0:
-                    summary["skipped_lines"] += 1
+                    failures.append(f"{head.head_no}: 明细缺少 PN 或数量非法")
                     continue
                 part_id = db.execute(
                     select(DimPart).where(DimPart.pn_std == line.pn)
                 ).scalar_one_or_none()
                 if part_id is None:
-                    summary["skipped_lines"] += 1
+                    failures.append(f"{head.head_no}: 未知 PN {line.pn}")
                     continue
                 try:
                     front_stock.apply_movement(
@@ -490,8 +524,24 @@ def apply_batch(db: Session, batch_id: str, operated_by: str) -> dict:
                         operated_by=operated_by,
                     )
                     summary["applied_lines"] += 1
-                except front_stock.FrontStockError:
-                    summary["skipped_lines"] += 1
+                except front_stock.FrontStockPayloadConflict:
+                    raise
+                except front_stock.FrontStockError as exc:
+                    failures.append(f"{head.head_no}: {exc}")
+            if failures:
+                # 失败关闭：回滚本批全部流水写入
+                db.rollback()
+                batch = db.get(MaintenanceDocImportBatch, batch_id)
+                batch.status = "failed"
+                batch.report_json = {
+                    **(batch.report_json or {}),
+                    "rejection_reason": "单据批次存在应用异常，整批零写入",
+                    "failures": failures[:20],
+                }
+                db.commit()
+                raise DocBatchError(
+                    f"单据批次应用失败 {len(failures)} 行，整批拒绝（已回滚全部写入）"
+                )
     else:
         # rkd_inbound / bxd_expense：本切片只落 raw；F3/C4 接线
         summary["canonical_effect"] = (

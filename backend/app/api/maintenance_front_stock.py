@@ -88,7 +88,9 @@ def get_front_stock(
             if complete_inc
             else None
         )
-        completeness = "complete" if complete_ex else "incomplete"
+        completeness = (
+            "complete" if (complete_ex and complete_inc) else "incomplete"
+        )
     result: dict = {
         "project_id": project_id,
         "rows": rows,

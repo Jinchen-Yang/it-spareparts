@@ -197,3 +197,36 @@ def test_version_bumps_on_each_movement(db, parts, project):
         )
     ).scalars().all()
     assert len(count) == 2
+
+
+def test_unknown_cost_inbound_clears_stale_cost(db, parts, project):
+    """未知成本批次入账后不得用旧单价冒充新批成本。"""
+    front_stock.apply_movement(
+        db,
+        project_id="fs-project-1",
+        part_id=parts["a"],
+        kind="shipment_in",
+        source_type="f_maintenance_line",
+        source_ref="known-cost-line",
+        qty=Decimal("2"),
+        unit_cost_ex_tax=Decimal("100.00"),
+        unit_cost_inc_tax=Decimal("113.00"),
+        operated_by="合成测试员",
+    )
+    front_stock.apply_movement(
+        db,
+        project_id="fs-project-1",
+        part_id=parts["a"],
+        kind="shipment_in",
+        source_type="ckd_shipment_line",
+        source_ref="unknown-cost-line",
+        qty=Decimal("3"),
+        unit_cost_ex_tax=None,
+        unit_cost_inc_tax=None,
+        operated_by="合成测试员",
+    )
+    db.commit()
+    rows = front_stock.balance_rows(db, "fs-project-1")
+    assert rows[0]["qty"] == 5.0
+    assert rows[0]["unit_cost_ex_tax"] is None
+    assert rows[0]["value_ex_tax"] is None

@@ -49,7 +49,7 @@ async def preview_ckd_import(
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
+    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_purchase_cost")),
     _preflight: None = Depends(_preflight),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"
@@ -125,7 +125,7 @@ def apply_ckd_import(
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
+    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_purchase_cost")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     operator = _real_operator(ident)
@@ -164,7 +164,7 @@ def get_ckd_import(
     ident: dict = Depends(current_identity),
     _auth: str = Depends(current_role),
     _page: None = Depends(require_page("page_maintenance")),
-    _action: None = Depends(require_action(_ACTION_KEY)),
+    _action: None = Depends(require_action(_ACTION_KEY, require_data="data_purchase_cost")),
     ctx: UserContext = Depends(get_current_user_context),
 ) -> dict:
     response.headers["Cache-Control"] = "no-store"

@@ -322,14 +322,21 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("LOCK TABLE maintenance_ledger_contract_row, maintenance_ledger_plan_row, maintenance_ledger_expense_row, maintenance_ledger_import_batch, maintenance_collection_milestone, maintenance_service_period IN ACCESS EXCLUSIVE MODE")
     op.execute(
         """
-        DO $guard$
+DO $guard$
         BEGIN
           IF EXISTS (SELECT 1 FROM maintenance_ledger_contract_row)
              OR EXISTS (SELECT 1 FROM maintenance_ledger_plan_row)
              OR EXISTS (SELECT 1 FROM maintenance_ledger_expense_row)
              OR EXISTS (SELECT 1 FROM maintenance_ledger_import_batch)
+             OR EXISTS (SELECT 1 FROM maintenance_project_contract
+                        WHERE amount_inc_tax IS NOT NULL)
+             OR EXISTS (SELECT 1 FROM maintenance_collection_milestone
+                        WHERE ledger_batch_id IS NOT NULL)
+             OR EXISTS (SELECT 1 FROM maintenance_service_period
+                        WHERE ledger_batch_id IS NOT NULL)
           THEN
             RAISE EXCEPTION
               'e7b3d9f2c1a4 downgrade blocked: ledger facts exist';

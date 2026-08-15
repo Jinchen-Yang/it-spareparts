@@ -74,9 +74,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("LOCK TABLE maintenance_return_obligation, maintenance_site_issue_line, maintenance_project IN ACCESS EXCLUSIVE MODE")
     op.execute(
         """
-        DO $guard$
+DO $guard$
         BEGIN
           IF EXISTS (
                 SELECT 1 FROM maintenance_return_obligation

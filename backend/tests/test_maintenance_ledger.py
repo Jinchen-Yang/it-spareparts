@@ -340,3 +340,57 @@ def test_apply_skips_missing_period(db):
     batch = db.get(MaintenanceLedgerImportBatch, batch_id)
     assert batch.status == "failed"
     assert db.execute(select(MaintenanceProject)).scalars().all() == []
+
+
+def test_apply_reconcile_mismatch_fail_closed(db):
+    """销售单存在且台账含税额 ≠ 未税×(1+税率) → 整批失败关闭、零写入。"""
+    from app.models.system import SysImportBatch
+
+    import_batch = SysImportBatch(
+        filename="s.xlsx", file_type="sales", file_hash="h", status="success"
+    )
+    db.add(import_batch)
+    db.flush()
+    db.add(
+        FSalesOrder(
+            raw_order_id="r-rec",
+            order_no="XSDD-20260731-0086",
+            order_date=date(2026, 7, 31),
+            salesperson="李呈辉",
+            business_type="整体维保",
+            warehouse="北京成品仓",
+            amount_ex_tax=39607.08,
+            tax_rate=0.13,
+            data_status="已生效",
+            import_batch_id=import_batch.id,
+        )
+    )
+    db.commit()
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "维保项目清单"
+    ws.append(
+        ["订单编号", "订单日期", "销售人员", "业务类型", "项目名称", "维保起始日期",
+         "维保终止日期", "CMO", "项目经理", "订单金额(含税)", "已收尾款", "待收尾款",
+         "验收材料", "验收材料是否完成及上传附件", "巡检时间", "巡检是否完成及上传附件"]
+    )
+    # 44,756 与销售未税对不上（应为 44,756.00；此处写 50,000）
+    ws.append(
+        ["XSDD-20260731-0086", "2026-07-31", "李呈辉", "整体维保",
+         "阿里专有云20260608-20291205", "2026-06-08", "2029-12-05", "廖晓娟", "任鑫明",
+         50000, 0, 50000, "", "", "", ""]
+    )
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    parsed = ledger.parse_ledger_workbook(buffer.getvalue(), "台账.xlsx")
+    batch_id = ledger.store_preview(
+        db, parsed, "合成管理员", idempotency_key="ledger-test-key-reconcile"
+    )
+    with pytest.raises(ledger.LedgerBatchError):
+        ledger.apply_batch(db, batch_id, "合成管理员")
+    batch = db.get(MaintenanceLedgerImportBatch, batch_id)
+    assert batch.status == "failed"
+    assert "reconcile_failures" in (batch.report_json or {})
+    # 零 canonical 写入
+    assert db.execute(select(MaintenanceProject)).scalars().all() == []
+    assert db.execute(select(MaintenanceProjectContract)).scalars().all() == []

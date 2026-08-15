@@ -132,13 +132,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("LOCK TABLE maintenance_ckd_import_batch, maintenance_ckd_head_row, maintenance_ckd_line_row, maintenance_front_stock_ledger IN ACCESS EXCLUSIVE MODE")
     op.execute(
         """
-        DO $guard$
+DO $guard$
         BEGIN
           IF EXISTS (SELECT 1 FROM maintenance_ckd_import_batch)
              OR EXISTS (SELECT 1 FROM maintenance_ckd_head_row)
              OR EXISTS (SELECT 1 FROM maintenance_ckd_line_row)
+             OR EXISTS (SELECT 1 FROM maintenance_front_stock_ledger
+                        WHERE source_type = 'ckd_shipment_line')
           THEN
             RAISE EXCEPTION
               'd1e3f5a7c2b9 downgrade blocked: CKD facts exist';

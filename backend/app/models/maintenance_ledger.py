@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import (UniqueConstraint, 
+from sqlalchemy import (UniqueConstraint,
     ARRAY,
     Boolean,
     CheckConstraint,
@@ -69,6 +69,10 @@ class MaintenanceLedgerImportBatch(Base):
     applied_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 
     __table_args__ = (
+        CheckConstraint("issue_rows >= 0", name="ck_maintenance_ledger_import_batch_issue_rows"),
+        CheckConstraint("expense_rows >= 0", name="ck_maintenance_ledger_import_batch_expense_rows"),
+        CheckConstraint("plan_rows >= 0", name="ck_maintenance_ledger_import_batch_plan_rows"),
+        CheckConstraint("contract_rows >= 0", name="ck_maintenance_ledger_import_batch_contract_rows"),
         CheckConstraint(
             "source_kind IN ('project_manager_xls_v1', 'ledger_template_v1')",
             name="ck_maintenance_ledger_import_source_kind",
